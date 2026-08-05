@@ -120,7 +120,7 @@ gamut-jxl = { path = "crates/gamut-jxl", version = "0.4.0", default-features = f
 # building this one runs cmake to compile libjxl (see its README); `links = "jxl"`.
 gamut-jxl-sys = { path = "crates/gamut-jxl-sys", version = "0.1.0" }
 gamut-webp = { path = "crates/gamut-webp", version = "0.3.1" }
-gamut-heic = { path = "crates/gamut-heic", version = "0.2.2" }
+gamut-heic = { path = "crates/gamut-heic", version = "0.2.3" }
 gamut-vvc = { path = "crates/gamut-vvc", version = "0.2.1" }
 gamut-tonemap = { path = "crates/gamut-tonemap", version = "1.0.0" }
 # Image metadata primitives (issue #34): the shared TIFF/IFD core plus per-format crates.
@@ -134,7 +134,7 @@ gamut-metadata = { path = "crates/gamut-metadata", version = "1.0.0" }
 gamut-tiff = { path = "crates/gamut-tiff", version = "1.0.0" }
 # DNG raw-image codec (issue #109): a TIFF/EP profile built on gamut-ifd.
 gamut-dng = { path = "crates/gamut-dng", version = "1.0.0" }
-gamut = { path = "crates/gamut", version = "0.3.2" }
+gamut = { path = "crates/gamut", version = "0.3.3" }
 
 [profile.release]
 lto = "thin"
