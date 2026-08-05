@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/visualcommons/gamut/compare/gamut-avif-v1.1.0...gamut-avif-v1.2.0) - 2026-08-05
+
+### Added
+
+- *(gamut-isobmff)* parse large and uuid boxes
+
 ## [1.1.0](https://github.com/justin13888/gamut/compare/gamut-avif-v1.0.0...gamut-avif-v1.1.0) - 2026-07-20
 
 ### Added

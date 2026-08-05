@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.1...gamut-webp-v0.3.2) - 2026-08-05
+
+### Other
+
+- updated the following local packages: gamut-core, gamut-color, gamut-color, gamut-riff, gamut-riff
+
 ## [0.3.1](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.0...gamut-webp-v0.3.1) - 2026-07-30
 
 ### Added
