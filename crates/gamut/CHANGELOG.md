@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/visualcommons/gamut/compare/gamut-v0.3.2...gamut-v0.3.3) - 2026-08-14
+
+### Other
+
+- updated the following local packages: gamut-core, gamut-color, gamut-av1, gamut-isobmff, gamut-avif, gamut-ifd, gamut-jxl, gamut-dng, gamut-exif, gamut-heic, gamut-xmp, gamut-jpeg, gamut-png, gamut-tiff, gamut-tonemap, gamut-webp, gamut-bitstream, gamut-av2, gamut-icc, gamut-iptc, gamut-metadata, gamut-vvc
+
 ## [0.3.2](https://github.com/visualcommons/gamut/compare/gamut-v0.3.1...gamut-v0.3.2) - 2026-07-30
 
 ### Other

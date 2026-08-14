@@ -1,7 +1,7 @@
 [package]
 name = "gamut-riff"
 description = "Resource Interchange File Format (RIFF) container utilities, used by the WebP container."
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
