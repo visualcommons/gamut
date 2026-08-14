@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-dng-v1.0.0...gamut-dng-v2.0.0) - 2026-08-14
+
+### Added
+
+- *(dng)* [**breaking**] decode what real cameras actually write
+- *(core)* add structured error diagnostics
+
+### Fixed
+
+- *(tiff)* reject non-progressing CCITT runs
+
+### Other
+
+- Merge pull request #348 from visualcommons/feat/174-dng-real-corpus
+- *(dng)* record the real-camera tier and the v2 breaks
+
 ## [1.0.0](https://github.com/justin13888/gamut/releases/tag/gamut-dng-v1.0.0) - 2026-07-18
 
 ### Added
