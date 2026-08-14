@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/visualcommons/gamut/compare/gamut-vvc-v0.2.1...gamut-vvc-v0.2.2) - 2026-08-14
+
+### Other
+
+- updated the following local packages: gamut-core, gamut-color, gamut-bitstream
+
 ## [0.2.1](https://github.com/justin13888/gamut/compare/gamut-vvc-v0.2.0...gamut-vvc-v0.2.1) - 2026-07-18
 
 ### Other

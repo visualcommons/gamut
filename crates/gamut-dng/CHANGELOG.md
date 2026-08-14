@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/visualcommons/gamut/compare/gamut-dng-v1.0.0...gamut-dng-v1.1.0) - 2026-08-14
+
+### Added
+
+- *(core)* add structured error diagnostics
+
+### Fixed
+
+- *(dng)* bound Deflate inflation to the expected chunk size
+- *(tiff)* reject non-progressing CCITT runs
+
+### Other
+
+- *(dng)* record the Deflate codec split and its measurements
+- *(dng)* benchmark DNG Deflate against miniz_oxide
+- *(dng)* encode Deflate strips with gamut-deflate
+
 ## [1.0.0](https://github.com/justin13888/gamut/releases/tag/gamut-dng-v1.0.0) - 2026-07-18
 
 ### Added
