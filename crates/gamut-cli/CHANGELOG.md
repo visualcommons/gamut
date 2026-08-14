@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/visualcommons/gamut/compare/gamut-cli-v0.3.1...gamut-cli-v0.3.2) - 2026-08-14
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.3.1](https://github.com/visualcommons/gamut/compare/gamut-cli-v0.3.0...gamut-cli-v0.3.1) - 2026-07-30
 
 ### Other
