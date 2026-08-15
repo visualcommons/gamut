@@ -15,8 +15,9 @@
 //! 1. The intent indexes lcms2's verbatim `Device2PCS16`/`PCS2Device16` tables
 //!    (`cmsio1.c:31-50`): perceptual → `A2B0`/`B2A0`, media-relative → `A2B1`/`B2A1`,
 //!    saturation → `A2B2`/`B2A2`, and **ICC-absolute → the media-relative tag**
-//!    (`A2B1`/`B2A1` — absolute is relative plus a white-point scaling that arrives with
-//!    issue #329, so at this phase absolute and relative build identical pipelines).
+//!    (`A2B1`/`B2A1` — absolute is relative plus a white-point scaling, which
+//!    [`IccTransform::between`](crate::IccTransform::between) applies at the PCS seam, so a
+//!    single profile's half-pipeline is identical for absolute and relative).
 //! 2. If that tag is absent, fall back to the **perceptual** tag (`A2B0`/`B2A0`).
 //! 3. If neither exists, fall back to the matrix/TRC ("shaper") tag set — RGB and gray
 //!    profiles, XYZ or Lab PCS.
@@ -52,8 +53,8 @@ use crate::pipeline::Pipeline;
 
 /// lcms2's `Device2PCS16` intent→tag table (`cmsio1.c:31-38`), verbatim: indexed by
 /// [`intent_index`]. Absolute colorimetric (index 3) deliberately reuses the
-/// media-relative tag `A2B1`.
-const DEVICE_TO_PCS_16: [KnownTag; 4] = [
+/// media-relative tag `A2B1`. Shared with [`crate::bpc`]'s intent-support gates.
+pub(crate) const DEVICE_TO_PCS_16: [KnownTag; 4] = [
     KnownTag::AToB0, // Perceptual
     KnownTag::AToB1, // Relative colorimetric
     KnownTag::AToB2, // Saturation
@@ -61,7 +62,7 @@ const DEVICE_TO_PCS_16: [KnownTag; 4] = [
 ];
 
 /// lcms2's `PCS2Device16` intent→tag table (`cmsio1.c:43-46`), verbatim.
-const PCS_TO_DEVICE_16: [KnownTag; 4] = [
+pub(crate) const PCS_TO_DEVICE_16: [KnownTag; 4] = [
     KnownTag::BToA0, // Perceptual
     KnownTag::BToA1, // Relative colorimetric
     KnownTag::BToA2, // Saturation
@@ -70,7 +71,7 @@ const PCS_TO_DEVICE_16: [KnownTag; 4] = [
 
 /// The intent's index into the tag tables — the ICC intent numbering (perceptual 0,
 /// media-relative 1, saturation 2, ICC-absolute 3), which is also lcms2's `INTENT_*` order.
-fn intent_index(intent: RenderingIntent) -> usize {
+pub(crate) fn intent_index(intent: RenderingIntent) -> usize {
     match intent {
         RenderingIntent::Perceptual => 0,
         RenderingIntent::MediaRelativeColorimetric => 1,
@@ -134,10 +135,11 @@ fn dispatch(
 /// PCS colorimetry (XYZ with D50 `Y = 1.0`, or Lab with `L*` in `0..=100`). The intent
 /// selects the LUT tag per lcms2's `Device2PCS16` table with the perceptual fallback (module
 /// docs): `A2B0`/`A2B1`/`A2B2` for perceptual/media-relative/saturation, with ICC-absolute
-/// reusing `A2B1` — the absolute white-point scaling itself arrives with issue #329, so at
-/// this phase absolute builds the same pipeline as media-relative. A profile without LUT
-/// tags falls back to the matrix/TRC shaper set (RGB or gray; intent-invariant — a shaper
-/// profile has no per-intent tables).
+/// reusing `A2B1` — the absolute white-point scaling is a *pair* concern applied at the PCS
+/// seam by [`IccTransform::between`](crate::IccTransform::between), so this half builds the
+/// same pipeline for absolute as for media-relative. A profile without LUT tags falls back
+/// to the matrix/TRC shaper set (RGB or gray; intent-invariant — a shaper profile has no
+/// per-intent tables).
 ///
 /// LUT tags whose "PCS" is itself a device space (a devicelink/abstract profile) build with
 /// no PCS seam: the pipeline runs encoded `[0, 1]` end to end.
@@ -362,7 +364,8 @@ mod tests {
     fn shaper_fallback_still_applies_without_lut_tags() {
         // A gray shaper with no LUT tags builds under every intent, and the built pipelines
         // are identical (shaper profiles are intent-invariant; per-intent renderings only
-        // exist in LUT tags, absolute arrives with #329).
+        // exist in LUT tags, and the absolute white scaling is applied by
+        // IccTransform::between, not by a single profile's half).
         let mut profile = bare_profile(ColorSpace::Gray, ColorSpace::Xyz);
         profile.tags.push((
             Signature(*b"kTRC"),

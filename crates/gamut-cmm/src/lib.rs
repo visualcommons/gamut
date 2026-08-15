@@ -42,7 +42,12 @@
 //!   shaper profiles; the module docs record the dispatch rule and the settled
 //!   `chad`/colorant convention.
 //! - [`transform`] — the object-safe [`Transform`] entry trait every runnable transform
-//!   implements.
+//!   implements, and [`IccTransform`]/[`TransformOptions`]: two profiles linked end to end
+//!   at a rendering intent, with the ICC-absolute white scaling and black-point compensation
+//!   applied at the PCS seam.
+//! - [`bpc`] — black-point **detection** ([`detect_black_point`],
+//!   [`detect_destination_black_point`] — lcms2's estimators transcribed) and the
+//!   compensation scaling [`IccTransform`] applies.
 //! - [`error`] — the typed [`CmmError`] and the crate [`Result`].
 //!
 //! # Pipeline placement
@@ -72,13 +77,17 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod bpc;
 pub mod clut;
 pub mod curve;
 pub mod error;
+mod intent;
 pub mod link;
 pub mod pipeline;
 pub mod transform;
 
+#[doc(inline)]
+pub use bpc::{detect_black_point, detect_destination_black_point};
 #[doc(inline)]
 pub use clut::{ClutInterpolation, ClutTable};
 #[doc(inline)]
@@ -90,4 +99,4 @@ pub use link::{device_to_pcs, pcs_to_device};
 #[doc(inline)]
 pub use pipeline::{MAX_CHANNELS, Pipeline, Stage};
 #[doc(inline)]
-pub use transform::Transform;
+pub use transform::{IccTransform, Transform, TransformOptions};

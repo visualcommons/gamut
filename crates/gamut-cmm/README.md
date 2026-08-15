@@ -72,8 +72,15 @@ chromatic-adaptation convention (colorants as-is, `chad` unread on the relative 
 from **LUT profiles**: `lut8`/`lut16`/`lutAToB`/`lutBToA` tags (CMYK printers, camera input
 profiles, device links), selected per rendering intent with lcms2's intent→tag tables and
 perceptual fallback, the lut16 v2-Lab encoding rule, and trilinear interpolation for
-Lab-indexed CLUTs — all documented in [STATUS.md](STATUS.md). Rendering-intent white
-scaling/BPC and transform chaining land phase by phase — see [STATUS.md](STATUS.md).
+Lab-indexed CLUTs. Rendering intents and black-point compensation (#329) complete the
+two-profile story: `IccTransform::between(&src, &dst, TransformOptions { intent,
+black_point_compensation })` links a pair end to end, applying the ICC-absolute media-white
+scaling (`diag(wIn/wOut)` at the XYZ seam, with lcms2's v2-display and missing-`wtpt`
+quirks) or black-point compensation (the ISO 18619/WP40 linear XYZ scaling over
+`bpc::{detect_black_point, detect_destination_black_point}` — lcms2's estimators
+transcribed, `bkpt` deliberately ignored, BPC forced for v4 destinations under
+perceptual/saturation exactly as lcms2 does) — all documented in [STATUS.md](STATUS.md).
+Transform chaining and typed pixel buffers land next — see [STATUS.md](STATUS.md).
 
 ## Deferred
 

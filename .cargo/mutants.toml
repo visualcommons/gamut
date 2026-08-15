@@ -643,4 +643,39 @@ exclude_re = [
     #   strict sides ARE killed by `reverse_table_out_of_range_targets_clamp_to_domain_ends`.
     'replace < with <= in reverse_table',
     'replace > with >= in reverse_table',
+    # gamut-cmm bpc.rs — float-boundary twins of transcribed lcms2 thresholds (#329). Each
+    # threshold comparison is isolated in a tiny named helper precisely so these
+    # boundary-equality mutants can be excluded without shadowing the killable mutants that
+    # share the surrounding functions (the broad mutations of every helper — body
+    # replacements, `<`→`==`/`>`, `>=`→`>` — stay live and are killed by the fit_root unit
+    # pins and the pathological-profile zoo differentials in tests/oracle_intents.rs).
+    #   within_straightness_tolerance (`|inRamp − outRamp| < 4.0`, cmssamp.c:527): `<` vs `<=`
+    #   is decided only at a difference of exactly 4.0 — inRamp is l·100/255 and outRamp an
+    #   interpolated 16-bit-derived value, so exact equality is a measure-zero float
+    #   coincidence no profile-derived ramp attains.
+    'replace < with <= in within_straightness_tolerance',
+    #   in_fit_window (`lo ≤ ff < hi`, cmssamp.c:568): the exclusive upper bound's twin is
+    #   decided only at `ff == hi` exactly, with ff a quotient of interpolated ramp values;
+    #   engineering exact equality would also make lcms2's own classification of that point
+    #   fall on the boundary, breaking the differential's determinism rather than testing it.
+    'replace < with <= in in_fit_window',
+    #   below_tolerance (the MATRIX_DET_TOLERANCE = 1e-4, |a|/|b| < 1e-10, and D50-anchor
+    #   1e-12 cutoffs): the twin is decided only at magnitude == tolerance exactly — a
+    #   determinant of least-squares sums, a fitted coefficient, or a black-point-to-anchor
+    #   difference landing bit-exactly on a decimal threshold, none of which is reachable
+    #   (the thresholds are not representable on those values' result grids). The reachable
+    #   disagreements of `<`→`==` ARE killed (fit_root_replicates_the_lcms2_determinant_cutoff,
+    #   equal_black_points_and_d50_coincidence_skip_compensation).
+    'replace < with <= in below_tolerance',
+    #   clip_probe_l (the darker-colorant L* clip, cmssamp.c:129-134): `> 95` vs `>= 95` is
+    #   decided only at L* == 95.0 exactly, which no 16-bit Lab encoding produces (v4 needs
+    #   raw 62258.25, v2 the non-representable 62016/652.8 quotient); the `< 0` arm is dead
+    #   in this crate's decoded pipelines (every PCS decode yields L* ≥ 0 — ToneCurve clamps
+    #   encodings to [0, 1] and XYZ decodes are non-negative), kept as lcms2 transcription
+    #   fidelity, and at the one reachable disagreement point (L* == 0) both variants of both
+    #   mutations still return 0. The `> `→`==`, `||`→`&&`, and body mutants ARE killed
+    #   (high_l_probe_clips_to_zero_not_fifty and the pedestal probe pins).
+    'replace > with >= in clip_probe_l',
+    'replace < with <= in clip_probe_l',
+    'replace < with == in clip_probe_l',
 ]

@@ -29,7 +29,7 @@ that add behaviour (#325 onward).
 | P3 | #326 | CLUT stage: multi-dimensional interpolation (lcms2-matching) — `ClutTable`/`ClutInterpolation` + `Stage::Clut` | ✅ |
 | P4 | #327 | Profile linking: matrix/TRC (shaper) profile pairs — `link::{device_to_pcs, pcs_to_device}` over RGB/gray v2+v4 shaper profiles, `Stage::MatrixN` | ✅ |
 | P5 | #328 | Profile linking: LUT (`lut8`/`lut16`/`mAB `/`mBA `) profile pairs — per-intent tag selection with lcms2's fallback, PCS encode/decode seams, `Stage::XyzToLab`/`LabToXyz` + the Lab-PCS RGB shaper lift | ✅ |
-| P6 | #329 | Rendering intents + black-point compensation | ☐ |
+| P6 | #329 | Rendering intents + black-point compensation: `IccTransform::between`/`TransformOptions` (the first end-to-end transform), ICC-absolute white scaling (`intent`), black-point detection + compensation (`bpc`) | ✅ |
 | P7 | #330 | Transform chaining + typed pixel buffers | ☐ |
 
 ## Settled decisions (P2, tone curves)
@@ -182,6 +182,69 @@ that add behaviour (#325 onward).
   the v2-Lab rule on the true type, not the version); media-relative is additionally
   compared on the true v4 profile.
 
+## Settled decisions (P6, rendering intents + BPC)
+
+- **`IccTransform::between` is lcms2's two-profile assembly** (`DefaultICCintents` +
+  `AddConversion`, `cmscnvrt.c`) in the decoded domain: `device_to_pcs(src, intent)` ∘
+  [PCS seam] ∘ `pcs_to_device(dst, intent)`. The seam's adjustment matrix acts in XYZ; Lab
+  ends are bridged with `LabToXyz`/`XyzToLab`, and an adjustment within lcms2's
+  `IsEmptyLayer` tolerance (`Σ|m − I| + Σ|off| < 0.002`) inserts **no stage** — for the
+  skip *decision* the offset is compared in lcms2's encoded scale (÷ `MAX_ENCODEABLE_XYZ`),
+  keeping the decision bit-identical while the applied offset stays decoded (the offset
+  division is the one place lcms2's encoded pipelines and this crate's decoded ones differ
+  in the BPC math). Device-link, abstract, and named-colour classes are rejected with
+  `UnsupportedProfile` — they chain via #330's transform API (lcms2 reads them
+  devicelink-style, A2B tags in both directions, which the pair linker does not model).
+- **Perceptual/saturation add no CMM-side math**: the per-intent tag selection (P5) is the
+  entire rendering; for v4 profiles the perceptual tables already target the Perceptual
+  Reference Medium and this CMM — like lcms2 — applies **no additional gamut mapping**
+  toward the PRMG (`references/cmm/ICCSpecRevision_22_02_05_PRMG.pdf`, `render.pdf`).
+- **ICC-absolute = `diag(wIn/wOut)` at adaptation state 1.0 only** (lcms2's default and this
+  crate's only state; `ComputeAbsoluteIntent`, `cmscnvrt.c:249-325`): the `chad` tag is
+  consumed solely by the non-default adaptation-state branches, so it is **never read**
+  here — closing the loop on P4's chad audit. Media whites come from `wtpt` via
+  `_cmsReadMediaWhitePoint`'s quirks (`cmsio1.c:64-90`), replicated verbatim: missing or
+  unusable tag → lcms2's **rounded** D50 literals (0.9642/1.0/0.8249 — not the exact
+  s15Fixed16 PCS illuminant; everywhere P6 replicates an lcms2 *algorithm* the rounded
+  anchor is used so the oracle is matched, while the pipeline stages keep the exact one),
+  and **v2 display-class profiles are forced to D50** regardless of the tag. BPC and
+  absolute are mutually exclusive: the options flag is ignored under absolute
+  (`cmscnvrt.c:1126-1127`).
+- **The v4 forced-BPC rule** (`_cmsLinkProfiles`, `cmscnvrt.c:1119-1135`): lcms2 forces
+  `BPC[i] = TRUE` for every v4 profile slot under perceptual/saturation; only
+  output-direction slots are consumed, so for a two-profile transform the **destination
+  profile's version** gates the force — replicated in `between`, making default-options
+  perceptual differentials against default-flag lcms2 match. The same forcing acts *inside*
+  lcms2's own detection round trip (`CreateRoundtripXForm` passes `BPC = FALSE` but still
+  runs `_cmsLinkProfiles`), so the ink round-trip probe on a v4 profile silently carries a
+  zero-black → destination-black compensation layer — replicated in `bpc`'s `RoundTrip`
+  (without it the probe misses the oracle by ≈ 2 `L*`).
+- **The `bkpt` tag is deliberately ignored** (lcms2's `CMS_USE_PROFILE_BLACK_POINT_TAG` is
+  compiled out by default — the tag is bogus in too many real profiles); black points are
+  **estimated** by the transcribed `cmsDetectBlackPoint`/`cmsDetectDestinationBlackPoint`
+  (`cmssamp.c`), public as `bpc::{detect_black_point, detect_destination_black_point}`
+  (independently testable; #330's proofing needs them). Estimated ⇒ oracle assertions are
+  **tolerance-based** on the probe/ramp paths (measured ≤ 2e-6 per component on the shared
+  corpus) and exact on the gate/fixed-black paths. Detection quirks replicated as-is:
+  absolute intent and link/abstract/named classes → zero; the destination gate checks the
+  intent's own `B2Ax` tag with *no* perceptual fallback (`cmsIsCLUT`); the quadratic fitter
+  returns `L* = 0` below 4 points while its caller admits 3 (net `L* = 0` at exactly 3);
+  the fitter replicates lcms2's `MATRIX_DET_TOLERANCE = 1e-4` singularity cutoff.
+- **Zero-black convention, no new error variants**: the detectors return `[0, 0, 0]` for
+  "no black point" and for every internal failure — exactly the value lcms2's consumer
+  sees (`ComputeConversion` pre-zeroes and ignores the boolean); a pair whose blacks cannot
+  be estimated simply gets no compensation. Pipeline-construction failures inside `between`
+  still surface as typed errors.
+- **One guarded divergence:** lcms2's compensation divides by `bpIn − D50` with no guard —
+  a black-point component equal to the anchor yields inf/NaN. This crate treats
+  `|bpIn − D50| < 1e-12` (any channel) as equal-blacks/no-op: a plausible-looking
+  non-finite cascade is worse than skipping, and no real black point sits at the white
+  anchor. Documented on `bpc::compensation`.
+- **Out-of-range comparison convention:** lcms2's `TYPE_*_DBL` formatters emit unclamped
+  device values for out-of-gamut PCS input, while this crate's `ToneCurve` clamps to
+  `[0, 1]` (P2, matching lcms2's own integer formatters); the P6 differentials clamp the
+  oracle's doubles before comparing.
+
 ## Deferred / out of scope
 
 | Item | Notes | Status |
@@ -221,6 +284,30 @@ per encoding, intent-table/fallback selection, and the identity-matrix skip), an
 profile in its v4/`mAB ` and v2/`lut16` serializations and the `scnr` RGB→Lab `mAB `,
 16-bit-CLUT-tight; the fallback differential over a modified-and-reserialized profile; the
 absolute≡relative and per-intent-distinctness pins; the Lab-indexed-trilinear divergence
-proof; and the hand-built Lab-PCS RGB shaper vs lcms2's XYZ2Lab/Lab2XYZ bridges). Gates:
-`mise run test` / `lint` / `fmt-check` / `coverage` (≥ 80%) / `mise run mutants-crate
-gamut-cmm`.
+proof; and the hand-built Lab-PCS RGB shaper vs lcms2's XYZ2Lab/Lab2XYZ bridges), and
+`tests/oracle_intents.rs` (P6: the absolute differential on a genuinely non-D50 `wtpt`
+shaper pair — measured worst device |Δ| 1.6e-7, ΔE₀₀ 1.7e-5 — plus the absolute≠relative
+observability floor and the equal-whites bitwise-equality pin; detection differentials for
+every path family — matrix-shaper colorant probe, gray, fixed v4 perceptual black
+(bitwise), ink round trip, relative and perceptual ramp estimators, gate refusals — worst
+measured 2e-6 per component; end-to-end BPC flag-on/flag-off differentials on an all-v2
+pair (worst 5e-5) with an observability floor; and the v4 default-options perceptual
+differential that rides on the replicated forced-BPC rule, with a version-downgrade
+control; and the **pathological-profile zoo** — hand-built gamut-icc profiles whose
+256-sample return curves control the estimator's round-trip ramp sample-exactly on both
+sides, steering it into every control-flow corner (the straightness band with and without
+its protected window, band-edge arithmetic, top-down monotonization via a late dip, the
+non-ascending rejection, the exactly-3-points fit quirk with kept chroma, the chroma
+clamps via a mixing CLUT, and the XYZ-PCS bridge with a root clamped to `L* = 50`), each
+asserted as a plain detection differential against lcms2 over the same serialized bytes.
+P6 unit tests pin the compensation formula's defining property and hand-computed
+literals, the D50-anchor guard, the fitter's roots/degeneracies/`n < 4` quirk and its
+`MATRIX_DET_TOLERANCE` cutoff (solved by Cramer's rule over the same determinant, so the
+transcription is observable), the detection gates and v2/v4 branch selection, the device
+endpoints per space (gray/RGB/Lab/CMY/CMYK), the ramp reject/shortcut/toe-fit paths over a
+hand-built round-trip vehicle, the `wtpt` quirk table, the empty-layer threshold on both
+sides of 0.002 (offset in encoded scale, including the exactly-representable boundary),
+every seam shape, and the forced-BPC gate matrix). Gates: `mise run test` / `lint` /
+`fmt-check` / `coverage` (≥ 80%) / `mise run mutants-crate gamut-cmm` (equivalent
+float-boundary survivors are excluded in `.cargo/mutants.toml` with per-mutant proofs, the
+workspace convention).

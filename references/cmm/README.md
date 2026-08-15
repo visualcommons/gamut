@@ -20,16 +20,20 @@ matches lcms2 and documents the choice at the API (see `crates/gamut-cmm`).
 
 ## Vendored primary sources
 
-None yet — this table is filled by the phases that transcribe constants (#329 adds the
-rendering-intent and black-point-compensation sources).
-
 | file | source |
 |------|--------|
+| `WP40-Black_Point_Compensation_2010-07-27.pdf` | ICC white paper 40, *Black Point Compensation* — color.org. Describes the linear-XYZ-scaling BPC method (the same method ISO 18619:2015 later standardized; see below) and its rationale. |
+| `adobebpc.pdf` | Adobe Systems, *Adobe Systems' Implementation of Black Point Compensation* — originally https://www.color.org/adobebpc.pdf, whose live URL now returns 404; recovered from the Internet Archive snapshot of 2026-02-10 of that URL. The primary source for the destination-black round-trip ramp estimator (`cmsDetectDestinationBlackPoint` cites it as "the Adobe paper"). |
+| `BlackPointCompensationTests.pdf` | *Black point compensation tests* — littlecms.com. Little-CMS's own BPC conformance notes. |
+| `render.pdf` | ICC, *Rendering intents* overview — color.org. The four ICC rendering intents and where CMM-side math applies (absolute white rescaling) versus profile-baked renderings. |
+| `ICCSpecRevision_22_02_05_PRMG.pdf` | ICC specification revision note on the Perceptual Reference Medium Gamut — color.org. Grounds the v4 position that perceptual tables target the PRM/PRMG, so a CMM applies no additional gamut mapping of its own. |
 
 ## Not vendored (paywalled — constants transcribed inline by the PRs that need them)
 
 - **ISO 18619:2015** (Image technology colour management — black point compensation) — ISO,
-  paywalled. The BPC algorithm implemented in #329.
+  paywalled. The BPC algorithm implemented in #329; per the ICC, white paper WP40 (vendored
+  above) describes the **same** linear XYZ scaling method, so WP40 + the lcms2 transcription
+  below stand in for the paywalled text.
 - **ISO 12640-3** (Graphic technology — prepress digital data exchange — Part 3: CIELAB standard
   colour image data, SCID) — ISO, paywalled.
 - **Kasson, Nin, Plouffe & Hafner, "Performing color space conversions with three-dimensional
@@ -75,3 +79,54 @@ whose PCS is Lab). Trilinear/bilinear LERP order is X, then Y, then Z
 (`Eval4InputsFloat`…`Eval15InputsFloat`, `cmsintrp.c:1038-1174`) slice the outermost axis:
 floor + fraction on input 0, evaluate the two inner (N−1)-D sub-grids, blend linearly —
 bottoming out in the 3-D tetrahedral base.
+
+## Transcription: black-point compensation and detection (#329)
+
+From `third_party/lcms2` (lcms2 2.19); implemented by `gamut-cmm`'s `bpc`/`intent` modules
+and `IccTransform::between` (`crates/gamut-cmm/src/{bpc,intent,transform}.rs`).
+
+**The compensation formula** (`src/cmscnvrt.c:166-201`, `ComputeBlackPointCompensation` —
+the ISO 18619 / WP40 method): a per-channel linear scaling in XYZ mapping the source black
+point onto the destination's while fixing the D50 white,
+
+```text
+a = (bpOut − D50) / (bpIn − D50)        (diagonal matrix entries)
+b = −D50 · (bpOut − bpIn) / (bpIn − D50)   (offset)
+```
+
+with **lcms2's rounded D50 literals** `cmsD50X/Y/Z = 0.9642, 1.0, 0.8249`
+(`include/lcms2.h:292-294`) as the anchor — not the exact s15Fixed16 PCS illuminant. lcms2
+divides the offset by `MAX_ENCODEABLE_XYZ` (1.99997) because its pipelines carry *encoded*
+XYZ; `gamut-cmm`'s decoded pipelines use the offset as derived. BPC applies to the
+non-absolute intents only (`cmscnvrt.c:1126-1127` forces the flag off for absolute), is
+**forced on** for v4 profiles under perceptual/saturation (`_cmsLinkProfiles`,
+`cmscnvrt.c:1119-1135` — per-slot, with only output-direction slots consumed), and is
+skipped entirely when the two detected blacks are equal or the layer is within the
+`IsEmptyLayer` tolerance (`Σ|m − I| + Σ|off| < 0.002`, `cmscnvrt.c:329-348`).
+
+**The fixed v4 perceptual black** (`include/lcms2.h:297-299`):
+
+```text
+cmsPERCEPTUAL_BLACK_X = 0.00336   cmsPERCEPTUAL_BLACK_Y = 0.0034731   cmsPERCEPTUAL_BLACK_Z = 0.00287
+```
+
+**Detection** (`src/cmssamp.c` — there is no `cmsbpc.c`): the profile's `bkpt` tag is
+deliberately ignored (`CMS_USE_PROFILE_BLACK_POINT_TAG` is compiled out by default — the tag
+is bogus in too many real profiles); the black point is **estimated** instead:
+`cmsDetectBlackPoint` (`cmssamp.c:238-323`) via class/intent gates, the fixed v4 perceptual
+black, the ink-profile perceptual round trip, or the darker-colorant probe; and
+`cmsDetectDestinationBlackPoint` (`cmssamp.c:399-598`) via the Adobe round-trip ramp
+estimator (256-step L\* ramp, top-down monotonization, mid-range straightness shortcut,
+least-squares quadratic root in the normalized shadow region — fit regions `[0.1, 0.5)`
+relative, `[0.03, 0.25)` perceptual/saturation). Because the estimators run *transforms*
+(f32 with 16-bit interpolation in lcms2, f64 in `gamut-cmm`), detected values agree between
+implementations only to a tolerance — differential assertions against the oracle are
+therefore **tolerance-based**, with the fixed-black and gate paths exact
+(`crates/gamut-cmm/tests/oracle_intents.rs` records the measured bounds).
+
+**Absolute rendering** (`src/cmscnvrt.c:249-325`, `ComputeAbsoluteIntent`): at the default
+adaptation state 1.0 the adjustment is exactly `diag(WhiteIn/WhiteOut)` in XYZ, with the
+media whites read through `_cmsReadMediaWhitePoint`'s quirks (`src/cmsio1.c:64-90`: missing
+tag → D50; **v2 display-class profiles → forced D50**, tag ignored). The `chad` tag is
+consumed *only* by the non-default adaptation-state branches, which `gamut-cmm` does not
+implement.
