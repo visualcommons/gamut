@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/visualcommons/gamut/compare/gamut-core-v2.0.1...gamut-core-v2.1.0) - 2026-08-15
+
+### Added
+
+- *(core)* add structured error diagnostics
+- add optional serde support to public enums
+
 ## [2.0.1](https://github.com/justin13888/gamut/compare/gamut-core-v2.0.0...gamut-core-v2.0.1) - 2026-07-20
 
 ### Other

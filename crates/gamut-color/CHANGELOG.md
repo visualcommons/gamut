@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/visualcommons/gamut/compare/gamut-color-v2.0.0...gamut-color-v2.1.0) - 2026-08-15
+
+### Added
+
+- *(gamut-color)* add bit-depth- and matrix-generic YCbCr to RGB conversion
+- *(gamut-color)* add the BT.470 System B,G matrix coefficients code point
+- *(core)* add structured error diagnostics
+- add optional serde support to public enums
+
+### Other
+
+- pin the blend rounding and the high-bit-depth paths mutation testing missed
+- record the high-bit-depth presentation surface in STATUS and READMEs
+
 ## [2.0.0](https://github.com/justin13888/gamut/compare/gamut-color-v1.1.0...gamut-color-v2.0.0) - 2026-07-20
 
 ### Added
