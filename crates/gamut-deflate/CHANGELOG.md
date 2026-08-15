@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/visualcommons/gamut/compare/gamut-deflate-v0.1.0...gamut-deflate-v0.1.1) - 2026-08-15
+
+### Added
+
+- *(deflate)* expose optimal-parse effort via DeflateEncoder::with_effort
+
+### Other
+
+- *(deflate)* keep the 1 MiB boundary case fast under limit-check mutation
+- *(deflate)* document the configurable optimal-parse effort budget
+- *(deflate)* pin Level as repr(u8) with explicit discriminants
+- *(dng)* record the Deflate codec split and its measurements
+
 ## [0.1.0](https://github.com/justin13888/gamut/releases/tag/gamut-deflate-v0.1.0) - 2026-07-18
 
 ### Added
