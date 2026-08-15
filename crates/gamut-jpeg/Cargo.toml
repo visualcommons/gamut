@@ -1,7 +1,7 @@
 [package]
 name = "gamut-jpeg"
 description = "Spec-compliant JPEG (ISO/IEC 10918 / ITU-T T.81) still-image codec."
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

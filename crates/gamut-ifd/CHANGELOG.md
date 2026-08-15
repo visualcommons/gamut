@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-ifd-v2.0.1...gamut-ifd-v3.0.0) - 2026-08-15
+
+### Added
+
+- *(ifd)* [**breaking**] name the bytes a file does not account for
+- *(core)* add structured error diagnostics
+- *(gamut-ifd)* add f64 value coercion
+
+### Fixed
+
+- *(tiff)* reject non-progressing CCITT runs
+
 ## [2.0.1](https://github.com/justin13888/gamut/compare/gamut-ifd-v2.0.0...gamut-ifd-v2.0.1) - 2026-07-20
 
 ### Other
