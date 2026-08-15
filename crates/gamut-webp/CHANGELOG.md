@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.1...gamut-webp-v0.4.0) - 2026-08-15
+
+### Added
+
+- *(riff)* [**breaking**] enforce reconstruction-chunk order and carry unknown chunks
+- *(riff)* [**breaking**] validate the spec's size and canvas bounds
+- *(core)* add structured error diagnostics
+
+### Other
+
+- *(riff)* ledger the v1 surface and correct the RFC citations
+
 ## [0.3.1](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.0...gamut-webp-v0.3.1) - 2026-07-30
 
 ### Added

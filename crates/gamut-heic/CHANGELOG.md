@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/visualcommons/gamut/compare/gamut-heic-v0.2.2...gamut-heic-v0.2.3) - 2026-08-15
+
+### Added
+
+- *(gamut-heic)* split annex-b export for platform decoders
+- *(core)* add structured error diagnostics
+- *(gamut-isobmff)* parse large and uuid boxes
+
+### Fixed
+
+- *(gamut-heic)* prefer nclx for rgba presentation
+- *(gamut-heic)* correct imir axis semantics
+
 ## [0.2.2](https://github.com/justin13888/gamut/compare/gamut-heic-v0.2.1...gamut-heic-v0.2.2) - 2026-07-21
 
 ### Other
