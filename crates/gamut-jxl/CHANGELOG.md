@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/visualcommons/gamut/compare/gamut-jxl-v0.4.0...gamut-jxl-v0.4.1) - 2026-08-15
+
+### Added
+
+- *(jxl)* decode truncated codestreams best-effort behind DecodePartialImage
+- *(jxl)* expose modular-mode control on the encoder
+- *(core)* add structured error diagnostics
+
+### Fixed
+
+- *(jxl)* restore the crate-wide deny(unsafe_code) and its safety section
+
+### Other
+
+- *(jxl)* record partial decode and answer the encoder-knob question
+- *(jxl)* sweep 16-bit-plus-alpha across the encoder-configuration grid
+- *(jxl)* sweep truncated streams through the partial decode path
+- *(jxl)* fold the raw-frame to ImageBuf tail into one helper
+- *(jxl)* rejoin the orphaned decode-side clause in the README
+- *(jxl)* record modular-mode control in STATUS and README
+
 ## [0.4.0](https://github.com/justin13888/gamut/compare/gamut-jxl-v0.3.0...gamut-jxl-v0.4.0) - 2026-07-20
 
 ### Added
