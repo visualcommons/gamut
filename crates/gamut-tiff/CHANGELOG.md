@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/visualcommons/gamut/compare/gamut-tiff-v1.0.0...gamut-tiff-v1.1.0) - 2026-08-15
+
+### Added
+
+- *(tiff)* add the TiffInfo pre-decode probe
+- *(tiff)* encode 16-bit grayscale, RGB and RGBA
+- *(tiff)* decode 16-bit grayscale, RGB, RGBA and CMYK samples
+- *(tiff)* add the SampleFormat tag type and reject non-integer samples
+- *(core)* add structured error diagnostics
+- *(gamut-tiff)* support deflate compression
+
+### Fixed
+
+- *(tiff)* reject non-progressing CCITT runs
+
+### Other
+
+- *(tiff)* pin which guard rejects a mismatched sample count
+- *(tiff)* record 16-bit sample support in the scope ledger
+- *(tiff)* extract page-header parsing from the decode funnel
+- *(tiff)* scope the decode-size guard to a named helper
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-tiff-v0.2.0...gamut-tiff-v1.0.0) - 2026-07-18
 
 ### Added

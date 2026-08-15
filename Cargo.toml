@@ -106,44 +106,44 @@ serde_json = "1"
 # crates.io round-trip; `version` is the requirement recorded in the published manifest.
 # Versions are independent per crate — release-plz rewrites these requirements automatically
 # when a dependency's version bumps.
-gamut-core = { path = "crates/gamut-core", version = "2.0.1" }
-gamut-color = { path = "crates/gamut-color", version = "2.0.0" }
+gamut-core = { path = "crates/gamut-core", version = "2.1.0" }
+gamut-color = { path = "crates/gamut-color", version = "2.1.0" }
 gamut-dsp = { path = "crates/gamut-dsp", version = "2.0.0" }
-gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.2.3" }
+gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.2.4" }
 # The shared codestream-backend seam (issue #272): repr(C) vtables + object-safe Rust twins that
 # let a foreign/alternate codec backend plug into any format crate. no_std, dependency-free.
 gamut-codec-abi = { path = "crates/gamut-codec-abi", version = "0.1.1" }
-gamut-deflate = { path = "crates/gamut-deflate", version = "0.1.0" }
-gamut-png = { path = "crates/gamut-png", version = "0.1.0" }
+gamut-deflate = { path = "crates/gamut-deflate", version = "0.1.1" }
+gamut-png = { path = "crates/gamut-png", version = "0.1.1" }
 # JPEG-1 (ISO/IEC 10918 / ITU-T T.81) codec (issue #28).
-gamut-jpeg = { path = "crates/gamut-jpeg", version = "0.1.0" }
-gamut-isobmff = { path = "crates/gamut-isobmff", version = "2.0.1" }
+gamut-jpeg = { path = "crates/gamut-jpeg", version = "0.1.1" }
+gamut-isobmff = { path = "crates/gamut-isobmff", version = "3.0.0" }
 gamut-riff = { path = "crates/gamut-riff", version = "1.0.0" }
-gamut-av1 = { path = "crates/gamut-av1", version = "0.4.1" }
-gamut-av2 = { path = "crates/gamut-av2", version = "0.1.3" }
-gamut-avif = { path = "crates/gamut-avif", version = "1.1.0" }
+gamut-av1 = { path = "crates/gamut-av1", version = "0.4.2" }
+gamut-av2 = { path = "crates/gamut-av2", version = "0.1.4" }
+gamut-avif = { path = "crates/gamut-avif", version = "2.0.0" }
 # `default-features = false` so consumers pick their halves: gamut-dng needs only the pure-Rust
 # `decode`; the umbrella re-enables both.
-gamut-jxl = { path = "crates/gamut-jxl", version = "0.4.0", default-features = false }
+gamut-jxl = { path = "crates/gamut-jxl", version = "0.4.1", default-features = false }
 # Static libjxl build + hand-written FFI for gamut-jxl's encoder. Unlike every other shipped crate,
 # building this one runs cmake to compile libjxl (see its README); `links = "jxl"`.
-gamut-jxl-sys = { path = "crates/gamut-jxl-sys", version = "0.1.0" }
-gamut-webp = { path = "crates/gamut-webp", version = "0.3.1" }
-gamut-heic = { path = "crates/gamut-heic", version = "0.2.2" }
-gamut-vvc = { path = "crates/gamut-vvc", version = "0.2.1" }
-gamut-tonemap = { path = "crates/gamut-tonemap", version = "1.0.0" }
+gamut-jxl-sys = { path = "crates/gamut-jxl-sys", version = "0.1.1" }
+gamut-webp = { path = "crates/gamut-webp", version = "0.4.0" }
+gamut-heic = { path = "crates/gamut-heic", version = "0.2.3" }
+gamut-vvc = { path = "crates/gamut-vvc", version = "0.2.2" }
+gamut-tonemap = { path = "crates/gamut-tonemap", version = "1.1.0" }
 # Image metadata primitives (issue #34): the shared TIFF/IFD core plus per-format crates.
-gamut-ifd = { path = "crates/gamut-ifd", version = "2.0.1" }
-gamut-icc = { path = "crates/gamut-icc", version = "1.0.0" }
-gamut-xmp = { path = "crates/gamut-xmp", version = "1.0.0" }
-gamut-exif = { path = "crates/gamut-exif", version = "1.0.0" }
-gamut-iptc = { path = "crates/gamut-iptc", version = "1.0.0" }
-gamut-metadata = { path = "crates/gamut-metadata", version = "1.0.0" }
+gamut-ifd = { path = "crates/gamut-ifd", version = "3.0.0" }
+gamut-icc = { path = "crates/gamut-icc", version = "1.0.1" }
+gamut-xmp = { path = "crates/gamut-xmp", version = "1.1.0" }
+gamut-exif = { path = "crates/gamut-exif", version = "1.1.0" }
+gamut-iptc = { path = "crates/gamut-iptc", version = "1.0.1" }
+gamut-metadata = { path = "crates/gamut-metadata", version = "2.0.0" }
 # Self-contained TIFF 6.0 codec (issue #107).
-gamut-tiff = { path = "crates/gamut-tiff", version = "1.0.0" }
+gamut-tiff = { path = "crates/gamut-tiff", version = "1.1.0" }
 # DNG raw-image codec (issue #109): a TIFF/EP profile built on gamut-ifd.
-gamut-dng = { path = "crates/gamut-dng", version = "1.0.0" }
-gamut = { path = "crates/gamut", version = "0.3.2" }
+gamut-dng = { path = "crates/gamut-dng", version = "2.0.0" }
+gamut = { path = "crates/gamut", version = "0.3.3" }
 
 [profile.release]
 lto = "thin"

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/visualcommons/gamut/compare/gamut-av1-v0.4.1...gamut-av1-v0.4.2) - 2026-08-15
+
+### Added
+
+- *(av1)* adapt CDFs while coding tiles
+- *(core)* add structured error diagnostics
+
+### Other
+
+- Merge branch 'master' into feat/335-avif-ycbcr-matrix
+- *(av1)* record CDF adaptation in STATUS and README
+
 ## [0.4.1](https://github.com/justin13888/gamut/compare/gamut-av1-v0.4.0...gamut-av1-v0.4.1) - 2026-07-20
 
 ### Other
