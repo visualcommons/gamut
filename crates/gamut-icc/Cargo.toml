@@ -1,7 +1,7 @@
 [package]
 name = "gamut-icc"
 description = "ICC color profile (ICC.1:2022) parser and serializer — header, tag table, and tag element types — for gamut image metadata."
-version = "1.0.0"
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

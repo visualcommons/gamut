@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-metadata-v1.0.0...gamut-metadata-v2.0.0) - 2026-08-22
+
+### Added
+
+- *(metadata)* [**breaking**] carry downstream typed models in a namespaced extension table
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-metadata-v0.1.1...gamut-metadata-v1.0.0) - 2026-07-18
 
 ### Added
