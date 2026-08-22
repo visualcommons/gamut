@@ -324,7 +324,7 @@ fn v4_perceptual_fixed_black(
 /// lcms2's `cmsIsMatrixShaper` (`cmsio1.c:806-827`): a gray profile with `kTRC`, or an RGB
 /// profile with all three colorants and all three TRCs. Tag *presence* only — usability is
 /// the link builders' concern.
-fn is_matrix_shaper(profile: &IccProfile) -> bool {
+pub(crate) fn is_matrix_shaper(profile: &IccProfile) -> bool {
     use gamut_icc::KnownTag as T;
     match profile.header.data_color_space {
         ColorSpace::Gray => profile.get(T::GrayTrc).is_some(),

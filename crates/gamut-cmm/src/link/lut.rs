@@ -33,7 +33,7 @@
 //! lcms2 forces every CLUT of a PCS→device LUT whose PCS is Lab to trilinear interpolation
 //! (`ChangeInterpolationToTrilinear`, `cmsio1.c:516-533` — "for 3D LUTS using Lab used as
 //! indexer space, trilinear interpolation should be used"). The builders mirror the rule:
-//! [`Direction::PcsToDevice`] with a Lab PCS selects
+//! [`LinkMode::PcsToDevice`] with a Lab PCS selects
 //! [`ClutInterpolation::Multilinear`]; every other CLUT takes [`ClutTable::new`]'s default
 //! (tetrahedral from 3 inputs).
 //!
@@ -56,13 +56,64 @@ use crate::curve::ToneCurve;
 use crate::error::{CmmError, Result};
 use crate::pipeline::{Pipeline, Stage};
 
-/// Which way the built pipeline runs, i.e. which end is the PCS seam.
+/// How the built pipeline is linked — which ends are PCS seams and whether the Lab-indexed
+/// trilinear rule applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Direction {
+pub(super) enum LinkMode {
     /// Device channels in, decoded PCS out: the PCS-decode stage is appended last.
-    DeviceToPcs,
+    DeviceToPcs {
+        /// The profile's header PCS (the tag's exit encoding; a device space means no seam).
+        pcs: ColorSpace,
+    },
     /// Decoded PCS in, device channels out: the PCS-encode stage is prepended first.
-    PcsToDevice,
+    PcsToDevice {
+        /// The profile's header PCS (the tag's entry encoding; a device space means no seam).
+        pcs: ColorSpace,
+    },
+    /// A devicelink-style read (lcms2's `_cmsReadDevicelinkLUT`, used for link-class and
+    /// abstract profiles): **both** ends may independently be a connection space — an
+    /// encode seam is prepended at a Lab/XYZ entry, a decode seam appended at a Lab/XYZ
+    /// exit (the decoded equivalents of lcms2's encoded pass-through plus its lut16
+    /// `LabV4ToV2`/`LabV2ToV4` fixups), device ends stay encoded `[0, 1]` — and every CLUT
+    /// interpolates trilinearly when the exit (the link's "PCS" header field) is Lab.
+    DeviceLink {
+        /// The link's entry space (`data_color_space`).
+        input: ColorSpace,
+        /// The link's exit space (the "PCS" header field, a device space for true links).
+        output: ColorSpace,
+    },
+}
+
+impl LinkMode {
+    /// The encode seam prepended before the tag's stages, if any.
+    fn prepend(self, legacy_lab: bool) -> Option<PcsEncoding> {
+        match self {
+            LinkMode::DeviceToPcs { .. } => None,
+            LinkMode::PcsToDevice { pcs } => pcs_encoding(pcs, legacy_lab),
+            LinkMode::DeviceLink { input, .. } => pcs_encoding(input, legacy_lab),
+        }
+    }
+
+    /// The decode seam appended after the tag's stages, if any.
+    fn append(self, legacy_lab: bool) -> Option<PcsEncoding> {
+        match self {
+            LinkMode::DeviceToPcs { pcs } => pcs_encoding(pcs, legacy_lab),
+            LinkMode::PcsToDevice { .. } => None,
+            LinkMode::DeviceLink { output, .. } => pcs_encoding(output, legacy_lab),
+        }
+    }
+
+    /// Whether the mode forces multilinear (trilinear) CLUT interpolation — lcms2's
+    /// Lab-indexed-CLUT rule (module docs): `ChangeInterpolationToTrilinear` runs in
+    /// `_cmsReadOutputLUT` (PCS→device of a Lab-PCS profile) and `_cmsReadDevicelinkLUT`
+    /// (a link whose exit space is Lab), never in `_cmsReadInputLUT`.
+    fn multilinear(self) -> bool {
+        match self {
+            LinkMode::DeviceToPcs { .. } => false,
+            LinkMode::PcsToDevice { pcs } => pcs == ColorSpace::Lab,
+            LinkMode::DeviceLink { output, .. } => output == ColorSpace::Lab,
+        }
+    }
 }
 
 /// `MAX_ENCODEABLE_XYZ = 1 + 32767/32768 = 65535/32768` (lcms2 `lcms2_internal.h`): the
@@ -166,17 +217,11 @@ fn pcs_encoding(pcs: ColorSpace, legacy_lab: bool) -> Option<PcsEncoding> {
     }
 }
 
-/// Whether the direction/PCS pair forces multilinear (trilinear) CLUT interpolation —
-/// lcms2's Lab-indexed-CLUT rule (module docs).
-fn lab_indexed(direction: Direction, pcs: ColorSpace) -> bool {
-    direction == Direction::PcsToDevice && pcs == ColorSpace::Lab
-}
-
 /// Builds the pipeline for one LUT tag: dispatches on the element type actually stored under
 /// the tag (an A2B or B2A slot may legally hold any of the four LUT element types — lcms2
 /// registers all four readers for both tag families and evaluates whatever pipeline results).
-/// The element type fixes the tag-internal stage order; `direction` fixes which end is the
-/// PCS seam and whether the Lab-indexed trilinear rule applies.
+/// The element type fixes the tag-internal stage order; `mode` fixes which ends are PCS
+/// seams and whether the Lab-indexed trilinear rule applies.
 ///
 /// # Errors
 ///
@@ -184,35 +229,31 @@ fn lab_indexed(direction: Direction, pcs: ColorSpace) -> bool {
 /// zero-entry table); [`ToneCurve::new`]/[`ClutTable`] construction errors for malformed
 /// curves or CLUT geometry; [`Pipeline::new`] channel-seam errors for a stage combination
 /// whose channel counts cannot chain.
-pub(super) fn build(
-    sig: Signature,
-    data: &TagData,
-    direction: Direction,
-    pcs: ColorSpace,
-) -> Result<Pipeline> {
+pub(super) fn build(sig: Signature, data: &TagData, mode: LinkMode) -> Result<Pipeline> {
     match data {
-        TagData::Lut8(lut) => lut8_pipeline(lut, direction, pcs),
-        TagData::Lut16(lut) => lut16_pipeline(sig, lut, direction, pcs),
-        TagData::LutAToB(lut) => lut_a_to_b_pipeline(lut, direction, pcs),
-        TagData::LutBToA(lut) => lut_b_to_a_pipeline(lut, direction, pcs),
+        TagData::Lut8(lut) => lut8_pipeline(lut, mode),
+        TagData::Lut16(lut) => lut16_pipeline(sig, lut, mode),
+        TagData::LutAToB(lut) => lut_a_to_b_pipeline(lut, mode),
+        TagData::LutBToA(lut) => lut_b_to_a_pipeline(lut, mode),
         _ => Err(CmmError::BadTagType(sig)),
     }
 }
 
-/// Attaches the PCS seam stage per `direction` (append decode / prepend encode; none when
-/// the "PCS" is a device space) and validates the finished chain.
+/// Attaches the PCS seam stage(s) per `mode` (encode prepended, decode appended; none at
+/// device-space ends) and validates the finished chain. `legacy_lab` selects the v2 Lab
+/// constants — set only by the `lut16Type` builder (module docs).
 fn finish(
-    direction: Direction,
-    encoding: Option<PcsEncoding>,
+    mode: LinkMode,
+    legacy_lab: bool,
     input_channels: u8,
     output_channels: u8,
     mut stages: Vec<Stage>,
 ) -> Result<Pipeline> {
-    if let Some(encoding) = encoding {
-        match direction {
-            Direction::DeviceToPcs => stages.push(encoding.decode_stage()),
-            Direction::PcsToDevice => stages.insert(0, encoding.encode_stage()),
-        }
+    if let Some(encoding) = mode.prepend(legacy_lab) {
+        stages.insert(0, encoding.encode_stage());
+    }
+    if let Some(encoding) = mode.append(legacy_lab) {
+        stages.push(encoding.decode_stage());
     }
     Pipeline::new(input_channels, output_channels, stages)
 }
@@ -322,7 +363,7 @@ fn clut_stage(clut: &Clut, multilinear: bool) -> Result<Stage> {
 /// widened to `u16` without rescaling, normalized by 255 inside [`ClutTable`] — numerically
 /// identical to lcms2's `FROM_8_TO_16` widening over 65535). A Lab PCS uses the **v4**
 /// encoding (the v2 fixup is lut16-only; module docs).
-fn lut8_pipeline(lut: &Lut8, direction: Direction, pcs: ColorSpace) -> Result<Pipeline> {
+fn lut8_pipeline(lut: &Lut8, mode: LinkMode) -> Result<Pipeline> {
     let mut stages = Vec::new();
     if let Some(stage) = legacy_matrix_stage(&lut.matrix, lut.input_channels) {
         stages.push(stage);
@@ -334,26 +375,15 @@ fn lut8_pipeline(lut: &Lut8, direction: Direction, pcs: ColorSpace) -> Result<Pi
         precision: ClutPrecision::U8,
         samples: lut.clut.iter().map(|&v| u16::from(v)).collect(),
     };
-    stages.push(clut_stage(&clut, lab_indexed(direction, pcs))?);
+    stages.push(clut_stage(&clut, mode.multilinear())?);
     stages.push(lut8_tables_stage(&lut.output_table)?);
-    finish(
-        direction,
-        pcs_encoding(pcs, false),
-        lut.input_channels,
-        lut.output_channels,
-        stages,
-    )
+    finish(mode, false, lut.input_channels, lut.output_channels, stages)
 }
 
 /// `lut16Type`: matrix (3-input, non-identity only) → input tables → CLUT → output tables
 /// (§10.10), 16-bit data with per-table entry counts. A Lab PCS uses the **v2** encoding
 /// (module docs).
-fn lut16_pipeline(
-    sig: Signature,
-    lut: &Lut16,
-    direction: Direction,
-    pcs: ColorSpace,
-) -> Result<Pipeline> {
+fn lut16_pipeline(sig: Signature, lut: &Lut16, mode: LinkMode) -> Result<Pipeline> {
     let mut stages = Vec::new();
     if let Some(stage) = legacy_matrix_stage(&lut.matrix, lut.input_channels) {
         stages.push(stage);
@@ -369,31 +399,25 @@ fn lut16_pipeline(
         precision: ClutPrecision::U16,
         samples: lut.clut.clone(),
     };
-    stages.push(clut_stage(&clut, lab_indexed(direction, pcs))?);
+    stages.push(clut_stage(&clut, mode.multilinear())?);
     stages.push(lut16_tables_stage(
         sig,
         &lut.output_table,
         lut.output_table_entries,
     )?);
-    finish(
-        direction,
-        pcs_encoding(pcs, true),
-        lut.input_channels,
-        lut.output_channels,
-        stages,
-    )
+    finish(mode, true, lut.input_channels, lut.output_channels, stages)
 }
 
 /// `lutAToBType`: A-curves → CLUT → M-curves → matrix → B-curves (the §10.12 evaluation
 /// order; the element *stores* B first but B applies last on the way to the PCS). Optional
 /// stages are omitted; a Lab PCS uses the v4 encoding.
-fn lut_a_to_b_pipeline(lut: &LutAToB, direction: Direction, pcs: ColorSpace) -> Result<Pipeline> {
+fn lut_a_to_b_pipeline(lut: &LutAToB, mode: LinkMode) -> Result<Pipeline> {
     let mut stages = Vec::new();
     if let Some(a_curves) = &lut.a_curves {
         stages.push(curves_stage(a_curves)?);
     }
     if let Some(clut) = &lut.clut {
-        stages.push(clut_stage(clut, lab_indexed(direction, pcs))?);
+        stages.push(clut_stage(clut, mode.multilinear())?);
     }
     if let Some(m_curves) = &lut.m_curves {
         stages.push(curves_stage(m_curves)?);
@@ -402,18 +426,12 @@ fn lut_a_to_b_pipeline(lut: &LutAToB, direction: Direction, pcs: ColorSpace) -> 
         stages.push(mab_matrix_stage(matrix));
     }
     stages.push(curves_stage(&lut.b_curves)?);
-    finish(
-        direction,
-        pcs_encoding(pcs, false),
-        lut.input_channels,
-        lut.output_channels,
-        stages,
-    )
+    finish(mode, false, lut.input_channels, lut.output_channels, stages)
 }
 
 /// `lutBToAType`: B-curves → matrix → M-curves → CLUT → A-curves (the §10.13 evaluation
 /// order, PCS side first). Optional stages are omitted; a Lab PCS uses the v4 encoding.
-fn lut_b_to_a_pipeline(lut: &LutBToA, direction: Direction, pcs: ColorSpace) -> Result<Pipeline> {
+fn lut_b_to_a_pipeline(lut: &LutBToA, mode: LinkMode) -> Result<Pipeline> {
     let mut stages = Vec::new();
     stages.push(curves_stage(&lut.b_curves)?);
     if let Some(matrix) = &lut.matrix {
@@ -423,18 +441,12 @@ fn lut_b_to_a_pipeline(lut: &LutBToA, direction: Direction, pcs: ColorSpace) -> 
         stages.push(curves_stage(m_curves)?);
     }
     if let Some(clut) = &lut.clut {
-        stages.push(clut_stage(clut, lab_indexed(direction, pcs))?);
+        stages.push(clut_stage(clut, mode.multilinear())?);
     }
     if let Some(a_curves) = &lut.a_curves {
         stages.push(curves_stage(a_curves)?);
     }
-    finish(
-        direction,
-        pcs_encoding(pcs, false),
-        lut.input_channels,
-        lut.output_channels,
-        stages,
-    )
+    finish(mode, false, lut.input_channels, lut.output_channels, stages)
 }
 
 #[cfg(test)]
@@ -567,8 +579,9 @@ mod tests {
     fn lut8_device_to_pcs_stage_order_with_embedded_matrix() {
         let pipeline = lut8_pipeline(
             &lut8_3x3(half_diag3x3()),
-            Direction::DeviceToPcs,
-            ColorSpace::Xyz,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Xyz,
+            },
         )
         .unwrap();
         // Matrix first (§10.11 evaluation order), then tables → CLUT → tables, then the
@@ -589,8 +602,9 @@ mod tests {
     fn lut8_identity_matrix_is_skipped() {
         let pipeline = lut8_pipeline(
             &lut8_3x3(identity3x3()),
-            Direction::DeviceToPcs,
-            ColorSpace::Xyz,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Xyz,
+            },
         )
         .unwrap();
         assert_eq!(kinds(&pipeline), ["curves", "clut", "curves", "matrix"]);
@@ -609,7 +623,13 @@ mod tests {
             clut: vec![0; 16 * 3],
             output_table: ramp_u8(3),
         };
-        let pipeline = lut8_pipeline(&lut, Direction::DeviceToPcs, ColorSpace::Lab).unwrap();
+        let pipeline = lut8_pipeline(
+            &lut,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Lab,
+            },
+        )
+        .unwrap();
         assert_eq!(kinds(&pipeline), ["curves", "clut", "curves", "matrix"]);
         assert_eq!(pipeline.input_channels(), 4);
     }
@@ -619,8 +639,9 @@ mod tests {
         // The v2 fixup is gated on the lut16 true type alone: lut8's Lab seam is v4.
         let pipeline = lut8_pipeline(
             &lut8_3x3(identity3x3()),
-            Direction::DeviceToPcs,
-            ColorSpace::Lab,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Lab,
+            },
         )
         .unwrap();
         let (diag, offset) = diagonal_of(pipeline.stages().last().unwrap());
@@ -635,8 +656,9 @@ mod tests {
         let pipeline = lut16_pipeline(
             Signature(*b"A2B0"),
             &lut16_3x3(identity3x3()),
-            Direction::DeviceToPcs,
-            ColorSpace::Lab,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Lab,
+            },
         )
         .unwrap();
         let (diag, offset) = diagonal_of(pipeline.stages().last().unwrap());
@@ -654,8 +676,9 @@ mod tests {
         let pipeline = lut16_pipeline(
             Signature(*b"A2B0"),
             &lut,
-            Direction::DeviceToPcs,
-            ColorSpace::Lab,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Lab,
+            },
         )
         .unwrap();
         let mut out = [0.0; 3];
@@ -672,8 +695,9 @@ mod tests {
         let pipeline = lut16_pipeline(
             Signature(*b"B2A0"),
             &lut16_3x3(identity3x3()),
-            Direction::PcsToDevice,
-            ColorSpace::Lab,
+            LinkMode::PcsToDevice {
+                pcs: ColorSpace::Lab,
+            },
         )
         .unwrap();
         let (diag, offset) = diagonal_of(&pipeline.stages()[0]);
@@ -694,35 +718,48 @@ mod tests {
     }
 
     #[test]
-    fn lab_indexed_cluts_are_multilinear_only_in_the_pcs_to_device_direction() {
+    fn lab_indexed_cluts_are_multilinear_only_where_lcms2_forces_trilinear() {
         // PCS→device with a Lab PCS forces trilinear (lcms2's
-        // ChangeInterpolationToTrilinear); the same element in the device→PCS direction (and
-        // any XYZ-PCS CLUT) keeps the tetrahedral default.
+        // ChangeInterpolationToTrilinear), as does a devicelink read whose EXIT space is
+        // Lab; the same element in the device→PCS direction (and any XYZ-exit CLUT) keeps
+        // the tetrahedral default.
         let cases = [
             (
-                Direction::PcsToDevice,
-                ColorSpace::Lab,
+                LinkMode::PcsToDevice {
+                    pcs: ColorSpace::Lab,
+                },
                 ClutInterpolation::Multilinear,
             ),
             (
-                Direction::DeviceToPcs,
-                ColorSpace::Lab,
+                LinkMode::DeviceToPcs {
+                    pcs: ColorSpace::Lab,
+                },
                 ClutInterpolation::Tetrahedral,
             ),
             (
-                Direction::PcsToDevice,
-                ColorSpace::Xyz,
+                LinkMode::PcsToDevice {
+                    pcs: ColorSpace::Xyz,
+                },
+                ClutInterpolation::Tetrahedral,
+            ),
+            (
+                LinkMode::DeviceLink {
+                    input: ColorSpace::Rgb,
+                    output: ColorSpace::Lab,
+                },
+                ClutInterpolation::Multilinear,
+            ),
+            (
+                LinkMode::DeviceLink {
+                    input: ColorSpace::Lab,
+                    output: ColorSpace::Rgb,
+                },
                 ClutInterpolation::Tetrahedral,
             ),
         ];
-        for (direction, pcs, want) in cases {
-            let pipeline = lut16_pipeline(
-                Signature(*b"B2A0"),
-                &lut16_3x3(identity3x3()),
-                direction,
-                pcs,
-            )
-            .unwrap();
+        for (mode, want) in cases {
+            let pipeline =
+                lut16_pipeline(Signature(*b"B2A0"), &lut16_3x3(identity3x3()), mode).unwrap();
             let clut = pipeline
                 .stages()
                 .iter()
@@ -731,8 +768,60 @@ mod tests {
                     _ => None,
                 })
                 .expect("pipeline carries a CLUT");
-            assert_eq!(clut.interpolation(), want, "{direction:?} {pcs:?}");
+            assert_eq!(clut.interpolation(), want, "{mode:?}");
         }
+    }
+
+    #[test]
+    fn devicelink_mode_seams_both_connection_space_ends() {
+        // A hypothetical Lab→Lab abstract read as a devicelink over a lut16: BOTH ends get
+        // the v2 constants (lcms2's LabV4ToV2 at BEGIN + LabV2ToV4 at END, folded into the
+        // decoded seams) — encode prepended, decode appended, around the tag's stages.
+        let pipeline = lut16_pipeline(
+            Signature(*b"A2B0"),
+            &lut16_3x3(identity3x3()),
+            LinkMode::DeviceLink {
+                input: ColorSpace::Lab,
+                output: ColorSpace::Lab,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            kinds(&pipeline),
+            ["matrix", "curves", "clut", "curves", "matrix"]
+        );
+        let (diag, offset) = diagonal_of(&pipeline.stages()[0]);
+        assert_eq!(
+            diag,
+            [1.0 / 100.390625, 1.0 / 255.99609375, 1.0 / 255.99609375]
+        );
+        assert_eq!(offset, [0.0, 128.0 / 255.99609375, 128.0 / 255.99609375]);
+        let (diag, offset) = diagonal_of(pipeline.stages().last().unwrap());
+        assert_eq!(diag, [100.390625, 255.99609375, 255.99609375]);
+        assert_eq!(offset, [0.0, -128.0, -128.0]);
+        // A device→device link (the everyday RGB→RGB / CMYK→CMYK shape) stays seamless.
+        let pipeline = lut16_pipeline(
+            Signature(*b"A2B0"),
+            &lut16_3x3(identity3x3()),
+            LinkMode::DeviceLink {
+                input: ColorSpace::Rgb,
+                output: ColorSpace::Rgb,
+            },
+        )
+        .unwrap();
+        assert_eq!(kinds(&pipeline), ["curves", "clut", "curves"]);
+        // And an mAB-style element (v4-native) at a Lab exit uses the v4 constants.
+        let pipeline = lut_a_to_b_pipeline(
+            &full_mab(),
+            LinkMode::DeviceLink {
+                input: ColorSpace::Rgb,
+                output: ColorSpace::Lab,
+            },
+        )
+        .unwrap();
+        let (diag, offset) = diagonal_of(pipeline.stages().last().unwrap());
+        assert_eq!(diag, [100.0, 255.0, 255.0]);
+        assert_eq!(offset, [0.0, -128.0, -128.0]);
     }
 
     fn gamma2() -> CurveOrParametric {
@@ -773,8 +862,13 @@ mod tests {
 
     #[test]
     fn mab_device_to_pcs_runs_a_clut_m_matrix_b_then_decodes() {
-        let pipeline =
-            lut_a_to_b_pipeline(&full_mab(), Direction::DeviceToPcs, ColorSpace::Xyz).unwrap();
+        let pipeline = lut_a_to_b_pipeline(
+            &full_mab(),
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Xyz,
+            },
+        )
+        .unwrap();
         // §10.12 evaluation order (B-curves stored first but applied last), decode appended.
         assert_eq!(
             kinds(&pipeline),
@@ -802,8 +896,13 @@ mod tests {
             matrix: None,
             b_curves: vec![CurveOrParametric::Curve(Curve::Identity); 3],
         };
-        let pipeline =
-            lut_a_to_b_pipeline(&minimal, Direction::DeviceToPcs, ColorSpace::Lab).unwrap();
+        let pipeline = lut_a_to_b_pipeline(
+            &minimal,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Lab,
+            },
+        )
+        .unwrap();
         assert_eq!(kinds(&pipeline), ["curves", "matrix"]);
         // And the mAB Lab seam is v4.
         let (diag, _) = diagonal_of(&pipeline.stages()[1]);
@@ -829,7 +928,13 @@ mod tests {
             }),
             a_curves: Some(vec![gamma2(); 4]),
         };
-        let pipeline = lut_b_to_a_pipeline(&full, Direction::PcsToDevice, ColorSpace::Lab).unwrap();
+        let pipeline = lut_b_to_a_pipeline(
+            &full,
+            LinkMode::PcsToDevice {
+                pcs: ColorSpace::Lab,
+            },
+        )
+        .unwrap();
         // Encode prepended, then the §10.13 order: B → matrix → M → CLUT → A.
         assert_eq!(
             kinds(&pipeline),
@@ -852,8 +957,9 @@ mod tests {
         let err = lut16_pipeline(
             Signature(*b"A2B0"),
             &lut,
-            Direction::DeviceToPcs,
-            ColorSpace::Lab,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Lab,
+            },
         )
         .unwrap_err();
         assert_eq!(
@@ -875,7 +981,13 @@ mod tests {
             matrix: None,
             b_curves: vec![gamma2(); 3],
         };
-        let err = lut_a_to_b_pipeline(&bad, Direction::DeviceToPcs, ColorSpace::Lab).unwrap_err();
+        let err = lut_a_to_b_pipeline(
+            &bad,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Lab,
+            },
+        )
+        .unwrap_err();
         assert!(
             matches!(err, CmmError::StageChannelMismatch { .. }),
             "got {err}"
@@ -897,7 +1009,13 @@ mod tests {
             clut: vec![255; 24],
             output_table: ramp_u8(3),
         };
-        let pipeline = lut8_pipeline(&lut, Direction::DeviceToPcs, ColorSpace::Lab).unwrap();
+        let pipeline = lut8_pipeline(
+            &lut,
+            LinkMode::DeviceToPcs {
+                pcs: ColorSpace::Lab,
+            },
+        )
+        .unwrap();
         let mut out = [0.0; 3];
         pipeline.eval(&[1.0, 1.0, 1.0], &mut out).unwrap();
         // v4 Lab decode of the all-ones encoded pixel: L = 100, a = b = 127.
@@ -911,8 +1029,9 @@ mod tests {
         let pipeline = build(
             Signature(*b"B2A0"),
             &TagData::LutAToB(full_mab()),
-            Direction::PcsToDevice,
-            ColorSpace::Xyz,
+            LinkMode::PcsToDevice {
+                pcs: ColorSpace::Xyz,
+            },
         )
         .unwrap();
         assert_eq!(
@@ -948,8 +1067,9 @@ mod tests {
             let pipeline = build(
                 Signature(*b"A2B0"),
                 &data,
-                Direction::DeviceToPcs,
-                ColorSpace::Xyz,
+                LinkMode::DeviceToPcs {
+                    pcs: ColorSpace::Xyz,
+                },
             )
             .unwrap();
             // Whatever the internals, the device→PCS build ends at the XYZ decode seam.

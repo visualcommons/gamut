@@ -87,6 +87,9 @@ pub const FLAGS_GAMUTCHECK: u32 = 0x1000;
 pub const FLAGS_BLACKPOINTCOMPENSATION: u32 = 0x2000;
 /// `cmsFLAGS_SOFTPROOFING` — simulate the proofing device (`lcms2.h:1751`).
 pub const FLAGS_SOFTPROOFING: u32 = 0x4000;
+/// `cmsFLAGS_NOWHITEONWHITEFIXUP` — don't force the input white point onto the output white
+/// ("scum dot" fixup) in precalculated (default-flag, 16-bit) transforms (`lcms2.h:1755`).
+pub const FLAGS_NOWHITEONWHITEFIXUP: u32 = 0x0004;
 
 /// An owned lcms2 colour transform (`cmsHTRANSFORM`); deleted on drop.
 ///

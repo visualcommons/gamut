@@ -30,7 +30,7 @@ that add behaviour (#325 onward).
 | P4 | #327 | Profile linking: matrix/TRC (shaper) profile pairs — `link::{device_to_pcs, pcs_to_device}` over RGB/gray v2+v4 shaper profiles, `Stage::MatrixN` | ✅ |
 | P5 | #328 | Profile linking: LUT (`lut8`/`lut16`/`mAB `/`mBA `) profile pairs — per-intent tag selection with lcms2's fallback, PCS encode/decode seams, `Stage::XyzToLab`/`LabToXyz` + the Lab-PCS RGB shaper lift | ✅ |
 | P6 | #329 | Rendering intents + black-point compensation: `IccTransform::between`/`TransformOptions` (the first end-to-end transform), ICC-absolute white scaling (`intent`), black-point detection + compensation (`bpc`) | ✅ |
-| P7 | #330 | Transform chaining + typed pixel buffers | ☐ |
+| P7 | #330 | Transform chaining (`IccTransform::chain`), device links (`IccTransform::device_link`), soft proofing (`IccTransform::proofing`/`ProofingOptions`), gamut check (`GamutCheck`), typed pixel buffers (`image`), and the epic's max-ΔE₀₀ conformance gate | ✅ |
 
 ## Settled decisions (P2, tone curves)
 
@@ -193,8 +193,8 @@ that add behaviour (#325 onward).
   keeping the decision bit-identical while the applied offset stays decoded (the offset
   division is the one place lcms2's encoded pipelines and this crate's decoded ones differ
   in the BPC math). Device-link, abstract, and named-colour classes are rejected with
-  `UnsupportedProfile` — they chain via #330's transform API (lcms2 reads them
-  devicelink-style, A2B tags in both directions, which the pair linker does not model).
+  `UnsupportedProfile` — the first two run via `IccTransform::device_link`/`chain` (P7),
+  which read them devicelink-style.
 - **Perceptual/saturation add no CMM-side math**: the per-intent tag selection (P5) is the
   entire rendering; for v4 profiles the perceptual tables already target the Perceptual
   Reference Medium and this CMM — like lcms2 — applies **no additional gamut mapping**
@@ -245,6 +245,96 @@ that add behaviour (#325 onward).
   `[0, 1]` (P2, matching lcms2's own integer formatters); the P6 differentials clamp the
   oracle's doubles before comparing.
 
+## Settled decisions (P7, chaining + conformance)
+
+- **One seam implementation:** `crate::chain::link_chain` transcribes lcms2's
+  `DefaultICCintents` (`cmscnvrt.c:510-645`) — per-hop input/output direction from the
+  tracked current colour space, devicelink-style reads for link/abstract classes,
+  `ComputeConversion` only on output-direction (and abstract, `i > 0`) hops,
+  `AddConversion`'s PCS bridging with the empty-layer skip, and lcms2's
+  `ColorSpaceIsCompatible` continuity check (violations are the typed
+  `CmmError::ChainMismatch`). `IccTransform::between` **is** the two-profile chain;
+  `proofing` is the four-profile chain `[src, proof, proof, dst]` at intents
+  `[intent, intent, relative, proofing_intent]` with BPC on the first two hops only
+  (`cmsCreateProofingTransform`, `cmsxform.c:1365-1395`); the gamut check's three
+  sub-transforms run through the same engine against a hand-built Lab-identity abstract
+  profile (the `cmsCreateLab4Profile` shape).
+- **Single intent/BPC per chain in v1:** the chain internals take per-hop intent/BPC arrays
+  (proofing needs them), but the public `IccTransform::chain` replicates one
+  `TransformOptions` across every hop — exactly what lcms2's
+  `cmsCreateMultiprofileTransform` does with its single intent word, so differentials
+  against it are like-for-like. A public per-hop-array API (lcms2's
+  `cmsCreateExtendedTransform`) is deferred until a consumer needs it.
+- **Device links have no shaper fallback** (`_cmsReadDevicelinkLUT`, `cmsio1.c:705-800`):
+  the A2B tag family with the perceptual fallback only — a link without a usable A2B tag is
+  `MissingTag`, never a matrix/TRC read. CLUTs interpolate **trilinearly when the link's
+  "PCS" field (its output space) is Lab**, the lut16 v2-Lab rule applies at each Lab end,
+  and device→device links run encoded `[0, 1]` end to end; Lab/XYZ link ends are seamed to
+  the crate's decoded colorimetry (the decoded equivalent of lcms2's encoded pass-through +
+  `LabV4ToV2`/`LabV2ToV4` fixups). `IccTransform::device_link` accepts only link-class
+  profiles; abstract profiles chain.
+- **Per-hop clamping divergence (documented):** mid-chain colorimetry that leaves the v4 Lab
+  encodeable range — deep CMYK blacks pushed below zero by a BPC layer, chroma past
+  ±128 — clamps at each hop's tag curves (the P2 `[0, 1]` `ToneCurve` convention), where
+  lcms2's unclamped *parametric* identity curves carry the overshoot to the final formatter.
+  Measured on the conformance battery: ≤ 1.66e-1 device units, only at ≥ 300 % ink corners
+  under relative+BPC through the Lab-identity abstract hop (≤ 4.6e-3 for the perceptual
+  fixed-black layer; ≤ 3.1e-5 everywhere in-range). The conformance gate splits the two
+  regimes with the mid-chain-Lab edge predicate and bounds both.
+- **Gamut check emits the raw `f64` excess** (`GamutCheck`): lcms2's `GamutSampler` double
+  round trip and ΔE₇₆ decision table (threshold 5.0; 1.0 for a matrix-shaper proof by tag
+  presence, `cmsIsMatrixShaper`) are transcribed — the table's two zero arms fold into one
+  `dE1 < T` test, provably behaviour-identical (documented on `GamutCheck::excess`; the
+  fold removes the redundant comparisons no test could distinguish) — but where lcms2
+  quantizes the excess into a 16-bit CLUT sampled on a coarse grid and interpolates, this
+  crate evaluates the sampler exactly per pixel and returns the unquantized excess
+  (`0.0` = in gamut) — classification is oracle-pinned, magnitudes deliberately are not.
+- **Pixel-buffer conventions (`image`):** colour channels normalize by the format's full
+  scale (255/65535), re-encode with lcms2's `_cmsQuickSaturateWord` rounding
+  (`floor(x + 0.5)`, saturating; NaN → 0); alpha channels never enter the transform (copied
+  when both formats carry alpha, dropped when only the source does, opaque-filled when only
+  the destination does); `Bilevel`/`Indexed8` are rejected as non-continuous colour
+  (`UnsupportedPixelFormat`); geometry violations are `ImageGeometry`/`BufferLength`.
+  Processing is chunked (256 pixels) through one reused `f64` scratch pair — constant extra
+  memory in the image size; planar buffers gather/scatter per chunk into the same
+  interleaved core (identical numerics, one extra copy).
+- **Pipeline optimization deferred to #372:** transforms evaluate stage by stage in `f64`;
+  lcms2's stage collapsing / CLUT resampling / curve joining (`cmsopt.c`) is a performance
+  concern tracked as the follow-up issue #372, not a v1 correctness concern — the
+  conformance gate's LOOSE configuration measures exactly the behavioural gap those
+  optimizations introduce on the oracle's side.
+
+## Conformance gate (P7)
+
+`tests/oracle_conformance.rs` — the epic's acceptance badge. Battery pairs (shaper↔shaper,
+gray↔shaper, shaper↔LUT both directions, LUT↔LUT incl. v2/v4 serializations) × 4 intents ×
+BPC {on, off} (BPC×absolute skipped — mutually exclusive), ≥ 50-pixel seeded device sweeps,
+outputs compared as ΔE₀₀ through a shared destination→Lab lens. Two oracle configurations
+per cell: **TIGHT** (lcms2 `TYPE_*_DBL`, `NOOPTIMIZE|NOCACHE` — evaluation semantics) and
+**LOOSE** (lcms2 `TYPE_*_16`, default flags — the optimized path real callers get; only the
+"scum dot" white fixup is disabled, `NOWHITEONWHITEFIXUP`, because it would dominate the
+metric at the device-white corner, measured 8.5 ΔE₀₀, while gating nothing about this
+crate). Measured maxima and asserted bounds (lcms2 2.19):
+
+| class | measured max ΔE₀₀ | asserted | justification |
+|-------|-------------------|----------|---------------|
+| tight / shaper pairs | 7.82e-4 | `< 2e-3` | lcms2 f32 stage noise + near-black γ-inverse amplification (gray→sRGB perceptual); ~2.5× headroom keeps a decade regression visible |
+| tight / LUT pairs | 6.87e-3 | `< 2e-2` | the oracle evaluates profile CLUTs through 16-bit fixed point even in double transforms (`EvaluateCLUTfloatIn16`); grid-9 tables bound the agreement |
+| loose / shaper pairs | 3.34e-1 (mean 1.49e-2) | max `< 6e-1`, mean `< 5e-2` | lcms2's default path resamples the transform into a grid-33 CLUT: deep-shadow toes of γ2.2 and gamut-clip corners interpolate coarsely **on the oracle's side** (at those pixels we match the TIGHT oracle to ~1e-3) |
+| loose / LUT pairs | 1.10e0 (mean 7.23e-3) | max `< 2.0`, mean `< 3e-2` | precalculated-CLUT smoothing of clip boundaries (absolute-intent white scaling clips hardest); the mean bound is the regression tripwire — a wrong tag/seam/BPC shifts whole sweeps |
+
+The gate also asserts the classes stay *distinct* (LUT maxima dominate shaper maxima), so
+the split cannot silently go stale. Also inside the gate: 3-profile chains (src→Lab4→dst,
+both directions) vs `cmsCreateMultiprofileTransform` (in-range worst |Δ| 3.1e-5, clamped
+regime per the P7 divergence above); device links — the v4 mAB ink-limiting link (worst
+1.5e-5), the curves-only linearization link (1.5e-8), and a hand-built v2 lut16 RGB→Lab
+link pinning the devicelink trilinear rule and v2-Lab seams (worst 3.4e-3 in decoded-Lab
+units, a bound the tetrahedral evaluation of the same CLUT fails); proofing vs
+`SOFTPROOFING` (worst 3.4e-5 across intents × BPC, plus an observability floor against the
+plain pair transform); and gamut-check in/out classification agreement per pixel against
+`GAMUTCHECK` alarm substitution over sentinel alarm codes (shaper and LUT proofs, two
+intents), with our excess pinned to exactly `0.0` in-gamut.
+
 ## Deferred / out of scope
 
 | Item | Notes | Status |
@@ -252,6 +342,10 @@ that add behaviour (#325 onward).
 | iccMAX (`ICC.2:2019`) | A separate, parallel next-generation format (spectral PCS, v5 header); not an extension of ICC.1 and unimplementable against the lcms2 oracle. See [`references/icc`](../../references/icc/README.md). | ✗ out of scope |
 | `multiProcessElementsType` (`mpet`) + `DToBx`/`BToDx` tags | The v4/iccMAX general-purpose processing pipeline; `gamut-icc` preserves it as `Raw`, and this CMM does not evaluate it. | ✗ out of scope |
 | Integer/`f32` fast paths | Evaluation is `f64` throughout at Tier-1 (correctness only, not bit-reproducible — the `gamut-color` posture, see [`references/color`](../../references/color/README.md)). | ☐ unplanned |
+| Pipeline optimization / stage collapsing | lcms2 collapses chains into resampled LUTs by default (`cmsopt.c`); v1 evaluates stage by stage. Follow-up issue **#372** tracks it. | ☐ deferred (#372) |
+| Public per-hop intent/BPC arrays | The chain internals already take them (proofing uses them); the public `chain` API stays single-intent until a consumer needs lcms2's `cmsCreateExtendedTransform` shape. | ☐ deferred |
+| Named-colour profiles | No continuous pixel transform; rejected with a typed error everywhere. | ✗ out of scope |
+| K-preserving intents (`INTENT_PRESERVE_K_*`) | lcms2 extensions beyond the four ICC intents (`cmscnvrt.c` dispatch table); no ICC.1 basis. | ☐ unplanned |
 
 ## Validation
 
@@ -307,7 +401,19 @@ transcription is observable), the detection gates and v2/v4 branch selection, th
 endpoints per space (gray/RGB/Lab/CMY/CMYK), the ramp reject/shortcut/toe-fit paths over a
 hand-built round-trip vehicle, the `wtpt` quirk table, the empty-layer threshold on both
 sides of 0.002 (offset in encoded scale, including the exactly-representable boundary),
-every seam shape, and the forced-BPC gate matrix). Gates: `mise run test` / `lint` /
+every seam shape, and the forced-BPC gate matrix). P7 adds `tests/oracle_conformance.rs`
+(the conformance gate above) and its unit layer: chain tests (between ≡ two-profile chain
+across intents × BPC, the abstract-identity transparency pin, space-continuity and
+named-colour rejections, `ColorSpaceIsCompatible` and the `AddConversion` default-arm
+quirk, devicelink no-shaper-fallback/perceptual-fallback/encoded-end-to-end pins,
+mid-chain device links, proofing shape + degenerate-identity case), gamut-check tests
+(ΔE₇₆ pin, the shaper/LUT threshold rule incl. the tag-presence quirk, exact-zero
+in-gamut vs positive excess on a gain-halved proof, buffer contract, object safety),
+devicelink `LinkMode` seam/trilinear unit pins, and the `image` suite (round-half-up
+saturation pins incl. NaN, interleaved == scalar path exactly at both widths across chunk
+boundaries, planar == interleaved, alpha copy/drop/opaque-fill in both layouts, the
+Rgb8→Cmyk8 model change, every `UnsupportedPixelFormat`/`ImageGeometry`/`BufferLength`
+error, empty buffers, and a doctest). Gates: `mise run test` / `lint` /
 `fmt-check` / `coverage` (≥ 80%) / `mise run mutants-crate gamut-cmm` (equivalent
 float-boundary survivors are excluded in `.cargo/mutants.toml` with per-mutant proofs, the
 workspace convention).

@@ -1,7 +1,9 @@
 //! ICC colour management module (CMM) for the gamut image-encoding workspace.
 //!
-//! A CMM turns parsed ICC profiles into runnable colour transforms: it links a source and a
-//! destination profile into one device→PCS→device conversion and evaluates it over pixels.
+//! A CMM turns parsed ICC profiles into runnable colour transforms: it links profiles —
+//! pairs, multi-profile chains, device links, soft-proofing simulations — into one
+//! device→PCS→device conversion and evaluates it over pixels (scalar `f64` samples or typed
+//! `u8`/`u16` image buffers).
 //! This crate provides the transform *engine* — the [`Pipeline`]/[`Stage`] evaluation model
 //! and the object-safe [`Transform`] entry trait — over profiles parsed by
 //! [`gamut-icc`](https://crates.io/crates/gamut-icc), with colorimetric primitives from
@@ -45,6 +47,15 @@
 //!   implements, and [`IccTransform`]/[`TransformOptions`]: two profiles linked end to end
 //!   at a rendering intent, with the ICC-absolute white scaling and black-point compensation
 //!   applied at the PCS seam.
+//! - [`chain`] — multi-profile chaining ([`IccTransform::chain`]), device-link transforms
+//!   ([`IccTransform::device_link`]), and soft-proofing
+//!   ([`IccTransform::proofing`]/[`ProofingOptions`]) — lcms2's `DefaultICCintents`
+//!   transcribed, and the one seam implementation [`IccTransform::between`] also uses.
+//! - [`gamut`] — [`GamutCheck`]: lcms2's double-round-trip gamut test as a [`Transform`]
+//!   (source device channels in, one in-gamut/ΔE-excess channel out).
+//! - [`image`] — typed pixel-buffer application over [`gamut_core::PixelFormat`]:
+//!   [`transform_interleaved_u8`]/[`transform_interleaved_u16`] and their planar siblings,
+//!   with alpha passthrough and lcms2-style round-half-up re-encoding.
 //! - [`bpc`] — black-point **detection** ([`detect_black_point`],
 //!   [`detect_destination_black_point`] — lcms2's estimators transcribed) and the
 //!   compensation scaling [`IccTransform`] applies.
@@ -78,9 +89,12 @@
 #![forbid(unsafe_code)]
 
 pub mod bpc;
+pub mod chain;
 pub mod clut;
 pub mod curve;
 pub mod error;
+pub mod gamut;
+pub mod image;
 mod intent;
 pub mod link;
 pub mod pipeline;
@@ -89,11 +103,19 @@ pub mod transform;
 #[doc(inline)]
 pub use bpc::{detect_black_point, detect_destination_black_point};
 #[doc(inline)]
+pub use chain::ProofingOptions;
+#[doc(inline)]
 pub use clut::{ClutInterpolation, ClutTable};
 #[doc(inline)]
 pub use curve::ToneCurve;
 #[doc(inline)]
 pub use error::{CmmError, Result};
+#[doc(inline)]
+pub use gamut::GamutCheck;
+#[doc(inline)]
+pub use image::{
+    transform_interleaved_u8, transform_interleaved_u16, transform_planar_u8, transform_planar_u16,
+};
 #[doc(inline)]
 pub use link::{device_to_pcs, pcs_to_device};
 #[doc(inline)]

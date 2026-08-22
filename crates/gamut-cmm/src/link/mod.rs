@@ -46,10 +46,20 @@ mod lut;
 mod shaper;
 
 use gamut_icc::{ColorSpace, IccProfile, KnownTag, RenderingIntent, TagData};
-use lut::Direction;
+use lut::LinkMode;
 
 use crate::error::{CmmError, Result};
 use crate::pipeline::Pipeline;
+
+/// Which half of a conversion is being built (the shaper fallback's dispatch key; LUT tags
+/// carry the richer [`LinkMode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    /// Device channels in, decoded PCS out.
+    DeviceToPcs,
+    /// Decoded PCS in, device channels out.
+    PcsToDevice,
+}
 
 /// lcms2's `Device2PCS16` intent→tag table (`cmsio1.c:31-38`), verbatim: indexed by
 /// [`intent_index`]. Absolute colorimetric (index 3) deliberately reuses the
@@ -115,7 +125,12 @@ fn dispatch(
     direction: Direction,
 ) -> Result<Pipeline> {
     if let Some((tag, data)) = select_lut_tag(profile, table, intent) {
-        return lut::build(tag.into(), data, direction, profile.header.pcs);
+        let pcs = profile.header.pcs;
+        let mode = match direction {
+            Direction::DeviceToPcs => LinkMode::DeviceToPcs { pcs },
+            Direction::PcsToDevice => LinkMode::PcsToDevice { pcs },
+        };
+        return lut::build(tag.into(), data, mode);
     }
     check_pcs(profile)?;
     match (profile.header.data_color_space, direction) {
@@ -173,6 +188,43 @@ pub fn device_to_pcs(profile: &IccProfile, intent: RenderingIntent) -> Result<Pi
 /// [`CmmError::NonMonotonicCurve`] if a TRC has no functional inverse.
 pub fn pcs_to_device(profile: &IccProfile, intent: RenderingIntent) -> Result<Pipeline> {
     dispatch(profile, intent, &PCS_TO_DEVICE_16, Direction::PcsToDevice)
+}
+
+/// Builds `profile`'s whole-transform pipeline devicelink-style — lcms2's
+/// `_cmsReadDevicelinkLUT` (`cmsio1.c:705-800`), the read used for device-link and abstract
+/// profiles (and by [`IccTransform::device_link`](crate::IccTransform::device_link) /
+/// [`IccTransform::chain`](crate::IccTransform::chain)).
+///
+/// The A2B tag is selected by the [`DEVICE_TO_PCS_16`] table with the perceptual fallback,
+/// and there is deliberately **no matrix/TRC shaper fallback**: a link without a usable A2B
+/// tag is [`CmmError::MissingTag`] (carrying the requested intent's primary tag). CLUTs
+/// interpolate trilinearly when the link's "PCS" header field (its *output* space) is Lab
+/// (`ChangeInterpolationToTrilinear`), and the lut16 v2-Lab rule applies at each Lab end.
+/// Ends that are a connection space (Lab/XYZ, e.g. an abstract profile's) are seamed to the
+/// crate's decoded colorimetry; device ends run encoded `[0, 1]` (lcms2's encoded
+/// pass-through, in the decoded-seam convention).
+///
+/// # Errors
+///
+/// [`CmmError::MissingTag`] when neither the intent's A2B tag nor `A2B0` exists;
+/// otherwise the same construction errors as [`device_to_pcs`].
+pub(crate) fn device_link_pipeline(
+    profile: &IccProfile,
+    intent: RenderingIntent,
+) -> Result<Pipeline> {
+    let Some((tag, data)) = select_lut_tag(profile, &DEVICE_TO_PCS_16, intent) else {
+        return Err(CmmError::MissingTag(
+            DEVICE_TO_PCS_16[intent_index(intent)].into(),
+        ));
+    };
+    lut::build(
+        tag.into(),
+        data,
+        LinkMode::DeviceLink {
+            input: profile.header.data_color_space,
+            output: profile.header.pcs,
+        },
+    )
 }
 
 #[cfg(test)]

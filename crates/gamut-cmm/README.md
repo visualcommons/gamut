@@ -21,9 +21,13 @@ over [`gamut-icc`](../gamut-icc)'s parsed profiles:
 ## Use cases
 
 - **Colour-correct decoding** — convert decoded pixels through an embedded profile (a PNG
-  `iCCP`, a JPEG `APP2`, a TIFF/DNG tag 34675) into a display or working space.
+  `iCCP`, a JPEG `APP2`, a TIFF/DNG tag 34675) into a display or working space, straight over
+  `gamut_core::PixelFormat` buffers (`transform_interleaved_u8` and friends).
 - **Profile-accurate encoding** — bring working-space pixels into the space an embedded profile
   describes before encoding.
+- **Prepress workflows** — chain profiles through abstract edits (`IccTransform::chain`), apply
+  finished device links (`IccTransform::device_link`), soft-proof a printer on a display
+  (`IccTransform::proofing`), and flag out-of-gamut colours (`GamutCheck`).
 - **Custom pipelines** — assemble a validated stage chain by hand and run it through the same
   `Transform` entry point a linked profile pair will use.
 
@@ -72,21 +76,31 @@ chromatic-adaptation convention (colorants as-is, `chad` unread on the relative 
 from **LUT profiles**: `lut8`/`lut16`/`lutAToB`/`lutBToA` tags (CMYK printers, camera input
 profiles, device links), selected per rendering intent with lcms2's intent→tag tables and
 perceptual fallback, the lut16 v2-Lab encoding rule, and trilinear interpolation for
-Lab-indexed CLUTs. Rendering intents and black-point compensation (#329) complete the
-two-profile story: `IccTransform::between(&src, &dst, TransformOptions { intent,
-black_point_compensation })` links a pair end to end, applying the ICC-absolute media-white
-scaling (`diag(wIn/wOut)` at the XYZ seam, with lcms2's v2-display and missing-`wtpt`
-quirks) or black-point compensation (the ISO 18619/WP40 linear XYZ scaling over
-`bpc::{detect_black_point, detect_destination_black_point}` — lcms2's estimators
-transcribed, `bkpt` deliberately ignored, BPC forced for v4 destinations under
-perceptual/saturation exactly as lcms2 does) — all documented in [STATUS.md](STATUS.md).
-Transform chaining and typed pixel buffers land next — see [STATUS.md](STATUS.md).
+Lab-indexed CLUTs. Rendering intents and black-point compensation (#329): `IccTransform::between(&src, &dst,
+TransformOptions { intent, black_point_compensation })` links a pair end to end, applying
+the ICC-absolute media-white scaling (`diag(wIn/wOut)` at the XYZ seam, with lcms2's
+v2-display and missing-`wtpt` quirks) or black-point compensation (the ISO 18619/WP40
+linear XYZ scaling over `bpc::{detect_black_point, detect_destination_black_point}` —
+lcms2's estimators transcribed, `bkpt` deliberately ignored, BPC forced for v4 destinations
+under perceptual/saturation exactly as lcms2 does). **v1 is complete** with transform
+chaining and typed pixel buffers (#330): `IccTransform::chain` links any number of profiles
+(device-link and abstract classes included) through lcms2's `DefaultICCintents` algorithm,
+`IccTransform::device_link` applies a finished link profile, `IccTransform::proofing`
+builds the four-profile soft-proofing chain, `GamutCheck` implements lcms2's
+double-round-trip gamut test, and the `image` module applies any `Transform` to interleaved
+or planar `u8`/`u16` buffers tagged with `gamut_core::PixelFormat` (alpha passthrough,
+round-half-up re-encoding). The whole engine is held to the epic's **conformance gate**: a
+profile battery × 4 intents × BPC on/off differenced against Little-CMS with per-class
+max-ΔE₀₀ bounds (see STATUS.md's threshold table) — all documented in
+[STATUS.md](STATUS.md).
 
 ## Deferred
 
 iccMAX (`ICC.2`), `multiProcessElementsType` (`mpet`), and the `DToBx`/`BToDx` tags are out of
 scope — the still-image profiles embedded in real images are all ICC.1 v2/v4, and the lcms2
-oracle does not implement iccMAX. See [STATUS.md](STATUS.md).
+oracle does not implement iccMAX. Pipeline optimization (lcms2's stage collapsing/CLUT
+resampling) is deferred to issue #372; per-hop intent arrays for chains stay internal until a
+consumer needs them. See [STATUS.md](STATUS.md).
 
 ## License
 

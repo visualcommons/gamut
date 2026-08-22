@@ -122,6 +122,28 @@ pub enum CmmError {
     /// reachable from hand-built stages.
     #[error("cmm: malformed stage ({0})")]
     BadStage(&'static str),
+
+    /// A transform chain's profiles do not connect: a profile's entry colour space differs
+    /// from the space the chain carries at that hop (lcms2's `ColorSpaceIsCompatible` check,
+    /// `cmscnvrt.c:492-568`), or the chain is shorter than two profiles. The payload says
+    /// which continuity rule was violated.
+    #[error("cmm: profile chain mismatch ({0})")]
+    ChainMismatch(&'static str),
+
+    /// A pixel-buffer format the CMM cannot transform: [`gamut_core::PixelFormat::Bilevel`]
+    /// and [`gamut_core::PixelFormat::Indexed8`] carry non-continuous colour (a threshold
+    /// bit, palette indices), which no colour transform can meaningfully rescale. The payload
+    /// is the offending format.
+    #[error("cmm: pixel format {0:?} carries no continuous colour channels")]
+    UnsupportedPixelFormat(gamut_core::PixelFormat),
+
+    /// A pixel-buffer call's geometry is inconsistent: the format's colour channel count does
+    /// not match the transform's, the source and destination disagree on the pixel count, or
+    /// a planar call's plane count/lengths contradict the format. The payload says which
+    /// check failed; plain length-divisibility violations use
+    /// [`BufferLength`](CmmError::BufferLength) instead.
+    #[error("cmm: image geometry mismatch ({0})")]
+    ImageGeometry(&'static str),
 }
 
 /// A [`Result`](core::result::Result) whose error is [`CmmError`].

@@ -5,9 +5,9 @@
 
 use gamut_icc::{ColorSpace, DeviceClass, IccProfile, RenderingIntent};
 
+use crate::chain;
 use crate::error::{CmmError, Result};
-use crate::pipeline::{Pipeline, Stage};
-use crate::{bpc, intent, link};
+use crate::pipeline::Pipeline;
 
 /// A runnable colour transform: interleaved `f64` pixels in, interleaved `f64` pixels out.
 ///
@@ -111,47 +111,16 @@ pub(crate) fn is_empty_layer(m: &[[f64; 3]; 3], off: &[f64; 3]) -> bool {
     diff < 0.002
 }
 
-/// The PCS-seam adjustment for the pair — lcms2's `ComputeConversion`
-/// (`cmscnvrt.c:352-418`) at adaptation state 1.0, in the decoded domain (no
-/// `MAX_ENCODEABLE_XYZ` division of the offset — the pipelines here carry decoded XYZ):
-/// absolute → the white scaling; otherwise BPC when requested **or forced**; else identity.
-fn conversion_layer(
-    src: &IccProfile,
-    dst: &IccProfile,
-    options: TransformOptions,
-) -> ([[f64; 3]; 3], [f64; 3]) {
-    const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    if options.intent == RenderingIntent::IccAbsoluteColorimetric {
-        // BPC and absolute are mutually exclusive: the flag is ignored here.
-        return (intent::absolute_scaling(src, dst), [0.0; 3]);
-    }
-    // The v4 forcing rule (_cmsLinkProfiles, cmscnvrt.c:1119-1135): BPC "applies always on
-    // V4 perceptual and saturation", keyed per profile slot — and only the DESTINATION
-    // slot's flag is consumed for a two-profile transform (ComputeConversion runs on the
-    // output-direction hop), so the destination profile's version gates the force.
-    let forced = matches!(
-        options.intent,
-        RenderingIntent::Perceptual | RenderingIntent::Saturation
-    ) && dst.header.version.major >= 4;
-    if options.black_point_compensation || forced {
-        let black_in = bpc::detect_black_point(src, options.intent);
-        let black_out = bpc::detect_destination_black_point(dst, options.intent);
-        if let Some((m, off)) = bpc::compensation(black_in, black_out) {
-            return (m, off);
-        }
-    }
-    (IDENTITY, [0.0; 3])
-}
-
-/// Rejects the profile classes `between` cannot link (they need #330's transform-chaining
-/// API, where lcms2 reads them devicelink-style: the A2B family in *both* directions).
+/// Rejects the profile classes `between` cannot link (they chain via
+/// [`IccTransform::chain`], where lcms2 reads them devicelink-style: the A2B family in
+/// *both* directions).
 fn reject_unchainable_class(profile: &IccProfile) -> Result<()> {
     match profile.header.device_class {
         DeviceClass::DeviceLink => Err(CmmError::UnsupportedProfile(
-            "device-link profiles chain via issue #330's transform-chaining API",
+            "device-link profiles run via IccTransform::device_link or IccTransform::chain",
         )),
         DeviceClass::Abstract => Err(CmmError::UnsupportedProfile(
-            "abstract profiles chain via issue #330's transform-chaining API",
+            "abstract profiles chain via IccTransform::chain",
         )),
         DeviceClass::NamedColor => Err(CmmError::UnsupportedProfile(
             "named-colour profiles have no continuous pixel transform",
@@ -179,7 +148,8 @@ impl IccTransform {
     /// # The PCS seam
     ///
     /// The adjustment matrix acts in **XYZ**; Lab ends are bridged with
-    /// [`Stage::LabToXyz`]/[`Stage::XyzToLab`] as needed (`AddConversion`'s four cases), and
+    /// [`crate::Stage::LabToXyz`]/[`crate::Stage::XyzToLab`] as needed (`AddConversion`'s
+    /// four cases), and
     /// an adjustment within lcms2's empty-layer tolerance (`Σ|m − I| + Σ|off| < 0.002`, the
     /// offset compared in lcms2's encoded scale) inserts **no stage at all** — two profiles
     /// with equal media whites build the identical pipeline under absolute and
@@ -205,54 +175,28 @@ impl IccTransform {
     /// # Errors
     ///
     /// [`CmmError::UnsupportedProfile`] for device-link, abstract, or named-colour profiles
-    /// (chaining is issue #330's API) and for a PCS that is neither XYZ nor Lab; otherwise
+    /// (the first two run via [`IccTransform::device_link`]/[`IccTransform::chain`]) and for
+    /// a PCS that is neither XYZ nor Lab; otherwise
     /// whatever [`device_to_pcs`](crate::link::device_to_pcs) /
     /// [`pcs_to_device`](crate::link::pcs_to_device) raise for the two halves
     /// (missing/mistyped tags, singular colorant matrices, non-invertible TRCs, …).
     pub fn between(src: &IccProfile, dst: &IccProfile, options: TransformOptions) -> Result<Self> {
         reject_unchainable_class(src)?;
         reject_unchainable_class(dst)?;
-        let src_pcs = connection_space(src)?;
-        let dst_pcs = connection_space(dst)?;
-        let forward = link::device_to_pcs(src, options.intent)?;
-        let reverse = link::pcs_to_device(dst, options.intent)?;
-
-        let (m, off) = conversion_layer(src, dst, options);
-        let mut seam = Vec::new();
-        let adjust = Stage::Matrix { m, offset: off };
-        let empty = is_empty_layer(&m, &off);
-        // lcms2's AddConversion (cmscnvrt.c:420-489): the matrix acts in XYZ; Lab ends get
-        // bridge stages, and an empty Lab→Lab layer inserts nothing at all.
-        match (src_pcs == ColorSpace::Lab, dst_pcs == ColorSpace::Lab) {
-            (false, false) => {
-                if !empty {
-                    seam.push(adjust);
-                }
-            }
-            (false, true) => {
-                if !empty {
-                    seam.push(adjust);
-                }
-                seam.push(Stage::XyzToLab);
-            }
-            (true, false) => {
-                seam.push(Stage::LabToXyz);
-                if !empty {
-                    seam.push(adjust);
-                }
-            }
-            (true, true) => {
-                if !empty {
-                    seam.push(Stage::LabToXyz);
-                    seam.push(adjust);
-                    seam.push(Stage::XyzToLab);
-                }
-            }
-        }
-        let pipeline = forward
-            .compose(Pipeline::new(3, 3, seam)?)?
-            .compose(reverse)?;
+        connection_space(src)?;
+        connection_space(dst)?;
+        // `between` IS the two-profile chain: one seam implementation for pairs, chains,
+        // and proofing transforms alike (crate::chain, lcms2's DefaultICCintents).
+        let intents = [options.intent; 2];
+        let bpc_flags = [options.black_point_compensation; 2];
+        let pipeline = chain::link_chain(&[src, dst], &intents, &bpc_flags)?;
         Ok(Self { pipeline })
+    }
+
+    /// Wraps an internally-built pipeline (the chain/devicelink/proofing constructors in
+    /// [`crate::chain`]).
+    pub(crate) fn from_pipeline(pipeline: Pipeline) -> Self {
+        Self { pipeline }
     }
 
     /// The number of device channels consumed per source pixel.
@@ -717,11 +661,11 @@ mod icc_transform_tests {
         let cases = [
             (
                 DeviceClass::DeviceLink,
-                "cmm: unsupported profile (device-link profiles chain via issue #330's transform-chaining API)",
+                "cmm: unsupported profile (device-link profiles run via IccTransform::device_link or IccTransform::chain)",
             ),
             (
                 DeviceClass::Abstract,
-                "cmm: unsupported profile (abstract profiles chain via issue #330's transform-chaining API)",
+                "cmm: unsupported profile (abstract profiles chain via IccTransform::chain)",
             ),
             (
                 DeviceClass::NamedColor,

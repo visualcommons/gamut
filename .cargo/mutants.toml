@@ -678,4 +678,13 @@ exclude_re = [
     'replace > with >= in clip_probe_l',
     'replace < with <= in clip_probe_l',
     'replace < with == in clip_probe_l',
+    # gamut-cmm gamut.rs — the one boundary twin of the transcribed GamutSampler decision
+    # table (#330). ratio_excess isolates the table's ratio arm precisely so this can be
+    # excluded without shadowing the killable threshold mutants in GamutCheck::excess (all
+    # killed by decision_table_arms_are_transcribed_verbatim's exact-threshold pins): at
+    # `ratio == threshold` exactly, the taken branch returns `ratio - threshold == 0.0` and
+    # the untaken one returns 0.0 — bitwise the same output, so `>` vs `>=` cannot change
+    # observable behaviour. Every other mutant in ratio_excess (the dE2 == 0 guard, the
+    # division, the subtraction, the branch bodies) IS killed by the same test's exact pins.
+    'replace > with >= in ratio_excess',
 ]

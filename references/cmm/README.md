@@ -18,6 +18,24 @@ CMM: differential tests link it dev-only through `tooling/lcms2-oracle`, built f
 ICC.1 — e.g. clamp semantics for NaN and out-of-range samples, CLUT interpolation — `gamut-cmm`
 matches lcms2 and documents the choice at the API (see `crates/gamut-cmm`).
 
+## Conformance
+
+Differential oracle against **Little-CMS (lcms2)** (C FFI, `tooling/lcms2-oracle`) for
+transform behaviour, culminating in the epic's **conformance gate**
+(`crates/gamut-cmm/tests/oracle_conformance.rs`): a synthesized profile battery — matrix/TRC
+shapers (sRGB, Display P3, wide-gamut γ2.2, gray) and LUT profiles (`scnr` mAB, CMYK `prtr` in
+v4/mAB and v2/lut16 serializations) — paired across shaper↔shaper, gray↔shaper, shaper↔LUT and
+LUT↔LUT under **all four intents × BPC on/off**, with per-scenario-class max-ΔE₀₀ bounds
+against two oracle configurations: lcms2's full-precision float pipelines
+(`TYPE_*_DBL`, `NOOPTIMIZE|NOCACHE`) and its default optimized 16-bit path (`TYPE_*_16`). The
+same gate covers multi-profile chains vs `cmsCreateMultiprofileTransform`, device-link
+transforms vs the one-profile `cmsCreateTransform`, soft proofing vs
+`cmsCreateProofingTransform(SOFTPROOFING)`, and gamut-check classification vs
+`cmsFLAGS_GAMUTCHECK` alarm substitution. Measured maxima and asserted thresholds are
+tabulated with justifications in [`gamut-cmm/STATUS.md`](../../crates/gamut-cmm/STATUS.md);
+every profile is synthesized in memory and both sides read the same serialized bytes, so the
+comparisons isolate evaluation semantics from tag quantization.
+
 ## Vendored primary sources
 
 | file | source |
