@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/visualcommons/gamut/compare/gamut-color-v2.0.0...gamut-color-v2.1.0) - 2026-08-22
+
+### Added
+
+- *(gamut-color)* add CIELab, LCh, xyY, ΔE₀₀, and the ICC PCS encodings
+- *(core)* add structured error diagnostics
+- add optional serde support to public enums
+
+### Other
+
+- merge origin/master into feat/321-color-cielab-de2000
+- *(gamut-color)* state the fast-floor gap instead of denying it
+- *(gamut-color)* kill the surviving lab mutants
+- *(color)* vendor the Sharma CIEDE2000 paper and Lab references
+
 ## [2.0.0](https://github.com/justin13888/gamut/compare/gamut-color-v1.1.0...gamut-color-v2.0.0) - 2026-07-20
 
 ### Added
