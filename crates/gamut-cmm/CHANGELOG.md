@@ -6,3 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.1.0](https://github.com/visualcommons/gamut/releases/tag/gamut-cmm-v0.1.0) - 2026-08-22
+
+### Added
+
+- *(gamut-cmm)* matrix/TRC shaper pipelines and the chad convention
+- *(gamut-cmm)* N-D multilinear and tetrahedral CLUT interpolation
+- *(gamut-cmm)* tone-curve tables and monotonic inversion
+- *(gamut-cmm)* new crate with the pipeline/stage model
+
+### Other
+
+- *(gamut-cmm)* record the shaper and chad settled decisions
+- *(gamut-cmm)* pin shaper profiles against Little-CMS
+- *(gamut-cmm)* transcribe the tetrahedral decomposition
+- *(gamut-cmm)* pin CLUT interpolation against Little-CMS
+- *(gamut-cmm)* record the tone-curve phase decisions
+- *(gamut-cmm)* pin tone curves against Little-CMS

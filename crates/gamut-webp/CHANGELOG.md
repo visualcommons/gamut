@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.1...gamut-webp-v0.4.0) - 2026-08-22
+
+### Added
+
+- *(webp)* [**breaking**] require an explicit policy for lossy presentation
+- *(core)* add structured error diagnostics
+
+### Other
+
+- adopt as_chunks for constant-size slice chunking
+- close the mutation-testing gaps in the conversion paths
+- merge origin/master into feat/268-pixel-conversion
+
 ## [0.3.1](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.0...gamut-webp-v0.3.1) - 2026-07-30
 
 ### Added

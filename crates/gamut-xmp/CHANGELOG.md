@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/visualcommons/gamut/compare/gamut-xmp-v1.0.0...gamut-xmp-v1.1.0) - 2026-08-22
+
+### Added
+
+- *(core)* add structured error diagnostics
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-xmp-v0.1.1...gamut-xmp-v1.0.0) - 2026-07-18
 
 ### Added
