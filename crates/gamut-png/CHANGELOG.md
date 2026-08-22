@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/visualcommons/gamut/compare/gamut-png-v0.1.0...gamut-png-v0.1.1) - 2026-08-22
+
+### Added
+
+- *(png)* route typed presentation through gamut-core convert
+- *(core)* add structured error diagnostics
+
+### Other
+
+- adopt as_chunks for constant-size slice chunking
+- merge origin/master into feat/268-pixel-conversion
+- close the mutation-testing gaps in the conversion paths
+
 ## [0.1.0](https://github.com/justin13888/gamut/releases/tag/gamut-png-v0.1.0) - 2026-07-18
 
 ### Added

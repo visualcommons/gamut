@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/visualcommons/gamut/compare/gamut-jxl-v0.4.0...gamut-jxl-v0.5.0) - 2026-08-22
+
+### Added
+
+- *(jxl)* [**breaking**] require an explicit policy for lossy presentation
+- *(core)* add structured error diagnostics
+
+### Other
+
+- adopt as_chunks for constant-size slice chunking
+- merge origin/master into feat/268-pixel-conversion
+- *(jxl)* pin that colour-as-grayscale is refused before the decode
+- close the mutation-testing gaps in the conversion paths
+- merge origin/master into feat/268-pixel-conversion
+
 ## [0.4.0](https://github.com/justin13888/gamut/compare/gamut-jxl-v0.3.0...gamut-jxl-v0.4.0) - 2026-07-20
 
 ### Added

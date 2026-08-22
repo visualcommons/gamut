@@ -1,7 +1,7 @@
 [package]
 name = "gamut-iptc"
 description = "IPTC photo metadata: the legacy IIM/Photoshop-IRB codec, IPTC Core over XMP, and IIM-XMP reconciliation."
-version = "1.0.0"
+version = "1.0.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
