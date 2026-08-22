@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0](https://github.com/visualcommons/gamut/compare/gamut-avif-v1.1.0...gamut-avif-v1.2.0) - 2026-08-22
+
+### Added
+
+- *(gamut-avif)* add the high-bit-depth RGBA16 presentation surface
+- *(core)* add structured error diagnostics
+- *(gamut-isobmff)* parse large and uuid boxes
+
+### Other
+
+- adopt as_chunks for constant-size slice chunking
+- Merge branch 'master' into feat/335-avif-ycbcr-matrix
+- Merge pull request #360 from visualcommons/feat/303-high-bit-depth-presentation
+- pin the blend rounding and the high-bit-depth paths mutation testing missed
+- record the high-bit-depth presentation surface in STATUS and READMEs
+
 ## [1.1.0](https://github.com/justin13888/gamut/compare/gamut-avif-v1.0.0...gamut-avif-v1.1.0) - 2026-07-20
 
 ### Added
