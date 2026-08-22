@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1](https://github.com/visualcommons/gamut/compare/gamut-icc-v1.0.0...gamut-icc-v1.0.1) - 2026-08-22
+
+### Other
+
+- merge origin/master into feat/322-lcms2-oracle-transforms
+- adopt as_chunks for constant-size slice chunking
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-icc-v0.1.1...gamut-icc-v1.0.0) - 2026-07-18
 
 ### Added

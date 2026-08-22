@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/visualcommons/gamut/compare/gamut-riff-v0.1.3...gamut-riff-v1.0.0) - 2026-08-22
+
+### Added
+
+- *(riff)* [**breaking**] enforce reconstruction-chunk order and carry unknown chunks
+- *(riff)* [**breaking**] validate the spec's size and canvas bounds
+- *(core)* add structured error diagnostics
+
+### Other
+
+- *(riff)* release v1.0.0
+- *(riff)* ledger the v1 surface and correct the RFC citations
+- *(riff)* spec fixtures, robustness sweep, and a libwebp demux oracle
+- *(riff)* [**breaking**] narrow the frozen public surface
+- *(riff)* drop the unused gamut-bitstream dependency
+
 ## [0.1.3](https://github.com/visualcommons/gamut/compare/gamut-riff-v0.1.2...gamut-riff-v0.1.3) - 2026-07-30
 
 ### Added

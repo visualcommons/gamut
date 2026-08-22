@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/visualcommons/gamut/compare/gamut-heic-v0.2.2...gamut-heic-v0.2.3) - 2026-08-22
+
+### Added
+
+- *(gamut-heic)* add the high-bit-depth RGBA16 presentation surface
+- *(core)* add structured error diagnostics
+- *(gamut-isobmff)* parse large and uuid boxes
+
+### Fixed
+
+- *(gamut-heic)* prefer nclx for rgba presentation
+- *(gamut-heic)* correct imir axis semantics
+
+### Other
+
+- adopt as_chunks for constant-size slice chunking
+- Merge pull request #360 from visualcommons/feat/303-high-bit-depth-presentation
+- pin the blend rounding and the high-bit-depth paths mutation testing missed
+- record the high-bit-depth presentation surface in STATUS and READMEs
+- *(gamut-heic)* make the RGBA pipeline generic over sample width
+
 ## [0.2.2](https://github.com/justin13888/gamut/compare/gamut-heic-v0.2.1...gamut-heic-v0.2.2) - 2026-07-21
 
 ### Other
