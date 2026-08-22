@@ -5,6 +5,8 @@
 //! construction, so evaluation carries no per-sample validation beyond buffer lengths and a
 //! constructed [`Pipeline`] can always run.
 
+use gamut_color::lab::{D50_XYZ, lab_to_xyz, xyz_to_lab};
+
 use crate::clut::ClutTable;
 use crate::curve::ToneCurve;
 use crate::error::{CmmError, Result};
@@ -25,10 +27,10 @@ pub const MAX_CHANNELS: u8 = 16;
 ///
 /// The enum is `#[non_exhaustive]` and grows additively with the CMM phases: [`Curves`]
 /// (#325, landed), [`Clut`](Stage::Clut) (#326, landed), [`MatrixN`](Stage::MatrixN) (#327,
-/// landed), and the `XyzToLab`/`LabToXyz` stages LUT-profile linking needs (#328) each arrive
-/// **together with their `eval` arm** — the crate-internal `eval` match is deliberately
-/// exhaustive (no wildcard), so the compiler forces every future variant to bring its
-/// evaluation in the same change.
+/// landed), and [`XyzToLab`](Stage::XyzToLab)/[`LabToXyz`](Stage::LabToXyz) (#328, landed)
+/// each arrive **together with their `eval` arm** — the crate-internal `eval` match is
+/// deliberately exhaustive (no wildcard), so the compiler forces every future variant to
+/// bring its evaluation in the same change.
 ///
 /// [`Curves`]: Stage::Curves
 #[derive(Debug, Clone)]
@@ -95,6 +97,21 @@ pub enum Stage {
         /// The per-row offset added after the multiply, `rows` entries.
         offset: Vec<f64>,
     },
+    /// Converts one pixel of decoded PCSXYZ (D50-relative, `Y = 1.0`) to decoded CIELAB
+    /// (D50 white, `L*` in `0..=100`) — 3-in/3-out, via
+    /// [`gamut_color::lab::xyz_to_lab`] with [`gamut_color::lab::D50_XYZ`].
+    ///
+    /// The decoded-domain form of lcms2's `_cmsStageAllocXYZ2Lab` stage (`EvaluateXYZ2Lab`,
+    /// `cmslut.c`, which un-encodes by `MAX_ENCODEABLE_XYZ`, runs `cmsXYZ2Lab` against D50,
+    /// and re-encodes — this crate's PCS seams are already decoded, so only the colorimetric
+    /// core remains). Used where a pipeline built over XYZ colorimetry must end at a Lab PCS:
+    /// the Lab-PCS RGB matrix/TRC shaper (lcms2's `BuildRGBInputMatrixShaper` appends exactly
+    /// this stage when `cmsGetPCS == cmsSigLabData`).
+    XyzToLab,
+    /// The inverse of [`XyzToLab`](Stage::XyzToLab): decoded CIELAB → decoded PCSXYZ,
+    /// 3-in/3-out (lcms2's `_cmsStageAllocLab2XYZ`; prepended by
+    /// `BuildRGBOutputMatrixShaper` for a Lab PCS).
+    LabToXyz,
 }
 
 impl Stage {
@@ -107,7 +124,7 @@ impl Stage {
             // rejected by `Pipeline::new` either way.
             Self::Curves(curves) => u8::try_from(curves.len()).unwrap_or(u8::MAX),
             Self::Clut(table) => table.input_channels(),
-            Self::Matrix { .. } => 3,
+            Self::Matrix { .. } | Self::XyzToLab | Self::LabToXyz => 3,
             Self::MatrixN { cols, .. } => *cols,
         }
     }
@@ -119,7 +136,7 @@ impl Stage {
             Self::Identity { channels } | Self::Clamp { channels } => *channels,
             Self::Curves(curves) => u8::try_from(curves.len()).unwrap_or(u8::MAX),
             Self::Clut(table) => table.output_channels(),
-            Self::Matrix { .. } => 3,
+            Self::Matrix { .. } | Self::XyzToLab | Self::LabToXyz => 3,
             Self::MatrixN { rows, .. } => *rows,
         }
     }
@@ -140,7 +157,9 @@ impl Stage {
             | Self::Clamp { .. }
             | Self::Curves(_)
             | Self::Clut(_)
-            | Self::Matrix { .. } => Ok(()),
+            | Self::Matrix { .. }
+            | Self::XyzToLab
+            | Self::LabToXyz => Ok(()),
             Self::MatrixN {
                 rows,
                 cols,
@@ -187,6 +206,12 @@ impl Stage {
                 for ((out, row), off) in output.iter_mut().zip(m).zip(offset) {
                     *out = row[0] * input[0] + row[1] * input[1] + row[2] * input[2] + off;
                 }
+            }
+            Self::XyzToLab => {
+                output.copy_from_slice(&xyz_to_lab([input[0], input[1], input[2]], D50_XYZ));
+            }
+            Self::LabToXyz => {
+                output.copy_from_slice(&lab_to_xyz([input[0], input[1], input[2]], D50_XYZ));
             }
             Self::MatrixN {
                 rows: _,
@@ -460,6 +485,41 @@ mod tests {
         assert_eq!(Stage::Clamp { channels: 7 }.output_channels(), 7);
         assert_eq!(dyadic_matrix().input_channels(), 3);
         assert_eq!(dyadic_matrix().output_channels(), 3);
+        for stage in [Stage::XyzToLab, Stage::LabToXyz] {
+            assert_eq!(stage.input_channels(), 3);
+            assert_eq!(stage.output_channels(), 3);
+        }
+    }
+
+    #[test]
+    fn xyz_to_lab_eval_delegates_to_gamut_color_with_d50() {
+        use gamut_color::lab::{D50_XYZ, xyz_to_lab};
+        // The D50 white maps to L* = 100, a* = b* = 0 — and only under the D50 white; a wrong
+        // white constant (or a swapped conversion direction) breaks this exact anchor.
+        let mut out = [0.0; 3];
+        Stage::XyzToLab.eval(&D50_XYZ, &mut out);
+        assert!((out[0] - 100.0).abs() < 1e-12, "L* = {}", out[0]);
+        assert!(out[1].abs() < 1e-12 && out[2].abs() < 1e-12, "{out:?}");
+        // An off-white chromatic probe matches the gamut-color reference exactly (bitwise:
+        // the stage is a delegation, not a re-derivation).
+        let xyz = [0.25, 0.5, 0.125];
+        Stage::XyzToLab.eval(&xyz, &mut out);
+        assert_eq!(out, xyz_to_lab(xyz, D50_XYZ));
+    }
+
+    #[test]
+    fn lab_to_xyz_eval_inverts_xyz_to_lab() {
+        use gamut_color::lab::{D50_XYZ, lab_to_xyz};
+        let lab = [62.5, -20.25, 33.75];
+        let mut xyz = [0.0; 3];
+        Stage::LabToXyz.eval(&lab, &mut xyz);
+        assert_eq!(xyz, lab_to_xyz(lab, D50_XYZ));
+        // Round trip through both stages is f64-tight.
+        let mut back = [0.0; 3];
+        Stage::XyzToLab.eval(&xyz, &mut back);
+        for ch in 0..3 {
+            assert!((back[ch] - lab[ch]).abs() < 1e-12, "{back:?} vs {lab:?}");
+        }
     }
 
     /// A rectangular 2×3 affine stage with exact-dyadic coefficients, offsets included.

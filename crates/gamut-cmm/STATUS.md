@@ -28,7 +28,7 @@ that add behaviour (#325 onward).
 | P2 | #325 | Curve stages: `ToneCurve` (`curveType`/`parametricCurveType` evaluation, monotonicity detection, analytic + lcms2-shaped numeric inversion) + `Stage::Curves` | ✅ |
 | P3 | #326 | CLUT stage: multi-dimensional interpolation (lcms2-matching) — `ClutTable`/`ClutInterpolation` + `Stage::Clut` | ✅ |
 | P4 | #327 | Profile linking: matrix/TRC (shaper) profile pairs — `link::{device_to_pcs, pcs_to_device}` over RGB/gray v2+v4 shaper profiles, `Stage::MatrixN` | ✅ |
-| P5 | #328 | Profile linking: LUT (`lut8`/`lut16`/`mAB `/`mBA `) profile pairs | ☐ |
+| P5 | #328 | Profile linking: LUT (`lut8`/`lut16`/`mAB `/`mBA `) profile pairs — per-intent tag selection with lcms2's fallback, PCS encode/decode seams, `Stage::XyzToLab`/`LabToXyz` + the Lab-PCS RGB shaper lift | ✅ |
 | P6 | #329 | Rendering intents + black-point compensation | ☐ |
 | P7 | #330 | Transform chaining + typed pixel buffers | ☐ |
 
@@ -107,16 +107,15 @@ that add behaviour (#325 onward).
   this crate's PCS seams are decoded colorimetry (crate convention), so the factors are
   omitted. End-to-end lcms2 transforms with `TYPE_XYZ_DBL` formatters produce decoded XYZ,
   so differentials compare directly.
-- **Intent parameter accepted but inert:** shaper profiles carry no per-intent tables
-  (perceptual/saturation renderings live in LUT tags, #328) and absolute colorimetric
-  arrives with #329, so `device_to_pcs`/`pcs_to_device` build the relative-colorimetric
+- **Intent parameter inert on the shaper path:** shaper profiles carry no per-intent tables
+  (per-intent renderings live in LUT tags — selected since P5) and absolute colorimetric's
+  white scaling arrives with #329, so the shaper fallback builds the relative-colorimetric
   baseline for every intent — documented on the functions and pinned by a test.
 - **LUT-tag precedence:** lcms2 consults LUT tags before the shaper fallback; a profile
-  carrying the requested direction's LUT tags (`A2B0/1/2` or `B2A0/1/2`) is refused with
-  `UnsupportedProfile("LUT-tag pipelines arrive with issue #328")` — a temporary placeholder
-  #328 replaces — rather than silently using the shaper tags. Lab-PCS *RGB* shapers (which
-  need an `XyzToLab` stage) are likewise deferred to #328; the gray Lab-PCS form is
-  supported now.
+  carrying the requested direction's LUT tags routes to the LUT path (P5, below) and never
+  silently uses the shaper tags it may also carry. Lab-PCS *RGB* shapers build via the
+  `XyzToLab`/`LabToXyz` bridge stages (landed with P5); the gray Lab-PCS form was supported
+  from P4.
 - **Gray pipelines:** XYZ PCS is `kTRC(g)·D50` forward and pick-`Y` → `kTRC⁻¹` reverse; Lab
   PCS is `[100·kTRC(g), 0, 0]` forward and pick-`L*/100` → `kTRC⁻¹` reverse (the decoded
   equivalents of lcms2's `GrayInputMatrix`/`PickYMatrix`/`PickLstarMatrix`). The D50 is
@@ -130,6 +129,58 @@ that add behaviour (#325 onward).
   denormal determinant) is also `SingularMatrix`. TRC inversion reuses `ToneCurve::inverse`:
   analytic for gamma and well-behaved parametric TRCs (as in lcms2's
   `cmsReverseToneCurveEx`), the lcms2-shaped 4096-entry numeric reversal for sampled tables.
+
+## Settled decisions (P5, LUT-profile linking)
+
+- **Intent→tag selection with the lcms2 fallback:** `device_to_pcs`/`pcs_to_device` index
+  lcms2's verbatim `Device2PCS16`/`PCS2Device16` tables (`cmsio1.c:31-50`) — perceptual →
+  `A2B0`/`B2A0`, media-relative → `A2B1`/`B2A1`, saturation → `A2B2`/`B2A2`, and
+  **ICC-absolute → the media-relative tag** (`A2B1`/`B2A1`; the absolute white scaling is
+  #329's, so absolute and relative currently build identical pipelines — pinned bit-for-bit).
+  A missing intent tag falls back to the perceptual tag (`_cmsReadInputLUT`/
+  `_cmsReadOutputLUT`), then to the matrix/TRC shaper set, then errors: `MissingTag` with
+  the intent's primary LUT tag for non-RGB/gray device spaces, the shaper builders' own
+  missing-tag errors otherwise. The float `DToBx`/`BToDx` tags, which lcms2 ≥ 2.6 would
+  consult *first*, are out of scope with `mpet` (they dispatch as absent — a pre-2.6 lcms2).
+- **Domain plan — encoded tag internals, one affine PCS seam:** lcms2 runs whole pipelines
+  in encoded `[0, 1]`; this crate's PCS ends are decoded. The builders keep every LUT-tag
+  stage (embedded matrix, tables/curves, CLUT, `mAB `/`mBA ` matrix **including its
+  offsets**) in the tag's native encoded domain — exactly lcms2's arrangement — and attach a
+  single diagonal-affine seam stage at the PCS end: decode appended for device→PCS, encode
+  prepended for PCS→device. Constants (derivations in `link/lut.rs`): PCSXYZ scale
+  `65535/32768` (= `MAX_ENCODEABLE_XYZ`); v4 Lab `L = v·100`, `a/b = v·255 − 128`; v2 Lab
+  `L = v·100.390625` (`65535/652.8`), `a/b = v·255.99609375 − 128` (`65535/256`). A LUT tag
+  whose header "PCS" is a device space (devicelink/abstract) gets no seam — encoded end to
+  end, as in `_cmsReadDevicelinkLUT`.
+- **The v2-Lab rule is keyed on the element type, `lut16Type` only:** lcms2 inserts its
+  `LabV4ToV2`/`LabV2ToV4` fixups only when the tag's **true type** is `cmsSigLut16Type` and
+  the PCS is Lab — never for `lut8` (whose `FROM_8_TO_16`-widened Lab encoding lands on the
+  v4 scaling) or `mAB `/`mBA `, and never keyed on the header version. Here that collapses
+  into the seam constants: lut16 + Lab ⇒ v2, everything else ⇒ v4. Pinned by unit
+  constant pins, a hand-computed lut16 end-to-end (`0xFF00 → L* = 100` exactly), and the
+  v2-vs-v4 profile differentials.
+- **The lut8/lut16 embedded 3×3 matrix is *not* XYZ-gated (deliberate divergence from the
+  spec's letter, following lcms2):** ICC.1:2022 §10.10/§10.11 say the matrix "shall be" the
+  identity unless the input is PCSXYZ; lcms2 (`Type_LUT8_Read`/`Type_LUT16_Read`) applies
+  whatever matrix a tag carries whenever `InputChannels == 3` and it is not the identity
+  (tolerance `1/65535`, `_cmsMAT3isIdentity`'s `CloseEnough`). This crate follows lcms2.
+- **Lab-indexed CLUTs interpolate trilinearly:** in the PCS→device direction of a Lab-PCS
+  profile every CLUT is built `Multilinear` (lcms2's `ChangeInterpolationToTrilinear`);
+  all other CLUTs keep the tetrahedral-from-3-inputs default. Pinned by a differential
+  where the tetrahedral evaluation of the same table visibly misses lcms2 (3-node grid).
+- **Lenient stage combinations:** any `mAB `/`mBA ` stage combination the offsets signal is
+  accepted (matching `gamut-icc`'s parse and lcms2), with absent stages omitted; a
+  combination whose channel counts cannot chain fails `Pipeline::new`'s seam validation
+  with a typed error instead of being special-cased. Either LUT element family is accepted
+  under either tag slot (lcms2 registers all four readers for both A2B and B2A) — the
+  element type fixes the internal order, the direction fixes the PCS seam.
+- **lcms2's implicit v4 BPC is #329's scope:** lcms2 *forces* black-point compensation for
+  v4 profiles under perceptual/saturation (`_cmsLinkProfiles`, per Adobe's document), keyed
+  on each hop's output-side/abstract profile. The P5 differentials neutralize it with a v2
+  Lab endpoint (`lab2`) and, for PCS→device perceptual/saturation, a version-downgraded
+  twin profile (header 2.4, `mAB `/`mBA ` bytes intact — also pinning that both sides key
+  the v2-Lab rule on the true type, not the version); media-relative is additionally
+  compared on the true v4 profile.
 
 ## Deferred / out of scope
 
@@ -162,6 +213,14 @@ linking: device→PCS and PCS→device sweeps for sRGB/Display P3/Adobe-ish/gray
 against end-to-end lcms2 transforms over the **same serialized bytes**, to f32-rounding
 tightness in XYZ plus ΔE₀₀ bounds; the three-way chad cases; analytic round trips; the
 assembled sRGB matrix pinned to Lindbloom's published D50-adapted values; LUT-precedence and
-error-path pins — the P4 linking unit tests hand-build `gamut-icc` profiles for the
-missing/mistyped-tag, singular-matrix, Lab-PCS, and dispatch boundaries). Gates: `mise run
-test` / `lint` / `fmt-check` / `coverage` (≥ 80%) / `mise run mutants-crate gamut-cmm`.
+error-path pins — the P4/P5 linking unit tests hand-build `gamut-icc` profiles for the
+missing/mistyped-tag, singular-matrix, Lab-PCS, and dispatch boundaries, per-tag stage-order
+fingerprints for all four LUT element types in both directions, the exact PCS seam constants
+per encoding, intent-table/fallback selection, and the identity-matrix skip), and
+`tests/oracle_lut.rs` (LUT linking: per-intent A2B/B2A differentials for the CMYK `prtr`
+profile in its v4/`mAB ` and v2/`lut16` serializations and the `scnr` RGB→Lab `mAB `,
+16-bit-CLUT-tight; the fallback differential over a modified-and-reserialized profile; the
+absolute≡relative and per-intent-distinctness pins; the Lab-indexed-trilinear divergence
+proof; and the hand-built Lab-PCS RGB shaper vs lcms2's XYZ2Lab/Lab2XYZ bridges). Gates:
+`mise run test` / `lint` / `fmt-check` / `coverage` (≥ 80%) / `mise run mutants-crate
+gamut-cmm`.

@@ -65,11 +65,15 @@ reversal) behind `Stage::Curves` — and multi-dimensional CLUTs (#326): `ClutTa
 interpolates 1–15-input grids behind `Stage::Clut`, with lcms2's exact tetrahedral
 decomposition (default from 3 inputs, recursing lcms2's slice-and-blend above 3-D) and
 selectable N-D multilinear (`ClutInterpolation`, the hook #328 uses for Lab-indexed CLUTs).
-Profile linking has begun (#327): `link::{device_to_pcs, pcs_to_device}` build runnable
-pipelines from **matrix/TRC ("shaper") profiles** — RGB and gray, v2 and v4, both directions —
-with the settled chromatic-adaptation convention (colorants as-is, `chad` unread on the
-relative path) documented in [STATUS.md](STATUS.md). LUT-profile linking, rendering
-intents/BPC, and transform chaining land phase by phase — see [STATUS.md](STATUS.md).
+Profile linking (#327, #328): `link::{device_to_pcs, pcs_to_device}` build runnable
+pipelines from **matrix/TRC ("shaper") profiles** — RGB (XYZ and Lab PCS, via the
+`XyzToLab`/`LabToXyz` bridge stages) and gray, v2 and v4, both directions, with the settled
+chromatic-adaptation convention (colorants as-is, `chad` unread on the relative path) — and
+from **LUT profiles**: `lut8`/`lut16`/`lutAToB`/`lutBToA` tags (CMYK printers, camera input
+profiles, device links), selected per rendering intent with lcms2's intent→tag tables and
+perceptual fallback, the lut16 v2-Lab encoding rule, and trilinear interpolation for
+Lab-indexed CLUTs — all documented in [STATUS.md](STATUS.md). Rendering-intent white
+scaling/BPC and transform chaining land phase by phase — see [STATUS.md](STATUS.md).
 
 ## Deferred
 

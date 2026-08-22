@@ -85,13 +85,19 @@ pub enum CmmError {
 
     /// A profile lacks a tag the requested link requires: a matrix/TRC shaper build needs all
     /// three colorants (`rXYZ`/`gXYZ`/`bXYZ`) and TRCs (`rTRC`/`gTRC`/`bTRC`) for RGB, or
-    /// `kTRC` for gray. The payload is the missing tag's signature.
+    /// `kTRC` for gray; a profile whose device space has no shaper form (CMYK and friends)
+    /// needs the intent's LUT tag or the perceptual fallback (`A2B0`/`B2A0`) — the payload is
+    /// then the requested intent's primary LUT tag. The payload is the missing tag's
+    /// signature.
     #[error("cmm: profile is missing required tag {0}")]
     MissingTag(gamut_icc::Signature),
 
     /// A required tag is present but holds an element type the link cannot use: a colorant tag
-    /// without an `XYZType` value (or with an empty one), or a TRC tag holding something other
-    /// than a `curveType`/`parametricCurveType`. The payload is the offending tag's signature.
+    /// without an `XYZType` value (or with an empty one), a TRC tag holding something other
+    /// than a `curveType`/`parametricCurveType`, or an `A2Bx`/`B2Ax` tag holding anything but
+    /// the four LUT element types (`lut8`/`lut16`/`mAB `/`mBA ` — an `mpet` payload, which
+    /// `gamut-icc` preserves as raw bytes, lands here) or carrying a zero-entry `lut16`
+    /// table. The payload is the offending tag's signature.
     #[error("cmm: tag {0} holds an unusable element type")]
     BadTagType(gamut_icc::Signature),
 
@@ -104,8 +110,8 @@ pub enum CmmError {
     SingularMatrix,
 
     /// The profile is outside what [`link`](crate::link) currently builds; the payload says
-    /// which boundary was hit (LUT-tag pipelines arrive with #328, absolute colorimetric with
-    /// #329, non-RGB/gray shapers are unsupported).
+    /// which boundary was hit (currently: a LUT-less profile whose header PCS is neither XYZ
+    /// nor Lab cannot take the matrix/TRC shaper fallback).
     #[error("cmm: unsupported profile ({0})")]
     UnsupportedProfile(&'static str),
 

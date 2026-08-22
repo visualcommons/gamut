@@ -80,56 +80,47 @@ fn invert_colorants(m: &[[f64; 3]; 3]) -> Result<[[f64; 3]; 3]> {
     Ok(inverse)
 }
 
-/// Guards the RGB paths against a Lab PCS, which needs #328's `XyzToLab`/`LabToXyz` stages.
-fn check_rgb_pcs(profile: &IccProfile) -> Result<()> {
-    if profile.header.pcs == ColorSpace::Lab {
-        return Err(CmmError::UnsupportedProfile(
-            "Lab-PCS RGB shaper profiles arrive with issue #328",
-        ));
-    }
-    Ok(())
-}
-
 /// RGB shaper, device → PCS: `Curves(TRCs) → Matrix(colorants)` (lcms2's
-/// `BuildRGBInputMatrixShaper`, without the encoded-domain `InpAdj` factor — module docs).
+/// `BuildRGBInputMatrixShaper`, without the encoded-domain `InpAdj` factor — module docs),
+/// plus a trailing [`Stage::XyzToLab`] when the PCS is Lab (lcms2 appends
+/// `_cmsStageAllocXYZ2Lab` there — the colorant matrix always lands in XYZ, so a Lab PCS
+/// needs the colorimetric bridge to end at the profile's decoded PCS).
 pub(super) fn rgb_device_to_pcs(profile: &IccProfile) -> Result<Pipeline> {
-    check_rgb_pcs(profile)?;
     let m = colorant_matrix(profile)?;
     let trcs = rgb_trcs(profile)?;
-    Pipeline::new(
-        3,
-        3,
-        vec![
-            Stage::Curves(trcs),
-            Stage::Matrix {
-                m,
-                offset: [0.0; 3],
-            },
-        ],
-    )
+    let mut stages = vec![
+        Stage::Curves(trcs),
+        Stage::Matrix {
+            m,
+            offset: [0.0; 3],
+        },
+    ];
+    if profile.header.pcs == ColorSpace::Lab {
+        stages.push(Stage::XyzToLab);
+    }
+    Pipeline::new(3, 3, stages)
 }
 
 /// RGB shaper, PCS → device: `Matrix(colorants⁻¹) → Curves(inverted TRCs)` (lcms2's
 /// `BuildRGBOutputMatrixShaper` without `OutpAdj`; the TRC inverses are analytic where the
-/// parameterization permits, sharper than lcms2's 4096-entry reversal tables).
+/// parameterization permits, sharper than lcms2's 4096-entry reversal tables), with a
+/// leading [`Stage::LabToXyz`] when the PCS is Lab (lcms2 prepends `_cmsStageAllocLab2XYZ`).
 pub(super) fn rgb_pcs_to_device(profile: &IccProfile) -> Result<Pipeline> {
-    check_rgb_pcs(profile)?;
     let inverse = invert_colorants(&colorant_matrix(profile)?)?;
     let inverted = rgb_trcs(profile)?
         .iter()
         .map(ToneCurve::inverse)
         .collect::<Result<Vec<_>>>()?;
-    Pipeline::new(
-        3,
-        3,
-        vec![
-            Stage::Matrix {
-                m: inverse,
-                offset: [0.0; 3],
-            },
-            Stage::Curves(inverted),
-        ],
-    )
+    let mut stages = Vec::new();
+    if profile.header.pcs == ColorSpace::Lab {
+        stages.push(Stage::LabToXyz);
+    }
+    stages.push(Stage::Matrix {
+        m: inverse,
+        offset: [0.0; 3],
+    });
+    stages.push(Stage::Curves(inverted));
+    Pipeline::new(3, 3, stages)
 }
 
 /// Gray shaper, device → PCS.
@@ -389,14 +380,47 @@ mod tests {
     }
 
     #[test]
-    fn lab_pcs_rgb_shaper_is_refused_in_both_directions() {
+    fn lab_pcs_rgb_shaper_appends_xyz_to_lab() {
+        use gamut_color::lab::xyz_to_lab;
         let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
         profile.header.pcs = ColorSpace::Lab;
-        for result in [rgb_device_to_pcs(&profile), rgb_pcs_to_device(&profile)] {
-            assert_eq!(
-                result.unwrap_err().to_string(),
-                "cmm: unsupported profile (Lab-PCS RGB shaper profiles arrive with issue #328)"
-            );
+        let forward = rgb_device_to_pcs(&profile).unwrap();
+        // Stage shape: Curves → Matrix → XyzToLab (lcms2's BuildRGBInputMatrixShaper order,
+        // with the Lab bridge LAST — after the colorant matrix).
+        assert_eq!(forward.stages().len(), 3);
+        assert!(matches!(forward.stages()[0], Stage::Curves(_)));
+        assert!(matches!(forward.stages()[1], Stage::Matrix { .. }));
+        assert!(matches!(forward.stages()[2], Stage::XyzToLab));
+        // Output pin: the full-scale green primary lands on xyz_to_lab(G_COL, D50) exactly
+        // (gamma fixes 1.0, the matrix reproduces the colorant column).
+        let mut out = [0.0; 3];
+        forward.eval(&[0.0, 1.0, 0.0], &mut out).unwrap();
+        assert_eq!(out, xyz_to_lab(G_COL, D50_XYZ));
+    }
+
+    #[test]
+    fn lab_pcs_rgb_shaper_prepends_lab_to_xyz_in_reverse() {
+        let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
+        profile.header.pcs = ColorSpace::Lab;
+        let reverse = rgb_pcs_to_device(&profile).unwrap();
+        // Stage shape: LabToXyz → Matrix(inverse) → Curves(inverses) — the bridge FIRST
+        // (lcms2's BuildRGBOutputMatrixShaper order).
+        assert_eq!(reverse.stages().len(), 3);
+        assert!(matches!(reverse.stages()[0], Stage::LabToXyz));
+        assert!(matches!(reverse.stages()[1], Stage::Matrix { .. }));
+        assert!(matches!(reverse.stages()[2], Stage::Curves(_)));
+        // Round trip through both Lab-PCS directions returns the device values.
+        let forward = rgb_device_to_pcs(&profile).unwrap();
+        let round_trip = forward.compose(reverse).unwrap();
+        for rgb in [[0.25, 0.5, 0.75], [1.0, 1.0, 1.0], [0.1, 0.9, 0.4]] {
+            let mut out = [0.0; 3];
+            round_trip.eval(&rgb, &mut out).unwrap();
+            for ch in 0..3 {
+                assert!(
+                    (out[ch] - rgb[ch]).abs() < 1e-9,
+                    "round trip {rgb:?} → {out:?}"
+                );
+            }
         }
     }
 

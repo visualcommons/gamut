@@ -23,13 +23,13 @@
 //!   the piecewise (toe-limited) TRCs; a pure-gamma TRC amplifies the f64 `M·M⁻¹` residue
 //!   at an exactly-zero channel to `ε^(1/γ)` ≈ 3e-8, which sets the asserted envelope.
 
-use gamut_cmm::{CmmError, Pipeline, Stage, device_to_pcs, pcs_to_device};
+use gamut_cmm::{Pipeline, Stage, device_to_pcs, pcs_to_device};
 use gamut_color::lab::{D50_XYZ, delta_e_2000, xyz_to_lab};
 use gamut_icc::{IccProfile, KnownTag, RenderingIntent};
 use lcms2_oracle::{
     FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, INTENT_RELATIVE_COLORIMETRIC, Profile, TYPE_GRAY_DBL,
-    TYPE_RGB_DBL, TYPE_XYZ_DBL, Transform, cmyk_prtr_v4, display_p3_srgb_trc, gray,
-    rgb_matrix_shaper, rgb_matrix_shaper_v2, set_quiet_log_handler, srgb, xyz,
+    TYPE_RGB_DBL, TYPE_XYZ_DBL, Transform, display_p3_srgb_trc, gray, rgb_matrix_shaper,
+    rgb_matrix_shaper_v2, set_quiet_log_handler, srgb, xyz,
 };
 
 /// The relative-colorimetric intent on our side of every differential.
@@ -452,20 +452,25 @@ fn srgb_colorant_matrix_matches_lindbloom() {
 }
 
 #[test]
-fn lut_bearing_profile_is_refused_until_issue_328() {
+fn shaper_dispatch_survives_the_lut_phase() {
     set_quiet_log_handler();
-    // The CMYK printer profile carries all six A2B/B2A LUT tags: both directions must refuse
-    // it with the documented placeholder error (LUT precedence, never a shaper fallback).
-    let (parsed, _) = reopen(&cmyk_prtr_v4(9));
-    for build in [device_to_pcs, pcs_to_device] {
-        let err = build(&parsed, RELATIVE).unwrap_err();
-        assert!(
-            matches!(err, CmmError::UnsupportedProfile(_)),
-            "got {err:?}"
-        );
-        assert_eq!(
-            err.to_string(),
-            "cmm: unsupported profile (LUT-tag pipelines arrive with issue #328)"
-        );
+    // The shaper fallback is only reached when no LUT tag exists for the direction: sRGB
+    // (shaper tags only) must still build under every intent, and — shaper profiles carrying
+    // no per-intent tables — build the identical pipeline for each.
+    let (parsed, _) = reopen(&srgb());
+    let baseline = device_to_pcs(&parsed, RELATIVE).unwrap();
+    for intent in [
+        RenderingIntent::Perceptual,
+        RenderingIntent::Saturation,
+        RenderingIntent::IccAbsoluteColorimetric,
+    ] {
+        let other = device_to_pcs(&parsed, intent).unwrap();
+        for point in rgb_sweep(43).into_iter().take(40) {
+            assert_eq!(
+                eval3(&baseline, &point),
+                eval3(&other, &point),
+                "intent {intent:?} diverged"
+            );
+        }
     }
 }

@@ -37,8 +37,10 @@
 //!   decomposition and N-D multilinear, selectable via [`ClutInterpolation`]) over
 //!   `gamut-icc`'s parsed CLUT elements, applied by [`Stage::Clut`].
 //! - [`link`] — profile linking: [`device_to_pcs`]/[`pcs_to_device`] build runnable pipelines
-//!   from parsed profiles (matrix/TRC shaper profiles at this phase; the module docs record
-//!   the settled `chad`/colorant convention).
+//!   from parsed profiles — LUT profiles (`lut8`/`lut16`/`lutAToB`/`lutBToA` tags, selected
+//!   per rendering intent with lcms2's intent tables and perceptual fallback) and matrix/TRC
+//!   shaper profiles; the module docs record the dispatch rule and the settled
+//!   `chad`/colorant convention.
 //! - [`transform`] — the object-safe [`Transform`] entry trait every runnable transform
 //!   implements.
 //! - [`error`] — the typed [`CmmError`] and the crate [`Result`].
