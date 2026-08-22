@@ -276,7 +276,8 @@ fn gamut_lossy_bpred_matches_libwebp_bit_exact() {
 
     for &(w, h) in &[(16u32, 16u32), (32, 32), (48, 48), (49, 33), (64, 16)] {
         for &quant_index in &[0u8, 8, 40] {
-            let (payload, _) = encode_frame(&detailed_yuv(w, h), quant_index);
+            let (payload, _) = encode_frame(&detailed_yuv(w, h), quant_index)
+                .expect("fixture fits the partition-size fields");
             let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -367,7 +368,8 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
         // (33, 145) spans ten macroblock rows, so the eight-partition cases route across every one.
         for &(w, h) in &[(32u32, 32u32), (48, 48), (49, 33), (33, 145)] {
             for &q in &[12u8, 48] {
-                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
+                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts)
+                    .expect("fixture fits the partition-size fields");
                 let webp = write_simple_lossy(&payload).unwrap();
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -398,7 +400,8 @@ fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
         (33, 49),
     ] {
         for &quant_index in &[0u8, 20, 60, 110] {
-            let (payload, _) = encode_frame(&synthetic_yuv(w, h), quant_index);
+            let (payload, _) = encode_frame(&synthetic_yuv(w, h), quant_index)
+                .expect("fixture fits the partition-size fields");
             let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -445,7 +448,8 @@ fn gamut_lossy_yuv_realistic_and_large_matches_libwebp() {
     ];
     for &(w, h) in &dims {
         for &quant_index in &[12u8, 56] {
-            let (payload, _) = encode_frame(&photo_like_yuv(w, h, 0x7e57), quant_index);
+            let (payload, _) = encode_frame(&photo_like_yuv(w, h, 0x7e57), quant_index)
+                .expect("fixture fits the partition-size fields");
             let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -494,7 +498,12 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
     // would make the conformance assertions below vacuous.
     {
         let yuv = detailed_yuv(48, 48);
-        let base = write_simple_lossy(&encode_frame(&yuv, 16).0).unwrap();
+        let base = write_simple_lossy(
+            &encode_frame(&yuv, 16)
+                .expect("fixture fits the partition-size fields")
+                .0,
+        )
+        .unwrap();
         let with = write_simple_lossy(
             &encode_frame_filtered(
                 &yuv,
@@ -504,6 +513,7 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                     ..Default::default()
                 },
             )
+            .expect("fixture fits the partition-size fields")
             .0,
         )
         .unwrap();
@@ -521,7 +531,8 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                     loop_filter_deltas: deltas,
                     ..Default::default()
                 };
-                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
+                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts)
+                    .expect("fixture fits the partition-size fields");
                 let webp = write_simple_lossy(&payload).unwrap();
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -545,7 +556,8 @@ fn gamut_decodes_patched_vp8_profiles_like_libwebp() {
     use gamut_webp::vp8::frame::{decode_frame, encode_frame};
 
     for &(w, h) in &[(32u32, 32u32), (49, 33)] {
-        let (payload, _) = encode_frame(&detailed_yuv(w, h), 24);
+        let (payload, _) =
+            encode_frame(&detailed_yuv(w, h), 24).expect("fixture fits the partition-size fields");
         for version in 1u8..=3 {
             let mut patched = payload.clone();
             patched[0] = (patched[0] & !0b1110) | (version << 1);
@@ -1096,5 +1108,113 @@ fn gamut_reads_metadata_libwebp_embedded() {
         assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()));
         assert_eq!(meta.exif, None);
         assert_eq!(meta.xmp, None);
+    }
+}
+
+#[test]
+fn libwebp_decodes_every_effort_level_bit_exactly() {
+    // The ladder's conformance gate. Each rung changes what the encoder emits — 4x4 search on or
+    // off, derived coefficient probabilities, a measured skip probability, a dead-zone quantizer —
+    // and every one of those must still produce a stream libwebp reconstructs identically to
+    // gamut's own decoder. Without this, a rung could quietly ship a stream only gamut can read.
+    //
+    // Swept over efforts x sizes x quantizers rather than crossed with the full dimension matrices
+    // the other tests use: each rung needs conformance coverage, not conformance coverage of every
+    // shape, and the combinatorial version would dominate the suite's runtime.
+    use common::libwebp_decode_yuv;
+    use gamut_riff::write_simple_lossy;
+    use gamut_webp::Effort;
+    use gamut_webp::vp8::frame::{EncodeOptions, decode_frame, encode_frame_filtered};
+
+    for level in 0..=6u8 {
+        let effort = Effort::from_level(level).expect("0..=6");
+        let opts = EncodeOptions {
+            effort,
+            ..EncodeOptions::default()
+        };
+        for &(w, h) in &[(32u32, 32u32), (49, 33)] {
+            for &q in &[12u8, 48] {
+                for (kind, yuv) in [
+                    ("detailed", detailed_yuv(w, h)),
+                    ("photo", photo_like_yuv(w, h, 7)),
+                ] {
+                    let (payload, _) = encode_frame_filtered(&yuv, q, opts)
+                        .expect("fixture fits the partition-size fields");
+                    let webp = write_simple_lossy(&payload).unwrap();
+                    let lib = libwebp_decode_yuv(&webp);
+                    let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+                    assert_eq!(
+                        gamut.y(),
+                        lib.y.as_slice(),
+                        "effort {level} {kind} Y {w}x{h} q{q}"
+                    );
+                    assert_eq!(
+                        gamut.u(),
+                        lib.u.as_slice(),
+                        "effort {level} {kind} U {w}x{h} q{q}"
+                    );
+                    assert_eq!(
+                        gamut.v(),
+                        lib.v.as_slice(),
+                        "effort {level} {kind} V {w}x{h} q{q}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn libwebp_decodes_every_effort_levels_lossless_and_alpha() {
+    // The container-level companion: lossless streams and the `ALPH` chunk at every rung, checked
+    // through libwebp's own decoder rather than gamut's, so a rung that produced a stream only
+    // gamut could read would fail here.
+    use common::{libwebp_decode_rgba, pattern_rgba};
+    use gamut_core::{EncodeImage, ImageRef, Rgba8};
+    use gamut_webp::{Effort, WebpEncoder};
+
+    let (w, h) = (48u32, 32u32);
+    let rgba = pattern_rgba(w, h);
+    let dims = gamut_core::Dimensions {
+        width: w,
+        height: h,
+    };
+    for level in 0..=6u8 {
+        let effort = Effort::from_level(level).expect("0..=6");
+        let mut lossless = Vec::new();
+        WebpEncoder::lossless()
+            .with_effort(effort)
+            .encode_image(
+                ImageRef::<Rgba8>::new(&rgba, dims).expect("fixture"),
+                &mut lossless,
+            )
+            .expect("lossless encode");
+        let decoded = libwebp_decode_rgba(&lossless);
+        assert_eq!(
+            decoded.rgba, rgba,
+            "libwebp did not recover the source losslessly at effort {level}"
+        );
+
+        let mut lossy = Vec::new();
+        WebpEncoder::lossy(70)
+            .with_effort(effort)
+            .encode_image(
+                ImageRef::<Rgba8>::new(&rgba, dims).expect("fixture"),
+                &mut lossy,
+            )
+            .expect("lossy encode");
+        let decoded = libwebp_decode_rgba(&lossy);
+        let got: Vec<u8> = decoded
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3])
+            .collect();
+        let want: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+        assert_eq!(
+            got, want,
+            "libwebp did not recover the alpha plane exactly at effort {level}"
+        );
     }
 }

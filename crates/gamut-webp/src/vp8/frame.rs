@@ -19,6 +19,8 @@ use gamut_color::{Yuv420, clip_pixel8};
 use gamut_core::{Error, Result};
 
 use super::bool_coder::{BoolDecoder, BoolEncoder};
+use super::cost::bit_cost;
+use super::effort::{Bpred, EFFORT_TABLE, QuantBias};
 /// Re-exported so the low-level frame API carries the loop-filter delta type next to [`EncodeOptions`].
 pub use super::header::LoopFilterDeltas;
 use super::header::{
@@ -29,6 +31,7 @@ use super::prediction::{self, B_DC_PRED, B_PRED, DC_PRED, H_PRED, NUM_BMODES, TM
 use super::quant::{self, QuantFactors};
 use super::tokens::{self, CoeffProbs};
 use super::transform::{fdct4x4, fwht4x4, idct4x4, iwht4x4};
+use crate::config::Effort;
 
 /// The whole-block prediction modes the encoder considers, in signaling order.
 const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
@@ -36,6 +39,16 @@ const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
 /// SAD margin by which per-subblock `B_PRED` must beat the best whole-block mode to be chosen — a
 /// coarse stand-in for `B_PRED`'s extra mode-signaling cost (true rate-distortion search is issue #32).
 const BPRED_SAD_PENALTY: u32 = 160;
+
+/// Mean absolute prediction error per luma pixel above which the gated rungs will consider
+/// `B_PRED`. Below it the whole-block modes already fit, and the 4x4 search would not repay its
+/// cost.
+const BPRED_GATE_SAD_PER_PIXEL: u32 = 6;
+
+/// The largest non-final token partition the bitstream can describe: its size is a 3-byte
+/// little-endian prefix (RFC 6386 §9.5), so 16 MiB - 1. The final partition carries no prefix —
+/// its length is the remainder — so it is unbounded.
+pub const MAX_TOKEN_PARTITION_SIZE: u32 = (1 << 24) - 1;
 
 /// Segment-id coding tree (RFC 6386 §10 `mb_segment_tree`): four leaves over two boolean decisions.
 const MB_SEGMENT_TREE: &[i8] = &[2, 4, 0, -1, -2, -3];
@@ -58,6 +71,9 @@ pub struct EncodeOptions {
     /// intra `ref_frame[0]` delta shifts every macroblock's filter level and the `B_PRED` `mode[0]`
     /// delta shifts 4×4-predicted ones; the default (all-zero) emits the disabled record.
     pub loop_filter_deltas: LoopFilterDeltas,
+    /// Compression effort: which coding tools the encoder may spend time on. Every level emits a
+    /// conformant key frame, so this trades encode time for size, never correctness.
+    pub effort: Effort,
 }
 
 impl Default for EncodeOptions {
@@ -67,6 +83,7 @@ impl Default for EncodeOptions {
             segmented: false,
             partitions: 1,
             loop_filter_deltas: LoopFilterDeltas::default(),
+            effort: Effort::Default,
         }
     }
 }
@@ -127,6 +144,120 @@ struct MbLevels {
     y: [[i16; 16]; 16],
     u: [[i16; 16]; 4],
     v: [[i16; 16]; 4],
+}
+
+/// One macroblock's coding decisions — everything the writing pass needs to emit its mode and token
+/// bits.
+///
+/// Reconstruction has already happened by the time this exists, and nothing in it depends on a
+/// probability: changing the frame's probabilities changes only the bit cost, never a decoded pixel.
+/// That is what makes measuring the probabilities between the two passes exact rather than an
+/// approximation.
+#[derive(Clone)]
+struct MbRecord {
+    /// The quantized coefficient levels for every block of the macroblock.
+    levels: MbLevels,
+    /// The 16 `B_PRED` submodes; meaningful only when `y_mode == B_PRED`.
+    sub_modes: [usize; 16],
+    /// The coded luma mode.
+    y_mode: usize,
+    /// The whole-block luma mode that was considered, which the `B_PRED` context propagation needs
+    /// even when `B_PRED` won.
+    wb_mode: usize,
+    /// The coded chroma mode.
+    uv_mode: usize,
+    /// The quantizer segment this macroblock was assigned.
+    segment: usize,
+    /// Whether every block came out all-zero, so no tokens are coded.
+    skip: bool,
+}
+
+/// The probability that a macroblock is **not** skipped, measured from what the frame actually
+/// produced (RFC 6386 §9.10).
+///
+/// The single-pass encoder had to guess this from the quantizer. Measuring it costs nothing once
+/// the decisions are recorded, and it is coded once in the header against one bool per macroblock.
+fn measured_skip_prob(records: &[MbRecord]) -> u8 {
+    let total = records.len() as u32;
+    if total == 0 {
+        return 1;
+    }
+    let skipped = records.iter().filter(|r| r.skip).count() as u32;
+    // `put_bool(prob_skip_false, skip)` codes `skip` as the *one* branch, so the stored probability
+    // is that of the zero branch — not skipping.
+    ((255 * (total - skipped)) / total).clamp(1, 255) as u8
+}
+
+/// Tallies the zero/one branches every coefficient token in the frame would take, threading the
+/// same above/left non-zero contexts the writing pass will.
+fn tally_coeff_bits(records: &[MbRecord], mb_cols: usize) -> tokens::CoeffCounts {
+    let mut counts: tokens::CoeffCounts =
+        [[[[[0; 2]; tokens::ENTROPY_NODES]; 3]; tokens::COEFF_BANDS]; tokens::PLANE_TYPES];
+    let mut above = vec![EntropyCtx::default(); mb_cols];
+    for chunk in records.chunks(mb_cols) {
+        let mut left = EntropyCtx::default();
+        for (mb_x, record) in chunk.iter().enumerate() {
+            let use_bpred = record.y_mode == B_PRED;
+            if record.skip {
+                clear_mb_context(&mut above[mb_x], &mut left, use_bpred);
+            } else {
+                count_mb_tokens(
+                    &mut counts,
+                    &mut above[mb_x],
+                    &mut left,
+                    &record.levels,
+                    use_bpred,
+                );
+            }
+        }
+    }
+    counts
+}
+
+/// Derives the frame's coefficient probabilities from measured token counts, adopting a measured
+/// value only where it pays for its own update record (RFC 6386 §13.4).
+///
+/// A context that was never exercised keeps its default: there is nothing to learn from it, and
+/// coding an update for it would be pure loss.
+fn optimize_coeff_probs(counts: &tokens::CoeffCounts) -> tokens::CoeffProbs {
+    let mut probs = tokens::DEFAULT_COEFF_PROBS;
+    for plane in 0..tokens::PLANE_TYPES {
+        for band in 0..tokens::COEFF_BANDS {
+            for ctx in 0..3 {
+                for node in 0..tokens::ENTROPY_NODES {
+                    // Widened to `u64` before anything is multiplied: these are frame-wide
+                    // tallies, and a single hot context on a large frame holds millions of
+                    // events. At up to 2048 cost units each (`bit_cost`'s maximum), the product
+                    // leaves `u32` around two million events — well inside the canvas sizes
+                    // WebP allows, so `u32` here is an overflow, not a bound.
+                    let [zeros, ones] = counts[plane][band][ctx][node].map(u64::from);
+                    let total = zeros + ones;
+                    if total == 0 {
+                        continue;
+                    }
+                    let old = tokens::DEFAULT_COEFF_PROBS[plane][band][ctx][node];
+                    let new = ((zeros * 255) / total).clamp(1, 255) as u8;
+                    if new == old {
+                        continue;
+                    }
+                    let update_prob = tokens::COEFF_UPDATE_PROBS[plane][band][ctx][node];
+                    let old_cost = zeros * u64::from(bit_cost(false, old))
+                        + ones * u64::from(bit_cost(true, old))
+                        + u64::from(bit_cost(false, update_prob));
+                    // Adopting costs the "yes, update" flag plus the eight literal bits of the new
+                    // value, on top of coding every token at the new probability.
+                    let new_cost = zeros * u64::from(bit_cost(false, new))
+                        + ones * u64::from(bit_cost(true, new))
+                        + u64::from(bit_cost(true, update_prob))
+                        + 8 * 256;
+                    if new_cost < old_cost {
+                        probs[plane][band][ctx][node] = new;
+                    }
+                }
+            }
+        }
+    }
+    probs
 }
 
 /// Macroblock-aligned reconstructed YUV planes (luma `mb_cols*16 × mb_rows*16`, chroma half each).
@@ -667,6 +798,15 @@ fn reconstruct_chroma(
 
 /// Transforms + quantizes one luma macroblock against its prediction, returning the Y2 and per
 /// sub-block AC levels.
+/// Forward-quantizes one coefficient under the effort level's rounding rule.
+fn quantize_with(bias: QuantBias, coeff: i16, factor: i16, dead_zone: u16) -> i16 {
+    match bias {
+        QuantBias::Nearest => quant::quantize(coeff, factor),
+        QuantBias::DeadZone => quant::quantize_biased(coeff, factor, dead_zone),
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // source, position, prediction, quantizer, and output
 fn quantize_luma(
     src: &[u8],
     stride: usize,
@@ -674,6 +814,7 @@ fn quantize_luma(
     mb_y: usize,
     pred: &[u8; 256],
     qf: &QuantFactors,
+    bias: QuantBias,
     levels: &mut MbLevels,
 ) {
     let mut y_coeffs = [[0i16; 16]; 16];
@@ -687,13 +828,13 @@ fn quantize_luma(
         y_dc[i] = y_coeffs[i][0];
     }
     let y2_coeffs = fwht4x4(&y_dc);
-    levels.y2[0] = quant::quantize(y2_coeffs[0], qf.y2_dc);
+    levels.y2[0] = quantize_with(bias, y2_coeffs[0], qf.y2_dc, quant::BIAS_DC);
     for k in 1..16 {
-        levels.y2[k] = quant::quantize(y2_coeffs[k], qf.y2_ac);
+        levels.y2[k] = quantize_with(bias, y2_coeffs[k], qf.y2_ac, quant::BIAS_AC);
     }
     for i in 0..16 {
         for k in 1..16 {
-            levels.y[i][k] = quant::quantize(y_coeffs[i][k], qf.y1_ac);
+            levels.y[i][k] = quantize_with(bias, y_coeffs[i][k], qf.y1_ac, quant::BIAS_AC);
         }
     }
 }
@@ -706,6 +847,7 @@ fn quantize_chroma(
     mb_y: usize,
     pred: &[u8; 64],
     qf: &QuantFactors,
+    bias: QuantBias,
 ) -> [[i16; 16]; 4] {
     let mut levels = [[0i16; 16]; 4];
     for i in 0..4 {
@@ -714,9 +856,9 @@ fn quantize_chroma(
         let p = sub_pred(pred, 8, sc * 4, sr * 4);
         let residue: [i16; 16] = core::array::from_fn(|k| block[k] - p[k]);
         let coeffs = fdct4x4(&residue);
-        levels[i][0] = quant::quantize(coeffs[0], qf.uv_dc);
+        levels[i][0] = quantize_with(bias, coeffs[0], qf.uv_dc, quant::BIAS_DC);
         for k in 1..16 {
-            levels[i][k] = quant::quantize(coeffs[k], qf.uv_ac);
+            levels[i][k] = quantize_with(bias, coeffs[k], qf.uv_ac, quant::BIAS_AC);
         }
     }
     levels
@@ -726,6 +868,7 @@ fn quantize_chroma(
 /// lowest-SAD submode, quantizes the residual (plane 3 — DC included, no Y2), and reconstructs in
 /// place so the next subblock predicts from it. Returns the 16 submodes, their quantized levels, and
 /// the total prediction SAD (for the macroblock mode decision).
+#[allow(clippy::too_many_arguments)] // the per-subblock search genuinely needs all of this state
 fn encode_bpred_luma(
     recon: &mut FrameBuffers,
     src: &[u8],
@@ -733,6 +876,7 @@ fn encode_bpred_luma(
     mb_x: usize,
     mb_y: usize,
     qf: &QuantFactors,
+    bias: QuantBias,
     above_right: &[u8; 4],
 ) -> ([usize; 16], [[i16; 16]; 16], u32) {
     let (px, py, rstride) = (mb_x * 16, mb_y * 16, recon.y_stride());
@@ -760,9 +904,9 @@ fn encode_bpred_luma(
 
         let residue: [i16; 16] = core::array::from_fn(|k| src_sub[k] - i16::from(pred[k]));
         let coeffs = fdct4x4(&residue);
-        levels[i][0] = quant::quantize(coeffs[0], qf.y1_dc);
+        levels[i][0] = quantize_with(bias, coeffs[0], qf.y1_dc, quant::BIAS_DC);
         for k in 1..16 {
-            levels[i][k] = quant::quantize(coeffs[k], qf.y1_ac);
+            levels[i][k] = quantize_with(bias, coeffs[k], qf.y1_ac, quant::BIAS_AC);
         }
         let mut dq = [0i16; 16];
         dq[0] = quant::dequantize(levels[i][0], qf.y1_dc);
@@ -912,6 +1056,46 @@ fn encode_mb_tokens(
     encode_chroma_tokens(enc, above, left, probs, levels);
 }
 
+/// Tallies the branches a macroblock's coefficient tokens would take, threading the same above/left
+/// contexts [`encode_mb_tokens`] does.
+///
+/// Deliberately mirrors that function's *shape* while sharing its per-block tokenization through
+/// [`tokens::count_block`], so the two cannot disagree about which bits exist.
+fn count_mb_tokens(
+    counts: &mut tokens::CoeffCounts,
+    above: &mut EntropyCtx,
+    left: &mut EntropyCtx,
+    levels: &MbLevels,
+    is_bpred: bool,
+) {
+    if !is_bpred {
+        let ctx = usize::from(above.y2) + usize::from(left.y2);
+        let has = tokens::count_block(counts, &levels.y2, 1, ctx);
+        above.y2 = has;
+        left.y2 = has;
+    }
+    let plane = if is_bpred { 3 } else { 0 };
+    for i in 0..16 {
+        let (r, c) = (i / 4, i % 4);
+        let ctx = usize::from(above.y[c]) + usize::from(left.y[r]);
+        let has = tokens::count_block(counts, &levels.y[i], plane, ctx);
+        above.y[c] = has;
+        left.y[r] = has;
+    }
+    for (plane_levels, above_ctx, left_ctx) in [
+        (&levels.u, &mut above.u, &mut left.u),
+        (&levels.v, &mut above.v, &mut left.v),
+    ] {
+        for i in 0..4 {
+            let (r, c) = (i / 2, i % 2);
+            let ctx = usize::from(above_ctx[c]) + usize::from(left_ctx[r]);
+            let has = tokens::count_block(counts, &plane_levels[i], 2, ctx);
+            above_ctx[c] = has;
+            left_ctx[r] = has;
+        }
+    }
+}
+
 /// Codes a macroblock's U then V chroma blocks (plane 2).
 fn encode_chroma_tokens(
     enc: &mut BoolEncoder,
@@ -983,20 +1167,36 @@ fn decode_mb_tokens(
 /// Encodes a [`Yuv420`] image as a VP8 key-frame bitstream (the `VP8 ` chunk payload), returning the
 /// bitstream and the encoder's reconstruction (the tier-2 oracle: it must equal any decoder's output).
 /// Uses the normal loop filter.
-#[must_use]
-pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
+///
+/// # Errors
+///
+/// As [`encode_frame_filtered`].
+pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> Result<(Vec<u8>, FrameBuffers)> {
     encode_frame_filtered(yuv, quant_index, EncodeOptions::default())
 }
 
 /// Encodes a frame with explicit [`EncodeOptions`] — the loop-filter type and whether to emit
 /// quantizer segments. [`encode_frame`] uses the defaults (normal filter, unsegmented). This lets the
 /// differential oracle drive the alternative encoder paths.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] when the coded frame outgrows one of the bitstream's own
+/// partition-size fields: the control partition past
+/// [`MAX_FIRST_PARTITION_SIZE`](super::header::MAX_FIRST_PARTITION_SIZE) (19 bits, RFC 6386 §9.1),
+/// or a non-final token partition past [`MAX_TOKEN_PARTITION_SIZE`] (24 bits, §9.5). Both are
+/// format ceilings a large, highly detailed frame can genuinely reach — the mode records of a
+/// `B_PRED`-heavy frame are what fill the control partition — and neither can be encoded, so the
+/// alternative to reporting them is emitting a stream no decoder accepts. libwebp reports the same
+/// condition (`VP8_ENC_ERROR_PARTITION0_OVERFLOW`) rather than degrading quality behind the
+/// caller's back, and neither does this. The lever is [`EncodeOptions::effort`]: `B_PRED` is what
+/// fills partition 0, so [`Effort::Fastest`] (which never emits it) encodes the whole WebP canvas
+/// range, up to 16383x16383, at any detail level.
 pub fn encode_frame_filtered(
     yuv: &Yuv420,
     quant_index: u8,
     opts: EncodeOptions,
-) -> (Vec<u8>, FrameBuffers) {
+) -> Result<(Vec<u8>, FrameBuffers)> {
     let mut header = frame_header(yuv.width(), yuv.height(), quant_index, opts.simple_filter);
     if opts.segmented {
         header.segmentation = Segmentation {
@@ -1008,6 +1208,7 @@ pub fn encode_frame_filtered(
             tree_probs: [128, 128, 128],
         };
     }
+    let tools = EFFORT_TABLE[opts.effort.level() as usize];
     header.token_partitions = opts.partitions.max(1);
     header.loop_filter.deltas = opts.loop_filter_deltas;
     let n = header.token_partitions as usize;
@@ -1033,18 +1234,14 @@ pub fn encode_frame_filtered(
         })
         .collect();
 
-    let mut modes = BoolEncoder::new();
-    header::write_frame_header(&mut modes, &header);
-    let mut residuals: Vec<BoolEncoder> = (0..n).map(|_| BoolEncoder::new()).collect();
-    let probs = &tokens::DEFAULT_COEFF_PROBS;
-
-    let mut above = vec![EntropyCtx::default(); recon.mb_cols];
-    let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
     let mut filter_interior = vec![false; recon.mb_cols * recon.mb_rows];
     let mut is_bpred_map = vec![false; recon.mb_cols * recon.mb_rows];
+    // Pass 1 decides and reconstructs; nothing is written yet. Every decision below depends only on
+    // the source, the reconstruction, and the quantizer — never on a probability — which is exactly
+    // why the frame's coefficient probabilities can be measured afterwards and still describe the
+    // stream that gets written.
+    let mut records: Vec<MbRecord> = Vec::with_capacity(recon.mb_cols * recon.mb_rows);
     for mb_y in 0..recon.mb_rows {
-        let mut left = EntropyCtx::default();
-        let mut left_bmodes = [B_DC_PRED; 4];
         for mb_x in 0..recon.mb_cols {
             let segment = segment_map[mb_y * recon.mb_cols + mb_x];
             let qf = seg_qf[segment];
@@ -1063,15 +1260,39 @@ pub fn encode_frame_filtered(
                 16,
             );
 
-            // B_PRED candidate — scribbles its reconstruction into recon.y while selecting submodes.
-            let above_right = above_right_source(&recon, mb_x, mb_y);
-            let (sub_modes, bpred_levels, bpred_sad) =
-                encode_bpred_luma(&mut recon, &src_y, yw, mb_x, mb_y, &qf, &above_right);
-            let use_bpred = bpred_sad + BPRED_SAD_PENALTY < wb_sad;
+            // B_PRED candidate — scribbles its reconstruction into recon.y while selecting
+            // submodes, so it is only run when the rung allows it. Searching ten submodes across
+            // sixteen subblocks is the most expensive thing the encoder does, and the fast rungs
+            // buy their speed almost entirely by skipping it.
+            let consider_bpred = match tools.bpred {
+                Bpred::Off => false,
+                // A macroblock the whole-block modes already predict well is very unlikely to
+                // profit from 4x4 prediction, so the gate skips the search there. The threshold is
+                // per-pixel mean absolute error, scaled by the quantizer because coarser
+                // quantization makes small prediction gains irrelevant.
+                Bpred::Gated => wb_sad > BPRED_GATE_SAD_PER_PIXEL * 256,
+                Bpred::Always => true,
+            };
+            let (sub_modes, bpred_levels, bpred_sad) = if consider_bpred {
+                let above_right = above_right_source(&recon, mb_x, mb_y);
+                encode_bpred_luma(
+                    &mut recon,
+                    &src_y,
+                    yw,
+                    mb_x,
+                    mb_y,
+                    &qf,
+                    tools.quant_bias,
+                    &above_right,
+                )
+            } else {
+                ([B_DC_PRED; 16], [[0i16; 16]; 16], u32::MAX)
+            };
+            let use_bpred = consider_bpred && bpred_sad + BPRED_SAD_PENALTY < wb_sad;
 
             let mut levels = MbLevels {
-                u: quantize_chroma(&src_u, cw, mb_x, mb_y, &u_pred, &qf),
-                v: quantize_chroma(&src_v, cw, mb_x, mb_y, &v_pred, &qf),
+                u: quantize_chroma(&src_u, cw, mb_x, mb_y, &u_pred, &qf, tools.quant_bias),
+                v: quantize_chroma(&src_v, cw, mb_x, mb_y, &v_pred, &qf, tools.quant_bias),
                 ..Default::default()
             };
             // Compute the luma levels before writing modes so the skip flag — which precedes the luma
@@ -1079,30 +1300,21 @@ pub fn encode_frame_filtered(
             // was already reconstructed during submode selection).
             let wb_pred = (!use_bpred).then(|| predict_luma(&recon, mb_x, mb_y, wb_mode));
             if let Some(yp) = &wb_pred {
-                quantize_luma(&src_y, yw, mb_x, mb_y, yp, &qf, &mut levels);
+                quantize_luma(
+                    &src_y,
+                    yw,
+                    mb_x,
+                    mb_y,
+                    yp,
+                    &qf,
+                    tools.quant_bias,
+                    &mut levels,
+                );
             } else {
                 levels.y = bpred_levels;
             }
             let skip = !mb_has_coeffs(&levels);
             let y_mode = if use_bpred { B_PRED } else { wb_mode };
-
-            if header.segmentation.update_map {
-                modes.put_tree(MB_SEGMENT_TREE, &header.segmentation.tree_probs, segment);
-            }
-            modes.put_bool(header.prob_skip_false, skip);
-            modes.put_tree(
-                prediction::KF_YMODE_TREE,
-                &prediction::KF_YMODE_PROB,
-                y_mode,
-            );
-            if use_bpred {
-                write_bmodes(&mut modes, &sub_modes, &above_bmodes[mb_x], &left_bmodes);
-            }
-            modes.put_tree(
-                prediction::KF_UV_MODE_TREE,
-                &prediction::KF_UV_MODE_PROB,
-                uv_mode,
-            );
 
             if let Some(yp) = &wb_pred {
                 reconstruct_luma(&mut recon, mb_x, mb_y, yp, &levels, &qf);
@@ -1113,20 +1325,84 @@ pub fn encode_frame_filtered(
 
             filter_interior[mb_y * recon.mb_cols + mb_x] = use_bpred || mb_has_coeffs(&levels);
             is_bpred_map[mb_y * recon.mb_cols + mb_x] = use_bpred;
-            if skip {
+            records.push(MbRecord {
+                levels,
+                sub_modes,
+                y_mode,
+                wb_mode,
+                uv_mode,
+                segment,
+                skip,
+            });
+        }
+    }
+
+    // Between the passes: measure what pass 1 actually produced, so the header can describe it.
+    if tools.measured_skip_prob {
+        header.prob_skip_false = measured_skip_prob(&records);
+    }
+    let probs = if tools.two_pass_probs {
+        optimize_coeff_probs(&tally_coeff_bits(&records, recon.mb_cols))
+    } else {
+        tokens::DEFAULT_COEFF_PROBS
+    };
+
+    // Pass 2 writes. The header goes first because it carries the probabilities and the skip
+    // probability the mode and token bits are coded against.
+    let mut modes = BoolEncoder::new();
+    header::write_frame_header(&mut modes, &header, &probs);
+    let mut residuals: Vec<BoolEncoder> = (0..n).map(|_| BoolEncoder::new()).collect();
+    let mut above = vec![EntropyCtx::default(); recon.mb_cols];
+    let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
+    for mb_y in 0..recon.mb_rows {
+        let mut left = EntropyCtx::default();
+        let mut left_bmodes = [B_DC_PRED; 4];
+        for mb_x in 0..recon.mb_cols {
+            let record = &records[mb_y * recon.mb_cols + mb_x];
+            let use_bpred = record.y_mode == B_PRED;
+
+            if header.segmentation.update_map {
+                modes.put_tree(
+                    MB_SEGMENT_TREE,
+                    &header.segmentation.tree_probs,
+                    record.segment,
+                );
+            }
+            modes.put_bool(header.prob_skip_false, record.skip);
+            modes.put_tree(
+                prediction::KF_YMODE_TREE,
+                &prediction::KF_YMODE_PROB,
+                record.y_mode,
+            );
+            if use_bpred {
+                write_bmodes(
+                    &mut modes,
+                    &record.sub_modes,
+                    &above_bmodes[mb_x],
+                    &left_bmodes,
+                );
+            }
+            modes.put_tree(
+                prediction::KF_UV_MODE_TREE,
+                &prediction::KF_UV_MODE_PROB,
+                record.uv_mode,
+            );
+
+            if record.skip {
                 clear_mb_context(&mut above[mb_x], &mut left, use_bpred);
             } else {
                 encode_mb_tokens(
                     &mut residuals[mb_y % n],
                     &mut above[mb_x],
                     &mut left,
-                    probs,
-                    &levels,
+                    &probs,
+                    &record.levels,
                     use_bpred,
                 );
             }
 
-            (above_bmodes[mb_x], left_bmodes) = bmode_propagation(use_bpred, wb_mode, &sub_modes);
+            (above_bmodes[mb_x], left_bmodes) =
+                bmode_propagation(use_bpred, record.wb_mode, &record.sub_modes);
         }
     }
 
@@ -1142,18 +1418,37 @@ pub fn encode_frame_filtered(
     let part0 = modes.finish();
     let token_parts: Vec<Vec<u8>> = residuals.into_iter().map(BoolEncoder::finish).collect();
     let mut out = Vec::new();
-    header::write_uncompressed_chunk(&header, part0.len() as u32, &mut out);
+    let part0_len = u32::try_from(part0.len()).unwrap_or(u32::MAX);
+    header::write_uncompressed_chunk(&header, part0_len, &mut out)?;
     out.extend_from_slice(&part0);
     // The first N-1 token-partition sizes are stored as 3-byte little-endian prefixes (§9.5); the
-    // last partition's size is implied by the remainder.
+    // last partition's size is implied by the remainder — which is why only the first N-1 are
+    // bounded here.
     for part in &token_parts[..n - 1] {
-        let len = part.len() as u32;
+        let len = token_partition_size(part.len())?;
         out.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8]);
     }
     for part in &token_parts {
         out.extend_from_slice(part);
     }
-    (out, recon)
+    Ok((out, recon))
+}
+
+/// The 3-byte little-endian size prefix for a non-final token partition (RFC 6386 §9.5).
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] when `len` exceeds [`MAX_TOKEN_PARTITION_SIZE`], which the
+/// prefix cannot describe. Split out from the writer so the ceiling is reachable from a test
+/// without building a 16 MiB partition.
+fn token_partition_size(len: usize) -> Result<u32> {
+    match u32::try_from(len) {
+        Ok(len) if len <= MAX_TOKEN_PARTITION_SIZE => Ok(len),
+        _ => Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: token partition exceeds the 3-byte size prefix",
+        )),
+    }
 }
 
 /// Splits the token-partition section (everything after the control partition) into `n` boolean
@@ -1407,7 +1702,8 @@ mod tests {
     #[test]
     fn bpred_is_exercised_and_bit_exact() {
         let yuv = detailed(48, 48);
-        let (bitstream, recon) = encode_frame(&yuv, 8);
+        let (bitstream, recon) =
+            encode_frame(&yuv, 8).expect("fixture fits the partition-size fields");
         assert!(
             mode_stats(&bitstream).0 > 0,
             "detailed content should select B_PRED for some macroblocks"
@@ -1436,7 +1732,7 @@ mod tests {
             vec![128u8; cw * ch],
         )
         .unwrap();
-        let (bits, recon) = encode_frame(&yuv, 60);
+        let (bits, recon) = encode_frame(&yuv, 60).expect("fixture fits the partition-size fields");
         assert!(
             mode_stats(&bits).1 > 0,
             "flat content should skip macroblocks"
@@ -1450,7 +1746,8 @@ mod tests {
     /// Tier-2: the encoder's reconstruction must equal the native decoder's output, bit-for-bit.
     fn assert_encoder_recon_matches_decoder(width: u32, height: u32, q: u8) {
         let yuv = pattern(width, height);
-        let (bitstream, recon) = encode_frame(&yuv, q);
+        let (bitstream, recon) =
+            encode_frame(&yuv, q).expect("fixture fits the partition-size fields");
         let decoded = decode_frame(&bitstream).expect("decode");
         let enc = recon.to_yuv420();
         let dec = decoded.to_yuv420();
@@ -1489,7 +1786,8 @@ mod tests {
                     partitions: 1,
                     ..Default::default()
                 };
-                let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
+                let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
+                    .expect("fixture fits the partition-size fields");
                 let dec = decode_frame(&bits).expect("decode");
                 let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
                 assert_eq!(enc.y(), dec.y(), "luma simple={simple} q{q}");
@@ -1511,7 +1809,8 @@ mod tests {
                 partitions: 1,
                 ..Default::default()
             };
-            let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
+            let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
+                .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
             let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
             assert_eq!(enc.y(), dec.y(), "luma q{q}");
@@ -1532,7 +1831,8 @@ mod tests {
                 partitions,
                 ..Default::default()
             };
-            let (bits, recon) = encode_frame_filtered(&yuv, 30, opts);
+            let (bits, recon) = encode_frame_filtered(&yuv, 30, opts)
+                .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
             let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
             assert_eq!(enc.y(), dec.y(), "luma p{partitions}");
@@ -1559,7 +1859,8 @@ mod tests {
                         },
                         ..Default::default()
                     };
-                    let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
+                    let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
+                        .expect("fixture fits the partition-size fields");
                     let dec = decode_frame(&bits).expect("decode");
                     let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
                     assert_eq!(enc.y(), dec.y(), "luma ref={ref_d} mode={mode_d} q{q}");
@@ -1575,7 +1876,7 @@ mod tests {
         // RFC 6386 §9.1: the frame-tag version selects profiles 0–3 (4–7 undefined). The version sits
         // in bits 1–3 of byte 0; patching it must not change which (valid) frame decodes.
         let yuv = pattern(32, 32);
-        let (bits, _) = encode_frame(&yuv, 40);
+        let (bits, _) = encode_frame(&yuv, 40).expect("fixture fits the partition-size fields");
         let patch_version = |v: u8| {
             let mut p = bits.clone();
             p[0] = (p[0] & !0b1110) | (v << 1);
@@ -1601,7 +1902,8 @@ mod tests {
     #[test]
     fn decode_rejects_truncated_first_partition() {
         let yuv = pattern(16, 16);
-        let (mut bitstream, _) = encode_frame(&yuv, 40);
+        let (mut bitstream, _) =
+            encode_frame(&yuv, 40).expect("fixture fits the partition-size fields");
         bitstream.truncate(UNCOMPRESSED_CHUNK_LEN + 1);
         let _ = decode_frame(&bitstream);
     }
@@ -1633,7 +1935,7 @@ mod tests {
         let qf = QuantFactors::new(16, &QuantIndices::default());
         let mut levels = MbLevels::default();
         // Quantize macroblock (1, 1) so the `mb_x * 16` and `mb_y * 16` read offsets are non-zero.
-        quantize_luma(&src, 32, 1, 1, &pred, &qf, &mut levels);
+        quantize_luma(&src, 32, 1, 1, &pred, &qf, QuantBias::Nearest, &mut levels);
         assert_eq!(weighted_checksum(levels.y2), 707);
         assert_eq!(weighted_checksum(levels.y.into_iter().flatten()), -22284);
     }
@@ -1650,7 +1952,7 @@ mod tests {
             *p = ((i * 5 + 3) % 251) as u8;
         }
         let qf = QuantFactors::new(16, &QuantIndices::default());
-        let levels = quantize_chroma(&src, 8, 0, 0, &pred, &qf);
+        let levels = quantize_chroma(&src, 8, 0, 0, &pred, &qf, QuantBias::Nearest);
         assert_eq!(weighted_checksum(levels.into_iter().flatten()), -1085);
     }
 
@@ -1664,7 +1966,8 @@ mod tests {
             *s = ((i * 11 + 3) % 251) as u8;
         }
         let qf = QuantFactors::new(12, &QuantIndices::default());
-        let (_, levels, _) = encode_bpred_luma(&mut recon, &src, 16, 0, 0, &qf, &[0; 4]);
+        let (_, levels, _) =
+            encode_bpred_luma(&mut recon, &src, 16, 0, 0, &qf, QuantBias::Nearest, &[0; 4]);
         assert_eq!(weighted_checksum(levels.into_iter().flatten()), -3083);
     }
 
@@ -1714,7 +2017,7 @@ mod tests {
     #[test]
     fn decode_rejects_zero_dimension() {
         let yuv = pattern(16, 16);
-        let (mut bits, _) = encode_frame(&yuv, 40);
+        let (mut bits, _) = encode_frame(&yuv, 40).expect("fixture fits the partition-size fields");
         // Clear the 14-bit width field (low 6 bits live in byte 7) while leaving height non-zero, so
         // only the `width == 0` half of the guard fires: `||` flipped to `&&` would let it through.
         bits[6] = 0;
@@ -1754,7 +2057,8 @@ mod tests {
             Yuv420::chroma_height(h) as usize,
         );
         let yuv = Yuv420::new(w, h, y, vec![128; cw * ch], vec![128; cw * ch]).unwrap();
-        let (bits, recon) = encode_frame_filtered(&yuv, 40, EncodeOptions::default());
+        let (bits, recon) = encode_frame_filtered(&yuv, 40, EncodeOptions::default())
+            .expect("fixture fits the partition-size fields");
         let dec = decode_frame(&bits).expect("decode");
         assert_eq!(recon.to_yuv420().y(), dec.to_yuv420().y());
     }
@@ -1778,12 +2082,130 @@ mod tests {
             vec![128; cw * ch],
         )
         .unwrap();
-        let (bits, _) = encode_frame(&yuv, 127); // coarsest quantizer → every macroblock skips
+        let (bits, _) = encode_frame(&yuv, 127).expect("fixture fits the partition-size fields"); // coarsest quantizer → every macroblock skips
         let chunk = header::read_uncompressed_chunk(&bits).expect("chunk");
         let end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
         assert!(
             decode_frame(&bits[..end]).is_ok(),
             "a stream ending exactly at the first partition (no token bytes) must decode"
         );
+    }
+
+    /// The 3-byte size prefix (RFC 6386 §9.5) tops out at 16 MiB - 1, and the writer packs the
+    /// value into exactly those three bytes — so a length one past the ceiling would be written
+    /// truncated, pointing the decoder at a boundary that is not there. Both sides of the edge are
+    /// pinned, and the constant is checked against the field it describes rather than against
+    /// itself.
+    #[test]
+    fn token_partition_size_stops_at_the_three_byte_prefix() {
+        // The ceiling is what three little-endian bytes can hold, derived independently.
+        assert_eq!(
+            MAX_TOKEN_PARTITION_SIZE,
+            u32::from_le_bytes([0xFF, 0xFF, 0xFF, 0])
+        );
+        assert_eq!(token_partition_size(0).expect("empty"), 0);
+        let max = MAX_TOKEN_PARTITION_SIZE as usize;
+        assert_eq!(
+            token_partition_size(max).expect("the ceiling"),
+            MAX_TOKEN_PARTITION_SIZE
+        );
+        let err = token_partition_size(max + 1).expect_err("one past the ceiling");
+        assert!(
+            err.to_string().contains("token partition"),
+            "unexpected error: {err}"
+        );
+        // And a length that does not even fit `u32` is the same refusal, not a wrapped success.
+        let err = token_partition_size(usize::MAX).expect_err("absurd length");
+        assert!(err.to_string().contains("token partition"));
+    }
+
+    /// The probability optimizer only adopts a measured value when it pays for its own update
+    /// record: the "yes, update" flag plus eight literal bits, which is 2048 cost units on top of
+    /// re-coding every token. That trade is the entire point of the function, so it is pinned at
+    /// its boundary from both sides — a context whose saving clears the record cost adopts, and an
+    /// otherwise identical context whose saving does not clear it keeps the default.
+    ///
+    /// Both cases use one context of the frame, and the counts are chosen so the *only* thing
+    /// separating them is the size of the saving; a mis-sized record cost, or an adopt/reject
+    /// comparison that admits ties, moves one of them.
+    #[test]
+    fn probability_updates_must_pay_for_their_own_record() {
+        /// Cost, in 1/256 bit, of coding `zeros`/`ones` at probability `p`.
+        fn coding_cost(zeros: u64, ones: u64, p: u8) -> u64 {
+            zeros * u64::from(bit_cost(false, p)) + ones * u64::from(bit_cost(true, p))
+        }
+        // Find a context whose default probability is far from an even split, so a measured 50/50
+        // has something to save.
+        let (plane, band, ctx, node) = (0, 1, 0, 0);
+        let old = tokens::DEFAULT_COEFF_PROBS[plane][band][ctx][node];
+        let update_prob = tokens::COEFF_UPDATE_PROBS[plane][band][ctx][node];
+        // Saving of the measured probability over the default, at an even split of `n` each way.
+        let saving = |n: u64| -> i64 {
+            let new = 127u8;
+            let keep = coding_cost(n, n, old) + u64::from(bit_cost(false, update_prob));
+            let adopt = coding_cost(n, n, new) + u64::from(bit_cost(true, update_prob)) + 8 * 256;
+            keep as i64 - adopt as i64
+        };
+        // Grow the count until adopting is worth it; `n - 1` is then the last count that is not.
+        let mut n = 1u64;
+        while saving(n) <= 0 && n < 1 << 20 {
+            n += 1;
+        }
+        assert!(n > 1, "the boundary must be interior to the search");
+        let mut counts: tokens::CoeffCounts =
+            [[[[[0; 2]; tokens::ENTROPY_NODES]; 3]; tokens::COEFF_BANDS]; tokens::PLANE_TYPES];
+
+        // Just over the boundary: adopted.
+        counts[plane][band][ctx][node] = [n as u32, n as u32];
+        assert_eq!(
+            optimize_coeff_probs(&counts)[plane][band][ctx][node],
+            127,
+            "a saving that clears the update record must be adopted"
+        );
+
+        // Just under it: the default survives.
+        counts[plane][band][ctx][node] = [(n - 1) as u32, (n - 1) as u32];
+        assert_eq!(
+            optimize_coeff_probs(&counts)[plane][band][ctx][node],
+            old,
+            "a saving that does not clear the update record must be rejected"
+        );
+    }
+
+    /// The probability optimizer accumulates frame-wide token tallies, so its cost arithmetic must
+    /// survive counts a large frame really produces. A 4000x4000 encode puts well over two million
+    /// events into a single hot context, and at `bit_cost`'s maximum of 2048 units each the product
+    /// leaves `u32` — which used to abort the encode under overflow checks (and silently invert the
+    /// adopt/reject decision without them). Driving one context past that boundary pins the `u64`
+    /// accumulator without needing a sixteen-megapixel fixture.
+    #[test]
+    fn probability_costs_survive_large_frame_counts() {
+        // Above u32::MAX / 2048, so any context whose default probability is extreme overflows.
+        const HUGE: u32 = 4_000_000;
+        let mut counts: tokens::CoeffCounts =
+            [[[[[0; 2]; tokens::ENTROPY_NODES]; 3]; tokens::COEFF_BANDS]; tokens::PLANE_TYPES];
+        for plane in counts.iter_mut() {
+            for band in plane.iter_mut() {
+                for ctx in band.iter_mut() {
+                    for node in ctx.iter_mut() {
+                        *node = [HUGE, HUGE];
+                    }
+                }
+            }
+        }
+        let probs = optimize_coeff_probs(&counts);
+        // Every context saw an even split, so the measured probability is 127 wherever adopting it
+        // pays for the update record — and nothing may be left at a wildly mispredicting default.
+        assert!(
+            probs
+                .iter()
+                .flatten()
+                .flatten()
+                .flatten()
+                .any(|&p| p == 127),
+            "an even split must be adopted somewhere"
+        );
+        // The counts are symmetric, so no adopted value may sit outside the codable range.
+        assert!(probs.iter().flatten().flatten().flatten().all(|&p| p >= 1));
     }
 }

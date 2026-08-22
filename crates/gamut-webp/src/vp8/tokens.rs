@@ -466,14 +466,6 @@ fn decode_extra(dec: &mut BoolDecoder, probs: &[Prob]) -> i32 {
     v
 }
 
-/// Encodes a category token's `offset` extra bits, MSB first (the inverse of [`decode_extra`]).
-fn encode_extra(enc: &mut BoolEncoder, probs: &[Prob], offset: i32) {
-    let n = probs.len();
-    for (j, &p) in probs.iter().enumerate() {
-        enc.put_bool(p, (offset >> (n - 1 - j)) & 1 != 0);
-    }
-}
-
 /// Decodes one 4×4 block's coefficients into `coeffs` from `dec`, using `probs` and the
 /// neighbor-complexity context `nonzero_ctx` (the number, 0..=2, of same-plane above/left neighbor
 /// blocks with coefficients). Positions `[first_coeff(plane)..16]` are overwritten; lower positions
@@ -527,14 +519,66 @@ pub fn decode_block(
     has_coeffs
 }
 
-/// Encodes one 4×4 block's coefficients to `enc`, mirroring [`decode_block`]. Returns whether the
-/// block has any non-zero coefficient.
-pub fn encode_block(
-    enc: &mut BoolEncoder,
+/// A consumer of one block's coded bits, letting the tokenization in [`walk_block`] be written once
+/// and reused for encoding, counting, and costing.
+///
+/// The split matters because the two kinds of bit are governed differently: the tree bits are the
+/// ones [`CoeffProbs`] covers and a two-pass encoder can re-derive, while the extra-bit and sign
+/// bits ride fixed probabilities the frame header cannot update.
+pub trait BlockSink {
+    /// One tree-coded bit, at `probs[plane][band][ctx][node]` of the frame's coefficient
+    /// probabilities.
+    fn tree_bit(&mut self, plane: usize, band: usize, ctx: usize, node: usize, bit: bool);
+    /// One bit at a fixed probability: a category's extra bits, or a coefficient's sign.
+    fn fixed_bit(&mut self, prob: Prob, bit: bool);
+}
+
+/// A [`BlockSink`] that writes to a [`BoolEncoder`] under a given probability table.
+struct WriteSink<'a, 'p> {
+    enc: &'a mut BoolEncoder,
+    probs: &'p CoeffProbs,
+}
+
+impl BlockSink for WriteSink<'_, '_> {
+    fn tree_bit(&mut self, plane: usize, band: usize, ctx: usize, node: usize, bit: bool) {
+        self.enc.put_bool(self.probs[plane][band][ctx][node], bit);
+    }
+
+    fn fixed_bit(&mut self, prob: Prob, bit: bool) {
+        self.enc.put_bool(prob, bit);
+    }
+}
+
+/// Per-context counts of the zero and one branches taken by a frame's coefficient tokens — the
+/// input to the probability optimizer.
+///
+/// Indexed exactly like [`CoeffProbs`], with a final `[zeros, ones]` pair.
+pub type CoeffCounts = [[[[[u32; 2]; ENTROPY_NODES]; 3]; COEFF_BANDS]; PLANE_TYPES];
+
+/// A [`BlockSink`] that tallies tree bits instead of writing them. Fixed-probability bits are
+/// ignored: no probability update can change their cost, so they are not part of the optimization.
+struct CountSink<'a> {
+    counts: &'a mut CoeffCounts,
+}
+
+impl BlockSink for CountSink<'_> {
+    fn tree_bit(&mut self, plane: usize, band: usize, ctx: usize, node: usize, bit: bool) {
+        self.counts[plane][band][ctx][node][usize::from(bit)] += 1;
+    }
+
+    fn fixed_bit(&mut self, _prob: Prob, _bit: bool) {}
+}
+
+/// Walks one 4×4 block's coefficient tokens, handing every coded bit to `sink` (RFC 6386 §13).
+/// Returns whether the block has any non-zero coefficient.
+///
+/// This is the single definition of the tokenization; [`encode_block`] and [`count_block`] are thin
+/// wrappers that differ only in what they do with the bits.
+pub fn walk_block(
     coeffs: &[i16; 16],
     plane: usize,
     nonzero_ctx: usize,
-    probs: &CoeffProbs,
+    sink: &mut impl BlockSink,
 ) -> bool {
     let first = first_coeff(plane);
     // One past the last non-zero coefficient: tokens are coded for [first, eob), then EOB (if eob<16).
@@ -548,34 +592,57 @@ pub fn encode_block(
         let level = i32::from(coeffs[ZIGZAG[i]]);
         let abs = level.abs();
         let token = token_for_abs(abs);
-        let node_probs = &probs[plane][COEFF_BANDS_MAP[i]][ctx3];
-        if prev_zero {
-            enc.put_tree_start(COEFF_TREE, node_probs, token, 2);
-        } else {
-            enc.put_tree(COEFF_TREE, node_probs, token);
-        }
+        let band = COEFF_BANDS_MAP[i];
+        // After a zero token the tree is entered at node 2 — the `DCT_0` branch cannot repeat.
+        let start = if prev_zero { 2 } else { 0 };
+        super::bool_coder::walk_tree(COEFF_TREE, token, start, |node, bit| {
+            sink.tree_bit(plane, band, ctx3, node, bit);
+        });
         if token != DCT_0 {
             if token >= DCT_CAT1 {
-                encode_extra(
-                    enc,
-                    PCAT[token - DCT_CAT1],
-                    abs - CATEGORY_BASE[token - DCT_CAT1],
-                );
+                let probs = PCAT[token - DCT_CAT1];
+                let offset = abs - CATEGORY_BASE[token - DCT_CAT1];
+                let n = probs.len();
+                for (j, &p) in probs.iter().enumerate() {
+                    sink.fixed_bit(p, (offset >> (n - 1 - j)) & 1 != 0);
+                }
             }
-            enc.put_flag(level < 0);
+            sink.fixed_bit(128, level < 0);
         }
         ctx3 = complexity(abs);
         prev_zero = token == DCT_0;
     }
     if eob < 16 {
         // The coefficient at `eob - 1` (if any) is non-zero, so an EOB never follows a zero here.
-        enc.put_tree(
-            COEFF_TREE,
-            &probs[plane][COEFF_BANDS_MAP[eob]][ctx3],
-            DCT_EOB,
-        );
+        let band = COEFF_BANDS_MAP[eob];
+        super::bool_coder::walk_tree(COEFF_TREE, DCT_EOB, 0, |node, bit| {
+            sink.tree_bit(plane, band, ctx3, node, bit);
+        });
     }
     eob > first
+}
+
+/// Encodes one 4×4 block's coefficients to `enc`, mirroring [`decode_block`]. Returns whether the
+/// block has any non-zero coefficient.
+pub fn encode_block(
+    enc: &mut BoolEncoder,
+    coeffs: &[i16; 16],
+    plane: usize,
+    nonzero_ctx: usize,
+    probs: &CoeffProbs,
+) -> bool {
+    walk_block(coeffs, plane, nonzero_ctx, &mut WriteSink { enc, probs })
+}
+
+/// Tallies one 4×4 block's tree-coded bits into `counts` without writing anything. Returns whether
+/// the block has any non-zero coefficient.
+pub fn count_block(
+    counts: &mut CoeffCounts,
+    coeffs: &[i16; 16],
+    plane: usize,
+    nonzero_ctx: usize,
+) -> bool {
+    walk_block(coeffs, plane, nonzero_ctx, &mut CountSink { counts })
 }
 
 /// The next-coefficient complexity context from an absolute level: 0 for zero, 1 for ±1, 2 otherwise

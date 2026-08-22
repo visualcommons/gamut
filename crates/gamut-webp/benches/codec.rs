@@ -8,7 +8,7 @@
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
-use gamut_webp::{WebpDecoder, WebpEncoder};
+use gamut_webp::{Effort, NearLossless, WebpDecoder, WebpEncoder};
 
 fn main() {
     divan::main();
@@ -69,6 +69,66 @@ fn encode_lossy(bencher: Bencher, quality: u8) {
             let mut out = Vec::new();
             let image = ImageRef::<Rgb8>::new(black_box(&rgb), dims).unwrap();
             WebpEncoder::lossy(quality)
+                .encode_image(image, &mut out)
+                .unwrap();
+            out
+        });
+}
+
+/// The effort ladder's cost, which is the other half of what the knob trades. Lossless is where
+/// the spread is widest: the low rungs try a single encoding, the high ones race a few dozen.
+#[divan::bench(args = [0, 2, 4, 6])]
+fn encode_lossless_effort(bencher: Bencher, level: u8) {
+    let rgb = gradient_rgb(SIDE);
+    let dims = dims();
+    let effort = Effort::from_level(level).expect("0..=6");
+    bencher
+        .counter(BytesCount::new(source_bytes()))
+        .bench_local(|| {
+            let mut out = Vec::new();
+            let image = ImageRef::<Rgb8>::new(black_box(&rgb), dims).unwrap();
+            WebpEncoder::lossless()
+                .with_effort(effort)
+                .encode_image(image, &mut out)
+                .unwrap();
+            out
+        });
+}
+
+/// The lossy ladder: rung 0 skips the 4x4 search entirely, the upper rungs add a second entropy
+/// pass over the recorded macroblocks.
+#[divan::bench(args = [0, 2, 4, 6])]
+fn encode_lossy_effort(bencher: Bencher, level: u8) {
+    let rgb = gradient_rgb(SIDE);
+    let dims = dims();
+    let effort = Effort::from_level(level).expect("0..=6");
+    bencher
+        .counter(BytesCount::new(source_bytes()))
+        .bench_local(|| {
+            let mut out = Vec::new();
+            let image = ImageRef::<Rgb8>::new(black_box(&rgb), dims).unwrap();
+            WebpEncoder::lossy(75)
+                .with_effort(effort)
+                .encode_image(image, &mut out)
+                .unwrap();
+            out
+        });
+}
+
+/// Near-lossless costs a second lossless encode, because the encoder keeps whichever of the exact
+/// and preprocessed codings is smaller.
+#[divan::bench]
+fn encode_near_lossless(bencher: Bencher) {
+    let rgb = gradient_rgb(SIDE);
+    let dims = dims();
+    let strength = NearLossless::new(60).expect("0..=99");
+    bencher
+        .counter(BytesCount::new(source_bytes()))
+        .bench_local(|| {
+            let mut out = Vec::new();
+            let image = ImageRef::<Rgb8>::new(black_box(&rgb), dims).unwrap();
+            WebpEncoder::lossless()
+                .with_near_lossless(Some(strength))
                 .encode_image(image, &mut out)
                 .unwrap();
             out

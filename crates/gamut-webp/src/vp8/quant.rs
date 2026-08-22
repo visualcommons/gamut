@@ -116,12 +116,49 @@ pub fn dequantize(level: i16, factor: i16) -> i16 {
 
 /// Forward-quantizes a transform `coeff` by a dequant `factor`, rounding to the nearest level (ties
 /// away from zero). Reconstruction re-derives residue through [`dequantize`], so any rounding yields
-/// bit-exact recon; nearest minimizes the reconstruction error. Quality tuning (zero-bins, RD) is
-/// deferred to issue #32.
+/// bit-exact recon; nearest minimizes the reconstruction error.
 #[must_use]
 pub fn quantize(coeff: i16, factor: i16) -> i16 {
     debug_assert!(factor > 0, "dequant factor is always >= 4");
     round_div_nearest(i32::from(coeff), i32::from(factor)) as i16
+}
+
+/// Rounding bias for the DC coefficient, in 256ths of a level: **128, i.e. round-to-nearest, with
+/// no dead zone at all**.
+///
+/// This is deliberate rather than an oversight. A DC error shifts a whole 4x4 block's mean, which
+/// shows up as blocking — the most objectionable artefact the codec can produce — and on flat
+/// content the DC is the only coefficient there is, so a dead zone there costs several dB for
+/// almost no rate. Dead-zoning DC only pays alongside a rate-distortion search that can veto the
+/// cases where it hurts, which this encoder does not have.
+pub const BIAS_DC: u16 = 128;
+
+/// Dead-zone bias for AC coefficients, in 256ths of a level. Below 128, so coefficients just over
+/// the halfway mark collapse to zero.
+///
+/// AC error removes high-frequency detail, which is masked by the detail that remains, and AC
+/// coefficients are where nearly all the tokens are — so this is where a dead zone pays.
+pub const BIAS_AC: u16 = 120;
+
+/// Forward-quantizes with an explicit rounding `bias` in 256ths of a level: a coefficient becomes
+/// `floor(|coeff| / factor + bias / 256)`, signed back.
+///
+/// A bias under 128 is a **dead zone**. Coefficients that sit just above the halfway mark round
+/// down to zero instead of up to one, which costs a little distortion and saves the token, its
+/// sign, and often the end-of-block position too — a trade that pays because the rate saved is
+/// superlinear in the number of coded coefficients while the distortion added is not.
+///
+/// The spec has nothing to say here: RFC 6386 defines only *de*quantization, so how an encoder
+/// arrives at a level is entirely its own choice, and any choice reconstructs bit-exactly.
+#[must_use]
+pub fn quantize_biased(coeff: i16, factor: i16, bias: u16) -> i16 {
+    debug_assert!(factor > 0, "dequant factor is always >= 4");
+    let magnitude = i32::from(coeff).unsigned_abs();
+    let factor = u32::from(factor.unsigned_abs());
+    // `(|coeff| * 256 + bias * factor) / (factor * 256)`, kept in integers.
+    let level = (magnitude * 256 + u32::from(bias) * factor) / (factor * 256);
+    let level = level.min(i32::from(i16::MAX) as u32) as i16;
+    if coeff < 0 { -level } else { level }
 }
 
 #[cfg(test)]

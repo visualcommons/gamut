@@ -47,6 +47,8 @@ use gamut_color::Yuv420;
 use gamut_core::{Dimensions, Error, Result};
 use gamut_riff::FourCc;
 
+use crate::config::Effort;
+
 /// Which of WebP's two codestreams a job concerns — the discriminant that lets one trait pair serve
 /// both.
 ///
@@ -178,17 +180,36 @@ pub struct WebpEncodeRequest {
     codestream: WebpCodestream,
     dimensions: Dimensions,
     quality: u8,
+    effort: Effort,
 }
 
 impl WebpEncodeRequest {
-    /// Describes an encode job for `codestream` at `dimensions` and `quality` (`0..=100`).
+    /// Describes an encode job for `codestream` at `dimensions` and `quality` (`0..=100`), at the
+    /// default [`Effort`]. Chain [`with_effort`](Self::with_effort) to select another.
     #[must_use]
     pub const fn new(codestream: WebpCodestream, dimensions: Dimensions, quality: u8) -> Self {
         Self {
             codestream,
             dimensions,
             quality,
+            // Named literally rather than via `Effort::default()`, which is not const-callable.
+            effort: Effort::Default,
         }
+    }
+
+    /// Sets the compression [`Effort`] for this job, returning the updated request so calls chain.
+    #[must_use]
+    pub const fn with_effort(mut self, effort: Effort) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    /// The requested compression effort — a **hint**. Every level produces a conformant stream, so
+    /// a backend that ignores it is still correct; one that honours it must not change what the
+    /// codestream decodes to beyond what its mode already allows.
+    #[must_use]
+    pub const fn effort(&self) -> Effort {
+        self.effort
     }
 
     /// The codestream to produce.
@@ -683,6 +704,20 @@ mod tests {
         };
         assert_eq!(aref.codestream(), WebpCodestream::Vp8l);
         assert_eq!(aref.dimensions(), dims(3, 1));
+    }
+
+    #[test]
+    fn encode_requests_default_to_effort_4_and_carry_an_override() {
+        // `new` stays a 3-arg const fn, so effort arrives through the chainable setter; a request
+        // that never mentions effort must report libwebp's default method rather than 0.
+        let base = WebpEncodeRequest::new(WebpCodestream::Vp8, dims(8, 8), 50);
+        assert_eq!(base.effort(), Effort::Default);
+        let slow = base.with_effort(Effort::Slowest);
+        assert_eq!(slow.effort(), Effort::Slowest);
+        // The override must leave the rest of the job description alone.
+        assert_eq!(slow.codestream(), base.codestream());
+        assert_eq!(slow.dimensions(), base.dimensions());
+        assert_eq!(slow.quality(), base.quality());
     }
 
     #[test]

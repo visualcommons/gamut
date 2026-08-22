@@ -13,7 +13,7 @@ const HASH_MULTIPLIER: u32 = 0x1e35_a7bd;
 
 /// Minimum and maximum `color_cache_code_bits` (RFC 9649 §3.6.3).
 const MIN_CACHE_BITS: u32 = 1;
-const MAX_CACHE_BITS: u32 = 11;
+pub(crate) const MAX_CACHE_BITS: u32 = 11;
 
 /// A VP8L color cache: `2^bits` slots, each holding one ARGB color, all initialized to zero.
 #[derive(Debug, Clone)]

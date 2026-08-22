@@ -17,7 +17,9 @@ fn valid_payload() -> Vec<u8> {
         vec![120u8; 24 * 16],
     )
     .unwrap();
-    encode_frame(&yuv, 40).0
+    encode_frame(&yuv, 40)
+        .expect("fixture fits the partition-size fields")
+        .0
 }
 
 #[test]

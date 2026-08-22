@@ -146,14 +146,33 @@ fn log2_partitions(count: u8) -> u32 {
     u32::from(count).trailing_zeros()
 }
 
+/// The largest control-partition size the frame tag can describe: the field is 19 bits wide
+/// (RFC 6386 §9.1, bits 5-23 of the 3-byte tag), so 512 KiB - 1 is a hard format ceiling, not an
+/// implementation limit. libwebp reports the same condition as `VP8_ENC_ERROR_PARTITION0_OVERFLOW`.
+pub const MAX_FIRST_PARTITION_SIZE: u32 = (1 << 19) - 1;
+
 /// Writes the 10-byte uncompressed data chunk for a key frame (RFC 6386 §19.1) to `out`:
 /// the frame tag (with `first_partition_size` and `show_frame = 1`), the start code, and the
 /// little-endian width/height + scale codes.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if `first_partition_size` exceeds
+/// [`MAX_FIRST_PARTITION_SIZE`]. The size shares a 3-byte tag with the version and show-frame
+/// bits, so an oversized value would silently lose its high bits and describe a partition
+/// boundary that is not there — a stream no decoder can read. Reporting it is the only honest
+/// option: the ceiling is the format's.
 pub fn write_uncompressed_chunk(
     header: &Vp8FrameHeader,
     first_partition_size: u32,
     out: &mut Vec<u8>,
-) {
+) -> Result<()> {
+    if first_partition_size > MAX_FIRST_PARTITION_SIZE {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: control partition exceeds the frame tag's 19-bit size field",
+        ));
+    }
     // key_frame bit (bit 0) = 0; version in bits 1-3; show_frame = 1 in bit 4; size in bits 5-23.
     let tag = (u32::from(header.version) << 1) | (1 << 4) | (first_partition_size << 5);
     out.push((tag & 0xff) as u8);
@@ -166,6 +185,7 @@ pub fn write_uncompressed_chunk(
     let v = u32::from(header.height) | (u32::from(header.vertical_scale) << 14);
     out.push((v & 0xff) as u8);
     out.push(((v >> 8) & 0xff) as u8);
+    Ok(())
 }
 
 /// Parses the uncompressed data chunk (RFC 6386 §19.1).
@@ -379,7 +399,11 @@ fn read_mb_lf_adjustments(dec: &mut BoolDecoder) -> LoopFilterDeltas {
 /// encoder `enc`, leaving it open for the per-macroblock records that follow. Segmentation,
 /// per-macroblock loop-filter adjustments, and coefficient-probability updates are emitted as
 /// configured.
-pub fn write_frame_header(enc: &mut BoolEncoder, header: &Vp8FrameHeader) {
+pub fn write_frame_header(
+    enc: &mut BoolEncoder,
+    header: &Vp8FrameHeader,
+    coeff_probs: &tokens::CoeffProbs,
+) {
     enc.put_literal(u32::from(header.color_space), 1);
     enc.put_flag(!header.clamp_required); // clamping_type: 1 = no clamp needed
     enc.put_flag(header.segmentation.enabled);
@@ -393,7 +417,9 @@ pub fn write_frame_header(enc: &mut BoolEncoder, header: &Vp8FrameHeader) {
     enc.put_literal(log2_partitions(header.token_partitions), 2);
     write_quant_indices(enc, &header.quant);
     enc.put_flag(header.refresh_entropy_probs);
-    tokens::write_coeff_prob_updates(enc, &DEFAULT_COEFF_PROBS, &DEFAULT_COEFF_PROBS);
+    // The record is a delta against the key-frame defaults, so passing the defaults themselves
+    // emits the all-"no update" record a single-pass encoder needs.
+    tokens::write_coeff_prob_updates(enc, coeff_probs, &DEFAULT_COEFF_PROBS);
     enc.put_flag(header.mb_no_skip_coeff);
     if header.mb_no_skip_coeff {
         enc.put_literal(u32::from(header.prob_skip_false), 8);
@@ -485,10 +511,11 @@ mod tests {
     /// Encodes a header to a complete (header-only) VP8 bitstream and decodes it back.
     fn roundtrip(header: &Vp8FrameHeader) {
         let mut enc = BoolEncoder::new();
-        write_frame_header(&mut enc, header);
+        write_frame_header(&mut enc, header, &DEFAULT_COEFF_PROBS);
         let part0 = enc.finish();
         let mut stream = Vec::new();
-        write_uncompressed_chunk(header, part0.len() as u32, &mut stream);
+        write_uncompressed_chunk(header, part0.len() as u32, &mut stream)
+            .expect("a header-only partition is far inside the 19-bit size field");
         stream.extend_from_slice(&part0);
 
         let chunk = read_uncompressed_chunk(&stream).expect("chunk");
@@ -504,6 +531,33 @@ mod tests {
             probs, DEFAULT_COEFF_PROBS,
             "minimal header carries no prob updates"
         );
+    }
+
+    /// The frame tag's size field is 19 bits, and it shares its three bytes with the version and
+    /// show-frame bits: a control partition of 512 KiB or more used to lose its high bit there and
+    /// describe a partition boundary that is not in the stream, which every decoder rejects — a
+    /// silently unreadable file from a successful encode. A frame can genuinely reach this: the
+    /// per-macroblock mode records of a `B_PRED`-heavy 16-megapixel frame fill partition 0 well
+    /// past the ceiling. The boundary is pinned from both sides, and the rejection is asserted on
+    /// its message so removing the guard cannot pass by tripping some later check.
+    #[test]
+    fn oversized_control_partition_is_reported_not_truncated() {
+        let header = sample_header();
+        // Exactly at the ceiling: describable, and it round-trips through the reader unchanged.
+        let mut stream = Vec::new();
+        write_uncompressed_chunk(&header, MAX_FIRST_PARTITION_SIZE, &mut stream)
+            .expect("the ceiling itself is encodable");
+        let chunk = read_uncompressed_chunk(&stream).expect("chunk");
+        assert_eq!(chunk.first_partition_size, MAX_FIRST_PARTITION_SIZE);
+        // One byte over: rejected, and nothing is appended to the caller's buffer.
+        let mut stream = Vec::new();
+        let err = write_uncompressed_chunk(&header, MAX_FIRST_PARTITION_SIZE + 1, &mut stream)
+            .expect_err("one byte past the field must not be encodable");
+        assert!(
+            err.to_string().contains("control partition"),
+            "unexpected error: {err}"
+        );
+        assert!(stream.is_empty(), "a rejected write must emit no bytes");
     }
 
     #[test]
@@ -664,7 +718,7 @@ mod tests {
             vertical_scale: 0,
         };
         let mut enc = BoolEncoder::new();
-        write_frame_header(&mut enc, &header);
+        write_frame_header(&mut enc, &header, &DEFAULT_COEFF_PROBS);
         let bytes = enc.finish();
         let (decoded, _) = read_frame_header(&chunk, &mut BoolDecoder::new(&bytes));
         assert_eq!(decoded.segmentation, header.segmentation);
@@ -691,7 +745,7 @@ mod tests {
         // `write_uncompressed_chunk` always sets show_frame (tag bit 4); a round-trip must read it
         // back true — pinning the `>> 4` shift and `!= 0` test (`<< 4` / `== 0` would clear it).
         let mut stream = Vec::new();
-        write_uncompressed_chunk(&sample_header(), 0, &mut stream);
+        write_uncompressed_chunk(&sample_header(), 0, &mut stream).expect("zero fits");
         assert!(read_uncompressed_chunk(&stream).expect("chunk").show_frame);
         // A frame tag with bit 4 clear must decode to show_frame = false — pinning the `& 1` mask
         // against `| 1` / `^ 1`, which would force the bit set.
@@ -724,7 +778,7 @@ mod tests {
             vertical_scale: 0,
         };
         let mut enc = BoolEncoder::new();
-        write_frame_header(&mut enc, &header);
+        write_frame_header(&mut enc, &header, &DEFAULT_COEFF_PROBS);
         let bytes = enc.finish();
         let (decoded, _) = read_frame_header(&chunk, &mut BoolDecoder::new(&bytes));
         assert_eq!(decoded.segmentation, header.segmentation);

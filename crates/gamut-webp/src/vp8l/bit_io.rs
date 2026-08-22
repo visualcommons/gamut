@@ -150,8 +150,11 @@ impl BitWriter {
     }
 
     /// Number of bits written so far (including any pending partial byte).
+    ///
+    /// The measurement hook the encoder's keep-the-smallest choices compare on: a candidate is
+    /// written into a scratch writer and scored by this, in bits rather than bytes, because the
+    /// stream is byte-padded only once at the very end.
     #[must_use]
-    #[cfg(test)]
     pub fn bit_len(&self) -> usize {
         self.buf.len() * 8 + self.bits_in_acc as usize
     }

@@ -33,6 +33,10 @@ gamut convert input.png output.avif
 # Encode WebP: lossless VP8L by default, or lossy VP8 with --lossy (transparency is preserved).
 gamut convert input.png output.webp
 gamut convert input.png output.webp --lossy --quality 80
+# --webp-effort 0..=6 trades encode time for size (libwebp's method; default 4).
+gamut convert input.png output.webp --webp-effort 6
+# --webp-near-lossless 0..=99 quantizes colour before lossless coding (omit or 100 = off).
+gamut convert input.png output.webp --webp-near-lossless 60
 
 # Encode JPEG XL: lossless by default, or lossy with --jxl-distance (~1.0 = visually lossless).
 # --jxl-effort 1..=10 tunes speed vs density; --jxl-container emits the ISO BMFF .jxl box format.

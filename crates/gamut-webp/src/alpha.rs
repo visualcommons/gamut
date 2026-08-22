@@ -11,6 +11,8 @@
 use gamut_color::clip_pixel8;
 use gamut_core::{Dimensions, Error, Result};
 
+use crate::config::Effort;
+use crate::vp8::effort::{AlphaEffort, EFFORT_TABLE};
 use crate::vp8l::bit_io::BitReader;
 use crate::vp8l::decoder::decode_image;
 use crate::vp8l::encoder::encode_image;
@@ -159,16 +161,27 @@ pub(crate) fn write_raw_alph(plane: &[u8], width: usize, height: usize) -> Vec<u
     out
 }
 
-/// Builds a **lossless-compressed** `ALPH` chunk payload (compression method `C=1`): the alpha values
-/// are placed in the green channel of an opaque ARGB image and encoded as a headerless VP8L
-/// image-stream (RFC 9649 §2.7.1). No pre-filter is applied (`F=0`); the VP8L spatial predictors do
-/// the decorrelation.
+/// Builds a **lossless-compressed** `ALPH` chunk payload (compression method `C=1`): the alpha
+/// values — optionally pre-filtered by `method` — are placed in the green channel of an opaque ARGB
+/// image and encoded as a headerless VP8L image-stream (RFC 9649 §2.7.1).
+///
+/// The pre-filter and the compression method are independent fields in the chunk header, and the
+/// decoder unfilters after decompressing either way. Applying one is not obviously a win — the VP8L
+/// spatial predictors already decorrelate — which is exactly why the choice is searched rather than
+/// assumed at the top of the effort ladder.
 ///
 /// # Errors
 ///
 /// Propagates a VP8L encoding error (only a dimension mismatch, which cannot occur here).
-fn write_compressed_alph(plane: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
-    let argb: Vec<u32> = plane
+fn write_compressed_alph(
+    plane: &[u8],
+    width: usize,
+    height: usize,
+    method: AlphaFilter,
+    effort: Effort,
+) -> Result<Vec<u8>> {
+    let residuals = filter(plane, width, height, method);
+    let argb: Vec<u32> = residuals
         .iter()
         .map(|&a| 0xff00_0000 | (u32::from(a) << 8))
         .collect();
@@ -176,9 +189,9 @@ fn write_compressed_alph(plane: &[u8], width: usize, height: usize) -> Result<Ve
         width: width as u32,
         height: height as u32,
     };
-    let stream = encode_image(&argb, dims)?;
+    let stream = encode_image(&argb, dims, effort)?;
     let mut out = Vec::with_capacity(1 + stream.len());
-    out.push(0x01); // P = 0, F = 0, C = 1 (lossless)
+    out.push(method.code() << 2 | 0x01); // P = 0, C = 1 (lossless)
     out.extend_from_slice(&stream);
     Ok(out)
 }
@@ -189,13 +202,44 @@ fn write_compressed_alph(plane: &[u8], width: usize, height: usize) -> Result<Ve
 ///
 /// Propagates a VP8L encoding error from the compressed path.
 pub fn write_alph(plane: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
-    let raw = write_raw_alph(plane, width, height);
-    let compressed = write_compressed_alph(plane, width, height)?;
-    Ok(if compressed.len() < raw.len() {
-        compressed
-    } else {
-        raw
-    })
+    write_alph_with_effort(plane, width, height, Effort::default())
+}
+
+/// Builds the smaller of the raw and lossless-compressed `ALPH` payloads, spending `effort` on the
+/// compressed path's VP8L encode.
+///
+/// The alpha plane is stored **losslessly at every effort level** — the knob only chooses how hard
+/// the lossless coder searches.
+///
+/// # Errors
+///
+/// Propagates a VP8L encoding error from the compressed path.
+pub fn write_alph_with_effort(
+    plane: &[u8],
+    width: usize,
+    height: usize,
+    effort: Effort,
+) -> Result<Vec<u8>> {
+    let mut best = write_raw_alph(plane, width, height);
+    // The compressed path's pre-filter is a free choice the decoder inverts either way. Most rungs
+    // leave it off and let the VP8L spatial predictors do the decorrelation; the top rungs search
+    // all four, which costs a full VP8L encode each and is why it sits where it does on the ladder.
+    let methods: &[AlphaFilter] = match EFFORT_TABLE[effort.level() as usize].alpha {
+        AlphaEffort::Balanced => &[AlphaFilter::None],
+        AlphaEffort::Exhaustive => &[
+            AlphaFilter::None,
+            AlphaFilter::Horizontal,
+            AlphaFilter::Vertical,
+            AlphaFilter::Gradient,
+        ],
+    };
+    for &method in methods {
+        let candidate = write_compressed_alph(plane, width, height, method, effort)?;
+        if candidate.len() < best.len() {
+            best = candidate;
+        }
+    }
+    Ok(best)
 }
 
 /// Decodes an `ALPH` chunk payload into the alpha plane (RFC 9649 §2.7.1), handling both the raw
@@ -286,6 +330,44 @@ mod tests {
         assert_eq!(read_alph(&chunk, w, h).unwrap(), plane);
     }
 
+    /// The filter method lives in bits 2-3 of the `ALPH` header byte (RFC 9649 §2.7.1), beside the
+    /// compression method in bits 0-1. Writing it into the wrong bits still produces a chunk the
+    /// reader accepts — it just unfilters with the wrong method, so the plane comes back wrong.
+    /// Every method is round-tripped through the compressed writer with a plane that is not
+    /// filter-invariant, which is what makes a misplaced field observable.
+    #[test]
+    fn every_alpha_filter_survives_the_compressed_round_trip() {
+        let (w, h) = (12usize, 9usize);
+        // Gradients in both axes plus a corner discontinuity: no two filters agree on this plane.
+        let plane: Vec<u8> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                ((x * 9 + y * 23) % 256) as u8
+            })
+            .collect();
+        for method in [
+            AlphaFilter::None,
+            AlphaFilter::Horizontal,
+            AlphaFilter::Vertical,
+            AlphaFilter::Gradient,
+        ] {
+            let payload = write_compressed_alph(&plane, w, h, method, Effort::default())
+                .expect("the plane matches the dimensions");
+            assert_eq!(
+                payload[0] & 0x03,
+                0x01,
+                "compression method must be lossless for {method:?}"
+            );
+            assert_eq!(
+                (payload[0] >> 2) & 0x03,
+                method.code(),
+                "filter method must occupy bits 2-3 for {method:?}"
+            );
+            let back = read_alph(&payload, w, h).expect("round trip");
+            assert_eq!(back, plane, "{method:?} did not round-trip");
+        }
+    }
+
     #[test]
     fn read_alph_rejects_bad_input() {
         assert!(read_alph(&[], 4, 4).is_err());
@@ -300,7 +382,8 @@ mod tests {
     fn compressed_alph_round_trips() {
         let (w, h) = (20, 12);
         let plane = pattern(w, h);
-        let chunk = write_compressed_alph(&plane, w, h).unwrap();
+        let chunk =
+            write_compressed_alph(&plane, w, h, AlphaFilter::None, Effort::default()).unwrap();
         assert_eq!(chunk[0] & 0x3, 1, "compression method is lossless");
         assert_eq!(read_alph(&chunk, w, h).unwrap(), plane);
     }

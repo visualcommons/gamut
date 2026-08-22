@@ -206,7 +206,7 @@ exclude_re = [
     # generates no such mutant. This is the only mutant the function produces.
     'replace AvifEncoder::lossless -> Self with Default::default\(\)',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
-    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75 }`); replacing the body with the
+    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
     # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
     'replace WebpEncoder::lossless -> Self with Default::default\(\)',

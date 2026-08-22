@@ -22,14 +22,14 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
   `WebpDecoder`. Verified bit-exact against libwebp (`libwebp-sys`) and against gamut's own decoder.
 - **M1** — ✅ **done**: VP8L full — predictor / color / color-indexing transforms, LZ77 backward
   references, color cache, meta prefix codes — bit-exact lossless. The **decoder** reads the entire
-  spec (any conformant stream); the **encoder** emits every feature with simple heuristics, leaving
-  compression-density tuning (optimal mode/parse/clustering) to issue #31.
+  spec (any conformant stream); the **encoder** emits every feature and, since issue #31, chooses
+  between candidate encodings of them under the `Effort` ladder.
 - **M2** — ✅ **done**: **VP8 lossy** key-frame intra — boolean entropy coder, frame header, intra
   prediction (16×16 DC/V/H/TM, per-4×4 B_PRED, chroma), Y2/WHT + integer 4×4 DCT, dequantization,
   zig-zag token coding, simple + normal loop filters, quantizer segmentation, 1/2/4/8 token
   partitions, per-macroblock skip. BT.601 YCbCr 4:2:0 added to gamut-color. `WebpEncoder::lossy`.
   **Bit-exact against libwebp in both directions** (gamut↔libwebp YUV) plus a malformed-input
-  robustness corpus.
+  robustness corpus. Rate/entropy tuning under the `Effort` ladder landed with issue #32.
 - **M3** — ✅ **done**: Extended container (encode + decode) — `VP8X` feature header + alpha (`ALPH`,
   raw and lossless), simple→extended promotion, RGBA API (`encode_rgba8` / `decode_to_rgba8`).
   libwebp recovers gamut's exact alpha and gamut recovers libwebp's. Alpha is a flagship still-image
@@ -284,4 +284,9 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | CLI `gamut convert … .webp` (encode) + `.webp` decode input | gamut-cli | ✅ | M0 |
 | codestream backend registries (`WebpCodestreamDecoder`/`WebpCodestreamEncoder`, push order + built-in tails) | issue #275 | ✅ | M6 |
 | `gamut-codec-abi` adapters (`AbiDecoderBackend` / `AbiEncoderBackend`, `VP8 `/`VP8L` codec ids) | issue #241 | ✅ | M6 |
+| `Effort` compression ladder (libwebp `method` `0..=6`) on both codestreams | issue #261 | ✅ | M4 |
+| VP8L candidate-plan search: transform chain, palette order, cache size, grouping, LZ77 depth | issue #31 | ✅ | M4 |
+| VP8 two-pass entropy: derived coefficient probabilities + measured skip probability | issue #32 | ✅ | M4 |
+| VP8 dead-zone quantizer (AC only; DC stays round-to-nearest) | issue #32 | ✅ | M4 |
+| near-lossless preprocessing (`NearLossless`, host-side RGB quantization before VP8L) | issue #261 | ✅ | M4 |
 | wasm / ffi bindings for WebP | gamut-{wasm,ffi} | ☐ | future |

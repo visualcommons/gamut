@@ -38,6 +38,21 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   segmentation, token partitions, and skip); `WebpDecoder` decodes any conformant key frame.
 - **Alpha** — `EncodeImage<Rgba8>` / `DecodeImage<Rgba8>`. A transparent lossy image uses the extended
   (`VP8X`) format with an `ALPH` chunk (raw or lossless); an opaque one stays a simple file.
+- **Compression effort** — `WebpEncoder::with_effort(Effort)` is libwebp's `method` dial, `0..=6`,
+  defaulting to `4`. It applies to both codestreams and never changes what the format guarantees:
+  lossless stays bit-exact at every rung, lossy keeps its quality target. The lossless rungs race
+  candidate encodings (transform chain, palette ordering, colour-cache size, entropy grouping, LZ77
+  depth) and keep the smallest — each rung's candidates are a superset of the rung below's, so
+  **size is non-increasing in effort by construction**. The lossy rungs add 4×4 prediction search,
+  coefficient probabilities derived from the coded frame, a measured skip probability, and a
+  dead-zone quantizer. On a 256×256 gradient, lossless costs ~9 ms at rung 0, ~156 ms at the
+  default and ~290 ms at rung 6; lossy is far flatter (~2.4 ms against ~3.3 ms). Rungs 0–2 are the
+  escape hatch when encode time matters more than bytes.
+- **Near-lossless** — `WebpEncoder::with_near_lossless(Some(NearLossless::new(n)?))` rounds the
+  source's colour channels to a coarser grid before lossless coding, on libwebp's `0..=99` strength
+  scale. The stream stays bit-exact — to the quantized image. Red/green/blue move by at most
+  `NearLossless::max_deviation()`; **alpha is never touched**. Turning it on can never enlarge a
+  file: the encoder codes both ways and keeps the smaller.
 - **Embedded metadata** — `WebpEncoder::with_icc_profile` / `with_exif` / `with_xmp` embed the `ICCP`,
   `EXIF`, and `XMP ` chunks; the `gamut_webp::metadata` free function reads them back out of any WebP
   file without decoding pixels. Payloads are carried **verbatim** — never parsed or reserialized — so

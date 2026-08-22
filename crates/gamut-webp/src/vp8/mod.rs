@@ -16,6 +16,8 @@
 pub mod frame;
 
 pub(crate) mod bool_coder;
+pub(crate) mod cost;
+pub(crate) mod effort;
 pub(crate) mod header;
 pub(crate) mod loop_filter;
 pub(crate) mod prediction;

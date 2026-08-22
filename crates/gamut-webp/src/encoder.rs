@@ -21,9 +21,10 @@ use crate::backend::{
     RasterRef, SharedEncoder, WebpCodestream, WebpCodestreamEncoder, WebpEncodeRequest,
     dispatch_encode,
 };
-use crate::config::{WebpConfig, WebpMode};
-use crate::vp8::frame::encode_frame;
+use crate::config::{Effort, NearLossless, WebpConfig, WebpMode};
+use crate::vp8::frame::{EncodeOptions, encode_frame_filtered};
 use crate::vp8l::encoder::encode as encode_vp8l;
+use crate::vp8l::near_lossless;
 use crate::vp8l::transform::make_argb;
 
 /// Maps a `0..=100` quality to a VP8 base quantizer index (`0..=127`); higher quality → lower index
@@ -96,6 +97,7 @@ impl WebpEncoder {
             config: WebpConfig {
                 mode: WebpMode::Lossy,
                 quality,
+                ..WebpConfig::default()
             },
             ..Self::default()
         }
@@ -137,6 +139,58 @@ impl WebpEncoder {
         self
     }
 
+    /// Sets the compression [`Effort`] — libwebp's `method` dial, `0..=6`.
+    ///
+    /// Applies to both modes. Higher effort spends more time searching for a smaller file; it
+    /// never changes what a lossless encode reproduces (still bit-exact) nor a lossy encode's
+    /// [`quality`](WebpConfig::quality) target. Calling this twice keeps the last value.
+    #[must_use]
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        self.config.effort = effort;
+        self
+    }
+
+    /// Sets (or, with `None`, clears) near-lossless preprocessing.
+    ///
+    /// Applies to [`WebpMode::Lossless`] only; a lossy encoder ignores it, exactly as a lossless
+    /// encoder ignores [`quality`](WebpConfig::quality). The coded stream stays a conformant,
+    /// bit-exact VP8L stream — what changes is its *input*, which is quantized in smooth regions
+    /// first. Red, green and blue move by at most
+    /// [`NearLossless::max_deviation`]; **alpha is never touched**. Calling this twice keeps the
+    /// last value.
+    #[must_use]
+    pub fn with_near_lossless(mut self, near_lossless: Option<NearLossless>) -> Self {
+        self.config.near_lossless = near_lossless;
+        self
+    }
+
+    /// Encodes the lossless codestream, applying near-lossless preprocessing when configured.
+    ///
+    /// With a strength set, the image is coded **both ways** and the smaller result kept. That
+    /// guard exists because quantization is not unconditionally a win: a gentle setting can shift
+    /// every value without meaningfully shrinking the residual alphabet, costing a few bytes rather
+    /// than saving them. Keeping the smaller makes the knob monotone from the caller's point of
+    /// view — turning it on can never inflate a file — at the cost of one extra encode on a path
+    /// that is opt-in anyway.
+    ///
+    /// Preprocessing is host-side and runs **before** the backend dispatch, so a pluggable
+    /// codestream backend simply receives already-quantized pixels and needs no knob of its own.
+    /// It also lands before the palette is built, since quantization is precisely what can drop an
+    /// image under the 256-colour threshold and make the palette path available.
+    fn encode_lossless(&self, argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
+        let exact = self.encode_vp8l_codestream(argb, dims)?;
+        let Some(strength) = self.config.near_lossless else {
+            return Ok(exact);
+        };
+        let quantized = near_lossless::apply(argb, strength.bits());
+        let candidate = self.encode_vp8l_codestream(&quantized, dims)?;
+        Ok(if candidate.len() < exact.len() {
+            candidate
+        } else {
+            exact
+        })
+    }
+
     /// Re-emits `chunks` whose FourCC the container spec does not define, after the metadata and in
     /// the order given — what RFC 9649 §2.7.1.6 asks of writers: "writers SHOULD preserve them in
     /// their original order".
@@ -173,25 +227,33 @@ impl WebpEncoder {
     /// Encodes the lossless codestream for `argb`, via a backend when one accepts, else the
     /// built-in VP8L encoder.
     fn encode_vp8l_codestream(&self, argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
-        let req = WebpEncodeRequest::new(WebpCodestream::Vp8l, dims, self.config.quality);
+        let req = WebpEncodeRequest::new(WebpCodestream::Vp8l, dims, self.config.quality)
+            .with_effort(self.config.effort);
         let raster = RasterRef::Argb {
             dimensions: dims,
             pixels: argb,
         };
         match dispatch_encode(&self.backends, &req, &raster) {
             Some(result) => result,
-            None => encode_vp8l(argb, dims),
+            None => encode_vp8l(argb, dims, self.config.effort),
         }
     }
 
     /// Encodes the lossy codestream for `yuv`, via a backend when one accepts, else the built-in
     /// VP8 encoder.
     fn encode_vp8_codestream(&self, yuv: &Yuv420, dims: Dimensions) -> Result<Vec<u8>> {
-        let req = WebpEncodeRequest::new(WebpCodestream::Vp8, dims, self.config.quality);
+        let req = WebpEncodeRequest::new(WebpCodestream::Vp8, dims, self.config.quality)
+            .with_effort(self.config.effort);
         let raster = RasterRef::Yuv420(yuv);
         match dispatch_encode(&self.backends, &req, &raster) {
             Some(result) => result,
-            None => Ok(encode_frame(yuv, quality_to_quant(self.config.quality)).0),
+            None => {
+                let opts = EncodeOptions {
+                    effort: self.config.effort,
+                    ..EncodeOptions::default()
+                };
+                Ok(encode_frame_filtered(yuv, quality_to_quant(self.config.quality), opts)?.0)
+            }
         }
     }
 
@@ -283,7 +345,7 @@ impl WebpEncoder {
                     .iter()
                     .map(|p| make_argb(0xff, p[0], p[1], p[2]))
                     .collect();
-                let bitstream = self.encode_vp8l_codestream(&argb, dims)?;
+                let bitstream = self.encode_lossless(&argb, dims)?;
                 self.wrap(dims, WebpCodestream::Vp8l, &bitstream, None, false)
             }
             WebpMode::Lossy => {
@@ -318,7 +380,7 @@ impl WebpEncoder {
                     .iter()
                     .map(|p| make_argb(p[3], p[0], p[1], p[2]))
                     .collect();
-                let bitstream = self.encode_vp8l_codestream(&argb, dims)?;
+                let bitstream = self.encode_lossless(&argb, dims)?;
                 // A VP8L bitstream carries its own alpha, so there is no `ALPH` chunk — but an
                 // extended file must still advertise the transparency in its `VP8X` header.
                 self.wrap(dims, WebpCodestream::Vp8l, &bitstream, None, transparent)
@@ -380,6 +442,26 @@ mod tests {
         let lossy = WebpEncoder::lossy(40);
         assert_eq!(lossy.config().mode, WebpMode::Lossy);
         assert_eq!(lossy.config().quality, 40);
+    }
+
+    #[test]
+    fn with_effort_sets_the_knob_without_disturbing_the_mode() {
+        // Effort is orthogonal to mode and quality: setting it must not perturb either, and the
+        // last call wins.
+        assert_eq!(WebpEncoder::new().config().effort, Effort::Default);
+        let enc = WebpEncoder::lossy(40)
+            .with_effort(Effort::Slowest)
+            .with_effort(Effort::Fastest);
+        assert_eq!(enc.config().effort, Effort::Fastest);
+        assert_eq!(enc.config().mode, WebpMode::Lossy);
+        assert_eq!(enc.config().quality, 40);
+        assert_eq!(
+            WebpEncoder::lossless()
+                .with_effort(Effort::Slower)
+                .config()
+                .effort,
+            Effort::Slower
+        );
     }
 
     #[test]

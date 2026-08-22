@@ -502,58 +502,268 @@ impl PrefixEncoder {
     }
 }
 
-/// Writes a prefix code described by `lengths` using the *normal code length code* (RFC 9649
-/// §3.7.2).
-///
-/// The code lengths are themselves prefix-coded; for simplicity each length is emitted literally
-/// (no 16/17/18 run compression — that density win is deferred to issue #31), `max_symbol` is left
-/// at the alphabet default, and the meta code is itself length-limited to the 3-bit field range.
-pub fn write_normal_prefix_code(w: &mut BitWriter, lengths: &[u8]) {
-    w.write_bits(0, 1); // 0 = normal (not simple) code length code.
+/// One way of describing a set of code lengths on the wire. Every variant reconstructs *exactly*
+/// the same lengths, so the choice between them is pure density (RFC 9649 §3.7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Description {
+    /// The *simple code length code*: 1 or 2 symbols, implicitly at code length 1.
+    Simple,
+    /// The *normal code length code*: the lengths are themselves prefix-coded.
+    ///
+    /// `run_coded` uses the repeat codes 16/17/18 rather than emitting every length literally;
+    /// `trim` sets an explicit `max_symbol` so trailing zero lengths are not coded at all.
+    Normal { run_coded: bool, trim: bool },
+}
 
-    // Histogram the literal code-length symbols (only values 0..=15 occur in this literal scheme).
-    let mut cl_hist = [0u32; CODE_LENGTH_CODES];
-    for &len in lengths {
-        if (len as usize) < CODE_LENGTH_CODES {
-            cl_hist[len as usize] += 1;
+/// The four description variants, cheapest-looking first (order only breaks exact ties).
+const DESCRIPTIONS: [Description; 5] = [
+    Description::Simple,
+    Description::Normal {
+        run_coded: true,
+        trim: true,
+    },
+    Description::Normal {
+        run_coded: true,
+        trim: false,
+    },
+    Description::Normal {
+        run_coded: false,
+        trim: true,
+    },
+    Description::Normal {
+        run_coded: false,
+        trim: false,
+    },
+];
+
+/// A code-length code symbol plus its extra-bit payload, as the reader consumes it.
+struct ClSymbol {
+    symbol: u8,
+    extra_bits: u32,
+    extra_value: u32,
+}
+
+/// The symbols used by `lengths`, and whether the *simple* description can carry them.
+///
+/// The simple description codes the second symbol in a fixed 8-bit field and the first in 1 or 8
+/// bits, so it can only express symbols `<= 255` — the green alphabet runs past that once a colour
+/// cache is in play, which is exactly the case this guard exists for.
+fn simple_symbols(lengths: &[u8]) -> Option<Vec<u16>> {
+    let used: Vec<usize> = (0..lengths.len()).filter(|&i| lengths[i] > 0).collect();
+    if used.is_empty() || used.len() > 2 {
+        return None;
+    }
+    // Both leaves of a two-symbol code sit at depth 1, and a lone leaf is the 0-bit single-symbol
+    // code; anything else is not what `Simple` reconstructs, so decline rather than corrupt.
+    if used.iter().any(|&i| lengths[i] != 1) || used.iter().any(|&i| i > 0xff) {
+        return None;
+    }
+    Some(used.iter().map(|&i| i as u16).collect())
+}
+
+/// Encodes `lengths[..count]` as a code-length symbol stream, optionally using the repeat codes.
+///
+/// Mirrors [`read_normal_prefix_code`]'s state machine exactly. Repeat code 16 repeats the last
+/// **nonzero** length the reader saw, and the reader does not update that on a zero, so a 16 is
+/// only ever emitted directly after the literal it repeats — never across an intervening zero run.
+fn code_length_symbols(lengths: &[u8], count: usize, run_coded: bool) -> Vec<ClSymbol> {
+    let literal = |value: u8| ClSymbol {
+        symbol: value,
+        extra_bits: 0,
+        extra_value: 0,
+    };
+    let mut out = Vec::new();
+    if !run_coded {
+        out.extend(lengths.iter().take(count).copied().map(literal));
+        return out;
+    }
+    let mut i = 0;
+    while i < count {
+        let value = lengths[i];
+        let run = lengths[i..count]
+            .iter()
+            .take_while(|&&l| l == value)
+            .count();
+        i += run;
+        if value == 0 {
+            let mut left = run;
+            while left >= 11 {
+                let repeat = left.min(138);
+                out.push(ClSymbol {
+                    symbol: 18,
+                    extra_bits: 7,
+                    extra_value: (repeat - 11) as u32,
+                });
+                left -= repeat;
+            }
+            while left >= 3 {
+                let repeat = left.min(10);
+                out.push(ClSymbol {
+                    symbol: 17,
+                    extra_bits: 3,
+                    extra_value: (repeat - 3) as u32,
+                });
+                left -= repeat;
+            }
+            out.extend((0..left).map(|_| literal(0)));
+        } else {
+            // The literal comes first so `prev_len` is this value before any 16 refers to it.
+            out.push(literal(value));
+            let mut left = run - 1;
+            while left >= 3 {
+                let repeat = left.min(6);
+                out.push(ClSymbol {
+                    symbol: 16,
+                    extra_bits: 2,
+                    extra_value: (repeat - 3) as u32,
+                });
+                left -= repeat;
+            }
+            out.extend((0..left).map(|_| literal(value)));
         }
     }
-    // The meta code's lengths are emitted in 3-bit fields, so they must fit in 7 bits.
-    let cl_lengths = build_length_limited_lengths(&cl_hist, 7);
-    let cl_encoder = PrefixEncoder::from_lengths(&cl_lengths);
+    out
+}
 
-    // Emit the meta code lengths in CODE_LENGTH_CODE_ORDER, trimming trailing zeros (min 4).
-    let mut num_code_lengths = CODE_LENGTH_CODES;
-    while num_code_lengths > 4 && cl_lengths[CODE_LENGTH_CODE_ORDER[num_code_lengths - 1]] == 0 {
-        num_code_lengths -= 1;
+/// The `(length_nbits_selector, length_nbits)` pair that can carry an explicit `max_symbol` of
+/// `count`, or `None` if `count` is out of the field's reach.
+///
+/// The reader recovers `max_symbol` as `2 + read_bits(2 + 2 * selector)`, so `count` must be at
+/// least 2 and `count - 2` must fit the chosen field.
+fn max_symbol_field(count: usize) -> Option<(u32, u32)> {
+    if count < 2 {
+        return None;
     }
-    w.write_bits((num_code_lengths - 4) as u32, 4);
-    for &order in CODE_LENGTH_CODE_ORDER.iter().take(num_code_lengths) {
-        w.write_bits(u32::from(cl_lengths[order]), 3);
-    }
+    (0..8u32).find_map(|selector| {
+        let nbits = 2 + 2 * selector;
+        ((count - 2) < (1usize << nbits)).then_some((selector, nbits))
+    })
+}
 
-    w.write_bits(0, 1); // max_symbol uses the alphabet default.
-    for &len in lengths {
-        cl_encoder.write_symbol(w, len as usize);
+/// Writes `lengths` under `description`, or returns `false` without writing if that description
+/// cannot express them.
+fn write_description(w: &mut BitWriter, lengths: &[u8], description: Description) -> bool {
+    match description {
+        Description::Simple => {
+            let Some(symbols) = simple_symbols(lengths) else {
+                return false;
+            };
+            w.write_bits(1, 1); // 1 = simple code length code.
+            w.write_bits((symbols.len() - 1) as u32, 1);
+            let symbol0 = symbols[0];
+            let is_first_8bits = u32::from(symbol0 > 1);
+            w.write_bits(is_first_8bits, 1);
+            w.write_bits(u32::from(symbol0), 1 + 7 * is_first_8bits);
+            if let Some(&symbol1) = symbols.get(1) {
+                w.write_bits(u32::from(symbol1), 8);
+            }
+            true
+        }
+        Description::Normal { run_coded, trim } => {
+            // Trimming describes only up to the last used symbol; the reader leaves the rest zero.
+            let count = if trim {
+                match lengths.iter().rposition(|&l| l > 0) {
+                    Some(last) => last + 1,
+                    None => return false,
+                }
+            } else {
+                lengths.len()
+            };
+            let symbols = code_length_symbols(lengths, count, run_coded);
+            // `max_symbol` bounds how many code-length symbols the reader consumes, not how many
+            // lengths they expand to, so it is the length of this stream.
+            let field = if trim {
+                match max_symbol_field(symbols.len()) {
+                    Some(field) => Some(field),
+                    None => return false,
+                }
+            } else {
+                None
+            };
+
+            let mut cl_hist = [0u32; CODE_LENGTH_CODES];
+            for s in &symbols {
+                cl_hist[s.symbol as usize] += 1;
+            }
+            // The meta code's lengths are emitted in 3-bit fields, so they must fit in 7 bits.
+            let cl_lengths = build_length_limited_lengths(&cl_hist, 7);
+            let cl_encoder = PrefixEncoder::from_lengths(&cl_lengths);
+
+            w.write_bits(0, 1); // 0 = normal (not simple) code length code.
+            // Emit the meta code lengths in CODE_LENGTH_CODE_ORDER, trimming trailing zeros (min 4).
+            let mut num_code_lengths = CODE_LENGTH_CODES;
+            while num_code_lengths > 4
+                && cl_lengths[CODE_LENGTH_CODE_ORDER[num_code_lengths - 1]] == 0
+            {
+                num_code_lengths -= 1;
+            }
+            w.write_bits((num_code_lengths - 4) as u32, 4);
+            for &order in CODE_LENGTH_CODE_ORDER.iter().take(num_code_lengths) {
+                w.write_bits(u32::from(cl_lengths[order]), 3);
+            }
+
+            match field {
+                Some((selector, nbits)) => {
+                    w.write_bits(1, 1);
+                    w.write_bits(selector, 3);
+                    w.write_bits((symbols.len() - 2) as u32, nbits);
+                }
+                None => w.write_bits(0, 1), // max_symbol uses the alphabet default.
+            }
+            for s in &symbols {
+                cl_encoder.write_symbol(w, s.symbol as usize);
+                w.write_bits(s.extra_value, s.extra_bits);
+            }
+            true
+        }
     }
 }
 
-/// Writes a prefix code for 1 or 2 symbols using the *simple code length code* (RFC 9649 §3.7.2).
-/// Each listed symbol is given code length 1. `symbols` must hold 1 or 2 entries; extra entries are
-/// ignored.
+/// Writes the code description for `lengths` in whichever encoding is smallest (RFC 9649 §3.7.2).
+///
+/// The candidates are the *simple* code (1-2 symbols), and the *normal* code with the lengths
+/// emitted literally or run-compressed with codes 16/17/18, each with and without an explicit
+/// `max_symbol` trimming trailing zero lengths. All of them reconstruct identical lengths, so
+/// picking the shortest is a pure density win — measured by writing each into a scratch
+/// [`BitWriter`] and comparing [`BitWriter::bit_len`], the crate's keep-the-smallest idiom.
+///
+/// This matters far more than it looks: an alphabet with a single used symbol (an unused distance
+/// code, or a constant alpha channel) costs 274 bits described literally and 4 bits as a simple
+/// code, and a prefix-code group carries five descriptions.
+pub fn write_prefix_code(w: &mut BitWriter, lengths: &[u8]) {
+    let mut best: Option<(usize, Description)> = None;
+    for &description in &DESCRIPTIONS {
+        let mut scratch = BitWriter::new();
+        if !write_description(&mut scratch, lengths, description) {
+            continue;
+        }
+        let bits = scratch.bit_len();
+        if best.is_none_or(|(best_bits, _)| bits < best_bits) {
+            best = Some((bits, description));
+        }
+    }
+    // `Normal { run_coded: false, trim: false }` can describe any length vector, so `best` is only
+    // `None` for an empty alphabet, which no caller produces.
+    if let Some((_, description)) = best {
+        write_description(w, lengths, description);
+    }
+}
+
+/// Writes a prefix code for 1 or 2 symbols using the *simple code length code* (RFC 9649 §3.7.2),
+/// bypassing [`write_prefix_code`]'s choice. Each listed symbol is given code length 1.
+///
+/// Test-only: it is how the decoder suites hand-build synthetic streams. Production encoding goes
+/// through [`write_prefix_code`], which reaches the same encoding when it is the smallest.
 #[cfg(test)]
 pub fn write_simple_prefix_code(w: &mut BitWriter, symbols: &[u16]) {
-    w.write_bits(1, 1); // 1 = simple code length code.
-    let num_symbols = symbols.len().clamp(1, 2);
-    w.write_bits((num_symbols - 1) as u32, 1);
-    let symbol0 = symbols.first().copied().unwrap_or(0);
-    let is_first_8bits = u32::from(symbol0 > 1);
-    w.write_bits(is_first_8bits, 1);
-    w.write_bits(u32::from(symbol0), 1 + 7 * is_first_8bits);
-    if num_symbols == 2 {
-        let symbol1 = symbols.get(1).copied().unwrap_or(0);
-        w.write_bits(u32::from(symbol1), 8);
+    let mut lengths = vec![0u8; 256];
+    for &symbol in symbols.iter().take(2) {
+        lengths[symbol as usize] = 1;
     }
+    assert!(
+        write_description(w, &lengths, Description::Simple),
+        "test helper called with symbols the simple code cannot express"
+    );
 }
 
 #[cfg(test)]
@@ -659,7 +869,7 @@ mod tests {
 
     #[test]
     fn normal_code_length_coding_round_trips() {
-        // Build a code, serialize it with write_normal_prefix_code, read it back, and confirm the
+        // Build a code, serialize it with write_prefix_code, read it back, and confirm the
         // reconstructed decoder agrees on a symbol stream.
         let mut hist = vec![0u32; 256];
         for (i, h) in hist.iter_mut().enumerate() {
@@ -670,7 +880,7 @@ mod tests {
 
         let stream: Vec<usize> = vec![0, 1, 2, 100, 255, 17, 42, 42, 7];
         let mut w = BitWriter::new();
-        write_normal_prefix_code(&mut w, &lengths);
+        write_prefix_code(&mut w, &lengths);
         for &s in &stream {
             encoder.write_symbol(&mut w, s);
         }
@@ -712,6 +922,168 @@ mod tests {
                 assert_eq!(decoder.read_symbol(&mut r).unwrap() as usize, s);
             }
         }
+    }
+
+    /// Round-trips `lengths` through one explicit [`Description`], returning its size in bits.
+    /// Panics if the description cannot express the lengths.
+    fn round_trip_description(lengths: &[u8], description: Description) -> usize {
+        let mut w = BitWriter::new();
+        assert!(
+            write_description(&mut w, lengths, description),
+            "{description:?} declined lengths it should accept"
+        );
+        let bits = w.bit_len();
+        let bytes = w.finish();
+        let mut r = BitReader::new(&bytes);
+        let decoder = read_prefix_code(&mut r, lengths.len()).expect("valid code description");
+        // Every used symbol must decode back to itself, which is the property that matters: the
+        // description is only correct if it reconstructs the very lengths the encoder coded with.
+        let encoder = PrefixEncoder::from_lengths(lengths);
+        for (symbol, _) in lengths.iter().enumerate().filter(|&(_, &l)| l > 0) {
+            let mut w2 = BitWriter::new();
+            encoder.write_symbol(&mut w2, symbol);
+            let payload = w2.finish();
+            let mut r2 = BitReader::new(&payload);
+            assert_eq!(
+                decoder.read_symbol(&mut r2).expect("symbol decodes") as usize,
+                symbol,
+                "{description:?} lost symbol {symbol}"
+            );
+        }
+        bits
+    }
+
+    /// Four runs of four length-4 symbols, separated by zero runs: a *complete* code (16 leaves at
+    /// depth 4) that still forces both repeat codes — 18/17 across the gaps and 16 inside each run.
+    fn grouped_runs() -> Vec<u8> {
+        let mut lengths = vec![0u8; 256];
+        for group in 0..4usize {
+            for i in 0..4usize {
+                lengths[group * 20 + i] = 4;
+            }
+        }
+        lengths
+    }
+
+    #[test]
+    fn every_description_reconstructs_the_same_code() {
+        // The four encodings are interchangeable by construction, so each must round-trip the same
+        // lengths. Cases chosen to exercise each one's edge: a lone symbol, two symbols, long zero
+        // runs (17/18), long equal-nonzero runs (16), and a run that straddles both.
+        let mut lone = vec![0u8; 256];
+        lone[0] = 1;
+        let mut two = vec![0u8; 256];
+        two[3] = 1;
+        two[200] = 1;
+        let uniform = vec![8u8; 256];
+        let mut trailing = vec![0u8; 280];
+        for l in trailing.iter_mut().take(4) {
+            *l = 2;
+        }
+        for lengths in [lone, two, grouped_runs(), uniform, trailing] {
+            for description in DESCRIPTIONS {
+                if write_description(&mut BitWriter::new(), &lengths, description) {
+                    round_trip_description(&lengths, description);
+                }
+            }
+            // And the chooser's output must round-trip too, whichever it picked.
+            let mut w = BitWriter::new();
+            write_prefix_code(&mut w, &lengths);
+            let bytes = w.finish();
+            let mut r = BitReader::new(&bytes);
+            read_prefix_code(&mut r, lengths.len()).expect("chosen description is readable");
+        }
+    }
+
+    #[test]
+    fn a_single_symbol_code_costs_four_bits() {
+        // The headline density win: a lone used symbol (an unused distance code, or a constant
+        // alpha channel) is 4 bits as a simple code where the literal normal code spends 274.
+        // Pinned absolutely, so any change that stops reaching the simple code is caught.
+        let mut lengths = vec![0u8; 256];
+        lengths[0] = 1;
+        let mut w = BitWriter::new();
+        write_prefix_code(&mut w, &lengths);
+        assert_eq!(w.bit_len(), 4);
+        assert_eq!(
+            round_trip_description(
+                &lengths,
+                Description::Normal {
+                    run_coded: false,
+                    trim: false
+                }
+            ),
+            274
+        );
+    }
+
+    #[test]
+    fn the_simple_description_declines_symbols_it_cannot_code() {
+        // The second simple symbol rides in a fixed 8-bit field, so a green alphabet extended by a
+        // colour cache can hold used symbols beyond 255. Coding those as `Simple` would silently
+        // truncate them, so the guard must decline and the chooser must fall back.
+        let mut lengths = vec![0u8; green_alphabet_size(64)];
+        lengths[300] = 1;
+        assert_eq!(simple_symbols(&lengths), None);
+        assert!(!write_description(
+            &mut BitWriter::new(),
+            &lengths,
+            Description::Simple
+        ));
+        round_trip_description(
+            &lengths,
+            Description::Normal {
+                run_coded: true,
+                trim: true,
+            },
+        );
+
+        // Two symbols where only one is out of range is equally undescribable.
+        let mut mixed = vec![0u8; green_alphabet_size(64)];
+        mixed[7] = 1;
+        mixed[280] = 1;
+        assert_eq!(simple_symbols(&mixed), None);
+    }
+
+    #[test]
+    fn repeat_code_16_never_crosses_a_zero_run() {
+        // The reader updates `prev_len` only on a nonzero code, so a 16 emitted after a zero run
+        // would repeat the wrong value. Assert the stream always re-states the literal first.
+        let lengths = grouped_runs();
+        let symbols = code_length_symbols(&lengths, lengths.len(), true);
+        let mut prev_nonzero = DEFAULT_CODE_LENGTH;
+        for s in &symbols {
+            if s.symbol == 16 {
+                assert_eq!(
+                    prev_nonzero, 4,
+                    "a 16 repeated {prev_nonzero}, not the intended length"
+                );
+            }
+            if s.symbol < 16 && s.symbol != 0 {
+                prev_nonzero = s.symbol;
+            }
+        }
+        assert!(symbols.iter().any(|s| s.symbol == 16), "run coding fired");
+        round_trip_description(
+            &lengths,
+            Description::Normal {
+                run_coded: true,
+                trim: true,
+            },
+        );
+    }
+
+    #[test]
+    fn max_symbol_field_picks_the_narrowest_that_fits() {
+        // The reader recovers `max_symbol` as `2 + read_bits(2 + 2 * selector)`, so counts below 2
+        // are unrepresentable and each selector step widens the field by two bits.
+        assert_eq!(max_symbol_field(0), None);
+        assert_eq!(max_symbol_field(1), None);
+        assert_eq!(max_symbol_field(2), Some((0, 2)));
+        assert_eq!(max_symbol_field(5), Some((0, 2)));
+        assert_eq!(max_symbol_field(6), Some((1, 4)));
+        assert_eq!(max_symbol_field(17), Some((1, 4)));
+        assert_eq!(max_symbol_field(18), Some((2, 6)));
     }
 
     #[test]

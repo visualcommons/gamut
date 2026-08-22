@@ -12,7 +12,7 @@ use gamut::jxl::{
 };
 use gamut::png::{Level as PngLevel, PngEncoder};
 use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
-use gamut::webp::WebpEncoder;
+use gamut::webp::{Effort as WebpEffort, NearLossless as WebpNearLossless, WebpEncoder};
 
 use crate::error::CliError;
 use crate::input::{decode_rgb8, decode_rgba8};
@@ -39,6 +39,15 @@ pub(crate) struct ConvertArgs {
     /// and JPEG (which is always lossy).
     #[arg(long, default_value_t = 75)]
     quality: u8,
+    /// WebP encoder effort, 0 (fastest) to 6 (densest); libwebp's default method is 4. Applies to
+    /// both lossless and lossy WebP. Ignored for other output formats.
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(0..=6))]
+    webp_effort: u8,
+    /// WebP near-lossless preprocessing on libwebp's scale: 0 (most loss) to 99, or 100 / omitted
+    /// for off. Quantizes the source in textured regions before *lossless* coding, leaving alpha
+    /// exact. Ignored with `--lossy` and for other output formats.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    webp_near_lossless: Option<u8>,
     /// JPEG chroma subsampling for colour input: `444` (none), `422` (halve horizontally), or `420`
     /// (halve both, the default). Ignored for other output formats and for grayscale.
     #[arg(long = "jpeg-subsampling", value_enum, default_value = "420")]
@@ -176,12 +185,26 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                 bytes = rgba.len(),
                 "decoded input"
             );
+            // The clap `0..=6` range guarantees `from_level` returns `Some`; fall back to the
+            // default effort rather than unwrap so the path stays panic-free.
+            let effort = WebpEffort::from_level(args.webp_effort).unwrap_or_default();
+            // `100` is libwebp's "off" sentinel, so it maps to `None` alongside an absent flag —
+            // the strength type refuses to represent "off" as a magic value.
+            let near_lossless = args
+                .webp_near_lossless
+                .and_then(WebpNearLossless::from_libwebp_strength);
+            if args.lossy && near_lossless.is_some() {
+                tracing::warn!("--webp-near-lossless applies to lossless WebP only; ignoring");
+            }
             let encoder = if args.lossy {
                 WebpEncoder::lossy(args.quality)
             } else {
                 WebpEncoder::lossless()
             };
-            encoder.encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
+            encoder
+                .with_effort(effort)
+                .with_near_lossless(near_lossless)
+                .encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
             (rgba.len(), dims)
         }
         OutputFormat::Tiff => {

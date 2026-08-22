@@ -19,6 +19,8 @@ pub(crate) mod color_cache;
 pub(crate) mod encoder;
 pub(crate) mod header;
 pub(crate) mod lz77;
+pub(crate) mod near_lossless;
+pub(crate) mod plan;
 pub(crate) mod prefix;
 pub(crate) mod transform;
 
