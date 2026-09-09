@@ -285,7 +285,11 @@ pub fn fill_c2pa(png: &mut [u8], span: &C2paSpan, store: &[u8]) -> Result<()> {
     if !frames {
         return Err(invalid("PNG: the C2PA span does not frame a chunk"));
     }
-    if png[span.chunk.start + 4..span.payload.start] != CABX {
+    // The chunk's eight header bytes, split where §5.3 splits them. Taken as one borrow rather
+    // than by indexed reads so that no byte offset is computed here twice: `frames` above already
+    // established that these eight bytes are inside the buffer.
+    let (declared, kind) = png[span.chunk.start..span.payload.start].split_at(4);
+    if kind != CABX {
         return Err(invalid("PNG: the C2PA span does not name a caBX chunk"));
     }
     // The span must agree with the chunk's *own* length field, not merely with itself. Until this
@@ -293,13 +297,11 @@ pub fn fill_c2pa(png: &mut [u8], span: &C2paSpan, store: &[u8]) -> Result<()> {
     // and applied to another — which the `&mut [u8]` signature deliberately allows — could name a
     // longer chunk than the one that is there and write the payload and CRC over whatever follows
     // it, most likely IDAT, and report success.
-    let declared = u32::from_be_bytes([
-        png[span.chunk.start],
-        png[span.chunk.start + 1],
-        png[span.chunk.start + 2],
-        png[span.chunk.start + 3],
-    ]);
-    if u64::try_from(span.payload.len()) != Ok(u64::from(declared)) {
+    let agrees = matches!(
+        u32::try_from(span.payload.len()),
+        Ok(payload_len) if declared == payload_len.to_be_bytes()
+    );
+    if !agrees {
         return Err(invalid(
             "PNG: the C2PA span disagrees with the chunk's declared length",
         ));
@@ -559,6 +561,20 @@ mod tests {
             find_c2pa(&png).map(|s| png[s.payload].to_vec()),
             Some(b"good".to_vec())
         );
+
+        // A length that does not fit one byte: every byte of the field is compared, so a span
+        // agreeing only in the low byte (300 vs 44) is rejected, and the true span fills.
+        let mut wide = SIGNATURE.to_vec();
+        write_chunk(&mut wide, *b"IHDR", &[0; 13]);
+        let wide_start = wide.len();
+        write_chunk(&mut wide, CABX, &[0; 300]);
+        write_chunk(&mut wide, *b"IEND", &[]);
+        let low_byte_only = C2paSpan::of(wide_start..wide_start + 12 + 44);
+        let error = fill_c2pa(&mut wide, &low_byte_only, &[7; 44]).expect_err("300 is not 44");
+        assert!(error.to_string().contains("declared length"), "{error}");
+        let whole = C2paSpan::of(wide_start..wide_start + 12 + 300);
+        fill_c2pa(&mut wide, &whole, &[9; 300]).expect("the declared length matches");
+        assert_eq!(find_c2pa(&wide).map(|s| wide[s.payload].len()), Some(300));
     }
 
     /// The bounds check admits the exact fit: a buffer that ends exactly where the chunk does is
