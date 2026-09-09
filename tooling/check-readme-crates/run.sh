@@ -9,7 +9,8 @@
 #
 #   * every workspace crate has a row, so a new crate cannot be added without documenting it;
 #   * every row names a crate that still exists, so a renamed or deleted crate cannot be left
-#     behind as a phantom row.
+#     behind as a phantom row;
+#   * no crate is listed twice, so the table stays a bijection rather than a set.
 #
 # What is deliberately NOT checked, and why:
 #   * The Purpose and Status cells. They are prose a human maintains, and their authority is the
@@ -20,7 +21,19 @@
 #     what each crate *is* rather than pinning a number that release-plz bumps.
 set -euo pipefail
 
-readme="${1:-README.md}"
+# With no argument, check the repository's own README from wherever the task was invoked. With
+# one, check that file as given -- so a caller can point the guard at a candidate README without
+# the working directory changing what "README.md" means.
+if [ "$#" -eq 0 ]; then
+    root="$(git rev-parse --show-toplevel)" || {
+        echo "check-readme-crates: not inside a git repository, and no README path was given"
+        exit 1
+    }
+    cd "$root" || exit 1
+    readme="README.md"
+else
+    readme="$1"
+fi
 
 test -f "$readme" || {
     echo "check-readme-crates: no such file: $readme"
@@ -29,24 +42,50 @@ test -f "$readme" || {
 
 # The rows of the "## Crates" table only. Bounded to that section so the README's other tables
 # (the `mise run ...` command table) can never be mistaken for a crate row.
-readme_crates="$(
+rows="$(
     awk '/^## Crates$/ { in_section = 1; next } /^## / { in_section = 0 } in_section' "$readme" |
-        sed -nE 's/^\| *`([a-z0-9-]+)` *\|.*/\1/p' | sort -u
+        sed -nE 's/^\| *`([a-z0-9-]+)` *\|.*/\1/p'
 )"
 
-test -n "$readme_crates" || {
+test -n "$rows" || {
     echo "check-readme-crates: found no crate rows under '## Crates' in $readme"
     exit 1
 }
 
+fail=0
+
+# LC_ALL=C throughout: `comm` exits non-zero on input it considers unsorted, and jq's `sort_by`
+# below orders by codepoint. Collating both sides the same way keeps them comparable under any
+# ambient locale.
+readme_crates="$(echo "$rows" | LC_ALL=C sort -u)"
+
+duplicates="$(echo "$rows" | LC_ALL=C sort | uniq -d)"
+if [ -n "$duplicates" ]; then
+    fail=1
+    echo "check-readme-crates: crates listed more than once in the $readme crates table:"
+    echo "$duplicates" | sed 's/^/  /'
+fi
+
 # The same source of truth `mise run versions` reads: --no-deps lists workspace members only.
 workspace_crates="$(
     cargo metadata --no-deps --format-version 1 | jq -r '.packages | sort_by(.name)[] | .name'
-)"
+)" || {
+    echo "check-readme-crates: could not read the workspace crate list from cargo metadata"
+    exit 1
+}
 
-fail=0
+# `comm` failing is a bug in this script (unsorted input), not a README defect, so it is reported
+# as itself rather than being swallowed by `set -e` into a bare exit. The diagnostic goes to
+# stderr because this runs inside a command substitution -- on stdout it would be captured as if
+# it were a crate name instead of shown.
+compare() {
+    LC_ALL=C comm "$1" <(echo "$workspace_crates") <(echo "$readme_crates") || {
+        echo "check-readme-crates: internal error comparing crate lists (comm $1)" >&2
+        exit 1
+    }
+}
 
-missing="$(comm -23 <(echo "$workspace_crates") <(echo "$readme_crates"))"
+missing="$(compare -23)"
 if [ -n "$missing" ]; then
     fail=1
     echo "check-readme-crates: workspace crates with no row in the $readme crates table:"
@@ -54,7 +93,7 @@ if [ -n "$missing" ]; then
     echo "  add a row (Crate | Purpose | Status), taking the status from the crate's STATUS.md."
 fi
 
-phantom="$(comm -13 <(echo "$workspace_crates") <(echo "$readme_crates"))"
+phantom="$(compare -13)"
 if [ -n "$phantom" ]; then
     fail=1
     echo "check-readme-crates: $readme crates table names crates that are not workspace members:"

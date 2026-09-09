@@ -296,9 +296,10 @@ run = "./tooling/mutants/run.sh --crate"
 description = "Enforce the mechanical test conventions in docs/testing.md"
 run = "./tooling/check-tests/run.sh"
 
-# The README crates table drifted until eighteen rows were wrong and four crates had no row at
-# all (issue #425), because nothing read it: `versions` only lists `name version` and asserts
-# nothing, and `check-msrv` greps the README for one number. This gates *membership* -- every
+# Nothing read the README crates table, so it drifted: fixing issue #425 meant correcting
+# eighteen rows and adding four crates that had no row at all. `versions` only lists
+# `name version` and asserts nothing, and `check-msrv` greps the README for one number, so
+# neither would have caught it. This gates the table's *membership* -- every
 # workspace crate has a row, every row names a real crate -- and deliberately not its prose, whose
 # authority is each crate's STATUS.md.
 [tasks.check-readme-crates]
