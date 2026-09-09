@@ -158,6 +158,60 @@ fn a_well_formed_blob_reports_no_drops() {
     );
 }
 
+/// A top-level directory past the 1st IFD is named rather than silently discarded.
+///
+/// EXIF defines exactly two — the 0th (primary image) and the 1st (thumbnail) — so a longer
+/// next-IFD chain parses cleanly and then has nowhere to go in the model. That is a real loss (the
+/// bytes do not survive `to_bytes`), and it is the one drop with no addressing tag: the chain is
+/// followed through the structural next-IFD pointer, so the reported tag is `0` and the reported
+/// offset is the directory's own position.
+#[test]
+fn a_top_level_directory_past_the_thumbnail_is_named() {
+    for extra in 1..=2 {
+        let mut thumb = Ifd::new();
+        thumb.set(0x0103, Value::Short(vec![6])); // Compression = JPEG
+
+        let mut ifds = vec![image_ifd(), thumb];
+        for n in 0..extra {
+            let mut trailing = Ifd::new();
+            trailing.set(0x0131, Value::Ascii(format!("trailing {n}"))); // Software
+            ifds.push(trailing);
+        }
+        let bytes = tiff(ifds);
+
+        let (exif, report) = ExifReader::new()
+            .parse_with_report(&bytes)
+            .expect("a long chain must still parse");
+        assert_eq!(exif.make(), Some("Canon"), "the 0th IFD survives");
+        assert!(exif.thumbnail().is_some(), "the 1st IFD survives");
+
+        // Where those directories actually sit, read back independently of the model.
+        let mut raw = IfdReader::open(&bytes[..]).expect("open");
+        let offsets: Vec<u64> = raw
+            .ifds()
+            .map(|ifd| ifd.expect("chain link").offset)
+            .collect();
+        assert_eq!(
+            offsets.len(),
+            2 + extra,
+            "the fixture really has a long chain"
+        );
+
+        assert_eq!(
+            report.dropped().len(),
+            extra,
+            "every trailing directory is named: {:?}",
+            report.dropped()
+        );
+        for (dropped, expected) in report.dropped().iter().zip(&offsets[2..]) {
+            assert_eq!(dropped.region(), DroppedRegion::TrailingIfd);
+            assert_eq!(dropped.tag(), 0, "no tag addresses a top-level directory");
+            assert_eq!(dropped.offset(), *expected, "named at its own position");
+            assert_eq!(dropped.reason(), DropReason::Unrepresentable);
+        }
+    }
+}
+
 /// The law, over a truncation sweep: whenever a lenient parse succeeds, a sub-IFD pointer that was
 /// present in the source has either been followed into the model or been named in the report —
 /// never silently missing.

@@ -52,9 +52,11 @@ points:
   `&[u8]` case of it — one parse engine, two entry points. It is deliberately synchronous: an
   async caller drives the source itself, which keeps a runtime dependency out of the crate.
 - **`parse_with_report`** (and its `parse_from_with_report` twin) returns a `ReadReport` alongside
-  the `Exif`, naming every sub-IFD and thumbnail range the lenient reader discarded — the tag that
-  addressed it, the offset it carried, and whether the address was out of bounds or the bytes
-  there were corrupt. `parse` stays silent, as before.
+  the `Exif`, naming each region the lenient reader discarded — a malformed Exif/GPS/Interop
+  sub-IFD, an out-of-bounds thumbnail range, or a top-level directory past the 1st IFD — with the
+  tag that addressed it, the offset it carried, and a typed reason. `parse` stays silent, as
+  before. The report is complete over those regions but is **not** a byte-completeness verdict: an
+  empty report does not mean the parse lost nothing (see the deferred items below).
 
 ```rust
 # use gamut_exif::ExifReader;
@@ -90,10 +92,13 @@ designed to be added without breaking the 1.0 API — the catalogue and vendor e
   losslessly via the raw `Ifd`).
 - **Uncompressed strip-based thumbnails** are read but not re-embedded (JPEG thumbnails are).
 - **Per-tag error recovery inside one directory.** A single unparseable entry fails its whole
-  directory in `gamut-ifd`, so the report's granularity is the sub-IFD, not the individual tag.
+  directory in `gamut-ifd`, so the report's granularity is the sub-IFD, not the individual tag
+  (issue #521).
+- **A signal for a shadowed duplicate tag.** Two entries for one tag decode to the last, and the
+  earlier one is discarded a layer below this crate, where `ReadReport` cannot see it (issue #528).
 - **A byte-completeness verdict** over the whole blob (which source bytes no parsed structure
   claims). `gamut-ifd`'s audit engine has the machinery; `ReadReport` today reports only what was
-  dropped, not what was never reached.
+  dropped, not what was never reached (issue #521).
 
 ## Status
 

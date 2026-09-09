@@ -12,6 +12,7 @@
 //! drift. It is deliberately synchronous: an async caller drives a [`ReadAt`] source itself, which
 //! keeps a runtime dependency out of a crate that has none.
 
+use gamut_core::ErrorKind;
 use gamut_ifd::{Ifd, IfdReader, RawIfd, ReadAt, tags as ifd_tags};
 
 use crate::error::{ExifError, Result};
@@ -79,6 +80,7 @@ impl ExifReader {
         let order = reader.order();
 
         let file = reader.read_file()?;
+        let trailing = file.ifds.len().saturating_sub(2);
         let mut ifds = file.ifds.into_iter();
         let mut image = ifds.next().ok_or(ExifError::Truncated)?;
         // The next-IFD chain's second entry is the thumbnail directory (1st IFD), if any.
@@ -86,6 +88,9 @@ impl ExifReader {
             Some(ifd) => Some(self.read_thumbnail(ifd, &mut reader, report)?),
             None => None,
         };
+        // EXIF defines exactly two top-level directories, so anything further down the chain has
+        // nowhere to go in the model. Name it rather than letting the iterator drop it silently.
+        record_trailing_ifds(&mut reader, trailing, report)?;
 
         // The Exif sub-IFD's own offset, captured before `follow` strips the pointer: the
         // maker-note pin needs the note value's absolute source position.
@@ -125,7 +130,14 @@ impl ExifReader {
     /// is longer than the marker, so such a source cannot parse either way.
     fn tiff_base<S: ReadAt>(&self, source: &mut S) -> Result<u64> {
         let mut head = [0u8; MARKER.len()];
-        let marked = source.read_exact_at(0, &mut head).is_ok() && head.as_slice() == MARKER;
+        let marked = match source.read_exact_at(0, &mut head) {
+            Ok(()) => head.as_slice() == MARKER,
+            // Too few bytes to hold a marker: unmarked. Keyed on the error *kind*, never on the
+            // source's length, so a slice keeps its exact behaviour while a transport failure
+            // (a disk error, a dropped network mount) is not misread as "no marker".
+            Err(e) if e.kind() == ErrorKind::InvalidInput => false,
+            Err(e) => return Err(e.into()),
+        };
         if marked {
             Ok(MARKER.len() as u64)
         } else if self.require_marker {
@@ -139,9 +151,15 @@ impl ExifReader {
     /// the pointer (it is represented structurally, not as a data field).
     ///
     /// Returns `Ok(None)` when the pointer is absent, or — in lenient mode — when the pointed-at
-    /// directory is unusable, in which case the drop is recorded in `report`. The removal happens
-    /// **after** the read is attempted: the pointer's tag and offset are what the report names, so
-    /// stripping it first would lose the identity of what was dropped.
+    /// directory is malformed, in which case the drop is recorded in `report`. Either way the
+    /// pointer is removed: preserving it would change what `to_bytes` emits for a malformed blob,
+    /// which is beyond this crate's remit here — #419's "the pointer was lost too" is answered by
+    /// *naming* the tag and offset in the report, not by keeping the entry.
+    ///
+    /// A failure that is not the *bytes* being wrong — a source whose transport failed — is
+    /// propagated unchanged in both modes. Leniency exists to tolerate corrupt files, and
+    /// reporting a structurally perfect directory as malformed because a disk read failed would be
+    /// a lie about the file.
     fn follow<S: ReadAt>(
         &self,
         parent: &mut Ifd,
@@ -161,6 +179,8 @@ impl ExifReader {
         parent.remove(ptr);
         match followed {
             Ok(ifd) => Ok(Some(ifd)),
+            // Not the file's fault: hand the transport failure back untouched.
+            Err(e) if e.kind() != ErrorKind::InvalidInput => Err(e.into()),
             Err(_) if self.strict => Err(ExifError::InvalidIfd(region.name())),
             Err(_) => {
                 let reason = address_reason(reader, offset)?;
@@ -211,6 +231,34 @@ impl ExifReader {
     }
 }
 
+/// Records the top-level directories past the 1st IFD, which parse cleanly but have nowhere to go
+/// in the [`Exif`] model.
+///
+/// The offsets come from a second walk of the next-IFD chain. That costs a re-read of the
+/// directory bodies, so it runs **only** when there is something to report — a well-formed EXIF
+/// blob has one or two directories and never reaches it, leaving the lazy read bound untouched.
+fn record_trailing_ifds<S: ReadAt>(
+    reader: &mut IfdReader<S>,
+    trailing: usize,
+    report: &mut ReadReport,
+) -> Result<()> {
+    if trailing == 0 {
+        return Ok(());
+    }
+    let mut offsets = Vec::with_capacity(trailing);
+    for raw in reader.ifds().skip(2) {
+        offsets.push(raw?.offset);
+    }
+    for offset in offsets {
+        report.record(Dropped::new(
+            DroppedRegion::TrailingIfd,
+            offset,
+            DropReason::Unrepresentable,
+        ));
+    }
+    Ok(())
+}
+
 /// Why an address that failed to parse failed: past the end of the stream, or inside it but
 /// structurally bad. Separating the two is what makes a report actionable — a dangling pointer is
 /// a different defect from a corrupt directory.
@@ -259,6 +307,7 @@ mod tests {
     use gamut_ifd::{ByteOrder, StreamSource, TiffFile, Value, Variant, write};
 
     use super::*;
+    use crate::exif::{GPS_IFD_POINTER, INTEROP_IFD_POINTER};
 
     /// A minimal marked EXIF blob whose 0th IFD carries `Make`.
     fn blob() -> Vec<u8> {
@@ -319,6 +368,125 @@ mod tests {
             .parse_from(&b"Exi"[..])
             .expect_err("three bytes cannot carry the marker");
         assert!(matches!(err, ExifError::MissingMarker), "{err:?}");
+    }
+
+    /// A `ReadAt` whose *transport* fails after `budget` successful reads — a disk error, a
+    /// dropped network mount. Distinct from a source whose bytes are merely wrong: `gamut-core`
+    /// maps the former to `Error::Io` and the latter to `Error::InvalidInput`.
+    struct FailingAfter<S> {
+        inner: S,
+        budget: usize,
+    }
+
+    impl<S: ReadAt> ReadAt for FailingAfter<S> {
+        fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> gamut_core::Result<()> {
+            let Some(left) = self.budget.checked_sub(1) else {
+                return Err(gamut_core::Error::Io(std::io::Error::other(
+                    "transport lost",
+                )));
+            };
+            self.budget = left;
+            self.inner.read_exact_at(offset, buf)
+        }
+
+        fn len(&mut self) -> gamut_core::Result<u64> {
+            self.inner.len()
+        }
+    }
+
+    /// A structurally perfect blob with both 0th-IFD sub-directories, so every drop path is
+    /// reachable and none of them *should* fire.
+    fn healthy_blob() -> Vec<u8> {
+        let mut interop = Ifd::new();
+        interop.set(0x0001, Value::Ascii("R98".into()));
+        let mut exif = Ifd::new();
+        exif.set(0x829D, Value::Rational(vec![(28, 10)]));
+        exif.set_sub_ifd(INTEROP_IFD_POINTER, vec![interop]);
+        let mut gps = Ifd::new();
+        gps.set(0x0000, Value::Byte(vec![2, 3, 0, 0]));
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
+        image.set_sub_ifd(GPS_IFD_POINTER, vec![gps]);
+        let tiff = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image],
+        })
+        .expect("write");
+        let mut out = MARKER.to_vec();
+        out.extend(tiff);
+        out
+    }
+
+    /// A failing source is propagated, never reported as a malformed file.
+    ///
+    /// Leniency exists to tolerate corrupt *bytes*. If the transport fails instead, the data may be
+    /// perfect, so silently returning `Ok` with the sub-IFDs missing — and a report blaming the
+    /// file — would be a lie, and the worst case is the network-backed source this entry point
+    /// exists to enable. The whole parse is swept one read at a time, so every read site is
+    /// covered: the marker probe, the header, each directory body and each out-of-line value.
+    #[test]
+    fn a_failing_source_is_propagated_not_reported_as_a_malformed_file() {
+        let data = healthy_blob();
+        let (mut failures, mut successes) = (0, 0);
+        for budget in 0..40 {
+            let source = FailingAfter {
+                inner: &data[..],
+                budget,
+            };
+            match ExifReader::new().parse_from_with_report(source) {
+                Ok((_, report)) => {
+                    successes += 1;
+                    assert!(
+                        report.is_empty(),
+                        "budget {budget}: a transport failure was blamed on the file: {:?}",
+                        report.dropped()
+                    );
+                }
+                Err(ExifError::Ifd(e)) => {
+                    failures += 1;
+                    assert_eq!(
+                        e.kind(),
+                        ErrorKind::Io,
+                        "budget {budget}: a transport failure must keep its kind"
+                    );
+                }
+                // `MissingMarker` here would mean the marker probe swallowed the error and
+                // decided the blob was unmarked; anything else is equally a misdiagnosis.
+                Err(other) => panic!("budget {budget}: transport failure became {other:?}"),
+            }
+        }
+        assert!(failures > 0 && successes > 0, "the sweep proved nothing");
+    }
+
+    /// A transport failure while probing for the marker is not a *missing* marker.
+    ///
+    /// The marker probe is the one read that happens before any parsing, and its result is a
+    /// three-way question — marked, unmarked, or unknown — collapsed onto a boolean. Deciding
+    /// "unmarked" from a failed read makes `require_marker(true)` answer `MissingMarker` for a blob
+    /// that may well carry one, which sends a caller to the wrong conclusion entirely. The split is
+    /// keyed on the error kind, so a short slice still reads as genuinely unmarked — which
+    /// `a_source_too_short_for_the_marker_is_unmarked` pins.
+    #[test]
+    fn a_transport_failure_probing_the_marker_is_not_a_missing_marker() {
+        let data = healthy_blob();
+        let source = FailingAfter {
+            inner: &data[..],
+            budget: 0,
+        };
+        let err = ExifReader::new()
+            .require_marker(true)
+            .parse_from(source)
+            .expect_err("a source that cannot be read must not parse");
+        match err {
+            ExifError::Ifd(e) => assert_eq!(
+                e.kind(),
+                ErrorKind::Io,
+                "the transport failure must keep its kind"
+            ),
+            other => panic!("transport failure became {other:?}"),
+        }
     }
 
     /// `address_reason` splits the two defects the report distinguishes, and the boundary is the

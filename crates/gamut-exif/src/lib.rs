@@ -18,9 +18,10 @@
 //! Two further read entry points sit on [`ExifReader`]:
 //! [`parse_from`](ExifReader::parse_from) reads through [`gamut_ifd::ReadAt`] rather than a slice,
 //! so EXIF can be pulled out of a large raw file without loading it, and
-//! [`parse_with_report`](ExifReader::parse_with_report) returns a [`ReadReport`] naming every
-//! sub-IFD and thumbnail range the lenient reader discarded. `parse` is the `&[u8]` case of
-//! `parse_from` and stays silent, so neither is a change for existing callers.
+//! [`parse_with_report`](ExifReader::parse_with_report) returns a [`ReadReport`] naming the
+//! sub-IFDs, thumbnail ranges and trailing directories the lenient reader discarded — see
+//! [`report`] for what that covers and what it deliberately does not. `parse` is the `&[u8]` case
+//! of `parse_from` and stays silent, so neither is a change for existing callers.
 //!
 //! ```
 //! use gamut_exif::{ByteOrder, Exif, ExifTag, Value};
@@ -43,7 +44,7 @@ pub mod gps;
 pub mod maker_note;
 pub mod reader;
 pub mod report;
-pub mod stream;
+mod stream;
 pub mod tag;
 pub mod thumbnail;
 pub mod value;
