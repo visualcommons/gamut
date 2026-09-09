@@ -58,7 +58,7 @@ resolve under gamut's name. DC-008 is the specification this crate implements an
 oracle, not the source, so gamut keeps the DC-008 reading in each case; the test pins the set
 exactly, and a second test proves each is a naming difference rather than a missing tag.
 
-| Tag | gamut / this crate's source | exiv2 0.28 |
+| Tag | gamut / this crate's source | exiv2 (vendored v0.28.8) |
 | --- | --- | --- |
 | `0x8827` | `PhotographicSensitivity` (DC-008, renamed in Exif 2.3) | `ISOSpeedRatings` (Exif 2.2) |
 | `0x02BC` | `ApplicationNotes` (TIFF/EP lineage) | `XMLPacket` (the XMP specification's name) |
