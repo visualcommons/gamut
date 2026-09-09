@@ -6,9 +6,42 @@
 //!
 //! Requires the `third_party/exiv2` + `third_party/expat` submodules and a C++ toolchain.
 
+use std::sync::{Mutex, PoisonError};
+
 use gamut_exif::{
     ByteOrder, Exif, ExifTag, ExifWriter, FieldType, IfdKind, Rational, TagCount, Value,
 };
+
+/// Serialises every exiv2 call this file makes.
+///
+/// `exiv2-oracle` puts its **XMP** entry points behind a lock, because XMPCore keeps global state
+/// and is documented as not thread-safe; its **EXIF** entry points are unguarded. This file is the
+/// only caller of those, and `cargo test` runs its `#[test]`s on separate threads, so they reach
+/// exiv2 concurrently — which segfaulted inside the C++ library on CI (one mutation shard's
+/// baseline crashed while another shard of the *same commit* passed, so the failure is a race, not
+/// a bad input). Taking this lock per call means exiv2 only ever runs single-threaded here.
+///
+/// The guard belongs in `tooling/exiv2-oracle` beside the XMP one, where it would protect every
+/// future caller; that is issue #536.
+static EXIV2: Mutex<()> = Mutex::new(());
+
+/// Runs `f` with exiv2 exclusively held. Poisoning is ignored: the lock guards no Rust data.
+fn exclusively<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = EXIV2.lock().unwrap_or_else(PoisonError::into_inner);
+    f()
+}
+
+fn exif_count(bytes: &[u8]) -> Result<usize, String> {
+    exclusively(|| exiv2_oracle::exif_count(bytes))
+}
+
+fn exif_get(bytes: &[u8], key: &str) -> Result<String, String> {
+    exclusively(|| exiv2_oracle::exif_get(bytes, key))
+}
+
+fn exif_roundtrip(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    exclusively(|| exiv2_oracle::exif_roundtrip(bytes))
+}
 
 /// A representative model spanning the 0th IFD and the Exif sub-IFD.
 fn sample() -> Exif {
@@ -37,11 +70,11 @@ fn exiv2_reads_the_standard_tags_gamut_wrote() {
     let bytes = bare(&sample());
 
     // exiv2 parses the whole stream — the 0th IFD and the Exif sub-IFD behind the ExifIFD pointer.
-    let count = exiv2_oracle::exif_count(&bytes).expect("exiv2 decodes gamut's EXIF");
+    let count = exif_count(&bytes).expect("exiv2 decodes gamut's EXIF");
     assert!(count >= 8, "exiv2 read only {count} tags");
 
     // Values round-trip exactly through the reference reader.
-    let get = |key: &str| exiv2_oracle::exif_get(&bytes, key).expect(key);
+    let get = |key: &str| exif_get(&bytes, key).expect(key);
     assert_eq!(get("Exif.Image.Make"), "Canon");
     assert_eq!(get("Exif.Image.Model"), "Canon EOS R5");
     assert_eq!(get("Exif.Image.Orientation"), "1");
@@ -55,7 +88,7 @@ fn exiv2_reads_the_standard_tags_gamut_wrote() {
 fn gamut_reads_what_exiv2_writes() {
     let original = sample();
     // exiv2 re-encodes the stream into its own canonical layout...
-    let exiv2_bytes = exiv2_oracle::exif_roundtrip(&bare(&original)).expect("exiv2 re-encodes");
+    let exiv2_bytes = exif_roundtrip(&bare(&original)).expect("exiv2 re-encodes");
     // ...and gamut must read the same values back out of it.
     let parsed = Exif::parse(&exiv2_bytes).expect("gamut parses exiv2's EXIF");
 
@@ -146,12 +179,12 @@ fn exiv2_knows_every_catalogued_tag_by_the_name_gamut_gives_it() {
     ] {
         let (tags, bytes) = stream_of_every_tag(ifd);
         assert!(
-            exiv2_oracle::exif_count(&bytes).expect("exiv2 decodes the stream") >= tags.len(),
+            exif_count(&bytes).expect("exiv2 decodes the stream") >= tags.len(),
             "exiv2 read fewer tags than gamut wrote into {ifd:?}"
         );
         for tag in tags {
             let key = format!("{}.{}", exiv2_group(ifd), tag.name());
-            if exiv2_oracle::exif_get(&bytes, &key).is_err() {
+            if exif_get(&bytes, &key).is_err() {
                 unknown_to_exiv2.push(tag.name());
             }
         }
@@ -177,11 +210,11 @@ fn each_divergent_tag_is_the_same_tag_under_exiv2s_own_name() {
             (&image, "Exif.Image")
         };
         assert!(
-            exiv2_oracle::exif_get(bytes, &format!("{group}.{ours}")).is_err(),
+            exif_get(bytes, &format!("{group}.{ours}")).is_err(),
             "exiv2 unexpectedly knows {ours}; it is no longer a divergence"
         );
         assert!(
-            exiv2_oracle::exif_get(bytes, &format!("{group}.{theirs}")).is_ok(),
+            exif_get(bytes, &format!("{group}.{theirs}")).is_ok(),
             "exiv2 does not know {theirs} either, so the recorded spelling is wrong"
         );
     }
@@ -203,7 +236,7 @@ fn exiv2_knows_the_exif_30_authorship_tags() {
         "MetadataEditingSoftware",
     ] {
         assert_eq!(
-            exiv2_oracle::exif_get(&bytes, &format!("Exif.Photo.{name}")).as_deref(),
+            exif_get(&bytes, &format!("Exif.Photo.{name}")).as_deref(),
             Ok("A"),
             "exiv2 did not read {name} back"
         );
