@@ -75,7 +75,9 @@ fn linear_raw_dng_is_accounted() {
 
 /// A C2PA manifest store (C2PA 2.4 §A.3.6) is placed after the image data, last in the file,
 /// and the byte accounting claims it as the value of IFD 0's tag-52545 entry — never as an
-/// unclassified run or a trailer — with the file fully classified in both byte orders.
+/// unclassified run or a trailer. The whole report is clean, on the same terms as every other
+/// file this encoder writes: the store's tag is a tag this crate knows, so `is_fully_accounted`
+/// stays true rather than reporting the file's own manifest store as a private tag.
 #[test]
 fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
     use gamut_dng::{DngMetadata, Segment, SpanKind};
@@ -97,10 +99,7 @@ fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
         let (_, _, ifd0) = gamut_ifd::read_header(&dng).expect("header");
 
         let report = deconstruct(&dng).expect("deconstruct");
-        assert!(
-            report.segments.is_fully_classified(),
-            "{order:?}: not fully classified: {report:?}"
-        );
+        assert_clean(&report);
         assert!(
             report.segments.segments.contains(&Segment {
                 range: excl.store,
@@ -118,11 +117,6 @@ fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
                 .iter()
                 .any(|s| s.kind == SpanKind::Trailer),
             "{order:?}: a store at the end of the file is not a trailer"
-        );
-        assert!(
-            report.anomalies.is_empty(),
-            "{order:?}: {:?}",
-            report.anomalies
         );
     }
 }

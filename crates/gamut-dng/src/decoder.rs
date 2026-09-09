@@ -378,8 +378,12 @@ impl DngDecoder {
 /// fields, typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
 ///
 /// The store is taken only as the `UNDEFINED` bytes C2PA 2.4 §A.3.6 mandates, verbatim — the
-/// file's byte order does not apply to them. A `C2PA` tag of any other type is put back for the
-/// extras, the same test [`gamut_ifd::c2pa::locate`] applies.
+/// file's byte order does not apply to them — and only when there are at least
+/// [`gamut_ifd::c2pa::MIN_STORE_LEN`] of them, since a value too short to hold a JUMBF box header
+/// is not a manifest store (`references/c2pa/README.md`). Anything else under that tag is put
+/// back for the extras, so nothing is dropped and what this returns is exactly what
+/// [`gamut_ifd::c2pa::locate`] reports ranges for — which is also what keeps decode → encode
+/// working: every store this hands back is one the encoder will accept.
 fn decode_metadata(
     ifd0: &TrackedIfd,
     store_ifd: &TrackedIfd,
@@ -388,7 +392,7 @@ fn decode_metadata(
     variant: Variant,
 ) -> DngMetadata {
     let c2pa = match store_ifd.get(c2pa::C2PA_MANIFEST_STORE) {
-        Some(Value::Undefined(store)) => Some(store.clone()),
+        Some(Value::Undefined(store)) if store.len() >= c2pa::MIN_STORE_LEN => Some(store.clone()),
         Some(_) => {
             store_ifd.untouch(c2pa::C2PA_MANIFEST_STORE);
             None

@@ -220,8 +220,11 @@ impl DngEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if both were requested, or if the store is too short to
-    /// be a JUMBF box at all ([`c2pa::MIN_STORE_LEN`]) — caught here, before any pixel work.
+    /// Returns [`Error::InvalidInput`] if both were requested, if the store is too short to be a
+    /// JUMBF box at all ([`c2pa::MIN_STORE_LEN`]), or if it would pack *inline* in this
+    /// encoder's container variant — BigTIFF's inline threshold is those same 8 bytes, so a
+    /// BigTIFF store must exceed them to be placeable at the end of the file. All caught here,
+    /// before any pixel work.
     fn c2pa_store(&self) -> Result<Option<Cow<'_, [u8]>>> {
         let store = match (&self.metadata.c2pa, self.c2pa_reserve) {
             (Some(_), Some(_)) => {
@@ -238,6 +241,15 @@ impl DngEncoder {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "DNG: a C2PA manifest store is at least a JUMBF box header (8 bytes)",
+            ));
+        }
+        // A value no longer than the variant's inline threshold is packed into the entry rather
+        // than placed out of line, so it cannot be the run at the end of the file §A.3.6 wants.
+        // Only reachable on BigTIFF, whose threshold is the 8 bytes above.
+        if store.len() <= self.variant().inline_threshold() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: a BigTIFF C2PA manifest store must exceed 8 bytes, or it packs inline",
             ));
         }
         Ok(Some(store))

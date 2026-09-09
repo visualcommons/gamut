@@ -341,6 +341,14 @@ pub const REDUCTION_MATRIX3: u16 = 52538;
 pub const RGB_TABLES: u16 = 52543;
 /// `ProfileGainTableMap2` (52544, 0xCD40) — the revised profile gain-table map (DNG 1.7).
 pub const PROFILE_GAIN_TABLE_MAP2: u16 = 52544;
+/// The C2PA manifest store (52545, 0xCD41) — C2PA 2.4 §A.3.6, not a DNG tag.
+///
+/// A DNG may carry a content-credentials manifest store, and this crate writes and reads one
+/// ([`DngMetadata::c2pa`](crate::DngMetadata::c2pa)), so a file carrying it is *recognised*
+/// rather than flagged as private by [`is_known_tag`]. The number itself is
+/// [`gamut_ifd::c2pa::C2PA_MANIFEST_STORE`] — the clause is stated once, in the crate shared by
+/// every TIFF-based codec — and is aliased here only so [`KNOWN_TAGS`] can name it.
+pub const C2PA_MANIFEST_STORE: u16 = gamut_ifd::c2pa::C2PA_MANIFEST_STORE;
 /// `ColumnInterleaveFactor` (52547, 0xCD43) — column interleaving of the stored image data
 /// (DNG 1.7.1).
 pub const COLUMN_INTERLEAVE_FACTOR: u16 = 52547;
@@ -543,6 +551,7 @@ const KNOWN_TAGS: &[u16] = &[
     REDUCTION_MATRIX3,
     RGB_TABLES,
     PROFILE_GAIN_TABLE_MAP2,
+    C2PA_MANIFEST_STORE,
     COLUMN_INTERLEAVE_FACTOR,
     IMAGE_SEQUENCE_INFO,
     IMAGE_STATS,
@@ -598,6 +607,9 @@ mod tests {
         // A couple of the matrix tags double as a spot-check that the list and accessors agree.
         assert!(is_known_tag(COLOR_MATRIX1));
         assert!(is_known_tag(JXL_DECODE_SPEED));
+        // The C2PA store is a tag this crate writes, so a file carrying one is not "private":
+        // `is_fully_accounted` must stay true for a DNG this encoder produced.
+        assert!(is_known_tag(gamut_ifd::c2pa::C2PA_MANIFEST_STORE));
     }
 
     #[test]

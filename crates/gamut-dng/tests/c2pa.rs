@@ -7,10 +7,9 @@
 mod common;
 
 use gamut_dng::{
-    ByteOrder, C2paExclusions, DngDecoder, DngEncodeReport, DngEncoder, DngMetadata, Range, RawTag,
-    Value,
+    ByteOrder, C2PA_MANIFEST_STORE, DngDecoder, DngEncodeReport, DngEncoder, DngMetadata,
+    MIN_STORE_LEN, Range, RawTag, Value,
 };
-use gamut_ifd::c2pa::C2PA_MANIFEST_STORE;
 use gamut_ifd::{align_word, read_header};
 
 /// `len` bytes that are neither a palindrome nor periodic at any small stride, so a byte-swapped,
@@ -290,18 +289,22 @@ fn a_store_in_a_trailing_ifd_is_found_there() {
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
     assert_eq!(decoded.metadata.c2pa, Some(bytes.clone()));
+    // `C2paExclusions` is `#[non_exhaustive]`, so the two ranges are compared field by field
+    // rather than against a literal.
+    let excl = decoded.c2pa_exclusions.expect("ranges");
     assert_eq!(
-        decoded.c2pa_exclusions,
-        Some(C2paExclusions {
-            store: Range {
-                start: store_at,
-                len: bytes.len() as u64
-            },
-            count_field: Range {
-                start: body + 2 + 4,
-                len: 4
-            },
-        })
+        excl.store,
+        Range {
+            start: store_at,
+            len: bytes.len() as u64
+        }
+    );
+    assert_eq!(
+        excl.count_field,
+        Range {
+            start: body + 2 + 4,
+            len: 4
+        }
     );
     let report = gamut_dng::deconstruct(&dng).expect("deconstruct");
     assert!(
@@ -326,4 +329,95 @@ fn a_store_entry_before_the_last_main_ifd_is_not_the_store() {
         tag: C2PA_MANIFEST_STORE,
         value: Value::Undefined(bytes),
     }));
+}
+
+/// A store of exactly `MIN_STORE_LEN` is the smallest a classic-TIFF DNG can carry, and it must
+/// read back as the *store* rather than as the offset word pointing at it.
+///
+/// BigTIFF's inline threshold is those same 8 bytes, so there the entry would hold the value
+/// itself and an appended run would be referenced by nothing. The encoder refuses that instead
+/// of producing a file whose exclusion ranges cover bytes no reader reads back — nine bytes are
+/// the smallest BigTIFF store, and they work.
+#[test]
+fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
+    let raw = common::sample_raw(32, 24, 16);
+    let smallest = store(MIN_STORE_LEN);
+
+    let (dng, report) = encode(&with_store(ByteOrder::LittleEndian, smallest.clone()));
+    let excl = report.c2pa.expect("classic accepts the smallest store");
+    assert_eq!(excl.store.len, MIN_STORE_LEN as u64);
+    assert_eq!(excl.store.end(), dng.len() as u64);
+    assert_eq!(slice(&dng, excl.store), smallest.as_slice());
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(
+        decoded.metadata.c2pa,
+        Some(smallest.clone()),
+        "the entry must read back as the store, not as an offset"
+    );
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept the smallest store");
+
+    // BigTIFF, same length: refused, and refused before any pixel work.
+    for encoder in [
+        with_store(ByteOrder::LittleEndian, smallest.clone()).with_big_tiff(true),
+        DngEncoder::new()
+            .with_big_tiff(true)
+            .with_c2pa_reserved(MIN_STORE_LEN),
+    ] {
+        let error = encoder
+            .encode(&raw, &common::sample_profile(), &mut Vec::new())
+            .expect_err("8 bytes pack inline in BigTIFF");
+        assert_eq!(
+            error.static_message(),
+            Some("DNG: a BigTIFF C2PA manifest store must exceed 8 bytes, or it packs inline")
+        );
+    }
+
+    // Nine bytes clear the threshold: the store lands last and reads back whole.
+    let nine = store(MIN_STORE_LEN + 1);
+    let (dng, report) =
+        encode(&with_store(ByteOrder::LittleEndian, nine.clone()).with_big_tiff(true));
+    let excl = report.c2pa.expect("nine bytes are writable in BigTIFF");
+    assert_eq!(excl.store.end(), dng.len() as u64);
+    assert_eq!(
+        DngDecoder::new()
+            .decode(&dng)
+            .expect("decode")
+            .metadata
+            .c2pa,
+        Some(nine)
+    );
+}
+
+/// A foreign file whose tag-52545 value is too short to hold a JUMBF box header carries no
+/// manifest store (`references/c2pa/README.md`): it decodes to `None`, and the decoded
+/// `DngMetadata` therefore re-encodes — which it could not if the decoder had handed back a
+/// store its own encoder refuses.
+#[test]
+fn a_too_short_store_decodes_as_absent_and_still_re_encodes() {
+    let short = store(MIN_STORE_LEN - 1);
+    let (mut dng, _) = encode(&DngEncoder::new());
+    // Body: count (2) + one entry (12) + next (4) = 18; the 7-byte value follows it.
+    let body = align_word(dng.len() as u64);
+    append_trailing_ifd(
+        &mut dng,
+        &[(
+            C2PA_MANIFEST_STORE,
+            7,
+            short.len() as u32,
+            (body + 18) as u32,
+        )],
+    );
+    dng.extend_from_slice(&short);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.metadata.c2pa, None, "7 bytes cannot be a JUMBF box");
+    assert_eq!(decoded.c2pa_exclusions, None);
+
+    // Decode -> encode: the metadata the decoder produced is accepted as encoder input.
+    let mut re = Vec::new();
+    let report = DngEncoder::new()
+        .with_metadata(decoded.metadata.clone())
+        .encode_with_report(&decoded.raw, &common::sample_profile(), &mut re)
+        .expect("a decoded file's metadata must re-encode");
+    assert_eq!(report.c2pa, None);
 }
