@@ -108,30 +108,67 @@ jobs:
         # Google Chrome's serves a `Packages.gz` whose hash does not match its index, and
         # Microsoft's breaks periodically. `apt-get update` exits 100 when *any* source fails,
         # which aborted this step and left every later step without sccache (issue #517).
-        # So drop the sources we do not use, then update and install unmasked -- a real failure
+        # So drop the entries we do not use, then update and install unmasked -- a real failure
         # of the Ubuntu archive, or of the packages themselves, still fails the job.
         #
-        # Ubuntu's own entries are matched by content rather than by filename: this image
-        # reaches the archive through a mirrorlist (`mirror+file:/etc/apt/apt-mirrors.txt`,
-        # resolving to azure.archive.ubuntu.com), and which file holds them has moved between
-        # `sources.list` and `sources.list.d/*.sources` across releases. If nothing matches,
-        # the step fails loudly instead of installing from a stale index.
+        # Classification is per source *entry* -- a `deb`/`deb-src` line, or a deb822 stanza --
+        # rather than per file, so a comment naming an Ubuntu host cannot rescue a third-party
+        # list, and a file carrying both an Ubuntu and a third-party stanza is rewritten rather
+        # than kept whole. An entry is Ubuntu's if its URI names this image's mirrorlist
+        # (`mirror+file:/etc/apt/apt-mirrors.txt`, resolving to azure.archive.ubuntu.com) or an
+        # `*.ubuntu.com` host; matching content rather than filenames keeps this correct
+        # wherever the entries live, `sources.list` or `sources.list.d/*.sources`.
+        #
+        # Sources are read through `sudo`, and awk's own failures are kept distinct from "no
+        # Ubuntu entry in this file", so a source that cannot be read is never guessed to be
+        # third-party and deleted. Nothing is modified until every file has been classified.
         run: |
-          kept=0
+          # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          prune='
+          function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
+          function flush(  i) {
+            if (n == 0) return
+            if (uri == "" || ok(uri)) { for (i = 0; i < n; i++) print s[i]; if (uri != "") keep++ } else drop++
+            n = 0; uri = ""
+          }
+          /^[ \t]*(deb|deb-src)[ \t]/ { flush(); if (ok($0)) { print; keep++ } else drop++; next }
+          /^[ \t]*$/ { flush(); print; next }
+          /^[ \t]*URIs:/ { uri = $0 }
+          { s[n++] = $0 }
+          END { flush(); exit (keep > 0 ? 0 : 10) }'
+          work=$(mktemp -d)
+          ubuntu=0
           for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
             [ -f "$f" ] || continue
-            if grep -Eq 'apt-mirrors\.txt|//[a-z0-9.-]*\.ubuntu\.com' "$f"; then
-              kept=$((kept + 1))
-              echo "keeping $f"
-            else
-              echo "removing third-party source $f"
-              sudo rm -f "$f"
-            fi
+            out="$work/$(echo "$f" | tr / _)"
+            rc=0
+            sudo awk "$prune" "$f" > "$out" || rc=$?
+            case "$rc" in
+              0) ubuntu=$((ubuntu + 1)) ;;
+              10) ;;
+              *) echo "::error::could not read or classify $f (awk exit $rc); not guessing at it"
+                 exit 1 ;;
+            esac
+            echo "$rc" > "$out.rc"
           done
-          if [ "$kept" -eq 0 ]; then
-            echo "::error::no Ubuntu apt source survived pruning; refusing to install from a stale index"
+          if [ "$ubuntu" -eq 0 ]; then
+            echo "::error::no Ubuntu apt source recognised; refusing to install from a stale index"
             exit 1
           fi
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            out="$work/$(echo "$f" | tr / _)"
+            if [ "$(cat "$out.rc")" = 10 ]; then
+              echo "removing third-party source $f"
+              sudo rm -f "$f"
+            elif sudo cmp -s "$out" "$f"; then
+              echo "keeping $f"
+            else
+              echo "dropping third-party entries from $f"
+              sudo rm -f "$f"
+              sudo cp "$out" "$f"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install -y pkg-config
       - uses: jdx/mise-action@v4
@@ -207,24 +244,55 @@ jobs:
       - name: Install system build deps (pkg-config; nasm is vendored, rest via mise)
         # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
         # Chrome/Microsoft source on the runner image makes `apt-get update` exit 100, so drop
-        # the sources this project does not consume, then update and install unmasked. Full
-        # rationale, and why Ubuntu's own sources are matched by content, is in ci.yml.
+        # the entries this project does not consume, then update and install unmasked. Full
+        # rationale, and why classification is per source entry, is in ci.yml.
         run: |
-          kept=0
+          # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          prune='
+          function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
+          function flush(  i) {
+            if (n == 0) return
+            if (uri == "" || ok(uri)) { for (i = 0; i < n; i++) print s[i]; if (uri != "") keep++ } else drop++
+            n = 0; uri = ""
+          }
+          /^[ \t]*(deb|deb-src)[ \t]/ { flush(); if (ok($0)) { print; keep++ } else drop++; next }
+          /^[ \t]*$/ { flush(); print; next }
+          /^[ \t]*URIs:/ { uri = $0 }
+          { s[n++] = $0 }
+          END { flush(); exit (keep > 0 ? 0 : 10) }'
+          work=$(mktemp -d)
+          ubuntu=0
           for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
             [ -f "$f" ] || continue
-            if grep -Eq 'apt-mirrors\.txt|//[a-z0-9.-]*\.ubuntu\.com' "$f"; then
-              kept=$((kept + 1))
-              echo "keeping $f"
-            else
-              echo "removing third-party source $f"
-              sudo rm -f "$f"
-            fi
+            out="$work/$(echo "$f" | tr / _)"
+            rc=0
+            sudo awk "$prune" "$f" > "$out" || rc=$?
+            case "$rc" in
+              0) ubuntu=$((ubuntu + 1)) ;;
+              10) ;;
+              *) echo "::error::could not read or classify $f (awk exit $rc); not guessing at it"
+                 exit 1 ;;
+            esac
+            echo "$rc" > "$out.rc"
           done
-          if [ "$kept" -eq 0 ]; then
-            echo "::error::no Ubuntu apt source survived pruning; refusing to install from a stale index"
+          if [ "$ubuntu" -eq 0 ]; then
+            echo "::error::no Ubuntu apt source recognised; refusing to install from a stale index"
             exit 1
           fi
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            out="$work/$(echo "$f" | tr / _)"
+            if [ "$(cat "$out.rc")" = 10 ]; then
+              echo "removing third-party source $f"
+              sudo rm -f "$f"
+            elif sudo cmp -s "$out" "$f"; then
+              echo "keeping $f"
+            else
+              echo "dropping third-party entries from $f"
+              sudo rm -f "$f"
+              sudo cp "$out" "$f"
+            fi
+          done
           sudo apt-get update
           sudo apt-get install -y pkg-config
       - uses: jdx/mise-action@v4
