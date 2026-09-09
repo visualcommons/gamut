@@ -331,3 +331,248 @@ fn locate_store(data: &[u8], prefix: usize) -> Option<&[u8]> {
     // The same `get` rejects an `LBox` that overruns the box.
     store_and_padding.get(..lbox)
 }
+
+/// What a report of a located manifest store has to say beside it, because locating one is not
+/// validating it.
+///
+/// C2PA 2.4 §15.12 puts validation on a validator: the signature layer (§13) and the
+/// validation-side rules are outside this crate entirely, and `references/c2pa/README.md` records
+/// the boundary — gamut locates, bounds and carries a manifest store, holds no COSE, X.509,
+/// RFC 3161 or trust-list code, and never reports a validity verdict.
+///
+/// The sentence exists because the *absence* of a verdict does not read as one. To anyone who has
+/// seen a Content Credentials badge, "C2PA: present" printed beside EXIF and ICC reads as
+/// *verified*, so a report that lets a reader infer a verdict is a defect rather than a wording
+/// preference. [`C2paSummary::report_lines`] therefore carries this text in the line that reports
+/// the stores, never as a footnote a reader can skip.
+pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
+     it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
+
+impl C2paBoxPurpose {
+    /// The `box_purpose` string this purpose is written as in the file (C2PA 2.4 §A.5.3).
+    ///
+    /// The exact inverse of the parse: [`from_bytes`](Self::from_bytes) maps these bytes back to
+    /// this variant.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manifest => "manifest",
+            Self::Original => "original",
+            Self::Update => "update",
+        }
+    }
+}
+
+/// One located manifest store, reported **without its bytes**: where it sits, how big it is, and
+/// what the `uuid` box that carried it said it was for.
+///
+/// The bytes are absent by construction rather than merely unused. They are opaque to this crate,
+/// routinely tens or hundreds of kilobytes once a manifest embeds a thumbnail, and rendering them
+/// invites exactly the "gamut understands manifests" reading [`C2PA_NOT_VALIDATED`] exists to
+/// prevent; a byte range is what a caller hands to `c2pa-rs` or to `dd`. Use
+/// [`C2paManifestStore::bytes`] when the bytes themselves are wanted.
+///
+/// Non-exhaustive: a later revision may report more of the box without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paStoreSummary {
+    /// The half-open byte range the store occupies in the file — the same range
+    /// [`C2paManifestStore::range`] reports, and just as much *not* a BMFF exclusion range.
+    pub range: Range<usize>,
+    /// The `box_purpose` of the `uuid` box that carried the store.
+    pub purpose: C2paBoxPurpose,
+}
+
+impl C2paStoreSummary {
+    /// The store's size in bytes.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.range.len()
+    }
+}
+
+/// A non-validating report of the C2PA manifest stores a HEIF file carries — presence, and for
+/// each store its byte range, its size and its `box_purpose`.
+///
+/// Built by [`HeifContainer::c2pa_summary`]. It is what a reporting tool prints: the summary
+/// carries the reportable facts and [`report_lines`](Self::report_lines) renders them, so a host
+/// that only formats output — a CLI outside a coverage gate, say — holds no logic of its own and
+/// cannot drop the non-validation disclaimer on the way to the terminal.
+///
+/// Non-exhaustive: a later revision may report more without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct C2paSummary {
+    /// Every located store, in file order. A file mid-update legitimately carries two — an
+    /// `original` box and an `update` box (C2PA 2.4 §A.5.3) — and both are listed with their
+    /// purposes: which of them is *active* is a validator's judgement, so collapsing them to a
+    /// count would hide the one fact that tells them apart.
+    pub stores: Vec<C2paStoreSummary>,
+}
+
+impl C2paSummary {
+    /// Whether the file carries a manifest store at all.
+    #[must_use]
+    pub fn is_present(&self) -> bool {
+        !self.stores.is_empty()
+    }
+
+    /// The human-readable report: one headline, then one line per store.
+    ///
+    /// The headline states presence or absence and carries [`C2PA_NOT_VALIDATED`] inline. Each
+    /// store line names its `box_purpose`, its size and its half-open byte range, and repeats
+    /// "located, not validated" so a line read on its own still cannot be mistaken for a verdict.
+    /// Store lines are indented two spaces relative to the headline; a caller prefixes its own
+    /// indent to every line.
+    ///
+    /// No store's bytes can appear here — a [`C2paStoreSummary`] does not hold them.
+    #[must_use]
+    pub fn report_lines(&self) -> Vec<String> {
+        if self.stores.is_empty() {
+            return vec![format!(
+                "C2PA: no manifest store found in the top-level boxes of the primary stream — \
+                 {C2PA_NOT_VALIDATED}"
+            )];
+        }
+        let count = self.stores.len();
+        let mut lines = vec![format!(
+            "C2PA: {count} manifest store{plural} located, NOT VALIDATED — {C2PA_NOT_VALIDATED}",
+            plural = if count == 1 { "" } else { "s" }
+        )];
+        lines.extend(self.stores.iter().map(|store| {
+            format!(
+                "  box_purpose \"{purpose}\": {size} bytes at [{start}, {end}) — located, not validated",
+                purpose = store.purpose.as_str(),
+                size = store.size(),
+                start = store.range.start,
+                end = store.range.end,
+            )
+        }));
+        lines
+    }
+}
+
+impl HeifContainer<'_> {
+    /// A non-validating summary of every C2PA manifest store in the file, in file order.
+    ///
+    /// The same scan as [`c2pa_manifest_stores`](Self::c2pa_manifest_stores) — with the same
+    /// reach, and the same silence on a malformed or foreign `uuid` box — reported without the
+    /// stores' bytes. See [`C2paSummary`] for what it is for, and [`C2PA_NOT_VALIDATED`] for what
+    /// has to be said beside it.
+    #[must_use]
+    pub fn c2pa_summary(&self) -> C2paSummary {
+        C2paSummary {
+            stores: self
+                .c2pa_manifest_stores()
+                .map(|store| C2paStoreSummary {
+                    range: store.range,
+                    purpose: store.purpose,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{C2PA_NOT_VALIDATED, C2paBoxPurpose, C2paStoreSummary, C2paSummary};
+
+    /// A summary of the stores at the given `(start, end, purpose)` triples.
+    fn summary(stores: &[(usize, usize, C2paBoxPurpose)]) -> C2paSummary {
+        C2paSummary {
+            stores: stores
+                .iter()
+                .map(|&(start, end, purpose)| C2paStoreSummary {
+                    range: start..end,
+                    purpose,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_purpose_renders_as_the_box_purpose_string_it_parses_from() {
+        for purpose in [
+            C2paBoxPurpose::Manifest,
+            C2paBoxPurpose::Original,
+            C2paBoxPurpose::Update,
+        ] {
+            assert_eq!(
+                C2paBoxPurpose::from_bytes(purpose.as_str().as_bytes()),
+                Some(purpose),
+                "{} must parse back to the purpose that renders it",
+                purpose.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_stores_size_is_the_length_of_its_range() {
+        // Not its end offset: a store never starts at zero, the box framing preceding it.
+        let one = summary(&[(61, 90, C2paBoxPurpose::Manifest)]);
+        assert_eq!(one.stores[0].size(), 29);
+    }
+
+    #[test]
+    fn the_disclaimer_names_every_check_gamut_omits_and_what_makes_them() {
+        for fragment in [
+            "signature",
+            "hash binding",
+            "trust list",
+            "c2pa-rs",
+            "never validates",
+        ] {
+            assert!(
+                C2PA_NOT_VALIDATED.contains(fragment),
+                "the disclaimer must mention {fragment}: {C2PA_NOT_VALIDATED}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_store_is_reported_as_absent_and_still_says_gamut_never_validates() {
+        let none = C2paSummary::default();
+        assert!(!none.is_present());
+        assert_eq!(
+            none.report_lines(),
+            vec![format!(
+                "C2PA: no manifest store found in the top-level boxes of the primary stream — \
+                 {C2PA_NOT_VALIDATED}"
+            )]
+        );
+    }
+
+    #[test]
+    fn one_store_is_reported_with_its_purpose_size_and_half_open_range() {
+        let one = summary(&[(61, 90, C2paBoxPurpose::Manifest)]);
+        assert!(one.is_present());
+        assert_eq!(
+            one.report_lines(),
+            vec![
+                format!("C2PA: 1 manifest store located, NOT VALIDATED — {C2PA_NOT_VALIDATED}"),
+                "  box_purpose \"manifest\": 29 bytes at [61, 90) — located, not validated"
+                    .to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mid_update_file_lists_both_stores_with_their_own_purposes() {
+        // Two stores differing in size, offset *and* purpose: a line built from the wrong element,
+        // or a purpose read from the wrong store, changes the output.
+        let two = summary(&[
+            (61, 90, C2paBoxPurpose::Original),
+            (131, 172, C2paBoxPurpose::Update),
+        ]);
+        assert_eq!(
+            two.report_lines(),
+            vec![
+                format!("C2PA: 2 manifest stores located, NOT VALIDATED — {C2PA_NOT_VALIDATED}"),
+                "  box_purpose \"original\": 29 bytes at [61, 90) — located, not validated"
+                    .to_owned(),
+                "  box_purpose \"update\": 41 bytes at [131, 172) — located, not validated"
+                    .to_owned(),
+            ]
+        );
+    }
+}

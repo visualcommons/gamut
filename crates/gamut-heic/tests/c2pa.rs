@@ -206,6 +206,58 @@ fn mid_update_file_reports_both_stores_in_file_order() {
 }
 
 #[test]
+fn the_summary_carries_every_located_store_with_its_range_size_and_purpose() {
+    let original = jumbf_store(b"original-store");
+    let update = jumbf_store(b"update-store-that-is-longer");
+    let data = file_with(&[
+        c2pa_box("original", Some(0), &original, &[]),
+        c2pa_box("update", Some(0), &update, &[]),
+    ]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let located: Vec<_> = c.c2pa_manifest_stores().collect();
+    let summary = c.c2pa_summary();
+    assert!(summary.is_present());
+    assert_eq!(summary.stores.len(), located.len());
+    for (reported, found) in summary.stores.iter().zip(&located) {
+        assert_eq!(reported.range, found.range);
+        assert_eq!(reported.purpose, found.purpose);
+        assert_eq!(reported.size(), found.bytes.len());
+    }
+    // The two stores differ in size, so a summary built from the wrong store is visible here.
+    assert_ne!(summary.stores[0].size(), summary.stores[1].size());
+}
+
+#[test]
+fn a_report_line_never_carries_a_stores_bytes() {
+    // C2PA 2.4 §15.12: a store is opaque to gamut, and rendering it would invite the reading that
+    // gamut understands — and so has checked — the manifest. A byte range is the whole report.
+    let contents = b"MANIFEST-STORE-CONTENTS";
+    let data = file_with(&[c2pa_box("manifest", Some(0), &jumbf_store(contents), &[])]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let lines = c.c2pa_summary().report_lines();
+    let rendered = lines.join("\n");
+    assert!(
+        !rendered.contains(std::str::from_utf8(contents).unwrap()),
+        "the store's contents leaked into the report: {rendered}"
+    );
+    // Nor the JUMBF framing that bounds them.
+    assert!(!rendered.contains("jumb"), "the store's header leaked: {rendered}");
+}
+
+#[test]
+fn a_file_with_no_c2pa_box_summarises_as_absent() {
+    let data = file_with(&[]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert!(!summary.is_present());
+    assert!(summary.stores.is_empty());
+    assert_eq!(summary.report_lines().len(), 1);
+}
+
+#[test]
 fn largesize_header_shifts_the_range_by_its_extra_eight_bytes() {
     // A 64-bit largesize header is 16 bytes, not 8. The offsets are derived from the segment range
     // and the body length, so the store must move by exactly the extra 8 header bytes.
