@@ -583,6 +583,17 @@ pub const MATRIX_3X3_TAGS: &[u16] = &[
 /// A handful of common baseline TIFF tags a DNG may carry but the codec does not name
 /// (`HostComputer`, `Min`/`MaxSampleValue`) are also accepted so a valid file is not flagged for
 /// them.
+///
+/// # What "known" means here
+///
+/// **A tag this crate recognises** — a question about this crate's vocabulary, answered from the
+/// tag number alone. It is deliberately *not* "a tag this decode consumed": that would make the
+/// answer depend on the file's contents, so the same tag would be known in one file and unknown
+/// in another, and `deconstruct`'s `UnknownTag` would stop meaning "a private or unrecognised
+/// tag" and start meaning "a tag some code path declined". Several listed tags are recognised
+/// but not modelled, and reach the caller verbatim as [`RawTag`](crate::RawTag)s; the C2PA
+/// manifest store (52545) is recognised here even though its clause is C2PA's rather than DNG's,
+/// because this crate writes and reads one.
 #[must_use]
 pub fn is_known_tag(tag: u16) -> bool {
     KNOWN_TAGS.contains(&tag)

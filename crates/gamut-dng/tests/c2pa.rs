@@ -388,6 +388,140 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
     );
 }
 
+/// Appends a trailing main-chain IFD holding `entries` **at the byte level**, so entries the
+/// eager `Ifd` would de-duplicate survive as written. Returns the directory's offset.
+fn append_raw_trailing_ifd(dng: &mut Vec<u8>, entries: &[(u16, u16, u32, u32)]) -> u64 {
+    let le = ByteOrder::LittleEndian;
+    let (_, _, ifd0) = read_header(dng).expect("header");
+    let n0 = usize::from(le.u16(dng[ifd0 as usize..ifd0 as usize + 2].try_into().expect("2")));
+    let next_at = ifd0 as usize + 2 + n0 * 12;
+    let body = align_word(dng.len() as u64);
+    dng.resize(body as usize, 0);
+    dng.extend_from_slice(&le.pack_u16(entries.len() as u16));
+    for &(tag, ty, count, word) in entries {
+        dng.extend_from_slice(&le.pack_u16(tag));
+        dng.extend_from_slice(&le.pack_u16(ty));
+        dng.extend_from_slice(&le.pack_u32(count));
+        dng.extend_from_slice(&le.pack_u32(word));
+    }
+    dng.extend_from_slice(&[0, 0, 0, 0]);
+    dng[next_at..next_at + 4].copy_from_slice(&le.pack_u32(body as u32));
+    body
+}
+
+/// §A.3.6 allows one store per asset, so a last IFD carrying **two** tag-52545 entries has no
+/// admissible store — and both decode surfaces must say so *together*.
+///
+/// Reading the bytes and the ranges through different paths is what made them disagree: the
+/// eager `Ifd` keeps the last duplicate, so `metadata.c2pa` reported that entry's bytes while
+/// `c2pa_exclusions` reported nothing. Re-encoding such a `DngMetadata` silently produced a
+/// one-entry file carrying only the last duplicate.
+#[test]
+fn a_duplicated_store_entry_is_absent_from_both_decode_surfaces() {
+    let first = store(40);
+    let (mut dng, _) = encode(&DngEncoder::new());
+    // Two entries in a trailing IFD: body is count (2) + 2 * 12 + next (4) = 30 bytes.
+    let body = append_raw_trailing_ifd(
+        &mut dng,
+        &[
+            (C2PA_MANIFEST_STORE, 7, first.len() as u32, 0),
+            (C2PA_MANIFEST_STORE, 7, first.len() as u32, 0),
+        ],
+    );
+    let values_at = body + 30;
+    let second: Vec<u8> = first.iter().map(|b| !b).collect();
+    let le = ByteOrder::LittleEndian;
+    for (i, entry) in [0usize, 1].iter().enumerate() {
+        let word_at = (body + 2 + *entry as u64 * 12 + 8) as usize;
+        dng[word_at..word_at + 4]
+            .copy_from_slice(&le.pack_u32((values_at + (i * first.len()) as u64) as u32));
+    }
+    dng.extend_from_slice(&first);
+    dng.extend_from_slice(&second);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(
+        decoded.c2pa_exclusions, None,
+        "two entries name no single store"
+    );
+    assert_eq!(
+        decoded.metadata.c2pa, None,
+        "the bytes surface must agree with the ranges, not report the last duplicate"
+    );
+    // Preservation still holds: the field reaches the caller verbatim.
+    assert!(
+        decoded
+            .trailing_extra
+            .iter()
+            .any(|t| t.tag == C2PA_MANIFEST_STORE),
+        "the duplicated entry is still surfaced: {:?}",
+        decoded.trailing_extra
+    );
+    // And re-encoding cannot smuggle one of the two duplicates back out as "the" store.
+    let mut re = Vec::new();
+    let report = DngEncoder::new()
+        .with_metadata(decoded.metadata.clone())
+        .encode_with_report(&decoded.raw, &common::sample_profile(), &mut re)
+        .expect("re-encode");
+    assert_eq!(report.c2pa, None);
+}
+
+/// A tag-52545 field this decoder declines to read as a store, in a **trailing** IFD that
+/// carries no image, still reaches the caller: that directory is neither IFD 0, nor the raw
+/// IFD, nor a sub-image, so without `trailing_extra` its fields would reach no surface at all
+/// and the crate's "nothing is silently dropped" promise would be false.
+#[test]
+fn a_declined_store_in_a_trailing_ifd_is_still_surfaced() {
+    let short = store(MIN_STORE_LEN - 1);
+    let (mut dng, _) = encode(&DngEncoder::new());
+    let body =
+        append_raw_trailing_ifd(&mut dng, &[(C2PA_MANIFEST_STORE, 7, short.len() as u32, 0)]);
+    // Body: count (2) + one entry (12) + next (4) = 18; point the entry at the bytes after it.
+    let word_at = (body + 2 + 8) as usize;
+    dng[word_at..word_at + 4]
+        .copy_from_slice(&ByteOrder::LittleEndian.pack_u32((body + 18) as u32));
+    dng.extend_from_slice(&short);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.metadata.c2pa, None, "7 bytes cannot be a JUMBF box");
+    assert_eq!(decoded.c2pa_exclusions, None);
+    assert!(
+        decoded.trailing_extra.contains(&RawTag {
+            tag: C2PA_MANIFEST_STORE,
+            value: Value::Undefined(short),
+        }),
+        "the declined field must not vanish: {:?}",
+        decoded.trailing_extra
+    );
+}
+
+/// A store this decoder *does* accept is consumed, not also reported as an unmodelled field —
+/// `trailing_extra` is the channel for what was declined, not a duplicate of what was read.
+#[test]
+fn an_accepted_store_is_not_also_a_trailing_extra() {
+    let bytes = store(50);
+    let (mut dng, _) = encode(&DngEncoder::new());
+    let body = align_word(dng.len() as u64);
+    let store_at = body + 18;
+    append_trailing_ifd(
+        &mut dng,
+        &[(C2PA_MANIFEST_STORE, 7, bytes.len() as u32, store_at as u32)],
+    );
+    dng.extend_from_slice(&bytes);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.metadata.c2pa, Some(bytes));
+    assert!(decoded.c2pa_exclusions.is_some());
+    assert!(
+        !decoded
+            .trailing_extra
+            .iter()
+            .any(|t| t.tag == C2PA_MANIFEST_STORE),
+        "a consumed store is not an extra: {:?}",
+        decoded.trailing_extra
+    );
+}
+
 /// A foreign file whose tag-52545 value is too short to hold a JUMBF box header carries no
 /// manifest store (`references/c2pa/README.md`): it decodes to `None`, and the decoded
 /// `DngMetadata` therefore re-encodes — which it could not if the decoder had handed back a

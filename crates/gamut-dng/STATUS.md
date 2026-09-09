@@ -224,7 +224,20 @@ exclusion ranges. Now:
   rather than writing a file whose exclusion ranges cover bytes no reader reads back.
 - **Duplicates.** Two tag-52545 entries in the last main IFD name no single store (§A.3.6: one
   per asset), so both `metadata.c2pa` and `c2pa_exclusions` report absence rather than
-  describing different byte runs.
+  describing different byte runs. The two surfaces cannot drift apart: the ranges are located
+  first and the bytes are taken *only* if that succeeded, so one rule decides both. (Reading the
+  bytes independently is what made them disagree — the eager `Ifd` keeps the last duplicate, so
+  the bytes surface reported that entry while the ranges reported none, and re-encoding produced
+  a one-entry file carrying only the last duplicate.) On the write side, `append_store` names a
+  duplicated entry as the problem instead of claiming the entry is missing.
+- **Nothing declined is dropped.** A tag-52545 field the decoder declines to read as a store —
+  wrong type, too short, duplicated — still reaches the caller verbatim. Where it lands depends
+  on the directory: IFD 0's go to `ifd0_extra`, and the last main-chain directory's to the new
+  `DecodedDng::trailing_extra`. That field exists because §A.3.6's other lawful placement (the
+  store as "the only entity within a new IFD following the existing one") produces a directory
+  with no image, which is therefore neither IFD 0, nor the raw IFD, nor a `SubImage` — so before
+  it, such a directory's fields reached no surface at all. It is empty for every file this crate
+  writes, which puts the entry in IFD 0.
 - **Version.** Carrying the tag raises neither `DNGVersion` nor `DNGBackwardVersion`: like XMP
   and ICC it is metadata a reader may ignore, and the tag is C2PA's, not a DNG feature a
   reader must implement (the SDK's tag table names it as `tcC2PAManifest` and validates a file
@@ -237,6 +250,11 @@ exclusion ranges. Now:
   following it. This crate writes one main IFD and uses the in-IFD form, which is lawful and is
   what the Adobe SDK reads without surprise. The **decoder** reads both, since it consults the
   last IFD of the chain whatever its shape.
+- **The one directory still not surfaced.** An *interior* main-chain page — neither the first
+  nor the last — that carries no image data is no `SubImage` either, so its fields reach no
+  verbatim channel. That predates #442 and is not what §A.3.6 creates (the store's own placement
+  is the *last* directory, which `trailing_extra` now covers); `deconstruct` still accounts for
+  its bytes. Filed as #525.
 - **Not done here.** The store is never parsed; a `DngRewrite` of a file carrying one relocates
   it into the value pool like any other value (a rewrite invalidates the binding regardless);
   the behavioural `c2pa-rs` oracle is #447's.

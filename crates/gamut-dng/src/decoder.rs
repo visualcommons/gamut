@@ -169,12 +169,36 @@ pub struct DecodedDng {
     /// against [`RawImage::new_raw_image_digest`] to verify raw-data integrity.
     pub new_raw_image_digest: Option<[u8; 16]>,
     /// Every IFD 0 field the pipeline does not model, verbatim — proprietary maker tags
-    /// included — in tag order. Nothing in the file is silently dropped; `deconstruct` remains
-    /// the byte-accounting *diagnostic* view of the same principle.
+    /// included — in tag order.
+    ///
+    /// This is one of four verbatim channels that together carry the unmodelled fields of every
+    /// directory the decode surfaces: this one, [`raw_extra`](Self::raw_extra),
+    /// [`SubImage::extra_tags`] per image directory, and
+    /// [`trailing_extra`](Self::trailing_extra) for the last main-chain directory when it is
+    /// none of those. Nothing those four reach is silently dropped; `deconstruct` remains the
+    /// byte-accounting *diagnostic* view of the same principle, and is what shows the one
+    /// residue they do not reach (an interior main-chain page carrying no image — see
+    /// [`trailing_extra`](Self::trailing_extra) and `STATUS.md`).
     pub ifd0_extra: Vec<RawTag>,
     /// Every unmodelled field of the raw IFD, verbatim. Empty when the raw image lives in IFD 0
     /// itself (its extras are then in [`ifd0_extra`](Self::ifd0_extra)).
     pub raw_extra: Vec<RawTag>,
+    /// Every field of the **last directory of the main IFD chain**, verbatim, when that
+    /// directory is not surfaced anywhere else — i.e. when it is not IFD 0, not the raw IFD and
+    /// carries no image of its own, so it becomes no [`SubImage`].
+    ///
+    /// C2PA 2.4 §A.3.6 is what makes such a directory ordinary rather than exotic: it permits a
+    /// manifest store to be "the only entity within a new IFD following the existing one", and a
+    /// directory holding just that entry has no pixels to make it a sub-image. Whatever it
+    /// carries reaches the caller here — including a tag-52545 field this decoder declined to
+    /// read as a store (wrong type, too short, or duplicated).
+    ///
+    /// Empty for every file this crate writes, which puts the entry in IFD 0.
+    ///
+    /// **Other pages are not covered.** A main-chain directory that is neither the first nor the
+    /// last, carries no image data, and is thus also no sub-image, still reaches no surface; see
+    /// `STATUS.md`. That gap predates this field and is not what §A.3.6 creates.
+    pub trailing_extra: Vec<RawTag>,
     /// Where the C2PA manifest store in [`metadata.c2pa`](DngMetadata::c2pa) sits in the file:
     /// the two ranges a `c2pa.hash.data` binding excludes (C2PA 2.4 §18.5.5), located by
     /// [`gamut_ifd::c2pa::locate`] in the last IFD of the main chain (§A.3.6). `Some` exactly
@@ -318,8 +342,19 @@ impl DngDecoder {
             .and_then(|b| <[u8; 16]>::try_from(b).ok());
         // The C2PA store lives in the last IFD of the main chain (C2PA 2.4 §A.3.6) — IFD 0 for
         // every file this crate writes, a trailing directory for the other form §A.3.6 allows.
-        let metadata = decode_metadata(ifd0, &tracked[last_main], data, order, variant);
+        // The ranges are located *first* and the bytes are then taken only if that succeeded, so
+        // the two surfaces cannot disagree about whether the file has a store: one rule, applied
+        // once. (Reading the bytes independently is what let a duplicated entry report bytes
+        // from the eager `Ifd`, which keeps the last duplicate, while the ranges reported none.)
         let c2pa_exclusions = c2pa::locate(data)?;
+        let metadata = decode_metadata(
+            ifd0,
+            &tracked[last_main],
+            c2pa_exclusions.is_some(),
+            data,
+            order,
+            variant,
+        );
         let gain_table_map = decode_gain_map(raw_ifd, tags::PROFILE_GAIN_TABLE_MAP, order)?;
         let gain_table_map2 = decode_gain_map(ifd0, tags::PROFILE_GAIN_TABLE_MAP2, order)?;
         let depth_info = decode_depth_info(ifd0);
@@ -348,6 +383,17 @@ impl DngDecoder {
         } else {
             tracked[raw_index].remaining()
         };
+        // The last directory of the main chain is where C2PA 2.4 §A.3.6 puts a manifest store,
+        // and such a directory legitimately carries no image at all — so it is not IFD 0, not
+        // the raw IFD, and not a sub-image, and without this its fields would reach no surface
+        // at all. That would break this decoder's standing promise that nothing in the file is
+        // silently dropped, for exactly the input the store's own placement rule invites.
+        let trailing_extra =
+            if last_main == 0 || last_main == raw_index || sub_indices.contains(&last_main) {
+                Vec::new()
+            } else {
+                tracked[last_main].remaining()
+            };
 
         Ok(DecodedDng {
             raw,
@@ -364,6 +410,7 @@ impl DngDecoder {
             new_raw_image_digest,
             ifd0_extra,
             raw_extra,
+            trailing_extra,
             c2pa_exclusions,
         })
     }
@@ -377,22 +424,26 @@ impl DngDecoder {
 /// own IFD 0 is *not* copied into the model's 0th IFD — [`DecodedDng`] already carries those
 /// fields, typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
 ///
-/// The store is taken only as the `UNDEFINED` bytes C2PA 2.4 §A.3.6 mandates, verbatim — the
-/// file's byte order does not apply to them — and only when there are at least
-/// [`gamut_ifd::c2pa::MIN_STORE_LEN`] of them, since a value too short to hold a JUMBF box header
-/// is not a manifest store (`references/c2pa/README.md`). Anything else under that tag is put
-/// back for the extras, so nothing is dropped and what this returns is exactly what
-/// [`gamut_ifd::c2pa::locate`] reports ranges for — which is also what keeps decode → encode
-/// working: every store this hands back is one the encoder will accept.
+/// The store is taken as the `UNDEFINED` bytes C2PA 2.4 §A.3.6 mandates, verbatim — the file's
+/// byte order does not apply to them — and only when `located` says
+/// [`gamut_ifd::c2pa::locate`] recognised a store in this file. That flag is the *whole*
+/// admission rule (type, length, uniqueness, placement), so this cannot disagree with
+/// [`DecodedDng::c2pa_exclusions`]: bytes and ranges are `Some` together or neither is.
+///
+/// A tag-52545 field that is not an admissible store — wrong type, shorter than a JUMBF box
+/// header, or one of several in a directory §A.3.6 allows only one store in — is put back for
+/// the extras rather than returned, so it still reaches the caller and decode → encode still
+/// works: every store this hands back is one the encoder will accept.
 fn decode_metadata(
     ifd0: &TrackedIfd,
     store_ifd: &TrackedIfd,
+    located: bool,
     data: &[u8],
     order: ByteOrder,
     variant: Variant,
 ) -> DngMetadata {
     let c2pa = match store_ifd.get(c2pa::C2PA_MANIFEST_STORE) {
-        Some(Value::Undefined(store)) if store.len() >= c2pa::MIN_STORE_LEN => Some(store.clone()),
+        Some(Value::Undefined(store)) if located => Some(store.clone()),
         Some(_) => {
             store_ifd.untouch(c2pa::C2PA_MANIFEST_STORE);
             None
