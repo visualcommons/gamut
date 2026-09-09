@@ -212,13 +212,49 @@ exclusion ranges. Now:
   stays in `ifd0_extra`; so does one in IFD 0 when the main chain continues past it.
 - **Byte accounting.** `deconstruct` claims the store as IFD 0's `Value { tag: 52545 }` span and
   the alignment filler before it as `Padding` — a store at the end of the file is never a
-  `Trailer` — so a store-carrying file is fully classified. `tags::is_known_tag` does not yet
-  list 52545 (the constant lives in `gamut-ifd`), so `is_fully_accounted` still reports it as an
-  `UnknownTag`; adding it there is a one-line follow-up outside this change's manifest.
+  `Trailer` — so a store-carrying file is fully classified. 52545 is in `tags::KNOWN_TAGS`
+  (aliasing `gamut_ifd::c2pa::C2PA_MANIFEST_STORE`, where the clause is stated), so
+  `is_fully_accounted()` stays **true** for a file this encoder writes: a manifest store gamut
+  itself embedded is not a private tag.
+- **Lengths.** A store shorter than a JUMBF box header (8 bytes) is refused by the encoder and
+  read as *absent* by the decoder — the split `references/c2pa/README.md` prescribes, and what
+  makes decode → encode of a foreign file carrying a stub value work. In **BigTIFF** the inline
+  threshold is those same 8 bytes, so a store must exceed them or it would pack into the entry
+  instead of landing at the end of the file; the encoder refuses that case with its own message
+  rather than writing a file whose exclusion ranges cover bytes no reader reads back.
+- **Duplicates.** Two tag-52545 entries in the last main IFD name no single store (§A.3.6: one
+  per asset), so both `metadata.c2pa` and `c2pa_exclusions` report absence rather than
+  describing different byte runs. The two surfaces cannot drift apart: the ranges are located
+  first and the bytes are taken *only* if that succeeded, so one rule decides both. (Reading the
+  bytes independently is what made them disagree — the eager `Ifd` keeps the last duplicate, so
+  the bytes surface reported that entry while the ranges reported none, and re-encoding produced
+  a one-entry file carrying only the last duplicate.) On the write side, `append_store` names a
+  duplicated entry as the problem instead of claiming the entry is missing.
+- **Nothing declined is dropped.** A tag-52545 field the decoder declines to read as a store —
+  wrong type, too short, duplicated — still reaches the caller verbatim. Where it lands depends
+  on the directory: IFD 0's go to `ifd0_extra`, and the last main-chain directory's to the new
+  `DecodedDng::trailing_extra`. That field exists because §A.3.6's other lawful placement (the
+  store as "the only entity within a new IFD following the existing one") produces a directory
+  with no image, which is therefore neither IFD 0, nor the raw IFD, nor a `SubImage` — so before
+  it, such a directory's fields reached no surface at all. It is empty for every file this crate
+  writes, which puts the entry in IFD 0.
 - **Version.** Carrying the tag raises neither `DNGVersion` nor `DNGBackwardVersion`: like XMP
   and ICC it is metadata a reader may ignore, and the tag is C2PA's, not a DNG feature a
   reader must implement (the SDK's tag table names it as `tcC2PAManifest` and validates a file
   carrying it).
+- **A store and a reservation together is an error, deliberately.** The signer flow is reserve →
+  sign → re-encode with the store, which sets one at a time; setting both is a caller mistake,
+  and letting either silently win would hide it.
+- **Writing §A.3.6's trailing-IFD form is out of scope, deliberately.** For a single-main-IFD
+  asset the clause permits the entry either in that IFD or as the only entity of a new IFD
+  following it. This crate writes one main IFD and uses the in-IFD form, which is lawful and is
+  what the Adobe SDK reads without surprise. The **decoder** reads both, since it consults the
+  last IFD of the chain whatever its shape.
+- **The one directory still not surfaced.** An *interior* main-chain page — neither the first
+  nor the last — that carries no image data is no `SubImage` either, so its fields reach no
+  verbatim channel. That predates #442 and is not what §A.3.6 creates (the store's own placement
+  is the *last* directory, which `trailing_extra` now covers); `deconstruct` still accounts for
+  its bytes. Filed as #525.
 - **Not done here.** The store is never parsed; a `DngRewrite` of a file carrying one relocates
   it into the value pool like any other value (a rewrite invalidates the binding regardless);
   the behavioural `c2pa-rs` oracle is #447's.
@@ -274,9 +310,11 @@ separate path (below).
   point of use. `GainValues`
   stays exhaustive — its four variants are the spec's closed `DataType` set.
 - Re-export closure: everything on the crate root, including `RawPhotometry`, `cfa_color`,
-  `opcode_id`, `new_subfile_type`, `gamut_ifd::Value` (the `RawTag` payload type), and the
+  `opcode_id`, `new_subfile_type`, `gamut_ifd::Value` (the `RawTag` payload type), the
   metadata surface's own types — `Exif`, `ExifTag`, `Rational` and `MetadataBlock` — so a caller
-  builds and reads `DngMetadata` without a direct `gamut-metadata` dependency;
+  builds and reads `DngMetadata` without a direct `gamut-metadata` dependency, and (since #442)
+  the whole C2PA surface this crate's docs name: `C2paExclusions`, `C2PA_MANIFEST_STORE` and
+  `MIN_STORE_LEN`, so a signer needs no direct `gamut-ifd` dependency either;
   `lossless_jpeg::{encode, decode}` stay module-scoped deliberately (a codec namespace).
 - `Compression::is_supported` became `is_decodable` (every decodable scheme encodes, with the
   documented `jxl-encode`/Deflate-depth caveats).

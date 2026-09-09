@@ -58,14 +58,21 @@ use crate::{
 /// §A.3.6.
 pub const C2PA_MANIFEST_STORE: u16 = 52545;
 
-/// The smallest store [`append_store`] accepts: a JUMBF box header, 4-byte `LBox` + 4-byte
-/// `TBox` (C2PA 2.4 §8.4.2.3's incidental description of the box framing; see
-/// `references/c2pa/README.md`). A manifest store is a JUMBF superbox, so nothing shorter can be
-/// one, and a reservation shorter than this could never be filled with a valid store.
+/// The length below which a value cannot be a manifest store: a JUMBF box header, being a
+/// 4-byte `LBox` followed by a 4-byte `TBox` (C2PA 2.4 §8.4.2.3's incidental description of the
+/// box framing; see `references/c2pa/README.md`). A manifest store is a JUMBF superbox, so
+/// nothing shorter can be one, and a reservation shorter than this could never be filled with a
+/// valid store.
 ///
-/// Every value this long is also longer than either variant's inline threshold (4 bytes in
-/// classic TIFF, 8 in BigTIFF), so an appended store is always out of line and its two exclusion
-/// ranges are always disjoint from each other.
+/// The bound is applied in both directions, but not symmetrically — `references/c2pa/README.md`
+/// prescribes exactly this split for a reader: [`locate`] treats a shorter value as **not a
+/// manifest store** and reports absence, while [`append_store`] **refuses** it, because an
+/// encoder handed a store it cannot write must say so rather than silently drop it.
+///
+/// **It does not by itself guarantee the value is out of line.** Classic TIFF's inline threshold
+/// is 4 bytes, but BigTIFF's is 8, so a store of exactly this length packs *inline* in a BigTIFF
+/// entry. [`append_store`] therefore gates on the variant's own
+/// [`inline_threshold`](Variant::inline_threshold), not on this constant.
 pub const MIN_STORE_LEN: usize = 8;
 
 /// The two byte ranges an external signer excludes from a `c2pa.hash.data` hard binding over a
@@ -76,7 +83,12 @@ pub const MIN_STORE_LEN: usize = 8;
 /// into the bytes that encoder produced). They never overlap: the count field lies inside a
 /// directory body, the store outside it (or, for a foreign file whose store packs inline, in the
 /// entry's value word, which follows the count field).
+///
+/// `#[non_exhaustive]`: §18.5.5's exclusion set is the two ranges below today, and a later
+/// revision naming a third must not be a breaking change. Construct one only by locating or
+/// writing a store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct C2paExclusions {
     /// The manifest store's bytes: `len` is the entry's `count`, the store being `UNDEFINED`
     /// (one byte per element).
@@ -84,6 +96,24 @@ pub struct C2paExclusions {
     /// The entry's `count` field: 4 bytes in classic TIFF, 8 in BigTIFF, at offset 4 of the
     /// entry record (after the 2-byte tag and 2-byte type).
     pub count_field: Range,
+}
+
+impl C2paExclusions {
+    /// The exclusion set for a store at `store` whose IFD entry's `count` field is at
+    /// `count_field`.
+    ///
+    /// [`locate`] and [`append_store`] return one of these already, and that is the ordinary
+    /// way to get one. This constructor exists because the type is `#[non_exhaustive]`, which
+    /// would otherwise leave a host that places a store by some other route — its own writer, a
+    /// format this crate does not serialise — unable to name the ranges §18.5.5 asks it to
+    /// exclude. Extensible and constructible are both available, so the type is both.
+    ///
+    /// The two ranges are the caller's to get right: nothing here re-reads the file to check
+    /// that they describe a manifest store, or that they are disjoint.
+    #[must_use]
+    pub const fn new(store: Range, count_field: Range) -> Self {
+        Self { store, count_field }
+    }
 }
 
 /// Reserves the manifest-store entry in `ifd`, the directory that will be written as the last
@@ -107,14 +137,31 @@ fn last_ifd<S: ReadAt>(reader: &mut IfdReader<S>) -> Result<RawIfd> {
     last.ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: no IFD"))
 }
 
-/// The manifest-store entry of `ifd`, if it carries one of the mandated type.
+/// The manifest-store entry of `ifd`, if it carries exactly one of the mandated type.
 ///
-/// A tag-52545 entry of any other type is not a manifest store — §A.3.6 fixes the type at 7 —
-/// and is reported as absence rather than an error, so a decoder can still surface it as an
-/// unmodelled field. Both sides of the workspace's codecs apply this same test.
+/// Two ways a tag-52545 entry is *not* the asset's manifest-store entry, both reported as
+/// absence rather than as an error, so a decoder can still surface the field as unmodelled:
+///
+/// - **Its type is not 7.** §A.3.6 fixes the type at `UNDEFINED`.
+/// - **It is one of several.** §A.3.6 admits "only one C2PA Manifest Store for the entire
+///   asset", so a directory carrying two tag-52545 entries names no single store. Reporting the
+///   first would be worse than reporting none: the eager [`Ifd`] keeps the *last* duplicate
+///   (see [`RawIfd::entry`]), so a caller reading the bytes through one path and the ranges
+///   through this one would be handed two different byte runs under one name.
+///
+/// The [`MIN_STORE_LEN`] bound is deliberately **not** applied here: it is a rule about a
+/// *store*, and [`append_store`] uses this helper to find the one-byte placeholder
+/// [`reserve_entry`] wrote, which is not a store yet. [`locate`] applies it.
 fn store_entry(ifd: &RawIfd) -> Option<&RawEntry> {
-    ifd.entry(C2PA_MANIFEST_STORE)
-        .filter(|entry| entry.field_type() == Some(FieldType::Undefined))
+    let mut matching = ifd
+        .entries
+        .iter()
+        .filter(|entry| entry.tag == C2PA_MANIFEST_STORE);
+    let entry = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    (entry.field_type() == Some(FieldType::Undefined)).then_some(entry)
 }
 
 /// The count field of `entry`: the offset-width word after the 2-byte tag and 2-byte type.
@@ -135,10 +182,26 @@ fn exceeds_offset_width(variant: Variant, end: u64) -> bool {
 /// Locates the C2PA manifest store of a TIFF-based file and reports its exclusion ranges.
 ///
 /// Walks the main-IFD chain to its **last** directory (§A.3.6) and looks there — and only
-/// there — for an `UNDEFINED` entry under [`C2PA_MANIFEST_STORE`]. Returns `Ok(None)` when the
-/// last directory has no such entry, when its type is not 7, or (a file that breaks §A.3.6) when
-/// the entry sits in an earlier directory of the chain. A store whose value packs inline is
+/// there — for an `UNDEFINED` entry under [`C2PA_MANIFEST_STORE`]. A store whose value packs
+/// inline (only possible in BigTIFF, whose inline threshold is [`MIN_STORE_LEN`] itself) is
 /// reported with `store` inside the entry's value word, after the count field.
+///
+/// Returns `Ok(None)` — absence, never an error — when the last directory has no such entry,
+/// when its type is not 7, when it is one of several tag-52545 entries, when its value is
+/// shorter than a JUMBF box header ([`MIN_STORE_LEN`]) and so cannot be a store, or (a file that
+/// breaks §A.3.6) when the entry sits in an earlier directory of the chain. Reporting absence
+/// rather than erroring is what keeps a foreign file readable: the field still reaches a caller
+/// as an unmodelled tag, and a decode → encode cycle over such a file does not trip the
+/// encoder's own minimum.
+///
+/// # This reads one shape [`append_store`] will not write, deliberately
+///
+/// A BigTIFF store of exactly [`MIN_STORE_LEN`] bytes packs inline, and this reports it — the
+/// file is lawful and its ranges are well defined. [`append_store`] nonetheless refuses to
+/// *write* that shape, because an inline value is not the run at the end of the file this
+/// crate's placement rule is built on, and admitting it would give a store two placements to
+/// reason about for no gain. Liberal in what it accepts, conservative in what it emits; the
+/// asymmetry is a decision, not an oversight.
 ///
 /// `src` is any [`ReadAt`] source — a `&[u8]`, or a [`StreamSource`](crate::StreamSource) over
 /// a file handle, since a multi-hundred-MB RAW need not be read to find a 12-byte entry.
@@ -154,6 +217,13 @@ pub fn locate<S: ReadAt>(src: S) -> Result<Option<C2paExclusions>> {
     let Some(entry) = store_entry(&last) else {
         return Ok(None);
     };
+    // A value too short to hold a JUMBF box header is not a manifest store
+    // (`references/c2pa/README.md`), so it is absence here rather than a range a signer could
+    // hash — and the encoder's own refusal of such a store stays reachable only for stores a
+    // caller supplies, never for one this reader handed back.
+    if entry.count < MIN_STORE_LEN as u64 {
+        return Ok(None);
+    }
     let variant = reader.variant();
     let count_field = count_field(entry, variant);
     // Out of line at the offset the entry declares; inline, the value word follows the count.
@@ -191,13 +261,23 @@ pub fn locate<S: ReadAt>(src: S) -> Result<Option<C2paExclusions>> {
 /// The bytes of `store` are copied verbatim — the TIFF byte order does not apply to them
 /// (§A.3.6).
 ///
+/// This writes exactly one placement: the store out of line, last in the file. A BigTIFF store
+/// of exactly [`MIN_STORE_LEN`] bytes would pack *inline* instead, which is lawful — [`locate`]
+/// reads that shape — but is not the placement this crate's reserve-then-sign flow is built on,
+/// so it is refused here rather than emitted. The asymmetry with [`locate`] is deliberate; see
+/// that function's docs.
+///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if `store` is shorter than [`MIN_STORE_LEN`]; if the
-/// container is unreadable; if its last IFD carries no [`C2PA_MANIFEST_STORE`] entry of type
-/// `UNDEFINED`; if that entry already points out of line (re-pointing it would orphan the bytes
-/// it points at — write a placeholder instead); or if the appended store would put the file past
-/// the 4 GiB classic-TIFF offset limit.
+/// Returns [`Error::InvalidInput`] if `store` is shorter than [`MIN_STORE_LEN`]; if it is not
+/// longer than the container variant's [`inline_threshold`](Variant::inline_threshold), since a
+/// value that packs *inline* cannot be the run at the end of the file this function exists to
+/// place (in BigTIFF that threshold is `MIN_STORE_LEN` itself, so the shortest writable BigTIFF
+/// store is nine bytes); if the container is unreadable; if its last IFD carries no
+/// [`C2PA_MANIFEST_STORE`] entry of type `UNDEFINED`, or carries more than one; if that entry
+/// already points out of line (re-pointing it would orphan the bytes it points at — write a
+/// placeholder instead); or if the appended store would put the file past the 4 GiB
+/// classic-TIFF offset limit.
 pub fn append_store(file: &mut Vec<u8>, store: &[u8]) -> Result<C2paExclusions> {
     if store.len() < MIN_STORE_LEN {
         return Err(Error::invalid_input(
@@ -208,6 +288,21 @@ pub fn append_store(file: &mut Vec<u8>, store: &[u8]) -> Result<C2paExclusions> 
     let (order, variant, entry) = {
         let mut reader = IfdReader::open(&file[..])?;
         let last = last_ifd(&mut reader)?;
+        // `store_entry` reports absence for a duplicated entry as well as for a missing or
+        // mistyped one, and "carries no entry" would be a misleading thing to tell a caller
+        // whose directory carries two, so the two cases are distinguished here.
+        if last
+            .entries
+            .iter()
+            .filter(|e| e.tag == C2PA_MANIFEST_STORE)
+            .count()
+            > 1
+        {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: the last IFD carries more than one C2PA manifest store entry",
+            ));
+        }
         let entry = store_entry(&last)
             .ok_or_else(|| {
                 Error::invalid_input(
@@ -224,6 +319,18 @@ pub fn append_store(file: &mut Vec<u8>, store: &[u8]) -> Result<C2paExclusions> 
         }
         (reader.order(), reader.variant(), entry)
     };
+    // The container's own inline rule, not a constant: a value no longer than the variant's
+    // threshold is packed *into* the entry by every reader (`IfdReader::value_offset` compares
+    // `<=`), so appending its bytes at the end of the file and writing an offset into the value
+    // word would leave the appended run referenced by nothing while the entry read back as the
+    // offset itself. BigTIFF's threshold is 8 — exactly `MIN_STORE_LEN` — so this is reachable
+    // there, not in classic TIFF.
+    if store.len() <= variant.inline_threshold() {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: C2PA manifest store packs inline in this variant, so it cannot be placed at the end of the file",
+        ));
+    }
 
     let start = align_word(file.len() as u64);
     let len = store.len() as u64;
@@ -468,22 +575,90 @@ mod tests {
         assert_eq!(found.count_field.start, second_body + 2 + 4);
     }
 
-    /// A store short enough to pack inline is reported inside its entry's value word, after the
-    /// count field.
+    /// The one shape in which a real store packs inline: a BigTIFF entry whose 8-byte value is
+    /// exactly the inline threshold. It is reported inside the entry's value word, immediately
+    /// after the 8-byte count field — the branch `value_offset` returning `None` selects.
+    #[cfg(feature = "bigtiff")]
     #[test]
-    fn locate_reports_an_inline_store_inside_its_entry() {
+    fn locate_reports_an_inline_bigtiff_store_inside_its_entry() {
+        let inline = store()[..MIN_STORE_LEN].to_vec();
+        let mut ifd = Ifd::new();
+        ifd.set(C2PA_MANIFEST_STORE, Value::Undefined(inline.clone()));
+        let bytes = write(&file(ByteOrder::LittleEndian, Variant::Big, vec![ifd])).expect("write");
+        let found = locate(&bytes[..]).expect("locate").expect("a store");
+        // BigTIFF header 16, entry count 8: the entry starts at 24, its count at 28, its value
+        // word at 36.
+        assert_eq!(found.count_field, Range { start: 28, len: 8 });
+        assert_eq!(found.store, Range { start: 36, len: 8 });
+        assert_eq!(&bytes[36..44], inline.as_slice());
+        assert_eq!(found.store.start, found.count_field.end());
+    }
+
+    /// A value too short to hold a JUMBF box header is not a manifest store
+    /// (`references/c2pa/README.md`): absence, not a range and not an error, so a foreign file
+    /// carrying one stays readable. The boundary is exact — one byte more is a store.
+    #[test]
+    fn locate_reports_absence_for_a_value_below_the_jumbf_header() {
+        let classic = |ifd| {
+            write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write")
+        };
+        for len in [0usize, 1, MIN_STORE_LEN - 1] {
+            let mut ifd = Ifd::new();
+            ifd.set(
+                C2PA_MANIFEST_STORE,
+                Value::Undefined(store()[..len].to_vec()),
+            );
+            assert_eq!(
+                locate(&classic(ifd)[..]).expect("locate"),
+                None,
+                "len {len}"
+            );
+        }
         let mut ifd = Ifd::new();
         ifd.set(
             C2PA_MANIFEST_STORE,
-            Value::Undefined(vec![0xA1, 0xB2, 0xC3]),
+            Value::Undefined(store()[..MIN_STORE_LEN].to_vec()),
         );
-        let bytes =
-            write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
-        let found = locate(&bytes[..]).expect("locate").expect("a store");
-        // Header 8, entry count 2: the entry starts at 10, its count at 14, its value at 18.
-        assert_eq!(found.count_field, Range { start: 14, len: 4 });
-        assert_eq!(found.store, Range { start: 18, len: 3 });
-        assert_eq!(&bytes[18..21], &[0xA1, 0xB2, 0xC3]);
+        let found = locate(&classic(ifd)[..])
+            .expect("locate")
+            .expect("exactly the header length is a store");
+        assert_eq!(found.store.len, MIN_STORE_LEN as u64);
+    }
+
+    /// §A.3.6 admits one store per asset, so a directory carrying two tag-52545 entries names
+    /// none: reporting the first would describe different bytes than the eager `Ifd` — which
+    /// keeps the *last* duplicate — hands back under the same name.
+    #[test]
+    fn locate_reports_absence_for_a_duplicated_entry() {
+        // `Ifd::set` de-duplicates, so the duplicate is built at the byte level: two entries
+        // with the same tag, pointing at different bytes.
+        let le = ByteOrder::LittleEndian;
+        let first = store();
+        let second: Vec<u8> = first.iter().map(|b| !b).collect();
+        let values_at = 8 + 2 + 2 * 12 + 4;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II\x2a\x00");
+        bytes.extend_from_slice(&le.pack_u32(8)); // first IFD at 8
+        bytes.extend_from_slice(&le.pack_u16(2)); // two entries
+        for i in 0..2 {
+            bytes.extend_from_slice(&le.pack_u16(C2PA_MANIFEST_STORE));
+            bytes.extend_from_slice(&le.pack_u16(FieldType::Undefined.code()));
+            bytes.extend_from_slice(&le.pack_u32(first.len() as u32));
+            bytes.extend_from_slice(&le.pack_u32((values_at + i * first.len()) as u32));
+        }
+        bytes.extend_from_slice(&le.pack_u32(0)); // next IFD
+        bytes.extend_from_slice(&first);
+        bytes.extend_from_slice(&second);
+
+        // Both entries are individually well-formed and in bounds...
+        assert_eq!(bytes.len(), values_at + first.len() + second.len());
+        assert_eq!(
+            read(&bytes).expect("read").ifds[0].get(C2PA_MANIFEST_STORE),
+            Some(&Value::Undefined(second)),
+            "the eager reader keeps the last duplicate"
+        );
+        // ...and precisely because those two answers differ, neither is reported.
+        assert_eq!(locate(&bytes[..]).expect("locate"), None);
     }
 
     /// A store whose declared extent runs past the end of the file is a typed error, not a range
@@ -689,7 +864,53 @@ mod tests {
         assert!(!exceeds_offset_width(Variant::Big, u64::from(u32::MAX) + 1));
     }
 
-    /// `reserve_entry` places exactly the inline placeholder `append_store` requires.
+    /// `append_store` tells a caller whose directory carries two store entries what is actually
+    /// wrong, rather than claiming there is none.
+    #[test]
+    fn append_store_names_a_duplicated_entry_as_the_problem() {
+        let le = ByteOrder::LittleEndian;
+        // Two placeholder entries, built at the byte level since `Ifd::set` de-duplicates.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II\x2a\x00");
+        bytes.extend_from_slice(&le.pack_u32(8));
+        bytes.extend_from_slice(&le.pack_u16(2));
+        for _ in 0..2 {
+            bytes.extend_from_slice(&le.pack_u16(C2PA_MANIFEST_STORE));
+            bytes.extend_from_slice(&le.pack_u16(FieldType::Undefined.code()));
+            bytes.extend_from_slice(&le.pack_u32(1));
+            bytes.extend_from_slice(&le.pack_u32(0));
+        }
+        bytes.extend_from_slice(&le.pack_u32(0));
+
+        let before = bytes.clone();
+        let error = append_store(&mut bytes, &store()).expect_err("a duplicated entry");
+        assert_eq!(
+            error.static_message(),
+            Some("TIFF: the last IFD carries more than one C2PA manifest store entry"),
+            "the message must name the duplication, not claim the entry is missing"
+        );
+        assert_eq!(bytes, before, "a refused append leaves the file untouched");
+    }
+
+    /// The public constructor builds the same value `locate` reports, so a host placing a store
+    /// by its own means can name its exclusion set despite `#[non_exhaustive]`.
+    #[test]
+    fn exclusions_can_be_constructed_publicly() {
+        let mut ifd = sample_ifd();
+        ifd.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
+        let bytes =
+            write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
+        let found = locate(&bytes[..]).expect("locate").expect("a store");
+        assert_eq!(
+            C2paExclusions::new(found.store, found.count_field),
+            found,
+            "the constructor's fields land in the documented order"
+        );
+    }
+
+    /// `reserve_entry` places exactly the inline placeholder `append_store` requires — and a
+    /// file carrying only that placeholder reports **no store**, because one byte cannot be a
+    /// JUMBF box: the reservation is a slot, not yet a store.
     #[test]
     fn reserve_entry_places_a_one_byte_inline_placeholder() {
         let mut ifd = Ifd::new();
@@ -700,12 +921,61 @@ mod tests {
         );
         let bytes =
             write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
-        let found = locate(&bytes[..]).expect("locate").expect("placeholder");
-        assert_eq!(found.store.len, 1);
+        assert_eq!(locate(&bytes[..]).expect("locate"), None);
+        // And it is the slot `append_store` fills: the same file takes a store.
+        let mut bytes = bytes;
+        let excl = append_store(&mut bytes, &store()).expect("append");
+        assert_eq!(locate(&bytes[..]).expect("locate"), Some(excl));
+    }
+
+    /// A store exactly at the variant's inline threshold, in both variants. Classic TIFF's
+    /// threshold is 4, so an 8-byte store is out of line and lands at the end of the file;
+    /// BigTIFF's is 8, so the same store would pack *into the entry* and is refused rather than
+    /// appended where nothing would reference it.
+    #[test]
+    fn append_store_refuses_a_store_that_would_pack_inline() {
+        let at_threshold = store()[..MIN_STORE_LEN].to_vec();
+
+        // Classic: 8 > 4, so this is the smallest writable store and it round-trips.
+        let mut ifd = Ifd::new();
+        reserve_entry(&mut ifd);
+        let mut bytes =
+            write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
+        let excl = append_store(&mut bytes, &at_threshold).expect("classic accepts 8 bytes");
+        assert_eq!(excl.store.end(), bytes.len() as u64);
         assert_eq!(
-            found.store.start,
-            found.count_field.end(),
-            "inline: in the value word"
+            read(&bytes).expect("read").ifds[0].get(C2PA_MANIFEST_STORE),
+            Some(&Value::Undefined(at_threshold.clone())),
+            "the entry must read back as the store, not as an offset"
         );
+
+        #[cfg(feature = "bigtiff")]
+        {
+            let mut ifd = Ifd::new();
+            reserve_entry(&mut ifd);
+            let mut bytes =
+                write(&file(ByteOrder::LittleEndian, Variant::Big, vec![ifd])).expect("write");
+            let before = bytes.clone();
+            let error = append_store(&mut bytes, &at_threshold)
+                .expect_err("BigTIFF's inline threshold is 8, so 8 bytes cannot go out of line");
+            assert_eq!(
+                error.static_message(),
+                Some(
+                    "TIFF: C2PA manifest store packs inline in this variant, so it cannot be placed at the end of the file"
+                )
+            );
+            assert_eq!(bytes, before, "a refused append leaves the file untouched");
+
+            // Nine bytes clear the threshold and round-trip as the store itself.
+            let mut writable = store()[..MIN_STORE_LEN + 1].to_vec();
+            writable[0] ^= 0xFF; // keep it asymmetric
+            let excl = append_store(&mut bytes, &writable).expect("nine bytes are writable");
+            assert_eq!(excl.store.end(), bytes.len() as u64);
+            assert_eq!(
+                read(&bytes).expect("read").ifds[0].get(C2PA_MANIFEST_STORE),
+                Some(&Value::Undefined(writable))
+            );
+            assert_eq!(locate(&bytes[..]).expect("locate"), Some(excl));
+        }
     }
 }

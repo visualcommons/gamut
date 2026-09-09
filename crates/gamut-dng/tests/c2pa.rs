@@ -7,10 +7,9 @@
 mod common;
 
 use gamut_dng::{
-    ByteOrder, C2paExclusions, DngDecoder, DngEncodeReport, DngEncoder, DngMetadata, Range, RawTag,
-    Value,
+    ByteOrder, C2PA_MANIFEST_STORE, DngDecoder, DngEncodeReport, DngEncoder, DngMetadata,
+    MIN_STORE_LEN, Range, RawTag, Value,
 };
-use gamut_ifd::c2pa::C2PA_MANIFEST_STORE;
 use gamut_ifd::{align_word, read_header};
 
 /// `len` bytes that are neither a palindrome nor periodic at any small stride, so a byte-swapped,
@@ -290,18 +289,22 @@ fn a_store_in_a_trailing_ifd_is_found_there() {
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
     assert_eq!(decoded.metadata.c2pa, Some(bytes.clone()));
+    // `C2paExclusions` is `#[non_exhaustive]`, so the two ranges are compared field by field
+    // rather than against a literal.
+    let excl = decoded.c2pa_exclusions.expect("ranges");
     assert_eq!(
-        decoded.c2pa_exclusions,
-        Some(C2paExclusions {
-            store: Range {
-                start: store_at,
-                len: bytes.len() as u64
-            },
-            count_field: Range {
-                start: body + 2 + 4,
-                len: 4
-            },
-        })
+        excl.store,
+        Range {
+            start: store_at,
+            len: bytes.len() as u64
+        }
+    );
+    assert_eq!(
+        excl.count_field,
+        Range {
+            start: body + 2 + 4,
+            len: 4
+        }
     );
     let report = gamut_dng::deconstruct(&dng).expect("deconstruct");
     assert!(
@@ -326,4 +329,261 @@ fn a_store_entry_before_the_last_main_ifd_is_not_the_store() {
         tag: C2PA_MANIFEST_STORE,
         value: Value::Undefined(bytes),
     }));
+}
+
+/// A store of exactly `MIN_STORE_LEN` is the smallest a classic-TIFF DNG can carry, and it must
+/// read back as the *store* rather than as the offset word pointing at it.
+///
+/// BigTIFF's inline threshold is those same 8 bytes, so there the entry would hold the value
+/// itself and an appended run would be referenced by nothing. The encoder refuses that instead
+/// of producing a file whose exclusion ranges cover bytes no reader reads back — nine bytes are
+/// the smallest BigTIFF store, and they work.
+#[test]
+fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
+    let raw = common::sample_raw(32, 24, 16);
+    let smallest = store(MIN_STORE_LEN);
+
+    let (dng, report) = encode(&with_store(ByteOrder::LittleEndian, smallest.clone()));
+    let excl = report.c2pa.expect("classic accepts the smallest store");
+    assert_eq!(excl.store.len, MIN_STORE_LEN as u64);
+    assert_eq!(excl.store.end(), dng.len() as u64);
+    assert_eq!(slice(&dng, excl.store), smallest.as_slice());
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(
+        decoded.metadata.c2pa,
+        Some(smallest.clone()),
+        "the entry must read back as the store, not as an offset"
+    );
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept the smallest store");
+
+    // BigTIFF, same length: refused, and refused before any pixel work.
+    for encoder in [
+        with_store(ByteOrder::LittleEndian, smallest.clone()).with_big_tiff(true),
+        DngEncoder::new()
+            .with_big_tiff(true)
+            .with_c2pa_reserved(MIN_STORE_LEN),
+    ] {
+        let error = encoder
+            .encode(&raw, &common::sample_profile(), &mut Vec::new())
+            .expect_err("8 bytes pack inline in BigTIFF");
+        assert_eq!(
+            error.static_message(),
+            Some("DNG: a BigTIFF C2PA manifest store must exceed 8 bytes, or it packs inline")
+        );
+    }
+
+    // Nine bytes clear the threshold: the store lands last and reads back whole.
+    let nine = store(MIN_STORE_LEN + 1);
+    let (dng, report) =
+        encode(&with_store(ByteOrder::LittleEndian, nine.clone()).with_big_tiff(true));
+    let excl = report.c2pa.expect("nine bytes are writable in BigTIFF");
+    assert_eq!(excl.store.end(), dng.len() as u64);
+    assert_eq!(
+        DngDecoder::new()
+            .decode(&dng)
+            .expect("decode")
+            .metadata
+            .c2pa,
+        Some(nine)
+    );
+}
+
+/// Appends a trailing main-chain IFD holding `entries` **at the byte level**, so entries the
+/// eager `Ifd` would de-duplicate survive as written. Returns the directory's offset.
+fn append_raw_trailing_ifd(dng: &mut Vec<u8>, entries: &[(u16, u16, u32, u32)]) -> u64 {
+    let le = ByteOrder::LittleEndian;
+    let (_, _, ifd0) = read_header(dng).expect("header");
+    let n0 = usize::from(le.u16(dng[ifd0 as usize..ifd0 as usize + 2].try_into().expect("2")));
+    let next_at = ifd0 as usize + 2 + n0 * 12;
+    let body = align_word(dng.len() as u64);
+    dng.resize(body as usize, 0);
+    dng.extend_from_slice(&le.pack_u16(entries.len() as u16));
+    for &(tag, ty, count, word) in entries {
+        dng.extend_from_slice(&le.pack_u16(tag));
+        dng.extend_from_slice(&le.pack_u16(ty));
+        dng.extend_from_slice(&le.pack_u32(count));
+        dng.extend_from_slice(&le.pack_u32(word));
+    }
+    dng.extend_from_slice(&[0, 0, 0, 0]);
+    dng[next_at..next_at + 4].copy_from_slice(&le.pack_u32(body as u32));
+    body
+}
+
+/// §A.3.6 allows one store per asset, so a last IFD carrying **two** tag-52545 entries has no
+/// admissible store — and both decode surfaces must say so *together*.
+///
+/// Reading the bytes and the ranges through different paths is what made them disagree: the
+/// eager `Ifd` keeps the last duplicate, so `metadata.c2pa` reported that entry's bytes while
+/// `c2pa_exclusions` reported nothing. Re-encoding such a `DngMetadata` silently produced a
+/// one-entry file carrying only the last duplicate.
+#[test]
+fn a_duplicated_store_entry_is_absent_from_both_decode_surfaces() {
+    let first = store(40);
+    let (mut dng, _) = encode(&DngEncoder::new());
+    // Two entries in a trailing IFD: body is count (2) + 2 * 12 + next (4) = 30 bytes.
+    let body = append_raw_trailing_ifd(
+        &mut dng,
+        &[
+            (C2PA_MANIFEST_STORE, 7, first.len() as u32, 0),
+            (C2PA_MANIFEST_STORE, 7, first.len() as u32, 0),
+        ],
+    );
+    let values_at = body + 30;
+    let second: Vec<u8> = first.iter().map(|b| !b).collect();
+    let le = ByteOrder::LittleEndian;
+    for (i, entry) in [0usize, 1].iter().enumerate() {
+        let word_at = (body + 2 + *entry as u64 * 12 + 8) as usize;
+        dng[word_at..word_at + 4]
+            .copy_from_slice(&le.pack_u32((values_at + (i * first.len()) as u64) as u32));
+    }
+    dng.extend_from_slice(&first);
+    dng.extend_from_slice(&second);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(
+        decoded.c2pa_exclusions, None,
+        "two entries name no single store"
+    );
+    assert_eq!(
+        decoded.metadata.c2pa, None,
+        "the bytes surface must agree with the ranges, not report the last duplicate"
+    );
+    // Preservation still holds: the field reaches the caller verbatim.
+    assert!(
+        decoded
+            .trailing_extra
+            .iter()
+            .any(|t| t.tag == C2PA_MANIFEST_STORE),
+        "the duplicated entry is still surfaced: {:?}",
+        decoded.trailing_extra
+    );
+    // And re-encoding cannot smuggle one of the two duplicates back out as "the" store.
+    let mut re = Vec::new();
+    let report = DngEncoder::new()
+        .with_metadata(decoded.metadata.clone())
+        .encode_with_report(&decoded.raw, &common::sample_profile(), &mut re)
+        .expect("re-encode");
+    assert_eq!(report.c2pa, None);
+}
+
+/// A tag-52545 field this decoder declines to read as a store, in a **trailing** IFD that
+/// carries no image, still reaches the caller: that directory is neither IFD 0, nor the raw
+/// IFD, nor a sub-image, so without `trailing_extra` its fields would reach no surface at all
+/// and the crate's "nothing is silently dropped" promise would be false.
+#[test]
+fn a_declined_store_in_a_trailing_ifd_is_still_surfaced() {
+    let short = store(MIN_STORE_LEN - 1);
+    let (mut dng, _) = encode(&DngEncoder::new());
+    let body =
+        append_raw_trailing_ifd(&mut dng, &[(C2PA_MANIFEST_STORE, 7, short.len() as u32, 0)]);
+    // Body: count (2) + one entry (12) + next (4) = 18; point the entry at the bytes after it.
+    let word_at = (body + 2 + 8) as usize;
+    dng[word_at..word_at + 4]
+        .copy_from_slice(&ByteOrder::LittleEndian.pack_u32((body + 18) as u32));
+    dng.extend_from_slice(&short);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.metadata.c2pa, None, "7 bytes cannot be a JUMBF box");
+    assert_eq!(decoded.c2pa_exclusions, None);
+    assert!(
+        decoded.trailing_extra.contains(&RawTag {
+            tag: C2PA_MANIFEST_STORE,
+            value: Value::Undefined(short),
+        }),
+        "the declined field must not vanish: {:?}",
+        decoded.trailing_extra
+    );
+}
+
+/// The other side of `trailing_extra`'s guard: when the last main-chain directory **is** IFD 0
+/// — every file this crate writes — its unmodelled fields belong to `ifd0_extra` and must not
+/// also appear in `trailing_extra`.
+///
+/// The fixture has to carry an unmodelled IFD-0 tag for this to say anything: with a clean file
+/// both lists are empty, so "surfaced elsewhere" and "collected here" agree and the guard
+/// decides nothing observable.
+#[test]
+fn a_single_main_ifd_files_extras_stay_in_ifd0_extra() {
+    // Retyping the store entry in place (7 -> 1, same element size, no offsets move) leaves
+    // IFD 0 holding a field the decoder does not model — the leftover this claim needs.
+    let bytes = store(24);
+    let (mut dng, report) = encode(&with_store(ByteOrder::LittleEndian, bytes.clone()));
+    let type_at = report.c2pa.expect("ranges").count_field.start as usize - 2;
+    dng[type_at..type_at + 2].copy_from_slice(&[1, 0]);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert!(
+        decoded
+            .ifd0_extra
+            .iter()
+            .any(|t| t.tag == C2PA_MANIFEST_STORE),
+        "the declined field belongs to ifd0_extra: {:?}",
+        decoded.ifd0_extra
+    );
+    assert!(
+        decoded.trailing_extra.is_empty(),
+        "IFD 0 is surfaced already, so nothing is collected as trailing: {:?}",
+        decoded.trailing_extra
+    );
+}
+
+/// A store this decoder *does* accept is consumed, not also reported as an unmodelled field —
+/// `trailing_extra` is the channel for what was declined, not a duplicate of what was read.
+#[test]
+fn an_accepted_store_is_not_also_a_trailing_extra() {
+    let bytes = store(50);
+    let (mut dng, _) = encode(&DngEncoder::new());
+    let body = align_word(dng.len() as u64);
+    let store_at = body + 18;
+    append_trailing_ifd(
+        &mut dng,
+        &[(C2PA_MANIFEST_STORE, 7, bytes.len() as u32, store_at as u32)],
+    );
+    dng.extend_from_slice(&bytes);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.metadata.c2pa, Some(bytes));
+    assert!(decoded.c2pa_exclusions.is_some());
+    assert!(
+        !decoded
+            .trailing_extra
+            .iter()
+            .any(|t| t.tag == C2PA_MANIFEST_STORE),
+        "a consumed store is not an extra: {:?}",
+        decoded.trailing_extra
+    );
+}
+
+/// A foreign file whose tag-52545 value is too short to hold a JUMBF box header carries no
+/// manifest store (`references/c2pa/README.md`): it decodes to `None`, and the decoded
+/// `DngMetadata` therefore re-encodes — which it could not if the decoder had handed back a
+/// store its own encoder refuses.
+#[test]
+fn a_too_short_store_decodes_as_absent_and_still_re_encodes() {
+    let short = store(MIN_STORE_LEN - 1);
+    let (mut dng, _) = encode(&DngEncoder::new());
+    // Body: count (2) + one entry (12) + next (4) = 18; the 7-byte value follows it.
+    let body = align_word(dng.len() as u64);
+    append_trailing_ifd(
+        &mut dng,
+        &[(
+            C2PA_MANIFEST_STORE,
+            7,
+            short.len() as u32,
+            (body + 18) as u32,
+        )],
+    );
+    dng.extend_from_slice(&short);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.metadata.c2pa, None, "7 bytes cannot be a JUMBF box");
+    assert_eq!(decoded.c2pa_exclusions, None);
+
+    // Decode -> encode: the metadata the decoder produced is accepted as encoder input.
+    let mut re = Vec::new();
+    let report = DngEncoder::new()
+        .with_metadata(decoded.metadata.clone())
+        .encode_with_report(&decoded.raw, &common::sample_profile(), &mut re)
+        .expect("a decoded file's metadata must re-encode");
+    assert_eq!(report.c2pa, None);
 }

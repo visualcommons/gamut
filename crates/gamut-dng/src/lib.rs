@@ -100,10 +100,12 @@ pub use deconstruct::{
 pub use encoder::{DngEncodeReport, DngEncoder};
 pub use gain_map::{GainValues, ProfileGainTableMap};
 pub use gamut_core::{Dimensions, Error, Result};
-// The C2PA exclusion set (C2PA 2.4 §18.5.5) is `gamut-ifd`'s — the placement and exclusion
-// rules are stated once there for every TIFF-based codec — re-exported so a signer reading
-// `DngEncodeReport`/`DecodedDng` needs no direct `gamut-ifd` dependency.
-pub use gamut_ifd::c2pa::C2paExclusions;
+// The C2PA surface (C2PA 2.4 §A.3.6, §18.5.5) is `gamut-ifd`'s — the placement and exclusion
+// rules are stated once there for every TIFF-based codec — re-exported whole so a signer
+// reading `DngEncodeReport`/`DecodedDng`, or checking the tag and the minimum store length this
+// crate's own docs name, needs no direct `gamut-ifd` dependency (the re-export closure of
+// `STATUS.md`'s freeze decisions).
+pub use gamut_ifd::c2pa::{C2PA_MANIFEST_STORE, C2paExclusions, MIN_STORE_LEN};
 // `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum;
 // `Segment`/`SpanKind`/`Range` are part of the preservation surface, naming the byte runs a
 // real camera file carries that its own structures do not account for (`Range` is also what

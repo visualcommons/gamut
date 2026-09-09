@@ -207,9 +207,23 @@ opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
 - **Endianness.** §A.3.6 says the header's `ByteOrder` "does not govern the endianness of the
   embedded C2PA Manifest Store": the bytes cross verbatim in both directions, pinned on `MM`
   fixtures whose store is asymmetric.
-- **Minimum length.** `append_store` refuses a store shorter than a JUMBF box header (8 bytes,
-  `MIN_STORE_LEN`): nothing shorter can be a manifest store, and the bound also guarantees the
-  value is out of line in both variants.
+- **Minimum length, and the bound that actually keeps a store out of line.** Nothing shorter
+  than a JUMBF box header (8 bytes, `MIN_STORE_LEN`) can be a manifest store, and the two
+  directions treat that differently, as `references/c2pa/README.md` prescribes for a reader:
+  `locate` reports **absence** for a shorter value (so a foreign file stays readable and a
+  decode → encode cycle over it does not trip the encoder's own minimum), while `append_store`
+  **refuses** it (an encoder handed a store it cannot write must say so, not drop it).
+  Out-of-line-ness is a *separate* bound and is not implied by that constant: classic TIFF's
+  inline threshold is 4 bytes but **BigTIFF's is 8**, so a store of exactly `MIN_STORE_LEN`
+  packs inline in a BigTIFF entry. `append_store` therefore gates on the variant's own
+  `inline_threshold()` — the shortest writable BigTIFF store is nine bytes. Without that gate
+  the bytes would be appended at the end of the file while the entry read back as the offset
+  word pointing at them, leaving the store referenced by nothing and the exclusion ranges
+  covering bytes no reader returns.
+- **One store per asset.** §A.3.6 admits exactly one, so a last IFD carrying *two* tag-52545
+  entries names none and `locate` reports absence. Reporting the first would be worse than
+  reporting nothing: the eager `Ifd` keeps the **last** duplicate, so a caller taking bytes from
+  one path and ranges from this one would get two different byte runs under one name.
 - **Byte accounting.** The store is the entry's `Value` span and the alignment filler before
   it is `Padding`, so an audited read of the result is fully classified — a store at the end of
   the file is never a `Trailer`.
@@ -217,3 +231,22 @@ opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
 Deliberately not here: a `TiffFile`-level "reserve the entry in the right IFD" helper. The
 codecs hold their last main IFD by hand (a DNG has exactly one), and picking it out of a chain
 is a one-liner nobody would get wrong.
+
+`C2paExclusions` is `#[non_exhaustive]`: §18.5.5 names two ranges today, and a revision naming a
+third must be additive rather than a `gamut-ifd` major. It also carries a public
+`C2paExclusions::new` — the attribute alone would leave a host that places a store by its own
+route unable to name the ranges §18.5.5 asks it to exclude, and extensible and constructible are
+both available.
+
+**The read and write sides are deliberately asymmetric.** A BigTIFF store of exactly
+`MIN_STORE_LEN` bytes packs inline; `locate` reports it (the file is lawful and its ranges are
+well defined) while `append_store` refuses to *write* that shape, because an inline value is not
+the run at the end of the file the placement rule is built on, and admitting it would give a
+store two placements to reason about for no gain. Liberal in, conservative out — stated at both
+functions so it reads as a decision rather than an oversight.
+
+**Accepted duplication.** `gamut_heic::c2pa::JUMBF_HEADER_LEN` states the same 8-byte JUMBF box
+header bound as `MIN_STORE_LEN` here. The dependency graph gives the two no shared home —
+`gamut-ifd` sits *below* `gamut-heic` and neither may depend on the other — and both cite the
+same clause (C2PA 2.4 §8.4.2.3's incidental description, recorded in
+`references/c2pa/README.md`). Factoring it out would mean a new crate for one integer.
