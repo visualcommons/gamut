@@ -1,6 +1,23 @@
 //! The PNG encoder: a [`PngEncoder`] builder implementing [`gamut_core::EncodeImage`] for each
 //! supported pixel layout. This covers the four non-indexed colour types at 8- and 16-bit depth;
 //! palette, sub-byte depths, ancillary chunks, and space optimisations layer on in later phases.
+//!
+//! # How a tie is broken
+//!
+//! Several candidate encodings are raced and the smallest kept ([`PngEncoder::cleaned_or_plain`],
+//! [`PngEncoder::write_reduced_or_native`]). At *equal* size the size contract cannot choose, so
+//! one rule decides all three tie-breaks:
+//!
+//! 1. **Prefer the candidate that discards less of the input's information.** Transparent cleanup
+//!    is this crate's one lossy knob — it rewrites samples no decoder renders — and it is opt-in
+//!    for a size win; with no win there is nothing to trade the exactness for, so the byte-exact
+//!    candidate stands ([`prefers_plain`]).
+//! 2. **Where the candidates are information-equivalent, fall back to a fixed order:**
+//!    `chunked ≻ chunk-free ≻ native` ([`prefers_chunk_free`], [`prefers_native`]). Every lossless
+//!    reduction preserves exactly the same image, so nothing distinguishes them at equal size; the
+//!    order exists only so that the output is a function of the input rather than of which
+//!    candidate happened to be encoded first. `tests/size_contract.rs`'s
+//!    `encoded_size_is_deterministic` is what pins that.
 
 use gamut_core::{
     Bilevel, Dimensions, EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef,
@@ -746,10 +763,11 @@ impl PngEncoder {
     /// all three are measured — `tests/size_contract.rs`'s `opaque256_rgba8` and
     /// `demotable_rgb16` rows are those two cases.
     ///
-    /// **The total order.** Ties resolve toward the earlier of `chunked ≻ chunk-free ≻ native` —
-    /// the more reduced encoding, and, among equal-length files, the one the encoder already
-    /// emitted before the runner-up joined the race, so a tie changes no output. See
-    /// [`prefers_chunk_free`] and [`prefers_native`], where each step is stated on its own.
+    /// **The total order.** All three candidates here are lossless, so at equal size none is
+    /// better by any property the size contract can see; ties resolve toward the earlier of
+    /// `chunked ≻ chunk-free ≻ native` purely so that the output is a function of the input. See
+    /// [the module's tie-break rule](self#how-a-tie-is-broken), and [`prefers_chunk_free`] /
+    /// [`prefers_native`], where each step is stated on its own.
     ///
     /// Only a reduction that *carries a chunk* pays for the extra encodes — a palette's `PLTE`
     /// (+ `tRNS`), or a colour key's `tRNS`. A chunk-free winner adds nothing DEFLATE cannot
@@ -928,10 +946,12 @@ impl PngEncoder {
 
 /// Whether the uncleaned encoding beats the cleaned one, for [`PngEncoder::cleaned_or_plain`].
 ///
-/// **A tie keeps the plain encoding.** Every other reduction in this crate is byte-exact;
-/// [`with_transparent_cleanup`](PngEncoder::with_transparent_cleanup) is the one knob that alters
-/// stored samples, and it is opt-in *for a size win*. Where there is no size win there is nothing
-/// to trade the exactness for, so the candidate that changed no sample is kept. Split out for the
+/// **A tie keeps the plain encoding.** This is the first half of
+/// [the module's tie-break rule](self#how-a-tie-is-broken): the two candidates are *not*
+/// information-equivalent, and the one that discards less wins. Every other reduction in this
+/// crate is byte-exact; [`with_transparent_cleanup`](PngEncoder::with_transparent_cleanup) is the
+/// one knob that alters stored samples, and it is opt-in *for a size win*. Where there is no size
+/// win there is nothing to trade the exactness for. Split out for the
 /// same reason as [`prefers_native`]: engineering two encodings of the same image to land on
 /// exactly equal lengths is not something a fixture can do reliably, so the tie is only assertable
 /// here.
@@ -942,9 +962,10 @@ fn prefers_plain(plain_len: usize, cleaned_len: usize) -> bool {
 /// Whether the chunk-free reduction beats the chunk-carrying one, the first step of
 /// [`PngEncoder::write_reduced_or_native`]'s three-way race.
 ///
-/// **A tie keeps the chunk-carrying encoding**: it is the candidate the raw estimate ranked first
-/// and the one the encoder emitted before the runner-up joined the race, so an equal-length
-/// runner-up changes no output. Split out for the same reason as [`prefers_native`].
+/// **A tie keeps the chunk-carrying encoding.** Both candidates are lossless and encode the same
+/// image, so at equal size neither is better; the fixed order is what makes the choice
+/// deterministic — see [the module's tie-break rule](self#how-a-tie-is-broken). Split out for the
+/// same reason as [`prefers_native`].
 fn prefers_chunk_free(chunk_free_len: usize, chunked_len: usize) -> bool {
     chunk_free_len < chunked_len
 }
@@ -952,8 +973,10 @@ fn prefers_chunk_free(chunk_free_len: usize, chunked_len: usize) -> bool {
 /// Whether the unreduced encoding beats the winning reduction, for
 /// [`PngEncoder::write_reduced_or_native`].
 ///
-/// **A tie keeps the reduction**, which decodes with less work for the same bytes — and where the
-/// palette won the first step, a tie here keeps the palette. Split out because engineering two
+/// **A tie keeps the reduction** — and where the palette won the first step, a tie here keeps the
+/// palette. Both candidates are lossless, so the fixed order is what makes the choice
+/// deterministic rather than a property of the winner; see
+/// [the module's tie-break rule](self#how-a-tie-is-broken). Split out because engineering two
 /// encodings of the same image to land on exactly equal lengths is not something a fixture can do
 /// reliably, so the tie is only assertable here.
 fn prefers_native(native_len: usize, palette_len: usize) -> bool {

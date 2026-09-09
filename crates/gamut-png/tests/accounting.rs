@@ -583,8 +583,10 @@ fn the_chunk_ceiling_admits_exactly_its_own_count_and_refuses_one_more() {
     );
 
     // IHDR is a chunk and is counted like one. The walk pushes it before the loop that reads the
-    // rest, so a ceiling checked only inside that loop let it through and `with_max_chunks(N)`
-    // meant N + 1 in that one respect — visibly so at zero, which admitted a whole file.
+    // rest, so a ceiling checked only inside that loop still counted it — the boundary above
+    // holds either way — but never ran at all for a datastream that pushes no chunk after IHDR.
+    // Such a file escaped the ceiling however small it was, which is what this case pins: one
+    // chunk fits a ceiling of one, and nothing fits a ceiling of zero.
     let ihdr_only = common::png_from_chunks(&chunks[..1]);
     let report =
         deconstruct_with_limits(&ihdr_only, DeconstructLimits::default().with_max_chunks(1))
