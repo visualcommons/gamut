@@ -68,15 +68,20 @@ impl ExifReader {
 
     /// Parses an EXIF blob and reports what a lenient parse discarded.
     ///
-    /// [`parse`](Self::parse) is silent about the sub-IFDs and thumbnail bytes leniency drops; this
-    /// returns the same [`Exif`] alongside a [`ReadReport`] naming each one, so a caller can tell a
-    /// blob that never carried GPS from one whose GPS pointer was dangling.
+    /// [`parse`](Self::parse) is silent about what leniency drops; this returns the same [`Exif`]
+    /// alongside a [`ReadReport`] naming each discarded region, so a caller can tell a blob that
+    /// never carried GPS from one whose GPS pointer was dangling.
+    ///
+    /// The report covers the regions [`DroppedRegion`](crate::DroppedRegion) enumerates and is
+    /// complete over them. It is **not** a byte-completeness verdict, and an empty report does not
+    /// mean the parse lost nothing — see the [`report`](crate::report) module for the two known
+    /// losses below this crate.
     ///
     /// ```
     /// # use gamut_exif::{ByteOrder, Exif, ExifReader};
     /// # let bytes = Exif::new(ByteOrder::LittleEndian).to_bytes()?;
     /// let (exif, report) = ExifReader::new().parse_with_report(&bytes)?;
-    /// assert!(report.is_empty()); // nothing was lost
+    /// assert!(report.is_empty()); // no covered region was discarded
     /// for dropped in report.dropped() {
     ///     eprintln!("{dropped}");
     /// }

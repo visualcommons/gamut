@@ -24,7 +24,7 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
 | P6 | §4.6 | **Keystone** — writer round-trip (endianness/pointers/thumbnail preserved) | ✅ |
 | P7 | §4.6 | MakerNote: opaque passthrough + vendor detection (no per-vendor decode) | ✅ |
 | P8 | — | exiv2 differential gate + golden fixtures | ✅ |
-| P9 | §4.6 | `ReadAt` streaming entry point + lenient-drop report (`ReadReport`) | ✅ |
+| P9 | §4.6 | `ReadAt` streaming entry point + lenient-drop report (`ReadReport`, scoped to the regions `DroppedRegion` names) | ✅ |
 | P10 | §4.6 | Full DC-008 tag breadth + per-tag value shape + value descriptions (issue #417) | ✅ |
 
 ## P10 — what the catalogue now covers
@@ -84,10 +84,16 @@ exactly, and a second test proves each is a naming difference rather than a miss
   make that differential possible.
 - **Uncompressed strip-based thumbnails** are read (as their directory) but not re-embedded; JPEG
   thumbnails round-trip fully.
-- **Per-tag error recovery inside a directory.** `ExifReader::parse_with_report` names every
-  sub-IFD and thumbnail range the lenient reader discards (issue #419), but the granularity is the
-  directory: a single unparseable entry fails its whole IFD in `gamut-ifd`, which is the layer that
-  would have to recover per entry. nom-exif's `entry.into_result()` is finer-grained here.
+- **Per-tag error recovery inside a directory.** `ExifReader::parse_with_report` names the
+  sub-IFDs, thumbnail ranges and trailing top-level directories the lenient reader discards (issue
+  #419), but the granularity is the directory: a single unparseable entry fails its whole IFD in
+  `gamut-ifd`, which is the layer that would have to recover per entry. nom-exif's
+  `entry.into_result()` is finer-grained here.
+- **A signal for a shadowed duplicate tag.** `gamut_ifd::IfdReader::decode_ifd` builds a directory
+  with `Ifd::set`, which is last-wins, so two entries for one tag decode to the second and the
+  first is discarded with no signal this crate can observe. `ReadReport::is_empty()` is therefore a
+  verdict over the regions it covers, **not** "this parse lost nothing"; both the report's module
+  docs and the README say so. Fixing it needs a reporting decode path in `gamut-ifd` (issue #528).
 - **A byte-completeness verdict.** `ReadReport` says what was *dropped*, not which source bytes no
   parsed structure claims. `gamut-ifd`'s audit engine (`Tracked`, `SegmentMap`, `read_audited`) is
   the machinery for it and is already used by `gamut-dng` and `gamut-tiff`; wiring it behind a
