@@ -69,18 +69,27 @@ In 2026, `gamut` started when there were no robust, well-tested Rust implementat
 ### Scope
 
 The initial focus is **AVIF, WebP, and JPEG** — the formats with the best
-size-versus-compatibility tradeoff today. **JPEG XL** (`gamut-jxl`) is now implemented as an
+size-versus-compatibility tradeoff today. **JPEG XL** (`gamut-jxl`) is implemented as an
 encoder + decoder (issue #243) — uniquely, by wrapping the format's reference implementations
 (libjxl for encode, the pure-Rust jxl-rs for decode) rather than clean-slate, a deliberate
-maintainer decision documented in that crate. The other format crates in the tree (HEIC, VVC,
-AV2) are scaffolding, and may move or be dropped as the focus sharpens. **TIFF 6.0**
-(`gamut-tiff`) is newly scaffolded and under active implementation (issue #107) as a
-royalty-free, natively still-image format — a good long-term fit for the image-first focus.
+maintainer decision documented in that crate. **TIFF 6.0** (`gamut-tiff`) is implemented at v1
+(issue #107) as a royalty-free, natively still-image format — a good long-term fit for the
+image-first focus — with YCbCr/Lab and JPEG-in-TIFF still deferred, and **DNG** (`gamut-dng`)
+is a raw encoder + decoder built as a TIFF/EP profile over the same `gamut-ifd` container core.
+`gamut-heic` is a decode-only HEIF container, with the HEVC bitstream itself left to a pluggable
+backend rather than decoded here. Of the format crates, only `gamut-vvc` and `gamut-av2` are
+still scaffolding, and they may move or be dropped as the focus sharpens.
 
-Alongside the codecs, gamut is growing **shared image-metadata primitives** (issue #34) — EXIF,
+Alongside the codecs, gamut ships **shared image-metadata primitives** (issue #34) — EXIF,
 XMP, ICC, and IPTC, plus the TIFF/IFD container core (`gamut-ifd`) that EXIF builds on — so the
-format crates can read, preserve, and embed metadata. These are newly scaffolded; the long-term
-goal is de-facto, fully-featured implementations (for EXIF, exiftool-class tag coverage).
+format crates can read, preserve, and embed metadata, reached through one `gamut-metadata`
+facade. These are all at v1 or later, each gated against a reference implementation (exiv2 for
+EXIF and IPTC, Adobe XMPCore for XMP); `gamut-cmm` adds the ICC transform engine over the
+profiles `gamut-icc` parses, is feature-complete against Little-CMS, and is the one piece not
+yet published. The long-term goal is de-facto, fully-featured implementations — for EXIF,
+exiftool-class tag coverage — which today's v1 crates do not yet reach: per-vendor MakerNote
+payloads round-trip verbatim but are not decoded, and tag breadth beyond the standard dictionary
+is still open. Issue #416 tracks that gap, measured.
 
 **gamut is image-first.** Even where a format's codec (AV1, AV2, VVC, HEVC) is fundamentally a
 video codec, gamut implements only the intra-frame, still-image subset those formats use — no
@@ -109,33 +118,37 @@ format.
 | Crate             | Purpose                                                                | Status                                 |
 | ----------------- | ---------------------------------------------------------------------- | -------------------------------------- |
 | `gamut`           | Umbrella crate; re-exports the format crates behind Cargo features     | implemented                            |
-| `gamut-core`      | Core traits (`Encoder`/`Decoder`), image buffers, dimensions, errors   | WIP                                    |
-| `gamut-color`     | Color spaces, pixel formats, bit depths, chroma subsampling, transfers | stabilizing api                        |
-| `gamut-dsp`       | Shared DSP: DCT, wavelet transforms, quantization, filtering           | stabilizing api                        |
+| `gamut-core`      | Core traits (`Encoder`/`Decoder`), image buffers, dimensions, errors, `convert` | stable (v1, #177); surface frozen, pixel conversion since #268 |
+| `gamut-color`     | Color spaces, pixel formats, bit depths, chroma subsampling, transfers | stable (v1, #179)                      |
+| `gamut-dsp`       | Shared DSP: DCT, wavelet transforms, quantization, filtering           | stable (v1, #192)                      |
 | `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)      | stabilizing api                        |
-| `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | finalizing api                         |
+| `gamut-tonemap`   | Tone-mapping curves (`ToneCurve` + Reinhard/ACES/Hable/Drago) for HDR→SDR | stable (v1, #188); eight operators, surface frozen |
+| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables + the backend registry | in use by gamut-jpeg (#277) and gamut-heic (#273) |
+| `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | stable (v2); structure only, codestream carried opaquely |
 | `gamut-riff`      | RIFF container utilities (WebP)                                        | stable (v1, #186)                      |
 | `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF   | implemented lossless and lossy (alpha) |
 | `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor        | placeholder                            |
-| `gamut-avif`      | AVIF encoder — AV1 still frames in an ISOBMFF container                | stabilizing with gamut-av1             |
-| `gamut-jxl`       | JPEG XL encoder (libjxl wrap) + decoder (pure-Rust jxl-rs)             | encoder + decoder (v1, #243)           |
-| `gamut-jxl-sys`   | Static libjxl 0.12.0 FFI declarations — native core of gamut-jxl encode | encoder backend (v1, #243)             |
+| `gamut-avif`      | AVIF encoder + container decoder — AV1 still frames in ISOBMFF         | encoder + decoder (v1; decoder #250); 10/12-bit deferred |
+| `gamut-jxl`       | JPEG XL encoder (libjxl wrap) + decoder (pure-Rust jxl-rs)             | encoder + decoder (#243)               |
+| `gamut-jxl-sys`   | Static libjxl 0.12.0 FFI declarations — native core of gamut-jxl encode | encoder backend (#243)                 |
+| `gamut-jpeg`      | JPEG-1 (ISO/IEC 10918-1) encoder + decoder — baseline & progressive, XYB | encoder + decoder (#28, P1–P13); unpublished |
 | `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                            | implemented VP8 + VP8L (+alpha, metadata, effort/near-lossless) |
-| `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                     | placeholder                            |
+| `gamut-heic`      | HEIC/HEIF still-image container **decoder** — HEVC via a pluggable backend | decode-only container (#238, S1–S7); no encoder, by charter |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
-| `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | scaffolding (impl in progress, #34)    |
-| `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on gamut-ifd        | scaffolding (impl in progress, #34)    |
+| `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | stable (v2, byte completeness #263); BigTIFF behind `bigtiff` |
+| `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on gamut-ifd        | stable (v1, #194); MakerNote preserved verbatim, not decoded |
 | `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | stable (v1, #180)                      |
 | `gamut-cmm`       | ICC colour management module (transform engine) over gamut-icc profiles | epic #323 complete (P1–P7); unpublished |
-| `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | scaffolding (impl in progress, #34)    |
-| `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | scaffolding (impl in progress, #34)    |
-| `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | scaffolding (impl in progress, #34)    |
-| `gamut-tiff`      | TIFF 6.0 encoder/decoder — self-contained (own IFD/tag container)      | baseline + extensions (YCbCr/Lab/JPEG WIP) |
-| `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut-png  | encoder (decoding stays on miniz_oxide) |
-| `gamut-png`       | PNG (W3C 3rd edition) encoder + spec-compliant decoder                 | encoder (#24) + decoder (#249)         |
-| `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives       | ready for use                          |
+| `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | stable (v1, #189); canonical serializer, UTF-8 packets only |
+| `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | stable (v1, #182); Extension structures pass through as raw XMP |
+| `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | stable (v1); orchestration only, C2PA carried opaquely |
+| `gamut-tiff`      | TIFF 6.0 encoder/decoder — on the shared `gamut-ifd` container core     | stable (v1, #107); YCbCr/Lab and JPEG-in-TIFF deferred |
+| `gamut-dng`       | DNG 1.7.1 raw encoder + decoder — a TIFF/EP profile over `gamut-ifd`   | encoder + decoder (v1, #109), Adobe DNG SDK-gated; unpublished |
+| `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut-png  | encoder (#195); decoding stays on miniz_oxide |
+| `gamut-png`       | PNG (W3C 3rd edition) encoder + spec-compliant decoder                 | encoder (#24) + decoder (#249); unpublished |
+| `gamut-cli`       | `gamut` CLI sandbox: encode AVIF/WebP + inspect the shared primitives  | ready for use                          |
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
-| `gamut-ffi`       | C-compatible FFI bindings                                              | placeholder                            |
+| `gamut-ffi`       | C-compatible FFI bindings                                              | provider boundary shipped (#280); consumer entry points pending (#242) |
 
 All cargo metadata except per-crate `version` is centralized in the root
 `[workspace.package]` / `[workspace.dependencies]`; each crate inherits the shared fields via
