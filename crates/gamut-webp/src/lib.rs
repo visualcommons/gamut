@@ -69,6 +69,20 @@
 //! straight into `gamut-metadata`'s `MetadataBlock` (the still-image [`gamut_core`] traits carry no
 //! metadata channel, which is why this is a separate entry point rather than a decode result field).
 //!
+//! # C2PA manifest stores
+//!
+//! A C2PA manifest store rides in a `C2PA` chunk (C2PA 2.4 §A.3.7), carried as opaquely as the three
+//! chunks above: gamut never builds, hashes, signs or validates one. [`WebpEncoder::with_c2pa`]
+//! embeds a finished store and [`WebpEncoder::with_c2pa_reserved`] leaves room for one that cannot
+//! exist yet, because its hard binding digests the finished file. Either way the chunk goes last —
+//! §A.3.7 requires it as the last sub-chunk of the `RIFF`/`WEBP` form, behind even the preserved
+//! unknown chunks — and no `VP8X` feature flag advertises it, RFC 9649 §2.5 defining no C2PA bit.
+//!
+//! [`WebpEncoder::encode_with_report`] returns the file together with the chunk's byte range, and
+//! [`c2pa_span`] recovers that range from any WebP file. The range is the chunk's whole span, which
+//! is what a `c2pa.hash.data` assertion excludes (§18.5); [`metadata`] surfaces the store's bytes
+//! themselves as [`WebpMetadata::c2pa`].
+//!
 //! # Pluggable codestream backends
 //!
 //! The RIFF container and the coded picture are separable: [`backend`] exposes one trait pair —
@@ -102,6 +116,6 @@ pub use backend::{
 };
 pub use config::{Effort, NearLossless, WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
-pub use encoder::WebpEncoder;
+pub use encoder::{WebpEncodeReport, WebpEncoder};
 pub use gamut_core::Dimensions;
-pub use metadata::{WebpMetadata, metadata};
+pub use metadata::{WebpMetadata, c2pa_span, metadata};
