@@ -41,7 +41,14 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
   reads them back without decoding pixels; libwebp's own muxer is the oracle in both directions.
   Read-side chunk-order enforcement and unknown-chunk round-trip preservation closed with
   `gamut-riff` v1 (issue #186): `gamut_riff::WebpLayout::parse` is the single container walk behind
-  both decode paths, and `WebpEncoder::with_unknown_chunks` re-emits preserved chunks.
+  both decode paths, and `WebpEncoder::with_unknown_chunks` re-emits preserved chunks — refusing any
+  FourCC `gamut_riff::WebpChunkId` classifies, so no chunk this crate writes itself can also be
+  passed through and written twice. The C2PA
+  manifest store joined them on the same verbatim terms (issue #445): `WebpEncoder::with_c2pa` /
+  `with_c2pa_reserved` embed or reserve it, `encode_with_report` and `gamut_webp::c2pa_span` report
+  the byte range a `c2pa.hash.data` assertion excludes, and `WebpMetadata::c2pa` reads it back.
+  gamut carries the store and never parses, hashes, signs or validates it; the behavioural `c2pa-rs`
+  oracle is issue #447.
 - **M5** — Animation: `ANIM` / `ANMF` — **out of scope** (decision 2026-06-09). Multi-frame
   sequences fall outside the image-first charter and the single-image `gamut_core` traits; WebP
   animation needs no codec work (each frame is an independent keyframe) but does need a non-trait
@@ -71,6 +78,7 @@ a settled charter rather than a wish-list. `gamut-riff` already recognizes every
 | Extended container | `VP8X` | **In scope** | ✅ | ✅ | M3 | Required enabler for lossy alpha, ICC, and metadata. Emitted only when a feature needs it (simple→extended promotion). |
 | Color profile | `ICCP` | **In scope** | ✅ embed | ✅ preserve | M4 | Color correctness on wide-gamut images. |
 | Metadata | `EXIF`, `XMP ` | **In scope** | ✅ embed | ✅ preserve | M4 | Cheap round-trip passthrough; preserved across decode→encode. |
+| C2PA manifest store | `C2PA` | **In scope** | ✅ embed / reserve | ✅ preserve | M4 | Provenance passthrough on the same verbatim terms; C2PA 2.4 §A.3.7 places the chunk, §18.5 defines the exclusion range. Validation is out of scope — see #447. |
 | Animation | `ANIM`, `ANMF` | **Out of scope** (tracked only) | ✕ | deferred | M5 | Sequence content, against the image-first charter ("no video sequences") and the single-image `gamut_core` traits. Each `ANMF` frame is an independent keyframe — no codec work needed — but assembly requires a non-trait multi-frame API. Rows kept for container-completeness; a decode-only path may be revisited later. |
 
 Markers: ✅ shipped · ✕ not planned · *deferred* = possible later, no commitment now.
@@ -96,13 +104,15 @@ Owner: [`gamut-riff`](../gamut-riff).
 | simple→extended promotion (emit `VP8X` when a feature needs it) | §2.7 | ✅ | M3 |
 | `ICCP` color profile chunk | §2.7.1.4 | ✅ | M4 |
 | `EXIF` / `XMP ` metadata chunks | §2.7.1.5 | ✅ | M4 |
-| canonical chunk order on **write** (`VP8X`, `ICCP`, image data, `EXIF`, `XMP `) | §2.7 | ✅ | M4 |
+| canonical chunk order on **write** (`VP8X`, `ICCP`, image data, `EXIF`, `XMP `, unknown, `C2PA`) | §2.7 | ✅ | M4 |
 | chunk ordering enforcement on **read** (reject out-of-order reconstruction chunks) | §2.7 | ✅ | M4 |
 | canvas bounds: dimensions in `1..=2^24`, width × height ≤ `2^32 - 1` | §2.7 | ✅ | M4 |
 | pad byte MUST be zero; trailing data past *File Size* surfaced | §2.3/§2.4 | ✅ | M4 |
 | `ANIM` global animation parameters (bg color, loop count) | §2.7.1.1 | ⊘ | M5 |
 | `ANMF` per-frame chunk + frame disposal/blend, canvas assembly | §2.7.1.1 | ⊘ | M5 |
 | unknown-chunk passthrough (preserve order) | §2.7.1.6 | ✅ | M4 |
+| `C2PA` manifest store, verbatim, as the **last** sub-chunk of the form | C2PA §A.3.7 | ✅ | M4 |
+| `c2pa.hash.data` exclusion range: whole chunk, pad byte excluded | C2PA §18.5 | ✅ | M4 |
 
 ## B. VP8L bitstream header (RFC 9649 §3.4; Google *Lossless Bitstream*)
 

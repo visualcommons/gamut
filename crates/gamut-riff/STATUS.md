@@ -16,7 +16,13 @@ and `tests/oracle.rs` against libwebp's demuxer.
 ## Scope
 
 The authority is **RFC 9649 §2** (*WebP Image Format*) and the Google *WebP Container* specification
-in [`references/webp/`](../../references/webp). The canonical RIFF document is *cited* by RFC 9649
+in [`references/webp/`](../../references/webp). One carrier comes from outside RFC 9649: the `C2PA` chunk of C2PA 2.4 §A.3.7, whose manifest
+store is carried as opaquely as `ICCP`/`EXIF`/`XMP ` are. The specification is vendored in
+[`references/c2pa/`](../../references/c2pa); §A.3.7 fixes the chunk's identifier and its place as
+the last sub-chunk of the form, and §18.5 fixes what a `c2pa.hash.data` exclusion covers. Nothing
+here parses, signs or validates a store.
+
+The canonical RIFF document is *cited* by RFC 9649
 (as a Library of Congress FDD URL), not vendored, so the wider RIFF vocabulary it defines — `LIST`,
 arbitrary form types, the AVI/WAVE chunks — is out of scope and unimplemented. What this crate calls
 "RIFF" is precisely the subset WebP uses: a flat chunk list under a single `RIFF`/`WEBP` form.
@@ -44,15 +50,19 @@ Dev-only — the shipped library links no C.
 | `RiffReader<'a>` | `new` + `Iterator<Item = Result<Chunk>>` + `trailing_bytes` | permissive; iteration ends after the first error |
 | `RiffWriter` | `new`/`write_chunk`/`finish`, all fallible past the size fields | private buffer — internal representation stays free |
 | `Vp8xHeader` | 5 feature flags + 1-based canvas, `to_payload`/`from_payload` | public fields; both directions validate the canvas |
-| `MetadataChunks<'a>` | borrowed `icc`/`exif`/`xmp` + `read`/`is_empty` | public fields; payloads never parsed or reserialized |
+| `MetadataChunks<'a>` | borrowed `icc`/`exif`/`xmp`/`c2pa` + `read`/`is_empty` | public fields; payloads never parsed or reserialized |
 | `WebpLayout<'a>` | `parse` + the sorted roles, `#[non_exhaustive]` | strict reader; new roles can be added non-breakingly |
 | `WebpChunkId` | fieldless variants + `Unknown(FourCc)`, `#[non_exhaustive]` | new chunk kinds can be recognised non-breakingly |
 | `write_simple_lossless` / `write_simple_lossy` | one bitstream chunk, §2.5-§2.6 | free functions returning `Result<Vec<u8>>` |
 | `write_extended` / `write_extended_with_metadata` / `write_extended_preserving` | the extended format at three levels of assistance | as above |
-| `VP8X_PAYLOAD_LEN`, `MAX_CANVAS_DIMENSION` | documented spec constants | literals the surface's own docs name |
+| `c2pa_span` | the `C2PA` chunk's whole byte span in a file, or `None` | free function returning `Result<Option<Range<usize>>>` |
+| `VP8X_PAYLOAD_LEN`, `MAX_CANVAS_DIMENSION`, `C2PA_FOURCC` | documented spec constants | literals the surface's own docs name |
 
 Adding chunk kinds, layout roles, writer helpers, or trait impls stays backward-compatible;
-removing or reshaping any of the above would not.
+removing or reshaping any of the above would not. `MetadataChunks` is the one exhaustive struct
+here, deliberately so — a new carrier should make every writer of a struct literal look at it — and
+adding `c2pa` for the manifest store is therefore a **breaking** change, the crate's first since v1.
+The migration is one line: `c2pa: None`, or `..Default::default()`.
 
 ## Container coverage
 
@@ -74,6 +84,8 @@ whose declared owner is this crate. Every row there is ✅ or ⊘ as of v1.
 | `ICCP` colour profile, verbatim | §2.7.1.4 | ✅ |
 | `EXIF` / `XMP ` metadata, verbatim, first of each kind wins | §2.7.1.5 | ✅ |
 | Unknown chunks: ignored on read, order preserved, re-emittable | §2.7.1.6 | ✅ |
+| `C2PA` manifest store, verbatim, written as the last sub-chunk of the form | C2PA §A.3.7 | ✅ |
+| `c2pa.hash.data` exclusion span: whole chunk, pad byte excluded | C2PA §18.5 | ✅ |
 | `ANIM` / `ANMF` animation | §2.7.1.1 | ⊘ out of scope |
 
 ## Settled design decisions (intentional, not gaps)
@@ -94,6 +106,35 @@ whose declared owner is this crate. Every row there is ✅ or ⊘ as of v1.
 - **`ICCP` is ordered, `EXIF`/`XMP ` are not.** §2.7 lists `ICCP` among the chunks that MUST appear
   in order and §2.7.1.4 adds "MUST appear before the image data", while the same paragraph exempts
   metadata and unknown chunks. The asymmetry is the spec's, not an oversight.
+- **The `C2PA` chunk is placed by the writer, not policed by the reader.** §A.3.7 says the chunk
+  "shall appear as the last sub-chunk of the first RIFF header chunk", so `write_extended_preserving`
+  emits it after `EXIF`, `XMP ` and even the preserved unknown chunks. The readers accept it
+  anywhere, because §2.7 does not list `C2PA` among the chunks whose order a reader may fail a file
+  over, and a store found in a file gamut did not write is still a store. It is *recognised*
+  (`WebpChunkId::C2pa`) rather than left unknown, so a read/modify/write cycle re-emits it once, in
+  its mandated place, instead of twice.
+- **A `C2PA` chunk never rides along among the unknown chunks.** `write_extended_preserving` writes
+  at most one, always in the store's place at the end. With `MetadataChunks::c2pa` set, a copy in
+  `unknown` is **dropped**: two would be resolved by "first of each kind wins" in favour of the
+  passed-through copy, and `c2pa_span` would then report a range over bytes the caller never
+  configured — exactly the range a signer excludes from its hash. With no store configured the copy
+  is **kept** and written in the store's place, because in the file it came from it *is* the store;
+  dropping it would lose a foreign manifest store with no signal. `write_extended` is the unfiltered
+  escape hatch for a caller assembling a file by hand.
+- **The layers are deliberately asymmetric.** This function is total — it always produces a
+  conformant file — while `gamut-webp`'s `WebpEncoder::with_unknown_chunks` *rejects* the same input
+  with a typed error. The high-level builder can name the offending call, which is the better
+  diagnostic; the low-level writer has no caller to blame and stays usable for a re-wrap that must
+  not fail.
+- **No `VP8X` feature flag advertises a store.** RFC 9649 §2.5's flag byte defines no C2PA bit and
+  the reserved bits "MUST be 0", so presence is decided by the chunk alone — the same rule the crate
+  already applies to `ICCP`/`EXIF`/`XMP `, where flags are advisory.
+- **The reported span is the whole chunk, minus the pad byte.** `c2pa_span` covers the identifier
+  and the size field as well as the payload, because an update manifest may resize the store and
+  that changes the size field's value (§18.5). The RIFF pad byte after an odd-length store stays
+  outside it: §2.3 makes the byte framing the container adds, which is why `Chunk::payload` excludes
+  it too. (§18.7.3.5's *general box hash* draws the boundary the other way, "to the padding byte, if
+  any, inclusive" — that is `c2pa.hash.boxes`, a different assertion this crate does not serve.)
 - **A non-zero pad byte fails its chunk.** The byte "MUST be 0 to conform with RIFF" (§2.3) and is
   attacker-controlled otherwise; a chunk whose framing is already known bad is never handed out. A
   pad byte *absent* from a final chunk still parses — there is then nothing to check.

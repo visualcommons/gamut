@@ -6,14 +6,15 @@
 //! impls; transparent lossy images use the extended (`VP8X`) format with a raw `ALPH` alpha chunk,
 //! as does any image carrying embedded metadata.
 
+use core::ops::Range;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use gamut_color::{ColorRange, Yuv420};
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8, Rgba8};
+use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Pixel, Result, Rgb8, Rgba8};
 use gamut_riff::{
-    Chunk, FourCc, MetadataChunks, Vp8xHeader, write_extended_preserving, write_simple_lossless,
-    write_simple_lossy,
+    Chunk, FourCc, MetadataChunks, Vp8xHeader, WebpChunkId, c2pa_span, write_extended_preserving,
+    write_simple_lossless, write_simple_lossy,
 };
 
 use crate::alpha;
@@ -34,6 +35,34 @@ fn quality_to_quant(quality: u8) -> u8 {
     ((100 - q) * 127 / 100) as u8
 }
 
+/// Whether `fourcc` names a chunk that is genuinely *unknown* — the only kind
+/// [`WebpEncoder::with_unknown_chunks`] carries through.
+///
+/// The classification is `gamut-riff`'s and is **asked for, not restated**: [`WebpChunkId::from`]
+/// knows every chunk the WebP container defines (RFC 9649 §2.5-§2.7) plus the `C2PA` chunk of
+/// C2PA 2.4 §A.3.7, and each of those is one this crate writes itself — from a dedicated setter, or
+/// from the image. A hand-written list of them is a copy of that table that drifts the moment
+/// `gamut-riff` recognises one more, which is exactly what happened: an eight-name list omitted
+/// `ANIM` and `ANMF`, so an animation chunk was accepted and produced a file
+/// [`gamut_riff::WebpLayout::parse`] then rejected as out of order.
+fn is_unknown_chunk(fourcc: FourCc) -> bool {
+    matches!(WebpChunkId::from(fourcc), WebpChunkId::Unknown(_))
+}
+
+/// Narrows a C2PA reservation to the `uint32` a RIFF chunk's size field holds (RFC 9649 §2.3).
+///
+/// Split out of [`WebpEncoder::with_c2pa_reserved`] so the limit can be tested without allocating
+/// the 4 GiB it would take to reach it — the same reason `gamut-riff`'s writer splits out its own
+/// `chunk_size_field`.
+fn reservation_len(len: usize) -> Result<u32> {
+    u32::try_from(len).map_err(|_| {
+        Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "WebP: C2PA reservation exceeds the uint32 chunk size field",
+        )
+    })
+}
+
 /// Encodes 8-bit RGB images to WebP.
 ///
 /// Construct with [`WebpEncoder::new`] (lossless), [`WebpEncoder::lossless`], or
@@ -41,7 +70,9 @@ fn quality_to_quant(quality: u8) -> u8 {
 ///
 /// Embedded metadata is attached with [`with_exif`](Self::with_exif) / [`with_xmp`](Self::with_xmp)
 /// / [`with_icc_profile`](Self::with_icc_profile), which promote the output to the extended (`VP8X`)
-/// format automatically.
+/// format automatically. A C2PA manifest store is attached with [`with_c2pa`](Self::with_c2pa) or
+/// reserved with [`with_c2pa_reserved`](Self::with_c2pa_reserved), and
+/// [`encode_with_report`](Self::encode_with_report) reports where in the finished file it landed.
 ///
 /// The codestream itself may be produced by a pluggable backend installed with
 /// [`push_backend`](Self::push_backend); with none installed (the default) the crate's own
@@ -57,6 +88,9 @@ pub struct WebpEncoder {
     xmp: Option<Vec<u8>>,
     /// The `ICCP` chunk payload (ICC colour profile) to embed, verbatim.
     icc: Option<Vec<u8>>,
+    /// The `C2PA` chunk payload — a C2PA manifest store, or a reservation of zero bytes to be
+    /// filled in once it has been computed over the finished file.
+    c2pa: Option<Vec<u8>>,
     /// Unknown chunks to re-emit after the metadata, in the order given (RFC 9649 §2.7.1.6).
     unknown: Vec<(FourCc, Vec<u8>)>,
     /// Pluggable codestream encoders, tried in push order ahead of the built-in tails.
@@ -72,6 +106,7 @@ impl fmt::Debug for WebpEncoder {
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("icc", &self.icc.as_ref().map(Vec::len))
+            .field("c2pa", &self.c2pa.as_ref().map(Vec::len))
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -139,6 +174,62 @@ impl WebpEncoder {
         self
     }
 
+    /// Embeds a C2PA manifest store as a `C2PA` chunk (C2PA 2.4 §A.3.7), promoting the output to
+    /// the extended (`VP8X`) format.
+    ///
+    /// The store is written **verbatim** and placed as the last sub-chunk of the `RIFF`/`WEBP` form,
+    /// which is where §A.3.7 requires it — behind `EXIF`, `XMP ` and any chunk passed to
+    /// [`with_unknown_chunks`](Self::with_unknown_chunks). No `VP8X` feature flag advertises it:
+    /// RFC 9649 §2.5 defines no C2PA bit, so presence is decided by the chunk alone.
+    ///
+    /// gamut carries the store; it does not build, hash, sign or validate one — that is a C2PA
+    /// implementation's job (`c2pa-rs`). Use [`encode_with_report`](Self::encode_with_report) to
+    /// learn the byte range the store's chunk occupies, which is what a `c2pa.hash.data` assertion
+    /// excludes (§18.5).
+    ///
+    /// The last of [`with_c2pa`](Self::with_c2pa) / [`with_c2pa_reserved`](Self::with_c2pa_reserved)
+    /// wins; a file carries exactly one store.
+    #[must_use]
+    pub fn with_c2pa(mut self, store: &[u8]) -> Self {
+        self.c2pa = Some(store.to_vec());
+        self
+    }
+
+    /// Reserves `len` zero bytes for a C2PA manifest store not yet computed.
+    ///
+    /// A store cannot be handed to the encoder complete, because its hard binding digests the
+    /// finished file (C2PA 2.4 §15.12.1.1) — which does not exist until the encoder has run. The
+    /// reserve-then-fill flow §18.5 asks for is three steps:
+    ///
+    /// 1. encode with the reservation, through
+    ///    [`encode_with_report`](Self::encode_with_report), and keep the reported range;
+    /// 2. hash the returned file with that **whole** range excluded, and build the store;
+    /// 3. encode again with [`with_c2pa`](Self::with_c2pa) and a store of the **same length**, which
+    ///    reproduces the same file with the reserved bytes replaced.
+    ///
+    /// The reservation is `len` bytes exactly — no slack is added — so ask for what the signer says
+    /// it needs. A store shorter than the reservation would move every byte after it and invalidate
+    /// the hash, which is why step 3 must match the length rather than merely fit inside it.
+    ///
+    /// No upper bound is imposed beyond what the container can express: a signer's `reserve_size` is
+    /// its own business, and neither `gamut-avif` nor `gamut-png` caps one either.
+    ///
+    /// The last of [`with_c2pa`](Self::with_c2pa) / [`with_c2pa_reserved`](Self::with_c2pa_reserved)
+    /// wins; a file carries exactly one store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`](gamut_core::Error) if `len` exceeds the `uint32` a RIFF chunk's
+    /// size field holds (RFC 9649 §2.3) — the same limit
+    /// [`gamut_riff::RiffWriter::write_chunk`] enforces, checked here so the reservation is refused
+    /// rather than allocated: `vec![0; len]` panics on a `len` no allocator could serve, and a
+    /// library path must return a typed error instead.
+    pub fn with_c2pa_reserved(mut self, len: usize) -> Result<Self> {
+        reservation_len(len)?;
+        self.c2pa = Some(vec![0; len]);
+        Ok(self)
+    }
+
     /// Sets the compression [`Effort`] — libwebp's `method` dial, `0..=6`.
     ///
     /// Applies to both modes. Higher effort spends more time searching for a smaller file; it
@@ -200,13 +291,36 @@ impl WebpEncoder {
     /// decode/re-encode cycle instead of dropping them. Any unknown chunk promotes the output to
     /// the extended (`VP8X`) format, since only that format has a place to put one. Calling this
     /// twice keeps the last list.
-    #[must_use]
-    pub fn with_unknown_chunks(mut self, chunks: &[(FourCc, &[u8])]) -> Self {
+    ///
+    /// This is the only setter that takes a FourCC from the caller rather than just a payload, so it
+    /// is the only one with an invalid input to reject — which is why it is fallible where the rest
+    /// of the builder is not.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`](gamut_core::Error) if `chunks` names any chunk the WebP
+    /// container defines (RFC 9649 §2.5-§2.7) or the `C2PA` chunk of C2PA 2.4 §A.3.7 — that is,
+    /// anything [`gamut_riff::WebpChunkId`] classifies as something other than
+    /// [`Unknown`](gamut_riff::WebpChunkId::Unknown). Each is written by this crate itself, from a
+    /// dedicated setter or from the image, so passing one through would emit it twice and the
+    /// pass-through copy would win: `gamut-riff`'s readers take the *first* of a repeated chunk. The
+    /// error names the offending FourCC in its detail, escaping any non-printable byte.
+    /// Use [`with_icc_profile`](Self::with_icc_profile), [`with_exif`](Self::with_exif),
+    /// [`with_xmp`](Self::with_xmp) or [`with_c2pa`](Self::with_c2pa) instead.
+    pub fn with_unknown_chunks(mut self, chunks: &[(FourCc, &[u8])]) -> Result<Self> {
+        if let Some((fourcc, _)) = chunks.iter().find(|(fourcc, _)| !is_unknown_chunk(*fourcc)) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "WebP: this chunk is written by the encoder itself and cannot be passed through as \
+                 an unknown chunk",
+            )
+            .with_detail(format!("{fourcc}")));
+        }
         self.unknown = chunks
             .iter()
             .map(|(fourcc, payload)| (*fourcc, payload.to_vec()))
             .collect();
-        self
+        Ok(self)
     }
 
     /// Installs a codestream encoder backend, returning `&mut self` so pushes chain.
@@ -269,6 +383,7 @@ impl WebpEncoder {
             icc: self.icc.as_deref(),
             exif: self.exif.as_deref(),
             xmp: self.xmp.as_deref(),
+            c2pa: self.c2pa.as_deref(),
         }
     }
 
@@ -277,7 +392,8 @@ impl WebpEncoder {
     /// With nothing that needs the extended format — no metadata and no separate `ALPH` chunk — this
     /// is the simple format: the `RIFF`/`WEBP` header plus the lone `VP8 `/`VP8L` chunk. Otherwise
     /// the file is promoted to extended, and the chunks go out in the spec's canonical order:
-    /// `VP8X`, `ICCP`, `ALPH`, the bitstream, `EXIF`, `XMP `.
+    /// `VP8X`, `ICCP`, `ALPH`, the bitstream, `EXIF`, `XMP `, the preserved unknown chunks, and last
+    /// of all `C2PA` (C2PA 2.4 §A.3.7).
     ///
     /// `has_alpha` records transparency for the `VP8X` feature flag independently of `alph`, because
     /// a `VP8L` bitstream carries its own alpha and so needs no `ALPH` chunk.
@@ -410,6 +526,90 @@ impl WebpEncoder {
     }
 }
 
+/// Where the things an encode *placed* ended up in the file it produced.
+///
+/// Returned by [`WebpEncoder::encode_with_report`]. Construct nothing here — the encoder fills it
+/// in. Marked `#[non_exhaustive]` so a later revision can report a further region without a
+/// breaking change.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct WebpEncodeReport {
+    /// The byte range the `C2PA` chunk occupies in the encoded file, or `None` when no manifest
+    /// store was configured.
+    ///
+    /// The range covers the chunk's **whole** span — the four identifier bytes, the four-byte size
+    /// field and the payload — because that is what a `c2pa.hash.data` assertion excludes (C2PA 2.4
+    /// §18.5): an update manifest may resize the store, which changes the size field's value as
+    /// well as the bytes after it. The RIFF pad byte that follows an odd-length store (RFC 9649
+    /// §2.3) is outside the range; it is framing the container adds, not store.
+    pub c2pa: Option<Range<usize>>,
+}
+
+impl WebpEncoder {
+    /// Encodes `image` and reports where the encoder placed what it was asked to place.
+    ///
+    /// The bytes are exactly the bytes [`EncodeImage::encode_image`] produces for the same encoder
+    /// and image — this is the same code path, not a second one — so the report can be taken as a
+    /// description of any file this encoder writes. It is a separate entry point because the
+    /// object-safe `EncodeImage` seam carries no channel for one.
+    ///
+    /// # Errors
+    ///
+    /// As [`EncodeImage::encode_image`], plus [`Error::InvalidInput`](gamut_core::Error) if the
+    /// `C2PA` chunk read back out of the finished file is not the store that was configured. That
+    /// check is what makes the reported range trustworthy: a range is only returned once the bytes
+    /// inside it have been confirmed to be the caller's own store, so a signer can never be handed a
+    /// span over somebody else's.
+    ///
+    /// That last error is **defence in depth** and no caller should expect to observe it: no input
+    /// this API accepts can make the encoder write a `C2PA` chunk that is not the configured store —
+    /// [`with_unknown_chunks`](Self::with_unknown_chunks) refuses one and
+    /// [`gamut_riff::write_extended_preserving`] gives the configured store the slot. It is kept as
+    /// a live check rather than a `debug_assert!` because this is a signing path, where a release
+    /// build is exactly where the protection is worth its one walk of the chunk list.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gamut_core::{Dimensions, ImageRef, Rgb8};
+    /// use gamut_webp::WebpEncoder;
+    ///
+    /// let pixels = [10u8, 20, 30];
+    /// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(1, 1)?)?;
+    /// let (file, report) = WebpEncoder::lossless()
+    ///     .with_c2pa_reserved(64)?
+    ///     .encode_with_report(image)?;
+    ///
+    /// let span = report.c2pa.expect("a store was reserved");
+    /// assert_eq!(&file[span.start..span.start + 4], b"C2PA");
+    /// assert_eq!(span.len(), 8 + 64);
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    pub fn encode_with_report<P: Pixel>(
+        &self,
+        image: ImageRef<'_, P>,
+    ) -> Result<(Vec<u8>, WebpEncodeReport)>
+    where
+        Self: EncodeImage<P>,
+    {
+        let mut file = Vec::new();
+        self.encode_image(image, &mut file)?;
+        // The range is read back out of the finished bytes with the very locator the read side uses
+        // (`gamut_riff::c2pa_span`), so a writer and a reader can never disagree about it. Reading
+        // the payload back through the *other* reader as well turns that into a checked claim: the
+        // range is returned only once the bytes inside it are known to be the configured store, so
+        // a stray `C2PA` chunk could never make the report name somebody else's bytes.
+        let c2pa = c2pa_span(&file)?;
+        if MetadataChunks::read(&file)?.c2pa != self.c2pa.as_deref() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "WebP: the C2PA chunk in the encoder's own output is not the configured store",
+            ));
+        }
+        Ok((file, WebpEncodeReport { c2pa }))
+    }
+}
+
 impl EncodeImage<Rgb8> for WebpEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         self.encode_rgb8_inner(image.as_samples(), image.dimensions(), out)
@@ -424,7 +624,8 @@ impl EncodeImage<Rgba8> for WebpEncoder {
 
 #[cfg(test)]
 mod tests {
-    use gamut_core::{DecodeImage, ImageBuf};
+    use gamut_core::{DecodeImage, ErrorKind, ImageBuf};
+    use gamut_riff::C2PA_FOURCC;
 
     use super::*;
 
@@ -619,5 +820,260 @@ mod tests {
             .expect("encode via trait");
         assert_eq!(written, out.len());
         assert_eq!(&out[0..4], b"RIFF");
+    }
+
+    /// The reservation is `len` zero bytes exactly — no slack, no framing. A signer sizes its store
+    /// against this number, so a reservation that were merely "at least `len`" would be useless.
+    #[test]
+    fn with_c2pa_reserved_is_exactly_len_zero_bytes() {
+        assert_eq!(
+            WebpEncoder::lossless().with_c2pa_reserved(0).unwrap().c2pa,
+            Some(vec![])
+        );
+        assert_eq!(
+            WebpEncoder::lossless().with_c2pa_reserved(5).unwrap().c2pa,
+            Some(vec![0, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            WebpEncoder::lossless().c2pa,
+            None,
+            "unconfigured by default"
+        );
+    }
+
+    /// The reservation limit is the RIFF chunk size field itself, admitted right up to its ceiling
+    /// and refused one past it. Testing the narrowing function rather than the builder is what makes
+    /// the boundary reachable at all: pinning it through `with_c2pa_reserved` would mean allocating
+    /// 4 GiB to watch the accepted side succeed.
+    #[test]
+    fn a_reservation_is_narrowed_to_the_uint32_size_field() {
+        assert_eq!(reservation_len(0).expect("empty"), 0);
+        assert_eq!(
+            reservation_len(u32::MAX as usize).expect("the ceiling is admitted"),
+            u32::MAX
+        );
+        // One past the ceiling is only expressible where `usize` is wider than `u32`; on a 32-bit
+        // target (wasm32) no `usize` can exceed it, so there is nothing to refuse.
+        if let Ok(past) = usize::try_from(u64::from(u32::MAX) + 1) {
+            let err = reservation_len(past).expect_err("one past the ceiling is refused");
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert!(err.to_string().contains("uint32 chunk size field"), "{err}");
+        }
+    }
+
+    /// And the builder refuses such a length instead of reaching `vec![0; len]`, which panics with
+    /// "capacity overflow" on a length no allocator can serve — CLAUDE.md forbids a panic on a
+    /// library path.
+    #[test]
+    fn with_c2pa_reserved_refuses_a_length_it_cannot_represent() {
+        let Ok(too_big) = usize::try_from(u64::from(u32::MAX) + 1) else {
+            return; // 32-bit target: unreachable, as above.
+        };
+        let err = WebpEncoder::lossless()
+            .with_c2pa_reserved(too_big)
+            .expect_err("a reservation past the uint32 size field is refused");
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+    }
+
+    /// Every FourCC `gamut-riff` classifies is refused, so the mistake is caught at the call that
+    /// made it rather than resolved silently in favour of the pass-through copy.
+    ///
+    /// `ANIM` and `ANMF` are in the list deliberately. A hand-written table of "chunks with their
+    /// own setter" left them out, and the encoder then accepted an `ANIM` chunk and wrote a file
+    /// `WebpLayout::parse` refuses as having its reconstruction chunks out of order — an encoder
+    /// steered into producing a file it cannot read back.
+    #[test]
+    fn with_unknown_chunks_refuses_every_chunk_the_container_defines() {
+        let classified = [
+            FourCc::VP8X,
+            FourCc::VP8,
+            FourCc::VP8L,
+            FourCc::ALPH,
+            FourCc::ICCP,
+            FourCc::EXIF,
+            FourCc::XMP,
+            FourCc::ANIM,
+            FourCc::ANMF,
+            C2PA_FOURCC,
+        ];
+        for reserved in classified {
+            let err = WebpEncoder::lossless()
+                .with_unknown_chunks(&[(reserved, b"payload")])
+                .err()
+                .unwrap_or_else(|| panic!("{reserved} must be refused"));
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{reserved}");
+            assert!(
+                err.to_string().contains(&reserved.to_string()),
+                "{reserved}: the error names the offending FourCC, got {err}"
+            );
+        }
+        // A genuinely unknown FourCC is still accepted, and the check does not depend on position.
+        let private = FourCc::from(*b"XYZW");
+        let ok = WebpEncoder::lossless()
+            .with_unknown_chunks(&[(private, b"payload")])
+            .expect("a private chunk is accepted");
+        assert_eq!(ok.unknown, vec![(private, b"payload".to_vec())]);
+        assert!(
+            WebpEncoder::lossless()
+                .with_unknown_chunks(&[(private, b"a"), (C2PA_FOURCC, b"b")])
+                .is_err(),
+            "a reserved FourCC is refused wherever it sits in the list"
+        );
+    }
+
+    /// A file carries exactly one store, so the two setters share one slot and the last call wins —
+    /// including when the two kinds are mixed, which is the case a per-setter "last wins" would miss.
+    #[test]
+    fn the_last_c2pa_call_wins_whichever_kind_it_is() {
+        assert_eq!(
+            WebpEncoder::lossless()
+                .with_c2pa(b"first")
+                .with_c2pa(b"second")
+                .c2pa,
+            Some(b"second".to_vec())
+        );
+        assert_eq!(
+            WebpEncoder::lossless()
+                .with_c2pa_reserved(4)
+                .unwrap()
+                .with_c2pa(b"store")
+                .c2pa,
+            Some(b"store".to_vec())
+        );
+        assert_eq!(
+            WebpEncoder::lossless()
+                .with_c2pa(b"store")
+                .with_c2pa_reserved(2)
+                .unwrap()
+                .c2pa,
+            Some(vec![0, 0])
+        );
+    }
+
+    /// The debug rendering names the store by length only: a manifest store is large and is not
+    /// something a log should spill.
+    #[test]
+    fn debug_reports_the_store_length_not_its_bytes() {
+        let rendered = format!("{:?}", WebpEncoder::lossless().with_c2pa(b"a store"));
+        assert!(rendered.contains("c2pa: Some(7)"), "{rendered}");
+        assert!(!rendered.contains("a store"), "{rendered}");
+    }
+
+    /// `encode_with_report` is `encode_image` plus a report — not a second encoding path — and it
+    /// reports nothing when nothing was placed.
+    #[test]
+    fn encode_with_report_is_encode_image_plus_a_report() {
+        let rgb = [0x10, 0x20, 0x30].repeat(4);
+        let encoder = WebpEncoder::lossless();
+        let image = || ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap();
+
+        let mut expected = Vec::new();
+        encoder
+            .encode_image(image(), &mut expected)
+            .expect("encode");
+        let (file, report) = encoder.encode_with_report(image()).expect("encode");
+        assert_eq!(file, expected);
+        assert_eq!(report, WebpEncodeReport::default());
+        assert_eq!(report.c2pa, None, "no store was configured");
+    }
+
+    /// The reported range is the chunk's whole span (C2PA 2.4 §18.5): identifier, size field and
+    /// payload, with the RIFF pad byte of an odd-length store left outside it.
+    #[test]
+    fn encode_with_report_names_the_whole_chunk_and_not_its_pad_byte() {
+        let store = b"an odd-length manifest store!!"; // sized to an odd length below
+        let store = &store[..29];
+        assert_eq!(store.len() % 2, 1, "the fixture must exercise the pad byte");
+        let rgb = [9u8, 8, 7].repeat(4);
+        let (file, report) = WebpEncoder::lossless()
+            .with_c2pa(store)
+            .encode_with_report(ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap())
+            .expect("encode");
+
+        let span = report.c2pa.expect("a store was configured");
+        assert_eq!(&file[span.start..span.start + 4], b"C2PA", "identifier");
+        assert_eq!(
+            &file[span.start + 4..span.start + 8],
+            &(store.len() as u32).to_le_bytes(),
+            "size field"
+        );
+        assert_eq!(&file[span.start + 8..span.end], store, "payload");
+        assert_eq!(span.end, file.len() - 1, "the pad byte is outside the span");
+        assert_eq!(
+            file[file.len() - 1],
+            0,
+            "RFC 9649 §2.3: the pad byte is zero"
+        );
+    }
+
+    /// The reported range is only handed back once the bytes inside it have been confirmed to be the
+    /// configured store, so a signer can never be given a span over somebody else's bytes. The
+    /// encoder cannot be made to write a second `C2PA` chunk — `with_unknown_chunks` refuses one and
+    /// `write_extended_preserving` filters one — so this pins the checked claim from the inside: for
+    /// every store the encoder accepts, the span it reports contains exactly that store.
+    #[test]
+    fn the_reported_span_always_contains_the_configured_store() {
+        let rgb = [1u8, 2, 3].repeat(4);
+        for store in [&b""[..], &b"x"[..], &b"even"[..], &[0xff; 64][..]] {
+            let (file, report) = WebpEncoder::lossless()
+                .with_c2pa(store)
+                .encode_with_report(ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap())
+                .expect("encode");
+            let span = report.c2pa.expect("a store was configured");
+            assert_eq!(span.len(), 8 + store.len(), "{store:?}: whole-chunk span");
+            assert_eq!(&file[span.start + 8..span.end], store, "{store:?}: payload");
+            assert_eq!(
+                crate::metadata(&file).unwrap().c2pa.as_deref(),
+                Some(store),
+                "{store:?}: and the reader agrees"
+            );
+        }
+    }
+
+    /// The reserve-then-fill flow only works if filling a reservation disturbs nothing else: two
+    /// equal-length stores must give two files that differ in exactly the reported span, so a hash
+    /// taken with that span excluded survives the substitution.
+    #[test]
+    fn filling_a_reservation_changes_only_the_reported_span() {
+        let rgb = [3u8, 5, 7].repeat(9);
+        let image = || ImageRef::<Rgb8>::new(&rgb, dims(3, 3)).unwrap();
+        let encode = |store: &[u8]| {
+            WebpEncoder::lossless()
+                .with_c2pa(store)
+                .encode_with_report(image())
+                .expect("encode")
+        };
+
+        let (reserved, report) = WebpEncoder::lossless()
+            .with_c2pa_reserved(8)
+            .unwrap()
+            .encode_with_report(image())
+            .expect("encode");
+        let span = report.c2pa.expect("a store was reserved");
+        let (first, first_report) = encode(b"11111111");
+        let (second, second_report) = encode(b"22222222");
+
+        assert_eq!(first_report.c2pa, Some(span.clone()));
+        assert_eq!(second_report.c2pa, Some(span.clone()));
+        assert_eq!(first.len(), reserved.len());
+        assert_eq!(second.len(), reserved.len());
+        for (label, filled) in [
+            ("reserved", &reserved),
+            ("first", &first),
+            ("second", &second),
+        ] {
+            assert_eq!(
+                filled[..span.start],
+                reserved[..span.start],
+                "{label}: before"
+            );
+            assert_eq!(filled[span.end..], reserved[span.end..], "{label}: after");
+        }
+        assert_eq!(
+            &reserved[span.start + 8..span.end],
+            &[0; 8],
+            "the reservation is zeros"
+        );
+        assert_ne!(first[span.clone()], second[span], "the stores differ");
     }
 }
