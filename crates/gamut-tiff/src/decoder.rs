@@ -16,6 +16,7 @@ use gamut_ifd::{ByteOrder, Ifd, read};
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor, SampleFormat};
 use crate::info::{self, TiffInfo};
+use crate::metadata::{self, TiffMetadata};
 use crate::palette::Palette8;
 use crate::tags;
 
@@ -183,6 +184,35 @@ impl TiffDecoder {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: page index out of range")
         })?;
         info::page_info(ifd, file.order)
+    }
+
+    /// Reads the metadata a TIFF carries, without decoding pixels.
+    ///
+    /// IFD 0 supplies the XMP, IPTC-IIM and ICC payloads and the `ExifIFD` sub-IFD. Every
+    /// byte-carried payload comes back **verbatim** — this crate parses none of them — so a block
+    /// written by [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) reads back
+    /// identical.
+    ///
+    /// ```
+    /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
+    /// use gamut_tiff::{TiffDecoder, TiffEncoder, TiffMetadata};
+    ///
+    /// let dims = Dimensions { width: 2, height: 1 };
+    /// let tiff = TiffEncoder::new()
+    ///     .with_metadata(TiffMetadata::new().with_xmp(b"<x:xmpmeta/>".to_vec()))
+    ///     .encode_to_vec(ImageRef::<Gray8>::new(&[7, 9], dims)?)?;
+    ///
+    /// let meta = TiffDecoder::new().metadata(&tiff)?;
+    /// assert_eq!(meta.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or a sub-IFD pointer
+    /// graph that is not a tree.
+    pub fn metadata(&self, data: &[u8]) -> Result<TiffMetadata> {
+        metadata::read_metadata(data)
     }
 
     /// Selects which lossy conversions a typed decode may perform.

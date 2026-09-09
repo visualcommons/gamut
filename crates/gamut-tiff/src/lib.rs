@@ -74,6 +74,7 @@ mod deconstruct;
 mod encoder;
 mod ifd;
 mod info;
+mod metadata;
 mod palette;
 mod writer;
 
@@ -94,5 +95,6 @@ pub use gamut_ifd::{
 };
 pub use ifd::{PhotometricInterpretation, Predictor, SampleFormat};
 pub use info::TiffInfo;
+pub use metadata::TiffMetadata;
 pub use palette::Palette8;
 pub use writer::{write_image, write_image_tiled, write_multipage};
