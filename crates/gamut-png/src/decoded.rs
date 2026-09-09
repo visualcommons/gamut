@@ -147,14 +147,19 @@ pub struct DecodedPng {
     pub xmp: Option<Vec<u8>>,
     /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim: the JUMBF bytes,
     /// uncompressed, exactly as the chunk carries them — opaque here, never parsed or judged.
-    /// Feed as `MetadataBlock::C2pa`. The first `caBX` in the file, and only when it fits the
-    /// metadata budget; see [`c2pa_duplicates`](Self::c2pa_duplicates).
+    /// Feed as `MetadataBlock::C2pa`. The first CRC-valid `caBX` before the first `IDAT`, and
+    /// only when it fits the metadata budget; see [`c2pa_ignored`](Self::c2pa_ignored).
     pub c2pa: Option<Vec<u8>>,
-    /// How many further `caBX` chunks followed the first, saturating at 255. A file carries
-    /// exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's APP11 run — so
-    /// any value above zero marks a malformed file whose extra stores were ignored rather than
-    /// concatenated.
-    pub c2pa_duplicates: u8,
+    /// How many CRC-valid `caBX` chunks the file carries that were **not** surfaced as the
+    /// store: any after the first, and any positioned after `IDAT`.
+    ///
+    /// A file carries exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's
+    /// APP11 run — so a non-zero count marks a malformed file whose extra chunks were ignored
+    /// rather than concatenated. The post-`IDAT` case is worth its own attention: §A.3.2 places
+    /// the store before `IDAT` and calls data after it bad-form, so a `caBX` appended to a
+    /// finished file is never read as the store. A file whose `c2pa` is `None` while this is
+    /// non-zero is exactly that shape — someone appended a store to a file that carries none.
+    pub c2pa_ignored: usize,
     /// tEXt/zTXt/iTXt annotations in file order (the XMP packet is excluded).
     pub texts: Vec<TextChunk>,
     /// gAMA: image gamma × 100 000 (§11.3.2.2) — the unit the encoder's `with_gamma` writes.
@@ -213,15 +218,20 @@ pub struct PngMetadata {
     /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
     /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim and uncompressed —
-    /// opaque bytes, never parsed or judged. Feed as `MetadataBlock::C2pa`. The first `caBX` in
-    /// the file, and only when it fits the metadata budget; see
-    /// [`c2pa_duplicates`](Self::c2pa_duplicates).
+    /// opaque bytes, never parsed or judged. Feed as `MetadataBlock::C2pa`. The first CRC-valid
+    /// `caBX` before the first `IDAT`, and only when it fits the metadata budget; see
+    /// [`c2pa_ignored`](Self::c2pa_ignored).
     pub c2pa: Option<Vec<u8>>,
-    /// How many further `caBX` chunks followed the first, saturating at 255. A file carries
-    /// exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's APP11 run — so
-    /// any value above zero marks a malformed file whose extra stores were ignored rather than
-    /// concatenated.
-    pub c2pa_duplicates: u8,
+    /// How many CRC-valid `caBX` chunks the file carries that were **not** surfaced as the
+    /// store: any after the first, and any positioned after `IDAT`.
+    ///
+    /// A file carries exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's
+    /// APP11 run — so a non-zero count marks a malformed file whose extra chunks were ignored
+    /// rather than concatenated. The post-`IDAT` case is worth its own attention: §A.3.2 places
+    /// the store before `IDAT` and calls data after it bad-form, so a `caBX` appended to a
+    /// finished file is never read as the store. A file whose `c2pa` is `None` while this is
+    /// non-zero is exactly that shape — someone appended a store to a file that carries none.
+    pub c2pa_ignored: usize,
     /// tEXt/zTXt/iTXt annotations in file order (the XMP packet is excluded).
     pub texts: Vec<TextChunk>,
     /// gAMA: image gamma × 100 000 (§11.3.2.2).
@@ -239,6 +249,11 @@ pub struct PngMetadata {
 /// attacker-sized `caBX` store — share `budget` bytes of output, and a payload that would bust
 /// the remainder is skipped, not an error. Once-only chunks keep their first occurrence; a
 /// second `caBX` is additionally counted, since exactly one store is the rule (C2PA §A.3.2).
+///
+/// `chunks` holds only chunks in a position where a store may appear: the caller's walk drops a
+/// `caBX` after `IDAT` before it gets here and counts it into
+/// [`PngMetadata::c2pa_ignored`](PngMetadata::c2pa_ignored) itself, so this function never has to
+/// know where in the file a chunk sat.
 pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata {
     let mut meta = PngMetadata::default();
     let mut budget = budget;
@@ -250,7 +265,7 @@ pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata
             b"eXIf" if meta.exif.is_none() => meta.exif = Some(data.to_vec()),
             _ if chunk_type == CABX => {
                 if seen_c2pa {
-                    meta.c2pa_duplicates = meta.c2pa_duplicates.saturating_add(1);
+                    meta.c2pa_ignored += 1;
                 } else {
                     seen_c2pa = true;
                     if data.len() <= budget {
@@ -569,21 +584,22 @@ mod tests {
             1024,
         );
         assert_eq!(meta.c2pa.as_deref(), Some(&b"first store"[..]));
-        assert_eq!(meta.c2pa_duplicates, 2);
+        assert_eq!(meta.c2pa_ignored, 2);
 
         let single = collect(&[(CABX, b"only")], 1024);
         assert_eq!(single.c2pa.as_deref(), Some(&b"only"[..]));
-        assert_eq!(single.c2pa_duplicates, 0);
+        assert_eq!(single.c2pa_ignored, 0);
         assert_eq!(collect(&[], 1024).c2pa, None);
     }
 
-    /// The duplicate count saturates rather than wrapping: 256 further stores read as 255, not
-    /// as none at all.
+    /// The count is a plain `usize`: it reports what the file carries however many that is. A
+    /// saturating `u8` here read 300 ignored chunks as 255, which is a number the file does not
+    /// contain.
     #[test]
-    fn the_cabx_duplicate_count_saturates_at_255() {
-        let chunks: Vec<([u8; 4], &[u8])> = (0..257).map(|_| (CABX, &b"s"[..])).collect();
+    fn the_ignored_count_reports_every_chunk_not_a_saturated_ceiling() {
+        let chunks: Vec<([u8; 4], &[u8])> = (0..301).map(|_| (CABX, &b"s"[..])).collect();
         let meta = collect(&chunks, 1024);
-        assert_eq!(meta.c2pa_duplicates, 255);
+        assert_eq!(meta.c2pa_ignored, 300);
     }
 
     /// `caBX` is attacker-sized like every other ancillary payload, so it is charged to the one
@@ -609,7 +625,7 @@ mod tests {
         let busts = collect(&[(CABX, &store), (CABX, b"tiny")], 9);
         assert_eq!(busts.c2pa, None, "one byte over the budget is skipped");
         assert_eq!(
-            busts.c2pa_duplicates, 1,
+            busts.c2pa_ignored, 1,
             "the skipped store is still the first; the next is a duplicate, not a substitute"
         );
     }

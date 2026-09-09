@@ -3,8 +3,9 @@
 //! moving a byte outside it, and that both reports name the same whole-chunk span at known
 //! offsets. Differential: libpng frames the same payload into the same bytes, decodes gamut's
 //! file pixel-exact with the chunk in place, and gamut reads the store back from a libpng-written
-//! file. The store is opaque bytes throughout — its behavioural oracle, `c2pa-rs`, is issue
-//! #447's.
+//! file. It also pins the two rules that decide what *is* the store: exactly one per file, and
+//! never one positioned after `IDAT`. The store is opaque bytes throughout — its behavioural
+//! oracle, `c2pa-rs`, is issue #447's.
 
 mod common;
 
@@ -15,6 +16,7 @@ use common::{
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Indexed8, Rgb8, Rgba8};
 use gamut_png::{
     PhysicalUnit, PngDecoder, PngEncoder, PngPalette, SegmentKind, SrgbIntent, deconstruct,
+    fill_c2pa,
 };
 
 /// A stand-in manifest store of `len` bytes: not all zero, no two runs alike, so a fill is
@@ -279,7 +281,7 @@ fn without_a_store_there_is_no_chunk_and_no_span() {
     assert_eq!(deconstruct(&png).expect("deconstruct").c2pa(), None);
     let decoded = PngDecoder::new().decode(&png).expect("decode");
     assert_eq!(decoded.c2pa, None);
-    assert_eq!(decoded.c2pa_duplicates, 0);
+    assert_eq!(decoded.c2pa_ignored, 0);
 }
 
 /// Both read entry points surface the store byte for byte, and the last of the two setters
@@ -295,10 +297,10 @@ fn decode_and_metadata_surface_the_store_verbatim_and_the_last_setter_wins() {
         .expect("encode");
     let meta = gamut_png::metadata(&png).expect("metadata");
     assert_eq!(meta.c2pa.as_deref(), Some(&store[..]));
-    assert_eq!(meta.c2pa_duplicates, 0);
+    assert_eq!(meta.c2pa_ignored, 0);
     let decoded = PngDecoder::new().decode(&png).expect("decode");
     assert_eq!(decoded.c2pa, meta.c2pa);
-    assert_eq!(decoded.c2pa_duplicates, 0);
+    assert_eq!(decoded.c2pa_ignored, 0);
 
     let reserved_last = PngEncoder::new()
         .with_c2pa(&store)
@@ -333,16 +335,142 @@ fn the_first_store_wins_and_a_second_is_counted_not_merged() {
     ]);
     let meta = gamut_png::metadata(&png).expect("metadata");
     assert_eq!(meta.c2pa.as_deref(), Some(&b"first"[..]));
-    assert_eq!(meta.c2pa_duplicates, 1);
+    assert_eq!(meta.c2pa_ignored, 1);
     let decoded = PngDecoder::new().decode(&png).expect("decode");
     assert_eq!(decoded.c2pa.as_deref(), Some(&b"first"[..]));
-    assert_eq!(decoded.c2pa_duplicates, 1);
+    assert_eq!(decoded.c2pa_ignored, 1);
 
     let report = deconstruct(&png).expect("deconstruct");
     let span = report.c2pa().expect("span");
     assert_eq!(span.chunk, 33..50, "the first chunk, 5 + 12 bytes");
     assert_eq!(&png[span.payload], b"first");
     assert_eq!(report.chunk(b"caBX").expect("stats").count, 2);
+}
+
+/// A `caBX` positioned **after** `IDAT` is never the store: §A.3.2 puts the store before `IDAT`
+/// and calls data after it bad-form, so accepting one would let anybody append a store to a
+/// finished file and have it read back as that file's provenance. It is ignored as the store but
+/// not hidden — the decode counts it, and the byte accounting still shows the chunk.
+#[test]
+fn a_cabx_after_idat_is_never_the_store_but_is_still_visible() {
+    let appended = png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(3, 2, 8, 2, 0)),
+        chunk(b"IDAT", &zlib(&[0u8; 20])),
+        chunk(b"caBX", b"appended store"),
+        chunk(b"IEND", &[]),
+    ]);
+    let meta = gamut_png::metadata(&appended).expect("metadata");
+    assert_eq!(meta.c2pa, None, "an appended chunk is not the file's store");
+    assert_eq!(meta.c2pa_ignored, 1, "but it is counted, not hidden");
+    let decoded = PngDecoder::new().decode(&appended).expect("decode");
+    assert_eq!(decoded.c2pa, None);
+    assert_eq!(decoded.c2pa_ignored, 1);
+
+    // The byte accounting still sees the chunk; it just does not call it the store.
+    let report = deconstruct(&appended).expect("deconstruct");
+    assert_eq!(report.c2pa(), None, "no store span for an appended chunk");
+    assert_eq!(report.chunk(b"caBX").expect("stats").count, 1);
+
+    // A real store before IDAT is unaffected by a second one appended after it: the first wins
+    // and the appended one is counted, so the two rules compose.
+    let both = png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(3, 2, 8, 2, 0)),
+        chunk(b"caBX", b"real store"),
+        chunk(b"IDAT", &zlib(&[0u8; 20])),
+        chunk(b"caBX", b"appended"),
+        chunk(b"IEND", &[]),
+    ]);
+    let meta = gamut_png::metadata(&both).expect("metadata");
+    assert_eq!(meta.c2pa.as_deref(), Some(&b"real store"[..]));
+    assert_eq!(meta.c2pa_ignored, 1);
+    let span = deconstruct(&both).expect("deconstruct").c2pa().expect("span");
+    assert_eq!(&both[span.payload], b"real store");
+}
+
+/// The two ignore-reasons add up rather than replacing one another: a duplicate before `IDAT`
+/// and two chunks after it are three ignored chunks, counted the same way by both entry points.
+#[test]
+fn ignored_stores_before_and_after_idat_are_counted_together() {
+    let png = png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(3, 2, 8, 2, 0)),
+        chunk(b"caBX", b"the store"),
+        chunk(b"caBX", b"duplicate"),
+        chunk(b"IDAT", &zlib(&[0u8; 20])),
+        chunk(b"caBX", b"appended one"),
+        chunk(b"caBX", b"appended two"),
+        chunk(b"IEND", &[]),
+    ]);
+    let meta = gamut_png::metadata(&png).expect("metadata");
+    assert_eq!(meta.c2pa.as_deref(), Some(&b"the store"[..]));
+    assert_eq!(meta.c2pa_ignored, 3, "one duplicate plus two appended");
+    let decoded = PngDecoder::new().decode(&png).expect("decode");
+    assert_eq!(decoded.c2pa_ignored, 3, "decode agrees with metadata");
+}
+
+/// The reserve-then-fill flow end to end, the way a signer runs it: reserve, take the span,
+/// fill in place, read the store back. The filled file is byte-identical to one encoded with
+/// the store set from the start, which is what makes the two routes interchangeable — and the
+/// signer's hash, taken over the reserved file with the span excluded, still describes it.
+#[test]
+fn a_reserved_store_is_filled_in_place_to_the_same_bytes_as_a_second_encode() {
+    let (pixels, dims) = rgb_source();
+    let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
+    let finished = store(64);
+
+    let (mut reserved, report) = everything_else()
+        .with_c2pa_reserved(64)
+        .encode_with_report(image)
+        .expect("encode");
+    let span = report.c2pa.expect("span");
+    let outside_before: Vec<u8> = (0..reserved.len())
+        .filter(|i| !span.chunk.contains(i))
+        .map(|i| reserved[i])
+        .collect();
+
+    fill_c2pa(&mut reserved, &span, &finished).expect("fill");
+
+    let reencoded = everything_else()
+        .with_c2pa(&finished)
+        .encode_to_vec(image)
+        .expect("encode");
+    assert_eq!(reserved, reencoded, "filling in place lands on the encoder's own bytes");
+
+    let outside_after: Vec<u8> = (0..reserved.len())
+        .filter(|i| !span.chunk.contains(i))
+        .map(|i| reserved[i])
+        .collect();
+    assert_eq!(outside_before, outside_after, "no byte outside the span moved");
+
+    // The filled store reads back through the ordinary decode path, so its CRC is right.
+    assert_eq!(
+        gamut_png::metadata(&reserved).expect("metadata").c2pa,
+        Some(finished)
+    );
+    let typed: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&reserved).expect("decode");
+    assert_eq!(typed.as_samples(), pixels, "the pixels are untouched");
+}
+
+/// The indexed route (`encode_indexed8` has no report of its own): take the span from the byte
+/// accounting, fill in place, read it back.
+#[test]
+fn an_indexed_encode_reserves_and_fills_through_the_report() {
+    let palette = PngPalette::new(&[[1, 2, 3], [4, 5, 6]]).expect("palette");
+    let indices = [0u8, 1, 1, 0, 1, 0];
+    let image =
+        ImageRef::<Indexed8>::new(&indices, Dimensions::new(3, 2).expect("valid")).expect("image");
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .with_c2pa_reserved(24)
+        .encode_indexed8(image, &palette, &mut png)
+        .expect("encode");
+
+    let span = deconstruct(&png).expect("deconstruct").c2pa().expect("span");
+    let finished = store(24);
+    fill_c2pa(&mut png, &span, &finished).expect("fill");
+    assert_eq!(
+        gamut_png::metadata(&png).expect("metadata").c2pa,
+        Some(finished)
+    );
 }
 
 /// A `caBX` whose CRC does not match is skipped on decode (§13.1) — it is not the store and
@@ -363,7 +491,7 @@ fn a_cabx_with_a_bad_crc_is_neither_the_store_nor_the_exclusion_span() {
     ]);
     let meta = gamut_png::metadata(&png).expect("metadata");
     assert_eq!(meta.c2pa.as_deref(), Some(&b"valid"[..]));
-    assert_eq!(meta.c2pa_duplicates, 0);
+    assert_eq!(meta.c2pa_ignored, 0);
 
     let report = deconstruct(&png).expect("deconstruct");
     let span = report.c2pa().expect("the valid store");

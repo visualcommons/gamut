@@ -103,7 +103,7 @@ fn metadata_agrees_with_decode_field_for_field() {
     assert_eq!(meta.icc_profile, decoded.icc_profile);
     assert_eq!(meta.xmp, decoded.xmp);
     assert_eq!(meta.c2pa, decoded.c2pa);
-    assert_eq!(meta.c2pa_duplicates, decoded.c2pa_duplicates);
+    assert_eq!(meta.c2pa_ignored, decoded.c2pa_ignored);
     assert_eq!(meta.texts, decoded.texts);
     assert_eq!(meta.gamma, decoded.gamma);
     assert_eq!(meta.chromaticities, decoded.chromaticities);
