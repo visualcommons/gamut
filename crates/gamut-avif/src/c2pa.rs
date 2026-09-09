@@ -76,14 +76,25 @@ const MERKLE_OFFSET_LEN: usize = 8;
 /// | `original` | the previous store of a file mid-update, unchanged apart from this label | "identical apart from value of `box_purpose`" to `manifest` |
 /// | `update` | a store holding update manifests only, the last box of the file | not stated — see below |
 ///
-/// **`update` framing is assumed, not read from the specification.** §A.5.3 constrains only an
-/// `update` store's *contents* ("shall only contain update manifests") and says nothing about the
-/// bytes ahead of it. This crate applies the same 8-byte merkle-offset prefix to all three
-/// purposes — the layout the reference implementation writes — rather than probing, because the
-/// slot this locator reports is bounded by the box, not by the store's own length (see
-/// [`C2paSlot`]), so there is no in-band signal to probe with. An `update` box written
-/// without the prefix would be reported 8 bytes short at its front. Recorded in the crate's
-/// `STATUS.md`.
+/// # `update`: the specification does not say, so the offset is probed for
+///
+/// §A.5.3 states the merkle offset for `manifest` and `original`. For `update` it constrains only
+/// the store's *contents* ("shall only contain update manifests") and says nothing about the bytes
+/// ahead of it. The reference implementation writes the 8-byte offset there too, so files in
+/// circulation carry it, but the silence is a gap rather than a prohibition.
+///
+/// So `update` is **probed**, over the same two candidate offsets `gamut-heic`'s locator uses
+/// (`[8, 0]`, [`store_prefix_candidates`](Self::store_prefix_candidates)): offset 8 first, falling
+/// back to 0. `manifest` and `original` are not probed — the specification states their framing,
+/// so a single offset is used.
+///
+/// **How strong the probe is here.** `gamut-heic` discriminates on JUMBF `LBox` validity;
+/// a box-bounded slot ([`C2paSlot`]) has no such field to read, so the only in-band signal is
+/// whether `data` is long enough for the prefix at all. The fallback therefore fires exactly when
+/// an `update` box's `data` is shorter than 8 bytes — which without it would be dropped as absent,
+/// the one case where the two crates disagreed about identical bytes. A *longer* prefix-less
+/// `update` store is still reported 8 bytes short at its front; detecting that needs the `LBox`
+/// check, which is #505's to unify. No known writer emits either shape.
 ///
 /// A fourth purpose, `merkle`, names an *auxiliary* box holding Merkle-tree hashes (§A.5.4), not a
 /// manifest store; a `merkle` box, like any unrecognised purpose, is not reported.
@@ -119,6 +130,16 @@ impl C2paBoxPurpose {
         [Self::Manifest, Self::Original, Self::Update]
             .into_iter()
             .find(|purpose| purpose.as_str().as_bytes() == bytes)
+    }
+
+    /// The offsets into `data`, in probe order, at which this purpose's store slot may begin: one
+    /// candidate where §A.5.3 states the framing, two where it is silent (see the
+    /// [type docs](Self)). The same list `gamut-heic`'s locator probes.
+    const fn store_prefix_candidates(self) -> &'static [usize] {
+        match self {
+            Self::Manifest | Self::Original => &[MERKLE_OFFSET_LEN],
+            Self::Update => &[MERKLE_OFFSET_LEN, 0],
+        }
     }
 }
 
@@ -230,7 +251,9 @@ pub(crate) fn manifest_stores<'a, 's>(
 /// manifest-store slot it carries, or `None` if it does not carry one.
 ///
 /// The body is walked in the §A.5.1.2 order: user type, version/flags, `box_purpose` to its NUL,
-/// then `data`, whose first 8 bytes are the merkle offset (§A.5.3) and whose remainder is the slot.
+/// then `data`, whose first 8 bytes are the merkle offset (§A.5.3) and whose remainder is the
+/// slot. Where the slot begins is one stated offset for `manifest`/`original` and two probed in
+/// order for `update` — see [`C2paBoxPurpose`].
 fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paSlot<'_>> {
     let (user_type, rest) = body.split_at_checked(C2PA_UUID.len())?;
     if user_type != C2PA_UUID {
@@ -243,13 +266,17 @@ fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paSl
     let terminator = rest.iter().position(|&b| b == 0)?;
     let purpose = C2paBoxPurpose::from_bytes(&rest[..terminator])?;
     let data = &rest[terminator + 1..];
-    let slot = data.get(MERKLE_OFFSET_LEN..)?;
-    let start = body_start + (body.len() - slot.len());
-    Some(C2paSlot {
-        slot_bytes: slot,
-        range: start..start + slot.len(),
-        purpose,
-    })
+    for &prefix in purpose.store_prefix_candidates() {
+        if let Some(slot) = data.get(prefix..) {
+            let start = body_start + (body.len() - slot.len());
+            return Some(C2paSlot {
+                slot_bytes: slot,
+                range: start..start + slot.len(),
+                purpose,
+            });
+        }
+    }
+    None
 }
 
 /// The payload of a `ContentProvenanceBox` after its user type — what
@@ -348,6 +375,37 @@ mod tests {
         assert_eq!(purpose(b"Manifest"), None);
         assert_eq!(purpose(b"manifes"), None);
         assert_eq!(purpose(b""), None);
+    }
+
+    #[test]
+    fn an_update_store_is_probed_at_both_offsets_and_the_stated_purposes_are_not() {
+        // §A.5.3 states the merkle offset for `manifest`/`original` and is silent for `update`, so
+        // only `update` falls back to offset 0 — and the fallback is reachable exactly when `data`
+        // is shorter than the 8-byte prefix, which is the case that was dropped as absent before.
+        let short = [1u8, 2, 3];
+        let short_body = body(C2PA_UUID, [0; 4], b"update", &short);
+        let update = parse_content_provenance_box(&short_body, 0)
+            .expect("a prefix-less update store is located, not dropped");
+        assert_eq!(update.slot_bytes, &short);
+        assert_eq!(update.purpose, C2paBoxPurpose::Update);
+        // 16 (user type) + 4 (version/flags) + 7 (`update\0`) + 0 (no prefix).
+        assert_eq!(update.range, 27..30);
+
+        // The stated purposes have one candidate, so the same too-short data is not a store.
+        for purpose in [b"manifest".as_slice(), b"original".as_slice()] {
+            assert_eq!(
+                parse_content_provenance_box(&body(C2PA_UUID, [0; 4], purpose, &short), 0),
+                None,
+                "{}: no fallback where §A.5.3 states the framing",
+                str::from_utf8(purpose).expect("ascii"),
+            );
+        }
+
+        // With room for the prefix, offset 8 wins for `update` too — the fallback never displaces
+        // the stated layout, so a normal update store keeps the reference implementation's framing.
+        let long_body = body(C2PA_UUID, [0; 4], b"update", &data(0, &[9, 9]));
+        let update = parse_content_provenance_box(&long_body, 0).expect("a normal update store");
+        assert_eq!(update.slot_bytes, &[9, 9]);
     }
 
     #[test]
