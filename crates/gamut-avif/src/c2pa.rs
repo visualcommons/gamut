@@ -38,7 +38,7 @@
 //!
 //! # The range is not an exclusion range
 //!
-//! Every byte range this module reports — [`C2paManifestStore::range`] on read,
+//! Every byte range this module reports — [`C2paSlot::range`] on read,
 //! [`AvifEncodeReport::c2pa`](crate::AvifEncodeReport::c2pa) on write — is for patching,
 //! extraction and byte accounting. A BMFF asset's hard binding is `c2pa.hash.bmff.v3`, which
 //! excludes content by **box path**, not by byte offset (§18.6, §A.5.6). Hashing "everything but
@@ -81,7 +81,7 @@ const MERKLE_OFFSET_LEN: usize = 8;
 /// bytes ahead of it. This crate applies the same 8-byte merkle-offset prefix to all three
 /// purposes — the layout the reference implementation writes — rather than probing, because the
 /// slot this locator reports is bounded by the box, not by the store's own length (see
-/// [`C2paManifestStore`]), so there is no in-band signal to probe with. An `update` box written
+/// [`C2paSlot`]), so there is no in-band signal to probe with. An `update` box written
 /// without the prefix would be reported 8 bytes short at its front. Recorded in the crate's
 /// `STATUS.md`.
 ///
@@ -122,24 +122,31 @@ impl C2paBoxPurpose {
     }
 }
 
-/// A C2PA manifest-store slot located in an AVIF file: its bytes, its exact byte range in the
-/// file, and the `box_purpose` of the `uuid` box that carries it.
+/// The C2PA manifest-store **slot** located in an AVIF file: the slot's bytes, its exact byte
+/// range in the file, and the `box_purpose` of the `uuid` box that carries it.
 ///
-/// # What bounds the slot
+/// # A slot, not a trimmed store — and why the name says so
 ///
-/// The enclosing `uuid` box. `bytes` runs from just after the 8-byte merkle offset to the end of
-/// the box, so it is the manifest store **plus any unused padding** §A.5.3 permits after it. A
-/// box the encoder reserved with
-/// [`AvifEncoder::with_c2pa_reserved`](crate::AvifEncoder::with_c2pa_reserved) that no signer has
-/// yet filled is reported with all-zero `bytes`: the slot exists, and whether it holds a store is
-/// a validator's question, not this locator's.
+/// [`slot_bytes`](Self::slot_bytes) is **box-bounded**: it runs from just after the 8-byte merkle
+/// offset to the end of the enclosing `uuid` box. For a filled box that is the manifest store
+/// **plus any unused padding** §A.5.3 permits after it; for a box
+/// [`AvifEncoder::with_c2pa_reserved`](crate::AvifEncoder::with_c2pa_reserved) reserved and no
+/// signer has filled, it is all zeros. Whether the slot holds a valid store is a validator's
+/// question, not this locator's.
 ///
-/// This crate does not trim the slot to the store's own outer length — the JUMBF `LBox` — which is
-/// how `gamut-heic`'s locator bounds a HEIF store. That trim reads a field whose grammar belongs to
-/// ISO/IEC 19566-5, and doing it here would give two crates two copies of the one C2PA lens gamut
-/// has; sharing that lens through `gamut-isobmff` is filed separately (see the crate's
-/// `STATUS.md`). Until then, `bytes` is the slot and a consumer that wants the store alone reads
-/// the store's own length off its front.
+/// [`gamut_heic::C2paManifestStore`] reports something different under a similar name: it trims to
+/// the store's own outer JUMBF `LBox`, so for one file the two crates can report different lengths
+/// — a filled store without its padding there, the whole slot here. This type is therefore named
+/// for the slot rather than for the store, so the two claims cannot be confused when both are
+/// re-exported from the `gamut` umbrella.
+///
+/// The bound is not an oversight. An `LBox` trim cannot locate a *reservation*: an all-zero slot
+/// has no `LBox`, so trimming would report it as absent and the reserve → report → patch flow
+/// this crate exists to support would have nothing to patch. Unifying the two lenses — and
+/// deciding the bound once for both crates — is issue #505; until then a consumer that wants the
+/// store alone reads its length off the front of `slot_bytes`.
+///
+/// [`gamut_heic::C2paManifestStore`]: https://docs.rs/gamut-heic
 ///
 /// # The range is observability, not an exclusion range
 ///
@@ -152,12 +159,13 @@ impl C2paBoxPurpose {
 /// change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct C2paManifestStore<'a> {
-    /// The slot: every byte of the box's `data` after the 8-byte merkle offset — the store, then
-    /// any padding. Opaque; nothing inside it is parsed.
-    pub bytes: &'a [u8],
-    /// The half-open byte range [`bytes`](Self::bytes) occupies within the file, so
-    /// `range.len() == bytes.len()`.
+pub struct C2paSlot<'a> {
+    /// The slot: every byte of the box's `data` after the merkle offset — the store, then any
+    /// padding — or all zeros for an unfilled reservation. Opaque; nothing inside it is parsed,
+    /// and it is **not** trimmed to the store's own JUMBF `LBox` (see the [type docs](Self)).
+    pub slot_bytes: &'a [u8],
+    /// The half-open byte range [`slot_bytes`](Self::slot_bytes) occupies within the file, so
+    /// `range.len() == slot_bytes.len()`.
     pub range: Range<usize>,
     /// The `box_purpose` of the `uuid` box that carries this slot.
     pub purpose: C2paBoxPurpose,
@@ -172,10 +180,10 @@ impl<'a> AvifContainer<'a> {
     /// container reader's. This accessor therefore promises only "the first one"; use
     /// [`c2pa_manifest_stores`](Self::c2pa_manifest_stores) to see them all with their purposes.
     ///
-    /// See [`C2paManifestStore`] for exactly what is stripped, what bounds the slot, and why the
+    /// See [`C2paSlot`] for exactly what is stripped, what bounds the slot, and why the
     /// reported range must not be treated as a BMFF exclusion range.
     #[must_use]
-    pub fn c2pa(&self) -> Option<C2paManifestStore<'a>> {
+    pub fn c2pa(&self) -> Option<C2paSlot<'a>> {
         self.c2pa_manifest_stores().next()
     }
 
@@ -195,7 +203,7 @@ impl<'a> AvifContainer<'a> {
     /// flags are non-zero, whose `box_purpose` is not one of [`C2paBoxPurpose`]'s, or whose body is
     /// too short to hold the framing is skipped silently: this is a lens over bytes that happen to
     /// be present, so a malformed or foreign box yields nothing rather than an error.
-    pub fn c2pa_manifest_stores(&self) -> impl Iterator<Item = C2paManifestStore<'a>> + '_ {
+    pub fn c2pa_manifest_stores(&self) -> impl Iterator<Item = C2paSlot<'a>> + '_ {
         manifest_stores(self.segments())
     }
 }
@@ -206,7 +214,7 @@ impl<'a> AvifContainer<'a> {
 /// reports is the range the reader finds.
 pub(crate) fn manifest_stores<'a, 's>(
     segments: &'s [Segment<'a>],
-) -> impl Iterator<Item = C2paManifestStore<'a>> + 's {
+) -> impl Iterator<Item = C2paSlot<'a>> + 's {
     segments.iter().filter_map(|segment| match segment.kind {
         SegmentKind::Box { ty, body } if &ty == b"uuid" => {
             // `range` spans the header and the body, so `range.end - body.len()` is the absolute
@@ -223,7 +231,7 @@ pub(crate) fn manifest_stores<'a, 's>(
 ///
 /// The body is walked in the §A.5.1.2 order: user type, version/flags, `box_purpose` to its NUL,
 /// then `data`, whose first 8 bytes are the merkle offset (§A.5.3) and whose remainder is the slot.
-fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paManifestStore<'_>> {
+fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paSlot<'_>> {
     let (user_type, rest) = body.split_at_checked(C2PA_UUID.len())?;
     if user_type != C2PA_UUID {
         return None;
@@ -237,8 +245,8 @@ fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paMa
     let data = &rest[terminator + 1..];
     let slot = data.get(MERKLE_OFFSET_LEN..)?;
     let start = body_start + (body.len() - slot.len());
-    Some(C2paManifestStore {
-        bytes: slot,
+    Some(C2paSlot {
+        slot_bytes: slot,
         range: start..start + slot.len(),
         purpose,
     })
@@ -319,11 +327,11 @@ mod tests {
         let slot = [0x11, 0x22, 0x33, 0x44, 0x55];
         let b = body(C2PA_UUID, [0; 4], b"manifest", &data(0x0102_0304, &slot));
         let store = parse_content_provenance_box(&b, 1000).expect("a manifest box");
-        assert_eq!(store.bytes, &slot);
+        assert_eq!(store.slot_bytes, &slot);
         assert_eq!(store.purpose, C2paBoxPurpose::Manifest);
         // body_start + 16 (user type) + 4 (version/flags) + 9 (`manifest\0`) + 8 (merkle offset).
         assert_eq!(store.range, 1037..1042);
-        assert_eq!(store.range.len(), store.bytes.len());
+        assert_eq!(store.range.len(), store.slot_bytes.len());
     }
 
     #[test]
@@ -382,7 +390,7 @@ mod tests {
             );
         }
         let empty = parse_content_provenance_box(&full, 500).expect("empty slot");
-        assert_eq!(empty.bytes, &[] as &[u8]);
+        assert_eq!(empty.slot_bytes, &[] as &[u8]);
         assert_eq!(empty.range, 537..537);
     }
 
@@ -436,11 +444,11 @@ mod tests {
         let stores: Vec<_> = manifest_stores(&segments).collect();
         assert_eq!(stores.len(), 2);
         assert_eq!(stores[0].purpose, C2paBoxPurpose::Original);
-        assert_eq!(stores[0].bytes, &[7, 7]);
+        assert_eq!(stores[0].slot_bytes, &[7, 7]);
         // 20 + 8 (box header) + 16 + 4 + 9 (`original\0`) + 8.
         assert_eq!(stores[0].range, 65..67);
         assert_eq!(stores[1].purpose, C2paBoxPurpose::Update);
-        assert_eq!(stores[1].bytes, &[8, 8, 8]);
+        assert_eq!(stores[1].slot_bytes, &[8, 8, 8]);
         // 300 + 8 + 16 + 4 + 7 (`update\0`) + 8.
         assert_eq!(stores[1].range, 343..346);
     }
@@ -454,7 +462,7 @@ mod tests {
         let mut b = C2PA_UUID.to_vec();
         b.extend_from_slice(&content_provenance_payload(C2paBoxPurpose::Manifest, &slot));
         let store = parse_content_provenance_box(&b, 0).expect("parses");
-        assert_eq!(store.bytes, &slot);
+        assert_eq!(store.slot_bytes, &slot);
         assert_eq!(store.purpose, C2paBoxPurpose::Manifest);
         assert_eq!(store.range, b.len() - slot.len()..b.len());
     }

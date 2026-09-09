@@ -131,7 +131,7 @@
 //! range ([`AvifEncodeReport::c2pa`]), which an external signer patches in place; nothing after
 //! the slot moves. [`AvifEncoder::with_c2pa`] writes a store already computed over this exact
 //! output. On read, [`AvifContainer::c2pa`] / [`AvifContainer::c2pa_manifest_stores`] report each
-//! located [`C2paManifestStore`] — slot bytes, file range and [`C2paBoxPurpose`]. The store is
+//! located [`C2paSlot`] — slot bytes, file range and [`C2paBoxPurpose`]. The store is
 //! opaque throughout: nothing here validates it, and the range is for patching and byte
 //! accounting, not a hash exclusion range (BMFF assets bind by box path, §18.6).
 //!
@@ -180,7 +180,7 @@ mod transform;
 
 pub use av1c::{Av1Config, ChromaFormat};
 pub use backend::{AV1_CODEC_ID, AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder};
-pub use c2pa::{C2PA_UUID, C2paBoxPurpose, C2paManifestStore};
+pub use c2pa::{C2PA_UUID, C2paBoxPurpose, C2paSlot};
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodedFrame};

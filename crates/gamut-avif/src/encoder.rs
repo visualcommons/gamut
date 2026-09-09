@@ -26,7 +26,7 @@ use crate::transform::{Mirror, Rotation};
 
 /// What the encoder writes into the store slot of the C2PA `uuid` box it emits.
 #[derive(Clone, PartialEq, Eq)]
-enum C2paSlot {
+enum SlotSource {
     /// A slot of this many zero bytes, for an external signer to fill after encoding.
     Reserved(usize),
     /// A manifest store the caller has already computed over this exact output.
@@ -35,7 +35,7 @@ enum C2paSlot {
 
 /// Prints the slot by kind and length, never the store bytes (opaque binary that would swamp the
 /// output).
-impl std::fmt::Debug for C2paSlot {
+impl std::fmt::Debug for SlotSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Reserved(len) => write!(f, "Reserved({len})"),
@@ -60,7 +60,7 @@ pub struct AvifEncodeReport {
     /// moves when it is overwritten with a payload of the same length, so the offset reported here
     /// is the offset the signer patches at. It is **not** a hash exclusion range — a BMFF asset's
     /// hard binding excludes by box path, not byte offset (C2PA 2.4 §18.6, §A.5.6); see
-    /// [`C2paManifestStore`](crate::C2paManifestStore).
+    /// [`C2paSlot`](crate::C2paSlot).
     pub c2pa: Option<Range<usize>>,
 }
 
@@ -115,7 +115,7 @@ pub struct AvifEncoder {
     xmp: Option<Vec<u8>>,
     /// The C2PA manifest-store slot — reserved zeros or a caller-computed store — written into a
     /// top-level `uuid` `ContentProvenanceBox` after `ftyp`.
-    c2pa: Option<C2paSlot>,
+    c2pa: Option<SlotSource>,
     /// Whether the colour values are premultiplied by alpha, emitted as a `prem` item reference.
     /// Meaningless without an alpha channel, so it reaches the file only for an RGBA encode.
     premultiplied: bool,
@@ -492,7 +492,7 @@ impl AvifEncoder {
     /// **last** call.
     #[must_use]
     pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
-        self.c2pa = Some(C2paSlot::Reserved(len));
+        self.c2pa = Some(SlotSource::Reserved(len));
         self
     }
 
@@ -509,7 +509,7 @@ impl AvifEncoder {
     /// checked. Calling this, or `with_c2pa_reserved`, twice keeps the **last** call.
     #[must_use]
     pub fn with_c2pa(mut self, store: &[u8]) -> Self {
-        self.c2pa = Some(C2paSlot::Store(store.to_vec()));
+        self.c2pa = Some(SlotSource::Store(store.to_vec()));
         self
     }
 
@@ -734,10 +734,10 @@ impl AvifEncoder {
         // §A.5.3) — and the slot is zeros or the caller's store behind the §A.5.1 framing.
         if let Some(slot) = &self.c2pa {
             let payload = match slot {
-                C2paSlot::Reserved(len) => {
+                SlotSource::Reserved(len) => {
                     content_provenance_payload(C2paBoxPurpose::Manifest, &vec![0u8; *len])
                 }
-                C2paSlot::Store(store) => {
+                SlotSource::Store(store) => {
                     content_provenance_payload(C2paBoxPurpose::Manifest, store)
                 }
             };
@@ -1779,14 +1779,14 @@ mod tests {
                 .with_c2pa(&store)
                 .with_c2pa_reserved(16)
                 .c2pa,
-            Some(C2paSlot::Reserved(16))
+            Some(SlotSource::Reserved(16))
         );
         assert_eq!(
             AvifEncoder::new()
                 .with_c2pa_reserved(16)
                 .with_c2pa(&store)
                 .c2pa,
-            Some(C2paSlot::Store(store))
+            Some(SlotSource::Store(store))
         );
     }
 

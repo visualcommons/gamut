@@ -174,9 +174,13 @@ fn the_crate_locates_the_slot_it_reserved_at_the_reported_range() {
         report.c2pa,
         "reader and writer agree"
     );
-    assert_eq!(store.bytes, &[0u8; 128][..], "an unfilled slot is zeros");
+    assert_eq!(
+        store.slot_bytes,
+        &[0u8; 128][..],
+        "an unfilled slot is zeros"
+    );
     assert_eq!(store.purpose, C2paBoxPurpose::Manifest);
-    assert_eq!(&bytes[store.range], store.bytes);
+    assert_eq!(&bytes[store.range], store.slot_bytes);
     assert_eq!(container.c2pa_manifest_stores().count(), 1);
 
     // A file with no box locates nothing.
@@ -228,10 +232,10 @@ fn a_file_mid_update_reports_its_original_and_update_stores_in_file_order() {
     let stores: Vec<_> = container.c2pa_manifest_stores().collect();
     assert_eq!(stores.len(), 2);
     assert_eq!(stores[0].purpose, C2paBoxPurpose::Original);
-    assert_eq!(stores[0].bytes, &original[..]);
+    assert_eq!(stores[0].slot_bytes, &original[..]);
     assert_eq!(&bytes[stores[0].range.clone()], &original[..]);
     assert_eq!(stores[1].purpose, C2paBoxPurpose::Update);
-    assert_eq!(stores[1].bytes, &update[..]);
+    assert_eq!(stores[1].slot_bytes, &update[..]);
     assert_eq!(&bytes[stores[1].range.clone()], &update[..]);
     // The update box is the file's last box, so its slot runs to end of file.
     assert_eq!(stores[1].range.end, bytes.len());
