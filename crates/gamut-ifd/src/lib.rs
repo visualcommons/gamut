@@ -14,7 +14,9 @@
 //! §2). [`read`] / [`read_header`] parse a stream into a [`TiffFile`]; [`write()`] serialises one
 //! back, laying out the IFD chain and out-of-line value pool with the two-pass offset machinery.
 //! [`read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
-//! well-known structural ones live in [`tags`]). For strict archival decoding, [`audit`]
+//! well-known structural ones live in [`tags`]). The one cross-format payload a TIFF-based file
+//! carries by tag — the C2PA manifest store — has its placement rule and exclusion ranges stated
+//! once, in [`c2pa`], for every TIFF-based codec to share. For strict archival decoding, [`audit`]
 //! classifies **every byte** of a stream into typed segments ([`SegmentReport`]) under a
 //! dual-ledger cross-check: a [`Tracked`] source records what the parse physically read, and
 //! the claims must match — byte accounting as a machine-checked proof, not a promise
@@ -71,6 +73,7 @@
 
 mod audit;
 mod byte_order;
+pub mod c2pa;
 mod entry;
 // Executable laws over this crate's own types, shared by the property tests and the fuzz tier
 // (`docs/testing.md`). Always available to the crate's own tests; `test-support` exposes it to an

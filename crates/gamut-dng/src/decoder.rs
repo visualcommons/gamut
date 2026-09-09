@@ -8,6 +8,7 @@
 use std::cell::RefCell;
 
 use gamut_core::{Dimensions, Error, Result};
+use gamut_ifd::c2pa::{self, C2paExclusions};
 use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_ifd_at};
 use gamut_metadata::exif::Exif;
 
@@ -28,9 +29,17 @@ use crate::{bitpack, compression, lossless_jpeg, tags};
 
 /// One IFD entry preserved verbatim: the tag number and its fully typed [`Value`].
 ///
-/// This is how the decoder represents every field it does not model — private maker tags,
-/// DNG features without a typed surface yet — so nothing in the file is silently dropped
-/// (issue #109's decode contract). The value is `gamut-ifd`'s typed enum, not opaque bytes.
+/// This is how the decoder represents a field it does not model — private maker tags, DNG
+/// features without a typed surface yet — so such fields are not silently dropped (issue #109's
+/// decode contract). The value is `gamut-ifd`'s typed enum, not opaque bytes.
+///
+/// The contract holds over four channels — [`DecodedDng::ifd0_extra`],
+/// [`DecodedDng::raw_extra`], [`SubImage::extra_tags`] and [`DecodedDng::trailing_extra`] — with
+/// two residues those channels do not reach, both documented on
+/// [`trailing_extra`](DecodedDng::trailing_extra): a **duplicated tag** keeps only the last
+/// entry, because the eager [`Ifd`] this is built from is last-wins, and an **interior**
+/// main-chain page carrying no image data reaches no channel at all (issue #525).
+/// [`deconstruct`](crate::deconstruct) still accounts for the bytes in both cases.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawTag {
     /// The TIFF/DNG tag number.
@@ -168,12 +177,51 @@ pub struct DecodedDng {
     /// against [`RawImage::new_raw_image_digest`] to verify raw-data integrity.
     pub new_raw_image_digest: Option<[u8; 16]>,
     /// Every IFD 0 field the pipeline does not model, verbatim — proprietary maker tags
-    /// included — in tag order. Nothing in the file is silently dropped; `deconstruct` remains
-    /// the byte-accounting *diagnostic* view of the same principle.
+    /// included — in tag order.
+    ///
+    /// This is one of four verbatim channels that together carry the unmodelled fields of every
+    /// directory the decode surfaces: this one, [`raw_extra`](Self::raw_extra),
+    /// [`SubImage::extra_tags`] per image directory, and
+    /// [`trailing_extra`](Self::trailing_extra) for the last main-chain directory when it is
+    /// none of those. Nothing those four reach is silently dropped; `deconstruct` remains the
+    /// byte-accounting *diagnostic* view of the same principle, and is what shows the one
+    /// residue they do not reach (an interior main-chain page carrying no image — see
+    /// [`trailing_extra`](Self::trailing_extra) and `STATUS.md`).
     pub ifd0_extra: Vec<RawTag>,
     /// Every unmodelled field of the raw IFD, verbatim. Empty when the raw image lives in IFD 0
     /// itself (its extras are then in [`ifd0_extra`](Self::ifd0_extra)).
     pub raw_extra: Vec<RawTag>,
+    /// Every field of the **last directory of the main IFD chain**, verbatim, when that
+    /// directory is not surfaced anywhere else — i.e. when it is not IFD 0, not the raw IFD and
+    /// carries no image of its own, so it becomes no [`SubImage`].
+    ///
+    /// C2PA 2.4 §A.3.6 is what makes such a directory ordinary rather than exotic: it permits a
+    /// manifest store to be "the only entity within a new IFD following the existing one", and a
+    /// directory holding just that entry has no pixels to make it a sub-image. Whatever it
+    /// carries reaches the caller here — including a tag-52545 field this decoder declined to
+    /// read as a store (wrong type, too short, or duplicated).
+    ///
+    /// Empty for every file this crate writes, which puts the entry in IFD 0.
+    ///
+    /// # The two residues of the "nothing is dropped" contract
+    ///
+    /// - **A duplicated tag keeps the last entry.** Every typed channel is built on the eager
+    ///   [`Ifd`], which is last-wins, so where a directory carries two entries under one tag
+    ///   only the second's value arrives. Such a file is malformed for a manifest store
+    ///   (§A.3.6 allows one per asset).
+    /// - **An interior main-chain page is not covered.** A directory that is neither the first
+    ///   nor the last of the chain, carries no image data, and is thus also no sub-image reaches
+    ///   no channel at all — issue #525. That gap predates this field and is not what §A.3.6
+    ///   creates.
+    ///
+    /// [`deconstruct`](crate::deconstruct) accounts for the bytes in both cases.
+    pub trailing_extra: Vec<RawTag>,
+    /// Where the C2PA manifest store in [`metadata.c2pa`](DngMetadata::c2pa) sits in the file:
+    /// the two ranges a `c2pa.hash.data` binding excludes (C2PA 2.4 §18.5.5), located by
+    /// [`gamut_ifd::c2pa::locate`] in the last IFD of the main chain (§A.3.6). `Some` exactly
+    /// when the store is; a `C2PA` tag of a type other than `UNDEFINED` is not a store and stays
+    /// in [`ifd0_extra`](Self::ifd0_extra).
+    pub c2pa_exclusions: Option<C2paExclusions>,
 }
 
 /// The verdict of [`DngDecoder::verify_new_raw_image_digest`].
@@ -229,7 +277,7 @@ impl DngDecoder {
     /// lossless storage only — whatever decoding the raw image reports.
     pub fn verify_new_raw_image_digest(&self, data: &[u8]) -> Result<DigestCheck> {
         let file = read(data)?;
-        let ifds = walk_ifds(&file, data);
+        let (ifds, _) = walk_ifds(&file, data);
         let raw_index = select_raw_ifd(&ifds)?;
         let tracked: Vec<TrackedIfd> = ifds.iter().map(TrackedIfd::new).collect();
         let Some(stored) = bytes_value(tracked[0].get(tags::NEW_RAW_IMAGE_DIGEST))
@@ -276,7 +324,7 @@ impl DngDecoder {
         let order = file.order;
         let variant = file.variant;
 
-        let ifds = walk_ifds(&file, data);
+        let (ifds, last_main) = walk_ifds(&file, data);
         let raw_index = select_raw_ifd(&ifds)?;
         // One consumption tracker per IFD; `walk_ifds` pushes IFD 0 first, so index 0 is IFD 0
         // (and `raw_index == 0` means the raw image lives in IFD 0 itself). Tags the walk/select
@@ -309,7 +357,21 @@ impl DngDecoder {
         });
         let new_raw_image_digest = bytes_value(ifd0.get(tags::NEW_RAW_IMAGE_DIGEST))
             .and_then(|b| <[u8; 16]>::try_from(b).ok());
-        let metadata = decode_metadata(ifd0, data, order, variant);
+        // The C2PA store lives in the last IFD of the main chain (C2PA 2.4 §A.3.6) — IFD 0 for
+        // every file this crate writes, a trailing directory for the other form §A.3.6 allows.
+        // The ranges are located *first* and the bytes are then taken only if that succeeded, so
+        // the two surfaces cannot disagree about whether the file has a store: one rule, applied
+        // once. (Reading the bytes independently is what let a duplicated entry report bytes
+        // from the eager `Ifd`, which keeps the last duplicate, while the ranges reported none.)
+        let c2pa_exclusions = c2pa::locate(data)?;
+        let metadata = decode_metadata(
+            ifd0,
+            &tracked[last_main],
+            c2pa_exclusions.is_some(),
+            data,
+            order,
+            variant,
+        );
         let gain_table_map = decode_gain_map(raw_ifd, tags::PROFILE_GAIN_TABLE_MAP, order)?;
         let gain_table_map2 = decode_gain_map(ifd0, tags::PROFILE_GAIN_TABLE_MAP2, order)?;
         let depth_info = decode_depth_info(ifd0);
@@ -338,6 +400,23 @@ impl DngDecoder {
         } else {
             tracked[raw_index].remaining()
         };
+        // The last directory of the main chain is where C2PA 2.4 §A.3.6 puts a manifest store,
+        // and such a directory legitimately carries no image at all — so it is not IFD 0, not
+        // the raw IFD, and not a sub-image, and without this its fields would reach no surface
+        // at all. That would break this decoder's standing promise that nothing in the file is
+        // silently dropped, for exactly the input the store's own placement rule invites.
+        //
+        // Stated as one membership test over the directories already surfaced rather than as a
+        // chain of `||`s: the disjuncts never disagree on a real file (a single-main-IFD DNG
+        // makes the first true, a trailing store directory makes all three false), so the
+        // operators between them decided nothing and no test could pin them.
+        let mut surfaced = vec![0, raw_index];
+        surfaced.extend_from_slice(&sub_indices);
+        let trailing_extra = if surfaced.contains(&last_main) {
+            Vec::new()
+        } else {
+            tracked[last_main].remaining()
+        };
 
         Ok(DecodedDng {
             raw,
@@ -354,22 +433,46 @@ impl DngDecoder {
             new_raw_image_digest,
             ifd0_extra,
             raw_extra,
+            trailing_extra,
+            c2pa_exclusions,
         })
     }
 }
 
-/// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD.
+/// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD —
+/// and the C2PA manifest store from `store_ifd`, the last IFD of the main chain.
 ///
 /// The `ExifIFD` is handed over whole, as the shared [`Exif`] model's Exif sub-IFD: every entry
 /// the directory holds survives, so no field of it is "unmodelled" and none is dropped. The DNG's
 /// own IFD 0 is *not* copied into the model's 0th IFD — [`DecodedDng`] already carries those
 /// fields, typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
+///
+/// The store is taken as the `UNDEFINED` bytes C2PA 2.4 §A.3.6 mandates, verbatim — the file's
+/// byte order does not apply to them — and only when `located` says
+/// [`gamut_ifd::c2pa::locate`] recognised a store in this file. That flag is the *whole*
+/// admission rule (type, length, uniqueness, placement), so this cannot disagree with
+/// [`DecodedDng::c2pa_exclusions`]: bytes and ranges are `Some` together or neither is.
+///
+/// A tag-52545 field that is not an admissible store — wrong type, shorter than a JUMBF box
+/// header, or one of several in a directory §A.3.6 allows only one store in — is put back for
+/// the extras rather than returned, so it still reaches the caller and decode → encode still
+/// works: every store this hands back is one the encoder will accept.
 fn decode_metadata(
     ifd0: &TrackedIfd,
+    store_ifd: &TrackedIfd,
+    located: bool,
     data: &[u8],
     order: ByteOrder,
     variant: Variant,
 ) -> DngMetadata {
+    let c2pa = match store_ifd.get(c2pa::C2PA_MANIFEST_STORE) {
+        Some(Value::Undefined(store)) if located => Some(store.clone()),
+        Some(_) => {
+            store_ifd.untouch(c2pa::C2PA_MANIFEST_STORE);
+            None
+        }
+        None => None,
+    };
     let exif = ifd0
         .get_u32(tags::EXIF_IFD)
         .and_then(|offset| read_ifd_at(data, u64::from(offset), order, variant).ok())
@@ -383,6 +486,7 @@ fn decode_metadata(
         xmp: bytes_value(ifd0.get(tags::XMP)),
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
         icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
+        c2pa,
     }
 }
 
@@ -406,13 +510,18 @@ fn is_raw_ifd(ifd: &Ifd) -> bool {
 const MAX_SUBIFD_DEPTH: usize = 8;
 
 /// Collects every IFD in the file — the top-level chain plus, recursively, every `SubIFDs`
-/// child — in encounter order. Lenient by design: an unreadable child is skipped rather than
-/// failing the whole decode, while offset de-duplication and the depth cap terminate hostile
-/// pointer cycles.
-fn walk_ifds(file: &TiffFile, data: &[u8]) -> Vec<Ifd> {
+/// child — in encounter order, plus the index of the **last main-chain directory** (where C2PA
+/// 2.4 §A.3.6 places the manifest store). Lenient by design: an unreadable child is skipped
+/// rather than failing the whole decode, while offset de-duplication and the depth cap terminate
+/// hostile pointer cycles.
+fn walk_ifds(file: &TiffFile, data: &[u8]) -> (Vec<Ifd>, usize) {
     let mut out = Vec::new();
     let mut visited: Vec<u64> = Vec::new();
+    let mut last_main = 0;
     for ifd in &file.ifds {
+        // Each main-chain directory is pushed before its descendants, so its index is the
+        // length so far; the last one is where C2PA 2.4 §A.3.6 puts the manifest store.
+        last_main = out.len();
         collect_sub_ifds(
             ifd,
             data,
@@ -423,7 +532,7 @@ fn walk_ifds(file: &TiffFile, data: &[u8]) -> Vec<Ifd> {
             &mut out,
         );
     }
-    out
+    (out, last_main)
 }
 
 /// Pushes `ifd` and recurses into its `SubIFDs` children (see [`walk_ifds`]).
@@ -1771,7 +1880,37 @@ mod tests {
         })
         .expect("write");
         let file = read(&bytes).expect("read");
-        assert_eq!(walk_ifds(&file, &bytes).len(), MAX_SUBIFD_DEPTH);
+        assert_eq!(walk_ifds(&file, &bytes).0.len(), MAX_SUBIFD_DEPTH);
+    }
+
+    /// The last main-chain index names the *last* top-level directory, not the last directory
+    /// collected: sub-IFDs of an earlier page are pushed before a later page, and the later
+    /// page's own sub-IFDs after it.
+    #[test]
+    fn walk_ifds_indexes_the_last_main_chain_directory() {
+        let mut child = Ifd::new();
+        child.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        let mut page0 = Ifd::new();
+        page0.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+        page0.set_sub_ifd(tags::SUB_IFDS, vec![child.clone()]);
+        let mut page1 = Ifd::new();
+        page1.set(tags::IMAGE_WIDTH, Value::Short(vec![3]));
+        page1.set_sub_ifd(tags::SUB_IFDS, vec![child]);
+        let bytes = gamut_ifd::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![page0, page1],
+        })
+        .expect("write");
+        let file = read(&bytes).expect("read");
+        let (ifds, last_main) = walk_ifds(&file, &bytes);
+        // page0, its child, page1, its child.
+        assert_eq!(ifds.len(), 4);
+        assert_eq!(last_main, 2);
+        assert_eq!(
+            ifds[last_main].get(tags::IMAGE_WIDTH),
+            Some(&Value::Short(vec![3]))
+        );
     }
 
     /// With several raw-photometry IFDs, the main image (`NewSubFileType` 0) wins even when a

@@ -1,6 +1,9 @@
 //! The DNG encoder.
 
+use std::borrow::Cow;
+
 use gamut_core::{Error, Result};
+use gamut_ifd::c2pa::{self, C2paExclusions};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
 use crate::gain_map::ProfileGainTableMap;
@@ -30,6 +33,26 @@ pub struct DngEncoder {
     gain_table_map: Option<ProfileGainTableMap>,
     gain_table_map2: Option<ProfileGainTableMap>,
     metadata: DngMetadata,
+    c2pa_reserve: Option<usize>,
+}
+
+/// What [`DngEncoder::encode_with_report`] produced: the byte count, and — when the file
+/// carries a C2PA manifest store or a reservation for one — the two byte ranges an external
+/// signer excludes from its `c2pa.hash.data` binding (C2PA 2.4 §18.5.5).
+///
+/// `#[non_exhaustive]`: later encoder features may report more without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DngEncodeReport {
+    /// The number of bytes appended to the output — the whole DNG.
+    pub len: usize,
+    /// The C2PA exclusion ranges, as offsets from the first byte of this DNG (not of the
+    /// output buffer it was appended to). `None` when no store or reservation was requested.
+    ///
+    /// `store` is the last range of the file — the store is placed after everything else
+    /// (§A.3.6), so a signer overwriting a reservation in place, or replacing the store with one
+    /// of a different size, moves no other offset.
+    pub c2pa: Option<C2paExclusions>,
 }
 
 impl Default for DngEncoder {
@@ -51,6 +74,7 @@ impl Default for DngEncoder {
             gain_table_map: None,
             gain_table_map2: None,
             metadata: DngMetadata::default(),
+            c2pa_reserve: None,
         }
     }
 }
@@ -167,11 +191,68 @@ impl DngEncoder {
         self
     }
 
-    /// Returns a copy of this encoder that embeds `metadata` (EXIF sub-IFD + XMP/IPTC/ICC blocks).
+    /// Returns a copy of this encoder that embeds `metadata` (EXIF sub-IFD + XMP/IPTC/ICC
+    /// blocks, and a caller-computed C2PA manifest store — see [`DngMetadata::c2pa`]).
     #[must_use]
     pub fn with_metadata(mut self, metadata: DngMetadata) -> Self {
         self.metadata = metadata;
         self
+    }
+
+    /// Returns a copy of this encoder that reserves `len` zero bytes for a C2PA manifest store
+    /// an external signer will fill in afterwards.
+    ///
+    /// The reservation is written exactly where a store goes — the `C2PA` tag (52545) of IFD 0,
+    /// its value last in the file (C2PA 2.4 §A.3.6) — and
+    /// [`encode_with_report`](Self::encode_with_report) reports its two exclusion ranges
+    /// (§18.5.5). A signer hashes the file around those ranges and overwrites the reservation in
+    /// place; nothing else in the file moves. `len` must be at least
+    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header), and a reservation cannot be
+    /// combined with a store supplied through [`with_metadata`](Self::with_metadata) — either is
+    /// a typed error at encode time.
+    #[must_use]
+    pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
+        self.c2pa_reserve = Some(len);
+        self
+    }
+
+    /// The C2PA manifest store to write, if any: the caller's, or a zero-filled reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if both were requested, if the store is too short to be a
+    /// JUMBF box at all ([`c2pa::MIN_STORE_LEN`]), or if it would pack *inline* in this
+    /// encoder's container variant — BigTIFF's inline threshold is those same 8 bytes, so a
+    /// BigTIFF store must exceed them to be placeable at the end of the file. All caught here,
+    /// before any pixel work.
+    fn c2pa_store(&self) -> Result<Option<Cow<'_, [u8]>>> {
+        let store = match (&self.metadata.c2pa, self.c2pa_reserve) {
+            (Some(_), Some(_)) => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "DNG: supply either a C2PA manifest store or a reservation, not both",
+                ));
+            }
+            (Some(store), None) => Cow::Borrowed(store.as_slice()),
+            (None, Some(len)) => Cow::Owned(vec![0; len]),
+            (None, None) => return Ok(None),
+        };
+        if store.len() < c2pa::MIN_STORE_LEN {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: a C2PA manifest store is at least a JUMBF box header (8 bytes)",
+            ));
+        }
+        // A value no longer than the variant's inline threshold is packed into the entry rather
+        // than placed out of line, so it cannot be the run at the end of the file §A.3.6 wants.
+        // Only reachable on BigTIFF, whose threshold is the 8 bytes above.
+        if store.len() <= self.variant().inline_threshold() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: a BigTIFF C2PA manifest store must exceed 8 bytes, or it packs inline",
+            ));
+        }
+        Ok(Some(store))
     }
 
     /// The container variant this encoder writes (BigTIFF when [`Self::with_big_tiff`] is set).
@@ -200,6 +281,30 @@ impl DngEncoder {
         profile: &CameraProfile,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
+        self.encode_with_report(raw, profile, out)
+            .map(|report| report.len)
+    }
+
+    /// [`encode`](Self::encode), also reporting where the C2PA manifest store (or its
+    /// reservation, [`with_c2pa_reserved`](Self::with_c2pa_reserved)) landed.
+    ///
+    /// The store is written last in the file and its entry lives in IFD 0 — the last (and only)
+    /// IFD of this encoder's main chain — as C2PA 2.4 §A.3.6 requires. The report's ranges are
+    /// offsets from the first byte of the DNG, so a caller appending to a non-empty `out`
+    /// rebases them by `out.len()` before the call.
+    ///
+    /// # Errors
+    ///
+    /// As [`encode`](Self::encode); additionally [`Error::InvalidInput`] if both a store and a
+    /// reservation were configured, or the store is shorter than
+    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`].
+    pub fn encode_with_report(
+        &self,
+        raw: &RawImage,
+        profile: &CameraProfile,
+        out: &mut Vec<u8>,
+    ) -> Result<DngEncodeReport> {
+        let store = self.c2pa_store()?;
         if color_plane_count(raw) != 3 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -284,6 +389,12 @@ impl DngEncoder {
         {
             ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
         }
+        // The C2PA entry goes in the last IFD of the main chain — IFD 0 here — as an inline
+        // placeholder, so the directory layout is final while the store itself is placed after
+        // the image data, last in the file (§A.3.6).
+        if store.is_some() {
+            c2pa::reserve_entry(&mut ifd0);
+        }
         let raw_ifd = build_raw_ifd(self, raw)?;
 
         let preview_blocks = ImageBlocks {
@@ -304,7 +415,7 @@ impl DngEncoder {
             },
         };
 
-        let bytes = write_cfa_dng(
+        let mut bytes = write_cfa_dng(
             self.order,
             self.variant(),
             ifd0,
@@ -312,8 +423,15 @@ impl DngEncoder {
             raw_ifd,
             &raw_blocks,
         )?;
+        let c2pa = match store {
+            Some(store) => Some(c2pa::append_store(&mut bytes, &store)?),
+            None => None,
+        };
         out.extend_from_slice(&bytes);
-        Ok(bytes.len())
+        Ok(DngEncodeReport {
+            len: bytes.len(),
+            c2pa,
+        })
     }
 
     /// Builds IFD 0: the RGB preview's image tags plus the DNG version, camera identity, and the

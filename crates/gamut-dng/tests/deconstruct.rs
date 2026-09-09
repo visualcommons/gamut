@@ -73,6 +73,54 @@ fn linear_raw_dng_is_accounted() {
     assert_clean(&report);
 }
 
+/// A C2PA manifest store (C2PA 2.4 §A.3.6) is placed after the image data, last in the file,
+/// and the byte accounting claims it as the value of IFD 0's tag-52545 entry — never as an
+/// unclassified run or a trailer. The whole report is clean, on the same terms as every other
+/// file this encoder writes: the store's tag is a tag this crate knows, so `is_fully_accounted`
+/// stays true rather than reporting the file's own manifest store as a private tag.
+#[test]
+fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
+    use gamut_dng::{DngMetadata, Segment, SpanKind};
+    use gamut_ifd::c2pa::C2PA_MANIFEST_STORE;
+
+    for &order in &[ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+        // An 8-bit 33×23 mosaic: an odd-length raw strip, so the store needs alignment filler.
+        let raw = common::sample_raw(33, 23, 8);
+        let mut dng = Vec::new();
+        let report = DngEncoder::new()
+            .with_byte_order(order)
+            .with_metadata(DngMetadata {
+                c2pa: Some((0u8..40).collect()),
+                ..Default::default()
+            })
+            .encode_with_report(&raw, &common::sample_profile(), &mut dng)
+            .expect("encode");
+        let excl = report.c2pa.expect("ranges");
+        let (_, _, ifd0) = gamut_ifd::read_header(&dng).expect("header");
+
+        let report = deconstruct(&dng).expect("deconstruct");
+        assert_clean(&report);
+        assert!(
+            report.segments.segments.contains(&Segment {
+                range: excl.store,
+                kind: SpanKind::Value {
+                    ifd: ifd0,
+                    tag: C2PA_MANIFEST_STORE,
+                },
+            }),
+            "{order:?}: the store is IFD 0's value span: {report:?}"
+        );
+        assert!(
+            !report
+                .segments
+                .segments
+                .iter()
+                .any(|s| s.kind == SpanKind::Trailer),
+            "{order:?}: a store at the end of the file is not a trailer"
+        );
+    }
+}
+
 #[test]
 fn decoder_deconstruct_returns_image_and_report() {
     let raw = common::sample_raw(16, 16, 16);
