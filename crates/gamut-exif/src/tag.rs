@@ -1,7 +1,7 @@
 //! The EXIF tag dictionary and the directories tags live in.
 //!
 //! [`IfdKind`] classifies which directory a tag belongs to; [`ExifTag`] names the standard Exif 3.0
-//! tags. The catalogue is generated from a single table (the [`exif_tags!`] invocation), so a tag's
+//! tags. The catalogue is generated from a single table (the `exif_tags!` invocation), so a tag's
 //! id, home directory, canonical name, permitted field types and component count can never drift
 //! apart. It intentionally covers the **standard** CIPA DC-008 tags, not exiftool's full vendor
 //! breadth — unknown and MakerNote tags still round-trip losslessly because [`Exif`](crate::Exif)

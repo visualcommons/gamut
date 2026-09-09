@@ -22,6 +22,18 @@
 //! sub-IFD and thumbnail range the lenient reader discarded. `parse` is the `&[u8]` case of
 //! `parse_from` and stays silent, so neither is a change for existing callers.
 //!
+//! Writing has one extra door. Every catalogued tag carries the field type and component count
+//! CIPA DC-008 mandates for it ([`ExifTag::field_types`], [`ExifTag::component_count`]), and
+//! [`set_tag_checked`] refuses a value that contradicts them. [`Exif::set_tag`] and the entire read
+//! path stay lenient on purpose — real files break the spec routinely, and a caller reproducing one
+//! must be able to.
+//!
+//! The optional `describe` feature (default **off**) adds the `describe` module: what the
+//! enumerated tags' values *mean*, in the specification's own wording, plus `describe::flash` for
+//! the `Flash` bitfield. It is a few kilobytes of static strings a consumer that only writes or
+//! round-trips metadata never reads, which is why it is opt-in. (Those names are not linked here:
+//! the module does not exist when the feature is off.)
+//!
 //! ```
 //! use gamut_exif::{ByteOrder, Exif, ExifTag, Value};
 //!
