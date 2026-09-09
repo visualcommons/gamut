@@ -29,7 +29,7 @@
 use gamut_color::SourceProfile;
 use gamut_color::cicp::{ColourPrimaries, TransferCharacteristics};
 use gamut_color::linalg::mat_mul3;
-use gamut_color::matrix::{D50, bradford_adapt, rgb_to_xyz_matrix};
+use gamut_color::matrix::{bradford_adapt, rgb_to_xyz_matrix};
 use gamut_color::transfer::pq_eotf;
 
 use crate::cicp::Cicp;
@@ -237,6 +237,20 @@ fn pq_samples() -> Vec<u16> {
         .collect()
 }
 
+/// The PCS D50 white as a CIE 1931 chromaticity, derived from the exact `XYZNumber` ICC.1:2022
+/// §7.2.16 mandates for the PCS illuminant.
+///
+/// Deliberately *not* [`gamut_color::matrix::D50`]: that is the CIE-published chromaticity, whose
+/// tristimulus Z is 0.82521, while ICC's rounded encoding is 0.8249. Adapting to the CIE one while
+/// writing the ICC one as the `mediaWhitePointTag` would leave the colorants disagreeing with the
+/// white point they are supposed to sum to, by 2e-4 in Z. The PCS illuminant is an ICC fact, so
+/// this crate owns it.
+fn pcs_d50_chromaticity() -> [f64; 2] {
+    let [x, y, z] = XyzNumber::D50.to_f64();
+    let sum = x + y + z;
+    [x / sum, y / sum]
+}
+
 /// The D50-adapted colorant columns for `primaries`, and the chromatic-adaptation matrix that took
 /// them there — the `rXYZ`/`gXYZ`/`bXYZ` (§9.2.10) and `chad` (§9.2.35) tag contents.
 ///
@@ -248,7 +262,7 @@ fn colorants_d50(primaries: ColourPrimaries) -> ([[f64; 3]; 3], [[f64; 3]; 3]) {
     let (rgb_to_xyz, chad) = primaries
         .chromaticities()
         .and_then(|(rgb, white)| {
-            rgb_to_xyz_matrix(&rgb, white).zip(bradford_adapt(white, D50))
+            rgb_to_xyz_matrix(&rgb, white).zip(bradford_adapt(white, pcs_d50_chromaticity()))
         })
         .unwrap_or((IDENTITY_3X3, IDENTITY_3X3));
     (mat_mul3(&chad, &rgb_to_xyz), chad)
@@ -434,7 +448,6 @@ impl IccProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tags::KnownTag;
     use gamut_color::transfer::srgb_eotf;
     use lcms2_oracle::tag;
 
@@ -618,6 +631,26 @@ mod tests {
         }
     }
 
+    /// Each space's colorants sum to the media white point the same profile declares — the law a
+    /// matrix/TRC profile has to satisfy for full-scale RGB to land on the PCS white. It is what
+    /// forces the Bradford adaptation to target [`pcs_d50_chromaticity`] rather than the CIE D50.
+    #[test]
+    fn colorants_sum_to_the_declared_media_white_point() {
+        let want = XyzNumber::D50.to_f64();
+        for space in BuiltinProfile::ALL {
+            let (primaries, _, _, label) = space.parts();
+            let (colorants, _) = colorants_d50(primaries);
+            for axis in 0..3 {
+                let sum: f64 = colorants[axis].iter().sum();
+                assert!(
+                    (sum - want[axis]).abs() < 1.0e-6,
+                    "{label} white [{axis}]: {sum} vs {}",
+                    want[axis]
+                );
+            }
+        }
+    }
+
     /// A constructor is a pure function of its arguments: the same call serializes to the same
     /// bytes. Guards the "no timestamp, no ID, no entropy" property the module doc promises, which
     /// a later `DateTime::now()` would silently break.
@@ -634,6 +667,11 @@ mod tests {
     /// same primaries itself. This is the colorimetric acceptance gate: the D50 adaptation, the
     /// column-vs-row orientation of the colorant tags and the `s15Fixed16` encoding are all only
     /// checked against an independent implementation.
+    ///
+    /// The tolerance is four `s15Fixed16` quanta, so it is the tag encoding — not the derivation —
+    /// that sets it: the largest observed disagreement is 2.4e-5, under two quanta. A transposed
+    /// matrix, a missing Bradford adaptation or a wrong white point all move a colorant by more
+    /// than 1e-2.
     #[test]
     fn oracle_colorants_match_lcms_for_the_same_primaries() {
         for space in [
@@ -660,7 +698,7 @@ mod tests {
                 let want = reference.read_xyz(sig).expect("colorant present");
                 for axis in 0..3 {
                     assert!(
-                        (got[axis] - want[axis]).abs() < 1.0e-3,
+                        (got[axis] - want[axis]).abs() < 4.0 / 65536.0,
                         "{label} {name} colorant [{axis}]: {got:?} vs {want:?}"
                     );
                 }
