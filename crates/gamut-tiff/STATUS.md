@@ -79,6 +79,18 @@ raw blocks the workspace's metadata facade consumes, as `gamut-png` and `gamut-w
 over — so this crate parses, validates and reconciles none of them; the `ExifIFD` is handed over
 as a `gamut_ifd::Ifd`, because it *is* a directory the decoder has already walked.
 
+Three consequences are contractual rather than incidental, and are documented where they are made.
+**(a)** The Exif directory's *entries* are carried unchanged but its **ordering is normalised** —
+ascending tag (TIFF 6.0 §2 requires it on disk), duplicate tags collapsed to the last, a child's
+next-IFD pointer ignored — so "verbatim" is claimed for byte payloads, not for a directory model.
+**(b)** The reader resolves **every standard pointer tag** (`gamut_ifd::tags::STANDARD_POINTER_TAGS`,
+the list `gamut-dng`'s rewrite path uses), not just `ExifIFD`: an `InteroperabilityIFD` inside the
+Exif directory is itself an absolute file offset, and returning it unparsed would let a caller
+re-encode a dangling pointer into a file laid out differently — which the crate's own
+`deconstruct` would then reject. **(c)** The blocks live in **IFD 0 only**, so a reader decoding
+page 3 of a multi-page document alone sees none of them; duplicating an ICC profile onto every
+page is the worse outcome, and IFD 0 is where a reader conventionally looks.
+
 The C2PA manifest store is the one carrier with a placement rule of its own, and that rule is not
 restated here: `gamut_ifd::c2pa` owns C2PA 2.4 §A.3.6 (tag 52545 / `0xCD41`, type `UNDEFINED`, one
 store per asset, its entry in the **last IFD of the main chain**, its bytes at the **end of the
