@@ -6,14 +6,15 @@
 //! impls; transparent lossy images use the extended (`VP8X`) format with a raw `ALPH` alpha chunk,
 //! as does any image carrying embedded metadata.
 
+use core::ops::Range;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use gamut_color::{ColorRange, Yuv420};
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8, Rgba8};
+use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Pixel, Result, Rgb8, Rgba8};
 use gamut_riff::{
-    Chunk, FourCc, MetadataChunks, Vp8xHeader, write_extended_preserving, write_simple_lossless,
-    write_simple_lossy,
+    Chunk, FourCc, MetadataChunks, Vp8xHeader, c2pa_span, write_extended_preserving,
+    write_simple_lossless, write_simple_lossy,
 };
 
 use crate::alpha;
@@ -41,7 +42,9 @@ fn quality_to_quant(quality: u8) -> u8 {
 ///
 /// Embedded metadata is attached with [`with_exif`](Self::with_exif) / [`with_xmp`](Self::with_xmp)
 /// / [`with_icc_profile`](Self::with_icc_profile), which promote the output to the extended (`VP8X`)
-/// format automatically.
+/// format automatically. A C2PA manifest store is attached with [`with_c2pa`](Self::with_c2pa) or
+/// reserved with [`with_c2pa_reserved`](Self::with_c2pa_reserved), and
+/// [`encode_with_report`](Self::encode_with_report) reports where in the finished file it landed.
 ///
 /// The codestream itself may be produced by a pluggable backend installed with
 /// [`push_backend`](Self::push_backend); with none installed (the default) the crate's own
@@ -57,6 +60,9 @@ pub struct WebpEncoder {
     xmp: Option<Vec<u8>>,
     /// The `ICCP` chunk payload (ICC colour profile) to embed, verbatim.
     icc: Option<Vec<u8>>,
+    /// The `C2PA` chunk payload — a C2PA manifest store, or a reservation of zero bytes to be
+    /// filled in once it has been computed over the finished file.
+    c2pa: Option<Vec<u8>>,
     /// Unknown chunks to re-emit after the metadata, in the order given (RFC 9649 §2.7.1.6).
     unknown: Vec<(FourCc, Vec<u8>)>,
     /// Pluggable codestream encoders, tried in push order ahead of the built-in tails.
@@ -72,6 +78,7 @@ impl fmt::Debug for WebpEncoder {
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("icc", &self.icc.as_ref().map(Vec::len))
+            .field("c2pa", &self.c2pa.as_ref().map(Vec::len))
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -136,6 +143,51 @@ impl WebpEncoder {
     #[must_use]
     pub fn with_icc_profile(mut self, profile: &[u8]) -> Self {
         self.icc = Some(profile.to_vec());
+        self
+    }
+
+    /// Embeds a C2PA manifest store as a `C2PA` chunk (C2PA 2.4 §A.3.7), promoting the output to
+    /// the extended (`VP8X`) format.
+    ///
+    /// The store is written **verbatim** and placed as the last sub-chunk of the `RIFF`/`WEBP` form,
+    /// which is where §A.3.7 requires it — behind `EXIF`, `XMP ` and any chunk passed to
+    /// [`with_unknown_chunks`](Self::with_unknown_chunks). No `VP8X` feature flag advertises it:
+    /// RFC 9649 §2.5 defines no C2PA bit, so presence is decided by the chunk alone.
+    ///
+    /// gamut carries the store; it does not build, hash, sign or validate one — that is a C2PA
+    /// implementation's job (`c2pa-rs`). Use [`encode_with_report`](Self::encode_with_report) to
+    /// learn the byte range the store's chunk occupies, which is what a `c2pa.hash.data` assertion
+    /// excludes (§18.5).
+    ///
+    /// The last of [`with_c2pa`](Self::with_c2pa) / [`with_c2pa_reserved`](Self::with_c2pa_reserved)
+    /// wins; a file carries exactly one store.
+    #[must_use]
+    pub fn with_c2pa(mut self, store: &[u8]) -> Self {
+        self.c2pa = Some(store.to_vec());
+        self
+    }
+
+    /// Reserves `len` zero bytes for a C2PA manifest store not yet computed.
+    ///
+    /// A store cannot be handed to the encoder complete, because its hard binding digests the
+    /// finished file (C2PA 2.4 §15.12.1.1) — which does not exist until the encoder has run. The
+    /// reserve-then-fill flow §18.5 asks for is three steps:
+    ///
+    /// 1. encode with the reservation, through
+    ///    [`encode_with_report`](Self::encode_with_report), and keep the reported range;
+    /// 2. hash the returned file with that **whole** range excluded, and build the store;
+    /// 3. encode again with [`with_c2pa`](Self::with_c2pa) and a store of the **same length**, which
+    ///    reproduces the same file with the reserved bytes replaced.
+    ///
+    /// The reservation is `len` bytes exactly — no slack is added — so ask for what the signer says
+    /// it needs. A store shorter than the reservation would move every byte after it and invalidate
+    /// the hash, which is why step 3 must match the length rather than merely fit inside it.
+    ///
+    /// The last of [`with_c2pa`](Self::with_c2pa) / [`with_c2pa_reserved`](Self::with_c2pa_reserved)
+    /// wins; a file carries exactly one store.
+    #[must_use]
+    pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
+        self.c2pa = Some(vec![0; len]);
         self
     }
 
@@ -269,6 +321,7 @@ impl WebpEncoder {
             icc: self.icc.as_deref(),
             exif: self.exif.as_deref(),
             xmp: self.xmp.as_deref(),
+            c2pa: self.c2pa.as_deref(),
         }
     }
 
@@ -277,7 +330,8 @@ impl WebpEncoder {
     /// With nothing that needs the extended format — no metadata and no separate `ALPH` chunk — this
     /// is the simple format: the `RIFF`/`WEBP` header plus the lone `VP8 `/`VP8L` chunk. Otherwise
     /// the file is promoted to extended, and the chunks go out in the spec's canonical order:
-    /// `VP8X`, `ICCP`, `ALPH`, the bitstream, `EXIF`, `XMP `.
+    /// `VP8X`, `ICCP`, `ALPH`, the bitstream, `EXIF`, `XMP `, the preserved unknown chunks, and last
+    /// of all `C2PA` (C2PA 2.4 §A.3.7).
     ///
     /// `has_alpha` records transparency for the `VP8X` feature flag independently of `alph`, because
     /// a `VP8L` bitstream carries its own alpha and so needs no `ALPH` chunk.
@@ -407,6 +461,81 @@ impl WebpEncoder {
         let written = file.len();
         out.extend_from_slice(&file);
         Ok(written)
+    }
+}
+
+/// Where the things an encode *placed* ended up in the file it produced.
+///
+/// Returned by [`WebpEncoder::encode_with_report`]. Construct nothing here — the encoder fills it
+/// in. Marked `#[non_exhaustive]` so a later revision can report a further region without a
+/// breaking change.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct WebpEncodeReport {
+    /// The byte range the `C2PA` chunk occupies in the encoded file, or `None` when no manifest
+    /// store was configured.
+    ///
+    /// The range covers the chunk's **whole** span — the four identifier bytes, the four-byte size
+    /// field and the payload — because that is what a `c2pa.hash.data` assertion excludes (C2PA 2.4
+    /// §18.5): an update manifest may resize the store, which changes the size field's value as
+    /// well as the bytes after it. The RIFF pad byte that follows an odd-length store (RFC 9649
+    /// §2.3) is outside the range; it is framing the container adds, not store.
+    pub c2pa: Option<Range<usize>>,
+}
+
+impl WebpEncoder {
+    /// Encodes `image` and reports where the encoder placed what it was asked to place.
+    ///
+    /// The bytes are exactly the bytes [`EncodeImage::encode_image`] produces for the same encoder
+    /// and image — this is the same code path, not a second one — so the report can be taken as a
+    /// description of any file this encoder writes. It is a separate entry point because the
+    /// object-safe `EncodeImage` seam carries no channel for one.
+    ///
+    /// # Errors
+    ///
+    /// As [`EncodeImage::encode_image`], plus [`Error::InvalidInput`](gamut_core::Error) if a
+    /// manifest store was configured and the crate cannot find the chunk it just wrote — a
+    /// contradiction that would otherwise hand a signer a file with no range to exclude.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gamut_core::{Dimensions, ImageRef, Rgb8};
+    /// use gamut_webp::WebpEncoder;
+    ///
+    /// let pixels = [10u8, 20, 30];
+    /// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(1, 1)?)?;
+    /// let (file, report) = WebpEncoder::lossless()
+    ///     .with_c2pa_reserved(64)
+    ///     .encode_with_report(image)?;
+    ///
+    /// let span = report.c2pa.expect("a store was reserved");
+    /// assert_eq!(&file[span.start..span.start + 4], b"C2PA");
+    /// assert_eq!(span.len(), 8 + 64);
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    pub fn encode_with_report<P: Pixel>(
+        &self,
+        image: ImageRef<'_, P>,
+    ) -> Result<(Vec<u8>, WebpEncodeReport)>
+    where
+        Self: EncodeImage<P>,
+    {
+        let mut file = Vec::new();
+        self.encode_image(image, &mut file)?;
+        // The range is read back out of the finished bytes with the very locator the read side uses
+        // (`gamut_riff::c2pa_span`), so a writer and a reader can never disagree about it.
+        let c2pa = match (c2pa_span(&file)?, self.c2pa.is_some()) {
+            (Some(span), _) => Some(span),
+            (None, false) => None,
+            (None, true) => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "WebP: the C2PA chunk this encoder wrote cannot be located in its own output",
+                ));
+            }
+        };
+        Ok((file, WebpEncodeReport { c2pa }))
     }
 }
 
@@ -619,5 +748,153 @@ mod tests {
             .expect("encode via trait");
         assert_eq!(written, out.len());
         assert_eq!(&out[0..4], b"RIFF");
+    }
+
+    /// The reservation is `len` zero bytes exactly — no slack, no framing. A signer sizes its store
+    /// against this number, so a reservation that were merely "at least `len`" would be useless.
+    #[test]
+    fn with_c2pa_reserved_is_exactly_len_zero_bytes() {
+        assert_eq!(
+            WebpEncoder::lossless().with_c2pa_reserved(0).c2pa,
+            Some(vec![])
+        );
+        assert_eq!(
+            WebpEncoder::lossless().with_c2pa_reserved(5).c2pa,
+            Some(vec![0, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            WebpEncoder::lossless().c2pa,
+            None,
+            "unconfigured by default"
+        );
+    }
+
+    /// A file carries exactly one store, so the two setters share one slot and the last call wins —
+    /// including when the two kinds are mixed, which is the case a per-setter "last wins" would miss.
+    #[test]
+    fn the_last_c2pa_call_wins_whichever_kind_it_is() {
+        assert_eq!(
+            WebpEncoder::lossless()
+                .with_c2pa(b"first")
+                .with_c2pa(b"second")
+                .c2pa,
+            Some(b"second".to_vec())
+        );
+        assert_eq!(
+            WebpEncoder::lossless()
+                .with_c2pa_reserved(4)
+                .with_c2pa(b"store")
+                .c2pa,
+            Some(b"store".to_vec())
+        );
+        assert_eq!(
+            WebpEncoder::lossless()
+                .with_c2pa(b"store")
+                .with_c2pa_reserved(2)
+                .c2pa,
+            Some(vec![0, 0])
+        );
+    }
+
+    /// The debug rendering names the store by length only: a manifest store is large and is not
+    /// something a log should spill.
+    #[test]
+    fn debug_reports_the_store_length_not_its_bytes() {
+        let rendered = format!("{:?}", WebpEncoder::lossless().with_c2pa(b"a store"));
+        assert!(rendered.contains("c2pa: Some(7)"), "{rendered}");
+        assert!(!rendered.contains("a store"), "{rendered}");
+    }
+
+    /// `encode_with_report` is `encode_image` plus a report — not a second encoding path — and it
+    /// reports nothing when nothing was placed.
+    #[test]
+    fn encode_with_report_is_encode_image_plus_a_report() {
+        let rgb = [0x10, 0x20, 0x30].repeat(4);
+        let encoder = WebpEncoder::lossless();
+        let image = || ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap();
+
+        let mut expected = Vec::new();
+        encoder
+            .encode_image(image(), &mut expected)
+            .expect("encode");
+        let (file, report) = encoder.encode_with_report(image()).expect("encode");
+        assert_eq!(file, expected);
+        assert_eq!(report, WebpEncodeReport::default());
+        assert_eq!(report.c2pa, None, "no store was configured");
+    }
+
+    /// The reported range is the chunk's whole span (C2PA 2.4 §18.5): identifier, size field and
+    /// payload, with the RIFF pad byte of an odd-length store left outside it.
+    #[test]
+    fn encode_with_report_names_the_whole_chunk_and_not_its_pad_byte() {
+        let store = b"an odd-length manifest store!!"; // sized to an odd length below
+        let store = &store[..29];
+        assert_eq!(store.len() % 2, 1, "the fixture must exercise the pad byte");
+        let rgb = [9u8, 8, 7].repeat(4);
+        let (file, report) = WebpEncoder::lossless()
+            .with_c2pa(store)
+            .encode_with_report(ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap())
+            .expect("encode");
+
+        let span = report.c2pa.expect("a store was configured");
+        assert_eq!(&file[span.start..span.start + 4], b"C2PA", "identifier");
+        assert_eq!(
+            &file[span.start + 4..span.start + 8],
+            &(store.len() as u32).to_le_bytes(),
+            "size field"
+        );
+        assert_eq!(&file[span.start + 8..span.end], store, "payload");
+        assert_eq!(span.end, file.len() - 1, "the pad byte is outside the span");
+        assert_eq!(
+            file[file.len() - 1],
+            0,
+            "RFC 9649 §2.3: the pad byte is zero"
+        );
+    }
+
+    /// The reserve-then-fill flow only works if filling a reservation disturbs nothing else: two
+    /// equal-length stores must give two files that differ in exactly the reported span, so a hash
+    /// taken with that span excluded survives the substitution.
+    #[test]
+    fn filling_a_reservation_changes_only_the_reported_span() {
+        let rgb = [3u8, 5, 7].repeat(9);
+        let image = || ImageRef::<Rgb8>::new(&rgb, dims(3, 3)).unwrap();
+        let encode = |store: &[u8]| {
+            WebpEncoder::lossless()
+                .with_c2pa(store)
+                .encode_with_report(image())
+                .expect("encode")
+        };
+
+        let (reserved, report) = WebpEncoder::lossless()
+            .with_c2pa_reserved(8)
+            .encode_with_report(image())
+            .expect("encode");
+        let span = report.c2pa.expect("a store was reserved");
+        let (first, first_report) = encode(b"11111111");
+        let (second, second_report) = encode(b"22222222");
+
+        assert_eq!(first_report.c2pa, Some(span.clone()));
+        assert_eq!(second_report.c2pa, Some(span.clone()));
+        assert_eq!(first.len(), reserved.len());
+        assert_eq!(second.len(), reserved.len());
+        for (label, filled) in [
+            ("reserved", &reserved),
+            ("first", &first),
+            ("second", &second),
+        ] {
+            assert_eq!(
+                filled[..span.start],
+                reserved[..span.start],
+                "{label}: before"
+            );
+            assert_eq!(filled[span.end..], reserved[span.end..], "{label}: after");
+        }
+        assert_eq!(
+            &reserved[span.start + 8..span.end],
+            &[0; 8],
+            "the reservation is zeros"
+        );
+        assert_ne!(first[span.clone()], second[span], "the stores differ");
     }
 }

@@ -59,6 +59,13 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   they can be borrowed straight into [`gamut-metadata`](../gamut-metadata)'s `MetadataBlock`.
   Embedding promotes a simple file to the extended format, derives the `VP8X` feature flags from the
   chunks present, and emits everything in the spec's canonical order.
+- **C2PA manifest stores** — `WebpEncoder::with_c2pa` embeds a finished manifest store as a `C2PA`
+  chunk (C2PA 2.4 §A.3.7) and `with_c2pa_reserved` leaves room for one that cannot exist yet,
+  because its hard binding digests the finished file. `encode_with_report` returns the file together
+  with the chunk's byte range — the range a `c2pa.hash.data` assertion excludes (§18.5) — and
+  `gamut_webp::c2pa_span` recovers that range from any WebP file. The chunk goes last, as §A.3.7
+  requires, and no `VP8X` flag advertises it, RFC 9649 defining no C2PA feature bit. gamut carries
+  the store; building, hashing, signing and validating it belong to a C2PA implementation.
 
 ### Pluggable codestream backends
 
@@ -81,8 +88,8 @@ directions** (gamut↔libwebp, at the YUV-plane level for lossy), backed by inte
 round-trips, the in-crate decoder, and a malformed-input robustness corpus.
 
 **Non-core feature paths** are decided in [`STATUS.md`](STATUS.md#scope-decisions--non-core-feature-paths):
-alpha/transparency (`VP8X` + `ALPH`) and color/metadata chunks (`ICCP` ICC profiles, `EXIF`, `XMP `)
-are **in scope** — embedded on encode and preserved on decode. Animation (`ANIM`/`ANMF`) is **out of
+alpha/transparency (`VP8X` + `ALPH`) and color/metadata chunks (`ICCP` ICC profiles, `EXIF`, `XMP `,
+and the `C2PA` manifest store) are **in scope** — embedded on encode and preserved on decode. Animation (`ANIM`/`ANMF`) is **out of
 scope** under the image-first charter (each frame is an independent keyframe, but multi-frame
 sequences don't fit the single-image API); its chunks are tracked only for container completeness.
 
