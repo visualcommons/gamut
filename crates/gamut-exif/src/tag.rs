@@ -291,7 +291,10 @@ exif_tags! {
     DigitalZoomRatio => (Exif, 0xA404, "DigitalZoomRatio", [Rational], Exact(1)),
     FocalLengthIn35mmFilm => (Exif, 0xA405, "FocalLengthIn35mmFilm", [Short], Exact(1)),
     SceneCaptureType => (Exif, 0xA406, "SceneCaptureType", [Short], Exact(1)),
-    GainControl => (Exif, 0xA407, "GainControl", [Rational], Exact(1)),
+    // DC-008 contradicts itself here: Table 9's Type column says RATIONAL, but §4.6.6.7.41 says
+    // SHORT and enumerates five integer codes (0-4). The tag's own section wins - a fraction
+    // cannot carry an enumeration - and both exiv2 and ExifTool read it as SHORT.
+    GainControl => (Exif, 0xA407, "GainControl", [Short], Exact(1)),
     Contrast => (Exif, 0xA408, "Contrast", [Short], Exact(1)),
     Saturation => (Exif, 0xA409, "Saturation", [Short], Exact(1)),
     Sharpness => (Exif, 0xA40A, "Sharpness", [Short], Exact(1)),
@@ -516,6 +519,15 @@ mod tests {
                 "RelatedImageLength",
             ]
         );
+    }
+
+    #[test]
+    fn gain_control_follows_its_own_section_not_the_summary_table() {
+        // CIPA DC-008 Table 9 says RATIONAL for 0xA407 while §4.6.6.7.41 says SHORT and lists
+        // five integer codes. A fraction cannot carry an enumeration, so the section wins; this
+        // pins the reading so nobody "corrects" it back to the table.
+        assert_eq!(ExifTag::GainControl.field_types(), &[FieldType::Short]);
+        assert_eq!(ExifTag::GainControl.component_count(), TagCount::Exact(1));
     }
 
     #[test]

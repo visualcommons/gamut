@@ -43,6 +43,14 @@ path only**; the reader and `Exif::set_tag` are unchanged and stay lenient.
 The `describe` feature (default **off**) renders the enumerated tags in DC-008's own wording, and
 `flash` decomposes the `Flash` bitfield of §4.6.6.7.21 Figure 17.
 
+### Where CIPA DC-008 disagrees with itself
+
+`GainControl` (`0xA407`): Table 9's `Type` column says `RATIONAL`, but §4.6.6.7.41 says `SHORT`
+and enumerates five integer codes (0–4). The tag's own section wins — a fraction cannot carry an
+enumeration — and both exiv2 and ExifTool read it as `SHORT`. Every other row was transcribed from
+the summary tables; a mechanical cross-check of all 149 specified rows against the per-tag
+`Tag = … / Type = … / Count = …` blocks found this to be the only contradiction.
+
 ### Where exiv2 and CIPA DC-008 disagree on a name
 
 `tests/oracle.rs` asks exiv2 for `Exif.<group>.<name>` for all 160 catalogued tags. Three do not
