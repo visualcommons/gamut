@@ -37,6 +37,8 @@
 //! ```
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "describe")]
+pub mod describe;
 pub mod error;
 pub mod exif;
 pub mod gps;
@@ -51,6 +53,8 @@ pub mod writer;
 
 // EXIF is a TIFF profile: reuse the container's value and directory types directly rather than
 // wrapping them in a parallel model.
+#[cfg(feature = "describe")]
+pub use describe::{FlashDescription, describe, described_values, flash};
 pub use error::{ExifError, Result};
 pub use exif::Exif;
 pub use gamut_ifd::{ByteOrder, FieldType, Ifd, Value};
