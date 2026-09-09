@@ -193,8 +193,9 @@ impl<'a> MetadataChunks<'a> {
     /// Collects the metadata chunks of the WebP file in `data`, borrowing each payload in place.
     ///
     /// The spec allows at most one chunk of each kind and lets readers "ignore all except the first
-    /// one" (RFC 9649 §2.7.1.4-§2.7.1.5), so the **first** `ICCP` / `EXIF` / `XMP ` / `C2PA` chunk
-    /// wins — the same policy the C2PA chunk gets, the file being malformed either way. The
+    /// one" (RFC 9649 §2.7.1.4-§2.7.1.5), so the **first** `ICCP` / `EXIF` / `XMP ` chunk wins. The
+    /// `C2PA` chunk gets the same policy: C2PA 2.4 §A.3.7 admits one manifest store per file, so a
+    /// second chunk is malformed and picking the first is as good a recovery as any. The
     /// `VP8X` feature flags are advisory here: a payload is reported because its chunk is present,
     /// never because a flag claims it is — so a flag set over a missing chunk yields `None`, and a
     /// chunk a non-conformant writer left unflagged is still recovered.
@@ -238,7 +239,7 @@ impl<'a> MetadataChunks<'a> {
 /// The pad byte RIFF appends after an odd-length payload (RFC 9649 §2.3) is **outside** the range.
 /// It is framing the container adds around the chunk, not part of the chunk's data — the same
 /// reason [`Chunk::payload`] excludes it. A caller who needs the padded span can add
-/// `range.len() % 2`, the store's length and the chunk header's 8 bytes having opposite parity.
+/// `range.len() % 2`: the 8-byte chunk header is even, so the span's parity is the store's.
 ///
 /// The **first** `C2PA` chunk wins, as it does in [`MetadataChunks::read`]; a conformant file has at
 /// most one, placed last (§A.3.7), which is where [`write_extended_preserving`] puts it.
@@ -267,14 +268,13 @@ pub fn c2pa_span(data: &[u8]) -> Result<Option<Range<usize>>> {
     let mut offset = RIFF_HEADER_LEN;
     for chunk in RiffReader::new(data)? {
         let chunk = chunk?;
-        // The reader framed this payload from a `uint32` size field, so the cast is exact.
-        let padded = CHUNK_HEADER_LEN + chunk.payload.len() + pad_len(chunk.payload.len() as u32);
+        let span = CHUNK_HEADER_LEN + chunk.payload.len();
         if WebpChunkId::from(chunk.fourcc) == WebpChunkId::C2pa {
-            return Ok(Some(
-                offset..offset + CHUNK_HEADER_LEN + chunk.payload.len(),
-            ));
+            return Ok(Some(offset..offset + span));
         }
-        offset += padded;
+        // Skip the pad byte too. The reader framed this payload from a `uint32` size field, so the
+        // cast is exact.
+        offset += span + pad_len(chunk.payload.len() as u32);
     }
     Ok(None)
 }
