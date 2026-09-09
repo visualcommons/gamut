@@ -86,15 +86,30 @@ impl C2paSpan {
     }
 }
 
-/// Locates the manifest store in a PNG: the first CRC-valid `caBX` chunk, or `None`.
+/// Locates the manifest store in a PNG: the first CRC-valid `caBX` chunk **before the first
+/// `IDAT`**, or `None`.
 ///
-/// The first CRC-valid one, because that is the chunk the decoder surfaces as its `c2pa` payload
-/// (§13.1 skips a CRC mismatch), so the span a caller excludes from a hash is the store it reads.
-/// Stops at end of input or at the first chunk that does not frame; a stream that is not a PNG
-/// has no store.
+/// The one definition of "the store", shared by every reader in this crate so they cannot
+/// disagree — [`PngReport::c2pa`](crate::PngReport::c2pa) and the decoder's metadata walks apply
+/// the same rule. Three parts, each load-bearing:
+///
+/// - **CRC-valid**, because §13.1 makes a mismatching ancillary chunk skippable, and the decoder
+///   skips it — so a span a caller excludes from a hash names the store the decoder read;
+/// - **the first**, because a PNG carries exactly one store (C2PA 2.4 §A.3.2); a later one is a
+///   malformed file's extra chunk, never merged in;
+/// - **before the first `IDAT`**, because §A.3.2 places the store there and calls data after
+///   `IDAT` bad-form. A `caBX` appended to a finished file is therefore not the store, which is
+///   what stops an appender turning a file that carries none into one that appears to.
+///
+/// The walk stops at the first `IDAT` or at `IEND`, whichever comes first: `IEND` ends the
+/// datastream (§5.6), and bytes after it are a trailer, not chunks (§13.2). It also stops at the
+/// first chunk that does not frame, so a stream that is not a PNG simply has no store.
 pub(crate) fn find_c2pa(png: &[u8]) -> Option<C2paSpan> {
     let mut reader = ChunkReader::new(png).ok()?;
     while let Ok(Some(chunk)) = reader.next_chunk() {
+        if chunk.chunk_type == *b"IDAT" || chunk.chunk_type == *b"IEND" {
+            return None;
+        }
         if chunk.chunk_type == CABX && chunk.crc_ok {
             return Some(C2paSpan::of(chunk.range));
         }
@@ -297,6 +312,35 @@ mod tests {
         assert_eq!(&png[span.chunk.start + 4..span.chunk.start + 8], b"caBX");
         // Nothing but the chunk: the span ends exactly where IEND's length field begins.
         assert_eq!(&png[span.chunk.end + 4..span.chunk.end + 8], b"IEND");
+    }
+
+    /// The walk ends with the datastream. A `caBX` after `IDAT` is bad-form carriage (C2PA
+    /// §A.3.2) and one after `IEND` is not in the datastream at all (§13.2) — neither is the
+    /// store, so an appender cannot inject one into a file that carries none.
+    #[test]
+    fn find_c2pa_stops_at_the_first_idat_and_at_iend() {
+        let mut after_idat = SIGNATURE.to_vec();
+        write_chunk(&mut after_idat, *b"IHDR", &[0; 13]);
+        write_chunk(&mut after_idat, *b"IDAT", b"zz");
+        write_chunk(&mut after_idat, CABX, b"appended");
+        write_chunk(&mut after_idat, *b"IEND", &[]);
+        assert_eq!(find_c2pa(&after_idat), None, "a caBX after IDAT is not the store");
+
+        let mut after_iend = SIGNATURE.to_vec();
+        write_chunk(&mut after_iend, *b"IHDR", &[0; 13]);
+        write_chunk(&mut after_iend, *b"IEND", &[]);
+        write_chunk(&mut after_iend, CABX, b"trailing");
+        assert_eq!(find_c2pa(&after_iend), None, "a caBX after IEND is not the store");
+
+        // ...while the same chunk one position earlier — before IDAT — is the store, so the
+        // stop is what decides, not the payload.
+        let mut before_idat = SIGNATURE.to_vec();
+        write_chunk(&mut before_idat, *b"IHDR", &[0; 13]);
+        write_chunk(&mut before_idat, CABX, b"appended");
+        write_chunk(&mut before_idat, *b"IDAT", b"zz");
+        write_chunk(&mut before_idat, *b"IEND", &[]);
+        let span = find_c2pa(&before_idat).expect("a store before IDAT");
+        assert_eq!(&before_idat[span.payload], b"appended");
     }
 
     /// The store the span names is the one the decoder reads: a `caBX` whose CRC does not match
