@@ -279,20 +279,37 @@ fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paSl
     None
 }
 
-/// The payload of a `ContentProvenanceBox` after its user type — what
-/// [`gamut_isobmff::TopLevelBox::uuid`] takes: the zero `FullBox` version and flags, the
-/// NUL-terminated `box_purpose`, the 8-byte merkle offset written as zero (a still image carries
-/// no `merkle` box), then `slot` verbatim as the store slot.
-pub(crate) fn content_provenance_payload(purpose: C2paBoxPurpose, slot: &[u8]) -> Vec<u8> {
+/// The framing a `ContentProvenanceBox` payload opens with, sized for a `slot_len`-byte slot after
+/// it: the zero `FullBox` version and flags, the NUL-terminated `box_purpose`, and the 8-byte
+/// merkle offset written as zero (a still image carries no `merkle` box).
+fn content_provenance_framing(purpose: C2paBoxPurpose, slot_len: usize) -> Vec<u8> {
     let purpose = purpose.as_str().as_bytes();
-    let mut payload = Vec::with_capacity(
-        VERSION_FLAGS.len() + purpose.len() + 1 + MERKLE_OFFSET_LEN + slot.len(),
-    );
+    let mut payload =
+        Vec::with_capacity(VERSION_FLAGS.len() + purpose.len() + 1 + MERKLE_OFFSET_LEN + slot_len);
     payload.extend_from_slice(&VERSION_FLAGS);
     payload.extend_from_slice(purpose);
     payload.push(0);
     payload.extend_from_slice(&[0; MERKLE_OFFSET_LEN]);
+    payload
+}
+
+/// The payload of a `ContentProvenanceBox` after its user type — what
+/// [`gamut_isobmff::TopLevelBox::uuid`] takes: the §A.5.1.2 framing, then `slot` verbatim as the
+/// store slot.
+pub(crate) fn content_provenance_payload(purpose: C2paBoxPurpose, slot: &[u8]) -> Vec<u8> {
+    let mut payload = content_provenance_framing(purpose, slot.len());
     payload.extend_from_slice(slot);
+    payload
+}
+
+/// The same payload with a `len`-byte **reserved** slot: the framing, then `len` zero bytes.
+///
+/// Written with one `resize` into the buffer the payload already owns rather than by building a
+/// `vec![0; len]` and copying it in, so reserving an n-byte slot peaks at n bytes and not 2n — the
+/// encoder is allocation-conscious and a caller may reserve megabytes.
+pub(crate) fn content_provenance_reserved(purpose: C2paBoxPurpose, len: usize) -> Vec<u8> {
+    let mut payload = content_provenance_framing(purpose, len);
+    payload.resize(payload.len() + len, 0);
     payload
 }
 
@@ -344,6 +361,26 @@ mod tests {
             content_provenance_payload(C2paBoxPurpose::Manifest, &[]).len(),
             4 + 9 + 8
         );
+    }
+
+    #[test]
+    fn a_reserved_slot_is_the_payload_a_zero_slot_would_give() {
+        // `content_provenance_reserved` exists only to avoid materialising the zeros twice, so it
+        // must agree byte for byte with handing the same zeros to the payload builder — at a
+        // couple of lengths, and at zero, where the two paths differ most (no resize at all).
+        for len in [0usize, 1, 96] {
+            for purpose in [
+                C2paBoxPurpose::Manifest,
+                C2paBoxPurpose::Original,
+                C2paBoxPurpose::Update,
+            ] {
+                assert_eq!(
+                    content_provenance_reserved(purpose, len),
+                    content_provenance_payload(purpose, &vec![0u8; len]),
+                    "{purpose:?} at {len}"
+                );
+            }
+        }
     }
 
     #[test]

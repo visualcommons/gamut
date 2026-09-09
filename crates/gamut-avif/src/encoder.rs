@@ -19,7 +19,10 @@ use gamut_isobmff::{
 };
 
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
-use crate::c2pa::{C2PA_UUID, C2paBoxPurpose, content_provenance_payload, manifest_stores};
+use crate::c2pa::{
+    C2PA_UUID, C2paBoxPurpose, content_provenance_payload, content_provenance_reserved,
+    manifest_stores,
+};
 use crate::config::{AvifConfig, AvifMode};
 use crate::image::ALPHA_AUX_URN;
 use crate::transform::{Mirror, Rotation};
@@ -734,8 +737,9 @@ impl AvifEncoder {
         // §A.5.3) — and the slot is zeros or the caller's store behind the §A.5.1 framing.
         if let Some(slot) = &self.c2pa {
             let payload = match slot {
+                // The reserved zeros are written once, into the payload buffer itself.
                 SlotSource::Reserved(len) => {
-                    content_provenance_payload(C2paBoxPurpose::Manifest, &vec![0u8; *len])
+                    content_provenance_reserved(C2paBoxPurpose::Manifest, *len)
                 }
                 SlotSource::Store(store) => {
                     content_provenance_payload(C2paBoxPurpose::Manifest, store)
