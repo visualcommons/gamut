@@ -495,6 +495,38 @@ fn a_declined_store_in_a_trailing_ifd_is_still_surfaced() {
     );
 }
 
+/// The other side of `trailing_extra`'s guard: when the last main-chain directory **is** IFD 0
+/// — every file this crate writes — its unmodelled fields belong to `ifd0_extra` and must not
+/// also appear in `trailing_extra`.
+///
+/// The fixture has to carry an unmodelled IFD-0 tag for this to say anything: with a clean file
+/// both lists are empty, so "surfaced elsewhere" and "collected here" agree and the guard
+/// decides nothing observable.
+#[test]
+fn a_single_main_ifd_files_extras_stay_in_ifd0_extra() {
+    // Retyping the store entry in place (7 -> 1, same element size, no offsets move) leaves
+    // IFD 0 holding a field the decoder does not model — the leftover this claim needs.
+    let bytes = store(24);
+    let (mut dng, report) = encode(&with_store(ByteOrder::LittleEndian, bytes.clone()));
+    let type_at = report.c2pa.expect("ranges").count_field.start as usize - 2;
+    dng[type_at..type_at + 2].copy_from_slice(&[1, 0]);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert!(
+        decoded
+            .ifd0_extra
+            .iter()
+            .any(|t| t.tag == C2PA_MANIFEST_STORE),
+        "the declined field belongs to ifd0_extra: {:?}",
+        decoded.ifd0_extra
+    );
+    assert!(
+        decoded.trailing_extra.is_empty(),
+        "IFD 0 is surfaced already, so nothing is collected as trailing: {:?}",
+        decoded.trailing_extra
+    );
+}
+
 /// A store this decoder *does* accept is consumed, not also reported as an unmodelled field —
 /// `trailing_extra` is the channel for what was declined, not a duplicate of what was read.
 #[test]

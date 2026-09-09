@@ -388,12 +388,18 @@ impl DngDecoder {
         // the raw IFD, and not a sub-image, and without this its fields would reach no surface
         // at all. That would break this decoder's standing promise that nothing in the file is
         // silently dropped, for exactly the input the store's own placement rule invites.
-        let trailing_extra =
-            if last_main == 0 || last_main == raw_index || sub_indices.contains(&last_main) {
-                Vec::new()
-            } else {
-                tracked[last_main].remaining()
-            };
+        //
+        // Stated as one membership test over the directories already surfaced rather than as a
+        // chain of `||`s: the disjuncts never disagree on a real file (a single-main-IFD DNG
+        // makes the first true, a trailing store directory makes all three false), so the
+        // operators between them decided nothing and no test could pin them.
+        let mut surfaced = vec![0, raw_index];
+        surfaced.extend_from_slice(&sub_indices);
+        let trailing_extra = if surfaced.contains(&last_main) {
+            Vec::new()
+        } else {
+            tracked[last_main].remaining()
+        };
 
         Ok(DecodedDng {
             raw,
