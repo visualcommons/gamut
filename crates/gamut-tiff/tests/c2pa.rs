@@ -5,10 +5,10 @@
 //! this crate's use of them — that a store survives an encode of a real image, in the right
 //! directory, at the end of the file, verbatim.
 
-use gamut_core::{Dimensions, ImageRef, Rgb8};
+use gamut_core::{Dimensions, ImageRef, Indexed8, Rgb8};
 use gamut_tiff::{
-    ByteOrder, SpanKind, TiffDecoder, TiffEncoder, TiffMetadata, c2pa_exclusions, deconstruct,
-    read, tags,
+    ByteOrder, Palette8, SpanKind, TiffDecoder, TiffEncoder, TiffMetadata, c2pa_exclusions,
+    deconstruct, read, tags,
 };
 
 /// A store whose bytes are neither a palindrome nor a repetition, so a byte-swapped copy of it
@@ -141,6 +141,49 @@ fn a_bigtiff_carries_the_store_with_its_wider_count_field() {
         STORE
     );
     assert_eq!(excl.store.end(), bytes.len() as u64);
+}
+
+#[test]
+fn the_palette_path_places_the_store_and_reports_it_through_the_locator() {
+    // `encode_palette8` needs a separate colour table, so it is an inherent method rather than an
+    // `EncodeImage` impl and `encode_with_report` cannot reach it. STATUS, README and the docs all
+    // say such a file still carries a store and still reports it through `c2pa_exclusions`; this
+    // is what makes that true rather than merely claimed.
+    let indices: Vec<u8> = (0..16 * 16).map(|i| (i % 251) as u8).collect();
+    let palette =
+        Palette8::from_rgb_triples(&(0..768).map(|i| (i % 251) as u8).collect::<Vec<_>>())
+            .expect("palette");
+    let mut bytes = Vec::new();
+    TiffEncoder::new()
+        .with_byte_order(ByteOrder::BigEndian)
+        .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .encode_palette8(
+            ImageRef::<Indexed8>::new(
+                &indices,
+                Dimensions {
+                    width: 16,
+                    height: 16,
+                },
+            )
+            .expect("indices"),
+            &palette,
+            &mut bytes,
+        )
+        .expect("encode");
+    let range = c2pa_exclusions(&bytes)
+        .expect("locate")
+        .expect("a store")
+        .store;
+    assert_eq!(&bytes[range.start as usize..range.end() as usize], STORE);
+    assert_eq!(range.end(), bytes.len() as u64);
+    assert_eq!(
+        TiffDecoder::new()
+            .metadata(&bytes)
+            .expect("metadata")
+            .c2pa
+            .as_deref(),
+        Some(STORE)
+    );
 }
 
 #[test]
