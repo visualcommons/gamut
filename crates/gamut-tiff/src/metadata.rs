@@ -16,7 +16,18 @@
 //! which this crate has already parsed by the time a caller sees it. Handing it back as
 //! [`gamut_ifd::Ifd`] rather than as bytes saves every caller from re-parsing a directory the
 //! decoder already walked. Its fields are neither validated nor completed — what the caller
-//! supplies is what the file gets, and what the file holds is what the caller gets.
+//! supplies is what the file gets, and what the file holds is what the caller gets — subject to
+//! the three normalisations a directory model implies, named on [`TiffMetadata::exif`].
+//!
+//! # Where the blocks live, and what that costs a page-at-a-time reader
+//!
+//! Every block goes in **IFD 0** and only there, including for a multi-page document: they
+//! describe the document, and an N-page file carrying N copies of an ICC profile is the worse
+//! outcome. IFD 0 is also where a reader conventionally looks. The cost is real and worth
+//! stating: a reader that decodes page 3 on its own sees no ICC profile, no XMP and no EXIF, and
+//! must consult IFD 0 for them. The C2PA manifest store is the deliberate exception — §A.3.6
+//! puts its entry in the **last** IFD of the main chain, so for a multi-page file that is the
+//! last page rather than the first.
 //!
 //! # The C2PA manifest store
 //!
@@ -55,10 +66,25 @@ use crate::tags;
 pub struct TiffMetadata {
     /// The Exif private sub-IFD (`ExifIFD`, 34665), as the shared directory model.
     ///
-    /// Carried **verbatim**: every entry the caller supplies is written, and every entry the
-    /// file holds is returned. This crate adds no mandatory Exif field (not even `ExifVersion`)
-    /// and drops none, because a TIFF's `ExifIFD` is the caller's directory — completing it
-    /// would silently change what a round-trip returns.
+    /// **Entries are carried unchanged; ordering is normalised.** This crate adds no mandatory
+    /// Exif field — not even `ExifVersion` — and drops none, because a TIFF's `ExifIFD` is the
+    /// caller's directory and completing it would silently change what a round trip returns. What
+    /// it does not promise is byte-identity, because [`gamut_ifd::Ifd`] is a directory model
+    /// rather than a byte range, and three normalisations are inherent to it:
+    ///
+    /// 1. fields are kept **sorted by ascending tag**, as TIFF 6.0 §2 requires on disk, so a
+    ///    source directory written out of order comes back in order;
+    /// 2. a **duplicated tag collapses** to its last occurrence;
+    /// 3. a child directory's **next-IFD pointer is ignored** — a sub-IFD is a directory, not a
+    ///    chain.
+    ///
+    /// A conforming source directory is unaffected by all three. A non-conforming one is
+    /// silently repaired, which is worth knowing before using a re-encode to prove a file
+    /// unmodified.
+    ///
+    /// Pointer tags *inside* this directory (`InteroperabilityIFD`, 40965) come back as parsed
+    /// [`sub_ifds`](gamut_ifd::Ifd::sub_ifds) groups, never as raw offsets into the file they were
+    /// read from — the writer gives them fresh offsets when this directory is embedded again.
     pub exif: Option<Ifd>,
     /// An XMP packet (UTF-8 RDF/XML), stored in the `XMP` tag (700) as `BYTE`, verbatim.
     pub xmp: Option<Vec<u8>>,
@@ -174,19 +200,30 @@ fn bytes_value(value: Option<&Value>) -> Option<Vec<u8>> {
 /// Reads the metadata a TIFF carries: IFD 0's blocks and Exif sub-IFD, plus the C2PA manifest
 /// store from the last IFD of the main chain (C2PA 2.4 §A.3.6).
 ///
-/// The store is taken only as the `UNDEFINED` bytes §A.3.6 mandates — a tag-52545 entry of any
-/// other type is not a manifest store and is reported as absence, the same test
-/// [`gamut_ifd::c2pa::locate`] applies.
+/// Whether a tag-52545 entry *is* a manifest store is [`gamut_ifd::c2pa::locate`]'s decision, not
+/// a second opinion held here: this asks the locator first and reports the store only when it
+/// agrees. That matters because `locate` reports absence for an entry a caller could not use —
+/// one of the wrong type, one too short to be a JUMBF box, a duplicated one — and reporting such
+/// an entry as a store would hand the caller a [`TiffMetadata`] that
+/// [`TiffEncoder`](crate::TiffEncoder) then refuses to encode. `gamut-dng` gates its own decode
+/// on the same locator for the same reason.
 pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
-    let file = read_tree(data, &[tags::EXIF_IFD])?;
+    // Every standard pointer tag, not just `ExifIFD`: an `InteroperabilityIFD` (40965) inside the
+    // Exif directory — near-universal in camera EXIF — is itself a pointer, and a pointer left
+    // unparsed comes back as the *source* file's absolute offset. Handing that to
+    // [`TiffMetadata::apply`] would write a dangling offset into a file laid out differently, so
+    // a directory this reader returns must have every pointer under it resolved into a child the
+    // writer can re-point. `gamut-dng`'s rewrite path reads with the same list.
+    let file = read_tree(data, gamut_ifd::tags::STANDARD_POINTER_TAGS)?;
     // §A.3.6: one store for the whole asset, in the last IFD of the main chain. `ifds` is that
     // chain, so its last element is where the entry belongs — and a single-page file makes the
     // two the same directory. A file with no IFD at all carries no metadata.
     let (Some(ifd0), Some(store_ifd)) = (file.ifds.first(), file.ifds.last()) else {
         return Ok(TiffMetadata::new());
     };
+    let located = c2pa::locate(data)?.is_some();
     let c2pa = match store_ifd.get(tags::C2PA_MANIFEST_STORE) {
-        Some(Value::Undefined(store)) => Some(store.clone()),
+        Some(Value::Undefined(store)) if located => Some(store.clone()),
         _ => None,
     };
     Ok(TiffMetadata {
@@ -355,13 +392,34 @@ mod tests {
     }
 
     #[test]
-    fn a_c2pa_tag_of_the_wrong_type_is_not_a_store() {
-        // §A.3.6 fixes the type at 7 (UNDEFINED). A BYTE entry under the same tag is some other
-        // writer's field, and reporting it as a manifest store would be a lie.
+    fn the_reader_and_the_locator_agree_on_what_a_store_is() {
+        // The two surfaces must never disagree: a `TiffMetadata` reporting a store that
+        // `c2pa_exclusions` cannot find is one the encoder would refuse, turning a decode→encode
+        // round trip into a hard error. Each case below is an entry `locate` reports absent for a
+        // *different* reason — wrong type (§A.3.6 fixes it at 7), and too short to be a JUMBF box
+        // (below `MIN_STORE_LEN`) — so a fix that only handled one of them still fails here.
+        for value in [
+            Value::Byte(vec![0x10; 12]),
+            Value::Undefined(vec![9; c2pa::MIN_STORE_LEN - 1]),
+        ] {
+            let mut ifd0 = Ifd::new();
+            ifd0.set(tags::C2PA_MANIFEST_STORE, value.clone());
+            let bytes = file_with(ifd0);
+            assert_eq!(read_metadata(&bytes).expect("read").c2pa, None, "{value:?}");
+            assert_eq!(c2pa_exclusions(&bytes).expect("locate"), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_store_the_locator_accepts_is_returned_verbatim() {
+        // The other side of the agreement: the reader must not be so strict that it drops a store
+        // the locator does find, which would make the two disagree in the opposite direction.
+        let store = b"\0\0\0\x16jumb\x01\x02\x03".to_vec();
         let mut ifd0 = Ifd::new();
-        ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Byte(vec![0x10; 12]));
-        let read = read_metadata(&file_with(ifd0)).expect("read");
-        assert_eq!(read.c2pa, None);
+        ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(store.clone()));
+        let bytes = file_with(ifd0);
+        assert_eq!(read_metadata(&bytes).expect("read").c2pa, Some(store));
+        assert!(c2pa_exclusions(&bytes).expect("locate").is_some());
     }
 
     #[test]

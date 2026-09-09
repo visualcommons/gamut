@@ -5,7 +5,9 @@
 //! fails on its own rather than hiding behind another.
 
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
-use gamut_tiff::{Ifd, TiffDecoder, TiffEncoder, TiffMetadata, Value, read, tags};
+use gamut_tiff::{
+    Anomaly, Ifd, Severity, TiffDecoder, TiffEncoder, TiffMetadata, Value, deconstruct, read, tags,
+};
 
 /// Distinct payloads per carrier, so a block written under the wrong tag is visible.
 const XMP: &[u8] = b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>";
@@ -111,6 +113,64 @@ fn the_decoder_returns_every_block_verbatim() {
     assert_eq!(read_back.iptc.as_deref(), Some(IPTC));
     assert_eq!(read_back.icc.as_deref(), Some(ICC));
     assert_eq!(read_back.exif, Some(exif()));
+}
+
+#[test]
+fn a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file() {
+    // An `InteroperabilityIFD` (40965) *inside* the Exif directory is near-universal in camera
+    // EXIF, and it is a pointer: its value is an absolute file offset. A decoder that returned it
+    // as a raw `Long` rather than as a parsed child directory would hand the caller the *source*
+    // file's offset, and re-encoding would write it verbatim into a file laid out differently —
+    // a dangling pointer. The crate's own judge is the test: gamut-tiff's v1 guarantee is that
+    // every file it writes is fully classified by `deconstruct`.
+    let mut interop = Ifd::new();
+    interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+    let mut exif = exif();
+    exif.set(37500, Value::Undefined(vec![0xAB; 6])); // MakerNote, so the directory is not tiny
+    exif.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
+
+    let pixels = rgb(8, 4);
+    let first = TiffEncoder::new()
+        .with_metadata(TiffMetadata::new().with_exif(exif))
+        .encode_to_vec(image(&pixels, 8, 4))
+        .expect("encode");
+
+    // Decode the metadata back and feed it straight into a new encode — the round trip a caller
+    // makes when rewriting a file.
+    let decoded = TiffDecoder::new().metadata(&first).expect("metadata");
+    let exif_back = decoded.exif.clone().expect("an Exif sub-IFD");
+    assert_eq!(
+        exif_back
+            .sub_ifds()
+            .iter()
+            .find(|group| group.tag == tags::INTEROPERABILITY_IFD)
+            .map(|group| group.ifds.as_slice()),
+        Some(&[interop][..]),
+        "the Interop directory must come back parsed, not as a raw offset"
+    );
+    assert_eq!(
+        exif_back.get(tags::INTEROPERABILITY_IFD),
+        None,
+        "a parsed pointer is consumed into the sub-IFD group, not left as a stale offset"
+    );
+
+    let second = TiffEncoder::new()
+        .with_metadata(decoded)
+        .encode_to_vec(image(&pixels, 8, 4))
+        .expect("re-encode");
+    let report = deconstruct(&second).expect("deconstruct");
+    assert!(
+        report.segments.is_fully_classified(),
+        "unclassified after a metadata round trip: {:?}",
+        report.segments.unclassified
+    );
+    assert!(
+        !report.anomalies.iter().any(
+            |a| matches!(a, Anomaly::Structure { severity, .. } if *severity == Severity::Error)
+        ),
+        "structural errors after a metadata round trip: {:?}",
+        report.anomalies
+    );
 }
 
 #[test]

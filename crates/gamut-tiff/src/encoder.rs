@@ -152,21 +152,37 @@ impl TiffEncoder {
     /// [`encode_with_report`](Self::encode_with_report) (or [`c2pa_exclusions`] over the produced
     /// bytes) reports its two exclusion ranges (§18.5.5). A signer hashes the file around those
     /// ranges and overwrites the reservation in place; nothing else in the file moves. `len` must
-    /// be at least [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header), and a reservation
-    /// cannot be combined with a store supplied through [`with_metadata`](Self::with_metadata) —
-    /// either is a typed error at encode time.
+    /// be at least [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header, 8 bytes) **and longer
+    /// than the container's inline threshold**, so BigTIFF's true minimum is 9 — a value of 8 or
+    /// less would be packed into the entry's own value word rather than placed out of line at the
+    /// end of the file. A reservation cannot be combined with a store supplied through
+    /// [`with_metadata`](Self::with_metadata). Either is a typed error raised before any pixel
+    /// work, not after the image has been compressed.
     #[must_use]
     pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
         self.c2pa_reserve = Some(len);
         self
     }
 
+    /// The shortest manifest store this encoder can place, for the container variant it writes.
+    ///
+    /// Two lower bounds apply and the larger wins. [`c2pa::MIN_STORE_LEN`] (8) is the format's: a
+    /// manifest store is a JUMBF superbox, so nothing shorter than an `LBox` + `TBox` could be
+    /// one. The container's is the variant's **inline threshold** — 4 bytes in classic TIFF, 8 in
+    /// BigTIFF — because a value that fits inline is packed into the entry's value word instead of
+    /// being placed out of line, which is not where §A.3.6 puts a store and would make the two
+    /// exclusion ranges overlap. So classic TIFF's minimum is 8 and BigTIFF's is **9**.
+    fn min_store_len(&self) -> usize {
+        c2pa::MIN_STORE_LEN.max(self.variant().inline_threshold() + 1)
+    }
+
     /// The C2PA manifest store to write, if any: the caller's, or a zero-filled reservation.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if both were requested, or if the store is too short to be
-    /// a JUMBF box at all ([`c2pa::MIN_STORE_LEN`]) — caught here, before any pixel work.
+    /// Returns [`Error::InvalidInput`] if both were requested, or if the store is shorter than
+    /// [`min_store_len`](Self::min_store_len) — caught here, before any pixel work, rather than
+    /// after a whole image has been compressed.
     fn c2pa_store(&self) -> Result<Option<Cow<'_, [u8]>>> {
         let store = match (&self.metadata.c2pa, self.c2pa_reserve) {
             (Some(_), Some(_)) => {
@@ -179,10 +195,11 @@ impl TiffEncoder {
             (None, Some(len)) => Cow::Owned(vec![0; len]),
             (None, None) => return Ok(None),
         };
-        if store.len() < c2pa::MIN_STORE_LEN {
+        if store.len() < self.min_store_len() {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "TIFF: a C2PA manifest store is at least a JUMBF box header (8 bytes)",
+                "TIFF: a C2PA manifest store must be a JUMBF box header (8 bytes) and longer \
+                 than the container's inline threshold (9 bytes in BigTIFF)",
             ));
         }
         Ok(Some(store))
@@ -826,25 +843,39 @@ mod tests {
     }
 
     #[test]
-    fn a_store_shorter_than_a_jumbf_box_header_is_refused() {
-        // A manifest store is a JUMBF superbox, so it is at least an 8-byte LBox + TBox; seven
-        // bytes could never be filled with a valid one. The boundary is the claim, so it is
-        // asserted at the two lengths that straddle it, for a supplied store and a reservation
-        // alike.
-        for encoder in [
-            TiffEncoder::new().with_metadata(TiffMetadata::new().with_c2pa(vec![0; 7])),
-            TiffEncoder::new().with_c2pa_reserved(7),
-        ] {
-            let err = encoder.c2pa_store().expect_err("too short");
+    fn the_shortest_placeable_store_differs_between_classic_tiff_and_bigtiff() {
+        // Two lower bounds, larger wins: the JUMBF box header (8) and the variant's inline
+        // threshold + 1, since a value that fits inline is packed into the entry's value word
+        // instead of being placed at the end of the file where §A.3.6 wants it. Classic TIFF's
+        // minimum is therefore 8 and BigTIFF's is 9. The boundary is the whole claim, so each
+        // variant is asserted at the two lengths that straddle its own — and 8 is the length that
+        // separates them, accepted as classic and refused as BigTIFF.
+        for (big_tiff, minimum) in [(false, 8), (true, 9)] {
+            let at = |len: usize| {
+                TiffEncoder::new()
+                    .with_big_tiff(big_tiff)
+                    .with_c2pa_reserved(len)
+            };
+            assert_eq!(at(0).min_store_len(), minimum, "big_tiff={big_tiff}");
+            let err = at(minimum - 1).c2pa_store().expect_err("too short");
             assert!(err.to_string().contains("JUMBF box header"), "{err}");
+            assert!(
+                at(minimum)
+                    .c2pa_store()
+                    .expect("the minimum is placeable")
+                    .is_some(),
+                "big_tiff={big_tiff}"
+            );
+            // A supplied store is held to the same bound as a reservation.
+            assert!(
+                TiffEncoder::new()
+                    .with_big_tiff(big_tiff)
+                    .with_metadata(TiffMetadata::new().with_c2pa(vec![0; minimum - 1]))
+                    .c2pa_store()
+                    .is_err(),
+                "big_tiff={big_tiff}"
+            );
         }
-        assert!(
-            TiffEncoder::new()
-                .with_c2pa_reserved(8)
-                .c2pa_store()
-                .expect("8 bytes is a box header")
-                .is_some()
-        );
     }
 
     #[test]
