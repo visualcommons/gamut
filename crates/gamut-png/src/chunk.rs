@@ -496,6 +496,18 @@ mod tests {
         assert_eq!(mine, png);
     }
 
+    /// The bounds check admits the exact fit: a buffer that ends exactly where the chunk does is
+    /// in range, not past it. `fill_c2pa` takes a `&mut [u8]`, so a caller may legitimately hand
+    /// it the prefix of a file up to the end of the store — and a file whose store happens to be
+    /// its last chunk is the same shape. Off by one here and every such call is refused.
+    #[test]
+    fn a_buffer_ending_exactly_where_the_chunk_does_is_in_range() {
+        let (mut png, span) = reserved(4);
+        let end = span.chunk.end;
+        fill_c2pa(&mut png[..end], &span, b"abcd").expect("the chunk ends at the buffer's end");
+        assert_eq!(&png[span.payload], b"abcd");
+    }
+
     /// A zero-length reservation is a legal chunk, and filling it with nothing is a no-op that
     /// still verifies — the boundary where payload start and end coincide.
     #[test]
