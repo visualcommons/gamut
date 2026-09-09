@@ -25,6 +25,13 @@ exclude = [
     # pins stable, and because a coverage-guided engine is unbounded and so cannot sit in the
     # `coverage` job, the only gate that runs tests. Run it with `mise run fuzz`.
     "tooling/gamut-fuzz",
+    # Dev-only differential oracle against `c2pa-rs`, the C2PA reference implementation (issue
+    # #447 under the #239 epic). Excluded for the usual reason and one more: `c2pa-rs` is a large
+    # dependency tree carrying signing and verification crypto, and the epic's "no crypto in the
+    # shipped graph" criterion means no shipped crate may ever reach it. Being outside the
+    # workspace also puts it outside `mise run check-release-deps`. Run it with `mise run
+    # test-c2pa`; `mise run check-c2pa` is the compile-only half the per-PR lint lane affords.
+    "tooling/c2pa-oracle",
     "tooling/gamut-iptc-oracle",
     "tooling/zlib-oracle",
     "tooling/libpng-oracle",

@@ -210,6 +210,23 @@ run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
 description = "Compile the real-camera DNG conformance tier (no corpus needed)"
 run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml --all-targets"
 
+# The C2PA differential oracle (issue #447 under the #239 epic). Like the tier above it is
+# workspace-excluded *and* nothing depends on it, so no per-PR gate reaches it; unlike that tier it
+# needs no corpus and no native toolchain — `c2pa-rs` is a pure-Rust crate built
+# `--no-default-features --features rust_native_crypto`, which is what keeps its vendored OpenSSL
+# out of this repository entirely. It is still kept off `mise run test` because a shipped crate
+# must never gain an edge to it, and the excluded manifest is what enforces that.
+[tasks.test-c2pa]
+description = "Cross-check gamut's C2PA carriage against c2pa-rs, both directions (issue #447)"
+run = "cargo test --manifest-path tooling/c2pa-oracle/Cargo.toml"
+
+# The compile half, for the same reason `check-dng-real` exists: a `gamut-avif` or `gamut-heic` API
+# change can break this crate while every per-PR gate stays green, and `check` catches that in
+# seconds without signing anything.
+[tasks.check-c2pa]
+description = "Compile the C2PA differential oracle (no signing, no corpus)"
+run = "cargo check --manifest-path tooling/c2pa-oracle/Cargo.toml --all-targets"
+
 # Doctests only. On stable, `cargo llvm-cov` cannot instrument doctests (that needs nightly), so
 # the coverage gate — which CI uses as its green-test gate — silently skips them. This task is the
 # missing slice: CI's lint lane runs it, reusing the `--all-targets --all-features` build it just
