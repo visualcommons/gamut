@@ -315,13 +315,21 @@ pub fn write_extended_with_metadata(
 /// the `C2PA` chunk to "appear as the last sub-chunk of the first RIFF header chunk", so it is
 /// emitted after the preserved chunks, not before them.
 ///
-/// [`MetadataChunks::c2pa`] **owns** that chunk. A `C2PA` chunk in `unknown` is dropped rather than
-/// emitted, so a file this function writes carries at most one — the field's. Without that, a caller
-/// who collected `unknown` with a reader that does not recognise `C2PA` (a third-party one, or this
-/// crate before the chunk was modelled) would emit two, and every reader here takes the *first*, so
-/// the stale copy would win and [`c2pa_span`] would report a range over the wrong bytes. The chunk
-/// is not unknown to this crate ([`WebpChunkId::C2pa`]), so [`WebpLayout::parse`] never puts it in
-/// `unknown` in the first place and nothing is lost by the filter.
+/// A file this function writes carries **at most one** `C2PA` chunk, and it is always in the
+/// store's place at the end. A `C2PA` chunk among `unknown` is never emitted where it sits:
+///
+/// - with [`MetadataChunks::c2pa`] set, the field owns the chunk and the copy in `unknown` is
+///   **dropped**. Emitting both would put the copy first, and every reader here takes the *first* of
+///   a repeated chunk — so it would win, and [`c2pa_span`] would report a range over bytes the
+///   caller never configured, which is exactly the range a signer excludes from its hash;
+/// - with no store configured, the copy **is** the store of the file it came from, so it is kept and
+///   written in the store's place. Dropping it would lose a foreign manifest store with no signal,
+///   and leaving it among the unknown chunks could put it somewhere §A.3.7 does not allow.
+///
+/// Where `unknown` holds several, the first wins, as everywhere else in this crate. A caller who
+/// read the file with [`WebpLayout::parse`] never sees a `C2PA` chunk in `unknown` at all — this
+/// crate recognises it ([`WebpChunkId::C2pa`]) — so this handles chunks collected by a reader that
+/// does not, such as a third-party one or this crate before the chunk was modelled.
 ///
 /// [`write_extended`] does no filtering: it writes the chunks it is given, and is the escape hatch
 /// for a caller who means to hand-assemble a file.
@@ -352,8 +360,10 @@ pub fn write_extended_preserving(
     if let Some(xmp) = metadata.xmp {
         chunks.push((FourCc::XMP, xmp));
     }
-    // `metadata.c2pa` owns the `C2PA` chunk, so a copy arriving through `unknown` is dropped: two
-    // would make the *first* win in every reader here, which is not the one the caller configured.
+    // A `C2PA` chunk never goes out among the unknown chunks: either the configured store owns that
+    // slot, or — with none configured — this one *is* the store and belongs in the store's place.
+    // First wins, as everywhere else here.
+    let carried = unknown.iter().find(|c| c.fourcc == C2PA_FOURCC);
     chunks.extend(
         unknown
             .iter()
@@ -362,7 +372,7 @@ pub fn write_extended_preserving(
     );
     // C2PA 2.4 §A.3.7: the manifest store's chunk is the *last* sub-chunk of the RIFF/WEBP form —
     // after the preserved unknown chunks, not merely somewhere past the image data.
-    if let Some(c2pa) = metadata.c2pa {
+    if let Some(c2pa) = metadata.c2pa.or(carried.map(|c| c.payload)) {
         chunks.push((C2PA_FOURCC, c2pa));
     }
     write_extended(&header, &chunks)
@@ -1576,6 +1586,51 @@ mod tests {
         );
         let span = c2pa_span(&file).unwrap().expect("the store was embedded");
         assert_eq!(&file[span.start + 8..span.end], b"FRESH");
+    }
+
+    /// With no store configured there is nothing for a carried `C2PA` chunk to displace, so it is
+    /// kept rather than dropped: it is the manifest store of the file it was read out of, and losing
+    /// it silently would be worse than carrying it. It still goes in the store's place (§A.3.7)
+    /// rather than wherever the caller's list happened to put it.
+    #[test]
+    fn a_carried_c2pa_chunk_is_kept_as_the_store_when_none_is_configured() {
+        let header = Vp8xHeader {
+            canvas_width: 4,
+            canvas_height: 4,
+            ..Default::default()
+        };
+        let file = write_extended_preserving(
+            &header,
+            &MetadataChunks::default(),
+            &[(FourCc::VP8L, &[0x2f])],
+            &[
+                Chunk {
+                    fourcc: C2PA_FOURCC,
+                    payload: b"foreign",
+                },
+                Chunk {
+                    fourcc: FourCc::from(*b"XYZW"),
+                    payload: b"kept",
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            chunk_ids(&file),
+            vec![
+                FourCc::VP8X,
+                FourCc::VP8L,
+                FourCc::from(*b"XYZW"),
+                C2PA_FOURCC,
+            ],
+            "the carried store moves to the end; the private chunk keeps its order"
+        );
+        assert_eq!(
+            MetadataChunks::read(&file).unwrap().c2pa,
+            Some(&b"foreign"[..]),
+            "and it reads back as the store, which is what it is"
+        );
     }
 
     /// `write_extended` is the unfiltered escape hatch: it writes what it is given, so a caller who
