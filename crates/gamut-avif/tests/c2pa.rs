@@ -17,11 +17,9 @@
 
 mod common;
 
-use common::av01_item;
-use gamut_avif::{
-    Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, C2PA_UUID, C2paBoxPurpose, DecodedFrame,
-};
-use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Result, Rgb8};
+use common::{Dav1dDecoder, av01_item};
+use gamut_avif::{AvifContainer, AvifEncoder, C2PA_UUID, C2paBoxPurpose};
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_isobmff::{IsoBmffImage, TopLevelBox, TopLevelPosition, write};
 
 const W: u32 = 34;
@@ -59,28 +57,6 @@ fn payload(seed: u8, len: usize) -> Vec<u8> {
     (0..len)
         .map(|i| seed.wrapping_add((i * 31) as u8))
         .collect()
-}
-
-/// [`Av1StillDecoder`] over the real dav1d decoder, bridged the way a platform decoder would be.
-struct Dav1dDecoder;
-
-impl Av1StillDecoder for Dav1dDecoder {
-    fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
-        let mut stream = Vec::new();
-        config.full_stream(payload, &mut stream)?;
-        let pic = dav1d_oracle::decode_obu(&stream)
-            .map_err(|_| Error::InvalidInput("c2pa: dav1d rejected the stream"))?;
-        let [y, u, v] = pic.planes;
-        DecodedFrame::new(
-            pic.width,
-            pic.height,
-            pic.bit_depth,
-            config.chroma_format(),
-            y,
-            u,
-            v,
-        )
-    }
 }
 
 #[test]
