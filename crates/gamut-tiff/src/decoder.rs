@@ -211,7 +211,17 @@ impl TiffDecoder {
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or a sub-IFD pointer
-    /// graph that is not a tree.
+    /// graph that is not a tree (a cycle, a repeated child offset, an out-of-bounds or
+    /// unparseable pointer target, or nesting deeper than 16 levels).
+    ///
+    /// **This can fail on a file [`decode_image`](DecodeImage::decode_image) decodes happily**,
+    /// and that is deliberate. Pixel decoding never follows a metadata pointer, so a broken
+    /// `ExifIFD` offset cannot stop it; this method does follow one, and the alternative to
+    /// failing is reporting `exif: None` for a directory the file plainly declares — silent loss
+    /// a caller cannot tell apart from "there is no EXIF here". A caller that wants a partial
+    /// answer can walk the re-exported [`read`](crate::read) / [`gamut_ifd::read_tree`] spine
+    /// itself and decide per pointer. (`gamut-dng` degrades instead of failing, because there the
+    /// metadata is incidental to a raw *image* decode that must still succeed.)
     pub fn metadata(&self, data: &[u8]) -> Result<TiffMetadata> {
         metadata::read_metadata(data)
     }
