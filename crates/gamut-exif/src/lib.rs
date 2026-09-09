@@ -35,6 +35,7 @@ pub mod exif;
 pub mod gps;
 pub mod maker_note;
 pub mod reader;
+pub mod stream;
 pub mod tag;
 pub mod thumbnail;
 pub mod value;
