@@ -43,9 +43,15 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
   `entry.into_result()` is finer-grained here.
 - **A signal for a shadowed duplicate tag.** `gamut_ifd::IfdReader::decode_ifd` builds a directory
   with `Ifd::set`, which is last-wins, so two entries for one tag decode to the second and the
-  first is discarded with no signal this crate can observe. `ReadReport::is_empty()` is therefore a
-  verdict over the regions it covers, **not** "this parse lost nothing"; both the report's module
-  docs and the README say so. Fixing it needs a reporting decode path in `gamut-ifd` (issue #528).
+  first is discarded. `ReadReport::is_empty()` is therefore a verdict over the regions it covers,
+  **not** "this parse lost nothing"; both the report's module docs and the README say so.
+
+  The deferral is a layering decision, **not** an inability to observe: `RawIfd::entries` is public
+  and in on-disk order and `follow` already holds the `RawIfd`, so `raw.entries.len() !=
+  ifd.fields().len()` would detect a shadowed tag here in three lines. What `gamut-exif` cannot do
+  is say *what* was lost without re-decoding the shadowed entry — and `gamut-tiff` and `gamut-dng`
+  need the same signal, so it belongs in the shared layer (issue #528). Issue #528's own body
+  states the weaker, incorrect reason; read it with this correction.
 - **A byte-completeness verdict.** `ReadReport` says what was *dropped*, not which source bytes no
   parsed structure claims. `gamut-ifd`'s audit engine (`Tracked`, `SegmentMap`, `read_audited`) is
   the machinery for it and is already used by `gamut-dng` and `gamut-tiff`; wiring it behind a

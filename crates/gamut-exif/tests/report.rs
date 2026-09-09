@@ -73,7 +73,11 @@ fn a_dangling_sub_ifd_pointer_is_named_with_its_tag_offset_and_reason() {
         );
         let dropped = report.dropped()[0];
         assert_eq!(dropped.region(), region);
-        assert_eq!(dropped.tag(), tag, "named by the tag that addressed it");
+        assert_eq!(
+            dropped.tag(),
+            Some(tag),
+            "named by the tag that addressed it"
+        );
         assert_eq!(dropped.offset(), u64::from(DANGLING));
         assert_eq!(dropped.reason(), DropReason::OutOfBounds);
     }
@@ -123,13 +127,17 @@ fn an_out_of_bounds_thumbnail_range_is_named() {
     assert_eq!(report.dropped().len(), 1, "{:?}", report.dropped());
     let dropped = report.dropped()[0];
     assert_eq!(dropped.region(), DroppedRegion::ThumbnailJpeg);
-    assert_eq!(dropped.tag(), THUMB_OFFSET);
+    assert_eq!(dropped.tag(), Some(THUMB_OFFSET));
     assert_eq!(dropped.offset(), u64::from(DANGLING));
     assert_eq!(dropped.reason(), DropReason::OutOfBounds);
 }
 
-/// A blob that parses in full reports nothing: `is_empty` is the "this parse lost nothing" verdict,
-/// so a report that named a region on a healthy file would make it useless.
+/// A blob that parses in full reports nothing.
+///
+/// `is_empty` is the verdict over the regions the report *covers* — deliberately not "this parse
+/// lost nothing", which is a stronger claim this crate cannot make (see the `report` module). What
+/// it must still guarantee is the direction tested here: a healthy file names nothing, or the
+/// signal would be noise.
 #[test]
 fn a_well_formed_blob_reports_no_drops() {
     let mut interop = Ifd::new();
@@ -205,7 +213,11 @@ fn a_top_level_directory_past_the_thumbnail_is_named() {
         );
         for (dropped, expected) in report.dropped().iter().zip(&offsets[2..]) {
             assert_eq!(dropped.region(), DroppedRegion::TrailingIfd);
-            assert_eq!(dropped.tag(), 0, "no tag addresses a top-level directory");
+            assert_eq!(
+                dropped.tag(),
+                None,
+                "no tag addresses a top-level directory"
+            );
             assert_eq!(dropped.offset(), *expected, "named at its own position");
             assert_eq!(dropped.reason(), DropReason::Unrepresentable);
         }
@@ -258,7 +270,7 @@ fn a_truncated_blob_never_drops_a_sub_ifd_without_naming_it() {
             if raw.entry(tag).is_none() {
                 continue;
             }
-            let named = report.dropped().iter().any(|d| d.tag() == tag);
+            let named = report.dropped().iter().any(|d| d.tag() == Some(tag));
             assert_ne!(
                 followed, named,
                 "at truncation {end}, tag {tag:#06x} was followed={followed} and named={named}"

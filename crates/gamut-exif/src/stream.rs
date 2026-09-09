@@ -80,7 +80,7 @@ impl ExifReader {
         let order = reader.order();
 
         let file = reader.read_file()?;
-        let trailing = file.ifds.len().saturating_sub(2);
+        let has_trailing = file.ifds.len() > 2;
         let mut ifds = file.ifds.into_iter();
         let mut image = ifds.next().ok_or(ExifError::Truncated)?;
         // The next-IFD chain's second entry is the thumbnail directory (1st IFD), if any.
@@ -90,7 +90,7 @@ impl ExifReader {
         };
         // EXIF defines exactly two top-level directories, so anything further down the chain has
         // nowhere to go in the model. Name it rather than letting the iterator drop it silently.
-        record_trailing_ifds(&mut reader, trailing, report)?;
+        record_trailing_ifds(&mut reader, has_trailing, report)?;
 
         // The Exif sub-IFD's own offset, captured before `follow` strips the pointer: the
         // maker-note pin needs the note value's absolute source position.
@@ -98,7 +98,7 @@ impl ExifReader {
         let exif = self.follow(&mut image, &mut reader, DroppedRegion::ExifIfd, report)?;
         let gps = self.follow(&mut image, &mut reader, DroppedRegion::GpsIfd, report)?;
         let maker_note_at = match (&exif, exif_ifd_at) {
-            (Some(_), Some(at)) => maker_note_offset(&mut reader, at),
+            (Some(_), Some(at)) => maker_note_offset(&mut reader, at)?,
             _ => None,
         };
 
@@ -167,7 +167,12 @@ impl ExifReader {
         region: DroppedRegion,
         report: &mut ReadReport,
     ) -> Result<Option<Ifd>> {
-        let ptr = region.tag();
+        // A region no tag addresses has, by definition, no pointer to follow — so `Ok(None)` is
+        // the answer, not a special case. Today `follow` is only ever called for the three
+        // pointer-addressed sub-IFDs, all of which have one.
+        let Some(ptr) = region.tag() else {
+            return Ok(None);
+        };
         let Some(offset) = parent.get_u32(ptr) else {
             return Ok(None);
         };
@@ -234,18 +239,24 @@ impl ExifReader {
 /// Records the top-level directories past the 1st IFD, which parse cleanly but have nowhere to go
 /// in the [`Exif`] model.
 ///
-/// The offsets come from a second walk of the next-IFD chain. That costs a re-read of the
-/// directory bodies, so it runs **only** when there is something to report — a well-formed EXIF
-/// blob has one or two directories and never reaches it, leaving the lazy read bound untouched.
+/// The offsets come from a second walk of the next-IFD chain, which is the single source of truth
+/// for *which* directories are trailing — `has_trailing` only says whether the walk is worth
+/// starting. That costs a re-read of the directory bodies, so it runs **only** when there is
+/// something to report: a well-formed EXIF blob has one or two directories and never reaches it,
+/// leaving the lazy read bound untouched.
+///
+/// A source that dies between the two walks turns a would-be success into an error. That is the
+/// same rule the rest of this module follows — a transport failure is propagated, never swallowed —
+/// and swallowing it only here would be the inconsistency.
 fn record_trailing_ifds<S: ReadAt>(
     reader: &mut IfdReader<S>,
-    trailing: usize,
+    has_trailing: bool,
     report: &mut ReadReport,
 ) -> Result<()> {
-    if trailing == 0 {
+    if !has_trailing {
         return Ok(());
     }
-    let mut offsets = Vec::with_capacity(trailing);
+    let mut offsets = Vec::new();
     for raw in reader.ifds().skip(2) {
         offsets.push(raw?.offset);
     }
@@ -294,10 +305,27 @@ fn read_range<S: ReadAt>(
 
 /// The absolute offset of the Exif sub-IFD's out-of-line `MakerNote` value in the TIFF stream, or
 /// `None` if the note is absent or inline.
-fn maker_note_offset<S: ReadAt>(reader: &mut IfdReader<S>, exif_ifd_at: u64) -> Option<u64> {
-    let raw: RawIfd = reader.read_ifd(exif_ifd_at).ok()?;
-    let entry = raw.entry(ifd_tags::MAKER_NOTE)?;
-    reader.value_offset(entry)
+///
+/// A transport failure here is propagated rather than folded into `None`. The offset is what
+/// [`ExifWriter`](crate::ExifWriter) uses to *pin* the note in place on a rewrite, so losing it
+/// silently re-emits a vendor MakerNote unpinned — wrong bytes, no error, and nothing in the
+/// report. No later read is guaranteed to resurface the failure either: `follow` returns before
+/// reading at all when the GPS and Interop pointers are absent, which is the common case.
+fn maker_note_offset<S: ReadAt>(
+    reader: &mut IfdReader<S>,
+    exif_ifd_at: u64,
+) -> Result<Option<u64>> {
+    let raw: RawIfd = match reader.read_ifd(exif_ifd_at) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() != ErrorKind::InvalidInput => return Err(e.into()),
+        // The directory parsed a moment ago in `follow`; if the bytes will not re-read now, the
+        // pin is simply unavailable, and that is not worth failing an otherwise good parse over.
+        Err(_) => return Ok(None),
+    };
+    let Some(entry) = raw.entry(ifd_tags::MAKER_NOTE) else {
+        return Ok(None);
+    };
+    Ok(reader.value_offset(entry))
 }
 
 #[cfg(test)]
@@ -394,8 +422,8 @@ mod tests {
         }
     }
 
-    /// A structurally perfect blob with both 0th-IFD sub-directories, so every drop path is
-    /// reachable and none of them *should* fire.
+    /// A structurally perfect blob with both 0th-IFD sub-directories and a nested Interop, so
+    /// every sub-IFD drop path is reachable and none of them *should* fire.
     fn healthy_blob() -> Vec<u8> {
         let mut interop = Ifd::new();
         interop.set(0x0001, Value::Ascii("R98".into()));
@@ -419,45 +447,120 @@ mod tests {
         out
     }
 
+    /// A structurally perfect blob that reaches the **maker-note** read site.
+    ///
+    /// `healthy_blob` cannot: it carries no `MakerNote`, and its Interop pointer means a failure
+    /// inside `maker_note_offset` is always resurfaced by the later Interop read. Here the GPS and
+    /// Interop pointers are both absent — so `follow` returns without reading at all — and the
+    /// out-of-line `MakerNote` makes the pin's offset something a caller can lose.
+    fn maker_note_blob() -> Vec<u8> {
+        let mut exif = Ifd::new();
+        exif.set(0x829A, Value::Rational(vec![(1, 250)])); // ExposureTime
+        // Nine bytes: too wide to sit inline in the entry, so it has a real source offset.
+        exif.set(
+            ifd_tags::MAKER_NOTE,
+            Value::Undefined(b"Canon\0\0\0\0".to_vec()),
+        );
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
+        let tiff = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image],
+        })
+        .expect("write");
+        let mut out = MARKER.to_vec();
+        out.extend(tiff);
+        out
+    }
+
+    /// The maker-note pin is real in the fixture the sweep uses, so losing it is observable.
+    ///
+    /// Without this the sweep below could pass against a blob that never had a pin to lose.
+    #[test]
+    fn the_maker_note_fixture_has_a_pin_to_lose() {
+        let exif = ExifReader::new()
+            .parse_from(&maker_note_blob()[..])
+            .expect("parse");
+        assert!(
+            exif.maker_note_offset().is_some(),
+            "the fixture must pin an out-of-line MakerNote"
+        );
+        assert!(
+            exif.gps_ifd().is_none(),
+            "no GPS pointer to rescue a failure"
+        );
+        assert!(
+            exif.interop_ifd().is_none(),
+            "no Interop pointer to rescue a failure"
+        );
+    }
+
     /// A failing source is propagated, never reported as a malformed file.
     ///
     /// Leniency exists to tolerate corrupt *bytes*. If the transport fails instead, the data may be
     /// perfect, so silently returning `Ok` with the sub-IFDs missing — and a report blaming the
     /// file — would be a lie, and the worst case is the network-backed source this entry point
-    /// exists to enable. The whole parse is swept one read at a time, so every read site is
-    /// covered: the marker probe, the header, each directory body and each out-of-line value.
+    /// exists to enable. The whole parse is swept one read at a time over two fixtures, between
+    /// them reaching every read site: the marker probe, the header, each directory body, each
+    /// out-of-line value, and the maker-note pin — which only `maker_note_blob` reaches.
+    ///
+    /// A silent loss shows up here as `Ok` from a source that failed, and the assertions cover both
+    /// shapes it can take: a spurious report entry blaming the file, or — as the maker-note pin did
+    /// — an `Exif` quietly missing something with nothing in the report at all.
     #[test]
     fn a_failing_source_is_propagated_not_reported_as_a_malformed_file() {
-        let data = healthy_blob();
-        let (mut failures, mut successes) = (0, 0);
-        for budget in 0..40 {
-            let source = FailingAfter {
-                inner: &data[..],
-                budget,
-            };
-            match ExifReader::new().parse_from_with_report(source) {
-                Ok((_, report)) => {
-                    successes += 1;
-                    assert!(
-                        report.is_empty(),
-                        "budget {budget}: a transport failure was blamed on the file: {:?}",
-                        report.dropped()
-                    );
+        for (name, data) in [
+            ("healthy", healthy_blob()),
+            ("maker-note", maker_note_blob()),
+        ] {
+            let clean = ExifReader::new()
+                .parse_from(&data[..])
+                .expect("clean parse");
+            let (mut failures, mut successes) = (0, 0);
+            for budget in 0..40 {
+                let source = FailingAfter {
+                    inner: &data[..],
+                    budget,
+                };
+                match ExifReader::new().parse_from_with_report(source) {
+                    Ok((exif, report)) => {
+                        successes += 1;
+                        assert!(
+                            report.is_empty(),
+                            "{name} budget {budget}: a transport failure was blamed on the file: \
+                             {:?}",
+                            report.dropped()
+                        );
+                        // An `Ok` from a failing source must be the *whole* answer, not a quietly
+                        // diminished one: the maker-note pin went missing exactly this way.
+                        assert_eq!(
+                            exif.maker_note_offset(),
+                            clean.maker_note_offset(),
+                            "{name} budget {budget}: the maker-note pin was silently lost"
+                        );
+                    }
+                    Err(ExifError::Ifd(e)) => {
+                        failures += 1;
+                        assert_eq!(
+                            e.kind(),
+                            ErrorKind::Io,
+                            "{name} budget {budget}: a transport failure must keep its kind"
+                        );
+                    }
+                    // `MissingMarker` here would mean the marker probe swallowed the error and
+                    // decided the blob was unmarked; anything else is equally a misdiagnosis.
+                    Err(other) => {
+                        panic!("{name} budget {budget}: transport failure became {other:?}")
+                    }
                 }
-                Err(ExifError::Ifd(e)) => {
-                    failures += 1;
-                    assert_eq!(
-                        e.kind(),
-                        ErrorKind::Io,
-                        "budget {budget}: a transport failure must keep its kind"
-                    );
-                }
-                // `MissingMarker` here would mean the marker probe swallowed the error and
-                // decided the blob was unmarked; anything else is equally a misdiagnosis.
-                Err(other) => panic!("budget {budget}: transport failure became {other:?}"),
             }
+            assert!(
+                failures > 0 && successes > 0,
+                "{name}: the sweep proved nothing"
+            );
         }
-        assert!(failures > 0 && successes > 0, "the sweep proved nothing");
     }
 
     /// A transport failure while probing for the marker is not a *missing* marker.
