@@ -15,7 +15,8 @@ the libheif differential-oracle slice (delivered — `tests/conformance.rs` over
 `src/backend.rs`, issue #273: `HevcDecoders` + the `gamut-codec-abi` adapter); **S6** = the
 high-bit-depth presentation slice (delivered — issue #303: `decode_item_rgba16` and the wider
 matrix set, retrofitted **additively** onto the S3 pipeline); **S7** = the C2PA manifest-store
-locator slice (delivered — issue #429 under the #239 epic: `src/c2pa.rs`).
+locator slice (delivered — issue #429 under the #239 epic: `src/c2pa.rs`, plus the reporting shape
+that `gamut inspect` prints from, issue #448).
 
 This crate builds on [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md): the box grammar, item model,
 property/reference parsing, and motion-photo *tolerance* already ship there. This ledger mirrors
@@ -128,6 +129,20 @@ reaches no verdict. The reported range is for observability and byte accounting 
 a BMFF exclusion range, since `c2pa.hash.bmff.v3` excludes by box path, not by byte offset (§18.6,
 §A.5.6). Nothing inside the store is parsed, no hash is computed and no signature is checked.
 
+**Implemented (S7, issue #448).** `HeifContainer::c2pa_summary` is the same scan shaped for
+*reporting*: a `C2paSummary` of `C2paStoreSummary` entries — a half-open range, a size and a
+`box_purpose` per store, in file order — and `report_lines`, which renders them. The bytes are
+absent by construction rather than merely unused, so no report built from a summary can print a
+store: it is opaque to this crate, routinely tens or hundreds of kilobytes once a manifest embeds a
+thumbnail, and rendering it invites the reading that gamut has understood — and so checked — the
+manifest, when a byte range is what a caller hands to `c2pa-rs`. Every word of the report lives here
+too, `C2PA_NOT_VALIDATED` included: §15.12 puts validation on a validator, and the line that reports
+a store states that gamut checks no signature, no hash binding and no trust list and names
+`c2pa-rs`, inline rather than as a footnote, because "C2PA: present" printed beside EXIF and ICC
+reads as *verified* to anyone who has seen a Content Credentials badge. Keeping the rendering in the
+crate is what lets a host that only formats output — `gamut inspect`, which is outside the coverage
+gate — hold no logic of its own and be unable to drop the disclaimer on the way to the terminal.
+
 **Deferred (planned, additive).** The rows below. Each lands additively — new crate items or new
 `#[non_exhaustive]` variants — never a reshape of the shipped surface.
 
@@ -150,6 +165,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Stop rules identical to `gamut_isobmff::read` (first ftyp wins; trailer only after ftyp+meta) | 14496-12 | ✅ | S1 |
 | Meta-level accounting: `meta`/`iprp` children not consumed by the model surfaced as `UnknownBox` (e.g. `dinf`/`dref`, `uuid`) | 14496-12 | ✅ | S1 |
 | C2PA manifest store located in a top-level `uuid` `ContentProvenanceBox`: opaque bytes + exact byte range, purposes `manifest`/`original`/`update` (`c2pa`, `c2pa_manifest_stores`) | C2PA 2.4 §A.5.1, §A.5.3, §8.4.2.3 (`references/c2pa` pending, #431) | ✅ | S7 |
+| Reporting shape for a located store: presence, half-open range, size and `box_purpose` per store with the bytes absent by construction, rendered with the non-validation disclaimer inline (`c2pa_summary`, `C2paSummary::report_lines`, `C2PA_NOT_VALIDATED`) | C2PA 2.4 §15.12, §A.5.3 | ✅ | S7 (#448) |
 | Store bounding is `LBox`-only and content-dependent (`LBox` validity alone cannot separate a store bound from a plausible interior length). Two routes close it: assert the `jumb` `TBox` — traceable to §A.3.9/§15.12.3.2 but only as a JPEG XL aside, so it is a maintainer call because it narrows what is reported — or confirm the store by §11.1.4.2's JUMBF type UUID, which needs 19566-5's Description Box layout. A `c2pa-rs` oracle fixture would settle either empirically | C2PA 2.4 §A.3.9, §11.1.4.2, §A.5.3; ISO/IEC 19566-5 (not vendored) | ☐ | #239 oracle |
 | C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` | C2PA 2.4 §A.5 | ☐ | later |
 | C2PA validation: JUMBF interior parse, `c2pa.hash.bmff.v3` hard binding, signature/trust verification | C2PA 2.4 §18.6, §A.5.6 | ☐ | user / #239 |
