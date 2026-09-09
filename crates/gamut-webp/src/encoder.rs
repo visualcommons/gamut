@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use gamut_color::{ColorRange, Yuv420};
 use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Pixel, Result, Rgb8, Rgba8};
 use gamut_riff::{
-    C2PA_FOURCC, Chunk, FourCc, MetadataChunks, Vp8xHeader, c2pa_span, write_extended_preserving,
+    Chunk, FourCc, MetadataChunks, Vp8xHeader, WebpChunkId, c2pa_span, write_extended_preserving,
     write_simple_lossless, write_simple_lossy,
 };
 
@@ -35,22 +35,33 @@ fn quality_to_quant(quality: u8) -> u8 {
     ((100 - q) * 127 / 100) as u8
 }
 
-/// The FourCCs [`WebpEncoder::with_unknown_chunks`] refuses, because each is a chunk this encoder
-/// writes itself from a dedicated setter or from the image: the container chunks RFC 9649 §2.5-§2.7
-/// defines, plus the `C2PA` chunk of C2PA 2.4 §A.3.7.
+/// Whether `fourcc` names a chunk that is genuinely *unknown* — the only kind
+/// [`WebpEncoder::with_unknown_chunks`] carries through.
 ///
-/// Accepting one would emit the chunk twice, and every reader in `gamut-riff` takes the *first* of a
-/// repeated chunk — so the passed-through copy would win over the configured one.
-const RESERVED_FOURCCS: [FourCc; 8] = [
-    FourCc::VP8X,
-    FourCc::VP8,
-    FourCc::VP8L,
-    FourCc::ALPH,
-    FourCc::ICCP,
-    FourCc::EXIF,
-    FourCc::XMP,
-    C2PA_FOURCC,
-];
+/// The classification is `gamut-riff`'s and is **asked for, not restated**: [`WebpChunkId::from`]
+/// knows every chunk the WebP container defines (RFC 9649 §2.5-§2.7) plus the `C2PA` chunk of
+/// C2PA 2.4 §A.3.7, and each of those is one this crate writes itself — from a dedicated setter, or
+/// from the image. A hand-written list of them is a copy of that table that drifts the moment
+/// `gamut-riff` recognises one more, which is exactly what happened: an eight-name list omitted
+/// `ANIM` and `ANMF`, so an animation chunk was accepted and produced a file
+/// [`gamut_riff::WebpLayout::parse`] then rejected as out of order.
+fn is_unknown_chunk(fourcc: FourCc) -> bool {
+    matches!(WebpChunkId::from(fourcc), WebpChunkId::Unknown(_))
+}
+
+/// Narrows a C2PA reservation to the `uint32` a RIFF chunk's size field holds (RFC 9649 §2.3).
+///
+/// Split out of [`WebpEncoder::with_c2pa_reserved`] so the limit can be tested without allocating
+/// the 4 GiB it would take to reach it — the same reason `gamut-riff`'s writer splits out its own
+/// `chunk_size_field`.
+fn reservation_len(len: usize) -> Result<u32> {
+    u32::try_from(len).map_err(|_| {
+        Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "WebP: C2PA reservation exceeds the uint32 chunk size field",
+        )
+    })
+}
 
 /// Encodes 8-bit RGB images to WebP.
 ///
@@ -214,12 +225,7 @@ impl WebpEncoder {
     /// rather than allocated: `vec![0; len]` panics on a `len` no allocator could serve, and a
     /// library path must return a typed error instead.
     pub fn with_c2pa_reserved(mut self, len: usize) -> Result<Self> {
-        if u32::try_from(len).is_err() {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "WebP: C2PA reservation exceeds the uint32 chunk size field",
-            ));
-        }
+        reservation_len(len)?;
         self.c2pa = Some(vec![0; len]);
         Ok(self)
     }
@@ -292,22 +298,23 @@ impl WebpEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`](gamut_core::Error) if `chunks` names a chunk this encoder
-    /// writes itself — `VP8X`, `VP8 `, `VP8L`, `ALPH`, `ICCP`, `EXIF`, `XMP `, or `C2PA`. Each has a
-    /// dedicated setter or comes from the image, so passing one through here would emit it twice and
-    /// the pass-through copy would win: `gamut-riff`'s readers take the *first* of a repeated chunk.
+    /// Returns [`Error::InvalidInput`](gamut_core::Error) if `chunks` names any chunk the WebP
+    /// container defines (RFC 9649 §2.5-§2.7) or the `C2PA` chunk of C2PA 2.4 §A.3.7 — that is,
+    /// anything [`gamut_riff::WebpChunkId`] classifies as something other than
+    /// [`Unknown`](gamut_riff::WebpChunkId::Unknown). Each is written by this crate itself, from a
+    /// dedicated setter or from the image, so passing one through would emit it twice and the
+    /// pass-through copy would win: `gamut-riff`'s readers take the *first* of a repeated chunk. The
+    /// error names the offending FourCC in its detail, escaping any non-printable byte.
     /// Use [`with_icc_profile`](Self::with_icc_profile), [`with_exif`](Self::with_exif),
     /// [`with_xmp`](Self::with_xmp) or [`with_c2pa`](Self::with_c2pa) instead.
     pub fn with_unknown_chunks(mut self, chunks: &[(FourCc, &[u8])]) -> Result<Self> {
-        if chunks
-            .iter()
-            .any(|(fourcc, _)| RESERVED_FOURCCS.contains(fourcc))
-        {
+        if let Some((fourcc, _)) = chunks.iter().find(|(fourcc, _)| !is_unknown_chunk(*fourcc)) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "WebP: VP8X/VP8 /VP8L/ALPH/ICCP/EXIF/XMP /C2PA are written from their own setters \
-                 and cannot be passed through as unknown chunks",
-            ));
+                "WebP: this chunk is written by the encoder itself and cannot be passed through as \
+                 an unknown chunk",
+            )
+            .with_detail(format!("{fourcc}")));
         }
         self.unknown = chunks
             .iter()
@@ -554,6 +561,13 @@ impl WebpEncoder {
     /// inside it have been confirmed to be the caller's own store, so a signer can never be handed a
     /// span over somebody else's.
     ///
+    /// That last error is **defence in depth** and no caller should expect to observe it: no input
+    /// this API accepts can make the encoder write a `C2PA` chunk that is not the configured store —
+    /// [`with_unknown_chunks`](Self::with_unknown_chunks) refuses one and
+    /// [`gamut_riff::write_extended_preserving`] gives the configured store the slot. It is kept as
+    /// a live check rather than a `debug_assert!` because this is a signing path, where a release
+    /// build is exactly where the protection is worth its one walk of the chunk list.
+    ///
     /// # Example
     ///
     /// ```
@@ -611,6 +625,7 @@ impl EncodeImage<Rgba8> for WebpEncoder {
 #[cfg(test)]
 mod tests {
     use gamut_core::{DecodeImage, ErrorKind, ImageBuf};
+    use gamut_riff::C2PA_FOURCC;
 
     use super::*;
 
@@ -826,35 +841,71 @@ mod tests {
         );
     }
 
-    /// A reservation the RIFF size field cannot express is refused with a typed error rather than
-    /// attempted: `vec![0; len]` panics on a length no allocator can serve, and CLAUDE.md forbids a
-    /// panic on a library path. The bound is the writer's own — a chunk payload is a `uint32`
-    /// (RFC 9649 §2.3) — so every accepted reservation is one the container could actually carry.
+    /// The reservation limit is the RIFF chunk size field itself, admitted right up to its ceiling
+    /// and refused one past it. Testing the narrowing function rather than the builder is what makes
+    /// the boundary reachable at all: pinning it through `with_c2pa_reserved` would mean allocating
+    /// 4 GiB to watch the accepted side succeed.
     #[test]
-    fn with_c2pa_reserved_refuses_a_length_the_size_field_cannot_hold() {
-        let too_big = usize::try_from(u64::from(u32::MAX) + 1).expect("64-bit test host");
+    fn a_reservation_is_narrowed_to_the_uint32_size_field() {
+        assert_eq!(reservation_len(0).expect("empty"), 0);
+        assert_eq!(
+            reservation_len(u32::MAX as usize).expect("the ceiling is admitted"),
+            u32::MAX
+        );
+        // One past the ceiling is only expressible where `usize` is wider than `u32`; on a 32-bit
+        // target (wasm32) no `usize` can exceed it, so there is nothing to refuse.
+        if let Ok(past) = usize::try_from(u64::from(u32::MAX) + 1) {
+            let err = reservation_len(past).expect_err("one past the ceiling is refused");
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert!(err.to_string().contains("uint32 chunk size field"), "{err}");
+        }
+    }
+
+    /// And the builder refuses such a length instead of reaching `vec![0; len]`, which panics with
+    /// "capacity overflow" on a length no allocator can serve — CLAUDE.md forbids a panic on a
+    /// library path.
+    #[test]
+    fn with_c2pa_reserved_refuses_a_length_it_cannot_represent() {
+        let Ok(too_big) = usize::try_from(u64::from(u32::MAX) + 1) else {
+            return; // 32-bit target: unreachable, as above.
+        };
         let err = WebpEncoder::lossless()
             .with_c2pa_reserved(too_big)
             .expect_err("a reservation past the uint32 size field is refused");
         assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert!(err.to_string().contains("uint32 chunk size field"), "{err}");
-        // The boundary itself is representable, so it is not refused by an off-by-one.
-        assert!(
-            u32::try_from(u32::MAX as usize).is_ok(),
-            "u32::MAX is the last accepted length"
-        );
     }
 
-    /// Every FourCC with a dedicated setter is refused, so the mistake is caught at the call that
+    /// Every FourCC `gamut-riff` classifies is refused, so the mistake is caught at the call that
     /// made it rather than resolved silently in favour of the pass-through copy.
+    ///
+    /// `ANIM` and `ANMF` are in the list deliberately. A hand-written table of "chunks with their
+    /// own setter" left them out, and the encoder then accepted an `ANIM` chunk and wrote a file
+    /// `WebpLayout::parse` refuses as having its reconstruction chunks out of order — an encoder
+    /// steered into producing a file it cannot read back.
     #[test]
-    fn with_unknown_chunks_refuses_every_chunk_that_has_its_own_setter() {
-        for reserved in RESERVED_FOURCCS {
+    fn with_unknown_chunks_refuses_every_chunk_the_container_defines() {
+        let classified = [
+            FourCc::VP8X,
+            FourCc::VP8,
+            FourCc::VP8L,
+            FourCc::ALPH,
+            FourCc::ICCP,
+            FourCc::EXIF,
+            FourCc::XMP,
+            FourCc::ANIM,
+            FourCc::ANMF,
+            C2PA_FOURCC,
+        ];
+        for reserved in classified {
             let err = WebpEncoder::lossless()
                 .with_unknown_chunks(&[(reserved, b"payload")])
                 .err()
                 .unwrap_or_else(|| panic!("{reserved} must be refused"));
             assert_eq!(err.kind(), ErrorKind::InvalidInput, "{reserved}");
+            assert!(
+                err.to_string().contains(&reserved.to_string()),
+                "{reserved}: the error names the offending FourCC, got {err}"
+            );
         }
         // A genuinely unknown FourCC is still accepted, and the check does not depend on position.
         let private = FourCc::from(*b"XYZW");
