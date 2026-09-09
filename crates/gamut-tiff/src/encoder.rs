@@ -8,6 +8,7 @@ use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
+use crate::metadata::TiffMetadata;
 use crate::palette::Palette8;
 use crate::{tags, writer};
 
@@ -33,6 +34,7 @@ pub struct TiffEncoder {
     predictor: Predictor,
     tiling: Option<(u32, u32)>,
     big_tiff: bool,
+    metadata: TiffMetadata,
 }
 
 impl Default for TiffEncoder {
@@ -43,6 +45,7 @@ impl Default for TiffEncoder {
             predictor: Predictor::None,
             tiling: None,
             big_tiff: false,
+            metadata: TiffMetadata::new(),
         }
     }
 }
@@ -100,6 +103,18 @@ impl TiffEncoder {
     #[must_use]
     pub fn with_big_tiff(mut self, big_tiff: bool) -> Self {
         self.big_tiff = big_tiff;
+        self
+    }
+
+    /// Returns a copy of this encoder that embeds `metadata` — an Exif sub-IFD plus opaque
+    /// XMP / IPTC-IIM / ICC blocks.
+    ///
+    /// The blocks and the Exif sub-IFD go in **IFD 0**, which for
+    /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) is the first page: they describe the
+    /// document, not one of its pages.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: TiffMetadata) -> Self {
+        self.metadata = metadata;
         self
     }
 
@@ -218,7 +233,8 @@ impl TiffEncoder {
         if let Some((tw, tl)) = self.tiling {
             return self.encode_tiled(packed, dims, layout, extra_fields, tw, tl, out);
         }
-        let (ifd, strips) = self.build_strip_image(packed, dims, layout, extra_fields)?;
+        let (mut ifd, strips) = self.build_strip_image(packed, dims, layout, extra_fields)?;
+        self.metadata.apply(&mut ifd);
         let bytes = writer::write_image(self.order, self.variant(), &ifd, &strips)?;
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
@@ -341,6 +357,10 @@ impl TiffEncoder {
                 },
                 &extra,
             )?);
+        }
+        // The blocks describe the document, not one of its pages, so they go in IFD 0 alone.
+        if let Some((ifd0, _)) = images.first_mut() {
+            self.metadata.apply(ifd0);
         }
         let bytes = writer::write_multipage(self.order, self.variant(), &images)?;
         out.extend_from_slice(&bytes);
@@ -495,6 +515,7 @@ impl TiffEncoder {
         for (tag, value) in extra_fields {
             ifd.set(*tag, value.clone());
         }
+        self.metadata.apply(&mut ifd);
 
         let bytes = writer::write_image_tiled(self.order, self.variant(), &ifd, &tiles)?;
         out.extend_from_slice(&bytes);
