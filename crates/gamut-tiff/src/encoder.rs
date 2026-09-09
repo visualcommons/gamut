@@ -488,7 +488,9 @@ impl TiffEncoder {
         if let Some((ifd0, _)) = images.first_mut() {
             self.metadata.apply(ifd0);
         }
-        if let (Some((last, _)), true) = (images.last_mut(), store.is_some()) {
+        if store.is_some()
+            && let Some((last, _)) = images.last_mut()
+        {
             c2pa::reserve_entry(last);
         }
         let bytes = writer::write_multipage(self.order, self.variant(), &images)?;
