@@ -68,6 +68,28 @@ for dropped in report.dropped() {
 # }
 ```
 
+Every catalogued tag carries the field type and component count CIPA DC-008 mandates for it
+([`ExifTag::field_types`], [`ExifTag::component_count`]). [`set_tag_checked`] is the conformant
+setter — it refuses a value that contradicts them — while [`Exif::set_tag`] and the whole read path
+stay lenient, because a caller reproducing a non-conformant source file must still be able to.
+
+```rust
+use gamut_exif::{ByteOrder, Exif, ExifTag, Value, set_tag_checked};
+
+let mut exif = Exif::new(ByteOrder::LittleEndian);
+let wrong = set_tag_checked(&mut exif, ExifTag::FNumber, Value::Short(vec![28]));
+assert_eq!(
+    wrong.unwrap_err().to_string(),
+    "FNumber: CIPA DC-008 requires RATIONAL, not SHORT",
+);
+```
+
+Enable the optional `describe` feature (also included by `full`) for the enumerated tags' meanings
+in the specification's own wording — `describe(ExifTag::ResolutionUnit, 2)` is `Some("inches")`,
+`described_values` gives a tag's whole defined domain, and `flash` decomposes the `Flash` bitfield.
+It is off by default: a display table is several kilobytes of static strings that a consumer which
+only writes or round-trips metadata never reads.
+
 Enable the optional `geocoordinates` feature (also included by `full`) to convert a complete
 [`GpsInfo`] with `TryFrom` into `geocoordinates::Wgs84` or `geocoordinates::Coordinate`. The latter
 preserves EXIF sea-level altitude as an orthometric height; the 2D `Wgs84` newtype intentionally
@@ -76,18 +98,21 @@ the typed [`GpsConversionError`].
 
 ## Scope
 
-v1 covers the **standard CIPA DC-008 tag dictionary** ([`ExifTag`]), full read/write round-trips
-over `gamut-ifd`, the typed [`GpsInfo`] projection, and JPEG thumbnails. Intentionally deferred (and
-designed to be added without breaking the 1.0 API — the catalogue and vendor enums are
-`#[non_exhaustive]`):
+v1 covers the **standard CIPA DC-008 tag dictionary** ([`ExifTag`]) — **every tag CIPA DC-008
+defines**, with the field type and component count the spec mandates for each, plus nine carried
+from other specifications for compatibility — full read/write round-trips over `gamut-ifd`, the
+typed [`GpsInfo`] projection, and JPEG thumbnails. Intentionally deferred (and designed to be added
+without breaking the 1.0 API — the catalogue and vendor enums are `#[non_exhaustive]`):
 
 - **Per-vendor MakerNote decoding.** The `MakerNote` block is preserved verbatim and its vendor
   detected ([`MakerNoteVendor`]), but not decoded. Since issue #263 a parsed model records the
   note's absolute source offset and the writer **pins** the byte range there on a rewrite, so
   vendor TIFF-absolute internal offsets stay valid; only an unsatisfiable pin (the directory
   region outgrew the old position) falls back to relocation, with the bytes still value-exact.
-- **exiftool-parity tag breadth** beyond the standard dictionary (unknown tags still round-trip
-  losslessly via the raw `Ifd`).
+- **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags to gamut's 160;
+  the difference is entirely tags CIPA DC-008 does not define (TIFF/EP, DNG, and other lineages),
+  which would have to be transcribed from *their* specifications, not copied out of an oracle.
+  Unknown tags still round-trip losslessly via the raw `Ifd`.
 - **Uncompressed strip-based thumbnails** are read but not re-embedded (JPEG thumbnails are).
 - **Per-tag error recovery inside one directory.** A single unparseable entry fails its whole
   directory in `gamut-ifd`, so the report's granularity is the sub-IFD, not the individual tag.
