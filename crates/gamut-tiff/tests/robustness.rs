@@ -2,7 +2,7 @@
 //! panic, never allocate unboundedly — on hostile data (P19).
 
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgb16};
-use gamut_tiff::{Compression, Predictor, TiffDecoder, TiffEncoder};
+use gamut_tiff::{Compression, Ifd, Predictor, TiffDecoder, TiffEncoder, TiffMetadata, Value};
 
 fn valid_lzw_tiff() -> Vec<u8> {
     let dims = Dimensions {
@@ -32,6 +32,47 @@ fn valid_rgb16_tiff() -> Vec<u8> {
         .with_predictor(Predictor::HorizontalDifferencing)
         .encode_to_vec(ImageRef::<Rgb16>::new(&rgb, dims).unwrap())
         .expect("encode")
+}
+
+/// A file carrying every metadata block, an `ExifIFD` sub-IFD and a C2PA manifest store: the
+/// structures `TiffDecoder::metadata` and `c2pa_exclusions` walk, and the only ones in this crate
+/// reached by following a pointer tag out of IFD 0 or an offset/count pair out of the last IFD.
+fn valid_metadata_tiff() -> Vec<u8> {
+    let dims = Dimensions {
+        width: 12,
+        height: 9,
+    };
+    let rgb: Vec<u8> = (0..12 * 9 * 3).map(|i| (i * 7) as u8).collect();
+    let mut exif = Ifd::new();
+    exif.set(33434, Value::Rational(vec![(1, 250)]));
+    TiffEncoder::new()
+        .with_metadata(
+            TiffMetadata::new()
+                .with_exif(exif)
+                .with_xmp(b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>".to_vec())
+                .with_iptc(vec![0x1c, 0x02, 0x05, 0x00, 0x04, b't', b'e', b's', b't'])
+                .with_icc(vec![0, 0, 0, 12, b'a', b'c', b's', b'p', 1, 2, 3, 4])
+                .with_c2pa(b"\0\0\0\x16jumb\x01\x02\x03\x04\x05\x06".to_vec()),
+        )
+        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims).unwrap())
+        .expect("encode")
+}
+
+#[test]
+fn hostile_input_to_the_metadata_entry_points_does_not_panic() {
+    // `metadata` follows the `ExifIFD` pointer into a second directory and `c2pa_exclusions`
+    // walks the chain to its end to read an offset/count pair — offset-driven reads of untrusted
+    // bytes on paths `decode_page` never takes, so the fuzz corpus above cannot reach them.
+    let dec = TiffDecoder::new();
+    let valid = valid_metadata_tiff();
+    for len in 0..=valid.len() {
+        let _ = dec.metadata(&valid[..len]);
+        let _ = gamut_tiff::c2pa_exclusions(&valid[..len]);
+    }
+    byte_flip_fuzz(&valid, |data| {
+        let _ = dec.metadata(data);
+        let _ = gamut_tiff::c2pa_exclusions(data);
+    });
 }
 
 #[test]
@@ -66,13 +107,17 @@ fn truncations_do_not_panic() {
 
 #[test]
 fn byte_flip_fuzz_does_not_panic() {
+    let dec = TiffDecoder::new();
     for valid in [valid_lzw_tiff(), valid_rgb16_tiff()] {
-        byte_flip_fuzz(&valid);
+        byte_flip_fuzz(&valid, |data| {
+            let _ = dec.decode_page(data, 0);
+        });
     }
 }
 
-fn byte_flip_fuzz(valid: &[u8]) {
-    let dec = TiffDecoder::new();
+/// Feeds `consume` 5000 deterministically mutated copies of `valid`; the caller names which entry
+/// point is under test.
+fn byte_flip_fuzz(valid: &[u8], mut consume: impl FnMut(&[u8])) {
     // Deterministic LCG (no RNG dependency) drives the mutations.
     let mut state: u64 = 0x1234_5678_9abc_def0;
     let mut next = || {
@@ -88,6 +133,6 @@ fn byte_flip_fuzz(valid: &[u8]) {
             let pos = next() as usize % data.len();
             data[pos] ^= (next() & 0xff) as u8;
         }
-        let _ = dec.decode_page(&data, 0);
+        consume(&data);
     }
 }
