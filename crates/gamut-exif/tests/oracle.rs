@@ -89,8 +89,9 @@ fn conforming_value(tag: ExifTag) -> Value {
         _ => 2,
     };
     match tag.field_types().first() {
-        Some(FieldType::Ascii) => Value::Ascii("A".repeat(n - 1)),
-        Some(FieldType::Utf8) => Value::Utf8("A".repeat(n - 1)),
+        // A string's component count includes the terminating NUL, so n - 1 characters.
+        Some(FieldType::Ascii) => Value::Ascii("A".repeat(n.saturating_sub(1))),
+        Some(FieldType::Utf8) => Value::Utf8("A".repeat(n.saturating_sub(1))),
         Some(FieldType::Short) => Value::Short(vec![1; n]),
         Some(FieldType::Long) => Value::Long(vec![1; n]),
         Some(FieldType::Rational) => Value::Rational(vec![(1, 1); n]),

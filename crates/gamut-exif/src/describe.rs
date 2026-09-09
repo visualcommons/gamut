@@ -400,6 +400,53 @@ mod tests {
         }
     }
 
+    /// Drift guard: exactly which tags CIPA DC-008 enumerates. Every other assertion here reads a
+    /// table through `described_values`, so an arm that lost its rows would make them vacuous —
+    /// this is what notices.
+    #[test]
+    fn exactly_the_enumerated_tags_have_a_table() {
+        let enumerated: Vec<&str> = ExifTag::ALL
+            .iter()
+            .filter(|t| !described_values(**t).is_empty())
+            .map(|t| t.name())
+            .collect();
+        assert_eq!(
+            enumerated,
+            [
+                "Compression",
+                "PhotometricInterpretation",
+                "Orientation",
+                "PlanarConfiguration",
+                "ResolutionUnit",
+                "YCbCrPositioning",
+                "ExposureProgram",
+                "SensitivityType",
+                "ComponentsConfiguration",
+                "MeteringMode",
+                "LightSource",
+                "ColorSpace",
+                "FocalPlaneResolutionUnit",
+                "SensingMethod",
+                "FileSource",
+                "SceneType",
+                "CustomRendered",
+                "ExposureMode",
+                "WhiteBalance",
+                "SceneCaptureType",
+                "GainControl",
+                "Contrast",
+                "Saturation",
+                "Sharpness",
+                "SubjectDistanceRange",
+                "CompositeImage",
+                "GPSAltitudeRef",
+                "GPSStatus",
+                "GPSMeasureMode",
+                "GPSDifferential",
+            ]
+        );
+    }
+
     #[test]
     fn no_description_is_empty() {
         for &tag in ExifTag::ALL {
