@@ -202,6 +202,93 @@ impl<'a> ChunkReader<'a> {
     }
 }
 
+/// Writes a finished C2PA manifest store into the `caBX` chunk `span` names, **in place**.
+///
+/// The second half of the reserve-then-fill flow (C2PA 2.4 §18.5): encode once with
+/// [`PngEncoder::with_c2pa_reserved`](crate::PngEncoder::with_c2pa_reserved), hash the output with
+/// `span.chunk` excluded, have the signer build a store of exactly the reserved length, then call
+/// this. Only the payload and the chunk's CRC change; the length field, the type, and every byte
+/// outside `span.chunk` — every offset in the file — are untouched, so the hash the signer signed
+/// still describes the filled file.
+///
+/// **This is the supported way to put a store into a file this encoder is not re-encoding**, and
+/// the only one for a file gamut did not write. Re-encoding with
+/// [`PngEncoder::with_c2pa`](crate::PngEncoder::with_c2pa) reaches the same bytes, but it costs a
+/// second full encode (at [`Level::Best`](crate::Level) with
+/// [`FilterStrategy::BruteForce`](crate::FilterStrategy) that is the whole brute-force set again)
+/// and it makes the signature depend on the encoder reproducing its output byte for byte. Filling
+/// in place depends on nothing but these twelve-plus-`n` bytes.
+///
+/// The span comes from [`PngEncodeReport::c2pa`](crate::PngEncodeReport::c2pa) for a file this
+/// encoder just wrote, or from [`PngReport::c2pa`](crate::PngReport::c2pa) for any file — which is
+/// also the route for an indexed image, since
+/// [`encode_indexed8`](crate::PngEncoder::encode_indexed8) has no report of its own.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] and leaves `png` **unmodified** if `span` runs past the end of
+/// `png`, if it does not frame a chunk (its payload must be `chunk.start + 8 .. chunk.end - 4`),
+/// if the bytes it names are not a `caBX` chunk, or if `store` is not exactly the reserved
+/// length. Every check runs before the first byte is written, so a rejected call cannot leave a
+/// half-filled chunk behind — and a store of the wrong length is rejected rather than resized,
+/// because resizing would move every byte after the chunk and invalidate the signer's hash.
+///
+/// # Example
+///
+/// ```
+/// use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+/// use gamut_png::{PngEncoder, fill_c2pa};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let pixels = vec![0u8; 3 * 4];
+/// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
+/// let (mut png, report) = PngEncoder::new()
+///     .with_c2pa_reserved(16)
+///     .encode_with_report(image)?;
+/// let span = report.c2pa.expect("a reservation was made");
+///
+/// // ... hash `png` with `span.chunk` excluded, sign, and receive a 16-byte store ...
+/// fill_c2pa(&mut png, &span, &[7u8; 16])?;
+///
+/// assert_eq!(gamut_png::metadata(&png)?.c2pa.as_deref(), Some(&[7u8; 16][..]));
+/// # Ok(())
+/// # }
+/// ```
+pub fn fill_c2pa(png: &mut [u8], span: &C2paSpan, store: &[u8]) -> Result<()> {
+    let invalid = |message: &'static str| Error::invalid_input(env!("CARGO_PKG_NAME"), message);
+    if span.chunk.end > png.len() {
+        return Err(invalid("PNG: the C2PA span runs past the end of the image"));
+    }
+    // The span must frame a chunk: 4 length bytes and 4 type bytes ahead of the payload, 4 CRC
+    // bytes behind it. Checked rather than assumed because a caller can build a `C2paSpan`.
+    let frames = span
+        .chunk
+        .start
+        .checked_add(8)
+        .zip(span.chunk.end.checked_sub(4))
+        .is_some_and(|(payload_start, payload_end)| {
+            span.payload.start == payload_start
+                && span.payload.end == payload_end
+                && payload_start <= payload_end
+        });
+    if !frames {
+        return Err(invalid("PNG: the C2PA span does not frame a chunk"));
+    }
+    if png[span.chunk.start + 4..span.payload.start] != CABX {
+        return Err(invalid("PNG: the C2PA span does not name a caBX chunk"));
+    }
+    if store.len() != span.payload.len() {
+        return Err(invalid("PNG: the C2PA store is not the reserved length"));
+    }
+
+    png[span.payload.clone()].copy_from_slice(store);
+    let mut crc = Crc32::new();
+    crc.update(&CABX);
+    crc.update(store);
+    png[span.payload.end..span.chunk.end].copy_from_slice(&crc.finish().to_be_bytes());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +399,96 @@ mod tests {
         assert_eq!(&png[span.chunk.start + 4..span.chunk.start + 8], b"caBX");
         // Nothing but the chunk: the span ends exactly where IEND's length field begins.
         assert_eq!(&png[span.chunk.end + 4..span.chunk.end + 8], b"IEND");
+    }
+
+    /// A PNG carrying a `len`-byte reservation, plus the span naming it.
+    fn reserved(len: usize) -> (Vec<u8>, C2paSpan) {
+        let mut png = SIGNATURE.to_vec();
+        write_chunk(&mut png, *b"IHDR", &[0; 13]);
+        write_chunk(&mut png, CABX, &vec![0; len]);
+        write_chunk(&mut png, *b"IDAT", b"zz");
+        write_chunk(&mut png, *b"IEND", &[]);
+        let span = find_c2pa(&png).expect("a reservation");
+        (png, span)
+    }
+
+    /// Filling rewrites the payload and the CRC, and nothing else: every byte outside the span
+    /// is untouched, the length and type inside it are untouched, and the chunk still frames —
+    /// `find_c2pa` re-reads the filled store, which it can only do if the CRC was recomputed.
+    #[test]
+    fn filling_a_reservation_rewrites_the_payload_and_its_crc_alone() {
+        let (mut png, span) = reserved(6);
+        let before = png.clone();
+        fill_c2pa(&mut png, &span, b"jumbf!").expect("fill");
+
+        assert_eq!(&png[span.payload.clone()], b"jumbf!");
+        assert_eq!(png.len(), before.len());
+        for i in (0..png.len()).filter(|i| !span.chunk.contains(i)) {
+            assert_eq!(png[i], before[i], "byte {i} outside the span changed");
+        }
+        assert_eq!(
+            png[span.chunk.start..span.payload.start],
+            before[span.chunk.start..span.payload.start],
+            "the length and type fields are untouched"
+        );
+        assert_ne!(
+            png[span.payload.end..span.chunk.end],
+            before[span.payload.end..span.chunk.end],
+            "the CRC followed the payload"
+        );
+        // The CRC is not merely different, it is right: the walk only returns a CRC-valid chunk.
+        let refound = find_c2pa(&png).expect("the filled chunk still verifies");
+        assert_eq!(refound, span);
+        assert_eq!(&png[refound.payload], b"jumbf!");
+    }
+
+    /// Every argument is validated before a byte is written, each with its own message, and a
+    /// rejected call leaves the image exactly as it was.
+    #[test]
+    fn filling_validates_its_span_and_length_before_writing() {
+        let (png, span) = reserved(4);
+
+        let mut short = png.clone();
+        let error = fill_c2pa(&mut short, &span, b"abc").expect_err("one byte short");
+        assert!(
+            error.to_string().contains("not the reserved length"),
+            "{error}"
+        );
+        assert_eq!(short, png, "a rejected fill writes nothing");
+        let mut long = png.clone();
+        assert!(fill_c2pa(&mut long, &span, b"abcde").is_err(), "one byte long");
+        assert_eq!(long, png);
+
+        // A span past the end of the buffer.
+        let mut truncated = png[..span.chunk.end - 1].to_vec();
+        let error = fill_c2pa(&mut truncated, &span, b"abcd").expect_err("past the end");
+        assert!(error.to_string().contains("runs past the end"), "{error}");
+
+        // A span whose payload does not sit inside its framing.
+        let mut mine = png.clone();
+        let skewed = C2paSpan {
+            chunk: span.chunk.clone(),
+            payload: span.payload.start + 1..span.payload.end,
+        };
+        let error = fill_c2pa(&mut mine, &skewed, b"abc").expect_err("not framed");
+        assert!(error.to_string().contains("does not frame a chunk"), "{error}");
+        assert_eq!(mine, png);
+
+        // A well-framed span naming some other chunk: the IHDR right before it.
+        let ihdr = C2paSpan::of(8..8 + 12 + 13);
+        let error = fill_c2pa(&mut mine, &ihdr, &[0; 13]).expect_err("not a caBX");
+        assert!(error.to_string().contains("does not name a caBX"), "{error}");
+        assert_eq!(mine, png);
+    }
+
+    /// A zero-length reservation is a legal chunk, and filling it with nothing is a no-op that
+    /// still verifies — the boundary where payload start and end coincide.
+    #[test]
+    fn filling_an_empty_reservation_is_lawful() {
+        let (mut png, span) = reserved(0);
+        assert_eq!(span.payload.len(), 0);
+        fill_c2pa(&mut png, &span, &[]).expect("fill");
+        assert_eq!(find_c2pa(&png), Some(span));
     }
 
     /// The walk ends with the datastream. A `caBX` after `IDAT` is bad-form carriage (C2PA

@@ -28,8 +28,9 @@
 //! store computed for this file and [`PngEncoder::with_c2pa_reserved`] reserves its place, as the
 //! last chunk before `IDAT`; [`PngEncoder::encode_with_report`] and [`PngReport::c2pa`] name the
 //! chunk's **whole** span — length, type, payload and CRC — which is what a `c2pa.hash.data`
-//! assertion excludes (§18.5.4), and a reservation is filled by a second encode of equal length
-//! that changes no byte outside it.
+//! assertion excludes (§18.5.4). [`fill_c2pa`] then writes the finished store into that span in
+//! place, rewriting only the payload and the chunk CRC, so the file the signer hashed is the file
+//! it signed.
 //!
 //! # Pluggable IDAT backends
 //!
@@ -86,7 +87,7 @@ pub mod stages;
 pub use abi::{AbiDeflater, AbiInflater, CODEC_ID_ZLIB, PIXEL_FORMAT_FILTERED_BYTES};
 pub use ancillary::{PhysicalUnit, SrgbIntent};
 pub use backend::{IdatDeflater, IdatInflater, IdatInfo};
-pub use chunk::C2paSpan;
+pub use chunk::{C2paSpan, fill_c2pa};
 pub use color::ColorType;
 pub use decoded::{
     Chromaticities, Cicp, DecodedPng, IccProfile, PngHeader, PngImage, PngMetadata, TextChunk,
