@@ -113,6 +113,12 @@ whose declared owner is this crate. Every row there is ✅ or ⊘ as of v1.
   over, and a store found in a file gamut did not write is still a store. It is *recognised*
   (`WebpChunkId::C2pa`) rather than left unknown, so a read/modify/write cycle re-emits it once, in
   its mandated place, instead of twice.
+- **`MetadataChunks::c2pa` owns the `C2PA` chunk.** `write_extended_preserving` drops a `C2PA`
+  chunk found among the `unknown` chunks it is asked to preserve, so a file it writes carries at most
+  one store — the field's. Two would be resolved by "first of each kind wins" in favour of the
+  passed-through copy, and `c2pa_span` would then report a range over bytes the caller never
+  configured, which is exactly the range a signer excludes from its hash. `write_extended` is the
+  unfiltered escape hatch for a caller assembling a file by hand.
 - **No `VP8X` feature flag advertises a store.** RFC 9649 §2.5's flag byte defines no C2PA bit and
   the reserved bits "MUST be 0", so presence is decided by the chunk alone — the same rule the crate
   already applies to `ICCP`/`EXIF`/`XMP `, where flags are advisory.

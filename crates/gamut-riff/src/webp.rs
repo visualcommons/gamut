@@ -313,9 +313,18 @@ pub fn write_extended_with_metadata(
 ///
 /// A `C2PA` manifest store is the one exception to "unknown chunks last": C2PA 2.4 §A.3.7 requires
 /// the `C2PA` chunk to "appear as the last sub-chunk of the first RIFF header chunk", so it is
-/// emitted after the preserved chunks, not before them. It is also no longer *unknown* to this
-/// crate ([`WebpChunkId::C2pa`]), so a store read back out of a file arrives in
-/// [`MetadataChunks::c2pa`] and is never re-emitted a second time out of `unknown`.
+/// emitted after the preserved chunks, not before them.
+///
+/// [`MetadataChunks::c2pa`] **owns** that chunk. A `C2PA` chunk in `unknown` is dropped rather than
+/// emitted, so a file this function writes carries at most one — the field's. Without that, a caller
+/// who collected `unknown` with a reader that does not recognise `C2PA` (a third-party one, or this
+/// crate before the chunk was modelled) would emit two, and every reader here takes the *first*, so
+/// the stale copy would win and [`c2pa_span`] would report a range over the wrong bytes. The chunk
+/// is not unknown to this crate ([`WebpChunkId::C2pa`]), so [`WebpLayout::parse`] never puts it in
+/// `unknown` in the first place and nothing is lost by the filter.
+///
+/// [`write_extended`] does no filtering: it writes the chunks it is given, and is the escape hatch
+/// for a caller who means to hand-assemble a file.
 ///
 /// # Errors
 ///
@@ -343,7 +352,14 @@ pub fn write_extended_preserving(
     if let Some(xmp) = metadata.xmp {
         chunks.push((FourCc::XMP, xmp));
     }
-    chunks.extend(unknown.iter().map(|c| (c.fourcc, c.payload)));
+    // `metadata.c2pa` owns the `C2PA` chunk, so a copy arriving through `unknown` is dropped: two
+    // would make the *first* win in every reader here, which is not the one the caller configured.
+    chunks.extend(
+        unknown
+            .iter()
+            .filter(|c| c.fourcc != C2PA_FOURCC)
+            .map(|c| (c.fourcc, c.payload)),
+    );
     // C2PA 2.4 §A.3.7: the manifest store's chunk is the *last* sub-chunk of the RIFF/WEBP form —
     // after the preserved unknown chunks, not merely somewhere past the image data.
     if let Some(c2pa) = metadata.c2pa {
@@ -1509,5 +1525,89 @@ mod tests {
         );
         let span = c2pa_span(&file).unwrap().expect("the store was embedded");
         assert_eq!(&file[span.start + 8..span.end], b"first");
+    }
+
+    /// `metadata.c2pa` owns the `C2PA` chunk: a copy handed in through `unknown` is dropped, so the
+    /// file carries exactly one store and it is the configured one.
+    ///
+    /// Emitting both put the stale copy *first*, and every reader here takes the first — so
+    /// `c2pa_span` reported a range over bytes the caller never configured, which is precisely the
+    /// range a signer would exclude from its hash.
+    #[test]
+    fn a_c2pa_chunk_in_unknown_never_displaces_the_configured_store() {
+        let header = Vp8xHeader {
+            canvas_width: 4,
+            canvas_height: 4,
+            ..Default::default()
+        };
+        let file = write_extended_preserving(
+            &header,
+            &MetadataChunks {
+                c2pa: Some(b"FRESH"),
+                ..Default::default()
+            },
+            &[(FourCc::VP8L, &[0x2f])],
+            &[
+                Chunk {
+                    fourcc: C2PA_FOURCC,
+                    payload: b"STALE",
+                },
+                Chunk {
+                    fourcc: FourCc::from(*b"XYZW"),
+                    payload: b"kept",
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            chunk_ids(&file),
+            vec![
+                FourCc::VP8X,
+                FourCc::VP8L,
+                FourCc::from(*b"XYZW"),
+                C2PA_FOURCC,
+            ],
+            "one store chunk, last, and the genuinely unknown chunk survives"
+        );
+        assert_eq!(
+            MetadataChunks::read(&file).unwrap().c2pa,
+            Some(&b"FRESH"[..])
+        );
+        let span = c2pa_span(&file).unwrap().expect("the store was embedded");
+        assert_eq!(&file[span.start + 8..span.end], b"FRESH");
+    }
+
+    /// `write_extended` is the unfiltered escape hatch: it writes what it is given, so a caller who
+    /// means to hand-assemble a file still can.
+    #[test]
+    fn write_extended_does_not_filter_a_c2pa_chunk() {
+        let header = Vp8xHeader {
+            canvas_width: 4,
+            canvas_height: 4,
+            ..Default::default()
+        };
+        let file = write_extended(&header, &[(C2PA_FOURCC, b"store")]).unwrap();
+        assert_eq!(chunk_ids(&file), vec![FourCc::VP8X, C2PA_FOURCC]);
+    }
+
+    /// `c2pa_span` walks the same framing every reader here does, so it rejects a file whose framing
+    /// is bad rather than reporting a range into it — the `# Errors` contract its docs state.
+    #[test]
+    fn c2pa_span_rejects_a_malformed_file() {
+        assert_eq!(
+            c2pa_span(b"not a RIFF file at all").unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+
+        // Well-formed header, then a chunk whose declared size runs past the end of the data.
+        let mut file = write_simple_lossless(&[0x2f, 0x00]).unwrap();
+        let len = file.len();
+        file[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(file.len(), len, "only the size field was edited");
+        assert_eq!(
+            c2pa_span(&file).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
     }
 }
