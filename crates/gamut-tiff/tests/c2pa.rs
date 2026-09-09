@@ -122,6 +122,28 @@ fn the_tile_path_places_the_store_too() {
 }
 
 #[test]
+fn a_bigtiff_carries_the_store_with_its_wider_count_field() {
+    // BigTIFF widens the entry's count and value words to 8 bytes, so the count field the signer
+    // excludes is 8 bytes rather than 4 — the one place the container variant changes what
+    // §18.5.5 names.
+    let pixels = rgb(17, 13);
+    let mut bytes = Vec::new();
+    let report = TiffEncoder::new()
+        .with_byte_order(ByteOrder::BigEndian)
+        .with_big_tiff(true)
+        .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .encode_with_report(image(&pixels, 17, 13), &mut bytes)
+        .expect("encode");
+    let excl = report.c2pa.expect("a store was written");
+    assert_eq!(excl.count_field.len, 8);
+    assert_eq!(
+        &bytes[excl.store.start as usize..excl.store.end() as usize],
+        STORE
+    );
+    assert_eq!(excl.store.end(), bytes.len() as u64);
+}
+
+#[test]
 fn a_multipage_document_puts_the_entry_in_its_last_page() {
     // §A.3.6: one store for the whole asset, in the *last* IFD of the main chain — not page 0,
     // where this crate's other metadata goes.
