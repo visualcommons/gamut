@@ -67,13 +67,23 @@ compression schemes land additively on this frozen surface (see Status).
 - **Compression** — uncompressed, PackBits, LZW (+ strip predictor), and Adobe Deflate
   (+ horizontal differencing on strips or tiles), plus the bilevel CCITT schemes Modified Huffman
   (Group 3 1-D) and Group 4 (T.6).
+- **Metadata** — `TiffEncoder::with_metadata` / `TiffDecoder::metadata` carry an Exif sub-IFD
+  (`ExifIFD`, 34665, as a `gamut_ifd::Ifd`) plus opaque XMP (700), IPTC-IIM (33723), ICC (34675)
+  and C2PA (52545) payloads, verbatim in both directions — the raw blocks the workspace's
+  metadata facade consumes. The C2PA manifest store follows C2PA 2.4 §A.3.6 through the shared
+  `gamut_ifd::c2pa` helper it and `gamut-dng` both call: the entry in the last IFD of the main
+  chain, the store at the end of the file, and the two §18.5.5 exclusion ranges reported by
+  `TiffEncoder::encode_with_report` or recovered from any file by `gamut_tiff::c2pa_exclusions`.
+  `with_c2pa_reserved` writes a zero-filled reservation for an external signer to overwrite in
+  place.
 - The decoder is hardened against hostile input (`#![forbid(unsafe_code)]`, a size cap, and a
   byte-flip fuzz corpus).
 
 **Deferred — planned, additive** (see the [STATUS.md](STATUS.md) scope ledger): YCbCr (§21),
 CIE L\*a\*b\* / RGB colorimetry (§20, §23), new-style JPEG-in-TIFF (§22, `Compression = 7`), and
 smaller items (CCITT Group 3 2-D, planar config, IEEE-float and 32-bit samples, 4-bit grayscale,
-halftone hints).
+halftone hints). The metadata payloads are carried as raw bytes rather than parsed here; wiring
+them to the typed [`gamut-metadata`](../gamut-metadata) facade is tracked separately.
 **Permanently out of scope:** old-style JPEG (§22, `Compression = 6`), deprecated and
 unimplementable-as-specified per TIFF Technical Note 2.
 

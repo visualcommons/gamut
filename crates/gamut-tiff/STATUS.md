@@ -68,6 +68,33 @@ Cross-depth requests resolve rather than fail: 8-bit widens to 16-bit by `×257`
 narrows to 8-bit by truncation (lossy, documented). Evidence: `tests/high_bit_depth.rs`, pixel-exact
 against libtiff in both directions.
 
+**Added since v1.0 (semver-minor) — the metadata seam and the C2PA manifest store (issue #446).**
+Until now the crate had no metadata surface at all: `tags.rs` named XMP (700), IPTC/NAA (33723),
+ICC (34675) and the Exif/GPS/Interop pointers only so `deconstruct` would not flag them unknown,
+and a caller wanting any of them dropped to the re-exported `gamut-ifd` spine. `TiffMetadata`
+(`#[non_exhaustive]`, built through `new` + `with_*`) is now written by
+`TiffEncoder::with_metadata` on the strip, tile and multi-page paths alike and read back by
+`TiffDecoder::metadata`. XMP, IPTC-IIM, ICC and C2PA are **opaque bytes carried verbatim** — the
+raw blocks the workspace's metadata facade consumes, as `gamut-png` and `gamut-webp` hand them
+over — so this crate parses, validates and reconciles none of them; the `ExifIFD` is handed over
+as a `gamut_ifd::Ifd`, because it *is* a directory the decoder has already walked.
+
+The C2PA manifest store is the one carrier with a placement rule of its own, and that rule is not
+restated here: `gamut_ifd::c2pa` owns C2PA 2.4 §A.3.6 (tag 52545 / `0xCD41`, type `UNDEFINED`, one
+store per asset, its entry in the **last IFD of the main chain**, its bytes at the **end of the
+file**) and §18.5.5 (the two disjoint exclusion ranges — the store, and the `count` field of its
+entry — that a `c2pa.hash.data` binding excludes; §18.7.3.3 leaves that the only binding a TIFF
+asset has), and `gamut-dng` calls the same helper, so the two formats cannot drift.
+`with_c2pa_reserved` writes a zero-filled reservation for an external signer to overwrite in
+place; `encode_with_report` reports the ranges, and `c2pa_exclusions` recovers them from any
+TIFF's bytes — including files written through `encode_palette8` or `encode_pages_rgb8`, which the
+object-safe `EncodeImage` seam cannot report through. The store's bytes are never byte-swapped:
+the header's `ByteOrder` does not govern them (§A.3.6). Tag 52545 joins `is_known_tag`, so the
+v1 zero-tolerance byte accounting claims the store as its entry's typed value span rather than
+reporting an unknown private tag and an unaccounted trailer. Evidence: `tests/c2pa.rs`,
+`tests/metadata.rs`, and libtiff decoding a store-carrying file pixel-exact
+(`tests/oracle_metadata.rs`).
+
 **Deferred (planned, additive).** Each plugs into the existing strip/tile pipeline and libtiff
 oracle the way every codec above did:
 
@@ -84,7 +111,9 @@ oracle the way every codec above did:
   4-bit grayscale; 16-bit palette (`ColorMap` indices stay 8-bit); `Cmyk16`/`GrayAlpha16`
   presentation (no such `gamut-core` pixel type — a 16-bit CMYK page decodes through `Cmyk8` by
   narrowing, or `Rgb16` with the fourth sample dropped); halftone hints (§17); document-storage
-  metadata tags (§12 beyond `PageNumber`).
+  metadata tags (§12 beyond `PageNumber`); **typed metadata** — the seam above carries raw
+  payloads only, and wiring them to the `gamut-metadata` facade's models is deliberately left out
+  (adding that dependency edge is the metadata epic's job, not this crate's).
 
 **Additivity guarantee:** each deferred row lands semver-minor — a new variant on a
 `#[non_exhaustive]` enum (`Compression`, `PhotometricInterpretation`, `Predictor`), a new builder
@@ -127,6 +156,13 @@ The API was frozen after a full-surface review; the additions and breaks:
   `Rgba16`. All new items; nothing existing was reshaped. The one behavioural change is that a
   16-bit page requested as an 8-bit pixel type now returns `Ok` (narrowed) where it previously
   returned `Err(Unsupported)`.
+- **Additions since the freeze (#446)** — `TiffMetadata`, `TiffEncodeReport`, `c2pa_exclusions`,
+  `tags::C2PA_MANIFEST_STORE`, `TiffEncoder::{with_metadata, with_c2pa_reserved,
+  encode_with_report}`, `TiffDecoder::metadata`, and the `C2paExclusions` re-export that keeps the
+  closure complete. All new items; nothing existing was reshaped. `TiffMetadata` is
+  `#[non_exhaustive]` from the start — a sixth carrier must not cost a major, which is exactly
+  what an exhaustive struct cost `gamut-dng`. The one behavioural change is that tag 52545 is no
+  longer reported as an unknown tag by `deconstruct`, since the crate now reads and writes it.
 - **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
   on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
   diagnostics whose wording is not contractual.
