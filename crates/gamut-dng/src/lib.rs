@@ -40,8 +40,12 @@
 //!   gain-table maps ([`ProfileGainTableMap`], both tag versions) parse typed and re-serialise
 //!   byte-exactly. Opcode lists are typed [`OpcodeList`] containers.
 //! - **Integrity & explicitness**: the encoder writes the SDK-bit-exact `NewRawImageDigest`
-//!   ([`RawImage::new_raw_image_digest`]), and the decoder surfaces every unmodelled field
-//!   verbatim as typed [`RawTag`]s — nothing in a file is silently dropped.
+//!   ([`RawImage::new_raw_image_digest`]), and the decoder surfaces unmodelled fields verbatim
+//!   as typed [`RawTag`]s — from IFD 0, the raw IFD, every image sub-IFD, and the last
+//!   directory of the main chain when it is none of those. Two documented residues aside — a
+//!   duplicated tag keeps the last entry (the IFD core's model), and an *interior* main-chain
+//!   page carrying no image reaches no typed channel (issue #525) — nothing in a file is
+//!   silently dropped, and [`deconstruct`] accounts for every byte either way.
 //!
 //! An **Apple ProRAW** DNG (1.7, JPEG XL, tiled, LinearRaw, semantic masks, gain map) therefore
 //! decodes fully. Full demosaicing and colour rendering are a raw *processor's* job and stay out

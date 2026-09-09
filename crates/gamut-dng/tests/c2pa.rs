@@ -388,27 +388,6 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
     );
 }
 
-/// Appends a trailing main-chain IFD holding `entries` **at the byte level**, so entries the
-/// eager `Ifd` would de-duplicate survive as written. Returns the directory's offset.
-fn append_raw_trailing_ifd(dng: &mut Vec<u8>, entries: &[(u16, u16, u32, u32)]) -> u64 {
-    let le = ByteOrder::LittleEndian;
-    let (_, _, ifd0) = read_header(dng).expect("header");
-    let n0 = usize::from(le.u16(dng[ifd0 as usize..ifd0 as usize + 2].try_into().expect("2")));
-    let next_at = ifd0 as usize + 2 + n0 * 12;
-    let body = align_word(dng.len() as u64);
-    dng.resize(body as usize, 0);
-    dng.extend_from_slice(&le.pack_u16(entries.len() as u16));
-    for &(tag, ty, count, word) in entries {
-        dng.extend_from_slice(&le.pack_u16(tag));
-        dng.extend_from_slice(&le.pack_u16(ty));
-        dng.extend_from_slice(&le.pack_u32(count));
-        dng.extend_from_slice(&le.pack_u32(word));
-    }
-    dng.extend_from_slice(&[0, 0, 0, 0]);
-    dng[next_at..next_at + 4].copy_from_slice(&le.pack_u32(body as u32));
-    body
-}
-
 /// §A.3.6 allows one store per asset, so a last IFD carrying **two** tag-52545 entries has no
 /// admissible store — and both decode surfaces must say so *together*.
 ///
@@ -421,7 +400,7 @@ fn a_duplicated_store_entry_is_absent_from_both_decode_surfaces() {
     let first = store(40);
     let (mut dng, _) = encode(&DngEncoder::new());
     // Two entries in a trailing IFD: body is count (2) + 2 * 12 + next (4) = 30 bytes.
-    let body = append_raw_trailing_ifd(
+    let body = append_trailing_ifd(
         &mut dng,
         &[
             (C2PA_MANIFEST_STORE, 7, first.len() as u32, 0),
@@ -448,14 +427,29 @@ fn a_duplicated_store_entry_is_absent_from_both_decode_surfaces() {
         decoded.metadata.c2pa, None,
         "the bytes surface must agree with the ranges, not report the last duplicate"
     );
-    // Preservation still holds: the field reaches the caller verbatim.
-    assert!(
-        decoded
-            .trailing_extra
-            .iter()
-            .any(|t| t.tag == C2PA_MANIFEST_STORE),
-        "the duplicated entry is still surfaced: {:?}",
+    // Preservation, stated exactly: the eager `Ifd` the typed channels are built on keeps the
+    // LAST of several entries under one tag, so one field arrives and it carries the second
+    // duplicate's bytes. Asserting only that *a* tag-52545 field is present would pass on the
+    // first duplicate, on the second, or on both — i.e. on the very ambiguity under test.
+    let surfaced: Vec<&RawTag> = decoded
+        .trailing_extra
+        .iter()
+        .filter(|t| t.tag == C2PA_MANIFEST_STORE)
+        .collect();
+    assert_eq!(
+        surfaced.len(),
+        1,
+        "the last-wins IFD model yields exactly one field: {:?}",
         decoded.trailing_extra
+    );
+    assert_eq!(
+        surfaced[0].value,
+        Value::Undefined(second.clone()),
+        "and it is the last duplicate's bytes, not the first's"
+    );
+    assert_ne!(
+        second, first,
+        "the fixture's duplicates must be distinguishable"
     );
     // And re-encoding cannot smuggle one of the two duplicates back out as "the" store.
     let mut re = Vec::new();
@@ -474,8 +468,7 @@ fn a_duplicated_store_entry_is_absent_from_both_decode_surfaces() {
 fn a_declined_store_in_a_trailing_ifd_is_still_surfaced() {
     let short = store(MIN_STORE_LEN - 1);
     let (mut dng, _) = encode(&DngEncoder::new());
-    let body =
-        append_raw_trailing_ifd(&mut dng, &[(C2PA_MANIFEST_STORE, 7, short.len() as u32, 0)]);
+    let body = append_trailing_ifd(&mut dng, &[(C2PA_MANIFEST_STORE, 7, short.len() as u32, 0)]);
     // Body: count (2) + one entry (12) + next (4) = 18; point the entry at the bytes after it.
     let word_at = (body + 2 + 8) as usize;
     dng[word_at..word_at + 4]
