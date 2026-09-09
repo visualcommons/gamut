@@ -80,9 +80,12 @@ pub const MIN_STORE_LEN: usize = 8;
 /// IFD entry.
 ///
 /// Both are absolute offsets into the file the store was located in (or, for an encoder's report,
-/// into the bytes that encoder produced). They never overlap: the count field lies inside a
-/// directory body, the store outside it (or, for a foreign file whose store packs inline, in the
-/// entry's value word, which follows the count field).
+/// into the bytes that encoder produced). **They never overlap, and neither is empty** — the
+/// count field lies inside a directory body and the store outside it (or, for a foreign file
+/// whose store packs inline, in the entry's value word, which follows the count field). That is
+/// an invariant of the type, not a description of the usual case: every value comes from
+/// [`locate`], [`append_store`] or [`new`](Self::new), and the last of those rejects anything
+/// that would break it.
 ///
 /// `#[non_exhaustive]`: §18.5.5's exclusion set is the two ranges below today, and a later
 /// revision naming a third must not be a breaking change. Construct one only by locating or
@@ -108,11 +111,30 @@ impl C2paExclusions {
     /// format this crate does not serialise — unable to name the ranges §18.5.5 asks it to
     /// exclude. Extensible and constructible are both available, so the type is both.
     ///
-    /// The two ranges are the caller's to get right: nothing here re-reads the file to check
-    /// that they describe a manifest store, or that they are disjoint.
-    #[must_use]
-    pub const fn new(store: Range, count_field: Range) -> Self {
-        Self { store, count_field }
+    /// The set that comes back satisfies the invariant this type advertises: the two ranges are
+    /// non-empty and disjoint. Nothing here re-reads a file — whether the ranges truly describe
+    /// a manifest store is the caller's to get right — but a set that could not describe one
+    /// under any reading is refused rather than handed on, because what it feeds is a signer's
+    /// hard binding and a nonsensical exclusion set must not pass silently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if either range is empty (nothing to exclude), or if the
+    /// two overlap. Ranges that merely *abut* are accepted: touching is not overlapping.
+    pub fn new(store: Range, count_field: Range) -> Result<Self> {
+        if store.len == 0 || count_field.len == 0 {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: a C2PA exclusion range is empty",
+            ));
+        }
+        if store.start < count_field.end() && count_field.start < store.end() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: the C2PA exclusion ranges overlap",
+            ));
+        }
+        Ok(Self { store, count_field })
     }
 }
 
@@ -902,10 +924,58 @@ mod tests {
             write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
         let found = locate(&bytes[..]).expect("locate").expect("a store");
         assert_eq!(
-            C2paExclusions::new(found.store, found.count_field),
+            C2paExclusions::new(found.store, found.count_field).expect("a located set is valid"),
             found,
             "the constructor's fields land in the documented order"
         );
+    }
+
+    /// The constructor enforces the invariant the type advertises, at each boundary: an empty
+    /// range on either side is refused, overlapping ranges are refused, and ranges that merely
+    /// abut are accepted — touching is not overlapping, and the two orders of abutment are the
+    /// inputs on which `<` and `<=` disagree.
+    #[test]
+    fn exclusions_new_rejects_empty_or_overlapping_ranges() {
+        let at = |start, len| Range { start, len };
+        let empty = "TIFF: a C2PA exclusion range is empty";
+        let overlap = "TIFF: the C2PA exclusion ranges overlap";
+
+        for (store, count_field) in [
+            (at(0, 0), at(10, 4)),
+            (at(10, 4), at(0, 0)),
+            (at(0, 0), at(0, 0)),
+        ] {
+            assert_eq!(
+                C2paExclusions::new(store, count_field)
+                    .expect_err("an empty range excludes nothing")
+                    .static_message(),
+                Some(empty)
+            );
+        }
+
+        // Overlap by one byte, each way round, and full containment.
+        for (store, count_field) in [
+            (at(10, 4), at(13, 4)),
+            (at(13, 4), at(10, 4)),
+            (at(10, 4), at(11, 1)),
+        ] {
+            assert_eq!(
+                C2paExclusions::new(store, count_field)
+                    .expect_err("overlapping ranges")
+                    .static_message(),
+                Some(overlap)
+            );
+        }
+
+        // Abutting is legal in both directions...
+        let abut_after = C2paExclusions::new(at(14, 4), at(10, 4)).expect("count then store");
+        assert_eq!(abut_after.store, at(14, 4));
+        assert!(
+            C2paExclusions::new(at(10, 4), at(14, 4)).is_ok(),
+            "store then count"
+        );
+        // ...and so is the ordinary far-apart case a real file produces.
+        assert!(C2paExclusions::new(at(900, 40), at(30, 4)).is_ok());
     }
 
     /// `reserve_entry` places exactly the inline placeholder `append_store` requires — and a
