@@ -285,6 +285,14 @@ exif_tags! {
     LensMake => (Exif, 0xA433, "LensMake", [Ascii, Utf8], Any),
     LensModel => (Exif, 0xA434, "LensModel", [Ascii, Utf8], Any),
     LensSerialNumber => (Exif, 0xA435, "LensSerialNumber", [Ascii], Any),
+    // Exif 3.0 authorship and software provenance (Table 8 section I, §4.6.6.9.8–§4.6.6.9.14).
+    ImageTitle => (Exif, 0xA436, "ImageTitle", [Ascii, Utf8], Any),
+    Photographer => (Exif, 0xA437, "Photographer", [Ascii, Utf8], Any),
+    ImageEditor => (Exif, 0xA438, "ImageEditor", [Ascii, Utf8], Any),
+    CameraFirmware => (Exif, 0xA439, "CameraFirmware", [Ascii, Utf8], Any),
+    RawDevelopingSoftware => (Exif, 0xA43A, "RAWDevelopingSoftware", [Ascii, Utf8], Any),
+    ImageEditingSoftware => (Exif, 0xA43B, "ImageEditingSoftware", [Ascii, Utf8], Any),
+    MetadataEditingSoftware => (Exif, 0xA43C, "MetadataEditingSoftware", [Ascii, Utf8], Any),
     CompositeImage => (Exif, 0xA460, "CompositeImage", [Short], Exact(1)),
     SourceImageNumberOfCompositeImage => (Exif, 0xA461, "SourceImageNumberOfCompositeImage", [Short], Exact(2)),
     SourceExposureTimesOfCompositeImage => (Exif, 0xA462, "SourceExposureTimesOfCompositeImage", [Undefined], Any),
@@ -404,6 +412,32 @@ mod tests {
         assert_eq!(ExifTag::IptcNaa.name(), "IPTC-NAA");
         assert_eq!(ExifTag::GpsLatitude.tag_id(), 0x0002);
         assert!(ExifTag::ALL.len() > 140);
+    }
+
+    #[test]
+    fn exif_30_authorship_tags_are_catalogued() {
+        // CIPA DC-008 Table 8 section I, the block Exif 3.0 added after LensSerialNumber.
+        for (tag, id, name) in [
+            (ExifTag::ImageTitle, 0xA436, "ImageTitle"),
+            (ExifTag::Photographer, 0xA437, "Photographer"),
+            (ExifTag::ImageEditor, 0xA438, "ImageEditor"),
+            (ExifTag::CameraFirmware, 0xA439, "CameraFirmware"),
+            (
+                ExifTag::RawDevelopingSoftware,
+                0xA43A,
+                "RAWDevelopingSoftware",
+            ),
+            (ExifTag::ImageEditingSoftware, 0xA43B, "ImageEditingSoftware"),
+            (
+                ExifTag::MetadataEditingSoftware,
+                0xA43C,
+                "MetadataEditingSoftware",
+            ),
+        ] {
+            assert_eq!(tag.tag_id(), id, "{name} id");
+            assert_eq!(tag.name(), name);
+            assert_eq!(tag.ifd(), IfdKind::Exif, "{name} lives in the Exif sub-IFD");
+        }
     }
 
     #[test]
