@@ -635,9 +635,12 @@ pub fn deconstruct_with_limits(png: &[u8], limits: DeconstructLimits) -> Result<
     let mut tally = ChunkTally::new();
     let mut idat = Vec::new();
     let mut saw_iend = false;
-    // Every chunk enters the report here, IHDR included, so the ceiling is checked here too: a
-    // check placed only inside the loop below would let the chunk pushed before it through, and
-    // `with_max_chunks(N)` would admit N + 1.
+    // Every chunk enters the report here, IHDR included, so the ceiling is checked here too.
+    // A check placed only inside the loop below counts IHDR (it counts every chunk pushed so
+    // far), so it is exact for any datastream that reaches the loop body — but it never runs for
+    // one that does not: a walk that pushes no chunk after IHDR, because the datastream is
+    // truncated at it or ends there, escaped the ceiling entirely. Visible at `max_chunks(0)`,
+    // which admitted such a file.
     let push =
         |segments: &mut Vec<Segment>, tally: &mut ChunkTally, chunk: &RawChunk| -> Result<()> {
             segments.push(Segment {
