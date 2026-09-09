@@ -220,23 +220,28 @@ jobs:
             echo "$rc" > "$out.rc"
           done
           if [ "$ubuntu" -eq 0 ]; then
-            echo "::error::no Ubuntu apt source recognised; refusing to install from a stale index"
-            exit 1
+            # Classification recognised nothing as Ubuntu's -- a re-hosted archive, a renamed mirrorlist.
+            # Prune nothing and carry on: that is exactly how this step behaved before the guard existed,
+            # whereas failing here would turn one runner-image change into a total outage across every
+            # job. A genuinely unreachable archive, or a missing package, still fails loudly at the
+            # unmasked `update`/`install` below.
+            echo "::warning::no Ubuntu apt source recognised; standing down and leaving sources as they are"
+          else
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              [ -f "$f" ] || continue
+              out="$work/$(echo "$f" | tr / _)"
+              if [ "$(cat "$out.rc")" = 10 ]; then
+                echo "removing third-party source $f"
+                sudo rm -f "$f"
+              elif sudo cmp -s "$out" "$f"; then
+                echo "keeping $f"
+              else
+                echo "dropping third-party entries from $f"
+                sudo rm -f "$f"
+                sudo cp "$out" "$f"
+              fi
+            done
           fi
-          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-            [ -f "$f" ] || continue
-            out="$work/$(echo "$f" | tr / _)"
-            if [ "$(cat "$out.rc")" = 10 ]; then
-              echo "removing third-party source $f"
-              sudo rm -f "$f"
-            elif sudo cmp -s "$out" "$f"; then
-              echo "keeping $f"
-            else
-              echo "dropping third-party entries from $f"
-              sudo rm -f "$f"
-              sudo cp "$out" "$f"
-            fi
-          done
           sudo apt-get update
           sudo apt-get install -y pkg-config
       - uses: jdx/mise-action@v4
@@ -315,23 +320,28 @@ jobs:
             echo "$rc" > "$out.rc"
           done
           if [ "$ubuntu" -eq 0 ]; then
-            echo "::error::no Ubuntu apt source recognised; refusing to install from a stale index"
-            exit 1
+            # Classification recognised nothing as Ubuntu's -- a re-hosted archive, a renamed mirrorlist.
+            # Prune nothing and carry on: that is exactly how this step behaved before the guard existed,
+            # whereas failing here would turn one runner-image change into a total outage across every
+            # job. A genuinely unreachable archive, or a missing package, still fails loudly at the
+            # unmasked `update`/`install` below.
+            echo "::warning::no Ubuntu apt source recognised; standing down and leaving sources as they are"
+          else
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              [ -f "$f" ] || continue
+              out="$work/$(echo "$f" | tr / _)"
+              if [ "$(cat "$out.rc")" = 10 ]; then
+                echo "removing third-party source $f"
+                sudo rm -f "$f"
+              elif sudo cmp -s "$out" "$f"; then
+                echo "keeping $f"
+              else
+                echo "dropping third-party entries from $f"
+                sudo rm -f "$f"
+                sudo cp "$out" "$f"
+              fi
+            done
           fi
-          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-            [ -f "$f" ] || continue
-            out="$work/$(echo "$f" | tr / _)"
-            if [ "$(cat "$out.rc")" = 10 ]; then
-              echo "removing third-party source $f"
-              sudo rm -f "$f"
-            elif sudo cmp -s "$out" "$f"; then
-              echo "keeping $f"
-            else
-              echo "dropping third-party entries from $f"
-              sudo rm -f "$f"
-              sudo cp "$out" "$f"
-            fi
-          done
           sudo apt-get update
           sudo apt-get install -y pkg-config
       - uses: jdx/mise-action@v4
