@@ -41,7 +41,8 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
   reads them back without decoding pixels; libwebp's own muxer is the oracle in both directions.
   Read-side chunk-order enforcement and unknown-chunk round-trip preservation closed with
   `gamut-riff` v1 (issue #186): `gamut_riff::WebpLayout::parse` is the single container walk behind
-  both decode paths, and `WebpEncoder::with_unknown_chunks` re-emits preserved chunks. The C2PA
+  both decode paths, and `WebpEncoder::with_unknown_chunks` re-emits preserved chunks (refusing a
+  FourCC that has its own setter, so no chunk can be written twice). The C2PA
   manifest store joined them on the same verbatim terms (issue #445): `WebpEncoder::with_c2pa` /
   `with_c2pa_reserved` embed or reserve it, `encode_with_report` and `gamut_webp::c2pa_span` report
   the byte range a `c2pa.hash.data` assertion excludes, and `WebpMetadata::c2pa` reads it back.
