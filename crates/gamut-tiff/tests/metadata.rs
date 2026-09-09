@@ -173,6 +173,58 @@ fn a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file() {
     );
 }
 
+/// A well-formed single-strip RGB file carrying XMP, plus one extra IFD-0 field.
+///
+/// Used to hand `metadata()` a file whose *pixels* are perfectly readable but whose IFD 0 carries
+/// a pointer tag feeding no field of [`TiffMetadata`].
+fn file_with_extra_ifd0_field(tag: u16, value: Value) -> Vec<u8> {
+    let mut ifd = Ifd::new();
+    ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+    ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
+    ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8, 8, 8]));
+    ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+    ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![2]));
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
+    ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![2]));
+    ifd.set(tags::XMP, Value::Byte(XMP.to_vec()));
+    ifd.set(tag, value);
+    gamut_tiff::write_image(
+        gamut_tiff::ByteOrder::LittleEndian,
+        gamut_tiff::Variant::Classic,
+        &ifd,
+        &[vec![0u8; 2 * 2 * 3]],
+    )
+    .expect("write")
+}
+
+#[test]
+fn a_broken_pointer_the_metadata_does_not_use_does_not_hide_the_blocks() {
+    // `TiffMetadata` has five fields, and an IFD-0 `SubIFDs` (330) or `GPSInfo` (34853) group
+    // feeds none of them — a thumbnail directory and a GPS directory are not XMP, IPTC, ICC, C2PA
+    // or the Exif sub-IFD. So following them can only add failure modes: a dangling one would make
+    // every block unreachable because of a pointer nobody asked for. The pixels of these files
+    // decode fine, which is exactly what makes losing the metadata indefensible.
+    for tag in [tags::SUB_IFDS, tags::GPS_INFO] {
+        let dangling = Value::Long(vec![0xFFFF_FF00]);
+        let bytes = file_with_extra_ifd0_field(tag, dangling);
+        let meta = TiffDecoder::new()
+            .metadata(&bytes)
+            .unwrap_or_else(|e| panic!("tag {tag}: metadata must survive a dangling pointer: {e}"));
+        assert_eq!(meta.xmp.as_deref(), Some(XMP), "tag {tag}");
+        // The same property keeps a multi-page file whose pages share one thumbnail directory
+        // readable: an offset that is never followed cannot trip the cross-chain loop guard.
+    }
+}
+
+#[test]
+fn a_broken_exif_pointer_is_still_an_error() {
+    // The other half of the scoping rule. The Exif sub-IFD's content *is* returned, so reporting
+    // `exif: None` for a directory the file declares would be silent loss — this is the one
+    // pointer whose failure the caller must hear about.
+    let bytes = file_with_extra_ifd0_field(tags::EXIF_IFD, Value::Long(vec![0xFFFF_FF00]));
+    assert!(TiffDecoder::new().metadata(&bytes).is_err());
+}
+
 #[test]
 fn a_file_without_metadata_decodes_to_an_empty_set() {
     let pixels = rgb(8, 4);

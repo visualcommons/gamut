@@ -82,9 +82,17 @@ pub struct TiffMetadata {
     /// silently repaired, which is worth knowing before using a re-encode to prove a file
     /// unmodified.
     ///
-    /// Pointer tags *inside* this directory (`InteroperabilityIFD`, 40965) come back as parsed
-    /// [`sub_ifds`](gamut_ifd::Ifd::sub_ifds) groups, never as raw offsets into the file they were
-    /// read from — the writer gives them fresh offsets when this directory is embedded again.
+    /// The **standard** pointer tag that occurs inside this directory — `InteroperabilityIFD`
+    /// (40965) — comes back as a parsed [`sub_ifds`](gamut_ifd::Ifd::sub_ifds) group rather than a
+    /// raw offset, so the writer gives it a fresh offset when the directory is embedded again.
+    ///
+    /// **Only the standard pointer tags are recognised as pointers.** A *private* tag whose value
+    /// happens to be a `LONG` file offset — some vendors point at their own sub-directories this
+    /// way — is indistinguishable from an ordinary integer field here, so it is carried through
+    /// unchanged and re-encoded verbatim, still holding an offset into the file it was read from.
+    /// Neither this crate nor [`deconstruct`](crate::deconstruct) can grade that, because neither
+    /// knows the tag is a pointer. A caller rewriting a file with vendor metadata must not treat a
+    /// round trip through this field as proof the result is pointer-safe.
     pub exif: Option<Ifd>,
     /// An XMP packet (UTF-8 RDF/XML), stored in the `XMP` tag (700) as `BYTE`, verbatim.
     pub xmp: Option<Vec<u8>>,
@@ -192,6 +200,30 @@ impl TiffMetadata {
     }
 }
 
+/// The pointer tags [`read_metadata`] follows, scoped to what [`TiffMetadata`] actually returns.
+///
+/// Two tags, and the pair is a deliberate lower bound rather than a subset of convenience.
+///
+/// `ExifIFD` is followed because that directory **is** a field of [`TiffMetadata`]: it is handed to
+/// the caller and may be written back, so a pointer under it that stayed a raw offset would be
+/// re-encoded into a file laid out differently. `InteroperabilityIFD` is the one standard pointer
+/// that occurs *inside* an Exif directory (EXIF 2.3 §4.6.3), and it is near-universal in camera
+/// EXIF — leaving it unresolved is exactly the dangling-pointer defect this list exists to prevent.
+///
+/// The other two members of [`gamut_ifd::tags::STANDARD_POINTER_TAGS`] are deliberately **not**
+/// here. `SubIFDs` (330) locates thumbnails and reduced-resolution subfiles and `GPSInfo` (34853)
+/// locates a GPS directory; neither feeds any field of [`TiffMetadata`], and neither is re-encoded
+/// by [`TiffMetadata::apply`], which writes into a directory the encoder builds fresh. Following
+/// them could therefore only *add* failure modes, and it did: a single dangling `SubIFDs` offset
+/// made XMP, IPTC, ICC and C2PA all unreachable on a file whose pixels decode perfectly, and two
+/// pages sharing one thumbnail directory tripped the reader's cross-chain loop guard. A pointer
+/// whose target this reader throws away must not be able to fail the whole call.
+///
+/// One over-reach remains and is harmless: `InteroperabilityIFD` is also followed if it appears at
+/// IFD 0, where it does not belong. A TIFF whose IFD 0 carries tag 40965 is already out of spec,
+/// and `read_tree` takes one flat list for the whole tree.
+const POINTER_TAGS: &[u16] = &[tags::EXIF_IFD, tags::INTEROPERABILITY_IFD];
+
 /// A raw `BYTE`/`UNDEFINED` payload, copied out of a directory entry.
 fn bytes_value(value: Option<&Value>) -> Option<Vec<u8>> {
     value.and_then(Value::as_bytes).map(<[u8]>::to_vec)
@@ -207,14 +239,19 @@ fn bytes_value(value: Option<&Value>) -> Option<Vec<u8>> {
 /// an entry as a store would hand the caller a [`TiffMetadata`] that
 /// [`TiffEncoder`](crate::TiffEncoder) then refuses to encode. `gamut-dng` gates its own decode
 /// on the same locator for the same reason.
+///
+/// Reader and locator agreeing is not the same as every readable store being writable, and this
+/// does not promise the latter — it cannot, because a reader does not know which container the
+/// caller will write. One case exists: `locate` accepts a store of exactly
+/// [`MIN_STORE_LEN`](gamut_ifd::c2pa::MIN_STORE_LEN) (8) bytes, while writing **BigTIFF** needs 9,
+/// since 8 bytes would pack into the entry's own value word instead of being placed out of line
+/// at the end of the file. So an 8-byte store read from any file cannot be written back to a
+/// BigTIFF. The affected input is degenerate — 8 bytes is a JUMBF box header with no content, so
+/// there is no manifest in it — but the refusal is real and comes from
+/// [`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved)'s placement rule,
+/// not from disagreement here.
 pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
-    // Every standard pointer tag, not just `ExifIFD`: an `InteroperabilityIFD` (40965) inside the
-    // Exif directory — near-universal in camera EXIF — is itself a pointer, and a pointer left
-    // unparsed comes back as the *source* file's absolute offset. Handing that to
-    // [`TiffMetadata::apply`] would write a dangling offset into a file laid out differently, so
-    // a directory this reader returns must have every pointer under it resolved into a child the
-    // writer can re-point. `gamut-dng`'s rewrite path reads with the same list.
-    let file = read_tree(data, gamut_ifd::tags::STANDARD_POINTER_TAGS)?;
+    let file = read_tree(data, POINTER_TAGS)?;
     // §A.3.6: one store for the whole asset, in the last IFD of the main chain. `ifds` is that
     // chain, so its last element is where the entry belongs — and a single-page file makes the
     // two the same directory. A file with no IFD at all carries no metadata.
