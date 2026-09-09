@@ -234,10 +234,15 @@ impl<'a> ChunkReader<'a> {
 ///
 /// Returns [`Error::InvalidInput`] and leaves `png` **unmodified** if `span` runs past the end of
 /// `png`, if it does not frame a chunk (its payload must be `chunk.start + 8 .. chunk.end - 4`),
-/// if the bytes it names are not a `caBX` chunk, or if `store` is not exactly the reserved
-/// length. Every check runs before the first byte is written, so a rejected call cannot leave a
-/// half-filled chunk behind — and a store of the wrong length is rejected rather than resized,
-/// because resizing would move every byte after the chunk and invalidate the signer's hash.
+/// if the bytes it names are not a `caBX` chunk, if the span's payload length disagrees with the
+/// length the chunk itself declares, or if `store` is not exactly the reserved length. Every check
+/// runs before the first byte is written, so a rejected call cannot leave a half-filled chunk
+/// behind — and a store of the wrong length is rejected rather than resized, because resizing
+/// would move every byte after the chunk and invalidate the signer's hash.
+///
+/// `png` need not be the buffer the span came from — filling a copy, or a buffer that ends where
+/// the chunk does, is supported — which is exactly why the chunk's declared length is checked
+/// against the span rather than assumed to match it.
 ///
 /// # Example
 ///
@@ -282,6 +287,22 @@ pub fn fill_c2pa(png: &mut [u8], span: &C2paSpan, store: &[u8]) -> Result<()> {
     }
     if png[span.chunk.start + 4..span.payload.start] != CABX {
         return Err(invalid("PNG: the C2PA span does not name a caBX chunk"));
+    }
+    // The span must agree with the chunk's *own* length field, not merely with itself. Until this
+    // check the only bytes of `png` read were the four type bytes, so a span taken from one file
+    // and applied to another — which the `&mut [u8]` signature deliberately allows — could name a
+    // longer chunk than the one that is there and write the payload and CRC over whatever follows
+    // it, most likely IDAT, and report success.
+    let declared = u32::from_be_bytes([
+        png[span.chunk.start],
+        png[span.chunk.start + 1],
+        png[span.chunk.start + 2],
+        png[span.chunk.start + 3],
+    ]);
+    if u64::try_from(span.payload.len()) != Ok(u64::from(declared)) {
+        return Err(invalid(
+            "PNG: the C2PA span disagrees with the chunk's declared length",
+        ));
     }
     if store.len() != span.payload.len() {
         return Err(invalid("PNG: the C2PA store is not the reserved length"));
@@ -494,6 +515,50 @@ mod tests {
             "{error}"
         );
         assert_eq!(mine, png);
+    }
+
+    /// A span must agree with the chunk's own length field, in both directions. `png` need not
+    /// be the buffer the span was taken from, so a span from a file whose store is long, applied
+    /// to a file whose store is short, would otherwise write the payload and a CRC straight over
+    /// the bytes that follow — here the `IDAT` — and report success.
+    #[test]
+    fn filling_rejects_a_span_the_chunks_declared_length_contradicts() {
+        // A caBX declaring 4 payload bytes, followed by a long IDAT.
+        let mut png = SIGNATURE.to_vec();
+        write_chunk(&mut png, *b"IHDR", &[0; 13]);
+        let chunk_start = png.len();
+        write_chunk(&mut png, CABX, &[0; 4]);
+        write_chunk(&mut png, *b"IDAT", &[0xEE; 40]);
+        write_chunk(&mut png, *b"IEND", &[]);
+        let untouched = png.clone();
+
+        // A span claiming a 40-byte payload at the same offset: every earlier guard passes — it
+        // is in bounds, it frames a chunk, and it starts at a real caBX.
+        let overlong = C2paSpan::of(chunk_start..chunk_start + 12 + 40);
+        let error = fill_c2pa(&mut png, &overlong, &[7; 40]).expect_err("longer than declared");
+        assert!(error.to_string().contains("declared length"), "{error}");
+        assert_eq!(png, untouched, "nothing was written over the IDAT");
+
+        // ...and the mirror: a span shorter than the chunk declares would plant the CRC inside
+        // the real payload, leaving a chunk no reader accepts.
+        let mut long_store = SIGNATURE.to_vec();
+        write_chunk(&mut long_store, *b"IHDR", &[0; 13]);
+        let start = long_store.len();
+        write_chunk(&mut long_store, CABX, &[0; 40]);
+        write_chunk(&mut long_store, *b"IEND", &[]);
+        let before = long_store.clone();
+        let short = C2paSpan::of(start..start + 12 + 4);
+        let error = fill_c2pa(&mut long_store, &short, &[7; 4]).expect_err("shorter than declared");
+        assert!(error.to_string().contains("declared length"), "{error}");
+        assert_eq!(long_store, before);
+
+        // The matching span still fills, so the check rejects disagreement, not every span.
+        let exact = C2paSpan::of(chunk_start..chunk_start + 12 + 4);
+        fill_c2pa(&mut png, &exact, b"good").expect("the declared length matches");
+        assert_eq!(
+            find_c2pa(&png).map(|s| png[s.payload].to_vec()),
+            Some(b"good".to_vec())
+        );
     }
 
     /// The bounds check admits the exact fit: a buffer that ends exactly where the chunk does is
