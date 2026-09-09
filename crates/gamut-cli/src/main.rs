@@ -62,7 +62,7 @@ struct Cli {
 enum Command {
     /// Decode an image (PNG/JPEG/PPM/WebP/JXL) and re-encode it as AVIF/WebP/TIFF/PNG/JXL/JPEG.
     Convert(commands::convert::ConvertArgs),
-    /// Strictly deconstruct a TIFF, DNG or PNG: account every byte, flag unknowns, and for PNG report where the bytes went (gamut-tiff/gamut-dng/gamut-png).
+    /// Strictly deconstruct a TIFF, DNG or PNG: account every byte, flag unknowns, and for PNG report where the bytes went (gamut-tiff/gamut-dng/gamut-png); for HEIC, report a C2PA manifest store without validating it (gamut-heic).
     Inspect(commands::inspect::InspectArgs),
     /// Extract and inspect the embedded ICC colour profile of an image (gamut-icc).
     Icc(commands::icc::IccArgs),

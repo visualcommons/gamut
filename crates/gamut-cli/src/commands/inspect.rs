@@ -1,9 +1,24 @@
-//! `gamut inspect` — strict "deconstruct" of a TIFF, DNG or PNG (issues #197/#263/#224).
+//! `gamut inspect` — strict "deconstruct" of a TIFF, DNG or PNG (issues #197/#263/#224), and the
+//! C2PA provenance report for a HEIC (issue #448).
 //!
 //! Walks the entire container, classifies every byte into typed segments, and flags anything
 //! unrecognised (unknown tags, unknown field types, out-of-spec codes, unclassified bytes).
 //! Prints a report to stdout and exits non-zero when the file is not fully accounted for —
 //! usable as an archival CI gate.
+//!
+//! # HEIC is the one format here with no gate
+//!
+//! The HEIC arm answers a different question from the other three, and answers only it: **does
+//! this file carry a C2PA manifest store, and where?** It does not deconstruct the container, so
+//! it has nothing to hold against the file and reports no verdict; it exits `0` whenever
+//! `gamut-heic` could parse the container, whether a store was found or not. Presence and absence
+//! are both ordinary outcomes of an ordinary file, and neither is an accounting anomaly.
+//!
+//! The reporting itself lives in `gamut-heic`, not here: `gamut-cli` is excluded from the coverage
+//! gate, so logic placed in this file would ship untested. [`gamut::heic::C2paSummary`] holds the
+//! reportable facts and renders the lines — disclaimer included, since a report that let a reader
+//! infer a validity verdict would be a defect — and this command prefixes its own indent to them.
+//! gamut locates a store and never validates one (C2PA 2.4 §15.12).
 //!
 //! The contract itself — the gate per format, the two exit codes, the budgets, and every reason
 //! the PNG filter scan declines — is recorded in `docs/inspect-exit-codes.md`, which is normative
@@ -69,7 +84,7 @@ const DNG_VERSION_TAG: u16 = 50706;
 /// Arguments for `gamut inspect`.
 #[derive(Args)]
 pub(crate) struct InspectArgs {
-    /// Input TIFF, DNG or PNG file.
+    /// Input TIFF, DNG, PNG or HEIC file.
     input: PathBuf,
     /// Force the container format instead of auto-detecting it.
     #[arg(long, value_enum)]
@@ -85,6 +100,8 @@ pub(crate) enum Format {
     Dng,
     /// PNG (gamut-png).
     Png,
+    /// HEIF/HEIC (gamut-heic) — the C2PA provenance report only; see the module docs.
+    Heic,
 }
 
 /// A format-agnostic view of a deconstruct report, for printing.
@@ -108,15 +125,18 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
 
     // PNG's report is a different shape -- it has no IFD tree and no tag vocabulary, but it does
     // carry compression figures the others have no equivalent for -- so it prints on its own path
-    // rather than being flattened into `Summary`.
-    if matches!(format, Format::Png) {
-        return inspect_png(&args.input, &data);
+    // rather than being flattened into `Summary`. HEIC's is not a deconstruct at all: it answers
+    // the provenance question and gates nothing (see the module docs).
+    match format {
+        Format::Png => return inspect_png(&args.input, &data),
+        Format::Heic => return inspect_heic(&args.input, &data),
+        Format::Tiff | Format::Dng => {}
     }
 
     let summary = match format {
         Format::Dng => summarize_dng(gamut::dng::deconstruct(&data)?),
         Format::Tiff => summarize_tiff(gamut::tiff::deconstruct(&data)?),
-        Format::Png => unreachable!("handled above"),
+        Format::Png | Format::Heic => unreachable!("handled above"),
     };
 
     print_summary(&args.input, format, &summary);
@@ -138,11 +158,29 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
 /// The 8-byte PNG file signature (§5.2).
 const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
-/// Detects PNG by signature, then DNG vs TIFF: a DNG is a TIFF whose IFD 0 carries the mandatory
-/// `DNGVersion` tag.
+/// The `ftyp` major brands that make an ISOBMFF file a HEIF **still image** (ISO/IEC 23008-12
+/// §B.4.1, MIAF).
+///
+/// Matched on the major brand alone, deliberately. A brand appearing among the *compatible* brands
+/// says the file can be read that way, not that it is one: an AVIF lists `mif1` there, and reading
+/// an AVIF through the HEIF container reader would report a store this command has no slice for.
+/// The sequence brands (`hevc`, `hevx`, `msf1`) are absent because gamut is image-first.
+const HEIF_MAJOR_BRANDS: [[u8; 4]; 5] = [*b"heic", *b"heix", *b"heim", *b"heis", *b"mif1"];
+
+/// Detects PNG by signature, then a HEIF still image by its `ftyp` major brand, then DNG vs TIFF:
+/// a DNG is a TIFF whose IFD 0 carries the mandatory `DNGVersion` tag.
 fn sniff(data: &[u8]) -> Format {
     if data.starts_with(&PNG_SIGNATURE) {
         return Format::Png;
+    }
+    // §4.3: `ftyp` is the first box of the file, so its type sits at offset 4 and the major brand
+    // at offset 8.
+    if data.get(4..8) == Some(b"ftyp")
+        && HEIF_MAJOR_BRANDS
+            .iter()
+            .any(|brand| data.get(8..12) == Some(brand))
+    {
+        return Format::Heic;
     }
     if let Ok(file) = gamut::tiff::read(data)
         && file
@@ -622,12 +660,29 @@ fn filter_skip_label(reason: gamut::png::SkippedFilterScan) -> &'static str {
     }
 }
 
+/// Reports what a HEIF/HEIC file says about its own provenance, and nothing else.
+///
+/// Every reportable fact and every word of the report come from `gamut-heic`; this function parses
+/// the container, prints the lines under the file's name, and returns `Ok(())`. It reaches no
+/// verdict, so it has none to fail on: a file with a manifest store and a file without one both
+/// exit `0`, and only a container this crate cannot parse at all exits non-zero — the same way a
+/// TIFF that cannot be opened does.
+fn inspect_heic(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
+    let container = gamut::heic::HeifContainer::parse(data)?;
+    println!("{}: HEIF/HEIC", path.display());
+    for line in container.c2pa_summary().report_lines() {
+        println!("  {line}");
+    }
+    Ok(())
+}
+
 /// The display name of a format.
 fn format_name(format: Format) -> &'static str {
     match format {
         Format::Tiff => "TIFF",
         Format::Dng => "DNG",
         Format::Png => "PNG",
+        Format::Heic => "HEIC",
     }
 }
 
