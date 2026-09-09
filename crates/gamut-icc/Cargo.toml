@@ -16,6 +16,11 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+# Colorimetry for the built-in profile constructors (`src/builtin.rs`): the CICP code-point
+# chromaticity tables, the RGB->XYZ / Bradford derivations, and the ST 2084 transfer. The edge
+# points this way because gamut-color is the primitive (fan-in 8) and has no need of a profile
+# serializer; see `STATUS.md`, "Built-in profiles".
+gamut-color.workspace = true
 gamut-core.workspace = true
 md-5.workspace = true
 thiserror.workspace = true
