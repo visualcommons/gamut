@@ -185,7 +185,7 @@ impl FilterScan {
     /// Whether the scan actually ran, so the counts describe bytes this reader read.
     ///
     /// The complement of [`is_damage`](Self::is_damage) only for a scan that ran: a skip is
-    /// either damage or a budget refusal, and **neither is a verification**. A caller grading a
+    /// either damage or a refusal to read, and **neither is a verification**. A caller grading a
     /// file — [`PngReport::is_verified`], an archival gate — asks this; a caller asking whether
     /// anything is known to be *wrong* asks `is_damage`.
     #[must_use]
@@ -215,11 +215,9 @@ impl FilterScan {
 #[non_exhaustive]
 pub enum SkippedFilterScan {
     /// The image the header describes is larger than this reader's byte budget, so the walk
-    /// declined to inflate a stream a decode would refuse to allocate — or the image is past the
-    /// decoder's default budget and the stream is too short to plausibly inflate to it (more than
-    /// sixty-four times its own length), which is the shape of a zlib bomb under a permissive
-    /// budget. **Nothing is known to be wrong with the file** — it may be a perfectly sound very
-    /// large PNG.
+    /// declined to inflate a stream a decode would refuse to allocate. **Nothing is known to be
+    /// wrong with the file** — it may be a perfectly sound very large PNG, read by raising
+    /// [`DeconstructLimits::max_image_bytes`].
     OverBudget = 0,
     /// The IDAT stream is not a valid zlib stream, is truncated, or inflates past the length the
     /// header implies.
@@ -229,18 +227,30 @@ pub enum SkippedFilterScan {
     LengthMismatch = 2,
     /// A scanline's leading byte is not one of the five filter codes §9.1 defines.
     UndefinedFilterCode = 3,
+    /// The image fits this reader's byte budget but is past the decoder's default one, and the
+    /// IDAT stream is too short to plausibly inflate to it — more than sixty-four times its own
+    /// length — which is the shape of a zlib bomb under a permissive budget.
+    ///
+    /// Distinct from [`OverBudget`](Self::OverBudget), which the image *exceeding* the budget
+    /// raises: a file refused here is one whose declared image the budget admits, so saying it is
+    /// too large would name a limit it does not cross. **Nothing is known to be wrong with the
+    /// file** either — a flat 16384×16384 image really does compress this far — only that this
+    /// reader will not spend the budget to find out.
+    ImplausibleInflation = 4,
 }
 
 impl SkippedFilterScan {
     /// Whether this reason means the **file** is damaged, rather than merely unread.
     ///
     /// The single source of truth for that question, so no caller has to re-derive it from the
-    /// variant list. [`OverBudget`](Self::OverBudget) is the only reason that is not damage: it
-    /// describes the reader's budget, not the file. Every other reason is a statement about the
+    /// variant list. The two reasons that are not damage are the two refusals to read —
+    /// [`OverBudget`](Self::OverBudget) and
+    /// [`ImplausibleInflation`](Self::ImplausibleInflation) — which describe what this reader was
+    /// willing to spend, not what the file contains. Every other reason is a statement about the
     /// bytes, and a future reason is damage until it says otherwise.
     #[must_use]
     pub fn is_damage(self) -> bool {
-        !matches!(self, Self::OverBudget)
+        !matches!(self, Self::OverBudget | Self::ImplausibleInflation)
     }
 }
 
@@ -454,7 +464,8 @@ struct ChunkTally {
     /// Type → its index in `stats`. Dropped at the end of the walk; never surfaced.
     index: HashMap<[u8; 4], usize>,
     /// Lookup work done so far, in entries examined — the probe that makes this type's
-    /// complexity assertable by count rather than by clock. See [`record`](Self::record).
+    /// complexity assertable by count rather than by clock. Charged by
+    /// [`lookup`](Self::lookup), which is where the examining happens.
     #[cfg(test)]
     probes: usize,
 }
@@ -472,17 +483,11 @@ impl ChunkTally {
 
     /// Adds one chunk of `chunk_type` carrying `payload_len` payload bytes.
     ///
-    /// The lookup accounts one probe per entry it examines: a hash lookup examines one, so a
-    /// file of N chunks costs N probes whatever its number of distinct types. Any replacement
-    /// lookup strategy must account its work here the same way — a linear scan, one per entry
-    /// compared — which is what lets the inline test bound the walk at O(N) instead of timing it.
+    /// All of its lookup work goes through [`lookup`](Self::lookup), which is where that work is
+    /// accounted.
     fn record(&mut self, chunk_type: [u8; 4], payload_len: usize) {
-        #[cfg(test)]
-        {
-            self.probes += 1;
-        }
-        match self.index.get(&chunk_type) {
-            Some(&at) => {
+        match self.lookup(chunk_type) {
+            Some(at) => {
                 self.stats[at].count += 1;
                 self.stats[at].payload_bytes += payload_len;
             }
@@ -495,6 +500,28 @@ impl ChunkTally {
                 });
             }
         }
+    }
+
+    /// Where `chunk_type`'s entry sits in `stats`, if it has one — the tally's **only** lookup,
+    /// and the only place the probe counter is charged.
+    ///
+    /// The charge is one per entry the strategy *examines*, made where the examining happens: a
+    /// hash lookup examines the single entry its bucket holds, whatever `stats` already contains,
+    /// so it charges one and N chunks cost N probes. The linear scan this replaced compares
+    /// entries in a loop, so the same rule charges one per comparison from inside that loop, and
+    /// N chunks of N distinct types cost about N²/2 — which is what makes
+    /// `the_tally_probes_once_per_chunk_whatever_the_number_of_distinct_types` fail if the
+    /// quadratic walk ever comes back, instead of bounding the walk by the clock. A replacement
+    /// strategy must keep that rule; charging once per call regardless of the work done would
+    /// leave the test asserting nothing.
+    fn lookup(&mut self, chunk_type: [u8; 4]) -> Option<usize> {
+        let at = self.index.get(&chunk_type).copied();
+        #[cfg(test)]
+        {
+            // One bucket entry examined, whatever `stats` holds.
+            self.probes += 1;
+        }
+        at
     }
 
     /// The accumulated totals, in first-appearance order.
@@ -549,7 +576,9 @@ pub struct DeconstructLimits {
     /// Raising it past the decoder's default admits larger *images*, not larger *inflations from
     /// small files*: above that default the walk also refuses, before inflating, a stream that
     /// would grow to more than sixty-four times its own length, so a permissive budget cannot be
-    /// spent by a zlib bomb. That refusal is the same [`SkippedFilterScan::OverBudget`].
+    /// spent by a zlib bomb. That refusal reports
+    /// [`SkippedFilterScan::ImplausibleInflation`] — the image fits this budget, so it is not
+    /// [`OverBudget`](SkippedFilterScan::OverBudget).
     pub max_image_bytes: usize,
     /// The largest number of chunks the walk will materialize into segments and per-type stats.
     ///
@@ -557,6 +586,10 @@ pub struct DeconstructLimits {
     /// `ChunkStats` and an index entry — so an input of unbounded chunk count is an input of
     /// unbounded heap, at roughly an order of magnitude over the file size. The chunk *type* is
     /// four unvalidated bytes, so the distinct-type count is attacker-chosen too.
+    ///
+    /// Counted over chunks, **IHDR included**: `with_max_chunks(N)` admits a file of exactly N
+    /// chunks and refuses one of N + 1, and `with_max_chunks(0)` admits no file at all, since
+    /// every datastream this walk reports on opens with IHDR.
     ///
     /// The default admits any plausible real file — a PNG at the ceiling is at least 12 MiB of
     /// pure chunk framing — while bounding a crafted one.
@@ -632,18 +665,32 @@ pub fn deconstruct_with_limits(png: &[u8], limits: DeconstructLimits) -> Result<
     let mut tally = ChunkTally::new();
     let mut idat = Vec::new();
     let mut saw_iend = false;
-    let push = |segments: &mut Vec<Segment>, tally: &mut ChunkTally, chunk: &RawChunk| {
-        segments.push(Segment {
-            range: chunk.range.clone(),
-            kind: SegmentKind::Chunk {
-                chunk_type: chunk.chunk_type,
-                payload_len: chunk.data.len(),
-                crc_ok: chunk.crc_ok,
-            },
-        });
-        tally.record(chunk.chunk_type, chunk.data.len());
-    };
-    push(&mut segments, &mut tally, &first);
+    // Every chunk enters the report here, IHDR included, so the ceiling is checked here too: a
+    // check placed only inside the loop below would let the chunk pushed before it through, and
+    // `with_max_chunks(N)` would admit N + 1.
+    let push =
+        |segments: &mut Vec<Segment>, tally: &mut ChunkTally, chunk: &RawChunk| -> Result<()> {
+            segments.push(Segment {
+                range: chunk.range.clone(),
+                kind: SegmentKind::Chunk {
+                    chunk_type: chunk.chunk_type,
+                    payload_len: chunk.data.len(),
+                    crc_ok: chunk.crc_ok,
+                },
+            });
+            tally.record(chunk.chunk_type, chunk.data.len());
+            // The signature segment is not a chunk, so the ceiling is over one fewer than the
+            // segments materialized so far. Nothing but a chunk has been pushed at this point:
+            // `Truncated` and `Trailer` end the walk.
+            if segments.len() - 1 > limits.max_chunks {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "PNG: more chunks than the walk's ceiling admits",
+                ));
+            }
+            Ok(())
+        };
+    push(&mut segments, &mut tally, &first)?;
 
     loop {
         match reader.next_chunk() {
@@ -653,16 +700,7 @@ pub fn deconstruct_with_limits(png: &[u8], limits: DeconstructLimits) -> Result<
                     idat.extend_from_slice(chunk.data);
                 }
                 let is_iend = &chunk.chunk_type == b"IEND";
-                push(&mut segments, &mut tally, &chunk);
-                // The signature segment is not a chunk, so the ceiling is over one fewer than
-                // the segments materialized so far.
-                let chunks_so_far = segments.len() - 1;
-                if chunks_so_far > limits.max_chunks {
-                    return Err(Error::invalid_input(
-                        env!("CARGO_PKG_NAME"),
-                        "PNG: more chunks than the walk's ceiling admits",
-                    ));
-                }
+                push(&mut segments, &mut tally, &chunk)?;
                 if is_iend {
                     saw_iend = true;
                     break;
@@ -791,8 +829,10 @@ fn fits_decode_budget(header: &ihdr::Ihdr, max_image_bytes: usize) -> bool {
 ///
 /// DEFLATE's ceiling is about 1032:1, so a stream at this ratio is either a large flat image or a
 /// bomb — and above [`DEFAULT_MAX_IMAGE_BYTES`] the walk stops assuming the former. A flat 16k×16k
-/// image is the one real file this declines, and it is declined as the reader's budget
-/// ([`SkippedFilterScan::OverBudget`]), not as damage.
+/// image is the one real file this declines, and it is declined as this reader's unwillingness to
+/// spend ([`SkippedFilterScan::ImplausibleInflation`]), not as damage — and not as
+/// [`OverBudget`](SkippedFilterScan::OverBudget) either, since its image fits the budget that
+/// admitted it.
 ///
 /// What a small hostile file can still cost, numerically: inside the default budget the ratio
 /// does not apply, so a few-kilobyte stream declaring an image that just fits 64 MiB is inflated
@@ -842,7 +882,7 @@ fn scan_filters(
     if !fits_decode_budget(header, DEFAULT_MAX_IMAGE_BYTES)
         && !fits_inflation_ratio(filtered_len, idat.len())
     {
-        return FilterScan::Skipped(SkippedFilterScan::OverBudget);
+        return FilterScan::Skipped(SkippedFilterScan::ImplausibleInflation);
     }
     let Ok(stream) = inflate::inflate_zlib(idat, filtered_len) else {
         return FilterScan::Skipped(SkippedFilterScan::CorruptStream);
@@ -964,10 +1004,17 @@ mod tests {
     }
 
     #[test]
-    fn only_an_over_budget_scan_is_not_damage() {
+    fn only_a_refusal_to_read_is_not_damage() {
         // The single source of truth for `is_intact`'s filter conjunct: declining to inflate a
-        // stream is a statement about this reader's budget, everything else about the file.
-        assert!(!SkippedFilterScan::OverBudget.is_damage());
+        // stream is a statement about what this reader will spend, everything else about the
+        // file. Both refusals decline, for different reasons, and neither is damage.
+        for reason in [
+            SkippedFilterScan::OverBudget,
+            SkippedFilterScan::ImplausibleInflation,
+        ] {
+            assert!(!reason.is_damage(), "{reason:?}");
+            assert!(!FilterScan::Skipped(reason).is_damage(), "{reason:?}");
+        }
         for reason in [
             SkippedFilterScan::CorruptStream,
             SkippedFilterScan::LengthMismatch,
@@ -976,7 +1023,6 @@ mod tests {
             assert!(reason.is_damage(), "{reason:?}");
             assert!(FilterScan::Skipped(reason).is_damage(), "{reason:?}");
         }
-        assert!(!FilterScan::Skipped(SkippedFilterScan::OverBudget).is_damage());
         let counted = FilterScan::Counted(FilterHistogram {
             counts: [1, 0, 0, 0, 0],
         });
@@ -1007,6 +1053,7 @@ mod tests {
         assert_eq!(SkippedFilterScan::CorruptStream as u8, 1);
         assert_eq!(SkippedFilterScan::LengthMismatch as u8, 2);
         assert_eq!(SkippedFilterScan::UndefinedFilterCode as u8, 3);
+        assert_eq!(SkippedFilterScan::ImplausibleInflation as u8, 4);
     }
 
     #[test]
@@ -1034,15 +1081,20 @@ mod tests {
         // to `inflate_zlib` as the cap and a zlib bomb of zeros fills it from about a megabyte
         // of input. The stream here is tiny, so without the ratio bound the walk inflates it
         // completely and reports the *file's* `LengthMismatch`; with it, the walk reports its own
-        // `OverBudget` and never inflates — the reason is the discriminator.
+        // `ImplausibleInflation` and never inflates — the reason is the discriminator.
         let bomb = png_declaring(16384, 16384, 4096);
         let generous = DeconstructLimits::default().with_max_image_bytes(1 << 30);
         let report = deconstruct_with_limits(&bomb, generous).expect("deconstruct");
         assert_eq!(
+            report.native_bytes(),
+            Some(1 << 30),
+            "precondition: the declared image is exactly the budget, so it is not over it"
+        );
+        assert_eq!(
             report.filters,
-            FilterScan::Skipped(SkippedFilterScan::OverBudget),
-            "a stream that would inflate to a gigabyte from four kilobytes is the reader's \
-             budget, not the file's damage"
+            FilterScan::Skipped(SkippedFilterScan::ImplausibleInflation),
+            "a stream that would inflate to a gigabyte from four kilobytes is refused for its \
+             ratio, not for exceeding a budget it exactly meets"
         );
         assert_eq!(
             report.filtered_len,
@@ -1089,11 +1141,13 @@ mod tests {
     }
 
     /// The complexity claim itself, by count rather than by clock: N chunks cost N lookup
-    /// probes however many distinct types they use. A linear scan over `stats` — the defect the
-    /// index replaced, quadratic in the number of distinct types — accounts one probe per entry
-    /// compared and lands near N²/2 here; the hash lookup accounts exactly one per record. Two
-    /// files of the same chunk count, one with every type distinct and one with a single type,
-    /// must cost the same. Wall-clock timing of the same claim belongs to `benches/`.
+    /// probes however many distinct types they use. [`ChunkTally::lookup`] charges one probe per
+    /// entry it examines, so a linear scan over `stats` — the defect the index replaced,
+    /// quadratic in the number of distinct types — charges one per comparison and costs
+    /// 2 096 128 probes here (measured, N²/2 to the entry), while the hash lookup charges exactly
+    /// one per record. Two files of the same chunk count, one with every type distinct and one
+    /// with a single type, must cost the same. Wall-clock timing of the same claim belongs to
+    /// `benches/`.
     #[test]
     fn the_tally_probes_once_per_chunk_whatever_the_number_of_distinct_types() {
         const CHUNKS: usize = 2048;

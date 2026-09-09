@@ -185,9 +185,9 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | --- | --- | --- |
 | 1 | Filter selection | **partial** — MinSumAbs, Entropy and Bigrams per line, plus seven whole-image candidates each fully DEFLATEd. Bigrams is worth 22–32% where it wins (see above). Still missing: per-line trial deflate, `AtomicMin` pruning, and a two-tier cheap-trial codec. [#480]. `FilterStrategy` became `#[non_exhaustive]` with this phase — a heuristic is a measurement result and the set grows with the corpus — which is a **breaking change** for any downstream exhaustive `match`: add a wildcard arm. |
 | 2 | DEFLATE quality | **good, ~2% behind zopfli**, and honestly documented in `gamut-deflate`. Two contained wins remain: an 8-byte-at-a-time match compare, and `parse_dp`'s single-distance relaxation. [#478], [#479] |
-| 3 | Smallest lawful representation | **done** — grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour. The key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. |
+| 3 | Smallest lawful representation | **partial** — every reduction is implemented (grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour) and the key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. What is not done is the **selection**. `reduce::analyze8` still resolves *some* candidates on the raw estimate alone, and a raw estimate cannot see DEFLATE (below). Until the three-candidate race below it resolved all of them, and the eliminated runner-up was often the one that won the finished file: an opaque RGBA image with ≤256 colours kept an alpha channel that was 255 everywhere (349 bytes against 317), and a 16-bit image whose samples are all `k·257` kept all sixteen bits (220 against 172). The estimate now hands the best **chunk-free** candidate over beside the chunk-carrying one and `write_reduced_or_native` measures both, which closes that whole family — the chunk-free gates are mutually exclusive, so at most one such candidate ever exists. The remainder is the *pair* that both carry a chunk: where a palette and a `tRNS` colour key are both lawful, only the raw-smaller one is ever encoded. |
 | 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.2.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. Modified-Zeng ordering and caller-supplied palette cleanup remain. [#482] |
-| 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. |
+| 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. A tie keeps the **plain** encoding: cleaning buys its rewritten samples with a size win, and where there is no win there is nothing to buy them with. |
 | 6 | Metadata hygiene | **no policy** — the encoder emits exactly what the caller set, and `gamut convert` drops metadata on the PNG path. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
 | 8 | Effort / speed / determinism | Output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). Three independent knobs, no composed dial. No parallelism. [#484] |
@@ -213,20 +213,33 @@ The raw-size estimate sees 16 664 against 65 536 and picks the palette by 4× **
 these sizes**. The finished files disagree: the palette's 224 fixed bytes are incompressible while
 the pixels they replace compress by two orders of magnitude, so indexing only pays once the image
 is large enough to amortise them — the crossover sits between 192 and 256. So
-`write_reduced_or_native` encodes both candidates and keeps the smaller, the same way
+`write_reduced_or_native` encodes the candidates and keeps the smallest, the same way
 `FilterStrategy::BruteForce` already resolves filters — no tuned constant, and never worse than
-either candidate alone. The three declined rows are the evidence: had the estimate been trusted,
-each would have carried a palette and been larger. Only palette reductions pay for the second
-encode; greyscale, alpha-drop and 16→8 demotion add no chunks, so for them the raw comparison is
-sound.
+any candidate it encoded. The three declined rows are the evidence: had the estimate been trusted,
+each would have carried a palette and been larger.
+
+**Three candidates, not two.** "Never worse than any candidate it encoded" is only worth
+having if the candidates that could win are among them, and for a while they were not. The
+estimate collapsed five reductions to one winner and only that winner was raced, so on an image
+where the palette won the estimate the reductions it beat — the alpha drop, the greyscale
+collapse, the 16→8 demotion — were never encoded, and losing the race dropped the file all the way
+back to *no* reduction. `reduce::Reductions` therefore carries the best chunk-free candidate beside
+the chunk-carrying one, and the race is over three encodings: chunk-carrying, chunk-free,
+unreduced. Ties resolve toward the earlier of `chunked ≻ chunk-free ≻ native` — the more reduced
+encoding, and among equal-length files the one already emitted, so a tie changes no output.
+
+A chunk-free *winner* still pays for nothing: it adds nothing DEFLATE cannot compress, so the raw
+comparison that chose it is sound and it is written straight out. It is a chunk-free *runner-up*
+that has to be measured, because the candidate that beat it does carry a chunk.
 
 **What the races cost.** Each race is a full extra encode, and they nest: `FilterStrategy::BruteForce`
-tries seven whole-image strategies, `write_reduced_or_native` encodes both candidates when the
-reduction carries a chunk (a palette's `PLTE`/`tRNS`, a colour key's `tRNS`), and `cleaned_or_plain`
-encodes both the cleaned and the untouched samples when cleanup changed anything. The worst case —
-`Level::Best` + `BruteForce` + auto-reduce + cleanup on an alpha image that is both cleanable and
-palettisable or keyable — is therefore 7 × 2 × 2 = **28** filter-plus-DEFLATE passes for one file,
-against 7 for `BruteForce` alone. That is the price of choosing by measured size rather than by a
+tries seven whole-image strategies, `write_reduced_or_native` encodes up to three candidates when
+the reduction carries a chunk (a palette's `PLTE`/`tRNS`, a colour key's `tRNS`), and
+`cleaned_or_plain` encodes both the cleaned and the untouched samples when cleanup changed
+anything. The worst case — `Level::Best` + `BruteForce` + auto-reduce + cleanup on an alpha image
+that is cleanable, palettisable or keyable, *and* has a chunk-free reduction available — is
+therefore 7 × 3 × 2 = **42** filter-plus-DEFLATE passes for one file, against 7 for `BruteForce`
+alone. That is the price of choosing by measured size rather than by a
 cost model; a model good enough to skip the losing candidate is [#480]'s remainder.
 
 **Chunks that follow the race.** `bKGD` and `sBIT` have a payload whose shape is the colour type, and

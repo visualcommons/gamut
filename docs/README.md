@@ -10,6 +10,7 @@ Anything not listed here is descriptive, not binding.
 | [`non-image-media.md`](non-image-media.md) | Whether gamut implements a given audio/video/other-media surface, the crate topology that work lands in, and the [#217]/[#216] roadmaps. Decides scope questions; authorizes no work. |
 | [`mutation-testing.md`](mutation-testing.md) | How a mutation survey is invoked and what bounds it: the single entry point, the memory budget every parallelism dial is derived from, the guards, and the refusals. What counts as an acceptable survivor is `AGENTS.md`'s rule. |
 | [`benchmarking.md`](benchmarking.md) | Where a benchmark lives, what a size or ratio table must record, and where a measured number is kept. What CI does with benches, and what it deliberately does not. Whether a size claim is *enforced* is `testing.md`'s. |
+| [`inspect-exit-codes.md`](inspect-exit-codes.md) | What `gamut inspect` exits with and why: the gate each format is judged by, PNG's third outcome (intact but unread), the byte budgets the walk observes, and every reason its filter scan declines. What each walk *finds* is the format crate's contract. |
 | [`testing.md`](testing.md) | Where a test lives and what it may reach, which technique it uses, the per-crate authority table, and the contract by which one law drives both a pinned-seed property test and the fuzz tier. The scope and technique *rules* are `AGENTS.md`'s. |
 
 ## Elsewhere in the repo

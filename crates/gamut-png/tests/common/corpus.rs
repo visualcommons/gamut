@@ -134,6 +134,63 @@ pub fn sprite_rgba(side: u32) -> Vec<u8> {
     buf
 }
 
+/// The colour index of the 8x8 cell a pixel falls in, over a 16-wide grid: 256 distinct indices
+/// at 128x128, 64 at 64x64, and never more than 256 whatever the side.
+///
+/// Shared by the two fixtures below so the 16-bit row is the 8-bit row's own colours widened, and
+/// the pair differs in exactly the axis it is there to measure.
+fn cell_index(x: u32, y: u32) -> u8 {
+    ((x / 8 + (y / 8) * 16) % 256) as u8
+}
+
+/// The colour a cell index carries. `i -> 7i` is a bijection on `u8` (7 is odd), so the fixture
+/// has exactly as many distinct colours as it has cells, and no colour is ever grey.
+fn cell_colour(idx: u8) -> [u8; 3] {
+    [
+        idx.wrapping_mul(7),
+        idx.wrapping_mul(3).wrapping_add(40),
+        255 - idx.wrapping_mul(5),
+    ]
+}
+
+/// Opaque RGBA8 over at most 256 distinct colours: the row where the *palette* wins the raw
+/// estimate and loses the finished file, so the reduction that must actually be emitted is the
+/// runner-up the estimate eliminated — the alpha drop.
+///
+/// Every other RGBA entry here is either translucent (`palette64_rgba`, `sprite_rgba`) or a single
+/// colour (`flat_rgba`), so none of them can reach an alpha drop that is also palettisable. That
+/// gap is why the encoder kept a 255-everywhere alpha channel on this shape unnoticed.
+pub fn opaque256_rgba(side: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity((side * side * 4) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let [r, g, b] = cell_colour(cell_index(x, y));
+            buf.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    buf
+}
+
+/// [`opaque256_rgba`]'s colours as 16-bit RGB with every sample `k*257`, big-endian as the file
+/// stores them: the lossless 16→8 demotion, under a palette that also applies.
+///
+/// The 16-bit twin of the same gap. `photo_rgb` is deliberately 16-bit-hostile and no other entry
+/// is 16-bit at all, so nothing in the corpus could see the demotion being discarded whenever the
+/// 8-bit analysis found a palette — which left the file at depth 16.
+pub fn demotable_rgb16(side: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity((side * side * 6) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            for sample in cell_colour(cell_index(x, y)) {
+                // v = k*257 is the exact inverse of the decoder's 8->16 widening, so the demotion
+                // back to `sample` is lossless.
+                buf.extend_from_slice(&(u16::from(sample) * 257).to_be_bytes());
+            }
+        }
+    }
+    buf
+}
+
 /// One fully opaque colour: the compressible extreme, where the whole reduce cascade applies and
 /// chunk framing is most of what is left to measure.
 pub fn flat_rgba(side: u32) -> Vec<u8> {

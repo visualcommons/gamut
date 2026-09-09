@@ -5,6 +5,10 @@
 //! Prints a report to stdout and exits non-zero when the file is not fully accounted for —
 //! usable as an archival CI gate.
 //!
+//! The contract itself — the gate per format, the two exit codes, the budgets, and every reason
+//! the PNG filter scan declines — is recorded in `docs/inspect-exit-codes.md`, which is normative
+//! for it. What follows is why the code is shaped that way.
+//!
 //! # What "fully accounted for" means, and what the exit code is
 //!
 //! Exit 0 is the file having nothing the walk can hold against it; exit 1 is a finding. Each
@@ -32,7 +36,9 @@
 //! unread. That gigabyte bounds the *image*, not what a small file may inflate to: past the
 //! decoder's default budget the walk also refuses, before inflating, a stream that would grow to
 //! more than sixty-four times its own length, so a megabyte declaring a 16k×16k header over a zlib
-//! stream of zeros is reported as not verified (over budget), never inflated to a gigabyte.
+//! stream of zeros is reported as not verified — for the stream's implausible inflation, which is
+//! a distinct reason from the image being over budget, since that image is exactly the gigabyte
+//! this command admits — and never inflated to a gigabyte.
 //!
 //! The gate is therefore **asymmetric across formats, and deliberately so**. A TIFF or DNG walk
 //! reads directories and tags, never pixel data, so there is no step in it this reader can decline
@@ -388,7 +394,8 @@ fn print_lines(label: &str, lines: &[String]) {
     print_lines_of(label, lines, lines.len());
 }
 
-/// [`print_lines`], where `lines` is already truncated and `total` is how many there really are.
+/// [`print_lines`], where `lines` may already be truncated and `total` is how many there really
+/// are.
 ///
 /// Splitting the count from the list is what lets a caller whose list length is chosen by the
 /// input build only the lines it will print while still reporting the true total.
@@ -400,9 +407,23 @@ fn print_lines_of(label: &str, lines: &[String], total: usize) {
     for line in lines.iter().take(MAX_LIST) {
         println!("    - {line}");
     }
-    if total > lines.len() {
-        println!("    … and {} more", total - lines.len());
+    let hidden = hidden_entries(total, lines.len());
+    if hidden > 0 {
+        println!("    … and {hidden} more");
     }
+}
+
+/// How many of a `total`-entry list this print left unshown, given the `lines` it was handed.
+///
+/// Counted from what is actually **printed** — at most [`MAX_LIST`] of them — because the two
+/// callers hide entries in different places. [`print_lines`] passes the whole list and its own
+/// length, so the `MAX_LIST` cut in the loop is the only thing that hides anything; the PNG
+/// caller passes a list already cut to `MAX_LIST` beside the true total, so what it hides are the
+/// lines it never built. A notice derived from `total > lines.len()` alone sees only the second
+/// and is dead for the first — which is how a TIFF with fifty unknown tags came to print twenty
+/// of them and no indication that thirty were missing.
+fn hidden_entries(total: usize, lines: usize) -> usize {
+    total.saturating_sub(lines.min(MAX_LIST))
 }
 
 /// Deconstructs a PNG and prints where its bytes went, exiting non-zero when the file is not a
@@ -589,6 +610,9 @@ fn filter_skip_label(reason: gamut::png::SkippedFilterScan) -> &'static str {
     use gamut::png::SkippedFilterScan as Reason;
     match reason {
         Reason::OverBudget => "the image is larger than the reader's byte budget",
+        Reason::ImplausibleInflation => {
+            "the IDAT stream is too short to plausibly inflate to the image the header declares"
+        }
         Reason::CorruptStream => "the IDAT stream is corrupt or truncated",
         Reason::LengthMismatch => "the IDAT stream inflated to the wrong length",
         Reason::UndefinedFilterCode => "a scanline carries an undefined filter code",
@@ -610,4 +634,23 @@ fn format_name(format: Format) -> &'static str {
 /// `yes`/`no` for a boolean verdict.
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_LIST, hidden_entries};
+
+    #[test]
+    fn the_truncation_notice_counts_the_entries_neither_caller_printed() {
+        // `print_lines` hands over the whole list, so only the `MAX_LIST` cut hides anything: a
+        // notice conditioned on `total > lines.len()` can never fire for it, and fifty unknown
+        // TIFF tags printed twenty lines and nothing else.
+        assert_eq!(hidden_entries(50, 50), 50 - MAX_LIST);
+        // The PNG caller hands over a list already cut to `MAX_LIST` with the true total beside
+        // it; the entries it never built are the hidden ones.
+        assert_eq!(hidden_entries(50, MAX_LIST), 50 - MAX_LIST);
+        // A list that fits hides nothing, from either caller.
+        assert_eq!(hidden_entries(MAX_LIST, MAX_LIST), 0);
+        assert_eq!(hidden_entries(3, 3), 0);
+    }
 }

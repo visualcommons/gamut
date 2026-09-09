@@ -183,8 +183,8 @@ fn synthetic_type(i: usize) -> [u8; 4] {
     ]
 }
 
-/// A file whose every chunk type is distinct is tallied one entry per type, in order — at a size
-/// where the quadratic walk this replaced would not finish inside a test.
+/// A file whose every chunk type is distinct is tallied one entry per type, in first-appearance
+/// order, against the same bytes carrying one type throughout.
 ///
 /// A chunk type is four unvalidated bytes and the walk never drops a chunk, so an attacker
 /// chooses how many *distinct* types a file carries — one per 12-byte chunk, if they like.
@@ -195,13 +195,20 @@ fn synthetic_type(i: usize) -> [u8; 4] {
 /// counted (`deconstruct::tests::the_tally_probes_once_per_chunk_whatever_the_number_of_distinct_types`):
 /// a wall-clock ratio between two runs in the blocking gate is flaky under `llvm-cov` and parallel
 /// test binaries, and timing belongs to `benches/`. What this test adds from the public side is
-/// the *content* at scale — 262 144 distinct types against the same bytes with one type — which
-/// is what the index exists to produce. Under the defect this fixture took about 17 s (it did
-/// complete); it is the probe count, not this test's duration, that tells the two apart.
+/// the *content* — one `ChunkStats` per distinct type, in order, and one entry counting every
+/// chunk when the type repeats — which is what the index exists to produce.
+///
+/// **Why 1024**, where this once built 262 144. The content claim is per entry and holds at any
+/// count past a handful; what the count must clear is `synthetic_type`'s own arithmetic, whose
+/// digits roll over at 26 and 676, so 1024 varies three of the four type bytes and still carries
+/// two orders of magnitude more distinct types than any real PNG. The larger figure pinned
+/// nothing further — it did not fail under the quadratic defect either, it merely took about
+/// 17 s — while costing ~3.1 MB of fixture per half on every `mise run test`, every coverage run,
+/// and once per mutant in every `gamut-png` mutation shard.
 #[test]
-fn every_distinct_chunk_type_gets_its_own_tally_entry_at_scale() {
-    /// Empty chunks between IHDR and IEND: 12 bytes each, so ~3.1 MB per half.
-    const CHUNKS: usize = 262_144;
+fn every_distinct_chunk_type_gets_its_own_tally_entry() {
+    /// Empty chunks between IHDR and IEND: 12 bytes each, so ~12 KB per half.
+    const CHUNKS: usize = 1024;
 
     let build = |distinct: bool| {
         let mut framed = Vec::with_capacity(CHUNKS + 2);
@@ -570,6 +577,21 @@ fn the_chunk_ceiling_admits_exactly_its_own_count_and_refuses_one_more() {
     let one_short = DeconstructLimits::default().with_max_chunks(CHUNKS - 1);
     let err = deconstruct_with_limits(&png, one_short)
         .expect_err("one past the ceiling the walk refuses rather than allocating");
+    assert!(
+        err.to_string().contains("more chunks"),
+        "the error names the ceiling it hit, got: {err}"
+    );
+
+    // IHDR is a chunk and is counted like one. The walk pushes it before the loop that reads the
+    // rest, so a ceiling checked only inside that loop let it through and `with_max_chunks(N)`
+    // meant N + 1 in that one respect — visibly so at zero, which admitted a whole file.
+    let ihdr_only = common::png_from_chunks(&chunks[..1]);
+    let report =
+        deconstruct_with_limits(&ihdr_only, DeconstructLimits::default().with_max_chunks(1))
+            .expect("one chunk under a ceiling of one");
+    assert_eq!(report.chunks.len(), 1, "IHDR alone, and it is a chunk");
+    let err = deconstruct_with_limits(&ihdr_only, DeconstructLimits::default().with_max_chunks(0))
+        .expect_err("no chunk at all fits a ceiling of zero");
     assert!(
         err.to_string().contains("more chunks"),
         "the error names the ceiling it hit, got: {err}"

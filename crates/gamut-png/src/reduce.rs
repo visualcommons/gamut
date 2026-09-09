@@ -3,10 +3,17 @@
 //! Before encoding, an image is scanned for redundancy that a smaller PNG encoding can drop without
 //! changing any pixel: an all-opaque alpha channel, identical R=G=B channels, a palette of ≤256
 //! distinct colours, grey values exactly representable at a sub-byte depth (§13.12), or 16-bit
-//! samples whose high and low bytes agree (lossless 16→8 demotion). The smallest *estimated*
-//! encoding (by raw byte count; sub-byte row padding is ignored, as in the palette estimate) is
-//! chosen; the actual DEFLATE pass then compresses it. Every reduction is exactly reversible, so
-//! the decoded pixels are unchanged — the libpng oracle verifies this.
+//! samples whose high and low bytes agree (lossless 16→8 demotion). Every reduction is exactly
+//! reversible, so the decoded pixels are unchanged — the libpng oracle verifies this.
+//!
+//! The analysis ranks the candidates by *estimated* raw byte count (sub-byte row padding is
+//! ignored, as in the palette estimate) and returns a [`Reductions`] rather than a single winner,
+//! because a raw byte count cannot see DEFLATE. A palette or a colour key carries a `PLTE`/`tRNS`
+//! chunk that DEFLATE cannot touch, so the estimate's winner can lose the finished file to a
+//! candidate it beat on raw bytes. Whenever the estimate picks a chunk-carrying candidate the
+//! best *chunk-free* one is handed over beside it, and
+//! [`PngEncoder`](crate::PngEncoder) encodes both — and the unreduced image — and keeps the
+//! smallest.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -63,6 +70,33 @@ pub enum Reduced {
         plte: Vec<u8>,
         /// tRNS payload (palette alphas), if the palette is not fully opaque.
         trns: Option<Vec<u8>>,
+    },
+}
+
+/// What [`analyze8`] / [`analyze16`] offer the encoder for one image.
+///
+/// The estimate that ranks the candidates counts *raw* bytes, which does not predict compressed
+/// size: a palette's `PLTE` (and often `tRNS`) and a colour key's `tRNS` are flat, incompressible
+/// costs, while the samples they replace may compress by two orders of magnitude. So a
+/// chunk-carrying winner is never trusted on its own — it arrives with the best candidate that
+/// carries no chunk, and [`PngEncoder`](crate::PngEncoder) encodes both plus the unreduced image
+/// and keeps the smallest file.
+///
+/// A chunk-free winner needs no such company: it adds nothing DEFLATE cannot compress, so the raw
+/// comparison that chose it is sound and it is written directly.
+pub enum Reductions {
+    /// No reduction stores fewer bytes than the input layout: encode the image as it arrived.
+    None,
+    /// The estimate's winner adds no chunk, so it is the whole answer.
+    ChunkFree(Reduced),
+    /// The estimate's winner carries a chunk, so it must be raced.
+    Chunked {
+        /// The chunk-carrying candidate the estimate ranked smallest.
+        chunked: Reduced,
+        /// The smallest candidate that adds no chunk, or `None` when no chunk-free reduction
+        /// stores fewer bytes than the input layout — the identity cases, where the "reduction"
+        /// re-spells the input and racing it would compress the same samples twice.
+        chunk_free: Option<Reduced>,
     },
 }
 
@@ -218,9 +252,9 @@ fn colour_key(pixels: &[u8], channels: usize) -> Option<[u8; 4]> {
 }
 
 /// Analyses interleaved 8-bit samples (`channels`: 1 = grey, 2 = grey+alpha, 3 = RGB, 4 = RGBA)
-/// and returns the smallest lossless reduction that beats the input encoding, or `None` to keep it
-/// as-is.
-pub fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
+/// and returns the lossless reductions that beat the input encoding — see [`Reductions`] for why
+/// that is one candidate or two rather than always one.
+pub fn analyze8(pixels: &[u8], channels: usize) -> Reductions {
     debug_assert!((1..=4).contains(&channels));
     let pixel_count = pixels.len() / channels;
 
@@ -294,55 +328,85 @@ pub fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
         .min(rgb_size)
         .min(keyed_size);
     if best >= input_size {
-        return None; // no reduction is smaller
+        return Reductions::None; // no reduction is smaller
     }
 
-    if best == gray_size {
-        let scale = gray8_scale(gray_depth);
-        Some(Reduced::Gray {
-            depth: gray_depth,
-            samples: pixels
-                .chunks_exact(channels)
-                .map(|px| px[0] / scale)
-                .collect(),
-        })
-    } else if best == gray_alpha_size {
-        let mut out = Vec::with_capacity(pixel_count * 2);
-        for px in pixels.chunks_exact(channels) {
-            let key = pixel_key(px, channels);
-            out.push(key[0]);
-            out.push(key[3]);
-        }
-        Some(Reduced::GrayAlpha8(out))
-    } else if let Some(key) = key
-        && best == keyed_size
-    {
-        if all_gray {
-            Some(Reduced::GrayKeyed {
+    // The chunk-free family: greyscale, grey+alpha, alpha drop. Their three gates are mutually
+    // exclusive -- grey needs `all_gray && all_opaque`, grey+alpha `all_gray && !all_opaque`, the
+    // alpha drop `all_opaque && !all_gray` -- so `free_size` names whichever one applies rather
+    // than resolving a race between them.
+    //
+    // `< input_size`, not `<=`: at equality the "reduction" is the input layout re-spelled (a
+    // Gray8 input reduced to 8-bit grey, a GrayAlpha8 input to grey+alpha), so offering it as a
+    // runner-up would make the encoder compress the same samples a second time for a file it
+    // already has.
+    let free_size = gray_size.min(gray_alpha_size).min(rgb_size);
+    let chunk_free = (free_size < input_size).then(|| {
+        if free_size == gray_size {
+            let scale = gray8_scale(gray_depth);
+            Reduced::Gray {
+                depth: gray_depth,
                 samples: pixels
                     .chunks_exact(channels)
-                    .map(|px| pixel_key(px, channels)[0])
+                    .map(|px| px[0] / scale)
                     .collect(),
-                key: key[0],
-            })
+            }
+        } else if free_size == gray_alpha_size {
+            let mut out = Vec::with_capacity(pixel_count * 2);
+            for px in pixels.chunks_exact(channels) {
+                let key = pixel_key(px, channels);
+                out.push(key[0]);
+                out.push(key[3]);
+            }
+            Reduced::GrayAlpha8(out)
         } else {
             let mut out = Vec::with_capacity(pixel_count * 3);
             for px in pixels.chunks_exact(channels) {
-                out.extend_from_slice(&pixel_key(px, channels)[0..3]);
+                out.extend_from_slice(&px[0..3]);
             }
-            Some(Reduced::Rgb8Keyed {
-                samples: out,
-                key: [key[0], key[1], key[2]],
-            })
+            Reduced::Rgb8(out)
         }
-    } else if best == rgb_size {
-        let mut out = Vec::with_capacity(pixel_count * 3);
-        for px in pixels.chunks_exact(channels) {
-            out.extend_from_slice(&px[0..3]);
+    });
+
+    // The chunk-carrying family: a colour key's `tRNS`, or a palette's `PLTE` (+ `tRNS`). Built
+    // only if one of them is the estimate's winner, since building either walks the pixels again.
+    let chunk_carrying = || {
+        if let Some(key) = key
+            && best == keyed_size
+        {
+            if all_gray {
+                Reduced::GrayKeyed {
+                    samples: pixels
+                        .chunks_exact(channels)
+                        .map(|px| pixel_key(px, channels)[0])
+                        .collect(),
+                    key: key[0],
+                }
+            } else {
+                let mut out = Vec::with_capacity(pixel_count * 3);
+                for px in pixels.chunks_exact(channels) {
+                    out.extend_from_slice(&pixel_key(px, channels)[0..3]);
+                }
+                Reduced::Rgb8Keyed {
+                    samples: out,
+                    key: [key[0], key[1], key[2]],
+                }
+            }
+        } else {
+            build_indexed(pixels, channels, &palette, &palette_index)
         }
-        Some(Reduced::Rgb8(out))
-    } else {
-        Some(build_indexed(pixels, channels, &palette, &palette_index))
+    };
+
+    match chunk_free {
+        // The estimate's own winner is the chunk-free candidate, so nothing carries a chunk and
+        // there is nothing to race. The second arm is therefore reached only when a palette or a
+        // colour key beat it -- `best < free_size`, which is also why `chunk_free` is `None` there
+        // whenever no chunk-free reduction exists at all.
+        Some(reduced) if best == free_size => Reductions::ChunkFree(reduced),
+        chunk_free => Reductions::Chunked {
+            chunked: chunk_carrying(),
+            chunk_free,
+        },
     }
 }
 
@@ -351,11 +415,16 @@ pub fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
 /// widening) is demoted and re-analysed at 8 bits — the demotion alone halves the payload, so it
 /// always reduces. Otherwise only the 16-bit-native channel reductions (grey, alpha drop) apply;
 /// PNG has no 16-bit palette.
-pub fn analyze16(samples: &[u16], channels: usize) -> Option<Reduced> {
+///
+/// The plain demotion is the floor of the demotable path, not merely its fallback: it adds no
+/// chunk, so where the 8-bit analysis offers a chunk-carrying winner and no chunk-free runner-up
+/// of its own, the demotion itself becomes that runner-up. Without it a palette that loses the
+/// finished file would drop the encoder all the way back to 16 bits, throwing away a halving that
+/// costs nothing.
+pub fn analyze16(samples: &[u16], channels: usize) -> Reductions {
     debug_assert!((1..=4).contains(&channels));
     if let Some(demoted) = demote16(samples) {
-        let further = analyze8(&demoted, channels);
-        return Some(further.unwrap_or(match channels {
+        let plain = |demoted| match channels {
             1 => Reduced::Gray {
                 depth: 8,
                 samples: demoted,
@@ -363,7 +432,18 @@ pub fn analyze16(samples: &[u16], channels: usize) -> Option<Reduced> {
             2 => Reduced::GrayAlpha8(demoted),
             3 => Reduced::Rgb8(demoted),
             _ => Reduced::Rgba8(demoted),
-        }));
+        };
+        return match analyze8(&demoted, channels) {
+            Reductions::None => Reductions::ChunkFree(plain(demoted)),
+            Reductions::ChunkFree(reduced) => Reductions::ChunkFree(reduced),
+            Reductions::Chunked {
+                chunked,
+                chunk_free,
+            } => Reductions::Chunked {
+                chunked,
+                chunk_free: Some(chunk_free.unwrap_or_else(|| plain(demoted))),
+            },
+        };
     }
 
     let mut all_opaque = true;
@@ -380,22 +460,23 @@ pub fn analyze16(samples: &[u16], channels: usize) -> Option<Reduced> {
     // Unlike the 8-bit analysis there is no size estimate to weigh: the candidates' gates are
     // mutually exclusive, and each strictly shrinks the channel count, so whichever gate matches
     // wins outright. The channel checks reject the identity "reductions" (grey of a Gray16 input,
-    // grey+alpha of a GrayAlpha16 input).
+    // grey+alpha of a GrayAlpha16 input). None of them carries a chunk -- PNG has no 16-bit
+    // palette and this arm found no demotion -- so there is never anything here to race.
     let px16 = samples.chunks_exact(channels);
     if all_gray && all_opaque && channels > 1 {
-        Some(Reduced::Gray16Be(be_bytes(px16.map(|px| px[0]))))
+        Reductions::ChunkFree(Reduced::Gray16Be(be_bytes(px16.map(|px| px[0]))))
     } else if all_gray && channels > 2 {
         // Not all-opaque (that is the branch above), so the alpha channel must be kept.
-        Some(Reduced::GrayAlpha16Be(be_bytes(
+        Reductions::ChunkFree(Reduced::GrayAlpha16Be(be_bytes(
             px16.flat_map(|px| [px[0], px[channels - 1]]),
         )))
     } else if channels == 4 && all_opaque {
         // Not all-grey (the branches above), so only the opaque alpha channel can be dropped.
-        Some(Reduced::Rgb16Be(be_bytes(
+        Reductions::ChunkFree(Reduced::Rgb16Be(be_bytes(
             px16.flat_map(|px| [px[0], px[1], px[2]]),
         )))
     } else {
-        None
+        Reductions::None
     }
 }
 
@@ -566,8 +647,10 @@ mod tests {
         // Opaque, non-grey RGBA -> RGB.
         let rgba = [10, 20, 30, 255, 40, 50, 60, 255];
         match analyze8(&rgba, 4) {
-            Some(Reduced::Rgb8(rgb)) => assert_eq!(rgb, vec![10, 20, 30, 40, 50, 60]),
-            _ => panic!("expected Rgb8"),
+            Reductions::ChunkFree(Reduced::Rgb8(rgb)) => {
+                assert_eq!(rgb, vec![10, 20, 30, 40, 50, 60]);
+            }
+            _ => panic!("expected a chunk-free Rgb8"),
         }
     }
 
@@ -576,10 +659,10 @@ mod tests {
         // Opaque R=G=B RGB with many levels -> 8-bit grey.
         let rgb: Vec<u8> = (0..60u8).flat_map(|v| [v, v, v]).collect();
         match analyze8(&rgb, 3) {
-            Some(Reduced::Gray { depth: 8, samples }) => {
+            Reductions::ChunkFree(Reduced::Gray { depth: 8, samples }) => {
                 assert_eq!(samples, (0..60u8).collect::<Vec<_>>());
             }
-            _ => panic!("expected 8-bit Gray"),
+            _ => panic!("expected a chunk-free 8-bit Gray"),
         }
     }
 
@@ -601,10 +684,10 @@ mod tests {
             rgba.extend_from_slice(&[g, g, g, a]);
         }
         match analyze8(&rgba, 4) {
-            Some(Reduced::GrayAlpha8(samples)) => {
+            Reductions::ChunkFree(Reduced::GrayAlpha8(samples)) => {
                 assert_eq!(samples.len(), 600, "two bytes per pixel");
             }
-            _ => panic!("expected GrayAlpha8"),
+            _ => panic!("expected a chunk-free GrayAlpha8"),
         }
     }
 
@@ -629,14 +712,105 @@ mod tests {
             rgba.extend_from_slice(&[c, c.wrapping_add(64), 200, 255]);
         }
         match analyze8(&rgba, 4) {
-            Some(Reduced::Indexed {
-                depth, plte, trns, ..
-            }) => {
+            Reductions::Chunked {
+                chunked:
+                    Reduced::Indexed {
+                        depth, plte, trns, ..
+                    },
+                ..
+            } => {
                 assert_eq!(depth, 8, "200 entries need the 8-bit index depth");
                 assert_eq!(plte.len(), 200 * 3);
                 assert_eq!(trns, None, "an all-opaque palette carries no tRNS");
             }
             _ => panic!("expected Indexed"),
+        }
+    }
+
+    /// A palette that wins the estimate still hands over the alpha drop it beat.
+    ///
+    /// The defect this pins: the estimate collapsed five candidates to one, and only that
+    /// one was ever encoded. On an opaque RGBA image with few enough colours the palette wins the
+    /// raw comparison — 350 + 600 + 24 against 1050 — and then loses the *finished* file to
+    /// `PLTE`'s 600 incompressible bytes, at which point the encoder fell back to the unreduced
+    /// RGBA and kept an alpha channel that is 255 everywhere. `Reductions::Chunked` carries the
+    /// runner-up so `write_reduced_or_native` can measure it too.
+    ///
+    /// The alpha drop, not the greyscale collapse or the grey+alpha one: the three chunk-free
+    /// gates are mutually exclusive and this fixture is opaque and not grey, so `free_size` can
+    /// only be `rgb_size`.
+    #[test]
+    fn an_opaque_palette_hands_over_the_alpha_drop_it_beat() {
+        let mut rgba = Vec::new();
+        for i in 0..350u32 {
+            // 200 distinct colours, none grey (R != G), all fully opaque.
+            let c = (i % 200) as u8;
+            rgba.extend_from_slice(&[c, c.wrapping_add(64), 200, 255]);
+        }
+        match analyze8(&rgba, 4) {
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { .. },
+                chunk_free: Some(Reduced::Rgb8(rgb)),
+            } => {
+                assert_eq!(rgb.len(), 350 * 3, "three channels, one alpha dropped");
+                assert_eq!(&rgb[0..6], &[0, 64, 200, 1, 65, 200]);
+            }
+            _ => panic!("expected Indexed with an Rgb8 runner-up"),
+        }
+    }
+
+    /// An identity layout is not offered as a runner-up, because encoding it is encoding nothing.
+    ///
+    /// This grey+alpha input reduces to a 1-bit palette, so a runner-up would be raced against it.
+    /// The only chunk-free candidate its gates admit is grey+alpha — which is the input layout
+    /// spelled again, `pixel_count * 2` against an input of exactly `pixel_count * 2`. Offering it
+    /// would make the encoder filter and DEFLATE the same samples a second time to arrive at the
+    /// file the unreduced candidate already produces, so `analyze8` requires a *strict* saving
+    /// before it names a runner-up.
+    #[test]
+    fn an_identity_layout_is_not_offered_as_a_runner_up() {
+        let ga: Vec<u8> = [0, 0, 255, 255].repeat(40); // transparent black, opaque white
+        match analyze8(&ga, 2) {
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { .. },
+                chunk_free,
+            } => assert!(
+                chunk_free.is_none(),
+                "grey+alpha of a grey+alpha input stores exactly the input's bytes"
+            ),
+            _ => panic!("expected Indexed"),
+        }
+    }
+
+    /// A demotable 16-bit image keeps its demotion as the runner-up when a palette wins.
+    ///
+    /// The 16-bit half of the same defect. `analyze16` demotes, re-analyses at 8 bits, and
+    /// used the plain demotion only when the 8-bit analysis found *nothing*. When the 8-bit
+    /// analysis found a palette instead, the demotion was discarded — and if the palette then lost
+    /// the finished file, the encoder fell back to the 16-bit input and threw away a halving that
+    /// costs no chunk. Here 64 opaque non-grey colours give an 8-bit palette and no chunk-free
+    /// 8-bit candidate (the input is already RGB), so the demotion is the only runner-up there is.
+    #[test]
+    fn a_demotable_palette_keeps_the_plain_demotion_as_its_runner_up() {
+        let rgb16: Vec<u16> = (0..600u32)
+            .flat_map(|i| {
+                let c = (i % 64) as u8;
+                [
+                    u16::from(c) * 257,
+                    u16::from(c.wrapping_add(64)) * 257,
+                    200 * 257,
+                ]
+            })
+            .collect();
+        match analyze16(&rgb16, 3) {
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { .. },
+                chunk_free: Some(Reduced::Rgb8(demoted)),
+            } => {
+                assert_eq!(demoted.len(), 600 * 3, "half the 16-bit payload");
+                assert_eq!(&demoted[0..3], &[0, 64, 200]);
+            }
+            _ => panic!("expected Indexed with a demoted Rgb8 runner-up"),
         }
     }
 
@@ -662,7 +836,10 @@ mod tests {
             rgba.extend_from_slice(&[c, c.wrapping_add(64), 200, 128]);
         }
         match analyze8(&rgba, 4) {
-            Some(Reduced::Indexed { depth, trns, .. }) => {
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { depth, trns, .. },
+                ..
+            } => {
                 assert_eq!(depth, 8, "200 entries need the 8-bit index depth");
                 assert_eq!(
                     trns.map(|t| t.len()),
@@ -690,7 +867,10 @@ mod tests {
             rgba.extend_from_slice(&[70, 80, 90, 255]);
         }
         match analyze8(&rgba, 4) {
-            Some(Reduced::Indexed { trns, .. }) => {
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { trns, .. },
+                ..
+            } => {
                 assert_eq!(
                     trns,
                     Some(vec![128]),
@@ -713,12 +893,16 @@ mod tests {
             }
         }
         match analyze8(&rgb, 3) {
-            Some(Reduced::Indexed {
-                depth,
-                plte,
-                trns,
-                indices,
-            }) => {
+            Reductions::Chunked {
+                chunked:
+                    Reduced::Indexed {
+                        depth,
+                        plte,
+                        trns,
+                        indices,
+                    },
+                ..
+            } => {
                 assert_eq!(depth, 1);
                 assert_eq!(plte.len(), 6); // two RGB entries
                 assert!(trns.is_none());
@@ -734,7 +918,7 @@ mod tests {
         let rgb: Vec<u8> = (0..300u32)
             .flat_map(|i| [i as u8, (i >> 1) as u8, (i >> 2) as u8])
             .collect();
-        assert!(analyze8(&rgb, 3).is_none());
+        assert!(matches!(analyze8(&rgb, 3), Reductions::None));
     }
 
     /// Rec. 601 luma is the *only* thing separating these five opaque entries -- same alpha, so
@@ -793,7 +977,10 @@ mod tests {
         rgba.extend_from_slice(&[0, 0, 0, 0].repeat(40)); // invisible, discovered last
 
         match analyze8(&rgba, 4) {
-            Some(Reduced::Indexed { plte, trns, .. }) => {
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { plte, trns, .. },
+                ..
+            } => {
                 assert_eq!(
                     plte,
                     vec![0, 0, 0, 200, 10, 10, 255, 255, 255],
@@ -813,7 +1000,10 @@ mod tests {
         ]
         .repeat(20);
         match analyze8(&rgba, 4) {
-            Some(Reduced::Indexed { trns: Some(t), .. }) => assert_eq!(t, vec![0]),
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { trns: Some(t), .. },
+                ..
+            } => assert_eq!(t, vec![0]),
             _ => panic!("expected indexed with tRNS"),
         }
     }
@@ -821,14 +1011,14 @@ mod tests {
     /// Asserts `pixels` (of `channels`) reduces to grey at `depth` with the expected codes.
     fn expect_gray(pixels: &[u8], channels: usize, depth: u8, codes: &[u8]) {
         match analyze8(pixels, channels) {
-            Some(Reduced::Gray {
+            Reductions::ChunkFree(Reduced::Gray {
                 depth: got,
                 samples,
             }) => {
                 assert_eq!(got, depth, "depth");
                 assert_eq!(samples, codes, "codes");
             }
-            _ => panic!("expected Gray at depth {depth}"),
+            _ => panic!("expected a chunk-free Gray at depth {depth}"),
         }
     }
 
@@ -856,9 +1046,13 @@ mod tests {
         // 2 bits still beats 8-bit grey.
         let gray: Vec<u8> = [5u8, 9, 200].repeat(40);
         match analyze8(&gray, 1) {
-            Some(Reduced::Indexed {
-                depth, plte, trns, ..
-            }) => {
+            Reductions::Chunked {
+                chunked:
+                    Reduced::Indexed {
+                        depth, plte, trns, ..
+                    },
+                ..
+            } => {
                 assert_eq!(depth, 2);
                 assert_eq!(plte, vec![5, 5, 5, 9, 9, 9, 200, 200, 200]);
                 assert!(trns.is_none());
@@ -872,7 +1066,7 @@ mod tests {
         // 8-bit grey using values off every sub-byte grid and >16 distinct levels: nothing beats
         // the input.
         let gray: Vec<u8> = (0..=255u8).collect();
-        assert!(analyze8(&gray, 1).is_none());
+        assert!(matches!(analyze8(&gray, 1), Reductions::None));
     }
 
     #[test]
@@ -885,12 +1079,16 @@ mod tests {
     fn grey_alpha_with_few_combinations_is_indexed_with_trns() {
         let ga: Vec<u8> = [0, 0, 255, 255].repeat(40); // transparent black, opaque white
         match analyze8(&ga, 2) {
-            Some(Reduced::Indexed {
-                depth,
-                plte,
-                trns: Some(t),
+            Reductions::Chunked {
+                chunked:
+                    Reduced::Indexed {
+                        depth,
+                        plte,
+                        trns: Some(t),
+                        ..
+                    },
                 ..
-            }) => {
+            } => {
                 assert_eq!(depth, 1);
                 assert_eq!(plte, vec![0, 0, 0, 255, 255, 255]);
                 assert_eq!(t, vec![0]);
@@ -926,7 +1124,10 @@ mod tests {
             .collect();
 
         match analyze8(&ga, 2) {
-            Some(Reduced::GrayKeyed { samples, key }) => {
+            Reductions::Chunked {
+                chunked: Reduced::GrayKeyed { samples, key },
+                ..
+            } => {
                 assert_eq!(key, 7, "the one grey every invisible pixel carries");
                 assert_eq!(samples.len(), 256, "one sample per pixel, alpha gone");
                 // The key erases whatever wears it, so nothing visible may wear it.
@@ -937,13 +1138,19 @@ mod tests {
                 }
             }
             other => panic!(
-                "expected GrayKeyed, got {}",
+                "expected a chunk-carrying GrayKeyed, got {}",
                 match other {
-                    Some(Reduced::Indexed { .. }) => "Indexed",
-                    Some(Reduced::GrayAlpha8(_)) => "GrayAlpha8",
-                    Some(Reduced::Rgb8Keyed { .. }) => "Rgb8Keyed",
-                    Some(_) => "some other reduction",
-                    None => "no reduction",
+                    Reductions::Chunked {
+                        chunked: Reduced::Indexed { .. },
+                        ..
+                    } => "Indexed",
+                    Reductions::Chunked {
+                        chunked: Reduced::Rgb8Keyed { .. },
+                        ..
+                    } => "Rgb8Keyed",
+                    Reductions::ChunkFree(Reduced::GrayAlpha8(_)) => "GrayAlpha8",
+                    Reductions::ChunkFree(_) | Reductions::Chunked { .. } => "some other reduction",
+                    Reductions::None => "no reduction",
                 }
             ),
         }
@@ -954,7 +1161,7 @@ mod tests {
         let ga: Vec<u8> = (0..600u32)
             .flat_map(|i| [(i % 251) as u8, (i % 249) as u8])
             .collect();
-        assert!(analyze8(&ga, 2).is_none());
+        assert!(matches!(analyze8(&ga, 2), Reductions::None));
     }
 
     #[test]
@@ -967,10 +1174,10 @@ mod tests {
             })
             .collect();
         match analyze16(&rgba16, 4) {
-            Some(Reduced::Gray { depth: 8, samples }) => {
+            Reductions::ChunkFree(Reduced::Gray { depth: 8, samples }) => {
                 assert_eq!(samples, (0..80).map(|i| (i % 60) as u8).collect::<Vec<_>>());
             }
-            _ => panic!("expected 8-bit Gray"),
+            _ => panic!("expected a chunk-free 8-bit Gray"),
         }
     }
 
@@ -988,7 +1195,7 @@ mod tests {
             })
             .collect();
         match analyze16(&rgba16, 4) {
-            Some(Reduced::Rgba8(demoted)) => {
+            Reductions::ChunkFree(Reduced::Rgba8(demoted)) => {
                 assert_eq!(demoted.len(), 600 * 4);
                 assert_eq!(demoted[0..4], [0, 0, 0, 0]);
                 assert_eq!(demoted[4 * 250], 250u8);
@@ -1001,7 +1208,7 @@ mod tests {
     fn two_matching_channels_are_not_grey() {
         // R == G but B differs on every pixel: not greyscale, too many colours to palette.
         let rgb: Vec<u8> = (0..60u8).flat_map(|v| [v, v, 200]).collect();
-        assert!(analyze8(&rgb, 3).is_none());
+        assert!(matches!(analyze8(&rgb, 3), Reductions::None));
         // The 16-bit twin (non-demotable): same verdict.
         let rgb16: Vec<u16> = (0..60u32)
             .flat_map(|i| {
@@ -1009,14 +1216,14 @@ mod tests {
                 [v, v, 200]
             })
             .collect();
-        assert!(analyze16(&rgb16, 3).is_none());
+        assert!(matches!(analyze16(&rgb16, 3), Reductions::None));
     }
 
     #[test]
     fn sixteen_bit_identity_reductions_are_rejected() {
         // Non-demotable grey noise arriving as Gray16 is already minimal.
         let gray16: Vec<u16> = (0..90u32).map(|i| (i * 501 + 1) as u16).collect();
-        assert!(analyze16(&gray16, 1).is_none());
+        assert!(matches!(analyze16(&gray16, 1), Reductions::None));
     }
 
     #[test]
@@ -1027,8 +1234,10 @@ mod tests {
             .flat_map(|i| [((i % 251) * 257) as u16, ((i % 33) * 7 * 257) as u16])
             .collect();
         match analyze16(&ga16, 2) {
-            Some(Reduced::GrayAlpha8(demoted)) => assert_eq!(demoted.len(), 600 * 2),
-            _ => panic!("expected demoted GrayAlpha8"),
+            Reductions::ChunkFree(Reduced::GrayAlpha8(demoted)) => {
+                assert_eq!(demoted.len(), 600 * 2);
+            }
+            _ => panic!("expected a chunk-free demoted GrayAlpha8"),
         }
 
         // Rgb16, every sample k*257, many non-grey colours: plain demotion keeps RGB.
@@ -1042,8 +1251,10 @@ mod tests {
             })
             .collect();
         match analyze16(&rgb16, 3) {
-            Some(Reduced::Rgb8(demoted)) => assert_eq!(demoted.len(), 600 * 3),
-            _ => panic!("expected demoted Rgb8"),
+            Reductions::ChunkFree(Reduced::Rgb8(demoted)) => {
+                assert_eq!(demoted.len(), 600 * 3);
+            }
+            _ => panic!("expected a chunk-free demoted Rgb8"),
         }
     }
 
@@ -1060,10 +1271,10 @@ mod tests {
         rgba16[1] = 0x0100;
         rgba16[2] = 0x0100; // keep the pixel grey so the native grey reduction still applies
         match analyze16(&rgba16, 4) {
-            Some(Reduced::Gray16Be(bytes)) => {
+            Reductions::ChunkFree(Reduced::Gray16Be(bytes)) => {
                 assert_eq!(&bytes[0..2], &[0x01, 0x00], "big-endian, undemoted");
             }
-            _ => panic!("expected Gray16Be"),
+            _ => panic!("expected a chunk-free Gray16Be"),
         }
     }
 
@@ -1074,11 +1285,11 @@ mod tests {
             .flat_map(|i| [(i * 501 + 1) as u16, (i * 703 + 2) as u16, 3, u16::MAX])
             .collect();
         match analyze16(&rgba16, 4) {
-            Some(Reduced::Rgb16Be(bytes)) => {
+            Reductions::ChunkFree(Reduced::Rgb16Be(bytes)) => {
                 assert_eq!(bytes.len(), 90 * 6);
                 assert_eq!(&bytes[0..6], &[0, 1, 0, 2, 0, 3]);
             }
-            _ => panic!("expected Rgb16Be"),
+            _ => panic!("expected a chunk-free Rgb16Be"),
         }
 
         // Grey non-demotable RGB16 -> Gray16.
@@ -1090,7 +1301,7 @@ mod tests {
             .collect();
         assert!(matches!(
             analyze16(&rgb16, 3),
-            Some(Reduced::Gray16Be(bytes)) if bytes.len() == 90 * 2
+            Reductions::ChunkFree(Reduced::Gray16Be(bytes)) if bytes.len() == 90 * 2
         ));
 
         // Opaque non-demotable GrayAlpha16 -> Gray16.
@@ -1099,7 +1310,7 @@ mod tests {
             .collect();
         assert!(matches!(
             analyze16(&ga16, 2),
-            Some(Reduced::Gray16Be(bytes)) if bytes.len() == 90 * 2
+            Reductions::ChunkFree(Reduced::Gray16Be(bytes)) if bytes.len() == 90 * 2
         ));
 
         // A translucent grey+alpha pair -> gets a full 16-bit gray+alpha only when smaller, which
@@ -1107,7 +1318,7 @@ mod tests {
         let translucent: Vec<u16> = (0..90u32)
             .flat_map(|i| [(i * 501 + 1) as u16, (i * 703) as u16 | 1])
             .collect();
-        assert!(analyze16(&translucent, 2).is_none());
+        assert!(matches!(analyze16(&translucent, 2), Reductions::None));
         let noise: Vec<u16> = (0..600u32)
             .flat_map(|i| {
                 [
@@ -1118,7 +1329,7 @@ mod tests {
                 ]
             })
             .collect();
-        assert!(analyze16(&noise, 4).is_none());
+        assert!(matches!(analyze16(&noise, 4), Reductions::None));
     }
 
     #[test]
@@ -1131,8 +1342,10 @@ mod tests {
             })
             .collect();
         match analyze16(&rgba16, 4) {
-            Some(Reduced::GrayAlpha16Be(bytes)) => assert_eq!(bytes.len(), 90 * 4),
-            _ => panic!("expected GrayAlpha16Be"),
+            Reductions::ChunkFree(Reduced::GrayAlpha16Be(bytes)) => {
+                assert_eq!(bytes.len(), 90 * 4);
+            }
+            _ => panic!("expected a chunk-free GrayAlpha16Be"),
         }
     }
 }
