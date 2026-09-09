@@ -76,13 +76,18 @@ appended to a finished file is not that file's provenance, and accepting one wou
 give a store to a file that carries none.
 
 **Decode.** `DecodedPng::c2pa` / `PngMetadata::c2pa` carry that chunk verbatim, ready for
-`MetadataBlock::C2pa`. Every CRC-valid `caBX` that is *not* the store — a later one, or any after
-`IDAT` — is counted in `c2pa_ignored` (a `usize`; the file's real number, not a saturated
-ceiling), never concatenated. `c2pa == None` with a non-zero count is exactly the appended-store
-shape. The store is attacker-sized like every ancillary payload, so its bytes are charged to the
-one cumulative `with_max_metadata_bytes` budget; a store past the remainder is skipped, not an
-error, and — skipped — is still the file's first store, so a smaller one after it is ignored
-rather than substituted.
+`MetadataBlock::C2pa`. The store is attacker-sized like every ancillary payload, so its bytes are
+charged to the one cumulative `with_max_metadata_bytes` budget; a store past the remainder is
+skipped, not an error, and — skipped — is still the file's first store, so a smaller one after it
+is ignored rather than substituted.
+
+`c2pa_ignored` counts every CRC-valid `caBX` **in the datastream** that was not surfaced as the
+store (a `usize`: the file's real number, not a saturated ceiling). That is three cases — a chunk
+later than the first, one positioned after `IDAT`, and the store-position chunk itself when it
+busted the budget — and the count deliberately does not say which: `c2pa == None` with a non-zero
+count is any of them, not evidence of an appended store. What it does **not** cover is a `caBX`
+after `IEND`, which is a trailer rather than part of the datastream (§13.2) and which neither
+metadata walk reaches; that shape is visible in `deconstruct`'s report, as a trailer segment.
 
 **Encode.** `with_c2pa(store)` embeds a store computed for this file; `with_c2pa_reserved(len)`
 writes `len` zero bytes in its place. Either is emitted as the **last** chunk before the first
@@ -110,8 +115,9 @@ filled.
 
 A span is **carriage**, not a decode result. The report has no byte budget, so a store past
 `with_max_metadata_bytes` is still spanned here while `decode().c2pa` is `None`; likewise
-`chunk(b"caBX").count` counts CRC-invalid and post-`IDAT` chunks that `c2pa_ignored` does not.
-Each number answers its own question, and the docs say so rather than promising they agree.
+`chunk(b"caBX").count` counts CRC-invalid chunks and chunks in the trailer, which `c2pa_ignored`
+does not. Each number answers its own question, and the docs say so rather than promising they
+agree.
 
 **Placement is ours, not the format's.** The store is written last before `IDAT` so its offset
 depends only on what precedes it — the property the reserve-then-fill flow rests on. PNG §14.3.2

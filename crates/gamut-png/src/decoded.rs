@@ -150,15 +150,19 @@ pub struct DecodedPng {
     /// Feed as `MetadataBlock::C2pa`. The first CRC-valid `caBX` before the first `IDAT`, and
     /// only when it fits the metadata budget; see [`c2pa_ignored`](Self::c2pa_ignored).
     pub c2pa: Option<Vec<u8>>,
-    /// How many CRC-valid `caBX` chunks the file carries that were **not** surfaced as the
-    /// store: any after the first, and any positioned after `IDAT`.
+    /// How many CRC-valid `caBX` chunks **in the datastream** were not surfaced as the store:
+    /// a chunk later than the first, a chunk positioned after `IDAT`, and the store-position
+    /// chunk itself when it did not fit the metadata budget.
     ///
     /// A file carries exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's
-    /// APP11 run — so a non-zero count marks a malformed file whose extra chunks were ignored
-    /// rather than concatenated. The post-`IDAT` case is worth its own attention: §A.3.2 places
-    /// the store before `IDAT` and calls data after it bad-form, so a `caBX` appended to a
-    /// finished file is never read as the store. A file whose `c2pa` is `None` while this is
-    /// non-zero is exactly that shape — someone appended a store to a file that carries none.
+    /// APP11 run — so a non-zero count marks a file whose extra chunks were ignored rather than
+    /// concatenated. It does **not** identify why: a store past the budget and a chunk appended
+    /// after `IDAT` both land here, and `c2pa == None` with a non-zero count is either.
+    ///
+    /// A `caBX` after `IEND` is **not** counted. Bytes after `IEND` are a trailer rather than
+    /// part of the datastream (§13.2), and neither metadata walk reads them. To see one — the
+    /// shape of a chunk appended to a finished file — use
+    /// [`deconstruct`](crate::deconstruct), whose report accounts the trailer as a segment.
     pub c2pa_ignored: usize,
     /// tEXt/zTXt/iTXt annotations in file order (the XMP packet is excluded).
     pub texts: Vec<TextChunk>,
@@ -222,15 +226,19 @@ pub struct PngMetadata {
     /// `caBX` before the first `IDAT`, and only when it fits the metadata budget; see
     /// [`c2pa_ignored`](Self::c2pa_ignored).
     pub c2pa: Option<Vec<u8>>,
-    /// How many CRC-valid `caBX` chunks the file carries that were **not** surfaced as the
-    /// store: any after the first, and any positioned after `IDAT`.
+    /// How many CRC-valid `caBX` chunks **in the datastream** were not surfaced as the store:
+    /// a chunk later than the first, a chunk positioned after `IDAT`, and the store-position
+    /// chunk itself when it did not fit the metadata budget.
     ///
     /// A file carries exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's
-    /// APP11 run — so a non-zero count marks a malformed file whose extra chunks were ignored
-    /// rather than concatenated. The post-`IDAT` case is worth its own attention: §A.3.2 places
-    /// the store before `IDAT` and calls data after it bad-form, so a `caBX` appended to a
-    /// finished file is never read as the store. A file whose `c2pa` is `None` while this is
-    /// non-zero is exactly that shape — someone appended a store to a file that carries none.
+    /// APP11 run — so a non-zero count marks a file whose extra chunks were ignored rather than
+    /// concatenated. It does **not** identify why: a store past the budget and a chunk appended
+    /// after `IDAT` both land here, and `c2pa == None` with a non-zero count is either.
+    ///
+    /// A `caBX` after `IEND` is **not** counted. Bytes after `IEND` are a trailer rather than
+    /// part of the datastream (§13.2), and neither metadata walk reads them. To see one — the
+    /// shape of a chunk appended to a finished file — use
+    /// [`deconstruct`](crate::deconstruct), whose report accounts the trailer as a segment.
     pub c2pa_ignored: usize,
     /// tEXt/zTXt/iTXt annotations in file order (the XMP packet is excluded).
     pub texts: Vec<TextChunk>,
@@ -247,8 +255,9 @@ pub struct PngMetadata {
 /// Parses the metadata-bearing ancillary chunks collected from the stream (in file order).
 /// Malformed payloads skip their chunk (§13.1); compressed payloads — and the uncompressed but
 /// attacker-sized `caBX` store — share `budget` bytes of output, and a payload that would bust
-/// the remainder is skipped, not an error. Once-only chunks keep their first occurrence; a
-/// second `caBX` is additionally counted, since exactly one store is the rule (C2PA §A.3.2).
+/// the remainder is skipped, not an error. Once-only chunks keep their first occurrence; every
+/// CRC-valid `caBX` this walk does not surface as the store — a later one, or the first when it
+/// busts the budget — is counted, since exactly one store is the rule (C2PA §A.3.2).
 ///
 /// `chunks` holds only chunks in a position where a store may appear: the caller's walk drops a
 /// `caBX` after `IDAT` before it gets here and counts it into
@@ -265,12 +274,18 @@ pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata
             b"eXIf" if meta.exif.is_none() => meta.exif = Some(data.to_vec()),
             _ if chunk_type == CABX => {
                 if seen_c2pa {
+                    // A second store-position chunk: never the store, whatever became of the
+                    // first, so an oversized store cannot be substituted by a smaller one.
                     meta.c2pa_ignored += 1;
                 } else {
                     seen_c2pa = true;
                     if data.len() <= budget {
                         budget -= data.len();
                         meta.c2pa = Some(data.to_vec());
+                    } else {
+                        // In store position but not admitted: counted, like every other
+                        // CRC-valid `caBX` this walk declines to surface.
+                        meta.c2pa_ignored += 1;
                     }
                 }
             }
@@ -625,8 +640,8 @@ mod tests {
         let busts = collect(&[(CABX, &store), (CABX, b"tiny")], 9);
         assert_eq!(busts.c2pa, None, "one byte over the budget is skipped");
         assert_eq!(
-            busts.c2pa_ignored, 1,
-            "the skipped store is still the first; the next is a duplicate, not a substitute"
+            busts.c2pa_ignored, 2,
+            "both are ignored: the store busted the budget, and the next is not a substitute"
         );
     }
 

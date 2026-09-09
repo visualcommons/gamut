@@ -485,6 +485,63 @@ fn an_indexed_encode_reserves_and_fills_through_the_report() {
     );
 }
 
+/// The budget-skipped store is counted like every other chunk the walk declines to surface, so
+/// the count means "CRC-valid `caBX` chunks in the datastream that are not the store" and not
+/// "chunks somebody appended". Both entry points agree.
+#[test]
+fn a_store_past_the_budget_is_counted_among_the_ignored() {
+    let (pixels, dims) = rgb_source();
+    let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
+    let png = PngEncoder::new()
+        .with_c2pa(&store(1000))
+        .encode_to_vec(image)
+        .expect("encode");
+
+    let generous = PngDecoder::new().with_max_metadata_bytes(1000);
+    let meta = generous.metadata(&png).expect("metadata");
+    assert!(meta.c2pa.is_some());
+    assert_eq!(meta.c2pa_ignored, 0, "an admitted store is not ignored");
+
+    let tight = PngDecoder::new().with_max_metadata_bytes(999);
+    let meta = tight.metadata(&png).expect("metadata");
+    assert_eq!(meta.c2pa, None);
+    assert_eq!(
+        meta.c2pa_ignored, 1,
+        "the store the budget skipped is counted"
+    );
+    let decoded = tight.decode(&png).expect("decode");
+    assert_eq!(decoded.c2pa_ignored, 1, "decode agrees with metadata");
+}
+
+/// What the count deliberately does **not** see: a `caBX` after `IEND` is a trailer, not part of
+/// the datastream (§13.2), so neither metadata walk reaches it and it is counted zero. The byte
+/// accounting is where that shape shows up, as a trailer segment — which is what the field's
+/// docs point a caller at.
+#[test]
+fn a_cabx_after_iend_is_a_trailer_the_report_sees_and_the_count_does_not() {
+    let mut png = png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(3, 2, 8, 2, 0)),
+        chunk(b"IDAT", &zlib(&[0u8; 20])),
+        chunk(b"IEND", &[]),
+    ]);
+    let datastream_len = png.len();
+    png.extend_from_slice(&chunk(b"caBX", b"appended after IEND"));
+
+    let meta = gamut_png::metadata(&png).expect("metadata");
+    assert_eq!(meta.c2pa, None);
+    assert_eq!(meta.c2pa_ignored, 0, "a trailer is not in the datastream");
+
+    let report = deconstruct(&png).expect("deconstruct");
+    assert_eq!(report.c2pa(), None, "a trailer is not the store either");
+    let trailer = report
+        .segments
+        .iter()
+        .find(|segment| segment.kind == SegmentKind::Trailer)
+        .expect("the appended bytes are accounted as a trailer");
+    assert_eq!(trailer.range, datastream_len..png.len());
+    assert!(report.is_fully_classified());
+}
+
 /// A `caBX` whose CRC does not match is skipped on decode (§13.1) — it is not the store and
 /// it is not a duplicate either, since it never reaches the metadata pass — and the exclusion
 /// span names the CRC-valid store the decoder actually surfaces, not the damaged bytes before

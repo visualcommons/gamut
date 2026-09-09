@@ -24,7 +24,8 @@ Graphics, W3C 3rd edition) images:
   `IDAT`; `encode_with_report` / `PngReport::c2pa` name the chunk's whole span (length, type,
   payload, CRC) for the `c2pa.hash.data` exclusion; and `fill_c2pa` writes the signed store into
   that span in place, changing no byte outside it. On read the store is the first CRC-valid `caBX`
-  before `IDAT` — an appended one is counted, never surfaced. Validation is `c2pa-rs`'s.
+  before `IDAT`; every other one in the datastream is counted in `c2pa_ignored`, never surfaced.
+  Validation is `c2pa-rs`'s.
 - **Memory-safe.** 100% safe Rust (`#![deny(unsafe_code)]`).
 
 ## Usage
