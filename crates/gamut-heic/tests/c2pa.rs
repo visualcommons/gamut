@@ -243,7 +243,10 @@ fn a_report_line_never_carries_a_stores_bytes() {
         "the store's contents leaked into the report: {rendered}"
     );
     // Nor the JUMBF framing that bounds them.
-    assert!(!rendered.contains("jumb"), "the store's header leaked: {rendered}");
+    assert!(
+        !rendered.contains("jumb"),
+        "the store's header leaked: {rendered}"
+    );
 }
 
 #[test]
