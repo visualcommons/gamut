@@ -230,10 +230,15 @@ exclusion ranges. Now:
   the bytes surface reported that entry while the ranges reported none, and re-encoding produced
   a one-entry file carrying only the last duplicate.) On the write side, `append_store` names a
   duplicated entry as the problem instead of claiming the entry is missing.
-- **Nothing declined is dropped.** A tag-52545 field the decoder declines to read as a store —
-  wrong type, too short, duplicated — still reaches the caller verbatim. Where it lands depends
-  on the directory: IFD 0's go to `ifd0_extra`, and the last main-chain directory's to the new
-  `DecodedDng::trailing_extra`. That field exists because §A.3.6's other lawful placement (the
+- **A declined field still reaches the caller.** A tag-52545 field the decoder declines to read
+  as a store — wrong type, or too short — arrives verbatim. Where it lands depends on the
+  directory: IFD 0's go to `ifd0_extra`, and the last main-chain directory's to the new
+  `DecodedDng::trailing_extra`. **A duplicated entry is the one partial case**: the typed
+  channels carry `gamut-ifd`'s eager `Ifd`, which keeps the *last* of several entries under one
+  tag, so the last duplicate's bytes arrive and the earlier ones do not. Carrying both would
+  mean changing that last-wins model, which every consumer of the IFD core shares; a file with
+  two stores is malformed under §A.3.6 in any case, and `deconstruct` still accounts for every
+  byte of both. That field exists because §A.3.6's other lawful placement (the
   store as "the only entity within a new IFD following the existing one") produces a directory
   with no image, which is therefore neither IFD 0, nor the raw IFD, nor a `SubImage` — so before
   it, such a directory's fields reached no surface at all. It is empty for every file this crate

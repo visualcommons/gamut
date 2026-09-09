@@ -29,9 +29,17 @@ use crate::{bitpack, compression, lossless_jpeg, tags};
 
 /// One IFD entry preserved verbatim: the tag number and its fully typed [`Value`].
 ///
-/// This is how the decoder represents every field it does not model — private maker tags,
-/// DNG features without a typed surface yet — so nothing in the file is silently dropped
-/// (issue #109's decode contract). The value is `gamut-ifd`'s typed enum, not opaque bytes.
+/// This is how the decoder represents a field it does not model — private maker tags, DNG
+/// features without a typed surface yet — so such fields are not silently dropped (issue #109's
+/// decode contract). The value is `gamut-ifd`'s typed enum, not opaque bytes.
+///
+/// The contract holds over four channels — [`DecodedDng::ifd0_extra`],
+/// [`DecodedDng::raw_extra`], [`SubImage::extra_tags`] and [`DecodedDng::trailing_extra`] — with
+/// two residues those channels do not reach, both documented on
+/// [`trailing_extra`](DecodedDng::trailing_extra): a **duplicated tag** keeps only the last
+/// entry, because the eager [`Ifd`] this is built from is last-wins, and an **interior**
+/// main-chain page carrying no image data reaches no channel at all (issue #525).
+/// [`deconstruct`](crate::deconstruct) still accounts for the bytes in both cases.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawTag {
     /// The TIFF/DNG tag number.
@@ -195,9 +203,18 @@ pub struct DecodedDng {
     ///
     /// Empty for every file this crate writes, which puts the entry in IFD 0.
     ///
-    /// **Other pages are not covered.** A main-chain directory that is neither the first nor the
-    /// last, carries no image data, and is thus also no sub-image, still reaches no surface; see
-    /// `STATUS.md`. That gap predates this field and is not what §A.3.6 creates.
+    /// # The two residues of the "nothing is dropped" contract
+    ///
+    /// - **A duplicated tag keeps the last entry.** Every typed channel is built on the eager
+    ///   [`Ifd`], which is last-wins, so where a directory carries two entries under one tag
+    ///   only the second's value arrives. Such a file is malformed for a manifest store
+    ///   (§A.3.6 allows one per asset).
+    /// - **An interior main-chain page is not covered.** A directory that is neither the first
+    ///   nor the last of the chain, carries no image data, and is thus also no sub-image reaches
+    ///   no channel at all — issue #525. That gap predates this field and is not what §A.3.6
+    ///   creates.
+    ///
+    /// [`deconstruct`](crate::deconstruct) accounts for the bytes in both cases.
     pub trailing_extra: Vec<RawTag>,
     /// Where the C2PA manifest store in [`metadata.c2pa`](DngMetadata::c2pa) sits in the file:
     /// the two ranges a `c2pa.hash.data` binding excludes (C2PA 2.4 §18.5.5), located by
