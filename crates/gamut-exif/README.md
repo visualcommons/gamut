@@ -44,7 +44,29 @@ let out = edited.to_bytes();                // Exif\0\0 + TIFF, ready to re-embe
 ```
 
 For a bare TIFF stream (PNG `eXIf` / WebP `EXIF`) or a byte-order override, use [`ExifWriter`];
-[`ExifReader`] carries the read-side options (`require_marker`, `strict`).
+[`ExifReader`] carries the read-side options (`require_marker`, `strict`) and two further entry
+points:
+
+- **`parse_from`** reads through [`gamut_ifd::ReadAt`] instead of a slice, so the EXIF of a
+  300 MB raw file costs a few hundred bytes of I/O rather than the whole file. `parse` is the
+  `&[u8]` case of it — one parse engine, two entry points. It is deliberately synchronous: an
+  async caller drives the source itself, which keeps a runtime dependency out of the crate.
+- **`parse_with_report`** (and its `parse_from_with_report` twin) returns a `ReadReport` alongside
+  the `Exif`, naming every sub-IFD and thumbnail range the lenient reader discarded — the tag that
+  addressed it, the offset it carried, and whether the address was out of bounds or the bytes
+  there were corrupt. `parse` stays silent, as before.
+
+```rust
+# use gamut_exif::ExifReader;
+# fn demo(bytes: &[u8]) -> Result<(), gamut_exif::ExifError> {
+let (exif, report) = ExifReader::new().parse_with_report(bytes)?;
+for dropped in report.dropped() {
+    eprintln!("{dropped}"); // e.g. "dropped GPS at tag 0x8825, offset 65535: ..."
+}
+# let _ = exif;
+# Ok(())
+# }
+```
 
 Enable the optional `geocoordinates` feature (also included by `full`) to convert a complete
 [`GpsInfo`] with `TryFrom` into `geocoordinates::Wgs84` or `geocoordinates::Coordinate`. The latter
@@ -67,6 +89,11 @@ designed to be added without breaking the 1.0 API — the catalogue and vendor e
 - **exiftool-parity tag breadth** beyond the standard dictionary (unknown tags still round-trip
   losslessly via the raw `Ifd`).
 - **Uncompressed strip-based thumbnails** are read but not re-embedded (JPEG thumbnails are).
+- **Per-tag error recovery inside one directory.** A single unparseable entry fails its whole
+  directory in `gamut-ifd`, so the report's granularity is the sub-IFD, not the individual tag.
+- **A byte-completeness verdict** over the whole blob (which source bytes no parsed structure
+  claims). `gamut-ifd`'s audit engine has the machinery; `ReadReport` today reports only what was
+  dropped, not what was never reached.
 
 ## Status
 

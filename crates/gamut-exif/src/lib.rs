@@ -15,6 +15,13 @@
 //! [`Exif::parse`] reads a blob and [`Exif::to_bytes`] re-serialises it (preserving the byte order);
 //! read tags with the typed accessors or the [`ExifTag`] catalogue.
 //!
+//! Two further read entry points sit on [`ExifReader`]:
+//! [`parse_from`](ExifReader::parse_from) reads through [`gamut_ifd::ReadAt`] rather than a slice,
+//! so EXIF can be pulled out of a large raw file without loading it, and
+//! [`parse_with_report`](ExifReader::parse_with_report) returns a [`ReadReport`] naming every
+//! sub-IFD and thumbnail range the lenient reader discarded. `parse` is the `&[u8]` case of
+//! `parse_from` and stays silent, so neither is a change for existing callers.
+//!
 //! ```
 //! use gamut_exif::{ByteOrder, Exif, ExifTag, Value};
 //!
@@ -35,6 +42,7 @@ pub mod exif;
 pub mod gps;
 pub mod maker_note;
 pub mod reader;
+pub mod report;
 pub mod stream;
 pub mod tag;
 pub mod thumbnail;
@@ -51,6 +59,7 @@ pub use gps::GpsConversionError;
 pub use gps::{GpsAltitude, GpsCoordinate, GpsInfo, GpsReference};
 pub use maker_note::{MakerNote, MakerNoteVendor};
 pub use reader::ExifReader;
+pub use report::{DropReason, Dropped, DroppedRegion, ReadReport};
 pub use tag::{ExifTag, IfdKind};
 pub use thumbnail::Thumbnail;
 pub use value::{Rational, SRational, as_text};

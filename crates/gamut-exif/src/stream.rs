@@ -15,8 +15,9 @@
 use gamut_ifd::{Ifd, IfdReader, RawIfd, ReadAt, tags as ifd_tags};
 
 use crate::error::{ExifError, Result};
-use crate::exif::{EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER};
+use crate::exif::{EXIF_IFD_POINTER, Exif, MARKER};
 use crate::reader::ExifReader;
+use crate::report::{DropReason, Dropped, DroppedRegion, ReadReport};
 use crate::tag::ExifTag;
 use crate::thumbnail::Thumbnail;
 
@@ -47,7 +48,30 @@ impl ExifReader {
     /// [`ExifError::Ifd`] when the TIFF stream is malformed or the source fails, or (in
     /// [`strict`](Self::strict) mode) [`ExifError::InvalidIfd`] /
     /// [`ExifError::BadThumbnail`] when a sub-IFD pointer or thumbnail range is unusable.
-    pub fn parse_from<S: ReadAt>(&self, mut source: S) -> Result<Exif> {
+    pub fn parse_from<S: ReadAt>(&self, source: S) -> Result<Exif> {
+        self.parse_source(source, &mut ReadReport::new())
+    }
+
+    /// Parses EXIF from a positioned byte source and reports what a lenient parse discarded.
+    ///
+    /// The streaming twin of [`parse_with_report`](Self::parse_with_report). See [`ReadReport`].
+    ///
+    /// # Errors
+    ///
+    /// As [`parse_from`](Self::parse_from).
+    pub fn parse_from_with_report<S: ReadAt>(&self, source: S) -> Result<(Exif, ReadReport)> {
+        let mut report = ReadReport::new();
+        let exif = self.parse_source(source, &mut report)?;
+        Ok((exif, report))
+    }
+
+    /// The crate's one parse engine: marker handling, the top-level chain, the thumbnail, and the
+    /// three pointer-addressed sub-IFDs, recording into `report` whatever leniency discards.
+    pub(crate) fn parse_source<S: ReadAt>(
+        &self,
+        mut source: S,
+        report: &mut ReadReport,
+    ) -> Result<Exif> {
         let base = self.tiff_base(&mut source)?;
         // Everything below addresses the TIFF stream, so offsets read out of it — and the offsets
         // this crate hands back — stay in EXIF's own frame of reference.
@@ -59,15 +83,15 @@ impl ExifReader {
         let mut image = ifds.next().ok_or(ExifError::Truncated)?;
         // The next-IFD chain's second entry is the thumbnail directory (1st IFD), if any.
         let thumbnail = match ifds.next() {
-            Some(ifd) => Some(self.read_thumbnail(ifd, &mut reader)?),
+            Some(ifd) => Some(self.read_thumbnail(ifd, &mut reader, report)?),
             None => None,
         };
 
         // The Exif sub-IFD's own offset, captured before `follow` strips the pointer: the
         // maker-note pin needs the note value's absolute source position.
         let exif_ifd_at = image.get_u32(EXIF_IFD_POINTER).map(u64::from);
-        let exif = self.follow(&mut image, &mut reader, EXIF_IFD_POINTER, "Exif")?;
-        let gps = self.follow(&mut image, &mut reader, GPS_IFD_POINTER, "GPS")?;
+        let exif = self.follow(&mut image, &mut reader, DroppedRegion::ExifIfd, report)?;
+        let gps = self.follow(&mut image, &mut reader, DroppedRegion::GpsIfd, report)?;
         let maker_note_at = match (&exif, exif_ifd_at) {
             (Some(_), Some(at)) => maker_note_offset(&mut reader, at),
             _ => None,
@@ -76,7 +100,8 @@ impl ExifReader {
         // The Interoperability directory is reached from *inside* the Exif sub-IFD, not the 0th IFD.
         let (exif, interop) = match exif {
             Some(mut e) => {
-                let interop = self.follow(&mut e, &mut reader, INTEROP_IFD_POINTER, "Interop")?;
+                let interop =
+                    self.follow(&mut e, &mut reader, DroppedRegion::InteropIfd, report)?;
                 (Some(e), interop)
             }
             None => (None, None),
@@ -110,38 +135,51 @@ impl ExifReader {
         }
     }
 
-    /// Reads pointer tag `ptr` from `parent`, removes it (the pointer is represented structurally,
-    /// not as a data field), and parses the sub-IFD it addresses.
+    /// Reads `region`'s pointer tag from `parent` and parses the sub-IFD it addresses, then removes
+    /// the pointer (it is represented structurally, not as a data field).
     ///
     /// Returns `Ok(None)` when the pointer is absent, or — in lenient mode — when the pointed-at
-    /// directory is malformed.
+    /// directory is unusable, in which case the drop is recorded in `report`. The removal happens
+    /// **after** the read is attempted: the pointer's tag and offset are what the report names, so
+    /// stripping it first would lose the identity of what was dropped.
     fn follow<S: ReadAt>(
         &self,
         parent: &mut Ifd,
         reader: &mut IfdReader<S>,
-        ptr: u16,
-        name: &'static str,
+        region: DroppedRegion,
+        report: &mut ReadReport,
     ) -> Result<Option<Ifd>> {
+        let ptr = region.tag();
         let Some(offset) = parent.get_u32(ptr) else {
             return Ok(None);
         };
-        parent.remove(ptr);
-        let followed = match reader.read_ifd(u64::from(offset)) {
+        let offset = u64::from(offset);
+        let followed = match reader.read_ifd(offset) {
             Ok(raw) => reader.decode_ifd(&raw),
             Err(e) => Err(e),
         };
+        parent.remove(ptr);
         match followed {
             Ok(ifd) => Ok(Some(ifd)),
-            Err(_) if !self.strict => Ok(None),
-            Err(_) => Err(ExifError::InvalidIfd(name)),
+            Err(_) if self.strict => Err(ExifError::InvalidIfd(region.name())),
+            Err(_) => {
+                let reason = address_reason(reader, offset)?;
+                report.record(Dropped::new(region, offset, reason));
+                Ok(None)
+            }
         }
     }
 
     /// Builds a [`Thumbnail`] from the 1st IFD, fetching its JPEG bytes (from the
     /// `JPEGInterchangeFormat` offset / length) when the range is wholly inside the stream. In
-    /// lenient mode an out-of-bounds range yields a thumbnail without bytes; in strict mode it
-    /// errors.
-    fn read_thumbnail<S: ReadAt>(&self, ifd: Ifd, reader: &mut IfdReader<S>) -> Result<Thumbnail> {
+    /// lenient mode an out-of-bounds range yields a thumbnail without bytes and a recorded drop;
+    /// in strict mode it errors.
+    fn read_thumbnail<S: ReadAt>(
+        &self,
+        ifd: Ifd,
+        reader: &mut IfdReader<S>,
+        report: &mut ReadReport,
+    ) -> Result<Thumbnail> {
         let ptr = ExifTag::JpegInterchangeFormat.tag_id();
         let offset = ifd.get_u32(ptr);
         let length = ifd.get_u32(ExifTag::JpegInterchangeFormatLength.tag_id());
@@ -151,7 +189,14 @@ impl ExifReader {
                 None if self.strict => {
                     return Err(ExifError::BadThumbnail("JPEG offset out of bounds"));
                 }
-                None => None,
+                None => {
+                    report.record(Dropped::new(
+                        DroppedRegion::ThumbnailJpeg,
+                        u64::from(offset),
+                        DropReason::OutOfBounds,
+                    ));
+                    None
+                }
             },
             _ => None,
         };
@@ -163,6 +208,18 @@ impl ExifReader {
             ifd.remove(ptr);
         }
         Ok(Thumbnail::from_parts(ifd, jpeg))
+    }
+}
+
+/// Why an address that failed to parse failed: past the end of the stream, or inside it but
+/// structurally bad. Separating the two is what makes a report actionable — a dangling pointer is
+/// a different defect from a corrupt directory.
+fn address_reason<S: ReadAt>(reader: &mut IfdReader<S>, offset: u64) -> Result<DropReason> {
+    let len = reader.source_mut().len()?;
+    if offset < len {
+        Ok(DropReason::Malformed)
+    } else {
+        Ok(DropReason::OutOfBounds)
     }
 }
 
@@ -262,6 +319,25 @@ mod tests {
             .parse_from(&b"Exi"[..])
             .expect_err("three bytes cannot carry the marker");
         assert!(matches!(err, ExifError::MissingMarker), "{err:?}");
+    }
+
+    /// `address_reason` splits the two defects the report distinguishes, and the boundary is the
+    /// stream's length itself: the last byte is inside, the length is not.
+    #[test]
+    fn an_address_is_out_of_bounds_from_the_streams_length_onwards() {
+        let data = [0u8; 8];
+        let mut reader =
+            IfdReader::with_layout(&data[..], ByteOrder::LittleEndian, Variant::Classic);
+        assert_eq!(
+            address_reason(&mut reader, 7).expect("reason"),
+            DropReason::Malformed,
+            "the last byte of the stream is inside it"
+        );
+        assert_eq!(
+            address_reason(&mut reader, 8).expect("reason"),
+            DropReason::OutOfBounds,
+            "one past the last byte is outside it"
+        );
     }
 
     /// A range is fetched only when it ends inside the stream — the bound that stops a hostile

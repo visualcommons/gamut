@@ -12,6 +12,7 @@
 
 use crate::error::Result;
 use crate::exif::Exif;
+use crate::report::ReadReport;
 
 /// Reads an EXIF blob into an [`Exif`], with options for how the parse is bounded.
 ///
@@ -63,6 +64,32 @@ impl ExifReader {
     /// malformed directory.
     pub fn parse(&self, bytes: &[u8]) -> Result<Exif> {
         self.parse_from(bytes)
+    }
+
+    /// Parses an EXIF blob and reports what a lenient parse discarded.
+    ///
+    /// [`parse`](Self::parse) is silent about the sub-IFDs and thumbnail bytes leniency drops; this
+    /// returns the same [`Exif`] alongside a [`ReadReport`] naming each one, so a caller can tell a
+    /// blob that never carried GPS from one whose GPS pointer was dangling.
+    ///
+    /// ```
+    /// # use gamut_exif::{ByteOrder, Exif, ExifReader};
+    /// # let bytes = Exif::new(ByteOrder::LittleEndian).to_bytes()?;
+    /// let (exif, report) = ExifReader::new().parse_with_report(&bytes)?;
+    /// assert!(report.is_empty()); // nothing was lost
+    /// for dropped in report.dropped() {
+    ///     eprintln!("{dropped}");
+    /// }
+    /// # let _ = exif;
+    /// # Ok::<(), gamut_exif::ExifError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`parse`](Self::parse). In [`strict`](Self::strict) mode the first malformed region fails
+    /// the parse instead of being reported, so a strict report is always empty.
+    pub fn parse_with_report(&self, bytes: &[u8]) -> Result<(Exif, ReadReport)> {
+        self.parse_from_with_report(bytes)
     }
 }
 
