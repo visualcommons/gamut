@@ -186,7 +186,28 @@ jobs:
           # vendored codecs. `aom`/`dav1d` are `update = none` and arrive via the fetch below.
           submodules: recursive
       - name: Install system build deps (pkg-config; nasm is vendored, rest via mise)
-        run: sudo apt-get update && sudo apt-get install -y pkg-config
+        # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
+        # Chrome/Microsoft source on the runner image makes `apt-get update` exit 100, so drop
+        # the sources this project does not consume, then update and install unmasked. Full
+        # rationale, and why Ubuntu's own sources are matched by content, is in ci.yml.
+        run: |
+          kept=0
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            if grep -Eq 'apt-mirrors\.txt|//[a-z0-9.-]*\.ubuntu\.com' "$f"; then
+              kept=$((kept + 1))
+              echo "keeping $f"
+            else
+              echo "removing third-party source $f"
+              sudo rm -f "$f"
+            fi
+          done
+          if [ "$kept" -eq 0 ]; then
+            echo "::error::no Ubuntu apt source survived pruning; refusing to install from a stale index"
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y pkg-config
       - uses: jdx/mise-action@v4
         with:
           install_args: cmake ninja meson
@@ -229,7 +250,28 @@ jobs:
           # the explicit step below is what pulls it. The C oracles under third_party/ are.
           submodules: recursive
       - name: Install system build deps (pkg-config; nasm is vendored, rest via mise)
-        run: sudo apt-get update && sudo apt-get install -y pkg-config
+        # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
+        # Chrome/Microsoft source on the runner image makes `apt-get update` exit 100, so drop
+        # the sources this project does not consume, then update and install unmasked. Full
+        # rationale, and why Ubuntu's own sources are matched by content, is in ci.yml.
+        run: |
+          kept=0
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            if grep -Eq 'apt-mirrors\.txt|//[a-z0-9.-]*\.ubuntu\.com' "$f"; then
+              kept=$((kept + 1))
+              echo "keeping $f"
+            else
+              echo "removing third-party source $f"
+              sudo rm -f "$f"
+            fi
+          done
+          if [ "$kept" -eq 0 ]; then
+            echo "::error::no Ubuntu apt source survived pruning; refusing to install from a stale index"
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y pkg-config
       - uses: jdx/mise-action@v4
         with:
           install_args: cmake ninja meson
