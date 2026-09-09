@@ -26,6 +26,7 @@ serialization as an equivalent profile.
 | P9 | §10 | **Full §10 coverage** — every remaining element type decoded (see below) | ✅ |
 | P10 | §8 | Profile-class conformance validation (`IccProfile::validate`) | ✅ |
 | P11 | — | **v1 stabilization** (issue #180): API-surface hardening (private modules, `Eq` model, std conversion traits, validated fallible writes, `ProfileHeader::new`) + spec-citation audit | ✅ |
+| P12 | §8.4, §9.2 | **Built-in profiles** (issue #424): `IccProfile::builtin` / `gray_with_gamma` / `from_cicp` / `from_source_profile` | ✅ |
 
 ## Modelled element types
 
@@ -40,6 +41,52 @@ serialization as an equivalent profile.
 Any element type *not* defined in ICC.1:2022 §10 (e.g. iccMAX's `multiProcessElementsType`, or
 private/unregistered types) is preserved verbatim as `TagData::Raw` and round-trips byte-for-byte,
 so no profile is rejected for carrying an unmodelled tag.
+
+## Built-in profiles
+
+`IccProfile::builtin`, `gray_with_gamma`, `from_cicp` and `from_source_profile` construct
+spec-valid v4 three-component matrix/TRC display profiles (§8.4). The colorimetry is **gamut-color's
+and is never restated here**: primaries and white point come from
+`ColourPrimaries::chromaticities`, the RGB→XYZ construction and Bradford adaptation from
+`gamut_color::matrix`, the ST 2084 curve from `gamut_color::transfer`.
+
+**Dependency direction: `gamut-icc → gamut-color`.** The constructors need gamut-color's
+colorimetry and gamut-icc's serializer, and only one of the two can own that edge. gamut-color is
+the primitive — fan-in 8, no ICC dependency — so pointing it the other way would invert the
+layering and give a widely-depended-on crate a profile serializer it has no use for. (Contrast
+`gamut-cmm → gamut-icc` below: applying a profile is a layer above parsing one; *describing* a
+colour space is a layer below.)
+
+**The buildable set is exactly what gamut-color can express on the two CICP axes**, because a
+matrix/TRC profile *is* a (primaries, transfer) pair: sRGB, linear sRGB, Display P3 and BT.2100 PQ.
+`SourceProfile::ADOBE_RGB` and `PROPHOTO_RGB` return `None` from both `colour_primaries()` and
+`transfer_characteristics()`, and their chromaticities are private to gamut-color, so
+`from_source_profile` declines them rather than restating tables this crate does not own. Adding
+them needs a public chromaticity accessor in gamut-color first — tracked separately.
+
+**Tone-curve shape per transfer.** A `parametricCurveType` (§10.18) is used wherever ITU-T H.273
+gives the transfer a closed form ICC also defines, and a sampled `curveType` (§10.6) otherwise:
+
+| Transfer (H.273) | ICC encoding | Deciding clause |
+| ---------------- | ------------ | --------------- |
+| Linear (code 8) | `parametricCurveType` type 0, `g = 1` | §10.18 type 0 is `Y = X^g` exactly |
+| sRGB / IEC 61966-2-1 (code 13) | `parametricCurveType` type 3, `(g, a, b, c, d)` | §10.18 type 3 is the spec's own piecewise form |
+| Grey gamma (`gray_with_gamma`) | `parametricCurveType` type 0 | §10.18 type 0; `s15Fixed16` beats `curveType`'s single `u8Fixed8` entry |
+| PQ / ST 2084 (codes 16, 14) | `curveType`, 1024 `uInt16` samples | §10.18 defines no closed form for PQ; 1024 points keep interpolation error under one `uInt16` quantum |
+
+**PCS white.** Colorants are Bradford-adapted to the D50 that `XYZNumber::D50` encodes (§7.2.16),
+not to `gamut_color::matrix::D50`. The two differ by 2e-4 in Z — the CIE chromaticity against ICC's
+rounded tristimulus — and adapting to the CIE one while writing the ICC one as the
+`mediaWhitePointTag` leaves the colorants disagreeing with the white point they sum to. The PCS
+illuminant is an ICC fact, so this crate owns it.
+
+**Determinism.** A constructor is a pure function of its arguments: no creation timestamp, no
+profile ID, no other entropy, so the same call always serializes to the same bytes.
+
+**Acceptance.** lcms2 re-opens every constructed profile and reports the same colorants as it
+derives from the same primaries itself (within four `s15Fixed16` quanta), evaluates our sRGB TRC to
+the same values as the sRGB profile it synthesizes itself, estimates the grey gamma we asked for,
+and transforms through our sRGB into its own sRGB as the identity to within one 8-bit code.
 
 ## Deferred / intentional leniencies
 

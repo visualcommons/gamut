@@ -310,7 +310,10 @@ fn rgb_matrix_trc(
         tags: vec![
             (KnownTag::ProfileDescription.into(), mluc(description)),
             (KnownTag::Copyright.into(), mluc(COPYRIGHT)),
-            (KnownTag::MediaWhitePoint.into(), TagData::Xyz(vec![XyzNumber::D50])),
+            (
+                KnownTag::MediaWhitePoint.into(),
+                TagData::Xyz(vec![XyzNumber::D50]),
+            ),
             (KnownTag::ChromaticAdaptation.into(), chad_tag),
             (KnownTag::RedColorant.into(), column(0)),
             (KnownTag::GreenColorant.into(), column(1)),
@@ -368,7 +371,10 @@ impl IccProfile {
                     mluc(&format!("Grey gamma {gamma}")),
                 ),
                 (KnownTag::Copyright.into(), mluc(COPYRIGHT)),
-                (KnownTag::MediaWhitePoint.into(), TagData::Xyz(vec![XyzNumber::D50])),
+                (
+                    KnownTag::MediaWhitePoint.into(),
+                    TagData::Xyz(vec![XyzNumber::D50]),
+                ),
                 (KnownTag::GrayTrc.into(), Trc::Gamma(gamma).tag()),
             ],
         }
@@ -447,9 +453,10 @@ impl IccProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gamut_color::transfer::srgb_eotf;
     use lcms2_oracle::tag;
+
+    use super::*;
 
     /// Every [`BuiltinProfile`] and the grey constructor satisfy ICC.1:2022 §8's required-tag set
     /// for the Display class, and serialize. `validate` is gamut-icc's own §8 checker, so this
@@ -501,7 +508,10 @@ mod tests {
         for step in 0..=100 {
             let x = f64::from(step) / 100.0;
             let (got, want) = (curve.eval(x), srgb_eotf(x));
-            assert!((got - want).abs() < 1.0e-4, "sRGB TRC at {x}: {got} vs {want}");
+            assert!(
+                (got - want).abs() < 1.0e-4,
+                "sRGB TRC at {x}: {got} vs {want}"
+            );
         }
     }
 

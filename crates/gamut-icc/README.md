@@ -14,9 +14,9 @@ the format crates can read, preserve, and embed accurate color characterization.
   ISO 15076-1; [`../../references/icc`](../../references/icc)), with v2 read support since most
   embedded profiles are still v2.
 - **Dependency-light.** An ICC profile needs neither IFD nor XML machinery, so this crate builds
-  only on [`gamut-core`](../gamut-core) plus [`md-5`](https://crates.io/crates/md-5) (the §7.2.18
-  profile-ID digest) — distinct from CICP color signaling, which lives in
-  [`gamut-color`](../gamut-color).
+  only on [`gamut-core`](../gamut-core), [`gamut-color`](../gamut-color) (the colorimetry behind
+  the built-in profile constructors below) and [`md-5`](https://crates.io/crates/md-5) (the
+  §7.2.18 profile-ID digest).
 
 ## Usage
 
@@ -31,6 +31,36 @@ if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint) {
 let serialized = profile.to_bytes()?; // spec-valid bytes, ready to re-embed
 # Ok(()) }
 ```
+
+### Built-in profiles, and CICP → profile
+
+Constructing a profile is the other direction. `IccProfile::builtin` emits a spec-valid v4
+matrix/TRC display profile for a named space, and `IccProfile::from_cicp` does the same from the
+H.273 code-point triple AVIF, HEIC and JXL usually signal instead of embedding a profile:
+
+```rust
+use gamut_icc::{BuiltinProfile, Cicp, IccProfile};
+
+let p3 = IccProfile::builtin(BuiltinProfile::DisplayP3);
+assert!(p3.validate().is_empty());
+let bytes = p3.to_bytes()?; // ready to embed
+
+// BT.2020 primaries + PQ, as an AVIF `colr` box would signal them.
+let hdr = IccProfile::from_cicp(Cicp {
+    colour_primaries: 9,
+    transfer_characteristics: 16,
+    matrix_coefficients: 0,
+    video_full_range_flag: 1,
+});
+assert!(hdr.is_some());
+# Ok::<_, gamut_icc::IccError>(())
+```
+
+The buildable spaces are sRGB, linear sRGB, Display P3 and BT.2100 PQ, plus
+`IccProfile::gray_with_gamma` for a monochrome profile — exactly the set
+[`gamut-color`](../gamut-color) can express on the two CICP axes. Their primaries, white point and
+transfer are read from that crate rather than restated here, so the two cannot drift; Adobe RGB and
+ProPhoto RGB have no code point on either axis and are declined rather than approximated.
 
 **Every ICC.1:2022 §10 element type decodes semantically** — the `XYZType`, curve, and text types;
 the `lut8`/`lut16`/`lutAToB`/`lutBToA` transforms; `namedColor2Type`; the measurement/signalling
