@@ -65,10 +65,10 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   with the chunk's byte range — the range a `c2pa.hash.data` assertion excludes (§18.5) — and
   `gamut_webp::c2pa_span` recovers that range from any WebP file. The chunk goes last, as §A.3.7
   requires, and no `VP8X` flag advertises it, RFC 9649 defining no C2PA feature bit. A file carries
-  exactly one store: `with_unknown_chunks` refuses a `C2PA` FourCC, the container writer drops one
-  from the preserved chunks, and `encode_with_report` re-reads its own output and will not report a
-  range that is not over the configured bytes. gamut carries the store; building, hashing, signing
-  and validating it belong to a C2PA implementation.
+  exactly one store: `with_unknown_chunks` refuses every FourCC the container defines, the container
+  writer gives the configured store that slot, and `encode_with_report` re-reads its own output and
+  will not report a range that is not over the configured bytes. gamut carries the store; building,
+  hashing, signing and validating it belong to a C2PA implementation.
 
 ### Pluggable codestream backends
 

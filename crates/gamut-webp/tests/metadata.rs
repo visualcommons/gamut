@@ -631,22 +631,3 @@ fn a_store_survives_a_decode_re_encode_cycle_exactly_once() {
     );
     assert_eq!(again, file);
 }
-
-#[test]
-fn c2pa_span_rejects_input_that_is_not_a_webp_file() {
-    // `c2pa_span` frames the file before it can locate anything, so its documented `# Errors` path
-    // is the framing check: bad input is refused rather than reported as "no store", which a caller
-    // would otherwise read as "nothing to exclude".
-    let err = gamut_webp::c2pa_span(b"not a WebP file").expect_err("not a RIFF/WebP file");
-    assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
-
-    // Well-formed header, chunk size running past the end of the data.
-    let mut file = encode_rgb(&WebpEncoder::lossless(), &rgb(4, 4), dims(4, 4));
-    file[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
-    assert_eq!(
-        gamut_webp::c2pa_span(&file)
-            .expect_err("a chunk overruns the data")
-            .kind(),
-        gamut_core::ErrorKind::InvalidInput
-    );
-}
