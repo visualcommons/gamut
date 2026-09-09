@@ -478,11 +478,7 @@ impl PngDecoder {
     /// ```
     pub fn metadata(&self, data: &[u8]) -> Result<PngMetadata> {
         let (chunks, c2pa_after_idat) = walk_metadata_chunks(data)?;
-        Ok(collected(
-            &chunks,
-            self.max_metadata_bytes,
-            c2pa_after_idat,
-        ))
+        Ok(collected(&chunks, self.max_metadata_bytes, c2pa_after_idat))
     }
 
     /// Runs the typed pipeline: parse (without metadata) → decode.
@@ -552,6 +548,11 @@ impl PngDecoder {
     }
 }
 
+/// What one metadata walk found: the chunks in a position where their type may appear, and how
+/// many CRC-valid `caBX` chunks sat after `IDAT` — never the store (C2PA §A.3.2), so counted
+/// rather than returned among the chunks.
+type MetadataWalk<'a> = (Vec<([u8; 4], &'a [u8])>, usize);
+
 /// Walks the chunk stream collecting the CRC-valid ancillary chunks, for [`decoded::collect`] to
 /// classify — the same handoff [`PngDecoder::parse_stream`] makes, so the two entry points cannot
 /// disagree about which chunks carry metadata.
@@ -560,10 +561,11 @@ impl PngDecoder {
 /// `Vec` and then requires at least one, neither of which a metadata read should do. Here IDAT
 /// (and PLTE) is skipped by length, so the pixel data is never touched or copied.
 ///
-/// Returns the chunks together with the number of CRC-valid `caBX` chunks seen *after* `IDAT`,
+/// Returns a [`MetadataWalk`]: the chunks together with the number of CRC-valid `caBX` chunks
+/// seen *after* `IDAT`,
 /// which are never the store (§A.3.2) and so are counted rather than returned — the same split
 /// [`PngDecoder::parse_stream`] makes, so the two entry points agree on what the store is.
-fn walk_metadata_chunks(data: &[u8]) -> Result<(Vec<([u8; 4], &[u8])>, usize)> {
+fn walk_metadata_chunks(data: &[u8]) -> Result<MetadataWalk<'_>> {
     let mut reader = ChunkReader::new(data)?;
     let first = reader
         .next_chunk()?
@@ -650,11 +652,7 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<(Vec<([u8; 4], &[u8])>, usize)> {
 ///
 /// The one place that addition happens, so `decode` and both `metadata` entry points cannot come
 /// to report different counts for the same file.
-fn collected(
-    chunks: &[([u8; 4], &[u8])],
-    budget: usize,
-    c2pa_after_idat: usize,
-) -> PngMetadata {
+fn collected(chunks: &[([u8; 4], &[u8])], budget: usize, c2pa_after_idat: usize) -> PngMetadata {
     let mut meta = decoded::collect(chunks, budget);
     meta.c2pa_ignored += c2pa_after_idat;
     meta
