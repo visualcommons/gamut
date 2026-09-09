@@ -6,8 +6,18 @@
 //! One chunk here is not PNG's own: the C2PA manifest store, `caBX` (C2PA 2.4 §A.3.2). It is
 //! emitted **last** of everything before `IDAT`, so that its offset depends only on the chunks
 //! that precede it and every byte after it is `IDAT` or `IEND` — which is what lets a reserved
-//! store be filled in place by a second encode of equal length without moving a byte outside
-//! the chunk. §A.3.2 asks only that it precede `IDAT`.
+//! store be filled in place ([`crate::fill_c2pa`]) without moving a byte outside the chunk.
+//! §A.3.2 asks only that it precede `IDAT`.
+//!
+//! "Last" is this writer's guarantee about the files it produces, **not** a property that
+//! survives other tools. PNG §14.3.2 is explicit that an unsafe-to-copy chunk's ordering
+//! requirements are relative to the *critical* chunks only, that "it is never valid to assume
+//! that a specific ancillary chunk type occurs with any particular positioning relative to other
+//! ancillary chunks", and that a PNG editor may insert another ancillary chunk after one an
+//! application always writes last. So a reader must assume no more than "before `IDAT`" — which
+//! is exactly what [`crate::PngReport::c2pa`] and the decoder assume — while a *reservation*
+//! whose offsets a signer depends on holds only for a file that has not been edited since this
+//! encoder wrote it.
 //!
 //! Two of them, `bKGD` and `sBIT`, have a payload whose shape is the image's colour type, and the
 //! encoder does not always write the colour type the caller set them for: auto-reduce may write a

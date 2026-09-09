@@ -383,7 +383,10 @@ fn a_cabx_after_idat_is_never_the_store_but_is_still_visible() {
     let meta = gamut_png::metadata(&both).expect("metadata");
     assert_eq!(meta.c2pa.as_deref(), Some(&b"real store"[..]));
     assert_eq!(meta.c2pa_ignored, 1);
-    let span = deconstruct(&both).expect("deconstruct").c2pa().expect("span");
+    let span = deconstruct(&both)
+        .expect("deconstruct")
+        .c2pa()
+        .expect("span");
     assert_eq!(&both[span.payload], b"real store");
 }
 
@@ -433,13 +436,19 @@ fn a_reserved_store_is_filled_in_place_to_the_same_bytes_as_a_second_encode() {
         .with_c2pa(&finished)
         .encode_to_vec(image)
         .expect("encode");
-    assert_eq!(reserved, reencoded, "filling in place lands on the encoder's own bytes");
+    assert_eq!(
+        reserved, reencoded,
+        "filling in place lands on the encoder's own bytes"
+    );
 
     let outside_after: Vec<u8> = (0..reserved.len())
         .filter(|i| !span.chunk.contains(i))
         .map(|i| reserved[i])
         .collect();
-    assert_eq!(outside_before, outside_after, "no byte outside the span moved");
+    assert_eq!(
+        outside_before, outside_after,
+        "no byte outside the span moved"
+    );
 
     // The filled store reads back through the ordinary decode path, so its CRC is right.
     assert_eq!(
@@ -464,7 +473,10 @@ fn an_indexed_encode_reserves_and_fills_through_the_report() {
         .encode_indexed8(image, &palette, &mut png)
         .expect("encode");
 
-    let span = deconstruct(&png).expect("deconstruct").c2pa().expect("span");
+    let span = deconstruct(&png)
+        .expect("deconstruct")
+        .c2pa()
+        .expect("span");
     let finished = store(24);
     fill_c2pa(&mut png, &span, &finished).expect("fill");
     assert_eq!(

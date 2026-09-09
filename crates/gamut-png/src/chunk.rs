@@ -59,7 +59,13 @@ impl RawChunk<'_> {
 /// Where a C2PA manifest store sits in a PNG: the `caBX` chunk's whole span and, inside it, the
 /// store's own bytes. Reported by
 /// [`PngEncoder::encode_with_report`](crate::PngEncoder::encode_with_report) for a file just
-/// written and by [`PngReport::c2pa`](crate::PngReport::c2pa) for any file.
+/// written and by [`PngReport::c2pa`](crate::PngReport::c2pa) for any file, and consumed by
+/// [`fill_c2pa`] to write the finished store into it.
+///
+/// A span describes **carriage** — where the bytes sit — and says nothing about whether a decode
+/// surfaced them: [`PngDecoder::with_max_metadata_bytes`](crate::PngDecoder::with_max_metadata_bytes)
+/// can skip a store this span still names, since a byte accounting has no budget and does not
+/// borrow another reader's. Exclude the span from a hash; read the payload from the decode.
 ///
 /// Non-exhaustive: a later revision may name a further range without a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,7 +462,10 @@ mod tests {
         );
         assert_eq!(short, png, "a rejected fill writes nothing");
         let mut long = png.clone();
-        assert!(fill_c2pa(&mut long, &span, b"abcde").is_err(), "one byte long");
+        assert!(
+            fill_c2pa(&mut long, &span, b"abcde").is_err(),
+            "one byte long"
+        );
         assert_eq!(long, png);
 
         // A span past the end of the buffer.
@@ -471,13 +480,19 @@ mod tests {
             payload: span.payload.start + 1..span.payload.end,
         };
         let error = fill_c2pa(&mut mine, &skewed, b"abc").expect_err("not framed");
-        assert!(error.to_string().contains("does not frame a chunk"), "{error}");
+        assert!(
+            error.to_string().contains("does not frame a chunk"),
+            "{error}"
+        );
         assert_eq!(mine, png);
 
         // A well-framed span naming some other chunk: the IHDR right before it.
         let ihdr = C2paSpan::of(8..8 + 12 + 13);
         let error = fill_c2pa(&mut mine, &ihdr, &[0; 13]).expect_err("not a caBX");
-        assert!(error.to_string().contains("does not name a caBX"), "{error}");
+        assert!(
+            error.to_string().contains("does not name a caBX"),
+            "{error}"
+        );
         assert_eq!(mine, png);
     }
 
@@ -501,13 +516,21 @@ mod tests {
         write_chunk(&mut after_idat, *b"IDAT", b"zz");
         write_chunk(&mut after_idat, CABX, b"appended");
         write_chunk(&mut after_idat, *b"IEND", &[]);
-        assert_eq!(find_c2pa(&after_idat), None, "a caBX after IDAT is not the store");
+        assert_eq!(
+            find_c2pa(&after_idat),
+            None,
+            "a caBX after IDAT is not the store"
+        );
 
         let mut after_iend = SIGNATURE.to_vec();
         write_chunk(&mut after_iend, *b"IHDR", &[0; 13]);
         write_chunk(&mut after_iend, *b"IEND", &[]);
         write_chunk(&mut after_iend, CABX, b"trailing");
-        assert_eq!(find_c2pa(&after_iend), None, "a caBX after IEND is not the store");
+        assert_eq!(
+            find_c2pa(&after_iend),
+            None,
+            "a caBX after IEND is not the store"
+        );
 
         // ...while the same chunk one position earlier — before IDAT — is the store, so the
         // stop is what decides, not the payload.

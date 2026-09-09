@@ -377,6 +377,10 @@ impl PngEncoder {
     /// into the same bytes — see there for the reserve-then-fill flow. The bytes are not parsed
     /// or validated: gamut carries the store, `c2pa-rs` judges it.
     ///
+    /// To put a finished store into a file that has **already** been encoded, prefer
+    /// [`fill_c2pa`](crate::fill_c2pa): it rewrites the reserved chunk in place, where this
+    /// setter re-runs the whole encode.
+    ///
     /// A store is bound to the bytes it was signed over, which is why no gamut re-encode helper —
     /// and never the `gamut-metadata` facade — hands one to this setter: a store copied forward
     /// into a rewritten file is invalid by construction, and `caBX` is *unsafe to copy* for the
@@ -395,16 +399,25 @@ impl PngEncoder {
     /// The reserve-then-fill flow an external signer needs (C2PA 2.4 §18.5):
     ///
     /// 1. encode with the reservation, via [`encode_with_report`](Self::encode_with_report), which
-    ///    names the chunk's span;
+    ///    names the chunk's span (for an indexed image, `deconstruct(&png)?.c2pa()` names the same
+    ///    span — see [`encode_indexed8`](Self::encode_indexed8));
     /// 2. hash the output with that **whole** span excluded — length, type, payload and CRC
     ///    (§18.5.4) — and have the signer build the store against it;
-    /// 3. encode again with [`with_c2pa`](Self::with_c2pa) and the finished store of the **same
-    ///    length**. The encoder's output is byte-reproducible and the store is the last chunk
-    ///    before `IDAT`, so the second file differs from the first only inside that span: the
-    ///    payload and the chunk CRC. Every other byte, and every offset, is unchanged.
+    /// 3. write the finished store into the span with [`fill_c2pa`](crate::fill_c2pa). Only the
+    ///    payload and the chunk CRC change, so every other byte — and every offset — is the one
+    ///    the signer hashed.
+    ///
+    /// Re-encoding with [`with_c2pa`](Self::with_c2pa) and a store of the same length reaches the
+    /// same bytes, because the output is byte-reproducible and the store is the last chunk before
+    /// `IDAT`; it costs a second full encode and ties the signature to that reproducibility, which
+    /// is why the in-place fill is the documented step 3.
     ///
     /// The reservation is `len` bytes exactly — no slack is added — so ask for what the signer
     /// says it needs (`c2pa-rs` reports a `reserve_size`).
+    ///
+    /// The offsets hold for the file as this encoder wrote it. A PNG editor may lawfully insert
+    /// another ancillary chunk after the store (PNG §14.3.2), so reserve, hash and fill without
+    /// passing the file through one.
     ///
     /// The last of `with_c2pa` / `with_c2pa_reserved` wins; a file carries exactly one store.
     #[must_use]
@@ -418,10 +431,12 @@ impl PngEncoder {
     /// [`with_c2pa_reserved`](Self::with_c2pa_reserved).
     ///
     /// The report is read back from the bytes written — the same walk
-    /// [`PngReport::c2pa`](crate::PngReport::c2pa) performs — so it cannot disagree with what a
-    /// later [`deconstruct`](crate::deconstruct) of the same bytes reports, and an indexed image
-    /// encoded through [`encode_indexed8`](Self::encode_indexed8) gets the same answer from
-    /// `deconstruct(&png)?.c2pa()`.
+    /// [`PngReport::c2pa`](crate::PngReport::c2pa) performs, over the same rule (the first
+    /// CRC-valid `caBX` before the first `IDAT`) — so it cannot disagree with what a later
+    /// [`deconstruct`](crate::deconstruct) of the same bytes reports. There is deliberately no
+    /// indexed twin of this method: [`encode_indexed8`](Self::encode_indexed8) needs a palette and
+    /// does not fit this shape, and `deconstruct(&png)?.c2pa()` gives an indexed caller the same
+    /// span, which [`fill_c2pa`](crate::fill_c2pa) then fills.
     ///
     /// # Errors
     ///

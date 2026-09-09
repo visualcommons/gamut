@@ -21,9 +21,10 @@ Graphics, W3C 3rd edition) images:
   decode-side inflate.
 - **C2PA carriage** (issue #440). The manifest store is located, bounded, carried and reserved —
   never parsed or judged. `with_c2pa` / `with_c2pa_reserved` put it as the last chunk before
-  `IDAT`, and `encode_with_report` / `PngReport::c2pa` name the chunk's whole span (length, type,
-  payload, CRC) for the `c2pa.hash.data` exclusion, so a reservation is filled by a second encode
-  that changes no byte outside it. Validation is `c2pa-rs`'s.
+  `IDAT`; `encode_with_report` / `PngReport::c2pa` name the chunk's whole span (length, type,
+  payload, CRC) for the `c2pa.hash.data` exclusion; and `fill_c2pa` writes the signed store into
+  that span in place, changing no byte outside it. On read the store is the first CRC-valid `caBX`
+  before `IDAT` — an appended one is counted, never surfaced. Validation is `c2pa-rs`'s.
 - **Memory-safe.** 100% safe Rust (`#![deny(unsafe_code)]`).
 
 ## Usage
