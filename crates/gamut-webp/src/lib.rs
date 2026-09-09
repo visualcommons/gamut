@@ -26,7 +26,8 @@
 //!   ignored on decode, as RFC 9649 §2.7.1.6 asks of readers. Preserving one across a
 //!   decode→encode cycle is opt-in and takes two steps: read the chunks with
 //!   [`gamut_riff::WebpLayout::parse`] and hand them back via
-//!   [`WebpEncoder::with_unknown_chunks`]. The pixel API alone does not thread them through.
+//!   [`WebpEncoder::with_unknown_chunks`], which refuses a FourCC that has its own setter rather
+//!   than emitting that chunk twice. The pixel API alone does not thread them through.
 //! - **Animation** — `ANIM` / `ANMF` multi-frame sequences are out of scope under the image-first
 //!   charter. Each frame is an independent key frame, but assembling them needs a non-trait API.
 //! - **Lossy quality** — the `0..=100` quality maps coarsely onto the VP8 base quantizer. The
@@ -82,6 +83,13 @@
 //! [`c2pa_span`] recovers that range from any WebP file. The range is the chunk's whole span, which
 //! is what a `c2pa.hash.data` assertion excludes (§18.5); [`metadata`] surfaces the store's bytes
 //! themselves as [`WebpMetadata::c2pa`].
+//!
+//! A file carries **exactly one** store, and that is enforced rather than assumed: the `C2PA` chunk
+//! is refused by [`WebpEncoder::with_unknown_chunks`], dropped from the preserved chunks by
+//! [`gamut_riff::write_extended_preserving`], and `encode_with_report` reads the store back out of
+//! its own output and refuses to report a range that does not cover the configured bytes. Without
+//! that, a stale `C2PA` chunk carried forward from a reader that did not recognise it would be
+//! written first, win every "first chunk of its kind" rule, and be the one a signer excluded.
 //!
 //! # Pluggable codestream backends
 //!

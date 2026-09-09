@@ -425,6 +425,7 @@ fn unknown_chunks_survive_a_decode_re_encode_cycle() {
     WebpEncoder::lossless()
         .with_exif(b"exif payload")
         .with_unknown_chunks(&[(odd, b"private payload")])
+        .expect("a private FourCC is accepted")
         .encode_image(image, &mut original)
         .expect("encode");
 
@@ -447,6 +448,7 @@ fn unknown_chunks_survive_a_decode_re_encode_cycle() {
     WebpEncoder::lossless()
         .with_exif(b"exif payload")
         .with_unknown_chunks(&carried)
+        .expect("carried chunks are private")
         .encode_image(
             ImageRef::<Rgb8>::new(decoded.as_samples(), decoded.dimensions()).unwrap(),
             &mut rewritten,
@@ -473,6 +475,7 @@ fn an_unknown_chunk_alone_promotes_a_file_to_the_extended_format() {
     let mut file = Vec::new();
     WebpEncoder::lossless()
         .with_unknown_chunks(&[(FourCc::from(PRIVATE), b"payload")])
+        .expect("a private FourCC is accepted")
         .encode_image(image, &mut file)
         .expect("encode");
 
@@ -489,6 +492,7 @@ fn no_unknown_chunks_leaves_a_simple_file_simple() {
     let mut file = Vec::new();
     WebpEncoder::lossless()
         .with_unknown_chunks(&[])
+        .expect("an empty list is accepted")
         .encode_image(image, &mut file)
         .expect("encode");
 
@@ -510,7 +514,8 @@ fn a_store_alone_promotes_a_file_to_the_extended_format_and_goes_last() {
                 .with_xmp(XMP)
                 .with_icc_profile(ICC)
                 .with_c2pa(C2PA)
-                .with_unknown_chunks(&[(FourCc::from(*b"XYZW"), b"private")]),
+                .with_unknown_chunks(&[(FourCc::from(*b"XYZW"), b"private")])
+                .expect("a private FourCC is accepted"),
             &rgb(16, 16),
             dims(16, 16),
         );
@@ -553,7 +558,8 @@ fn the_store_round_trips_byte_exactly_and_sets_no_vp8x_flag() {
         let flagged = encode_rgb(
             &encoder
                 .clone()
-                .with_unknown_chunks(&[(FourCc::from(*b"XYZW"), b"x")]),
+                .with_unknown_chunks(&[(FourCc::from(*b"XYZW"), b"x")])
+                .expect("a private FourCC is accepted"),
             &rgb(16, 16),
             dims(16, 16),
         );
@@ -618,9 +624,29 @@ fn a_store_survives_a_decode_re_encode_cycle_exactly_once() {
     let again = encode_rgb(
         &WebpEncoder::lossless()
             .with_c2pa(layout.metadata.c2pa.expect("the store was read back"))
-            .with_unknown_chunks(&carried),
+            .with_unknown_chunks(&carried)
+            .expect("carried chunks are private"),
         &rgb(8, 8),
         dims(8, 8),
     );
     assert_eq!(again, file);
+}
+
+#[test]
+fn c2pa_span_rejects_input_that_is_not_a_webp_file() {
+    // `c2pa_span` frames the file before it can locate anything, so its documented `# Errors` path
+    // is the framing check: bad input is refused rather than reported as "no store", which a caller
+    // would otherwise read as "nothing to exclude".
+    let err = gamut_webp::c2pa_span(b"not a WebP file").expect_err("not a RIFF/WebP file");
+    assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+
+    // Well-formed header, chunk size running past the end of the data.
+    let mut file = encode_rgb(&WebpEncoder::lossless(), &rgb(4, 4), dims(4, 4));
+    file[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        gamut_webp::c2pa_span(&file)
+            .expect_err("a chunk overruns the data")
+            .kind(),
+        gamut_core::ErrorKind::InvalidInput
+    );
 }
