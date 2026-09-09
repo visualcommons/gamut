@@ -58,20 +58,25 @@ impl XmpSidecar {
     ///
     /// # Errors
     ///
-    /// Returns [`XmpError::Prohibited`] naming the document element when it is not `x:xmpmeta`
-    /// (a bare `rdf:RDF` document is a packet body, not a sidecar), and otherwise the same errors
-    /// as [`XmpMeta::from_packet`]: [`XmpError::Encoding`] for non-UTF-8 input, [`XmpError::Xml`]
-    /// for malformed XML, [`XmpError::MissingRdf`] when no `rdf:RDF` is found, and the
-    /// RDF/XML-for-XMP errors for constructs XMP does not permit.
+    /// Returns [`XmpError::MissingXmpMeta`] naming the document element when it is not `x:xmpmeta`
+    /// — a bare `rdf:RDF` document is a packet body, valid XMP that [`XmpMeta::from_packet`]
+    /// accepts, but not a sidecar. Otherwise the same errors as [`XmpMeta::from_packet`]:
+    /// [`XmpError::Encoding`] for non-UTF-8 input, [`XmpError::Xml`] for malformed XML,
+    /// [`XmpError::MissingRdf`] when no `rdf:RDF` is found, and the RDF/XML-for-XMP errors for
+    /// constructs XMP does not permit.
+    ///
+    /// Note that exiv2 is more permissive here: its sidecar sniffer (`isXmpType`) accepts a file
+    /// that starts with `<?xpacket` **or** `<x:xmpmeta`, so it reads a wrapper-less packet from a
+    /// `.xmp` file that this rejects. gamut is deliberately the stricter of the two — Part 3
+    /// defines a sidecar as the packet as embedded, and §7.3.3 is what identifies XMP in a
+    /// standalone XML file — and a caller who wants exiv2's latitude uses
+    /// [`XmpMeta::from_packet`].
     pub fn read(bytes: &[u8]) -> Result<XmpMeta> {
         let packet = XmpPacket::scan(bytes)?;
         // Parse first so a malformed file reports its malformation, not a missing wrapper.
         let meta = packet.parse()?;
         if let Some(root) = document_element_unless_xmpmeta(&packet.body)? {
-            return Err(XmpError::Prohibited(format!(
-                "sidecar document element is <{root}>, not x:xmpmeta (a .xmp file is the packet \
-                 as embedded, wrapped in <x:xmpmeta xmlns:x=\"adobe:ns:meta/\">)"
-            )));
+            return Err(XmpError::MissingXmpMeta(root));
         }
         Ok(meta)
     }
@@ -103,6 +108,15 @@ const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 /// Walks past the prolog (declaration, comments, processing instructions, whitespace) to the first
 /// start tag and resolves its namespace, so the check is on the element's identity rather than on
 /// the literal `x:` prefix a writer happened to choose.
+///
+/// **Reachability.** Called from [`XmpSidecar::read`] the answer can only ever be `None` or
+/// `Some("RDF")`: `read` parses the body first, and the reader admits exactly one document element,
+/// `rdf:RDF` or `x:xmpmeta` (`reader.rs`'s `find_rdf`, over a tree `build_tree` has already
+/// rejected multiple roots in). So on that path the namespace comparison, the `Empty` arm and the
+/// end-of-input error are all unreachable, and the second lex is a bounded extra pass over bytes
+/// already parsed once. It is kept as a total function over any XML — unit-tested directly for the
+/// cases `read` cannot produce — rather than threading the root element out of `find_rdf`, which
+/// would widen the blast radius in `reader.rs` for a one-off cost.
 ///
 /// # Errors
 ///
@@ -174,11 +188,17 @@ mod tests {
     #[test]
     fn read_rejects_a_bare_rdf_document() {
         // A packet body without x:xmpmeta is valid embedded XMP but not a sidecar; the error names
-        // the element found so the caller knows which wrapper is missing.
+        // the element found so the caller knows which wrapper is missing. It is deliberately not
+        // `Prohibited`: Part 1 §7.3.3 permits the wrapper-less form, and `XmpMeta::from_packet`
+        // reads exactly these bytes.
         let err = XmpSidecar::read(RDF_ONLY.as_bytes()).unwrap_err();
         assert!(
-            matches!(&err, XmpError::Prohibited(m) if m.contains("<RDF>") && m.contains("x:xmpmeta")),
+            matches!(&err, XmpError::MissingXmpMeta(root) if root == "RDF"),
             "got {err:?}"
+        );
+        assert!(
+            XmpMeta::from_packet(RDF_ONLY.as_bytes()).is_ok(),
+            "the same bytes must stay valid as an embedded packet"
         );
     }
 
@@ -191,7 +211,7 @@ mod tests {
         );
         let err = XmpSidecar::read(file.as_bytes()).unwrap_err();
         assert!(
-            matches!(&err, XmpError::Prohibited(m) if m.contains("<RDF>")),
+            matches!(&err, XmpError::MissingXmpMeta(root) if root == "RDF"),
             "got {err:?}"
         );
     }

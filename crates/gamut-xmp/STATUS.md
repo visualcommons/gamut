@@ -47,16 +47,20 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   normalization.
 - **Sidecars require `x:xmpmeta` (issue #421).** `XmpSidecar::read` accepts everything
   `XmpMeta::from_packet` does — XML declaration, BOM, wrapper or bare — but rejects a document
-  whose element is not `x:xmpmeta` with `XmpError::Prohibited` naming the element found. Part 3
+  whose element is not `x:xmpmeta` with `XmpError::MissingXmpMeta` naming the element found. Part 3
   ("External storage of metadata", in the vendored 2020 edition's Introduction) defines a sidecar as
   the packet "as though it were embedded and then … extracted"; Part 1 §7.3.3 gives `x:xmpmeta`
   exactly one purpose, identifying XMP inside general XML text, which a standalone `.xmp` file is;
   exiv2's sidecar sniffer keys on `<?xpacket` or `<x:xmpmeta`. `XmpSidecar::write` emits the XML
   declaration Part 3 asks for, then a read-only (`end="r"`), unpadded packet wrapping the canonical
   body in `x:xmpmeta` — byte-stable per graph. No filesystem API and no enforced file name: the
-  `.xmp`-beside-the-image convention is documented for the caller. The missing-wrapper error reuses
-  `XmpError::Prohibited` (a dedicated variant is a possible later addition; `XmpError` is
-  `#[non_exhaustive]`).
+  `.xmp`-beside-the-image convention is documented for the caller. The missing wrapper has its own
+  error, `XmpError::MissingXmpMeta`, naming the element found: the wrapper-less form is *permitted*
+  by §7.3.3 and is what `XmpWriter::wrap_xmpmeta(false)` emits, so reporting it as a prohibited
+  construct would assert a prohibition the spec does not make. exiv2 is more permissive still — its
+  sniffer (`isXmpType`) accepts a `.xmp` file starting with `<?xpacket` **or** `<x:xmpmeta` — so a
+  file exiv2 reads as a sidecar and gamut rejects is expected; the caller reads those bytes with
+  `XmpMeta::from_packet`.
 
 ## Phases
 

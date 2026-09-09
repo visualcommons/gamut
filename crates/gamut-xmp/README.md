@@ -62,7 +62,9 @@ storage of metadata"). A sidecar is the packet as embedded, so `read` accepts ev
 `from_packet` does but **requires the `x:xmpmeta` document element**: Part 1 §7.3.3 makes it the
 marker that identifies XMP inside general XML text, which is what a standalone file is. (exiv2's
 sidecar sniffer accepts a file starting with `<?xpacket` *or* `<x:xmpmeta`; gamut is the stricter of
-the two, deliberately.) `write` emits the XML declaration
+the two, deliberately — a caller who wants that latitude uses `XmpMeta::from_packet`, and the
+rejection is its own `XmpError::MissingXmpMeta` rather than a claim that the wrapper-less form is
+prohibited.) `write` emits the XML declaration
 Part 3 asks for, then a read-only, unpadded packet in canonical form, so two sidecars of the same
 graph are byte-identical. The crate has no filesystem API; the naming convention — `photo.xmp`
 beside `photo.dng`, looked up in the image's directory — is documented, not enforced, and the caller
