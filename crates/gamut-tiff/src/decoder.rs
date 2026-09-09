@@ -188,10 +188,11 @@ impl TiffDecoder {
 
     /// Reads the metadata a TIFF carries, without decoding pixels.
     ///
-    /// IFD 0 supplies the XMP, IPTC-IIM and ICC payloads and the `ExifIFD` sub-IFD. Every
-    /// byte-carried payload comes back **verbatim** — this crate parses none of them — so a block
-    /// written by [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) reads back
-    /// identical.
+    /// IFD 0 supplies the XMP, IPTC-IIM and ICC payloads and the `ExifIFD` sub-IFD; the last IFD
+    /// of the main chain supplies the C2PA manifest store (C2PA 2.4 §A.3.6). Every byte-carried
+    /// payload comes back **verbatim** — this crate parses none of them — so a block written by
+    /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) reads back identical.
+    /// Use [`c2pa_exclusions`](crate::c2pa_exclusions) for *where* the store sits.
     ///
     /// ```
     /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
