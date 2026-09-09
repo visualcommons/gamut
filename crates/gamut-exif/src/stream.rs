@@ -306,7 +306,7 @@ fn read_range<S: ReadAt>(
 /// The absolute offset of the Exif sub-IFD's out-of-line `MakerNote` value in the TIFF stream, or
 /// `None` if the note is absent or inline.
 ///
-/// A transport failure here is propagated rather than folded into `None`. The offset is what
+/// A failure here is propagated rather than folded into `None`. The offset is what
 /// [`ExifWriter`](crate::ExifWriter) uses to *pin* the note in place on a rewrite, so losing it
 /// silently re-emits a vendor MakerNote unpinned — wrong bytes, no error, and nothing in the
 /// report. No later read is guaranteed to resurface the failure either: `follow` returns before
@@ -315,13 +315,11 @@ fn maker_note_offset<S: ReadAt>(
     reader: &mut IfdReader<S>,
     exif_ifd_at: u64,
 ) -> Result<Option<u64>> {
-    let raw: RawIfd = match reader.read_ifd(exif_ifd_at) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() != ErrorKind::InvalidInput => return Err(e.into()),
-        // The directory parsed a moment ago in `follow`; if the bytes will not re-read now, the
-        // pin is simply unavailable, and that is not worth failing an otherwise good parse over.
-        Err(_) => return Ok(None),
-    };
+    // Every error propagates, with no lenient arm — deliberately. This is reached only when
+    // `follow` has already read and decoded this exact directory at this exact offset, so a
+    // deterministic source cannot fail here for a reason the *bytes* explain. A malformed-input
+    // arm would therefore be unreachable, and an unreachable arm is a branch no test can falsify.
+    let raw: RawIfd = reader.read_ifd(exif_ifd_at)?;
     let Some(entry) = raw.entry(ifd_tags::MAKER_NOTE) else {
         return Ok(None);
     };
