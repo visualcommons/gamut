@@ -69,7 +69,9 @@ compression schemes land additively on this frozen surface (see Status).
   (Group 3 1-D) and Group 4 (T.6).
 - **Metadata** — `TiffEncoder::with_metadata` / `TiffDecoder::metadata` carry an Exif sub-IFD
   (`ExifIFD`, 34665, as a `gamut_ifd::Ifd`, its own `InteroperabilityIFD` resolved into a child
-  directory rather than a stale offset) plus opaque XMP (700), IPTC-IIM (33723), ICC (34675) and
+  directory rather than a stale offset; other pointer tags, whose targets the seam does not
+  return, are left alone so a broken one cannot hide the blocks) plus opaque XMP (700),
+  IPTC-IIM (33723), ICC (34675) and
   C2PA (52545) payloads — the raw blocks the workspace's metadata facade consumes. Byte payloads
   are verbatim; the Exif directory's *entries* are carried unchanged but its ordering is
   normalised (ascending tag, duplicate tags collapsed, a child's next-IFD pointer ignored). The
