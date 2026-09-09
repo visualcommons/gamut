@@ -83,7 +83,11 @@ pub use decoder::TiffDecoder;
 pub use deconstruct::{
     Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag, deconstruct,
 };
-pub use encoder::TiffEncoder;
+pub use encoder::{TiffEncodeReport, TiffEncoder};
+// The C2PA exclusion set is `gamut_ifd::c2pa`'s — §A.3.6 and §18.5.5 are stated once, for this
+// crate and `gamut-dng` alike — but it is reachable from `TiffEncodeReport` and
+// [`c2pa_exclusions`], so it is re-exported here too and needs no direct gamut-ifd dependency.
+pub use gamut_ifd::c2pa::C2paExclusions;
 // The structural IFD core lives in gamut-ifd; re-export the types a gamut-tiff user can touch —
 // the read/write spine plus every type reachable from this crate's own public items
 // (`DeconstructReport` exposes `SegmentReport`, which exposes `Segment`/`SpanKind`/`DataLabel`/
@@ -95,6 +99,6 @@ pub use gamut_ifd::{
 };
 pub use ifd::{PhotometricInterpretation, Predictor, SampleFormat};
 pub use info::TiffInfo;
-pub use metadata::TiffMetadata;
+pub use metadata::{TiffMetadata, c2pa_exclusions};
 pub use palette::Palette8;
 pub use writer::{write_image, write_image_tiled, write_multipage};

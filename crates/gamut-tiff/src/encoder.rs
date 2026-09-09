@@ -1,14 +1,17 @@
 //! The TIFF encoder.
 
+use std::borrow::Cow;
+
 use gamut_core::{
-    Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, Gray16, ImageRef, Indexed8, Result,
-    Rgb8, Rgb16, Rgba8, Rgba16,
+    Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, Gray16, ImageRef, Indexed8, Pixel,
+    Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
+use gamut_ifd::c2pa::{self, C2paExclusions};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
-use crate::metadata::TiffMetadata;
+use crate::metadata::{TiffMetadata, c2pa_exclusions};
 use crate::palette::Palette8;
 use crate::{tags, writer};
 
@@ -35,6 +38,26 @@ pub struct TiffEncoder {
     tiling: Option<(u32, u32)>,
     big_tiff: bool,
     metadata: TiffMetadata,
+    c2pa_reserve: Option<usize>,
+}
+
+/// What [`TiffEncoder::encode_with_report`] produced: the byte count, and — when the file carries
+/// a C2PA manifest store or a reservation for one — the two byte ranges an external signer
+/// excludes from its `c2pa.hash.data` hard binding (C2PA 2.4 §18.5.5).
+///
+/// `#[non_exhaustive]`: later encoder features may report more without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TiffEncodeReport {
+    /// The number of bytes appended to the output — the whole TIFF.
+    pub len: usize,
+    /// The C2PA exclusion ranges, as offsets from the first byte of this TIFF (not of the output
+    /// buffer it was appended to). `None` when no store or reservation was requested.
+    ///
+    /// `store` is the last range of the file — the store is placed after everything else
+    /// (§A.3.6), so a signer overwriting a reservation in place, or replacing the store with one
+    /// of a different size, moves no other offset.
+    pub c2pa: Option<C2paExclusions>,
 }
 
 impl Default for TiffEncoder {
@@ -46,6 +69,7 @@ impl Default for TiffEncoder {
             tiling: None,
             big_tiff: false,
             metadata: TiffMetadata::new(),
+            c2pa_reserve: None,
         }
     }
 }
@@ -107,15 +131,110 @@ impl TiffEncoder {
     }
 
     /// Returns a copy of this encoder that embeds `metadata` — an Exif sub-IFD plus opaque
-    /// XMP / IPTC-IIM / ICC blocks.
+    /// XMP / IPTC-IIM / ICC blocks, and a caller-computed C2PA manifest store (see
+    /// [`TiffMetadata::c2pa`]).
     ///
-    /// The blocks and the Exif sub-IFD go in **IFD 0**, which for
-    /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) is the first page: they describe the
-    /// document, not one of its pages.
+    /// The blocks and the Exif sub-IFD go in **IFD 0**; the C2PA store's entry goes in the last
+    /// IFD of the main chain and its bytes at the end of the file, as C2PA 2.4 §A.3.6 requires.
+    /// For a single-image encode those are the same directory; for
+    /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) they are the first and last page.
     #[must_use]
     pub fn with_metadata(mut self, metadata: TiffMetadata) -> Self {
         self.metadata = metadata;
         self
+    }
+
+    /// Returns a copy of this encoder that reserves `len` zero bytes for a C2PA manifest store an
+    /// external signer will fill in afterwards.
+    ///
+    /// The reservation is written exactly where a store goes — the `C2PA` tag (52545) of the last
+    /// main-chain IFD, its value last in the file (C2PA 2.4 §A.3.6) — and
+    /// [`encode_with_report`](Self::encode_with_report) (or [`c2pa_exclusions`] over the produced
+    /// bytes) reports its two exclusion ranges (§18.5.5). A signer hashes the file around those
+    /// ranges and overwrites the reservation in place; nothing else in the file moves. `len` must
+    /// be at least [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header), and a reservation
+    /// cannot be combined with a store supplied through [`with_metadata`](Self::with_metadata) —
+    /// either is a typed error at encode time.
+    #[must_use]
+    pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
+        self.c2pa_reserve = Some(len);
+        self
+    }
+
+    /// The C2PA manifest store to write, if any: the caller's, or a zero-filled reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if both were requested, or if the store is too short to be
+    /// a JUMBF box at all ([`c2pa::MIN_STORE_LEN`]) — caught here, before any pixel work.
+    fn c2pa_store(&self) -> Result<Option<Cow<'_, [u8]>>> {
+        let store = match (&self.metadata.c2pa, self.c2pa_reserve) {
+            (Some(_), Some(_)) => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: supply either a C2PA manifest store or a reservation, not both",
+                ));
+            }
+            (Some(store), None) => Cow::Borrowed(store.as_slice()),
+            (None, Some(len)) => Cow::Owned(vec![0; len]),
+            (None, None) => return Ok(None),
+        };
+        if store.len() < c2pa::MIN_STORE_LEN {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: a C2PA manifest store is at least a JUMBF box header (8 bytes)",
+            ));
+        }
+        Ok(Some(store))
+    }
+
+    /// Places `store` (if any) at the end of the finished file and appends the result to `out`,
+    /// returning the number of bytes written.
+    ///
+    /// The store lands after everything else, and the reserved entry is re-pointed at it, by
+    /// [`gamut_ifd::c2pa::append_store`] — so a store of a different size moves no other offset.
+    fn emit(
+        &self,
+        mut bytes: Vec<u8>,
+        store: Option<Cow<'_, [u8]>>,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        if let Some(store) = store {
+            c2pa::append_store(&mut bytes, &store)?;
+        }
+        out.extend_from_slice(&bytes);
+        Ok(bytes.len())
+    }
+
+    /// Encodes `image` as [`encode_image`](EncodeImage::encode_image) does, also reporting where
+    /// the C2PA manifest store (or its reservation,
+    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved)) landed.
+    ///
+    /// The report's ranges are offsets from the first byte of the TIFF, so a caller appending to
+    /// a non-empty `out` rebases them by `out.len()` before the call. They are read back out of
+    /// the bytes just written by [`c2pa_exclusions`], the same locator a verifier uses — which is
+    /// also how the entry points this method cannot reach (`encode_palette8`,
+    /// `encode_pages_rgb8`) report their store.
+    ///
+    /// # Errors
+    ///
+    /// As [`encode_image`](EncodeImage::encode_image); additionally [`Error::InvalidInput`] if
+    /// both a store and a reservation were configured, or the store is shorter than
+    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`].
+    pub fn encode_with_report<P: Pixel>(
+        &self,
+        image: ImageRef<'_, P>,
+        out: &mut Vec<u8>,
+    ) -> Result<TiffEncodeReport>
+    where
+        Self: EncodeImage<P>,
+    {
+        let base = out.len();
+        let len = self.encode_image(image, out)?;
+        Ok(TiffEncodeReport {
+            len,
+            c2pa: c2pa_exclusions(&out[base..])?,
+        })
     }
 
     /// The container variant this encoder writes (BigTIFF when [`Self::with_big_tiff`] is set).
@@ -230,14 +349,18 @@ impl TiffEncoder {
         extra_fields: &[(u16, Value)],
         out: &mut Vec<u8>,
     ) -> Result<usize> {
+        // Validated before any pixel work, so a contradictory C2PA configuration fails fast.
+        let store = self.c2pa_store()?;
         if let Some((tw, tl)) = self.tiling {
-            return self.encode_tiled(packed, dims, layout, extra_fields, tw, tl, out);
+            return self.encode_tiled(packed, dims, layout, extra_fields, tw, tl, store, out);
         }
         let (mut ifd, strips) = self.build_strip_image(packed, dims, layout, extra_fields)?;
         self.metadata.apply(&mut ifd);
+        if store.is_some() {
+            c2pa::reserve_entry(&mut ifd);
+        }
         let bytes = writer::write_image(self.order, self.variant(), &ifd, &strips)?;
-        out.extend_from_slice(&bytes);
-        Ok(bytes.len())
+        self.emit(bytes, store, out)
     }
 
     /// Builds one strip image's directory (without `StripOffsets`/`StripByteCounts`) and its
@@ -338,6 +461,7 @@ impl TiffEncoder {
                 "TIFF: no pages to encode",
             ));
         }
+        let store = self.c2pa_store()?;
         let total = pages.len() as u16;
         let mut images: Vec<(Ifd, Vec<Vec<u8>>)> = Vec::with_capacity(pages.len());
         for (i, page) in pages.iter().enumerate() {
@@ -358,13 +482,17 @@ impl TiffEncoder {
                 &extra,
             )?);
         }
-        // The blocks describe the document, not one of its pages, so they go in IFD 0 alone.
+        // The blocks describe the document, so they go in IFD 0; the manifest store's entry must
+        // sit in the *last* IFD of the main chain (C2PA 2.4 §A.3.6), which for a multi-page TIFF
+        // is the last page rather than the first.
         if let Some((ifd0, _)) = images.first_mut() {
             self.metadata.apply(ifd0);
         }
+        if let (Some((last, _)), true) = (images.last_mut(), store.is_some()) {
+            c2pa::reserve_entry(last);
+        }
         let bytes = writer::write_multipage(self.order, self.variant(), &images)?;
-        out.extend_from_slice(&bytes);
-        Ok(bytes.len())
+        self.emit(bytes, store, out)
     }
 
     /// Applies the selected compression to one strip's already-packed bytes.
@@ -421,7 +549,7 @@ impl TiffEncoder {
 
     /// Lays out an 8-bit image as a grid of `tile_w × tile_h` tiles (edge tiles zero-padded).
     #[allow(clippy::too_many_arguments)]
-    fn encode_tiled(
+    fn encode_tiled<'a>(
         &self,
         packed: &[u8],
         dims: Dimensions,
@@ -429,6 +557,7 @@ impl TiffEncoder {
         extra_fields: &[(u16, Value)],
         tile_w: u32,
         tile_h: u32,
+        store: Option<Cow<'a, [u8]>>,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         if !matches!(layout.bits_per_sample, 8 | 16) {
@@ -516,10 +645,12 @@ impl TiffEncoder {
             ifd.set(*tag, value.clone());
         }
         self.metadata.apply(&mut ifd);
+        if store.is_some() {
+            c2pa::reserve_entry(&mut ifd);
+        }
 
         let bytes = writer::write_image_tiled(self.order, self.variant(), &ifd, &tiles)?;
-        out.extend_from_slice(&bytes);
-        Ok(bytes.len())
+        self.emit(bytes, store, out)
     }
 }
 
@@ -677,6 +808,68 @@ mod tests {
         assert!(matches!(dim_value(1), Value::Short(_)));
         assert!(matches!(dim_value(u32::from(u16::MAX)), Value::Short(_)));
         assert!(matches!(dim_value(u32::from(u16::MAX) + 1), Value::Long(_)));
+    }
+
+    #[test]
+    fn a_store_and_a_reservation_cannot_both_be_configured() {
+        // A reservation exists to be overwritten by a signer who has not computed a store yet;
+        // supplying both says two different things about the same bytes, so it is refused rather
+        // than silently resolved one way.
+        let err = TiffEncoder::new()
+            .with_metadata(TiffMetadata::new().with_c2pa(vec![0; 16]))
+            .with_c2pa_reserved(16)
+            .c2pa_store()
+            .expect_err("contradictory configuration");
+        assert!(err.to_string().contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn a_store_shorter_than_a_jumbf_box_header_is_refused() {
+        // A manifest store is a JUMBF superbox, so it is at least an 8-byte LBox + TBox; seven
+        // bytes could never be filled with a valid one. The boundary is the claim, so it is
+        // asserted at the two lengths that straddle it, for a supplied store and a reservation
+        // alike.
+        for encoder in [
+            TiffEncoder::new().with_metadata(TiffMetadata::new().with_c2pa(vec![0; 7])),
+            TiffEncoder::new().with_c2pa_reserved(7),
+        ] {
+            let err = encoder.c2pa_store().expect_err("too short");
+            assert!(err.to_string().contains("JUMBF box header"), "{err}");
+        }
+        assert!(
+            TiffEncoder::new()
+                .with_c2pa_reserved(8)
+                .c2pa_store()
+                .expect("8 bytes is a box header")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_store_is_the_callers_bytes_or_a_zero_filled_reservation() {
+        let supplied = b"\0\0\0\x14jumbc2pa".to_vec();
+        assert_eq!(
+            TiffEncoder::new()
+                .with_metadata(TiffMetadata::new().with_c2pa(supplied.clone()))
+                .c2pa_store()
+                .expect("a store")
+                .as_deref(),
+            Some(&supplied[..])
+        );
+        assert_eq!(
+            TiffEncoder::new()
+                .with_c2pa_reserved(12)
+                .c2pa_store()
+                .expect("a reservation")
+                .as_deref(),
+            Some(&[0u8; 12][..])
+        );
+        assert!(
+            TiffEncoder::new()
+                .c2pa_store()
+                .expect("no C2PA configured")
+                .is_none()
+        );
     }
 
     #[test]

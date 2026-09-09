@@ -1,4 +1,4 @@
-//! Optional metadata embedded in a TIFF: an Exif sub-IFD plus XMP / IPTC / ICC blocks.
+//! Optional metadata embedded in a TIFF: an Exif sub-IFD plus XMP / IPTC / ICC / C2PA blocks.
 //!
 //! TIFF stores metadata the way it stores everything else — as IFD entries — so the seam is thin
 //! by construction: [`TiffMetadata`] is a plain struct of optional payloads that
@@ -6,25 +6,36 @@
 //! [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) reads back.
 //!
 //! Everything except EXIF is a **single opaque payload** in the file — XMP (700), IPTC-IIM
-//! (33723) and ICC (34675) — so this crate carries the bytes verbatim in both directions and
-//! parses none of them. That is deliberate: they are the raw blocks the workspace's metadata
-//! facade consumes (the same shape `gamut-png` and `gamut-webp` hand over), and keeping them
-//! opaque here is what lets a caller choose its own conflict policy instead of inheriting one
-//! from the container.
+//! (33723), ICC (34675) and the C2PA manifest store (52545) — so this crate carries the bytes
+//! verbatim in both directions and parses none of them. That is deliberate: they are the raw
+//! blocks the workspace's metadata facade consumes (the same shape `gamut-png` and `gamut-webp`
+//! hand over), and keeping them opaque here is what lets a caller choose its own conflict policy
+//! instead of inheriting one from the container.
 //!
 //! EXIF is the exception, and only because TIFF makes it one: an `ExifIFD` (34665) *is* an IFD,
 //! which this crate has already parsed by the time a caller sees it. Handing it back as
 //! [`gamut_ifd::Ifd`] rather than as bytes saves every caller from re-parsing a directory the
 //! decoder already walked. Its fields are neither validated nor completed — what the caller
 //! supplies is what the file gets, and what the file holds is what the caller gets.
+//!
+//! # The C2PA manifest store
+//!
+//! One carrier has a placement rule of its own: C2PA 2.4 §A.3.6 puts the manifest store's entry
+//! in the **last IFD of the main chain** and its bytes at the **end of the file**, and §18.5.5
+//! makes an external signer exclude two disjoint ranges from its hard binding. All of that is
+//! [`gamut_ifd::c2pa`]'s — the one place the workspace states §A.3.6, shared with `gamut-dng`
+//! rather than re-derived here. This module only wires it to the encoder
+//! ([`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved)) and exposes the
+//! read-side locator as [`c2pa_exclusions`].
 
 use gamut_core::Result;
+use gamut_ifd::c2pa::{self, C2paExclusions};
 use gamut_ifd::{Ifd, Value, read_tree};
 
 use crate::tags;
 
 /// Metadata to embed in a TIFF, or read back from one: an Exif sub-IFD and/or opaque
-/// XMP / IPTC-IIM / ICC payloads.
+/// XMP / IPTC-IIM / ICC / C2PA payloads.
 ///
 /// `#[non_exhaustive]`, so a later carrier is an additive change: build one from
 /// [`TiffMetadata::new`] and the `with_*` builders, or assign the public fields of a value you
@@ -60,6 +71,17 @@ pub struct TiffMetadata {
     pub iptc: Option<Vec<u8>>,
     /// An ICC profile, stored in the `ICCProfile` tag (34675) as `UNDEFINED`, verbatim.
     pub icc: Option<Vec<u8>>,
+    /// A C2PA manifest store, stored in the `C2PA` tag
+    /// ([`gamut_ifd::c2pa::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`), verbatim.
+    ///
+    /// **Opaque, and bound to one exact file.** A manifest store is signed over the bytes
+    /// *around* it (C2PA 2.4 §18.5), so the only store valid here is one an external signer
+    /// computed over this encoder's own output — through
+    /// [`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved) and the
+    /// exclusion ranges [`c2pa_exclusions`] reports. A store copied out of another file is
+    /// invalid by construction. The bytes are written exactly as given: the TIFF header's
+    /// `ByteOrder` does not govern them (§A.3.6).
+    pub c2pa: Option<Vec<u8>>,
 }
 
 impl TiffMetadata {
@@ -97,13 +119,25 @@ impl TiffMetadata {
         self
     }
 
+    /// Returns a copy carrying `store` as the file's C2PA manifest store — see
+    /// [`c2pa`](Self::c2pa) for what makes a store valid.
+    #[must_use]
+    pub fn with_c2pa(mut self, store: Vec<u8>) -> Self {
+        self.c2pa = Some(store);
+        self
+    }
+
     /// Whether there is nothing to embed: no payload set, and no Exif sub-IFD with fields in it.
     ///
     /// An `exif` directory with no entries counts as empty — writing it would add an `ExifIFD`
     /// pointer to a directory with nothing in it.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.exif_ifd().is_none() && self.xmp.is_none() && self.iptc.is_none() && self.icc.is_none()
+        self.exif_ifd().is_none()
+            && self.xmp.is_none()
+            && self.iptc.is_none()
+            && self.icc.is_none()
+            && self.c2pa.is_none()
     }
 
     /// The Exif sub-IFD to write, or `None` when there is no Exif content worth a directory.
@@ -112,6 +146,10 @@ impl TiffMetadata {
     }
 
     /// Writes the XMP / IPTC / ICC blocks and the Exif sub-IFD into `ifd0`.
+    ///
+    /// The C2PA store is deliberately **not** written here: its bytes must land at the end of
+    /// the file (C2PA 2.4 §A.3.6), after the image data, which only the encoder can arrange once
+    /// the rest of the file exists ([`gamut_ifd::c2pa::append_store`]).
     pub(crate) fn apply(&self, ifd0: &mut Ifd) {
         if let Some(xmp) = &self.xmp {
             ifd0.set(tags::XMP, Value::Byte(xmp.clone()));
@@ -133,12 +171,23 @@ fn bytes_value(value: Option<&Value>) -> Option<Vec<u8>> {
     value.and_then(Value::as_bytes).map(<[u8]>::to_vec)
 }
 
-/// Reads the metadata a TIFF carries: IFD 0's blocks and its Exif sub-IFD.
+/// Reads the metadata a TIFF carries: IFD 0's blocks and Exif sub-IFD, plus the C2PA manifest
+/// store from the last IFD of the main chain (C2PA 2.4 §A.3.6).
+///
+/// The store is taken only as the `UNDEFINED` bytes §A.3.6 mandates — a tag-52545 entry of any
+/// other type is not a manifest store and is reported as absence, the same test
+/// [`gamut_ifd::c2pa::locate`] applies.
 pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
     let file = read_tree(data, &[tags::EXIF_IFD])?;
-    // A file with no IFD at all carries no metadata.
-    let Some(ifd0) = file.ifds.first() else {
+    // §A.3.6: one store for the whole asset, in the last IFD of the main chain. `ifds` is that
+    // chain, so its last element is where the entry belongs — and a single-page file makes the
+    // two the same directory. A file with no IFD at all carries no metadata.
+    let (Some(ifd0), Some(store_ifd)) = (file.ifds.first(), file.ifds.last()) else {
         return Ok(TiffMetadata::new());
+    };
+    let c2pa = match store_ifd.get(tags::C2PA_MANIFEST_STORE) {
+        Some(Value::Undefined(store)) => Some(store.clone()),
+        _ => None,
     };
     Ok(TiffMetadata {
         exif: ifd0
@@ -150,7 +199,29 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
         xmp: bytes_value(ifd0.get(tags::XMP)),
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
         icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
+        c2pa,
     })
+}
+
+/// The byte ranges an external signer excludes from a `c2pa.hash.data` hard binding over `file`
+/// (C2PA 2.4 §18.5.5): the manifest store's own bytes, and the `count` field of its IFD entry.
+///
+/// Returns `Ok(None)` when `file` carries no manifest store — including when a tag-52545 entry
+/// sits somewhere other than the last IFD of the main chain, which §A.3.6 does not allow. The
+/// two ranges are always disjoint, and both are offsets from the first byte of `file`.
+///
+/// This is the read side of [`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved):
+/// it reports where a store *is*, whether this crate wrote the file or not, so a caller that
+/// encoded through a path without a report (a palette or multi-page image) recovers the ranges
+/// from the bytes.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the container is
+/// unreadable (bad header, looping or runaway IFD chain, no IFD) or the store's declared extent
+/// lies outside `file`.
+pub fn c2pa_exclusions(file: &[u8]) -> Result<Option<C2paExclusions>> {
+    c2pa::locate(file)
 }
 
 #[cfg(test)]
@@ -205,6 +276,7 @@ mod tests {
             TiffMetadata::new().with_xmp(vec![1]),
             TiffMetadata::new().with_iptc(vec![1]),
             TiffMetadata::new().with_icc(vec![1]),
+            TiffMetadata::new().with_c2pa(vec![1]),
         ];
         for (i, meta) in singles.iter().enumerate() {
             assert!(!meta.is_empty(), "carrier {i} alone must be non-empty");
@@ -217,11 +289,13 @@ mod tests {
             .with_exif(exif_ifd())
             .with_xmp(b"<x:xmpmeta/>".to_vec())
             .with_iptc(vec![0x1c, 0x02, 0x05])
-            .with_icc(vec![7; 4]);
+            .with_icc(vec![7; 4])
+            .with_c2pa(b"\0\0\0\x14jumbc2pa".to_vec());
         assert_eq!(meta.exif, Some(exif_ifd()));
         assert_eq!(meta.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
         assert_eq!(meta.iptc.as_deref(), Some(&[0x1c, 0x02, 0x05][..]));
         assert_eq!(meta.icc.as_deref(), Some(&[7, 7, 7, 7][..]));
+        assert_eq!(meta.c2pa.as_deref(), Some(&b"\0\0\0\x14jumbc2pa"[..]));
     }
 
     #[test]
@@ -253,6 +327,16 @@ mod tests {
     }
 
     #[test]
+    fn apply_never_writes_the_c2pa_store() {
+        // The store is the encoder's to place at the end of the file (§A.3.6), so `apply` must
+        // leave the directory without it even when one is configured.
+        let mut ifd = Ifd::new();
+        TiffMetadata::new().with_c2pa(vec![0; 16]).apply(&mut ifd);
+        assert!(ifd.get(tags::C2PA_MANIFEST_STORE).is_none());
+        assert!(ifd.fields().is_empty());
+    }
+
+    #[test]
     fn read_metadata_returns_each_payload_verbatim() {
         let mut ifd0 = Ifd::new();
         TiffMetadata::new()
@@ -261,11 +345,23 @@ mod tests {
             .with_icc(vec![7; 4])
             .with_exif(exif_ifd())
             .apply(&mut ifd0);
+        ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(vec![0x10; 12]));
         let read = read_metadata(&file_with(ifd0)).expect("read");
         assert_eq!(read.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
         assert_eq!(read.iptc.as_deref(), Some(&[0x1c, 0x02, 0x05][..]));
         assert_eq!(read.icc.as_deref(), Some(&[7, 7, 7, 7][..]));
         assert_eq!(read.exif, Some(exif_ifd()));
+        assert_eq!(read.c2pa.as_deref(), Some(&[0x10; 12][..]));
+    }
+
+    #[test]
+    fn a_c2pa_tag_of_the_wrong_type_is_not_a_store() {
+        // §A.3.6 fixes the type at 7 (UNDEFINED). A BYTE entry under the same tag is some other
+        // writer's field, and reporting it as a manifest store would be a lie.
+        let mut ifd0 = Ifd::new();
+        ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Byte(vec![0x10; 12]));
+        let read = read_metadata(&file_with(ifd0)).expect("read");
+        assert_eq!(read.c2pa, None);
     }
 
     #[test]
@@ -275,5 +371,27 @@ mod tests {
         let read = read_metadata(&file_with(ifd0)).expect("read");
         assert!(read.is_empty());
         assert_eq!(read, TiffMetadata::new());
+    }
+
+    #[test]
+    fn read_metadata_takes_the_store_from_the_last_ifd_of_the_chain() {
+        // §A.3.6 puts the one store in the last main-chain IFD; a tag-52545 entry in an earlier
+        // page is not it. Distinct payloads pin which directory was consulted.
+        let mut first = Ifd::new();
+        first.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(vec![0xAA; 12]));
+        first.set(tags::XMP, Value::Byte(b"first".to_vec()));
+        let mut last = Ifd::new();
+        last.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(vec![0xBB; 12]));
+        last.set(tags::XMP, Value::Byte(b"last".to_vec()));
+        let bytes = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![first, last],
+        })
+        .expect("write");
+        let read = read_metadata(&bytes).expect("read");
+        assert_eq!(read.c2pa.as_deref(), Some(&[0xBB; 12][..]));
+        // The other blocks stay IFD 0's, so the two directories are not confused for each other.
+        assert_eq!(read.xmp.as_deref(), Some(&b"first"[..]));
     }
 }
