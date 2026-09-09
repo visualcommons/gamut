@@ -82,6 +82,25 @@ impl TagCount {
     }
 }
 
+/// Spells the requirement the way CIPA DC-008's `Count` column does: `20`, `Any`, `2 or 3 or 4`.
+impl core::fmt::Display for TagCount {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TagCount::Any => f.write_str("Any"),
+            TagCount::Exact(n) => write!(f, "{n}"),
+            TagCount::OneOf(ns) => {
+                for (i, n) in ns.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(" or ")?;
+                    }
+                    write!(f, "{n}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Generates the [`ExifTag`] enum and its accessors from one table of
 /// `Variant => (IfdKind, id, "CanonicalName", [FieldType, …], TagCount)` rows, keeping them in
 /// lock-step.
@@ -427,7 +446,11 @@ mod tests {
                 0xA43A,
                 "RAWDevelopingSoftware",
             ),
-            (ExifTag::ImageEditingSoftware, 0xA43B, "ImageEditingSoftware"),
+            (
+                ExifTag::ImageEditingSoftware,
+                0xA43B,
+                "ImageEditingSoftware",
+            ),
             (
                 ExifTag::MetadataEditingSoftware,
                 0xA43C,
@@ -521,6 +544,16 @@ mod tests {
         assert!(!one_of.allows(5));
         // An empty set admits nothing, so `allows` cannot be short-circuiting to true.
         assert!(!TagCount::OneOf(&[]).allows(0));
+    }
+
+    #[test]
+    fn count_displays_as_the_spec_writes_it() {
+        // The `Count` column's three spellings, which the write-side error message quotes.
+        assert_eq!(TagCount::Exact(20).to_string(), "20");
+        assert_eq!(TagCount::Any.to_string(), "Any");
+        assert_eq!(TagCount::OneOf(&[2, 3, 4]).to_string(), "2 or 3 or 4");
+        assert_eq!(TagCount::OneOf(&[2]).to_string(), "2");
+        assert_eq!(TagCount::OneOf(&[]).to_string(), "");
     }
 
     #[test]

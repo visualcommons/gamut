@@ -6,16 +6,157 @@
 //! attach the Exif/GPS/Interop sub-IFDs under their pointer tags and chain the thumbnail as the 1st
 //! IFD — so the round-trip `parse → write → parse` reproduces the directories with the source byte
 //! order preserved.
+//!
+//! This module also holds the crate's one **conformance check**, [`set_tag_checked`]: the write
+//! path is the only place gamut is the author of the bytes, so it is the only place a spec
+//! violation is gamut's to refuse. Reading stays lenient — real files break the spec routinely and
+//! the crate's job there is to surface what is present, not to judge it.
 
 use gamut_ifd::{
-    ByteOrder, Ifd, TiffFile, Value, Variant, WriteOptions, align_word, tags as ifd_tags, write,
-    write_with,
+    ByteOrder, FieldType, Ifd, TiffFile, Value, Variant, WriteOptions, align_word,
+    tags as ifd_tags, write, write_with,
 };
 
 use crate::error::Result;
 use crate::exif::{EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER};
-use crate::tag::ExifTag;
+use crate::tag::{ExifTag, TagCount};
 use crate::thumbnail::Thumbnail;
+
+/// Why [`set_tag_checked`] refused a value.
+///
+/// Distinct from [`ExifError`](crate::ExifError), which reports what is wrong with *data being
+/// read*: this reports what is wrong with a value a caller asked gamut to write. Marked
+/// `#[non_exhaustive]` so further constraints can be checked without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum TagConstraintError {
+    /// The value's field type is not one CIPA DC-008 permits for the tag.
+    #[error("{tag}: CIPA DC-008 requires {expected}, not {actual}")]
+    FieldType {
+        /// The tag's canonical name.
+        tag: &'static str,
+        /// The permitted type(s), as the spec writes them (e.g. `"SHORT or LONG"`).
+        expected: String,
+        /// The type the offered value would have been written as.
+        actual: String,
+    },
+    /// The value has a component count CIPA DC-008 does not allow for the tag.
+    #[error("{tag}: CIPA DC-008 requires a count of {expected}, not {actual}")]
+    Count {
+        /// The tag's canonical name.
+        tag: &'static str,
+        /// The permitted count(s), as the spec's `Count` column writes them.
+        expected: TagCount,
+        /// The component count of the offered value.
+        actual: u64,
+    },
+}
+
+/// The spec's own spelling of an on-disk field-type code, so the error message can be checked
+/// against CIPA DC-008 without a lookup table.
+///
+/// Takes the code rather than a [`FieldType`] deliberately: `FieldType` grows three variants when
+/// another workspace crate turns on `gamut-ifd`'s `bigtiff` feature, which Cargo unifies into this
+/// build, so an exhaustive match over the *variants* would compile in one configuration and not
+/// the other. A code is also what a [`Value::Unknown`] has to offer.
+fn spec_type_name(code: u16) -> String {
+    match code {
+        1 => "BYTE".to_owned(),
+        2 => "ASCII".to_owned(),
+        3 => "SHORT".to_owned(),
+        4 => "LONG".to_owned(),
+        5 => "RATIONAL".to_owned(),
+        6 => "SBYTE".to_owned(),
+        7 => "UNDEFINED".to_owned(),
+        8 => "SSHORT".to_owned(),
+        9 => "SLONG".to_owned(),
+        10 => "SRATIONAL".to_owned(),
+        11 => "FLOAT".to_owned(),
+        12 => "DOUBLE".to_owned(),
+        13 => "IFD".to_owned(),
+        129 => "UTF-8".to_owned(),
+        other => format!("type code {other}"),
+    }
+}
+
+/// Joins the permitted types the way CIPA DC-008 writes them: `"SHORT or LONG"`.
+fn spec_type_list(types: &[FieldType]) -> String {
+    types
+        .iter()
+        .map(|t| spec_type_name(t.code()))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+/// Checks `value` against the field type and component count CIPA DC-008 mandates for `tag`.
+///
+/// This is the **write-side** conformance check, deliberately absent from the read path: a parsed
+/// file is reported as it is, however non-conformant. A tag CIPA DC-008 does not itself define
+/// (empty [`ExifTag::field_types`]) constrains nothing and always passes — see the
+/// [tag module docs](crate::tag).
+///
+/// # Errors
+///
+/// Returns [`TagConstraintError::FieldType`] if the value would be written with a type the spec
+/// does not list for the tag, or [`TagConstraintError::Count`] if its component count is not one
+/// the spec allows. For `ASCII` and `UTF8` the component count is the byte count *including* the
+/// terminating NUL, matching [`gamut_ifd::Value::count`].
+pub fn check_tag(tag: ExifTag, value: &Value) -> core::result::Result<(), TagConstraintError> {
+    let types = tag.field_types();
+    if !types.is_empty() && !types.iter().any(|&t| Some(t) == value.field_type()) {
+        return Err(TagConstraintError::FieldType {
+            tag: tag.name(),
+            expected: spec_type_list(types),
+            actual: spec_type_name(value.type_code()),
+        });
+    }
+
+    let count = tag.component_count();
+    if !count.allows(value.count()) {
+        return Err(TagConstraintError::Count {
+            tag: tag.name(),
+            expected: count,
+            actual: value.count(),
+        });
+    }
+    Ok(())
+}
+
+/// Sets `tag` on `exif` only if `value` conforms to CIPA DC-008's field type and component count
+/// for that tag.
+///
+/// The conformant alternative to [`Exif::set_tag`](crate::Exif::set_tag), which writes whatever it
+/// is given — deliberately, since a caller reproducing a non-conformant source file must be able
+/// to. Reach for this one when gamut is authoring the metadata.
+///
+/// ```
+/// use gamut_exif::{ByteOrder, Exif, ExifTag, Value, set_tag_checked};
+///
+/// let mut exif = Exif::new(ByteOrder::LittleEndian);
+/// // FNumber is RATIONAL with one component.
+/// assert!(set_tag_checked(&mut exif, ExifTag::FNumber, Value::Rational(vec![(28, 10)])).is_ok());
+///
+/// let wrong = set_tag_checked(&mut exif, ExifTag::FNumber, Value::Short(vec![28]));
+/// assert_eq!(
+///     wrong.unwrap_err().to_string(),
+///     "FNumber: CIPA DC-008 requires RATIONAL, not SHORT",
+/// );
+/// // The rejected write left the conformant value in place.
+/// assert_eq!(exif.get_tag(ExifTag::FNumber), Some(&Value::Rational(vec![(28, 10)])));
+/// ```
+///
+/// # Errors
+///
+/// Returns the [`TagConstraintError`] from [`check_tag`]; `exif` is then left untouched.
+pub fn set_tag_checked(
+    exif: &mut Exif,
+    tag: ExifTag,
+    value: Value,
+) -> core::result::Result<(), TagConstraintError> {
+    check_tag(tag, &value)?;
+    exif.set_tag(tag, value);
+    Ok(())
+}
 
 /// Serialises an [`Exif`] back to an EXIF blob, with options for the marker and byte order.
 ///
@@ -385,6 +526,170 @@ mod tests {
             reparsed.maker_note().expect("note").bytes,
             blob,
             "bytes exact despite relocation"
+        );
+    }
+
+    #[test]
+    fn spec_type_name_spells_every_exif_field_type() {
+        // The names quoted in the write-side error must be CIPA DC-008's own, so a reader can
+        // look the constraint up. Every type an EXIF value can have, plus the fallback.
+        for (code, name) in [
+            (1, "BYTE"),
+            (2, "ASCII"),
+            (3, "SHORT"),
+            (4, "LONG"),
+            (5, "RATIONAL"),
+            (6, "SBYTE"),
+            (7, "UNDEFINED"),
+            (8, "SSHORT"),
+            (9, "SLONG"),
+            (10, "SRATIONAL"),
+            (11, "FLOAT"),
+            (12, "DOUBLE"),
+            (13, "IFD"),
+            (129, "UTF-8"),
+        ] {
+            assert_eq!(spec_type_name(code), name);
+        }
+        // A code no TIFF revision this crate speaks defines still names itself.
+        assert_eq!(spec_type_name(200), "type code 200");
+        assert_eq!(spec_type_name(16), "type code 16");
+    }
+
+    #[test]
+    fn spec_type_list_joins_alternatives_the_way_the_spec_does() {
+        assert_eq!(spec_type_list(&[FieldType::Rational]), "RATIONAL");
+        assert_eq!(
+            spec_type_list(&[FieldType::Short, FieldType::Long]),
+            "SHORT or LONG"
+        );
+        assert_eq!(
+            spec_type_list(&[FieldType::Ascii, FieldType::Utf8]),
+            "ASCII or UTF-8"
+        );
+        assert_eq!(spec_type_list(&[]), "");
+    }
+
+    #[test]
+    fn check_tag_accepts_every_type_the_spec_lists() {
+        // "SHORT or LONG" must accept both, not just the first.
+        assert!(check_tag(ExifTag::ImageWidth, &Value::Short(vec![640])).is_ok());
+        assert!(check_tag(ExifTag::ImageWidth, &Value::Long(vec![640])).is_ok());
+        // "ASCII or UTF-8" likewise, so Exif 3.0 text is not refused.
+        assert!(check_tag(ExifTag::LensModel, &Value::Ascii("XF16mm".into())).is_ok());
+        assert!(check_tag(ExifTag::LensModel, &Value::Utf8("XF16mm ƒ1.4".into())).is_ok());
+    }
+
+    #[test]
+    fn check_tag_rejects_a_type_the_spec_does_not_list() {
+        let err = check_tag(ExifTag::FNumber, &Value::Short(vec![28])).expect_err("wrong type");
+        assert_eq!(
+            err.to_string(),
+            "FNumber: CIPA DC-008 requires RATIONAL, not SHORT"
+        );
+        // An alternation names both permitted types.
+        let err = check_tag(ExifTag::ImageWidth, &Value::Ascii("640".into()))
+            .expect_err("ASCII is not a dimension");
+        assert_eq!(
+            err.to_string(),
+            "ImageWidth: CIPA DC-008 requires SHORT or LONG, not ASCII"
+        );
+    }
+
+    #[test]
+    fn check_tag_rejects_a_count_the_spec_does_not_allow() {
+        // GPSLatitude is three RATIONALs: degrees, minutes, seconds.
+        let err = check_tag(
+            ExifTag::GpsLatitude,
+            &Value::Rational(vec![(48, 1), (51, 1)]),
+        )
+        .expect_err("two components is not a coordinate");
+        assert_eq!(
+            err.to_string(),
+            "GPSLatitude: CIPA DC-008 requires a count of 3, not 2"
+        );
+        // The alternating count names each alternative.
+        let err = check_tag(ExifTag::SubjectArea, &Value::Short(vec![1, 2, 3, 4, 5]))
+            .expect_err("five components is not a subject area");
+        assert_eq!(
+            err.to_string(),
+            "SubjectArea: CIPA DC-008 requires a count of 2 or 3 or 4, not 5"
+        );
+        for n in 2..=4 {
+            assert!(check_tag(ExifTag::SubjectArea, &Value::Short(vec![0; n])).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_string_count_includes_the_terminating_nul() {
+        // DateTime's count of 20 is 19 characters plus the NUL, so the 19-character form passes
+        // and a 20-character one does not.
+        assert!(
+            check_tag(
+                ExifTag::DateTime,
+                &Value::Ascii("2024:01:01 12:00:00".into())
+            )
+            .is_ok()
+        );
+        let err = check_tag(
+            ExifTag::DateTime,
+            &Value::Ascii("2024:01:01 12:00:000".into()),
+        )
+        .expect_err("one character too many");
+        assert_eq!(
+            err.to_string(),
+            "DateTime: CIPA DC-008 requires a count of 20, not 21"
+        );
+    }
+
+    #[test]
+    fn check_tag_constrains_nothing_the_spec_does_not_define() {
+        // ApplicationNotes (XMP) and the DCF-era Interoperability tags have no DC-008 row, so
+        // the check must pass anything rather than invent a constraint.
+        assert!(check_tag(ExifTag::Xmp, &Value::Byte(vec![1, 2, 3])).is_ok());
+        assert!(check_tag(ExifTag::Xmp, &Value::Ascii("<x:xmpmeta/>".into())).is_ok());
+        assert!(check_tag(ExifTag::RelatedImageWidth, &Value::Long(vec![1])).is_ok());
+    }
+
+    #[test]
+    fn set_tag_checked_writes_only_a_conforming_value() {
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        set_tag_checked(&mut exif, ExifTag::FNumber, Value::Rational(vec![(28, 10)]))
+            .expect("conformant");
+        assert_eq!(
+            exif.get_tag(ExifTag::FNumber),
+            Some(&Value::Rational(vec![(28, 10)]))
+        );
+
+        // A rejected write must not disturb what is already there.
+        let err = set_tag_checked(&mut exif, ExifTag::FNumber, Value::Short(vec![56]))
+            .expect_err("wrong type");
+        assert_eq!(
+            err.to_string(),
+            "FNumber: CIPA DC-008 requires RATIONAL, not SHORT"
+        );
+        assert_eq!(
+            exif.get_tag(ExifTag::FNumber),
+            Some(&Value::Rational(vec![(28, 10)])),
+            "the refused value was not written"
+        );
+    }
+
+    #[test]
+    fn the_unchecked_setter_stays_lenient() {
+        // Exif::set_tag is the deliberate escape hatch for reproducing a non-conformant source
+        // file; adding the checked setter must not have changed it.
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set_tag(ExifTag::FNumber, Value::Short(vec![28]));
+        assert_eq!(
+            exif.get_tag(ExifTag::FNumber),
+            Some(&Value::Short(vec![28]))
+        );
+        // And such a model still serialises and re-parses.
+        let parsed = Exif::parse(&exif.to_bytes().expect("write")).expect("parse");
+        assert_eq!(
+            parsed.get_tag(ExifTag::FNumber),
+            Some(&Value::Short(vec![28]))
         );
     }
 

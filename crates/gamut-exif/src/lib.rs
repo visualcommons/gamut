@@ -63,4 +63,4 @@ pub use report::{DropReason, Dropped, DroppedRegion, ReadReport};
 pub use tag::{ExifTag, IfdKind, TagCount};
 pub use thumbnail::Thumbnail;
 pub use value::{Rational, SRational, as_text};
-pub use writer::ExifWriter;
+pub use writer::{ExifWriter, TagConstraintError, check_tag, set_tag_checked};
