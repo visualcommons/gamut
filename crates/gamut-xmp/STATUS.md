@@ -39,12 +39,18 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   `xmpNsInfo`), and `tests/oracle.rs` reads a documented property of each back from XMPCore by its
   `Xmp.<prefix>.<name>` key, which fails for a wrong URI *or* a wrong prefix. The registry stays a
   registry: nothing about a value is interpreted. Two divergences are recorded rather than hidden:
-  `exifEX` is `http://cipa.jp/exif/1.0/` (CIPA DC-010; the reference engine's URI) although the
-  vendored Exif 3.0 text's annotation examples (Annex J) bind the prefix to `…/exif/2.32/`; and
+  `exifEX` is `http://cipa.jp/exif/1.0/` (the URI exiv2 and XMPCore bind) although the vendored Exif
+  3.0 text's annotation examples (Annex J.2–J.3) bind the prefix to `…/exif/2.32/` — CIPA DC-010
+  itself is not vendored, so this one entry rests on the oracle rather than on a specification under
+  `references/`, tracked in issue #516; and
   exiv2 appends `/` to a URI ending in neither `/` nor `#` when registering it with XMPCore
   (`XmpProperties::registerNs`), so the engine re-serializes `dwc` as `…/index.htm/` while gamut
   writes the `…/index.htm` exiv2 documents — pinned in `tests/oracle.rs` as an oracle
-  normalization.
+  normalization. Because that normalization is what XMPCore *emits*, `WellKnownNs::from_uri` also
+  recognises `http://rs.tdwg.org/dwc/index.htm/` as a read-only alias (`DWC_URI_TRAILING_SLASH`),
+  so a graph parsed from an exiv2-written packet or sidecar re-serializes under `dwc` rather than a
+  synthesized prefix; `uri()` still emits the unslashed URI, so gamut's own bytes are unchanged and
+  the alias is not an `ALL` entry.
 - **Sidecars require `x:xmpmeta` (issue #421).** `XmpSidecar::read` accepts everything
   `XmpMeta::from_packet` does — XML declaration, BOM, wrapper or bare — but rejects a document
   whose element is not `x:xmpmeta` with `XmpError::MissingXmpMeta` naming the element found. Part 3

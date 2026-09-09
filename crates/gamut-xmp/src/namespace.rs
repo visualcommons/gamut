@@ -291,12 +291,33 @@ impl WellKnownNs {
         }
     }
 
-    /// The schema whose URI is exactly `uri`, if any.
+    /// The schema `uri` identifies, if any.
+    ///
+    /// An exact match against [`WellKnownNs::uri`], plus one **read alias**: Darwin Core is also
+    /// recognised under [`DWC_URI_TRAILING_SLASH`], the form Adobe XMPCore emits (see that
+    /// constant). The alias is read-only — [`WellKnownNs::uri`] keeps returning the unslashed URI
+    /// exiv2 documents, so gamut's own bytes are unchanged — and it is not a [`WellKnownNs::ALL`]
+    /// entry, so iteration and the URI/prefix uniqueness of the registry are unaffected.
     #[must_use]
     pub fn from_uri(uri: &str) -> Option<WellKnownNs> {
-        WellKnownNs::ALL.iter().copied().find(|ns| ns.uri() == uri)
+        WellKnownNs::ALL
+            .iter()
+            .copied()
+            .find(|ns| ns.uri() == uri)
+            .or_else(|| (uri == DWC_URI_TRAILING_SLASH).then_some(WellKnownNs::DarwinCore))
     }
 }
+
+/// Darwin Core's namespace URI with the trailing slash Adobe XMPCore emits.
+///
+/// exiv2 appends `/` to any namespace URI ending in neither `/` nor `#` before registering it with
+/// XMPCore (`third_party/exiv2/src/properties.cpp`, `XmpProperties::registerNs`), and Darwin Core
+/// (`http://rs.tdwg.org/dwc/index.htm`) is the only registered schema whose URI ends in neither.
+/// A packet written by exiv2 — including a sidecar it wrote — therefore declares the slashed form,
+/// and without this alias such a graph would re-serialize under a synthesized `ns1` prefix instead
+/// of `dwc`. Prefixes are non-semantic (Part 1 §6.2), so this is round-trip fidelity, not
+/// correctness.
+pub const DWC_URI_TRAILING_SLASH: &str = "http://rs.tdwg.org/dwc/index.htm/";
 
 #[cfg(test)]
 mod tests {
@@ -399,8 +420,36 @@ mod tests {
                 "{ns:?} must be in ALL so from_uri and the writer's prefix table see it"
             );
         }
-        // 18 entries before this change (the original 17 plus `dcterms`) and twelve added: 30.
+    }
+
+    #[test]
+    fn registry_holds_thirty_schemas() {
+        // A drift guard, deliberately separate from the exiv2-parity test above: every future
+        // addition to the registry edits this one line, and it fails for exactly that reason.
+        // 18 entries before the exiv2-parity additions (the original 17 plus `dcterms`) + 12 = 30.
         assert_eq!(WellKnownNs::ALL.len(), 30);
+    }
+
+    #[test]
+    fn from_uri_accepts_the_darwin_core_trailing_slash_alias_without_emitting_it() {
+        // XMPCore emits `.../index.htm/`; reading a packet it wrote must still resolve to the
+        // registered schema, so the graph re-serializes under `dwc` rather than a synthesized
+        // prefix. The alias is read-only: `uri()` still emits the unslashed URI exiv2 documents,
+        // and the alias is not an ALL entry.
+        assert_eq!(
+            WellKnownNs::from_uri(DWC_URI_TRAILING_SLASH),
+            Some(WellKnownNs::DarwinCore)
+        );
+        assert_eq!(
+            WellKnownNs::DarwinCore.uri(),
+            "http://rs.tdwg.org/dwc/index.htm"
+        );
+        assert_ne!(WellKnownNs::DarwinCore.uri(), DWC_URI_TRAILING_SLASH);
+        assert!(
+            !WellKnownNs::ALL
+                .iter()
+                .any(|ns| ns.uri() == DWC_URI_TRAILING_SLASH)
+        );
     }
 
     #[test]

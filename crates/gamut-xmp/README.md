@@ -134,7 +134,9 @@ changed — every existing variant, URI, prefix and method keeps its meaning.
   (`tests/oracle.rs`; needs the `third_party/exiv2` + `third_party/expat` submodules and a C++
   toolchain). One oracle normalization is pinned as such: exiv2 appends `/` to a namespace URI
   ending in neither `/` nor `#` when it registers it with XMPCore, so the engine re-serializes
-  Darwin Core as `http://rs.tdwg.org/dwc/index.htm/`; gamut writes the URI exiv2 documents.
+  Darwin Core as `http://rs.tdwg.org/dwc/index.htm/`; gamut writes the URI exiv2 documents and
+  additionally accepts the slashed form on read (`DWC_URI_TRAILING_SLASH`), so a packet the engine
+  wrote round-trips under the `dwc` prefix.
 - **Mutation-clean** — `cargo mutants` passes with zero gamut-xmp exclusions in
   `.cargo/mutants.toml`.
 - **No benches, intentionally** — the crate has no performance contract; packets are a few KB.

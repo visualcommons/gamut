@@ -467,6 +467,23 @@ fn mwg_regions_list_item_name_reads_back_under_the_mwg_rs_key() {
 }
 
 #[test]
+fn darwin_core_nested_bag_survives_the_uri_xmpcore_normalizes() {
+    // The only registered schema whose URI XMPCore rewrites (see `xmpcore_output_uri`), driven
+    // through the nested helper so the expected graph is re-namespaced with `from != to` — the
+    // MWG callers both pass a URI the engine leaves alone, which would leave that normalization
+    // unexercised. The shape is the helper's bag-of-structure rather than the `bag Text` exiv2
+    // declares for dwc's bags: this crate is a namespace registry, not a validator, and XMPCore
+    // stores the shape the packet carries; what is under test here is the URI, not the type.
+    struct_bag_item_field_survives_xmpcore(
+        WellKnownNs::DarwinCore,
+        "Record",
+        "dynamicProperties",
+        "institutionID",
+        "GAMUT",
+    );
+}
+
+#[test]
 fn mwg_keywords_hierarchy_item_keyword_reads_back_under_the_mwg_kw_key() {
     // MWG Guidelines 2.0, Keywords: `mwg-kw:Keywords` is a KeywordInfo structure whose
     // `Hierarchy` is a Bag of KeywordStruct, each with a text `Keyword`.
