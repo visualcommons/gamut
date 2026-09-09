@@ -83,10 +83,9 @@ const MERKLE_OFFSET_LEN: usize = 8;
 /// ahead of it. The reference implementation writes the 8-byte offset there too, so files in
 /// circulation carry it, but the silence is a gap rather than a prohibition.
 ///
-/// So `update` is **probed**, over the same two candidate offsets `gamut-heic`'s locator uses
-/// (`[8, 0]`, [`store_prefix_candidates`](Self::store_prefix_candidates)): offset 8 first, falling
-/// back to 0. `manifest` and `original` are not probed — the specification states their framing,
-/// so a single offset is used.
+/// So `update` is **probed**, over the same two candidate offsets `gamut-heic`'s locator uses —
+/// `8` first, falling back to `0`. `manifest` and `original` are not probed: the specification
+/// states their framing, so a single offset is used.
 ///
 /// **How strong the probe is here.** `gamut-heic` discriminates on JUMBF `LBox` validity;
 /// a box-bounded slot ([`C2paSlot`]) has no such field to read, so the only in-band signal is

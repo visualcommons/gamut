@@ -57,10 +57,11 @@ writes a store the caller has already computed over this exact output, and
 `AvifEncoder::encode_with_report` returns the slot's file range beside the (unchanged) bytes, so
 the offset is known before the signer runs. Nothing after placement moves a byte
 (`tests/c2pa.rs`, exact-byte). The read side, `AvifContainer::c2pa` / `c2pa_manifest_stores`,
-locates every top-level C2PA `uuid` box and reports its purpose, slot bytes and file range. The
+locates every top-level C2PA `uuid` box and reports its purpose, slot bytes and file range as a
+`C2paSlot` (named for the box-bounded slot it reports, not for a trimmed store). The
 object-safe `EncodeImage` entry point is untouched. libavif and dav1d decode a file carrying the
-box to the same pixels as one without. See the C2PA note under section L for the three recorded
-limits of the locator.
+box to the same pixels as one without. See the C2PA note under section L for the four recorded
+limits.
 
 **Deferred (planned, additive).** Every ☐ row below: 4:2:0/4:2:2 and `MA1B` landed with
 #390/#391, the alpha auxiliary, `Gray8` and monochrome surface with #396/#397, and the 10/12-bit
@@ -347,19 +348,22 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | libavif structure/metadata/pixels + dav1d planar bit-exact differential suite | (oracle) | ✅ | S4 |
 | C2PA manifest-store locator (`AvifContainer::c2pa` / `c2pa_manifest_stores`): every top-level `uuid` box with the C2PA user type → `box_purpose`, slot bytes, file range, in file order | C2PA 2.4 §A.5.1–§A.5.3; §18.6 | ✅ (#444) | — |
 
-**C2PA locator — three recorded limits (#444).** (1) *The slot, not the store.* `bytes`/`range`
-run from just after the 8-byte merkle offset to the end of the `uuid` box, so they include any
+**C2PA — four recorded limits (#444).** (1) *A slot, not a trimmed store.* `C2paSlot::slot_bytes`
+/ `range` run from just after the merkle offset to the end of the `uuid` box, so they include any
 unused padding §A.5.3 permits after the store, and a reserved-but-unfilled slot reads back as
-zeros. `gamut-heic`'s locator (#429) instead trims to the store's own JUMBF `LBox`; the two crates
-therefore report different bounds for the same file today. Sharing one lens through
-`gamut-isobmff`, and deciding the bound once, is **#505** — the reverse path is to replace this
-module's parse with a call into it. (2) *`update` framing is assumed.* §A.5.3 states the merkle
-offset only for `manifest`/`original`; the same 8-byte prefix is applied to `update` (the layout
-the reference implementation writes) rather than probed, since a box-bounded slot has no in-band
-length to probe with. (3) *The range is not an exclusion range.* BMFF assets bind with
-`c2pa.hash.bmff.v3`, which excludes by box path (§18.6, §A.5.6); the range is for patching and
-byte accounting, and no type is named "exclusion". The reserve → sign → validate direction
-against `c2pa-rs` is #447's.
+zeros. `gamut-heic`'s `C2paManifestStore` (#429) instead trims to the store's own JUMBF `LBox`, so
+the two crates can report different lengths for one file; the AVIF type is *named* for the slot so
+the two claims cannot be confused across the umbrella's re-exports. The bound is deliberate — an
+`LBox` trim cannot locate a reservation, which has no `LBox` — and unifying the two lenses is
+**#505**. (2) *`update` framing is probed, not stated.* §A.5.3 gives the merkle offset only for
+`manifest`/`original`; `update` is probed over the same `[8, 0]` candidates `gamut-heic` uses, so a
+prefix-less `update` store shorter than 8 bytes is located rather than dropped. A *longer*
+prefix-less one is still reported 8 bytes short — that needs the `LBox` check, also #505. (3) *The
+range is not an exclusion range.* BMFF assets bind with `c2pa.hash.bmff.v3`, which excludes by box
+path (§18.6, §A.5.6); the range is for patching and byte accounting, and no type is named
+"exclusion". (4) *The encoder writes `manifest` only.* The read side reports all three purposes;
+producing an `original`/`update` pair is a manifest-update operation on an existing file, outside
+#444. The reserve → sign → validate direction against `c2pa-rs` is #447's.
 
 **Deferred (additive) for the decode surface:** the backend registry + `gamut-codec-abi` adapter
 around `Av1StillDecoder` — section M reserves its name and shape; the typed trait itself already

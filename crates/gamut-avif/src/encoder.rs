@@ -492,7 +492,17 @@ impl AvifEncoder {
     /// pixels as one without — and its bytes are opaque to this crate, which validates nothing
     /// about them. A slot nobody fills reads back through [`AvifContainer::c2pa`](crate::AvifContainer::c2pa)
     /// as `len` zero bytes. Calling this, or [`with_c2pa`](Self::with_c2pa), twice keeps the
-    /// **last** call.
+    /// **last** call — as every other payload builder on this encoder does.
+    ///
+    /// # The encoder writes `manifest`, and only `manifest`
+    ///
+    /// §A.5.3 defines three `box_purpose` values for a store-bearing box, and the *read* side
+    /// reports all three ([`C2paBoxPurpose`](crate::C2paBoxPurpose)). This encoder writes one:
+    /// `manifest`, the purpose of an ordinary store in a file that is not mid-update. Once a file
+    /// carries an `update` box, §A.5.3 requires its earlier store to be re-labelled `original`, so
+    /// re-encoding such a file through this builder would label it wrongly; producing an
+    /// `original`/`update` pair is a manifest-update operation on an existing file, which this
+    /// crate does not offer (issue #444's scope is reserve, write and locate).
     #[must_use]
     pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
         self.c2pa = Some(SlotSource::Reserved(len));
@@ -510,6 +520,10 @@ impl AvifEncoder {
     /// workspace's metadata facade never hands one over (its C2PA policy is to locate and carry,
     /// never to originate). The bytes are carried verbatim; nothing inside them is parsed or
     /// checked. Calling this, or `with_c2pa_reserved`, twice keeps the **last** call.
+    ///
+    /// The box is labelled `box_purpose = manifest`, the only purpose this encoder writes; see
+    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) for why an `original`/`update` pair is a
+    /// file-update operation this crate does not offer.
     #[must_use]
     pub fn with_c2pa(mut self, store: &[u8]) -> Self {
         self.c2pa = Some(SlotSource::Store(store.to_vec()));
