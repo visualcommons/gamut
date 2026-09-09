@@ -98,6 +98,24 @@ pub struct C2paExclusions {
     pub count_field: Range,
 }
 
+impl C2paExclusions {
+    /// The exclusion set for a store at `store` whose IFD entry's `count` field is at
+    /// `count_field`.
+    ///
+    /// [`locate`] and [`append_store`] return one of these already, and that is the ordinary
+    /// way to get one. This constructor exists because the type is `#[non_exhaustive]`, which
+    /// would otherwise leave a host that places a store by some other route — its own writer, a
+    /// format this crate does not serialise — unable to name the ranges §18.5.5 asks it to
+    /// exclude. Extensible and constructible are both available, so the type is both.
+    ///
+    /// The two ranges are the caller's to get right: nothing here re-reads the file to check
+    /// that they describe a manifest store, or that they are disjoint.
+    #[must_use]
+    pub const fn new(store: Range, count_field: Range) -> Self {
+        Self { store, count_field }
+    }
+}
+
 /// Reserves the manifest-store entry in `ifd`, the directory that will be written as the last
 /// IFD of the main chain (§A.3.6): a one-byte inline `UNDEFINED` placeholder under
 /// [`C2PA_MANIFEST_STORE`].
@@ -176,6 +194,15 @@ fn exceeds_offset_width(variant: Variant, end: u64) -> bool {
 /// as an unmodelled tag, and a decode → encode cycle over such a file does not trip the
 /// encoder's own minimum.
 ///
+/// # This reads one shape [`append_store`] will not write, deliberately
+///
+/// A BigTIFF store of exactly [`MIN_STORE_LEN`] bytes packs inline, and this reports it — the
+/// file is lawful and its ranges are well defined. [`append_store`] nonetheless refuses to
+/// *write* that shape, because an inline value is not the run at the end of the file this
+/// crate's placement rule is built on, and admitting it would give a store two placements to
+/// reason about for no gain. Liberal in what it accepts, conservative in what it emits; the
+/// asymmetry is a decision, not an oversight.
+///
 /// `src` is any [`ReadAt`] source — a `&[u8]`, or a [`StreamSource`](crate::StreamSource) over
 /// a file handle, since a multi-hundred-MB RAW need not be read to find a 12-byte entry.
 ///
@@ -234,6 +261,12 @@ pub fn locate<S: ReadAt>(src: S) -> Result<Option<C2paExclusions>> {
 /// The bytes of `store` are copied verbatim — the TIFF byte order does not apply to them
 /// (§A.3.6).
 ///
+/// This writes exactly one placement: the store out of line, last in the file. A BigTIFF store
+/// of exactly [`MIN_STORE_LEN`] bytes would pack *inline* instead, which is lawful — [`locate`]
+/// reads that shape — but is not the placement this crate's reserve-then-sign flow is built on,
+/// so it is refused here rather than emitted. The asymmetry with [`locate`] is deliberate; see
+/// that function's docs.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] if `store` is shorter than [`MIN_STORE_LEN`]; if it is not
@@ -255,6 +288,21 @@ pub fn append_store(file: &mut Vec<u8>, store: &[u8]) -> Result<C2paExclusions> 
     let (order, variant, entry) = {
         let mut reader = IfdReader::open(&file[..])?;
         let last = last_ifd(&mut reader)?;
+        // `store_entry` reports absence for a duplicated entry as well as for a missing or
+        // mistyped one, and "carries no entry" would be a misleading thing to tell a caller
+        // whose directory carries two, so the two cases are distinguished here.
+        if last
+            .entries
+            .iter()
+            .filter(|e| e.tag == C2PA_MANIFEST_STORE)
+            .count()
+            > 1
+        {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: the last IFD carries more than one C2PA manifest store entry",
+            ));
+        }
         let entry = store_entry(&last)
             .ok_or_else(|| {
                 Error::invalid_input(
@@ -814,6 +862,50 @@ mod tests {
         ));
         #[cfg(feature = "bigtiff")]
         assert!(!exceeds_offset_width(Variant::Big, u64::from(u32::MAX) + 1));
+    }
+
+    /// `append_store` tells a caller whose directory carries two store entries what is actually
+    /// wrong, rather than claiming there is none.
+    #[test]
+    fn append_store_names_a_duplicated_entry_as_the_problem() {
+        let le = ByteOrder::LittleEndian;
+        // Two placeholder entries, built at the byte level since `Ifd::set` de-duplicates.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II\x2a\x00");
+        bytes.extend_from_slice(&le.pack_u32(8));
+        bytes.extend_from_slice(&le.pack_u16(2));
+        for _ in 0..2 {
+            bytes.extend_from_slice(&le.pack_u16(C2PA_MANIFEST_STORE));
+            bytes.extend_from_slice(&le.pack_u16(FieldType::Undefined.code()));
+            bytes.extend_from_slice(&le.pack_u32(1));
+            bytes.extend_from_slice(&le.pack_u32(0));
+        }
+        bytes.extend_from_slice(&le.pack_u32(0));
+
+        let before = bytes.clone();
+        let error = append_store(&mut bytes, &store()).expect_err("a duplicated entry");
+        assert_eq!(
+            error.static_message(),
+            Some("TIFF: the last IFD carries more than one C2PA manifest store entry"),
+            "the message must name the duplication, not claim the entry is missing"
+        );
+        assert_eq!(bytes, before, "a refused append leaves the file untouched");
+    }
+
+    /// The public constructor builds the same value `locate` reports, so a host placing a store
+    /// by its own means can name its exclusion set despite `#[non_exhaustive]`.
+    #[test]
+    fn exclusions_can_be_constructed_publicly() {
+        let mut ifd = sample_ifd();
+        ifd.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
+        let bytes =
+            write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
+        let found = locate(&bytes[..]).expect("locate").expect("a store");
+        assert_eq!(
+            C2paExclusions::new(found.store, found.count_field),
+            found,
+            "the constructor's fields land in the documented order"
+        );
     }
 
     /// `reserve_entry` places exactly the inline placeholder `append_store` requires — and a

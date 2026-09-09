@@ -233,8 +233,17 @@ codecs hold their last main IFD by hand (a DNG has exactly one), and picking it 
 is a one-liner nobody would get wrong.
 
 `C2paExclusions` is `#[non_exhaustive]`: §18.5.5 names two ranges today, and a revision naming a
-third must be additive rather than a `gamut-ifd` major. It is constructed only by locating or
-writing a store.
+third must be additive rather than a `gamut-ifd` major. It also carries a public
+`C2paExclusions::new` — the attribute alone would leave a host that places a store by its own
+route unable to name the ranges §18.5.5 asks it to exclude, and extensible and constructible are
+both available.
+
+**The read and write sides are deliberately asymmetric.** A BigTIFF store of exactly
+`MIN_STORE_LEN` bytes packs inline; `locate` reports it (the file is lawful and its ranges are
+well defined) while `append_store` refuses to *write* that shape, because an inline value is not
+the run at the end of the file the placement rule is built on, and admitting it would give a
+store two placements to reason about for no gain. Liberal in, conservative out — stated at both
+functions so it reads as a decision rather than an oversight.
 
 **Accepted duplication.** `gamut_heic::c2pa::JUMBF_HEADER_LEN` states the same 8-byte JUMBF box
 header bound as `MIN_STORE_LEN` here. The dependency graph gives the two no shared home —
