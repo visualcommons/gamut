@@ -40,6 +40,23 @@ Each row also carries that table's `Type` and `Count` columns, as `ExifTag::fiel
 no constraint is claimed rather than one invented. `set_tag_checked` enforces them on the **write
 path only**; the reader and `Exif::set_tag` are unchanged and stay lenient.
 
+### Where the nine non-DC-008 tags come from
+
+The workspace rule is that a row comes from a specification under `references/`. Three of the nine
+do; six do not, and are **residuals** — carried because real files and every other reader use them,
+with no vendored text fixing their type or count, which is exactly why `field_types` is empty.
+
+| Tag | Vendored source |
+| --- | --- |
+| `ApplicationNotes` `0x02BC` | `references/xmp/xmp-part3.pdf` — its TIFF table gives `700 / 0x2BC — XMP packet` |
+| `IPTC-NAA` `0x83BB` | `references/xmp/xmp-part3.pdf` — same table, `33723 / 0x83BB — IPTC dataset`; the payload's own format is `references/iptc/iim-4.2.pdf` |
+| `InterColorProfile` `0x8773` | `references/icc/icc.1-2001-04.pdf` — "The TIFFTag that identifies the field = 34675(8773.H)" |
+| `InteroperabilityVersion` `0x0002`, `RelatedImageFileFormat` `0x1000`, `RelatedImageWidth` `0x1001`, `RelatedImageLength` `0x1002` | **Residual.** DC-008 3.0 *names* all four in its original-preservation-image annex but delegates them to "Table 13, 'Interoperability IFD Description Support Levels,' of DCF[2], section 4.7". DCF (CIPA DC-009) is not vendored, so no text here fixes their type or count. |
+| `Rating` `0x4746`, `RatingPercent` `0x4749` | **Residual.** Microsoft's Windows photo-metadata extension; no vendored specification at all. |
+
+Vendoring DCF would settle four of the six. All nine predate this phase — P10 only made their
+unspecified status explicit and machine-readable.
+
 The `describe` feature (default **off**) renders the enumerated tags in DC-008's own wording, and
 `flash` decomposes the `Flash` bitfield of §4.6.6.7.21 Figure 17.
 
