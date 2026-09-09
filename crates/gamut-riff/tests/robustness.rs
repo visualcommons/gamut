@@ -30,6 +30,7 @@ fn seed() -> Vec<u8> {
             icc: Some(b"icc"), // odd -> padded
             exif: Some(b"exif"),
             xmp: Some(b"<x/>"),
+            c2pa: None,
         },
         &[
             (FourCc::ALPH, &[0x00, 0x11]),

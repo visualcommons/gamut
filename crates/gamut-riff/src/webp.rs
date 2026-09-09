@@ -1,9 +1,18 @@
 //! WebP-specific helpers over the generic RIFF layer: classifying WebP chunks, the [`Vp8xHeader`]
-//! extended-format feature header, the [`MetadataChunks`] passthrough for `ICCP`/`EXIF`/`XMP `, and
-//! writing the simple (single-bitstream) and extended file formats (RFC 9649 §2.5-§2.7).
+//! extended-format feature header, the [`MetadataChunks`] passthrough for
+//! `ICCP`/`EXIF`/`XMP `/`C2PA`, and writing the simple (single-bitstream) and extended file formats
+//! (RFC 9649 §2.5-§2.7).
 //!
 //! The remaining extended-format chunks (`ANIM`/`ANMF`) are tracked in `gamut-webp/STATUS.md`
 //! section A and are out of scope under the image-first charter.
+//!
+//! The `C2PA` chunk is the one carrier here that RFC 9649 does not define: it is C2PA 2.4 §A.3.7's,
+//! and to the WebP container it is an unknown chunk readers ignore (§2.7.1.6). It is modelled
+//! anyway — [`C2PA_FOURCC`], [`WebpChunkId::C2pa`], [`MetadataChunks::c2pa`] and [`c2pa_span`] —
+//! because §A.3.7 constrains *where* it goes, which the generic unknown-chunk passthrough cannot
+//! express.
+
+use core::ops::Range;
 
 use gamut_core::{Error, Result};
 
@@ -18,6 +27,17 @@ pub const VP8X_PAYLOAD_LEN: usize = 10;
 /// The largest canvas dimension a `VP8X` header can express: the width and height are stored
 /// 1-based in 24 bits, so `1..=2^24` (RFC 9649 §2.7).
 pub const MAX_CANVAS_DIMENSION: u32 = 1 << 24;
+
+/// The FourCC of the chunk that carries a C2PA manifest store: `C2PA` (C2PA 2.4 §A.3.7).
+///
+/// Deliberately not one of [`FourCc`]'s associated constants, which are RFC 9649's chunk
+/// vocabulary. This identifier belongs to the C2PA specification instead, so it is named beside the
+/// code that places it — and the WebP container itself only ever sees an unknown chunk (§2.7.1.6).
+pub const C2PA_FOURCC: FourCc = FourCc(*b"C2PA");
+
+/// Byte length of a RIFF/WebP file header: the `RIFF` magic, the `uint32` file size, and the `WEBP`
+/// form type (RFC 9649 §2.4). Chunks begin here.
+const RIFF_HEADER_LEN: usize = 12;
 
 /// The extended-format feature header carried by a `VP8X` chunk (RFC 9649 §2.7): which optional
 /// features the file uses, plus the 1-based canvas dimensions. A simple (single-bitstream) file has no
@@ -149,7 +169,8 @@ pub fn write_extended(header: &Vp8xHeader, chunks: &[(FourCc, &[u8])]) -> Result
 }
 
 /// The metadata chunks an extended WebP file may carry, **borrowed** rather than copied: the `ICCP`
-/// colour profile and the `EXIF` / `XMP ` metadata payloads (RFC 9649 §2.7.1.4-§2.7.1.5).
+/// colour profile, the `EXIF` / `XMP ` metadata payloads (RFC 9649 §2.7.1.4-§2.7.1.5), and the
+/// `C2PA` manifest store (C2PA 2.4 §A.3.7).
 ///
 /// The container assigns these payloads no meaning — each is carried verbatim, so metadata survives
 /// a read/write cycle byte for byte with no reserialization. Use [`MetadataChunks::read`] to collect
@@ -162,13 +183,18 @@ pub struct MetadataChunks<'a> {
     pub exif: Option<&'a [u8]>,
     /// The `XMP ` chunk payload: an XMP packet.
     pub xmp: Option<&'a [u8]>,
+    /// The `C2PA` chunk payload: a C2PA manifest store, opaque here — nothing in this crate parses,
+    /// validates or signs it. A writer places it last, as §A.3.7 requires; [`c2pa_span`] reports
+    /// where it landed. The pad byte RIFF adds after an odd-length store is framing, not store.
+    pub c2pa: Option<&'a [u8]>,
 }
 
 impl<'a> MetadataChunks<'a> {
     /// Collects the metadata chunks of the WebP file in `data`, borrowing each payload in place.
     ///
     /// The spec allows at most one chunk of each kind and lets readers "ignore all except the first
-    /// one" (RFC 9649 §2.7.1.4-§2.7.1.5), so the **first** `ICCP` / `EXIF` / `XMP ` chunk wins. The
+    /// one" (RFC 9649 §2.7.1.4-§2.7.1.5), so the **first** `ICCP` / `EXIF` / `XMP ` / `C2PA` chunk
+    /// wins — the same policy the C2PA chunk gets, the file being malformed either way. The
     /// `VP8X` feature flags are advisory here: a payload is reported because its chunk is present,
     /// never because a flag claims it is — so a flag set over a missing chunk yields `None`, and a
     /// chunk a non-conformant writer left unflagged is still recovered.
@@ -185,6 +211,7 @@ impl<'a> MetadataChunks<'a> {
                 WebpChunkId::Iccp => &mut found.icc,
                 WebpChunkId::Exif => &mut found.exif,
                 WebpChunkId::Xmp => &mut found.xmp,
+                WebpChunkId::C2pa => &mut found.c2pa,
                 _ => continue,
             };
             slot.get_or_insert(chunk.payload);
@@ -196,19 +223,73 @@ impl<'a> MetadataChunks<'a> {
     /// file into the extended format.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.icc.is_none() && self.exif.is_none() && self.xmp.is_none()
+        self.icc.is_none() && self.exif.is_none() && self.xmp.is_none() && self.c2pa.is_none()
     }
+}
+
+/// Locates the `C2PA` chunk of the WebP file in `data`, returning the byte range its **whole**
+/// on-disk span occupies: the four identifier bytes, the four-byte size field, and the payload.
+///
+/// That whole span is the range a `c2pa.hash.data` assertion excludes (C2PA 2.4 §18.5), not just
+/// the payload: an update manifest may resize the manifest store, and resizing it changes the value
+/// of the size field as surely as it changes the bytes after it, so a hash that covered the size
+/// field could not survive the update the exclusion exists to permit.
+///
+/// The pad byte RIFF appends after an odd-length payload (RFC 9649 §2.3) is **outside** the range.
+/// It is framing the container adds around the chunk, not part of the chunk's data — the same
+/// reason [`Chunk::payload`] excludes it. A caller who needs the padded span can add
+/// `range.len() % 2`, the store's length and the chunk header's 8 bytes having opposite parity.
+///
+/// The **first** `C2PA` chunk wins, as it does in [`MetadataChunks::read`]; a conformant file has at
+/// most one, placed last (§A.3.7), which is where [`write_extended_preserving`] puts it.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if `data` is not a valid RIFF/WebP file, or if a chunk's declared
+/// size runs past the end of the data.
+///
+/// # Example
+///
+/// ```
+/// use gamut_riff::{MetadataChunks, Vp8xHeader, c2pa_span, write_extended_with_metadata};
+///
+/// let store = b"a C2PA manifest store";
+/// let header = Vp8xHeader { canvas_width: 1, canvas_height: 1, ..Default::default() };
+/// let metadata = MetadataChunks { c2pa: Some(store), ..Default::default() };
+/// let file = write_extended_with_metadata(&header, &metadata, &[])?;
+///
+/// let span = c2pa_span(&file)?.expect("the store was embedded");
+/// assert_eq!(&file[span.start..span.start + 4], b"C2PA");
+/// assert_eq!(span.len(), 8 + store.len());
+/// # Ok::<(), gamut_core::Error>(())
+/// ```
+pub fn c2pa_span(data: &[u8]) -> Result<Option<Range<usize>>> {
+    let mut offset = RIFF_HEADER_LEN;
+    for chunk in RiffReader::new(data)? {
+        let chunk = chunk?;
+        // The reader framed this payload from a `uint32` size field, so the cast is exact.
+        let padded = CHUNK_HEADER_LEN + chunk.payload.len() + pad_len(chunk.payload.len() as u32);
+        if WebpChunkId::from(chunk.fourcc) == WebpChunkId::C2pa {
+            return Ok(Some(
+                offset..offset + CHUNK_HEADER_LEN + chunk.payload.len(),
+            ));
+        }
+        offset += padded;
+    }
+    Ok(None)
 }
 
 /// Writes an extended WebP file carrying `metadata`, placing every chunk in the canonical order the
 /// spec mandates: `VP8X`, `ICCP`, the image data (an optional `ALPH` then the `VP8 `/`VP8L`
-/// bitstream), then `EXIF` and `XMP ` (RFC 9649 §2.7 — readers "SHOULD fail" when the chunks needed
-/// for reconstruction and colour correction are out of order, and metadata follows the image data).
+/// bitstream), then `EXIF`, `XMP ` and last of all `C2PA` (RFC 9649 §2.7 — readers "SHOULD fail"
+/// when the chunks needed for reconstruction and colour correction are out of order, and metadata
+/// follows the image data; C2PA 2.4 §A.3.7 for the store's place at the very end).
 ///
-/// The three metadata feature flags of `header` are **derived** from `metadata`, so a chunk can
-/// never be emitted without its flag nor a flag without its chunk; `alpha`, `animation`, and the
-/// canvas size are taken as given. Ordering *within* `image_data` is the caller's responsibility, as
-/// in [`write_extended`].
+/// The three RFC 9649 metadata feature flags of `header` are **derived** from `metadata`, so a chunk
+/// can never be emitted without its flag nor a flag without its chunk; `alpha`, `animation`, and the
+/// canvas size are taken as given. The `C2PA` chunk has no feature flag to derive — §2.5's flag byte
+/// defines none — so its presence is decided by the chunk alone. Ordering *within* `image_data` is
+/// the caller's responsibility, as in [`write_extended`].
 ///
 /// # Errors
 ///
@@ -230,6 +311,12 @@ pub fn write_extended_with_metadata(
 /// the file and lets them "appear out of order" relative to metadata, so emitting them last is
 /// conforming regardless of where they sat in the original.
 ///
+/// A `C2PA` manifest store is the one exception to "unknown chunks last": C2PA 2.4 §A.3.7 requires
+/// the `C2PA` chunk to "appear as the last sub-chunk of the first RIFF header chunk", so it is
+/// emitted after the preserved chunks, not before them. It is also no longer *unknown* to this
+/// crate ([`WebpChunkId::C2pa`]), so a store read back out of a file arrives in
+/// [`MetadataChunks::c2pa`] and is never re-emitted a second time out of `unknown`.
+///
 /// # Errors
 ///
 /// As [`write_extended`]: an inexpressible canvas or an over-large payload or file.
@@ -245,7 +332,7 @@ pub fn write_extended_preserving(
         xmp_metadata: metadata.xmp.is_some(),
         ..*header
     };
-    let mut chunks: Vec<(FourCc, &[u8])> = Vec::with_capacity(image_data.len() + 3 + unknown.len());
+    let mut chunks: Vec<(FourCc, &[u8])> = Vec::with_capacity(image_data.len() + 4 + unknown.len());
     if let Some(icc) = metadata.icc {
         chunks.push((FourCc::ICCP, icc));
     }
@@ -257,6 +344,11 @@ pub fn write_extended_preserving(
         chunks.push((FourCc::XMP, xmp));
     }
     chunks.extend(unknown.iter().map(|c| (c.fourcc, c.payload)));
+    // C2PA 2.4 §A.3.7: the manifest store's chunk is the *last* sub-chunk of the RIFF/WEBP form —
+    // after the preserved unknown chunks, not merely somewhere past the image data.
+    if let Some(c2pa) = metadata.c2pa {
+        chunks.push((C2PA_FOURCC, c2pa));
+    }
     write_extended(&header, &chunks)
 }
 
@@ -264,7 +356,9 @@ pub fn write_extended_preserving(
 /// `ANIM`, then the image data (`ALPH` before the bitstream) — RFC 9649 §2.7.
 ///
 /// `None` marks a chunk the ordering rule does not constrain: metadata (`EXIF`/`XMP `) and unknown
-/// chunks, which the spec says "MAY appear out of order".
+/// chunks, which the spec says "MAY appear out of order". `C2PA` joins them: §2.7 knows nothing of
+/// it, and C2PA 2.4 §A.3.7's "last sub-chunk" is a rule this crate's *writer* honours rather than
+/// one a reader may impose on a file it did not write.
 const fn reconstruction_rank(id: WebpChunkId) -> Option<u8> {
     match id {
         WebpChunkId::Vp8x => Some(0),
@@ -272,7 +366,7 @@ const fn reconstruction_rank(id: WebpChunkId) -> Option<u8> {
         WebpChunkId::Anim => Some(2),
         WebpChunkId::Anmf | WebpChunkId::Alpha => Some(3),
         WebpChunkId::Vp8 | WebpChunkId::Vp8l => Some(4),
-        WebpChunkId::Exif | WebpChunkId::Xmp | WebpChunkId::Unknown(_) => None,
+        WebpChunkId::Exif | WebpChunkId::Xmp | WebpChunkId::C2pa | WebpChunkId::Unknown(_) => None,
     }
 }
 
@@ -300,7 +394,8 @@ const fn reconstruction_rank(id: WebpChunkId) -> Option<u8> {
 pub struct WebpLayout<'a> {
     /// The parsed `VP8X` feature header, or `None` for a simple (single-bitstream) file.
     pub vp8x: Option<Vp8xHeader>,
-    /// The `ICCP`, `EXIF`, and `XMP ` payloads, first of each kind winning as the spec permits.
+    /// The `ICCP`, `EXIF`, `XMP ` and `C2PA` payloads, first of each kind winning as the spec
+    /// permits.
     pub metadata: MetadataChunks<'a>,
     /// The `ALPH` chunk payload, when the file carries lossy alpha.
     pub alph: Option<&'a [u8]>,
@@ -337,7 +432,7 @@ impl<'a> WebpLayout<'a> {
         };
         // Rank of the last reconstruction chunk seen; the sequence must never regress.
         let mut last_rank = 0;
-        let mut offset = 12;
+        let mut offset = RIFF_HEADER_LEN;
         for chunk in reader {
             let chunk = chunk?;
             let id = WebpChunkId::from(chunk.fourcc);
@@ -365,6 +460,9 @@ impl<'a> WebpLayout<'a> {
                 }
                 WebpChunkId::Xmp => {
                     layout.metadata.xmp.get_or_insert(chunk.payload);
+                }
+                WebpChunkId::C2pa => {
+                    layout.metadata.c2pa.get_or_insert(chunk.payload);
                 }
                 WebpChunkId::Alpha => {
                     layout.alph.get_or_insert(chunk.payload);
@@ -408,6 +506,8 @@ pub enum WebpChunkId {
     Exif,
     /// XMP metadata (`XMP `).
     Xmp,
+    /// C2PA manifest store (`C2PA`) — C2PA 2.4 §A.3.7, not an RFC 9649 chunk.
+    C2pa,
     /// Global animation parameters (`ANIM`).
     Anim,
     /// Animation frame (`ANMF`).
@@ -426,6 +526,7 @@ impl From<FourCc> for WebpChunkId {
             b"ICCP" => Self::Iccp,
             b"EXIF" => Self::Exif,
             b"XMP " => Self::Xmp,
+            b"C2PA" => Self::C2pa,
             b"ANIM" => Self::Anim,
             b"ANMF" => Self::Anmf,
             _ => Self::Unknown(fourcc),
@@ -474,6 +575,7 @@ mod tests {
         assert_eq!(WebpChunkId::from(FourCc::ICCP), WebpChunkId::Iccp);
         assert_eq!(WebpChunkId::from(FourCc::EXIF), WebpChunkId::Exif);
         assert_eq!(WebpChunkId::from(FourCc::XMP), WebpChunkId::Xmp);
+        assert_eq!(WebpChunkId::from(C2PA_FOURCC), WebpChunkId::C2pa);
         assert_eq!(WebpChunkId::from(FourCc::ANIM), WebpChunkId::Anim);
         assert_eq!(WebpChunkId::from(FourCc::ANMF), WebpChunkId::Anmf);
         let weird = FourCc::from(*b"XYZW");
@@ -731,6 +833,7 @@ mod tests {
             icc: Some(icc),
             exif: Some(exif),
             xmp: Some(xmp),
+            c2pa: None,
         };
         let file = write_extended_with_metadata(
             &header,
@@ -777,6 +880,7 @@ mod tests {
             icc: Some(&[1]),
             exif: Some(&[2]),
             xmp: Some(&[3]),
+            c2pa: None,
         };
         let image: &[(FourCc, &[u8])] = &[(FourCc::VP8L, &[0x2f])];
 
@@ -884,6 +988,10 @@ mod tests {
                 xmp: Some(&[0]),
                 ..Default::default()
             },
+            MetadataChunks {
+                c2pa: Some(&[0]),
+                ..Default::default()
+            },
         ] {
             assert!(!chunks.is_empty(), "{chunks:?} carries a payload");
         }
@@ -929,6 +1037,7 @@ mod tests {
                 icc: None,
                 exif: None,
                 xmp: Some(&b"<x/>"[..]),
+                c2pa: None,
             }
         );
     }
@@ -1217,5 +1326,188 @@ mod tests {
         let mut file = write_simple_lossless(&[0x2f, 1, 2]).unwrap();
         file.extend_from_slice(b"motion photo stream");
         assert_eq!(WebpLayout::parse(&file).unwrap().trailing_bytes, 19);
+    }
+
+    /// C2PA 2.4 §A.3.7: "this C2PA chunk shall appear as the **last sub-chunk of the first RIFF
+    /// header chunk**" — for WebP, the last sub-chunk of the `RIFF`/`WEBP` form.
+    ///
+    /// "Last" is stricter than "after the image data": the store goes behind `EXIF`, behind `XMP `,
+    /// and behind the unknown chunks §2.7.1.6 asks writers to preserve, which
+    /// `write_extended_preserving` otherwise emits at the end. Nothing else pins that the store
+    /// outranks the preserved chunks.
+    #[test]
+    fn the_c2pa_chunk_is_written_last_of_all() {
+        let header = Vp8xHeader {
+            canvas_width: 16,
+            canvas_height: 16,
+            ..Default::default()
+        };
+        let metadata = MetadataChunks {
+            icc: Some(b"icc"),
+            exif: Some(b"exif"),
+            xmp: Some(b"<x/>"),
+            c2pa: Some(b"store"),
+        };
+        let unknown = [Chunk {
+            fourcc: FourCc::from(*b"XYZW"),
+            payload: &[0xaa],
+        }];
+        let file =
+            write_extended_preserving(&header, &metadata, &[(FourCc::VP8L, &[0x2f])], &unknown)
+                .unwrap();
+        assert_eq!(
+            chunk_ids(&file),
+            vec![
+                FourCc::VP8X,
+                FourCc::ICCP,
+                FourCc::VP8L,
+                FourCc::EXIF,
+                FourCc::XMP,
+                FourCc::from(*b"XYZW"),
+                C2PA_FOURCC,
+            ]
+        );
+        assert_eq!(MetadataChunks::read(&file).unwrap(), metadata);
+    }
+
+    /// The `VP8X` feature byte has no C2PA bit (RFC 9649 §2.5), so a store must neither set one nor
+    /// disturb the three flags that do exist: presence is decided by the chunk alone.
+    #[test]
+    fn a_c2pa_store_sets_no_vp8x_feature_flag() {
+        let header = Vp8xHeader {
+            canvas_width: 4,
+            canvas_height: 4,
+            ..Default::default()
+        };
+        let image: &[(FourCc, &[u8])] = &[(FourCc::VP8L, &[0x2f])];
+        let with_store = write_extended_with_metadata(
+            &header,
+            &MetadataChunks {
+                c2pa: Some(b"store"),
+                ..Default::default()
+            },
+            image,
+        )
+        .unwrap();
+        assert_eq!(vp8x_header_of(&with_store), header);
+        // Byte for byte the file is a store-free one with the chunk appended: nothing ahead of the
+        // store moved, and no flag byte changed.
+        let without =
+            write_extended_with_metadata(&header, &MetadataChunks::default(), image).unwrap();
+        assert_eq!(&with_store[12..without.len()], &without[12..]);
+    }
+
+    /// `c2pa_span` reports the chunk's whole span — identifier, size field and payload — because
+    /// that is what a `c2pa.hash.data` exclusion covers (C2PA 2.4 §18.5). The RIFF pad byte after an
+    /// odd-length store (§2.3) is framing, so it stays outside both the span and the payload.
+    #[test]
+    fn c2pa_span_covers_the_whole_chunk_but_not_the_pad_byte() {
+        let store = b"odd length store!"; // 17 bytes -> one pad byte
+        assert_eq!(store.len() % 2, 1, "the fixture must exercise the pad byte");
+        let file = write_extended_with_metadata(
+            &Vp8xHeader {
+                canvas_width: 4,
+                canvas_height: 4,
+                ..Default::default()
+            },
+            &MetadataChunks {
+                c2pa: Some(store),
+                ..Default::default()
+            },
+            &[(FourCc::VP8L, &[0x2f])],
+        )
+        .unwrap();
+
+        let span = c2pa_span(&file).unwrap().expect("the store was embedded");
+        assert_eq!(&file[span.start..span.start + 4], b"C2PA", "identifier");
+        assert_eq!(
+            &file[span.start + 4..span.start + 8],
+            &(store.len() as u32).to_le_bytes(),
+            "size field"
+        );
+        assert_eq!(&file[span.start + 8..span.end], store, "payload");
+        assert_eq!(span.end, file.len() - 1, "the pad byte is outside the span");
+        assert_eq!(file[file.len() - 1], 0, "§2.3: the pad byte is zero");
+    }
+
+    /// The span is an offset into the whole file, so the pad byte of every *preceding* odd-length
+    /// chunk has to be counted as well.
+    #[test]
+    fn c2pa_span_counts_the_padding_of_the_chunks_before_it() {
+        let mut w = RiffWriter::new();
+        w.write_chunk(FourCc::VP8L, &[0x2f, 0x00, 0x00]).unwrap(); // odd -> padded
+        w.write_chunk(FourCc::EXIF, b"odd").unwrap(); // odd -> padded
+        w.write_chunk(C2PA_FOURCC, b"store").unwrap();
+        let file = w.finish().unwrap();
+        let span = c2pa_span(&file).unwrap().expect("the store was embedded");
+        assert_eq!(&file[span.start..span.start + 4], b"C2PA");
+        // 12-byte file header, then two chunks of 8 header + 3 payload + 1 pad bytes each; the
+        // store's own chunk is its 8-byte header plus its five payload bytes.
+        let start = 12 + (8 + 3 + 1) + (8 + 3 + 1);
+        assert_eq!(span, start..start + 8 + 5);
+    }
+
+    /// A file with no store has no span to report, rather than an empty range at some offset a
+    /// caller might hash around.
+    #[test]
+    fn c2pa_span_is_none_without_a_store() {
+        let file = write_simple_lossless(&[0x2f]).unwrap();
+        assert_eq!(c2pa_span(&file).unwrap(), None);
+    }
+
+    /// The store is *not* an unknown chunk to this crate: `WebpLayout::parse` routes it to
+    /// `MetadataChunks::c2pa`, so `write_extended_preserving` cannot emit it twice — once out of
+    /// `unknown` and once out of `metadata` — when a file is read, modified and written back.
+    #[test]
+    fn a_store_read_back_is_metadata_and_survives_a_rewrite_exactly_once() {
+        let original = raw_file(&[
+            (FourCc::VP8X, &vp8x(false)),
+            (FourCc::VP8L, &[0x2f]),
+            (C2PA_FOURCC, b"store"),
+        ]);
+        let layout = WebpLayout::parse(&original).unwrap();
+        assert_eq!(layout.metadata.c2pa, Some(&b"store"[..]));
+        assert!(layout.unknown.is_empty(), "a store is not an unknown chunk");
+
+        let rewritten = write_extended_preserving(
+            &layout.vp8x.unwrap(),
+            &layout.metadata,
+            &[(FourCc::VP8L, layout.bitstream.unwrap().1)],
+            &layout.unknown,
+        )
+        .unwrap();
+        assert_eq!(rewritten, original);
+    }
+
+    /// §A.3.7 constrains a *writer*. A reader must not turn §2.7's ordering rule against a store it
+    /// finds early, since §2.7 does not list `C2PA` among the reconstruction chunks.
+    #[test]
+    fn a_store_ahead_of_the_bitstream_still_parses() {
+        let file = raw_file(&[
+            (FourCc::VP8X, &vp8x(false)),
+            (C2PA_FOURCC, b"store"),
+            (FourCc::VP8L, &[0x2f]),
+        ]);
+        let layout = WebpLayout::parse(&file).unwrap();
+        assert_eq!(layout.metadata.c2pa, Some(&b"store"[..]));
+        // 12-byte header + the 18-byte VP8X chunk, then 8 + 5 bytes of store chunk.
+        assert_eq!(c2pa_span(&file).unwrap(), Some(30..43));
+    }
+
+    /// The store joins the "first of each kind wins" policy the crate applies everywhere, and the
+    /// span reported is the same chunk the payload came from.
+    #[test]
+    fn metadata_chunks_read_keeps_the_first_store() {
+        let mut w = RiffWriter::new();
+        w.write_chunk(FourCc::VP8L, &[0x2f]).unwrap();
+        w.write_chunk(C2PA_FOURCC, b"first").unwrap();
+        w.write_chunk(C2PA_FOURCC, b"second").unwrap();
+        let file = w.finish().unwrap();
+        assert_eq!(
+            MetadataChunks::read(&file).unwrap().c2pa,
+            Some(&b"first"[..])
+        );
+        let span = c2pa_span(&file).unwrap().expect("the store was embedded");
+        assert_eq!(&file[span.start + 8..span.end], b"first");
     }
 }
