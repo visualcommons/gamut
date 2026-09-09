@@ -39,6 +39,7 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | P9 | §4.5 | **Space opt:** lossless palette/gray/alpha-drop reduction (size-estimate chosen) + brute-force filter strategy; extended to grey/grey-alpha/16-bit inputs with lossless 16→8 demotion and sub-byte grey packing (#338) | ✅ done |
 | P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ✅ done |
 | E1 | #224 | **Efficiency:** `deconstruct` byte accounting; divan size/bpp + per-stage bench; libpng-9 size contract; opt-in transparent cleanup; palette-vs-native race; `crc32fast` and restructured filter kernels (see [Efficiency](#efficiency-issue-224)) | ✅ done |
+| C1 | C2PA 2.4 §A.3.2, §18.5.4 | **C2PA carriage** (#440): the `caBX` manifest store — raw decode surface (`c2pa`; first CRC-valid chunk before `IDAT` wins, ignored ones counted, under the metadata budget); `with_c2pa` / `with_c2pa_reserved` as the last chunk before `IDAT`; the whole-chunk exclusion span from `encode_with_report` and `PngReport::c2pa`, filled in place by `fill_c2pa` (see [C2PA](#c2pa-manifest-store-issue-440)) | ✅ done |
 
 ## Decoder phases (issue #249)
 
@@ -51,6 +52,88 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | D5 | §11.3 | Rich `decode()` → `DecodedPng`: raw eXIf/iCCP/XMP/text payloads (MetadataBlock-ready), parsed gAMA/cHRM/sRGB/cICP, metadata inflation budget | ✅ done |
 | D6 | — | libpng differential conformance suite over generated fixtures; malformed-input rejection corpus; mutation-gap closure | ✅ done |
 | D7 | §5, §11.3 | Pixel-free metadata entry point (issue #379): `metadata()` / `PngDecoder::metadata()` → `PngMetadata`, sharing one chunk-classification predicate with `decode()`; IDAT skipped by length, never read or inflated. Mirrors `gamut_jpeg::metadata` / `gamut_webp::metadata` | ✅ done |
+
+## C2PA manifest store (issue #440)
+
+Part of epic #239. gamut **locates, bounds, carries and reserves** the C2PA manifest store; it
+never parses or judges it. The store is opaque bytes plus byte ranges here, and validation is
+`c2pa-rs`'s (`references/c2pa/README.md` draws the boundary).
+
+**Carriage.** The store is the data of a `caBX` chunk, uncompressed (C2PA 2.4 §A.3.2). The chunk
+type is spelled once, in `chunk::CABX`, and its *property bits* are asserted rather than only its
+letters: ancillary and private (bit 5 set on bytes 0 and 1), reserved bit clear, and — the point —
+**unsafe to copy** (bit 5 *clear* on byte 3; PNG §5.4 Table 6 gives that polarity, and the issue's
+prose had it backwards). A PNG editor that rewrites the image must drop an unrecognised
+unsafe-to-copy chunk, which is the container enforcing the same no-copy-forward law
+`gamut-metadata`'s `C2paPolicy` states for the facade: a store is bound to the bytes it was signed
+over, so one copied forward into a rewritten file is invalid by construction.
+
+**What counts as the store.** One rule, in every reader: the **first CRC-valid `caBX` before the
+first `IDAT`**. First, because a file carries exactly one store (§A.3.2) — PNG has no multi-chunk
+store, unlike JPEG's APP11 run. CRC-valid, because §13.1 makes a mismatch skippable and the decode
+skips it. Before `IDAT`, because §A.3.2 puts it there and calls data after it bad-form: a `caBX`
+appended to a finished file is not that file's provenance, and accepting one would let an appender
+give a store to a file that carries none.
+
+**Decode.** `DecodedPng::c2pa` / `PngMetadata::c2pa` carry that chunk verbatim, ready for
+`MetadataBlock::C2pa`. The store is attacker-sized like every ancillary payload, so its bytes are
+charged to the one cumulative `with_max_metadata_bytes` budget; a store past the remainder is
+skipped, not an error, and — skipped — is still the file's first store, so a smaller one after it
+is ignored rather than substituted.
+
+`c2pa_ignored` counts every CRC-valid `caBX` **in the datastream** that was not surfaced as the
+store (a `usize`: the file's real number, not a saturated ceiling). That is three cases — a chunk
+later than the first, one positioned after `IDAT`, and the store-position chunk itself when it
+busted the budget — and the count deliberately does not say which: `c2pa == None` with a non-zero
+count is any of them, not evidence of an appended store. What it does **not** cover is a `caBX`
+after `IEND`, which is a trailer rather than part of the datastream (§13.2) and which neither
+metadata walk reaches; that shape is visible in `deconstruct`'s report, as a trailer segment.
+
+**Encode.** `with_c2pa(store)` embeds a store computed for this file; `with_c2pa_reserved(len)`
+writes `len` zero bytes in its place. Either is emitted as the **last** chunk before the first
+`IDAT` — after `PLTE`/`tRNS` and every other ancillary chunk — so the chunk's offset depends only
+on what precedes it and every later byte is `IDAT`/`IEND`. §A.3.2 asks only that it precede
+`IDAT`; last-before-`IDAT` is what makes the reserve-then-fill flow a no-move: encode with the
+reservation, hash with the chunk's span excluded, then encode again with the finished store of the
+same length — the output is byte-reproducible, so the second file differs from the first only in
+the payload and the chunk CRC. `tests/c2pa.rs` pins that as an exact-byte diff.
+
+**Exclusion span, and filling it.** `encode_with_report` (for the file just written) and
+`PngReport::c2pa` (for any file, including an indexed encode) name the chunk's **whole** span —
+length, type, payload and CRC — as `C2paSpan`, with the payload bracketed inside it. §18.5.4 says
+the length and type go inside the exclusion; the CRC must too, since it changes with the payload,
+and a `c2pa.hash.data` computed over any of them breaks on the store's first write. The span is
+derived from the same chunk walk the byte accounting uses, so it is always one of the report's
+claimed segments.
+
+`fill_c2pa(&mut png, &span, store)` then writes the finished store into that span in place,
+rewriting the payload and the chunk CRC and nothing else — O(store) rather than the O(encode) of a
+second `with_c2pa` pass, and without tying the signature to the encoder reproducing its output.
+Its arguments are validated first (span inside the image, framing a chunk, naming a `caBX`, store
+exactly the reserved length), so a rejected call leaves the file untouched rather than half
+filled.
+
+A span is **carriage**, not a decode result. The report has no byte budget, so a store past
+`with_max_metadata_bytes` is still spanned here while `decode().c2pa` is `None`; likewise
+`chunk(b"caBX").count` counts CRC-invalid chunks and chunks in the trailer, which `c2pa_ignored`
+does not. Each number answers its own question, and the docs say so rather than promising they
+agree.
+
+**Placement is ours, not the format's.** The store is written last before `IDAT` so its offset
+depends only on what precedes it — the property the reserve-then-fill flow rests on. PNG §14.3.2
+warns that ordering relative to *other ancillary chunks* is never guaranteed and an editor may
+insert one after ours, so "last" describes files as this encoder wrote them; readers assume only
+"before `IDAT`".
+
+**Oracle.** libpng has no C2PA support and carries `caBX` as an unknown chunk — which is exactly
+the proof needed for framing: for the same payload it must produce the same length, type and CRC
+bytes as gamut, it must decode gamut's file pixel-exact with the chunk in place, and gamut must read
+the store from a libpng-written file. The behavioural oracle (`c2pa-rs`, against which a store's
+hash assertion can be checked over the excluded span) is issue #447.
+
+**Not done, by design.** No JUMBF parsing, not even of the outer box length. No validation verdict
+of any kind. `gamut convert` does not carry a store across a re-encode (that is the facade's
+`C2paPolicy` law, and the CLI's own path is #448/#483).
 
 ## Efficiency (issue #224)
 

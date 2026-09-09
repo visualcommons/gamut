@@ -3,6 +3,22 @@
 //! These are optional. The encoder accumulates whatever the caller sets and emits the chunks in the
 //! order PNG requires (Table 7): colour-space chunks before `PLTE`, the rest before `IDAT`.
 //!
+//! One chunk here is not PNG's own: the C2PA manifest store, `caBX` (C2PA 2.4 §A.3.2). It is
+//! emitted **last** of everything before `IDAT`, so that its offset depends only on the chunks
+//! that precede it and every byte after it is `IDAT` or `IEND` — which is what lets a reserved
+//! store be filled in place ([`crate::fill_c2pa`]) without moving a byte outside the chunk.
+//! §A.3.2 asks only that it precede `IDAT`.
+//!
+//! "Last" is this writer's guarantee about the files it produces, **not** a property that
+//! survives other tools. PNG §14.3.2 is explicit that an unsafe-to-copy chunk's ordering
+//! requirements are relative to the *critical* chunks only, that "it is never valid to assume
+//! that a specific ancillary chunk type occurs with any particular positioning relative to other
+//! ancillary chunks", and that a PNG editor may insert another ancillary chunk after one an
+//! application always writes last. So a reader must assume no more than "before `IDAT`" — which
+//! is exactly what [`crate::PngReport::c2pa`] and the decoder assume — while a *reservation*
+//! whose offsets a signer depends on holds only for a file that has not been edited since this
+//! encoder wrote it.
+//!
 //! Two of them, `bKGD` and `sBIT`, have a payload whose shape is the image's colour type, and the
 //! encoder does not always write the colour type the caller set them for: auto-reduce may write a
 //! palette, a greyscale or a colour-keyed truecolour image in place of the input's layout, and the
@@ -115,6 +131,9 @@ pub(crate) struct Ancillary {
     pub iccp: Option<(String, Vec<u8>)>,
     /// eXIf: raw EXIF/TIFF bytes (the chunk payload starts with the TIFF byte-order marker).
     pub exif: Option<Vec<u8>>,
+    /// caBX: the C2PA manifest store, raw and uncompressed (C2PA 2.4 §A.3.2) — or a run of zero
+    /// bytes reserving its place. Emitted last, immediately before the first `IDAT`.
+    pub c2pa: Option<Vec<u8>>,
     /// tEXt / zTXt / iTXt entries, emitted in insertion order.
     texts: Vec<TextEntry>,
 }
@@ -189,7 +208,8 @@ impl Ancillary {
         }
     }
 
-    /// Emits the remaining ancillary chunks that precede `IDAT` (after any `PLTE`/`tRNS`).
+    /// Emits the remaining ancillary chunks that precede `IDAT` (after any `PLTE`/`tRNS`), the
+    /// C2PA manifest store last of all so that it is the chunk immediately before `IDAT`.
     /// `effort` is the encoder's [`Level::Best`] budget, applied to compressed `zTXt` payloads;
     /// `written` is the IHDR (and palette) these chunks sit under, which `bKGD` must agree with.
     pub(crate) fn write_post_plte(
@@ -220,6 +240,11 @@ impl Ancillary {
         }
         for entry in &self.texts {
             write_text(out, entry, effort);
+        }
+        // Last, so nothing whose size could shift the store follows it: a reservation filled by
+        // a second encode of equal length keeps every offset outside this chunk.
+        if let Some(store) = &self.c2pa {
+            chunk::write_chunk(out, chunk::CABX, store);
         }
     }
 }
@@ -515,6 +540,42 @@ mod tests {
             vec![7, 234, 6, 13, 1, 2, 3]
         ); // 2026 = 0x07EA
         assert_eq!(find_chunk(&out, b"tEXt").unwrap(), b"Title\0hi".to_vec());
+    }
+
+    /// The manifest store is the last chunk the pre-IDAT pass writes, after every text entry
+    /// added before or after it was set, and it is written raw: no keyword, no compression byte.
+    #[test]
+    fn the_c2pa_store_is_written_raw_and_last_before_idat() {
+        let mut a = Ancillary::default();
+        a.add_text_latin1("Before", "set first");
+        a.c2pa = Some(b"\0\0\0\x1fjumb".to_vec());
+        a.add_text_compressed("After", "set later");
+        a.set_time(2026, 9, 6, 0, 0, 0);
+        let mut out = vec![0u8; 8];
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+
+        let mut types = Vec::new();
+        let mut i = 8;
+        while i + 12 <= out.len() {
+            let len = u32::from_be_bytes([out[i], out[i + 1], out[i + 2], out[i + 3]]) as usize;
+            types.push(out[i + 4..i + 8].to_vec());
+            i += 12 + len;
+        }
+        assert_eq!(types.last().map(Vec::as_slice), Some(&b"caBX"[..]));
+        assert_eq!(
+            types.iter().filter(|t| t.as_slice() == b"caBX").count(),
+            1,
+            "exactly one store"
+        );
+        assert_eq!(
+            find_chunk(&out, b"caBX"),
+            Some(b"\0\0\0\x1fjumb".to_vec()),
+            "the payload is the store verbatim"
+        );
+        // Unset, no chunk at all.
+        let mut none = vec![0u8; 8];
+        Ancillary::default().write_post_plte(&mut none, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        assert_eq!(find_chunk(&none, b"caBX"), None);
     }
 
     #[test]

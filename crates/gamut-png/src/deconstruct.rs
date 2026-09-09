@@ -29,7 +29,7 @@ use std::collections::HashMap;
 
 use gamut_core::{Error, Result};
 
-use crate::chunk::{ChunkReader, RawChunk, SIGNATURE};
+use crate::chunk::{C2paSpan, CABX, ChunkReader, RawChunk, SIGNATURE};
 use crate::decoded::PngHeader;
 use crate::decoder::DEFAULT_MAX_IMAGE_BYTES;
 use crate::filter::FilterType;
@@ -399,6 +399,60 @@ impl PngReport {
             self.header.color_type.channels(),
             self.header.bit_depth,
         )
+    }
+
+    /// Where a C2PA manifest store is **carried**: the whole span of the first CRC-valid `caBX`
+    /// chunk before the first `IDAT` — length, type, payload **and CRC** — or `None` when the file
+    /// carries none there. The store's own bytes are the span's `payload`.
+    ///
+    /// This is the range a `c2pa.hash.data` assertion must exclude (C2PA 2.4 §18.5.4): the store's
+    /// bytes change when it is written, the length field when it is resized, and the CRC with
+    /// either, so a hash that keeps any of them breaks on the store's first update. It is also the
+    /// span [`fill_c2pa`](crate::fill_c2pa) fills.
+    ///
+    /// The rule is [`crate::PngDecoder::decode`]'s: the *first* chunk, since a PNG carries exactly
+    /// one store (§A.3.2); *CRC-valid*, since §13.1 makes a mismatch skippable; *before `IDAT`*,
+    /// since data after it is bad-form and an appended chunk must not become the file's store.
+    ///
+    /// # This is carriage, not the decoded payload
+    ///
+    /// A span here does **not** promise that [`PngDecoder::decode`] surfaced a `c2pa` payload for
+    /// the same file, and the two answer different questions:
+    ///
+    /// - this walk reports what the file *carries*, and has no byte budget;
+    /// - [`PngDecoder::with_max_metadata_bytes`] bounds what a decode *admits*, so a store past
+    ///   that budget is skipped and `decode().c2pa` is `None` while this still names its span.
+    ///
+    /// That is deliberate — a report that hid a chunk because some other reader's budget was too
+    /// small would not be a byte accounting — but it means a caller must not gate on one and read
+    /// the other. Exclude the span this returns; read the bytes `decode` returns.
+    ///
+    /// For the same reason, this does not agree with [`chunk`](Self::chunk)`(b"caBX")`'s count,
+    /// which counts every `caBX` including CRC-invalid ones and any after `IDAT`, nor with the
+    /// decoder's `c2pa_ignored`, which counts only the CRC-valid ones it declined to surface.
+    /// Each number answers its own question.
+    ///
+    /// [`PngDecoder::decode`]: crate::PngDecoder::decode
+    /// [`PngDecoder::with_max_metadata_bytes`]: crate::PngDecoder::with_max_metadata_bytes
+    #[must_use]
+    pub fn c2pa(&self) -> Option<C2paSpan> {
+        for segment in &self.segments {
+            match segment.kind {
+                SegmentKind::Chunk {
+                    chunk_type: CABX,
+                    crc_ok: true,
+                    ..
+                } => return Some(C2paSpan::of(segment.range.clone())),
+                // The datastream's store sits before the pixels; nothing from here on is one.
+                SegmentKind::Chunk { chunk_type, .. }
+                    if &chunk_type == b"IDAT" || &chunk_type == b"IEND" =>
+                {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// The stats for one chunk type, if the file carries it.

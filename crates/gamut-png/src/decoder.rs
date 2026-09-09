@@ -26,7 +26,7 @@ use gamut_core::{
 };
 
 use crate::backend::{IdatInflater, IdatInfo, Registry, run_inflaters};
-use crate::chunk::ChunkReader;
+use crate::chunk::{CABX, ChunkReader};
 use crate::color::ColorType;
 use crate::decoded::{self, DecodedPng, PngHeader, PngImage, PngMetadata};
 use crate::filter::{self, FilterType};
@@ -39,7 +39,8 @@ use crate::{adam7, inflate, pack};
 /// `pub(crate)` because [`crate::deconstruct`] reports against the same budget: a file this
 /// decoder decodes is one the report walk will inflate to count filters.
 pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
-/// Default cumulative cap on inflated metadata (iCCP/zTXt/iTXt) payloads: 16 MiB.
+/// Default cumulative cap on metadata payloads — inflated iCCP/zTXt/iTXt plus the raw `caBX`
+/// manifest store: 16 MiB.
 const DEFAULT_MAX_METADATA_BYTES: usize = 16 << 20;
 /// The spec's own dimension bound (§11.2.1): width and height are 1 ..= 2³¹ − 1.
 const SPEC_MAX_DIMENSION: u32 = i32::MAX as u32;
@@ -138,9 +139,10 @@ impl PngDecoder {
         self
     }
 
-    /// Caps the *cumulative* inflated size of compressed metadata payloads — iCCP, zTXt, and
-    /// compressed iTXt together (default 16 MiB). Payloads past the budget are skipped, not
-    /// errors; the typed [`DecodeImage`] path never inflates metadata at all.
+    /// Caps the *cumulative* size of metadata payloads — the inflated iCCP, zTXt and compressed
+    /// iTXt, plus the raw C2PA manifest store (`caBX`), which is uncompressed but sized by the
+    /// file, together (default 16 MiB). Payloads past the budget are skipped, not errors; the
+    /// typed [`DecodeImage`] path never inflates or copies metadata at all.
     #[must_use]
     pub fn with_max_metadata_bytes(mut self, bytes: usize) -> Self {
         self.max_metadata_bytes = bytes;
@@ -177,8 +179,14 @@ struct Parsed<'a> {
     trns: Option<&'a [u8]>,
     /// All IDAT payloads, concatenated (§5.6 requires them consecutive).
     idat: Vec<u8>,
-    /// Metadata-bearing ancillary chunks in file order (populated only when requested).
+    /// Metadata-bearing ancillary chunks in file order (populated only when requested), holding
+    /// only chunks in a position where a manifest store may appear — see `c2pa_after_idat`.
     ancillary: Vec<([u8; 4], &'a [u8])>,
+    /// CRC-valid `caBX` chunks found *after* `IDAT`. C2PA §A.3.2 places the store before `IDAT`
+    /// and calls data after it bad-form, so these are never the store; they are counted rather
+    /// than dropped silently, because a `caBX` appended to a finished file is what an injection
+    /// attempt looks like.
+    c2pa_after_idat: usize,
 }
 
 /// Decoded samples in the file's native value range: one byte per sample for depths ≤ 8
@@ -223,6 +231,7 @@ impl PngDecoder {
         let mut trns: Option<&[u8]> = None;
         let mut idat = Vec::new();
         let mut ancillary = Vec::new();
+        let mut c2pa_after_idat = 0usize;
         let mut seen_idat = false;
         let mut idat_done = false;
         let mut seen_iend = false;
@@ -320,7 +329,14 @@ impl PngDecoder {
                     // These are borrowed slices, so an unrecognised chunk costs a fat pointer,
                     // not a copy of its payload.
                     if want_metadata && chunk.crc_ok {
-                        ancillary.push((chunk.chunk_type, chunk.data));
+                        // The one chunk type whose *position* decides whether it is metadata at
+                        // all: a manifest store precedes IDAT (§A.3.2), so one after IDAT is
+                        // counted as ignored rather than offered as the store.
+                        if chunk.chunk_type == CABX && seen_idat {
+                            c2pa_after_idat += 1;
+                        } else {
+                            ancillary.push((chunk.chunk_type, chunk.data));
+                        }
                     }
                 }
                 _ => {
@@ -351,6 +367,7 @@ impl PngDecoder {
             trns,
             idat,
             ancillary,
+            c2pa_after_idat,
         })
     }
 
@@ -388,7 +405,7 @@ impl PngDecoder {
     /// Decodes a PNG into its native layout together with the ancillary metadata — the rich
     /// counterpart of the typed [`DecodeImage`] implementations, and the only way to reach the
     /// palette of an indexed image, the tRNS colour key, and the raw metadata payloads
-    /// (eXIf/ICC/XMP/text, plus parsed gAMA/cHRM/sRGB/cICP values).
+    /// (eXIf/ICC/XMP/text and the C2PA manifest store, plus parsed gAMA/cHRM/sRGB/cICP values).
     ///
     /// # Errors
     ///
@@ -397,7 +414,11 @@ impl PngDecoder {
     /// payloads are not errors: the affected chunk is skipped (§13.1) and its field stays empty.
     pub fn decode(&self, data: &[u8]) -> Result<DecodedPng> {
         let parsed = self.parse_stream(data, true)?;
-        let meta = decoded::collect(&parsed.ancillary, self.max_metadata_bytes);
+        let meta = collected(
+            &parsed.ancillary,
+            self.max_metadata_bytes,
+            parsed.c2pa_after_idat,
+        );
         let native = self.decode_parsed(&parsed)?;
         let header = PngHeader {
             width: native.header.width,
@@ -415,6 +436,8 @@ impl PngDecoder {
             exif: meta.exif,
             icc_profile: meta.icc_profile,
             xmp: meta.xmp,
+            c2pa: meta.c2pa,
+            c2pa_ignored: meta.c2pa_ignored,
             texts: meta.texts,
             gamma: meta.gamma,
             chromaticities: meta.chromaticities,
@@ -454,8 +477,8 @@ impl PngDecoder {
     /// # }
     /// ```
     pub fn metadata(&self, data: &[u8]) -> Result<PngMetadata> {
-        let chunks = walk_metadata_chunks(data)?;
-        Ok(decoded::collect(&chunks, self.max_metadata_bytes))
+        let (chunks, c2pa_after_idat) = walk_metadata_chunks(data)?;
+        Ok(collected(&chunks, self.max_metadata_bytes, c2pa_after_idat))
     }
 
     /// Runs the typed pipeline: parse (without metadata) → decode.
@@ -525,6 +548,11 @@ impl PngDecoder {
     }
 }
 
+/// What one metadata walk found: the chunks in a position where their type may appear, and how
+/// many CRC-valid `caBX` chunks sat after `IDAT` — never the store (C2PA §A.3.2), so counted
+/// rather than returned among the chunks.
+type MetadataWalk<'a> = (Vec<([u8; 4], &'a [u8])>, usize);
+
 /// Walks the chunk stream collecting the CRC-valid ancillary chunks, for [`decoded::collect`] to
 /// classify — the same handoff [`PngDecoder::parse_stream`] makes, so the two entry points cannot
 /// disagree about which chunks carry metadata.
@@ -532,7 +560,12 @@ impl PngDecoder {
 /// Deliberately not `parse_stream` itself: that accumulates every IDAT payload into an owned
 /// `Vec` and then requires at least one, neither of which a metadata read should do. Here IDAT
 /// (and PLTE) is skipped by length, so the pixel data is never touched or copied.
-fn walk_metadata_chunks(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>> {
+///
+/// Returns a [`MetadataWalk`]: the chunks together with the number of CRC-valid `caBX` chunks
+/// seen *after* `IDAT`,
+/// which are never the store (§A.3.2) and so are counted rather than returned — the same split
+/// [`PngDecoder::parse_stream`] makes, so the two entry points agree on what the store is.
+fn walk_metadata_chunks(data: &[u8]) -> Result<MetadataWalk<'_>> {
     let mut reader = ChunkReader::new(data)?;
     let first = reader
         .next_chunk()?
@@ -554,6 +587,8 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>> {
     ihdr::parse(first.data)?;
 
     let mut chunks = Vec::new();
+    let mut c2pa_after_idat = 0usize;
+    let mut seen_idat = false;
     let mut seen_iend = false;
     while let Some(chunk) = reader.next_chunk()? {
         match &chunk.chunk_type {
@@ -580,11 +615,16 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>> {
                 break;
             }
             // The pixel-bearing critical chunks. Skipped by length — never read, never copied.
-            b"IDAT" | b"PLTE" => {}
+            b"IDAT" | b"PLTE" => seen_idat |= &chunk.chunk_type == b"IDAT",
             _ if chunk.is_ancillary() => {
                 // §13.1: a CRC mismatch skips the chunk rather than failing the image.
                 if chunk.crc_ok {
-                    chunks.push((chunk.chunk_type, chunk.data));
+                    // A store precedes IDAT (§A.3.2); one after it is counted, not offered.
+                    if chunk.chunk_type == CABX && seen_idat {
+                        c2pa_after_idat += 1;
+                    } else {
+                        chunks.push((chunk.chunk_type, chunk.data));
+                    }
                 }
             }
             _ => {
@@ -604,16 +644,28 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>> {
             "PNG: missing IEND",
         ));
     }
-    Ok(chunks)
+    Ok((chunks, c2pa_after_idat))
+}
+
+/// Assembles the metadata from a walk's two results: the chunks in a store-bearing position, and
+/// the count of `caBX` chunks the walk found after `IDAT`.
+///
+/// The one place that addition happens, so `decode` and both `metadata` entry points cannot come
+/// to report different counts for the same file.
+fn collected(chunks: &[([u8; 4], &[u8])], budget: usize, c2pa_after_idat: usize) -> PngMetadata {
+    let mut meta = decoded::collect(chunks, budget);
+    meta.c2pa_ignored += c2pa_after_idat;
+    meta
 }
 
 /// Reads a PNG's ancillary metadata without decoding any pixels.
 ///
 /// Walks the chunk stream, collecting the metadata-bearing ancillary chunks and inflating only
-/// the compressed ones (iCCP, zTXt, and compressed iTXt) under one cumulative 16 MiB budget.
-/// IDAT is skipped by length, so no pixel data is read, copied, or inflated — which makes this
-/// cheap enough for a probe on a large file. `cICP`, `sRGB`, `gAMA` and `cHRM` are uncompressed
-/// and cost nothing beyond the walk.
+/// the compressed ones (iCCP, zTXt, and compressed iTXt) under one cumulative 16 MiB budget,
+/// which the raw C2PA manifest store (`caBX`) is charged to as well. IDAT is skipped by length,
+/// so no pixel data is read, copied, or inflated — which makes this cheap enough for a probe on
+/// a large file. `cICP`, `sRGB`, `gAMA` and `cHRM` are uncompressed and cost nothing beyond the
+/// walk.
 ///
 /// The result matches [`PngDecoder::decode`] field for field on the same file. Use
 /// [`PngDecoder::metadata`] instead if you need a metadata budget other than the default.
@@ -661,8 +713,12 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>> {
 /// # }
 /// ```
 pub fn metadata(data: &[u8]) -> Result<PngMetadata> {
-    let chunks = walk_metadata_chunks(data)?;
-    Ok(decoded::collect(&chunks, DEFAULT_MAX_METADATA_BYTES))
+    let (chunks, c2pa_after_idat) = walk_metadata_chunks(data)?;
+    Ok(collected(
+        &chunks,
+        DEFAULT_MAX_METADATA_BYTES,
+        c2pa_after_idat,
+    ))
 }
 
 /// Validates PLTE presence/shape and tRNS shape against the colour type (§11.2.2, §11.3.1.1),
