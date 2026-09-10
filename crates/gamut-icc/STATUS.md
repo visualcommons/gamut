@@ -50,8 +50,10 @@ colorimetry they resolve is **gamut-color's and is never restated here** — pri
 point come from `ColourPrimaries::chromaticities`, the RGB→XYZ construction and Bradford
 adaptation from `gamut_color::matrix`, the ST 2084 curve from `gamut_color::transfer` — and those
 constructors are themselves fallible, so an input whose colorimetry cannot be resolved is declined
-rather than given a profile whose colorants are silently the PCS axes. `builtin` yields `Some` for
-every `BuiltinProfile` in this release and a test pins that.
+rather than given a profile whose colorants are silently the PCS axes. Colorimetry is not the only
+reason to decline: `from_cicp` also refuses signalling this profile *shape* cannot carry, which is
+where narrow range lands — see "CICP fields the profile does not build from" below. `builtin`
+yields `Some` for every `BuiltinProfile` in this release and a test pins that.
 
 **Dependency direction: `gamut-icc → gamut-color`.** The constructors need gamut-color's
 colorimetry and gamut-icc's serializer, and only one of the two can own that edge. gamut-color is
@@ -85,15 +87,25 @@ because the set of curves an ICC tag can encode is not the set gamut-color can e
 and 15 have no `TransferCharacteristics` variant, and none of the four BT.709-family codes has a
 gamut-color EOTF, yet all four are exactly encodable.
 
-**CICP fields the profile does not carry.** `from_cicp` builds from the primaries and transfer
-code points only. §10.3 states that "when the data colour space in the profile header is RGB or
-XYZ, MatrixCoefficients shall be 0 (zero)", so the caller's `MatrixCoefficients` — routinely 1, 5,
-6 or 9 in an AVIF/HEIC `nclx` box — is **not** written into the `cicpType` tag; writing it would
-make the profile non-conforming for the most common input there is. `VideoFullRangeFlag` is
-normalized to `1` alongside it, because the profile's matrix and tone curves are defined over
-full-scale RGB. Neither is a loss of information: both describe a luma–chroma encoding the caller
-de-matrixes *before* this profile applies, and both remain in the container signalling a decoder
-reads them from.
+**CICP fields the profile does not build from.** `from_cicp` builds from the primaries and transfer
+code points only, and treats the other two fields differently on purpose — one is rewritten, one is
+a precondition.
+
+`MatrixCoefficients` is **rewritten to zero**. §10.3 states that "when the data colour space in the
+profile header is RGB or XYZ, MatrixCoefficients shall be 0 (zero)", so the caller's value —
+routinely 1, 5, 6 or 9 in an AVIF/HEIC `nclx` box — is **not** written into the `cicpType` tag;
+writing it would make the profile non-conforming for the most common input there is. Nothing is
+lost: the coefficients describe a luma–chroma encoding the caller de-matrixes *before* this profile
+applies, and they remain in the container signalling a decoder reads them from.
+
+`VideoFullRangeFlag` is **not** rewritten. A triple carrying anything but full range (`1`) is
+**declined**. §10.3's own RGB examples put the flag at zero (`1-1-0-0`, `9-16-0-0`), and read
+`1-1-0-0` closely: with `MatrixCoefficients` already zero it is a narrow range on the *RGB samples
+themselves*, which de-matrixing does not remove. This profile's colorants, `chad` and tone curves
+are all defined over full-scale RGB, so normalising the flag to `1` would return a profile that
+renders the caller's colour **wrongly**, not one that merely dropped metadata. Declining is what the
+crate already does for primaries it has no chromaticities for and for a transfer with no ICC tone
+curve. Callers holding narrow-range samples scale them to full range and pass `1`.
 
 **Grey gamma domain.** `gray_with_gamma` takes open `f64` input and declines anything a `kTRC`
 cannot carry: non-finite, non-positive, or ≥ 32 768, the first magnitude `s15Fixed16` (§4.6) cannot

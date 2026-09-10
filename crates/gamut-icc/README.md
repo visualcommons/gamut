@@ -47,13 +47,15 @@ let bytes = p3.to_bytes()?; // ready to embed
 
 // BT.2020 primaries + PQ, as an AVIF `colr` box would signal them. The matrix coefficients are
 // deliberately not carried into the profile: ICC.1:2022 §10.3 requires zero for an RGB profile.
-let hdr = IccProfile::from_cicp(Cicp {
+// The range flag, by contrast, is a precondition: only full range (1) can be described.
+let signalled = Cicp {
     colour_primaries: 9,
     transfer_characteristics: 16,
     matrix_coefficients: 9,
-    video_full_range_flag: 0,
-});
-assert!(hdr.is_some());
+    video_full_range_flag: 1,
+};
+assert!(IccProfile::from_cicp(signalled).is_some());
+assert!(IccProfile::from_cicp(Cicp { video_full_range_flag: 0, ..signalled }).is_none());
 # Ok::<_, gamut_icc::IccError>(())
 ```
 
@@ -64,7 +66,10 @@ and ProPhoto RGB have no code point on either CICP axis and are declined rather 
 `from_cicp` reaches further on the transfer axis — the BT.709 family (H.273 code points 1, 6, 14
 and 15), linear, sRGB and PQ all have an ICC tone-curve encoding — because what an ICC tag can
 encode is not the same set as what gamut-color can evaluate. Every constructor returns an `Option`
-and declines signalling it cannot describe; `STATUS.md` tabulates the curve chosen per transfer.
+and declines signalling it cannot describe — including a narrow-range `VideoFullRangeFlag`, which
+is a scaling of the RGB samples that a full-scale matrix/TRC profile does not perform and that
+de-matrixing does not remove. `STATUS.md` tabulates the curve chosen per transfer and records why
+each field is rewritten or refused.
 
 **Every ICC.1:2022 §10 element type decodes semantically** — the `XYZType`, curve, and text types;
 the `lut8`/`lut16`/`lutAToB`/`lutBToA` transforms; `namedColor2Type`; the measurement/signalling

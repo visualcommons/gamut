@@ -26,27 +26,32 @@
 //!
 //! # What a CICP triple contributes, and what it does not
 //!
-//! [`IccProfile::from_cicp`] takes all four H.273 fields but builds from two of them, and
-//! rewrites the other two. The two rewrites do **not** rest on the same authority, and are
-//! documented apart on purpose.
+//! [`IccProfile::from_cicp`] takes all four H.273 fields but builds from two of them. Of the other
+//! two, one is rewritten and one is a precondition. They do **not** rest on the same authority, and
+//! are documented apart on purpose.
 //!
-//! `MatrixCoefficients` is **conformance**. ICC.1:2022 §10.3 states that *"when the data colour
-//! space in the profile header is RGB or XYZ, MatrixCoefficients shall be 0 (zero)"* — a `shall`
-//! — so the caller's value cannot be carried: an AVIF or HEIC `nclx` box routinely signals 1, 5,
-//! 6 or 9, and writing any of those into an RGB profile would make it non-conforming. Nothing is
-//! lost by that. The coefficients describe a luma–chroma *encoding* the caller de-matrixes before
-//! the profile applies, and they remain in the container's own signalling where a decoder reads
-//! them.
+//! `MatrixCoefficients` is **conformance**, and is rewritten. ICC.1:2022 §10.3 states that *"when
+//! the data colour space in the profile header is RGB or XYZ, MatrixCoefficients shall be 0
+//! (zero)"* — a `shall` — so the caller's value cannot be carried: an AVIF or HEIC `nclx` box
+//! routinely signals 1, 5, 6 or 9, and writing any of those into an RGB profile would make it
+//! non-conforming. Nothing is lost by that. The coefficients describe a luma–chroma *encoding* the
+//! caller de-matrixes before the profile applies, and they remain in the container's own
+//! signalling where a decoder reads them. The sample *range* that accompanies such an encoding is
+//! not theirs to describe — that is the next field, and it is guarded, not rewritten.
 //!
-//! `VideoFullRangeFlag` is **not** conformance. §10.3 says only that the flag "is often 1" for an
-//! RGB profile, and its own RGB examples include `1-1-0-0` and `9-16-0-0` with the flag at zero,
-//! so a narrow-range RGB `cicpType` is a legal tag this module chooses not to write. Fixing it at
-//! `1` is a deliberate normalisation: everything the profile actually contains — the colorant
-//! matrix, the `chad` and the tone curves — is defined over full-scale RGB, so a profile of this
-//! shape signalling narrow range would describe a scaling it does not perform. The consequence is
-//! that the caller's flag is **discarded, not preserved**: two triples differing only in it build
-//! one profile, and a caller that needs the original value must keep it in the container
-//! signalling it came from.
+//! `VideoFullRangeFlag` is **not** conformance, and is **not** rewritten either: a triple carrying
+//! anything but full range (`1`) is **declined**. §10.3 says only that the flag "is often 1" for an
+//! RGB profile, and its own RGB examples include `1-1-0-0` and `9-16-0-0` with the flag at zero, so
+//! a narrow-range RGB `cicpType` is a legal tag — it is simply not one this module can build.
+//! Everything the profile contains — the colorant matrix, the `chad` and the tone curves — is
+//! defined over full-scale RGB, and read §10.3's `1-1-0-0` example closely: with
+//! `MatrixCoefficients` already zero it is a narrow range on the **RGB samples themselves**, so
+//! de-matrixing does not remove it. Normalising the flag to `1` would hand back a profile that
+//! renders the caller's colour *wrongly*, not one that merely dropped a piece of metadata.
+//! Declining is what this module already does for primaries it has no chromaticities for and for a
+//! transfer with no ICC tone curve, and narrow range is the same case: signalling this profile
+//! shape cannot describe. A caller holding narrow-range samples scales them to full range first,
+//! and then the triple it passes is one this module builds.
 //!
 //! # Which reading of transfer 1, 6, 14 and 15
 //!
@@ -213,30 +218,37 @@ impl BuiltinProfile {
     }
 }
 
+/// The one `VideoFullRangeFlag` a profile built here can describe (ITU-T H.273 signals full range
+/// as `1`).
+///
+/// Stated once and read from both ends of the module: it is what [`cicp_of`] writes and what
+/// [`IccProfile::from_cicp`] requires of the caller, so the tag and the precondition cannot drift.
+/// Every colorant, `chad` and tone curve written here is defined over full-scale RGB; see the
+/// module docs for why narrow range is declined rather than normalised.
+const FULL_RANGE: u8 = 1;
+
 /// The `cicpType` value for a pair of CICP axes.
 fn cicp_of(primaries: ColourPrimaries, transfer: TransferCharacteristics) -> Cicp {
-    normalized_cicp(Cicp {
+    rgb_conforming_cicp(Cicp {
         colour_primaries: cicp_byte(primaries.code_point()),
         transfer_characteristics: cicp_byte(transfer.code_point()),
-        // Both set by `normalized_cicp`, which owns the §10.3 rule for every constructor.
+        // Set by `rgb_conforming_cicp`, which owns the §10.3 rule for every constructor.
         matrix_coefficients: 0,
-        video_full_range_flag: 0,
+        video_full_range_flag: FULL_RANGE,
     })
 }
 
-/// `cicp` with the two fields this module does not take from the caller replaced.
+/// `cicp` with `MatrixCoefficients` replaced by the zero ICC.1:2022 §10.3 **requires** of an RGB or
+/// XYZ profile.
 ///
-/// `MatrixCoefficients` is zero because ICC.1:2022 §10.3 **requires** it of an RGB or XYZ profile.
-/// `VideoFullRangeFlag` is `1` by this module's own choice, not by that clause: §10.3 only remarks
-/// that the flag "is often 1" for RGB, and lists RGB examples with it at zero. Full range is what
-/// the colorants and tone curves written alongside it are defined over, so the caller's flag is
-/// normalised away rather than carried — see the module docs.
-///
-/// The two axes the profile is actually built from pass through untouched.
-fn normalized_cicp(cicp: Cicp) -> Cicp {
+/// That is the only field this module rewrites. `VideoFullRangeFlag` is not normalised here: a
+/// triple that does not already carry [`FULL_RANGE`] is declined by
+/// [`IccProfile::from_cicp`] instead, so nothing reaching this function can disagree with the
+/// colorants and curves written alongside it. The two axes the profile is built from pass through
+/// untouched.
+fn rgb_conforming_cicp(cicp: Cicp) -> Cicp {
     Cicp {
         matrix_coefficients: 0,
-        video_full_range_flag: 1,
         ..cicp
     }
 }
@@ -545,23 +557,27 @@ impl IccProfile {
     /// HEIC and JXL usually carry (a `colr`/`nclx` code-point trio) to an embeddable profile.
     ///
     /// Only the primaries and transfer code points shape the profile. The `cicpType` tag records
-    /// those two verbatim, and replaces the other two with `0` and `1`.
+    /// those two verbatim, replaces `MatrixCoefficients` with `0`, and passes
+    /// `VideoFullRangeFlag` through — because the only value it accepts is `1`.
     ///
     /// `MatrixCoefficients` is zero because ICC.1:2022 §10.3 states that when the data colour
     /// space is RGB or XYZ it *shall* be. No information is lost: the coefficients describe a
     /// luma–chroma encoding the caller de-matrixes before this profile applies, and they stay in
     /// the container signalling (`nclx`, AV1 sequence header) a decoder actually reads them from.
     ///
-    /// `VideoFullRangeFlag` is `1` by this crate's choice, **not** by §10.3, which only remarks
-    /// that the flag "is often 1" for RGB and gives RGB examples with it at zero. The profile's
-    /// colorants and tone curves are defined over full-scale RGB, so that is what it signals. The
-    /// caller's flag is therefore **not carried**: triples differing only in it build one profile,
-    /// and a caller that needs the original value must read it from the container signalling.
+    /// `VideoFullRangeFlag` is **not** rewritten. §10.3 does not require `1` — it only remarks
+    /// that the flag "is often 1" for RGB, and gives RGB examples with it at zero — but this
+    /// profile's colorants, `chad` and tone curves are all defined over full-scale RGB, and §10.3's
+    /// own `1-1-0-0` example is a narrow range on the **RGB samples themselves** (its
+    /// `MatrixCoefficients` is already zero), which no de-matrixing removes. Rewriting the flag
+    /// would therefore return a profile that renders the caller's colour wrongly, so a triple that
+    /// does not signal full range is declined instead. Scale narrow-range samples to full range and
+    /// pass `1`.
     ///
     /// Returns `None` when the profile cannot describe the signalling: a primaries code point
     /// with no chromaticities, whether unmodelled or
-    /// [`Unspecified`](ColourPrimaries::Unspecified); or a transfer code point with no ICC tone
-    /// curve, such as HLG (18) or Unspecified (2).
+    /// [`Unspecified`](ColourPrimaries::Unspecified); a transfer code point with no ICC tone
+    /// curve, such as HLG (18) or Unspecified (2); or any `VideoFullRangeFlag` other than `1`.
     ///
     /// # Examples
     ///
@@ -575,14 +591,21 @@ impl IccProfile {
     ///
     /// // The BT.601 matrix an AVIF `nclx` box may carry does not change the profile, and is not
     /// // written into it.
-    /// let matrixed = Cicp { matrix_coefficients: 6, video_full_range_flag: 0, ..signalled };
+    /// let matrixed = Cicp { matrix_coefficients: 6, ..signalled };
     /// assert_eq!(IccProfile::from_cicp(matrixed), IccProfile::from_cicp(signalled));
+    ///
+    /// // Narrow range is a scaling of the RGB samples this profile shape does not perform.
+    /// let narrow = Cicp { video_full_range_flag: 0, ..signalled };
+    /// assert!(IccProfile::from_cicp(narrow).is_none());
     ///
     /// // "Unspecified" primaries name no chromaticities, so no profile can be built.
     /// assert!(IccProfile::from_cicp(Cicp { colour_primaries: 2, ..signalled }).is_none());
     /// ```
     #[must_use]
     pub fn from_cicp(cicp: Cicp) -> Option<Self> {
+        if cicp.video_full_range_flag != FULL_RANGE {
+            return None;
+        }
         let primaries = ColourPrimaries::from_code_point(u16::from(cicp.colour_primaries))?;
         let trc = Trc::for_code_point(cicp.transfer_characteristics)?;
         let named = BuiltinProfile::for_axes(primaries, cicp.transfer_characteristics);
@@ -593,7 +616,7 @@ impl IccProfile {
                 cicp.colour_primaries, cicp.transfer_characteristics
             ),
         };
-        rgb_matrix_trc(primaries, trc, &description, normalized_cicp(cicp))
+        rgb_matrix_trc(primaries, trc, &description, rgb_conforming_cicp(cicp))
     }
 
     /// A v4 matrix/TRC display profile for a [`SourceProfile`] — `gamut-color`'s
@@ -884,14 +907,12 @@ mod tests {
         }
     }
 
-    /// Neither of the two fields `from_cicp` does not build from reaches the `cicpType` tag, so
-    /// two triples differing only in them are one profile. The coefficients an AVIF or HEIC `nclx`
-    /// box carries (1, 5, 6, 9 …) are dropped because ICC.1:2022 §10.3 says they *shall* be zero
-    /// in an RGB profile; the range flag is dropped by this crate's own normalisation to the
-    /// full-scale RGB its matrix and curves are defined over. The assertion is the same either
-    /// way — that the caller's value is not carried — which is the part a caller can observe.
+    /// The one field `from_cicp` rewrites does not reach the `cicpType` tag, so two triples
+    /// differing only in it are one profile. The coefficients an AVIF or HEIC `nclx` box carries
+    /// (1, 5, 6, 9 …) are dropped because ICC.1:2022 §10.3 says they *shall* be zero in an RGB
+    /// profile, and what a caller can observe is exactly that: the value it passed is not carried.
     #[test]
-    fn from_cicp_normalizes_the_matrix_coefficients_and_range_flag() {
+    fn from_cicp_zeroes_the_matrix_coefficients() {
         let conforming = Cicp {
             colour_primaries: 9,
             transfer_characteristics: 16,
@@ -900,21 +921,51 @@ mod tests {
         };
         let reference = IccProfile::from_cicp(conforming).expect("the control builds");
         for matrix in [1_u8, 5, 6, 9] {
-            for range in [0_u8, 1] {
-                let signalled = Cicp {
-                    matrix_coefficients: matrix,
-                    video_full_range_flag: range,
-                    ..conforming
-                };
-                let profile =
-                    IccProfile::from_cicp(signalled).expect("signalling with a matrix builds");
-                assert_eq!(profile, reference, "matrix {matrix}, range {range}");
-                assert_eq!(
-                    profile.get(KnownTag::Cicp),
-                    Some(&TagData::Cicp(conforming)),
-                    "matrix {matrix}, range {range}: neither field is taken from the caller"
-                );
+            let signalled = Cicp {
+                matrix_coefficients: matrix,
+                ..conforming
+            };
+            let profile =
+                IccProfile::from_cicp(signalled).expect("signalling with a matrix builds");
+            assert_eq!(profile, reference, "matrix {matrix}");
+            assert_eq!(
+                profile.get(KnownTag::Cicp),
+                Some(&TagData::Cicp(conforming)),
+                "matrix {matrix}: the coefficients are not taken from the caller"
+            );
+        }
+    }
+
+    /// Full range is a precondition of `from_cicp`, not a field it normalises: every other
+    /// `VideoFullRangeFlag` byte is declined.
+    ///
+    /// The complement is swept rather than sampled at `0`, because the guard is a comparison and
+    /// an ordering mutation of it (`<`, `>`) leaves one side of `1` still admitted. The control at
+    /// `1` builds from the same axes, so the axes cannot be what any rejection is about.
+    #[test]
+    fn a_cicp_triple_that_is_not_full_range_is_declined() {
+        let full = Cicp {
+            colour_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 0,
+            video_full_range_flag: FULL_RANGE,
+        };
+        assert!(
+            IccProfile::from_cicp(full).is_some(),
+            "the full-range control builds"
+        );
+        for flag in 0..=u8::MAX {
+            if flag == FULL_RANGE {
+                continue;
             }
+            assert_eq!(
+                IccProfile::from_cicp(Cicp {
+                    video_full_range_flag: flag,
+                    ..full
+                }),
+                None,
+                "video_full_range_flag {flag}"
+            );
         }
     }
 
