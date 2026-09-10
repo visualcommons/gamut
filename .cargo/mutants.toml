@@ -582,6 +582,7 @@ exclude_re = [
     # than matching every comparison in the function.
     'replace && with \|\| in canonical_codes',
     'replace > with >= in canonical_codes',
+    # gamut-webp `vp8l::prefix::code_length_count`: the trim's floor, `count > 4`, relaxed to
     # `>= 4`. Reaching 3 would underflow the caller's `- 4` on a `usize` and panic, but the loop
     # can never get there.
     #
@@ -934,7 +935,6 @@ exclude_re = [
     # stay in the survey, and one of them is what caught this reasoning being checked rather than
     # assumed.
     'replace \+= with \*= in tokenize',
-    # gamut-webp `vp8l::prefix::code_length_count`: the trim's floor, `count > 4`, relaxed to
     # `build_length_limited_lengths` raises the histogram's floor and rebuilds until the tree fits
     # `max_len`. `if max_depth <= max_len { return }` is the loop's only exit, so reversing it to
     # `>` means the loop returns exactly when it should keep going and spins when it should stop:
