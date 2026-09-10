@@ -22,33 +22,62 @@
 //!
 //! # Is the gamut-versus-SDK comparison fair?
 //!
-//! Two comparisons are published, and their biases point in *opposite* directions, so together
-//! they bracket the truth rather than flattering one side.
+//! Every asymmetry between the two implementations is either **removed** or **measured**. None is
+//! left as an adjective.
 //!
-//! `decode_dng_*` — **the SDK is favoured, by a stated and computable margin.** Both sides parse
-//! the same in-memory bytes: [`gamut_dng_oracle::decode_dng_in_memory`] exists precisely so the
-//! reference implementation is not charged for a temporary file or for the export `memcpy` that
-//! crossing the FFI boundary would otherwise need (see its docs). What remains is that
-//! `DngDecoder::decode` is a *whole-file* decode and `ReadStage1Image` is not: gamut additionally
-//! decodes IFD 0's uncompressed RGB preview and reconstructs the metadata, work the SDK's stage-1
-//! read skips entirely. The preview's size is exact and not a guess — `⌊w/2⌋ × ⌊h/2⌋ × 3` bytes
-//! against the raw's `w × h × planes × 2` — so the fixture table prints it per case and the
-//! handicap can be read off directly. It is not normalised away because gamut exposes no
-//! raw-image-only decode entry point, and inventing one to make a benchmark look better would be
-//! the wrong direction of causation.
+//! **Neither side pays for the FFI boundary on the way in.**
+//! [`gamut_dng_oracle::decode_dng_in_memory`] hands the SDK a `dng_stream` over the caller's own
+//! bytes, so the reference implementation parses the very buffer gamut parses: no temporary file,
+//! no import copy on either side.
 //!
-//! `decode_lossless_jpeg_*` — **gamut is favoured, by a smaller margin.** Here the subjects match
-//! exactly: the same bare SOF3 stream in, the same interleaved `Vec<u16>` out, no container work
-//! on either side. The residual bias is the FFI export path
-//! ([`gamut_dng_oracle::decode_lossless_jpeg`] spools into a `std::vector`, copies that into a
-//! `malloc`d buffer, and copies *that* into a `Vec`), which charges the SDK two extra passes over
-//! the sample volume that gamut's single `Vec` does not pay. Those are memory-bandwidth passes,
-//! not entropy decoding, so this is the tighter of the two comparisons — but it is a bias, and it
-//! runs the other way.
+//! **Neither side pays for it on the way out, in the container comparison.** That entry point
+//! reports the decoded image's *extent* and exports no samples, so the SDK is not charged for a
+//! `malloc` + `memcpy` that only exists because the caller is in Rust.
 //!
-//! There is no `encode_adobe_sdk`: the oracle shim wraps the SDK's reader, not its writer, so no
-//! reference encode number exists to compare against and none is fabricated. Encode throughput is
-//! reported for gamut alone, across the same matrix.
+//! **The one asymmetry left in `decode_dng` is the preview, and the throughput column corrects
+//! for it.** `DngDecoder::decode` is a *whole-file* decode and `ReadStage1Image` is not: gamut
+//! additionally unpacks IFD 0's uncompressed RGB preview and reconstructs the metadata. The
+//! preview's volume is exact — `⌊w/2⌋ × ⌊h/2⌋ × 3` bytes against the raw's `w × h × planes × 2` —
+//! so this file applies the **counter rule** below and the fixture table prints the factor per
+//! case. It is not normalised away by changing the codec: gamut exposes no raw-image-only decode
+//! entry point, and inventing one to make a benchmark look better would be the wrong direction of
+//! causation.
+//!
+//! **The one asymmetry left in `decode_lossless_jpeg` is the export path, and a third arm prices
+//! it.** [`gamut_dng_oracle::decode_lossless_jpeg`] spools into a `std::vector`, copies that into
+//! a `malloc`d buffer and copies *that* into a `Vec`; gamut fills one `Vec`. Rather than assert
+//! that the difference is small, `adobe-sdk-no-export` runs the identical decode into the
+//! identical spool buffer and stops there, so the gap between the two SDK arms **is** the export
+//! cost, measured on the same box in the same run.
+//!
+//! # The counter rule
+//!
+//! Every benchmark's counter is **the pixel volume that implementation actually moves**:
+//!
+//! - the raw sample volume for every SDK arm and for gamut's bare-codestream decode; and
+//! - the raw sample volume **plus the IFD-0 preview** for gamut's whole-file DNG decode and for
+//!   gamut's DNG encode, both of which also handle the preview.
+//!
+//! So in `decode_dng` the **median-time** column is the *uncorrected* comparison and the
+//! **throughput** column is the *preview-corrected* one — a reader has no subtraction to do. The
+//! correction charges preview bytes at the raw path's per-byte rate, which is close to exact on
+//! the uncompressed cases (both paths just move bytes) and generous to gamut on the compressed
+//! ones (where a raw byte costs far more than a preview byte), so on those rows the corrected
+//! ratio is a *lower bound* on gamut's true one. In `decode_lossless_jpeg` all three arms share
+//! the raw volume, so there the two columns say the same thing.
+//!
+//! # Why each pair is one benchmark
+//!
+//! `decode_dng` and `decode_lossless_jpeg` take the implementation as a benchmark *argument*
+//! rather than living in a benchmark each. divan runs benchmarks in name order, so two separate
+//! benchmarks would measure every reference case minutes away from its counterpart — and on a
+//! shared machine that drifts, a ratio measured minutes apart is not a ratio. As arguments the
+//! pair members run back to back, under the same instantaneous load. The argument names are
+//! ordered so that divan's own name sort keeps them adjacent.
+//!
+//! There is no `encode` arm for the SDK: the oracle shim wraps the SDK's reader, not its writer,
+//! so no reference encode number exists to compare against and none is fabricated. Encode
+//! throughput is reported for gamut alone, across the same matrix.
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
@@ -154,9 +183,16 @@ impl Case {
         out
     }
 
-    /// Raw sample volume in bytes — the throughput denominator for every benchmark.
+    /// Raw sample volume in bytes — the denominator every SDK arm is quoted against.
     fn raw_bytes(self) -> usize {
         raw_bytes(self.photometry)
+    }
+
+    /// Pixel volume gamut moves for this case: the raw samples *plus* the IFD-0 preview, which
+    /// `DngDecoder::decode` unpacks and `DngEncoder::encode` derives. See the counter rule in
+    /// this file's header.
+    fn gamut_bytes(self) -> usize {
+        self.raw_bytes() + preview_bytes()
     }
 }
 
@@ -206,6 +242,128 @@ const CASES: [Case; 6] = [
         compression: Compression::LosslessJpeg,
     },
 ];
+
+/// Which implementation one `decode_dng` measurement runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DngImpl {
+    /// gamut's `DngDecoder::decode` — a whole-file decode, preview and metadata included.
+    Gamut,
+    /// The Adobe DNG SDK: parse → build negative → `ReadStage1Image`, over the same bytes, from
+    /// memory, exporting nothing.
+    AdobeSdk,
+}
+
+impl std::fmt::Display for DngImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `pad`, not `write_str`, so a width on the formatter survives — see `Photometry`.
+        f.pad(match self {
+            DngImpl::Gamut => "gamut",
+            DngImpl::AdobeSdk => "adobe-sdk",
+        })
+    }
+}
+
+/// One `decode_dng` measurement: a matrix cell decoded by one implementation.
+#[derive(Clone, Copy)]
+struct DngJob {
+    case: Case,
+    imp: DngImpl,
+}
+
+impl std::fmt::Display for DngJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(&format!("{} {}", self.case, self.imp))
+    }
+}
+
+/// Every case, each decoded by both implementations. The two arms of a pair are emitted next to
+/// each other *and* sort next to each other by name, so divan measures them back to back.
+const DNG_JOBS: [DngJob; CASES.len() * 2] = dng_jobs();
+
+/// Builds [`DNG_JOBS`]: the cross product of [`CASES`] with both implementations.
+const fn dng_jobs() -> [DngJob; CASES.len() * 2] {
+    let mut jobs = [DngJob {
+        case: CASES[0],
+        imp: DngImpl::Gamut,
+    }; CASES.len() * 2];
+    let mut index = 0;
+    while index < CASES.len() {
+        jobs[index * 2] = DngJob {
+            case: CASES[index],
+            imp: DngImpl::Gamut,
+        };
+        jobs[index * 2 + 1] = DngJob {
+            case: CASES[index],
+            imp: DngImpl::AdobeSdk,
+        };
+        index += 1;
+    }
+    jobs
+}
+
+/// Which implementation one `decode_lossless_jpeg` measurement runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JpegImpl {
+    /// gamut's `lossless_jpeg::decode`, filling one `Vec<u16>`.
+    Gamut,
+    /// The Adobe DNG SDK's `DecodeLosslessJPEG<Scalar>`, exported across the FFI boundary.
+    AdobeSdk,
+    /// The same SDK decode, stopping at the spool buffer. The gap to `AdobeSdk` is the export
+    /// path's cost and nothing else.
+    AdobeSdkNoExport,
+}
+
+impl std::fmt::Display for JpegImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(match self {
+            JpegImpl::Gamut => "gamut",
+            JpegImpl::AdobeSdk => "adobe-sdk",
+            JpegImpl::AdobeSdkNoExport => "adobe-sdk-no-export",
+        })
+    }
+}
+
+/// One `decode_lossless_jpeg` measurement: a photometry decoded by one implementation.
+#[derive(Clone, Copy)]
+struct JpegJob {
+    photometry: Photometry,
+    imp: JpegImpl,
+}
+
+impl std::fmt::Display for JpegJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(&format!("{} {}", self.photometry, self.imp))
+    }
+}
+
+/// Both photometries, each decoded by all three arms, adjacent by construction and by name sort.
+const JPEG_JOBS: [JpegJob; PHOTOMETRIES.len() * 3] = jpeg_jobs();
+
+/// Builds [`JPEG_JOBS`]: the cross product of [`PHOTOMETRIES`] with all three arms.
+const fn jpeg_jobs() -> [JpegJob; PHOTOMETRIES.len() * 3] {
+    let mut jobs = [JpegJob {
+        photometry: PHOTOMETRIES[0],
+        imp: JpegImpl::Gamut,
+    }; PHOTOMETRIES.len() * 3];
+    let arms = [
+        JpegImpl::Gamut,
+        JpegImpl::AdobeSdk,
+        JpegImpl::AdobeSdkNoExport,
+    ];
+    let mut photometry = 0;
+    while photometry < PHOTOMETRIES.len() {
+        let mut arm = 0;
+        while arm < arms.len() {
+            jobs[photometry * arms.len() + arm] = JpegJob {
+                photometry: PHOTOMETRIES[photometry],
+                imp: arms[arm],
+            };
+            arm += 1;
+        }
+        photometry += 1;
+    }
+    jobs
+}
 
 /// A sensor-like frame: a smooth illumination falloff, a per-CFA-channel gain, and deterministic
 /// per-photosite noise, interleaved across `planes`.
@@ -301,42 +459,56 @@ fn lossless_jpeg_stream(photometry: Photometry) -> Vec<u8> {
 
 /// Prints the byte volumes each measured region moves, so a throughput number can be read against
 /// what it is a throughput *of* — including the preview volume that separates gamut's whole-file
-/// decode from the SDK's stage-1 read.
+/// decode from the SDK's stage-1 read, and the factor that volume puts into gamut's counter.
 fn print_fixture_table() {
     println!(
         "\nDNG codec fixtures, {WIDTH}x{HEIGHT} at {BITS}-bit (bytes):\n\n\
-         {:<26} {:>12} {:>12} {:>8} {:>12} {:>10}",
-        "case", "raw samples", "encoded DNG", "of raw", "IFD0 preview", "of raw"
+         {:<26} {:>12} {:>12} {:>8} {:>12} {:>8} {:>12} {:>8}",
+        "case",
+        "raw samples",
+        "encoded DNG",
+        "of raw",
+        "IFD0 preview",
+        "of raw",
+        "gamut vol.",
+        "/ raw"
     );
     for case in CASES {
         let raw = case.raw_bytes();
         let encoded = case.encoded().len();
         let preview = preview_bytes();
+        let gamut = case.gamut_bytes();
         println!(
-            "{case:<26} {raw:>12} {encoded:>12} {:>7.1}% {preview:>12} {:>9.1}%",
+            "{case:<26} {raw:>12} {encoded:>12} {:>7.1}% {preview:>12} {:>7.1}% {gamut:>12} {:>8.3}",
             encoded as f64 / raw as f64 * 100.0,
             preview as f64 / raw as f64 * 100.0,
+            gamut as f64 / raw as f64,
         );
     }
     println!(
-        "\n`decode_dng_gamut` decodes the whole file — raw image, that IFD-0 preview and the\n\
-         metadata; `decode_dng_adobe_sdk` reads the raw image only. The \"IFD0 preview / of raw\"\n\
-         column is the pixel volume of that difference. `decode_lossless_jpeg_*` has no such gap:\n\
-         same stream in, same samples out.\n"
+        "\n`decode_dng gamut` decodes the whole file — raw image, that IFD-0 preview and the\n\
+         metadata; `decode_dng adobe-sdk` reads the raw image only, from the same bytes, and\n\
+         exports nothing. The counters differ by exactly the preview column, so in\n\
+         `decode_dng` the median-time column is the uncorrected ratio and the throughput column\n\
+         is the preview-corrected one. `decode_lossless_jpeg` needs no correction: same stream\n\
+         in, same samples out, one counter for all three arms — and the gap between its\n\
+         `adobe-sdk` and `adobe-sdk-no-export` arms is the FFI export path, priced rather than\n\
+         assumed.\n"
     );
 }
 
 /// Encode: `DngEncoder::encode` over a prepared raw image and profile.
 ///
 /// Timed: preview derivation, sample packing and compression, IFD-tree layout, and the growth and
-/// teardown of the output buffer. Not timed: building the raw image and the profile.
+/// teardown of the output buffer. Not timed: building the raw image and the profile. The counter
+/// is the raw volume plus the preview, because the encoder derives the preview too.
 #[divan::bench(args = CASES)]
 fn encode_gamut(bencher: Bencher, case: Case) {
     let raw = case.raw();
     let profile = profile();
     let encoder = encoder(case.compression);
     bencher
-        .counter(BytesCount::new(case.raw_bytes()))
+        .counter(BytesCount::new(case.gamut_bytes()))
         .bench_local(|| {
             let mut out = Vec::new();
             encoder
@@ -346,75 +518,78 @@ fn encode_gamut(bencher: Bencher, case: Case) {
         });
 }
 
-/// Decode, gamut: `DngDecoder::decode` over a prepared DNG.
+/// Whole-file DNG decode, both implementations, interleaved: gamut's `DngDecoder::decode` and the
+/// Adobe DNG SDK's parse → `ReadStage1Image`, over the *same* in-memory bytes.
 ///
-/// Timed: container parse, raw-image decode, IFD-0 preview decode, metadata reconstruction, and
-/// the teardown of everything decoded. Not timed: producing the DNG bytes.
-#[divan::bench(args = CASES)]
-fn decode_dng_gamut(bencher: Bencher, case: Case) {
-    let bytes = case.encoded();
-    let decoder = DngDecoder::new();
-    bencher
-        .counter(BytesCount::new(case.raw_bytes()))
-        .bench_local(|| {
-            drop(black_box(
-                decoder.decode(black_box(&bytes)).expect("decode"),
-            ));
-        });
+/// Timed, gamut: container parse, raw-image decode, IFD-0 preview decode, metadata
+/// reconstruction, and the teardown of everything decoded. Timed, SDK: everything the reference
+/// implementation does to materialise the raw image, including the negative's teardown, which
+/// runs inside the C++ call. Not timed, either side: producing the DNG bytes — and by
+/// construction of [`gamut_dng_oracle::decode_dng_in_memory`], no temporary file and no FFI
+/// export copy.
+///
+/// The counters differ by the preview, deliberately: see this file's counter rule.
+#[divan::bench(args = DNG_JOBS)]
+fn decode_dng(bencher: Bencher, job: DngJob) {
+    let bytes = job.case.encoded();
+    match job.imp {
+        DngImpl::Gamut => {
+            let decoder = DngDecoder::new();
+            bencher
+                .counter(BytesCount::new(job.case.gamut_bytes()))
+                .bench_local(|| {
+                    drop(black_box(
+                        decoder.decode(black_box(&bytes)).expect("decode"),
+                    ));
+                });
+        }
+        DngImpl::AdobeSdk => {
+            bencher
+                .counter(BytesCount::new(job.case.raw_bytes()))
+                .bench_local(|| {
+                    // No `drop` to place: `DecodedExtent` is plain `Copy` data, because the SDK's
+                    // own teardown already ran — inside the call, and so inside this timed region.
+                    black_box(
+                        gamut_dng_oracle::decode_dng_in_memory(black_box(&bytes))
+                            .expect("SDK decode"),
+                    );
+                });
+        }
+    }
 }
 
-/// Decode, Adobe DNG SDK: parse → build negative → `ReadStage1Image`, over the *same* bytes, from
-/// memory.
+/// Bare lossless-JPEG (SOF3) codestream decode, all three arms, interleaved: gamut, the Adobe DNG
+/// SDK exporting its samples across the FFI boundary, and the same SDK decode stopping at the
+/// spool buffer.
 ///
-/// Timed: everything the reference implementation does to materialise the raw image, including
-/// the negative's teardown. Not timed: producing the DNG bytes — and, by construction of
-/// [`gamut_dng_oracle::decode_dng_in_memory`], no temporary file and no FFI export copy. See this
-/// file's header for the residual asymmetry against `decode_dng_gamut`.
-#[divan::bench(args = CASES)]
-fn decode_dng_adobe_sdk(bencher: Bencher, case: Case) {
-    let bytes = case.encoded();
-    bencher
-        .counter(BytesCount::new(case.raw_bytes()))
-        .bench_local(|| {
-            // No `drop` to place: `DecodedExtent` is plain `Copy` data, because the SDK's own
-            // teardown already ran — inside the call, and so inside this timed region.
-            black_box(
-                gamut_dng_oracle::decode_dng_in_memory(black_box(&bytes)).expect("SDK decode"),
-            );
-        });
-}
-
-/// Lossless-JPEG codestream decode, gamut: `lossless_jpeg::decode` over a bare SOF3 stream.
-///
-/// Timed: marker parse, Huffman + predictor decode, and the teardown of the sample buffer. Not
-/// timed: encoding the stream.
-#[divan::bench(args = PHOTOMETRIES)]
-fn decode_lossless_jpeg_gamut(bencher: Bencher, photometry: Photometry) {
-    let stream = lossless_jpeg_stream(photometry);
-    bencher
-        .counter(BytesCount::new(raw_bytes(photometry)))
-        .bench_local(|| {
+/// Timed: marker parse, Huffman and predictor decode, and the teardown of the sample buffer —
+/// plus, for `adobe-sdk`, the export path (spool → `malloc`d buffer → `Vec`). Not timed:
+/// encoding the stream. The gap between the two SDK arms is that export path and nothing else,
+/// which is how this file quantifies its one remaining bias rather than describing it.
+#[divan::bench(args = JPEG_JOBS)]
+fn decode_lossless_jpeg(bencher: Bencher, job: JpegJob) {
+    let stream = lossless_jpeg_stream(job.photometry);
+    let expected = (WIDTH * HEIGHT * job.photometry.planes()) as usize;
+    let bencher = bencher.counter(BytesCount::new(raw_bytes(job.photometry)));
+    match job.imp {
+        JpegImpl::Gamut => bencher.bench_local(|| {
             drop(black_box(
                 lossless_jpeg::decode(black_box(&stream)).expect("decode"),
             ));
-        });
-}
-
-/// Lossless-JPEG codestream decode, Adobe DNG SDK: `DecodeLosslessJPEG` over the *same* stream.
-///
-/// Timed: the SDK's decode plus the FFI export path (spool vector → `malloc`d buffer → `Vec`),
-/// which is two passes over the sample volume more than gamut pays. That bias favours gamut and
-/// is the reason this file publishes two comparisons rather than one.
-#[divan::bench(args = PHOTOMETRIES)]
-fn decode_lossless_jpeg_adobe_sdk(bencher: Bencher, photometry: Photometry) {
-    let stream = lossless_jpeg_stream(photometry);
-    let expected = (WIDTH * HEIGHT * photometry.planes()) as usize;
-    bencher
-        .counter(BytesCount::new(raw_bytes(photometry)))
-        .bench_local(|| {
+        }),
+        JpegImpl::AdobeSdk => bencher.bench_local(|| {
             drop(black_box(
                 gamut_dng_oracle::decode_lossless_jpeg(black_box(&stream), expected)
                     .expect("SDK decode"),
             ));
-        });
+        }),
+        JpegImpl::AdobeSdkNoExport => bencher.bench_local(|| {
+            // Returns a `usize`; there is nothing allocated for the caller to release, which is
+            // the whole point of this arm.
+            black_box(
+                gamut_dng_oracle::decode_lossless_jpeg_extent(black_box(&stream), expected)
+                    .expect("SDK decode"),
+            );
+        }),
+    }
 }
