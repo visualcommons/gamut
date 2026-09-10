@@ -54,6 +54,13 @@
 //! model. A retained field whose name the model *does* own is dropped rather than emitted twice: a
 //! structure carrying two fields of one name is ill-formed and does not read back, so the modelled
 //! value stays the authority.
+//!
+//! # Lenient on read, strict on write
+//!
+//! Reading accepts the shapes seen in the wild: a bare structure written where the standard puts an
+//! array of structures reads as that array's single element, and a language alternative written as
+//! plain text reads as its text. Writing always emits the standard form — the array, and the
+//! language alternative — so a read-modify-write normalises rather than propagates.
 
 use gamut_xmp::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
@@ -105,16 +112,23 @@ fn nested<'a>(fields: &'a [XmpProperty], ns: &str, name: &str) -> Option<&'a [Xm
 
 /// The structure fields of every item of the array field named `ns:name`, skipping non-structures.
 fn nested_array<'a>(fields: &'a [XmpProperty], ns: &str, name: &str) -> Vec<&'a [XmpProperty]> {
-    match &field(fields, ns, name).map(|p| &p.value) {
-        Some(XmpValue::Array(array)) => array
+    field(fields, ns, name)
+        .map(|p| structures(&p.value))
+        .unwrap_or_default()
+}
+
+/// The structure field lists an array value holds, skipping items that are not structures.
+///
+/// A bare structure written where the standard puts an array reads as that array's single element
+/// (see the [module docs](self)); everything that is neither reads as nothing at all.
+fn structures(value: &XmpValue) -> Vec<&[XmpProperty]> {
+    match value {
+        XmpValue::Array(array) => array
             .items()
             .iter()
-            .filter_map(|item| match &item.value {
-                XmpValue::Structured(inner) => Some(inner.as_slice()),
-                _ => None,
-            })
+            .filter_map(|item| structure(&item.value))
             .collect(),
-        _ => Vec::new(),
+        single => structure(single).into_iter().collect(),
     }
 }
 
@@ -934,14 +948,11 @@ fn entities(fields: &[XmpProperty], name: &str) -> Vec<Entity> {
 
 // --- The accessors on the unified view ---------------------------------------------------------
 
-/// Reads every structure of the `Bag`/`Seq` property `ns:name` through `parse`.
-fn read_array<T>(xmp: &XmpMeta, ns: &str, name: &str, parse: fn(&XmpValue) -> Option<T>) -> Vec<T> {
-    match xmp.get_array(ns, name) {
-        Some(array) => array
-            .items()
-            .iter()
-            .filter_map(|i| parse(&i.value))
-            .collect(),
+/// Reads every structure of the `Bag`/`Seq` property `ns:name` through `parse`, tolerating a bare
+/// structure written where the array should be (see the [module docs](self)).
+fn read_array<T>(xmp: &XmpMeta, ns: &str, name: &str, parse: fn(&[XmpProperty]) -> T) -> Vec<T> {
+    match xmp.get(ns, name) {
+        Some(property) => structures(&property.value).into_iter().map(parse).collect(),
         None => Vec::new(),
     }
 }
@@ -983,7 +994,7 @@ impl PhotoMetadata {
             &self.xmp,
             ns::IPTC_EXT,
             "ImageRegion",
-            ImageRegion::from_xmp,
+            ImageRegion::from_fields,
         )
     }
 
@@ -1001,7 +1012,7 @@ impl PhotoMetadata {
             &self.xmp,
             ns::IPTC_EXT,
             "ArtworkOrObject",
-            ArtworkOrObject::from_xmp,
+            ArtworkOrObject::from_fields,
         )
     }
 
@@ -1015,7 +1026,7 @@ impl PhotoMetadata {
     /// The licensors of the image (`plus:Licensor`).
     #[must_use]
     pub fn licensors(&self) -> Vec<Licensor> {
-        read_array(&self.xmp, ns::PLUS, "Licensor", Licensor::from_xmp)
+        read_array(&self.xmp, ns::PLUS, "Licensor", Licensor::from_fields)
     }
 
     /// Sets the licensors of the image (`plus:Licensor`, an unordered bag); an empty slice removes
@@ -1416,6 +1427,41 @@ mod tests {
             ImageRegion::from_xmp(&value).map(|r| r.to_xmp()),
             Some(value.clone())
         );
+    }
+
+    #[test]
+    fn a_bare_structure_reads_as_a_one_element_sequence() {
+        // Seen in the wild: a single structure written where the standard puts a Bag. Lenient on
+        // read, strict on write — the Bag comes back on the way out.
+        let licensor = Licensor {
+            name: Some("Agence gamut".to_owned()),
+            ..Licensor::default()
+        };
+        let mut pm = PhotoMetadata::new();
+        pm.xmp
+            .set(XmpProperty::new(ns::PLUS, "Licensor", licensor.to_xmp()));
+        assert_eq!(pm.licensors(), vec![licensor]);
+
+        // A nested array field is read the same way: one `rCtype` structure, not a Bag of them.
+        let entity = Entity {
+            name: Some("Human".to_owned()),
+            ..Entity::default()
+        };
+        let region = XmpValue::Structured(vec![XmpProperty::new(
+            ns::IPTC_EXT,
+            "rCtype",
+            entity.to_xmp(),
+        )]);
+        assert_eq!(
+            ImageRegion::from_xmp(&region).map(|r| r.content_types),
+            Some(vec![entity])
+        );
+
+        pm.set_licensors(&pm.licensors());
+        assert!(matches!(
+            pm.xmp.get(ns::PLUS, "Licensor").unwrap().value,
+            XmpValue::Array(XmpArray::Bag(_))
+        ));
     }
 
     #[test]
