@@ -298,8 +298,8 @@ mod tests {
             .expect_err("strict must reject half a thumbnail pair");
         assert_eq!(
             err.to_string(),
-            "invalid thumbnail: JPEGInterchangeFormat without JPEGInterchangeFormatLength",
-            "the message must name which half is missing"
+            "invalid thumbnail: JPEGInterchangeFormat offset with no length to size it",
+            "the message must name the unreadable range, not a missing mandatory tag"
         );
     }
 

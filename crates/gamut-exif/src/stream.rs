@@ -229,8 +229,11 @@ impl ExifReader {
                 }
             },
             (Some(_), None) if self.strict => {
+                // States the structural fact — a range with no size — rather than naming a missing
+                // mandatory tag: Table 21 makes the sibling mandatory only under `Compression =
+                // Compressed`, and forbids recording it at all under the uncompressed columns.
                 return Err(ExifError::BadThumbnail(
-                    "JPEGInterchangeFormat without JPEGInterchangeFormatLength",
+                    "JPEGInterchangeFormat offset with no length to size it",
                 ));
             }
             (Some(offset), None) => {
