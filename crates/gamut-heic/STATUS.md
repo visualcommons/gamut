@@ -140,8 +140,18 @@ too, `C2PA_NOT_VALIDATED` included: §15.12 puts validation on a validator, and 
 a store states that gamut checks no signature, no hash binding and no trust list and names
 `c2pa-rs`, inline rather than as a footnote, because "C2PA: present" printed beside EXIF and ICC
 reads as *verified* to anyone who has seen a Content Credentials badge. Keeping the rendering in the
-crate is what lets a host that only formats output — `gamut inspect`, which is outside the coverage
-gate — hold no logic of its own and be unable to drop the disclaimer on the way to the terminal.
+crate is what makes every host print the same words and none able to reword the disclaimer away.
+
+The summary reports a **third** outcome beside a store and no C2PA box at all: a top-level box whose
+extended type *is* `C2PA_UUID` and that still yields no store — its `FullBox` version or flags are
+non-zero (§A.5.1.2), its `box_purpose` is the auxiliary `merkle` or a value this revision does not
+know (§A.5.3), it is truncated, or no valid JUMBF `LBox` bounds a store where its purpose puts one.
+`C2paSummary::unread` lists those with a `C2paUnreadReason`, and `report_lines` gives each one a
+line. Collapsing them into "no manifest store found" would be the mirror of the verdict
+`C2PA_NOT_VALIDATED` prevents: it would let a reader infer *no provenance* from bytes this crate
+merely could not read through. A `uuid` box whose extended type is not `C2PA_UUID` — even one byte
+off — is **not** one of these: §A.5.1.1 makes the extended type the whole test, and an ordinary file
+carries vendor `uuid` boxes that are no evidence of provenance.
 
 **Deferred (planned, additive).** The rows below. Each lands additively — new crate items or new
 `#[non_exhaustive]` variants — never a reshape of the shipped surface.
@@ -166,6 +176,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Meta-level accounting: `meta`/`iprp` children not consumed by the model surfaced as `UnknownBox` (e.g. `dinf`/`dref`, `uuid`) | 14496-12 | ✅ | S1 |
 | C2PA manifest store located in a top-level `uuid` `ContentProvenanceBox`: opaque bytes + exact byte range, purposes `manifest`/`original`/`update` (`c2pa`, `c2pa_manifest_stores`) | C2PA 2.4 §A.5.1, §A.5.3, §8.4.2.3 (`references/c2pa` pending, #431) | ✅ | S7 |
 | Reporting shape for a located store: presence, half-open range, size and `box_purpose` per store with the bytes absent by construction, rendered with the non-validation disclaimer inline (`c2pa_summary`, `C2paSummary::report_lines`, `C2PA_NOT_VALIDATED`) | C2PA 2.4 §15.12, §A.5.3 | ✅ | S7 (#448) |
+| A C2PA box that yields no store is reported as such, with the reason, and never as absence (`C2paSummary::unread`, `C2paUnreadBox`, `C2paUnreadReason`); a `uuid` box whose extended type is not `C2PA_UUID` stays absence | C2PA 2.4 §A.5.1.1, §A.5.1.2, §A.5.3 | ✅ | S7 (#448) |
 | Store bounding is `LBox`-only and content-dependent (`LBox` validity alone cannot separate a store bound from a plausible interior length). Two routes close it: assert the `jumb` `TBox` — traceable to §A.3.9/§15.12.3.2 but only as a JPEG XL aside, so it is a maintainer call because it narrows what is reported — or confirm the store by §11.1.4.2's JUMBF type UUID, which needs 19566-5's Description Box layout. A `c2pa-rs` oracle fixture would settle either empirically | C2PA 2.4 §A.3.9, §11.1.4.2, §A.5.3; ISO/IEC 19566-5 (not vendored) | ☐ | #239 oracle |
 | C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` | C2PA 2.4 §A.5 | ☐ | later |
 | C2PA validation: JUMBF interior parse, `c2pa.hash.bmff.v3` hard binding, signature/trust verification | C2PA 2.4 §18.6, §A.5.6 | ☐ | user / #239 |
