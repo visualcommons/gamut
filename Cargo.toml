@@ -162,6 +162,36 @@ gamut-tiff = { path = "crates/gamut-tiff", version = "1.0.0" }
 gamut-dng = { path = "crates/gamut-dng", version = "1.0.0" }
 gamut = { path = "crates/gamut", version = "0.3.2" }
 
+# Debug info lives beside the artefacts instead of inside each one. A `cargo test --all-features`
+# build links 172 test binaries and packed DWARF is copied into every one of them: a sampled
+# test binary was 0.78 MiB of `.text` under 64.8 MiB of debug sections. `unpacked` emits the DWARF
+# once per codegen unit as `.dwo` files that the binaries reference, which costs no debug
+# information at all — but it does mean a binary is no longer self-contained, so one copied out of
+# `target/` loses it. Debug and profile them where they were built.
+[profile.dev]
+split-debuginfo = "unpacked"
+
+# The three packages that compile vendored C/C++ take their `CMAKE_BUILD_TYPE` (via cmake-rs) and
+# their `-O`/`-g` flags (via cc) from the `OPT_LEVEL` and `DEBUG` that cargo derives from this
+# profile, which at the dev default is `-O0 -g`. That built `libjxl.a` at 181.7 MiB against
+# 8.1 MiB for the same archive at `Release`, and the cost is paid again in every binary that
+# statically links it and again in every superseded build-script output directory, which cargo
+# never reclaims. None of it is gamut's own code and none of it is ever stepped through from Rust.
+# The hand-written oracles under `tooling/` already pass `-DCMAKE_BUILD_TYPE=Release` for this
+# reason; these three cannot, because they delegate to `jpegxl_src::build()` and to `cc::Build`,
+# neither of which accepts that define. Setting the profile is the only lever they share.
+[profile.dev.package.gamut-jxl-sys]
+opt-level = 2
+debug = false
+
+[profile.dev.package.gamut-dng-oracle]
+opt-level = 2
+debug = false
+
+[profile.dev.package.lcms2-oracle]
+opt-level = 2
+debug = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -174,6 +204,7 @@ incremental = true
 [profile.test]
 opt-level = 3
 debug = 1
+split-debuginfo = "unpacked"
 incremental = true
 
 # Mutation testing (`.cargo/mutants.toml` selects it with `profile = "mutants"`). Identical to
