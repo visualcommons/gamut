@@ -103,11 +103,34 @@ pub struct Cicp {
     pub full_range: bool,
 }
 
+/// Which of §11.3.3's three chunks carried an annotation, and whether its text was compressed.
+///
+/// The four combinations are the whole space PNG defines, so this enum is closed. It exists so a
+/// re-encode can put an annotation back in the chunk it came out of: without it a `zTXt` is
+/// indistinguishable from a `tEXt` once decoded, and rewriting a compressed 40-byte payload as an
+/// uncompressed one can inflate it fortyfold — preservation that does not preserve.
+///
+/// `#[repr(u8)]` with explicit, permanent discriminants: the value crosses the C ABI as a plain
+/// integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum TextChunkKind {
+    /// `tEXt`: uncompressed Latin-1 (§11.3.3.2).
+    Text = 0,
+    /// `zTXt`: zlib-compressed Latin-1 (§11.3.3.3).
+    CompressedText = 1,
+    /// `iTXt` with the compression flag clear: uncompressed UTF-8 (§11.3.3.4).
+    International = 2,
+    /// `iTXt` with the compression flag set: zlib-compressed UTF-8 (§11.3.3.4).
+    CompressedInternational = 3,
+}
+
 /// One text annotation (tEXt/zTXt/iTXt, §11.3.3), decompressed where stored compressed.
 ///
 /// tEXt/zTXt hold Latin-1, mapped code-point-for-code-point into the `String` (lossless);
-/// iTXt holds UTF-8. The XMP packet (`XML:com.adobe.xmp`) is surfaced as [`DecodedPng::xmp`],
-/// not repeated here.
+/// iTXt holds UTF-8. [`kind`](Self::kind) records which chunk it was, so a re-encode can put it
+/// back in the same one. The XMP packet (`XML:com.adobe.xmp`) is surfaced as
+/// [`DecodedPng::xmp`], not repeated here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TextChunk {
@@ -119,6 +142,8 @@ pub struct TextChunk {
     pub language: Option<String>,
     /// The iTXt translated keyword, if the chunk carried one.
     pub translated_keyword: Option<String>,
+    /// The chunk this annotation was stored in, and whether its text was compressed.
+    pub kind: TextChunkKind,
 }
 
 /// Everything a PNG carries: the pixels in their native layout plus the ancillary payloads.
@@ -340,8 +365,9 @@ pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata
     meta
 }
 
-/// The standard iTXt keyword carrying an XMP packet (XMP Specification Part 3).
-const XMP_KEYWORD: &str = "XML:com.adobe.xmp";
+/// The standard iTXt keyword carrying an XMP packet (XMP Specification Part 3), reserved for it
+/// by §11.3.3.1 Table 21. Shared with the encoder so the two sides cannot disagree on it.
+pub(crate) const XMP_KEYWORD: &str = "XML:com.adobe.xmp";
 
 /// A parsed iTXt: either the XMP packet or an ordinary text annotation.
 enum ITxt {
@@ -403,7 +429,7 @@ fn parse_chrm(data: &[u8]) -> Option<Chromaticities> {
     })
 }
 
-/// tEXt (§11.3.3.3): keyword, NUL, Latin-1 text.
+/// tEXt (§11.3.3.2): keyword, NUL, Latin-1 text.
 fn parse_text(data: &[u8]) -> Option<TextChunk> {
     let (keyword, text) = split_keyword(data)?;
     Some(TextChunk {
@@ -411,10 +437,11 @@ fn parse_text(data: &[u8]) -> Option<TextChunk> {
         text: latin1(text),
         language: None,
         translated_keyword: None,
+        kind: TextChunkKind::Text,
     })
 }
 
-/// zTXt (§11.3.3.4): keyword, NUL, compression method 0, deflated Latin-1 text.
+/// zTXt (§11.3.3.3): keyword, NUL, compression method 0, deflated Latin-1 text.
 fn parse_ztxt(data: &[u8], budget: &mut usize) -> Option<TextChunk> {
     let (keyword, rest) = split_keyword(data)?;
     let (&method, compressed) = rest.split_first()?;
@@ -427,10 +454,11 @@ fn parse_ztxt(data: &[u8], budget: &mut usize) -> Option<TextChunk> {
         text: latin1(&text),
         language: None,
         translated_keyword: None,
+        kind: TextChunkKind::CompressedText,
     })
 }
 
-/// iTXt (§11.3.3.5): keyword, NUL, compression flag, compression method, language tag, NUL,
+/// iTXt (§11.3.3.4): keyword, NUL, compression flag, compression method, language tag, NUL,
 /// translated keyword, NUL, UTF-8 text (deflated when the flag is 1).
 fn parse_itxt(data: &[u8], budget: &mut usize) -> Option<ITxt> {
     let (keyword, rest) = split_keyword(data)?;
@@ -454,6 +482,11 @@ fn parse_itxt(data: &[u8], budget: &mut usize) -> Option<ITxt> {
         text: String::from_utf8(text_bytes).ok()?,
         language: Some(language).filter(|l| !l.is_empty()),
         translated_keyword: Some(translated).filter(|t| !t.is_empty()),
+        kind: if flag == 1 {
+            TextChunkKind::CompressedInternational
+        } else {
+            TextChunkKind::International
+        },
     }))
 }
 

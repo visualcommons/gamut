@@ -258,8 +258,7 @@ fn ancillary_pile_survives_decode() {
     let (w, h) = (16u32, 16u32);
     let src = noise((w * h * 3) as usize, 9);
     let exif = tiny_exif();
-    // No iCCP: it is the one chunk the encoder refuses beside the sRGB this pile carries (§5.6
-    // Table 5, §11.3.2.5), and its carriage is pinned by `tests/metadata.rs`.
+    let icc = tiny_icc_profile();
     let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#;
     let mut png = Vec::new();
     PngEncoder::new()
@@ -274,6 +273,7 @@ fn ancillary_pile_survives_decode() {
         .with_compressed_text("Comment", &"squeeze ".repeat(40))
         .with_international_text("Author", "gämut")
         .with_exif(&exif)
+        .with_icc_profile("prof", &icc)
         .with_xmp(xmp)
         .encode_image(
             ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
@@ -289,6 +289,7 @@ fn ancillary_pile_survives_decode() {
     assert_eq!(decoded.srgb, Some(SrgbIntent::RelativeColorimetric));
     assert!(decoded.chromaticities.is_some());
     assert_eq!(decoded.exif.as_deref(), Some(exif.as_slice()));
+    assert_eq!(decoded.icc_profile.unwrap().profile, icc);
     assert_eq!(decoded.xmp.as_deref(), Some(xmp.as_bytes()));
     assert_eq!(decoded.texts.len(), 3);
 }

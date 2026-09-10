@@ -31,7 +31,9 @@ use crate::ancillary::{
 use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
-use crate::decoded::{Chromaticities, Cicp, DecodedPng, IccProfile, PngMetadata, TextChunk};
+use crate::decoded::{
+    Chromaticities, Cicp, DecodedPng, IccProfile, PngMetadata, TextChunk, TextChunkKind,
+};
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::PngPalette;
 use crate::reduce::{self, Reduced, Reductions};
@@ -90,6 +92,56 @@ struct MetadataView<'a> {
     chromaticities: Option<Chromaticities>,
     srgb: Option<SrgbIntent>,
     cicp: Option<Cicp>,
+    /// Whether the source carried a C2PA manifest store. Only the presence is needed: a store is
+    /// never carried, but a caller has to be told it was left behind.
+    c2pa: bool,
+}
+
+/// A metadata payload [`PngEncoder::with_metadata`] could not carry into the output.
+///
+/// Preservation exists to stop metadata disappearing quietly, so the two payloads a carry cannot
+/// take are named rather than dropped in silence. Read them back with
+/// [`PngEncoder::dropped_metadata`] and tell the user — `gamut convert` does.
+///
+/// `#[repr(u8)]` with explicit discriminants, which are permanent and append-only: the value
+/// crosses the C ABI as a plain integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum DroppedMetadata {
+    /// A `cICP` whose matrix coefficients are not 0. §11.3.2.6 requires 0 for PNG — "RGB is
+    /// currently the only supported color model in PNG, and as such Matrix Coefficients shall be
+    /// set to 0" — so the source chunk is not conforming and copying it forward would reproduce
+    /// the defect in a file this encoder signed off on.
+    NonRgbCicp = 0,
+    /// The C2PA manifest store (`caBX`). A store is signed over the exact bytes of the file it
+    /// was made for, which is why C2PA 2.4 §A.3.2 marks the chunk unsafe to copy: carried into a
+    /// re-encode it is invalid by construction, and a validator reports a *tampered* file rather
+    /// than an unsigned one. Re-sign the output and set it with
+    /// [`with_c2pa`](PngEncoder::with_c2pa).
+    C2paManifestStore = 1,
+}
+
+impl DroppedMetadata {
+    /// One line naming what was left behind and why, fit to show a user.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NonRgbCicp => {
+                "cICP: its matrix coefficients are not 0, which PNG requires (§11.3.2.6)"
+            }
+            Self::C2paManifestStore => {
+                "C2PA manifest store: signed over the source bytes, so a copy would be invalid \
+                 (C2PA 2.4 §A.3.2) — re-sign the output"
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for DroppedMetadata {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.reason())
+    }
 }
 
 /// A reusable PNG encoder.
@@ -102,6 +154,9 @@ pub struct PngEncoder {
     auto_reduce: bool,
     clean_transparent: bool,
     backends: Registry<dyn IdatDeflater + Send>,
+    /// What the last metadata carry could not take, in the order it was found. Reset by each
+    /// [`Self::with_metadata`] / [`Self::with_metadata_from`] call, so it describes that call.
+    dropped: Vec<DroppedMetadata>,
 }
 
 impl Default for PngEncoder {
@@ -123,6 +178,7 @@ impl PngEncoder {
             auto_reduce: false,
             clean_transparent: false,
             backends: Registry::default(),
+            dropped: Vec::new(),
         }
     }
 
@@ -225,12 +281,14 @@ impl PngEncoder {
         self
     }
 
-    /// Records the standard colour-space rendering intent (sRGB chunk).
+    /// Records the standard colour-space rendering intent (sRGB chunk, §11.3.2.5).
     ///
-    /// Mutually exclusive with [`with_icc_profile`](Self::with_icc_profile): PNG §5.6 Table 5 and
-    /// §11.3.2.5 both say the two chunks should not appear together, so setting both makes the
-    /// encode fail with [`Error::InvalidInput`] rather than write a file the standard tells
-    /// encoders not to produce. [`with_metadata`](Self::with_metadata) resolves the pair for you.
+    /// May be combined with [`with_icc_profile`](Self::with_icc_profile). §5.6 Table 5 and
+    /// §11.3.2.5 say only that the two "should not" appear together — lowercase, and §15 gives
+    /// the BCP 14 keywords force "when, and only when, they appear in all capitals" — while §4.3
+    /// Table 1 presupposes the pair and settles it, ranking `iCCP` (priority 2) above `sRGB`
+    /// (3). Both are written; a reader honours the profile and treats the intent as the fallback
+    /// for readers that cannot apply one.
     #[must_use]
     pub fn with_srgb(mut self, intent: SrgbIntent) -> Self {
         self.ancillary.set_srgb(intent);
@@ -395,13 +453,11 @@ impl PngEncoder {
         self
     }
 
-    /// Embeds an ICC colour profile (iCCP chunk), zlib-compressed. `profile` is the raw ICC profile
-    /// — for example the bytes produced by `gamut-icc`.
+    /// Embeds an ICC colour profile (iCCP chunk, §11.3.2.3), zlib-compressed. `profile` is the
+    /// raw ICC profile — for example the bytes produced by `gamut-icc`.
     ///
-    /// Mutually exclusive with [`with_srgb`](Self::with_srgb): PNG §5.6 Table 5 and §11.3.2.5 both
-    /// say the two chunks should not appear together, so setting both makes the encode fail with
-    /// [`Error::InvalidInput`] rather than write a file the standard tells encoders not to
-    /// produce. [`with_metadata`](Self::with_metadata) resolves the pair for you.
+    /// May be combined with [`with_srgb`](Self::with_srgb); see there for why the pair is
+    /// written rather than refused, and which chunk a reader honours.
     #[must_use]
     pub fn with_icc_profile(mut self, name: &str, profile: &[u8]) -> Self {
         self.ancillary.iccp = Some((name.to_string(), profile.to_vec()));
@@ -412,8 +468,7 @@ impl PngEncoder {
     /// the XMP/RDF document — for example the bytes produced by `gamut-xmp`.
     #[must_use]
     pub fn with_xmp(mut self, xmp: &str) -> Self {
-        self.ancillary
-            .add_text_international("XML:com.adobe.xmp", xmp);
+        self.ancillary.add_xmp(xmp.as_bytes());
         self
     }
 
@@ -426,26 +481,32 @@ impl PngEncoder {
     /// [`with_metadata_from`](Self::with_metadata_from) is the same thing for a full
     /// [`DecodedPng`].
     ///
+    /// Calling it twice with the same metadata is the same as calling it once: a later carry
+    /// replaces what an earlier one contributed rather than appending a second copy of every
+    /// annotation.
+    ///
     /// # What it carries, and what it deliberately does not
     ///
-    /// Everything the read side surfaces is set, with three spec-driven adjustments:
+    /// Everything the read side surfaces is set, including a `cICP`, an `sRGB` and an `iCCP`
+    /// together — §4.3 Table 1 ranks the colour chunks precisely so a file may carry more than
+    /// one, and a reader honours the lowest priority number. Each text annotation goes back into
+    /// the chunk it came out of, compressed if it was compressed
+    /// ([`TextChunkKind`](crate::TextChunkKind)).
     ///
-    /// - **`iCCP` and `sRGB` are resolved, not both written.** §4.3 Table 1 ranks the colour
-    ///   chunks and a reader takes the lowest priority number, so the ICC profile (priority 2)
-    ///   wins over the rendering intent (priority 3) and the `sRGB` chunk is dropped — which is
-    ///   exactly the chunk a conforming reader would have ignored. Writing both is refused (§5.6
-    ///   Table 5, §11.3.2.5); this method is how a file carrying both is re-encoded at all.
-    /// - **A `cICP` whose matrix coefficients are not 0 is dropped.** §11.3.2.6 requires 0 for
-    ///   PNG, so such a chunk is not conforming and copying it forward would reproduce the defect.
-    /// - **The C2PA manifest store is never carried.** A store is signed over the exact bytes of
-    ///   the file it was made for, so copying it into a re-encode invalidates it by construction
-    ///   — which is why `caBX` is *unsafe to copy* (C2PA 2.4 §A.3.2). Re-sign the output and set
-    ///   it with [`with_c2pa`](Self::with_c2pa).
+    /// Two payloads cannot be carried, and both are **named** rather than dropped in silence —
+    /// read them back with [`dropped_metadata`](Self::dropped_metadata):
     ///
-    /// Two further limits are the read side's, not this method's: `pHYs`, `tIME`, `sBIT` and
-    /// `bKGD` are not part of [`PngMetadata`], so they cannot be carried here (set them with
-    /// their own builder methods); and a `zTXt` is indistinguishable from a `tEXt` once decoded,
-    /// so a compressed annotation is rewritten uncompressed. Neither loses any text.
+    /// - a **`cICP` whose matrix coefficients are not 0**, which §11.3.2.6 does not allow in PNG;
+    /// - the **C2PA manifest store**, signed over the bytes of the file it was made for.
+    ///
+    /// Anything that would be *corrupted* rather than lost — a keyword outside §11.3.3.1's
+    /// repertoire, a null inside a text string, an XMP packet that is not UTF-8 — makes the
+    /// encode fail with [`Error::InvalidInput`] naming the annotation, rather than being written
+    /// as something a reader reads back differently.
+    ///
+    /// One further limit is the read side's, not this method's: `pHYs`, `tIME`, `sBIT` and `bKGD`
+    /// are not part of [`PngMetadata`], so they cannot be carried here (set them with their own
+    /// builder methods).
     #[must_use]
     pub fn with_metadata(self, metadata: &PngMetadata) -> Self {
         self.with_metadata_view(MetadataView {
@@ -457,6 +518,7 @@ impl PngEncoder {
             chromaticities: metadata.chromaticities,
             srgb: metadata.srgb,
             cicp: metadata.cicp,
+            c2pa: metadata.c2pa.is_some(),
         })
     }
 
@@ -476,31 +538,58 @@ impl PngEncoder {
             chromaticities: decoded.chromaticities,
             srgb: decoded.srgb,
             cicp: decoded.cicp,
+            c2pa: decoded.c2pa.is_some(),
         })
+    }
+
+    /// What the last [`with_metadata`](Self::with_metadata) /
+    /// [`with_metadata_from`](Self::with_metadata_from) call could not carry, in the order it was
+    /// found — empty when it carried everything, and reset by each call.
+    ///
+    /// Surface this to whoever asked for the re-encode. Losing metadata without saying so is the
+    /// defect the preservation path exists to remove; losing it *with* an explanation is a
+    /// choice the spec forces.
+    #[must_use]
+    pub fn dropped_metadata(&self) -> &[DroppedMetadata] {
+        &self.dropped
     }
 
     /// The one implementation behind [`with_metadata`](Self::with_metadata) and
     /// [`with_metadata_from`](Self::with_metadata_from).
     fn with_metadata_view(mut self, meta: MetadataView<'_>) -> Self {
+        self.dropped.clear();
+        self.ancillary.begin_carry();
         if let Some(exif) = meta.exif {
             self = self.with_exif(exif);
         }
-        // §4.3 Table 1: the reader honours the lowest priority number, iCCP (2) over sRGB (3).
-        // Writing both is what `Ancillary::validate` refuses, so pick the one that would have
-        // been honoured rather than hand the caller an error it cannot act on.
-        match (meta.icc_profile, meta.srgb) {
-            (Some(icc), _) => self = self.with_icc_profile(&icc.name, &icc.profile),
-            (None, Some(intent)) => self = self.with_srgb(intent),
-            (None, None) => {}
+        // Both colour statements are carried. §5.6 Table 5 and §11.3.2.5 only *recommend* against
+        // the pair, and §4.3 Table 1 exists to resolve it: `iCCP` outranks `sRGB`, so the profile
+        // is what a reader applies and the intent is what a reader without a CMM falls back on.
+        // Dropping either would throw away colour information the source carried.
+        if let Some(icc) = meta.icc_profile {
+            self = self.with_icc_profile(&icc.name, &icc.profile);
         }
-        // §11.3.2.6: "Matrix Coefficients shall be set to 0". A source chunk that says otherwise
-        // is not a conforming cICP; carrying it forward would put the same defect in the output.
-        if let Some(cicp) = meta.cicp.filter(|cicp| cicp.matrix_coefficients == 0) {
-            self = self.with_cicp(
-                cicp.color_primaries,
-                cicp.transfer_function,
-                cicp.full_range,
-            );
+        if let Some(intent) = meta.srgb {
+            self = self.with_srgb(intent);
+        }
+        match meta.cicp {
+            // §11.3.2.6: "Matrix Coefficients shall be set to 0". A source chunk that says
+            // otherwise is not a conforming cICP; carrying it forward would put the same defect
+            // in the output.
+            Some(cicp) if cicp.matrix_coefficients != 0 => {
+                self.dropped.push(DroppedMetadata::NonRgbCicp);
+            }
+            Some(cicp) => {
+                self = self.with_cicp(
+                    cicp.color_primaries,
+                    cicp.transfer_function,
+                    cicp.full_range,
+                );
+            }
+            None => {}
+        }
+        if meta.c2pa {
+            self.dropped.push(DroppedMetadata::C2paManifestStore);
         }
         // Set in the stored ×100 000 fixed-point units rather than through `with_gamma` /
         // `with_chromaticities`, whose `f64` arguments would round-trip the value through a
@@ -520,25 +609,41 @@ impl PngEncoder {
                 chrm.blue.1,
             ]);
         }
-        // The XMP packet is UTF-8 by §11.3.3.4; bytes that are not are not a packet this encoder
-        // can frame, and are dropped rather than written as an invalid iTXt.
-        if let Some(xmp) = meta.xmp.and_then(|bytes| str::from_utf8(bytes).ok()) {
-            self = self.with_xmp(xmp);
+        // Handed over as bytes, because that is what the chunk held. §11.3.3.4 requires UTF-8, so
+        // a packet that is not gets a refusal at `encode` naming it — never a silent drop.
+        if let Some(xmp) = meta.xmp {
+            self.ancillary.add_xmp(xmp);
         }
         for text in meta.texts {
-            match (&text.language, &text.translated_keyword) {
-                // Neither field set: the annotation came from a tEXt/zTXt, or from an iTXt whose
-                // two optional fields were empty. Offer it as Latin-1 — which is byte-exact for
-                // the first case — and let `Ancillary` promote it to iTXt if the text needs it.
-                (None, None) => self.ancillary.add_text_latin1(&text.keyword, &text.text),
-                (language, translated) => self.ancillary.add_text_international_tagged(
+            let (language, translated) = (
+                text.language.as_deref().unwrap_or_default(),
+                text.translated_keyword.as_deref().unwrap_or_default(),
+            );
+            match text.kind {
+                TextChunkKind::Text => self.ancillary.add_text_latin1(&text.keyword, &text.text),
+                TextChunkKind::CompressedText => {
+                    self.ancillary
+                        .add_text_compressed(&text.keyword, &text.text);
+                }
+                TextChunkKind::International => self.ancillary.add_text_international_tagged(
                     &text.keyword,
-                    language.as_deref().unwrap_or_default(),
-                    translated.as_deref().unwrap_or_default(),
+                    language,
+                    translated,
                     &text.text,
+                    false,
                 ),
+                TextChunkKind::CompressedInternational => {
+                    self.ancillary.add_text_international_tagged(
+                        &text.keyword,
+                        language,
+                        translated,
+                        &text.text,
+                        true,
+                    );
+                }
             }
         }
+        self.ancillary.end_carry();
         self
     }
 

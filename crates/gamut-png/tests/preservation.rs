@@ -1,16 +1,16 @@
 //! `PngEncoder::with_metadata` / `with_metadata_from` (issue #483): what a re-encode carries
 //! forward from the file it rewrites, and what it deliberately does not.
 //!
-//! Example and drift-guard level. No oracle: the claim is about gamut's own read→write seam, and
-//! the source files are built chunk by chunk from `common` so a fixture can carry combinations
-//! this encoder refuses to write — notably `sRGB` beside `iCCP`, which §5.6 Table 5 and §11.3.2.5
-//! tell encoders not to produce but which a reader still meets.
+//! Example and drift-guard level, over gamut's own read→write seam. The source files are built
+//! chunk by chunk from `common` so a fixture can carry exactly the combination each claim is
+//! about, without the encoder's own choices standing in the way. That a re-encode's output is a
+//! file the *reference* reader accepts is `tests/oracle.rs`'s job, not this file's.
 
 mod common;
 
 use common::{chunk, ihdr_payload, png_from_chunks, tiny_exif, tiny_icc_profile, zlib};
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
-use gamut_png::{PngDecoder, PngEncoder, PngMetadata, SrgbIntent};
+use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
+use gamut_png::{DroppedMetadata, PngDecoder, PngEncoder, PngMetadata, SrgbIntent};
 
 /// The `cHRM` payload for the sRGB primaries, in the ×100 000 units §11.3.2.1 stores.
 const CHRM: [u32; 8] = [
@@ -45,14 +45,42 @@ fn source(extra: &[Vec<u8>]) -> Vec<u8> {
     png_from_chunks(&chunks)
 }
 
-/// Re-encodes a 2×2 image under `build`, and reads back what the output carries.
-fn re_encoded(build: impl FnOnce(PngEncoder) -> PngEncoder) -> PngMetadata {
+/// A source carrying only `extra` between the header and the image data — for a claim about one
+/// annotation, which the full [`source`] pile would confuse with its own.
+fn minimal_source(extra: &[Vec<u8>]) -> Vec<u8> {
+    let mut chunks = vec![chunk(b"IHDR", &ihdr_payload(3, 2, 8, 2, 0))];
+    chunks.extend_from_slice(extra);
+    chunks.push(chunk(b"IDAT", &zlib(&[0u8; 20])));
+    chunks.push(chunk(b"IEND", &[]));
+    png_from_chunks(&chunks)
+}
+
+/// Re-encodes a 2×2 image under `build`, returning the output bytes.
+fn re_encoded_bytes(build: impl FnOnce(PngEncoder) -> PngEncoder) -> Vec<u8> {
     let pixels = vec![0u8; 3 * 4];
     let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2).unwrap()).unwrap();
-    let png = build(PngEncoder::new())
+    build(PngEncoder::new())
         .encode_to_vec(image)
-        .expect("re-encode");
-    gamut_png::metadata(&png).expect("read back")
+        .expect("re-encode")
+}
+
+/// Re-encodes a 2×2 image under `build`, and reads back what the output carries.
+fn re_encoded(build: impl FnOnce(PngEncoder) -> PngEncoder) -> PngMetadata {
+    gamut_png::metadata(&re_encoded_bytes(build)).expect("read back")
+}
+
+/// The payload of the first chunk of type `ty`, for a claim about which *chunk* carries an
+/// annotation rather than what text it holds — the distinction a decode erases.
+fn chunk_payload(png: &[u8], ty: &[u8; 4]) -> Option<Vec<u8>> {
+    let mut i = 8; // past the signature
+    while i + 12 <= png.len() {
+        let len = u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]) as usize;
+        if &png[i + 4..i + 8] == ty {
+            return Some(png[i + 8..i + 8 + len].to_vec());
+        }
+        i += 12 + len;
+    }
+    None
 }
 
 /// The headline claim of #483: nothing the read side surfaced is dropped on the way back out.
@@ -92,35 +120,23 @@ fn an_itxt_keeps_its_language_and_translated_keyword() {
     assert_eq!(note.translated_keyword.as_deref(), Some("Notiz"));
 }
 
-/// §4.3 Table 1 ranks the colour chunks and a reader honours the lowest priority number, so of a
-/// source carrying both the `iCCP` (2) is the chunk that was being used and the `sRGB` (3) the
-/// chunk that was being ignored. Carrying both would be the pair §5.6 Table 5 and §11.3.2.5
-/// refuse, and would make the file unencodable.
+/// A source may legally carry both, and both are kept. §5.6 Table 5 and §11.3.2.5 say only that
+/// `sRGB` and `iCCP` "should not" appear together — lowercase, and §15 gives the BCP 14 keywords
+/// force "when, and only when, they appear in all capitals" — while §4.3 Table 1 presupposes the
+/// pair and ranks it, `iCCP` (2) over `sRGB` (3). Dropping either would lose colour information
+/// the source carried, which is exactly what this preservation path exists to stop.
+///
+/// That the result is a file the reference reader accepts is pinned against libpng in
+/// `tests/oracle.rs`.
 #[test]
-fn srgb_gives_way_to_an_icc_profile_from_the_same_file() {
+fn a_profile_and_a_rendering_intent_are_both_carried() {
     let meta = gamut_png::metadata(&source(&[chunk(b"sRGB", &[1])])).unwrap();
     assert_eq!(meta.srgb, Some(SrgbIntent::RelativeColorimetric));
     assert!(meta.icc_profile.is_some(), "the source carries both");
 
     let re = re_encoded(|e| e.with_metadata(&meta));
-    assert!(re.icc_profile.is_some(), "the ICC profile is kept");
-    assert!(re.srgb.is_none(), "the lower-priority sRGB is dropped");
-}
-
-/// The converse: with no ICC profile to outrank it, the rendering intent is the colour
-/// information the file has, and dropping it would lose it.
-#[test]
-fn srgb_is_carried_when_no_icc_profile_outranks_it() {
-    let png = png_from_chunks(&[
-        chunk(b"IHDR", &ihdr_payload(3, 2, 8, 2, 0)),
-        chunk(b"sRGB", &[2]),
-        chunk(b"IDAT", &zlib(&[0u8; 20])),
-        chunk(b"IEND", &[]),
-    ]);
-    let meta = gamut_png::metadata(&png).unwrap();
-
-    let re = re_encoded(|e| e.with_metadata(&meta));
-    assert_eq!(re.srgb, Some(SrgbIntent::Saturation));
+    assert_eq!(re.icc_profile, meta.icc_profile);
+    assert_eq!(re.srgb, meta.srgb);
 }
 
 /// §11.3.2.6: "RGB is currently the only supported color model in PNG, and as such Matrix
@@ -145,7 +161,16 @@ fn a_cicp_is_carried_only_when_its_matrix_coefficients_are_zero() {
 
     let non_rgb = gamut_png::metadata(&source(&[chunk(b"cICP", &[9, 16, 1, 1])])).unwrap();
     assert!(non_rgb.cicp.is_some(), "the source carries it");
-    assert!(re_encoded(|e| e.with_metadata(&non_rgb)).cicp.is_none());
+    let encoder = PngEncoder::new().with_metadata(&non_rgb);
+    assert!(re_encoded(|_| encoder.clone()).cicp.is_none());
+    // Dropped, but not in silence: the caller can say so.
+    assert!(
+        encoder
+            .dropped_metadata()
+            .contains(&DroppedMetadata::NonRgbCicp),
+        "{:?}",
+        encoder.dropped_metadata()
+    );
 }
 
 /// Drift guard. A C2PA manifest store is signed over the exact bytes of the file it was made for,
@@ -157,7 +182,12 @@ fn the_c2pa_manifest_store_is_never_carried_forward() {
     let meta = gamut_png::metadata(&source(&[])).unwrap();
     assert!(meta.c2pa.is_some(), "the source carries a store");
 
-    assert!(re_encoded(|e| e.with_metadata(&meta)).c2pa.is_none());
+    let encoder = PngEncoder::new().with_metadata(&meta);
+    assert!(re_encoded(|_| encoder.clone()).c2pa.is_none());
+    assert_eq!(
+        encoder.dropped_metadata(),
+        [DroppedMetadata::C2paManifestStore]
+    );
 }
 
 /// The two entry points differ only in which read surface they take, so a field wired into one
@@ -175,4 +205,94 @@ fn with_metadata_from_agrees_with_with_metadata() {
     // A pair of empty results would satisfy the comparison above.
     assert!(from_decoded.icc_profile.is_some() && from_decoded.cicp.is_some());
     assert!(!from_decoded.texts.is_empty() && from_decoded.exif.is_some());
+}
+
+/// §11.3.3.3 makes a `zTXt` "semantically equivalent" to a `tEXt`, so a decode that keeps only the
+/// text loses no *words* — but rewriting a compressed annotation uncompressed is still not
+/// preservation: the fixture's 1 600-byte body is a 40-byte chunk in the source, and a re-encode
+/// that forgets which chunk it came from writes it back forty times larger.
+///
+/// Kills the `CompressedText` arm of `with_metadata_view`'s routing, and any mutant that collapses
+/// [`TextChunkKind`](gamut_png::TextChunkKind) to one value.
+#[test]
+fn a_compressed_annotation_goes_back_into_a_compressed_chunk() {
+    let body = "the quick brown fox ".repeat(80);
+    let mut ztxt = b"Comment\0\0".to_vec();
+    ztxt.extend_from_slice(&zlib(body.as_bytes()));
+    let meta = gamut_png::metadata(&minimal_source(&[chunk(b"zTXt", &ztxt)])).unwrap();
+
+    let out = re_encoded_bytes(|e| e.with_metadata(&meta));
+    let carried = chunk_payload(&out, b"zTXt").expect("carried as zTXt");
+    assert!(
+        chunk_payload(&out, b"tEXt").is_none(),
+        "not inflated to tEXt"
+    );
+    assert!(
+        carried.len() < body.len() / 4,
+        "still compressed: {} bytes for a {}-byte body",
+        carried.len(),
+        body.len()
+    );
+}
+
+/// The same claim for the compression flag §11.3.3.4 gives `iTXt`: a compressed international
+/// annotation stays compressed, and keeps the language tag and translated keyword that a plain
+/// `iTXt` rewrite would have kept but a `tEXt` rewrite would have dropped.
+///
+/// Kills the `CompressedInternational` arm of `with_metadata_view`'s routing.
+#[test]
+fn a_compressed_itxt_goes_back_into_a_compressed_itxt() {
+    let body = "gämut ".repeat(200);
+    let mut itxt = b"Note\0\x01\0de\0Notiz\0".to_vec();
+    itxt.extend_from_slice(&zlib(body.as_bytes()));
+    let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iTXt", &itxt)])).unwrap();
+
+    let out = re_encoded_bytes(|e| e.with_metadata(&meta));
+    let note = chunk_payload(&out, b"iTXt").expect("the Note annotation");
+    // keyword, NUL, compression flag 1, method 0, language, NUL, translated keyword, NUL.
+    assert!(note.starts_with(b"Note\0\x01\0de\0Notiz\0"), "{note:?}");
+    assert!(
+        note.len() < body.len() / 4,
+        "still compressed: {} bytes",
+        note.len()
+    );
+}
+
+/// Carrying the same metadata twice is carrying it once. The single-value slots are idempotent
+/// because a second write overwrites the first; the text list is the one place where a second
+/// call would otherwise append a duplicate of every annotation — which is what a caller that
+/// builds an encoder in a loop, or reuses one across files, would get.
+#[test]
+fn carrying_the_same_metadata_twice_carries_it_once() {
+    let meta = gamut_png::metadata(&source(&[])).unwrap();
+
+    let once = re_encoded(|e| e.with_metadata(&meta));
+    let twice = re_encoded(|e| e.with_metadata(&meta).with_metadata(&meta));
+    assert_eq!(once, twice);
+    assert_eq!(once.texts.len(), 2, "the fixture carries two annotations");
+}
+
+/// §11.3.3.4 gives the `iTXt` text field UTF-8 and no alternative, so a packet that is not UTF-8
+/// has no chunk this encoder can frame. The read side hands it over as raw bytes regardless — it
+/// reports what the file held — so the write side is where it has to be said out loud. Refusing
+/// is the point: the alternative is a caller who asked for preservation and got a file with the
+/// packet missing and nothing to read about it.
+#[test]
+fn a_non_utf8_xmp_packet_refuses_the_re_encode() {
+    let mut itxt = b"XML:com.adobe.xmp\0\0\0\0\0".to_vec();
+    itxt.extend_from_slice(b"<x:xmpmeta \xFF\xFE/>");
+    let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iTXt", &itxt)])).unwrap();
+    assert!(meta.xmp.is_some(), "the read side surfaces the raw packet");
+
+    let pixels = vec![0u8; 3 * 4];
+    let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2).unwrap()).unwrap();
+    let error = PngEncoder::new()
+        .with_metadata(&meta)
+        .encode_to_vec(image)
+        .expect_err("refused");
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(
+        error.to_string().contains("XMP packet is not UTF-8"),
+        "{error}"
+    );
 }

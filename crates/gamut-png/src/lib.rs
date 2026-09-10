@@ -91,13 +91,14 @@ pub use chunk::{C2paSpan, fill_c2pa};
 pub use color::ColorType;
 pub use decoded::{
     Chromaticities, Cicp, DecodedPng, IccProfile, PngHeader, PngImage, PngMetadata, TextChunk,
+    TextChunkKind,
 };
 pub use decoder::{PngDecoder, TransparencyKey, metadata};
 pub use deconstruct::{
     ChunkStats, DEFAULT_MAX_CHUNKS, DeconstructLimits, FilterHistogram, FilterScan, PassStats,
     PngReport, Segment, SegmentKind, SkippedFilterScan, deconstruct, deconstruct_with_limits,
 };
-pub use encoder::{PngEncodeReport, PngEncoder};
+pub use encoder::{DroppedMetadata, PngEncodeReport, PngEncoder};
 pub use filter::{FilterStrategy, FilterType};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
 pub use gamut_deflate::Level;

@@ -37,9 +37,10 @@
 use gamut_core::{Error, Result};
 use gamut_deflate::{DeflateEncoder, Level};
 
+use crate::decoded::XMP_KEYWORD;
 use crate::{ColorType, chunk};
 
-/// The rendering intent for an `sRGB` chunk (PNG spec §11.3.3.5).
+/// The rendering intent for an `sRGB` chunk (PNG spec §11.3.2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrgbIntent {
     /// Perceptual (intent code 0).
@@ -106,6 +107,20 @@ enum TextKind {
     InternationalCompressed,
 }
 
+impl TextKind {
+    /// The `iTXt` kind that carries the same compression choice.
+    ///
+    /// §11.3.3.2 sends text outside Latin-1's repertoire to `iTXt`, and §11.3.3.4 gives `iTXt` a
+    /// compression flag of its own, so a promotion changes the character set and nothing else —
+    /// a compressed annotation stays compressed.
+    fn international(self) -> Self {
+        match self {
+            Self::Latin1 | Self::International => Self::International,
+            Self::Compressed | Self::InternationalCompressed => Self::InternationalCompressed,
+        }
+    }
+}
+
 /// One accumulated text annotation, already **in the byte form its chunk carries**.
 ///
 /// The distinction is the whole point of holding bytes rather than `String`s. PNG's three text
@@ -116,11 +131,12 @@ enum TextKind {
 /// chunk"), while §11.3.3.4 gives `iTXt` UTF-8. A Rust `String` is UTF-8, so writing its bytes
 /// into a `tEXt` chunk stores mojibake for every code point above U+007F — `é` (U+00E9) becomes
 /// the two bytes `C3 A9`, which a conforming reader shows as `Ã©`. Converting once, at the point
-/// the caller sets the text, makes that unrepresentable: an entry exists only if its bytes are
-/// already right for its `kind`.
+/// the caller sets the text, makes that unrepresentable: an entry's bytes are always already
+/// right for its `kind`, or it carries the [`fault`](Self::fault) that stops it being written.
 #[derive(Debug, Clone)]
 struct TextEntry {
-    /// The keyword, Latin-1 (§11.3.3.1).
+    /// The keyword, Latin-1 (§11.3.3.1). Empty when [`fault`](Self::fault) is set, because such
+    /// an entry is never written — [`Ancillary::validate`] refuses the encode first.
     keyword: Vec<u8>,
     /// The text: Latin-1 for `tEXt`/`zTXt`, UTF-8 for `iTXt`.
     text: Vec<u8>,
@@ -130,15 +146,116 @@ struct TextEntry {
     /// The `iTXt` translated keyword (UTF-8, §11.3.3.4); empty for the other kinds.
     translated: Vec<u8>,
     kind: TextKind,
+    /// Whether this entry came from [`Ancillary::begin_carry`] rather than a direct setter, so a
+    /// second carry can replace exactly what the first contributed.
+    carried: bool,
+    /// Why this annotation must not be written, if it must not. Recorded here rather than
+    /// returned from the setter because the setters sit behind `#[must_use]` builder methods
+    /// that have no error channel; [`Ancillary::validate`] reports it at the encode chokepoint.
+    fault: Option<TextFault>,
 }
 
-/// The Latin-1 bytes of `s`, or `None` when a character has no Latin-1 encoding.
+/// Why one accumulated text annotation cannot be written, and which annotation it was.
+#[derive(Debug, Clone)]
+struct TextFault {
+    /// The keyword exactly as the caller gave it, for the refusal message — including a keyword
+    /// that is itself the fault.
+    keyword: String,
+    /// The clause the annotation breaks, phrased for the caller.
+    reason: &'static str,
+}
+
+/// §11.3.3.1: "Keywords are restricted to 1 to 79 bytes in length."
+const KEYWORD_LENGTH: &str = "a keyword is restricted to 1 to 79 bytes (§11.3.3.1)";
+/// §11.3.3.1: "Keywords shall contain only printable Latin-1 [ISO_8859-1] characters and spaces;
+/// that is, only code points 0x20-7E and 0xA1-FF are allowed", and expressly "nor is U+00A0
+/// NON-BREAKING SPACE". A null is outside it too, which is also §11.3.3.2's "Neither the keyword
+/// nor the text string may contain a null character".
+const KEYWORD_REPERTOIRE: &str = "a keyword may hold only code points 0x20-0x7E and 0xA1-0xFF \
+     — no null, no control character, not U+00A0 (§11.3.3.1)";
+/// §11.3.3.1: "leading spaces, trailing spaces, and consecutive spaces are not permitted in
+/// keywords".
+const KEYWORD_SPACES: &str =
+    "a keyword may not have a leading, trailing or consecutive space (§11.3.3.1)";
+/// §11.3.3.2 for `tEXt`/`zTXt` ("Neither the keyword nor the text string may contain a null
+/// character") and §11.3.3.4 for `iTXt` ("neither shall contain a zero byte"). The null is the
+/// field separator, so an embedded one does not merely offend the grammar — the chunk re-parses
+/// as a *different* annotation.
+const TEXT_NUL: &str = "a text string may not contain a null character (§11.3.3.2, §11.3.3.4)";
+/// §11.3.3.4: "The language tag is a well-formed language tag defined by [BCP47]", whose subtags
+/// are ASCII letters and digits joined by hyphens. Anything else is neither well-formed nor
+/// (being written as UTF-8 and read back as Latin-1) byte-exact.
+const LANGUAGE_TAG: &str =
+    "an iTXt language tag may hold only ASCII letters, digits and '-' (§11.3.3.4, BCP 47)";
+/// §11.3.3.4: "The translated keyword and text both use the UTF-8 encoding, and neither shall
+/// contain a zero byte (null character)."
+const TRANSLATED_NUL: &str =
+    "an iTXt translated keyword may not contain a null character (§11.3.3.4)";
+/// §11.3.3.4 gives the `iTXt` text field UTF-8 and no other encoding, so a packet that is not
+/// UTF-8 has no chunk to go in. Dropping it silently is the loss this crate refuses to make.
+const XMP_NOT_UTF8: &str =
+    "the XMP packet is not UTF-8, and an iTXt text string must be (§11.3.3.4)";
+
+/// Whether `c` is a printable Latin-1 character or a space, the repertoire §11.3.3.1 spells out
+/// as "only code points 0x20-7E and 0xA1-FF".
+fn printable_latin1(c: char) -> bool {
+    matches!(u32::from(c), 0x20..=0x7E | 0xA1..=0xFF)
+}
+
+/// Whether `c` may appear in a `tEXt`/`zTXt` **text string**: §11.3.3.1's closing paragraph
+/// restricts their content to "the printable Latin-1 character set plus U+000A LINE FEED (LF)".
 ///
-/// Latin-1 is the first 256 Unicode code points, so the encoding is `u8::try_from` on each
-/// `char` — the exact inverse of the decoder's `latin1`, which maps byte *n* to U+00*nn*. A
-/// string that came out of this crate's decoder therefore always converts back.
-fn latin1_bytes(s: &str) -> Option<Vec<u8>> {
-    s.chars().map(|c| u8::try_from(u32::from(c)).ok()).collect()
+/// §11.3.3.2 says more loosely that the text "may contain any Latin-1 character", which would
+/// admit the C0/C1 controls and U+00A0. The tighter reading costs nothing to take: a character
+/// outside this set is not rejected, it is *promoted* to `iTXt` — exactly what §11.3.3.2's own
+/// "Text containing characters outside the repertoire of ISO/IEC 8859-1 should be encoded using
+/// the iTXt chunk" directs — so the character always survives and only the chunk changes.
+fn text_repertoire(c: char) -> bool {
+    c == '\n' || printable_latin1(c)
+}
+
+/// The Latin-1 byte of `c`: Latin-1 is the first 256 Unicode code points, so the encoding is
+/// `u8::try_from` — the exact inverse of the decoder's `latin1`, which maps byte *n* to U+00*nn*.
+fn latin1_byte(c: char) -> Option<u8> {
+    u8::try_from(u32::from(c)).ok()
+}
+
+/// The Latin-1 bytes of a keyword, or the §11.3.3.1 clause it breaks.
+///
+/// The repertoire is checked before the length so that the length bound counts *stored* bytes:
+/// every character that passes is one Latin-1 byte, which a UTF-8 `str::len` is not.
+fn keyword_bytes(keyword: &str) -> core::result::Result<Vec<u8>, &'static str> {
+    let bytes: Option<Vec<u8>> = keyword
+        .chars()
+        .map(|c| latin1_byte(c).filter(|_| printable_latin1(c)))
+        .collect();
+    let bytes = bytes.ok_or(KEYWORD_REPERTOIRE)?;
+    if bytes.is_empty() || bytes.len() > 79 {
+        return Err(KEYWORD_LENGTH);
+    }
+    if keyword.starts_with(' ') || keyword.ends_with(' ') || keyword.contains("  ") {
+        return Err(KEYWORD_SPACES);
+    }
+    Ok(bytes)
+}
+
+/// The Latin-1 bytes of a `tEXt`/`zTXt` text string, or `None` when a character is outside
+/// [`text_repertoire`] — the signal to promote the annotation to `iTXt`.
+fn text_bytes(text: &str) -> Option<Vec<u8>> {
+    text.chars()
+        .map(|c| latin1_byte(c).filter(|_| text_repertoire(c)))
+        .collect()
+}
+
+/// The §11.3.3.4 clause an `iTXt`'s language tag or translated keyword breaks, if any.
+fn itxt_field_fault(language: &str, translated: &str) -> Option<&'static str> {
+    if !language
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Some(LANGUAGE_TAG);
+    }
+    translated.contains('\0').then_some(TRANSLATED_NUL)
 }
 
 /// Accumulated ancillary metadata to emit alongside the image.
@@ -170,13 +287,10 @@ pub(crate) struct Ancillary {
     pub c2pa: Option<Vec<u8>>,
     /// tEXt / zTXt / iTXt entries, emitted in insertion order.
     texts: Vec<TextEntry>,
-    /// Whether a caller set a text annotation whose **keyword** has no Latin-1 encoding.
-    ///
-    /// §11.3.3.1 restricts a keyword to Latin-1 in all three text chunks, so — unlike the text,
-    /// which `iTXt` carries in UTF-8 — there is no chunk such a keyword fits. The entry is
-    /// dropped at the setter and the encode is refused by [`Self::validate`], rather than
-    /// silently writing a keyword no reader can match.
-    unencodable_keyword: bool,
+    /// Whether the entries being pushed right now come from a metadata carry, so that a second
+    /// carry can replace exactly what the first contributed. Set between [`Self::begin_carry`]
+    /// and [`Self::end_carry`].
+    carrying: bool,
 }
 
 impl Ancillary {
@@ -206,93 +320,147 @@ impl Ancillary {
     }
 
     /// Adds an `iTXt` entry keeping its language tag and translated keyword (§11.3.3.4), which
-    /// [`add_text_international`](Self::add_text_international) leaves empty. Used only to carry
-    /// a decoded annotation forward, so that re-encoding a file does not silently drop the two
-    /// fields that make `iTXt` international.
+    /// [`add_text_international`](Self::add_text_international) leaves empty, and its compression
+    /// flag. Used to carry a decoded annotation forward without changing its identity: neither
+    /// the two fields that make `iTXt` international nor the flag that keeps a 40-byte payload
+    /// from being rewritten as 1600 uncompressed bytes.
     pub(crate) fn add_text_international_tagged(
         &mut self,
         keyword: &str,
         language: &str,
         translated: &str,
         text: &str,
+        compressed: bool,
     ) {
-        if let Some(mut entry) = self.text_entry(keyword, text, TextKind::International) {
-            entry.language = language.as_bytes().to_vec();
-            entry.translated = translated.as_bytes().to_vec();
-            self.texts.push(entry);
+        let kind = if compressed {
+            TextKind::InternationalCompressed
+        } else {
+            TextKind::International
+        };
+        let mut entry = self.text_entry(keyword, text, kind);
+        if entry.fault.is_none() {
+            entry.fault = itxt_field_fault(language, translated).map(|reason| TextFault {
+                keyword: keyword.to_string(),
+                reason,
+            });
         }
+        entry.language = language.as_bytes().to_vec();
+        entry.translated = translated.as_bytes().to_vec();
+        self.texts.push(entry);
+    }
+
+    /// Adds an XMP packet as the `iTXt` §11.3.3.1 Table 21 reserves for it.
+    ///
+    /// Takes bytes rather than a `&str` because that is what the read side surfaces: a file's
+    /// packet is whatever bytes its chunk held. §11.3.3.4 gives the `iTXt` text field UTF-8 and
+    /// no alternative, so bytes that are not UTF-8 have no chunk to go in — and are recorded as
+    /// a refusal rather than discarded, because a caller that handed this encoder a packet is
+    /// entitled to learn it did not come out the other side.
+    pub(crate) fn add_xmp(&mut self, packet: &[u8]) {
+        match str::from_utf8(packet) {
+            Ok(text) => self.add_text_international(XMP_KEYWORD, text),
+            Err(_) => {
+                let mut entry = self.text_entry(XMP_KEYWORD, "", TextKind::International);
+                entry.fault = Some(TextFault {
+                    keyword: XMP_KEYWORD.to_string(),
+                    reason: XMP_NOT_UTF8,
+                });
+                self.texts.push(entry);
+            }
+        }
+    }
+
+    /// Starts carrying a read file's metadata, discarding whatever a previous carry contributed.
+    ///
+    /// This is what makes [`PngEncoder::with_metadata`](crate::PngEncoder::with_metadata)
+    /// idempotent for text. The single-value slots — `gamma`, `iccp`, `srgb`, … — are idempotent
+    /// already because a second write overwrites the first; the text list is the one place where
+    /// "set it again" would otherwise mean "append it again", duplicating every annotation.
+    pub(crate) fn begin_carry(&mut self) {
+        self.texts.retain(|entry| !entry.carried);
+        self.carrying = true;
+    }
+
+    /// Ends the carry started by [`begin_carry`](Self::begin_carry), so later direct setters push
+    /// entries a subsequent carry will not remove.
+    pub(crate) fn end_carry(&mut self) {
+        self.carrying = false;
     }
 
     fn push_text(&mut self, keyword: &str, text: &str, kind: TextKind) {
-        if let Some(entry) = self.text_entry(keyword, text, kind) {
-            self.texts.push(entry);
-        }
+        let entry = self.text_entry(keyword, text, kind);
+        self.texts.push(entry);
     }
 
-    /// Builds the entry for one text annotation, choosing the chunk that can actually carry it.
+    /// Builds the entry for one text annotation, choosing the chunk that can actually carry it
+    /// and recording the clause it breaks if no chunk can.
     ///
     /// The caller's `kind` is a *preference*, not a guarantee: §11.3.3.2 says outright that "text
     /// containing characters outside the repertoire of ISO/IEC 8859-1 should be encoded using the
-    /// `iTXt` chunk", so a `tEXt`/`zTXt` request whose text is not Latin-1 is promoted to `iTXt`
-    /// rather than written as UTF-8 bytes a Latin-1 reader mis-renders. The promotion keeps the
-    /// caller's *other* choice — compression — because §11.3.3.4 gives `iTXt` a compression flag
-    /// of its own; only the character set changes.
+    /// `iTXt` chunk", so a `tEXt`/`zTXt` request whose text leaves [`text_repertoire`] is
+    /// promoted rather than written as bytes a Latin-1 reader mis-renders. The promotion keeps
+    /// the caller's *other* choice, compression, because §11.3.3.4 gives `iTXt` a flag of its own.
     ///
-    /// `None` (the entry is dropped, and [`Self::validate`] then refuses the encode) is reserved
-    /// for the one case no chunk can express: a keyword outside Latin-1.
-    fn text_entry(&mut self, keyword: &str, text: &str, kind: TextKind) -> Option<TextEntry> {
-        let Some(keyword) = latin1_bytes(keyword) else {
-            self.unencodable_keyword = true;
-            return None;
+    /// A null in the text is the one thing promotion cannot fix — §11.3.3.2 and §11.3.3.4 both
+    /// forbid it, and it is the field separator, so the chunk would re-parse as a different
+    /// annotation — and neither can a keyword outside §11.3.3.1's repertoire, length or spacing
+    /// rules. Those become a [`TextFault`] the entry carries to [`Self::validate`].
+    fn text_entry(&self, keyword: &str, text: &str, kind: TextKind) -> TextEntry {
+        let (keyword_bytes, keyword_fault) = match keyword_bytes(keyword) {
+            Ok(bytes) => (bytes, None),
+            Err(reason) => (Vec::new(), Some(reason)),
         };
-        let (kind, text) = match (kind, latin1_bytes(text)) {
-            (TextKind::Latin1, Some(latin1)) => (TextKind::Latin1, latin1),
-            (TextKind::Compressed, Some(latin1)) => (TextKind::Compressed, latin1),
-            (TextKind::Latin1, None) => (TextKind::International, text.as_bytes().to_vec()),
-            (TextKind::Compressed, None) => {
-                (TextKind::InternationalCompressed, text.as_bytes().to_vec())
-            }
-            (kind, _) => (kind, text.as_bytes().to_vec()),
+        let reason = keyword_fault.or_else(|| text.contains('\0').then_some(TEXT_NUL));
+        // An iTXt was asked for as UTF-8 and stays UTF-8; only a Latin-1 request has a
+        // repertoire to leave.
+        let latin1 = match kind {
+            TextKind::Latin1 | TextKind::Compressed => text_bytes(text),
+            TextKind::International | TextKind::InternationalCompressed => None,
         };
-        Some(TextEntry {
-            keyword,
-            text,
+        let (kind, text_bytes) = match latin1 {
+            Some(bytes) => (kind, bytes),
+            None => (kind.international(), text.as_bytes().to_vec()),
+        };
+        TextEntry {
+            keyword: keyword_bytes,
+            text: text_bytes,
             language: Vec::new(),
             translated: Vec::new(),
             kind,
-        })
+            carried: self.carrying,
+            fault: reason.map(|reason| TextFault {
+                keyword: keyword.to_string(),
+                reason,
+            }),
+        }
     }
 
-    /// Refuses an accumulation the spec says must not be written, before any byte is emitted.
+    /// Refuses an accumulation the spec forbids, before any byte is emitted.
     ///
-    /// Two cases, both of which the caller stated explicitly and neither of which this encoder
-    /// may silently resolve for it:
+    /// Only the text chunks are refusable here, and only where a clause is a requirement rather
+    /// than a recommendation: a keyword outside §11.3.3.1's repertoire, length or spacing rules;
+    /// a null in a text string (§11.3.3.2, §11.3.3.4); a language tag or translated keyword
+    /// §11.3.3.4 rules out; a non-UTF-8 XMP packet. Each is a chunk that would be *read back as
+    /// something else* — the null re-frames the annotation outright — so writing it is a silent
+    /// corruption, and dropping it is a silent loss.
     ///
-    /// - **`sRGB` together with `iCCP`.** §5.6 Table 5 records the constraint on both rows — "if
-    ///   the `iCCP` chunk is present, the `sRGB` chunk should not be present" and its converse —
-    ///   and §11.3.2.5 repeats it ("it is recommended that the `sRGB` and `iCCP` chunks do not
-    ///   appear simultaneously in a PNG datastream"). Emitting both is not undefined, because
-    ///   §4.3 Table 1 ranks the colour chunks and a reader takes the lowest priority number
-    ///   (`iCCP` 2 over `sRGB` 3) — but it *is* a datastream the standard tells encoders not to
-    ///   produce, and which of the two the caller meant is not something this crate can guess.
-    ///   Dropping one silently would lose colour information the caller supplied, so the encode
-    ///   is refused. To carry both forward from a decoded file, use
-    ///   [`PngEncoder::with_metadata`](crate::PngEncoder::with_metadata), which applies Table 1
-    ///   itself.
-    /// - **A text keyword outside Latin-1** (§11.3.3.1), which no text chunk can carry.
+    /// The colour chunks are deliberately **not** policed. §5.6 Table 5 and §11.3.2.5 say only
+    /// that `sRGB` and `iCCP` "should not" appear together, and §15 gives the BCP 14 keywords
+    /// force "when, and only when, they appear in all capitals"; §4.3 Table 1 then *presupposes*
+    /// the co-occurrence and defines the outcome by ranking the chunks. Both are written, and a
+    /// reader takes the highest-priority one.
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.srgb.is_some() && self.iccp.is_some() {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "PNG: sRGB and iCCP must not both be written (spec §5.6 Table 5, §11.3.2.5); \
-                 set one",
-            ));
-        }
-        if self.unencodable_keyword {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "PNG: a text keyword must be Latin-1 (spec §11.3.3.1)",
-            ));
+        for (index, entry) in self.texts.iter().enumerate() {
+            if let Some(fault) = &entry.fault {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "PNG: a text annotation breaks the clause of the chunk that would carry it",
+                )
+                .with_detail(format!(
+                    "text annotation {index} (keyword {:?}): {}",
+                    fault.keyword, fault.reason
+                )));
+            }
         }
         Ok(())
     }
@@ -969,21 +1137,32 @@ mod tests {
         assert_eq!(find_chunk(&post, b"bKGD"), None);
     }
 
+    /// Encodes `a`'s post-PLTE chunks and returns the buffer, so a claim can read the bytes a
+    /// text annotation actually becomes.
+    fn post_plte(a: &Ancillary) -> Vec<u8> {
+        let mut out = vec![0u8; 8];
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        out
+    }
+
+    /// The refusal `validate` gives, rendered — including the owned detail naming the annotation.
+    fn refusal(a: &Ancillary) -> String {
+        a.validate().expect_err("the encode is refused").to_string()
+    }
+
     /// A `tEXt` text string "is interpreted according to the Latin-1 character set" (§11.3.3.2),
     /// so a character above U+007F is **one** byte, not its UTF-8 pair.
     ///
-    /// Kills a mutant of [`Ancillary::text_entry`] that keeps the caller's `String` bytes: `é`
-    /// would be stored as `C3 A9`, which a conforming reader renders `Ã©`. Asserted on the chunk
-    /// payload rather than through a decode, because this crate's decoder maps Latin-1 back
+    /// Kills a mutant of [`text_bytes`] that keeps the caller's `String` bytes: `é` would be
+    /// stored as `C3 A9`, which a conforming reader renders `Ã©`. Asserted on the chunk payload
+    /// rather than through a decode, because this crate's decoder maps Latin-1 back
     /// code-point-for-code-point and would agree with the encoder either way.
     #[test]
     fn latin1_text_is_written_one_byte_per_character() {
         let mut a = Ancillary::default();
         a.add_text_latin1("Author", "café ÿ");
-        let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
         assert_eq!(
-            find_chunk(&out, b"tEXt"),
+            find_chunk(&post_plte(&a), b"tEXt"),
             Some(b"Author\0caf\xE9 \xFF".to_vec())
         );
     }
@@ -992,14 +1171,13 @@ mod tests {
     /// encoded using the iTXt chunk." A `tEXt` request whose text has no Latin-1 encoding is
     /// therefore promoted rather than mangled or dropped.
     ///
-    /// Kills the `(TextKind::Latin1, None)` arm of [`Ancillary::text_entry`]. The keyword stays
-    /// Latin-1 either way (§11.3.3.1 binds it in every text chunk).
+    /// Kills the `None` arm of [`Ancillary::text_entry`]'s promotion. The keyword stays Latin-1
+    /// either way (§11.3.3.1 binds it in every text chunk).
     #[test]
     fn text_outside_latin1_is_promoted_to_itxt() {
         let mut a = Ancillary::default();
         a.add_text_latin1("Title", "字");
-        let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        let out = post_plte(&a);
         assert_eq!(find_chunk(&out, b"tEXt"), None);
         // keyword, NUL, compression flag 0, method 0, empty language, empty translated keyword,
         // then the UTF-8 text (§11.3.3.4).
@@ -1009,19 +1187,55 @@ mod tests {
         );
     }
 
+    /// §11.3.3.1 restricts a `tEXt`/`zTXt` text string to "the printable Latin-1 character set
+    /// plus U+000A LINE FEED (LF)", and a control character is outside it — so it promotes, for
+    /// the same reason a Han character does. The character survives either way; only the chunk
+    /// that can define it changes.
+    ///
+    /// Kills [`text_repertoire`] mutated to accept everything Latin-1 can hold, which the looser
+    /// wording of §11.3.3.2 ("may contain any Latin-1 character") would otherwise excuse. 0x7F
+    /// DELETE is Latin-1-encodable and still not printable.
+    #[test]
+    fn a_control_character_promotes_the_annotation_to_itxt() {
+        let mut a = Ancillary::default();
+        a.add_text_latin1("Title", "one\u{7F}two");
+        let out = post_plte(&a);
+        assert_eq!(find_chunk(&out, b"tEXt"), None);
+        assert_eq!(
+            find_chunk(&out, b"iTXt"),
+            Some(b"Title\0\0\0\0\0one\x7Ftwo".to_vec())
+        );
+    }
+
+    /// The other side of the same boundary: a line feed and the top of Latin-1 are *inside* the
+    /// repertoire §11.3.3.1 grants `tEXt`, so neither promotes.
+    ///
+    /// Kills [`text_repertoire`] mutated to drop its `'\n'` case or to stop at 0xFE, either of
+    /// which would push an ordinary multi-line Latin-1 note into an `iTXt`.
+    #[test]
+    fn a_line_feed_and_the_top_of_latin1_stay_in_a_text_chunk() {
+        let mut a = Ancillary::default();
+        a.add_text_latin1("Description", "line\nÿ");
+        let out = post_plte(&a);
+        assert_eq!(find_chunk(&out, b"iTXt"), None);
+        assert_eq!(
+            find_chunk(&out, b"tEXt"),
+            Some(b"Description\0line\n\xFF".to_vec())
+        );
+    }
+
     /// Promoting a `zTXt` keeps the caller's *compression*, because §11.3.3.4 gives `iTXt` a
     /// compression flag of its own — only the character set had to change.
     ///
-    /// Kills the `(TextKind::Compressed, None)` arm of [`Ancillary::text_entry`] and the
-    /// compression-flag byte in [`write_text`]: a mutant that promotes to plain `International`
-    /// leaves the flag at 0 and the body uncompressed.
+    /// Kills the `Compressed` arm of [`TextKind::international`] and the compression-flag byte in
+    /// [`write_text`]: a mutant that promotes to plain `International` leaves the flag at 0 and
+    /// the body uncompressed.
     #[test]
     fn compressed_text_outside_latin1_stays_compressed_in_itxt() {
         let body = "字".repeat(200);
         let mut a = Ancillary::default();
         a.add_text_compressed("Comment", &body);
-        let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        let out = post_plte(&a);
         assert_eq!(find_chunk(&out, b"zTXt"), None);
         let itxt = find_chunk(&out, b"iTXt").expect("promoted to iTXt");
         assert_eq!(&itxt[..12], b"Comment\0\x01\0\0\0");
@@ -1032,47 +1246,188 @@ mod tests {
         );
     }
 
-    /// §5.6 Table 5 states it on both rows — "If the iCCP chunk is present, the sRGB chunk should
-    /// not be present" and its converse — and §11.3.2.5 repeats it. Setting both is a question
-    /// only the caller can answer, so the encode is refused rather than one chunk silently
-    /// dropped.
+    /// §5.6 Table 5 and §11.3.2.5 say only that the two chunks "should not" appear together —
+    /// lowercase, and §15 gives the BCP 14 keywords force "when, and only when, they appear in
+    /// all capitals" — while §4.3 Table 1 presupposes the pair and ranks it. Both are written, so
+    /// no colour information the caller supplied is thrown away.
     ///
-    /// Kills the first guard of [`Ancillary::validate`]. Asserts the message, not `is_err`: the
-    /// second guard also rejects, so `is_err` alone would survive removing this one.
+    /// Kills a mutant that reinstates a refusal or drops one of the two chunks.
     #[test]
-    fn srgb_beside_iccp_is_refused() {
+    fn a_profile_and_a_rendering_intent_are_both_written() {
         let mut a = Ancillary::default();
         a.set_srgb(SrgbIntent::Perceptual);
-        assert!(a.validate().is_ok(), "sRGB alone is fine");
-
         a.iccp = Some(("prof".to_string(), vec![0u8; 4]));
-        let error = a.validate().expect_err("sRGB beside iCCP");
-        assert!(
-            error.to_string().contains("sRGB and iCCP must not both"),
-            "{error}"
-        );
+        assert!(a.validate().is_ok(), "the pair is legal");
 
-        a.srgb = None;
-        assert!(a.validate().is_ok(), "iCCP alone is fine");
+        let mut out = vec![0u8; 8];
+        a.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        assert_eq!(find_chunk(&out, b"sRGB"), Some(vec![0]));
+        assert!(
+            find_chunk(&out, b"iCCP").is_some(),
+            "the profile is written"
+        );
     }
 
-    /// §11.3.3.1 binds the keyword to Latin-1 in all three text chunks, so — unlike the text,
-    /// which §11.3.3.2 routes to `iTXt` — a keyword outside it has no chunk at all. The entry is
-    /// not written, and the encode is refused rather than the annotation quietly disappearing.
+    /// §11.3.3.1: "Keywords are restricted to 1 to 79 bytes in length." Both edges, because an
+    /// empty keyword makes a third-party reader drop the whole annotation and an over-long one is
+    /// a chunk no conforming reader has to accept.
     ///
-    /// Kills the keyword arm of [`Ancillary::text_entry`] and the second guard of
-    /// [`Ancillary::validate`]. Asserts the message for the same reason as the sRGB test.
+    /// Kills the length guard in [`keyword_bytes`], including a mutant that shifts either bound
+    /// by one.
     #[test]
-    fn a_text_keyword_outside_latin1_is_refused() {
-        let mut a = Ancillary::default();
-        a.add_text_latin1("题", "body");
-        assert!(a.texts.is_empty(), "the entry is not written");
+    fn a_keyword_outside_one_to_seventy_nine_bytes_is_refused() {
+        let mut ok = Ancillary::default();
+        ok.add_text_latin1(&"k".repeat(79), "body");
+        ok.add_text_latin1("k", "body");
+        assert!(ok.validate().is_ok(), "79 bytes and 1 byte are inside");
 
-        let error = a.validate().expect_err("keyword outside Latin-1");
+        for keyword in ["", &"k".repeat(80)] {
+            let mut a = Ancillary::default();
+            a.add_text_latin1(keyword, "body");
+            assert!(
+                refusal(&a).contains("restricted to 1 to 79 bytes"),
+                "keyword of {} bytes",
+                keyword.len()
+            );
+        }
+    }
+
+    /// §11.3.3.1: "only code points 0x20-7E and 0xA1-FF are allowed", and expressly "nor is
+    /// U+00A0 NON-BREAKING SPACE since it is visually indistinguishable from an ordinary space".
+    /// The null is the same clause read through §11.3.3.2 — and the one that *corrupts* rather
+    /// than merely offends, because it is the field separator: `Auth\0or` re-parses as the
+    /// annotation `Auth`.
+    ///
+    /// Kills the repertoire guard in [`keyword_bytes`] and each edge of [`printable_latin1`].
+    #[test]
+    fn a_keyword_outside_the_printable_latin1_repertoire_is_refused() {
+        for keyword in [
+            "Auth\0or",   // the field separator itself
+            "Auth\u{7F}", // DELETE
+            "Auth\u{9F}", // C1 control
+            "Auth\u{A0}", // NON-BREAKING SPACE, named by the clause
+            "题",         // outside Latin-1 altogether
+        ] {
+            let mut a = Ancillary::default();
+            a.add_text_latin1(keyword, "body");
+            assert!(
+                refusal(&a).contains("code points 0x20-0x7E and 0xA1-0xFF"),
+                "keyword {keyword:?}"
+            );
+        }
+
+        let mut edges = Ancillary::default();
+        edges.add_text_latin1("a\u{20}b\u{7E}\u{A1}\u{FF}", "body");
+        assert!(edges.validate().is_ok(), "0x20, 0x7E, 0xA1 and 0xFF are in");
+    }
+
+    /// §11.3.3.1: "leading spaces, trailing spaces, and consecutive spaces are not permitted in
+    /// keywords", so that a keyword cannot be misread as another.
+    ///
+    /// Kills the spacing guard in [`keyword_bytes`], one condition at a time.
+    #[test]
+    fn a_keyword_with_a_leading_trailing_or_consecutive_space_is_refused() {
+        for keyword in [" Author", "Author ", "Two  Words"] {
+            let mut a = Ancillary::default();
+            a.add_text_latin1(keyword, "body");
+            assert!(
+                refusal(&a).contains("leading, trailing or consecutive space"),
+                "keyword {keyword:?}"
+            );
+        }
+
+        let mut ok = Ancillary::default();
+        ok.add_text_latin1("Two Words", "body");
+        assert!(ok.validate().is_ok(), "a single interior space is allowed");
+    }
+
+    /// §11.3.3.2: "Neither the keyword nor the text string may contain a null character", and
+    /// §11.3.3.4 the same for `iTXt`. This is corruption, not pedantry: the null is the field
+    /// separator, so `note\0Author\0other` written as a `tEXt` body re-parses as a *different*
+    /// annotation. Promotion cannot rescue it, because `iTXt` forbids it too.
+    ///
+    /// Kills the null guard in [`Ancillary::text_entry`], in both the Latin-1 and the UTF-8
+    /// request — a mutant that checks only one leaves the other writing the corrupt chunk.
+    #[test]
+    fn a_null_in_a_text_string_is_refused() {
+        let mut latin1 = Ancillary::default();
+        latin1.add_text_latin1("Note", "before\0after");
+        assert!(refusal(&latin1).contains("may not contain a null character"));
+
+        let mut utf8 = Ancillary::default();
+        utf8.add_text_international("Note", "before\0after");
+        assert!(refusal(&utf8).contains("may not contain a null character"));
+    }
+
+    /// §11.3.3.4: "The translated keyword and text both use the UTF-8 encoding, and neither shall
+    /// contain a zero byte (null character)" — the translated keyword is null-terminated too, so
+    /// an embedded null re-frames everything after it.
+    ///
+    /// Kills the translated-keyword arm of [`itxt_field_fault`].
+    #[test]
+    fn a_null_in_a_translated_keyword_is_refused() {
+        let mut a = Ancillary::default();
+        a.add_text_international_tagged("Note", "de", "No\0tiz", "body", false);
+        assert!(refusal(&a).contains("translated keyword may not contain a null"));
+    }
+
+    /// §11.3.3.4: "The language tag is a well-formed language tag defined by [BCP47]", whose
+    /// subtags are ASCII letters and digits joined by hyphens. Anything else is not a tag, and —
+    /// written as UTF-8 into a field a reader takes as Latin-1 — would not even survive the trip.
+    ///
+    /// Kills the language arm of [`itxt_field_fault`], and the empty case pins that "unspecified"
+    /// stays legal.
+    #[test]
+    fn a_language_tag_outside_bcp_47_is_refused() {
+        for language in ["de\0DE", "zh_Hans", "dé"] {
+            let mut a = Ancillary::default();
+            a.add_text_international_tagged("Note", language, "", "body", false);
+            assert!(
+                refusal(&a).contains("ASCII letters, digits and '-'"),
+                "language {language:?}"
+            );
+        }
+
+        let mut ok = Ancillary::default();
+        ok.add_text_international_tagged("Note", "", "", "body", false);
+        ok.add_text_international_tagged("Note", "ar-AE-u-nu-latn", "", "body", false);
         assert!(
-            error.to_string().contains("keyword must be Latin-1"),
-            "{error}"
+            ok.validate().is_ok(),
+            "empty and a full BCP 47 tag are fine"
         );
+    }
+
+    /// §11.3.3.4 gives the `iTXt` text field UTF-8 and no alternative, so a packet that is not
+    /// UTF-8 has no chunk to go in. It is refused rather than quietly discarded: the read side
+    /// surfaces a packet as raw bytes, and a caller that handed those bytes back is entitled to
+    /// learn they did not come out the other side.
+    ///
+    /// Kills the `Err` arm of [`Ancillary::add_xmp`] — with it gone the packet vanishes silently.
+    #[test]
+    fn a_non_utf8_xmp_packet_is_refused() {
+        let mut a = Ancillary::default();
+        a.add_xmp(b"<x:xmpmeta \xFF\xFE/>");
+        assert!(refusal(&a).contains("XMP packet is not UTF-8"));
+
+        let mut valid = Ancillary::default();
+        valid.add_xmp(b"<x:xmpmeta/>");
+        assert!(valid.validate().is_ok(), "a UTF-8 packet is carried");
+        assert!(find_chunk(&post_plte(&valid), b"iTXt").is_some());
+    }
+
+    /// A refusal a caller cannot act on is barely better than a silent drop, so it names *which*
+    /// annotation offended — its position and its keyword, escaped so a null shows up.
+    ///
+    /// Kills the `enumerate` and the owned detail in [`Ancillary::validate`]: with either gone
+    /// the message is the same for every annotation in the file.
+    #[test]
+    fn the_refusal_names_the_annotation_and_its_keyword() {
+        let mut a = Ancillary::default();
+        a.add_text_latin1("Title", "fine");
+        a.add_text_latin1("Author", "bad\0body");
+        let message = refusal(&a);
+        assert!(message.contains("text annotation 1"), "{message}");
+        assert!(message.contains(r#""Author""#), "{message}");
     }
 
     /// §11.3.3.4's language tag and translated keyword survive, so carrying a decoded `iTXt`
@@ -1083,13 +1438,29 @@ mod tests {
     #[test]
     fn a_tagged_itxt_keeps_its_language_and_translated_keyword() {
         let mut a = Ancillary::default();
-        a.add_text_international_tagged("Author", "de", "Autor", "gämut");
-        let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        a.add_text_international_tagged("Author", "de", "Autor", "gämut", false);
         assert_eq!(
-            find_chunk(&out, b"iTXt"),
+            find_chunk(&post_plte(&a), b"iTXt"),
             Some(b"Author\0\0\0de\0Autor\0g\xC3\xA4mut".to_vec())
         );
+    }
+
+    /// A carry replaces what an earlier carry contributed instead of appending a second copy, so
+    /// `with_metadata` is idempotent for text the way the single-value colour slots already are.
+    ///
+    /// Kills the `retain` in [`Ancillary::begin_carry`] (two copies of every annotation) and the
+    /// `carried` flag's `end_carry` reset (a carry that also eats the caller's own annotations).
+    #[test]
+    fn a_second_carry_replaces_the_first_and_spares_direct_setters() {
+        let mut a = Ancillary::default();
+        a.add_text_latin1("Mine", "kept");
+        for _ in 0..2 {
+            a.begin_carry();
+            a.add_text_latin1("Carried", "once");
+            a.end_carry();
+        }
+        let keywords: Vec<&[u8]> = a.texts.iter().map(|e| e.keyword.as_slice()).collect();
+        assert_eq!(keywords, [b"Mine".as_slice(), b"Carried".as_slice()]);
     }
 
     /// §11.3.2.6 Table 18 orders the payload primaries, transfer function, matrix coefficients,
