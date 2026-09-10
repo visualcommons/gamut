@@ -4,7 +4,7 @@
 //! Each test pins one encode path's use of the seam, so a path that stopped embedding metadata
 //! fails on its own rather than hiding behind another.
 
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
 use gamut_tiff::{
     Anomaly, Ifd, Severity, TiffDecoder, TiffEncoder, TiffMetadata, Value, deconstruct, read, tags,
 };
@@ -13,6 +13,9 @@ use gamut_tiff::{
 const XMP: &[u8] = b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>";
 const IPTC: &[u8] = &[0x1c, 0x02, 0x05, 0x00, 0x04, b't', b'e', b's', b't'];
 const ICC: &[u8] = &[0, 0, 0, 12, b'a', b'c', b's', b'p', 1, 2, 3, 4];
+/// A JUMBF-shaped C2PA manifest store: long enough for `gamut_ifd::c2pa::locate` to accept it
+/// (`LBox` + `TBox`, 8 bytes) and out of line in a classic TIFF entry.
+const STORE: &[u8] = &[0, 0, 0, 0x16, b'j', b'u', b'm', b'b', 1, 2, 3, 4];
 
 /// An Exif sub-IFD with one recognisable field (`ExposureTime`, 33434).
 fn exif() -> Ifd {
@@ -173,11 +176,9 @@ fn a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file() {
     );
 }
 
-/// A well-formed single-strip RGB file carrying XMP, plus one extra IFD-0 field.
-///
-/// Used to hand `metadata()` a file whose *pixels* are perfectly readable but whose IFD 0 carries
-/// a pointer tag feeding no field of [`TiffMetadata`].
-fn file_with_extra_ifd0_field(tag: u16, value: Value) -> Vec<u8> {
+/// The uncompressed 2×2 RGB directory every hand-built page below starts from: enough fields for
+/// the pixels to decode, and nothing that feeds [`TiffMetadata`].
+fn page_ifd() -> Ifd {
     let mut ifd = Ifd::new();
     ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
     ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
@@ -186,13 +187,41 @@ fn file_with_extra_ifd0_field(tag: u16, value: Value) -> Vec<u8> {
     ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![2]));
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
     ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![2]));
+    ifd
+}
+
+/// The one strip [`page_ifd`]'s directory describes.
+fn page_strips() -> Vec<Vec<u8>> {
+    vec![vec![0u8; 2 * 2 * 3]]
+}
+
+/// A well-formed single-strip RGB file carrying XMP, plus one extra IFD-0 field.
+///
+/// Used to hand `metadata()` a file whose *pixels* are perfectly readable but whose IFD 0 carries
+/// a pointer tag feeding no field of [`TiffMetadata`].
+fn file_with_extra_ifd0_field(tag: u16, value: Value) -> Vec<u8> {
+    let mut ifd = page_ifd();
     ifd.set(tags::XMP, Value::Byte(XMP.to_vec()));
     ifd.set(tag, value);
     gamut_tiff::write_image(
         gamut_tiff::ByteOrder::LittleEndian,
         gamut_tiff::Variant::Classic,
         &ifd,
-        &[vec![0u8; 2 * 2 * 3]],
+        &page_strips(),
+    )
+    .expect("write")
+}
+
+/// Serialises `pages` as a multi-page classic TIFF, every page carrying [`page_strips`].
+fn multipage(pages: &[Ifd]) -> Vec<u8> {
+    let pages: Vec<(Ifd, Vec<Vec<u8>>)> = pages
+        .iter()
+        .map(|ifd| (ifd.clone(), page_strips()))
+        .collect();
+    gamut_tiff::write_multipage(
+        gamut_tiff::ByteOrder::LittleEndian,
+        gamut_tiff::Variant::Classic,
+        &pages,
     )
     .expect("write")
 }
@@ -220,9 +249,83 @@ fn a_broken_pointer_the_metadata_does_not_use_does_not_hide_the_blocks() {
 fn a_broken_exif_pointer_is_still_an_error() {
     // The other half of the scoping rule. The Exif sub-IFD's content *is* returned, so reporting
     // `exif: None` for a directory the file declares would be silent loss — this is the one
-    // pointer whose failure the caller must hear about.
+    // pointer whose failure the caller must hear about. The *message* is the claim, not merely
+    // `is_err`: the file also carries a dangling offset the reader must not have followed for any
+    // other reason, so a refusal naming something else would mean the wrong pointer failed.
     let bytes = file_with_extra_ifd0_field(tags::EXIF_IFD, Value::Long(vec![0xFFFF_FF00]));
-    assert!(TiffDecoder::new().metadata(&bytes).is_err());
+    let err = TiffDecoder::new()
+        .metadata(&bytes)
+        .expect_err("a dangling ExifIFD is the caller's business");
+    assert!(err.to_string().contains("read out of bounds"), "{err}");
+}
+
+#[test]
+fn a_broken_pointer_on_a_page_the_metadata_discards_does_not_fail_the_read() {
+    // The same rule that keeps `SubIFDs` and `GPSInfo` out of `POINTER_TAGS`, applied to whole
+    // *pages*: the blocks come from IFD 0 and the C2PA store from the last IFD, so a pointer
+    // anywhere else feeds nothing this returns and following it can only add failure modes. A
+    // dangling `ExifIFD` on page 1 of a two-page document used to fail the whole call.
+    //
+    // The store on that same last page is the other half of the claim: its entry carries the
+    // store's bytes rather than an offset, so the directory whose pointers are never resolved
+    // still delivers it.
+    let mut page0 = page_ifd();
+    page0.set(tags::XMP, Value::Byte(XMP.to_vec()));
+    let mut page1 = page_ifd();
+    page1.set(tags::EXIF_IFD, Value::Long(vec![0xFFFF_FF00]));
+    page1.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(STORE.to_vec()));
+    let bytes = multipage(&[page0, page1]);
+
+    let meta = TiffDecoder::new()
+        .metadata(&bytes)
+        .expect("a pointer on a discarded page must not fail the read");
+    assert_eq!(meta.xmp.as_deref(), Some(XMP), "IFD 0's blocks");
+    assert_eq!(meta.c2pa.as_deref(), Some(STORE), "the last IFD's store");
+    // And the file is sound, which is what makes losing its metadata indefensible.
+    let decoded: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&bytes).expect("decode");
+    assert_eq!(decoded.dimensions().width, 2);
+}
+
+/// A two-page file whose pages point their `ExifIFD` at **one** directory.
+///
+/// Built in two passes: the offset the writer gives page 0's Exif directory is not known until it
+/// has laid the file out, so pass 1 carries a same-sized `LONG` placeholder on page 1 and pass 2
+/// substitutes the real offset into a byte-identical layout.
+fn two_pages_sharing_one_exif_directory() -> Vec<u8> {
+    let build = |offset: u32| {
+        let mut page0 = page_ifd();
+        page0.set_sub_ifd(tags::EXIF_IFD, vec![exif()]);
+        let mut page1 = page_ifd();
+        page1.set(tags::EXIF_IFD, Value::Long(vec![offset]));
+        multipage(&[page0, page1])
+    };
+    let laid_out = read(&build(0)).expect("read").ifds[0]
+        .get_u32(tags::EXIF_IFD)
+        .expect("page 0's Exif pointer");
+    let bytes = build(laid_out);
+    let pages = read(&bytes).expect("read").ifds;
+    assert_eq!(
+        (
+            pages[0].get_u32(tags::EXIF_IFD),
+            pages[1].get_u32(tags::EXIF_IFD)
+        ),
+        (Some(laid_out), Some(laid_out)),
+        "the two pages must end up sharing one directory for this to be the file under test"
+    );
+    bytes
+}
+
+#[test]
+fn two_pages_naming_one_exif_directory_do_not_trip_the_loop_guard() {
+    // A cross-page pointer graph the reader walked with a single `visited` set: page 1's
+    // `ExifIFD` looked like a second pointer claiming page 0's directory and failed the call —
+    // for a page whose Exif is discarded. Page 0's Exif is the one that is returned, so it is
+    // what the assertion reads.
+    let bytes = two_pages_sharing_one_exif_directory();
+    let meta = TiffDecoder::new()
+        .metadata(&bytes)
+        .expect("a shared directory on a discarded page must not fail the read");
+    assert_eq!(meta.exif, Some(exif()));
 }
 
 #[test]

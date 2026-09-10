@@ -92,7 +92,13 @@ rejects. `SubIFDs` and `GPSInfo` are *out* of the list because their targets fee
 a single dangling `SubIFDs` offset made XMP, IPTC, ICC and C2PA unreachable on a file whose pixels
 decode perfectly, and two pages sharing one thumbnail directory tripped the reader's cross-chain
 loop guard. Only *standard* pointer tags are recognised; a vendor private tag holding an offset is
-carried through unchanged, and nothing in this crate can grade that. **(c)** The blocks live in **IFD 0 only**, so a reader decoding
+carried through unchanged, and nothing in this crate can grade that. The same rule scopes *where*
+the pair is resolved: **IFD 0's subtree and no other page's**. Every later page of a multi-page
+document feeds one field — the C2PA manifest store, whose entry holds the store's bytes rather
+than an offset — so a *pointer* there is a discarded target too, and a dangling `ExifIFD` on page
+1, or two pages naming one Exif directory, used to fail the whole read. Within that subtree it is
+still one flat list at every node, which leaves one harmless over-reach: `InteroperabilityIFD` is
+followed at IFD 0 as well, where a spec-conformant file never puts it. **(c)** The blocks live in **IFD 0 only**, so a reader decoding
 page 3 of a multi-page document alone sees none of them; duplicating an ICC profile onto every
 page is the worse outcome, and IFD 0 is where a reader conventionally looks.
 
