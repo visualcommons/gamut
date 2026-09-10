@@ -523,6 +523,14 @@ mod tests {
     //! | [`jumbf_superbox_span`] | `end <= buffer.len()`: the length runs past the buffer | [`a_declared_length_running_past_the_buffer_is_an_unusable_length_not_an_absent_superbox`] | [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_span`] |
     //! | [`is_jumbf_not_found`] | `C2pa(JumbfNotFound)`: the asset carries no manifest at all | [`c2pa_rss_jumbf_not_found_is_an_absent_manifest`] | [`a_c2pa_error_other_than_jumbf_not_found_is_not_an_absent_manifest`] |
     //!
+    //! The table is machine-checked. [`the_enumeration_is_a_table_with_no_blank_cell`] and
+    //! [`every_test_the_enumeration_names_exists_in_this_file`] parse it out of this very doc
+    //! comment and fail on a blank cell or on a name nothing defines, so renaming a pinned test
+    //! cannot leave a stale row behind a green suite; rustdoc would not catch it, because it never
+    //! compiles a `cfg(test)` module and never resolves these links.
+    //! [`every_test_file_the_enumeration_names_exists`] does the same for the `tests/` files the
+    //! prose points at.
+    //!
     //! Two things about the table read as gaps and are not. Two rows share a "not taken" column —
     //! [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_span`] is the nearest non-refused
     //! input for both of [`jumbf_superbox_span`]'s refusals, and splitting it would only give the
@@ -894,6 +902,123 @@ mod tests {
             !is_jumbf_not_found(&error),
             "an error raised about a manifest that is present is not the absence of one; got \
              {error} reported as an absent manifest"
+        );
+    }
+
+    /// This file's own source, so the enumeration in the module doc above can be checked against
+    /// the definitions below it.
+    const SOURCE: &str = include_str!("lib.rs");
+
+    /// The lines of this module's doc comment, `//!` and surrounding space stripped.
+    fn module_doc_lines() -> impl Iterator<Item = &'static str> {
+        SOURCE
+            .lines()
+            .skip_while(|line| !line.starts_with("mod tests {"))
+            .filter_map(|line| line.trim_start().strip_prefix("//!"))
+            .map(str::trim)
+    }
+
+    /// The enumeration's rows, header and separator included, each split into its cells.
+    fn enumeration_rows() -> Vec<Vec<&'static str>> {
+        module_doc_lines()
+            .filter(|line| line.starts_with('|'))
+            .map(|line| line.trim_matches('|').split('|').map(str::trim).collect())
+            .collect()
+    }
+
+    /// The `` [`name`] `` intra-doc links in `text`, in order.
+    fn intra_doc_links(text: &str) -> Vec<&str> {
+        text.match_indices("[`")
+            .filter_map(|(at, _)| {
+                let rest = &text[at + 2..];
+                rest.find("`]").map(|end| &rest[..end])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_enumeration_is_a_table_with_no_blank_cell() {
+        const HEADER: [&str; 4] = ["Function", "Branch", "Taken", "Not taken"];
+
+        let rows = enumeration_rows();
+        assert!(
+            rows.len() > 2,
+            "the module doc must carry the enumeration table: header, separator and at least one \
+             branch"
+        );
+        assert_eq!(
+            rows[0], HEADER,
+            "the columns this test reads by position must be the ones the table declares"
+        );
+
+        for row in &rows[2..] {
+            assert_eq!(
+                row.len(),
+                HEADER.len(),
+                "every row names a function, a branch and both of its directions: {row:?}"
+            );
+            for (column, cell) in HEADER.iter().zip(row) {
+                assert!(
+                    !cell.is_empty(),
+                    "a row with a blank `{column}` is the finding, not a formatting slip: {row:?}"
+                );
+            }
+            for column in [0usize, 2, 3] {
+                assert!(
+                    !intra_doc_links(row[column]).is_empty(),
+                    "`{}` must name its function or test as an intra-doc link, so this file can \
+                     check it resolves: {row:?}",
+                    HEADER[column]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_test_the_enumeration_names_exists_in_this_file() {
+        let mut checked = 0usize;
+
+        for line in module_doc_lines() {
+            for name in intra_doc_links(line) {
+                checked += 1;
+                assert!(
+                    SOURCE.contains(&format!("fn {name}(")),
+                    "the enumeration names `{name}`, and this file defines no function by that \
+                     name; a renamed test has to be renamed in its row too"
+                );
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "the enumeration names its functions with intra-doc links; finding none means this \
+             test read the wrong lines and was checking nothing"
+        );
+    }
+
+    #[test]
+    fn every_test_file_the_enumeration_names_exists() {
+        let mut checked = 0usize;
+
+        for line in module_doc_lines() {
+            for span in line.split('`').skip(1).step_by(2) {
+                if !span.starts_with("tests/") || !span.ends_with(".rs") {
+                    continue;
+                }
+                checked += 1;
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(span);
+                assert!(
+                    path.exists(),
+                    "the enumeration points at `{span}` for a claim it does not pin itself, and \
+                     there is no such file"
+                );
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "the enumeration points at `tests/` files for the two claims outside this layer; \
+             finding none means this test read the wrong lines and was checking nothing"
         );
     }
 }
