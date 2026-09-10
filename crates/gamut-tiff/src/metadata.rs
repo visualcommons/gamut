@@ -689,14 +689,20 @@ mod tests {
         assert!(!meta.is_empty(), "a group is content");
         let mut ifd0 = Ifd::new();
         meta.apply(&mut ifd0);
+        let written = ifd0
+            .sub_ifds()
+            .iter()
+            .find(|group| group.tag == tags::EXIF_IFD)
+            .and_then(|group| group.ifds.first())
+            .expect("the Exif directory must be written");
         assert_eq!(
-            ifd0.sub_ifds()
+            written
+                .sub_ifds()
                 .iter()
-                .find(|group| group.tag == tags::EXIF_IFD)
-                .and_then(|group| group.ifds.first())
-                .map(|exif| exif.sub_ifds().len()),
-            Some(1),
-            "the Exif directory must be written, carrying its Interop group"
+                .find(|group| group.tag == tags::INTEROPERABILITY_IFD)
+                .map(|group| group.ifds.as_slice()),
+            Some(&[interop][..]),
+            "carrying the group that was its only content"
         );
     }
 
