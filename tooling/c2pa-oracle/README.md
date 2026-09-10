@@ -269,10 +269,11 @@ outside that layer — `reserve_then_fill` rejecting a slot that is not the sign
 needs c2pa-rs and a gamut encoder in reach, so it is pinned in `tests/reserve_then_fill.rs`
 instead, and the table says so.
 
-Every one of those tests asserts the **message** the refusal carries, never `is_err()`. Several
-branches refuse the same input for different reasons — delete the truncated-`LBox` arm and a
-three-byte buffer falls into the `LBox == 0` arm, which refuses it too — so only the message
-distinguishes the branch that fired from the one that caught the fall.
+Every one of those tests asserts **which** refusal fired — the message where the variant carries
+one, the variant itself where it does not — never merely that an error occurred. Several branches
+refuse the same input for different reasons: delete the truncated-`LBox` arm and a three-byte
+buffer falls into the `LBox == 0` arm, which refuses it too, so only the message distinguishes the
+branch that fired from the one that caught the fall.
 
 For the same reason `find_jumbf_superbox` **continues** past a `jumb` that appears too early to
 carry an `LBox` in front of it, instead of concluding the buffer has no superbox. Today's fixtures

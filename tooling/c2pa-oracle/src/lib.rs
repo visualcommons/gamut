@@ -522,10 +522,11 @@ mod tests {
     //! signed store's length — needs c2pa-rs and a gamut encoder, so it is pinned where those are
     //! in reach: `tests/reserve_then_fill.rs`.
     //!
-    //! Every refusal is asserted by the **message** it carries, never by `is_err()`. Several
-    //! branches refuse the same input for different reasons — deleting the truncated-`LBox` arm,
-    //! for instance, sends a 3-byte buffer into the `LBox == 0` arm, which refuses it too — so
-    //! only the message distinguishes the arm that fired from the one that caught the fall.
+    //! Every one of these tests asserts **which** refusal fired — the message where the variant
+    //! carries one, the variant itself where it does not — never merely that an error occurred.
+    //! Several branches refuse the same input for different reasons: deleting the
+    //! truncated-`LBox` arm sends a 3-byte buffer into the `LBox == 0` arm, which refuses it too,
+    //! so only the message distinguishes the arm that fired from the one that caught the fall.
 
     use super::{OracleError, declared_store_len, find_jumbf_superbox, jumbf_superbox_span};
 
