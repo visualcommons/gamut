@@ -1148,20 +1148,37 @@ mod tests {
     }
 
     #[test]
-    fn a_standard_pointer_at_ifd_0_that_feeds_no_field_is_left_alone() {
-        // The other half of the per-level rule: at IFD 0 only `ExifIFD` is followed, so a
-        // `SubIFDs` or `GPSInfo` field on the page stays the plain integer field it was read as
-        // rather than becoming a group. What that buys — a dangling one of them not hiding the
-        // blocks — is `a_broken_pointer_the_metadata_does_not_use_does_not_hide_the_blocks`
+    fn ifd_0_resolves_the_exif_directory_and_no_other_standard_pointer() {
+        // The other half of the per-level rule, and the whole of it: at IFD 0 only `ExifIFD` is
+        // followed, so every *other* standard pointer field on the page stays the plain integer
+        // field it was read as rather than becoming a group. What that buys — a dangling one of
+        // them not hiding the blocks — is
+        // `a_broken_pointer_the_metadata_does_not_use_does_not_hide_the_blocks`
         // (tests/metadata.rs); this pins the resolution itself, on a pointer that is perfectly
         // readable, so the two claims cannot be confused.
         //
+        // Both halves are asserted here because neither holds the behaviour alone. The membership
+        // assertion is what a widened `IFD0_POINTER_TAGS` fails: a `const`'s contents are not a
+        // mutable expression, so the mutation gate cannot see this at all, and adding
+        // `InteroperabilityIFD` to the set left all 25 of this crate's test binaries green. The
+        // sweep is derived *from* the constant rather than repeating a list by hand — a hand list
+        // is what let that widening through — so it can never assert "left alone" about a tag the
+        // constant says is followed.
+        //
         // `resolve_pointers` is driven directly, at the depth `read_metadata` calls it with,
-        // because IFD 0 is the one directory the seam never hands back: asking `read_metadata`
-        // instead can only observe `exif`, which stays `None` whether the pointer was resolved or
-        // not, so the regression this names — `pointer_tags` returning the full set at every
-        // level — would pass unnoticed. Here it does not: resolution turns the field into a group.
-        for tag in [tags::SUB_IFDS, tags::GPS_INFO] {
+        // because IFD 0 is the one directory the seam never hands back; the public observation
+        // that also sees this is `a_broken_pointer_the_metadata_does_not_use_does_not_hide_the_blocks`,
+        // which fails on a dangling target rather than on a resolved one.
+        assert_eq!(
+            IFD0_POINTER_TAGS,
+            [tags::EXIF_IFD],
+            "IFD 0 follows the one pointer whose target `TiffMetadata` returns, and no other"
+        );
+        let unresolved = gamut_ifd::tags::STANDARD_POINTER_TAGS
+            .iter()
+            .copied()
+            .filter(|tag| !IFD0_POINTER_TAGS.contains(tag));
+        for tag in unresolved {
             let mut source = Ifd::new();
             source.set_sub_ifd(tag, vec![exif_ifd()]);
             source.set(tags::XMP, Value::Byte(b"x".to_vec()));
