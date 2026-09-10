@@ -161,10 +161,12 @@ that field does not hold travels beside it in `XmpFraming`: §11.3.3.4's compres
 tag and translated keyword. §11.3.3.1 Table 21 recommends the null framing for XMP compliance
 ("with Compression Flag set to 0, and both Language Tag and Translated Keyword set to the null
 string") — recommends, not requires, and a provenance packet is exactly the payload a writer
-compresses. The measured cost of getting this wrong, on the fixture in `tests/preservation.rs`: a
-354-byte `iTXt` rewritten as 3 734 bytes, a factor of 10.6, with the language tag and translated
-keyword gone as well. `with_xmp` — which has no source file to take framing from — takes Table 21's
-recommended framing. The packet is a **single-value payload** like `iCCP` or `eXIf`: setting it
+compresses. The measured cost of getting this wrong, on the fixture in `tests/preservation.rs`:
+the source `iTXt` payload is 354 bytes, the carry that keeps the flag writes 352, and the same
+carry with the flag cleared writes **3 734** — a factor of 10.6 against the 352 it should have
+been. The language tag and translated keyword were a second, separate loss of the same defect,
+pinned by a test of their own. `with_xmp` — which has no source file to take framing from — takes
+Table 21's recommended framing. The packet is a **single-value payload** like `iCCP` or `eXIf`: setting it
 again replaces it, because a second `iTXt` under the reserved keyword is one this crate's own
 reader discards.
 
@@ -207,7 +209,7 @@ the wording:
 | A null in a keyword, or in an `iTXt` translated keyword | §11.3.3.2, §11.3.3.4 | **refuses the encode** — those fields end at their first null, so the chunk re-parses as a *different* annotation |
 | A null in a text string | §11.3.3.2, §11.3.3.4 | annotation **dropped**, `TextStringNull` — the text is last and "not null-terminated (the length of the chunk defines the ending)", so it re-frames nothing and this crate's reader hands it back whole; but libpng truncates it at the null, so writing it would put a chunk two readers read differently into a file this encoder signed off on |
 | Keyword outside Latin-1, or outside 1–79 bytes | §11.3.3.1 | annotation **dropped**, `TextKeywordNotLatin1` / `TextKeywordLength` — no chunk can hold it, and this crate's own reader drops one that tries |
-| Keyword outside `0x20`–`0x7E` / `0xA1`–`0xFF`, or with a leading, trailing or consecutive space | §11.3.3.1 | **written verbatim**, `TextKeywordRepertoire` / `TextKeywordSpacing` |
+| Keyword outside `0x20`–`0x7E` / `0xA1`–`0xFF`, or with a leading, trailing or consecutive space | §11.3.3.1 | **written verbatim**, `TextKeywordRepertoire` / `TextKeywordSpacing` — the datastream is then non-conforming per §15.3.1 |
 | `iTXt` language tag outside ASCII letters, digits and `-` | §11.3.3.4 | tag **dropped**, annotation written, `ItxtLanguageTag` |
 | XMP packet that is not UTF-8 | §11.3.3.4 | packet **dropped**, `XmpNotUtf8` |
 

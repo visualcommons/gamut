@@ -141,7 +141,9 @@ pub enum MetadataNotice {
     /// A text annotation **written**, whose keyword leaves the repertoire §11.3.3.1 recommends
     /// ("only code points 0x20-7E and 0xA1-FF are allowed", and expressly "nor is U+00A0
     /// NON-BREAKING SPACE"). The keyword is written exactly as it arrived — this crate reads it
-    /// back unchanged — but another reader need not be so forgiving.
+    /// back unchanged — but the datastream is then non-conforming per §15.3.1, which requires
+    /// that "All field values in the PNG datastream obey the relationships specified in this
+    /// specification".
     TextKeywordRepertoire = 4,
     /// A text annotation **written**, whose keyword has a leading, trailing or consecutive
     /// space, which §11.3.3.1 says are "not permitted in keywords" so that one keyword cannot be
@@ -191,7 +193,8 @@ impl MetadataNotice {
             }
             Self::TextKeywordRepertoire => {
                 "text annotation: written, but its keyword leaves the code points 0x20-0x7E and \
-                 0xA1-0xFF §11.3.3.1 recommends — another reader may reject it"
+                 0xA1-0xFF §11.3.3.1 recommends, so the datastream is non-conforming per \
+                 §15.3.1"
             }
             Self::TextKeywordSpacing => {
                 "text annotation: written, but its keyword has a leading, trailing or \
@@ -394,8 +397,7 @@ impl PngEncoder {
     ///
     /// cICP is the **highest-precedence** colour chunk (§4.3 Table 1, priority 1), so a reader
     /// that understands it ignores any `iCCP`, `sRGB`, `gAMA` and `cHRM` in the same file. Those
-    /// stay legal alongside it — unlike the `sRGB`/`iCCP` pair — and are worth keeping as a
-    /// fallback for readers that do not.
+    /// are worth keeping alongside it as a fallback for readers that do not.
     #[must_use]
     pub fn with_cicp(
         mut self,
@@ -515,6 +517,12 @@ impl PngEncoder {
     }
 
     /// Adds an uncompressed Latin-1 text annotation (tEXt chunk).
+    ///
+    /// Almost nothing here fails: what §11.3.3 does not endorse — a keyword outside §11.3.3.1's
+    /// repertoire, length or spacing, a text string holding a null — is reported through
+    /// [`metadata_notices`](Self::metadata_notices), which also says whether the annotation was
+    /// written. The one exception is a null in the *keyword*, which fails the encode, because a
+    /// keyword ends at its first null and the chunk would re-parse as a different annotation.
     #[must_use]
     pub fn with_text(mut self, keyword: &str, text: &str) -> Self {
         self.ancillary.add_text_latin1(keyword, text);
@@ -522,6 +530,10 @@ impl PngEncoder {
     }
 
     /// Adds a zlib-compressed Latin-1 text annotation (zTXt chunk).
+    ///
+    /// §11.3.3's rules reach this annotation exactly as they reach
+    /// [`with_text`](Self::with_text): everything but a null in the keyword is reported through
+    /// [`metadata_notices`](Self::metadata_notices) rather than failing the encode.
     #[must_use]
     pub fn with_compressed_text(mut self, keyword: &str, text: &str) -> Self {
         self.ancillary.add_text_compressed(keyword, text);
@@ -529,6 +541,10 @@ impl PngEncoder {
     }
 
     /// Adds an uncompressed UTF-8 text annotation (iTXt chunk).
+    ///
+    /// §11.3.3's rules reach this annotation exactly as they reach
+    /// [`with_text`](Self::with_text): everything but a null in the keyword is reported through
+    /// [`metadata_notices`](Self::metadata_notices) rather than failing the encode.
     #[must_use]
     pub fn with_international_text(mut self, keyword: &str, text: &str) -> Self {
         self.ancillary.add_text_international(keyword, text);
