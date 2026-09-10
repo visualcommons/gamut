@@ -173,10 +173,11 @@ impl TiffMetadata {
         self
     }
 
-    /// Whether there is nothing to embed: no payload set, and no Exif sub-IFD with fields in it.
+    /// Whether there is nothing to embed: no payload set, and no Exif sub-IFD with content in it.
     ///
     /// An `exif` directory with no entries counts as empty — writing it would add an `ExifIFD`
-    /// pointer to a directory with nothing in it.
+    /// pointer to a directory with nothing in it. A sub-IFD group *is* content: a directory whose
+    /// only entry is an `InteroperabilityIFD` pointer still writes one on-disk entry.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.exif_ifd().is_none()
@@ -187,8 +188,16 @@ impl TiffMetadata {
     }
 
     /// The Exif sub-IFD to write, or `None` when there is no Exif content worth a directory.
+    ///
+    /// A directory is worth writing when it holds **either** a field **or** a sub-IFD group.
+    /// Testing only [`fields`](Ifd::fields) dropped a directory whose sole content was a group —
+    /// an `ExifIFD` holding nothing but its `InteroperabilityIFD` pointer, which
+    /// [`read_metadata`] returns in exactly that shape — silently, into a file with no Exif
+    /// directory at all and no error to say so.
     fn exif_ifd(&self) -> Option<&Ifd> {
-        self.exif.as_ref().filter(|ifd| !ifd.fields().is_empty())
+        self.exif
+            .as_ref()
+            .filter(|ifd| !ifd.fields().is_empty() || !ifd.sub_ifds().is_empty())
     }
 
     /// Refuses a set this crate would write into a file its own [`read_metadata`] then rejects,
@@ -662,6 +671,33 @@ mod tests {
             Some(Value::Long8(_))
         ));
         assert_eq!(read_metadata(&bytes).expect("read").exif, Some(exif_ifd()));
+    }
+
+    #[test]
+    fn an_exif_directory_whose_only_content_is_a_group_is_still_written() {
+        // `exif_ifd` filtered on `fields()` alone, so a directory holding nothing but its
+        // `InteroperabilityIFD` group — the exact shape `read_metadata` returns for an Exif
+        // directory with one pointer and no scalar fields — was dropped: it encoded to a file with
+        // no Exif directory at all and read back as absent, with no error to say so. A group is one
+        // on-disk entry, so a directory holding one is not an empty directory.
+        let mut interop = Ifd::new();
+        interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+        let mut only_a_group = Ifd::new();
+        only_a_group.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
+
+        let meta = TiffMetadata::new().with_exif(only_a_group);
+        assert!(!meta.is_empty(), "a group is content");
+        let mut ifd0 = Ifd::new();
+        meta.apply(&mut ifd0);
+        assert_eq!(
+            ifd0.sub_ifds()
+                .iter()
+                .find(|group| group.tag == tags::EXIF_IFD)
+                .and_then(|group| group.ifds.first())
+                .map(|exif| exif.sub_ifds().len()),
+            Some(1),
+            "the Exif directory must be written, carrying its Interop group"
+        );
     }
 
     #[test]
