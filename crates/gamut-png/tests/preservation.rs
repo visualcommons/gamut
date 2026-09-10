@@ -296,3 +296,26 @@ fn a_non_utf8_xmp_packet_refuses_the_re_encode() {
         "{error}"
     );
 }
+
+/// Naming a dropped payload is only useful if the name says something. `gamut convert` prints
+/// these lines and they are the whole of what a user learns about metadata that did not survive,
+/// so each has to identify the payload and give the reason it could not come along.
+///
+/// Pinned here rather than in `gamut-cli`, whose tests the mutation gate cannot see: a mutant
+/// that empties [`DroppedMetadata::reason`] or its `Display` would otherwise leave the command
+/// printing nothing at all.
+#[test]
+fn a_dropped_payload_is_named_in_words() {
+    let store = DroppedMetadata::C2paManifestStore.to_string();
+    assert!(store.contains("C2PA manifest store"), "{store}");
+    assert!(store.contains("re-sign"), "{store}");
+
+    let cicp = DroppedMetadata::NonRgbCicp.to_string();
+    assert!(cicp.contains("cICP"), "{cicp}");
+    assert!(cicp.contains("matrix coefficients"), "{cicp}");
+    assert_eq!(
+        cicp,
+        DroppedMetadata::NonRgbCicp.reason(),
+        "Display is the reason"
+    );
+}

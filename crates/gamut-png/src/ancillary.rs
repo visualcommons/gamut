@@ -1453,14 +1453,26 @@ mod tests {
     #[test]
     fn a_second_carry_replaces_the_first_and_spares_direct_setters() {
         let mut a = Ancillary::default();
-        a.add_text_latin1("Mine", "kept");
-        for _ in 0..2 {
-            a.begin_carry();
-            a.add_text_latin1("Carried", "once");
-            a.end_carry();
-        }
+        a.add_text_latin1("Before", "kept");
+        a.begin_carry();
+        a.add_text_latin1("Carried", "once");
+        a.end_carry();
+        // Set *after* the carry ended: it must not be mistaken for part of it, which is what
+        // `end_carry` is for and what a mutant that skips it would get wrong.
+        a.add_text_latin1("After", "kept");
+        a.begin_carry();
+        a.add_text_latin1("Carried", "once");
+        a.end_carry();
+
         let keywords: Vec<&[u8]> = a.texts.iter().map(|e| e.keyword.as_slice()).collect();
-        assert_eq!(keywords, [b"Mine".as_slice(), b"Carried".as_slice()]);
+        assert_eq!(
+            keywords,
+            [
+                b"Before".as_slice(),
+                b"After".as_slice(),
+                b"Carried".as_slice()
+            ]
+        );
     }
 
     /// §11.3.2.6 Table 18 orders the payload primaries, transfer function, matrix coefficients,
