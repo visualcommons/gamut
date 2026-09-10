@@ -113,7 +113,7 @@ fn the_earlier_store_is_relabelled_original_when_an_update_box_is_added() {
 
     // §A.5.3: once a file carries an `update` box, the store it had before is re-labelled
     // `original`. Both are reported, in file order, and neither is judged — which is why
-    // `AvifContainer::c2pa` promises only "the first one".
+    // `AvifContainer::c2pa_slot` promises only "the first one".
     let purposes: Vec<_> = container.c2pa_slots().map(|slot| slot.purpose).collect();
     assert_eq!(
         purposes,

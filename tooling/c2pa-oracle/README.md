@@ -122,10 +122,10 @@ PNG, TIFF and RIFF, is where a store followed by more container bytes first appe
 
 ## Why gamut owns the locate/bound step at all
 
-The obvious objection to `gamut-heic::HeifContainer::c2pa` and `gamut_avif::AvifContainer::c2pa` is
-that they duplicate something `c2pa-rs` already does, and that a consumer who wants the store could
-just call the reference implementation. That objection is wrong, and it is written down here so
-nobody deletes gamut's locator as redundant later.
+The obvious objection to `gamut-heic::HeifContainer::c2pa` and
+`gamut_avif::AvifContainer::c2pa_slot` is that they duplicate something `c2pa-rs` already does, and
+that a consumer who wants the store could just call the reference implementation. That objection is
+wrong, and it is written down here so nobody deletes gamut's locator as redundant later.
 
 **`c2pa-rs` has no cheap parse-only mode.** Its reading entry point is `Reader`, which validates:
 it parses the store, checks the hard binding against the asset, verifies the COSE signature and
@@ -225,25 +225,33 @@ That independent view is the one thing this crate parses itself, so it has to be
 c2pa-rs never produces: a wrong span here is an oracle handing gamut a wrong answer and calling it
 the reference one.
 
-A JUMBF box is a JPEG-family *standard box*, and C2PA 2.4 §8.4.2.3 spells the syntax out where it
-defines the C2PA salt as "a standard box consisting of: a box length (LBox, as a 4-byte big-endian
-unsigned integer); a box type (TBox, 4-byte big-endian unsigned integer …)". The full grammar lives
-in ISO 19566-5:2023, which is paywalled and not vendored here (its procurement is issue #441), and
-it reserves two `LBox` values that a naive four-byte read gets wrong:
+A JUMBF box is a JPEG-family *standard box* — `LBox` (4 bytes, big-endian), `TBox` (4 bytes), then
+optionally `XLBox`. C2PA 2.4 §8.4.2.3 is the only place the vendored specification writes any of
+that down, and it writes down only part: defining the C2PA salt, it calls it "a standard box
+consisting of: a box length (LBox, as a 4-byte big-endian unsigned integer); a box type (TBox,
+4-byte big-endian unsigned integer …)". That is the whole of it — `LBox` occurs exactly once in
+`references/c2pa/C2PA_Specification_2.4.html` and `XLBox` not at all — so the vendored document
+never mentions the oversized-header field and states no reserved `LBox` value. The full grammar,
+*including* the two reserved values, is ISO 19566-5:2023, which is paywalled and not vendored here
+(its procurement is issue #441). The two arms below are therefore the convention as it is
+universally implemented, read against `c2pa-rs`'s behaviour — not a clause this crate can cite:
 
 - **`LBox == 0`** — the box runs to the end of the file, so its length is however much of the
   buffer follows its own first byte;
 - **`LBox == 1`** — the length is the 8-byte big-endian `XLBox` after `TBox`, counting the whole
   box including that 16-byte header.
 
-`declared_store_len` implements both, and applies one rule to both header sizes — the rule
+`declared_store_len` implements both, and applies one rule to *every* arm — the rule
 `gamut_isobmff`'s box reader already applies, that a length counting a header can never be less
 than that header: `LBox` in 2..=7 against the 8-byte header, `XLBox` below 16 against the 16-byte
-one. Either would otherwise yield a span ending at or before the store's first body byte. Both
-refusals are the typed `OracleError::UnusableSuperboxLength`, and no length is ever guessed.
-No store this crate has seen uses either reserved value — c2pa-rs writes a plain 32-bit `LBox` —
-which is precisely why the handling is written rather than assumed, and why the arms are pinned by
-unit tests in `src/lib.rs` rather than left to a fixture that cannot reach them.
+one, and `LBox == 0` in a buffer of fewer than 8 bytes, whose to-end-of-buffer length counts that
+same 8-byte header. Any of them would otherwise yield a span ending at or before the store's first
+body byte. All three refusals are the typed `OracleError::UnusableSuperboxLength`, and no length is
+ever guessed. No store this crate has seen uses either reserved value — c2pa-rs writes a plain
+32-bit `LBox` — which is precisely why the handling is written rather than assumed, and why the
+arms are pinned by unit tests in `src/lib.rs` rather than left to a fixture that cannot reach them:
+each side of each refusal is pinned by its own test, so widening or narrowing a range by one is
+caught.
 
 For the same reason `find_jumbf_superbox` **continues** past a `jumb` that appears too early to
 carry an `LBox` in front of it, instead of concluding the buffer has no superbox. Today's fixtures
