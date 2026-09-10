@@ -203,25 +203,36 @@ impl TiffMetadata {
     /// Refuses a set this crate would write into a file its own [`read_metadata`] then rejects,
     /// or reads back as something other than what was written.
     ///
-    /// The Exif sub-IFD is a caller's directory and may carry sub-IFD groups of its own, and
-    /// nothing about a directory in memory stops it nesting a hundred levels down or hanging a
-    /// group off a tag no reader treats as a pointer. Two bounds therefore apply, and
-    /// [`check_exif_subtree`] reports them as **two distinct refusals** because they are two
+    /// The Exif sub-IFD is a caller's directory, and nothing about a directory in memory stops it
+    /// nesting a hundred levels down, hanging a group off a tag no reader treats as a pointer, or
+    /// carrying a bare integer under a tag every reader does. Three bounds therefore apply, and
+    /// [`check_exif_subtree`] reports them as **three distinct refusals** because they are three
     /// distinct mistakes:
     ///
-    /// 1. **the tag.** A group's tag must be one the reader resolves inside the Exif subtree
+    /// 1. **the field.** No field under a tag in [`EXIF_SUBTREE_POINTER_TAGS`] may carry a
+    ///    pointer's own type ([`pointer_offsets`]). The reader decides "pointer" from the field,
+    ///    not from the group a caller built, so such a field is followed as an offset into a file
+    ///    it never came from — the round trip returns a parsed directory, an error, or nothing,
+    ///    but never the field that was written.
+    /// 2. **the tag.** A group's tag must be one the reader resolves inside the Exif subtree
     ///    ([`EXIF_SUBTREE_POINTER_TAGS`]). Under any other tag the writer emits a pointer the
     ///    reader hands back as a raw offset into the file it came from, so the directory does not
     ///    survive a round trip.
-    /// 2. **the depth.** The reader follows [`MAX_POINTER_DEPTH`] levels below IFD 0 and refuses
+    /// 3. **the depth.** The reader follows [`MAX_POINTER_DEPTH`] levels below IFD 0 and refuses
     ///    what is deeper. The Exif directory occupies the first of those levels, so its own
     ///    nesting may use the rest — one further directory, which for a decoded camera EXIF is
     ///    `InteroperabilityIFD` (EXIF 2.3 §4.6.3).
     ///
+    /// Only the Exif subtree is checked, because it is the only directory a caller supplies: the
+    /// blocks [`apply`](Self::apply) writes into IFD 0 sit under `XMP`, `IPTC_NAA` and
+    /// `ICC_PROFILE`, none of which any level treats as a pointer, and the rest of IFD 0 is the
+    /// encoder's own.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the Exif sub-IFD hangs
-    /// a group off a tag the reader does not resolve, or nests deeper than the reader walks back.
+    /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the Exif sub-IFD
+    /// carries a pointer-typed field under a pointer tag, hangs a group off a tag the reader does
+    /// not resolve, or nests deeper than the reader walks back.
     pub(crate) fn check(&self) -> Result<()> {
         match self.exif_ifd() {
             Some(exif) => check_exif_subtree(exif, MAX_POINTER_DEPTH - 1),
@@ -325,35 +336,72 @@ fn pointer_tags(depth: usize) -> &'static [u16] {
 /// generic reader needs sixteen because it is handed arbitrary tags, and this one is not.
 const MAX_POINTER_DEPTH: usize = 2;
 
-/// The writer's side of what the reader delivers: refuses an Exif subtree whose groups this crate
-/// could not hand back unchanged, `depth` further levels being all that is left below `ifd`.
+/// The refusal earned by a field under a tag in [`EXIF_SUBTREE_POINTER_TAGS`] whose value
+/// [`pointer_offsets`] accepts — [`check_exif_subtree`]'s first clause.
 ///
-/// Two refusals, deliberately distinct, because they are two different mistakes and a caller
+/// A named constant rather than a literal in place because it **enumerates the tag set in prose**,
+/// as this crate's public documentation does, while the set itself is a sibling crate's constant.
+/// Naming it lets the enumeration be pinned in one assertion instead of drifting silently.
+const POINTER_FIELD_REFUSAL: &str = "TIFF: an Exif sub-IFD may not carry a plain field under a \
+     standard pointer tag (SubIFDs, ExifIFD, GPSInfo, InteroperabilityIFD) with a pointer's own \
+     type (LONG, IFD, LONG8 or IFD8), which the reader would follow as a file offset";
+
+/// The refusal earned by a sub-IFD group under a tag *outside* [`EXIF_SUBTREE_POINTER_TAGS`] —
+/// [`check_exif_subtree`]'s second clause. Named for the same reason as
+/// [`POINTER_FIELD_REFUSAL`].
+const FOREIGN_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may only nest a group under a standard \
+     pointer tag (SubIFDs, ExifIFD, GPSInfo, InteroperabilityIFD) and this one uses another, \
+     which would read back as a raw file offset";
+
+/// The writer's side of what the reader delivers: refuses an Exif subtree this crate could not
+/// hand back unchanged, `depth` further levels being all that is left below `ifd`.
+///
+/// **This inspects what [`resolve_pointers`] inspects, and that symmetry is the whole design.**
+/// The reader decides "pointer" from a directory's *fields* — `ifd.get(tag)` under a tag in
+/// [`EXIF_SUBTREE_POINTER_TAGS`] whose value [`pointer_offsets`] accepts — while a caller builds
+/// one from [`sub_ifds`](Ifd::sub_ifds) *groups*. Checking only the groups left the writer blind
+/// to the very shape the reader misreads: a pointer tag carried as a plain `LONG`, which encoded
+/// cleanly and then failed this crate's own [`read_metadata`] with `read out of bounds` or
+/// `sub-IFD pointer loop` depending on the integer. So both are checked, at every level.
+///
+/// Three refusals, deliberately distinct, because they are three different mistakes and a caller
 /// reading the message has to know which one it made:
 ///
-/// * a group under a tag outside [`EXIF_SUBTREE_POINTER_TAGS`] — the reader leaves that pointer
-///   as a raw absolute offset, so what came back would not be what was written;
+/// * a **field** under a tag *in* [`EXIF_SUBTREE_POINTER_TAGS`] whose type is a pointer's own —
+///   the reader follows it as a file offset into a file it did not come from, so what came back
+///   is a parsed directory, an error, or nothing, but never the field that was written. Only the
+///   pointer *types* are refused: `pointer_offsets` rejects every other type, so a `SHORT` under
+///   `SubIFDs` is left in place by the reader and is left alone here too;
+/// * a **group** under a tag *outside* [`EXIF_SUBTREE_POINTER_TAGS`] — the reader leaves that
+///   pointer as a raw absolute offset, so what came back would not be what was written;
 /// * a *child directory* nested past `depth` — the reader refuses to walk that far
 ///   ([`MAX_POINTER_DEPTH`]). A group with no children reaches no further level, so it is the
 ///   children and not the group that the bound counts.
 ///
-/// The tag is checked first: a group under an unfollowed tag is unreturnable whatever its depth,
-/// and naming a depth clause for it is the message a reader cannot act on. Both stop at the first
-/// offender and the depth bound stops at the bound rather than measuring the whole tree, so a
-/// directory a caller nested a hundred levels deep costs a hundred levels of neither recursion nor
-/// time.
+/// The order is field, then group tag, then depth, and it is the order of how little the rest of
+/// the tree matters to each: a pointer-typed field is unreturnable whatever else the directory
+/// holds, a group under an unfollowed tag is unreturnable whatever its depth, and only the depth
+/// clause needs the tree walked. All three stop at the first offender and the depth bound stops at
+/// the bound rather than measuring the whole tree, so a directory a caller nested a hundred levels
+/// deep costs a hundred levels of neither recursion nor time.
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) for either refusal.
+/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) for any of the three refusals.
 fn check_exif_subtree(ifd: &Ifd, depth: usize) -> Result<()> {
+    for &tag in EXIF_SUBTREE_POINTER_TAGS {
+        if ifd.get(tag).and_then(pointer_offsets).is_some() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                POINTER_FIELD_REFUSAL,
+            ));
+        }
+    }
     for group in ifd.sub_ifds() {
         if !EXIF_SUBTREE_POINTER_TAGS.contains(&group.tag) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "TIFF: an Exif sub-IFD may only nest a group under a standard pointer tag \
-                 (SubIFDs, ExifIFD, GPSInfo, InteroperabilityIFD) and this one uses another, \
-                 which would read back as a raw file offset",
+                FOREIGN_GROUP_REFUSAL,
             ));
         }
         for child in &group.ifds {
@@ -723,6 +771,87 @@ mod tests {
             .check()
             .expect_err("a group the reader hands back as an offset must not be written");
         assert!(err.to_string().contains("standard pointer tag"), "{err}");
+    }
+
+    #[test]
+    fn the_writer_refuses_an_exif_pointer_tag_carried_as_a_pointer_typed_field() {
+        // `check` inspected only `sub_ifds()` while `resolve_pointers` inspects `get(tag)`, so the
+        // one shape the reader misreads was the one shape the writer never looked at: a standard
+        // pointer tag carried as a plain `LONG`. All four encoded cleanly and then failed this
+        // crate's own `read_metadata` — `read out of bounds` for a large integer, `sub-IFD pointer
+        // loop` for a small one — which is exactly what `check` documents it refuses. Every
+        // pointer type is swept, because which one a caller's directory happens to use is not
+        // something the writer can know. The *message* is the claim: this tree has no group and no
+        // nesting at all, so a refusal naming either of the other two clauses would be the wrong
+        // check answering.
+        let pointer_typed = [
+            Value::Long(vec![8]),
+            Value::Ifd(vec![8]),
+            Value::Long8(vec![8]),
+            Value::Ifd8(vec![8]),
+        ];
+        for tag in EXIF_SUBTREE_POINTER_TAGS {
+            for value in &pointer_typed {
+                let mut exif = exif_ifd();
+                exif.set(*tag, value.clone());
+                let Err(err) = TiffMetadata::new().with_exif(exif).check() else {
+                    panic!("tag {tag}, {value:?}: a field the reader follows as an offset");
+                };
+                assert!(
+                    err.to_string().contains("may not carry a plain field"),
+                    "tag {tag}, {value:?}: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_value_no_reader_would_follow_survives_under_a_pointer_tag() {
+        // The refusal above is shaped by the value's *type*, not by its tag, and that is the whole
+        // difference between bounding the writer by what the reader misreads and banning four tags
+        // outright. `pointer_offsets` accepts only LONG/IFD/LONG8/IFD8, so a `SHORT` under
+        // `SubIFDs` is left in place by the reader — and must therefore be written and handed back
+        // unchanged rather than refused.
+        for tag in EXIF_SUBTREE_POINTER_TAGS {
+            let mut exif = exif_ifd();
+            exif.set(*tag, Value::Short(vec![8]));
+            let meta = TiffMetadata::new().with_exif(exif);
+            meta.check()
+                .unwrap_or_else(|e| panic!("tag {tag}: a SHORT is not a pointer: {e}"));
+
+            let mut ifd0 = Ifd::new();
+            meta.apply(&mut ifd0);
+            let back = read_metadata(&file_with(ifd0))
+                .expect("read")
+                .exif
+                .unwrap_or_else(|| panic!("tag {tag}: an Exif directory"));
+            assert_eq!(
+                back.get(*tag),
+                Some(&Value::Short(vec![8])),
+                "tag {tag}: must come back the field that was written"
+            );
+        }
+    }
+
+    #[test]
+    fn the_exif_subtree_pointer_tags_are_the_four_this_crate_documents() {
+        // The set is a sibling crate's constant, `gamut_ifd::tags::STANDARD_POINTER_TAGS`, while
+        // this crate's public contract enumerates its four members one by one — in
+        // `TiffMetadata::exif`, `TiffEncoder::with_metadata`, `TiffDecoder::metadata`, README.md,
+        // STATUS.md, and both refusal messages. A fifth member added upstream would widen every
+        // one of those silently, and a public contract must not widen without someone deciding it.
+        // So the enumeration is pinned once, here, against the literal numbers the prose gives and
+        // the names the messages give.
+        assert_eq!(
+            EXIF_SUBTREE_POINTER_TAGS,
+            [330, 34665, 34853, 40965],
+            "the four pointer tags this crate's documentation and messages enumerate"
+        );
+        for message in [POINTER_FIELD_REFUSAL, FOREIGN_GROUP_REFUSAL] {
+            for name in ["SubIFDs", "ExifIFD", "GPSInfo", "InteroperabilityIFD"] {
+                assert!(message.contains(name), "{name} unnamed by: {message}");
+            }
+        }
     }
 
     #[test]
