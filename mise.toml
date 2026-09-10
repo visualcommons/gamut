@@ -216,9 +216,15 @@ run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml
 # `--no-default-features --features rust_native_crypto`, which is what keeps its vendored OpenSSL
 # out of this repository entirely. It is still kept off `mise run test` because a shipped crate
 # must never gain an edge to it, and the excluded manifest is what enforces that.
+#
+# `--locked` is what makes the committed `tooling/c2pa-oracle/Cargo.lock` load-bearing. Without it
+# cargo silently re-resolves the 325 transitive packages under the pinned `c2pa` and writes the
+# result over the committed file, so the crate's own resolved-graph assertion would be reading a
+# resolution cargo had produced moments earlier. With it, a lockfile that is missing or out of date
+# fails the task instead of being regenerated.
 [tasks.test-c2pa]
 description = "Cross-check gamut's C2PA carriage against c2pa-rs, both directions (issue #447)"
-run = "cargo test --manifest-path tooling/c2pa-oracle/Cargo.toml"
+run = "cargo test --locked --manifest-path tooling/c2pa-oracle/Cargo.toml"
 
 # The compile half, shaped after `check-dng-real`: a `gamut-avif` or `gamut-heic` API change can
 # break this crate while every per-PR gate stays green, and `check` catches that in seconds without
@@ -230,7 +236,7 @@ run = "cargo test --manifest-path tooling/c2pa-oracle/Cargo.toml"
 # Wiring them up — `check-c2pa` in the per-PR lint lane, `test-c2pa` in extended — is issue #541.
 [tasks.check-c2pa]
 description = "Compile the C2PA differential oracle (no signing, no corpus)"
-run = "cargo check --manifest-path tooling/c2pa-oracle/Cargo.toml --all-targets"
+run = "cargo check --locked --manifest-path tooling/c2pa-oracle/Cargo.toml --all-targets"
 
 # Doctests only. On stable, `cargo llvm-cov` cannot instrument doctests (that needs nightly), so
 # the coverage gate — which CI uses as its green-test gate — silently skips them. This task is the

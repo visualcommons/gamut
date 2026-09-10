@@ -17,10 +17,16 @@
 //! The fourth guards what makes the second one an assertion at all. `Cargo.lock` is committed for
 //! this crate — an exception to the blanket `tooling/*/Cargo.lock` rule, recorded in
 //! `.gitignore` — because the `=` pin holds the direct dependency and nothing under it: with the
-//! lockfile ignored, the whole transitive graph re-resolves on every invocation and the
+//! lockfile ignored, the 325 transitive packages re-resolve on every invocation and the
 //! resolved-graph check can only inspect a file cargo has just written for it, which is not a
 //! check. So the exception itself is pinned, or it can be reverted in one line without a single
 //! test going red.
+//!
+//! The committed file is only half of that. Cargo regenerates a missing or stale lockfile without
+//! complaint, so `mise run test-c2pa` and `mise run check-c2pa` pass **`--locked`**: the resolution
+//! in the tree is the resolution that was used, or the task fails. Nothing here asserts the file
+//! merely *exists* — under `--locked` it cannot be absent, and an assertion that cannot fail is
+//! not one.
 
 use std::path::Path;
 
@@ -98,9 +104,19 @@ fn the_c2pa_dependency_pins_the_exact_version_the_readmes_citations_were_read_ag
 #[test]
 fn the_lockfile_this_crate_resolves_against_is_committed_rather_than_ignored() {
     // The repository ignores `tooling/*/Cargo.lock` — a `tooling/` crate normally resolves through
-    // the root lockfile, so a local one is redundant. This crate is the exception: nothing else in
-    // the tree depends on `c2pa`, so nothing else pins the graph it drags in, and the
-    // resolved-graph assertion above would be reading a file cargo had written moments earlier.
+    // the root lockfile, so a local one is redundant. This crate is the exception, and the reason
+    // is the 325 packages *under* `c2pa`: the `=` pin holds one direct dependency and nothing
+    // beneath it, so without a committed lockfile the whole transitive graph re-resolves on every
+    // invocation and the resolved-graph assertion above can only inspect the resolution cargo just
+    // wrote for it. `mise run test-c2pa` and `check-c2pa` pass `--locked`, which is what turns
+    // "the file exists" into "this is the resolution that was used".
+    //
+    // A different argument used to stand here — that nothing else in the tree depends on `c2pa`,
+    // so nothing else pins its graph. That one is true but it bears on the *feature* line above,
+    // not on this test: it says no other dependent can unify `openssl` back on. It says nothing
+    // about which versions those 325 packages resolve to, which is the only thing committing this
+    // file actually holds still. The two are different claims and only the second justifies the
+    // exception.
     //
     // A drift guard on the negation line, the same technique as the manifest check: dropping it
     // is one edit, and every other test here would stay green afterwards.
@@ -114,11 +130,5 @@ fn the_lockfile_this_crate_resolves_against_is_committed_rather_than_ignored() {
         "`.gitignore` must keep the negation that exempts this crate's lockfile from the blanket \
          `tooling/*/Cargo.lock` rule; without it the graph re-resolves on every run and nothing \
          above asserts anything about what was resolved"
-    );
-    assert!(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("Cargo.lock")
-            .exists(),
-        "and the lockfile the negation exempts must be in the tree"
     );
 }
