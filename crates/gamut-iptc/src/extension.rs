@@ -86,6 +86,9 @@
 //! at risk there, because reading a property never rewrites it. Inside a structure the same
 //! leniency would normalise the shape away on the way out, so it is not taken — such a field is
 //! retained instead, and reads as absent.
+//!
+//! The array setters write the standard form: an `rdf:Bag`, unless the property they replace is
+//! already an `rdf:Seq`, whose order the caller may be relying on.
 
 use gamut_xmp::{XML_NAMESPACE, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
@@ -1179,18 +1182,19 @@ fn read_array<T>(xmp: &XmpMeta, ns: &str, name: &str, parse: fn(&[XmpProperty]) 
     }
 }
 
-/// Replaces the `Bag` property `ns:name` with `values`, skipping a value that carries no field at
-/// all and removing the property when nothing is left to write.
+/// Replaces the array property `ns:name` with `values`, and removes it when there is nothing left
+/// to write.
 ///
-/// A member with nothing to say is not written, for the reason
-/// [`PhotoMetadata::set_creator_contact_info`] does not write an empty structure: a reader would
-/// otherwise report it as present but blank.
-fn write_bag(xmp: &mut XmpMeta, ns: &str, name: &str, values: Vec<XmpValue>) {
-    let values: Vec<XmpValue> = values
-        .into_iter()
-        .filter(|value| !structure(value).is_some_and(<[XmpProperty]>::is_empty))
-        .collect();
-    match nested_array_value(false, values) {
+/// The RDF container kind the property already carries is kept — an `rdf:Seq` a caller wrote for
+/// its order stays a `Seq` — and anything else becomes the `rdf:Bag` the standard specifies. Every
+/// value the caller passes is written, including one that carries no field at all, so that reading
+/// an array and setting it back is the identity (see the [module docs](self)).
+fn write_array(xmp: &mut XmpMeta, ns: &str, name: &str, values: Vec<XmpValue>) {
+    let ordered = matches!(
+        xmp.get(ns, name).map(|property| &property.value),
+        Some(XmpValue::Array(XmpArray::Seq(_)))
+    );
+    match nested_array_value(ordered, values) {
         Some(value) => xmp.set(XmpProperty::new(ns, name, value)),
         None => drop(xmp.remove(ns, name)),
     }
@@ -1226,11 +1230,11 @@ impl PhotoMetadata {
         )
     }
 
-    /// Sets the image regions (`Iptc4xmpExt:ImageRegion`, an unordered bag); an empty slice
-    /// removes the property.
+    /// Sets the image regions (`Iptc4xmpExt:ImageRegion`); an empty slice removes the property,
+    /// and an existing array keeps its container kind (see [`write_array`]).
     pub fn set_image_regions(&mut self, regions: &[ImageRegion]) {
         let values = regions.iter().map(ImageRegion::to_xmp).collect();
-        write_bag(&mut self.xmp, ns::IPTC_EXT, "ImageRegion", values);
+        write_array(&mut self.xmp, ns::IPTC_EXT, "ImageRegion", values);
     }
 
     /// The artworks or objects shown in the image (`Iptc4xmpExt:ArtworkOrObject`).
@@ -1244,11 +1248,11 @@ impl PhotoMetadata {
         )
     }
 
-    /// Sets the artworks or objects shown in the image (`Iptc4xmpExt:ArtworkOrObject`, an
-    /// unordered bag); an empty slice removes the property.
+    /// Sets the artworks or objects shown in the image (`Iptc4xmpExt:ArtworkOrObject`); an empty
+    /// slice removes the property, and an existing array keeps its container kind.
     pub fn set_artwork_or_objects(&mut self, artworks: &[ArtworkOrObject]) {
         let values = artworks.iter().map(ArtworkOrObject::to_xmp).collect();
-        write_bag(&mut self.xmp, ns::IPTC_EXT, "ArtworkOrObject", values);
+        write_array(&mut self.xmp, ns::IPTC_EXT, "ArtworkOrObject", values);
     }
 
     /// The licensors of the image (`plus:Licensor`).
@@ -1257,11 +1261,11 @@ impl PhotoMetadata {
         read_array(&self.xmp, ns::PLUS, "Licensor", Licensor::from_fields)
     }
 
-    /// Sets the licensors of the image (`plus:Licensor`, an unordered bag); an empty slice removes
-    /// the property.
+    /// Sets the licensors of the image (`plus:Licensor`); an empty slice removes the property, and
+    /// an existing array keeps its container kind.
     pub fn set_licensors(&mut self, licensors: &[Licensor]) {
         let values = licensors.iter().map(Licensor::to_xmp).collect();
-        write_bag(&mut self.xmp, ns::PLUS, "Licensor", values);
+        write_array(&mut self.xmp, ns::PLUS, "Licensor", values);
     }
 }
 
@@ -2263,19 +2267,45 @@ mod tests {
     }
 
     #[test]
-    fn an_array_element_with_nothing_to_say_is_not_written() {
-        // The four setters agree: a member that carries no field at all is not written, rather
-        // than left in the array as an element a reader reports as present but blank.
+    fn setting_an_array_keeps_the_container_kind_the_property_already_has() {
+        // Forcing an `rdf:Seq` a caller wrote back to an `rdf:Bag` throws away the one thing a Seq
+        // states that a Bag does not, and the setter has the existing property in front of it. A
+        // property that is not an array still becomes the standard Bag.
         let mut pm = PhotoMetadata::new();
         let region = ImageRegion {
             identifier: Some("r1".to_owned()),
             ..ImageRegion::default()
         };
-        pm.set_image_regions(&[ImageRegion::default(), region.clone()]);
-        assert_eq!(pm.image_regions(), vec![region]);
-        // Nothing but empty members leaves no property at all, as an empty slice does.
-        pm.set_image_regions(&[ImageRegion::default()]);
-        assert!(pm.xmp.properties.is_empty());
+        pm.xmp.set(XmpProperty::new(
+            ns::IPTC_EXT,
+            "ImageRegion",
+            XmpValue::Array(XmpArray::Seq(vec![XmpItem::new(region.to_xmp())])),
+        ));
+        pm.set_image_regions(&pm.image_regions());
+        assert!(matches!(
+            pm.xmp
+                .get(ns::IPTC_EXT, "ImageRegion")
+                .expect("the property")
+                .value,
+            XmpValue::Array(XmpArray::Seq(_))
+        ));
+    }
+
+    #[test]
+    fn reading_an_array_and_setting_it_back_keeps_every_member() {
+        // A member carrying no field at all is still a member: dropping it would shift every
+        // later member's index, so `image_regions()` -> `set_image_regions()` would not be the
+        // identity. `rbVertices` never dropped one, and the top-level setters now agree with it.
+        let mut pm = PhotoMetadata::new();
+        let region = ImageRegion {
+            identifier: Some("r1".to_owned()),
+            ..ImageRegion::default()
+        };
+        let regions = vec![ImageRegion::default(), region];
+        pm.set_image_regions(&regions);
+        assert_eq!(pm.image_regions(), regions);
+        pm.set_image_regions(&pm.image_regions());
+        assert_eq!(pm.image_regions(), regions);
     }
 
     #[test]
