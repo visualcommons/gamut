@@ -12,9 +12,12 @@
 //! unreadable (a malformed header or a truncated top-level chain), exactly as
 //! [`gamut_ifd::read`] would.
 
+use std::collections::BTreeMap;
+
 use gamut_core::{ImageBuf, Result, Rgb8};
 use gamut_ifd::{
-    AuditFinding, Ifd, SegmentReport, SkipReason, StandardAuditSpec, Value, audit as ifd_audit,
+    AuditFinding, Ifd, IfdReader, SegmentReport, SkipReason, SpanKind, StandardAuditSpec, Value,
+    audit as ifd_audit,
 };
 
 use crate::compression::Compression;
@@ -111,6 +114,27 @@ pub enum Anomaly {
         /// How serious the condition is.
         severity: Severity,
     },
+    /// A directory carrying more than one entry under the same tag.
+    ///
+    /// TIFF 6.0 §2 gives a directory one entry per tag, in ascending order. A repeated tag is
+    /// therefore a directory no reader can resolve without choosing — and readers choose
+    /// differently: this crate's model keeps the **last** occurrence, while libtiff marks every
+    /// occurrence after the **first** to be ignored (`tif_dirread.c`, "Mark duplicates of any tag
+    /// to be ignored") and warns that the directory is not sorted in ascending order. Which entry
+    /// survives is therefore a property of the reader, not of the file.
+    ///
+    /// Named by **offset** rather than by page, because the directory may be a metadata sub-IFD
+    /// several levels below one: the offset is the identity
+    /// [`SpanKind::IfdBody`](gamut_ifd::SpanKind::IfdBody) already uses.
+    #[non_exhaustive]
+    DuplicateTag {
+        /// The file offset of the directory holding the repeated tag.
+        ifd: u64,
+        /// The repeated tag.
+        tag: u16,
+        /// How many entries that directory carries under it.
+        entries: usize,
+    },
 }
 
 /// The result of a strict deconstruct: byte-level classification plus TIFF-specific findings.
@@ -169,6 +193,7 @@ pub fn deconstruct(data: &[u8]) -> Result<DeconstructReport> {
         findings.check_image_ifd(ifd, page);
     }
     findings.map_audit_findings(&audit.findings);
+    findings.check_duplicate_tags(data, &audit.report);
     Ok(DeconstructReport {
         segments: audit.report,
         unknown_fields: findings.unknown_fields,
@@ -320,6 +345,44 @@ impl Findings {
     }
 
     /// Maps the audit walk's lenient findings onto this crate's anomaly taxonomy.
+    /// Flags every directory that carries two entries under one tag.
+    ///
+    /// This re-reads the **raw** entry records rather than consulting the parsed tree, and that is
+    /// the whole point: [`Ifd`] is a directory model, so by the time the tree exists a duplicated
+    /// tag has already collapsed to its last occurrence and the defect is invisible there. It was
+    /// invisible here too, and that is why a round trip through this crate could not see a writer
+    /// that emitted a field and a sub-IFD group under one tag — the report graded such a file
+    /// clean.
+    ///
+    /// The directories to re-read are the ones the audit says it walked
+    /// ([`SpanKind::IfdBody`](gamut_ifd::SpanKind::IfdBody)), so this is a second pass over bytes
+    /// already claimed rather than a second walk of the pointer graph. A directory the audit
+    /// reached parses again by construction; one that does not is already reported by the audit's
+    /// own finding, so it is skipped here rather than reported twice.
+    fn check_duplicate_tags(&mut self, data: &[u8], report: &SegmentReport) {
+        let Ok(mut reader) = IfdReader::open(data) else {
+            return;
+        };
+        for segment in &report.segments {
+            let SpanKind::IfdBody { ifd } = segment.kind else {
+                continue;
+            };
+            let Ok(raw) = reader.read_ifd(ifd) else {
+                continue;
+            };
+            let mut counts: BTreeMap<u16, usize> = BTreeMap::new();
+            for entry in &raw.entries {
+                *counts.entry(entry.tag).or_default() += 1;
+            }
+            for (tag, entries) in counts {
+                if entries > 1 {
+                    self.anomalies
+                        .push(Anomaly::DuplicateTag { ifd, tag, entries });
+                }
+            }
+        }
+    }
+
     fn map_audit_findings(&mut self, findings: &[AuditFinding]) {
         for finding in findings {
             match *finding {
@@ -430,6 +493,58 @@ mod tests {
             assert!(report.anomalies.is_empty(), "{report:?}");
             assert!(report.is_fully_accounted(), "{report:?}");
         }
+    }
+
+    #[test]
+    fn flags_a_directory_that_repeats_a_tag() {
+        // The report is this crate's own judge, and it graded a duplicated tag clean — which is
+        // why a round trip could not see a writer that emitted a field and a sub-IFD group under
+        // one tag. `Ifd` collapses a repeated tag to its last occurrence, so the defect exists
+        // only in the raw entry records; libtiff keeps the *first* instead, so which entry
+        // survives is a property of the reader rather than of the file.
+        //
+        // Both sides are asserted, because the anomaly must not fire on a conforming directory:
+        // the same image without the extra entry is graded fully accounted.
+        let mut child = Ifd::new();
+        child.set(1, Value::Ascii("R98".into()));
+        let mut plain = image_ifd();
+        plain.set_sub_ifd(tags::SUB_IFDS, vec![child.clone()]);
+        let clean = write_image(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            &plain,
+            &[vec![0u8; 4]],
+        )
+        .expect("write");
+        let report = deconstruct(&clean).expect("deconstruct");
+        assert!(
+            !report
+                .anomalies
+                .iter()
+                .any(|a| matches!(a, Anomaly::DuplicateTag { .. })),
+            "one entry per tag is a conforming directory: {report:?}"
+        );
+
+        let mut repeated = image_ifd();
+        repeated.set(tags::SUB_IFDS, Value::Short(vec![7]));
+        repeated.set_sub_ifd(tags::SUB_IFDS, vec![child]);
+        let duplicated = write_image(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            &repeated,
+            &[vec![0u8; 4]],
+        )
+        .expect("write");
+        let report = deconstruct(&duplicated).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::DuplicateTag { tag, entries, .. }
+                    if *tag == tags::SUB_IFDS && *entries == 2
+            )),
+            "two entries under one tag must be graded: {report:?}"
+        );
+        assert!(!report.is_fully_accounted(), "{report:?}");
     }
 
     #[test]
