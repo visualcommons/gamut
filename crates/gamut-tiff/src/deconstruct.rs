@@ -134,6 +134,13 @@ pub enum Anomaly {
         tag: u16,
         /// How many entries that directory carries under it.
         entries: usize,
+        /// How serious the condition is — always [`Severity::Error`], as for every other
+        /// structural defect: TIFF 6.0 §2 gives a directory one entry per tag, so a field the
+        /// caller set is lost by at least one reader. Carried as a field rather than left
+        /// implicit so that a caller triaging a report reads severity the same way off every
+        /// variant that has one, and so that a later condition graded `Warning` needs no
+        /// breaking change to say so.
+        severity: Severity,
     },
 }
 
@@ -376,8 +383,12 @@ impl Findings {
             }
             for (tag, entries) in counts {
                 if entries > 1 {
-                    self.anomalies
-                        .push(Anomaly::DuplicateTag { ifd, tag, entries });
+                    self.anomalies.push(Anomaly::DuplicateTag {
+                        ifd,
+                        tag,
+                        entries,
+                        severity: Severity::Error,
+                    });
                 }
             }
         }
@@ -539,7 +550,7 @@ mod tests {
         assert!(
             report.anomalies.iter().any(|a| matches!(
                 a,
-                Anomaly::DuplicateTag { tag, entries, .. }
+                Anomaly::DuplicateTag { tag, entries, severity: Severity::Error, .. }
                     if *tag == tags::SUB_IFDS && *entries == 2
             )),
             "two entries under one tag must be graded: {report:?}"
