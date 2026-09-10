@@ -303,7 +303,7 @@ run = "./tooling/check-tests/run.sh"
 # workspace crate has a row, every row names a real crate -- and deliberately not its prose, whose
 # authority is each crate's STATUS.md.
 [tasks.check-readme-crates]
-description = "Verify the README crates table lists every workspace crate and no phantom ones"
+description = "Verify the README crates table covers every workspace crate, has no phantom rows, and is well formed"
 run = "./tooling/check-readme-crates/run.sh"
 
 [tasks.check-release-deps]

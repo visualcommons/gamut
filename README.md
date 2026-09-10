@@ -122,14 +122,14 @@ format.
 | ----------------- | ---------------------------------------------------------------------- | -------------------------------------- |
 | `gamut`           | Umbrella crate; re-exports the format crates behind Cargo features     | implemented                            |
 | `gamut-core`      | Core traits (`Encoder`/`Decoder`), image buffers, dimensions, errors, `convert` | stable (v2; v1 under #177), pixel conversion added by #268 |
-| `gamut-color`     | Color spaces, pixel formats, bit depths, chroma subsampling, transfers | stable (v2; v1 under #179)             |
-| `gamut-dsp`       | Shared DSP kernels: AV1 DCT/ADST/identity/WHT, quantization rounding    | stable (v2; v1 under #192)             |
-| `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)      | stabilizing api                        |
+| `gamut-color`     | Pixel formats, bit depths, chroma subsampling, CICP code points and planar buffers, plus the `f64` colour science (transfer, Lab/OKLab, XYB, matrix, gamut map, CCT, profile) | stable (v2; v1 under #179); the colour science is Tier-1 `f64`, not bit-reproducible |
+| `gamut-dsp`       | Shared DSP kernels: AV1 DCT/ADST/identity/WHT, the JPEG 8×8 forward/inverse DCT, quantization rounding | stable (v2; v1 under #192)             |
+| `gamut-bitstream` | Bit readers/writers, LEB128, the AV1 §8.2 symbol (arithmetic) coder, MSB-first sample packing | v0.2, no v1 release issue yet; the ANS and Huffman coders are not implemented |
 | `gamut-tonemap`   | Tone-mapping curves (`ToneCurve` + Reinhard/ACES/Hable/Drago) for HDR→SDR | stable (v1, #188); eight operators, surface frozen |
-| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables + the backend registry | in use by avif, heic, jpeg, jxl, png and webp |
+| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables + the backend registry | in use by avif, ffi, heic, jpeg, jxl, png and webp |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | stable (v2); structure only, codestream carried opaquely |
 | `gamut-riff`      | RIFF container utilities (WebP)                                        | stable (v1, #186)                      |
-| `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF   | implemented lossless and lossy (alpha) |
+| `gamut-av1`       | AV1 still-image (intra-frame) encoder + decoder — the codec layer beneath AVIF | encoder: lossless and lossy intra keyframes; decoder (default-on `decode` feature): 8-bit 4:4:4 intra key frames only (#259) |
 | `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor        | placeholder                            |
 | `gamut-avif`      | AVIF encoder + container decoder — AV1 still frames in ISOBMFF         | encoder (v1, 8/10/12-bit) + container decode (#250); AV1 codestream decode via the `Av1StillDecoder` seam |
 | `gamut-jxl`       | JPEG XL encoder (libjxl wrap) + decoder (pure-Rust jxl-rs)             | encoder + decoder (#243)               |
@@ -148,7 +148,7 @@ format.
 | `gamut-tiff`      | TIFF 6.0 encoder/decoder — on the shared `gamut-ifd` container core     | stable (v1, #107); YCbCr/Lab and JPEG-in-TIFF deferred |
 | `gamut-dng`       | DNG 1.7.1 raw encoder + decoder — a TIFF/EP profile over `gamut-ifd`   | encoder + decoder (v1, #109), Adobe DNG SDK-gated |
 | `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut-png  | encoder (#195); decoding stays on miniz_oxide |
-| `gamut-png`       | PNG (W3C 3rd edition) encoder + spec-compliant decoder                 | encoder (#24) + decoder (#249)         |
+| `gamut-png`       | PNG (W3C 3rd edition) encoder + decoder, over the still-image subset   | encoder (#24) + decoder (#249); APNG out of scope, so an animated PNG decodes as its default image |
 | `gamut-cli`       | `gamut` CLI sandbox: encode AVIF/WebP/TIFF/PNG/JXL/JPEG + inspect the primitives | ready for use                |
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
 | `gamut-ffi`       | C-compatible FFI bindings                                              | provider boundary shipped (#280); consumer entry points pending (#242) |
@@ -229,6 +229,7 @@ cargo test --workspace
 | `mise run lint`      | Lint with Clippy (warnings as errors)    |
 | `mise run lint-fix`  | Lint and auto-fix                        |
 | `mise run check-commits` | Check commits are Conventional Commits |
+| `mise run check-readme-crates` | Check this README's crates table names every workspace crate, no phantom ones, and every row is a three-cell row |
 | `mise run coverage`  | Run tests with coverage (min 80%)        |
 | `mise run check-cross <triple>` | Cross-compile-check the libs for a target (extended CI; master/manual) |
 | `mise run check-msrv` | Check the libs compile on the documented MSRV (extended CI; master/manual) |

@@ -4,19 +4,22 @@
 # described as unstarted scaffolding citing a closed issue -- and four crates (gamut-codec-abi,
 # gamut-dng, gamut-jpeg, gamut-tonemap) had no row at all.
 #
-# This guard checks the one property that is mechanical -- the table's *membership* -- and
-# nothing else:
+# This guard checks what is mechanical about the table -- its *membership* and the *shape* of a
+# row -- and nothing about the prose in it:
 #
 #   * every workspace crate has a row, so a new crate cannot be added without documenting it;
 #   * every row names a crate that still exists, so a renamed or deleted crate cannot be left
 #     behind as a phantom row;
-#   * no crate is listed twice, so the table stays a bijection rather than a set.
+#   * no crate is listed twice, so the table stays a bijection rather than a set;
+#   * every crate row is a well-formed three-cell row with a non-empty Purpose and Status, so a
+#     row cannot be reduced to a bare crate name and still satisfy membership.
 #
 # What is deliberately NOT checked, and why:
-#   * The Purpose and Status cells. They are prose a human maintains, and their authority is the
-#     crate's own STATUS.md. A text gate over them would fossilise a particular wording, and a
-#     generated table would move prose a human writes into a generator -- so staleness of a row's
-#     *text* stays a review concern, not a lint. Membership is what a machine can settle.
+#   * The *wording* of the Purpose and Status cells. They are prose a human maintains, and their
+#     authority is the crate's own lib.rs, Cargo.toml and STATUS.md. A text gate over them would
+#     fossilise a particular phrasing, and a generated table would move prose a human writes into
+#     a generator -- so staleness of a row's *text* stays a review concern, not a lint. What a
+#     machine can settle is membership and shape, and it settles both.
 #   * The version. `mise run versions` already reports it, and the README deliberately states
 #     what each crate *is* rather than pinning a number that release-plz bumps.
 set -euo pipefail
@@ -53,6 +56,40 @@ test -n "$rows" || {
 }
 
 fail=0
+
+# Shape, as distinct from prose. Membership reads a row's first cell only, so a row stripped of
+# its Purpose and Status -- `| `gamut-core` |` -- names a live crate and passes membership while
+# documenting nothing. An escaped pipe is swapped for a sentinel first, so a cell holding a
+# literal `\|` stays content rather than becoming an extra column.
+malformed="$(
+    awk '
+        /^## Crates$/ { in_section = 1; next }
+        /^## /        { in_section = 0 }
+        !in_section   { next }
+        /^\| *`[a-z0-9-]+` *\|/ {
+            row = $0
+            gsub(/\\\|/, "\001", row)
+            n = split(row, cell, "|")
+            name = cell[2]
+            gsub(/[` ]/, "", name)
+            if (n != 5) {
+                print name " has " (n - 2) " cell(s); a crate row is Crate | Purpose | Status"
+                next
+            }
+            purpose = cell[3]
+            status = cell[4]
+            gsub(/^[ \001]+|[ \001]+$/, "", purpose)
+            gsub(/^[ \001]+|[ \001]+$/, "", status)
+            if (purpose == "") { print name " has an empty Purpose cell" }
+            if (status == "")  { print name " has an empty Status cell" }
+        }
+    ' "$readme"
+)"
+if [ -n "$malformed" ]; then
+    fail=1
+    echo "check-readme-crates: malformed crate rows in the $readme crates table:"
+    echo "$malformed" | sed 's/^/  /'
+fi
 
 # LC_ALL=C throughout: `comm` exits non-zero on input it considers unsorted, and jq's `sort_by`
 # below orders by codepoint. Collating both sides the same way keeps them comparable under any
