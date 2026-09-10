@@ -74,7 +74,11 @@ pub enum Format {
 
 impl Format {
     /// Every format, in discriminant order — the way to enumerate a `#[non_exhaustive]` enum.
-    pub const ALL: [Self; 8] = [
+    ///
+    /// A slice, not a fixed-length array, precisely because the enum is `#[non_exhaustive]`:
+    /// appending a format would change an array constant's *type*, breaking every caller who
+    /// named it, which is the opposite of what `#[non_exhaustive]` promises.
+    pub const ALL: &'static [Self] = &[
         Self::Jpeg,
         Self::Png,
         Self::WebP,
@@ -124,8 +128,8 @@ pub enum Carrier {
 }
 
 impl Carrier {
-    /// Every carrier, in discriminant order.
-    pub const ALL: [Self; 5] = [Self::Exif, Self::Xmp, Self::Icc, Self::IptcIim, Self::C2pa];
+    /// Every carrier, in discriminant order. A slice for the same reason as [`Format::ALL`].
+    pub const ALL: &'static [Self] = &[Self::Exif, Self::Xmp, Self::Icc, Self::IptcIim, Self::C2pa];
 }
 
 /// Which way the metadata moves.
@@ -139,7 +143,7 @@ pub enum Direction {
 }
 
 impl Direction {
-    /// Both directions.
+    /// Both directions. An array, since this enum is exhaustive and cannot gain a variant.
     pub const ALL: [Self; 2] = [Self::Read, Self::Write];
 }
 
@@ -294,8 +298,8 @@ mod tests {
     #[test]
     fn supports_equals_the_documented_matrix_in_every_cell() {
         // Walks the full product so a flipped arm anywhere in `supports` is a named cell here.
-        for format in Format::ALL {
-            for carrier in Carrier::ALL {
+        for &format in Format::ALL {
+            for &carrier in Carrier::ALL {
                 for direction in Direction::ALL {
                     let expected = SUPPORTED.contains(&(format, carrier, direction));
                     assert_eq!(
@@ -311,7 +315,8 @@ mod tests {
     #[test]
     fn typed_wiring_names_exactly_the_four_wired_crates() {
         let wired: Vec<Format> = Format::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|&f| typed_wiring(f))
             .collect();
         assert_eq!(
@@ -322,7 +327,7 @@ mod tests {
 
     #[test]
     fn crate_name_follows_the_workspace_naming() {
-        for format in Format::ALL {
+        for &format in Format::ALL {
             let name = format.crate_name();
             assert!(name.starts_with("gamut-"), "{format:?}: {name}");
             assert_eq!(
@@ -336,13 +341,15 @@ mod tests {
     #[test]
     fn discriminants_are_the_documented_append_only_values() {
         // The `repr(u8)` values are a public contract (C ABI); pin them so a reorder is a failure.
+        // Collected rather than `map`ped over an array: `ALL` is a slice, so its length is part of
+        // what these compare, and an appended variant without its discriminant fails here.
         assert_eq!(
-            Format::ALL.map(|f| f as u8),
-            core::array::from_fn::<u8, 8, _>(|i| i as u8)
+            Format::ALL.iter().map(|&f| f as u8).collect::<Vec<_>>(),
+            (0..8).collect::<Vec<u8>>()
         );
         assert_eq!(
-            Carrier::ALL.map(|c| c as u8),
-            core::array::from_fn::<u8, 5, _>(|i| i as u8)
+            Carrier::ALL.iter().map(|&c| c as u8).collect::<Vec<_>>(),
+            (0..5).collect::<Vec<u8>>()
         );
         assert_eq!(Direction::ALL.map(|d| d as u8), [0, 1]);
     }

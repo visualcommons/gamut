@@ -247,9 +247,11 @@ four wired crates through an optional `metadata` feature of their own (`gamut-jp
 **`gamut-dng` has no such feature**: it depends on this crate unconditionally, so `gamut-dng/metadata`
 is not something a manifest can ask for.
 
-The enums are `#[repr(u8)]` with append-only discriminants and carry `ALL` constants for
-enumeration, since `Format` and `Carrier` are `#[non_exhaustive]`. The audio/video half of the same
-question is outside an image-first workspace and stays with issue #216.
+The enums are `#[repr(u8)]` with append-only discriminants. `Format` and `Carrier` are
+`#[non_exhaustive]` and carry their `ALL` constants as **slices** rather than fixed-length arrays,
+so appending a variant does not change a constant's type under a caller who named it; `Direction`
+is exhaustive and keeps an array. The audio/video half of the same question is outside an
+image-first workspace and stays with issue #216.
 
 ## Consumer integration
 
