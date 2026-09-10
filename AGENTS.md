@@ -112,12 +112,17 @@ Dependency edges (a crate depends on those to its right):
   data it walks instead of by its own arithmetic does not produce one. An exclusion is the last
   resort and must argue that **no** input can distinguish the mutant, or that the only thing it
   moves is a choice the format leaves free. Exclusions live only in `.cargo/mutants.toml`, one
-  regex per mutant, anchored so it cannot also cover a killable sibling (`file:line:column` for
-  an operator mutation, the function signature for a whole-body one), never as a
+  regex per *claim* — several generated mutants only when they are one statement or one site's
+  operator class and a single argument covers them all, and the comment says so — anchored so it
+  cannot also cover a killable sibling (`file:line:column` for an operator mutation, the function
+  signature for a whole-body one, and that file's header states which trades what), never as a
   `#[mutants::skip]` attribute in source: one reviewable list beats a scatter, and a glob may
-  exclude a path but never a live code path. Before paying to kill a survivor, ask whether the
-  mutated expression is observable at all — a capacity hint or a discarded return value is not —
-  and if you buy the signal anyway, record what it cost.
+  exclude a path but never a live code path. Removing a mutant structurally is not free either:
+  the rewrite takes the site's killable siblings with it, so the code is afterwards covered by
+  fewer mutants — say so where the rewrite lands, and never let a shrinking survey read as a
+  strengthening one. Before paying to kill a survivor, ask whether the mutated expression is
+  observable at all — a capacity hint or a discarded return value is not — and if you buy the
+  signal anyway, record what it cost.
 - **Never narrow a contract to make a mutant assertable.** The test is whether any conformant
   input can tell the old bound from the new. If none can — the spec's own clause puts every
   conformant value inside the tighter bound — then the loose bound was arbitrary and tightening
