@@ -40,7 +40,7 @@ in both directions.
 | gamut reserves → an external signer completes → c2pa-rs validates | `tests/reserve_then_fill.rs` | a store signed over the reserved file validates once patched into the range `encode_with_report` gave, and exactly fills it |
 | c2pa-rs embeds → gamut locates the identical byte range | `tests/locate_embedded.rs` | `gamut-avif` and `gamut-heic` report the *same span* as the store's own JUMBF header, and c2pa-rs re-validates the bytes gamut extracted |
 | the box itself | `tests/box_framing.rs` | `gamut-avif`'s `ContentProvenanceBox` is byte-identical to c2pa-rs's for the same store |
-| a derivative carries no parent store | `tests/no_copy_forward.rs` | the parent's located store, carried through `gamut-metadata`'s `C2paPolicy` and into a re-encode, reads back as **unsigned** (`JumbfNotFound`) — and `Reject` refuses it by name |
+| a derivative carries no parent store | `tests/no_copy_forward.rs` | the parent's located store, carried through `gamut-metadata`'s `C2paPolicy` and into a re-encode, reads back as **unsigned** (`JumbfNotFound`) |
 | the build stays crypto-free where it must | `tests/build_configuration.rs` | the `c2pa` dependency never regains its default `openssl` feature, in the manifest and in the resolved graph |
 | the one BMFF layout gamut cannot discriminate | `tests/update_manifest.rs` | what c2pa-rs actually emits for `box_purpose = update` — see below |
 
@@ -94,7 +94,7 @@ test wrongly accusing gamut of mis-bounding.
 
 ## What this oracle does not check
 
-Two limits, stated so nobody reads a green run as covering them.
+Three limits, stated so nobody reads a green run as covering them.
 
 **Where the box sits.** C2PA 2.4 §A.5.3 constrains a `ContentProvenanceBox`'s *placement* among the
 top-level boxes. c2pa-rs validates a store wherever it finds one, so no assertion here can
@@ -109,6 +109,16 @@ not merely unasserted — because the signing identity is ephemeral and on no tr
 [The signing identity](#the-signing-identity) below. Reaching it would need a trust list and a
 committed certificate with a real expiry, a different subject belonging to a later slice of the
 #239 epic. Nothing of the sort is checked into this tree, and no assertion here asks for it.
+
+**That a store ends inside its enclosing box.** `jumbf_superbox_span` takes the store's declared
+length at its word and checks it only against the end of the *buffer*, never against the end of the
+`ContentProvenanceBox` around it. A store whose `LBox` overruns its own box but still fits the file
+is reported as a span. Bounding it properly would mean parsing ISOBMFF framing here — which would
+make this oracle depend on exactly the structural understanding it exists to check independently,
+and a second copy of gamut's §A.5.1.2 walk proves nothing about the first. The independence is
+worth more than the extra check, so the limit is accepted rather than closed. It costs nothing on
+today's fixtures, whose stores run to the end of their box; issue #534, which points this crate at
+PNG, TIFF and RIFF, is where a store followed by more container bytes first appears.
 
 ## Why gamut owns the locate/bound step at all
 
@@ -226,8 +236,11 @@ it reserves two `LBox` values that a naive four-byte read gets wrong:
 - **`LBox == 1`** — the length is the 8-byte big-endian `XLBox` after `TBox`, counting the whole
   box including that 16-byte header.
 
-`declared_store_len` implements both, refuses `LBox` 2..=7 (shorter than the header they sit in)
-with a typed `OracleError::UnusableSuperboxLength`, and never returns a length it had to guess.
+`declared_store_len` implements both, and applies one rule to both header sizes — the rule
+`gamut_isobmff`'s box reader already applies, that a length counting a header can never be less
+than that header: `LBox` in 2..=7 against the 8-byte header, `XLBox` below 16 against the 16-byte
+one. Either would otherwise yield a span ending at or before the store's first body byte. Both
+refusals are the typed `OracleError::UnusableSuperboxLength`, and no length is ever guessed.
 No store this crate has seen uses either reserved value — c2pa-rs writes a plain 32-bit `LBox` —
 which is precisely why the handling is written rather than assumed, and why the arms are pinned by
 unit tests in `src/lib.rs` rather than left to a fixture that cannot reach them.
