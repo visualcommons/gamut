@@ -691,6 +691,27 @@ impl IccProfile {
     /// a primaries nor a transfer code point, and their chromaticities are private to
     /// `gamut-color`, so this crate cannot describe them without restating tables it does not own.
     ///
+    /// # The profile is the code point, not the bundle's own curve
+    ///
+    /// A [`SourceProfile`] is a *rendering* bundle, and for one of them the profile built here and
+    /// the bundle's own [`eotf`](SourceProfile::eotf) are not the same curve.
+    /// `SourceProfile::BT2020` pairs BT.2020 primaries with `SourceTransfer::Bt2020Pq`, which is
+    /// the ST 2084 EOTF **followed by a Reinhard tone map to SDR**. Its CICP transfer code point
+    /// is 16, and 16 is ST 2084 — so this profile encodes ST 2084, peak-referred, without the tone
+    /// map. Swept over the signal domain at 100 001 points the two diverge by up to **0.735**
+    /// absolute, 52× at `V = 0.1`; `SourceProfile::SRGB`, whose transfer *is* its code point,
+    /// agrees with its profile to 4.2e-6 — the `s15Fixed16` rounding of the tag, and nothing else.
+    ///
+    /// That is deliberate, and it is the difference between the two axes. A narrow sample range is
+    /// a property of the samples, which is why [`from_cicp`](IccProfile::from_cicp) declines one it
+    /// cannot describe. A tone map is not: it is `gamut-color`'s choice about how to *render* an
+    /// HDR transfer into SDR, and an ICC transfer tag is the encoding the code point names.
+    /// Writing the tone map into the tag would hand a CMM a curve no other reader of the same CICP
+    /// triple would produce, and would contradict the `cicpType` tag written beside it (ICC.1:2022
+    /// §9.2.17: the CICP tag content "shall be equivalent to the data colour space encoding
+    /// represented by this ICC profile"). A caller that wants the tone-mapped rendering applies it
+    /// to its samples and embeds an SDR profile.
+    ///
     /// # Examples
     ///
     /// ```
@@ -1096,6 +1117,11 @@ mod tests {
 
     /// `SourceProfile`'s bundles map onto the built-in spaces, and the two with no CICP axes are
     /// declined rather than approximated.
+    ///
+    /// `BT2020` maps onto [`BuiltinProfile::Bt2020Pq`] even though the bundle's own `eotf` is a
+    /// tone map and the profile's `rTRC` is not: the mapping is on the **code points** the bundle
+    /// projects onto, which is what `from_source_profile` is defined over. The divergence that
+    /// follows is documented on the constructor and measured there (up to 0.735 absolute).
     #[test]
     fn source_profiles_map_onto_the_builtin_spaces() {
         let cases = [

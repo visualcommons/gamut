@@ -93,6 +93,19 @@ differently is a `gamut-color` question, filed as
 on `src/builtin.rs`'s module documentation pins every clause of this paragraph that is a claim
 about gamut-color, so it cannot drift from the crate it describes.
 
+**A `SourceProfile` bundle's own curve is not always the profile's curve.** `from_source_profile`
+projects the bundle onto its two CICP code points and builds from those. For `SourceProfile::SRGB`
+that is a distinction without a difference — the bundle's transfer *is* code point 13, and profile
+and bundle agree to 4.2e-6, the `s15Fixed16` rounding of the tag. For `SourceProfile::BT2020` it is
+not: that bundle's transfer is ST 2084 **plus a Reinhard tone map to SDR**, while its code point is
+16, which is ST 2084 alone. The profile encodes 16, peak-referred, and over a 100 001-point sweep
+of the signal domain the two curves diverge by up to **0.735** absolute — 52× at `V = 0.1`. This is
+the opposite call from narrow range above, and deliberately so: a sample range is a property of the
+*samples*, which a full-scale profile genuinely cannot describe, whereas a tone map is gamut-color's
+choice about how to *render* an HDR transfer, and §9.2.17 requires the `cicpType` tag to be
+equivalent to the encoding the profile represents. A caller wanting the tone-mapped rendering
+applies it to its samples and embeds an SDR profile.
+
 **CICP fields the profile does not build from.** `from_cicp` builds from the primaries and transfer
 code points only, and treats the other two fields differently on purpose — one is rewritten, one is
 a precondition.
