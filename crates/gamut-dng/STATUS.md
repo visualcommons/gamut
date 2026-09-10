@@ -378,21 +378,41 @@ removed or measured; none is left as an adjective.
   reports the decoded image's extent and exports no samples, so the reference implementation is not
   charged for a `malloc` + `memcpy` that exists only because the caller is in Rust.
 - **The one asymmetry left in `decode_dng` is the IFD-0 preview** (plus the metadata
-  reconstruction), which `DngDecoder::decode` performs and `ReadStage1Image` does not. The
-  preview's volume is exact — `⌊w/2⌋ × ⌊h/2⌋ × 3` against the raw's `w × h × planes × 2`, i.e.
-  37.5 % of a 16-bit CFA frame and 12.5 % of a `LinearRaw` one — so the harness puts it in gamut's
-  divan counter: the **median-time** column is the uncorrected ratio and the **throughput** column
-  is the preview-corrected one, and a reader has no subtraction to do. The correction charges
-  preview bytes at the raw path's per-byte rate, which is close to exact on the uncompressed cases
-  (both paths just move bytes) and generous to gamut on the compressed ones, where the corrected
-  ratio is therefore a lower bound. It is not normalised away by changing the codec: gamut exposes
-  no raw-image-only decode entry point, and adding one so a benchmark reads better would be the
-  wrong direction of causation.
+  reconstruction), which `DngDecoder::decode` performs and `ReadStage1Image` does not. Its volume
+  is exact, and it is the volume the *decoder materialises*, not the one the file stores: the
+  preview is written at 8 bits, but every sub-image is surfaced as `SubImageData::Decoded(
+  Vec<u16>)`, so the buffer gamut allocates, fills and frees is `⌊w/2⌋ × ⌊h/2⌋ × 3 × 2` bytes
+  against the raw's `w × h × planes × 2` — 75 % of a 16-bit CFA frame and 25 % of a `LinearRaw`
+  one. On the **uncompressed** rows that volume goes into gamut's divan counter, so the
+  **median-time** column is the uncorrected ratio and the **throughput** column the corrected one.
+  On the **compressed** rows it does not. Correcting there charges preview bytes at the raw path's
+  per-byte rate, and under Deflate or lossless JPEG a raw byte carries entropy-coding work a
+  preview byte does not, so the arithmetic yields a lower bound on gamut's ratio rather than a
+  measurement of it; the harness prints no number for it and says so, in the fixture table and in
+  the epilogue below it. Read a compressed row as: gamut's figure includes preview and metadata
+  work the reference arm does not do, by an amount this harness does not measure. It is not
+  normalised away by changing the codec: gamut exposes no raw-image-only decode entry point, and
+  adding one so a benchmark reads better would be the wrong direction of causation.
 - **The one asymmetry left in `decode_lossless_jpeg` is the FFI export path, and a third arm
-  prices it.** `adobe-sdk-no-export` runs the identical `DecodeLosslessJPEG<Scalar>` into the
-  identical spool buffer and stops before the `malloc`/`memcpy`/`Vec` copies. Measured, that path
-  costs the reference implementation **0.3–1.9 %** across two runs, so the codestream comparison is
-  fair to within 2 % — a number rather than a claim.
+  bounds it.** `adobe-sdk-no-export` runs the identical `DecodeLosslessJPEG<Scalar>` into the
+  identical spool buffer and stops before the `malloc`/`memcpy`/`Vec` copies. Across sixteen
+  case-runs the gap between the two SDK arms spans −4 % to +64 %: an effect below this harness's
+  run-to-run spread on a shared machine, whose *sign* is not resolved. What that supports is a
+  **bound** — on the runs where neither SDK arm was disturbed the gap is under 3 %, and the
+  fairness claim needs only that the export path cannot account for a 30×-plus ratio — not a
+  figure for what the export path costs. Earlier revisions of this section quoted 0.3–1.9 % as
+  though it were the cost; it was two samples of a quantity at the noise floor.
+- **One measured path is not built from this repository, and it is a Deflate one.** `build.rs`
+  links the system libz dynamically (`-lz`), because the SDK includes `<zlib.h>` unconditionally.
+  So on the two `*/deflate` rows — and only there — the reference arm's speed is a property of the
+  machine, and even of the launcher: `cargo bench` puts every build script's native search path on
+  `LD_LIBRARY_PATH`, so it resolves whichever stock zlib another dev oracle has built under
+  `target/`, while running the same binary directly resolves the platform's. Measured here, that
+  choice moves the reference arm by 1.2–1.3× and moves gamut's arm not at all — enough to reverse
+  which side of 1.0 a Deflate row falls on, with no defect in either implementation. The harness
+  therefore prints the resolved library above its divan output (`zlibVersion()` plus the path
+  `dladdr` reports, since zlib-ng's compatibility build answers `"1.3.1"` exactly as stock zlib
+  does), and a Deflate figure below travels with the library it was taken against or not at all.
 
 **Each pair is one benchmark, not two.** `decode_dng` and `decode_lossless_jpeg` take the
 implementation as a divan *argument* rather than living in a benchmark each. Separate benchmarks
@@ -401,59 +421,90 @@ shared machine that drifts, a ratio measured minutes apart is not a ratio. As ar
 members run back to back under the same instantaneous load, and the argument names are ordered so
 divan's own name sort keeps them adjacent.
 
+Interleaving is kept on that argument alone. An earlier revision of this section also credited it
+with a 25–30 % shift in the two Deflate ratios; that attribution is **withdrawn**. Those are the two
+rows now known to depend on which libz the machine resolves, an effect of the same magnitude and the
+same sign, and this round did not re-run the non-interleaved arrangement under a pinned library, so
+the shift is not this section's to explain.
+
 There is no `encode` arm for the SDK: the oracle shim wraps the SDK's *reader*, not its writer, so
 no reference encode number exists and none is invented. Encode is reported for gamut alone.
+
+**Alternate the arm order between runs.** Adjacent is not simultaneous: divan cannot interleave a
+pair *per sample*, so one arm always runs first and inherits nothing while the second inherits the
+caches and the frequency governor the first left. divan's sort is reversible, so the control
+already exists — `--sortr name` runs the gamut arm first — and a published ratio is the mean of one
+run each way. Measured across the eight runs below, the order is worth about a percent, well under
+the run-to-run spread; it is corrected for because it is one-directional, not because it is large.
 
 **No absolute figures are pinned here.** Unlike the #196 numbers above — a ratio comparison between
 two encoders in the same process, which is robust to a loaded machine — throughput in MB/s is a
 property of the machine that produced it. Run the harness on the box you care about.
 
-**What the harness measured.** Two runs, 100 samples each, 512×384 at 16 bits, in a quiet window on
-a shared machine (one-minute load average bracketed by `uptime`: 3.18 → 2.91 for run A, 2.89 → 2.85
-for run B). Ratios only; every row of the matrix is here, including the ones that do not fit a
-tidy story.
+**What the harness measured.** Eight runs, 100 samples each, 512×384 at 16 bits, on a shared
+machine at one-minute load averages of 15 to 38 (bracketed by `uptime` per run): two repetitions of
+`{stock zlib, zlib-ng} × {reference arm first, gamut arm first}`. Ratios only, medians unless
+marked; every row of the matrix is here, including the ones that do not fit a tidy story, and the
+raw divan output for all eight is published with the pull request rather than summarised into these
+cells.
 
-Whole-file decode, gamut ÷ Adobe DNG SDK (median time; "corrected" divides out the preview volume
-gamut also unpacks):
+Whole-file decode, gamut ÷ Adobe DNG SDK, median time — uncorrected, which is what the harness now
+prints on the compressed rows:
 
-| `decode_dng` case          | run A  | run B  | corrected A | corrected B |
-| -------------------------- | ------ | ------ | ----------- | ----------- |
-| `cfa/uncompressed`         | 2.44×  | 2.39×  | 1.78×       | 1.74×       |
-| `cfa/deflate`              | 0.97×  | 0.94×  | 0.71×       | 0.69×       |
-| `cfa/lossless-jpeg`        | 60.1×  | 57.5×  | 43.7×       | 41.8×       |
-| `linear-raw/uncompressed`  | 1.85×  | 1.76×  | 1.65×       | 1.57×       |
-| `linear-raw/deflate`       | 0.95×  | 0.96×  | 0.85×       | 0.85×       |
-| `linear-raw/lossless-jpeg` | 59.0×  | 58.8×  | 52.4×       | 52.2×       |
+| `decode_dng` case          | stock zlib 1.3.1            | zlib-ng 2.3.3               |
+| -------------------------- | --------------------------- | --------------------------- |
+| `cfa/uncompressed`         | 2.17, 2.27, 2.23, 2.21      | 2.52, 2.26, 2.14, 2.34      |
+| `cfa/deflate`              | 0.94, 0.94, 0.94, (2.71)    | 1.23, 1.25, 1.26, 1.17      |
+| `cfa/lossless-jpeg`        | 83, 50, 89, (18)            | 87, 45, 66, 92              |
+| `linear-raw/uncompressed`  | 1.73, 1.72, 1.79, 1.79      | 1.84, 1.70, 1.78, 1.82      |
+| `linear-raw/deflate`       | 1.00, 0.90, 0.97, 0.84      | 1.41, 1.28, 1.28, 1.28      |
+| `linear-raw/lossless-jpeg` | 35, 101, 60, 47             | 47, 47, 75, 57              |
+
+The four cells per column are, in order, `{rep 1, rep 2} × {reference arm first, gamut arm first}`.
+The parenthesised `cfa` figures come from the noisiest run in the set (load 36.8); its
+*fastest*-sample ratios are 0.97 and 27, in line with the rest. The `uncompressed` rows are quoted
+uncorrected here; with the preview correction the harness applies to them, they read 1.24–1.44 and
+1.36–1.47 respectively.
 
 Bare codestream decode, which carries no container asymmetry — same SOF3 stream in, same samples
-out, one counter for all three arms:
+out, one counter for all three arms. Medians are unusable here (gamut's arm is ~100 ms, long enough
+to swallow a scheduling event whole), so the fastest-sample ratio is given alongside:
 
-| `decode_lossless_jpeg` case | gamut ÷ SDK, A | gamut ÷ SDK, B | SDK export path, A | B     |
-| --------------------------- | -------------- | -------------- | ------------------ | ----- |
-| `cfa`                       | 56.7×          | 56.4×          | 1.9 %              | 0.3 % |
-| `linear-raw`                | 58.6×          | 57.5×          | 1.1 %              | 0.7 % |
+| `decode_lossless_jpeg` case | gamut ÷ SDK, median | gamut ÷ SDK, fastest sample |
+| --------------------------- | ------------------- | --------------------------- |
+| `cfa`                       | 45–92               | 34–61                       |
+| `linear-raw`                | 42–91               | 41–63                       |
 
-Interleaving is what makes the small ratios usable at all. Measured as two separate benchmark
-groups, this harness previously reported `cfa/deflate` at 1.24× and `linear-raw/deflate` at 1.25×;
-interleaved, both sit **below** 1.0× — gamut decodes Deflate DNGs slightly *faster* than the
-reference implementation. A 25–30 % shift in a 1.2× ratio is the measurement moving, not the codec.
+**The two Deflate rows depend on a library this repository does not build**, and that is the whole
+of a discrepancy an independent re-measurement raised against an earlier revision of this section.
+The earlier figures (0.94–0.97, gamut faster) and the independent ones (1.20–1.26, the SDK faster)
+are **both correct**, and the eight runs above reproduce both: 0.94 under stock zlib 1.3.1, 1.17–1.26
+under zlib-ng 2.3.3, at every load from 15 to 38 and in both arm orders. The isolating evidence is
+that the *gamut* arm does not move between the two — its `cfa/deflate` median is 1.04–1.05 ms under
+either library — while the reference arm moves from 0.83 ms to 0.97–1.11 ms. Neither measurement was
+wrong; the harness failed to say which inflate implementation it had measured, so two correct runs
+looked like a contradiction. It now prints it.
 
 **What the harness found.** Two defects, both filed rather than fixed here — a benchmark that
 measures the codec is not the place to change it:
 
 - **#583, lossless-JPEG decode speed.** The isolating evidence is the **codestream pair** above,
-  which carries no container asymmetry and whose one residual bias is priced at under 2 %: there
-  gamut is **56–59× slower** than the reference implementation, in both runs, on both photometries.
-  `lossless_jpeg::decode_symbol` scans the whole 256-entry code table once per candidate bit
-  length, so a symbol costs ~1000 comparisons where the reference implementation spends one table
-  probe.
+  which carries no container asymmetry and whose one residual bias — the FFI export path — is
+  bounded well below the effect: there gamut is **one and a half to two orders of magnitude
+  slower** than the reference implementation. Across eight runs, on both photometries and in both
+  arm orders, no fastest-sample ratio is below **34×** and the medians centre near 50–60×; the
+  earlier "56–59×" was a two-run figure and is not reproducible to that precision on a loaded box,
+  but nothing in the eight runs brings the effect near parity. `lossless_jpeg::decode_symbol` scans
+  the whole 256-entry code table once per candidate bit length, so a symbol costs ~1000 comparisons
+  where the reference implementation spends one table probe.
 
   The whole-file rows are published above in full rather than filtered to the ones that agree. Two
-  of them are not close to parity: `cfa/uncompressed` at 2.4× and `linear-raw/uncompressed` at
-  1.8×. The preview correction explains part of that (1.7–1.8× and 1.6× corrected); the remainder
-  is the fixed IFD and metadata reconstruction, which does not scale with the frame and therefore
-  dominates exactly where the raw path is little more than a `memcpy`. This harness measures that
-  gap and does not attribute it further — and #583's isolation does not rest on it.
+  of them are not close to parity: `cfa/uncompressed` at 2.1–2.5× and `linear-raw/uncompressed` at
+  1.7–1.8×. Those are the rows the preview correction applies to, and corrected they read 1.2–1.4×
+  and 1.4–1.5×; the remainder is the fixed IFD and metadata reconstruction, which does not scale
+  with the frame and therefore dominates exactly where the raw path is little more than a `memcpy`.
+  This harness measures that gap and does not attribute it further — and #583's isolation does not
+  rest on it.
 - **#584, CFA lossless-JPEG size.** Quoted throughout against **one** denominator, the raw sample
   volume (393 216 bytes for this fixture): `cfa/uncompressed` writes a 541 440-byte file (137.7 %)
   and `cfa/lossless-jpeg` a 618 800-byte one (157.4 %), so turning compression on makes the file
@@ -474,8 +525,9 @@ to a single synthetic fixture is precisely the failure a benchmark harness exist
 Re-measure on the real-camera corpus (`mise run fetch-dng-samples`, then `mise run test-dng-real`)
 before the encoder changes, and gate on that if anything is to be gated.
 
-Both defects are byte- or ratio-quantities rather than absolute times, so both reproduce off this
-box.
+#584 is a byte quantity and reproduces anywhere. #583 is a ratio, and the only outside code in its
+measured path is the SDK's own lossless-JPEG decoder, built here from the committed SDK source — so
+unlike the Deflate rows it does not depend on what the machine has installed.
 
 ## Deferred / out of scope
 
