@@ -115,10 +115,22 @@ jobs:
       # One target's crash says nothing about another's, so a failure must not cancel the rest.
       fail-fast: false
       matrix:
-        # One entry per file in tooling/gamut-fuzz/fuzz_targets. A matrix rather than three steps
-        # in one job, so each target gets the full time budget below in parallel instead of the
-        # job's wall time growing with every crate that gains laws.
-        target: [ifd_read_ledger, core_convert, tonemap_curves]
+        # One entry per file in tooling/gamut-fuzz/fuzz_targets. A matrix rather than one job with
+        # a step per target, so each target gets the full time budget below in parallel instead of
+        # the job's wall time growing with every crate that gains laws or a parser entry point.
+        target:
+          - ifd_read_ledger
+          - core_convert
+          - tonemap_curves
+          # The parser entry points (#264): the untrusted-input surface `docs/testing.md`'s
+          # per-crate table names, one target per entry point rather than per crate, because
+          # gamut-heic's container walk and its `hvcC`/NAL layer are two independent surfaces.
+          - ifd_read
+          - tiff_decode
+          - dng_decode
+          - isobmff_boxes
+          - heic_container
+          - heic_hvcc
     env:
       MISE_TASK_RUN_AUTO_INSTALL: false
     steps:
@@ -158,6 +170,17 @@ jobs:
         # A crash found here is minimised and promoted into a NAMED DETERMINISTIC TEST in the
         # crate's own suite -- the corpus is a search aid, not the regression record -- so a
         # failure of this job is a signal to go and write that test, not to re-run until green.
+        #
+        # EXPECTED RED: `tiff_decode` and `dng_decode` fail today on filed, accepted defects
+        # (#563, #564). They are deliberately not narrowed to make these rows green; read the
+        # per-row status rather than this workflow's aggregate until both close. Restoring the
+        # aggregate's meaning is #593.
+        #
+        # CADENCE (#594), decided: this job stays on the workflow's own trigger. Nothing
+        # accumulates between runs -- each starts from the committed seeds and discards what the
+        # engine finds -- so a run is ten minutes of cold search whatever the cadence, and running
+        # less often just searches less. Persisting the corpus (#603) is the change that makes
+        # frequency and this time budget worth tuning; the README states the full argument.
         run: mise run fuzz ${{ matrix.target }} -- -max_total_time=600
       - name: Upload any crash artifacts
         if: failure()

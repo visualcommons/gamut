@@ -169,6 +169,52 @@ lives where the DNG sample corpus lives: an excluded `tooling/` crate, a corpus 
 task, and an `extended.yml` job. **A crash it finds is minimised and promoted into a named
 deterministic case in that crate's `tests/robustness.rs`**, which is where the regression value is.
 
+What the per-PR path *does* carry is the **compile** half, for the reason the excluded real-DNG
+tier already carries it: nothing else builds an excluded crate, so an API change in a driven crate
+breaks its targets unnoticed until the next run on master. CI's lint job runs `mise run
+check-fuzz` — no nightly, no sanitizer, no engine, nothing unbounded — and its `Format & Metadata`
+job runs `mise run check-fuzz-matrix`, which reconciles the three hand-maintained lists that
+describe the target set (the files, the `[[bin]]` entries, the `extended.yml` matrix), because a
+target missing from the third is one that never runs and nothing reports it. Both are mise tasks
+rather than commands written into the workflow, so a contributor runs exactly what CI runs.
+
+A **robustness** target is not a law and does not route through an `invariants` module: its
+primary oracle is the engine's own — a panic, a hang, or an allocation past `-malloc_limit_mb` —
+which no function can express. Any check it adds beyond that oracle must be able to *fail*, and
+**its module doc records the injected defect that made it fail** — the patch, the message the
+target printed, and the command that reproduces it.
+
+**"Can fail" means some defect in the code the check names makes some *input* fail it**, and both
+halves bite. A check whose two sides are computed from one another cannot be separated by any
+input, however hostile: it can only report a defect in that shared computation, never one in the
+subject it advertises. Three shapes recur, and every one of them was found here by injecting the
+defect the check named and getting nothing back:
+
+- **a wrapper against the expression its own body is.** `gamut_ifd::read` against
+  `IfdReader::open(..)?.read_file()` is one function call written twice.
+- **two sides that come from one reader.** A decoded-versus-described geometry check sees nothing
+  when the decoder and the probe share a tag reader.
+- **a value silently derived from the value it is compared with.** A decode's sample count looks
+  like the pixel pipeline's own output, but `gamut_core::convert::convert_from_raw` allocates its
+  result as `ImageBuf::<Q>::zeroed(src.dims)` — so the count *is* the dimensions' product, and
+  comparing it against the declared geometry's product is the geometry comparison times a
+  constant. A transposition passes it. In the same shape, "the box cursor strictly advances"
+  cannot fail for any declared box size, because `BoxReader::next_box` consumes its 8-byte header
+  before any success return.
+
+Anchor a check on a value the compared side does not produce, and keep the tautology — if it is
+worth keeping at all — as a **structure pin**: named as one at the site, and kept out of the
+target's list of checks. A pin earns its one comparison where a future change could genuinely
+split the two bodies apart; it is worth nothing as a search.
+
+**Inject once per listed check, not once per target.** A target that lists two checks and records
+one injection has evidence for one of them, and the other can sit dead for rounds — two of this
+workspace's did. Where a check is an equality between an accessor and a count, inject in both
+directions, because one direction is silent on a file that holds no instance of the thing. And
+where an injection reports nothing because no *committed seed* reaches the check, add the seed: a
+check whose only witness has to be synthesised by the engine is a check the tier is asking luck
+for.
+
 `#[ignore]` is not used in this workspace and must not be introduced: `coverage` is the only test
 gate, so an ignored test is not deferred, it is unrun.
 
@@ -177,15 +223,16 @@ gate, so an ignored test is not deferred, it is unrun.
 The authority and primary technique for each crate are decided **here, once**. A row changes only
 in a pull request that says why. "Authority" is the **in-crate** authority — several crates are
 additionally covered by a consuming codec's oracle, which their own `STATUS.md` records. "Fuzz
-entry point" names the untrusted-input surface a fuzz target takes; ☐ marks one not yet wired
-(#264). The binary, binding and stub crates (`gamut`, `gamut-cli`, `gamut-wasm`, `gamut-ffi`,
-`gamut-jxl-sys`, `gamut-av2`, `gamut-vvc`) have no row: they are excluded from the coverage and
-mutation gates, and the stubs carry no function bodies.
+entry point" names the untrusted-input surface a fuzz target takes; ☑ marks one a target in
+`tooling/gamut-fuzz` drives today, ☐ one not yet wired (#264). The binary, binding and stub crates
+(`gamut`, `gamut-cli`, `gamut-wasm`, `gamut-ffi`, `gamut-jxl-sys`, `gamut-av2`, `gamut-vvc`) have
+no row: they are excluded from the coverage and mutation gates, and the stubs carry no function
+bodies.
 
 | Crate | Authority | Primary technique | Fuzz entry point |
 | --- | --- | --- | --- |
 | gamut-core | *none* — no oracle exists | **property** (`convert`, `image` stride math) | — |
-| gamut-ifd | *none in-crate* — libtiff/exiv2 reach it via the consuming codecs (STATUS.md P7) | **property** + exact-byte | `IfdReader`, `read` ☑ laws; ☐ driver |
+| gamut-ifd | *none in-crate* — libtiff/exiv2 reach it via the consuming codecs (STATUS.md P7) | **property** + exact-byte | `IfdReader`, `read` ☑ laws; ☑ driver |
 | gamut-tonemap | *none* | **property** (monotonicity, endpoints, no NaN) | — |
 | gamut-bitstream | *none* — self-inverse | property + exact-byte | — |
 | gamut-dsp | AV1 §7.13 / T.81 §A.3 transform definitions | example + in-test reference transform | — |
@@ -196,13 +243,13 @@ mutation gates, and the stubs carry no function bodies.
 | gamut-deflate | zlib | differential | — |
 | gamut-png | libpng (both directions) | differential + conformance | `PngDecoder` ☐ |
 | gamut-jpeg | libjpeg-turbo | differential + exact-byte | `JpegDecoder` ☐ |
-| gamut-tiff | libtiff | differential | `TiffDecoder` ☐ |
-| gamut-dng | Adobe DNG SDK; libtiff (container) | conformance + differential | `DngDecoder` ☐ |
-| gamut-isobmff | ISO/IEC 14496-12 + 23008-12; libavif/dav1d via gamut-avif | exact-byte + law | `read` ☐ |
+| gamut-tiff | libtiff | differential | `TiffDecoder` ☑ |
+| gamut-dng | Adobe DNG SDK; libtiff (container) | conformance + differential | `DngDecoder` ☑ |
+| gamut-isobmff | ISO/IEC 14496-12 + 23008-12; libavif/dav1d via gamut-avif | exact-byte + law | `read` ☑ |
 | gamut-riff | libwebp demux | differential + law | `RiffReader` ☐ |
 | gamut-webp | libwebp (both directions) | differential + size/effort contract | `WebpDecoder` ☐ |
 | gamut-avif | libavif; dav1d | differential + law | `decode` ☐ |
-| gamut-heic | libheif + libde265 | differential + law | container `parse`, NAL `parse` ☐ |
+| gamut-heic | libheif + libde265 | differential + law | container `parse`, NAL `parse` ☑ |
 | gamut-av1 | libaom (definitive); dav1d | differential | — |
 | gamut-jxl | libjxl (the `jxl` crate is the decoder under test, not an authority) | differential | `decode` ☐ |
 | gamut-exif | exiv2 | differential + golden | `parse` ☐ |
