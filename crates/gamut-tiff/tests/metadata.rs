@@ -174,6 +174,70 @@ fn a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file() {
 }
 
 #[test]
+fn every_standard_pointer_inside_the_exif_directory_survives_a_round_trip() {
+    // A pointer *inside* the Exif directory is a file offset, and that directory is the one the
+    // seam hands back — so a pointer the reader leaves unresolved is returned to the caller as an
+    // absolute offset into the source file, and re-encoding it writes that offset into a file laid
+    // out differently. `InteroperabilityIFD` is covered by
+    // `a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file` above; the reader once
+    // resolved only that one and `ExifIFD`, so a `SubIFDs` or `GPSInfo` group under `ExifIFD`
+    // encoded cleanly, came back as a raw `Long`, and re-encoded into a file this crate's own
+    // judge graded `Severity::Error`. Every standard pointer tag is swept, because which of the
+    // four a caller's directory happens to carry is not something the reader can know.
+    //
+    // The judge is the assertion, not a round-trip equality: gamut-tiff's v1 guarantee is that
+    // every file it writes is fully classified by `deconstruct`.
+    for tag in [
+        tags::SUB_IFDS,
+        tags::EXIF_IFD,
+        tags::GPS_INFO,
+        tags::INTEROPERABILITY_IFD,
+    ] {
+        let mut child = Ifd::new();
+        child.set(1, Value::Byte(vec![2, 3, 0, 0]));
+        let mut exif = exif();
+        exif.set(37500, Value::Undefined(vec![0xAB; 6])); // MakerNote, so the directory is not tiny
+        exif.set_sub_ifd(tag, vec![child]);
+
+        let pixels = rgb(8, 4);
+        let first = TiffEncoder::new()
+            .with_metadata(TiffMetadata::new().with_exif(exif))
+            .encode_to_vec(image(&pixels, 8, 4))
+            .unwrap_or_else(|e| panic!("tag {tag}: encode: {e}"));
+        let decoded = TiffDecoder::new()
+            .metadata(&first)
+            .unwrap_or_else(|e| panic!("tag {tag}: metadata: {e}"));
+        assert_eq!(
+            decoded
+                .exif
+                .as_ref()
+                .unwrap_or_else(|| panic!("tag {tag}: an Exif directory"))
+                .get(tag),
+            None,
+            "tag {tag}: handed back as a stale offset instead of a parsed group"
+        );
+
+        let second = TiffEncoder::new()
+            .with_metadata(decoded)
+            .encode_to_vec(image(&pixels, 8, 4))
+            .unwrap_or_else(|e| panic!("tag {tag}: re-encode: {e}"));
+        let report = deconstruct(&second).expect("deconstruct");
+        assert!(
+            report.segments.is_fully_classified(),
+            "tag {tag}: unclassified after a round trip: {:?}",
+            report.segments.unclassified
+        );
+        assert!(
+            !report.anomalies.iter().any(
+                |a| matches!(a, Anomaly::Structure { severity, .. } if *severity == Severity::Error)
+            ),
+            "tag {tag}: structural errors after a round trip: {:?}",
+            report.anomalies
+        );
+    }
+}
+
+#[test]
 fn the_encoder_refuses_an_exif_tree_its_own_decoder_could_not_read_back() {
     // The encoder used to write any nesting a caller built and `metadata()` refused a third level
     // of it, so this crate emitted a well-formed file it could not itself read — the one shape a
