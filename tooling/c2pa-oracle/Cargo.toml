@@ -29,11 +29,15 @@ doctest = false
 # pure-Rust signing/verification backend that replaces it; dropping `default_http` additionally
 # drops reqwest and ureq, which this oracle never needs because it fetches no remote manifests.
 #
-# Pinned to an exact version, not a caret range. `README.md` cites c2pa-rs's own source **by line
+# Pinned to an exact version, not a caret range: `README.md` cites c2pa-rs's own source **by line
 # number** for two claims it records, and a `^` range lets a patch release move those lines under
-# a citation nobody re-checked. There is no committed lockfile to hold them either: `.gitignore`
-# excludes `tooling/*/Cargo.lock`, because a workspace-excluded oracle resolves standalone. The
-# pin is the smaller of the two fixes and it is the one that makes the citations honest.
+# a citation nobody re-checked.
+#
+# The pin holds this one line and nothing else. The three hundred-odd transitive packages under it
+# are held by `Cargo.lock`, which is committed for this crate alone against the blanket
+# `tooling/*/Cargo.lock` rule — the exception, and why it is made, are recorded in `.gitignore`.
+# Without it the no-OpenSSL assertion in `tests/build_configuration.rs` could only ever inspect
+# the resolution cargo had just written for it, which the pin does nothing to constrain.
 c2pa = { version = "=0.90.21", default-features = false, features = ["rust_native_crypto"] }
 
 [dev-dependencies]
