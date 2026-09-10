@@ -17,11 +17,26 @@
 //!   never declares — or declares bytes it never touched — produces no crash at all, and this is
 //!   what sees it.
 //!
-//! Injection that proved the audit fires (re-runnable): in `IfdReader::read_chain`, claim the
-//! header as `header_size() - 1` bytes — an off-by-one that leaves a byte the parser physically
-//! reads outside every structural claim. The committed seeds alone report it, with no search:
-//! `run.sh ifd_read <seeds> -- -runs=0` gives *"parser read bytes it never claimed"* carrying
-//! `unclaimed_reads: [Range { start: 7, len: 1 }]`.
+//! The audit has **two halves and each is checked separately**, because a single injection
+//! satisfies only one of them — which is how the second half went three rounds without a falsifier.
+//! Both injections are in `IfdReader::read_chain`'s header claim and both are re-runnable as
+//! `run.sh ifd_read <seeds> -- -runs=0`, reported by the committed seeds alone with no search:
+//!
+//! - **no byte read outside a claim.** Claim the header as `header_size() - 1` bytes — an
+//!   off-by-one that leaves a byte the parser physically reads outside every structural claim.
+//!   Reports *"parser read bytes it never claimed"* carrying
+//!   `unclaimed_reads: [Range { start: 7, len: 1 }]`.
+//! - **no claim unread.** Claim the header as `header_size() + 1` bytes — an over-claim that
+//!   declares a byte the parser never touches. Reports *"parser claimed bytes it never read"*
+//!   carrying `unread_claims: [Segment { range: Range { start: 0, len: 9 }, kind: Header }]`.
+//!
+//! That second one is only reachable because of one seed. In every file whose IFD0 sits at the
+//! usual offset 8, byte 8 *is* read — it is the entry count — so an over-claim of one byte lands
+//! on a byte the ledger already holds and the check stays quiet; measured, the #264 cases alone
+//! give exit 0 under it. `corpus/ifd_read/padding-unread-claim.tif` is a 22-byte TIFF whose header
+//! points IFD0 at offset 16, leaving `8..16` as internal padding that nothing reads, and it is what
+//! turns the over-claim into a report. A check whose only witness must be synthesised by the engine
+//! is a check the tier is asking luck for.
 //!
 //! ## What this target deliberately does *not* check
 //!
@@ -52,8 +67,9 @@ use libfuzzer_sys::fuzz_target;
 const POINTER_TAGS: &[u16] = &[330, 34665, 34853];
 
 fuzz_target!(|data: &[u8]| {
-    // The byte audit: the live check. Only meaningful on a parse that succeeded, because an
-    // abandoned parse has no complete claim set to reconcile against.
+    // The byte audit: the live check, in two halves that fail for different defects. Only
+    // meaningful on a parse that succeeded, because an abandoned parse has no complete claim set
+    // to reconcile against.
     if let Ok((_, report)) = read_audited(data) {
         assert!(
             report.unclaimed_reads.is_empty(),
