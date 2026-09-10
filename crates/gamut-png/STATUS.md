@@ -188,6 +188,12 @@ libpng reads a file carrying both and returns the same pixels (`tests/oracle.rs`
 written: dropping either would throw away colour information the source carried, and a reader
 takes the one it can use.
 
+That last clause is a claim about **other** readers, not about this crate. Table 1 ranks the chunks
+for a reader, and which one to honour depends on whether the reader has a CMM at all — which an
+encoder cannot know. gamut-png's own reader surfaces `cICP`, `iCCP`, `sRGB`, `cHRM` and `gAMA` side
+by side and ranks none of them; resolving a profile against an intent is `gamut-cmm`'s work
+(epic #323), and this encoder deliberately does not pre-empt it.
+
 **Only the null byte refuses the encode. Everything else §11.3.3 asks for is a notice.**
 §15 gives the BCP 14 keywords force "when, and only when, they appear in all capitals", and every
 statement §11.3.3.1 makes about a keyword's shape is lowercase — "Keywords shall contain only
