@@ -7,8 +7,9 @@
 //! representing each sub-IFD structurally on [`Exif`] instead.
 //!
 //! This module holds the reader's options and its `&[u8]` entry points. The parse itself is
-//! generic over [`gamut_ifd::ReadAt`] and lives in [`crate::stream`]; a slice is simply one such
-//! source, so there is exactly **one** parse engine and the two entry points cannot drift.
+//! generic over [`gamut_ifd::ReadAt`] and lives in the crate's private `stream` module; a slice is
+//! simply one such source, so there is exactly **one** parse engine and the two entry points cannot
+//! drift.
 
 use crate::error::Result;
 use crate::exif::Exif;
@@ -32,7 +33,7 @@ impl ExifReader {
     }
 
     /// Requires the `Exif\0\0` marker; a bare TIFF stream is then rejected with
-    /// [`ExifError::MissingMarker`].
+    /// [`ExifError::MissingMarker`](crate::ExifError::MissingMarker).
     ///
     /// Off by default: the JPEG `APP1` segment carries the marker, but the WebP `EXIF` and PNG
     /// `eXIf` chunks carry a bare TIFF stream.
@@ -62,6 +63,12 @@ impl ExifReader {
     /// malformed, or (in [`strict`](Self::strict) mode)
     /// [`ExifError::InvalidIfd`](crate::ExifError::InvalidIfd) when a sub-IFD pointer addresses a
     /// malformed directory.
+    ///
+    /// An offset inside an error message is a position in `bytes` — the buffer the caller handed
+    /// in — so for a marked blob it counts the six-byte `Exif\0\0` marker. That is deliberately a
+    /// different frame from [`Dropped::offset`](crate::Dropped::offset), which is relative to the
+    /// start of the TIFF stream and therefore six smaller for the same position: a diagnostic
+    /// points into the caller's own bytes, while a report offset addresses the TIFF structure.
     pub fn parse(&self, bytes: &[u8]) -> Result<Exif> {
         self.parse_from(bytes)
     }
@@ -91,8 +98,11 @@ impl ExifReader {
     ///
     /// # Errors
     ///
-    /// As [`parse`](Self::parse). In [`strict`](Self::strict) mode the first malformed region fails
-    /// the parse instead of being reported, so a strict report is always empty.
+    /// As [`parse`](Self::parse). In [`strict`](Self::strict) mode the first *malformed* region
+    /// fails the parse instead of being reported — but a strict report is **not** therefore always
+    /// empty: [`DroppedRegion::TrailingIfd`](crate::DroppedRegion::TrailingIfd) is well-formed and
+    /// merely unrepresentable, so strictness has no grounds to reject it and it is reported in both
+    /// modes.
     pub fn parse_with_report(&self, bytes: &[u8]) -> Result<(Exif, ReadReport)> {
         self.parse_from_with_report(bytes)
     }
@@ -254,6 +264,42 @@ mod tests {
         assert!(
             matches!(err, ExifError::BadThumbnail(_)),
             "wrong error for an out-of-bounds thumbnail: {err:?}"
+        );
+    }
+
+    /// A thumbnail offset with no length is a malformed pair, and strict mode says so.
+    ///
+    /// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength`
+    /// both mandatory for a compressed thumbnail. Half the pair therefore fails strictness for the
+    /// same reason an out-of-bounds range does — the sibling case above — rather than passing as a
+    /// thumbnail that simply has no bytes. The lenient half of the contract is the report, pinned in
+    /// `tests/report.rs`.
+    #[test]
+    fn a_thumbnail_offset_without_a_length_is_rejected_strictly() {
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        let mut thumb = Ifd::new();
+        thumb.set(ExifTag::Compression.tag_id(), Value::Short(vec![6]));
+        thumb.set(
+            ExifTag::JpegInterchangeFormat.tag_id(),
+            Value::Long(vec![4]),
+        );
+        // ...and deliberately no JpegInterchangeFormatLength.
+        let bytes = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image, thumb],
+        })
+        .expect("write");
+
+        let err = ExifReader::new()
+            .strict(true)
+            .parse(&bytes)
+            .expect_err("strict must reject half a thumbnail pair");
+        assert_eq!(
+            err.to_string(),
+            "invalid thumbnail: JPEGInterchangeFormat without JPEGInterchangeFormatLength",
+            "the message must name which half is missing"
         );
     }
 

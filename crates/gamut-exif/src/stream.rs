@@ -197,8 +197,13 @@ impl ExifReader {
 
     /// Builds a [`Thumbnail`] from the 1st IFD, fetching its JPEG bytes (from the
     /// `JPEGInterchangeFormat` offset / length) when the range is wholly inside the stream. In
-    /// lenient mode an out-of-bounds range yields a thumbnail without bytes and a recorded drop;
-    /// in strict mode it errors.
+    /// lenient mode an unusable range yields a thumbnail without bytes and a recorded drop; in
+    /// strict mode it errors.
+    ///
+    /// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength`
+    /// *both* mandatory for a compressed thumbnail, so an offset without a length is a malformed
+    /// pair, not an absent thumbnail: it addresses bytes nothing can size. A length without an
+    /// offset addresses nothing at all, so nothing was dropped and nothing is reported.
     fn read_thumbnail<S: ReadAt>(
         &self,
         ifd: Ifd,
@@ -223,7 +228,20 @@ impl ExifReader {
                     None
                 }
             },
-            _ => None,
+            (Some(_), None) if self.strict => {
+                return Err(ExifError::BadThumbnail(
+                    "JPEGInterchangeFormat without JPEGInterchangeFormatLength",
+                ));
+            }
+            (Some(offset), None) => {
+                report.record(Dropped::new(
+                    DroppedRegion::ThumbnailJpeg,
+                    u64::from(offset),
+                    DropReason::Incomplete,
+                ));
+                None
+            }
+            (None, _) => None,
         };
         // The JPEGInterchangeFormat offset is structural — the bytes are captured above and the
         // writer re-synthesises the offset — so drop it from the stored directory (mirroring how the
@@ -317,8 +335,14 @@ fn maker_note_offset<S: ReadAt>(
 ) -> Result<Option<u64>> {
     // Every error propagates, with no lenient arm — deliberately. This is reached only when
     // `follow` has already read and decoded this exact directory at this exact offset, so a
-    // deterministic source cannot fail here for a reason the *bytes* explain. A malformed-input
-    // arm would therefore be unreachable, and an unreachable arm is a branch no test can falsify.
+    // *deterministic* source cannot fail here for a reason the bytes explain: over such a source a
+    // malformed-input arm is unreachable, and an unreachable arm is a branch no test can falsify.
+    //
+    // It is not unreachable in general. A `ReadAt` may answer differently on a second read — a file
+    // rewritten underneath the reader is precisely the case `parse_from` exists to enable — and then
+    // the directory really can fail here. A hard error is still the right answer for it: the pin is
+    // what keeps a vendor MakerNote's TIFF-absolute internal offsets valid on a rewrite, so
+    // continuing would re-emit the note unpinned, with wrong bytes and nothing in the report.
     let raw: RawIfd = reader.read_ifd(exif_ifd_at)?;
     let Some(entry) = raw.entry(ifd_tags::MAKER_NOTE) else {
         return Ok(None);
@@ -445,13 +469,22 @@ mod tests {
         out
     }
 
-    /// A structurally perfect blob that reaches the **maker-note** read site.
+    /// The bytes `deep_blob`'s thumbnail range addresses, appended past the directories.
+    const THUMB_BYTES: &[u8] = b"\xFF\xD8__jpg\xFF\xD9";
+    /// A `JPEGInterchangeFormat` value patched to the real offset once the layout is known —
+    /// `write` lays the directories out, so the payload's position is not knowable before it runs.
+    const THUMB_SENTINEL: u32 = 0xDEAD_BEEF;
+
+    /// A structurally perfect blob reaching every read site `healthy_blob` cannot.
     ///
-    /// `healthy_blob` cannot: it carries no `MakerNote`, and its Interop pointer means a failure
-    /// inside `maker_note_offset` is always resurfaced by the later Interop read. Here the GPS and
-    /// Interop pointers are both absent — so `follow` returns without reading at all — and the
-    /// out-of-line `MakerNote` makes the pin's offset something a caller can lose.
-    fn maker_note_blob() -> Vec<u8> {
+    /// `healthy_blob` has no `MakerNote`, no thumbnail bytes and no trailing directory, and its
+    /// Interop pointer means a failure inside `maker_note_offset` is always resurfaced by the later
+    /// Interop read. Here the GPS and Interop pointers are both absent — so `follow` returns without
+    /// reading at all — while three additions each open one otherwise-unswept read: an out-of-line
+    /// `MakerNote` gives the pin an offset a caller can lose, an in-bounds thumbnail range makes
+    /// `read_range` fetch, and a third top-level directory makes `record_trailing_ifds` re-walk the
+    /// chain.
+    fn deep_blob() -> Vec<u8> {
         let mut exif = Ifd::new();
         exif.set(0x829A, Value::Rational(vec![(1, 250)])); // ExposureTime
         // Nine bytes: too wide to sit inline in the entry, so it has a real source offset.
@@ -462,28 +495,69 @@ mod tests {
         let mut image = Ifd::new();
         image.set(0x010F, Value::Ascii("Canon".into()));
         image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
-        let tiff = write(&TiffFile {
+
+        let mut thumb = Ifd::new();
+        thumb.set(ExifTag::Compression.tag_id(), Value::Short(vec![6]));
+        thumb.set(
+            ExifTag::JpegInterchangeFormat.tag_id(),
+            Value::Long(vec![THUMB_SENTINEL]),
+        );
+        thumb.set(
+            ExifTag::JpegInterchangeFormatLength.tag_id(),
+            Value::Long(vec![THUMB_BYTES.len() as u32]),
+        );
+
+        let mut trailing = Ifd::new();
+        trailing.set(0x0131, Value::Ascii("trailing".into())); // Software
+
+        let mut tiff = write(&TiffFile {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
-            ifds: vec![image],
+            ifds: vec![image, thumb, trailing],
         })
         .expect("write");
+
+        // The payload goes after the directories, so the sentinel is patched to where it lands.
+        let at = u32::try_from(tiff.len()).expect("the fixture fits in 32 bits");
+        let sentinel = THUMB_SENTINEL.to_le_bytes();
+        let hits: Vec<usize> = tiff
+            .windows(4)
+            .enumerate()
+            .filter(|(_, w)| *w == sentinel)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "the sentinel must name exactly one value field"
+        );
+        tiff[hits[0]..hits[0] + 4].copy_from_slice(&at.to_le_bytes());
+        tiff.extend_from_slice(THUMB_BYTES);
+
         let mut out = MARKER.to_vec();
         out.extend(tiff);
         out
     }
 
-    /// The maker-note pin is real in the fixture the sweep uses, so losing it is observable.
+    /// The deep fixture really carries every loss the sweep below claims to watch for.
     ///
-    /// Without this the sweep below could pass against a blob that never had a pin to lose.
+    /// Without this the sweep could pass against a blob that never had a pin, thumbnail bytes or a
+    /// trailing directory to lose — and against a clean report that already blamed the file, which
+    /// would make the sweep's report-equality law vacuous.
     #[test]
-    fn the_maker_note_fixture_has_a_pin_to_lose() {
-        let exif = ExifReader::new()
-            .parse_from(&maker_note_blob()[..])
+    fn the_deep_fixture_has_a_pin_a_thumbnail_and_a_trailing_directory_to_lose() {
+        let data = deep_blob();
+        let (exif, report) = ExifReader::new()
+            .parse_from_with_report(&data[..])
             .expect("parse");
         assert!(
             exif.maker_note_offset().is_some(),
             "the fixture must pin an out-of-line MakerNote"
+        );
+        assert_eq!(
+            exif.thumbnail().and_then(Thumbnail::jpeg),
+            Some(THUMB_BYTES),
+            "the fixture must have thumbnail bytes that were really fetched"
         );
         assert!(
             exif.gps_ifd().is_none(),
@@ -493,6 +567,13 @@ mod tests {
             exif.interop_ifd().is_none(),
             "no Interop pointer to rescue a failure"
         );
+        assert_eq!(report.dropped().len(), 1, "{:?}", report.dropped());
+        assert_eq!(report.dropped()[0].region(), DroppedRegion::TrailingIfd);
+        assert_eq!(
+            report.dropped()[0].reason(),
+            DropReason::Unrepresentable,
+            "the clean report must blame nothing on the file"
+        );
     }
 
     /// A failing source is propagated, never reported as a malformed file.
@@ -501,20 +582,22 @@ mod tests {
     /// perfect, so silently returning `Ok` with the sub-IFDs missing — and a report blaming the
     /// file — would be a lie, and the worst case is the network-backed source this entry point
     /// exists to enable. The whole parse is swept one read at a time over two fixtures, between
-    /// them reaching every read site: the marker probe, the header, each directory body, each
-    /// out-of-line value, and the maker-note pin — which only `maker_note_blob` reaches.
+    /// them reaching every site that reads bytes: the marker probe, the header, each directory
+    /// body, each out-of-line value, the three sub-IFD reads (`healthy_blob`), and the thumbnail
+    /// fetch, the trailing-chain re-walk and the maker-note pin (`deep_blob`). The one `ReadAt`
+    /// method left unswept is `len`, which answers a length rather than reading bytes.
     ///
-    /// A silent loss shows up here as `Ok` from a source that failed, and the assertions cover both
-    /// shapes it can take: a spurious report entry blaming the file, or — as the maker-note pin did
-    /// — an `Exif` quietly missing something with nothing in the report at all.
+    /// The law is that an `Ok` from a failing source is the **whole** answer — equal to the clean
+    /// parse in report, pin and thumbnail bytes — which catches both shapes a silent loss takes: a
+    /// spurious report entry blaming the file, or, as the maker-note pin did, an `Exif` quietly
+    /// missing something with nothing in the report at all. Equality against the clean report
+    /// rather than emptiness is what lets `deep_blob` be swept at all: its trailing directory is a
+    /// legitimate drop that a clean parse reports too.
     #[test]
     fn a_failing_source_is_propagated_not_reported_as_a_malformed_file() {
-        for (name, data) in [
-            ("healthy", healthy_blob()),
-            ("maker-note", maker_note_blob()),
-        ] {
-            let clean = ExifReader::new()
-                .parse_from(&data[..])
+        for (name, data) in [("healthy", healthy_blob()), ("deep", deep_blob())] {
+            let (clean, clean_report) = ExifReader::new()
+                .parse_from_with_report(&data[..])
                 .expect("clean parse");
             let (mut failures, mut successes) = (0, 0);
             for budget in 0..40 {
@@ -525,18 +608,19 @@ mod tests {
                 match ExifReader::new().parse_from_with_report(source) {
                     Ok((exif, report)) => {
                         successes += 1;
-                        assert!(
-                            report.is_empty(),
-                            "{name} budget {budget}: a transport failure was blamed on the file: \
-                             {:?}",
-                            report.dropped()
+                        assert_eq!(
+                            report, clean_report,
+                            "{name} budget {budget}: a transport failure changed the report"
                         );
-                        // An `Ok` from a failing source must be the *whole* answer, not a quietly
-                        // diminished one: the maker-note pin went missing exactly this way.
                         assert_eq!(
                             exif.maker_note_offset(),
                             clean.maker_note_offset(),
                             "{name} budget {budget}: the maker-note pin was silently lost"
+                        );
+                        assert_eq!(
+                            exif.thumbnail().and_then(Thumbnail::jpeg),
+                            clean.thumbnail().and_then(Thumbnail::jpeg),
+                            "{name} budget {budget}: the thumbnail bytes were silently lost"
                         );
                     }
                     Err(ExifError::Ifd(e)) => {

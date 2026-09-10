@@ -56,6 +56,11 @@ pub enum DroppedRegion {
     /// The 1st IFD's embedded JPEG thumbnail bytes, addressed by `JPEGInterchangeFormat`
     /// (`0x0201`) and sized by `JPEGInterchangeFormatLength` (`0x0202`). The thumbnail's own
     /// directory survives; only its bytes are lost.
+    ///
+    /// Reported when the range lies outside the blob ([`DropReason::OutOfBounds`]) and when the
+    /// offset has no length beside it ([`DropReason::Incomplete`]) — Exif 3.0 §4.6.9.2 Table 21
+    /// marks both tags mandatory for a compressed thumbnail, so half the pair addresses bytes
+    /// nothing can size.
     ThumbnailJpeg = 3,
     /// A top-level directory past the 1st IFD.
     ///
@@ -118,6 +123,13 @@ pub enum DropReason {
     /// Nothing was wrong with the region — it parsed cleanly — but the EXIF model has no place to
     /// put it, so it could not be carried across.
     Unrepresentable = 2,
+    /// The region was addressed but never fully described, so there was no range to read: today
+    /// only a `JPEGInterchangeFormat` offset with no `JPEGInterchangeFormatLength` beside it.
+    ///
+    /// Distinct from [`OutOfBounds`](Self::OutOfBounds) — the address may be perfectly valid — and
+    /// from [`Malformed`](Self::Malformed), which is about bytes that *were* read and did not
+    /// parse. The repair is different in each case, which is why they are different reasons.
+    Incomplete = 3,
 }
 
 impl DropReason {
@@ -127,6 +139,7 @@ impl DropReason {
             Self::OutOfBounds => "addresses bytes outside the EXIF blob",
             Self::Malformed => "is not a well-formed directory",
             Self::Unrepresentable => "parsed cleanly but has no place in the EXIF model",
+            Self::Incomplete => "is addressed but never fully described",
         }
     }
 }
@@ -178,6 +191,13 @@ impl Dropped {
     /// For a sub-IFD or the thumbnail bytes this is the value the addressing tag carried; for a
     /// [`TrailingIfd`](DroppedRegion::TrailingIfd) it is the directory's own position in the
     /// stream.
+    ///
+    /// This is **not** the frame the crate's *error* messages use. An [`ExifError`](crate::ExifError)
+    /// carries the offset of the byte the reader could not read in the source the caller handed in,
+    /// so for a marked blob it is 6 bytes (`MARKER.len()`) larger than the same position expressed
+    /// here. The two frames are deliberately different: a diagnostic points into the caller's own
+    /// buffer, while a report offset addresses the TIFF structure the report describes and matches
+    /// every offset stored inside the file.
     #[must_use]
     pub const fn offset(self) -> u64 {
         self.offset
@@ -262,7 +282,7 @@ mod tests {
     use super::*;
 
     /// Each region reports the tag that actually addresses it — the value a caller uses to find
-    /// the pointer back in the source directory — and a region no tag addresses reports `0`.
+    /// the pointer back in the source directory — and a region no tag addresses reports `None`.
     #[test]
     fn each_region_carries_the_tag_that_addresses_it() {
         for (region, tag) in [
@@ -299,6 +319,10 @@ mod tests {
         assert_eq!(
             Dropped::new(DroppedRegion::ThumbnailJpeg, 1, DropReason::OutOfBounds).to_string(),
             "dropped Thumbnail (tag 0x0201) at offset 1: addresses bytes outside the EXIF blob"
+        );
+        assert_eq!(
+            Dropped::new(DroppedRegion::ThumbnailJpeg, 42, DropReason::Incomplete).to_string(),
+            "dropped Thumbnail (tag 0x0201) at offset 42: is addressed but never fully described"
         );
     }
 

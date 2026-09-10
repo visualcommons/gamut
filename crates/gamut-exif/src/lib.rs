@@ -21,7 +21,16 @@
 //! [`parse_with_report`](ExifReader::parse_with_report) returns a [`ReadReport`] naming the
 //! sub-IFDs, thumbnail ranges and trailing directories the lenient reader discarded — see
 //! [`report`] for what that covers and what it deliberately does not. `parse` is the `&[u8]` case
-//! of `parse_from` and stays silent, so neither is a change for existing callers.
+//! of `parse_from` and stays silent.
+//!
+//! `parse` keeps its signature, its accept/reject verdict and its re-serialised bytes, with two
+//! narrow exceptions, both measured over a 3 144-case truncation-and-corruption sweep against the
+//! previous release. An error message's offset is now a position in the buffer the caller handed
+//! in, so for a marked blob it is six bytes larger than before — the `Exif\0\0` marker — while a
+//! [`Dropped::offset`] stays relative to the TIFF stream; and a 1st IFD carrying
+//! `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength`, which Exif 3.0 §4.6.9.2 requires
+//! together, is now named in the report instead of vanishing, and rejected in
+//! [`strict`](ExifReader::strict) mode as the malformed pair it is.
 //!
 //! Writing has one extra door. Every tag CIPA DC-008 itself defines carries the field type and
 //! component count that specification mandates for it ([`ExifTag::field_types`],

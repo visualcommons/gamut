@@ -53,17 +53,20 @@ points:
   async caller drives the source itself, which keeps a runtime dependency out of the crate.
 - **`parse_with_report`** (and its `parse_from_with_report` twin) returns a `ReadReport` alongside
   the `Exif`, naming each region the lenient reader discarded — a malformed Exif/GPS/Interop
-  sub-IFD, an out-of-bounds thumbnail range, or a top-level directory past the 1st IFD — with the
-  tag that addressed it, the offset it carried, and a typed reason. `parse` stays silent, as
-  before. The report is complete over those regions but is **not** a byte-completeness verdict: an
-  empty report does not mean the parse lost nothing (see the deferred items below).
+  sub-IFD, an unusable thumbnail range, or a top-level directory past the 1st IFD — with the tag
+  that addressed it, the offset it carried, and a typed reason. `parse` stays silent, as before.
+  The report is complete over those regions but is **not** a byte-completeness verdict: an empty
+  report does not mean the parse lost nothing (see the deferred items below). A `strict` report is
+  not always empty either: strictness rejects *malformed* regions, and a trailing directory is
+  well-formed and merely unrepresentable, so it is reported in both modes.
 
 ```rust
 # use gamut_exif::ExifReader;
 # fn demo(bytes: &[u8]) -> Result<(), gamut_exif::ExifError> {
 let (exif, report) = ExifReader::new().parse_with_report(bytes)?;
 for dropped in report.dropped() {
-    eprintln!("{dropped}"); // e.g. "dropped GPS at tag 0x8825, offset 65535: ..."
+    // e.g. "dropped GPS (tag 0x8825) at offset 65535: addresses bytes outside the EXIF blob"
+    eprintln!("{dropped}");
 }
 # let _ = exif;
 # Ok(())
