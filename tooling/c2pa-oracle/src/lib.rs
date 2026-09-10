@@ -46,13 +46,13 @@ pub enum OracleError {
     /// found in it at all. Only [`split_composed_box`] raises this.
     NoJumbfSuperbox,
     /// A JUMBF superbox header is present, but the length it declares cannot be read: its
-    /// `LBox`/`XLBox` fields are truncated, `LBox` is one of the values ISO box syntax leaves
-    /// undefined (2..=7, all shorter than the 8-byte header they sit in), or the declared length
-    /// does not fit this platform's `usize`. Carries which of those it was.
+    /// `LBox`/`XLBox` fields are truncated, or the length it declares is shorter than the header
+    /// it is part of — `LBox` in 2..=7 against the 8-byte header, or `XLBox` below 16 against the
+    /// 16-byte one. Carries which of those it was.
     ///
-    /// This exists so the length is never *guessed*. A span silently derived from an
-    /// unrepresentable `LBox` would be an oracle handing gamut a wrong answer and calling it a
-    /// reference one; see [`declared_store_len`].
+    /// This exists so the length is never *guessed*. A span silently derived from a length that
+    /// describes no box would be an oracle handing gamut a wrong answer and calling it a reference
+    /// one; see [`declared_store_len`].
     UnusableSuperboxLength(&'static str),
 }
 
@@ -250,10 +250,15 @@ pub fn split_composed_box(composed: Vec<u8>) -> Result<ComposedBox> {
 /// # The two reserved `LBox` values
 ///
 /// A JUMBF box is a JPEG-family *standard box* — `LBox` (4 bytes, big-endian), `TBox` (4 bytes),
-/// then optionally `XLBox` — and C2PA 2.4 §8.4.2.3 spells that syntax out where it defines the
-/// C2PA salt as "a standard box consisting of: a box length (LBox, as a 4-byte big-endian unsigned
-/// integer); a box type (TBox, 4-byte big-endian unsigned integer …)". The same syntax reserves two
-/// `LBox` values, and both are read here rather than taken at face value:
+/// then optionally `XLBox`. C2PA 2.4 §8.4.2.3 is the only place the vendored specification writes
+/// any of that down, and it writes down only part: defining the C2PA salt, it calls it "a standard
+/// box consisting of: a box length (LBox, as a 4-byte big-endian unsigned integer); a box type
+/// (TBox, 4-byte big-endian unsigned integer …)". It never mentions `XLBox`, and it states no
+/// reserved `LBox` value. The full grammar — including both reserved values — is ISO 19566-5:2023,
+/// which is paywalled and **not vendored in this repository**; its procurement is
+/// [issue #441](https://github.com/visualcommons/gamut/issues/441). So the two arms below are the
+/// convention as it is universally implemented, read against `c2pa-rs`'s behaviour, not a clause
+/// this crate can cite:
 ///
 /// * **`LBox == 0`** — the box runs to the end of the file. `store` begins at the superbox's own
 ///   first byte, so that end is the end of `store`, and the declared length is `store.len()`.
@@ -261,18 +266,31 @@ pub fn split_composed_box(composed: Vec<u8>) -> Result<ComposedBox> {
 ///   `store[8..16]`, and it counts the whole box including that 16-byte header.
 ///
 /// Taking either literally would return 0 or 1 as a length: a wrong span, produced silently, on
-/// the side of the differential whose answers are treated as the reference. `LBox` values 2..=7
-/// are shorter than the header they sit in and describe no box at all, so they are refused rather
-/// than resolved.
+/// the side of the differential whose answers are treated as the reference.
+///
+/// # Lengths shorter than the header they sit in
+///
+/// A declared length counts the header, so it can never be less than one. Both header sizes are
+/// refused on that one rule, the way `gamut_isobmff`'s box reader refuses `size < header_size`:
+/// `LBox` in 2..=7 against the 8-byte header, and `XLBox` below 16 against the 16-byte one.
+/// Accepting either would hand back a span that ends at or before the store's own first body byte
+/// — an empty or four-byte "store" — which is exactly the guessed answer this function exists to
+/// refuse.
 ///
 /// No store this crate has seen uses either reserved value — c2pa-rs writes a plain 32-bit `LBox`
 /// — which is exactly why the handling is here rather than assumed away.
 ///
 /// # Errors
 ///
-/// [`OracleError::UnusableSuperboxLength`] when the `LBox`/`XLBox` fields are truncated, when
-/// `LBox` is 2..=7, or when the declared length does not fit a `usize`.
+/// [`OracleError::UnusableSuperboxLength`] when the `LBox`/`XLBox` fields are truncated, or when
+/// the declared length is shorter than the header it counts.
 pub fn declared_store_len(store: &[u8]) -> Result<usize> {
+    // Both widths reach `usize` losslessly, so neither conversion below is fallible and neither
+    // needs a runtime arm. This is dev-only host tooling — nothing cross-compiles it — so the
+    // assumption is pinned here at compile time, where an error message about "this platform's
+    // usize" would only be defending something that cannot happen.
+    const _: () = assert!(usize::BITS >= u64::BITS);
+
     let field: [u8; 4] = store
         .get(..4)
         .and_then(|field| field.try_into().ok())
@@ -282,23 +300,23 @@ pub fn declared_store_len(store: &[u8]) -> Result<usize> {
 
     match u32::from_be_bytes(field) {
         0 => Ok(store.len()),
-        1 => {
-            let field: [u8; 8] = store
+        1 => match u64::from_be_bytes(
+            store
                 .get(8..16)
-                .and_then(|field| field.try_into().ok())
+                .and_then(|field| <[u8; 8]>::try_from(field).ok())
                 .ok_or(OracleError::UnusableSuperboxLength(
                     "LBox is 1 but the XLBox field that carries the length is truncated",
-                ))?;
-            usize::try_from(u64::from_be_bytes(field)).map_err(|_| {
-                OracleError::UnusableSuperboxLength("XLBox does not fit this platform's usize")
-            })
-        }
+                ))?,
+        ) {
+            0..=15 => Err(OracleError::UnusableSuperboxLength(
+                "XLBox is below 16, shorter than the LBox+TBox+XLBox header it is part of",
+            )),
+            xlbox => Ok(xlbox as usize),
+        },
         2..=7 => Err(OracleError::UnusableSuperboxLength(
             "LBox is between 2 and 7, shorter than the LBox+TBox header it is part of",
         )),
-        lbox => usize::try_from(lbox).map_err(|_| {
-            OracleError::UnusableSuperboxLength("LBox does not fit this platform's usize")
-        }),
+        lbox => Ok(lbox as usize),
     }
 }
 
@@ -516,6 +534,40 @@ mod tests {
                 .contains("XLBox field that carries the length is truncated"),
             "the refusal must name the truncated XLBox rather than any other unusable length; got \
              {error}"
+        );
+    }
+
+    #[test]
+    fn an_xlbox_below_the_sixteen_byte_header_is_refused_rather_than_resolved() {
+        for xlbox in [0u64, 1, 8, 15] {
+            let mut store = vec![0u8; 40];
+            store[..4].copy_from_slice(&1u32.to_be_bytes());
+            store[4..8].copy_from_slice(b"jumb");
+            store[8..16].copy_from_slice(&xlbox.to_be_bytes());
+
+            let error = declared_store_len(&store)
+                .expect_err("an XLBox below 16 is shorter than the header it counts");
+            assert!(
+                error
+                    .to_string()
+                    .contains("shorter than the LBox+TBox+XLBox header"),
+                "the refusal must name the undersized XLBox rather than any other unusable \
+                 length; XLBox {xlbox} gave {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_xlbox_of_exactly_the_header_size_is_a_length() {
+        let mut store = vec![0u8; 40];
+        store[..4].copy_from_slice(&1u32.to_be_bytes());
+        store[4..8].copy_from_slice(b"jumb");
+        store[8..16].copy_from_slice(&16u64.to_be_bytes());
+
+        assert_eq!(
+            declared_store_len(&store).expect("16 is the header itself, the smallest legal box"),
+            16,
+            "the refusal must stop exactly at the header size, not swallow the first legal length"
         );
     }
 
