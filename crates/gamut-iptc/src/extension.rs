@@ -74,6 +74,11 @@
 //! The last two re-spell a value without changing it, and doing them twice changes nothing more,
 //! so they are the only two differences that still count as reproducing a field.
 //!
+//! Deciding this on the write side costs one throwaway value per field read — the very value the
+//! writer would emit — and, for a structure field, a throwaway conversion of the structure below
+//! it. IPTC structures nest three deep at most and hold a handful of fields each, so the cost is
+//! bounded by the size of the structure being read; nothing here is on an encoder's pixel path.
+//!
 //! A retained field whose name the model also carries is emitted only when the modelled field is
 //! not: a structure with two fields of one name is ill-formed and does not read back, so the
 //! modelled value stays the authority when there is one, and the retained field is written when it
