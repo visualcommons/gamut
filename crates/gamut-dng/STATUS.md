@@ -421,7 +421,10 @@ removed or measured; none is left as an adjective.
   (`zlibVersion()` plus the path `dladdr` reports, since the version string cannot tell the two
   builds apart) and **warns when that path lies inside a build directory**, because a resolution
   that came from the build graph rather than from the platform is one nobody else reproduces. A
-  Deflate figure below travels with the library it was taken against or not at all.
+  Deflate figure below travels with the library it was taken against or not at all. Pinning that
+  library for the benchmark while keeping `-lz` for conformance is filed as **#618** and not taken
+  here: it is a build-system change to a crate every `gamut-dng` test links, and it belongs to its
+  own change rather than to the one that added the benchmark.
 
 **Each pair is one benchmark, not two.** `decode_dng` and `decode_lossless_jpeg` take the
 implementation as a divan *argument* rather than living in a benchmark each. Separate benchmarks
@@ -537,6 +540,15 @@ before the encoder changes, and gate on that if anything is to be gated.
 #584 is a byte quantity and reproduces anywhere. #583 is a ratio, and the only outside code in its
 measured path is the SDK's own lossless-JPEG decoder, built here from the committed SDK source — so
 unlike the Deflate rows it does not depend on what the machine has installed.
+
+**Both issues were filed from the first revision of this section and still quote figures it has
+since withdrawn**: #583 asserts the two Deflate ratios and rests its localisation argument on them,
+omitting the uncompressed rows that falsify it, and its verification command names benchmarks that
+no longer exist (the arms were merged into one benchmark taking the implementation as an argument —
+`cargo bench -p gamut-dng --bench codec -- decode_lossless_jpeg`); #584 quotes a fixture-table
+column this harness no longer prints, whose preview model has since doubled. **#617** states
+precisely which figure in each is withdrawn and what replaced it. This section is that replacement
+text; the two findings themselves stand.
 
 ## Deferred / out of scope
 
