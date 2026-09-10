@@ -326,8 +326,9 @@ const fn framing_len(purpose: C2paBoxPurpose) -> usize {
 /// the NUL-terminated `box_purpose`, and the 8-byte merkle offset written as zero (a still image
 /// carries no `merkle` box) — in a buffer pre-sized to `capacity`, the payload's finished length.
 ///
-/// `capacity` is a caller-computed total rather than a slot length this function adds on, so the
-/// one addition that can overflow lives at each caller, where it is checked or provably safe.
+/// `capacity` is a caller-computed figure rather than a slot length this function adds on, so the
+/// one addition of a slot length to a framing length in this module lives at the single caller that
+/// checks it, [`content_provenance_reserved`].
 fn content_provenance_framing(purpose: C2paBoxPurpose, capacity: usize) -> Vec<u8> {
     let mut payload = Vec::with_capacity(capacity);
     payload.extend_from_slice(&VERSION_FLAGS);
@@ -341,11 +342,16 @@ fn content_provenance_framing(purpose: C2paBoxPurpose, capacity: usize) -> Vec<u
 /// [`gamut_isobmff::TopLevelBox::uuid`] takes: the §A.5.1.2 framing, then `slot` verbatim as the
 /// store slot.
 ///
-/// Infallible where [`content_provenance_reserved`] is not: `slot` is a materialised slice, so
-/// `slot.len() <= isize::MAX` and the total cannot overflow a `usize`. A *reservation* is a bare
-/// integer with no such bound, which is why only that path has to refuse.
+/// Infallible where [`content_provenance_reserved`] is not: `slot` is a materialised slice, so its
+/// length is one the machine already holds. A *reservation* is a bare integer with no such bound,
+/// which is why only that path has to refuse.
+///
+/// The room for `slot` is asked for with `reserve_exact` rather than folded into the framing's
+/// capacity, so this path computes no total of its own: the only place the two lengths are added is
+/// [`content_provenance_reserved`], where the sum is checked.
 pub(crate) fn content_provenance_payload(purpose: C2paBoxPurpose, slot: &[u8]) -> Vec<u8> {
-    let mut payload = content_provenance_framing(purpose, framing_len(purpose) + slot.len());
+    let mut payload = content_provenance_framing(purpose, framing_len(purpose));
+    payload.reserve_exact(slot.len());
     payload.extend_from_slice(slot);
     payload
 }
