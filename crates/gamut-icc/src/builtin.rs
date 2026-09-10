@@ -823,7 +823,11 @@ mod tests {
             if ENCODABLE.contains(&code) {
                 continue;
             }
-            assert_eq!(Trc::for_code_point(code), None, "transfer code point {code}");
+            assert_eq!(
+                Trc::for_code_point(code),
+                None,
+                "transfer code point {code}"
+            );
         }
     }
 
