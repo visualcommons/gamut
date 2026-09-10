@@ -124,10 +124,10 @@ pub use backend::{
     is_backend_declined,
 };
 pub use decoder::{JpegDecoder, JpegInfo, JpegMetadata, JpegProcess, info, metadata};
+pub use encoder::{ChromaSubsampling, JpegColorMode, JpegEncoder, RdOptimization, XYB_ICC_PROFILE};
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `JpegMetadata::metadata` / `JpegEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
 pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock};
-pub use encoder::{ChromaSubsampling, JpegColorMode, JpegEncoder, RdOptimization, XYB_ICC_PROFILE};
 pub use marker::DensityUnit;
 pub use quant::{CHROMINANCE, LUMINANCE, QuantTables};

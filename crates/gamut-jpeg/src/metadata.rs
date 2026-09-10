@@ -95,11 +95,8 @@ impl JpegEncoder {
     /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
     pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
         let encoded = MetadataEmbedder::new().embed(meta).map_err(|e| {
-            Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "JPEG: metadata does not serialize",
-            )
-            .with_detail(e.to_string())
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: metadata does not serialize")
+                .with_detail(e.to_string())
         })?;
         self.with_encoded_metadata(&encoded)
     }
@@ -217,7 +214,11 @@ mod tests {
 
     #[test]
     fn an_empty_model_embeds_nothing() {
-        let jpeg = encode(JpegEncoder::new().with_metadata(&Metadata::default()).unwrap());
+        let jpeg = encode(
+            JpegEncoder::new()
+                .with_metadata(&Metadata::default())
+                .unwrap(),
+        );
         assert_eq!(crate::metadata(&jpeg).unwrap(), JpegMetadata::default());
     }
 
@@ -259,16 +260,15 @@ mod tests {
     fn encoded_blocks_route_to_the_raw_setters() {
         // Each present field lands in its APP segment; an absent one leaves an earlier setting.
         let encoded = typed().encode().unwrap();
-        let jpeg = encode(
-            JpegEncoder::new()
-                .with_encoded_metadata(&encoded)
-                .unwrap(),
-        );
+        let jpeg = encode(JpegEncoder::new().with_encoded_metadata(&encoded).unwrap());
         let read = crate::metadata(&jpeg).unwrap();
         // `EncodedMetadata::exif` carries the `Exif\0\0` signature; the stream stores the TIFF.
         assert_eq!(
             read.exif.as_deref(),
-            encoded.exif.as_deref().and_then(|e| e.strip_prefix(b"Exif\0\0"))
+            encoded
+                .exif
+                .as_deref()
+                .and_then(|e| e.strip_prefix(b"Exif\0\0"))
         );
         assert_eq!(read.xmp, encoded.xmp);
         assert_eq!(read.icc, encoded.icc);
