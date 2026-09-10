@@ -18,20 +18,32 @@ nothing else; the distinctions below are carried by the stderr message, not by t
 | Exit | Meaning |
 | --- | --- |
 | `0` | The file passed its format's gate, or its format has no gate (HEIC). The report is on stdout. |
-| `1` | Either the file failed its gate (a report is still printed to stdout first, and the summary goes to stderr), or the walk could not run at all — the file was unreadable, or the container could not be opened. |
+| `1` | Either the file failed its gate (a report is still printed to stdout first, and the summary goes to stderr), or the walk could not run at all — the file was unreadable, the container could not be opened, or it was not a container this command reads. |
 
 A gate failure and an unreadable file are **not** distinguished by exit code. A caller that needs
 to tell them apart reads the message: a gate failure is `<path>: not fully accounted — …`,
 `<path>: not verified — …` or `<path>: not a complete, undamaged PNG datastream — …`; anything
-else is the walk itself failing.
+else — including `<path>: unsupported container brand '…' — …` — is the walk itself never running.
 
 ## The gate, per format
 
-The format is sniffed unless `--format` forces it: a PNG signature, else an `ftyp` box whose
-**major** brand is a HEIF still-image brand (`heic`, `heix`, `heim`, `heis`, `mif1`) is a HEIC,
-else a readable TIFF whose IFD 0 carries `DNGVersion` (50706) is a DNG, else TIFF. Only the major
-brand is matched: an AVIF lists `mif1` among its *compatible* brands, and reading it through the
-HEIF container reader would report a store this command has no slice for.
+The format is sniffed unless `--format` forces it: a PNG signature, else an `ftyp` box (an ISOBMFF
+file) routes to the HEIC arm, else a readable TIFF whose IFD 0 carries `DNGVersion` (50706) is a
+DNG, else TIFF.
+
+The `ftyp` test is a **route, not a verdict**. It says the file is ISOBMFF, not that it is the HEVC
+still image the HEIC arm reports on, so that arm parses the container and then *confirms* it with
+`gamut-heic`'s own `HeifImage::is_hevc_still` (`references/heif` §7) before printing anything; a
+file that fails the confirmation exits `1` with `<path>: unsupported container brand '<brand>' — …`
+and prints no report. No brand list lives in the command. One would have to be exhaustive over the
+still-image brands — `mif2`, `avci` and `avcs` beside `heic`/`heix`/`heim`/`heis`/`mif1` — and would
+still be wrong about `mif1`, which is the generic MIAF structural brand an AVIF may carry as its
+*major* brand, not merely among its compatible ones. `gamut-heic` settles that case on the primary
+item carrying an `hvcC`.
+
+`--format heic` skips the sniff **and** the confirmation: a forced format is the caller's own
+assertion about the file, and overriding detection is what `--format` is for. `gamut inspect
+--format heic some.avif` therefore prints a full HEIC C2PA section at exit `0`.
 
 - **TIFF / DNG** — `DeconstructReport::is_fully_accounted()`: every byte classified into exactly
   one typed segment, **and** no unknown field type, no unknown tag, no anomaly. Identical in both
@@ -39,7 +51,8 @@ HEIF container reader would report a store this command has no slice for.
 - **PNG** — `PngReport::is_verified()`: `is_intact()` **and** `FilterScan::is_counted()`, i.e.
   every byte classified, every chunk CRC valid, IEND present, no trailing bytes after it, no
   truncated tail, nothing the filter scan found damaging — *and the filter scan actually ran*.
-- **HEIC** — **no gate**; see the section below. Exit `0` whenever `HeifContainer::parse` succeeds.
+- **HEIC** — **no gate**; see the section below. Exit `0` whenever `HeifContainer::parse` succeeds
+  and the container is the one this arm reads.
 
 PNG's `is_fully_classified()` is printed but is **not** the gate: it is true by construction for
 every file `deconstruct` accepts (a truncated tail and a trailer each get a segment of their own),
@@ -57,20 +70,37 @@ file:
 | HEIC state | Exit | stdout |
 | --- | --- | --- |
 | a store is present | `0` | the store(s), each with its purpose, size and range |
-| no store is present | `0` | that none was found in the top-level boxes of the primary stream |
+| a C2PA box is present but no store could be read from it | `0` | that the box is present, its range, and why no store was read — explicitly *not* an absence |
+| no C2PA box is present | `0` | that none was found in the top-level boxes of the primary stream |
+| the container is not the HEVC still image this arm reads (e.g. an AVIF) | `1` | nothing; `unsupported container brand …` on stderr |
 | the container cannot be parsed | `1` | nothing; `error: …` on stderr |
 
-**Presence never changes the exit code, and neither does absence.** Both are ordinary properties of
-an ordinary file: a store is not an accounting anomaly, and its absence is not a defect. A caller
-that wants to gate on provenance reads stdout, or uses a validator.
+**The exit code says whether the inspection succeeded, not what it found.** Presence never changes
+it, absence never changes it, and a box gamut could not read through never changes it either: all
+three are ordinary properties of an ordinary file, and none is an accounting anomaly. That
+asymmetry against TIFF/DNG/PNG is deliberate — those three exit `1` on a *finding*, because their
+walk has a claim to make about the file; this one has none.
+
+**Absence of a store line is not absence of provenance.** A file can carry a genuine
+`ContentProvenanceBox` — right extended type, real JUMBF store — that this reader declines: its
+`FullBox` version is not zero (§A.5.1.2), its `box_purpose` is the auxiliary `merkle` or a value
+this revision does not know (§A.5.3), it is truncated, or no valid JUMBF `LBox` bounds a store
+where its purpose puts one. Such a box gets its own line naming the reason, precisely so a reader
+cannot infer "no provenance" from bytes gamut merely could not read. A caller gating on stdout must
+treat the `unread C2PA box` line as *unknown*, never as absence, and reach for a validator. One
+case is deliberately reported as absence: a top-level `uuid` box whose extended type is **not** the
+C2PA one, even by a single byte. §A.5.1.1 makes the extended type the whole test, and an ordinary
+file carries vendor `uuid` boxes — calling a near miss damaged C2PA framing would claim provenance
+where there is none.
 
 Nothing in that report is a verdict. gamut locates a manifest store and never validates one — no
 signature, no hash binding, no trust list (C2PA 2.4 §15.12; `references/c2pa/README.md`) — and the
 line that reports a store says so, because "C2PA: present" printed beside EXIF and ICC otherwise
-reads as *verified*. The wording lives in `gamut-heic` (`C2PA_NOT_VALIDATED`) and is covered by
-that crate's tests, since `gamut-cli` is excluded from the coverage gate. The store's bytes are
-never printed at any verbosity: they are opaque to gamut, routinely hundreds of kilobytes, and a
-byte range is what a caller hands to `c2pa-rs`.
+reads as *verified*. The wording lives in `gamut-heic` (`C2PA_NOT_VALIDATED`) so that every host
+renders the same words and none can reword the disclaimer away; that crate's tests pin the wording,
+and `gamut-cli`'s `tests/inspect_c2pa.rs` pins that this command carries it to the terminal
+unabridged. The store's bytes are never printed at any verbosity: they are opaque to gamut,
+routinely hundreds of kilobytes, and a byte range is what a caller hands to `c2pa-rs`.
 
 The other containers gamut can locate a store in gain the same section as each one's locator slice
 lands; only HEIC's is on `master` today.
