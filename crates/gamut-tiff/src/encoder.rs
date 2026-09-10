@@ -155,14 +155,13 @@ impl TiffEncoder {
     /// be at least [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header, 8 bytes) **and longer
     /// than the container's inline threshold**, so BigTIFF's true minimum is 9 — a value of 8 or
     /// less would be packed into the entry's own value word rather than placed out of line at the
-    /// end of the file. It must also be no *longer* than the smaller of what a buffer holds
-    /// (`isize::MAX`, past which zero-filling it would panic rather than return) and what the
-    /// container's count and offset words describe (`u32::MAX` in classic TIFF; BigTIFF's are
-    /// 64-bit). A reservation cannot be combined with a store supplied through
+    /// end of the file. It must also be a length a buffer can hold: past `isize::MAX` a `Vec<u8>`
+    /// cannot exist, so the reservation is taken fallibly and such a `len` is refused rather than
+    /// panicking. A reservation cannot be combined with a store supplied through
     /// [`with_metadata`](Self::with_metadata). Each of those is a typed error raised before any
-    /// pixel work — and before the reservation is allocated — not after the image has been
-    /// compressed. What is left outside this crate's reach is the allocator's: a reservation the
-    /// machine has no memory for aborts, as any oversized allocation in Rust does.
+    /// pixel work, not after the image has been compressed. What is left outside this crate's
+    /// reach is the allocator's: a reservation the machine has no memory for aborts, as any
+    /// oversized allocation in Rust does.
     #[must_use]
     pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
         self.c2pa_reserve = Some(len);
@@ -181,35 +180,14 @@ impl TiffEncoder {
         c2pa::MIN_STORE_LEN.max(self.variant().inline_threshold() + 1)
     }
 
-    /// The longest manifest store this encoder can place, for the container variant it writes.
-    ///
-    /// Two upper bounds apply and the smaller wins. The buffer's is `isize::MAX`, all a `Vec<u8>`
-    /// can hold: past it `vec![0; len]` panics with a capacity overflow instead of returning, and
-    /// a length is something a caller passes, not something this crate controls. The container's
-    /// is the width of the words that describe the store — classic TIFF counts an `UNDEFINED`
-    /// value with a 32-bit `LONG` and addresses it with a 32-bit offset, so nothing beyond
-    /// `u32::MAX` could be described or pointed at; BigTIFF's are 64-bit, which on any target this
-    /// crate builds for is no bound at all beside the buffer's.
-    ///
-    /// What remains outside this crate's reach is the allocator's: a reservation the machine has
-    /// no memory for aborts, as any oversized allocation in Rust does.
-    fn max_store_len(&self) -> usize {
-        // `usize::MAX / 2` is `isize::MAX`, spelled without a sign-losing cast.
-        const BUFFER_MAX: usize = usize::MAX / 2;
-        match self.variant() {
-            Variant::Classic => BUFFER_MAX.min(u32::MAX as usize),
-            Variant::Big => BUFFER_MAX,
-        }
-    }
-
     /// The C2PA manifest store to write, if any: the caller's, or a zero-filled reservation.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if both were requested, or if the store is shorter than
-    /// [`min_store_len`](Self::min_store_len) or longer than
-    /// [`max_store_len`](Self::max_store_len) — all caught here, before any pixel work, rather
-    /// than after a whole image has been compressed.
+    /// Returns [`Error::InvalidInput`] if both were requested, if the store is shorter than
+    /// [`min_store_len`](Self::min_store_len), or if a reservation is longer than a buffer can
+    /// hold ([`zeroed`]) — all caught here, before any pixel work, rather than after a whole image
+    /// has been compressed.
     fn c2pa_store(&self) -> Result<Option<Cow<'_, [u8]>>> {
         // The *length* is settled before a reservation is materialised, so an unusable one costs
         // neither the allocation nor the panic `vec![0; len]` raises past `isize::MAX`.
@@ -231,16 +209,9 @@ impl TiffEncoder {
                  than the container's inline threshold (9 bytes in BigTIFF)",
             ));
         }
-        if len > self.max_store_len() {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: a C2PA manifest store must fit both a buffer and the container's 32-bit \
-                 count and offset words (BigTIFF's are 64-bit)",
-            ));
-        }
         Ok(Some(match &self.metadata.c2pa {
             Some(store) => Cow::Borrowed(store.as_slice()),
-            None => Cow::Owned(vec![0; len]),
+            None => Cow::Owned(zeroed(len)?),
         }))
     }
 
@@ -865,6 +836,29 @@ impl EncodeImage<Bilevel> for TiffEncoder {
     }
 }
 
+/// A `len`-byte zero-filled C2PA reservation, or a typed error where `vec![0; len]` would panic.
+///
+/// [`TiffEncoder::with_c2pa_reserved`] returns `Self`, so it cannot refuse anything itself and the
+/// length it stores is a caller's number that reaches this untouched. Past `isize::MAX` a `Vec<u8>`
+/// cannot exist at all, and `vec![0; len]` says so by panicking with a capacity overflow — which a
+/// library path must not do. Reserving fallibly turns that into [`Error::InvalidInput`], raised
+/// before any pixel work.
+///
+/// What remains outside this crate's reach is the allocator's: a reservation the machine has no
+/// memory for aborts, as any oversized allocation in Rust does, since a request the kernel
+/// overcommits succeeds here and fails only when the bytes are written.
+fn zeroed(len: usize) -> Result<Vec<u8>> {
+    let mut store = Vec::new();
+    store.try_reserve_exact(len).map_err(|_| {
+        Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: a C2PA manifest store reservation this long cannot be allocated",
+        )
+    })?;
+    store.resize(len, 0);
+    Ok(store)
+}
+
 /// Stores a dimension/count as `SHORT` when it fits, else `LONG` (both are valid per §2).
 fn dim_value(n: u32) -> Value {
     if n <= u32::from(u16::MAX) {
@@ -939,35 +933,18 @@ mod tests {
     }
 
     #[test]
-    fn a_reservation_no_buffer_or_container_could_hold_is_refused() {
-        // `with_c2pa_reserved` returns `Self`, so an unusable length arrives at the encode.
-        // Unchecked it reached `vec![0; len]`, which past `isize::MAX` panics with a capacity
-        // overflow instead of returning — and a length is a caller's number, so a panic is this
-        // crate's defect, not theirs. Classic TIFF's own bound is the smaller of the two: an
-        // `UNDEFINED` value is counted with a 32-bit `LONG` and addressed with a 32-bit offset,
-        // so nothing beyond `u32::MAX` could be described or pointed at.
-        //
-        // The accepting side of these boundaries is not asserted — it would mean allocating
-        // gigabytes — so each variant is asserted one past its own bound and again at
-        // `usize::MAX`, which is where the missing check panicked.
-        for (big_tiff, container_max) in [(false, u64::from(u32::MAX)), (true, u64::MAX)] {
-            let at = |len: usize| {
-                TiffEncoder::new()
-                    .with_big_tiff(big_tiff)
-                    .with_c2pa_reserved(len)
-            };
-            let expected = container_max.min(usize::MAX as u64 / 2) as usize;
-            assert_eq!(at(0).max_store_len(), expected, "big_tiff={big_tiff}");
-            let mut lengths = vec![usize::MAX];
-            lengths.extend(expected.checked_add(1));
-            for len in lengths {
-                let err = at(len).c2pa_store().expect_err("longer than the bound");
-                assert!(
-                    err.to_string().contains("must fit both a buffer"),
-                    "big_tiff={big_tiff}, len={len}: {err}"
-                );
-            }
-        }
+    fn a_reservation_no_buffer_could_hold_is_refused_instead_of_panicking() {
+        // `with_c2pa_reserved` returns `Self`, so an unusable length arrives at the encode, and it
+        // went straight into `vec![0; len]`. Past `isize::MAX` a `Vec<u8>` cannot exist and that
+        // expression says so by panicking with a capacity overflow — a panic out of a library path
+        // for a number the caller chose. `usize::MAX` is the shortest way to reach it; the
+        // accepting side of the boundary is not asserted, since it would mean allocating
+        // `isize::MAX` bytes.
+        let err = TiffEncoder::new()
+            .with_c2pa_reserved(usize::MAX)
+            .c2pa_store()
+            .expect_err("no buffer holds usize::MAX bytes");
+        assert!(err.to_string().contains("cannot be allocated"), "{err}");
     }
 
     #[test]

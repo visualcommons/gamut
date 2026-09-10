@@ -112,11 +112,12 @@ asset has), and `gamut-dng` calls the same helper, so the two formats cannot dri
 place. It is an infallible builder, so every bound on `len` is enforced by the **encode** that
 follows, as `Error::InvalidInput`, on every entry point: below the store's minimum (8 bytes, 9 in
 BigTIFF — the JUMBF box header, and one more than the variant's inline threshold, since a value
-that packs inline is not the run at the end of the file §A.3.6 wants), and above the smaller of
-what a buffer holds (`isize::MAX`, past which zero-filling it panicked instead of returning) and
-what the container's count and offset words describe (`u32::MAX` in classic TIFF; BigTIFF's are
-64-bit). The length is settled before the reservation is allocated, so an unusable one costs
-neither the allocation nor the panic. `encode_with_report` reports the ranges, and `c2pa_exclusions` recovers them from any
+that packs inline is not the run at the end of the file §A.3.6 wants), and above what a buffer can
+hold, since past `isize::MAX` a `Vec<u8>` cannot exist and `vec![0; len]` said so by panicking with
+a capacity overflow. The reservation is taken fallibly instead, so a caller's number cannot panic a
+library path. What stays outside this crate's reach is the allocator's: a reservation the machine
+has no memory for aborts, as any oversized allocation in Rust does. `encode_with_report` reports
+the ranges, and `c2pa_exclusions` recovers them from any
 TIFF's bytes — including files written through `encode_palette8` or `encode_pages_rgb8`, which the
 object-safe `EncodeImage` seam cannot report through. The store's bytes are never byte-swapped:
 the header's `ByteOrder` does not govern them (§A.3.6). Tag 52545 joins `is_known_tag`, so the
