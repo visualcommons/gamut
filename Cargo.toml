@@ -30,7 +30,8 @@ exclude = [
     # dependency tree carrying signing and verification crypto, and the epic's "no crypto in the
     # shipped graph" criterion means no shipped crate may ever reach it. Being outside the
     # workspace also puts it outside `mise run check-release-deps`. Run it with `mise run
-    # test-c2pa`; `mise run check-c2pa` is the compile-only half the per-PR lint lane affords.
+    # test-c2pa`, or `mise run check-c2pa` for the compile-only half. No workflow under `.github/`
+    # calls either task yet, so nothing in CI reaches this crate; wiring them up is issue #541.
     "tooling/c2pa-oracle",
     "tooling/gamut-iptc-oracle",
     "tooling/zlib-oracle",
