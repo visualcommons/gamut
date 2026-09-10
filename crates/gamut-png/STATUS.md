@@ -437,8 +437,26 @@ The shape is the finding: **the ladder is steep in time and shallow in size.** `
 roughly 190x `Balanced` to save 2.7%, and `Smallest` roughly 1150x to save 6.2%, because both
 cross into the zopfli-style optimal parse and `Smallest` additionally runs a full DEFLATE per
 brute-force candidate. That is the trade `Level::Best` has always carried; the dial does not
-change it, it makes it selectable and says what it costs. It is also the case for [#624]: the
-6.2x step from `Small` to `Smallest` is very nearly the seven-candidate search running serially.
+change it, it makes it selectable and says what it costs.
+
+**What the `Small` to `Smallest` step actually buys time from** — measured by adding one knob at a
+time to `Small`, same method:
+
+| arm | ms per corpus pass | relative |
+| --- | ---: | ---: |
+| `Small` | 575.3 | 1x |
+| `Small` + `BruteForce` | 3 604.0 | **6.26x** |
+| `Small` + effort 15 | 574.0 | 1.00x |
+| `Small` + unbounded parse limit | 581.6 | 1.01x |
+| `Smallest` (all three) | 3 563.3 | 6.19x |
+
+**The whole step is the filter search.** Raising the refinement budget from 6 to 15 costs nothing
+measurable, because the passes stop early at a fixed point and this corpus reaches it well before
+six; and the unbounded parse limit costs nothing *at this size* by construction, since a 64x64 row
+filters to far less than the 32 KiB window the span floor already covers — that knob only starts
+to matter on an image large enough to exceed it, which is exactly why it exists. So the 6.26x is
+the seven whole-image candidates running one after another, which makes this table the direct
+case for [#624]: it is the one factor here that parallelism could reclaim.
 
 Per row:
 
@@ -465,7 +483,8 @@ rungs for the reason it ties everywhere: incompressible input leaves every setti
 blocks.
 
 **`Fast` filters with a fixed Paeth rather than not filtering at all**, which is the opposite of
-the obvious guess and was settled by measuring, not by argument. Over the same corpus:
+the obvious guess and was settled by measuring, not by argument. Over the same corpus, warmed up,
+minimum of five interleaved passes:
 
 | `Fast` candidate | relative time | bytes |
 | --- | ---: | ---: |
