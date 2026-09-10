@@ -340,7 +340,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 1 | Filter selection | **partial** — MinSumAbs, Entropy and Bigrams per line, plus seven whole-image candidates each fully DEFLATEd. Bigrams is worth 22–32% where it wins (see above). Still missing: per-line trial deflate, `AtomicMin` pruning, and a two-tier cheap-trial codec. [#480]. `FilterStrategy` became `#[non_exhaustive]` with this phase — a heuristic is a measurement result and the set grows with the corpus — which is a **breaking change** for any downstream exhaustive `match`: add a wildcard arm. |
 | 2 | DEFLATE quality | **good, ~2% behind zopfli**, and honestly documented in `gamut-deflate`. Two contained wins remain: an 8-byte-at-a-time match compare, and `parse_dp`'s single-distance relaxation. [#478], [#479] |
 | 3 | Smallest lawful representation | **partial** — every reduction is implemented (grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour) and the key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. What is not done is the **selection**. `reduce::analyze8` still resolves *some* candidates on the raw estimate alone, and a raw estimate cannot see DEFLATE (below). Until the three-candidate race below it resolved all of them, and the eliminated runner-up was often the one that won the finished file: an opaque RGBA image with ≤256 colours kept an alpha channel that was 255 everywhere (349 bytes against 317), and a 16-bit image whose samples are all `k·257` kept all sixteen bits (220 against 172). The estimate now hands the best **chunk-free** candidate over beside the chunk-carrying one and `write_reduced_or_native` measures both, which closes that whole family — the chunk-free gates are mutually exclusive, so at most one such candidate ever exists. The remainder is the *pair* that both carry a chunk: where a palette and a `tRNS` colour key are both lawful, only the raw-smaller one is ever encoded. |
-| 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.2.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. Modified-Zeng ordering and caller-supplied palette cleanup remain. [#482] |
+| 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.2.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. A **caller-supplied** palette is now cleaned as well (see [Cleaning a caller's palette](#cleaning-a-callers-palette)), so the two paths cost the same for the same picture. Modified-Zeng ordering — and any ordering of a caller's palette — remain, as a measured heuristic rather than a rule the spec states. [#612] |
 | 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. A tie keeps the **plain** encoding: cleaning buys its rewritten samples with a size win, and where there is no win there is nothing to buy them with. |
 | 6 | Metadata hygiene | **preserve, never strip** — the encoder emits exactly what the caller set, and `gamut convert` carries a PNG input's metadata into a PNG output unless `--strip-metadata` asks otherwise (see [Metadata preservation](#metadata-preservation-issue-483)). Preserving costs bytes, and that is the trade this axis takes: a smaller file that silently lost a colour profile is not a better one. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
@@ -403,9 +403,43 @@ palette becomes the index of its entry (an opaque entry where a transparent twin
 triple collapses to one grey sample — and omitted, without error, where no lossless conversion
 exists, since a payload shaped for the wrong colour type is a chunk libpng rejects and drops. A
 caller's palette *index* survives only on the `encode_indexed8` path, whose palette is the caller's;
-under an encoder-derived palette it names nothing and is omitted. This holds across colour
-**types**; on the depth axis a `bKGD` sample is range-checked but not rescaled with a 16→8 demotion
-or a sub-byte packing — that is [#501].
+under an encoder-derived palette it names nothing and is omitted. On that path the index is
+renumbered with the entry it names when cleaning renumbers the palette, and the entry it names is
+kept even when no pixel names it — the chunk is carried verbatim, so the alternative is a
+background silently repainted. This holds across colour **types**; on the depth axis a `bKGD` sample
+is range-checked but not rescaled with a 16→8 demotion or a sub-byte packing — that is [#501].
+
+### Cleaning a caller's palette
+
+`encode_indexed8` takes the palette the caller hands it. That palette is not built from the pixels,
+so — unlike the encoder-derived one, which cannot contain either by construction — it may hold
+entries nothing names and entries that name a colour another entry already names. Both are written
+into an incompressible `PLTE`, and the count of them decides the index bit depth.
+
+So the palette is cleaned before it is written (`PngPalette::cleaned`): an entry no pixel and no
+`bKGD` index names is dropped, a later entry with the same RGB **and** the same alpha as an earlier
+one is merged into it, the trailing opaque `tRNS` bytes §11.3.2.1 lets a chunk omit are omitted, the
+index bit depth is derived from what survives, and the image's indices — and a
+`with_background_index` background — are renumbered onto the result. Surviving entries keep the
+caller's relative order; **ordering** a caller's palette is a separate, heuristic question ([#612]).
+
+It is silent and lossless, which is why it goes through no notice channel: a merged entry did not
+fail to come along, it arrived under another index. libpng resolving the file to the caller's exact
+RGBA is the test of that (`tests/oracle.rs`).
+
+Measured on a 64×64 four-colour picture handed a full 256-entry palette (4 colours repeated 64
+times, one of them transparent):
+
+| palette handed in | before | after |
+| --- | ---: | ---: |
+| 256 entries, 4 colours | 1 194 | **162** |
+| 4 entries, tight | 164 | **162** |
+
+The redundant palette now costs exactly what the tight one costs — the files are byte-identical,
+which `a_redundant_palette_costs_what_the_tight_one_costs` pins — because after cleaning they *are*
+the same palette: −86.4% on the first row. The tight palette's own 2 bytes are the `tRNS` trim,
+which this path did not previously apply. What is bought is rarely the `PLTE` bytes alone: 252
+dropped entries also take the index stream from 8 bits per pixel to 2.
 
 [#437]: https://github.com/visualcommons/gamut/issues/437
 [#478]: https://github.com/visualcommons/gamut/issues/478
@@ -416,3 +450,4 @@ or a sub-byte packing — that is [#501].
 [#483]: https://github.com/visualcommons/gamut/issues/483
 [#484]: https://github.com/visualcommons/gamut/issues/484
 [#501]: https://github.com/visualcommons/gamut/issues/501
+[#612]: https://github.com/visualcommons/gamut/issues/612
