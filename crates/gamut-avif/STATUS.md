@@ -72,10 +72,14 @@ included, could find. A **third** refusal sits between them and comes from `gamu
 from here: a top-level box carries a 32-bit size field, so the container writer rejects a
 `ContentProvenanceBox` at or beyond 4 GiB as `Error::Unsupported`. That is the effective ceiling —
 measured, the largest `len` that clears it is `4_294_967_250` and `4_294_967_251` is refused —
-and whether this crate should own that bound with its own error is **#576**. The **read** side
-makes no such demand and reports a degenerate slot it genuinely finds, with its true range: strict
-in what it writes, honest about what it reads. See the C2PA note under section L for the five
-recorded limits.
+and whether this crate should own that bound with its own error is **#576**.
+
+The **read** side demands nothing of a slot's length: it reports a degenerate slot it genuinely
+finds, with its true range. That is not a "strict writer, permissive reader" asymmetry — the
+minimum bounds the *reservation* path alone. `with_c2pa(bytes)` carries a caller-supplied slice
+verbatim, as every other metadata payload in this workspace is carried, so this crate does write
+and then locate a slot shorter than a JUMBF box header; whether the minimum should apply there too
+is **#577**. See the C2PA note under section L for the five recorded limits.
 
 **Deferred (planned, additive).** Every ☐ row below: 4:2:0/4:2:2 and `MA1B` landed with
 #390/#391, the alpha auxiliary, `Gray8` and monochrome surface with #396/#397, and the 10/12-bit

@@ -549,6 +549,20 @@ impl AvifEncoder {
     /// never to originate). The bytes are carried verbatim; nothing inside them is parsed or
     /// checked. Calling this, or `with_c2pa_reserved`, twice keeps the **last** call.
     ///
+    /// # `store` is trusted, and the reservation minimum does not apply to it
+    ///
+    /// `with_c2pa_reserved` refuses a `len` below 8 bytes; **this builder applies no minimum**.
+    /// `store` is a slice the caller already holds, so it is carried as supplied — the same way
+    /// every other caller-supplied metadata payload in this workspace is carried — and a store
+    /// shorter than a JUMBF box header is written, and located again by
+    /// [`AvifContainer::c2pa_slot`](crate::AvifContainer::c2pa_slot), rather than refused. Only
+    /// the *length* is unchecked here in a way the reservation path is not; the content is
+    /// unchecked on both. Whether the minimum should apply here too is issue #577.
+    ///
+    /// The container's own bound still applies: a `store` large enough to push the
+    /// `ContentProvenanceBox` to or past 4 GiB is refused at encode time by
+    /// [`gamut_isobmff::write`], as [`Error::Unsupported`](gamut_core::Error::Unsupported).
+    ///
     /// The box is labelled `box_purpose = manifest`, the only purpose this encoder writes; see
     /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) for why an `original`/`update` pair is a
     /// file-update operation this crate does not offer.

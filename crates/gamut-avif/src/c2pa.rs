@@ -258,15 +258,20 @@ impl<'a> AvifContainer<'a> {
     /// too short to hold the framing is skipped silently: this is a lens over bytes that happen to
     /// be present, so a malformed or foreign box yields nothing rather than an error.
     ///
-    /// # The read side is permissive where the write side is strict
+    /// # The read side demands nothing of a slot's length
     ///
     /// [`AvifEncoder::with_c2pa_reserved`](crate::AvifEncoder::with_c2pa_reserved) **refuses** to
-    /// write a slot shorter than a JUMBF box header, because a slot that cannot hold a store is a
-    /// caller's mistake made before any bytes exist. This locator makes no such demand: a
-    /// well-framed box with a zero-length or otherwise degenerate slot is reported with its true
-    /// (possibly empty) range, because the bytes are *there* and some other writer put them there.
-    /// The asymmetry is deliberate — strict in what it writes, honest about what it reads — so a
-    /// file this crate would decline to produce is still one it will faithfully describe.
+    /// reserve a slot shorter than a JUMBF box header, because a *reservation* is a bare integer
+    /// and a slot that cannot hold a store is a caller's mistake made before any bytes exist. This
+    /// locator makes no such demand: a well-framed box with a zero-length or otherwise degenerate
+    /// slot is reported with its true (possibly empty) range, because the bytes are *there* and
+    /// somebody put them there.
+    ///
+    /// That is not a "strict writer, permissive reader" asymmetry, and it would be wrong to
+    /// describe it as one: the minimum bounds the reservation path alone.
+    /// [`with_c2pa`](crate::AvifEncoder::with_c2pa) carries a caller-supplied slice verbatim, so
+    /// this crate does write files whose slot is shorter than a JUMBF box header, and this locator
+    /// reports them. Whether that builder should apply the minimum too is issue #577.
     pub fn c2pa_slots(&self) -> impl Iterator<Item = C2paSlot<'a>> + '_ {
         slots(self.segments())
     }
