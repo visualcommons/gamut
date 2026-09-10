@@ -372,8 +372,9 @@ enum JpegImpl {
     Gamut,
     /// The Adobe DNG SDK's `DecodeLosslessJPEG<Scalar>`, exported across the FFI boundary.
     AdobeSdk,
-    /// The same SDK decode, stopping at the spool buffer. The gap to `AdobeSdk` is the export
-    /// path's cost and nothing else.
+    /// The same SDK decode, stopping at the spool buffer. The export path is the only difference
+    /// between this arm and `AdobeSdk`, so the gap between them bounds its cost — a magnitude, not
+    /// a signed price: it sits at this harness's measurement floor.
     AdobeSdkNoExport,
 }
 
@@ -685,8 +686,8 @@ fn decode_dng(bencher: Bencher, job: DngJob) {
 ///
 /// Timed: marker parse, Huffman and predictor decode, and the teardown of the sample buffer —
 /// plus, for `adobe-sdk`, the export path (spool → `malloc`d buffer → `Vec`). Not timed:
-/// encoding the stream. The gap between the two SDK arms is that export path and nothing else,
-/// which is how this file quantifies its one remaining bias rather than describing it.
+/// encoding the stream. The export path is the only difference between the two SDK arms, so the
+/// gap between them bounds this file's one remaining bias rather than leaving it described.
 #[divan::bench(args = JPEG_JOBS)]
 fn decode_lossless_jpeg(bencher: Bencher, job: JpegJob) {
     let stream = lossless_jpeg_stream(job.photometry);
