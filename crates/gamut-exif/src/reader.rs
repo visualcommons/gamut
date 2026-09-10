@@ -106,11 +106,13 @@ impl ExifReader {
     /// merely unrepresentable, so strictness has no grounds to reject it and it is reported in both
     /// modes.
     ///
-    /// The two offset frames of [`parse`](Self::parse) both reach the caller here, in one call:
-    /// an offset in a returned [`ExifError`](crate::ExifError) is a position in `bytes` and counts
-    /// any `Exif\0\0` marker, while every [`Dropped::offset`](crate::Dropped::offset) in the
-    /// report is relative to the start of the TIFF stream — six smaller for the same position in a
-    /// marked blob. A caller that renders both beside each other must normalise one of them.
+    /// The two offset frames of [`parse`](Self::parse) meet here: an offset in a returned
+    /// [`ExifError`](crate::ExifError) is a position in `bytes` and counts any `Exif\0\0` marker,
+    /// while every [`Dropped::offset`](crate::Dropped::offset) in the report is relative to the
+    /// start of the TIFF stream — six smaller for the same position in a marked blob. A caller
+    /// that renders both beside each other must normalise one of them. They *meet* rather than
+    /// always arrive together: the return is a sum type, so a blob whose strict-fatal defect is
+    /// reached after a reportable one yields the error alone and no report.
     pub fn parse_with_report(&self, bytes: &[u8]) -> Result<(Exif, ReadReport)> {
         self.parse_from_with_report(bytes)
     }

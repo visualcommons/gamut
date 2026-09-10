@@ -140,16 +140,21 @@ pub enum DropReason {
     /// parse. The repair is different in each case, which is why they are different reasons.
     ///
     /// Recorded whatever the thumbnail's `Compression` says, because the reason it is a loss is
-    /// that the read has no length — not that a tag is missing where the spec requires one. Exif
-    /// 3.0 §4.6.9.2 Table 21 gives the pair's support level *per `Compression` column*: mandatory
-    /// under **Compressed**, and `N` (not allowed to record) under all three uncompressed columns.
+    /// **readability**: the read has no length, not a tag is missing where the spec requires one.
+    /// Exif 3.0 §4.6.9.2 Table 21 gives the pair's support level *per column*: mandatory under
+    /// **Compressed**, and `N` (not allowed to record) under all three uncompressed columns.
     ///
-    /// Reading unconditionally costs nothing in conformance, because the two tags carry the *same*
-    /// level in every column: an offset with no length is non-conformant under all four, so there
-    /// is no conformant 1st IFD this rule wrongly names. Whether to condition it on `Compression`
-    /// anyway is filed as issue #574, and it is a cheap option rather than a costly one —
-    /// [`Thumbnail::compression`](crate::Thumbnail::compression) already reads the tag, so nothing
-    /// needs plumbing. The mirror case in that issue — a length with no offset — is genuinely
+    /// **Conformance** is a separate axis, and it is only what shows the unconditional rule names
+    /// nothing it should not: the two tags carry the *same* level in every column, so an offset
+    /// with no length is non-conformant under all four and there is no conformant 1st IFD this
+    /// rule wrongly names. Whether to condition it on `Compression` anyway is filed as issue #574,
+    /// and it is a cheap option rather than a costly one — not because
+    /// [`Thumbnail::compression`](crate::Thumbnail::compression) exists (that accessor reads a
+    /// *finished* thumbnail, and the arm #574 would condition returns before one is built) but
+    /// because the 1st IFD is already in scope there and `Compression` is the same one-line
+    /// lookup that reads the offset and the length two lines above. Nothing needs plumbing.
+    ///
+    /// The mirror case in that issue — a length with no offset — is genuinely
     /// asymmetric and not merely unreached: an offset with no length *addresses bytes*, so
     /// something is lost, while a length with no offset addresses nothing, so nothing is.
     ThumbnailLengthMissing = 3,

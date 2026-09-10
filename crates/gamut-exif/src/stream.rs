@@ -274,8 +274,8 @@ impl ExifReader {
         // case; the ThumbnailLengthMissing arm above is a SECOND instance of it. What separates
         // them is not that a strict parse of the re-emitted blob fails — it fails for BOTH, since
         // an out-of-bounds offset survives the round trip just as an unsized one does — but that
-        // the OutOfBounds instance is pre-existing (the default branch already rejects it
-        // strictly) while this one is created by adding the strict arm. Fixing the condition is a
+        // the OutOfBounds instance is pre-existing (`master` already rejects it strictly) while
+        // this one is created by adding the strict arm. Fixing the condition is a
         // writer behaviour change and belongs to #548, not here.
         let mut ifd = ifd;
         if jpeg.is_some() {

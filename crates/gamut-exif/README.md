@@ -73,21 +73,34 @@ for dropped in report.dropped() {
 # }
 ```
 
-One read verdict changed with the report. A 1st IFD carrying `JPEGInterchangeFormat` with no
-`JPEGInterchangeFormatLength` used to parse as a thumbnail that simply had no bytes; it is now a
-**loss** — named in the report as `DropReason::ThumbnailLengthMissing`, and **rejected by `strict`**
-with `ExifError::BadThumbnail`, since an offset with nothing to size it addresses bytes that cannot
-be read. This is a fix rather than a redefinition, so it is not a breaking release: Exif 3.0
-§4.6.9.2 Table 21 gives both tags the *same* support level in each of its four `Compression`
-columns — mandatory under **Compressed**, "not allowed to record" under the three uncompressed ones
-— so the input that now fails was non-conformant under every one of them. A caller running `strict`
-over blobs it previously accepted should still know the verdict moved.
-
 Enable the optional `geocoordinates` feature (also included by `full`) to convert a complete
 [`GpsInfo`] with `TryFrom` into `geocoordinates::Wgs84` or `geocoordinates::Coordinate`. The latter
 preserves EXIF sea-level altitude as an orthometric height; the 2D `Wgs84` newtype intentionally
 drops altitude. Malformed references, rationals, DMS components, and out-of-range positions return
 the typed [`GpsConversionError`].
+
+## Compatibility
+
+**One read verdict changed after 1.0.0.** A 1st IFD carrying `JPEGInterchangeFormat` with no
+`JPEGInterchangeFormatLength` used to parse as a thumbnail that simply had no bytes; from the next
+release it is a **loss** — named in the report as `DropReason::ThumbnailLengthMissing`, and
+**rejected by `strict`** with `ExifError::BadThumbnail`. A caller running `strict` over blobs
+1.0.0 accepted should know the verdict moved.
+
+The rule is about **readability**: an offset with nothing to size it addresses bytes that cannot be
+read, which is what `strict` is for. It is not about a support level, and the reader does not
+consult `Compression` at all.
+
+**Conformance** is the separate question of whether the move is a *fix* or a *redefinition*, and it
+is a fix, so no major version is forced. Exif 3.0 §4.6.9.2 Table 21 states each 1st IFD tag's
+support level per thumbnail-format column — three uncompressed ones (Chunky, Planar, YCC) plus
+**Compressed**, an axis of photometric and planar layout rather than the two-valued `Compression`
+tag — and gives `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength` the *same* level in each:
+"not allowed to record" under the three uncompressed columns, mandatory under Compressed. An offset
+with no length is therefore non-conformant under every column, and no conformant 1st IFD changes
+verdict. That grounding is what this repository ships — the table is vendored under
+`references/exif/`; the before/after comparison measured behind it is recorded in the pull request
+that introduced the report, not committed here as a harness.
 
 ## Scope
 
