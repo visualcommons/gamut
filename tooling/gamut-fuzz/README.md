@@ -137,6 +137,35 @@ claim unread" and `heic_hvcc`'s error path — because their row's single inject
 the other half. Where a check is an equality between an accessor and a count, inject in **both**
 directions: one direction is silent on a file that holds no instance of the thing.
 
+#### The audit that rule produces
+
+The check set is derived from the table above rather than read off it: split each row's last cell
+on its own bold `and`, and every conjunct is one listed check owed one injection. Six rows yield
+**ten** listed checks, and sixteen injections stand behind them — more than one apiece wherever a
+check is an accessor-versus-count equality, which is injected in both directions.
+
+| listed check | target | injections recorded |
+|---|---|---|
+| no byte read outside a claim | `ifd_read` | 1 — header claimed as `header_size() - 1` |
+| no claim unread | `ifd_read` | 1 — header claimed as `header_size() + 1` |
+| the geometry that arrives equals the geometry the tags declare | `tiff_decode` | 1 — transpose the `DecodedImage` dimensions |
+| the raw image holds `width × height × planes` samples | `dng_decode` | 1 — push a sample past `check_sample_count` |
+| the segments are contiguous | `isobmff_boxes` | 1 — record a box as `b.offset + 8..end` |
+| the segments cover to end of file | `isobmff_boxes` | 1 — `segments.pop()` before the return |
+| every accessor agrees with the segment list | `heic_container` | 6 — `boxes`/`appended_stream`/`trailer`, each under- and over-reporting |
+| every borrowed slice lies inside `data()` | `heic_container` | 2 — `data()` returns a copy; `boxes()` yields copies |
+| the emitters append on the success path | `heic_hvcc` | 1 — `annex_b_parameter_sets` begins `out.clear()` |
+| the emitters append on the error path | `heic_hvcc` | 1 — `annex_b_payload` clears before returning `Err` |
+
+Each injection's message and the command that reproduces it are in the target's own module docs;
+this table only accounts for *coverage*, so a row with no injection is visible without reading six
+files. The law targets are outside it by construction: their oracle is the `invariants` function
+itself, which the property tier already drives.
+
+Four of these injections report only because of a seed added for them, and each of the four was
+first observed to report **nothing** on the seed set that preceded it — the "Seeds" section names
+which seed feeds which check.
+
 ### Entries that could not fail
 
 Each of these was listed as a check and each was removed or relabelled after an injection into the

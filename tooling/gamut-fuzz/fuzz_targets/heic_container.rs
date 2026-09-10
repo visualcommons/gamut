@@ -18,13 +18,15 @@
 //!   and still break it.
 //!
 //! Injections that proved each assertion fires (re-runnable), all reported by the committed seeds
-//! alone with no search, as `run.sh heic_container <seeds> -- -runs=0`. Each `is_some()` equality
-//! is injected in **both** directions, because one direction is silent on a file that has no
-//! segment of that kind:
+//! alone with no search, as `run.sh heic_container <seeds> -- -runs=0`. Every accessor-versus-count
+//! equality is injected in **both** directions — an accessor that under-reports and one that
+//! over-reports are different defects, and for the two `is_some()` accessors the under-reporting
+//! direction is additionally silent on a file that has no segment of that kind:
 //!
 //! | injection in `gamut-heic` | message |
 //! |---|---|
 //! | `boxes()` skips the `ftyp` box | *"boxes() disagrees with the Box segments"* |
+//! | `boxes()` yields every `Box` segment twice | the same |
 //! | `appended_stream()` returns `None` unconditionally | *"appended\_stream() disagrees with the AppendedStream segments"* |
 //! | `appended_stream()` returns `Some(self.data)` unconditionally | the same |
 //! | `trailer()` returns `None` unconditionally | *"trailer() disagrees with the Trailer segments"* |
