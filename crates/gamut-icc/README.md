@@ -13,10 +13,11 @@ the format crates can read, preserve, and embed accurate color characterization.
 - **Clean-slate from the spec.** Implemented from **ICC.1:2022** (profile v4.4, equivalent to
   ISO 15076-1; [`../../references/icc`](../../references/icc)), with v2 read support since most
   embedded profiles are still v2.
-- **Dependency-light.** An ICC profile needs neither IFD nor XML machinery, so this crate builds
-  only on [`gamut-core`](../gamut-core), [`gamut-color`](../gamut-color) (the colorimetry behind
-  the built-in profile constructors below) and [`md-5`](https://crates.io/crates/md-5) (the
-  §7.2.18 profile-ID digest).
+- **Dependency-light.** An ICC profile needs neither IFD nor XML machinery, so the whole
+  dependency list is [`gamut-core`](../gamut-core), [`gamut-color`](../gamut-color) (the
+  colorimetry behind the built-in profile constructors below),
+  [`md-5`](https://crates.io/crates/md-5) (the §7.2.18 profile-ID digest) and
+  [`thiserror`](https://crates.io/crates/thiserror).
 
 ## Usage
 

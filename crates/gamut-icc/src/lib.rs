@@ -3,9 +3,9 @@
 //! An ICC profile is the self-describing colour-characterization blob embedded in images (the WebP
 //! `ICCP` chunk, the AVIF/HEIF `colr` box of type `prof`, a JPEG `APP2` segment): a 128-byte header,
 //! a tag table, then the tag element data the table points at. It is a flat, offset-indexed binary
-//! format that needs neither the TIFF/IFD machinery nor XML, so this crate's only dependencies are
-//! [`gamut_core`], [`gamut_color`] (the colorimetry behind the built-in profile constructors below)
-//! and `md-5` (for the §7.2.18 profile ID).
+//! format that needs neither the TIFF/IFD machinery nor XML, so this crate's whole dependency list
+//! is [`gamut_core`], [`gamut_color`] (the colorimetry behind the built-in profile constructors
+//! below), `md-5` (for the §7.2.18 profile ID) and `thiserror`.
 //!
 //! Layouts follow **ICC.1:2022** (profile version 4.4, equivalent to ISO 15076-1; see
 //! `references/icc`). Profile **v2** — still the most common version in real images — is supported,
