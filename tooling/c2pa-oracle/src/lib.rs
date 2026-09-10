@@ -500,12 +500,17 @@ mod tests {
     //! | [`declared_store_len`] | `LBox == 1`: `get(8..16)`, the `XLBox` field is truncated | [`an_lbox_of_one_without_room_for_an_xlbox_is_refused`] | [`an_lbox_of_one_in_a_buffer_of_exactly_the_sixteen_byte_header_is_a_length`] |
     //! | [`declared_store_len`] | `XLBox` below the 16-byte header it counts | [`an_xlbox_below_the_sixteen_byte_header_is_refused_rather_than_resolved`] | [`an_xlbox_of_exactly_the_header_size_is_a_length`] |
     //! | [`declared_store_len`] | `LBox` in 2..=7, below the 8-byte header it counts | [`an_lbox_between_two_and_seven_is_refused_rather_than_resolved`] | [`an_lbox_of_exactly_the_header_size_is_a_length`] |
-    //! | [`jumbf_superbox_span`] | `checked_add`: offset plus declared length leaves `usize` | [`a_declared_length_that_overflows_the_buffer_offset_is_an_unusable_length`] | [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_length`] |
-    //! | [`jumbf_superbox_span`] | `end <= buffer.len()`: the length runs past the buffer | [`a_declared_length_running_past_the_buffer_is_an_unusable_length_not_an_absent_superbox`] | [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_length`] |
+    //! | [`jumbf_superbox_span`] | `checked_add`: offset plus declared length leaves `usize` | [`a_declared_length_that_overflows_the_buffer_offset_is_an_unusable_length`] | [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_span`] |
+    //! | [`jumbf_superbox_span`] | `end <= buffer.len()`: the length runs past the buffer | [`a_declared_length_running_past_the_buffer_is_an_unusable_length_not_an_absent_superbox`] | [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_span`] |
     //!
-    //! Two rows share an "accepts" column deliberately: the same input is the nearest non-refused
-    //! one for both, and splitting it would only give the second row a fixture that differs in a
-    //! byte neither branch reads.
+    //! Two things about the table read as gaps and are not. The last two rows share an "accepts"
+    //! column: the same input is the nearest non-refused one for both branches, and splitting it
+    //! would only give the second row a fixture differing in a byte neither branch reads. And one
+    //! test appears in both columns — [`an_lbox_of_zero_in_a_buffer_shorter_than_the_header_is_refused`]
+    //! is the *refused* side of the `LBox == 0` branch and the *accepted* side of the truncation
+    //! branch above it, because a 4-to-7-byte buffer is one whose `LBox` field was read
+    //! successfully and whose resulting length is then too short. Adjacent branches on the same
+    //! input share a boundary; that is what makes it a boundary.
     //!
     //! Two arms of [`declared_store_len`] refuse nothing and so appear in no row — the reserved
     //! `LBox` values, which resolve to a length rather than rejecting it. They are pinned by
@@ -642,10 +647,10 @@ mod tests {
     }
 
     #[test]
-    fn a_span_ending_exactly_at_the_end_of_the_buffer_is_a_length() {
+    fn a_span_ending_exactly_at_the_end_of_the_buffer_is_a_span() {
         // The accepted side of both of `jumbf_superbox_span`'s refusals: the sum stays inside
-        // `usize` and the end lands on the last byte. A bound that refused one byte too early
-        // would refuse this store, which is the shape every real store has.
+        // `usize` and the end lands on the last byte of the buffer. A bound that refused one byte
+        // too early would refuse this store, which is the shape every real store has.
         let buffer = superbox_at_the_start_of_the_buffer();
         assert_eq!(buffer.len(), 24, "the declared length is the whole buffer");
 
