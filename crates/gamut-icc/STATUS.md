@@ -129,13 +129,20 @@ lost: the coefficients describe a luma–chroma encoding the caller de-matrixes 
 applies, and they remain in the container signalling a decoder reads them from.
 
 `VideoFullRangeFlag` is **not** rewritten. A triple carrying anything but full range (`1`) is
-**declined**. §10.3's own RGB examples put the flag at zero (`1-1-0-0`, `9-16-0-0`), and read
+**declined**, and carrying it through unchanged instead would be non-conforming rather than merely
+inconsistent: §9.2.17 requires that "the colour encoding specified by the CICP tag content shall be
+equivalent to the data colour space encoding represented by this ICC profile", which a narrow-range
+triple beside full-scale colorants is not. §10.3's own RGB examples put the flag at zero (`1-1-0-0`, `9-16-0-0`), and read
 `1-1-0-0` closely: with `MatrixCoefficients` already zero it is a narrow range on the *RGB samples
 themselves*, which de-matrixing does not remove. This profile's colorants, `chad` and tone curves
 are all defined over full-scale RGB, so normalising the flag to `1` would return a profile that
 renders the caller's colour **wrongly**, not one that merely dropped metadata. Declining is what the
 crate already does for primaries it has no chromaticities for and for a transfer with no ICC tone
 curve. Callers holding narrow-range samples scale them to full range and pass `1`.
+
+`gray_with_gamma` writes no `cicpType` tag at all: §9.2.17 permits the tag only for an RGB, YCbCr
+or XYZ data colour space and says it shall not be present otherwise, and a monochrome profile's
+space is `GRAY`.
 
 **Grey gamma domain.** `gray_with_gamma` takes open `f64` input and declines anything the `kTRC`
 cannot carry *non-degenerately*. The bound is on the encoding of the §10.18 type 0 parameter, not

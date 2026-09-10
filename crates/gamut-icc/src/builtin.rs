@@ -94,6 +94,14 @@
 //! shape cannot describe. A caller holding narrow-range samples scales them to full range first,
 //! and then the triple it passes is one this module builds.
 //!
+//! Nor is carrying the flag through unchanged — the option that looks most conservative, since it
+//! discards nothing — merely inconsistent. §9.2.17 makes it **non-conforming**: the colour
+//! encoding a `cicpType` tag specifies *"shall be equivalent to the data colour space encoding
+//! represented by this ICC profile"*, and a narrow-range triple sitting beside full-scale
+//! colorants and tone curves is not equivalent to what the profile represents. There is no
+//! reading of the tag under which all three of "keep the flag", "keep the colorimetry" and
+//! "conform" hold together.
+//!
 //! # Which reading of transfer 1, 6, 14 and 15
 //!
 //! H.273 Table 3 defines those four code points as an **opto-electronic** function, and an ICC
@@ -570,6 +578,10 @@ impl IccProfile {
     /// A v4 monochrome display profile with a pure-gamma grey tone curve (`Y = X^gamma`).
     ///
     /// The white point is D50, so no chromatic adaptation is needed and no `chad` tag is written.
+    /// Nor is a `cicpType` tag: §9.2.17 permits it only when the data colour space in the header is
+    /// RGB, YCbCr or XYZ, and states that it *"shall not be present for other data colour spaces"*.
+    /// A monochrome profile's space is `GRAY`, so the tag's absence here is required rather than an
+    /// omission — and the CICP axes have nothing to say about a grey ramp anyway.
     ///
     /// Returns `None` for a `gamma` the `kTRC` cannot carry *as the caller wrote it*. The bound
     /// is the `s15Fixed16` encoding of the curve parameter rather than the number: `gamma` is
