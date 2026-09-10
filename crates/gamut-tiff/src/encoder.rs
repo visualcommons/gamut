@@ -141,18 +141,24 @@ impl TiffEncoder {
     ///
     /// **What this encoder writes, [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) reads
     /// back.** What could break the agreement is the caller's own Exif directory, which is the one
-    /// directory here this crate did not build, and three shapes of it are refused — each a typed
+    /// directory here this crate did not build, and four shapes of it are refused — each a typed
     /// [`Error::InvalidInput`] raised before any pixel work, with its own message, rather than a
     /// well-formed file this crate's own reader then rejects:
     ///
     /// * a **field** under one of the four standard pointer tags — `SubIFDs` (330), `ExifIFD`
-    ///   (34665), `GPSInfo` (34853), `InteroperabilityIFD` (40965) — whose type is a pointer's own
-    ///   (`LONG`, `IFD`, `LONG8`, `IFD8`). The reader decides "pointer" from the field, so it would
-    ///   follow that integer as an offset into a file it never came from. A value of any other
-    ///   type under those tags is not a pointer to either side, and is written and read back
-    ///   unchanged;
+    ///   (34665), `GPSInfo` (34853), `InteroperabilityIFD` (40965) — whose **on-disk type code**
+    ///   is a pointer's own (`LONG` 4, `IFD` 13, `LONG8` 16, `IFD8` 18). The reader decides
+    ///   "pointer" from the entry it parses, so it would follow that integer as an offset into a
+    ///   file it never came from. The code and not the [`Value`](gamut_ifd::Value) variant is what
+    ///   is checked, because a `Value::Unknown` carries an arbitrary code beside its word and the
+    ///   writer emits that code verbatim. A value of any other type under those tags is not a
+    ///   pointer to either side, and is written and read back unchanged;
     /// * a **group** under any other tag: the reader resolves only those four inside the Exif
     ///   subtree, so a group elsewhere comes back as the raw offset this encoder gave it;
+    /// * a tag carrying **both** a field and a group: that is two entries under one tag, which
+    ///   TIFF 6.0 §2 does not allow, and readers disagree about which one survives — this crate
+    ///   keeps the last, libtiff the first — so the field the caller set is dropped by at least
+    ///   one of them;
     /// * a directory nested **below** the `ExifIFD` → `InteroperabilityIFD` pair (EXIF 2.3
     ///   §4.6.3), which is as deep as the reader walks.
     #[must_use]

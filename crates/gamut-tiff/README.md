@@ -71,7 +71,9 @@ compression schemes land additively on this frozen surface (see Status).
   (`ExifIFD`, 34665, as a `gamut_ifd::Ifd`) plus opaque XMP (700), IPTC-IIM (33723), ICC (34675)
   and C2PA (52545) payloads — the raw blocks the workspace's metadata facade consumes. Byte
   payloads are verbatim; the Exif directory's *entries* are carried unchanged but its ordering is
-  normalised (ascending tag, duplicate tags collapsed, a child's next-IFD pointer ignored). The
+  normalised (ascending tag, duplicate tags collapsed, a child's next-IFD pointer ignored), and a
+  tag the caller gave both a field and a sub-IFD group is refused rather than normalised — that
+  would be two entries under one tag, and no reader keeps both. The
   blocks live in **IFD 0 only**, so a reader decoding page 3 of a multi-page document alone must
   look at IFD 0 for them.
   Which pointers are resolved depends on the level, because the two levels answer opposite
@@ -87,13 +89,16 @@ compression schemes land additively on this frozen surface (see Status).
   What the encoder writes the decoder reads back, and the writer is bounded by exactly what the
   reader would misread. The Exif directory may nest one further directory
   (`InteroperabilityIFD`, EXIF 2.3 §4.6.3, is the one a camera writes), which is as deep as the
-  reader walks; it may hang a group only off a standard pointer tag; and it may not carry a
-  *plain field* under one of those four tags whose type is a pointer's own (`LONG`, `IFD`,
-  `LONG8`, `IFD8`), because the reader decides "pointer" from the field and would follow that
-  integer as a file offset. A value of any other type under those tags is not a pointer to either
-  side and round-trips unchanged. A caller's directory nested deeper, hung off any other tag, or
-  carrying such a field is refused by the encode — with its own message per case — rather than
-  written into a file this crate could not read back unchanged.
+  reader walks; it may hang a group only off a standard pointer tag; it may not give one tag both
+  a field and a group; and it may not carry a *plain field* under one of those four tags whose
+  **on-disk type code** is a pointer's own (`LONG` 4, `IFD` 13, `LONG8` 16, `IFD8` 18), because
+  the reader decides "pointer" from the entry it parses and would follow that integer as a file
+  offset. It is the code and not the in-memory `Value` variant that is checked, since a
+  `Value::Unknown` carries an arbitrary code beside its word and the writer emits that code
+  verbatim. A value of any other type under those tags is not a pointer to either side and
+  round-trips unchanged. A caller's directory nested deeper, hung off any other tag, repeating a
+  tag, or carrying such a field is refused by the encode — with its own message per case — rather
+  than written into a file this crate could not read back unchanged.
   The C2PA manifest store follows C2PA 2.4 §A.3.6 through the shared `gamut_ifd::c2pa` helper it
   and `gamut-dng` both call: the entry in the last IFD of the main
   chain, the store at the end of the file, and the two §18.5.5 exclusion ranges reported by
