@@ -151,7 +151,12 @@ fn every_rung_stores_the_pixels_it_was_handed() {
         for preset in ladder() {
             let png = encode(&PngEncoder::new().with_preset(preset), &row);
             let (w, h, rgba) = libpng_oracle::decode_rgba8(&png);
-            assert_eq!((w, h), (row.side, row.side), "{}/{preset:?}: size", row.name);
+            assert_eq!(
+                (w, h),
+                (row.side, row.side),
+                "{}/{preset:?}: size",
+                row.name
+            );
             assert!(
                 rgba == expected,
                 "{}/{preset:?}: a rung changed what the file stores",
