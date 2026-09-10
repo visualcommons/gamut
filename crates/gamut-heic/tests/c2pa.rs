@@ -256,6 +256,35 @@ fn a_report_line_never_carries_a_stores_bytes() {
 }
 
 #[test]
+fn a_summary_holds_no_borrow_of_the_file_it_describes() {
+    // Drift guard for the same guarantee one step earlier: the rendering above can only see bytes
+    // a rendering actually emits, whereas the risk is a byte field added years from now to one of
+    // these `#[non_exhaustive]` types. `'static` is exactly "borrows nothing".
+    //
+    // The bound has to be taken on values produced from a buffer that is *local*. Given a
+    // hand-built value — `C2paSummary::default()`, or a struct literal — inference is free to
+    // choose `'static` for a lifetime parameter the type does not have today, so the bound is
+    // satisfied trivially and a type that grew a borrowing field would still compile. Produced
+    // from `data`, the lifetime is forced to `data`'s and such a field stops this compiling.
+    fn borrows_nothing<T: 'static>(_: &T) {}
+
+    let data = file_with(&[
+        c2pa_box("manifest", Some(0), &store(), &[]),
+        c2pa_box("merkle", Some(0), &store(), &[]),
+    ]);
+    let c = HeifContainer::parse(&data).unwrap();
+    let summary = c.c2pa_summary();
+    // Both element types have to be reached through a real summary for the same reason: a literal
+    // would let inference pick the lifetime again.
+    assert_eq!(summary.stores.len(), 1, "the fixture must carry a store");
+    assert_eq!(summary.unread.len(), 1, "and an unread C2PA box");
+
+    borrows_nothing(&summary);
+    borrows_nothing(&summary.stores[0]);
+    borrows_nothing(&summary.unread[0]);
+}
+
+#[test]
 fn a_file_with_no_c2pa_box_summarises_as_absent() {
     let data = file_with(&[]);
     let c = HeifContainer::parse(&data).unwrap();
