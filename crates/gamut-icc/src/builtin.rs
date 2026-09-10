@@ -415,7 +415,14 @@ fn pcs_d50_chromaticity() -> [f64; 2] {
 }
 
 /// The D50-adapted colorant columns for `primaries`, and the chromatic-adaptation matrix that took
-/// them there — the `rXYZ`/`gXYZ`/`bXYZ` (§9.2.10) and `chad` (§9.2.35) tag contents.
+/// them there — the `rXYZ`/`gXYZ`/`bXYZ` (ICC.1:2022 §9.2.46, §9.2.31, §9.2.4) and `chad`
+/// (§9.2.15) tag contents.
+///
+/// Those are the numbers the standard's clause **headings** carry. ICC.1:2022 numbers two of the
+/// same clauses differently where §8.4.3 cross-references them (9.2.44 for `redMatrixColumnTag`,
+/// 9.2.30 for `greenMatrixColumnTag`) — an erratum in the published document, not two editions.
+/// Every §9.2.x citation in this crate uses the heading numbering. No gate checks that yet;
+/// <https://github.com/visualcommons/gamut/issues/606> is the one that would.
 ///
 /// `None` when the primaries cannot be turned into colorants at all: a code point that names no
 /// chromaticities ([`ColourPrimaries::Unspecified`], and any later variant `gamut-color` adds
