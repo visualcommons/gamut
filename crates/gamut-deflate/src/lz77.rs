@@ -89,6 +89,42 @@ impl Matcher {
     /// prune in front of it is still a single byte: it rejects most candidates outright, and a
     /// wide read there would touch bytes past `best_len` for nothing.
     fn find(&self, data: &[u8], pos: usize, max_chain: usize, limit: usize) -> Option<(u16, u16)> {
+        self.walk(data, pos, max_chain, limit, None)
+    }
+
+    /// [`find`](Self::find), and additionally fills `sublen` so that `sublen[len]` is the
+    /// **nearest** distance at which a match of at least `len` bytes exists, for every `len` from
+    /// `MIN_MATCH` up to the returned longest length; every other entry is `0`.
+    ///
+    /// The table is what lets the optimal parse price a short match at its own cheapest distance
+    /// instead of at the distance of the longest one (zopfli's `sublen`). The chain is walked
+    /// nearest-first and a candidate only records the lengths it is the first to reach, so the
+    /// first candidate reaching a length is the nearest that does.
+    ///
+    /// The table is caller-owned so a parse can allocate it once and reuse it at every position.
+    fn find_sublen(
+        &self,
+        data: &[u8],
+        pos: usize,
+        max_chain: usize,
+        limit: usize,
+        sublen: &mut [u16; MAX_MATCH + 1],
+    ) -> Option<(u16, u16)> {
+        sublen.fill(0);
+        self.walk(data, pos, max_chain, limit, Some(sublen))
+    }
+
+    /// The chain walk shared by [`find`](Self::find) and [`find_sublen`](Self::find_sublen): the
+    /// longest match, plus the per-length nearest distances when a table is supplied. The table is
+    /// optional so the lazy parser, which needs only the longest match, pays nothing for it.
+    fn walk(
+        &self,
+        data: &[u8],
+        pos: usize,
+        max_chain: usize,
+        limit: usize,
+        mut sublen: Option<&mut [u16; MAX_MATCH + 1]>,
+    ) -> Option<(u16, u16)> {
         if pos + MIN_MATCH > limit {
             return None;
         }
@@ -111,8 +147,14 @@ impl Matcher {
                 // `c < pos`, so both windows end at or before `limit <= data.len()`.
                 let len = common_prefix_len(&data[c..c + max_len], &data[pos..pos + max_len]);
                 if len > best_len {
+                    let dist = pos - c;
+                    // Lengths up to `best_len` were reached by a nearer candidate already; this one
+                    // is the first -- hence the nearest -- to reach `best_len + 1..=len`.
+                    if let Some(table) = sublen.as_deref_mut() {
+                        table[best_len + 1..=len].fill(dist as u16);
+                    }
                     best_len = len;
-                    best_dist = pos - c;
+                    best_dist = dist;
                     if len >= max_len {
                         break; // can't do better than the maximum
                     }
@@ -310,6 +352,8 @@ fn parse_dp(
     f[0] = 0;
     let mut matcher = Matcher::new();
     matcher.prime(data, start);
+    // The per-length nearest-distance table, allocated once and refilled at every position.
+    let mut sublen = [0u16; MAX_MATCH + 1];
     for i in 0..n {
         let fi = f[i];
         // A literal always advances one byte.
@@ -319,13 +363,21 @@ fn parse_dp(
             blen[i + 1] = 0;
             bdist[i + 1] = 0;
         }
-        let found = matcher.find(data, start + i, max_chain, end);
+        let found = matcher.find_sublen(data, start + i, max_chain, end, &mut sublen);
         matcher.insert(data, start + i);
-        if let Some((max_len, dist)) = found {
-            let (dsym, dbits, _) = symbols::distance_code(dist);
-            let dcost = u64::from(dist_cost[dsym as usize]) + u64::from(dbits);
-            // Every length from MIN_MATCH up to the longest match is reachable at this distance.
+        if let Some((max_len, _)) = found {
+            // Every length from MIN_MATCH up to the longest match is reachable, each at its own
+            // nearest distance: a short match need not pay the distance code of the longest one.
+            // The distance is non-decreasing in the length and changes only a few times over the
+            // range, so its cost is re-derived only when it does.
+            let mut dist = 0u16;
+            let mut dcost = 0u64;
             for len in MIN_MATCH..=max_len as usize {
+                if sublen[len] != dist {
+                    dist = sublen[len];
+                    let (dsym, dbits, _) = symbols::distance_code(dist);
+                    dcost = u64::from(dist_cost[dsym as usize]) + u64::from(dbits);
+                }
                 let (lsym, lbits, _) = symbols::length_code(len as u16);
                 let cost = fi + u64::from(lit_cost[lsym as usize]) + u64::from(lbits) + dcost;
                 if cost < f[i + len] {
@@ -409,6 +461,71 @@ mod tests {
         assert_eq!(common_prefix_len(&a, &a), 19);
         assert_eq!(common_prefix_len(&a[..16], &a[..16]), 16);
         assert_eq!(common_prefix_len(&a[..11], &a), 11);
+    }
+
+    /// Two candidates for the final `abcde`: the nearer (`abcX`, distance 7) reaches length 3, the
+    /// farther (`abcde`, distance 15) reaches 5. Each length must be recorded at the nearest
+    /// distance that achieves it -- 3 at 7, and 4 and 5 at 15 -- with the longest match unchanged
+    /// and every length past it left at zero.
+    #[test]
+    fn find_sublen_records_each_length_at_its_nearest_distance() {
+        let data = b"abcdeQQQabcXQQQabcde";
+        let pos = 15;
+        let mut matcher = Matcher::new();
+        matcher.prime(data, pos);
+        let mut sublen = [0xFFFFu16; MAX_MATCH + 1];
+        let found = matcher.find_sublen(data, pos, 128, data.len(), &mut sublen);
+        assert_eq!(found, Some((5, 15)));
+        assert_eq!(found, matcher.find(data, pos, 128, data.len()));
+        assert_eq!(
+            sublen[MIN_MATCH], 7,
+            "length 3 is reachable at the nearer candidate"
+        );
+        assert_eq!(sublen[4], 15);
+        assert_eq!(sublen[5], 15);
+        assert!(
+            sublen[..MIN_MATCH].iter().all(|&d| d == 0) && sublen[6..].iter().all(|&d| d == 0),
+            "lengths with no match are zero"
+        );
+    }
+
+    /// With far distance codes priced high and near ones low, the shortest path through the second
+    /// `abc` of `abcabcde` is a length-3 match at distance 3 plus two literals (9 + 16 = 25 bits),
+    /// not the longest match: length 5 back to the opening `abcde`, 44 bytes away, costs 8 + 15 +
+    /// 4 extra bits = 27 for the same five bytes. That holds only when length 3 is offered at its
+    /// own distance -- relaxed at the longest match's distance it costs 27 as well and the far
+    /// match wins -- so this pins that the DP sees the nearer one.
+    #[test]
+    fn optimal_parse_takes_a_short_match_at_its_nearer_distance() {
+        let mut data = b"abcde".to_vec();
+        data.extend(0x80u8..0xA4); // 36 distinct bytes: no repeated 3-gram, no match
+        data.extend_from_slice(b"abcabcde");
+        let far = 44;
+        assert_eq!(&data[far - 3..far], b"abc");
+        assert_eq!(&data[far..], b"abcde");
+        // Literals and length symbols: 8 bits each. Distances 1..=4 (codes 0..=3): 1 bit; every
+        // other distance code: 15 bits (plus its extra bits).
+        let lit_cost = vec![8u16; 286];
+        let mut dist_cost = vec![15u16; 30];
+        dist_cost[..4].fill(1);
+        let tokens = parse_dp(&data, 0, data.len(), 128, &lit_cost, &dist_cost);
+        let leading = far; // "abcde", the filler and the first "abc" are all literals
+        assert!(
+            tokens[..leading]
+                .iter()
+                .all(|t| matches!(t, Token::Literal(_))),
+            "{tokens:?}"
+        );
+        assert_eq!(
+            &tokens[leading..],
+            &[
+                Token::Match { len: 3, dist: 3 },
+                Token::Literal(b'd'),
+                Token::Literal(b'e')
+            ],
+            "the short match must take the near distance"
+        );
+        assert_eq!(reconstruct(&tokens), data);
     }
 
     #[test]
