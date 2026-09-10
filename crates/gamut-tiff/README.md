@@ -68,19 +68,29 @@ compression schemes land additively on this frozen surface (see Status).
   (+ horizontal differencing on strips or tiles), plus the bilevel CCITT schemes Modified Huffman
   (Group 3 1-D) and Group 4 (T.6).
 - **Metadata** — `TiffEncoder::with_metadata` / `TiffDecoder::metadata` carry an Exif sub-IFD
-  (`ExifIFD`, 34665, as a `gamut_ifd::Ifd`, its own `InteroperabilityIFD` resolved into a child
-  directory rather than a stale offset; other pointer tags, whose targets the seam does not
-  return, are left alone so a broken one cannot hide the blocks) plus opaque XMP (700),
-  IPTC-IIM (33723), ICC (34675) and
-  C2PA (52545) payloads — the raw blocks the workspace's metadata facade consumes. Byte payloads
-  are verbatim; the Exif directory's *entries* are carried unchanged but its ordering is
+  (`ExifIFD`, 34665, as a `gamut_ifd::Ifd`) plus opaque XMP (700), IPTC-IIM (33723), ICC (34675)
+  and C2PA (52545) payloads — the raw blocks the workspace's metadata facade consumes. Byte
+  payloads are verbatim; the Exif directory's *entries* are carried unchanged but its ordering is
   normalised (ascending tag, duplicate tags collapsed, a child's next-IFD pointer ignored). The
   blocks live in **IFD 0 only**, so a reader decoding page 3 of a multi-page document alone must
-  look at IFD 0 for them. What the encoder writes the decoder reads back: the Exif directory may
-  nest the one further directory `InteroperabilityIFD` (EXIF 2.3 §4.6.3), which is as deep as the
-  reader walks, and a caller's directory nested deeper is refused by the encode rather than
-  written into a file this crate could not read. The C2PA manifest store follows C2PA 2.4 §A.3.6 through the shared
-  `gamut_ifd::c2pa` helper it and `gamut-dng` both call: the entry in the last IFD of the main
+  look at IFD 0 for them.
+  Which pointers are resolved depends on the level, because the two levels answer opposite
+  questions. **Inside the returned Exif directory all four standard pointer tags** — `SubIFDs`
+  (330), `ExifIFD` (34665), `GPSInfo` (34853), `InteroperabilityIFD` (40965) — come back as child
+  directories rather than as stale offsets, since anything left unresolved there is handed to the
+  caller as an absolute offset into the source file. **At IFD 0 only `ExifIFD` is followed**,
+  since no other target feeds the seam and a broken one would otherwise hide the blocks. The price
+  is stated: inside the Exif directory an unreadable target under any of the four fails the read.
+  A *vendor-private* tag whose value happens to be an offset is not a pointer to anything this
+  crate can see, so it is carried through and re-encoded verbatim, still holding the source file's
+  offset — a round trip through such a field is **not** proof the result is pointer-safe.
+  What the encoder writes the decoder reads back: the Exif directory may nest one further
+  directory (`InteroperabilityIFD`, EXIF 2.3 §4.6.3, is the one a camera writes), which is as deep
+  as the reader walks, and it may hang that group only off a standard pointer tag. A caller's
+  directory nested deeper, or hung off any other tag, is refused by the encode — with its own
+  message per case — rather than written into a file this crate could not read back unchanged.
+  The C2PA manifest store follows C2PA 2.4 §A.3.6 through the shared `gamut_ifd::c2pa` helper it
+  and `gamut-dng` both call: the entry in the last IFD of the main
   chain, the store at the end of the file, and the two §18.5.5 exclusion ranges reported by
   `TiffEncoder::encode_with_report` or recovered from any file by `gamut_tiff::c2pa_exclusions`.
   `with_c2pa_reserved` writes a zero-filled reservation for an external signer to overwrite in
