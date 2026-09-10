@@ -436,6 +436,7 @@ impl PngDecoder {
             exif: meta.exif,
             icc_profile: meta.icc_profile,
             xmp: meta.xmp,
+            xmp_framing: meta.xmp_framing,
             c2pa: meta.c2pa,
             c2pa_ignored: meta.c2pa_ignored,
             texts: meta.texts,

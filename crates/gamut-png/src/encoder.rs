@@ -32,7 +32,7 @@ use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
 use crate::decoded::{
-    Chromaticities, Cicp, DecodedPng, IccProfile, PngMetadata, TextChunk, TextChunkKind,
+    Chromaticities, Cicp, DecodedPng, IccProfile, PngMetadata, TextChunk, TextChunkKind, XmpFraming,
 };
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::PngPalette;
@@ -87,6 +87,9 @@ struct MetadataView<'a> {
     exif: Option<&'a [u8]>,
     icc_profile: Option<&'a IccProfile>,
     xmp: Option<&'a [u8]>,
+    /// How the source framed its XMP packet (§11.3.3.4): compression flag, language tag,
+    /// translated keyword. Carried beside the packet because the packet has its own field.
+    xmp_framing: Option<&'a XmpFraming>,
     texts: &'a [TextChunk],
     gamma: Option<u32>,
     chromaticities: Option<Chromaticities>,
@@ -97,33 +100,66 @@ struct MetadataView<'a> {
     c2pa: bool,
 }
 
-/// A metadata payload [`PngEncoder::with_metadata`] could not carry into the output.
+/// Something [`PngEncoder::with_metadata`] could not do faithfully with a payload it was given.
 ///
-/// Preservation exists to stop metadata disappearing quietly, so the two payloads a carry cannot
-/// take are named rather than dropped in silence. Read them back with
-/// [`PngEncoder::dropped_metadata`] and tell the user — `gamut convert` does.
+/// Preservation exists to stop metadata disappearing quietly, so anything a carry cannot take —
+/// and anything it takes only by writing bytes the specification does not endorse — is named
+/// rather than passed over. Read them back with [`PngEncoder::metadata_notices`] and tell the
+/// user; `gamut convert` does. [`carried`](Self::carried) separates the two cases: a payload
+/// left behind from one that reached the output with a caveat on it.
+///
+/// This is deliberately **not** an error channel. The only thing that stops an encode is a null
+/// byte in a text field, which makes the chunk re-parse as a different annotation; everything
+/// here is something a caller has to *know*, not something that should fail a conversion whose
+/// pixels are fine.
 ///
 /// `#[repr(u8)]` with explicit discriminants, which are permanent and append-only: the value
 /// crosses the C ABI as a plain integer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 #[non_exhaustive]
-pub enum DroppedMetadata {
-    /// A `cICP` whose matrix coefficients are not 0. §11.3.2.6 requires 0 for PNG — "RGB is
-    /// currently the only supported color model in PNG, and as such Matrix Coefficients shall be
-    /// set to 0" — so the source chunk is not conforming and copying it forward would reproduce
-    /// the defect in a file this encoder signed off on.
+pub enum MetadataNotice {
+    /// A `cICP` whose matrix coefficients are not 0, left behind. §11.3.2.6 requires 0 for PNG —
+    /// "RGB is currently the only supported color model in PNG, and as such Matrix Coefficients
+    /// shall be set to 0" — so the source chunk is not conforming and copying it forward would
+    /// reproduce the defect in a file this encoder signed off on.
     NonRgbCicp = 0,
-    /// The C2PA manifest store (`caBX`). A store is signed over the exact bytes of the file it
-    /// was made for, which is why C2PA 2.4 §A.3.2 marks the chunk unsafe to copy: carried into a
-    /// re-encode it is invalid by construction, and a validator reports a *tampered* file rather
-    /// than an unsigned one. Re-sign the output and set it with
+    /// The C2PA manifest store (`caBX`), left behind. A store is signed over the exact bytes of
+    /// the file it was made for, which is why C2PA 2.4 §A.3.2 marks the chunk unsafe to copy:
+    /// carried into a re-encode it is invalid by construction, and a validator reports a
+    /// *tampered* file rather than an unsigned one. Re-sign the output and set it with
     /// [`with_c2pa`](PngEncoder::with_c2pa).
     C2paManifestStore = 1,
+    /// A text annotation left behind because its keyword holds a character Latin-1 cannot
+    /// encode. §11.3.3.1 binds the keyword to Latin-1 in *all three* text chunks, so unlike the
+    /// text — which §11.3.3.2 routes to `iTXt` — there is no chunk that could carry it.
+    TextKeywordNotLatin1 = 2,
+    /// A text annotation left behind because its keyword is empty or longer than the 79 bytes
+    /// §11.3.3.1 allows. All three chunks fix that field at 1–79 bytes, so a reader — this
+    /// crate's own included — drops the whole chunk rather than reading a longer one.
+    TextKeywordLength = 3,
+    /// A text annotation **written**, whose keyword leaves the repertoire §11.3.3.1 recommends
+    /// ("only code points 0x20-7E and 0xA1-FF are allowed", and expressly "nor is U+00A0
+    /// NON-BREAKING SPACE"). The keyword is written exactly as it arrived — this crate reads it
+    /// back unchanged — but another reader need not be so forgiving.
+    TextKeywordRepertoire = 4,
+    /// A text annotation **written**, whose keyword has a leading, trailing or consecutive
+    /// space, which §11.3.3.1 says are "not permitted in keywords" so that one keyword cannot be
+    /// misread as another. Written as it arrived, for the same reason as
+    /// [`TextKeywordRepertoire`](Self::TextKeywordRepertoire).
+    TextKeywordSpacing = 5,
+    /// A text annotation **written without its `iTXt` language tag**, because the tag was not
+    /// the ASCII shape §11.3.3.4 requires ("a well-formed language tag defined by [BCP47]").
+    /// Written as UTF-8 into a field a reader takes as Latin-1 the tag would not survive the
+    /// trip; an empty tag is §11.3.3.4's own way of saying the language is unspecified.
+    ItxtLanguageTag = 6,
+    /// An XMP packet left behind because it is not UTF-8. §11.3.3.4 gives the `iTXt` text field
+    /// UTF-8 and no alternative, so there is no chunk to frame it in.
+    XmpNotUtf8 = 7,
 }
 
-impl DroppedMetadata {
-    /// One line naming what was left behind and why, fit to show a user.
+impl MetadataNotice {
+    /// One line naming the payload and what happened to it, fit to show a user.
     #[must_use]
     pub fn reason(self) -> &'static str {
         match self {
@@ -134,11 +170,48 @@ impl DroppedMetadata {
                 "C2PA manifest store: signed over the source bytes, so a copy would be invalid \
                  (C2PA 2.4 §A.3.2) — re-sign the output"
             }
+            Self::TextKeywordNotLatin1 => {
+                "text annotation: its keyword is not Latin-1, which every text chunk requires \
+                 (§11.3.3.1)"
+            }
+            Self::TextKeywordLength => {
+                "text annotation: its keyword is not 1 to 79 bytes, the length every text chunk \
+                 fixes (§11.3.3.1)"
+            }
+            Self::TextKeywordRepertoire => {
+                "text annotation: written, but its keyword leaves the code points 0x20-0x7E and \
+                 0xA1-0xFF §11.3.3.1 recommends — another reader may reject it"
+            }
+            Self::TextKeywordSpacing => {
+                "text annotation: written, but its keyword has a leading, trailing or \
+                 consecutive space, which §11.3.3.1 does not permit"
+            }
+            Self::ItxtLanguageTag => {
+                "text annotation: written without its language tag, which was not the BCP 47 \
+                 shape §11.3.3.4 requires"
+            }
+            Self::XmpNotUtf8 => {
+                "XMP packet: not UTF-8, and an iTXt text string must be (§11.3.3.4)"
+            }
         }
+    }
+
+    /// Whether the payload still reached the output.
+    ///
+    /// `false` means it was left behind entirely; `true` means it was written, with the caveat
+    /// [`reason`](Self::reason) gives. A caller showing these to a user needs the difference —
+    /// "this did not come along" and "this came along in a form some readers dislike" call for
+    /// different action.
+    #[must_use]
+    pub fn carried(self) -> bool {
+        matches!(
+            self,
+            Self::TextKeywordRepertoire | Self::TextKeywordSpacing | Self::ItxtLanguageTag
+        )
     }
 }
 
-impl core::fmt::Display for DroppedMetadata {
+impl core::fmt::Display for MetadataNotice {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.reason())
     }
@@ -154,9 +227,11 @@ pub struct PngEncoder {
     auto_reduce: bool,
     clean_transparent: bool,
     backends: Registry<dyn IdatDeflater + Send>,
-    /// What the last metadata carry could not take, in the order it was found. Reset by each
-    /// [`Self::with_metadata`] / [`Self::with_metadata_from`] call, so it describes that call.
-    dropped: Vec<DroppedMetadata>,
+    /// What the last metadata carry could not take *as a whole payload*, in the order it was
+    /// found. Reset by each [`Self::with_metadata`] / [`Self::with_metadata_from`] call, so it
+    /// describes that call. Per-annotation notices live with their annotation instead, so that a
+    /// second carry replaces them exactly as it replaces the annotations themselves.
+    carry_notices: Vec<MetadataNotice>,
 }
 
 impl Default for PngEncoder {
@@ -178,7 +253,7 @@ impl PngEncoder {
             auto_reduce: false,
             clean_transparent: false,
             backends: Registry::default(),
-            dropped: Vec::new(),
+            carry_notices: Vec::new(),
         }
     }
 
@@ -468,7 +543,11 @@ impl PngEncoder {
     /// the XMP/RDF document — for example the bytes produced by `gamut-xmp`.
     #[must_use]
     pub fn with_xmp(mut self, xmp: &str) -> Self {
-        self.ancillary.add_xmp(xmp.as_bytes());
+        // §11.3.3.1 Table 21: "The use of iTXt, with Compression Flag set to 0, and both Language
+        // Tag and Translated Keyword set to the null string, are recommended for XMP compliance."
+        // A packet read out of a file that framed it otherwise keeps its framing; this entry
+        // point has no framing to keep, so it takes the recommended one.
+        self.ancillary.add_xmp(xmp.as_bytes(), "", "", false);
         self
     }
 
@@ -491,18 +570,24 @@ impl PngEncoder {
     /// together — §4.3 Table 1 ranks the colour chunks precisely so a file may carry more than
     /// one, and a reader honours the lowest priority number. Each text annotation goes back into
     /// the chunk it came out of, compressed if it was compressed
-    /// ([`TextChunkKind`](crate::TextChunkKind)).
+    /// ([`TextChunkKind`](crate::TextChunkKind)); so does the XMP packet, whose own framing —
+    /// compression flag, language tag, translated keyword — rides in
+    /// [`XmpFraming`](crate::XmpFraming).
     ///
-    /// Two payloads cannot be carried, and both are **named** rather than dropped in silence —
-    /// read them back with [`dropped_metadata`](Self::dropped_metadata):
+    /// Two payloads cannot be carried at all, and neither is dropped in silence — read them back
+    /// with [`metadata_notices`](Self::metadata_notices):
     ///
     /// - a **`cICP` whose matrix coefficients are not 0**, which §11.3.2.6 does not allow in PNG;
     /// - the **C2PA manifest store**, signed over the bytes of the file it was made for.
     ///
-    /// Anything that would be *corrupted* rather than lost — a keyword outside §11.3.3.1's
-    /// repertoire, a null inside a text string, an XMP packet that is not UTF-8 — makes the
-    /// encode fail with [`Error::InvalidInput`] naming the annotation, rather than being written
-    /// as something a reader reads back differently.
+    /// A text annotation whose keyword or XMP packet §11.3.3 does not endorse is reported through
+    /// the same channel rather than failing the carry: a keyword outside §11.3.3.1's repertoire
+    /// or spacing rules is written as it arrived, a keyword no chunk can hold and an XMP packet
+    /// that is not UTF-8 are left behind, and
+    /// [`MetadataNotice::carried`](MetadataNotice::carried) says which happened. **Only a null**
+    /// in a keyword or text string fails the encode with [`Error::InvalidInput`] naming the
+    /// annotation — the null is the field separator, so the chunk would be read back as a
+    /// *different* annotation, which no notice can undo.
     ///
     /// One further limit is the read side's, not this method's: `pHYs`, `tIME`, `sBIT` and `bKGD`
     /// are not part of [`PngMetadata`], so they cannot be carried here (set them with their own
@@ -513,6 +598,7 @@ impl PngEncoder {
             exif: metadata.exif.as_deref(),
             icc_profile: metadata.icc_profile.as_ref(),
             xmp: metadata.xmp.as_deref(),
+            xmp_framing: metadata.xmp_framing.as_ref(),
             texts: &metadata.texts,
             gamma: metadata.gamma,
             chromaticities: metadata.chromaticities,
@@ -533,6 +619,7 @@ impl PngEncoder {
             exif: decoded.exif.as_deref(),
             icc_profile: decoded.icc_profile.as_ref(),
             xmp: decoded.xmp.as_deref(),
+            xmp_framing: decoded.xmp_framing.as_ref(),
             texts: &decoded.texts,
             gamma: decoded.gamma,
             chromaticities: decoded.chromaticities,
@@ -542,22 +629,30 @@ impl PngEncoder {
         })
     }
 
-    /// What the last [`with_metadata`](Self::with_metadata) /
-    /// [`with_metadata_from`](Self::with_metadata_from) call could not carry, in the order it was
-    /// found — empty when it carried everything, and reset by each call.
+    /// What this encoder could not carry faithfully: whole payloads left behind, then the
+    /// per-annotation notices, in the order they were found — empty when everything came along
+    /// intact.
     ///
     /// Surface this to whoever asked for the re-encode. Losing metadata without saying so is the
-    /// defect the preservation path exists to remove; losing it *with* an explanation is a
-    /// choice the spec forces.
+    /// defect the preservation path exists to remove; losing it — or bending it — *with* an
+    /// explanation is a choice the spec forces. Use
+    /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
+    ///
+    /// The payload-level notices describe the last [`with_metadata`](Self::with_metadata) /
+    /// [`with_metadata_from`](Self::with_metadata_from) call and are reset by each; the
+    /// per-annotation notices belong to the annotations still accumulated, so they follow the
+    /// same replace-not-append rule a carry gives the text list.
     #[must_use]
-    pub fn dropped_metadata(&self) -> &[DroppedMetadata] {
-        &self.dropped
+    pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
+        let mut notices = self.carry_notices.clone();
+        notices.extend(self.ancillary.text_notices());
+        notices
     }
 
     /// The one implementation behind [`with_metadata`](Self::with_metadata) and
     /// [`with_metadata_from`](Self::with_metadata_from).
     fn with_metadata_view(mut self, meta: MetadataView<'_>) -> Self {
-        self.dropped.clear();
+        self.carry_notices.clear();
         self.ancillary.begin_carry();
         if let Some(exif) = meta.exif {
             self = self.with_exif(exif);
@@ -577,7 +672,7 @@ impl PngEncoder {
             // otherwise is not a conforming cICP; carrying it forward would put the same defect
             // in the output.
             Some(cicp) if cicp.matrix_coefficients != 0 => {
-                self.dropped.push(DroppedMetadata::NonRgbCicp);
+                self.carry_notices.push(MetadataNotice::NonRgbCicp);
             }
             Some(cicp) => {
                 self = self.with_cicp(
@@ -589,7 +684,7 @@ impl PngEncoder {
             None => {}
         }
         if meta.c2pa {
-            self.dropped.push(DroppedMetadata::C2paManifestStore);
+            self.carry_notices.push(MetadataNotice::C2paManifestStore);
         }
         // Set in the stored ×100 000 fixed-point units rather than through `with_gamma` /
         // `with_chromaticities`, whose `f64` arguments would round-trip the value through a
@@ -609,10 +704,21 @@ impl PngEncoder {
                 chrm.blue.1,
             ]);
         }
-        // Handed over as bytes, because that is what the chunk held. §11.3.3.4 requires UTF-8, so
-        // a packet that is not gets a refusal at `encode` naming it — never a silent drop.
+        // Handed over as bytes, because that is what the chunk held, and with the framing its
+        // chunk gave it — above all §11.3.3.4's compression flag, without which a packet stored
+        // as 71 compressed bytes is rewritten as the 4 045 it inflates to. §11.3.3.4 requires
+        // UTF-8, so a packet that is not is reported by `metadata_notices` — never a silent drop.
         if let Some(xmp) = meta.xmp {
-            self.ancillary.add_xmp(xmp);
+            let (language, translated, compressed) =
+                meta.xmp_framing.map_or(("", "", false), |f| {
+                    (
+                        f.language.as_deref().unwrap_or_default(),
+                        f.translated_keyword.as_deref().unwrap_or_default(),
+                        f.compressed,
+                    )
+                });
+            self.ancillary
+                .add_xmp(xmp, language, translated, compressed);
         }
         for text in meta.texts {
             let (language, translated) = (

@@ -90,9 +90,10 @@ pub(crate) struct ConvertArgs {
     /// re-encoded to PNG keeps its EXIF, ICC profile, XMP packet, text annotations and colour
     /// chunks; a stripped file is smaller, an unstripped one is colour-accurate, so the default
     /// is the one that loses nothing. Anything that cannot be carried — the C2PA manifest store,
-    /// signed over the bytes of the file it was made for — is reported on stderr rather than
-    /// dropped in silence. Currently applies only to the PNG output path with a PNG input; every
-    /// other pair drops metadata regardless.
+    /// signed over the bytes of the file it was made for — and anything carried in a shape the
+    /// PNG specification does not endorse is reported on stderr rather than passed over in
+    /// silence. Currently applies only to the PNG output path with a PNG input; every other pair
+    /// drops metadata regardless.
     #[arg(long)]
     strip_metadata: bool,
 }
@@ -268,11 +269,15 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                     "carrying input metadata"
                 );
                 encoder = encoder.with_metadata(metadata);
-                // Say what could not come along. Silent loss is the defect this path exists to
-                // remove, and a payload the spec forbids carrying is still a payload the caller
-                // had.
-                for dropped in encoder.dropped_metadata() {
-                    tracing::warn!("input metadata not carried — {dropped}");
+                // Say what could not come along, and what came along with a caveat. Silent loss
+                // is the defect this path exists to remove, and a payload the spec forbids
+                // carrying is still a payload the caller had.
+                for notice in encoder.metadata_notices() {
+                    if notice.carried() {
+                        tracing::warn!("input metadata carried with a caveat — {notice}");
+                    } else {
+                        tracing::warn!("input metadata not carried — {notice}");
+                    }
                 }
             }
             encoder.encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
