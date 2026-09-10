@@ -119,6 +119,22 @@ impl PngPalette {
     }
 }
 
+/// The alpha a palette entry has when `tRNS` does not carry one for it (§11.3.2.1).
+pub(crate) const OPAQUE: u8 = 255;
+
+/// Drops the trailing fully-opaque entries a `tRNS` chunk is allowed to omit: a decoder reads
+/// every entry past the chunk's end as opaque (§11.3.2.1), so those bytes say nothing the absence
+/// of the bytes does not already say.
+///
+/// One owner for the rule, because both palette paths need it and a rule restated twice is a rule
+/// that can drift: the encoder-derived palette trims the alphas it collects
+/// ([`crate::reduce`]), and a caller-supplied one will trim its own.
+pub(crate) fn trim_trailing_opaque(alphas: &mut Vec<u8>) {
+    while alphas.last() == Some(&OPAQUE) {
+        alphas.pop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -175,6 +191,28 @@ mod tests {
         assert_eq!(parsed.alpha(3), None);
         assert!(parsed.has_transparency());
         assert!(!PngPalette::new(&[[0, 0, 0]]).unwrap().has_transparency());
+    }
+
+    /// [`trim_trailing_opaque`] removes exactly the run of opaque entries at the end.
+    ///
+    /// It stops at the last non-opaque entry rather than removing every opaque one, because a
+    /// `tRNS` chunk is positional: entry 1 below is opaque and has to stay, or entry 2's alpha
+    /// would land on entry 1.
+    #[test]
+    fn trailing_opaque_alphas_are_the_ones_trns_may_omit() {
+        let mut alphas = vec![0, OPAQUE, 128, OPAQUE, OPAQUE];
+        trim_trailing_opaque(&mut alphas);
+        assert_eq!(alphas, vec![0, OPAQUE, 128]);
+
+        // A wholly opaque run leaves nothing, which is the chunk not being written at all.
+        let mut all_opaque = vec![OPAQUE; 4];
+        trim_trailing_opaque(&mut all_opaque);
+        assert!(all_opaque.is_empty());
+
+        // Nothing to trim is not an error.
+        let mut none = vec![7, 8];
+        trim_trailing_opaque(&mut none);
+        assert_eq!(none, vec![7, 8]);
     }
 
     #[test]
