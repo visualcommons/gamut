@@ -183,11 +183,18 @@ manifest line is the whole determinant, which is what makes a drift guard over i
 The version is pinned with `=`, not a caret range, and that is a separate guarantee from the
 features. This file cites c2pa-rs's own source **by line number** — `src/validation_results.rs:36-41`
 below, `src/jumbf_io.rs:246` and `:258` at the end — and a caret range lets any patch release move
-those lines while the citation stands as written. There is no committed lockfile to hold the
-resolution instead: `.gitignore` excludes `tooling/*/Cargo.lock`, because a workspace-excluded
-oracle resolves standalone. The pin is the smaller fix and the one that keeps the prose honest;
-`tests/build_configuration.rs` guards it too, so raising the version is a deliberate act that also
-means re-reading every citation here.
+those lines while the citation stands as written. `tests/build_configuration.rs` guards the pin, so
+raising the version is a deliberate act that also means re-reading every citation here.
+
+`Cargo.lock` is committed as well, for this crate alone. `.gitignore` excludes
+`tooling/*/Cargo.lock` — a `tooling/` crate normally resolves through the root lockfile, so a local
+one is redundant — and this crate is the one exception, with the negation and its reason recorded
+beside the rule. The reason is that the `=` pin holds exactly one line: everything *under* `c2pa`,
+three hundred-odd transitive packages, re-resolves on every invocation without a lockfile. The
+no-OpenSSL check above is an assertion about the resolved graph, and with the graph re-resolved
+moments earlier it could only ever inspect what cargo had just written for it. Committing the
+lockfile is what makes it a check; the exception is itself pinned by a drift guard, so it cannot be
+reverted in one line without a test going red.
 
 ## The signing identity
 
@@ -249,9 +256,23 @@ same 8-byte header. Any of them would otherwise yield a span ending at or before
 body byte. All three refusals are the typed `OracleError::UnusableSuperboxLength`, and no length is
 ever guessed. No store this crate has seen uses either reserved value — c2pa-rs writes a plain
 32-bit `LBox` — which is precisely why the handling is written rather than assumed, and why the
-arms are pinned by unit tests in `src/lib.rs` rather than left to a fixture that cannot reach them:
-each side of each refusal is pinned by its own test, so widening or narrowing a range by one is
-caught.
+arms are pinned by unit tests in `src/lib.rs` rather than left to a fixture that cannot reach them.
+
+Each side of each refusal is pinned by its own test — the input the branch refuses, and the nearest
+input it must *not* refuse — so widening or narrowing a range by one is caught. That is a claim
+about a *set* of branches, and three consecutive reviews each found one more member of the set
+untested, so the set is now written down rather than argued: the module documentation on
+`#[cfg(test)] mod tests` in `src/lib.rs` carries the enumeration as a table, one row per refusing
+branch across `find_jumbf_superbox`, `declared_store_len` and `jumbf_superbox_span`, naming both
+tests. A branch added without a row, or a row with one side blank, is the finding. The one refusal
+outside that layer — `reserve_then_fill` rejecting a slot that is not the signed store's length —
+needs c2pa-rs and a gamut encoder in reach, so it is pinned in `tests/reserve_then_fill.rs`
+instead, and the table says so.
+
+Every one of those tests asserts the **message** the refusal carries, never `is_err()`. Several
+branches refuse the same input for different reasons — delete the truncated-`LBox` arm and a
+three-byte buffer falls into the `LBox == 0` arm, which refuses it too — so only the message
+distinguishes the branch that fired from the one that caught the fall.
 
 For the same reason `find_jumbf_superbox` **continues** past a `jumb` that appears too early to
 carry an `LBox` in front of it, instead of concluding the buffer has no superbox. Today's fixtures
