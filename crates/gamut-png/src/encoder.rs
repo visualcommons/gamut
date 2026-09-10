@@ -31,6 +31,9 @@ use crate::ancillary::{
 use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
+use crate::decoded::{
+    Chromaticities, Cicp, DecodedPng, IccProfile, PngMetadata, TextChunk, TextChunkKind, XmpFraming,
+};
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::PngPalette;
 use crate::reduce::{self, Reduced, Reductions};
@@ -74,6 +77,168 @@ pub struct PngEncodeReport {
     pub c2pa: Option<C2paSpan>,
 }
 
+/// The metadata fields [`PngMetadata`] and [`DecodedPng`] both carry, borrowed.
+///
+/// The two read surfaces agree field for field on purpose (one reads the pixels, one does not),
+/// so [`PngEncoder::with_metadata`] and [`PngEncoder::with_metadata_from`] are the same function
+/// over two shapes. Borrowing rather than cloning into a `PngMetadata` keeps a large ICC profile
+/// or EXIF block from being copied twice on the way into the encoder.
+struct MetadataView<'a> {
+    exif: Option<&'a [u8]>,
+    icc_profile: Option<&'a IccProfile>,
+    xmp: Option<&'a [u8]>,
+    /// How the source framed its XMP packet (§11.3.3.4): compression flag, language tag,
+    /// translated keyword. Carried beside the packet because the packet has its own field.
+    xmp_framing: Option<&'a XmpFraming>,
+    texts: &'a [TextChunk],
+    gamma: Option<u32>,
+    chromaticities: Option<Chromaticities>,
+    srgb: Option<SrgbIntent>,
+    cicp: Option<Cicp>,
+    /// Whether the source carried a C2PA manifest store. Only the presence is needed: a store is
+    /// never carried, but a caller has to be told it was left behind.
+    c2pa: bool,
+}
+
+/// Something [`PngEncoder::with_metadata`] could not do faithfully with a payload it was given.
+///
+/// Preservation exists to stop metadata disappearing quietly, so anything a carry cannot take —
+/// and anything it takes only by writing bytes the specification does not endorse — is named
+/// rather than passed over. Read them back with [`PngEncoder::metadata_notices`] and tell the
+/// user; `gamut convert` does. [`carried`](Self::carried) separates the two cases: a payload
+/// left behind from one that reached the output with a caveat on it.
+///
+/// This is deliberately **not** an error channel. The only thing that stops an encode is a null
+/// byte in a *keyword* — a field a null separator ends, so the chunk would re-parse as a
+/// different annotation; everything here is something a caller has to *know*, not something that
+/// should fail a conversion whose pixels are fine.
+///
+/// `#[repr(u8)]` with explicit discriminants, which are permanent and append-only: the value
+/// crosses the C ABI as a plain integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum MetadataNotice {
+    /// A `cICP` whose matrix coefficients are not 0, left behind. §11.3.2.6 requires 0 for PNG —
+    /// "RGB is currently the only supported color model in PNG, and as such Matrix Coefficients
+    /// shall be set to 0" — so the source chunk is not conforming and copying it forward would
+    /// reproduce the defect in a file this encoder signed off on.
+    NonRgbCicp = 0,
+    /// The C2PA manifest store (`caBX`), left behind. A store is signed over the exact bytes of
+    /// the file it was made for, which is why C2PA 2.4 §A.3.2 marks the chunk unsafe to copy:
+    /// carried into a re-encode it is invalid by construction, and a validator reports a
+    /// *tampered* file rather than an unsigned one. Re-sign the output and set it with
+    /// [`with_c2pa`](PngEncoder::with_c2pa).
+    C2paManifestStore = 1,
+    /// A text annotation left behind because its keyword holds a character Latin-1 cannot
+    /// encode. §11.3.3.1 binds the keyword to Latin-1 in *all three* text chunks, so unlike the
+    /// text — which §11.3.3.2 routes to `iTXt` — there is no chunk that could carry it.
+    TextKeywordNotLatin1 = 2,
+    /// A text annotation left behind because its keyword is empty or longer than the 79 bytes
+    /// §11.3.3.1 allows. All three chunks fix that field at 1–79 bytes, so a reader — this
+    /// crate's own included — drops the whole chunk rather than reading a longer one.
+    TextKeywordLength = 3,
+    /// A text annotation **written**, whose keyword leaves the repertoire §11.3.3.1 recommends
+    /// ("only code points 0x20-7E and 0xA1-FF are allowed", and expressly "nor is U+00A0
+    /// NON-BREAKING SPACE"). The keyword is written exactly as it arrived — this crate reads it
+    /// back unchanged — but the datastream is then non-conforming per §15.3.1, which requires
+    /// that "All field values in the PNG datastream obey the relationships specified in this
+    /// specification".
+    TextKeywordRepertoire = 4,
+    /// A text annotation **written**, whose keyword has a leading, trailing or consecutive
+    /// space, which §11.3.3.1 says are "not permitted in keywords" so that one keyword cannot be
+    /// misread as another. Written as it arrived, for the same reason as
+    /// [`TextKeywordRepertoire`](Self::TextKeywordRepertoire).
+    TextKeywordSpacing = 5,
+    /// A text annotation **written without its `iTXt` language tag**, because the tag was not
+    /// the ASCII shape §11.3.3.4 requires ("a well-formed language tag defined by [BCP47]").
+    /// Written as UTF-8 into a field a reader takes as Latin-1 the tag would not survive the
+    /// trip; an empty tag is §11.3.3.4's own way of saying the language is unspecified.
+    ItxtLanguageTag = 6,
+    /// An XMP packet left behind because it is not UTF-8. §11.3.3.4 gives the `iTXt` text field
+    /// UTF-8 and no alternative, so there is no chunk to frame it in.
+    XmpNotUtf8 = 7,
+    /// A text payload left behind because its **text string** holds a null character, which
+    /// §11.3.3.2 ("Neither the keyword nor the text string may contain a null character") and
+    /// §11.3.3.4 ("neither shall contain a zero byte") both forbid.
+    ///
+    /// Unlike a null in a keyword this re-frames nothing — the text is last and "not
+    /// null-terminated (the length of the chunk defines the ending)" — so it does not fail the
+    /// encode. It is not written either: readers disagree about what such a chunk holds, libpng
+    /// truncating the text at the null where this crate's reader returns it whole, so the
+    /// payload is dropped rather than written into a file whose meaning depends on who reads it.
+    ///
+    /// The payload is usually a text annotation, but the XMP packet goes into an `iTXt` too and
+    /// so can land here. That case is worth reading twice: XML 1.0 does not admit U+0000 in a
+    /// document at all, so a packet that reaches this notice is not merely unwritable — it is
+    /// already not well-formed XML, whatever produced it.
+    TextStringNull = 8,
+}
+
+impl MetadataNotice {
+    /// One line naming the payload and what happened to it, fit to show a user.
+    #[must_use]
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NonRgbCicp => {
+                "cICP: its matrix coefficients are not 0, which PNG requires (§11.3.2.6)"
+            }
+            Self::C2paManifestStore => {
+                "C2PA manifest store: signed over the source bytes, so a copy would be invalid \
+                 (C2PA 2.4 §A.3.2) — re-sign the output"
+            }
+            Self::TextKeywordNotLatin1 => {
+                "text annotation: its keyword is not Latin-1, which every text chunk requires \
+                 (§11.3.3.1)"
+            }
+            Self::TextKeywordLength => {
+                "text annotation: its keyword is not 1 to 79 bytes, the length every text chunk \
+                 fixes (§11.3.3.1)"
+            }
+            Self::TextKeywordRepertoire => {
+                "text annotation: written, but its keyword leaves the code points 0x20-0x7E and \
+                 0xA1-0xFF §11.3.3.1 recommends, so the datastream is non-conforming per \
+                 §15.3.1"
+            }
+            Self::TextKeywordSpacing => {
+                "text annotation: written, but its keyword has a leading, trailing or \
+                 consecutive space, which §11.3.3.1 does not permit"
+            }
+            Self::ItxtLanguageTag => {
+                "text annotation: written without its language tag, which was not the BCP 47 \
+                 shape §11.3.3.4 requires"
+            }
+            Self::XmpNotUtf8 => {
+                "XMP packet: not UTF-8, and an iTXt text string must be (§11.3.3.4)"
+            }
+            Self::TextStringNull => {
+                "text annotation or XMP packet: its text string contains a null character, \
+                 which no text chunk may hold (§11.3.3.2, §11.3.3.4)"
+            }
+        }
+    }
+
+    /// Whether the payload still reached the output.
+    ///
+    /// `false` means it was left behind entirely; `true` means it was written, with the caveat
+    /// [`reason`](Self::reason) gives. A caller showing these to a user needs the difference —
+    /// "this did not come along" and "this came along in a form some readers dislike" call for
+    /// different action.
+    #[must_use]
+    pub fn carried(self) -> bool {
+        matches!(
+            self,
+            Self::TextKeywordRepertoire | Self::TextKeywordSpacing | Self::ItxtLanguageTag
+        )
+    }
+}
+
+impl core::fmt::Display for MetadataNotice {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
 /// A reusable PNG encoder.
 #[derive(Debug, Clone)]
 pub struct PngEncoder {
@@ -84,6 +249,11 @@ pub struct PngEncoder {
     auto_reduce: bool,
     clean_transparent: bool,
     backends: Registry<dyn IdatDeflater + Send>,
+    /// What the last metadata carry could not take *as a whole payload*, in the order it was
+    /// found. Reset by each [`Self::with_metadata`] / [`Self::with_metadata_from`] call, so it
+    /// describes that call. Per-annotation notices live with their annotation instead, so that a
+    /// second carry replaces them exactly as it replaces the annotations themselves.
+    carry_notices: Vec<MetadataNotice>,
 }
 
 impl Default for PngEncoder {
@@ -105,6 +275,7 @@ impl PngEncoder {
             auto_reduce: false,
             clean_transparent: false,
             backends: Registry::default(),
+            carry_notices: Vec::new(),
         }
     }
 
@@ -207,10 +378,38 @@ impl PngEncoder {
         self
     }
 
-    /// Records the standard colour-space rendering intent (sRGB chunk).
+    /// Records the standard colour-space rendering intent (sRGB chunk, §11.3.2.5).
+    ///
+    /// May be combined with [`with_icc_profile`](Self::with_icc_profile). §5.6 Table 5 and
+    /// §11.3.2.5 say only that the two "should not" appear together — lowercase, and §15 gives
+    /// the BCP 14 keywords force "when, and only when, they appear in all capitals" — while §4.3
+    /// Table 1 presupposes the pair and settles it, ranking `iCCP` (priority 2) above `sRGB`
+    /// (3). Both are written; a reader honours the profile and treats the intent as the fallback
+    /// for readers that cannot apply one.
     #[must_use]
     pub fn with_srgb(mut self, intent: SrgbIntent) -> Self {
         self.ancillary.set_srgb(intent);
+        self
+    }
+
+    /// Records the video-signal colour space by its ITU-T H.273 code points (cICP chunk,
+    /// §11.3.2.6): the colour primaries, the transfer function, and whether the samples use the
+    /// full value range.
+    ///
+    /// There is no matrix-coefficients parameter because §11.3.2.6 fixes it: "RGB is currently
+    /// the only supported color model in PNG, and as such Matrix Coefficients shall be set to 0."
+    ///
+    /// cICP is the **highest-precedence** colour chunk (§4.3 Table 1, priority 1), so a reader
+    /// that understands it ignores any `iCCP`, `sRGB`, `gAMA` and `cHRM` in the same file. Those
+    /// are worth keeping alongside it as a fallback for readers that do not.
+    #[must_use]
+    pub fn with_cicp(
+        mut self,
+        color_primaries: u8,
+        transfer_function: u8,
+        full_range: bool,
+    ) -> Self {
+        self.ancillary.cicp = Some((color_primaries, transfer_function, full_range));
         self
     }
 
@@ -322,6 +521,12 @@ impl PngEncoder {
     }
 
     /// Adds an uncompressed Latin-1 text annotation (tEXt chunk).
+    ///
+    /// Almost nothing here fails: what §11.3.3 does not endorse — a keyword outside §11.3.3.1's
+    /// repertoire, length or spacing, a text string holding a null — is reported through
+    /// [`metadata_notices`](Self::metadata_notices), which also says whether the annotation was
+    /// written. The one exception is a null in the *keyword*, which fails the encode, because a
+    /// keyword ends at its first null and the chunk would re-parse as a different annotation.
     #[must_use]
     pub fn with_text(mut self, keyword: &str, text: &str) -> Self {
         self.ancillary.add_text_latin1(keyword, text);
@@ -329,6 +534,10 @@ impl PngEncoder {
     }
 
     /// Adds a zlib-compressed Latin-1 text annotation (zTXt chunk).
+    ///
+    /// §11.3.3's rules reach this annotation exactly as they reach
+    /// [`with_text`](Self::with_text): everything but a null in the keyword is reported through
+    /// [`metadata_notices`](Self::metadata_notices) rather than failing the encode.
     #[must_use]
     pub fn with_compressed_text(mut self, keyword: &str, text: &str) -> Self {
         self.ancillary.add_text_compressed(keyword, text);
@@ -336,6 +545,10 @@ impl PngEncoder {
     }
 
     /// Adds an uncompressed UTF-8 text annotation (iTXt chunk).
+    ///
+    /// §11.3.3's rules reach this annotation exactly as they reach
+    /// [`with_text`](Self::with_text): everything but a null in the keyword is reported through
+    /// [`metadata_notices`](Self::metadata_notices) rather than failing the encode.
     #[must_use]
     pub fn with_international_text(mut self, keyword: &str, text: &str) -> Self {
         self.ancillary.add_text_international(keyword, text);
@@ -350,9 +563,11 @@ impl PngEncoder {
         self
     }
 
-    /// Embeds an ICC colour profile (iCCP chunk), zlib-compressed. `profile` is the raw ICC profile
-    /// — for example the bytes produced by `gamut-icc`. (Mutually exclusive with [`Self::with_srgb`]
-    /// per the spec; set only one.)
+    /// Embeds an ICC colour profile (iCCP chunk, §11.3.2.3), zlib-compressed. `profile` is the
+    /// raw ICC profile — for example the bytes produced by `gamut-icc`.
+    ///
+    /// May be combined with [`with_srgb`](Self::with_srgb); see there for why the pair is
+    /// written rather than refused, and which chunk a reader honours.
     #[must_use]
     pub fn with_icc_profile(mut self, name: &str, profile: &[u8]) -> Self {
         self.ancillary.iccp = Some((name.to_string(), profile.to_vec()));
@@ -363,8 +578,216 @@ impl PngEncoder {
     /// the XMP/RDF document — for example the bytes produced by `gamut-xmp`.
     #[must_use]
     pub fn with_xmp(mut self, xmp: &str) -> Self {
-        self.ancillary
-            .add_text_international("XML:com.adobe.xmp", xmp);
+        // §11.3.3.1 Table 21: "The use of iTXt, with Compression Flag set to 0, and both Language
+        // Tag and Translated Keyword set to the null string, are recommended for XMP compliance."
+        // A packet read out of a file that framed it otherwise keeps its framing; this entry
+        // point has no framing to keep, so it takes the recommended one.
+        self.ancillary.add_xmp(xmp.as_bytes(), "", "", false);
+        self
+    }
+
+    /// Carries every metadata chunk a [`PngMetadata`] holds into this encoder, so that
+    /// re-encoding a file keeps its EXIF, ICC profile, XMP packet, text annotations and colour
+    /// chunks instead of dropping them.
+    ///
+    /// This is the write-side counterpart of [`metadata`](crate::metadata): read a file's
+    /// metadata without touching its pixels, then hand it to the encoder that rewrites them.
+    /// [`with_metadata_from`](Self::with_metadata_from) is the same thing for a full
+    /// [`DecodedPng`].
+    ///
+    /// Calling it twice with the same metadata is the same as calling it once: a later carry
+    /// replaces what an earlier one contributed rather than appending a second copy of every
+    /// annotation.
+    ///
+    /// # What it carries, and what it deliberately does not
+    ///
+    /// Everything the read side surfaces is set, including a `cICP`, an `sRGB` and an `iCCP`
+    /// together — §4.3 Table 1 ranks the colour chunks precisely so a file may carry more than
+    /// one, and a reader honours the lowest priority number. That is a claim about *other*
+    /// readers: this crate's own reader surfaces all of them and ranks none, because which chunk
+    /// to honour depends on whether the reader has a colour-management module, which an encoder
+    /// cannot know. Resolving a profile against an intent belongs to `gamut-cmm`. Each text annotation goes back into
+    /// the chunk it came out of, compressed if it was compressed
+    /// ([`TextChunkKind`](crate::TextChunkKind)); so does the XMP packet, whose own framing —
+    /// compression flag, language tag, translated keyword — rides in
+    /// [`XmpFraming`](crate::XmpFraming).
+    ///
+    /// Two payloads cannot be carried at all, and neither is dropped in silence — read them back
+    /// with [`metadata_notices`](Self::metadata_notices):
+    ///
+    /// - a **`cICP` whose matrix coefficients are not 0**, which §11.3.2.6 does not allow in PNG;
+    /// - the **C2PA manifest store**, signed over the bytes of the file it was made for.
+    ///
+    /// A text annotation whose keyword or XMP packet §11.3.3 does not endorse is reported through
+    /// the same channel rather than failing the carry: a keyword outside §11.3.3.1's repertoire
+    /// or spacing rules is written as it arrived, while a keyword no chunk can hold, a text
+    /// string holding a null and an XMP packet that is not UTF-8 are left behind, and
+    /// [`MetadataNotice::carried`](MetadataNotice::carried) says which happened. **Only a null in
+    /// a keyword** — or in an `iTXt` translated keyword — fails the encode with
+    /// [`Error::InvalidInput`] naming the annotation: those fields end at their first null, so
+    /// the chunk would be read back as a *different* annotation, which no notice can undo.
+    ///
+    /// One further limit is the read side's, not this method's: `pHYs`, `tIME`, `sBIT` and `bKGD`
+    /// are not part of [`PngMetadata`], so they cannot be carried here (set them with their own
+    /// builder methods).
+    #[must_use]
+    pub fn with_metadata(self, metadata: &PngMetadata) -> Self {
+        self.with_metadata_view(MetadataView {
+            exif: metadata.exif.as_deref(),
+            icc_profile: metadata.icc_profile.as_ref(),
+            xmp: metadata.xmp.as_deref(),
+            xmp_framing: metadata.xmp_framing.as_ref(),
+            texts: &metadata.texts,
+            gamma: metadata.gamma,
+            chromaticities: metadata.chromaticities,
+            srgb: metadata.srgb,
+            cicp: metadata.cicp,
+            c2pa: metadata.c2pa.is_some(),
+        })
+    }
+
+    /// Carries the metadata of a decoded file into this encoder: the [`DecodedPng`] twin of
+    /// [`with_metadata`](Self::with_metadata), which documents exactly what is and is not carried.
+    ///
+    /// Use this when you already decoded the pixels; use `with_metadata` when
+    /// [`metadata`](crate::metadata) read the file without them.
+    #[must_use]
+    pub fn with_metadata_from(self, decoded: &DecodedPng) -> Self {
+        self.with_metadata_view(MetadataView {
+            exif: decoded.exif.as_deref(),
+            icc_profile: decoded.icc_profile.as_ref(),
+            xmp: decoded.xmp.as_deref(),
+            xmp_framing: decoded.xmp_framing.as_ref(),
+            texts: &decoded.texts,
+            gamma: decoded.gamma,
+            chromaticities: decoded.chromaticities,
+            srgb: decoded.srgb,
+            cicp: decoded.cicp,
+            c2pa: decoded.c2pa.is_some(),
+        })
+    }
+
+    /// What this encoder could not carry faithfully: whole payloads left behind, then the
+    /// per-annotation notices, in the order they were found — empty when everything came along
+    /// intact.
+    ///
+    /// Surface this to whoever asked for the re-encode. Losing metadata without saying so is the
+    /// defect the preservation path exists to remove; losing it — or bending it — *with* an
+    /// explanation is a choice the spec forces. Use
+    /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
+    ///
+    /// The payload-level notices describe the last [`with_metadata`](Self::with_metadata) /
+    /// [`with_metadata_from`](Self::with_metadata_from) call and are reset by each; the
+    /// per-annotation notices belong to the annotations still accumulated, so they follow the
+    /// same replace-not-append rule a carry gives the text list.
+    #[must_use]
+    pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
+        let mut notices = self.carry_notices.clone();
+        notices.extend(self.ancillary.text_notices());
+        notices
+    }
+
+    /// The one implementation behind [`with_metadata`](Self::with_metadata) and
+    /// [`with_metadata_from`](Self::with_metadata_from).
+    fn with_metadata_view(mut self, meta: MetadataView<'_>) -> Self {
+        self.carry_notices.clear();
+        self.ancillary.begin_carry();
+        if let Some(exif) = meta.exif {
+            self = self.with_exif(exif);
+        }
+        // Both colour statements are carried. §5.6 Table 5 and §11.3.2.5 only *recommend* against
+        // the pair, and §4.3 Table 1 exists to resolve it: `iCCP` outranks `sRGB`, so the profile
+        // is what a reader applies and the intent is what a reader without a CMM falls back on.
+        // Dropping either would throw away colour information the source carried.
+        if let Some(icc) = meta.icc_profile {
+            self = self.with_icc_profile(&icc.name, &icc.profile);
+        }
+        if let Some(intent) = meta.srgb {
+            self = self.with_srgb(intent);
+        }
+        match meta.cicp {
+            // §11.3.2.6: "Matrix Coefficients shall be set to 0". A source chunk that says
+            // otherwise is not a conforming cICP; carrying it forward would put the same defect
+            // in the output.
+            Some(cicp) if cicp.matrix_coefficients != 0 => {
+                self.carry_notices.push(MetadataNotice::NonRgbCicp);
+            }
+            Some(cicp) => {
+                self = self.with_cicp(
+                    cicp.color_primaries,
+                    cicp.transfer_function,
+                    cicp.full_range,
+                );
+            }
+            None => {}
+        }
+        if meta.c2pa {
+            self.carry_notices.push(MetadataNotice::C2paManifestStore);
+        }
+        // Set in the stored ×100 000 fixed-point units rather than through `with_gamma` /
+        // `with_chromaticities`, whose `f64` arguments would round-trip the value through a
+        // division and a `round()`: preservation must be byte-exact.
+        if let Some(gamma) = meta.gamma {
+            self.ancillary.gamma = Some(gamma);
+        }
+        if let Some(chrm) = meta.chromaticities {
+            self.ancillary.chrm = Some([
+                chrm.white.0,
+                chrm.white.1,
+                chrm.red.0,
+                chrm.red.1,
+                chrm.green.0,
+                chrm.green.1,
+                chrm.blue.0,
+                chrm.blue.1,
+            ]);
+        }
+        // Handed over as bytes, because that is what the chunk held, and with the framing its
+        // chunk gave it — above all §11.3.3.4's compression flag, without which a packet stored
+        // as 71 compressed bytes is rewritten as the 4 045 it inflates to. §11.3.3.4 requires
+        // UTF-8, so a packet that is not is reported by `metadata_notices` — never a silent drop.
+        if let Some(xmp) = meta.xmp {
+            let (language, translated, compressed) =
+                meta.xmp_framing.map_or(("", "", false), |f| {
+                    (
+                        f.language.as_deref().unwrap_or_default(),
+                        f.translated_keyword.as_deref().unwrap_or_default(),
+                        f.compressed,
+                    )
+                });
+            self.ancillary
+                .add_xmp(xmp, language, translated, compressed);
+        }
+        for text in meta.texts {
+            let (language, translated) = (
+                text.language.as_deref().unwrap_or_default(),
+                text.translated_keyword.as_deref().unwrap_or_default(),
+            );
+            match text.kind {
+                TextChunkKind::Text => self.ancillary.add_text_latin1(&text.keyword, &text.text),
+                TextChunkKind::CompressedText => {
+                    self.ancillary
+                        .add_text_compressed(&text.keyword, &text.text);
+                }
+                TextChunkKind::International => self.ancillary.add_text_international_tagged(
+                    &text.keyword,
+                    language,
+                    translated,
+                    &text.text,
+                    false,
+                ),
+                TextChunkKind::CompressedInternational => {
+                    self.ancillary.add_text_international_tagged(
+                        &text.keyword,
+                        language,
+                        translated,
+                        &text.text,
+                        true,
+                    );
+                }
+            }
+        }
+        self.ancillary.end_carry();
         self
     }
 
@@ -677,6 +1100,10 @@ impl PngEncoder {
         pre_idat: F,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
+        // Refuse an accumulation the spec says must not be written before emitting a byte, so a
+        // caller never receives a half-written buffer for a chunk set it chose (see
+        // [`Ancillary::validate`]). Every encode path funnels through here.
+        self.ancillary.validate()?;
         let (color, bit_depth) = (written.color, written.bit_depth);
         // Stride in bytes per pixel (≥1, even for sub-byte depths) and the padded row length.
         let bits_per_pixel = color.channels() * bit_depth as usize;

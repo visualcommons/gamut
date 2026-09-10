@@ -40,6 +40,7 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ✅ done |
 | E1 | #224 | **Efficiency:** `deconstruct` byte accounting; divan size/bpp + per-stage bench; libpng-9 size contract; opt-in transparent cleanup; palette-vs-native race; `crc32fast` and restructured filter kernels (see [Efficiency](#efficiency-issue-224)) | ✅ done |
 | C1 | C2PA 2.4 §A.3.2, §18.5.4 | **C2PA carriage** (#440): the `caBX` manifest store — raw decode surface (`c2pa`; first CRC-valid chunk before `IDAT` wins, ignored ones counted, under the metadata budget); `with_c2pa` / `with_c2pa_reserved` as the last chunk before `IDAT`; the whole-chunk exclusion span from `encode_with_report` and `PngReport::c2pa`, filled in place by `fill_c2pa` (see [C2PA](#c2pa-manifest-store-issue-440)) | ✅ done |
+| M1 | §4.3, §11.3.2.6, §11.3.3 | **Metadata preservation** (#483): `with_metadata` / `with_metadata_from` carry a read file's eXIf/iCCP/sRGB/cICP/gAMA/cHRM/XMP/text chunks into a re-encode, each annotation back into the chunk it came from and the XMP packet back into the framing its `iTXt` gave it (`gamut convert` uses it; `--strip-metadata` opts out; what could not be carried faithfully is named by `metadata_notices`); `with_cicp`; a null in a keyword refuses the encode, a null in the length-delimited text string drops the annotation, and §11.3.3.1's advisory keyword rules report through the notice channel, with promotion to `iTXt` for text outside Latin-1 (see [Metadata preservation](#metadata-preservation-issue-483)) | ✅ done |
 
 ## Decoder phases (issue #249)
 
@@ -135,6 +136,140 @@ hash assertion can be checked over the excluded span) is issue #447.
 of any kind. `gamut convert` does not carry a store across a re-encode (that is the facade's
 `C2paPolicy` law, and the CLI's own path is #448/#483).
 
+## Metadata preservation (issue #483)
+
+The read side has surfaced every metadata payload since D5, and the write side has accepted every
+one since P8, but nothing joined them: a re-encode dropped all of it, so `gamut convert`'s PNG
+path round-tripped 0% of a file's metadata.
+
+`PngEncoder::with_metadata(&PngMetadata)` and `with_metadata_from(&DecodedPng)` are that join —
+one private borrowed view behind two entry points, so the pixel-free `metadata()` walk and a full
+`decode()` reach it without copying a large ICC profile twice. `gamut convert` uses it on the PNG
+output path; `--strip-metadata` is the opt-out. **Preserve is the default**: a stripped file is
+smaller, but dropping an ICC profile silently changes what a viewer paints, so the loss is the
+thing that has to be asked for. Carrying the same metadata twice carries it once — the text list
+is replaced, not appended to, so the single-value colour slots and the annotations are idempotent
+alike.
+
+**Identity, not just content.** `TextChunk::kind` records which of §11.3.3's three chunks carried
+an annotation and whether its text was compressed, and a carry puts it back in the same one.
+Without it a `zTXt` is indistinguishable from a `tEXt` once decoded, and a compressed 40-byte
+payload comes back out as 1 600 uncompressed bytes — no words lost, but not preservation either.
+
+The **XMP packet leaves the read side through its own field**, not through `texts`, so the framing
+that field does not hold travels beside it in `XmpFraming`: §11.3.3.4's compression flag, language
+tag and translated keyword. §11.3.3.1 Table 21 recommends the null framing for XMP compliance
+("with Compression Flag set to 0, and both Language Tag and Translated Keyword set to the null
+string") — recommends, not requires, and a provenance packet is exactly the payload a writer
+compresses. The measured cost of getting this wrong, on the fixture in `tests/preservation.rs`:
+the source `iTXt` payload is 354 bytes, the carry that keeps the flag writes 352, and the same
+carry with the flag cleared writes **3 734** — a factor of 10.6 against the 352 it should have
+been. The language tag and translated keyword were a second, separate loss of the same defect,
+pinned by a test of their own. `with_xmp` — which has no source file to take framing from — takes
+Table 21's recommended framing. The packet is a **single-value payload** like `iCCP` or `eXIf`: setting it
+again replaces it, because a second `iTXt` under the reserved keyword is one this crate's own
+reader discards.
+
+Consolidating the packet into `texts` would retire `XmpFraming` and put the packet back in its
+file position rather than first among the annotations; it reshapes a public type, so it is
+[#600](https://github.com/visualcommons/gamut/issues/600), not this work.
+
+**Two payloads cannot be carried, and neither is dropped in silence.** `metadata_notices()` names
+them and `gamut convert` prints them:
+
+- a `cICP` whose matrix coefficients are not 0 — §11.3.2.6 requires 0 for PNG, so the source chunk
+  is not conforming and carrying it forward would reproduce the defect;
+- the **C2PA manifest store**, signed over the exact bytes of the file it was made for, which is
+  why `caBX` is unsafe to copy (C2PA 2.4 §A.3.2). Re-sign the output and set it with `with_c2pa`.
+
+**The colour chunks are carried together, not resolved.** §5.6 Table 5 and §11.3.2.5 say only that
+`sRGB` and `iCCP` "should not" appear together — lowercase, and §15 gives the BCP 14 keywords
+force "when, and only when, they appear in all capitals" — while §4.3 Table 1 *presupposes* the
+co-occurrence and defines the outcome by ranking the chunks (cICP 1, iCCP 2, sRGB 3, cHRM+gAMA 4).
+libpng reads a file carrying both and returns the same pixels (`tests/oracle.rs`). So both are
+written: dropping either would throw away colour information the source carried, and a reader
+takes the one it can use.
+
+That last clause is a claim about **other** readers, not about this crate. Table 1 ranks the chunks
+for a reader, and which one to honour depends on whether the reader has a CMM at all — which an
+encoder cannot know. gamut-png's own reader surfaces `cICP`, `iCCP`, `sRGB`, `cHRM` and `gAMA` side
+by side and ranks none of them; resolving a profile against an intent is `gamut-cmm`'s work
+(epic #323), and this encoder deliberately does not pre-empt it.
+
+**Only a null in a keyword refuses the encode. Everything else §11.3.3 asks for is a notice.**
+§15 gives the BCP 14 keywords force "when, and only when, they appear in all capitals", and every
+statement §11.3.3.1 makes about a keyword's shape is lowercase — "Keywords shall contain only
+printable Latin-1", "leading spaces, trailing spaces, and consecutive spaces are not permitted",
+"Keywords are restricted to 1 to 79 bytes in length". The same argument that lets `sRGB` and
+`iCCP` be carried together applies here, so what separates the outcomes is the *consequence*, not
+the wording:
+
+| Field | Clause | Outcome |
+| --- | --- | --- |
+| A null in a keyword, or in an `iTXt` translated keyword | §11.3.3.2, §11.3.3.4 | **refuses the encode** — those fields end at their first null, so the chunk re-parses as a *different* annotation |
+| A null in a text string | §11.3.3.2, §11.3.3.4 | annotation **dropped**, `TextStringNull` — the text is last and "not null-terminated (the length of the chunk defines the ending)", so it re-frames nothing and this crate's reader hands it back whole; but libpng truncates it at the null, so writing it would put a chunk two readers read differently into a file this encoder signed off on |
+| Keyword outside Latin-1, or outside 1–79 bytes | §11.3.3.1 | annotation **dropped**, `TextKeywordNotLatin1` / `TextKeywordLength` — no chunk can hold it, and this crate's own reader drops one that tries |
+| Keyword outside `0x20`–`0x7E` / `0xA1`–`0xFF`, or with a leading, trailing or consecutive space | §11.3.3.1 | **written verbatim**, `TextKeywordRepertoire` / `TextKeywordSpacing` — the datastream is then non-conforming per §15.3.1 |
+| `iTXt` language tag outside ASCII letters, digits and `-` | §11.3.3.4 | tag **dropped**, annotation written, `ItxtLanguageTag` |
+| XMP packet that is not UTF-8 | §11.3.3.4 | packet **dropped**, `XmpNotUtf8` |
+
+The written-verbatim row is the important one, and it is where an earlier draft of this work got
+it wrong. Five keyword shapes — a leading space, a trailing space, consecutive spaces, a C0/C1
+control, U+00A0 — are ones this crate's *reader* accepts and returns unchanged. Refusing to write
+them back made a re-encode fail on a file whose pixels are fine, and the only escape was
+`--strip-metadata`, which discards the ICC profile too. A writer must not be stricter than its own
+reader about a clause that is advisory in the first place; `MetadataNotice::carried()` tells a
+caller which of these reached the output. A notice that says "written, but…" is suppressed for an
+annotation nothing was written for, so `carried()` never claims a payload came along when the
+entry carrying the deviation was dropped for another reason.
+
+The same rule settles the text string's null. §11.3.3.2 and §11.3.3.4 forbid it in words, but
+neither field is *framed* by it, and this crate's reader returns such a text whole — so a refusal
+would again be a writer stricter than its own reader, on a file the reader accepted. What stops it
+being written verbatim is not the clause but the disagreement: libpng truncates the text at the
+null, so the chunk would hold one annotation for this crate and a shorter one for libpng. Dropped
+and named is the only outcome that is the same everywhere.
+
+**The specification contradicts itself about a `tEXt` text string, and the more specific clause
+wins.** §11.3.3.1's closing paragraph: "There are also tEXt and zTXt chunks, whose content is
+restricted to the printable Latin-1 character set plus U+000A LINE FEED (LF)." §11.3.3.2, which
+defines `tEXt`: "Text is interpreted according to the Latin-1 character set [ISO_8859-1]. The text
+string may contain any Latin-1 character." Both are in `references/png/png-3.html`. §11.3.3.2 is
+the more specific and the more permissive, so it is taken: every Latin-1 character is written into
+the chunk that already interprets its bytes as Latin-1, and only a character Latin-1 cannot encode
+**promotes** to `iTXt` — which is what §11.3.3.2 itself directs ("Text containing characters
+outside the repertoire of ISO/IEC 8859-1 should be encoded using the iTXt chunk"), keeping the
+caller's compression via §11.3.3.4's own flag. Taking the tighter reading silently changed a
+conforming annotation's chunk *type*, which contradicts the identity claim above. The keyword rule
+stays as §11.3.3.1 writes it, because that clause is specific to keywords and all three chunks
+share it.
+
+**Two spec defects** the same issue found, both in the writer, both fixed:
+
+- *`tEXt`/`zTXt` carried UTF-8.* §11.3.3.2 interprets a `tEXt` text string as Latin-1 and
+  §11.3.3.3 makes an inflated `zTXt` identical to it, but the writer pushed the Rust `String`'s
+  bytes, storing `C3 A9` where `é` belongs. Text and keyword are now converted once at the setter
+  and the entry holds the bytes its chunk carries, so the wrong encoding is unrepresentable rather
+  than merely avoided.
+- *`iTXt` lost its language tag and translated keyword*, the two fields that make it
+  international, and its compression flag.
+
+`with_cicp` (§11.3.2.6) was added with this work — without it, preservation would silently drop the
+highest-precedence colour chunk of any file that carries one. It takes no matrix argument: PNG
+fixes that byte at 0.
+
+**Not done.** `pHYs`, `tIME`, `sBIT` and `bKGD` are not part of `PngMetadata`/`DecodedPng`, so they
+cannot be carried (set them with their own builder methods). The `iTXt` language tag is checked for
+its character set, not for full BCP 47 well-formedness (subtag order, registry membership). The XMP
+packet rides in its own field beside `XmpFraming` rather than in `texts`, so a carry emits it
+**first** among the annotations regardless of where it sat in the source, and the two fields can be
+set inconsistently by a caller building a `PngMetadata` by hand — #600. `sPLT` and `hIST` are
+surfaced by neither read walk, so they are not carried either. `gamut convert` carries metadata
+only PNG→PNG; mapping a JPEG/WebP/JXL input's metadata into PNG chunks is a cross-format job of its
+own. The libpng oracle reads no chunk back and drops warnings, so preservation is pinned against
+gamut's own reader plus a decode the oracle accepts — #502, #571 and #572 are what would make it
+differential.
+
 ## Efficiency (issue #224)
 
 Correctness was settled long before efficiency was measured. This section is the measured state:
@@ -219,7 +354,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 3 | Smallest lawful representation | **partial** — every reduction is implemented (grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour) and the key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. What is not done is the **selection**. `reduce::analyze8` still resolves *some* candidates on the raw estimate alone, and a raw estimate cannot see DEFLATE (below). Until the three-candidate race below it resolved all of them, and the eliminated runner-up was often the one that won the finished file: an opaque RGBA image with ≤256 colours kept an alpha channel that was 255 everywhere (349 bytes against 317), and a 16-bit image whose samples are all `k·257` kept all sixteen bits (220 against 172). The estimate now hands the best **chunk-free** candidate over beside the chunk-carrying one and `write_reduced_or_native` measures both, which closes that whole family — the chunk-free gates are mutually exclusive, so at most one such candidate ever exists. The remainder is the *pair* that both carry a chunk: where a palette and a `tRNS` colour key are both lawful, only the raw-smaller one is ever encoded. |
 | 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.2.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. Modified-Zeng ordering and caller-supplied palette cleanup remain. [#482] |
 | 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. A tie keeps the **plain** encoding: cleaning buys its rewritten samples with a size win, and where there is no win there is nothing to buy them with. |
-| 6 | Metadata hygiene | **no policy** — the encoder emits exactly what the caller set, and `gamut convert` drops metadata on the PNG path. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
+| 6 | Metadata hygiene | **preserve, never strip** — the encoder emits exactly what the caller set, and `gamut convert` carries a PNG input's metadata into a PNG output unless `--strip-metadata` asks otherwise (see [Metadata preservation](#metadata-preservation-issue-483)). Preserving costs bytes, and that is the trade this axis takes: a smaller file that silently lost a colour profile is not a better one. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
 | 8 | Effort / speed / determinism | Output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). Three independent knobs, no composed dial. No parallelism. [#484] |
 | 9 | Correctness / robustness | **covered** — 16-bit, odd dimensions, 1×1, CRC policy, malformed input. |
