@@ -811,8 +811,12 @@ mod tests {
 
     #[test]
     fn a_declared_length_running_past_the_buffer_is_an_unusable_length_not_an_absent_superbox() {
+        // 33 bytes declared in a 32-byte buffer: the *nearest* length the bound must refuse, one
+        // byte past the end. A far-past length — 4096, say — is refused by a bound off by any
+        // amount, so it says nothing about where the bound sits; this one is refused only by a
+        // bound that stops exactly at `buffer.len()`.
         let mut buffer = vec![0u8; 32];
-        buffer[..4].copy_from_slice(&4096u32.to_be_bytes());
+        buffer[..4].copy_from_slice(&33u32.to_be_bytes());
         buffer[4..8].copy_from_slice(b"jumb");
 
         let error = jumbf_superbox_span(&buffer)
