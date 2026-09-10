@@ -68,6 +68,102 @@ Cross-depth requests resolve rather than fail: 8-bit widens to 16-bit by `×257`
 narrows to 8-bit by truncation (lossy, documented). Evidence: `tests/high_bit_depth.rs`, pixel-exact
 against libtiff in both directions.
 
+**Added since v1.0 (semver-minor) — the metadata seam and the C2PA manifest store (issue #446).**
+Until now the crate had no metadata surface at all: `tags.rs` named XMP (700), IPTC/NAA (33723),
+ICC (34675) and the Exif/GPS/Interop pointers only so `deconstruct` would not flag them unknown,
+and a caller wanting any of them dropped to the re-exported `gamut-ifd` spine. `TiffMetadata`
+(`#[non_exhaustive]`, built through `new` + `with_*`) is now written by
+`TiffEncoder::with_metadata` on the strip, tile and multi-page paths alike and read back by
+`TiffDecoder::metadata`. XMP, IPTC-IIM, ICC and C2PA are **opaque bytes carried verbatim** — the
+raw blocks the workspace's metadata facade consumes, as `gamut-png` and `gamut-webp` hand them
+over — so this crate parses, validates and reconciles none of them; the `ExifIFD` is handed over
+as a `gamut_ifd::Ifd`, because it *is* a directory the decoder has already walked.
+
+Three consequences are contractual rather than incidental, and are documented where they are made.
+**(a)** The Exif directory's *entries* are carried unchanged but its **ordering is normalised** —
+ascending tag (TIFF 6.0 §2 requires it on disk), duplicate tags collapsed to the last, a child's
+next-IFD pointer ignored — so "verbatim" is claimed for byte payloads, not for a directory model.
+The one shape the model can express and a file cannot — a tag holding both a field and a sub-IFD
+group, which is two entries under one tag — is refused by the encode rather than normalised,
+because normalising it means silently choosing which of the two the caller meant.
+**(b)** Which pointer tags the reader resolves depends on the **level**, and one rule decides it
+at both: a pointer is followed exactly when its target belongs to a directory `TiffMetadata` hands
+back. At **IFD 0** that is `ExifIFD` alone. `SubIFDs` and `GPSInfo` are out, because their targets
+feed no field of `TiffMetadata` and are never re-encoded, so following them there could only add
+failure modes — and did: a single dangling `SubIFDs` offset made XMP, IPTC, ICC and C2PA
+unreachable on a file whose pixels decode perfectly, and two pages sharing one thumbnail directory
+tripped the reader's cross-chain loop guard. **Inside the Exif subtree all four**
+`gamut_ifd::tags::STANDARD_POINTER_TAGS` are resolved — `SubIFDs`, `ExifIFD`, `GPSInfo`,
+`InteroperabilityIFD` — because that directory *is* returned to the caller and may be written
+back, so a pointer left unresolved there is handed over as a raw absolute offset into the source
+file; re-encoding it writes a dangling pointer into a file laid out differently, which the crate's
+own `deconstruct` grades `Severity::Error`. `InteroperabilityIFD` is the one EXIF 2.3 §4.6.3 puts
+there, but a `GPSInfo` or `SubIFDs` group under `ExifIFD` re-encodes just as badly and the reader
+cannot tell a hand-built directory from a camera's. The cost is stated rather than hidden: inside
+the Exif subtree an unreadable target under any of the four fails the whole read, the same trade
+`ExifIFD` itself already makes. Only *standard* pointer tags are recognised anywhere; a **vendor
+private tag holding an offset** is indistinguishable from an integer field, so it is carried
+through and re-encoded verbatim, still holding the source file's offset — neither this crate nor
+`deconstruct` can grade that, and a round trip through such a field is not proof the result is
+pointer-safe. The same rule scopes *where* the walk runs: **IFD 0's subtree and no other page's**.
+Every later page of a multi-page document feeds one field — the C2PA manifest store, whose entry
+holds the store's bytes rather than an offset — so a *pointer* there is a discarded target too,
+and a dangling `ExifIFD` on page 1, or two pages naming one Exif directory, used to fail the whole
+read. `gamut_ifd::read_tree` can be scoped neither way: it resolves the one flat list it is given
+at every node of every page. **(c)** The blocks live in **IFD 0 only**, so a reader decoding
+page 3 of a multi-page document alone sees none of them; duplicating an ICC profile onto every
+page is the worse outcome, and IFD 0 is where a reader conventionally looks. **(d)** The **writer
+is bounded by what the reader accepts**, and it is bounded by inspecting *what the reader
+inspects*, with a distinct message per case since they are distinct mistakes. *Depth*: the walk
+stops two levels under IFD 0 — the deepest tree the followed tags legitimately reach (EXIF 2.3
+§4.6.3) — and an Exif directory a caller nested deeper is refused. *Tag*: a group hung off
+anything outside the standard pointer tags comes back as a raw offset, so it is refused too.
+*Field*: the reader decides "pointer" from a directory's **fields**, while a caller builds one
+from **groups**, so checking only the groups left the writer blind to the one shape the reader
+misreads — a standard pointer tag carried as a plain `LONG`, which encoded cleanly and then failed
+this crate's own reader with `read out of bounds` or `sub-IFD pointer loop`. A field under one of
+the four tags whose **on-disk type code** is a pointer's own (`LONG` 4, `IFD` 13, `LONG8` 16,
+`IFD8` 18) is therefore refused; any other type under those tags is not a pointer to either side
+and round-trips unchanged. The discriminator is the *code*, not the in-memory `Value` variant,
+because the two disagree for exactly one shape: `Value::Unknown` carries an arbitrary code beside
+its value word, the writer emits the code verbatim, and the reader classifies by it — so an
+`Unknown` built at 4, 13, 16 or 18 was a plain field to a variant-shaped check and a pointer to
+the reader. *Pair*: a tag given both a field and a group is two entries under one tag, which
+TIFF 6.0 §2 does not allow and which readers resolve in opposite directions — this crate keeps the
+last occurrence, libtiff ignores everything after the first — so it is refused too. All four are
+`Error::InvalidInput` from `with_metadata`'s encode before any pixel work, on **every** public
+encode surface, rather than a well-formed file this crate cannot read back unchanged. The bound is
+the spec's; that a narrower one is also easier to assert is not on its own a reason to narrow a
+contract.
+
+The C2PA manifest store is the one carrier with a placement rule of its own, and that rule is not
+restated here: `gamut_ifd::c2pa` owns C2PA 2.4 §A.3.6 (tag 52545 / `0xCD41`, type `UNDEFINED`, one
+store per asset, its entry in the **last IFD of the main chain**, its bytes at the **end of the
+file**) and §18.5.5 (the two disjoint exclusion ranges — the store, and the `count` field of its
+entry — that a `c2pa.hash.data` binding excludes; §18.7.3.3 leaves that the only binding a TIFF
+asset has), and `gamut-dng` calls the same helper, so the two formats cannot drift.
+`with_c2pa_reserved` writes a zero-filled reservation for an external signer to overwrite in place.
+It is an infallible builder, so every bound on `len` is enforced by the **encode** that follows, as
+`Error::InvalidInput`, on every entry point: below the store's minimum (8 bytes, 9 in BigTIFF — the
+JUMBF box header, and one more than the variant's inline threshold, since a value that packs inline
+is not the run at the end of the file §A.3.6 wants), above what a buffer can hold, since past
+`isize::MAX` a `Vec<u8>` cannot exist and `vec![0; len]` said so by panicking with a capacity
+overflow, and — in a classic TIFF — above the 4 GiB its entry's 32-bit `LONG` `count` could
+describe, which the encode would otherwise discover only after compressing the image and
+zero-filling the reservation (BigTIFF's count is 64-bit and has no such bound). The reservation is
+taken fallibly instead, so a caller's number cannot panic a library path. A store whose *offset*
+would pass classic TIFF's 4 GiB limit depends on the size of the file it lands after, so that one
+stays `gamut_ifd::c2pa::append_store`'s, refused once the file exists. What stays outside this
+crate's reach is the allocator's: a reservation the machine has no memory for aborts, as any
+oversized allocation in Rust does. `encode_with_report` reports the ranges, and `c2pa_exclusions`
+recovers them from any TIFF's bytes — including files written through `encode_palette8` or
+`encode_pages_rgb8`, which the object-safe `EncodeImage` seam cannot report through. The store's
+bytes are never byte-swapped: the header's `ByteOrder` does not govern them (§A.3.6). Tag 52545
+joins `is_known_tag`, so the v1 zero-tolerance byte accounting claims the store as its entry's typed
+value span rather than reporting an unknown private tag and an unaccounted trailer. Evidence:
+`tests/c2pa.rs`, `tests/metadata.rs`, and libtiff decoding a store-carrying file pixel-exact
+(`tests/oracle_metadata.rs`).
+
 **Deferred (planned, additive).** Each plugs into the existing strip/tile pipeline and libtiff
 oracle the way every codec above did:
 
@@ -84,7 +180,9 @@ oracle the way every codec above did:
   4-bit grayscale; 16-bit palette (`ColorMap` indices stay 8-bit); `Cmyk16`/`GrayAlpha16`
   presentation (no such `gamut-core` pixel type — a 16-bit CMYK page decodes through `Cmyk8` by
   narrowing, or `Rgb16` with the fourth sample dropped); halftone hints (§17); document-storage
-  metadata tags (§12 beyond `PageNumber`).
+  metadata tags (§12 beyond `PageNumber`); **typed metadata** — the seam above carries raw
+  payloads only, and wiring them to the `gamut-metadata` facade's models is deliberately left out
+  (adding that dependency edge is the metadata epic's job, not this crate's).
 
 **Additivity guarantee:** each deferred row lands semver-minor — a new variant on a
 `#[non_exhaustive]` enum (`Compression`, `PhotometricInterpretation`, `Predictor`), a new builder
@@ -127,6 +225,13 @@ The API was frozen after a full-surface review; the additions and breaks:
   `Rgba16`. All new items; nothing existing was reshaped. The one behavioural change is that a
   16-bit page requested as an 8-bit pixel type now returns `Ok` (narrowed) where it previously
   returned `Err(Unsupported)`.
+- **Additions since the freeze (#446)** — `TiffMetadata`, `TiffEncodeReport`, `c2pa_exclusions`,
+  `tags::C2PA_MANIFEST_STORE`, `TiffEncoder::{with_metadata, with_c2pa_reserved,
+  encode_with_report}`, `TiffDecoder::metadata`, and the `C2paExclusions` re-export that keeps the
+  closure complete. All new items; nothing existing was reshaped. `TiffMetadata` is
+  `#[non_exhaustive]` from the start — a sixth carrier must not cost a major, which is exactly
+  what an exhaustive struct cost `gamut-dng`. The one behavioural change is that tag 52545 is no
+  longer reported as an unknown tag by `deconstruct`, since the crate now reads and writes it.
 - **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
   on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
   diagnostics whose wording is not contractual.
