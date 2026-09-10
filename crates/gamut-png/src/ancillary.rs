@@ -305,7 +305,11 @@ impl Ancillary {
             // §11.3.2.6 Table 18: primaries, transfer function, matrix coefficients, full-range
             // flag — one byte each, the matrix fixed at 0 because "RGB is currently the only
             // supported color model in PNG, and as such Matrix Coefficients shall be set to 0".
-            chunk::write_chunk(out, *b"cICP", &[primaries, transfer, 0, u8::from(full_range)]);
+            chunk::write_chunk(
+                out,
+                *b"cICP",
+                &[primaries, transfer, 0, u8::from(full_range)],
+            );
         }
         if let Some(chrm) = self.chrm {
             let mut data = [0u8; 32];
@@ -567,7 +571,6 @@ pub(crate) fn sbit_for(sbit: &[u8], color: ColorType, bit_depth: u8) -> Option<V
         .then_some(entries)
 }
 
-/// Serialises one text chunk (tEXt / zTXt / iTXt).
 /// Serialises one text annotation. `entry.text` is already in the chunk's character set — Latin-1
 /// for `tEXt`/`zTXt` (§11.3.3.2, §11.3.3.3), UTF-8 for `iTXt` (§11.3.3.4) — because
 /// [`Ancillary::text_entry`] converted it when the caller set it, so this function only frames
@@ -964,5 +967,152 @@ mod tests {
             header(ColorType::Grayscale, 8),
         );
         assert_eq!(find_chunk(&post, b"bKGD"), None);
+    }
+
+    /// A `tEXt` text string "is interpreted according to the Latin-1 character set" (§11.3.3.2),
+    /// so a character above U+007F is **one** byte, not its UTF-8 pair.
+    ///
+    /// Kills a mutant of [`Ancillary::text_entry`] that keeps the caller's `String` bytes: `é`
+    /// would be stored as `C3 A9`, which a conforming reader renders `Ã©`. Asserted on the chunk
+    /// payload rather than through a decode, because this crate's decoder maps Latin-1 back
+    /// code-point-for-code-point and would agree with the encoder either way.
+    #[test]
+    fn latin1_text_is_written_one_byte_per_character() {
+        let mut a = Ancillary::default();
+        a.add_text_latin1("Author", "café ÿ");
+        let mut out = vec![0u8; 8];
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        assert_eq!(
+            find_chunk(&out, b"tEXt"),
+            Some(b"Author\0caf\xE9 \xFF".to_vec())
+        );
+    }
+
+    /// §11.3.3.2: "Text containing characters outside the repertoire of ISO/IEC 8859-1 should be
+    /// encoded using the iTXt chunk." A `tEXt` request whose text has no Latin-1 encoding is
+    /// therefore promoted rather than mangled or dropped.
+    ///
+    /// Kills the `(TextKind::Latin1, None)` arm of [`Ancillary::text_entry`]. The keyword stays
+    /// Latin-1 either way (§11.3.3.1 binds it in every text chunk).
+    #[test]
+    fn text_outside_latin1_is_promoted_to_itxt() {
+        let mut a = Ancillary::default();
+        a.add_text_latin1("Title", "字");
+        let mut out = vec![0u8; 8];
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        assert_eq!(find_chunk(&out, b"tEXt"), None);
+        // keyword, NUL, compression flag 0, method 0, empty language, empty translated keyword,
+        // then the UTF-8 text (§11.3.3.4).
+        assert_eq!(
+            find_chunk(&out, b"iTXt"),
+            Some(b"Title\0\0\0\0\0\xE5\xAD\x97".to_vec())
+        );
+    }
+
+    /// Promoting a `zTXt` keeps the caller's *compression*, because §11.3.3.4 gives `iTXt` a
+    /// compression flag of its own — only the character set had to change.
+    ///
+    /// Kills the `(TextKind::Compressed, None)` arm of [`Ancillary::text_entry`] and the
+    /// compression-flag byte in [`write_text`]: a mutant that promotes to plain `International`
+    /// leaves the flag at 0 and the body uncompressed.
+    #[test]
+    fn compressed_text_outside_latin1_stays_compressed_in_itxt() {
+        let body = "字".repeat(200);
+        let mut a = Ancillary::default();
+        a.add_text_compressed("Comment", &body);
+        let mut out = vec![0u8; 8];
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        assert_eq!(find_chunk(&out, b"zTXt"), None);
+        let itxt = find_chunk(&out, b"iTXt").expect("promoted to iTXt");
+        assert_eq!(&itxt[..12], b"Comment\0\x01\0\0\0");
+        assert!(
+            itxt.len() < body.len(),
+            "the body is deflated, not copied: {} bytes",
+            itxt.len()
+        );
+    }
+
+    /// §5.6 Table 5 states it on both rows — "If the iCCP chunk is present, the sRGB chunk should
+    /// not be present" and its converse — and §11.3.2.5 repeats it. Setting both is a question
+    /// only the caller can answer, so the encode is refused rather than one chunk silently
+    /// dropped.
+    ///
+    /// Kills the first guard of [`Ancillary::validate`]. Asserts the message, not `is_err`: the
+    /// second guard also rejects, so `is_err` alone would survive removing this one.
+    #[test]
+    fn srgb_beside_iccp_is_refused() {
+        let mut a = Ancillary::default();
+        a.set_srgb(SrgbIntent::Perceptual);
+        assert!(a.validate().is_ok(), "sRGB alone is fine");
+
+        a.iccp = Some(("prof".to_string(), vec![0u8; 4]));
+        let error = a.validate().expect_err("sRGB beside iCCP");
+        assert!(
+            error.to_string().contains("sRGB and iCCP must not both"),
+            "{error}"
+        );
+
+        a.srgb = None;
+        assert!(a.validate().is_ok(), "iCCP alone is fine");
+    }
+
+    /// §11.3.3.1 binds the keyword to Latin-1 in all three text chunks, so — unlike the text,
+    /// which §11.3.3.2 routes to `iTXt` — a keyword outside it has no chunk at all. The entry is
+    /// not written, and the encode is refused rather than the annotation quietly disappearing.
+    ///
+    /// Kills the keyword arm of [`Ancillary::text_entry`] and the second guard of
+    /// [`Ancillary::validate`]. Asserts the message for the same reason as the sRGB test.
+    #[test]
+    fn a_text_keyword_outside_latin1_is_refused() {
+        let mut a = Ancillary::default();
+        a.add_text_latin1("题", "body");
+        assert!(a.texts.is_empty(), "the entry is not written");
+
+        let error = a.validate().expect_err("keyword outside Latin-1");
+        assert!(
+            error.to_string().contains("keyword must be Latin-1"),
+            "{error}"
+        );
+    }
+
+    /// §11.3.3.4's language tag and translated keyword survive, so carrying a decoded `iTXt`
+    /// forward does not strip the two fields that make it international.
+    ///
+    /// Kills [`Ancillary::add_text_international_tagged`] and the two `extend_from_slice` calls
+    /// for them in [`write_text`]: with either gone the payload is shorter and the tags empty.
+    #[test]
+    fn a_tagged_itxt_keeps_its_language_and_translated_keyword() {
+        let mut a = Ancillary::default();
+        a.add_text_international_tagged("Author", "de", "Autor", "gämut");
+        let mut out = vec![0u8; 8];
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        assert_eq!(
+            find_chunk(&out, b"iTXt"),
+            Some(b"Author\0\0\0de\0Autor\0g\xC3\xA4mut".to_vec())
+        );
+    }
+
+    /// §11.3.2.6 Table 18 orders the payload primaries, transfer function, matrix coefficients,
+    /// full-range flag — and fixes the matrix at 0 for PNG, so the setter has no argument for it.
+    ///
+    /// Kills the cICP arm of [`Ancillary::write_pre_plte`]: the two code points differ, so a
+    /// mutant that swaps them fails, and the literal `0` is asserted in its own position.
+    #[test]
+    fn cicp_is_written_with_the_matrix_fixed_at_zero() {
+        let full = Ancillary {
+            cicp: Some((9, 16, true)),
+            ..Default::default()
+        };
+        let mut out = vec![0u8; 8];
+        full.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        assert_eq!(find_chunk(&out, b"cICP"), Some(vec![9, 16, 0, 1]));
+
+        let narrow = Ancillary {
+            cicp: Some((1, 13, false)),
+            ..Default::default()
+        };
+        let mut out = vec![0u8; 8];
+        narrow.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        assert_eq!(find_chunk(&out, b"cICP"), Some(vec![1, 13, 0, 0]));
     }
 }

@@ -1,6 +1,6 @@
 //! `gamut convert` — decode an image and re-encode it with a gamut codec.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use gamut::avif::AvifEncoder;
@@ -86,6 +86,14 @@ pub(crate) struct ConvertArgs {
     /// for other output formats.
     #[arg(long)]
     jxl_container: bool,
+    /// Drop the input's metadata instead of carrying it into the output. By default a PNG input
+    /// re-encoded to PNG keeps its EXIF, ICC profile, XMP packet, text annotations and colour
+    /// chunks; a stripped file is smaller, an unstripped one is colour-accurate, so the default
+    /// is the one that loses nothing. The C2PA manifest store is never carried either way (it is
+    /// signed over the bytes of the file it was made for). Currently applies only to the PNG
+    /// output path with a PNG input; every other pair drops metadata regardless.
+    #[arg(long)]
+    strip_metadata: bool,
 }
 
 /// Output container/codec for `gamut convert`.
@@ -242,6 +250,22 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
             if let Some(effort) = args.png_effort {
                 encoder = encoder.with_effort(effort);
             }
+            // Carry the input's metadata rather than dropping it (issue #483). `png_metadata`
+            // reads the file a second time — cheaply: the walk skips IDAT by length and never
+            // inflates a pixel — and yields nothing for an input that is not a PNG.
+            let metadata = (!args.strip_metadata)
+                .then(|| png_metadata(&args.input))
+                .flatten();
+            if let Some(metadata) = &metadata {
+                tracing::info!(
+                    texts = metadata.texts.len(),
+                    exif = metadata.exif.is_some(),
+                    icc = metadata.icc_profile.is_some(),
+                    xmp = metadata.xmp.is_some(),
+                    "carrying input metadata"
+                );
+                encoder = encoder.with_metadata(metadata);
+            }
             encoder.encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
             (rgba.len(), dims)
         }
@@ -322,6 +346,16 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
         out.len(),
     );
     Ok(())
+}
+
+/// The metadata `path` carries, or `None` when it is not a PNG or cannot be read.
+///
+/// Deliberately total: the input has already been decoded successfully by the time this is
+/// called, so an error here means the file is simply not a PNG — a JPEG or WebP input has
+/// metadata of its own, but mapping that into PNG chunks is a cross-format job this command does
+/// not do yet. Failing to *read* metadata must never fail a conversion whose pixels are fine.
+fn png_metadata(path: &Path) -> Option<gamut::png::PngMetadata> {
+    gamut::png::metadata(&std::fs::read(path).ok()?).ok()
 }
 
 /// Picks the output format from `--format`, falling back to the output file's extension.

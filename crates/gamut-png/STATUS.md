@@ -41,6 +41,8 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | E1 | #224 | **Efficiency:** `deconstruct` byte accounting; divan size/bpp + per-stage bench; libpng-9 size contract; opt-in transparent cleanup; palette-vs-native race; `crc32fast` and restructured filter kernels (see [Efficiency](#efficiency-issue-224)) | ✅ done |
 | C1 | C2PA 2.4 §A.3.2, §18.5.4 | **C2PA carriage** (#440): the `caBX` manifest store — raw decode surface (`c2pa`; first CRC-valid chunk before `IDAT` wins, ignored ones counted, under the metadata budget); `with_c2pa` / `with_c2pa_reserved` as the last chunk before `IDAT`; the whole-chunk exclusion span from `encode_with_report` and `PngReport::c2pa`, filled in place by `fill_c2pa` (see [C2PA](#c2pa-manifest-store-issue-440)) | ✅ done |
 
+| M1 | §4.3, §5.6, §11.3.2.6, §11.3.3 | **Metadata preservation** (#483): `with_metadata` / `with_metadata_from` carry a read file's eXIf/iCCP/XMP/text/colour chunks into a re-encode (`gamut convert` uses it; `--strip-metadata` opts out); `with_cicp`; `sRGB` beside `iCCP` refused and resolved by colour-chunk priority; `tEXt`/`zTXt` written as Latin-1 with promotion to `iTXt` (see [Metadata preservation](#metadata-preservation-issue-483)) | ✅ done |
+
 ## Decoder phases (issue #249)
 
 | Phase | Spec | Scope | Status |
@@ -134,6 +136,56 @@ hash assertion can be checked over the excluded span) is issue #447.
 **Not done, by design.** No JUMBF parsing, not even of the outer box length. No validation verdict
 of any kind. `gamut convert` does not carry a store across a re-encode (that is the facade's
 `C2paPolicy` law, and the CLI's own path is #448/#483).
+
+## Metadata preservation (issue #483)
+
+The read side has surfaced every metadata payload since D5, and the write side has accepted every
+one since P8, but nothing joined them: a re-encode dropped all of it, so `gamut convert`'s PNG
+path round-tripped 0% of a file's metadata.
+
+`PngEncoder::with_metadata(&PngMetadata)` and `with_metadata_from(&DecodedPng)` are that join —
+one private borrowed view behind two entry points, so the pixel-free `metadata()` walk and a full
+`decode()` reach it without copying a large ICC profile twice. `gamut convert` uses it on the PNG
+output path; `--strip-metadata` is the opt-out. **Preserve is the default**: a stripped file is
+smaller, but dropping an ICC profile silently changes what a viewer paints, so the loss is the
+thing that has to be asked for.
+
+**Three spec-driven adjustments** on the way through, none of them a policy choice:
+
+- `iCCP` and `sRGB` are **resolved, not both written**. §5.6 Table 5 records the constraint on both
+  rows and §11.3.2.5 repeats it; §4.3 Table 1 then ranks the colour chunks (cICP 1, iCCP 2, sRGB 3,
+  cHRM+gAMA 4) and a reader honours the lowest number. So the `iCCP` is carried and the `sRGB`
+  dropped — the chunk a conforming reader was already ignoring.
+- A `cICP` whose matrix coefficients are not 0 is dropped: §11.3.2.6 requires 0 for PNG, so such a
+  chunk is not conforming and carrying it forward would reproduce the defect.
+- The **C2PA manifest store is never carried**. A store is signed over the exact bytes of the file
+  it was made for — the reason `caBX` is unsafe to copy (C2PA 2.4 §A.3.2) — so a copy is invalid by
+  construction. Re-sign the output and set it with `with_c2pa`.
+
+**Two spec defects** the same issue found, both in the writer:
+
+- *`sRGB` beside `iCCP` was written whenever both were set*, warned about only in a doc comment.
+  Now `Ancillary::validate` refuses the encode with `InvalidInput` at the one chokepoint every
+  encode path funnels through. Refusing rather than dropping one is the point: which the caller
+  meant is not guessable, and `with_metadata` exists for the case where §4.3 answers it.
+- *`tEXt`/`zTXt` carried UTF-8.* §11.3.3.2 interprets a `tEXt` text string as Latin-1, §11.3.3.3
+  makes an inflated `zTXt` identical to it, and §11.3.3.1 binds every keyword to Latin-1 — but the
+  writer pushed the Rust `String`'s bytes, storing `C3 A9` where `é` belongs. Text and keyword are
+  now converted once at the setter and the entry holds the bytes its chunk carries, so the wrong
+  encoding is unrepresentable rather than merely avoided. A text outside Latin-1 is promoted to
+  `iTXt` exactly as §11.3.3.2 directs, keeping the caller's compression via §11.3.3.4's flag; a
+  *keyword* outside it has no chunk at all, so it refuses the encode.
+
+`with_cicp` (§11.3.2.6) was added with this work — without it, preservation would silently drop the
+highest-precedence colour chunk of any file that carries one. It takes no matrix argument: PNG
+fixes that byte at 0.
+
+**Not done.** `pHYs`, `tIME`, `sBIT` and `bKGD` are not part of `PngMetadata`/`DecodedPng`, so they
+cannot be carried (set them with their own builder methods). A `zTXt` is indistinguishable from a
+`tEXt` once decoded, so a compressed annotation is rewritten uncompressed — no text is lost, only
+bytes. §11.3.3.1's keyword *syntax* rules beyond Latin-1 (the printable subset, the space rules,
+the 1–79-byte bound) are not enforced. `gamut convert` carries metadata only PNG→PNG; mapping a
+JPEG/WebP/JXL input's metadata into PNG chunks is a cross-format job of its own.
 
 ## Efficiency (issue #224)
 

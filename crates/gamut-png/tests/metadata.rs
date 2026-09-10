@@ -104,7 +104,9 @@ fn metadata_agrees_with_decode_field_for_field() {
     let mut iccp = b"Tiny\0\0".to_vec();
     iccp.extend_from_slice(&zlib(&icc));
     let mut chrm = Vec::new();
-    for coord in [31_270u32, 32_900, 64_000, 33_000, 30_000, 60_000, 15_000, 6_000] {
+    for coord in [
+        31_270u32, 32_900, 64_000, 33_000, 30_000, 60_000, 15_000, 6_000,
+    ] {
         chrm.extend_from_slice(&coord.to_be_bytes());
     }
     let png = png_from_chunks(&[

@@ -15,8 +15,7 @@ use common::{
 };
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Indexed8, Rgb8, Rgba8};
 use gamut_png::{
-    PhysicalUnit, PngDecoder, PngEncoder, PngPalette, SegmentKind, deconstruct,
-    fill_c2pa,
+    PhysicalUnit, PngDecoder, PngEncoder, PngPalette, SegmentKind, deconstruct, fill_c2pa,
 };
 
 /// A stand-in manifest store of `len` bytes: not all zero, no two runs alike, so a fill is
