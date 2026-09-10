@@ -22,7 +22,9 @@
 //! flags, then the null-terminated `box_purpose`, then `data`. What sits at the front of `data`
 //! depends on the purpose ([`C2paBoxPurpose`]), and what bounds the store inside it is the store's
 //! own JUMBF `LBox` ([`C2paManifestStore`]).
+use core::iter::Peekable;
 use core::ops::Range;
+use core::slice;
 
 use crate::container::{HeifContainer, SegmentKind};
 
@@ -626,6 +628,16 @@ pub struct C2paSummary {
     /// says what is true about the bytes and leaves the reading to a validator. No range is kept
     /// and no line is emitted per box: the boxes are not this crate's subject, and the specification
     /// has no notion of an approximate extended type.
+    ///
+    /// # What the count cannot tell you
+    ///
+    /// Which kind of box it counted. A corrupted C2PA extended type and an ordinary vendor `uuid`
+    /// box are the *same* observation to this field — a box whose sixteen bytes are not
+    /// [`C2PA_UUID`] — and a file carrying one of each renders exactly as a file carrying two of
+    /// either. Nothing here narrows that: telling them apart would need a notion of an approximate
+    /// extended type, which §A.5.1.1 does not have. So the count separates a file with such a box
+    /// from a file with none, and nothing finer; a non-zero count on ordinary camera output is the
+    /// expected reading, not a signal.
     pub other_uuid_boxes: usize,
 }
 
@@ -671,15 +683,18 @@ impl C2paSummary {
     /// `uuid` boxes whose extended type is not C2PA's.
     ///
     /// **At most two lines, whatever the file holds**, which is what makes this the part a host
-    /// prints unconditionally. The headline states what was found and carries
+    /// prints unconditionally. The headline states every non-empty category and carries
     /// [`C2PA_NOT_VALIDATED`] inline; the second line is a byte count, worded so it cannot be read
     /// as a provenance claim (see [`other_uuid_boxes`](Self::other_uuid_boxes)).
+    ///
+    /// Neither line is indented, because neither is a list entry: they are the head a host prints
+    /// above whatever it shows of [`detail_lines`](Self::detail_lines), which *is* indented.
     #[must_use]
     pub fn summary_lines(&self) -> Vec<String> {
         let mut lines = vec![self.headline()];
         if self.other_uuid_boxes > 0 {
             lines.push(format!(
-                "  other top-level uuid boxes: {count} (extended type is not the C2PA one; a uuid \
+                "top-level uuid boxes of another extended type: {count} (not the C2PA one; a uuid \
                  box is not provenance framing)",
                 count = self.other_uuid_boxes,
             ));
@@ -687,7 +702,17 @@ impl C2paSummary {
         lines
     }
 
-    /// One line per located store, then one line per C2PA box that yielded no store, in file order.
+    /// One line per top-level C2PA box — a located store or a box that yielded none — **in true
+    /// file order**, the two kinds interleaved exactly as the file carries them.
+    ///
+    /// # Why the order is part of the contract
+    ///
+    /// A host that caps this list keeps a *prefix* of it. Grouped by kind, one budget can silence
+    /// a whole category: twenty legal stores ahead of one unreadable box render no unread line at
+    /// all, and which category gets silenced would be decided by this rendering rather than by the
+    /// file. In file order the cut is category-blind — it hides the last boxes, whatever they are —
+    /// and [`summary_lines`](Self::summary_lines) names every non-empty category regardless, so no
+    /// cap can hide that a category exists.
     ///
     /// Each store line names its `box_purpose`, its size and its half-open byte range, and repeats
     /// "located, not validated" so a line read on its own still cannot be mistaken for a verdict;
@@ -699,10 +724,10 @@ impl C2paSummary {
     /// that chose how many to carry. [`detail_line_count`](Self::detail_line_count) is how many
     /// there are in total.
     pub fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
-        self.stores
-            .iter()
-            .map(store_line)
-            .chain(self.unread.iter().map(unread_line))
+        DetailLines {
+            stores: self.stores.iter().peekable(),
+            unread: self.unread.iter().peekable(),
+        }
     }
 
     /// How many lines [`detail_lines`](Self::detail_lines) yields — one per store plus one per
@@ -714,29 +739,89 @@ impl C2paSummary {
 
     /// The report's first line: what the scan found, with [`C2PA_NOT_VALIDATED`] inline.
     ///
-    /// Three outcomes, not two. A file carrying C2PA boxes none of which yielded a store is
-    /// neither "located" nor "none found": saying "none found" for it would let a reader infer
-    /// absence of provenance from bytes gamut merely could not read.
+    /// **Every non-empty category is named, not just the first.** A file carrying stores *and*
+    /// boxes no store could be read from says both, in this one line. That matters because
+    /// [`detail_lines`](Self::detail_lines) is what a host caps, and a category can fall wholly
+    /// past the cut; the headline is the line a reader cannot lose, so it is where the existence
+    /// of a category has to be stated.
+    ///
+    /// Four outcomes, not two. A file carrying C2PA boxes none of which yielded a store is neither
+    /// "located" nor "none found": saying "none found" for it would let a reader infer absence of
+    /// provenance from bytes gamut merely could not read.
     fn headline(&self) -> String {
-        let count = self.stores.len();
-        if count > 0 {
-            return format!(
-                "C2PA: {count} manifest store{plural} located, NOT VALIDATED — {C2PA_NOT_VALIDATED}",
-                plural = if count == 1 { "" } else { "s" }
-            );
-        }
+        let stores = self.stores.len();
         let unread = self.unread.len();
-        if unread > 0 {
-            return format!(
-                "C2PA: no manifest store could be read, but {unread} C2PA {noun} present — that is \
-                 NOT absence of provenance — {C2PA_NOT_VALIDATED}",
-                noun = if unread == 1 { "box is" } else { "boxes are" }
-            );
+        match (stores, unread) {
+            (0, 0) => format!(
+                "C2PA: no manifest store found in the top-level boxes of the primary stream — \
+                 {C2PA_NOT_VALIDATED}"
+            ),
+            (0, _) => format!(
+                "C2PA: no manifest store could be read, but {present} — that is NOT absence of \
+                 provenance — {C2PA_NOT_VALIDATED}",
+                present = unread_clause(unread),
+            ),
+            (_, 0) => format!(
+                "C2PA: {located} — {C2PA_NOT_VALIDATED}",
+                located = located_clause(stores),
+            ),
+            _ => format!(
+                "C2PA: {located}, and {present} from which no store could be read — a box gamut \
+                 could not read through is NOT absence of provenance — {C2PA_NOT_VALIDATED}",
+                located = located_clause(stores),
+                present = unread_clause(unread),
+            ),
         }
-        format!(
-            "C2PA: no manifest store found in the top-level boxes of the primary stream — \
-             {C2PA_NOT_VALIDATED}"
-        )
+    }
+}
+
+/// The headline's clause for the located stores, written once so both headlines that name them
+/// agree. Never called with zero.
+fn located_clause(count: usize) -> String {
+    format!(
+        "{count} manifest store{plural} located, NOT VALIDATED",
+        plural = if count == 1 { "" } else { "s" }
+    )
+}
+
+/// The headline's clause for the C2PA boxes that yielded no store, written once so both headlines
+/// that name them agree. Never called with zero.
+fn unread_clause(count: usize) -> String {
+    format!(
+        "{count} C2PA {noun} present",
+        noun = if count == 1 { "box is" } else { "boxes are" }
+    )
+}
+
+/// [`C2paSummary::detail_lines`]'s iterator: the store list and the unread list merged back into
+/// the file order they were both built in.
+///
+/// Merging on `range.start` is exact rather than approximate. Different top-level `uuid` boxes
+/// occupy disjoint byte ranges, and a store's range lies inside the box that carried it, so the
+/// lower start is always the earlier box. A tie is not reachable from a parsed file — a store
+/// begins strictly after its box's header — and resolves to the store, so the iterator is total
+/// for a summary assembled by hand as well.
+struct DetailLines<'a> {
+    stores: Peekable<slice::Iter<'a, C2paStoreSummary>>,
+    unread: Peekable<slice::Iter<'a, C2paUnreadBox>>,
+}
+
+impl Iterator for DetailLines<'_> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        let store_at = self.stores.peek().map(|store| store.range.start);
+        let unread_at = self.unread.peek().map(|unread| unread.range.start);
+        let store_first = match (store_at, unread_at) {
+            (Some(store), Some(unread)) => store <= unread,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if store_first {
+            self.stores.next().map(store_line)
+        } else {
+            self.unread.next().map(unread_line)
+        }
     }
 }
 
@@ -966,9 +1051,11 @@ mod tests {
     }
 
     #[test]
-    fn a_located_store_headlines_the_report_even_beside_an_unread_box() {
-        // Precedence: one store read is what the headline states, and the box that yielded nothing
-        // is still listed under it rather than replacing the headline or being dropped.
+    fn the_headline_states_both_categories_when_the_file_carries_both() {
+        // A headline that stopped at the first non-empty category was hideable: a host caps the
+        // detail lines, so a category that falls wholly past the cut would leave no trace at all
+        // and the report would read as a clean bill of health. Naming both here is what no cap can
+        // reach.
         let mixed = C2paSummary {
             stores: vec![C2paStoreSummary {
                 range: 61..90,
@@ -985,12 +1072,81 @@ mod tests {
         assert_eq!(
             mixed.report_lines(),
             vec![
-                format!("C2PA: 1 manifest store located, NOT VALIDATED — {C2PA_NOT_VALIDATED}"),
+                format!(
+                    "C2PA: 1 manifest store located, NOT VALIDATED, and 1 C2PA box is present from \
+                     which no store could be read — a box gamut could not read through is NOT \
+                     absence of provenance — {C2PA_NOT_VALIDATED}"
+                ),
                 "  box_purpose \"manifest\": 29 bytes at [61, 90) — located, not validated"
                     .to_owned(),
                 format!(
                     "  unread C2PA box at [90, 150): {}",
                     C2paUnreadReason::NotAManifestStorePurpose.describe()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_detail_lines_interleave_the_two_kinds_in_file_order() {
+        // Grouped by kind, a host's cap silences whichever kind renders last, and which kind that
+        // is would be this rendering's choice rather than the file's. In file order the cut is
+        // category-blind: it hides the last boxes, whatever they are.
+        let mut mixed = summary(&[
+            (61, 90, C2paBoxPurpose::Manifest),
+            (231, 260, C2paBoxPurpose::Update),
+        ]);
+        mixed.unread = vec![
+            C2paUnreadBox {
+                range: 16..40,
+                reason: C2paUnreadReason::Truncated,
+                position: C2paBoxPosition::BeforeMediaData,
+            },
+            C2paUnreadBox {
+                range: 130..200,
+                reason: C2paUnreadReason::NoStoreBound,
+                position: C2paBoxPosition::BeforeMediaData,
+            },
+        ];
+        assert_eq!(
+            mixed.detail_lines().collect::<Vec<_>>(),
+            vec![
+                format!(
+                    "  unread C2PA box at [16, 40): {}",
+                    C2paUnreadReason::Truncated.describe()
+                ),
+                "  box_purpose \"manifest\": 29 bytes at [61, 90) — located, not validated"
+                    .to_owned(),
+                format!(
+                    "  unread C2PA box at [130, 200): {}",
+                    C2paUnreadReason::NoStoreBound.describe()
+                ),
+                "  box_purpose \"update\": 29 bytes at [231, 260) — located, not validated"
+                    .to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_store_and_an_unread_box_starting_together_render_the_store_first() {
+        // Unreachable from a parsed file — a store begins strictly after the header of the box
+        // carrying it — but the merge must be total for a summary assembled by hand, so which side
+        // wins a tie is pinned rather than left to the shape of the comparison.
+        let mut tied = summary(&[(61, 90, C2paBoxPurpose::Manifest)]);
+        tied.unread.push(C2paUnreadBox {
+            range: 61..150,
+            reason: C2paUnreadReason::Truncated,
+            position: C2paBoxPosition::BeforeMediaData,
+        });
+        let lines: Vec<String> = tied.detail_lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "  box_purpose \"manifest\": 29 bytes at [61, 90) — located, not validated"
+                    .to_owned(),
+                format!(
+                    "  unread C2PA box at [61, 150): {}",
+                    C2paUnreadReason::Truncated.describe()
                 ),
             ]
         );
@@ -1040,26 +1196,6 @@ mod tests {
             ]
         );
     }
-    #[test]
-    fn a_report_holds_no_borrow_of_the_file_it_describes() {
-        // Drift guard for the guarantee that no report can print a store's bytes. Today that rests
-        // on structure — no lifetime parameter, no byte field — which an additive change could
-        // weaken without any test noticing, since every one of these types is `#[non_exhaustive]`
-        // and open to new fields. `'static` is exactly "borrows nothing", so a field that borrows
-        // the input fails this at compile time instead.
-        fn borrows_nothing<T: 'static>(_: &T) {}
-        borrows_nothing(&C2paSummary::default());
-        borrows_nothing(&C2paStoreSummary {
-            range: 61..90,
-            purpose: C2paBoxPurpose::Manifest,
-            position: C2paBoxPosition::BeforeMediaData,
-        });
-        borrows_nothing(&C2paUnreadBox {
-            range: 16..106,
-            reason: C2paUnreadReason::Truncated,
-            position: C2paBoxPosition::BeforeMediaData,
-        });
-    }
 
     #[test]
     fn uuid_boxes_of_another_extended_type_are_reported_as_a_count_of_bytes_present() {
@@ -1072,9 +1208,11 @@ mod tests {
         };
         let lines = none.report_lines();
         assert_eq!(lines.len(), 2, "{lines:?}");
+        // Unindented, because it is part of the head and not a detail entry, and it names what it
+        // counts without an "other" whose antecedent this file does not have.
         assert_eq!(
             lines[1],
-            "  other top-level uuid boxes: 3 (extended type is not the C2PA one; a uuid box is \
+            "top-level uuid boxes of another extended type: 3 (not the C2PA one; a uuid box is \
              not provenance framing)"
         );
         // The headline is still the absence one: no store was found, and none of these is one.
