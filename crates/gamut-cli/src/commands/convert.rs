@@ -89,9 +89,10 @@ pub(crate) struct ConvertArgs {
     /// Drop the input's metadata instead of carrying it into the output. By default a PNG input
     /// re-encoded to PNG keeps its EXIF, ICC profile, XMP packet, text annotations and colour
     /// chunks; a stripped file is smaller, an unstripped one is colour-accurate, so the default
-    /// is the one that loses nothing. The C2PA manifest store is never carried either way (it is
-    /// signed over the bytes of the file it was made for). Currently applies only to the PNG
-    /// output path with a PNG input; every other pair drops metadata regardless.
+    /// is the one that loses nothing. Anything that cannot be carried — the C2PA manifest store,
+    /// signed over the bytes of the file it was made for — is reported on stderr rather than
+    /// dropped in silence. Currently applies only to the PNG output path with a PNG input; every
+    /// other pair drops metadata regardless.
     #[arg(long)]
     strip_metadata: bool,
 }
@@ -251,8 +252,10 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                 encoder = encoder.with_effort(effort);
             }
             // Carry the input's metadata rather than dropping it (issue #483). `png_metadata`
-            // reads the file a second time — cheaply: the walk skips IDAT by length and never
-            // inflates a pixel — and yields nothing for an input that is not a PNG.
+            // reads the file from disk a second time; the *walk* is cheap (it skips IDAT by
+            // length and never inflates a pixel), the second read is not, and it is what the
+            // convenience of taking a path rather than the already-loaded bytes costs. It yields
+            // nothing for an input that is not a PNG.
             let metadata = (!args.strip_metadata)
                 .then(|| png_metadata(&args.input))
                 .flatten();
@@ -265,6 +268,12 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                     "carrying input metadata"
                 );
                 encoder = encoder.with_metadata(metadata);
+                // Say what could not come along. Silent loss is the defect this path exists to
+                // remove, and a payload the spec forbids carrying is still a payload the caller
+                // had.
+                for dropped in encoder.dropped_metadata() {
+                    tracing::warn!("input metadata not carried — {dropped}");
+                }
             }
             encoder.encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
             (rgba.len(), dims)

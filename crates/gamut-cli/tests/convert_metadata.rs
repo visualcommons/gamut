@@ -13,7 +13,8 @@ use std::process::Command;
 use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgba8};
 use gamut::png::{PngEncoder, PngMetadata, SrgbIntent};
 
-/// A 2×2 PNG carrying an EXIF block, a text annotation and a rendering intent.
+/// A 2×2 PNG carrying an EXIF block, a text annotation, a rendering intent and a C2PA manifest
+/// store — the last being the one payload a re-encode may not carry.
 fn png_with_metadata() -> Vec<u8> {
     let rgba = vec![255u8; 4 * 4];
     let dims = Dimensions {
@@ -25,13 +26,15 @@ fn png_with_metadata() -> Vec<u8> {
         .with_exif(&[0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00])
         .with_text("Author", "nobody")
         .with_srgb(SrgbIntent::Perceptual)
+        .with_c2pa(b"\0\0\0\x10jumbc2pa")
         .encode_to_vec(image)
         .unwrap()
 }
 
 /// Writes `png` to a temp file, converts it to PNG with `extra` flags, and returns the output's
-/// metadata. Both temp files are removed before the assertion runs.
-fn convert(name: &str, png: &[u8], extra: &[&str]) -> PngMetadata {
+/// metadata together with what the command said on stderr. Both temp files are removed before
+/// the assertion runs.
+fn convert(name: &str, png: &[u8], extra: &[&str]) -> (PngMetadata, String) {
     let dir = std::env::temp_dir();
     let input = dir.join(format!(
         "gamut-convert-{}-{name}-in.png",
@@ -59,14 +62,17 @@ fn convert(name: &str, png: &[u8], extra: &[&str]) -> PngMetadata {
         "stderr: {}",
         String::from_utf8_lossy(&status.stderr)
     );
-    gamut::png::metadata(&encoded.expect("output written")).expect("read back")
+    (
+        gamut::png::metadata(&encoded.expect("output written")).expect("read back"),
+        String::from_utf8_lossy(&status.stderr).into_owned(),
+    )
 }
 
 /// The issue's headline: `gamut convert` used to decode to raw RGBA and encode with a bare
 /// builder, so every EXIF, ICC, XMP and text chunk was lost with no warning.
 #[test]
 fn png_to_png_carries_the_input_metadata_by_default() {
-    let meta = convert("default", &png_with_metadata(), &[]);
+    let (meta, _) = convert("default", &png_with_metadata(), &[]);
 
     assert_eq!(
         meta.exif.as_deref(),
@@ -85,7 +91,22 @@ fn png_to_png_carries_the_input_metadata_by_default() {
 /// for — the default may not silently discard colour information.
 #[test]
 fn strip_metadata_drops_it_all() {
-    let meta = convert("stripped", &png_with_metadata(), &["--strip-metadata"]);
+    let (meta, _) = convert("stripped", &png_with_metadata(), &["--strip-metadata"]);
 
     assert_eq!(meta, PngMetadata::default());
+}
+
+/// A payload the command could not carry is *said*, not swallowed. A C2PA manifest store is
+/// signed over the bytes of the file it was made for (C2PA 2.4 §A.3.2), so a copy would be
+/// invalid — but the caller asked for preservation and is entitled to know their provenance did
+/// not survive. Warnings reach stderr at the default verbosity, so this needs no `-v`.
+#[test]
+fn a_payload_that_cannot_be_carried_is_reported_on_stderr() {
+    let (meta, stderr) = convert("dropped", &png_with_metadata(), &[]);
+
+    assert!(meta.c2pa.is_none(), "the store is not carried");
+    assert!(
+        stderr.contains("C2PA manifest store"),
+        "stderr said nothing about the store: {stderr}"
+    );
 }
