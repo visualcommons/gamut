@@ -43,9 +43,17 @@
 //!   the crate;
 //! - a numeric field whose text does not parse as a number reads as absent (honest read — the raw
 //!   value is still in the graph);
-//! - an [`ImageRegion`] keeps every field it does not model in [`ImageRegion::other`], because the
-//!   standard explicitly allows a region to carry any other metadata property, so a region
-//!   survives `from_xmp` → `to_xmp` intact.
+//! - field *order* within a structure is not preserved: a structure is re-emitted in the model's
+//!   field order, with the retained fields last. Values, and the relative order of an array's
+//!   items, are preserved.
+//!
+//! Nothing else is dropped by a read-modify-write. Every type here keeps the fields it does not
+//! model in its `other` list — [`ImageRegion`] because the standard explicitly allows a region to
+//! carry any other metadata property, the other three so that a vendor extension in a real-world
+//! file survives being read and written back — and re-emits them verbatim after the fields it does
+//! model. A retained field whose name the model *does* own is dropped rather than emitted twice: a
+//! structure carrying two fields of one name is ill-formed and does not read back, so the modelled
+//! value stays the authority.
 
 use gamut_xmp::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
@@ -198,6 +206,32 @@ fn structure(value: &XmpValue) -> Option<&[XmpProperty]> {
     }
 }
 
+// --- Verbatim retention of the fields a model does not name -----------------------------------
+
+/// Whether `p` is one of the `(namespace, name)` fields a model names.
+fn is_modelled(p: &XmpProperty, modelled: &[(&str, &str)]) -> bool {
+    modelled
+        .iter()
+        .any(|&(ns, name)| p.namespace == ns && p.name == name)
+}
+
+/// Every field of `f` the model does not name, cloned for verbatim retention.
+fn unmodelled(f: &[XmpProperty], modelled: &[(&str, &str)]) -> Vec<XmpProperty> {
+    f.iter()
+        .filter(|p| !is_modelled(p, modelled))
+        .cloned()
+        .collect()
+}
+
+/// Appends the retained fields, dropping any whose name the model owns.
+///
+/// The retention list is public, so a caller can put a modelled name in it; emitting it as well
+/// would produce a structure with two fields of one name, which is ill-formed and does not read
+/// back (see the [module docs](self)).
+fn put_unmodelled(out: &mut Vec<XmpProperty>, modelled: &[(&str, &str)], other: &[XmpProperty]) {
+    out.extend(other.iter().filter(|p| !is_modelled(p, modelled)).cloned());
+}
+
 // --- Creator's contact info -------------------------------------------------------------------
 
 /// The creator's contact details (`Iptc4xmpCore:CreatorContactInfo`, IPTC Core 1.5 §8.1).
@@ -227,9 +261,24 @@ pub struct CreatorContactInfo {
     pub phone: Option<String>,
     /// Work web URL(s) (`Iptc4xmpCore:CiUrlWork`).
     pub web_url: Option<String>,
+    /// Every other field the structure carries, verbatim, so a read-modify-write does not drop a
+    /// vendor extension (see the [module docs](self)).
+    pub other: Vec<XmpProperty>,
 }
 
 impl CreatorContactInfo {
+    /// The eight field names this type models; everything else lands in [`other`](Self::other).
+    const MODELLED: [(&'static str, &'static str); 8] = [
+        (ns::IPTC_CORE, "CiAdrExtadr"),
+        (ns::IPTC_CORE, "CiAdrCity"),
+        (ns::IPTC_CORE, "CiAdrCtry"),
+        (ns::IPTC_CORE, "CiAdrPcode"),
+        (ns::IPTC_CORE, "CiAdrRegion"),
+        (ns::IPTC_CORE, "CiEmailWork"),
+        (ns::IPTC_CORE, "CiTelWork"),
+        (ns::IPTC_CORE, "CiUrlWork"),
+    ];
+
     /// Reads the structure from an XMP value, or `None` if the value is not a structure.
     #[must_use]
     pub fn from_xmp(value: &XmpValue) -> Option<Self> {
@@ -247,10 +296,12 @@ impl CreatorContactInfo {
             email: text(f, ns::IPTC_CORE, "CiEmailWork"),
             phone: text(f, ns::IPTC_CORE, "CiTelWork"),
             web_url: text(f, ns::IPTC_CORE, "CiUrlWork"),
+            other: unmodelled(f, &Self::MODELLED),
         }
     }
 
-    /// Writes the structure as an XMP value, omitting absent fields.
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
@@ -267,6 +318,7 @@ impl CreatorContactInfo {
         put_text(&mut f, ns::IPTC_CORE, "CiEmailWork", self.email.as_ref());
         put_text(&mut f, ns::IPTC_CORE, "CiTelWork", self.phone.as_ref());
         put_text(&mut f, ns::IPTC_CORE, "CiUrlWork", self.web_url.as_ref());
+        put_unmodelled(&mut f, &Self::MODELLED, &self.other);
         XmpValue::Structured(f)
     }
 }
@@ -316,9 +368,34 @@ pub struct ArtworkOrObject {
     pub source_inventory_url: Option<String>,
     /// Style periods (`Iptc4xmpExt:AOStylePeriod`).
     pub style_periods: Vec<String>,
+    /// Every other field the structure carries, verbatim, so a read-modify-write does not drop a
+    /// vendor extension (see the [module docs](self)).
+    pub other: Vec<XmpProperty>,
 }
 
 impl ArtworkOrObject {
+    /// The seventeen field names this type models; everything else lands in
+    /// [`other`](Self::other).
+    const MODELLED: [(&'static str, &'static str); 17] = [
+        (ns::IPTC_EXT, "AOTitle"),
+        (ns::IPTC_EXT, "AOCreator"),
+        (ns::IPTC_EXT, "AOCreatorId"),
+        (ns::IPTC_EXT, "AODateCreated"),
+        (ns::IPTC_EXT, "AOCircaDateCreated"),
+        (ns::IPTC_EXT, "AOCopyrightNotice"),
+        (ns::IPTC_EXT, "AOCurrentCopyrightOwnerName"),
+        (ns::IPTC_EXT, "AOCurrentCopyrightOwnerId"),
+        (ns::IPTC_EXT, "AOCurrentLicensorName"),
+        (ns::IPTC_EXT, "AOCurrentLicensorId"),
+        (ns::IPTC_EXT, "AOContentDescription"),
+        (ns::IPTC_EXT, "AOContributionDescription"),
+        (ns::IPTC_EXT, "AOPhysicalDescription"),
+        (ns::IPTC_EXT, "AOSource"),
+        (ns::IPTC_EXT, "AOSourceInvNo"),
+        (ns::IPTC_EXT, "AOSourceInvURL"),
+        (ns::IPTC_EXT, "AOStylePeriod"),
+    ];
+
     /// Reads the structure from an XMP value, or `None` if the value is not a structure.
     #[must_use]
     pub fn from_xmp(value: &XmpValue) -> Option<Self> {
@@ -345,10 +422,12 @@ impl ArtworkOrObject {
             source_inventory_number: text(f, ns::IPTC_EXT, "AOSourceInvNo"),
             source_inventory_url: text(f, ns::IPTC_EXT, "AOSourceInvURL"),
             style_periods: list(f, ns::IPTC_EXT, "AOStylePeriod"),
+            other: unmodelled(f, &Self::MODELLED),
         }
     }
 
-    /// Writes the structure as an XMP value, omitting absent fields.
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
     ///
     /// The container kinds follow the standard: `AOCreator` and `AOCreatorId` are ordered `Seq`s
     /// (identifiers are given in the same sequence as the names), `AOStylePeriod` an unordered
@@ -445,6 +524,7 @@ impl ArtworkOrObject {
             false,
             &self.style_periods,
         );
+        put_unmodelled(&mut f, &Self::MODELLED, &self.other);
         XmpValue::Structured(f)
     }
 }
@@ -490,9 +570,31 @@ pub struct Licensor {
     pub email: Option<String>,
     /// Web URL (`plus:LicensorURL`).
     pub web_url: Option<String>,
+    /// Every other field the structure carries, verbatim, so a read-modify-write does not drop a
+    /// vendor extension (see the [module docs](self)).
+    pub other: Vec<XmpProperty>,
 }
 
 impl Licensor {
+    /// The fourteen field names this type models; everything else lands in
+    /// [`other`](Self::other).
+    const MODELLED: [(&'static str, &'static str); 14] = [
+        (ns::PLUS, "LicensorID"),
+        (ns::PLUS, "LicensorName"),
+        (ns::PLUS, "LicensorStreetAddress"),
+        (ns::PLUS, "LicensorExtendedAddress"),
+        (ns::PLUS, "LicensorCity"),
+        (ns::PLUS, "LicensorRegion"),
+        (ns::PLUS, "LicensorPostalCode"),
+        (ns::PLUS, "LicensorCountry"),
+        (ns::PLUS, "LicensorTelephoneType1"),
+        (ns::PLUS, "LicensorTelephone1"),
+        (ns::PLUS, "LicensorTelephoneType2"),
+        (ns::PLUS, "LicensorTelephone2"),
+        (ns::PLUS, "LicensorEmail"),
+        (ns::PLUS, "LicensorURL"),
+    ];
+
     /// Reads the structure from an XMP value, or `None` if the value is not a structure.
     #[must_use]
     pub fn from_xmp(value: &XmpValue) -> Option<Self> {
@@ -516,10 +618,12 @@ impl Licensor {
             telephone2: text(f, ns::PLUS, "LicensorTelephone2"),
             email: text(f, ns::PLUS, "LicensorEmail"),
             web_url: text(f, ns::PLUS, "LicensorURL"),
+            other: unmodelled(f, &Self::MODELLED),
         }
     }
 
-    /// Writes the structure as an XMP value, omitting absent fields.
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
@@ -572,6 +676,7 @@ impl Licensor {
         );
         put_text(&mut f, ns::PLUS, "LicensorEmail", self.email.as_ref());
         put_text(&mut f, ns::PLUS, "LicensorURL", self.web_url.as_ref());
+        put_unmodelled(&mut f, &Self::MODELLED, &self.other);
         XmpValue::Structured(f)
     }
 }
@@ -754,7 +859,7 @@ pub struct ImageRegion {
     /// The role the region plays in the image (`Iptc4xmpExt:rRole`).
     pub roles: Vec<Entity>,
     /// Every other property the region carries, verbatim (the standard's
-    /// "other metadata property").
+    /// "other metadata property"), so a read-modify-write does not drop it.
     pub other: Vec<XmpProperty>,
 }
 
@@ -783,15 +888,7 @@ impl ImageRegion {
             name: lang_alt(f, ns::IPTC_EXT, "Name"),
             content_types: entities(f, "rCtype"),
             roles: entities(f, "rRole"),
-            other: f
-                .iter()
-                .filter(|p| {
-                    !Self::MODELLED
-                        .iter()
-                        .any(|&(ns, name)| p.namespace == ns && p.name == name)
-                })
-                .cloned()
-                .collect(),
+            other: unmodelled(f, &Self::MODELLED),
         }
     }
 
@@ -822,7 +919,7 @@ impl ImageRegion {
             false,
             self.roles.iter().map(Entity::to_xmp).collect(),
         );
-        f.extend(self.other.iter().cloned());
+        put_unmodelled(&mut f, &Self::MODELLED, &self.other);
         XmpValue::Structured(f)
     }
 }
@@ -949,6 +1046,7 @@ mod tests {
             email: Some("a@example.org".to_owned()),
             phone: Some("+33 1 23".to_owned()),
             web_url: Some("https://example.org/".to_owned()),
+            other: Vec::new(),
         }
     }
 
@@ -1004,6 +1102,7 @@ mod tests {
             source_inventory_number: Some("NG3863".to_owned()),
             source_inventory_url: Some("https://example.org/NG3863".to_owned()),
             style_periods: vec!["Post-Impressionism".to_owned()],
+            other: Vec::new(),
         };
         let value = art.to_xmp();
         assert_eq!(ArtworkOrObject::from_xmp(&value), Some(art));
@@ -1058,6 +1157,7 @@ mod tests {
             telephone2: Some("+33 6 22".to_owned()),
             email: Some("licence@example.org".to_owned()),
             web_url: Some("https://example.org/licence".to_owned()),
+            other: Vec::new(),
         };
         let value = licensor.to_xmp();
         assert_eq!(Licensor::from_xmp(&value), Some(licensor));
@@ -1241,6 +1341,81 @@ mod tests {
         let extracted = PhotoMetadata::from_xmp(&graph);
         assert_eq!(extracted.licensors().len(), 1);
         assert_eq!(extracted.xmp.properties.len(), 1);
+    }
+
+    /// `value` (a structure) with one vendor-namespace field appended.
+    fn with_vendor_field(value: &XmpValue) -> XmpValue {
+        let mut fields = structure(value).expect("a structure value").to_vec();
+        fields.push(XmpProperty::new(
+            "http://example.org/vendor/",
+            "Tint",
+            text_value("warm"),
+        ));
+        XmpValue::Structured(fields)
+    }
+
+    #[test]
+    fn every_structure_keeps_the_field_it_does_not_model() {
+        // A read-modify-write must not drop a vendor extension. Each conversion is checked as a
+        // fixed point over its own canonical output plus one foreign field, so a type that
+        // silently replaced the graph value fails here.
+        let art = ArtworkOrObject {
+            title: Some("Sunflowers".to_owned()),
+            ..ArtworkOrObject::default()
+        };
+        let licensor = Licensor {
+            name: Some("Agence gamut".to_owned()),
+            ..Licensor::default()
+        };
+        let region = ImageRegion {
+            identifier: Some("r1".to_owned()),
+            ..ImageRegion::default()
+        };
+        /// A structure's `from_xmp` → `to_xmp` round trip, named for the type it converts.
+        type Trip = (&'static str, XmpValue, fn(&XmpValue) -> Option<XmpValue>);
+        let trips: [Trip; 4] = [
+            ("CreatorContactInfo", contact().to_xmp(), |v| {
+                Some(CreatorContactInfo::from_xmp(v)?.to_xmp())
+            }),
+            ("ArtworkOrObject", art.to_xmp(), |v| {
+                Some(ArtworkOrObject::from_xmp(v)?.to_xmp())
+            }),
+            ("Licensor", licensor.to_xmp(), |v| {
+                Some(Licensor::from_xmp(v)?.to_xmp())
+            }),
+            ("ImageRegion", region.to_xmp(), |v| {
+                Some(ImageRegion::from_xmp(v)?.to_xmp())
+            }),
+        ];
+        for (name, canonical, round_trip) in trips {
+            let input = with_vendor_field(&canonical);
+            assert_eq!(
+                round_trip(&input).as_ref(),
+                Some(&input),
+                "{name} did not keep its unmodelled field"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retained_field_never_duplicates_a_modelled_one() {
+        // The retention list is public, so a caller can put a modelled name in it. Emitting both
+        // would make a structure carrying two `rId` fields, which is ill-formed and reads back as
+        // only one of them.
+        let region = ImageRegion {
+            identifier: Some("r1".to_owned()),
+            other: vec![XmpProperty::new(ns::IPTC_EXT, "rId", text_value("r2"))],
+            ..ImageRegion::default()
+        };
+        let value = region.to_xmp();
+        let fields = structure(&value).unwrap();
+        assert_eq!(fields.iter().filter(|p| p.name == "rId").count(), 1);
+        // The modelled value is the authority, and the output is a fixed point.
+        assert_eq!(text(fields, ns::IPTC_EXT, "rId"), Some("r1".to_owned()));
+        assert_eq!(
+            ImageRegion::from_xmp(&value).map(|r| r.to_xmp()),
+            Some(value.clone())
+        );
     }
 
     #[test]

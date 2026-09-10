@@ -39,7 +39,9 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
   `Iptc4xmpExt:ArtworkOrObject` and `plus:Licensor` as typed projections over the XMP graph, in the
   `from_xmp`/`to_xmp` shape `gamut_exif::GpsInfo` uses for its sub-IFD. Every one is XMP-only — none
   carries an `IIMid` — so none extends the reconciliation surface; `tests/techreference.rs` pins
-  that, and each structure's field set, to the reference.
+  that, and each structure's field set, to the reference. Each keeps the fields it does not model in
+  its `other` list and re-emits them verbatim, so a read-modify-write does not drop a vendor
+  extension.
 - **IIM tag table.** `iim::IimTagInfo` now names every dataset IPTC-IIM 4.2 states an octet maximum
   for that `max_octets` can hold: 14 Envelope + 56 Application datasets (chapters 5 and 6 bar
   `2:202`), plus `7:10` Size Mode, the one dataset outside those chapters whose length the spec
