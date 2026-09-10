@@ -87,7 +87,8 @@ The v1 contract, stated precisely:
   regions, artwork/object and licensors (`extension`). Reading one and writing it back changes
   nothing: a field enters the typed value only when what the writer would emit reproduces the field
   that was read — value, container kind and qualifiers — and every other field is kept in the
-  type's `other` list and re-emitted verbatim. The remaining Extension structures (locations, persons,
+  type's `other` list and re-emitted verbatim. The property itself enters the typed view on the same
+  terms, so a shape the setter could not write back reads as absent and is left where it lies. The remaining Extension structures (locations, persons,
   controlled-vocabulary terms, …) have no typed model — they still round-trip losslessly as raw
   properties in `PhotoMetadata::xmp`, reachable via `get_field`/`set_field` where mapped.
 - **Strict write, honest read.** Writing never silently truncates or drops: unencodable text,

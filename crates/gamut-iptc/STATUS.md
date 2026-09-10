@@ -64,7 +64,11 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
     against the six datasets the standard names that gamut deliberately does not. The extraction is
     not run by the gate — `pdftotext` is a system package the toolchain does not provision — so its
     output is committed as a derived artefact with the command that regenerates it recorded beside
-    it. A mistyped name fails there even if it were mistyped the same way twice.
+    it. A name mistyped in `KNOWN_TAGS` alone fails there. A name mistyped *identically* in
+    `KNOWN_TAGS` and in the committed `.tsv` does not: the guard compares the table against the
+    artefact, and nothing re-derives the artefact from the PDF. What carries that residual is the
+    artefact's own never-hand-edit banner, not a gate — having CI re-derive it where `pdftotext`
+    is present is issue #623.
   - **octet maximum, repeatability and value kind** — stated in the standard's prose, so
     `tag_table_matches_the_exiv2_dataset_table` compares them against exiv2's independent
     transcription of the same chapters, parsed out of the vendored `third_party/exiv2` sources. A
@@ -82,6 +86,14 @@ Intentional, documented skips — none lose data on round-trip:
   default, an unexpected container kind. Nothing is lost: the field is in the type's `other` list
   and the graph keeps it verbatim. Whether the model should widen to report the value as well is
   issue #609.
+- **A whole structured property the projection cannot express reads as absent, on the same terms.**
+  `creator_contact_info`, `image_regions`, `artwork_or_objects` and `licensors` report a value only
+  when writing it back would give the property back — so a bare structure written where the standard
+  puts an array, an array member that is not a structure, a qualifier on the property or on an
+  `rdf:li`, an array or structure holding nothing, and two top-level properties of one name all read
+  as nothing. Nothing is lost: the graph keeps the property untouched, and the setter beside the
+  accessor does not remove what the accessor did not report. Reading a property and setting it back
+  is the identity, pinned by a generated cross of every pair, value shape and qualifier list.
 - **The remaining eleven IPTC Extension structures** (`Location`, `PersonWDetails`, `CvTerm`,
   `EntityWRole`, `ProductWGtin`, `RegistryEntry`, `EmbdEncRightsExpr`, `LinkedEncRightsExpr`,
   `CopyrightOwner`, `ImageCreator`, `ImageSupplier`): no typed model — issue #538. They pass through
