@@ -107,10 +107,24 @@ renders the caller's colour **wrongly**, not one that merely dropped metadata. D
 crate already does for primaries it has no chromaticities for and for a transfer with no ICC tone
 curve. Callers holding narrow-range samples scale them to full range and pass `1`.
 
-**Grey gamma domain.** `gray_with_gamma` takes open `f64` input and declines anything a `kTRC`
-cannot carry: non-finite, non-positive, or ≥ 32 768, the first magnitude `s15Fixed16` (§4.6) cannot
-hold. `S15Fixed16::from_f64` saturates rather than failing, so accepting those would silently write
-a gamma nobody asked for.
+**Grey gamma domain.** `gray_with_gamma` takes open `f64` input and declines anything the `kTRC`
+cannot carry *non-degenerately*. The bound is on the encoding of the §10.18 type 0 parameter, not
+on the number: `S15Fixed16::from_f64` (§4.6) rounds `gamma × 65 536` and then clamps, so it never
+fails and it degenerates at both ends. Accepted is `0.5 / 65 536 = 7.629 394 531 25e-6` up to but
+not including `(2^31 − 0.5) / 65 536 = 32 767.999 992 370 605 468 75`; below that the parameter
+rounds to raw zero, which is a `Y = X^0` curve mapping every input to white and a tag `validate`
+reports clean, and at or above it the parameter clamps to a gamma the encoder chose rather than the
+caller. Non-finite input is declined with the rest. The two bounds are not the same kind of thing:
+the bottom one refuses a **degenerate** profile, while the top one is **fidelity only** — the first
+rejected gamma and the last accepted one are one `f64` ulp apart (`2^-38`, under four parts in a
+trillion) and evaluate identically, so nothing is saved from misrendering there. It is kept because
+a domain stated at both ends is easier to reason about than one open at the top, and the crate says
+which kind each end is rather than implying both refuse harm.
+
+The `profileDescriptionTag` names the gamma the tag **holds**, not the one requested:
+`gray_with_gamma(2.2)` is described as `Grey gamma 2.1999969482421875`. At the smallest accepted
+gamma the two differ by a factor of two, and a profile whose description contradicts its own tag is
+worse than a long number.
 
 **PCS white.** Colorants are Bradford-adapted to the D50 that `XYZNumber::D50` encodes (§7.2.16),
 not to `gamut_color::matrix::D50`. The two differ by 2e-4 in Z — the CIE chromaticity against ICC's

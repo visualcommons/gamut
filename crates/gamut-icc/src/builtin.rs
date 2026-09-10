@@ -261,28 +261,40 @@ fn cicp_byte(code_point: u16) -> u8 {
     u8::try_from(code_point).unwrap_or(2)
 }
 
-/// Whether `gamma` survives the `s15Fixed16` encoding of a `parametricCurveType` function type 0
-/// parameter (ICC.1:2022 §10.18) with the value the caller asked for.
+/// The `s15Fixed16` a `parametricCurveType` function type 0 parameter (ICC.1:2022 §10.18) carries
+/// for `gamma`, or `None` when the encoding cannot hold it non-degenerately.
 ///
 /// The guard is on the **encoding**, not on the number, because [`S15Fixed16::from_f64`] rounds
-/// `gamma × 65 536` and then *clamps*: it never fails, and it degenerates at both ends.
+/// `gamma × 65 536` and then *clamps*: it never fails, and it degenerates at both ends. The
+/// comparison is against the product *before* the clamp — afterwards a saturated parameter is
+/// indistinguishable from one the caller asked for.
 ///
 /// * Below `0.5 / 65 536 = 7.629 394 531 25e-6` the product rounds to raw `0`, and `Y = X^0` maps
 ///   every input — black included — to white. That is the same profile a literal `gamma` of `0.0`
 ///   would give, and [`IccProfile::validate`] cannot see it: a `kTRC` holding raw zero is a
 ///   structurally well-formed tag.
 /// * From `(2^31 − 0.5) / 65 536 = 32 767.999 992 370 605 468 75` upward the product exceeds
-///   `i32::MAX` and the clamp writes `32 767.999 984 741 21` instead — a gamma chosen by the
-///   encoder rather than by the caller. (The clamp, not the fixed-point width, is where this
-///   starts: the *largest representable* value, `32 767.999 984 741 21`, is half a quantum lower
-///   still, and every gamma between the two merely rounds to it.)
+///   `i32::MAX` and the clamp writes `32 767.999 984 741 210 937 5` instead — a gamma chosen by
+///   the encoder rather than by the caller. (The clamp, not the fixed-point width, is where this
+///   starts: the *largest representable* value, `32 767.999 984 741 210 937 5`, is half a quantum
+///   lower still, and every gamma between the two merely rounds to it.)
 ///
 /// Between the two the encoding is a rounding of at most half a quantum, which is what a
-/// fixed-point tag is for. Non-finite input satisfies neither comparison and is declined with the
-/// rest.
-fn gamma_is_encodable(gamma: f64) -> bool {
+/// fixed-point tag is for; inside that range the clamp in [`S15Fixed16::from_f64`] is inert, so
+/// the value returned is the same product this guard tested. Non-finite input satisfies neither
+/// comparison and is declined with the rest.
+///
+/// The two ends are not the same kind of refusal. The bottom one refuses a **degenerate** profile:
+/// an all-white curve nothing downstream can detect. The top one is **fidelity only** — the first
+/// rejected gamma and the last accepted one are one `f64` ulp apart (`2^-38`, under four parts in
+/// a trillion) and evaluate identically, so no caller is saved from a misrendering by it. It is
+/// kept for the symmetry of a domain closed at both ends, and named here so the symmetry is not
+/// mistaken for a second correctness claim.
+fn encodable_gamma(gamma: f64) -> Option<S15Fixed16> {
     let raw = (gamma * 65_536.0).round();
-    (1.0..=f64::from(i32::MAX)).contains(&raw)
+    (1.0..=f64::from(i32::MAX))
+        .contains(&raw)
+        .then(|| S15Fixed16::from_f64(gamma))
 }
 
 /// A tone-response curve this module can encode.
@@ -510,7 +522,9 @@ impl IccProfile {
     /// `(2^31 − 0.5) / 65 536 = 32 767.999 992 370 605 468 75`. Below that the parameter rounds to
     /// zero and `Y = X^0` maps every input to white — the same degenerate profile a literal `0.0`
     /// would give, which [`validate`](IccProfile::validate) cannot see, since a `kTRC` holding raw
-    /// zero is a well-formed tag. At or above it the parameter saturates to a different gamma.
+    /// zero is a well-formed tag. At or above it the parameter saturates to a different gamma —
+    /// though only just: that bound is fidelity, not degeneracy, since the first rejected gamma
+    /// and the last accepted one are one `f64` ulp apart and evaluate identically.
     /// Non-finite input is declined with the rest: `NaN` would otherwise reach both the
     /// description string and the tag.
     ///
@@ -518,6 +532,13 @@ impl IccProfile {
     /// of `1e-5` is encodable and useless. Whether the constructor should also refuse a
     /// meaningless gamma is deliberately left open; see
     /// <https://github.com/visualcommons/gamut/issues/589>.
+    ///
+    /// The `profileDescriptionTag` names the gamma the `kTRC` **holds**, not the one that was
+    /// asked for: an accepted `gamma` is rounded to the tag's `s15Fixed16` parameter first and
+    /// every use below reads that, so `gray_with_gamma(2.2)` is described as
+    /// `Grey gamma 2.1999969482421875`. A profile whose own description contradicted its own tag
+    /// would be worse than a long number — at the smallest accepted gamma the two differ by a
+    /// factor of two.
     ///
     /// # Examples
     ///
@@ -533,9 +554,11 @@ impl IccProfile {
     /// ```
     #[must_use]
     pub fn gray_with_gamma(gamma: f64) -> Option<Self> {
-        if !gamma_is_encodable(gamma) {
-            return None;
-        }
+        // Shadowing, not a second binding: from here on the value the caller asked for is out of
+        // scope, so neither the tag nor the description below can be written from it. That is the
+        // structural form of "the description names what the tag holds" — there is nothing else
+        // left to name.
+        let gamma = encodable_gamma(gamma)?.to_f64();
         Some(IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
             tags: vec![
@@ -980,7 +1003,7 @@ mod tests {
     /// which `validate` reports clean.
     ///
     /// The two bounds are restated as literal decimals instead of being reused from
-    /// [`gamma_is_encodable`], so a wrong scale factor there cannot agree with the test.
+    /// [`encodable_gamma`], so a wrong scale factor there cannot agree with the test.
     #[test]
     fn a_grey_gamma_the_ktrc_cannot_carry_is_declined() {
         /// `0.5 / 65 536` — one half of a `s15Fixed16` quantum, which is both the smallest gamma
