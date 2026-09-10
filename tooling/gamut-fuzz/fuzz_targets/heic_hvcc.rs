@@ -14,11 +14,26 @@
 //! construction: each one is free to `clear()` or to write through an index, and doing so breaks
 //! every reusing caller while producing no crash at all. That is what this target searches for.
 //!
-//! Injection that proved the append check fires (re-runnable): begin
-//! `HevcConfig::annex_b_parameter_sets` with `out.clear()` — an emitter that replaces instead of
-//! appending, which breaks every reusing caller and crashes nothing. The committed seed alone
-//! reports it, with no search: `run.sh heic_hvcc <seeds> -- -runs=0` gives *"an annex_b emitter
-//! overwrote what was already in the buffer"*.
+//! The contract has **two halves — the success path and the error path — and one injection covers
+//! only one of them**, so each has its own, both re-runnable as `run.sh heic_hvcc <seeds> --
+//! -runs=0` and both reported by the committed seeds alone with no search:
+//!
+//! - **success path.** Begin `HevcConfig::annex_b_parameter_sets` with `out.clear()` — an emitter
+//!   that replaces instead of appending, which breaks every reusing caller and crashes nothing.
+//!   Reports *"an annex_b emitter overwrote what was already in the buffer"*.
+//! - **error path.** Have `annex_b_payload` `out.clear()` before returning the error a malformed
+//!   NAL length prefix produces — an emitter that unwinds the caller's buffer when it gives up.
+//!   Reports the same message, on `corpus/heic_hvcc/truncated-payload-nal.bin`.
+//!
+//! That second seed is what makes the error half reachable: the well-formed record's payload
+//! splits cleanly, so `annex_b_payload` never returns `Err` for it and the error-path injection
+//! goes unreported. `truncated-payload-nal.bin` is the same record with its one NAL length prefix
+//! raised by one, past the end of the payload.
+//!
+//! The prefix and tail comparisons take their slices with `get`, not by indexing: an emitter that
+//! truncates the buffer would otherwise report a bare "range end index out of range" from inside
+//! this target rather than the assertion's own message, which is a worse thing to be handed by an
+//! unattended run.
 //!
 //! Alongside it, and explicitly **not** a differential, is a **structure pin**: `annex_b`'s body
 //! *is* `annex_b_parameter_sets` followed by `annex_b_payload`, so asserting the whole equals the
@@ -77,13 +92,13 @@ fuzz_target!(|data: &[u8]| {
     config.annex_b_parameter_sets(&mut reused);
     let _ = config.annex_b_payload(payload, &mut reused);
     assert_eq!(
-        &reused[..SCRATCH.len()],
-        &SCRATCH[..],
+        reused.get(..SCRATCH.len()),
+        Some(&SCRATCH[..]),
         "an annex_b emitter overwrote what was already in the buffer"
     );
     assert_eq!(
-        &reused[SCRATCH.len()..],
-        &whole[..],
+        reused.get(SCRATCH.len()..),
+        Some(&whole[..]),
         "annex_b is not its two documented halves concatenated"
     );
 
