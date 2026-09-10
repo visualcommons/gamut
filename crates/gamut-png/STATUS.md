@@ -40,8 +40,7 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ✅ done |
 | E1 | #224 | **Efficiency:** `deconstruct` byte accounting; divan size/bpp + per-stage bench; libpng-9 size contract; opt-in transparent cleanup; palette-vs-native race; `crc32fast` and restructured filter kernels (see [Efficiency](#efficiency-issue-224)) | ✅ done |
 | C1 | C2PA 2.4 §A.3.2, §18.5.4 | **C2PA carriage** (#440): the `caBX` manifest store — raw decode surface (`c2pa`; first CRC-valid chunk before `IDAT` wins, ignored ones counted, under the metadata budget); `with_c2pa` / `with_c2pa_reserved` as the last chunk before `IDAT`; the whole-chunk exclusion span from `encode_with_report` and `PngReport::c2pa`, filled in place by `fill_c2pa` (see [C2PA](#c2pa-manifest-store-issue-440)) | ✅ done |
-
-| M1 | §4.3, §5.6, §11.3.2.6, §11.3.3 | **Metadata preservation** (#483): `with_metadata` / `with_metadata_from` carry a read file's eXIf/iCCP/XMP/text/colour chunks into a re-encode (`gamut convert` uses it; `--strip-metadata` opts out); `with_cicp`; `sRGB` beside `iCCP` refused and resolved by colour-chunk priority; `tEXt`/`zTXt` written as Latin-1 with promotion to `iTXt` (see [Metadata preservation](#metadata-preservation-issue-483)) | ✅ done |
+| M1 | §4.3, §11.3.2.6, §11.3.3 | **Metadata preservation** (#483): `with_metadata` / `with_metadata_from` carry a read file's eXIf/iCCP/sRGB/cICP/gAMA/cHRM/XMP/text chunks into a re-encode, each annotation back into the chunk it came from (`gamut convert` uses it; `--strip-metadata` opts out; what cannot be carried is named by `dropped_metadata`); `with_cicp`; §11.3.3.1's keyword rules and §11.3.3.2/§11.3.3.4's null prohibition enforced, with promotion to `iTXt` for text outside Latin-1 (see [Metadata preservation](#metadata-preservation-issue-483)) | ✅ done |
 
 ## Decoder phases (issue #249)
 
@@ -148,44 +147,76 @@ one private borrowed view behind two entry points, so the pixel-free `metadata()
 `decode()` reach it without copying a large ICC profile twice. `gamut convert` uses it on the PNG
 output path; `--strip-metadata` is the opt-out. **Preserve is the default**: a stripped file is
 smaller, but dropping an ICC profile silently changes what a viewer paints, so the loss is the
-thing that has to be asked for.
+thing that has to be asked for. Carrying the same metadata twice carries it once — the text list
+is replaced, not appended to, so the single-value colour slots and the annotations are idempotent
+alike.
 
-**Three spec-driven adjustments** on the way through, none of them a policy choice:
+**Identity, not just content.** `TextChunk::kind` records which of §11.3.3's three chunks carried
+an annotation and whether its text was compressed, and a carry puts it back in the same one.
+Without it a `zTXt` is indistinguishable from a `tEXt` once decoded, and a compressed 40-byte
+payload comes back out as 1 600 uncompressed bytes — no words lost, but not preservation either.
 
-- `iCCP` and `sRGB` are **resolved, not both written**. §5.6 Table 5 records the constraint on both
-  rows and §11.3.2.5 repeats it; §4.3 Table 1 then ranks the colour chunks (cICP 1, iCCP 2, sRGB 3,
-  cHRM+gAMA 4) and a reader honours the lowest number. So the `iCCP` is carried and the `sRGB`
-  dropped — the chunk a conforming reader was already ignoring.
-- A `cICP` whose matrix coefficients are not 0 is dropped: §11.3.2.6 requires 0 for PNG, so such a
-  chunk is not conforming and carrying it forward would reproduce the defect.
-- The **C2PA manifest store is never carried**. A store is signed over the exact bytes of the file
-  it was made for — the reason `caBX` is unsafe to copy (C2PA 2.4 §A.3.2) — so a copy is invalid by
-  construction. Re-sign the output and set it with `with_c2pa`.
+**Two payloads cannot be carried, and neither is dropped in silence.** `dropped_metadata()` names
+them and `gamut convert` prints them:
 
-**Two spec defects** the same issue found, both in the writer:
+- a `cICP` whose matrix coefficients are not 0 — §11.3.2.6 requires 0 for PNG, so the source chunk
+  is not conforming and carrying it forward would reproduce the defect;
+- the **C2PA manifest store**, signed over the exact bytes of the file it was made for, which is
+  why `caBX` is unsafe to copy (C2PA 2.4 §A.3.2). Re-sign the output and set it with `with_c2pa`.
 
-- *`sRGB` beside `iCCP` was written whenever both were set*, warned about only in a doc comment.
-  Now `Ancillary::validate` refuses the encode with `InvalidInput` at the one chokepoint every
-  encode path funnels through. Refusing rather than dropping one is the point: which the caller
-  meant is not guessable, and `with_metadata` exists for the case where §4.3 answers it.
-- *`tEXt`/`zTXt` carried UTF-8.* §11.3.3.2 interprets a `tEXt` text string as Latin-1, §11.3.3.3
-  makes an inflated `zTXt` identical to it, and §11.3.3.1 binds every keyword to Latin-1 — but the
-  writer pushed the Rust `String`'s bytes, storing `C3 A9` where `é` belongs. Text and keyword are
-  now converted once at the setter and the entry holds the bytes its chunk carries, so the wrong
-  encoding is unrepresentable rather than merely avoided. A text outside Latin-1 is promoted to
-  `iTXt` exactly as §11.3.3.2 directs, keeping the caller's compression via §11.3.3.4's flag; a
-  *keyword* outside it has no chunk at all, so it refuses the encode.
+**The colour chunks are carried together, not resolved.** §5.6 Table 5 and §11.3.2.5 say only that
+`sRGB` and `iCCP` "should not" appear together — lowercase, and §15 gives the BCP 14 keywords
+force "when, and only when, they appear in all capitals" — while §4.3 Table 1 *presupposes* the
+co-occurrence and defines the outcome by ranking the chunks (cICP 1, iCCP 2, sRGB 3, cHRM+gAMA 4).
+libpng reads a file carrying both and returns the same pixels (`tests/oracle.rs`). So both are
+written: dropping either would throw away colour information the source carried, and a reader
+takes the one it can use.
+
+**The text clauses are enforced, because breaking them corrupts rather than merely offends.**
+§11.3.3.1 and §11.3.3.2/§11.3.3.4 are different clauses with different repertoires, and both are
+implemented as written:
+
+| Field | Repertoire | Clause |
+| --- | --- | --- |
+| Keyword (all three chunks) | code points `0x20`–`0x7E` and `0xA1`–`0xFF`; 1–79 bytes; no leading, trailing or consecutive space; expressly not U+00A0 | §11.3.3.1 |
+| `tEXt`/`zTXt` text string | the keyword repertoire plus U+000A LINE FEED | §11.3.3.1 closing ¶, §11.3.3.2 |
+| `iTXt` text and translated keyword | UTF-8, no null byte | §11.3.3.4 |
+| `iTXt` language tag | ASCII letters, digits and `-` (BCP 47 subtags) | §11.3.3.4 |
+
+Text outside the `tEXt`/`zTXt` repertoire is **promoted** to `iTXt`, which is what §11.3.3.2
+directs ("Text containing characters outside the repertoire of ISO/IEC 8859-1 should be encoded
+using the iTXt chunk"), keeping the caller's compression via §11.3.3.4's own flag. Because
+promotion is lossless — the character survives, only the chunk changes — the tighter of §11.3.3.1's
+and §11.3.3.2's two readings of "Latin-1" is taken, so a control character promotes rather than
+being written with no defined meaning.
+
+Anything **no** chunk can carry refuses the encode with `InvalidInput`, naming the annotation's
+index and keyword: a null anywhere in a keyword or text string (it is the field separator, so the
+chunk re-parses as a *different* annotation), a keyword outside §11.3.3.1, an XMP packet that is
+not UTF-8. A refusal is not a policy choice here — the alternative is a file that reads back as
+something else, or a payload that vanishes with nothing said.
+
+**Two spec defects** the same issue found, both in the writer, both fixed:
+
+- *`tEXt`/`zTXt` carried UTF-8.* §11.3.3.2 interprets a `tEXt` text string as Latin-1 and
+  §11.3.3.3 makes an inflated `zTXt` identical to it, but the writer pushed the Rust `String`'s
+  bytes, storing `C3 A9` where `é` belongs. Text and keyword are now converted once at the setter
+  and the entry holds the bytes its chunk carries, so the wrong encoding is unrepresentable rather
+  than merely avoided.
+- *`iTXt` lost its language tag and translated keyword*, the two fields that make it
+  international, and its compression flag.
 
 `with_cicp` (§11.3.2.6) was added with this work — without it, preservation would silently drop the
 highest-precedence colour chunk of any file that carries one. It takes no matrix argument: PNG
 fixes that byte at 0.
 
 **Not done.** `pHYs`, `tIME`, `sBIT` and `bKGD` are not part of `PngMetadata`/`DecodedPng`, so they
-cannot be carried (set them with their own builder methods). A `zTXt` is indistinguishable from a
-`tEXt` once decoded, so a compressed annotation is rewritten uncompressed — no text is lost, only
-bytes. §11.3.3.1's keyword *syntax* rules beyond Latin-1 (the printable subset, the space rules,
-the 1–79-byte bound) are not enforced. `gamut convert` carries metadata only PNG→PNG; mapping a
-JPEG/WebP/JXL input's metadata into PNG chunks is a cross-format job of its own.
+cannot be carried (set them with their own builder methods). The `iTXt` language tag is checked for
+its character set, not for full BCP 47 well-formedness (subtag order, registry membership).
+`gamut convert` carries metadata only PNG→PNG; mapping a JPEG/WebP/JXL input's metadata into PNG
+chunks is a cross-format job of its own. The libpng oracle reads no chunk back and drops warnings,
+so preservation is pinned against gamut's own reader plus a decode the oracle accepts — #502, #571
+and #572 are what would make it differential.
 
 ## Efficiency (issue #224)
 
