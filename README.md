@@ -131,10 +131,10 @@ why; deciding that comparison needs the network, so it is stated there rather th
 | `gamut-dsp`       | Shared DSP kernels: AV1 DCT/ADST/identity/WHT, the JPEG 8×8 forward/inverse DCT, quantization rounding | stable (v2; v1 under #192)             |
 | `gamut-bitstream` | Bit readers/writers, LEB128, the AV1 §8.2 symbol (arithmetic) coder, MSB-first sample packing | v0.2, no v1 release issue yet; the ANS and Huffman coders are not implemented |
 | `gamut-tonemap`   | Tone-mapping curves for HDR→SDR: the `ToneCurve` trait over the Linear, Clamp, Exposure, Reinhard, ReinhardExtended, ACES, Hable and Drago operators | stable (v1, #188); surface frozen |
-| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables, their object-safe Rust twins, and the registry fallback *contract*; this crate declares no registry — each host crate that offers a seam keeps its own | consumed by `gamut`, `gamut-avif`, `gamut-ffi`, `gamut-heic`, `gamut-jpeg`, `gamut-jxl`, `gamut-png` and `gamut-webp`; the umbrella's is behind its `codec-abi` feature |
+| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables, their object-safe Rust twins, and the registry fallback *contract*; this crate declares no registry — each host crate that offers a seam keeps its own | consumed by `gamut`, `gamut-avif`, `gamut-ffi`, `gamut-heic`, `gamut-jpeg`, `gamut-jxl`, `gamut-png` and `gamut-webp`; the umbrella's edge is optional, behind feature `codec-abi` |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | stable (v2); structure only, codestream carried opaquely |
 | `gamut-riff`      | RIFF container utilities (WebP)                                        | stable (v1, #186)                      |
-| `gamut-av1`       | AV1 still-image (intra-frame) encoder + decoder — the codec layer beneath AVIF | encoder: lossless and lossy intra keyframes; decoder (default-on `decode` feature): 8-bit 4:4:4 intra frames, key and intra-only (#259) |
+| `gamut-av1`       | AV1 still-image (intra-frame) encoder + decoder — the codec layer beneath AVIF | encoder: lossless and lossy intra keyframes; decoder (default feature `decode`): 8-bit 4:4:4 intra frames, key and intra-only (#259) |
 | `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor        | placeholder                            |
 | `gamut-avif`      | AVIF encoder + container decoder — AV1 still frames in ISOBMFF         | encoder (v1, 8/10/12-bit) + container decode (#250); AV1 codestream decode via the `Av1StillDecoder` seam |
 | `gamut-jxl`       | JPEG XL encoder (libjxl wrap) + decoder (pure-Rust jxl-rs)             | encoder + decoder (#243)               |
@@ -143,7 +143,7 @@ why; deciding that comparison needs the network, so it is stated there rather th
 | `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder, with a public `backend` seam for an alternate VP8/VP8L codestream implementation | implemented VP8 + VP8L (+alpha, metadata, effort/near-lossless) |
 | `gamut-heic`      | HEIC/HEIF still-image container **decoder** — HEVC via a pluggable backend | decode-only container (S1–S7); no encoder, by charter |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
-| `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | stable (v2, byte completeness #263); BigTIFF behind `bigtiff` |
+| `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | stable (v2, byte completeness #263); BigTIFF behind feature `bigtiff` |
 | `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on gamut-ifd        | stable (v1, #194); MakerNote preserved verbatim, not decoded |
 | `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | stable (v1, #180)                      |
 | `gamut-cmm`       | ICC colour management module (transform engine) over gamut-icc profiles | P1–P8 complete per its STATUS.md — P1–P7 are epic #323, while P8 (pipeline optimization) is #372, which #323 lists out of scope |
