@@ -489,45 +489,63 @@ mod tests {
     //! itself; these are the arms an oracle has to get right before it is pointed at a container
     //! whose store follows arbitrary bytes.
     //!
-    //! # Every arm, enumerated once
+    //! # Every branch, enumerated once
     //!
     //! Three rounds of review each found one more untested arm here, because each round looked at
     //! the arm the last one had missed rather than at the set. So the set is written down. Every
-    //! branch that can refuse an input across the three header-reading functions is listed below
-    //! with the test that pins each of its two directions — the input it refuses, and the nearest
-    //! input it must *not* refuse. Adding a branch means adding a row, and a row with one side
-    //! blank is the finding, not a matter of taste.
+    //! **discriminating** branch on this crate's own parsing surface — every point where the code
+    //! chooses between two answers about a buffer — is listed below with the test that pins each
+    //! of its two directions. Adding a branch means adding a row, and a row with one side blank is
+    //! the finding, not a matter of taste.
     //!
-    //! | Function | Branch | Refuses | Accepts |
+    //! The scope was narrower once: only branches that could *refuse* an input. That boundary
+    //! excluded exactly the predicates whose whole job is telling two cases apart —
+    //! [`is_jumbf_not_found`] sat outside it and had one direction unpinned, which is the same
+    //! blank-side shape the table exists to make visible. Discrimination, not refusal, is the
+    //! property that earns a row.
+    //!
+    //! *Taken* is the input that reaches the branch; *not taken* is the nearest input that does
+    //! not. For a branch that refuses, those are the input it refuses and the nearest input it
+    //! must **not** refuse.
+    //!
+    //! | Function | Branch | Taken | Not taken |
     //! |---|---|---|---|
     //! | [`find_jumbf_superbox`] | `.skip(4)`: a type offset below 4 has no `LBox` in front of it | [`a_jumb_three_bytes_in_is_too_early_to_carry_an_lbox`] | [`a_superbox_whose_lbox_opens_the_buffer_is_found_at_offset_zero`] |
     //! | [`find_jumbf_superbox`] | `.ok_or`: no `jumb` in the buffer at all | [`a_buffer_carrying_no_jumb_at_all_is_an_absent_superbox`] | [`the_search_continues_past_a_jumb_too_early_to_carry_an_lbox`] |
     //! | [`declared_store_len`] | `get(..4)`: the `LBox` field is truncated | [`a_buffer_too_short_for_an_lbox_field_is_refused_as_a_truncated_field`] | [`an_lbox_of_zero_in_a_buffer_shorter_than_the_header_is_refused`] |
+    //! | [`declared_store_len`] | `LBox == 0`: the reserved to-end-of-buffer value, not a literal zero | [`an_lbox_of_zero_declares_the_rest_of_the_buffer`] | [`an_lbox_of_exactly_the_header_size_is_a_length`] |
     //! | [`declared_store_len`] | `LBox == 0` in a buffer below the 8-byte header | [`an_lbox_of_zero_in_a_buffer_shorter_than_the_header_is_refused`] | [`an_lbox_of_zero_in_a_buffer_of_exactly_the_header_size_is_a_length`] |
+    //! | [`declared_store_len`] | `LBox == 1`: the reserved defer-to-`XLBox` value, not a literal one | [`an_lbox_of_one_takes_its_length_from_the_xlbox_field`] | [`an_lbox_of_exactly_the_header_size_is_a_length`] |
     //! | [`declared_store_len`] | `LBox == 1`: `get(8..16)`, the `XLBox` field is truncated | [`an_lbox_of_one_without_room_for_an_xlbox_is_refused`] | [`an_lbox_of_one_in_a_buffer_of_exactly_the_sixteen_byte_header_is_a_length`] |
     //! | [`declared_store_len`] | `XLBox` below the 16-byte header it counts | [`an_xlbox_below_the_sixteen_byte_header_is_refused_rather_than_resolved`] | [`an_xlbox_of_exactly_the_header_size_is_a_length`] |
     //! | [`declared_store_len`] | `LBox` in 2..=7, below the 8-byte header it counts | [`an_lbox_between_two_and_seven_is_refused_rather_than_resolved`] | [`an_lbox_of_exactly_the_header_size_is_a_length`] |
     //! | [`jumbf_superbox_span`] | `checked_add`: offset plus declared length leaves `usize` | [`a_declared_length_that_overflows_the_buffer_offset_is_an_unusable_length`] | [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_span`] |
     //! | [`jumbf_superbox_span`] | `end <= buffer.len()`: the length runs past the buffer | [`a_declared_length_running_past_the_buffer_is_an_unusable_length_not_an_absent_superbox`] | [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_span`] |
+    //! | [`is_jumbf_not_found`] | `C2pa(JumbfNotFound)`: the asset carries no manifest at all | [`c2pa_rss_jumbf_not_found_is_an_absent_manifest`] | [`a_c2pa_error_other_than_jumbf_not_found_is_not_an_absent_manifest`] |
     //!
-    //! Two things about the table read as gaps and are not. The last two rows share an "accepts"
-    //! column: the same input is the nearest non-refused one for both branches, and splitting it
-    //! would only give the second row a fixture differing in a byte neither branch reads. And one
-    //! test appears in both columns — [`an_lbox_of_zero_in_a_buffer_shorter_than_the_header_is_refused`]
-    //! is the *refused* side of the `LBox == 0` branch and the *accepted* side of the truncation
-    //! branch above it, because a 4-to-7-byte buffer is one whose `LBox` field was read
-    //! successfully and whose resulting length is then too short. Adjacent branches on the same
-    //! input share a boundary; that is what makes it a boundary.
+    //! Two things about the table read as gaps and are not. Two rows share a "not taken" column —
+    //! [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_span`] is the nearest non-refused
+    //! input for both of [`jumbf_superbox_span`]'s refusals, and splitting it would only give the
+    //! second row a fixture differing in a byte neither branch reads; so do the three
+    //! [`declared_store_len`] rows whose neighbouring arm is the ordinary 32-bit `LBox`, which
+    //! [`an_lbox_of_exactly_the_header_size_is_a_length`] is. And one test appears in both columns
+    //! — [`an_lbox_of_zero_in_a_buffer_shorter_than_the_header_is_refused`] is the *taken* side of
+    //! the `LBox == 0` header-minimum branch and the *not taken* side of the truncation branch
+    //! above it, because a 4-to-7-byte buffer is one whose `LBox` field was read successfully and
+    //! whose resulting length is then too short. Adjacent branches on the same input share a
+    //! boundary; that is what makes it a boundary.
     //!
-    //! Two arms of [`declared_store_len`] refuse nothing and so appear in no row — the reserved
-    //! `LBox` values, which resolve to a length rather than rejecting it. They are pinned by
-    //! [`an_lbox_of_zero_declares_the_rest_of_the_buffer`] and
-    //! [`an_lbox_of_one_takes_its_length_from_the_xlbox_field`], which are about *not* taking a
-    //! reserved value literally rather than about a boundary.
+    //! One test here is in no row: [`a_span_is_still_found_when_a_decoy_jumb_precedes_the_superbox`]
+    //! pins the *composition* of the search and the length reading, not a branch of either.
+    //!
+    //! [`is_jumbf_not_found`]'s taken side is also observed end to end, on an error c2pa-rs itself
+    //! raised, in `tests/no_copy_forward.rs`. The row points at the inline test rather than that
+    //! one because the inline test fails for exactly one reason — the predicate misread an error —
+    //! while the differential fails for anything wrong anywhere in a re-encode.
     //!
     //! The refusal outside this layer — `reserve_then_fill` rejecting a slot that is not the
-    //! signed store's length — needs c2pa-rs and a gamut encoder, so it is pinned where those are
-    //! in reach: `tests/reserve_then_fill.rs`.
+    //! signed store's length — is not parsing and needs c2pa-rs and a gamut encoder, so it is
+    //! pinned where those are in reach: `tests/reserve_then_fill.rs`.
     //!
     //! Every one of these tests asserts **which** refusal fired — the message where the variant
     //! carries one, the variant itself where it does not — never merely that an error occurred.
@@ -535,7 +553,10 @@ mod tests {
     //! truncated-`LBox` arm sends a 3-byte buffer into the `LBox == 0` arm, which refuses it too,
     //! so only the message distinguishes the arm that fired from the one that caught the fall.
 
-    use super::{OracleError, declared_store_len, find_jumbf_superbox, jumbf_superbox_span};
+    use super::{
+        OracleError, declared_store_len, find_jumbf_superbox, is_jumbf_not_found,
+        jumbf_superbox_span,
+    };
 
     /// A buffer with a decoy `jumb` at offset **3** — the last offset too early to be a superbox
     /// type, because an `LBox` needs the four bytes in front of it — and a genuine `LBox` + `jumb`
@@ -848,6 +869,31 @@ mod tests {
                 if what.contains("runs past the end of the buffer")),
             "a declared length that overflows the offset it is added to runs past every end there \
              is, and must be refused as the unusable length it is; got {error}"
+        );
+    }
+
+    #[test]
+    fn c2pa_rss_jumbf_not_found_is_an_absent_manifest() {
+        assert!(
+            is_jumbf_not_found(&OracleError::C2pa(c2pa::Error::JumbfNotFound)),
+            "`JumbfNotFound` is c2pa-rs saying the asset carries no manifest at all, which is the \
+             one verdict this predicate exists to recognise"
+        );
+    }
+
+    #[test]
+    fn a_c2pa_error_other_than_jumbf_not_found_is_not_an_absent_manifest() {
+        // `JumbfBoxNotFound` is the nearest neighbour there is: same crate, same phrasing, and it
+        // is raised only once a store *has* been found and something inside it is missing. Reading
+        // it as an absent manifest would turn "the derivative carries a broken copy of its
+        // parent's store" into "the derivative carries nothing", which is precisely the confusion
+        // the no-copy-forward claim turns on.
+        let error = OracleError::C2pa(c2pa::Error::JumbfBoxNotFound);
+
+        assert!(
+            !is_jumbf_not_found(&error),
+            "an error raised about a manifest that is present is not the absence of one; got \
+             {error} reported as an absent manifest"
         );
     }
 }
