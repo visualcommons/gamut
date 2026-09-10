@@ -408,8 +408,9 @@ index, the grey sample and the RGB triple — name an entry of the caller's pale
 owner (`ancillary::background_entry`): the entry each names is kept even when no pixel names it, and
 the chunk is written as that entry's index in the cleaned palette. The alternative is a background
 silently repainted — including by the chunk resolving a second time against the cleaned palette and
-landing on a transparent twin of the triple it asked for. This holds across colour **types**; on the depth axis a `bKGD` sample
-is range-checked but not rescaled with a 16→8 demotion or a sub-byte packing — that is [#501].
+landing on a transparent twin of the triple it asked for. This holds across colour **types**; on the
+depth axis a `bKGD` sample is range-checked but not rescaled with a 16→8 demotion or a sub-byte
+packing — that is [#501].
 
 ### Cleaning a caller's palette
 
