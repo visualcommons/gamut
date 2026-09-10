@@ -430,25 +430,44 @@ mod tests {
             .unwrap_or_else(|e| panic!("vendored file {relative} must be readable: {e}"))
     }
 
-    /// `src` with every string literal removed, so a comma or a brace inside a C++ description
-    /// cannot be mistaken for punctuation.
-    fn without_string_literals(src: &str) -> String {
+    /// The octet that stands in for a string literal in [`index_string_literals`]'s output, on
+    /// both sides of the literal's index. It cannot occur in C++ source outside a literal.
+    const LITERAL: char = '\u{1}';
+
+    /// `src` with every string literal replaced by its index into the returned literals, so a comma
+    /// or a brace inside a C++ description cannot be mistaken for punctuation while the literal
+    /// itself stays readable.
+    fn index_string_literals(src: &str) -> (String, Vec<String>) {
         let mut out = String::new();
+        let mut literals: Vec<String> = Vec::new();
         let mut chars = src.chars();
         while let Some(c) = chars.next() {
             if c != '"' {
                 out.push(c);
                 continue;
             }
+            let mut literal = String::new();
             while let Some(c) = chars.next() {
                 match c {
-                    '\\' => drop(chars.next()),
+                    '\\' => literal.extend(chars.next()),
                     '"' => break,
-                    _ => {}
+                    _ => literal.push(c),
                 }
             }
+            out.push(LITERAL);
+            out.push_str(&literals.len().to_string());
+            out.push(LITERAL);
+            literals.push(literal);
         }
-        out
+        (out, literals)
+    }
+
+    /// The first string literal `field` references, if it references one.
+    fn literal<'a>(field: &str, literals: &'a [String]) -> Option<&'a str> {
+        let start = field.find(LITERAL)? + LITERAL.len_utf8();
+        let end = start + field[start..].find(LITERAL)?;
+        let index: usize = field[start..end].parse().ok()?;
+        literals.get(index).map(String::as_str)
     }
 
     /// The `static constexpr uint16_t NAME = N;` constants of an exiv2 header.
@@ -476,8 +495,19 @@ mod tests {
         &source[start..start + end]
     }
 
-    /// exiv2's own IIM dataset table, read from the vendored `third_party/exiv2` sources as
-    /// `(record, dataset) -> (repeatable, maximum octets, value type)`.
+    /// One row of exiv2's own IIM dataset table.
+    struct Exiv2DataSet {
+        /// The dataset's title, exiv2's counterpart of [`IimTagInfo::name`].
+        title: String,
+        /// Whether the dataset may repeat within a record.
+        repeatable: bool,
+        /// The maximum value length in octets.
+        max: u32,
+        /// exiv2's name for the value type (`string`, `date`, `unsignedShort`, ...).
+        kind: String,
+    }
+
+    /// exiv2's own IIM dataset table, read from the vendored `third_party/exiv2` sources.
     ///
     /// Each row of `datasets.cpp` is `{IptcDataSets::<symbol>, "name", N_("title"),
     /// N_("description"), mandatory, repeatable, minbytes, maxbytes, type, record, "photoshop"}`,
@@ -485,10 +515,11 @@ mod tests {
     /// the end, because a description spans an unpredictable number of concatenated literals. The
     /// sentinel row closing each array numbers itself `0xffff` rather than a symbol, so it drops
     /// out of the constant lookup.
-    fn exiv2_dataset_table() -> BTreeMap<(u8, u8), (bool, u32, String)> {
+    fn exiv2_dataset_table() -> BTreeMap<(u8, u8), Exiv2DataSet> {
         let header = vendored("third_party/exiv2/include/exiv2/datasets.hpp");
         let numbers = cpp_constants(&header);
-        let source = without_string_literals(&vendored("third_party/exiv2/src/datasets.cpp"));
+        let (source, literals) =
+            index_string_literals(&vendored("third_party/exiv2/src/datasets.cpp"));
         let mut table = BTreeMap::new();
         for array in ["envelopeRecord", "application2Record"] {
             for chunk in cpp_array(&source, array).split('}') {
@@ -508,21 +539,64 @@ mod tests {
                 else {
                     continue;
                 };
-                let repeatable = fields[last - 5] == "true";
-                let max: u32 = fields[last - 3].parse().expect("maxbytes is a number");
-                let kind = fields[last - 2].trim_start_matches("Exiv2::").to_owned();
-                table.insert((record as u8, dataset as u8), (repeatable, max, kind));
+                let Some(title) = literal(fields[2], &literals) else {
+                    continue;
+                };
+                let row = Exiv2DataSet {
+                    title: title.to_owned(),
+                    repeatable: fields[last - 5] == "true",
+                    max: fields[last - 3].parse().expect("maxbytes is a number"),
+                    kind: fields[last - 2].trim_start_matches("Exiv2::").to_owned(),
+                };
+                table.insert((record as u8, dataset as u8), row);
             }
         }
         table
     }
 
+    /// The datasets exiv2 titles more briefly than IIM 4.2 names them. Each row pins BOTH
+    /// spellings — `((record, dataset), the IIM 4.2 name gamut carries, exiv2's title)` — so it
+    /// self-invalidates if either side changes, and every name in the table is pinned to something
+    /// either way.
+    #[rustfmt::skip]
+    const NAME_ABBREVIATIONS: &[((u8, u8), &str, &str)] = &[
+    ((1, 22), "File Format Version", "File Version"),
+    ((1, 30), "Service Identifier", "Service Id"),
+    ((1, 50), "Product I.D.", "Product Id"),
+    ((1, 90), "Coded Character Set", "Character Set"),
+    ((1, 100), "UNO", "Unique Name Object"),
+    ((2, 3), "Object Type Reference", "Object Type"),
+    ((2, 4), "Object Attribute Reference", "Object Attribute"),
+    ((2, 12), "Subject Reference", "Subject"),
+    ((2, 22), "Fixture Identifier", "Fixture Id"),
+    ((2, 26), "Content Location Code", "Location Code"),
+    ((2, 27), "Content Location Name", "Location Name"),
+    ((2, 38), "Expiration Time", "ExpirationTime"),
+    ((2, 62), "Digital Creation Date", "Digitization Date"),
+    ((2, 63), "Digital Creation Time", "Digitization Time"),
+    ((2, 65), "Originating Program", "Program"),
+    ((2, 92), "Sub-location", "Sub Location"),
+    ((2, 95), "Province/State", "Province State"),
+    ((2, 100), "Country/Primary Location Code", "Country Code"),
+    ((2, 101), "Country/Primary Location Name", "Country Name"),
+    ((2, 103), "Original Transmission Reference", "Transmission Reference"),
+    ((2, 116), "Copyright Notice", "Copyright"),
+    ((2, 120), "Caption/Abstract", "Caption"),
+    ((2, 122), "Writer/Editor", "Writer"),
+    ((2, 135), "Language Identifier", "Language"),
+    ((2, 151), "Audio Sampling Rate", "Audio Rate"),
+    ((2, 152), "Audio Sampling Resolution", "Audio Resolution"),
+    ((2, 200), "ObjectData Preview File Format", "Preview Format"),
+    ((2, 201), "ObjectData Preview File Format Version", "Preview Version"),
+    ];
+
     #[test]
     fn tag_table_matches_the_exiv2_dataset_table() {
         // Drift guard. `iim-4.2.pdf` is not machine-readable, so the 70 record-1/2 rows are a hand
-        // transcription with nothing but ordering and uniqueness to catch a slipped digit. exiv2 —
-        // the crate's differential oracle — carries its own independent transcription of the same
-        // spec chapters, so comparing the two tables catches exactly that.
+        // transcription with nothing but ordering and uniqueness to catch a slipped digit or a
+        // mistyped name. exiv2 — the crate's differential oracle — carries its own independent
+        // transcription of the same spec chapters, so comparing the two tables column for column
+        // (name, octet maximum, repeatability, value type) catches exactly that.
         let exiv2 = exiv2_dataset_table();
         assert!(
             exiv2.len() > 60,
@@ -530,22 +604,30 @@ mod tests {
             exiv2.len()
         );
         for t in KNOWN_TAGS {
-            let Some((repeatable, max, kind)) = exiv2.get(&(t.record, t.dataset)) else {
+            let Some(row) = exiv2.get(&(t.record, t.dataset)) else {
                 // exiv2 tables records 1 and 2 only; 7:10 comes from the PDF alone.
                 assert_eq!(
-                    (t.record, t.dataset),
-                    (7, 10),
-                    "{}:{} {} is not in exiv2's table",
-                    t.record,
-                    t.dataset,
-                    t.name
+                    ((t.record, t.dataset), t.name),
+                    ((7, 10), "Size Mode"),
+                    "a dataset outside exiv2's table must be 7:10 Size Mode"
                 );
                 continue;
             };
             let where_ = format!("{}:{} {}", t.record, t.dataset, t.name);
-            assert_eq!(u32::from(t.max_octets), *max, "{where_}: octet maximum");
-            assert_eq!(t.repeatable, *repeatable, "{where_}: repeatability");
-            let expected = match kind.as_str() {
+            assert_eq!(u32::from(t.max_octets), row.max, "{where_}: octet maximum");
+            assert_eq!(t.repeatable, row.repeatable, "{where_}: repeatability");
+            // exiv2 abbreviates some titles, so those rows pin both spellings instead of matching.
+            match NAME_ABBREVIATIONS
+                .iter()
+                .find(|&&(key, ..)| key == (t.record, t.dataset))
+            {
+                Some(&(_, name, title)) => {
+                    assert_eq!(t.name, name, "{where_}: dataset name");
+                    assert_eq!(row.title, title, "{where_}: exiv2 title");
+                }
+                None => assert_eq!(t.name, row.title, "{where_}: dataset name"),
+            }
+            let expected = match row.kind.as_str() {
                 // exiv2 types 1:90 Coded Character Set as a string; IIM 4.2 Ch. 5 makes it ISO
                 // 2022 escape sequences, which are control characters, not graphic ones — so
                 // gamut calls it Binary. Pinned here rather than merely documented.
@@ -566,6 +648,13 @@ mod tests {
             assert!(
                 IimTagInfo::lookup(record, dataset).is_some(),
                 "exiv2 documents {record}:{dataset} but gamut does not name it"
+            );
+        }
+        // A stale abbreviation would silently stop pinning anything, so every row must be live.
+        for &(key, ..) in NAME_ABBREVIATIONS {
+            assert!(
+                KNOWN_TAGS.iter().any(|t| (t.record, t.dataset) == key) && exiv2.contains_key(&key),
+                "{key:?} is pinned as an abbreviation but is not in both tables"
             );
         }
     }
