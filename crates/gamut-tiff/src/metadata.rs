@@ -236,9 +236,15 @@ impl TiffMetadata {
 const POINTER_TAGS: &[u16] = &[tags::EXIF_IFD, tags::INTEROPERABILITY_IFD];
 
 /// An upper bound on the sub-IFD nesting [`resolve_pointers`] follows, bounding a hostile pointer
-/// graph. It is [`gamut_ifd::read_tree`]'s own bound, so the two walks agree on what is too deep;
-/// the deepest legitimate tree reachable through [`POINTER_TAGS`] is Exif → Interop, two levels.
-const MAX_POINTER_DEPTH: usize = 16;
+/// graph: a directory a hundred levels down is still a directory, and a file of a few kilobytes
+/// holds enough of them to exhaust the stack.
+///
+/// It is **two**, not [`gamut_ifd::read_tree`]'s sixteen, because this walk follows two tags and
+/// the deepest tree they can legitimately reach is IFD 0 → `ExifIFD` → `InteroperabilityIFD`
+/// (EXIF 2.3 §4.6.3). Nothing conformant puts an Exif or an Interop directory *inside* an Interop
+/// directory, so a third level is already out of spec — a generic reader needs sixteen because it
+/// is handed arbitrary tags, and this one is not.
+const MAX_POINTER_DEPTH: usize = 2;
 
 /// The file offsets a sub-IFD pointer value carries: a `LONG` array (TIFF 6.0 §2), the typed
 /// `IFD` (13) form of TIFF Technical Note 1, or BigTIFF's 64-bit `LONG8`/`IFD8` forms. Any other
@@ -504,6 +510,45 @@ mod tests {
         TiffMetadata::new().with_c2pa(vec![0; 16]).apply(&mut ifd);
         assert!(ifd.get(tags::C2PA_MANIFEST_STORE).is_none());
         assert!(ifd.fields().is_empty());
+    }
+
+    #[test]
+    fn a_bigtiff_exif_pointer_is_followed_through_its_64_bit_form() {
+        // BigTIFF writes a sub-IFD pointer as `LONG8`, not `LONG`. A resolver that knew only the
+        // 32-bit forms would leave the field in place as a plain integer and report `exif: None` —
+        // silent loss on every BigTIFF, the one file shape where the type differs.
+        let mut ifd0 = Ifd::new();
+        ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif_ifd()]);
+        let bytes = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Big,
+            ifds: vec![ifd0],
+        })
+        .expect("write");
+        assert!(matches!(
+            read(&bytes).expect("read").ifds[0].get(tags::EXIF_IFD),
+            Some(Value::Long8(_))
+        ));
+        assert_eq!(read_metadata(&bytes).expect("read").exif, Some(exif_ifd()));
+    }
+
+    #[test]
+    fn a_directory_below_the_exif_interop_pair_is_too_deep() {
+        // The bound is two because the pair can legitimately reach two levels and no more, so
+        // both sides of it are asserted: `a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file`
+        // (tests/metadata.rs) reads an Exif → Interop tree back, and a third level — an Interop
+        // directory inside an Interop directory, which no conformant file writes — is refused
+        // here rather than walked.
+        let mut third = Ifd::new();
+        third.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+        let mut interop = Ifd::new();
+        interop.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![third]);
+        let mut exif = exif_ifd();
+        exif.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop]);
+        let mut ifd0 = Ifd::new();
+        ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
+        let err = read_metadata(&file_with(ifd0)).expect_err("three levels is out of spec");
+        assert!(err.to_string().contains("sub-IFD tree too deep"), "{err}");
     }
 
     #[test]
