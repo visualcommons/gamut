@@ -71,15 +71,17 @@
 //! [`xmp`]); parsing and serializing the XMP packet bytes is [`gamut_xmp`]'s responsibility (issue
 //! #34). Exotic ISO 2022 character sets beyond Latin-1 and UTF-8 are reported as
 //! [`crate::IptcError::Unsupported`] rather than mis-decoded (see [`charset`]). The typed
-//! accessors cover every scalar/list IPTC **Core** property; the structured
-//! `Iptc4xmpCore:CreatorContactInfo` and the IPTC **Extension** structures (image regions,
-//! artwork, licensors) have no typed model and pass through [`PhotoMetadata::xmp`] as raw
-//! values. Scalar-shaped IIM datasets that repeat on the wire (`2:04`, `2:85`) reconcile their
-//! first value only; IIM records 3–9 have no named tags — both still round-trip byte-exact. See
-//! `STATUS.md` for the full v1 deferral list.
+//! accessors cover every scalar/list IPTC **Core** property, plus the structured
+//! `Iptc4xmpCore:CreatorContactInfo` and the most-used IPTC **Extension** structures — image
+//! regions, artwork/object and licensors (see [`extension`]); the remaining Extension structures
+//! pass through [`PhotoMetadata::xmp`] as raw values. Scalar-shaped IIM datasets that repeat on the
+//! wire (`2:04`, `2:85`) reconcile their first value only; the IIM tag table names every dataset
+//! IIM 4.2 gives a determinate octet maximum for, and everything else — including records 3–9 —
+//! round-trips byte-exact without a name. See `STATUS.md` for the full deferral list.
 #![forbid(unsafe_code)]
 
 pub mod charset;
+pub mod extension;
 pub mod iim;
 pub mod irb;
 pub mod photo_metadata;
@@ -93,6 +95,10 @@ mod reconcile;
 
 pub use charset::IimCharset;
 pub use error::{IptcError, Result};
+pub use extension::{
+    ArtworkOrObject, CreatorContactInfo, Entity, ImageRegion, Licensor, RegionBoundary,
+    RegionBoundaryPoint,
+};
 /// The XMP value model this crate's API speaks ([`XmpMeta`](gamut_xmp::XmpMeta),
 /// [`XmpProperty`](gamut_xmp::XmpProperty), …).
 ///

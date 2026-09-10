@@ -399,7 +399,15 @@ mod tests {
         // `max_octets` can only state a determinate maximum, so the datasets IIM 4.2 gives none
         // for are deliberately absent: `2:202` ObjectData Preview Data (256000 octets, beyond
         // `u16`) and the records 7-9 datasets ("a binary number" of unstated width).
-        for (record, dataset) in [(2, 202), (7, 10), (7, 20), (7, 90), (7, 95), (8, 10), (9, 10)] {
+        for (record, dataset) in [
+            (2, 202),
+            (7, 10),
+            (7, 20),
+            (7, 90),
+            (7, 95),
+            (8, 10),
+            (9, 10),
+        ] {
             assert!(
                 IimTagInfo::lookup(record, dataset).is_none(),
                 "{record}:{dataset} is modelled but has no stated octet maximum"
