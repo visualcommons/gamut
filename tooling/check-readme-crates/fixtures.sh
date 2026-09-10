@@ -177,6 +177,8 @@ check "a feature claim in section prose cargo refutes"    1 "feature claims"    
 check "a consumed-by list outside a crate row"            1 "no crate to be about" sedx 's/^Each crate manifest sets/Each is consumed by `gamut-png`; each crate manifest sets/'
 check "an always-on list outside a crate row"             1 "no crate to be about" sedx 's/^Each crate manifest sets/Each has an always-on dependency: `gamut-core`; each crate manifest sets/'
 check "a version token outside a crate row"               1 "no crate to be about" sedx 's/^Each crate manifest sets/Each v9 crate manifest sets/'
+check "a phantom crate named in a sub-heading"            1 "do not exist"        awkx '/^Each crate manifest sets/{print "### The `gamut-ifdd` note"; print ""} {print}'
+check "a claim in a sub-heading cargo refutes"            1 "feature claims"      awkx '/^Each crate manifest sets/{print "### The `gamut-png` Cargo feature `nope`"; print ""} {print}'
 
 echo
 echo "check-readme-crates fixtures: $passed passed, $failed failed (awk: ${CHECK_README_AWK:-awk})"

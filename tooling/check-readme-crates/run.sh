@@ -49,11 +49,13 @@
 #
 # WHAT THE CONTRACT COVERS. The whole `## Crates` section, not only its rows. The structural
 # checks always judged the section; the claim checks do too, so a machine-decidable claim written
-# as ordinary prose above or below the table is read exactly as it would be inside a cell. Two
-# forms -- the version token and the `consumed by`/`always-on` lists -- name no subject of their
-# own and take the row's crate as their subject, so outside a crate row they have nobody to be
-# about: writing one there is a failure rather than a silent pass, and the message says to move it
-# into a row.
+# as ordinary prose above or below the table -- or in a `###` sub-heading inside it -- is read
+# exactly as it would be inside a cell. Two forms -- the version token and the `consumed
+# by`/`always-on` lists -- name no subject of their own and take the row's crate as their subject,
+# so outside a crate row they have nobody to be about: writing one there is a failure rather than
+# a silent pass, and the message says to move it into a row. The one exception is a fenced or
+# indented code block, which is outside every check here: its content is a code sample, not a
+# claim this workspace has to answer for.
 #
 # WHAT THE TABLE IS FORBIDDEN TO WRITE, and why forbidding beats widening. A check that reads
 # backticked names can only be as good as the assumption that names are backticked, and that
@@ -485,9 +487,10 @@ scan="$(
                 in_table = 0
                 if (lvl <= 2) { in_section = (htitle == "Crates") ? 1 : 0 }
                 # A `###` sub-heading does not end the section, so its text is section text and
-                # is scanned like any other. The `## Crates` heading itself is scanned too, which
-                # costs nothing and keeps "every line of the section" true without an exception.
-                if (in_section) { unbackticked("line " NR, cur) }
+                # is read like any other line -- names and claims alike. The `## Crates` heading
+                # itself is read too, which costs nothing and keeps "every line of the section"
+                # true without an exception.
+                if (in_section) { unbackticked("line " NR, cur); claims("line " NR, "", cur) }
                 prev = ""
                 prev_para = 0
                 next
@@ -499,9 +502,10 @@ scan="$(
                 next
             }
 
-            # The contract is the whole section, not only its rows. An indented code block is
-            # exempt for the same reason a fence is: there a `gamut_png` is a sample of Rust or of
-            # a shell line, where the underscore spelling is the correct one.
+            # The contract is the whole section, not only its rows. A fenced or indented code
+            # block is exempt from all of it, names and claims alike: there a `gamut_png` is a
+            # sample of Rust or of a shell line, where the underscore spelling is the correct one,
+            # and a marker is a word in a code sample rather than a claim about this workspace.
             if (cur !~ /^    /) { unbackticked("line " NR, cur) }
 
             # A table runs from its delimiter row until the first line that is not a table row.
