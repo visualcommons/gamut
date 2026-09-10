@@ -514,8 +514,9 @@ mod tests {
     //!
     //! * [`reserve_then_fill`]'s `store.len() != slot.len()` guard. It discriminates exactly as a
     //!   row does; what separates it is *reach*, not subject — pinning it needs c2pa-rs and a
-    //!   gamut encoder, so it lives in `tests/reserve_then_fill.rs`, which the last column of no
-    //!   row can name because these rows name functions in this file.
+    //!   gamut encoder in scope, so its test lives in `tests/reserve_then_fill.rs`. A row could
+    //!   not point there anyway: [`every_test_the_enumeration_names_exists_in_this_file`] resolves
+    //!   every name a row links against *this* file's definitions.
     //! * `Display for OracleError`'s match over the variants. It chooses the *wording* for an
     //!   outcome some other branch already decided, so it discriminates nothing about an input.
     //!   Every refusal test below asserts on the message it renders, so it is exercised
