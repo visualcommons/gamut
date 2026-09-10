@@ -84,8 +84,9 @@ compression schemes land additively on this frozen surface (see Status).
   chain, the store at the end of the file, and the two §18.5.5 exclusion ranges reported by
   `TiffEncoder::encode_with_report` or recovered from any file by `gamut_tiff::c2pa_exclusions`.
   `with_c2pa_reserved` writes a zero-filled reservation for an external signer to overwrite in
-  place; because it is an infallible builder, a length no buffer could hold is refused by the
-  encode that follows rather than panicking.
+  place; because it is an infallible builder, a length no buffer could hold — or, in a classic
+  TIFF, none its 32-bit `count` word could describe — is refused by the encode that follows
+  rather than panicking or costing a whole image's compression first.
 - The decoder is hardened against hostile input (`#![forbid(unsafe_code)]`, a size cap, and a
   byte-flip fuzz corpus).
 

@@ -164,9 +164,15 @@ impl TiffEncoder {
     /// less would be packed into the entry's own value word rather than placed out of line at the
     /// end of the file. It must also be a length a buffer can hold: past `isize::MAX` a `Vec<u8>`
     /// cannot exist, so the reservation is taken fallibly and such a `len` is refused rather than
-    /// panicking. A reservation cannot be combined with a store supplied through
-    /// [`with_metadata`](Self::with_metadata). Each of those is a typed error raised before any
-    /// pixel work, not after the image has been compressed. What is left outside this crate's
+    /// panicking. In a **classic** TIFF it must further be countable by the 32-bit `LONG` the
+    /// entry's `count` field is — 4 GiB — since a longer store could not be described whatever
+    /// else held it; BigTIFF's count is 64-bit and has no such bound. A reservation cannot be
+    /// combined with a store supplied through [`with_metadata`](Self::with_metadata). Each of
+    /// those is a typed error raised before any pixel work, not after the image has been
+    /// compressed. What the length alone cannot settle stays with
+    /// [`gamut_ifd::c2pa::append_store`]: a store whose *offset* would pass classic TIFF's 4 GiB
+    /// limit depends on the size of the file it lands after, so it is refused there, once the
+    /// file exists. What is left outside this crate's
     /// reach is the allocator's: a reservation the machine has no memory for aborts, as any
     /// oversized allocation in Rust does.
     #[must_use]
@@ -192,9 +198,9 @@ impl TiffEncoder {
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if both were requested, if the store is shorter than
-    /// [`min_store_len`](Self::min_store_len), or if a reservation is longer than a buffer can
-    /// hold ([`zeroed`]) — all caught here, before any pixel work, rather than after a whole image
-    /// has been compressed.
+    /// [`min_store_len`](Self::min_store_len), if classic TIFF's 32-bit `LONG` count cannot
+    /// describe it, or if a reservation is longer than a buffer can hold ([`zeroed`]) — all
+    /// caught here, before any pixel work, rather than after a whole image has been compressed.
     fn c2pa_store(&self) -> Result<Option<Cow<'_, [u8]>>> {
         // The *length* is settled before a reservation is materialised, so an unusable one costs
         // neither the allocation nor the panic `vec![0; len]` raises past `isize::MAX`.
@@ -214,6 +220,25 @@ impl TiffEncoder {
                 env!("CARGO_PKG_NAME"),
                 "TIFF: a C2PA manifest store must be a JUMBF box header (8 bytes) and longer \
                  than the container's inline threshold (9 bytes in BigTIFF)",
+            ));
+        }
+        // Classic TIFF counts an `UNDEFINED` value with a 32-bit `LONG` and addresses it with a
+        // 32-bit offset; BigTIFF's words are 64-bit. A store no `LONG` can count is one
+        // `gamut_ifd::c2pa::append_store` refuses — but only once the whole image has been
+        // compressed and the reservation zero-filled, and with a message about the file's 4 GiB
+        // limit rather than about the length the caller passed. Comparing two lengths costs
+        // nothing, so the refusal is taken here as well. It is *necessary*, not sufficient: the
+        // store's own offset must also fit, and that depends on the size of the file it lands
+        // after, which only `append_store` knows.
+        let countable = match self.variant() {
+            Variant::Classic => u32::try_from(len).is_ok(),
+            Variant::Big => true,
+        };
+        if !countable {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: a C2PA manifest store longer than 4 GiB cannot be counted by classic \
+                 TIFF's 32-bit LONG (BigTIFF's count is 64-bit)",
             ));
         }
         Ok(Some(match &self.metadata.c2pa {
@@ -963,12 +988,32 @@ mod tests {
         // expression says so by panicking with a capacity overflow — a panic out of a library path
         // for a number the caller chose. `usize::MAX` is the shortest way to reach it; the
         // accepting side of the boundary is not asserted, since it would mean allocating
-        // `isize::MAX` bytes.
+        // `isize::MAX` bytes. BigTIFF, because classic TIFF refuses this length one check earlier
+        // for a different reason — its `count` word could not describe it.
         let err = TiffEncoder::new()
+            .with_big_tiff(true)
             .with_c2pa_reserved(usize::MAX)
             .c2pa_store()
             .expect_err("no buffer holds usize::MAX bytes");
         assert!(err.to_string().contains("cannot be allocated"), "{err}");
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn a_classic_tiff_store_its_count_word_cannot_describe_is_refused_before_the_pixels() {
+        // Classic TIFF counts an `UNDEFINED` value with a 32-bit `LONG`, so 4 GiB is the longest
+        // store the entry could describe. `append_store` does refuse it, but only after the image
+        // has been compressed and the reservation zero-filled — 4 GiB of it. Length alone settles
+        // this, so it is settled first.
+        //
+        // Neither the accepting side of the boundary nor BigTIFF's freedom from it is asserted:
+        // both would mean successfully allocating 4 GiB in a unit test. The test is 64-bit-only
+        // because on a 32-bit target no `usize` can exceed `u32::MAX`.
+        let err = TiffEncoder::new()
+            .with_c2pa_reserved(u32::MAX as usize + 1)
+            .c2pa_store()
+            .expect_err("longer than a classic TIFF LONG can count");
+        assert!(err.to_string().contains("cannot be counted"), "{err}");
     }
 
     #[test]
