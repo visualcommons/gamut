@@ -20,6 +20,16 @@
 //! These two columns describe what a *conformant writer* must emit. They are used by
 //! [`set_tag_checked`](crate::set_tag_checked) on the write path only: the reader stays lenient and
 //! accepts whatever a real-world file carries.
+//!
+//! # The three pointer tags are deliberately absent
+//!
+//! DC-008 gives `Exif IFD Pointer` (34665), `GPS Info IFD Pointer` (34853) and
+//! `Interoperability IFD Pointer` (40965) their own `Tag`/`Type`/`Count` blocks in §4.6.3.1.1,
+//! §4.6.3.2.1 and §4.6.3.3.1, outside the five tables above, and this catalogue does not name
+//! them. They are structural: the writer synthesises each one from the sub-IFD tree it is handed
+//! and removes any that were set by hand. Cataloguing them would let `set_tag_checked` accept a
+//! pointer that is then silently discarded, which is worse than having no name for it — reach the
+//! directories through [`Exif`](crate::Exif)'s accessors instead.
 
 use gamut_ifd::FieldType;
 
@@ -112,6 +122,17 @@ macro_rules! exif_tags {
         /// maps to a 16-bit on-disk tag number ([`ExifTag::tag_id`]) within its home directory
         /// ([`ExifTag::ifd`]); [`ExifTag::name`] gives the canonical CIPA DC-008 name, and
         /// [`ExifTag::field_types`]/[`ExifTag::component_count`] the value shape the spec mandates.
+        ///
+        /// # The discriminants are not stable
+        ///
+        /// Variants are declared in the specification's own order — directory by directory,
+        /// ascending by tag number — which is also the order [`ExifTag::ALL`] iterates in, so a
+        /// tag added later lands in the middle and shifts the implicit discriminants after it.
+        /// That is deliberate: the on-disk identity of a tag is [`ExifTag::tag_id`], never its
+        /// discriminant, and keeping `ALL` in spec order is worth more than a number no consumer
+        /// has. The enum is `#[non_exhaustive]`, carries no `repr`, and is reached by no
+        /// `gamut-ffi` entry point, so nothing may cast it to an integer or match it across an
+        /// ABI boundary.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[non_exhaustive]
         pub enum ExifTag {

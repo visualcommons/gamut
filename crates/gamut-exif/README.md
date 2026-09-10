@@ -70,10 +70,13 @@ for dropped in report.dropped() {
 # }
 ```
 
-Every catalogued tag carries the field type and component count CIPA DC-008 mandates for it
-([`ExifTag::field_types`], [`ExifTag::component_count`]). [`set_tag_checked`] is the conformant
-setter — it refuses a value that contradicts them — while [`Exif::set_tag`] and the whole read path
-stay lenient, because a caller reproducing a non-conformant source file must still be able to.
+Every tag CIPA DC-008 itself defines carries the field type and component count that specification
+mandates for it ([`ExifTag::field_types`], [`ExifTag::component_count`]); the nine carried from
+other specifications claim no constraint, and their `field_types` is empty. [`set_tag_checked`] is
+the conformant setter — it refuses a value that contradicts them — and it is the crate's only
+checked door. [`Exif::set_tag`], [`Exif::set`], `exif_ifd_mut`, `gps_ifd_mut`, `interop_ifd_mut`,
+`set_gps_ifd` and their siblings all stay lenient, as does the whole read path, because a caller
+reproducing a non-conformant source file must still be able to.
 
 ```rust
 use gamut_exif::{ByteOrder, Exif, ExifTag, Value, set_tag_checked};
@@ -90,7 +93,9 @@ Enable the optional `describe` feature (also included by `full`) for the enumera
 in the specification's own wording — `describe(ExifTag::ResolutionUnit, 2)` is `Some("inches")`,
 `described_values` gives a tag's whole defined domain, and `flash` decomposes the `Flash` bitfield.
 It is off by default: a display table is several kilobytes of static strings that a consumer which
-only writes or round-trips metadata never reads.
+only writes or round-trips metadata never reads. Only a crate that depends on `gamut-exif`
+directly can turn it on — neither the `gamut-metadata` facade nor the `gamut` umbrella forwards it
+yet (issue #543).
 
 Enable the optional `geocoordinates` feature (also included by `full`) to convert a complete
 [`GpsInfo`] with `TryFrom` into `geocoordinates::Wgs84` or `geocoordinates::Coordinate`. The latter
@@ -100,11 +105,17 @@ the typed [`GpsConversionError`].
 
 ## Scope
 
-v1 covers the **standard CIPA DC-008 tag dictionary** ([`ExifTag`]) — **every tag CIPA DC-008
-defines**, with the field type and component count the spec mandates for each, plus nine carried
-from other specifications for compatibility — full read/write round-trips over `gamut-ifd`, the
-typed [`GpsInfo`] projection, and JPEG thumbnails. Intentionally deferred (and designed to be added
-without breaking the 1.0 API — the catalogue and vendor enums are `#[non_exhaustive]`):
+v1 covers the **standard CIPA DC-008 tag dictionary** ([`ExifTag`]) — every tag in the five tables
+that define one (Table 6 for the 0th IFD, Tables 8 and 9 for the Exif sub-IFD, Table 14 for GPS and
+Table 16 for Interoperability), with the field type and component count that table mandates for
+each, plus nine carried from other specifications for compatibility. The three IFD-pointer tags
+(`Exif IFD Pointer`, `GPS Info IFD Pointer`, `Interoperability IFD Pointer`), which DC-008 gives
+their own sections outside those tables, are deliberately **not** catalogued: the writer
+synthesises them from the tree it is given and drops any that were hand-set, so a name for them
+would only invite a write that is silently discarded. The crate also gives full read/write
+round-trips over `gamut-ifd`, the typed [`GpsInfo`] projection, and JPEG thumbnails. Intentionally
+deferred (and designed to be added without breaking the 1.0 API — the catalogue and vendor enums
+are `#[non_exhaustive]`):
 
 - **Per-vendor MakerNote decoding.** The `MakerNote` block is preserved verbatim and its vendor
   detected ([`MakerNoteVendor`]), but not decoded. Since issue #263 a parsed model records the
@@ -115,6 +126,9 @@ without breaking the 1.0 API — the catalogue and vendor enums are `#[non_exhau
   the difference is entirely tags CIPA DC-008 does not define (TIFF/EP, DNG, and other lineages),
   which would have to be transcribed from *their* specifications, not copied out of an oracle.
   Unknown tags still round-trip losslessly via the raw `Ifd`.
+- **A re-derivation of the per-tag `Type`/`Count` columns.** They are transcribed by hand from the
+  vendored specification and guarded structurally, but nothing recomputes them from the spec, so a
+  *corrected-but-different* value would compile and pass (issue #544).
 - **Uncompressed strip-based thumbnails** are read but not re-embedded (JPEG thumbnails are).
 - **Per-tag error recovery inside one directory.** A single unparseable entry fails its whole
   directory in `gamut-ifd`, so the report's granularity is the sub-IFD, not the individual tag

@@ -58,7 +58,13 @@ Vendoring DCF would settle four of the six. All nine predate this phase — P10 
 unspecified status explicit and machine-readable.
 
 The `describe` feature (default **off**) renders the enumerated tags in DC-008's own wording, and
-`flash` decomposes the `Flash` bitfield of §4.6.6.7.21 Figure 17.
+`flash` decomposes the `Flash` bitfield of §4.6.6.7.21 Figure 17. It covers all **39** tags for
+which DC-008 prints a value table — 26 in the 0th IFD and Exif sub-IFD, 13 in the GPS sub-IFD, of
+which eleven are the **character-coded** ASCII tags (`GPSStatus`, `GPSMeasureMode` and the nine
+reference tags of §4.6.7.1) whose code is the letter's byte rather than an integer. A test names
+that set exactly, so a table added for a tag the spec leaves open, or an arm that loses its rows,
+fails. Only a crate depending on `gamut-exif` directly can enable the feature: neither
+`gamut-metadata` nor the `gamut` umbrella forwards it yet (issue #543).
 
 ### Where CIPA DC-008 disagrees with itself
 
@@ -98,7 +104,12 @@ exactly, and a second test proves each is a naming difference rather than a miss
   transcribed from CIPA DC-008 and checked structurally — each table ascending and distinct,
   `describe` exactly a lookup into `described_values`, and each `Flash` bit field a function of its
   own bits only — but not against exiv2's rendering. Exposing `print()` in the oracle shim would
-  make that differential possible.
+  make that differential possible (issue #533).
+- **A re-derivation of the `Type`/`Count` columns.** They were transcribed by hand from the
+  vendored specification and cross-checked once against the per-tag prose blocks, but nothing in
+  the repository recomputes them, and mutation testing cannot see a wrong constant in a macro
+  invocation. A *missing* row is caught by the structural guards; a *corrected-but-different* value
+  is caught by nothing (issue #544).
 - **Uncompressed strip-based thumbnails** are read (as their directory) but not re-embedded; JPEG
   thumbnails round-trip fully.
 - **Per-tag error recovery inside a directory.** `ExifReader::parse_with_report` names the

@@ -9,8 +9,17 @@
 //!
 //! This module also holds the crate's one **conformance check**, [`set_tag_checked`]: the write
 //! path is the only place gamut is the author of the bytes, so it is the only place a spec
-//! violation is gamut's to refuse. Reading stays lenient — real files break the spec routinely and
-//! the crate's job there is to surface what is present, not to judge it.
+//! violation is gamut's to refuse. It is one door among several, and the only checked one — every
+//! other way to put a field into the tree stays lenient, because a caller reproducing a
+//! non-conformant source file must be able to. Those are
+//! [`Exif::set_tag`](crate::Exif::set_tag), [`Exif::set`](crate::Exif::set),
+//! [`Exif::exif_ifd_mut`](crate::Exif::exif_ifd_mut),
+//! [`Exif::gps_ifd_mut`](crate::Exif::gps_ifd_mut),
+//! [`Exif::interop_ifd_mut`](crate::Exif::interop_ifd_mut) and
+//! [`Exif::set_gps_ifd`](crate::Exif::set_gps_ifd), together with the `image_mut`,
+//! `set_exif_ifd` and `set_interop_ifd` siblings that reach the same directories. Reading stays
+//! lenient for the same reason — real files break the spec routinely and the crate's job there is
+//! to surface what is present, not to judge it.
 
 use gamut_ifd::{
     ByteOrder, FieldType, Ifd, TiffFile, Value, Variant, WriteOptions, align_word,
@@ -24,9 +33,11 @@ use crate::thumbnail::Thumbnail;
 
 /// Why [`set_tag_checked`] refused a value.
 ///
-/// Distinct from [`ExifError`](crate::ExifError), which reports what is wrong with *data being
-/// read*: this reports what is wrong with a value a caller asked gamut to write. Marked
-/// `#[non_exhaustive]` so further constraints can be checked without a breaking change.
+/// Deliberately a type of its own rather than a variant of [`ExifError`](crate::ExifError), which
+/// reports what is wrong with *data being read*: this reports what is wrong with a value a caller
+/// asked gamut to write, so a caller that never writes never has to match it. That is the same
+/// split `gps::GpsConversionError` makes. Marked `#[non_exhaustive]`
+/// so further constraints can be checked without a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum TagConstraintError {
@@ -144,6 +155,15 @@ pub fn check_tag(tag: ExifTag, value: &Value) -> core::result::Result<(), TagCon
 /// // The rejected write left the conformant value in place.
 /// assert_eq!(exif.get_tag(ExifTag::FNumber), Some(&Value::Rational(vec![(28, 10)])));
 /// ```
+///
+/// # Where this refuses what a table literally says
+///
+/// `GainControl` (0xA407) is the one tag CIPA DC-008 describes twice and differently: Table 9's
+/// `Type` column says RATIONAL, while the tag's own §4.6.6.7.41 says SHORT and enumerates five
+/// integer codes. gamut follows the section — a fraction cannot carry an enumeration, and exiv2
+/// and ExifTool read it as SHORT — so this function rejects a RATIONAL `GainControl` even though
+/// Table 9 permits one. A caller reproducing a Table-9-conformant file writes it through
+/// [`Exif::set_tag`](crate::Exif::set_tag), which is unchecked by design.
 ///
 /// # Errors
 ///
