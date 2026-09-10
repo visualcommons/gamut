@@ -118,18 +118,24 @@ format.
 
 ## Crates
 
+Every row describes the crate **in this tree**: any version it cites is the crate's own
+`Cargo.toml` — what `mise run versions` prints and what a workspace `path` dependency builds — not
+what crates.io currently serves. The two agree for thirty of the thirty-two crates; `gamut-riff`'s
+manifest is ahead of its newest release and `gamut-cmm` has no release yet, both noted in
+[Releases](#releases).
+
 | Crate             | Purpose                                                                | Status                                 |
 | ----------------- | ---------------------------------------------------------------------- | -------------------------------------- |
 | `gamut`           | Umbrella crate; re-exports the format crates behind Cargo features     | implemented                            |
-| `gamut-core`      | Core traits (`Encoder`/`Decoder`), image buffers, dimensions, errors, `convert` | stable (v2; v1 under #177), pixel conversion added by #268 |
-| `gamut-color`     | Pixel formats, bit depths, chroma subsampling, CICP code points and planar buffers, plus the `f64` colour science (transfer, Lab/OKLab, XYB, matrix, gamut map, CCT, profile) | stable (v2; v1 under #179); the colour science is Tier-1 `f64`, not bit-reproducible |
+| `gamut-core`      | Core traits (`EncodeImage`/`DecodeImage`), image buffers, dimensions, errors, `convert` | stable (v2; v1 under #177), pixel conversion added by #268 |
+| `gamut-color`     | Pixel formats, bit depths, chroma subsampling, CICP code points and planar buffers, the `ycbcr` matrixing layer (H.273, plus the libwebp-exact BT.601 one VP8 needs), and the `f64` colour science (transfer, Lab/OKLab, XYB, `matrix`/`linalg`, gamut map, CCT, profile) | stable (v2; v1 under #179); the colour science is Tier-1 `f64`, not bit-reproducible |
 | `gamut-dsp`       | Shared DSP kernels: AV1 DCT/ADST/identity/WHT, the JPEG 8×8 forward/inverse DCT, quantization rounding | stable (v2; v1 under #192)             |
 | `gamut-bitstream` | Bit readers/writers, LEB128, the AV1 §8.2 symbol (arithmetic) coder, MSB-first sample packing | v0.2, no v1 release issue yet; the ANS and Huffman coders are not implemented |
 | `gamut-tonemap`   | Tone-mapping curves (`ToneCurve` + Reinhard/ACES/Hable/Drago) for HDR→SDR | stable (v1, #188); eight operators, surface frozen |
 | `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables + the backend registry | in use by avif, ffi, heic, jpeg, jxl, png and webp |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | stable (v2); structure only, codestream carried opaquely |
 | `gamut-riff`      | RIFF container utilities (WebP)                                        | stable (v1, #186)                      |
-| `gamut-av1`       | AV1 still-image (intra-frame) encoder + decoder — the codec layer beneath AVIF | encoder: lossless and lossy intra keyframes; decoder (default-on `decode` feature): 8-bit 4:4:4 intra key frames only (#259) |
+| `gamut-av1`       | AV1 still-image (intra-frame) encoder + decoder — the codec layer beneath AVIF | encoder: lossless and lossy intra keyframes; decoder (default-on `decode` feature): 8-bit 4:4:4 intra frames, key and intra-only (#259) |
 | `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor        | placeholder                            |
 | `gamut-avif`      | AVIF encoder + container decoder — AV1 still frames in ISOBMFF         | encoder (v1, 8/10/12-bit) + container decode (#250); AV1 codestream decode via the `Av1StillDecoder` seam |
 | `gamut-jxl`       | JPEG XL encoder (libjxl wrap) + decoder (pure-Rust jxl-rs)             | encoder + decoder (#243)               |

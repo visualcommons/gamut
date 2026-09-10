@@ -20,7 +20,7 @@ Dependency edges (a crate depends on those to its right):
   `cmm`, `codec-abi`, `all`); `default = []`. `primitives` re-exports shared `color`/`dsp`/`bitstream`;
   `isobmff`/`metadata`/`tonemap`/`codec-abi` re-export their respective primitive crates;
   `all` includes all of these.
-- **gamut-core** — `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`, plus the
+- **gamut-core** — `EncodeImage`/`DecodeImage` traits, image buffers, `Dimensions`, `Error`, plus the
   format-agnostic `convert` module: the one place any `Pixel` layout converts to another
   (grey↔RGB, alpha add/drop/composite, 8↔16-bit), lossless by default with loss opted into per
   decoder via a `ConvertPolicy`. Format crates decode to what the file carries and delegate the
