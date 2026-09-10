@@ -118,24 +118,34 @@ verdict you report for an allocation-heavy mutant.
 
 **What the tool mutates is a short list**, and everything outside it is invisible to the gate.
 Derive the list instead of trusting a written one — the hand-written version this replaces was
-taken from three crates and was two verbs short:
+taken from three crates and was two verbs short. Each rule below matches one verb's exact shape,
+and the `awk` tail is the point of the thing: a line no rule rewrote is printed as `UNCLASSIFIED`
+and the pipeline exits non-zero, so a verb this repository has never seen announces itself instead
+of being folded into the nearest bucket. A derivation that cannot detect a new class would be a
+hand-written list wearing a script — which is what it replaces.
 
 ```bash
 cargo mutants --list --no-config | sed -E '
   s/^.*:[0-9]+:[0-9]+: //
-  s/^replace match guard .*/replace match guard/
+  s/^replace match guard .* with (true|false) in .*/replace match guard/
   s/^replace .* -> .* with .*/replace body/
   s/^replace .* with \(\)$/replace body/
-  s/^replace .* with .*/replace operator/
+  s/^replace [-+*\/%&|^<>=!]+ with [-+*\/%&|^<>=!]+( in .*)?$/replace operator/
   s/^delete (match arm|field|!|-).*/delete \1/
-' | sort | uniq -c | sort -rn
+' | sort | uniq -c | sort -rn | awk '
+  /(replace (operator|body|match guard)|delete (match arm|field|!|-))$/ { print; next }
+  { print "UNCLASSIFIED: " $0 > "/dev/stderr"; bad = 1 }
+  END { exit bad }'
 ```
 
-Over the whole tree (25 215 mutants, September 2026) that is exactly seven verbs: 16 082 binary
-or compound-assignment operator swaps, 7 212 function bodies replaced by a default value, 917
-whole match arms deleted, 540 unary `-` deletions, 269 `!` deletions, 160 match guards forced to
-`true`/`false`, and 35 struct fields deleted from a struct literal. Nothing else is generated, so
-the gate can never report:
+Over the whole tree (25 215 mutants, September 2026) that is exactly seven verbs, and it exits 0:
+16 082 binary or compound-assignment operator swaps, 7 212 function bodies replaced by a default
+value, 917 whole match arms deleted, 540 unary `-` deletions, 269 `!` deletions, 160 match guards
+forced to `true`/`false`, and 35 struct fields deleted from a struct literal. The operator rule
+carries an optional ` in <fn>` tail because 110 of those swaps sit outside any function body —
+`const`/`static` initialisers, and one array length in a signature — so the tool has no function
+name to attach and prints the swap bare; the catch-all this replaces absorbed them silently.
+Nothing else is generated, so the gate can never report:
 
 - a case that is **missing** from a `match` or a table — there is nothing there to mutate, and a
   survey of nine absent spec-defined cases still scores zero missed;
