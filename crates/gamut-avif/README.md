@@ -102,6 +102,22 @@ the encoder adds HEIF's 4-byte offset prefix) and `with_xmp` attach metadata ite
 `cdsc` reference to the primary image. All five carry their payloads verbatim and leave the
 codestream untouched; libavif reads every one of them back byte-for-byte.
 
+**Content credentials (C2PA).** A C2PA manifest store cannot be handed to an encoder complete —
+its hard binding digests the finished file — so the encoder reserves rather than receives:
+`with_c2pa_reserved(len)` writes a top-level `uuid` `ContentProvenanceBox` (C2PA 2.4 §A.5.1) after
+`ftyp` around a slot of `len` zero bytes, and `encode_with_report` returns the same bytes
+`encode_to_vec` would plus the slot's byte range, which a signer then patches in place; nothing
+else in the file moves. `with_c2pa(bytes)` writes a store the caller has already computed over
+this exact output. A `len` that could never hold a store — below the 8-byte JUMBF box header, or
+beyond what a buffer holds — is refused by the encode that follows, since the builder itself cannot
+fail; a third refusal comes from the container writer, which cannot express a top-level box at or
+beyond 4 GiB. That minimum bounds the *reservation* alone: `with_c2pa(bytes)` carries a supplied
+slice verbatim. On read, `AvifContainer::c2pa_slot` reports the located slot's bytes, purpose and
+range, and demands nothing of its length: a degenerate slot that is genuinely there is reported
+as found. The store is opaque here — gamut locates and carries, it never validates — and the range
+is for patching and byte accounting, not a hash exclusion range (BMFF assets bind by box path,
+§18.6).
+
 Output is verified against real decoders (`libavif`, `dav1d`, `libaom`), linked from vendored
 `third_party/` submodules rather than system-installed binaries.
 

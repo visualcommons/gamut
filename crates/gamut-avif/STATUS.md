@@ -48,6 +48,39 @@ AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `d
 doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
+**C2PA carriage (issue #444, epic #239).** The encoder reserves or writes a C2PA manifest store
+as a top-level `uuid` `ContentProvenanceBox` (C2PA 2.4 §A.5.1) placed after `ftyp` and before
+`meta` (§A.5.3, via `IsoBmffImage::push_top_level_box`): `AvifEncoder::with_c2pa_reserved(len)`
+writes the §A.5.1.2 framing — zero `FullBox` version/flags, `box_purpose` `manifest`, a zero
+8-byte merkle offset — around `len` zero bytes for an external signer to fill, `with_c2pa(bytes)`
+writes a store the caller has already computed over this exact output, and
+`AvifEncoder::encode_with_report` returns the slot's file range beside the (unchanged) bytes, so
+the offset is known before the signer runs. Nothing after placement moves a byte
+(`tests/c2pa.rs`, exact-byte). The read side, `AvifContainer::c2pa_slot` / `c2pa_slots`,
+locates every top-level C2PA `uuid` box and reports its purpose, slot bytes and file range as a
+`C2paSlot` (named for the box-bounded slot it reports, not for a trimmed store). The
+object-safe `EncodeImage` entry point is untouched. libavif and dav1d decode a file carrying the
+box to the same pixels as one without.
+
+`with_c2pa_reserved` is an infallible builder, so an unusable `len` is refused by the **encode**
+that follows, on every entry point including `EncodeImage::encode_to_vec`. This crate refuses two
+lengths as `Error::InvalidInput`: below 8 bytes (the JUMBF `LBox`/`TBox` header a manifest store
+opens with, so a shorter slot could never hold one) and above what a buffer can hold. Unchecked,
+the second was worse than a panic — the release profile a downstream consumer builds with wrapped
+the framing addition and emitted a well-formed AVIF whose C2PA box no locator, this crate's
+included, could find. A **third** refusal sits between them and comes from `gamut-isobmff`, not
+from here: a top-level box carries a 32-bit size field, so the container writer rejects a
+`ContentProvenanceBox` at or beyond 4 GiB as `Error::Unsupported`. That is the effective ceiling —
+measured, the largest `len` that clears it is `4_294_967_250` and `4_294_967_251` is refused —
+and whether this crate should own that bound with its own error is **#576**.
+
+The **read** side demands nothing of a slot's length: it reports a degenerate slot it genuinely
+finds, with its true range. That is not a "strict writer, permissive reader" asymmetry — the
+minimum bounds the *reservation* path alone. `with_c2pa(bytes)` carries a caller-supplied slice
+verbatim, as every other metadata payload in this workspace is carried, so this crate does write
+and then locate a slot shorter than a JUMBF box header; whether the minimum should apply there too
+is **#577**. See the C2PA note under section L for the five recorded limits.
+
 **Deferred (planned, additive).** Every ☐ row below: 4:2:0/4:2:2 and `MA1B` landed with
 #390/#391, the alpha auxiliary, `Gray8` and monochrome surface with #396/#397, and the 10/12-bit
 path end to end with #398/#399, and subsampled chroma on the `Rgb16` path with #399 — what remains
@@ -125,6 +158,7 @@ adding it needs no container change.
 | `idat` inline item data | 14496-12 | ☐ | M5 |
 | `thmb` thumbnail item | 23008-12 | ☐ | M5 |
 | Exif / XMP metadata items + `cdsc` ref | AVIF §9.1.2; 23008-12 | ✅ (`AvifEncoder::with_exif`/`with_xmp`) | M4 |
+| C2PA `ContentProvenanceBox`: top-level `uuid` (user type `D8FEC3D6-…-C481`) after `ftyp`, `box_purpose` `manifest`, zero merkle offset, a reserved zero slot or a caller-computed store; slot range via `encode_with_report` | C2PA 2.4 §A.5.1, §A.5.3 | ✅ (#444; `AvifEncoder::with_c2pa_reserved`/`with_c2pa`) | D |
 | `a1op` operating-point sel / `a1lx` layered index / `lsel` layer sel (layered/progressive stills) | AVIF §2.3 | ☐ | D |
 | `dinf`/`dref` external data references | AVIF §9.1.2 | OOS | OOS |
 | sequence tracks: `moov`/`trak`/`mdia`/`stbl`, `av01` sample entry, `av1C` in `stsd` | 14496-12; AV1-ISOBMFF §3 | OOS | OOS |
@@ -330,6 +364,29 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | `clap`/`irot`/`imir` application in `ipma` order (2022 `imir` axis semantics) | 23008-12:2022 §6.5.12; 14496-12 §12.1.4 | ✅ | S3 |
 | `iovl` overlay compositing (source-over, canvas fill, clipping) | 23008-12 §6.6.2.3.3 | ✅ | S3 |
 | libavif structure/metadata/pixels + dav1d planar bit-exact differential suite | (oracle) | ✅ | S4 |
+| C2PA manifest-store locator (`AvifContainer::c2pa_slot` / `c2pa_slots`): every top-level `uuid` box with the C2PA user type → `box_purpose`, slot bytes, file range, in file order | C2PA 2.4 §A.5.1–§A.5.3; §18.6 | ✅ (#444) | — |
+
+**C2PA — five recorded limits (#444).** (1) *A slot, not a trimmed store.* `C2paSlot::slot_bytes`
+/ `range` run from just after the merkle offset to the end of the `uuid` box, so they include any
+unused padding §A.5.3 permits after the store, and a reserved-but-unfilled slot reads back as
+zeros. `gamut-heic`'s `C2paManifestStore` (#429) instead trims to the store's own JUMBF `LBox`, so
+the two crates can report different lengths for one file; the AVIF type is *named* for the slot so
+the two claims cannot be confused across the umbrella's re-exports. The bound is deliberate — an
+`LBox` trim cannot locate a reservation, which has no `LBox` — and unifying the two lenses is
+**#505**. (2) *`update` framing is probed, not stated.* §A.5.3 gives the merkle offset only for
+`manifest`/`original`; `update` is probed over the same `[8, 0]` candidates `gamut-heic` uses, so a
+prefix-less `update` store shorter than 8 bytes is located rather than dropped. A *longer*
+prefix-less one is still reported 8 bytes short — that needs the `LBox` check, also #505. (3) *The
+range is not an exclusion range.* BMFF assets bind with `c2pa.hash.bmff.v3`, which excludes by box
+path (§18.6, §A.5.6); the range is for patching and byte accounting, and no type is named
+"exclusion". (4) *The encoder writes `manifest` only.* The read side reports all three purposes;
+producing an `original`/`update` pair is a manifest-update operation on an existing file, outside
+#444. The reserve → sign → validate direction against `c2pa-rs` is #447's. (5) *The range is a
+bare `Range<usize>`.* Limit (3) is documented at every site but not enforced by a type, so nothing
+stops a caller feeding the reported range to a hash as an exclusion range. A newtype that makes
+that unrepresentable is deferred to **#505**, so it can land in `gamut-heic` and `gamut-avif`
+together under one name rather than as an AVIF-only spelling that would be renamed on adoption;
+#505's text tracks the lens unification and does not yet name the newtype.
 
 **Deferred (additive) for the decode surface:** the backend registry + `gamut-codec-abi` adapter
 around `Av1StillDecoder` — section M reserves its name and shape; the typed trait itself already
