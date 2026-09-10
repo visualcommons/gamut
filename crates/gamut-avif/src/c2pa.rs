@@ -84,9 +84,15 @@ const MIN_SLOT_LEN: usize = 8;
 /// than returning. Refusing above this ceiling turns that panic into an error, so no reservation
 /// length can panic the library.
 ///
-/// Above it lies only the allocator's own limit — a length within this ceiling but beyond the
-/// machine's memory aborts, as any oversized allocation in Rust does, which no fallible API here
-/// can intercept.
+/// This is a panic guard, not the encoder's effective limit. Long before it, the container writer
+/// refuses the box: a top-level box carries a 32-bit size field, so
+/// [`gamut_isobmff::write`] rejects one at or beyond 4 GiB with
+/// [`Error::Unsupported`](gamut_core::Error::Unsupported). Measured on this framing, the largest
+/// `len` that clears that check is `4_294_967_250` and `4_294_967_251` is refused, and a `len`
+/// just under it aborts in the allocator while the writer copies the payload into the output
+/// buffer. So above the writer's bound lies the writer's error, and below it — for a length the
+/// machine has no memory for — lies the allocator's own limit, which no fallible API here can
+/// intercept.
 const MAX_PAYLOAD_LEN: usize = isize::MAX as usize;
 
 /// The `box_purpose` of a C2PA `uuid` box that carries a manifest store (C2PA 2.4 §A.5.3).

@@ -497,17 +497,26 @@ impl AvifEncoder {
     /// # `len` is checked, at encode time
     ///
     /// This builder cannot fail — it returns `Self` — so an unusable `len` is refused by the
-    /// *encode* that follows, as [`Error::InvalidInput`], on every entry point including
-    /// [`EncodeImage::encode_to_vec`]. Two lengths are refused: one **below 8 bytes**, the size of
-    /// a JUMBF box header, which could not hold even an empty manifest store's outermost box; and
-    /// one so large that the framed box exceeds what a buffer can hold. Neither is merely
+    /// *encode* that follows, on every entry point including [`EncodeImage::encode_to_vec`]. This
+    /// crate refuses two lengths, both as [`Error::InvalidInput`]: one **below 8 bytes**, the size
+    /// of a JUMBF box header, which could not hold even an empty manifest store's outermost box;
+    /// and one so large that the framed box exceeds what a buffer can hold. Neither is merely
     /// documented as a precondition, because in the release profile a downstream consumer builds
     /// with, the second wrapped silently and produced a well-formed AVIF whose C2PA box no locator
     /// — this crate's included — could find, while just below the wrap it panicked instead.
     ///
-    /// Every `len` in between is written as asked. What remains beyond this crate's reach is the
-    /// allocator's: a reservation the machine has no memory for aborts, as any oversized
-    /// allocation in Rust does.
+    /// A **third** refusal sits between them and comes from the container writer, not from here: a
+    /// top-level box carries a 32-bit size field, so [`gamut_isobmff::write`] rejects a
+    /// `ContentProvenanceBox` at or beyond 4 GiB. That arrives as
+    /// [`Error::Unsupported`](gamut_core::Error::Unsupported) attributed to `gamut-isobmff`, and
+    /// it is the encoder's effective ceiling: on this framing the largest `len` that clears it is
+    /// `4_294_967_250`, and `4_294_967_251` is refused. Widening this crate's own ceiling to that
+    /// bound, so the refusal arrives as an `InvalidInput` naming AVIF, is issue #576.
+    ///
+    /// Every `len` below that bound is written as asked. What remains beyond this crate's reach is
+    /// the allocator's: a reservation the machine has no memory for aborts, as any oversized
+    /// allocation in Rust does — measurably so just under the 4 GiB bound, where the writer's copy
+    /// of the payload into the output buffer needs twice the slot.
     ///
     /// The *read* side is deliberately more permissive: it reports a degenerate slot it genuinely
     /// finds rather than hiding it, since those bytes exist and some other writer put them there.

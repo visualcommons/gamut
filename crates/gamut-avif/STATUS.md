@@ -63,11 +63,16 @@ object-safe `EncodeImage` entry point is untouched. libavif and dav1d decode a f
 box to the same pixels as one without.
 
 `with_c2pa_reserved` is an infallible builder, so an unusable `len` is refused by the **encode**
-that follows, as `Error::InvalidInput`, on every entry point including `EncodeImage::encode_to_vec`:
-below 8 bytes (the JUMBF `LBox`/`TBox` header a manifest store opens with, so a shorter slot could
-never hold one) and above what a buffer can hold. Unchecked, the second was worse than a panic —
-the release profile a downstream consumer builds with wrapped the framing addition and emitted a
-well-formed AVIF whose C2PA box no locator, this crate's included, could find. The **read** side
+that follows, on every entry point including `EncodeImage::encode_to_vec`. This crate refuses two
+lengths as `Error::InvalidInput`: below 8 bytes (the JUMBF `LBox`/`TBox` header a manifest store
+opens with, so a shorter slot could never hold one) and above what a buffer can hold. Unchecked,
+the second was worse than a panic — the release profile a downstream consumer builds with wrapped
+the framing addition and emitted a well-formed AVIF whose C2PA box no locator, this crate's
+included, could find. A **third** refusal sits between them and comes from `gamut-isobmff`, not
+from here: a top-level box carries a 32-bit size field, so the container writer rejects a
+`ContentProvenanceBox` at or beyond 4 GiB as `Error::Unsupported`. That is the effective ceiling —
+measured, the largest `len` that clears it is `4_294_967_250` and `4_294_967_251` is refused —
+and whether this crate should own that bound with its own error is **#576**. The **read** side
 makes no such demand and reports a degenerate slot it genuinely finds, with its true range: strict
 in what it writes, honest about what it reads. See the C2PA note under section L for the five
 recorded limits.
