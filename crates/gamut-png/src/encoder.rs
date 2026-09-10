@@ -217,6 +217,139 @@ impl core::fmt::Display for MetadataNotice {
     }
 }
 
+/// One rung of the encoder's size/time ladder: a named setting for all five of the knobs that
+/// trade encoding time for output size (issue #484).
+///
+/// The knobs — [`with_compression`](PngEncoder::with_compression),
+/// [`with_effort`](PngEncoder::with_effort), [`with_filter`](PngEncoder::with_filter),
+/// [`with_optimal_parse_limit`](PngEncoder::with_optimal_parse_limit) and
+/// [`with_auto_reduce`](PngEncoder::with_auto_reduce) — are independent, and nothing mapped one
+/// choice onto a sensible combination of them: a caller wanting the smallest file had to know that
+/// it means [`Level::Best`] *and* [`FilterStrategy::BruteForce`] *and* auto-reduce. A rung is that
+/// knowledge, named. [`with_preset`](PngEncoder::with_preset) applies one.
+///
+/// # What a rung does not touch
+///
+/// [`with_transparent_cleanup`](PngEncoder::with_transparent_cleanup) is deliberately absent from
+/// every rung. It is this crate's one *lossy* knob — it rewrites stored samples no decoder renders
+/// — and a dial named for effort must never be the thing that silently changes what a file stores.
+/// Enable it beside a rung when you want it. Ancillary chunks, metadata and pushed backends are
+/// untouched for the same reason: they are what the file *says*, not how hard the encoder worked.
+///
+/// # Choosing a rung, not a setting
+///
+/// The rungs are the contract; which knob values each one selects is not, and may be re-tuned as
+/// this crate's corpus grows. Two things are fixed: [`Preset::Balanced`] encodes byte-identically
+/// to a default [`PngEncoder`], and the ladder is ordered — no rung produces a larger file than
+/// the rung above it on this crate's corpus (`crates/gamut-png/tests/effort.rs`, and `STATUS.md`
+/// for the measured table).
+///
+/// The discriminants are a permanent, append-only part of the contract: they are what
+/// [`level`](Self::level) and [`from_level`](Self::from_level) round trip, and what a numeric CLI
+/// or FFI knob carries. Non-exhaustive, so a later rung is not a breaking change — match with a
+/// wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum Preset {
+    /// Level 0 — encode quickly and accept a larger file: greedy matching and no filter search.
+    Fast = 0,
+    /// Level 1 — what a default [`PngEncoder`] already does, and the balanced speed/size point.
+    #[default]
+    Balanced = 1,
+    /// Level 2 — the optimal parse and lossless reduction, still on one filter heuristic.
+    Small = 2,
+    /// Level 3 — every knob at its size-optimal setting, including the whole-image filter search.
+    /// Slowest by a wide margin; intended for write-once assets where size dominates.
+    Smallest = 3,
+}
+
+/// The knob values one [`Preset`] rung selects.
+///
+/// Private, and exhaustively destructured by [`PngEncoder::with_preset`], so adding a knob to the
+/// ladder fails to compile until every rung says what it does with it.
+#[derive(Debug, Clone, Copy)]
+struct PresetKnobs {
+    level: Level,
+    effort: u8,
+    filter: FilterStrategy,
+    optimal_parse_limit: usize,
+    auto_reduce: bool,
+}
+
+impl Preset {
+    /// The ladder level (`0..=3`) this rung selects, lower being faster.
+    #[must_use]
+    pub const fn level(self) -> u8 {
+        self as u8
+    }
+
+    /// The [`Preset`] for a ladder level, or `None` if `level` is outside `0..=3`.
+    ///
+    /// The inverse of [`Preset::level`]; handy for wiring up a numeric CLI flag.
+    #[must_use]
+    pub const fn from_level(level: u8) -> Option<Self> {
+        Some(match level {
+            0 => Self::Fast,
+            1 => Self::Balanced,
+            2 => Self::Small,
+            3 => Self::Smallest,
+            _ => return None,
+        })
+    }
+
+    /// The knob values this rung composes — the ladder's one definition of itself.
+    const fn knobs(self) -> PresetKnobs {
+        match self {
+            // Greedy matching, and one fixed filter rather than a per-row search.
+            //
+            // `Paeth` and not `FilterStrategy::None`, which is the obvious guess and is measurably
+            // wrong: skipping the filter hands DEFLATE a stream so much larger that the compressor
+            // loses more time than the filter pass saves. Over the corpus in `tests/effort.rs`,
+            // `None` was both the **largest** result (46 267 bytes against 17 530) and *slower*
+            // than the fixed Paeth predictor — a dominated candidate, not a trade. `Fixed(Paeth)`
+            // in turn dominates `MinSumAbs` here (smaller *and* faster), and beats a fixed `Up`
+            // on size; see `STATUS.md`.
+            Self::Fast => PresetKnobs {
+                level: Level::Fast,
+                effort: 0,
+                filter: FilterStrategy::Fixed(FilterType::Paeth),
+                optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
+                auto_reduce: false,
+            },
+            // Deliberately spelled out rather than read back from `PngEncoder::new`: that the two
+            // agree is a claim `the_balanced_rung_is_a_default_encoder` tests, not a tautology
+            // this function arranges.
+            Self::Balanced => PresetKnobs {
+                level: Level::Default,
+                effort: DeflateEncoder::DEFAULT_EFFORT,
+                filter: FilterStrategy::MinSumAbs,
+                optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
+                auto_reduce: false,
+            },
+            // The two structural wins — the optimal parse and lossless reduction — without the
+            // whole-image filter search, which costs one full DEFLATE per candidate.
+            Self::Small => PresetKnobs {
+                level: Level::Best,
+                effort: DeflateEncoder::DEFAULT_EFFORT,
+                filter: FilterStrategy::MinSumAbs,
+                optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
+                auto_reduce: true,
+            },
+            // Every knob at its size-optimal end, derived rather than chosen: `zopfli`'s own
+            // refinement budget of 15, the full brute-force filter search, and an unbounded span
+            // so one cost model covers the whole filtered stream however large the image.
+            Self::Smallest => PresetKnobs {
+                level: Level::Best,
+                effort: 15,
+                filter: FilterStrategy::BruteForce,
+                optimal_parse_limit: usize::MAX,
+                auto_reduce: true,
+            },
+        }
+    }
+}
+
 /// A reusable PNG encoder.
 #[derive(Debug, Clone)]
 pub struct PngEncoder {
@@ -287,6 +420,40 @@ impl PngEncoder {
     pub fn push_backend(&mut self, backend: impl IdatDeflater + 'static) -> &mut Self {
         self.backends
             .push(std::sync::Arc::new(std::sync::Mutex::new(backend)));
+        self
+    }
+
+    /// Sets all five size/time knobs at once from a [`Preset`] rung — the composed effort dial
+    /// (issue #484).
+    ///
+    /// A plain setter, not a mode: it assigns the same fields the individual `with_*` knobs do, so
+    /// a later call overrides the rung and an earlier one is overridden by it. `with_preset` last
+    /// is "this rung"; a knob after it is "this rung, except". It leaves everything the rung does
+    /// not name — ancillary chunks, metadata, pushed backends and
+    /// [`with_transparent_cleanup`](Self::with_transparent_cleanup) — exactly as it found them.
+    ///
+    /// ```
+    /// use gamut_png::{PngEncoder, Preset};
+    ///
+    /// // The smallest file this crate can produce, with the one lossy knob added on top.
+    /// let encoder = PngEncoder::new()
+    ///     .with_preset(Preset::Smallest)
+    ///     .with_transparent_cleanup(true);
+    /// ```
+    #[must_use]
+    pub fn with_preset(mut self, preset: Preset) -> Self {
+        let PresetKnobs {
+            level,
+            effort,
+            filter,
+            optimal_parse_limit,
+            auto_reduce,
+        } = preset.knobs();
+        self.level = level;
+        self.effort = effort;
+        self.filter = filter;
+        self.optimal_parse_limit = optimal_parse_limit;
+        self.auto_reduce = auto_reduce;
         self
     }
 
@@ -2007,6 +2174,26 @@ mod tests {
             "the limit did not reach the IDAT deflate: both spans encoded to {} bytes",
             one_span.len()
         );
+    }
+
+    #[test]
+    fn every_preset_level_round_trips_and_the_ladder_is_contiguous() {
+        // `from_level` is the mechanical enumeration of the ladder — `tests/effort.rs` walks it
+        // from 0 until it yields `None`, so the rungs must be contiguous from 0 and the first
+        // gap must be the end. Extending the ladder without extending this range fails here.
+        for level in 0..=3u8 {
+            let preset = Preset::from_level(level).expect("0..=3 is in range");
+            assert_eq!(preset.level(), level, "level {level} does not round trip");
+        }
+        assert_eq!(Preset::from_level(4), None, "the ladder ends at 3");
+        assert_eq!(Preset::from_level(u8::MAX), None);
+    }
+
+    #[test]
+    fn the_default_preset_is_the_balanced_rung() {
+        // `Preset::default()` is what a `#[derive(Default)]` config struct or an unset FFI field
+        // lands on, and it must be the rung that changes nothing.
+        assert_eq!(Preset::default(), Preset::Balanced);
     }
 
     #[test]
