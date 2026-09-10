@@ -113,7 +113,9 @@ Dependency edges (a crate depends on those to its right):
   never as a `#[mutants::skip]` attribute in source: one reviewable list beats a scatter, and a
   glob may exclude a path but never a live code path. Before paying to kill a survivor, ask
   whether the mutated expression is observable at all — a capacity hint or a discarded return
-  value is not — and if you buy the signal anyway, record what it cost. The gate is blind to
+  value is not — and if you buy the signal anyway, record what it cost. Never narrow a contract
+  to make a mutant assertable: a bound the format defines outranks the bound the suite can
+  reach. The gate is blind to
   everything it cannot mutate: a match arm that is *missing*, a literal or `const` (mutating a
   guard's operand is not in the tool's vocabulary), and a single alternative of an or-pattern
   (only whole arms are deleted, so assert each alternative separately). Completeness against the

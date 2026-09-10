@@ -126,6 +126,14 @@ none of these can be killed by any test, because nothing depends on them. That i
 delete the expression, not to test harder — and where deleting it costs something (an extra
 allocation, say), record the cost where the code is.
 
+**Never narrow a contract to make a mutant killable.** A limit that exists because the format
+defines it — a nesting depth, a size cap, a table length — is not a knob for test assertability.
+Lowering one so its boundary comes within reach of the suite changes what the crate accepts or
+emits, and an encoder narrowed that way can end up writing a file its own reader refuses. If a
+spec's bound is out of the suite's reach, reach it with a fixture or an internal seam, or take the
+exclusion and write the argument down. The contract is the deliverable; the gate is the
+instrument, and an instrument that cannot see a bound is not a reason to move it.
+
 **Verify a hand-applied mutant the way the tool does.** Commit first, so `git diff` shows exactly
 the mutation and nothing else; apply the expression verbatim from the `--list` line; run the whole
 package suite (`test_workspace = false` — the workspace suite is not what scored it); and re-read
