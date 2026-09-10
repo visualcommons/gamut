@@ -89,13 +89,18 @@ impl PngPalette {
         if usize::from(index) >= self.rgb.len() {
             return None;
         }
-        Some(self.alpha.get(usize::from(index)).copied().unwrap_or(255))
+        Some(
+            self.alpha
+                .get(usize::from(index))
+                .copied()
+                .unwrap_or(OPAQUE),
+        )
     }
 
     /// Whether any entry is not fully opaque (i.e. the palette carries transparency).
     #[must_use]
     pub fn has_transparency(&self) -> bool {
-        self.alpha.iter().any(|&alpha| alpha != 255)
+        self.alpha.iter().any(|&alpha| alpha != OPAQUE)
     }
 
     /// Always `false` — a palette has at least one entry (kept for API completeness).
