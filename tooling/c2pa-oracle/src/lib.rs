@@ -37,12 +37,23 @@ pub enum OracleError {
     /// c2pa-rs refused an operation. Carries its error unchanged: the reference implementation's
     /// own classification is the diagnostic, so it is never re-coded into one of ours.
     C2pa(c2pa::Error),
-    /// A gamut crate refused to produce or read the asset the oracle asked for. Raised only by a
-    /// caller's closure, never by this crate.
+    /// The asset side of the differential went wrong: a gamut crate refused to produce or read
+    /// what the oracle asked for, or the asset it produced does not fit what c2pa-rs signed.
+    /// Raised by a caller's closure, and by [`reserve_then_fill`] when a signed store and the slot
+    /// reserved for it are not the same length.
     Asset(String),
     /// A composed `ContentProvenanceBox` carried no JUMBF superbox: no [`JUMBF_SUPERBOX_TYPE`] was
     /// found in it at all. Only [`split_composed_box`] raises this.
     NoJumbfSuperbox,
+    /// A JUMBF superbox header is present, but the length it declares cannot be read: its
+    /// `LBox`/`XLBox` fields are truncated, `LBox` is one of the values ISO box syntax leaves
+    /// undefined (2..=7, all shorter than the 8-byte header they sit in), or the declared length
+    /// does not fit this platform's `usize`. Carries which of those it was.
+    ///
+    /// This exists so the length is never *guessed*. A span silently derived from an
+    /// unrepresentable `LBox` would be an oracle handing gamut a wrong answer and calling it a
+    /// reference one; see [`declared_store_len`].
+    UnusableSuperboxLength(&'static str),
 }
 
 impl std::fmt::Display for OracleError {
@@ -52,6 +63,9 @@ impl std::fmt::Display for OracleError {
             Self::Asset(message) => write!(f, "asset: {message}"),
             Self::NoJumbfSuperbox => {
                 f.write_str("composed ContentProvenanceBox carries no JUMBF superbox")
+            }
+            Self::UnusableSuperboxLength(what) => {
+                write!(f, "JUMBF superbox declares no usable length: {what}")
             }
         }
     }
@@ -174,15 +188,22 @@ impl ComposedBox {
 /// The returned offset is therefore an *independent* claim about where the store begins, which is
 /// what makes "gamut reports the same range" a differential rather than a tautology.
 ///
+/// A `jumb` in the first four bytes cannot be a superbox type — there would be no room for the
+/// `LBox` in front of it — so the search **continues past** one rather than giving up on it. That
+/// costs nothing on today's fixtures, where the framing ahead of the store is fixed; it matters
+/// the moment this crate is pointed at a container whose store follows arbitrary bytes.
+///
 /// # Errors
 ///
 /// [`OracleError::NoJumbfSuperbox`] if no `jumb` box type appears at or after offset 4.
 pub fn find_jumbf_superbox(buffer: &[u8]) -> Result<usize> {
     buffer
         .windows(JUMBF_SUPERBOX_TYPE.len())
-        .position(|window| window == JUMBF_SUPERBOX_TYPE)
-        .filter(|type_offset| *type_offset >= 4)
-        .map(|type_offset| type_offset - 4)
+        .enumerate()
+        // Offsets 0..4 have no room for an `LBox`, so skip those windows and keep looking.
+        .skip(4)
+        .find(|(_, window)| *window == JUMBF_SUPERBOX_TYPE)
+        .map(|(type_offset, _)| type_offset - 4)
         .ok_or(OracleError::NoJumbfSuperbox)
 }
 
@@ -195,10 +216,11 @@ pub fn find_jumbf_superbox(buffer: &[u8]) -> Result<usize> {
 /// # Errors
 ///
 /// [`OracleError::NoJumbfSuperbox`] if no superbox is found, or if the length it declares runs off
-/// the end of `buffer`.
+/// the end of `buffer`; [`OracleError::UnusableSuperboxLength`] if that length cannot be read at
+/// all (see [`declared_store_len`]).
 pub fn jumbf_superbox_span(buffer: &[u8]) -> Result<Range<usize>> {
     let start = find_jumbf_superbox(buffer)?;
-    let len = declared_store_len(&buffer[start..]).ok_or(OracleError::NoJumbfSuperbox)?;
+    let len = declared_store_len(&buffer[start..])?;
     let end = start
         .checked_add(len)
         .filter(|end| *end <= buffer.len())
@@ -220,15 +242,64 @@ pub fn split_composed_box(composed: Vec<u8>) -> Result<ComposedBox> {
     })
 }
 
-/// The outer JUMBF `LBox` a store declares for itself: its length in bytes, big-endian, read from
-/// the store's own first four bytes. `None` when `store` is shorter than that field.
+/// The total length in bytes the JUMBF superbox at the start of `store` declares for itself.
 ///
 /// This is the bound `gamut-heic`'s locator trims to, so a test can state the length it expects
 /// without borrowing gamut's reading of it.
-#[must_use]
-pub fn declared_store_len(store: &[u8]) -> Option<usize> {
-    let field: [u8; 4] = store.get(..4)?.try_into().ok()?;
-    Some(u32::from_be_bytes(field) as usize)
+///
+/// # The two reserved `LBox` values
+///
+/// A JUMBF box is a JPEG-family *standard box* — `LBox` (4 bytes, big-endian), `TBox` (4 bytes),
+/// then optionally `XLBox` — and C2PA 2.4 §8.4.2.3 spells that syntax out where it defines the
+/// C2PA salt as "a standard box consisting of: a box length (LBox, as a 4-byte big-endian unsigned
+/// integer); a box type (TBox, 4-byte big-endian unsigned integer …)". The same syntax reserves two
+/// `LBox` values, and both are read here rather than taken at face value:
+///
+/// * **`LBox == 0`** — the box runs to the end of the file. `store` begins at the superbox's own
+///   first byte, so that end is the end of `store`, and the declared length is `store.len()`.
+/// * **`LBox == 1`** — the real length is the 8-byte big-endian `XLBox` that follows `TBox`, i.e.
+///   `store[8..16]`, and it counts the whole box including that 16-byte header.
+///
+/// Taking either literally would return 0 or 1 as a length: a wrong span, produced silently, on
+/// the side of the differential whose answers are treated as the reference. `LBox` values 2..=7
+/// are shorter than the header they sit in and describe no box at all, so they are refused rather
+/// than resolved.
+///
+/// No store this crate has seen uses either reserved value — c2pa-rs writes a plain 32-bit `LBox`
+/// — which is exactly why the handling is here rather than assumed away.
+///
+/// # Errors
+///
+/// [`OracleError::UnusableSuperboxLength`] when the `LBox`/`XLBox` fields are truncated, when
+/// `LBox` is 2..=7, or when the declared length does not fit a `usize`.
+pub fn declared_store_len(store: &[u8]) -> Result<usize> {
+    let field: [u8; 4] = store
+        .get(..4)
+        .and_then(|field| field.try_into().ok())
+        .ok_or(OracleError::UnusableSuperboxLength(
+            "the LBox field is truncated",
+        ))?;
+
+    match u32::from_be_bytes(field) {
+        0 => Ok(store.len()),
+        1 => {
+            let field: [u8; 8] = store
+                .get(8..16)
+                .and_then(|field| field.try_into().ok())
+                .ok_or(OracleError::UnusableSuperboxLength(
+                    "LBox is 1 but the XLBox field that carries the length is truncated",
+                ))?;
+            usize::try_from(u64::from_be_bytes(field)).map_err(|_| {
+                OracleError::UnusableSuperboxLength("XLBox does not fit this platform's usize")
+            })
+        }
+        2..=7 => Err(OracleError::UnusableSuperboxLength(
+            "LBox is between 2 and 7, shorter than the LBox+TBox header it is part of",
+        )),
+        lbox => usize::try_from(lbox).map_err(|_| {
+            OracleError::UnusableSuperboxLength("LBox does not fit this platform's usize")
+        }),
+    }
 }
 
 /// What [`reserve_then_fill`] produced.
@@ -362,4 +433,120 @@ pub fn read_with_external_store(
 #[must_use]
 pub fn is_jumbf_not_found(error: &OracleError) -> bool {
     matches!(error, OracleError::C2pa(c2pa::Error::JumbfNotFound))
+}
+
+#[cfg(test)]
+mod tests {
+    //! The JUMBF header reading this crate does *not* borrow from gamut, on the inputs c2pa-rs
+    //! never produces. Everything c2pa-rs does produce is pinned in `tests/` against c2pa-rs
+    //! itself; these are the arms an oracle has to get right before it is pointed at a container
+    //! whose store follows arbitrary bytes.
+
+    use super::{OracleError, declared_store_len, find_jumbf_superbox, jumbf_superbox_span};
+
+    /// A buffer with a stray `jumb` at offset 0 — too early to be a superbox type, since there is
+    /// no room for an `LBox` in front of it — and a genuine `LBox` + `jumb` superbox at offset 12.
+    fn stray_jumb_then_real_superbox() -> Vec<u8> {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(b"jumb"); // offset 0: too early to be a superbox type
+        buffer.extend_from_slice(&[0xAA; 8]); // filler
+        buffer.extend_from_slice(&24u32.to_be_bytes()); // offset 12: the real LBox
+        buffer.extend_from_slice(b"jumb"); // offset 16: the real TBox
+        buffer.extend_from_slice(&[0x11; 16]); // the store's body, to LBox's 24 bytes
+        buffer
+    }
+
+    #[test]
+    fn the_search_continues_past_a_jumb_too_early_to_carry_an_lbox() {
+        assert_eq!(
+            find_jumbf_superbox(&stray_jumb_then_real_superbox()).expect("the real superbox"),
+            12,
+            "a `jumb` in the first four bytes has no room for an `LBox` in front of it, so it must \
+             be skipped and the search continued, not treated as the end of it"
+        );
+    }
+
+    #[test]
+    fn a_span_is_still_found_when_a_stray_jumb_precedes_the_superbox() {
+        assert_eq!(
+            jumbf_superbox_span(&stray_jumb_then_real_superbox()).expect("the real superbox"),
+            12..36,
+        );
+    }
+
+    #[test]
+    fn an_lbox_of_zero_declares_the_rest_of_the_buffer() {
+        let mut store = vec![0u8; 76];
+        store[..4].copy_from_slice(&0u32.to_be_bytes());
+        store[4..8].copy_from_slice(b"jumb");
+
+        assert_eq!(
+            declared_store_len(&store).expect("LBox 0 is a length, not a literal zero"),
+            76,
+            "ISO box syntax reads `LBox = 0` as \"to the end of the file\"; taken literally it \
+             would make the store zero bytes long"
+        );
+    }
+
+    #[test]
+    fn an_lbox_of_one_takes_its_length_from_the_xlbox_field() {
+        let mut store = vec![0u8; 40];
+        store[..4].copy_from_slice(&1u32.to_be_bytes());
+        store[4..8].copy_from_slice(b"jumb");
+        store[8..16].copy_from_slice(&40u64.to_be_bytes());
+
+        assert_eq!(
+            declared_store_len(&store).expect("LBox 1 defers to XLBox"),
+            40,
+            "ISO box syntax reads `LBox = 1` as \"the 8-byte XLBox after TBox holds the length\"; \
+             taken literally it would make the store one byte long"
+        );
+    }
+
+    #[test]
+    fn an_lbox_of_one_without_room_for_an_xlbox_is_refused() {
+        let mut store = vec![0u8; 12];
+        store[..4].copy_from_slice(&1u32.to_be_bytes());
+        store[4..8].copy_from_slice(b"jumb");
+
+        let error = declared_store_len(&store).expect_err("there is no XLBox to read");
+        assert!(
+            error
+                .to_string()
+                .contains("XLBox field that carries the length is truncated"),
+            "the refusal must name the truncated XLBox rather than any other unusable length; got \
+             {error}"
+        );
+    }
+
+    #[test]
+    fn an_lbox_between_two_and_seven_is_refused_rather_than_resolved() {
+        let mut store = vec![0u8; 32];
+        store[..4].copy_from_slice(&7u32.to_be_bytes());
+        store[4..8].copy_from_slice(b"jumb");
+
+        let error = declared_store_len(&store).expect_err("7 is shorter than the header itself");
+        assert!(
+            error
+                .to_string()
+                .contains("shorter than the LBox+TBox header"),
+            "the refusal must name the undersized LBox rather than any other unusable length; got \
+             {error}"
+        );
+    }
+
+    #[test]
+    fn a_declared_length_running_past_the_buffer_is_not_a_span() {
+        let mut buffer = vec![0u8; 32];
+        buffer[..4].copy_from_slice(&4096u32.to_be_bytes());
+        buffer[4..8].copy_from_slice(b"jumb");
+
+        assert!(
+            matches!(
+                jumbf_superbox_span(&buffer),
+                Err(OracleError::NoJumbfSuperbox)
+            ),
+            "a length that runs off the end of the buffer bounds nothing"
+        );
+    }
 }
