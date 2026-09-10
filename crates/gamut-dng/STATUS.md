@@ -351,6 +351,46 @@ crate encoded with before:
 The Adobe DNG SDK validates the output on every fixture the oracle covers (CFA and LinearRaw,
 8- and 16-bit, strips and tiles), so the migration is correctness-neutral.
 
+## Codec benchmark harness (#163)
+
+`cargo bench -p gamut-dng --bench codec` measures **encode and decode throughput across the whole
+shipped codec matrix** — uncompressed, Deflate and lossless JPEG, each for CFA and `LinearRaw`
+photometry — and puts gamut's decode next to the **Adobe DNG SDK's**. (The older `--bench
+compression` is narrower and stays as it is: it answers the #196 question, "which DEFLATE encoder
+should the ZIP path use", on packed payloads.) Fixtures are synthesised in-process, so the harness
+needs no sample corpus and runs by default; the ~178 MiB real-camera submodule behind `mise run
+fetch-dng-samples` is deliberately not a prerequisite.
+
+**What is timed.** The codec call, the allocation and growth of the buffer it produces, and that
+buffer's teardown — the last of those explicitly, because divan would otherwise defer a returned
+value's drop past the timed region, which would charge gamut nothing for freeing a decoded image
+while the SDK's `dng_negative` destructor runs inside its own call. Fixture synthesis, the
+`RawImage`/`CameraProfile` build, and the encode that produces the bytes a decode benchmark reads
+are all outside it. Nothing touches the filesystem.
+
+**Whether the comparison is fair.** Two comparisons are published and their biases point in
+opposite directions, which is what makes the pair usable:
+
+- `decode_dng_*` **favours the SDK, by a margin the harness prints.** Both sides parse the same
+  in-memory bytes: the oracle gained a timed entry point (`decode_dng_in_memory`) that opens no
+  temporary file and skips the FFI export `memcpy`, so the reference implementation is not charged
+  for the shim. What remains is that `DngDecoder::decode` is a *whole-file* decode while
+  `ReadStage1Image` is not — gamut also unpacks IFD 0's uncompressed RGB preview and rebuilds the
+  metadata. The preview's size is exact (`⌊w/2⌋ × ⌊h/2⌋ × 3` against the raw's `w × h × planes ×
+  2`, i.e. 37.5 % of a 16-bit CFA frame), so the fixture table prints it per case. It is not
+  normalised away: gamut exposes no raw-image-only decode entry point, and adding one so a
+  benchmark reads better would be the wrong direction of causation.
+- `decode_lossless_jpeg_*` **favours gamut, by less.** Same bare SOF3 stream in, same interleaved
+  `Vec<u16>` out, no container work either side; the residual bias is the oracle's export path
+  (spool vector → `malloc`d buffer → `Vec`), two memory-bandwidth passes gamut does not pay.
+
+There is no `encode_adobe_sdk`: the oracle shim wraps the SDK's *reader*, not its writer, so no
+reference encode number exists and none is invented. Encode is reported for gamut alone.
+
+**No absolute figures are pinned here.** Unlike the #196 numbers above — a ratio comparison between
+two encoders in the same process, which is robust to a loaded machine — throughput in MB/s is a
+property of the machine that produced it. Run the harness on the box you care about.
+
 ## Deferred / out of scope
 
 Each deferred item plugs into the same IFD-tree/chunk pipeline and oracles the shipped features
