@@ -76,7 +76,7 @@ jobs:
         # third is silent -- a target that is written and committed but never run, with no check
         # anywhere reporting it. Pure text, no cargo, sub-second, which is why it is here and not
         # in lint.
-        run: ./tooling/gamut-fuzz/check-targets.sh
+        run: mise run check-fuzz-matrix
       - name: Check PR commit messages
         # Only PRs have a base..head range; validate just the PR's own commits so the pre-existing
         # non-conventional history on master doesn't fail the check.
@@ -163,7 +163,7 @@ jobs:
       # (docs/testing.md, "Why fuzzing is not in the per-PR gate"). The driven crates are already
       # built by the Clippy step above, so the marginal cost is the targets themselves.
       - name: Fuzz tier compiles
-        run: cargo check --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets
+        run: mise run check-fuzz
       - name: gamut-ffi feature sync
         run: mise run check-ffi-features
       - name: gamut-ffi header sync

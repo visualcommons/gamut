@@ -195,6 +195,25 @@ run = "git submodule update --init --checkout third_party/gamut-dng-samples"
 description = "Coverage-guided fuzzing of the invariants laws; `mise run fuzz <target>`"
 run = "./tooling/gamut-fuzz/run.sh"
 
+# The compile half of the tier above -- the only part of it the per-PR lane can afford, and the
+# same argument `check-dng-real` below makes for the other excluded `tooling/` crate: `gamut-fuzz`
+# is workspace-excluded *and* nothing depends on it, so `clippy --workspace --all-targets` and
+# `test --workspace` never build it, and an API change in gamut-ifd, gamut-tiff, gamut-dng,
+# gamut-isobmff or gamut-heic can break every target while all four required checks stay green.
+# Build-only: no nightly, no sanitizer, no engine, so it stays bounded and reproducible and does
+# not put a coverage-guided run on the pull-request path (docs/testing.md).
+[tasks.check-fuzz]
+description = "Compile the fuzz tier's targets (no nightly, no engine)"
+run = "cargo check --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets"
+
+# The drift guard for the three hand-maintained lists that describe the same target set: the files
+# under `fuzz_targets/`, the `[[bin]]` entries, and `extended.yml`'s fuzz matrix. Missing from the
+# third means the target is written, reviewed, committed -- and never run, silently. Pure text: no
+# cargo, no toolchain, no network, which is why CI runs it in the cheap `Format & Metadata` job.
+[tasks.check-fuzz-matrix]
+description = "Reconcile the fuzz targets across fuzz_targets/, Cargo.toml and extended.yml"
+run = "./tooling/gamut-fuzz/check-targets.sh"
+
 [tasks.test-dng-real]
 description = "Validate gamut-dng against real camera DNGs (issue #174; needs fetch-dng-samples)"
 run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
