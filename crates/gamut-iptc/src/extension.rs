@@ -46,16 +46,18 @@
 //! - a field the model does not name — a vendor extension, or the "any other metadata property"
 //!   the standard explicitly allows an [`ImageRegion`] to carry;
 //! - a field it names but cannot read — a coordinate whose text is not a number, an identifier
-//!   holding a structure where text belongs. Such a field reads as absent, because the typed view
-//!   will not invent a value for it, and is written back unchanged rather than dropped.
+//!   holding a structure where text belongs, a language alternative with no `x-default` entry. Such
+//!   a field reads as absent, because the typed view will not invent a value for it, and is written
+//!   back unchanged rather than dropped.
 //!
 //! What a read-modify-write does change:
 //!
 //! - **field order within a structure**: a structure is re-emitted in the model's field order, with
 //!   the retained fields last. Values, and the relative order of an array's items, are preserved.
-//! - **the other languages of a language alternative**: the model reads one entry and writes it
-//!   back as the only entry, so a `dc:title`-style field carrying `en` and `fr` alongside the
-//!   default keeps only what was read.
+//! - **the other languages of a modelled language alternative**: the model reads the `x-default`
+//!   entry and writes it back as the only entry, so a `dc:title`-style field carrying `en` and `fr`
+//!   alongside the default keeps only the default. (A field with *no* default entry is not read at
+//!   all, so its languages survive verbatim.)
 //! - **an array item of the wrong kind, when the field also holds a right one**: a `Bag` of text
 //!   holding one structure, or a `Bag` of structures holding one text, is read as the items the
 //!   model can take and re-emitted as those. A field holding *only* items of the wrong kind is read
@@ -82,6 +84,9 @@ use crate::photo_metadata::PhotoMetadata;
 use crate::schema::ns;
 
 // --- Reading a structure's field list, tracking what the read consumed ------------------------
+
+/// The language tag of a language alternative's default entry (XMP Part 1 §8.2.2.4).
+const X_DEFAULT: &str = "x-default";
 
 /// A structure's field list under a typed read, remembering which fields the read took a value
 /// from.
@@ -128,12 +133,23 @@ impl<'a> Reader<'a> {
         self.read(ns, name, |value| value.text().map(str::to_owned))
     }
 
-    /// The `x-default` (first) entry of the language-alternative field named `ns:name`, tolerating
-    /// a plain simple value.
+    /// The `x-default` entry of the language-alternative field named `ns:name`, tolerating a plain
+    /// simple value.
+    ///
+    /// The entry is found by its `xml:lang` qualifier, compared case-insensitively as XMP Part 1
+    /// §8.2.2.4 requires — the same match [`XmpMeta::get_lang_alt`] makes on a top-level property.
+    /// An alternative list with no default entry is *not* read: it reads as absent and is kept
+    /// verbatim, rather than having another language relabelled as the default.
     fn lang_alt(&mut self, ns: &str, name: &str) -> Option<String> {
         self.read(ns, name, |value| {
             match value {
-                XmpValue::Array(XmpArray::Alt(items)) => items.iter().find_map(XmpItem::text),
+                XmpValue::Array(XmpArray::Alt(items)) => items
+                    .iter()
+                    .find(|item| {
+                        item.lang()
+                            .is_some_and(|l| l.eq_ignore_ascii_case(X_DEFAULT))
+                    })
+                    .and_then(XmpItem::text),
                 simple => simple.text(),
             }
             .map(str::to_owned)
@@ -1538,7 +1554,7 @@ mod tests {
             "Nested",
             text_value("v"),
         )]);
-        let cases: [Trip; 2] = [
+        let cases: [Trip; 3] = [
             // An identifier holding a structure where text belongs.
             (
                 "rId",
@@ -1559,6 +1575,17 @@ mod tests {
                 )]),
                 |v| Some(RegionBoundaryPoint::from_xmp(v)?.to_xmp()),
             ),
+            // A language alternative with no `x-default` entry: relabelling another language as
+            // the default would destroy the only text the field has.
+            (
+                "AOTitle",
+                XmpValue::Structured(vec![XmpProperty::new(
+                    ns::IPTC_EXT,
+                    "AOTitle",
+                    XmpValue::Array(XmpArray::Alt(vec![XmpItem::lang_text("fr", "Tournesols")])),
+                )]),
+                |v| Some(ArtworkOrObject::from_xmp(v)?.to_xmp()),
+            ),
         ];
         for (name, input, round_trip) in cases {
             assert_eq!(
@@ -1574,6 +1601,23 @@ mod tests {
             structured,
         )]));
         assert_eq!(region.and_then(|r| r.identifier), None);
+    }
+
+    #[test]
+    fn a_language_alternative_is_read_by_its_tag_not_its_position() {
+        // A conforming writer puts `x-default` first, but nothing in the graph enforces it. Reading
+        // by position would take the French text and re-emit it labelled as the default.
+        let value = XmpValue::Structured(vec![XmpProperty::new(
+            ns::IPTC_EXT,
+            "AOTitle",
+            XmpValue::Array(XmpArray::Alt(vec![
+                XmpItem::lang_text("fr", "Tournesols"),
+                XmpItem::lang_text("X-Default", "Sunflowers"),
+            ])),
+        )]);
+        let art = ArtworkOrObject::from_xmp(&value).unwrap();
+        // The tag match is case-insensitive, as XMP Part 1 §8.2.2.4 requires.
+        assert_eq!(art.title.as_deref(), Some("Sunflowers"));
     }
 
     #[test]
