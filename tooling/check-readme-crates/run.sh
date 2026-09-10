@@ -5,7 +5,7 @@
 # crates (gamut-codec-abi, gamut-dng, gamut-jpeg, gamut-tonemap) had no row at all.
 #
 # This guard checks what is mechanical about the table -- its *membership*, the *shape* of a row,
-# and that the table is a table -- and nothing about the prose in it:
+# that the table is a table, and the handful of claim forms `cargo metadata` can decide:
 #
 #   * every workspace crate has a row, so a new crate cannot be added without documenting it;
 #   * every row names a crate that still exists, so a renamed or deleted crate cannot be left
@@ -19,46 +19,66 @@
 #   * a row inside an HTML comment or a fenced code block is not a row. Both render as something
 #     other than a table cell, so a crate documented only there is documented nowhere, and the
 #     membership check must see it as missing rather than as present;
-#   * the first crate row is *immediately* preceded by a GFM delimiter row, which is itself
-#     immediately preceded by a header row with the same number of columns, and neither is
-#     indented four spaces or more. All three parts are what make the lines around them a table at
-#     all: remove any one and every row renders as a paragraph of literal pipes while each row's
-#     bytes stay intact, which is a table that documents nothing. Adjacency is the load-bearing
-#     word -- "a delimiter exists somewhere above" is satisfied by a blank line after it, by an
-#     unrelated table earlier in the section, and by a header that does not agree with it, each of
-#     which renders as no table.
+#   * EVERY crate row in the section lives inside ONE rendered table. A table is a header row
+#     immediately followed by a GFM delimiter row of the same width, neither indented four spaces
+#     or more, and it ends at the first line that is not a table row. That is a claim about the
+#     whole section rather than about the first row's two neighbours: a blank line between two
+#     crate rows, a decoy table earlier in the section donating its head, a deleted delimiter, a
+#     blanked header and a header of the wrong width all leave some or all of the rows rendering
+#     as a paragraph of literal pipes while each row's bytes stay intact, and all of them fail
+#     here.
+#
+# Three claim forms in a cell are checked against `cargo metadata`, and they are the only prose
+# this guard reads. Each is opt-in: a row that does not write one claims nothing and is not
+# checked. Write a claim a reader could check against cargo in one of these forms, or do not
+# write it -- a hand-maintained list of crates is exactly the defect this file exists to catch,
+# one level down:
+#
+#   * a `vN` or `vN.M` token -- the FIRST one in the row must agree with that crate's own
+#     `Cargo.toml` version, to the precision written (`v2` checks the major, `v0.2` the major and
+#     minor). This is what makes a version the most checkable thing a cell can carry;
+#   * `consumed by` followed by backticked crate names -- that set must be exactly the workspace
+#     crates declaring a normal or build dependency on the row's crate. Dev-dependencies are
+#     excluded, as they are for `check-release-deps`: they are not what a consumer links;
+#   * `always-on dependency`/`always-on dependencies` followed by backticked crate names -- that
+#     set must be exactly the workspace crates the row's crate depends on non-optionally. Naming
+#     none asserts that there are none.
+#
+# In all three the name list ends at the first character that is not a backticked name, a comma,
+# a colon, a space or the word "and", so ordinary prose may follow it on the same line.
 #
 # CRLF input is accepted: a trailing carriage return is removed from every line before anything is
 # matched, so a CRLF README does not silently lose its heading and report itself as rowless.
 #
-# The row pattern is deliberately narrow: a crate row is `| `name` | ... | ... |` with the pipe in
-# column 1 and the crate name alone inside a code span. Legal Markdown this does not recognise --
-# an omitted leading or trailing pipe, an indented row, a linked or annotated crate cell -- is
-# reported as a *missing crate*, and the failure message says so, because widening the pattern is
-# how a phantom row gets in. Narrow and loud beats wide and quiet.
+# The `## Crates` heading is matched in every form CommonMark gives it: any ATX level-2 heading
+# with the text `Crates`, indented up to three spaces, with or without a closing `##` sequence, or
+# the setext form underlined with dashes. Any level-1 or level-2 heading ends the section; a
+# `###` or deeper heading does not, so a sub-table inside the section is still part of it.
 #
-# One bypass is known and left open, and is stated rather than covered by the word "table": a blank
-# line inserted *between* two crate rows splits the table in two, and every row below the blank
-# renders as a paragraph while still satisfying membership, shape and the delimiter checks -- only
-# the FIRST crate row's header/delimiter context is asserted. Closing it means asserting that the
-# crate rows are contiguous, which would reject a legal table that interleaves a non-crate row
-# (a `| **Codecs** | | |` separator, say), so it stays a reader's job.
-#
-# What is deliberately NOT checked, and why:
-#   * The *wording* of the Purpose and Status cells. They are prose a human maintains, and their
-#     authority is **the crate's own source** -- the code that ships. No single file outranks it:
-#     `STATUS.md` can list a shipped module as deferred (issue #545) and a module doc can defer a
-#     capability the crate's own `EncodeImage` impls already provide (issue #560) -- which is why
-#     the `gamut-avif` row states 8/10/12-bit encode against a doc comment that still calls
-#     10/12-bit deferred. `lib.rs`, `Cargo.toml` and `STATUS.md` are where to look first, in that
-#     order, but each is a summary and a row must be true of the crate, not faithful to a file.
-#     A text gate over the cells would fossilise a particular phrasing, and a generated table
-#     would move prose a human writes into a generator -- so staleness of a row's *text* stays a
-#     review concern, not a lint.
+# What is deliberately NOT checked, and why. These are limitations, not oversights, and this
+# comment is the one place they are written down:
+#   * The *wording* of the Purpose and Status cells, beyond the three claim forms above. They are
+#     prose a human maintains, and their authority is **the crate's own source** -- the code that
+#     ships. No single file outranks it: `STATUS.md` can list a shipped module as deferred (issue
+#     #545) and a module doc can defer a capability the crate's own `EncodeImage` impls already
+#     provide (issue #560) -- which is why the `gamut-avif` row states 8/10/12-bit encode against
+#     a doc comment that still calls 10/12-bit deferred. `lib.rs`, `Cargo.toml` and `STATUS.md`
+#     are where to look first, in that order, but each is a summary and a row must be true of the
+#     crate, not faithful to a file. A text gate over the cells would fossilise a particular
+#     phrasing, and a generated table would move prose a human writes into a generator.
 #   * The header row's own text. Its *presence* directly above the delimiter and its *column
 #     count* are asserted; what the three column headings are called is prose like any other cell.
-#   * The version. `mise run versions` already reports it, and the README deliberately states
-#     what each crate *is* rather than pinning a number that release-plz bumps.
+#   * Anything that needs the network. Whether crates.io serves the version a manifest declares
+#     cannot be decided here, so the table states the manifest version and [Releases](#releases)
+#     states the gaps.
+#   * A row whose crate cell is written in legal Markdown this pattern does not recognise -- an
+#     omitted leading OR trailing pipe, a linked or annotated crate cell, prose after the code
+#     span. Each is reported as a *missing crate*, and the failure message says so, because
+#     widening the pattern is how a phantom row gets in. Narrow and loud beats wide and quiet.
+#   * Whether an HTML element in a cell renders. Every tag is treated as rendering nothing, so a
+#     cell whose only content is `<img ...>` is reported empty. Telling a replaced element from a
+#     wrapper needs an HTML model, and a crates-table cell that says nothing in plain text
+#     documents nothing to a reader of the file.
 set -euo pipefail
 
 # With no argument, check the repository's own README from wherever the task was invoked. With
@@ -80,10 +100,10 @@ test -f "$readme" || {
     exit 1
 }
 
-# One pass over the file emits every stream -- `NAME` for membership, `BAD` for shape, `DELIM` for
-# the table delimiter -- so the checks can never disagree about which lines are crate rows.
-# Bounded to the "## Crates" section so the README's other tables (the `mise run ...` command
-# table) can never be mistaken for a crate row.
+# One pass over the file emits every stream -- `NAME` for membership, `BAD` for shape, `ORPHAN`
+# and `SPLIT` for the table context, `VER`/`CONS`/`ALWAYS` for the claim forms -- so the checks
+# can never disagree about which lines are crate rows. Bounded to the "## Crates" section so the
+# README's other tables (the `mise run ...` command table) can never be mistaken for a crate row.
 #
 # LC_ALL=C makes every regexp below byte-wise, which is what the octal escapes assume; the awk
 # is POSIX (no gensub, no interval expressions, dynamic regexps built as strings) so it behaves
@@ -98,22 +118,23 @@ scan="$(
             # ASCII space and every C0/DEL control byte.
             ASCII_BLANK = "[ \001-\037\177]"
             # The UTF-8 encodings of the Unicode blanks a Markdown renderer shows as nothing:
-            # U+00A0, U+1680, U+2000-U+200D, U+2028, U+2029, U+202F, U+205F, U+2060, U+3000 and
+            # U+00A0, U+1680, U+2000-U+200F, U+2028, U+2029, U+202F, U+205F, U+2060, U+3000 and
             # U+FEFF. Without this fold a single non-breaking space reconstructs exactly the
             # degenerate row the shape check exists to reject.
-            UNI_BLANK = "\302\240|\341\232\200|\342\200[\200-\215\250\251\257]"
+            UNI_BLANK = "\302\240|\341\232\200|\342\200[\200-\217\250\251\257]"
             UNI_BLANK = UNI_BLANK "|\342\201[\237\240]|\343\200\200|\357\273\277"
             # The same blanks written as HTML character references, which a Markdown renderer
-            # resolves before it shows the cell. This list is the common set, NOT an exhaustive
-            # one -- HTML5 names some 2000 references and a decimal or hex form exists for every
-            # code point, so an author determined to write an invisible cell can always find a
-            # spelling this misses. It closes the spellings a human actually reaches for.
+            # resolves before it shows the cell. The named list is the common set, NOT an
+            # exhaustive one -- HTML5 names some 2000 references -- but the numeric lists below
+            # cover every code point the two lists above name, in decimal and in hex, with
+            # leading zeros allowed. A named reference whose numeric twin was missing was the
+            # whole hole: `&lrm;` folded while `&#8206;` did not.
             ENT_BLANK = "&(nbsp|NonBreakingSpace|ensp|emsp|emsp13|emsp14|numsp|puncsp|thinsp"
             ENT_BLANK = ENT_BLANK "|hairsp|VeryThinSpace|MediumSpace|ThickSpace|ThinSpace"
             ENT_BLANK = ENT_BLANK "|zwnj|zwj|ZeroWidthSpace|NegativeThinSpace|NoBreak|lrm|rlm);"
-            ENT_BLANK = ENT_BLANK "|&#(160|8194|8195|8196|8197|8199|8200|8201|8202|8203|8204"
-            ENT_BLANK = ENT_BLANK "|8205|8232|8233|8239|8287|8288|12288|65279);"
-            ENT_BLANK = ENT_BLANK "|&#[xX]0*([Aa]0|1680|200[0-9A-Da-d]|202[8-9Ff]|205[Ff]"
+            ENT_BLANK = ENT_BLANK "|&#0*(160|5760|819[2-9]|820[0-7]|8232|8233|8239|8287|8288"
+            ENT_BLANK = ENT_BLANK "|12288|65279);"
+            ENT_BLANK = ENT_BLANK "|&#[xX]0*([Aa]0|1680|200[0-9A-Fa-f]|202[89Ff]|205[Ff]"
             ENT_BLANK = ENT_BLANK "|2060|3000|[Ff][Ee][Ff][Ff]);"
         }
 
@@ -138,6 +159,12 @@ scan="$(
             return out
         }
 
+        function trim(s) {
+            sub(/^[ \t]+/, "", s)
+            sub(/[ \t]+$/, "", s)
+            return s
+        }
+
         # A closing fence: the opening fence character, repeated at least as many times, and
         # nothing else on the line.
         function is_fence_close(line,   m, i) {
@@ -151,10 +178,45 @@ scan="$(
             return 1
         }
 
+        # The level of an ATX heading (1-6), with its text left in `htext`, or 0. Up to three
+        # spaces of indentation is legal; four is an indented code block. A closing run of `#`
+        # separated from the text by whitespace is a closing sequence and is not text, so
+        # `## Crates ##` is the heading `Crates`, while `## Crates#` is not.
+        function atx_level(line,   m, lvl, t) {
+            m = line
+            if (m ~ /^    /) { return 0 }
+            sub(/^ */, "", m)
+            lvl = 0
+            while (substr(m, lvl + 1, 1) == "#") { lvl++ }
+            if (lvl < 1 || lvl > 6) { return 0 }
+            t = substr(m, lvl + 1)
+            if (t != "" && t !~ /^[ \t]/) { return 0 }
+            t = trim(t)
+            if (t ~ /(^|[ \t])#+$/) {
+                sub(/[ \t]*#+$/, "", t)
+                t = trim(t)
+            }
+            htext = t
+            return lvl
+        }
+
+        # 1 for a setext `===` underline, 2 for a `---` one, 0 otherwise. Whether it underlines
+        # anything is the caller`s business: only a paragraph line can be underlined.
+        function setext_rule(line,   m) {
+            m = line
+            if (m ~ /^    /) { return 0 }
+            sub(/^ */, "", m)
+            sub(/[ \t]*$/, "", m)
+            if (m ~ /^=+$/) { return 1 }
+            if (m ~ /^-+$/) { return 2 }
+            return 0
+        }
+
         # Splits a pipe-delimited line into `tcell[2..]` and returns the cell count, or 0 if the
-        # line is not a table row at all. Four or more leading spaces is an indented code block,
-        # not a table -- so an indented delimiter is no delimiter. An escaped pipe is content, so
-        # it is swapped out before the split here too, exactly as the row shape check does.
+        # line is not a table row at all. Up to three spaces of indentation is legal; four or more
+        # is an indented code block, not a table -- so an indented delimiter is no delimiter. An
+        # escaped pipe is content, so it is swapped out before the split here too, exactly as the
+        # row shape check does.
         function table_cells(line,   t, k, i) {
             t = line
             if (t ~ /^    /) { return 0 }
@@ -204,10 +266,48 @@ scan="$(
             return c == ""
         }
 
-        # Remembers the last two lines that a renderer would see as block syntax, so the first
-        # crate row can be judged against the two lines directly above it. A line inside a fenced
-        # block is remembered as empty: whatever it spells, it is not table syntax.
-        function shift(seen) { prev2 = prev1; prev1 = seen }
+        # A paragraph line: something a setext rule below it would turn into a heading. Not blank,
+        # not a table row, not itself an ATX heading.
+        function is_para(line) {
+            if (trim(line) == "") { return 0 }
+            if (table_cells(line) > 0) { return 0 }
+            if (atx_level(line) > 0) { return 0 }
+            return 1
+        }
+
+        # Collects the backticked crate names that follow a claim marker, stopping at the first
+        # character that is neither a name, a separator, nor the word "and" -- so prose may follow
+        # the list on the same line.
+        function name_list(rest,   out, tok) {
+            out = ""
+            while (1) {
+                sub(/^[ ,:]+/, "", rest)
+                if (rest ~ /^and[ ]/) { rest = substr(rest, 4); continue }
+                if (rest !~ /^`[A-Za-z0-9_-]+`/) { return out }
+                match(rest, /^`[A-Za-z0-9_-]+`/)
+                tok = substr(rest, 2, RLENGTH - 2)
+                out = (out == "") ? tok : out " " tok
+                rest = substr(rest, RLENGTH + 1)
+            }
+        }
+
+        # Emits the machine-checkable claims a row makes. Each is opt-in: a row that writes none
+        # claims nothing.
+        function claims(name, text,   s, tok, nxt) {
+            s = " " text
+            while (match(s, /[^A-Za-z0-9_.]v[0-9]+(\.[0-9]+)*/)) {
+                tok = substr(s, RSTART + 2, RLENGTH - 2)
+                nxt = substr(s, RSTART + RLENGTH, 1)
+                s = substr(s, RSTART + RLENGTH)
+                if (nxt !~ /[A-Za-z0-9_]/) { print "VER\t" name "\t" tok; break }
+            }
+            if (match(text, /consumed by/)) {
+                print "CONS\t" name "\t" name_list(substr(text, RSTART + RLENGTH))
+            }
+            if (match(text, /always-on dependenc(y|ies)/)) {
+                print "ALWAYS\t" name "\t" name_list(substr(text, RSTART + RLENGTH))
+            }
+        }
 
         {
             line = $0
@@ -219,83 +319,148 @@ scan="$(
             # row -- until the fence closes.
             if (in_fence) {
                 if (is_fence_close(line)) { in_fence = 0 }
-                shift("")
+                in_table = 0
+                prev = ""
+                prev_para = 0
                 next
             }
 
-            line = strip_comments(line)
+            cur = strip_comments(line)
 
-            if (match(line, /^ *(```+|~~~+)/)) {
-                marker = substr(line, RSTART, RLENGTH)
+            if (match(cur, /^ *(```+|~~~+)/)) {
+                marker = substr(cur, RSTART, RLENGTH)
                 sub(/^ +/, "", marker)
                 fence_char = substr(marker, 1, 1)
                 fence_len = length(marker)
                 in_fence = 1
-                shift("")
+                in_table = 0
+                prev = ""
+                prev_para = 0
                 next
             }
 
-            # A trailing space on an ATX heading is legal and renders identically, so it must not
-            # unmatch the section and report an intact table as rowless.
-            if (line ~ /^## Crates[ \t]*$/) { in_section = 1; shift(""); next }
-            if (line ~ /^## /)        { in_section = 0; shift(""); next }
-            if (!in_section)          { shift(""); next }
+            lvl = atx_level(cur)
+            if (lvl > 0) {
+                htitle = htext
+            } else {
+                srule = setext_rule(cur)
+                if (srule > 0 && prev_para) { lvl = srule; htitle = trim(prev) }
+            }
+            if (lvl > 0) {
+                in_table = 0
+                if (lvl <= 2) { in_section = (htitle == "Crates") ? 1 : 0 }
+                prev = ""
+                prev_para = 0
+                next
+            }
 
-            if (line !~ /^\| *`[A-Za-z0-9_-]+` *\|/) { shift(line); next }
+            if (!in_section) {
+                prev = cur
+                prev_para = is_para(cur)
+                next
+            }
 
-            # The first crate row is where the context of the table is judged, on exactly the
-            # two lines DIRECTLY above it: a delimiter, and above that a header agreeing with it on
-            # column count. Anything else -- a blank line, a decoy table further up, a header of a
-            # different width -- renders as no table, however intact the rows below it look.
-            if (nrows == 0) {
-                dcols = delim_cells(prev1)
-                hcols = header_cells(prev2)
-                if (dcols == 0) {
-                    print "NODELIM\t"
-                } else if (hcols == 0) {
-                    print "NOHEADER\t"
-                } else if (hcols != dcols) {
-                    print "MISMATCH\t" hcols " header column(s) over a " dcols "-column delimiter"
-                } else {
-                    print "DELIM\tok"
+            # A table runs from its delimiter row until the first line that is not a table row.
+            # Tracking it for the whole section is what makes "every crate row is in ONE table"
+            # answerable, rather than only "the first crate row has a head above it".
+            ncells = table_cells(cur)
+            if (in_table && ncells == 0) { in_table = 0 }
+            if (!in_table) {
+                d = delim_cells(cur)
+                if (d > 0) {
+                    h = header_cells(prev)
+                    if (h == d) {
+                        in_table = 1
+                        ntable++
+                        # A crate row directly above this delimiter IS this table`s header row,
+                        # so it renders inside the table rather than outside it.
+                        if (ncrate > 0 && crline[ncrate] == NR - 1 && crtable[ncrate] == 0) {
+                            crtable[ncrate] = ntable
+                        }
+                    } else {
+                        nhint++
+                        if (h == 0) {
+                            hint[nhint] = "line " NR ": a delimiter row with no header row directly above it"
+                        } else {
+                            hint[nhint] = "line " NR ": a " h "-column header over a " d "-column delimiter"
+                        }
+                    }
                 }
             }
 
-            nrows++
-            row = line
+            row = cur
+            if (row ~ /^    /) { prev = cur; prev_para = is_para(cur); next }
+            sub(/^ */, "", row)
+            sub(/[ \t]*$/, "", row)
             gsub(/\\\|/, SENTINEL, row)
+            if (row !~ /^\| *`[A-Za-z0-9_-]+` *\|/ || substr(row, length(row), 1) != "|") {
+                prev = cur
+                prev_para = is_para(cur)
+                next
+            }
+
+            ncrate++
+            crline[ncrate] = NR
+            crtable[ncrate] = in_table ? ntable : 0
             n = split(row, cell, "|")
             name = cell[2]
             gsub(/[` ]/, "", name)
-            print "NAME\t" name
+            crname[ncrate] = name
 
             if (n != 5) {
-                print "BAD\t" name " has " (n - 2) " cell(s); a crate row is Crate | Purpose | Status"
-                shift(line)
-                next
+                nbad++
+                bad[nbad] = name " has " (n - 2) " cell(s); a crate row is Crate | Purpose | Status"
+            } else {
+                purpose = cell[3]
+                status = cell[4]
+                gsub(SENTINEL, "|", purpose)
+                gsub(SENTINEL, "|", status)
+                if (is_blank(purpose)) { nbad++; bad[nbad] = name " has an empty Purpose cell" }
+                if (is_blank(status))  { nbad++; bad[nbad] = name " has an empty Status cell" }
+                claims(name, purpose " " status)
             }
-            purpose = cell[3]
-            status = cell[4]
-            gsub(SENTINEL, "|", purpose)
-            gsub(SENTINEL, "|", status)
-            if (is_blank(purpose)) { print "BAD\t" name " has an empty Purpose cell" }
-            if (is_blank(status))  { print "BAD\t" name " has an empty Status cell" }
-            shift(line)
+
+            prev = cur
+            prev_para = is_para(cur)
+        }
+
+        END {
+            for (i = 1; i <= ncrate; i++) { print "NAME\t" crname[i] }
+            for (i = 1; i <= nbad; i++)   { print "BAD\t" bad[i] }
+
+            orphan = ""
+            ndistinct = 0
+            for (i = 1; i <= ncrate; i++) {
+                if (crtable[i] == 0) {
+                    orphan = (orphan == "") ? crname[i] : orphan " " crname[i]
+                } else if (!(crtable[i] in tseen)) {
+                    tseen[crtable[i]] = 1
+                    ndistinct++
+                }
+            }
+            if (ncrate > 0) {
+                if (orphan != "") {
+                    print "ORPHAN\t" orphan
+                } else if (ndistinct > 1) {
+                    print "SPLIT\t" ndistinct
+                }
+            }
+            for (i = 1; i <= nhint; i++) { print "HINT\t" hint[i] }
         }
     ' "$readme"
 )"
 
 rows="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "NAME" { print $2 }')"
 malformed="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "BAD" { print $2 }')"
-delimiter="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "DELIM" { print $2 }')"
-no_delim="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "NODELIM" { print "1" }')"
-no_header="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "NOHEADER" { print "1" }')"
-mismatch="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "MISMATCH" { print $2 }')"
+orphans="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "ORPHAN" { print $2 }')"
+split_tables="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "SPLIT" { print $2 }')"
+hints="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "HINT" { print $2 }')"
 
 test -n "$rows" || {
     echo "check-readme-crates: found no crate rows under '## Crates' in $readme"
-    echo "  either the '## Crates' heading is missing or is not exactly that, or every row under"
-    echo "  it is hidden: a row inside an HTML comment or a fenced code block does not count."
+    echo "  either the '## Crates' heading is missing or is not a level-2 heading with that exact"
+    echo "  text, or every row under it is hidden: a row inside an HTML comment or a fenced code"
+    echo "  block does not count."
     exit 1
 }
 
@@ -307,28 +472,25 @@ if [ -n "$malformed" ]; then
     echo "$malformed" | sed 's/^/  /'
 fi
 
-if [ -n "$no_delim" ]; then
+if [ -n "$orphans" ]; then
     fail=1
-    echo "check-readme-crates: in $readme, the line directly above the first crate row is not a"
-    echo "  '| --- | --- | --- |' delimiter row. A delimiter somewhere further up does not make a"
-    echo "  table: a blank line after it, an unrelated table earlier in the section, or four"
-    echo "  spaces of indentation each leave the rows rendering as a paragraph of literal pipes,"
-    echo "  so every row below documents nothing."
-elif [ -n "$no_header" ]; then
+    echo "check-readme-crates: in $readme, these crate rows do not render inside a table:"
+    echo "$orphans" | tr ' ' '\n' | sed 's/^/  /'
+    echo "  A table is a header row IMMEDIATELY followed by a '| --- | --- | --- |' delimiter of"
+    echo "  the same width, neither indented four spaces or more, and it ends at the first line"
+    echo "  that is not a table row. A blank line between two rows, a deleted delimiter, a blanked"
+    echo "  header or a header of the wrong width each leave the rows below rendering as a"
+    echo "  paragraph of literal pipes, however intact their bytes look."
+    if [ -n "$hints" ]; then
+        echo "  Near misses seen in the section:"
+        echo "$hints" | sed 's/^/    /'
+    fi
+elif [ -n "$split_tables" ]; then
     fail=1
-    echo "check-readme-crates: in $readme, the delimiter above the first crate row has no header"
-    echo "  row directly above it. A delimiter with nothing above it starts no table, so the rows"
-    echo "  below render as a paragraph of literal pipes. What the headings are CALLED is not"
-    echo "  checked -- only that a row is there."
-elif [ -n "$mismatch" ]; then
-    fail=1
-    echo "check-readme-crates: in $readme, the crates table header and its delimiter disagree on"
-    echo "  how many columns the table has:"
-    echo "$mismatch" | sed 's/^/  /'
-    echo "  Markdown renders no table at all when they disagree, whatever the rows below say."
-elif [ -z "$delimiter" ]; then
-    fail=1
-    echo "check-readme-crates: internal error: the crates table context was never judged"
+    echo "check-readme-crates: in $readme, the crate rows are spread over $split_tables separate"
+    echo "  tables. They document one list of crates and must render as one table; a second table"
+    echo "  in the section (a decoy above the real one, or a blank line splitting it) is how rows"
+    echo "  keep passing every other check while rendering somewhere a reader will not read them."
 fi
 
 # LC_ALL=C throughout: `comm` exits non-zero on input it considers unsorted, and jq's `sort_by`
@@ -343,10 +505,16 @@ if [ -n "$duplicates" ]; then
     echo "$duplicates" | sed 's/^/  /'
 fi
 
-# The same source of truth `mise run versions` reads: --no-deps lists workspace members only.
-workspace_crates="$(
-    cargo metadata --no-deps --format-version 1 | jq -r '.packages | sort_by(.name)[] | .name'
-)" || {
+# The same source of truth `mise run versions` reads: --no-deps lists workspace members only. It
+# is read once and every derived claim below is answered from this one document, so two checks
+# can never disagree about the graph. `check-release-deps` runs the same command in the same CI
+# job, so nothing here needs a build.
+metadata="$(cargo metadata --no-deps --format-version 1)" || {
+    echo "check-readme-crates: could not read the workspace crate list from cargo metadata"
+    exit 1
+}
+
+workspace_crates="$(printf '%s' "$metadata" | jq -r '.packages | sort_by(.name)[] | .name')" || {
     echo "check-readme-crates: could not read the workspace crate list from cargo metadata"
     exit 1
 }
@@ -368,10 +536,11 @@ if [ -n "$missing" ]; then
     echo "check-readme-crates: workspace crates with no row in the $readme crates table:"
     echo "$missing" | sed 's/^/  /'
     echo "  a crate row is recognised ONLY as: | \`crate-name\` | Purpose | Status |"
-    echo "  -- the pipe in column 1, the crate name alone inside a code span. That pattern is"
-    echo "  deliberately narrow, so legal Markdown it does not recognise (a missing leading or"
-    echo "  trailing pipe, an indented row, a linked or annotated crate cell, prose after the code"
-    echo "  span) is reported here as a missing crate. Check the row's shape before adding one."
+    echo "  -- a pipe first on the line (up to three spaces of indent), the crate name alone"
+    echo "  inside a code span, and a closing pipe at the end. That pattern is deliberately"
+    echo "  narrow, so legal Markdown it does not recognise (a missing leading or trailing pipe,"
+    echo "  a linked or annotated crate cell, prose after the code span) is reported here as a"
+    echo "  missing crate. Check the row's shape before adding one."
     echo "  Its authority is the crate's own source -- the"
     echo "  code that ships. Read lib.rs, then Cargo.toml, then STATUS.md, but trust none of them"
     echo "  over the crate: each is a summary and any of them can be stale, so the row must be"
@@ -384,6 +553,102 @@ if [ -n "$phantom" ]; then
     echo "check-readme-crates: $readme crates table names crates that are not workspace members:"
     echo "$phantom" | sed 's/^/  /'
     echo "  drop the row, or fix the crate name it misspells."
+fi
+
+# Normalises a claimed name list so a set comparison does not depend on the order or the spacing
+# a sentence happens to use.
+normalise_set() {
+    printf '%s\n' "$1" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# `vN` / `vN.M`: the row's first version token against the crate's own manifest version, compared
+# to the precision the row wrote.
+version_claims="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "VER" { print $2 "\t" $3 }')"
+if [ -n "$version_claims" ]; then
+    manifest_versions="$(printf '%s' "$metadata" | jq -r '.packages[] | "\(.name)\t\(.version)"')"
+    version_errors="$(
+        printf '%s\n' "$version_claims" | while IFS="$(printf '\t')" read -r crate claimed; do
+            actual="$(printf '%s\n' "$manifest_versions" | awk -F'\t' -v c="$crate" '$1 == c { print $2 }')"
+            if [ -n "$actual" ]; then
+                prefix="$(printf '%s\n' "$actual" | awk -F. -v t="$claimed" '
+                    BEGIN { n = split(t, want, ".") }
+                    { s = $1; for (i = 2; i <= n; i++) { s = s "." $i } print s }
+                ')"
+                if [ "$prefix" != "$claimed" ]; then
+                    echo "  $crate: the row cites v$claimed, its Cargo.toml declares $actual"
+                fi
+            fi
+        done
+        true
+    )"
+    if [ -n "$version_errors" ]; then
+        fail=1
+        echo "check-readme-crates: version claims in $readme that the workspace manifests refute:"
+        echo "$version_errors"
+        echo "  A row's version is its own Cargo.toml's, to whatever precision the row writes."
+    fi
+fi
+
+# `consumed by`: the claimed consumer set against the workspace crates that declare a normal or
+# build dependency on the row's crate.
+consumer_claims="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "CONS" { print $2 "\t" $3 }')"
+if [ -n "$consumer_claims" ]; then
+    actual_consumers="$(printf '%s' "$metadata" | jq -r '
+        [ .packages[] | . as $p | $p.dependencies[]
+          | select((.kind // "normal") != "dev")
+          | { consumer: $p.name, dependency: .name } ]
+        | group_by(.dependency)[]
+        | "\(.[0].dependency)\t\(map(.consumer) | unique | sort | join(" "))"
+    ')"
+    consumer_errors="$(
+        printf '%s\n' "$consumer_claims" | while IFS="$(printf '\t')" read -r crate claimed; do
+            actual="$(printf '%s\n' "$actual_consumers" | awk -F'\t' -v c="$crate" '$1 == c { print $2 }')"
+            want="$(normalise_set "$actual")"
+            got="$(normalise_set "$claimed")"
+            if [ "$want" != "$got" ]; then
+                echo "  $crate: the row says [$got]; cargo metadata says [$want]"
+            fi
+        done
+        true
+    )"
+    if [ -n "$consumer_errors" ]; then
+        fail=1
+        echo "check-readme-crates: 'consumed by' lists in $readme that cargo metadata refutes:"
+        echo "$consumer_errors"
+        echo "  Dev-dependencies are excluded, as they are for check-release-deps."
+    fi
+fi
+
+# `always-on dependency`/`dependencies`: the claimed set against the row crate's non-optional
+# workspace dependencies. Naming none asserts that there are none.
+always_claims="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "ALWAYS" { print $2 "\t" $3 }')"
+if [ -n "$always_claims" ]; then
+    actual_always="$(printf '%s' "$metadata" | jq -r '
+        [ .packages[].name ] as $members
+        | .packages[]
+        | "\(.name)\t\([ .dependencies[]
+              | select((.kind // "normal") != "dev")
+              | select(.optional | not)
+              | .name
+              | select(. as $n | $members | index($n)) ] | unique | sort | join(" "))"
+    ')"
+    always_errors="$(
+        printf '%s\n' "$always_claims" | while IFS="$(printf '\t')" read -r crate claimed; do
+            actual="$(printf '%s\n' "$actual_always" | awk -F'\t' -v c="$crate" '$1 == c { print $2 }')"
+            want="$(normalise_set "$actual")"
+            got="$(normalise_set "$claimed")"
+            if [ "$want" != "$got" ]; then
+                echo "  $crate: the row says [$got]; cargo metadata says [$want]"
+            fi
+        done
+        true
+    )"
+    if [ -n "$always_errors" ]; then
+        fail=1
+        echo "check-readme-crates: 'always-on dependency' lists in $readme that cargo metadata refutes:"
+        echo "$always_errors"
+        echo "  An optional dependency is not always on, and only workspace crates are counted."
+    fi
 fi
 
 if [ "$fail" -eq 0 ]; then
