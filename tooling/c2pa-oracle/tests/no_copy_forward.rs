@@ -17,15 +17,14 @@
 //! *what the embedder returned*. If [`C2paPolicy`] ever handed the store back, the derivative would
 //! carry it and c2pa-rs would find one, which is the failure this file exists to see.
 //!
-//! Issue #428 names `C2paPolicy` as the mechanism, and it has two arms:
-//!
-//! * [`C2paPolicy::Drop`] (the default) — the store is not emitted, and the derivative reads back
-//!   as unsigned. That is the whole round trip, end to end.
-//! * [`C2paPolicy::Reject`] — the same refusal, made loud, for a caller that must be told
-//!   provenance is being lost rather than discover it downstream.
+//! Issue #428 names `C2paPolicy` as the mechanism, and its default arm — `Drop` — is what this
+//! file drives end to end. Its other arm, `Reject`, refuses the same store loudly instead, and is
+//! a claim about `gamut-metadata` alone: `crates/gamut-metadata/tests/roundtrip.rs` already pins
+//! it against a synthetic store, with no c2pa-rs and no encoder in reach. Restating it here would
+//! only re-run that assertion behind a signing chain that judges none of it.
 //!
 //! Forcing the forward (assigning the model's store to `EncodedMetadata::c2pa` by hand, the arm
-//! `C2paPolicy` deliberately does not offer) makes the first test fail with c2pa-rs reporting
+//! `C2paPolicy` deliberately does not offer) makes the test below fail with c2pa-rs reporting
 //! `Valid` — not `Invalid`. That is not a softening of the hazard, it is a sharpening of it: this
 //! fixture re-encodes deterministically, and a BMFF hard binding excludes the `ContentProvenanceBox`
 //! by box path, so a bit-identical derivative wearing its parent's store validates and presents
@@ -44,9 +43,7 @@ use c2pa_oracle::{AVIF_MIME, embed, is_jumbf_not_found, read};
 use common::{dims, plain_avif, source_rgb};
 use gamut_avif::{AvifContainer, AvifEncoder};
 use gamut_core::{EncodeImage, ImageRef, Rgb8};
-use gamut_metadata::{
-    C2paPolicy, MetadataBlock, MetadataEmbedder, MetadataError, MetadataExtractor,
-};
+use gamut_metadata::{MetadataBlock, MetadataEmbedder, MetadataExtractor};
 
 /// A gamut AVIF that c2pa-rs has signed, asserted `Valid` first so a later `JumbfNotFound` is
 /// about the derivative rather than about a parent that never carried a store.
@@ -75,6 +72,11 @@ fn derivative_through(embedder: MetadataEmbedder, store: &[u8]) -> Vec<u8> {
     let meta = MetadataExtractor::new()
         .extract(&[MetadataBlock::C2pa(store)])
         .expect("a lone C2PA block extracts");
+    assert!(
+        meta.c2pa.is_some(),
+        "the parent's store must be in the model handed to the embedder, or the policy is asked \
+         to drop nothing and the derivative carries no store for a reason that is not the policy"
+    );
     let blocks = embedder.embed(&meta).expect("embedding the parent's model");
 
     let rgb = source_rgb();
@@ -98,23 +100,5 @@ fn a_derivative_built_from_the_parents_model_reads_back_as_unsigned_not_as_inval
         is_jumbf_not_found(&error),
         "c2pa-rs must report the derivative as unsigned (`JumbfNotFound`), not as a file whose \
          store fails to validate; got {error}"
-    );
-}
-
-#[test]
-fn the_reject_policy_refuses_the_parents_store_rather_than_losing_it_quietly() {
-    let parent = signed_parent();
-    let store = store_of(&parent);
-    let meta = MetadataExtractor::new()
-        .extract(&[MetadataBlock::C2pa(&store)])
-        .expect("a lone C2PA block extracts");
-
-    let error = MetadataEmbedder::new()
-        .c2pa_policy(C2paPolicy::Reject)
-        .embed(&meta)
-        .expect_err("`Reject` must refuse a model carrying a store");
-    assert!(
-        matches!(error, MetadataError::UnembeddableC2pa { len } if len == store.len()),
-        "the refusal must name the parent's store, by the length gamut-avif located; got {error}"
     );
 }
