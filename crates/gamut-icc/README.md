@@ -41,26 +41,30 @@ H.273 code-point triple AVIF, HEIC and JXL usually signal instead of embedding a
 ```rust
 use gamut_icc::{BuiltinProfile, Cicp, IccProfile};
 
-let p3 = IccProfile::builtin(BuiltinProfile::DisplayP3);
+let p3 = IccProfile::builtin(BuiltinProfile::DisplayP3).expect("a modelled space");
 assert!(p3.validate().is_empty());
 let bytes = p3.to_bytes()?; // ready to embed
 
-// BT.2020 primaries + PQ, as an AVIF `colr` box would signal them.
+// BT.2020 primaries + PQ, as an AVIF `colr` box would signal them. The matrix coefficients are
+// deliberately not carried into the profile: ICC.1:2022 §10.3 requires zero for an RGB profile.
 let hdr = IccProfile::from_cicp(Cicp {
     colour_primaries: 9,
     transfer_characteristics: 16,
-    matrix_coefficients: 0,
-    video_full_range_flag: 1,
+    matrix_coefficients: 9,
+    video_full_range_flag: 0,
 });
 assert!(hdr.is_some());
 # Ok::<_, gamut_icc::IccError>(())
 ```
 
-The buildable spaces are sRGB, linear sRGB, Display P3 and BT.2100 PQ, plus
-`IccProfile::gray_with_gamma` for a monochrome profile — exactly the set
-[`gamut-color`](../gamut-color) can express on the two CICP axes. Their primaries, white point and
-transfer are read from that crate rather than restated here, so the two cannot drift; Adobe RGB and
-ProPhoto RGB have no code point on either axis and are declined rather than approximated.
+The named spaces are sRGB, linear sRGB, Display P3 and BT.2100 PQ, plus
+`IccProfile::gray_with_gamma` for a monochrome profile. Their primaries and white point are read
+from [`gamut-color`](../gamut-color) rather than restated here, so the two cannot drift; Adobe RGB
+and ProPhoto RGB have no code point on either CICP axis and are declined rather than approximated.
+`from_cicp` reaches further on the transfer axis — the BT.709 family (H.273 code points 1, 6, 14
+and 15), linear, sRGB and PQ all have an ICC tone-curve encoding — because what an ICC tag can
+encode is not the same set as what gamut-color can evaluate. Every constructor returns an `Option`
+and declines signalling it cannot describe; `STATUS.md` tabulates the curve chosen per transfer.
 
 **Every ICC.1:2022 §10 element type decodes semantically** — the `XYZType`, curve, and text types;
 the `lut8`/`lut16`/`lutAToB`/`lutBToA` transforms; `namedColor2Type`; the measurement/signalling

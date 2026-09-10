@@ -45,17 +45,20 @@ so no profile is rejected for carrying an unmodelled tag.
 ## Built-in profiles
 
 `IccProfile::builtin`, `gray_with_gamma`, `from_cicp` and `from_source_profile` construct
-spec-valid v4 three-component matrix/TRC display profiles (§8.4). The colorimetry is **gamut-color's
-and is never restated here**: primaries and white point come from
-`ColourPrimaries::chromaticities`, the RGB→XYZ construction and Bradford adaptation from
-`gamut_color::matrix`, the ST 2084 curve from `gamut_color::transfer`.
+spec-valid v4 three-component matrix/TRC display profiles (§8.4). All four return `Option`: the
+colorimetry they resolve is **gamut-color's and is never restated here** — primaries and white
+point come from `ColourPrimaries::chromaticities`, the RGB→XYZ construction and Bradford
+adaptation from `gamut_color::matrix`, the ST 2084 curve from `gamut_color::transfer` — and those
+constructors are themselves fallible, so an input whose colorimetry cannot be resolved is declined
+rather than given a profile whose colorants are silently the PCS axes. `builtin` yields `Some` for
+every `BuiltinProfile` in this release and a test pins that.
 
 **Dependency direction: `gamut-icc → gamut-color`.** The constructors need gamut-color's
 colorimetry and gamut-icc's serializer, and only one of the two can own that edge. gamut-color is
-the primitive — fan-in 8, no ICC dependency — so pointing it the other way would invert the
-layering and give a widely-depended-on crate a profile serializer it has no use for. (Contrast
-`gamut-cmm → gamut-icc` below: applying a profile is a layer above parsing one; *describing* a
-colour space is a layer below.)
+the primitive — fan-in 10 before this edge, 11 with it, and no ICC dependency — so pointing it the
+other way would invert the layering and give a widely-depended-on crate a profile serializer it
+has no use for. (Contrast `gamut-cmm → gamut-icc` below: applying a profile is a layer above
+parsing one; *describing* a colour space is a layer below.)
 
 **The buildable set is exactly what gamut-color can express on the two CICP axes**, because a
 matrix/TRC profile *is* a (primaries, transfer) pair: sRGB, linear sRGB, Display P3 and BT.2100 PQ.
@@ -70,15 +73,47 @@ gives the transfer a closed form ICC also defines, and a sampled `curveType` (§
 | Transfer (H.273) | ICC encoding | Deciding clause |
 | ---------------- | ------------ | --------------- |
 | Linear (code 8) | `parametricCurveType` type 0, `g = 1` | §10.18 type 0 is `Y = X^g` exactly |
+| BT.709 family (codes 1, 6, 14, 15) | `parametricCurveType` type 3, `(g, a, b, c, d)` | Table 3 gives all four one curve — "functionally the same as the values 1, 6 and 15" — with α = 1 + 5.5β and β = 0.018053968510807…; its inverse is §10.18 type 3 exactly |
 | sRGB / IEC 61966-2-1 (code 13) | `parametricCurveType` type 3, `(g, a, b, c, d)` | §10.18 type 3 is the spec's own piecewise form |
 | Grey gamma (`gray_with_gamma`) | `parametricCurveType` type 0 | §10.18 type 0; `s15Fixed16` beats `curveType`'s single `u8Fixed8` entry |
-| PQ / ST 2084 (codes 16, 14) | `curveType`, 1024 `uInt16` samples | §10.18 defines no closed form for PQ; 1024 points keep interpolation error under one `uInt16` quantum |
+| PQ / ST 2084 (code 16) | `curveType`, 1024 `uInt16` samples | §10.18 defines no closed form for PQ; 1024 points keep interpolation error under one `uInt16` quantum |
+
+Declined: HLG (code 18) and Unspecified (code 2) have neither a §10.18 closed form nor a
+gamut-color EOTF to sample from, and every other H.273 code point is unmodelled here. The transfer
+axis is keyed on the **raw code point**, not on `gamut_color::cicp::TransferCharacteristics`,
+because the set of curves an ICC tag can encode is not the set gamut-color can evaluate: codes 6
+and 15 have no `TransferCharacteristics` variant, and none of the four BT.709-family codes has a
+gamut-color EOTF, yet all four are exactly encodable.
+
+**CICP fields the profile does not carry.** `from_cicp` builds from the primaries and transfer
+code points only. §10.3 states that "when the data colour space in the profile header is RGB or
+XYZ, MatrixCoefficients shall be 0 (zero)", so the caller's `MatrixCoefficients` — routinely 1, 5,
+6 or 9 in an AVIF/HEIC `nclx` box — is **not** written into the `cicpType` tag; writing it would
+make the profile non-conforming for the most common input there is. `VideoFullRangeFlag` is
+normalized to `1` alongside it, because the profile's matrix and tone curves are defined over
+full-scale RGB. Neither is a loss of information: both describe a luma–chroma encoding the caller
+de-matrixes *before* this profile applies, and both remain in the container signalling a decoder
+reads them from.
+
+**Grey gamma domain.** `gray_with_gamma` takes open `f64` input and declines anything a `kTRC`
+cannot carry: non-finite, non-positive, or ≥ 32 768, the first magnitude `s15Fixed16` (§4.6) cannot
+hold. `S15Fixed16::from_f64` saturates rather than failing, so accepting those would silently write
+a gamma nobody asked for.
 
 **PCS white.** Colorants are Bradford-adapted to the D50 that `XYZNumber::D50` encodes (§7.2.16),
 not to `gamut_color::matrix::D50`. The two differ by 2e-4 in Z — the CIE chromaticity against ICC's
 rounded tristimulus — and adapting to the CIE one while writing the ICC one as the
 `mediaWhitePointTag` leaves the colorants disagreeing with the white point they sum to. The PCS
 illuminant is an ICC fact, so this crate owns it.
+
+**Known limit: the BT.2100 PQ profile is peak-referred.** Its `curveType` samples ST 2084
+normalized to the transfer's own 10 000 cd/m² peak, so signal maps to media-relative luminance as a
+fraction of that peak. A diffuse-white signal (the ~203 cd/m² BT.2408 reference white) therefore
+evaluates to roughly 0.02 media-relative, and a CMM rendering such content through this profile
+puts it near black. That is mathematically correct for a peak-referred profile and it is not what a
+caller embedding the profile alongside SDR-referred content necessarily expects; choosing a
+diffuse-white-referred normalization instead is a colour-appearance decision with its own
+consequences, so it is tracked separately rather than changed silently here.
 
 **Determinism.** A constructor is a pure function of its arguments: no creation timestamp, no
 profile ID, no other entropy, so the same call always serializes to the same bytes.

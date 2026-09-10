@@ -24,8 +24,9 @@
 //! [`IccProfile::builtin`] constructs a spec-valid v4 matrix/TRC profile for a named
 //! [`BuiltinProfile`] space, [`IccProfile::gray_with_gamma`] the monochrome equivalent, and
 //! [`IccProfile::from_cicp`] / [`IccProfile::from_source_profile`] the same from what a codec
-//! actually signals — an H.273 code-point triple, or a [`gamut_color::SourceProfile`]. The
-//! colorimetry behind them is [`gamut_color`]'s, never restated here; see `src/builtin.rs`.
+//! actually signals — an H.273 code-point triple, or a [`gamut_color::SourceProfile`]. Each
+//! returns `None` for signalling no matrix/TRC profile can describe. The colorimetry behind them
+//! is [`gamut_color`]'s, never restated here; see `src/builtin.rs`.
 //!
 //! ```no_run
 //! use gamut_icc::{IccProfile, KnownTag, TagData};
