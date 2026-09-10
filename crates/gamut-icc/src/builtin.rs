@@ -48,8 +48,33 @@
 //! one profile, and a caller that needs the original value must keep it in the container
 //! signalling it came from.
 //!
+//! # Which reading of transfer 1, 6, 14 and 15
 //!
-
+//! H.273 Table 3 defines those four code points as an **opto-electronic** function, and an ICC
+//! tone curve encodes signal → light, so this module writes its exact inverse:
+//! `Lc = ((V + α − 1) / α)^(1/0.45)` above the knee. That is the literal reading, and it is what
+//! the reference implementations write, so a profile built here agrees with them.
+//!
+//! It is not the only sanctioned reading. H.273 §8.2 NOTE 1 observes that for these code points
+//! "a suggested corresponding reference electro-optical transfer characteristic function for flat
+//! panel displays used in HDTV studio production has been specified in Rec. ITU-R BT.1886-0" —
+//! which, at reference black zero, is a pure gamma of 2.4. Since every profile built here is a
+//! *display*-class profile, that reading has a real claim, and the two are far apart. At mid-grey
+//! `V = 0.5` the PCS `Y` is:
+//!
+//! | reading | `Y` at `V = 0.5` |
+//! | --- | --- |
+//! | inverse OETF — what this module writes | 0.259719 |
+//! | BT.1886 EOTF, `V^2.4` | 0.189465 |
+//! | the sRGB code point (13), for scale | 0.214041 |
+//!
+//! The literal reading is 1.371× the BT.1886 one — 0.0703 in absolute `Y`. Note the third row:
+//! two code points this module *does* encode, 1 and 13, already differ by 0.0457 at mid-grey
+//! (21 % of the sRGB value), so a caller that treats "BT.709 primaries" and "sRGB" as
+//! interchangeable will see that much of a shift from the transfer alone. Offering the BT.1886
+//! reading as an option is tracked at
+//! <https://github.com/visualcommons/gamut/issues/586>.
+//!
 //! # Determinism
 //!
 //! A constructor is a pure function of its arguments: the creation date is
@@ -260,6 +285,10 @@ enum Trc {
     /// 14 (BT.2020 10-bit) and 15 (BT.2020 12-bit) — one function, as Table 3's own informative
     /// remark says ("functionally the same as the values 1, 6 and 15"). Also a
     /// `parametricCurveType` function type 3.
+    ///
+    /// This is the *inverse of Table 3's opto-electronic function*, the literal reading; H.273
+    /// §8.2 NOTE 1 sanctions a second one for display profiles, which the module docs quantify
+    /// against this one.
     Bt709,
     /// SMPTE ST 2084 (PQ) normalized to its peak. ICC.1:2022 §10.18 defines no closed form for
     /// it, so it is a sampled `curveType` (§10.6).
