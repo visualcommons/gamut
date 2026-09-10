@@ -5,46 +5,61 @@
 //! cap, so a hostile file must end in a typed error rather than a panic, a hang or a runaway
 //! allocation — the three things libFuzzer itself detects.
 //!
-//! The check beyond the crash oracle is that **the decoded volume matches the declared geometry**:
-//! a page that decodes yields exactly `width × height × Rgb8::CHANNELS` samples, where the width
-//! and height are the ones `info_page` read out of the tags. The sample count is not read from the
-//! geometry reader at all — it is what the strip/tile assembly, the predictor pass and the
-//! photometric unpack physically produced — so the check reaches that whole pipeline rather than
-//! the handful of lines that copy a described number into a decoded one.
+//! ## The check beyond the crash oracle
+//!
+//! **The geometry that arrives equals the geometry the tags declare.** `decode_page_samples` reads
+//! the page's dimensions once, runs the strip/tile assembly, the predictor pass and the photometric
+//! unpack, and only then builds the `DecodedImage` those dimensions travel out in; the buffer a
+//! caller receives carries whatever that stage, `RawImage::new` and `convert_from_raw` between them
+//! made of it. A stage that rewrites the geometry it hands on — a crop, an orientation, a tile-grid
+//! rounding — is accepted by every constructor on the way, produces no crash, and is contradicted
+//! only by the tags.
 //!
 //! Injection that proved it fires (re-runnable): at the point `decode_page_samples` builds its
-//! `DecodedImage`, trim the last row from the samples *and* report `height - 1` — a crop stage
-//! that describes what it cropped. It is internally consistent, so `RawImage::new` and
-//! `ImageBuf::new` both accept it and nothing crashes; only the declared geometry contradicts it.
-//! Run as `run.sh tiff_decode <seeds> -- -runs=0`, the committed seeds alone report it:
-//! *"page 0: decoded 54 samples for the 6 × 4 × 3 the tags declare"*.
+//! `DecodedImage`, swap `width` and `height` — an orientation stage, volume-preserving, so nothing
+//! downstream refuses it. The committed seeds alone report it, with no search:
+//! `run.sh tiff_decode <seeds> -- -runs=0` gives
+//! *"page 0: decoded 4 × 6 for the 6 × 4 the tags declare"*.
 //!
-//! Two things this deliberately does **not** assert, both because they cannot fail by input:
+//! ## The sample count beside it is a structure pin, not a second check
 //!
-//! - **`info_page` at `page_count` is refused.** `page_count` is `read(data)?.ifds.len()` and
-//!   `info_page` is `read(data)?.ifds.get(page)`, so the claim reduces to indexing a vector one
-//!   past its own length. Injecting the defect it advertised — a count that over-reports the
-//!   chain — produces no report, because the over-report moves both sides together.
-//! - **decoded dimensions equal described dimensions.** The two sides are one reader:
-//!   `decode_page_samples` states outright that "everything the page *declares* comes from one
-//!   shared reader", so a transposition inside `info::page_info` hands every caller a transposed
-//!   image and this comparison stays quiet. It fires only for a defect in the few lines between
-//!   that reader and the returned buffer, which is a reach the sample count already covers.
+//! An earlier revision anchored this target on the number of samples the decode physically yielded
+//! and claimed that count "is not read from the geometry reader at all". **That is false.**
+//! `convert_from_raw` allocates its output as `ImageBuf::<Q>::zeroed(src.dims)`, and
+//! `ImageBuf::zeroed` sizes that allocation with `expected_len::<P>(dims)` — so the returned
+//! `as_samples().len()` is `width × height × CHANNELS` of the *dimensions*, by construction, for
+//! every input. Asserting it against `info.width × info.height × CHANNELS` is therefore the
+//! geometry comparison above multiplied by a constant on both sides: it can separate the two sides
+//! only if `ImageBuf`'s own length-versus-dimensions invariant breaks, never if the decode pipeline
+//! miscounts.
 //!
-//! One assertion beside it is kept and **named a structure pin** rather than advertised as a
-//! check: "a page that decodes must also describe". `decode_page_samples` calls `info::page_info`
-//! before it reads a pixel, so a page `info_page` refuses cannot decode, for any input, while that
-//! body stands. It costs nothing — both calls are made anyway for the crash oracle — and it is the
-//! shape that would report if `decode` ever grew its own tag reader.
+//! Measured, not reasoned: the transposition above gives **exit 0 and no report** under the sample
+//! count alone, because `w·h·3 == w·h·3` after a transposition for every input, while the geometry
+//! comparison fires on the committed seeds immediately.
 //!
-//! What the sample count does not see either, stated so nobody over-reads it: a defect that
-//! produces the wrong *volume* while leaving the dimensions alone is turned into a typed error by
-//! `RawImage::new`/`ImageBuf::new` before it can reach a caller, so it arrives here as a rejected
-//! file rather than as a report. Measured, not assumed: decoding `info.height + 1` rows — the
-//! first injection tried — produced **no** report, because the strip assembly runs out of bytes
-//! and the page is refused. The live class is a stage that rewrites the geometry it hands on — a
-//! crop, an orientation, a tile-grid rounding — which both constructors accept and only the
-//! declared geometry contradicts. That is the same class the sibling `dng_decode` target checks,
+//! The sample count is kept — one comparison on values already in hand — and **named a pin at the
+//! site**: it pins `ImageBuf`'s constructor continuing to derive its length from its dimensions.
+//! (`ImageBuf::new`, which does validate a caller-supplied buffer against dimensions, is never
+//! called on this path; `RawImage::new` is the only gate the decoded samples pass through, and it
+//! runs before the output buffer exists.)
+//!
+//! A second assertion is a pin for the same reason and labelled as one at the site: **"a page that
+//! decodes must also describe"**. `decode_page_samples` calls `info::page_info` before it reads a
+//! pixel, so a page `info_page` refuses cannot decode, for any input, while that body stands. It is
+//! the shape that would report if `decode` ever grew its own tag reader.
+//!
+//! ## What is deliberately not asserted
+//!
+//! **`info_page` at `page_count` is refused.** `page_count` is `read(data)?.ifds.len()` and
+//! `info_page` is `read(data)?.ifds.get(page)`, so the claim reduces to indexing a vector one past
+//! its own length. Injecting the defect it advertised — a count that over-reports the chain —
+//! produces no report, because the over-report moves both sides together.
+//!
+//! A defect that produces the wrong *volume* while leaving the dimensions alone does not arrive
+//! here as a report either: `RawImage::new` turns it into a typed error before a caller sees it, so
+//! the file is simply rejected. Measured — decoding `info.height + 1` rows produced **no** report,
+//! because the strip assembly runs out of bytes and the page is refused. The live class is the
+//! geometry-rewriting stage above, which is also the class the sibling `dng_decode` target checks,
 //! where linearisation and active-area handling are such stages today.
 //!
 //! The policy is [`ConvertPolicy::permissive`] so the decode reaches the pixel and conversion
@@ -70,11 +85,10 @@ const MAX_PAGES: usize = 4;
 fuzz_target!(|data: &[u8]| {
     let decoder = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
 
+    // A file whose chain does not parse is simply refused. The other entry points are not driven
+    // for it: `page_count` is `read(data)?.ifds.len()`, and `info`/`decode_page` both begin with
+    // that same `read`, so they fail at the byte it already failed at and reach nothing new.
     let Ok(pages) = decoder.page_count(data) else {
-        // A file whose chain does not parse must still be refused — not crash — by the entry
-        // points that do not consult `page_count` first.
-        let _ = decoder.info(data);
-        let _ = decoder.decode_page(data, 0);
         return;
     };
 
@@ -83,8 +97,21 @@ fuzz_target!(|data: &[u8]| {
         let image = decoder.decode_page(data, page);
         match (&info, &image) {
             (Ok(info), Ok(image)) => {
-                // The declared geometry, times the channel count of the layout that was asked for,
-                // against the samples the decode actually produced.
+                // The live check: the geometry that arrives, against the geometry the tags
+                // declare. Every stage between the tag reader and this buffer could rewrite it.
+                let decoded = image.dimensions();
+                assert_eq!(
+                    (decoded.width, decoded.height),
+                    (info.width, info.height),
+                    "page {page}: decoded {} × {} for the {} × {} the tags declare",
+                    decoded.width,
+                    decoded.height,
+                    info.width,
+                    info.height
+                );
+                // Structure pin, not a check: `ImageBuf` sizes its storage from its own
+                // dimensions, so for every input this is the assertion above times
+                // `Rgb8::CHANNELS` on both sides (see the module docs).
                 let declared = (info.width as usize)
                     .checked_mul(info.height as usize)
                     .and_then(|n| n.checked_mul(<Rgb8 as Pixel>::CHANNELS));
