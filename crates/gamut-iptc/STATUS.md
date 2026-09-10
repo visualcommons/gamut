@@ -48,16 +48,25 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
   `2:202`), plus `7:10` Size Mode, the one dataset outside those chapters whose length the spec
   fixes ("one octet"). The table is descriptive — no `FIELD_MAP` row references a dataset outside
   the PMD-mapped subset — so reading, merging and writing are byte-for-byte unchanged by it.
-- **Authority.** The PMD tech reference is machine-readable only for the ~20 IIM-mapped rows and the
-  `ipmd_struct` field sets, both of which `tests/techreference.rs` re-derives at test time. The rest
-  of the record-1/2 table comes from `iim-4.2.pdf`, which is not machine-readable. Its guard is
-  `iim`'s own `tag_table_matches_the_exiv2_dataset_table`, which parses exiv2's independent
-  transcription of the same chapters out of the vendored `third_party/exiv2` sources and compares
-  every row column for column — dataset name, octet maximum, repeatability and value kind. A
-  mis-transcribed maximum or a mistyped name fails there, which no round trip can see. exiv2 titles
-  28 of the 70 shared datasets more briefly than IIM 4.2 names them; those rows pin both spellings,
-  so every name in the table is pinned either way. The structural laws (ordering, uniqueness, the fixed date/time form
-  lengths) and the exiv2 wire differential in `tests/oracle.rs` sit alongside it.
+- **Authority.** The PMD tech reference maps only the ~20 IIM-mapped rows and the `ipmd_struct`
+  field sets, both of which `tests/techreference.rs` re-derives at test time. The rest of the
+  record-1/2 table comes from `iim-4.2.pdf`, and both of its guards read a source outside this
+  crate:
+  - **names** — the standard sets every DataSet's name in a column of its own, which
+    `pdftotext -bbox-layout` recovers by position. `tests/data/extract-iim-names.py` does that and
+    writes `tests/data/iim-4.2-dataset-names.tsv`; `iim`'s own
+    `tag_table_names_match_the_standards_own_dataset_names` compares every row against it, and
+    against the six datasets the standard names that gamut deliberately does not. The extraction is
+    not run by the gate — `pdftotext` is a system package the toolchain does not provision — so its
+    output is committed as a derived artefact with the command that regenerates it recorded beside
+    it. A mistyped name fails there even if it were mistyped the same way twice.
+  - **octet maximum, repeatability and value kind** — stated in the standard's prose, so
+    `tag_table_matches_the_exiv2_dataset_table` compares them against exiv2's independent
+    transcription of the same chapters, parsed out of the vendored `third_party/exiv2` sources. A
+    slipped digit fails there, which no round trip can see.
+
+  The structural laws (ordering, uniqueness, the fixed date/time form lengths) and the exiv2 wire
+  differential in `tests/oracle.rs` sit alongside them.
 
 ## Deferred / out of scope
 
