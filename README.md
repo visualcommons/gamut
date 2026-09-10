@@ -126,7 +126,7 @@ manifest is ahead of its newest release and `gamut-cmm` has no release yet, both
 
 | Crate             | Purpose                                                                | Status                                 |
 | ----------------- | ---------------------------------------------------------------------- | -------------------------------------- |
-| `gamut`           | Umbrella crate; re-exports 25 sibling crates behind Cargo features — the 11 format/codec crates plus 14 primitive, container, metadata and ABI crates; only `gamut::core` is unconditional | implemented |
+| `gamut`           | Umbrella crate; re-exports 25 sibling crates behind Cargo features — the 11 format/codec crates and 14 shared layers (primitives, containers, metadata, colour management, the codec ABI); only `gamut::core` is unconditional | implemented |
 | `gamut-core`      | Core traits (`EncodeImage`/`DecodeImage`), image buffers, dimensions, errors, `convert` | stable (v2; v1 under #177), pixel conversion added by #268 |
 | `gamut-color`     | Pixel formats, bit depths, chroma subsampling, CICP code points and planar buffers, the `ycbcr` matrixing layer (H.273, plus the libwebp-exact BT.601 one VP8 needs), and the `f64` colour science (transfer, Lab/OKLab, XYB, `matrix`/`linalg`, gamut map, CCT, profile) | stable (v2; v1 under #179); the colour science is Tier-1 `f64`, not bit-reproducible |
 | `gamut-dsp`       | Shared DSP kernels: AV1 DCT/ADST/identity/WHT, the JPEG 8×8 forward/inverse DCT, quantization rounding | stable (v2; v1 under #192)             |
