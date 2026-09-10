@@ -503,7 +503,7 @@ mod tests {
     /// character — that the value carries on its own, or, for `ComponentsConfiguration`, that
     /// each of its four elements carries on its own.
     ///
-    /// So the spec printing a table for a tag is not sufficient. Four tags whose sections print
+    /// So the spec printing a table for a tag is not sufficient. Five tags whose sections print
     /// one are excluded, because what those tables enumerate is not a scalar code: `Flash`
     /// §4.6.6.7.21, a bitfield whose meaning composes independent bits (`flash` decomposes it);
     /// `GPSVersionID` §4.6.7.1.1 and `FlashpixVersion` §4.6.6.1.2, each a fixed multi-byte version

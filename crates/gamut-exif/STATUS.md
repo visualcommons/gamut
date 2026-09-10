@@ -67,7 +67,7 @@ sub-IFD, 13 in the GPS sub-IFD, of which eleven are the **character-coded** ASCI
 byte rather than an integer.
 
 The spec printing a table is neither sufficient nor necessary for membership, so the count is not
-simply "every tag with a table". Four tags whose sections print one are **excluded**, because what
+simply "every tag with a table". Five tags whose sections print one are **excluded**, because what
 those tables enumerate is not a scalar code: `Flash` §4.6.6.7.21 (a bitfield, decomposed by `flash`
 instead), `GPSVersionID` §4.6.7.1.1 and `FlashpixVersion` §4.6.6.1.2 (fixed multi-byte versions,
 not domains), `YCbCrSubSampling` §4.6.5.1.12 (a pair whose meaning belongs to its two elements
@@ -75,7 +75,8 @@ jointly) and `InteroperabilityIndex` §4.6.8.1.1 (multi-character ASCII codes). 
 table of its own is **included**, the deliberate exception: `FocalPlaneResolutionUnit` §4.6.6.7.28,
 whose section defines it as "the same as the ResolutionUnit" (§4.6.5.1.11) rather than restating
 the values, so it shares that arm. A test names the resulting set exactly, so a table added for a
-tag the spec leaves open, or an arm that loses its rows, fails. Only a crate depending on `gamut-exif` directly can enable the feature: neither
+tag the spec leaves open, or an arm that loses its rows, fails. Only a crate depending on
+`gamut-exif` directly can enable the feature: neither
 `gamut-metadata` nor the `gamut` umbrella forwards it yet (issue #543).
 
 ### Where CIPA DC-008 disagrees with itself
