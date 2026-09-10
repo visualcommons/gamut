@@ -26,9 +26,9 @@ Dependency edges (a crate depends on those to its right):
   decoder via a `ConvertPolicy`. Format crates decode to what the file carries and delegate the
   layout change there rather than hand-rolling it. No internal deps; everything else depends on it.
 - **gamut-color** / **gamut-dsp** / **gamut-bitstream** — shared primitives. ← core.
-- **gamut-tonemap** — scalar tone-mapping curves (`ToneCurve` + Reinhard/ACES/Hable/Drago)
-  for HDR→SDR pipelines, between `gamut-color`'s transfer functions and the SDR re-encode.
-  ← core.
+- **gamut-tonemap** — scalar tone-mapping curves for HDR→SDR pipelines: the `ToneCurve` trait
+  over eight operators (Linear/Clamp/Exposure/Reinhard/ReinhardExtended/ACES/Hable/Drago),
+  between `gamut-color`'s transfer functions and the SDR re-encode. ← core.
 - **gamut-codec-abi** — shared codestream-backend seam: `repr(C)` vtables
   (`DecoderVTable`/`EncoderVTable` + `StreamConfig`/`EncodeConfig`/`ImageDesc`) and their
   object-safe Rust twin traits, plus the registry fallback contract by which a foreign

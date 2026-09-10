@@ -126,13 +126,13 @@ manifest is ahead of its newest release and `gamut-cmm` has no release yet, both
 
 | Crate             | Purpose                                                                | Status                                 |
 | ----------------- | ---------------------------------------------------------------------- | -------------------------------------- |
-| `gamut`           | Umbrella crate; re-exports the format crates behind Cargo features     | implemented                            |
+| `gamut`           | Umbrella crate; re-exports 25 sibling crates behind Cargo features — the 11 format/codec crates plus 14 primitive, container, metadata and ABI crates; only `gamut::core` is unconditional | implemented |
 | `gamut-core`      | Core traits (`EncodeImage`/`DecodeImage`), image buffers, dimensions, errors, `convert` | stable (v2; v1 under #177), pixel conversion added by #268 |
 | `gamut-color`     | Pixel formats, bit depths, chroma subsampling, CICP code points and planar buffers, the `ycbcr` matrixing layer (H.273, plus the libwebp-exact BT.601 one VP8 needs), and the `f64` colour science (transfer, Lab/OKLab, XYB, `matrix`/`linalg`, gamut map, CCT, profile) | stable (v2; v1 under #179); the colour science is Tier-1 `f64`, not bit-reproducible |
 | `gamut-dsp`       | Shared DSP kernels: AV1 DCT/ADST/identity/WHT, the JPEG 8×8 forward/inverse DCT, quantization rounding | stable (v2; v1 under #192)             |
 | `gamut-bitstream` | Bit readers/writers, LEB128, the AV1 §8.2 symbol (arithmetic) coder, MSB-first sample packing | v0.2, no v1 release issue yet; the ANS and Huffman coders are not implemented |
-| `gamut-tonemap`   | Tone-mapping curves (`ToneCurve` + Reinhard/ACES/Hable/Drago) for HDR→SDR | stable (v1, #188); eight operators, surface frozen |
-| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables + the backend registry | in use by avif, ffi, heic, jpeg, jxl, png and webp |
+| `gamut-tonemap`   | Tone-mapping curves for HDR→SDR: the `ToneCurve` trait over eight operators — Linear, Clamp, Exposure, Reinhard, ReinhardExtended, ACES, Hable, Drago | stable (v1, #188); surface frozen |
+| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables, their object-safe Rust twins, and the registry fallback *contract*; the registries themselves are host-owned, one per consuming crate | direct dependency of avif, ffi, heic, jpeg, jxl, png and webp, plus the umbrella under its `codec-abi` feature |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | stable (v2); structure only, codestream carried opaquely |
 | `gamut-riff`      | RIFF container utilities (WebP)                                        | stable (v1, #186)                      |
 | `gamut-av1`       | AV1 still-image (intra-frame) encoder + decoder — the codec layer beneath AVIF | encoder: lossless and lossy intra keyframes; decoder (default-on `decode` feature): 8-bit 4:4:4 intra frames, key and intra-only (#259) |
@@ -140,8 +140,8 @@ manifest is ahead of its newest release and `gamut-cmm` has no release yet, both
 | `gamut-avif`      | AVIF encoder + container decoder — AV1 still frames in ISOBMFF         | encoder (v1, 8/10/12-bit) + container decode (#250); AV1 codestream decode via the `Av1StillDecoder` seam |
 | `gamut-jxl`       | JPEG XL encoder (libjxl wrap) + decoder (pure-Rust jxl-rs)             | encoder + decoder (#243)               |
 | `gamut-jxl-sys`   | Static libjxl 0.12.0 FFI declarations — native core of gamut-jxl encode | encoder backend (#243)                 |
-| `gamut-jpeg`      | JPEG-1 (ISO/IEC 10918-1) encoder + decoder — baseline & progressive, XYB | encoder + decoder (#28, P1–P13)        |
-| `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                            | implemented VP8 + VP8L (+alpha, metadata, effort/near-lossless) |
+| `gamut-jpeg`      | JPEG-1 (ISO/IEC 10918-1) encoder + decoder — baseline & progressive; the jpegli-style XYB colour mode is encode-only | encoder + decoder (#28, P1–P13) |
+| `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder, with a public `backend` seam for an alternate VP8/VP8L codestream implementation | implemented VP8 + VP8L (+alpha, metadata, effort/near-lossless) |
 | `gamut-heic`      | HEIC/HEIF still-image container **decoder** — HEVC via a pluggable backend | decode-only container (S1–S7); no encoder, by charter |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
 | `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | stable (v2, byte completeness #263); BigTIFF behind `bigtiff` |
@@ -150,7 +150,7 @@ manifest is ahead of its newest release and `gamut-cmm` has no release yet, both
 | `gamut-cmm`       | ICC colour management module (transform engine) over gamut-icc profiles | epic #323 complete (P1–P8); not yet on crates.io |
 | `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | stable (v1, #189); canonical serializer, UTF-8 packets only |
 | `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | stable (v1, #182); Extension structures pass through as raw XMP |
-| `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | stable (v1); orchestration only, C2PA carried opaquely |
+| `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | stable (v1); orchestration only. A C2PA manifest store is extracted verbatim but never re-embedded: embedding drops it, or refuses, because its hard binding cannot survive the rewrite |
 | `gamut-tiff`      | TIFF 6.0 encoder/decoder — on the shared `gamut-ifd` container core     | stable (v1, #107); YCbCr/Lab and JPEG-in-TIFF deferred |
 | `gamut-dng`       | DNG 1.7.1 raw encoder + decoder — a TIFF/EP profile over `gamut-ifd`   | encoder + decoder (v1, #109), Adobe DNG SDK-gated |
 | `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut-png  | encoder (#195); decoding stays on miniz_oxide |
