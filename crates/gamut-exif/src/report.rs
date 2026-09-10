@@ -21,7 +21,11 @@
 //! outside it, both below this crate in [`gamut_ifd`]:
 //!
 //! * a **duplicate tag** within one directory keeps the last occurrence and discards the earlier
-//!   one, with no signal this crate can observe (issue #528);
+//!   one. This crate *could* detect that a directory lost an entry — `RawIfd::entries` is public
+//!   and in on-disk order, so comparing its length against the decoded `Ifd::fields()` finds it in
+//!   three lines — but it could not say what was lost without re-decoding the shadowed entry
+//!   itself. The signal belongs at the layer that does the discarding, which three crates share
+//!   (issue #528);
 //! * a single unparseable **entry** fails its whole directory rather than being skipped, so the
 //!   report's granularity is the directory, never the individual tag (issue #521).
 //!
@@ -32,12 +36,6 @@ use core::fmt;
 
 use crate::exif::{EXIF_IFD_POINTER, GPS_IFD_POINTER, INTEROP_IFD_POINTER};
 use crate::tag::ExifTag;
-
-/// The [`Dropped::tag`] value for a region that no tag addresses.
-///
-/// Zero is a real tag number in a GPS directory (`GPSVersionID`), but never a *pointer* tag, and
-/// [`Dropped::tag`] only ever carries a pointer or offset tag — so it is unambiguous here.
-const NO_TAG: u16 = 0;
 
 /// A region of an EXIF blob that a lenient parse can discard.
 ///
@@ -64,7 +62,11 @@ pub enum DroppedRegion {
     /// EXIF defines exactly two: the 0th IFD (primary image) and the 1st (thumbnail). A stream
     /// whose next-IFD chain runs on has more, and the [`Exif`](crate::Exif) model has nowhere to
     /// put them — so they parse cleanly and are then discarded. No tag addresses one (the chain is
-    /// followed through the structural next-IFD pointer), so [`Dropped::tag`] is `0`.
+    /// followed through the structural next-IFD pointer), so [`Dropped::tag`] is `None`.
+    ///
+    /// Reported in [`strict`](crate::ExifReader::strict) mode too: strictness rejects *malformed*
+    /// regions, and nothing about a trailing directory is malformed — it is well-formed and
+    /// unrepresentable. A strict report is therefore empty of everything *but* this.
     TrailingIfd = 4,
 }
 
@@ -87,14 +89,14 @@ impl DroppedRegion {
         }
     }
 
-    /// The tag whose value addressed this region, or [`NO_TAG`] when none does.
-    pub(crate) const fn tag(self) -> u16 {
+    /// The tag whose value addressed this region, or `None` when no tag does.
+    pub(crate) const fn tag(self) -> Option<u16> {
         match self {
-            Self::ExifIfd => EXIF_IFD_POINTER,
-            Self::GpsIfd => GPS_IFD_POINTER,
-            Self::InteropIfd => INTEROP_IFD_POINTER,
-            Self::ThumbnailJpeg => ExifTag::JpegInterchangeFormat.tag_id(),
-            Self::TrailingIfd => NO_TAG,
+            Self::ExifIfd => Some(EXIF_IFD_POINTER),
+            Self::GpsIfd => Some(GPS_IFD_POINTER),
+            Self::InteropIfd => Some(INTEROP_IFD_POINTER),
+            Self::ThumbnailJpeg => Some(ExifTag::JpegInterchangeFormat.tag_id()),
+            Self::TrailingIfd => None,
         }
     }
 }
@@ -135,7 +137,7 @@ impl DropReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Dropped {
     region: DroppedRegion,
-    tag: u16,
+    tag: Option<u16>,
     offset: u64,
     reason: DropReason,
 }
@@ -160,11 +162,13 @@ impl Dropped {
     /// The tag whose value addressed the discarded region — the pointer tag for a sub-IFD,
     /// `JPEGInterchangeFormat` for the thumbnail bytes.
     ///
-    /// `0` when no tag addresses the region, which today means only
+    /// `None` when no tag addresses the region, which today means only
     /// [`DroppedRegion::TrailingIfd`]: a top-level directory is reached through the structural
-    /// next-IFD pointer, not through a tag.
+    /// next-IFD pointer, not through a tag. This is an `Option` rather than a `0` sentinel because
+    /// `0` is a real tag number (`GPSVersionID`), and the region set is `#[non_exhaustive]` — the
+    /// next region without an addressing tag might well be one inside a GPS directory.
     #[must_use]
-    pub const fn tag(self) -> u16 {
+    pub const fn tag(self) -> Option<u16> {
         self.tag
     }
 
@@ -187,17 +191,23 @@ impl Dropped {
 }
 
 impl fmt::Display for Dropped {
+    /// One grammar for every drop — `dropped <region> (tag <t>) at offset <n>: <reason>` — with
+    /// `none` as the explicit absent marker rather than a second shape. A caller that scrapes this
+    /// line should not have to recognise two forms, and an absent tag is a fact worth stating.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = self.region.name();
         let clause = self.reason.clause();
-        if self.tag == NO_TAG {
-            write!(f, "dropped {name} at offset {}: {clause}", self.offset)
-        } else {
-            write!(
+        match self.tag {
+            Some(tag) => write!(
                 f,
-                "dropped {name} at tag {:#06x}, offset {}: {clause}",
-                self.tag, self.offset
-            )
+                "dropped {name} (tag {tag:#06x}) at offset {}: {clause}",
+                self.offset
+            ),
+            None => write!(
+                f,
+                "dropped {name} (tag none) at offset {}: {clause}",
+                self.offset
+            ),
         }
     }
 }
@@ -206,9 +216,10 @@ impl fmt::Display for Dropped {
 ///
 /// Obtained from [`ExifReader::parse_with_report`](crate::ExifReader::parse_with_report) or
 /// [`ExifReader::parse_from_with_report`](crate::ExifReader::parse_from_with_report). In
-/// [`strict`](crate::ExifReader::strict) mode the first *malformed* region fails the parse instead,
-/// so a strict report can still be non-empty only for regions strictness does not reject (a
-/// trailing directory is discarded either way).
+/// [`strict`](crate::ExifReader::strict) mode the first *malformed* region fails the parse instead
+/// of being reported — but a strict report is **not** therefore always empty:
+/// [`DroppedRegion::TrailingIfd`] is well-formed and merely unrepresentable, so strictness has no
+/// grounds to reject it and it is reported in both modes.
 ///
 /// Read the module documentation for what this report deliberately does **not** cover: it is not a
 /// byte-completeness verdict, and losses inside a single directory belong to [`gamut_ifd`].
@@ -255,11 +266,11 @@ mod tests {
     #[test]
     fn each_region_carries_the_tag_that_addresses_it() {
         for (region, tag) in [
-            (DroppedRegion::ExifIfd, 0x8769),
-            (DroppedRegion::GpsIfd, 0x8825),
-            (DroppedRegion::InteropIfd, 0xA005),
-            (DroppedRegion::ThumbnailJpeg, 0x0201),
-            (DroppedRegion::TrailingIfd, NO_TAG),
+            (DroppedRegion::ExifIfd, Some(0x8769)),
+            (DroppedRegion::GpsIfd, Some(0x8825)),
+            (DroppedRegion::InteropIfd, Some(0xA005)),
+            (DroppedRegion::ThumbnailJpeg, Some(0x0201)),
+            (DroppedRegion::TrailingIfd, None),
         ] {
             assert_eq!(
                 Dropped::new(region, 0, DropReason::OutOfBounds).tag(),
@@ -275,29 +286,31 @@ mod tests {
     fn the_rendered_drop_names_region_tag_offset_and_reason() {
         assert_eq!(
             Dropped::new(DroppedRegion::GpsIfd, 65_535, DropReason::OutOfBounds).to_string(),
-            "dropped GPS at tag 0x8825, offset 65535: addresses bytes outside the EXIF blob"
+            "dropped GPS (tag 0x8825) at offset 65535: addresses bytes outside the EXIF blob"
         );
         assert_eq!(
             Dropped::new(DroppedRegion::ExifIfd, 26, DropReason::Malformed).to_string(),
-            "dropped Exif at tag 0x8769, offset 26: is not a well-formed directory"
+            "dropped Exif (tag 0x8769) at offset 26: is not a well-formed directory"
         );
         assert_eq!(
             Dropped::new(DroppedRegion::InteropIfd, 8, DropReason::Malformed).to_string(),
-            "dropped Interop at tag 0xa005, offset 8: is not a well-formed directory"
+            "dropped Interop (tag 0xa005) at offset 8: is not a well-formed directory"
         );
         assert_eq!(
             Dropped::new(DroppedRegion::ThumbnailJpeg, 1, DropReason::OutOfBounds).to_string(),
-            "dropped Thumbnail at tag 0x0201, offset 1: addresses bytes outside the EXIF blob"
+            "dropped Thumbnail (tag 0x0201) at offset 1: addresses bytes outside the EXIF blob"
         );
     }
 
-    /// A region no tag addresses renders without a tag clause, rather than claiming tag `0x0000` —
-    /// which is a real tag number (`GPSVersionID`) and would read as a fact about the source.
+    /// A region no tag addresses says so explicitly, in the same grammar as every other drop —
+    /// rather than claiming tag `0x0000`, which is a real tag number (`GPSVersionID`) and would
+    /// read as a fact about the source.
     #[test]
-    fn a_drop_with_no_addressing_tag_renders_without_one() {
+    fn a_drop_with_no_addressing_tag_says_so_in_the_same_grammar() {
         assert_eq!(
             Dropped::new(DroppedRegion::TrailingIfd, 120, DropReason::Unrepresentable).to_string(),
-            "dropped TrailingIFD at offset 120: parsed cleanly but has no place in the EXIF model"
+            "dropped TrailingIFD (tag none) at offset 120: parsed cleanly but has no place in the \
+             EXIF model"
         );
     }
 

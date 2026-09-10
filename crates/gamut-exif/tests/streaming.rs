@@ -118,10 +118,13 @@ fn extracting_exif_from_a_large_file_never_reads_the_payload() {
     assert!(exif.thumbnail().is_some(), "the 1st IFD was read");
 
     // 251 bytes today: the marker, the header, five directory bodies and their out-of-line
-    // values. 512 leaves room for a tag or two without letting a megabyte through — four
-    // megabytes is the failure mode a slurping reader would show.
+    // values. Four megabytes is the failure mode a slurping reader would show — but the bound is
+    // tighter than "not the payload" on purpose. A reader that re-walks the next-IFD chain when it
+    // has no trailing directory to report costs 347 bytes here, so 300 is the value that makes
+    // that a *failure* rather than an invisible inefficiency; it still leaves ~20% headroom for a
+    // tag or two.
     assert!(
-        counting.bytes_read <= 512,
+        counting.bytes_read <= 300,
         "streaming parse read {} bytes of a {FILE_LEN}-byte file",
         counting.bytes_read
     );

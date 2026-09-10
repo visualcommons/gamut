@@ -120,7 +120,10 @@ without breaking the 1.0 API — the catalogue and vendor enums are `#[non_exhau
   directory in `gamut-ifd`, so the report's granularity is the sub-IFD, not the individual tag
   (issue #521).
 - **A signal for a shadowed duplicate tag.** Two entries for one tag decode to the last, and the
-  earlier one is discarded a layer below this crate, where `ReadReport` cannot see it (issue #528).
+  earlier one is discarded a layer below this crate. `gamut-exif` could *detect* the loss (compare
+  `RawIfd::entries` against the decoded `Ifd::fields()`), but not describe it without re-decoding
+  the shadowed entry, so the signal belongs where the discarding happens — a layer three crates
+  share (issue #528).
 - **A byte-completeness verdict** over the whole blob (which source bytes no parsed structure
   claims). `gamut-ifd`'s audit engine has the machinery; `ReadReport` today reports only what was
   dropped, not what was never reached (issue #521).
