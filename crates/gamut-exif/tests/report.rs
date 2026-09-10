@@ -288,3 +288,65 @@ fn a_truncated_blob_never_drops_a_sub_ifd_without_naming_it() {
         "no truncation dropped a sub-IFD — the sweep proved nothing"
     );
 }
+/// A thumbnail offset with no length beside it is named rather than silently ignored.
+///
+/// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength` both
+/// mandatory for a compressed thumbnail, so half the pair is not "no thumbnail" — it is an address
+/// with nothing to size the read by, and the JPEG behind it is lost. Before this the pair fell into
+/// the reader's catch-all `None` arm: no bytes, no error, no report entry, inside the very region
+/// this report claims completeness over.
+#[test]
+fn a_thumbnail_offset_without_a_length_is_named() {
+    let mut thumb = Ifd::new();
+    thumb.set(0x0103, Value::Short(vec![6])); // Compression = JPEG
+    thumb.set(THUMB_OFFSET, Value::Long(vec![4])); // ...in bounds, so not OutOfBounds
+    // ...and deliberately no THUMB_LENGTH.
+
+    let (exif, report) = ExifReader::new()
+        .parse_with_report(&tiff(vec![image_ifd(), thumb]))
+        .expect("lenient parse");
+
+    assert_eq!(
+        exif.thumbnail().and_then(|t| t.jpeg()),
+        None,
+        "there is no length, so there are no bytes"
+    );
+    assert_eq!(report.dropped().len(), 1, "{:?}", report.dropped());
+    let dropped = report.dropped()[0];
+    assert_eq!(dropped.region(), DroppedRegion::ThumbnailJpeg);
+    assert_eq!(dropped.tag(), Some(THUMB_OFFSET));
+    assert_eq!(dropped.offset(), 4, "named at the offset the tag carried");
+    assert_eq!(
+        dropped.reason(),
+        DropReason::Incomplete,
+        "not OutOfBounds — the address is inside the blob; the length is what is missing"
+    );
+}
+
+/// A thumbnail with neither JPEG tag is an uncompressed thumbnail, not a loss, and reports nothing.
+///
+/// The other direction of the pair: a `JPEGInterchangeFormatLength` on its own addresses no bytes
+/// at all, so there is nothing to name. Without this, reporting the incomplete pair could be
+/// "fixed" by reporting every thumbnail that has no JPEG, which would make the signal noise.
+#[test]
+fn a_thumbnail_with_no_jpeg_range_reports_nothing() {
+    for extra in [None, Some((THUMB_LENGTH, 16))] {
+        let mut thumb = Ifd::new();
+        thumb.set(0x0103, Value::Short(vec![1])); // Compression = uncompressed
+        if let Some((tag, value)) = extra {
+            thumb.set(tag, Value::Long(vec![value]));
+        }
+        let (exif, report) = ExifReader::new()
+            .parse_with_report(&tiff(vec![image_ifd(), thumb]))
+            .expect("lenient parse");
+        assert!(
+            exif.thumbnail().is_some(),
+            "the 1st IFD is still a thumbnail"
+        );
+        assert!(
+            report.is_empty(),
+            "nothing was addressed, so nothing was dropped: {:?}",
+            report.dropped()
+        );
+    }
+}

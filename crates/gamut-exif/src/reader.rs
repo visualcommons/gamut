@@ -257,6 +257,42 @@ mod tests {
         );
     }
 
+    /// A thumbnail offset with no length is a malformed pair, and strict mode says so.
+    ///
+    /// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength`
+    /// both mandatory for a compressed thumbnail. Half the pair therefore fails strictness for the
+    /// same reason an out-of-bounds range does — the sibling case above — rather than passing as a
+    /// thumbnail that simply has no bytes. The lenient half of the contract is the report, pinned in
+    /// `tests/report.rs`.
+    #[test]
+    fn a_thumbnail_offset_without_a_length_is_rejected_strictly() {
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        let mut thumb = Ifd::new();
+        thumb.set(ExifTag::Compression.tag_id(), Value::Short(vec![6]));
+        thumb.set(
+            ExifTag::JpegInterchangeFormat.tag_id(),
+            Value::Long(vec![4]),
+        );
+        // ...and deliberately no JpegInterchangeFormatLength.
+        let bytes = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image, thumb],
+        })
+        .expect("write");
+
+        let err = ExifReader::new()
+            .strict(true)
+            .parse(&bytes)
+            .expect_err("strict must reject half a thumbnail pair");
+        assert_eq!(
+            err.to_string(),
+            "invalid thumbnail: JPEGInterchangeFormat without JPEGInterchangeFormatLength",
+            "the message must name which half is missing"
+        );
+    }
+
     #[test]
     fn lenient_drops_a_dangling_sub_ifd_pointer_that_strict_rejects() {
         // An ExifIFD pointer that addresses far past the end of the stream.

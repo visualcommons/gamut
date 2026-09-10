@@ -197,8 +197,13 @@ impl ExifReader {
 
     /// Builds a [`Thumbnail`] from the 1st IFD, fetching its JPEG bytes (from the
     /// `JPEGInterchangeFormat` offset / length) when the range is wholly inside the stream. In
-    /// lenient mode an out-of-bounds range yields a thumbnail without bytes and a recorded drop;
-    /// in strict mode it errors.
+    /// lenient mode an unusable range yields a thumbnail without bytes and a recorded drop; in
+    /// strict mode it errors.
+    ///
+    /// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength`
+    /// *both* mandatory for a compressed thumbnail, so an offset without a length is a malformed
+    /// pair, not an absent thumbnail: it addresses bytes nothing can size. A length without an
+    /// offset addresses nothing at all, so nothing was dropped and nothing is reported.
     fn read_thumbnail<S: ReadAt>(
         &self,
         ifd: Ifd,
@@ -223,7 +228,20 @@ impl ExifReader {
                     None
                 }
             },
-            _ => None,
+            (Some(_), None) if self.strict => {
+                return Err(ExifError::BadThumbnail(
+                    "JPEGInterchangeFormat without JPEGInterchangeFormatLength",
+                ));
+            }
+            (Some(offset), None) => {
+                report.record(Dropped::new(
+                    DroppedRegion::ThumbnailJpeg,
+                    u64::from(offset),
+                    DropReason::Incomplete,
+                ));
+                None
+            }
+            (None, _) => None,
         };
         // The JPEGInterchangeFormat offset is structural — the bytes are captured above and the
         // writer re-synthesises the offset — so drop it from the stored directory (mirroring how the
