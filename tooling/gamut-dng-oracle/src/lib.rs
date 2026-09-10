@@ -306,10 +306,12 @@ pub fn read_linear_dng(bytes: &[u8]) -> Result<AdobeRaw, String> {
 
 /// Identifies the zlib the SDK's Deflate reader calls: its `zlibVersion()` string and, where the
 /// loader can report it, the resolved path of the shared object the symbol came from — e.g.
-/// `"1.3.1 from /usr/lib64/libz.so.1.3.1.zlib-ng"`.
+/// `"1.3.1 from /usr/lib64/libz.so.1.3.1"`.
 ///
-/// The path is the discriminating part: `zlibVersion()` reports the zlib *API* version, so the
-/// zlib-ng compatibility build answers `"1.3.1"` exactly as stock zlib does.
+/// The path is the discriminating part: `zlibVersion()` reports the string the loaded build
+/// carries, and the two candidates that actually collide here — a stock `libz.so.1.3.1` a build
+/// script left under `target/` and a stock `libz.so.1.3.1` installed on the platform — carry the
+/// same one.
 ///
 /// `build.rs` links the system libz dynamically (`-lz`) because the SDK includes `<zlib.h>`
 /// unconditionally. That makes the SDK's Deflate decode the one measured path in this oracle that

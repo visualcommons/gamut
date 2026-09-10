@@ -409,17 +409,23 @@ removed or measured; none is left as an adjective.
   whatever libz the loader resolved** — not gamut's own codec against the SDK's. The distinction
   that decides whether the row is reproducible is **pinning**, not authorship: `miniz_oxide` is
   pinned by `Cargo.lock` to one version and one checksum, so every run of this harness anywhere
-  inflates with the same code, while the system libz is pinned by nothing. Not by a version —
-  zlib-ng's compatibility build answers `zlibVersion()` with `"1.3.1"`, exactly as stock zlib does
-  — and not even by the machine: `cargo bench` puts every build script's native search path on
+  inflates with the same code, while the system libz is pinned by nothing. Not by a version — two
+  *stock* builds of one zlib version answer `zlibVersion()` with the same string, so the version
+  cannot say which of them was loaded, and on the resolution this harness actually trips over both
+  candidates are stock 1.3.1: the copy a dev oracle left under `target/` and an installed
+  `/usr/lib64/libz.so.1.3.1`. (A fork that changes the string, such as this box's
+  `zlib-ng`-compatibility build answering `"1.3.1.zlib-ng"`, *is* separable by version; the
+  identification cannot rest on that, because the pair that actually collides does not differ.)
+  And not even by the machine: `cargo bench` puts every build script's native search path on
   `LD_LIBRARY_PATH`, so it resolves whichever stock zlib a dev oracle in the graph has built under
   `target/` (`gamut-dng` dev-depends on `libtiff-oracle`, which builds one, so `cargo bench -p
   gamut-dng` on its own is enough), while running the same binary directly resolves the platform's.
   Measured here, that choice moves the reference arm by 1.2–1.3× and moves gamut's arm not at all —
   enough to reverse which side of 1.0 a Deflate row falls on, with no defect in either
   implementation. The harness therefore prints the resolved library above its divan output
-  (`zlibVersion()` plus the path `dladdr` reports, since the version string cannot tell the two
-  builds apart) and **warns when that path lies inside a build directory**, because a resolution
+  (`zlibVersion()` plus the path `dladdr` reports; the path is what identifies the resolution,
+  because two stock builds of one version are indistinguishable by version string) and **warns
+  when that path lies inside a build directory**, because a resolution
   that came from the build graph rather than from the platform is one nobody else reproduces. A
   Deflate figure below travels with the library it was taken against or not at all. Pinning that
   library for the benchmark while keeping `-lz` for conformance is filed as **#618** and not taken

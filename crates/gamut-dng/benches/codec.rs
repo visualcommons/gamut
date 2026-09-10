@@ -65,8 +65,13 @@
 //! The distinction that decides whether such a row is reproducible is **pinning**, not
 //! authorship: `miniz_oxide` is pinned by `Cargo.lock` to one version and one checksum, so every
 //! run of this harness anywhere inflates with the same code, while the system libz is pinned by
-//! nothing. Not by a version — zlib-ng's compatibility build answers `zlibVersion()` with stock
-//! zlib's own string — and not even by the machine: cargo puts every build script's native search
+//! nothing. Not by a version — two *stock* builds of one zlib version answer `zlibVersion()`
+//! identically, so the version cannot say which was loaded, and the two candidates this harness
+//! actually collides are exactly that pair: the copy a dev oracle left under `target/` and an
+//! installed `libz.so.1.3.1`. A fork that changes the string (a `zlib-ng`-compatibility build
+//! answering `"1.3.1.zlib-ng"`, say) *is* separable by version, which is why the identification
+//! must rest on the path instead: the pair that collides does not differ in the string at all.
+//! And not even by the machine: cargo puts every build script's native search
 //! path on `LD_LIBRARY_PATH`, and `gamut-dng`'s own dev-dependency `libtiff-oracle` builds a
 //! `libz.so` under `target/`, so `cargo bench` and the same binary launched directly can resolve
 //! different implementations. Stock zlib and a zlib-ng-class fork differ by more than the margin
@@ -657,7 +662,8 @@ this crate inflates with miniz_oxide, and the SDK calls the system libz, which t
 dynamically because it includes <zlib.h> unconditionally. Read those rows as miniz_oxide against
 that libz. What separates them is that miniz_oxide is pinned by Cargo.lock -- one version, one
 checksum, the same code everywhere -- and the system libz is pinned by nothing: not by a version
-(zlib-ng answers zlibVersion() with stock zlib's string), and not by the machine, since cargo puts
+(two stock builds of one zlib version answer zlibVersion() identically, so the path printed above,
+not the version, is what says which one was loaded), and not by the machine, since cargo puts
 every build script's native search path on LD_LIBRARY_PATH. The resolved library is printed above,
 with a warning when it came out of a build directory; publish it with any Deflate figure, and do
 not compare a Deflate ratio against one taken on a different libz. Every other row runs only code

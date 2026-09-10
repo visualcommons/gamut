@@ -125,10 +125,14 @@ const std::string &resolved_zlib_path() {
 // followed, where the loader can tell us, by the resolved path of the shared object the symbol
 // came from.
 //
-// The path is the part that matters. `zlibVersion()` reports the zlib API version, so the
-// zlib-ng compatibility build answers "1.3.1" exactly as stock zlib does and cannot tell the two
-// apart -- while `dladdr` plus `realpath` yields e.g. `/usr/lib64/libz.so.1.3.1.zlib-ng`, which
-// can.
+// The path is the part that matters. `zlibVersion()` reports the string the loaded build carries,
+// which separates two builds only when they chose different strings -- and the pair this oracle
+// actually collides did not. Two *stock* builds of one version, the copy a build script left at
+// `<target>/release/build/*/out/zlib-prefix/lib/libz.so.1.3.1` and an installed
+// `/usr/lib64/libz.so.1.3.1`, both answer "1.3.1"; `dladdr` plus `realpath` names each one
+// exactly. (A fork that renames itself, e.g. a zlib-ng-compatibility build answering
+// "1.3.1.zlib-ng", is separable by version -- but the identification cannot rest on a fork
+// choosing to rename itself.)
 //
 // This matters to a *measurement*, not to correctness. `build.rs` links the system libz
 // dynamically (`-lz`), so the SDK's Deflate decode is a measured code path this oracle neither
