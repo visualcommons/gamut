@@ -49,26 +49,45 @@ fn a_store_signed_over_the_reserved_file_validates_once_patched_into_the_reporte
 }
 
 #[test]
-fn the_signed_store_exactly_fills_the_slot_that_was_reserved() {
+fn the_signed_store_is_exactly_the_length_the_placeholder_asked_the_host_to_reserve() {
     let filled = reserve_then_fill(AVIF_MIME, reserve_avif).expect("reserve, sign and patch");
 
     // `Builder::placeholder` pins the JUMBF length and `sign_embeddable` zero-pads back to it, so
     // the store is the size the caller was told to reserve. Nothing in the file after the slot can
     // move, which is the encoder-side criterion the epic states.
+    //
+    // This is the one claim here that is about c2pa-rs. `slot.len() == store.len()` and "the
+    // slot's bytes are the store's bytes" were asserted alongside it and could not fail:
+    // `reserve_then_fill` refuses the first before it returns — see
+    // `a_slot_that_is_not_the_signed_stores_length_is_refused_rather_than_patched` below, which
+    // drives that refusal instead of restating it — and produces the second with
+    // `copy_from_slice`. Both said only that the oracle's own plumbing ran.
     assert_eq!(
         filled.store.len(),
         filled.placeholder_store_len,
         "the signed store must be exactly the length the placeholder asked the host to reserve"
     );
-    assert_eq!(
-        filled.slot.len(),
-        filled.store.len(),
-        "the reserved slot must be exactly the store's length"
-    );
-    assert_eq!(
-        &filled.asset[filled.slot.clone()],
-        filled.store.as_slice(),
-        "the slot's bytes must be the store's bytes"
+}
+
+#[test]
+fn a_slot_that_is_not_the_signed_stores_length_is_refused_rather_than_patched() {
+    // The refusal `reserve_then_fill` carries, exercised rather than assumed: reserve one byte
+    // more than the placeholder asked for and the signed store no longer fills the slot. Patching
+    // it in anyway would leave a trailing byte of whatever the encoder wrote inside the store's
+    // own `LBox` bound, and every "the range is identical" claim downstream would be measured
+    // against a store the oracle had quietly mis-sized.
+    //
+    // A slot *larger* than the store is also the one configuration nothing here signs
+    // successfully — the case where a box-bounded and an `LBox`-bounded locator legitimately
+    // diverge. Making the oracle pad rather than refuse is issue #598.
+    let error = reserve_then_fill(AVIF_MIME, |len| reserve_avif(len + 1))
+        .expect_err("a slot one byte too long is not a slot the signed store fits");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("signed store is") && message.contains("the reserved slot is"),
+        "the refusal must name both lengths, so a caller sees which side got it wrong rather \
+         than only that something did; got {error}"
     );
 }
 
