@@ -302,14 +302,17 @@ run = "./tooling/check-tests/run.sh"
 # so neither would have caught it. This gates the table's *membership* -- every workspace crate
 # has a row, every row names a real crate, no crate twice -- each crate row's *shape* (three cells
 # whose Purpose and Status each render as something, and not hidden inside an HTML comment or a
-# code fence), and the `| --- | --- | --- |` delimiter row, without which every row below renders
-# as literal text. It gates nothing about the prose, so a green run means "every crate has a
-# well-formed row", not "the table is true". A row's prose answers to the crate's own source --
+# code fence), and the table's *context*: the first crate row must sit directly under a delimiter
+# row that sits directly under a header row of the same width, since anything else renders every
+# row below as literal text. One bypass stays open and is named in the script header -- a blank
+# line BETWEEN two crate rows splits the table while every check still passes. It gates nothing
+# about the prose, so a green run means "every crate has a well-formed row under a real table
+# head", not "the table is true". A row's prose answers to the crate's own source --
 # the code that ships. lib.rs, then Cargo.toml, then STATUS.md is where to look, but each is a
 # summary and any of them can be stale (issues #545, #560), so a row must be true of the crate
 # rather than faithful to a file.
 [tasks.check-readme-crates]
-description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, stands under its delimiter row, and gives each crate a three-cell row whose Purpose and Status render as something"
+description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, sits directly under a header and delimiter row of matching width, and gives each crate a three-cell row whose Purpose and Status render as something"
 run = "./tooling/check-readme-crates/run.sh"
 
 [tasks.check-release-deps]
