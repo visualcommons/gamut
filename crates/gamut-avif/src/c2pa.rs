@@ -7,7 +7,7 @@
 //! around the store, on the write side to reserve or fill a slot for one
 //! ([`AvifEncoder::with_c2pa_reserved`](crate::AvifEncoder::with_c2pa_reserved) /
 //! [`with_c2pa`](crate::AvifEncoder::with_c2pa)) and on the read side to report where one sits
-//! ([`AvifContainer::c2pa`]). It parses nothing inside the store, verifies no hash, checks no
+//! ([`AvifContainer::c2pa_slot`]). It parses nothing inside the store, verifies no hash, checks no
 //! signature and reaches no verdict — validation is a C2PA validator's job, downstream.
 //!
 //! §A.5.1.2 defines the box as a `FullBox` with `version = 0` and `flags = 0`:
@@ -47,6 +47,7 @@
 
 use core::ops::Range;
 
+use gamut_core::{Error, Result};
 use gamut_isobmff::{Segment, SegmentKind};
 
 use crate::container::AvifContainer;
@@ -64,6 +65,29 @@ const VERSION_FLAGS: [u8; 4] = [0; 4];
 /// Length of the absolute file offset of the first `merkle` box that opens `data` (§A.5.3). A
 /// still image this crate writes has no `merkle` box, so the encoder writes it as zero.
 const MERKLE_OFFSET_LEN: usize = 8;
+
+/// The shortest slot a **reservation** may ask for: the 8 bytes of a JUMBF box header — its 4-byte
+/// `LBox` length and its 4-byte `TBox` type — since a manifest store is a JUMBF superbox and a
+/// shorter slot could not hold even that header, let alone a store.
+///
+/// C2PA 2.4 §8.4.2.3 ("Hashing JUMBF Boxes") is where the width and endianness of the pair are
+/// traceable within the C2PA specification itself; the general JUMBF grammar is ISO/IEC 19566-5,
+/// which C2PA references but does not restate and which is not vendored here. `gamut-heic` bounds
+/// its `LBox` reads by the same constant (its `JUMBF_HEADER_LEN`).
+///
+/// This bounds the **write** side only. See [`content_provenance_reserved`] for the refusal and
+/// [`AvifContainer::c2pa_slots`] for why the read side stays permissive.
+const MIN_SLOT_LEN: usize = 8;
+
+/// The longest `ContentProvenanceBox` payload [`content_provenance_reserved`] will build: a `Vec`
+/// holds at most `isize::MAX` bytes, and asking for more *panics* with "capacity overflow" rather
+/// than returning. Refusing above this ceiling turns that panic into an error, so no reservation
+/// length can panic the library.
+///
+/// Above it lies only the allocator's own limit — a length within this ceiling but beyond the
+/// machine's memory aborts, as any oversized allocation in Rust does, which no fallible API here
+/// can intercept.
+const MAX_PAYLOAD_LEN: usize = isize::MAX as usize;
 
 /// The `box_purpose` of a C2PA `uuid` box that carries a manifest store (C2PA 2.4 §A.5.3).
 ///
@@ -192,23 +216,27 @@ pub struct C2paSlot<'a> {
 }
 
 impl<'a> AvifContainer<'a> {
-    /// The first C2PA manifest store in the file, in file order, or `None` if the file carries
-    /// none.
+    /// The first C2PA manifest-store **slot** in the file, in file order, or `None` if the file
+    /// carries none.
     ///
     /// A file that is mid-update legitimately carries two — an `original` box and an `update` box
     /// (C2PA 2.4 §A.5.3) — and deciding which of them is *active* is a validator's judgement, not a
     /// container reader's. This accessor therefore promises only "the first one"; use
-    /// [`c2pa_manifest_stores`](Self::c2pa_manifest_stores) to see them all with their purposes.
+    /// [`c2pa_slots`](Self::c2pa_slots) to see them all with their purposes.
     ///
     /// See [`C2paSlot`] for exactly what is stripped, what bounds the slot, and why the
     /// reported range must not be treated as a BMFF exclusion range.
     #[must_use]
-    pub fn c2pa(&self) -> Option<C2paSlot<'a>> {
-        self.c2pa_manifest_stores().next()
+    pub fn c2pa_slot(&self) -> Option<C2paSlot<'a>> {
+        self.c2pa_slots().next()
     }
 
-    /// Every C2PA manifest store among the **top-level boxes of the primary stream**, in file
-    /// order.
+    /// Every C2PA manifest-store **slot** among the **top-level boxes of the primary stream**, in
+    /// file order.
+    ///
+    /// Each item is a [`C2paSlot`]: the box-bounded region after the merkle offset, which is a
+    /// manifest store only if somebody wrote one there. This accessor reports where a store would
+    /// sit, never that one is valid — nothing inside the slot is parsed.
     ///
     /// Only *top-level* `uuid` boxes are considered — where §A.5.3 puts the box, and the set
     /// [`gamut_isobmff::read`] stores in
@@ -223,16 +251,26 @@ impl<'a> AvifContainer<'a> {
     /// flags are non-zero, whose `box_purpose` is not one of [`C2paBoxPurpose`]'s, or whose body is
     /// too short to hold the framing is skipped silently: this is a lens over bytes that happen to
     /// be present, so a malformed or foreign box yields nothing rather than an error.
-    pub fn c2pa_manifest_stores(&self) -> impl Iterator<Item = C2paSlot<'a>> + '_ {
-        manifest_stores(self.segments())
+    ///
+    /// # The read side is permissive where the write side is strict
+    ///
+    /// [`AvifEncoder::with_c2pa_reserved`](crate::AvifEncoder::with_c2pa_reserved) **refuses** to
+    /// write a slot shorter than a JUMBF box header, because a slot that cannot hold a store is a
+    /// caller's mistake made before any bytes exist. This locator makes no such demand: a
+    /// well-framed box with a zero-length or otherwise degenerate slot is reported with its true
+    /// (possibly empty) range, because the bytes are *there* and some other writer put them there.
+    /// The asymmetry is deliberate — strict in what it writes, honest about what it reads — so a
+    /// file this crate would decline to produce is still one it will faithfully describe.
+    pub fn c2pa_slots(&self) -> impl Iterator<Item = C2paSlot<'a>> + '_ {
+        slots(self.segments())
     }
 }
 
-/// The manifest stores among `segments`' top-level boxes, in order — the one locator behind
-/// [`AvifContainer::c2pa_manifest_stores`] and the encoder's
+/// The manifest-store slots among `segments`' top-level boxes, in order — the one locator behind
+/// [`AvifContainer::c2pa_slots`] and the encoder's
 /// [`encode_with_report`](crate::AvifEncoder::encode_with_report), so the range the encoder
 /// reports is the range the reader finds.
-pub(crate) fn manifest_stores<'a, 's>(
+pub(crate) fn slots<'a, 's>(
     segments: &'s [Segment<'a>],
 ) -> impl Iterator<Item = C2paSlot<'a>> + 's {
     segments.iter().filter_map(|segment| match segment.kind {
@@ -278,15 +316,22 @@ fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paSl
     None
 }
 
-/// The framing a `ContentProvenanceBox` payload opens with, sized for a `slot_len`-byte slot after
-/// it: the zero `FullBox` version and flags, the NUL-terminated `box_purpose`, and the 8-byte
-/// merkle offset written as zero (a still image carries no `merkle` box).
-fn content_provenance_framing(purpose: C2paBoxPurpose, slot_len: usize) -> Vec<u8> {
-    let purpose = purpose.as_str().as_bytes();
-    let mut payload =
-        Vec::with_capacity(VERSION_FLAGS.len() + purpose.len() + 1 + MERKLE_OFFSET_LEN + slot_len);
+/// How many bytes of §A.5.1.2 framing precede the slot for `purpose`: the 4-byte zero `FullBox`
+/// version and flags, the NUL-terminated `box_purpose`, and the 8-byte merkle offset.
+const fn framing_len(purpose: C2paBoxPurpose) -> usize {
+    VERSION_FLAGS.len() + purpose.as_str().len() + 1 + MERKLE_OFFSET_LEN
+}
+
+/// The framing a `ContentProvenanceBox` payload opens with — the zero `FullBox` version and flags,
+/// the NUL-terminated `box_purpose`, and the 8-byte merkle offset written as zero (a still image
+/// carries no `merkle` box) — in a buffer pre-sized to `capacity`, the payload's finished length.
+///
+/// `capacity` is a caller-computed total rather than a slot length this function adds on, so the
+/// one addition that can overflow lives at each caller, where it is checked or provably safe.
+fn content_provenance_framing(purpose: C2paBoxPurpose, capacity: usize) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(capacity);
     payload.extend_from_slice(&VERSION_FLAGS);
-    payload.extend_from_slice(purpose);
+    payload.extend_from_slice(purpose.as_str().as_bytes());
     payload.push(0);
     payload.extend_from_slice(&[0; MERKLE_OFFSET_LEN]);
     payload
@@ -295,8 +340,12 @@ fn content_provenance_framing(purpose: C2paBoxPurpose, slot_len: usize) -> Vec<u
 /// The payload of a `ContentProvenanceBox` after its user type — what
 /// [`gamut_isobmff::TopLevelBox::uuid`] takes: the §A.5.1.2 framing, then `slot` verbatim as the
 /// store slot.
+///
+/// Infallible where [`content_provenance_reserved`] is not: `slot` is a materialised slice, so
+/// `slot.len() <= isize::MAX` and the total cannot overflow a `usize`. A *reservation* is a bare
+/// integer with no such bound, which is why only that path has to refuse.
 pub(crate) fn content_provenance_payload(purpose: C2paBoxPurpose, slot: &[u8]) -> Vec<u8> {
-    let mut payload = content_provenance_framing(purpose, slot.len());
+    let mut payload = content_provenance_framing(purpose, framing_len(purpose) + slot.len());
     payload.extend_from_slice(slot);
     payload
 }
@@ -304,12 +353,39 @@ pub(crate) fn content_provenance_payload(purpose: C2paBoxPurpose, slot: &[u8]) -
 /// The same payload with a `len`-byte **reserved** slot: the framing, then `len` zero bytes.
 ///
 /// Written with one `resize` into the buffer the payload already owns rather than by building a
-/// `vec![0; len]` and copying it in, so reserving an n-byte slot peaks at n bytes and not 2n — the
-/// encoder is allocation-conscious and a caller may reserve megabytes.
-pub(crate) fn content_provenance_reserved(purpose: C2paBoxPurpose, len: usize) -> Vec<u8> {
-    let mut payload = content_provenance_framing(purpose, len);
-    payload.resize(payload.len() + len, 0);
-    payload
+/// `vec![0; len]` and copying it in, so *the payload builder* peaks at n bytes for an n-byte slot
+/// and not 2n. The encode as a whole still peaks near 2n, because `gamut_isobmff::writer` copies
+/// this payload into the output buffer; the saving claimed here is this function's alone.
+///
+/// # Errors
+///
+/// [`Error::InvalidInput`] if `len` is below [`MIN_SLOT_LEN`] — a slot too small to hold a JUMBF
+/// box header can never hold a manifest store — or if the framed payload would exceed
+/// [`MAX_PAYLOAD_LEN`]. Both are refused rather than documented as a precondition, because both
+/// unchecked outcomes were wrong in different ways: the sum wraps in the release profile every
+/// downstream consumer builds with, truncating the framing and emitting a well-formed file whose
+/// C2PA box no locator can find, and just below the wrap it panics inside `Vec` instead. A silent
+/// wrong answer about the range a signer binds, or a panic out of an infallible builder, are both
+/// outcomes this refuses to produce.
+pub(crate) fn content_provenance_reserved(purpose: C2paBoxPurpose, len: usize) -> Result<Vec<u8>> {
+    if len < MIN_SLOT_LEN {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: a reserved C2PA slot is at least 8 bytes, the size of a JUMBF box header",
+        ));
+    }
+    let total = framing_len(purpose)
+        .checked_add(len)
+        .filter(|&total| total <= MAX_PAYLOAD_LEN)
+        .ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: the reserved C2PA slot exceeds the largest ContentProvenanceBox that fits in memory",
+            )
+        })?;
+    let mut payload = content_provenance_framing(purpose, total);
+    payload.resize(total, 0);
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -365,18 +441,59 @@ mod tests {
     #[test]
     fn a_reserved_slot_is_the_payload_a_zero_slot_would_give() {
         // `content_provenance_reserved` exists only to avoid materialising the zeros twice, so it
-        // must agree byte for byte with handing the same zeros to the payload builder — at a
-        // couple of lengths, and at zero, where the two paths differ most (no resize at all).
-        for len in [0usize, 1, 96] {
+        // must agree byte for byte with handing the same zeros to the payload builder — at the
+        // shortest slot it will write and at a couple of longer ones.
+        for len in [MIN_SLOT_LEN, MIN_SLOT_LEN + 1, 96] {
             for purpose in [
                 C2paBoxPurpose::Manifest,
                 C2paBoxPurpose::Original,
                 C2paBoxPurpose::Update,
             ] {
                 assert_eq!(
-                    content_provenance_reserved(purpose, len),
+                    content_provenance_reserved(purpose, len).expect("a framable reservation"),
                     content_provenance_payload(purpose, &vec![0u8; len]),
                     "{purpose:?} at {len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_reservation_below_a_jumbf_box_header_is_refused() {
+        // A slot shorter than the 8-byte `LBox`/`TBox` pair cannot hold even the outermost box of
+        // an empty manifest store, so the writer declines rather than emitting a slot no signer
+        // could use. Every length below the bound is refused and the bound itself is accepted, so
+        // the comparison cannot be off by one.
+        for len in 0..MIN_SLOT_LEN {
+            let err = content_provenance_reserved(C2paBoxPurpose::Manifest, len)
+                .expect_err("shorter than a JUMBF box header");
+            assert!(
+                format!("{err}").contains("at least 8 bytes"),
+                "{len}: {err}"
+            );
+        }
+        assert!(content_provenance_reserved(C2paBoxPurpose::Manifest, MIN_SLOT_LEN).is_ok());
+    }
+
+    #[test]
+    fn a_reservation_that_cannot_be_framed_is_refused_rather_than_truncated_or_panicked() {
+        // Two unchecked failures sit next to each other above the ceiling. Nearest `usize::MAX`,
+        // the framing addition wrapped and `resize` *shrank* the framing instead of growing it,
+        // producing a well-formed file whose C2PA box the locator could not find. Just below that,
+        // the sum was representable but larger than a `Vec` can hold, so `with_capacity` panicked.
+        // Every length from the first one over the ceiling upwards is refused, so neither survives.
+        for purpose in [
+            C2paBoxPurpose::Manifest,
+            C2paBoxPurpose::Original,
+            C2paBoxPurpose::Update,
+        ] {
+            let over_ceiling = MAX_PAYLOAD_LEN - framing_len(purpose) + 1;
+            for len in [over_ceiling, usize::MAX - framing_len(purpose), usize::MAX] {
+                let err = content_provenance_reserved(purpose, len)
+                    .expect_err("no framed payload this size can be built");
+                assert!(
+                    format!("{err}").contains("exceeds the largest"),
+                    "{purpose:?} at {len}: {err}"
                 );
             }
         }
@@ -489,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_stores_reads_top_level_uuid_boxes_only_and_offsets_by_the_segment() {
+    fn slots_reads_top_level_uuid_boxes_only_and_offsets_by_the_segment() {
         // Two C2PA uuid boxes, a non-C2PA uuid box between them, and a `free` box whose body is
         // byte-for-byte a C2PA payload: the stores come back in file order, each at the offset
         // its segment gives, and nothing else is reported — §A.5.1.1 fixes the box type to
@@ -535,7 +652,7 @@ mod tests {
                 },
             },
         ];
-        let stores: Vec<_> = manifest_stores(&segments).collect();
+        let stores: Vec<_> = slots(&segments).collect();
         assert_eq!(stores.len(), 2);
         assert_eq!(stores[0].purpose, C2paBoxPurpose::Original);
         assert_eq!(stores[0].slot_bytes, &[7, 7]);
