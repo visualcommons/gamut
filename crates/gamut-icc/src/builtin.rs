@@ -751,6 +751,30 @@ mod tests {
         }
     }
 
+    /// No transfer code point outside the encodable set builds a tone curve.
+    ///
+    /// The set is restated here rather than read back from [`Trc::for_code_point`], which is what
+    /// makes this the only test that fails when a code point is wrongly *admitted*. Every other
+    /// test of the mapping starts from a code point it already believes in, so it can see a
+    /// member sent to the wrong curve but not a non-member let in — and no mutation of a match
+    /// expression produces an extra arm, so the mutation gate cannot see it either.
+    #[test]
+    fn no_unlisted_transfer_code_point_is_encodable() {
+        // ICC.1:2022 §10.18 gives a closed form, or gamut-color an EOTF to sample, for exactly
+        // these ITU-T H.273 Table 3 code points: the BT.709 family (1, 6, 14, 15), linear (8),
+        // sRGB (13) and PQ (16). Every other byte — reserved, unspecified, the two logarithmic
+        // curves, ST 240, the BT.470-6 display gammas, HLG, and everything H.273 has not
+        // assigned — has no ICC tone curve here.
+        const ENCODABLE: [u8; 7] = [1, 6, 8, 13, 14, 15, 16];
+
+        for code in 0..=u8::MAX {
+            if ENCODABLE.contains(&code) {
+                continue;
+            }
+            assert_eq!(Trc::for_code_point(code), None, "transfer code point {code}");
+        }
+    }
+
     /// A transfer `gamut-color` implements no curve for cannot be built, and neither can
     /// unmodelled or unspecified primaries. Each rejection is asserted at an input that isolates
     /// it: the primaries are valid when the transfer is the reason, and vice versa.
