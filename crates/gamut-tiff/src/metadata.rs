@@ -301,6 +301,14 @@ fn within_depth(ifd: &Ifd, depth: usize) -> bool {
 /// type is not a pointer, and its field is left in place — the rule
 /// [`gamut_ifd::read_tree`] applies, restated here so the two walks cannot disagree about what a
 /// pointer is.
+///
+/// The source guards its 64-bit arm with `#[cfg(feature = "bigtiff")]` and this restatement does
+/// not, because it cannot: `bigtiff` is `gamut-ifd`'s feature, enabled unconditionally by this
+/// crate's dependency on it and not re-exported, so the same attribute here would name a feature
+/// `gamut-tiff` does not have. `unexpected_cfgs` rejects it under the workspace's `-D warnings`,
+/// and were it accepted the arm would vanish and every BigTIFF's `ExifIFD` would read back as a
+/// plain integer. The arm is therefore always live here, which is what a codec that always writes
+/// and reads BigTIFF needs.
 fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
     match value {
         Value::Long(v) | Value::Ifd(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
