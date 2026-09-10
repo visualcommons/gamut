@@ -450,7 +450,7 @@ fn a_broken_exif_pointer_is_still_an_error() {
 
 #[test]
 fn a_broken_pointer_on_a_page_the_metadata_discards_does_not_fail_the_read() {
-    // The same rule that keeps `SubIFDs` and `GPSInfo` out of `POINTER_TAGS`, applied to whole
+    // The same rule that keeps `SubIFDs` and `GPSInfo` out of `IFD0_POINTER_TAGS`, applied to whole
     // *pages*: the blocks come from IFD 0 and the C2PA store from the last IFD, so a pointer
     // anywhere else feeds nothing this returns and following it can only add failure modes. A
     // dangling `ExifIFD` on page 1 of a two-page document used to fail the whole call.

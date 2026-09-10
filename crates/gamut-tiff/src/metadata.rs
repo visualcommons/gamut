@@ -894,19 +894,40 @@ mod tests {
         // blocks — is `a_broken_pointer_the_metadata_does_not_use_does_not_hide_the_blocks`
         // (tests/metadata.rs); this pins the resolution itself, on a pointer that is perfectly
         // readable, so the two claims cannot be confused.
+        //
+        // `resolve_pointers` is driven directly, at the depth `read_metadata` calls it with,
+        // because IFD 0 is the one directory the seam never hands back: asking `read_metadata`
+        // instead can only observe `exif`, which stays `None` whether the pointer was resolved or
+        // not, so the regression this names — `pointer_tags` returning the full set at every
+        // level — would pass unnoticed. Here it does not: resolution turns the field into a group.
         for tag in [tags::SUB_IFDS, tags::GPS_INFO] {
-            let mut ifd0 = Ifd::new();
-            ifd0.set_sub_ifd(tag, vec![exif_ifd()]);
-            ifd0.set(tags::XMP, Value::Byte(b"x".to_vec()));
-            let bytes = file_with(ifd0);
-            let offset = read(&bytes).expect("read").ifds[0]
+            let mut source = Ifd::new();
+            source.set_sub_ifd(tag, vec![exif_ifd()]);
+            source.set(tags::XMP, Value::Byte(b"x".to_vec()));
+            let bytes = file_with(source);
+            let mut ifd0 = read(&bytes).expect("read").ifds.swap_remove(0);
+            let offset = ifd0
                 .get_u32(tag)
                 .unwrap_or_else(|| panic!("tag {tag}: a written pointer"));
             assert!(offset > 0, "tag {tag}: the pointer must name a directory");
+
+            resolve_pointers(
+                &bytes,
+                ByteOrder::LittleEndian,
+                Variant::Classic,
+                &mut ifd0,
+                &mut BTreeSet::new(),
+                0,
+            )
+            .unwrap_or_else(|e| panic!("tag {tag}: resolving IFD 0: {e}"));
             assert_eq!(
-                read_metadata(&bytes).expect("metadata").exif,
-                None,
-                "tag {tag}: a page pointer must not become the Exif directory"
+                ifd0.get_u32(tag),
+                Some(offset),
+                "tag {tag}: must stay the integer field it was read as"
+            );
+            assert!(
+                ifd0.sub_ifds().is_empty(),
+                "tag {tag}: must not become a group at IFD 0"
             );
         }
     }
