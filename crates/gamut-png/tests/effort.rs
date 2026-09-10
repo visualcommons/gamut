@@ -169,13 +169,39 @@ fn every_rung_stores_the_pixels_it_was_handed() {
 #[test]
 fn every_rung_is_strictly_smaller_over_the_corpus_than_the_one_above_it() {
     let rungs = ladder();
-    let totals: Vec<usize> = rungs
+    let rows = corpus();
+    // One encode per (row, rung), kept rather than summed away, because the per-row numbers are
+    // the table `STATUS.md` publishes and the ties in it are the caveat that table carries.
+    let sizes: Vec<Vec<usize>> = rows
         .iter()
-        .map(|&preset| {
-            let encoder = PngEncoder::new().with_preset(preset);
-            corpus().iter().map(|row| encode(&encoder, row).len()).sum()
+        .map(|row| {
+            rungs
+                .iter()
+                .map(|&preset| encode(&PngEncoder::new().with_preset(preset), row).len())
+                .collect()
         })
         .collect();
+    let totals: Vec<usize> = (0..rungs.len())
+        .map(|rung| sizes.iter().map(|row| row[rung]).sum())
+        .collect();
+
+    // Printed, not just asserted, so the command `STATUS.md` names for the size columns actually
+    // produces them: a documented table nobody can regenerate goes stale silently. `cargo test`
+    // captures this unless `--nocapture` is passed. The time columns there are not produced here
+    // — see that section for why they are not a test's output.
+    let cells = |values: &[usize]| -> String {
+        values.iter().map(|value| format!("{value:>12}")).collect()
+    };
+    let header: String = rungs
+        .iter()
+        .map(|rung| format!("{:>12}", format!("{rung:?}")))
+        .collect();
+    println!("{:<18}{header}", "input");
+    for (row, row_sizes) in rows.iter().zip(&sizes) {
+        println!("{:<18}{}", row.name, cells(row_sizes));
+    }
+    println!("{:<18}{}", "TOTAL", cells(&totals));
+
     for (pair, names) in totals.windows(2).zip(rungs.windows(2)) {
         assert!(
             pair[0] > pair[1],
