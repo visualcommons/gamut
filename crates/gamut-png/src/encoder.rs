@@ -921,17 +921,22 @@ impl PngEncoder {
         let indices: Vec<u8> = indices.iter().map(|&i| remap[usize::from(i)]).collect();
         // The background still names the colour the caller chose, so the chunk is rewritten as
         // that entry's index in the *cleaned* palette, whichever form it arrived in. Pinning the
-        // index here is also what stops a colour-form background from being resolved a second time
-        // against the cleaned palette and landing on a different entry — an opaque triple whose
-        // transparent twin outlived it resolves to the twin. Only a background whose bytes
-        // actually change copies the encoder's chunk state.
+        // index is also what stops a colour-form background being resolved a second time against
+        // the cleaned palette and landing on a different entry — an opaque triple whose
+        // transparent twin outlived it would resolve to the twin. Unconditionally, so that the
+        // answer never depends on the order cleaning leaves the survivors in: guarding the copy on
+        // "the bytes would change" saves one clone of the encoder's chunk state on the one path
+        // that has a background at all, and buys it with a branch whose two sides write the same
+        // file.
         let renumbered;
-        let this = match background.map(|index| remap[usize::from(index)]) {
-            Some(index) if self.ancillary.bkgd.as_deref() != Some([index].as_slice()) => {
-                renumbered = self.clone().with_background_index(index);
+        let this = match background {
+            Some(index) => {
+                renumbered = self
+                    .clone()
+                    .with_background_index(remap[usize::from(index)]);
                 &renumbered
             }
-            _ => self,
+            None => self,
         };
 
         let dims = image.dimensions();
