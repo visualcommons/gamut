@@ -65,12 +65,10 @@
 //! The distinction that decides whether such a row is reproducible is **pinning**, not
 //! authorship: `miniz_oxide` is pinned by `Cargo.lock` to one version and one checksum, so every
 //! run of this harness anywhere inflates with the same code, while the system libz is pinned by
-//! nothing. Not by a version — two *stock* builds of one zlib version answer `zlibVersion()`
-//! identically, so the version cannot say which was loaded, and the two candidates this harness
-//! actually collides are exactly that pair: the copy a dev oracle left under `target/` and an
-//! installed `libz.so.1.3.1`. A fork that changes the string (a `zlib-ng`-compatibility build
-//! answering `"1.3.1.zlib-ng"`, say) *is* separable by version, which is why the identification
-//! must rest on the path instead: the pair that collides does not differ in the string at all.
+//! nothing. Not by a version: the loader chooses between a copy a dev oracle built under
+//! `target/` and whatever the platform installed, and `zlibVersion()` separates those two only
+//! when the platform's build renamed itself. A box shipping stock zlib 1.3.1 gives two
+//! resolutions that answer identically, so the identification rests on the path instead.
 //! And not even by the machine: cargo puts every build script's native search
 //! path on `LD_LIBRARY_PATH`, and `gamut-dng`'s own dev-dependency `libtiff-oracle` builds a
 //! `libz.so` under `target/`, so `cargo bench` and the same binary launched directly can resolve

@@ -309,9 +309,9 @@ pub fn read_linear_dng(bytes: &[u8]) -> Result<AdobeRaw, String> {
 /// `"1.3.1 from /usr/lib64/libz.so.1.3.1"`.
 ///
 /// The path is the discriminating part: `zlibVersion()` reports the string the loaded build
-/// carries, and the two candidates that actually collide here — a stock `libz.so.1.3.1` a build
-/// script left under `target/` and a stock `libz.so.1.3.1` installed on the platform — carry the
-/// same one.
+/// carries, so it separates the copy a build script left under `target/` from the platform's only
+/// when the platform's build renamed itself. Two stock builds of one version — which is what a box
+/// shipping stock zlib gives — carry the same string, and the path still tells them apart.
 ///
 /// `build.rs` links the system libz dynamically (`-lz`) because the SDK includes `<zlib.h>`
 /// unconditionally. That makes the SDK's Deflate decode the one measured path in this oracle that

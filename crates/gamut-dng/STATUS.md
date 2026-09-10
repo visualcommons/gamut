@@ -409,13 +409,12 @@ removed or measured; none is left as an adjective.
   whatever libz the loader resolved** — not gamut's own codec against the SDK's. The distinction
   that decides whether the row is reproducible is **pinning**, not authorship: `miniz_oxide` is
   pinned by `Cargo.lock` to one version and one checksum, so every run of this harness anywhere
-  inflates with the same code, while the system libz is pinned by nothing. Not by a version — two
-  *stock* builds of one zlib version answer `zlibVersion()` with the same string, so the version
-  cannot say which of them was loaded, and on the resolution this harness actually trips over both
-  candidates are stock 1.3.1: the copy a dev oracle left under `target/` and an installed
-  `/usr/lib64/libz.so.1.3.1`. (A fork that changes the string, such as this box's
-  `zlib-ng`-compatibility build answering `"1.3.1.zlib-ng"`, *is* separable by version; the
-  identification cannot rest on that, because the pair that actually collides does not differ.)
+  inflates with the same code, while the system libz is pinned by nothing. Not by a version: the
+  loader chooses between a copy a dev oracle built under `target/` and whatever the platform
+  installed, and `zlibVersion()` separates those two only when the platform's build renamed itself.
+  This box's did — it answers `"1.3.1.zlib-ng"` where the build-tree copy answers `"1.3.1"` — but a
+  box shipping stock zlib 1.3.1 gives two resolutions that answer identically, so what identifies
+  the loaded library cannot be the version string.
   And not even by the machine: `cargo bench` puts every build script's native search path on
   `LD_LIBRARY_PATH`, so it resolves whichever stock zlib a dev oracle in the graph has built under
   `target/` (`gamut-dng` dev-depends on `libtiff-oracle`, which builds one, so `cargo bench -p
