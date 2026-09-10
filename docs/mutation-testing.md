@@ -117,8 +117,8 @@ differently on CI and locally — issue #613. Until that is pinned, state the bu
 verdict you report for an allocation-heavy mutant.
 
 **What the tool mutates is a short list**, and everything outside it is invisible to the gate.
-Derive the list instead of trusting a written one — a hand-written version of this list has been
-short twice:
+Derive the list instead of trusting a written one — the hand-written version this replaces was
+taken from three crates and was two verbs short:
 
 ```bash
 cargo mutants --list --no-config | sed -E '
