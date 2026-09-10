@@ -239,10 +239,12 @@ impl core::fmt::Display for MetadataNotice {
 /// # Choosing a rung, not a setting
 ///
 /// The rungs are the contract; which knob values each one selects is not, and may be re-tuned as
-/// this crate's corpus grows. Two things are fixed: [`Preset::Balanced`] encodes byte-identically
-/// to a default [`PngEncoder`], and the ladder is ordered — no rung produces a larger file than
-/// the rung above it on this crate's corpus (`crates/gamut-png/tests/effort.rs`, and `STATUS.md`
-/// for the measured table).
+/// this crate's corpus grows. Two things are fixed. [`Preset::Balanced`] encodes byte-identically
+/// to a default [`PngEncoder`]; and every rung is strictly smaller than the rung above it **summed
+/// over this crate's corpus** — which is deliberately not a per-row promise, because per row it is
+/// false. A rung that fixes one filter can beat a rung that searches per row on a picture that
+/// suits it, and one corpus row measures exactly that. See `crates/gamut-png/tests/effort.rs` for
+/// what is gated and `STATUS.md` for the measured tables.
 ///
 /// The discriminants are a permanent, append-only part of the contract: they are what
 /// [`level`](Self::level) and [`from_level`](Self::from_level) round trip, and what a numeric CLI
@@ -252,7 +254,8 @@ impl core::fmt::Display for MetadataNotice {
 #[repr(u8)]
 #[non_exhaustive]
 pub enum Preset {
-    /// Level 0 — encode quickly and accept a larger file: greedy matching and no filter search.
+    /// Level 0 — encode quickly and accept a larger file: greedy matching, and one fixed filter
+    /// rather than a per-row filter search.
     Fast = 0,
     /// Level 1 — what a default [`PngEncoder`] already does, and the balanced speed/size point.
     #[default]
@@ -2134,8 +2137,8 @@ mod tests {
     }
 
     /// One long greyscale row whose bytes are neither flat nor periodic, so the span the optimal
-    /// parse works over is what decides the parse. 40 001 filtered bytes: one span at the 1 MiB
-    /// default, two at the 32 KiB LZ77 window.
+    /// parse works over is what decides the parse. It filters to 40 001 bytes, which is one span
+    /// when the limit is unbounded and two when the limit sits at the 32 KiB LZ77 window floor.
     fn long_unrepeating_row() -> Vec<u8> {
         (0..40_000u32)
             .map(|i| {
