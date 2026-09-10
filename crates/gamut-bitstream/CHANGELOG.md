@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/visualcommons/gamut/compare/gamut-bitstream-v0.2.3...gamut-bitstream-v0.2.4) - 2026-09-10
+
+### Added
+
+- *(bitstream)* add the AV1 bit reader and symbol decoder
+
+### Fixed
+
+- *(bitstream)* compute ns(n) in u64 so n >= 2^31 does not overflow
+- *(bitstream)* implement all three of exit_symbol's conformance checks
+- *(bitstream)* bound the symbol search by the alphabet, not by the CDF
+
+### Other
+
+- *(bitstream)* pin read_f's zero padding and retire two hang mutants
+- *(bitstream)* cover read_golomb, which nothing exercised
+- *(bitstream)* separate the leb128 length rule from the round trip
+
 ## [0.2.3](https://github.com/justin13888/gamut/compare/gamut-bitstream-v0.2.2...gamut-bitstream-v0.2.3) - 2026-07-20
 
 ### Other

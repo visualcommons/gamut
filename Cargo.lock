@@ -21,9 +21,9 @@ dependencies = [
 
 [[package]]
 name = "aho-corasick"
-version = "1.1.4"
+version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
 dependencies = [
  "memchr",
 ]
@@ -166,9 +166,9 @@ checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
 name = "bitflags"
-version = "2.13.1"
+version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "block-buffer"
@@ -228,9 +228,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.4.0"
+version = "1.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
+checksum = "005ec2760ca554fae18df7a11195552ec576cd665632a881bc011d5bb2fd4d80"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -276,9 +276,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.4"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
+checksum = "473c7e07f409a8d772161724aa8db6a765a2532a70f9667eeb7b49d3d02fbdca"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -286,9 +286,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.2"
+version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
+checksum = "7b48fea5a88e9ae728a2dcbedbfc0e730f7d60da42e1cb049a83c9fb8b789889"
 dependencies = [
  "anstream",
  "anstyle",
@@ -306,7 +306,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -368,18 +368,18 @@ checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
 name = "crc32fast"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
 dependencies = [
  "cfg-if",
 ]
 
 [[package]]
 name = "crossbeam-utils"
-version = "0.8.22"
+version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crypto-common"
@@ -442,7 +442,7 @@ checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -472,9 +472,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.17.0"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
+checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "equivalent"
@@ -527,23 +527,24 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.9"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flate2"
-version = "1.1.9"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
- "miniz_oxide",
+ "miniz_oxide 0.9.1",
+ "zlib-rs",
 ]
 
 [[package]]
 name = "gamut"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "gamut-av1",
  "gamut-av2",
@@ -575,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-av1"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "aom-oracle",
  "dav1d-oracle",
@@ -588,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-av2"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -598,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-avif"
-version = "1.1.0"
+version = "2.0.0"
 dependencies = [
  "dav1d-oracle",
  "divan",
@@ -612,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-bitstream"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "divan",
  "gamut-core",
@@ -620,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "clap",
  "gamut",
@@ -644,11 +645,11 @@ dependencies = [
 
 [[package]]
 name = "gamut-codec-abi"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "gamut-color"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "divan",
  "gamut-core",
@@ -659,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-core"
-version = "2.0.1"
+version = "2.1.0"
 dependencies = [
  "proptest",
  "serde",
@@ -669,17 +670,17 @@ dependencies = [
 
 [[package]]
 name = "gamut-deflate"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "divan",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
  "zlib-oracle",
  "zopfli",
 ]
 
 [[package]]
 name = "gamut-dng"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "divan",
  "gamut-bitstream",
@@ -692,7 +693,7 @@ dependencies = [
  "gamut-jxl",
  "gamut-metadata",
  "libtiff-oracle",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -707,14 +708,14 @@ dependencies = [
 
 [[package]]
 name = "gamut-dsp"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "divan",
 ]
 
 [[package]]
 name = "gamut-exif"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "exiv2-oracle",
  "gamut-core",
@@ -725,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-ffi"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "gamut",
  "gamut-codec-abi",
@@ -733,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-heic"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "gamut-codec-abi",
  "gamut-color",
@@ -744,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-icc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "gamut-core",
  "lcms2-oracle",
@@ -754,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-ifd"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "divan",
  "gamut-core",
@@ -763,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-iptc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "divan",
  "gamut-core",
@@ -783,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-isobmff"
-version = "2.0.1"
+version = "3.0.0"
 dependencies = [
  "divan",
  "gamut-core",
@@ -791,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-jpeg"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut-codec-abi",
  "gamut-color",
@@ -802,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-jxl"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "gamut-codec-abi",
  "gamut-core",
@@ -812,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-jxl-sys"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cmake",
  "jpegxl-src",
@@ -820,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-metadata"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "gamut-exif",
  "gamut-icc",
@@ -831,13 +832,13 @@ dependencies = [
 
 [[package]]
 name = "gamut-png"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut-codec-abi",
  "gamut-core",
  "gamut-deflate",
  "libpng-oracle",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -851,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-tiff"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "divan",
  "gamut-bitstream",
@@ -859,12 +860,12 @@ dependencies = [
  "gamut-deflate",
  "gamut-ifd",
  "libtiff-oracle",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
 name = "gamut-tonemap"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "divan",
  "gamut-core",
@@ -873,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-vvc"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -883,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-wasm"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "gamut",
  "wasm-bindgen",
@@ -891,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-webp"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "divan",
  "gamut-codec-abi",
@@ -904,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-xmp"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "exiv2-oracle",
  "gamut-core",
@@ -924,9 +925,9 @@ dependencies = [
 
 [[package]]
 name = "geocoordinates"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9c1922a103f7c4deca321fa0a4333b5025871905325fb4d18cd6a896ceccf28"
+checksum = "c7cbb4470a3ec8b58cb7d46b087c46f9f38d5602125687944b86a398564d6d48"
 dependencies = [
  "geographiclib-rs",
  "thiserror",
@@ -1010,9 +1011,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.14.0"
+version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown",
@@ -1069,9 +1070,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.103"
+version = "0.3.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
+checksum = "ce57d20d1ea864ce2ac172ab472d409214f4fd359f0b2a2775abdf522e2af99e"
 dependencies = [
  "cfg-if",
  "wasm-bindgen",
@@ -1233,9 +1234,9 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lzma-rs"
@@ -1294,6 +1295,16 @@ name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
+name = "miniz_oxide"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
@@ -1385,9 +1396,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkg-config"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "png"
@@ -1399,7 +1410,7 @@ dependencies = [
  "crc32fast",
  "fdeflate",
  "flate2",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -1563,9 +1574,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.16"
+version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -1636,7 +1647,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -1726,9 +1737,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.3"
+version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1771,22 +1782,22 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.19"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.3",
+ "syn 3.0.5",
 ]
 
 [[package]]
@@ -1800,9 +1811,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.54"
+version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e1d5e639ff6bab73cb6885cc7e7b1de96c3f32c68ec55f3952614bec1092244"
+checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
  "num-conv",
@@ -1910,9 +1921,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.126"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b067c0c11094aef6b7a801c1e34a26affafdf3d051dba08456b868789aaf9a4"
+checksum = "aecb87a33d3b0c5e3b7aa46336eaf486cffafbd281b195e4c8b80d50df2351bf"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -1923,9 +1934,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.126"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "167ce5e579f6bcf889c4f7175a8a5a585de84e8ff93976ce393efa5f2837aab1"
+checksum = "a690d511e3c1a8b3a55e33511e3c2c00c78415cd23650f32b808627f5696b9ed"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -1933,22 +1944,22 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.126"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3997c7839262f4ef12cf90b818d6340c18e80f263f1a94bf157d0ec4420380e"
+checksum = "411e4887f0071ef2d2164a9d5fdf2d20efbef78fccd3a78b0c10a1dc5295e48a"
 dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.5",
  "wasm-bindgen-shared",
 ]
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.126"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
+checksum = "81941cd78d0c92026c33e5e01312845a4cb1e9af3407f9134b100dd03144103e"
 dependencies = [
  "unicode-ident",
 ]
@@ -1995,18 +2006,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.56"
+version = "0.8.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
+checksum = "d35102a9f36d089ccae9e4c6802bc118be4487b80aaffc0ab4e0cf5ce92d2873"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.56"
+version = "0.8.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
+checksum = "146c01f5ab44258da43cf276c74a2763db2ff3969c9c652c3f2de07041d0b2bc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2072,6 +2083,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "zlib-rs"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12"
+
+[[package]]
 name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2100,18 +2117,18 @@ dependencies = [
 
 [[package]]
 name = "zstd-safe"
-version = "7.2.4"
+version = "7.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+version = "2.1.0+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2119,9 +2136,9 @@ dependencies = [
 
 [[package]]
 name = "zune-core"
-version = "0.5.1"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb8a0807f7c01457d0379ba880ba6322660448ddebc890ce29bb64da71fb40f9"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
 
 [[package]]
 name = "zune-jpeg"

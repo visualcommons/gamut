@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1](https://github.com/visualcommons/gamut/compare/gamut-dsp-v2.0.0...gamut-dsp-v2.0.1) - 2026-09-10
+
+### Other
+
+- deny unsafe in the hot-path crates instead of forbidding it
+- *(dsp)* share one deterministic generator across the transform sweeps
+
 ## [2.0.0](https://github.com/justin13888/gamut/compare/gamut-dsp-v1.0.0...gamut-dsp-v2.0.0) - 2026-07-18
 
 ### Added

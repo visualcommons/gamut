@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-ifd-v2.0.1...gamut-ifd-v3.0.0) - 2026-09-10
+
+### Added
+
+- *(ifd)* reserve a leading vendor preamble in the writer's layout
+- *(ifd)* [**breaking**] name the bytes a file does not account for
+- *(core)* add structured error diagnostics
+- *(gamut-ifd)* add f64 value coercion
+
+### Fixed
+
+- *(ifd)* let the test suite compile under default features
+- *(mutants)* retire an exclusion that was a coverage gap, not an equivalence
+- *(ifd)* declare the preamble the way an audit reads it
+- *(tiff)* reject non-progressing CCITT runs
+
+### Other
+
+- *(ifd)* say what a hand-advanced cursor's mutants actually do
+- *(ifd)* bound the claim subtraction by the claims it walks
+- *(ifd)* confine the claim skip whose mutant cannot terminate
+- *(ifd)* bound the audit's cursor walks by the data they walk
+- *(ifd)* close the mutation survivors the corpus pass left
+- *(ifd)* pin where the pool resumes after jumping a pin
+- *(ifd)* cover the pinned-span placement rules
+- *(ifd)* state the read ledger's laws as executable invariants
+- adopt as_chunks for constant-size slice chunking
+
 ## [2.0.1](https://github.com/justin13888/gamut/compare/gamut-ifd-v2.0.0...gamut-ifd-v2.0.1) - 2026-07-20
 
 ### Other
