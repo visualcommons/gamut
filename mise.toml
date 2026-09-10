@@ -219,10 +219,10 @@ run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml
 #
 # `--locked` is what makes the committed `tooling/c2pa-oracle/Cargo.lock` load-bearing. Without it
 # cargo silently re-resolves the 307 transitive packages under the pinned `c2pa` (the figure is
-# derived in `tooling/c2pa-oracle/README.md`) and writes the
-# result over the committed file, so the crate's own resolved-graph assertion would be reading a
-# resolution cargo had produced moments earlier. With it, a lockfile that is missing or out of date
-# fails the task instead of being regenerated.
+# derived in `tooling/c2pa-oracle/README.md`) and writes the result over the committed file, so the
+# crate's own resolved-graph assertion would be reading a resolution cargo had produced moments
+# earlier. With it, a lockfile that is missing or out of date fails the task instead of being
+# regenerated.
 [tasks.test-c2pa]
 description = "Cross-check gamut's C2PA carriage against c2pa-rs, both directions (issue #447)"
 run = "cargo test --locked --manifest-path tooling/c2pa-oracle/Cargo.toml"

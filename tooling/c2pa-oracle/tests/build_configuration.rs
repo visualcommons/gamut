@@ -106,10 +106,10 @@ fn the_lockfile_this_crate_resolves_against_is_committed_rather_than_ignored() {
     // The repository ignores `tooling/*/Cargo.lock` — a `tooling/` crate normally resolves through
     // the root lockfile, so a local one is redundant. This crate is the exception, and the reason
     // is the 307 packages *under* `c2pa` — the version-aware closure of its lockfile entries,
-    // derived in `README.md`: the `=` pin holds one direct dependency and nothing
-    // beneath it, so without a committed lockfile the whole transitive graph re-resolves on every
-    // invocation and the resolved-graph assertion above can only inspect the resolution cargo just
-    // wrote for it. `mise run test-c2pa` and `check-c2pa` pass `--locked`, which is what turns
+    // derived in `README.md`. The `=` pin holds one direct dependency and nothing beneath it, so
+    // without a committed lockfile the whole transitive graph re-resolves on every invocation and
+    // the resolved-graph assertion above can only inspect the resolution cargo just wrote for it.
+    // `mise run test-c2pa` and `check-c2pa` pass `--locked`, which is what turns
     // "the file exists" into "this is the resolution that was used".
     //
     // A different argument used to stand here — that nothing else in the tree depends on `c2pa`,
