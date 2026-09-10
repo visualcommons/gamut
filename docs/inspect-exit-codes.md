@@ -77,8 +77,9 @@ file:
 | --- | --- | --- |
 | a store is present | `0` | the store(s), each with its purpose, size and range |
 | a C2PA box is present but no store could be read from it | `0` | that the box is present, its range, and why no store was read — explicitly *not* an absence |
+| **both**: some boxes yielded stores and others did not | `0` | the headline names **both** counts, and the per-box lines follow in file order |
 | no C2PA box is present | `0` | that none was found in the top-level boxes of the primary stream |
-| a top-level `uuid` box carries some other extended type | `0` | a count of them, beside whichever of the three rows above applies |
+| a top-level `uuid` box carries some other extended type | `0` | a count of them, beside whichever of the four rows above applies |
 | the container is not the HEVC still image this arm reads (e.g. an AVIF) | `1` | nothing; `unsupported container brand …` on stderr |
 | the container cannot be parsed | `1` | nothing; `error: …` on stderr |
 
@@ -93,18 +94,35 @@ walk has a claim to make about the file; this one has none.
 `FullBox` version is not zero (§A.5.1.2), its `box_purpose` is the auxiliary `merkle` or a value
 this revision does not know (§A.5.3), it is truncated, or no valid JUMBF `LBox` bounds a store
 where its purpose puts one. Such a box gets its own line naming the reason, precisely so a reader
-cannot infer "no provenance" from bytes gamut merely could not read. A caller gating on stdout must
-treat the `unread C2PA box` line as *unknown*, never as absence, and reach for a validator.
+cannot infer "no provenance" from bytes gamut merely could not read.
+
+**A caller gating on stdout reads the headline, not the list.** The headline names *every* class
+the scan found that is non-empty — located stores, and boxes no store could be read from — so a file
+carrying both says both on its first line: `N manifest stores located, NOT VALIDATED, and M C2PA
+boxes are present from which no store could be read — a box gamut could not read through is NOT
+absence of provenance — …`. That clause is what a caller must treat as *unknown*, never as absence,
+and reach for a validator over. The per-box `unread C2PA box` lines are the detail behind it and
+are **subject to the cap below**, so their absence is not evidence of anything; the headline is not
+capped, and is.
 
 **A near miss on the extended type is reported as a count, and as nothing more.** §A.5.1.1 makes
 the sixteen-byte extended type the box's whole identity, and the specification has no notion of an
 approximate one, so a top-level `uuid` box that is a single byte off is **not** damaged C2PA
 framing and never earns an `unread C2PA box` line. But it is not passed over either: the report
-carries `other top-level uuid boxes: N (extended type is not the C2PA one; a uuid box is not
-provenance framing)`. Without it, a file whose only `uuid` box is one byte off — what a signed file
-corrupted in transit looks like — printed byte-for-byte what a file carrying no such box prints,
-and the reader most in need of looking closer was the one told the least. The line states a fact
-about bytes and claims nothing: an ordinary file carries vendor `uuid` boxes.
+carries `top-level uuid boxes of another extended type: N (not the C2PA one; a uuid box is not
+provenance framing)` — unindented, beside the headline rather than at the detail indent, because it
+is part of the report's head and not the first entry of the list. Without it, a file whose only
+`uuid` box is one byte off — what a signed file corrupted in transit looks like — printed
+byte-for-byte what a file carrying no such box prints, and the reader most in need of looking closer
+was the one told the least. The line states a fact about bytes and claims nothing.
+
+**What that count cannot tell you is which kind of box it counted.** A corrupted C2PA extended type
+and an ordinary vendor `uuid` box are the same observation to it — sixteen bytes that are not
+C2PA's — and the two produce byte-identical reports; executed, a one-byte miss and an unrelated
+vendor UUID render the same line. Nothing here narrows that: separating them would need a notion of
+an approximate extended type, which §A.5.1.1 does not have. So the line separates a file carrying
+such a box from a file carrying none, and nothing finer, and it fires on ordinary camera output —
+vendor `uuid` boxes are commonplace. It is a prompt to look, never a finding.
 
 **A box's position is reported when it sits past the file's media data**, as `; its box begins
 after the first mdat box` on that box's own line. §A.5.3 places a manifest-store box "before the
@@ -119,8 +137,47 @@ same `… and N more` tail. §A.5.3 permits any number of these boxes, so their 
 input and needs no malformity to grow: a legal 2.7 MB file carrying fifty thousand of them printed
 fifty thousand lines and put the headline — non-validation disclaimer and all — at line 2 of them.
 The cap is this command's presentation decision; `gamut-heic` keeps returning every entry, and
-`C2paSummary::detail_line_count()` is the true total the tail is computed from. The headline and
-the `uuid`-box count are never truncated: there are at most two such lines whatever the file holds.
+`C2paSummary::detail_line_count()` is the true total the tail is computed from.
+
+Exactly what the cap can and cannot hide:
+
+- It **can** hide any individual box's line, of either kind, and it says only how many lines it
+  hid — not which kind they were. A file with twenty-one C2PA boxes shows twenty lines and
+  `… and 1 more`, and nothing on stdout says whether that one was a store or a box no store could
+  be read from.
+- It **cannot** hide that a kind exists. The headline names every non-empty kind with its true
+  count, and it is never truncated — the head is at most two lines whatever the file holds. So a
+  file with twenty legal stores and one unreadable box reports `20 manifest stores located, …, and
+  1 C2PA box is present from which no store could be read` even though the unreadable box's own
+  line falls past the cut.
+- It **cannot** silence one kind systematically. `C2paSummary::detail_lines()` yields the boxes in
+  true **file order**, not grouped by kind, so the cut takes the file's last boxes whatever they
+  are. Grouped by kind, one budget could drop a whole category — twenty stores ahead of one
+  unreadable box left no unread line at all — and which category it dropped would have been decided
+  by the rendering rather than by the file.
+- The `uuid`-box count line is never truncated either, for the same reason: it is part of the head.
+
+There is deliberately **one** budget rather than one per kind. With the headline naming every kind
+and the list in file order, a single budget can no longer silence a kind, and a second budget would
+only be a second number to keep in step with this one.
+
+**What holds each of those claims, and why it is stated here.** `gamut-cli` is excluded from the
+mutation gate (`.cargo/mutants.toml`'s `exclude_globs`) and from the coverage gate (the
+`--ignore-filename-regex`), so a green workspace gate is no evidence at all about the rendering this
+section describes; only a test that drives the built binary is. Those tests are in
+`crates/gamut-cli/tests/inspect_c2pa.rs`:
+
+| Claim above | Test |
+| --- | --- |
+| the headline names a kind whose lines the cap hid entirely | `the_headline_names_a_class_of_box_the_cap_hides_entirely` |
+| the cut is the file's last boxes, not its last kind | `the_capped_list_is_the_files_first_boxes_and_not_its_first_stores` |
+| twenty lines and a truthful `… and N more` tail | `the_c2pa_box_list_is_truncated_like_every_other_list_in_the_command` |
+| an unreadable box is not printed with the absence wording, at exit `0` | `a_c2pa_box_that_yields_no_store_is_not_reported_as_a_file_without_provenance` |
+| the near-miss count reaches stdout and disclaims provenance | `a_uuid_box_of_another_extended_type_reaches_stdout_as_a_count` |
+| the disclaimer and the store's own line reach the terminal unabridged | `a_located_store_reaches_the_terminal_with_the_non_validation_disclaimer` |
+
+The wording of each line, the headline's four shapes and the file ordering are `gamut-heic`'s own
+contract and are pinned there, inside the mutation gate.
 
 **A machine consumer has no surface here yet.** Every distinction above is carried by stdout prose
 and none by the exit code, which is deliberate — two exit codes are the command's contract, and a
