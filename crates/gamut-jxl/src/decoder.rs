@@ -78,9 +78,33 @@ pub struct JxlMetadata {
 fn container_metadata_boxes(data: &[u8]) -> Result<MetadataBoxes> {
     let mut exif = None;
     let mut xmp = None;
-    let mut pos = 0;
-    while pos < data.len() {
-        let (box_type, body, next) = read_box(data, pos)?;
+    let mut rest = data;
+    while !rest.is_empty() {
+        let (box_type, header_len, box_len) = parse_box_header(rest)?;
+        if box_len > rest.len() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: box overruns the stream",
+            ));
+        }
+        // §4.2: a box's `size` counts its own header, so it is never below `MIN_BOX_HEADER`. The
+        // walk enforces that here rather than trusting the header parser, which also makes the
+        // loop's progress local: every iteration consumes at least `MIN_BOX_HEADER` bytes of
+        // `rest`, so the walk terminates whatever the parser reports.
+        if box_len < MIN_BOX_HEADER {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: malformed box size",
+            ));
+        }
+        // `header_len > box_len` is the 64-bit form declaring a `largesize` smaller than the
+        // header it is part of; the body is then not a range at all.
+        let Some(body) = rest.get(header_len..box_len) else {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: malformed box size",
+            ));
+        };
         match &box_type {
             b"brob" => {
                 let Some(inner) = body.get(..4) else {
@@ -100,7 +124,7 @@ fn container_metadata_boxes(data: &[u8]) -> Result<MetadataBoxes> {
             b"xml " if xmp.is_none() => xmp = Some(body.to_vec()),
             _ => {}
         }
-        pos = next;
+        rest = &rest[box_len..];
     }
     Ok((exif, xmp))
 }
@@ -109,20 +133,36 @@ fn container_metadata_boxes(data: &[u8]) -> Result<MetadataBoxes> {
 #[cfg(feature = "decode")]
 type MetadataBoxes = (Option<Vec<u8>>, Option<Vec<u8>>);
 
-/// Reads the box at `pos`: its type, its payload, and the offset just past it.
+/// The smallest ISO BMFF box header (§4.2): a 4-byte `size` and a 4-byte type.
 #[cfg(feature = "decode")]
-fn read_box(data: &[u8], pos: usize) -> Result<([u8; 4], &[u8], usize)> {
-    let rest = &data[pos..];
-    let [s0, s1, s2, s3, t0, t1, t2, t3, tail @ ..] = rest else {
+const MIN_BOX_HEADER: usize = 8;
+
+/// The 64-bit box header: [`MIN_BOX_HEADER`] plus the 8-byte `largesize` that follows the type.
+#[cfg(feature = "decode")]
+const LARGE_BOX_HEADER: usize = 16;
+
+/// Parses the box header at the start of `data`, returning its type, the length of the header
+/// itself, and the length of the whole box (header included) as the header declares it.
+///
+/// Nothing here is validated against `data`'s length, and nothing is sliced: the returned lengths
+/// are what the header *claims*, and the caller — which owns the walk's progress — is what checks
+/// them (see [`container_metadata_boxes`]).
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if `data` is too short to hold the header it announces.
+#[cfg(feature = "decode")]
+fn parse_box_header(data: &[u8]) -> Result<([u8; 4], usize, usize)> {
+    let [s0, s1, s2, s3, t0, t1, t2, t3, tail @ ..] = data else {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "JXL: truncated box header",
         ));
     };
     let box_type = [*t0, *t1, *t2, *t3];
-    let (header_len, box_len) = match u32::from_be_bytes([*s0, *s1, *s2, *s3]) {
+    match u32::from_be_bytes([*s0, *s1, *s2, *s3]) {
         // `size == 0`: the box extends to the end of the file.
-        0 => (8, rest.len()),
+        0 => Ok((box_type, MIN_BOX_HEADER, data.len())),
         // `size == 1`: a 64-bit `largesize` follows the type.
         1 => {
             let [l0, l1, l2, l3, l4, l5, l6, l7, ..] = tail else {
@@ -132,37 +172,16 @@ fn read_box(data: &[u8], pos: usize) -> Result<([u8; 4], &[u8], usize)> {
                 ));
             };
             let large = u64::from_be_bytes([*l0, *l1, *l2, *l3, *l4, *l5, *l6, *l7]);
-            match usize::try_from(large) {
-                Ok(len) if len >= 16 => (16, len),
-                Ok(_) => {
-                    return Err(Error::invalid_input(
-                        env!("CARGO_PKG_NAME"),
-                        "JXL: malformed box size",
-                    ));
-                }
-                Err(_) => {
-                    return Err(Error::invalid_input(
-                        env!("CARGO_PKG_NAME"),
-                        "JXL: box overruns the stream",
-                    ));
-                }
-            }
+            // A length no address space can hold cannot be a length within `data` either, so it
+            // saturates and the caller's overrun check reports it.
+            Ok((
+                box_type,
+                LARGE_BOX_HEADER,
+                usize::try_from(large).unwrap_or(usize::MAX),
+            ))
         }
-        size if size < 8 => {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "JXL: malformed box size",
-            ));
-        }
-        size => (8, size as usize),
-    };
-    if box_len > rest.len() {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "JXL: box overruns the stream",
-        ));
+        size => Ok((box_type, MIN_BOX_HEADER, size as usize)),
     }
-    Ok((box_type, &rest[header_len..box_len], pos + box_len))
 }
 
 /// The TIFF stream of an `Exif` box payload: skips the 4-byte big-endian `exif_tiff_header_offset`
