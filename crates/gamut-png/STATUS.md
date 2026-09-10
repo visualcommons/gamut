@@ -550,6 +550,14 @@ the narrower spans were free to model separately, and on a photograph — the le
 here — that loses. Five rows win by under a percent, one loses by a tenth of one, two cannot move
 either way, and the spread is small in both directions.
 
+The photograph still loses at the rung's own settings, where the filter search gets a say in the
+result: one encode of the same 1024x1024 `photo_rgb8` at the whole `Preset::Smallest` rung emits
+284 991 bytes at the 1 MiB default and **285 022** at 8 MiB, 16 MiB and no bound alike — the three
+agree because that image's filtered stream is 3.1 MB, inside any of them. So the top rung's span
+costs this picture 31 bytes, and the rung takes it anyway on the strength of the five rows above
+that it saves more on. That is the honest shape of the knob: it is a bet, and this document is
+where the losing rows are written down.
+
 **And the win saturates.** At 2048x2048 the gradient's stream is 12 MiB, so the span choice is a
 real one:
 
