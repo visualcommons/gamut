@@ -64,14 +64,18 @@
 //! "a suggested corresponding reference electro-optical transfer characteristic function for flat
 //! panel displays used in HDTV studio production has been specified in Rec. ITU-R BT.1886-0" —
 //! which, at reference black zero, is a pure gamma of 2.4. Since every profile built here is a
-//! *display*-class profile, that reading has a real claim, and the two are far apart. At mid-grey
-//! `V = 0.5` the PCS `Y` is:
+//! *display*-class profile, that reading has a real claim, and the two are far apart.
+//!
+//! At mid-grey `V = 0.5` the PCS `Y` is as follows. The two rows this module writes are quoted as
+//! the **tag evaluates**, with `(g, a, b, c, d)` already rounded to `s15Fixed16` — not as the
+//! closed form before rounding, which is a different number in the sixth decimal. The BT.1886 row
+//! is the closed form, because no tag here holds it.
 //!
 //! | reading | `Y` at `V = 0.5` |
 //! | --- | --- |
-//! | inverse OETF — what this module writes | 0.259719 |
-//! | BT.1886 EOTF, `V^2.4` | 0.189465 |
-//! | the sRGB code point (13), for scale | 0.214041 |
+//! | inverse OETF — the `parametricCurveType` this module writes | 0.259721 |
+//! | BT.1886 EOTF, `V^2.4` — closed form; not written here | 0.189465 |
+//! | the sRGB code point (13) as this module writes it, for scale | 0.214045 |
 //!
 //! The literal reading is 1.371× the BT.1886 one — 0.0703 in absolute `Y`. Note the third row:
 //! two code points this module *does* encode, 1 and 13, already differ by 0.0457 at mid-grey
@@ -253,7 +257,7 @@ fn rgb_conforming_cicp(cicp: Cicp) -> Cicp {
     }
 }
 
-/// A CICP code point as the byte `cicpType` stores it (ICC.1:2022 §10.7 — four `uInt8`s).
+/// A CICP code point as the byte `cicpType` stores it (ICC.1:2022 §10.3 — four `uInt8`s).
 ///
 /// ITU-T H.273 defines every code point in `0..=255`, so this is total for any modelled value; a
 /// value that does not fit a byte cannot be signalled at all and becomes `2` (Unspecified).
