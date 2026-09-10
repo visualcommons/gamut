@@ -31,12 +31,13 @@
 //! `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` is now named in the report
 //! instead of vanishing, and rejected in [`strict`](ExifReader::strict) mode as the unreadable
 //! range it is — an offset with nothing to size it addresses bytes that cannot be read. That rule
-//! is structural, not a support level: Exif 3.0 §4.6.9.2 Table 21 states the pair's level only
-//! *per `Compression` column*, and this reader does not consult that tag — though
-//! [`Thumbnail::compression`](thumbnail::Thumbnail::compression) exposes it to callers (issue
-//! #574). It refuses no conformant input: the table gives both tags the same level in all four
-//! columns — `M` under **Compressed**, `N` (not allowed to record) under the three uncompressed
-//! ones — so an offset with no length is non-conformant under every one of them.
+//! is structural, not a support level: Exif 3.0 §4.6.9.2 Table 21 states the pair's level only *per
+//! thumbnail-format column*, an axis that is not the two-valued `Compression` tag — which this
+//! reader does not consult, though [`Thumbnail::compression`](thumbnail::Thumbnail::compression)
+//! exposes it to callers (issue #574). It refuses no conformant input: the table gives both tags
+//! the same level in all four columns — `M` under **Compressed**, `N` (not allowed to record) under
+//! the three uncompressed ones — so an offset with no length is non-conformant under every one of
+//! them.
 //!
 //! ```
 //! use gamut_exif::{ByteOrder, Exif, ExifTag, Value};

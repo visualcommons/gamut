@@ -69,7 +69,9 @@ impl ExifReader {
     /// [`Dropped::offset`](crate::Dropped::offset) in the returned report is relative to the start
     /// of the TIFF stream, while an offset in a returned [`ExifError`] is a position in `source`
     /// and includes any `Exif\0\0` marker. A caller that renders both beside each other must
-    /// normalise one of them.
+    /// normalise one of them. They *meet* rather than always arrive together: the return is a sum
+    /// type, so a source whose strict-fatal defect is reached after a reportable one yields the
+    /// error alone and no report.
     ///
     /// # Errors
     ///
@@ -219,9 +221,10 @@ impl ExifReader {
     /// A length with no offset addresses nothing at all, so nothing was dropped and nothing is
     /// reported. Both halves of that rule are structural and apply whatever the thumbnail's
     /// `Compression` says: Exif 3.0 §4.6.9.2 Table 21 gives the pair's support level *per
-    /// `Compression` column* (mandatory under **Compressed**, `N` — not allowed to record — under
-    /// all three uncompressed ones), and this reader does not consult that tag. Whether it should,
-    /// and whether the length-only case should be rejected for symmetry, is issue #574.
+    /// thumbnail-format column* (mandatory under **Compressed**, `N` — not allowed to record —
+    /// under all three uncompressed ones); that axis is not the two-valued `Compression` tag, which
+    /// this reader does not consult. Whether it should, and whether the length-only case should be
+    /// rejected for symmetry, is issue #574.
     fn read_thumbnail<S: ReadAt>(
         &self,
         ifd: Ifd,

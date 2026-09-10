@@ -62,9 +62,9 @@ pub enum DroppedRegion {
     /// nothing to size it addresses bytes that cannot be read, which is a loss rather than an
     /// absent thumbnail. That rule is structural and unconditional here — see
     /// [`ThumbnailLengthMissing`](DropReason::ThumbnailLengthMissing) — and is *not* derived from
-    /// the pair's support level, which Exif 3.0 §4.6.9.2 Table 21 states only per `Compression`
-    /// column, a tag this *reader* does not consult (a parsed
-    /// [`Thumbnail`](crate::Thumbnail) does expose it, through
+    /// the pair's support level, which Exif 3.0 §4.6.9.2 Table 21 states only per
+    /// thumbnail-format column. That axis is not the two-valued `Compression` tag, which this
+    /// *reader* does not consult (a parsed [`Thumbnail`](crate::Thumbnail) does expose it, through
     /// [`compression`](crate::Thumbnail::compression)).
     ThumbnailJpeg = 3,
     /// A top-level directory past the 1st IFD.
