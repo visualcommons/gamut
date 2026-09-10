@@ -345,9 +345,20 @@ pipeline stalls silently when either is missing (issue #377):
    [`release.yml`](.github/workflows/release.yml) prefers it over `GITHUB_TOKEN` when present.
 2. **A brand-new crate needs one manual first publish.** Trusted Publishing mints a token *for a
    crate that already exists*, so the very first version of a new crate must be published once
-   with an owner-scoped token, after which OIDC takes over. Crates still awaiting that bootstrap
-   have no `<crate>-v<version>` tag: currently `gamut-cmm`, `gamut-deflate`, `gamut-dng`,
-   `gamut-jpeg`, `gamut-jxl-sys` and `gamut-png`.
+   with an owner-scoped token, after which OIDC takes over. **`gamut-cmm` is the only crate still
+   awaiting that bootstrap** — it is the one workspace crate absent from crates.io.
+
+A missing `<crate>-v<version>` tag is **not** evidence of a missing publish, and this section
+previously read it that way. `gamut-deflate`, `gamut-dng`, `gamut-jpeg`, `gamut-jxl-sys` and
+`gamut-png` carry no release tag and are nonetheless on crates.io, each at the version its
+`Cargo.toml` declares. That is the stall above showing itself in the tag-and-release half of the
+pipeline rather than in the publish half.
+
+The opposite skew exists too, and it is the one place a version in the [crates table](#crates)
+differs from what crates.io serves: `gamut-riff`'s manifest declares `1.0.0` while the newest
+published release is `0.1.3`. Whether that 1.0 is real is a release decision rather than a
+documentation one, so the table states the manifest version and this note states the gap
+(issue #546).
 
 ## License
 
