@@ -104,6 +104,58 @@ impl PngPalette {
         self.rgb.is_empty()
     }
 
+    /// The palette reduced to the entries `used` marks, with duplicates merged and the `tRNS`
+    /// trailing-opaque bytes trimmed, plus the old-index → new-index map that rewrites an image's
+    /// indices onto it.
+    ///
+    /// Three redundancies a caller-supplied palette may carry that one built from the pixels
+    /// cannot, and what each costs the file:
+    ///
+    /// - an entry `used` does not mark: 3 `PLTE` bytes naming a colour nothing in the file reads;
+    /// - a later entry with the same RGB **and** the same alpha as an earlier one: the same 3
+    ///   bytes, for a colour the earlier entry already names;
+    /// - a trailing opaque `tRNS` entry: 1 byte the chunk may simply not carry (§11.3.2.1).
+    ///
+    /// The saving is rarely those bytes. It is that `PLTE` is incompressible and that a shorter
+    /// palette may fit a smaller index bit depth — a 256-entry palette holding three colours drops
+    /// 759 `PLTE` bytes *and* takes the index stream from 8 bits per pixel to 2.
+    ///
+    /// Nothing is lost: every surviving entry keeps its RGB and its alpha byte for byte, and the
+    /// map sends each marked old index to the entry that holds the colour it named, so the pixels
+    /// a decoder resolves are the ones the caller supplied. Surviving entries keep the caller's
+    /// relative order — reordering them is a separate, heuristic question (#612).
+    ///
+    /// `used[i]` beyond [`Self::len`] is ignored. `remap[i]` for an unmarked or out-of-range `i`
+    /// is 0, which no index reaching a remapped image can be, because the caller marks every index
+    /// its image uses.
+    ///
+    /// The result is a valid palette without a length check: at most 256 entries go in so at most
+    /// 256 come out, and the one caller ([`crate::PngEncoder::encode_indexed8`]) marks the index
+    /// of every pixel in an image that [`gamut_core::ImageRef`] has already refused to build empty,
+    /// so at least one entry is always marked.
+    pub(crate) fn cleaned(&self, used: &[bool; 256]) -> (Self, [u8; 256]) {
+        let mut kept: Vec<([u8; 3], u8)> = Vec::new();
+        let mut remap = [0u8; 256];
+        for (index, &rgb) in self.rgb.iter().enumerate() {
+            if !used[index] {
+                continue;
+            }
+            let entry = (rgb, self.alpha.get(index).copied().unwrap_or(OPAQUE));
+            let position = kept.iter().position(|&k| k == entry).unwrap_or_else(|| {
+                kept.push(entry);
+                kept.len() - 1
+            });
+            remap[index] = position as u8;
+        }
+        let mut alpha: Vec<u8> = kept.iter().map(|&(_, a)| a).collect();
+        trim_trailing_opaque(&mut alpha);
+        let cleaned = Self {
+            rgb: kept.into_iter().map(|(rgb, _)| rgb).collect(),
+            alpha,
+        };
+        (cleaned, remap)
+    }
+
     /// The PLTE chunk payload: RGB triples, flattened.
     pub(crate) fn plte(&self) -> Vec<u8> {
         self.rgb.iter().flatten().copied().collect()
@@ -128,7 +180,7 @@ pub(crate) const OPAQUE: u8 = 255;
 ///
 /// One owner for the rule, because both palette paths need it and a rule restated twice is a rule
 /// that can drift: the encoder-derived palette trims the alphas it collects
-/// ([`crate::reduce`]), and a caller-supplied one will trim its own.
+/// ([`crate::reduce`]), and a caller-supplied one trims [`PngPalette::cleaned`]'s.
 pub(crate) fn trim_trailing_opaque(alphas: &mut Vec<u8>) {
     while alphas.last() == Some(&OPAQUE) {
         alphas.pop();
@@ -193,6 +245,15 @@ mod tests {
         assert!(!PngPalette::new(&[[0, 0, 0]]).unwrap().has_transparency());
     }
 
+    /// Marks `indices` (and nothing else) as used, the way `encode_indexed8` does.
+    fn used_by(indices: &[u8]) -> [bool; 256] {
+        let mut used = [false; 256];
+        for &index in indices {
+            used[usize::from(index)] = true;
+        }
+        used
+    }
+
     /// [`trim_trailing_opaque`] removes exactly the run of opaque entries at the end.
     ///
     /// It stops at the last non-opaque entry rather than removing every opaque one, because a
@@ -213,6 +274,83 @@ mod tests {
         let mut none = vec![7, 8];
         trim_trailing_opaque(&mut none);
         assert_eq!(none, vec![7, 8]);
+    }
+
+    /// [`PngPalette::cleaned`] drops an entry no index marks, and renumbers the survivors.
+    #[test]
+    fn cleaning_drops_an_entry_no_index_marks() {
+        let palette = PngPalette::new(&[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]]).unwrap();
+        let (cleaned, remap) = palette.cleaned(&used_by(&[1, 3]));
+
+        assert_eq!(cleaned.len(), 2);
+        assert_eq!(cleaned.rgb(0), Some([1, 1, 1]));
+        assert_eq!(cleaned.rgb(1), Some([3, 3, 3]));
+        // The survivors keep the caller's relative order, so 1 lands before 3.
+        assert_eq!(remap[1], 0);
+        assert_eq!(remap[3], 1);
+    }
+
+    /// [`PngPalette::cleaned`] merges two entries naming the same colour, sending both old indices
+    /// to the surviving one.
+    #[test]
+    fn cleaning_merges_entries_that_name_the_same_colour() {
+        let palette = PngPalette::new(&[[9, 9, 9], [4, 4, 4], [9, 9, 9]]).unwrap();
+        let (cleaned, remap) = palette.cleaned(&used_by(&[0, 1, 2]));
+
+        assert_eq!(cleaned.len(), 2, "the repeated colour is written once");
+        assert_eq!(cleaned.rgb(0), Some([9, 9, 9]));
+        assert_eq!(cleaned.rgb(1), Some([4, 4, 4]));
+        assert_eq!(
+            remap[2], remap[0],
+            "the duplicate resolves to the first entry"
+        );
+        assert_eq!(remap[1], 1);
+    }
+
+    /// Two entries with the same RGB but different alphas are different colours, so
+    /// [`PngPalette::cleaned`] keeps both.
+    ///
+    /// Merging them would silently repaint every pixel using one of them.
+    #[test]
+    fn an_entry_is_its_alpha_as_well_as_its_rgb() {
+        let palette = PngPalette::with_transparency(&[[9, 9, 9], [9, 9, 9]], &[0, 200]).unwrap();
+        let (cleaned, remap) = palette.cleaned(&used_by(&[0, 1]));
+
+        assert_eq!(cleaned.len(), 2);
+        assert_eq!(cleaned.alpha(0), Some(0));
+        assert_eq!(cleaned.alpha(1), Some(200));
+        assert_ne!(remap[0], remap[1]);
+    }
+
+    /// An entry the palette leaves out of `tRNS` is opaque (§11.3.2.1), so
+    /// [`PngPalette::cleaned`] must compare it as opaque rather than as absent.
+    ///
+    /// Entry 1 below carries an explicit `OPAQUE` and entry 2 carries none; they are the same
+    /// colour and must merge, which they cannot if a missing alpha is treated as its own value.
+    #[test]
+    fn a_missing_trns_entry_is_opaque_when_entries_are_compared() {
+        let palette =
+            PngPalette::with_transparency(&[[0, 0, 0], [5, 5, 5], [5, 5, 5]], &[0, OPAQUE])
+                .unwrap();
+        let (cleaned, remap) = palette.cleaned(&used_by(&[0, 1, 2]));
+
+        assert_eq!(cleaned.len(), 2);
+        assert_eq!(remap[2], remap[1]);
+    }
+
+    /// [`PngPalette::cleaned`] hands back a palette whose `tRNS` payload is already trimmed, so
+    /// the encoder writes the shortest chunk §11.3.2.1 allows.
+    #[test]
+    fn a_cleaned_palette_carries_a_trimmed_trns() {
+        let palette =
+            PngPalette::with_transparency(&[[0, 0, 0], [1, 1, 1], [2, 2, 2]], &[0, OPAQUE, OPAQUE])
+                .unwrap();
+        let (cleaned, _) = palette.cleaned(&used_by(&[0, 1, 2]));
+        assert_eq!(cleaned.trns(), Some(&[0u8][..]));
+
+        // Nothing transparent survives: no chunk at all.
+        let (opaque, _) = palette.cleaned(&used_by(&[1, 2]));
+        assert_eq!(opaque.trns(), None);
     }
 
     #[test]

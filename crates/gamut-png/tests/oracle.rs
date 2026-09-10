@@ -235,6 +235,62 @@ fn indexed8_with_palette_and_transparency_round_trips() {
     assert_eq!(rgba, expected);
 }
 
+/// A caller palette full of redundancy still resolves, in libpng, to exactly the colours the
+/// caller supplied.
+///
+/// `encode_indexed8` cleans the palette it is handed — dropping entries nothing names, merging
+/// entries that name the same colour, renumbering the indices onto the result — and reports
+/// nothing, because none of it is supposed to be observable. This is the test of that claim, and
+/// it fails for one reason: cleaning changed what a pixel means. A merged pair that were not the
+/// same colour, an entry dropped while something still named it, or a remap pointing at the wrong
+/// survivor all land here as the wrong RGBA.
+///
+/// libpng rather than our own decoder, because our decoder would resolve the file through the very
+/// palette the encoder wrote: a wrong palette and a matching wrong remap agree with each other,
+/// and a round trip cannot see a defect that is symmetric across the two.
+#[test]
+fn a_cleaned_palette_still_resolves_to_the_colours_the_caller_supplied() {
+    // Three colours spread over all 256 entries, so 253 entries are redundant: two of the three
+    // are named by 85 entries each and repeat every third index. The third pairs an RGB triple
+    // that also occurs opaque with alpha 0, so a merge that ignored alpha would collapse two
+    // colours the caller kept apart.
+    let colours: [([u8; 3], u8); 3] = [
+        ([200, 10, 10], 255),
+        ([10, 200, 10], 0),
+        ([200, 10, 10], 64),
+    ];
+    let rgb: Vec<[u8; 3]> = (0..256).map(|i| colours[i % 3].0).collect();
+    let alpha: Vec<u8> = (0..256).map(|i| colours[i % 3].1).collect();
+    let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+
+    let (w, h) = (16u32, 16u32);
+    let indices: Vec<u8> = (0..(w * h) as usize).map(|i| i as u8).collect();
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .encode_indexed8(
+            ImageRef::<Indexed8>::new(&indices, Dimensions::new(w, h).unwrap()).unwrap(),
+            &palette,
+            &mut png,
+        )
+        .expect("encode");
+
+    let (dw, dh, rgba) = libpng_oracle::decode_rgba8(&png);
+    assert_eq!((dw, dh), (w, h));
+    let expected: Vec<u8> = indices
+        .iter()
+        .flat_map(|&index| {
+            let ([r, g, b], a) = colours[usize::from(index) % 3];
+            [r, g, b, a]
+        })
+        .collect();
+    assert_eq!(rgba, expected);
+    assert_eq!(
+        libpng_oracle::decode(&png).color_type,
+        libpng_oracle::COLOR_PALETTE,
+        "still an indexed file, so the palette is what resolved it"
+    );
+}
+
 #[test]
 fn indexed8_rejects_out_of_range_index() {
     let palette = PngPalette::new(&[[0, 0, 0], [255, 255, 255]]).unwrap();
