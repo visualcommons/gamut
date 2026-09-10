@@ -314,6 +314,10 @@ extern "C" int gdng_decode_lossless_jpeg(const uint8_t *data, size_t len, size_t
 extern "C" int gdng_decode_lossless_jpeg_extent(const uint8_t *data, size_t len,
                                                 size_t expected_samples, size_t *out_len) {
   *out_len = 0;
+  // `dng_stream` takes a 32-bit length; a longer buffer would be silently truncated.
+  if (len > 0xFFFFFFFFu) {
+    return dng_error_bad_format;
+  }
   try {
     dng_stream stream(data, static_cast<uint32>(len));
     buffer_spooler spooler;
