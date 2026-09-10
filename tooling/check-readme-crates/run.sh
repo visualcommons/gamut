@@ -30,29 +30,30 @@
 #     as a paragraph of literal pipes while each row's bytes stay intact, and all of them fail
 #     here.
 #
-# Four claim forms in a cell are checked against `cargo metadata`, and they are the only prose
-# this guard reads. Each is opt-in: a row that does not write one claims nothing and is not
-# checked. Write a claim a reader could check against cargo in one of these forms, or do not
+# A set of claim FORMS is checked against `cargo metadata`, and they are the only prose this
+# guard reads. Each is opt-in and marker-driven: text that writes no marker claims nothing and is
+# not checked. Write a claim a reader could check against cargo in one of these forms, or do not
 # write it -- a hand-maintained list of crates is exactly the defect this file exists to catch,
-# one level down:
+# one level down.
 #
-#   * a `vN` or `vN.M` token -- the FIRST one in the row must agree with that crate's own
-#     `Cargo.toml` version, to the precision written (`v2` checks the major, `v0.2` the major and
-#     minor). This is what makes a version the most checkable thing a cell can carry;
-#   * `consumed by` followed by backticked crate names -- that set must be exactly the workspace
-#     crates declaring a normal or build dependency on the row's crate. Dev-dependencies are
-#     excluded, as they are for `check-release-deps`: they are not what a consumer links;
-#   * `always-on dependency`/`always-on dependencies` followed by backticked crate names -- that
-#     set must be exactly the workspace crates the row's crate depends on non-optionally. Naming
-#     none asserts that there are none;
-#   * `feature`/`features` followed by backticked names -- each must be declared by one of the
-#     workspace crates the row names, which is its own crate plus any other it cites, because a
-#     row may legitimately point at the umbrella's feature for the seam it describes. Writing
-#     `default feature` instead additionally requires that crate's `default` list to enable it.
-#     Every occurrence in a row is read, not only the first.
+# The forms are deliberately NOT enumerated here. An enumeration in the documentation of an
+# enumeration checker is the one place a hand-written list must not be, and this header shipped a
+# stale one for two rounds: it said "four" while the code checked five. `claims()` below is the
+# list. Every form is one `match()` in it, tagged and documented at that match site, and every
+# failure message names the form it rejects and the shape it wants:
 #
-# In all four the name list ends at the first character that is not a backticked name, a comma,
-# a colon, a space or the word "and", so ordinary prose may follow it on the same line.
+#     grep -n 'CLAIM FORM:' tooling/check-readme-crates/run.sh
+#
+# In every name-list form the list ends at the first character that is not a backticked name, a
+# comma, a colon, a space or the word "and", so ordinary prose may follow it on the same line.
+#
+# WHAT THE CONTRACT COVERS. The whole `## Crates` section, not only its rows. The structural
+# checks always judged the section; the claim checks do too, so a machine-decidable claim written
+# as ordinary prose above or below the table is read exactly as it would be inside a cell. Two
+# forms -- the version token and the `consumed by`/`always-on` lists -- name no subject of their
+# own and take the row's crate as their subject, so outside a crate row they have nobody to be
+# about: writing one there is a failure rather than a silent pass, and the message says to move it
+# into a row.
 #
 # WHAT THE TABLE IS FORBIDDEN TO WRITE, and why forbidding beats widening. A check that reads
 # backticked names can only be as good as the assumption that names are backticked, and that
@@ -64,8 +65,8 @@
 #     real crate, because that is the precondition every name check rests on. The bare word
 #     `gamut` is exempt: it is the project's name in English as well as the umbrella's package
 #     name, and requiring a code span around every mention of it would reject the prose this
-#     README is made of. A fenced or indented code block is exempt too -- there a compound is a
-#     sample of Rust or of a shell line, where `gamut_png` is the correct spelling;
+#     README is made of. A fenced code block is exempt too -- there a compound is a sample of
+#     Rust or of a shell line, where `gamut_png` is the correct spelling;
 #   * the underscore spelling of a workspace crate is REJECTED, deliberately, and this is the one
 #     place that decision is written down. `gamut_ifd` is a Rust identifier, not a cargo package
 #     name; cargo publishes `gamut-ifd` and `cargo add gamut_ifd` does not resolve. Accepting it
@@ -84,7 +85,7 @@
 #
 # What is deliberately NOT checked, and why. These are limitations, not oversights, and this
 # comment is the one place they are written down:
-#   * The *wording* of the Purpose and Status cells, beyond the four claim forms above. They are
+#   * The *wording* of the Purpose and Status cells, beyond the claim forms. They are
 #     prose a human maintains, and their authority is **the crate's own source** -- the code that
 #     ships. No single file outranks it: `STATUS.md` can list a shipped module as deferred (issue
 #     #545) and a module doc can defer a capability the crate's own `EncodeImage` impls already
@@ -135,8 +136,12 @@ test -f "$readme" || {
 # LC_ALL=C makes every regexp below byte-wise, which is what the octal escapes assume; the awk
 # is POSIX (no gensub, no interval expressions, dynamic regexps built as strings) so it behaves
 # the same under mawk, which is what `awk` is on the CI runner.
+#
+# `CHECK_README_AWK` picks the interpreter, unquoted so `CHECK_README_AWK='gawk --posix'` works.
+# The portability claim is only worth what someone can re-run: `fixtures.sh` beside this file
+# drives the whole battery through here once per interpreter available on the machine.
 scan="$(
-    LC_ALL=C awk '
+    LC_ALL=C ${CHECK_README_AWK:-awk} '
         BEGIN {
             # An escaped pipe is content, not a column separator, so it is swapped for a control
             # byte before the split and swapped back before the cell is judged.
@@ -318,24 +323,26 @@ scan="$(
             }
         }
 
-        # Emits the machine-checkable claims a row makes. Each is opt-in: a row that writes none
-        # claims nothing.
-        # Every backticked lower-case identifier in the row, which is the set of crates a feature
-        # named here may belong to. The shell keeps only the workspace members.
+        # Every backticked lower-case identifier in the text, which is the set of crates a feature
+        # or an external dependency named here may belong to. `name` is the row`s own crate, or ""
+        # for prose outside a row, which owns nothing but what it names. The shell keeps only the
+        # workspace members.
         function cited(name, text,   out, rest) {
             out = name
             rest = text
             while (match(rest, /`[A-Za-z0-9_-]+`/)) {
-                out = out " " substr(rest, RSTART + 1, RLENGTH - 2)
+                out = (out == "") ? substr(rest, RSTART + 1, RLENGTH - 2) \
+                                  : out " " substr(rest, RSTART + 1, RLENGTH - 2)
                 rest = substr(rest, RSTART + RLENGTH)
             }
             return out
         }
 
-        # Every backticked `gamut`-prefixed name in a cell asserts that such a crate exists, and
+        # CLAIM FORM: a backticked `gamut`-prefixed name asserts that such a crate exists, and
         # cargo settles that: a renamed or deleted crate leaves a phantom behind in a Purpose cell
-        # exactly as it does in a crate cell, and only the crate cell was ever read.
-        function cites(name, text,   rest, tok, out) {
+        # exactly as it does in a crate cell, and only the crate cell was ever read. The underscore
+        # spelling is a name like any other here and so fails, which the header explains.
+        function cites(subject, text,   rest, tok, out) {
             out = ""
             rest = text
             while (match(rest, /`gamut[A-Za-z0-9_-]*`/)) {
@@ -343,7 +350,7 @@ scan="$(
                 out = (out == "") ? tok : out " " tok
                 rest = substr(rest, RSTART + RLENGTH)
             }
-            if (out != "") { print "CITE\t" name "\t" out }
+            if (out != "") { print "CITE\t" subject "\t" out }
         }
 
         # A `gamut-`/`gamut_` compound written outside a code span. Every name check downstream
@@ -362,25 +369,52 @@ scan="$(
             if (out != "") { print "UNBT\t" subject "\t" out }
         }
 
-        function claims(name, text,   s, tok, nxt, pre, qual, lst, at, len) {
-            cites(name, text)
+        # Emits the machine-checkable claims a text makes. Each is opt-in: text that writes no
+        # marker claims nothing. `name` is the row`s crate, or "" when this is prose in the
+        # section rather than a crate row -- the two subject-bearing forms are then refused
+        # instead of being read, because they would have nobody to be about.
+        function claims(subject, name, text,   s, tok, nxt, pre, qual, lst, at, len) {
+            cites(subject, text)
+            # CLAIM FORM: a `vN`/`vN.M` token -- the FIRST one in the row -- must agree with that
+            # crate`s own `Cargo.toml` version, to the precision written (`v2` checks the major,
+            # `v0.2` the major and minor). This is what makes a version the most checkable thing
+            # a cell can carry.
             s = " " text
             while (match(s, /[^A-Za-z0-9_.]v[0-9]+(\.[0-9]+)*/)) {
                 tok = substr(s, RSTART + 2, RLENGTH - 2)
                 nxt = substr(s, RSTART + RLENGTH, 1)
                 s = substr(s, RSTART + RLENGTH)
-                if (nxt !~ /[A-Za-z0-9_]/) { print "VER\t" name "\t" tok; break }
+                if (nxt !~ /[A-Za-z0-9_]/) {
+                    if (name == "") { print "SUBJ\t" subject "\ta version token (v" tok ")" }
+                    else { print "VER\t" name "\t" tok }
+                    break
+                }
             }
+            # CLAIM FORM: `consumed by` followed by backticked crate names -- that set must be
+            # exactly the workspace crates declaring a normal or build dependency on the row`s
+            # crate. Dev-dependencies are excluded, as they are for `check-release-deps`: they are
+            # not what a consumer links.
             if (match(text, /consumed by/)) {
-                print "CONS\t" name "\t" name_list(substr(text, RSTART + RLENGTH))
+                if (name == "") { print "SUBJ\t" subject "\ta `consumed by` list" }
+                else { print "CONS\t" name "\t" name_list(substr(text, RSTART + RLENGTH)) }
             }
+            # CLAIM FORM: `always-on dependency`/`always-on dependencies` followed by backticked
+            # crate names -- that set must be exactly the workspace crates the row`s crate depends
+            # on non-optionally. Naming none asserts that there are none.
             if (match(text, /always-on dependenc(y|ies)/)) {
-                print "ALWAYS\t" name "\t" name_list(substr(text, RSTART + RLENGTH))
+                if (name == "") { print "SUBJ\t" subject "\tan `always-on dependenc...` list" }
+                else { print "ALWAYS\t" name "\t" name_list(substr(text, RSTART + RLENGTH)) }
             }
-            # `feature`/`features` immediately followed by backticked names, optionally qualified
-            # by a preceding `default`. Every occurrence in the row is read, not just the first.
+            # CLAIM FORM: `Cargo feature`/`Cargo features` immediately followed by backticked
+            # names -- each must be declared by one of the workspace crates the text names,
+            # because a row may legitimately point at the umbrella`s feature for the seam it
+            # describes. Writing `default Cargo feature` instead additionally requires that
+            # crate`s `default` list to enable it. Every occurrence is read, not only the first.
+            # The marker carries `Cargo` because bare `feature`/`features` is an ordinary English
+            # verb: "the crate features `chunk` walking" was read as a feature claim and rejected,
+            # and a guard that rejects legal prose is a guard someone turns off.
             s = text
-            while (match(s, /features?[ ]+`/)) {
+            while (match(s, /Cargo features?[ ]+`/)) {
                 # name_list() and cited() both call match(), so the offsets of the marker are
                 # saved before either runs -- reading RSTART back afterwards would not advance.
                 at = RSTART
@@ -389,7 +423,22 @@ scan="$(
                 qual = (pre ~ /default[ ]*$/) ? "default" : "any"
                 lst = name_list(substr(s, at + len - 1))
                 if (lst != "") {
-                    print "FEAT\t" name "\t" qual "\t" lst "\t" cited(name, text)
+                    print "FEAT\t" subject "\t" qual "\t" lst "\t" cited(name, text)
+                }
+                s = substr(s, at + len)
+            }
+            # CLAIM FORM: `external dependency`/`external dependencies` immediately followed by
+            # backticked names -- each must be a non-dev dependency of one of the workspace crates
+            # the text names. This is the marker that settles a name cargo knows but the cite
+            # check cannot read, because no rule separates an external crate name from a module or
+            # a type name in a code span: under a marker, the writer has said which it is.
+            s = text
+            while (match(s, /external dependenc(y|ies)[ ]+`/)) {
+                at = RSTART
+                len = RLENGTH
+                lst = name_list(substr(s, at + len - 1))
+                if (lst != "") {
+                    print "EXTDEP\t" subject "\t" lst "\t" cited(name, text)
                 }
                 s = substr(s, at + len)
             }
@@ -450,9 +499,9 @@ scan="$(
                 next
             }
 
-            # The precondition is the whole section, rows and prose alike. An indented code block
-            # is exempt for the same reason a fence is: there a `gamut_png` is a sample of Rust or
-            # of a shell line, where the underscore spelling is the correct one.
+            # The contract is the whole section, not only its rows. An indented code block is
+            # exempt for the same reason a fence is: there a `gamut_png` is a sample of Rust or of
+            # a shell line, where the underscore spelling is the correct one.
             if (cur !~ /^    /) { unbackticked("line " NR, cur) }
 
             # A table runs from its delimiter row until the first line that is not a table row.
@@ -489,6 +538,10 @@ scan="$(
             sub(/[ \t]*$/, "", row)
             gsub(/\\\|/, SENTINEL, row)
             if (row !~ /^\| *`[A-Za-z0-9_-]+` *\|/ || substr(row, length(row), 1) != "|") {
+                # Not a crate row, so it is prose in the section: the claim forms that name their
+                # own subject are checked here, and the two that borrow the row`s crate as their
+                # subject are refused rather than ignored.
+                claims("line " NR, "", cur)
                 prev = cur
                 prev_para = is_para(cur)
                 next
@@ -512,7 +565,7 @@ scan="$(
                 gsub(SENTINEL, "|", status)
                 if (is_blank(purpose)) { nbad++; bad[nbad] = name " has an empty Purpose cell" }
                 if (is_blank(status))  { nbad++; bad[nbad] = name " has an empty Status cell" }
-                claims(name, purpose " " status)
+                claims("the `" name "` row", name, purpose " " status)
             }
 
             prev = cur
@@ -752,10 +805,10 @@ fi
 cite_claims="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "CITE" { print $2 "\t" $3 }')"
 if [ -n "$cite_claims" ]; then
     cite_errors="$(
-        printf '%s\n' "$cite_claims" | while IFS="$(printf '\t')" read -r crate names; do
+        printf '%s\n' "$cite_claims" | while IFS="$(printf '\t')" read -r subject names; do
             for cited in $names; do
                 if ! printf '%s\n' "$workspace_crates" | grep -qxF -- "$cited"; then
-                    echo "  $crate: the row names \`$cited\`, which is not a workspace crate"
+                    echo "  $subject names \`$cited\`, which is not a workspace crate"
                 fi
             done
         done
@@ -763,7 +816,7 @@ if [ -n "$cite_claims" ]; then
     )"
     if [ -n "$cite_errors" ]; then
         fail=1
-        echo "check-readme-crates: $readme cells name crates that do not exist:"
+        echo "check-readme-crates: $readme names crates that do not exist:"
         echo "$cite_errors"
         echo "  drop the mention, or fix the crate name it misspells. The underscore spelling of a"
         echo "  real crate is rejected here on purpose: a cell names a cargo package, and cargo"
@@ -785,6 +838,18 @@ if [ -n "$unbackticked" ]; then
     echo "  English here as well as a package name), and so is a fenced or indented code block."
 fi
 
+# A version token, a `consumed by` list or an `always-on` list takes the row's crate as its
+# subject. Outside a crate row there is no such crate, so the claim cannot be decided; it is
+# refused rather than silently skipped, which is what made prose in this section invisible.
+subjectless="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "SUBJ" { print "  " $2 ": " $3 }')"
+if [ -n "$subjectless" ]; then
+    fail=1
+    echo "check-readme-crates: in $readme, claims outside a crate row that name no crate to be about:"
+    echo "$subjectless"
+    echo "  These forms are decided against the crate whose row they sit in. Move the claim into"
+    echo "  that crate's row, or write the sentence without the form's marker."
+fi
+
 # `feature`/`features`: each named feature must be declared by one of the workspace crates the row
 # talks about -- its own crate, or another one it names -- because a row may legitimately cite the
 # umbrella's feature for the seam the row describes. `default feature` additionally requires that
@@ -798,7 +863,7 @@ if [ -n "$feature_claims" ]; then
         | "\($p.name)\t\(.)\t\(if . as $f | $default | index($f) then "default" else "off" end)"
     ')"
     feature_errors="$(
-        printf '%s\n' "$feature_claims" | while IFS="$(printf '\t')" read -r crate qual names owners; do
+        printf '%s\n' "$feature_claims" | while IFS="$(printf '\t')" read -r subject qual names owners; do
             for feature in $names; do
                 found=""
                 for owner in $owners; do
@@ -813,9 +878,9 @@ if [ -n "$feature_claims" ]; then
                 done
                 if [ -z "$found" ]; then
                     if [ "$qual" = "default" ]; then
-                        echo "  $crate: no crate this row names enables '$feature' by default"
+                        echo "  $subject: no crate it names enables '$feature' by default"
                     else
-                        echo "  $crate: no crate this row names declares a '$feature' feature"
+                        echo "  $subject: no crate it names declares a '$feature' feature"
                     fi
                 fi
             done
@@ -826,8 +891,49 @@ if [ -n "$feature_claims" ]; then
         fail=1
         echo "check-readme-crates: feature claims in $readme that cargo metadata refutes:"
         echo "$feature_errors"
-        echo "  Write a feature as: feature \`name\` -- or default feature \`name\` -- and name the"
-        echo "  crate that declares it in the same row."
+        echo "  Write a feature as: Cargo feature \`name\` -- or default Cargo feature \`name\` --"
+        echo "  and name the crate that declares it in the same row. The marker carries 'Cargo'"
+        echo "  because bare 'feature'/'features' is an ordinary English verb."
+    fi
+fi
+
+# `external dependency`/`external dependencies`: each named crate must be a non-dev dependency of
+# one of the workspace crates the text names. Under a marker the writer has said that this code
+# span is a crate name, which is what the `gamut`-prefixed cite check cannot decide on its own.
+extdep_claims="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "EXTDEP" { print $2 "\t" $3 "\t" $4 }')"
+if [ -n "$extdep_claims" ]; then
+    actual_deps="$(printf '%s' "$metadata" | jq -r '
+        .packages[]
+        | "\(.name)\t\([ .dependencies[] | select((.kind // "normal") != "dev") | .name ]
+             | unique | sort | join(" "))"
+    ')"
+    extdep_errors="$(
+        printf '%s\n' "$extdep_claims" | while IFS="$(printf '\t')" read -r subject names owners; do
+            for dep in $names; do
+                found=""
+                for owner in $owners; do
+                    if printf '%s\n' "$actual_deps" |
+                        awk -F'\t' -v o="$owner" -v d="$dep" '
+                            $1 == o { n = split($2, have, " ")
+                                      for (i = 1; i <= n; i++) { if (have[i] == d) { found = 1 } } }
+                            END { exit found ? 0 : 1 }'; then
+                        found="$owner"
+                        break
+                    fi
+                done
+                if [ -z "$found" ]; then
+                    echo "  $subject: no crate it names depends on '$dep'"
+                fi
+            done
+        done
+        true
+    )"
+    if [ -n "$extdep_errors" ]; then
+        fail=1
+        echo "check-readme-crates: external-dependency claims in $readme that cargo metadata refutes:"
+        echo "$extdep_errors"
+        echo "  Write one as: external dependency \`name\` -- and name, in the same row, a crate"
+        echo "  that declares it. Dev-dependencies are excluded, as they are everywhere here."
     fi
 fi
 

@@ -304,17 +304,20 @@ run = "./tooling/check-tests/run.sh"
 # whose Purpose and Status each render as something, and not hidden inside an HTML comment or a
 # code fence), and the table's *context*: EVERY crate row in the section must render inside ONE
 # table, headed by a delimiter row directly under a header row of the same width, since anything
-# else renders some or all of the rows as literal text. It also checks the three claim forms
-# `cargo metadata` can decide -- a `vN` version token, a `consumed by` list, an `always-on
-# dependency` list -- because a hand-maintained list of crates is the defect this task exists to
-# catch, one level down. It gates nothing else about the prose, so a green run means "every crate
-# has a well-formed row inside a real table, and the claims cargo can settle are settled", not
-# "the table is true". A row's prose answers to the crate's own source -- the code that ships.
-# lib.rs, then Cargo.toml, then STATUS.md is where to look, but each is a summary and any of them
-# can be stale (issues #545, #560), so a row must be true of the crate rather than faithful to a
-# file. What the guard deliberately does not check is written down once, in the script header.
+# else renders some or all of the rows as literal text. It also checks the claim forms `cargo
+# metadata` can decide, because a hand-maintained list of crates is the defect this task exists
+# to catch, one level down. Those forms are NOT enumerated here: this comment named three of them
+# while the script checked five, which is the same defect a third time. The script header says
+# where the list lives and how to print it -- `grep -n 'CLAIM FORM:'` over the script.
+#
+# It gates nothing else about the prose, so a green run means "every crate has a well-formed row
+# inside a real table, and the claims cargo can settle are settled", not "the table is true". A
+# row's prose answers to the crate's own source -- the code that ships. lib.rs, then Cargo.toml,
+# then STATUS.md is where to look, but each is a summary and any of them can be stale (issues
+# #545, #560), so a row must be true of the crate rather than faithful to a file. What the guard
+# deliberately does not check is written down once, in the script header.
 [tasks.check-readme-crates]
-description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, renders as one table under a header and delimiter row of matching width, gives each crate a three-cell row whose Purpose and Status render as something, and agrees with cargo metadata wherever a row cites a version, a feature, or a list of crates"
+description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, renders as one table under a header and delimiter row of matching width, gives each crate a three-cell row whose Purpose and Status render as something, and agrees with cargo metadata wherever the section makes a claim in one of the forms the guard checks"
 run = "./tooling/check-readme-crates/run.sh"
 
 [tasks.check-release-deps]
