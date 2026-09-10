@@ -210,9 +210,13 @@ impl TiffDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or a sub-IFD pointer
-    /// graph that is not a tree (a cycle, a repeated child offset, an out-of-bounds or
-    /// unparseable pointer target, or nesting deeper than 16 levels).
+    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or for a pointer
+    /// **inside IFD 0's subtree** that does not resolve into a tree: an out-of-bounds or
+    /// unparseable target, two pointers naming one directory, or nesting deeper than 16 levels.
+    /// Only `ExifIFD` (34665) and `InteroperabilityIFD` (40965) are followed, and only from
+    /// IFD 0 downwards — a pointer on any later page of a multi-page document is never resolved,
+    /// so however broken it is it cannot fail this call, not even by naming a directory IFD 0's
+    /// own subtree also names.
     ///
     /// **This can fail on a file [`decode_image`](DecodeImage::decode_image) decodes happily**,
     /// and that is deliberate. Pixel decoding never follows a metadata pointer, so a broken

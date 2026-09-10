@@ -39,9 +39,9 @@
 //! ([`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved)) and exposes the
 //! read-side locator as [`c2pa_exclusions`].
 
-use gamut_core::Result;
+use gamut_core::{Error, Result};
 use gamut_ifd::c2pa::{self, C2paExclusions};
-use gamut_ifd::{Ifd, Value, read_tree};
+use gamut_ifd::{ByteOrder, Ifd, Value, Variant, read, read_header, read_ifd_at};
 
 use crate::tags;
 
@@ -200,7 +200,8 @@ impl TiffMetadata {
     }
 }
 
-/// The pointer tags [`read_metadata`] follows, scoped to what [`TiffMetadata`] actually returns.
+/// The pointer tags [`read_metadata`] follows in IFD 0's subtree, scoped to what
+/// [`TiffMetadata`] actually returns.
 ///
 /// Two tags, and the pair is a deliberate lower bound rather than a subset of convenience.
 ///
@@ -219,10 +220,92 @@ impl TiffMetadata {
 /// pages sharing one thumbnail directory tripped the reader's cross-chain loop guard. A pointer
 /// whose target this reader throws away must not be able to fail the whole call.
 ///
-/// One over-reach remains and is harmless: `InteroperabilityIFD` is also followed if it appears at
-/// IFD 0, where it does not belong. A TIFF whose IFD 0 carries tag 40965 is already out of spec,
-/// and `read_tree` takes one flat list for the whole tree.
+/// The same rule scopes *where* the list is resolved, not only what is in it: it is applied to
+/// **IFD 0's subtree and nowhere else** ([`resolve_pointers`]). Every page after IFD 0 feeds one
+/// field of [`TiffMetadata`] — the C2PA manifest store, whose entry holds the store's bytes
+/// directly rather than a pointer — so a *pointer* on such a page is a thrown-away target too,
+/// and one on page 1 of a two-page document used to fail the whole call. `read_tree` cannot be
+/// scoped that way: it resolves the list it is given at every node of every page.
+///
+/// Within that subtree it is still **one flat list at every node**, exactly as
+/// [`gamut_ifd::read_tree`] applies one to a whole file, and that is where the one remaining
+/// over-reach comes from: `InteroperabilityIFD` is also followed if it appears at IFD 0, where it
+/// does not belong. It is harmless — a TIFF whose IFD 0 carries tag 40965 is already out of spec,
+/// and the resolved group feeds no field either way — and narrowing it further would take a
+/// per-node list, which is a `gamut-ifd` surface rather than a scoping decision this crate makes.
 const POINTER_TAGS: &[u16] = &[tags::EXIF_IFD, tags::INTEROPERABILITY_IFD];
+
+/// An upper bound on the sub-IFD nesting [`resolve_pointers`] follows, bounding a hostile pointer
+/// graph. It is [`gamut_ifd::read_tree`]'s own bound, so the two walks agree on what is too deep;
+/// the deepest legitimate tree reachable through [`POINTER_TAGS`] is Exif → Interop, two levels.
+const MAX_POINTER_DEPTH: usize = 16;
+
+/// The file offsets a sub-IFD pointer value carries: a `LONG` array (TIFF 6.0 §2), the typed
+/// `IFD` (13) form of TIFF Technical Note 1, or BigTIFF's 64-bit `LONG8`/`IFD8` forms. Any other
+/// type is not a pointer, and its field is left in place — the rule
+/// [`gamut_ifd::read_tree`] applies, restated here so the two walks cannot disagree about what a
+/// pointer is.
+fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
+    match value {
+        Value::Long(v) | Value::Ifd(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
+        Value::Long8(v) | Value::Ifd8(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+/// Resolves `tags` over `ifd` and, recursively, over the children it reaches, replacing each
+/// pointer field with a [`sub_ifds`](Ifd::sub_ifds) group — what [`gamut_ifd::read_tree`] does
+/// for a whole file, applied to **one** directory's subtree.
+///
+/// The scoping is the whole reason this exists: `read_tree` resolves the flat list it is handed at
+/// every node of every page, so a pointer on a page [`read_metadata`] discards can fail a call
+/// whose answer that page never contributed to. Following a pointer by hand is
+/// [`gamut_ifd::read_ifd_at`]'s documented purpose. `visited` spans the walk and `depth` bounds
+/// it, so a cycle or two pointers claiming one directory fail here rather than loop — the guards
+/// are restated because they guard *this* walk.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if a pointer target is
+/// unreadable, if two pointers name one directory, or if the tree nests deeper than
+/// [`MAX_POINTER_DEPTH`].
+fn resolve_pointers(
+    data: &[u8],
+    order: ByteOrder,
+    variant: Variant,
+    ifd: &mut Ifd,
+    tags: &[u16],
+    visited: &mut Vec<u64>,
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_POINTER_DEPTH {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: sub-IFD tree too deep",
+        ));
+    }
+    for &tag in tags {
+        let Some(offsets) = ifd.get(tag).and_then(pointer_offsets) else {
+            continue;
+        };
+        let mut children = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            if visited.contains(&offset) {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: sub-IFD pointer loop",
+                ));
+            }
+            visited.push(offset);
+            let mut child = read_ifd_at(data, offset, order, variant)?;
+            resolve_pointers(data, order, variant, &mut child, tags, visited, depth + 1)?;
+            children.push(child);
+        }
+        ifd.remove(tag);
+        ifd.set_sub_ifd(tag, children);
+    }
+    Ok(())
+}
 
 /// A raw `BYTE`/`UNDEFINED` payload, copied out of a directory entry.
 fn bytes_value(value: Option<&Value>) -> Option<Vec<u8>> {
@@ -251,28 +334,41 @@ fn bytes_value(value: Option<&Value>) -> Option<Vec<u8>> {
 /// [`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved)'s placement rule,
 /// not from disagreement here.
 pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
-    let file = read_tree(data, POINTER_TAGS)?;
-    // §A.3.6: one store for the whole asset, in the last IFD of the main chain. `ifds` is that
-    // chain, so its last element is where the entry belongs — and a single-page file makes the
-    // two the same directory. A file with no IFD at all carries no metadata.
-    let (Some(ifd0), Some(store_ifd)) = (file.ifds.first(), file.ifds.last()) else {
+    let (order, variant, _) = read_header(data)?;
+    // The chain alone: `read` follows no pointer at all. A file with no IFD carries no metadata.
+    let mut ifds = read(data)?.ifds;
+    let Some(ifd0) = ifds.first_mut() else {
         return Ok(TiffMetadata::new());
     };
+    // One flat list, resolved over IFD 0's subtree and no other page's — see [`POINTER_TAGS`].
+    resolve_pointers(data, order, variant, ifd0, POINTER_TAGS, &mut Vec::new(), 0)?;
+    let exif = ifd0
+        .sub_ifds()
+        .iter()
+        .find(|group| group.tag == tags::EXIF_IFD)
+        .and_then(|group| group.ifds.first())
+        .cloned();
+    let xmp = bytes_value(ifd0.get(tags::XMP));
+    let iptc = bytes_value(ifd0.get(tags::IPTC_NAA));
+    let icc = bytes_value(ifd0.get(tags::ICC_PROFILE));
+    // §A.3.6: one store for the whole asset, in the last IFD of the main chain. `ifds` is that
+    // chain, so its last element is where the entry belongs — and a single-page file makes the
+    // two the same directory. The entry carries the store's bytes rather than an offset, so the
+    // last IFD is reached without following a pointer, on a page whose pointers were never
+    // resolved.
     let located = c2pa::locate(data)?.is_some();
-    let c2pa = match store_ifd.get(tags::C2PA_MANIFEST_STORE) {
+    let c2pa = match ifds
+        .last()
+        .and_then(|ifd| ifd.get(tags::C2PA_MANIFEST_STORE))
+    {
         Some(Value::Undefined(store)) if located => Some(store.clone()),
         _ => None,
     };
     Ok(TiffMetadata {
-        exif: ifd0
-            .sub_ifds()
-            .iter()
-            .find(|group| group.tag == tags::EXIF_IFD)
-            .and_then(|group| group.ifds.first())
-            .cloned(),
-        xmp: bytes_value(ifd0.get(tags::XMP)),
-        iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
-        icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
+        exif,
+        xmp,
+        iptc,
+        icc,
         c2pa,
     })
 }
