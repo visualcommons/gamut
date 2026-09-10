@@ -237,7 +237,7 @@ impl ExifReader {
                 report.record(Dropped::new(
                     DroppedRegion::ThumbnailJpeg,
                     u64::from(offset),
-                    DropReason::Incomplete,
+                    DropReason::ThumbnailLengthMissing,
                 ));
                 None
             }

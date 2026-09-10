@@ -324,7 +324,7 @@ fn a_thumbnail_offset_without_a_length_is_named() {
     assert_eq!(dropped.offset(), 4, "named at the offset the tag carried");
     assert_eq!(
         dropped.reason(),
-        DropReason::Incomplete,
+        DropReason::ThumbnailLengthMissing,
         "not OutOfBounds — the address is inside the blob; the length is what is missing"
     );
 }
