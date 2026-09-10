@@ -107,6 +107,13 @@
 //! passes, including one carrying no field at all. Handed nothing to write, it removes the
 //! property — but only when the read reported one, because a caller cannot have meant to clear a
 //! property it was never shown.
+//!
+//! Retention is not merging. A setter handed values *replaces* the property, and a replaced
+//! property does not keep its qualifiers: the container kind is kept because it is part of how the
+//! values themselves are held, and nothing else is. So the shapes above survive a read-modify-write
+//! because the read declines to report them, not because the setter works around them — a caller
+//! that reads nothing and then deliberately writes a value has replaced the property, qualifiers
+//! and all, which is what a setter is for.
 
 use std::borrow::Borrow;
 
