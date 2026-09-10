@@ -54,10 +54,11 @@ impl ReadLedger {
         }
         let new_start = self.spans[i].start.min(start);
         // The spans that merge are the run from `i` whose starts still reach `end`; taking that
-        // run as a sub-slice is what bounds the walk. A hand-advanced index is bounded instead
-        // by its own arithmetic being right -- `j *= 1` never advances one -- and the loop it
-        // drove could then be reported only as a mutation-testing timeout, never as a wrong
-        // answer (issue #110).
+        // run as a sub-slice is what bounds the walk. A hand-advanced index is bounded by its own
+        // arithmetic instead, and the mutant that stalls that arithmetic -- `j *= 1` never
+        // advances an index of zero -- makes the loop spin instead of finishing wrong, so the
+        // escape is reportable only as a mutation-testing timeout and no test can assert on it
+        // (issue #110).
         let merge_len = self.spans[i..]
             .iter()
             .take_while(|s| s.start <= end)
@@ -111,10 +112,12 @@ impl ReadLedger {
         // Subtract `merged` from each ledger span. Both lists are sorted and disjoint, so the
         // claims that can touch one span are a contiguous run of `merged`: the run that reaches
         // past the span's start, up to the last that begins before its end. Taking that run as a
-        // sub-slice is what bounds the walk -- a cursor advanced by hand is bounded instead by
-        // its own arithmetic staying right (`pos *= n` never moves one that starts at zero), and
-        // the loop it drives can then be reported only as a mutation-testing timeout, never as a
-        // wrong answer (issue #110).
+        // sub-slice is what bounds the walk. A cursor advanced by hand is bounded by its own
+        // arithmetic instead, and the mutants of that arithmetic split two ways: one that stalls
+        // the cursor (`pos *= n` never moves one that starts at zero) spins instead of finishing,
+        // and is reportable only as a mutation-testing timeout, while one that merely mis-steps
+        // it returns a wrong answer a test can pin. Only the first kind is unkillable, and
+        // bounding the walk by the data removes it (issue #110).
         let mut out = Vec::new();
         for span in &self.spans {
             let end = span.end();
