@@ -305,6 +305,11 @@ struct PresetKnobs {
 /// unbounded reaches, and on a 4096x4096 photograph −0.028% of −0.044%. Doubling to 16 MiB buys
 /// a further 0.005% there and costs another 94 MiB, which is the trade this constant declines.
 /// `STATUS.md` carries the whole sweep, including the rows where a wider span costs bytes.
+///
+/// Both ends of that — wider than the default, and finite — are what
+/// `the_smallest_rungs_parse_span_sits_between_the_default_and_no_bound_at_all` asserts. Neither is
+/// observable through an encode at corpus size, where every candidate span already exceeds the
+/// filtered stream.
 const SMALLEST_OPTIMAL_PARSE_LIMIT: usize = 8 << 20;
 
 impl Preset {
@@ -2240,6 +2245,22 @@ mod tests {
         }
         assert_eq!(Preset::from_level(4), None, "the ladder ends at 3");
         assert_eq!(Preset::from_level(u8::MAX), None);
+    }
+
+    #[test]
+    fn the_smallest_rungs_parse_span_sits_between_the_default_and_no_bound_at_all() {
+        // Both ends are the point of the knob. Wider than the default, or the rung is not asking
+        // for anything; finite, or one encode's parse state grows without bound in the image, at
+        // 12 bytes per byte of span. Asserted on the value rather than through an encode because
+        // it is not observable through one: this crate's corpus filters to less than the 32 KiB
+        // span floor, so every candidate span already covers the whole stream and every rung
+        // emits the same bytes whatever the limit says.
+        let span = Preset::Smallest.knobs().optimal_parse_limit;
+        assert!(
+            span > DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT && span < usize::MAX,
+            "the top rung's parse span is {span}, not between the {} default and no bound at all",
+            DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT
+        );
     }
 
     #[test]
