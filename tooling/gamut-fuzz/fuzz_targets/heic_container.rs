@@ -17,16 +17,26 @@
 //!   an accessor that normalised or re-allocated on the way out would satisfy every count above
 //!   and still break it.
 //!
-//! Injections that proved each assertion fires (re-runnable), all reported by the committed seed
-//! alone with no search, as `run.sh heic_container <seeds> -- -runs=0`:
+//! Injections that proved each assertion fires (re-runnable), all reported by the committed seeds
+//! alone with no search, as `run.sh heic_container <seeds> -- -runs=0`. Each `is_some()` equality
+//! is injected in **both** directions, because one direction is silent on a file that has no
+//! segment of that kind:
 //!
 //! | injection in `gamut-heic` | message |
 //! |---|---|
 //! | `boxes()` skips the `ftyp` box | *"boxes() disagrees with the Box segments"* |
 //! | `appended_stream()` returns `None` unconditionally | *"appended\_stream() disagrees with the AppendedStream segments"* |
-//! | `trailer()` returns `Some(self.data)` unconditionally | *"trailer() disagrees with the Trailer segments"* |
-//! | `data()` returns a leaked copy of the input rather than the input | *"left == right" on the `data()` pointer* |
-//! | `boxes()` yields a leaked copy of each body rather than the borrowed body | *"a borrowed slice is not inside data()"* |
+//! | `appended_stream()` returns `Some(self.data)` unconditionally | the same |
+//! | `trailer()` returns `None` unconditionally | *"trailer() disagrees with the Trailer segments"* |
+//! | `trailer()` returns `Some(self.data)` unconditionally | the same |
+//! | `data()` returns a leaked copy of the input rather than the input | *"data() is not the input"* |
+//! | `boxes()` yields a leaked copy of each body rather than the borrowed body | *"a borrowed slice is not inside data(): 16 bytes at 0x…, data() is 272 bytes at 0x…"* |
+//!
+//! Two of those rows need a file the corpus did not have. `heic-single-item.heic` carries neither
+//! an appended stream nor a trailer, so `appended_stream()`/`trailer()` returning `None`
+//! unconditionally agreed with it and reported nothing. `appended-stream.heic` (a second top-level
+//! `ftyp`, as a motion-photo phone writes) and `trailer.heic` (a truncated trailing box header,
+//! retained once `ftyp` and `meta` are seen) are what make those two directions reachable.
 //!
 //! The accessors' **reach is one function each**, and that is a limitation rather than a flaw:
 //! `boxes`, `appended_stream` and `trailer` are each a three-line `filter_map`/`find_map` over the
