@@ -81,8 +81,8 @@ fn the_store_declares_its_own_length_as_the_whole_slot() {
     // makes it safe for `gamut-avif` (box-bounded) and `gamut-heic` (`LBox`-bounded) to report the
     // same range for the same file.
     assert_eq!(
-        declared_store_len(&filled.store),
-        Some(filled.slot.len()),
+        declared_store_len(&filled.store).expect("the store declares its own length"),
+        filled.slot.len(),
         "the store's own `LBox` must account for the whole reserved slot"
     );
 }

@@ -24,15 +24,22 @@ fn the_box_gamut_avif_writes_is_byte_identical_to_the_one_c2pa_rs_composes() {
         .expect("c2pa-rs composes a box around the same store");
 
     // The store sits at the end of the composed box, so the box starts that far ahead of the slot.
+    // Both ends are checked before slicing: a wrong `store_offset` on either side of the
+    // differential is a defect this test should *report*, not one it should panic on with an index
+    // out of bounds that names no side.
     let framing = composed.len() - filled.store.len();
     let start = filled
         .slot
         .start
         .checked_sub(framing)
         .expect("the box begins inside the file");
+    let written = start
+        .checked_add(composed.len())
+        .and_then(|end| filled.asset.get(start..end))
+        .expect("the box ends inside the file");
 
     assert_eq!(
-        &filled.asset[start..start + composed.len()],
+        written,
         composed.as_slice(),
         "gamut-avif's ContentProvenanceBox must be byte-identical to c2pa-rs's for the same store"
     );

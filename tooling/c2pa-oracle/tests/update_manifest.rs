@@ -93,8 +93,8 @@ fn the_update_store_is_bounded_by_its_own_lbox_at_the_probed_offset() {
     // would have read the merkle offset's leading bytes as an `LBox`, so the store it reported
     // would not account for its own range.
     assert_eq!(
-        declared_store_len(&asset[update.clone()]),
-        Some(update.len()),
+        declared_store_len(&asset[update.clone()]).expect("the store declares its own length"),
+        update.len(),
         "the located `update` store must declare exactly the range gamut reported"
     );
 }

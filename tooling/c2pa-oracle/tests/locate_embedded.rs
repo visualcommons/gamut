@@ -39,21 +39,55 @@ fn signed_avif() -> Vec<u8> {
 }
 
 #[test]
-fn gamut_avif_reports_the_exact_span_c2pa_rs_embedded() {
+fn gamut_avif_bounds_the_store_c2pa_rs_embedded_by_the_box_that_carries_it() {
     let asset = signed_avif();
     let expected = jumbf_superbox_span(&asset).expect("the signed asset carries a JUMBF superbox");
 
     let container = AvifContainer::parse(&asset).expect("the signed asset parses");
     let slot = container.c2pa().expect("gamut-avif locates the slot");
 
+    // `gamut-avif` bounds the slot by the *box*, so it reports the store and anything the writer
+    // left after it (`C2paSlot::slot_bytes`: "the store, then any padding"). The claim this test
+    // holds gamut to is therefore containment, not equality: the slot begins exactly where the
+    // store begins and holds every byte of it. Whether c2pa-rs leaves padding at all is c2pa-rs's
+    // business, and it is pinned on its own below — so a future padding c2pa-rs fails *that* test
+    // rather than being misread here as gamut mis-locating.
     assert_eq!(
-        slot.range, expected,
-        "gamut-avif's reported range must be the span c2pa-rs embedded, not a superset or a \
-         fragment of it"
+        slot.range.start, expected.start,
+        "gamut-avif's reported range must begin at the store c2pa-rs embedded, not before or \
+         after it"
+    );
+    assert!(
+        slot.range.end >= expected.end,
+        "gamut-avif's reported range must hold the whole store, not a fragment of it: reported \
+         {:?}, store at {expected:?}",
+        slot.range
     );
     assert_eq!(
-        slot.slot_bytes, &asset[expected],
+        &slot.slot_bytes[..expected.len()],
+        &asset[expected],
         "the bytes gamut-avif hands back must be the bytes at that range"
+    );
+}
+
+#[test]
+fn c2pa_rs_leaves_no_padding_between_the_store_and_the_end_of_its_box() {
+    let asset = signed_avif();
+    let expected = jumbf_superbox_span(&asset).expect("the signed asset carries a JUMBF superbox");
+
+    let container = AvifContainer::parse(&asset).expect("the signed asset parses");
+    let slot = container.c2pa().expect("gamut-avif locates the slot");
+
+    // An observation about the reference implementation, recorded in `README.md` beside the
+    // `update`-purpose finding and asserted here for the same reason: it is what makes the
+    // box-bounded bound (`gamut-avif`) and the `LBox`-bounded bound (`gamut-heic`) report the
+    // *same* range for the same file. Nothing in C2PA 2.4 §A.5.1.2 forbids a writer from sizing
+    // the box larger than the store, so this is evidence, not a rule — and when it stops holding,
+    // this is the test that says so.
+    assert_eq!(
+        slot.range, expected,
+        "c2pa-rs sizes the ContentProvenanceBox to the store exactly; a difference here is the \
+         reference implementation having started to pad, not gamut-avif mis-locating"
     );
 }
 
@@ -80,16 +114,15 @@ fn gamut_heic_reports_the_exact_span_c2pa_rs_embedded() {
 fn c2pa_rs_validates_the_store_read_out_of_gamut_avifs_reported_range() {
     let asset = signed_avif();
     let container = AvifContainer::parse(&asset).expect("the signed asset parses");
-    let located = container
-        .c2pa()
-        .expect("gamut-avif locates the slot")
-        .slot_bytes
-        .to_vec();
+    let range = container.c2pa().expect("gamut-avif locates the slot").range;
+    let located = asset[range].to_vec();
 
-    // The sharpest form of the claim: hand gamut's own extraction back to c2pa-rs as if it were a
-    // sidecar, against the same asset. A span starting a byte early or late does not parse as
-    // JUMBF, and one cut short fails its own length field, so only the exact range survives — and
-    // the hard binding still has to verify against the asset on top of that.
+    // The sharpest form of the claim, and it is `range` that is exercised: the bytes are cut out
+    // of the asset *at the range gamut reported*, not taken from the `slot_bytes` the same call
+    // hands over, so a range wrong by one byte reaches c2pa-rs as wrong bytes. A span starting a
+    // byte early or late does not parse as JUMBF, and one cut short fails its own length field,
+    // so only the exact range survives — and the hard binding still has to verify against the
+    // asset on top of that.
     assert_eq!(
         read_with_external_store(AVIF_MIME, &located, &asset)
             .expect("the located bytes parse as a manifest store"),
