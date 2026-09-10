@@ -108,8 +108,9 @@ impl Photometry {
                 ];
                 RawImage::new_cfa(dims, BITS, (2, 2), pattern, samples).expect("valid CFA fixture")
             }
-            Photometry::LinearRaw => RawImage::new_linear_raw(dims, BITS, 3, samples)
-                .expect("valid LinearRaw fixture"),
+            Photometry::LinearRaw => {
+                RawImage::new_linear_raw(dims, BITS, 3, samples).expect("valid LinearRaw fixture")
+            }
         }
         .with_black_level(0.0)
         .expect("valid black level")
@@ -349,7 +350,9 @@ fn decode_dng_gamut(bencher: Bencher, case: Case) {
     bencher
         .counter(BytesCount::new(case.raw_bytes()))
         .bench_local(|| {
-            drop(black_box(decoder.decode(black_box(&bytes)).expect("decode")));
+            drop(black_box(
+                decoder.decode(black_box(&bytes)).expect("decode"),
+            ));
         });
 }
 
