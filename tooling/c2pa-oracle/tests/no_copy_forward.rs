@@ -39,7 +39,7 @@
 mod common;
 
 use c2pa::ValidationState;
-use c2pa_oracle::{AVIF_MIME, embed, is_jumbf_not_found, read};
+use c2pa_oracle::{AVIF_MIME, embed, is_jumbf_not_found, jumbf_superbox_span, read};
 use common::{dims, plain_avif, source_rgb};
 use gamut_avif::{AvifContainer, AvifEncoder};
 use gamut_core::{EncodeImage, ImageRef, Rgb8};
@@ -67,15 +67,26 @@ fn store_of(parent: &[u8]) -> Vec<u8> {
 }
 
 /// Re-encodes the fixture, writing whatever C2PA block `embedder` returned for a model carrying
-/// `store` — so the derivative's contents are downstream of the policy under test.
-fn derivative_through(embedder: MetadataEmbedder, store: &[u8]) -> Vec<u8> {
+/// the store `gamut-avif` located in `parent` — so the derivative's contents are downstream of the
+/// policy under test.
+fn derivative_through(embedder: MetadataEmbedder, parent: &[u8]) -> Vec<u8> {
+    let store = store_of(parent);
     let meta = MetadataExtractor::new()
-        .extract(&[MetadataBlock::C2pa(store)])
+        .extract(&[MetadataBlock::C2pa(&store)])
         .expect("a lone C2PA block extracts");
-    assert!(
-        meta.c2pa.is_some(),
-        "the parent's store must be in the model handed to the embedder, or the policy is asked \
-         to drop nothing and the derivative carries no store for a reason that is not the policy"
+
+    // Compared against the oracle's *own* reading of the parent — the store's JUMBF header, not
+    // gamut's ISOBMFF walk — so this says the parent's bytes are what the embedder saw. Comparing
+    // the model back against `store` would say nothing: the model is built from it, so the two
+    // agree however wrong `store_of` is. `meta.c2pa.is_some()` says even less, because
+    // `MetadataExtractor` carries a C2PA block through whatever its length, so an empty or
+    // truncated store satisfies it and the policy is then asked to drop nothing.
+    let expected = jumbf_superbox_span(parent).expect("the signed parent carries a JUMBF store");
+    assert_eq!(
+        meta.c2pa.as_deref(),
+        Some(&parent[expected]),
+        "the model handed to the embedder must carry the parent's store byte for byte, or the \
+         derivative carries no store for a reason that is not the policy"
     );
     let blocks = embedder.embed(&meta).expect("embedding the parent's model");
 
@@ -92,7 +103,7 @@ fn derivative_through(embedder: MetadataEmbedder, store: &[u8]) -> Vec<u8> {
 #[test]
 fn a_derivative_built_from_the_parents_model_reads_back_as_unsigned_not_as_invalid() {
     let parent = signed_parent();
-    let derivative = derivative_through(MetadataEmbedder::new(), &store_of(&parent));
+    let derivative = derivative_through(MetadataEmbedder::new(), &parent);
 
     let error =
         read(AVIF_MIME, &derivative).expect_err("a derivative must carry no manifest store at all");
