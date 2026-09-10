@@ -296,11 +296,12 @@ fn a_truncated_blob_never_drops_a_sub_ifd_without_naming_it() {
 
 /// A thumbnail offset with no length beside it is named rather than silently ignored.
 ///
-/// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength` both
-/// mandatory for a compressed thumbnail, so half the pair is not "no thumbnail" — it is an address
-/// with nothing to size the read by, and the JPEG behind it is lost. Before this the pair fell into
-/// the reader's catch-all `None` arm: no bytes, no error, no report entry, inside the very region
-/// this report claims completeness over.
+/// An offset with no `JPEGInterchangeFormatLength` is not "no thumbnail" — it is an address with
+/// nothing to size the read by, and the JPEG behind it is lost. Before this the pair fell into the
+/// reader's catch-all `None` arm: no bytes, no error, no report entry, inside the very region this
+/// report claims completeness over. The rule is structural, not a support level: Exif 3.0 §4.6.9.2
+/// Table 21 states the pair's level per `Compression` column and the reader does not read that tag
+/// (issue #574), so the fixture's `Compression` value is scene-setting, not the trigger.
 #[test]
 fn a_thumbnail_offset_without_a_length_is_named() {
     let mut thumb = Ifd::new();
@@ -334,6 +335,11 @@ fn a_thumbnail_offset_without_a_length_is_named() {
 /// The other direction of the pair: a `JPEGInterchangeFormatLength` on its own addresses no bytes
 /// at all, so there is nothing to name. Without this, reporting the incomplete pair could be
 /// "fixed" by reporting every thumbnail that has no JPEG, which would make the signal noise.
+///
+/// This pins the *reporting* contract only. Whether a length-only 1st IFD should nonetheless be
+/// *rejected* in strict mode — under `Compression = Compressed` Exif 3.0 §4.6.9.2 Table 21 marks
+/// both tags mandatory, so it is as malformed as the offset-only case — is open, and filed as
+/// issue #574. Both fixtures here are uncompressed, where the table forbids either tag outright.
 #[test]
 fn a_thumbnail_with_no_jpeg_range_reports_nothing() {
     for extra in [None, Some((THUMB_LENGTH, 16))] {

@@ -58,9 +58,12 @@ pub enum DroppedRegion {
     /// directory survives; only its bytes are lost.
     ///
     /// Reported when the range lies outside the blob ([`DropReason::OutOfBounds`]) and when the
-    /// offset has no length beside it ([`DropReason::ThumbnailLengthMissing`]) — Exif 3.0 §4.6.9.2 Table 21
-    /// marks both tags mandatory for a compressed thumbnail, so half the pair addresses bytes
-    /// nothing can size.
+    /// offset has no length beside it ([`DropReason::ThumbnailLengthMissing`]): an offset with
+    /// nothing to size it addresses bytes that cannot be read, which is a loss rather than an
+    /// absent thumbnail. That rule is structural and unconditional here — see
+    /// [`ThumbnailLengthMissing`](DropReason::ThumbnailLengthMissing) — and is *not* derived from
+    /// the pair's support level, which Exif 3.0 §4.6.9.2 Table 21 states only per `Compression`
+    /// column, a tag this crate does not read.
     ThumbnailJpeg = 3,
     /// A top-level directory past the 1st IFD.
     ///
@@ -133,6 +136,13 @@ pub enum DropReason {
     /// Distinct from [`OutOfBounds`](Self::OutOfBounds) — the address may be perfectly valid — and
     /// from [`Malformed`](Self::Malformed), which is about bytes that *were* read and did not
     /// parse. The repair is different in each case, which is why they are different reasons.
+    ///
+    /// Recorded whatever the thumbnail's `Compression` says, because the reason it is a loss is
+    /// that the read has no length — not that a tag is missing where the spec requires one. Exif
+    /// 3.0 §4.6.9.2 Table 21 gives the pair's support level *per `Compression` column*: mandatory
+    /// under **Compressed**, and `N` (not allowed to record) under all three uncompressed columns.
+    /// Whether this crate should read `Compression` and condition the rule on it — and whether a
+    /// length with no offset should be rejected for symmetry — is open, and filed as issue #574.
     ThumbnailLengthMissing = 3,
 }
 

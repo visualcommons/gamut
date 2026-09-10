@@ -267,12 +267,15 @@ mod tests {
         );
     }
 
-    /// A thumbnail offset with no length is a malformed pair, and strict mode says so.
+    /// A thumbnail offset with no length is an unreadable range, and strict mode says so.
     ///
-    /// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength`
-    /// both mandatory for a compressed thumbnail. Half the pair therefore fails strictness for the
-    /// same reason an out-of-bounds range does — the sibling case above — rather than passing as a
-    /// thumbnail that simply has no bytes. The lenient half of the contract is the report, pinned in
+    /// A `JPEGInterchangeFormat` with nothing to size the read by addresses bytes that cannot be
+    /// fetched, so it fails strictness for the same reason an out-of-bounds range does — the
+    /// sibling case above — rather than passing as a thumbnail that simply has no bytes. The
+    /// message is pinned because it must state that structural fact and *not* claim a missing
+    /// mandatory tag: Exif 3.0 §4.6.9.2 Table 21 makes the pair mandatory only under
+    /// `Compression = Compressed`, and forbids recording either tag under the uncompressed
+    /// columns (issue #574). The lenient half of the contract is the report, pinned in
     /// `tests/report.rs`.
     #[test]
     fn a_thumbnail_offset_without_a_length_is_rejected_strictly() {
