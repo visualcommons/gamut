@@ -69,6 +69,14 @@ jobs:
         # property depending on OS entropy would make cargo-mutants report CAUGHT or MISSED for the
         # same mutant on different runs.
         run: mise run check-tests
+      - name: Fuzz target lists in step
+        # Three hand-maintained lists describe the same set of fuzz targets: the files under
+        # tooling/gamut-fuzz/fuzz_targets, the [[bin]] entries in that crate's Cargo.toml, and the
+        # matrix of extended.yml's fuzz job. Nothing reconciled them, and the failure mode of the
+        # third is silent -- a target that is written and committed but never run, with no check
+        # anywhere reporting it. Pure text, no cargo, sub-second, which is why it is here and not
+        # in lint.
+        run: ./tooling/gamut-fuzz/check-targets.sh
       - name: Check PR commit messages
         # Only PRs have a base..head range; validate just the PR's own commits so the pre-existing
         # non-conventional history on master doesn't fail the check.
@@ -147,6 +155,15 @@ jobs:
       # corpus, so this job does not grow the ~178 MiB fetch that `test-dng-real` requires.
       - name: Real-DNG conformance tier compiles
         run: mise run check-dng-real
+      # Same hole, same shape: `tooling/gamut-fuzz` is workspace-excluded and nothing depends on
+      # it, so no gate on the pull-request path compiles its targets at all -- an API change in
+      # gamut-ifd, gamut-tiff, gamut-dng, gamut-isobmff or gamut-heic breaks them unnoticed until
+      # the next Extended run on master. This is build-only: no nightly, no sanitizer, no engine,
+      # so it stays bounded and reproducible and does not put a coverage-guided run on the PR path
+      # (docs/testing.md, "Why fuzzing is not in the per-PR gate"). The driven crates are already
+      # built by the Clippy step above, so the marginal cost is the targets themselves.
+      - name: Fuzz tier compiles
+        run: cargo check --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets
       - name: gamut-ffi feature sync
         run: mise run check-ffi-features
       - name: gamut-ffi header sync
