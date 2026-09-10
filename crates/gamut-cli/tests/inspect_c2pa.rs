@@ -253,3 +253,100 @@ fn forcing_the_heic_format_skips_the_confirmation_the_sniff_applies() {
     );
     assert!(stdout.contains("HEIF/HEIC"), "{stdout}");
 }
+
+/// The most entries `gamut inspect` prints per list before truncating (`MAX_LIST` in
+/// `commands/inspect.rs`, which is private to the binary).
+const MAX_LIST: usize = 20;
+
+#[test]
+fn the_c2pa_box_list_is_truncated_like_every_other_list_in_the_command() {
+    // C2PA 2.4 §A.5.3 permits any number of these boxes, so their count is chosen by the input and
+    // needs no malformity: uncapped, a legal file puts the headline — non-validation disclaimer and
+    // all — at line 2 of however many the file cares to carry.
+    let boxes: Vec<Vec<u8>> = (0..MAX_LIST + 2)
+        .map(|_| {
+            uuid_box(
+                &C2PA_UUID,
+                1,
+                "manifest",
+                &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+            )
+        })
+        .collect();
+    let file = splice_after_ftyp(&heic_file(), &boxes);
+    let out = run_inspect("many.heic", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout.matches("unread C2PA box at").count(),
+        MAX_LIST,
+        "{stdout}"
+    );
+    assert!(stdout.contains("… and 2 more"), "{stdout}");
+    // The headline is still the second line of the report, where a reader meets it first.
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[1].contains("NOT absence of provenance"), "{stdout}");
+}
+
+#[test]
+fn a_uuid_box_of_another_extended_type_reaches_stdout_as_a_count() {
+    // A file whose only `uuid` box is a single byte off the C2PA type — what a signed file
+    // corrupted in transit looks like — printed byte-for-byte what a file with no such box prints.
+    // The count is a fact about bytes and says so; it must not read as C2PA framing.
+    let mut foreign = C2PA_UUID;
+    foreign[0] ^= 0xFF;
+    let file = splice_after_ftyp(
+        &heic_file(),
+        &[uuid_box(
+            &foreign,
+            0,
+            "manifest",
+            &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+        )],
+    );
+    let out = run_inspect("near-miss.heic", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("other top-level uuid boxes: 1"),
+        "the near miss must be visible at all: {stdout}"
+    );
+    assert!(
+        stdout.contains("not provenance framing"),
+        "and must disclaim provenance in the same line: {stdout}"
+    );
+    // It is still not a C2PA box: no store, and no unread-box line claiming damaged framing.
+    assert!(!stdout.contains("unread C2PA box"), "{stdout}");
+}
+
+#[test]
+fn the_label_says_whether_the_format_was_detected_or_asserted() {
+    // `--format` skips the sniff and the confirmation, so on that path the command has tested
+    // nothing about the container: printing the label it prints for a file it confirmed would be
+    // echoing the caller's assertion back as this command's own finding.
+    let sniffed = run_inspect("detected.heic", &heic_file(), None);
+    let sniffed_stdout = String::from_utf8_lossy(&sniffed.stdout);
+    assert!(sniffed.status.success(), "{sniffed_stdout}");
+    assert!(
+        sniffed_stdout.contains(": HEIF/HEIC\n"),
+        "a confirmed container is labelled plainly: {sniffed_stdout}"
+    );
+
+    let forced = run_inspect("asserted.avif", &mif1_avif_file(), Some("heic"));
+    let forced_stdout = String::from_utf8_lossy(&forced.stdout);
+    assert!(forced.status.success(), "{forced_stdout}");
+    assert!(
+        forced_stdout.contains("HEIF/HEIC (asserted by --format, not detected)"),
+        "a forced container must say the format was asserted: {forced_stdout}"
+    );
+}

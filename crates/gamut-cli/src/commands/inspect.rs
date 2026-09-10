@@ -38,7 +38,10 @@
 //! from the crate that owns the rule.
 //!
 //! `--format heic` skips the sniff **and** the confirmation. A forced format is the caller's own
-//! assertion about the file, and honouring it is what `--format` is for.
+//! assertion about the file, and honouring it is what `--format` is for — so the label the report
+//! opens with says the format was *asserted*, not determined. `<path>: HEIF/HEIC` is this command's
+//! own claim about the file, and printing it over a file the sniff would have declined would echo
+//! the caller's assertion back as a finding.
 //!
 //! The contract itself — the gate per format, the two exit codes, the budgets, and every reason
 //! the PNG filter scan declines — is recorded in `docs/inspect-exit-codes.md`, which is normative
@@ -685,15 +688,31 @@ enum HeicRoute {
     /// confirmed against `gamut-heic`'s own still-image predicate before anything is reported.
     Sniffed,
     /// By an explicit `--format heic`. A forced format is the caller's own assertion about the
-    /// file; `--format` exists to override detection, so it overrides the confirmation too.
+    /// file; `--format` exists to override detection, so it overrides the confirmation too — and
+    /// the label says so, rather than reporting the caller's assertion back as this command's.
     Forced,
+}
+
+/// The label the HEIC report opens with, which states how the format was arrived at.
+///
+/// On the sniffed route the command determined it, and confirmed it against `gamut-heic`'s own
+/// still-image predicate. On the forced route it determined nothing: the caller asserted the format
+/// and both the sniff and the confirmation were skipped, so a bare `HEIF/HEIC` would be this
+/// command vouching for a file it never tested — over an AVIF, say, which `--format heic` accepts.
+fn heic_label(route: HeicRoute) -> &'static str {
+    match route {
+        HeicRoute::Sniffed => "HEIF/HEIC",
+        HeicRoute::Forced => "HEIF/HEIC (asserted by --format, not detected)",
+    }
 }
 
 /// Reports what a HEIF/HEIC file says about its own provenance, and nothing else.
 ///
 /// Every reportable fact and every word of the report come from `gamut-heic`; this function parses
 /// the container, confirms it is the HEVC still image this arm reports on (unless `--format` forced
-/// the arm), prints the lines under the file's name, and returns `Ok(())`.
+/// the arm), prints the lines under the file's name, and returns `Ok(())`. The per-box lines are
+/// truncated at [`MAX_LIST`] with the same "… and N more" tail every other list here carries; the
+/// crate keeps returning all of them.
 ///
 /// It reaches no verdict, so it has none to fail on: a file with a manifest store, a file without
 /// one, and a file whose C2PA box could not be read through all exit `0`, each saying which it is.
@@ -711,9 +730,24 @@ fn inspect_heic(path: &std::path::Path, data: &[u8], route: HeicRoute) -> Result
             brand: brand_label(image.major_brand()),
         });
     }
-    println!("{}: HEIF/HEIC", path.display());
-    for line in container.c2pa_summary().report_lines() {
+    println!("{}: {}", path.display(), heic_label(route));
+
+    // Capped like every other list here, and for the same reason: C2PA 2.4 §A.5.3 permits any
+    // number of these boxes, so their count is chosen by the input. Uncapped, a legal file carrying
+    // fifty thousand of them puts the headline — disclaimer and all — at line 2 of fifty thousand.
+    // The summary lines are never capped: there are at most two of them whatever the file holds,
+    // and the first is the one a reader must not lose.
+    let summary = container.c2pa_summary();
+    for line in summary.summary_lines() {
         println!("  {line}");
+    }
+    let shown: Vec<String> = summary.detail_lines().take(MAX_LIST).collect();
+    for line in &shown {
+        println!("  {line}");
+    }
+    let hidden = hidden_entries(summary.detail_line_count(), shown.len());
+    if hidden > 0 {
+        println!("    … and {hidden} more");
     }
     Ok(())
 }
