@@ -53,8 +53,9 @@ pub enum OracleError {
     NoJumbfSuperbox,
     /// A JUMBF superbox header is present, but the length it declares cannot be used: its
     /// `LBox`/`XLBox` fields are truncated, the length is shorter than the header it is part of —
-    /// `LBox` in 2..=7 against the 8-byte header, or `XLBox` below 16 against the 16-byte one — or
-    /// the length runs past the end of the buffer it is read from. Carries which of those it was.
+    /// `LBox` in 2..=7 against the 8-byte header, `XLBox` below 16 against the 16-byte one, or
+    /// `LBox == 0` in a buffer that ends inside that 8-byte header — or the length runs past the
+    /// end of the buffer it is read from. Carries which of those it was.
     ///
     /// This exists so the length is never *guessed*. A span silently derived from a length that
     /// describes no box would be an oracle handing gamut a wrong answer and calling it a reference
@@ -280,12 +281,18 @@ pub fn split_composed_box(composed: Vec<u8>) -> Result<ComposedBox> {
 ///
 /// # Lengths shorter than the header they sit in
 ///
-/// A declared length counts the header, so it can never be less than one. Both header sizes are
-/// refused on that one rule, the way `gamut_isobmff`'s box reader refuses `size < header_size`:
-/// `LBox` in 2..=7 against the 8-byte header, and `XLBox` below 16 against the 16-byte one.
-/// Accepting either would hand back a span that ends at or before the store's own first body byte
-/// — an empty or four-byte "store" — which is exactly the guessed answer this function exists to
-/// refuse.
+/// A declared length counts the header, so it can never be less than one. **Every** arm is refused
+/// on that one rule, the way `gamut_isobmff`'s box reader refuses `size < header_size`:
+///
+/// * `LBox` in 2..=7, against the 8-byte header;
+/// * `XLBox` below 16, against the 16-byte one;
+/// * `LBox == 0` in a buffer of fewer than 8 bytes — the to-end-of-buffer length is still a length
+///   counting the 8-byte header, so a 4-to-7-byte buffer declares a box shorter than its own
+///   header just as literally as an `LBox` of 7 does.
+///
+/// Accepting any of them would hand back a span that ends at or before the store's own first body
+/// byte — an empty or four-byte "store" — which is exactly the guessed answer this function exists
+/// to refuse.
 ///
 /// No store this crate has seen uses either reserved value — c2pa-rs writes a plain 32-bit `LBox`
 /// — which is exactly why the handling is here rather than assumed away.
@@ -309,7 +316,12 @@ pub fn declared_store_len(store: &[u8]) -> Result<usize> {
         ))?;
 
     match u32::from_be_bytes(field) {
-        0 => Ok(store.len()),
+        0 => match store.len() {
+            0..=7 => Err(OracleError::UnusableSuperboxLength(
+                "LBox is 0 but the buffer ends inside the LBox+TBox header it would count",
+            )),
+            to_end_of_buffer => Ok(to_end_of_buffer),
+        },
         1 => match u64::from_be_bytes(
             store
                 .get(8..16)
@@ -583,17 +595,63 @@ mod tests {
 
     #[test]
     fn an_lbox_between_two_and_seven_is_refused_rather_than_resolved() {
+        for lbox in [2u32, 3, 4, 5, 6, 7] {
+            let mut store = vec![0u8; 32];
+            store[..4].copy_from_slice(&lbox.to_be_bytes());
+            store[4..8].copy_from_slice(b"jumb");
+
+            let error = declared_store_len(&store)
+                .expect_err("an LBox below 8 is shorter than the header it counts");
+            assert!(
+                error
+                    .to_string()
+                    .contains("shorter than the LBox+TBox header"),
+                "the refusal must name the undersized LBox rather than any other unusable length; \
+                 LBox {lbox} gave {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_lbox_of_exactly_the_header_size_is_a_length() {
         let mut store = vec![0u8; 32];
-        store[..4].copy_from_slice(&7u32.to_be_bytes());
+        store[..4].copy_from_slice(&8u32.to_be_bytes());
         store[4..8].copy_from_slice(b"jumb");
 
-        let error = declared_store_len(&store).expect_err("7 is shorter than the header itself");
-        assert!(
-            error
-                .to_string()
-                .contains("shorter than the LBox+TBox header"),
-            "the refusal must name the undersized LBox rather than any other unusable length; got \
-             {error}"
+        assert_eq!(
+            declared_store_len(&store).expect("8 is the header itself, the smallest legal box"),
+            8,
+            "the refusal must stop exactly at the header size, not swallow the first legal length"
+        );
+    }
+
+    #[test]
+    fn an_lbox_of_zero_in_a_buffer_shorter_than_the_header_is_refused() {
+        for len in [4usize, 5, 6, 7] {
+            let store = vec![0u8; len];
+
+            let error = declared_store_len(&store)
+                .expect_err("the bytes to the end of the buffer do not reach the header itself");
+            assert!(
+                error
+                    .to_string()
+                    .contains("the buffer ends inside the LBox+TBox header"),
+                "the to-end-of-buffer length obeys the same header minimum as the other arms, and \
+                 the refusal must name it; a {len}-byte buffer gave {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_lbox_of_zero_in_a_buffer_of_exactly_the_header_size_is_a_length() {
+        let mut store = vec![0u8; 8];
+        store[4..8].copy_from_slice(b"jumb");
+
+        assert_eq!(
+            declared_store_len(&store)
+                .expect("8 bytes is the header itself, the smallest legal box"),
+            8,
+            "the refusal must stop exactly at the header size, not swallow the first legal length"
         );
     }
 
