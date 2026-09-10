@@ -118,10 +118,14 @@ asset has), and `gamut-dng` calls the same helper, so the two formats cannot dri
 place. It is an infallible builder, so every bound on `len` is enforced by the **encode** that
 follows, as `Error::InvalidInput`, on every entry point: below the store's minimum (8 bytes, 9 in
 BigTIFF — the JUMBF box header, and one more than the variant's inline threshold, since a value
-that packs inline is not the run at the end of the file §A.3.6 wants), and above what a buffer can
+that packs inline is not the run at the end of the file §A.3.6 wants), above what a buffer can
 hold, since past `isize::MAX` a `Vec<u8>` cannot exist and `vec![0; len]` said so by panicking with
-a capacity overflow. The reservation is taken fallibly instead, so a caller's number cannot panic a
-library path. What stays outside this crate's reach is the allocator's: a reservation the machine
+a capacity overflow, and — in a classic TIFF — above the 4 GiB its entry's 32-bit `LONG` `count`
+could describe, which the encode would otherwise discover only after compressing the image and
+zero-filling the reservation (BigTIFF's count is 64-bit and has no such bound). The reservation is
+taken fallibly instead, so a caller's number cannot panic a library path. A store whose *offset*
+would pass classic TIFF's 4 GiB limit depends on the size of the file it lands after, so that one
+stays `gamut_ifd::c2pa::append_store`'s, refused once the file exists. What stays outside this crate's reach is the allocator's: a reservation the machine
 has no memory for aborts, as any oversized allocation in Rust does. `encode_with_report` reports
 the ranges, and `c2pa_exclusions` recovers them from any
 TIFF's bytes — including files written through `encode_palette8` or `encode_pages_rgb8`, which the
