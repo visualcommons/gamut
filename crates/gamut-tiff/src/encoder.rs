@@ -230,11 +230,17 @@ impl TiffEncoder {
         // nothing, so the refusal is taken here as well. It is *necessary*, not sufficient: the
         // store's own offset must also fit, and that depends on the size of the file it lands
         // after, which only `append_store` knows.
-        let countable = match self.variant() {
-            Variant::Classic => u32::try_from(len).is_ok(),
-            Variant::Big => true,
+        //
+        // Spelled as the *refusing* condition, with no `!` in front of it, because deleting a `!`
+        // is a mutation cargo-mutants makes: over `!countable` it turns the guard into its own
+        // opposite, and the length that reaches `zeroed` from the test below is one whose
+        // reservation the machine may well satisfy — 4 GiB of zero-fill, which is a timed-out
+        // mutant rather than a caught one, and timed out only on machines slow enough to notice.
+        let uncountable = match self.variant() {
+            Variant::Classic => u32::try_from(len).is_err(),
+            Variant::Big => false,
         };
-        if !countable {
+        if uncountable {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "TIFF: a C2PA manifest store longer than 4 GiB cannot be counted by classic \
@@ -1009,8 +1015,16 @@ mod tests {
         // Neither the accepting side of the boundary nor BigTIFF's freedom from it is asserted:
         // both would mean successfully allocating 4 GiB in a unit test. The test is 64-bit-only
         // because on a 32-bit target no `usize` can exceed `u32::MAX`.
+        //
+        // `usize::MAX` rather than `u32::MAX + 1` for the same reason the guard avoids a `!`:
+        // should any mutant let this length past the guard, the next thing it meets is a
+        // reservation no allocator can satisfy, which fails instantly. A length the machine
+        // *might* satisfy would make the mutant's fate depend on how fast that machine zero-fills
+        // 4 GiB. Which of the two bounds fires first is what separates this from
+        // `a_reservation_no_buffer_could_hold_is_refused_instead_of_panicking`, which asks for the
+        // same length as BigTIFF and gets the other message.
         let err = TiffEncoder::new()
-            .with_c2pa_reserved(u32::MAX as usize + 1)
+            .with_c2pa_reserved(usize::MAX)
             .c2pa_store()
             .expect_err("longer than a classic TIFF LONG can count");
         assert!(err.to_string().contains("cannot be counted"), "{err}");
