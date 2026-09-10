@@ -96,3 +96,56 @@ fn exiv2_rejects_garbage_but_accepts_gamut_output() {
     let bytes = fixture().encode().unwrap();
     assert!(gamut_iptc_oracle::parse_iim(&bytes).is_some());
 }
+
+/// A stream spanning the Envelope record and the Application-record datasets *outside* the
+/// PMD-mapped subset — the ones gamut's tag table names but never projects from XMP. The existing
+/// fixture is record 2 only, so this is the record-1 leg and the wide dataset numbers.
+fn wide_fixture() -> IimBlock {
+    IimBlock {
+        datasets: vec![
+            // Envelope record.
+            ds(1, 0, &[0, 4]),         // Model Version = 4
+            ds(1, 20, &[0, 3]),        // File Format = 3 (TIFF)
+            ds(1, 22, &[0, 1]),        // File Format Version = 1
+            ds(1, 30, b"gamut"),       // Service Identifier
+            ds(1, 40, b"00000001"),    // Envelope Number
+            ds(1, 70, b"19900127"),    // Date Sent
+            ds(1, 80, b"133015+0100"), // Time Sent
+            // Application record, beyond the XMP-mapped datasets.
+            ds(2, 0, &[0, 4]),               // Record Version = 4
+            ds(2, 10, b"5"),                 // Urgency
+            ds(2, 30, b"19900127"),          // Release Date
+            ds(2, 35, b"090000-0500"),       // Release Time
+            ds(2, 65, b"gamut"),             // Originating Program
+            ds(2, 70, b"1.0"),               // Program Version
+            ds(2, 118, b"news@example.org"), // Contact
+            ds(2, 131, b"L"),                // Image Orientation
+            ds(2, 135, b"en"),               // Language Identifier
+            ds(2, 151, b"044100"),           // Audio Sampling Rate
+            ds(2, 200, &[0, 3]),             // ObjectData Preview File Format
+        ],
+    }
+}
+
+#[test]
+fn gamut_and_exiv2_agree_on_the_datasets_outside_the_xmp_mapping() {
+    let block = wide_fixture();
+    let bytes = block.encode().unwrap();
+
+    let exiv2 = gamut_iptc_oracle::parse_iim(&bytes).expect("exiv2 parses the wide stream");
+    assert_eq!(exiv2.len(), block.datasets.len());
+    for (o, g) in exiv2.iter().zip(&block.datasets) {
+        assert_eq!(
+            (o.record, o.tag, &o.value),
+            (u16::from(g.record), u16::from(g.dataset), &g.data),
+            "mismatch at {}:{}",
+            g.record,
+            g.dataset
+        );
+    }
+
+    // exiv2 re-encodes the same datasets (order is exiv2's own, so compare as multisets).
+    let exiv2_bytes = gamut_iptc_oracle::reencode_iim(&bytes).expect("exiv2 re-encodes the stream");
+    let reparsed = IimBlock::parse(&exiv2_bytes).expect("gamut parses exiv2's output");
+    assert_eq!(multiset(&reparsed), multiset(&block));
+}
