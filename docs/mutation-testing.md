@@ -1,9 +1,10 @@
 # Mutation testing
 
-Normative for **how a mutation survey is invoked and what bounds it**. What counts as an
-acceptable survivor or a justified exclusion is `AGENTS.md`'s rule and
-`.cargo/mutants.toml`'s prose; this document is about running the thing without taking the
-machine down.
+Normative for **how a mutation survey is invoked, what bounds it, and how to read what it
+reports**. What counts as an acceptable survivor or a justified exclusion is `AGENTS.md`'s rule
+and `.cargo/mutants.toml`'s prose — this document points at them rather than restating them. It
+is about running the thing without taking the machine down, and about not misreading the result
+once it has run.
 
 ## The one entry point
 
@@ -103,20 +104,46 @@ A run that prints no `MISSED` line is not necessarily a clean run.
 neither caught nor missed; the runner reports it as `TIMEOUT` and exits 3, and the `--in-diff`
 gate fails on it just as it does on a survivor. Read the counts before triaging: a shard that
 hits its own cap silently stops, so every mutant it never reached is unreported rather than
-caught. Treat a hang the way `AGENTS.md` says to treat a survivor — the loop that cannot make
-progress under mutation is usually a loop that should have been bounded by a slice in the first
-place, and rewriting it as one turns an unkillable `TIMEOUT` into an ordinary killable mutant.
+caught. For what to do about one, see `AGENTS.md` — a hang is a survivor for policy purposes,
+and the loop that cannot make progress under mutation is usually a loop that should have been
+bounded by the data it walks. Rewriting it as one turns an unkillable `TIMEOUT` into an ordinary
+killable mutant, which is how `gamut-ifd`'s ledger walks lost theirs.
+
+**A verdict can depend on the runner, not only on the code.** A mutant that allocates without
+bound is ended by whichever limit it reaches first: under a tight per-process address-space cap
+the scenario aborts and scores `caught`, under a looser one it runs to the test timeout and
+scores `TIMEOUT`. `run.sh` derives that cap as budget ÷ jobs, so the same mutant can score
+differently on CI and locally — issue #613. Until that is pinned, state the budget beside any
+verdict you report for an allocation-heavy mutant.
 
 **What the tool mutates is a short list**, and everything outside it is invisible to the gate.
-`cargo mutants --list` on this workspace generates exactly: a function body replaced by a default
-value, a binary or compound-assignment operator swapped, a `!` deleted, a match *guard* forced to
-`true`/`false`, and a whole match arm deleted. So the gate can never report:
+Derive the list instead of trusting a written one — a hand-written version of this list has been
+short twice:
+
+```bash
+cargo mutants --list --no-config | sed -E '
+  s/^.*:[0-9]+:[0-9]+: //
+  s/^replace match guard .*/replace match guard/
+  s/^replace .* -> .* with .*/replace body/
+  s/^replace .* with \(\)$/replace body/
+  s/^replace .* with .*/replace operator/
+  s/^delete (match arm|field|!|-).*/delete \1/
+' | sort | uniq -c | sort -rn
+```
+
+Over the whole tree (25 215 mutants, September 2026) that is exactly seven verbs: 16 082 binary
+or compound-assignment operator swaps, 7 212 function bodies replaced by a default value, 917
+whole match arms deleted, 540 unary `-` deletions, 269 `!` deletions, 160 match guards forced to
+`true`/`false`, and 35 struct fields deleted from a struct literal. Nothing else is generated, so
+the gate can never report:
 
 - a case that is **missing** from a `match` or a table — there is nothing there to mutate, and a
   survey of nine absent spec-defined cases still scores zero missed;
-- a wrong **literal or `const`** — a guard's operand is not mutated, so a test that asserts an
+- a wrong **literal or `const` inside an expression or a guard operand** — `>= 3` is never
+  mutated into `>= 4`, and a guard's operands are not touched at all, so a test that asserts an
   error message against its own copy of the literal is self-referential and pins nothing. Assert
-  the value, not the symbol;
+  the value, not the symbol. (A literal that *is* a function body is reachable, because bodies
+  are replaced wholesale: `replace SrgbIntent::code -> u8 with 0` is that mutant.)
 - one **alternative of an or-pattern** — `delete match arm A(v) | B(v)` removes both at once, so
   a wrong alternative stays green. Assert each alternative separately rather than looping.
 
@@ -125,14 +152,6 @@ discarded return value, arithmetic whose operands cannot disagree at the sizes t
 none of these can be killed by any test, because nothing depends on them. That is a reason to
 delete the expression, not to test harder — and where deleting it costs something (an extra
 allocation, say), record the cost where the code is.
-
-**Never narrow a contract to make a mutant killable.** A limit that exists because the format
-defines it — a nesting depth, a size cap, a table length — is not a knob for test assertability.
-Lowering one so its boundary comes within reach of the suite changes what the crate accepts or
-emits, and an encoder narrowed that way can end up writing a file its own reader refuses. If a
-spec's bound is out of the suite's reach, reach it with a fixture or an internal seam, or take the
-exclusion and write the argument down. The contract is the deliverable; the gate is the
-instrument, and an instrument that cannot see a bound is not a reason to move it.
 
 **Verify a hand-applied mutant the way the tool does.** Commit first, so `git diff` shows exactly
 the mutation and nothing else; apply the expression verbatim from the `--list` line; run the whole
