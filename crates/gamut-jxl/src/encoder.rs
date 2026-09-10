@@ -267,11 +267,8 @@ impl JxlEncoder {
         let encoded = gamut_metadata::MetadataEmbedder::new()
             .embed(meta)
             .map_err(|e| {
-                Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "JXL: metadata does not serialize",
-                )
-                .with_detail(e.to_string())
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: metadata does not serialize")
+                    .with_detail(e.to_string())
             })?;
         self.with_encoded_metadata(&encoded)
     }
@@ -315,10 +312,7 @@ impl JxlEncoder {
             .map(std::str::from_utf8)
             .transpose()
             .map_err(|_| {
-                Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "JXL: XMP packet is not UTF-8",
-                )
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: XMP packet is not UTF-8")
             })?;
         if let Some(exif) = &encoded.exif {
             self = self.with_exif(exif.strip_prefix(b"Exif\0\0").unwrap_or(exif));

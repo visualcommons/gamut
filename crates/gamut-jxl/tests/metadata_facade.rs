@@ -67,7 +67,11 @@ fn a_manifest_store_is_never_copied_forward() {
     let mut typed = typed();
     typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());
     let jxl = encode(container_encoder().with_metadata(&typed).unwrap());
-    let read = JxlDecoder::new().metadata(&jxl).unwrap().metadata().unwrap();
+    let read = JxlDecoder::new()
+        .metadata(&jxl)
+        .unwrap()
+        .metadata()
+        .unwrap();
     assert_eq!(read.c2pa, None);
     typed.c2pa = None;
     assert_eq!(read, typed);
@@ -99,7 +103,10 @@ fn encoded_blocks_route_to_the_setters_with_the_exif_signature_stripped() {
             .unwrap(),
     );
     let read = JxlDecoder::new().metadata(&jxl).unwrap();
-    assert_eq!(read.exif.as_deref(), Some(&b"II\x2A\x00\x08\x00\x00\x00\x00\x00"[..]));
+    assert_eq!(
+        read.exif.as_deref(),
+        Some(&b"II\x2A\x00\x08\x00\x00\x00\x00\x00"[..])
+    );
     assert_eq!(read.xmp, encoded.xmp);
 }
 
@@ -116,7 +123,9 @@ fn unwritable_carriers_are_typed_errors() {
 
     let mut c2pa = EncodedMetadata::default();
     c2pa.c2pa = Some(vec![0u8; 4]);
-    let err = container_encoder().with_encoded_metadata(&c2pa).unwrap_err();
+    let err = container_encoder()
+        .with_encoded_metadata(&c2pa)
+        .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert_eq!(
         err.static_message(),

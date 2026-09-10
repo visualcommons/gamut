@@ -1054,19 +1054,13 @@ mod box_tests {
             bx(b"Exif", b"\0\0\0\0MM\0*"),
         ]);
         let (exif, xmp) = container_metadata_boxes(&data).unwrap();
-        assert_eq!(
-            xmp.as_deref(),
-            Some(&b"<x:xmpmeta>first</x:xmpmeta>"[..])
-        );
+        assert_eq!(xmp.as_deref(), Some(&b"<x:xmpmeta>first</x:xmpmeta>"[..]));
         assert_eq!(exif.as_deref(), Some(TIFF));
     }
 
     #[test]
     fn largesize_and_to_end_of_file_boxes_are_walked() {
-        let data = container(&[
-            bx64(b"Exif", &exif_payload(0, 0)),
-            bx0(b"xml ", b"<x/>"),
-        ]);
+        let data = container(&[bx64(b"Exif", &exif_payload(0, 0)), bx0(b"xml ", b"<x/>")]);
         let (exif, xmp) = container_metadata_boxes(&data).unwrap();
         assert_eq!(exif.as_deref(), Some(TIFF));
         assert_eq!(xmp.as_deref(), Some(&b"<x/>"[..]));

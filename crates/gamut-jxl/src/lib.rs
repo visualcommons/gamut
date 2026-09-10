@@ -162,9 +162,9 @@ pub use backend::{
     JxlImageRef, JxlOwnedSamples, JxlSamples, JxlStreamInfo,
 };
 pub use config::{ColorSpec, Container, Distance, Effort, ModularMode, Orientation};
-pub use decoder::{JxlDecoder, JxlMetadata};
 #[cfg(feature = "decode")]
 pub use decoder::{DecodePartialImage, JxlInfo, JxlPartialReport, JxlRender};
+pub use decoder::{JxlDecoder, JxlMetadata};
 pub use encoder::JxlEncoder;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `JxlMetadata::metadata` / `JxlEncoder::with_metadata` without a direct dependency.
