@@ -170,6 +170,13 @@ pub enum WellKnownNs {
     ///
     /// URI `http://rs.tdwg.org/dwc/index.htm`, the TDWG Darwin Core namespace as it is used in
     /// XMP; registered by exiv2 (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
+    ///
+    /// **The only variant with two spellings.** Adobe XMPCore writes this URI with a trailing
+    /// slash ([`DWC_URI_TRAILING_SLASH`]), which [`WellKnownNs::from_uri`] accepts as a read alias
+    /// while [`WellKnownNs::uri`] keeps returning the unslashed form above. Reading does not
+    /// canonicalize, so in a graph parsed from an XMPCore-written packet the properties are keyed
+    /// by the *slashed* URI and `uri()` will not find them; resolve them by the URI the packet
+    /// carries. See [`WellKnownNs::from_uri`] for the whole of it.
     DarwinCore,
 }
 
