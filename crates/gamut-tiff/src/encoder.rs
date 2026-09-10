@@ -230,17 +230,7 @@ impl TiffEncoder {
         // nothing, so the refusal is taken here as well. It is *necessary*, not sufficient: the
         // store's own offset must also fit, and that depends on the size of the file it lands
         // after, which only `append_store` knows.
-        //
-        // Spelled as the *refusing* condition, with no `!` in front of it, because deleting a `!`
-        // is a mutation cargo-mutants makes: over `!countable` it turns the guard into its own
-        // opposite, and the length that reaches `zeroed` from the test below is one whose
-        // reservation the machine may well satisfy — 4 GiB of zero-fill, which is a timed-out
-        // mutant rather than a caught one, and timed out only on machines slow enough to notice.
-        let uncountable = match self.variant() {
-            Variant::Classic => u32::try_from(len).is_err(),
-            Variant::Big => false,
-        };
-        if uncountable {
+        if uncountable_store_len(self.variant(), len) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "TIFF: a C2PA manifest store longer than 4 GiB cannot be counted by classic \
@@ -891,6 +881,27 @@ impl EncodeImage<Bilevel> for TiffEncoder {
     }
 }
 
+/// Whether `variant`'s count word is too narrow to describe a `len`-byte C2PA manifest store.
+///
+/// Classic TIFF counts an `UNDEFINED` value with a 32-bit `LONG`, so `u32::MAX` is the longest
+/// store it can name and one byte more is unnameable; BigTIFF's count is 64-bit and no `usize`
+/// exceeds it, so nothing is refused there.
+///
+/// A named predicate rather than the two lines inline, for two reasons that are the same reason.
+/// The magnitude is the whole claim — a bound narrowed to sixteen bits refuses stores a classic
+/// TIFF describes perfectly well — and no test in this crate can reach it through
+/// [`TiffEncoder::c2pa_store`] without asking for a length whose *reservation* answers first, so
+/// the boundary is only assertable here. And spelling it as the *refusing* condition leaves no `!`
+/// for cargo-mutants to delete: inverting the guard at the call site would send an oversized
+/// length on to [`zeroed`], which on a machine whose allocator grants it is a 4 GiB zero-fill and
+/// a timed-out mutant rather than a caught one.
+fn uncountable_store_len(variant: Variant, len: usize) -> bool {
+    match variant {
+        Variant::Classic => u32::try_from(len).is_err(),
+        Variant::Big => false,
+    }
+}
+
 /// A `len`-byte zero-filled C2PA reservation, or a typed error where `vec![0; len]` would panic.
 ///
 /// [`TiffEncoder::with_c2pa_reserved`] returns `Self`, so it cannot refuse anything itself and the
@@ -1002,6 +1013,27 @@ mod tests {
             .c2pa_store()
             .expect_err("no buffer holds usize::MAX bytes");
         assert!(err.to_string().contains("cannot be allocated"), "{err}");
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn the_classic_count_bound_is_the_width_of_a_tiff_long() {
+        // The *magnitude* of the bound, which no test going through `c2pa_store` can reach: a
+        // length large enough to be refused there is also large enough that some other bound —
+        // `zeroed`'s reservation — answers first, so a bound narrowed to sixteen bits would refuse
+        // stores a classic TIFF describes perfectly well and every existing test would still pass.
+        // Asserted on the predicate instead, at the boundary and one past it, allocating nothing.
+        assert!(
+            !uncountable_store_len(Variant::Classic, u32::MAX as usize),
+            "the longest store a 32-bit LONG counts"
+        );
+        assert!(
+            uncountable_store_len(Variant::Classic, u32::MAX as usize + 1),
+            "one byte past what a 32-bit LONG counts"
+        );
+        // BigTIFF's count is 64-bit, so no `usize` is uncountable there — the arm that makes the
+        // refusal classic TIFF's alone rather than every container's.
+        assert!(!uncountable_store_len(Variant::Big, usize::MAX));
     }
 
     #[test]
