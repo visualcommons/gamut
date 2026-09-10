@@ -118,47 +118,81 @@ no crash is still visible:
 
 | target | crate | entry points | check beyond the crash oracle |
 |---|---|---|---|
-| `ifd_read` | `gamut-ifd` | `read`, `read_tree`, `read_audited` | the dual-ledger audit is complete: no byte read outside a claim, no claim unread |
-| `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | a page that decodes yields exactly `width × height × Rgb8::CHANNELS` samples for the geometry the tags declare |
+| `ifd_read` | `gamut-ifd` | `read`, `read_tree`, `read_audited` | the dual-ledger audit is complete — no byte read outside a claim, **and** no claim unread |
+| `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | the geometry the decode hands back equals the geometry the tags declare, after every stage that could rewrite it |
 | `dng_decode` | `gamut-dng` | `DngDecoder::{decode,verify_new_raw_image_digest}` | the raw image that *arrives* holds exactly `width × height × planes` samples, after every rewriting stage |
-| `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `read`, `BoxReader` | the box cursor strictly advances; the segments tile `0..len` exactly |
-| `heic_container` | `gamut-heic` | `HeifContainer::parse` | the segments tile `0..len` exactly and every accessor agrees with that tiling |
-| `heic_hvcc` | `gamut-heic` | `HevcConfig::parse`, `annex_b*`, `validate_still_payload`, `iter_nal_units` | the Annex-B emitters append rather than replace, on the success path and the error path |
+| `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `read`, `BoxReader` | the segments tile `0..len` exactly — contiguous, **and** covering to end of file |
+| `heic_container` | `gamut-heic` | `HeifContainer::parse` | every accessor agrees with the segment list, **and** every borrowed slice lies inside `data()` |
+| `heic_hvcc` | `gamut-heic` | `HevcConfig::parse`, `annex_b*`, `validate_still_payload`, `iter_nal_units` | the Annex-B emitters append rather than replace — on the success path **and** on the error path |
 
 **A check is only listed here if it can fail — and each target's module doc names the injected
-defect that made it fail**, with the message it produced and the command that reproduces it. That
-second half is the part a reader can re-run; without it "this check is live" is a reading of the
-code, which is exactly what put the rows below wrong twice.
+defect that made *each listed check* fail**, with the message it produced and the command that
+reproduces it. That second half is the part a reader can re-run; without it "this check is live" is
+a reading of the code, which is exactly what put the rows above wrong twice.
 
-Five earlier entries could not fail. `ifd_read` compared `read(data)` against
-`IfdReader::open(data)?.read_file()` — but `reader.rs` *defines* `read` as that expression, so the
-two sides were one function call written twice. `heic_hvcc` compared `annex_b(..).is_ok()` against
-`annex_b_payload(..).is_ok()` on the same input, and asserted `annex_b` equals the two calls its
-own body makes. `dng_decode` compared a digest verdict against a decoded field that is read with
-the *same expression* on both sides. `tiff_decode` claimed two: that `info_page` refuses the index
-`page_count` returns — which reduces to indexing a vector one past its own length, both sides
-being `read(data)?.ifds` — and that the described and decoded geometry agree, which sees only the
-few lines copying one into the other, because `decode_page_samples` says outright that
-"everything the page *declares* comes from one shared reader". None of them had a reachable
-failure, and calling any of them a differential overstated what the tier proves.
+**One injection per listed check, not per target row.** Every "and" in the column above is a
+separate assertion that fails for a separate defect, and a row that records one injection has
+evidence for one of them. Two checks survived three rounds of review that way — `ifd_read`'s "no
+claim unread" and `heic_hvcc`'s error path — because their row's single injection satisfied only
+the other half. Where a check is an equality between an accessor and a count, inject in **both**
+directions: one direction is silent on a file that holds no instance of the thing.
 
-The two `tiff_decode` claims are **dropped**, and the target is re-anchored on something the
-geometry reader does not produce: the number of samples the decode physically yielded, against the
-declared dimensions and the channel count of the layout asked for. The rest are **relabelled and
-repriced**. A claim about two bodies agreeing is a **structure pin**: worth keeping where it is
-free or where a future change could genuinely split the bodies apart, worth nothing as a search.
-So `heic_hvcc` still asserts the two halves, folded into the append check's existing buffer at no
-extra emitter pass; `dng_decode` still compares the verdict, on a call it makes anyway for the
-crash oracle; and the `gamut-ifd` wrapper pin lives in `crates/gamut-ifd/tests/robustness.rs`,
-over a bounded exhaustive corpus, rather than costing half of every one of this target's twenty
-thousand executions per second to search for a counterexample that does not exist. Dropping the
-two duplicate parses raised `ifd_read` from roughly 12 000 exec/s to roughly 20 000.
+### Entries that could not fail
 
-Two smaller assertions are pins for the same reason and are labelled as such at the site, so
-nobody reads them as checks: `tiff_decode`'s "a page that decodes must also describe" (decoding
-calls the tag reader before it reads a pixel) and `heic_hvcc`'s "no empty NAL unit"
-(`NalUnitIter::next` errors on a zero length before it can yield one). Both cost one comparison on
-a value already in hand.
+Each of these was listed as a check and each was removed or relabelled after an injection into the
+defect it advertised produced no report:
+
+1. `ifd_read` compared `read(data)` against `IfdReader::open(data)?.read_file()` — but `reader.rs`
+   *defines* `read` as that expression, so the two sides were one function call written twice.
+2. `heic_hvcc` compared `annex_b(..).is_ok()` against `annex_b_payload(..).is_ok()` on the same
+   input.
+3. `heic_hvcc` asserted `annex_b` equals the two calls its own body makes.
+4. `dng_decode` compared a digest verdict against a decoded field that is read with the *same
+   expression* on both sides.
+5. `tiff_decode` claimed that `info_page` refuses the index `page_count` returns — which reduces to
+   indexing a vector one past its own length, both sides being `read(data)?.ifds`.
+6. `tiff_decode` claimed that the described and decoded geometry agree, which sees only the few
+   lines copying one into the other, because `decode_page_samples` says outright that "everything
+   the page *declares* comes from one shared reader".
+7. `tiff_decode`'s replacement for 5 and 6 — the number of samples the decode physically yielded,
+   against the declared geometry — was **also** one of these, and was listed as the row's check for
+   a round. `convert_from_raw` allocates its output as `ImageBuf::<Q>::zeroed(src.dims)`, so the
+   returned count is the *dimensions'* product by construction: the assertion is the geometry
+   comparison times a constant on both sides, and a transposition injected where the decode builds
+   its `DecodedImage` passes it with exit 0. The geometry pair — dropped as entry 6 — is what fires
+   on that transposition, so it is back, and the sample count is a pin (below).
+8. `isobmff_boxes` claimed the box cursor strictly advances. `BoxReader::next_box` reads its
+   4-byte size and 4-byte type through `take` before any success return, so no declared box size
+   can stall the cursor: with the `size < header_size` guard removed, 851 173 executions over
+   61 seconds reported nothing, while a `self.pos` rewind reports on the first seed.
+9. `heic_container` checked that the segments tile `0..len`. `HeifContainer::parse` stores
+   `gamut_isobmff::walk_segments(data)?` verbatim, so that is the same assertion over the same
+   values as `isobmff_boxes`'s — the same injection produced the *identical* message in both — on a
+   narrower input set. Two ten-minute runners searching one function, at a measured-zero marginal
+   yield.
+
+Calling any of them a differential overstated what the tier proves.
+
+### Structure pins
+
+A claim about two bodies agreeing is a **structure pin**: worth keeping where it is free or where a
+future change could genuinely split the bodies apart, worth nothing as a search. Each is labelled
+as one at the site and none is listed in the table above.
+
+| pin | target | why no input can fail it |
+|---|---|---|
+| `annex_b` equals its two documented halves | `heic_hvcc` | `annex_b`'s body *is* those two calls; folded into the append check's existing buffer at no extra emitter pass |
+| no empty NAL unit | `heic_hvcc` | `NalUnitIter::next` errors on a zero length before it can yield one |
+| the digest verdict matches the decoded field | `dng_decode` | both sides read `NewRawImageDigest` out of IFD 0 with the same expression; the call is made anyway for the crash oracle |
+| a page that decodes must also describe | `tiff_decode` | `decode_page_samples` calls the tag reader before it reads a pixel |
+| the sample count matches the declared geometry's product | `tiff_decode` | `ImageBuf` sizes its storage from its own dimensions, so this is the row's live check times `Rgb8::CHANNELS` |
+| the box cursor strictly advances, and never runs past the end | `isobmff_boxes` | `next_box` consumes its 8-byte header through `take` before any success return |
+| no segment is empty | `isobmff_boxes` | every shape `walk_segments` pushes is widened by that same header read, or runs to end of file |
+
+The `gamut-ifd` wrapper pin (entry 1) lives in `crates/gamut-ifd/tests/robustness.rs` instead, over
+a bounded exhaustive corpus, rather than costing half of every one of this target's twenty thousand
+executions per second to search for a counterexample that does not exist. Dropping the two
+duplicate parses raised `ifd_read` from roughly 12 000 exec/s to roughly 20 000.
 
 An **allocation** defect needs the engine's malloc hook to be visible at all: an oversized
 `Vec::with_capacity` costs no resident memory on an overcommitting kernel, so measuring RSS finds
@@ -201,6 +235,12 @@ It is **kept**, and here is why, so the next target added does not reopen it:
 - Changing the trigger would also move #593's premise (whether a per-push aggregate is red), which
   is a decision about the workflow's shape rather than about this tier.
 
+The **size** of the matrix is a separate question with the same answer. Nine rows is nine targets,
+and dropping one to buy back queue time would trade coverage for a cost that #603 already owns —
+persisting the corpus is what changes this tier's yield per minute, and until it lands, a shorter
+matrix is simply less search. A target is removed when its checks stop having reach, which is what
+the injection audit decides, and never to make a job finish sooner.
+
 ## Keeping the three lists in step
 
 A target exists in three hand-maintained places: its `fuzz_targets/<name>.rs` file, its `[[bin]]`
@@ -232,12 +272,31 @@ adds a couple of hundred files — and those stay untracked, which is the point.
 `git add -f` the whole directory a second time**: add the one seed you mean by path, or the
 engine's search state goes in with it.
 
-They are seeds, **not** the regression record. `corpus/ifd_read/` carries the thirteen
-malformed-TIFF cases enumerated on issue #264 (contributed from rawshift's deleted in-repo TIFF
-parser); each of the other five directories carries one or two small well-formed files, written by
-this workspace's own encoders, so a decoder target starts from something that reaches its pixel
-path instead of spending its budget rediscovering a header. `corpus/tiff_decode/` carries two —
-`rgb8-none.tif` and `rgb8-lzw.tif` — because an uncompressed strip and an LZW strip enter the
-decoder through different code, and seeding only one leaves the other to be rediscovered.
-Real-camera corpora are deliberately not vendored: they run to hundreds of
-megabytes and live in `justin13888/rawshift-test-fixtures` releases.
+They are seeds, **not** the regression record. `corpus/ifd_read/` carries the thirteen cases
+enumerated on issue #264 (contributed from rawshift's deleted in-repo TIFF parser) — eleven that
+must be refused and two that must parse — under that issue's own numbering, so a file maps back to
+a row of its table. Two things about the numbering, since neither is guessable from `ls`: **case 2
+carries no file**, because `"II" LE16(42)` *is* `"II" 2A 00` byte for byte and it would be the same
+four bytes as case 1; and cases 9 and 10 carry two files each, `a` and `b`, for the two variants
+their rows name.
+
+Each of the other five directories starts from one or two small well-formed files, written by this
+workspace's own encoders, so a decoder target begins from something that reaches its pixel path
+instead of spending its budget rediscovering a header.
+
+Beyond those, **a seed is added whenever a listed check turns out to have no witness in the
+corpus** — that is what the injection audit above is for, and a check whose only witness has to be
+synthesised by the engine is a check the tier is asking luck for. Four exist for that reason and
+each names the check it feeds:
+
+| seed | the check it makes reachable |
+|---|---|
+| `ifd_read/padding-unread-claim.tif` | "no claim unread". Every #264 case puts IFD0 at offset 8, so byte 8 *is* read as the entry count and an over-claimed header lands on a byte the ledger already holds. This one points IFD0 at offset 16, leaving `8..16` as padding nothing reads. |
+| `heic_container/appended-stream.heic` | `appended_stream()` returning `None` when a segment of that kind exists — silent on a file that has no appended stream, which the original seed did not. A second top-level `ftyp`, as a motion-photo phone writes. |
+| `heic_container/trailer.heic` | `trailer()` returning `None` when a trailer exists. A truncated trailing box header, retained as a trailer once `ftyp` and `meta` are seen. |
+| `heic_hvcc/truncated-payload-nal.bin` | the append contract **on the error path**. The well-formed record's payload splits cleanly, so `annex_b_payload` never returns `Err` for it. Same record, one NAL length prefix raised past the end of the payload. |
+
+`corpus/tiff_decode/` carries two — `rgb8-none.tif` and `rgb8-lzw.tif` — because an uncompressed
+strip and an LZW strip enter the decoder through different code, and seeding only one leaves the
+other to be rediscovered. Real-camera corpora are deliberately not vendored: they run to hundreds
+of megabytes and live in `justin13888/rawshift-test-fixtures` releases.
