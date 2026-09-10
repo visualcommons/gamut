@@ -39,6 +39,8 @@
 //! ([`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved)) and exposes the
 //! read-side locator as [`c2pa_exclusions`].
 
+use std::collections::BTreeSet;
+
 use gamut_core::{Error, Result};
 use gamut_ifd::c2pa::{self, C2paExclusions};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant, read, read_header, read_ifd_at};
@@ -318,6 +320,14 @@ fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
 /// it, so a cycle or two pointers claiming one directory fail here rather than loop — the guards
 /// are restated because they guard *this* walk.
 ///
+/// `visited` is a **set**, not a list, and that is a hardening decision rather than a style one:
+/// nothing bounds how many offsets one pointer array holds, so a linear membership scan makes the
+/// walk quadratic in a number a hostile file chooses. Measured in release on hand-built files
+/// whose single `ExifIFD` array names N distinct empty directories, a scanned list took 0.24 s at
+/// 0.6 MB and 4.2 s at 2.3 MB — clean quadratic growth, every call returning `Ok`. A set answers
+/// the same files in 5 ms and 27 ms. What still has no bound is the *breadth* of one pointer
+/// array; that is issue #579.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if a pointer target is
@@ -329,7 +339,7 @@ fn resolve_pointers(
     variant: Variant,
     ifd: &mut Ifd,
     tags: &[u16],
-    visited: &mut Vec<u64>,
+    visited: &mut BTreeSet<u64>,
     depth: usize,
 ) -> Result<()> {
     if depth > MAX_POINTER_DEPTH {
@@ -344,13 +354,12 @@ fn resolve_pointers(
         };
         let mut children = Vec::with_capacity(offsets.len());
         for offset in offsets {
-            if visited.contains(&offset) {
+            if !visited.insert(offset) {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
                     "TIFF: sub-IFD pointer loop",
                 ));
             }
-            visited.push(offset);
             let mut child = read_ifd_at(data, offset, order, variant)?;
             resolve_pointers(data, order, variant, &mut child, tags, visited, depth + 1)?;
             children.push(child);
@@ -395,7 +404,15 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
         return Ok(TiffMetadata::new());
     };
     // One flat list, resolved over IFD 0's subtree and no other page's — see [`POINTER_TAGS`].
-    resolve_pointers(data, order, variant, ifd0, POINTER_TAGS, &mut Vec::new(), 0)?;
+    resolve_pointers(
+        data,
+        order,
+        variant,
+        ifd0,
+        POINTER_TAGS,
+        &mut BTreeSet::new(),
+        0,
+    )?;
     let exif = ifd0
         .sub_ifds()
         .iter()
