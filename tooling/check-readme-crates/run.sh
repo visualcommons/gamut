@@ -11,15 +11,26 @@
 #   * every row names a crate that still exists, so a renamed or deleted crate cannot be left
 #     behind as a phantom row;
 #   * no crate is listed twice, so the table stays a bijection rather than a set;
-#   * every crate row is a well-formed three-cell row with a non-empty Purpose and Status, so a
-#     row cannot be reduced to a bare crate name and still satisfy membership.
+#   * every crate row is a three-cell row whose Purpose and Status each carry at least one
+#     character that is neither whitespace nor a control code, so a row cannot be reduced to a
+#     bare crate name -- or to a cell holding one non-breaking space -- and still satisfy
+#     membership;
+#   * a row inside an HTML comment or a fenced code block is not a row. Both render as something
+#     other than a table cell, so a crate documented only there is documented nowhere, and the
+#     membership check must see it as missing rather than as present.
 #
 # What is deliberately NOT checked, and why:
 #   * The *wording* of the Purpose and Status cells. They are prose a human maintains, and their
-#     authority is the crate's own lib.rs, Cargo.toml and STATUS.md. A text gate over them would
-#     fossilise a particular phrasing, and a generated table would move prose a human writes into
-#     a generator -- so staleness of a row's *text* stays a review concern, not a lint. What a
-#     machine can settle is membership and shape, and it settles both.
+#     authority is, in this order, the crate's own `lib.rs`, its `Cargo.toml`, and its `STATUS.md`
+#     where the first two are silent -- a `STATUS.md` can itself be stale (issue #545), so a row
+#     must be true of the crate rather than merely faithful to a file. A text gate over the cells
+#     would fossilise a particular phrasing, and a generated table would move prose a human writes
+#     into a generator -- so staleness of a row's *text* stays a review concern, not a lint.
+#   * The table's header and `| --- |` delimiter row. Deleting the delimiter makes every row
+#     render as literal text while leaving each row's bytes intact, so this guard still passes on
+#     a table that renders as a paragraph. That is a known, unclosed hole: what is checked is that
+#     each crate has a row and that the row has its three cells, not that the surrounding table
+#     renders.
 #   * The version. `mise run versions` already reports it, and the README deliberately states
 #     what each crate *is* rather than pinning a number that release-plz bumps.
 set -euo pipefail
@@ -43,48 +54,130 @@ test -f "$readme" || {
     exit 1
 }
 
-# The rows of the "## Crates" table only. Bounded to that section so the README's other tables
-# (the `mise run ...` command table) can never be mistaken for a crate row.
-rows="$(
-    awk '/^## Crates$/ { in_section = 1; next } /^## / { in_section = 0 } in_section' "$readme" |
-        sed -nE 's/^\| *`([a-z0-9-]+)` *\|.*/\1/p'
+# One pass over the file emits both streams -- `NAME` for membership, `BAD` for shape -- so the
+# two checks can never disagree about which lines are crate rows. Bounded to the "## Crates"
+# section so the README's other tables (the `mise run ...` command table) can never be mistaken
+# for a crate row.
+#
+# LC_ALL=C makes every regexp below byte-wise, which is what the octal escapes assume; the awk
+# is POSIX (no gensub, no interval expressions, dynamic regexps built as strings) so it behaves
+# the same under mawk, which is what `awk` is on the CI runner.
+scan="$(
+    LC_ALL=C awk '
+        BEGIN {
+            # An escaped pipe is content, not a column separator, so it is swapped for a control
+            # byte before the split and swapped back before the cell is judged.
+            SENTINEL = "\001"
+            # ASCII space and every C0/DEL control byte.
+            ASCII_BLANK = "[ \001-\037\177]"
+            # The UTF-8 encodings of the Unicode blanks a Markdown renderer shows as nothing:
+            # U+00A0, U+1680, U+2000-U+200D, U+2028, U+2029, U+202F, U+205F, U+2060, U+3000 and
+            # U+FEFF. Without this fold a single non-breaking space reconstructs exactly the
+            # degenerate row the shape check exists to reject.
+            UNI_BLANK = "\302\240|\341\232\200|\342\200[\200-\215\250\251\257]"
+            UNI_BLANK = UNI_BLANK "|\342\201[\237\240]|\343\200\200|\357\273\277"
+        }
+
+        # Returns the part of `line` that is outside an HTML comment, carrying `in_comment`
+        # across lines so a multi-line comment hides every line it spans.
+        function strip_comments(line,   out, p) {
+            out = ""
+            while (length(line) > 0) {
+                if (in_comment) {
+                    p = index(line, "-->")
+                    if (p == 0) { return out }
+                    in_comment = 0
+                    line = substr(line, p + 3)
+                } else {
+                    p = index(line, "<!--")
+                    if (p == 0) { return out line }
+                    out = out substr(line, 1, p - 1)
+                    in_comment = 1
+                    line = substr(line, p + 4)
+                }
+            }
+            return out
+        }
+
+        # A closing fence: the opening fence character, repeated at least as many times, and
+        # nothing else on the line.
+        function is_fence_close(line,   m, i) {
+            m = line
+            sub(/^ */, "", m)
+            sub(/[ \t]*$/, "", m)
+            if (length(m) < fence_len) { return 0 }
+            for (i = 1; i <= length(m); i++) {
+                if (substr(m, i, 1) != fence_char) { return 0 }
+            }
+            return 1
+        }
+
+        # Empty means "carries no character that is neither whitespace nor a control code".
+        function is_blank(cell,   c) {
+            c = cell
+            gsub(UNI_BLANK, " ", c)
+            gsub(ASCII_BLANK, "", c)
+            return c == ""
+        }
+
+        {
+            line = $0
+
+            # Inside a fenced block nothing else is syntax -- not a heading, not a comment, not a
+            # row -- until the fence closes.
+            if (in_fence) {
+                if (is_fence_close(line)) { in_fence = 0 }
+                next
+            }
+
+            line = strip_comments(line)
+
+            if (match(line, /^ *(```+|~~~+)/)) {
+                marker = substr(line, RSTART, RLENGTH)
+                sub(/^ +/, "", marker)
+                fence_char = substr(marker, 1, 1)
+                fence_len = length(marker)
+                in_fence = 1
+                next
+            }
+
+            if (line ~ /^## Crates$/) { in_section = 1; next }
+            if (line ~ /^## /)        { in_section = 0; next }
+            if (!in_section)          { next }
+            if (line !~ /^\| *`[a-z0-9-]+` *\|/) { next }
+
+            row = line
+            gsub(/\\\|/, SENTINEL, row)
+            n = split(row, cell, "|")
+            name = cell[2]
+            gsub(/[` ]/, "", name)
+            print "NAME\t" name
+
+            if (n != 5) {
+                print "BAD\t" name " has " (n - 2) " cell(s); a crate row is Crate | Purpose | Status"
+                next
+            }
+            purpose = cell[3]
+            status = cell[4]
+            gsub(SENTINEL, "|", purpose)
+            gsub(SENTINEL, "|", status)
+            if (is_blank(purpose)) { print "BAD\t" name " has an empty Purpose cell" }
+            if (is_blank(status))  { print "BAD\t" name " has an empty Status cell" }
+        }
+    ' "$readme"
 )"
+
+rows="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "NAME" { print $2 }')"
+malformed="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "BAD" { print $2 }')"
 
 test -n "$rows" || {
     echo "check-readme-crates: found no crate rows under '## Crates' in $readme"
+    echo "  a row inside an HTML comment or a fenced code block does not count as a row."
     exit 1
 }
 
 fail=0
 
-# Shape, as distinct from prose. Membership reads a row's first cell only, so a row stripped of
-# its Purpose and Status -- `| `gamut-core` |` -- names a live crate and passes membership while
-# documenting nothing. An escaped pipe is swapped for a sentinel first, so a cell holding a
-# literal `\|` stays content rather than becoming an extra column.
-malformed="$(
-    awk '
-        /^## Crates$/ { in_section = 1; next }
-        /^## /        { in_section = 0 }
-        !in_section   { next }
-        /^\| *`[a-z0-9-]+` *\|/ {
-            row = $0
-            gsub(/\\\|/, "\001", row)
-            n = split(row, cell, "|")
-            name = cell[2]
-            gsub(/[` ]/, "", name)
-            if (n != 5) {
-                print name " has " (n - 2) " cell(s); a crate row is Crate | Purpose | Status"
-                next
-            }
-            purpose = cell[3]
-            status = cell[4]
-            gsub(/^[ \001]+|[ \001]+$/, "", purpose)
-            gsub(/^[ \001]+|[ \001]+$/, "", status)
-            if (purpose == "") { print name " has an empty Purpose cell" }
-            if (status == "")  { print name " has an empty Status cell" }
-        }
-    ' "$readme"
-)"
 if [ -n "$malformed" ]; then
     fail=1
     echo "check-readme-crates: malformed crate rows in the $readme crates table:"
@@ -127,7 +220,9 @@ if [ -n "$missing" ]; then
     fail=1
     echo "check-readme-crates: workspace crates with no row in the $readme crates table:"
     echo "$missing" | sed 's/^/  /'
-    echo "  add a row (Crate | Purpose | Status), taking the status from the crate's STATUS.md."
+    echo "  add a row (Crate | Purpose | Status). Its authority is the crate's own lib.rs, then"
+    echo "  its Cargo.toml, and its STATUS.md only where those are silent -- a STATUS.md can"
+    echo "  itself be stale, so the row must be true of the crate, not faithful to a file."
 fi
 
 phantom="$(compare -13)"
