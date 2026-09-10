@@ -5,7 +5,7 @@
 //! this crate's use of them — that a store survives an encode of a real image, in the right
 //! directory, at the end of the file, verbatim.
 
-use gamut_core::{Dimensions, ImageRef, Indexed8, Rgb8};
+use gamut_core::{Bilevel, Dimensions, EncodeImage, ImageRef, Indexed8, Rgb8, Rgb16, Rgba8};
 use gamut_tiff::{
     ByteOrder, Palette8, SpanKind, TiffDecoder, TiffEncoder, TiffMetadata, c2pa_exclusions,
     deconstruct, read, tags,
@@ -207,6 +207,56 @@ fn a_multipage_document_puts_the_entry_in_its_last_page() {
         .expect("a store")
         .store;
     assert_eq!(&bytes[range.start as usize..range.end() as usize], STORE);
+}
+
+#[test]
+fn the_pixel_paths_that_pack_their_own_buffer_place_the_store_too() {
+    // Every entry point resolves the store before it lays out pixels and hands it to
+    // `encode_packed` as a parameter — but a path can still hand on `None`, and that is silent:
+    // the file is well formed and only `c2pa_exclusions` disagrees. The strip, tile, palette and
+    // multi-page paths are pinned above. These are the three the rest of this file never encodes,
+    // and they are the three that do pixel work of their own first — a byte-order-corrected copy
+    // for 16-bit, an extra sample for RGBA, a whole bit-packing pass for bilevel — which is
+    // exactly where a store gets dropped on the floor.
+    let dims = Dimensions {
+        width: 4,
+        height: 4,
+    };
+    let encoder = TiffEncoder::new()
+        .with_byte_order(ByteOrder::BigEndian)
+        .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()));
+    let files = [
+        (
+            "the 16-bit path",
+            encoder
+                .encode_to_vec(ImageRef::<Rgb16>::new(&[0u16; 48], dims).expect("16-bit image"))
+                .expect("encode"),
+        ),
+        (
+            "the RGBA path",
+            encoder
+                .encode_to_vec(ImageRef::<Rgba8>::new(&[0u8; 64], dims).expect("RGBA image"))
+                .expect("encode"),
+        ),
+        (
+            "the bilevel path",
+            encoder
+                .encode_to_vec(ImageRef::<Bilevel>::new(&[0u8; 16], dims).expect("bilevel image"))
+                .expect("encode"),
+        ),
+    ];
+    for (path, bytes) in files {
+        let range = c2pa_exclusions(&bytes)
+            .expect("locate")
+            .unwrap_or_else(|| panic!("{path} wrote no store"))
+            .store;
+        assert_eq!(
+            &bytes[range.start as usize..range.end() as usize],
+            STORE,
+            "{path}"
+        );
+        assert_eq!(range.end(), bytes.len() as u64, "{path}");
+    }
 }
 
 #[test]
