@@ -73,13 +73,6 @@ const SAMPLED_TRC_POINTS: usize = 1024;
 /// A 3×3 matrix in row-major order — the shape `gamut_color::matrix` produces and consumes.
 type Matrix3 = [[f64; 3]; 3];
 
-/// The largest gamma a `parametricCurveType` parameter can carry: `s15Fixed16` (ICC.1:2022 §4.6)
-/// is a signed 16.16 fixed-point number, so 32 768 is the first value it cannot encode.
-///
-/// [`S15Fixed16::from_f64`] saturates rather than failing, so a gamma at or above this would be
-/// silently written as 32 767.99998. [`IccProfile::gray_with_gamma`] declines it instead.
-const GAMMA_ENCODING_LIMIT: f64 = 32_768.0;
-
 /// ITU-T H.273 (07/2024) §8.2: for `TransferCharacteristics` 1, 6, 14 and 15, β is "the positive
 /// constant necessary for the curve segments that meet at the value β to have continuity of both
 /// value and slope", stated there as `0.018053968510807...`.
@@ -212,6 +205,30 @@ fn normalized_cicp(cicp: Cicp) -> Cicp {
 /// value that does not fit a byte cannot be signalled at all and becomes `2` (Unspecified).
 fn cicp_byte(code_point: u16) -> u8 {
     u8::try_from(code_point).unwrap_or(2)
+}
+
+/// Whether `gamma` survives the `s15Fixed16` encoding of a `parametricCurveType` function type 0
+/// parameter (ICC.1:2022 §10.18) with the value the caller asked for.
+///
+/// The guard is on the **encoding**, not on the number, because [`S15Fixed16::from_f64`] rounds
+/// `gamma × 65 536` and then *clamps*: it never fails, and it degenerates at both ends.
+///
+/// * Below `0.5 / 65 536 = 7.629 394 531 25e-6` the product rounds to raw `0`, and `Y = X^0` maps
+///   every input — black included — to white. That is the same profile a literal `gamma` of `0.0`
+///   would give, and [`IccProfile::validate`] cannot see it: a `kTRC` holding raw zero is a
+///   structurally well-formed tag.
+/// * From `(2^31 − 0.5) / 65 536 = 32 767.999 992 370 605 468 75` upward the product exceeds
+///   `i32::MAX` and the clamp writes `32 767.999 984 741 21` instead — a gamma chosen by the
+///   encoder rather than by the caller. (The clamp, not the fixed-point width, is where this
+///   starts: the *largest representable* value, `32 767.999 984 741 21`, is half a quantum lower
+///   still, and every gamma between the two merely rounds to it.)
+///
+/// Between the two the encoding is a rounding of at most half a quantum, which is what a
+/// fixed-point tag is for. Non-finite input satisfies neither comparison and is declined with the
+/// rest.
+fn gamma_is_encodable(gamma: f64) -> bool {
+    let raw = (gamma * 65_536.0).round();
+    (1.0..=f64::from(i32::MAX)).contains(&raw)
 }
 
 /// A tone-response curve this module can encode.
@@ -429,11 +446,20 @@ impl IccProfile {
     ///
     /// The white point is D50, so no chromatic adaptation is needed and no `chad` tag is written.
     ///
-    /// Returns `None` for a `gamma` no `kTRC` can carry: `gamma` must be finite, strictly
-    /// positive, and below 32 768 — the first magnitude the `s15Fixed16` parameter cannot hold.
-    /// `f64` is open input, and the alternatives are worse than declining:
-    /// `NaN` would be written as a description string and a saturated `s15Fixed16`, and a gamma of
-    /// `0.0` describes a profile that maps every input to white.
+    /// Returns `None` for a `gamma` the `kTRC` cannot carry *as the caller wrote it*. The bound
+    /// is the `s15Fixed16` encoding of the curve parameter rather than the number: `gamma` is
+    /// accepted from `0.5 / 65 536 = 7.629 394 531 25e-6` up to, but not including,
+    /// `(2^31 − 0.5) / 65 536 = 32 767.999 992 370 605 468 75`. Below that the parameter rounds to
+    /// zero and `Y = X^0` maps every input to white — the same degenerate profile a literal `0.0`
+    /// would give, which [`validate`](IccProfile::validate) cannot see, since a `kTRC` holding raw
+    /// zero is a well-formed tag. At or above it the parameter saturates to a different gamma.
+    /// Non-finite input is declined with the rest: `NaN` would otherwise reach both the
+    /// description string and the tag.
+    ///
+    /// That range is what the format can encode, not what is colorimetrically sensible — a gamma
+    /// of `1e-5` is encodable and useless. Whether the constructor should also refuse a
+    /// meaningless gamma is deliberately left open; see
+    /// <https://github.com/visualcommons/gamut/issues/589>.
     ///
     /// # Examples
     ///
@@ -449,7 +475,7 @@ impl IccProfile {
     /// ```
     #[must_use]
     pub fn gray_with_gamma(gamma: f64) -> Option<Self> {
-        if !gamma.is_finite() || gamma <= 0.0 || gamma >= GAMMA_ENCODING_LIMIT {
+        if !gamma_is_encodable(gamma) {
             return None;
         }
         Some(IccProfile {
@@ -811,26 +837,49 @@ mod tests {
         }
     }
 
-    /// A grey gamma is open `f64` input, and one the `kTRC` cannot carry is declined rather than
-    /// written as a saturated or non-finite `s15Fixed16`. The limit itself is asserted from both
-    /// sides, because only a value exactly at it separates `>=` from `>`.
+    /// A grey gamma is open `f64` input, and the constructor accepts exactly those the `kTRC`
+    /// parameter carries back. Each accepted gamma is read out of the tag it was written into, so
+    /// the test fails if the value survives the guard but not the encoding; each rejected one is
+    /// the neighbour of an accepted one, so both bounds are pinned from both sides.
+    ///
+    /// The `s15Fixed16` conversion degenerates at both ends and never fails, which is why the
+    /// bound is on the encoding: above the top it clamps to `i32::MAX`, and below the bottom it
+    /// rounds to raw zero — a `Y = X^0` curve mapping every input to white, which serializes and
+    /// which `validate` reports clean.
+    ///
+    /// The two bounds are restated as literal decimals instead of being reused from
+    /// [`gamma_is_encodable`], so a wrong scale factor there cannot agree with the test.
     #[test]
-    fn an_unencodable_grey_gamma_is_declined() {
-        assert!(
-            IccProfile::gray_with_gamma(2.2).is_some(),
-            "the control builds"
-        );
-        assert!(
-            IccProfile::gray_with_gamma(GAMMA_ENCODING_LIMIT - 1.0).is_some(),
-            "the largest encodable magnitude builds"
-        );
+    fn a_grey_gamma_the_ktrc_cannot_carry_is_declined() {
+        /// `0.5 / 65 536` — one half of a `s15Fixed16` quantum, which is both the smallest gamma
+        /// whose parameter rounds to raw 1 rather than raw 0 and the largest rounding error the
+        /// encoding may introduce.
+        const HALF_QUANTUM: f64 = 7.629_394_531_25e-6;
+        /// `(2 ^ 31 − 0.5) / 65 536` — the smallest gamma whose parameter clamps to `i32::MAX`.
+        const SATURATING: f64 = 32_767.999_992_370_605_468_75;
+
+        for gamma in [HALF_QUANTUM, 1.0, 2.2, SATURATING.next_down()] {
+            let profile = IccProfile::gray_with_gamma(gamma)
+                .unwrap_or_else(|| panic!("gamma {gamma} is encodable"));
+            let Some(TagData::ParametricCurve(curve)) = profile.get(KnownTag::GrayTrc) else {
+                panic!("gamma {gamma}: the grey TRC is a parametricCurveType");
+            };
+            let written = curve.params[0].to_f64();
+            assert!(
+                written > 0.0 && (written - gamma).abs() <= HALF_QUANTUM,
+                "gamma {gamma} reached the kTRC as {written}"
+            );
+        }
+
         for gamma in [
             0.0,
             -1.0,
             f64::NAN,
             f64::INFINITY,
             f64::NEG_INFINITY,
-            GAMMA_ENCODING_LIMIT,
+            HALF_QUANTUM.next_down(),
+            1.0e-6,
+            SATURATING,
             40_000.0,
         ] {
             assert_eq!(IccProfile::gray_with_gamma(gamma), None, "gamma {gamma}");
