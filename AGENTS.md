@@ -24,7 +24,8 @@ Dependency edges (a crate depends on those to its right):
   format-agnostic `convert` module: the one place any `Pixel` layout converts to another
   (grey↔RGB, alpha add/drop/composite, 8↔16-bit), lossless by default with loss opted into per
   decoder via a `ConvertPolicy`. Format crates decode to what the file carries and delegate the
-  layout change there rather than hand-rolling it. No internal deps; everything else depends on it.
+  layout change there rather than hand-rolling it. No internal deps of its own; each entry below
+  states its own edges, and most — not all — of them include `gamut-core`.
 - **gamut-color** / **gamut-dsp** / **gamut-bitstream** — shared primitives. ← core.
 - **gamut-tonemap** — scalar tone-mapping curves for HDR→SDR pipelines: the `ToneCurve` trait
   over eight operators (Linear/Clamp/Exposure/Reinhard/ReinhardExtended/ACES/Hable/Drago),
