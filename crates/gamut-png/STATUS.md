@@ -40,7 +40,7 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ✅ done |
 | E1 | #224 | **Efficiency:** `deconstruct` byte accounting; divan size/bpp + per-stage bench; libpng-9 size contract; opt-in transparent cleanup; palette-vs-native race; `crc32fast` and restructured filter kernels (see [Efficiency](#efficiency-issue-224)) | ✅ done |
 | C1 | C2PA 2.4 §A.3.2, §18.5.4 | **C2PA carriage** (#440): the `caBX` manifest store — raw decode surface (`c2pa`; first CRC-valid chunk before `IDAT` wins, ignored ones counted, under the metadata budget); `with_c2pa` / `with_c2pa_reserved` as the last chunk before `IDAT`; the whole-chunk exclusion span from `encode_with_report` and `PngReport::c2pa`, filled in place by `fill_c2pa` (see [C2PA](#c2pa-manifest-store-issue-440)) | ✅ done |
-| M1 | §4.3, §11.3.2.6, §11.3.3 | **Metadata preservation** (#483): `with_metadata` / `with_metadata_from` carry a read file's eXIf/iCCP/sRGB/cICP/gAMA/cHRM/XMP/text chunks into a re-encode, each annotation back into the chunk it came from and the XMP packet back into the framing its `iTXt` gave it (`gamut convert` uses it; `--strip-metadata` opts out; what could not be carried faithfully is named by `metadata_notices`); `with_cicp`; §11.3.3.2/§11.3.3.4's null prohibition refuses the encode and §11.3.3.1's advisory keyword rules report through the notice channel, with promotion to `iTXt` for text outside Latin-1 (see [Metadata preservation](#metadata-preservation-issue-483)) | ✅ done |
+| M1 | §4.3, §11.3.2.6, §11.3.3 | **Metadata preservation** (#483): `with_metadata` / `with_metadata_from` carry a read file's eXIf/iCCP/sRGB/cICP/gAMA/cHRM/XMP/text chunks into a re-encode, each annotation back into the chunk it came from and the XMP packet back into the framing its `iTXt` gave it (`gamut convert` uses it; `--strip-metadata` opts out; what could not be carried faithfully is named by `metadata_notices`); `with_cicp`; a null in a keyword refuses the encode, a null in the length-delimited text string drops the annotation, and §11.3.3.1's advisory keyword rules report through the notice channel, with promotion to `iTXt` for text outside Latin-1 (see [Metadata preservation](#metadata-preservation-issue-483)) | ✅ done |
 
 ## Decoder phases (issue #249)
 
@@ -194,7 +194,7 @@ encoder cannot know. gamut-png's own reader surfaces `cICP`, `iCCP`, `sRGB`, `cH
 by side and ranks none of them; resolving a profile against an intent is `gamut-cmm`'s work
 (epic #323), and this encoder deliberately does not pre-empt it.
 
-**Only the null byte refuses the encode. Everything else §11.3.3 asks for is a notice.**
+**Only a null in a keyword refuses the encode. Everything else §11.3.3 asks for is a notice.**
 §15 gives the BCP 14 keywords force "when, and only when, they appear in all capitals", and every
 statement §11.3.3.1 makes about a keyword's shape is lowercase — "Keywords shall contain only
 printable Latin-1", "leading spaces, trailing spaces, and consecutive spaces are not permitted",
@@ -204,7 +204,8 @@ the wording:
 
 | Field | Clause | Outcome |
 | --- | --- | --- |
-| A null in a keyword or text string | §11.3.3.2, §11.3.3.4 | **refuses the encode** — the null is the field separator, so the chunk re-parses as a *different* annotation |
+| A null in a keyword, or in an `iTXt` translated keyword | §11.3.3.2, §11.3.3.4 | **refuses the encode** — those fields end at their first null, so the chunk re-parses as a *different* annotation |
+| A null in a text string | §11.3.3.2, §11.3.3.4 | annotation **dropped**, `TextStringNull` — the text is last and "not null-terminated (the length of the chunk defines the ending)", so it re-frames nothing and this crate's reader hands it back whole; but libpng truncates it at the null, so writing it would put a chunk two readers read differently into a file this encoder signed off on |
 | Keyword outside Latin-1, or outside 1–79 bytes | §11.3.3.1 | annotation **dropped**, `TextKeywordNotLatin1` / `TextKeywordLength` — no chunk can hold it, and this crate's own reader drops one that tries |
 | Keyword outside `0x20`–`0x7E` / `0xA1`–`0xFF`, or with a leading, trailing or consecutive space | §11.3.3.1 | **written verbatim**, `TextKeywordRepertoire` / `TextKeywordSpacing` |
 | `iTXt` language tag outside ASCII letters, digits and `-` | §11.3.3.4 | tag **dropped**, annotation written, `ItxtLanguageTag` |
@@ -216,7 +217,16 @@ control, U+00A0 — are ones this crate's *reader* accepts and returns unchanged
 them back made a re-encode fail on a file whose pixels are fine, and the only escape was
 `--strip-metadata`, which discards the ICC profile too. A writer must not be stricter than its own
 reader about a clause that is advisory in the first place; `MetadataNotice::carried()` tells a
-caller which of these reached the output.
+caller which of these reached the output. A notice that says "written, but…" is suppressed for an
+annotation nothing was written for, so `carried()` never claims a payload came along when the
+entry carrying the deviation was dropped for another reason.
+
+The same rule settles the text string's null. §11.3.3.2 and §11.3.3.4 forbid it in words, but
+neither field is *framed* by it, and this crate's reader returns such a text whole — so a refusal
+would again be a writer stricter than its own reader, on a file the reader accepted. What stops it
+being written verbatim is not the clause but the disagreement: libpng truncates the text at the
+null, so the chunk would hold one annotation for this crate and a shorter one for libpng. Dropped
+and named is the only outcome that is the same everywhere.
 
 **The specification contradicts itself about a `tEXt` text string, and the more specific clause
 wins.** §11.3.3.1's closing paragraph: "There are also tEXt and zTXt chunks, whose content is

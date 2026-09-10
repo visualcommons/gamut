@@ -468,17 +468,48 @@ fn a_non_utf8_xmp_packet_is_reported_and_the_re_encode_proceeds() {
     assert!(re_encoded(|_| encoder.clone()).xmp.is_none());
 }
 
-/// A null byte is the one thing that still refuses, because it is the field separator: a `tEXt`
-/// carrying `Note\0Author\0other` re-parses as a *different* annotation, so writing it would make
-/// the file mean something the caller never supplied. No notice can undo that.
+/// A null in a text *string* is a shape this crate's own reader hands back: §11.3.3.2 makes the
+/// text last and length-delimited ("The text string is not null-terminated (the length of the
+/// chunk defines the ending)"), so the reader stops at the keyword's null and everything after
+/// it — later nulls included — is the text. Refusing to write it back would fail a re-encode on
+/// a file this crate decoded without complaint, which is the failure the notice channel exists to
+/// end. It is not written either: libpng truncates such a text at the null, so the chunk would
+/// hold different annotations for different readers. Dropped, and named.
 #[test]
-fn a_null_in_a_carried_text_string_refuses_the_re_encode() {
-    // Built through the setter rather than a fixture: the reader splits a chunk at its first
-    // null, so no file can hand a null to the carry — only a caller can.
+fn a_null_in_a_carried_text_string_is_dropped_with_a_notice() {
+    let png = minimal_source(&[chunk(b"tEXt", b"Comment\0val\0ue")]);
+    let meta = gamut_png::metadata(&png).unwrap();
+    assert_eq!(
+        meta.texts.first().map(|t| t.text.as_str()),
+        Some("val\0ue"),
+        "the reader hands the null back"
+    );
+
+    let encoder = PngEncoder::new().with_metadata(&meta);
+    assert_eq!(
+        encoder.metadata_notices(),
+        [MetadataNotice::TextStringNull],
+        "named, not refused"
+    );
+    assert!(
+        re_encoded(|_| encoder.clone()).texts.is_empty(),
+        "and not written"
+    );
+}
+
+/// The null that still refuses is the one in a *keyword*: all three chunks are framed "Keyword …
+/// Null separator …", so `Auth\0or` re-parses as the annotation `Auth` with `or` for its text and
+/// the file means something the caller never supplied.
+///
+/// Built through the setter, which is the only way in — the reader splits a chunk at its first
+/// null and never returns a keyword holding one. Kills a mutant that drops the accumulated
+/// annotations' validation from the encode path.
+#[test]
+fn a_null_in_a_carried_keyword_refuses_the_re_encode() {
     let pixels = vec![0u8; 3 * 4];
     let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2).unwrap()).unwrap();
     let error = PngEncoder::new()
-        .with_text("Note", "before\0after")
+        .with_text("Auth\0or", "body")
         .encode_to_vec(image)
         .expect_err("refused");
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
@@ -534,6 +565,7 @@ fn a_notice_says_whether_the_payload_reached_the_output() {
         MetadataNotice::TextKeywordNotLatin1,
         MetadataNotice::TextKeywordLength,
         MetadataNotice::XmpNotUtf8,
+        MetadataNotice::TextStringNull,
     ] {
         assert!(!lost.carried(), "{lost:?}");
     }

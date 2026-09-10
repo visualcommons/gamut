@@ -161,8 +161,9 @@ struct TextEntry {
     /// can hold, or one written verbatim that deviates from a recommendation. Surfaced by
     /// [`PngEncoder::metadata_notices`](crate::PngEncoder::metadata_notices).
     notices: Vec<MetadataNotice>,
-    /// Why this annotation must not be written *at all*, if it must not — the null byte, and
-    /// only the null byte. Recorded here rather than returned from the setter because the
+    /// Why this annotation must not be written *at all*, if it must not — a null in the keyword
+    /// or in the `iTXt` translated keyword, the two fields a null separator ends, and nothing
+    /// else. Recorded here rather than returned from the setter because the
     /// setters sit behind `#[must_use]` builder methods that have no error channel;
     /// [`Ancillary::validate`] reports it at the encode chokepoint.
     fault: Option<TextFault>,
@@ -178,13 +179,18 @@ struct TextFault {
     reason: &'static str,
 }
 
-/// §11.3.3.2 for `tEXt`/`zTXt` ("Neither the keyword nor the text string may contain a null
-/// character") and §11.3.3.4 for `iTXt` ("neither shall contain a zero byte"). The null is the
-/// field separator, so an embedded one does not merely offend the grammar — the chunk re-parses
-/// as a *different* annotation. It is the one thing here that makes a file **mean** something
-/// else, and so the one thing that refuses the encode.
-const TEXT_NUL: &str =
-    "a keyword or text string may not contain a null character (§11.3.3.2, §11.3.3.4)";
+/// §11.3.3.2 and §11.3.3.4 lay all three text chunks out as "Keyword … Null separator … ", so
+/// the keyword is the field that *ends* at its first zero byte. An embedded null there does not
+/// merely offend the grammar — the chunk re-parses as a *different* annotation, `Auth\0or`
+/// becoming the keyword `Auth` with `or` for its text. It is the one thing here that makes a
+/// file **mean** something else, and so the one thing that refuses the encode.
+///
+/// The *text string* is the opposite case and is **not** covered by this: §11.3.3.2 says of it
+/// "The text string is not null-terminated (the length of the chunk defines the ending)", and
+/// §11.3.3.4 "The text, unlike other textual data in this chunk, is not null-terminated; its
+/// length is derived from the chunk length". A null there re-frames nothing, so it is reported
+/// as [`MetadataNotice::TextStringNull`] instead.
+const KEYWORD_NUL: &str = "a keyword may not contain a null character (§11.3.3.2, §11.3.3.4)";
 /// §11.3.3.4: "The translated keyword and text both use the UTF-8 encoding, and neither shall
 /// contain a zero byte (null character)." Null-terminated like the language tag, so an embedded
 /// one re-frames every field after it.
@@ -435,10 +441,21 @@ impl Ancillary {
     }
 
     /// Every §11.3.3 deviation the accumulated annotations carry, in insertion order.
+    ///
+    /// An entry that is **not emitted** reports only the notices that explain the drop.
+    /// [`MetadataNotice::carried`](crate::MetadataNotice::carried) is fixed by the variant, so
+    /// the entry's [`emit`](TextEntry::emit) flag is the authority on whether anything reached
+    /// the output: one entry can record both a keyword no chunk can hold and a language tag that
+    /// did not survive, and surfacing the second unfiltered would tell a caller its annotation
+    /// came along with a caveat when no chunk was written at all.
     pub(crate) fn text_notices(&self) -> impl Iterator<Item = MetadataNotice> + '_ {
-        self.texts
-            .iter()
-            .flat_map(|entry| entry.notices.iter().copied())
+        self.texts.iter().flat_map(|entry| {
+            entry
+                .notices
+                .iter()
+                .copied()
+                .filter(move |notice| entry.emit || !notice.carried())
+        })
     }
 
     /// Starts carrying a read file's metadata, discarding whatever a previous carry contributed.
@@ -472,18 +489,28 @@ impl Ancillary {
     /// promoted rather than written as bytes a Latin-1 reader mis-renders. The promotion keeps
     /// the caller's *other* choice, compression, because §11.3.3.4 gives `iTXt` a flag of its own.
     ///
-    /// A null anywhere in the keyword or the text is the one thing neither promotion nor a
-    /// notice can fix — §11.3.3.2 and §11.3.3.4 both forbid it, and it is the field separator, so
-    /// the chunk would re-parse as a different annotation. It becomes a [`TextFault`] the entry
-    /// carries to [`Self::validate`]. Every *other* way a keyword can fall short of §11.3.3.1 is
-    /// a [`MetadataNotice`] instead: see [`Keyword`] for why the line is drawn there.
+    /// A null is forbidden in both fields (§11.3.3.2, §11.3.3.4), and the two are not the same
+    /// kind of forbidden. The **keyword** ends at its first null, so a null there makes the chunk
+    /// re-parse as a *different* annotation and nothing can undo it: it becomes a [`TextFault`]
+    /// the entry carries to [`Self::validate`], and the encode refuses. The **text string** is
+    /// last and length-delimited — see [`KEYWORD_NUL`] for both clauses — so a null there
+    /// re-frames nothing, and this crate's own reader hands such a text back intact; refusing it
+    /// would make the writer stricter than its own reader over a file the reader accepts. It is
+    /// not written either, because readers disagree about what the chunk then holds (libpng
+    /// truncates the text at the null), so the annotation is dropped and reported as
+    /// [`MetadataNotice::TextStringNull`]. Every *other* way a keyword can fall short of
+    /// §11.3.3.1 is a [`MetadataNotice`] too: see [`Keyword`] for where that line falls.
     fn text_entry(&self, keyword: &str, text: &str, kind: TextKind) -> TextEntry {
-        let (keyword_bytes, emit, notice, keyword_nul) = match keyword_verdict(keyword) {
+        let (keyword_bytes, mut emit, notice, keyword_nul) = match keyword_verdict(keyword) {
             Keyword::Write(bytes, notice) => (bytes, true, notice, false),
             Keyword::Drop(notice) => (Vec::new(), false, Some(notice), false),
             Keyword::Refuse => (Vec::new(), true, None, true),
         };
-        let refused = keyword_nul || text.contains('\0');
+        let mut notices: Vec<MetadataNotice> = notice.into_iter().collect();
+        if text.contains('\0') {
+            emit = false;
+            notices.push(MetadataNotice::TextStringNull);
+        }
         // An iTXt was asked for as UTF-8 and stays UTF-8; only a Latin-1 request has a
         // repertoire to leave.
         let latin1 = match kind {
@@ -503,21 +530,22 @@ impl Ancillary {
             carried: self.carrying,
             xmp: false,
             emit,
-            notices: notice.into_iter().collect(),
-            fault: refused.then(|| TextFault {
+            notices,
+            fault: keyword_nul.then(|| TextFault {
                 keyword: keyword.to_string(),
-                reason: TEXT_NUL,
+                reason: KEYWORD_NUL,
             }),
         }
     }
 
     /// Refuses an accumulation the spec forbids, before any byte is emitted.
     ///
-    /// **Only a null byte gets here.** A null in a keyword, a text string or an `iTXt`
-    /// translated keyword (§11.3.3.2, §11.3.3.4) is the field separator, so a chunk carrying one
-    /// re-parses as a *different* annotation: the file would mean something other than what the
-    /// caller supplied, and no notice can undo that. Everything else §11.3.3 asks of a text
-    /// chunk — the keyword's repertoire, length and spacing, the `iTXt` language tag's shape, an
+    /// **Only a null in a keyword gets here.** A null in a text chunk's keyword or in an `iTXt`
+    /// translated keyword (§11.3.3.2, §11.3.3.4) sits in a field a null separator *ends*, so a
+    /// chunk carrying one re-parses as a *different* annotation: the file would mean something
+    /// other than what the caller supplied, and no notice can undo that. Everything else §11.3.3
+    /// asks of a text chunk — the keyword's repertoire, length and spacing, a null in the
+    /// length-delimited text string, the `iTXt` language tag's shape, an
     /// XMP packet that is not UTF-8 — is reported through
     /// [`PngEncoder::metadata_notices`](crate::PngEncoder::metadata_notices) and the encode
     /// proceeds. Refusing those would fail a conversion over a file whose pixels are fine, and
@@ -1459,22 +1487,55 @@ mod tests {
         assert!(refusal(&a).contains("may not contain a null character"));
     }
 
-    /// §11.3.3.2: "Neither the keyword nor the text string may contain a null character", and
-    /// §11.3.3.4 the same for `iTXt`. This is corruption, not pedantry: the null is the field
-    /// separator, so `note\0Author\0other` written as a `tEXt` body re-parses as a *different*
-    /// annotation. Promotion cannot rescue it, because `iTXt` forbids it too.
+    /// §11.3.3.2 forbids a null in the text string ("Neither the keyword nor the text string may
+    /// contain a null character") and §11.3.3.4 says the same for `iTXt` — but neither field is
+    /// *framed* by a null: "The text string is not null-terminated (the length of the chunk
+    /// defines the ending)". So the annotation is **dropped and reported**, not refused: this
+    /// crate's own reader hands such a text back whole, and a writer must not fail on a file its
+    /// own reader accepts. It is not written either, because libpng truncates such a text at the
+    /// null, so the chunk would mean different things to different readers.
     ///
-    /// Kills the null guard in [`Ancillary::text_entry`], in both the Latin-1 and the UTF-8
-    /// request — a mutant that checks only one leaves the other writing the corrupt chunk.
+    /// Kills the text-null guard in [`Ancillary::text_entry`], in both the Latin-1 and the UTF-8
+    /// request — a mutant that checks only one leaves the other writing the disputed chunk — and
+    /// a mutant that turns the drop back into a refusal.
     #[test]
-    fn a_null_in_a_text_string_is_refused() {
+    fn a_null_in_a_text_string_is_dropped_with_a_notice() {
         let mut latin1 = Ancillary::default();
         latin1.add_text_latin1("Note", "before\0after");
-        assert!(refusal(&latin1).contains("may not contain a null character"));
+        assert_eq!(notices(&latin1), [MetadataNotice::TextStringNull]);
+        assert!(latin1.validate().is_ok(), "reported, not refused");
+        assert_eq!(find_chunk(&post_plte(&latin1), b"tEXt"), None);
 
         let mut utf8 = Ancillary::default();
         utf8.add_text_international("Note", "before\0after");
-        assert!(refusal(&utf8).contains("may not contain a null character"));
+        assert_eq!(notices(&utf8), [MetadataNotice::TextStringNull]);
+        assert!(utf8.validate().is_ok(), "reported, not refused");
+        assert_eq!(find_chunk(&post_plte(&utf8), b"iTXt"), None);
+    }
+
+    /// A notice that says the annotation *was written* has no business being reported for one no
+    /// chunk carries. [`MetadataNotice::carried`] is fixed by the variant, so the entry's `emit`
+    /// flag is what decides: an `iTXt` whose keyword no chunk can hold records the language tag's
+    /// deviation on the same entry, and reporting that unfiltered tells a caller its annotation
+    /// came along with a caveat when zero chunks were written.
+    ///
+    /// Kills the `emit` filter in [`Ancillary::text_notices`]; the second half pins that the
+    /// filter does not swallow the same notice when the annotation *is* written.
+    #[test]
+    fn a_dropped_annotation_reports_only_why_it_was_dropped() {
+        let mut dropped = Ancillary::default();
+        dropped.add_text_international_tagged("\u{153}kw", "zh_Hans", "", "body", false);
+        assert_eq!(
+            notices(&dropped),
+            [MetadataNotice::TextKeywordNotLatin1],
+            "the language tag of an annotation nobody wrote is not news"
+        );
+        assert_eq!(find_chunk(&post_plte(&dropped), b"iTXt"), None);
+
+        let mut written = Ancillary::default();
+        written.add_text_international_tagged("kw", "zh_Hans", "", "body", false);
+        assert_eq!(notices(&written), [MetadataNotice::ItxtLanguageTag]);
+        assert!(find_chunk(&post_plte(&written), b"iTXt").is_some());
     }
 
     /// §11.3.3.4: "The translated keyword and text both use the UTF-8 encoding, and neither shall
@@ -1580,10 +1641,10 @@ mod tests {
     fn the_refusal_names_the_annotation_and_its_keyword() {
         let mut a = Ancillary::default();
         a.add_text_latin1("Title", "fine");
-        a.add_text_latin1("Author", "bad\0body");
+        a.add_text_latin1("Auth\0or", "body");
         let message = refusal(&a);
         assert!(message.contains("text annotation 1"), "{message}");
-        assert!(message.contains(r#""Author""#), "{message}");
+        assert!(message.contains(r#""Auth\0or""#), "{message}");
     }
 
     /// §11.3.3.4's language tag and translated keyword survive, so carrying a decoded `iTXt`
