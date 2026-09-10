@@ -12,6 +12,17 @@ target
 # regenerates a redundant local lockfile that should not be committed.
 tooling/*/Cargo.lock
 
+# One deliberate exception. `tooling/c2pa-oracle` resolves a real external dependency tree
+# (`c2pa`, the C2PA reference implementation) that no other manifest in this repository pins, so
+# there is no root lockfile standing behind it: without one of its own, its whole transitive graph
+# re-resolves on every invocation. Two things depend on that resolution being held still —
+# `README.md` cites `c2pa`'s source **by line number**, and
+# `tests/build_configuration.rs` asserts no OpenSSL package reached the graph. The exact `=`
+# version pin in its manifest holds only the direct dependency; the assertion about the *graph*
+# can otherwise only ever inspect the resolution cargo has just written, which is not an
+# assertion. Committing this one lockfile is what makes it one.
+!tooling/c2pa-oracle/Cargo.lock
+
 # The fuzz tier's search state (issues #264, #311). The corpus is a search aid, not the regression
 # record: a saved input is only reproducible while the target's byte-to-input mapping is unchanged,
 # so a crash is minimised and promoted into a NAMED DETERMINISTIC TEST in the crate's own suite
