@@ -79,6 +79,10 @@ unsafe extern "C" {
     /// the loader found it. Static storage duration; valid for the process.
     fn gdng_zlib_identity() -> *const c_char;
 
+    /// Returns the resolved path of that same zlib alone, or null when the loader cannot report
+    /// one. Static storage duration; valid for the process.
+    fn gdng_zlib_path() -> *const c_char;
+
     /// Computes the SDK's `NewRawImageDigest` for the DNG at `path` into `out_digest` (16 bytes);
     /// `0` on success, else the SDK error code.
     fn gdng_new_raw_image_digest(path: *const c_char, out_digest: *mut u8) -> c_int;
@@ -329,6 +333,32 @@ pub fn zlib_identity() -> String {
         .to_str()
         .unwrap_or("unknown")
         .to_string()
+}
+
+/// The resolved path of that libz on its own — the same string [`zlib_identity`] appends, handed
+/// over unformatted so a caller can *test* it rather than print it.
+///
+/// Returns `None` when the loader reports no path, or reports one that is not UTF-8.
+///
+/// A caller that finds this path inside a Cargo build directory has learned something the version
+/// string cannot tell it: the loader resolved libz from the build graph rather than from the
+/// platform. `cargo` puts every build script's native search path on `LD_LIBRARY_PATH`, and
+/// `gamut-dng`'s own dev-dependency `libtiff-oracle` builds a `libz.so` under `target/`, so a
+/// benchmark launched through `cargo` can measure a different inflate implementation from the one
+/// the same binary measures when run directly. That resolution is not reproducible for anyone
+/// else, which is why `cargo bench -p gamut-dng --bench codec` flags it rather than only printing
+/// it.
+#[must_use]
+pub fn zlib_path() -> Option<PathBuf> {
+    // SAFETY: the shim returns either null or a pointer to a NUL-terminated string with static
+    // storage duration, valid for the life of the process; the `CStr` borrow ends here.
+    let raw = unsafe { gdng_zlib_path() };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, and as above NUL-terminated and static.
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().ok()?;
+    Some(PathBuf::from(text))
 }
 
 /// The extent of an image the Adobe DNG SDK decoded: its geometry and how many samples it holds.

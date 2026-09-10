@@ -102,6 +102,25 @@ dng_error_code copy_short_image(const dng_image *image, uint32_t *out_w, uint32_
 
 } // namespace
 
+namespace {
+
+// The resolved path of the shared object `zlibVersion` came from, or an empty string when the
+// loader cannot report one. Computed once; the storage lives for the process.
+const std::string &resolved_zlib_path() {
+  static const std::string path = [] {
+    Dl_info info;
+    if (dladdr(reinterpret_cast<const void *>(&zlibVersion), &info) == 0 ||
+        info.dli_fname == nullptr) {
+      return std::string();
+    }
+    char resolved[PATH_MAX];
+    return std::string(realpath(info.dli_fname, resolved) ? resolved : info.dli_fname);
+  }();
+  return path;
+}
+
+} // namespace
+
 // Identifies the zlib the SDK's Deflate reader is actually calling: its `zlibVersion()` string
 // followed, where the loader can tell us, by the resolved path of the shared object the symbol
 // came from.
@@ -112,27 +131,37 @@ dng_error_code copy_short_image(const dng_image *image, uint32_t *out_w, uint32_
 // can.
 //
 // This matters to a *measurement*, not to correctness. `build.rs` links the system libz
-// dynamically (`-lz`), so the SDK's Deflate decode is the one measured code path in this oracle
-// that is not built from source committed to this repository: which libz the dynamic linker
-// resolves is a property of the machine. Inflate implementations differ by well over the margin
-// that separates "gamut is faster" from "the SDK is faster" on a Deflate row, so a Deflate
-// throughput ratio is not interpretable without this string beside it.
+// dynamically (`-lz`), so the SDK's Deflate decode is a measured code path this oracle neither
+// builds nor pins: which libz the dynamic linker resolves is a property of the machine, and of
+// the launcher, since cargo puts every build script's native search path on `LD_LIBRARY_PATH`.
+// Inflate implementations differ by well over the margin that separates "gamut is faster" from
+// "the SDK is faster" on a Deflate row, so a Deflate throughput ratio is not interpretable
+// without this string beside it.
 //
 // The returned pointer has static storage duration and lives for the process.
 extern "C" const char *gdng_zlib_identity(void) {
   static const std::string identity = [] {
     std::string text = zlibVersion();
-    Dl_info info;
-    if (dladdr(reinterpret_cast<const void *>(&zlibVersion), &info) != 0 &&
-        info.dli_fname != nullptr) {
-      char resolved[PATH_MAX];
-      const char *path = realpath(info.dli_fname, resolved) ? resolved : info.dli_fname;
+    const std::string &path = resolved_zlib_path();
+    if (!path.empty()) {
       text += " from ";
       text += path;
     }
     return text;
   }();
   return identity.c_str();
+}
+
+// The resolved path alone, or `nullptr` when the loader cannot report one -- the same string
+// `gdng_zlib_identity` appends, handed over unformatted so a caller can *test* it rather than
+// print it. A caller that finds this path inside a Cargo build directory knows the loader
+// resolved libz from the build graph rather than from the platform, which is a resolution nobody
+// else reproduces.
+//
+// The returned pointer has static storage duration and lives for the process.
+extern "C" const char *gdng_zlib_path(void) {
+  const std::string &path = resolved_zlib_path();
+  return path.empty() ? nullptr : path.c_str();
 }
 
 // The code gdng_validate returns when the SDK marks the negative damaged (a stored

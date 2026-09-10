@@ -573,11 +573,48 @@ fn print_fixture_table() {
             decode_volume as f64 / raw as f64,
         );
     }
+    print_zlib_identity();
+    print!("{FIXTURE_TABLE_EPILOGUE}");
+}
+
+/// Prints which libz the reference arm's Deflate decode actually called, and flags the case where
+/// the loader resolved it out of a build directory.
+///
+/// Printing the library is what makes a Deflate ratio interpretable; flagging a build-tree
+/// resolution is what makes it *reproducible*. `cargo` puts every build script's native search
+/// path on `LD_LIBRARY_PATH`, and this crate's own dev-dependency `libtiff-oracle` builds a
+/// `libz.so` under `target/`, so a run launched through `cargo bench` can measure a different
+/// inflate implementation from the one the same binary measures when run directly — a difference
+/// large enough to move a Deflate row across 1.0. That resolution belongs to whoever's build
+/// graph produced it and to nobody else, so it is called out rather than merely recorded.
+fn print_zlib_identity() {
     println!(
         "\nThe SDK's Deflate arm calls the system zlib: {}.",
         gamut_dng_oracle::zlib_identity()
     );
-    print!("{FIXTURE_TABLE_EPILOGUE}");
+    if gamut_dng_oracle::zlib_path().is_some_and(|path| is_build_tree(&path)) {
+        print!("{BUILD_TREE_ZLIB_WARNING}");
+    }
+}
+
+/// Printed when the loader resolved libz out of a build directory: the `*/deflate` rows still
+/// measured something, but not something a reader elsewhere can reproduce.
+const BUILD_TREE_ZLIB_WARNING: &str = "\
+WARNING: that libz came out of a build directory, not the platform. `cargo` exports every build
+script's native search path on the runner's library path, and this crate dev-depends on
+`libtiff-oracle`, which builds a `libz.so` of its own — so the `*/deflate` rows below were taken
+against a library that belongs to this build graph and to no one else's. Run the bench binary
+under `target/release/deps/` directly to measure against the platform's libz instead, and say
+which of the two any published Deflate figure came from.
+";
+
+/// Whether `path` lies inside a Cargo build directory, i.e. has a `target` component.
+///
+/// Deliberately a path test and not a comparison against this build's own `target/`: the loader
+/// may resolve a `libz.so` any build script in the graph produced, and every one of those is
+/// equally unreproducible for a reader elsewhere.
+fn is_build_tree(path: &std::path::Path) -> bool {
+    path.components().any(|c| c.as_os_str() == "target")
 }
 
 /// What an operator has to know to read the table above and the divan output below it, printed
