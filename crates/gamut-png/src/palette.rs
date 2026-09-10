@@ -181,10 +181,18 @@ pub(crate) const OPAQUE: u8 = 255;
 /// One owner for the rule, because both palette paths need it and a rule restated twice is a rule
 /// that can drift: the encoder-derived palette trims the alphas it collects
 /// ([`crate::reduce`]), and a caller-supplied one trims [`PngPalette::cleaned`]'s.
+///
+/// Written as a search for the last entry that must stay rather than as a pop-until loop. The two
+/// compute the same length, but the loop's condition has a form -- `last() == Some(&OPAQUE)` -- in
+/// which inverting the comparison never terminates, because an emptied vector answers `None` and
+/// `None != Some(&OPAQUE)` holds forever. That is a hang no test can distinguish from a slow one,
+/// so the shape that cannot express it is the one to write.
 pub(crate) fn trim_trailing_opaque(alphas: &mut Vec<u8>) {
-    while alphas.last() == Some(&OPAQUE) {
-        alphas.pop();
-    }
+    let keep = alphas
+        .iter()
+        .rposition(|&a| a != OPAQUE)
+        .map_or(0, |i| i + 1);
+    alphas.truncate(keep);
 }
 
 #[cfg(test)]
