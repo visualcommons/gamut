@@ -7,13 +7,21 @@
 //! Both are `#![forbid(unsafe_code)]` offset arithmetic, so a hostile record must end in a typed
 //! error rather than a panic or a spin.
 //!
-//! The check beyond the crash oracle is the **composition the API documents**:
-//! `annex_b` is defined as `annex_b_parameter_sets` followed by `annex_b_payload`, appended to
-//! the caller's buffer. Two callers rely on that split — an Annex-B decoder takes the whole
-//! stream, an Android MediaCodec-shaped API takes `csd-0` and the samples separately — so the
-//! halves drifting from the whole is a real defect that produces no crash at all. The target
-//! asserts byte equality *and* that the two forms agree on success, including the documented
-//! "bytes already appended are left in place" behaviour on error.
+//! The check beyond the crash oracle is the **append contract**: `annex_b`,
+//! `annex_b_parameter_sets` and `annex_b_payload` all document that they *append* to the caller's
+//! buffer — bytes already there are left in place, including on the error path — so a caller can
+//! reuse one scratch buffer across items. Nothing in any of the three bodies makes that true by
+//! construction: each one is free to `clear()` or to write through an index, and doing so breaks
+//! every reusing caller while producing no crash at all. That is what this target searches for.
+//!
+//! Alongside it, and explicitly **not** a differential, is a **structure pin**: `annex_b`'s body
+//! *is* `annex_b_parameter_sets` followed by `annex_b_payload`, so asserting the whole equals the
+//! two halves cannot fail for any input while that body stands. It is kept because the split is a
+//! documented API contract with two distinct callers — an Annex-B decoder takes the whole stream,
+//! an Android MediaCodec-shaped API takes `csd-0` and the samples separately — so a future
+//! `annex_b` that stops delegating is a real regression. It is folded into the append check's
+//! second pass rather than costing a third emitter run: the equality of two `is_ok()` calls on the
+//! same expression, which an earlier draft also asserted, is trivially true and is gone.
 //!
 //! `validate_still_payload` is driven for its own sake: it re-walks the payload through
 //! `NalHeader::parse`, a different reach from the Annex-B emitters.
@@ -33,6 +41,10 @@
 use gamut_heic::{HevcConfig, NalHeader, iter_nal_units};
 use libfuzzer_sys::fuzz_target;
 
+/// The bytes a reused scratch buffer is pre-filled with, so an emitter that replaces rather than
+/// appends is visible as a missing prefix rather than as a length that happens to match.
+const SCRATCH: [u8; 3] = [0xEE; 3];
+
 fuzz_target!(|data: &[u8]| {
     let Some((length, rest)) = data.split_first_chunk::<2>() else {
         return;
@@ -44,27 +56,25 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // The documented composition: `annex_b` is the two halves, in order, appended to `out`.
+    // Pass one: the whole stream into an empty buffer, as an Annex-B decoder takes it.
     let mut whole = Vec::new();
-    let whole_result = config.annex_b(payload, &mut whole);
-    let mut halves = Vec::new();
-    config.annex_b_parameter_sets(&mut halves);
-    let halves_result = config.annex_b_payload(payload, &mut halves);
-    assert_eq!(
-        whole_result.is_ok(),
-        halves_result.is_ok(),
-        "annex_b and its two halves disagree on success"
-    );
-    assert_eq!(whole, halves, "annex_b is not its two halves concatenated");
+    let _ = config.annex_b(payload, &mut whole);
 
-    // Appending, not replacing: a caller reusing a scratch buffer keeps what was there.
-    let mut reused = vec![0xEE; 3];
-    let _ = config.annex_b(payload, &mut reused);
-    assert_eq!(&reused[..3], &[0xEE; 3], "annex_b overwrote the buffer");
+    // Pass two: the same stream through the two halves, into a buffer that is *not* empty. The
+    // prefix assertion is the live check — it fails if either half replaces instead of appending,
+    // on the success path or the error path. The tail assertion is the structure pin above.
+    let mut reused = SCRATCH.to_vec();
+    config.annex_b_parameter_sets(&mut reused);
+    let _ = config.annex_b_payload(payload, &mut reused);
     assert_eq!(
-        &reused[3..],
+        &reused[..SCRATCH.len()],
+        &SCRATCH[..],
+        "an annex_b emitter overwrote what was already in the buffer"
+    );
+    assert_eq!(
+        &reused[SCRATCH.len()..],
         &whole[..],
-        "annex_b appended something different to a non-empty buffer"
+        "annex_b is not its two documented halves concatenated"
     );
 
     // The NAL layer on its own reach: the still-image constraint re-walks the payload through
