@@ -4,9 +4,13 @@
 //! Each test pins one encode path's use of the seam, so a path that stopped embedding metadata
 //! fails on its own rather than hiding behind another.
 
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use gamut_core::{
+    Bilevel, Cmyk8, Dimensions, EncodeImage, Gray8, Gray16, ImageRef, Indexed8, Rgb8, Rgb16, Rgba8,
+    Rgba16,
+};
 use gamut_tiff::{
-    Anomaly, Ifd, Severity, TiffDecoder, TiffEncoder, TiffMetadata, Value, deconstruct, read, tags,
+    Anomaly, Ifd, Palette8, Severity, TiffDecoder, TiffEncoder, TiffMetadata, Value, deconstruct,
+    read, tags,
 };
 
 /// Distinct payloads per carrier, so a block written under the wrong tag is visible.
@@ -238,13 +242,23 @@ fn every_standard_pointer_inside_the_exif_directory_survives_a_round_trip() {
 }
 
 #[test]
-fn the_encoder_refuses_an_exif_tree_its_own_decoder_could_not_read_back() {
-    // The encoder used to write any nesting a caller built and `metadata()` refused a third level
-    // of it, so this crate emitted a well-formed file it could not itself read — the one shape a
-    // seam whose contract is "what the file holds is what the caller gets" must not have. The
-    // refusal is the encoder's, before any pixel work; the reader's side of the same bound is
-    // `a_directory_below_the_exif_interop_pair_is_too_deep` (src/metadata.rs), and the depth this
-    // pair *does* reach round-trips in
+fn every_public_encode_surface_refuses_an_exif_tree_its_own_decoder_could_not_read_back() {
+    // The encoder used to write any nesting a caller built while `metadata()` refused a third
+    // level of it, so this crate emitted a well-formed file it could not itself read — the one
+    // shape a seam whose contract is "what the file holds is what the caller gets" must not have.
+    // The refusal is taken once, at the chokepoint every entry point shares, and *that* is why
+    // this test is table-driven over the entry points rather than over the chokepoint: an entry
+    // point that stops calling the checked form still refuses a bad C2PA store, so nothing but a
+    // per-surface claim can see it go. Reverting one surface to the unchecked form used to fail
+    // no test in this crate.
+    //
+    // Every public surface that encodes pixels is here: the eight `EncodeImage` impls, reached
+    // both by `encode_image` and by the two wrappers that are separate entry points
+    // (`encode_to_vec`, `encode_with_report`), plus the two inherent ones. The *message* is the
+    // claim, not `is_err`, so a surface refusing for some unrelated reason is not mistaken for a
+    // surface honouring the bound. The reader's side of that bound is
+    // `a_directory_below_the_exif_interop_pair_is_too_deep` (src/metadata.rs) and the depth this
+    // pair does reach round-trips in
     // `a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file` above.
     let mut interop = Ifd::new();
     interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
@@ -252,13 +266,103 @@ fn the_encoder_refuses_an_exif_tree_its_own_decoder_could_not_read_back() {
     inner.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop]);
     let mut deeper = exif();
     deeper.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![inner]);
+    let enc = TiffEncoder::new().with_metadata(TiffMetadata::new().with_exif(deeper));
 
-    let pixels = rgb(8, 4);
-    let err = TiffEncoder::new()
-        .with_metadata(TiffMetadata::new().with_exif(deeper))
-        .encode_to_vec(image(&pixels, 8, 4))
-        .expect_err("a tree the decoder refuses must not be written");
-    assert!(err.to_string().contains("nests deeper"), "{err}");
+    let dims = Dimensions {
+        width: 2,
+        height: 2,
+    };
+    let palette = Palette8::from_rgb_triples(&[0u8; 768]).expect("palette");
+    let rgb8 = ImageRef::<Rgb8>::new(&[0u8; 12], dims).expect("rgb8");
+    let mut out = Vec::new();
+    let refusals = [
+        (
+            "encode_image::<Gray8>",
+            enc.encode_image(
+                ImageRef::<Gray8>::new(&[0u8; 4], dims).expect("gray8"),
+                &mut out,
+            )
+            .map(|_| ()),
+        ),
+        (
+            "encode_image::<Rgb8>",
+            enc.encode_image(rgb8, &mut out).map(|_| ()),
+        ),
+        (
+            "encode_image::<Cmyk8>",
+            enc.encode_image(
+                ImageRef::<Cmyk8>::new(&[0u8; 16], dims).expect("cmyk8"),
+                &mut out,
+            )
+            .map(|_| ()),
+        ),
+        (
+            "encode_image::<Rgba8>",
+            enc.encode_image(
+                ImageRef::<Rgba8>::new(&[0u8; 16], dims).expect("rgba8"),
+                &mut out,
+            )
+            .map(|_| ()),
+        ),
+        (
+            "encode_image::<Gray16>",
+            enc.encode_image(
+                ImageRef::<Gray16>::new(&[0u16; 4], dims).expect("gray16"),
+                &mut out,
+            )
+            .map(|_| ()),
+        ),
+        (
+            "encode_image::<Rgb16>",
+            enc.encode_image(
+                ImageRef::<Rgb16>::new(&[0u16; 12], dims).expect("rgb16"),
+                &mut out,
+            )
+            .map(|_| ()),
+        ),
+        (
+            "encode_image::<Rgba16>",
+            enc.encode_image(
+                ImageRef::<Rgba16>::new(&[0u16; 16], dims).expect("rgba16"),
+                &mut out,
+            )
+            .map(|_| ()),
+        ),
+        (
+            "encode_image::<Bilevel>",
+            enc.encode_image(
+                ImageRef::<Bilevel>::new(&[0u8; 4], dims).expect("bilevel"),
+                &mut out,
+            )
+            .map(|_| ()),
+        ),
+        (
+            "encode_palette8",
+            enc.encode_palette8(
+                ImageRef::<Indexed8>::new(&[0u8; 4], dims).expect("indexed8"),
+                &palette,
+                &mut out,
+            )
+            .map(|_| ()),
+        ),
+        (
+            "encode_pages_rgb8",
+            enc.encode_pages_rgb8(&[rgb8], &mut out).map(|_| ()),
+        ),
+        ("encode_to_vec", enc.encode_to_vec(rgb8).map(|_| ())),
+        (
+            "encode_with_report",
+            enc.encode_with_report(rgb8, &mut out).map(|_| ()),
+        ),
+    ];
+    for (surface, result) in refusals {
+        let err = result.expect_err(surface);
+        assert!(
+            err.to_string().contains("nests deeper"),
+            "{surface} refused for the wrong reason: {err}"
+        );
+    }
+    assert!(out.is_empty(), "a refused encode writes nothing");
 }
 
 /// The uncompressed 2×2 RGB directory every hand-built page below starts from: enough fields for
