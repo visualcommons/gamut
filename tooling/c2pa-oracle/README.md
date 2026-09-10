@@ -190,17 +190,58 @@ raising the version is a deliberate act that also means re-reading every citatio
 `tooling/*/Cargo.lock` — a `tooling/` crate normally resolves through the root lockfile, so a local
 one is redundant — and this crate is the one exception, with the negation and its reason recorded
 beside the rule. The reason is that the `=` pin holds exactly one line: everything *under* `c2pa`,
-325 transitive packages, re-resolves on every invocation without a lockfile. The no-OpenSSL check
+307 transitive packages, re-resolves on every invocation without a lockfile. The no-OpenSSL check
 above is an assertion about the resolved graph, and with the graph re-resolved moments earlier it
 could only ever inspect what cargo had just written for it. Committing the lockfile is what makes
 it a check; the exception is itself pinned by a drift guard, so it cannot be reverted in one line
 without a test going red.
 
+307 is the version-aware closure of `c2pa`'s entries in the committed lockfile, `c2pa` itself
+excluded: the packages whose versions the `=` pin does **not** hold, which is the population this
+argument is about — an `openssl` package can only arrive beneath `c2pa`, and it is *resolution*, not
+compilation, that a missing lockfile redoes. Re-derive it from the lockfile:
+
+```bash
+python3 - <<'PY'
+import tomllib
+
+package = tomllib.load(open("tooling/c2pa-oracle/Cargo.lock", "rb"))["package"]
+by_key = {(p["name"], p["version"]): p for p in package}
+versions = {}
+for p in package:
+    versions.setdefault(p["name"], []).append(p["version"])
+
+def key(dependency):
+    field = dependency.split()
+    return (field[0], field[1] if len(field) > 1 else versions[field[0]][0])
+
+seen, todo = set(), [("c2pa", "0.90.21")]
+while todo:
+    node = todo.pop()
+    if node in seen:
+        continue
+    seen.add(node)
+    todo += [key(d) for d in by_key[node].get("dependencies", [])]
+
+print(len(seen) - 1)
+PY
+```
+
+The version has to be carried through the walk: 21 package names occur at two versions in this
+lockfile, so a name-keyed closure is not the same set. The whole file holds 326 entries
+(`grep -c '^name = ' tooling/c2pa-oracle/Cargo.lock`) — those 307, `c2pa` itself, this crate, and 17
+reachable only through its four `gamut-*` dev-dependencies, which the root workspace lockfile
+resolves. Fewer are ever compiled: 240 with default features off
+(`cargo tree --manifest-path tooling/c2pa-oracle/Cargo.toml --locked -e normal -p c2pa
+--prefix none | sed 's/ (\*)$//' | sort -u | wc -l`, `c2pa` included), because a lockfile pins
+optional dependencies this build never turns on. That smaller figure is not the one the argument
+needs: re-resolution moves all 307.
+
 Committing it is only half. Cargo regenerates a missing or stale lockfile without complaint, so
 `mise run test-c2pa` and `mise run check-c2pa` pass **`--locked`**: the resolution in the tree is
 the resolution that was used, or the task fails. That is *not* the same claim as "nothing else in
 the tree depends on `c2pa`" — true, but it bears on the feature line, saying no other dependent can
-unify `openssl` back on, and says nothing about which versions those 325 packages resolve to.
+unify `openssl` back on, and says nothing about which versions those 307 packages resolve to.
 
 ## The signing identity
 

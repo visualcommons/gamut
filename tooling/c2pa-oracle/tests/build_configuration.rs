@@ -17,7 +17,7 @@
 //! The fourth guards what makes the second one an assertion at all. `Cargo.lock` is committed for
 //! this crate — an exception to the blanket `tooling/*/Cargo.lock` rule, recorded in
 //! `.gitignore` — because the `=` pin holds the direct dependency and nothing under it: with the
-//! lockfile ignored, the 325 transitive packages re-resolve on every invocation and the
+//! lockfile ignored, the 307 transitive packages beneath it re-resolve on every invocation and the
 //! resolved-graph check can only inspect a file cargo has just written for it, which is not a
 //! check. So the exception itself is pinned, or it can be reverted in one line without a single
 //! test going red.
@@ -105,7 +105,8 @@ fn the_c2pa_dependency_pins_the_exact_version_the_readmes_citations_were_read_ag
 fn the_lockfile_this_crate_resolves_against_is_committed_rather_than_ignored() {
     // The repository ignores `tooling/*/Cargo.lock` — a `tooling/` crate normally resolves through
     // the root lockfile, so a local one is redundant. This crate is the exception, and the reason
-    // is the 325 packages *under* `c2pa`: the `=` pin holds one direct dependency and nothing
+    // is the 307 packages *under* `c2pa` — the version-aware closure of its lockfile entries,
+    // derived in `README.md`: the `=` pin holds one direct dependency and nothing
     // beneath it, so without a committed lockfile the whole transitive graph re-resolves on every
     // invocation and the resolved-graph assertion above can only inspect the resolution cargo just
     // wrote for it. `mise run test-c2pa` and `check-c2pa` pass `--locked`, which is what turns
@@ -114,7 +115,7 @@ fn the_lockfile_this_crate_resolves_against_is_committed_rather_than_ignored() {
     // A different argument used to stand here — that nothing else in the tree depends on `c2pa`,
     // so nothing else pins its graph. That one is true but it bears on the *feature* line above,
     // not on this test: it says no other dependent can unify `openssl` back on. It says nothing
-    // about which versions those 325 packages resolve to, which is the only thing committing this
+    // about which versions those 307 packages resolve to, which is the only thing committing this
     // file actually holds still. The two are different claims and only the second justifies the
     // exception.
     //

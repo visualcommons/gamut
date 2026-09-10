@@ -33,12 +33,13 @@ doctest = false
 # number** for two claims it records, and a `^` range lets a patch release move those lines under
 # a citation nobody re-checked.
 #
-# The pin holds this one line and nothing else. The 325 transitive packages under it are held by
+# The pin holds this one line and nothing else. The 307 transitive packages under it — the
+# version-aware closure of its lockfile entries, derived in `README.md` — are held by
 # `Cargo.lock`, which is committed for this crate alone against the blanket `tooling/*/Cargo.lock`
 # rule — the exception, and why it is made, are recorded in `.gitignore`. That, and not the fact
 # that nothing else in the tree depends on `c2pa`, is what the exception rests on: the
 # single-dependent fact bears on the feature line above (no other dependent can unify `openssl`
-# back on) and says nothing about which versions those 325 packages resolve to. `mise run
+# back on) and says nothing about which versions those 307 packages resolve to. `mise run
 # test-c2pa` and `check-c2pa` pass `--locked`, so the committed resolution is the one that is
 # used; without both, the no-OpenSSL assertion in `tests/build_configuration.rs` could only ever
 # inspect a resolution cargo had just written for it, which the pin does nothing to constrain.

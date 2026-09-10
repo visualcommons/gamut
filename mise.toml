@@ -218,7 +218,8 @@ run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml
 # must never gain an edge to it, and the excluded manifest is what enforces that.
 #
 # `--locked` is what makes the committed `tooling/c2pa-oracle/Cargo.lock` load-bearing. Without it
-# cargo silently re-resolves the 325 transitive packages under the pinned `c2pa` and writes the
+# cargo silently re-resolves the 307 transitive packages under the pinned `c2pa` (the figure is
+# derived in `tooling/c2pa-oracle/README.md`) and writes the
 # result over the committed file, so the crate's own resolved-graph assertion would be reading a
 # resolution cargo had produced moments earlier. With it, a lockfile that is missing or out of date
 # fails the task instead of being regenerated.
