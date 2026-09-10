@@ -77,6 +77,11 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
 
 Intentional, documented skips — none lose data on round-trip:
 
+- **A structured field the projection cannot express reads as absent** — a URL held as
+  `rdf:resource`, a value carrying a qualifier, a language alternative with entries beside the
+  default, an unexpected container kind. Nothing is lost: the field is in the type's `other` list
+  and the graph keeps it verbatim. Whether the model should widen to report the value as well is
+  issue #609.
 - **The remaining eleven IPTC Extension structures** (`Location`, `PersonWDetails`, `CvTerm`,
   `EntityWRole`, `ProductWGtin`, `RegistryEntry`, `EmbdEncRightsExpr`, `LinkedEncRightsExpr`,
   `CopyrightOwner`, `ImageCreator`, `ImageSupplier`): no typed model — issue #538. They pass through
