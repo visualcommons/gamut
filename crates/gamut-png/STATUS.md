@@ -344,7 +344,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. A tie keeps the **plain** encoding: cleaning buys its rewritten samples with a size win, and where there is no win there is nothing to buy them with. |
 | 6 | Metadata hygiene | **preserve, never strip** — the encoder emits exactly what the caller set, and `gamut convert` carries a PNG input's metadata into a PNG output unless `--strip-metadata` asks otherwise (see [Metadata preservation](#metadata-preservation-issue-483)). Preserving costs bytes, and that is the trade this axis takes: a smaller file that silently lost a colour profile is not a better one. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
-| 8 | Effort / speed / determinism | Output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). Three independent knobs, no composed dial. No parallelism. [#484] |
+| 8 | Effort / speed / determinism | **partial** — output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). The five size/time knobs now compose into a four-rung `Preset` dial (see [The effort ladder](#the-effort-ladder-issue-484)), and `gamut-deflate`'s `with_optimal_parse_limit` is reachable from `PngEncoder` at last, so PNG callers are no longer stuck at 1 MiB spans. What remains is parallelism: `BruteForce`'s seven candidates are embarrassingly parallel and still run one after another, which is a workspace-level dependency decision rather than a local change. [#484], [#624] |
 | 9 | Correctness / robustness | **covered** — 16-bit, odd dimensions, 1×1, CRC policy, malformed input. |
 
 ### The cost model, and why it is a race
@@ -409,6 +409,95 @@ kept even when no pixel names it — the chunk is carried verbatim, so the alter
 background silently repainted. This holds across colour **types**; on the depth axis a `bKGD` sample
 is range-checked but not rescaled with a 16→8 demotion or a sub-byte packing — that is [#501].
 
+### The effort ladder (issue #484)
+
+`with_compression`, `with_effort`, `with_filter`, `with_optimal_parse_limit` and
+`with_auto_reduce` are five independent knobs. Nothing mapped one choice onto a sensible
+combination of them, so a caller wanting the smallest file had to know that it means `Level::Best`
+*and* `FilterStrategy::BruteForce` *and* auto-reduce. `Preset` is that knowledge, named.
+
+Measured over the nine-row efficiency corpus at 64x64 (32x32 for the 16-bit row) —
+`cargo test -p gamut-png --test effort -- --nocapture`. **Sizes are exact and reproducible; the
+times are not bench figures.** They come from the test profile rather than `cargo bench`, on one
+machine, with every arm warmed up and the minimum kept over three interleaved passes. Read the
+ratios, not the absolute milliseconds — and read them as approximate: a first pass measured
+without warm-up put the same two ratios at 150x and 968x rather than 186x and 1147x, so the order
+of magnitude is the finding and the third digit is not. Every arm is the same pure-Rust binary and
+no reference codec is linked into this measurement, so nothing here depends on which native
+library the loader resolved.
+
+| rung | ms per corpus pass | relative | bytes | vs `Balanced` |
+| --- | ---: | ---: | ---: | ---: |
+| `Fast` | 0.951 | 0.32x | 17 530 | +3.4% |
+| `Balanced` | 2.939 | 1x | 16 952 | — |
+| `Small` | 546.7 | ~190x | 16 497 | **−2.7%** |
+| `Smallest` | 3 370.7 | ~1150x | 15 903 | **−6.2%** |
+
+The shape is the finding: **the ladder is steep in time and shallow in size.** `Small` costs
+roughly 190x `Balanced` to save 2.7%, and `Smallest` roughly 1150x to save 6.2%, because both
+cross into the zopfli-style optimal parse and `Smallest` additionally runs a full DEFLATE per
+brute-force candidate. That is the trade `Level::Best` has always carried; the dial does not
+change it, it makes it selectable and says what it costs. It is also the case for [#624]: the
+6.2x step from `Small` to `Smallest` is very nearly the seven-candidate search running serially.
+
+Per row:
+
+| input | `Fast` | `Balanced` | `Small` | `Smallest` |
+| --- | ---: | ---: | ---: | ---: |
+| `gradient_rgb8` | 301 | 292 | 259 | **224** |
+| `photo_rgb8` | 2 758 | 2 339 | 2 193 | **1 736** |
+| `noise_rgb8` | 12 420 | 12 420 | 12 420 | 12 420 |
+| `grey_as_rgb8` | 154 | 146 | **98** | **98** |
+| `palette64_rgba8` | 236 | 216 | 209 | **193** |
+| `sprite_rgba8` | 1 070 | 987 | 902 | **859** |
+| `flat_rgba8` | 197 | 167 | **86** | **86** |
+| `opaque256_rgba8` | 239 | 224 | 212 | **172** |
+| `demotable_rgb16` | **155** | 161 | 118 | **115** |
+
+**The ladder is ordered over the corpus, not per row**, and `demotable_rgb16` is the recorded
+counterexample: `Fast` emits 155 bytes there against `Balanced`'s 161. `Fast` fixes the Paeth
+predictor where `Balanced` runs the per-row `MinSumAbs` search, and a fixed predictor beats a
+heuristic on a picture that suits it. A cheaper rung coming out smaller costs a caller nothing, so
+this is not a defect — but it means "no rung is larger than the rung above it" is not a promise
+this crate can keep. `tests/effort.rs` gates the aggregate ordering (strictly, so a rung that buys
+nothing fails) rather than pinning an accident of the corpus. `noise_rgb8` ties across all four
+rungs for the reason it ties everywhere: incompressible input leaves every setting emitting stored
+blocks.
+
+**`Fast` filters with a fixed Paeth rather than not filtering at all**, which is the opposite of
+the obvious guess and was settled by measuring, not by argument. Over the same corpus:
+
+| `Fast` candidate | relative time | bytes |
+| --- | ---: | ---: |
+| `FilterStrategy::None` | 1.21x | 46 267 |
+| `Fixed(Up)` | 0.94x | 18 064 |
+| `Fixed(Paeth)` | 1x | **17 530** |
+| `MinSumAbs` | 1.25x | 17 600 |
+
+Skipping the filter hands DEFLATE a stream so much larger that the compressor loses more time than
+the filter pass saves: `None` is both 2.6x the largest result *and* 21% slower than fixed Paeth —
+a dominated candidate, not a trade. `Fixed(Paeth)` likewise dominates `MinSumAbs` here, smaller
+*and* faster. Only `Fixed(Up)` is a genuine alternative, 6% quicker for 3% more bytes; Paeth takes
+the rung because the ladder already has three slower entries above it and the bottom rung's job is
+to cost almost nothing extra in size.
+
+**What the dial deliberately does not touch.** `with_transparent_cleanup` is in no rung. It is this
+crate's one lossy knob (axis 5), and a dial named for effort must not be what silently changes
+which samples a file stores; enable it beside a rung. Ancillary chunks, metadata and pushed
+backends are untouched for the same reason — they are what the file *says*, not how hard the
+encoder worked.
+
+**What the gates cannot see.** The times above are reported, not gated, for the reason [#437]
+gives for the rest of this document: a timing cannot fail a build without making it flaky. What
+*is* gated is the aggregate size ordering, the byte-identity of `Preset::Balanced` with a default
+`PngEncoder`, and — through libpng — that no rung changes the pixels a file resolves to. The last
+covers the 8-bit rows only, and that bound is libpng's rather than this crate's: `decode_rgba8`
+drives libpng's *simplified* API, which treats a 16-bit file as linear and converts it to sRGB on
+the way to 8-bit output. A stored sample of 40 comes back as 40 from an 8-bit file and as 110 from
+a 16-bit one, so it is not a depth-neutral resolver and cannot compare a rung that stores 16 bits
+against one that losslessly demotes to 8. 16-bit fidelity is pinned by `tests/oracle.rs` at its own
+stored depth.
+
 ### Cleaning a caller's palette
 
 `encode_indexed8` takes the palette the caller hands it. That palette is not built from the pixels,
@@ -451,3 +540,4 @@ dropped entries also take the index stream from 8 bits per pixel to 2.
 [#484]: https://github.com/visualcommons/gamut/issues/484
 [#501]: https://github.com/visualcommons/gamut/issues/501
 [#612]: https://github.com/visualcommons/gamut/issues/612
+[#624]: https://github.com/visualcommons/gamut/issues/624
