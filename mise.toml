@@ -220,9 +220,14 @@ run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml
 description = "Cross-check gamut's C2PA carriage against c2pa-rs, both directions (issue #447)"
 run = "cargo test --manifest-path tooling/c2pa-oracle/Cargo.toml"
 
-# The compile half, for the same reason `check-dng-real` exists: a `gamut-avif` or `gamut-heic` API
-# change can break this crate while every per-PR gate stays green, and `check` catches that in
-# seconds without signing anything.
+# The compile half, shaped after `check-dng-real`: a `gamut-avif` or `gamut-heic` API change can
+# break this crate while every per-PR gate stays green, and `check` catches that in seconds without
+# signing anything.
+#
+# Unlike `check-dng-real`, **neither of these two tasks is called by any workflow in `.github/`.**
+# The crate's whole automated reach today is `fmt-tooling-check`, which `fmt-check` hangs off, so a
+# compile break or a differential regression is caught only when someone runs these by hand.
+# Wiring them up — `check-c2pa` in the per-PR lint lane, `test-c2pa` in extended — is issue #541.
 [tasks.check-c2pa]
 description = "Compile the C2PA differential oracle (no signing, no corpus)"
 run = "cargo check --manifest-path tooling/c2pa-oracle/Cargo.toml --all-targets"

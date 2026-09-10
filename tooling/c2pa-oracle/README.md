@@ -10,8 +10,24 @@ manifest path:
 
 ```bash
 mise run test-c2pa    # the differential tests
-mise run check-c2pa   # compile only, which is what the per-PR lint lane affords
+mise run check-c2pa   # compile only, in seconds, without signing anything
+
+# and, when a claim below needs re-deriving rather than re-checking:
+cargo run --manifest-path tooling/c2pa-oracle/Cargo.toml --example probe
 ```
+
+**Nothing in CI runs either of those two tasks.** No workflow under `.github/` names this crate,
+and being workspace-`exclude`d with no dependents it is invisible to `cargo clippy --workspace` and
+`cargo test --workspace` as well. Its entire automated reach today is `fmt-tooling-check`, which
+`mise run fmt-check` hangs off — formatting, and nothing else. Wiring `check-c2pa` into the per-PR
+lint lane and `test-c2pa` into extended, mirroring `check-dng-real`/`test-dng-real`, is
+[issue #541](https://github.com/visualcommons/gamut/issues/541); until it lands, run them by hand
+after touching `gamut-avif` or `gamut-heic`.
+
+`examples/probe.rs` asserts nothing. It prints what c2pa-rs actually does with a gamut-written
+AVIF — the composed box's framing bytes, both directions' offsets and lengths, what each locator
+reports, and the layout of an update-manifest pair — so the findings recorded below can be checked
+against a newer `c2pa-rs` without reading its source.
 
 ## What it checks
 
@@ -24,7 +40,7 @@ in both directions.
 | gamut reserves → an external signer completes → c2pa-rs validates | `tests/reserve_then_fill.rs` | a store signed over the reserved file validates once patched into the range `encode_with_report` gave, and exactly fills it |
 | c2pa-rs embeds → gamut locates the identical byte range | `tests/locate_embedded.rs` | `gamut-avif` and `gamut-heic` report the *same span* as the store's own JUMBF header, and c2pa-rs re-validates the bytes gamut extracted |
 | the box itself | `tests/box_framing.rs` | `gamut-avif`'s `ContentProvenanceBox` is byte-identical to c2pa-rs's for the same store |
-| a derivative carries no parent store | `tests/no_copy_forward.rs` | a re-encode reads back as **unsigned** (`JumbfNotFound`), not as invalid |
+| a derivative carries no parent store | `tests/no_copy_forward.rs` | the parent's located store, carried through `gamut-metadata`'s `C2paPolicy` and into a re-encode, reads back as **unsigned** (`JumbfNotFound`) — and `Reject` refuses it by name |
 | the build stays crypto-free where it must | `tests/build_configuration.rs` | the `c2pa` dependency never regains its default `openssl` feature, in the manifest and in the resolved graph |
 | the one BMFF layout gamut cannot discriminate | `tests/update_manifest.rs` | what c2pa-rs actually emits for `box_purpose = update` — see below |
 
@@ -52,6 +68,47 @@ circulation rather than a source of mis-bounding. `tests/locate_embedded.rs` add
 every store c2pa-rs writes opens `LBox` + `jumb`, which is the `TBox` check that would make the
 bound self-checking. Neither observation makes the `LBox` bound self-checking on its own — that is
 issue #505 — but together they replace an assumption with evidence.
+
+## The no-padding finding
+
+`gamut-avif` bounds a slot by the **box** that carries it; `gamut-heic` bounds a store by its own
+JUMBF **`LBox`**. Those are different bounds, and `tests/locate_embedded.rs` asks both locators for
+the same file and compares each against the same independently derived span. They agree — and the
+reason they can is a second observation about the reference implementation, recorded here for the
+same reason the `update`-purpose one is:
+
+> **c2pa-rs sizes the `ContentProvenanceBox` to the store exactly. It writes no padding between the
+> end of the JUMBF superbox and the end of the box that carries it.**
+
+Nothing in C2PA 2.4 §A.5.1.2 requires that. A writer that reserved a slot larger than the store it
+finally signed — which is exactly what `gamut-avif`'s own `with_c2pa_reserved` seam permits, and
+what `C2paSlot::slot_bytes` documents as "the store, then any padding" — would produce a file where
+the box-bounded and `LBox`-bounded answers legitimately differ.
+
+So the two claims are asserted separately. `gamut_avif_bounds_the_store_c2pa_rs_embedded_by_the_box_that_carries_it`
+holds gamut only to *containment*: the slot begins where the store begins and holds every byte of
+it. `c2pa_rs_leaves_no_padding_between_the_store_and_the_end_of_its_box` asserts the equality on its
+own, and is named for c2pa-rs because c2pa-rs is what it measures. A future release that started
+padding would fail that one test, and the diagnosis would be in its name rather than in a locator
+test wrongly accusing gamut of mis-bounding.
+
+## What this oracle does not check
+
+Two limits, stated so nobody reads a green run as covering them.
+
+**Where the box sits.** C2PA 2.4 §A.5.3 constrains a `ContentProvenanceBox`'s *placement* among the
+top-level boxes. c2pa-rs validates a store wherever it finds one, so no assertion here can
+distinguish a conforming placement from a non-conforming one, and none tries: an oracle that cannot
+see a property must not be read as having checked it. Placement is `gamut-avif`'s own suite's
+business — `crates/gamut-avif/tests/c2pa.rs` — where the writer's byte layout is the subject.
+`AvifContainer::c2pa_manifest_stores` deliberately reports a store outside that window as found,
+with its true range, rather than rejecting it, so the container stays a lens over bytes.
+
+**Whose key signed the file.** `ValidationState::Trusted` is unreachable here *by construction* —
+not merely unasserted — because the signing identity is ephemeral and on no trust list; see
+[The signing identity](#the-signing-identity) below. Reaching it would need a trust list and a
+committed certificate with a real expiry, a different subject belonging to a later slice of the
+#239 epic. Nothing of the sort is checked into this tree, and no assertion here asks for it.
 
 ## Why gamut owns the locate/bound step at all
 
@@ -93,12 +150,18 @@ in `tooling/`, where a dev-dependency tree costs a shipped consumer nothing.
 ## Build configuration is not optional
 
 ```toml
-c2pa = { version = "0.90.21", default-features = false, features = ["rust_native_crypto"] }
+c2pa = { version = "=0.90.21", default-features = false, features = ["rust_native_crypto"] }
 ```
 
-`c2pa`'s default feature set is `["openssl", "default_http"]`. The `openssl` feature pulls OpenSSL
-in **vendored**, compiling it from C source into a dev build — precisely the thing the epic's
-no-crypto criterion exists to keep out, and it would make this oracle the slowest thing in CI.
+`c2pa`'s default feature set is `["openssl", "default_http"]`, and its own manifest declares
+
+```toml
+openssl = { version = "0.10.80", features = ["vendored"], optional = true }
+```
+
+— so the default build compiles OpenSSL from C source into a dev build of this repository. That is
+precisely the thing the epic's no-crypto criterion exists to keep out, and it would make this
+oracle the slowest thing in CI.
 `rust_native_crypto` is the pure-Rust signing and verification backend that replaces it; dropping
 `default_http` additionally drops `reqwest` and `ureq`, which this oracle never needs because it
 resolves no remote manifests.
@@ -106,6 +169,15 @@ resolves no remote manifests.
 `tests/build_configuration.rs` fails if that line ever loses either half. This crate is `c2pa`'s
 only dependent in the repository, so nothing else can turn the feature back on by unification: the
 manifest line is the whole determinant, which is what makes a drift guard over it sufficient.
+
+The version is pinned with `=`, not a caret range, and that is a separate guarantee from the
+features. This file cites c2pa-rs's own source **by line number** — `src/validation_results.rs:36-41`
+below, `src/jumbf_io.rs:246` and `:258` at the end — and a caret range lets any patch release move
+those lines while the citation stands as written. There is no committed lockfile to hold the
+resolution instead: `.gitignore` excludes `tooling/*/Cargo.lock`, because a workspace-excluded
+oracle resolves standalone. The pin is the smaller fix and the one that keeps the prose honest;
+`tests/build_configuration.rs` guards it too, so raising the version is a deliberate act that also
+means re-reading every citation here.
 
 ## The signing identity
 
@@ -136,3 +208,31 @@ lower-level entry point would tie this oracle to internals that carry no stabili
 `Builder` and `Reader` express everything the two directions need. Where the oracle needs an
 independent view of where a store sits, it derives it from the store's own JUMBF header — see
 `find_jumbf_superbox` in `src/lib.rs`.
+
+## Reading a JUMBF header, on the reference side
+
+That independent view is the one thing this crate parses itself, so it has to be right on inputs
+c2pa-rs never produces: a wrong span here is an oracle handing gamut a wrong answer and calling it
+the reference one.
+
+A JUMBF box is a JPEG-family *standard box*, and C2PA 2.4 §8.4.2.3 spells the syntax out where it
+defines the C2PA salt as "a standard box consisting of: a box length (LBox, as a 4-byte big-endian
+unsigned integer); a box type (TBox, 4-byte big-endian unsigned integer …)". The full grammar lives
+in ISO 19566-5:2023, which is paywalled and not vendored here (its procurement is issue #441), and
+it reserves two `LBox` values that a naive four-byte read gets wrong:
+
+- **`LBox == 0`** — the box runs to the end of the file, so its length is however much of the
+  buffer follows its own first byte;
+- **`LBox == 1`** — the length is the 8-byte big-endian `XLBox` after `TBox`, counting the whole
+  box including that 16-byte header.
+
+`declared_store_len` implements both, refuses `LBox` 2..=7 (shorter than the header they sit in)
+with a typed `OracleError::UnusableSuperboxLength`, and never returns a length it had to guess.
+No store this crate has seen uses either reserved value — c2pa-rs writes a plain 32-bit `LBox` —
+which is precisely why the handling is written rather than assumed, and why the arms are pinned by
+unit tests in `src/lib.rs` rather than left to a fixture that cannot reach them.
+
+For the same reason `find_jumbf_superbox` **continues** past a `jumb` that appears too early to
+carry an `LBox` in front of it, instead of concluding the buffer has no superbox. Today's fixtures
+put a fixed ISOBMFF framing ahead of the store, so nothing can trip it; issue #534 points this
+crate at PNG, TIFF and RIFF, where a store follows arbitrary compressed bytes.
