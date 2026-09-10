@@ -3,9 +3,14 @@
 //! panic, a hang, or unbounded allocation (STATUS P6).
 //!
 //! Every input is also driven through the streaming [`IfdReader`] and the two entry points must
-//! *agree* — both parse to equal files, or both fail. The slice functions are thin wrappers over
-//! the streaming engine (one parser), so this differential layer is now a regression gate on the
-//! wrappers themselves staying faithful.
+//! *agree* — both parse to equal files, or both fail. This is a **structure pin, not a
+//! differential**: `read` is *defined* as `IfdReader::open(data)?.read_file()` (and `read_tree`
+//! likewise), so the two sides are one parser reached twice and the comparison cannot fail while
+//! those bodies stand. It is kept because a `read` that stopped delegating — growing a second
+//! directory walk, and with it a second set of hostile-input guards to drift — is exactly the
+//! regression the crate's one-parser design exists to prevent. Being unfalsifiable by input, it
+//! belongs here, over this bounded corpus, and not in the unbounded fuzz tier, where it would cost
+//! half of every execution and search for a counterexample that does not exist.
 
 use gamut_ifd::{
     ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_audited, read_tree, write,
@@ -73,7 +78,7 @@ fn survives(data: &[u8]) {
 }
 
 #[test]
-fn specific_malformed_inputs_error_without_panic() {
+fn specific_malformed_inputs_yield_typed_errors_not_panics() {
     let cases: &[&[u8]] = &[
         b"",
         b"II",
