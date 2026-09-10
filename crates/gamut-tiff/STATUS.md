@@ -109,7 +109,14 @@ file**) and §18.5.5 (the two disjoint exclusion ranges — the store, and the `
 entry — that a `c2pa.hash.data` binding excludes; §18.7.3.3 leaves that the only binding a TIFF
 asset has), and `gamut-dng` calls the same helper, so the two formats cannot drift.
 `with_c2pa_reserved` writes a zero-filled reservation for an external signer to overwrite in
-place; `encode_with_report` reports the ranges, and `c2pa_exclusions` recovers them from any
+place. It is an infallible builder, so every bound on `len` is enforced by the **encode** that
+follows, as `Error::InvalidInput`, on every entry point: below the store's minimum (8 bytes, 9 in
+BigTIFF — the JUMBF box header, and one more than the variant's inline threshold, since a value
+that packs inline is not the run at the end of the file §A.3.6 wants), and above the smaller of
+what a buffer holds (`isize::MAX`, past which zero-filling it panicked instead of returning) and
+what the container's count and offset words describe (`u32::MAX` in classic TIFF; BigTIFF's are
+64-bit). The length is settled before the reservation is allocated, so an unusable one costs
+neither the allocation nor the panic. `encode_with_report` reports the ranges, and `c2pa_exclusions` recovers them from any
 TIFF's bytes — including files written through `encode_palette8` or `encode_pages_rgb8`, which the
 object-safe `EncodeImage` seam cannot report through. The store's bytes are never byte-swapped:
 the header's `ByteOrder` does not govern them (§A.3.6). Tag 52545 joins `is_known_tag`, so the
