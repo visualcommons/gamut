@@ -30,6 +30,67 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   the namespace only — what the property *means* is read by `gamut-metadata`, consistent with the
   registry-not-validator posture below — and `tests/oracle.rs` pins that XMPCore reads the property
   back under the `Xmp.dcterms.provenance` key its own registry defines.
+- **Schema breadth = exiv2's documented set (issue #421).** `WellKnownNs` holds 30 entries: the
+  Adobe Parts 1–2 schemas and structure types, `dcterms`, and the twelve further schemas exiv2
+  documents (<https://exiv2.org/metadata.html>): `exifEX`, `aux`, `plus`, `mwg-rs`, `mwg-kw`,
+  `GPano`, `lr`, `MicrosoftPhoto`, `digiKam`, `acdsee`, `crss`, `dwc`. Each URI is taken from the
+  schema owner's specification where one is published and cited on the variant; the vendored
+  reference for all twelve is exiv2's own registry (`third_party/exiv2/src/properties.cpp`,
+  `xmpNsInfo`), and `tests/oracle.rs` reads a documented property of each back from XMPCore by its
+  `Xmp.<prefix>.<name>` key, which fails for a wrong URI *or* a wrong prefix. The registry stays a
+  registry: nothing about a value is interpreted. Two divergences are recorded rather than hidden:
+  `exifEX` is `http://cipa.jp/exif/1.0/` (the URI exiv2 and XMPCore bind) although the vendored Exif
+  3.0 text's annotation examples (Annex J.2–J.3) bind the prefix to `…/exif/2.32/` — CIPA DC-010
+  itself is not vendored, so this one entry rests on the oracle rather than on a specification under
+  `references/`, tracked in issue #516; and
+  exiv2 appends `/` to a URI ending in neither `/` nor `#` when registering it with XMPCore
+  (`XmpProperties::registerNs`), so the engine re-serializes `dwc` as `…/index.htm/` while gamut
+  writes the `…/index.htm` exiv2 documents — pinned in `tests/oracle.rs` as an oracle
+  normalization. Because that normalization is what XMPCore *emits*, `WellKnownNs::from_uri` also
+  recognises `http://rs.tdwg.org/dwc/index.htm/` as a read-only alias (`DWC_URI_TRAILING_SLASH`),
+  so a graph parsed from an exiv2-written packet or sidecar re-serializes under `dwc` rather than a
+  synthesized prefix; `uri()` still emits the unslashed URI, so gamut's own bytes are unchanged and
+  the alias is not an `ALL` entry. The alias buys a **prefix**, not a URI: reading does not
+  canonicalize, so such a graph keeps the slashed URI its packet declared and a caller must look the
+  property up under `DWC_URI_TRAILING_SLASH` — `get_text(WellKnownNs::DarwinCore.uri(), …)` returns
+  `None` for it. `from_uri(u).map(uri) == Some(u)` therefore holds for every registry entry and not
+  for the alias, pinned as such in `namespace.rs`. Canonicalizing on read — which would trade byte
+  fidelity for that symmetry — is filed as issue #547 for when a consumer needs it.
+- **Sidecars require `x:xmpmeta` (issue #421).** `XmpSidecar::read` accepts everything
+  `XmpMeta::from_packet` does — XML declaration, BOM, wrapper or bare — but rejects a document
+  whose element is not `x:xmpmeta` with `XmpError::MissingXmpMeta` naming the element found. **This
+  is stricter than the specification, not derived from it.** The vendored Part 1 §7.3.3 reads "An
+  optional x:xmpmeta element **may** be placed around the rdf:RDF element" and "An XMP processor
+  **should tolerate** an x:xmpmeta element in any input" — permission and tolerance, never a
+  requirement; the vendored Part 3's "External storage of metadata" bullets (a complete, well-formed
+  XML document with the leading XML declaration, the `.xmp` extension, `application/rdf+xml`,
+  written "as though it were embedded and then had the XMP packets extracted and catenated by a
+  postprocessor") never mention the element, and the string `xmpmeta` occurs in Part 3 exactly
+  once, inside an SVG example. So `read` rejects a sidecar the specification permits. What §7.3.3
+  supplies is the element's *purpose* — identifying XMP inside general XML text — and a standalone
+  `.xmp` file is that text, so gamut takes the element as the marker rather than reading any RDF
+  document beside an image as XMP; exiv2 draws its own, different line (`isXmpType` keys on
+  `<?xpacket` **or** `<x:xmpmeta`). `XmpSidecar::write` emits the XML declaration Part 3 asks for,
+  then a read-only (`end="r"`), unpadded packet wrapping the canonical body in `x:xmpmeta` —
+  byte-stable per graph. No filesystem API and no enforced file name: the `.xmp`-beside-the-image
+  convention is documented for the caller. The missing wrapper has its own error,
+  `XmpError::MissingXmpMeta`, naming the element found: the wrapper-less form is *permitted* by
+  §7.3.3 and is what `XmpWriter::wrap_xmpmeta(false)` emits, so reporting it as a prohibited
+  construct would assert a prohibition the spec does not make. exiv2 is more permissive still — its
+  sniffer (`isXmpType`) accepts a `.xmp` file starting with `<?xpacket` **or** `<x:xmpmeta` — so a
+  file exiv2 reads as a sidecar and gamut rejects is expected; the caller reads those bytes with
+  `XmpMeta::from_packet`.
+- **A catenated sidecar is truncated to its first packet (issue #562).** Part 3's bullet asks that
+  external metadata be written "as though it were embedded and then had the XMP packets extracted
+  and catenated by a postprocessor", so a conforming producer may emit a `.xmp` file holding
+  several `<?xpacket?>` packets end to end. `XmpSidecar::read` reads the first and silently
+  discards the rest — `XmpPacket::scan` ends the body at the *next* `<?xpacket` instruction, which
+  in a catenated file is the first packet's own trailer. Two `XmpSidecar::write` outputs
+  concatenated read back as the properties of the first alone, with no error; Adobe XMPCore rejects
+  those same bytes. `XmpSidecar::write` emits exactly one packet, so gamut never produces the
+  shape. The behaviour predates issue #421 and is documented rather than changed: rejecting,
+  merging every packet, or keeping the truncation are three different products (a merge needs a
+  conflict rule Part 3 does not supply), and #562 holds that decision.
 
 ## Phases
 
@@ -42,6 +103,7 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
 | P5 | Part 1 §7 | **Keystone** — canonical RDF/XML serialization + packet emit (writable padding) | ✅ done |
 | P6 | — | exiv2 differential conformance gate | ✅ done |
 | P7 | Parts 1–3 | **v1 stabilization** (issue #189) — API finalization (`XmpPacket::parse` composition, `XmpWriter::with_namespace` prefix registration, model conveniences), conformance audit (control-character escaping fix, trailer `end=` matching, edge-case pins), gamut-iptc dogfood migration, docs | ✅ done |
+| P8 | Part 2; Part 3 "External storage" | **Breadth** (issue #421) — registry at parity with exiv2's documented schemas (17 → 30 entries), `.xmp` sidecar read/write, per-schema and sidecar oracle tests | ✅ done |
 
 ## Intentional skips (audited for v1)
 
@@ -61,6 +123,13 @@ deliberately:
 - **Part 3 per-container embedding and JPEG ExtendedXMP:** owned by the format crates; this crate
   supplies wrapper-optional parse, bare-body serialization, and the writable/padding envelope.
 - **Per-schema value validation (Part 2):** values are uninterpreted text; `WellKnownNs` is a
-  namespace registry, not a validator.
+  namespace registry, not a validator — still true after the exiv2-parity additions (issue #421).
+- **Sidecar file naming and I/O (Part 3):** `XmpSidecar` is bytes-in / bytes-out; locating
+  `photo.xmp` beside `photo.dng` is the caller's, as embedding is the format crates'.
+- **Decode limits (crate-wide, not sidecar-specific):** `XmpSidecar::read` takes an unbounded
+  `&[u8]` and parses the document before checking for the wrapper. `XmpMeta::from_packet` has
+  identical exposure on the same bytes, so the sidecar API (issue #421) adds no hostile-input class
+  the crate did not already have; whether gamut-xmp should grow a decode-limit convention like
+  `gamut-png`'s is a question for the crate as a whole and is deliberately left open.
 - **Deferred additive API** (post-1.0, no consumer today): an opt-in `XmpMeta::validate()`, and
   nested-structure field lookup.
