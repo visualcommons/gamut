@@ -3,9 +3,9 @@
 //! `cargo bench -p gamut-dng --bench codec` first prints a fixture table — the byte volumes each
 //! measured region moves — then runs divan throughput benchmarks over the codec matrix the crate
 //! ships: **uncompressed**, **Deflate** and **lossless JPEG**, each for **CFA** and **LinearRaw**
-//! photometry. The counter is always the *raw sample volume* (`samples × 2` bytes), so encode,
-//! decode and the reference implementation are all quoted against the same denominator and are
-//! directly comparable.
+//! photometry. Every counter is a *pixel volume* in bytes — the raw sample volume (`samples × 2`),
+//! plus the IFD-0 preview for the two gamut benchmarks that also handle it. See the counter rule
+//! below: it is what makes the throughput column of `decode_dng` a preview-corrected comparison.
 //!
 //! # What is inside the timed region, and what is not
 //!
@@ -436,9 +436,9 @@ fn raw_bytes(photometry: Photometry) -> usize {
 /// Bytes of IFD-0 preview a decode of one of these fixtures additionally unpacks:
 /// `⌊w/2⌋ × ⌊h/2⌋ × 3`, uncompressed RGB8 (the encoder always writes the preview uncompressed).
 ///
-/// This is the whole of the `decode_dng_gamut` / `decode_dng_adobe_sdk` asymmetry that is
-/// attributable to pixels; the rest is IFD and metadata reconstruction, which does not scale with
-/// the frame.
+/// This is the whole of the `decode_dng` gamut-versus-SDK asymmetry that is attributable to
+/// pixels; the rest is IFD and metadata reconstruction, which does not scale with the frame. It
+/// is what [`Case::gamut_bytes`] adds to the raw volume.
 fn preview_bytes() -> usize {
     (WIDTH / 2 * (HEIGHT / 2) * 3) as usize
 }
