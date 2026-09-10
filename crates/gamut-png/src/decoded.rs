@@ -89,7 +89,7 @@ pub struct Chromaticities {
     pub blue: (u32, u32),
 }
 
-/// Coding-independent code points (cICP, §11.3.2.5) identifying the video-signal colour space.
+/// Coding-independent code points (cICP, §11.3.2.6) identifying the video-signal colour space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Cicp {
@@ -188,7 +188,7 @@ pub struct DecodedPng {
     pub palette: Option<PngPalette>,
     /// The tRNS colour key of a greyscale/truecolour image, in native (unscaled) sample units.
     pub transparency: Option<TransparencyKey>,
-    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.4). Feed as
+    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.5). Feed as
     /// `gamut_metadata::MetadataBlock::Exif`.
     pub exif: Option<Vec<u8>>,
     /// The embedded ICC profile (iCCP), inflated. Feed as `MetadataBlock::Icc`.
@@ -224,7 +224,7 @@ pub struct DecodedPng {
     pub gamma: Option<u32>,
     /// cHRM chromaticities, each coordinate × 100 000.
     pub chromaticities: Option<Chromaticities>,
-    /// sRGB rendering intent (§11.3.2.4).
+    /// sRGB rendering intent (§11.3.2.5).
     pub srgb: Option<SrgbIntent>,
     /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
@@ -267,7 +267,7 @@ pub struct DecodedPng {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PngMetadata {
-    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.4). Feed as
+    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.5). Feed as
     /// `gamut_metadata::MetadataBlock::Exif`.
     pub exif: Option<Vec<u8>>,
     /// The embedded ICC profile (iCCP), inflated. Feed as `MetadataBlock::Icc`.
@@ -303,7 +303,7 @@ pub struct PngMetadata {
     pub gamma: Option<u32>,
     /// cHRM chromaticities, each coordinate × 100 000.
     pub chromaticities: Option<Chromaticities>,
-    /// sRGB rendering intent (§11.3.2.4).
+    /// sRGB rendering intent (§11.3.2.5).
     pub srgb: Option<SrgbIntent>,
     /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
