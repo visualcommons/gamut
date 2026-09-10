@@ -138,6 +138,13 @@ impl TiffEncoder {
     /// IFD of the main chain and its bytes at the end of the file, as C2PA 2.4 §A.3.6 requires.
     /// For a single-image encode those are the same directory; for
     /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) they are the first and last page.
+    ///
+    /// **What this encoder writes, [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) reads
+    /// back.** The one thing that could break the agreement is nesting: an Exif sub-IFD may carry
+    /// sub-IFD groups of its own, the reader follows the `ExifIFD` → `InteroperabilityIFD` pair
+    /// (EXIF 2.3 §4.6.3) and no deeper, so a directory nested below that pair is refused here —
+    /// a typed [`Error::InvalidInput`] raised before any pixel work, not a well-formed file this
+    /// crate's own reader then rejects.
     #[must_use]
     pub fn with_metadata(mut self, metadata: TiffMetadata) -> Self {
         self.metadata = metadata;
@@ -215,6 +222,23 @@ impl TiffEncoder {
         }))
     }
 
+    /// Every refusal a configuration can earn, taken together before any pixel work: metadata
+    /// this crate would write but could not read back ([`TiffMetadata::check`]), and the C2PA
+    /// manifest store ([`c2pa_store`](Self::c2pa_store)), whose bytes come back for the layout
+    /// stage to place.
+    ///
+    /// The two are resolved at one call rather than at each entry point's own convenience,
+    /// because "before any pixel work" is a promise every entry point has to keep and a second
+    /// place to forget it is a defect waiting to be written.
+    ///
+    /// # Errors
+    ///
+    /// As [`TiffMetadata::check`] and [`c2pa_store`](Self::c2pa_store).
+    fn checked_store(&self) -> Result<Option<Cow<'_, [u8]>>> {
+        self.metadata.check()?;
+        self.c2pa_store()
+    }
+
     /// Places `store` (if any) at the end of the finished file and appends the result to `out`,
     /// returning the number of bytes written.
     ///
@@ -286,7 +310,7 @@ impl TiffEncoder {
         palette: &Palette8,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        let store = self.c2pa_store()?;
+        let store = self.checked_store()?;
         let w = indices.width() as usize;
         let colormap = palette.to_tiff_colormap();
         self.encode_packed(
@@ -314,7 +338,7 @@ impl TiffEncoder {
     ) -> Result<usize> {
         // The caller is an EncodeImage impl handing us an ImageRef-validated buffer, so
         // pixels.len() == width * height * spp holds and the product cannot overflow.
-        let store = self.c2pa_store()?;
+        let store = self.checked_store()?;
         let row_bytes = dims.width as usize * spp;
         debug_assert_eq!(pixels.len(), row_bytes * dims.height as usize);
         self.encode_packed(
@@ -347,7 +371,7 @@ impl TiffEncoder {
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         // Before the serialisation buffer below, so a bad C2PA configuration costs no allocation.
-        let store = self.c2pa_store()?;
+        let store = self.checked_store()?;
         // As in `encode_8bit`, the caller hands us an ImageRef-validated buffer.
         let row_bytes = dims.width as usize * spp * 2;
         debug_assert_eq!(samples.len() * 2, row_bytes * dims.height as usize);
@@ -504,7 +528,7 @@ impl TiffEncoder {
                 "TIFF: no pages to encode",
             ));
         }
-        let store = self.c2pa_store()?;
+        let store = self.checked_store()?;
         let total = pages.len() as u16;
         let mut images: Vec<(Ifd, Vec<Vec<u8>>)> = Vec::with_capacity(pages.len());
         for (i, page) in pages.iter().enumerate() {
@@ -739,7 +763,7 @@ impl EncodeImage<Cmyk8> for TiffEncoder {
 impl EncodeImage<Rgba8> for TiffEncoder {
     /// Stores the fourth sample as *unassociated* alpha (`ExtraSamples = 2`, not premultiplied).
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
-        let store = self.c2pa_store()?;
+        let store = self.checked_store()?;
         let row_bytes = image.width() as usize * 4;
         self.encode_packed(
             image.as_samples(),
@@ -806,7 +830,7 @@ impl EncodeImage<Bilevel> for TiffEncoder {
     /// Packs one byte per pixel (`0` = black, non-zero = white) MSB-first into bits, `BlackIsZero`.
     fn encode_image(&self, image: ImageRef<'_, Bilevel>, out: &mut Vec<u8>) -> Result<usize> {
         // Before the bit-packing pass below, so a bad C2PA configuration costs no pixel work.
-        let store = self.c2pa_store()?;
+        let store = self.checked_store()?;
         let (w, h) = (image.width() as usize, image.height() as usize);
         let pixels = image.as_samples();
         let stored_row_bytes = w.div_ceil(8);

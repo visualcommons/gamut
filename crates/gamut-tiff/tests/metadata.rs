@@ -176,6 +176,30 @@ fn a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file() {
     );
 }
 
+#[test]
+fn the_encoder_refuses_an_exif_tree_its_own_decoder_could_not_read_back() {
+    // The encoder used to write any nesting a caller built and `metadata()` refused a third level
+    // of it, so this crate emitted a well-formed file it could not itself read — the one shape a
+    // seam whose contract is "what the file holds is what the caller gets" must not have. The
+    // refusal is the encoder's, before any pixel work; the reader's side of the same bound is
+    // `a_directory_below_the_exif_interop_pair_is_too_deep` (src/metadata.rs), and the depth this
+    // pair *does* reach round-trips in
+    // `a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file` above.
+    let mut interop = Ifd::new();
+    interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+    let mut inner = exif();
+    inner.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop]);
+    let mut deeper = exif();
+    deeper.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![inner]);
+
+    let pixels = rgb(8, 4);
+    let err = TiffEncoder::new()
+        .with_metadata(TiffMetadata::new().with_exif(deeper))
+        .encode_to_vec(image(&pixels, 8, 4))
+        .expect_err("a tree the decoder refuses must not be written");
+    assert!(err.to_string().contains("nests deeper"), "{err}");
+}
+
 /// The uncompressed 2×2 RGB directory every hand-built page below starts from: enough fields for
 /// the pixels to decode, and nothing that feeds [`TiffMetadata`].
 fn page_ifd() -> Ifd {

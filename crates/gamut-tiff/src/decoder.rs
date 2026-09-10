@@ -212,7 +212,10 @@ impl TiffDecoder {
     ///
     /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or for a pointer
     /// **inside IFD 0's subtree** that does not resolve into a tree: an out-of-bounds or
-    /// unparseable target, two pointers naming one directory, or nesting deeper than 16 levels.
+    /// unparseable target, two pointers naming one directory, or nesting below the
+    /// `ExifIFD` → `InteroperabilityIFD` pair — two levels under IFD 0, the deepest tree those
+    /// two tags legitimately reach (EXIF 2.3 §4.6.3), and the same bound
+    /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) writes within.
     /// Only `ExifIFD` (34665) and `InteroperabilityIFD` (40965) are followed, and only from
     /// IFD 0 downwards — a pointer on any later page of a multi-page document is never resolved,
     /// so however broken it is it cannot fail this call, not even by naming a directory IFD 0's
