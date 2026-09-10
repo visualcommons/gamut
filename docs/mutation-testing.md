@@ -95,6 +95,44 @@ memory, where the OOM killer picks a victim that may be cargo-mutants itself.
 
 `--dry-run` resolves and prints the whole invocation without running it.
 
+## Reading the result
+
+A run that prints no `MISSED` line is not necessarily a clean run.
+
+**Exit code 3 is a timeout, not a survivor.** A mutant that makes the suite hang is scored
+neither caught nor missed; the runner reports it as `TIMEOUT` and exits 3, and the `--in-diff`
+gate fails on it just as it does on a survivor. Read the counts before triaging: a shard that
+hits its own cap silently stops, so every mutant it never reached is unreported rather than
+caught. Treat a hang the way `AGENTS.md` says to treat a survivor — the loop that cannot make
+progress under mutation is usually a loop that should have been bounded by a slice in the first
+place, and rewriting it as one turns an unkillable `TIMEOUT` into an ordinary killable mutant.
+
+**What the tool mutates is a short list**, and everything outside it is invisible to the gate.
+`cargo mutants --list` on this workspace generates exactly: a function body replaced by a default
+value, a binary or compound-assignment operator swapped, a `!` deleted, a match *guard* forced to
+`true`/`false`, and a whole match arm deleted. So the gate can never report:
+
+- a case that is **missing** from a `match` or a table — there is nothing there to mutate, and a
+  survey of nine absent spec-defined cases still scores zero missed;
+- a wrong **literal or `const`** — a guard's operand is not mutated, so a test that asserts an
+  error message against its own copy of the literal is self-referential and pins nothing. Assert
+  the value, not the symbol;
+- one **alternative of an or-pattern** — `delete match arm A(v) | B(v)` removes both at once, so
+  a wrong alternative stays green. Assert each alternative separately rather than looping.
+
+**A green mutant can also mean the expression is unobservable.** A `Vec` capacity hint, a
+discarded return value, arithmetic whose operands cannot disagree at the sizes the suite builds:
+none of these can be killed by any test, because nothing depends on them. That is a reason to
+delete the expression, not to test harder — and where deleting it costs something (an extra
+allocation, say), record the cost where the code is.
+
+**Verify a hand-applied mutant the way the tool does.** Commit first, so `git diff` shows exactly
+the mutation and nothing else; apply the expression verbatim from the `--list` line; run the whole
+package suite (`test_workspace = false` — the workspace suite is not what scored it); and re-read
+the file to confirm the edit landed before believing the verdict. A test asserting only `is_err()`
+cannot kill a guard-removal mutant when a later check rejects the same input for a different
+reason — assert the message.
+
 ## Tight debug loops
 
 When killing a specific survivor, narrow the selection and reuse the previous verdicts:
