@@ -1195,9 +1195,17 @@ mod tests {
         // assertion is what a widened `IFD0_POINTER_TAGS` fails: a `const`'s contents are not a
         // mutable expression, so the mutation gate cannot see this at all, and adding
         // `InteroperabilityIFD` to the set left all 25 of this crate's test binaries green. The
-        // sweep is derived *from* the constant rather than repeating a list by hand — a hand list
-        // is what let that widening through — so it can never assert "left alone" about a tag the
-        // constant says is followed.
+        // sweep is derived rather than repeating a list by hand — a hand list is what let that
+        // widening through — so it can never assert "left alone" about a tag the constant says is
+        // followed.
+        //
+        // It is derived from `gamut_ifd::tags::STANDARD_POINTER_TAGS`, the sibling crate's own
+        // constant, and not from this crate's `EXIF_SUBTREE_POINTER_TAGS`, which is *defined* as
+        // that constant. Same members today, and deliberately the wider name: the domain this
+        // sweep has to cover is "every standard pointer tag that exists", so a fifth one added
+        // upstream must enter it whatever this crate's alias is doing. Deriving from the alias
+        // would let a later narrowing of the alias shrink the sweep silently — the same
+        // hand-maintained-set failure one indirection further out.
         //
         // `resolve_pointers` is driven directly, at the depth `read_metadata` calls it with,
         // because IFD 0 is the one directory the seam never hands back; the public observation
