@@ -143,6 +143,9 @@ const COPYRIGHT: &str = "Public domain — no rights reserved.";
 ///
 /// 1024 points keep the linear-interpolation error of the steepest such curve (ST 2084 near its
 /// peak) below one `uInt16` quantum, so the table is as exact as the encoding it is written in.
+/// Measured **0.986** quanta at `V ≈ 0.9956` over a 200 001-point sweep, and 0.9854 over the
+/// midpoint sweep `sampled_pq_curve_matches_gamut_color` runs — which is why that test's
+/// tolerance is one quantum: a guard at twice the claimed bound is not a guard on the claim.
 const SAMPLED_TRC_POINTS: usize = 1024;
 
 /// A 3×3 matrix in row-major order — the shape `gamut_color::matrix` produces and consumes.
@@ -838,17 +841,26 @@ mod tests {
     /// the `uInt16` quantum the table is written in. This is what justifies
     /// [`SAMPLED_TRC_POINTS`]: it pins that the sampling density is fine enough to make the
     /// encoding, not the table, the limit on accuracy.
+    ///
+    /// The sweep visits every one of the table's intervals at both ends *and at its midpoint*,
+    /// which is where linear interpolation is furthest from the curve it interpolates. A uniform
+    /// 101-point sweep misses the peak: it measures 0.962 quanta where the true worst case is
+    /// 0.986, at `V ≈ 0.9956`. The tolerance is therefore **one** quantum — the bound
+    /// [`SAMPLED_TRC_POINTS`] claims — not two; the arithmetic is deterministic, so a guard that
+    /// tight cannot flake.
     #[test]
     fn sampled_pq_curve_matches_gamut_color() {
         let TagData::Curve(curve) = Trc::Pq.tag() else {
             panic!("PQ is encoded as a sampled curveType");
         };
         let peak = pq_eotf(1.0);
-        for step in 0..=100 {
-            let x = f64::from(step) / 100.0;
+        // Twice the interval count: an even `step` lands on a sample, an odd one on a midpoint.
+        let steps = 2 * (SAMPLED_TRC_POINTS - 1);
+        for step in 0..=steps {
+            let x = step as f64 / steps as f64;
             let (got, want) = (curve.eval(x), pq_eotf(x) / peak);
             assert!(
-                (got - want).abs() < 2.0 / 65535.0,
+                (got - want).abs() < 1.0 / 65535.0,
                 "PQ TRC at {x}: {got} vs {want}"
             );
         }
