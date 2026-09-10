@@ -10,9 +10,6 @@
 //! [`Rebased`](crate::Rebased) views layered on `&mut Tracked<…>` delegate down, so reads made
 //! through a rebased view (a maker-note mini-IFD) land in the ledger at **physical** offsets.
 
-use core::iter::Peekable;
-use core::slice::Iter;
-
 use gamut_core::Result;
 
 use crate::segment::Range;
@@ -111,57 +108,43 @@ impl ReadLedger {
                 _ => merged.push(r),
             }
         }
-        // Two-pointer subtract of `merged` from the ledger spans.
+        // Subtract `merged` from each ledger span. Both lists are sorted and disjoint, so the
+        // claims that can touch one span are a contiguous run of `merged`: the run that reaches
+        // past the span's start, up to the last that begins before its end. Taking that run as a
+        // sub-slice is what bounds the walk -- a cursor advanced by hand is bounded instead by
+        // its own arithmetic staying right (`pos *= n` never moves one that starts at zero), and
+        // the loop it drives can then be reported only as a mutation-testing timeout, never as a
+        // wrong answer (issue #110).
         let mut out = Vec::new();
-        let mut c = merged.iter().peekable();
         for span in &self.spans {
-            let mut pos = span.start;
             let end = span.end();
-            while pos < end {
-                match next_live_claim(&mut c, pos) {
-                    Some(r) if r.start <= pos => {
-                        // Covered up to the claim's end.
-                        pos = r.end().min(end);
-                    }
-                    // Uncovered up to whichever comes first: the next claim's start, or the end
-                    // of this span.
-                    //
-                    // The two cases were separate arms, split on `r.start < end`. They are the
-                    // same arm: at `r.start == end` the old second arm pushed `end - pos` and set
-                    // `pos = end`, which is exactly what the fallback did, so `<` and `<=` there
-                    // produced identical output and no test could tell them apart. Written as a
-                    // `min` the operator is gone rather than excluded (#110) -- and `min` is not
-                    // equivalent to `max` here, so what replaces it is killable.
-                    next => {
-                        let stop = next.map_or(end, |r| r.start.min(end));
-                        out.push(Range {
-                            start: pos,
-                            len: stop - pos,
-                        });
-                        pos = stop;
-                    }
-                }
+            let live = &merged[merged.partition_point(|r| r.end() <= span.start)..];
+            let touching = live.iter().take_while(|r| r.start < end).count();
+            // Each claim closes the stretch before it and moves the cursor to its own end,
+            // clamped to the span; whatever is left over after the run is the trailing stretch.
+            let mut pos = span.start;
+            for r in &live[..touching] {
+                push_gap(&mut out, pos, r.start);
+                pos = r.end().min(end);
             }
+            push_gap(&mut out, pos, end);
         }
         out
     }
 }
 
-/// The first claim at the head of `claims` that reaches past `pos`, dropping the ones that do
-/// not.
+/// Records `[start, stop)` as unclaimed, unless it is empty.
 ///
-/// This exists as its own function because its comparison is the one thing in
-/// [`ReadLedger::subtract`] no test can pin. Dropping a settled claim is what leaves the walk's
-/// covered arm a claim that ends *after* `pos`, and so what makes `pos` advance; relax the
-/// comparison and the walk stops making progress instead of producing a wrong answer, which
-/// cargo-mutants can report only as a timeout (issue #110). Confining it here keeps the
-/// exclusion that documents it anchored to a name rather than to a line, and leaves every other
-/// comparison in `subtract` — all of them killable — outside its reach. Returning the surviving
-/// claim rather than nothing is what keeps the *body* mutant killable: `None` says "no claim
-/// covers anything", and the walk then reports every read as unclaimed.
-fn next_live_claim<'a>(claims: &mut Peekable<Iter<'a, Range>>, pos: u64) -> Option<&'a Range> {
-    while claims.next_if(|r| r.end() <= pos).is_some() {}
-    claims.peek().copied()
+/// One guard serves both the stretch before a claim and the one after the last claim, so the
+/// emptiness test is written once. `stop` may be *below* `start` -- a claim reaching back before
+/// the span it is subtracted from starts there -- which is why the test is `>` and not `!=`.
+fn push_gap(out: &mut Vec<Range>, start: u64, stop: u64) {
+    if stop > start {
+        out.push(Range {
+            start,
+            len: stop - start,
+        });
+    }
 }
 
 /// A [`ReadAt`] adaptor that records every successful read into a [`ReadLedger`].
