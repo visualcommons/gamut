@@ -403,10 +403,12 @@ palette becomes the index of its entry (an opaque entry where a transparent twin
 triple collapses to one grey sample — and omitted, without error, where no lossless conversion
 exists, since a payload shaped for the wrong colour type is a chunk libpng rejects and drops. A
 caller's palette *index* survives only on the `encode_indexed8` path, whose palette is the caller's;
-under an encoder-derived palette it names nothing and is omitted. On that path the index is
-renumbered with the entry it names when cleaning renumbers the palette, and the entry it names is
-kept even when no pixel names it — the chunk is carried verbatim, so the alternative is a
-background silently repainted. This holds across colour **types**; on the depth axis a `bKGD` sample
+under an encoder-derived palette it names nothing and is omitted. On that path all three forms — the
+index, the grey sample and the RGB triple — name an entry of the caller's palette, one rule with one
+owner (`ancillary::background_entry`): the entry each names is kept even when no pixel names it, and
+the chunk is written as that entry's index in the cleaned palette. The alternative is a background
+silently repainted — including by the chunk resolving a second time against the cleaned palette and
+landing on a transparent twin of the triple it asked for. This holds across colour **types**; on the depth axis a `bKGD` sample
 is range-checked but not rescaled with a 16→8 demotion or a sub-byte packing — that is [#501].
 
 ### Cleaning a caller's palette
@@ -417,15 +419,19 @@ entries nothing names and entries that name a colour another entry already names
 into an incompressible `PLTE`, and the count of them decides the index bit depth.
 
 So the palette is cleaned before it is written (`PngPalette::cleaned`): an entry no pixel and no
-`bKGD` index names is dropped, a later entry with the same RGB **and** the same alpha as an earlier
-one is merged into it, the trailing opaque `tRNS` bytes §11.3.2.1 lets a chunk omit are omitted, the
-index bit depth is derived from what survives, and the image's indices — and a
-`with_background_index` background — are renumbered onto the result. Surviving entries keep the
-caller's relative order; **ordering** a caller's palette is a separate, heuristic question ([#612]).
+`bKGD` background names is dropped, a later entry with the same RGB **and** the same alpha as an
+earlier one is merged into it, the trailing opaque `tRNS` bytes §11.3.2.1 lets a chunk omit are
+omitted, the index bit depth is derived from what survives, and the image's indices — and the
+background, in whichever of its three forms it was set — are renumbered onto the result. Surviving
+entries keep the caller's relative order; **ordering** a caller's palette is a separate, heuristic
+question ([#612]).
 
 It is silent and lossless, which is why it goes through no notice channel: a merged entry did not
-fail to come along, it arrived under another index. libpng resolving the file to the caller's exact
-RGBA is the test of that (`tests/oracle.rs`).
+fail to come along, it arrived under another index, and a background's entry is kept rather than
+dropped or re-resolved. libpng resolving the file to the caller's exact RGBA is the test of that
+(`tests/oracle.rs`); the background's own chunk is asserted against §11.3.5.1's read rule —
+`PLTE[index]`, and `tRNS[index]` for its alpha — beside the encoder, because libpng surfaces the
+pixels but not `bKGD`.
 
 Measured on a 64×64 four-colour picture handed a full 256-entry palette (4 colours repeated 64
 times, one of them transparent):
