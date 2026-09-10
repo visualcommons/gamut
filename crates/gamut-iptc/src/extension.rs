@@ -1122,6 +1122,17 @@ mod tests {
     }
 
     #[test]
+    fn entity_round_trips_its_identifiers_and_name() {
+        // An Entity reached through an ImageRegion is read field-list-first; this is the public
+        // value-level conversion, which nothing else exercises with a structure value.
+        let entity = Entity {
+            identifiers: vec!["urn:a".to_owned(), "urn:b".to_owned()],
+            name: Some("Human".to_owned()),
+        };
+        assert_eq!(Entity::from_xmp(&entity.to_xmp()), Some(entity));
+    }
+
+    #[test]
     fn polygon_boundary_keeps_its_vertices_in_order() {
         let boundary = RegionBoundary {
             shape: Some("polygon".to_owned()),
