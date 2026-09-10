@@ -310,15 +310,21 @@ input it must *not* refuse — so widening or narrowing a range by one is caught
 about a *set* of branches, and three consecutive reviews each found one more member of the set
 untested, so the set is now written down rather than argued: the module documentation on
 `#[cfg(test)] mod tests` in `src/lib.rs` carries the enumeration as a table, one row per
-**discriminating** branch — every point where the parsing surface chooses between two answers about
-a buffer, refusing or not — across `find_jumbf_superbox`, `declared_store_len`,
-`jumbf_superbox_span` and `is_jumbf_not_found`, naming the test on each side. A branch added
-without a row, or a row with one side blank, is the finding, and three tests in that same module
-parse the table and enforce it: rustdoc never compiles a `cfg(test)` module, so its intra-doc links
-would otherwise go stale behind a green suite. The one refusal outside that layer —
-`reserve_then_fill` rejecting a slot that is not the signed store's length — is not parsing and
-needs c2pa-rs and a gamut encoder in reach, so it is pinned in `tests/reserve_then_fill.rs`
-instead, and the table says so.
+discriminating branch in four **named** functions — `find_jumbf_superbox`, `declared_store_len`,
+`jumbf_superbox_span` and `is_jumbf_not_found` — naming the test on each side. It is a list, not a
+rule membership can be derived from: a table that claimed to cover "every branch that chooses
+between two answers about a buffer" would exclude the `is_jumbf_not_found` row, which chooses
+between two answers about an *error*. The two discriminating branches deliberately left out, and
+why, are named in that same doc comment.
+
+Three tests in that module parse the table out of the doc comment and fail on a blank cell, or on a
+name nothing in the file defines — rustdoc never compiles a `cfg(test)` module and never resolves
+these links, so a renamed test would otherwise leave a stale row behind a green suite. That is the
+whole of what they enforce. They read **rows → tests**: a branch added to one of those four
+functions *without* a row leaves all of them green, as does a test added without one, so the
+table's completeness is held by review and not by the suite. The per-function branch-count guard
+that would close that direction is
+[issue #616](https://github.com/visualcommons/gamut/issues/616).
 
 Every one of those tests asserts **which** refusal fired — the message where the variant carries
 one, the variant itself where it does not — never merely that an error occurred. Several branches

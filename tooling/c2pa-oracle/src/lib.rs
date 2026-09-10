@@ -492,17 +492,34 @@ mod tests {
     //! # Every branch, enumerated once
     //!
     //! Three rounds of review each found one more untested arm here, because each round looked at
-    //! the arm the last one had missed rather than at the set. So the set is written down. Every
-    //! **discriminating** branch on this crate's own parsing surface — every point where the code
-    //! chooses between two answers about a buffer — is listed below with the test that pins each
-    //! of its two directions. Adding a branch means adding a row, and a row with one side blank is
-    //! the finding, not a matter of taste.
+    //! the arm the last one had missed rather than at the set. So the set is written down — as a
+    //! **named list**, not as a rule to derive membership from. The table covers every
+    //! discriminating branch, every point where the code chooses between two answers, in exactly
+    //! these four functions: [`find_jumbf_superbox`], [`declared_store_len`],
+    //! [`jumbf_superbox_span`] and [`is_jumbf_not_found`]. Each row names the test pinning each
+    //! of its two directions. Adding a branch to one of those four means adding a row, and a row
+    //! with one side blank is the finding, not a matter of taste.
     //!
     //! The scope was narrower once: only branches that could *refuse* an input. That boundary
     //! excluded exactly the predicates whose whole job is telling two cases apart —
     //! [`is_jumbf_not_found`] sat outside it and had one direction unpinned, which is the same
-    //! blank-side shape the table exists to make visible. Discrimination, not refusal, is the
-    //! property that earns a row.
+    //! blank-side shape the table exists to make visible. Widening it to discrimination is what
+    //! made the boundary undrawable in prose, though: [`is_jumbf_not_found`] discriminates
+    //! between two answers about an *error*, not about a buffer, so no wording about buffers
+    //! covers the row the widening was made for. Hence the list. It claims to be complete over
+    //! four named functions and nothing wider.
+    //!
+    //! Two discriminating branches in this file sit outside it, named here so their absence is a
+    //! decision and not an oversight:
+    //!
+    //! * [`reserve_then_fill`]'s `store.len() != slot.len()` guard. It discriminates exactly as a
+    //!   row does; what separates it is *reach*, not subject — pinning it needs c2pa-rs and a
+    //!   gamut encoder, so it lives in `tests/reserve_then_fill.rs`, which the last column of no
+    //!   row can name because these rows name functions in this file.
+    //! * `Display for OracleError`'s match over the variants. It chooses the *wording* for an
+    //!   outcome some other branch already decided, so it discriminates nothing about an input.
+    //!   Every refusal test below asserts on the message it renders, so it is exercised
+    //!   throughout without a row of its own.
     //!
     //! *Taken* is the input that reaches the branch; *not taken* is the nearest input that does
     //! not. For a branch that refuses, those are the input it refuses and the nearest input it
@@ -543,17 +560,27 @@ mod tests {
     //! whose resulting length is then too short. Adjacent branches on the same input share a
     //! boundary; that is what makes it a boundary.
     //!
-    //! One test here is in no row: [`a_span_is_still_found_when_a_decoy_jumb_precedes_the_superbox`]
-    //! pins the *composition* of the search and the length reading, not a branch of either.
+    //! Four of this module's tests are in no row, and the count is derived rather than
+    //! remembered: `grep -c '^    #\[test\]$' src/lib.rs` gives 24 tests, and
+    //! `grep -c '^    //! | \[' src/lib.rs` gives the table's 12 rows, which name 20 distinct
+    //! tests between their two columns. The four are
+    //! [`a_span_is_still_found_when_a_decoy_jumb_precedes_the_superbox`], which pins the
+    //! *composition* of the search and the length reading rather than a branch of either, and the
+    //! three checks whose subject is this doc comment rather than a buffer —
+    //! [`the_enumeration_is_a_table_with_no_blank_cell`],
+    //! [`every_test_the_enumeration_names_exists_in_this_file`] and
+    //! [`every_test_file_the_enumeration_names_exists`].
+    //!
+    //! Nothing checks that count, and the reason is worth stating: those three run rows → tests
+    //! and never tests → rows. They catch a row naming a test that is gone; they cannot catch a
+    //! test that is here and in no row — nor this sentence going stale — because in that
+    //! direction they ask nothing. That asymmetry is why the number above carries the command
+    //! that re-derives it.
     //!
     //! [`is_jumbf_not_found`]'s taken side is also observed end to end, on an error c2pa-rs itself
     //! raised, in `tests/no_copy_forward.rs`. The row points at the inline test rather than that
     //! one because the inline test fails for exactly one reason — the predicate misread an error —
     //! while the differential fails for anything wrong anywhere in a re-encode.
-    //!
-    //! The refusal outside this layer — `reserve_then_fill` rejecting a slot that is not the
-    //! signed store's length — is not parsing and needs c2pa-rs and a gamut encoder, so it is
-    //! pinned where those are in reach: `tests/reserve_then_fill.rs`.
     //!
     //! Every one of these tests asserts **which** refusal fired — the message where the variant
     //! carries one, the variant itself where it does not — never merely that an error occurred.
