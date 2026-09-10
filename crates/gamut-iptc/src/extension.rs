@@ -963,13 +963,22 @@ fn read_array<T>(xmp: &XmpMeta, ns: &str, name: &str, parse: fn(&[XmpProperty]) 
     }
 }
 
-/// Replaces the `Bag` property `ns:name` with `values`, removing it when `values` is empty.
+/// Replaces the `Bag` property `ns:name` with `values`, skipping a value that carries no field at
+/// all and removing the property when nothing is left to write.
+///
+/// A member with nothing to say is not written, for the reason
+/// [`PhotoMetadata::set_creator_contact_info`] does not write an empty structure: a reader would
+/// otherwise report it as present but blank.
 fn write_bag(xmp: &mut XmpMeta, ns: &str, name: &str, values: Vec<XmpValue>) {
-    if values.is_empty() {
+    let items: Vec<XmpItem> = values
+        .into_iter()
+        .filter(|value| !structure(value).is_some_and(<[XmpProperty]>::is_empty))
+        .map(XmpItem::new)
+        .collect();
+    if items.is_empty() {
         xmp.remove(ns, name);
         return;
     }
-    let items = values.into_iter().map(XmpItem::new).collect();
     xmp.set(XmpProperty::new(
         ns,
         name,
@@ -1456,6 +1465,22 @@ mod tests {
             // The finite sibling is still written, so the skip is per value, not per structure.
             assert_eq!(number(fields, ns::IPTC_EXT, "rbY"), Some(1.5));
         }
+    }
+
+    #[test]
+    fn an_array_element_with_nothing_to_say_is_not_written() {
+        // The four setters agree: a member that carries no field at all is not written, rather
+        // than left in the array as an element a reader reports as present but blank.
+        let mut pm = PhotoMetadata::new();
+        let region = ImageRegion {
+            identifier: Some("r1".to_owned()),
+            ..ImageRegion::default()
+        };
+        pm.set_image_regions(&[ImageRegion::default(), region.clone()]);
+        assert_eq!(pm.image_regions(), vec![region]);
+        // Nothing but empty members leaves no property at all, as an empty slice does.
+        pm.set_image_regions(&[ImageRegion::default()]);
+        assert!(pm.xmp.properties.is_empty());
     }
 
     #[test]
