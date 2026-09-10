@@ -62,6 +62,17 @@ same rule `docs/testing.md` applies to a shrunk `proptest` counterexample, and t
   `x86_64-unknown-linux-musl`, and the sanitizer cannot link against a static libc. Without the
   pin the build fails before reaching a target at all.
 - **This crate is workspace-excluded**, so `cargo test --workspace --all-features` never builds it.
+  Nothing on the pull-request path would otherwise compile these targets at all, and an API change
+  in a driven crate would break them unnoticed until the next Extended run. CI's lint job therefore
+  runs `cargo check --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets` — build-only, no
+  nightly, no sanitizer, no engine — exactly as it already does for the excluded real-DNG
+  conformance tier.
+- **The dependency graph is shared across every target.** A feature turned on for one target's
+  crate is on for all of them, because Cargo resolves features once per crate for the whole
+  package: `bigtiff` was added to `gamut-ifd` for the `ifd_read` driver, and the pre-existing
+  `ifd_read_ledger` law target is now built with it too. That is harmless here — `bigtiff` widens
+  the accepted input rather than changing the laws — but it is not free in general, and a feature
+  added for one target must be checked against the others before it goes in.
 - **The `--` is reconstructed, not passed through.** mise swallows a task's `--`, so
   `mise run fuzz t -- -max_total_time=60` reaches `run.sh` as two bare words and cargo-fuzz would
   reject the second as one of its own options. The runner re-splits on libFuzzer's own flag syntax
@@ -85,6 +96,16 @@ over normalised inputs, per the section above.
 
 One file per crate, deliberately, so adding a crate is an additive change.
 
+`Drago` is held to monotonicity only where `Drago::is_monotonic` says it claims it (#439); every
+other operator promises it unconditionally, and all of them are driven through the other three
+laws.
+
+The `tonemap_curves` target found a defect **in a law** within a minute of first running: the
+monotonicity tolerance derived its scale from the sampled outputs, so a sample set drawn entirely
+from `Hable`'s near-zero cancellation region measured the noise against itself. Fixed in the same
+change, with the case promoted into a named test — which is the workflow this file prescribes,
+exercised once.
+
 ### Robustness targets (#264)
 
 They hand the engine's bytes, unchanged, to the **parser entry point** `docs/testing.md`'s
@@ -98,17 +119,65 @@ no crash is still visible:
 
 | target | crate | entry points | check beyond the crash oracle |
 |---|---|---|---|
-| `ifd_read` | `gamut-ifd` | `read`, `read_tree`, `read_audited`, `IfdReader` | slice and streaming readers agree; the dual-ledger audit is complete |
+| `ifd_read` | `gamut-ifd` | `read`, `read_tree`, `read_audited` | the dual-ledger audit is complete: no byte read outside a claim, no claim unread |
 | `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | the page index is bounded by `page_count`; describing and decoding agree on geometry |
-| `dng_decode` | `gamut-dng` | `DngDecoder::{decode,verify_new_raw_image_digest}` | the decoded raw is self-consistent; the digest verdict agrees with the decoded model |
+| `dng_decode` | `gamut-dng` | `DngDecoder::{decode,verify_new_raw_image_digest}` | the raw image that *arrives* holds exactly `width × height × planes` samples, after every rewriting stage |
 | `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `read`, `BoxReader` | the box cursor strictly advances; the segments tile `0..len` exactly |
 | `heic_container` | `gamut-heic` | `HeifContainer::parse` | the segments tile `0..len` exactly and every accessor agrees with that tiling |
-| `heic_hvcc` | `gamut-heic` | `HevcConfig::parse`, `annex_b*`, `validate_still_payload`, `iter_nal_units` | `annex_b` is its two documented halves, concatenated and appended |
+| `heic_hvcc` | `gamut-heic` | `HevcConfig::parse`, `annex_b*`, `validate_still_payload`, `iter_nal_units` | the Annex-B emitters append rather than replace, on the success path and the error path |
+
+**A check is only listed here if it can fail.** Three earlier entries could not. `ifd_read`
+compared `read(data)` against `IfdReader::open(data)?.read_file()` — but `reader.rs` *defines*
+`read` as that expression, so the two sides were one function call written twice. `heic_hvcc`
+compared `annex_b(..).is_ok()` against `annex_b_payload(..).is_ok()` on the same input, and
+asserted `annex_b` equals the two calls its own body makes. `dng_decode` compared a digest verdict
+against a decoded field that is read with the *same expression* on both sides. None of them had a
+reachable failure, and calling any of them a differential overstated what the tier proves.
+
+They are not all deleted — they are **relabelled and repriced**. A claim about two bodies agreeing
+is a **structure pin**: worth keeping where it is free or where a future change could genuinely
+split the bodies apart, worth nothing as a search. So `heic_hvcc` still asserts the two halves,
+folded into the append check's existing buffer at no extra emitter pass; `dng_decode` still
+compares the verdict, on a call it makes anyway for the crash oracle; and the `gamut-ifd` wrapper
+pin lives in `crates/gamut-ifd/tests/robustness.rs`, over a bounded exhaustive corpus, rather than
+costing half of every one of this target's twenty thousand executions per second to search for a
+counterexample that does not exist. Dropping the two duplicate parses raised `ifd_read` from
+roughly 12 000 exec/s to roughly 20 000.
 
 An **allocation** defect needs the engine's malloc hook to be visible at all: an oversized
 `Vec::with_capacity` costs no resident memory on an overcommitting kernel, so measuring RSS finds
 nothing and `-malloc_limit_mb` (which libFuzzer defaults to `-rss_limit_mb`, 2048) is the oracle.
 That is how `dng_decode` reports a 780-byte file asking for a 34 GB allocation.
+
+### Two of these rows are red on purpose
+
+`Fuzz tiff_decode` and `Fuzz dng_decode` **fail today**, on the first defects this tier found:
+[#563](https://github.com/visualcommons/gamut/issues/563) (a panic on `SamplesPerPixel = 0`) and
+[#564](https://github.com/visualcommons/gamut/issues/564) (a raw buffer sized from declared
+geometry). They are filed rather than fixed, because narrowing a target so its row goes green is
+weakening a check to make a report green — the opposite of what the tier is for.
+
+What that costs, stated plainly so nobody has to rediscover it: **Extended runs on every push to
+the default branch, so its aggregate status stays red until both are fixed.** The blast radius is
+bounded — Extended is post-merge and manual-dispatch only, and the fuzz job is `fail-fast: false`,
+so no pull request is blocked and no other row is cancelled — but a human scanning one red tick
+per push learns nothing from it. Read the per-row status, not the aggregate, until #563 and #564
+close; both rows go green with no change here. Whether these two rows should instead live in a
+separate, expected-to-fail lane so the aggregate keeps its meaning is
+[#593](https://github.com/visualcommons/gamut/issues/593) — a workflow-topology question, not a
+fuzzing one. The job's cadence, which was inherited rather than chosen and now costs nine parallel
+ten-minute runners per push, is [#594](https://github.com/visualcommons/gamut/issues/594).
+
+## Keeping the three lists in step
+
+A target exists in three hand-maintained places: its `fuzz_targets/<name>.rs` file, its `[[bin]]`
+entry in `Cargo.toml`, and its row in `extended.yml`'s fuzz matrix. Miss the third and the target
+is written, committed, and never run — silently, because nothing fails. `check-targets.sh`
+reconciles all three and is wired into CI's `Format & Metadata` job; run it directly too:
+
+```bash
+./tooling/gamut-fuzz/check-targets.sh
+```
 
 ## Seeds
 
@@ -123,19 +192,12 @@ adds a couple of hundred files — and those stay untracked, which is the point.
 `git add -f` the whole directory a second time**: add the one seed you mean by path, or the
 engine's search state goes in with it.
 
-They are seeds, **not** the regression record. `corpus/ifd_read/` carries the malformed-TIFF cases
-enumerated on issue #264 (contributed from rawshift's deleted in-repo TIFF parser); the other
-directories carry one small well-formed file each, written by this workspace's own encoders, so a
-decoder target starts from something that reaches its pixel path instead of spending its budget
-rediscovering a header. Real-camera corpora are deliberately not vendored: they run to hundreds of
+They are seeds, **not** the regression record. `corpus/ifd_read/` carries the thirteen
+malformed-TIFF cases enumerated on issue #264 (contributed from rawshift's deleted in-repo TIFF
+parser); each of the other five directories carries one or two small well-formed files, written by
+this workspace's own encoders, so a decoder target starts from something that reaches its pixel
+path instead of spending its budget rediscovering a header. `corpus/tiff_decode/` carries two —
+`rgb8-none.tif` and `rgb8-lzw.tif` — because an uncompressed strip and an LZW strip enter the
+decoder through different code, and seeding only one leaves the other to be rediscovered.
+Real-camera corpora are deliberately not vendored: they run to hundreds of
 megabytes and live in `justin13888/rawshift-test-fixtures` releases.
-
-`Drago` is held to monotonicity only where `Drago::is_monotonic` says it claims it (#439); every
-other operator promises it unconditionally, and all of them are driven through the other three
-laws.
-
-The `tonemap_curves` target found a defect **in a law** within a minute of first running: the
-monotonicity tolerance derived its scale from the sampled outputs, so a sample set drawn entirely
-from `Hable`'s near-zero cancellation region measured the noise against itself. Fixed in the same
-change, with the case promoted into a named test — which is the workflow this file prescribes,
-exercised once.

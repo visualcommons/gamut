@@ -170,6 +170,12 @@ jobs:
         # A crash found here is minimised and promoted into a NAMED DETERMINISTIC TEST in the
         # crate's own suite -- the corpus is a search aid, not the regression record -- so a
         # failure of this job is a signal to go and write that test, not to re-run until green.
+        #
+        # EXPECTED RED: `tiff_decode` and `dng_decode` fail today on filed, accepted defects
+        # (#563, #564). They are deliberately not narrowed to make these rows green; read the
+        # per-row status rather than this workflow's aggregate until both close. Restoring the
+        # aggregate's meaning is #593; this job's cadence (nine parallel ten-minute runners on
+        # every push to the default branch, growing with the matrix) is #594.
         run: mise run fuzz ${{ matrix.target }} -- -max_total_time=600
       - name: Upload any crash artifacts
         if: failure()
