@@ -10,10 +10,14 @@
 //!
 //! - [`supports`] — can the format crate **locate** ([`Direction::Read`]) or **write**
 //!   ([`Direction::Write`]) the carrier as a raw payload? This is the crate's own surface
-//!   (`metadata()` / `with_exif`-style setters), independent of any feature.
+//!   (`metadata()` / `with_exif`-style setters).
 //! - [`typed_wiring`] — does the format crate also expose the facade's typed models directly
 //!   (`blocks()` / `metadata()` accessors and a `with_metadata` encoder builder), behind that
-//!   crate's `metadata` Cargo feature?
+//!   crate's optional `metadata` Cargo feature where it has one?
+//!
+//! Both answer for the surface a crate **defines**, not for what a particular build compiled: a
+//! `const fn` sees neither the Cargo features another crate was built with nor the target. Each
+//! function's own docs name the cases where that gap is real.
 //!
 //! The table is a transcription of each crate's `STATUS.md` **as of this facade version**; every
 //! arm below cites the row that justifies it, and the cell changes in the pull request that changes
@@ -141,9 +145,19 @@ impl Direction {
 
 /// Whether the crate for `format` can locate (`Read`) or write (`Write`) `carrier` as a raw payload.
 ///
-/// This is the **raw** surface — the crate's own byte-level `metadata()` / `with_*` API, which every
-/// format crate ships unconditionally. Whether it also exposes the facade's typed models is
-/// [`typed_wiring`]. Each arm cites the `STATUS.md` row of the crate it describes.
+/// This is the **raw** surface — the crate's own byte-level `metadata()` / `with_*` API — as
+/// against the facade's typed models, which are [`typed_wiring`]. Each arm cites the `STATUS.md`
+/// row of the crate it describes.
+///
+/// # What a `const` table cannot see
+///
+/// It answers for the surface the crate **defines**, not for the surface a given build compiled:
+/// a `const fn` observes neither another crate's Cargo features nor the target. Most format crates
+/// ship their raw surface unconditionally, but not all — `gamut-jxl` gates its reader
+/// (`JxlDecoder::metadata`, `JxlDecoder::embedded_icc_profile`) on its `decode` feature and its
+/// encoder on `encode`, so under `default-features = false, features = ["encode"]` no reader
+/// exists while this table still answers `true` for [`Direction::Read`]. A caller who switches a
+/// format crate's own default features off owns that intersection.
 #[must_use]
 pub const fn supports(format: Format, carrier: Carrier, direction: Direction) -> bool {
     let read = matches!(direction, Direction::Read);
@@ -201,11 +215,19 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
 }
 
 /// Whether the crate for `format` exposes the facade's typed models directly — `blocks()` /
-/// `metadata()` accessors on its decoded metadata and a `with_metadata` builder on its encoder —
-/// behind that crate's `metadata` Cargo feature.
+/// `metadata()` accessors on its decoded metadata and a `with_metadata` builder on its encoder.
 ///
 /// `false` means the crate still hands its payloads over as raw bytes that a caller feeds to
 /// [`Metadata::from_blocks`](crate::Metadata::from_blocks) by hand.
+///
+/// # How a `true` cell is switched on
+///
+/// Three of the four wired crates put that surface behind an optional `metadata` Cargo feature of
+/// their own — `gamut-jpeg`, `gamut-jxl` and `gamut-heic`, each off by default, and each forwarded
+/// weakly by the `gamut` umbrella's `metadata` feature. `gamut-dng` has **no such feature**: it
+/// depends on this crate unconditionally, because its `DngMetadata` holds the facade's `Exif` by
+/// value, so `gamut-dng/metadata` is not a feature that can be asked for. As with [`supports`],
+/// the answer describes what the crate defines, not what a given build compiled.
 #[must_use]
 pub const fn typed_wiring(format: Format) -> bool {
     match format {

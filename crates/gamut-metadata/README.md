@@ -233,13 +233,23 @@ assert!(typed_wiring(Format::Jpeg));   // `blocks()` / `metadata()` / `with_meta
 assert!(!typed_wiring(Format::Png));   // raw bytes handed to `Metadata::from_blocks` by hand
 ```
 
-`supports` describes the crate's **raw** surface, which every format crate ships unconditionally;
-`typed_wiring` says whether it also exposes this crate's models directly, behind that crate's
-`metadata` Cargo feature. C2PA is read-only everywhere by construction — no embedder copies a
-manifest store forward (see above). The enums are `#[repr(u8)]` with append-only discriminants and
-carry `ALL` constants for enumeration, since `Format` and `Carrier` are `#[non_exhaustive]`. The
-audio/video half of the same question is outside an image-first workspace and stays with issue
-#216.
+`supports` describes the crate's **raw** surface — its byte-level `metadata()` / `with_*` API;
+`typed_wiring` says whether it also exposes this crate's models directly. C2PA is read-only
+everywhere by construction — no embedder copies a manifest store forward (see above).
+
+Both describe the surface a crate **defines**, not the surface a particular build compiled: a
+`const` table sees neither another crate's Cargo features nor the target. Two places where that
+gap is real, and both are in the table's own docs. `gamut-jxl` gates its reader on its `decode`
+feature and its encoder on `encode`, so a build with `default-features = false, features =
+["encode"]` has no reader while the table still says `r`. And typed wiring reaches three of the
+four wired crates through an optional `metadata` feature of their own (`gamut-jpeg`, `gamut-jxl`,
+`gamut-heic`, each off by default and each forwarded weakly by the `gamut` umbrella) — but
+**`gamut-dng` has no such feature**: it depends on this crate unconditionally, so `gamut-dng/metadata`
+is not something a manifest can ask for.
+
+The enums are `#[repr(u8)]` with append-only discriminants and carry `ALL` constants for
+enumeration, since `Format` and `Carrier` are `#[non_exhaustive]`. The audio/video half of the same
+question is outside an image-first workspace and stays with issue #216.
 
 ## Consumer integration
 
