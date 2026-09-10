@@ -8,7 +8,7 @@
 //! reader, is the judge.
 
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
-use gamut_tiff::{Ifd, PhotometricInterpretation, TiffDecoder, TiffEncoder, TiffMetadata, Value};
+use gamut_tiff::{Ifd, TiffDecoder, TiffEncoder, TiffMetadata, Value};
 
 mod common;
 
@@ -77,19 +77,31 @@ fn libtiff_decodes_a_gamut_image_carrying_a_c2pa_manifest_store() {
     }
 }
 
-/// The 2x2 RGB pixel block the hand-built fixture below carries.
-const REPEATED_TAG_PIXELS: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+/// The two 2x2 RGB pixel blocks the hand-built fixture below carries, one per candidate strip.
+///
+/// Distinct in every byte, so a reader that returns one of them says which entry it followed.
+const REPEATED_TAG_STRIPS: [[u8; 12]; 2] = [
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112],
+];
 
-/// A 2x2 8-bit RGB classic TIFF whose IFD 0 carries `PhotometricInterpretation` (262) **twice**:
-/// `RGB` (2) first, then `BlackIsZero` (1).
+/// A 2x2 8-bit RGB classic TIFF whose IFD 0 carries `StripOffsets` (273) **twice**, each entry
+/// pointing at a different one of the two strips in the file: the leading entry at
+/// `REPEATED_TAG_STRIPS[first]`, the repeat at `REPEATED_TAG_STRIPS[1 - first]`.
+///
+/// `StripOffsets` rather than a descriptive tag because the repeat has to reach the **pixels**:
+/// for uncompressed chunky data the scanline bytes a reader hands back are a function of this tag
+/// and of no other repeated tag, so both readers' answers move when either changes which entry it
+/// keeps. `first` is a parameter so both orderings are exercised, which is what separates
+/// "follows the first entry" from "follows the lower offset".
 ///
 /// Built byte by byte because no directory model can express it: `gamut_ifd::Ifd` collapses a
 /// repeated tag, which is the very normalisation this fixture exists to look underneath.
-fn tiff_repeating_photometric() -> Vec<u8> {
+fn tiff_repeating_strip_offsets(first: usize) -> Vec<u8> {
     // 11 entries; the directory occupies 2 + 11*12 + 4 = 138 bytes from offset 8.
     const ENTRIES: u16 = 11;
     let bits_per_sample = 8 + 2 + u32::from(ENTRIES) * 12 + 4;
-    let strip = bits_per_sample + 6;
+    let strips = [bits_per_sample + 6, bits_per_sample + 6 + 12];
 
     let mut out = Vec::new();
     out.extend_from_slice(b"II");
@@ -107,11 +119,11 @@ fn tiff_repeating_photometric() -> Vec<u8> {
     entry(258, 3, 3, bits_per_sample); // BitsPerSample, out of line
     entry(259, 3, 1, 1); // Compression = none
     entry(262, 3, 1, 2); // PhotometricInterpretation = RGB
-    entry(262, 3, 1, 1); // PhotometricInterpretation = BlackIsZero -- the repeat
-    entry(273, 4, 1, strip); // StripOffsets
+    entry(273, 4, 1, strips[first]); // StripOffsets
+    entry(273, 4, 1, strips[1 - first]); // StripOffsets = the other strip -- the repeat
     entry(277, 3, 1, 3); // SamplesPerPixel
     entry(278, 3, 1, 2); // RowsPerStrip
-    entry(279, 4, 1, REPEATED_TAG_PIXELS.len() as u32); // StripByteCounts
+    entry(279, 4, 1, REPEATED_TAG_STRIPS[0].len() as u32); // StripByteCounts
     entry(284, 3, 1, 1); // PlanarConfiguration = chunky
     out.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
     assert_eq!(
@@ -122,8 +134,9 @@ fn tiff_repeating_photometric() -> Vec<u8> {
     for _ in 0..3 {
         out.extend_from_slice(&8u16.to_le_bytes());
     }
-    assert_eq!(out.len() as u32, strip, "value layout drifted");
-    out.extend_from_slice(&REPEATED_TAG_PIXELS);
+    assert_eq!(out.len() as u32, strips[0], "value layout drifted");
+    out.extend_from_slice(&REPEATED_TAG_STRIPS[0]);
+    out.extend_from_slice(&REPEATED_TAG_STRIPS[1]);
     out
 }
 
@@ -135,21 +148,27 @@ fn libtiff_and_this_crate_resolve_a_repeated_tag_to_different_entries() {
     // after the **first** to be ignored (`tif_dirread.c`, "Mark duplicates of any tag to be
     // ignored"); this crate's directory model keeps the **last**. A round trip through gamut
     // cannot see that -- it writes and reads by the same rule -- so the oracle is what makes the
-    // disagreement observable at all.
-    let bytes = tiff_repeating_photometric();
+    // disagreement observable at all. Repeating `StripOffsets` is what puts the disagreement in
+    // the decoded pixels: either reader changing its rule changes the block it returns, so this
+    // fails if libtiff ever keeps the last occurrence just as surely as if this crate keeps the
+    // first.
+    for first in 0..REPEATED_TAG_STRIPS.len() {
+        let bytes = tiff_repeating_strip_offsets(first);
 
-    let decoded = libtiff_oracle::decode_tiff(&bytes).expect("libtiff decode");
-    assert_eq!(
-        (decoded.width, decoded.height, decoded.samples_per_pixel),
-        (2, 2, 3),
-        "libtiff must take the first entry, which says RGB"
-    );
-    assert_eq!(decoded.pixels, REPEATED_TAG_PIXELS);
+        let decoded = libtiff_oracle::decode_tiff(&bytes).expect("libtiff decode");
+        assert_eq!(
+            decoded.pixels,
+            REPEATED_TAG_STRIPS[first].as_slice(),
+            "libtiff must read the strip the FIRST entry points at (leading entry: {first})"
+        );
 
-    let info = TiffDecoder::new().info(&bytes).expect("gamut info");
-    assert_eq!(
-        info.photometric,
-        PhotometricInterpretation::BlackIsZero,
-        "this crate must take the last entry, which says BlackIsZero"
-    );
+        let image = TiffDecoder::new()
+            .decode_page(&bytes, 0)
+            .expect("gamut decode");
+        assert_eq!(
+            image.as_samples(),
+            REPEATED_TAG_STRIPS[1 - first].as_slice(),
+            "this crate must read the strip the LAST entry points at (leading entry: {first})"
+        );
+    }
 }
