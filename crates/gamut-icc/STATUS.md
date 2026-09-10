@@ -178,6 +178,11 @@ caller embedding the profile alongside SDR-referred content necessarily expects;
 diffuse-white-referred normalization instead is a colour-appearance decision with its own
 consequences, so it is tracked separately rather than changed silently here.
 
+**Rendering intent.** Every constructor writes `Perceptual` in the header's rendering-intent field
+(§7.2.15), `ProfileHeader::new`'s default. It is a surprising default on a colorimetrically exact
+matrix/TRC profile, so it is disclosed rather than left to be discovered; the field is a preference
+a CMM may override, and a caller wanting another sets `header.rendering_intent` before serializing.
+
 **Determinism.** A constructor is a pure function of its arguments: no creation timestamp, no
 profile ID, no other entropy, so the same call always serializes to the same bytes.
 

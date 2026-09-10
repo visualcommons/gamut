@@ -133,6 +133,25 @@
 //! reading as an option is tracked at
 //! <https://github.com/visualcommons/gamut/issues/586>.
 //!
+//! # Rendering intent
+//!
+//! Every profile built here carries `Perceptual` in the header's rendering-intent field (§7.2.15),
+//! which is [`ProfileHeader::new`]'s default. That is worth stating because it is surprising on a
+//! colorimetrically exact matrix/TRC profile, where `MediaRelativeColorimetric` is what most
+//! callers mean. The field is a *preference* a CMM may override — the profile describes one
+//! colour space either way, and the intent that actually renders is chosen at transform time — so
+//! it changes nothing about the colorimetry, and a caller who wants a different default sets
+//! `profile.header.rendering_intent` before serializing:
+//!
+//! ```
+//! use gamut_icc::{BuiltinProfile, IccProfile, RenderingIntent};
+//!
+//! let mut p = IccProfile::builtin(BuiltinProfile::Srgb).expect("a modelled space");
+//! assert_eq!(p.header.rendering_intent, RenderingIntent::Perceptual);
+//! p.header.rendering_intent = RenderingIntent::MediaRelativeColorimetric;
+//! assert!(p.validate().is_empty());
+//! ```
+//!
 //! # Determinism
 //!
 //! A constructor is a pure function of its arguments: the creation date is
