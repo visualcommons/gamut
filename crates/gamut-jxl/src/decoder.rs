@@ -1086,6 +1086,28 @@ mod box_tests {
     }
 
     #[test]
+    fn an_empty_box_is_walked_over_rather_than_rejected() {
+        // A box whose `size` is exactly the 8-byte header carries no payload and is legal §4.2
+        // framing: the walk must step over it and keep going, so the minimum-size rule is
+        // `box_len < 8`, not `<= 8`. It is also the smallest step the walk can take, which is what
+        // makes the loop's progress local to it.
+        let data = container(&[
+            bx(b"free", b""),
+            bx(b"Exif", &exif_payload(0, 0)),
+            bx(b"free", b""),
+            bx(b"xml ", b"<x/>"),
+        ]);
+        let (exif, xmp) = container_metadata_boxes(&data).unwrap();
+        assert_eq!(exif.as_deref(), Some(TIFF));
+        assert_eq!(xmp.as_deref(), Some(&b"<x/>"[..]));
+
+        // An empty box of a kind the walk *does* read is an empty payload, not an absent one.
+        let data = container(&[bx(b"xml ", b"")]);
+        let (_, xmp) = container_metadata_boxes(&data).unwrap();
+        assert_eq!(xmp.as_deref(), Some(&b""[..]));
+    }
+
+    #[test]
     fn a_container_without_metadata_boxes_yields_nothing() {
         let data = container(&[bx(b"ftyp", b"jxl "), bx(b"jxlc", &[0xFF, 0x0A])]);
         assert_eq!(container_metadata_boxes(&data).unwrap(), (None, None));
