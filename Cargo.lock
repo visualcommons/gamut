@@ -833,9 +833,12 @@ dependencies = [
 name = "gamut-png"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "divan",
  "gamut-codec-abi",
  "gamut-core",
  "gamut-deflate",
+ "gamut-png",
  "libpng-oracle",
  "miniz_oxide",
 ]

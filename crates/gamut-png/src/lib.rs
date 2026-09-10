@@ -6,8 +6,9 @@
 //! for output sizes on par with the best PNG encoders, trading encode time for size at higher
 //! levels. The decoder ([`PngDecoder`], issue #249) covers the full still-image spec — every
 //! colour type and bit depth, Adam7 interlacing, all filters — behind hostile-input limits, and
-//! surfaces ancillary metadata (EXIF/ICC/XMP/text) as raw payloads. Animation (APNG) is out of
-//! scope. Correctness in both directions is proven differentially against a vendored libpng.
+//! surfaces ancillary metadata (EXIF/ICC/XMP/text, and the C2PA manifest store) as raw payloads.
+//! Animation (APNG) is out of scope. Correctness in both directions is proven differentially
+//! against a vendored libpng.
 //!
 //! # Reading metadata without the pixels
 //!
@@ -16,6 +17,20 @@
 //! length, so no pixel data is read or inflated. It is the counterpart of `gamut_jpeg::metadata`
 //! and `gamut_webp::metadata`, and what a colour-space probe should call.
 //! [`PngDecoder::metadata`] is the same walk with a configurable inflation budget.
+//!
+//! # C2PA manifest store
+//!
+//! A C2PA manifest store travels in the `caBX` chunk (C2PA 2.4 §A.3.2: ancillary, private,
+//! **unsafe to copy**), raw and uncompressed. gamut locates, bounds, carries and reserves it and
+//! never judges it: the store is opaque bytes here, and validation is `c2pa-rs`'s. On read it is
+//! [`DecodedPng::c2pa`] / [`PngMetadata::c2pa`], the first `caBX` in the file, under the same
+//! metadata budget as every other ancillary payload. On write, [`PngEncoder::with_c2pa`] embeds a
+//! store computed for this file and [`PngEncoder::with_c2pa_reserved`] reserves its place, as the
+//! last chunk before `IDAT`; [`PngEncoder::encode_with_report`] and [`PngReport::c2pa`] name the
+//! chunk's **whole** span — length, type, payload and CRC — which is what a `c2pa.hash.data`
+//! assertion excludes (§18.5.4). [`fill_c2pa`] then writes the finished store into that span in
+//! place, rewriting only the payload and the chunk CRC, so the file the signer hashed is the file
+//! it signed.
 //!
 //! # Pluggable IDAT backends
 //!
@@ -55,6 +70,7 @@ mod color;
 mod crc32;
 mod decoded;
 mod decoder;
+mod deconstruct;
 mod encoder;
 mod filter;
 mod ihdr;
@@ -62,16 +78,27 @@ mod inflate;
 mod pack;
 mod palette;
 mod reduce;
+/// The encoder's pipeline stages, re-exported for the out-of-tree benchmark driver (issue #224).
+/// Not part of the stable API; see `docs/benchmarking.md`.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod stages;
 
 pub use abi::{AbiDeflater, AbiInflater, CODEC_ID_ZLIB, PIXEL_FORMAT_FILTERED_BYTES};
 pub use ancillary::{PhysicalUnit, SrgbIntent};
 pub use backend::{IdatDeflater, IdatInflater, IdatInfo};
+pub use chunk::{C2paSpan, fill_c2pa};
 pub use color::ColorType;
 pub use decoded::{
     Chromaticities, Cicp, DecodedPng, IccProfile, PngHeader, PngImage, PngMetadata, TextChunk,
+    TextChunkKind, XmpFraming,
 };
 pub use decoder::{PngDecoder, TransparencyKey, metadata};
-pub use encoder::PngEncoder;
+pub use deconstruct::{
+    ChunkStats, DEFAULT_MAX_CHUNKS, DeconstructLimits, FilterHistogram, FilterScan, PassStats,
+    PngReport, Segment, SegmentKind, SkippedFilterScan, deconstruct, deconstruct_with_limits,
+};
+pub use encoder::{MetadataNotice, PngEncodeReport, PngEncoder};
 pub use filter::{FilterStrategy, FilterType};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
 pub use gamut_deflate::Level;

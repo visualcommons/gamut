@@ -41,6 +41,33 @@ impl Ihdr {
     }
 }
 
+/// The decoded image's byte cost: `width × height × channels × (2 if the depth is 16 else 1)`.
+///
+/// **The single definition** of the quantity PNG budgets. [`crate::PngDecoder`] bounds it before
+/// allocating anything, and [`crate::deconstruct`] gates its optional IDAT inflation on the same
+/// number, so "a report never allocates more than a decode would" holds structurally instead of
+/// being asserted by two constants over two different quantities.
+///
+/// It counts the **unpacked** buffer, which is what a decode produces: one byte per sample at
+/// depths 1/2/4/8 (sub-byte samples are unpacked, §7.2), two at depth 16. The *filtered* stream is
+/// a different, larger quantity — it adds one filter byte per scanline (§9.1) — so the two must
+/// not be interchanged.
+///
+/// `None` when the product overflows `usize`; the caller decides whether that is an error or a
+/// refusal.
+pub(crate) fn native_bytes(
+    width: u32,
+    height: u32,
+    channels: usize,
+    bit_depth: u8,
+) -> Option<usize> {
+    let bytes_per_sample = if bit_depth == 16 { 2 } else { 1 };
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(channels)?
+        .checked_mul(bytes_per_sample)
+}
+
 /// Parses and validates a 13-byte IHDR payload (PNG spec §11.2.1).
 ///
 /// # Errors
@@ -147,6 +174,21 @@ mod tests {
         assert_eq!(parsed.color, ColorType::GrayscaleAlpha);
         assert!(!parsed.interlaced);
         assert_eq!(parsed.bits_per_pixel(), 32);
+    }
+
+    #[test]
+    fn native_bytes_counts_unpacked_samples() {
+        // 4096x4096 RGBA8 is exactly the decoder's 64 MiB default budget — the image the two
+        // budgets used to disagree about.
+        assert_eq!(native_bytes(4096, 4096, 4, 8), Some(64 << 20));
+        // Depth 16 is the only depth that costs two bytes per sample...
+        assert_eq!(native_bytes(4096, 4096, 4, 16), Some(128 << 20));
+        // ...and every sub-byte depth costs one, because a decode unpacks it (§7.2). A packed
+        // count would be eight times smaller here, and the row padding would round it up again.
+        assert_eq!(native_bytes(9, 4, 1, 1), Some(36));
+        assert_eq!(native_bytes(9, 4, 1, 8), Some(36));
+        // Overflow is refused rather than wrapped: 4 channels past the largest square.
+        assert_eq!(native_bytes(u32::MAX, u32::MAX, 4, 8), None);
     }
 
     #[test]
