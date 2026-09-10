@@ -32,6 +32,27 @@
 //! together, is now named in the report instead of vanishing, and rejected in
 //! [`strict`](ExifReader::strict) mode as the malformed pair it is.
 //!
+//! Writing has one extra door. Every tag CIPA DC-008 itself defines carries the field type and
+//! component count that specification mandates for it ([`ExifTag::field_types`],
+//! [`ExifTag::component_count`]), and [`set_tag_checked`] refuses a value that contradicts them.
+//! A handful of catalogued tags come from other specifications and are carried only for
+//! compatibility; DC-008 mandates nothing for them, their `field_types` is empty, and
+//! [`set_tag_checked`] claims no constraint — see [`tag`] for which they are.
+//!
+//! Everything else on the write path is lenient on purpose, because a caller reproducing a
+//! non-conformant source file must be able to: [`Exif::set_tag`], [`Exif::set`],
+//! [`Exif::exif_ifd_mut`], [`Exif::gps_ifd_mut`], [`Exif::interop_ifd_mut`] and
+//! [`Exif::set_gps_ifd`] all write whatever they are given, as do their `image_mut` /
+//! `set_exif_ifd` / `set_interop_ifd` siblings. So does the entire read path.
+//!
+//! The optional `describe` feature (default **off**) adds the `describe` module: what the
+//! enumerated tags' values *mean*, in the specification's own wording, plus `describe::flash` for
+//! the `Flash` bitfield. It is a few kilobytes of static strings a consumer that only writes or
+//! round-trips metadata never reads, which is why it is opt-in. (Those names are not linked here:
+//! the module does not exist when the feature is off.) Only a crate that depends on `gamut-exif`
+//! directly can turn it on: neither the `gamut-metadata` facade nor the `gamut` umbrella forwards
+//! it yet.
+//!
 //! ```
 //! use gamut_exif::{ByteOrder, Exif, ExifTag, Value};
 //!
@@ -47,6 +68,8 @@
 //! ```
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "describe")]
+pub mod describe;
 pub mod error;
 pub mod exif;
 pub mod gps;
@@ -61,16 +84,18 @@ pub mod writer;
 
 // EXIF is a TIFF profile: reuse the container's value and directory types directly rather than
 // wrapping them in a parallel model.
+#[cfg(feature = "describe")]
+pub use describe::{FlashDescription, describe, described_values, flash};
 pub use error::{ExifError, Result};
 pub use exif::Exif;
-pub use gamut_ifd::{ByteOrder, Ifd, Value};
+pub use gamut_ifd::{ByteOrder, FieldType, Ifd, Value};
 #[cfg(feature = "geocoordinates")]
 pub use gps::GpsConversionError;
 pub use gps::{GpsAltitude, GpsCoordinate, GpsInfo, GpsReference};
 pub use maker_note::{MakerNote, MakerNoteVendor};
 pub use reader::ExifReader;
 pub use report::{DropReason, Dropped, DroppedRegion, ReadReport};
-pub use tag::{ExifTag, IfdKind};
+pub use tag::{ExifTag, IfdKind, TagCount};
 pub use thumbnail::Thumbnail;
 pub use value::{Rational, SRational, as_text};
-pub use writer::ExifWriter;
+pub use writer::{ExifWriter, TagConstraintError, check_tag, set_tag_checked};
