@@ -103,6 +103,45 @@ Dependency edges (a crate depends on those to its right):
 - Correctness: implement the specification claimed; test thoroughly against the crate's
   oracle. Mutation testing should pass with only non-redundant, high-value tests;
   exclusions need strictly strong justification.
+- Mutation survivors: **remove the mutant before you exclude it.** A survivor is first a
+  question about the code, not about the suite — rewrite so the operator has no equivalent twin
+  (disjoint bit lanes `a << n | b` become arithmetic; a `bool` is decided where the question is
+  asked; a guard the constructor already makes is deleted; two match arms returning the same
+  thing collapse into one), *then* write the test that kills what is left. A mutant that hangs
+  the suite is a survivor too — it can be scored only as a TIMEOUT — and a loop bounded by the
+  data it walks instead of by its own arithmetic does not produce one. An exclusion is the last
+  resort and must argue that **no** input can distinguish the mutant, or that the only thing it
+  moves is a choice the format leaves free. Exclusions live only in `.cargo/mutants.toml`, one
+  regex per *claim* — several generated mutants only when they are one statement or one site's
+  operator class and a single argument covers them all, and the comment says so — anchored so it
+  cannot also cover a killable sibling (`file:line:column` for an operator mutation, the function
+  signature for a whole-body one, and that file's header states which trades what), never as a
+  `#[mutants::skip]` attribute in source: one reviewable list beats a scatter, and a glob may
+  exclude a path but never a live code path. Removing a mutant structurally is not free either:
+  the rewrite takes the site's killable siblings with it, so the code is afterwards covered by
+  fewer mutants — say so where the rewrite lands, and never let a shrinking survey read as a
+  strengthening one. Before paying to kill a survivor, ask whether the mutated expression is
+  observable at all — a capacity hint or a discarded return value is not — and if you buy the
+  signal anyway, record what it cost.
+- **Never narrow a contract to make a mutant assertable.** The test is whether any conformant
+  input can tell the old bound from the new. If none can — the spec's own clause puts every
+  conformant value inside the tighter bound — then the loose bound was arbitrary and tightening
+  it is a correction, which cites the clause that permits it. If one can, the bound is the
+  deliverable and the gate is only the instrument: reach the boundary with a fixture or an
+  internal seam, or take the exclusion and write the argument down. A limit lowered to bring a
+  boundary within the suite's reach is how an encoder ends up emitting a file its own reader
+  refuses. Conformance is the floor of that test, not the whole of it: a **reader**'s loose bound
+  is exactly what carries the non-conformant files the world actually holds, so narrowing one
+  additionally requires naming what it stops accepting, in the same place as the clause — the
+  trade is then visible rather than implied.
+- The gate is blind to everything it cannot mutate: a match arm that is *missing*, a literal or
+  `const` **inside an expression or a guard operand** (a body that is just a literal is replaced
+  wholesale, so that one is reachable), and a single alternative of an or-pattern (only whole
+  arms are deleted, so assert each alternative separately). Derive that vocabulary rather than
+  trusting a written list of it — `docs/mutation-testing.md` carries the one-line command and
+  what it returns today. Completeness against the spec is still the spec's job. Run surveys only
+  through the memory-capped `mise run mutants`; `docs/mutation-testing.md` has the rest,
+  including that exit code 3 is a timeout, not a clean run.
 - Test scope: **a test names one thing and fails for one reason.** Minimise its *reach* — the
   modules a defect in which can fail it — and name it for that reach. Placement is mechanical, not
   taste: if the assertion reads a non-`pub` item it goes inline in `#[cfg(test)] mod tests` beside
