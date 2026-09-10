@@ -210,16 +210,22 @@ impl TiffDecoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or for a pointer
-    /// **inside IFD 0's subtree** that does not resolve into a tree: an out-of-bounds or
-    /// unparseable target, two pointers naming one directory, or nesting below the
-    /// `ExifIFD` → `InteroperabilityIFD` pair — two levels under IFD 0, the deepest tree those
-    /// two tags legitimately reach (EXIF 2.3 §4.6.3), and the same bound
+    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or for a **followed**
+    /// pointer that does not resolve into a tree: an out-of-bounds or unparseable target, two
+    /// pointers naming one directory, or nesting below the `ExifIFD` → `InteroperabilityIFD` pair
+    /// — two levels under IFD 0, the deepest tree those two tags legitimately reach (EXIF 2.3
+    /// §4.6.3), and the same bound
     /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) writes within.
-    /// Only `ExifIFD` (34665) and `InteroperabilityIFD` (40965) are followed, and only from
-    /// IFD 0 downwards — a pointer on any later page of a multi-page document is never resolved,
-    /// so however broken it is it cannot fail this call, not even by naming a directory IFD 0's
-    /// own subtree also names.
+    ///
+    /// Which pointers are followed depends on the **level**, so which ones can fail this call does
+    /// too. At **IFD 0** only `ExifIFD` (34665) is followed: a `SubIFDs` (330), `GPSInfo` (34853)
+    /// or `InteroperabilityIFD` (40965) field on the page itself is left as the integer it was
+    /// read as, so however broken it is it cannot fail this call. **Inside the returned Exif
+    /// directory all four** are followed, because that directory is handed back and an unresolved
+    /// pointer in it would be a raw offset into the source file — so there, unlike at IFD 0, an
+    /// unreadable target under any of the four *does* fail the call. And only IFD 0's subtree is
+    /// walked at all: a pointer on any later page of a multi-page document is never resolved, not
+    /// even one naming a directory IFD 0's own subtree also names.
     ///
     /// **This can fail on a file [`decode_image`](DecodeImage::decode_image) decodes happily**,
     /// and that is deliberate. Pixel decoding never follows a metadata pointer, so a broken
