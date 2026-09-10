@@ -60,7 +60,10 @@
 //! Reading accepts the shapes seen in the wild: a bare structure written where the standard puts an
 //! array of structures reads as that array's single element, and a language alternative written as
 //! plain text reads as its text. Writing always emits the standard form — the array, and the
-//! language alternative — so a read-modify-write normalises rather than propagates.
+//! language alternative — so a read-modify-write normalises rather than propagates. One value is
+//! dropped rather than normalised: a non-finite coordinate (`NaN`, `±inf`) is not a value of the
+//! XMP `Real` type, so it is skipped on emit instead of being written as text nothing can read
+//! back as a number.
 
 use gamut_xmp::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
@@ -166,9 +169,12 @@ fn put_list(out: &mut Vec<XmpProperty>, ns: &str, name: &str, ordered: bool, val
     ));
 }
 
-/// Appends `ns:name` as an XMP `Real`, unless the value is absent.
+/// Appends `ns:name` as an XMP `Real`, unless the value is absent or non-finite.
+///
+/// `NaN` and the infinities are not values of the XMP `Real` type, so they are skipped rather than
+/// written as text (see the [module docs](self)).
 fn put_number(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<f64>) {
-    if let Some(value) = value {
+    if let Some(value) = value.filter(|v| v.is_finite()) {
         out.push(XmpProperty::new(
             ns,
             name,
@@ -978,13 +984,16 @@ impl PhotoMetadata {
         CreatorContactInfo::from_xmp(&self.xmp.get(ns::IPTC_CORE, "CreatorContactInfo")?.value)
     }
 
-    /// Sets the creator's contact details (`Iptc4xmpCore:CreatorContactInfo`).
+    /// Sets the creator's contact details (`Iptc4xmpCore:CreatorContactInfo`); a block with no
+    /// fields at all removes the property, as an empty slice does for the array accessors.
     pub fn set_creator_contact_info(&mut self, info: &CreatorContactInfo) {
-        self.xmp.set(XmpProperty::new(
-            ns::IPTC_CORE,
-            "CreatorContactInfo",
-            info.to_xmp(),
-        ));
+        let value = info.to_xmp();
+        if structure(&value).is_some_and(<[XmpProperty]>::is_empty) {
+            self.xmp.remove(ns::IPTC_CORE, "CreatorContactInfo");
+            return;
+        }
+        self.xmp
+            .set(XmpProperty::new(ns::IPTC_CORE, "CreatorContactInfo", value));
     }
 
     /// The image regions (`Iptc4xmpExt:ImageRegion`), in the order the graph holds them.
@@ -1427,6 +1436,37 @@ mod tests {
             ImageRegion::from_xmp(&value).map(|r| r.to_xmp()),
             Some(value.clone())
         );
+    }
+
+    #[test]
+    fn a_non_finite_coordinate_is_not_written() {
+        // NaN and the infinities are not values of the XMP Real type: writing one would put a
+        // value in the graph that no reader can take back as a number.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let value = RegionBoundaryPoint {
+                x: Some(bad),
+                y: Some(1.5),
+            }
+            .to_xmp();
+            let fields = structure(&value).unwrap();
+            assert!(
+                field(fields, ns::IPTC_EXT, "rbX").is_none(),
+                "{bad} was written to the graph"
+            );
+            // The finite sibling is still written, so the skip is per value, not per structure.
+            assert_eq!(number(fields, ns::IPTC_EXT, "rbY"), Some(1.5));
+        }
+    }
+
+    #[test]
+    fn an_empty_contact_block_removes_the_property() {
+        // All four setters agree: nothing to say removes the property, rather than leaving behind
+        // an empty structure a reader would report as "present but blank".
+        let mut pm = PhotoMetadata::new();
+        pm.set_creator_contact_info(&contact());
+        pm.set_creator_contact_info(&CreatorContactInfo::default());
+        assert_eq!(pm.creator_contact_info(), None);
+        assert!(pm.xmp.properties.is_empty());
     }
 
     #[test]
