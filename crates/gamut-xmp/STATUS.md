@@ -64,22 +64,33 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   **should tolerate** an x:xmpmeta element in any input" — permission and tolerance, never a
   requirement; the vendored Part 3's "External storage of metadata" bullets (a complete, well-formed
   XML document with the leading XML declaration, the `.xmp` extension, `application/rdf+xml`,
-  written "as though it were embedded and then had the XMP packets extracted") never mention the
-  element, and the string `xmpmeta` occurs in Part 3 exactly once, inside an SVG example. So `read`
-  rejects a sidecar the specification permits. What §7.3.3 supplies is the element's *purpose* —
-  identifying XMP inside general XML text — and a standalone `.xmp` file is that text, so gamut takes
-  the element as the marker rather than reading any RDF document beside an image as XMP; exiv2 draws
-  its own, different line (`isXmpType` keys on `<?xpacket` **or** `<x:xmpmeta`).
-  `XmpSidecar::write` emits the XML
-  declaration Part 3 asks for, then a read-only (`end="r"`), unpadded packet wrapping the canonical
-  body in `x:xmpmeta` — byte-stable per graph. No filesystem API and no enforced file name: the
-  `.xmp`-beside-the-image convention is documented for the caller. The missing wrapper has its own
-  error, `XmpError::MissingXmpMeta`, naming the element found: the wrapper-less form is *permitted*
-  by §7.3.3 and is what `XmpWriter::wrap_xmpmeta(false)` emits, so reporting it as a prohibited
+  written "as though it were embedded and then had the XMP packets extracted and catenated by a
+  postprocessor") never mention the element, and the string `xmpmeta` occurs in Part 3 exactly
+  once, inside an SVG example. So `read` rejects a sidecar the specification permits. What §7.3.3
+  supplies is the element's *purpose* — identifying XMP inside general XML text — and a standalone
+  `.xmp` file is that text, so gamut takes the element as the marker rather than reading any RDF
+  document beside an image as XMP; exiv2 draws its own, different line (`isXmpType` keys on
+  `<?xpacket` **or** `<x:xmpmeta`). `XmpSidecar::write` emits the XML declaration Part 3 asks for,
+  then a read-only (`end="r"`), unpadded packet wrapping the canonical body in `x:xmpmeta` —
+  byte-stable per graph. No filesystem API and no enforced file name: the `.xmp`-beside-the-image
+  convention is documented for the caller. The missing wrapper has its own error,
+  `XmpError::MissingXmpMeta`, naming the element found: the wrapper-less form is *permitted* by
+  §7.3.3 and is what `XmpWriter::wrap_xmpmeta(false)` emits, so reporting it as a prohibited
   construct would assert a prohibition the spec does not make. exiv2 is more permissive still — its
   sniffer (`isXmpType`) accepts a `.xmp` file starting with `<?xpacket` **or** `<x:xmpmeta` — so a
   file exiv2 reads as a sidecar and gamut rejects is expected; the caller reads those bytes with
   `XmpMeta::from_packet`.
+- **A catenated sidecar is truncated to its first packet (issue #562).** Part 3's bullet asks that
+  external metadata be written "as though it were embedded and then had the XMP packets extracted
+  and catenated by a postprocessor", so a conforming producer may emit a `.xmp` file holding
+  several `<?xpacket?>` packets end to end. `XmpSidecar::read` reads the first and silently
+  discards the rest — `XmpPacket::scan` ends the body at the *next* `<?xpacket` instruction, which
+  in a catenated file is the first packet's own trailer. Two `XmpSidecar::write` outputs
+  concatenated read back as the properties of the first alone, with no error; Adobe XMPCore rejects
+  those same bytes. `XmpSidecar::write` emits exactly one packet, so gamut never produces the
+  shape. The behaviour predates issue #421 and is documented rather than changed: rejecting,
+  merging every packet, or keeping the truncation are three different products (a merge needs a
+  conflict rule Part 3 does not supply), and #562 holds that decision.
 
 ## Phases
 

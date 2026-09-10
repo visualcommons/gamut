@@ -4,12 +4,19 @@
 //! A sidecar is the standard interchange for RAW workflows: a camera's proprietary raw file is not
 //! extensible, so the metadata travels in `<image>.xmp` next to it. Part 3 asks that such a file be
 //! "a complete, well-formed XML document, including the leading XML declaration", written "as though
-//! it were embedded and then had the XMP packets extracted", with the `.xmp` extension and the same
-//! base name as the image; applications find it by looking in the image's directory.
+//! it were embedded and then had the XMP packets extracted and catenated by a postprocessor", with
+//! the `.xmp` extension and the same base name as the image; applications find it by looking in the
+//! image's directory.
 //!
 //! [`XmpSidecar::read`] and [`XmpSidecar::write`] are the bytes-in / bytes-out pair. This crate has
 //! no filesystem API and the naming convention is documented, not enforced: the caller owns the
 //! path, exactly as the format crates own the embedded packet's location in their containers.
+//!
+//! **One packet, not a catenation.** That "catenated by a postprocessor" phrase describes a file
+//! holding *several* `<?xpacket?>` packets end to end — a shape [`XmpSidecar::write`] never
+//! produces (it emits exactly one) and [`XmpSidecar::read`] does not read: it takes the first
+//! packet and silently discards the rest. See [`XmpSidecar::read`] for what that costs the caller,
+//! and issue [#562](https://github.com/visualcommons/gamut/issues/562) for the open decision.
 
 use quick_xml::NsReader;
 use quick_xml::events::Event;
@@ -61,6 +68,20 @@ impl XmpSidecar {
     /// [`XmpMeta::from_packet`] accepts — **provided** the document element is `x:xmpmeta`
     /// (namespace `adobe:ns:meta/`, Part 1 §7.3.3). Trailing padding inside the packet wrapper is
     /// ignored.
+    ///
+    /// # A catenated file loses everything after its first packet
+    ///
+    /// Part 3 asks that external metadata be written "as though it were embedded and then had the
+    /// XMP packets extracted **and catenated by a postprocessor**", so a conforming producer may
+    /// hand over a `.xmp` file holding several `<?xpacket?>` packets end to end. This reads the
+    /// first one and **silently discards the rest**: no error, and no way to tell the result from
+    /// a genuine single-packet file. Two [`XmpSidecar::write`] outputs concatenated read back as
+    /// the properties of the first alone. Adobe XMPCore rejects those same bytes.
+    ///
+    /// Read such a file only if you know it holds one packet, or split it on `<?xpacket` yourself
+    /// and read each part. Which of rejecting, merging or keeping this is right is open as issue
+    /// [#562](https://github.com/visualcommons/gamut/issues/562); until it is settled the
+    /// behaviour is documented rather than changed, so it will not shift under a patch release.
     ///
     /// # Errors
     ///

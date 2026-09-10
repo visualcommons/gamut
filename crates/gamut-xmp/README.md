@@ -67,11 +67,16 @@ the element's purpose — identifying XMP inside general XML text, which is what
 — so gamut takes it as the marker. (exiv2 draws its own line, accepting a file starting with
 `<?xpacket` *or* `<x:xmpmeta`. A caller who wants that latitude uses `XmpMeta::from_packet`, and the
 rejection is its own `XmpError::MissingXmpMeta` rather than a claim that the wrapper-less form is
-prohibited.) `write` emits the XML declaration
-Part 3 asks for, then a read-only, unpadded packet in canonical form, so two sidecars of the same
-graph are byte-identical. The crate has no filesystem API; the naming convention — `photo.xmp`
-beside `photo.dng`, looked up in the image's directory — is documented, not enforced, and the caller
-owns the path.
+prohibited.) `write` emits the XML declaration Part 3 asks for, then a read-only, unpadded packet in
+canonical form, so two sidecars of the same graph are byte-identical. The crate has no filesystem
+API; the naming convention — `photo.xmp` beside `photo.dng`, looked up in the image's directory — is
+documented, not enforced, and the caller owns the path. One packet, not a catenation: Part 3's
+bullet asks for the file to be written "as though it were embedded and then had the XMP packets
+extracted **and catenated by a postprocessor**", so a conforming producer may emit several
+`<?xpacket?>` packets end to end. `write` emits exactly one; `read` takes the first and silently
+discards the rest, so two `write` outputs concatenated read back as the first alone, with no error
+(Adobe XMPCore rejects those bytes). Whether to reject, merge or keep that is open as issue
+[#562](https://github.com/visualcommons/gamut/issues/562).
 
 ## Scope
 
