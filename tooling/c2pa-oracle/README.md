@@ -227,8 +227,9 @@ print(len(seen) - 1)
 PY
 ```
 
-The version has to be carried through the walk: 21 package names occur at two versions in this
-lockfile, so a name-keyed closure is not the same set. The whole file holds 326 entries
+The version has to be carried through the walk: 21 package names occur at more than one version
+here (`syn` and `getrandom` at three), so a name-keyed walk counts names rather than packages and
+lands on 285. The whole file holds 326 entries
 (`grep -c '^name = ' tooling/c2pa-oracle/Cargo.lock`) — those 307, `c2pa` itself, this crate, and 17
 reachable only through its four `gamut-*` dev-dependencies, which the root workspace lockfile
 resolves. Fewer are ever compiled: 240 with default features off
