@@ -84,9 +84,15 @@ const MIN_SLOT_LEN: usize = 8;
 /// than returning. Refusing above this ceiling turns that panic into an error, so no reservation
 /// length can panic the library.
 ///
-/// Above it lies only the allocator's own limit — a length within this ceiling but beyond the
-/// machine's memory aborts, as any oversized allocation in Rust does, which no fallible API here
-/// can intercept.
+/// This is a panic guard, not the encoder's effective limit. Long before it, the container writer
+/// refuses the box: a top-level box carries a 32-bit size field, so
+/// [`gamut_isobmff::write`] rejects one at or beyond 4 GiB with
+/// [`Error::Unsupported`](gamut_core::Error::Unsupported). Measured on this framing, the largest
+/// `len` that clears that check is `4_294_967_250` and `4_294_967_251` is refused, and a `len`
+/// just under it aborts in the allocator while the writer copies the payload into the output
+/// buffer. So above the writer's bound lies the writer's error, and below it — for a length the
+/// machine has no memory for — lies the allocator's own limit, which no fallible API here can
+/// intercept.
 const MAX_PAYLOAD_LEN: usize = isize::MAX as usize;
 
 /// The `box_purpose` of a C2PA `uuid` box that carries a manifest store (C2PA 2.4 §A.5.3).
@@ -252,15 +258,20 @@ impl<'a> AvifContainer<'a> {
     /// too short to hold the framing is skipped silently: this is a lens over bytes that happen to
     /// be present, so a malformed or foreign box yields nothing rather than an error.
     ///
-    /// # The read side is permissive where the write side is strict
+    /// # The read side demands nothing of a slot's length
     ///
     /// [`AvifEncoder::with_c2pa_reserved`](crate::AvifEncoder::with_c2pa_reserved) **refuses** to
-    /// write a slot shorter than a JUMBF box header, because a slot that cannot hold a store is a
-    /// caller's mistake made before any bytes exist. This locator makes no such demand: a
-    /// well-framed box with a zero-length or otherwise degenerate slot is reported with its true
-    /// (possibly empty) range, because the bytes are *there* and some other writer put them there.
-    /// The asymmetry is deliberate — strict in what it writes, honest about what it reads — so a
-    /// file this crate would decline to produce is still one it will faithfully describe.
+    /// reserve a slot shorter than a JUMBF box header, because a *reservation* is a bare integer
+    /// and a slot that cannot hold a store is a caller's mistake made before any bytes exist. This
+    /// locator makes no such demand: a well-framed box with a zero-length or otherwise degenerate
+    /// slot is reported with its true (possibly empty) range, because the bytes are *there* and
+    /// somebody put them there.
+    ///
+    /// That is not a "strict writer, permissive reader" asymmetry, and it would be wrong to
+    /// describe it as one: the minimum bounds the reservation path alone.
+    /// [`with_c2pa`](crate::AvifEncoder::with_c2pa) carries a caller-supplied slice verbatim, so
+    /// this crate does write files whose slot is shorter than a JUMBF box header, and this locator
+    /// reports them. Whether that builder should apply the minimum too is issue #577.
     pub fn c2pa_slots(&self) -> impl Iterator<Item = C2paSlot<'a>> + '_ {
         slots(self.segments())
     }
@@ -479,6 +490,20 @@ mod tests {
             );
         }
         assert!(content_provenance_reserved(C2paBoxPurpose::Manifest, MIN_SLOT_LEN).is_ok());
+
+        // The sweep above is written in terms of `MIN_SLOT_LEN`, so it holds for whatever value
+        // the constant carries — including one the refusal *message* contradicts, since the
+        // message spells the bound as a literal. These two lengths are literals on both sides:
+        // 7 must be refused and 8 accepted, so moving the constant either way fails here rather
+        // than shipping a file the message misdescribes. (The mutation gate cannot see this: it
+        // does not mutate constants.)
+        let err = content_provenance_reserved(C2paBoxPurpose::Manifest, 7)
+            .expect_err("7 bytes is short of a JUMBF box header");
+        assert!(format!("{err}").contains("at least 8 bytes"), "{err}");
+        assert!(
+            content_provenance_reserved(C2paBoxPurpose::Manifest, 8).is_ok(),
+            "8 bytes is a JUMBF box header exactly, the length the message names"
+        );
     }
 
     #[test]
