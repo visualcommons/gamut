@@ -45,6 +45,12 @@ item carrying an `hvcC`.
 assertion about the file, and overriding detection is what `--format` is for. `gamut inspect
 --format heic some.avif` therefore prints a full HEIC C2PA section at exit `0`.
 
+The report's opening label says which of the two happened. A detected container is
+`<path>: HEIF/HEIC`; a forced one is `<path>: HEIF/HEIC (asserted by --format, not detected)`. On
+the forced path the command tested nothing about the container, so the plain label would be this
+command vouching for a file it never examined — echoing the caller's own assertion back as a
+finding.
+
 - **TIFF / DNG** — `DeconstructReport::is_fully_accounted()`: every byte classified into exactly
   one typed segment, **and** no unknown field type, no unknown tag, no anomaly. Identical in both
   crates.
@@ -72,6 +78,7 @@ file:
 | a store is present | `0` | the store(s), each with its purpose, size and range |
 | a C2PA box is present but no store could be read from it | `0` | that the box is present, its range, and why no store was read — explicitly *not* an absence |
 | no C2PA box is present | `0` | that none was found in the top-level boxes of the primary stream |
+| a top-level `uuid` box carries some other extended type | `0` | a count of them, beside whichever of the three rows above applies |
 | the container is not the HEVC still image this arm reads (e.g. an AVIF) | `1` | nothing; `unsupported container brand …` on stderr |
 | the container cannot be parsed | `1` | nothing; `error: …` on stderr |
 
@@ -87,11 +94,39 @@ walk has a claim to make about the file; this one has none.
 this revision does not know (§A.5.3), it is truncated, or no valid JUMBF `LBox` bounds a store
 where its purpose puts one. Such a box gets its own line naming the reason, precisely so a reader
 cannot infer "no provenance" from bytes gamut merely could not read. A caller gating on stdout must
-treat the `unread C2PA box` line as *unknown*, never as absence, and reach for a validator. One
-case is deliberately reported as absence: a top-level `uuid` box whose extended type is **not** the
-C2PA one, even by a single byte. §A.5.1.1 makes the extended type the whole test, and an ordinary
-file carries vendor `uuid` boxes — calling a near miss damaged C2PA framing would claim provenance
-where there is none.
+treat the `unread C2PA box` line as *unknown*, never as absence, and reach for a validator.
+
+**A near miss on the extended type is reported as a count, and as nothing more.** §A.5.1.1 makes
+the sixteen-byte extended type the box's whole identity, and the specification has no notion of an
+approximate one, so a top-level `uuid` box that is a single byte off is **not** damaged C2PA
+framing and never earns an `unread C2PA box` line. But it is not passed over either: the report
+carries `other top-level uuid boxes: N (extended type is not the C2PA one; a uuid box is not
+provenance framing)`. Without it, a file whose only `uuid` box is one byte off — what a signed file
+corrupted in transit looks like — printed byte-for-byte what a file carrying no such box prints,
+and the reader most in need of looking closer was the one told the least. The line states a fact
+about bytes and claims nothing: an ordinary file carries vendor `uuid` boxes.
+
+**A box's position is reported when it sits past the file's media data**, as `; its box begins
+after the first mdat box` on that box's own line. §A.5.3 places a manifest-store box "before the
+first 'mdat' box in the file and before any 'moov' box in the file", and an appended box is
+precisely the adversarial shape — but the clause is positional, not a verdict: §A.5.3 itself
+requires the `update` box of a mid-update file to be the last box of the file. (`moov` is the other
+boundary §A.5.3 names and is unreachable here: `gamut-heic` refuses a file carrying a top-level
+movie box, image sequences being out of the workspace's scope.)
+
+**The per-box lines are truncated at twenty**, like every other list this command prints, with the
+same `… and N more` tail. §A.5.3 permits any number of these boxes, so their count is chosen by the
+input and needs no malformity to grow: a legal 2.7 MB file carrying fifty thousand of them printed
+fifty thousand lines and put the headline — non-validation disclaimer and all — at line 2 of them.
+The cap is this command's presentation decision; `gamut-heic` keeps returning every entry, and
+`C2paSummary::detail_line_count()` is the true total the tail is computed from. The headline and
+the `uuid`-box count are never truncated: there are at most two such lines whatever the file holds.
+
+**A machine consumer has no surface here yet.** Every distinction above is carried by stdout prose
+and none by the exit code, which is deliberate — two exit codes are the command's contract, and a
+third would not fit the outcomes anyway. Structured output is the answer and is tracked in
+issue #596; until it lands, a caller matching on wording is matching on wording this document is
+free to improve.
 
 Nothing in that report is a verdict. gamut locates a manifest store and never validates one — no
 signature, no hash binding, no trust list (C2PA 2.4 §15.12; `references/c2pa/README.md`) — and the
