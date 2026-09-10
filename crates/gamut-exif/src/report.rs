@@ -63,7 +63,9 @@ pub enum DroppedRegion {
     /// absent thumbnail. That rule is structural and unconditional here — see
     /// [`ThumbnailLengthMissing`](DropReason::ThumbnailLengthMissing) — and is *not* derived from
     /// the pair's support level, which Exif 3.0 §4.6.9.2 Table 21 states only per `Compression`
-    /// column, a tag this crate does not read.
+    /// column, a tag this *reader* does not consult (a parsed
+    /// [`Thumbnail`](crate::Thumbnail) does expose it, through
+    /// [`compression`](crate::Thumbnail::compression)).
     ThumbnailJpeg = 3,
     /// A top-level directory past the 1st IFD.
     ///
@@ -141,8 +143,15 @@ pub enum DropReason {
     /// that the read has no length — not that a tag is missing where the spec requires one. Exif
     /// 3.0 §4.6.9.2 Table 21 gives the pair's support level *per `Compression` column*: mandatory
     /// under **Compressed**, and `N` (not allowed to record) under all three uncompressed columns.
-    /// Whether this crate should read `Compression` and condition the rule on it — and whether a
-    /// length with no offset should be rejected for symmetry — is open, and filed as issue #574.
+    ///
+    /// Reading unconditionally costs nothing in conformance, because the two tags carry the *same*
+    /// level in every column: an offset with no length is non-conformant under all four, so there
+    /// is no conformant 1st IFD this rule wrongly names. Whether to condition it on `Compression`
+    /// anyway is filed as issue #574, and it is a cheap option rather than a costly one —
+    /// [`Thumbnail::compression`](crate::Thumbnail::compression) already reads the tag, so nothing
+    /// needs plumbing. The mirror case in that issue — a length with no offset — is genuinely
+    /// asymmetric and not merely unreached: an offset with no length *addresses bytes*, so
+    /// something is lost, while a length with no offset addresses nothing, so nothing is.
     ThumbnailLengthMissing = 3,
 }
 

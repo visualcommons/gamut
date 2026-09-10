@@ -28,9 +28,15 @@
 //! previous release. An error message's offset is now a position in the buffer the caller handed
 //! in, so for a marked blob it is six bytes larger than before — the `Exif\0\0` marker — while a
 //! [`Dropped::offset`] stays relative to the TIFF stream; and a 1st IFD carrying
-//! `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength`, which Exif 3.0 §4.6.9.2 requires
-//! together, is now named in the report instead of vanishing, and rejected in
-//! [`strict`](ExifReader::strict) mode as the malformed pair it is.
+//! `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` is now named in the report
+//! instead of vanishing, and rejected in [`strict`](ExifReader::strict) mode as the unreadable
+//! range it is — an offset with nothing to size it addresses bytes that cannot be read. That rule
+//! is structural, not a support level: Exif 3.0 §4.6.9.2 Table 21 states the pair's level only
+//! *per `Compression` column*, and this reader does not consult that tag — though
+//! [`Thumbnail::compression`](thumbnail::Thumbnail::compression) exposes it to callers (issue
+//! #574). It refuses no conformant input: the table gives both tags the same level in all four
+//! columns — `M` under **Compressed**, `N` (not allowed to record) under the three uncompressed
+//! ones — so an offset with no length is non-conformant under every one of them.
 //!
 //! ```
 //! use gamut_exif::{ByteOrder, Exif, ExifTag, Value};

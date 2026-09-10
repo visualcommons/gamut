@@ -271,9 +271,11 @@ impl ExifReader {
         // The removal is conditioned on bytes having been read, which is #548: when `jpeg` is
         // `None` the pointer survives into the model and `to_bytes` re-emits it, so the emitted
         // blob claims a thumbnail the report says was dropped. #548 names only the OutOfBounds
-        // case; the ThumbnailLengthMissing arm above is a SECOND instance of it, and a sharper
-        // one — the re-emitted blob still has an offset and still has no length, so a strict parse
-        // of it fails with the BadThumbnail this crate itself produced. Fixing the condition is a
+        // case; the ThumbnailLengthMissing arm above is a SECOND instance of it. What separates
+        // them is not that a strict parse of the re-emitted blob fails — it fails for BOTH, since
+        // an out-of-bounds offset survives the round trip just as an unsized one does — but that
+        // the OutOfBounds instance is pre-existing (the default branch already rejects it
+        // strictly) while this one is created by adding the strict arm. Fixing the condition is a
         // writer behaviour change and belongs to #548, not here.
         let mut ifd = ifd;
         if jpeg.is_some() {

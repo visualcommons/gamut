@@ -62,7 +62,9 @@ impl ExifReader {
     /// required but absent, an [`ExifError::Ifd`](crate::ExifError::Ifd) when the TIFF stream is
     /// malformed, or (in [`strict`](Self::strict) mode)
     /// [`ExifError::InvalidIfd`](crate::ExifError::InvalidIfd) when a sub-IFD pointer addresses a
-    /// malformed directory.
+    /// malformed directory or [`ExifError::BadThumbnail`](crate::ExifError::BadThumbnail) when the
+    /// 1st IFD's JPEG range is unusable — outside the blob, or an offset with no
+    /// `JPEGInterchangeFormatLength` to size it.
     ///
     /// An offset inside an error message is a position in `bytes` — the buffer the caller handed
     /// in — so for a marked blob it counts the six-byte `Exif\0\0` marker. That is deliberately a
@@ -103,6 +105,12 @@ impl ExifReader {
     /// empty: [`DroppedRegion::TrailingIfd`](crate::DroppedRegion::TrailingIfd) is well-formed and
     /// merely unrepresentable, so strictness has no grounds to reject it and it is reported in both
     /// modes.
+    ///
+    /// The two offset frames of [`parse`](Self::parse) both reach the caller here, in one call:
+    /// an offset in a returned [`ExifError`](crate::ExifError) is a position in `bytes` and counts
+    /// any `Exif\0\0` marker, while every [`Dropped::offset`](crate::Dropped::offset) in the
+    /// report is relative to the start of the TIFF stream — six smaller for the same position in a
+    /// marked blob. A caller that renders both beside each other must normalise one of them.
     pub fn parse_with_report(&self, bytes: &[u8]) -> Result<(Exif, ReadReport)> {
         self.parse_from_with_report(bytes)
     }

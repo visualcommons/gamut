@@ -73,6 +73,16 @@ for dropped in report.dropped() {
 # }
 ```
 
+One read verdict changed with the report. A 1st IFD carrying `JPEGInterchangeFormat` with no
+`JPEGInterchangeFormatLength` used to parse as a thumbnail that simply had no bytes; it is now a
+**loss** — named in the report as `DropReason::ThumbnailLengthMissing`, and **rejected by `strict`**
+with `ExifError::BadThumbnail`, since an offset with nothing to size it addresses bytes that cannot
+be read. This is a fix rather than a redefinition, so it is not a breaking release: Exif 3.0
+§4.6.9.2 Table 21 gives both tags the *same* support level in each of its four `Compression`
+columns — mandatory under **Compressed**, "not allowed to record" under the three uncompressed ones
+— so the input that now fails was non-conformant under every one of them. A caller running `strict`
+over blobs it previously accepted should still know the verdict moved.
+
 Enable the optional `geocoordinates` feature (also included by `full`) to convert a complete
 [`GpsInfo`] with `TryFrom` into `geocoordinates::Wgs84` or `geocoordinates::Coordinate`. The latter
 preserves EXIF sea-level altitude as an orthometric height; the 2D `Wgs84` newtype intentionally

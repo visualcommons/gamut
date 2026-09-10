@@ -300,8 +300,9 @@ fn a_truncated_blob_never_drops_a_sub_ifd_without_naming_it() {
 /// nothing to size the read by, and the JPEG behind it is lost. Before this the pair fell into the
 /// reader's catch-all `None` arm: no bytes, no error, no report entry, inside the very region this
 /// report claims completeness over. The rule is structural, not a support level: Exif 3.0 §4.6.9.2
-/// Table 21 states the pair's level per `Compression` column and the reader does not read that tag
-/// (issue #574), so the fixture's `Compression` value is scene-setting, not the trigger.
+/// Table 21 states the pair's level per `Compression` column and this reader does not consult that
+/// tag — `Thumbnail::compression` exposes it, but nothing in the parse branches on it (issue #574)
+/// — so the fixture's `Compression` value is scene-setting, not the trigger.
 #[test]
 fn a_thumbnail_offset_without_a_length_is_named() {
     let mut thumb = Ifd::new();
@@ -337,9 +338,11 @@ fn a_thumbnail_offset_without_a_length_is_named() {
 /// "fixed" by reporting every thumbnail that has no JPEG, which would make the signal noise.
 ///
 /// This pins the *reporting* contract only. Whether a length-only 1st IFD should nonetheless be
-/// *rejected* in strict mode — under `Compression = Compressed` Exif 3.0 §4.6.9.2 Table 21 marks
-/// both tags mandatory, so it is as malformed as the offset-only case — is open, and filed as
-/// issue #574. Both fixtures here are uncompressed, where the table forbids either tag outright.
+/// *rejected* in strict mode is open, and filed as issue #574: it is equally non-conformant (Exif
+/// 3.0 §4.6.9.2 Table 21 gives both tags one level per `Compression` column — `M` under
+/// **Compressed**, `N` under the three uncompressed ones), but it is not equally a *loss*, which
+/// is what this report names. An offset with no length addresses bytes; a length with no offset
+/// addresses nothing. Both fixtures here are uncompressed, where the table forbids either tag.
 #[test]
 fn a_thumbnail_with_no_jpeg_range_reports_nothing() {
     for extra in [None, Some((THUMB_LENGTH, 16))] {
