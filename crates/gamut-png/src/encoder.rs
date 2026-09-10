@@ -262,8 +262,13 @@ pub enum Preset {
     Balanced = 1,
     /// Level 2 — the optimal parse and lossless reduction, still on one filter heuristic.
     Small = 2,
-    /// Level 3 — every knob at its size-optimal setting, including the whole-image filter search.
-    /// Slowest by a wide margin; intended for write-once assets where size dominates.
+    /// Level 3 — the whole-image filter search on top of [`Preset::Small`], plus zopfli's own
+    /// refinement budget and an eight-times-wider optimal-parse span.
+    ///
+    /// Slowest by a wide margin, and the margin is the filter search: on this crate's corpus the
+    /// step from `Small` costs **6.26x** and buys 3.6%, and on four of the nine rows it buys three
+    /// bytes or fewer. Intended for write-once assets where size dominates, and worth measuring on
+    /// your own material rather than assuming — see `STATUS.md`.
     Smallest = 3,
 }
 
@@ -279,6 +284,28 @@ struct PresetKnobs {
     optimal_parse_limit: usize,
     auto_reduce: bool,
 }
+
+/// The optimal-parse span [`Preset::Smallest`] selects: **8 MiB**, eight times
+/// [`DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT`].
+///
+/// Finite, and that is the point. The span is the only thing bounding the shortest-path parse's
+/// working set: `gamut-deflate` allocates three span-length vectors per refinement pass — the cost
+/// row, the chosen length and the chosen distance — for **12 bytes per byte of span** (11.0 to
+/// 12.3 measured resident; the two `u16` rows are zero-initialised, so pages they never write are
+/// never faulted in). An unbounded span therefore makes one encode's peak memory grow without
+/// bound in the image, which is not something to ship behind a rung named for size. Measured peak
+/// resident set for one encode of a 4096x4096 RGB photograph at [`Level::Best`]: **701.8 MiB**
+/// unbounded against **219.0 MiB** at this span and **177.9 MiB** at the 1 MiB default.
+///
+/// Eight and not more, measured rather than picked: a wider span only helps an image whose
+/// *filtered* stream exceeds it, and the help saturates fast. At 8 MiB the span is the whole
+/// stream — so byte-identical to unbounded — for any image up to about 1670x1670 RGB or
+/// 1448x1448 RGBA, which is where every size win this crate measured for the knob lives. Past
+/// that it keeps most of what is left: on a 2048x2048 gradient it takes −0.100% of the −0.106%
+/// unbounded reaches, and on a 4096x4096 photograph −0.028% of −0.044%. Doubling to 16 MiB buys
+/// a further 0.005% there and costs another 94 MiB, which is the trade this constant declines.
+/// `STATUS.md` carries the whole sweep, including the rows where a wider span costs bytes.
+const SMALLEST_OPTIMAL_PARSE_LIMIT: usize = 8 << 20;
 
 impl Preset {
     /// The ladder level (`0..=3`) this rung selects, lower being faster.
@@ -339,14 +366,14 @@ impl Preset {
                 optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
                 auto_reduce: true,
             },
-            // Every knob at its size-optimal end, derived rather than chosen: `zopfli`'s own
-            // refinement budget of 15, the full brute-force filter search, and an unbounded span
-            // so one cost model covers the whole filtered stream however large the image.
+            // `zopfli`'s own refinement budget of 15, the full brute-force filter search, and the
+            // widest optimal-parse span this crate will spend memory on — see
+            // `SMALLEST_OPTIMAL_PARSE_LIMIT` for why that span is finite and why it is this wide.
             Self::Smallest => PresetKnobs {
                 level: Level::Best,
                 effort: 15,
                 filter: FilterStrategy::BruteForce,
-                optimal_parse_limit: usize::MAX,
+                optimal_parse_limit: SMALLEST_OPTIMAL_PARSE_LIMIT,
                 auto_reduce: true,
             },
         }
@@ -486,10 +513,33 @@ impl PngEncoder {
     /// [`DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT`] (1 MiB).
     ///
     /// A filtered PNG scanline stream longer than the limit is parsed as consecutive spans of this
-    /// size, so raising it lets one cost model span more of the image — a small ratio win on
-    /// homogeneous material, at a disproportionate time cost. A limit below the 32 KiB LZ77 window
-    /// is raised to it. Ignored at every other [`Level`], and by any pushed [`IdatDeflater`]
-    /// backend that accepts a stream.
+    /// size, so raising it lets one cost model span more of the image. A limit below the 32 KiB
+    /// LZ77 window is raised to it. Ignored at every other [`Level`], and by any pushed
+    /// [`IdatDeflater`] backend that accepts a stream.
+    ///
+    /// # What raising it costs: memory, linearly, with no bound of its own
+    ///
+    /// The shortest-path parse allocates three span-length vectors per refinement pass — the cost
+    /// row, the chosen length and the chosen distance — which is **12 bytes for every byte of
+    /// span**. The limit is therefore the only thing bounding this encoder's working set, and a
+    /// caller who removes it makes one encode's peak memory grow without bound in the image.
+    /// Measured peak resident set for a single encode of a square RGB photograph at
+    /// [`Level::Best`], default span against no bound: **21.9 → 46.5 MiB** at 1024x1024,
+    /// **56.0 → 177.2 MiB** at 2048x2048, **177.9 → 701.8 MiB** at 4096x4096. Time is not what
+    /// scales here — the same three pairs measured 8.41 → 8.47 s, 34.65 → 33.95 s and
+    /// 133.9 → 132.7 s, because the parse's work is linear in the input whatever the span. (A
+    /// wider span can still take more refinement passes to converge on some material, so time is
+    /// data-dependent rather than flat.)
+    ///
+    /// # What raising it buys: bytes, sometimes, depending on the picture
+    ///
+    /// A wider span is a different cost model, not a better one, and the sign is a property of the
+    /// data. Measured at 1024x1024 with no bound against the default: **−0.75%** on a greyscale
+    /// ramp, **−0.18%** on a gradient, **−0.12%** on a sprite sheet, **−0.08%** on a palette
+    /// image, nothing at all on noise or on a picture already inside one span — and **+0.10% on a
+    /// photograph**. Raise it if your material
+    /// is homogeneous and you have measured that it helps; the crate's own top rung takes a
+    /// finite, bounded 8 MiB for exactly this reason.
     ///
     /// Unlike [`with_effort`](Self::with_effort), which governs every zlib stream this encoder
     /// emits, this limit governs the **`IDAT` image data only**. It is the one stream whose length
