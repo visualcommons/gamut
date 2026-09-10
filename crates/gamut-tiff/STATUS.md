@@ -100,7 +100,13 @@ than an offset — so a *pointer* there is a discarded target too, and a danglin
 still one flat list at every node, which leaves one harmless over-reach: `InteroperabilityIFD` is
 followed at IFD 0 as well, where a spec-conformant file never puts it. **(c)** The blocks live in **IFD 0 only**, so a reader decoding
 page 3 of a multi-page document alone sees none of them; duplicating an ICC profile onto every
-page is the worse outcome, and IFD 0 is where a reader conventionally looks.
+page is the worse outcome, and IFD 0 is where a reader conventionally looks. **(d)** The **writer
+is bounded by what the reader accepts**: the walk above stops two levels under IFD 0 — the deepest
+tree `ExifIFD` and `InteroperabilityIFD` legitimately reach (EXIF 2.3 §4.6.3) — and an Exif
+directory a caller nested deeper is refused by `with_metadata`'s encode, as `Error::InvalidInput`
+before any pixel work, rather than written into a well-formed file this crate cannot read back.
+The bound is the spec's; that a narrower one is also easier to assert is not on its own a reason
+to narrow a contract.
 
 The C2PA manifest store is the one carrier with a placement rule of its own, and that rule is not
 restated here: `gamut_ifd::c2pa` owns C2PA 2.4 §A.3.6 (tag 52545 / `0xCD41`, type `UNDEFINED`, one

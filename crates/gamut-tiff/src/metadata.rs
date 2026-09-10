@@ -179,6 +179,40 @@ impl TiffMetadata {
         self.exif.as_ref().filter(|ifd| !ifd.fields().is_empty())
     }
 
+    /// Refuses a set this crate would write into a file its own [`read_metadata`] then rejects.
+    ///
+    /// One thing can break that: the Exif sub-IFD is a caller's directory and may carry sub-IFD
+    /// groups of its own, and nothing about a directory in memory stops it nesting a hundred
+    /// levels down. The reader follows [`MAX_POINTER_DEPTH`] levels below IFD 0 and refuses what
+    /// is deeper, so the writer refuses the same tree rather than emitting a well-formed file
+    /// whose metadata this crate cannot read back. The Exif directory occupies the first of those
+    /// levels, so its own nesting may use the rest — one further directory,
+    /// `InteroperabilityIFD` (EXIF 2.3 §4.6.3), which is exactly the tree a decoded camera EXIF
+    /// comes back as.
+    ///
+    /// It is a *conservative* restatement in one respect: the reader only refuses a tree too deep
+    /// under a tag it follows, while this counts every sub-IFD group. A group under a tag the
+    /// reader does not follow is a directory this crate could not return either — it comes back
+    /// as the raw offset it was written to — so refusing it too keeps the writer inside what the
+    /// reader delivers rather than outside it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the Exif sub-IFD nests
+    /// deeper than the reader walks back.
+    pub(crate) fn check(&self) -> Result<()> {
+        if let Some(exif) = self.exif_ifd()
+            && !within_depth(exif, MAX_POINTER_DEPTH - 1)
+        {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: an Exif sub-IFD may nest one further directory \
+                 (ExifIFD -> InteroperabilityIFD, EXIF 2.3 §4.6.3) and this one nests deeper",
+            ));
+        }
+        Ok(())
+    }
+
     /// Writes the XMP / IPTC / ICC blocks and the Exif sub-IFD into `ifd0`.
     ///
     /// The C2PA store is deliberately **not** written here: its bytes must land at the end of
@@ -245,6 +279,20 @@ const POINTER_TAGS: &[u16] = &[tags::EXIF_IFD, tags::INTEROPERABILITY_IFD];
 /// directory, so a third level is already out of spec — a generic reader needs sixteen because it
 /// is handed arbitrary tags, and this one is not.
 const MAX_POINTER_DEPTH: usize = 2;
+
+/// Whether `ifd`'s own sub-IFD nesting stays within `depth` further levels — the writer's side of
+/// [`MAX_POINTER_DEPTH`], used by [`TiffMetadata::check`].
+///
+/// Stops at the bound instead of measuring the whole tree, so a directory a caller nested a
+/// hundred levels deep costs a hundred levels of neither recursion nor time.
+fn within_depth(ifd: &Ifd, depth: usize) -> bool {
+    ifd.sub_ifds().iter().all(|group| {
+        group.ifds.iter().all(|child| match depth.checked_sub(1) {
+            Some(left) => within_depth(child, left),
+            None => false,
+        })
+    })
+}
 
 /// The file offsets a sub-IFD pointer value carries: a `LONG` array (TIFF 6.0 §2), the typed
 /// `IFD` (13) form of TIFF Technical Note 1, or BigTIFF's 64-bit `LONG8`/`IFD8` forms. Any other
@@ -530,6 +578,31 @@ mod tests {
             Some(Value::Long8(_))
         ));
         assert_eq!(read_metadata(&bytes).expect("read").exif, Some(exif_ifd()));
+    }
+
+    #[test]
+    fn the_writer_refuses_the_exif_nesting_the_reader_refuses() {
+        // `metadata()` walks two levels below IFD 0 and refuses a third, so a set the encoder
+        // accepted at three levels became a well-formed file this crate could not read back —
+        // the encoder emitting what its own reader rejects. The bound is the whole claim, so
+        // both sides of it are asserted: the `ExifIFD` → `InteroperabilityIFD` pair (EXIF 2.3
+        // §4.6.3) is accepted, and one directory below it is not.
+        let mut interop = Ifd::new();
+        interop.set(1, Value::Ascii("R98".into())); // InteroperabilityIndex
+        let mut pair = exif_ifd();
+        pair.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop]);
+        TiffMetadata::new()
+            .with_exif(pair.clone())
+            .check()
+            .expect("the Exif -> Interop pair is what a decoded camera EXIF is");
+
+        let mut deeper = exif_ifd();
+        deeper.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![pair]);
+        let err = TiffMetadata::new()
+            .with_exif(deeper)
+            .check()
+            .expect_err("a directory below the pair is one this crate could not read back");
+        assert!(err.to_string().contains("nests deeper"), "{err}");
     }
 
     #[test]

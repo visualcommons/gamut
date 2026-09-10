@@ -76,7 +76,10 @@ compression schemes land additively on this frozen surface (see Status).
   are verbatim; the Exif directory's *entries* are carried unchanged but its ordering is
   normalised (ascending tag, duplicate tags collapsed, a child's next-IFD pointer ignored). The
   blocks live in **IFD 0 only**, so a reader decoding page 3 of a multi-page document alone must
-  look at IFD 0 for them. The C2PA manifest store follows C2PA 2.4 §A.3.6 through the shared
+  look at IFD 0 for them. What the encoder writes the decoder reads back: the Exif directory may
+  nest the one further directory `InteroperabilityIFD` (EXIF 2.3 §4.6.3), which is as deep as the
+  reader walks, and a caller's directory nested deeper is refused by the encode rather than
+  written into a file this crate could not read. The C2PA manifest store follows C2PA 2.4 §A.3.6 through the shared
   `gamut_ifd::c2pa` helper it and `gamut-dng` both call: the entry in the last IFD of the main
   chain, the store at the end of the file, and the two §18.5.5 exclusion ranges reported by
   `TiffEncoder::encode_with_report` or recovered from any file by `gamut_tiff::c2pa_exclusions`.
