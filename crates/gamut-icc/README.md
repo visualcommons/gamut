@@ -13,10 +13,11 @@ the format crates can read, preserve, and embed accurate color characterization.
 - **Clean-slate from the spec.** Implemented from **ICC.1:2022** (profile v4.4, equivalent to
   ISO 15076-1; [`../../references/icc`](../../references/icc)), with v2 read support since most
   embedded profiles are still v2.
-- **Dependency-light.** An ICC profile needs neither IFD nor XML machinery, so this crate builds
-  only on [`gamut-core`](../gamut-core) plus [`md-5`](https://crates.io/crates/md-5) (the §7.2.18
-  profile-ID digest) — distinct from CICP color signaling, which lives in
-  [`gamut-color`](../gamut-color).
+- **Dependency-light.** An ICC profile needs neither IFD nor XML machinery, so the whole
+  dependency list is [`gamut-core`](../gamut-core), [`gamut-color`](../gamut-color) (the
+  colorimetry behind the built-in profile constructors below),
+  [`md-5`](https://crates.io/crates/md-5) (the §7.2.18 profile-ID digest) and
+  [`thiserror`](https://crates.io/crates/thiserror).
 
 ## Usage
 
@@ -31,6 +32,45 @@ if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint) {
 let serialized = profile.to_bytes()?; // spec-valid bytes, ready to re-embed
 # Ok(()) }
 ```
+
+### Built-in profiles, and CICP → profile
+
+Constructing a profile is the other direction. `IccProfile::builtin` emits a spec-valid v4
+matrix/TRC display profile for a named space, and `IccProfile::from_cicp` does the same from the
+H.273 code-point triple AVIF, HEIC and JXL usually signal instead of embedding a profile:
+
+```rust
+use gamut_icc::{BuiltinProfile, Cicp, IccProfile};
+
+let p3 = IccProfile::builtin(BuiltinProfile::DisplayP3).expect("a modelled space");
+assert!(p3.validate().is_empty());
+let bytes = p3.to_bytes()?; // ready to embed
+
+// BT.2020 primaries + PQ, as an AVIF `colr` box would signal them. The matrix coefficients are
+// deliberately not carried into the profile: ICC.1:2022 §10.3 requires zero for an RGB profile.
+// The range flag, by contrast, is a precondition: only full range (1) can be described.
+let signalled = Cicp {
+    colour_primaries: 9,
+    transfer_characteristics: 16,
+    matrix_coefficients: 9,
+    video_full_range_flag: 1,
+};
+assert!(IccProfile::from_cicp(signalled).is_some());
+assert!(IccProfile::from_cicp(Cicp { video_full_range_flag: 0, ..signalled }).is_none());
+# Ok::<_, gamut_icc::IccError>(())
+```
+
+The named spaces are sRGB, linear sRGB, Display P3 and BT.2100 PQ, plus
+`IccProfile::gray_with_gamma` for a monochrome profile. Their primaries and white point are read
+from [`gamut-color`](../gamut-color) rather than restated here, so the two cannot drift; Adobe RGB
+and ProPhoto RGB have no code point on either CICP axis and are declined rather than approximated.
+`from_cicp` reaches further on the transfer axis — the BT.709 family (H.273 code points 1, 6, 14
+and 15), linear, sRGB and PQ all have an ICC tone-curve encoding — because what an ICC tag can
+encode is not the same set as what gamut-color can evaluate. Every constructor returns an `Option`
+and declines signalling it cannot describe — including a narrow-range `VideoFullRangeFlag`, which
+is a scaling of the RGB samples that a full-scale matrix/TRC profile does not perform and that
+de-matrixing does not remove. `STATUS.md` tabulates the curve chosen per transfer and records why
+each field is rewritten or refused.
 
 **Every ICC.1:2022 §10 element type decodes semantically** — the `XYZType`, curve, and text types;
 the `lut8`/`lut16`/`lutAToB`/`lutBToA` transforms; `namedColor2Type`; the measurement/signalling

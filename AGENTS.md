@@ -74,7 +74,7 @@ Dependency edges (a crate depends on those to its right):
 - **gamut-ifd** — TIFF/IFD container core (byte order, field types, IFD read/write); a
   low-level container primitive (sibling to bitstream), shared by `gamut-tiff` and EXIF
   metadata. ← core. Optional `bigtiff` feature adds 64-bit BigTIFF. Per-format metadata
-  crates (**gamut-exif** ← ifd; **gamut-icc**; **gamut-xmp**; **gamut-iptc** ← xmp) and the
+  crates (**gamut-exif** ← ifd; **gamut-icc** ← color; **gamut-xmp**; **gamut-iptc** ← xmp) and the
   **gamut-metadata** facade (← exif/xmp/icc/iptc) layer on top under the `metadata` feature;
   format crates consume the facade for embedded metadata.
 - **gamut-cmm** — ICC colour management module (epic #323): the transform engine — a
