@@ -125,6 +125,19 @@ exclude_re = [
     # trading this hang for an equivalent mutant at the `r.end() == span.start` boundary, where
     # including or excluding an already-settled claim cannot change the output either way.
     'replace <= with > in next_live_claim',
+    # gamut-ifd `ReadLedger::subtract`'s span walk -- the other non-terminating mutant, and the
+    # one whose *verdict* is not even stable. `while pos < end` walks one ledger span; `<=` lets
+    # the body run once more at `pos == end`, where the span is exhausted and nothing can move
+    # `pos`: `next_live_claim` has already dropped every claim ending at or before `end`, so the
+    # covered arm would assign `pos` the value it already holds and the fallback arm computes
+    # `stop == end`. The walk spins, so no test can see an output it never produces. It also
+    # pushes a zero-length `Range` every turn, which is why the mutant scores `caught` under a
+    # tight address-space cap (the run aborts before the 60s test timeout fires) and `TIMEOUT`
+    # under a looser one -- the same mutant, two verdicts, depending on the runner. Excluding it
+    # is what makes the gate say the same thing on every machine. Anchored by name and operator:
+    # this loop holds the only `<` in the function, and its `==` and `>` twins terminate and ARE
+    # caught.
+    'replace < with <= in ReadLedger::subtract',
     # gamut-dng rewrite::write — the pin-fallback match guard. With `pin == None` the guard is
     # the only difference between "return the error" and "retry the identical un-pinned write
     # and return its (identical) error": `write_with` is deterministic in its inputs, so forcing
