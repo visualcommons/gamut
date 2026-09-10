@@ -42,13 +42,19 @@ pub enum OracleError {
     /// Raised by a caller's closure, and by [`reserve_then_fill`] when a signed store and the slot
     /// reserved for it are not the same length.
     Asset(String),
-    /// A composed `ContentProvenanceBox` carried no JUMBF superbox: no [`JUMBF_SUPERBOX_TYPE`] was
-    /// found in it at all. Only [`split_composed_box`] raises this.
+    /// A composed `ContentProvenanceBox` — or any other buffer — carried no JUMBF superbox: no
+    /// [`JUMBF_SUPERBOX_TYPE`] was found in it at all.
+    ///
+    /// [`find_jumbf_superbox`] is the only function that raises this; [`split_composed_box`] and
+    /// [`jumbf_superbox_span`] call it and propagate the refusal unchanged. It is strictly about
+    /// *absence*: a superbox that is present but declares a length nothing can use is
+    /// [`UnusableSuperboxLength`](Self::UnusableSuperboxLength) instead, so the two are never
+    /// conflated.
     NoJumbfSuperbox,
-    /// A JUMBF superbox header is present, but the length it declares cannot be read: its
-    /// `LBox`/`XLBox` fields are truncated, or the length it declares is shorter than the header
-    /// it is part of — `LBox` in 2..=7 against the 8-byte header, or `XLBox` below 16 against the
-    /// 16-byte one. Carries which of those it was.
+    /// A JUMBF superbox header is present, but the length it declares cannot be used: its
+    /// `LBox`/`XLBox` fields are truncated, the length is shorter than the header it is part of —
+    /// `LBox` in 2..=7 against the 8-byte header, or `XLBox` below 16 against the 16-byte one — or
+    /// the length runs past the end of the buffer it is read from. Carries which of those it was.
     ///
     /// This exists so the length is never *guessed*. A span silently derived from a length that
     /// describes no box would be an oracle handing gamut a wrong answer and calling it a reference
@@ -215,16 +221,20 @@ pub fn find_jumbf_superbox(buffer: &[u8]) -> Result<usize> {
 ///
 /// # Errors
 ///
-/// [`OracleError::NoJumbfSuperbox`] if no superbox is found, or if the length it declares runs off
-/// the end of `buffer`; [`OracleError::UnusableSuperboxLength`] if that length cannot be read at
-/// all (see [`declared_store_len`]).
+/// [`OracleError::NoJumbfSuperbox`] if no superbox is found at all;
+/// [`OracleError::UnusableSuperboxLength`] if the superbox is there but its declared length cannot
+/// be read (see [`declared_store_len`]) or runs past the end of `buffer`. A superbox that is
+/// present but unbounded is never reported as one that is absent: `buffer` demonstrably carries a
+/// store, and it is the *length* that is unusable — which is the case that variant exists to name.
 pub fn jumbf_superbox_span(buffer: &[u8]) -> Result<Range<usize>> {
     let start = find_jumbf_superbox(buffer)?;
     let len = declared_store_len(&buffer[start..])?;
     let end = start
         .checked_add(len)
         .filter(|end| *end <= buffer.len())
-        .ok_or(OracleError::NoJumbfSuperbox)?;
+        .ok_or(OracleError::UnusableSuperboxLength(
+            "the declared length runs past the end of the buffer",
+        ))?;
     Ok(start..end)
 }
 
@@ -588,17 +598,18 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_length_running_past_the_buffer_is_not_a_span() {
+    fn a_declared_length_running_past_the_buffer_is_an_unusable_length_not_an_absent_superbox() {
         let mut buffer = vec![0u8; 32];
         buffer[..4].copy_from_slice(&4096u32.to_be_bytes());
         buffer[4..8].copy_from_slice(b"jumb");
 
+        let error = jumbf_superbox_span(&buffer)
+            .expect_err("a length that runs off the end of the buffer bounds nothing");
         assert!(
-            matches!(
-                jumbf_superbox_span(&buffer),
-                Err(OracleError::NoJumbfSuperbox)
-            ),
-            "a length that runs off the end of the buffer bounds nothing"
+            matches!(&error, OracleError::UnusableSuperboxLength(what)
+                if what.contains("runs past the end of the buffer")),
+            "the buffer plainly carries a superbox, so the refusal must name its unusable length \
+             rather than report the store as absent; got {error}"
         );
     }
 }
