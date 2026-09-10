@@ -84,8 +84,14 @@ Declined: HLG (code 18) and Unspecified (code 2) have neither a §10.18 closed f
 gamut-color EOTF to sample from, and every other H.273 code point is unmodelled here. The transfer
 axis is keyed on the **raw code point**, not on `gamut_color::cicp::TransferCharacteristics`,
 because the set of curves an ICC tag can encode is not the set gamut-color can evaluate: codes 6
-and 15 have no `TransferCharacteristics` variant, and none of the four BT.709-family codes has a
-gamut-color EOTF, yet all four are exactly encodable.
+and 15 have no `TransferCharacteristics` variant at all; code 1 has one but no `eotf_for` curve;
+and code 14 has an `eotf_for` curve that is **not this one** — `bt2020_pq_to_sdr`, a PQ EOTF plus
+a tone map to SDR, which at `V = 0.5` is 20.3 % above what Table 3 gives code 14. All four are
+exactly encodable here as the one curve Table 3 defines. That the two crates read code point 14
+differently is a `gamut-color` question, filed as
+[#605](https://github.com/visualcommons/gamut/issues/605) rather than resolved here; the doctest
+on `src/builtin.rs`'s module documentation pins every clause of this paragraph that is a claim
+about gamut-color, so it cannot drift from the crate it describes.
 
 **CICP fields the profile does not build from.** `from_cicp` builds from the primaries and transfer
 code points only, and treats the other two fields differently on purpose — one is rewritten, one is

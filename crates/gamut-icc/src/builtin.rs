@@ -21,8 +21,36 @@
 //! **Transfers** are keyed on the raw ITU-T H.273 code point, because the set of curves an ICC
 //! tag can *encode* is not the set `gamut-color` can *evaluate*: H.273 Table 3's code points 1,
 //! 6, 14 and 15 are one curve with a closed form ICC.1:2022 §10.18 defines exactly, so this
-//! module encodes all four even though `gamut_color::transfer::eotf_for` supplies no EOTF for
-//! them and its `TransferCharacteristics` models only two of the four.
+//! module encodes all four, while `gamut_color::cicp::TransferCharacteristics` models only two of
+//! them (1 and 14) and `gamut_color::transfer::eotf_for` returns a curve for only one — code
+//! point 14, which it maps to `bt2020_pq_to_sdr`, a PQ EOTF followed by a tone map to SDR rather
+//! than Table 3's curve. Keying on the code point is what keeps that tone map out of an ICC tag:
+//! at `V = 0.5` it evaluates 20.3 % above the curve this module writes for the same code point.
+//! Which of the two readings of code point 14 is right is `gamut-color`'s question, not this
+//! crate's, and is tracked at <https://github.com/visualcommons/gamut/issues/605>.
+//!
+//! ```
+//! use gamut_color::cicp::TransferCharacteristics as Tc;
+//! use gamut_color::transfer::eotf_for;
+//! use gamut_icc::{Cicp, IccProfile};
+//!
+//! // Two of the four BT.709-family code points have a `TransferCharacteristics` variant …
+//! assert_eq!(Tc::from_code_point(1), Some(Tc::Bt709));
+//! assert_eq!(Tc::from_code_point(14), Some(Tc::Bt2020_10));
+//! assert_eq!(Tc::from_code_point(6), None);
+//! assert_eq!(Tc::from_code_point(15), None);
+//! // … and exactly one of those two has an EOTF, which is not this curve.
+//! assert!(eotf_for(Tc::Bt709).is_none());
+//! assert!(eotf_for(Tc::Bt2020_10).is_some());
+//!
+//! // All four are encodable here regardless; that they encode one curve is pinned by
+//! // `every_bt709_family_code_point_builds_the_same_curve`.
+//! let axes = Cicp { colour_primaries: 1, transfer_characteristics: 1,
+//!                   matrix_coefficients: 0, video_full_range_flag: 1 };
+//! for code in [1, 6, 14, 15] {
+//!     assert!(IccProfile::from_cicp(Cicp { transfer_characteristics: code, ..axes }).is_some());
+//! }
+//! ```
 //!
 //! # What a CICP triple contributes, and what it does not
 //!
