@@ -28,10 +28,11 @@
 
 namespace {
 
-// Parses `path` into a negative and reads its stage-1 (raw) image. Shared by the entry points.
-dng_error_code read_negative(const char *path, dng_host &host, dng_info &info,
+// Parses `stream` into a negative and reads its stage-1 (raw) image. This is the SDK flow every
+// decoding entry point here runs, in one place: the file-stream and memory-stream entry points
+// differ only in which `dng_stream` they hand it, so neither can drift from the other.
+dng_error_code read_negative(dng_stream &stream, dng_host &host, dng_info &info,
                              AutoPtr<dng_negative> &negative) {
-  dng_file_stream stream(path);
   info.Parse(host, stream);
   info.PostParse(host);
   if (!info.IsValidDNG()) {
@@ -42,6 +43,13 @@ dng_error_code read_negative(const char *path, dng_host &host, dng_info &info,
   negative->PostParse(host, stream, info);
   negative->ReadStage1Image(host, stream, info);
   return dng_error_none;
+}
+
+// The same flow over the file at `path`. Opening the stream is the whole of the difference.
+dng_error_code read_negative(const char *path, dng_host &host, dng_info &info,
+                             AutoPtr<dng_negative> &negative) {
+  dng_file_stream stream(path);
+  return read_negative(stream, host, info, negative);
 }
 
 // Copies a 16-bit-typed `dng_image` into a freshly `malloc`d interleaved `uint16` buffer,
@@ -167,16 +175,12 @@ extern "C" int gdng_decode_dng_in_memory(const uint8_t *data, size_t len, uint32
   try {
     dng_host host;
     dng_info info;
+    AutoPtr<dng_negative> negative;
     dng_stream stream(data, static_cast<uint32>(len));
-    info.Parse(host, stream);
-    info.PostParse(host);
-    if (!info.IsValidDNG()) {
-      return dng_error_bad_format;
+    dng_error_code rc = read_negative(stream, host, info, negative);
+    if (rc != dng_error_none) {
+      return rc;
     }
-    AutoPtr<dng_negative> negative(host.Make_dng_negative());
-    negative->Parse(host, stream, info);
-    negative->PostParse(host, stream, info);
-    negative->ReadStage1Image(host, stream, info);
     const dng_image *image = negative->Stage1Image();
     if (image == nullptr) {
       return dng_error_unknown;
