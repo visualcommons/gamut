@@ -21,8 +21,12 @@
 //!
 //! The code is the tag's numeric value, with two shapes worth naming:
 //!
-//! * The GPS tags whose codes are **characters** — `GPSStatus` and `GPSMeasureMode` — are keyed by
-//!   the character's byte, so `describe(ExifTag::GpsStatus, u32::from(b'A'))`.
+//! * The GPS tags whose codes are **characters** — `GPSStatus`, `GPSMeasureMode` and the nine
+//!   ASCII reference tags (`GPSLatitudeRef`, `GPSLongitudeRef`, `GPSSpeedRef`, `GPSTrackRef`,
+//!   `GPSImgDirectionRef`, `GPSDestLatitudeRef`, `GPSDestLongitudeRef`, `GPSDestBearingRef`,
+//!   `GPSDestDistanceRef`) — are keyed by the character's byte, so
+//!   `describe(ExifTag::GpsStatus, u32::from(b'A'))`. Each is stored as a two-byte ASCII value,
+//!   the letter and its terminating NUL; the code is the letter.
 //! * `ComponentsConfiguration` holds **four** codes, one per channel; describe each on its own.
 //!
 //! `Flash` is a bitfield rather than an enumeration, so it is not in these tables: use [`flash`].
@@ -235,7 +239,9 @@ pub fn described_values(tag: ExifTag) -> &'static [(u32, &'static str)] {
             ),
             (3, "Negative sea level value (below sea level reference)"),
         ],
-        // Character codes, so the key is the character's byte: 'A' is 65 and 'V' is 86.
+        // The rest of the GPS enumerations are ASCII reference tags, whose codes are *characters*:
+        // the key is the character's byte, so 'A' is 65 and 'V' is 86. Each table is in ascending
+        // byte order, which is not always the order the spec prints the rows in.
         ExifTag::GpsStatus => &[
             (b'A' as u32, "Measurement in progress"),
             (b'V' as u32, "Measurement interrupted"),
@@ -243,6 +249,35 @@ pub fn described_values(tag: ExifTag) -> &'static [(u32, &'static str)] {
         ExifTag::GpsMeasureMode => &[
             (b'2' as u32, "2-dimensional measurement"),
             (b'3' as u32, "3-dimensional measurement"),
+        ],
+        // §4.6.7.1.2 and §4.6.7.1.20 give the shooting location and the destination point the
+        // same two codes.
+        ExifTag::GpsLatitudeRef | ExifTag::GpsDestLatitudeRef => &[
+            (b'N' as u32, "North latitude"),
+            (b'S' as u32, "South latitude"),
+        ],
+        // §4.6.7.1.4 and §4.6.7.1.22, likewise.
+        ExifTag::GpsLongitudeRef | ExifTag::GpsDestLongitudeRef => &[
+            (b'E' as u32, "East longitude"),
+            (b'W' as u32, "West longitude"),
+        ],
+        // §4.6.7.1.15, §4.6.7.1.17 and §4.6.7.1.24: three directions, one pair of codes.
+        ExifTag::GpsTrackRef | ExifTag::GpsImgDirectionRef | ExifTag::GpsDestBearingRef => &[
+            (b'M' as u32, "Magnetic direction"),
+            (b'T' as u32, "True direction"),
+        ],
+        // §4.6.7.1.13. Same three letters as `GPSDestDistanceRef`, different units: this one is a
+        // speed, so 'N' is knots rather than nautical miles.
+        ExifTag::GpsSpeedRef => &[
+            (b'K' as u32, "Kilometers per hour"),
+            (b'M' as u32, "Miles per hour"),
+            (b'N' as u32, "Knots"),
+        ],
+        // §4.6.7.1.26, the distance counterpart.
+        ExifTag::GpsDestDistanceRef => &[
+            (b'K' as u32, "Kilometers"),
+            (b'M' as u32, "Miles"),
+            (b'N' as u32, "Nautical miles"),
         ],
         ExifTag::GpsDifferential => &[
             (0, "Measurement without differential correction"),
@@ -369,6 +404,64 @@ mod tests {
         assert_eq!(describe(ExifTag::GpsMeasureMode, 3), None);
     }
 
+    /// The nine ASCII reference tags reuse the same few letters for unrelated meanings, so an arm
+    /// that swallowed one tag into a sibling's group would answer plausibly and wrongly. Nothing
+    /// else here would notice: the domains are the same size, ascending, and non-empty either way.
+    #[test]
+    fn a_reference_tag_letter_means_what_its_own_section_says() {
+        // 'M' three ways (§4.6.7.1.15, §4.6.7.1.13, §4.6.7.1.26).
+        assert_eq!(
+            describe(ExifTag::GpsTrackRef, u32::from(b'M')),
+            Some("Magnetic direction")
+        );
+        assert_eq!(
+            describe(ExifTag::GpsSpeedRef, u32::from(b'M')),
+            Some("Miles per hour")
+        );
+        assert_eq!(
+            describe(ExifTag::GpsDestDistanceRef, u32::from(b'M')),
+            Some("Miles")
+        );
+        // 'N' three ways (§4.6.7.1.2, §4.6.7.1.13, §4.6.7.1.26).
+        assert_eq!(
+            describe(ExifTag::GpsLatitudeRef, u32::from(b'N')),
+            Some("North latitude")
+        );
+        assert_eq!(
+            describe(ExifTag::GpsSpeedRef, u32::from(b'N')),
+            Some("Knots")
+        );
+        assert_eq!(
+            describe(ExifTag::GpsDestDistanceRef, u32::from(b'N')),
+            Some("Nautical miles")
+        );
+        // The destination tags repeat the shooting-location codes (§4.6.7.1.20, §4.6.7.1.22),
+        // while the bearing reference takes the direction pair (§4.6.7.1.24).
+        assert_eq!(
+            describe(ExifTag::GpsDestLatitudeRef, u32::from(b'S')),
+            Some("South latitude")
+        );
+        assert_eq!(
+            describe(ExifTag::GpsDestLongitudeRef, u32::from(b'W')),
+            Some("West longitude")
+        );
+        assert_eq!(
+            describe(ExifTag::GpsLongitudeRef, u32::from(b'E')),
+            Some("East longitude")
+        );
+        assert_eq!(
+            describe(ExifTag::GpsDestBearingRef, u32::from(b'T')),
+            Some("True direction")
+        );
+        assert_eq!(
+            describe(ExifTag::GpsImgDirectionRef, u32::from(b'T')),
+            Some("True direction")
+        );
+        // A letter one group defines and another does not stays reserved.
+        assert_eq!(describe(ExifTag::GpsLatitudeRef, u32::from(b'K')), None);
+        assert_eq!(describe(ExifTag::GpsSpeedRef, u32::from(b'T')), None);
+    }
+
     #[test]
     fn the_sixteen_bit_colour_space_code_survives() {
         // Uncalibrated is 0xFFFF, which a narrower key type would have truncated.
@@ -400,9 +493,10 @@ mod tests {
         }
     }
 
-    /// Drift guard: exactly which tags CIPA DC-008 enumerates. Every other assertion here reads a
-    /// table through `described_values`, so an arm that lost its rows would make them vacuous —
-    /// this is what notices.
+    /// Drift guard: the thirty-nine tags for which CIPA DC-008 prints a value table are exactly
+    /// the tags that have one here — no arm missing, and none invented for a tag the spec leaves
+    /// open. Every other assertion in this module reads a table through `described_values`, so an
+    /// arm that lost its rows would make them vacuous; this is what notices.
     #[test]
     fn exactly_the_enumerated_tags_have_a_table() {
         let enumerated: Vec<&str> = ExifTag::ALL
@@ -439,9 +533,18 @@ mod tests {
                 "Sharpness",
                 "SubjectDistanceRange",
                 "CompositeImage",
+                "GPSLatitudeRef",
+                "GPSLongitudeRef",
                 "GPSAltitudeRef",
                 "GPSStatus",
                 "GPSMeasureMode",
+                "GPSSpeedRef",
+                "GPSTrackRef",
+                "GPSImgDirectionRef",
+                "GPSDestLatitudeRef",
+                "GPSDestLongitudeRef",
+                "GPSDestBearingRef",
+                "GPSDestDistanceRef",
                 "GPSDifferential",
             ]
         );
