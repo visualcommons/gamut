@@ -53,10 +53,14 @@
 //!   holding a structure where text belongs, a language alternative with no `x-default` entry;
 //! - a field it can read but could not write back as it stands — a URL held as an `rdf:resource`
 //!   where the model writes element text, a value carrying a qualifier, a language alternative
-//!   with entries beyond the default, an `rdf:Seq` or `rdf:Alt` where the model writes an
-//!   `rdf:Bag`, an array holding an item of a kind the model does not take, a bare structure where
-//!   the model writes an array of them, a coordinate that is not a value of the XMP `Real` type
-//!   (`NaN`, an infinity, or a decimal that overflows to one), or two fields of a single name.
+//!   holding a language beside the default or plain text written where one belongs, an array of
+//!   any container kind other than the one the model writes, an array holding an item of a kind
+//!   the model does not take, a bare structure where the model writes an array of them, a
+//!   coordinate that is not a value of the XMP `Real` type (`NaN`, an infinity, or a decimal that
+//!   overflows to one), or two fields of a single name.
+//!
+//! `retention_covers_every_shape_the_typed_read_parses_but_cannot_write_back` derives that list
+//! from the module's shape corpus rather than restating it, so it cannot fall out of date.
 //!
 //! Such a field reads as **absent** — the typed view does not report a value it would go on to
 //! destroy — and survives a read-modify-write untouched.
