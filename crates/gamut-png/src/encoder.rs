@@ -568,7 +568,10 @@ impl PngEncoder {
     ///
     /// Everything the read side surfaces is set, including a `cICP`, an `sRGB` and an `iCCP`
     /// together — §4.3 Table 1 ranks the colour chunks precisely so a file may carry more than
-    /// one, and a reader honours the lowest priority number. Each text annotation goes back into
+    /// one, and a reader honours the lowest priority number. That is a claim about *other*
+    /// readers: this crate's own reader surfaces all of them and ranks none, because which chunk
+    /// to honour depends on whether the reader has a colour-management module, which an encoder
+    /// cannot know. Resolving a profile against an intent belongs to `gamut-cmm`. Each text annotation goes back into
     /// the chunk it came out of, compressed if it was compressed
     /// ([`TextChunkKind`](crate::TextChunkKind)); so does the XMP packet, whose own framing —
     /// compression flag, language tag, translated keyword — rides in
