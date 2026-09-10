@@ -100,9 +100,10 @@ and code 14 has an `eotf_for` curve that is **not this one** — `bt2020_pq_to_s
 a tone map to SDR, which at `V = 0.5` is 20.3 % above what Table 3 gives code 14. All four are
 exactly encodable here as the one curve Table 3 defines. That the two crates read code point 14
 differently is a `gamut-color` question, filed as
-[#605](https://github.com/visualcommons/gamut/issues/605) rather than resolved here; the doctest
-on `src/builtin.rs`'s module documentation pins every clause of this paragraph that is a claim
-about gamut-color, so it cannot drift from the crate it describes.
+[#605](https://github.com/visualcommons/gamut/issues/605) rather than resolved here. Each claim
+about gamut-color above is an assertion in the doctest on `src/builtin.rs`'s module documentation:
+which of the four code points `TransferCharacteristics::from_code_point` models, which of those
+`eotf_for` returns a curve for, and the 20.3 % by which that curve exceeds Table 3's at `V = 0.5`.
 
 **A `SourceProfile` bundle's own curve is not always the profile's curve.** `from_source_profile`
 projects the bundle onto its two CICP code points and builds from those. For `SourceProfile::SRGB`
@@ -167,7 +168,9 @@ worse than a long number.
 not to `gamut_color::matrix::D50`. The two differ by 2e-4 in Z — the CIE chromaticity against ICC's
 rounded tristimulus — and adapting to the CIE one while writing the ICC one as the
 `mediaWhitePointTag` leaves the colorants disagreeing with the white point they sum to. The PCS
-illuminant is an ICC fact, so this crate owns it.
+illuminant is an ICC fact, so this crate owns it. Both tristimuli and the 2e-4 gap are pinned by
+`the_two_d50_tristimuli_the_doc_names_are_what_the_constants_hold`, so this figure cannot drift
+from the constants it describes.
 
 **Known limit: the BT.2100 PQ profile is peak-referred.** Its `curveType` samples ST 2084
 normalized to the transfer's own 10 000 cd/m² peak, so signal maps to media-relative luminance as a

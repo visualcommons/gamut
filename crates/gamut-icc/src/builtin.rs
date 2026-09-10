@@ -52,9 +52,12 @@
 //! assert_eq!(Tc::from_code_point(14), Some(Tc::Bt2020_10));
 //! assert_eq!(Tc::from_code_point(6), None);
 //! assert_eq!(Tc::from_code_point(15), None);
-//! // … and exactly one of those two has an EOTF, which is not this curve.
+//! // … and exactly one of those two has an EOTF, which is not this curve: at V = 0.5 it sits
+//! // 20.3 % above Table 3's 0.259719, the light this module writes for the same code point
+//! // (pinned by `bt709_curve_inverts_the_h273_transfer`).
 //! assert!(eotf_for(Tc::Bt709).is_none());
-//! assert!(eotf_for(Tc::Bt2020_10).is_some());
+//! let tone_mapped = eotf_for(Tc::Bt2020_10).expect("code point 14 has an EOTF")(0.5);
+//! assert!(((tone_mapped / 0.259_719 - 1.0) * 100.0 - 20.3).abs() < 0.05);
 //!
 //! // All four are encodable here regardless; that they encode one curve is pinned by
 //! // `every_bt709_family_code_point_builds_the_same_curve`.
@@ -479,6 +482,10 @@ fn pq_samples() -> Vec<u16> {
 /// `XYZNumber` encoding carries 0.824905. Adapting to the CIE one while writing the ICC one as
 /// the `mediaWhitePointTag` would leave the colorants disagreeing with the white point they are
 /// supposed to sum to, by 2.0e-4 in Z. The PCS illuminant is an ICC fact, so this crate owns it.
+///
+/// Both tristimuli and the gap between them are pinned by
+/// `the_two_d50_tristimuli_the_doc_names_are_what_the_constants_hold`, so this paragraph cannot
+/// drift from the two constants it quotes.
 fn pcs_d50_chromaticity() -> [f64; 2] {
     let [x, y, z] = XyzNumber::D50.to_f64();
     let sum = x + y + z;
@@ -1204,6 +1211,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The two D50s [`pcs_d50_chromaticity`] distinguishes hold the tristimuli its doc quotes:
+    /// `gamut_color::matrix::D50` gives `Z = 0.825105` at `Y = 1`, ICC's encoded
+    /// [`XyzNumber::D50`] carries `0.824905`, and the gap is the documented 2.0e-4. A drift guard
+    /// on two constants this crate does not own — the doc sentence naming them is otherwise
+    /// unchecked, and its arithmetic is what decides the adaptation target.
+    #[test]
+    fn the_two_d50_tristimuli_the_doc_names_are_what_the_constants_hold() {
+        let [x, y] = gamut_color::matrix::D50;
+        let cie_z = (1.0 - x - y) / y;
+        let icc_z = XyzNumber::D50.to_f64()[2];
+        assert!((cie_z - 0.825_105).abs() < 5.0e-7, "CIE D50 Z: {cie_z}");
+        assert!((icc_z - 0.824_905).abs() < 5.0e-7, "ICC D50 Z: {icc_z}");
+        // Each bound is half the last digit the doc states: six decimals on the two tristimuli,
+        // two significant figures on the gap they differ by.
+        assert!(
+            (cie_z - icc_z - 2.0e-4).abs() < 5.0e-6,
+            "gap: {}",
+            cie_z - icc_z
+        );
     }
 
     /// A constructor is a pure function of its arguments: the same call serializes to the same
