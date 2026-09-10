@@ -210,10 +210,10 @@ impl TiffMetadata {
     /// distinct mistakes:
     ///
     /// 1. **the field.** No field under a tag in [`EXIF_SUBTREE_POINTER_TAGS`] may carry a
-    ///    pointer's own type ([`pointer_offsets`]). The reader decides "pointer" from the field,
-    ///    not from the group a caller built, so such a field is followed as an offset into a file
-    ///    it never came from — the round trip returns a parsed directory, an error, or nothing,
-    ///    but never the field that was written.
+    ///    pointer's own on-disk type code ([`POINTER_TYPE_CODES`]). The reader decides "pointer"
+    ///    from the entry it parses, not from the group a caller built, so such a field is followed
+    ///    as an offset into a file it never came from — the round trip returns a parsed directory,
+    ///    an error, or nothing, but never the field that was written.
     /// 2. **the tag.** A group's tag must be one the reader resolves inside the Exif subtree
     ///    ([`EXIF_SUBTREE_POINTER_TAGS`]). Under any other tag the writer emits a pointer the
     ///    reader hands back as a raw offset into the file it came from, so the directory does not
@@ -336,8 +336,37 @@ fn pointer_tags(depth: usize) -> &'static [u16] {
 /// generic reader needs sixteen because it is handed arbitrary tags, and this one is not.
 const MAX_POINTER_DEPTH: usize = 2;
 
-/// The refusal earned by a field under a tag in [`EXIF_SUBTREE_POINTER_TAGS`] whose value
-/// [`pointer_offsets`] accepts — [`check_exif_subtree`]'s first clause.
+/// The on-disk field-type codes that make a directory entry a sub-IFD pointer: `LONG` (4),
+/// the typed `IFD` (13) of TIFF Technical Note 1, and BigTIFF's `LONG8` (16) / `IFD8` (18).
+///
+/// The same set [`pointer_offsets`] accepts, stated as **codes** rather than as [`Value`]
+/// variants, and that difference is the whole of this constant's reason to exist.
+/// `pointer_offsets` answers about a value the *reader* parsed, where the variant and the on-disk
+/// code agree by construction. [`check_exif_subtree`] answers about a value a *caller* built,
+/// which nothing has written yet — and there the two can disagree: [`gamut_ifd::UnknownValue`]
+/// carries an arbitrary type code beside its value word (its constructor validates only the
+/// word's width), [`gamut_ifd::write`] emits that code verbatim, and the reader classifies the
+/// entry by it. A `Value::Unknown` built at 4, 13, 16 or 18 is therefore a plain field to a
+/// variant-shaped predicate and a **pointer** to the reader: it encoded cleanly and then failed
+/// this crate's own [`read_metadata`] with `read out of bounds` or `value offset out of bounds`.
+/// The discriminator that survives the write/read boundary is the code, so the writer asks about
+/// the code.
+///
+/// The membership is pinned against `pointer_offsets` over the whole code space by
+/// `the_pointer_type_codes_are_exactly_the_codes_the_resolver_follows`. The sibling half — a
+/// `gamut-ifd` constructor that accepts a *known* code into `Unknown` at all — is issue #608 and
+/// is not fixable from this crate.
+const POINTER_TYPE_CODES: &[u16] = &[4, 13, 16, 18];
+
+/// Whether the reader would follow `value` as a sub-IFD pointer once it has been written out and
+/// read back: its on-disk type code ([`Value::type_code`], total over every variant including
+/// `Unknown`) is one of [`POINTER_TYPE_CODES`].
+fn is_pointer_typed(value: &Value) -> bool {
+    POINTER_TYPE_CODES.contains(&value.type_code())
+}
+
+/// The refusal earned by a field under a tag in [`EXIF_SUBTREE_POINTER_TAGS`] whose on-disk type
+/// code is in [`POINTER_TYPE_CODES`] — [`check_exif_subtree`]'s first clause.
 ///
 /// A named constant rather than a literal in place because it **enumerates the tag set in prose**,
 /// as this crate's public documentation does, while the set itself is a sibling crate's constant.
@@ -358,11 +387,17 @@ const FOREIGN_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may only nest a group
 ///
 /// **This inspects what [`resolve_pointers`] inspects, and that symmetry is the whole design.**
 /// The reader decides "pointer" from a directory's *fields* — `ifd.get(tag)` under a tag in
-/// [`EXIF_SUBTREE_POINTER_TAGS`] whose value [`pointer_offsets`] accepts — while a caller builds
-/// one from [`sub_ifds`](Ifd::sub_ifds) *groups*. Checking only the groups left the writer blind
-/// to the very shape the reader misreads: a pointer tag carried as a plain `LONG`, which encoded
-/// cleanly and then failed this crate's own [`read_metadata`] with `read out of bounds` or
-/// `sub-IFD pointer loop` depending on the integer. So both are checked, at every level.
+/// [`EXIF_SUBTREE_POINTER_TAGS`] whose entry carries one of [`POINTER_TYPE_CODES`] — while a
+/// caller builds one from [`sub_ifds`](Ifd::sub_ifds) *groups*. Checking only the groups left the
+/// writer blind to the very shape the reader misreads: a pointer tag carried as a plain `LONG`,
+/// which encoded cleanly and then failed this crate's own [`read_metadata`] with `read out of
+/// bounds` or `sub-IFD pointer loop` depending on the integer. So both are checked, at every
+/// level.
+///
+/// The symmetry is stated across the **write/read boundary**, not on a parsed value, because that
+/// boundary is where it kept breaking: a caller's [`Value`] and the entry the reader will parse
+/// agree on nothing but the on-disk type code, so the code is what both sides ask about — see
+/// [`POINTER_TYPE_CODES`].
 ///
 /// Three refusals, deliberately distinct, because they are three different mistakes and a caller
 /// reading the message has to know which one it made:
@@ -370,8 +405,8 @@ const FOREIGN_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may only nest a group
 /// * a **field** under a tag *in* [`EXIF_SUBTREE_POINTER_TAGS`] whose type is a pointer's own —
 ///   the reader follows it as a file offset into a file it did not come from, so what came back
 ///   is a parsed directory, an error, or nothing, but never the field that was written. Only the
-///   pointer *types* are refused: `pointer_offsets` rejects every other type, so a `SHORT` under
-///   `SubIFDs` is left in place by the reader and is left alone here too;
+///   pointer *type codes* are refused: the reader leaves every other type in place, so a `SHORT`
+///   under `SubIFDs` is left alone here too;
 /// * a **group** under a tag *outside* [`EXIF_SUBTREE_POINTER_TAGS`] — the reader leaves that
 ///   pointer as a raw absolute offset, so what came back would not be what was written;
 /// * a *child directory* nested past `depth` — the reader refuses to walk that far
@@ -390,7 +425,7 @@ const FOREIGN_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may only nest a group
 /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) for any of the three refusals.
 fn check_exif_subtree(ifd: &Ifd, depth: usize) -> Result<()> {
     for &tag in EXIF_SUBTREE_POINTER_TAGS {
-        if ifd.get(tag).and_then(pointer_offsets).is_some() {
+        if ifd.get(tag).is_some_and(is_pointer_typed) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 POINTER_FIELD_REFUSAL,
@@ -604,12 +639,97 @@ mod tests {
 
     /// A minimal one-page file carrying `ifd0`, so `read_metadata` has a chain to walk.
     fn file_with(ifd0: Ifd) -> Vec<u8> {
+        file_with_variant(ifd0, Variant::Classic)
+    }
+
+    /// [`file_with`] in a named container variant, for the axes on which classic and BigTIFF
+    /// differ: the width of a pointer's value word, and therefore its field type.
+    fn file_with_variant(ifd0: Ifd, variant: Variant) -> Vec<u8> {
         write(&TiffFile {
             order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
+            variant,
             ifds: vec![ifd0],
         })
         .expect("write")
+    }
+
+    /// One value of every on-disk field type, keyed by the type's code.
+    ///
+    /// Exhaustive over [`gamut_ifd::FieldType`] by construction: the compiler rejects this match
+    /// the day a field type is added upstream, so no caller of it can silently sweep a set short
+    /// by one — which is exactly the defect that produced the pointer-field regression.
+    fn canonical_value(ty: gamut_ifd::FieldType) -> Value {
+        use gamut_ifd::FieldType as T;
+        match ty {
+            T::Byte => Value::Byte(vec![8]),
+            T::Ascii => Value::Ascii("ab".into()),
+            T::Short => Value::Short(vec![8]),
+            T::Long => Value::Long(vec![8]),
+            T::Rational => Value::Rational(vec![(1, 2)]),
+            T::SByte => Value::SByte(vec![8]),
+            T::Undefined => Value::Undefined(vec![8]),
+            T::SShort => Value::SShort(vec![8]),
+            T::SLong => Value::SLong(vec![8]),
+            T::SRational => Value::SRational(vec![(1, 2)]),
+            T::Float => Value::Float(vec![1.0]),
+            T::Double => Value::Double(vec![1.0]),
+            T::Ifd => Value::Ifd(vec![8]),
+            T::Utf8 => Value::Utf8("ab".into()),
+            T::Long8 => Value::Long8(vec![8]),
+            T::SLong8 => Value::SLong8(vec![8]),
+            T::Ifd8 => Value::Ifd8(vec![8]),
+        }
+    }
+
+    /// Every on-disk field-type code a directory entry can carry, derived by sweeping the whole
+    /// `u16` code space rather than listed by hand.
+    fn every_type_code() -> Vec<u16> {
+        (0..=u16::MAX)
+            .filter(|&code| gamut_ifd::FieldType::from_code(code).is_some())
+            .collect()
+    }
+
+    /// One `Value` per **well-formed** directory entry representable in a file of `variant`: the
+    /// natural variant of every recognised type code, the [`Value::Unknown`] form carrying that
+    /// same code with an opaque value word, and the `Unknown` form at a few codes no field type
+    /// claims.
+    ///
+    /// Derived from [`every_type_code`], so a type added upstream enters this sweep without an
+    /// edit here; the `Unknown` arm exists because it is the one shape whose in-memory variant and
+    /// on-disk code disagree, which is the whole subject of the sweep.
+    ///
+    /// **Well-formed** excludes one thing, and only for the `Unknown` arm: a single value of a
+    /// recognised type wider than the variant's value word would be written *out of line*, and the
+    /// word an `UnknownValue` carries is then a raw file offset a test cannot know. Such an entry
+    /// is unreadable whatever tag it sits under — `Rational` under `Classic` fails
+    /// `read_metadata` with `value offset out of bounds` — so it is a malformed entry rather than a
+    /// misclassified pointer, and this crate cannot refuse it without refusing every vendor entry
+    /// of an unrecognised type read out of a real file. That gap is issue #608, on the constructor
+    /// that admits it. All four pointer codes are still swept: 4 and 13 fit both variants' words,
+    /// 16 and 18 fit BigTIFF's.
+    fn every_representable_value(variant: Variant) -> Vec<(String, Value)> {
+        let word = vec![8u8; variant.offset_size()];
+        let unknown = |code: u16| {
+            Value::Unknown(
+                gamut_ifd::UnknownValue::new(code, 1, &word, ByteOrder::LittleEndian, variant)
+                    .expect("an unknown-type entry of the file's own width"),
+            )
+        };
+        let mut values = Vec::new();
+        for code in every_type_code() {
+            let ty = gamut_ifd::FieldType::from_code(code).expect("a swept code");
+            values.push((format!("{ty:?}({code})"), canonical_value(ty)));
+            if ty.size() <= variant.offset_size() {
+                values.push((format!("Unknown({code})"), unknown(code)));
+            }
+        }
+        // Controls: codes no field type claims, so the entry is unsizable and stays `Unknown` on
+        // the way back — the word is never followed.
+        let unclaimed = (0..=u16::MAX).filter(|&c| gamut_ifd::FieldType::from_code(c).is_none());
+        for code in unclaimed.take(3) {
+            values.push((format!("Unknown({code}, unclaimed)"), unknown(code)));
+        }
+        values
     }
 
     #[test]
@@ -801,6 +921,89 @@ mod tests {
                     err.to_string().contains("may not carry a plain field"),
                     "tag {tag}, {value:?}: {err}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pointer_type_codes_are_exactly_the_codes_the_resolver_follows() {
+        // `POINTER_TYPE_CODES` restates, as on-disk codes, the set `pointer_offsets` restates as
+        // `Value` variants — and the writer now asks the code while the reader still asks the
+        // variant, so the two must not drift. Derived by sweeping the whole `u16` code space
+        // through `FieldType::from_code` and asking `pointer_offsets` about a value of each type,
+        // never by repeating the four numbers: a hand list short by one is the defect this
+        // constant exists to close.
+        let derived: Vec<u16> = every_type_code()
+            .into_iter()
+            .filter(|&code| {
+                let ty = gamut_ifd::FieldType::from_code(code).expect("a swept code");
+                pointer_offsets(&canonical_value(ty)).is_some()
+            })
+            .collect();
+        assert_eq!(
+            derived, POINTER_TYPE_CODES,
+            "the codes the reader follows must be exactly the codes the writer refuses"
+        );
+    }
+
+    #[test]
+    fn every_value_the_writer_accepts_under_a_pointer_tag_reads_back_as_a_field() {
+        // The regression this crate kept reopening, stated at the boundary it kept breaking at.
+        // `check` was shaped by the `Value` variant while the reader classifies by the on-disk
+        // type code, and `Value::Unknown` is the one shape where those disagree: built at code 4,
+        // 13, 16 or 18 it is a plain field to a variant-shaped predicate and a pointer to the
+        // reader, so it encoded cleanly and then failed `read_metadata` — or, in BigTIFF at the
+        // top level, came back as a *group* where a field was written.
+        //
+        // The sweep is derived, not listed: every representable entry type (natural and `Unknown`
+        // at every code) x the four pointer tags x classic and BigTIFF x on the Exif directory
+        // itself and one level below it. Only accepted sets are exercised; that the refused ones
+        // are exactly the pointer-coded ones is
+        // `the_pointer_type_codes_are_exactly_the_codes_the_resolver_follows`.
+        for variant in [Variant::Classic, Variant::Big] {
+            for (name, value) in every_representable_value(variant) {
+                for &tag in EXIF_SUBTREE_POINTER_TAGS {
+                    for nested in [false, true] {
+                        let mut carrier = exif_ifd();
+                        carrier.set(tag, value.clone());
+                        let mut exif = exif_ifd();
+                        if nested {
+                            exif.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![carrier]);
+                        } else {
+                            exif = carrier;
+                        }
+                        let meta = TiffMetadata::new().with_exif(exif.clone());
+                        if meta.check().is_err() {
+                            continue;
+                        }
+                        let where_ = format!("{name} under {tag}, {variant:?}, nested={nested}");
+                        let mut ifd0 = Ifd::new();
+                        meta.apply(&mut ifd0);
+                        let bytes = file_with_variant(ifd0, variant);
+                        let back = read_metadata(&bytes)
+                            .unwrap_or_else(|e| panic!("{where_}: accepted but unreadable: {e}"))
+                            .exif
+                            .unwrap_or_else(|| panic!("{where_}: accepted but no Exif directory"));
+                        let carrier = if nested {
+                            back.sub_ifds()
+                                .iter()
+                                .find(|group| group.tag == tags::INTEROPERABILITY_IFD)
+                                .and_then(|group| group.ifds.first())
+                                .cloned()
+                                .unwrap_or_else(|| panic!("{where_}: the nested directory"))
+                        } else {
+                            back
+                        };
+                        assert!(
+                            carrier.get(tag).is_some(),
+                            "{where_}: must come back a field, not be followed as an offset"
+                        );
+                        assert!(
+                            carrier.sub_ifds().iter().all(|group| group.tag != tag),
+                            "{where_}: a field must not come back a group"
+                        );
+                    }
+                }
             }
         }
     }
