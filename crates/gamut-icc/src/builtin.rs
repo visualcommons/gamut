@@ -937,7 +937,9 @@ mod tests {
         /// encoding may introduce.
         const HALF_QUANTUM: f64 = 7.629_394_531_25e-6;
         /// `(2 ^ 31 − 0.5) / 65 536` — the smallest gamma whose parameter clamps to `i32::MAX`.
-        const SATURATING: f64 = 32_767.999_992_370_605_468_75;
+        /// Exactly 32 767.999 992 370 605 468 75, written at the shortest decimal that names
+        /// that `f64` and no other.
+        const SATURATING: f64 = 32_767.999_992_370_605;
 
         for gamma in [HALF_QUANTUM, 1.0, 2.2, SATURATING.next_down()] {
             let profile = IccProfile::gray_with_gamma(gamma)
