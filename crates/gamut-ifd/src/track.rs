@@ -53,12 +53,17 @@ impl ReadLedger {
             return;
         }
         let new_start = self.spans[i].start.min(start);
-        let mut new_end = end;
-        let mut j = i;
-        while j < self.spans.len() && self.spans[j].start <= end {
-            new_end = new_end.max(self.spans[j].end());
-            j += 1;
-        }
+        // The spans that merge are the run from `i` whose starts still reach `end`; taking that
+        // run as a sub-slice is what bounds the walk. A hand-advanced index is bounded instead
+        // by its own arithmetic being right -- `j *= 1` never advances one -- and the loop it
+        // drove could then be reported only as a mutation-testing timeout, never as a wrong
+        // answer (issue #110).
+        let merge_len = self.spans[i..]
+            .iter()
+            .take_while(|s| s.start <= end)
+            .count();
+        let j = i + merge_len;
+        let new_end = self.spans[i..j].iter().fold(end, |e, s| e.max(s.end()));
         self.spans.splice(
             i..j,
             [Range {
