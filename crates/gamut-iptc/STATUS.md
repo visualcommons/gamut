@@ -30,14 +30,78 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
 | P5 | IPTC mapping | **Keystone** — IIM ↔ XMP reconciliation (precedence policy + date split/join) | ✅ |
 | P6 | — | IIM/IRB writer round-trip + exiv2 differential gate (`tooling/gamut-iptc-oracle`) | ✅ |
 | v1 | issue #182 | API finalization (two entry points, published field map, complete Core accessors), strict-write/honest-read error contract, tech-reference drift guard, divan benches, docs | ✅ |
+| P7 | issue #422 | Breadth: the complete IIM 4.2 record-1/record-2 tag table, and typed models for the four most-used structured properties (`extension`) | ✅ |
 
-## Deferred / out of scope (v1)
+## Breadth (issue #422)
+
+- **Structured properties.** `extension` models `Iptc4xmpCore:CreatorContactInfo`,
+  `Iptc4xmpExt:ImageRegion` (with `RegionBoundary`/`RegionBoundaryPoint`/`Entity`),
+  `Iptc4xmpExt:ArtworkOrObject` and `plus:Licensor` as typed projections over the XMP graph, in the
+  `from_xmp`/`to_xmp` shape `gamut_exif::GpsInfo` uses for its sub-IFD. Every one is XMP-only — none
+  carries an `IIMid` — so none extends the reconciliation surface; `tests/techreference.rs` pins
+  that, and each structure's field set, to the reference. Reading a structure and writing it back
+  changes nothing: a field is taken into the typed value only when the property the writer will
+  emit for it *reproduces* the field that was read — value, RDF container kind and qualifiers —
+  and every other field is kept in the type's `other` list and re-emitted verbatim. That one rule
+  covers a field the model does not name, one it names but cannot read, and one it can read but
+  could not write back as it stands (an `rdf:resource` where the model writes element text, a
+  qualifier, a language beside the default, an unexpected container kind, a coordinate with no XMP
+  `Real` value). Only two differences remain, both idempotent: a structure's fields come back in
+  the model's order, and a number or an `x-default` tag may be re-spelled.
+- **IIM tag table.** `iim::IimTagInfo` now names every dataset IPTC-IIM 4.2 states an octet maximum
+  for that `max_octets` can hold: 14 Envelope + 56 Application datasets (chapters 5 and 6 bar
+  `2:202`), plus `7:10` Size Mode, the one dataset outside those chapters whose length the spec
+  fixes ("one octet"). The table is descriptive — no `FIELD_MAP` row references a dataset outside
+  the PMD-mapped subset — so reading, merging and writing are byte-for-byte unchanged by it.
+- **Authority.** The PMD tech reference maps only the ~20 IIM-mapped rows and the `ipmd_struct`
+  field sets, both of which `tests/techreference.rs` re-derives at test time. The rest of the
+  record-1/2 table comes from `iim-4.2.pdf`, and both of its guards read a source outside this
+  crate:
+  - **names** — the standard sets every DataSet's name in a column of its own, which
+    `pdftotext -bbox-layout` recovers by position. `tests/data/extract-iim-names.py` does that and
+    writes `tests/data/iim-4.2-dataset-names.tsv`; `iim`'s own
+    `tag_table_names_match_the_standards_own_dataset_names` compares every row against it, and
+    against the six datasets the standard names that gamut deliberately does not. The extraction is
+    not run by the gate — `pdftotext` is a system package the toolchain does not provision — so its
+    output is committed as a derived artefact with the command that regenerates it recorded beside
+    it. A name mistyped in `KNOWN_TAGS` alone fails there. A name mistyped *identically* in
+    `KNOWN_TAGS` and in the committed `.tsv` does not: the guard compares the table against the
+    artefact, and nothing re-derives the artefact from the PDF. What carries that residual is the
+    artefact's own never-hand-edit banner, not a gate — having CI re-derive it where `pdftotext`
+    is present is issue #623.
+  - **octet maximum, repeatability and value kind** — stated in the standard's prose, so
+    `tag_table_matches_the_exiv2_dataset_table` compares them against exiv2's independent
+    transcription of the same chapters, parsed out of the vendored `third_party/exiv2` sources. A
+    slipped digit fails there, which no round trip can see.
+
+  The structural laws (ordering, uniqueness, the fixed date/time form lengths) and the exiv2 wire
+  differential in `tests/oracle.rs` sit alongside them.
+
+## Deferred / out of scope
 
 Intentional, documented skips — none lose data on round-trip:
 
-- **IPTC Extension structures** (image regions, artwork/object, licensors, locations shown, …) and
-  the structured `Iptc4xmpCore:CreatorContactInfo`: no typed model. They pass through
+- **A structured field the projection cannot express reads as absent** — a URL held as
+  `rdf:resource`, a value carrying a qualifier, a language alternative with entries beside the
+  default, an unexpected container kind. Nothing is lost: the field is in the type's `other` list
+  and the graph keeps it verbatim. Whether the model should widen to report the value as well is
+  issue #609.
+- **A whole structured property the projection cannot express reads as absent, on the same terms.**
+  `creator_contact_info`, `image_regions`, `artwork_or_objects` and `licensors` report a value only
+  when writing it back would give the property back — so a bare structure written where the standard
+  puts an array, an array member that is not a structure, a qualifier on the property or on an
+  `rdf:li`, an array or structure holding nothing, and two top-level properties of one name all read
+  as nothing. Nothing is lost: the graph keeps the property untouched, and the setter beside the
+  accessor does not remove what the accessor did not report. Reading a property and setting it back
+  is the identity, pinned by a generated cross of every pair, value shape and qualifier list.
+- **The remaining eleven IPTC Extension structures** (`Location`, `PersonWDetails`, `CvTerm`,
+  `EntityWRole`, `ProductWGtin`, `RegistryEntry`, `EmbdEncRightsExpr`, `LinkedEncRightsExpr`,
+  `CopyrightOwner`, `ImageCreator`, `ImageSupplier`): no typed model — issue #538. They pass through
   `PhotoMetadata::xmp` as raw `gamut-xmp` values untouched.
+- **IIM datasets with no octet maximum `max_octets` can state** (`2:202`, and records 7–9 apart from
+  `7:10`): not in the tag table, because `IimTagInfo::max_octets` is a `u16` and can only state a
+  determinate maximum — issue #539, whose remainder is six datasets, `7:10` having since been named.
+  They still round-trip byte-exact, as every unmodeled dataset in any record does.
 - **Exotic ISO 2022 character sets**: dataset 1:90 designations other than the spec default
   (decoded as Latin-1, the exiv2/ExifTool de-facto reading of ISO 646 IRV) and UTF-8 (`ESC % G`)
   are reported as `Error::Unsupported`, never mis-decoded.
@@ -50,8 +114,10 @@ Intentional, documented skips — none lose data on round-trip:
 - **Length limits are write-side only** (strict-write/honest-read contract): `IptcWriter` rejects
   overlong or unencodable values and IIM-inexpressible `DateCreated`s; the parser accepts and
   preserves overlong wire values rather than reject real-world files.
-- **IIM records 3–9**: no named tag-table entries (the table covers the structural record-1 and
-  PMD-mapped record-2 datasets); all unmodeled datasets in any record round-trip byte-exact.
+- **IIM records 3–6**: no named tag-table entries, because IIM 4.2 defines no datasets for them —
+  record 3 (Digital Newsphoto Parameter) is a separate publication, records 4 and 5 are not
+  allocated, and record 6 (Abstract Relationship) has only the method identifiers of Appendix F.
+  Datasets in those records round-trip byte-exact, unnamed.
 
 ## Reference discrepancies
 

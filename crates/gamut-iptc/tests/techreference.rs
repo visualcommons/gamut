@@ -2,14 +2,20 @@
 //! technical reference vendored in `references/iptc/iptc-pmd-techreference_2025.1.json`.
 //!
 //! [`gamut_iptc::schema::FIELD_MAP`] and the [`gamut_iptc::IimTagInfo`] table are transcribed from
-//! that file (the `ipmd_top` entries carrying an `IIMid`). These tests re-derive the mapping from
-//! the JSON at test time and compare, so any transcription slip — or a future IPTC release changing
-//! the reference — fails loudly instead of silently drifting. The versioned filename makes bumping
-//! to a new IPTC edition a deliberate act that re-runs this gate.
+//! that file (the `ipmd_top` entries carrying an `IIMid`), and so are the typed structures of
+//! [`gamut_iptc::extension`] (the `ipmd_struct` entries). These tests re-derive both from the JSON
+//! at test time and compare, so any transcription slip — or a future IPTC release changing the
+//! reference — fails loudly instead of silently drifting. The versioned filename makes bumping to a
+//! new IPTC edition a deliberate act that re-runs this gate.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use gamut_iptc::extension::{
+    ArtworkOrObject, CreatorContactInfo, Entity, ImageRegion, Licensor, RegionBoundary,
+    RegionBoundaryPoint,
+};
 use gamut_iptc::schema::{FIELD_MAP, XmpShape, ns};
+use gamut_iptc::xmp::{XmpProperty, XmpValue};
 use gamut_iptc::{IimTagInfo, PhotoMetadata};
 use serde_json::Value;
 
@@ -58,8 +64,35 @@ fn ns_prefix(uri: &str) -> &'static str {
         _ if uri == ns::XMP_RIGHTS => "xmpRights",
         _ if uri == ns::IPTC_CORE => "Iptc4xmpCore",
         _ if uri == ns::IPTC_EXT => "Iptc4xmpExt",
-        _ => panic!("FIELD_MAP references a namespace outside the IPTC set: {uri}"),
+        _ if uri == ns::PLUS => "plus",
+        _ if uri == ns::XMP => "xmp",
+        _ => panic!("gamut references a namespace outside the IPTC set: {uri}"),
     }
+}
+
+/// The `XMPid`s the reference gives the fields of the `ipmd_struct` entry named `structure`,
+/// skipping the wildcard `$anypmdproperty` row (which has no identity of its own).
+fn struct_field_ids(doc: &Value, structure: &str) -> BTreeSet<String> {
+    doc["ipmd_struct"][structure]
+        .as_object()
+        .unwrap_or_else(|| panic!("ipmd_struct has no {structure} entry"))
+        .values()
+        .filter_map(|field| match field["XMPid"].as_str() {
+            Some("") | None => None,
+            Some(id) => Some(id.to_owned()),
+        })
+        .collect()
+}
+
+/// The `prefix:name` of every field a structure value carries.
+fn emitted_field_ids(value: &XmpValue) -> BTreeSet<String> {
+    let XmpValue::Structured(fields) = value else {
+        panic!("to_xmp must produce a structure value");
+    };
+    fields
+        .iter()
+        .map(|p: &XmpProperty| format!("{}:{}", ns_prefix(&p.namespace), p.name))
+        .collect()
 }
 
 /// The IIM↔XMP mapping must be a bijection between FIELD_MAP and the JSON's IIMid-bearing rows:
@@ -165,5 +198,209 @@ fn shapes_match_techreference_occurrence_and_type() {
             pm.set_field(&row.xmp, &["a", "b"]);
             assert_eq!(pm.get_field(&row.xmp), ["a", "b"], "{}", row.xmp.name);
         }
+    }
+}
+
+/// A [`CreatorContactInfo`] with every field set, so `to_xmp` emits the whole structure.
+///
+/// The extension structures are `#[non_exhaustive]` — a future IPTC edition adding a field must
+/// not be a breaking change — so a downstream caller builds one from [`Default`] and assigns.
+fn full_contact() -> CreatorContactInfo {
+    let mut it = CreatorContactInfo::default();
+    it.address = Some("1 Rue Test".to_owned());
+    it.city = Some("Lyon".to_owned());
+    it.country = Some("France".to_owned());
+    it.postal_code = Some("69000".to_owned());
+    it.region = Some("Rhône".to_owned());
+    it.email = Some("a@example.org".to_owned());
+    it.phone = Some("+33 1 23".to_owned());
+    it.web_url = Some("https://example.org/".to_owned());
+    it
+}
+
+/// An [`ArtworkOrObject`] with every field set.
+fn full_artwork() -> ArtworkOrObject {
+    let mut it = ArtworkOrObject::default();
+    it.title = Some("Sunflowers".to_owned());
+    it.creator_names = vec!["Van Gogh".to_owned()];
+    it.creator_identifiers = vec!["urn:creator".to_owned()];
+    it.date_created = Some("1888-08".to_owned());
+    it.circa_date_created = Some("circa 1888".to_owned());
+    it.copyright_notice = Some("Public domain".to_owned());
+    it.current_copyright_owner_name = Some("Owner".to_owned());
+    it.current_copyright_owner_identifier = Some("urn:owner".to_owned());
+    it.current_licensor_name = Some("Licensor".to_owned());
+    it.current_licensor_identifier = Some("urn:licensor".to_owned());
+    it.content_description = Some("Vase with flowers".to_owned());
+    it.contribution_description = Some("Restored 1980".to_owned());
+    it.physical_description = Some("Oil on canvas".to_owned());
+    it.source = Some("National Gallery".to_owned());
+    it.source_inventory_number = Some("NG3863".to_owned());
+    it.source_inventory_url = Some("https://example.org/NG3863".to_owned());
+    it.style_periods = vec!["Post-Impressionism".to_owned()];
+    it
+}
+
+/// A [`Licensor`] with every field set.
+fn full_licensor() -> Licensor {
+    let mut it = Licensor::default();
+    it.identifier = Some("urn:licensor".to_owned());
+    it.name = Some("Agence gamut".to_owned());
+    it.address = Some("2 Rue Test".to_owned());
+    it.address_detail = Some("Floor 3".to_owned());
+    it.city = Some("Paris".to_owned());
+    it.region = Some("Île-de-France".to_owned());
+    it.postal_code = Some("75001".to_owned());
+    it.country = Some("France".to_owned());
+    it.telephone_type1 = Some("work".to_owned());
+    it.telephone1 = Some("+33 1 11".to_owned());
+    it.telephone_type2 = Some("cell".to_owned());
+    it.telephone2 = Some("+33 6 22".to_owned());
+    it.email = Some("licence@example.org".to_owned());
+    it.web_url = Some("https://example.org/licence".to_owned());
+    it
+}
+
+/// An [`Entity`] with every field set.
+fn full_entity() -> Entity {
+    let mut it = Entity::default();
+    it.identifiers = vec!["https://cv.iptc.org/newscodes/imageregiontype/human".to_owned()];
+    it.name = Some("Human".to_owned());
+    it
+}
+
+/// A [`RegionBoundaryPoint`] with both coordinates set.
+fn full_point() -> RegionBoundaryPoint {
+    let mut it = RegionBoundaryPoint::default();
+    it.x = Some(1.0);
+    it.y = Some(2.0);
+    it
+}
+
+/// A [`RegionBoundary`] with every field set. The shapes are mutually exclusive in practice, but
+/// the reference defines all seven scalars plus the vertex list on the one structure.
+fn full_boundary() -> RegionBoundary {
+    let mut it = RegionBoundary::default();
+    it.shape = Some("polygon".to_owned());
+    it.unit = Some("relative".to_owned());
+    it.x = Some(0.25);
+    it.y = Some(0.5);
+    it.width = Some(0.125);
+    it.height = Some(0.0625);
+    it.radius = Some(0.1);
+    it.vertices = vec![full_point()];
+    it
+}
+
+/// An [`ImageRegion`] with every modelled field set and no extra properties.
+fn full_region() -> ImageRegion {
+    let mut it = ImageRegion::default();
+    it.boundary = Some(full_boundary());
+    it.identifier = Some("region-1".to_owned());
+    it.name = Some("Face".to_owned());
+    it.content_types = vec![full_entity()];
+    it.roles = vec![full_entity()];
+    it
+}
+
+/// Each typed structure must emit exactly the fields the reference's `ipmd_struct` entry defines —
+/// no invented field, none missed, and none under a mistyped namespace prefix.
+#[test]
+fn extension_structures_match_techreference_field_sets() {
+    let doc = techreference();
+    let cases: [(&str, XmpValue); 7] = [
+        ("CreatorContactInfo", full_contact().to_xmp()),
+        ("ArtworkOrObject", full_artwork().to_xmp()),
+        ("Licensor", full_licensor().to_xmp()),
+        ("Entity", full_entity().to_xmp()),
+        ("RegionBoundaryPoint", full_point().to_xmp()),
+        ("RegionBoundary", full_boundary().to_xmp()),
+        ("ImageRegion", full_region().to_xmp()),
+    ];
+    for (structure, value) in cases {
+        assert_eq!(
+            emitted_field_ids(&value),
+            struct_field_ids(&doc, structure),
+            "{structure} fields drifted from the tech reference"
+        );
+    }
+}
+
+/// The typed structures must sit on the `ipmd_top` properties the reference names, with the
+/// structure type it names — a projection hung on the wrong property would still round-trip.
+#[test]
+fn extension_accessors_target_the_techreference_top_properties() {
+    let doc = techreference();
+    let top = doc["ipmd_top"].as_object().expect("ipmd_top is an object");
+    // (reference key, expected XMPid, expected structure name)
+    let expected = [
+        (
+            "creatorContactInfo",
+            "Iptc4xmpCore:CreatorContactInfo",
+            "CreatorContactInfo",
+        ),
+        ("imageRegion", "Iptc4xmpExt:ImageRegion", "ImageRegion"),
+        (
+            "artworkOrObjects",
+            "Iptc4xmpExt:ArtworkOrObject",
+            "ArtworkOrObject",
+        ),
+        ("licensors", "plus:Licensor", "Licensor"),
+    ];
+    for (key, xmp_id, structure) in expected {
+        let entry = &top[key];
+        assert_eq!(entry["XMPid"].as_str(), Some(xmp_id), "{key} XMPid");
+        assert_eq!(
+            entry["dataformat"].as_str(),
+            Some(structure),
+            "{key} structure"
+        );
+    }
+
+    // The accessors write those exact properties: four values in, four properties out.
+    let mut pm = PhotoMetadata::new();
+    pm.set_creator_contact_info(&full_contact());
+    pm.set_image_regions(&[full_region()]);
+    pm.set_artwork_or_objects(&[full_artwork()]);
+    pm.set_licensors(&[full_licensor()]);
+    let written: BTreeSet<String> = pm
+        .xmp
+        .properties
+        .iter()
+        .map(|p| format!("{}:{}", ns_prefix(&p.namespace), p.name))
+        .collect();
+    let named: BTreeSet<String> = expected.iter().map(|&(_, id, _)| id.to_owned()).collect();
+    assert_eq!(written, named);
+}
+
+/// Every structured property gamut models is XMP-only in the reference — no `IIMid`, and so no row
+/// in `FIELD_MAP`. That is what makes a structured field unable to conflict with the legacy
+/// carrier, so it is pinned to the reference rather than merely documented.
+#[test]
+fn modelled_structured_properties_carry_no_iim_counterpart() {
+    let doc = techreference();
+    let top = doc["ipmd_top"].as_object().expect("ipmd_top is an object");
+    for key in [
+        "creatorContactInfo",
+        "imageRegion",
+        "artworkOrObjects",
+        "licensors",
+    ] {
+        assert!(
+            top[key].get("IIMid").is_none(),
+            "{key} has an IIM counterpart, so it can conflict and needs a reconciliation rule"
+        );
+    }
+    // ...and none of them is in the IIM<->XMP map, whose rows are exactly the IIMid-bearing ones.
+    for name in [
+        "CreatorContactInfo",
+        "ImageRegion",
+        "ArtworkOrObject",
+        "Licensor",
+    ] {
+        assert!(
+            !FIELD_MAP.iter().any(|row| row.xmp.name == name),
+            "{name} is reconciled but has no IIM dataset"
+        );
     }
 }
