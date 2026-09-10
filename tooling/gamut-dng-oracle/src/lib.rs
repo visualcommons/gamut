@@ -53,6 +53,18 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> c_int;
 
+    /// Decodes the DNG in `data`/`len` from memory and reports the stage-1 image's geometry and
+    /// sample count without exporting the samples; `0` on success, else the SDK error code.
+    /// Nothing is allocated for the caller, so there is nothing to free.
+    fn gdng_decode_dng_in_memory(
+        data: *const u8,
+        len: usize,
+        out_w: *mut u32,
+        out_h: *mut u32,
+        out_planes: *mut u32,
+        out_len: *mut usize,
+    ) -> c_int;
+
     /// Computes the SDK's `NewRawImageDigest` for the DNG at `path` into `out_digest` (16 bytes);
     /// `0` on success, else the SDK error code.
     fn gdng_new_raw_image_digest(path: *const c_char, out_digest: *mut u8) -> c_int;
@@ -274,6 +286,69 @@ pub fn read_linear_dng(bytes: &[u8]) -> Result<AdobeRaw, String> {
     read_image(bytes, gdng_read_linear, "stage-2 linear")
 }
 
+/// The extent of an image the Adobe DNG SDK decoded: its geometry and how many samples it holds.
+///
+/// Deliberately carries no pixels. It is what [`decode_dng_in_memory`] reports, and the point of
+/// that entry is to *not* pay for an export copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedExtent {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Colour planes per pixel.
+    pub planes: u32,
+    /// How many samples the decoded image holds: `width * height * planes`.
+    pub samples: usize,
+}
+
+/// Decodes `bytes` as a DNG with the Adobe DNG SDK **from memory**, returning only the extent of
+/// the stage-1 raw image it produced.
+///
+/// This is the reference implementation's decode reduced to the work gamut's
+/// `DngDecoder::decode` also does, so the two can be timed against each other
+/// (`cargo bench -p gamut-dng --bench codec`):
+///
+/// - no temporary file is written and no `dng_file_stream` is opened — the SDK parses the same
+///   in-memory bytes the Rust caller holds; and
+/// - the decoded image is not exported into a caller-owned buffer, so the extra full-image
+///   `malloc` + `memcpy` that [`read_raw_dng`] must perform to cross the FFI boundary is not
+///   charged to the codec.
+///
+/// Use [`read_raw_dng`] when you want the samples; this one when you want the time.
+///
+/// # Errors
+///
+/// Returns an error message (with the SDK's numeric error code) if the SDK cannot parse the bytes
+/// or read the raw image.
+pub fn decode_dng_in_memory(bytes: &[u8]) -> Result<DecodedExtent, String> {
+    let (mut width, mut height, mut planes): (u32, u32, u32) = (0, 0, 0);
+    let mut samples: usize = 0;
+    // SAFETY: `bytes` outlives the call and the shim only reads `bytes.len()` bytes from it; the
+    // four out-parameters are distinct live locals and the shim allocates nothing for us.
+    let code = unsafe {
+        gdng_decode_dng_in_memory(
+            bytes.as_ptr(),
+            bytes.len(),
+            &mut width,
+            &mut height,
+            &mut planes,
+            &mut samples,
+        )
+    };
+    if code != 0 {
+        return Err(format!(
+            "Adobe DNG SDK could not decode the DNG from memory (code {code})"
+        ));
+    }
+    Ok(DecodedExtent {
+        width,
+        height,
+        planes,
+        samples,
+    })
+}
+
 /// Decodes a **bare lossless-JPEG (SOF3) stream** with the Adobe DNG SDK's own codec — the
 /// reference for gamut-dng's T.81 process-14 decoder (predictors 1–7, point transform,
 /// row-aligned restart intervals).
@@ -334,6 +409,24 @@ mod tests {
         assert!(
             raw.samples.iter().any(|&s| s != 0),
             "stub libjxl would leave the image all-zero"
+        );
+    }
+
+    /// The memory-stream decode reaches the same stage-1 image as the file-stream one, so the
+    /// entry point a benchmark times is not a cheaper, different decode.
+    #[test]
+    fn in_memory_decode_reaches_the_same_image_as_the_file_decode() {
+        let bytes = sample_file("05_PGTM2_unsigned8.dng").expect("sample DNG present");
+        let exported = read_raw_dng(&bytes).expect("file-stream decode");
+        let extent = decode_dng_in_memory(&bytes).expect("memory-stream decode");
+        assert_eq!(
+            (extent.width, extent.height, extent.planes, extent.samples),
+            (
+                exported.width,
+                exported.height,
+                exported.planes,
+                exported.samples.len()
+            )
         );
     }
 

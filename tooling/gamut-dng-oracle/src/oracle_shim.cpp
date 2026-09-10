@@ -141,6 +141,62 @@ extern "C" int gdng_read_raw(const char *path, uint32_t *out_w, uint32_t *out_h,
   }
 }
 
+// Decodes the DNG held in `data`/`len` and reports the extent of the stage-1 (raw) image it
+// produced, without exporting the samples. This is the *timed* decode entry point (issue #163):
+// it exists so a throughput benchmark can compare the reference implementation against gamut's
+// `DngDecoder` on the same terms, and it differs from `gdng_read_raw` in exactly two ways, both
+// of which remove work gamut's decoder does not do either:
+//
+//   * it reads from a memory stream rather than a `dng_file_stream`, so no temporary file is
+//     written and no filesystem is touched inside the measured region, and
+//   * it stops once `ReadStage1Image` has materialised the image, skipping the
+//     `copy_short_image` export pass — an extra full-image `malloc` + `memcpy` that only the FFI
+//     boundary needs.
+//
+// Everything else is the same parse → build-negative → read-stage-1 flow as `gdng_read_raw`.
+// Returns `dng_error_none` on success, or the SDK error code.
+extern "C" int gdng_decode_dng_in_memory(const uint8_t *data, size_t len, uint32_t *out_w,
+                                         uint32_t *out_h, uint32_t *out_planes, size_t *out_len) {
+  *out_w = 0;
+  *out_h = 0;
+  *out_planes = 0;
+  *out_len = 0;
+  if (len > 0xFFFFFFFFu) {
+    return dng_error_bad_format;
+  }
+  try {
+    dng_host host;
+    dng_info info;
+    dng_stream stream(data, static_cast<uint32>(len));
+    info.Parse(host, stream);
+    info.PostParse(host);
+    if (!info.IsValidDNG()) {
+      return dng_error_bad_format;
+    }
+    AutoPtr<dng_negative> negative(host.Make_dng_negative());
+    negative->Parse(host, stream, info);
+    negative->PostParse(host, stream, info);
+    negative->ReadStage1Image(host, stream, info);
+    const dng_image *image = negative->Stage1Image();
+    if (image == nullptr) {
+      return dng_error_unknown;
+    }
+    dng_rect bounds = image->Bounds();
+    uint32 w = static_cast<uint32>(bounds.r - bounds.l);
+    uint32 h = static_cast<uint32>(bounds.b - bounds.t);
+    uint32 planes = image->Planes();
+    *out_w = w;
+    *out_h = h;
+    *out_planes = planes;
+    *out_len = static_cast<size_t>(w) * static_cast<size_t>(h) * static_cast<size_t>(planes);
+  } catch (const dng_exception &except) {
+    return except.ErrorCode();
+  } catch (...) {
+    return dng_error_unknown;
+  }
+  return dng_error_none;
+}
+
 // Reads the DNG at `path` and returns its stage-2 (linearized) image — the SDK's application of
 // the spec's Chapter-5 "Mapping Raw Values to Linear Reference Values": linearization table,
 // black subtraction (pattern + deltas), rescale, clip. The buffer is active-area-sized,
