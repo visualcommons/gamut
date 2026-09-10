@@ -368,45 +368,114 @@ while the SDK's `dng_negative` destructor runs inside its own call. Fixture synt
 `RawImage`/`CameraProfile` build, and the encode that produces the bytes a decode benchmark reads
 are all outside it. Nothing touches the filesystem.
 
-**Whether the comparison is fair.** Two comparisons are published and their biases point in
-opposite directions, which is what makes the pair usable:
+**Whether the comparison is fair.** Every asymmetry between the two implementations is either
+removed or measured; none is left as an adjective.
 
-- `decode_dng_*` **favours the SDK, by a margin the harness prints.** Both sides parse the same
-  in-memory bytes: the oracle gained a timed entry point (`decode_dng_in_memory`) that opens no
-  temporary file and skips the FFI export `memcpy`, so the reference implementation is not charged
-  for the shim. What remains is that `DngDecoder::decode` is a *whole-file* decode while
-  `ReadStage1Image` is not — gamut also unpacks IFD 0's uncompressed RGB preview and rebuilds the
-  metadata. The preview's size is exact (`⌊w/2⌋ × ⌊h/2⌋ × 3` against the raw's `w × h × planes ×
-  2`, i.e. 37.5 % of a 16-bit CFA frame), so the fixture table prints it per case. It is not
-  normalised away: gamut exposes no raw-image-only decode entry point, and adding one so a
-  benchmark reads better would be the wrong direction of causation.
-- `decode_lossless_jpeg_*` **favours gamut, by less.** Same bare SOF3 stream in, same interleaved
-  `Vec<u16>` out, no container work either side; the residual bias is the oracle's export path
-  (spool vector → `malloc`d buffer → `Vec`), two memory-bandwidth passes gamut does not pay.
+- **Neither side pays for the FFI boundary on the way in.** The oracle gained a timed entry point,
+  `decode_dng_in_memory`, which hands the SDK a `dng_stream` over the caller's own bytes: no
+  temporary file, no import copy, the same buffer gamut parses.
+- **Neither side pays for it on the way out, in the container comparison.** That entry point
+  reports the decoded image's extent and exports no samples, so the reference implementation is not
+  charged for a `malloc` + `memcpy` that exists only because the caller is in Rust.
+- **The one asymmetry left in `decode_dng` is the IFD-0 preview** (plus the metadata
+  reconstruction), which `DngDecoder::decode` performs and `ReadStage1Image` does not. The
+  preview's volume is exact — `⌊w/2⌋ × ⌊h/2⌋ × 3` against the raw's `w × h × planes × 2`, i.e.
+  37.5 % of a 16-bit CFA frame and 12.5 % of a `LinearRaw` one — so the harness puts it in gamut's
+  divan counter: the **median-time** column is the uncorrected ratio and the **throughput** column
+  is the preview-corrected one, and a reader has no subtraction to do. The correction charges
+  preview bytes at the raw path's per-byte rate, which is close to exact on the uncompressed cases
+  (both paths just move bytes) and generous to gamut on the compressed ones, where the corrected
+  ratio is therefore a lower bound. It is not normalised away by changing the codec: gamut exposes
+  no raw-image-only decode entry point, and adding one so a benchmark reads better would be the
+  wrong direction of causation.
+- **The one asymmetry left in `decode_lossless_jpeg` is the FFI export path, and a third arm
+  prices it.** `adobe-sdk-no-export` runs the identical `DecodeLosslessJPEG<Scalar>` into the
+  identical spool buffer and stops before the `malloc`/`memcpy`/`Vec` copies. Measured, that path
+  costs the reference implementation **0.3–1.9 %** across two runs, so the codestream comparison is
+  fair to within 2 % — a number rather than a claim.
 
-There is no `encode_adobe_sdk`: the oracle shim wraps the SDK's *reader*, not its writer, so no
-reference encode number exists and none is invented. Encode is reported for gamut alone.
+**Each pair is one benchmark, not two.** `decode_dng` and `decode_lossless_jpeg` take the
+implementation as a divan *argument* rather than living in a benchmark each. Separate benchmarks
+run in name order, which measures every reference case minutes away from its counterpart; on a
+shared machine that drifts, a ratio measured minutes apart is not a ratio. As arguments the pair
+members run back to back under the same instantaneous load, and the argument names are ordered so
+divan's own name sort keeps them adjacent.
+
+There is no `encode` arm for the SDK: the oracle shim wraps the SDK's *reader*, not its writer, so
+no reference encode number exists and none is invented. Encode is reported for gamut alone.
 
 **No absolute figures are pinned here.** Unlike the #196 numbers above — a ratio comparison between
 two encoders in the same process, which is robust to a loaded machine — throughput in MB/s is a
 property of the machine that produced it. Run the harness on the box you care about.
 
-**What the harness found, on its first run.** Two defects, both filed rather than fixed here — a
-benchmark that measures the codec is not the place to change it:
+**What the harness measured.** Two runs, 100 samples each, 512×384 at 16 bits, in a quiet window on
+a shared machine (one-minute load average bracketed by `uptime`: 3.18 → 2.91 for run A, 2.89 → 2.85
+for run B). Ratios only; every row of the matrix is here, including the ones that do not fit a
+tidy story.
 
-- **#583, decode speed.** Every decode path is within 1.25× of the SDK *except* lossless JPEG,
-  which is ~60× slower. `lossless_jpeg::decode_symbol` scans the whole 256-entry code table once
-  per candidate bit length, so a symbol costs ~1000 comparisons where the reference implementation
-  spends one table probe. The isolation is the evidence: nothing else is out by more than a
-  quarter.
-- **#584, CFA lossless-JPEG size.** `cfa/lossless-jpeg` is *larger* than `cfa/uncompressed`
-  (157.4 % of the raw samples against 137.7 %), because the encoder hands the mosaic to
-  `lossless_jpeg::encode` as one full-width component, so predictor 1 differences a red photosite
-  against its green neighbour. Declaring the same samples as `(width / 2, height, 2)` — the
-  reshape DNG 1.7.1.0 p. 20 describes, needing no sample reordering and already readable by this
-  crate's decoder — takes the payload from 119.7 % to 91.5 % of raw.
+Whole-file decode, gamut ÷ Adobe DNG SDK (median time; "corrected" divides out the preview volume
+gamut also unpacks):
 
-Both are byte- or ratio-quantities rather than absolute times, so both reproduce off this box.
+| `decode_dng` case          | run A  | run B  | corrected A | corrected B |
+| -------------------------- | ------ | ------ | ----------- | ----------- |
+| `cfa/uncompressed`         | 2.44×  | 2.39×  | 1.78×       | 1.74×       |
+| `cfa/deflate`              | 0.97×  | 0.94×  | 0.71×       | 0.69×       |
+| `cfa/lossless-jpeg`        | 60.1×  | 57.5×  | 43.7×       | 41.8×       |
+| `linear-raw/uncompressed`  | 1.85×  | 1.76×  | 1.65×       | 1.57×       |
+| `linear-raw/deflate`       | 0.95×  | 0.96×  | 0.85×       | 0.85×       |
+| `linear-raw/lossless-jpeg` | 59.0×  | 58.8×  | 52.4×       | 52.2×       |
+
+Bare codestream decode, which carries no container asymmetry — same SOF3 stream in, same samples
+out, one counter for all three arms:
+
+| `decode_lossless_jpeg` case | gamut ÷ SDK, A | gamut ÷ SDK, B | SDK export path, A | B     |
+| --------------------------- | -------------- | -------------- | ------------------ | ----- |
+| `cfa`                       | 56.7×          | 56.4×          | 1.9 %              | 0.3 % |
+| `linear-raw`                | 58.6×          | 57.5×          | 1.1 %              | 0.7 % |
+
+Interleaving is what makes the small ratios usable at all. Measured as two separate benchmark
+groups, this harness previously reported `cfa/deflate` at 1.24× and `linear-raw/deflate` at 1.25×;
+interleaved, both sit **below** 1.0× — gamut decodes Deflate DNGs slightly *faster* than the
+reference implementation. A 25–30 % shift in a 1.2× ratio is the measurement moving, not the codec.
+
+**What the harness found.** Two defects, both filed rather than fixed here — a benchmark that
+measures the codec is not the place to change it:
+
+- **#583, lossless-JPEG decode speed.** The isolating evidence is the **codestream pair** above,
+  which carries no container asymmetry and whose one residual bias is priced at under 2 %: there
+  gamut is **56–59× slower** than the reference implementation, in both runs, on both photometries.
+  `lossless_jpeg::decode_symbol` scans the whole 256-entry code table once per candidate bit
+  length, so a symbol costs ~1000 comparisons where the reference implementation spends one table
+  probe.
+
+  The whole-file rows are published above in full rather than filtered to the ones that agree. Two
+  of them are not close to parity: `cfa/uncompressed` at 2.4× and `linear-raw/uncompressed` at
+  1.8×. The preview correction explains part of that (1.7–1.8× and 1.6× corrected); the remainder
+  is the fixed IFD and metadata reconstruction, which does not scale with the frame and therefore
+  dominates exactly where the raw path is little more than a `memcpy`. This harness measures that
+  gap and does not attribute it further — and #583's isolation does not rest on it.
+- **#584, CFA lossless-JPEG size.** Quoted throughout against **one** denominator, the raw sample
+  volume (393 216 bytes for this fixture): `cfa/uncompressed` writes a 541 440-byte file (137.7 %)
+  and `cfa/lossless-jpeg` a 618 800-byte one (157.4 %), so turning compression on makes the file
+  **14.3 % larger**. The encoder hands the mosaic to `lossless_jpeg::encode` as one full-width
+  component, so predictor 1 differences a red photosite against its green neighbour. Declaring the
+  same samples as `(width / 2, height, 2)` — the reshape DNG 1.7.1.0 p. 20 describes, which needs
+  no sample reordering and which this crate's decoder already reads — takes the codestream from
+  470 576 bytes to 359 888. Both files carry an identical 148 224 bytes of preview and directory,
+  so the reshaped file would be 508 112 bytes, **129.2 %** of raw: **6.2 % smaller than the
+  uncompressed file**, not the ~33 % a reader gets by chaining the codestream ratio onto the file
+  ratio.
+
+**The fixture table is not a codec gate, and should not become one.** #584's verification section
+proposes pinning the encoder to the sizes this harness prints. It should not be: the margin is a
+property of frame-uniform synthetic gains — one gain per CFA colour across the entire frame, which
+is what makes the interleaved-component reshape win so cleanly — and pinning an encoder requirement
+to a single synthetic fixture is precisely the failure a benchmark harness exists to avoid.
+Re-measure on the real-camera corpus (`mise run fetch-dng-samples`, then `mise run test-dng-real`)
+before the encoder changes, and gate on that if anything is to be gated.
+
+Both defects are byte- or ratio-quantities rather than absolute times, so both reproduce off this
+box.
 
 ## Deferred / out of scope
 
