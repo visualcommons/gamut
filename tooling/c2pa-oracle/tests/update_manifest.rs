@@ -63,22 +63,29 @@ fn c2pa_rs_writes_the_merkle_offset_in_front_of_an_update_store_too() {
     let asset = mid_update_avif().expect("c2pa-rs produces a mid-update file");
     let update = update_slot(&asset).expect("gamut locates the `update` store");
 
-    // The eight bytes immediately before the store are the merkle offset §A.5.3 states for the
-    // other two purposes, written as zero because a still image carries no `merkle` box. Ahead of
-    // them is the NUL that terminates the `box_purpose` string.
+    // The fifteen bytes ahead of the store are `update`, the NUL terminating `box_purpose`, and
+    // the 8-byte merkle offset §A.5.3 states for the other two purposes. Each end is checked
+    // before slicing, the way `box_framing.rs` does it: a store gamut located too close to the
+    // start of the file is a defect this test should *report*, not one it should panic on with a
+    // subtraction overflow that names no side.
+    let purpose = update
+        .start
+        .checked_sub(15)
+        .expect("the `box_purpose` string begins inside the file");
+    let (nul, merkle) = (purpose + 6, purpose + 7);
+
     assert_eq!(
-        &asset[update.start - 8..update.start],
+        &asset[merkle..update.start],
         &[0u8; 8],
         "the reference implementation writes an 8-byte merkle offset in front of an `update` \
          store, so the offset-less layout gamut cannot discriminate is not one it emits"
     );
     assert_eq!(
-        asset[update.start - 9],
-        0,
+        asset[nul], 0,
         "and immediately before it, the NUL terminating `box_purpose`"
     );
     assert_eq!(
-        &asset[update.start - 15..update.start - 9],
+        &asset[purpose..nul],
         b"update",
         "the purpose really is `update`"
     );
