@@ -39,66 +39,75 @@
 //! # Fidelity
 //!
 //! A typed view is a projection, so the model is narrower than the graph — but reading a structure
-//! and writing it back does not lose what the model cannot express. Every type here keeps, in its
-//! `other` list, **every field its typed read took no value from**, and re-emits it verbatim after
-//! the fields it does model. One rule covers both ways a field falls outside the model:
+//! and writing it back loses nothing at all. What decides that is **round-trippability, not
+//! readability**: a field becomes part of the typed value only when the property the writer will
+//! emit for that value *reproduces* the field that was read — same value, same RDF container kind,
+//! same qualifiers. Every other field is kept in the type's `other` list and re-emitted verbatim,
+//! after the fields the model does write.
+//!
+//! One rule therefore covers every way a field falls outside the model:
 //!
 //! - a field the model does not name — a vendor extension, or the "any other metadata property"
 //!   the standard explicitly allows an [`ImageRegion`] to carry;
 //! - a field it names but cannot read — a coordinate whose text is not a number, an identifier
-//!   holding a structure where text belongs, a language alternative with no `x-default` entry. Such
-//!   a field reads as absent, because the typed view will not invent a value for it, and is written
-//!   back unchanged rather than dropped.
+//!   holding a structure where text belongs, a language alternative with no `x-default` entry;
+//! - a field it can read but could not write back as it stands — a URL held as an `rdf:resource`
+//!   where the model writes element text, a value carrying a qualifier, a language alternative
+//!   with entries beyond the default, an `rdf:Seq` or `rdf:Alt` where the model writes an
+//!   `rdf:Bag`, an array holding an item of a kind the model does not take, a bare structure where
+//!   the model writes an array of them, a coordinate that is not a value of the XMP `Real` type
+//!   (`NaN`, an infinity, or a decimal that overflows to one), or two fields of a single name.
+//!
+//! Such a field reads as **absent** — the typed view does not report a value it would go on to
+//! destroy — and survives a read-modify-write untouched.
 //!
 //! What a read-modify-write does change:
 //!
-//! - **field order within a structure**: a structure is re-emitted in the model's field order, with
-//!   the retained fields last. Values, and the relative order of an array's items, are preserved.
-//! - **the other languages of a modelled language alternative**: the model reads the `x-default`
-//!   entry and writes it back as the only entry, so a `dc:title`-style field carrying `en` and `fr`
-//!   alongside the default keeps only the default. (A field with *no* default entry is not read at
-//!   all, so its languages survive verbatim.)
-//! - **an array item of the wrong kind, when the field also holds a right one**: a `Bag` of text
-//!   holding one structure, or a `Bag` of structures holding one text, is read as the items the
-//!   model can take and re-emitted as those. A field holding *only* items of the wrong kind is read
-//!   as nothing, and so is kept verbatim.
-//! - **a non-finite coordinate**: `NaN` and the infinities are not values of the XMP `Real` type, so
-//!   a coordinate set to one through the typed API is skipped on emit rather than written as text
-//!   nothing can read back as a number.
+//! - **field order within a structure**: a structure is re-emitted in the model's field order,
+//!   with the retained fields last. A structure's fields are an unordered set (XMP Part 1 §6.3.3),
+//!   so this is a re-ordering and not a loss; values, and the relative order of an array's items,
+//!   are preserved.
+//! - **the lexical form of a number**: a coordinate written `0.50` is re-emitted as `0.5`.
+//! - **the case of an `x-default` language tag**: an entry tagged `X-Default` is re-emitted as
+//!   `x-default`, which Part 1 §8.2.2.4 matches as the same tag.
+//!
+//! The last two re-spell a value without changing it, and doing them twice changes nothing more,
+//! so they are the only two differences that still count as reproducing a field.
 //!
 //! A retained field whose name the model also carries is emitted only when the modelled field is
 //! not: a structure with two fields of one name is ill-formed and does not read back, so the
 //! modelled value stays the authority when there is one, and the retained field is written when it
 //! is the only copy.
 //!
-//! # Lenient on read, strict on write
+//! # Lenient at the top level, exact inside a structure
 //!
-//! Reading accepts the shapes seen in the wild: a bare structure written where the standard puts an
-//! array of structures reads as that array's single element, and a language alternative written as
-//! plain text reads as its text. Writing always emits the standard form — the array, and the
-//! language alternative — so a read-modify-write normalises rather than propagates.
+//! [`PhotoMetadata`]'s array accessors accept the shapes seen in the wild: a bare structure written
+//! where the standard puts an array of structures reads as that array's single element. Nothing is
+//! at risk there, because reading a property never rewrites it. Inside a structure the same
+//! leniency would normalise the shape away on the way out, so it is not taken — such a field is
+//! retained instead, and reads as absent.
 
-use gamut_xmp::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
+use gamut_xmp::{XML_NAMESPACE, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
 use crate::photo_metadata::PhotoMetadata;
 use crate::schema::ns;
 
-// --- Reading a structure's field list, tracking what the read consumed ------------------------
+// --- Reading a structure's field list, keeping only what the writer can reproduce -------------
 
 /// The language tag of a language alternative's default entry (XMP Part 1 §8.2.2.4).
 const X_DEFAULT: &str = "x-default";
 
-/// A structure's field list under a typed read, remembering which fields the read took a value
-/// from.
+/// A structure's field list under a typed read, remembering which fields the read consumed.
 ///
-/// Retention is decided by *consumption* rather than by a list of modelled names, so the two ways
-/// a field can fall outside the model are handled by one rule: a field the model does not name and
-/// a field it names but cannot read are both left unconsumed, and both end up in the type's `other`
-/// list verbatim (see the [module docs](self)).
+/// A field is consumed only when the property the writer will emit for the value read *reproduces*
+/// that field (see [`reproduces`]); every other field is left for the type's `other` list and
+/// re-emitted verbatim. Deciding it on the write side rather than on the read side is what makes
+/// the three ways a field can fall outside the model — unnamed, unreadable, unwritable — one rule
+/// (see the [module docs](self)).
 struct Reader<'a> {
     /// The fields being read.
     fields: &'a [XmpProperty],
-    /// Whether the read took a value from the field at the same index.
+    /// Whether the read consumed the field at the same index.
     used: Vec<bool>,
 }
 
@@ -111,96 +120,100 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Reads the field named `ns:name` through `read`, marking it consumed only if `read` yields a
-    /// value.
+    /// Reads the field named `ns:name` through `parse`, and keeps the value only when the property
+    /// `write` will emit for it reproduces the field that was read.
+    ///
+    /// Two fields of one name are never read: only one of them could be written back, so both are
+    /// left to be kept verbatim instead.
     fn read<T>(
         &mut self,
         ns: &str,
         name: &str,
-        read: impl FnOnce(&'a XmpValue) -> Option<T>,
+        parse: impl FnOnce(&'a XmpValue) -> Option<T>,
+        write: impl FnOnce(&T) -> Option<XmpValue>,
     ) -> Option<T> {
         let fields = self.fields;
-        let index = fields
+        let mut matches = fields
             .iter()
-            .position(|p| p.namespace == ns && p.name == name)?;
-        let value = read(&fields[index].value)?;
+            .enumerate()
+            .filter(|(_, p)| p.namespace == ns && p.name == name);
+        let (index, field) = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        let value = parse(&field.value)?;
+        let emitted = XmpProperty::new(ns, name, write(&value)?);
+        if !reproduces(field, &emitted) {
+            return None;
+        }
         self.used[index] = true;
         Some(value)
     }
 
     /// The simple text of the field named `ns:name`.
     fn text(&mut self, ns: &str, name: &str) -> Option<String> {
-        self.read(ns, name, |value| value.text().map(str::to_owned))
+        self.read(ns, name, parse_text, |value| Some(text_value(value)))
     }
 
-    /// The `x-default` entry of the language-alternative field named `ns:name`, tolerating a plain
-    /// simple value.
-    ///
-    /// The entry is found by its `xml:lang` qualifier, compared case-insensitively as XMP Part 1
-    /// §8.2.2.4 requires — the same match [`XmpMeta::get_lang_alt`] makes on a top-level property.
-    /// An alternative list with no default entry is *not* read: it reads as absent and is kept
-    /// verbatim, rather than having another language relabelled as the default.
+    /// The `x-default` entry of the language-alternative field named `ns:name`.
     fn lang_alt(&mut self, ns: &str, name: &str) -> Option<String> {
-        self.read(ns, name, |value| {
-            match value {
-                XmpValue::Array(XmpArray::Alt(items)) => items
-                    .iter()
-                    .find(|item| {
-                        item.lang()
-                            .is_some_and(|l| l.eq_ignore_ascii_case(X_DEFAULT))
-                    })
-                    .and_then(XmpItem::text),
-                simple => simple.text(),
-            }
-            .map(str::to_owned)
+        self.read(ns, name, parse_lang_alt, |value| {
+            Some(lang_alt_value(value))
         })
     }
 
-    /// Every simple item of the array field named `ns:name` (empty if absent, not an array, or
-    /// holding no simple item — in which case the field stays unconsumed).
-    fn list(&mut self, ns: &str, name: &str) -> Vec<String> {
-        self.read(ns, name, |value| match value {
-            XmpValue::Array(array) => {
-                let texts: Vec<String> = array.texts().map(str::to_owned).collect();
-                (!texts.is_empty()).then_some(texts)
-            }
-            _ => None,
-        })
-        .unwrap_or_default()
+    /// Every simple item of the array field named `ns:name` (empty when the field is absent or the
+    /// read did not consume it).
+    fn list(&mut self, ns: &str, name: &str, ordered: bool) -> Vec<String> {
+        self.read(ns, name, parse_list, |values| list_value(ordered, values))
+            .unwrap_or_default()
     }
 
-    /// The field named `ns:name` parsed as an XMP `Real`; a value that does not parse reads as
-    /// absent and stays unconsumed.
+    /// The field named `ns:name` parsed as an XMP `Real`.
     fn number(&mut self, ns: &str, name: &str) -> Option<f64> {
-        self.read(ns, name, |value| value.text()?.trim().parse().ok())
+        self.read(ns, name, parse_number, |value| number_value(*value))
     }
 
-    /// The single structured field named `ns:name`, read through `parse`.
+    /// The single structured field named `ns:name`, read through `parse` and written through
+    /// `write`.
     fn nested<T>(
         &mut self,
         ns: &str,
         name: &str,
         parse: impl FnOnce(&[XmpProperty]) -> T,
+        write: impl FnOnce(&T) -> XmpValue,
     ) -> Option<T> {
-        self.read(ns, name, |value| structure(value).map(parse))
+        self.read(
+            ns,
+            name,
+            |value| structure(value).map(parse),
+            |value| Some(write(value)),
+        )
     }
 
-    /// Every structure of the array field named `ns:name`, read through `parse` (empty if absent or
-    /// holding no structure, in which case the field stays unconsumed).
+    /// Every structure of the array field named `ns:name`, read through `parse` and written through
+    /// `write` (empty when the field is absent or the read did not consume it).
     fn nested_array<T>(
         &mut self,
         ns: &str,
         name: &str,
+        ordered: bool,
         parse: impl Fn(&[XmpProperty]) -> T,
+        write: impl Fn(&T) -> XmpValue,
     ) -> Vec<T> {
-        self.read(ns, name, |value| {
-            let parsed: Vec<T> = structures(value).into_iter().map(parse).collect();
-            (!parsed.is_empty()).then_some(parsed)
-        })
+        self.read(
+            ns,
+            name,
+            |value| {
+                let parsed: Vec<T> = structures(value).into_iter().map(&parse).collect();
+                (!parsed.is_empty()).then_some(parsed)
+            },
+            |values| nested_array_value(ordered, values.iter().map(&write).collect()),
+        )
         .unwrap_or_default()
     }
 
-    /// Every field the read took nothing from, cloned for verbatim retention.
+    /// Every field the read did not consume, cloned for verbatim retention.
     fn other(self) -> Vec<XmpProperty> {
         let Self { fields, used } = self;
         fields
@@ -227,59 +240,224 @@ fn structures(value: &XmpValue) -> Vec<&[XmpProperty]> {
     }
 }
 
+/// The structure fields of `value`, or `None` if it is not a structure.
+fn structure(value: &XmpValue) -> Option<&[XmpProperty]> {
+    match value {
+        XmpValue::Structured(fields) => Some(fields),
+        _ => None,
+    }
+}
+
+// --- Reproduction: whether writing back what was read gives the field back --------------------
+
+/// Whether `emitted` — the property the writer will produce for the value read from `read` —
+/// reproduces `read`.
+///
+/// Reproduction is equality of value and qualifiers, with the two lexical re-spellings the module
+/// documents allowed: a number may be written in another form for the same value, and a language
+/// tag may be re-cased, because XMP Part 1 §8.2.2.4 matches tags case-insensitively. A structure's
+/// fields are an unordered set (Part 1 §6.3.3), so the model's field order is not a difference; an
+/// array's items are ordered, and its RDF container kind is part of its value (Part 1 §6.3.4).
+fn reproduces(read: &XmpProperty, emitted: &XmpProperty) -> bool {
+    read.namespace == emitted.namespace
+        && read.name == emitted.name
+        && same_value(&read.value, &emitted.value)
+        && same_qualifiers(&read.qualifiers, &emitted.qualifiers)
+}
+
+/// Whether two values carry the same information (see [`reproduces`]).
+fn same_value(read: &XmpValue, emitted: &XmpValue) -> bool {
+    match (read, emitted) {
+        (XmpValue::Simple(read), XmpValue::Simple(emitted)) => {
+            read == emitted || same_number(read, emitted)
+        }
+        (XmpValue::Uri(read), XmpValue::Uri(emitted)) => read == emitted,
+        (XmpValue::Structured(read), XmpValue::Structured(emitted)) => {
+            read.len() == emitted.len()
+                && read
+                    .iter()
+                    .all(|field| emitted.iter().any(|other| reproduces(field, other)))
+        }
+        (XmpValue::Array(read), XmpValue::Array(emitted)) => same_array(read, emitted),
+        _ => false,
+    }
+}
+
+/// Whether two arrays are the same RDF container kind holding the same items in the same order.
+fn same_array(read: &XmpArray, emitted: &XmpArray) -> bool {
+    let items = match (read, emitted) {
+        (XmpArray::Bag(read), XmpArray::Bag(emitted))
+        | (XmpArray::Seq(read), XmpArray::Seq(emitted))
+        | (XmpArray::Alt(read), XmpArray::Alt(emitted)) => (read, emitted),
+        _ => return false,
+    };
+    items.0.len() == items.1.len()
+        && items.0.iter().zip(items.1).all(|(read, emitted)| {
+            same_value(&read.value, &emitted.value)
+                && same_qualifiers(&read.qualifiers, &emitted.qualifiers)
+        })
+}
+
+/// Whether two qualifier lists hold the same qualifiers, matching an `xml:lang` tag
+/// case-insensitively (XMP Part 1 §8.2.2.4).
+fn same_qualifiers(read: &[XmpProperty], emitted: &[XmpProperty]) -> bool {
+    read.len() == emitted.len()
+        && read.iter().all(|qualifier| {
+            emitted
+                .iter()
+                .any(|other| match (lang(qualifier), lang(other)) {
+                    (Some(read), Some(emitted)) => read.eq_ignore_ascii_case(emitted),
+                    _ => reproduces(qualifier, other),
+                })
+        })
+}
+
+/// The tag `qualifier` carries if it is an `xml:lang` qualifier.
+fn lang(qualifier: &XmpProperty) -> Option<&str> {
+    (qualifier.namespace == XML_NAMESPACE && qualifier.name == "lang")
+        .then(|| qualifier.text())
+        .flatten()
+}
+
+/// Whether two texts spell the same finite XMP `Real` (Part 1 §8.2.1) — the difference between
+/// ` 0.50 ` and `0.5`, which the writer's own formatting introduces.
+fn same_number(read: &str, emitted: &str) -> bool {
+    let number = |text: &str| {
+        text.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+    };
+    matches!((number(read), number(emitted)), (Some(read), Some(emitted)) if read == emitted)
+}
+
+// --- The value each modelled field is read from and written back as ---------------------------
+//
+// Every field is read by a `parse_*` and written by the `*_value` beside it, so what the reader
+// compares against is the very value the writer will emit and the two cannot drift apart.
+
+/// The simple text of a value.
+fn parse_text(value: &XmpValue) -> Option<String> {
+    value.text().map(str::to_owned)
+}
+
+/// A simple text value.
+fn text_value(value: &str) -> XmpValue {
+    XmpValue::Simple(value.to_owned())
+}
+
+/// The `x-default` entry of a language alternative, tolerating a plain simple value.
+///
+/// The entry is found by its `xml:lang` qualifier, compared case-insensitively as XMP Part 1
+/// §8.2.2.4 requires — the same match [`XmpMeta::get_lang_alt`] makes on a top-level property. An
+/// alternative list with no default entry reads as absent, rather than having another language
+/// relabelled as the default; one holding a language *beside* the default reads its default and is
+/// then refused by [`reproduces`], because [`lang_alt_value`] would write the other language away.
+fn parse_lang_alt(value: &XmpValue) -> Option<String> {
+    match value {
+        XmpValue::Array(XmpArray::Alt(items)) => items
+            .iter()
+            .find(|item| {
+                item.lang()
+                    .is_some_and(|lang| lang.eq_ignore_ascii_case(X_DEFAULT))
+            })
+            .and_then(XmpItem::text),
+        simple => simple.text(),
+    }
+    .map(str::to_owned)
+}
+
+/// A language alternative holding one `x-default` entry.
+fn lang_alt_value(value: &str) -> XmpValue {
+    XmpValue::Array(XmpArray::Alt(vec![XmpItem::lang_text(
+        X_DEFAULT,
+        value.to_owned(),
+    )]))
+}
+
+/// Every simple item of an array value, or `None` when the value is not an array or holds no
+/// simple item.
+fn parse_list(value: &XmpValue) -> Option<Vec<String>> {
+    match value {
+        XmpValue::Array(array) => {
+            let texts: Vec<String> = array.texts().map(str::to_owned).collect();
+            (!texts.is_empty()).then_some(texts)
+        }
+        _ => None,
+    }
+}
+
+/// An array of simple text, or `None` when there is nothing to write.
+fn list_value(ordered: bool, values: &[String]) -> Option<XmpValue> {
+    array_value(ordered, values.iter().map(XmpItem::simple).collect())
+}
+
+/// A value parsed as an XMP `Real`; text that does not parse reads as absent.
+fn parse_number(value: &XmpValue) -> Option<f64> {
+    value.text()?.trim().parse().ok()
+}
+
+/// An XMP `Real`, or `None` for a value the type has no form for.
+///
+/// `NaN` and the infinities are not values of the XMP `Real` type (Part 1 §8.2.1), so they are
+/// never written — and a coordinate stating one in the graph is therefore never consumed, and is
+/// kept verbatim (see the [module docs](self)).
+fn number_value(value: f64) -> Option<XmpValue> {
+    value
+        .is_finite()
+        .then(|| XmpValue::Simple(value.to_string()))
+}
+
+/// An array of structure values, or `None` when there is nothing to write.
+fn nested_array_value(ordered: bool, values: Vec<XmpValue>) -> Option<XmpValue> {
+    array_value(ordered, values.into_iter().map(XmpItem::new).collect())
+}
+
+/// An `rdf:Seq` when `ordered` and an `rdf:Bag` otherwise, or `None` when there are no items: an
+/// empty array says nothing a missing property does not.
+fn array_value(ordered: bool, items: Vec<XmpItem>) -> Option<XmpValue> {
+    if items.is_empty() {
+        return None;
+    }
+    Some(XmpValue::Array(if ordered {
+        XmpArray::Seq(items)
+    } else {
+        XmpArray::Bag(items)
+    }))
+}
+
 // --- Writing helpers -------------------------------------------------------------------------
+
+/// Appends `ns:name`, unless there is no value to write.
+fn put(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<XmpValue>) {
+    if let Some(value) = value {
+        out.push(XmpProperty::new(ns, name, value));
+    }
+}
 
 /// Appends `ns:name` as simple text, unless the value is absent.
 fn put_text(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<&String>) {
-    if let Some(value) = value {
-        out.push(XmpProperty::new(ns, name, XmpValue::Simple(value.clone())));
-    }
+    put(out, ns, name, value.map(String::as_str).map(text_value));
 }
 
 /// Appends `ns:name` as a language alternative holding one `x-default` item, unless absent.
 fn put_lang_alt(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<&String>) {
-    if let Some(value) = value {
-        let items = vec![XmpItem::lang_text("x-default", value.clone())];
-        out.push(XmpProperty::new(
-            ns,
-            name,
-            XmpValue::Array(XmpArray::Alt(items)),
-        ));
-    }
+    put(out, ns, name, value.map(String::as_str).map(lang_alt_value));
 }
 
 /// Appends `ns:name` as an array of simple text, unless the list is empty.
 fn put_list(out: &mut Vec<XmpProperty>, ns: &str, name: &str, ordered: bool, values: &[String]) {
-    if values.is_empty() {
-        return;
-    }
-    let items = values.iter().map(XmpItem::simple).collect();
-    out.push(XmpProperty::new(
-        ns,
-        name,
-        XmpValue::Array(array(ordered, items)),
-    ));
+    put(out, ns, name, list_value(ordered, values));
 }
 
-/// Appends `ns:name` as an XMP `Real`, unless the value is absent or non-finite.
-///
-/// `NaN` and the infinities are not values of the XMP `Real` type, so they are skipped rather than
-/// written as text (see the [module docs](self)).
+/// Appends `ns:name` as an XMP `Real`, unless the value is absent or has no `Real` form.
 fn put_number(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<f64>) {
-    if let Some(value) = value.filter(|v| v.is_finite()) {
-        out.push(XmpProperty::new(
-            ns,
-            name,
-            XmpValue::Simple(value.to_string()),
-        ));
-    }
+    put(out, ns, name, value.and_then(number_value));
 }
 
 /// Appends `ns:name` as a single structure value, unless absent.
 fn put_nested(out: &mut Vec<XmpProperty>, ns: &str, name: &str, value: Option<XmpValue>) {
-    if let Some(value) = value {
-        out.push(XmpProperty::new(ns, name, value));
-    }
+    put(out, ns, name, value);
 }
 
 /// Appends `ns:name` as an array of structure values, unless the list is empty.
@@ -290,46 +468,24 @@ fn put_nested_array(
     ordered: bool,
     values: Vec<XmpValue>,
 ) {
-    if values.is_empty() {
-        return;
-    }
-    let items = values.into_iter().map(XmpItem::new).collect();
-    out.push(XmpProperty::new(
-        ns,
-        name,
-        XmpValue::Array(array(ordered, items)),
-    ));
-}
-
-/// A `Seq` when `ordered`, otherwise a `Bag`.
-fn array(ordered: bool, items: Vec<XmpItem>) -> XmpArray {
-    if ordered {
-        XmpArray::Seq(items)
-    } else {
-        XmpArray::Bag(items)
-    }
-}
-
-/// The structure fields of `value`, or `None` if it is not a structure.
-fn structure(value: &XmpValue) -> Option<&[XmpProperty]> {
-    match value {
-        XmpValue::Structured(fields) => Some(fields),
-        _ => None,
-    }
+    put(out, ns, name, nested_array_value(ordered, values));
 }
 
 // --- Verbatim retention of the fields a typed read did not consume ---------------------------
 
-/// Appends the retained fields, skipping one whose `(namespace, name)` a field already emitted
-/// carries.
+/// Appends the retained fields, skipping one whose `(namespace, name)` a *modelled* field already
+/// emitted carries.
 ///
 /// The retention list is public, so a caller can put a name the model also carries in it. Emitting
 /// both would produce a structure with two fields of one name, which is ill-formed and does not
-/// read back — so a namesake is dropped, but only when the modelled field was actually emitted.
-/// When it was not, the retained field is the only copy of that name and is written.
+/// read back — so a namesake of a modelled field is dropped, but only when that field was actually
+/// emitted. When it was not, the retained field is the only copy of that name and is written; and
+/// two retained fields of one name are both written, because dropping either would lose a field
+/// the graph carries.
 fn put_other(out: &mut Vec<XmpProperty>, other: &[XmpProperty]) {
+    let modelled = out.len();
     for property in other {
-        if !out
+        if !out[..modelled]
             .iter()
             .any(|p| p.namespace == property.namespace && p.name == property.name)
         {
@@ -480,8 +636,8 @@ impl ArtworkOrObject {
         let mut r = Reader::new(f);
         Self {
             title: r.lang_alt(ns::IPTC_EXT, "AOTitle"),
-            creator_names: r.list(ns::IPTC_EXT, "AOCreator"),
-            creator_identifiers: r.list(ns::IPTC_EXT, "AOCreatorId"),
+            creator_names: r.list(ns::IPTC_EXT, "AOCreator", true),
+            creator_identifiers: r.list(ns::IPTC_EXT, "AOCreatorId", true),
             date_created: r.text(ns::IPTC_EXT, "AODateCreated"),
             circa_date_created: r.text(ns::IPTC_EXT, "AOCircaDateCreated"),
             copyright_notice: r.text(ns::IPTC_EXT, "AOCopyrightNotice"),
@@ -495,7 +651,7 @@ impl ArtworkOrObject {
             source: r.text(ns::IPTC_EXT, "AOSource"),
             source_inventory_number: r.text(ns::IPTC_EXT, "AOSourceInvNo"),
             source_inventory_url: r.text(ns::IPTC_EXT, "AOSourceInvURL"),
-            style_periods: r.list(ns::IPTC_EXT, "AOStylePeriod"),
+            style_periods: r.list(ns::IPTC_EXT, "AOStylePeriod", false),
             other: r.other(),
         }
     }
@@ -766,7 +922,7 @@ impl Entity {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            identifiers: r.list(ns::XMP, "Identifier"),
+            identifiers: r.list(ns::XMP, "Identifier", false),
             name: r.lang_alt(ns::IPTC_EXT, "Name"),
             other: r.other(),
         }
@@ -875,7 +1031,13 @@ impl RegionBoundary {
             width: r.number(ns::IPTC_EXT, "rbW"),
             height: r.number(ns::IPTC_EXT, "rbH"),
             radius: r.number(ns::IPTC_EXT, "rbRx"),
-            vertices: r.nested_array(ns::IPTC_EXT, "rbVertices", RegionBoundaryPoint::from_fields),
+            vertices: r.nested_array(
+                ns::IPTC_EXT,
+                "rbVertices",
+                true,
+                RegionBoundaryPoint::from_fields,
+                RegionBoundaryPoint::to_xmp,
+            ),
             other: r.other(),
         }
     }
@@ -948,11 +1110,28 @@ impl ImageRegion {
     fn from_fields(f: &[XmpProperty]) -> Self {
         let mut r = Reader::new(f);
         Self {
-            boundary: r.nested(ns::IPTC_EXT, "RegionBoundary", RegionBoundary::from_fields),
+            boundary: r.nested(
+                ns::IPTC_EXT,
+                "RegionBoundary",
+                RegionBoundary::from_fields,
+                RegionBoundary::to_xmp,
+            ),
             identifier: r.text(ns::IPTC_EXT, "rId"),
             name: r.lang_alt(ns::IPTC_EXT, "Name"),
-            content_types: r.nested_array(ns::IPTC_EXT, "rCtype", Entity::from_fields),
-            roles: r.nested_array(ns::IPTC_EXT, "rRole", Entity::from_fields),
+            content_types: r.nested_array(
+                ns::IPTC_EXT,
+                "rCtype",
+                false,
+                Entity::from_fields,
+                Entity::to_xmp,
+            ),
+            roles: r.nested_array(
+                ns::IPTC_EXT,
+                "rRole",
+                false,
+                Entity::from_fields,
+                Entity::to_xmp,
+            ),
             other: r.other(),
         }
     }
@@ -1007,20 +1186,14 @@ fn read_array<T>(xmp: &XmpMeta, ns: &str, name: &str, parse: fn(&[XmpProperty]) 
 /// [`PhotoMetadata::set_creator_contact_info`] does not write an empty structure: a reader would
 /// otherwise report it as present but blank.
 fn write_bag(xmp: &mut XmpMeta, ns: &str, name: &str, values: Vec<XmpValue>) {
-    let items: Vec<XmpItem> = values
+    let values: Vec<XmpValue> = values
         .into_iter()
         .filter(|value| !structure(value).is_some_and(<[XmpProperty]>::is_empty))
-        .map(XmpItem::new)
         .collect();
-    if items.is_empty() {
-        xmp.remove(ns, name);
-        return;
+    match nested_array_value(false, values) {
+        Some(value) => xmp.set(XmpProperty::new(ns, name, value)),
+        None => drop(xmp.remove(ns, name)),
     }
-    xmp.set(XmpProperty::new(
-        ns,
-        name,
-        XmpValue::Array(XmpArray::Bag(items)),
-    ));
 }
 
 impl PhotoMetadata {
@@ -1293,9 +1466,8 @@ mod tests {
             XmpValue::Structured(_)
         ));
         // The entity identifier is `xmp:Identifier`, not an IPTC-namespaced property.
-        let entities =
-            Reader::new(fields).nested_array(ns::IPTC_EXT, "rCtype", <[XmpProperty]>::to_vec);
-        assert!(field(&entities[0], ns::XMP, "Identifier").is_some());
+        let entity = structures(&field(fields, ns::IPTC_EXT, "rCtype").unwrap().value)[0];
+        assert!(field(entity, ns::XMP, "Identifier").is_some());
     }
 
     #[test]
@@ -1353,15 +1525,27 @@ mod tests {
     }
 
     #[test]
-    fn lang_alt_fields_read_a_plain_simple_value_too() {
-        // Non-conformant but seen in the wild: a Lang Alt field written as plain text.
+    fn a_default_entry_tagged_in_another_case_is_still_the_default() {
+        // `X-Default` and `x-default` are one tag (XMP Part 1 §8.2.2.4), so the entry is read and
+        // written back in the canonical case rather than kept as a language of its own.
         let value = XmpValue::Structured(vec![XmpProperty::new(
             ns::IPTC_EXT,
             "AOTitle",
-            text_value("Sunflowers"),
+            XmpValue::Array(XmpArray::Alt(vec![XmpItem::lang_text(
+                "X-Default",
+                "Sunflowers",
+            )])),
         )]);
         let art = ArtworkOrObject::from_xmp(&value).unwrap();
         assert_eq!(art.title.as_deref(), Some("Sunflowers"));
+        assert_eq!(
+            art.to_xmp(),
+            XmpValue::Structured(vec![XmpProperty::new(
+                ns::IPTC_EXT,
+                "AOTitle",
+                lang_alt_value("Sunflowers"),
+            )])
+        );
     }
 
     #[test]
@@ -1523,8 +1707,398 @@ mod tests {
         );
     }
 
+    /// One shape a modelled field can arrive in, with both rules' machinery attached to it.
+    struct Shape {
+        /// What the shape is — the label the enumeration is published under.
+        label: &'static str,
+        /// The field as the graph holds it.
+        field: XmpProperty,
+        /// Runs the modelling read for that field, discarding the value: what is under test is
+        /// whether the reader consumed the field, not what it parsed.
+        read: fn(&mut Reader<'_>),
+        /// Whether the typed read parses a value out of it — the rule retention used to be decided
+        /// by, before the writer had a say.
+        parses: fn(&XmpValue) -> bool,
+        /// The owning type's `from_xmp` -> `to_xmp`.
+        trip: fn(&XmpValue) -> Option<XmpValue>,
+    }
+
+    fn structured(fields: Vec<XmpProperty>) -> XmpValue {
+        XmpValue::Structured(fields)
+    }
+
+    fn qualified(mut property: XmpProperty, lang: &str) -> XmpProperty {
+        property
+            .qualifiers
+            .push(XmpProperty::new(XML_NAMESPACE, "lang", text_value(lang)));
+        property
+    }
+
+    fn entity() -> XmpValue {
+        Entity {
+            name: Some("Human".to_owned()),
+            ..Entity::default()
+        }
+        .to_xmp()
+    }
+
+    fn vertex() -> XmpValue {
+        RegionBoundaryPoint {
+            x: Some(1.0),
+            ..RegionBoundaryPoint::default()
+        }
+        .to_xmp()
+    }
+
+    /// Every shape the module's fidelity rule is stated over: the canonical form of each modelled
+    /// field kind, and every departure from it a graph can carry.
+    ///
+    /// Each shape is a single field of the type that models it, so `trip` is that type's
+    /// read-modify-write over exactly this one field.
+    fn shapes() -> Vec<Shape> {
+        let contact: fn(&XmpValue) -> Option<XmpValue> =
+            |v| Some(CreatorContactInfo::from_xmp(v)?.to_xmp());
+        let artwork: fn(&XmpValue) -> Option<XmpValue> =
+            |v| Some(ArtworkOrObject::from_xmp(v)?.to_xmp());
+        let region: fn(&XmpValue) -> Option<XmpValue> =
+            |v| Some(ImageRegion::from_xmp(v)?.to_xmp());
+        let point: fn(&XmpValue) -> Option<XmpValue> =
+            |v| Some(RegionBoundaryPoint::from_xmp(v)?.to_xmp());
+        let boundary: fn(&XmpValue) -> Option<XmpValue> =
+            |v| Some(RegionBoundary::from_xmp(v)?.to_xmp());
+
+        let text: fn(&mut Reader<'_>) = |r| {
+            r.text(ns::IPTC_CORE, "CiUrlWork");
+        };
+        let text_parses: fn(&XmpValue) -> bool = |v| parse_text(v).is_some();
+        let lang_alt: fn(&mut Reader<'_>) = |r| {
+            r.lang_alt(ns::IPTC_EXT, "AOTitle");
+        };
+        let lang_alt_parses: fn(&XmpValue) -> bool = |v| parse_lang_alt(v).is_some();
+        let bag: fn(&mut Reader<'_>) = |r| {
+            r.list(ns::IPTC_EXT, "AOStylePeriod", false);
+        };
+        let seq: fn(&mut Reader<'_>) = |r| {
+            r.list(ns::IPTC_EXT, "AOCreator", true);
+        };
+        let list_parses: fn(&XmpValue) -> bool = |v| parse_list(v).is_some();
+        let number: fn(&mut Reader<'_>) = |r| {
+            r.number(ns::IPTC_EXT, "rbX");
+        };
+        let number_parses: fn(&XmpValue) -> bool = |v| parse_number(v).is_some();
+        let nested: fn(&mut Reader<'_>) = |r| {
+            r.nested(
+                ns::IPTC_EXT,
+                "RegionBoundary",
+                RegionBoundary::from_fields,
+                RegionBoundary::to_xmp,
+            );
+        };
+        let nested_parses: fn(&XmpValue) -> bool = |v| structure(v).is_some();
+        let nested_bag: fn(&mut Reader<'_>) = |r| {
+            r.nested_array(
+                ns::IPTC_EXT,
+                "rCtype",
+                false,
+                Entity::from_fields,
+                Entity::to_xmp,
+            );
+        };
+        let nested_seq: fn(&mut Reader<'_>) = |r| {
+            r.nested_array(
+                ns::IPTC_EXT,
+                "rbVertices",
+                true,
+                RegionBoundaryPoint::from_fields,
+                RegionBoundaryPoint::to_xmp,
+            );
+        };
+        let nested_array_parses: fn(&XmpValue) -> bool = |v| !structures(v).is_empty();
+
+        let shape = |label, field, read, parses, trip| Shape {
+            label,
+            field,
+            read,
+            parses,
+            trip,
+        };
+        let ext = |name, value| XmpProperty::new(ns::IPTC_EXT, name, value);
+        vec![
+            // --- the canonical form of each field kind: read, and written back unchanged --------
+            shape(
+                "text: element text",
+                XmpProperty::new(
+                    ns::IPTC_CORE,
+                    "CiUrlWork",
+                    text_value("https://example.org/"),
+                ),
+                text,
+                text_parses,
+                contact,
+            ),
+            shape(
+                "lang alt: one x-default entry",
+                ext("AOTitle", lang_alt_value("Sunflowers")),
+                lang_alt,
+                lang_alt_parses,
+                artwork,
+            ),
+            shape(
+                "list: a bag of text",
+                ext(
+                    "AOStylePeriod",
+                    XmpValue::Array(XmpArray::Bag(vec![XmpItem::simple("Baroque")])),
+                ),
+                bag,
+                list_parses,
+                artwork,
+            ),
+            shape(
+                "list: a seq of text",
+                ext(
+                    "AOCreator",
+                    XmpValue::Array(XmpArray::Seq(vec![XmpItem::simple("Van Gogh")])),
+                ),
+                seq,
+                list_parses,
+                artwork,
+            ),
+            shape(
+                "number: a decimal",
+                ext("rbX", text_value("0.25")),
+                number,
+                number_parses,
+                point,
+            ),
+            shape(
+                "nested: a structure",
+                ext(
+                    "RegionBoundary",
+                    structured(vec![ext("rbShape", text_value("circle"))]),
+                ),
+                nested,
+                nested_parses,
+                region,
+            ),
+            shape(
+                "nested array: a bag of structures",
+                ext(
+                    "rCtype",
+                    XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(entity())])),
+                ),
+                nested_bag,
+                nested_array_parses,
+                region,
+            ),
+            shape(
+                "nested array: a seq of structures",
+                ext(
+                    "rbVertices",
+                    XmpValue::Array(XmpArray::Seq(vec![XmpItem::new(vertex())])),
+                ),
+                nested_seq,
+                nested_array_parses,
+                boundary,
+            ),
+            // --- departures from it: parsed by the typed read, but not writable back as they are
+            shape(
+                "text: a URL held as rdf:resource",
+                XmpProperty::new(
+                    ns::IPTC_CORE,
+                    "CiUrlWork",
+                    XmpValue::Uri("https://example.org/".to_owned()),
+                ),
+                text,
+                text_parses,
+                contact,
+            ),
+            shape(
+                "text: a value carrying a qualifier",
+                qualified(
+                    XmpProperty::new(
+                        ns::IPTC_CORE,
+                        "CiUrlWork",
+                        text_value("https://example.org/"),
+                    ),
+                    "fr",
+                ),
+                text,
+                text_parses,
+                contact,
+            ),
+            shape(
+                "lang alt: another language beside the default",
+                ext(
+                    "AOTitle",
+                    XmpValue::Array(XmpArray::Alt(vec![
+                        XmpItem::lang_text(X_DEFAULT, "Sunflowers"),
+                        XmpItem::lang_text("fr", "Tournesols"),
+                    ])),
+                ),
+                lang_alt,
+                lang_alt_parses,
+                artwork,
+            ),
+            shape(
+                "lang alt: plain text where an alternative belongs",
+                ext("AOTitle", text_value("Sunflowers")),
+                lang_alt,
+                lang_alt_parses,
+                artwork,
+            ),
+            shape(
+                "list: an rdf:Alt where an array belongs",
+                ext(
+                    "AOStylePeriod",
+                    XmpValue::Array(XmpArray::Alt(vec![
+                        XmpItem::lang_text(X_DEFAULT, "Baroque"),
+                        XmpItem::lang_text("fr", "baroque"),
+                    ])),
+                ),
+                bag,
+                list_parses,
+                artwork,
+            ),
+            shape(
+                "list: an rdf:Seq where an rdf:Bag belongs",
+                ext(
+                    "AOStylePeriod",
+                    XmpValue::Array(XmpArray::Seq(vec![XmpItem::simple("Baroque")])),
+                ),
+                bag,
+                list_parses,
+                artwork,
+            ),
+            shape(
+                "list: an item that is not text",
+                ext(
+                    "AOStylePeriod",
+                    XmpValue::Array(XmpArray::Bag(vec![
+                        XmpItem::simple("Baroque"),
+                        XmpItem::new(structured(vec![ext("Nested", text_value("v"))])),
+                    ])),
+                ),
+                bag,
+                list_parses,
+                artwork,
+            ),
+            shape(
+                "list: an item held as rdf:resource",
+                ext(
+                    "AOStylePeriod",
+                    XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(XmpValue::Uri(
+                        "https://example.org/".to_owned(),
+                    ))])),
+                ),
+                bag,
+                list_parses,
+                artwork,
+            ),
+            shape(
+                "number: text with no XMP Real value",
+                ext("rbX", text_value("NaN")),
+                number,
+                number_parses,
+                point,
+            ),
+            shape(
+                "nested: a structure carrying a qualifier",
+                qualified(
+                    ext(
+                        "RegionBoundary",
+                        structured(vec![ext("rbShape", text_value("circle"))]),
+                    ),
+                    "fr",
+                ),
+                nested,
+                nested_parses,
+                region,
+            ),
+            shape(
+                "nested array: a bare structure where an array belongs",
+                ext("rCtype", entity()),
+                nested_bag,
+                nested_array_parses,
+                region,
+            ),
+            shape(
+                "nested array: an rdf:Bag where an rdf:Seq belongs",
+                ext(
+                    "rbVertices",
+                    XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(vertex())])),
+                ),
+                nested_seq,
+                nested_array_parses,
+                boundary,
+            ),
+            shape(
+                "nested array: an item that is not a structure",
+                ext(
+                    "rCtype",
+                    XmpValue::Array(XmpArray::Bag(vec![
+                        XmpItem::new(entity()),
+                        XmpItem::simple("not an entity"),
+                    ])),
+                ),
+                nested_bag,
+                nested_array_parses,
+                region,
+            ),
+        ]
+    }
+
     #[test]
-    fn a_non_finite_coordinate_is_not_written() {
+    fn every_shape_survives_a_read_modify_write_unchanged() {
+        // The law the module states: reading a structure and writing it back changes nothing.
+        // A shape the writer reproduces goes out as the model's own output; one it cannot is kept
+        // verbatim. Either way the graph that comes out is the graph that went in.
+        for shape in shapes() {
+            let input = structured(vec![shape.field]);
+            assert_eq!(
+                (shape.trip)(&input).as_ref(),
+                Some(&input),
+                "{}: a read-modify-write did not give the field back",
+                shape.label
+            );
+        }
+    }
+
+    #[test]
+    fn retention_covers_every_shape_the_typed_read_parses_but_cannot_write_back() {
+        // Derived, not listed: a shape is retained under the new rule and would have been consumed
+        // — and so destroyed — under the old one exactly when the typed read parses a value out of
+        // it and the reader still leaves it alone. This is the enumeration the module documents.
+        let mut destroyed = Vec::new();
+        for shape in shapes() {
+            let fields = [shape.field];
+            let mut reader = Reader::new(&fields);
+            (shape.read)(&mut reader);
+            if (shape.parses)(&fields[0].value) && !reader.other().is_empty() {
+                destroyed.push(shape.label);
+            }
+        }
+        assert_eq!(
+            destroyed,
+            [
+                "text: a URL held as rdf:resource",
+                "text: a value carrying a qualifier",
+                "lang alt: another language beside the default",
+                "lang alt: plain text where an alternative belongs",
+                "list: an rdf:Alt where an array belongs",
+                "list: an rdf:Seq where an rdf:Bag belongs",
+                "list: an item that is not text",
+                "list: an item held as rdf:resource",
+                "number: text with no XMP Real value",
+                "nested: a structure carrying a qualifier",
+                "nested array: a bare structure where an array belongs",
+                "nested array: an rdf:Bag where an rdf:Seq belongs",
+                "nested array: an item that is not a structure",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_non_finite_coordinate_is_neither_written_nor_destroyed() {
         // NaN and the infinities are not values of the XMP Real type: writing one would put a
         // value in the graph that no reader can take back as a number.
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -1542,6 +2116,57 @@ mod tests {
             // The finite sibling is still written, so the skip is per value, not per structure.
             assert_eq!(Reader::new(fields).number(ns::IPTC_EXT, "rbY"), Some(1.5));
         }
+        // The same values arriving *from the graph* must not be destroyed either: the read parses
+        // them, so a rule that consumed whatever it could read would drop them on the way out.
+        for stated in ["NaN", "inf", "-inf", "1e400"] {
+            let input = XmpValue::Structured(vec![XmpProperty::new(
+                ns::IPTC_EXT,
+                "rbX",
+                text_value(stated),
+            )]);
+            let point = RegionBoundaryPoint::from_xmp(&input).expect("a structure value");
+            assert_eq!(point.x, None, "{stated} was reported as a coordinate");
+            assert_eq!(point.to_xmp(), input, "{stated} was destroyed");
+        }
+    }
+
+    #[test]
+    fn a_coordinate_keeps_its_value_when_it_is_respelled() {
+        // The one lexical change the writer makes to a number it consumed: ` 0.50 ` comes back as
+        // `0.5`, the same value, and doing it again changes nothing more.
+        let input = XmpValue::Structured(vec![XmpProperty::new(
+            ns::IPTC_EXT,
+            "rbX",
+            text_value(" 0.50 "),
+        )]);
+        let point = RegionBoundaryPoint::from_xmp(&input).expect("a structure value");
+        assert_eq!(point.x, Some(0.5));
+        let written = point.to_xmp();
+        assert_eq!(
+            written,
+            XmpValue::Structured(vec![XmpProperty::new(
+                ns::IPTC_EXT,
+                "rbX",
+                text_value("0.5"),
+            )])
+        );
+        assert_eq!(
+            RegionBoundaryPoint::from_xmp(&written).map(|p| p.to_xmp()),
+            Some(written.clone())
+        );
+    }
+
+    #[test]
+    fn two_fields_of_one_name_are_both_kept() {
+        // Only one of them could be written back, so neither is read and both are retained: the
+        // structure is ill-formed, and silently halving it would be a loss the caller cannot see.
+        let input = XmpValue::Structured(vec![
+            XmpProperty::new(ns::IPTC_EXT, "rId", text_value("r1")),
+            XmpProperty::new(ns::IPTC_EXT, "rId", text_value("r2")),
+        ]);
+        let region = ImageRegion::from_xmp(&input).expect("a structure value");
+        assert_eq!(region.identifier, None);
+        assert_eq!(region.to_xmp(), input);
     }
 
     #[test]
@@ -1604,20 +2229,20 @@ mod tests {
     }
 
     #[test]
-    fn a_language_alternative_is_read_by_its_tag_not_its_position() {
-        // A conforming writer puts `x-default` first, but nothing in the graph enforces it. Reading
-        // by position would take the French text and re-emit it labelled as the default.
+    fn a_language_alternative_keeps_the_languages_beside_the_default() {
+        // The model holds one string, so writing this field back would keep the default and
+        // destroy the French entry. It is therefore not read, and the whole alternative survives.
         let value = XmpValue::Structured(vec![XmpProperty::new(
             ns::IPTC_EXT,
             "AOTitle",
             XmpValue::Array(XmpArray::Alt(vec![
+                XmpItem::lang_text(X_DEFAULT, "Sunflowers"),
                 XmpItem::lang_text("fr", "Tournesols"),
-                XmpItem::lang_text("X-Default", "Sunflowers"),
             ])),
         )]);
         let art = ArtworkOrObject::from_xmp(&value).unwrap();
-        // The tag match is case-insensitive, as XMP Part 1 §8.2.2.4 requires.
-        assert_eq!(art.title.as_deref(), Some("Sunflowers"));
+        assert_eq!(art.title, None);
+        assert_eq!(art.to_xmp(), value);
     }
 
     #[test]
@@ -1677,20 +2302,20 @@ mod tests {
             .set(XmpProperty::new(ns::PLUS, "Licensor", licensor.to_xmp()));
         assert_eq!(pm.licensors(), vec![licensor]);
 
-        // A nested array field is read the same way: one `rCtype` structure, not a Bag of them.
-        let entity = Entity {
-            name: Some("Human".to_owned()),
-            ..Entity::default()
-        };
+        // Inside a structure the same shape is kept verbatim instead, because writing it back
+        // would normalise it into a Bag: `rCtype` reads as nothing and survives untouched.
         let region = XmpValue::Structured(vec![XmpProperty::new(
             ns::IPTC_EXT,
             "rCtype",
-            entity.to_xmp(),
+            Entity {
+                name: Some("Human".to_owned()),
+                ..Entity::default()
+            }
+            .to_xmp(),
         )]);
-        assert_eq!(
-            ImageRegion::from_xmp(&region).map(|r| r.content_types),
-            Some(vec![entity])
-        );
+        let read = ImageRegion::from_xmp(&region).expect("a structure value");
+        assert_eq!(read.content_types, Vec::new());
+        assert_eq!(read.to_xmp(), region);
 
         pm.set_licensors(&pm.licensors());
         assert!(matches!(
