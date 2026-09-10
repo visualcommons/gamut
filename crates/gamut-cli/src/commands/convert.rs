@@ -149,29 +149,35 @@ pub(crate) enum JxlModular {
     Modular,
 }
 
-/// PNG effort preset for `--png-preset`, mirroring `gamut_png::Preset` rung for rung.
+/// PNG effort preset for `--png-preset`, naming the rungs of `gamut_png::Preset`.
+///
+/// The discriminants **are** the codec's ladder levels, and `to_codec` resolves them through
+/// [`PngCodecPreset::from_level`] rather than re-deciding the mapping — the same route
+/// `--webp-effort` and `--jxl-effort` take through their own ladders. A named value enum rather
+/// than the siblings' bare integer only because clap prints a rung's doc comment in `--help`,
+/// which a number cannot.
 #[derive(Clone, Copy, ValueEnum)]
+#[repr(u8)]
 pub(crate) enum PngPreset {
     /// Fastest: greedy matching and one fixed filter, accepting a larger file.
-    Fast,
+    Fast = 0,
     /// The `gamut-png` library default — the balanced speed/size point.
-    Balanced,
+    Balanced = 1,
     /// The optimal parse and lossless reduction on one filter heuristic; this command's default.
-    Small,
-    /// Every knob at its size-optimal setting, including the whole-image filter search. Slowest
-    /// by a wide margin; for write-once assets where size dominates.
-    Smallest,
+    Small = 2,
+    /// Adds the whole-image filter search, zopfli's own refinement budget and a wider
+    /// optimal-parse span. Six times slower than `small` and worth about 3.6% on gamut's corpus,
+    /// but nothing at all on three of its nine rows: measure your own material.
+    Smallest = 3,
 }
 
 impl PngPreset {
     /// Maps the CLI choice onto the codec's [`PngCodecPreset`] rung.
     fn to_codec(self) -> PngCodecPreset {
-        match self {
-            PngPreset::Fast => PngCodecPreset::Fast,
-            PngPreset::Balanced => PngCodecPreset::Balanced,
-            PngPreset::Small => PngCodecPreset::Small,
-            PngPreset::Smallest => PngCodecPreset::Smallest,
-        }
+        // `the_png_preset_flag_offers_exactly_the_codec_ladder` pins that every discriminant here
+        // is a level the codec admits, so the fallback is unreachable; it exists because this is
+        // a CLI and a panic is not an error report.
+        PngCodecPreset::from_level(self as u8).unwrap_or_default()
     }
 }
 
@@ -427,5 +433,32 @@ fn resolve_format(args: &ConvertArgs) -> Result<OutputFormat, CliError> {
         Some("jpg" | "jpeg") => Ok(OutputFormat::Jpeg),
         Some(other) => Err(CliError::UnsupportedOutput(other.to_string())),
         None => Err(CliError::UnsupportedOutput("<none>".to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::ValueEnum;
+
+    use super::{PngCodecPreset, PngPreset};
+
+    #[test]
+    fn the_png_preset_flag_offers_exactly_the_codec_ladder() {
+        // The flag's values and the codec's rungs are two lists that must stay the same list.
+        // Walking `from_level` from zero is the codec's own enumeration of its ladder, so a rung
+        // added to `gamut_png::Preset` fails here instead of being silently unreachable from the
+        // command line — which is what a hand-written arm-per-variant mapping could not catch.
+        let from_flag: Vec<u8> = PngPreset::value_variants()
+            .iter()
+            .map(|preset| preset.to_codec().level())
+            .collect();
+        let from_codec: Vec<u8> = (0..=u8::MAX)
+            .map_while(PngCodecPreset::from_level)
+            .map(PngCodecPreset::level)
+            .collect();
+        assert!(
+            from_flag == from_codec,
+            "--png-preset offers levels {from_flag:?} against the codec ladder {from_codec:?}"
+        );
     }
 }
