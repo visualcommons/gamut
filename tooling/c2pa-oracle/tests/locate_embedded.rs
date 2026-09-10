@@ -44,7 +44,7 @@ fn gamut_avif_bounds_the_store_c2pa_rs_embedded_by_the_box_that_carries_it() {
     let expected = jumbf_superbox_span(&asset).expect("the signed asset carries a JUMBF superbox");
 
     let container = AvifContainer::parse(&asset).expect("the signed asset parses");
-    let slot = container.c2pa().expect("gamut-avif locates the slot");
+    let slot = container.c2pa_slot().expect("gamut-avif locates the slot");
 
     // `gamut-avif` bounds the slot by the *box*, so it reports the store and anything the writer
     // left after it (`C2paSlot::slot_bytes`: "the store, then any padding"). The claim this test
@@ -76,7 +76,7 @@ fn c2pa_rs_leaves_no_padding_between_the_store_and_the_end_of_its_box() {
     let expected = jumbf_superbox_span(&asset).expect("the signed asset carries a JUMBF superbox");
 
     let container = AvifContainer::parse(&asset).expect("the signed asset parses");
-    let slot = container.c2pa().expect("gamut-avif locates the slot");
+    let slot = container.c2pa_slot().expect("gamut-avif locates the slot");
 
     // An observation about the reference implementation, recorded in `README.md` beside the
     // `update`-purpose finding and asserted here for the same reason: it is what makes the
@@ -114,7 +114,10 @@ fn gamut_heic_reports_the_exact_span_c2pa_rs_embedded() {
 fn c2pa_rs_validates_the_store_read_out_of_gamut_avifs_reported_range() {
     let asset = signed_avif();
     let container = AvifContainer::parse(&asset).expect("the signed asset parses");
-    let range = container.c2pa().expect("gamut-avif locates the slot").range;
+    let range = container
+        .c2pa_slot()
+        .expect("gamut-avif locates the slot")
+        .range;
     let located = asset[range].to_vec();
 
     // The sharpest form of the claim, and it is `range` that is exercised: the bytes are cut out

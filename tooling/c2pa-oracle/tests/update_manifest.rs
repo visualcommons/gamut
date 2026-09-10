@@ -52,7 +52,7 @@ fn update_slot(asset: &[u8]) -> Result<std::ops::Range<usize>> {
     let container =
         AvifContainer::parse(asset).map_err(|error| OracleError::Asset(error.to_string()))?;
     container
-        .c2pa_manifest_stores()
+        .c2pa_slots()
         .find(|slot| slot.purpose == C2paBoxPurpose::Update)
         .map(|slot| slot.range)
         .ok_or_else(|| OracleError::Asset("no `update` store in the mid-update file".into()))
@@ -114,10 +114,7 @@ fn the_earlier_store_is_relabelled_original_when_an_update_box_is_added() {
     // §A.5.3: once a file carries an `update` box, the store it had before is re-labelled
     // `original`. Both are reported, in file order, and neither is judged — which is why
     // `AvifContainer::c2pa` promises only "the first one".
-    let purposes: Vec<_> = container
-        .c2pa_manifest_stores()
-        .map(|slot| slot.purpose)
-        .collect();
+    let purposes: Vec<_> = container.c2pa_slots().map(|slot| slot.purpose).collect();
     assert_eq!(
         purposes,
         vec![C2paBoxPurpose::Original, C2paBoxPurpose::Update],

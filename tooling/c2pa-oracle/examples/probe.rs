@@ -107,7 +107,7 @@ fn main() -> Result<()> {
     println!("direction 2: independent JUMBF span {span:?}");
 
     match AvifContainer::parse(&signed) {
-        Ok(container) => match container.c2pa() {
+        Ok(container) => match container.c2pa_slot() {
             Some(slot) => println!(
                 "gamut-avif slot: range {:?}, {} bytes, purpose {:?}, LBox {:?}, tail zeros {}",
                 slot.range,
@@ -154,7 +154,7 @@ fn main() -> Result<()> {
             println!("update: {} bytes", updated.len());
             match AvifContainer::parse(&updated) {
                 Ok(container) => {
-                    for slot in container.c2pa_manifest_stores() {
+                    for slot in container.c2pa_slots() {
                         println!(
                             "  update slot: range {:?}, purpose {:?}, LBox {:?}",
                             slot.range,

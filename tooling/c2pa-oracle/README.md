@@ -101,7 +101,7 @@ top-level boxes. c2pa-rs validates a store wherever it finds one, so no assertio
 distinguish a conforming placement from a non-conforming one, and none tries: an oracle that cannot
 see a property must not be read as having checked it. Placement is `gamut-avif`'s own suite's
 business — `crates/gamut-avif/tests/c2pa.rs` — where the writer's byte layout is the subject.
-`AvifContainer::c2pa_manifest_stores` deliberately reports a store outside that window as found,
+`AvifContainer::c2pa_slots` deliberately reports a store outside that window as found,
 with its true range, rather than rejecting it, so the container stays a lens over bytes.
 
 **Whose key signed the file.** `ValidationState::Trusted` is unreachable here *by construction* —

@@ -61,7 +61,7 @@ fn signed_parent() -> Vec<u8> {
 fn store_of(parent: &[u8]) -> Vec<u8> {
     let container = AvifContainer::parse(parent).expect("the signed parent parses");
     let slot = container
-        .c2pa()
+        .c2pa_slot()
         .expect("gamut-avif locates the parent's store");
     parent[slot.range].to_vec()
 }
