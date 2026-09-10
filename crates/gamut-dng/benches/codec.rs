@@ -10,10 +10,10 @@
 //! # What is inside the timed region, and what is not
 //!
 //! **Inside**, for every benchmark: the codec call itself, the allocation and growth of the buffer
-//! it produces, and that buffer's teardown. Every closure below returns `()` and drops its result
-//! explicitly, because divan otherwise defers a returned value's drop until after timing — which
-//! would charge gamut nothing for freeing a decoded image while the SDK, whose `dng_negative`
-//! destructor runs inside its own call, pays in full.
+//! it produces, and that buffer's teardown. Every closure below returns `()`, so its result is
+//! released where it was made rather than handed back to divan — which defers a returned value's
+//! drop until after timing, and would therefore charge gamut nothing for freeing a decoded image
+//! while the SDK, whose `dng_negative` destructor runs inside its own call, pays in full.
 //!
 //! **Outside**, for every benchmark: synthesising the sensor samples, building the [`RawImage`]
 //! and [`CameraProfile`], and encoding the DNG (or the bare lossless-JPEG stream) that the decode
@@ -212,6 +212,9 @@ const CASES: [Case; 6] = [
 /// the two cannot share one generator because they produce different things — that bench needs
 /// packed bytes for `gamut-deflate`, this one needs `u16` samples for a [`RawImage`].
 fn sensor_samples(planes: u32) -> Vec<u16> {
+    /// Per-colour gain, R/G/B, as a fraction of full scale.
+    const GAINS: [f64; 3] = [0.42, 0.70, 0.31];
+
     let max = f64::from((1u32 << BITS) - 1);
     let mut samples = Vec::with_capacity((WIDTH * HEIGHT * planes) as usize);
     for y in 0..HEIGHT {
@@ -221,18 +224,18 @@ fn sensor_samples(planes: u32) -> Vec<u16> {
                 let dx = f64::from(x) / f64::from(WIDTH) - 0.5;
                 let dy = f64::from(y) / f64::from(HEIGHT) - 0.5;
                 let falloff = 1.0 - 1.4 * (dx * dx + dy * dy);
-                // A green photosite collects roughly twice what red and blue do; for a linear
-                // image the same gains index the interleaved planes.
-                let channel = if planes == 1 {
-                    (x % 2, y % 2)
+                // A green photosite collects roughly twice what red and blue do. In a CFA mosaic
+                // the RGGB tile decides the colour; in a linear image the interleaved plane does.
+                let colour = if planes == 1 {
+                    match (x % 2, y % 2) {
+                        (0, 0) => 0, // R
+                        (1, 1) => 2, // B
+                        _ => 1,      // G
+                    }
                 } else {
-                    (plane % 2, plane / 2)
+                    plane as usize
                 };
-                let gain = match channel {
-                    (0, 0) => 0.42, // R
-                    (1, 1) => 0.31, // B
-                    _ => 0.70,      // G
-                };
+                let gain = GAINS[colour.min(GAINS.len() - 1)];
                 // Deterministic shot-noise stand-in, a few percent of full scale.
                 let hash = ((y * WIDTH + x) * planes + plane).wrapping_mul(2_654_435_761) >> 11;
                 let noise = f64::from(hash % 2048) / 2048.0 - 0.5;
