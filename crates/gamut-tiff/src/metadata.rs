@@ -928,6 +928,40 @@ mod tests {
     }
 
     #[test]
+    fn the_reader_accepts_the_exif_group_tag_the_writer_refuses() {
+        // The one direction in which `check` is deliberately *stricter* than the reader, stated on
+        // `TiffMetadata::check` as clause 2 and nowhere held: a group under a tag outside
+        // `EXIF_SUBTREE_POINTER_TAGS` is refused by the writer, while the reader takes such a file
+        // without error and hands the tag back as the raw absolute offset it was written as -- the
+        // child directory is lost, silently. That asymmetry is the *reason* the refusal is the
+        // conservative choice, so it has to fail if it ever stops being true: if the reader began
+        // resolving the tag there would be nothing left to refuse, and if it began erroring the
+        // refusal would no longer be the stricter side. The refusal itself is
+        // `the_writer_refuses_an_exif_group_under_a_tag_the_reader_does_not_resolve`; this is the
+        // reader's half, on the same shape.
+        const VENDOR: u16 = 50000;
+        let mut child = Ifd::new();
+        child.set(1, Value::Byte(vec![9]));
+        let mut exif = exif_ifd();
+        exif.set_sub_ifd(VENDOR, vec![child]);
+        let mut ifd0 = Ifd::new();
+        ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
+
+        let back = read_metadata(&file_with(ifd0))
+            .expect("the reader takes the file the writer refuses")
+            .exif
+            .expect("an Exif directory");
+        assert!(
+            back.get_u32(VENDOR).is_some_and(|offset| offset > 0),
+            "the vendor group comes back as the bare file offset the writer wrote: {back:?}"
+        );
+        assert!(
+            back.sub_ifds().iter().all(|group| group.tag != VENDOR),
+            "a tag outside the standard four is not resolved into a group: {back:?}"
+        );
+    }
+
+    #[test]
     fn the_writer_refuses_an_exif_pointer_tag_carried_as_a_pointer_typed_field() {
         // `check` inspected only `sub_ifds()` while `resolve_pointers` inspects `get(tag)`, so the
         // one shape the reader misreads was the one shape the writer never looked at: a standard
