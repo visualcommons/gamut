@@ -30,6 +30,11 @@
 //! * `ComponentsConfiguration` holds **four** codes, one per channel; describe each on its own.
 //!
 //! `Flash` is a bitfield rather than an enumeration, so it is not in these tables: use [`flash`].
+//! Four more tags for which the specification prints a table are absent for the same kind of
+//! reason — what it enumerates for them is not a single scalar code: `GPSVersionID` and
+//! `FlashpixVersion` are fixed multi-byte versions, `YCbCrSubSampling` is a pair whose meaning
+//! belongs to its two elements jointly, and `InteroperabilityIndex`'s codes are multi-character
+//! ASCII strings.
 
 use crate::tag::ExifTag;
 
@@ -493,10 +498,26 @@ mod tests {
         }
     }
 
-    /// Drift guard: the thirty-nine tags for which CIPA DC-008 prints a value table are exactly
-    /// the tags that have one here — no arm missing, and none invented for a tag the spec leaves
-    /// open. Every other assertion in this module reads a table through `described_values`, so an
-    /// arm that lost its rows would make them vacuous; this is what notices.
+    /// Drift guard over the rule this module implements: a tag has a table here exactly when
+    /// CIPA DC-008 fixes the meaning of a **single scalar code** — one integer, or one ASCII
+    /// character — that the value carries on its own, or, for `ComponentsConfiguration`, that
+    /// each of its four elements carries on its own.
+    ///
+    /// So the spec printing a table for a tag is not sufficient. Four tags whose sections print
+    /// one are excluded, because what those tables enumerate is not a scalar code: `Flash`
+    /// §4.6.6.7.21, a bitfield whose meaning composes independent bits (`flash` decomposes it);
+    /// `GPSVersionID` §4.6.7.1.1 and `FlashpixVersion` §4.6.6.1.2, each a fixed multi-byte version
+    /// rather than a domain; `YCbCrSubSampling` §4.6.5.1.12, a pair whose meaning belongs to its
+    /// two elements jointly; and `InteroperabilityIndex` §4.6.8.1.1, whose codes are
+    /// multi-character ASCII strings. Nor is it necessary: `FocalPlaneResolutionUnit` §4.6.6.7.28
+    /// is the deliberate exception, admitted with no table of its own because that section defines
+    /// it as "the same as the ResolutionUnit" (§4.6.5.1.11) instead of restating those values, and
+    /// so shares that arm.
+    ///
+    /// The list below is what that rule selects — no arm missing, and none invented for a tag the
+    /// spec leaves open. Every other assertion in this module reads a table through
+    /// `described_values`, so an arm that lost its rows would make them vacuous; this is what
+    /// notices.
     #[test]
     fn exactly_the_enumerated_tags_have_a_table() {
         let enumerated: Vec<&str> = ExifTag::ALL

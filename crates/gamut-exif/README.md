@@ -77,9 +77,12 @@ Every tag CIPA DC-008 itself defines carries the field type and component count 
 mandates for it ([`ExifTag::field_types`], [`ExifTag::component_count`]); the nine carried from
 other specifications claim no constraint, and their `field_types` is empty. [`set_tag_checked`] is
 the conformant setter — it refuses a value that contradicts them — and it is the crate's only
-checked door. [`Exif::set_tag`], [`Exif::set`], `exif_ifd_mut`, `gps_ifd_mut`, `interop_ifd_mut`,
-`set_gps_ifd` and their siblings all stay lenient, as does the whole read path, because a caller
-reproducing a non-conformant source file must still be able to.
+checked door. The boundary is doors that admit a **field**: there are nine, and all nine stay
+lenient — [`Exif::set_tag`], [`Exif::set`], `image_mut`, `exif_ifd_mut`, `gps_ifd_mut`,
+`interop_ifd_mut`, `set_exif_ifd`, `set_gps_ifd` and `set_interop_ifd` — as does the whole read
+path, because a caller reproducing a non-conformant source file must still be able to.
+`set_thumbnail` sits outside that boundary: it admits bytes rather than a field, and does not check
+that they are a JPEG.
 
 ```rust
 use gamut_exif::{ByteOrder, Exif, ExifTag, Value, set_tag_checked};
@@ -114,8 +117,11 @@ Table 16 for Interoperability), with the field type and component count that tab
 each, plus nine carried from other specifications for compatibility. The three IFD-pointer tags
 (`Exif IFD Pointer`, `GPS Info IFD Pointer`, `Interoperability IFD Pointer`), which DC-008 gives
 their own sections outside those tables, are deliberately **not** catalogued: the writer
-synthesises them from the tree it is given and drops any that were hand-set, so a name for them
-would only invite a write that is silently discarded. The crate also gives full read/write
+synthesises them from the tree it is given and drops any hand-set in the directory the
+specification puts it in — the Exif and GPS pointers from the 0th IFD, the Interoperability pointer
+from the Exif sub-IFD — so a name for them would only invite a write that is silently discarded.
+(One written into some other directory is not one the writer looks for: it survives as an ordinary
+field that no accessor reads.) The crate also gives full read/write
 round-trips over `gamut-ifd`, the typed [`GpsInfo`] projection, and JPEG thumbnails. Intentionally
 deferred (and designed to be added without breaking the 1.0 API — the catalogue and vendor enums
 are `#[non_exhaustive]`):

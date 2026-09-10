@@ -130,9 +130,13 @@ macro_rules! exif_tags {
         /// tag added later lands in the middle and shifts the implicit discriminants after it.
         /// That is deliberate: the on-disk identity of a tag is [`ExifTag::tag_id`], never its
         /// discriminant, and keeping `ALL` in spec order is worth more than a number no consumer
-        /// has. The enum is `#[non_exhaustive]`, carries no `repr`, and is reached by no
-        /// `gamut-ffi` entry point, so nothing may cast it to an integer or match it across an
-        /// ABI boundary.
+        /// has.
+        ///
+        /// Nothing stops a cast. `#[non_exhaustive]` blocks exhaustive matching, not
+        /// `ExifTag::Make as u32` on a fieldless enum, and the absence of a `repr` pins nothing
+        /// about what such a cast yields. No `gamut-ffi` entry point reaches this type, so no C
+        /// surface publishes the numbers — but callers must not cast, persist, transmit or
+        /// otherwise depend on them.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[non_exhaustive]
         pub enum ExifTag {
