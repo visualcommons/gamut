@@ -4,8 +4,9 @@
 //! measured region moves — then runs divan throughput benchmarks over the codec matrix the crate
 //! ships: **uncompressed**, **Deflate** and **lossless JPEG**, each for **CFA** and **LinearRaw**
 //! photometry. Every counter is a *pixel volume* in bytes — the raw sample volume (`samples × 2`),
-//! plus the IFD-0 preview for the two gamut benchmarks that also handle it. See the counter rule
-//! below: it is what makes the throughput column of `decode_dng` a preview-corrected comparison.
+//! plus the IFD-0 preview on the gamut benchmarks that handle it and where charging for it is a
+//! measurement rather than a bound. See the counter rule below, and the fixture table's epilogue,
+//! which names the rows where the preview correction is applied and the rows where it is not.
 //!
 //! # What is inside the timed region, and what is not
 //!
@@ -34,37 +35,48 @@
 //! reports the decoded image's *extent* and exports no samples, so the SDK is not charged for a
 //! `malloc` + `memcpy` that only exists because the caller is in Rust.
 //!
-//! **The one asymmetry left in `decode_dng` is the preview, and the throughput column corrects
-//! for it.** `DngDecoder::decode` is a *whole-file* decode and `ReadStage1Image` is not: gamut
-//! additionally unpacks IFD 0's uncompressed RGB preview and reconstructs the metadata. The
-//! preview's volume is exact — `⌊w/2⌋ × ⌊h/2⌋ × 3` bytes against the raw's `w × h × planes × 2` —
-//! so this file applies the **counter rule** below and the fixture table prints the factor per
-//! case. It is not normalised away by changing the codec: gamut exposes no raw-image-only decode
-//! entry point, and inventing one to make a benchmark look better would be the wrong direction of
-//! causation.
+//! **The one asymmetry left in `decode_dng` is the preview, and on the rows where correcting for
+//! it is a measurement the throughput column does so.** `DngDecoder::decode` is a *whole-file*
+//! decode and `ReadStage1Image` is not: gamut additionally unpacks IFD 0's uncompressed RGB
+//! preview and reconstructs the metadata. The preview's volume is exact — see
+//! [`preview_decode_bytes`], which models it at the width the *decoder* materialises, not the
+//! width the file stores it at — so this file applies the **counter rule** below and the fixture
+//! table prints, per case, that volume and whether the correction was applied. It is not
+//! normalised away by changing the codec: gamut exposes no raw-image-only decode entry point, and
+//! inventing one to make a benchmark look better would be the wrong direction of causation.
 //!
-//! **The one asymmetry left in `decode_lossless_jpeg` is the export path, and a third arm prices
+//! **The one asymmetry left in `decode_lossless_jpeg` is the export path, and a third arm bounds
 //! it.** [`gamut_dng_oracle::decode_lossless_jpeg`] spools into a `std::vector`, copies that into
 //! a `malloc`d buffer and copies *that* into a `Vec`; gamut fills one `Vec`. Rather than assert
 //! that the difference is small, `adobe-sdk-no-export` runs the identical decode into the
-//! identical spool buffer and stops there, so the gap between the two SDK arms **is** the export
-//! cost, measured on the same box in the same run.
+//! identical spool buffer and stops there, so the gap between the two SDK arms **bounds** the
+//! export cost, measured on the same box in the same run. Read that gap as a magnitude only: it
+//! sits at this harness's measurement floor, where its *sign* is not resolved, so what it
+//! supports is "the codestream comparison is fair to within the bound", not "the export path
+//! costs the SDK X".
 //!
 //! # The counter rule
 //!
 //! Every benchmark's counter is **the pixel volume that implementation actually moves**:
 //!
-//! - the raw sample volume for every SDK arm and for gamut's bare-codestream decode; and
-//! - the raw sample volume **plus the IFD-0 preview** for gamut's whole-file DNG decode and for
-//!   gamut's DNG encode, both of which also handle the preview.
+//! - the raw sample volume for every SDK arm and for gamut's bare-codestream decode;
+//! - the raw sample volume **plus the preview the encoder derives** for `encode_gamut`, which has
+//!   no reference arm and so is not a comparison at all; and
+//! - for gamut's whole-file DNG decode, the raw sample volume plus the preview the decoder
+//!   materialises — **but only on the rows where charging preview bytes at the raw path's
+//!   per-byte rate is a measurement rather than a bound.**
 //!
-//! So in `decode_dng` the **median-time** column is the *uncorrected* comparison and the
-//! **throughput** column is the *preview-corrected* one — a reader has no subtraction to do. The
-//! correction charges preview bytes at the raw path's per-byte rate, which is close to exact on
-//! the uncompressed cases (both paths just move bytes) and generous to gamut on the compressed
-//! ones (where a raw byte costs far more than a preview byte), so on those rows the corrected
-//! ratio is a *lower bound* on gamut's true one. In `decode_lossless_jpeg` all three arms share
-//! the raw volume, so there the two columns say the same thing.
+//! That proviso is the whole of the rule. On the **uncompressed** rows both paths do the same
+//! kind of work per byte — unpack a stored integer and store it — so the correction is a
+//! measurement, it is applied, and in `decode_dng` the **median-time** column is then the
+//! uncorrected comparison while the **throughput** column is the preview-corrected one. On the
+//! **compressed** rows a raw byte costs far more than a preview byte (the preview is stored
+//! uncompressed whatever the raw scheme is), so the same arithmetic would credit gamut with more
+//! than the preview actually costs: a *lower bound* printed where a reader will take a
+//! measurement. There the correction is **suppressed** — gamut's counter is the raw volume, both
+//! columns say the same uncorrected thing, and the fixture table and its epilogue say which rows
+//! those are. In `decode_lossless_jpeg` all three arms share the raw volume, so no correction
+//! arises.
 //!
 //! # Why each pair is one benchmark
 //!
@@ -78,6 +90,22 @@
 //! There is no `encode` arm for the SDK: the oracle shim wraps the SDK's reader, not its writer,
 //! so no reference encode number exists to compare against and none is fabricated. Encode
 //! throughput is reported for gamut alone, across the same matrix.
+//!
+//! # Alternate the arm order between runs
+//!
+//! Adjacent is not simultaneous. divan cannot interleave two arms *per sample*, so inside every
+//! pair one arm always runs first, and the second inherits whatever the first left in the caches
+//! and in the frequency governor. That is a real bias and it points one way for a whole run.
+//! divan's sort is reversible, so the control already exists: take one run each way and publish
+//! the mean of the two.
+//!
+//! ```text
+//! cargo bench -p gamut-dng --bench codec                   # reference arm first
+//! cargo bench -p gamut-dng --bench codec -- --sortr name   # gamut arm first
+//! ```
+//!
+//! The epilogue printed under the fixture table repeats this, because that is where an operator
+//! reads it rather than here.
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
@@ -188,11 +216,39 @@ impl Case {
         raw_bytes(self.photometry)
     }
 
-    /// Pixel volume gamut moves for this case: the raw samples *plus* the IFD-0 preview, which
-    /// `DngDecoder::decode` unpacks and `DngEncoder::encode` derives. See the counter rule in
-    /// this file's header.
-    fn gamut_bytes(self) -> usize {
-        self.raw_bytes() + preview_bytes()
+    /// Pixel volume gamut's **encoder** moves for this case: the raw samples plus the preview it
+    /// derives. `encode_gamut` has no reference arm, so this is a description of the work, not a
+    /// correction to a comparison.
+    fn gamut_encode_bytes(self) -> usize {
+        self.raw_bytes() + preview_encode_bytes()
+    }
+
+    /// Pixel volume gamut's **decoder** is credited with for this case — the counter rule's one
+    /// conditional.
+    ///
+    /// `DngDecoder::decode` always unpacks the IFD-0 preview that `ReadStage1Image` does not, so
+    /// the raw volume alone understates its work. But the correction charges preview bytes at the
+    /// *raw path's* per-byte rate, and that only holds where the two paths do comparable work per
+    /// byte. So the preview is added on the rows where [`Case::preview_correction_is_measured`]
+    /// holds and withheld everywhere else, rather than printing a bound a reader would take as a
+    /// measurement.
+    fn gamut_decode_bytes(self) -> usize {
+        if self.preview_correction_is_measured() {
+            self.raw_bytes() + preview_decode_bytes()
+        } else {
+            self.raw_bytes()
+        }
+    }
+
+    /// Whether charging this case's preview bytes at its raw path's per-byte rate is a
+    /// measurement.
+    ///
+    /// It is exactly when the raw path is uncompressed: then both the raw samples and the
+    /// (always uncompressed) preview are unpacked and stored, at comparable cost per byte. Under
+    /// Deflate or lossless JPEG a raw byte carries Huffman/LZ77 work the preview byte does not,
+    /// so the same arithmetic would over-credit gamut and the correction is suppressed.
+    fn preview_correction_is_measured(self) -> bool {
+        matches!(self.compression, Compression::Uncompressed)
     }
 }
 
@@ -433,14 +489,31 @@ fn raw_bytes(photometry: Photometry) -> usize {
     (WIDTH * HEIGHT * photometry.planes()) as usize * size_of::<u16>()
 }
 
-/// Bytes of IFD-0 preview a decode of one of these fixtures additionally unpacks:
-/// `⌊w/2⌋ × ⌊h/2⌋ × 3`, uncompressed RGB8 (the encoder always writes the preview uncompressed).
+/// IFD-0 preview samples for one of these fixtures: `⌊w/2⌋ × ⌊h/2⌋ × 3`, RGB (the encoder
+/// collapses each `2 × 2` block into one pixel, and always writes the preview uncompressed).
+fn preview_samples() -> usize {
+    (WIDTH / 2 * (HEIGHT / 2) * 3) as usize
+}
+
+/// Bytes of preview `DngEncoder::encode` derives: one byte per sample, because `preview::
+/// raw_preview` builds a `Vec<u8>` and the encoder writes it at 8 bits per sample.
+fn preview_encode_bytes() -> usize {
+    preview_samples() * size_of::<u8>()
+}
+
+/// Bytes of preview `DngDecoder::decode` **materialises**: two per sample, not one.
+///
+/// The preview is *stored* at 8 bits, but the decoder surfaces every sub-image as
+/// `SubImageData::Decoded(Vec<u16>)` — one `u16` per sample whatever the IFD's bit depth — so the
+/// buffer it allocates, fills and tears down is twice the stored size. Modelling the stored width
+/// here would under-state the work by half and, because the preview sits on gamut's side of the
+/// comparison, would make gamut look slower than it is.
 ///
 /// This is the whole of the `decode_dng` gamut-versus-SDK asymmetry that is attributable to
 /// pixels; the rest is IFD and metadata reconstruction, which does not scale with the frame. It
-/// is what [`Case::gamut_bytes`] adds to the raw volume.
-fn preview_bytes() -> usize {
-    (WIDTH / 2 * (HEIGHT / 2) * 3) as usize
+/// is what [`Case::gamut_decode_bytes`] adds to the raw volume where the counter rule allows.
+fn preview_decode_bytes() -> usize {
+    preview_samples() * size_of::<u16>()
 }
 
 /// A bare lossless-JPEG (SOF3) stream over one photometry's fixture samples — one component for
@@ -459,56 +532,84 @@ fn lossless_jpeg_stream(photometry: Photometry) -> Vec<u8> {
 
 /// Prints the byte volumes each measured region moves, so a throughput number can be read against
 /// what it is a throughput *of* — including the preview volume that separates gamut's whole-file
-/// decode from the SDK's stage-1 read, and the factor that volume puts into gamut's counter.
+/// decode from the SDK's stage-1 read, and, per case, whether that volume is charged into gamut's
+/// counter or withheld because charging it would be a bound rather than a measurement.
 fn print_fixture_table() {
     println!(
         "\nDNG codec fixtures, {WIDTH}x{HEIGHT} at {BITS}-bit (bytes):\n\n\
-         {:<26} {:>12} {:>12} {:>8} {:>12} {:>8} {:>12} {:>8}",
+         {:<26} {:>12} {:>12} {:>8} {:>12} {:>12} {:>8} {:>11}",
         "case",
         "raw samples",
         "encoded DNG",
         "of raw",
-        "IFD0 preview",
-        "of raw",
-        "gamut vol.",
-        "/ raw"
+        "preview",
+        "decode vol.",
+        "/ raw",
+        "correction"
     );
     for case in CASES {
         let raw = case.raw_bytes();
         let encoded = case.encoded().len();
-        let preview = preview_bytes();
-        let gamut = case.gamut_bytes();
+        let preview = preview_decode_bytes();
+        let decode_volume = case.gamut_decode_bytes();
+        let correction = if case.preview_correction_is_measured() {
+            "applied"
+        } else {
+            "SUPPRESSED"
+        };
         println!(
-            "{case:<26} {raw:>12} {encoded:>12} {:>7.1}% {preview:>12} {:>7.1}% {gamut:>12} {:>8.3}",
+            "{case:<26} {raw:>12} {encoded:>12} {:>7.1}% {preview:>12} {decode_volume:>12} \
+             {:>8.3} {correction:>11}",
             encoded as f64 / raw as f64 * 100.0,
-            preview as f64 / raw as f64 * 100.0,
-            gamut as f64 / raw as f64,
+            decode_volume as f64 / raw as f64,
         );
     }
-    println!(
-        "\n`decode_dng gamut` decodes the whole file — raw image, that IFD-0 preview and the\n\
-         metadata; `decode_dng adobe-sdk` reads the raw image only, from the same bytes, and\n\
-         exports nothing. The counters differ by exactly the preview column, so in\n\
-         `decode_dng` the median-time column is the uncorrected ratio and the throughput column\n\
-         is the preview-corrected one. `decode_lossless_jpeg` needs no correction: same stream\n\
-         in, same samples out, one counter for all three arms — and the gap between its\n\
-         `adobe-sdk` and `adobe-sdk-no-export` arms is the FFI export path, priced rather than\n\
-         assumed.\n"
-    );
+    print!("{FIXTURE_TABLE_EPILOGUE}");
 }
+
+/// What an operator has to know to read the table above and the divan output below it, printed
+/// where they are read rather than only in this file's header: what the preview correction is,
+/// which rows it is applied to, why it is withheld on the rest, and that a published ratio is the
+/// mean of two runs taken in opposite arm orders.
+const FIXTURE_TABLE_EPILOGUE: &str = "
+`decode_dng gamut` decodes the whole file — raw image, the IFD-0 preview and the metadata;
+`decode_dng adobe-sdk` reads the raw image only, from the same bytes, and exports nothing. The
+`preview` column is the volume gamut's decoder materialises for that preview (two bytes per
+sample: every sub-image surfaces as a `Vec<u16>`, whatever the stored depth).
+
+On the `correction: applied` rows that volume is added to gamut's counter, so the median-time
+column is the uncorrected comparison and the throughput column is the preview-corrected one. On
+the `correction: SUPPRESSED` rows it is not, and BOTH columns are uncorrected. Correcting there
+would charge preview bytes at the compressed raw path's per-byte rate — arithmetic that credits
+gamut with more than the preview costs, and so yields a lower bound on gamut's true ratio, not a
+measurement of it. No number is printed for it, because a printed number is read as measured. Read
+the compressed rows as: gamut's figure includes preview and metadata work the SDK arm does not do,
+by an amount this harness does not measure.
+
+`decode_lossless_jpeg` needs no correction: same stream in, same samples out, one counter for all
+three arms. The gap between its `adobe-sdk` and `adobe-sdk-no-export` arms bounds the FFI export
+path — a magnitude, not a signed cost; it sits at the measurement floor.
+
+Adjacent is not simultaneous: divan cannot interleave a pair per sample, so one arm always runs
+first and the bias points one way for a whole run. Take one run each way and publish the mean:
+
+    cargo bench -p gamut-dng --bench codec                   # reference arm first
+    cargo bench -p gamut-dng --bench codec -- --sortr name   # gamut arm first
+
+";
 
 /// Encode: `DngEncoder::encode` over a prepared raw image and profile.
 ///
 /// Timed: preview derivation, sample packing and compression, IFD-tree layout, and the growth and
 /// teardown of the output buffer. Not timed: building the raw image and the profile. The counter
-/// is the raw volume plus the preview, because the encoder derives the preview too.
+/// is the raw volume plus the preview the encoder derives (at the 8-bit width it derives it).
 #[divan::bench(args = CASES)]
 fn encode_gamut(bencher: Bencher, case: Case) {
     let raw = case.raw();
     let profile = profile();
     let encoder = encoder(case.compression);
     bencher
-        .counter(BytesCount::new(case.gamut_bytes()))
+        .counter(BytesCount::new(case.gamut_encode_bytes()))
         .bench_local(|| {
             let mut out = Vec::new();
             encoder
@@ -528,7 +629,8 @@ fn encode_gamut(bencher: Bencher, case: Case) {
 /// construction of [`gamut_dng_oracle::decode_dng_in_memory`], no temporary file and no FFI
 /// export copy.
 ///
-/// The counters differ by the preview, deliberately: see this file's counter rule.
+/// The two counters differ by the preview volume on the uncompressed rows and are identical on
+/// the compressed ones, where that correction is suppressed: see this file's counter rule.
 #[divan::bench(args = DNG_JOBS)]
 fn decode_dng(bencher: Bencher, job: DngJob) {
     let bytes = job.case.encoded();
@@ -536,7 +638,7 @@ fn decode_dng(bencher: Bencher, job: DngJob) {
         DngImpl::Gamut => {
             let decoder = DngDecoder::new();
             bencher
-                .counter(BytesCount::new(job.case.gamut_bytes()))
+                .counter(BytesCount::new(job.case.gamut_decode_bytes()))
                 .bench_local(|| {
                     drop(black_box(
                         decoder.decode(black_box(&bytes)).expect("decode"),
