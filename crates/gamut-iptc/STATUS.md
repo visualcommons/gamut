@@ -47,10 +47,12 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
   the PMD-mapped subset — so reading, merging and writing are byte-for-byte unchanged by it.
 - **Authority.** The PMD tech reference is machine-readable only for the ~20 IIM-mapped rows and the
   `ipmd_struct` field sets, both of which `tests/techreference.rs` re-derives at test time. The rest
-  of the record-1/2 table comes from `iim-4.2.pdf`, which is not machine-readable; its guards are the
-  structural laws in `iim`'s own tests (ordering, uniqueness, the fixed date/time form lengths) and
-  the exiv2 differential in `tests/oracle.rs`, which cross-checks a stream spanning the newly named
-  Envelope and wide Application datasets.
+  of the record-1/2 table comes from `iim-4.2.pdf`, which is not machine-readable. Its guard is
+  `iim`'s own `tag_table_matches_the_exiv2_dataset_table`, which parses exiv2's independent
+  transcription of the same chapters out of the vendored `third_party/exiv2` sources and compares
+  every row's octet maximum, repeatability and value kind — a mis-transcribed maximum fails there,
+  which no round trip can see. The structural laws (ordering, uniqueness, the fixed date/time form
+  lengths) and the exiv2 wire differential in `tests/oracle.rs` sit alongside it.
 
 ## Deferred / out of scope
 

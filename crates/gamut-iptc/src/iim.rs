@@ -321,6 +321,8 @@ impl IimBlock {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn ds(record: u8, dataset: u8, data: &[u8]) -> IimDataSet {
@@ -417,6 +419,155 @@ mod tests {
         // Everything else in chapters 5 and 6 is named: 14 Envelope + 56 Application datasets.
         assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 1).count(), 14);
         assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 2).count(), 56);
+    }
+
+    /// The text of a vendored file, relative to the workspace root.
+    fn vendored(relative: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(relative);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("vendored file {relative} must be readable: {e}"))
+    }
+
+    /// `src` with every string literal removed, so a comma or a brace inside a C++ description
+    /// cannot be mistaken for punctuation.
+    fn without_string_literals(src: &str) -> String {
+        let mut out = String::new();
+        let mut chars = src.chars();
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                out.push(c);
+                continue;
+            }
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => drop(chars.next()),
+                    '"' => break,
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// The `static constexpr uint16_t NAME = N;` constants of an exiv2 header.
+    fn cpp_constants(header: &str) -> BTreeMap<&str, u16> {
+        header
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim().strip_prefix("static constexpr uint16_t ")?;
+                let (name, value) = rest.split_once(" = ")?;
+                Some((name, value.trim().trim_end_matches(';').parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// The body of the `constexpr DataSet <name>[] = { ... };` array in exiv2's `datasets.cpp`.
+    fn cpp_array<'a>(source: &'a str, name: &str) -> &'a str {
+        let marker = format!("constexpr DataSet {name}[] = {{");
+        let start = source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("exiv2 defines {name}"))
+            + marker.len();
+        let end = source[start..]
+            .find("\n};")
+            .unwrap_or_else(|| panic!("{name} is terminated"));
+        &source[start..start + end]
+    }
+
+    /// exiv2's own IIM dataset table, read from the vendored `third_party/exiv2` sources as
+    /// `(record, dataset) -> (repeatable, maximum octets, value type)`.
+    ///
+    /// Each row of `datasets.cpp` is `{IptcDataSets::<symbol>, "name", N_("title"),
+    /// N_("description"), mandatory, repeatable, minbytes, maxbytes, type, record, "photoshop"}`,
+    /// and `datasets.hpp` gives `<symbol>`'s dataset number. The trailing fields are counted from
+    /// the end, because a description spans an unpredictable number of concatenated literals. The
+    /// sentinel row closing each array numbers itself `0xffff` rather than a symbol, so it drops
+    /// out of the constant lookup.
+    fn exiv2_dataset_table() -> BTreeMap<(u8, u8), (bool, u32, String)> {
+        let header = vendored("third_party/exiv2/include/exiv2/datasets.hpp");
+        let numbers = cpp_constants(&header);
+        let source = without_string_literals(&vendored("third_party/exiv2/src/datasets.cpp"));
+        let mut table = BTreeMap::new();
+        for array in ["envelopeRecord", "application2Record"] {
+            for chunk in cpp_array(&source, array).split('}') {
+                let Some(open) = chunk.rfind('{') else {
+                    continue;
+                };
+                let fields: Vec<&str> = chunk[open + 1..].split(',').map(str::trim).collect();
+                let Some(last) = fields.len().checked_sub(1).filter(|&n| n >= 7) else {
+                    continue;
+                };
+                let symbol = fields[0].strip_prefix("IptcDataSets::");
+                let record = fields[last - 1].strip_prefix("IptcDataSets::");
+                let (Some(symbol), Some(record)) = (symbol, record) else {
+                    continue;
+                };
+                let (Some(&dataset), Some(&record)) = (numbers.get(symbol), numbers.get(record))
+                else {
+                    continue;
+                };
+                let repeatable = fields[last - 5] == "true";
+                let max: u32 = fields[last - 3].parse().expect("maxbytes is a number");
+                let kind = fields[last - 2].trim_start_matches("Exiv2::").to_owned();
+                table.insert((record as u8, dataset as u8), (repeatable, max, kind));
+            }
+        }
+        table
+    }
+
+    #[test]
+    fn tag_table_matches_the_exiv2_dataset_table() {
+        // Drift guard. `iim-4.2.pdf` is not machine-readable, so the 70 record-1/2 rows are a hand
+        // transcription with nothing but ordering and uniqueness to catch a slipped digit. exiv2 —
+        // the crate's differential oracle — carries its own independent transcription of the same
+        // spec chapters, so comparing the two tables catches exactly that.
+        let exiv2 = exiv2_dataset_table();
+        assert!(
+            exiv2.len() > 60,
+            "exiv2 table parsed as {} rows",
+            exiv2.len()
+        );
+        for t in KNOWN_TAGS {
+            let Some((repeatable, max, kind)) = exiv2.get(&(t.record, t.dataset)) else {
+                // exiv2 tables records 1 and 2 only; 7:10 comes from the PDF alone.
+                assert_eq!(
+                    (t.record, t.dataset),
+                    (7, 10),
+                    "{}:{} {} is not in exiv2's table",
+                    t.record,
+                    t.dataset,
+                    t.name
+                );
+                continue;
+            };
+            let where_ = format!("{}:{} {}", t.record, t.dataset, t.name);
+            assert_eq!(u32::from(t.max_octets), *max, "{where_}: octet maximum");
+            assert_eq!(t.repeatable, *repeatable, "{where_}: repeatability");
+            let expected = match kind.as_str() {
+                // exiv2 types 1:90 Coded Character Set as a string; IIM 4.2 Ch. 5 makes it ISO
+                // 2022 escape sequences, which are control characters, not graphic ones — so
+                // gamut calls it Binary. Pinned here rather than merely documented.
+                _ if (t.record, t.dataset) == (1, 90) => Binary,
+                "string" => Graphic,
+                "unsignedShort" | "undefined" => Binary,
+                "date" => Date,
+                "time" => Time,
+                other => panic!("{where_}: unmapped exiv2 value type {other}"),
+            };
+            assert_eq!(t.kind, expected, "{where_}: value kind");
+        }
+        // ...and nothing exiv2 documents is missing, apart from the one row `u16` cannot state.
+        for &(record, dataset) in exiv2.keys() {
+            if (record, dataset) == (2, 202) {
+                continue;
+            }
+            assert!(
+                IimTagInfo::lookup(record, dataset).is_some(),
+                "exiv2 documents {record}:{dataset} but gamut does not name it"
+            );
+        }
     }
 
     #[test]
