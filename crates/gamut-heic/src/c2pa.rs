@@ -22,9 +22,7 @@
 //! flags, then the null-terminated `box_purpose`, then `data`. What sits at the front of `data`
 //! depends on the purpose ([`C2paBoxPurpose`]), and what bounds the store inside it is the store's
 //! own JUMBF `LBox` ([`C2paManifestStore`]).
-use core::iter::Peekable;
 use core::ops::Range;
-use core::slice;
 
 use crate::container::{HeifContainer, SegmentKind};
 
@@ -720,14 +718,37 @@ impl C2paSummary {
     /// carries [`C2paBoxPosition::note`] when the box sits past the file's media data. Lines are
     /// indented two spaces relative to the headline; a caller prefixes its own indent to every one.
     ///
-    /// Lazy, so a host that caps the list at N builds N lines rather than one per box in a file
-    /// that chose how many to carry. [`detail_line_count`](Self::detail_line_count) is how many
-    /// there are in total.
+    /// Every *line* is built on demand, so a host that caps the list at N builds N strings rather
+    /// than one per box in a file that chose how many to carry — a manifest store's line is the
+    /// costly part, and §A.5.3 puts the number of boxes in the file's hands. Ordering them costs
+    /// one borrowed entry per box, which is what the summary already holds.
+    /// [`detail_line_count`](Self::detail_line_count) is how many there are in total.
     pub fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
-        DetailLines {
-            stores: self.stores.iter().peekable(),
-            unread: self.unread.iter().peekable(),
-        }
+        self.detail_entries().into_iter().map(|entry| entry.line())
+    }
+
+    /// The two lists merged back into the file order both were built in, as borrowed entries: the
+    /// order [`detail_lines`](Self::detail_lines) renders and nothing else.
+    ///
+    /// Ordering by `range.start` is exact rather than approximate. Different top-level `uuid`
+    /// boxes occupy disjoint byte ranges, and a store's range lies inside the box that carried it,
+    /// so the lower start is always the earlier box. A tie is not reachable from a parsed file — a
+    /// store begins strictly after its box's header — and the sort being stable resolves one to
+    /// the store, since the stores are chained first, so the order is total for a summary
+    /// assembled by hand as well.
+    ///
+    /// The list is built rather than merged lazily so that its length is fixed by the summary and
+    /// not by this function: a host consuming it can be handed no more entries than the file has
+    /// boxes, whatever the merge does.
+    fn detail_entries(&self) -> Vec<DetailEntry<'_>> {
+        let mut entries: Vec<DetailEntry<'_>> = self
+            .stores
+            .iter()
+            .map(DetailEntry::Store)
+            .chain(self.unread.iter().map(DetailEntry::Unread))
+            .collect();
+        entries.sort_by_key(DetailEntry::start);
+        entries
     }
 
     /// How many lines [`detail_lines`](Self::detail_lines) yields — one per store plus one per
@@ -793,34 +814,29 @@ fn unread_clause(count: usize) -> String {
     )
 }
 
-/// [`C2paSummary::detail_lines`]'s iterator: the store list and the unread list merged back into
-/// the file order they were both built in.
-///
-/// Merging on `range.start` is exact rather than approximate. Different top-level `uuid` boxes
-/// occupy disjoint byte ranges, and a store's range lies inside the box that carried it, so the
-/// lower start is always the earlier box. A tie is not reachable from a parsed file — a store
-/// begins strictly after its box's header — and resolves to the store, so the iterator is total
-/// for a summary assembled by hand as well.
-struct DetailLines<'a> {
-    stores: Peekable<slice::Iter<'a, C2paStoreSummary>>,
-    unread: Peekable<slice::Iter<'a, C2paUnreadBox>>,
+/// One entry of [`C2paSummary::detail_lines`]'s list: a located store, or a top-level C2PA box
+/// that yielded none. Borrowed from the summary, so ordering the list copies no line.
+enum DetailEntry<'a> {
+    /// A store [`C2paSummary::stores`] holds.
+    Store(&'a C2paStoreSummary),
+    /// A C2PA box [`C2paSummary::unread`] holds.
+    Unread(&'a C2paUnreadBox),
 }
 
-impl Iterator for DetailLines<'_> {
-    type Item = String;
+impl DetailEntry<'_> {
+    /// Where this entry's box begins in the file: the key the list is ordered by.
+    fn start(&self) -> usize {
+        match self {
+            Self::Store(store) => store.range.start,
+            Self::Unread(unread) => unread.range.start,
+        }
+    }
 
-    fn next(&mut self) -> Option<String> {
-        let store_at = self.stores.peek().map(|store| store.range.start);
-        let unread_at = self.unread.peek().map(|unread| unread.range.start);
-        let store_first = match (store_at, unread_at) {
-            (Some(store), Some(unread)) => store <= unread,
-            (Some(_), None) => true,
-            (None, _) => false,
-        };
-        if store_first {
-            self.stores.next().map(store_line)
-        } else {
-            self.unread.next().map(unread_line)
+    /// This entry's report line.
+    fn line(&self) -> String {
+        match self {
+            Self::Store(store) => store_line(store),
+            Self::Unread(unread) => unread_line(unread),
         }
     }
 }
