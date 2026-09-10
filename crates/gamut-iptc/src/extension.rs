@@ -1743,6 +1743,95 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_uri_reproduces_only_a_uri_of_the_same_target() {
+        // `rdf:resource` is a value kind of its own (XMP Part 1 §6.3.2), so a URL field is
+        // reproduced only by emitting the same URI again — the clause that makes a `Uri` field
+        // consumable at all rather than retained.
+        let url = |target: &str| {
+            XmpProperty::new(
+                ns::IPTC_EXT,
+                "AOSourceInvURL",
+                XmpValue::Uri(target.to_owned()),
+            )
+        };
+        assert!(reproduces(
+            &url("https://example.test/a"),
+            &url("https://example.test/a")
+        ));
+        assert!(!reproduces(
+            &url("https://example.test/a"),
+            &url("https://example.test/b")
+        ));
+    }
+
+    #[test]
+    fn a_structure_reproduces_only_when_every_field_does() {
+        // A structure's fields are an unordered set (Part 1 §6.3.3), so each one has to be found
+        // in the other structure; counting them is not enough.
+        let creator = |name: &str| {
+            XmpProperty::new(
+                ns::IPTC_EXT,
+                "AOCreator",
+                structured(vec![XmpProperty::new(
+                    ns::IPTC_EXT,
+                    "Name",
+                    text_value(name),
+                )]),
+            )
+        };
+        assert!(reproduces(&creator("Human"), &creator("Human")));
+        assert!(!reproduces(&creator("Human"), &creator("Another")));
+    }
+
+    #[test]
+    fn a_qualifier_the_writer_does_not_emit_is_a_difference() {
+        // The writer builds its properties with no qualifiers at all, so a qualified field is
+        // reproduced only by a field carrying the same qualifier — matching them pairwise, not
+        // by count.
+        let city = || XmpProperty::new(ns::IPTC_EXT, "CiAdrCity", text_value("Paris"));
+        assert!(reproduces(
+            &qualified(city(), "fr"),
+            &qualified(city(), "fr")
+        ));
+        assert!(!reproduces(&qualified(city(), "fr"), &city()));
+        assert!(!reproduces(
+            &qualified(city(), "fr"),
+            &qualified(city(), "en")
+        ));
+    }
+
+    #[test]
+    fn only_an_xml_lang_qualifier_is_matched_case_insensitively() {
+        // XMP Part 1 §8.2.2.4 matches language tags case-insensitively. No other qualifier is
+        // matched that way: neither the `xml:` namespace on its own nor the name `lang` on its
+        // own makes one, and an ordinary qualifier is compared by value.
+        let city = || XmpProperty::new(ns::IPTC_EXT, "CiAdrCity", text_value("Paris"));
+        let with = |namespace: &str, name: &str, text: &str| {
+            let mut property = city();
+            property
+                .qualifiers
+                .push(XmpProperty::new(namespace, name, text_value(text)));
+            property
+        };
+        assert!(reproduces(
+            &qualified(city(), "x-default"),
+            &qualified(city(), "X-Default")
+        ));
+        assert!(!reproduces(
+            &with(XML_NAMESPACE, "space", "preserve"),
+            &with(XML_NAMESPACE, "space", "PRESERVE")
+        ));
+        assert!(!reproduces(
+            &with(ns::IPTC_EXT, "lang", "fr"),
+            &with(ns::IPTC_EXT, "lang", "FR")
+        ));
+        assert!(!reproduces(
+            &with(ns::IPTC_EXT, "role", "editor"),
+            &with(ns::IPTC_EXT, "role", "author")
+        ));
+    }
+
     /// One shape a modelled field can arrive in, with both rules' machinery attached to it.
     struct Shape {
         /// What the shape is — the label the enumeration is published under.
