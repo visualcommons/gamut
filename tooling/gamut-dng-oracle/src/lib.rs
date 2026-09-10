@@ -53,6 +53,16 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> c_int;
 
+    /// Decodes the same bare lossless-JPEG stream as `gdng_decode_lossless_jpeg` but stops at
+    /// the spooler, reporting only how many samples the SDK produced; `0` on success, else the
+    /// SDK error code. Nothing is allocated for the caller, so there is nothing to free.
+    fn gdng_decode_lossless_jpeg_extent(
+        data: *const u8,
+        len: usize,
+        expected_samples: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+
     /// Decodes the DNG in `data`/`len` from memory and reports the stage-1 image's geometry and
     /// sample count without exporting the samples; `0` on success, else the SDK error code.
     /// Nothing is allocated for the caller, so there is nothing to free.
@@ -385,6 +395,38 @@ pub fn decode_lossless_jpeg(stream: &[u8], expected_samples: usize) -> Result<Ve
     Ok(samples)
 }
 
+/// Decodes the same bare lossless-JPEG (SOF3) stream as [`decode_lossless_jpeg`] with the Adobe
+/// DNG SDK, but **without exporting the samples** — it returns how many the SDK produced.
+///
+/// The two entry points run the identical `DecodeLosslessJPEG<Scalar>` call into the identical
+/// spool buffer and differ only in what happens afterwards: [`decode_lossless_jpeg`] must
+/// `malloc` a buffer, `memcpy` the spool into it and copy that into a `Vec` to cross the FFI
+/// boundary, and this one does none of those. Timing the pair therefore measures the export path
+/// and nothing else, which is how `cargo bench -p gamut-dng --bench codec` quantifies the one
+/// residual bias in its codestream comparison instead of merely asserting it is small.
+///
+/// # Errors
+///
+/// Returns an error message (with the SDK's numeric error code) if the SDK cannot decode the
+/// stream, or if it produces a different number of samples than `expected_samples`.
+pub fn decode_lossless_jpeg_extent(
+    stream: &[u8],
+    expected_samples: usize,
+) -> Result<usize, String> {
+    let mut len: usize = 0;
+    // SAFETY: `stream` outlives the call and the shim only reads `stream.len()` bytes from it;
+    // `len` is a live local and the shim allocates nothing for us.
+    let code = unsafe {
+        gdng_decode_lossless_jpeg_extent(stream.as_ptr(), stream.len(), expected_samples, &mut len)
+    };
+    if code != 0 {
+        return Err(format!(
+            "Adobe DNG SDK could not decode the lossless JPEG (code {code})"
+        ));
+    }
+    Ok(len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,10 +454,11 @@ mod tests {
         );
     }
 
-    /// The memory-stream decode reaches the same stage-1 image as the file-stream one, so the
-    /// entry point a benchmark times is not a cheaper, different decode.
+    /// The memory-stream decode reports the same stage-1 extent as the file-stream one, so the
+    /// entry point a benchmark times is not a cheaper, different decode. It compares extents and
+    /// not pixels because the entry point deliberately exports no pixels.
     #[test]
-    fn in_memory_decode_reaches_the_same_image_as_the_file_decode() {
+    fn in_memory_decode_reports_the_same_extent_as_the_file_decode() {
         let bytes = sample_file("05_PGTM2_unsigned8.dng").expect("sample DNG present");
         let exported = read_raw_dng(&bytes).expect("file-stream decode");
         let extent = decode_dng_in_memory(&bytes).expect("memory-stream decode");

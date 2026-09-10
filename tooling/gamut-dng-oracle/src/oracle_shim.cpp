@@ -302,6 +302,32 @@ extern "C" int gdng_decode_lossless_jpeg(const uint8_t *data, size_t len, size_t
   }
 }
 
+// Decodes the same bare lossless-JPEG stream as `gdng_decode_lossless_jpeg` but stops at the
+// spooler: it reports how many samples the SDK produced and exports none of them. The only
+// difference between the two entry points is the FFI export path (the `malloc` plus the `memcpy`
+// out of the spool buffer), so timing them against each other measures that export cost and
+// nothing else. Returns `dng_error_none` on success or the SDK error code.
+extern "C" int gdng_decode_lossless_jpeg_extent(const uint8_t *data, size_t len,
+                                                size_t expected_samples, size_t *out_len) {
+  *out_len = 0;
+  try {
+    dng_stream stream(data, static_cast<uint32>(len));
+    buffer_spooler spooler;
+    uint32 byte_count = static_cast<uint32>(expected_samples * sizeof(uint16_t));
+    DecodeLosslessJPEG<Scalar>(stream, spooler, byte_count, byte_count, false,
+                               static_cast<uint64>(len));
+    if (spooler.bytes.size() != byte_count) {
+      return dng_error_bad_format;
+    }
+    *out_len = spooler.bytes.size() / sizeof(uint16_t);
+    return dng_error_none;
+  } catch (const dng_exception &except) {
+    return except.ErrorCode();
+  } catch (...) {
+    return dng_error_unknown;
+  }
+}
+
 // Releases a buffer returned by `gdng_read_raw` / `gdng_read_linear` /
 // `gdng_decode_lossless_jpeg`.
 // Returns the camera-neutral coordinates the reference implementation derives for the DNG at
