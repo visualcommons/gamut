@@ -176,18 +176,6 @@ impl TiffEncoder {
         c2pa::MIN_STORE_LEN.max(self.variant().inline_threshold() + 1)
     }
 
-    /// Rejects a contradictory or unplaceable C2PA configuration, discarding the store itself.
-    ///
-    /// [`encode_packed`](Self::encode_packed) is the chokepoint every layout funnels through, but
-    /// two paths do real work *before* reaching it — [`encode_16bit`](Self::encode_16bit)
-    /// allocates and fills a byte-order-corrected copy of the samples, and the [`Bilevel`] impl
-    /// runs a whole bit-packing pass — so each calls this first. That is what makes
-    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved)'s promise to fail before any pixel work
-    /// true on every path rather than on most of them.
-    fn check_c2pa(&self) -> Result<()> {
-        self.c2pa_store().map(|_| ())
-    }
-
     /// The C2PA manifest store to write, if any: the caller's, or a zero-filled reservation.
     ///
     /// # Errors
@@ -288,6 +276,7 @@ impl TiffEncoder {
         palette: &Palette8,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
+        let store = self.c2pa_store()?;
         let w = indices.width() as usize;
         let colormap = palette.to_tiff_colormap();
         self.encode_packed(
@@ -300,6 +289,7 @@ impl TiffEncoder {
                 photometric: PhotometricInterpretation::Palette,
             },
             &[(tags::COLOR_MAP, Value::Short(colormap))],
+            store,
             out,
         )
     }
@@ -314,6 +304,7 @@ impl TiffEncoder {
     ) -> Result<usize> {
         // The caller is an EncodeImage impl handing us an ImageRef-validated buffer, so
         // pixels.len() == width * height * spp holds and the product cannot overflow.
+        let store = self.c2pa_store()?;
         let row_bytes = dims.width as usize * spp;
         debug_assert_eq!(pixels.len(), row_bytes * dims.height as usize);
         self.encode_packed(
@@ -326,6 +317,7 @@ impl TiffEncoder {
                 photometric,
             },
             &[],
+            store,
             out,
         )
     }
@@ -345,7 +337,7 @@ impl TiffEncoder {
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         // Before the serialisation buffer below, so a bad C2PA configuration costs no allocation.
-        self.check_c2pa()?;
+        let store = self.c2pa_store()?;
         // As in `encode_8bit`, the caller hands us an ImageRef-validated buffer.
         let row_bytes = dims.width as usize * spp * 2;
         debug_assert_eq!(samples.len() * 2, row_bytes * dims.height as usize);
@@ -366,22 +358,32 @@ impl TiffEncoder {
                 photometric,
             },
             extra_fields,
+            store,
             out,
         )
     }
 
     /// Lays out an image from already-packed sample bytes (`height * stored_row_bytes`), applying
     /// the strip codec and building the directory.
+    ///
+    /// `store` is the already-resolved C2PA manifest store (or reservation) to place at the end of
+    /// the file. It is a parameter rather than something resolved here so that every entry point
+    /// has to call [`c2pa_store`](Self::c2pa_store) — and so take its refusal — *before* whatever
+    /// pixel work it does to produce `packed`, which for
+    /// [`encode_16bit`](Self::encode_16bit) is a byte-order-corrected copy of the samples and for
+    /// the [`Bilevel`] impl a whole bit-packing pass. That is what makes
+    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved)'s promise to fail before any pixel work
+    /// true on every path rather than on most of them, and it is the same shape
+    /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) already uses.
     fn encode_packed(
         &self,
         packed: &[u8],
         dims: Dimensions,
         layout: &SampleLayout,
         extra_fields: &[(u16, Value)],
+        store: Option<Cow<'_, [u8]>>,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        // Validated before any pixel work, so a contradictory C2PA configuration fails fast.
-        let store = self.c2pa_store()?;
         if let Some((tw, tl)) = self.tiling {
             return self.encode_tiled(packed, dims, layout, extra_fields, tw, tl, store, out);
         }
@@ -727,6 +729,7 @@ impl EncodeImage<Cmyk8> for TiffEncoder {
 impl EncodeImage<Rgba8> for TiffEncoder {
     /// Stores the fourth sample as *unassociated* alpha (`ExtraSamples = 2`, not premultiplied).
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
+        let store = self.c2pa_store()?;
         let row_bytes = image.width() as usize * 4;
         self.encode_packed(
             image.as_samples(),
@@ -738,6 +741,7 @@ impl EncodeImage<Rgba8> for TiffEncoder {
                 photometric: PhotometricInterpretation::Rgb,
             },
             &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
+            store,
             out,
         )
     }
@@ -792,7 +796,7 @@ impl EncodeImage<Bilevel> for TiffEncoder {
     /// Packs one byte per pixel (`0` = black, non-zero = white) MSB-first into bits, `BlackIsZero`.
     fn encode_image(&self, image: ImageRef<'_, Bilevel>, out: &mut Vec<u8>) -> Result<usize> {
         // Before the bit-packing pass below, so a bad C2PA configuration costs no pixel work.
-        self.check_c2pa()?;
+        let store = self.c2pa_store()?;
         let (w, h) = (image.width() as usize, image.height() as usize);
         let pixels = image.as_samples();
         let stored_row_bytes = w.div_ceil(8);
@@ -816,6 +820,7 @@ impl EncodeImage<Bilevel> for TiffEncoder {
                 photometric: PhotometricInterpretation::BlackIsZero,
             },
             &[],
+            store,
             out,
         )
     }
@@ -922,44 +927,59 @@ mod tests {
     }
 
     #[test]
-    fn every_pixel_type_refuses_a_bad_c2pa_configuration_before_touching_pixels() {
-        // `with_c2pa_reserved` promises the refusal comes before any pixel work. `encode_packed`
-        // is the common chokepoint, but `encode_16bit` allocates a byte-order-corrected copy of
-        // the samples first and the `Bilevel` impl runs a whole bit-packing pass first, so those
-        // two paths needed their own check — and a mutant deleting either would leave the doc
-        // claim false while every output stayed byte-identical. One case per path shape.
+    fn every_encode_path_resolves_the_c2pa_store_before_it_lays_out_pixels() {
+        // `with_c2pa_reserved` promises a contradictory configuration is refused before any pixel
+        // work. `encode_packed` takes the already-resolved store as a parameter, so every entry
+        // point has to resolve it before whatever pass produces the packed bytes — `encode_16bit`
+        // a byte-order-corrected copy of the samples, the `Bilevel` impl a whole bit-packing pass,
+        // nothing at all for the 8-bit impls.
+        //
+        // Ordering leaves no trace in a successful encode, so it is read off the *message* of the
+        // refusal instead: each case is also given a tile size that is not a multiple of 16, which
+        // the layout stage rejects with its own error. Coming back with the C2PA message rather
+        // than the tiling one is what says the store was resolved before the layout stage ran —
+        // asserting only `is_err` cannot tell the two orders apart, since both refuse. The
+        // remaining step, resolving it before the pixel pass *within* an entry point, changes no
+        // output at all and so is held by `encode_packed`'s signature rather than by a test.
         let dims = Dimensions {
             width: 2,
             height: 2,
         };
         let bad = TiffEncoder::new()
             .with_metadata(TiffMetadata::new().with_c2pa(vec![0; 4]))
-            .with_c2pa_reserved(4);
+            .with_c2pa_reserved(4)
+            .with_tiling(17, 17);
         let mut out = Vec::new();
-        assert!(
-            bad.encode_image(
-                ImageRef::<Rgb16>::new(&[0u16; 12], dims).expect("16-bit image"),
-                &mut out
-            )
-            .is_err(),
-            "the 16-bit path must refuse before packing"
-        );
-        assert!(
-            bad.encode_image(
-                ImageRef::<Bilevel>::new(&[0u8; 4], dims).expect("bilevel image"),
-                &mut out
-            )
-            .is_err(),
-            "the bilevel path must refuse before packing"
-        );
-        assert!(
-            bad.encode_image(
-                ImageRef::<Rgb8>::new(&[0u8; 12], dims).expect("8-bit image"),
-                &mut out
-            )
-            .is_err(),
-            "the 8-bit path must refuse"
-        );
+        let refusals = [
+            (
+                "the 16-bit path",
+                bad.encode_image(
+                    ImageRef::<Rgb16>::new(&[0u16; 12], dims).expect("16-bit image"),
+                    &mut out,
+                ),
+            ),
+            (
+                "the bilevel path",
+                bad.encode_image(
+                    ImageRef::<Bilevel>::new(&[0u8; 4], dims).expect("bilevel image"),
+                    &mut out,
+                ),
+            ),
+            (
+                "the 8-bit path",
+                bad.encode_image(
+                    ImageRef::<Rgb8>::new(&[0u8; 12], dims).expect("8-bit image"),
+                    &mut out,
+                ),
+            ),
+        ];
+        for (path, result) in refusals {
+            let err = result.expect_err(path);
+            assert!(
+                err.to_string().contains("not both"),
+                "{path} refused for the wrong reason: {err}"
+            );
+        }
         assert!(out.is_empty(), "a refused encode writes nothing");
     }
 
