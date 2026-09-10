@@ -54,6 +54,26 @@
 # In all four the name list ends at the first character that is not a backticked name, a comma,
 # a colon, a space or the word "and", so ordinary prose may follow it on the same line.
 #
+# WHAT THE TABLE IS FORBIDDEN TO WRITE, and why forbidding beats widening. A check that reads
+# backticked names can only be as good as the assumption that names are backticked, and that
+# assumption was not enforced: an unbackticked `gamut-ifdd` in a cell sailed past the cite check.
+# The fix is not a wider pattern -- widening is how a phantom gets in -- but the requirement made
+# real. Inside the section:
+#
+#   * a `gamut-`/`gamut_` compound OUTSIDE a code span is a failure, whether or not it names a
+#     real crate, because that is the precondition every name check rests on. The bare word
+#     `gamut` is exempt: it is the project's name in English as well as the umbrella's package
+#     name, and requiring a code span around every mention of it would reject the prose this
+#     README is made of. A fenced or indented code block is exempt too -- there a compound is a
+#     sample of Rust or of a shell line, where `gamut_png` is the correct spelling;
+#   * the underscore spelling of a workspace crate is REJECTED, deliberately, and this is the one
+#     place that decision is written down. `gamut_ifd` is a Rust identifier, not a cargo package
+#     name; cargo publishes `gamut-ifd` and `cargo add gamut_ifd` does not resolve. Accepting it
+#     would also split the guard against itself, because the crate-cell pattern reads `_` on
+#     purpose so a phantom row cannot hide behind one -- one half would fold the spelling while
+#     the other treats it as a distinct name. Cells name packages; the umbrella's module aliases
+#     (`gamut::png`) are how the Rust side is spelled in prose.
+#
 # CRLF input is accepted: a trailing carriage return is removed from every line before anything is
 # matched, so a CRLF README does not silently lose its heading and report itself as rowless.
 #
@@ -326,6 +346,22 @@ scan="$(
             if (out != "") { print "CITE\t" name "\t" out }
         }
 
+        # A `gamut-`/`gamut_` compound written outside a code span. Every name check downstream
+        # reads code spans only, so an unbackticked name is not a name the guard can see; the
+        # requirement is enforced here rather than assumed. The bare word `gamut` is exempt --
+        # it is English in this README as well as a package name.
+        function unbackticked(subject, text,   rest, tok, out) {
+            rest = text
+            gsub(/`[^`]*`/, " ", rest)
+            out = ""
+            while (match(rest, /gamut[-_][A-Za-z0-9_-]*/)) {
+                tok = substr(rest, RSTART, RLENGTH)
+                out = (out == "") ? tok : out " " tok
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+            if (out != "") { print "UNBT\t" subject "\t" out }
+        }
+
         function claims(name, text,   s, tok, nxt, pre, qual, lst, at, len) {
             cites(name, text)
             s = " " text
@@ -399,6 +435,10 @@ scan="$(
             if (lvl > 0) {
                 in_table = 0
                 if (lvl <= 2) { in_section = (htitle == "Crates") ? 1 : 0 }
+                # A `###` sub-heading does not end the section, so its text is section text and
+                # is scanned like any other. The `## Crates` heading itself is scanned too, which
+                # costs nothing and keeps "every line of the section" true without an exception.
+                if (in_section) { unbackticked("line " NR, cur) }
                 prev = ""
                 prev_para = 0
                 next
@@ -409,6 +449,11 @@ scan="$(
                 prev_para = is_para(cur)
                 next
             }
+
+            # The precondition is the whole section, rows and prose alike. An indented code block
+            # is exempt for the same reason a fence is: there a `gamut_png` is a sample of Rust or
+            # of a shell line, where the underscore spelling is the correct one.
+            if (cur !~ /^    /) { unbackticked("line " NR, cur) }
 
             # A table runs from its delimiter row until the first line that is not a table row.
             # Tracking it for the whole section is what makes "every crate row is in ONE table"
@@ -720,8 +765,24 @@ if [ -n "$cite_claims" ]; then
         fail=1
         echo "check-readme-crates: $readme cells name crates that do not exist:"
         echo "$cite_errors"
-        echo "  drop the mention, or fix the crate name it misspells."
+        echo "  drop the mention, or fix the crate name it misspells. The underscore spelling of a"
+        echo "  real crate is rejected here on purpose: a cell names a cargo package, and cargo"
+        echo "  publishes the hyphenated name (see the header of this script for the whole reason)."
     fi
+fi
+
+# The precondition every name check above rests on: names are inside code spans. A `gamut-`/
+# `gamut_` compound written as bare text is a failure whether or not it names a real crate,
+# because an unbackticked name is invisible to the cite check -- an unbackticked `gamut-ifdd`
+# passed every check this script had.
+unbackticked="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "UNBT" { print "  " $2 ": " $3 }')"
+if [ -n "$unbackticked" ]; then
+    fail=1
+    echo "check-readme-crates: in $readme, crate names written without a code span:"
+    echo "$unbackticked"
+    echo "  Inside '## Crates', write every \`gamut-\`/\`gamut_\` compound in a code span, so the"
+    echo "  checks that read crate names can see it. The bare word 'gamut' is exempt (it is"
+    echo "  English here as well as a package name), and so is a fenced or indented code block."
 fi
 
 # `feature`/`features`: each named feature must be declared by one of the workspace crates the row
