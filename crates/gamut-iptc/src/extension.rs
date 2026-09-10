@@ -88,16 +88,27 @@
 //! modelled value stays the authority when there is one, and the retained field is written when it
 //! is the only copy.
 //!
-//! # Lenient at the top level, exact inside a structure
+//! # The same rule at both levels
 //!
-//! [`PhotoMetadata`]'s array accessors accept the shapes seen in the wild: a bare structure written
-//! where the standard puts an array of structures reads as that array's single element. Nothing is
-//! at risk there, because reading a property never rewrites it. Inside a structure the same
-//! leniency would normalise the shape away on the way out, so it is not taken — such a field is
-//! retained instead, and reads as absent.
+//! [`PhotoMetadata`]'s four accessor pairs for these properties apply that gate to the property
+//! itself, not only to the fields inside it. Inside a structure the retention list is the type's
+//! `other` field; at the top level it is the graph — a property the read does not consume is left
+//! exactly where it lies, and the setter beside it does not remove it. So a read that reports
+//! nothing is never a read that destroys something: a bare structure written where the standard
+//! puts an array of structures, an array member that is not a structure, an `rdf:li` or a property
+//! carrying a qualifier, an array or structure holding nothing at all, and two top-level properties
+//! of one name all read as absent and survive a read-modify-write untouched. Two of one name are
+//! refused for the reason [`Reader::read`] refuses two fields of one name: only one of them could
+//! be written back.
 //!
-//! The array setters write the standard form: an `rdf:Bag`, unless the property they replace is
-//! already an `rdf:Seq`, whose order the caller may be relying on.
+//! An array setter writes the RDF container kind the property it replaces already carries — an
+//! `rdf:Bag`, an `rdf:Seq` whose order the caller may be relying on, or an `rdf:Alt` — and the
+//! `rdf:Bag` the standard specifies when it replaces nothing. It writes every value the caller
+//! passes, including one carrying no field at all. Handed nothing to write, it removes the
+//! property — but only when the read reported one, because a caller cannot have meant to clear a
+//! property it was never shown.
+
+use std::borrow::Borrow;
 
 use gamut_xmp::{XML_NAMESPACE, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
@@ -1182,99 +1193,197 @@ impl ImageRegion {
 
 // --- The accessors on the unified view ---------------------------------------------------------
 
-/// Reads every structure of the `Bag`/`Seq` property `ns:name` through `parse`, tolerating a bare
-/// structure written where the array should be (see the [module docs](self)).
-fn read_array<T>(xmp: &XmpMeta, ns: &str, name: &str, parse: fn(&[XmpProperty]) -> T) -> Vec<T> {
-    match xmp.get(ns, name) {
-        Some(property) => structures(&property.value).into_iter().map(parse).collect(),
-        None => Vec::new(),
+/// The RDF container an array setter puts its items in (XMP Part 1 §6.3.4).
+type Container = fn(Vec<XmpItem>) -> XmpArray;
+
+/// The container kind a property's value is already held in — what an array setter keeps, so that
+/// one legal container kind is never rewritten to another. A property that is not an array, or no
+/// property at all, gives the `rdf:Bag` the standard specifies for these properties.
+fn container_of(value: Option<&XmpValue>) -> Container {
+    match value {
+        Some(XmpValue::Array(XmpArray::Seq(_))) => XmpArray::Seq,
+        Some(XmpValue::Array(XmpArray::Alt(_))) => XmpArray::Alt,
+        _ => XmpArray::Bag,
     }
 }
 
-/// Replaces the array property `ns:name` with `values`, and removes it when there is nothing left
-/// to write.
+/// One top-level property the typed view projects, and the rule that keeps that projection
+/// lossless.
 ///
-/// The RDF container kind the property already carries is kept — an `rdf:Seq` a caller wrote for
-/// its order stays a `Seq` — and anything else becomes the `rdf:Bag` the standard specifies. Every
-/// value the caller passes is written, including one that carries no field at all, so that reading
-/// an array and setting it back is the identity (see the [module docs](self)).
-fn write_array(xmp: &mut XmpMeta, ns: &str, name: &str, values: Vec<XmpValue>) {
-    let ordered = matches!(
-        xmp.get(ns, name).map(|property| &property.value),
-        Some(XmpValue::Array(XmpArray::Seq(_)))
-    );
-    match nested_array_value(ordered, values) {
-        Some(value) => xmp.set(XmpProperty::new(ns, name, value)),
-        None => drop(xmp.remove(ns, name)),
+/// This is [`Reader`] one level up. Inside a structure the retention list is the type's `other`
+/// field; at the top level it is the graph itself, so *retained* here means the accessor pair
+/// leaves the property exactly where it found it. The gate is the same one: the read reports a
+/// value only when the property the setter will emit for it [reproduces](reproduces) the property
+/// that was read.
+///
+/// `R` is what the read yields and `W` what the setter takes — `Vec<T>` and `[T]` for a property
+/// holding an array of structures, one type for a property holding a single structure.
+struct Projection<R, W: ?Sized> {
+    /// The property's namespace URI.
+    ns: &'static str,
+    /// The property's local name.
+    name: &'static str,
+    /// Reads the typed value out of the property's value, or `None` when there is none to read.
+    parse: fn(&XmpValue) -> Option<R>,
+    /// The value the setter emits for a typed value, in the container kind the property already
+    /// carries, or `None` when there is nothing to write.
+    emit: fn(&W, Container) -> Option<XmpValue>,
+}
+
+impl<R: Borrow<W>, W: ?Sized> Projection<R, W> {
+    /// The typed value of the property, or `None` when it is absent, holds nothing the model
+    /// reads, or could not be written back as it stands.
+    ///
+    /// Two top-level properties of one name are never read: only one of them could be written
+    /// back, which is why [`Reader::read`] refuses the same shape inside a structure.
+    fn read(&self, xmp: &XmpMeta) -> Option<R> {
+        let mut matches = xmp
+            .properties
+            .iter()
+            .filter(|property| property.namespace == self.ns && property.name == self.name);
+        let property = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        let value = (self.parse)(&property.value)?;
+        let emitted = XmpProperty::new(
+            self.ns,
+            self.name,
+            (self.emit)(value.borrow(), container_of(Some(&property.value)))?,
+        );
+        reproduces(property, &emitted).then_some(value)
+    }
+
+    /// Replaces the property with `value`, keeping the RDF container kind it already carries.
+    ///
+    /// Writing nothing removes the property — but only when [`read`](Self::read) reported one. A
+    /// property the typed view does not report is one the caller was never shown, so the pair does
+    /// not destroy it.
+    fn write(&self, xmp: &mut XmpMeta, value: &W) {
+        let container = container_of(xmp.get(self.ns, self.name).map(|property| &property.value));
+        match (self.emit)(value, container) {
+            Some(value) => xmp.set(XmpProperty::new(self.ns, self.name, value)),
+            None if self.read(xmp).is_some() => drop(xmp.remove(self.ns, self.name)),
+            None => {}
+        }
     }
 }
+
+/// Every structure an array property holds, which is none at all for a value holding none.
+///
+/// Never `None`: whether there is anything here to write is [`emit_structures`]'s decision, taken
+/// once. A read that finds no structure emits nothing, and a read that emits nothing reports
+/// nothing (see [`Projection::read`]).
+fn parse_structures<T>(value: &XmpValue, parse: fn(&[XmpProperty]) -> T) -> Option<Vec<T>> {
+    Some(structures(value).into_iter().map(parse).collect())
+}
+
+/// The array value an array setter emits for `values`, or `None` when there is nothing to write:
+/// an empty array says nothing a missing property does not.
+fn emit_structures<T>(
+    values: &[T],
+    container: Container,
+    to_xmp: fn(&T) -> XmpValue,
+) -> Option<XmpValue> {
+    (!values.is_empty()).then(|| {
+        XmpValue::Array(container(
+            values
+                .iter()
+                .map(|value| XmpItem::new(to_xmp(value)))
+                .collect(),
+        ))
+    })
+}
+
+/// The `Iptc4xmpCore:CreatorContactInfo` projection: a single structure, so no container applies.
+const CONTACT_INFO: Projection<CreatorContactInfo, CreatorContactInfo> = Projection {
+    ns: ns::IPTC_CORE,
+    name: "CreatorContactInfo",
+    parse: |value| structure(value).map(CreatorContactInfo::from_fields),
+    emit: |info, _| {
+        let value = info.to_xmp();
+        (!structure(&value).is_some_and(<[XmpProperty]>::is_empty)).then_some(value)
+    },
+};
+
+/// The `Iptc4xmpExt:ImageRegion` projection.
+const IMAGE_REGIONS: Projection<Vec<ImageRegion>, [ImageRegion]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "ImageRegion",
+    parse: |value| parse_structures(value, ImageRegion::from_fields),
+    emit: |values, container| emit_structures(values, container, ImageRegion::to_xmp),
+};
+
+/// The `Iptc4xmpExt:ArtworkOrObject` projection.
+const ARTWORK_OR_OBJECTS: Projection<Vec<ArtworkOrObject>, [ArtworkOrObject]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "ArtworkOrObject",
+    parse: |value| parse_structures(value, ArtworkOrObject::from_fields),
+    emit: |values, container| emit_structures(values, container, ArtworkOrObject::to_xmp),
+};
+
+/// The `plus:Licensor` projection.
+const LICENSORS: Projection<Vec<Licensor>, [Licensor]> = Projection {
+    ns: ns::PLUS,
+    name: "Licensor",
+    parse: |value| parse_structures(value, Licensor::from_fields),
+    emit: |values, container| emit_structures(values, container, Licensor::to_xmp),
+};
 
 impl PhotoMetadata {
-    /// The creator's contact details (`Iptc4xmpCore:CreatorContactInfo`).
+    /// The creator's contact details (`Iptc4xmpCore:CreatorContactInfo`), or `None` when the
+    /// property is absent, holds no structure, or could not be written back as it stands (see the
+    /// [module docs](self)).
     #[must_use]
     pub fn creator_contact_info(&self) -> Option<CreatorContactInfo> {
-        CreatorContactInfo::from_xmp(&self.xmp.get(ns::IPTC_CORE, "CreatorContactInfo")?.value)
+        CONTACT_INFO.read(&self.xmp)
     }
 
     /// Sets the creator's contact details (`Iptc4xmpCore:CreatorContactInfo`); a block with no
-    /// fields at all removes the property, as an empty slice does for the array accessors.
+    /// fields at all removes the property, as an empty slice does for the array accessors — but
+    /// only a property this pair reported.
     pub fn set_creator_contact_info(&mut self, info: &CreatorContactInfo) {
-        let value = info.to_xmp();
-        if structure(&value).is_some_and(<[XmpProperty]>::is_empty) {
-            self.xmp.remove(ns::IPTC_CORE, "CreatorContactInfo");
-            return;
-        }
-        self.xmp
-            .set(XmpProperty::new(ns::IPTC_CORE, "CreatorContactInfo", value));
+        CONTACT_INFO.write(&mut self.xmp, info);
     }
 
-    /// The image regions (`Iptc4xmpExt:ImageRegion`), in the order the graph holds them.
+    /// The image regions (`Iptc4xmpExt:ImageRegion`), in the order the graph holds them, or an
+    /// empty list when the property is absent, holds no structure, or could not be written back as
+    /// it stands (see the [module docs](self)).
     #[must_use]
     pub fn image_regions(&self) -> Vec<ImageRegion> {
-        read_array(
-            &self.xmp,
-            ns::IPTC_EXT,
-            "ImageRegion",
-            ImageRegion::from_fields,
-        )
+        IMAGE_REGIONS.read(&self.xmp).unwrap_or_default()
     }
 
-    /// Sets the image regions (`Iptc4xmpExt:ImageRegion`); an empty slice removes the property,
-    /// and an existing array keeps its container kind (see [`write_array`]).
+    /// Sets the image regions (`Iptc4xmpExt:ImageRegion`); an existing array keeps its container
+    /// kind, and an empty slice removes a property this pair reported.
     pub fn set_image_regions(&mut self, regions: &[ImageRegion]) {
-        let values = regions.iter().map(ImageRegion::to_xmp).collect();
-        write_array(&mut self.xmp, ns::IPTC_EXT, "ImageRegion", values);
+        IMAGE_REGIONS.write(&mut self.xmp, regions);
     }
 
-    /// The artworks or objects shown in the image (`Iptc4xmpExt:ArtworkOrObject`).
+    /// The artworks or objects shown in the image (`Iptc4xmpExt:ArtworkOrObject`), on the same
+    /// terms as [`image_regions`](Self::image_regions).
     #[must_use]
     pub fn artwork_or_objects(&self) -> Vec<ArtworkOrObject> {
-        read_array(
-            &self.xmp,
-            ns::IPTC_EXT,
-            "ArtworkOrObject",
-            ArtworkOrObject::from_fields,
-        )
+        ARTWORK_OR_OBJECTS.read(&self.xmp).unwrap_or_default()
     }
 
-    /// Sets the artworks or objects shown in the image (`Iptc4xmpExt:ArtworkOrObject`); an empty
-    /// slice removes the property, and an existing array keeps its container kind.
+    /// Sets the artworks or objects shown in the image (`Iptc4xmpExt:ArtworkOrObject`); an existing
+    /// array keeps its container kind, and an empty slice removes a property this pair reported.
     pub fn set_artwork_or_objects(&mut self, artworks: &[ArtworkOrObject]) {
-        let values = artworks.iter().map(ArtworkOrObject::to_xmp).collect();
-        write_array(&mut self.xmp, ns::IPTC_EXT, "ArtworkOrObject", values);
+        ARTWORK_OR_OBJECTS.write(&mut self.xmp, artworks);
     }
 
-    /// The licensors of the image (`plus:Licensor`).
+    /// The licensors of the image (`plus:Licensor`), on the same terms as
+    /// [`image_regions`](Self::image_regions).
     #[must_use]
     pub fn licensors(&self) -> Vec<Licensor> {
-        read_array(&self.xmp, ns::PLUS, "Licensor", Licensor::from_fields)
+        LICENSORS.read(&self.xmp).unwrap_or_default()
     }
 
-    /// Sets the licensors of the image (`plus:Licensor`); an empty slice removes the property, and
-    /// an existing array keeps its container kind.
+    /// Sets the licensors of the image (`plus:Licensor`); an existing array keeps its container
+    /// kind, and an empty slice removes a property this pair reported.
     pub fn set_licensors(&mut self, licensors: &[Licensor]) {
-        let values = licensors.iter().map(Licensor::to_xmp).collect();
-        write_array(&mut self.xmp, ns::PLUS, "Licensor", values);
+        LICENSORS.write(&mut self.xmp, licensors);
     }
 }
 
@@ -2389,26 +2498,40 @@ mod tests {
 
     #[test]
     fn setting_an_array_keeps_the_container_kind_the_property_already_has() {
-        // Forcing an `rdf:Seq` a caller wrote back to an `rdf:Bag` throws away the one thing a Seq
-        // states that a Bag does not, and the setter has the existing property in front of it. A
-        // property that is not an array still becomes the standard Bag.
-        let mut pm = PhotoMetadata::new();
+        // Rewriting one legal container kind to another throws away what that kind states — a
+        // `Seq`'s order, an `Alt`'s "these are alternatives" — and the setter has the existing
+        // property in front of it. A property that is not an array becomes the standard Bag.
         let region = ImageRegion {
             identifier: Some("r1".to_owned()),
             ..ImageRegion::default()
         };
-        pm.xmp.set(XmpProperty::new(
-            ns::IPTC_EXT,
-            "ImageRegion",
-            XmpValue::Array(XmpArray::Seq(vec![XmpItem::new(region.to_xmp())])),
-        ));
-        pm.set_image_regions(&pm.image_regions());
+        let kinds: [fn(Vec<XmpItem>) -> XmpArray; 3] =
+            [XmpArray::Bag, XmpArray::Seq, XmpArray::Alt];
+        for kind in kinds {
+            let mut pm = PhotoMetadata::new();
+            pm.xmp.set(XmpProperty::new(
+                ns::IPTC_EXT,
+                "ImageRegion",
+                XmpValue::Array(kind(vec![XmpItem::new(region.to_xmp())])),
+            ));
+            pm.set_image_regions(std::slice::from_ref(&region));
+            assert_eq!(
+                pm.xmp
+                    .get(ns::IPTC_EXT, "ImageRegion")
+                    .expect("the property")
+                    .value,
+                XmpValue::Array(kind(vec![XmpItem::new(region.to_xmp())]))
+            );
+        }
+        // Nothing to keep: the standard Bag.
+        let mut pm = PhotoMetadata::new();
+        pm.set_image_regions(std::slice::from_ref(&region));
         assert!(matches!(
             pm.xmp
                 .get(ns::IPTC_EXT, "ImageRegion")
                 .expect("the property")
                 .value,
-            XmpValue::Array(XmpArray::Seq(_))
+            XmpValue::Array(XmpArray::Bag(_))
         ));
     }
 
@@ -2441,9 +2564,10 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_structure_reads_as_a_one_element_sequence() {
-        // Seen in the wild: a single structure written where the standard puts a Bag. Lenient on
-        // read, strict on write — the Bag comes back on the way out.
+    fn a_bare_structure_where_an_array_belongs_reads_as_absent_at_both_levels() {
+        // Seen in the wild: a single structure written where the standard puts a Bag. Writing it
+        // back would normalise it into a Bag, so it is not read — one rule, at both levels, and
+        // the property is left where it lies either way.
         let licensor = Licensor {
             name: Some("Agence gamut".to_owned()),
             ..Licensor::default()
@@ -2451,10 +2575,9 @@ mod tests {
         let mut pm = PhotoMetadata::new();
         pm.xmp
             .set(XmpProperty::new(ns::PLUS, "Licensor", licensor.to_xmp()));
-        assert_eq!(pm.licensors(), vec![licensor]);
+        assert_eq!(pm.licensors(), Vec::new());
 
-        // Inside a structure the same shape is kept verbatim instead, because writing it back
-        // would normalise it into a Bag: `rCtype` reads as nothing and survives untouched.
+        // Inside a structure the same shape reads the same way: `rCtype` reads as nothing.
         let region = XmpValue::Structured(vec![XmpProperty::new(
             ns::IPTC_EXT,
             "rCtype",
@@ -2466,18 +2589,13 @@ mod tests {
         )]);
         let read = ImageRegion::from_xmp(&region).expect("a structure value");
         assert_eq!(read.content_types, Vec::new());
-        assert_eq!(read.to_xmp(), region);
-
-        pm.set_licensors(&pm.licensors());
-        assert!(matches!(
-            pm.xmp.get(ns::PLUS, "Licensor").unwrap().value,
-            XmpValue::Array(XmpArray::Bag(_))
-        ));
     }
 
     #[test]
-    fn a_non_structure_array_item_is_skipped_not_fatal() {
-        // Hostile/odd input: a Bag holding plain text where a structure is expected.
+    fn an_array_member_the_model_cannot_write_back_makes_the_property_read_as_absent() {
+        // Hostile/odd input: a Bag holding plain text where a structure is expected. Reporting the
+        // one region the model does read would invite a setter call that drops the other member,
+        // so the property reads as absent instead — and it is not fatal.
         let mut pm = PhotoMetadata::new();
         pm.xmp.set(XmpProperty::new(
             ns::IPTC_EXT,
@@ -2493,9 +2611,7 @@ mod tests {
                 ),
             ])),
         ));
-        let regions = pm.image_regions();
-        assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0].identifier.as_deref(), Some("r1"));
+        assert_eq!(pm.image_regions(), Vec::new());
         // A non-array property yields nothing at all rather than a bogus entry.
         pm.xmp.set(XmpProperty::new(
             ns::PLUS,
@@ -2503,5 +2619,31 @@ mod tests {
             text_value("not an array"),
         ));
         assert!(pm.licensors().is_empty());
+    }
+
+    #[test]
+    fn two_top_level_properties_of_one_name_are_neither_read_nor_lost() {
+        // Only one of the two could be written back, so neither is read — the rule `Reader::read`
+        // already takes inside a structure — and the setter therefore has nothing to remove.
+        let named = |name: &str| {
+            XmpProperty::new(
+                ns::PLUS,
+                "Licensor",
+                XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(
+                    Licensor {
+                        name: Some(name.to_owned()),
+                        ..Licensor::default()
+                    }
+                    .to_xmp(),
+                )])),
+            )
+        };
+        let mut pm = PhotoMetadata::new();
+        pm.xmp.properties.push(named("Agence gamut"));
+        pm.xmp.properties.push(named("Another agency"));
+        let before = pm.xmp.clone();
+        assert_eq!(pm.licensors(), Vec::new());
+        pm.set_licensors(&pm.licensors());
+        assert_eq!(pm.xmp, before);
     }
 }
