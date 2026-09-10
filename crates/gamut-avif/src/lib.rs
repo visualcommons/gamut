@@ -130,7 +130,7 @@
 //! [`AvifEncoder::encode_with_report`] returns the bytes `encode_to_vec` would plus the slot's
 //! range ([`AvifEncodeReport::c2pa`]), which an external signer patches in place; nothing after
 //! the slot moves. [`AvifEncoder::with_c2pa`] writes a store already computed over this exact
-//! output. On read, [`AvifContainer::c2pa`] / [`AvifContainer::c2pa_manifest_stores`] report each
+//! output. On read, [`AvifContainer::c2pa_slot`] / [`AvifContainer::c2pa_slots`] report each
 //! located [`C2paSlot`] — slot bytes, file range and [`C2paBoxPurpose`]. The store is
 //! opaque throughout: nothing here validates it, and the range is for patching and byte
 //! accounting, not a hash exclusion range (BMFF assets bind by box path, §18.6).

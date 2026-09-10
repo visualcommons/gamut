@@ -20,8 +20,7 @@ use gamut_isobmff::{
 
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
 use crate::c2pa::{
-    C2PA_UUID, C2paBoxPurpose, content_provenance_payload, content_provenance_reserved,
-    manifest_stores,
+    C2PA_UUID, C2paBoxPurpose, content_provenance_payload, content_provenance_reserved, slots,
 };
 use crate::config::{AvifConfig, AvifMode};
 use crate::image::ALPHA_AUX_URN;
@@ -50,9 +49,10 @@ impl std::fmt::Debug for SlotSource {
 /// What [`AvifEncoder::encode_with_report`] found out about the file it just produced, beyond the
 /// bytes: where the container placed the things a caller has to come back to.
 ///
-/// Non-exhaustive: a later minor release may report more placements. Construct nothing here —
-/// the encoder fills it in.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Non-exhaustive: a later minor release may report more placements. Construct nothing here — the
+/// encoder fills it in, and the type deliberately implements no [`Default`], so the only way to
+/// hold one is to have been given one by [`encode_with_report`](AvifEncoder::encode_with_report).
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AvifEncodeReport {
     /// The byte range of the C2PA manifest-store slot within the file — the `len` bytes of
@@ -490,9 +490,28 @@ impl AvifEncoder {
     ///
     /// The box is invisible to an AVIF reader — libavif decodes a file carrying it to the same
     /// pixels as one without — and its bytes are opaque to this crate, which validates nothing
-    /// about them. A slot nobody fills reads back through [`AvifContainer::c2pa`](crate::AvifContainer::c2pa)
+    /// about them. A slot nobody fills reads back through [`AvifContainer::c2pa_slot`](crate::AvifContainer::c2pa_slot)
     /// as `len` zero bytes. Calling this, or [`with_c2pa`](Self::with_c2pa), twice keeps the
     /// **last** call — as every other payload builder on this encoder does.
+    ///
+    /// # `len` is checked, at encode time
+    ///
+    /// This builder cannot fail — it returns `Self` — so an unusable `len` is refused by the
+    /// *encode* that follows, as [`Error::InvalidInput`], on every entry point including
+    /// [`EncodeImage::encode_to_vec`]. Two lengths are refused: one **below 8 bytes**, the size of
+    /// a JUMBF box header, which could not hold even an empty manifest store's outermost box; and
+    /// one so large that the framed box exceeds what a buffer can hold. Neither is merely
+    /// documented as a precondition, because in the release profile a downstream consumer builds
+    /// with, the second wrapped silently and produced a well-formed AVIF whose C2PA box no locator
+    /// — this crate's included — could find, while just below the wrap it panicked instead.
+    ///
+    /// Every `len` in between is written as asked. What remains beyond this crate's reach is the
+    /// allocator's: a reservation the machine has no memory for aborts, as any oversized
+    /// allocation in Rust does.
+    ///
+    /// The *read* side is deliberately more permissive: it reports a degenerate slot it genuinely
+    /// finds rather than hiding it, since those bytes exist and some other writer put them there.
+    /// See [`AvifContainer::c2pa_slots`](crate::AvifContainer::c2pa_slots).
     ///
     /// # The encoder writes `manifest`, and only `manifest`
     ///
@@ -537,14 +556,16 @@ impl AvifEncoder {
     /// The bytes are exactly the bytes `encode_to_vec` produces: this is the same encode with a
     /// report alongside, not a different code path, so the object-safe `EncodeImage` entry point
     /// stays what it is. The range is found by running the crate's own locator over the finished
-    /// file — the same one [`AvifContainer::c2pa`](crate::AvifContainer::c2pa) uses — so what the
+    /// file — the same one [`AvifContainer::c2pa_slot`](crate::AvifContainer::c2pa_slot) uses — so what the
     /// encoder reports is, by construction, what a reader of the file finds.
     ///
     /// # Errors
     ///
-    /// As [`EncodeImage::encode_image`]; additionally [`Error::InvalidInput`] if a C2PA slot was
-    /// configured but cannot be located in the file just written, which would mean the writer and
-    /// the locator disagree about the box framing and is never expected.
+    /// As [`EncodeImage::encode_image`] — which includes [`Error::InvalidInput`] for a
+    /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) length that cannot be framed — and
+    /// additionally [`Error::InvalidInput`] if a C2PA slot was configured but cannot be located in
+    /// the file just written, which would mean the writer and the locator disagree about the box
+    /// framing and is never expected.
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
@@ -557,7 +578,7 @@ impl AvifEncoder {
             None => None,
             Some(_) => {
                 let (segments, _) = gamut_isobmff::walk_segments(&bytes)?;
-                let store = manifest_stores(&segments).next().ok_or_else(|| {
+                let store = slots(&segments).next().ok_or_else(|| {
                     Error::invalid_input(
                         env!("CARGO_PKG_NAME"),
                         "AVIF: the C2PA box this encoder wrote cannot be located in its own output",
@@ -751,9 +772,11 @@ impl AvifEncoder {
         // §A.5.3) — and the slot is zeros or the caller's store behind the §A.5.1 framing.
         if let Some(slot) = &self.c2pa {
             let payload = match slot {
-                // The reserved zeros are written once, into the payload buffer itself.
+                // The reserved zeros are written once, into the payload buffer itself. A length
+                // that cannot be framed is refused here rather than truncated: see
+                // `content_provenance_reserved`.
                 SlotSource::Reserved(len) => {
-                    content_provenance_reserved(C2paBoxPurpose::Manifest, *len)
+                    content_provenance_reserved(C2paBoxPurpose::Manifest, *len)?
                 }
                 SlotSource::Store(store) => {
                     content_provenance_payload(C2paBoxPurpose::Manifest, store)
@@ -1750,6 +1773,33 @@ mod tests {
         );
         let store = format!("{:?}", AvifEncoder::new().with_c2pa(&payload(0x55, 3)));
         assert!(store.contains("c2pa: Some(Store(3))"), "{store}");
+    }
+
+    #[test]
+    fn an_unusable_c2pa_reservation_is_refused_by_the_object_safe_encode_path() {
+        // `with_c2pa_reserved` returns `Self`, so the refusal has to arrive at the encode — and at
+        // the `EncodeImage` entry point most callers reach for, not only at `encode_with_report`.
+        // Before the length was checked, the release profile wrapped the framing addition here and
+        // returned `Ok` with a file whose C2PA box the crate's own locator could not find, so an
+        // `Ok` on either length is the outcome this pins shut. The two lengths fail for different
+        // reasons, so each is matched on the reason it gives.
+        let rgb = vec![0u8; 34 * 18 * 3];
+        let dims = Dimensions {
+            width: 34,
+            height: 18,
+        };
+        let img = ImageRef::<Rgb8>::new(&rgb, dims).expect("the ramp fits the dimensions");
+        for (len, reason) in [
+            (0usize, "at least 8 bytes"),
+            (usize::MAX, "exceeds the largest"),
+        ] {
+            let mut out = Vec::new();
+            let err = AvifEncoder::new()
+                .with_c2pa_reserved(len)
+                .encode_image(img, &mut out)
+                .expect_err("an unusable reservation is refused");
+            assert!(format!("{err}").contains(reason), "{len}: {err}");
+        }
     }
 
     #[test]

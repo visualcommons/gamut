@@ -1,6 +1,6 @@
 //! The C2PA manifest-store surface (C2PA 2.4 §A.5): the reserve → report → patch contract of
 //! `AvifEncoder::with_c2pa_reserved` / `with_c2pa` / `encode_with_report` pinned exact-byte, the
-//! `AvifContainer::c2pa` locator reading back what the encoder wrote and a mid-update pair, and —
+//! `AvifContainer::c2pa_slot` locator reading back what the encoder wrote and a mid-update pair, and —
 //! against the crate's real readers — that a file carrying the box decodes unchanged.
 //!
 //! The exact-byte test is the load-bearing one for the epic's encoder criterion: the slot's
@@ -144,7 +144,7 @@ fn the_crate_locates_the_slot_it_reserved_at_the_reported_range() {
         .encode_with_report(image(&rgb))
         .expect("encode");
     let container = AvifContainer::parse(&bytes).expect("gamut-avif parses its own output");
-    let store = container.c2pa().expect("the slot is located");
+    let store = container.c2pa_slot().expect("the slot is located");
     assert_eq!(
         Some(store.range.clone()),
         report.c2pa,
@@ -157,7 +157,7 @@ fn the_crate_locates_the_slot_it_reserved_at_the_reported_range() {
     );
     assert_eq!(store.purpose, C2paBoxPurpose::Manifest);
     assert_eq!(&bytes[store.range], store.slot_bytes);
-    assert_eq!(container.c2pa_manifest_stores().count(), 1);
+    assert_eq!(container.c2pa_slots().count(), 1);
 
     // A file with no box locates nothing.
     let plain = AvifEncoder::new()
@@ -166,7 +166,7 @@ fn the_crate_locates_the_slot_it_reserved_at_the_reported_range() {
     assert!(
         AvifContainer::parse(&plain)
             .expect("parses")
-            .c2pa()
+            .c2pa_slot()
             .is_none()
     );
 }
@@ -205,7 +205,7 @@ fn a_file_mid_update_reports_its_original_and_update_stores_in_file_order() {
     let bytes = write(&model).expect("writes");
     let container = AvifContainer::parse(&bytes).expect("parses");
 
-    let stores: Vec<_> = container.c2pa_manifest_stores().collect();
+    let stores: Vec<_> = container.c2pa_slots().collect();
     assert_eq!(stores.len(), 2);
     assert_eq!(stores[0].purpose, C2paBoxPurpose::Original);
     assert_eq!(stores[0].slot_bytes, &original[..]);
@@ -217,7 +217,7 @@ fn a_file_mid_update_reports_its_original_and_update_stores_in_file_order() {
     assert_eq!(stores[1].range.end, bytes.len());
     // `c2pa()` is "the first one", never a judgement about which is active.
     assert_eq!(
-        container.c2pa().map(|s| s.purpose),
+        container.c2pa_slot().map(|s| s.purpose),
         Some(C2paBoxPurpose::Original)
     );
 }
