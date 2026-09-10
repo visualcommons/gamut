@@ -60,20 +60,21 @@ pub struct IimTagInfo {
 use IimFieldKind::{Binary, Date, Graphic, Time};
 
 /// Every IIM dataset gamut names: the complete Envelope (record 1) and Application (record 2)
-/// dataset sets of IPTC-IIM 4.2, chapters 5 and 6.
+/// dataset sets of IPTC-IIM 4.2 chapters 5 and 6, plus `7:10` Size Mode.
 ///
 /// Sourced from the IPTC-IIM 4.2 dataset definitions (`references/iptc/iim-4.2.pdf`); the subset
 /// IPTC Photo Metadata maps to XMP is additionally cross-checked against the machine-readable
 /// technical reference (`references/iptc/iptc-pmd-techreference_2025.1.json`) by
 /// `tests/techreference.rs`.
 ///
-/// Datasets the spec gives no determinate octet maximum for are deliberately absent, because
-/// [`IimTagInfo::max_octets`] can only state one: `2:202` ObjectData Preview Data (256000 octets,
-/// beyond `u16`) and every dataset of records 7–9 (`7:20`, `7:90`, `7:95`, `8:10`, `9:10`), whose
-/// value is "a binary number" of unstated width. Records 3 (a separate publication), 4 and 5 (not
-/// allocated) and 6 (IIM 4.2 Appendix F defines method identifiers, not datasets) carry no dataset
-/// definitions in the vendored spec at all. Every unmodeled dataset in any record still round-trips
-/// byte-exact.
+/// A dataset is named when IIM 4.2 states a maximum value length that is determinate *and* fits
+/// [`IimTagInfo::max_octets`]'s `u16`. Exactly six do not, and are deliberately absent: `2:202`
+/// ObjectData Preview Data (256000 octets, beyond `u16`) and `7:20`, `7:90`, `7:95`, `8:10` and
+/// `9:10`, whose value is "a binary number" of unstated width. `7:10` Size Mode is the one dataset
+/// outside chapters 5 and 6 that *is* named, because the spec fixes it at "one octet" (IIM 4.2
+/// Ch. 11). Records 3 (a separate publication), 4 and 5 (not allocated) and 6 (IIM 4.2 Appendix F
+/// defines method identifiers, not datasets) carry no dataset definitions in the vendored spec at
+/// all. Every unmodeled dataset in any record still round-trips byte-exact.
 #[rustfmt::skip]
 const KNOWN_TAGS: &[IimTagInfo] = &[
     // Envelope record (1) — IIM 4.2 Chapter 5.
@@ -151,6 +152,10 @@ const KNOWN_TAGS: &[IimTagInfo] = &[
     IimTagInfo { record: 2, dataset: 154, name: "Audio Outcue", repeatable: false, max_octets: 64, kind: Graphic },
     IimTagInfo { record: 2, dataset: 200, name: "ObjectData Preview File Format", repeatable: false, max_octets: 2, kind: Binary },
     IimTagInfo { record: 2, dataset: 201, name: "ObjectData Preview File Format Version", repeatable: false, max_octets: 2, kind: Binary },
+    // Pre-ObjectData Descriptor record (7) — IIM 4.2 Chapter 11. Only 7:10 states a determinate
+    // length ("Mandatory, not repeatable, one octet"); 7:20, 7:90 and 7:95 are "a binary number"
+    // of unstated width, as are 8:10 and 9:10.
+    IimTagInfo { record: 7, dataset: 10, name: "Size Mode", repeatable: false, max_octets: 1, kind: Binary },
 ];
 
 impl IimTagInfo {
@@ -177,7 +182,7 @@ impl IimTagInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IimDataSet {
     /// The record number this dataset belongs to (IPTC-IIM 4.2 §1.1: 1 = Envelope, 2 = Application;
-    /// records 3–9 round-trip as raw datasets).
+    /// records 3–9 are unnamed apart from `7:10` and round-trip as raw datasets).
     pub record: u8,
     /// The dataset number within the record.
     pub dataset: u8,
@@ -353,7 +358,7 @@ mod tests {
     fn known_tags_are_well_formed() {
         for t in KNOWN_TAGS {
             assert!(
-                t.record == 1 || t.record == 2,
+                matches!(t.record, 1 | 2 | 7),
                 "unexpected record {}",
                 t.record
             );
@@ -395,25 +400,21 @@ mod tests {
     }
 
     #[test]
-    fn datasets_without_a_stated_maximum_stay_unmodeled() {
-        // `max_octets` can only state a determinate maximum, so the datasets IIM 4.2 gives none
-        // for are deliberately absent: `2:202` ObjectData Preview Data (256000 octets, beyond
-        // `u16`) and the records 7-9 datasets ("a binary number" of unstated width).
-        for (record, dataset) in [
-            (2, 202),
-            (7, 10),
-            (7, 20),
-            (7, 90),
-            (7, 95),
-            (8, 10),
-            (9, 10),
-        ] {
+    fn only_datasets_with_a_determinate_octet_maximum_are_named() {
+        // `max_octets` is a `u16` and can only state a determinate maximum, so the six datasets
+        // IIM 4.2 gives none it can hold are absent: `2:202` ObjectData Preview Data (256000
+        // octets, beyond `u16`) and 7:20/7:90/7:95/8:10/9:10 ("a binary number" of unstated
+        // width).
+        for (record, dataset) in [(2, 202), (7, 20), (7, 90), (7, 95), (8, 10), (9, 10)] {
             assert!(
                 IimTagInfo::lookup(record, dataset).is_none(),
-                "{record}:{dataset} is modelled but has no stated octet maximum"
+                "{record}:{dataset} is named but has no octet maximum `max_octets` can state"
             );
         }
-        // The rest of IIM 4.2 chapters 5 and 6 is named: 14 Envelope + 56 Application datasets.
+        // 7:10 Size Mode is the boundary case that keeps the criterion honest: it is outside
+        // chapters 5 and 6, but IIM 4.2 Ch. 11 fixes it at one octet, so it is named.
+        assert_eq!(IimTagInfo::lookup(7, 10).map(|t| t.max_octets), Some(1));
+        // Everything else in chapters 5 and 6 is named: 14 Envelope + 56 Application datasets.
         assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 1).count(), 14);
         assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 2).count(), 56);
     }

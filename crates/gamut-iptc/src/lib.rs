@@ -76,8 +76,8 @@
 //! regions, artwork/object and licensors (see [`extension`]); the remaining Extension structures
 //! pass through [`PhotoMetadata::xmp`] as raw values. Scalar-shaped IIM datasets that repeat on the
 //! wire (`2:04`, `2:85`) reconcile their first value only; the IIM tag table names every dataset
-//! IIM 4.2 gives a determinate octet maximum for, and everything else — including records 3–9 —
-//! round-trips byte-exact without a name. See `STATUS.md` for the full deferral list.
+//! IIM 4.2 gives a determinate octet maximum for — all of records 1 and 2 bar `2:202`, plus `7:10`
+//! Size Mode — and everything else round-trips byte-exact without a name. See `STATUS.md` for the full deferral list.
 #![forbid(unsafe_code)]
 
 pub mod charset;
