@@ -469,16 +469,31 @@ mod tests {
 
     #[test]
     fn the_trailing_slash_alias_is_the_only_uri_from_uri_does_not_hand_back() {
-        // `from_uri(u).map(uri) == Some(u)` — resolving a URI hands the same URI back, because
-        // reading never canonicalizes — holds for every registered URI. The Darwin Core read alias
-        // is the sole exception, and pinning it here is what keeps it a documented exception rather
-        // than a silent hole: a caller that resolved by the slashed URI must keep using it.
+        // That `from_uri(u).map(uri) == Some(u)` for every *registered* URI is already pinned, more
+        // strongly, by `uri_and_prefix_are_exact_and_round_trip`. What only this test can see is
+        // that the Darwin Core alias is the *sole* exception, so it closes `from_uri` over the
+        // alias family exiv2 generates — `XmpProperties::registerNs` appends `/` to a URI ending in
+        // neither `/` nor `#`, so an alias is a registry URI with a trailing slash added or
+        // removed. A second, undocumented read alias drawn from that family fails here and passes
+        // every other test in the crate.
         for &ns in WellKnownNs::ALL {
-            assert_eq!(
-                WellKnownNs::from_uri(ns.uri()).map(WellKnownNs::uri),
-                Some(ns.uri()),
-                "{ns:?} must hand back the URI it was resolved by"
-            );
+            let slashed = format!("{}/", ns.uri());
+            if ns == WellKnownNs::DarwinCore {
+                assert_eq!(slashed, DWC_URI_TRAILING_SLASH, "the one documented alias");
+            } else {
+                assert_eq!(
+                    WellKnownNs::from_uri(&slashed),
+                    None,
+                    "{ns:?}: no schema but Darwin Core answers to its slashed URI"
+                );
+            }
+            if let Some(unslashed) = ns.uri().strip_suffix(['/', '#']) {
+                assert_eq!(
+                    WellKnownNs::from_uri(unslashed),
+                    None,
+                    "{ns:?}: the alias runs one way only — a URI is not recognised unterminated"
+                );
+            }
         }
         assert_eq!(
             WellKnownNs::from_uri(DWC_URI_TRAILING_SLASH).map(WellKnownNs::uri),
