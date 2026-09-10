@@ -130,7 +130,10 @@ Dependency edges (a crate depends on those to its right):
   deliverable and the gate is only the instrument: reach the boundary with a fixture or an
   internal seam, or take the exclusion and write the argument down. A limit lowered to bring a
   boundary within the suite's reach is how an encoder ends up emitting a file its own reader
-  refuses.
+  refuses. Conformance is the floor of that test, not the whole of it: a **reader**'s loose bound
+  is exactly what carries the non-conformant files the world actually holds, so narrowing one
+  additionally requires naming what it stops accepting, in the same place as the clause — the
+  trade is then visible rather than implied.
 - The gate is blind to everything it cannot mutate: a match arm that is *missing*, a literal or
   `const` **inside an expression or a guard operand** (a body that is just a literal is replaced
   wholesale, so that one is reachable), and a single alternative of an or-pattern (only whole
