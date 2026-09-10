@@ -490,6 +490,20 @@ mod tests {
             );
         }
         assert!(content_provenance_reserved(C2paBoxPurpose::Manifest, MIN_SLOT_LEN).is_ok());
+
+        // The sweep above is written in terms of `MIN_SLOT_LEN`, so it holds for whatever value
+        // the constant carries — including one the refusal *message* contradicts, since the
+        // message spells the bound as a literal. These two lengths are literals on both sides:
+        // 7 must be refused and 8 accepted, so moving the constant either way fails here rather
+        // than shipping a file the message misdescribes. (The mutation gate cannot see this: it
+        // does not mutate constants.)
+        let err = content_provenance_reserved(C2paBoxPurpose::Manifest, 7)
+            .expect_err("7 bytes is short of a JUMBF box header");
+        assert!(format!("{err}").contains("at least 8 bytes"), "{err}");
+        assert!(
+            content_provenance_reserved(C2paBoxPurpose::Manifest, 8).is_ok(),
+            "8 bytes is a JUMBF box header exactly, the length the message names"
+        );
     }
 
     #[test]
