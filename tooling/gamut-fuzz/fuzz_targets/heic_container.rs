@@ -19,6 +19,18 @@
 //! Real files reach here: phones append a whole second MP4 after the HEIC, and camera apps leave
 //! trailers, so the accounting path is not an exotic branch.
 //!
+//! Injection that proved the accessor check fires (re-runnable): make `HeifContainer::boxes()`
+//! skip the `ftyp` box — an accessor that filters what the segments hold. The committed seed alone
+//! reports it, with no search: `run.sh heic_container <seeds> -- -runs=0` gives *"boxes()
+//! disagrees with the Box segments"*.
+//!
+//! Its **reach is one function per accessor**, and that is a limitation rather than a flaw:
+//! `boxes`, `appended_stream` and `trailer` are each a three-line `filter_map`/`find_map` over the
+//! segment list, so the check sees a defect in those and nothing deeper. It is kept at that size
+//! because the accessors are the API every caller actually uses — the segment list is the
+//! evidence, the accessors are the product — and because it costs one pass over a list the target
+//! walks anyway. The tiling check above is the one with the deep reach: it sees the whole parse.
+//!
 //! A crash found here is **minimised and promoted into a named deterministic case** in
 //! `gamut-heic`'s own suite. The corpus is a search aid, not the regression record.
 

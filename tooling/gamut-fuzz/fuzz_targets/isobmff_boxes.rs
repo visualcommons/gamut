@@ -12,6 +12,12 @@
 //! produces, which is where a size-0 or a wrapping box length would show up as a hole or an
 //! overlap rather than as a crash.
 //!
+//! Injection that proved the tiling check fires (re-runnable): in `walk_segments`, record a box's
+//! segment as `b.offset + 8..end` — byte accounting that counts box bodies and forgets their
+//! headers. The committed seed alone reports it, with no search:
+//! `run.sh isobmff_boxes <seeds> -- -runs=0` gives *"segment 8..24 leaves a gap or overlaps at
+//! 0"*.
+//!
 //! `BoxReader` is driven separately from `walk_segments` because it is the lower layer and a
 //! caller may use it directly: the check there is that the cursor advances strictly, so a walk of
 //! a hostile file cannot spin.

@@ -14,6 +14,12 @@
 //! construction: each one is free to `clear()` or to write through an index, and doing so breaks
 //! every reusing caller while producing no crash at all. That is what this target searches for.
 //!
+//! Injection that proved the append check fires (re-runnable): begin
+//! `HevcConfig::annex_b_parameter_sets` with `out.clear()` — an emitter that replaces instead of
+//! appending, which breaks every reusing caller and crashes nothing. The committed seed alone
+//! reports it, with no search: `run.sh heic_hvcc <seeds> -- -runs=0` gives *"an annex_b emitter
+//! overwrote what was already in the buffer"*.
+//!
 //! Alongside it, and explicitly **not** a differential, is a **structure pin**: `annex_b`'s body
 //! *is* `annex_b_parameter_sets` followed by `annex_b_payload`, so asserting the whole equals the
 //! two halves cannot fail for any input while that body stands. It is kept because the split is a
@@ -24,7 +30,11 @@
 //! same expression, which an earlier draft also asserted, is trivially true and is gone.
 //!
 //! `validate_still_payload` is driven for its own sake: it re-walks the payload through
-//! `NalHeader::parse`, a different reach from the Annex-B emitters.
+//! `NalHeader::parse`, a different reach from the Annex-B emitters. The "no empty NAL unit"
+//! assertion beside that walk is a **structure pin** too, and is labelled as one at the site:
+//! `NalUnitIter::next` returns `Err("zero-length NAL unit")` for `len == 0` *before* it can yield
+//! an empty slice, so no input reaches an `Ok` that fails it. It pins that early return staying
+//! where it is, at the cost of one `is_empty` on a slice already in hand.
 //!
 //! ## Input framing
 //!
@@ -82,6 +92,8 @@ fuzz_target!(|data: &[u8]| {
     let _ = config.validate_still_payload(payload);
     for nal in iter_nal_units(payload, config.nal_length_size()) {
         let Ok(nal) = nal else { break };
+        // Structure pin, not a check: `next` errors on a zero length before it can yield an empty
+        // slice, so this cannot fail by input while that early return stands (module docs).
         assert!(!nal.is_empty(), "iter_nal_units yielded an empty NAL unit");
         let _ = NalHeader::parse(nal);
     }

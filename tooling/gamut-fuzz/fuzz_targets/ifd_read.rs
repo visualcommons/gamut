@@ -17,6 +17,12 @@
 //!   never declares — or declares bytes it never touched — produces no crash at all, and this is
 //!   what sees it.
 //!
+//! Injection that proved the audit fires (re-runnable): in `IfdReader::read_chain`, claim the
+//! header as `header_size() - 1` bytes — an off-by-one that leaves a byte the parser physically
+//! reads outside every structural claim. The committed seeds alone report it, with no search:
+//! `run.sh ifd_read <seeds> -- -runs=0` gives *"parser read bytes it never claimed"* carrying
+//! `unclaimed_reads: [Range { start: 7, len: 1 }]`.
+//!
 //! ## What this target deliberately does *not* check
 //!
 //! An earlier draft also compared `read(data)` against `IfdReader::open(data)?.read_file()` and

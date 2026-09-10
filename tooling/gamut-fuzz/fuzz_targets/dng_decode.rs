@@ -14,6 +14,12 @@
 //! active-area and crop handling before a caller sees it, and it is the value that *arrives* —
 //! after everything that may have rewritten `samples` or `dims` — this asserts on.
 //!
+//! Injection that proved it fires (re-runnable): have `RawImage::new_cfa` push one extra sample
+//! *after* `check_sample_count` has passed — a constructor whose own gate no longer describes what
+//! it built. The committed seed alone reports it, with no search:
+//! `run.sh dng_decode <seeds> -- -runs=0` gives *"decoded raw holds 49 samples for
+//! Dimensions { width: 8, height: 6 } × 1 planes"*.
+//!
 //! `verify_new_raw_image_digest` is driven for its own reach: on a lossy-compressed raw it walks
 //! the chunk grid and digests the compressed chunks, which `decode` never does. Its verdict is
 //! compared against the decoded model as a **structure pin, not a differential** — both sides read
