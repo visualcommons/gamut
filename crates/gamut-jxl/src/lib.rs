@@ -85,13 +85,24 @@
 //!   [`JxlEncoder`] still exists and still encodes — through whatever backend was pushed. With
 //!   neither, encoding returns [`Error::Unsupported`](gamut_core::Error::Unsupported).
 //! - `decode` (default) includes the jxl-rs decode tail, and additionally provides the header-only
-//!   accessors ([`JxlDecoder::info`], [`JxlDecoder::embedded_icc_profile`], [`JxlInfo`]) and the
+//!   accessors ([`JxlDecoder::info`], [`JxlDecoder::embedded_icc_profile`], [`JxlInfo`]), the
+//!   metadata read-back ([`JxlDecoder::metadata`] → [`JxlMetadata`]: the container's `Exif` /
+//!   `xml ` boxes, located by this crate's own box walk, plus the codestream ICC profile) and the
 //!   best-effort [`DecodePartialImage`] surface, all of which are always answered by the built-in
 //!   parser. Without it, [`JxlDecoder`] decodes through a pushed backend, or returns
 //!   [`Error::Unsupported`](gamut_core::Error::Unsupported).
 //!
 //! This is why the encode direction works on `wasm32-unknown-unknown` despite libjxl being
 //! unbuildable there: push a backend and the tail's absence stops mattering.
+//!
+//! ## The `metadata` feature
+//!
+//! Off by default. It adds the `gamut-metadata` facade's typed models over the raw surface above:
+//! [`JxlMetadata::blocks`] hands the located payloads over as `MetadataBlock`s and
+//! [`JxlMetadata::metadata`] parses them into a unified `Metadata`, while
+//! [`JxlEncoder::with_metadata`] / [`JxlEncoder::with_encoded_metadata`] embed one, routing EXIF
+//! and XMP to the container boxes and the ICC profile to [`ColorSpec::Icc`]. The dependency
+//! direction stays `gamut-jxl → gamut-metadata`.
 //!
 //! ## Deferred: container ownership
 //!
@@ -151,7 +162,11 @@ pub use backend::{
     JxlImageRef, JxlOwnedSamples, JxlSamples, JxlStreamInfo,
 };
 pub use config::{ColorSpec, Container, Distance, Effort, ModularMode, Orientation};
-pub use decoder::JxlDecoder;
 #[cfg(feature = "decode")]
 pub use decoder::{DecodePartialImage, JxlInfo, JxlPartialReport, JxlRender};
+pub use decoder::{JxlDecoder, JxlMetadata};
 pub use encoder::JxlEncoder;
+// The facade types named in the `metadata`-feature signatures, so a caller can spell
+// `JxlMetadata::metadata` / `JxlEncoder::with_metadata` without a direct dependency.
+#[cfg(feature = "metadata")]
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock};

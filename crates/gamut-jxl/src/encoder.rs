@@ -240,6 +240,103 @@ impl JxlEncoder {
         self
     }
 
+    /// Embeds a unified [`Metadata`](gamut_metadata::Metadata) model: serializes it with the
+    /// default [`MetadataEmbedder`](gamut_metadata::MetadataEmbedder) and routes each carrier to
+    /// the matching setter — EXIF to [`with_exif`](Self::with_exif) (the facade's `Exif\0\0`
+    /// signature stripped, since the `Exif` box carries the TIFF stream), XMP to
+    /// [`with_xmp`](Self::with_xmp), and the ICC profile to [`with_color`](Self::with_color) as
+    /// [`ColorSpec::Icc`] — in JPEG XL the profile *is* the codestream's colour encoding, not a
+    /// container box, and it is validated against the image's colour family at encode time. Returns
+    /// the updated encoder for chaining.
+    ///
+    /// Encoding then requires [`Container::IsoBmff`](crate::Container::IsoBmff) whenever an EXIF or
+    /// XMP carrier was present, exactly as for the raw setters. The default embedder emits no legacy
+    /// IPTC-IIM block and **drops** a C2PA manifest store (a store is signed over the file it came
+    /// from; see [`gamut_metadata::C2paPolicy`]); a caller that must be told about either
+    /// configures the embedder itself and calls
+    /// [`with_encoded_metadata`](Self::with_encoded_metadata).
+    ///
+    /// # Precedence
+    ///
+    /// A carrier **absent** from the model leaves any earlier setting untouched. A carrier
+    /// **present** in it overwrites one, because each is routed to the raw setter — and for ICC
+    /// that setter is [`with_color`](Self::with_color), so a profile in the model replaces a
+    /// [`ColorSpec`] chosen before this call, not merely an earlier profile. Call this before
+    /// [`with_color`](Self::with_color) when the explicit colour choice is meant to win. Whether
+    /// last-write-wins is the right rule for a colour encoding, or the conflict should be refused,
+    /// is open (issue #626); this documents what it does today rather than settling it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message is
+    /// carried as [`Error::detail`]), and whatever
+    /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
+    #[cfg(feature = "metadata")]
+    pub fn with_metadata(self, meta: &gamut_metadata::Metadata) -> Result<Self> {
+        let encoded = gamut_metadata::MetadataEmbedder::new()
+            .embed(meta)
+            .map_err(|e| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: metadata does not serialize")
+                    .with_detail(e.to_string())
+            })?;
+        self.with_encoded_metadata(&encoded)
+    }
+
+    /// Embeds already-serialized facade blocks — the output of a
+    /// [`MetadataEmbedder`](gamut_metadata::MetadataEmbedder) configured by the caller — routing
+    /// each present carrier as [`with_metadata`](Self::with_metadata) does. Returns the updated
+    /// encoder for chaining.
+    ///
+    /// Only the carriers JPEG XL can write are accepted: EXIF (`Exif` box), XMP (`xml ` box) and
+    /// ICC (the codestream colour encoding). Fields that are `None` leave any earlier setting
+    /// untouched; a field that is `Some` overwrites one, and for ICC that means replacing the
+    /// encoder's [`ColorSpec`] — see the precedence note on
+    /// [`with_metadata`](Self::with_metadata).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (JPEG XL has
+    /// no carrier for it) or a C2PA manifest store (the `jumb` box is not written by this crate,
+    /// and a store must not be copied forward in any case), and [`Error::InvalidInput`] when the
+    /// XMP packet is not UTF-8 (the `xml ` box holds text). Nothing is applied when an error is
+    /// returned.
+    #[cfg(feature = "metadata")]
+    pub fn with_encoded_metadata(
+        mut self,
+        encoded: &gamut_metadata::EncodedMetadata,
+    ) -> Result<Self> {
+        if encoded.iptc_iim.is_some() {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JXL: IPTC-IIM has no container carrier",
+            ));
+        }
+        if encoded.c2pa.is_some() {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JXL: C2PA manifest store (jumb box) embedding is not supported",
+            ));
+        }
+        let xmp = encoded
+            .xmp
+            .as_deref()
+            .map(std::str::from_utf8)
+            .transpose()
+            .map_err(|_| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: XMP packet is not UTF-8")
+            })?;
+        if let Some(exif) = &encoded.exif {
+            self = self.with_exif(exif.strip_prefix(b"Exif\0\0").unwrap_or(exif));
+        }
+        if let Some(xmp) = xmp {
+            self = self.with_xmp(xmp);
+        }
+        if let Some(icc) = &encoded.icc {
+            self = self.with_color(ColorSpec::Icc(icc.clone()));
+        }
+        Ok(self)
+    }
+
     /// Declares the samples' **coded bit depth** N, making a 16-bit pixel buffer carry N-bit code
     /// values (`0 ..= 2^N - 1`) instead of full-range 16-bit. Returns the updated encoder for
     /// chaining.

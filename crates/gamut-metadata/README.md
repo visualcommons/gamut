@@ -205,11 +205,79 @@ Use `Metadata::default()` plus field assignment when you also need `extensions`,
 arm to any exhaustive `match` on `MetadataBlock`. Nothing else changed: every existing method keeps
 its signature and behaviour.
 
+## Capability query
+
+The facade never parses a container, so it cannot say whether a *file* carries metadata. What it
+can say — statically, from a crate that depends on no format crate — is whether gamut's crate for a
+format can **locate** or **write** a given carrier at all. `gamut_metadata::capability` is that
+table, per (format × carrier × direction), transcribed from each crate's `STATUS.md` with the row
+cited on every cell:
+
+| Format | EXIF | XMP | ICC | IPTC-IIM | C2PA | typed wiring |
+| --- | --- | --- | --- | --- | --- | --- |
+| JPEG | r/w | r/w | r/w | — | — | ✅ (`metadata` feature) |
+| PNG | r/w | r/w | r/w | — | — | — |
+| WebP | r/w | r/w | r/w | — | — | — |
+| AVIF | r/w | r/w | r/w | — | — | — |
+| HEIC | r | r | r | — | r | ✅ (`metadata` feature) |
+| JPEG XL | r/w | r/w | r/w | — | — | ✅ (`metadata` feature) |
+| TIFF | — | — | — | — | — | — |
+| DNG | r/w | r/w | r/w | r/w | — | ✅ |
+
+```rust
+use gamut_metadata::capability::{Carrier, Direction, Format, supports, typed_wiring};
+
+assert!(supports(Format::Jpeg, Carrier::Exif, Direction::Write));
+assert!(!supports(Format::Heic, Carrier::Exif, Direction::Write)); // decode-only crate
+assert!(typed_wiring(Format::Jpeg));   // `blocks()` / `metadata()` / `with_metadata` exist there
+assert!(!typed_wiring(Format::Png));   // raw bytes handed to `Metadata::from_blocks` by hand
+```
+
+`supports` describes the crate's **raw** surface — its byte-level `metadata()` / `with_*` API;
+`typed_wiring` says whether it also exposes this crate's models directly. C2PA is read-only
+everywhere by construction — no embedder copies a manifest store forward (see above).
+
+Both describe the surface a crate **defines**, not the surface a particular build compiled: a
+`const` table sees neither another crate's Cargo features nor the target. Two places where that
+gap is real, and both are in the table's own docs. `gamut-jxl` gates its reader on its `decode`
+feature and its encoder on `encode`, so a build with `default-features = false, features =
+["encode"]` has no reader while the table still says `r`. And typed wiring reaches three of the
+four wired crates through an optional `metadata` feature of their own (`gamut-jpeg`, `gamut-jxl`,
+`gamut-heic`, each off by default and each forwarded weakly by the `gamut` umbrella) — but
+**`gamut-dng` has no such feature**: it depends on this crate unconditionally, so `gamut-dng/metadata`
+is not something a manifest can ask for.
+
+The enums are `#[repr(u8)]` with append-only discriminants. `Format` and `Carrier` are
+`#[non_exhaustive]` and carry their `ALL` constants as **slices** rather than fixed-length arrays,
+so appending a variant does not change a constant's type under a caller who named it; `Direction`
+is exhaustive and keeps an array. The audio/video half of the same question is outside an
+image-first workspace and stays with issue #216.
+
 ## Consumer integration
 
-The format crates (`gamut-avif`/`gamut-webp`/`gamut-heic`/…) gaining a `gamut-metadata` dependency to
-read, preserve, and embed metadata is tracked in their own milestones; the dependency direction
-`format → gamut-metadata → per-format crates` is settled here.
+The dependency direction is `format → gamut-metadata → per-format crates`, settled here. A format
+crate wires the facade in behind an optional `metadata` Cargo feature (a normal, not dev,
+dependency — release ordering follows it): its decoded metadata type gains `blocks()` (the located
+payloads as `MetadataBlock`s, e.g. a JPEG's EXIF with the `Exif\0\0` signature already stripped,
+an ISOBMFF `Exif` item with its `exif_tiff_header_offset` already applied) and `metadata()`
+(`Metadata::from_blocks` over them), and its encoder gains `with_metadata(&Metadata)` — embedding
+through `MetadataEmbedder::new()` and routing each `EncodedMetadata` field to the crate's raw
+setter — plus `with_encoded_metadata(&EncodedMetadata)` for a caller who chose the embedder's
+policies. A carrier the container cannot write is a typed `Unsupported` error there, never a silent
+drop, and a manifest store is never copied forward.
+
+**Precedence, as it behaves today.** A carrier absent from the model leaves whatever the caller set
+earlier untouched; a carrier *present* in the model overwrites it, because the routing is the raw
+setter. That is unremarkable for a container box, and consequential for ICC in JPEG XL, where the
+profile is not a box but the codestream's colour encoding: `JxlEncoder::with_metadata` routes a
+present profile to `with_color(ColorSpec::Icc(…))`, replacing a `ColorSpec` the caller chose before
+the call. Order the two accordingly. Whether last-write-wins is the right rule for a colour
+encoding — as against refusing the conflict — is an open question, filed as #626 rather than
+decided here.
+
+Wired today: `gamut-dng` (its `DngMetadata` holds the facade's `Exif` by value), `gamut-jpeg`,
+`gamut-jxl` and `gamut-heic` (decode-only). The remaining format crates hand their payloads over as
+raw bytes — see the capability table above.
 
 ## License
 

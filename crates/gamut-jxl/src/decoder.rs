@@ -35,6 +35,216 @@ fn wrong_backend_layout() -> Error {
     )
 }
 
+/// Embedded metadata located in a JPEG XL stream by [`JxlDecoder::metadata`]: the container's
+/// `Exif` / `xml ` boxes and the codestream's ICC profile.
+///
+/// Each payload is stored in the form the dedicated metadata crates parse (and the
+/// `gamut-metadata` facade's `MetadataBlock` borrows) directly; with the `metadata` feature,
+/// [`JxlMetadata::blocks`] / [`JxlMetadata::metadata`] do that hand-over. Marked
+/// `#[non_exhaustive]` so a later carrier (the `jumb` C2PA box) can be added without a breaking
+/// change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JxlMetadata {
+    /// The EXIF TIFF stream (starts `II`/`MM`): the `Exif` box payload with its leading 4-byte
+    /// big-endian `exif_tiff_header_offset` applied. The JPEG XL container reuses HEIF's
+    /// `ExifDataBlock` (ISO/IEC 23008-12 §A.2.1; `references/jxl/format_overview.md`), which is
+    /// also what [`JxlEncoder::with_exif`](crate::JxlEncoder::with_exif) writes (offset `0`).
+    pub exif: Option<Vec<u8>>,
+    /// The XMP packet: the `xml ` box payload, verbatim.
+    pub xmp: Option<Vec<u8>>,
+    /// The ICC profile embedded in the codestream's colour encoding — exactly what
+    /// [`JxlDecoder::embedded_icc_profile`] reports — or `None` for a structured encoding.
+    pub icc: Option<Vec<u8>>,
+}
+
+/// Locates the `Exif` and `xml ` boxes of an ISO BMFF `.jxl` container: the TIFF stream behind
+/// the `Exif` box's tiff-header offset, and the `xml ` payload verbatim. For a duplicated box the
+/// first wins (the workspace's JPEG convention).
+///
+/// jxl-rs consumes auxiliary boxes without exposing them, so the walk is this crate's own: the
+/// plain top-level box sequence of ISO/IEC 14496-12 §4.2 (32-bit size, `size == 1` with a 64-bit
+/// `largesize`, `size == 0` meaning "to the end of the file"). Box *contents* are never
+/// interpreted beyond the two metadata types, so a codestream (`jxlc`/`jxlp`), `jbrd`, or unknown
+/// box is stepped over by length.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for a truncated or malformed box header, a box overrunning the
+/// stream, or an `Exif` payload shorter than its offset field or with the offset past its end;
+/// [`Error::Unsupported`] for a Brotli-compressed (`brob`) `Exif`/`xml ` box, which this crate
+/// cannot decompress. Any other `brob` box is skipped.
+#[cfg(feature = "decode")]
+fn container_metadata_boxes(data: &[u8]) -> Result<MetadataBoxes> {
+    let mut exif = None;
+    let mut xmp = None;
+    let mut rest = data;
+    while !rest.is_empty() {
+        let (box_type, header_len, box_len) = parse_box_header(rest)?;
+        if box_len > rest.len() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: box overruns the stream",
+            ));
+        }
+        // §4.2: a box's `size` counts its own header, so it is never below `MIN_BOX_HEADER`. The
+        // walk enforces that here rather than trusting the header parser, which also makes the
+        // loop's progress local: every iteration consumes at least `MIN_BOX_HEADER` bytes of
+        // `rest`, so the walk terminates whatever the parser reports.
+        if box_len < MIN_BOX_HEADER {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: malformed box size",
+            ));
+        }
+        // `header_len > box_len` is the 64-bit form declaring a `largesize` smaller than the
+        // header it is part of; the body is then not a range at all.
+        let Some(body) = rest.get(header_len..box_len) else {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: malformed box size",
+            ));
+        };
+        match &box_type {
+            b"brob" => {
+                let Some(inner) = body.get(..4) else {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "JXL: truncated brob box",
+                    ));
+                };
+                if inner == b"Exif" || inner == b"xml " {
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        "JXL: Brotli-compressed metadata box (brob) is not supported",
+                    ));
+                }
+            }
+            b"Exif" if exif.is_none() => exif = Some(exif_box_tiff_stream(body)?.to_vec()),
+            b"xml " if xmp.is_none() => xmp = Some(body.to_vec()),
+            _ => {}
+        }
+        rest = &rest[box_len..];
+    }
+    Ok((exif, xmp))
+}
+
+/// The located `Exif` TIFF stream and `xml ` payload of a container, each `None` when absent.
+#[cfg(feature = "decode")]
+type MetadataBoxes = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// The smallest ISO BMFF box header (§4.2): a 4-byte `size` and a 4-byte type.
+#[cfg(feature = "decode")]
+const MIN_BOX_HEADER: usize = 8;
+
+/// The 64-bit box header: [`MIN_BOX_HEADER`] plus the 8-byte `largesize` that follows the type.
+#[cfg(feature = "decode")]
+const LARGE_BOX_HEADER: usize = 16;
+
+/// Parses the box header at the start of `data`, returning its type, the length of the header
+/// itself, and the length of the whole box (header included) as the header declares it.
+///
+/// Nothing here is validated against `data`'s length, and nothing is sliced: the returned lengths
+/// are what the header *claims*, and the caller — which owns the walk's progress — is what checks
+/// them (see [`container_metadata_boxes`]).
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if `data` is too short to hold the header it announces.
+#[cfg(feature = "decode")]
+fn parse_box_header(data: &[u8]) -> Result<([u8; 4], usize, usize)> {
+    let [s0, s1, s2, s3, t0, t1, t2, t3, tail @ ..] = data else {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: truncated box header",
+        ));
+    };
+    let box_type = [*t0, *t1, *t2, *t3];
+    match u32::from_be_bytes([*s0, *s1, *s2, *s3]) {
+        // `size == 0`: the box extends to the end of the file.
+        0 => Ok((box_type, MIN_BOX_HEADER, data.len())),
+        // `size == 1`: a 64-bit `largesize` follows the type.
+        1 => {
+            let [l0, l1, l2, l3, l4, l5, l6, l7, ..] = tail else {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JXL: truncated box header",
+                ));
+            };
+            let large = u64::from_be_bytes([*l0, *l1, *l2, *l3, *l4, *l5, *l6, *l7]);
+            // A length no address space can hold cannot be a length within `data` either, so it
+            // saturates and the caller's overrun check reports it.
+            Ok((
+                box_type,
+                LARGE_BOX_HEADER,
+                usize::try_from(large).unwrap_or(usize::MAX),
+            ))
+        }
+        size => Ok((box_type, MIN_BOX_HEADER, size as usize)),
+    }
+}
+
+/// The TIFF stream of an `Exif` box payload: skips the 4-byte big-endian `exif_tiff_header_offset`
+/// and then `offset` further bytes (ISO/IEC 23008-12 §A.2.1).
+#[cfg(feature = "decode")]
+fn exif_box_tiff_stream(payload: &[u8]) -> Result<&[u8]> {
+    let [o0, o1, o2, o3, rest @ ..] = payload else {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: truncated Exif box",
+        ));
+    };
+    usize::try_from(u32::from_be_bytes([*o0, *o1, *o2, *o3]))
+        .ok()
+        .and_then(|offset| rest.get(offset..))
+        .ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: Exif box tiff-header offset out of range",
+            )
+        })
+}
+
+#[cfg(feature = "metadata")]
+impl JxlMetadata {
+    /// The located payloads as [`MetadataBlock`](gamut_metadata::MetadataBlock)s, ready for
+    /// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) or a
+    /// [`MetadataExtractor`](gamut_metadata::MetadataExtractor) with a chosen
+    /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy): the EXIF TIFF stream, the XMP packet
+    /// and the codestream ICC profile, each present only when the stream carried it.
+    ///
+    /// JPEG XL has no IPTC-IIM carrier, and the `jumb` (C2PA) box is not located by this crate
+    /// (see `STATUS.md`), so no `IptcIim` / `C2pa` block is ever produced here.
+    #[must_use]
+    pub fn blocks(&self) -> Vec<gamut_metadata::MetadataBlock<'_>> {
+        use gamut_metadata::MetadataBlock;
+        let mut blocks = Vec::new();
+        if let Some(exif) = &self.exif {
+            blocks.push(MetadataBlock::Exif(exif));
+        }
+        if let Some(xmp) = &self.xmp {
+            blocks.push(MetadataBlock::Xmp(xmp));
+        }
+        if let Some(icc) = &self.icc {
+            blocks.push(MetadataBlock::Icc(icc));
+        }
+        blocks
+    }
+
+    /// Parses the located payloads into the unified
+    /// [`Metadata`](gamut_metadata::Metadata) model —
+    /// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
+    /// [`blocks`](Self::blocks).
+    ///
+    /// # Errors
+    ///
+    /// Returns the facade's [`MetadataError`](gamut_metadata::MetadataError) naming the carrier
+    /// whose parse failed.
+    pub fn metadata(&self) -> gamut_metadata::Result<gamut_metadata::Metadata> {
+        gamut_metadata::Metadata::from_blocks(&self.blocks())
+    }
+}
+
 /// A JPEG XL decoder.
 ///
 /// Decodes both JPEG XL framings — a bare codestream and the ISO BMFF `.jxl` container — into any of
@@ -175,6 +385,40 @@ impl JxlDecoder {
     #[cfg(feature = "decode")]
     pub fn embedded_icc_profile(&self, data: &[u8]) -> Result<Option<Vec<u8>>> {
         crate::jxlrs::embedded_icc_profile(data)
+    }
+
+    /// Reads the stream's embedded metadata without decoding any pixels: the container's `Exif`
+    /// and `xml ` boxes (what [`JxlEncoder::with_exif`](crate::JxlEncoder::with_exif) /
+    /// [`with_xmp`](crate::JxlEncoder::with_xmp) wrote) plus the codestream's ICC profile (as
+    /// [`embedded_icc_profile`](Self::embedded_icc_profile)). A bare codestream has no boxes, so
+    /// only the ICC field can be set for one.
+    ///
+    /// The boxes are located by this crate's own walk of the container's top-level box sequence —
+    /// the pure-Rust decode tail does not expose them — and a pushed backend is not consulted. The
+    /// `Exif` payload's 4-byte tiff-header offset is applied, so [`JxlMetadata::exif`] is the TIFF
+    /// stream itself; for a duplicated box the first wins. A Brotli-compressed (`brob`) `Exif` /
+    /// `xml ` box is refused rather than silently skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the data carries neither signature, is truncated before
+    /// the colour metadata, or has a malformed box sequence (a truncated header, a box overrunning
+    /// the stream, an `Exif` payload shorter than its offset field or with the offset past its
+    /// end); [`Error::Unsupported`] for a `brob`-wrapped `Exif` / `xml ` box.
+    #[cfg(feature = "decode")]
+    pub fn metadata(&self, data: &[u8]) -> Result<JxlMetadata> {
+        let (exif, xmp) = match JxlFraming::detect(data) {
+            JxlFraming::IsoBmff => container_metadata_boxes(data)?,
+            JxlFraming::Codestream => (None, None),
+            JxlFraming::Unknown => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JXL: neither the codestream nor the container signature",
+                ));
+            }
+        };
+        let icc = crate::jxlrs::embedded_icc_profile(data)?;
+        Ok(JxlMetadata { exif, xmp, icc })
     }
 
     /// The stream's dimensions when the built-in header parser can determine them, else `None`.
@@ -744,5 +988,233 @@ mod tests {
         // Equality still compares configuration only.
         assert_eq!(dec, clone);
         assert!(format!("{dec:?}").contains("backends: 1"));
+    }
+}
+
+/// Unit tests for the container box walk behind [`JxlDecoder::metadata`]: the located payloads,
+/// the three box-size forms, and the hostile-input refusals. `container_metadata_boxes` is
+/// private, so these live beside it.
+#[cfg(all(test, feature = "decode"))]
+mod box_tests {
+    use gamut_core::ErrorKind;
+
+    use super::*;
+
+    /// The 12-byte container signature box.
+    const SIGNATURE: [u8; 12] = [
+        0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
+    ];
+    /// A TIFF-shaped EXIF stream.
+    const TIFF: &[u8] = b"II\x2A\x00\x08\x00\x00\x00\x00\x00";
+
+    /// One box in the 32-bit size form.
+    fn bx(ty: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = (8 + body.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(ty);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// One box in the `size == 1` / 64-bit `largesize` form.
+    fn bx64(ty: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = 1u32.to_be_bytes().to_vec();
+        out.extend_from_slice(ty);
+        out.extend_from_slice(&(16 + body.len() as u64).to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// One box in the `size == 0` (to end of file) form.
+    fn bx0(ty: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = 0u32.to_be_bytes().to_vec();
+        out.extend_from_slice(ty);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// The signature followed by `boxes`.
+    fn container(boxes: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = SIGNATURE.to_vec();
+        for b in boxes {
+            out.extend_from_slice(b);
+        }
+        out
+    }
+
+    /// An `Exif` box payload: the big-endian offset, `gap` filler bytes, then the TIFF stream.
+    fn exif_payload(offset: u32, gap: usize) -> Vec<u8> {
+        let mut out = offset.to_be_bytes().to_vec();
+        out.extend(std::iter::repeat_n(0xEE, gap));
+        out.extend_from_slice(TIFF);
+        out
+    }
+
+    #[test]
+    fn exif_box_yields_the_tiff_stream_behind_the_offset() {
+        // Offset 0 (what the encoder writes) and a non-zero offset skipping filler bytes.
+        for (offset, gap) in [(0, 0), (6, 6)] {
+            let data = container(&[
+                bx(b"ftyp", b"jxl "),
+                bx(b"Exif", &exif_payload(offset, gap)),
+            ]);
+            let (exif, xmp) = container_metadata_boxes(&data).unwrap();
+            assert_eq!(exif.as_deref(), Some(TIFF), "offset {offset}");
+            assert_eq!(xmp, None);
+        }
+    }
+
+    #[test]
+    fn xml_box_is_verbatim_and_the_first_of_a_kind_wins() {
+        let data = container(&[
+            bx(b"xml ", b"<x:xmpmeta>first</x:xmpmeta>"),
+            bx(b"jxlc", &[0xFF, 0x0A]),
+            bx(b"xml ", b"<x:xmpmeta>second</x:xmpmeta>"),
+            bx(b"Exif", &exif_payload(0, 0)),
+            bx(b"Exif", b"\0\0\0\0MM\0*"),
+        ]);
+        let (exif, xmp) = container_metadata_boxes(&data).unwrap();
+        assert_eq!(xmp.as_deref(), Some(&b"<x:xmpmeta>first</x:xmpmeta>"[..]));
+        assert_eq!(exif.as_deref(), Some(TIFF));
+    }
+
+    #[test]
+    fn largesize_and_to_end_of_file_boxes_are_walked() {
+        let data = container(&[bx64(b"Exif", &exif_payload(0, 0)), bx0(b"xml ", b"<x/>")]);
+        let (exif, xmp) = container_metadata_boxes(&data).unwrap();
+        assert_eq!(exif.as_deref(), Some(TIFF));
+        assert_eq!(xmp.as_deref(), Some(&b"<x/>"[..]));
+    }
+
+    #[test]
+    fn an_empty_box_is_walked_over_rather_than_rejected() {
+        // A box whose `size` is exactly the 8-byte header carries no payload and is legal §4.2
+        // framing: the walk must step over it and keep going, so the minimum-size rule is
+        // `box_len < 8`, not `<= 8`. It is also the smallest step the walk can take, which is what
+        // makes the loop's progress local to it.
+        let data = container(&[
+            bx(b"free", b""),
+            bx(b"Exif", &exif_payload(0, 0)),
+            bx(b"free", b""),
+            bx(b"xml ", b"<x/>"),
+        ]);
+        let (exif, xmp) = container_metadata_boxes(&data).unwrap();
+        assert_eq!(exif.as_deref(), Some(TIFF));
+        assert_eq!(xmp.as_deref(), Some(&b"<x/>"[..]));
+
+        // An empty box of a kind the walk *does* read is an empty payload, not an absent one.
+        let data = container(&[bx(b"xml ", b"")]);
+        let (_, xmp) = container_metadata_boxes(&data).unwrap();
+        assert_eq!(xmp.as_deref(), Some(&b""[..]));
+    }
+
+    #[test]
+    fn a_container_without_metadata_boxes_yields_nothing() {
+        let data = container(&[bx(b"ftyp", b"jxl "), bx(b"jxlc", &[0xFF, 0x0A])]);
+        assert_eq!(container_metadata_boxes(&data).unwrap(), (None, None));
+    }
+
+    #[test]
+    fn brob_wrapping_a_metadata_box_is_unsupported() {
+        for inner in [b"Exif", b"xml "] {
+            let mut body = inner.to_vec();
+            body.extend_from_slice(b"\x0b\x02\x80compressed");
+            let data = container(&[bx(b"brob", &body)]);
+            let err = container_metadata_boxes(&data).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                err.static_message(),
+                Some("JXL: Brotli-compressed metadata box (brob) is not supported")
+            );
+        }
+    }
+
+    #[test]
+    fn brob_wrapping_another_box_is_skipped() {
+        let data = container(&[
+            bx(b"brob", b"jumb\x0b\x02\x80compressed"),
+            bx(b"xml ", b"<x/>"),
+        ]);
+        let (exif, xmp) = container_metadata_boxes(&data).unwrap();
+        assert_eq!(exif, None);
+        assert_eq!(xmp.as_deref(), Some(&b"<x/>"[..]));
+    }
+
+    #[test]
+    fn malformed_box_sequences_are_invalid_input_with_the_named_fault() {
+        let cases: [(Vec<u8>, &str); 7] = [
+            // Seven bytes where a header should be.
+            (
+                container(&[vec![0, 0, 0, 9, b'x', b'm', b'l']]),
+                "JXL: truncated box header",
+            ),
+            // `size == 1` but no `largesize`.
+            (
+                container(&[vec![0, 0, 0, 1, b'E', b'x', b'i', b'f', 0, 0]]),
+                "JXL: truncated box header",
+            ),
+            // A 32-bit size below the header's own length.
+            (
+                container(&[vec![0, 0, 0, 4, b'x', b'm', b'l', b' ']]),
+                "JXL: malformed box size",
+            ),
+            // A `largesize` below its header's own length.
+            (
+                container(&[vec![
+                    0, 0, 0, 1, b'x', b'm', b'l', b' ', 0, 0, 0, 0, 0, 0, 0, 8,
+                ]]),
+                "JXL: malformed box size",
+            ),
+            // A box claiming more bytes than remain.
+            (
+                container(&[vec![
+                    0, 0, 0, 20, b'x', b'm', b'l', b' ', b'<', b'x', b'/', b'>',
+                ]]),
+                "JXL: box overruns the stream",
+            ),
+            // A `largesize` no address space can hold.
+            (
+                container(&[vec![
+                    0, 0, 0, 1, b'x', b'm', b'l', b' ', 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF,
+                ]]),
+                "JXL: box overruns the stream",
+            ),
+            // A `brob` box too short to name the box it wraps.
+            (container(&[bx(b"brob", b"xm")]), "JXL: truncated brob box"),
+        ];
+        for (data, message) in cases {
+            let err = container_metadata_boxes(&data).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{message}");
+            assert_eq!(err.static_message(), Some(message));
+        }
+    }
+
+    #[test]
+    fn malformed_exif_payloads_are_invalid_input_with_the_named_fault() {
+        let cases: [(&[u8], &str); 2] = [
+            (b"\0\0\0", "JXL: truncated Exif box"),
+            (
+                b"\0\0\0\x0bII*\0",
+                "JXL: Exif box tiff-header offset out of range",
+            ),
+        ];
+        for (payload, message) in cases {
+            let data = container(&[bx(b"Exif", payload)]);
+            let err = container_metadata_boxes(&data).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{message}");
+            assert_eq!(err.static_message(), Some(message));
+        }
+        // An offset landing exactly at the end is an empty (not out-of-range) stream.
+        assert_eq!(exif_box_tiff_stream(b"\0\0\0\x02ab").unwrap(), b"");
+    }
+
+    #[test]
+    fn metadata_of_a_stream_with_neither_signature_is_invalid_input() {
+        let err = JxlDecoder::new().metadata(b"not a jxl").unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            err.static_message(),
+            Some("JXL: neither the codestream nor the container signature")
+        );
     }
 }

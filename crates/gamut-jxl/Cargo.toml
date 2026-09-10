@@ -28,6 +28,11 @@ gamut-core.workspace = true
 # build.
 jxl = { workspace = true, optional = true }
 
+# Typed metadata (issue #420): the unified `Metadata` model over the `Exif` / `xml ` boxes and the
+# codestream ICC profile this crate writes and reads. Optional and off by default, and a *normal*
+# dependency (never dev-only) so release ordering follows it (`mise run check-release-deps`).
+gamut-metadata = { workspace = true, optional = true }
+
 # The libjxl-backed encoder. Target-conditional optional dep (the `getrandom` pattern), present on
 # every encoder-capable target: everything except wasm32 *without* emscripten. On
 # `wasm32-unknown-emscripten` gamut-jxl-sys builds libjxl with the emsdk toolchain, so the full
@@ -52,3 +57,7 @@ encode = ["dep:gamut-jxl-sys"]
 # The pure-Rust JPEG XL decoder wrapping the `jxl` crate (jxl-rs). Pure safe Rust with no native
 # build, so — unlike `encode` — it is available on every target, wasm32 included.
 decode = ["dep:jxl"]
+# Typed metadata wiring: `JxlMetadata::blocks` / `JxlMetadata::metadata` and
+# `JxlEncoder::with_metadata` / `with_encoded_metadata` over the `gamut-metadata` facade. Pure Rust,
+# target-independent; reading the boxes back (`JxlDecoder::metadata`) needs `decode`.
+metadata = ["dep:gamut-metadata"]
