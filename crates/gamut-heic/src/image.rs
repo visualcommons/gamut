@@ -286,6 +286,62 @@ impl HeifImage {
     }
 }
 
+#[cfg(feature = "metadata")]
+impl HeifImage {
+    /// The primary item's located metadata payloads as
+    /// [`MetadataBlock`](gamut_metadata::MetadataBlock)s, ready for
+    /// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) or a
+    /// [`MetadataExtractor`](gamut_metadata::MetadataExtractor) with a chosen
+    /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy): the Exif item's TIFF stream
+    /// ([`HeifItem::exif_tiff_stream`]), the XMP `mime` item's packet ([`xmp`](Self::xmp)) and the
+    /// primary item's `colr` ICC profile ([`HeifItem::icc_profile`]), each present only when the
+    /// file carries it.
+    ///
+    /// HEIF has no IPTC-IIM item type, so no `IptcIim` block is produced. A C2PA manifest store
+    /// lives in a top-level `uuid` box outside the item model, so it is not produced here either:
+    /// [`HeifContainer::c2pa`](crate::HeifContainer::c2pa) locates it, and a caller wanting it in
+    /// the same model appends a [`MetadataBlock::C2pa`](gamut_metadata::MetadataBlock::C2pa).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the Exif item's payload is malformed — shorter than its
+    /// 4-byte `exif_tiff_header_offset`, or with the offset past the payload's end.
+    pub fn blocks(&self) -> Result<Vec<gamut_metadata::MetadataBlock<'_>>> {
+        use gamut_metadata::MetadataBlock;
+        let mut blocks = Vec::new();
+        if let Some(exif) = self.exif() {
+            blocks.push(MetadataBlock::Exif(exif.exif_tiff_stream()?));
+        }
+        if let Some(xmp) = self.xmp() {
+            blocks.push(MetadataBlock::Xmp(&xmp.as_isobmff_item().payload));
+        }
+        if let Some(icc) = self.primary_item().icc_profile() {
+            blocks.push(MetadataBlock::Icc(icc));
+        }
+        Ok(blocks)
+    }
+
+    /// Parses the primary item's located metadata into the unified
+    /// [`Metadata`](gamut_metadata::Metadata) model —
+    /// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
+    /// [`blocks`](Self::blocks).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] as [`blocks`](Self::blocks) does, or when a located payload
+    /// does not parse — the facade's [`MetadataError`](gamut_metadata::MetadataError) message,
+    /// naming the carrier, is carried as [`Error::detail`].
+    pub fn metadata(&self) -> Result<gamut_metadata::Metadata> {
+        gamut_metadata::Metadata::from_blocks(&self.blocks()?).map_err(|e| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIF: embedded metadata does not parse",
+            )
+            .with_detail(e.to_string())
+        })
+    }
+}
+
 /// A single HEIF item, viewed by role. A zero-cost borrow of the underlying [`gamut_isobmff::Item`];
 /// [`as_isobmff_item`](Self::as_isobmff_item) exposes it. Per-item accessors read the item's type
 /// and properties; cross-item relationships live on [`HeifImage`].
@@ -299,6 +355,55 @@ impl<'a> HeifItem<'a> {
     #[must_use]
     pub fn as_isobmff_item(&self) -> &'a Item {
         self.inner
+    }
+
+    /// For an `Exif` item, the TIFF stream (starting `II`/`MM`) behind the payload's 4-byte
+    /// big-endian `exif_tiff_header_offset` — the `ExifDataBlock` of ISO/IEC 23008-12 §A.2.1,
+    /// whose offset counts bytes from the end of the field to the TIFF header (`references/heif`
+    /// §9). This is the form `gamut-exif` parses; the raw payload, offset included, stays
+    /// available through [`as_isobmff_item`](Self::as_isobmff_item).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the item is not an `Exif` item, if the payload is shorter
+    /// than the offset field, or if the offset points past the payload's end.
+    pub fn exif_tiff_stream(&self) -> Result<&'a [u8]> {
+        if !matches!(self.kind(), ItemKind::Exif) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIF: item is not an Exif item",
+            ));
+        }
+        let [o0, o1, o2, o3, rest @ ..] = self.inner.payload.as_slice() else {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIF: Exif item payload is shorter than its tiff-header offset field",
+            ));
+        };
+        usize::try_from(u32::from_be_bytes([*o0, *o1, *o2, *o3]))
+            .ok()
+            .and_then(|offset| rest.get(offset..))
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "HEIF: Exif item tiff-header offset out of range",
+                )
+            })
+    }
+
+    /// The ICC profile carried by the item's first `colr` property of ICC type (`rICC` or `prof`),
+    /// if any — the bytes `gamut-icc` parses. An item may carry both an `nclx` and an ICC `colr`
+    /// (MIAF allows the pair); [`colour`](Self::colour) returns whichever comes first, this lens
+    /// the profile regardless of order.
+    #[must_use]
+    pub fn icc_profile(&self) -> Option<&'a [u8]> {
+        self.inner.properties.iter().find_map(|p| match &p.kind {
+            PropertyKind::Colour(
+                ColourInformation::RestrictedIcc(profile)
+                | ColourInformation::UnrestrictedIcc(profile),
+            ) => Some(profile.as_slice()),
+            _ => None,
+        })
     }
 
     /// The item's id.
@@ -697,4 +802,122 @@ fn is_alpha_urn(aux_type: &str) -> bool {
 /// Whether `aux_type` is one of the depth URNs (`references/heif` §6).
 fn is_depth_urn(aux_type: &str) -> bool {
     DEPTH_AUX_URNS.contains(&aux_type)
+}
+
+/// Unit tests for the two metadata lenses on [`HeifItem`]: the `exif_tiff_header_offset`
+/// arithmetic of `exif_tiff_stream` and the property search of `icc_profile`. They read
+/// `HeifImage::new`, which is `pub(crate)`, so they live here.
+#[cfg(test)]
+mod tests {
+    use gamut_core::ErrorKind;
+    use gamut_isobmff::{IsoBmffImage, NclxColr, Property};
+
+    use super::*;
+
+    /// A one-item file whose primary is `item`.
+    fn image_of(item: Item) -> HeifImage {
+        HeifImage::new(IsoBmffImage {
+            major_brand: *b"heic",
+            minor_version: 0,
+            compatible_brands: vec![*b"heic", *b"mif1"],
+            primary_item_id: item.id,
+            items: vec![item],
+            groups: vec![],
+        })
+        .unwrap()
+    }
+
+    /// A bare item of the given type and payload.
+    fn item(item_type: [u8; 4], payload: Vec<u8>, properties: Vec<Property>) -> Item {
+        Item {
+            id: 1,
+            item_type,
+            name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            references: vec![],
+            properties,
+            payload,
+        }
+    }
+
+    fn colr(info: ColourInformation) -> Property {
+        Property {
+            essential: false,
+            kind: PropertyKind::Colour(info),
+        }
+    }
+
+    #[test]
+    fn exif_tiff_stream_skips_the_offset_field_and_the_offset() {
+        // Offset 0 (the usual case) and a non-zero offset skipping filler bytes.
+        for (payload, expected) in [
+            (b"\0\0\0\0II*\0".to_vec(), &b"II*\0"[..]),
+            (b"\0\0\0\x02\xEE\xEEMM\0*".to_vec(), &b"MM\0*"[..]),
+            // An offset landing exactly at the end is an empty stream, not an error.
+            (b"\0\0\0\x01\xEE".to_vec(), &b""[..]),
+        ] {
+            let image = image_of(item(*b"Exif", payload.clone(), vec![]));
+            assert_eq!(
+                image.primary_item().exif_tiff_stream().unwrap(),
+                expected,
+                "{payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exif_tiff_stream_refuses_the_named_faults() {
+        let cases: [(Item, &str); 3] = [
+            (
+                item(*b"mime", b"\0\0\0\0<x/>".to_vec(), vec![]),
+                "HEIF: item is not an Exif item",
+            ),
+            (
+                item(*b"Exif", b"\0\0\0".to_vec(), vec![]),
+                "HEIF: Exif item payload is shorter than its tiff-header offset field",
+            ),
+            (
+                item(*b"Exif", b"\0\0\0\x05II*\0".to_vec(), vec![]),
+                "HEIF: Exif item tiff-header offset out of range",
+            ),
+        ];
+        for (item, message) in cases {
+            let image = image_of(item);
+            let err = image.primary_item().exif_tiff_stream().unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{message}");
+            assert_eq!(err.static_message(), Some(message));
+        }
+    }
+
+    #[test]
+    fn icc_profile_finds_the_icc_colr_behind_an_nclx_one() {
+        let nclx = ColourInformation::Nclx(NclxColr {
+            colour_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 6,
+            full_range: true,
+        });
+        let hvc1 = |props: Vec<Property>| item(*b"hvc1", vec![0xAA], props);
+
+        // nclx first, then `prof`: `colour()` reports the nclx, the lens the profile.
+        let image = image_of(hvc1(vec![
+            colr(nclx.clone()),
+            colr(ColourInformation::UnrestrictedIcc(vec![1, 2, 3])),
+        ]));
+        let primary = image.primary_item();
+        assert!(matches!(primary.colour(), Some(ColourInformation::Nclx(_))));
+        assert_eq!(primary.icc_profile(), Some(&[1u8, 2, 3][..]));
+
+        // `rICC` counts too.
+        let image = image_of(hvc1(vec![colr(ColourInformation::RestrictedIcc(vec![9]))]));
+        assert_eq!(image.primary_item().icc_profile(), Some(&[9u8][..]));
+
+        // nclx alone, or no colr at all: no profile.
+        let image = image_of(hvc1(vec![colr(nclx)]));
+        assert_eq!(image.primary_item().icc_profile(), None);
+        let image = image_of(hvc1(vec![]));
+        assert_eq!(image.primary_item().icc_profile(), None);
+    }
 }
