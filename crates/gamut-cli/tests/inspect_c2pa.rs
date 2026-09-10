@@ -1,0 +1,255 @@
+//! End-to-end tests for `gamut inspect`'s HEIC arm: which containers it accepts, and what the C2PA
+//! report says once it does.
+//!
+//! These drive the built `gamut` binary (`CARGO_BIN_EXE_gamut`) so they exercise the real command
+//! path — the format sniff, the container confirmation, and the lines that reach stdout — the way a
+//! user runs it. What each line *means* is `gamut-heic`'s contract and is pinned by that crate's
+//! tests; what is pinned here is that this binary routes the file correctly and prints the crate's
+//! words through, unabridged.
+//!
+//! Fixtures are built by `gamut::isobmff::write` and then have hand-authored top-level boxes spliced
+//! in after `ftyp`, since a C2PA `uuid` box is not part of the writer's model. C2PA clause
+//! references are to the 2.4 specification.
+
+use std::process::{Command, Output};
+
+use gamut::isobmff::{IsoBmffImage, Item, Property, PropertyKind, write};
+
+/// The C2PA `ContentProvenanceBox` extended (user) type — C2PA 2.4 §A.5.1.1.
+const C2PA_UUID: [u8; 16] = [
+    0xD8, 0xFE, 0xC3, 0xD6, 0x1B, 0x0E, 0x48, 0x3C, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7E, 0xC4, 0x81,
+];
+
+/// A coded-image item with one essential codec-configuration property.
+fn coded_item(id: u32, item_type: [u8; 4], config: [u8; 4]) -> Item {
+    Item {
+        id,
+        item_type,
+        name: String::new(),
+        content_type: None,
+        content_encoding: None,
+        hidden: false,
+        references: vec![],
+        properties: vec![
+            Property {
+                essential: true,
+                kind: PropertyKind::CodecConfiguration {
+                    kind: config,
+                    data: vec![1, 2, 3, 4],
+                },
+            },
+            Property {
+                essential: false,
+                kind: PropertyKind::ImageSpatialExtents {
+                    width: 64,
+                    height: 48,
+                },
+            },
+        ],
+        payload: vec![9, 9, 9, 9],
+    }
+}
+
+/// A HEVC still image: major brand `heic`, one `hvc1` item carrying an `hvcC`.
+fn heic_file() -> Vec<u8> {
+    write(&IsoBmffImage {
+        major_brand: *b"heic",
+        minor_version: 0,
+        compatible_brands: vec![*b"heic", *b"mif1"],
+        primary_item_id: 1,
+        items: vec![coded_item(1, *b"hvc1", *b"hvcC")],
+        groups: vec![],
+    })
+    .expect("valid HEVC still-image model")
+}
+
+/// An AVIF carrying the generic MIAF structural brand `mif1` as its **major** brand: one `av01`
+/// item with an `av1C`, and no HEVC brand anywhere. This is the file the major-brand test alone
+/// cannot tell from a HEIC (`references/heif` §7 settles it on the primary item's `hvcC`).
+fn mif1_avif_file() -> Vec<u8> {
+    write(&IsoBmffImage {
+        major_brand: *b"mif1",
+        minor_version: 0,
+        compatible_brands: vec![*b"mif1", *b"miaf", *b"avif"],
+        primary_item_id: 1,
+        items: vec![coded_item(1, *b"av01", *b"av1C")],
+        groups: vec![],
+    })
+    .expect("valid AVIF-shaped model")
+}
+
+/// One complete box: 32-bit size + type + body.
+fn bx(ty: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut out = (8 + body.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(ty);
+    out.extend_from_slice(body);
+    out
+}
+
+/// A top-level `uuid` box with an explicit user type, `FullBox` version/flags, null-terminated
+/// `box_purpose` and raw `data` (C2PA 2.4 §A.5.1.2).
+fn uuid_box(user_type: &[u8; 16], version: u8, purpose: &str, data: &[u8]) -> Vec<u8> {
+    let mut body = user_type.to_vec();
+    body.push(version);
+    body.extend_from_slice(&[0, 0, 0]); // flags
+    body.extend_from_slice(purpose.as_bytes());
+    body.push(0);
+    body.extend_from_slice(data);
+    bx(b"uuid", &body)
+}
+
+/// A JUMBF-shaped manifest store: a 4-byte big-endian `LBox` covering the whole box, the `jumb`
+/// `TBox`, then opaque contents (C2PA 2.4 §8.4.2.3, §A.3.9).
+fn jumbf_store(contents: &[u8]) -> Vec<u8> {
+    let mut out = ((8 + contents.len()) as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(b"jumb");
+    out.extend_from_slice(contents);
+    out
+}
+
+/// Splices `boxes` in immediately after the file's `ftyp`, which C2PA 2.4 §A.5.3 is where a
+/// `ContentProvenanceBox` goes. The `ftyp` length is the file's first four bytes.
+fn splice_after_ftyp(file: &[u8], boxes: &[Vec<u8>]) -> Vec<u8> {
+    let ftyp_len = u32::from_be_bytes(file[..4].try_into().unwrap()) as usize;
+    let mut out = file[..ftyp_len].to_vec();
+    for b in boxes {
+        out.extend_from_slice(b);
+    }
+    out.extend_from_slice(&file[ftyp_len..]);
+    out
+}
+
+/// Writes `bytes` to a unique temp file, runs `gamut inspect [--format <f>] <file>`, removes it,
+/// and returns the output.
+fn run_inspect(name: &str, bytes: &[u8], force: Option<&str>) -> Output {
+    let path =
+        std::env::temp_dir().join(format!("gamut-inspect-c2pa-{}-{name}", std::process::id()));
+    std::fs::write(&path, bytes).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gamut"));
+    command.arg("inspect");
+    if let Some(format) = force {
+        command.arg("--format").arg(format);
+    }
+    let output = command.arg(&path).output().expect("run gamut inspect");
+    let _ = std::fs::remove_file(&path);
+    output
+}
+
+#[test]
+fn a_located_store_reaches_the_terminal_with_the_non_validation_disclaimer() {
+    // The one thing this command must never lose on the way to stdout: locating a store is not
+    // validating it (C2PA 2.4 §15.12), and a store line read without that reads as *verified*.
+    let file = splice_after_ftyp(
+        &heic_file(),
+        &[uuid_box(
+            &C2PA_UUID,
+            0,
+            "manifest",
+            &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+        )],
+    );
+    let out = run_inspect("located.heic", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("HEIF/HEIC"), "{stdout}");
+    assert!(
+        stdout.contains("1 manifest store located, NOT VALIDATED"),
+        "{stdout}"
+    );
+    for fragment in [
+        "no signature",
+        "no hash binding",
+        "no trust list",
+        "c2pa-rs",
+    ] {
+        assert!(
+            stdout.contains(fragment),
+            "the disclaimer must reach stdout naming {fragment}: {stdout}"
+        );
+    }
+    // The size is the store's own JUMBF `LBox` (8-byte header + 6 bytes of contents), not the
+    // enclosing box's, so the number is evidence the store line came from the store.
+    assert!(
+        stdout.contains("box_purpose \"manifest\": 14 bytes at"),
+        "the store's own line must reach stdout too: {stdout}"
+    );
+}
+
+#[test]
+fn a_c2pa_box_that_yields_no_store_is_not_reported_as_a_file_without_provenance() {
+    // §A.5.1.2 fixes the `FullBox` version at zero, so no store is read — but the file plainly
+    // carries C2PA framing, and printing the wording a file with no C2PA box gets would let a
+    // reader infer absence of provenance from bytes gamut merely could not read through.
+    let file = splice_after_ftyp(
+        &heic_file(),
+        &[uuid_box(
+            &C2PA_UUID,
+            1,
+            "manifest",
+            &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+        )],
+    );
+    let out = run_inspect("unread.heic", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "an unreadable box is a finding, not an inspection failure; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !stdout.contains("no manifest store found"),
+        "the absence wording must not be used for a box that is present: {stdout}"
+    );
+    assert!(stdout.contains("NOT absence of provenance"), "{stdout}");
+    assert!(stdout.contains("unread C2PA box at"), "{stdout}");
+}
+
+#[test]
+fn an_avif_whose_major_brand_is_mif1_is_not_reported_as_a_heic() {
+    // `mif1` is the generic MIAF structural brand, so a major-brand test alone accepts this file
+    // and would report an AVIF's C2PA box as a HEIC's. The confirmation is `gamut-heic`'s own
+    // still-image predicate, applied after the parse.
+    let file = splice_after_ftyp(
+        &mif1_avif_file(),
+        &[uuid_box(
+            &C2PA_UUID,
+            0,
+            "manifest",
+            &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+        )],
+    );
+    let out = run_inspect("mif1.avif", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(!out.status.success(), "stdout: {stdout}");
+    assert!(
+        stderr.contains("unsupported container brand 'mif1'"),
+        "the message must name the brand it declined: {stderr}"
+    );
+    assert!(
+        !stdout.contains("C2PA"),
+        "nothing about the AVIF's provenance may be printed: {stdout}"
+    );
+}
+
+#[test]
+fn forcing_the_heic_format_skips_the_confirmation_the_sniff_applies() {
+    // `--format` overrides detection by definition, so it overrides the confirmation too: the same
+    // AVIF the sniff declines is read as a HEIC when the caller asserts it is one.
+    let out = run_inspect("forced.avif", &mif1_avif_file(), Some("heic"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("HEIF/HEIC"), "{stdout}");
+}
