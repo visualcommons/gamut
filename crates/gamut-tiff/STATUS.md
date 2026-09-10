@@ -110,13 +110,19 @@ read. `gamut_ifd::read_tree` can be scoped neither way: it resolves the one flat
 at every node of every page. **(c)** The blocks live in **IFD 0 only**, so a reader decoding
 page 3 of a multi-page document alone sees none of them; duplicating an ICC profile onto every
 page is the worse outcome, and IFD 0 is where a reader conventionally looks. **(d)** The **writer
-is bounded by what the reader accepts**, on both axes of (b) and with a distinct message for each,
-since they are distinct mistakes. *Depth*: the walk stops two levels under IFD 0 — the deepest
-tree the followed tags legitimately reach (EXIF 2.3 §4.6.3) — and an Exif directory a caller
-nested deeper is refused. *Tag*: a group hung off anything outside the standard pointer tags comes
-back as a raw offset, so it is refused too. Both are `Error::InvalidInput` from `with_metadata`'s
-encode before any pixel work, on **every** public encode surface, rather than a well-formed file
-this crate cannot read back unchanged. The bound is the spec's; that a narrower one is also easier
+is bounded by what the reader accepts**, and it is bounded by inspecting *what the reader
+inspects*, with a distinct message per case since they are distinct mistakes. *Depth*: the walk
+stops two levels under IFD 0 — the deepest tree the followed tags legitimately reach (EXIF 2.3
+§4.6.3) — and an Exif directory a caller nested deeper is refused. *Tag*: a group hung off
+anything outside the standard pointer tags comes back as a raw offset, so it is refused too.
+*Field*: the reader decides "pointer" from a directory's **fields**, while a caller builds one
+from **groups**, so checking only the groups left the writer blind to the one shape the reader
+misreads — a standard pointer tag carried as a plain `LONG`, which encoded cleanly and then failed
+this crate's own reader with `read out of bounds` or `sub-IFD pointer loop`. A field under one of
+the four tags whose type is a pointer's own (`LONG`, `IFD`, `LONG8`, `IFD8`) is therefore refused;
+any other type under those tags is not a pointer to either side and round-trips unchanged. All
+three are `Error::InvalidInput` from `with_metadata`'s encode before any pixel work, on **every**
+public encode surface, rather than a well-formed file this crate cannot read back unchanged. The bound is the spec's; that a narrower one is also easier
 to assert is not on its own a reason to narrow a contract.
 
 The C2PA manifest store is the one carrier with a placement rule of its own, and that rule is not

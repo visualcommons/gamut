@@ -84,11 +84,16 @@ compression schemes land additively on this frozen surface (see Status).
   A *vendor-private* tag whose value happens to be an offset is not a pointer to anything this
   crate can see, so it is carried through and re-encoded verbatim, still holding the source file's
   offset — a round trip through such a field is **not** proof the result is pointer-safe.
-  What the encoder writes the decoder reads back: the Exif directory may nest one further
-  directory (`InteroperabilityIFD`, EXIF 2.3 §4.6.3, is the one a camera writes), which is as deep
-  as the reader walks, and it may hang that group only off a standard pointer tag. A caller's
-  directory nested deeper, or hung off any other tag, is refused by the encode — with its own
-  message per case — rather than written into a file this crate could not read back unchanged.
+  What the encoder writes the decoder reads back, and the writer is bounded by exactly what the
+  reader would misread. The Exif directory may nest one further directory
+  (`InteroperabilityIFD`, EXIF 2.3 §4.6.3, is the one a camera writes), which is as deep as the
+  reader walks; it may hang a group only off a standard pointer tag; and it may not carry a
+  *plain field* under one of those four tags whose type is a pointer's own (`LONG`, `IFD`,
+  `LONG8`, `IFD8`), because the reader decides "pointer" from the field and would follow that
+  integer as a file offset. A value of any other type under those tags is not a pointer to either
+  side and round-trips unchanged. A caller's directory nested deeper, hung off any other tag, or
+  carrying such a field is refused by the encode — with its own message per case — rather than
+  written into a file this crate could not read back unchanged.
   The C2PA manifest store follows C2PA 2.4 §A.3.6 through the shared `gamut_ifd::c2pa` helper it
   and `gamut-dng` both call: the entry in the last IFD of the main
   chain, the store at the end of the file, and the two §18.5.5 exclusion ranges reported by
