@@ -189,11 +189,11 @@ impl Trc {
             TransferCharacteristics::Linear => Some(Trc::Gamma(1.0)),
             TransferCharacteristics::Srgb => Some(Trc::Srgb),
             TransferCharacteristics::Pq | TransferCharacteristics::Bt2020_10 => Some(Trc::Pq),
-            TransferCharacteristics::Bt709
-            | TransferCharacteristics::Hlg
-            | TransferCharacteristics::Unspecified => None,
-            // `TransferCharacteristics` is `#[non_exhaustive]`: a code point gamut-color models
-            // later has no curve here until this match names it.
+            // Every other code point has no curve here. That covers the three gamut-color models
+            // but supplies no EOTF for (`Bt709`, `Hlg`, `Unspecified`) and, since
+            // `TransferCharacteristics` is `#[non_exhaustive]`, any code point gamut-color models
+            // later until this match names it. Listing the first three explicitly would be a
+            // second, behaviourally identical arm.
             _ => None,
         }
     }
