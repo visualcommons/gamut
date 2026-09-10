@@ -260,103 +260,125 @@ impl<'a> HeifContainer<'a> {
     /// A top-level `uuid` box whose user type is not [`C2PA_UUID`], whose `FullBox` version or flags
     /// are non-zero, whose `box_purpose` is not one of [`C2paBoxPurpose`]'s, or whose contents are
     /// truncated or self-inconsistent yields no store: this is a lens over bytes that happen to be
-    /// present, so a malformed or foreign box yields nothing rather than an error.
+    /// present, so a malformed box or one of another extended type yields nothing rather than an
+    /// error.
     ///
     /// A box that *is* a [`C2PA_UUID`] box and still yields nothing is not silent, though — it is
     /// reported, with the reason, by [`c2pa_summary`](Self::c2pa_summary), so a reader cannot take
     /// an empty iterator here for a file carrying no provenance at all.
     pub fn c2pa_manifest_stores(&self) -> impl Iterator<Item = C2paManifestStore<'a>> + '_ {
-        self.content_provenance_boxes()
-            .filter_map(|(_, outcome)| outcome.ok())
-    }
-
-    /// Every top-level `ContentProvenanceBox`, as its whole box range paired with what reading it
-    /// yielded: the manifest store it carries, or the reason it carries none.
-    ///
-    /// The one scan both public views are built from, so "a store" and "a box that yielded no
-    /// store" can never disagree about which boxes were looked at.
-    fn content_provenance_boxes(
-        &self,
-    ) -> impl Iterator<
-        Item = (
-            Range<usize>,
-            Result<C2paManifestStore<'a>, C2paUnreadReason>,
-        ),
-    > + '_ {
-        self.segments()
-            .iter()
-            .filter_map(|segment| match segment.kind {
-                SegmentKind::Box { ty, body } if &ty == b"uuid" => {
-                    // `range` spans the header and the body, so `range.end - body.len()` is the absolute
-                    // offset of the body — correct for an 8-byte header and a 16-byte largesize one
-                    // alike, without the container needing to report the header width.
-                    let body_start = segment.range.end.checked_sub(body.len())?;
-                    let outcome = parse_content_provenance_box(body, body_start)?;
-                    Some((segment.range.clone(), outcome))
-                }
-                _ => None,
+        self.top_level_uuid_boxes()
+            .filter_map(|(_, _, classified)| match classified {
+                TopLevelUuidBox::ContentProvenance(outcome) => outcome.ok(),
+                TopLevelUuidBox::OtherExtendedType => None,
             })
     }
+
+    /// Every top-level `uuid` box, as its whole box range, where it sits relative to the file's
+    /// media data, and what it turned out to be.
+    ///
+    /// The one scan every public view is built from, so "a store", "a box that yielded no store"
+    /// and "a `uuid` box of some other extended type" can never disagree about which boxes were
+    /// looked at.
+    ///
+    /// The position is taken from the walk itself rather than by comparing offsets: the boundary is
+    /// simply whether a media-data box has already been passed when this box is reached.
+    fn top_level_uuid_boxes(
+        &self,
+    ) -> impl Iterator<Item = (Range<usize>, C2paBoxPosition, TopLevelUuidBox<'a>)> + '_ {
+        self.segments()
+            .iter()
+            .scan(C2paBoxPosition::BeforeMediaData, |position, segment| {
+                let entry = match segment.kind {
+                    SegmentKind::Box { ty, .. } if &ty == b"mdat" => {
+                        *position = C2paBoxPosition::AfterMediaData;
+                        None
+                    }
+                    SegmentKind::Box { ty, body } if &ty == b"uuid" => {
+                        // `range` spans the header and the body, so `range.end - body.len()` is the
+                        // absolute offset of the body — correct for an 8-byte header and a 16-byte
+                        // largesize one alike, without the container needing to report the header
+                        // width.
+                        segment.range.end.checked_sub(body.len()).map(|body_start| {
+                            (
+                                segment.range.clone(),
+                                *position,
+                                classify_uuid_box(body, body_start),
+                            )
+                        })
+                    }
+                    _ => None,
+                };
+                // `scan` stops at the first `None` it yields, so every segment yields `Some`; the
+                // inner `Option` is what filters.
+                Some(entry)
+            })
+            .flatten()
+    }
+}
+
+/// What one top-level `uuid` box turned out to be.
+enum TopLevelUuidBox<'a> {
+    /// A C2PA `ContentProvenanceBox` — its extended type is [`C2PA_UUID`] — and what reading it
+    /// yielded: the manifest store it carries, or the reason it carries none.
+    ContentProvenance(Result<C2paManifestStore<'a>, C2paUnreadReason>),
+    /// A `uuid` box carrying some other extended type. §A.5.1.1 makes the extended type the whole
+    /// test, so this is not C2PA framing however near the miss.
+    OtherExtendedType,
 }
 
 /// Classifies one top-level `uuid` box body (starting at absolute offset `body_start`).
 ///
-/// `None` means the box is not a C2PA `ContentProvenanceBox` at all — a foreign vendor `uuid` box,
-/// which is no evidence of provenance and must not be reported as one. `Some` means it is one, and
-/// carries either the manifest store it holds or the reason it holds none.
-fn parse_content_provenance_box(
-    body: &[u8],
-    body_start: usize,
-) -> Option<Result<C2paManifestStore<'_>, C2paUnreadReason>> {
-    // §A.5.1.1: the extended type is what makes a `uuid` box a ContentProvenanceBox. A body too
-    // short to hold sixteen bytes carries no extended type to match, so it is a foreign box rather
-    // than a truncated C2PA one — nothing in it says C2PA.
-    if body.get(..C2PA_UUID.len())? != &C2PA_UUID[..] {
-        return None;
+/// [`TopLevelUuidBox::OtherExtendedType`] means the box is not a C2PA `ContentProvenanceBox` at all
+/// — a vendor `uuid` box, which is no evidence of provenance and must not be reported as one.
+fn classify_uuid_box(body: &[u8], body_start: usize) -> TopLevelUuidBox<'_> {
+    // §A.5.1.1: the extended type is what makes a `uuid` box a ContentProvenanceBox.
+    //
+    // The short-body arm is unreachable, not a classification: `gamut_isobmff::BoxReader::next_box`
+    // rejects a `uuid` box whose body cannot hold its complete 16-byte user type with a fatal
+    // "truncated uuid user type", so `HeifContainer::parse` fails and no summary is produced at
+    // all. The split is written to be total anyway, because this function must not depend on a
+    // guarantee its own signature does not carry.
+    let Some((extended_type, after_uuid)) = body.split_at_checked(C2PA_UUID.len()) else {
+        return TopLevelUuidBox::OtherExtendedType;
+    };
+    if extended_type != &C2PA_UUID[..] {
+        return TopLevelUuidBox::OtherExtendedType;
     }
-    Some(read_content_provenance_box(body, body_start))
+    TopLevelUuidBox::ContentProvenance(read_content_provenance_box(
+        after_uuid,
+        body_start + C2PA_UUID.len(),
+    ))
 }
 
-/// Reads a box already known to carry the [`C2PA_UUID`] extended type, per §A.5.1.2 and §A.5.3.
+/// Reads what follows the [`C2PA_UUID`] extended type of a box already known to carry it, per
+/// §A.5.1.2 and §A.5.3. `after_uuid_start` is that slice's absolute offset in the file.
 fn read_content_provenance_box(
-    body: &[u8],
-    body_start: usize,
+    after_uuid: &[u8],
+    after_uuid_start: usize,
 ) -> Result<C2paManifestStore<'_>, C2paUnreadReason> {
     // §A.5.1.2: a FullBox with version 0 and flags 0. `RawBox::payload` strips the user type but not
     // these four bytes, so they are read here.
-    let after_uuid = body
-        .get(C2PA_UUID.len()..)
+    let (version_flags, after_full_box) = after_uuid
+        .split_at_checked(VERSION_FLAGS_LEN)
         .ok_or(C2paUnreadReason::Truncated)?;
-    if after_uuid
-        .get(..VERSION_FLAGS_LEN)
-        .ok_or(C2paUnreadReason::Truncated)?
-        != &[0u8; VERSION_FLAGS_LEN][..]
-    {
+    if version_flags != &[0u8; VERSION_FLAGS_LEN][..] {
         return Err(C2paUnreadReason::NotVersionZero);
     }
-    let after_full_box = after_uuid
-        .get(VERSION_FLAGS_LEN..)
-        .ok_or(C2paUnreadReason::Truncated)?;
 
-    // `string box_purpose` — null-terminated, per §A.5.1.2.
-    let terminator = after_full_box
-        .iter()
-        .position(|&b| b == 0)
-        .ok_or(C2paUnreadReason::Truncated)?;
-    let purpose = C2paBoxPurpose::from_bytes(
-        after_full_box
-            .get(..terminator)
-            .ok_or(C2paUnreadReason::Truncated)?,
-    )
-    .ok_or(C2paUnreadReason::NotAManifestStorePurpose)?;
-    let data = after_full_box
-        .get(terminator + 1..)
-        .ok_or(C2paUnreadReason::Truncated)?;
+    // `string box_purpose` — null-terminated, per §A.5.1.2. Splitting on the NUL yields the string
+    // and everything after it; a body with no NUL yields only a first part, and that missing second
+    // part is the truncation. `splitn` always yields a first part, empty slice included.
+    let mut purpose_and_data = after_full_box.splitn(2, |&b| b == 0);
+    let purpose_bytes = purpose_and_data.next().unwrap_or_default();
+    let data = purpose_and_data.next().ok_or(C2paUnreadReason::Truncated)?;
+    let purpose = C2paBoxPurpose::from_bytes(purpose_bytes)
+        .ok_or(C2paUnreadReason::NotAManifestStorePurpose)?;
 
     // Where the store begins inside `data`: one fixed offset for `manifest`/`original`, whose framing
     // §A.5.3 states, and two probed in order for `update`, whose framing it does not — see
     // `C2paBoxPurpose`. The first candidate whose `LBox` is a valid bound wins.
-    let data_start = body_start + (body.len() - data.len());
+    let data_start = after_uuid_start + (after_uuid.len() - data.len());
     for &prefix in purpose.store_prefix_candidates() {
         if let Some(bytes) = locate_store(data, prefix) {
             let start = data_start + prefix;
@@ -429,8 +451,11 @@ impl C2paBoxPurpose {
 ///
 /// A `uuid` box whose extended type is **not** [`C2PA_UUID`] is not one of these. §A.5.1.1 makes
 /// the extended type the whole test, and an ordinary file carries vendor `uuid` boxes that are no
-/// evidence of provenance; a near-miss on the sixteen bytes is a foreign box, not a damaged C2PA
-/// one, and is reported as absence.
+/// evidence of provenance; a near-miss on the sixteen bytes is a box of another type, not a damaged
+/// C2PA one. It is never given a reason — the specification has no notion of an approximate
+/// extended type — but it is not passed over in silence either: it is counted in
+/// [`C2paSummary::other_uuid_boxes`], because a report in which a one-byte miss and no box at all
+/// read identically hides exactly the file a reader most needs to look at.
 ///
 /// Non-exhaustive and with permanent discriminants: a later revision may distinguish a further
 /// reason without a breaking change.
@@ -470,6 +495,54 @@ impl C2paUnreadReason {
     }
 }
 
+/// Where a top-level `uuid` box sits relative to the file's media data — a **positional fact about
+/// bytes**, and never a verdict.
+///
+/// C2PA 2.4 §A.5.3 places the box carrying a manifest store "before the first 'mdat' box in the
+/// file and before any 'moov' box in the file", and after the `ftyp`. The box is reported wherever
+/// it is found and its position is never enforced, but a box sitting past that boundary is worth
+/// stating for the same reason a byte range is: it is where an *appended* box lands, and a reader
+/// deciding what to hand a validator cannot see it from a range alone.
+///
+/// The boundary this crate can observe is the first `mdat` alone. §A.5.3's other one, `moov`, is a
+/// movie box, and [`HeifContainer::parse`] refuses a file carrying a top-level one before any of
+/// this runs — image sequences and tracks are out of the workspace's scope — so a `moov` test here
+/// would be a branch no parsed file could take.
+///
+/// Stating it is not judging it, and deliberately so. §A.5.3 separately requires the `update` box
+/// of a mid-update file to "exist as the last box of the file", which on a file with media data
+/// puts it past this boundary by the specification's own instruction. So
+/// [`AfterMediaData`](Self::AfterMediaData) is neither a violation nor a validity finding: it says
+/// only where the bytes are.
+///
+/// Non-exhaustive and with permanent discriminants: a later revision may distinguish a further
+/// position without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum C2paBoxPosition {
+    /// The box was reached before any `mdat` box — the window §A.5.3 places a manifest-store box
+    /// in. A file with no `mdat` at all reports this too.
+    BeforeMediaData = 0,
+    /// An `mdat` box was already passed when this box was reached.
+    AfterMediaData = 1,
+}
+
+impl C2paBoxPosition {
+    /// The clause a report adds to this box's line, or `None` when the box sits where §A.5.3 puts
+    /// one and its position adds nothing to what the range already says.
+    ///
+    /// Worded as a position, not as a fault: see the [type docs](Self) for why an `update` box past
+    /// the boundary is exactly what §A.5.3 asks for.
+    #[must_use]
+    pub const fn note(self) -> Option<&'static str> {
+        match self {
+            Self::AfterMediaData => Some("its box begins after the first mdat box"),
+            _ => None,
+        }
+    }
+}
+
 /// A top-level C2PA `ContentProvenanceBox` that yielded no manifest store: where the whole box
 /// sits, and why nothing was read from it.
 ///
@@ -484,6 +557,8 @@ pub struct C2paUnreadBox {
     pub range: Range<usize>,
     /// Why no manifest store was read from it.
     pub reason: C2paUnreadReason,
+    /// Where the box sits relative to the file's media data.
+    pub position: C2paBoxPosition,
 }
 
 /// One located manifest store, reported **without its bytes**: where it sits, how big it is, and
@@ -504,6 +579,8 @@ pub struct C2paStoreSummary {
     pub range: Range<usize>,
     /// The `box_purpose` of the `uuid` box that carried the store.
     pub purpose: C2paBoxPurpose,
+    /// Where the `uuid` box that carried the store sits relative to the file's media data.
+    pub position: C2paBoxPosition,
 }
 
 impl C2paStoreSummary {
@@ -537,51 +614,102 @@ pub struct C2paSummary {
     /// collapse into "none found": the file carries C2PA framing this reader could not read
     /// through, which is not the same fact as carrying none. See [`C2paUnreadReason`].
     pub unread: Vec<C2paUnreadBox>,
+    /// How many top-level `uuid` boxes carried an extended type other than [`C2PA_UUID`].
+    ///
+    /// A **count of bytes present**, not a provenance claim. §A.5.1.1 makes the extended type the
+    /// whole test, so none of these boxes is C2PA framing and none of them may be reported as
+    /// damaged C2PA framing — an ordinary file carries vendor `uuid` boxes.
+    ///
+    /// It is counted because otherwise a file whose only `uuid` box is a *single byte* off the
+    /// C2PA type — what a signed file corrupted in transit looks like — would be indistinguishable
+    /// from a file with no such box at all: same lists, same lines, same words. Reporting the count
+    /// says what is true about the bytes and leaves the reading to a validator. No range is kept
+    /// and no line is emitted per box: the boxes are not this crate's subject, and the specification
+    /// has no notion of an approximate extended type.
+    pub other_uuid_boxes: usize,
 }
 
 impl C2paSummary {
-    /// Whether the file carries a manifest store at all.
+    /// Whether the file carries a manifest store this reader could **read**.
     ///
-    /// A store, specifically — `false` here does **not** mean the file carries no provenance, only
-    /// that none was read. Check [`unread`](Self::unread) too.
+    /// # A host that reports this predicate on its own reintroduces the defect
+    ///
+    /// `false` here is not "no provenance", and it is not even "no C2PA box". A file whose only
+    /// `ContentProvenanceBox` has a non-zero `FullBox` version — among other things, what a signed
+    /// file corrupted in transit looks like — plainly carries C2PA framing and still answers
+    /// `false`, because no *store* was read from it. Printing "C2PA: none" from this alone is
+    /// exactly the inference [`unread`](Self::unread) exists to prevent, and it is why the report
+    /// is rendered by [`report_lines`](Self::report_lines) rather than assembled per host: those
+    /// lines keep all three outcomes apart and this boolean cannot.
+    ///
+    /// Read [`unread`](Self::unread) and [`other_uuid_boxes`](Self::other_uuid_boxes) beside it, or
+    /// render the report instead of this. Whether a two-valued accessor should answer a
+    /// three-valued question at all is issue #597.
     #[must_use]
     pub fn is_present(&self) -> bool {
         !self.stores.is_empty()
     }
 
-    /// The human-readable report: one headline, then one line per store, then one line per C2PA
-    /// box that yielded no store.
+    /// The whole human-readable report, uncapped: [`summary_lines`](Self::summary_lines) followed
+    /// by every [`detail_lines`](Self::detail_lines) entry.
     ///
-    /// The headline states what was found and carries [`C2PA_NOT_VALIDATED`] inline. Each store
-    /// line names its `box_purpose`, its size and its half-open byte range, and repeats "located,
-    /// not validated" so a line read on its own still cannot be mistaken for a verdict; each
-    /// unread-box line names the box's range and [`C2paUnreadReason::describe`]. Detail lines are
-    /// indented two spaces relative to the headline; a caller prefixes its own indent to every
-    /// line.
+    /// A host printing to a terminal should cap the detail lines instead — the number of them is
+    /// chosen by the input, since §A.5.3 permits any number of these boxes — and
+    /// [`detail_line_count`](Self::detail_line_count) is the true total to report beside a capped
+    /// list. This method exists for a host that wants everything.
     ///
     /// No store's bytes can appear here — neither [`C2paStoreSummary`] nor [`C2paUnreadBox`] holds
     /// them.
     #[must_use]
     pub fn report_lines(&self) -> Vec<String> {
-        let mut lines = vec![self.headline()];
-        lines.extend(self.stores.iter().map(|store| {
-            format!(
-                "  box_purpose \"{purpose}\": {size} bytes at [{start}, {end}) — located, not validated",
-                purpose = store.purpose.as_str(),
-                size = store.size(),
-                start = store.range.start,
-                end = store.range.end,
-            )
-        }));
-        lines.extend(self.unread.iter().map(|unread| {
-            format!(
-                "  unread C2PA box at [{start}, {end}): {reason}",
-                start = unread.range.start,
-                end = unread.range.end,
-                reason = unread.reason.describe(),
-            )
-        }));
+        let mut lines = self.summary_lines();
+        lines.extend(self.detail_lines());
         lines
+    }
+
+    /// The report's head: the headline, and — when the file carries any — the count of top-level
+    /// `uuid` boxes whose extended type is not C2PA's.
+    ///
+    /// **At most two lines, whatever the file holds**, which is what makes this the part a host
+    /// prints unconditionally. The headline states what was found and carries
+    /// [`C2PA_NOT_VALIDATED`] inline; the second line is a byte count, worded so it cannot be read
+    /// as a provenance claim (see [`other_uuid_boxes`](Self::other_uuid_boxes)).
+    #[must_use]
+    pub fn summary_lines(&self) -> Vec<String> {
+        let mut lines = vec![self.headline()];
+        if self.other_uuid_boxes > 0 {
+            lines.push(format!(
+                "  other top-level uuid boxes: {count} (extended type is not the C2PA one; a uuid \
+                 box is not provenance framing)",
+                count = self.other_uuid_boxes,
+            ));
+        }
+        lines
+    }
+
+    /// One line per located store, then one line per C2PA box that yielded no store, in file order.
+    ///
+    /// Each store line names its `box_purpose`, its size and its half-open byte range, and repeats
+    /// "located, not validated" so a line read on its own still cannot be mistaken for a verdict;
+    /// each unread-box line names the box's range and [`C2paUnreadReason::describe`]. Either kind
+    /// carries [`C2paBoxPosition::note`] when the box sits past the file's media data. Lines are
+    /// indented two spaces relative to the headline; a caller prefixes its own indent to every one.
+    ///
+    /// Lazy, so a host that caps the list at N builds N lines rather than one per box in a file
+    /// that chose how many to carry. [`detail_line_count`](Self::detail_line_count) is how many
+    /// there are in total.
+    pub fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
+        self.stores
+            .iter()
+            .map(store_line)
+            .chain(self.unread.iter().map(unread_line))
+    }
+
+    /// How many lines [`detail_lines`](Self::detail_lines) yields — one per store plus one per
+    /// unread box — without building any of them.
+    #[must_use]
+    pub fn detail_line_count(&self) -> usize {
+        self.stores.len() + self.unread.len()
     }
 
     /// The report's first line: what the scan found, with [`C2PA_NOT_VALIDATED`] inline.
@@ -612,40 +740,84 @@ impl C2paSummary {
     }
 }
 
+/// The report line for one located store.
+fn store_line(store: &C2paStoreSummary) -> String {
+    format!(
+        "  box_purpose \"{purpose}\": {size} bytes at [{start}, {end}) — located, not validated{note}",
+        purpose = store.purpose.as_str(),
+        size = store.size(),
+        start = store.range.start,
+        end = store.range.end,
+        note = position_note(store.position),
+    )
+}
+
+/// The report line for one C2PA box that yielded no store.
+fn unread_line(unread: &C2paUnreadBox) -> String {
+    format!(
+        "  unread C2PA box at [{start}, {end}): {reason}{note}",
+        start = unread.range.start,
+        end = unread.range.end,
+        reason = unread.reason.describe(),
+        note = position_note(unread.position),
+    )
+}
+
+/// The trailing clause a line carries for its box's position, or nothing when there is none to add.
+fn position_note(position: C2paBoxPosition) -> String {
+    position
+        .note()
+        .map_or_else(String::new, |note| format!("; {note}"))
+}
+
 impl HeifContainer<'_> {
     /// A non-validating summary of the file's C2PA boxes, in file order: every manifest store,
     /// and every C2PA box that yielded none, with the reason.
     ///
-    /// The same scan as [`c2pa_manifest_stores`](Self::c2pa_manifest_stores), with the same reach
-    /// and the same silence on a *foreign* `uuid` box, reported without the stores' bytes. It is
+    /// The same scan as [`c2pa_manifest_stores`](Self::c2pa_manifest_stores), with the same reach,
+    /// reported without the stores' bytes. It is
     /// strictly the fuller view: a C2PA box that yields no store is dropped by that iterator and
-    /// listed in [`unread`](C2paSummary::unread) here. See [`C2paSummary`] for what it is for, and
-    /// [`C2PA_NOT_VALIDATED`] for what has to be said beside it.
+    /// listed in [`unread`](C2paSummary::unread) here, and a top-level `uuid` box of some other
+    /// extended type — invisible to both, and to any report, before this — is counted in
+    /// [`other_uuid_boxes`](C2paSummary::other_uuid_boxes). See [`C2paSummary`] for what it is for,
+    /// and [`C2PA_NOT_VALIDATED`] for what has to be said beside it.
     #[must_use]
     pub fn c2pa_summary(&self) -> C2paSummary {
         let mut stores = Vec::new();
         let mut unread = Vec::new();
-        for (range, outcome) in self.content_provenance_boxes() {
-            match outcome {
-                Ok(store) => stores.push(C2paStoreSummary {
+        let mut other_uuid_boxes = 0;
+        for (range, position, classified) in self.top_level_uuid_boxes() {
+            match classified {
+                TopLevelUuidBox::ContentProvenance(Ok(store)) => stores.push(C2paStoreSummary {
                     range: store.range,
                     purpose: store.purpose,
+                    position,
                 }),
-                Err(reason) => unread.push(C2paUnreadBox { range, reason }),
+                TopLevelUuidBox::ContentProvenance(Err(reason)) => unread.push(C2paUnreadBox {
+                    range,
+                    reason,
+                    position,
+                }),
+                TopLevelUuidBox::OtherExtendedType => other_uuid_boxes += 1,
             }
         }
-        C2paSummary { stores, unread }
+        C2paSummary {
+            stores,
+            unread,
+            other_uuid_boxes,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        C2PA_NOT_VALIDATED, C2paBoxPurpose, C2paStoreSummary, C2paSummary, C2paUnreadBox,
-        C2paUnreadReason,
+        C2PA_NOT_VALIDATED, C2paBoxPosition, C2paBoxPurpose, C2paStoreSummary, C2paSummary,
+        C2paUnreadBox, C2paUnreadReason,
     };
 
-    /// A summary of the stores at the given `(start, end, purpose)` triples, and nothing unread.
+    /// A summary of the stores at the given `(start, end, purpose)` triples, all in the window
+    /// §A.5.3 mandates, and nothing unread.
     fn summary(stores: &[(usize, usize, C2paBoxPurpose)]) -> C2paSummary {
         C2paSummary {
             stores: stores
@@ -653,13 +825,16 @@ mod tests {
                 .map(|&(start, end, purpose)| C2paStoreSummary {
                     range: start..end,
                     purpose,
+                    position: C2paBoxPosition::BeforeMediaData,
                 })
                 .collect(),
             unread: Vec::new(),
+            other_uuid_boxes: 0,
         }
     }
 
-    /// A summary of no stores and the unread C2PA boxes at the given `(start, end, reason)` triples.
+    /// A summary of no stores and the unread C2PA boxes at the given `(start, end, reason)` triples,
+    /// all in the window §A.5.3 mandates.
     fn unread_summary(boxes: &[(usize, usize, C2paUnreadReason)]) -> C2paSummary {
         C2paSummary {
             stores: Vec::new(),
@@ -668,8 +843,10 @@ mod tests {
                 .map(|&(start, end, reason)| C2paUnreadBox {
                     range: start..end,
                     reason,
+                    position: C2paBoxPosition::BeforeMediaData,
                 })
                 .collect(),
+            other_uuid_boxes: 0,
         }
     }
 
@@ -796,11 +973,14 @@ mod tests {
             stores: vec![C2paStoreSummary {
                 range: 61..90,
                 purpose: C2paBoxPurpose::Manifest,
+                position: C2paBoxPosition::BeforeMediaData,
             }],
             unread: vec![C2paUnreadBox {
                 range: 90..150,
                 reason: C2paUnreadReason::NotAManifestStorePurpose,
+                position: C2paBoxPosition::BeforeMediaData,
             }],
+            other_uuid_boxes: 0,
         };
         assert_eq!(
             mixed.report_lines(),
@@ -859,5 +1039,107 @@ mod tests {
                     .to_owned(),
             ]
         );
+    }
+    #[test]
+    fn a_report_holds_no_borrow_of_the_file_it_describes() {
+        // Drift guard for the guarantee that no report can print a store's bytes. Today that rests
+        // on structure — no lifetime parameter, no byte field — which an additive change could
+        // weaken without any test noticing, since every one of these types is `#[non_exhaustive]`
+        // and open to new fields. `'static` is exactly "borrows nothing", so a field that borrows
+        // the input fails this at compile time instead.
+        fn borrows_nothing<T: 'static>(_: &T) {}
+        borrows_nothing(&C2paSummary::default());
+        borrows_nothing(&C2paStoreSummary {
+            range: 61..90,
+            purpose: C2paBoxPurpose::Manifest,
+            position: C2paBoxPosition::BeforeMediaData,
+        });
+        borrows_nothing(&C2paUnreadBox {
+            range: 16..106,
+            reason: C2paUnreadReason::Truncated,
+            position: C2paBoxPosition::BeforeMediaData,
+        });
+    }
+
+    #[test]
+    fn uuid_boxes_of_another_extended_type_are_reported_as_a_count_of_bytes_present() {
+        // The near miss and the absent box were byte-identical reports before this line existed,
+        // and a signed file corrupted in transit is exactly the first. The line states a count and
+        // disclaims provenance in the same breath: it must not read as C2PA framing.
+        let none = C2paSummary {
+            other_uuid_boxes: 3,
+            ..C2paSummary::default()
+        };
+        let lines = none.report_lines();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(
+            lines[1],
+            "  other top-level uuid boxes: 3 (extended type is not the C2PA one; a uuid box is \
+             not provenance framing)"
+        );
+        // The headline is still the absence one: no store was found, and none of these is one.
+        assert!(lines[0].contains("no manifest store found"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_file_with_no_other_uuid_boxes_gets_no_count_line() {
+        // A count of zero is not a fact worth a line: every ordinary file would carry it.
+        assert_eq!(C2paSummary::default().summary_lines().len(), 1);
+    }
+
+    #[test]
+    fn a_store_past_the_files_media_data_says_so_on_its_own_line() {
+        // The positional fact, stated and not judged: an appended box is the adversarial shape, and
+        // a reader cannot see it from the byte range alone.
+        let mut appended = summary(&[(61, 90, C2paBoxPurpose::Manifest)]);
+        appended.stores[0].position = C2paBoxPosition::AfterMediaData;
+        assert_eq!(
+            appended.report_lines()[1],
+            "  box_purpose \"manifest\": 29 bytes at [61, 90) — located, not validated; its box \
+             begins after the first mdat box"
+        );
+    }
+
+    #[test]
+    fn an_unread_box_past_the_files_media_data_says_so_too() {
+        let mut appended = unread_summary(&[(16, 106, C2paUnreadReason::NoStoreBound)]);
+        appended.unread[0].position = C2paBoxPosition::AfterMediaData;
+        assert_eq!(
+            appended.report_lines()[1],
+            format!(
+                "  unread C2PA box at [16, 106): {}; its box begins after the first mdat box",
+                C2paUnreadReason::NoStoreBound.describe()
+            )
+        );
+    }
+
+    #[test]
+    fn a_box_in_the_mandated_window_adds_no_positional_clause() {
+        // The clause is a flag, not a field: stating a position for every box would bury the one
+        // that is worth reading.
+        assert_eq!(C2paBoxPosition::BeforeMediaData.note(), None);
+    }
+
+    #[test]
+    fn the_capped_and_uncapped_renderings_are_the_same_lines() {
+        // A host caps the detail lines and prints the head unconditionally, so the two halves must
+        // reassemble into exactly what `report_lines` gives, and the count must match the lines.
+        let mut mixed = summary(&[
+            (61, 90, C2paBoxPurpose::Original),
+            (131, 172, C2paBoxPurpose::Update),
+        ]);
+        mixed.unread.push(C2paUnreadBox {
+            range: 172..200,
+            reason: C2paUnreadReason::Truncated,
+            position: C2paBoxPosition::BeforeMediaData,
+        });
+        mixed.other_uuid_boxes = 1;
+
+        let detail: Vec<String> = mixed.detail_lines().collect();
+        assert_eq!(mixed.detail_line_count(), detail.len());
+        assert_eq!(detail.len(), 3);
+        let mut reassembled = mixed.summary_lines();
+        reassembled.extend(detail);
+        assert_eq!(mixed.report_lines(), reassembled);
     }
 }

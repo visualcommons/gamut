@@ -15,7 +15,9 @@ use common::{
     C2PA_UUID, bx, c2pa_box, cat, clean_file, ftyp, hdlr, hvc1_item, iinf_v0, infe_v2, jumbf_store,
     meta, pitm_v0, uuid_box,
 };
-use gamut_heic::{C2paBoxPurpose, C2paUnreadReason, HeifContainer, UnknownBoxLocation};
+use gamut_heic::{
+    C2paBoxPosition, C2paBoxPurpose, C2paUnreadReason, HeifContainer, UnknownBoxLocation,
+};
 
 /// The `meta` box every fixture below closes with: the minimum that `HeifContainer::parse` accepts
 /// (a `pict` handler, a primary item, and that item's `infe`).
@@ -605,4 +607,108 @@ fn a_foreign_uuid_box_is_not_reported_as_an_unread_c2pa_box() {
     let summary = c.c2pa_summary();
     assert!(summary.stores.is_empty());
     assert!(summary.unread.is_empty());
+}
+
+#[test]
+fn a_uuid_box_of_another_extended_type_is_counted_rather_than_passed_over() {
+    // The near miss and the file with no `uuid` box at all produced byte-identical reports before
+    // this count existed — and a signed file corrupted in transit is precisely the first. The count
+    // is a fact about bytes: it neither claims provenance for the box nor calls it damaged C2PA
+    // framing, which §A.5.1.1 forbids since the extended type is the box's whole identity.
+    let mut foreign = C2PA_UUID;
+    foreign[0] ^= 0xFF;
+    let data = file_with(&[uuid_box(
+        &foreign,
+        0,
+        0,
+        "manifest",
+        &cat(&[&0u64.to_be_bytes()[..], &store()]),
+    )]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert_eq!(summary.other_uuid_boxes, 1);
+    // Still not a store and still not an unread C2PA box: only the count changed.
+    assert!(summary.stores.is_empty());
+    assert!(summary.unread.is_empty());
+}
+
+#[test]
+fn a_c2pa_box_is_counted_as_a_c2pa_box_and_never_as_a_uuid_box_of_another_type() {
+    // The two tallies partition the top-level `uuid` boxes; a box counted in both, or in the wrong
+    // one, would let a reader double-count the provenance framing a file carries.
+    let data = file_with(&[c2pa_box("manifest", Some(0), &store(), &[])]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert_eq!(summary.stores.len(), 1);
+    assert_eq!(summary.other_uuid_boxes, 0);
+}
+
+#[test]
+fn a_store_before_the_files_media_data_sits_where_a_5_3_places_it() {
+    // §A.5.3: "before the first 'mdat' box in the file and before any 'moov' box in the file".
+    let data = cat(&[
+        ftyp(b"heic"),
+        c2pa_box("manifest", Some(0), &store(), &[]),
+        bx(b"mdat", &[0xAA; 16]),
+        minimal_meta(),
+    ]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert_eq!(summary.stores.len(), 1);
+    assert_eq!(summary.stores[0].position, C2paBoxPosition::BeforeMediaData);
+}
+
+#[test]
+fn a_store_after_the_files_media_data_is_flagged_by_its_position() {
+    // The adversarial shape: a `ContentProvenanceBox` appended past the media data rather than
+    // written into the window §A.5.3 mandates. Reported as a position, not as a verdict — §A.5.3
+    // itself puts a mid-update `update` box last in the file.
+    let data = cat(&[
+        ftyp(b"heic"),
+        bx(b"mdat", &[0xAA; 16]),
+        c2pa_box("manifest", Some(0), &store(), &[]),
+        minimal_meta(),
+    ]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert_eq!(summary.stores.len(), 1);
+    assert_eq!(summary.stores[0].position, C2paBoxPosition::AfterMediaData);
+}
+
+#[test]
+fn a_top_level_moov_never_reaches_the_c2pa_lens() {
+    // Why the boundary is the first `mdat` alone, though §A.5.3 names `moov` as well: a top-level
+    // movie box is refused by the container before any C2PA scan runs — image sequences are out of
+    // scope — so testing for one would be a branch no parsed file could take.
+    let data = cat(&[
+        ftyp(b"heic"),
+        bx(b"moov", &[0xAA; 16]),
+        c2pa_box("manifest", Some(0), &store(), &[]),
+        minimal_meta(),
+    ]);
+    let error = HeifContainer::parse(&data).expect_err("a top-level moov is not a still image");
+    assert!(
+        error.to_string().contains("image sequences"),
+        "the container must refuse the file, not classify its boxes: {error}"
+    );
+}
+
+#[test]
+fn a_uuid_box_too_short_to_hold_an_extended_type_never_reaches_the_c2pa_lens() {
+    // Why `classify_uuid_box`'s short-body arm is unreachable rather than a classification: the
+    // container rejects such a box outright (`gamut_isobmff::BoxReader::next_box`, "truncated uuid
+    // user type"), so there is no summary to report it in — the whole file fails to parse.
+    for short in [0usize, 15] {
+        let data = file_with(&[bx(b"uuid", &vec![0xAB; short])]);
+        let error = HeifContainer::parse(&data)
+            .expect_err("a uuid box without its complete user type is a parse error");
+        assert!(
+            error.to_string().contains("uuid user type"),
+            "a {short}-byte uuid body must be refused by the box reader: {error}"
+        );
+    }
 }

@@ -163,8 +163,8 @@ pub use backend::{
     AbiHevcDecoder, BACKEND_DECLINED, HEVC_CODEC_ID, HevcDecoders, NO_BACKEND, planar_pixel_format,
 };
 pub use c2pa::{
-    C2PA_NOT_VALIDATED, C2PA_UUID, C2paBoxPurpose, C2paManifestStore, C2paStoreSummary,
-    C2paSummary, C2paUnreadBox, C2paUnreadReason,
+    C2PA_NOT_VALIDATED, C2PA_UUID, C2paBoxPosition, C2paBoxPurpose, C2paManifestStore,
+    C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason,
 };
 pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{DecodedFrame, HevcDecoder};
