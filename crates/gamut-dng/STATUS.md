@@ -391,6 +391,23 @@ reference encode number exists and none is invented. Encode is reported for gamu
 two encoders in the same process, which is robust to a loaded machine — throughput in MB/s is a
 property of the machine that produced it. Run the harness on the box you care about.
 
+**What the harness found, on its first run.** Two defects, both filed rather than fixed here — a
+benchmark that measures the codec is not the place to change it:
+
+- **#583, decode speed.** Every decode path is within 1.25× of the SDK *except* lossless JPEG,
+  which is ~60× slower. `lossless_jpeg::decode_symbol` scans the whole 256-entry code table once
+  per candidate bit length, so a symbol costs ~1000 comparisons where the reference implementation
+  spends one table probe. The isolation is the evidence: nothing else is out by more than a
+  quarter.
+- **#584, CFA lossless-JPEG size.** `cfa/lossless-jpeg` is *larger* than `cfa/uncompressed`
+  (157.4 % of the raw samples against 137.7 %), because the encoder hands the mosaic to
+  `lossless_jpeg::encode` as one full-width component, so predictor 1 differences a red photosite
+  against its green neighbour. Declaring the same samples as `(width / 2, height, 2)` — the
+  reshape DNG 1.7.1.0 p. 20 describes, needing no sample reordering and already readable by this
+  crate's decoder — takes the payload from 119.7 % to 91.5 % of raw.
+
+Both are byte- or ratio-quantities rather than absolute times, so both reproduce off this box.
+
 ## Deferred / out of scope
 
 Each deferred item plugs into the same IFD-tree/chunk pipeline and oracles the shipped features
