@@ -30,14 +30,39 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
 | P5 | IPTC mapping | **Keystone** — IIM ↔ XMP reconciliation (precedence policy + date split/join) | ✅ |
 | P6 | — | IIM/IRB writer round-trip + exiv2 differential gate (`tooling/gamut-iptc-oracle`) | ✅ |
 | v1 | issue #182 | API finalization (two entry points, published field map, complete Core accessors), strict-write/honest-read error contract, tech-reference drift guard, divan benches, docs | ✅ |
+| P7 | issue #422 | Breadth: the complete IIM 4.2 record-1/record-2 tag table, and typed models for the four most-used structured properties (`extension`) | ✅ |
 
-## Deferred / out of scope (v1)
+## Breadth (issue #422)
+
+- **Structured properties.** `extension` models `Iptc4xmpCore:CreatorContactInfo`,
+  `Iptc4xmpExt:ImageRegion` (with `RegionBoundary`/`RegionBoundaryPoint`/`Entity`),
+  `Iptc4xmpExt:ArtworkOrObject` and `plus:Licensor` as typed projections over the XMP graph, in the
+  `from_xmp`/`to_xmp` shape `gamut_exif::GpsInfo` uses for its sub-IFD. Every one is XMP-only — none
+  carries an `IIMid` — so none extends the reconciliation surface; `tests/techreference.rs` pins
+  that, and each structure's field set, to the reference.
+- **IIM tag table.** `iim::IimTagInfo` now names every dataset IPTC-IIM 4.2 chapters 5 and 6 give a
+  determinate octet maximum: 14 Envelope + 56 Application datasets. The table is descriptive — no
+  `FIELD_MAP` row references a dataset outside the PMD-mapped subset — so reading, merging and
+  writing are byte-for-byte unchanged by it.
+- **Authority.** The PMD tech reference is machine-readable only for the ~20 IIM-mapped rows and the
+  `ipmd_struct` field sets, both of which `tests/techreference.rs` re-derives at test time. The rest
+  of the record-1/2 table comes from `iim-4.2.pdf`, which is not machine-readable; its guards are the
+  structural laws in `iim`'s own tests (ordering, uniqueness, the fixed date/time form lengths) and
+  the exiv2 differential in `tests/oracle.rs`, which cross-checks a stream spanning the newly named
+  Envelope and wide Application datasets.
+
+## Deferred / out of scope
 
 Intentional, documented skips — none lose data on round-trip:
 
-- **IPTC Extension structures** (image regions, artwork/object, licensors, locations shown, …) and
-  the structured `Iptc4xmpCore:CreatorContactInfo`: no typed model. They pass through
+- **The remaining eleven IPTC Extension structures** (`Location`, `PersonWDetails`, `CvTerm`,
+  `EntityWRole`, `ProductWGtin`, `RegistryEntry`, `EmbdEncRightsExpr`, `LinkedEncRightsExpr`,
+  `CopyrightOwner`, `ImageCreator`, `ImageSupplier`): no typed model — issue #538. They pass through
   `PhotoMetadata::xmp` as raw `gamut-xmp` values untouched.
+- **IIM datasets with no spec-stated octet maximum** (`2:202` and every dataset of records 7–9): not
+  in the tag table, because `IimTagInfo::max_octets` is a `u16` and can only state a determinate
+  maximum — issue #539. They still round-trip byte-exact, as every unmodeled dataset in any record
+  does.
 - **Exotic ISO 2022 character sets**: dataset 1:90 designations other than the spec default
   (decoded as Latin-1, the exiv2/ExifTool de-facto reading of ISO 646 IRV) and UTF-8 (`ESC % G`)
   are reported as `Error::Unsupported`, never mis-decoded.
@@ -50,8 +75,10 @@ Intentional, documented skips — none lose data on round-trip:
 - **Length limits are write-side only** (strict-write/honest-read contract): `IptcWriter` rejects
   overlong or unencodable values and IIM-inexpressible `DateCreated`s; the parser accepts and
   preserves overlong wire values rather than reject real-world files.
-- **IIM records 3–9**: no named tag-table entries (the table covers the structural record-1 and
-  PMD-mapped record-2 datasets); all unmodeled datasets in any record round-trip byte-exact.
+- **IIM records 3–6**: no named tag-table entries, because IIM 4.2 defines no datasets for them —
+  record 3 (Digital Newsphoto Parameter) is a separate publication, records 4 and 5 are not
+  allocated, and record 6 (Abstract Relationship) has only the method identifiers of Appendix F.
+  Datasets in those records round-trip byte-exact, unnamed.
 
 ## Reference discrepancies
 
