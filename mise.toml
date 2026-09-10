@@ -320,6 +320,15 @@ run = "./tooling/check-tests/run.sh"
 description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, renders as one table under a header and delimiter row of matching width, gives each crate a three-cell row whose Purpose and Status render as something, and agrees with cargo metadata wherever the section makes a claim in one of the forms the guard checks"
 run = "./tooling/check-readme-crates/run.sh"
 
+# The guard's own regression battery: single-edit fixtures over the repository README, each
+# asserting the exit code and the message the guard owes it. Not part of `check-readme-crates`,
+# and not in CI: it is for whoever changes the guard, and it costs a `cargo metadata` per fixture.
+# `CHECK_README_AWK` selects the interpreter, so the portability claim is re-runnable rather than
+# asserted -- e.g. `CHECK_README_AWK='gawk --posix' mise run check-readme-crates-fixtures`.
+[tasks.check-readme-crates-fixtures]
+description = "Run the README crates-table guard against its own fixture battery"
+run = "./tooling/check-readme-crates/fixtures.sh"
+
 [tasks.check-release-deps]
 description = "Reject publishable dev-only workspace edges that release-plz cannot order"
 run = '''cargo metadata --no-deps --format-version 1 | jq -r -e '
