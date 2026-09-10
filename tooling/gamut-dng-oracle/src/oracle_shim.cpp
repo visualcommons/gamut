@@ -325,6 +325,11 @@ extern "C" int gdng_decode_lossless_jpeg(const uint8_t *data, size_t len, size_t
                                          uint16_t **out_data, size_t *out_len) {
   *out_data = nullptr;
   *out_len = 0;
+  // The same narrowing guard `gdng_decode_lossless_jpeg_extent` carries, for the reason stated
+  // there: the two are timed against each other and must accept exactly the same inputs.
+  if (len > 0xFFFFFFFFu) {
+    return dng_error_bad_format;
+  }
   try {
     dng_stream stream(data, static_cast<uint32>(len));
     buffer_spooler spooler;
@@ -357,7 +362,10 @@ extern "C" int gdng_decode_lossless_jpeg(const uint8_t *data, size_t len, size_t
 extern "C" int gdng_decode_lossless_jpeg_extent(const uint8_t *data, size_t len,
                                                 size_t expected_samples, size_t *out_len) {
   *out_len = 0;
-  // `dng_stream` takes a 32-bit length; a longer buffer would be silently truncated.
+  // `dng_stream` takes a 32-bit length; a longer buffer would be silently truncated. The guard
+  // has to be identical to `gdng_decode_lossless_jpeg`'s: these two are timed against each other,
+  // so any check one runs and the other does not is a difference in the measured region as well
+  // as a difference in what each accepts.
   if (len > 0xFFFFFFFFu) {
     return dng_error_bad_format;
   }
