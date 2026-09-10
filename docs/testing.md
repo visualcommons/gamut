@@ -182,13 +182,38 @@ A **robustness** target is not a law and does not route through an `invariants` 
 primary oracle is the engine's own — a panic, a hang, or an allocation past `-malloc_limit_mb` —
 which no function can express. Any check it adds beyond that oracle must be able to *fail*, and
 **its module doc records the injected defect that made it fail** — the patch, the message the
-target printed, and the command that reproduces it. An assertion comparing a wrapper against the
-expression its own body is (`gamut_ifd::read` against `IfdReader::open(..)?.read_file()`) is a
-tautology, not a differential; so is a comparison whose two sides come from one reader, which is
-what a decoded-versus-described geometry check reduces to when the decoder and the probe share a
-tag reader. Anchor the check on something the compared reader does not produce — the count of
-samples the decode physically yielded, against the geometry the file declares — and keep the
-tautology, if it is worth keeping at all, as a **structure pin**, named as one at the site.
+target printed, and the command that reproduces it.
+
+**"Can fail" means some defect in the code the check names makes some *input* fail it**, and both
+halves bite. A check whose two sides are computed from one another cannot be separated by any
+input, however hostile: it can only report a defect in that shared computation, never one in the
+subject it advertises. Three shapes recur, and every one of them was found here by injecting the
+defect the check named and getting nothing back:
+
+- **a wrapper against the expression its own body is.** `gamut_ifd::read` against
+  `IfdReader::open(..)?.read_file()` is one function call written twice.
+- **two sides that come from one reader.** A decoded-versus-described geometry check sees nothing
+  when the decoder and the probe share a tag reader.
+- **a value silently derived from the value it is compared with.** A decode's sample count looks
+  like the pixel pipeline's own output, but `gamut_core::convert::convert_from_raw` allocates its
+  result as `ImageBuf::<Q>::zeroed(src.dims)` — so the count *is* the dimensions' product, and
+  comparing it against the declared geometry's product is the geometry comparison times a
+  constant. A transposition passes it. In the same shape, "the box cursor strictly advances"
+  cannot fail for any declared box size, because `BoxReader::next_box` consumes its 8-byte header
+  before any success return.
+
+Anchor a check on a value the compared side does not produce, and keep the tautology — if it is
+worth keeping at all — as a **structure pin**: named as one at the site, and kept out of the
+target's list of checks. A pin earns its one comparison where a future change could genuinely
+split the two bodies apart; it is worth nothing as a search.
+
+**Inject once per listed check, not once per target.** A target that lists two checks and records
+one injection has evidence for one of them, and the other can sit dead for rounds — two of this
+workspace's did. Where a check is an equality between an accessor and a count, inject in both
+directions, because one direction is silent on a file that holds no instance of the thing. And
+where an injection reports nothing because no *committed seed* reaches the check, add the seed: a
+check whose only witness has to be synthesised by the engine is a check the tier is asking luck
+for.
 
 `#[ignore]` is not used in this workspace and must not be introduced: `coverage` is the only test
 gate, so an ignored test is not deferred, it is unrun.
