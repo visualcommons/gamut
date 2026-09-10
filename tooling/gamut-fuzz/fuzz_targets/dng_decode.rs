@@ -8,16 +8,31 @@
 //! one observable: an over-sized `Vec::with_capacity` costs no resident memory on an
 //! overcommitting kernel, so the engine's limit, not the OS, is the oracle.
 //!
-//! Two checks beyond the crash oracle:
+//! The check beyond the crash oracle is that **the raw image is self-consistent**: whatever the
+//! decode pipeline returns holds exactly `width × height × samples_per_pixel` samples. The
+//! constructors enforce that at construction, but a `RawImage` is handed on through linearisation,
+//! active-area and crop handling before a caller sees it, and it is the value that *arrives* —
+//! after everything that may have rewritten `samples` or `dims` — this asserts on.
 //!
-//! - **the raw image is self-consistent**: a decoded `RawImage` holds exactly
-//!   `width × height × samples_per_pixel` samples. The constructors enforce it; a decode path
-//!   that builds one another way is what this notices.
-//! - **the digest verdict agrees with the decoded model**: the file either carries a
-//!   `NewRawImageDigest` — in which case `verify_new_raw_image_digest` must reach a verdict — or
-//!   it does not, in which case the verdict must be `Absent`. Two entry points read the same tag
-//!   by different routes (`decode` models it, `verify` re-reads it), so a disagreement means one
-//!   of them found a tag the other did not.
+//! `verify_new_raw_image_digest` is driven for its own reach: on a lossy-compressed raw it walks
+//! the chunk grid and digests the compressed chunks, which `decode` never does. Its verdict is
+//! compared against the decoded model as a **structure pin, not a differential** — both sides read
+//! `NewRawImageDigest` out of IFD 0 with the same expression, so the comparison cannot fail while
+//! those two bodies agree. It is kept because the two are genuinely separate readers that a future
+//! change could let drift apart (a `verify` that started selecting the raw IFD's digest, say), and
+//! it costs nothing: the call is made anyway, for the crash oracle.
+//!
+//! ## Why a failed digest check is a classified outcome, not a crash
+//!
+//! `verify_new_raw_image_digest` is not a second call to `decode`. It re-reads the container and
+//! then, depending on the file's own `Compression` code, takes one of two routes — and only one of
+//! them is a subset of what `decode` did. It is therefore free to return `Err` on a file that
+//! decoded, and an earlier draft turned that into `expect(...)`: a **false crash**,
+//! indistinguishable from a real one until a human minimises it, on a tier that runs unattended
+//! with no human at the other end. Nothing in either function's documented contract promises
+//! "everything that decodes also verifies" — `verify`'s own docs bound its errors by `decode`'s
+//! only *for lossless storage* — so the `Err` arm is simply a case with nothing to compare, and
+//! the target returns instead of panicking.
 //!
 //! A crash found here is **minimised and promoted into a named deterministic case** in
 //! `gamut-dng`'s own suite. The corpus is a search aid, not the regression record.
@@ -50,9 +65,11 @@ fuzz_target!(|data: &[u8]| {
         decoded.raw.samples_per_pixel()
     );
 
-    // `decode` succeeded, so the container is walkable and the digest path must have reached a
-    // verdict too — the two routes disagree only if they selected different directories.
-    let verdict = verdict.expect("digest check on a file that decoded");
+    // The digest route may legitimately refuse a file `decode` accepted (see the module docs), so
+    // an `Err` is a case with nothing to cross-check, not a defect. Only a verdict is comparable.
+    let Ok(verdict) = verdict else {
+        return;
+    };
     assert_eq!(
         decoded.new_raw_image_digest.is_none(),
         verdict == DigestCheck::Absent,
