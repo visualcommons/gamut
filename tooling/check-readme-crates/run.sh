@@ -13,6 +13,8 @@
 #     character set is cargo's own -- letters, digits, `-` and `_`, in either case -- and a
 #     phantom row cannot hide behind a capital or an underscore;
 #   * no crate is listed twice, so the table stays a bijection rather than a set;
+#   * every `gamut`-prefixed name a Purpose or Status cell backticks is a workspace crate too, so
+#     a rename leaves no phantom behind in the prose either;
 #   * every crate row is a three-cell row whose Purpose and Status each *render as something*:
 #     a cell holding one non-breaking space, one tab, or one empty HTML element is empty, because
 #     that is what a reader sees;
@@ -28,7 +30,7 @@
 #     as a paragraph of literal pipes while each row's bytes stay intact, and all of them fail
 #     here.
 #
-# Three claim forms in a cell are checked against `cargo metadata`, and they are the only prose
+# Four claim forms in a cell are checked against `cargo metadata`, and they are the only prose
 # this guard reads. Each is opt-in: a row that does not write one claims nothing and is not
 # checked. Write a claim a reader could check against cargo in one of these forms, or do not
 # write it -- a hand-maintained list of crates is exactly the defect this file exists to catch,
@@ -42,9 +44,14 @@
 #     excluded, as they are for `check-release-deps`: they are not what a consumer links;
 #   * `always-on dependency`/`always-on dependencies` followed by backticked crate names -- that
 #     set must be exactly the workspace crates the row's crate depends on non-optionally. Naming
-#     none asserts that there are none.
+#     none asserts that there are none;
+#   * `feature`/`features` followed by backticked names -- each must be declared by one of the
+#     workspace crates the row names, which is its own crate plus any other it cites, because a
+#     row may legitimately point at the umbrella's feature for the seam it describes. Writing
+#     `default feature` instead additionally requires that crate's `default` list to enable it.
+#     Every occurrence in a row is read, not only the first.
 #
-# In all three the name list ends at the first character that is not a backticked name, a comma,
+# In all four the name list ends at the first character that is not a backticked name, a comma,
 # a colon, a space or the word "and", so ordinary prose may follow it on the same line.
 #
 # CRLF input is accepted: a trailing carriage return is removed from every line before anything is
@@ -57,7 +64,7 @@
 #
 # What is deliberately NOT checked, and why. These are limitations, not oversights, and this
 # comment is the one place they are written down:
-#   * The *wording* of the Purpose and Status cells, beyond the three claim forms above. They are
+#   * The *wording* of the Purpose and Status cells, beyond the four claim forms above. They are
 #     prose a human maintains, and their authority is **the crate's own source** -- the code that
 #     ships. No single file outranks it: `STATUS.md` can list a shipped module as deferred (issue
 #     #545) and a module doc can defer a capability the crate's own `EncodeImage` impls already
@@ -101,9 +108,9 @@ test -f "$readme" || {
 }
 
 # One pass over the file emits every stream -- `NAME` for membership, `BAD` for shape, `ORPHAN`
-# and `SPLIT` for the table context, `VER`/`CONS`/`ALWAYS` for the claim forms -- so the checks
-# can never disagree about which lines are crate rows. Bounded to the "## Crates" section so the
-# README's other tables (the `mise run ...` command table) can never be mistaken for a crate row.
+# and `SPLIT` for the table context, `VER`/`CONS`/`ALWAYS`/`FEAT`/`CITE` for the claims -- so the
+# checks can never disagree about which lines are crate rows. Bounded to the "## Crates" section
+# so the README's other tables (the `mise run ...` table) can never be mistaken for a crate row.
 #
 # LC_ALL=C makes every regexp below byte-wise, which is what the octal escapes assume; the awk
 # is POSIX (no gensub, no interval expressions, dynamic regexps built as strings) so it behaves
@@ -293,7 +300,34 @@ scan="$(
 
         # Emits the machine-checkable claims a row makes. Each is opt-in: a row that writes none
         # claims nothing.
-        function claims(name, text,   s, tok, nxt) {
+        # Every backticked lower-case identifier in the row, which is the set of crates a feature
+        # named here may belong to. The shell keeps only the workspace members.
+        function cited(name, text,   out, rest) {
+            out = name
+            rest = text
+            while (match(rest, /`[A-Za-z0-9_-]+`/)) {
+                out = out " " substr(rest, RSTART + 1, RLENGTH - 2)
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+            return out
+        }
+
+        # Every backticked `gamut`-prefixed name in a cell asserts that such a crate exists, and
+        # cargo settles that: a renamed or deleted crate leaves a phantom behind in a Purpose cell
+        # exactly as it does in a crate cell, and only the crate cell was ever read.
+        function cites(name, text,   rest, tok, out) {
+            out = ""
+            rest = text
+            while (match(rest, /`gamut[A-Za-z0-9_-]*`/)) {
+                tok = substr(rest, RSTART + 1, RLENGTH - 2)
+                out = (out == "") ? tok : out " " tok
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+            if (out != "") { print "CITE\t" name "\t" out }
+        }
+
+        function claims(name, text,   s, tok, nxt, pre, qual, lst, at, len) {
+            cites(name, text)
             s = " " text
             while (match(s, /[^A-Za-z0-9_.]v[0-9]+(\.[0-9]+)*/)) {
                 tok = substr(s, RSTART + 2, RLENGTH - 2)
@@ -306,6 +340,22 @@ scan="$(
             }
             if (match(text, /always-on dependenc(y|ies)/)) {
                 print "ALWAYS\t" name "\t" name_list(substr(text, RSTART + RLENGTH))
+            }
+            # `feature`/`features` immediately followed by backticked names, optionally qualified
+            # by a preceding `default`. Every occurrence in the row is read, not just the first.
+            s = text
+            while (match(s, /features?[ ]+`/)) {
+                # name_list() and cited() both call match(), so the offsets of the marker are
+                # saved before either runs -- reading RSTART back afterwards would not advance.
+                at = RSTART
+                len = RLENGTH
+                pre = substr(s, 1, at - 1)
+                qual = (pre ~ /default[ ]*$/) ? "default" : "any"
+                lst = name_list(substr(s, at + len - 1))
+                if (lst != "") {
+                    print "FEAT\t" name "\t" qual "\t" lst "\t" cited(name, text)
+                }
+                s = substr(s, at + len)
             }
         }
 
@@ -648,6 +698,75 @@ if [ -n "$always_claims" ]; then
         echo "check-readme-crates: 'always-on dependency' lists in $readme that cargo metadata refutes:"
         echo "$always_errors"
         echo "  An optional dependency is not always on, and only workspace crates are counted."
+    fi
+fi
+
+# Every `gamut`-prefixed name a cell backticks must be a workspace crate. The phantom check above
+# reads the crate cell only, so before this a Purpose cell could name a crate that no longer
+# exists -- the same defect the crate cell has been guarded against since the first commit.
+cite_claims="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "CITE" { print $2 "\t" $3 }')"
+if [ -n "$cite_claims" ]; then
+    cite_errors="$(
+        printf '%s\n' "$cite_claims" | while IFS="$(printf '\t')" read -r crate names; do
+            for cited in $names; do
+                if ! printf '%s\n' "$workspace_crates" | grep -qxF -- "$cited"; then
+                    echo "  $crate: the row names \`$cited\`, which is not a workspace crate"
+                fi
+            done
+        done
+        true
+    )"
+    if [ -n "$cite_errors" ]; then
+        fail=1
+        echo "check-readme-crates: $readme cells name crates that do not exist:"
+        echo "$cite_errors"
+        echo "  drop the mention, or fix the crate name it misspells."
+    fi
+fi
+
+# `feature`/`features`: each named feature must be declared by one of the workspace crates the row
+# talks about -- its own crate, or another one it names -- because a row may legitimately cite the
+# umbrella's feature for the seam the row describes. `default feature` additionally requires that
+# crate's `default` list to enable it.
+feature_claims="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "FEAT" { print $2 "\t" $3 "\t" $4 "\t" $5 }')"
+if [ -n "$feature_claims" ]; then
+    declared_features="$(printf '%s' "$metadata" | jq -r '
+        .packages[] | . as $p
+        | ($p.features.default // []) as $default
+        | ($p.features | keys[])
+        | "\($p.name)\t\(.)\t\(if . as $f | $default | index($f) then "default" else "off" end)"
+    ')"
+    feature_errors="$(
+        printf '%s\n' "$feature_claims" | while IFS="$(printf '\t')" read -r crate qual names owners; do
+            for feature in $names; do
+                found=""
+                for owner in $owners; do
+                    state="$(printf '%s\n' "$declared_features" |
+                        awk -F'\t' -v o="$owner" -v f="$feature" '$1 == o && $2 == f { print $3 }')"
+                    if [ "$qual" = "default" ]; then
+                        [ "$state" = "default" ] && found="$owner"
+                    else
+                        [ -n "$state" ] && found="$owner"
+                    fi
+                    [ -n "$found" ] && break
+                done
+                if [ -z "$found" ]; then
+                    if [ "$qual" = "default" ]; then
+                        echo "  $crate: no crate this row names enables '$feature' by default"
+                    else
+                        echo "  $crate: no crate this row names declares a '$feature' feature"
+                    fi
+                fi
+            done
+        done
+        true
+    )"
+    if [ -n "$feature_errors" ]; then
+        fail=1
+        echo "check-readme-crates: feature claims in $readme that cargo metadata refutes:"
+        echo "$feature_errors"
+        echo "  Write a feature as: feature \`name\` -- or default feature \`name\` -- and name the"
+        echo "  crate that declares it in the same row."
     fi
 fi
 

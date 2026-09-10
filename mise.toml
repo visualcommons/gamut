@@ -314,7 +314,7 @@ run = "./tooling/check-tests/run.sh"
 # can be stale (issues #545, #560), so a row must be true of the crate rather than faithful to a
 # file. What the guard deliberately does not check is written down once, in the script header.
 [tasks.check-readme-crates]
-description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, renders as one table under a header and delimiter row of matching width, gives each crate a three-cell row whose Purpose and Status render as something, and agrees with cargo metadata wherever a row cites a version or lists crates"
+description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, renders as one table under a header and delimiter row of matching width, gives each crate a three-cell row whose Purpose and Status render as something, and agrees with cargo metadata wherever a row cites a version, a feature, or a list of crates"
 run = "./tooling/check-readme-crates/run.sh"
 
 [tasks.check-release-deps]
