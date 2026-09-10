@@ -5,7 +5,7 @@
 //! → read-stage-1 flow (the same one its `dng_validate` tool uses); it succeeds only if the SDK
 //! reads the file without error. All `unsafe` FFI is confined to this crate.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
 
@@ -52,6 +52,36 @@ unsafe extern "C" {
         out_data: *mut *mut u16,
         out_len: *mut usize,
     ) -> c_int;
+
+    /// Decodes the same bare lossless-JPEG stream as `gdng_decode_lossless_jpeg` but stops at
+    /// the spooler, reporting only how many samples the SDK produced; `0` on success, else the
+    /// SDK error code. Nothing is allocated for the caller, so there is nothing to free.
+    fn gdng_decode_lossless_jpeg_extent(
+        data: *const u8,
+        len: usize,
+        expected_samples: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+
+    /// Decodes the DNG in `data`/`len` from memory and reports the stage-1 image's geometry and
+    /// sample count without exporting the samples; `0` on success, else the SDK error code.
+    /// Nothing is allocated for the caller, so there is nothing to free.
+    fn gdng_decode_dng_in_memory(
+        data: *const u8,
+        len: usize,
+        out_w: *mut u32,
+        out_h: *mut u32,
+        out_planes: *mut u32,
+        out_len: *mut usize,
+    ) -> c_int;
+
+    /// Returns the identity of the zlib the SDK's Deflate reader calls: its version, and where
+    /// the loader found it. Static storage duration; valid for the process.
+    fn gdng_zlib_identity() -> *const c_char;
+
+    /// Returns the resolved path of that same zlib alone, or null when the loader cannot report
+    /// one. Static storage duration; valid for the process.
+    fn gdng_zlib_path() -> *const c_char;
 
     /// Computes the SDK's `NewRawImageDigest` for the DNG at `path` into `out_digest` (16 bytes);
     /// `0` on success, else the SDK error code.
@@ -274,6 +304,132 @@ pub fn read_linear_dng(bytes: &[u8]) -> Result<AdobeRaw, String> {
     read_image(bytes, gdng_read_linear, "stage-2 linear")
 }
 
+/// Identifies the zlib the SDK's Deflate reader calls: its `zlibVersion()` string and, where the
+/// loader can report it, the resolved path of the shared object the symbol came from — e.g.
+/// `"1.3.1 from /usr/lib64/libz.so.1.3.1"`.
+///
+/// The path is the discriminating part: `zlibVersion()` reports the string the loaded build
+/// carries, so it separates the copy a build script left under `target/` from the platform's only
+/// when the platform's build renamed itself. Two stock builds of one version — which is what a box
+/// shipping stock zlib gives — carry the same string, and the path still tells them apart.
+///
+/// `build.rs` links the system libz dynamically (`-lz`) because the SDK includes `<zlib.h>`
+/// unconditionally. That makes the SDK's Deflate decode the one measured path in this oracle that
+/// is **not** built from source committed to this repository: which libz the dynamic linker
+/// resolves is a property of the machine, and inflate implementations differ by far more than the
+/// margin that decides whether gamut or the reference implementation is faster on a Deflate row.
+/// `cargo bench -p gamut-dng --bench codec` prints this next to its fixture table so a Deflate
+/// ratio is never published without the library it is a ratio against.
+///
+/// Falls back to `"unknown"` if libz returns no string, which it is not documented to do.
+#[must_use]
+pub fn zlib_identity() -> String {
+    // SAFETY: the shim returns a pointer to a NUL-terminated string with static storage duration,
+    // valid for the life of the process; the `CStr` borrow ends before this function returns.
+    let raw = unsafe { gdng_zlib_identity() };
+    if raw.is_null() {
+        return "unknown".to_string();
+    }
+    // SAFETY: non-null, and as above NUL-terminated and static.
+    unsafe { CStr::from_ptr(raw) }
+        .to_str()
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// The resolved path of that libz on its own — the same string [`zlib_identity`] appends, handed
+/// over unformatted so a caller can *test* it rather than print it.
+///
+/// Returns `None` when the loader reports no path, or reports one that is not UTF-8.
+///
+/// A caller that finds this path inside a Cargo build directory has learned something the version
+/// string cannot tell it: the loader resolved libz from the build graph rather than from the
+/// platform. `cargo` puts every build script's native search path on `LD_LIBRARY_PATH`, and
+/// `gamut-dng`'s own dev-dependency `libtiff-oracle` builds a `libz.so` under `target/`, so a
+/// benchmark launched through `cargo` can measure a different inflate implementation from the one
+/// the same binary measures when run directly. That resolution is not reproducible for anyone
+/// else, which is why `cargo bench -p gamut-dng --bench codec` flags it rather than only printing
+/// it.
+#[must_use]
+pub fn zlib_path() -> Option<PathBuf> {
+    // SAFETY: the shim returns either null or a pointer to a NUL-terminated string with static
+    // storage duration, valid for the life of the process; the `CStr` borrow ends here.
+    let raw = unsafe { gdng_zlib_path() };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, and as above NUL-terminated and static.
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().ok()?;
+    Some(PathBuf::from(text))
+}
+
+/// The extent of an image the Adobe DNG SDK decoded: its geometry and how many samples it holds.
+///
+/// Deliberately carries no pixels. It is what [`decode_dng_in_memory`] reports, and the point of
+/// that entry is to *not* pay for an export copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedExtent {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Colour planes per pixel.
+    pub planes: u32,
+    /// How many samples the decoded image holds: `width * height * planes`.
+    pub samples: usize,
+}
+
+/// Decodes `bytes` as a DNG with the Adobe DNG SDK **from memory**, returning only the extent of
+/// the stage-1 raw image it produced.
+///
+/// This is the reference implementation's decode reduced to the work gamut's
+/// `DngDecoder::decode` also does, so the two can be timed against each other
+/// (`cargo bench -p gamut-dng --bench codec`):
+///
+/// - no temporary file is written and no `dng_file_stream` is opened — the SDK parses the same
+///   in-memory bytes the Rust caller holds; and
+/// - the decoded image is not exported into a caller-owned buffer, so the extra full-image
+///   `malloc` + `memcpy` that [`read_raw_dng`] must perform to cross the FFI boundary is not
+///   charged to the codec.
+///
+/// Use [`read_raw_dng`] when you want the samples; this one when you want the time.
+///
+/// That the two agree is pinned by `adobe_in_memory_decode_matches_the_file_decode` in
+/// `gamut-dng`'s `tests/roundtrip.rs`, not here: this crate is excluded from the workspace, so a
+/// test in it never runs in automation.
+///
+/// # Errors
+///
+/// Returns an error message (with the SDK's numeric error code) if the SDK cannot parse the bytes
+/// or read the raw image.
+pub fn decode_dng_in_memory(bytes: &[u8]) -> Result<DecodedExtent, String> {
+    let (mut width, mut height, mut planes): (u32, u32, u32) = (0, 0, 0);
+    let mut samples: usize = 0;
+    // SAFETY: `bytes` outlives the call and the shim only reads `bytes.len()` bytes from it; the
+    // four out-parameters are distinct live locals and the shim allocates nothing for us.
+    let code = unsafe {
+        gdng_decode_dng_in_memory(
+            bytes.as_ptr(),
+            bytes.len(),
+            &mut width,
+            &mut height,
+            &mut planes,
+            &mut samples,
+        )
+    };
+    if code != 0 {
+        return Err(format!(
+            "Adobe DNG SDK could not decode the DNG from memory (code {code})"
+        ));
+    }
+    Ok(DecodedExtent {
+        width,
+        height,
+        planes,
+        samples,
+    })
+}
+
 /// Decodes a **bare lossless-JPEG (SOF3) stream** with the Adobe DNG SDK's own codec — the
 /// reference for gamut-dng's T.81 process-14 decoder (predictors 1–7, point transform,
 /// row-aligned restart intervals).
@@ -308,6 +464,42 @@ pub fn decode_lossless_jpeg(stream: &[u8], expected_samples: usize) -> Result<Ve
     let samples = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
     unsafe { gdng_free(data) };
     Ok(samples)
+}
+
+/// Decodes the same bare lossless-JPEG (SOF3) stream as [`decode_lossless_jpeg`] with the Adobe
+/// DNG SDK, but **without exporting the samples** — it returns how many the SDK produced.
+///
+/// The two entry points run the identical `DecodeLosslessJPEG<Scalar>` call into the identical
+/// spool buffer and differ only in what happens afterwards: [`decode_lossless_jpeg`] must
+/// `malloc` a buffer, `memcpy` the spool into it and copy that into a `Vec` to cross the FFI
+/// boundary, and this one does none of those. Timing the pair therefore measures the export path
+/// and nothing else, which is how `cargo bench -p gamut-dng --bench codec` quantifies the one
+/// residual bias in its codestream comparison instead of merely asserting it is small.
+///
+/// That the two agree is pinned by `sdk_extent_entry_counts_the_same_samples_as_the_exporting_entry`
+/// in `gamut-dng`'s `lossless_jpeg` tests, not here, for the reason given on
+/// [`decode_dng_in_memory`].
+///
+/// # Errors
+///
+/// Returns an error message (with the SDK's numeric error code) if the SDK cannot decode the
+/// stream, or if it produces a different number of samples than `expected_samples`.
+pub fn decode_lossless_jpeg_extent(
+    stream: &[u8],
+    expected_samples: usize,
+) -> Result<usize, String> {
+    let mut len: usize = 0;
+    // SAFETY: `stream` outlives the call and the shim only reads `stream.len()` bytes from it;
+    // `len` is a live local and the shim allocates nothing for us.
+    let code = unsafe {
+        gdng_decode_lossless_jpeg_extent(stream.as_ptr(), stream.len(), expected_samples, &mut len)
+    };
+    if code != 0 {
+        return Err(format!(
+            "Adobe DNG SDK could not decode the lossless JPEG (code {code})"
+        ));
+    }
+    Ok(len)
 }
 
 #[cfg(test)]
