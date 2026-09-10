@@ -64,7 +64,8 @@ Dependency edges (a crate depends on those to its right):
   decode itself is out of scope here). Differential oracle: libheif+libde265 (+kvazaar
   fixture generation), dev-only. ← isobmff, core, color.
 - **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png;
-  deliberately encoder-only — workspace decoders inflate via `miniz_oxide`. ← core.
+  deliberately encoder-only — workspace decoders inflate via `miniz_oxide`. ← nothing: no dependency
+  at all, not even `gamut-core` (`src/lib.rs:6`).
 - **gamut-png** — PNG codec (3rd edition, W3C): space-efficient encoder and spec-compliant
   decoder — all colour types/bit depths, Adam7 *decoding*, all filters, decode limits for
   hostile input, ancillary metadata surfaced as raw `MetadataBlock`-ready payloads
