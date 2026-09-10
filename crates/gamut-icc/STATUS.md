@@ -46,11 +46,22 @@ so no profile is rejected for carrying an unmodelled tag.
 
 `IccProfile::builtin`, `gray_with_gamma`, `from_cicp` and `from_source_profile` construct
 spec-valid v4 three-component matrix/TRC display profiles (§8.4). All four return `Option`: the
-colorimetry they resolve is **gamut-color's and is never restated here** — primaries and white
-point come from `ColourPrimaries::chromaticities`, the RGB→XYZ construction and Bradford
-adaptation from `gamut_color::matrix`, the ST 2084 curve from `gamut_color::transfer` — and those
-constructors are themselves fallible, so an input whose colorimetry cannot be resolved is declined
-rather than given a profile whose colorants are silently the PCS axes. Colorimetry is not the only
+colorimetry they resolve is **gamut-color's, and whatever gamut-color can supply is never retyped
+here** — primaries and white point come from `ColourPrimaries::chromaticities`, the RGB→XYZ
+construction and Bradford adaptation from `gamut_color::matrix`, the ST 2084 curve from
+`gamut_color::transfer` — and those constructors are themselves fallible, so an input whose
+colorimetry cannot be resolved is declined rather than given a profile whose colorants are silently
+the PCS axes.
+
+Three published constants gamut-color does *not* supply are written out here, because an ICC tag
+needs them in a form no gamut-color function returns, and each is gated rather than trusted:
+H.273 §8.2's β (`BT709_BETA`, from which α is derived rather than restated), pinned by
+`bt709_curve_inverts_the_h273_transfer` against an independent forward transcription of Table 3 and
+by the lcms2 oracle; the IEC 61966-2-1 `(g, a, b, c, d)` parameter set for §10.18 type 3, pinned by
+`srgb_parametric_curve_matches_gamut_color` against `gamut_color::transfer::srgb_eotf` and by
+`oracle_srgb_tone_curve_matches_lcms`; and the PCS D50 of §7.2.16, which is an ICC fact rather than
+a CIE one (see "PCS white" below), pinned by `colorants_sum_to_the_declared_media_white_point` and
+the lcms2 colorant oracle. `src/builtin.rs`'s module documentation tabulates the three. Colorimetry is not the only
 reason to decline: `from_cicp` also refuses signalling this profile *shape* cannot carry, which is
 where narrow range lands — see "CICP fields the profile does not build from" below. `builtin`
 yields `Some` for every `BuiltinProfile` in this release and a test pins that.

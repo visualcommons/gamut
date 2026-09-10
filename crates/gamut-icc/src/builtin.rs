@@ -2,11 +2,24 @@
 //! [`SourceProfile`], or for a CICP signalling triple.
 //!
 //! Every profile built here is a **v4 three-component matrix/TRC display profile** (ICC.1:2022
-//! §8.4) — or, for [`IccProfile::gray_with_gamma`], the monochrome model of the same class. The
-//! colorimetry is never written down twice: the primaries and white point come from
-//! [`gamut_color::cicp::ColourPrimaries::chromaticities`], the RGB→XYZ construction and the
-//! Bradford adaptation to the D50 PCS from [`gamut_color::matrix`], and the ST 2084 curve from
-//! [`gamut_color::transfer`]. This crate contributes the ICC encoding, not the numbers.
+//! §8.4) — or, for [`IccProfile::gray_with_gamma`], the monochrome model of the same class.
+//!
+//! **Colorimetry `gamut-color` can supply is never retyped here**: the primaries and white point
+//! come from [`gamut_color::cicp::ColourPrimaries::chromaticities`], the RGB→XYZ construction and
+//! the Bradford adaptation to the D50 PCS from [`gamut_color::matrix`], and the ST 2084 curve from
+//! [`gamut_color::transfer`].
+//!
+//! Three published constants it does not supply *are* written here, because an ICC tag needs them
+//! in a form no `gamut-color` function returns. Each is gated against something outside this
+//! module rather than trusted:
+//!
+//! | Restated here | Why it cannot be borrowed | What gates it |
+//! | --- | --- | --- |
+//! | [`BT709_BETA`] (H.273 §8.2); [`BT709_ALPHA`] is *derived* from it, not restated | `gamut-color` has no BT.709-family curve at all — see "Which spaces" | `bt709_curve_inverts_the_h273_transfer`, against `h273_bt709_oetf`, a forward transcription of Table 3 that restates α and β on purpose so no mistyped digit is shared; and `oracle_bt709_tone_curve_matches_the_h273_transfer` through lcms2 |
+//! | The IEC 61966-2-1 `(g, a, b, c, d)` set for [`Trc::Srgb`] | `gamut_color::transfer::srgb_eotf` is a *function*; §10.18 type 3 needs its five parameters | `srgb_parametric_curve_matches_gamut_color` against that function, and `oracle_srgb_tone_curve_matches_lcms` |
+//! | The PCS D50, via [`XyzNumber::D50`] | It is an **ICC** fact (§7.2.16), not a CIE one; see [`pcs_d50_chromaticity`] | `colorants_sum_to_the_declared_media_white_point`, and the lcms2 colorant oracle |
+//!
+//! Everything else this module contributes is ICC encoding, not colour science.
 //!
 //! # Which spaces
 //!
