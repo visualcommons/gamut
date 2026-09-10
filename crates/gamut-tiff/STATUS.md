@@ -83,6 +83,9 @@ Three consequences are contractual rather than incidental, and are documented wh
 **(a)** The Exif directory's *entries* are carried unchanged but its **ordering is normalised** —
 ascending tag (TIFF 6.0 §2 requires it on disk), duplicate tags collapsed to the last, a child's
 next-IFD pointer ignored — so "verbatim" is claimed for byte payloads, not for a directory model.
+The one shape the model can express and a file cannot — a tag holding both a field and a sub-IFD
+group, which is two entries under one tag — is refused by the encode rather than normalised,
+because normalising it means silently choosing which of the two the caller meant.
 **(b)** Which pointer tags the reader resolves depends on the **level**, and one rule decides it
 at both: a pointer is followed exactly when its target belongs to a directory `TiffMetadata` hands
 back. At **IFD 0** that is `ExifIFD` alone. `SubIFDs` and `GPSInfo` are out, because their targets
@@ -119,11 +122,19 @@ anything outside the standard pointer tags comes back as a raw offset, so it is 
 from **groups**, so checking only the groups left the writer blind to the one shape the reader
 misreads — a standard pointer tag carried as a plain `LONG`, which encoded cleanly and then failed
 this crate's own reader with `read out of bounds` or `sub-IFD pointer loop`. A field under one of
-the four tags whose type is a pointer's own (`LONG`, `IFD`, `LONG8`, `IFD8`) is therefore refused;
-any other type under those tags is not a pointer to either side and round-trips unchanged. All
-three are `Error::InvalidInput` from `with_metadata`'s encode before any pixel work, on **every**
-public encode surface, rather than a well-formed file this crate cannot read back unchanged. The bound is the spec's; that a narrower one is also easier
-to assert is not on its own a reason to narrow a contract.
+the four tags whose **on-disk type code** is a pointer's own (`LONG` 4, `IFD` 13, `LONG8` 16,
+`IFD8` 18) is therefore refused; any other type under those tags is not a pointer to either side
+and round-trips unchanged. The discriminator is the *code*, not the in-memory `Value` variant,
+because the two disagree for exactly one shape: `Value::Unknown` carries an arbitrary code beside
+its value word, the writer emits the code verbatim, and the reader classifies by it — so an
+`Unknown` built at 4, 13, 16 or 18 was a plain field to a variant-shaped check and a pointer to
+the reader. *Pair*: a tag given both a field and a group is two entries under one tag, which
+TIFF 6.0 §2 does not allow and which readers resolve in opposite directions — this crate keeps the
+last occurrence, libtiff ignores everything after the first — so it is refused too. All four are
+`Error::InvalidInput` from `with_metadata`'s encode before any pixel work, on **every** public
+encode surface, rather than a well-formed file this crate cannot read back unchanged. The bound is
+the spec's; that a narrower one is also easier to assert is not on its own a reason to narrow a
+contract.
 
 The C2PA manifest store is the one carrier with a placement rule of its own, and that rule is not
 restated here: `gamut_ifd::c2pa` owns C2PA 2.4 §A.3.6 (tag 52545 / `0xCD41`, type `UNDEFINED`, one

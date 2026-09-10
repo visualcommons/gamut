@@ -192,6 +192,9 @@ impl TiffDecoder {
     /// of the main chain supplies the C2PA manifest store (C2PA 2.4 §A.3.6). Every byte-carried
     /// payload comes back **verbatim** — this crate parses none of them — so a block written by
     /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) reads back identical.
+    /// The Exif directory is a directory model rather than a byte range, so what it promises is
+    /// narrower and is stated on [`TiffMetadata::exif`](crate::TiffMetadata::exif); the shapes it
+    /// could not promise for are refused by the encode rather than written.
     /// Use [`c2pa_exclusions`](crate::c2pa_exclusions) for *where* the store sits.
     ///
     /// ```
