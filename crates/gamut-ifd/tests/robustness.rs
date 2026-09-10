@@ -83,7 +83,11 @@ fn specific_malformed_inputs_error_without_panic() {
         b"MM\x00\x2a\xff\xff\xff\x7f",     // first-IFD offset past EOF (big-endian)
         b"II\x2a\x00\x08\x00\x00\x00",     // first IFD at EOF
         b"II\x2a\x00\x08\x00\x00\x00\xff", // truncated IFD count
-        b"II\x2a\x00\x00\x00\x00\x00",     // first-IFD offset 0 (no IFD)
+        // A whole entry count of 65 535 with no entry bytes at all behind it — the count is
+        // present and well-formed, so the reader reaches the point of sizing the directory from
+        // it. Nothing may be reserved for the 786 KiB it claims in a ten-byte file.
+        b"II\x2a\x00\x08\x00\x00\x00\xff\xff",
+        b"II\x2a\x00\x00\x00\x00\x00", // first-IFD offset 0 (no IFD)
         // A 1-entry IFD whose value count is huge (byte-length overflow path), then truncated.
         b"II\x2a\x00\x08\x00\x00\x00\x01\x00\x00\x01\x03\x00\xff\xff\xff\xff\x08\x00\x00\x00\x00\x00\x00\x00",
         // An IFD whose next-IFD pointer loops back to itself.
@@ -94,6 +98,13 @@ fn specific_malformed_inputs_error_without_panic() {
     }
     // The loop case must be a typed error, not a hang.
     assert!(read(b"II\x2a\x00\x08\x00\x00\x00\x00\x00\x08\x00\x00\x00").is_err());
+    // The hostile entry count must be refused against the source length, not merely survived.
+    assert!(
+        read(b"II\x2a\x00\x08\x00\x00\x00\xff\xff")
+            .expect_err("65 535 entries in a ten-byte file")
+            .to_string()
+            .contains("IFD extends past end of file")
+    );
 }
 
 #[test]
