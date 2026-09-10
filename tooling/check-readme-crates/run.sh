@@ -37,8 +37,8 @@
 # one level down.
 #
 # The forms are deliberately NOT enumerated here. An enumeration in the documentation of an
-# enumeration checker is the one place a hand-written list must not be, and this header shipped a
-# stale one for two rounds: it said "four" while the code checked five. `claims()` below is the
+# enumeration checker is the one place a hand-written list must not be, and this header was stale
+# the moment the fifth check landed: the same commit left it saying "four". `claims()` below is the
 # list. Every form is one `match()` in it, tagged and documented at that match site, and every
 # failure message names the form it rejects and the shape it wants:
 #
@@ -67,8 +67,8 @@
 #     real crate, because that is the precondition every name check rests on. The bare word
 #     `gamut` is exempt: it is the project's name in English as well as the umbrella's package
 #     name, and requiring a code span around every mention of it would reject the prose this
-#     README is made of. A fenced code block is exempt too -- there a compound is a sample of
-#     Rust or of a shell line, where `gamut_png` is the correct spelling;
+#     README is made of. A fenced or indented code block is exempt too -- there a compound is a
+#     sample of Rust or of a shell line, where `gamut_png` is the correct spelling;
 #   * the underscore spelling of a workspace crate is REJECTED, deliberately, and this is the one
 #     place that decision is written down. `gamut_ifd` is a Rust identifier, not a cargo package
 #     name; cargo publishes `gamut-ifd` and `cargo add gamut_ifd` does not resolve. Accepting it
