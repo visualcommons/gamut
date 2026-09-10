@@ -1711,6 +1711,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reproduction_is_equality_apart_from_the_two_re_spellings() {
+        // The relation the retention rule is built on, stated on its own: the same value spelled
+        // another way reproduces a field, and nothing else does.
+        let coordinate = |text: &str| XmpProperty::new(ns::IPTC_EXT, "rbX", text_value(text));
+        assert!(reproduces(&coordinate(" 0.50 "), &coordinate("0.5")));
+        assert!(!reproduces(&coordinate("0.5"), &coordinate("0.25")));
+        assert!(!reproduces(&coordinate("left"), &coordinate("right")));
+        // A value of another kind is another value, and a field of another name is another field.
+        assert!(!reproduces(
+            &coordinate("0.5"),
+            &XmpProperty::new(ns::IPTC_EXT, "rbX", XmpValue::Uri("0.5".to_owned()))
+        ));
+        assert!(!reproduces(
+            &coordinate("0.5"),
+            &XmpProperty::new(ns::IPTC_EXT, "rbY", text_value("0.5"))
+        ));
+        assert!(!reproduces(
+            &coordinate("0.5"),
+            &XmpProperty::new(ns::XMP, "rbX", text_value("0.5"))
+        ));
+    }
+
     /// One shape a modelled field can arrive in, with both rules' machinery attached to it.
     struct Shape {
         /// What the shape is — the label the enumeration is published under.
