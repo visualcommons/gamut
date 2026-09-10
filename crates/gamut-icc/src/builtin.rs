@@ -430,8 +430,8 @@ impl IccProfile {
     /// The white point is D50, so no chromatic adaptation is needed and no `chad` tag is written.
     ///
     /// Returns `None` for a `gamma` no `kTRC` can carry: `gamma` must be finite, strictly
-    /// positive, and below [`GAMMA_ENCODING_LIMIT`] — the first magnitude the `s15Fixed16`
-    /// parameter cannot hold. `f64` is open input, and the alternatives are worse than declining:
+    /// positive, and below 32 768 — the first magnitude the `s15Fixed16` parameter cannot hold.
+    /// `f64` is open input, and the alternatives are worse than declining:
     /// `NaN` would be written as a description string and a saturated `s15Fixed16`, and a gamma of
     /// `0.0` describes a profile that maps every input to white.
     ///
