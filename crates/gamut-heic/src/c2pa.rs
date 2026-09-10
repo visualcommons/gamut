@@ -259,9 +259,30 @@ impl<'a> HeifContainer<'a> {
     ///
     /// A top-level `uuid` box whose user type is not [`C2PA_UUID`], whose `FullBox` version or flags
     /// are non-zero, whose `box_purpose` is not one of [`C2paBoxPurpose`]'s, or whose contents are
-    /// truncated or self-inconsistent is skipped silently: this is a lens over bytes that happen to
-    /// be present, so a malformed or foreign box yields nothing rather than an error.
+    /// truncated or self-inconsistent yields no store: this is a lens over bytes that happen to be
+    /// present, so a malformed or foreign box yields nothing rather than an error.
+    ///
+    /// A box that *is* a [`C2PA_UUID`] box and still yields nothing is not silent, though — it is
+    /// reported, with the reason, by [`c2pa_summary`](Self::c2pa_summary), so a reader cannot take
+    /// an empty iterator here for a file carrying no provenance at all.
     pub fn c2pa_manifest_stores(&self) -> impl Iterator<Item = C2paManifestStore<'a>> + '_ {
+        self.content_provenance_boxes()
+            .filter_map(|(_, outcome)| outcome.ok())
+    }
+
+    /// Every top-level `ContentProvenanceBox`, as its whole box range paired with what reading it
+    /// yielded: the manifest store it carries, or the reason it carries none.
+    ///
+    /// The one scan both public views are built from, so "a store" and "a box that yielded no
+    /// store" can never disagree about which boxes were looked at.
+    fn content_provenance_boxes(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            Range<usize>,
+            Result<C2paManifestStore<'a>, C2paUnreadReason>,
+        ),
+    > + '_ {
         self.segments()
             .iter()
             .filter_map(|segment| match segment.kind {
@@ -270,32 +291,67 @@ impl<'a> HeifContainer<'a> {
                     // offset of the body — correct for an 8-byte header and a 16-byte largesize one
                     // alike, without the container needing to report the header width.
                     let body_start = segment.range.end.checked_sub(body.len())?;
-                    parse_content_provenance_box(body, body_start)
+                    let outcome = parse_content_provenance_box(body, body_start)?;
+                    Some((segment.range.clone(), outcome))
                 }
                 _ => None,
             })
     }
 }
 
-/// Parses one top-level `uuid` box body (starting at absolute offset `body_start`) into the manifest
-/// store it carries, or `None` if it does not carry one.
-fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paManifestStore<'_>> {
-    // §A.5.1.1: the extended type is what makes a `uuid` box a ContentProvenanceBox.
+/// Classifies one top-level `uuid` box body (starting at absolute offset `body_start`).
+///
+/// `None` means the box is not a C2PA `ContentProvenanceBox` at all — a foreign vendor `uuid` box,
+/// which is no evidence of provenance and must not be reported as one. `Some` means it is one, and
+/// carries either the manifest store it holds or the reason it holds none.
+fn parse_content_provenance_box(
+    body: &[u8],
+    body_start: usize,
+) -> Option<Result<C2paManifestStore<'_>, C2paUnreadReason>> {
+    // §A.5.1.1: the extended type is what makes a `uuid` box a ContentProvenanceBox. A body too
+    // short to hold sixteen bytes carries no extended type to match, so it is a foreign box rather
+    // than a truncated C2PA one — nothing in it says C2PA.
     if body.get(..C2PA_UUID.len())? != &C2PA_UUID[..] {
         return None;
     }
+    Some(read_content_provenance_box(body, body_start))
+}
+
+/// Reads a box already known to carry the [`C2PA_UUID`] extended type, per §A.5.1.2 and §A.5.3.
+fn read_content_provenance_box(
+    body: &[u8],
+    body_start: usize,
+) -> Result<C2paManifestStore<'_>, C2paUnreadReason> {
     // §A.5.1.2: a FullBox with version 0 and flags 0. `RawBox::payload` strips the user type but not
     // these four bytes, so they are read here.
-    let after_uuid = body.get(C2PA_UUID.len()..)?;
-    if after_uuid.get(..VERSION_FLAGS_LEN)? != &[0u8; VERSION_FLAGS_LEN][..] {
-        return None;
+    let after_uuid = body
+        .get(C2PA_UUID.len()..)
+        .ok_or(C2paUnreadReason::Truncated)?;
+    if after_uuid
+        .get(..VERSION_FLAGS_LEN)
+        .ok_or(C2paUnreadReason::Truncated)?
+        != &[0u8; VERSION_FLAGS_LEN][..]
+    {
+        return Err(C2paUnreadReason::NotVersionZero);
     }
-    let after_full_box = after_uuid.get(VERSION_FLAGS_LEN..)?;
+    let after_full_box = after_uuid
+        .get(VERSION_FLAGS_LEN..)
+        .ok_or(C2paUnreadReason::Truncated)?;
 
     // `string box_purpose` — null-terminated, per §A.5.1.2.
-    let terminator = after_full_box.iter().position(|&b| b == 0)?;
-    let purpose = C2paBoxPurpose::from_bytes(after_full_box.get(..terminator)?)?;
-    let data = after_full_box.get(terminator + 1..)?;
+    let terminator = after_full_box
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or(C2paUnreadReason::Truncated)?;
+    let purpose = C2paBoxPurpose::from_bytes(
+        after_full_box
+            .get(..terminator)
+            .ok_or(C2paUnreadReason::Truncated)?,
+    )
+    .ok_or(C2paUnreadReason::NotAManifestStorePurpose)?;
+    let data = after_full_box
+        .get(terminator + 1..)
+        .ok_or(C2paUnreadReason::Truncated)?;
 
     // Where the store begins inside `data`: one fixed offset for `manifest`/`original`, whose framing
     // §A.5.3 states, and two probed in order for `update`, whose framing it does not — see
@@ -304,14 +360,14 @@ fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paMa
     for &prefix in purpose.store_prefix_candidates() {
         if let Some(bytes) = locate_store(data, prefix) {
             let start = data_start + prefix;
-            return Some(C2paManifestStore {
+            return Ok(C2paManifestStore {
                 bytes,
                 range: start..start + bytes.len(),
                 purpose,
             });
         }
     }
-    None
+    Err(C2paUnreadReason::NoStoreBound)
 }
 
 /// Reads the JUMBF `LBox` sitting `prefix` bytes into `data` and returns the store it bounds, or
@@ -363,6 +419,73 @@ impl C2paBoxPurpose {
     }
 }
 
+/// Why a top-level C2PA `ContentProvenanceBox` yielded no manifest store.
+///
+/// The box is a C2PA box — its extended type is [`C2PA_UUID`] — so the file *does* carry
+/// provenance framing; only the store inside it could not be read. That distinction is the reason
+/// this type exists: reporting such a box as "no manifest store found" would let a reader infer
+/// *no provenance* from a box gamut merely could not read, which is the mirror of the verdict
+/// [`C2PA_NOT_VALIDATED`] exists to prevent.
+///
+/// A `uuid` box whose extended type is **not** [`C2PA_UUID`] is not one of these. §A.5.1.1 makes
+/// the extended type the whole test, and an ordinary file carries vendor `uuid` boxes that are no
+/// evidence of provenance; a near-miss on the sixteen bytes is a foreign box, not a damaged C2PA
+/// one, and is reported as absence.
+///
+/// Non-exhaustive and with permanent discriminants: a later revision may distinguish a further
+/// reason without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum C2paUnreadReason {
+    /// The box ends before the framing §A.5.1.2 requires — the `FullBox` version and flags, or the
+    /// NUL that terminates `box_purpose`.
+    Truncated = 0,
+    /// The `FullBox` version or flags are not zero, which §A.5.1.2 fixes them at.
+    NotVersionZero = 1,
+    /// The `box_purpose` is not one §A.5.3 gives a manifest store: the auxiliary `merkle` box, or a
+    /// value this revision does not know.
+    NotAManifestStorePurpose = 2,
+    /// No valid JUMBF `LBox` bounds a store where this `box_purpose`'s framing puts one — the
+    /// length there is zero, below the 8-byte header it must cover, or overruns the box.
+    NoStoreBound = 3,
+}
+
+impl C2paUnreadReason {
+    /// A one-clause explanation, for the line [`C2paSummary::report_lines`] renders.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Truncated => "the box ends before the framing C2PA 2.4 §A.5.1.2 requires",
+            Self::NotVersionZero => {
+                "its FullBox version or flags are not zero, which C2PA 2.4 §A.5.1.2 fixes them at"
+            }
+            Self::NotAManifestStorePurpose => {
+                "its box_purpose is not one C2PA 2.4 §A.5.3 gives a manifest store"
+            }
+            Self::NoStoreBound => {
+                "no valid JUMBF store length sits where its box_purpose puts the store"
+            }
+        }
+    }
+}
+
+/// A top-level C2PA `ContentProvenanceBox` that yielded no manifest store: where the whole box
+/// sits, and why nothing was read from it.
+///
+/// Reported **without its bytes**, exactly as [`C2paStoreSummary`] is and for the same reason.
+///
+/// Non-exhaustive: a later revision may report more of the box without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paUnreadBox {
+    /// The half-open byte range of the whole `uuid` box — header, extended type and all, since
+    /// there is no store inside it to bound more tightly.
+    pub range: Range<usize>,
+    /// Why no manifest store was read from it.
+    pub reason: C2paUnreadReason,
+}
+
 /// One located manifest store, reported **without its bytes**: where it sits, how big it is, and
 /// what the `uuid` box that carried it said it was for.
 ///
@@ -395,9 +518,9 @@ impl C2paStoreSummary {
 /// each store its byte range, its size and its `box_purpose`.
 ///
 /// Built by [`HeifContainer::c2pa_summary`]. It is what a reporting tool prints: the summary
-/// carries the reportable facts and [`report_lines`](Self::report_lines) renders them, so a host
-/// that only formats output — a CLI outside a coverage gate, say — holds no logic of its own and
-/// cannot drop the non-validation disclaimer on the way to the terminal.
+/// carries the reportable facts and [`report_lines`](Self::report_lines) renders them, so every
+/// host renders the same words and none can drop the non-validation disclaimer while rewording
+/// them. The wording is then pinned once, here, rather than once per host.
 ///
 /// Non-exhaustive: a later revision may report more without a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -408,37 +531,39 @@ pub struct C2paSummary {
     /// purposes: which of them is *active* is a validator's judgement, so collapsing them to a
     /// count would hide the one fact that tells them apart.
     pub stores: Vec<C2paStoreSummary>,
+    /// Every top-level C2PA box that yielded no store, in file order, with the reason.
+    ///
+    /// A non-empty list beside empty [`stores`](Self::stores) is the case a report must not
+    /// collapse into "none found": the file carries C2PA framing this reader could not read
+    /// through, which is not the same fact as carrying none. See [`C2paUnreadReason`].
+    pub unread: Vec<C2paUnreadBox>,
 }
 
 impl C2paSummary {
     /// Whether the file carries a manifest store at all.
+    ///
+    /// A store, specifically — `false` here does **not** mean the file carries no provenance, only
+    /// that none was read. Check [`unread`](Self::unread) too.
     #[must_use]
     pub fn is_present(&self) -> bool {
         !self.stores.is_empty()
     }
 
-    /// The human-readable report: one headline, then one line per store.
+    /// The human-readable report: one headline, then one line per store, then one line per C2PA
+    /// box that yielded no store.
     ///
-    /// The headline states presence or absence and carries [`C2PA_NOT_VALIDATED`] inline. Each
-    /// store line names its `box_purpose`, its size and its half-open byte range, and repeats
-    /// "located, not validated" so a line read on its own still cannot be mistaken for a verdict.
-    /// Store lines are indented two spaces relative to the headline; a caller prefixes its own
-    /// indent to every line.
+    /// The headline states what was found and carries [`C2PA_NOT_VALIDATED`] inline. Each store
+    /// line names its `box_purpose`, its size and its half-open byte range, and repeats "located,
+    /// not validated" so a line read on its own still cannot be mistaken for a verdict; each
+    /// unread-box line names the box's range and [`C2paUnreadReason::describe`]. Detail lines are
+    /// indented two spaces relative to the headline; a caller prefixes its own indent to every
+    /// line.
     ///
-    /// No store's bytes can appear here — a [`C2paStoreSummary`] does not hold them.
+    /// No store's bytes can appear here — neither [`C2paStoreSummary`] nor [`C2paUnreadBox`] holds
+    /// them.
     #[must_use]
     pub fn report_lines(&self) -> Vec<String> {
-        if self.stores.is_empty() {
-            return vec![format!(
-                "C2PA: no manifest store found in the top-level boxes of the primary stream — \
-                 {C2PA_NOT_VALIDATED}"
-            )];
-        }
-        let count = self.stores.len();
-        let mut lines = vec![format!(
-            "C2PA: {count} manifest store{plural} located, NOT VALIDATED — {C2PA_NOT_VALIDATED}",
-            plural = if count == 1 { "" } else { "s" }
-        )];
+        let mut lines = vec![self.headline()];
         lines.extend(self.stores.iter().map(|store| {
             format!(
                 "  box_purpose \"{purpose}\": {size} bytes at [{start}, {end}) — located, not validated",
@@ -448,36 +573,79 @@ impl C2paSummary {
                 end = store.range.end,
             )
         }));
+        lines.extend(self.unread.iter().map(|unread| {
+            format!(
+                "  unread C2PA box at [{start}, {end}): {reason}",
+                start = unread.range.start,
+                end = unread.range.end,
+                reason = unread.reason.describe(),
+            )
+        }));
         lines
+    }
+
+    /// The report's first line: what the scan found, with [`C2PA_NOT_VALIDATED`] inline.
+    ///
+    /// Three outcomes, not two. A file carrying C2PA boxes none of which yielded a store is
+    /// neither "located" nor "none found": saying "none found" for it would let a reader infer
+    /// absence of provenance from bytes gamut merely could not read.
+    fn headline(&self) -> String {
+        let count = self.stores.len();
+        if count > 0 {
+            return format!(
+                "C2PA: {count} manifest store{plural} located, NOT VALIDATED — {C2PA_NOT_VALIDATED}",
+                plural = if count == 1 { "" } else { "s" }
+            );
+        }
+        let unread = self.unread.len();
+        if unread > 0 {
+            return format!(
+                "C2PA: no manifest store could be read, but {unread} C2PA {noun} present — that is \
+                 NOT absence of provenance — {C2PA_NOT_VALIDATED}",
+                noun = if unread == 1 { "box is" } else { "boxes are" }
+            );
+        }
+        format!(
+            "C2PA: no manifest store found in the top-level boxes of the primary stream — \
+             {C2PA_NOT_VALIDATED}"
+        )
     }
 }
 
 impl HeifContainer<'_> {
-    /// A non-validating summary of every C2PA manifest store in the file, in file order.
+    /// A non-validating summary of the file's C2PA boxes, in file order: every manifest store,
+    /// and every C2PA box that yielded none, with the reason.
     ///
-    /// The same scan as [`c2pa_manifest_stores`](Self::c2pa_manifest_stores) — with the same
-    /// reach, and the same silence on a malformed or foreign `uuid` box — reported without the
-    /// stores' bytes. See [`C2paSummary`] for what it is for, and [`C2PA_NOT_VALIDATED`] for what
-    /// has to be said beside it.
+    /// The same scan as [`c2pa_manifest_stores`](Self::c2pa_manifest_stores), with the same reach
+    /// and the same silence on a *foreign* `uuid` box, reported without the stores' bytes. It is
+    /// strictly the fuller view: a C2PA box that yields no store is dropped by that iterator and
+    /// listed in [`unread`](C2paSummary::unread) here. See [`C2paSummary`] for what it is for, and
+    /// [`C2PA_NOT_VALIDATED`] for what has to be said beside it.
     #[must_use]
     pub fn c2pa_summary(&self) -> C2paSummary {
-        C2paSummary {
-            stores: self
-                .c2pa_manifest_stores()
-                .map(|store| C2paStoreSummary {
+        let mut stores = Vec::new();
+        let mut unread = Vec::new();
+        for (range, outcome) in self.content_provenance_boxes() {
+            match outcome {
+                Ok(store) => stores.push(C2paStoreSummary {
                     range: store.range,
                     purpose: store.purpose,
-                })
-                .collect(),
+                }),
+                Err(reason) => unread.push(C2paUnreadBox { range, reason }),
+            }
         }
+        C2paSummary { stores, unread }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{C2PA_NOT_VALIDATED, C2paBoxPurpose, C2paStoreSummary, C2paSummary};
+    use super::{
+        C2PA_NOT_VALIDATED, C2paBoxPurpose, C2paStoreSummary, C2paSummary, C2paUnreadBox,
+        C2paUnreadReason,
+    };
 
-    /// A summary of the stores at the given `(start, end, purpose)` triples.
+    /// A summary of the stores at the given `(start, end, purpose)` triples, and nothing unread.
     fn summary(stores: &[(usize, usize, C2paBoxPurpose)]) -> C2paSummary {
         C2paSummary {
             stores: stores
@@ -485,6 +653,21 @@ mod tests {
                 .map(|&(start, end, purpose)| C2paStoreSummary {
                     range: start..end,
                     purpose,
+                })
+                .collect(),
+            unread: Vec::new(),
+        }
+    }
+
+    /// A summary of no stores and the unread C2PA boxes at the given `(start, end, reason)` triples.
+    fn unread_summary(boxes: &[(usize, usize, C2paUnreadReason)]) -> C2paSummary {
+        C2paSummary {
+            stores: Vec::new(),
+            unread: boxes
+                .iter()
+                .map(|&(start, end, reason)| C2paUnreadBox {
+                    range: start..end,
+                    reason,
                 })
                 .collect(),
         }
@@ -554,6 +737,108 @@ mod tests {
                     .to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn a_c2pa_box_that_yielded_no_store_is_reported_instead_of_absence() {
+        // The mirror of the verdict `C2PA_NOT_VALIDATED` prevents: this file plainly carries C2PA
+        // framing, so the wording a file with *no* C2PA box gets would let a reader infer absence
+        // of provenance from bytes gamut could not read.
+        let one = unread_summary(&[(16, 106, C2paUnreadReason::NotVersionZero)]);
+        assert!(!one.is_present());
+        assert_eq!(
+            one.report_lines(),
+            vec![
+                format!(
+                    "C2PA: no manifest store could be read, but 1 C2PA box is present — that is \
+                     NOT absence of provenance — {C2PA_NOT_VALIDATED}"
+                ),
+                format!(
+                    "  unread C2PA box at [16, 106): {}",
+                    C2paUnreadReason::NotVersionZero.describe()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn several_c2pa_boxes_that_yielded_no_store_are_counted_in_the_plural() {
+        // Two boxes differing in range *and* reason: a headline built from the wrong count, or a
+        // line built from the wrong element, is visible here.
+        let two = unread_summary(&[
+            (16, 40, C2paUnreadReason::Truncated),
+            (40, 120, C2paUnreadReason::NoStoreBound),
+        ]);
+        assert_eq!(
+            two.report_lines(),
+            vec![
+                format!(
+                    "C2PA: no manifest store could be read, but 2 C2PA boxes are present — that is \
+                     NOT absence of provenance — {C2PA_NOT_VALIDATED}"
+                ),
+                format!(
+                    "  unread C2PA box at [16, 40): {}",
+                    C2paUnreadReason::Truncated.describe()
+                ),
+                format!(
+                    "  unread C2PA box at [40, 120): {}",
+                    C2paUnreadReason::NoStoreBound.describe()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_located_store_headlines_the_report_even_beside_an_unread_box() {
+        // Precedence: one store read is what the headline states, and the box that yielded nothing
+        // is still listed under it rather than replacing the headline or being dropped.
+        let mixed = C2paSummary {
+            stores: vec![C2paStoreSummary {
+                range: 61..90,
+                purpose: C2paBoxPurpose::Manifest,
+            }],
+            unread: vec![C2paUnreadBox {
+                range: 90..150,
+                reason: C2paUnreadReason::NotAManifestStorePurpose,
+            }],
+        };
+        assert_eq!(
+            mixed.report_lines(),
+            vec![
+                format!("C2PA: 1 manifest store located, NOT VALIDATED — {C2PA_NOT_VALIDATED}"),
+                "  box_purpose \"manifest\": 29 bytes at [61, 90) — located, not validated"
+                    .to_owned(),
+                format!(
+                    "  unread C2PA box at [90, 150): {}",
+                    C2paUnreadReason::NotAManifestStorePurpose.describe()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_unread_reason_describes_itself_distinctly() {
+        // A reason a reader cannot tell from another reason is not a reason: the whole point of
+        // reporting the box is naming what stopped it being read.
+        let reasons = [
+            C2paUnreadReason::Truncated,
+            C2paUnreadReason::NotVersionZero,
+            C2paUnreadReason::NotAManifestStorePurpose,
+            C2paUnreadReason::NoStoreBound,
+        ];
+        for (i, reason) in reasons.iter().enumerate() {
+            assert!(
+                !reason.describe().is_empty(),
+                "{reason:?} must describe itself"
+            );
+            for other in &reasons[i + 1..] {
+                assert_ne!(
+                    reason.describe(),
+                    other.describe(),
+                    "{reason:?} and {other:?} must read differently"
+                );
+            }
+        }
     }
 
     #[test]

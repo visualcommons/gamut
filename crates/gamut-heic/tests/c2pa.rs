@@ -2,6 +2,10 @@
 //! of framing excluded), every rejection branch must yield `None` rather than an error, and a `uuid`
 //! box that is not a top-level C2PA `ContentProvenanceBox` must never be reported as one.
 //!
+//! A box that *is* a `ContentProvenanceBox` and still yields no store is a separate outcome from a
+//! file carrying none, and `c2pa_summary` must keep them apart; the `unread` cases below pin which
+//! reason each malformed shape earns.
+//!
 //! Fixtures are hand-built so the byte offsets are known by construction and can be asserted as
 //! literals; C2PA clause references are to the 2.4 specification.
 
@@ -11,7 +15,7 @@ use common::{
     C2PA_UUID, bx, c2pa_box, cat, clean_file, ftyp, hdlr, hvc1_item, iinf_v0, infe_v2, jumbf_store,
     meta, pitm_v0, uuid_box,
 };
-use gamut_heic::{C2paBoxPurpose, HeifContainer, UnknownBoxLocation};
+use gamut_heic::{C2paBoxPurpose, C2paUnreadReason, HeifContainer, UnknownBoxLocation};
 
 /// The `meta` box every fixture below closes with: the minimum that `HeifContainer::parse` accepts
 /// (a `pict` handler, a primary item, and that item's `infe`).
@@ -501,4 +505,104 @@ fn lbox_exactly_filling_the_remaining_data_is_reported() {
     let found = c.c2pa().expect("manifest store located");
     assert_eq!(found.bytes, store.as_slice());
     assert_eq!(found.range, 61..61 + store.len());
+}
+
+#[test]
+fn a_c2pa_box_with_a_non_zero_full_box_version_is_reported_as_unread() {
+    // §A.5.1.2 fixes version and flags at zero, so the box carries no store gamut can read — but it
+    // is unmistakably a C2PA box, and reporting nothing would read as "this file has no provenance".
+    let data = file_with(&[uuid_box(
+        &C2PA_UUID,
+        1,
+        0,
+        "manifest",
+        &cat(&[&0u64.to_be_bytes()[..], &store()]),
+    )]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert!(summary.stores.is_empty());
+    assert_eq!(summary.unread.len(), 1);
+    assert_eq!(summary.unread[0].reason, C2paUnreadReason::NotVersionZero);
+}
+
+#[test]
+fn a_merkle_box_is_reported_as_unread_rather_than_as_nothing_at_all() {
+    // §A.5.3 gives `merkle` no manifest store, so there is genuinely none to locate; the box itself
+    // is still C2PA framing the file carries.
+    let data = file_with(&[uuid_box(&C2PA_UUID, 0, 0, "merkle", &store())]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert!(summary.stores.is_empty());
+    assert_eq!(summary.unread.len(), 1);
+    assert_eq!(
+        summary.unread[0].reason,
+        C2paUnreadReason::NotAManifestStorePurpose
+    );
+}
+
+#[test]
+fn a_c2pa_box_holding_only_the_user_type_is_reported_as_truncated() {
+    // Exactly 16 bytes of body: the extended type matches, so it is a C2PA box, and there is no
+    // `FullBox` header after it.
+    let data = file_with(&[bx(b"uuid", &C2PA_UUID)]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert!(summary.stores.is_empty());
+    assert_eq!(summary.unread.len(), 1);
+    assert_eq!(summary.unread[0].reason, C2paUnreadReason::Truncated);
+}
+
+#[test]
+fn a_c2pa_box_whose_lbox_overruns_it_is_reported_as_unbounded() {
+    // A hostile length where the store's own `LBox` must be: the framing is spec-clean up to the
+    // store, and only the bound is unusable.
+    let mut store = jumbf_store(b"payload");
+    store[..4].copy_from_slice(&u32::MAX.to_be_bytes());
+    let data = file_with(&[c2pa_box("manifest", Some(0), &store, &[])]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert!(summary.stores.is_empty());
+    assert_eq!(summary.unread.len(), 1);
+    assert_eq!(summary.unread[0].reason, C2paUnreadReason::NoStoreBound);
+}
+
+#[test]
+fn an_unread_boxs_range_covers_the_whole_uuid_box() {
+    // The store's own range is unavailable — there is no store — so the whole box is what is
+    // reported, header and extended type included, starting right after the 16-byte `ftyp`.
+    let inner = uuid_box(&C2PA_UUID, 0, 0, "merkle", &store());
+    let data = file_with(std::slice::from_ref(&inner));
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert_eq!(
+        summary.unread[0].range,
+        AFTER_FTYP..AFTER_FTYP + inner.len()
+    );
+    assert_eq!(&data[summary.unread[0].range.clone()], inner.as_slice());
+}
+
+#[test]
+fn a_foreign_uuid_box_is_not_reported_as_an_unread_c2pa_box() {
+    // §A.5.1.1 makes the extended type the whole test. An ordinary file carries vendor `uuid`
+    // boxes; reporting one byte off the C2PA type as damaged C2PA framing would claim provenance
+    // where there is none, which is the same defect as claiming absence where there is some.
+    let mut foreign = C2PA_UUID;
+    foreign[0] ^= 0xFF;
+    let data = file_with(&[uuid_box(
+        &foreign,
+        0,
+        0,
+        "manifest",
+        &cat(&[&0u64.to_be_bytes()[..], &store()]),
+    )]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert!(summary.stores.is_empty());
+    assert!(summary.unread.is_empty());
 }
