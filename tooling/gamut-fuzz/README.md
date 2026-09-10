@@ -118,6 +118,11 @@ committed, and force-adding the seeds keeps exactly that split: the seeds are tr
 libFuzzer writes beside them stays ignored. `cargo fuzz` uses the directory as its corpus with no
 extra wiring, so `mise run fuzz <target>` picks them up.
 
+Running a target writes its new findings into the same directory — a few minutes of `heic_hvcc`
+adds a couple of hundred files — and those stay untracked, which is the point. **Never
+`git add -f` the whole directory a second time**: add the one seed you mean by path, or the
+engine's search state goes in with it.
+
 They are seeds, **not** the regression record. `corpus/ifd_read/` carries the malformed-TIFF cases
 enumerated on issue #264 (contributed from rawshift's deleted in-repo TIFF parser); the other
 directories carry one small well-formed file each, written by this workspace's own encoders, so a
