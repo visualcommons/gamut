@@ -81,11 +81,21 @@ fn derivative_through(embedder: MetadataEmbedder, parent: &[u8]) -> Vec<u8> {
     // agree however wrong `store_of` is. `meta.c2pa.is_some()` says even less, because
     // `MetadataExtractor` carries a C2PA block through whatever its length, so an empty or
     // truncated store satisfies it and the policy is then asked to drop nothing.
+    //
+    // Containment, not equality, for the same reason `locate_embedded.rs` states it that way:
+    // `store_of` bounds by the enclosing box, so it would carry any padding a writer left after
+    // the store, while `jumbf_superbox_span` bounds by the store's own `LBox`. That c2pa-rs pads
+    // nothing today is pinned by name, once, in
+    // `locate_embedded.rs::c2pa_rs_leaves_no_padding_between_the_store_and_the_end_of_its_box`,
+    // so a future padding release fails *that* test instead of being misread here as the model
+    // carrying the wrong bytes.
     let expected = jumbf_superbox_span(parent).expect("the signed parent carries a JUMBF store");
     assert_eq!(
-        meta.c2pa.as_deref(),
+        meta.c2pa
+            .as_deref()
+            .and_then(|carried| carried.get(..expected.len())),
         Some(&parent[expected]),
-        "the model handed to the embedder must carry the parent's store byte for byte, or the \
+        "the model handed to the embedder must open with the parent's store byte for byte, or the \
          derivative carries no store for a reason that is not the policy"
     );
     let blocks = embedder.embed(&meta).expect("embedding the parent's model");
