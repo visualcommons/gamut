@@ -101,7 +101,8 @@ fn tiff_repeating_strip_offsets(first: usize) -> Vec<u8> {
     // 11 entries; the directory occupies 2 + 11*12 + 4 = 138 bytes from offset 8.
     const ENTRIES: u16 = 11;
     let bits_per_sample = 8 + 2 + u32::from(ENTRIES) * 12 + 4;
-    let strips = [bits_per_sample + 6, bits_per_sample + 6 + 12];
+    let strip_len = REPEATED_TAG_STRIPS[0].len() as u32;
+    let strips = [bits_per_sample + 6, bits_per_sample + 6 + strip_len];
 
     let mut out = Vec::new();
     out.extend_from_slice(b"II");
@@ -123,7 +124,7 @@ fn tiff_repeating_strip_offsets(first: usize) -> Vec<u8> {
     entry(273, 4, 1, strips[1 - first]); // StripOffsets = the other strip -- the repeat
     entry(277, 3, 1, 3); // SamplesPerPixel
     entry(278, 3, 1, 2); // RowsPerStrip
-    entry(279, 4, 1, REPEATED_TAG_STRIPS[0].len() as u32); // StripByteCounts
+    entry(279, 4, 1, strip_len); // StripByteCounts
     entry(284, 3, 1, 1); // PlanarConfiguration = chunky
     out.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
     assert_eq!(
