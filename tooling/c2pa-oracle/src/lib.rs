@@ -174,6 +174,13 @@ pub struct ComposedBox {
 impl ComposedBox {
     /// The raw JUMBF manifest store: what a host embeds in its own framing, and what gamut's
     /// locators report.
+    ///
+    /// # Panics
+    ///
+    /// If [`store_offset`](Self::store_offset) is past the end of [`composed`](Self::composed).
+    /// [`split_composed_box`] cannot produce such a value — it derives the offset by finding a
+    /// superbox type *inside* the buffer — so this is reachable only by building the struct
+    /// literally, which both fields being `pub` permits.
     #[must_use]
     pub fn store(&self) -> &[u8] {
         &self.composed[self.store_offset..]
