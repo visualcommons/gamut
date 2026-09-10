@@ -84,9 +84,19 @@ pub struct TiffMetadata {
     /// silently repaired, which is worth knowing before using a re-encode to prove a file
     /// unmodified.
     ///
-    /// The **standard** pointer tag that occurs inside this directory — `InteroperabilityIFD`
-    /// (40965) — comes back as a parsed [`sub_ifds`](gamut_ifd::Ifd::sub_ifds) group rather than a
-    /// raw offset, so the writer gives it a fresh offset when the directory is embedded again.
+    /// **Every standard pointer tag inside this directory is resolved.** All four members of
+    /// [`gamut_ifd::tags::STANDARD_POINTER_TAGS`] — `SubIFDs` (330), `ExifIFD` (34665), `GPSInfo`
+    /// (34853) and `InteroperabilityIFD` (40965) — come back as parsed
+    /// [`sub_ifds`](gamut_ifd::Ifd::sub_ifds) groups rather than as raw offsets, so the writer
+    /// gives each a fresh offset when the directory is embedded again. `InteroperabilityIFD` is
+    /// the one EXIF 2.3 §4.6.3 puts here and the one a camera writes; the other three are
+    /// resolved because a directory this crate *hands back* must not contain an offset into the
+    /// file it was read from, whichever tag carries it.
+    ///
+    /// This is the Exif subtree's rule and not IFD 0's: at IFD 0 only `ExifIFD` is followed, so a
+    /// `SubIFDs` or `GPSInfo` pointer sitting on the page — whose target feeds no field here —
+    /// cannot fail the call. Inside this directory the same pointer is followed, and an
+    /// unreadable target is an error, because this directory is the one that comes back.
     ///
     /// **Only the standard pointer tags are recognised as pointers.** A *private* tag whose value
     /// happens to be a `LONG` file offset — some vendors point at their own sub-directories this
@@ -181,38 +191,33 @@ impl TiffMetadata {
         self.exif.as_ref().filter(|ifd| !ifd.fields().is_empty())
     }
 
-    /// Refuses a set this crate would write into a file its own [`read_metadata`] then rejects.
+    /// Refuses a set this crate would write into a file its own [`read_metadata`] then rejects,
+    /// or reads back as something other than what was written.
     ///
-    /// One thing can break that: the Exif sub-IFD is a caller's directory and may carry sub-IFD
-    /// groups of its own, and nothing about a directory in memory stops it nesting a hundred
-    /// levels down. The reader follows [`MAX_POINTER_DEPTH`] levels below IFD 0 and refuses what
-    /// is deeper, so the writer refuses the same tree rather than emitting a well-formed file
-    /// whose metadata this crate cannot read back. The Exif directory occupies the first of those
-    /// levels, so its own nesting may use the rest — one further directory,
-    /// `InteroperabilityIFD` (EXIF 2.3 §4.6.3), which is exactly the tree a decoded camera EXIF
-    /// comes back as.
+    /// The Exif sub-IFD is a caller's directory and may carry sub-IFD groups of its own, and
+    /// nothing about a directory in memory stops it nesting a hundred levels down or hanging a
+    /// group off a tag no reader treats as a pointer. Two bounds therefore apply, and
+    /// [`check_exif_subtree`] reports them as **two distinct refusals** because they are two
+    /// distinct mistakes:
     ///
-    /// It is a *conservative* restatement in one respect: the reader only refuses a tree too deep
-    /// under a tag it follows, while this counts every sub-IFD group. A group under a tag the
-    /// reader does not follow is a directory this crate could not return either — it comes back
-    /// as the raw offset it was written to — so refusing it too keeps the writer inside what the
-    /// reader delivers rather than outside it.
+    /// 1. **the tag.** A group's tag must be one the reader resolves inside the Exif subtree
+    ///    ([`EXIF_SUBTREE_POINTER_TAGS`]). Under any other tag the writer emits a pointer the
+    ///    reader hands back as a raw offset into the file it came from, so the directory does not
+    ///    survive a round trip.
+    /// 2. **the depth.** The reader follows [`MAX_POINTER_DEPTH`] levels below IFD 0 and refuses
+    ///    what is deeper. The Exif directory occupies the first of those levels, so its own
+    ///    nesting may use the rest — one further directory, which for a decoded camera EXIF is
+    ///    `InteroperabilityIFD` (EXIF 2.3 §4.6.3).
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the Exif sub-IFD nests
-    /// deeper than the reader walks back.
+    /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the Exif sub-IFD hangs
+    /// a group off a tag the reader does not resolve, or nests deeper than the reader walks back.
     pub(crate) fn check(&self) -> Result<()> {
-        if let Some(exif) = self.exif_ifd()
-            && !within_depth(exif, MAX_POINTER_DEPTH - 1)
-        {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: an Exif sub-IFD may nest one further directory \
-                 (ExifIFD -> InteroperabilityIFD, EXIF 2.3 §4.6.3) and this one nests deeper",
-            ));
+        match self.exif_ifd() {
+            Some(exif) => check_exif_subtree(exif, MAX_POINTER_DEPTH - 1),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Writes the XMP / IPTC / ICC blocks and the Exif sub-IFD into `ifd0`.
@@ -236,64 +241,124 @@ impl TiffMetadata {
     }
 }
 
-/// The pointer tags [`read_metadata`] follows in IFD 0's subtree, scoped to what
-/// [`TiffMetadata`] actually returns.
+/// The pointer tags [`read_metadata`] resolves **at IFD 0**, scoped to what [`TiffMetadata`]
+/// actually returns.
 ///
-/// Two tags, and the pair is a deliberate lower bound rather than a subset of convenience.
+/// One tag, and it is a deliberate lower bound rather than a subset of convenience. `ExifIFD` is
+/// followed because that directory **is** a field of [`TiffMetadata`]: it is handed to the caller
+/// and may be written back, so a pointer under it that stayed a raw offset would be re-encoded
+/// into a file laid out differently.
 ///
-/// `ExifIFD` is followed because that directory **is** a field of [`TiffMetadata`]: it is handed to
-/// the caller and may be written back, so a pointer under it that stayed a raw offset would be
-/// re-encoded into a file laid out differently. `InteroperabilityIFD` is the one standard pointer
-/// that occurs *inside* an Exif directory (EXIF 2.3 §4.6.3), and it is near-universal in camera
-/// EXIF — leaving it unresolved is exactly the dangling-pointer defect this list exists to prevent.
-///
-/// The other two members of [`gamut_ifd::tags::STANDARD_POINTER_TAGS`] are deliberately **not**
-/// here. `SubIFDs` (330) locates thumbnails and reduced-resolution subfiles and `GPSInfo` (34853)
-/// locates a GPS directory; neither feeds any field of [`TiffMetadata`], and neither is re-encoded
-/// by [`TiffMetadata::apply`], which writes into a directory the encoder builds fresh. Following
-/// them could therefore only *add* failure modes, and it did: a single dangling `SubIFDs` offset
+/// The other three members of [`gamut_ifd::tags::STANDARD_POINTER_TAGS`] are deliberately **not**
+/// here. `SubIFDs` (330) locates thumbnails and reduced-resolution subfiles, `GPSInfo` (34853)
+/// locates a GPS directory, and `InteroperabilityIFD` (40965) does not belong at IFD 0 at all;
+/// none feeds any field of [`TiffMetadata`] from this level, and none is re-encoded by
+/// [`TiffMetadata::apply`], which writes into a directory the encoder builds fresh. Following them
+/// here could therefore only *add* failure modes, and it did: a single dangling `SubIFDs` offset
 /// made XMP, IPTC, ICC and C2PA all unreachable on a file whose pixels decode perfectly, and two
 /// pages sharing one thumbnail directory tripped the reader's cross-chain loop guard. A pointer
 /// whose target this reader throws away must not be able to fail the whole call.
 ///
-/// The same rule scopes *where* the list is resolved, not only what is in it: it is applied to
+/// The same rule scopes *where* the walk runs, not only what it follows: it is applied to
 /// **IFD 0's subtree and nowhere else** ([`resolve_pointers`]). Every page after IFD 0 feeds one
 /// field of [`TiffMetadata`] — the C2PA manifest store, whose entry holds the store's bytes
 /// directly rather than a pointer — so a *pointer* on such a page is a thrown-away target too,
-/// and one on page 1 of a two-page document used to fail the whole call. `read_tree` cannot be
-/// scoped that way: it resolves the list it is given at every node of every page.
+/// and one on page 1 of a two-page document used to fail the whole call. [`gamut_ifd::read_tree`]
+/// cannot be scoped either way: it resolves the flat list it is given at every node of every page.
+const IFD0_POINTER_TAGS: &[u16] = &[tags::EXIF_IFD];
+
+/// The pointer tags [`read_metadata`] resolves **inside the Exif subtree** — every standard one.
 ///
-/// Within that subtree it is still **one flat list at every node**, exactly as
-/// [`gamut_ifd::read_tree`] applies one to a whole file, and that is where the one remaining
-/// over-reach comes from: `InteroperabilityIFD` is also followed if it appears at IFD 0, where it
-/// does not belong. It is harmless — a TIFF whose IFD 0 carries tag 40965 is already out of spec,
-/// and the resolved group feeds no field either way — and narrowing it further would take a
-/// per-node list, which is a `gamut-ifd` surface rather than a scoping decision this crate makes.
-const POINTER_TAGS: &[u16] = &[tags::EXIF_IFD, tags::INTEROPERABILITY_IFD];
+/// The scoping rule that keeps three tags out of [`IFD0_POINTER_TAGS`] puts all four in here, and
+/// it is the same rule, not an exception to it: a pointer is followed exactly when its target
+/// belongs to a directory [`TiffMetadata`] hands back. At IFD 0 a `SubIFDs` or `GPSInfo` target is
+/// thrown away, so following it can only add failure modes. Under `ExifIFD` the enclosing
+/// directory *is* returned, so a pointer left unresolved there is handed to the caller as a raw
+/// absolute offset into the source file, and re-encoding it writes that offset into a file laid
+/// out differently — the dangling pointer this crate's own [`deconstruct`](crate::deconstruct)
+/// grades `Severity::Error`. `InteroperabilityIFD` is the one EXIF 2.3 §4.6.3 puts here, but a
+/// `GPSInfo` or `SubIFDs` group under `ExifIFD` re-encodes just as badly, and the reader cannot
+/// tell a caller's hand-built directory from a camera's.
+///
+/// The cost is stated rather than hidden: an unreadable target under *any* of these four fails
+/// the whole [`read_metadata`] call, where at IFD 0 it would be ignored. That is the same trade
+/// `ExifIFD` itself already makes — reporting `exif: None` for a directory the file declares
+/// would be silent loss — extended to the pointers that directory contains.
+///
+/// What is still **not** resolved is a *private* tag whose value happens to be an offset; see
+/// [`TiffMetadata::exif`] for why that is undecidable here and what it costs a caller.
+const EXIF_SUBTREE_POINTER_TAGS: &[u16] = gamut_ifd::tags::STANDARD_POINTER_TAGS;
+
+/// The pointer tags [`resolve_pointers`] follows at `depth`: [`IFD0_POINTER_TAGS`] at the page
+/// itself, [`EXIF_SUBTREE_POINTER_TAGS`] at every level below it.
+///
+/// A per-node list rather than [`gamut_ifd::read_tree`]'s one flat list, because the two levels
+/// answer opposite questions: at IFD 0 a followed pointer can only add a failure mode, and below
+/// it an *un*followed pointer becomes a stale offset in a directory the caller is handed. Depth 0
+/// is the only level whose directory is a page, and the walk never leaves IFD 0's subtree, so
+/// "not depth 0" is exactly "inside the Exif subtree".
+fn pointer_tags(depth: usize) -> &'static [u16] {
+    if depth == 0 {
+        IFD0_POINTER_TAGS
+    } else {
+        EXIF_SUBTREE_POINTER_TAGS
+    }
+}
 
 /// An upper bound on the sub-IFD nesting [`resolve_pointers`] follows, bounding a hostile pointer
 /// graph: a directory a hundred levels down is still a directory, and a file of a few kilobytes
 /// holds enough of them to exhaust the stack.
 ///
-/// It is **two**, not [`gamut_ifd::read_tree`]'s sixteen, because this walk follows two tags and
-/// the deepest tree they can legitimately reach is IFD 0 → `ExifIFD` → `InteroperabilityIFD`
-/// (EXIF 2.3 §4.6.3). Nothing conformant puts an Exif or an Interop directory *inside* an Interop
-/// directory, so a third level is already out of spec — a generic reader needs sixteen because it
-/// is handed arbitrary tags, and this one is not.
+/// It is **two**, not [`gamut_ifd::read_tree`]'s sixteen, because the walk starts at a page and
+/// the deepest tree the tags it follows can legitimately reach is IFD 0 → `ExifIFD` → one
+/// directory the Exif spec puts inside it, `InteroperabilityIFD` (EXIF 2.3 §4.6.3). Nothing
+/// conformant nests a further directory below that, so a third level is already out of spec — a
+/// generic reader needs sixteen because it is handed arbitrary tags, and this one is not.
 const MAX_POINTER_DEPTH: usize = 2;
 
-/// Whether `ifd`'s own sub-IFD nesting stays within `depth` further levels — the writer's side of
-/// [`MAX_POINTER_DEPTH`], used by [`TiffMetadata::check`].
+/// The writer's side of what the reader delivers: refuses an Exif subtree whose groups this crate
+/// could not hand back unchanged, `depth` further levels being all that is left below `ifd`.
 ///
-/// Stops at the bound instead of measuring the whole tree, so a directory a caller nested a
-/// hundred levels deep costs a hundred levels of neither recursion nor time.
-fn within_depth(ifd: &Ifd, depth: usize) -> bool {
-    ifd.sub_ifds().iter().all(|group| {
-        group.ifds.iter().all(|child| match depth.checked_sub(1) {
-            Some(left) => within_depth(child, left),
-            None => false,
-        })
-    })
+/// Two refusals, deliberately distinct, because they are two different mistakes and a caller
+/// reading the message has to know which one it made:
+///
+/// * a group under a tag outside [`EXIF_SUBTREE_POINTER_TAGS`] — the reader leaves that pointer
+///   as a raw absolute offset, so what came back would not be what was written;
+/// * a *child directory* nested past `depth` — the reader refuses to walk that far
+///   ([`MAX_POINTER_DEPTH`]). A group with no children reaches no further level, so it is the
+///   children and not the group that the bound counts.
+///
+/// The tag is checked first: a group under an unfollowed tag is unreturnable whatever its depth,
+/// and naming a depth clause for it is the message a reader cannot act on. Both stop at the first
+/// offender and the depth bound stops at the bound rather than measuring the whole tree, so a
+/// directory a caller nested a hundred levels deep costs a hundred levels of neither recursion nor
+/// time.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) for either refusal.
+fn check_exif_subtree(ifd: &Ifd, depth: usize) -> Result<()> {
+    for group in ifd.sub_ifds() {
+        if !EXIF_SUBTREE_POINTER_TAGS.contains(&group.tag) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: an Exif sub-IFD may only nest a group under a standard pointer tag \
+                 (SubIFDs, ExifIFD, GPSInfo, InteroperabilityIFD) and this one uses another, \
+                 which would read back as a raw file offset",
+            ));
+        }
+        for child in &group.ifds {
+            let Some(left) = depth.checked_sub(1) else {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: an Exif sub-IFD may nest one further directory \
+                     (ExifIFD -> InteroperabilityIFD, EXIF 2.3 §4.6.3) and this one nests deeper",
+                ));
+            };
+            check_exif_subtree(child, left)?;
+        }
+    }
+    Ok(())
 }
 
 /// The file offsets a sub-IFD pointer value carries: a `LONG` array (TIFF 6.0 §2), the typed
@@ -317,16 +382,19 @@ fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
     }
 }
 
-/// Resolves `tags` over `ifd` and, recursively, over the children it reaches, replacing each
-/// pointer field with a [`sub_ifds`](Ifd::sub_ifds) group — what [`gamut_ifd::read_tree`] does
-/// for a whole file, applied to **one** directory's subtree.
+/// Resolves [`pointer_tags`]`(depth)` over `ifd` and, recursively, over the children it reaches,
+/// replacing each pointer field with a [`sub_ifds`](Ifd::sub_ifds) group — what
+/// [`gamut_ifd::read_tree`] does for a whole file, applied to **one** directory's subtree with a
+/// **per-level** tag list.
 ///
-/// The scoping is the whole reason this exists: `read_tree` resolves the flat list it is handed at
-/// every node of every page, so a pointer on a page [`read_metadata`] discards can fail a call
-/// whose answer that page never contributed to. Following a pointer by hand is
-/// [`gamut_ifd::read_ifd_at`]'s documented purpose. `visited` spans the walk and `depth` bounds
-/// it, so a cycle or two pointers claiming one directory fail here rather than loop — the guards
-/// are restated because they guard *this* walk.
+/// The scoping is the whole reason this exists, and it has two axes. `read_tree` resolves the flat
+/// list it is handed at every node of every page, so a pointer on a page [`read_metadata`] discards
+/// can fail a call whose answer that page never contributed to — hence one page. And it cannot
+/// vary the list by level, so a list wide enough to keep the Exif directory pointer-free would
+/// make an unrelated `SubIFDs` offset on the page itself able to fail the call — hence
+/// [`pointer_tags`]. Following a pointer by hand is [`gamut_ifd::read_ifd_at`]'s documented
+/// purpose. `visited` spans the walk and `depth` bounds it, so a cycle or two pointers claiming one
+/// directory fail here rather than loop — the guards are restated because they guard *this* walk.
 ///
 /// `visited` is a **set**, not a list, and that is a hardening decision rather than a style one:
 /// nothing bounds how many offsets one pointer array holds, so a linear membership scan makes the
@@ -346,7 +414,6 @@ fn resolve_pointers(
     order: ByteOrder,
     variant: Variant,
     ifd: &mut Ifd,
-    tags: &[u16],
     visited: &mut BTreeSet<u64>,
     depth: usize,
 ) -> Result<()> {
@@ -356,7 +423,7 @@ fn resolve_pointers(
             "TIFF: sub-IFD tree too deep",
         ));
     }
-    for &tag in tags {
+    for &tag in pointer_tags(depth) {
         let Some(offsets) = ifd.get(tag).and_then(pointer_offsets) else {
             continue;
         };
@@ -369,7 +436,7 @@ fn resolve_pointers(
                 ));
             }
             let mut child = read_ifd_at(data, offset, order, variant)?;
-            resolve_pointers(data, order, variant, &mut child, tags, visited, depth + 1)?;
+            resolve_pointers(data, order, variant, &mut child, visited, depth + 1)?;
             children.push(child);
         }
         ifd.remove(tag);
@@ -411,16 +478,8 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
     let Some(ifd0) = ifds.first_mut() else {
         return Ok(TiffMetadata::new());
     };
-    // One flat list, resolved over IFD 0's subtree and no other page's — see [`POINTER_TAGS`].
-    resolve_pointers(
-        data,
-        order,
-        variant,
-        ifd0,
-        POINTER_TAGS,
-        &mut BTreeSet::new(),
-        0,
-    )?;
+    // IFD 0's subtree and no other page's, with a per-level tag list — see [`pointer_tags`].
+    resolve_pointers(data, order, variant, ifd0, &mut BTreeSet::new(), 0)?;
     let exif = ifd0
         .sub_ifds()
         .iter()
@@ -603,6 +662,82 @@ mod tests {
             Some(Value::Long8(_))
         ));
         assert_eq!(read_metadata(&bytes).expect("read").exif, Some(exif_ifd()));
+    }
+
+    #[test]
+    fn the_writer_refuses_an_exif_group_under_a_tag_the_reader_does_not_resolve() {
+        // The reader resolves the four standard pointer tags inside the Exif subtree and nothing
+        // else, so a group hung off any other tag comes back as the raw offset the writer put
+        // there — the directory does not survive its own round trip. The *message* is the claim:
+        // this tree is one level deep, well inside the depth bound, so a refusal naming the
+        // nesting clause would be the wrong check answering. Depth is
+        // `the_writer_refuses_the_exif_nesting_the_reader_refuses` below.
+        let mut child = Ifd::new();
+        child.set(1, Value::Byte(vec![9]));
+        let mut vendor = exif_ifd();
+        vendor.set_sub_ifd(50000, vec![child]); // a private tag, not a standard pointer
+        let err = TiffMetadata::new()
+            .with_exif(vendor)
+            .check()
+            .expect_err("a group the reader hands back as an offset must not be written");
+        assert!(err.to_string().contains("standard pointer tag"), "{err}");
+    }
+
+    #[test]
+    fn a_standard_pointer_group_inside_the_exif_directory_is_resolved() {
+        // `POINTER_TAGS` once listed `ExifIFD` and `InteroperabilityIFD` only, so a `SubIFDs` or
+        // `GPSInfo` group *inside* the Exif directory came back as a raw absolute offset into the
+        // source file. Which tag the reader resolves at which level is this crate's decision, so
+        // it is asserted here on the directory model; that the re-encode of such a directory is a
+        // clean file is `every_standard_pointer_inside_the_exif_directory_survives_a_round_trip`
+        // (tests/metadata.rs).
+        for tag in gamut_ifd::tags::STANDARD_POINTER_TAGS {
+            let mut child = Ifd::new();
+            child.set(1, Value::Byte(vec![2, 3, 0, 0]));
+            let mut exif = exif_ifd();
+            exif.set_sub_ifd(*tag, vec![child.clone()]);
+            let mut ifd0 = Ifd::new();
+            ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
+
+            let back = read_metadata(&file_with(ifd0))
+                .expect("read")
+                .exif
+                .unwrap_or_else(|| panic!("tag {tag}: an Exif directory"));
+            assert_eq!(back.get(*tag), None, "tag {tag}: left as a raw offset");
+            assert_eq!(
+                back.sub_ifds()
+                    .iter()
+                    .find(|group| group.tag == *tag)
+                    .map(|group| group.ifds.as_slice()),
+                Some(&[child][..]),
+                "tag {tag}: must come back parsed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_standard_pointer_at_ifd_0_that_feeds_no_field_is_left_alone() {
+        // The other half of the per-level rule: at IFD 0 only `ExifIFD` is followed, so a
+        // `SubIFDs` or `GPSInfo` field on the page stays the plain integer field it was read as
+        // rather than becoming a group. What that buys — a dangling one of them not hiding the
+        // blocks — is `a_broken_pointer_the_metadata_does_not_use_does_not_hide_the_blocks`
+        // (tests/metadata.rs); this pins the resolution itself, on a pointer that is perfectly
+        // readable, so the two claims cannot be confused.
+        for tag in [tags::SUB_IFDS, tags::GPS_INFO] {
+            let mut ifd0 = Ifd::new();
+            ifd0.set_sub_ifd(tag, vec![exif_ifd()]);
+            ifd0.set(tags::XMP, Value::Byte(b"x".to_vec()));
+            let bytes = file_with(ifd0);
+            let offset = read(&bytes).expect("read").ifds[0]
+                .get_u32(tag)
+                .unwrap_or_else(|| panic!("tag {tag}: a written pointer"));
+            assert!(offset > 0, "tag {tag}: the pointer must name a directory");
+            assert_eq!(
+                read_metadata(&bytes).expect("metadata").exif,
+                None,
+                "tag {tag}: a page pointer must not become the Exif directory"
+            );
+        }
     }
 
     #[test]
