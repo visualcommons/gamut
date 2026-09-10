@@ -31,6 +31,7 @@ use crate::ancillary::{
 use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
+use crate::decoded::{Chromaticities, Cicp, DecodedPng, IccProfile, PngMetadata, TextChunk};
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::PngPalette;
 use crate::reduce::{self, Reduced, Reductions};
@@ -72,6 +73,23 @@ pub struct PngEncodeReport {
     /// [`with_c2pa`]: PngEncoder::with_c2pa
     /// [`with_c2pa_reserved`]: PngEncoder::with_c2pa_reserved
     pub c2pa: Option<C2paSpan>,
+}
+
+/// The metadata fields [`PngMetadata`] and [`DecodedPng`] both carry, borrowed.
+///
+/// The two read surfaces agree field for field on purpose (one reads the pixels, one does not),
+/// so [`PngEncoder::with_metadata`] and [`PngEncoder::with_metadata_from`] are the same function
+/// over two shapes. Borrowing rather than cloning into a `PngMetadata` keeps a large ICC profile
+/// or EXIF block from being copied twice on the way into the encoder.
+struct MetadataView<'a> {
+    exif: Option<&'a [u8]>,
+    icc_profile: Option<&'a IccProfile>,
+    xmp: Option<&'a [u8]>,
+    texts: &'a [TextChunk],
+    gamma: Option<u32>,
+    chromaticities: Option<Chromaticities>,
+    srgb: Option<SrgbIntent>,
+    cicp: Option<Cicp>,
 }
 
 /// A reusable PNG encoder.
@@ -208,9 +226,36 @@ impl PngEncoder {
     }
 
     /// Records the standard colour-space rendering intent (sRGB chunk).
+    ///
+    /// Mutually exclusive with [`with_icc_profile`](Self::with_icc_profile): PNG §5.6 Table 5 and
+    /// §11.3.2.5 both say the two chunks should not appear together, so setting both makes the
+    /// encode fail with [`Error::InvalidInput`] rather than write a file the standard tells
+    /// encoders not to produce. [`with_metadata`](Self::with_metadata) resolves the pair for you.
     #[must_use]
     pub fn with_srgb(mut self, intent: SrgbIntent) -> Self {
         self.ancillary.set_srgb(intent);
+        self
+    }
+
+    /// Records the video-signal colour space by its ITU-T H.273 code points (cICP chunk,
+    /// §11.3.2.6): the colour primaries, the transfer function, and whether the samples use the
+    /// full value range.
+    ///
+    /// There is no matrix-coefficients parameter because §11.3.2.6 fixes it: "RGB is currently
+    /// the only supported color model in PNG, and as such Matrix Coefficients shall be set to 0."
+    ///
+    /// cICP is the **highest-precedence** colour chunk (§4.3 Table 1, priority 1), so a reader
+    /// that understands it ignores any `iCCP`, `sRGB`, `gAMA` and `cHRM` in the same file. Those
+    /// stay legal alongside it — unlike the `sRGB`/`iCCP` pair — and are worth keeping as a
+    /// fallback for readers that do not.
+    #[must_use]
+    pub fn with_cicp(
+        mut self,
+        color_primaries: u8,
+        transfer_function: u8,
+        full_range: bool,
+    ) -> Self {
+        self.ancillary.cicp = Some((color_primaries, transfer_function, full_range));
         self
     }
 
@@ -351,8 +396,12 @@ impl PngEncoder {
     }
 
     /// Embeds an ICC colour profile (iCCP chunk), zlib-compressed. `profile` is the raw ICC profile
-    /// — for example the bytes produced by `gamut-icc`. (Mutually exclusive with [`Self::with_srgb`]
-    /// per the spec; set only one.)
+    /// — for example the bytes produced by `gamut-icc`.
+    ///
+    /// Mutually exclusive with [`with_srgb`](Self::with_srgb): PNG §5.6 Table 5 and §11.3.2.5 both
+    /// say the two chunks should not appear together, so setting both makes the encode fail with
+    /// [`Error::InvalidInput`] rather than write a file the standard tells encoders not to
+    /// produce. [`with_metadata`](Self::with_metadata) resolves the pair for you.
     #[must_use]
     pub fn with_icc_profile(mut self, name: &str, profile: &[u8]) -> Self {
         self.ancillary.iccp = Some((name.to_string(), profile.to_vec()));
@@ -365,6 +414,131 @@ impl PngEncoder {
     pub fn with_xmp(mut self, xmp: &str) -> Self {
         self.ancillary
             .add_text_international("XML:com.adobe.xmp", xmp);
+        self
+    }
+
+    /// Carries every metadata chunk a [`PngMetadata`] holds into this encoder, so that
+    /// re-encoding a file keeps its EXIF, ICC profile, XMP packet, text annotations and colour
+    /// chunks instead of dropping them.
+    ///
+    /// This is the write-side counterpart of [`metadata`](crate::metadata): read a file's
+    /// metadata without touching its pixels, then hand it to the encoder that rewrites them.
+    /// [`with_metadata_from`](Self::with_metadata_from) is the same thing for a full
+    /// [`DecodedPng`].
+    ///
+    /// # What it carries, and what it deliberately does not
+    ///
+    /// Everything the read side surfaces is set, with three spec-driven adjustments:
+    ///
+    /// - **`iCCP` and `sRGB` are resolved, not both written.** §4.3 Table 1 ranks the colour
+    ///   chunks and a reader takes the lowest priority number, so the ICC profile (priority 2)
+    ///   wins over the rendering intent (priority 3) and the `sRGB` chunk is dropped — which is
+    ///   exactly the chunk a conforming reader would have ignored. Writing both is refused (§5.6
+    ///   Table 5, §11.3.2.5); this method is how a file carrying both is re-encoded at all.
+    /// - **A `cICP` whose matrix coefficients are not 0 is dropped.** §11.3.2.6 requires 0 for
+    ///   PNG, so such a chunk is not conforming and copying it forward would reproduce the defect.
+    /// - **The C2PA manifest store is never carried.** A store is signed over the exact bytes of
+    ///   the file it was made for, so copying it into a re-encode invalidates it by construction
+    ///   — which is why `caBX` is *unsafe to copy* (C2PA 2.4 §A.3.2). Re-sign the output and set
+    ///   it with [`with_c2pa`](Self::with_c2pa).
+    ///
+    /// Two further limits are the read side's, not this method's: `pHYs`, `tIME`, `sBIT` and
+    /// `bKGD` are not part of [`PngMetadata`], so they cannot be carried here (set them with
+    /// their own builder methods); and a `zTXt` is indistinguishable from a `tEXt` once decoded,
+    /// so a compressed annotation is rewritten uncompressed. Neither loses any text.
+    #[must_use]
+    pub fn with_metadata(self, metadata: &PngMetadata) -> Self {
+        self.with_metadata_view(MetadataView {
+            exif: metadata.exif.as_deref(),
+            icc_profile: metadata.icc_profile.as_ref(),
+            xmp: metadata.xmp.as_deref(),
+            texts: &metadata.texts,
+            gamma: metadata.gamma,
+            chromaticities: metadata.chromaticities,
+            srgb: metadata.srgb,
+            cicp: metadata.cicp,
+        })
+    }
+
+    /// Carries the metadata of a decoded file into this encoder: the [`DecodedPng`] twin of
+    /// [`with_metadata`](Self::with_metadata), which documents exactly what is and is not carried.
+    ///
+    /// Use this when you already decoded the pixels; use `with_metadata` when
+    /// [`metadata`](crate::metadata) read the file without them.
+    #[must_use]
+    pub fn with_metadata_from(self, decoded: &DecodedPng) -> Self {
+        self.with_metadata_view(MetadataView {
+            exif: decoded.exif.as_deref(),
+            icc_profile: decoded.icc_profile.as_ref(),
+            xmp: decoded.xmp.as_deref(),
+            texts: &decoded.texts,
+            gamma: decoded.gamma,
+            chromaticities: decoded.chromaticities,
+            srgb: decoded.srgb,
+            cicp: decoded.cicp,
+        })
+    }
+
+    /// The one implementation behind [`with_metadata`](Self::with_metadata) and
+    /// [`with_metadata_from`](Self::with_metadata_from).
+    fn with_metadata_view(mut self, meta: MetadataView<'_>) -> Self {
+        if let Some(exif) = meta.exif {
+            self = self.with_exif(exif);
+        }
+        // §4.3 Table 1: the reader honours the lowest priority number, iCCP (2) over sRGB (3).
+        // Writing both is what `Ancillary::validate` refuses, so pick the one that would have
+        // been honoured rather than hand the caller an error it cannot act on.
+        match (meta.icc_profile, meta.srgb) {
+            (Some(icc), _) => self = self.with_icc_profile(&icc.name, &icc.profile),
+            (None, Some(intent)) => self = self.with_srgb(intent),
+            (None, None) => {}
+        }
+        // §11.3.2.6: "Matrix Coefficients shall be set to 0". A source chunk that says otherwise
+        // is not a conforming cICP; carrying it forward would put the same defect in the output.
+        if let Some(cicp) = meta.cicp.filter(|cicp| cicp.matrix_coefficients == 0) {
+            self = self.with_cicp(
+                cicp.color_primaries,
+                cicp.transfer_function,
+                cicp.full_range,
+            );
+        }
+        // Set in the stored ×100 000 fixed-point units rather than through `with_gamma` /
+        // `with_chromaticities`, whose `f64` arguments would round-trip the value through a
+        // division and a `round()`: preservation must be byte-exact.
+        if let Some(gamma) = meta.gamma {
+            self.ancillary.gamma = Some(gamma);
+        }
+        if let Some(chrm) = meta.chromaticities {
+            self.ancillary.chrm = Some([
+                chrm.white.0,
+                chrm.white.1,
+                chrm.red.0,
+                chrm.red.1,
+                chrm.green.0,
+                chrm.green.1,
+                chrm.blue.0,
+                chrm.blue.1,
+            ]);
+        }
+        // The XMP packet is UTF-8 by §11.3.3.4; bytes that are not are not a packet this encoder
+        // can frame, and are dropped rather than written as an invalid iTXt.
+        if let Some(xmp) = meta.xmp.and_then(|bytes| str::from_utf8(bytes).ok()) {
+            self = self.with_xmp(xmp);
+        }
+        for text in meta.texts {
+            match (&text.language, &text.translated_keyword) {
+                // Neither field set: the annotation came from a tEXt/zTXt, or from an iTXt whose
+                // two optional fields were empty. Offer it as Latin-1 — which is byte-exact for
+                // the first case — and let `Ancillary` promote it to iTXt if the text needs it.
+                (None, None) => self.ancillary.add_text_latin1(&text.keyword, &text.text),
+                (language, translated) => self.ancillary.add_text_international_tagged(
+                    &text.keyword,
+                    language.as_deref().unwrap_or_default(),
+                    translated.as_deref().unwrap_or_default(),
+                    &text.text,
+                ),
+            }
+        }
         self
     }
 
@@ -677,6 +851,10 @@ impl PngEncoder {
         pre_idat: F,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
+        // Refuse an accumulation the spec says must not be written before emitting a byte, so a
+        // caller never receives a half-written buffer for a chunk set it chose (see
+        // [`Ancillary::validate`]). Every encode path funnels through here.
+        self.ancillary.validate()?;
         let (color, bit_depth) = (written.color, written.bit_depth);
         // Stride in bytes per pixel (≥1, even for sub-byte depths) and the padded row length.
         let bits_per_pixel = color.channels() * bit_depth as usize;

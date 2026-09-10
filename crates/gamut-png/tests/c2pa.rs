@@ -15,7 +15,7 @@ use common::{
 };
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Indexed8, Rgb8, Rgba8};
 use gamut_png::{
-    PhysicalUnit, PngDecoder, PngEncoder, PngPalette, SegmentKind, SrgbIntent, deconstruct,
+    PhysicalUnit, PngDecoder, PngEncoder, PngPalette, SegmentKind, deconstruct,
     fill_c2pa,
 };
 
@@ -65,7 +65,10 @@ fn rgb_source() -> (Vec<u8>, Dimensions) {
 fn everything_else() -> PngEncoder {
     PngEncoder::new()
         .with_gamma(1.0 / 2.2)
-        .with_srgb(SrgbIntent::Perceptual)
+        // cICP rather than sRGB: §5.6 Table 5 and §11.3.2.5 say sRGB and iCCP must not both
+        // be written, and iCCP is the one whose payload has a size the store's placement depends
+        // on. cICP is legal alongside it (§4.3 Table 1 only ranks them).
+        .with_cicp(9, 16, true)
         .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
         .with_icc_profile("Tiny", &tiny_icc_profile())
         .with_significant_bits(&[8, 8, 8, 8])

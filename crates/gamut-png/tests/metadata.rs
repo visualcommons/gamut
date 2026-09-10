@@ -11,7 +11,7 @@ use common::{
     chunk, ihdr_payload, minimal_png, png_from_chunks, tiny_exif, tiny_icc_profile, zlib,
 };
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
-use gamut_png::{PngDecoder, PngEncoder, PngMetadata, SrgbIntent};
+use gamut_png::{PngDecoder, PngEncoder, PngMetadata};
 
 /// A 2×2 RGB8 source for the encoder-driven tests.
 fn source() -> Vec<u8> {
@@ -50,7 +50,9 @@ fn every_carrier_round_trips_byte_exact() {
             .with_compressed_text("Comment", "compressed comment")
             .with_international_text("Title", "international title")
             .with_gamma(1.0 / 2.2)
-            .with_srgb(SrgbIntent::RelativeColorimetric)
+            // cICP rather than sRGB, which §5.6 Table 5 and §11.3.2.5 forbid beside the iCCP
+            // this file also carries; sRGB's own carriage is pinned by `roundtrip.rs`.
+            .with_cicp(9, 16, true)
             .with_chromaticities(
                 (0.3127, 0.3290),
                 (0.6400, 0.3300),
@@ -67,7 +69,16 @@ fn every_carrier_round_trips_byte_exact() {
     assert_eq!(meta.xmp.as_deref(), Some(xmp.as_bytes()));
     assert_eq!(meta.c2pa.as_deref(), Some(&c2pa[..]));
     assert_eq!(meta.gamma, Some(45_455));
-    assert_eq!(meta.srgb, Some(SrgbIntent::RelativeColorimetric));
+    let cicp = meta.cicp.expect("cICP present");
+    assert_eq!(
+        (
+            cicp.color_primaries,
+            cicp.transfer_function,
+            cicp.matrix_coefficients,
+            cicp.full_range
+        ),
+        (9, 16, 0, true)
+    );
     let chrm = meta.chromaticities.expect("cHRM present");
     assert_eq!(chrm.white, (31_270, 32_900));
     assert_eq!(chrm.red, (64_000, 33_000));
@@ -84,17 +95,32 @@ fn every_carrier_round_trips_byte_exact() {
 /// and not the other fails here.
 #[test]
 fn metadata_agrees_with_decode_field_for_field() {
+    // Built chunk by chunk rather than by the encoder, so that *every* field is populated: the
+    // encoder refuses sRGB beside iCCP (§5.6 Table 5, §11.3.2.5), and a comparison of two `None`s
+    // would not see a chunk wired into one walk and not the other. A reader still meets such a
+    // file, and §13.1 says an ancillary chunk it cannot use is skipped, not fatal.
     let exif = tiny_exif();
     let icc = tiny_icc_profile();
-    let png = encode(|e| {
-        e.with_exif(&exif)
-            .with_icc_profile("Tiny", &icc)
-            .with_xmp("<x:xmpmeta/>")
-            .with_c2pa(b"\0\0\0\x10jumbc2pa")
-            .with_text("Author", "nobody")
-            .with_gamma(1.0 / 2.2)
-            .with_srgb(SrgbIntent::Perceptual)
-    });
+    let mut iccp = b"Tiny\0\0".to_vec();
+    iccp.extend_from_slice(&zlib(&icc));
+    let mut chrm = Vec::new();
+    for coord in [31_270u32, 32_900, 64_000, 33_000, 30_000, 60_000, 15_000, 6_000] {
+        chrm.extend_from_slice(&coord.to_be_bytes());
+    }
+    let png = png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(3, 2, 8, 2, 0)),
+        chunk(b"eXIf", &exif),
+        chunk(b"iCCP", &iccp),
+        chunk(b"sRGB", &[1]),
+        chunk(b"cICP", &[1, 13, 0, 1]),
+        chunk(b"gAMA", &45_455u32.to_be_bytes()),
+        chunk(b"cHRM", &chrm),
+        chunk(b"tEXt", b"Author\0nobody"),
+        chunk(b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0<x:xmpmeta/>"),
+        chunk(b"caBX", b"\0\0\0\x10jumbc2pa"),
+        chunk(b"IDAT", &zlib(&[0u8; 20])),
+        chunk(b"IEND", &[]),
+    ]);
 
     let meta = gamut_png::metadata(&png).unwrap();
     let decoded = PngDecoder::new().decode(&png).unwrap();
@@ -109,10 +135,16 @@ fn metadata_agrees_with_decode_field_for_field() {
     assert_eq!(meta.chromaticities, decoded.chromaticities);
     assert_eq!(meta.srgb, decoded.srgb);
     assert_eq!(meta.cicp, decoded.cicp);
+    // A `None` on both sides would pass every comparison above, so pin that the file really did
+    // carry each field.
+    assert!(meta.exif.is_some() && meta.icc_profile.is_some() && meta.xmp.is_some());
+    assert!(meta.c2pa.is_some() && !meta.texts.is_empty());
+    assert!(meta.gamma.is_some() && meta.chromaticities.is_some());
+    assert!(meta.srgb.is_some() && meta.cicp.is_some());
 }
 
 /// The probe case from #379: cICP is uncompressed, so a colour-space probe costs a chunk walk and
-/// nothing more. The encoder cannot write cICP, so the chunk is built by hand.
+/// nothing more. Built by hand so the assertion reads the walk, not the encoder's own chunk.
 #[test]
 fn cicp_is_read_without_inflating_anything() {
     // BT.2020 primaries (9), PQ transfer (16), RGB matrix (0), full range.

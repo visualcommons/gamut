@@ -1636,7 +1636,6 @@ mod tests {
 
     #[test]
     fn rich_decode_surfaces_metadata_and_native_image() {
-        use crate::SrgbIntent;
         use crate::decoded::PngImage;
 
         let (w, h) = (6u32, 4u32);
@@ -1647,7 +1646,9 @@ mod tests {
         let mut png = Vec::new();
         PngEncoder::new()
             .with_gamma(1.0 / 2.2)
-            .with_srgb(SrgbIntent::Perceptual)
+            // cICP, not sRGB: the encoder refuses sRGB beside the iCCP this fixture needs
+            // (§5.6 Table 5, §11.3.2.5), while cICP is legal alongside it (§4.3 Table 1).
+            .with_cicp(9, 16, true)
             .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
             .with_exif(&exif)
             .with_icc_profile("prof", b"not-a-real-profile-but-bytes")
@@ -1670,7 +1671,7 @@ mod tests {
             other => panic!("expected Rgb8, got {other:?}"),
         }
         assert_eq!(decoded.gamma, Some(45455));
-        assert_eq!(decoded.srgb, Some(SrgbIntent::Perceptual));
+        assert!(decoded.srgb.is_none());
         let chrm = decoded.chromaticities.unwrap();
         assert_eq!(chrm.white, (31270, 32900));
         assert_eq!(chrm.blue, (15000, 6000));
@@ -1690,7 +1691,16 @@ mod tests {
         assert_eq!(decoded.texts[1].text, comment);
         assert!(decoded.palette.is_none());
         assert!(decoded.transparency.is_none());
-        assert!(decoded.cicp.is_none());
+        let cicp = decoded.cicp.expect("cICP present");
+        assert_eq!(
+            (
+                cicp.color_primaries,
+                cicp.transfer_function,
+                cicp.matrix_coefficients,
+                cicp.full_range
+            ),
+            (9, 16, 0, true)
+        );
     }
 
     #[test]

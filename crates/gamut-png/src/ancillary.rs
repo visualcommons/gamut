@@ -34,6 +34,7 @@
 //! sample inside the written range keeps its input-depth value. That is issue #501, not this
 //! module's claim.
 
+use gamut_core::{Error, Result};
 use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::{ColorType, chunk};
@@ -101,13 +102,43 @@ enum TextKind {
     Compressed,
     /// `iTXt`: uncompressed UTF-8.
     International,
+    /// `iTXt` with the compression flag set: zlib-compressed UTF-8.
+    InternationalCompressed,
 }
 
+/// One accumulated text annotation, already **in the byte form its chunk carries**.
+///
+/// The distinction is the whole point of holding bytes rather than `String`s. PNG's three text
+/// chunks do not share a character set: §11.3.3.1 restricts a keyword to Latin-1
+/// ([ISO_8859-1]) in *every* one of them, §11.3.3.2 says a `tEXt` text string "is interpreted
+/// according to the Latin-1 character set" (and §11.3.3.3 that inflating a `zTXt` "yields
+/// Latin-1 text that is identical to the text that would be stored in an equivalent `tEXt`
+/// chunk"), while §11.3.3.4 gives `iTXt` UTF-8. A Rust `String` is UTF-8, so writing its bytes
+/// into a `tEXt` chunk stores mojibake for every code point above U+007F — `é` (U+00E9) becomes
+/// the two bytes `C3 A9`, which a conforming reader shows as `Ã©`. Converting once, at the point
+/// the caller sets the text, makes that unrepresentable: an entry exists only if its bytes are
+/// already right for its `kind`.
 #[derive(Debug, Clone)]
 struct TextEntry {
-    keyword: String,
-    text: String,
+    /// The keyword, Latin-1 (§11.3.3.1).
+    keyword: Vec<u8>,
+    /// The text: Latin-1 for `tEXt`/`zTXt`, UTF-8 for `iTXt`.
+    text: Vec<u8>,
+    /// The `iTXt` language tag (§11.3.3.4, BCP 47); empty for the other kinds and for an
+    /// unspecified language.
+    language: Vec<u8>,
+    /// The `iTXt` translated keyword (UTF-8, §11.3.3.4); empty for the other kinds.
+    translated: Vec<u8>,
     kind: TextKind,
+}
+
+/// The Latin-1 bytes of `s`, or `None` when a character has no Latin-1 encoding.
+///
+/// Latin-1 is the first 256 Unicode code points, so the encoding is `u8::try_from` on each
+/// `char` — the exact inverse of the decoder's `latin1`, which maps byte *n* to U+00*nn*. A
+/// string that came out of this crate's decoder therefore always converts back.
+fn latin1_bytes(s: &str) -> Option<Vec<u8>> {
+    s.chars().map(|c| u8::try_from(u32::from(c)).ok()).collect()
 }
 
 /// Accumulated ancillary metadata to emit alongside the image.
@@ -119,6 +150,9 @@ pub(crate) struct Ancillary {
     pub chrm: Option<[u32; 8]>,
     /// sRGB: rendering-intent code.
     pub srgb: Option<u8>,
+    /// cICP: (colour primaries, transfer function, video full-range flag). The matrix
+    /// coefficients byte is not carried because §11.3.2.6 fixes it at 0 for PNG.
+    pub cicp: Option<(u8, u8, bool)>,
     /// sBIT: significant bits per channel (1–4 values, matching the colour type).
     pub sbit: Option<Vec<u8>>,
     /// bKGD: background colour, pre-serialised to its colour-type-specific bytes.
@@ -136,6 +170,13 @@ pub(crate) struct Ancillary {
     pub c2pa: Option<Vec<u8>>,
     /// tEXt / zTXt / iTXt entries, emitted in insertion order.
     texts: Vec<TextEntry>,
+    /// Whether a caller set a text annotation whose **keyword** has no Latin-1 encoding.
+    ///
+    /// §11.3.3.1 restricts a keyword to Latin-1 in all three text chunks, so — unlike the text,
+    /// which `iTXt` carries in UTF-8 — there is no chunk such a keyword fits. The entry is
+    /// dropped at the setter and the encode is refused by [`Self::validate`], rather than
+    /// silently writing a keyword no reader can match.
+    unencodable_keyword: bool,
 }
 
 impl Ancillary {
@@ -164,18 +205,108 @@ impl Ancillary {
         self.push_text(keyword, text, TextKind::International);
     }
 
+    /// Adds an `iTXt` entry keeping its language tag and translated keyword (§11.3.3.4), which
+    /// [`add_text_international`](Self::add_text_international) leaves empty. Used only to carry
+    /// a decoded annotation forward, so that re-encoding a file does not silently drop the two
+    /// fields that make `iTXt` international.
+    pub(crate) fn add_text_international_tagged(
+        &mut self,
+        keyword: &str,
+        language: &str,
+        translated: &str,
+        text: &str,
+    ) {
+        if let Some(mut entry) = self.text_entry(keyword, text, TextKind::International) {
+            entry.language = language.as_bytes().to_vec();
+            entry.translated = translated.as_bytes().to_vec();
+            self.texts.push(entry);
+        }
+    }
+
     fn push_text(&mut self, keyword: &str, text: &str, kind: TextKind) {
-        self.texts.push(TextEntry {
-            keyword: keyword.to_string(),
-            text: text.to_string(),
+        if let Some(entry) = self.text_entry(keyword, text, kind) {
+            self.texts.push(entry);
+        }
+    }
+
+    /// Builds the entry for one text annotation, choosing the chunk that can actually carry it.
+    ///
+    /// The caller's `kind` is a *preference*, not a guarantee: §11.3.3.2 says outright that "text
+    /// containing characters outside the repertoire of ISO/IEC 8859-1 should be encoded using the
+    /// `iTXt` chunk", so a `tEXt`/`zTXt` request whose text is not Latin-1 is promoted to `iTXt`
+    /// rather than written as UTF-8 bytes a Latin-1 reader mis-renders. The promotion keeps the
+    /// caller's *other* choice — compression — because §11.3.3.4 gives `iTXt` a compression flag
+    /// of its own; only the character set changes.
+    ///
+    /// `None` (the entry is dropped, and [`Self::validate`] then refuses the encode) is reserved
+    /// for the one case no chunk can express: a keyword outside Latin-1.
+    fn text_entry(&mut self, keyword: &str, text: &str, kind: TextKind) -> Option<TextEntry> {
+        let Some(keyword) = latin1_bytes(keyword) else {
+            self.unencodable_keyword = true;
+            return None;
+        };
+        let (kind, text) = match (kind, latin1_bytes(text)) {
+            (TextKind::Latin1, Some(latin1)) => (TextKind::Latin1, latin1),
+            (TextKind::Compressed, Some(latin1)) => (TextKind::Compressed, latin1),
+            (TextKind::Latin1, None) => (TextKind::International, text.as_bytes().to_vec()),
+            (TextKind::Compressed, None) => {
+                (TextKind::InternationalCompressed, text.as_bytes().to_vec())
+            }
+            (kind, _) => (kind, text.as_bytes().to_vec()),
+        };
+        Some(TextEntry {
+            keyword,
+            text,
+            language: Vec::new(),
+            translated: Vec::new(),
             kind,
-        });
+        })
+    }
+
+    /// Refuses an accumulation the spec says must not be written, before any byte is emitted.
+    ///
+    /// Two cases, both of which the caller stated explicitly and neither of which this encoder
+    /// may silently resolve for it:
+    ///
+    /// - **`sRGB` together with `iCCP`.** §5.6 Table 5 records the constraint on both rows — "if
+    ///   the `iCCP` chunk is present, the `sRGB` chunk should not be present" and its converse —
+    ///   and §11.3.2.5 repeats it ("it is recommended that the `sRGB` and `iCCP` chunks do not
+    ///   appear simultaneously in a PNG datastream"). Emitting both is not undefined, because
+    ///   §4.3 Table 1 ranks the colour chunks and a reader takes the lowest priority number
+    ///   (`iCCP` 2 over `sRGB` 3) — but it *is* a datastream the standard tells encoders not to
+    ///   produce, and which of the two the caller meant is not something this crate can guess.
+    ///   Dropping one silently would lose colour information the caller supplied, so the encode
+    ///   is refused. To carry both forward from a decoded file, use
+    ///   [`PngEncoder::with_metadata`](crate::PngEncoder::with_metadata), which applies Table 1
+    ///   itself.
+    /// - **A text keyword outside Latin-1** (§11.3.3.1), which no text chunk can carry.
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.srgb.is_some() && self.iccp.is_some() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: sRGB and iCCP must not both be written (spec §5.6 Table 5, §11.3.2.5); \
+                 set one",
+            ));
+        }
+        if self.unencodable_keyword {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: a text keyword must be Latin-1 (spec §11.3.3.1)",
+            ));
+        }
+        Ok(())
     }
 
     /// Emits the colour-space chunks that must precede `PLTE` (PNG Table 7). `effort` is the
     /// encoder's [`Level::Best`] budget, applied to the compressed `iCCP` payload; `written` is
     /// the IHDR these chunks sit under, which `sBIT` must agree with.
     pub(crate) fn write_pre_plte(&self, out: &mut Vec<u8>, effort: u8, written: WrittenHeader<'_>) {
+        if let Some((primaries, transfer, full_range)) = self.cicp {
+            // §11.3.2.6 Table 18: primaries, transfer function, matrix coefficients, full-range
+            // flag — one byte each, the matrix fixed at 0 because "RGB is currently the only
+            // supported color model in PNG, and as such Matrix Coefficients shall be set to 0".
+            chunk::write_chunk(out, *b"cICP", &[primaries, transfer, 0, u8::from(full_range)]);
+        }
         if let Some(chrm) = self.chrm {
             let mut data = [0u8; 32];
             for (slot, value) in chrm.iter().enumerate() {
@@ -437,32 +568,42 @@ pub(crate) fn sbit_for(sbit: &[u8], color: ColorType, bit_depth: u8) -> Option<V
 }
 
 /// Serialises one text chunk (tEXt / zTXt / iTXt).
+/// Serialises one text annotation. `entry.text` is already in the chunk's character set — Latin-1
+/// for `tEXt`/`zTXt` (§11.3.3.2, §11.3.3.3), UTF-8 for `iTXt` (§11.3.3.4) — because
+/// [`Ancillary::text_entry`] converted it when the caller set it, so this function only frames
+/// the bytes.
 fn write_text(out: &mut Vec<u8>, entry: &TextEntry, effort: u8) {
+    let compress = |payload: &[u8], data: &mut Vec<u8>| {
+        DeflateEncoder::new()
+            .with_level(Level::Best)
+            .with_effort(effort)
+            .zlib_compress(payload, data);
+    };
+    let mut data = entry.keyword.clone();
+    data.push(0); // null separator
     match entry.kind {
         TextKind::Latin1 => {
-            let mut data = entry.keyword.clone().into_bytes();
-            data.push(0); // null separator
-            data.extend_from_slice(entry.text.as_bytes());
+            data.extend_from_slice(&entry.text);
             chunk::write_chunk(out, *b"tEXt", &data);
         }
         TextKind::Compressed => {
-            let mut data = entry.keyword.clone().into_bytes();
-            data.push(0); // null separator
             data.push(0); // compression method: 0 = zlib/deflate
-            DeflateEncoder::new()
-                .with_level(Level::Best)
-                .with_effort(effort)
-                .zlib_compress(entry.text.as_bytes(), &mut data);
+            compress(&entry.text, &mut data);
             chunk::write_chunk(out, *b"zTXt", &data);
         }
-        TextKind::International => {
-            let mut data = entry.keyword.clone().into_bytes();
-            data.push(0); // null separator
-            data.push(0); // compression flag: 0 = uncompressed
-            data.push(0); // compression method
-            data.push(0); // empty language tag, then null
-            data.push(0); // empty translated keyword, then null
-            data.extend_from_slice(entry.text.as_bytes()); // UTF-8 text
+        TextKind::International | TextKind::InternationalCompressed => {
+            let compressed = entry.kind == TextKind::InternationalCompressed;
+            data.push(u8::from(compressed)); // compression flag
+            data.push(0); // compression method: 0 = zlib/deflate
+            data.extend_from_slice(&entry.language);
+            data.push(0); // language tag terminator
+            data.extend_from_slice(&entry.translated);
+            data.push(0); // translated keyword terminator
+            if compressed {
+                compress(&entry.text, &mut data);
+            } else {
+                data.extend_from_slice(&entry.text);
+            }
             chunk::write_chunk(out, *b"iTXt", &data);
         }
     }
