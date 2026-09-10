@@ -27,6 +27,7 @@ use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::ancillary::{
     Ancillary, PaletteOrigin, PhysicalUnit, SrgbIntent, WrittenHeader, WrittenPalette,
+    background_entry,
 };
 use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
@@ -437,6 +438,9 @@ impl PngEncoder {
     /// that is lossless (to an RGB triple, or to the palette entry holding the grey) and
     /// **omitted, without error,** where the written colour type or depth cannot carry it. See
     /// `STATUS.md`, "Chunks that follow the race".
+    ///
+    /// Under [`encode_indexed8`](Self::encode_indexed8) the entry holding the grey is kept by the
+    /// palette cleaning even when no pixel names it, and the chunk becomes that entry's index.
     #[must_use]
     pub fn with_background_gray(mut self, gray: u16) -> Self {
         self.ancillary.bkgd = Some(gray.to_be_bytes().to_vec());
@@ -451,6 +455,10 @@ impl PngEncoder {
     /// holding the colour — an opaque one where a transparent twin exists) and **omitted, without
     /// error,** where the written colour type or depth cannot carry it. See `STATUS.md`, "Chunks
     /// that follow the race".
+    ///
+    /// Under [`encode_indexed8`](Self::encode_indexed8) the entry holding the colour is kept by the
+    /// palette cleaning even when no pixel names it, and the chunk becomes that entry's index — so
+    /// the opaque entry a transparent twin would otherwise outlive is the one you keep.
     #[must_use]
     pub fn with_background_rgb(mut self, red: u16, green: u16, blue: u16) -> Self {
         let mut data = Vec::with_capacity(6);
@@ -465,8 +473,8 @@ impl PngEncoder {
     ///
     /// The index names an entry of the palette **you** supply to
     /// [`encode_indexed8`](Self::encode_indexed8), and is emitted only there (and only in range).
-    /// It keeps naming that entry: cleaning the palette may renumber it, and the chunk is
-    /// renumbered with it, so the background written is the colour you pointed at.
+    /// It keeps naming that entry: cleaning the palette keeps the entry and may renumber it, and
+    /// the chunk is renumbered with it, so the background written is the colour you pointed at.
     /// Under [`with_auto_reduce`](Self::with_auto_reduce) the palette, if one is written, is the
     /// encoder's own, in an order this index never referred to, so the chunk is **omitted,
     /// without error** — set the background as a colour ([`with_background_rgb`](Self::with_background_rgb))
@@ -849,11 +857,19 @@ impl PngEncoder {
     /// `palette` is **cleaned** before it is written, silently and losslessly: an entry nothing in
     /// the file names is dropped, a second entry holding the same RGB *and* alpha as an earlier one
     /// is merged into it, the trailing opaque `tRNS` bytes §11.3.2.1 lets a chunk omit are omitted,
-    /// the index bit depth is derived from what survives, and the image's indices — and a
-    /// [`with_background_index`](Self::with_background_index) background — are renumbered to match
-    /// ([`PngPalette::cleaned`]). The colour every pixel resolves to is unchanged, which is why
-    /// this reports nothing: a merged entry did not fail to come along, it arrived under another
-    /// index. Surviving entries keep the order you gave them.
+    /// the index bit depth is derived from what survives, and the image's indices are renumbered to
+    /// match ([`PngPalette::cleaned`]). The colour every pixel resolves to is unchanged, which is
+    /// why this reports nothing: a merged entry did not fail to come along, it arrived under
+    /// another index. Surviving entries keep the order you gave them.
+    ///
+    /// "Nothing in the file names it" includes the `bKGD` background, in **whichever** of its three
+    /// forms you set it — [`with_background_index`](Self::with_background_index),
+    /// [`with_background_gray`](Self::with_background_gray) or
+    /// [`with_background_rgb`](Self::with_background_rgb). Each names an entry of the palette you
+    /// supply, so that entry survives even when no pixel names it, and the chunk is written as its
+    /// index in the cleaned palette. Your background keeps its colour *and* its alpha: a triple
+    /// that appears both opaque and transparent resolves to the opaque entry, and it is that entry
+    /// the chunk keeps naming.
     ///
     /// What it costs is bounded by the palette, not by the picture: at most 256 entries, each
     /// compared against the survivors before it. Only the index remap walks the image, one pass
@@ -876,33 +892,46 @@ impl PngEncoder {
                 "PNG: palette index out of range",
             ));
         }
-        // Every entry the finished file still has to name. A pixel names one; so does an in-range
-        // `bKGD` palette index, which is the one background form that survives this path
-        // (`ancillary::bkgd_for`), so the entry behind it has to survive with it.
+        // Every entry the finished file still has to name. A pixel names one; so does the `bKGD`
+        // background, in whichever of its three forms it was set — an index into this palette, a
+        // grey sample, an RGB triple. Which entry each form names is `ancillary::background_entry`
+        // to answer, and it is asked rather than restated here, so no form can be missed.
         let mut used = [false; 256];
         for &index in indices {
             used[usize::from(index)] = true;
         }
         let background = match self.ancillary.bkgd.as_deref() {
-            Some(&[index]) if usize::from(index) < palette.len() => Some(index),
-            _ => None,
+            Some(bkgd) => {
+                let supplied = palette.plte();
+                background_entry(
+                    bkgd,
+                    WrittenPalette {
+                        plte: &supplied,
+                        trns: palette.trns(),
+                        origin: PaletteOrigin::Caller,
+                    },
+                )
+            }
+            None => None,
         };
         if let Some(index) = background {
             used[usize::from(index)] = true;
         }
         let (palette, remap) = palette.cleaned(&used);
         let indices: Vec<u8> = indices.iter().map(|&i| remap[usize::from(i)]).collect();
-        // The background still names the colour the caller chose, so its index moves with the
-        // entry. Only a background that actually moved copies the encoder's chunk state.
+        // The background still names the colour the caller chose, so the chunk is rewritten as
+        // that entry's index in the *cleaned* palette, whichever form it arrived in. Pinning the
+        // index here is also what stops a colour-form background from being resolved a second time
+        // against the cleaned palette and landing on a different entry — an opaque triple whose
+        // transparent twin outlived it resolves to the twin. Only a background whose bytes
+        // actually change copies the encoder's chunk state.
         let renumbered;
-        let this = match background.filter(|&index| remap[usize::from(index)] != index) {
-            Some(index) => {
-                renumbered = self
-                    .clone()
-                    .with_background_index(remap[usize::from(index)]);
+        let this = match background.map(|index| remap[usize::from(index)]) {
+            Some(index) if self.ancillary.bkgd.as_deref() != Some([index].as_slice()) => {
+                renumbered = self.clone().with_background_index(index);
                 &renumbered
             }
-            None => self,
+            _ => self,
         };
 
         let dims = image.dimensions();
@@ -1771,6 +1800,83 @@ mod tests {
             Some(vec![1]),
             "and the index moved with it"
         );
+    }
+
+    /// A background set as a *colour* names, after cleaning, an entry holding that colour with
+    /// that alpha.
+    ///
+    /// `bKGD` names a palette entry in three forms (§11.3.5.1) -- an index, a grey sample, an RGB
+    /// triple -- and `ancillary::background_entry` resolves all three against the caller's palette.
+    /// Marking only the index form's entry as used left the other two naming an entry cleaning was
+    /// free to drop or to renumber under them, which is the repainting the index form's mark
+    /// exists to prevent, one field over. It fails for one reason: the background stopped naming
+    /// the colour the caller set.
+    ///
+    /// Both rows are that one defect; they differ only in how it shows. In the first the entry is
+    /// named by nothing else, so it was dropped and the chunk vanished with it. In the second an
+    /// opaque entry and a transparent twin hold the same triple: the resolver prefers the opaque
+    /// one (`WrittenPalette::index_of`), no pixel names it, and dropping it left the chunk written
+    /// and
+    /// pointing at the transparent twin -- an opaque background silently turned see-through, with
+    /// nothing missing from the file to show for it.
+    ///
+    /// The colour is read back the way §11.3.5.1 says a reader reads it: the index into `PLTE`,
+    /// and the same index into `tRNS` (opaque past its end, §11.3.2.1).
+    #[test]
+    fn a_colour_background_names_an_entry_holding_its_colour() {
+        struct Case {
+            /// The palette the caller supplies, and its tRNS bytes.
+            entries: &'static [[u8; 3]],
+            alphas: &'static [u8],
+            /// The indices the image paints — never the background's entry.
+            painted: &'static [u8],
+            /// The background colour, and the alpha the entry it names must still have.
+            background: [u8; 3],
+            alpha: u8,
+        }
+        let cases = [
+            Case {
+                entries: &[[10, 20, 30], [200, 100, 50]],
+                alphas: &[],
+                painted: &[0, 0, 0, 0],
+                background: [200, 100, 50],
+                alpha: 255,
+            },
+            Case {
+                entries: &[[7, 7, 7], [7, 7, 7], [1, 2, 3]],
+                alphas: &[255, 0],
+                painted: &[1, 2, 1, 2],
+                background: [7, 7, 7],
+                alpha: 255,
+            },
+        ];
+        for case in cases {
+            let Case {
+                entries,
+                alphas,
+                painted,
+                background: [r, g, b],
+                alpha,
+            } = case;
+            let palette = PngPalette::with_transparency(entries, alphas).unwrap();
+            let dims = Dimensions::new(painted.len() as u32, 1).unwrap();
+            let img = ImageRef::<Indexed8>::new(painted, dims).unwrap();
+            let mut png = Vec::new();
+            PngEncoder::new()
+                .with_background_rgb(r.into(), g.into(), b.into())
+                .encode_indexed8(img, &palette, &mut png)
+                .unwrap();
+
+            let bkgd = find_chunk(&png, b"bKGD")
+                .unwrap_or_else(|| panic!("{r},{g},{b}: the background's entry was dropped"));
+            let index = usize::from(bkgd[0]);
+            let plte = find_chunk(&png, b"PLTE").expect("an indexed file has a palette");
+            assert_eq!(&plte[index * 3..index * 3 + 3], &[r, g, b], "{r},{g},{b}");
+            let written = find_chunk(&png, b"tRNS")
+                .and_then(|trns| trns.get(index).copied())
+                .unwrap_or(255);
+            assert_eq!(written, alpha, "{r},{g},{b}: the background's alpha");
+        }
     }
 
     /// A `bKGD` index past the end of the caller's palette is still omitted, not renumbered into

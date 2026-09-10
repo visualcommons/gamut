@@ -716,6 +716,37 @@ impl WrittenHeader<'static> {
     }
 }
 
+/// The palette entry a `bKGD` payload names in `palette`, or `None` if it names none.
+///
+/// The payload names its own form by its length (§11.3.5.1): one byte is an index into the
+/// palette the caller supplied, two a grey sample and six an RGB triple, each sample 16-bit
+/// big-endian. A colour names the entry holding it, preferring an opaque entry over a transparent
+/// twin of the same triple ([`WrittenPalette::index_of`]); an index names the entry it numbers,
+/// and names nothing under a palette the encoder derived ([`PaletteOrigin::Derived`]) or past that
+/// palette's end.
+///
+/// One owner for the rule, because two callers need the same answer and a rule restated beside the
+/// rule is a rule that drifts: [`bkgd_for`] converts the chunk for the header being written, and
+/// [`crate::PngEncoder::encode_indexed8`] marks the entry this names as used, so cleaning the
+/// caller's palette keeps it instead of dropping the background's colour out from under the chunk.
+/// Restating "an index, and only an index, names an entry" beside this is what let a colour-form
+/// background lose its entry.
+pub(crate) fn background_entry(bkgd: &[u8], palette: WrittenPalette<'_>) -> Option<u8> {
+    let sample = |hi: u8, lo: u8| u16::from_be_bytes([hi, lo]);
+    let rgb: [u16; 3] = match *bkgd {
+        [index] => {
+            return (palette.origin == PaletteOrigin::Caller && usize::from(index) < palette.len())
+                .then_some(index);
+        }
+        [hi, lo] => [sample(hi, lo); 3],
+        [r1, r0, g1, g0, b1, b0] => [sample(r1, r0), sample(g1, g0), sample(b1, b0)],
+        _ => return None,
+    };
+    let entry = rgb.map(|v| u8::try_from(v).ok());
+    let index = palette.index_of([entry[0]?, entry[1]?, entry[2]?])?;
+    u8::try_from(index).ok()
+}
+
 /// The `bKGD` payload for the header actually written (§11.3.5.1), or `None` to omit the chunk.
 ///
 /// The caller's payload names its own colour type by its length — one byte is a palette index,
@@ -738,28 +769,23 @@ impl WrittenHeader<'static> {
 /// The rules are the ones a reader applies before honouring the chunk — libpng's
 /// `png_handle_bKGD` rejects a wrong length, an index past the palette and a sample past the
 /// depth — so "converted or omitted" means "never dropped on read".
+///
+/// Which palette entry a payload names — in any of its three forms — is [`background_entry`]'s to
+/// decide, not this function's; this one only says which colour types can carry the answer.
 pub(crate) fn bkgd_for(bkgd: &[u8], written: WrittenHeader<'_>) -> Option<Vec<u8>> {
     let sample = |hi: u8, lo: u8| u16::from_be_bytes([hi, lo]);
     let rgb: [u16; 3] = match *bkgd {
-        [index] => {
+        [_] => {
             // An index names an entry only in the palette the caller supplied.
-            let palette = written.palette?;
-            return (written.color == ColorType::Indexed
-                && palette.origin == PaletteOrigin::Caller
-                && usize::from(index) < palette.len())
-            .then(|| vec![index]);
+            let index = background_entry(bkgd, written.palette?)?;
+            return (written.color == ColorType::Indexed).then(|| vec![index]);
         }
         [hi, lo] => [sample(hi, lo); 3],
         [r1, r0, g1, g0, b1, b0] => [sample(r1, r0), sample(g1, g0), sample(b1, b0)],
         _ => return None,
     };
     match written.color {
-        ColorType::Indexed => {
-            let entry = rgb.map(|v| u8::try_from(v).ok());
-            let entry = [entry[0]?, entry[1]?, entry[2]?];
-            let index = written.palette?.index_of(entry)?;
-            u8::try_from(index).ok().map(|index| vec![index])
-        }
+        ColorType::Indexed => background_entry(bkgd, written.palette?).map(|index| vec![index]),
         ColorType::Grayscale | ColorType::GrayscaleAlpha => {
             let grey = (rgb[0] == rgb[1] && rgb[1] == rgb[2]).then_some(rgb[0])?;
             fits_depth(grey, written.bit_depth).then(|| grey.to_be_bytes().to_vec())
