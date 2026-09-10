@@ -327,6 +327,10 @@ pub struct DecodedExtent {
 ///
 /// Use [`read_raw_dng`] when you want the samples; this one when you want the time.
 ///
+/// That the two agree is pinned by `adobe_in_memory_decode_matches_the_file_decode` in
+/// `gamut-dng`'s `tests/roundtrip.rs`, not here: this crate is excluded from the workspace, so a
+/// test in it never runs in automation.
+///
 /// # Errors
 ///
 /// Returns an error message (with the SDK's numeric error code) if the SDK cannot parse the bytes
@@ -405,6 +409,10 @@ pub fn decode_lossless_jpeg(stream: &[u8], expected_samples: usize) -> Result<Ve
 /// and nothing else, which is how `cargo bench -p gamut-dng --bench codec` quantifies the one
 /// residual bias in its codestream comparison instead of merely asserting it is small.
 ///
+/// That the two agree is pinned by `sdk_extent_entry_counts_the_same_samples_as_the_exporting_entry`
+/// in `gamut-dng`'s `lossless_jpeg` tests, not here, for the reason given on
+/// [`decode_dng_in_memory`].
+///
 /// # Errors
 ///
 /// Returns an error message (with the SDK's numeric error code) if the SDK cannot decode the
@@ -451,25 +459,6 @@ mod tests {
         assert!(
             raw.samples.iter().any(|&s| s != 0),
             "stub libjxl would leave the image all-zero"
-        );
-    }
-
-    /// The memory-stream decode reports the same stage-1 extent as the file-stream one, so the
-    /// entry point a benchmark times is not a cheaper, different decode. It compares extents and
-    /// not pixels because the entry point deliberately exports no pixels.
-    #[test]
-    fn in_memory_decode_reports_the_same_extent_as_the_file_decode() {
-        let bytes = sample_file("05_PGTM2_unsigned8.dng").expect("sample DNG present");
-        let exported = read_raw_dng(&bytes).expect("file-stream decode");
-        let extent = decode_dng_in_memory(&bytes).expect("memory-stream decode");
-        assert_eq!(
-            (extent.width, extent.height, extent.planes, extent.samples),
-            (
-                exported.width,
-                exported.height,
-                exported.planes,
-                exported.samples.len()
-            )
         );
     }
 
