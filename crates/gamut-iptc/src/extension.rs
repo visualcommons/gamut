@@ -2646,4 +2646,191 @@ mod tests {
         pm.set_licensors(&pm.licensors());
         assert_eq!(pm.xmp, before);
     }
+
+    /// One top-level property the typed view projects, for the sweep below.
+    struct TopProperty {
+        /// The accessor pair under test, for the failure message.
+        label: &'static str,
+        /// The property's namespace URI.
+        ns: &'static str,
+        /// The property's local name.
+        name: &'static str,
+        /// A structure value whose every field the property's own type reads.
+        member: fn() -> XmpValue,
+        /// Reads the property through its accessor and writes what it read straight back.
+        trip: fn(&mut PhotoMetadata),
+    }
+
+    /// The four accessor pairs [`PhotoMetadata`] exposes for a structured IPTC property.
+    fn top_properties() -> Vec<TopProperty> {
+        vec![
+            TopProperty {
+                label: "creator_contact_info",
+                ns: ns::IPTC_CORE,
+                name: "CreatorContactInfo",
+                member: || contact().to_xmp(),
+                trip: |pm| {
+                    let info = pm.creator_contact_info().unwrap_or_default();
+                    pm.set_creator_contact_info(&info);
+                },
+            },
+            TopProperty {
+                label: "image_regions",
+                ns: ns::IPTC_EXT,
+                name: "ImageRegion",
+                member: || {
+                    ImageRegion {
+                        identifier: Some("r1".to_owned()),
+                        ..ImageRegion::default()
+                    }
+                    .to_xmp()
+                },
+                trip: |pm| pm.set_image_regions(&pm.image_regions()),
+            },
+            TopProperty {
+                label: "artwork_or_objects",
+                ns: ns::IPTC_EXT,
+                name: "ArtworkOrObject",
+                member: || {
+                    ArtworkOrObject {
+                        title: Some("Sunflowers".to_owned()),
+                        ..ArtworkOrObject::default()
+                    }
+                    .to_xmp()
+                },
+                trip: |pm| pm.set_artwork_or_objects(&pm.artwork_or_objects()),
+            },
+            TopProperty {
+                label: "licensors",
+                ns: ns::PLUS,
+                name: "Licensor",
+                member: || {
+                    Licensor {
+                        name: Some("Agence gamut".to_owned()),
+                        ..Licensor::default()
+                    }
+                    .to_xmp()
+                },
+                trip: |pm| pm.set_licensors(&pm.licensors()),
+            },
+        ]
+    }
+
+    /// Every shape a top-level property's *value* can arrive in: the canonical form the model
+    /// writes, and every departure from it a graph can carry — a container kind it does not write,
+    /// a member it cannot read or cannot write back, and a value that is not an array at all.
+    fn top_level_values(member: &XmpValue) -> Vec<(&'static str, XmpValue)> {
+        let bag = |items: Vec<XmpItem>| XmpValue::Array(XmpArray::Bag(items));
+        let one = || XmpItem::new(member.clone());
+        let vendor = XmpValue::Structured(vec![XmpProperty::new(
+            "http://example.org/vendor/",
+            "Tint",
+            text_value("warm"),
+        )]);
+        vec![
+            ("a bag of one structure", bag(vec![one()])),
+            (
+                "a seq of one structure",
+                XmpValue::Array(XmpArray::Seq(vec![one()])),
+            ),
+            (
+                "an alt of one structure",
+                XmpValue::Array(XmpArray::Alt(vec![one()])),
+            ),
+            ("a bag of two structures", bag(vec![one(), one()])),
+            (
+                "a bag of a structure the model does not name",
+                bag(vec![XmpItem::new(vendor)]),
+            ),
+            (
+                "a bag of a structure with no field at all",
+                bag(vec![XmpItem::new(XmpValue::Structured(Vec::new()))]),
+            ),
+            (
+                "a bag holding a member that is not a structure",
+                bag(vec![one(), XmpItem::simple("not a structure")]),
+            ),
+            (
+                "a bag holding a member held as rdf:resource",
+                bag(vec![XmpItem::new(XmpValue::Uri(
+                    "https://example.org/".to_owned(),
+                ))]),
+            ),
+            (
+                "a bag holding a member that carries a qualifier",
+                bag(vec![XmpItem {
+                    value: member.clone(),
+                    qualifiers: vec![XmpProperty::new(XML_NAMESPACE, "lang", text_value("fr"))],
+                }]),
+            ),
+            ("an empty bag", bag(Vec::new())),
+            ("a bare structure", member.clone()),
+            (
+                "a structure with no field at all",
+                XmpValue::Structured(Vec::new()),
+            ),
+            ("simple text", text_value("not a structure")),
+            (
+                "a value held as rdf:resource",
+                XmpValue::Uri("https://example.org/".to_owned()),
+            ),
+            (
+                "a language alternative of text",
+                XmpValue::Array(XmpArray::Alt(vec![
+                    XmpItem::lang_text(X_DEFAULT, "Sunflowers"),
+                    XmpItem::lang_text("fr", "Tournesols"),
+                ])),
+            ),
+        ]
+    }
+
+    /// Every qualifier list a top-level property can carry.
+    fn top_level_qualifiers() -> Vec<(&'static str, Vec<XmpProperty>)> {
+        let lang = || XmpProperty::new(XML_NAMESPACE, "lang", text_value("fr"));
+        let vendor = || XmpProperty::new("http://example.org/vendor/", "Note", text_value("n"));
+        vec![
+            ("no qualifier", Vec::new()),
+            ("an xml:lang qualifier", vec![lang()]),
+            ("a vendor qualifier", vec![vendor()]),
+            ("two qualifiers", vec![lang(), vendor()]),
+        ]
+    }
+
+    #[test]
+    fn every_top_level_shape_survives_a_read_modify_write_unchanged() {
+        // The same law as `every_shape_survives_a_read_modify_write_unchanged`, one level up, and
+        // generated rather than listed: every accessor pair crossed with every value shape and
+        // every qualifier list. A shape the setter reproduces goes back out as the model's own
+        // output; one it cannot is left where it lies. Either way the graph that comes out — the
+        // property under test and the unrelated one beside it — is the graph that went in.
+        let neighbour = XmpProperty::new(ns::PHOTOSHOP, "Headline", text_value("Breaking"));
+        let mut crossed = 0_usize;
+        for property in top_properties() {
+            let member = (property.member)();
+            for (value_label, value) in top_level_values(&member) {
+                for (qualifier_label, qualifiers) in top_level_qualifiers() {
+                    let mut pm = PhotoMetadata::new();
+                    pm.xmp.properties.push(XmpProperty {
+                        namespace: property.ns.to_owned(),
+                        name: property.name.to_owned(),
+                        value: value.clone(),
+                        qualifiers,
+                    });
+                    pm.xmp.properties.push(neighbour.clone());
+                    let before = pm.xmp.clone();
+                    (property.trip)(&mut pm);
+                    assert_eq!(
+                        pm.xmp, before,
+                        "{}: {value_label}, {qualifier_label}: a read-modify-write did not give \
+                         the graph back",
+                        property.label
+                    );
+                    crossed += 1;
+                }
+            }
+        }
+        // The cross is what makes this a sweep rather than a spot check: 4 pairs x 15 value
+        // shapes x 4 qualifier lists.
+        assert_eq!(crossed, 240);
+    }
 }
