@@ -1,36 +1,44 @@
 #!/usr/bin/env bash
 # The README's "## Crates" table is hand-maintained prose, and nothing read it. By issue #425 it
-# had drifted far enough that eighteen rows needed correcting -- five shipped crates were still
-# described as unstarted scaffolding citing a closed issue -- and four crates (gamut-codec-abi,
-# gamut-dng, gamut-jpeg, gamut-tonemap) had no row at all.
+# had drifted far enough that twenty-three of its twenty-eight rows needed correcting -- five
+# shipped crates were still described as unstarted scaffolding citing a closed issue -- and four
+# crates (gamut-codec-abi, gamut-dng, gamut-jpeg, gamut-tonemap) had no row at all.
 #
-# This guard checks what is mechanical about the table -- its *membership* and the *shape* of a
-# row -- and nothing about the prose in it:
+# This guard checks what is mechanical about the table -- its *membership*, the *shape* of a row,
+# and that the table is a table -- and nothing about the prose in it:
 #
 #   * every workspace crate has a row, so a new crate cannot be added without documenting it;
 #   * every row names a crate that still exists, so a renamed or deleted crate cannot be left
-#     behind as a phantom row;
+#     behind as a phantom row. A row is recognised by a backticked cargo package name, so the
+#     character set is cargo's own -- letters, digits, `-` and `_`, in either case -- and a
+#     phantom row cannot hide behind a capital or an underscore;
 #   * no crate is listed twice, so the table stays a bijection rather than a set;
-#   * every crate row is a three-cell row whose Purpose and Status each carry at least one
-#     character that is neither whitespace nor a control code, so a row cannot be reduced to a
-#     bare crate name -- or to a cell holding one non-breaking space -- and still satisfy
-#     membership;
+#   * every crate row is a three-cell row whose Purpose and Status each *render as something*:
+#     a cell holding one non-breaking space, one tab, or one empty HTML element is empty, because
+#     that is what a reader sees;
 #   * a row inside an HTML comment or a fenced code block is not a row. Both render as something
 #     other than a table cell, so a crate documented only there is documented nowhere, and the
-#     membership check must see it as missing rather than as present.
+#     membership check must see it as missing rather than as present;
+#   * the crate rows stand under a `| --- | --- | --- |` delimiter row. The delimiter is what
+#     makes the lines around it a table at all: delete it and every row renders as a paragraph of
+#     literal pipes while each row's bytes stay intact, which is a table that documents nothing.
+#
+# CRLF input is accepted: a trailing carriage return is removed from every line before anything is
+# matched, so a CRLF README does not silently lose its heading and report itself as rowless.
 #
 # What is deliberately NOT checked, and why:
 #   * The *wording* of the Purpose and Status cells. They are prose a human maintains, and their
-#     authority is, in this order, the crate's own `lib.rs`, its `Cargo.toml`, and its `STATUS.md`
-#     where the first two are silent -- a `STATUS.md` can itself be stale (issue #545), so a row
-#     must be true of the crate rather than merely faithful to a file. A text gate over the cells
-#     would fossilise a particular phrasing, and a generated table would move prose a human writes
-#     into a generator -- so staleness of a row's *text* stays a review concern, not a lint.
-#   * The table's header and `| --- |` delimiter row. Deleting the delimiter makes every row
-#     render as literal text while leaving each row's bytes intact, so this guard still passes on
-#     a table that renders as a paragraph. That is a known, unclosed hole: what is checked is that
-#     each crate has a row and that the row has its three cells, not that the surrounding table
-#     renders.
+#     authority is **the crate's own source** -- the code that ships. No single file outranks it:
+#     `STATUS.md` can list a shipped module as deferred (issue #545) and a module doc can defer a
+#     capability the crate's own `EncodeImage` impls already provide (issue #560) -- which is why
+#     the `gamut-avif` row states 8/10/12-bit encode against a doc comment that still calls
+#     10/12-bit deferred. `lib.rs`, `Cargo.toml` and `STATUS.md` are where to look first, in that
+#     order, but each is a summary and a row must be true of the crate, not faithful to a file.
+#     A text gate over the cells would fossilise a particular phrasing, and a generated table
+#     would move prose a human writes into a generator -- so staleness of a row's *text* stays a
+#     review concern, not a lint.
+#   * The header row's own text. The delimiter above is asserted; what the three column headings
+#     are called is prose like any other cell.
 #   * The version. `mise run versions` already reports it, and the README deliberately states
 #     what each crate *is* rather than pinning a number that release-plz bumps.
 set -euo pipefail
@@ -54,10 +62,10 @@ test -f "$readme" || {
     exit 1
 }
 
-# One pass over the file emits both streams -- `NAME` for membership, `BAD` for shape -- so the
-# two checks can never disagree about which lines are crate rows. Bounded to the "## Crates"
-# section so the README's other tables (the `mise run ...` command table) can never be mistaken
-# for a crate row.
+# One pass over the file emits every stream -- `NAME` for membership, `BAD` for shape, `DELIM` for
+# the table delimiter -- so the checks can never disagree about which lines are crate rows.
+# Bounded to the "## Crates" section so the README's other tables (the `mise run ...` command
+# table) can never be mistaken for a crate row.
 #
 # LC_ALL=C makes every regexp below byte-wise, which is what the octal escapes assume; the awk
 # is POSIX (no gensub, no interval expressions, dynamic regexps built as strings) so it behaves
@@ -68,6 +76,7 @@ scan="$(
             # An escaped pipe is content, not a column separator, so it is swapped for a control
             # byte before the split and swapped back before the cell is judged.
             SENTINEL = "\001"
+            CR = sprintf("%c", 13)
             # ASCII space and every C0/DEL control byte.
             ASCII_BLANK = "[ \001-\037\177]"
             # The UTF-8 encodings of the Unicode blanks a Markdown renderer shows as nothing:
@@ -112,9 +121,29 @@ scan="$(
             return 1
         }
 
-        # Empty means "carries no character that is neither whitespace nor a control code".
+        # A GFM delimiter row for a three-column table: pipe-separated cells that are nothing but
+        # dashes, with an optional alignment colon at either end.
+        function is_delim(line,   t, k, c, i, cells) {
+            t = line
+            sub(/^ */, "", t)
+            sub(/[ \t]*$/, "", t)
+            if (substr(t, 1, 1) != "|") { return 0 }
+            if (substr(t, length(t), 1) == "|") { t = substr(t, 1, length(t) - 1) }
+            k = split(t, c, "|")
+            cells = 0
+            for (i = 2; i <= k; i++) {
+                if (c[i] !~ /^ *:?-+:? *$/) { return 0 }
+                cells++
+            }
+            return (cells == 3)
+        }
+
+        # Empty means "renders as nothing": nothing survives once HTML tags, the Unicode blanks a
+        # renderer collapses, and the ASCII blanks and control bytes are taken out. A cell holding
+        # only <span></span> or a lone <br/> is therefore empty, because that is what a reader sees.
         function is_blank(cell,   c) {
             c = cell
+            gsub(/<[^<>]*>/, "", c)
             gsub(UNI_BLANK, " ", c)
             gsub(ASCII_BLANK, "", c)
             return c == ""
@@ -122,6 +151,9 @@ scan="$(
 
         {
             line = $0
+            if (substr(line, length(line), 1) == CR) {
+                line = substr(line, 1, length(line) - 1)
+            }
 
             # Inside a fenced block nothing else is syntax -- not a heading, not a comment, not a
             # row -- until the fence closes.
@@ -144,8 +176,14 @@ scan="$(
             if (line ~ /^## Crates$/) { in_section = 1; next }
             if (line ~ /^## /)        { in_section = 0; next }
             if (!in_section)          { next }
-            if (line !~ /^\| *`[a-z0-9-]+` *\|/) { next }
 
+            # Only a delimiter standing ABOVE the first crate row can be this table delimiter,
+            # so it is recorded before any row is seen and reported once at END.
+            if (nrows == 0 && is_delim(line)) { delim = 1; next }
+
+            if (line !~ /^\| *`[A-Za-z0-9_-]+` *\|/) { next }
+
+            nrows++
             row = line
             gsub(/\\\|/, SENTINEL, row)
             n = split(row, cell, "|")
@@ -164,15 +202,19 @@ scan="$(
             if (is_blank(purpose)) { print "BAD\t" name " has an empty Purpose cell" }
             if (is_blank(status))  { print "BAD\t" name " has an empty Status cell" }
         }
+
+        END { if (delim) { print "DELIM\tok" } }
     ' "$readme"
 )"
 
 rows="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "NAME" { print $2 }')"
 malformed="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "BAD" { print $2 }')"
+delimiter="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "DELIM" { print $2 }')"
 
 test -n "$rows" || {
     echo "check-readme-crates: found no crate rows under '## Crates' in $readme"
-    echo "  a row inside an HTML comment or a fenced code block does not count as a row."
+    echo "  either the '## Crates' heading is missing or is not exactly that, or every row under"
+    echo "  it is hidden: a row inside an HTML comment or a fenced code block does not count."
     exit 1
 }
 
@@ -182,6 +224,13 @@ if [ -n "$malformed" ]; then
     fail=1
     echo "check-readme-crates: malformed crate rows in the $readme crates table:"
     echo "$malformed" | sed 's/^/  /'
+fi
+
+if [ -z "$delimiter" ]; then
+    fail=1
+    echo "check-readme-crates: the $readme crates table has no '| --- | --- | --- |' delimiter"
+    echo "  row above its first crate row. Without it Markdown renders the whole table as a"
+    echo "  paragraph of literal pipes, so every row below it documents nothing."
 fi
 
 # LC_ALL=C throughout: `comm` exits non-zero on input it considers unsorted, and jq's `sort_by`
@@ -220,9 +269,10 @@ if [ -n "$missing" ]; then
     fail=1
     echo "check-readme-crates: workspace crates with no row in the $readme crates table:"
     echo "$missing" | sed 's/^/  /'
-    echo "  add a row (Crate | Purpose | Status). Its authority is the crate's own lib.rs, then"
-    echo "  its Cargo.toml, and its STATUS.md only where those are silent -- a STATUS.md can"
-    echo "  itself be stale, so the row must be true of the crate, not faithful to a file."
+    echo "  add a row (Crate | Purpose | Status). Its authority is the crate's own source -- the"
+    echo "  code that ships. Read lib.rs, then Cargo.toml, then STATUS.md, but trust none of them"
+    echo "  over the crate: each is a summary and any of them can be stale, so the row must be"
+    echo "  true of the crate rather than faithful to a file."
 fi
 
 phantom="$(compare -13)"

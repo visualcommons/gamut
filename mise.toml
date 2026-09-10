@@ -297,19 +297,19 @@ description = "Enforce the mechanical test conventions in docs/testing.md"
 run = "./tooling/check-tests/run.sh"
 
 # Nothing read the README crates table, so it drifted: fixing issue #425 meant correcting
-# eighteen rows and adding four crates that had no row at all. `versions` only lists
-# `name version` and asserts nothing, and `check-msrv` greps the README for one number, so
-# neither would have caught it. This gates the table's *membership* -- every workspace crate has a
-# row, every row names a real crate, no crate twice -- and each crate row's *shape*: three cells
-# whose Purpose and Status each carry a character that is neither whitespace nor a control code,
-# and not hidden inside an HTML comment or a code fence. It gates neither the prose nor the
-# table's header/delimiter rows, so a green run means "every crate has a well-formed row", not
-# "the table renders" and not "the table is true". A row's prose has authority in this order: the
-# crate's own lib.rs, then its Cargo.toml, then its STATUS.md where those two are silent -- a
-# STATUS.md can itself be stale (issue #545), so a row must be true of the crate rather than
-# faithful to a file.
+# twenty-three of its twenty-eight rows and adding four crates that had no row at all. `versions`
+# only lists `name version` and asserts nothing, and `check-msrv` greps the README for one number,
+# so neither would have caught it. This gates the table's *membership* -- every workspace crate
+# has a row, every row names a real crate, no crate twice -- each crate row's *shape* (three cells
+# whose Purpose and Status each render as something, and not hidden inside an HTML comment or a
+# code fence), and the `| --- | --- | --- |` delimiter row, without which every row below renders
+# as literal text. It gates nothing about the prose, so a green run means "every crate has a
+# well-formed row", not "the table is true". A row's prose answers to the crate's own source --
+# the code that ships. lib.rs, then Cargo.toml, then STATUS.md is where to look, but each is a
+# summary and any of them can be stale (issues #545, #560), so a row must be true of the crate
+# rather than faithful to a file.
 [tasks.check-readme-crates]
-description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, and gives each crate a three-cell row with a non-empty Purpose and Status"
+description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, stands under its delimiter row, and gives each crate a three-cell row whose Purpose and Status render as something"
 run = "./tooling/check-readme-crates/run.sh"
 
 [tasks.check-release-deps]
