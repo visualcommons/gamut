@@ -39,9 +39,10 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
   `Iptc4xmpExt:ArtworkOrObject` and `plus:Licensor` as typed projections over the XMP graph, in the
   `from_xmp`/`to_xmp` shape `gamut_exif::GpsInfo` uses for its sub-IFD. Every one is XMP-only — none
   carries an `IIMid` — so none extends the reconciliation surface; `tests/techreference.rs` pins
-  that, and each structure's field set, to the reference. Each keeps the fields it does not model in
-  its `other` list and re-emits them verbatim, so a read-modify-write does not drop a vendor
-  extension.
+  that, and each structure's field set, to the reference. Each of the seven types keeps in its
+  `other` list every field its typed read took no value from — a field the model does not name, and
+  equally one it names but cannot read — and re-emits it verbatim, so a read-modify-write does not
+  drop a vendor extension or a value the model cannot express.
 - **IIM tag table.** `iim::IimTagInfo` now names every dataset IPTC-IIM 4.2 states an octet maximum
   for that `max_octets` can hold: 14 Envelope + 56 Application datasets (chapters 5 and 6 bar
   `2:202`), plus `7:10` Size Mode, the one dataset outside those chapters whose length the spec
@@ -52,8 +53,10 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
   of the record-1/2 table comes from `iim-4.2.pdf`, which is not machine-readable. Its guard is
   `iim`'s own `tag_table_matches_the_exiv2_dataset_table`, which parses exiv2's independent
   transcription of the same chapters out of the vendored `third_party/exiv2` sources and compares
-  every row's octet maximum, repeatability and value kind — a mis-transcribed maximum fails there,
-  which no round trip can see. The structural laws (ordering, uniqueness, the fixed date/time form
+  every row column for column — dataset name, octet maximum, repeatability and value kind. A
+  mis-transcribed maximum or a mistyped name fails there, which no round trip can see. exiv2 titles
+  28 of the 70 shared datasets more briefly than IIM 4.2 names them; those rows pin both spellings,
+  so every name in the table is pinned either way. The structural laws (ordering, uniqueness, the fixed date/time form
   lengths) and the exiv2 wire differential in `tests/oracle.rs` sit alongside it.
 
 ## Deferred / out of scope
