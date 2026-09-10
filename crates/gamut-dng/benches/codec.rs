@@ -123,7 +123,9 @@ impl Photometry {
 
 impl std::fmt::Display for Photometry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+        // `pad`, not `write_str`: the latter goes straight to the underlying buffer and drops the
+        // formatter's width and alignment, so a `{:<26}` column would not line up.
+        f.pad(match self {
             Photometry::Cfa => "cfa",
             Photometry::LinearRaw => "linear-raw",
         })
@@ -161,12 +163,14 @@ impl Case {
 impl std::fmt::Display for Case {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let scheme = match self.compression {
-            Compression::Uncompressed => "uncompressed",
-            Compression::Deflate => "deflate",
-            Compression::LosslessJpeg => "lossless-jpeg",
-            other => return write!(f, "{}/{other:?}", self.photometry),
+            Compression::Uncompressed => "uncompressed".to_string(),
+            Compression::Deflate => "deflate".to_string(),
+            Compression::LosslessJpeg => "lossless-jpeg".to_string(),
+            other => format!("{other:?}"),
         };
-        write!(f, "{}/{scheme}", self.photometry)
+        // `pad`, not `write!`: `write!` writes through to the buffer and ignores the formatter's
+        // width, so the fixture table's `{case:<26}` column would not align.
+        f.pad(&format!("{}/{scheme}", self.photometry))
     }
 }
 
