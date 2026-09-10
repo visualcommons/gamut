@@ -402,17 +402,26 @@ removed or measured; none is left as an adjective.
   fairness claim needs only that the export path cannot account for a 30×-plus ratio — not a
   figure for what the export path costs. Earlier revisions of this section quoted 0.3–1.9 % as
   though it were the cost; it was two samples of a quantity at the noise floor.
-- **One measured path is not built from this repository, and it is a Deflate one.** `build.rs`
-  links the system libz dynamically (`-lz`), because the SDK includes `<zlib.h>` unconditionally.
-  So on the two `*/deflate` rows — and only there — the reference arm's speed is a property of the
-  machine, and even of the launcher: `cargo bench` puts every build script's native search path on
-  `LD_LIBRARY_PATH`, so it resolves whichever stock zlib another dev oracle has built under
-  `target/`, while running the same binary directly resolves the platform's. Measured here, that
-  choice moves the reference arm by 1.2–1.3× and moves gamut's arm not at all — enough to reverse
-  which side of 1.0 a Deflate row falls on, with no defect in either implementation. The harness
-  therefore prints the resolved library above its divan output (`zlibVersion()` plus the path
-  `dladdr` reports, since zlib-ng's compatibility build answers `"1.3.1"` exactly as stock zlib
-  does), and a Deflate figure below travels with the library it was taken against or not at all.
+- **On the Deflate rows neither arm's inflate is gamut-authored, and only one of the two is
+  pinned.** `gamut-deflate` is deliberately encoder-only, so this crate inflates with
+  `miniz_oxide`; the oracle's `build.rs` links the system libz dynamically (`-lz`), because the
+  SDK includes `<zlib.h>` unconditionally. A `*/deflate` row is therefore **`miniz_oxide` against
+  whatever libz the loader resolved** — not gamut's own codec against the SDK's. The distinction
+  that decides whether the row is reproducible is **pinning**, not authorship: `miniz_oxide` is
+  pinned by `Cargo.lock` to one version and one checksum, so every run of this harness anywhere
+  inflates with the same code, while the system libz is pinned by nothing. Not by a version —
+  zlib-ng's compatibility build answers `zlibVersion()` with `"1.3.1"`, exactly as stock zlib does
+  — and not even by the machine: `cargo bench` puts every build script's native search path on
+  `LD_LIBRARY_PATH`, so it resolves whichever stock zlib a dev oracle in the graph has built under
+  `target/` (`gamut-dng` dev-depends on `libtiff-oracle`, which builds one, so `cargo bench -p
+  gamut-dng` on its own is enough), while running the same binary directly resolves the platform's.
+  Measured here, that choice moves the reference arm by 1.2–1.3× and moves gamut's arm not at all —
+  enough to reverse which side of 1.0 a Deflate row falls on, with no defect in either
+  implementation. The harness therefore prints the resolved library above its divan output
+  (`zlibVersion()` plus the path `dladdr` reports, since the version string cannot tell the two
+  builds apart) and **warns when that path lies inside a build directory**, because a resolution
+  that came from the build graph rather than from the platform is one nobody else reproduces. A
+  Deflate figure below travels with the library it was taken against or not at all.
 
 **Each pair is one benchmark, not two.** `decode_dng` and `decode_lossless_jpeg` take the
 implementation as a divan *argument* rather than living in a benchmark each. Separate benchmarks
