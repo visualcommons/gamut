@@ -737,6 +737,12 @@ fn inspect_heic(path: &std::path::Path, data: &[u8], route: HeicRoute) -> Result
     // fifty thousand of them puts the headline — disclaimer and all — at line 2 of fifty thousand.
     // The summary lines are never capped: there are at most two of them whatever the file holds,
     // and the first is the one a reader must not lose.
+    //
+    // What keeps the cap honest is entirely in `gamut-heic`. The headline names *every* non-empty
+    // category, so a whole class of box cannot go unmentioned however the cut falls; and the detail
+    // lines arrive in true file order, so the cut hides the file's last boxes rather than one kind
+    // of box. One budget over one file-ordered list is therefore enough, and a second per-category
+    // budget would only add a number to keep in step with this one.
     let summary = container.c2pa_summary();
     for line in summary.summary_lines() {
         println!("  {line}");

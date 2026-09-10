@@ -318,7 +318,7 @@ fn a_uuid_box_of_another_extended_type_reaches_stdout_as_a_count() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        stdout.contains("other top-level uuid boxes: 1"),
+        stdout.contains("top-level uuid boxes of another extended type: 1"),
         "the near miss must be visible at all: {stdout}"
     );
     assert!(
@@ -349,4 +349,95 @@ fn the_label_says_whether_the_format_was_detected_or_asserted() {
         forced_stdout.contains("HEIF/HEIC (asserted by --format, not detected)"),
         "a forced container must say the format was asserted: {forced_stdout}"
     );
+}
+
+#[test]
+fn the_headline_names_a_class_of_box_the_cap_hides_entirely() {
+    // The shape the cap can swallow whole: enough legal stores to fill the list, and one C2PA box
+    // no store could be read from sitting behind them. Twenty store-shaped boxes need no
+    // malformity — §A.5.3 permits any number — so this is a file anyone can build, and the report
+    // it used to get was a clean bill of health: twenty stores, exit 0, not one word about the box
+    // gamut could not read through. The headline states both classes, which is what a truncated
+    // list cannot take away.
+    let mut boxes: Vec<Vec<u8>> = (0..MAX_LIST)
+        .map(|_| {
+            uuid_box(
+                &C2PA_UUID,
+                0,
+                "manifest",
+                &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+            )
+        })
+        .collect();
+    // §A.5.1.2 fixes the `FullBox` version at zero, so this last box yields no store.
+    boxes.push(uuid_box(
+        &C2PA_UUID,
+        1,
+        "manifest",
+        &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+    ));
+    let file = splice_after_ftyp(&heic_file(), &boxes);
+    let out = run_inspect("hidden-class.heic", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The cap really does hide it: the box is last in file order, so no line of its own survives.
+    assert_eq!(stdout.matches("unread C2PA box at").count(), 0, "{stdout}");
+    assert!(stdout.contains("… and 1 more"), "{stdout}");
+    // And the headline still says the class exists, on the line a reader meets first.
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[1].contains("20 manifest stores located"), "{stdout}");
+    assert!(
+        lines[1].contains("1 C2PA box is present from which no store could be read"),
+        "the headline must name the class the cap hid: {stdout}"
+    );
+    assert!(
+        lines[1].contains("NOT absence of provenance"),
+        "and must not let it be read as absence: {stdout}"
+    );
+}
+
+#[test]
+fn the_capped_list_is_the_files_first_boxes_and_not_its_first_stores() {
+    // File order, end to end. An unreadable box ahead of the stores gets its line where the file
+    // puts it, so the cut is category-blind: it hides the file's last boxes, whatever kind they
+    // are, instead of systematically favouring one kind.
+    let mut boxes: Vec<Vec<u8>> = vec![uuid_box(
+        &C2PA_UUID,
+        1,
+        "manifest",
+        &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+    )];
+    boxes.extend((0..MAX_LIST).map(|_| {
+        uuid_box(
+            &C2PA_UUID,
+            0,
+            "manifest",
+            &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+        )
+    }));
+    let file = splice_after_ftyp(&heic_file(), &boxes);
+    let out = run_inspect("file-order.heic", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let details: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("unread C2PA box at") || line.contains("box_purpose"))
+        .collect();
+    assert_eq!(details.len(), MAX_LIST, "{stdout}");
+    assert!(
+        details[0].contains("unread C2PA box at"),
+        "the file's first box is the report's first entry: {stdout}"
+    );
+    // One store is past the cut, so the tail counts it and no kind was hidden as a kind.
+    assert!(stdout.contains("… and 1 more"), "{stdout}");
 }
