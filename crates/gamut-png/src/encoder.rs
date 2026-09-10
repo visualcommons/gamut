@@ -109,9 +109,9 @@ struct MetadataView<'a> {
 /// left behind from one that reached the output with a caveat on it.
 ///
 /// This is deliberately **not** an error channel. The only thing that stops an encode is a null
-/// byte in a text field, which makes the chunk re-parse as a different annotation; everything
-/// here is something a caller has to *know*, not something that should fail a conversion whose
-/// pixels are fine.
+/// byte in a *keyword* — a field a null separator ends, so the chunk would re-parse as a
+/// different annotation; everything here is something a caller has to *know*, not something that
+/// should fail a conversion whose pixels are fine.
 ///
 /// `#[repr(u8)]` with explicit discriminants, which are permanent and append-only: the value
 /// crosses the C ABI as a plain integer.
@@ -156,6 +156,17 @@ pub enum MetadataNotice {
     /// An XMP packet left behind because it is not UTF-8. §11.3.3.4 gives the `iTXt` text field
     /// UTF-8 and no alternative, so there is no chunk to frame it in.
     XmpNotUtf8 = 7,
+    /// A text annotation left behind because its **text string** holds a null character, which
+    /// §11.3.3.2 ("Neither the keyword nor the text string may contain a null character") and
+    /// §11.3.3.4 ("neither shall contain a zero byte") both forbid.
+    ///
+    /// Unlike a null in a keyword this re-frames nothing — the text is last and "not
+    /// null-terminated (the length of the chunk defines the ending)" — so it does not fail the
+    /// encode. It is not written either: readers disagree about what such a chunk holds, libpng
+    /// truncating the text at the null where this crate's reader returns it whole, so the
+    /// annotation is dropped rather than written into a file whose meaning depends on who reads
+    /// it.
+    TextStringNull = 8,
 }
 
 impl MetadataNotice {
@@ -192,6 +203,10 @@ impl MetadataNotice {
             }
             Self::XmpNotUtf8 => {
                 "XMP packet: not UTF-8, and an iTXt text string must be (§11.3.3.4)"
+            }
+            Self::TextStringNull => {
+                "text annotation: its text string contains a null character, which no text chunk \
+                 may hold (§11.3.3.2, §11.3.3.4)"
             }
         }
     }
@@ -585,12 +600,12 @@ impl PngEncoder {
     ///
     /// A text annotation whose keyword or XMP packet §11.3.3 does not endorse is reported through
     /// the same channel rather than failing the carry: a keyword outside §11.3.3.1's repertoire
-    /// or spacing rules is written as it arrived, a keyword no chunk can hold and an XMP packet
-    /// that is not UTF-8 are left behind, and
-    /// [`MetadataNotice::carried`](MetadataNotice::carried) says which happened. **Only a null**
-    /// in a keyword or text string fails the encode with [`Error::InvalidInput`] naming the
-    /// annotation — the null is the field separator, so the chunk would be read back as a
-    /// *different* annotation, which no notice can undo.
+    /// or spacing rules is written as it arrived, while a keyword no chunk can hold, a text
+    /// string holding a null and an XMP packet that is not UTF-8 are left behind, and
+    /// [`MetadataNotice::carried`](MetadataNotice::carried) says which happened. **Only a null in
+    /// a keyword** — or in an `iTXt` translated keyword — fails the encode with
+    /// [`Error::InvalidInput`] naming the annotation: those fields end at their first null, so
+    /// the chunk would be read back as a *different* annotation, which no notice can undo.
     ///
     /// One further limit is the read side's, not this method's: `pHYs`, `tIME`, `sBIT` and `bKGD`
     /// are not part of [`PngMetadata`], so they cannot be carried here (set them with their own
