@@ -84,6 +84,10 @@ impl Matcher {
     /// Matches never extend past `limit` (`<= data.len()`), so a caller parsing one span of a
     /// larger buffer cannot emit a token that runs off the end of its span. Candidates *behind*
     /// `pos` are unrestricted, which is what lets a span reference the history before it.
+    ///
+    /// Each surviving candidate is measured with [`common_prefix_len`], eight bytes per step. The
+    /// prune in front of it is still a single byte: it rejects most candidates outright, and a
+    /// wide read there would touch bytes past `best_len` for nothing.
     fn find(&self, data: &[u8], pos: usize, max_chain: usize, limit: usize) -> Option<(u16, u16)> {
         if pos + MIN_MATCH > limit {
             return None;
@@ -100,11 +104,12 @@ impl Matcher {
                 break; // out of window; chain only gets older from here
             }
             // Prune: a candidate can only win if it matches at the byte just past the current best.
-            if best_len < max_len && data[c + best_len] == data[pos + best_len] {
-                let mut len = 0usize;
-                while len < max_len && data[c + len] == data[pos + len] {
-                    len += 1;
-                }
+            // `best_len < max_len` holds throughout the loop -- it starts at `MIN_MATCH - 1 < 3 <=
+            // max_len`, and a match that reaches `max_len` breaks out below before it is stored --
+            // so both reads stay inside the two `max_len` windows compared next.
+            if data[c + best_len] == data[pos + best_len] {
+                // `c < pos`, so both windows end at or before `limit <= data.len()`.
+                let len = common_prefix_len(&data[c..c + max_len], &data[pos..pos + max_len]);
                 if len > best_len {
                     best_len = len;
                     best_dist = pos - c;
@@ -125,6 +130,35 @@ impl Matcher {
             None
         }
     }
+}
+
+/// Length of the common prefix of `a` and `b` (bounded by the shorter), i.e. the index of the
+/// first byte at which they differ.
+///
+/// This is the match finder's inner loop, run once per surviving chain candidate — up to
+/// `max_chain` (1024 at `Level::Best`) times per input position — so it compares **eight bytes per
+/// step** instead of one: both windows are read as a `u64`, and where they differ the first
+/// mismatching byte is the lowest set byte of the XOR, which `trailing_zeros / 8` locates because
+/// `from_le_bytes` puts byte 0 in the least significant lane (the same on every target). The
+/// remaining `< 8` bytes are compared one at a time. The result is exactly what a byte-by-byte
+/// walk would return — this changes how fast a match is measured, never which match is found.
+fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let (a_words, a_tail) = a[..n].as_chunks::<8>();
+    let (b_words, b_tail) = b[..n].as_chunks::<8>();
+    let mut len = 0usize;
+    for (x, y) in a_words.iter().zip(b_words) {
+        let diff = u64::from_le_bytes(*x) ^ u64::from_le_bytes(*y);
+        if diff != 0 {
+            return len + (diff.trailing_zeros() / 8) as usize;
+        }
+        len += 8;
+    }
+    len + a_tail
+        .iter()
+        .zip(b_tail)
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 /// Parses `data` into an LZ77 token stream, searching up to `max_chain` candidates per position.
@@ -347,6 +381,34 @@ mod tests {
             }
         }
         out
+    }
+
+    /// `common_prefix_len` must return the index of the first differing byte wherever it falls: in
+    /// the first eight-byte word, in a later word, or in the sub-word tail. The bytes are non-zero
+    /// with several bits set, so an `|`/`&` in place of the XOR reports a difference where there is
+    /// none, and the flipped bit is bit 0 of its byte, so `trailing_zeros % 8` (0) disagrees with
+    /// `trailing_zeros / 8` (the byte index) at every offset that is not a multiple of eight.
+    #[test]
+    fn common_prefix_len_locates_the_first_difference_at_every_offset() {
+        let a: Vec<u8> = (0..19u8).map(|i| 0x5A ^ i.wrapping_mul(0x33)).collect();
+        assert!(a.iter().all(|&b| b != 0));
+        for k in 0..a.len() {
+            let mut b = a.clone();
+            b[k] ^= 0x01;
+            assert_eq!(common_prefix_len(&a, &b), k, "difference at offset {k}");
+        }
+    }
+
+    /// Windows that never differ measure their whole common length: ending mid-word (the tail is
+    /// walked to its end), on a word boundary (there is no tail), and when one window is longer
+    /// (the result is bounded by the shorter). A boundary pin, not a mutant killer: the sweep above
+    /// already kills every operator mutant, and this names the no-difference return it cannot reach.
+    #[test]
+    fn common_prefix_len_of_identical_windows_is_their_whole_length() {
+        let a: Vec<u8> = (0..19u8).map(|i| 0xA5 ^ i.wrapping_mul(0x33)).collect();
+        assert_eq!(common_prefix_len(&a, &a), 19);
+        assert_eq!(common_prefix_len(&a[..16], &a[..16]), 16);
+        assert_eq!(common_prefix_len(&a[..11], &a), 11);
     }
 
     #[test]
