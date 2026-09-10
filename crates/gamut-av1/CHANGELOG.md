@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/visualcommons/gamut/compare/gamut-av1-v0.4.1...gamut-av1-v0.5.0) - 2026-09-10
+
+### Added
+
+- *(av1)* parse OBUs and the AV1 sequence and frame headers
+- *(av1)* [**breaking**] give every coded plane its own sample geometry
+- *(av1)* adapt CDFs while coding tiles
+- *(core)* add structured error diagnostics
+
+### Fixed
+
+- *(av1)* name monochrome when the decoder refuses a monochrome stream
+- *(av1)* check every OBU's trailing bits against its declared size
+
+### Other
+
+- *(av1)* separate CDF adaptation from context independence
+- merge feat/397-avif-alpha-aux into feat/398-av1-high-bitdepth
+- Merge pull request #403 from visualcommons/feat/391-avif-422-profile2
+- Merge pull request #402 from visualcommons/feat/390-avif-420-profile0
+- *(av1)* kill the mutants the header layer pulled into the diff
+- *(av1)* supply the monochrome flag at the header parse call sites
+- Merge remote-tracking branch 'origin/master' into feat/259-avif-decoder
+- *(av1)* kill the surviving tile-spacing and lr_params mutants
+- *(av1)* cover the header syntax the encoders never emit
+- *(av1)* check the decoder's header layer against libaom
+- Merge pull request #394 from visualcommons/feat/389-av1-per-plane-geometry
+- *(av1)* kill the mutants the geometry refactor pulled into the diff
+- Merge branch 'master' into feat/335-avif-ycbcr-matrix
+- *(av1)* record CDF adaptation in STATUS and README
+
 ## [0.4.1](https://github.com/justin13888/gamut/compare/gamut-av1-v0.4.0...gamut-av1-v0.4.1) - 2026-07-20
 
 ### Other

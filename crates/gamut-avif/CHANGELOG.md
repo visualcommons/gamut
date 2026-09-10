@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-avif-v1.1.0...gamut-avif-v2.0.0) - 2026-09-10
+
+### Added
+
+- *(avif)* lower high-bit-depth jobs across the codec-abi seam
+- *(avif)* [**breaking**] honour with_chroma on the 16-bit input path
+- *(avif)* [**breaking**] default lossy output to 4:2:0 and expose the chroma format
+- *(gamut-avif)* add the high-bit-depth RGBA16 presentation surface
+- *(core)* add structured error diagnostics
+- *(gamut-isobmff)* parse large and uuid boxes
+
+### Fixed
+
+- *(avif)* send the backend the chroma the planes actually carry
+
+### Other
+
+- *(avif)* close the crate's first mutation survey
+- *(isobmff)* drop imports the moved tests no longer use
+- *(isobmff)* share the segment walk with avif and heic
+- *(avif)* separate grid cropping from tile placement
+- *(avif)* pin the sequence-header chroma derivation directly
+- merge feat/398-av1-high-bitdepth into feat/399-avif-16bit-inputs
+- merge feat/397-avif-alpha-aux into feat/398-av1-high-bitdepth
+- merge origin/master into feat/397-avif-alpha-aux
+- Merge pull request #403 from visualcommons/feat/391-avif-422-profile2
+- Merge pull request #402 from visualcommons/feat/390-avif-420-profile0
+- *(avif)* say precisely when with_chroma is ignored
+- Merge remote-tracking branch 'origin/master' into feat/390-avif-420-profile0
+- close the remaining chroma mutation gaps
+- merge origin/master into feat/390-avif-420-profile0
+- cover the chroma derivations directly, not through an encode
+- Merge pull request #394 from visualcommons/feat/389-av1-per-plane-geometry
+- derive chroma plane sizes from one shared rule
+- adopt as_chunks for constant-size slice chunking
+- Merge branch 'master' into feat/335-avif-ycbcr-matrix
+- Merge pull request #360 from visualcommons/feat/303-high-bit-depth-presentation
+- pin the blend rounding and the high-bit-depth paths mutation testing missed
+- record the high-bit-depth presentation surface in STATUS and READMEs
+
 ## [1.1.0](https://github.com/justin13888/gamut/compare/gamut-avif-v1.0.0...gamut-avif-v1.1.0) - 2026-07-20
 
 ### Added

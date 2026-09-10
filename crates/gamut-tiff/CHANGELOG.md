@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/visualcommons/gamut/compare/gamut-tiff-v1.0.0...gamut-tiff-v1.1.0) - 2026-09-10
+
+### Added
+
+- *(tiff)* add the TiffInfo pre-decode probe
+- *(tiff)* encode 16-bit grayscale, RGB and RGBA
+- *(tiff)* decode 16-bit grayscale, RGB, RGBA and CMYK samples
+- *(tiff)* add the SampleFormat tag type and reject non-integer samples
+- *(core)* add structured error diagnostics
+- *(gamut-tiff)* support deflate compression
+
+### Fixed
+
+- *(tiff)* stop LZW decoding once the strip is satisfied
+- *(tiff)* reject non-progressing CCITT runs
+
+### Other
+
+- *(tiff)* re-attach a #[test] this branch had split off
+- *(tiff)* diagnose the audit's three sub-IFD findings
+- *(tiff)* pin the LZW decoder's 12-bit code-width cap
+- *(tiff)* assert the archival verdict through its public wrapper
+- *(tiff)* the fifth and last shift-or equivalent
+- *(tiff)* pin T.6's vertical code table and PackBits' two-run rule
+- *(tiff)* pin the SHORT/LONG boundary, and a fourth shift-or equivalent
+- *(tiff)* two more CCITT equivalents, removed rather than excluded
+- *(tiff)* pin the 64 make-up boundary and the half-present tile pair
+- *(tiff)* assert LZW compresses, the third encoder to hide behind a round trip
+- *(tiff)* assert LZW's width bound at compile time instead of guarding it
+- *(tiff)* pin that G4 chooses pass mode, which no oracle could see
+- *(tiff)* make two G4 colour decisions falsifiable
+- *(tiff)* assert PackBits actually compresses, not just that it round-trips
+- *(tiff)* share the two patterns the libtiff cross-checks both use
+- adopt as_chunks for constant-size slice chunking
+- *(tiff)* pin the 16-bit CMYK narrowing to its depth policy
+- merge origin/master into feat/268-pixel-conversion
+- *(tiff)* pin which guard rejects a mismatched sample count
+- *(tiff)* record 16-bit sample support in the scope ledger
+- *(tiff)* extract page-header parsing from the decode funnel
+- *(tiff)* scope the decode-size guard to a named helper
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-tiff-v0.2.0...gamut-tiff-v1.0.0) - 2026-07-18
 
 ### Added

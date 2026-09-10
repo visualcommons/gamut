@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/visualcommons/gamut/compare/gamut-jxl-sys-v0.1.0...gamut-jxl-sys-v0.1.1) - 2026-09-10
+
+### Added
+
+- *(jxl-sys)* declare the MODULAR frame-setting id
+
+### Fixed
+
+- *(oracles)* bound every native build by the shared parallelism dial
+- *(jxl-sys)* stop overriding the caller's cmake build parallelism
+
 ## [0.1.0](https://github.com/justin13888/gamut/releases/tag/gamut-jxl-sys-v0.1.0) - 2026-07-18
 
 ### Added

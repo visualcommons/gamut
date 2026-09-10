@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/visualcommons/gamut/compare/gamut-codec-abi-v0.1.1...gamut-codec-abi-v0.1.2) - 2026-09-10
+
+### Other
+
+- *(codec-abi)* cover the borrowed-backend blanket impls
+- *(codec-abi)* split the seam's tests by the claim each one pins
+
 ## [0.1.1](https://github.com/justin13888/gamut/compare/gamut-codec-abi-v0.1.0...gamut-codec-abi-v0.1.1) - 2026-07-21
 
 ### Other

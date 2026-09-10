@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-metadata-v1.0.0...gamut-metadata-v2.0.0) - 2026-09-10
+
+### Added
+
+- *(metadata)* add the C2PA manifest store as a fourth carrier
+- *(metadata)* [**breaking**] carry downstream typed models in a namespaced extension table
+
+### Other
+
+- *(metadata)* pin that remove_extension matches on namespace AND key
+- *(metadata)* pin each extension-removal claim separately
+- *(metadata)* cite the clause that defines the C2PA manifest store
+- *(metadata)* state what the C2PA carrier actually guarantees
+- *(metadata)* explain the C2PA carrier and the keystone carve-out
+- *(metadata)* cover the C2PA carrier and its no-copy-forward policy
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-metadata-v0.1.1...gamut-metadata-v1.0.0) - 2026-07-18
 
 ### Added

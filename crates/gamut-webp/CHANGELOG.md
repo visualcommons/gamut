@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.1...gamut-webp-v0.4.0) - 2026-09-10
+
+### Added
+
+- *(webp)* [**breaking**] require an explicit policy for lossy presentation
+- *(core)* add structured error diagnostics
+
+### Fixed
+
+- *(webp)* guarantee the run-length loop advances
+- *(webp)* discard a zero-length LZ77 match instead of looping on it
+
+### Other
+
+- *(webp)* band the segmentation fixture across all four segments
+- *(webp)* re-attach a #[test] and drop a one-element loop
+- *(webp)* pin the entropy image's block-size field
+- *(webp)* pin the degenerate histograms, and count used symbols with !=
+- *(webp)* mask the LZ77 extra bits instead of subtracting an offset
+- *(webp)* write the partition size as little-endian bytes
+- *(webp)* reconstruct a macroblock that is both B_PRED and skipped
+- *(webp)* write the bool decoder's range doubling as a multiply
+- *(webp)* read the partition size as one integer, and pin its high byte
+- *(webp)* drop a cache-bits guard the constructor already makes
+- *(webp)* size the prefix-code descriptions, and name the trim's floor
+- *(webp)* pin the segmented stream, which nothing else could see
+- *(webp)* pin the canonical code assignment for a sparse alphabet
+- *(webp)* separate the decode and encode poisoning paths
+- *(webp)* use is_multiple_of in the break-even search
+- *(webp)* pin the deferral's strictness and exclude the equivalent mutants
+- *(webp)* pin the deferred parse's tokens, not just that it differs
+- *(webp)* drive the lazy parse and cache deltas directly
+- *(webp)* add the tiled fixture for the VP8L parse plans
+- *(webp)* add the smooth high-quality fixture to the effort pins
+- *(webp)* give the effort pins fixtures the decisions are visible in
+- *(webp)* pin the effort ladder's output and its boundary decisions
+- merge origin/master into feat/261-webp-encoder-knobs
+- adopt as_chunks for constant-size slice chunking
+- close the mutation-testing gaps in the conversion paths
+- merge origin/master into feat/268-pixel-conversion
+
 ## [0.3.1](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.0...gamut-webp-v0.3.1) - 2026-07-30
 
 ### Added

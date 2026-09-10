@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/visualcommons/gamut/compare/gamut-exif-v1.0.0...gamut-exif-v1.1.0) - 2026-09-10
+
+### Added
+
+- *(gamut-exif)* convert gps metadata to geocoordinates
+
+### Other
+
+- *(exif)* close the survivors of this crate's first mutation survey
+- *(exif)* separate what equality covers from what it ignores
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-exif-v0.1.1...gamut-exif-v1.0.0) - 2026-07-18
 
 ### Added
