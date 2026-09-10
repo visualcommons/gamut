@@ -109,6 +109,22 @@ exclude_re = [
     # set-equality test missed it, but the canonical form is not. `subtract_is_the_set_difference`
     # kills it and shrinks to `reads = [{2747, 103}], claims = [{2748, 0}]`.
     'replace match guard r\.start <= last\.end\(\) with false in ReadLedger::subtract',
+    # gamut-ifd `next_live_claim` -- a non-terminating mutant, not a behavioural escape. The
+    # function drops the claims that end at or before `pos`, and that is what leaves
+    # `ReadLedger::subtract`'s covered arm a claim ending *after* `pos`, so that `pos = r.end()`
+    # advances. Relaxing `<=` to `>` keeps a settled claim at the head instead: the covered arm
+    # then assigns `pos` the value it already holds, the walk stops making progress, and
+    # cargo-mutants can report it only as a TIMEOUT -- no finite test can observe an output that
+    # is never produced. The skip lives in its own three-line function precisely so this entry is
+    # anchored to a name rather than a line: `subtract` has two other `<=` comparisons (the
+    # claim-merge guard and the covered-arm test) whose `>` twins ARE caught, and a name-anchored
+    # entry here cannot reach them. The *body* mutant is NOT excluded -- `with None` says no claim
+    # covers anything, the walk then reports every read as unclaimed, and
+    # `subtract_reports_exactly_the_unclaimed_reads` kills it. Bounding the walk by a slice
+    # instead (`partition_point` per span) was considered and rejected: it only moves the problem,
+    # trading this hang for an equivalent mutant at the `r.end() == span.start` boundary, where
+    # including or excluding an already-settled claim cannot change the output either way.
+    'replace <= with > in next_live_claim',
     # gamut-dng rewrite::write — the pin-fallback match guard. With `pin == None` the guard is
     # the only difference between "return the error" and "retry the identical un-pinned write
     # and return its (identical) error": `write_with` is deterministic in its inputs, so forcing

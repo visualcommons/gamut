@@ -10,6 +10,9 @@
 //! [`Rebased`](crate::Rebased) views layered on `&mut Tracked<…>` delegate down, so reads made
 //! through a rebased view (a maker-note mini-IFD) land in the ledger at **physical** offsets.
 
+use core::iter::Peekable;
+use core::slice::Iter;
+
 use gamut_core::Result;
 
 use crate::segment::Range;
@@ -115,11 +118,7 @@ impl ReadLedger {
             let mut pos = span.start;
             let end = span.end();
             while pos < end {
-                // Skip claims entirely before `pos`.
-                while c.peek().is_some_and(|r| r.end() <= pos) {
-                    c.next();
-                }
-                match c.peek() {
+                match next_live_claim(&mut c, pos) {
                     Some(r) if r.start <= pos => {
                         // Covered up to the claim's end.
                         pos = r.end().min(end);
@@ -146,6 +145,23 @@ impl ReadLedger {
         }
         out
     }
+}
+
+/// The first claim at the head of `claims` that reaches past `pos`, dropping the ones that do
+/// not.
+///
+/// This exists as its own function because its comparison is the one thing in
+/// [`ReadLedger::subtract`] no test can pin. Dropping a settled claim is what leaves the walk's
+/// covered arm a claim that ends *after* `pos`, and so what makes `pos` advance; relax the
+/// comparison and the walk stops making progress instead of producing a wrong answer, which
+/// cargo-mutants can report only as a timeout (issue #110). Confining it here keeps the
+/// exclusion that documents it anchored to a name rather than to a line, and leaves every other
+/// comparison in `subtract` — all of them killable — outside its reach. Returning the surviving
+/// claim rather than nothing is what keeps the *body* mutant killable: `None` says "no claim
+/// covers anything", and the walk then reports every read as unclaimed.
+fn next_live_claim<'a>(claims: &mut Peekable<Iter<'a, Range>>, pos: u64) -> Option<&'a Range> {
+    while claims.next_if(|r| r.end() <= pos).is_some() {}
+    claims.peek().copied()
 }
 
 /// A [`ReadAt`] adaptor that records every successful read into a [`ReadLedger`].
