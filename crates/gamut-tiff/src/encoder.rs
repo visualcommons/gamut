@@ -941,10 +941,16 @@ mod tests {
         // asserting only `is_err` cannot tell the two orders apart, since both refuse. The
         // remaining step, resolving it before the pixel pass *within* an entry point, changes no
         // output at all and so is held by `encode_packed`'s signature rather than by a test.
+        //
+        // Every entry point that resolves a store of its own is here — the four `encode_packed`
+        // callers plus `encode_palette8`, which reaches it through the same layout stage. Only
+        // `encode_pages_rgb8` is absent, and not by choice: it builds strip images directly, so
+        // there is no second refusal for the C2PA one to be told apart from.
         let dims = Dimensions {
             width: 2,
             height: 2,
         };
+        let palette = Palette8::from_rgb_triples(&[0u8; 768]).expect("palette");
         let bad = TiffEncoder::new()
             .with_metadata(TiffMetadata::new().with_c2pa(vec![0; 4]))
             .with_c2pa_reserved(4)
@@ -969,6 +975,21 @@ mod tests {
                 "the 8-bit path",
                 bad.encode_image(
                     ImageRef::<Rgb8>::new(&[0u8; 12], dims).expect("8-bit image"),
+                    &mut out,
+                ),
+            ),
+            (
+                "the RGBA path",
+                bad.encode_image(
+                    ImageRef::<Rgba8>::new(&[0u8; 16], dims).expect("RGBA image"),
+                    &mut out,
+                ),
+            ),
+            (
+                "the palette path",
+                bad.encode_palette8(
+                    ImageRef::<Indexed8>::new(&[0u8; 4], dims).expect("palette image"),
+                    &palette,
                     &mut out,
                 ),
             ),
