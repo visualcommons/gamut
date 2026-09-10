@@ -620,6 +620,38 @@ mod tests {
         assert!(meta.texts.is_empty());
     }
 
+    /// The framing §11.3.3.1 Table 21 recommends — "Compression Flag set to 0, and both Language
+    /// Tag and Translated Keyword set to the null string" — reads back as exactly that, so a
+    /// re-encode reproduces it rather than inventing one.
+    ///
+    /// Kills the framing arm of [`parse_itxt`] read the other way from
+    /// `xmp_framing_carries_the_compression_flag`: a mutant that reports every packet compressed,
+    /// or that keeps an empty tag as `Some("")`, would rewrite a Table 21-conforming chunk as
+    /// something else.
+    #[test]
+    fn an_unframed_xmp_packet_reads_back_unframed() {
+        let itxt = b"XML:com.adobe.xmp\0\0\0\0\0<x:xmpmeta/>";
+        let meta = collect(&[(*b"iTXt", itxt)], 1024);
+        assert_eq!(meta.xmp_framing, Some(XmpFraming::default()));
+    }
+
+    /// §11.3.3.4's compression flag, language tag and translated keyword belong to the XMP chunk
+    /// as much as to any other `iTXt`, and the packet's own field cannot hold them. Losing the
+    /// flag alone rewrites a compressed packet at many times its size.
+    ///
+    /// Kills each field of the `ITxt::Xmp` arm of [`parse_itxt`].
+    #[test]
+    fn xmp_framing_carries_the_compression_flag() {
+        let mut itxt = b"XML:com.adobe.xmp\0\x01\0en-GB\0Metadata\0".to_vec();
+        itxt.extend_from_slice(&deflated(b"<x:xmpmeta/>"));
+        let meta = collect(&[(*b"iTXt", &itxt)], 1024);
+        assert_eq!(meta.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
+        let framing = meta.xmp_framing.expect("framed");
+        assert!(framing.compressed);
+        assert_eq!(framing.language.as_deref(), Some("en-GB"));
+        assert_eq!(framing.translated_keyword.as_deref(), Some("Metadata"));
+    }
+
     #[test]
     fn metadata_budget_is_cumulative_and_skips_busting_chunks() {
         let body = vec![b'a'; 600];
