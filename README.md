@@ -120,19 +120,18 @@ format.
 
 Every row describes the crate **in this tree**: any version it cites is the crate's own
 `Cargo.toml` — what `mise run versions` prints and what a workspace `path` dependency builds — not
-what crates.io currently serves. The two agree for thirty of the thirty-two crates; `gamut-riff`'s
-manifest is ahead of its newest release and `gamut-cmm` has no release yet, both noted in
-[Releases](#releases).
+what crates.io currently serves. Where the two differ, [Releases](#releases) says which crate and
+why; deciding that comparison needs the network, so it is stated there rather than counted here.
 
 | Crate             | Purpose                                                                | Status                                 |
 | ----------------- | ---------------------------------------------------------------------- | -------------------------------------- |
-| `gamut`           | Umbrella crate; re-exports 25 sibling crates behind Cargo features — the 11 format/codec crates and 14 shared layers (primitives, containers, metadata, colour management, the codec ABI); only `gamut::core` is unconditional | implemented |
+| `gamut`           | Umbrella crate; each sibling crate it re-exports sits behind its own Cargo feature — the format/codec crates plus the shared layers (core, colour, DSP, bitstream, containers, metadata, tone mapping, colour management, the codec ABI) — with one always-on dependency: `gamut-core` | implemented |
 | `gamut-core`      | Core traits (`EncodeImage`/`DecodeImage`), image buffers, dimensions, errors, `convert` | stable (v2; v1 under #177), pixel conversion added by #268 |
 | `gamut-color`     | Coded-plane bit depths and chroma subsampling, CICP code points and planar buffers, the `ycbcr` matrixing layer (H.273, plus the libwebp-exact BT.601 one VP8 needs), and the `f64` colour science (transfer, Lab/OKLab, XYB, `matrix`/`linalg`, gamut map, CCT, profile) | stable (v2; v1 under #179); the colour science is Tier-1 `f64`, not bit-reproducible |
 | `gamut-dsp`       | Shared DSP kernels: AV1 DCT/ADST/identity/WHT, the JPEG 8×8 forward/inverse DCT, quantization rounding | stable (v2; v1 under #192)             |
 | `gamut-bitstream` | Bit readers/writers, LEB128, the AV1 §8.2 symbol (arithmetic) coder, MSB-first sample packing | v0.2, no v1 release issue yet; the ANS and Huffman coders are not implemented |
-| `gamut-tonemap`   | Tone-mapping curves for HDR→SDR: the `ToneCurve` trait over eight operators — Linear, Clamp, Exposure, Reinhard, ReinhardExtended, ACES, Hable, Drago | stable (v1, #188); surface frozen |
-| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables, their object-safe Rust twins, and the registry fallback *contract*; this crate declares no registry — each host crate that offers a seam keeps its own | direct dependency of avif, ffi, heic, jpeg, jxl, png and webp, plus the umbrella under its `codec-abi` feature |
+| `gamut-tonemap`   | Tone-mapping curves for HDR→SDR: the `ToneCurve` trait over the Linear, Clamp, Exposure, Reinhard, ReinhardExtended, ACES, Hable and Drago operators | stable (v1, #188); surface frozen |
+| `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables, their object-safe Rust twins, and the registry fallback *contract*; this crate declares no registry — each host crate that offers a seam keeps its own | consumed by `gamut`, `gamut-avif`, `gamut-ffi`, `gamut-heic`, `gamut-jpeg`, `gamut-jxl`, `gamut-png` and `gamut-webp`; the umbrella's is behind its `codec-abi` feature |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | stable (v2); structure only, codestream carried opaquely |
 | `gamut-riff`      | RIFF container utilities (WebP)                                        | stable (v1, #186)                      |
 | `gamut-av1`       | AV1 still-image (intra-frame) encoder + decoder — the codec layer beneath AVIF | encoder: lossless and lossy intra keyframes; decoder (default-on `decode` feature): 8-bit 4:4:4 intra frames, key and intra-only (#259) |
@@ -147,15 +146,15 @@ manifest is ahead of its newest release and `gamut-cmm` has no release yet, both
 | `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | stable (v2, byte completeness #263); BigTIFF behind `bigtiff` |
 | `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on gamut-ifd        | stable (v1, #194); MakerNote preserved verbatim, not decoded |
 | `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | stable (v1, #180)                      |
-| `gamut-cmm`       | ICC colour management module (transform engine) over gamut-icc profiles | epic #323 complete (P1–P8); not yet on crates.io |
+| `gamut-cmm`       | ICC colour management module (transform engine) over gamut-icc profiles | P1–P8 complete per its STATUS.md — P1–P7 are epic #323, while P8 (pipeline optimization) is #372, which #323 lists out of scope |
 | `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | stable (v1, #189); canonical serializer, UTF-8 packets only |
 | `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | stable (v1, #182); Extension structures pass through as raw XMP |
 | `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | stable (v1); orchestration only. A C2PA manifest store is extracted verbatim but never re-embedded: embedding drops it, or refuses, because its hard binding cannot survive the rewrite |
 | `gamut-tiff`      | TIFF 6.0 encoder/decoder — on the shared `gamut-ifd` container core     | stable (v1, #107); YCbCr/Lab and JPEG-in-TIFF deferred |
 | `gamut-dng`       | DNG 1.7.1 raw encoder + decoder — a TIFF/EP profile over `gamut-ifd`   | encoder + decoder (v1, #109), Adobe DNG SDK-gated |
-| `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut-png  | encoder (#195), and no runtime dependency of its own; inflating is the consumers' business — `gamut-png` and `gamut-dng` use `miniz_oxide` |
+| `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut's own writers | encoder (#195); consumed by `gamut-dng`, `gamut-png` and `gamut-tiff`, which inflate with `miniz_oxide` rather than here — this crate has no always-on dependencies of its own |
 | `gamut-png`       | PNG (W3C 3rd edition) encoder + decoder, over the still-image subset   | encoder (#24) + decoder (#249); APNG out of scope, so an animated PNG decodes as its default image |
-| `gamut-cli`       | `gamut` CLI sandbox: encode AVIF/WebP/TIFF/PNG/JXL/JPEG + inspect the primitives | ready for use                |
+| `gamut-cli`       | `gamut` CLI sandbox: `convert` (decode PNG/JPEG/PPM/WebP/JXL, re-encode AVIF/WebP/TIFF/PNG/JXL/JPEG), `inspect` (TIFF/DNG byte accounting), `icc`, `isobmff`, `av1`, and the `color`, `dsp` and `bitstream` primitive inspectors | ready for use |
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
 | `gamut-ffi`       | C-compatible FFI bindings                                              | provider boundary shipped (#280); consumer entry points pending (#242) |
 
