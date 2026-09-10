@@ -174,8 +174,13 @@ jobs:
         # EXPECTED RED: `tiff_decode` and `dng_decode` fail today on filed, accepted defects
         # (#563, #564). They are deliberately not narrowed to make these rows green; read the
         # per-row status rather than this workflow's aggregate until both close. Restoring the
-        # aggregate's meaning is #593; this job's cadence (nine parallel ten-minute runners on
-        # every push to the default branch, growing with the matrix) is #594.
+        # aggregate's meaning is #593.
+        #
+        # CADENCE (#594), decided: this job stays on the workflow's own trigger. Nothing
+        # accumulates between runs -- each starts from the committed seeds and discards what the
+        # engine finds -- so a run is ten minutes of cold search whatever the cadence, and running
+        # less often just searches less. Persisting the corpus (#603) is the change that makes
+        # frequency and this time budget worth tuning; the README states the full argument.
         run: mise run fuzz ${{ matrix.target }} -- -max_total_time=600
       - name: Upload any crash artifacts
         if: failure()

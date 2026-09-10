@@ -171,20 +171,24 @@ deterministic case in that crate's `tests/robustness.rs`**, which is where the r
 
 What the per-PR path *does* carry is the **compile** half, for the reason the excluded real-DNG
 tier already carries it: nothing else builds an excluded crate, so an API change in a driven crate
-breaks its targets unnoticed until the next run on master. CI's lint job runs
-`cargo check --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets` — no nightly, no
-sanitizer, no engine, nothing unbounded — and its `Format & Metadata` job runs
-`tooling/gamut-fuzz/check-targets.sh`, which reconciles the three hand-maintained lists that
+breaks its targets unnoticed until the next run on master. CI's lint job runs `mise run
+check-fuzz` — no nightly, no sanitizer, no engine, nothing unbounded — and its `Format & Metadata`
+job runs `mise run check-fuzz-matrix`, which reconciles the three hand-maintained lists that
 describe the target set (the files, the `[[bin]]` entries, the `extended.yml` matrix), because a
-target missing from the third is one that never runs and nothing reports it.
+target missing from the third is one that never runs and nothing reports it. Both are mise tasks
+rather than commands written into the workflow, so a contributor runs exactly what CI runs.
 
 A **robustness** target is not a law and does not route through an `invariants` module: its
 primary oracle is the engine's own — a panic, a hang, or an allocation past `-malloc_limit_mb` —
-which no function can express. Any check it adds beyond that oracle must be able to *fail*: an
-assertion comparing a wrapper against the expression its own body is (`gamut_ifd::read` against
-`IfdReader::open(..)?.read_file()`) is a tautology, not a differential, and belongs — if it is
-worth pinning at all — in the crate's bounded deterministic suite as a **structure pin**, named as
-one.
+which no function can express. Any check it adds beyond that oracle must be able to *fail*, and
+**its module doc records the injected defect that made it fail** — the patch, the message the
+target printed, and the command that reproduces it. An assertion comparing a wrapper against the
+expression its own body is (`gamut_ifd::read` against `IfdReader::open(..)?.read_file()`) is a
+tautology, not a differential; so is a comparison whose two sides come from one reader, which is
+what a decoded-versus-described geometry check reduces to when the decoder and the probe share a
+tag reader. Anchor the check on something the compared reader does not produce — the count of
+samples the decode physically yielded, against the geometry the file declares — and keep the
+tautology, if it is worth keeping at all, as a **structure pin**, named as one at the site.
 
 `#[ignore]` is not used in this workspace and must not be introduced: `coverage` is the only test
 gate, so an ignored test is not deferred, it is unrun.

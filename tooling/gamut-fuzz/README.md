@@ -64,9 +64,8 @@ same rule `docs/testing.md` applies to a shrunk `proptest` counterexample, and t
 - **This crate is workspace-excluded**, so `cargo test --workspace --all-features` never builds it.
   Nothing on the pull-request path would otherwise compile these targets at all, and an API change
   in a driven crate would break them unnoticed until the next Extended run. CI's lint job therefore
-  runs `cargo check --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets` — build-only, no
-  nightly, no sanitizer, no engine — exactly as it already does for the excluded real-DNG
-  conformance tier.
+  runs `mise run check-fuzz` — build-only, no nightly, no sanitizer, no engine — exactly as it
+  already does for the excluded real-DNG conformance tier with `mise run check-dng-real`.
 - **The dependency graph is shared across every target.** A feature turned on for one target's
   crate is on for all of them, because Cargo resolves features once per crate for the whole
   package: `bigtiff` was added to `gamut-ifd` for the `ifd_read` driver, and the pre-existing
@@ -120,29 +119,46 @@ no crash is still visible:
 | target | crate | entry points | check beyond the crash oracle |
 |---|---|---|---|
 | `ifd_read` | `gamut-ifd` | `read`, `read_tree`, `read_audited` | the dual-ledger audit is complete: no byte read outside a claim, no claim unread |
-| `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | the page index is bounded by `page_count`; describing and decoding agree on geometry |
+| `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | a page that decodes yields exactly `width × height × Rgb8::CHANNELS` samples for the geometry the tags declare |
 | `dng_decode` | `gamut-dng` | `DngDecoder::{decode,verify_new_raw_image_digest}` | the raw image that *arrives* holds exactly `width × height × planes` samples, after every rewriting stage |
 | `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `read`, `BoxReader` | the box cursor strictly advances; the segments tile `0..len` exactly |
 | `heic_container` | `gamut-heic` | `HeifContainer::parse` | the segments tile `0..len` exactly and every accessor agrees with that tiling |
 | `heic_hvcc` | `gamut-heic` | `HevcConfig::parse`, `annex_b*`, `validate_still_payload`, `iter_nal_units` | the Annex-B emitters append rather than replace, on the success path and the error path |
 
-**A check is only listed here if it can fail.** Three earlier entries could not. `ifd_read`
-compared `read(data)` against `IfdReader::open(data)?.read_file()` — but `reader.rs` *defines*
-`read` as that expression, so the two sides were one function call written twice. `heic_hvcc`
-compared `annex_b(..).is_ok()` against `annex_b_payload(..).is_ok()` on the same input, and
-asserted `annex_b` equals the two calls its own body makes. `dng_decode` compared a digest verdict
-against a decoded field that is read with the *same expression* on both sides. None of them had a
-reachable failure, and calling any of them a differential overstated what the tier proves.
+**A check is only listed here if it can fail — and each target's module doc names the injected
+defect that made it fail**, with the message it produced and the command that reproduces it. That
+second half is the part a reader can re-run; without it "this check is live" is a reading of the
+code, which is exactly what put the rows below wrong twice.
 
-They are not all deleted — they are **relabelled and repriced**. A claim about two bodies agreeing
-is a **structure pin**: worth keeping where it is free or where a future change could genuinely
-split the bodies apart, worth nothing as a search. So `heic_hvcc` still asserts the two halves,
-folded into the append check's existing buffer at no extra emitter pass; `dng_decode` still
-compares the verdict, on a call it makes anyway for the crash oracle; and the `gamut-ifd` wrapper
-pin lives in `crates/gamut-ifd/tests/robustness.rs`, over a bounded exhaustive corpus, rather than
-costing half of every one of this target's twenty thousand executions per second to search for a
-counterexample that does not exist. Dropping the two duplicate parses raised `ifd_read` from
-roughly 12 000 exec/s to roughly 20 000.
+Five earlier entries could not fail. `ifd_read` compared `read(data)` against
+`IfdReader::open(data)?.read_file()` — but `reader.rs` *defines* `read` as that expression, so the
+two sides were one function call written twice. `heic_hvcc` compared `annex_b(..).is_ok()` against
+`annex_b_payload(..).is_ok()` on the same input, and asserted `annex_b` equals the two calls its
+own body makes. `dng_decode` compared a digest verdict against a decoded field that is read with
+the *same expression* on both sides. `tiff_decode` claimed two: that `info_page` refuses the index
+`page_count` returns — which reduces to indexing a vector one past its own length, both sides
+being `read(data)?.ifds` — and that the described and decoded geometry agree, which sees only the
+few lines copying one into the other, because `decode_page_samples` says outright that
+"everything the page *declares* comes from one shared reader". None of them had a reachable
+failure, and calling any of them a differential overstated what the tier proves.
+
+The two `tiff_decode` claims are **dropped**, and the target is re-anchored on something the
+geometry reader does not produce: the number of samples the decode physically yielded, against the
+declared dimensions and the channel count of the layout asked for. The rest are **relabelled and
+repriced**. A claim about two bodies agreeing is a **structure pin**: worth keeping where it is
+free or where a future change could genuinely split the bodies apart, worth nothing as a search.
+So `heic_hvcc` still asserts the two halves, folded into the append check's existing buffer at no
+extra emitter pass; `dng_decode` still compares the verdict, on a call it makes anyway for the
+crash oracle; and the `gamut-ifd` wrapper pin lives in `crates/gamut-ifd/tests/robustness.rs`,
+over a bounded exhaustive corpus, rather than costing half of every one of this target's twenty
+thousand executions per second to search for a counterexample that does not exist. Dropping the
+two duplicate parses raised `ifd_read` from roughly 12 000 exec/s to roughly 20 000.
+
+Two smaller assertions are pins for the same reason and are labelled as such at the site, so
+nobody reads them as checks: `tiff_decode`'s "a page that decodes must also describe" (decoding
+calls the tag reader before it reads a pixel) and `heic_hvcc`'s "no empty NAL unit"
+(`NalUnitIter::next` errors on a zero length before it can yield one). Both cost one comparison on
+a value already in hand.
 
 An **allocation** defect needs the engine's malloc hook to be visible at all: an oversized
 `Vec::with_capacity` costs no resident memory on an overcommitting kernel, so measuring RSS finds
@@ -165,19 +181,43 @@ per push learns nothing from it. Read the per-row status, not the aggregate, unt
 close; both rows go green with no change here. Whether these two rows should instead live in a
 separate, expected-to-fail lane so the aggregate keeps its meaning is
 [#593](https://github.com/visualcommons/gamut/issues/593) — a workflow-topology question, not a
-fuzzing one. The job's cadence, which was inherited rather than chosen and now costs nine parallel
-ten-minute runners per push, is [#594](https://github.com/visualcommons/gamut/issues/594).
+fuzzing one.
+
+### The cadence, answered
+
+Nine parallel ten-minute runners on every push to the default branch, growing by one runner per
+target, was inherited from the workflow's trigger rather than chosen ([#594](https://github.com/visualcommons/gamut/issues/594)).
+It is **kept**, and here is why, so the next target added does not reopen it:
+
+- The cost is queue time, not budget — Actions minutes are free for public repositories — and the
+  job is post-merge with `fail-fast: false`, so it blocks no pull request. The matrix grows the
+  number of *parallel* runners, not the job's wall time.
+- Frequency is the wrong dial, because **nothing accumulates between runs**. Each run starts from
+  the committed seeds and discards what the engine finds, so a run's yield is ten minutes of cold
+  search whatever the cadence: running less often searches strictly less, and running more often
+  re-derives the same shallow space. What would change the tier's yield is persisting the corpus,
+  filed as [#603](https://github.com/visualcommons/gamut/issues/603) — and the cadence and the
+  `-max_total_time` budget are both worth re-opening *after* that lands, not before.
+- Changing the trigger would also move #593's premise (whether a per-push aggregate is red), which
+  is a decision about the workflow's shape rather than about this tier.
 
 ## Keeping the three lists in step
 
 A target exists in three hand-maintained places: its `fuzz_targets/<name>.rs` file, its `[[bin]]`
 entry in `Cargo.toml`, and its row in `extended.yml`'s fuzz matrix. Miss the third and the target
 is written, committed, and never run — silently, because nothing fails. `check-targets.sh`
-reconciles all three and is wired into CI's `Format & Metadata` job; run it directly too:
+reconciles all three and is wired into CI's `Format & Metadata` job as `mise run
+check-fuzz-matrix`; run the same thing locally:
 
 ```bash
-./tooling/gamut-fuzz/check-targets.sh
+mise run check-fuzz-matrix   # the three lists describe the same target set
+mise run check-fuzz          # every target still compiles against the crates it drives
 ```
+
+Both are tasks rather than bare commands so a contributor runs *what CI runs*: a step whose command
+lives only in a workflow is a step nobody can reproduce without reading YAML, and the two copies
+drift. `check-targets.sh` also fails a `[[bin]]` whose `name` disagrees with its own `path`, and
+names a duplicated entry as a duplicate rather than mis-reporting it as a missing file.
 
 ## Seeds
 
