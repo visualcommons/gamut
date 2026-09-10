@@ -28,7 +28,13 @@ doctest = false
 # OpenSSL build would also make this the slowest thing in CI. `rust_native_crypto` is the
 # pure-Rust signing/verification backend that replaces it; dropping `default_http` additionally
 # drops reqwest and ureq, which this oracle never needs because it fetches no remote manifests.
-c2pa = { version = "0.90.21", default-features = false, features = ["rust_native_crypto"] }
+#
+# Pinned to an exact version, not a caret range. `README.md` cites c2pa-rs's own source **by line
+# number** for two claims it records, and a `^` range lets a patch release move those lines under
+# a citation nobody re-checked. There is no committed lockfile to hold them either: `.gitignore`
+# excludes `tooling/*/Cargo.lock`, because a workspace-excluded oracle resolves standalone. The
+# pin is the smaller of the two fixes and it is the one that makes the citations honest.
+c2pa = { version = "=0.90.21", default-features = false, features = ["rust_native_crypto"] }
 
 [dev-dependencies]
 # The crates under test. Both locate a C2PA manifest store in a top-level ISOBMFF `uuid`
@@ -37,3 +43,13 @@ c2pa = { version = "0.90.21", default-features = false, features = ["rust_native
 gamut-avif = { path = "../../crates/gamut-avif" }
 gamut-heic = { path = "../../crates/gamut-heic" }
 gamut-core = { path = "../../crates/gamut-core" }
+# The metadata facade, for `tests/no_copy_forward.rs` only: its `C2paPolicy` is the mechanism that
+# refuses to carry a parent's manifest store into a derivative, and the test drives it rather than
+# asserting a re-encode happens not to emit one.
+gamut-metadata = { path = "../../crates/gamut-metadata" }
+
+# Keeps this manifest from being read as a member of any workspace above it — the same guard
+# `tooling/gamut-fuzz/Cargo.toml` carries. Without it, cargo walks past `tooling/` looking for a
+# workspace root, which in a nested git worktree finds the primary checkout's manifest and makes
+# every invocation depend on where the tree happens to sit.
+[workspace]
