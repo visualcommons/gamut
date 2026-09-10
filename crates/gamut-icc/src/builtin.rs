@@ -431,11 +431,11 @@ fn pq_samples() -> Vec<u16> {
 /// The PCS D50 white as a CIE 1931 chromaticity, derived from the exact `XYZNumber` ICC.1:2022
 /// §7.2.16 mandates for the PCS illuminant.
 ///
-/// Deliberately *not* [`gamut_color::matrix::D50`]: that is the CIE-published chromaticity, whose
-/// tristimulus Z is 0.82521, while ICC's rounded encoding is 0.8249. Adapting to the CIE one while
-/// writing the ICC one as the `mediaWhitePointTag` would leave the colorants disagreeing with the
-/// white point they are supposed to sum to, by 2e-4 in Z. The PCS illuminant is an ICC fact, so
-/// this crate owns it.
+/// Deliberately *not* [`gamut_color::matrix::D50`]: that is the CIE-published chromaticity
+/// `(0.3457, 0.3585)`, whose tristimulus `Z` at `Y = 1` is 0.825105, while ICC's rounded
+/// `XYZNumber` encoding carries 0.824905. Adapting to the CIE one while writing the ICC one as
+/// the `mediaWhitePointTag` would leave the colorants disagreeing with the white point they are
+/// supposed to sum to, by 2.0e-4 in Z. The PCS illuminant is an ICC fact, so this crate owns it.
 fn pcs_d50_chromaticity() -> [f64; 2] {
     let [x, y, z] = XyzNumber::D50.to_f64();
     let sum = x + y + z;
