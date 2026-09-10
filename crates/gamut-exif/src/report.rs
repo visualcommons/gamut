@@ -191,6 +191,13 @@ impl Dropped {
     /// For a sub-IFD or the thumbnail bytes this is the value the addressing tag carried; for a
     /// [`TrailingIfd`](DroppedRegion::TrailingIfd) it is the directory's own position in the
     /// stream.
+    ///
+    /// This is **not** the frame the crate's *error* messages use. An [`ExifError`](crate::ExifError)
+    /// carries the offset of the byte the reader could not read in the source the caller handed in,
+    /// so for a marked blob it is 6 bytes (`MARKER.len()`) larger than the same position expressed
+    /// here. The two frames are deliberately different: a diagnostic points into the caller's own
+    /// buffer, while a report offset addresses the TIFF structure the report describes and matches
+    /// every offset stored inside the file.
     #[must_use]
     pub const fn offset(self) -> u64 {
         self.offset
@@ -275,7 +282,7 @@ mod tests {
     use super::*;
 
     /// Each region reports the tag that actually addresses it — the value a caller uses to find
-    /// the pointer back in the source directory — and a region no tag addresses reports `0`.
+    /// the pointer back in the source directory — and a region no tag addresses reports `None`.
     #[test]
     fn each_region_carries_the_tag_that_addresses_it() {
         for (region, tag) in [

@@ -6,7 +6,10 @@
 //! indistinguishable. Each test below feeds one deliberately broken blob to
 //! [`ExifReader::parse_with_report`] and pins that the discarded region is named with the tag that
 //! addressed it, the offset it carried, and a reason that separates "nothing could be there" from
-//! "something was there and it was corrupt". The last test generalises it over a truncation sweep.
+//! "something was there and it was corrupt". Three further tests pin the contract's edges: that a
+//! *strict* report is not empty of the one loss strictness has no grounds to reject, that the
+//! report's offsets and the crate's error offsets are deliberately in different frames, and — over
+//! a truncation sweep — that no sub-IFD is ever dropped without being named.
 
 use gamut_exif::{DropReason, DroppedRegion, ExifReader};
 use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, write};
@@ -23,6 +26,8 @@ const THUMB_OFFSET: u16 = 0x0201;
 const THUMB_LENGTH: u16 = 0x0202;
 /// An offset far past the end of any fixture here.
 const DANGLING: u32 = 0xFFFF;
+/// The `Exif\0\0` marker a JPEG `APP1` payload carries before the TIFF stream.
+const MARKER: &[u8] = b"Exif\x00\x00";
 
 /// Serialises `ifds` as a bare little-endian TIFF stream.
 fn tiff(ifds: Vec<Ifd>) -> Vec<u8> {
@@ -171,7 +176,7 @@ fn a_well_formed_blob_reports_no_drops() {
 /// EXIF defines exactly two — the 0th (primary image) and the 1st (thumbnail) — so a longer
 /// next-IFD chain parses cleanly and then has nowhere to go in the model. That is a real loss (the
 /// bytes do not survive `to_bytes`), and it is the one drop with no addressing tag: the chain is
-/// followed through the structural next-IFD pointer, so the reported tag is `0` and the reported
+/// followed through the structural next-IFD pointer, so the reported tag is `None` and the reported
 /// offset is the directory's own position.
 #[test]
 fn a_top_level_directory_past_the_thumbnail_is_named() {
@@ -288,6 +293,7 @@ fn a_truncated_blob_never_drops_a_sub_ifd_without_naming_it() {
         "no truncation dropped a sub-IFD — the sweep proved nothing"
     );
 }
+
 /// A thumbnail offset with no length beside it is named rather than silently ignored.
 ///
 /// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength` both
@@ -349,4 +355,85 @@ fn a_thumbnail_with_no_jpeg_range_reports_nothing() {
             report.dropped()
         );
     }
+}
+
+/// A strict report is not always empty: it still carries the loss strictness cannot reject.
+///
+/// Strictness rejects *malformed* regions. A top-level directory past the 1st IFD is not malformed
+/// — it parses cleanly and the [`Exif`](gamut_exif::Exif) model simply has nowhere to put it — so
+/// strict has no grounds to fail on it, and dropping it silently would re-hide exactly the loss
+/// `DroppedRegion::TrailingIfd` exists to surface.
+#[test]
+fn a_strict_parse_still_reports_a_trailing_directory() {
+    let mut thumb = Ifd::new();
+    thumb.set(0x0103, Value::Short(vec![6])); // Compression = JPEG
+    let mut trailing = Ifd::new();
+    trailing.set(0x0131, Value::Ascii("trailing".into())); // Software
+
+    let (exif, report) = ExifReader::new()
+        .strict(true)
+        .parse_with_report(&tiff(vec![image_ifd(), thumb, trailing]))
+        .expect("a well-formed long chain must not fail even in strict mode");
+
+    assert_eq!(exif.make(), Some("Canon"), "the 0th IFD survives");
+    assert_eq!(report.dropped().len(), 1, "{:?}", report.dropped());
+    assert_eq!(report.dropped()[0].region(), DroppedRegion::TrailingIfd);
+    assert_eq!(report.dropped()[0].reason(), DropReason::Unrepresentable);
+}
+
+/// The report's offsets and the crate's error offsets are in different frames, by the marker.
+///
+/// A `Dropped::offset` addresses the TIFF stream, so it matches every offset stored inside the file
+/// and is unchanged by whether the caller's buffer carries the six-byte `Exif\0\0` marker. An error
+/// message instead names a byte of the buffer that was handed in, so the marker shifts it. Pinning
+/// the pair together is what stops either frame drifting onto the other: unifying them would aim a
+/// diagnostic outside the caller's buffer or renumber every reported offset.
+#[test]
+fn report_offsets_ignore_the_marker_but_error_offsets_include_it() {
+    let mut image = image_ifd();
+    image.set(GPS_INFO, Value::Long(vec![DANGLING]));
+    let bare = tiff(vec![image]);
+    let mut marked = MARKER.to_vec();
+    marked.extend(&bare);
+
+    // The report frame is marker-invariant.
+    let offsets = |blob: &[u8]| -> Vec<u64> {
+        let (_, report) = ExifReader::new().parse_with_report(blob).expect("parse");
+        report.dropped().iter().map(|d| d.offset()).collect()
+    };
+    assert_eq!(offsets(&bare), vec![u64::from(DANGLING)]);
+    assert_eq!(
+        offsets(&marked),
+        offsets(&bare),
+        "a report offset addresses the TIFF stream, not the caller's buffer"
+    );
+
+    // The diagnostic frame is marker-shifted. The same corruption is applied to the TIFF stream in
+    // both blobs, so any offset difference is the marker and nothing else.
+    let mut broken_bare = bare.clone();
+    broken_bare[4] ^= 0xFF; // the first-IFD offset in the TIFF header
+    let mut broken_marked = MARKER.to_vec();
+    broken_marked.extend(&broken_bare);
+
+    let message = |blob: &[u8]| -> String {
+        ExifReader::new()
+            .parse(blob)
+            .expect_err("a corrupt first-IFD offset must fail")
+            .to_string()
+    };
+    let (bare_msg, marked_msg) = (message(&broken_bare), message(&broken_marked));
+    let at = |m: &str| -> u64 {
+        let tail = m
+            .rsplit_once("byte offset: ")
+            .expect("the diagnostic names a byte offset")
+            .1;
+        tail.trim_end_matches(']')
+            .parse()
+            .expect("the byte offset parses")
+    };
+    assert_eq!(
+        at(&marked_msg) - at(&bare_msg),
+        MARKER.len() as u64,
+        "an error offset counts the marker: {marked_msg} vs {bare_msg}"
+    );
 }

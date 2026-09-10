@@ -335,8 +335,14 @@ fn maker_note_offset<S: ReadAt>(
 ) -> Result<Option<u64>> {
     // Every error propagates, with no lenient arm — deliberately. This is reached only when
     // `follow` has already read and decoded this exact directory at this exact offset, so a
-    // deterministic source cannot fail here for a reason the *bytes* explain. A malformed-input
-    // arm would therefore be unreachable, and an unreachable arm is a branch no test can falsify.
+    // *deterministic* source cannot fail here for a reason the bytes explain: over such a source a
+    // malformed-input arm is unreachable, and an unreachable arm is a branch no test can falsify.
+    //
+    // It is not unreachable in general. A `ReadAt` may answer differently on a second read — a file
+    // rewritten underneath the reader is precisely the case `parse_from` exists to enable — and then
+    // the directory really can fail here. A hard error is still the right answer for it: the pin is
+    // what keeps a vendor MakerNote's TIFF-absolute internal offsets valid on a rewrite, so
+    // continuing would re-emit the note unpinned, with wrong bytes and nothing in the report.
     let raw: RawIfd = reader.read_ifd(exif_ifd_at)?;
     let Some(entry) = raw.entry(ifd_tags::MAKER_NOTE) else {
         return Ok(None);
