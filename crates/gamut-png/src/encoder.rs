@@ -222,6 +222,7 @@ impl core::fmt::Display for MetadataNotice {
 pub struct PngEncoder {
     level: Level,
     effort: u8,
+    optimal_parse_limit: usize,
     filter: FilterStrategy,
     ancillary: Ancillary,
     auto_reduce: bool,
@@ -248,6 +249,7 @@ impl PngEncoder {
         Self {
             level: Level::Default,
             effort: DeflateEncoder::DEFAULT_EFFORT,
+            optimal_parse_limit: DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT,
             filter: FilterStrategy::MinSumAbs,
             ancillary: Ancillary::default(),
             auto_reduce: false,
@@ -306,6 +308,26 @@ impl PngEncoder {
     #[must_use]
     pub fn with_effort(mut self, effort: u8) -> Self {
         self.effort = effort;
+        self
+    }
+
+    /// Sets the [`Level::Best`] optimal-parse limit: the largest span the shortest-path parse
+    /// handles in one piece (see [`DeflateEncoder::with_optimal_parse_limit`]), defaulting to
+    /// [`DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT`] (1 MiB).
+    ///
+    /// A filtered PNG scanline stream longer than the limit is parsed as consecutive spans of this
+    /// size, so raising it lets one cost model span more of the image — a small ratio win on
+    /// homogeneous material, at a disproportionate time cost. A limit below the 32 KiB LZ77 window
+    /// is raised to it. Ignored at every other [`Level`], and by any pushed [`IdatDeflater`]
+    /// backend that accepts a stream.
+    ///
+    /// Unlike [`with_effort`](Self::with_effort), which governs every zlib stream this encoder
+    /// emits, this limit governs the **`IDAT` image data only**. It is the one stream whose length
+    /// grows with the image, so it is the one a caller can need to re-span; a compressed ancillary
+    /// payload (`iCCP`, `zTXt`) is whatever the caller handed over and keeps the default.
+    #[must_use]
+    pub fn with_optimal_parse_limit(mut self, limit: usize) -> Self {
+        self.optimal_parse_limit = limit;
         self
     }
 
@@ -1160,7 +1182,8 @@ impl PngEncoder {
     ) -> Result<Vec<u8>> {
         let deflate = DeflateEncoder::new()
             .with_level(self.level)
-            .with_effort(self.effort);
+            .with_effort(self.effort)
+            .with_optimal_parse_limit(self.optimal_parse_limit);
         // Every candidate stream goes through the same seam: a pushed backend that accepts sees
         // each brute-force candidate, and the smallest result still wins.
         let compress = |strategy| {
@@ -1941,6 +1964,49 @@ mod tests {
             .unwrap();
         assert_eq!(brute.len(), paeth.len(), "same length, different bytes");
         assert_ne!(brute, paeth);
+    }
+
+    /// One long greyscale row whose bytes are neither flat nor periodic, so the span the optimal
+    /// parse works over is what decides the parse. 40 001 filtered bytes: one span at the 1 MiB
+    /// default, two at the 32 KiB LZ77 window.
+    fn long_unrepeating_row() -> Vec<u8> {
+        (0..40_000u32)
+            .map(|i| {
+                let mut h = i.wrapping_mul(2_654_435_761);
+                h ^= h >> 15;
+                // A slow ramp plus a small jitter: compressible enough that the parse has matches
+                // to choose between, unrepeating enough that the choice is not forced.
+                ((i / 97) as u8).wrapping_add((h % 7) as u8)
+            })
+            .collect()
+    }
+
+    /// Encodes [`long_unrepeating_row`] at `Level::Best` under `configure`.
+    fn best_encoded_row(configure: impl FnOnce(PngEncoder) -> PngEncoder) -> Vec<u8> {
+        let src = long_unrepeating_row();
+        let img = ImageRef::<Gray8>::new(&src, Dimensions::new(40_000, 1).unwrap()).unwrap();
+        let mut png = Vec::new();
+        configure(PngEncoder::new().with_compression(Level::Best))
+            // The optimal parse is the only consumer of the limit, and refinement passes are the
+            // expensive part of `Level::Best`; the seed parse alone already spans.
+            .with_effort(0)
+            .encode_image(img, &mut png)
+            .unwrap();
+        png
+    }
+
+    #[test]
+    fn the_optimal_parse_limit_reaches_the_idat_stream() {
+        // `with_optimal_parse_limit` is only observable through the bytes it changes: a limit at
+        // the LZ77 window splits this row's filtered stream into two spans, each with its own cost
+        // model, where the default parses it as one.
+        let one_span = best_encoded_row(|e| e.with_optimal_parse_limit(usize::MAX));
+        let two_spans = best_encoded_row(|e| e.with_optimal_parse_limit(1));
+        assert!(
+            one_span != two_spans,
+            "the limit did not reach the IDAT deflate: both spans encoded to {} bytes",
+            one_span.len()
+        );
     }
 
     #[test]
