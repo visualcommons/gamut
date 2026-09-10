@@ -51,6 +51,28 @@ matrix="$(
 )"
 
 status=0
+
+# A hand-maintained list can name the same target twice, and `comm -23` reports the second copy as
+# a line present on the left and absent on the right -- i.e. as "a [[bin]] points at a file that
+# does not exist" or "CI names a target that cannot be built", neither of which is what happened.
+# Duplicates are therefore diagnosed first, by name, and the lists are de-duplicated before the
+# set comparisons below so those keep saying what they mean. (`find` cannot produce a duplicate
+# filename, so (1) needs no such check.)
+duplicates() {
+	local what="$1" where="$2" list="$3" dupes
+	dupes="$(printf '%s\n' "$list" | uniq -d)"
+	if [ -n "$dupes" ]; then
+		echo "$where names the same fuzz target more than once ($what):" >&2
+		printf '  %s\n' $dupes >&2
+		status=1
+	fi
+}
+
+duplicates "cargo would build it twice" "$MANIFEST" "$bins"
+duplicates "CI would run it twice" "$WORKFLOW" "$matrix"
+bins="$(printf '%s\n' "$bins" | uniq)"
+matrix="$(printf '%s\n' "$matrix" | uniq)"
+
 report() {
 	local what="$1" left="$2" right="$3" left_list="$4" right_list="$5"
 	local missing
