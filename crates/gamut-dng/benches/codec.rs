@@ -55,6 +55,14 @@
 //! supports is "the codestream comparison is fair to within the bound", not "the export path
 //! costs the SDK X".
 //!
+//! **One measured path is not built from this repository, and it is a Deflate one.** The oracle
+//! links the system libz dynamically (the SDK includes `<zlib.h>` unconditionally), so on the two
+//! `*/deflate` rows the reference arm's speed depends on which libz the machine resolves —
+//! stock zlib and a zlib-ng-class fork differ by more than the margin that decides which side of
+//! 1.0 those rows fall on. Every other row runs only code built here. The fixture table prints
+//! [`gamut_dng_oracle::zlib_identity`] for exactly this reason: a Deflate ratio is not a fact about
+//! two codecs unless the library it was taken against travels with it.
+//!
 //! # The counter rule
 //!
 //! Every benchmark's counter is **the pixel volume that implementation actually moves**:
@@ -564,6 +572,10 @@ fn print_fixture_table() {
             decode_volume as f64 / raw as f64,
         );
     }
+    println!(
+        "\nThe SDK's Deflate arm calls the system zlib: {}.",
+        gamut_dng_oracle::zlib_identity()
+    );
     print!("{FIXTURE_TABLE_EPILOGUE}");
 }
 
@@ -585,6 +597,13 @@ gamut with more than the preview costs, and so yields a lower bound on gamut's t
 measurement of it. No number is printed for it, because a printed number is read as measured. Read
 the compressed rows as: gamut's figure includes preview and metadata work the SDK arm does not do,
 by an amount this harness does not measure.
+
+The `*/deflate` rows are the only ones whose SDK arm runs code from outside this repository: the
+oracle links the system libz dynamically, because the SDK includes <zlib.h> unconditionally. Which
+libz the dynamic linker resolves is a property of the machine, and inflate implementations differ
+by more than the margin that decides which side of 1.0 a Deflate ratio falls on. The resolved
+library is printed above; publish it with any Deflate figure, and do not compare a Deflate ratio
+against one taken on a different libz. Every other row runs only code built here.
 
 `decode_lossless_jpeg` needs no correction: same stream in, same samples out, one counter for all
 three arms. The gap between its `adobe-sdk` and `adobe-sdk-no-export` arms bounds the FFI export

@@ -3,6 +3,11 @@
 // negative, and read its stage-1 (raw) image. If any of that throws, the file is not a valid DNG
 // the reference implementation accepts.
 
+// `dladdr` (used by `gdng_zlib_identity`) is a GNU extension; glibc hides it otherwise.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include "dng_auto_ptr.h"
 #include "dng_camera_profile.h"
 #include "dng_color_spec.h"
@@ -21,9 +26,14 @@
 #include "dng_stream.h"
 #include "dng_tag_types.h"
 
+#include <zlib.h>
+
+#include <climits>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
+#include <string>
 #include <vector>
 
 namespace {
@@ -91,6 +101,39 @@ dng_error_code copy_short_image(const dng_image *image, uint32_t *out_w, uint32_
 }
 
 } // namespace
+
+// Identifies the zlib the SDK's Deflate reader is actually calling: its `zlibVersion()` string
+// followed, where the loader can tell us, by the resolved path of the shared object the symbol
+// came from.
+//
+// The path is the part that matters. `zlibVersion()` reports the zlib API version, so the
+// zlib-ng compatibility build answers "1.3.1" exactly as stock zlib does and cannot tell the two
+// apart -- while `dladdr` plus `realpath` yields e.g. `/usr/lib64/libz.so.1.3.1.zlib-ng`, which
+// can.
+//
+// This matters to a *measurement*, not to correctness. `build.rs` links the system libz
+// dynamically (`-lz`), so the SDK's Deflate decode is the one measured code path in this oracle
+// that is not built from source committed to this repository: which libz the dynamic linker
+// resolves is a property of the machine. Inflate implementations differ by well over the margin
+// that separates "gamut is faster" from "the SDK is faster" on a Deflate row, so a Deflate
+// throughput ratio is not interpretable without this string beside it.
+//
+// The returned pointer has static storage duration and lives for the process.
+extern "C" const char *gdng_zlib_identity(void) {
+  static const std::string identity = [] {
+    std::string text = zlibVersion();
+    Dl_info info;
+    if (dladdr(reinterpret_cast<const void *>(&zlibVersion), &info) != 0 &&
+        info.dli_fname != nullptr) {
+      char resolved[PATH_MAX];
+      const char *path = realpath(info.dli_fname, resolved) ? resolved : info.dli_fname;
+      text += " from ";
+      text += path;
+    }
+    return text;
+  }();
+  return identity.c_str();
+}
 
 // The code gdng_validate returns when the SDK marks the negative damaged (a stored
 // RawImageDigest/NewRawImageDigest that does not match the image data). The SDK's non-validate

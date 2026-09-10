@@ -5,7 +5,7 @@
 //! → read-stage-1 flow (the same one its `dng_validate` tool uses); it succeeds only if the SDK
 //! reads the file without error. All `unsafe` FFI is confined to this crate.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
 
@@ -74,6 +74,10 @@ unsafe extern "C" {
         out_planes: *mut u32,
         out_len: *mut usize,
     ) -> c_int;
+
+    /// Returns the identity of the zlib the SDK's Deflate reader calls: its version, and where
+    /// the loader found it. Static storage duration; valid for the process.
+    fn gdng_zlib_identity() -> *const c_char;
 
     /// Computes the SDK's `NewRawImageDigest` for the DNG at `path` into `out_digest` (16 bytes);
     /// `0` on success, else the SDK error code.
@@ -294,6 +298,37 @@ pub fn read_raw_dng(bytes: &[u8]) -> Result<AdobeRaw, String> {
 /// cannot build/read the stage-2 image (with its numeric error code).
 pub fn read_linear_dng(bytes: &[u8]) -> Result<AdobeRaw, String> {
     read_image(bytes, gdng_read_linear, "stage-2 linear")
+}
+
+/// Identifies the zlib the SDK's Deflate reader calls: its `zlibVersion()` string and, where the
+/// loader can report it, the resolved path of the shared object the symbol came from — e.g.
+/// `"1.3.1 from /usr/lib64/libz.so.1.3.1.zlib-ng"`.
+///
+/// The path is the discriminating part: `zlibVersion()` reports the zlib *API* version, so the
+/// zlib-ng compatibility build answers `"1.3.1"` exactly as stock zlib does.
+///
+/// `build.rs` links the system libz dynamically (`-lz`) because the SDK includes `<zlib.h>`
+/// unconditionally. That makes the SDK's Deflate decode the one measured path in this oracle that
+/// is **not** built from source committed to this repository: which libz the dynamic linker
+/// resolves is a property of the machine, and inflate implementations differ by far more than the
+/// margin that decides whether gamut or the reference implementation is faster on a Deflate row.
+/// `cargo bench -p gamut-dng --bench codec` prints this next to its fixture table so a Deflate
+/// ratio is never published without the library it is a ratio against.
+///
+/// Falls back to `"unknown"` if libz returns no string, which it is not documented to do.
+#[must_use]
+pub fn zlib_identity() -> String {
+    // SAFETY: the shim returns a pointer to a NUL-terminated string with static storage duration,
+    // valid for the life of the process; the `CStr` borrow ends before this function returns.
+    let raw = unsafe { gdng_zlib_identity() };
+    if raw.is_null() {
+        return "unknown".to_string();
+    }
+    // SAFETY: non-null, and as above NUL-terminated and static.
+    unsafe { CStr::from_ptr(raw) }
+        .to_str()
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 /// The extent of an image the Adobe DNG SDK decoded: its geometry and how many samples it holds.
