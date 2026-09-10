@@ -261,7 +261,10 @@ fn text_property_survives_xmpcore(ns: WellKnownNs, name: &str, value: &str) {
     );
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
     let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
-    assert_eq!(parsed.get_text(ns.uri(), name), Some(value));
+    // The reference engine's output URI, as in `struct_field_survives_xmpcore`: the identity for
+    // every schema but Darwin Core, so reading back under `ns.uri()` here would fail for a future
+    // schema whose URI ends in neither `/` nor `#`, for a reason unrelated to that schema.
+    assert_eq!(parsed.get_text(&xmpcore_output_uri(ns), name), Some(value));
 }
 
 #[test]

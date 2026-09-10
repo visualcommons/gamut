@@ -298,6 +298,15 @@ impl WellKnownNs {
     /// constant). The alias is read-only — [`WellKnownNs::uri`] keeps returning the unslashed URI
     /// exiv2 documents, so gamut's own bytes are unchanged — and it is not a [`WellKnownNs::ALL`]
     /// entry, so iteration and the URI/prefix uniqueness of the registry are unaffected.
+    ///
+    /// **The alias buys a prefix, not a URI.** For every registered URI `from_uri` hands back the
+    /// URI it was given — `from_uri(u).map(WellKnownNs::uri) == Some(u)` — and for the alias it does
+    /// not. Nothing rewrites the URI a packet carries, so a graph parsed from an XMPCore-written
+    /// packet re-serializes under the `dwc` prefix while its properties stay keyed by
+    /// [`DWC_URI_TRAILING_SLASH`]: [`XmpMeta::get_text`] with `WellKnownNs::DarwinCore.uri()`
+    /// returns `None` for such a graph. Resolve a property by the URI its packet carries.
+    ///
+    /// [`XmpMeta::get_text`]: crate::XmpMeta::get_text
     #[must_use]
     pub fn from_uri(uri: &str) -> Option<WellKnownNs> {
         WellKnownNs::ALL
@@ -444,11 +453,30 @@ mod tests {
             WellKnownNs::DarwinCore.uri(),
             "http://rs.tdwg.org/dwc/index.htm"
         );
-        assert_ne!(WellKnownNs::DarwinCore.uri(), DWC_URI_TRAILING_SLASH);
         assert!(
             !WellKnownNs::ALL
                 .iter()
                 .any(|ns| ns.uri() == DWC_URI_TRAILING_SLASH)
+        );
+    }
+
+    #[test]
+    fn the_trailing_slash_alias_is_the_only_uri_from_uri_does_not_hand_back() {
+        // `from_uri(u).map(uri) == Some(u)` — resolving a URI hands the same URI back, because
+        // reading never canonicalizes — holds for every registered URI. The Darwin Core read alias
+        // is the sole exception, and pinning it here is what keeps it a documented exception rather
+        // than a silent hole: a caller that resolved by the slashed URI must keep using it.
+        for &ns in WellKnownNs::ALL {
+            assert_eq!(
+                WellKnownNs::from_uri(ns.uri()).map(WellKnownNs::uri),
+                Some(ns.uri()),
+                "{ns:?} must hand back the URI it was resolved by"
+            );
+        }
+        assert_eq!(
+            WellKnownNs::from_uri(DWC_URI_TRAILING_SLASH).map(WellKnownNs::uri),
+            Some("http://rs.tdwg.org/dwc/index.htm"),
+            "the alias resolves to the unslashed URI, so it is not an identity"
         );
     }
 

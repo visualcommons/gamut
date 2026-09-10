@@ -23,13 +23,19 @@ use crate::writer::XmpWriter;
 
 /// The XMP sidecar file format: an XMP packet as a standalone `.xmp` file.
 ///
-/// The one thing a sidecar requires beyond an embedded packet is the `x:xmpmeta` element. Part 1
-/// §7.3.3 makes it optional inside a container — its purpose is "to identify XMP metadata within
-/// general XML text that might contain other non-XMP uses of RDF" — and a standalone `.xmp` file is
-/// exactly that general XML text, so here it is the marker that makes the file XMP at all (exiv2's
-/// sidecar sniffer likewise keys on the `<?xpacket?>` header or the `<x:xmpmeta>` element). A
-/// bare `rdf:RDF` document is rejected by [`XmpSidecar::read`] and always emitted by
-/// [`XmpSidecar::write`] wrapped.
+/// The one thing this crate requires of a sidecar beyond an embedded packet is the `x:xmpmeta`
+/// element — **a gamut rule, stricter than the specification rather than derived from it**. Part 1
+/// §7.3.3 says an "optional" `x:xmpmeta` element "may be placed around the rdf:RDF element" and that
+/// a processor "should tolerate" one: permission, never a requirement. Part 3's "External storage
+/// of metadata" bullets never mention the element at all. A wrapper-less `.xmp` file is therefore
+/// spec-conformant, and [`XmpSidecar::read`] rejects it anyway.
+///
+/// What §7.3.3 does supply is the element's purpose — "to identify XMP metadata within general XML
+/// text that might contain other non-XMP uses of RDF" — and a standalone `.xmp` file is exactly
+/// that general XML text: without the element nothing in the bytes says the RDF is XMP. exiv2 draws
+/// the line elsewhere again, accepting `<?xpacket` **or** `<x:xmpmeta`, so an xpacket-wrapped bare
+/// `rdf:RDF` is a sidecar to exiv2 and not to this crate. [`XmpSidecar::write`] always emits the
+/// element.
 ///
 /// ```
 /// use gamut_xmp::{WellKnownNs, XmpMeta, XmpSidecar};
@@ -60,17 +66,18 @@ impl XmpSidecar {
     ///
     /// Returns [`XmpError::MissingXmpMeta`] naming the document element when it is not `x:xmpmeta`
     /// — a bare `rdf:RDF` document is a packet body, valid XMP that [`XmpMeta::from_packet`]
-    /// accepts, but not a sidecar. Otherwise the same errors as [`XmpMeta::from_packet`]:
+    /// accepts, but not one this crate reads as a sidecar. Otherwise the same errors as
+    /// [`XmpMeta::from_packet`]:
     /// [`XmpError::Encoding`] for non-UTF-8 input, [`XmpError::Xml`] for malformed XML,
     /// [`XmpError::MissingRdf`] when no `rdf:RDF` is found, and the RDF/XML-for-XMP errors for
     /// constructs XMP does not permit.
     ///
-    /// Note that exiv2 is more permissive here: its sidecar sniffer (`isXmpType`) accepts a file
-    /// that starts with `<?xpacket` **or** `<x:xmpmeta`, so it reads a wrapper-less packet from a
-    /// `.xmp` file that this rejects. gamut is deliberately the stricter of the two — Part 3
-    /// defines a sidecar as the packet as embedded, and §7.3.3 is what identifies XMP in a
-    /// standalone XML file — and a caller who wants exiv2's latitude uses
-    /// [`XmpMeta::from_packet`].
+    /// Both exiv2 and the specification are more permissive here. exiv2's sidecar sniffer
+    /// (`isXmpType`) accepts a file that starts with `<?xpacket` **or** `<x:xmpmeta`, so it reads
+    /// as a sidecar both a wrapper-less packet and an xpacket-wrapped bare `rdf:RDF` that this
+    /// rejects; and §7.3.3 calls the element optional, so the rejection is gamut's own choice and
+    /// not a spec requirement (see the type's documentation for why it is made). A caller who wants
+    /// that latitude uses [`XmpMeta::from_packet`].
     pub fn read(bytes: &[u8]) -> Result<XmpMeta> {
         let packet = XmpPacket::scan(bytes)?;
         // Parse first so a malformed file reports its malformation, not a missing wrapper.

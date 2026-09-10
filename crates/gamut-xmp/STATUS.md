@@ -50,14 +50,27 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   recognises `http://rs.tdwg.org/dwc/index.htm/` as a read-only alias (`DWC_URI_TRAILING_SLASH`),
   so a graph parsed from an exiv2-written packet or sidecar re-serializes under `dwc` rather than a
   synthesized prefix; `uri()` still emits the unslashed URI, so gamut's own bytes are unchanged and
-  the alias is not an `ALL` entry.
+  the alias is not an `ALL` entry. The alias buys a **prefix**, not a URI: reading does not
+  canonicalize, so such a graph keeps the slashed URI its packet declared and a caller must look the
+  property up under `DWC_URI_TRAILING_SLASH` — `get_text(WellKnownNs::DarwinCore.uri(), …)` returns
+  `None` for it. `from_uri(u).map(uri) == Some(u)` therefore holds for every registry entry and not
+  for the alias, pinned as such in `namespace.rs`. Canonicalizing on read — which would trade byte
+  fidelity for that symmetry — is filed as issue #547 for when a consumer needs it.
 - **Sidecars require `x:xmpmeta` (issue #421).** `XmpSidecar::read` accepts everything
   `XmpMeta::from_packet` does — XML declaration, BOM, wrapper or bare — but rejects a document
-  whose element is not `x:xmpmeta` with `XmpError::MissingXmpMeta` naming the element found. Part 3
-  ("External storage of metadata", in the vendored 2020 edition's Introduction) defines a sidecar as
-  the packet "as though it were embedded and then … extracted"; Part 1 §7.3.3 gives `x:xmpmeta`
-  exactly one purpose, identifying XMP inside general XML text, which a standalone `.xmp` file is;
-  exiv2's sidecar sniffer keys on `<?xpacket` or `<x:xmpmeta`. `XmpSidecar::write` emits the XML
+  whose element is not `x:xmpmeta` with `XmpError::MissingXmpMeta` naming the element found. **This
+  is stricter than the specification, not derived from it.** The vendored Part 1 §7.3.3 reads "An
+  optional x:xmpmeta element **may** be placed around the rdf:RDF element" and "An XMP processor
+  **should tolerate** an x:xmpmeta element in any input" — permission and tolerance, never a
+  requirement; the vendored Part 3's "External storage of metadata" bullets (a complete, well-formed
+  XML document with the leading XML declaration, the `.xmp` extension, `application/rdf+xml`,
+  written "as though it were embedded and then had the XMP packets extracted") never mention the
+  element, and the string `xmpmeta` occurs in Part 3 exactly once, inside an SVG example. So `read`
+  rejects a sidecar the specification permits. What §7.3.3 supplies is the element's *purpose* —
+  identifying XMP inside general XML text — and a standalone `.xmp` file is that text, so gamut takes
+  the element as the marker rather than reading any RDF document beside an image as XMP; exiv2 draws
+  its own, different line (`isXmpType` keys on `<?xpacket` **or** `<x:xmpmeta`).
+  `XmpSidecar::write` emits the XML
   declaration Part 3 asks for, then a read-only (`end="r"`), unpadded packet wrapping the canonical
   body in `x:xmpmeta` — byte-stable per graph. No filesystem API and no enforced file name: the
   `.xmp`-beside-the-image convention is documented for the caller. The missing wrapper has its own
@@ -102,5 +115,10 @@ deliberately:
   namespace registry, not a validator — still true after the exiv2-parity additions (issue #421).
 - **Sidecar file naming and I/O (Part 3):** `XmpSidecar` is bytes-in / bytes-out; locating
   `photo.xmp` beside `photo.dng` is the caller's, as embedding is the format crates'.
+- **Decode limits (crate-wide, not sidecar-specific):** `XmpSidecar::read` takes an unbounded
+  `&[u8]` and parses the document before checking for the wrapper. `XmpMeta::from_packet` has
+  identical exposure on the same bytes, so the sidecar API (issue #421) adds no hostile-input class
+  the crate did not already have; whether gamut-xmp should grow a decode-limit convention like
+  `gamut-png`'s is a question for the crate as a whole and is deliberately left open.
 - **Deferred additive API** (post-1.0, no consumer today): an opt-in `XmpMeta::validate()`, and
   nested-structure field lookup.

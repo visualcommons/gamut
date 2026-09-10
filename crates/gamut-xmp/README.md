@@ -59,10 +59,13 @@ padding) and `XmpPacket::parse` the graph — `from_packet` is exactly that comp
 **Sidecars.** `XmpSidecar::write` / `XmpSidecar::read` are the bytes of a standalone `.xmp` file —
 the interchange RAW workflows use, since a camera's raw format is not extensible (Part 3, "External
 storage of metadata"). A sidecar is the packet as embedded, so `read` accepts everything
-`from_packet` does but **requires the `x:xmpmeta` document element**: Part 1 §7.3.3 makes it the
-marker that identifies XMP inside general XML text, which is what a standalone file is. (exiv2's
-sidecar sniffer accepts a file starting with `<?xpacket` *or* `<x:xmpmeta`; gamut is the stricter of
-the two, deliberately — a caller who wants that latitude uses `XmpMeta::from_packet`, and the
+`from_packet` does but **requires the `x:xmpmeta` document element** — a gamut rule that is stricter
+than the specification, not derived from it. Part 1 §7.3.3 calls the element optional and asks only
+that a processor tolerate one, and Part 3's external-storage bullets never mention it, so a
+wrapper-less `.xmp` file is spec-conformant and `read` rejects it anyway. What §7.3.3 supplies is
+the element's purpose — identifying XMP inside general XML text, which is what a standalone file is
+— so gamut takes it as the marker. (exiv2 draws its own line, accepting a file starting with
+`<?xpacket` *or* `<x:xmpmeta`. A caller who wants that latitude uses `XmpMeta::from_packet`, and the
 rejection is its own `XmpError::MissingXmpMeta` rather than a claim that the wrapper-less form is
 prohibited.) `write` emits the XML declaration
 Part 3 asks for, then a read-only, unpadded packet in canonical form, so two sidecars of the same
@@ -135,8 +138,11 @@ changed — every existing variant, URI, prefix and method keeps its meaning.
   toolchain). One oracle normalization is pinned as such: exiv2 appends `/` to a namespace URI
   ending in neither `/` nor `#` when it registers it with XMPCore, so the engine re-serializes
   Darwin Core as `http://rs.tdwg.org/dwc/index.htm/`; gamut writes the URI exiv2 documents and
-  additionally accepts the slashed form on read (`DWC_URI_TRAILING_SLASH`), so a packet the engine
-  wrote round-trips under the `dwc` prefix.
+  additionally maps the slashed form to the `dwc` **prefix** on read (`DWC_URI_TRAILING_SLASH`), so
+  a packet the engine wrote re-serializes under `dwc` rather than a synthesized prefix. It does not
+  rewrite the URI — the graph keeps the slashed URI its packet declared — so a caller resolving such
+  a property by URI passes `DWC_URI_TRAILING_SLASH`, not `WellKnownNs::DarwinCore.uri()`
+  (issue #547).
 - **Mutation-clean** — `cargo mutants` passes with zero gamut-xmp exclusions in
   `.cargo/mutants.toml`.
 - **No benches, intentionally** — the crate has no performance contract; packets are a few KB.
