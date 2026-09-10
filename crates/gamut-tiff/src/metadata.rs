@@ -17,7 +17,9 @@
 //! [`gamut_ifd::Ifd`] rather than as bytes saves every caller from re-parsing a directory the
 //! decoder already walked. Its fields are neither validated nor completed — what the caller
 //! supplies is what the file gets, and what the file holds is what the caller gets — subject to
-//! the three normalisations a directory model implies, named on [`TiffMetadata::exif`].
+//! the three normalisations a directory model implies, named on [`TiffMetadata::exif`], and to
+//! the four shapes the encode **refuses** outright rather than write a file it could not read
+//! back ([`TiffMetadata::check`]).
 //!
 //! # Where the blocks live, and what that costs a page-at-a-time reader
 //!
@@ -83,6 +85,11 @@ pub struct TiffMetadata {
     /// A conforming source directory is unaffected by all three. A non-conforming one is
     /// silently repaired, which is worth knowing before using a re-encode to prove a file
     /// unmodified.
+    ///
+    /// The one shape the model can express and the file cannot is a tag holding **both** a field
+    /// and a sub-IFD group: two entries under one tag, which TIFF 6.0 §2 does not allow. That is
+    /// refused by the encode rather than normalised, because normalising it would mean choosing —
+    /// silently — which of the two the caller meant; see [`TiffMetadata::check`].
     ///
     /// **Every standard pointer tag inside this directory is resolved.** All four members of
     /// [`gamut_ifd::tags::STANDARD_POINTER_TAGS`] — `SubIFDs` (330), `ExifIFD` (34665), `GPSInfo`
@@ -204,10 +211,10 @@ impl TiffMetadata {
     /// or reads back as something other than what was written.
     ///
     /// The Exif sub-IFD is a caller's directory, and nothing about a directory in memory stops it
-    /// nesting a hundred levels down, hanging a group off a tag no reader treats as a pointer, or
-    /// carrying a bare integer under a tag every reader does. Three bounds therefore apply, and
-    /// [`check_exif_subtree`] reports them as **three distinct refusals** because they are three
-    /// distinct mistakes:
+    /// nesting a hundred levels down, hanging a group off a tag no reader treats as a pointer,
+    /// carrying a bare integer under a tag every reader does, or naming one tag twice. Four bounds
+    /// therefore apply, and [`check_exif_subtree`] reports them as **four distinct refusals**
+    /// because they are four distinct mistakes:
     ///
     /// 1. **the field.** No field under a tag in [`EXIF_SUBTREE_POINTER_TAGS`] may carry a
     ///    pointer's own on-disk type code ([`POINTER_TYPE_CODES`]). The reader decides "pointer"
@@ -218,7 +225,9 @@ impl TiffMetadata {
     ///    ([`EXIF_SUBTREE_POINTER_TAGS`]). Under any other tag the writer emits a pointer the
     ///    reader hands back as a raw offset into the file it came from, so the directory does not
     ///    survive a round trip.
-    /// 3. **the depth.** The reader follows [`MAX_POINTER_DEPTH`] levels below IFD 0 and refuses
+    /// 3. **the pair.** One tag may carry a field **or** a group, never both: two entries under
+    ///    one tag is not a TIFF directory (TIFF 6.0 §2), and the field is what a reader drops.
+    /// 4. **the depth.** The reader follows [`MAX_POINTER_DEPTH`] levels below IFD 0 and refuses
     ///    what is deeper. The Exif directory occupies the first of those levels, so its own
     ///    nesting may use the rest — one further directory, which for a decoded camera EXIF is
     ///    `InteroperabilityIFD` (EXIF 2.3 §4.6.3).
@@ -232,7 +241,8 @@ impl TiffMetadata {
     ///
     /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the Exif sub-IFD
     /// carries a pointer-typed field under a pointer tag, hangs a group off a tag the reader does
-    /// not resolve, or nests deeper than the reader walks back.
+    /// not resolve, carries a field and a group under one tag, or nests deeper than the reader
+    /// walks back.
     pub(crate) fn check(&self) -> Result<()> {
         match self.exif_ifd() {
             Some(exif) => check_exif_subtree(exif, MAX_POINTER_DEPTH - 1),
@@ -382,6 +392,20 @@ const FOREIGN_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may only nest a group
      pointer tag (SubIFDs, ExifIFD, GPSInfo, InteroperabilityIFD) and this one uses another, \
      which would read back as a raw file offset";
 
+/// The refusal earned by a tag carrying **both** a plain field and a sub-IFD group —
+/// [`check_exif_subtree`]'s third clause.
+///
+/// [`gamut_ifd::Ifd`] holds fields and groups in two lists, so one tag can appear in both; the
+/// writer then emits **two entries under that tag**, which TIFF 6.0 §2 does not allow, and every
+/// reader keeps exactly one of them. Which one differs: this crate's model collapses a duplicated
+/// tag to its **last** occurrence, while libtiff marks every occurrence after the **first** to be
+/// ignored (`tif_dirread.c`, "Mark duplicates of any tag to be ignored") and warns that the
+/// directory is not sorted in ascending order. So the entry that survives depends on the reader,
+/// and the field the caller set is dropped by at least one of them.
+const FIELD_BESIDE_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may not carry both a plain field \
+     and a sub-IFD group under one tag, which would be written as two entries under that tag \
+     (TIFF 6.0 §2 allows one) and read back as only one of them";
+
 /// The writer's side of what the reader delivers: refuses an Exif subtree this crate could not
 /// hand back unchanged, `depth` further levels being all that is left below `ifd`.
 ///
@@ -399,7 +423,7 @@ const FOREIGN_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may only nest a group
 /// agree on nothing but the on-disk type code, so the code is what both sides ask about — see
 /// [`POINTER_TYPE_CODES`].
 ///
-/// Three refusals, deliberately distinct, because they are three different mistakes and a caller
+/// Four refusals, deliberately distinct, because they are four different mistakes and a caller
 /// reading the message has to know which one it made:
 ///
 /// * a **field** under a tag *in* [`EXIF_SUBTREE_POINTER_TAGS`] whose type is a pointer's own —
@@ -409,20 +433,24 @@ const FOREIGN_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may only nest a group
 ///   under `SubIFDs` is left alone here too;
 /// * a **group** under a tag *outside* [`EXIF_SUBTREE_POINTER_TAGS`] — the reader leaves that
 ///   pointer as a raw absolute offset, so what came back would not be what was written;
+/// * a **field beside a group** under one tag — the writer emits two entries under it, which
+///   TIFF 6.0 §2 does not allow, and the field is the one a reader drops
+///   ([`FIELD_BESIDE_GROUP_REFUSAL`]);
 /// * a *child directory* nested past `depth` — the reader refuses to walk that far
 ///   ([`MAX_POINTER_DEPTH`]). A group with no children reaches no further level, so it is the
 ///   children and not the group that the bound counts.
 ///
-/// The order is field, then group tag, then depth, and it is the order of how little the rest of
-/// the tree matters to each: a pointer-typed field is unreturnable whatever else the directory
-/// holds, a group under an unfollowed tag is unreturnable whatever its depth, and only the depth
-/// clause needs the tree walked. All three stop at the first offender and the depth bound stops at
-/// the bound rather than measuring the whole tree, so a directory a caller nested a hundred levels
-/// deep costs a hundred levels of neither recursion nor time.
+/// The order is field, then group tag, then field-beside-group, then depth, and it is the order of
+/// how little the rest of the tree matters to each: a pointer-typed field is unreturnable whatever
+/// else the directory holds, a group under an unfollowed tag is unreturnable whatever its depth, a
+/// duplicated tag is unreturnable whatever is below it, and only the depth clause needs the tree
+/// walked. All four stop at the first offender and the depth bound stops at the bound rather than
+/// measuring the whole tree, so a directory a caller nested a hundred levels deep costs a hundred
+/// levels of neither recursion nor time.
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) for any of the three refusals.
+/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) for any of the four refusals.
 fn check_exif_subtree(ifd: &Ifd, depth: usize) -> Result<()> {
     for &tag in EXIF_SUBTREE_POINTER_TAGS {
         if ifd.get(tag).is_some_and(is_pointer_typed) {
@@ -437,6 +465,12 @@ fn check_exif_subtree(ifd: &Ifd, depth: usize) -> Result<()> {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 FOREIGN_GROUP_REFUSAL,
+            ));
+        }
+        if ifd.get(group.tag).is_some() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                FIELD_BESIDE_GROUP_REFUSAL,
             ));
         }
         for child in &group.ifds {
@@ -1005,6 +1039,30 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_writer_refuses_a_field_and_a_group_under_one_tag() {
+        // `Ifd` keeps fields and groups in two lists, so one tag can sit in both; the writer then
+        // emits two entries under it — not a TIFF directory (TIFF 6.0 §2) — and the field is what
+        // a reader drops. It encoded cleanly, read back without the field, and this crate's own
+        // `deconstruct` graded the file clean, so nothing in the round trip could see it. The
+        // *message* is the claim: the tag is a standard pointer tag and the value is a `SHORT`, so
+        // neither of the other clauses applies to this tree.
+        for &tag in EXIF_SUBTREE_POINTER_TAGS {
+            let mut child = Ifd::new();
+            child.set(1, Value::Ascii("R98".into()));
+            let mut exif = exif_ifd();
+            exif.set(tag, Value::Short(vec![7]));
+            exif.set_sub_ifd(tag, vec![child]);
+            let Err(err) = TiffMetadata::new().with_exif(exif).check() else {
+                panic!("tag {tag}: two entries under one tag is not a directory");
+            };
+            assert!(
+                err.to_string().contains("both a plain field"),
+                "tag {tag}: {err}"
+            );
         }
     }
 
