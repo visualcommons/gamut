@@ -1,9 +1,47 @@
-//! `gamut inspect` — strict "deconstruct" of a TIFF, DNG or PNG (issues #197/#263/#224).
+//! `gamut inspect` — strict "deconstruct" of a TIFF, DNG or PNG (issues #197/#263/#224), and the
+//! C2PA provenance report for a HEIC (issue #448).
 //!
 //! Walks the entire container, classifies every byte into typed segments, and flags anything
 //! unrecognised (unknown tags, unknown field types, out-of-spec codes, unclassified bytes).
 //! Prints a report to stdout and exits non-zero when the file is not fully accounted for —
 //! usable as an archival CI gate.
+//!
+//! # HEIC is the one format here with no gate
+//!
+//! The HEIC arm answers a different question from the other three, and answers only it: **does
+//! this file carry a C2PA manifest store, and where?** It does not deconstruct the container, so
+//! it has nothing to hold against the file and reports no verdict; it exits `0` whenever
+//! `gamut-heic` could parse the container, whether a store was found or not. Presence and absence
+//! are both ordinary outcomes of an ordinary file, and neither is an accounting anomaly.
+//!
+//! The reporting itself lives in `gamut-heic`, not here, because that is where the facts and the
+//! words about them belong: [`gamut::heic::C2paSummary`] holds the reportable facts and renders the
+//! lines — disclaimer included, since a report that let a reader infer a validity verdict would be a
+//! defect — and this command prefixes its own indent to them. One rendering, pinned once, for every
+//! host. gamut locates a store and never validates one (C2PA 2.4 §15.12).
+//!
+//! `gamut-cli` being outside the coverage gate is **not** a reason to move logic out of it, and
+//! nothing here rests on that: coverage exclusion is not test exclusion. This file's own logic is
+//! tested inline below and, through the built binary, by `tests/inspect_c2pa.rs`.
+//!
+//! # Which files the HEIC arm accepts
+//!
+//! The sniff routes an ISOBMFF file — anything whose first box is `ftyp` — into the HEIC arm, and
+//! `inspect_heic` then *confirms* it with `gamut-heic`'s own
+//! [`HeifImage::is_hevc_still`](gamut::heic::HeifImage::is_hevc_still) after the parse it performs
+//! anyway, reporting an unsupported container brand when the confirmation fails. The predicate is
+//! not restated here: a brand list in this file would have to be exhaustive over the still-image
+//! brands — `mif2`, `avci` and `avcs` beside `heic`/`heix`/`heim`/`heis`/`mif1` — and would still be
+//! wrong about `mif1`, which is the generic MIAF structural brand an AVIF may carry as its *major*
+//! brand. `references/heif` §7 fixes the rule and `gamut-heic` implements it: for `mif1` the primary
+//! item must additionally carry an `hvcC`. Confirming after the parse costs nothing and cannot drift
+//! from the crate that owns the rule.
+//!
+//! `--format heic` skips the sniff **and** the confirmation. A forced format is the caller's own
+//! assertion about the file, and honouring it is what `--format` is for — so the label the report
+//! opens with says the format was *asserted*, not determined. `<path>: HEIF/HEIC` is this command's
+//! own claim about the file, and printing it over a file the sniff would have declined would echo
+//! the caller's assertion back as a finding.
 //!
 //! The contract itself — the gate per format, the two exit codes, the budgets, and every reason
 //! the PNG filter scan declines — is recorded in `docs/inspect-exit-codes.md`, which is normative
@@ -69,7 +107,7 @@ const DNG_VERSION_TAG: u16 = 50706;
 /// Arguments for `gamut inspect`.
 #[derive(Args)]
 pub(crate) struct InspectArgs {
-    /// Input TIFF, DNG or PNG file.
+    /// Input TIFF, DNG, PNG or HEIC file.
     input: PathBuf,
     /// Force the container format instead of auto-detecting it.
     #[arg(long, value_enum)]
@@ -85,6 +123,8 @@ pub(crate) enum Format {
     Dng,
     /// PNG (gamut-png).
     Png,
+    /// HEIF/HEIC (gamut-heic) — the C2PA provenance report only; see the module docs.
+    Heic,
 }
 
 /// A format-agnostic view of a deconstruct report, for printing.
@@ -108,15 +148,24 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
 
     // PNG's report is a different shape -- it has no IFD tree and no tag vocabulary, but it does
     // carry compression figures the others have no equivalent for -- so it prints on its own path
-    // rather than being flattened into `Summary`.
-    if matches!(format, Format::Png) {
-        return inspect_png(&args.input, &data);
+    // rather than being flattened into `Summary`. HEIC's is not a deconstruct at all: it answers
+    // the provenance question and gates nothing (see the module docs).
+    match format {
+        Format::Png => return inspect_png(&args.input, &data),
+        Format::Heic => {
+            let route = match args.format {
+                Some(_) => HeicRoute::Forced,
+                None => HeicRoute::Sniffed,
+            };
+            return inspect_heic(&args.input, &data, route);
+        }
+        Format::Tiff | Format::Dng => {}
     }
 
     let summary = match format {
         Format::Dng => summarize_dng(gamut::dng::deconstruct(&data)?),
         Format::Tiff => summarize_tiff(gamut::tiff::deconstruct(&data)?),
-        Format::Png => unreachable!("handled above"),
+        Format::Png | Format::Heic => unreachable!("handled above"),
     };
 
     print_summary(&args.input, format, &summary);
@@ -138,11 +187,21 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
 /// The 8-byte PNG file signature (§5.2).
 const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
-/// Detects PNG by signature, then DNG vs TIFF: a DNG is a TIFF whose IFD 0 carries the mandatory
-/// `DNGVersion` tag.
+/// Detects PNG by signature, then an ISOBMFF file by its `ftyp` box, then DNG vs TIFF: a DNG is a
+/// TIFF whose IFD 0 carries the mandatory `DNGVersion` tag.
+///
+/// The `ftyp` test is a **route**, not a verdict: it says the file is ISOBMFF, not that it is the
+/// HEVC still image the HEIC arm reports on. `inspect_heic` confirms that with `gamut-heic`'s own
+/// predicate after parsing (see the module docs for why the brand rule is not restated here), so an
+/// AVIF entering this way is reported as an unsupported container rather than blamed on TIFF for
+/// having no byte-order mark.
 fn sniff(data: &[u8]) -> Format {
     if data.starts_with(&PNG_SIGNATURE) {
         return Format::Png;
+    }
+    // §4.3: `ftyp` is the first box of the file, so its type sits at offset 4.
+    if data.get(4..8) == Some(b"ftyp") {
+        return Format::Heic;
     }
     if let Ok(file) = gamut::tiff::read(data)
         && file
@@ -622,12 +681,107 @@ fn filter_skip_label(reason: gamut::png::SkippedFilterScan) -> &'static str {
     }
 }
 
+/// How the HEIC arm was reached, which decides whether the container is confirmed.
+#[derive(Clone, Copy)]
+enum HeicRoute {
+    /// By sniffing an `ftyp` box. The sniff only knows the file is ISOBMFF, so the container is
+    /// confirmed against `gamut-heic`'s own still-image predicate before anything is reported.
+    Sniffed,
+    /// By an explicit `--format heic`. A forced format is the caller's own assertion about the
+    /// file; `--format` exists to override detection, so it overrides the confirmation too — and
+    /// the label says so, rather than reporting the caller's assertion back as this command's.
+    Forced,
+}
+
+/// The label the HEIC report opens with, which states how the format was arrived at.
+///
+/// On the sniffed route the command determined it, and confirmed it against `gamut-heic`'s own
+/// still-image predicate. On the forced route it determined nothing: the caller asserted the format
+/// and both the sniff and the confirmation were skipped, so a bare `HEIF/HEIC` would be this
+/// command vouching for a file it never tested — over an AVIF, say, which `--format heic` accepts.
+fn heic_label(route: HeicRoute) -> &'static str {
+    match route {
+        HeicRoute::Sniffed => "HEIF/HEIC",
+        HeicRoute::Forced => "HEIF/HEIC (asserted by --format, not detected)",
+    }
+}
+
+/// Reports what a HEIF/HEIC file says about its own provenance, and nothing else.
+///
+/// Every reportable fact and every word of the report come from `gamut-heic`; this function parses
+/// the container, confirms it is the HEVC still image this arm reports on (unless `--format` forced
+/// the arm), prints the lines under the file's name, and returns `Ok(())`. The per-box lines are
+/// truncated at [`MAX_LIST`] with the same "… and N more" tail every other list here carries; the
+/// crate keeps returning all of them.
+///
+/// It reaches no verdict, so it has none to fail on: a file with a manifest store, a file without
+/// one, and a file whose C2PA box could not be read through all exit `0`, each saying which it is.
+/// The exit code says whether the *inspection* succeeded, not what it found, so only a container
+/// this crate cannot parse — or one that is not this arm's container at all — exits non-zero, the
+/// same way a TIFF that cannot be opened does.
+fn inspect_heic(path: &std::path::Path, data: &[u8], route: HeicRoute) -> Result<(), CliError> {
+    let container = gamut::heic::HeifContainer::parse(data)?;
+    let image = container.image();
+    // `is_hevc_still` is `gamut-heic`'s own rule (`references/heif` §7), including the `mif1` case
+    // an AVIF can satisfy on the major brand alone; see the module docs.
+    if matches!(route, HeicRoute::Sniffed) && !image.is_hevc_still() {
+        return Err(CliError::UnsupportedContainer {
+            path: path.to_path_buf(),
+            brand: brand_label(image.major_brand()),
+        });
+    }
+    println!("{}: {}", path.display(), heic_label(route));
+
+    // Capped like every other list here, and for the same reason: C2PA 2.4 §A.5.3 permits any
+    // number of these boxes, so their count is chosen by the input. Uncapped, a legal file carrying
+    // fifty thousand of them puts the headline — disclaimer and all — at line 2 of fifty thousand.
+    // The summary lines are never capped: there are at most two of them whatever the file holds,
+    // and the first is the one a reader must not lose.
+    //
+    // What keeps the cap honest is entirely in `gamut-heic`. The headline names *every* non-empty
+    // category, so a whole class of box cannot go unmentioned however the cut falls; and the detail
+    // lines arrive in true file order, so the cut hides the file's last boxes rather than one kind
+    // of box. One budget over one file-ordered list is therefore enough, and a second per-category
+    // budget would only add a number to keep in step with this one.
+    let summary = container.c2pa_summary();
+    for line in summary.summary_lines() {
+        println!("  {line}");
+    }
+    let shown: Vec<String> = summary.detail_lines().take(MAX_LIST).collect();
+    for line in &shown {
+        println!("  {line}");
+    }
+    let hidden = hidden_entries(summary.detail_line_count(), shown.len());
+    if hidden > 0 {
+        println!("    … and {hidden} more");
+    }
+    Ok(())
+}
+
+/// Renders a four-character brand for a message, escaping every byte that is not printable ASCII.
+///
+/// A brand is four printable characters by definition, but the four bytes come from the file, and
+/// a report on hostile input must not push control characters at the terminal it prints to.
+fn brand_label(brand: [u8; 4]) -> String {
+    brand
+        .iter()
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                char::from(b).to_string()
+            } else {
+                format!("\\x{b:02x}")
+            }
+        })
+        .collect()
+}
+
 /// The display name of a format.
 fn format_name(format: Format) -> &'static str {
     match format {
         Format::Tiff => "TIFF",
         Format::Dng => "DNG",
         Format::Png => "PNG",
+        Format::Heic => "HEIC",
     }
 }
 
@@ -638,7 +792,20 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_LIST, hidden_entries};
+    use super::{MAX_LIST, brand_label, hidden_entries};
+
+    #[test]
+    fn a_brand_label_escapes_every_byte_that_is_not_printable_ascii() {
+        // The four bytes come from the file. A brand of control characters must reach the report as
+        // text, not as an escape sequence the terminal acts on.
+        assert_eq!(brand_label(*b"avif"), "avif");
+        // Trailing spaces are legal in a four-character code and must survive unescaped.
+        assert_eq!(brand_label(*b"qt  "), "qt  ");
+        assert_eq!(
+            brand_label([0x07, 0x1B, 0x00, 0xFF]),
+            "\\x07\\x1b\\x00\\xff"
+        );
+    }
 
     #[test]
     fn the_truncation_notice_counts_the_entries_neither_caller_printed() {

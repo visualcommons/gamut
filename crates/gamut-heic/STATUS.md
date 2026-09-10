@@ -15,7 +15,8 @@ the libheif differential-oracle slice (delivered — `tests/conformance.rs` over
 `src/backend.rs`, issue #273: `HevcDecoders` + the `gamut-codec-abi` adapter); **S6** = the
 high-bit-depth presentation slice (delivered — issue #303: `decode_item_rgba16` and the wider
 matrix set, retrofitted **additively** onto the S3 pipeline); **S7** = the C2PA manifest-store
-locator slice (delivered — issue #429 under the #239 epic: `src/c2pa.rs`).
+locator slice (delivered — issue #429 under the #239 epic: `src/c2pa.rs`, plus the reporting shape
+that `gamut inspect` prints from, issue #448).
 
 This crate builds on [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md): the box grammar, item model,
 property/reference parsing, and motion-photo *tolerance* already ship there. This ledger mirrors
@@ -128,6 +129,51 @@ reaches no verdict. The reported range is for observability and byte accounting 
 a BMFF exclusion range, since `c2pa.hash.bmff.v3` excludes by box path, not by byte offset (§18.6,
 §A.5.6). Nothing inside the store is parsed, no hash is computed and no signature is checked.
 
+**Implemented (S7, issue #448).** `HeifContainer::c2pa_summary` is the same scan shaped for
+*reporting*: a `C2paSummary` of `C2paStoreSummary` entries — a half-open range, a size and a
+`box_purpose` per store, in file order — and `report_lines`, which renders them. The bytes are
+absent by construction rather than merely unused, so no report built from a summary can print a
+store: it is opaque to this crate, routinely tens or hundreds of kilobytes once a manifest embeds a
+thumbnail, and rendering it invites the reading that gamut has understood — and so checked — the
+manifest, when a byte range is what a caller hands to `c2pa-rs`. Every word of the report lives here
+too, `C2PA_NOT_VALIDATED` included: §15.12 puts validation on a validator, and the line that reports
+a store states that gamut checks no signature, no hash binding and no trust list and names
+`c2pa-rs`, inline rather than as a footnote, because "C2PA: present" printed beside EXIF and ICC
+reads as *verified* to anyone who has seen a Content Credentials badge. Keeping the rendering in the
+crate is what makes every host print the same words and none able to reword the disclaimer away.
+
+The summary reports a **third** outcome beside a store and no C2PA box at all: a top-level box whose
+extended type *is* `C2PA_UUID` and that still yields no store — its `FullBox` version or flags are
+non-zero (§A.5.1.2), its `box_purpose` is the auxiliary `merkle` or a value this revision does not
+know (§A.5.3), it is truncated, or no valid JUMBF `LBox` bounds a store where its purpose puts one.
+`C2paSummary::unread` lists those with a `C2paUnreadReason`, and `report_lines` gives each one a
+line. Collapsing them into "no manifest store found" would be the mirror of the verdict
+`C2PA_NOT_VALIDATED` prevents: it would let a reader infer *no provenance* from bytes this crate
+merely could not read through. A `uuid` box whose extended type is not `C2PA_UUID` — even one byte
+off — is **not** one of these: §A.5.1.1 makes the extended type the whole test, and an ordinary file
+carries vendor `uuid` boxes that are no evidence of provenance.
+
+It is still **counted**, in `C2paSummary::other_uuid_boxes`, and the count gets its own line. A near
+miss and no box at all otherwise rendered byte-for-byte identically, and the first is what a signed
+file corrupted in transit looks like — the file most in need of a second look was the one the report
+said the least about. The line states a count and disclaims provenance in the same breath: no range
+is kept and no reason is offered, because the specification has no notion of an approximate extended
+type.
+
+Every `uuid` box also carries a `C2paBoxPosition`: whether the walk had already passed an `mdat`
+when it reached the box. §A.5.3 places a manifest-store box "before the first 'mdat' box in the file
+and before any 'moov' box in the file", and an appended box is the adversarial shape — but the fact
+is positional, never a verdict, since §A.5.3 equally requires the `update` box of a mid-update file
+to be the file's last box. The `moov` half of the boundary is unreachable here: `HeifContainer::parse`
+refuses a top-level movie box outright.
+
+Rendering is split so a host can cap without rewording: `summary_lines` is the headline plus the
+`uuid`-box count (at most two lines, whatever the file holds), `detail_lines` is one lazy line per
+store and per unread box, and `detail_line_count` is the true total to print beside a truncated
+list. `report_lines` is still the whole report for a host that wants it — but §A.5.3 permits any
+number of these boxes, so their count is chosen by the input, and `gamut inspect` truncates at the
+same twenty entries as every other list it prints.
+
 **Deferred (planned, additive).** The rows below. Each lands additively — new crate items or new
 `#[non_exhaustive]` variants — never a reshape of the shipped surface.
 
@@ -150,6 +196,11 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Stop rules identical to `gamut_isobmff::read` (first ftyp wins; trailer only after ftyp+meta) | 14496-12 | ✅ | S1 |
 | Meta-level accounting: `meta`/`iprp` children not consumed by the model surfaced as `UnknownBox` (e.g. `dinf`/`dref`, `uuid`) | 14496-12 | ✅ | S1 |
 | C2PA manifest store located in a top-level `uuid` `ContentProvenanceBox`: opaque bytes + exact byte range, purposes `manifest`/`original`/`update` (`c2pa`, `c2pa_manifest_stores`) | C2PA 2.4 §A.5.1, §A.5.3, §8.4.2.3 (`references/c2pa` pending, #431) | ✅ | S7 |
+| Reporting shape for a located store: presence, half-open range, size and `box_purpose` per store with the bytes absent by construction, rendered with the non-validation disclaimer inline (`c2pa_summary`, `C2paSummary::report_lines`, `C2PA_NOT_VALIDATED`) | C2PA 2.4 §15.12, §A.5.3 | ✅ | S7 (#448) |
+| A C2PA box that yields no store is reported as such, with the reason, and never as absence (`C2paSummary::unread`, `C2paUnreadBox`, `C2paUnreadReason`); a `uuid` box whose extended type is not `C2PA_UUID` is never one of these | C2PA 2.4 §A.5.1.1, §A.5.1.2, §A.5.3 | ✅ | S7 (#448) |
+| A top-level `uuid` box of another extended type is counted as a byte fact (`C2paSummary::other_uuid_boxes`), so a one-byte near miss no longer renders identically to no box at all | C2PA 2.4 §A.5.1.1 | ✅ | S7 (#448) |
+| Each box's position relative to the first `mdat` reported as a positional fact, never a verdict (`C2paBoxPosition`) | C2PA 2.4 §A.5.3 | ✅ | S7 (#448) |
+| Rendering split for a host that caps a terminal report (`summary_lines`, `detail_lines`, `detail_line_count`) while every word stays pinned in this crate | — | ✅ | S7 (#448) |
 | Store bounding is `LBox`-only and content-dependent (`LBox` validity alone cannot separate a store bound from a plausible interior length). Two routes close it: assert the `jumb` `TBox` — traceable to §A.3.9/§15.12.3.2 but only as a JPEG XL aside, so it is a maintainer call because it narrows what is reported — or confirm the store by §11.1.4.2's JUMBF type UUID, which needs 19566-5's Description Box layout. A `c2pa-rs` oracle fixture would settle either empirically | C2PA 2.4 §A.3.9, §11.1.4.2, §A.5.3; ISO/IEC 19566-5 (not vendored) | ☐ | #239 oracle |
 | C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` | C2PA 2.4 §A.5 | ☐ | later |
 | C2PA validation: JUMBF interior parse, `c2pa.hash.bmff.v3` hard binding, signature/trust verification | C2PA 2.4 §18.6, §A.5.6 | ☐ | user / #239 |
