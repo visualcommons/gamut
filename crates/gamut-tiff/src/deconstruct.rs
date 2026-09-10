@@ -363,9 +363,26 @@ impl Findings {
     ///
     /// The directories to re-read are the ones the audit says it walked
     /// ([`SpanKind::IfdBody`](gamut_ifd::SpanKind::IfdBody)), so this is a second pass over bytes
-    /// already claimed rather than a second walk of the pointer graph. A directory the audit
-    /// reached parses again by construction; one that does not is already reported by the audit's
-    /// own finding, so it is skipped here rather than reported twice.
+    /// already claimed rather than a second walk of the pointer graph.
+    ///
+    /// Two skips are therefore silent in this loop, and the contract is that neither one costs a
+    /// finding:
+    ///
+    /// * a directory the audit **did** claim as an `IfdBody` span re-parses here by construction —
+    ///   the span exists only because [`IfdReader`] already read a directory at that offset during
+    ///   the audit, so the `continue` is unreachable rather than lenient;
+    /// * a directory the audit could **not** parse is claimed as no span at all, so this pass never
+    ///   reaches it. It arrives instead as
+    ///   [`AuditFinding::SkippedSubIfd`](gamut_ifd::AuditFinding::SkippedSubIfd), which
+    ///   `map_audit_findings` turns into an [`Anomaly::Structure`] of [`Severity::Error`]. So no
+    ///   file is graded [`is_fully_accounted`](DeconstructReport::is_fully_accounted) on the
+    ///   strength of a directory nobody read — which is what a caller may rely on, and what
+    ///   `an_unparsable_sub_ifd_is_reported_rather_than_silently_skipped` fails for when it stops
+    ///   being true.
+    ///
+    /// Reporting it there rather than here is deliberate: the audit's finding names the pointer tag
+    /// and the offset that failed, which is strictly more than this pass could say about a
+    /// directory it never parsed.
     fn check_duplicate_tags(&mut self, data: &[u8], report: &SegmentReport) {
         let Ok(mut reader) = IfdReader::open(data) else {
             return;
@@ -741,6 +758,41 @@ mod tests {
                     if detail.contains("too deep")
             )),
             "{report:?}"
+        );
+    }
+
+    /// A sub-IFD the audit could not parse is reported by the audit, not lost to the
+    /// duplicate-tag pass that never sees it.
+    #[test]
+    fn an_unparsable_sub_ifd_is_reported_rather_than_silently_skipped() {
+        // `check_duplicate_tags` iterates the `IfdBody` spans and skips anything it cannot re-read,
+        // and its contract is that the skip costs no finding: a directory the audit could not parse
+        // is claimed as no span at all, so it arrives as `AuditFinding::SkippedSubIfd` instead.
+        // Nothing held that. The cycle and depth guards have their own reasons (`SkipReason::Cycle`
+        // and `TooDeep`); this is the plain unreadable target, the reason a truncated or hostile
+        // file gives, and the file must not be graded fully accounted on the strength of a
+        // directory nobody read.
+        let mut ifd = image_ifd();
+        ifd.set(tags::SUB_IFDS, Value::Long(vec![0xFFFF_FF00]));
+        let bytes = write_image(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            &ifd,
+            &[vec![0u8; 4]],
+        )
+        .expect("write");
+        let report = deconstruct(&bytes).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::Structure { detail, severity: Severity::Error, .. }
+                    if detail.contains("could not be parsed")
+            )),
+            "an unreadable sub-IFD target must be reported: {report:?}"
+        );
+        assert!(
+            !report.is_fully_accounted(),
+            "a file with a directory nobody read is not fully accounted: {report:?}"
         );
     }
 
