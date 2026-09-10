@@ -254,8 +254,17 @@ impl JxlEncoder {
     /// IPTC-IIM block and **drops** a C2PA manifest store (a store is signed over the file it came
     /// from; see [`gamut_metadata::C2paPolicy`]); a caller that must be told about either
     /// configures the embedder itself and calls
-    /// [`with_encoded_metadata`](Self::with_encoded_metadata). Carriers absent from the model leave
-    /// any earlier setting untouched.
+    /// [`with_encoded_metadata`](Self::with_encoded_metadata).
+    ///
+    /// # Precedence
+    ///
+    /// A carrier **absent** from the model leaves any earlier setting untouched. A carrier
+    /// **present** in it overwrites one, because each is routed to the raw setter — and for ICC
+    /// that setter is [`with_color`](Self::with_color), so a profile in the model replaces a
+    /// [`ColorSpec`] chosen before this call, not merely an earlier profile. Call this before
+    /// [`with_color`](Self::with_color) when the explicit colour choice is meant to win. Whether
+    /// last-write-wins is the right rule for a colour encoding, or the conflict should be refused,
+    /// is open (issue #626); this documents what it does today rather than settling it.
     ///
     /// # Errors
     ///
@@ -280,7 +289,9 @@ impl JxlEncoder {
     ///
     /// Only the carriers JPEG XL can write are accepted: EXIF (`Exif` box), XMP (`xml ` box) and
     /// ICC (the codestream colour encoding). Fields that are `None` leave any earlier setting
-    /// untouched.
+    /// untouched; a field that is `Some` overwrites one, and for ICC that means replacing the
+    /// encoder's [`ColorSpec`] — see the precedence note on
+    /// [`with_metadata`](Self::with_metadata).
     ///
     /// # Errors
     ///
