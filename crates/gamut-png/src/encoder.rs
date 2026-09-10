@@ -158,7 +158,7 @@ pub enum MetadataNotice {
     /// An XMP packet left behind because it is not UTF-8. §11.3.3.4 gives the `iTXt` text field
     /// UTF-8 and no alternative, so there is no chunk to frame it in.
     XmpNotUtf8 = 7,
-    /// A text annotation left behind because its **text string** holds a null character, which
+    /// A text payload left behind because its **text string** holds a null character, which
     /// §11.3.3.2 ("Neither the keyword nor the text string may contain a null character") and
     /// §11.3.3.4 ("neither shall contain a zero byte") both forbid.
     ///
@@ -166,8 +166,12 @@ pub enum MetadataNotice {
     /// null-terminated (the length of the chunk defines the ending)" — so it does not fail the
     /// encode. It is not written either: readers disagree about what such a chunk holds, libpng
     /// truncating the text at the null where this crate's reader returns it whole, so the
-    /// annotation is dropped rather than written into a file whose meaning depends on who reads
-    /// it.
+    /// payload is dropped rather than written into a file whose meaning depends on who reads it.
+    ///
+    /// The payload is usually a text annotation, but the XMP packet goes into an `iTXt` too and
+    /// so can land here. That case is worth reading twice: XML 1.0 does not admit U+0000 in a
+    /// document at all, so a packet that reaches this notice is not merely unwritable — it is
+    /// already not well-formed XML, whatever produced it.
     TextStringNull = 8,
 }
 
@@ -208,8 +212,8 @@ impl MetadataNotice {
                 "XMP packet: not UTF-8, and an iTXt text string must be (§11.3.3.4)"
             }
             Self::TextStringNull => {
-                "text annotation: its text string contains a null character, which no text chunk \
-                 may hold (§11.3.3.2, §11.3.3.4)"
+                "text annotation or XMP packet: its text string contains a null character, \
+                 which no text chunk may hold (§11.3.3.2, §11.3.3.4)"
             }
         }
     }

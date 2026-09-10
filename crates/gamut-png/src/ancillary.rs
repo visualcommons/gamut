@@ -157,8 +157,15 @@ struct TextEntry {
     /// carry its [`notices`](Self::notices) — a payload dropped in silence is the defect this
     /// module exists to remove.
     emit: bool,
-    /// What §11.3.3 says about this annotation that the caller has to hear: a keyword no chunk
-    /// can hold, or one written verbatim that deviates from a recommendation. Surfaced by
+    /// What §11.3.3 says about this annotation that the caller has to hear.
+    ///
+    /// Which things those are is [`MetadataNotice`]'s own list of variants, deliberately not
+    /// copied here: a copy written out once is what goes stale when a variant is added. An entry
+    /// records every notice its fields earn — some meaning the annotation was left behind, some
+    /// that it was written with a deviation on it — and
+    /// [`MetadataNotice::carried`](crate::MetadataNotice::carried) is which of the two a variant
+    /// means. Whether *this* entry reached the output is [`emit`](Self::emit), which
+    /// [`Ancillary::text_notices`] takes as the authority when the two disagree. Surfaced by
     /// [`PngEncoder::metadata_notices`](crate::PngEncoder::metadata_notices).
     notices: Vec<MetadataNotice>,
     /// Why this annotation must not be written *at all*, if it must not — a null in the keyword
