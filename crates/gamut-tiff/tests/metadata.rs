@@ -4,7 +4,7 @@
 //! Each test pins one encode path's use of the seam, so a path that stopped embedding metadata
 //! fails on its own rather than hiding behind another.
 
-use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_tiff::{
     Anomaly, Ifd, Severity, TiffDecoder, TiffEncoder, TiffMetadata, Value, deconstruct, read, tags,
 };
@@ -13,9 +13,6 @@ use gamut_tiff::{
 const XMP: &[u8] = b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>";
 const IPTC: &[u8] = &[0x1c, 0x02, 0x05, 0x00, 0x04, b't', b'e', b's', b't'];
 const ICC: &[u8] = &[0, 0, 0, 12, b'a', b'c', b's', b'p', 1, 2, 3, 4];
-/// A JUMBF-shaped C2PA manifest store: long enough for `gamut_ifd::c2pa::locate` to accept it
-/// (`LBox` + `TBox`, 8 bytes) and out of line in a classic TIFF entry.
-const STORE: &[u8] = &[0, 0, 0, 0x16, b'j', b'u', b'm', b'b', 1, 2, 3, 4];
 
 /// An Exif sub-IFD with one recognisable field (`ExposureTime`, 33434).
 fn exif() -> Ifd {
@@ -290,24 +287,19 @@ fn a_broken_pointer_on_a_page_the_metadata_discards_does_not_fail_the_read() {
     // anywhere else feeds nothing this returns and following it can only add failure modes. A
     // dangling `ExifIFD` on page 1 of a two-page document used to fail the whole call.
     //
-    // The store on that same last page is the other half of the claim: its entry carries the
-    // store's bytes rather than an offset, so the directory whose pointers are never resolved
-    // still delivers it.
+    // Only that: which directory a store comes from is
+    // `read_metadata_takes_the_store_from_the_last_ifd_of_the_chain` (src/metadata.rs), and
+    // whether these pixels decode is the strip decoder's business, not this rule's.
     let mut page0 = page_ifd();
     page0.set(tags::XMP, Value::Byte(XMP.to_vec()));
     let mut page1 = page_ifd();
     page1.set(tags::EXIF_IFD, Value::Long(vec![0xFFFF_FF00]));
-    page1.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(STORE.to_vec()));
     let bytes = multipage(&[page0, page1]);
 
     let meta = TiffDecoder::new()
         .metadata(&bytes)
         .expect("a pointer on a discarded page must not fail the read");
     assert_eq!(meta.xmp.as_deref(), Some(XMP), "IFD 0's blocks");
-    assert_eq!(meta.c2pa.as_deref(), Some(STORE), "the last IFD's store");
-    // And the file is sound, which is what makes losing its metadata indefensible.
-    let decoded: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&bytes).expect("decode");
-    assert_eq!(decoded.dimensions().width, 2);
 }
 
 /// A two-page file whose pages point their `ExifIFD` at **one** directory.
