@@ -21,7 +21,7 @@ use crate::inflate;
 use crate::palette::PngPalette;
 
 /// The parsed image header (IHDR, §11.2.1), reported as stored in the file.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PngHeader {
     /// Image width in pixels.

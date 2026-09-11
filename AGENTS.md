@@ -70,7 +70,10 @@ Dependency edges (a crate depends on those to its right):
   hostile input, ancillary metadata surfaced as raw `MetadataBlock`-ready payloads
   (eXIf/iCCP/XMP/text) plus parsed gAMA/cHRM/sRGB/cICP. APNG out of scope (decodes as the
   default image). Differential oracle both directions: libpng, which also *generates* the
-  decoder's conformance fixtures. ← core, deflate (+ `miniz_oxide` for inflate).
+  decoder's conformance fixtures. ← core, deflate (+ `miniz_oxide` for inflate, and
+  **maintainer-approved `crc32fast`** for the chunk CRC that every encode pays on its critical
+  path — hardware CRC-32 on x86-64/aarch64, table fallback elsewhere including wasm32, and it
+  keeps its `unsafe` to itself, so gamut-png stays `#![deny(unsafe_code)]`).
 - **gamut-ifd** — TIFF/IFD container core (byte order, field types, IFD read/write); a
   low-level container primitive (sibling to bitstream), shared by `gamut-tiff` and EXIF
   metadata. ← core. Optional `bigtiff` feature adds 64-bit BigTIFF. Per-format metadata

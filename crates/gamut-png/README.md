@@ -59,7 +59,12 @@ A differential oracle (`tooling/libpng-oracle`, a vendored static libpng) proves
 libpng decodes the encoder's output pixel-exact, and a libpng *reference encoder* generates the
 decoder's conformance fixtures (interlaced, sub-byte, forced-filter, metadata-laden) which both
 decoders must read identically — no vendored image corpus. A hand-crafted malformed-input corpus
-pins the rejection policy, and output size is benchmarked against libpng at maximum compression.
+pins the rejection policy. Output size is measured against libpng at zlib level 9 by
+`cargo bench -p gamut-png`, and **enforced** by `tests/size_contract.rs`, whose per-case budgets
+each carry a written justification — a regression in the crate's reason to exist fails the build.
+`STATUS.md` records the measured table; gamut is smaller than libpng-9 on every corpus entry, by
+28-85% wherever a reduction or a filter choice applies and by 0.2% on the incompressible noise row,
+where there is nothing for either encoder to find.
 
 ## License
 
