@@ -17,12 +17,7 @@ pub(crate) fn gray8_scale(bit_depth: u8) -> u8 {
 
 /// Packs one-byte-per-sample `samples` (each value `< 2^bit_depth`) into MSB-first bit-packed,
 /// byte-padded scanlines. `bit_depth` must be 1, 2, or 4.
-pub(crate) fn pack_scanlines(
-    samples: &[u8],
-    width: usize,
-    height: usize,
-    bit_depth: u8,
-) -> Vec<u8> {
+pub fn pack_scanlines(samples: &[u8], width: usize, height: usize, bit_depth: u8) -> Vec<u8> {
     debug_assert!(matches!(bit_depth, 1 | 2 | 4));
     let depth = bit_depth as usize;
     let per_byte = 8 / depth; // samples packed per output byte: 8, 4, or 2
