@@ -79,10 +79,13 @@ verbatim, and a `TopLevelPosition`:
 - **`Trailing`** — written after `mdat`.
 
 `read` assigns the position from where it met the box: after `mdat` → `Trailing`, otherwise
-`AfterFtyp`. A box a foreign file placed *between* `meta` and `mdat` is therefore written back
-between `ftyp` and `meta` — the one reordering the round-trip performs. For a C2PA box that is a
-move between two lawful positions: §A.5.3 requires only after `ftyp` and before the first `mdat`
-(and any `moov`), and both satisfy it. `TopLevelPosition` is `#[non_exhaustive]` so a finer
+`AfterFtyp`. `write` always emits `ftyp`, the `AfterFtyp` boxes, `meta`, `mdat`, then the
+`Trailing` boxes, so a foreign file's box moves on round-trip wherever its layout differs: a box
+*between* `meta` and `mdat` is written back between `ftyp` and `meta` (for a C2PA box a move
+between two lawful positions: §A.5.3 requires only after `ftyp` and before the first `mdat` and
+any `moov`, and both satisfy it); a box before `ftyp` is written back after `ftyp`; and in a file
+with `mdat` before `meta`, a box between `mdat` and `meta` is `Trailing` and is written back
+after `meta` and `mdat`. `TopLevelPosition` is `#[non_exhaustive]` so a finer
 position can be added later without a major bump. Files this crate writes round-trip
 byte-identically. `write` rejects a top-level box typed `ftyp`/`meta`/`mdat` (the model emits
 those itself), `moov`/`trak` (image sequences, `Unsupported` as on read), one whose `user_type`

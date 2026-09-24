@@ -207,10 +207,18 @@ impl TopLevelBox {
 ///
 /// [`crate::read`] assigns the position from where it found the box: before `mdat` (whether
 /// before or after `meta`) is [`AfterFtyp`](Self::AfterFtyp), after `mdat` is
-/// [`Trailing`](Self::Trailing). A box a foreign file put between `meta` and `mdat` is therefore
-/// written back between `ftyp` and `meta` — the one reordering the round-trip performs. For a
-/// C2PA box that is a move between two lawful positions: §A.5.3 requires only after `ftyp` and
-/// before the first `mdat` (and any `moov`), which both satisfy.
+/// [`Trailing`](Self::Trailing). Because [`crate::write`] always emits `ftyp`, then the
+/// `AfterFtyp` boxes, `meta`, `mdat`, then the `Trailing` boxes, a foreign file's box moves on
+/// round-trip wherever its layout differs:
+///
+/// - a box between `meta` and `mdat` is written back between `ftyp` and `meta`. For a C2PA box
+///   that is a move between two lawful positions: §A.5.3 requires only after `ftyp` and before
+///   the first `mdat` (and any `moov`), which both satisfy;
+/// - a box before `ftyp` is written back after `ftyp`;
+/// - in a file with `mdat` before `meta`, a box between `mdat` and `meta` is `Trailing` and is
+///   written back after `meta` and `mdat`, as is `mdat` itself after `meta`.
+///
+/// Files this crate writes use only that layout, so they round-trip byte-identically.
 ///
 /// Non-exhaustive, with permanent append-only discriminants: a finer position (e.g. between
 /// `meta` and `mdat`) may be added in a minor release, so match with a wildcard arm.
