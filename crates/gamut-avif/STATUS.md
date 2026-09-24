@@ -71,9 +71,9 @@ the framing addition and emitted a well-formed AVIF whose C2PA box no locator, t
 included, could find. On 64-bit targets a **third** refusal sits between them and comes from
 `gamut-isobmff`, not from here: a top-level box carries a 32-bit size field, so the container
 writer rejects a `ContentProvenanceBox` at or beyond 4 GiB as `Error::Unsupported`. There that is
-the effective ceiling — measured on a 64-bit host, the largest `len` that clears it is `4_294_967_250`
-and `4_294_967_251` is refused — and whether this crate should own that bound with its own error
-is **#576**. On 32-bit targets (`wasm32`, built by `gamut-wasm`) a buffer holds under 2 GiB, so
+the effective ceiling — measured on a 64-bit host, the largest `len` that clears it is
+`4_294_967_250` and `4_294_967_251` is refused — and whether this crate should own that bound
+with its own error is **#576**. On 32-bit targets (`wasm32`, built by `gamut-wasm`) a buffer holds under 2 GiB, so
 this crate's own `InvalidInput` is the effective ceiling and the writer's refusal never fires.
 
 The **read** side demands nothing of a slot's length: it reports a degenerate slot it genuinely
