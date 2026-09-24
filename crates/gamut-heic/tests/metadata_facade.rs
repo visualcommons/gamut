@@ -122,6 +122,31 @@ fn a_malformed_exif_item_is_invalid_input_from_both_accessors() {
 }
 
 #[test]
+fn a_content_encoded_xmp_item_is_unsupported_from_both_accessors() {
+    // A `deflate`-coded XMP item: its payload is not the packet, so it must not be labelled
+    // `MetadataBlock::Xmp` and fail as unparsable — it is refused as a coding this crate lacks.
+    let primary = hvc1_item(1, vec![1, 2, 3, 4]);
+    let xmp = Item {
+        content_type: Some("application/rdf+xml".to_string()),
+        content_encoding: Some("deflate".to_string()),
+        references: vec![iref(b"cdsc", &[1])],
+        ..item(2, *b"mime", vec![0x78, 0x9C, 0x03, 0x00])
+    };
+    let data = clean_file(1, vec![primary, xmp]);
+    let container = HeifContainer::parse(&data).unwrap();
+    for err in [
+        container.image().blocks().unwrap_err(),
+        container.image().metadata().unwrap_err(),
+    ] {
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            err.static_message(),
+            Some("HEIF: content-encoded XMP item is not supported")
+        );
+    }
+}
+
+#[test]
 fn an_unparsable_payload_is_invalid_input_with_the_facade_detail() {
     let (exif, xmp, _) = payloads();
     let tiff = exif.strip_prefix(b"Exif\0\0").unwrap();

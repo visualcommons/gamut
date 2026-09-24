@@ -305,7 +305,14 @@ impl HeifImage {
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if the Exif item's payload is malformed — shorter than its
-    /// 4-byte `exif_tiff_header_offset`, or with the offset past the payload's end.
+    /// 4-byte `exif_tiff_header_offset`, or with the offset past the payload's end — and
+    /// [`Error::Unsupported`] if the XMP `mime` item declares a `content_encoding` (the `infe`
+    /// field of ISO/IEC 14496-12 §8.11.6, an HTTP content-coding such as `deflate`): its payload is
+    /// then not the raw packet `references/heif` §9 describes, and this crate does not decode
+    /// content codings. Any declared
+    /// coding is refused, `identity` included, which RFC 9110 §8.4.1 reserves for
+    /// `Accept-Encoding` and does not allow as a `Content-Encoding` value; the coded item stays
+    /// reachable through [`xmp`](Self::xmp).
     pub fn blocks(&self) -> Result<Vec<gamut_metadata::MetadataBlock<'_>>> {
         use gamut_metadata::MetadataBlock;
         let mut blocks = Vec::new();
@@ -313,7 +320,14 @@ impl HeifImage {
             blocks.push(MetadataBlock::Exif(exif.exif_tiff_stream()?));
         }
         if let Some(xmp) = self.xmp() {
-            blocks.push(MetadataBlock::Xmp(&xmp.as_isobmff_item().payload));
+            let item = xmp.as_isobmff_item();
+            if item.content_encoding.is_some() {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "HEIF: content-encoded XMP item is not supported",
+                ));
+            }
+            blocks.push(MetadataBlock::Xmp(&item.payload));
         }
         if let Some(icc) = self.primary_item().icc_profile() {
             blocks.push(MetadataBlock::Icc(icc));
@@ -328,7 +342,9 @@ impl HeifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] as [`blocks`](Self::blocks) does, or when a located payload
+    /// Returns [`Error::InvalidInput`] and [`Error::Unsupported`] as [`blocks`](Self::blocks) does
+    /// (a content-encoded XMP item is refused before the facade sees it), or
+    /// [`Error::InvalidInput`] when a located payload
     /// does not parse — the facade's [`MetadataError`](gamut_metadata::MetadataError) message,
     /// naming the carrier, is carried as [`Error::detail`].
     pub fn metadata(&self) -> Result<gamut_metadata::Metadata> {
