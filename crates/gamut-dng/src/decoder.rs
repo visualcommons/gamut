@@ -220,7 +220,11 @@ pub struct DecodedDng {
     /// the two ranges a `c2pa.hash.data` binding excludes (C2PA 2.4 §18.5.5), located by
     /// [`gamut_ifd::c2pa::locate`] in the last IFD of the main chain (§A.3.6). `Some` exactly
     /// when the store is; a `C2PA` tag of a type other than `UNDEFINED` is not a store and stays
-    /// in [`ifd0_extra`](Self::ifd0_extra).
+    /// in the verbatim channel of the directory that holds it — [`ifd0_extra`](Self::ifd0_extra)
+    /// when that is IFD 0, [`trailing_extra`](Self::trailing_extra) when it is a trailing
+    /// directory surfaced nowhere else (or [`raw_extra`](Self::raw_extra) /
+    /// [`SubImage::extra_tags`] when the last main-chain directory is the raw IFD or a
+    /// sub-image).
     pub c2pa_exclusions: Option<C2paExclusions>,
 }
 

@@ -5,8 +5,9 @@
 //! (decimal) or 0xCD41 (hexadecimal), with a tag type of 7" (§A.3.6). This module is the one
 //! place the workspace states that clause: the tag ([`C2PA_MANIFEST_STORE`]), the placement
 //! rule over a directory chain, the two-range exclusion set an external signer hashes around,
-//! and the read-side locator that recovers those ranges from a file. `gamut-dng` and
-//! `gamut-tiff` call it rather than each re-deriving §A.3.6.
+//! and the read-side locator that recovers those ranges from a file. `gamut-dng` calls it
+//! rather than re-deriving §A.3.6; `gamut-tiff` is planned to do the same (issue #446) and
+//! does not yet.
 //!
 //! It is a **locator and placer only**: the store is opaque bytes. Nothing here parses the JUMBF
 //! interior, verifies a hash, checks a signature or reaches a verdict — validation belongs to a
@@ -88,8 +89,8 @@ pub const MIN_STORE_LEN: usize = 8;
 /// that would break it.
 ///
 /// `#[non_exhaustive]`: §18.5.5's exclusion set is the two ranges below today, and a later
-/// revision naming a third must not be a breaking change. Construct one only by locating or
-/// writing a store.
+/// revision naming a third must not be a breaking change. Get one by locating or writing a
+/// store, or build one from its two ranges through the validating [`new`](Self::new).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct C2paExclusions {
