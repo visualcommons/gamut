@@ -4,6 +4,8 @@
 //! covers the type and data. All multi-byte integers in PNG are big-endian — the opposite of the
 //! DEFLATE/zlib payload the IDAT chunks carry.
 
+use core::ops::Range;
+
 use gamut_core::{Error, Result};
 
 use crate::crc32::Crc32;
@@ -30,6 +32,10 @@ pub(crate) struct RawChunk<'a> {
     pub data: &'a [u8],
     /// Whether the stored CRC-32 (computed over type + data, §5.5) matched.
     pub crc_ok: bool,
+    /// The chunk's whole span in the input, framing included: `12 + data.len()` bytes covering
+    /// the length, type, payload and CRC fields. Single-sourced from the offset the reader
+    /// already advances, so byte accounting cannot drift from framing.
+    pub range: Range<usize>,
 }
 
 impl RawChunk<'_> {
@@ -105,12 +111,22 @@ impl<'a> ChunkReader<'a> {
         crc.update(data);
         let crc_ok = crc.finish().to_be_bytes() == stored;
         self.rest = rest;
+        let start = self.offset;
         self.offset += 12 + length as usize;
         Ok(Some(RawChunk {
             chunk_type,
             data,
             crc_ok,
+            range: start..self.offset,
         }))
+    }
+
+    /// The reader's cursor: the offset of the next chunk header, or — after [`next_chunk`] has
+    /// returned an error — the start of the malformed one.
+    ///
+    /// [`next_chunk`]: Self::next_chunk
+    pub(crate) fn offset(&self) -> usize {
+        self.offset
     }
 }
 

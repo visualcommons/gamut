@@ -3,6 +3,9 @@
 //! CRC-32 so the builders do not depend on the crate under test.
 #![allow(dead_code)] // each integration-test binary uses its own subset
 
+/// The efficiency corpus, shared with `benches/encode.rs` (issue #224).
+pub mod corpus;
+
 /// The 8-byte PNG signature.
 pub const SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
@@ -145,4 +148,91 @@ pub fn tiny_exif() -> Vec<u8> {
     vec![
         0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ]
+}
+
+/// Every valid Table-12 colour-type/bit-depth pair, flattened (libpng's `COLOR_*` codes).
+pub const TABLE_12: &[(u8, u8)] = &[
+    (libpng_oracle::COLOR_GRAY, 1),
+    (libpng_oracle::COLOR_GRAY, 2),
+    (libpng_oracle::COLOR_GRAY, 4),
+    (libpng_oracle::COLOR_GRAY, 8),
+    (libpng_oracle::COLOR_GRAY, 16),
+    (libpng_oracle::COLOR_PALETTE, 1),
+    (libpng_oracle::COLOR_PALETTE, 2),
+    (libpng_oracle::COLOR_PALETTE, 4),
+    (libpng_oracle::COLOR_PALETTE, 8),
+    (libpng_oracle::COLOR_RGB, 8),
+    (libpng_oracle::COLOR_RGB, 16),
+    (libpng_oracle::COLOR_GRAY_ALPHA, 8),
+    (libpng_oracle::COLOR_GRAY_ALPHA, 16),
+    (libpng_oracle::COLOR_RGBA, 8),
+    (libpng_oracle::COLOR_RGBA, 16),
+];
+
+/// A full-size palette for an indexed fixture at `depth`.
+fn full_palette(depth: u8) -> Vec<[u8; 3]> {
+    (0..(1usize << depth))
+        .map(|i| [i as u8, (i * 7 + 3) as u8, 255 - i as u8])
+        .collect()
+}
+
+/// Encodes a deterministic fixture with libpng (full-size palette for indexed depths).
+pub fn libpng_fixture(
+    width: u32,
+    height: u32,
+    color_type: u8,
+    depth: u8,
+    interlace: bool,
+) -> Vec<u8> {
+    let pixels = sample_bytes(width, height, color_type, depth, 11);
+    let palette = full_palette(depth);
+    let opts = libpng_oracle::EncodeOpts {
+        interlace,
+        palette: (color_type == libpng_oracle::COLOR_PALETTE).then_some(&palette),
+        ..libpng_oracle::EncodeOpts::default()
+    };
+    libpng_oracle::encode(&pixels, width, height, color_type, depth, &opts)
+}
+
+/// An 8-bit RGB fixture libpng wrote with exactly one filter on every scanline. `mask` is one of
+/// libpng's `FILTER_*` bits, so the *oracle* chooses the filter, not gamut.
+pub fn libpng_forced_filter(width: u32, height: u32, mask: u8) -> Vec<u8> {
+    let pixels = sample_bytes(width, height, libpng_oracle::COLOR_RGB, 8, 11);
+    let opts = libpng_oracle::EncodeOpts {
+        filters: Some(mask),
+        ..libpng_oracle::EncodeOpts::default()
+    };
+    libpng_oracle::encode(&pixels, width, height, libpng_oracle::COLOR_RGB, 8, &opts)
+}
+
+/// An 8-bit RGB fixture carrying extra raw chunks written verbatim after IHDR — used for chunk
+/// types this crate does not recognise, ancillary and critical alike.
+pub fn libpng_with_extra_chunks(width: u32, height: u32, extra: &[([u8; 4], &[u8])]) -> Vec<u8> {
+    let pixels = sample_bytes(width, height, libpng_oracle::COLOR_RGB, 8, 11);
+    let opts = libpng_oracle::EncodeOpts {
+        extra_chunks: extra,
+        ..libpng_oracle::EncodeOpts::default()
+    };
+    libpng_oracle::encode(&pixels, width, height, libpng_oracle::COLOR_RGB, 8, &opts)
+}
+
+/// A structurally perfect PNG whose IDAT payload is not a zlib stream. Every CRC is valid, so
+/// only the *compressed data* is damaged — the one input that isolates a decompression failure
+/// from a framing failure.
+pub fn png_with_garbage_idat(width: u32, height: u32) -> Vec<u8> {
+    png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(width, height, 8, 2, 0)),
+        chunk(b"IDAT", b"this is not a zlib stream"),
+        chunk(b"IEND", &[]),
+    ])
+}
+
+/// A PNG whose IHDR claims 2^30 x 2^30 with a tiny IDAT: the filtered stream it implies is far
+/// past any sane inflation budget, so a reader must decline rather than attempt it.
+pub fn png_with_huge_ihdr() -> Vec<u8> {
+    png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(1 << 30, 1 << 30, 8, 2, 0)),
+        chunk(b"IDAT", &zlib(&[0u8; 16])),
+        chunk(b"IEND", &[]),
+    ])
 }

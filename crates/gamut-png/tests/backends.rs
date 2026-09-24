@@ -22,8 +22,17 @@ use gamut_png::{
 // Byte-identical defaults
 // ---------------------------------------------------------------------------------------------
 
-/// Bytes captured from the encoder **before** the seam existed. Pushing no backend must reproduce
-/// them exactly: the registry is inert by construction, not merely "close enough".
+/// Bytes captured from the encoder **before** the seam existed, except where a row's re-capture is
+/// recorded below. Pushing no backend must reproduce them exactly: the registry is inert by
+/// construction, not merely "close enough".
+///
+/// This pins the *seam*, not the encoder — so a deliberate encoding improvement re-captures the
+/// affected row, and the change is recorded here rather than being absorbed silently:
+///
+/// * `rgb8_best_bruteforce`, issue #224: `FilterStrategy::MinBigrams` joined
+///   `BRUTE_FORCE_STRATEGIES` and wins on this fixture, taking the IDAT from 36 bytes to 21. The
+///   gate catching that is the point of it — an encoder change that made output *larger* would
+///   look identical here, and would be a regression.
 const GOLDEN: [(&str, &str); 11] = [
     (
         "gray8",
@@ -59,7 +68,7 @@ const GOLDEN: [(&str, &str); 11] = [
     ),
     (
         "rgb8_best_bruteforce",
-        "89504e470d0a1a0a0000000d49484452000000080000000808020000004b6d29dc000000244944415478da636160e713c5065856ac58418404828357079a14761d081e5ea3b0ca0100921322178646d81f0000000049454e44ae426082",
+        "89504e470d0a1a0a0000000d49484452000000080000000808020000004b6d29dc000000154944415478da636460e713c5069856e0008353020008cb701e6f73d8bc0000000049454e44ae426082",
     ),
     (
         "rgb8_fast",

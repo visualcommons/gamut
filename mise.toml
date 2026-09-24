@@ -238,7 +238,7 @@ run = "cargo bench --workspace"
 # an `unwrap` on an encode that now fails -- was invisible.
 #
 # `--benches` restricts this to bench targets. Without it `cargo bench` also builds every lib and
-# test target in release just to look for `#[bench]` functions that do not exist here (all 15
+# test target in release just to look for `#[bench]` functions that do not exist here (all 16
 # benches are `harness = false` Divan), which is a second full release build for nothing.
 [tasks.bench-test]
 description = "Run every bench once to prove it still executes (no timings; issue #437)"
