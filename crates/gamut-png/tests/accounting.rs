@@ -287,6 +287,34 @@ fn trailing_bytes_after_iend_are_a_trailer() {
 }
 
 #[test]
+fn a_datastream_that_ends_cleanly_without_iend_is_not_intact() {
+    // Drop exactly the trailing 12-byte IEND chunk: every remaining chunk frames and its CRC holds,
+    // the walk meets end of input between chunks (no `Truncated`, no `Trailer`), and the IDAT
+    // stream is whole, so the filter scan counts it. The missing IEND is the only conjunct of
+    // `is_intact` this file fails.
+    let full = encode_rgb(8, 8);
+    let png = &full[..full.len() - 12];
+    let report = deconstruct(png).expect("deconstruct");
+
+    assert_covers(&report.segments, png.len());
+    assert!(report.chunk(b"IEND").is_none(), "precondition: IEND is gone");
+    assert!(
+        report.segments.iter().all(|seg| matches!(
+            seg.kind,
+            SegmentKind::Signature | SegmentKind::Chunk { crc_ok: true, .. }
+        )),
+        "precondition: nothing else is held against the file: {:?}",
+        report.segments
+    );
+    assert!(
+        report.filters.is_counted(),
+        "precondition: the scan ran and found nothing"
+    );
+    assert!(!report.is_intact(), "a datastream without IEND is not intact");
+    assert!(!report.is_verified());
+}
+
+#[test]
 fn a_truncated_tail_is_reported_not_an_error() {
     let full = encode_rgb(24, 24);
     // Cut inside the IDAT payload: the chunk header frames, but its data overruns the input.
