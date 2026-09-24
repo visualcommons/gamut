@@ -30,10 +30,14 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   the namespace only — what the property *means* is read by `gamut-metadata`, consistent with the
   registry-not-validator posture below — and `tests/oracle.rs` pins that XMPCore reads the property
   back under the `Xmp.dcterms.provenance` key its own registry defines.
-- **Schema breadth = exiv2's documented set (issue #421).** `WellKnownNs` holds 30 entries: the
-  Adobe Parts 1–2 schemas and structure types, `dcterms`, and the twelve further schemas exiv2
-  documents (<https://exiv2.org/metadata.html>): `exifEX`, `aux`, `plus`, `mwg-rs`, `mwg-kw`,
-  `GPano`, `lr`, `MicrosoftPhoto`, `digiKam`, `acdsee`, `crss`, `dwc`. Each URI is taken from the
+- **Schema breadth = the issue #421 set of exiv2's documented schemas.** `WellKnownNs` holds 30
+  entries: the Adobe Parts 1–2 schemas and structure types, `dcterms`, and the twelve further
+  schemas issue #421 selected from those exiv2 documents (<https://exiv2.org/metadata.html>):
+  `exifEX`, `aux`, `plus`, `mwg-rs`, `mwg-kw`, `GPano`, `lr`, `MicrosoftPhoto`, `digiKam`,
+  `acdsee`, `crss`, `dwc`. exiv2 documents six more that are **not** registered — `kipi`,
+  `mediapro`, `expressionmedia`, `MP`, `MPRI`, `MPReg` (its `doc/templates/tags-xmp-*.html.in` pages) — so their
+  properties serialize under a synthesized `ns<N>` prefix unless the graph declares a namespace
+  for them; registering one is an additive change for a later issue. Each URI is taken from the
   schema owner's specification where one is published and cited on the variant; the vendored
   reference for all twelve is exiv2's own registry (`third_party/exiv2/src/properties.cpp`,
   `xmpNsInfo`), and `tests/oracle.rs` reads a documented property of each back from XMPCore by its
@@ -103,7 +107,7 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
 | P5 | Part 1 §7 | **Keystone** — canonical RDF/XML serialization + packet emit (writable padding) | ✅ done |
 | P6 | — | exiv2 differential conformance gate | ✅ done |
 | P7 | Parts 1–3 | **v1 stabilization** (issue #189) — API finalization (`XmpPacket::parse` composition, `XmpWriter::with_namespace` prefix registration, model conveniences), conformance audit (control-character escaping fix, trailer `end=` matching, edge-case pins), gamut-iptc dogfood migration, docs | ✅ done |
-| P8 | Part 2; Part 3 "External storage" | **Breadth** (issue #421) — registry at parity with exiv2's documented schemas (17 → 30 entries), `.xmp` sidecar read/write, per-schema and sidecar oracle tests | ✅ done |
+| P8 | Part 2; Part 3 "External storage" | **Breadth** (issue #421) — registry gains the twelve exiv2-documented schemas the issue selected (18 → 30 entries; exiv2's `kipi`, `mediapro`, `expressionmedia`, `MP`, `MPRI`, `MPReg` stay unregistered), `.xmp` sidecar read/write, per-schema and sidecar oracle tests | ✅ done |
 
 ## Intentional skips (audited for v1)
 
@@ -123,7 +127,7 @@ deliberately:
 - **Part 3 per-container embedding and JPEG ExtendedXMP:** owned by the format crates; this crate
   supplies wrapper-optional parse, bare-body serialization, and the writable/padding envelope.
 - **Per-schema value validation (Part 2):** values are uninterpreted text; `WellKnownNs` is a
-  namespace registry, not a validator — still true after the exiv2-parity additions (issue #421).
+  namespace registry, not a validator — still true after the issue #421 additions.
 - **Sidecar file naming and I/O (Part 3):** `XmpSidecar` is bytes-in / bytes-out; locating
   `photo.xmp` beside `photo.dng` is the caller's, as embedding is the format crates'.
 - **Decode limits (crate-wide, not sidecar-specific):** `XmpSidecar::read` takes an unbounded

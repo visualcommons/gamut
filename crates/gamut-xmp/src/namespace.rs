@@ -47,9 +47,13 @@ impl From<WellKnownNs> for Namespace {
 ///
 /// This is a **namespace registry, not a validator**: registering a schema fixes the prefix its
 /// properties serialize under (the one the reference engine, exiv2's Adobe XMPCore, keys them by),
-/// and nothing more — property values stay uninterpreted text. The set covers every schema exiv2
-/// documents (<https://exiv2.org/metadata.html>); the non-Adobe URIs are each cited on their
-/// variant, and all thirty are cross-checked against XMPCore's own registry in `tests/oracle.rs`.
+/// and nothing more — property values stay uninterpreted text. The set is the Adobe Parts 1–2
+/// schemas, `dcterms`, and the twelve schemas issue #421 selected from those exiv2 documents
+/// (<https://exiv2.org/metadata.html>). It is **not** all of exiv2's documented set: `kipi`,
+/// `mediapro`, `expressionmedia`, `MP`, `MPRI` and `MPReg` (exiv2's
+/// `doc/templates/tags-xmp-*.html.in` pages) are not registered, so a property in one of them serializes under a synthesized
+/// `ns<N>` prefix unless the graph declares a namespace for it. The non-Adobe URIs are each cited on their variant, and all thirty are cross-checked
+/// against XMPCore's own registry in `tests/oracle.rs`.
 ///
 /// Marked `#[non_exhaustive]`: the registry grows as gamut's format and metadata crates need
 /// further schemas, and each addition must not be a breaking change. Match with a wildcard arm,
@@ -368,7 +372,7 @@ mod tests {
 
     #[test]
     fn exiv2_documented_schemas_have_exact_uris_and_prefixes() {
-        // The twelve schemas added for exiv2 parity (issue #421). Each pair is the exact string
+        // The twelve exiv2-documented schemas issue #421 added. Each pair is the exact string
         // exiv2's registry binds (`third_party/exiv2/src/properties.cpp`), so the prefix gamut
         // serializes under is the key the reference engine reads back by; the differential check
         // is `tests/oracle.rs`. Near-misses are the likely defects: `exifEX` vs `exifEx`, `aux/`
@@ -440,9 +444,9 @@ mod tests {
 
     #[test]
     fn registry_holds_thirty_schemas() {
-        // A drift guard, deliberately separate from the exiv2-parity test above: every future
+        // A drift guard, deliberately separate from the issue #421 test above: every future
         // addition to the registry edits this one line, and it fails for exactly that reason.
-        // 18 entries before the exiv2-parity additions (the original 17 plus `dcterms`) + 12 = 30.
+        // 18 entries before the issue #421 additions (the original 17 plus `dcterms`) + 12 = 30.
         assert_eq!(WellKnownNs::ALL.len(), 30);
     }
 

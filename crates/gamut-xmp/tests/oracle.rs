@@ -225,7 +225,7 @@ fn default_xml_lang_on_description_matches_reference() {
 }
 
 // ---------------------------------------------------------------------------------------------------
-// Schema breadth (issue #421): one test per namespace added for exiv2 parity.
+// Schema breadth (issue #421): one test per exiv2-documented namespace it added.
 //
 // Each writes one *documented* property of the schema (a name from exiv2's own property table for
 // that namespace) and reads it back from XMPCore by its exiv2 key, `Xmp.<prefix>.<name>`. The key

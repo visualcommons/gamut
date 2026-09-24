@@ -94,12 +94,16 @@ discards the rest, so two `write` outputs concatenated read back as the first al
   with the reference engine. Per-property and per-item `xml:lang` are fully supported.
 - **Part 2 (standard schemas) is a namespace registry** (`WellKnownNs`), not per-property
   validation: values are uninterpreted text in the model, as the wire format allows. The registry
-  covers every schema exiv2 documents (<https://exiv2.org/metadata.html>) — the Adobe Parts 1–2
-  schemas plus the external ones image-metadata standards and deployed tools layer on XMP:
+  holds the Adobe Parts 1–2 schemas plus external ones image-metadata standards and deployed
+  tools layer on XMP:
   `dcterms` (DCMI Metadata Terms, which C2PA uses for `dcterms:provenance`, the URL of an
   *external* manifest store — C2PA 2.4 §11.5; reading that property as a provenance signal is
   [`gamut-metadata`](../gamut-metadata)'s job), `exifEX`, `aux`, `plus`, `mwg-rs`, `mwg-kw`,
-  `GPano`, `lr`, `MicrosoftPhoto`, `digiKam`, `acdsee`, `crss` and `dwc`. Registering a schema
+  `GPano`, `lr`, `MicrosoftPhoto`, `digiKam`, `acdsee`, `crss` and `dwc` — the last twelve being
+  the set issue #421 took from the schemas exiv2 documents (<https://exiv2.org/metadata.html>).
+  That is not all of exiv2's documented set: `kipi`, `mediapro`, `expressionmedia`, `MP`, `MPRI`
+  and `MPReg` are not registered, so their properties serialize under a synthesized `ns<N>`
+  prefix unless the graph declares a namespace for them. Registering a schema
   fixes the prefix its properties serialize under — the one Adobe XMPCore keys them by — and
   nothing more; each non-Adobe URI is cited on its variant, and every one is vouched for by the
   reference engine in `tests/oracle.rs`. `exifEX` is registered under `http://cipa.jp/exif/1.0/`
@@ -117,7 +121,8 @@ discards the rest, so two `write` outputs concatenated read back as the first al
 
 **Production-ready v1** (issue #189). Implemented: parser + canonical serializer for the full XMP
 data model (simple / URI / structured / `Bag`·`Seq`·`Alt`, qualifiers, language alternatives), the
-`<?xpacket?>` wrapper, a 30-schema registry at parity with exiv2's documented set, and `.xmp`
+`<?xpacket?>` wrapper, a 30-schema registry (the Adobe schemas, `dcterms`, and the twelve exiv2-documented schemas
+issue #421 selected), and `.xmp`
 sidecar read/write (issue #421). See [STATUS.md](STATUS.md).
 
 ## Migrating from 1.x
@@ -136,7 +141,7 @@ changed — every existing variant, URI, prefix and method keeps its meaning.
   non-semantic (`tests/roundtrip.rs`).
 - **Differential oracle** against exiv2's bundled **Adobe XMPCore**: gamut's packets validate and
   round-trip through the reference engine, every `WellKnownNs` URI is vouched for by its schema
-  registry (one test per exiv2-parity schema reads a documented property back by its
+  registry (one test per issue #421 schema reads a documented property back by its
   `Xmp.<prefix>.<name>` key), a sidecar gamut writes is read by the engine and the engine's own
   serialization is read as a sidecar, and the default-`xml:lang` posture is pinned to parity
   (`tests/oracle.rs`; needs the `third_party/exiv2` + `third_party/expat` submodules and a C++
