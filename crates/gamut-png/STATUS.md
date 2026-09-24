@@ -173,8 +173,12 @@ where the palette won the estimate the reductions it beat — the alpha drop, th
 collapse, the 16→8 demotion — were never encoded, and losing the race dropped the file all the way
 back to *no* reduction. `reduce::Reductions` therefore carries the best chunk-free candidate beside
 the chunk-carrying one, and the race is over three encodings: chunk-carrying, chunk-free,
-unreduced. Ties resolve toward the earlier of `chunked ≻ chunk-free ≻ native` — the more reduced
-encoding, and among equal-length files the one already emitted, so a tie changes no output.
+unreduced. Ties resolve toward the earlier of `chunked ≻ chunk-free ≻ native`. The three are
+information-equivalent — every lossless reduction preserves exactly the same image — so at equal
+size the size contract has nothing to choose between, and the order exists only so that the output
+is a function of the input rather than of which candidate happened to be encoded first (the
+encoder's module doc, *How a tie is broken*; pinned by `size_contract`'s
+`encoded_size_is_deterministic`).
 
 A chunk-free *winner* still pays for nothing: it adds nothing DEFLATE cannot compress, so the raw
 comparison that chose it is sound and it is written straight out. It is a chunk-free *runner-up*
