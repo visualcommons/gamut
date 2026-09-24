@@ -207,7 +207,9 @@ impl DngEncoder {
     /// [`encode_with_report`](Self::encode_with_report) reports its two exclusion ranges
     /// (§18.5.5). A signer hashes the file around those ranges and overwrites the reservation in
     /// place; nothing else in the file moves. `len` must be at least
-    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header), and a reservation cannot be
+    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header) — and, with
+    /// [`with_big_tiff`](Self::with_big_tiff), strictly more, since BigTIFF packs an 8-byte
+    /// value inline — and a reservation cannot be
     /// combined with a store supplied through [`with_metadata`](Self::with_metadata) — either is
     /// a typed error at encode time.
     #[must_use]
@@ -296,8 +298,10 @@ impl DngEncoder {
     /// # Errors
     ///
     /// As [`encode`](Self::encode); additionally [`Error::InvalidInput`] if both a store and a
-    /// reservation were configured, or the store is shorter than
-    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`].
+    /// reservation were configured; if the store (or reservation) is shorter than
+    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`]; or if, with [`with_big_tiff`](Self::with_big_tiff),
+    /// it is exactly `MIN_STORE_LEN` (8) bytes — BigTIFF packs a value that short inline in its
+    /// entry, so it could not be the out-of-line run at the end of the file §A.3.6 wants.
     pub fn encode_with_report(
         &self,
         raw: &RawImage,
