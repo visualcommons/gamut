@@ -60,6 +60,11 @@ jobs:
         run: mise run check-ffi-features
       - name: Release dependency graph
         run: mise run check-release-deps
+      - name: README crates table
+        # Static: `cargo metadata --no-deps` (the same call the step above makes) plus awk over
+        # README.md. Nothing is built and nothing is fetched. A drift guard that runs nowhere
+        # cannot guard against drift, so it runs here beside the other three static checks.
+        run: mise run check-readme-crates
       - name: Test conventions (docs/testing.md)
         # Static: greps the tree, builds nothing, sub-second. Enforces that every integration-test
         # file names what it pins, that every proptest configuration pins its seed and disables
