@@ -60,12 +60,11 @@
 //!
 //! // A minimal AV1 still: one av01 item with a monochrome av1C and a conforming payload
 //! // (a reduced-still-picture sequence header OBU + a frame OBU).
-//! let img = IsoBmffImage {
-//!     major_brand: *b"avif",
-//!     minor_version: 0,
-//!     compatible_brands: vec![*b"avif", *b"mif1", *b"miaf"],
-//!     primary_item_id: 1,
-//!     items: vec![Item {
+//! let img = IsoBmffImage::new(
+//!     *b"avif",
+//!     vec![*b"avif", *b"mif1", *b"miaf"],
+//!     1,
+//!     vec![Item {
 //!         id: 1,
 //!         item_type: *b"av01",
 //!         name: String::new(),
@@ -84,8 +83,7 @@
 //!         // seq header OBU (reduced_still_picture_header = 1) + frame OBU.
 //!         payload: vec![0x0A, 0x01, 0x18, 0x32, 0x03, 0xAA, 0xBB, 0xCC],
 //!     }],
-//!     groups: vec![],
-//! };
+//! );
 //! let bytes = write(&img).unwrap();
 //!
 //! let container = AvifContainer::parse(&bytes).unwrap();

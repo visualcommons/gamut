@@ -62,14 +62,13 @@ pub fn av01_item(id: u32, payload: Vec<u8>) -> Item {
 
 /// Wraps items in a complete AVIF-style file whose primary item is the first one.
 pub fn image(items: Vec<Item>) -> IsoBmffImage {
-    IsoBmffImage {
-        major_brand: *b"avif",
-        minor_version: 0,
-        compatible_brands: vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
-        primary_item_id: items[0].id,
+    let primary_item_id = items[0].id;
+    IsoBmffImage::new(
+        *b"avif",
+        vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
+        primary_item_id,
         items,
-        groups: vec![],
-    }
+    )
 }
 
 // ---- spec-byte builders --------------------------------------------------------------------

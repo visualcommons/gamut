@@ -73,14 +73,12 @@ pub fn av01_item(id: u32, payload: Vec<u8>) -> Item {
 
 /// Wraps items into a complete `avif` file whose primary is the item with `primary_id`.
 pub fn avif_image(primary_id: u32, items: Vec<Item>) -> IsoBmffImage {
-    IsoBmffImage {
-        major_brand: *b"avif",
-        minor_version: 0,
-        compatible_brands: vec![*b"avif", *b"mif1", *b"miaf"],
-        primary_item_id: primary_id,
+    IsoBmffImage::new(
+        *b"avif",
+        vec![*b"avif", *b"mif1", *b"miaf"],
+        primary_id,
         items,
-        groups: vec![],
-    }
+    )
 }
 
 /// Serialises a model to a clean AVIF file (`ftyp` + `meta` + `mdat`).

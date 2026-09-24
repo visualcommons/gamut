@@ -596,14 +596,7 @@ impl AvifEncoder {
                 xmp.clone(),
             ));
         }
-        let image = IsoBmffImage {
-            major_brand: *b"avif",
-            minor_version: 0,
-            compatible_brands: compatible_brands(&items),
-            primary_item_id: PRIMARY_ITEM_ID,
-            items,
-            groups: vec![],
-        };
+        let image = IsoBmffImage::new(*b"avif", compatible_brands(&items), PRIMARY_ITEM_ID, items);
         write(&image)
     }
 

@@ -36,6 +36,7 @@ files.
 | P4 | 14496-12; 23008-12 | Reader: bounds-checked box walk including `largesize`, size-0, and UUID user types; foreign-file repertoire (`iloc` v0–v2, `mdat`/`idat`, base offsets, 0/4/8-byte fields, multi-extent, `pitm`/`ipma` v0–v1, `infe` v2–v3, `iref` v0–v1); motion-photo tolerance (stop at a second top-level `ftyp` / at a malformed trailing box once `ftyp`+`meta` are seen); `read(&write)` round-trip; unrecognised property boxes preserved verbatim | ✅ done |
 | P5 | — | Robustness: truncation/overrun/size/index guards ✅; counts never trusted for allocation ✅; total payload capped at input size (anti amplification) ✅; spec fixtures independent of the writer ✅; fuzz corpus ☐ | ◑ partial |
 | P6 | — | Differential oracle: libavif/dav1d parses the container and reproduces pixels (via `gamut-avif/tests/decode_roundtrip.rs`) | ✅ via codec |
+| P7 | 14496-12 §4.2; C2PA 2.4 §A.5.3 | Top-level boxes the model does not otherwise own (`IsoBmffImage::top_level_boxes`, #443): retained on read with the position they were found at, written after `ftyp` (`AfterFtyp`) or after `mdat` (`Trailing`); `read`→`write` byte-identical for a file *this crate wrote* carrying them (foreign files stay equivalent-but-normalised); libavif decodes an AVIF carrying a C2PA `uuid` box unchanged (`gamut-avif/tests/remux_roundtrip.rs`) | ✅ done |
 
 ## Demonstration surface
 
@@ -63,6 +64,56 @@ is opaque — by the `gamut isobmff` CLI (`inspect`/`remux`/`build`) and two ora
   `parse` takes it as a parameter and rejects a truncated or trailing-byte payload; `to_bytes`
   picks the compact 16-bit form only when the dims fit `u16` *and* every signed offset fits `i16`.
   Additive (semver-minor).
+
+## Top-level boxes
+
+`IsoBmffImage::top_level_boxes` (#443) holds, in file order, every top-level box of the primary
+stream that the model does not otherwise own — anything but `ftyp`, `meta`, `mdat` and the
+appended motion-photo stream `read` stops at. Each `TopLevelBox` carries the box type, the 16-byte
+user type when it is a `uuid` box (the `RawBox` split: `payload` omits the user type), the payload
+verbatim, and a `TopLevelPosition`:
+
+- **`AfterFtyp`** — written between `ftyp` and `meta`, so before the first `mdat`: the C2PA 2.4
+  §A.5.3 placement of a `ContentProvenanceBox` (`uuid`, user type
+  `D8FEC3D6-1B0E-483C-9297-5828877EC481`, §A.5.1).
+- **`Trailing`** — written after `mdat`.
+
+`read` assigns the position from where it met the box: after `mdat` → `Trailing`, otherwise
+`AfterFtyp`. `write` always emits `ftyp`, the `AfterFtyp` boxes, `meta`, `mdat`, then the
+`Trailing` boxes, so a foreign file's box moves on round-trip wherever its layout differs: a box
+*between* `meta` and `mdat` is written back between `ftyp` and `meta` (for a C2PA box a move
+between two lawful positions: §A.5.3 requires only after `ftyp` and before the first `mdat` and
+any `moov`, and both satisfy it); a box before `ftyp` is written back after `ftyp`; and in a file
+with `mdat` before `meta`, a box between `mdat` and `meta` is `Trailing` and is written back
+after `meta` and `mdat`. `TopLevelPosition` is `#[non_exhaustive]` so a finer
+position can be added later without a major bump. Files this crate writes round-trip
+byte-identically. `write` rejects a top-level box typed `ftyp`/`meta`/`mdat` (the model emits
+those itself), `moov`/`trak` (image sequences, `Unsupported` as on read), one whose `user_type`
+does not pair with the `uuid` type, one whose complete box (header included) does not fit the
+32-bit size field, or a list that interleaves positions (an `AfterFtyp` box after a `Trailing`
+one) — the file holds the groups in order, so `read` could not give the interleaved order back;
+`IsoBmffImage::push_top_level_box` appends at the end of a box's position group so a parsed
+model that already carries trailing boxes never becomes interleaved.
+
+Two costs of retaining rather than dropping, accepted knowingly:
+
+- **A retained box is an owned copy.** A motion-photo `mpvd` box (Google) that carries a whole
+  video is copied into the model on `read`, where it was previously skipped; the copy is bounded
+  by the input size, and `walk_segments` continues to surface the same bytes zero-copy for
+  consumers that only account for them.
+- **An `iloc` extent may address bytes inside a retained box** (the reader resolves extents
+  against the whole file). Such bytes are then carried twice on `write` — once verbatim in the box,
+  once as the item's payload in `mdat`. No known encoder does this; a file that does still
+  decodes identically, it is merely larger.
+
+Deliberately **not** here: parsing the C2PA `box_purpose`, merkle offset or JUMBF `LBox` — that
+typed lens is `gamut-heic`'s `c2pa` module (#429); modelling a manifest store as an item (C2PA
+Appendix A defines only the top-level `uuid` carriage for BMFF); promoting a `uuid` box found
+inside `meta` (surfaced by `walk_meta_children`) to the top level.
+
+**Semver:** adding the field made `IsoBmffImage` `#[non_exhaustive]` (a major bump); construct it
+with `IsoBmffImage::new(..)` plus `with_minor_version`/`with_groups`/`with_top_level_boxes`, so the
+next field is a minor release.
 
 ## Exported walk primitives
 
