@@ -297,7 +297,10 @@ fn a_datastream_that_ends_cleanly_without_iend_is_not_intact() {
     let report = deconstruct(png).expect("deconstruct");
 
     assert_covers(&report.segments, png.len());
-    assert!(report.chunk(b"IEND").is_none(), "precondition: IEND is gone");
+    assert!(
+        report.chunk(b"IEND").is_none(),
+        "precondition: IEND is gone"
+    );
     assert!(
         report.segments.iter().all(|seg| matches!(
             seg.kind,
@@ -310,7 +313,10 @@ fn a_datastream_that_ends_cleanly_without_iend_is_not_intact() {
         report.filters.is_counted(),
         "precondition: the scan ran and found nothing"
     );
-    assert!(!report.is_intact(), "a datastream without IEND is not intact");
+    assert!(
+        !report.is_intact(),
+        "a datastream without IEND is not intact"
+    );
     assert!(!report.is_verified());
 }
 
