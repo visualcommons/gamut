@@ -22,7 +22,9 @@
 //!
 //! - **It never fetches the URL.** Resolving it, and judging whatever it points at, is a
 //!   validator's job and a network operation; the workspace ships neither (see
-//!   `references/c2pa/README.md`). The URL is handed over as the string the XMP carried.
+//!   `references/c2pa/README.md`). The URL is handed over as the string the XMP carried, with
+//!   surrounding whitespace trimmed and nothing else changed; a value that is empty or only
+//!   whitespace counts as no URL.
 //! - **The HTTP `Link` header route is out of scope.** §15.5.3.2 defines an HTTP `Link` relation
 //!   that carries the same pointer for an asset served over HTTP. A header is a property of a
 //!   *transfer*, not of the file's bytes, so a file-format library cannot observe it; a caller that
@@ -41,7 +43,9 @@
 /// from carrying both — and neither source suppresses the other. This is a report of what the file
 /// carries, not a validity verdict and not a choice between the two.
 ///
-/// The remote URL is carried as the string the XMP held. **gamut never resolves it**; see the
+/// The remote URL is carried as the string the XMP held, with surrounding whitespace trimmed and
+/// otherwise verbatim; an empty or whitespace-only value counts as no URL. **gamut never resolves
+/// it**; see the
 /// [module docs](self) for why, and for the HTTP `Link` header route this type deliberately does
 /// not model.
 ///
