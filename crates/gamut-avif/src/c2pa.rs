@@ -84,15 +84,22 @@ const MIN_SLOT_LEN: usize = 8;
 /// than returning. Refusing above this ceiling turns that panic into an error, so no reservation
 /// length can panic the library.
 ///
-/// This is a panic guard, not the encoder's effective limit. Long before it, the container writer
-/// refuses the box: a top-level box carries a 32-bit size field, so
-/// [`gamut_isobmff::write`] rejects one at or beyond 4 GiB with
-/// [`Error::Unsupported`](gamut_core::Error::Unsupported). Measured on this framing, the largest
-/// `len` that clears that check is `4_294_967_250` and `4_294_967_251` is refused, and a `len`
-/// just under it aborts in the allocator while the writer copies the payload into the output
-/// buffer. So above the writer's bound lies the writer's error, and below it — for a length the
-/// machine has no memory for — lies the allocator's own limit, which no fallible API here can
-/// intercept.
+/// Which bound is the encoder's effective limit depends on the target's pointer width.
+///
+/// - **64-bit targets:** this is a panic guard, not the effective limit. Long before it, the
+///   container writer refuses the box: a top-level box carries a 32-bit size field, so
+///   [`gamut_isobmff::write`] rejects one at or beyond 4 GiB with
+///   [`Error::Unsupported`](gamut_core::Error::Unsupported). Measured on a 64-bit host with this framing,
+///   the largest `len` that clears that check is `4_294_967_250` and `4_294_967_251` is refused,
+///   and a `len` just under it aborts in the allocator while the writer copies the payload into
+///   the output buffer. So above the writer's bound lies the writer's error, and below it — for a
+///   length the machine has no memory for — lies the allocator's own limit, which no fallible API
+///   here can intercept.
+/// - **32-bit targets** (`wasm32`, which `gamut-wasm` builds): `isize::MAX` is `2^31 - 1`, just
+///   under 2 GiB, so this ceiling *is* the effective limit. Every framed box it admits is below
+///   the writer's 4 GiB bound, so the refusal a caller sees is this crate's
+///   [`Error::InvalidInput`](gamut_core::Error::InvalidInput) and the writer's `Unsupported`
+///   never fires. Not measured on such a target; it follows from the two constants.
 const MAX_PAYLOAD_LEN: usize = isize::MAX as usize;
 
 /// The `box_purpose` of a C2PA `uuid` box that carries a manifest store (C2PA 2.4 §A.5.3).

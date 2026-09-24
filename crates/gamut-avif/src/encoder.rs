@@ -505,18 +505,20 @@ impl AvifEncoder {
     /// with, the second wrapped silently and produced a well-formed AVIF whose C2PA box no locator
     /// — this crate's included — could find, while just below the wrap it panicked instead.
     ///
-    /// A **third** refusal sits between them and comes from the container writer, not from here: a
-    /// top-level box carries a 32-bit size field, so [`gamut_isobmff::write`] rejects a
-    /// `ContentProvenanceBox` at or beyond 4 GiB. That arrives as
-    /// [`Error::Unsupported`](gamut_core::Error::Unsupported) attributed to `gamut-isobmff`, and
-    /// it is the encoder's effective ceiling: on this framing the largest `len` that clears it is
-    /// `4_294_967_250`, and `4_294_967_251` is refused. Widening this crate's own ceiling to that
-    /// bound, so the refusal arrives as an `InvalidInput` naming AVIF, is issue #576.
+    /// On **64-bit** targets a **third** refusal sits between them and comes from the container
+    /// writer, not from here: a top-level box carries a 32-bit size field, so
+    /// [`gamut_isobmff::write`] rejects a `ContentProvenanceBox` at or beyond 4 GiB. That arrives
+    /// as [`Error::Unsupported`](gamut_core::Error::Unsupported) attributed to `gamut-isobmff`,
+    /// and there it is the encoder's effective ceiling: on this framing the largest `len` that
+    /// clears it is `4_294_967_250`, and `4_294_967_251` is refused. Widening this crate's own
+    /// ceiling to that bound, so the refusal arrives as an `InvalidInput` naming AVIF, is issue
+    /// #576. On **32-bit** targets (`wasm32`) a buffer holds under 2 GiB, so this crate's own
+    /// `InvalidInput` is the effective ceiling and the writer's 4 GiB refusal is never reached.
     ///
-    /// Every `len` below that bound is written as asked. What remains beyond this crate's reach is
-    /// the allocator's: a reservation the machine has no memory for aborts, as any oversized
-    /// allocation in Rust does — measurably so just under the 4 GiB bound, where the writer's copy
-    /// of the payload into the output buffer needs twice the slot.
+    /// Every `len` below the effective ceiling is written as asked. What remains beyond this
+    /// crate's reach is the allocator's: a reservation the machine has no memory for aborts, as
+    /// any oversized allocation in Rust does — measurably so on a 64-bit host just under the 4 GiB
+    /// bound, where the writer's copy of the payload into the output buffer needs twice the slot.
     ///
     /// The *read* side is deliberately more permissive: it reports a degenerate slot it genuinely
     /// finds rather than hiding it, since those bytes exist and some other writer put them there.
