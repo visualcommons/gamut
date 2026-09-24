@@ -2,26 +2,29 @@
 //! §11.3) — the read-side twin of the `ancillary` writers.
 //!
 //! Metadata payloads are surfaced **raw** — `eXIf` bytes, the inflated ICC profile, the XMP
-//! packet — precisely so callers can hand them to `gamut_metadata::MetadataBlock`
-//! (`Exif`/`Icc`/`Xmp`) without gamut-png depending on the metadata stack. Fixed-layout
-//! colour-space chunks (`gAMA`/`cHRM`/`sRGB`/`cICP`) are additionally parsed into values, in the
-//! same ×100 000 fixed-point units the encoder accepts. Ancillary payloads are attacker
-//! territory: a malformed payload skips that chunk (§13.1) rather than failing the image, and
-//! compressed payloads (iCCP/zTXt/iTXt) inflate under one cumulative byte budget so a metadata
-//! zlib bomb cannot exhaust memory.
+//! packet, the C2PA manifest store — precisely so callers can hand them to
+//! `gamut_metadata::MetadataBlock` (`Exif`/`Icc`/`Xmp`/`C2pa`) without gamut-png depending on
+//! the metadata stack. Fixed-layout colour-space chunks (`gAMA`/`cHRM`/`sRGB`/`cICP`) are
+//! additionally parsed into values, in the same ×100 000 fixed-point units the encoder accepts.
+//! Ancillary payloads are attacker territory: a malformed payload skips that chunk (§13.1)
+//! rather than failing the image, and compressed payloads (iCCP/zTXt/iTXt) inflate under one
+//! cumulative byte budget so a metadata zlib bomb cannot exhaust memory. The manifest store
+//! (`caBX`, C2PA 2.4 §A.3.2) is uncompressed but attacker-sized, so its bytes are charged to the
+//! same budget rather than copied beside it.
 
 use gamut_core::{
     Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Indexed8, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
 use crate::ancillary::SrgbIntent;
+use crate::chunk::CABX;
 use crate::color::ColorType;
 use crate::decoder::TransparencyKey;
 use crate::inflate;
 use crate::palette::PngPalette;
 
 /// The parsed image header (IHDR, §11.2.1), reported as stored in the file.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PngHeader {
     /// Image width in pixels.
@@ -86,7 +89,7 @@ pub struct Chromaticities {
     pub blue: (u32, u32),
 }
 
-/// Coding-independent code points (cICP, §11.3.2.5) identifying the video-signal colour space.
+/// Coding-independent code points (cICP, §11.3.2.6) identifying the video-signal colour space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Cicp {
@@ -100,11 +103,60 @@ pub struct Cicp {
     pub full_range: bool,
 }
 
+/// Which of §11.3.3's three chunks carried an annotation, and whether its text was compressed.
+///
+/// The four combinations are the whole space PNG defines, so this enum is closed. It exists so a
+/// re-encode can put an annotation back in the chunk it came out of: without it a `zTXt` is
+/// indistinguishable from a `tEXt` once decoded, and rewriting a compressed 40-byte payload as an
+/// uncompressed one can inflate it fortyfold — preservation that does not preserve.
+///
+/// `#[repr(u8)]` with explicit, permanent discriminants: the value crosses the C ABI as a plain
+/// integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum TextChunkKind {
+    /// `tEXt`: uncompressed Latin-1 (§11.3.3.2).
+    Text = 0,
+    /// `zTXt`: zlib-compressed Latin-1 (§11.3.3.3).
+    CompressedText = 1,
+    /// `iTXt` with the compression flag clear: uncompressed UTF-8 (§11.3.3.4).
+    International = 2,
+    /// `iTXt` with the compression flag set: zlib-compressed UTF-8 (§11.3.3.4).
+    CompressedInternational = 3,
+}
+
+/// How a file framed its XMP packet inside the `iTXt` chunk §11.3.3.1 Table 21 reserves for it.
+///
+/// The packet itself is [`DecodedPng::xmp`] / [`PngMetadata::xmp`]; this is everything *else* the
+/// chunk carried, and it is `Some` exactly when the packet is. It exists for the same reason
+/// [`TextChunkKind`] does — a re-encode has to put the packet back the way it came out — but the
+/// packet is surfaced as its own field rather than as a [`TextChunk`], so the framing needs its
+/// own home. Table 21 *recommends* the null framing (`compressed` clear, both strings empty) for
+/// XMP compliance; it does not require it, and a file that frames it otherwise is still a file
+/// whose bytes have to survive a re-encode.
+///
+/// Marked `#[non_exhaustive]`: consolidating the packet into [`PngMetadata::texts`] would retire
+/// this type, and that is a decision of its own (issue #600). Until then the pairing is a
+/// convention, not a type: a caller assembling a [`PngMetadata`] by hand can set one field
+/// without the other, and the encoder then takes this type's [`Default`] framing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct XmpFraming {
+    /// The chunk's language tag (§11.3.3.4), if it carried a non-empty one.
+    pub language: Option<String>,
+    /// The chunk's translated keyword (§11.3.3.4), if it carried a non-empty one.
+    pub translated_keyword: Option<String>,
+    /// Whether the packet was stored zlib-compressed (§11.3.3.4's compression flag). A packet
+    /// stored compressed and rewritten uncompressed is the same words at many times the size.
+    pub compressed: bool,
+}
+
 /// One text annotation (tEXt/zTXt/iTXt, §11.3.3), decompressed where stored compressed.
 ///
 /// tEXt/zTXt hold Latin-1, mapped code-point-for-code-point into the `String` (lossless);
-/// iTXt holds UTF-8. The XMP packet (`XML:com.adobe.xmp`) is surfaced as [`DecodedPng::xmp`],
-/// not repeated here.
+/// iTXt holds UTF-8. [`kind`](Self::kind) records which chunk it was, so a re-encode can put it
+/// back in the same one. The XMP packet (`XML:com.adobe.xmp`) is surfaced as
+/// [`DecodedPng::xmp`], not repeated here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TextChunk {
@@ -116,6 +168,8 @@ pub struct TextChunk {
     pub language: Option<String>,
     /// The iTXt translated keyword, if the chunk carried one.
     pub translated_keyword: Option<String>,
+    /// The chunk this annotation was stored in, and whether its text was compressed.
+    pub kind: TextChunkKind,
 }
 
 /// Everything a PNG carries: the pixels in their native layout plus the ancillary payloads.
@@ -134,21 +188,43 @@ pub struct DecodedPng {
     pub palette: Option<PngPalette>,
     /// The tRNS colour key of a greyscale/truecolour image, in native (unscaled) sample units.
     pub transparency: Option<TransparencyKey>,
-    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.4). Feed as
+    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.5). Feed as
     /// `gamut_metadata::MetadataBlock::Exif`.
     pub exif: Option<Vec<u8>>,
     /// The embedded ICC profile (iCCP), inflated. Feed as `MetadataBlock::Icc`.
     pub icc_profile: Option<IccProfile>,
-    /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.2), decompressed if stored
+    /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.4), decompressed if stored
     /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
+    /// How the chunk that carried [`xmp`](Self::xmp) framed it: its compression flag, language
+    /// tag and translated keyword (§11.3.3.4). `Some` exactly when `xmp` is.
+    pub xmp_framing: Option<XmpFraming>,
+    /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim: the JUMBF bytes,
+    /// uncompressed, exactly as the chunk carries them — opaque here, never parsed or judged.
+    /// Feed as `MetadataBlock::C2pa`. The first CRC-valid `caBX` before the first `IDAT`, and
+    /// only when it fits the metadata budget; see [`c2pa_ignored`](Self::c2pa_ignored).
+    pub c2pa: Option<Vec<u8>>,
+    /// How many CRC-valid `caBX` chunks **in the datastream** were not surfaced as the store:
+    /// a chunk later than the first, a chunk positioned after `IDAT`, and the store-position
+    /// chunk itself when it did not fit the metadata budget.
+    ///
+    /// A file carries exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's
+    /// APP11 run — so a non-zero count marks a file whose extra chunks were ignored rather than
+    /// concatenated. It does **not** identify why: a store past the budget and a chunk appended
+    /// after `IDAT` both land here, and `c2pa == None` with a non-zero count is either.
+    ///
+    /// A `caBX` after `IEND` is **not** counted. Bytes after `IEND` are a trailer rather than
+    /// part of the datastream (§13.2), and neither metadata walk reads them. To see one — the
+    /// shape of a chunk appended to a finished file — use
+    /// [`deconstruct`](crate::deconstruct), whose report accounts the trailer as a segment.
+    pub c2pa_ignored: usize,
     /// tEXt/zTXt/iTXt annotations in file order (the XMP packet is excluded).
     pub texts: Vec<TextChunk>,
     /// gAMA: image gamma × 100 000 (§11.3.2.2) — the unit the encoder's `with_gamma` writes.
     pub gamma: Option<u32>,
     /// cHRM chromaticities, each coordinate × 100 000.
     pub chromaticities: Option<Chromaticities>,
-    /// sRGB rendering intent (§11.3.2.4).
+    /// sRGB rendering intent (§11.3.2.5).
     pub srgb: Option<SrgbIntent>,
     /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
@@ -165,7 +241,8 @@ pub struct DecodedPng {
 ///
 /// Unlike `gamut_jpeg::JpegMetadata` and `gamut_webp::WebpMetadata`, which carry only
 /// EXIF/XMP/ICC, this also surfaces PNG's parsed colour chunks — `cICP`, `sRGB`, `gAMA`, `cHRM` —
-/// because those are uncompressed and answer "what colour space is this?" on their own.
+/// because those are uncompressed and answer "what colour space is this?" on their own, and the
+/// C2PA manifest store (`caBX`), raw.
 ///
 /// Marked `#[non_exhaustive]` so further ancillary chunks can be added without a breaking change.
 ///
@@ -190,36 +267,85 @@ pub struct DecodedPng {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PngMetadata {
-    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.4). Feed as
+    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.5). Feed as
     /// `gamut_metadata::MetadataBlock::Exif`.
     pub exif: Option<Vec<u8>>,
     /// The embedded ICC profile (iCCP), inflated. Feed as `MetadataBlock::Icc`.
     pub icc_profile: Option<IccProfile>,
-    /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.2), decompressed if stored
+    /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.4), decompressed if stored
     /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
+    /// How the chunk that carried [`xmp`](Self::xmp) framed it: its compression flag, language
+    /// tag and translated keyword (§11.3.3.4). `Some` exactly when `xmp` is.
+    pub xmp_framing: Option<XmpFraming>,
+    /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim and uncompressed —
+    /// opaque bytes, never parsed or judged. Feed as `MetadataBlock::C2pa`. The first CRC-valid
+    /// `caBX` before the first `IDAT`, and only when it fits the metadata budget; see
+    /// [`c2pa_ignored`](Self::c2pa_ignored).
+    pub c2pa: Option<Vec<u8>>,
+    /// How many CRC-valid `caBX` chunks **in the datastream** were not surfaced as the store:
+    /// a chunk later than the first, a chunk positioned after `IDAT`, and the store-position
+    /// chunk itself when it did not fit the metadata budget.
+    ///
+    /// A file carries exactly one manifest store — PNG has no multi-chunk store, unlike JPEG's
+    /// APP11 run — so a non-zero count marks a file whose extra chunks were ignored rather than
+    /// concatenated. It does **not** identify why: a store past the budget and a chunk appended
+    /// after `IDAT` both land here, and `c2pa == None` with a non-zero count is either.
+    ///
+    /// A `caBX` after `IEND` is **not** counted. Bytes after `IEND` are a trailer rather than
+    /// part of the datastream (§13.2), and neither metadata walk reads them. To see one — the
+    /// shape of a chunk appended to a finished file — use
+    /// [`deconstruct`](crate::deconstruct), whose report accounts the trailer as a segment.
+    pub c2pa_ignored: usize,
     /// tEXt/zTXt/iTXt annotations in file order (the XMP packet is excluded).
     pub texts: Vec<TextChunk>,
     /// gAMA: image gamma × 100 000 (§11.3.2.2).
     pub gamma: Option<u32>,
     /// cHRM chromaticities, each coordinate × 100 000.
     pub chromaticities: Option<Chromaticities>,
-    /// sRGB rendering intent (§11.3.2.4).
+    /// sRGB rendering intent (§11.3.2.5).
     pub srgb: Option<SrgbIntent>,
     /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
 }
 
 /// Parses the metadata-bearing ancillary chunks collected from the stream (in file order).
-/// Malformed payloads skip their chunk (§13.1); compressed payloads share `budget` bytes of
-/// inflated output, and a payload that would bust the remainder is skipped, not an error.
-/// Once-only chunks keep their first occurrence.
+/// Malformed payloads skip their chunk (§13.1); compressed payloads — and the uncompressed but
+/// attacker-sized `caBX` store — share `budget` bytes of output, and a payload that would bust
+/// the remainder is skipped, not an error. Once-only chunks keep their first occurrence; every
+/// CRC-valid `caBX` this walk does not surface as the store — a later one, or the first when it
+/// busts the budget — is counted, since exactly one store is the rule (C2PA §A.3.2).
+///
+/// `chunks` holds only chunks in a position where a store may appear: the caller's walk drops a
+/// `caBX` after `IDAT` before it gets here and counts it into
+/// [`PngMetadata::c2pa_ignored`](PngMetadata::c2pa_ignored) itself, so this function never has to
+/// know where in the file a chunk sat.
 pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata {
     let mut meta = PngMetadata::default();
     let mut budget = budget;
+    // Whether a `caBX` has been seen at all, admitted or not: the first is the store (or is
+    // skipped for its size), every later one is a duplicate — never promoted into its place.
+    let mut seen_c2pa = false;
     for &(chunk_type, data) in chunks {
         match &chunk_type {
             b"eXIf" if meta.exif.is_none() => meta.exif = Some(data.to_vec()),
+            _ if chunk_type == CABX => {
+                if seen_c2pa {
+                    // A second store-position chunk: never the store, whatever became of the
+                    // first, so an oversized store cannot be substituted by a smaller one.
+                    meta.c2pa_ignored += 1;
+                } else {
+                    seen_c2pa = true;
+                    if data.len() <= budget {
+                        budget -= data.len();
+                        meta.c2pa = Some(data.to_vec());
+                    } else {
+                        // In store position but not admitted: counted, like every other
+                        // CRC-valid `caBX` this walk declines to surface.
+                        meta.c2pa_ignored += 1;
+                    }
+                }
+            }
             b"iCCP" if meta.icc_profile.is_none() => {
                 meta.icc_profile = parse_iccp(data, &mut budget);
             }
@@ -257,9 +383,10 @@ pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata
                 }
             }
             b"iTXt" => match parse_itxt(data, &mut budget) {
-                Some(ITxt::Xmp(packet)) => {
+                Some(ITxt::Xmp(packet, framing)) => {
                     if meta.xmp.is_none() {
                         meta.xmp = Some(packet);
+                        meta.xmp_framing = Some(framing);
                     }
                 }
                 Some(ITxt::Text(text)) => meta.texts.push(text),
@@ -271,12 +398,14 @@ pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata
     meta
 }
 
-/// The standard iTXt keyword carrying an XMP packet (XMP Specification Part 3).
-const XMP_KEYWORD: &str = "XML:com.adobe.xmp";
+/// The standard iTXt keyword carrying an XMP packet (XMP Specification Part 3), reserved for it
+/// by §11.3.3.1 Table 21. Shared with the encoder so the two sides cannot disagree on it.
+pub(crate) const XMP_KEYWORD: &str = "XML:com.adobe.xmp";
 
-/// A parsed iTXt: either the XMP packet or an ordinary text annotation.
+/// A parsed iTXt: either the XMP packet and how its chunk framed it, or an ordinary text
+/// annotation.
 enum ITxt {
-    Xmp(Vec<u8>),
+    Xmp(Vec<u8>, XmpFraming),
     Text(TextChunk),
 }
 
@@ -334,7 +463,7 @@ fn parse_chrm(data: &[u8]) -> Option<Chromaticities> {
     })
 }
 
-/// tEXt (§11.3.3.3): keyword, NUL, Latin-1 text.
+/// tEXt (§11.3.3.2): keyword, NUL, Latin-1 text.
 fn parse_text(data: &[u8]) -> Option<TextChunk> {
     let (keyword, text) = split_keyword(data)?;
     Some(TextChunk {
@@ -342,10 +471,11 @@ fn parse_text(data: &[u8]) -> Option<TextChunk> {
         text: latin1(text),
         language: None,
         translated_keyword: None,
+        kind: TextChunkKind::Text,
     })
 }
 
-/// zTXt (§11.3.3.4): keyword, NUL, compression method 0, deflated Latin-1 text.
+/// zTXt (§11.3.3.3): keyword, NUL, compression method 0, deflated Latin-1 text.
 fn parse_ztxt(data: &[u8], budget: &mut usize) -> Option<TextChunk> {
     let (keyword, rest) = split_keyword(data)?;
     let (&method, compressed) = rest.split_first()?;
@@ -358,10 +488,11 @@ fn parse_ztxt(data: &[u8], budget: &mut usize) -> Option<TextChunk> {
         text: latin1(&text),
         language: None,
         translated_keyword: None,
+        kind: TextChunkKind::CompressedText,
     })
 }
 
-/// iTXt (§11.3.3.5): keyword, NUL, compression flag, compression method, language tag, NUL,
+/// iTXt (§11.3.3.4): keyword, NUL, compression flag, compression method, language tag, NUL,
 /// translated keyword, NUL, UTF-8 text (deflated when the flag is 1).
 fn parse_itxt(data: &[u8], budget: &mut usize) -> Option<ITxt> {
     let (keyword, rest) = split_keyword(data)?;
@@ -378,13 +509,28 @@ fn parse_itxt(data: &[u8], budget: &mut usize) -> Option<ITxt> {
         _ => return None,
     };
     if keyword == XMP_KEYWORD {
-        return Some(ITxt::Xmp(text_bytes));
+        // The packet leaves by its own field, so everything the chunk framed it with — the
+        // compression flag above all — leaves beside it rather than with the annotation list.
+        // Without the flag a 71-byte chunk is rewritten as thousands of uncompressed bytes.
+        return Some(ITxt::Xmp(
+            text_bytes,
+            XmpFraming {
+                language: Some(language).filter(|l| !l.is_empty()),
+                translated_keyword: Some(translated).filter(|t| !t.is_empty()),
+                compressed: flag == 1,
+            },
+        ));
     }
     Some(ITxt::Text(TextChunk {
         keyword,
         text: String::from_utf8(text_bytes).ok()?,
         language: Some(language).filter(|l| !l.is_empty()),
         translated_keyword: Some(translated).filter(|t| !t.is_empty()),
+        kind: if flag == 1 {
+            TextChunkKind::CompressedInternational
+        } else {
+            TextChunkKind::International
+        },
     }))
 }
 
@@ -474,6 +620,38 @@ mod tests {
         assert!(meta.texts.is_empty());
     }
 
+    /// The framing §11.3.3.1 Table 21 recommends — "Compression Flag set to 0, and both Language
+    /// Tag and Translated Keyword set to the null string" — reads back as exactly that, so a
+    /// re-encode reproduces it rather than inventing one.
+    ///
+    /// Kills the framing arm of [`parse_itxt`] read the other way from
+    /// `xmp_framing_carries_the_compression_flag`: a mutant that reports every packet compressed,
+    /// or that keeps an empty tag as `Some("")`, would rewrite a Table 21-conforming chunk as
+    /// something else.
+    #[test]
+    fn an_unframed_xmp_packet_reads_back_unframed() {
+        let itxt = b"XML:com.adobe.xmp\0\0\0\0\0<x:xmpmeta/>";
+        let meta = collect(&[(*b"iTXt", itxt)], 1024);
+        assert_eq!(meta.xmp_framing, Some(XmpFraming::default()));
+    }
+
+    /// §11.3.3.4's compression flag, language tag and translated keyword belong to the XMP chunk
+    /// as much as to any other `iTXt`, and the packet's own field cannot hold them. Losing the
+    /// flag alone rewrites a compressed packet at many times its size.
+    ///
+    /// Kills each field of the `ITxt::Xmp` arm of [`parse_itxt`].
+    #[test]
+    fn xmp_framing_carries_the_compression_flag() {
+        let mut itxt = b"XML:com.adobe.xmp\0\x01\0en-GB\0Metadata\0".to_vec();
+        itxt.extend_from_slice(&deflated(b"<x:xmpmeta/>"));
+        let meta = collect(&[(*b"iTXt", &itxt)], 1024);
+        assert_eq!(meta.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
+        let framing = meta.xmp_framing.expect("framed");
+        assert!(framing.compressed);
+        assert_eq!(framing.language.as_deref(), Some("en-GB"));
+        assert_eq!(framing.translated_keyword.as_deref(), Some("Metadata"));
+    }
+
     #[test]
     fn metadata_budget_is_cumulative_and_skips_busting_chunks() {
         let body = vec![b'a'; 600];
@@ -518,6 +696,62 @@ mod tests {
         assert_eq!(meta.chromaticities.unwrap().white, (1, 2));
         assert_eq!(meta.srgb, Some(SrgbIntent::Perceptual));
         assert_eq!(meta.cicp.unwrap().color_primaries, 9);
+    }
+
+    /// Exactly one store per file: the first `caBX` is the store and every later one is counted,
+    /// never concatenated onto it and never promoted into its place — PNG has no multi-chunk
+    /// store, unlike JPEG's APP11 run (C2PA §A.3.2).
+    #[test]
+    fn the_first_cabx_is_the_store_and_later_ones_are_counted_not_concatenated() {
+        let meta = collect(
+            &[(CABX, b"first store"), (CABX, b"second"), (CABX, b"third")],
+            1024,
+        );
+        assert_eq!(meta.c2pa.as_deref(), Some(&b"first store"[..]));
+        assert_eq!(meta.c2pa_ignored, 2);
+
+        let single = collect(&[(CABX, b"only")], 1024);
+        assert_eq!(single.c2pa.as_deref(), Some(&b"only"[..]));
+        assert_eq!(single.c2pa_ignored, 0);
+        assert_eq!(collect(&[], 1024).c2pa, None);
+    }
+
+    /// The count is a plain `usize`: it reports what the file carries however many that is. A
+    /// saturating `u8` here read 300 ignored chunks as 255, which is a number the file does not
+    /// contain.
+    #[test]
+    fn the_ignored_count_reports_every_chunk_not_a_saturated_ceiling() {
+        let chunks: Vec<([u8; 4], &[u8])> = (0..301).map(|_| (CABX, &b"s"[..])).collect();
+        let meta = collect(&chunks, 1024);
+        assert_eq!(meta.c2pa_ignored, 300);
+    }
+
+    /// `caBX` is attacker-sized like every other ancillary payload, so it is charged to the one
+    /// cumulative budget rather than copied beside it: a store exactly the size of the remaining
+    /// budget is admitted and leaves nothing for a compressed payload after it; one byte larger
+    /// is skipped — and, skipped, it is still the file's one store, so a smaller `caBX` after it
+    /// is a duplicate rather than a substitute.
+    #[test]
+    fn the_cabx_store_is_charged_to_the_metadata_budget() {
+        let ztxt: Vec<u8> = [b"kw\0\0".to_vec(), deflated(b"x")].concat();
+        let store = [7u8; 10];
+        let fits = collect(&[(CABX, &store), (*b"zTXt", &ztxt)], 10);
+        assert_eq!(
+            fits.c2pa.as_deref(),
+            Some(&store[..]),
+            "exactly the budget fits"
+        );
+        assert!(
+            fits.texts.is_empty(),
+            "the store consumed the budget, so the zTXt after it is skipped"
+        );
+
+        let busts = collect(&[(CABX, &store), (CABX, b"tiny")], 9);
+        assert_eq!(busts.c2pa, None, "one byte over the budget is skipped");
+        assert_eq!(
+            busts.c2pa_ignored, 2,
+            "both are ignored: the store busted the budget, and the next is not a substitute"
+        );
     }
 
     #[test]
