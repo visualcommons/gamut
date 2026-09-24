@@ -55,6 +55,12 @@ outcomes where the other two formats have two:
 | `is_intact()` but not verified — nothing is known against the file, but its IDAT was never read | `1` | `<path>: not verified — <why the scan did not run>` |
 | not `is_intact()` — something is known against the file | `1` | `<path>: not a complete, undamaged PNG datastream — N finding(s)` |
 
+`N` counts, and the report's `findings` list names, one finding per chunk CRC mismatch, one for a
+truncated tail, one for trailing bytes after IEND, one for a **missing IEND** (including a
+datastream that ends cleanly at a chunk boundary without it, and alongside a truncated tail, which
+lacks it too), and one for a filter-scan skip that is damage. Every conjunct of `is_intact()` a
+file can fail is on that list, so the third row always reports `N ≥ 1`.
+
 The middle row is why `is_intact()` is not the gate. A file whose filter scan was skipped for
 budget is not *damaged* — `intact: yes` is printed truthfully — but a corrupt zlib payload under a
 valid CRC is damage **only** the scan can see, so exiting `0` on an unread file would report this
