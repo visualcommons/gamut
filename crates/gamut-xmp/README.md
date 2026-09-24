@@ -71,7 +71,11 @@ padding) and `XmpPacket::parse` the graph — `from_packet` is exactly that comp
   Adobe XMPCore does not materialize it either (pinned in `tests/oracle.rs`); gamut keeps parity
   with the reference engine. Per-property and per-item `xml:lang` are fully supported.
 - **Part 2 (standard schemas) is a namespace registry** (`WellKnownNs`), not per-property
-  validation: values are uninterpreted text in the model, as the wire format allows.
+  validation: values are uninterpreted text in the model, as the wire format allows. The registry
+  also carries the external schemas image-metadata standards layer on XMP — `dcterms` (DCMI
+  Metadata Terms), which C2PA uses for `dcterms:provenance`, the URL of an *external* manifest
+  store (C2PA 2.4 §11.5). gamut-xmp registers the namespace; reading that property as a
+  provenance signal is [`gamut-metadata`](../gamut-metadata)'s job.
 - **Part 3 (storage in files) belongs to the format crates by design.** This crate supplies what
   they need — wrapper-optional parse, bare-body serialization (`to_rdf` / `serialize_body`), and
   the writability/padding envelope for in-place editing. Locating packets inside JPEG/TIFF/PNG
@@ -85,6 +89,13 @@ padding) and `XmpPacket::parse` the graph — `from_packet` is exactly that comp
 **Production-ready v1** (issue #189). Implemented: parser + canonical serializer for the full XMP
 data model (simple / URI / structured / `Bag`·`Seq`·`Alt`, qualifiers, language alternatives) and
 the `<?xpacket?>` wrapper. See [STATUS.md](STATUS.md).
+
+## Migrating from 1.x
+
+`WellKnownNs` is `#[non_exhaustive]` from 2.0: the registry grows with the schemas gamut's crates
+need, and each addition is now a minor change instead of a major one. An exhaustive `match` on it
+needs a wildcard arm; `WellKnownNs::ALL` still enumerates every registered schema. Nothing else
+changed — every existing variant, URI, prefix and method keeps its meaning.
 
 ## Validation
 
