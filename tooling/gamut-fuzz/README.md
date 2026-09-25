@@ -141,8 +141,9 @@ directions: one direction is silent on a file that holds no instance of the thin
 
 The check set is derived from the table above rather than read off it: split each row's last cell
 on its own bold `and`, and every conjunct is one listed check owed one injection. Six rows yield
-**ten** listed checks, and sixteen injections stand behind them — more than one apiece wherever a
-check is an accessor-versus-count equality, which is injected in both directions.
+**ten** listed checks, and seventeen injections stand behind them — more than one apiece wherever a
+check is an accessor-versus-count equality, which is injected in both directions, or where one
+check spans several bodies that each carry the contract on their own.
 
 | listed check | target | injections recorded |
 |---|---|---|
@@ -154,7 +155,7 @@ check is an accessor-versus-count equality, which is injected in both directions
 | the segments cover to end of file | `isobmff_boxes` | 1 — `segments.pop()` before the return |
 | every accessor agrees with the segment list | `heic_container` | 6 — `boxes`/`appended_stream`/`trailer`, each under- and over-reporting |
 | every borrowed slice lies inside `data()` | `heic_container` | 2 — `data()` returns a copy; `boxes()` yields copies |
-| the emitters append on the success path | `heic_hvcc` | 1 — `annex_b_parameter_sets` begins `out.clear()` |
+| the emitters append on the success path | `heic_hvcc` | 2 — `annex_b_parameter_sets` begins `out.clear()`; `annex_b`'s own body begins `out.clear()` |
 | the emitters append on the error path | `heic_hvcc` | 1 — `annex_b_payload` clears before returning `Err` |
 
 Each injection's message and the command that reproduces it are in the target's own module docs;
