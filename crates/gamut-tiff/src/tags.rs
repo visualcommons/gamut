@@ -68,6 +68,12 @@ pub const ICC_PROFILE: u16 = 34675;
 pub const GPS_INFO: u16 = gamut_ifd::tags::GPS_INFO;
 /// `InteroperabilityIFD` (40965) — the offset of the Exif Interoperability sub-IFD.
 pub const INTEROPERABILITY_IFD: u16 = gamut_ifd::tags::INTEROPERABILITY_IFD;
+/// `C2PA` (52545, `0xCD41`) — the C2PA manifest store, type `UNDEFINED` (C2PA 2.4 §A.3.6).
+///
+/// A private tag in TIFF 6.0 §7 terms, but one this crate now reads and writes, so
+/// [`is_known_tag`] recognises it. Its placement and exclusion rules are [`gamut_ifd::c2pa`]'s;
+/// the payload is carried verbatim ([`TiffMetadata::c2pa`](crate::TiffMetadata::c2pa)).
+pub const C2PA_MANIFEST_STORE: u16 = gamut_ifd::c2pa::C2PA_MANIFEST_STORE;
 
 /// Whether `tag` is one this crate recognises as part of TIFF 6.0 — the baseline reference (§8)
 /// plus the Part 2 still-image extension tags — as opposed to a private or unknown tag a strict
@@ -113,6 +119,7 @@ pub fn is_known_tag(tag: u16) -> bool {
             | ICC_PROFILE
             | GPS_INFO
             | INTEROPERABILITY_IFD
+            | C2PA_MANIFEST_STORE
             // Other TIFF 6.0 baseline (§8) and Part 2 still-image extension tags a valid file may
             // carry but the codec does not act on. Kept as numeric literals — no codec constant
             // is needed for tags the pixel path never reads.
@@ -205,6 +212,7 @@ mod tests {
             ICC_PROFILE,
             GPS_INFO,
             INTEROPERABILITY_IFD,
+            C2PA_MANIFEST_STORE,
         ] {
             assert!(is_known_tag(tag), "tag {tag} should be known");
         }

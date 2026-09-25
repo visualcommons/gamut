@@ -16,6 +16,7 @@ use gamut_ifd::{ByteOrder, Ifd, read};
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor, SampleFormat};
 use crate::info::{self, TiffInfo};
+use crate::metadata::{self, TiffMetadata};
 use crate::palette::Palette8;
 use crate::tags;
 
@@ -183,6 +184,62 @@ impl TiffDecoder {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: page index out of range")
         })?;
         info::page_info(ifd, file.order)
+    }
+
+    /// Reads the metadata a TIFF carries, without decoding pixels.
+    ///
+    /// IFD 0 supplies the XMP, IPTC-IIM and ICC payloads and the `ExifIFD` sub-IFD; the last IFD
+    /// of the main chain supplies the C2PA manifest store (C2PA 2.4 §A.3.6). Every byte-carried
+    /// payload comes back **verbatim** — this crate parses none of them — so a block written by
+    /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) reads back identical.
+    /// The Exif directory is a directory model rather than a byte range, so what it promises is
+    /// narrower and is stated on [`TiffMetadata::exif`](crate::TiffMetadata::exif); the shapes it
+    /// could not promise for are refused by the encode rather than written.
+    /// Use [`c2pa_exclusions`](crate::c2pa_exclusions) for *where* the store sits.
+    ///
+    /// ```
+    /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
+    /// use gamut_tiff::{TiffDecoder, TiffEncoder, TiffMetadata};
+    ///
+    /// let dims = Dimensions { width: 2, height: 1 };
+    /// let tiff = TiffEncoder::new()
+    ///     .with_metadata(TiffMetadata::new().with_xmp(b"<x:xmpmeta/>".to_vec()))
+    ///     .encode_to_vec(ImageRef::<Gray8>::new(&[7, 9], dims)?)?;
+    ///
+    /// let meta = TiffDecoder::new().metadata(&tiff)?;
+    /// assert_eq!(meta.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or for a **followed**
+    /// pointer that does not resolve into a tree: an out-of-bounds or unparseable target, two
+    /// pointers naming one directory, or nesting below the `ExifIFD` → `InteroperabilityIFD` pair
+    /// — two levels under IFD 0, the deepest tree those two tags legitimately reach (EXIF 2.3
+    /// §4.6.3), and the same bound
+    /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) writes within.
+    ///
+    /// Which pointers are followed depends on the **level**, so which ones can fail this call does
+    /// too. At **IFD 0** only `ExifIFD` (34665) is followed: a `SubIFDs` (330), `GPSInfo` (34853)
+    /// or `InteroperabilityIFD` (40965) field on the page itself is left as the integer it was
+    /// read as, so however broken it is it cannot fail this call. **Inside the returned Exif
+    /// directory all four** are followed, because that directory is handed back and an unresolved
+    /// pointer in it would be a raw offset into the source file — so there, unlike at IFD 0, an
+    /// unreadable target under any of the four *does* fail the call. And only IFD 0's subtree is
+    /// walked at all: a pointer on any later page of a multi-page document is never resolved, not
+    /// even one naming a directory IFD 0's own subtree also names.
+    ///
+    /// **This can fail on a file [`decode_image`](DecodeImage::decode_image) decodes happily**,
+    /// and that is deliberate. Pixel decoding never follows a metadata pointer, so a broken
+    /// `ExifIFD` offset cannot stop it; this method does follow one, and the alternative to
+    /// failing is reporting `exif: None` for a directory the file plainly declares — silent loss
+    /// a caller cannot tell apart from "there is no EXIF here". A caller that wants a partial
+    /// answer can walk the re-exported [`read`](crate::read) / [`gamut_ifd::read_tree`] spine
+    /// itself and decide per pointer. (`gamut-dng` degrades instead of failing, because there the
+    /// metadata is incidental to a raw *image* decode that must still succeed.)
+    pub fn metadata(&self, data: &[u8]) -> Result<TiffMetadata> {
+        metadata::read_metadata(data)
     }
 
     /// Selects which lossy conversions a typed decode may perform.
