@@ -15,8 +15,8 @@
 //!
 //! | Restated here | Why it cannot be borrowed | What gates it |
 //! | --- | --- | --- |
-//! | [`BT709_BETA`] (H.273 §8.2); [`BT709_ALPHA`] is *derived* from it, not restated | `gamut-color` has no BT.709-family curve at all — see "Which spaces" | `bt709_curve_inverts_the_h273_transfer`, against `h273_bt709_oetf`, a forward transcription of Table 3 that restates α and β on purpose so no mistyped digit is shared; and `oracle_bt709_tone_curve_matches_the_h273_transfer` through lcms2 |
-//! | The IEC 61966-2-1 `(g, a, b, c, d)` set for [`Trc::Srgb`] | `gamut_color::transfer::srgb_eotf` is a *function*; §10.18 type 3 needs its five parameters | `srgb_parametric_curve_matches_gamut_color` against that function, and `oracle_srgb_tone_curve_matches_lcms` |
+//! | [`BT709_BETA`] (H.273 §8.2); [`BT709_ALPHA`] is *derived* from it, not restated | `gamut-color` has no BT.709-family curve at all — see "Which spaces" | `bt709_curve_inverts_the_h273_transfer`, against `h273_bt709_oetf`, a forward transcription of Table 3 that restates α and β on purpose so no mistyped digit is shared; and `oracle_every_encodable_transfer_matches_its_curve_through_lcms` through lcms2 |
+//! | The IEC 61966-2-1 `(g, a, b, c, d)` set for [`Trc::Srgb`] | `gamut_color::transfer::srgb_eotf` is a *function*; §10.18 type 3 needs its five parameters | `srgb_parametric_curve_matches_gamut_color` against that function, and `oracle_every_encodable_transfer_matches_its_curve_through_lcms` against lcms2's own sRGB |
 //! | The PCS D50, via [`XyzNumber::D50`] | It is an **ICC** fact (§7.2.16), not a CIE one; see [`pcs_d50_chromaticity`] | `colorants_sum_to_the_declared_media_white_point`, and the lcms2 colorant oracle |
 //!
 //! Everything else this module contributes is ICC encoding, not colour science.
@@ -1293,79 +1293,6 @@ mod tests {
 
     // --- differential: Little-CMS re-opens what we built ------------------------------------
 
-    /// lcms2 re-opens each built-in profile and reports the same colorants as it computes for the
-    /// same primaries itself. This is the colorimetric acceptance gate: the D50 adaptation, the
-    /// column-vs-row orientation of the colorant tags and the `s15Fixed16` encoding are all only
-    /// checked against an independent implementation.
-    ///
-    /// The tolerance is four `s15Fixed16` quanta, so it is the tag encoding — not the derivation —
-    /// that sets it: the largest observed disagreement is 2.4e-5, under two quanta. A transposed
-    /// matrix, a missing Bradford adaptation or a wrong white point all move a colorant by more
-    /// than 1e-2.
-    #[test]
-    fn oracle_colorants_match_lcms_for_the_same_primaries() {
-        for space in [
-            BuiltinProfile::Srgb,
-            BuiltinProfile::DisplayP3,
-            BuiltinProfile::Bt2020Pq,
-        ] {
-            let (primaries, _, _, label) = space.parts();
-            let (rgb, white) = primaries.chromaticities().expect("a modelled code point");
-            // lcms2 builds its own matrix/TRC profile from the same chromaticities; the gamma is
-            // irrelevant to the colorants.
-            let reference = lcms2_oracle::rgb_matrix_shaper(white, rgb, [2.2, 2.2, 2.2]);
-            let ours = lcms2_oracle::Profile::from_bytes(
-                &IccProfile::builtin(space)
-                    .expect("a modelled space")
-                    .to_bytes()
-                    .expect("serializes"),
-            )
-            .expect("lcms2 re-opens the profile");
-
-            for (name, sig) in [
-                ("red", tag::RED_COLORANT),
-                ("green", tag::GREEN_COLORANT),
-                ("blue", tag::BLUE_COLORANT),
-            ] {
-                let got = ours.read_xyz(sig).expect("colorant present");
-                let want = reference.read_xyz(sig).expect("colorant present");
-                for axis in 0..3 {
-                    assert!(
-                        (got[axis] - want[axis]).abs() < 4.0 / 65536.0,
-                        "{label} {name} colorant [{axis}]: {got:?} vs {want:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// lcms2 evaluates our sRGB tone curve to the same values as it evaluates the sRGB curve in
-    /// the profile it synthesizes itself. Two independent constructions of IEC 61966-2-1, read by
-    /// the same reference CMM.
-    #[test]
-    fn oracle_srgb_tone_curve_matches_lcms() {
-        let ours = lcms2_oracle::Profile::from_bytes(
-            &IccProfile::builtin(BuiltinProfile::Srgb)
-                .expect("sRGB is buildable")
-                .to_bytes()
-                .expect("serializes"),
-        )
-        .expect("lcms2 re-opens the profile");
-        let reference = lcms2_oracle::srgb();
-
-        for step in 0..=20 {
-            let x = step as f32 / 20.0;
-            let got = ours.eval_tone_curve(tag::RED_TRC, x).expect("rTRC present");
-            let want = reference
-                .eval_tone_curve(tag::RED_TRC, x)
-                .expect("rTRC present");
-            assert!(
-                (got - want).abs() < 1.0e-4,
-                "sRGB rTRC at {x}: {got} vs {want}"
-            );
-        }
-    }
-
     /// A transform from our sRGB profile to lcms2's own sRGB profile is the identity, to within a
     /// code. This is the end-to-end acceptance: colorants, white point, adaptation and TRC all
     /// have to be right together for a full round trip through the PCS to come back unchanged.
@@ -1395,34 +1322,183 @@ mod tests {
         }
     }
 
-    /// lcms2 re-opens the BT.709 profile from our serialized bytes and evaluates its `rTRC` to
-    /// the light H.273 Table 3's forward function started from. An independent CMM reading an
-    /// independent transcription of the spec: this is what says the `parametricCurveType` we
-    /// *wrote* — function type, parameter order and `s15Fixed16` encoding — is the curve, not
-    /// just that our own evaluator agrees with itself.
-    #[test]
-    fn oracle_bt709_tone_curve_matches_the_h273_transfer() {
-        let bytes = IccProfile::from_cicp(Cicp {
-            colour_primaries: 1,
-            transfer_characteristics: 1,
+    /// The serialized bytes of `profile`, re-opened by lcms2.
+    fn opened_by_lcms(profile: &IccProfile) -> lcms2_oracle::Profile {
+        lcms2_oracle::Profile::from_bytes(&profile.to_bytes().expect("serializes"))
+            .expect("lcms2 re-opens the profile")
+    }
+
+    /// The profile `from_cicp` builds for full-range RGB signalling of `primaries` and `transfer`.
+    fn rgb_cicp(primaries: u8, transfer: u8) -> Option<IccProfile> {
+        IccProfile::from_cicp(Cicp {
+            colour_primaries: primaries,
+            transfer_characteristics: transfer,
             matrix_coefficients: 0,
             video_full_range_flag: 1,
         })
-        .expect("BT.709 signalling builds")
-        .to_bytes()
-        .expect("serializes");
-        let opened = lcms2_oracle::Profile::from_bytes(&bytes).expect("lcms2 re-opens the profile");
+    }
 
-        for step in 0..=20 {
-            let light = f64::from(step) / 20.0;
-            let signal = h273_bt709_oetf(light);
-            let got = opened
-                .eval_tone_curve(tag::RED_TRC, signal as f32)
-                .expect("rTRC present");
-            assert!(
-                (f64::from(got) - light).abs() < 1.0e-4,
-                "BT.709 rTRC at V = {signal}: {got} vs Lc = {light}"
-            );
+    /// Every primaries code point `from_cicp` builds, found by asking it rather than restated.
+    fn buildable_primaries() -> Vec<u8> {
+        (0..=u8::MAX)
+            .filter(|&code| rgb_cicp(code, 13).is_some())
+            .collect()
+    }
+
+    /// lcms2 re-opens a profile for **every** primaries code point `from_cicp` builds — not only
+    /// the three the built-in spaces use — and reports the colorants it derives from the same
+    /// chromaticities itself. This is the colorimetric acceptance gate: the D50 adaptation, the
+    /// column-vs-row orientation of the colorant tags and the `s15Fixed16` encoding are all only
+    /// checked against an independent implementation. The code points BT.470 BG (5) and SMPTE
+    /// 170M (6) are reachable only through `from_cicp`; the built-in spaces' three are reached
+    /// here through the same path, which `each_builtin_space_round_trips_through_its_cicp_value`
+    /// pins to be the profile `builtin` returns.
+    ///
+    /// The tolerance is four `s15Fixed16` quanta, so it is the tag encoding — not the derivation —
+    /// that sets it: the largest observed disagreement is 1.2e-5 (BT.470 BG), under one quantum;
+    /// over the three built-in primaries alone it is 9.1e-6 (BT.2020). A transposed
+    /// matrix, a missing Bradford adaptation or a wrong white point all move a colorant by more
+    /// than 1e-2. lcms2 builds its reference from the same chromaticities; its gamma is
+    /// irrelevant to the colorants.
+    #[test]
+    fn oracle_colorants_match_lcms_for_every_buildable_primaries() {
+        let codes = buildable_primaries();
+        for code in [1, 5, 6, 9, 12] {
+            assert!(codes.contains(&code), "primaries {code} build");
+        }
+        for code in codes {
+            let primaries =
+                ColourPrimaries::from_code_point(u16::from(code)).expect("a modelled code point");
+            let (rgb, white) = primaries.chromaticities().expect("a modelled code point");
+            let reference = lcms2_oracle::rgb_matrix_shaper(white, rgb, [2.2, 2.2, 2.2]);
+            let ours = opened_by_lcms(&rgb_cicp(code, 13).expect("buildable"));
+            for (name, sig) in [
+                ("red", tag::RED_COLORANT),
+                ("green", tag::GREEN_COLORANT),
+                ("blue", tag::BLUE_COLORANT),
+            ] {
+                let got = ours.read_xyz(sig).expect("colorant present");
+                let want = reference.read_xyz(sig).expect("colorant present");
+                for axis in 0..3 {
+                    assert!(
+                        (got[axis] - want[axis]).abs() < 4.0 / 65536.0,
+                        "primaries {code} {name} colorant [{axis}]: {got:?} vs {want:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// lcms2 reads the `mediaWhitePointTag` of every profile built here — each built-in space and
+    /// the grey constructor — as the D50 it writes into a matrix/TRC profile it builds itself.
+    /// The colorant oracle only sees the white point through the colorants; this reads it.
+    #[test]
+    fn oracle_media_white_point_matches_lcms() {
+        let reference = lcms2_oracle::rgb_matrix_shaper(
+            [0.3127, 0.3290],
+            [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]],
+            [2.2, 2.2, 2.2],
+        )
+        .read_xyz(tag::MEDIA_WHITE_POINT)
+        .expect("lcms2 writes a white point");
+        let profiles = BuiltinProfile::ALL
+            .into_iter()
+            .map(|space| (format!("{space:?}"), IccProfile::builtin(space)))
+            .chain([("grey".to_owned(), IccProfile::gray_with_gamma(2.2))]);
+        for (label, profile) in profiles {
+            let got = opened_by_lcms(&profile.expect("buildable"))
+                .read_xyz(tag::MEDIA_WHITE_POINT)
+                .expect("wtpt present");
+            for axis in 0..3 {
+                assert!(
+                    (got[axis] - reference[axis]).abs() < 1.0 / 65536.0,
+                    "{label} white point [{axis}]: {got:?} vs {reference:?}"
+                );
+            }
+        }
+    }
+
+    /// lcms2 evaluates the three TRCs of the profile built for **every** encodable transfer code
+    /// point to that transfer's own curve, taken from a source independent of the tag: H.273
+    /// Table 3's forward function for the BT.709 family, the identity for linear, lcms2's own sRGB
+    /// for sRGB, and `gamut-color`'s `pq_eotf` for PQ. The linear and PQ tags are otherwise only
+    /// checked by this crate's own evaluator. An independent CMM reading an independent
+    /// transcription of each curve is what says the tag this module *wrote* — function type,
+    /// parameter order, `s15Fixed16` encoding, sampling — is the curve, not just that this
+    /// crate's evaluator agrees with itself.
+    ///
+    /// The tolerance is two `uInt16` quanta: the sampled PQ table's own interpolation error is
+    /// under one (see [`SAMPLED_TRC_POINTS`]), and lcms2 adds its 16-bit evaluation of the table
+    /// on top. Measured worst cases on this grid: 1.08e-5 for PQ, 4.2e-6 for sRGB, 1.3e-6 for the
+    /// BT.709 family, zero for linear. A wrong curve, direction or normalization moves a sample
+    /// by orders of magnitude more.
+    #[test]
+    fn oracle_every_encodable_transfer_matches_its_curve_through_lcms() {
+        let srgb = lcms2_oracle::srgb();
+        let peak = pq_eotf(1.0);
+        for code in [1_u8, 6, 8, 13, 14, 15, 16] {
+            let ours = opened_by_lcms(&rgb_cicp(1, code).expect("an encodable transfer"));
+            for step in 0..=64 {
+                let light_or_signal = f64::from(step) / 64.0;
+                // (signal, the light that signal must decode to)
+                let (signal, want) = match code {
+                    1 | 6 | 14 | 15 => (h273_bt709_oetf(light_or_signal), light_or_signal),
+                    8 => (light_or_signal, light_or_signal),
+                    13 => (
+                        light_or_signal,
+                        f64::from(
+                            srgb.eval_tone_curve(tag::RED_TRC, light_or_signal as f32)
+                                .expect("lcms2 sRGB rTRC"),
+                        ),
+                    ),
+                    _ => (light_or_signal, pq_eotf(light_or_signal) / peak),
+                };
+                for (channel, sig) in [
+                    ("r", tag::RED_TRC),
+                    ("g", tag::GREEN_TRC),
+                    ("b", tag::BLUE_TRC),
+                ] {
+                    let got = f64::from(
+                        ours.eval_tone_curve(sig, signal as f32)
+                            .expect("TRC present"),
+                    );
+                    assert!(
+                        (got - want).abs() < 2.0 / 65535.0,
+                        "transfer {code} {channel}TRC at V = {signal}: {got} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The `cicpType` tag every buildable signalling writes is the one lcms2's own `cicp`
+    /// synthesiser writes for the same four fields, read back through this crate's parser.
+    /// The two inputs coincide once §10.3 has zeroed `MatrixCoefficients`, so each triple is
+    /// built from a caller's `nclx`-style matrix 9 and compared with lcms2's tag for matrix 0:
+    /// a field written at the wrong offset, or the matrix passed through, shows up as a mismatch
+    /// against bytes this crate did not produce.
+    #[test]
+    fn oracle_cicp_tag_matches_the_lcms_synthesiser() {
+        for primaries in buildable_primaries() {
+            for transfer in [1_u8, 6, 8, 13, 14, 15, 16] {
+                let ours = IccProfile::from_cicp(Cicp {
+                    colour_primaries: primaries,
+                    transfer_characteristics: transfer,
+                    matrix_coefficients: 9,
+                    video_full_range_flag: 1,
+                })
+                .expect("buildable signalling");
+                let lcms = IccProfile::parse(
+                    &lcms2_oracle::cicp(primaries, transfer, 0, 1).to_bytes(),
+                )
+                .expect("lcms2's profile parses");
+                assert_eq!(
+                    ours.get(KnownTag::Cicp),
+                    lcms.get(KnownTag::Cicp),
+                    "cicp {primaries}/{transfer}"
+                );
+                assert!(ours.get(KnownTag::Cicp).is_some(), "cicp tag written");
+            }
         }
     }
 

@@ -59,7 +59,7 @@ H.273 §8.2's β (`BT709_BETA`, from which α is derived rather than restated), 
 `bt709_curve_inverts_the_h273_transfer` against an independent forward transcription of Table 3 and
 by the lcms2 oracle; the IEC 61966-2-1 `(g, a, b, c, d)` parameter set for §10.18 type 3, pinned by
 `srgb_parametric_curve_matches_gamut_color` against `gamut_color::transfer::srgb_eotf` and by
-`oracle_srgb_tone_curve_matches_lcms`; and the PCS D50 of §7.2.16, which is an ICC fact rather than
+`oracle_every_encodable_transfer_matches_its_curve_through_lcms`; and the PCS D50 of §7.2.16, which is an ICC fact rather than
 a CIE one (see "PCS white" below), pinned by `colorants_sum_to_the_declared_media_white_point` and
 the lcms2 colorant oracle. `src/builtin.rs`'s module documentation tabulates the three. Colorimetry is not the only
 reason to decline: `from_cicp` also refuses signalling this profile *shape* cannot carry, which is
@@ -191,10 +191,20 @@ a CMM may override, and a caller wanting another sets `header.rendering_intent` 
 **Determinism.** A constructor is a pure function of its arguments: no creation timestamp, no
 profile ID, no other entropy, so the same call always serializes to the same bytes.
 
-**Acceptance.** lcms2 re-opens every constructed profile and reports the same colorants as it
-derives from the same primaries itself (within four `s15Fixed16` quanta), evaluates our sRGB TRC to
-the same values as the sRGB profile it synthesizes itself, estimates the grey gamma we asked for,
-and transforms through our sRGB into its own sRGB as the identity to within one 8-bit code.
+**Acceptance.** Every check below is lcms2 (`tooling/lcms2-oracle`) reading bytes this crate
+serialized, compared against something this crate did not compute:
+
+| What lcms2 checks | Over which profiles | Test |
+| --- | --- | --- |
+| Colorants equal the ones lcms2 derives from the same chromaticities (four `s15Fixed16` quanta) | `from_cicp` for **every** primaries code point it builds — 1, 5, 6, 9, 12 — which covers the built-in spaces' three | `oracle_colorants_match_lcms_for_every_buildable_primaries` |
+| `mediaWhitePointTag` equals the D50 lcms2 writes itself | every `BuiltinProfile` and the grey constructor | `oracle_media_white_point_matches_lcms` |
+| All three TRCs evaluate to the transfer's own curve (two `uInt16` quanta) | `from_cicp` for **every** encodable transfer — 1, 6, 8, 13, 14, 15, 16 — against H.273 Table 3, the identity, lcms2's own sRGB and `gamut-color`'s `pq_eotf` | `oracle_every_encodable_transfer_matches_its_curve_through_lcms` |
+| The `cicpType` tag equals the one lcms2's own `cicp` synthesiser writes | every buildable (primaries, transfer) pair, built from an `nclx`-style matrix 9 | `oracle_cicp_tag_matches_the_lcms_synthesiser` |
+| The grey gamma lcms2 estimates is the one asked for | `gray_with_gamma` at 1.0, 1.8, 2.2 | `oracle_gray_gamma_matches_lcms` |
+| A transform through our sRGB into lcms2's own sRGB is the identity to one 8-bit code | sRGB | `oracle_transform_through_our_srgb_is_the_identity` |
+
+Not checked by lcms2: the `chad` tag's contents (it is read only through the colorants it
+produced), and any `from_cicp` profile's end-to-end transform other than sRGB's.
 
 ## Deferred / intentional leniencies
 
