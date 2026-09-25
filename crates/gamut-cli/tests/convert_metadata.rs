@@ -32,9 +32,15 @@ fn png_with_metadata() -> Vec<u8> {
 }
 
 /// Writes `png` to a temp file, converts it to PNG with `extra` flags, and returns the output's
-/// metadata together with what the command said on stderr. Both temp files are removed before
-/// the assertion runs.
+/// metadata together with what the command said on stderr.
 fn convert(name: &str, png: &[u8], extra: &[&str]) -> (PngMetadata, String) {
+    let (encoded, stderr) = convert_bytes(name, png, extra);
+    (gamut::png::metadata(&encoded).expect("read back"), stderr)
+}
+
+/// [`convert`], returning the output file itself rather than its metadata. Both temp files are
+/// removed before the assertion runs.
+fn convert_bytes(name: &str, png: &[u8], extra: &[&str]) -> (Vec<u8>, String) {
     let dir = std::env::temp_dir();
     let input = dir.join(format!(
         "gamut-convert-{}-{name}-in.png",
@@ -63,7 +69,7 @@ fn convert(name: &str, png: &[u8], extra: &[&str]) -> (PngMetadata, String) {
         String::from_utf8_lossy(&status.stderr)
     );
     (
-        gamut::png::metadata(&encoded.expect("output written")).expect("read back"),
+        encoded.expect("output written"),
         String::from_utf8_lossy(&status.stderr).into_owned(),
     )
 }
@@ -109,4 +115,63 @@ fn a_payload_that_cannot_be_carried_is_reported_on_stderr() {
         stderr.contains("C2PA manifest store"),
         "stderr said nothing about the store: {stderr}"
     );
+}
+
+/// The other half of the report: a payload that *was* written, but not as §11.3.3 would have it,
+/// is worded as carried rather than as lost. A trailing space in a keyword is one §11.3.3.1 does
+/// not permit and this crate's reader accepts, so the annotation goes through verbatim.
+#[test]
+fn a_payload_carried_with_a_caveat_is_reported_as_carried() {
+    let rgba = vec![255u8; 4 * 4];
+    let image = ImageRef::<Rgba8>::new(&rgba, Dimensions::new(2, 2).unwrap()).unwrap();
+    let png = PngEncoder::new()
+        .with_text("Author ", "nobody")
+        .encode_to_vec(image)
+        .unwrap();
+
+    let (meta, stderr) = convert("caveat", &png, &[]);
+
+    let keywords: Vec<&str> = meta.texts.iter().map(|t| t.keyword.as_str()).collect();
+    assert_eq!(
+        keywords,
+        ["Author "],
+        "the annotation is written as it arrived"
+    );
+    assert!(
+        stderr.contains("input metadata carried with a caveat")
+            && stderr.contains("leading, trailing or consecutive space"),
+        "stderr did not report the carried annotation: {stderr}"
+    );
+    assert!(
+        !stderr.contains("not carried"),
+        "a written annotation was reported as lost: {stderr}"
+    );
+}
+
+/// §11.3.2.3 pins an RGB profile to colour types 2, 3 and 6. `gamut convert` auto-reduces, and
+/// the default path carries the input's profile, so grey content in an RGB file used to come out
+/// as greyscale under the RGB profile it was converted with — a pairing libpng rejects, ignoring
+/// the profile. The reduction now stays in the profile's family.
+#[test]
+fn grey_content_under_an_rgb_profile_is_not_reduced_to_greyscale() {
+    let rgba: Vec<u8> = (0..64u8)
+        .flat_map(|i| [i * 3; 3].into_iter().chain([255]))
+        .collect();
+    let image = ImageRef::<Rgba8>::new(&rgba, Dimensions::new(8, 8).unwrap()).unwrap();
+    let mut icc = vec![0u8; 128];
+    icc[16..20].copy_from_slice(b"RGB ");
+    let png = PngEncoder::new()
+        .with_icc_profile("rgb", &icc)
+        .encode_to_vec(image)
+        .unwrap();
+
+    let (out, _) = convert_bytes("rgb-profile", &png, &[]);
+
+    let color_type = out[25];
+    assert!(
+        matches!(color_type, 2 | 3 | 6),
+        "colour type {color_type} under an RGB profile"
+    );
+    let meta = gamut::png::metadata(&out).expect("read back");
+    assert_eq!(meta.icc_profile.map(|p| p.profile), Some(icc));
 }
