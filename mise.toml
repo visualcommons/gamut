@@ -223,6 +223,14 @@ run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml
 # crate's own resolved-graph assertion would be reading a resolution cargo had produced moments
 # earlier. With it, a lockfile that is missing or out of date fails the task instead of being
 # regenerated.
+#
+# That lockfile also records the 15 `gamut-*` crates this one reaches by path (it is workspace-
+# `exclude`d, so the root lockfile does not stand in for it). A release-plz version bump or a
+# dependency change in any of them therefore fails both tasks with "cannot update the lock file …
+# --locked was passed" even though nothing here changed. Refresh with
+# `cargo update --workspace --manifest-path tooling/c2pa-oracle/Cargo.toml` (path entries only; the
+# registry graph under `c2pa` stays put) and commit it — `tooling/c2pa-oracle/README.md`,
+# "Refreshing the lockfile after a gamut crate changes".
 [tasks.test-c2pa]
 description = "Cross-check gamut's C2PA carriage against c2pa-rs, both directions (issue #447)"
 run = "cargo test --locked --manifest-path tooling/c2pa-oracle/Cargo.toml"

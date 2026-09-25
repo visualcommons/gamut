@@ -231,8 +231,11 @@ The version has to be carried through the walk: 21 package names occur at more t
 here (`syn` and `getrandom` at three), so a name-keyed walk counts names rather than packages and
 lands on 285. The whole file holds 326 entries
 (`grep -c '^name = ' tooling/c2pa-oracle/Cargo.lock`) — those 307, `c2pa` itself, this crate, and 17
-reachable only through its four `gamut-*` dev-dependencies, which the root workspace lockfile
-resolves. Fewer are ever compiled: 240 with default features off
+reachable only through its four `gamut-*` dev-dependencies. Those 17 are resolved **here**, not by
+the root workspace lockfile: this crate is `exclude`d from the workspace, so its lockfile records
+every package it reaches, and 15 of the 17 are the `gamut-*` crates it reaches by `path` (see
+[Refreshing the lockfile](#refreshing-the-lockfile-after-a-gamut-crate-changes) for what that
+costs). Fewer are ever compiled: 240 with default features off
 (`cargo tree --manifest-path tooling/c2pa-oracle/Cargo.toml --locked -e normal -p c2pa
 --prefix none | sed 's/ (\*)$//' | sort -u | wc -l`, `c2pa` included), because a lockfile pins
 optional dependencies this build never turns on. That smaller figure is not the one the argument
@@ -243,6 +246,31 @@ Committing it is only half. Cargo regenerates a missing or stale lockfile withou
 the resolution that was used, or the task fails. That is *not* the same claim as "nothing else in
 the tree depends on `c2pa`" — true, but it bears on the feature line, saying no other dependent can
 unify `openssl` back on, and says nothing about which versions those 307 packages resolve to.
+
+### Refreshing the lockfile after a gamut crate changes
+
+`--locked` holds the path-reached `gamut-*` entries exactly as it holds the 307: the lockfile
+records each one's version and its dependency list. So a change that touches none of this crate's
+files still fails both tasks with `cannot update the lock file … because --locked was passed` when
+it moves any of those 15 crates' lock entries — a release-plz version bump (`gamut-core` 2.0.1 →
+2.0.2 is enough), or a dependency added to or removed from one of them. That failure says the
+lockfile is stale, not that the oracle found anything. Refresh it, and commit the result with the
+change that caused it:
+
+```bash
+cargo update --workspace --manifest-path tooling/c2pa-oracle/Cargo.toml
+```
+
+`--workspace` rewrites only the local path crates' entries and adds a package only when one of them
+needs one the file does not yet hold; it leaves every locked registry version, and so the 307 under
+`c2pa`, where it was. Check that with `git diff tooling/c2pa-oracle/Cargo.lock` before committing:
+for a version bump the diff is that one `version =` line. A bare `cargo update` or
+`cargo generate-lockfile` re-resolves the whole graph instead, which is exactly what the committed
+file exists to prevent.
+
+Nothing refreshes it automatically — no release workflow touches this crate — and until #541 wires
+the two tasks into CI nothing notices a stale one either, so the first person to run `test-c2pa`
+after a release is the one who meets this.
 
 ## The signing identity
 
