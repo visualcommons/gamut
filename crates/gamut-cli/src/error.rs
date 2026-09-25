@@ -52,6 +52,19 @@ pub(crate) enum CliError {
     #[error("{0}")]
     NotFullyAccounted(String),
 
+    /// `gamut inspect` sniffed an ISOBMFF file that is not the HEVC still image its HEIC arm
+    /// reports on — an AVIF, say, which may carry the generic `mif1` brand as its major brand.
+    /// Nothing is printed to stdout for it: this arm has no slice for that container.
+    #[error(
+        "{path}: unsupported container brand '{brand}' — gamut inspect reads HEVC still images (HEIF/HEIC) here"
+    )]
+    UnsupportedContainer {
+        /// The input file.
+        path: PathBuf,
+        /// The file's `ftyp` major brand, with non-printable bytes escaped.
+        brand: String,
+    },
+
     /// A command argument was malformed in a way clap could not catch.
     #[error("invalid argument: {0}")]
     Usage(String),
