@@ -196,6 +196,13 @@ encoder cannot know. gamut-png's own reader surfaces `cICP`, `iCCP`, `sRGB`, `cH
 by side and ranks none of them; resolving a profile against an intent is `gamut-cmm`'s work
 (epic #323), and this encoder deliberately does not pre-empt it.
 
+**The profile name goes back as the bytes it came out as.** §11.3.2.3 gives it the keyword's
+printable Latin-1 repertoire and the reader decodes it one byte per character, so the writer
+encodes it as Latin-1 too. Written as UTF-8, every name byte ≥ 0x80 became two: the name came
+back garbled, and a 79-byte name holding one grew past the 79 bytes the reader accepts, losing
+the profile itself on read-back. Validating a name a caller supplies by hand — empty, over-long,
+null-bearing or outside Latin-1 — is [#619](https://github.com/visualcommons/gamut/issues/619).
+
 **Only a null in a keyword refuses the encode. Everything else §11.3.3 asks for is a notice.**
 §15 gives the BCP 14 keywords force "when, and only when, they appear in all capitals", and every
 statement §11.3.3.1 makes about a keyword's shape is lowercase — "Keywords shall contain only
