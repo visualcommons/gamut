@@ -386,6 +386,9 @@ impl PngEncoder {
     /// into a rewritten file is invalid by construction, and `caBX` is *unsafe to copy* for the
     /// same reason. Set only a store computed for the output this encoder is about to write.
     ///
+    /// A chunk's payload is limited to 2^31 − 1 bytes (PNG §5.3); an encode with a longer `store`
+    /// fails with [`Error::InvalidInput`] rather than writing a chunk no reader accepts.
+    ///
     /// The last of `with_c2pa` / `with_c2pa_reserved` wins; a file carries exactly one store.
     #[must_use]
     pub fn with_c2pa(mut self, store: &[u8]) -> Self {
@@ -413,7 +416,9 @@ impl PngEncoder {
     /// is why the in-place fill is the documented step 3.
     ///
     /// The reservation is `len` bytes exactly — no slack is added — so ask for what the signer
-    /// says it needs (`c2pa-rs` reports a `reserve_size`).
+    /// says it needs (`c2pa-rs` reports a `reserve_size`). It is bounded like any chunk payload
+    /// by PNG §5.3 to 2^31 − 1 bytes: an encode with a larger `len` fails with
+    /// [`Error::InvalidInput`] rather than writing a chunk no reader accepts.
     ///
     /// The offsets hold for the file as this encoder wrote it. A PNG editor may lawfully insert
     /// another ancillary chunk after the store (PNG §14.3.2), so reserve, hash and fill without
@@ -440,7 +445,9 @@ impl PngEncoder {
     ///
     /// # Errors
     ///
-    /// As [`EncodeImage::encode_image`].
+    /// As [`EncodeImage::encode_image`], which includes rejecting a C2PA store longer than the
+    /// 2^31 − 1 bytes a chunk can carry (PNG §5.3) — so a store that was set always yields
+    /// `Some` span on success.
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
@@ -682,6 +689,12 @@ impl PngEncoder {
         let bits_per_pixel = color.channels() * bit_depth as usize;
         let bpp = bits_per_pixel.div_ceil(8).max(1);
         let row_bytes = (width as usize * bits_per_pixel).div_ceil(8);
+        // Reject a C2PA store the §5.3 length field cannot carry before any byte is written,
+        // rather than emit a caBX no reader accepts (and a report of `c2pa: None` for a file that
+        // was told to carry one).
+        if let Some(store) = &self.ancillary.c2pa {
+            chunk::check_data_len(store.len())?;
+        }
 
         let start = out.len();
         out.extend_from_slice(&SIGNATURE);

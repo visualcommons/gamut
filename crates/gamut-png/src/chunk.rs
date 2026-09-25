@@ -24,6 +24,28 @@ pub(crate) const SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A,
 /// spelled in exactly one place and its *bits* are asserted, not only its letters.
 pub(crate) const CABX: [u8; 4] = *b"caBX";
 
+/// The largest chunk payload PNG §5.3 allows: the length field is "limited to 2^31 − 1 bytes".
+pub(crate) const MAX_DATA_LEN: usize = (1 << 31) - 1;
+
+/// Rejects a payload of `len` bytes that the §5.3 length field cannot carry.
+///
+/// [`write_chunk`] casts the length to `u32`, so a payload past [`MAX_DATA_LEN`] would otherwise be
+/// written with a length field every reader refuses (or, past `u32::MAX`, one that is silently
+/// truncated). Callers whose payload size the caller of the encoder chooses check here first.
+///
+/// # Errors
+///
+/// [`Error::InvalidInput`] if `len` exceeds [`MAX_DATA_LEN`].
+pub(crate) fn check_data_len(len: usize) -> Result<()> {
+    if len > MAX_DATA_LEN {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: chunk payload exceeds 2^31 - 1 bytes",
+        ));
+    }
+    Ok(())
+}
+
 /// Appends a complete chunk (`length`, `type`, `data`, `CRC`) to `out`.
 pub(crate) fn write_chunk(out: &mut Vec<u8>, chunk_type: [u8; 4], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
@@ -331,6 +353,15 @@ mod tests {
             out,
             vec![0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82]
         );
+    }
+
+    #[test]
+    fn check_data_len_admits_exactly_the_section_5_3_range() {
+        // §5.3: the length field is "limited to 2^31 - 1 bytes". Pinned as a literal because the
+        // constant sits inside the comparison, where the mutation gate cannot reach it.
+        assert_eq!(MAX_DATA_LEN, 0x7FFF_FFFF);
+        assert!(check_data_len(MAX_DATA_LEN).is_ok());
+        assert!(check_data_len(MAX_DATA_LEN + 1).is_err());
     }
 
     #[test]
