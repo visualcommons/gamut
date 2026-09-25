@@ -151,7 +151,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Meta-level accounting: `meta`/`iprp` children not consumed by the model surfaced as `UnknownBox` (e.g. `dinf`/`dref`, `uuid`) | 14496-12 | ✅ | S1 |
 | C2PA manifest store located in a top-level `uuid` `ContentProvenanceBox`: opaque bytes + exact byte range, purposes `manifest`/`original`/`update` (`c2pa`, `c2pa_manifest_stores`) | C2PA 2.4 §A.5.1, §A.5.3, §8.4.2.3 (`references/c2pa` pending, #431) | ✅ | S7 |
 | Store bounding is `LBox`-only and content-dependent (`LBox` validity alone cannot separate a store bound from a plausible interior length). Two routes close it: assert the `jumb` `TBox` — traceable to §A.3.9/§15.12.3.2 but only as a JPEG XL aside, so it is a maintainer call because it narrows what is reported — or confirm the store by §11.1.4.2's JUMBF type UUID, which needs 19566-5's Description Box layout. A `c2pa-rs` oracle fixture would settle either empirically | C2PA 2.4 §A.3.9, §11.1.4.2, §A.5.3; ISO/IEC 19566-5 (not vendored) | ☐ | #239 oracle |
-| C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` | C2PA 2.4 §A.5 | ☐ | later |
+| C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` (the store lives in a top-level `uuid` box outside the item model `HeifImage::blocks` reads; a caller appends `MetadataBlock::C2pa(HeifContainer::c2pa().bytes)` itself) | C2PA 2.4 §A.5 | ☐ | later |
 | C2PA validation: JUMBF interior parse, `c2pa.hash.bmff.v3` hard binding, signature/trust verification | C2PA 2.4 §18.6, §A.5.6 | ☐ | user / #239 |
 | `ftyp` brands + `is_hevc_still` (`heic`/`heix`/`heim`/`heis`, or `mif1`+`hvcC` primary) | 23008-12; `references/heif` §7 | ✅ | S1 |
 | Sequence brands `msf1`/`hevc`/`hevx` (image sequences) | `references/heif` §7 | OOS | OOS |
@@ -175,7 +175,8 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Derived-image sources (`dimg`), `grid` payload + tile-count validation, `iovl` payload | 23008-12 §6.6.2; `references/heif` §4 | ✅ | S1 |
 | `iden` identity derived item recognised (kind); source via `dimg` | 23008-12 §6.6.2.1 | ✅ | S1 |
 | Entity groups + `altr` alternatives lens | 14496-12; MIAF | ✅ | S1 |
-| Decoded Exif/XMP bytes → `gamut-exif`/`gamut-xmp` (payload exposed opaque here) | 23008-12 §A | ☐ | later |
+| Exif `ExifDataBlock` lens: `HeifItem::exif_tiff_stream` applies the 4-byte `exif_tiff_header_offset` and yields the TIFF stream (`II`/`MM`); `HeifItem::icc_profile` yields the `rICC`/`prof` bytes regardless of `nclx` order | 23008-12 §A.2.1; `references/heif` §9 | ✅ | #420 |
+| Decoded Exif/XMP/ICC bytes → the `gamut-metadata` facade: `HeifImage::blocks` (`MetadataBlock`s) and `HeifImage::metadata` (`Metadata`), behind the opt-in `metadata` feature (a normal, optional dependency). Pinned by typed extraction from an authored fixture at offsets 0 and 6. **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no HEIF reader), so "exiv2 reads the items out of the HEIC" is untested; the item bytes are pinned byte-exact against libheif (`tests/conformance.rs`) and the leaf crates pin the payloads against exiv2 (#510) | 23008-12 §A; issue #420 | ✅ | #420 |
 | Protected / `uri ` items; external data references | 23008-12 | OOS | OOS |
 
 ## C. HEVC configuration & NAL layer (14496-15 · H.265)

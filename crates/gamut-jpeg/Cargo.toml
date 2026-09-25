@@ -24,6 +24,17 @@ gamut-codec-abi.workspace = true
 gamut-color.workspace = true
 # The §A.3.3 forward DCT kernel and the §A.3.4 round-to-nearest quantizer divide.
 gamut-dsp.workspace = true
+# Typed metadata (issue #420): the unified `Metadata` model over the raw APP1/APP2 payloads this
+# crate locates and writes. Optional and off by default — a plain JPEG consumer pays for none of
+# the four metadata crates — and a *normal* dependency (never dev-only), so release ordering
+# follows it (`mise run check-release-deps`).
+gamut-metadata = { workspace = true, optional = true }
+
+[features]
+default = []
+# Typed metadata wiring: `JpegMetadata::blocks` / `JpegMetadata::metadata` and
+# `JpegEncoder::with_metadata` / `with_encoded_metadata` over the `gamut-metadata` facade.
+metadata = ["dep:gamut-metadata"]
 
 [dev-dependencies]
 # Differential cross-check oracle: a vendored, statically-linked libjpeg-turbo 3.2.0 (built from the

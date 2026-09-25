@@ -156,6 +156,22 @@
 //! # Ok::<(), gamut_metadata::MetadataError>(())
 //! ```
 //!
+//! # Which formats carry what
+//!
+//! The facade never parses a container, so it cannot say whether a *file* has metadata — but it can
+//! say whether gamut's crate for a format can locate or write a given carrier at all, before a
+//! caller pulls that crate in. [`capability::supports`] answers per (format × carrier × direction),
+//! and [`capability::typed_wiring`] says whether the format crate also exposes these typed models
+//! directly (behind its `metadata` feature) rather than as raw bytes:
+//!
+//! ```
+//! use gamut_metadata::capability::{Carrier, Direction, Format, supports, typed_wiring};
+//!
+//! assert!(supports(Format::Jpeg, Carrier::Exif, Direction::Write));
+//! assert!(!supports(Format::Heic, Carrier::Exif, Direction::Write)); // decode-only crate
+//! assert!(typed_wiring(Format::Jpeg));
+//! ```
+//!
 //! # Quick start
 //!
 //! ```
@@ -178,6 +194,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod capability;
 pub mod embed;
 pub mod error;
 pub mod extension;

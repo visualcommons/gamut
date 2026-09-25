@@ -77,11 +77,22 @@
 //! [`HevcDecoder`] seam — over gamut-authored fixtures generated at test time
 //! (`tests/conformance.rs`, the dev-only `tooling/libheif-oracle`; see `references/heif` "Oracle").
 //!
+//! # Metadata
+//!
+//! [`HeifImage::exif`] / [`HeifImage::xmp`] locate the Exif and XMP items describing the primary
+//! image, [`HeifItem::exif_tiff_stream`] applies the Exif item's `exif_tiff_header_offset` to
+//! yield the TIFF stream `gamut-exif` parses, and [`HeifItem::icc_profile`] yields the `colr` ICC
+//! bytes `gamut-icc` parses. With the optional **`metadata`** Cargo feature (off by default) the
+//! same payloads are wired to the `gamut-metadata` facade's typed models: [`HeifImage::blocks`]
+//! hands them over as `MetadataBlock`s and [`HeifImage::metadata`] parses them into a unified
+//! `Metadata`. A C2PA manifest store lives outside the item model, in a top-level `uuid` box;
+//! [`HeifContainer::c2pa`] locates it. The dependency direction stays
+//! `gamut-heic → gamut-metadata`.
+//!
 //! # Deferred to later slices
 //!
-//! Wiring the decoded Exif/XMP bytes through `gamut-exif`/`gamut-xmp`. Image *sequences*
-//! (`msf1`/`hevc`/`hevx` tracks) are permanently out of scope (gamut is image-first). See this
-//! crate's `STATUS.md`.
+//! Image *sequences* (`msf1`/`hevc`/`hevx` tracks) are permanently out of scope (gamut is
+//! image-first). See this crate's `STATUS.md`.
 //!
 //! # Example
 //!
@@ -160,6 +171,10 @@ pub use backend::{
 pub use c2pa::{C2PA_UUID, C2paBoxPurpose, C2paManifestStore};
 pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{DecodedFrame, HevcDecoder};
+// The facade types named in the `metadata`-feature signatures, so a caller can spell
+// `HeifImage::metadata` / `HeifImage::blocks` without a direct dependency.
+#[cfg(feature = "metadata")]
+pub use gamut_metadata::{Metadata, MetadataBlock};
 pub use hvcc::{ChromaFormat, HevcConfig, NalArray};
 pub use image::{
     CleanAperture, ContentLightLevel, HeifImage, HeifItem, ItemKind, PixelAspectRatio,

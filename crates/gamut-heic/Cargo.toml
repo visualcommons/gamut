@@ -20,6 +20,16 @@ gamut-codec-abi.workspace = true
 gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-isobmff.workspace = true
+# Typed metadata (issue #420): the unified `Metadata` model over the Exif / XMP items and `colr`
+# ICC profile this crate locates. Optional and off by default, and a *normal* dependency (never
+# dev-only) so release ordering follows it (`mise run check-release-deps`).
+gamut-metadata = { workspace = true, optional = true }
+
+[features]
+default = []
+# Typed metadata wiring: `HeifImage::blocks` / `HeifImage::metadata` over the `gamut-metadata`
+# facade (decode-only, like the crate).
+metadata = ["dep:gamut-metadata"]
 
 [dev-dependencies]
 # libheif (+ libde265 decode, kvazaar encode) as the differential-conformance oracle: FFI to a
