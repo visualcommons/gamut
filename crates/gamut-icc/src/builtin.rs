@@ -71,8 +71,8 @@
 //! # What a CICP triple contributes, and what it does not
 //!
 //! [`IccProfile::from_cicp`] takes all four H.273 fields but builds from two of them. Of the other
-//! two, one is rewritten and one is a precondition. They do **not** rest on the same authority, and
-//! are documented apart on purpose.
+//! two, one is always rewritten and one is a precondition on the RGB samples. They do **not** rest
+//! on the same authority, and are documented apart on purpose.
 //!
 //! `MatrixCoefficients` is **conformance**, and is rewritten. ICC.1:2022 §10.3 states that *"when
 //! the data colour space in the profile header is RGB or XYZ, MatrixCoefficients shall be 0
@@ -81,29 +81,36 @@
 //! non-conforming. Nothing is lost by that. The coefficients describe a luma–chroma *encoding* the
 //! caller de-matrixes before the profile applies, and they remain in the container's own
 //! signalling where a decoder reads them. The sample *range* that accompanies such an encoding is
-//! not theirs to describe — that is the next field, and it is guarded, not rewritten.
+//! the next field, and whether it is theirs depends on which coefficients they are.
 //!
-//! `VideoFullRangeFlag` is **not** conformance, and is **not** rewritten either: a triple carrying
-//! anything but full range (`1`) is **declined**. §10.3 says only that the flag "is often 1" for an
-//! RGB profile, and its own RGB examples include `1-1-0-0` and `9-16-0-0` with the flag at zero, so
-//! a narrow-range RGB `cicpType` is a legal tag — it is simply not one this module can build.
-//! Everything the profile contains — the colorant matrix, the `chad` and the tone curves — is
-//! defined over full-scale RGB, and read §10.3's `1-1-0-0` example closely: with
-//! `MatrixCoefficients` already zero it is a narrow range on the **RGB samples themselves**, so
-//! de-matrixing does not remove it. Normalising the flag to `1` would hand back a profile that
-//! renders the caller's colour *wrongly*, not one that merely dropped a piece of metadata.
-//! Declining is what this module already does for primaries it has no chromaticities for and for a
-//! transfer with no ICC tone curve, and narrow range is the same case: signalling this profile
-//! shape cannot describe. A caller holding narrow-range samples scales them to full range first,
-//! and then the triple it passes is one this module builds.
+//! `VideoFullRangeFlag` is **not** conformance. What it scales is fixed by the coefficients beside
+//! it — H.273 §8.3 applies it to **R, G and B** when `MatrixCoefficients` is 0, 8, 16 or 17
+//! (equations 27 to 29, and 33 to 35), and to **Y, Cb and Cr** when it is 1, 4, 5, 6, 7 or 9 to
+//! 15 (equations 30 to 32, and 36 to 38) — so the flag is read as a statement about the RGB
+//! samples the profile will see, and the triple is kept only if they are full range:
 //!
-//! Nor is carrying the flag through unchanged — the option that looks most conservative, since it
-//! discards nothing — merely inconsistent. §9.2.17 makes it **non-conforming**: the colour
+//! * **Full range (`1`)** under any coefficients: the RGB is full scale, and the flag is kept.
+//! * **Narrow range (`0`) under luma–chroma coefficients** — `9-16-9-0`, `1-13-6-0`, what an AVIF
+//!   or HEIC `nclx` box most often carries. The narrow range is on Y, Cb and Cr, and E′R, E′G and
+//!   E′B come out of de-matrixing in the range 0 to 1: the RGB this profile applies to *is* full
+//!   scale. So the profile is built, and its tag carries `1` — the range of the RGB it describes,
+//!   exactly as `MatrixCoefficients` is written as the `0` of the RGB it describes.
+//! * **Narrow range under RGB coefficients** (0, 8, 16, 17) — §10.3's own `1-1-0-0` and `9-16-0-0`
+//!   examples. The narrow range is on the **RGB samples themselves**, de-matrixing does not remove
+//!   it, and every colorant, `chad` and tone curve here is defined over full-scale RGB. Declined:
+//!   normalising the flag would hand back a profile that renders the caller's colour *wrongly*.
+//!   A narrow-range RGB `cicpType` is a legal tag — it is simply not one this module can build,
+//!   the same case as primaries with no chromaticities or a transfer with no ICC tone curve. A
+//!   caller holding such samples scales them to full range and passes `1`.
+//! * **Anything else** — any other flag byte, or narrow range under coefficients H.273 leaves
+//!   unknown (2) or reserved — says nothing this module can rely on about the RGB, and is
+//!   declined.
+//!
+//! Carrying the caller's `0` through unchanged — the option that looks most conservative, since it
+//! discards nothing — is not merely inconsistent. §9.2.17 makes it **non-conforming**: the colour
 //! encoding a `cicpType` tag specifies *"shall be equivalent to the data colour space encoding
-//! represented by this ICC profile"*, and a narrow-range triple sitting beside full-scale
-//! colorants and tone curves is not equivalent to what the profile represents. There is no
-//! reading of the tag under which all three of "keep the flag", "keep the colorimetry" and
-//! "conform" hold together.
+//! represented by this ICC profile"*, and with `MatrixCoefficients` at `0` a flag of `0` reads as
+//! narrow-range RGB, which is not what full-scale colorants and tone curves represent.
 //!
 //! # Which reading of transfer 1, 6, 14 and 15
 //!
@@ -299,34 +306,53 @@ impl BuiltinProfile {
 /// The one `VideoFullRangeFlag` a profile built here can describe (ITU-T H.273 signals full range
 /// as `1`).
 ///
-/// Stated once and read from both ends of the module: it is what [`cicp_of`] writes and what
-/// [`IccProfile::from_cicp`] requires of the caller, so the tag and the precondition cannot drift.
-/// Every colorant, `chad` and tone curve written here is defined over full-scale RGB; see the
-/// module docs for why narrow range is declined rather than normalised.
+/// Stated once and read from both ends of the module: it is what [`rgb_conforming_cicp`] writes
+/// and what [`rgb_is_full_range`] accepts, so the tag and the precondition cannot drift. Every
+/// colorant, `chad` and tone curve written here is defined over full-scale RGB; see the module
+/// docs for which narrow-range signalling that still admits.
 const FULL_RANGE: u8 = 1;
+
+/// ITU-T H.273 (07/2024) §8.3: the `MatrixCoefficients` code points for which
+/// `VideoFullRangeFlag` scales Y, Cb and Cr (equations 30 to 32) rather than R, G and B — so a
+/// narrow range under them leaves de-matrixed RGB full scale. Transcribed from the clause's own
+/// list; every other code point is an RGB-range one (0, 8, 16, 17), unknown (2) or reserved.
+const LUMA_CHROMA_MATRICES: [u8; 12] = [1, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15];
+
+/// Whether the RGB samples a profile built from `cicp` applies to are full range — full range
+/// signalled outright, or narrow range on luma–chroma signals the caller de-matrixes first.
+fn rgb_is_full_range(cicp: Cicp) -> bool {
+    match cicp.video_full_range_flag {
+        FULL_RANGE => true,
+        0 => LUMA_CHROMA_MATRICES.contains(&cicp.matrix_coefficients),
+        _ => false,
+    }
+}
 
 /// The `cicpType` value for a pair of CICP axes.
 fn cicp_of(primaries: ColourPrimaries, transfer: TransferCharacteristics) -> Cicp {
     rgb_conforming_cicp(Cicp {
         colour_primaries: cicp_byte(primaries.code_point()),
         transfer_characteristics: cicp_byte(transfer.code_point()),
-        // Set by `rgb_conforming_cicp`, which owns the §10.3 rule for every constructor.
+        // Both set by `rgb_conforming_cicp`, which owns the §10.3 and range rules for every
+        // constructor.
         matrix_coefficients: 0,
         video_full_range_flag: FULL_RANGE,
     })
 }
 
-/// `cicp` with `MatrixCoefficients` replaced by the zero ICC.1:2022 §10.3 **requires** of an RGB or
-/// XYZ profile.
+/// `cicp` as it describes the RGB the profile applies to: `MatrixCoefficients` replaced by the
+/// zero ICC.1:2022 §10.3 **requires** of an RGB or XYZ profile, and `VideoFullRangeFlag` by
+/// [`FULL_RANGE`].
 ///
-/// That is the only field this module rewrites. `VideoFullRangeFlag` is not normalised here: a
-/// triple that does not already carry [`FULL_RANGE`] is declined by
-/// [`IccProfile::from_cicp`] instead, so nothing reaching this function can disagree with the
-/// colorants and curves written alongside it. The two axes the profile is built from pass through
-/// untouched.
+/// The flag is written, not passed through, because once the coefficients are `0` a flag of `0`
+/// would read as narrow-range *RGB* — which is not what a caller's narrow-range luma–chroma
+/// signalling decodes to. Only triples [`rgb_is_full_range`] admits reach here, so the value
+/// written is always the range of the samples the colorants and curves are defined over. The two
+/// axes the profile is built from pass through untouched.
 fn rgb_conforming_cicp(cicp: Cicp) -> Cicp {
     Cicp {
         matrix_coefficients: 0,
+        video_full_range_flag: FULL_RANGE,
         ..cicp
     }
 }
@@ -673,27 +699,28 @@ impl IccProfile {
     /// HEIC and JXL usually carry (a `colr`/`nclx` code-point trio) to an embeddable profile.
     ///
     /// Only the primaries and transfer code points shape the profile. The `cicpType` tag records
-    /// those two verbatim, replaces `MatrixCoefficients` with `0`, and passes
-    /// `VideoFullRangeFlag` through — because the only value it accepts is `1`.
+    /// those two verbatim and describes the RGB the profile applies to: `MatrixCoefficients` `0`
+    /// and `VideoFullRangeFlag` `1`.
     ///
     /// `MatrixCoefficients` is zero because ICC.1:2022 §10.3 states that when the data colour
     /// space is RGB or XYZ it *shall* be. No information is lost: the coefficients describe a
     /// luma–chroma encoding the caller de-matrixes before this profile applies, and they stay in
     /// the container signalling (`nclx`, AV1 sequence header) a decoder actually reads them from.
     ///
-    /// `VideoFullRangeFlag` is **not** rewritten. §10.3 does not require `1` — it only remarks
-    /// that the flag "is often 1" for RGB, and gives RGB examples with it at zero — but this
-    /// profile's colorants, `chad` and tone curves are all defined over full-scale RGB, and §10.3's
-    /// own `1-1-0-0` example is a narrow range on the **RGB samples themselves** (its
-    /// `MatrixCoefficients` is already zero), which no de-matrixing removes. Rewriting the flag
-    /// would therefore return a profile that renders the caller's colour wrongly, so a triple that
-    /// does not signal full range is declined instead. Scale narrow-range samples to full range and
-    /// pass `1`.
+    /// `VideoFullRangeFlag` is read against those coefficients, because ITU-T H.273 §8.3 applies
+    /// it to Y, Cb and Cr under luma–chroma coefficients (1, 4–7, 9–15) and to R, G and B under
+    /// the others. Narrow range on luma–chroma signals — `9-16-9-0`, `1-13-6-0` — de-matrixes to
+    /// full-scale RGB, so it is built, and the tag says `1`. Narrow range under RGB coefficients
+    /// (0, 8, 16, 17) — §10.3's own `1-1-0-0` example — is a narrow range on the **RGB samples
+    /// themselves**, which no de-matrixing removes and which this profile's full-scale colorants,
+    /// `chad` and tone curves cannot describe, so it is declined. Scale such samples to full range
+    /// and pass `1`.
     ///
     /// Returns `None` when the profile cannot describe the signalling: a primaries code point
     /// with no chromaticities, whether unmodelled or
     /// [`Unspecified`](ColourPrimaries::Unspecified); a transfer code point with no ICC tone
-    /// curve, such as HLG (18) or Unspecified (2); or any `VideoFullRangeFlag` other than `1`.
+    /// curve, such as HLG (18) or Unspecified (2); narrow range under coefficients that are not
+    /// luma–chroma ones; or a `VideoFullRangeFlag` other than `0` or `1`.
     ///
     /// # Examples
     ///
@@ -710,16 +737,21 @@ impl IccProfile {
     /// let matrixed = Cicp { matrix_coefficients: 6, ..signalled };
     /// assert_eq!(IccProfile::from_cicp(matrixed), IccProfile::from_cicp(signalled));
     ///
-    /// // Narrow range is a scaling of the RGB samples this profile shape does not perform.
-    /// let narrow = Cicp { video_full_range_flag: 0, ..signalled };
-    /// assert!(IccProfile::from_cicp(narrow).is_none());
+    /// // Narrow range on Y/Cb/Cr de-matrixes to full-scale RGB: the same profile …
+    /// let narrow_ycbcr = Cicp { video_full_range_flag: 0, ..matrixed };
+    /// assert_eq!(IccProfile::from_cicp(narrow_ycbcr), IccProfile::from_cicp(signalled));
+    ///
+    /// // … but narrow range on the RGB samples themselves is a scaling this profile does not
+    /// // perform.
+    /// let narrow_rgb = Cicp { video_full_range_flag: 0, ..signalled };
+    /// assert!(IccProfile::from_cicp(narrow_rgb).is_none());
     ///
     /// // "Unspecified" primaries name no chromaticities, so no profile can be built.
     /// assert!(IccProfile::from_cicp(Cicp { colour_primaries: 2, ..signalled }).is_none());
     /// ```
     #[must_use]
     pub fn from_cicp(cicp: Cicp) -> Option<Self> {
-        if cicp.video_full_range_flag != FULL_RANGE {
+        if !rgb_is_full_range(cicp) {
             return None;
         }
         let primaries = ColourPrimaries::from_code_point(u16::from(cicp.colour_primaries))?;
@@ -1084,12 +1116,13 @@ mod tests {
         }
     }
 
-    /// Full range is a precondition of `from_cicp`, not a field it normalises: every other
-    /// `VideoFullRangeFlag` byte is declined.
+    /// Under RGB coefficients, full range is a precondition of `from_cicp`, not a field it
+    /// normalises: every other `VideoFullRangeFlag` byte is declined. Under luma–chroma
+    /// coefficients every byte but `0` and `1` is declined too.
     ///
-    /// The complement is swept rather than sampled at `0`, because the guard is a comparison and
-    /// an ordering mutation of it (`<`, `>`) leaves one side of `1` still admitted. The control at
-    /// `1` builds from the same axes, so the axes cannot be what any rejection is about.
+    /// The complement is swept rather than sampled at `0`, so a guard that admitted any byte
+    /// beyond the two H.273 defines is seen. The control at `1` builds from the same axes, so the
+    /// axes cannot be what any rejection is about.
     #[test]
     fn a_cicp_triple_that_is_not_full_range_is_declined() {
         let full = Cicp {
@@ -1112,8 +1145,57 @@ mod tests {
                     ..full
                 }),
                 None,
-                "video_full_range_flag {flag}"
+                "RGB coefficients, video_full_range_flag {flag}"
             );
+            if flag != 0 {
+                assert_eq!(
+                    IccProfile::from_cicp(Cicp {
+                        matrix_coefficients: 9,
+                        video_full_range_flag: flag,
+                        ..full
+                    }),
+                    None,
+                    "luma–chroma coefficients, video_full_range_flag {flag}"
+                );
+            }
+        }
+    }
+
+    /// Narrow range is built exactly when H.273 §8.3 puts it on Y, Cb and Cr — equations 30 to
+    /// 32's list, 1, 4–7 and 9–15 — and then yields the full-range profile, whose `cicpType`
+    /// says `1`: de-matrixing a narrow-range luma–chroma signal gives full-scale RGB, and that is
+    /// what the profile describes. Every other coefficient is declined: 0, 8, 16 and 17 put the
+    /// narrow range on the RGB samples, 2 leaves it unknown, and the rest are reserved.
+    ///
+    /// The list is restated here rather than read back from [`LUMA_CHROMA_MATRICES`], and the
+    /// whole byte range is swept, so a coefficient wrongly admitted or wrongly left out fails
+    /// here — the or-pattern-like membership test has no mutant for either.
+    #[test]
+    fn narrow_range_builds_only_under_luma_chroma_coefficients() {
+        const EQUATIONS_30_TO_32: [u8; 12] = [1, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15];
+        let full = Cicp {
+            colour_primaries: 9,
+            transfer_characteristics: 16,
+            matrix_coefficients: 0,
+            video_full_range_flag: FULL_RANGE,
+        };
+        let want = IccProfile::from_cicp(full).expect("the full-range control builds");
+        for matrix in 0..=u8::MAX {
+            let got = IccProfile::from_cicp(Cicp {
+                matrix_coefficients: matrix,
+                video_full_range_flag: 0,
+                ..full
+            });
+            if EQUATIONS_30_TO_32.contains(&matrix) {
+                assert_eq!(got.as_ref(), Some(&want), "matrix {matrix}, narrow range");
+                assert_eq!(
+                    got.as_ref().and_then(|p| p.get(KnownTag::Cicp)),
+                    Some(&TagData::Cicp(full)),
+                    "matrix {matrix}: the tag describes the full-range RGB"
+                );
+            } else {
+                assert_eq!(got, None, "matrix {matrix}, narrow range");
+            }
         }
     }
 

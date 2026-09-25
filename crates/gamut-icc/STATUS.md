@@ -114,15 +114,15 @@ not: that bundle's transfer is ST 2084 **plus a Reinhard tone map to SDR**, whil
 of the signal domain the two curves diverge by up to **0.735** absolute — 52× at `V = 0.1`. All
 three figures in this paragraph are asserted at the precision written here by
 `source_profile_divergence_is_what_the_docs_quote`, beside the constructor they describe. This is
-the opposite call from narrow range above, and deliberately so: a sample range is a property of the
-*samples*, which a full-scale profile genuinely cannot describe, whereas a tone map is gamut-color's
+the opposite call from narrow-range RGB below, and deliberately so: a sample range is a property of
+the *samples*, which a full-scale profile genuinely cannot describe, whereas a tone map is gamut-color's
 choice about how to *render* an HDR transfer, and §9.2.17 requires the `cicpType` tag to be
 equivalent to the encoding the profile represents. A caller wanting the tone-mapped rendering
 applies it to its samples and embeds an SDR profile.
 
 **CICP fields the profile does not build from.** `from_cicp` builds from the primaries and transfer
-code points only, and treats the other two fields differently on purpose — one is rewritten, one is
-a precondition.
+code points only, and treats the other two fields differently on purpose — one is always
+rewritten, the other is a precondition on the RGB samples, read against the first.
 
 `MatrixCoefficients` is **rewritten to zero**. §10.3 states that "when the data colour space in the
 profile header is RGB or XYZ, MatrixCoefficients shall be 0 (zero)", so the caller's value —
@@ -131,17 +131,27 @@ writing it would make the profile non-conforming for the most common input there
 lost: the coefficients describe a luma–chroma encoding the caller de-matrixes *before* this profile
 applies, and they remain in the container signalling a decoder reads them from.
 
-`VideoFullRangeFlag` is **not** rewritten. A triple carrying anything but full range (`1`) is
-**declined**, and carrying it through unchanged instead would be non-conforming rather than merely
-inconsistent: §9.2.17 requires that "the colour encoding specified by the CICP tag content shall be
-equivalent to the data colour space encoding represented by this ICC profile", which a narrow-range
-triple beside full-scale colorants is not. §10.3's own RGB examples put the flag at zero (`1-1-0-0`, `9-16-0-0`), and read
-`1-1-0-0` closely: with `MatrixCoefficients` already zero it is a narrow range on the *RGB samples
-themselves*, which de-matrixing does not remove. This profile's colorants, `chad` and tone curves
-are all defined over full-scale RGB, so normalising the flag to `1` would return a profile that
-renders the caller's colour **wrongly**, not one that merely dropped metadata. Declining is what the
-crate already does for primaries it has no chromaticities for and for a transfer with no ICC tone
-curve. Callers holding narrow-range samples scale them to full range and pass `1`.
+`VideoFullRangeFlag` is **read against the matrix coefficients**, because ITU-T H.273 §8.3 applies
+it to Y, Cb and Cr under luma–chroma coefficients (1, 4–7, 9–15; equations 30 to 32) and to R, G
+and B under the others (0, 8, 16, 17; equations 27 to 29):
+
+| Signalled | What is narrow | Result |
+| --- | --- | --- |
+| flag `1`, any coefficients | nothing | built; tag flag `1` |
+| flag `0`, luma–chroma coefficients (`9-16-9-0`, `1-13-6-0`) | Y, Cb, Cr — de-matrixed RGB is full scale | built, the same profile as flag `1`; tag flag `1` |
+| flag `0`, RGB coefficients (§10.3's `1-1-0-0`, `9-16-0-0`) | the RGB samples themselves | **declined** |
+| flag `0` under coefficient 2 (unknown) or a reserved one; any flag byte but `0`/`1` | unknown | **declined** |
+
+The tag writes `1` for the admitted narrow-range case because it describes the RGB the profile
+applies to, the same reason it writes `MatrixCoefficients` `0`: once the coefficients are `0`, a
+flag of `0` would read as narrow-range *RGB*, and §9.2.17 requires that "the colour encoding
+specified by the CICP tag content shall be equivalent to the data colour space encoding represented
+by this ICC profile". The declined RGB case is the one no de-matrixing removes: this profile's
+colorants, `chad` and tone curves are all defined over full-scale RGB, so normalising the flag to
+`1` would return a profile that renders the caller's colour **wrongly**, not one that merely dropped
+metadata. Declining is what the crate already does for primaries it has no chromaticities for and
+for a transfer with no ICC tone curve. Callers holding narrow-range RGB samples scale them to full
+range and pass `1`.
 
 `gray_with_gamma` writes no `cicpType` tag at all: §9.2.17 permits the tag only for an RGB, YCbCr
 or XYZ data colour space and says it shall not be present otherwise, and a monochrome profile's
