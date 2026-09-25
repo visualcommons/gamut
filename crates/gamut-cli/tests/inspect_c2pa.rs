@@ -240,6 +240,37 @@ fn an_avif_whose_major_brand_is_mif1_is_not_reported_as_a_heic() {
 }
 
 #[test]
+fn an_isobmff_movie_is_refused_by_the_heic_parse_not_declined_by_brand() {
+    // The `ftyp` sniff routes every ISOBMFF file into the HEIC arm, and the brand confirmation runs
+    // only after `HeifContainer::parse` succeeds. A file with a top-level `moov` — an MP4, a CR3, a
+    // HEIF image sequence — is refused by that parse first (image sequences are out of scope), so it
+    // exits 1 with the parse error rather than the unsupported-brand message, and prints no report.
+    let mut ftyp_body = b"isom".to_vec();
+    ftyp_body.extend_from_slice(&0u32.to_be_bytes());
+    ftyp_body.extend_from_slice(b"isommp41");
+    let file = [
+        bx(b"ftyp", &ftyp_body),
+        bx(b"moov", &[0xAA; 16]),
+        bx(b"mdat", &[0; 8]),
+    ]
+    .concat();
+    let out = run_inspect("movie.mp4", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}; stderr: {stderr}");
+    assert!(
+        stderr.contains("image sequences"),
+        "the HEIC container parse must be what refuses the file: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unsupported container brand"),
+        "the brand confirmation is never reached for a file the parse refuses: {stderr}"
+    );
+    assert!(stdout.is_empty(), "no report may be printed: {stdout}");
+}
+
+#[test]
 fn forcing_the_heic_format_skips_the_confirmation_the_sniff_applies() {
     // `--format` overrides detection by definition, so it overrides the confirmation too: the same
     // AVIF the sniff declines is read as a HEIC when the caller asserts it is one.

@@ -35,7 +35,10 @@ The `ftyp` test is a **route, not a verdict**. It says the file is ISOBMFF, not 
 still image the HEIC arm reports on, so that arm parses the container and then *confirms* it with
 `gamut-heic`'s own `HeifImage::is_hevc_still` (`references/heif` §7) before printing anything; a
 file that fails the confirmation exits `1` with `<path>: unsupported container brand '<brand>' — …`
-and prints no report. No brand list lives in the command. One would have to be exhaustive over the
+and prints no report. The confirmation runs only once the parse has succeeded, so an ISOBMFF file
+`gamut-heic` refuses outright never reaches it: one with a top-level `moov` — an MP4, a CR3, a HEIF
+image sequence — exits `1` with the parse error (`error: …`), not the unsupported-brand message.
+No brand list lives in the command. One would have to be exhaustive over the
 still-image brands — `mif2`, `avci` and `avcs` beside `heic`/`heix`/`heim`/`heis`/`mif1` — and would
 still be wrong about `mif1`, which is the generic MIAF structural brand an AVIF may carry as its
 *major* brand, not merely among its compatible ones. `gamut-heic` settles that case on the primary
@@ -81,7 +84,7 @@ file:
 | no C2PA box is present | `0` | that none was found in the top-level boxes of the primary stream |
 | a top-level `uuid` box carries some other extended type | `0` | a count of them, beside whichever of the four rows above applies |
 | the container is not the HEVC still image this arm reads (e.g. an AVIF) | `1` | nothing; `unsupported container brand …` on stderr |
-| the container cannot be parsed | `1` | nothing; `error: …` on stderr |
+| the container cannot be parsed (including any file with a top-level `moov`) | `1` | nothing; `error: …` on stderr |
 
 **The exit code says whether the inspection succeeded, not what it found.** Presence never changes
 it, absence never changes it, and a box gamut could not read through never changes it either: all
