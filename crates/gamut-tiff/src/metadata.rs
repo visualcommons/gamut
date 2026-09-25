@@ -71,8 +71,9 @@ pub struct TiffMetadata {
     /// The Exif private sub-IFD (`ExifIFD`, 34665), as the shared directory model.
     ///
     /// **Entries are carried unchanged; ordering is normalised.** This crate adds no mandatory
-    /// Exif field — not even `ExifVersion` — and drops none, because a TIFF's `ExifIFD` is the
-    /// caller's directory and completing it would silently change what a round trip returns. What
+    /// Exif field — not even `ExifVersion` — and drops none of the directory's entries, because a
+    /// TIFF's `ExifIFD` is the caller's directory and completing it would silently change what a
+    /// round trip returns. What
     /// it does not promise is byte-identity, because [`gamut_ifd::Ifd`] is a directory model
     /// rather than a byte range, and three normalisations are inherent to it:
     ///
@@ -85,6 +86,14 @@ pub struct TiffMetadata {
     /// A conforming source directory is unaffected by all three. A non-conforming one is
     /// silently repaired, which is worth knowing before using a re-encode to prove a file
     /// unmodified.
+    ///
+    /// **One directory, and on read a loss this field cannot report.** The field holds a single
+    /// directory, and an `ExifIFD` entry names one (its `count` is 1). A source file whose
+    /// `ExifIFD` entry instead carries an **array** of offsets comes back as the **first**
+    /// directory only; the others are dropped without an error or a report. That is deferred
+    /// rather than decided (issue #599), and until it lands a re-encode of such a file loses
+    /// every Exif directory after the first — use
+    /// [`deconstruct`](crate::deconstruct) to see the whole array.
     ///
     /// The one shape the model can express and the file cannot is a tag holding **both** a field
     /// and a sub-IFD group: two entries under one tag, which TIFF 6.0 §2 does not allow. That is
