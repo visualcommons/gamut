@@ -17,7 +17,11 @@ workspace = true
 
 [features]
 default = []
-full = ["geocoordinates"]
+full = ["describe", "geocoordinates"]
+# Human-readable descriptions of the enumerated tag values (CIPA DC-008's own wording). Off by
+# default: several kilobytes of static strings that a consumer which only writes metadata, or only
+# round-trips it, never reads. Pure data — no dependency.
+describe = []
 geocoordinates = ["dep:geocoordinates"]
 
 [dependencies]
