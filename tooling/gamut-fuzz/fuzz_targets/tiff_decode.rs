@@ -58,9 +58,9 @@
 //! A defect that produces the wrong *volume* while leaving the dimensions alone does not arrive
 //! here as a report either: `RawImage::new` turns it into a typed error before a caller sees it, so
 //! the file is simply rejected. Measured — decoding `info.height + 1` rows produced **no** report,
-//! because the strip assembly runs out of bytes and the page is refused. The live class is the
-//! geometry-rewriting stage above, which is also the class the sibling `dng_decode` target checks,
-//! where linearisation and active-area handling are such stages today.
+//! because the strip assembly runs out of bytes and the page is refused. The sibling `dng_decode`
+//! target has no live check of this kind at all: its decoder records linearisation, active area
+//! and crop without applying them, so its sample count is a structure pin.
 //!
 //! The policy is [`ConvertPolicy::permissive`] so the decode reaches the pixel and conversion
 //! paths for pages the default lossless policy would refuse at the layout gate.

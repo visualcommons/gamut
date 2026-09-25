@@ -113,14 +113,16 @@ There is no law function to share, because the primary oracle is the engine's ow
 these crates is `#![forbid(unsafe_code)]` and promises a *typed error* on hostile input, so a
 panic, a hang, or an allocation past libFuzzer's limit is the defect.
 
-Each target adds at least one check the engine cannot make on its own, so that a defect producing
-no crash is still visible:
+Each target but `dng_decode` adds at least one check the engine cannot make on its own, so that a
+defect producing no crash is still visible. `dng_decode` has none that can fail — both of its
+assertions are structure pins (below) — and runs for the crash oracle alone, which is what found
+#564:
 
 | target | crate | entry points | check beyond the crash oracle |
 |---|---|---|---|
 | `ifd_read` | `gamut-ifd` | `read`, `read_tree`, `read_audited` | the dual-ledger audit is complete — no byte read outside a claim, **and** no claim unread |
 | `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | the geometry the decode hands back equals the geometry the tags declare, after every stage that could rewrite it |
-| `dng_decode` | `gamut-dng` | `DngDecoder::{decode,verify_new_raw_image_digest}` | the raw image that *arrives* holds exactly `width × height × planes` samples, after every rewriting stage |
+| `dng_decode` | `gamut-dng` | `DngDecoder::{decode,verify_new_raw_image_digest}` | none — the crash oracle alone; its two assertions are structure pins |
 | `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `read`, `BoxReader` | the segments tile `0..len` exactly — contiguous, **and** covering to end of file |
 | `heic_container` | `gamut-heic` | `HeifContainer::parse` | every accessor agrees with the segment list, **and** every borrowed slice lies inside `data()` |
 | `heic_hvcc` | `gamut-heic` | `HevcConfig::parse`, `annex_b*`, `validate_still_payload`, `iter_nal_units` | the Annex-B emitters append rather than replace — on the success path **and** on the error path |
@@ -140,8 +142,8 @@ directions: one direction is silent on a file that holds no instance of the thin
 #### The audit that rule produces
 
 The check set is derived from the table above rather than read off it: split each row's last cell
-on its own bold `and`, and every conjunct is one listed check owed one injection. Six rows yield
-**ten** listed checks, and seventeen injections stand behind them — more than one apiece wherever a
+on its own bold `and`, and every conjunct is one listed check owed one injection. The five rows
+that list a check yield **nine** listed checks, and sixteen injections stand behind them — more than one apiece wherever a
 check is an accessor-versus-count equality, which is injected in both directions, or where one
 check spans several bodies that each carry the contract on their own.
 
@@ -150,7 +152,6 @@ check spans several bodies that each carry the contract on their own.
 | no byte read outside a claim | `ifd_read` | 1 — header claimed as `header_size() - 1` |
 | no claim unread | `ifd_read` | 1 — header claimed as `header_size() + 1` |
 | the geometry that arrives equals the geometry the tags declare | `tiff_decode` | 1 — transpose the `DecodedImage` dimensions |
-| the raw image holds `width × height × planes` samples | `dng_decode` | 1 — push a sample past `check_sample_count` |
 | the segments are contiguous | `isobmff_boxes` | 1 — record a box as `b.offset + 8..end` |
 | the segments cover to end of file | `isobmff_boxes` | 1 — `segments.pop()` before the return |
 | every accessor agrees with the segment list | `heic_container` | 6 — `boxes`/`appended_stream`/`trailer`, each under- and over-reporting |
@@ -200,6 +201,12 @@ defect it advertised produced no report:
    values as `isobmff_boxes`'s — the same injection produced the *identical* message in both — on a
    narrower input set. Two ten-minute runners searching one function, at a measured-zero marginal
    yield.
+10. `dng_decode` claimed the raw image that *arrives* holds exactly `width × height × planes`
+    samples "after every rewriting stage". There is no such stage: `RawImage`'s fields are private,
+    both constructors refuse any other count through `check_sample_count`, and the decoder only
+    calls `with_*` setters afterwards, none of which touches `samples` or `dims` — linearisation,
+    active area and crop are recorded for a consumer, never applied. The injection that stood as
+    its evidence sat inside a constructor, after its own gate: a defect no file can express.
 
 Calling any of them a differential overstated what the tier proves.
 
@@ -213,6 +220,7 @@ as one at the site and none is listed in the table above.
 |---|---|---|
 | `annex_b` equals its two documented halves | `heic_hvcc` | `annex_b`'s body *is* those two calls; folded into the append check's existing buffer at no extra emitter pass |
 | no empty NAL unit | `heic_hvcc` | `NalUnitIter::next` errors on a zero length before it can yield one |
+| the raw image holds `width × height × planes` samples | `dng_decode` | both `RawImage` constructors enforce the count, and no later decode stage touches `samples` or `dims` |
 | the digest verdict matches the decoded field | `dng_decode` | both sides read `NewRawImageDigest` out of IFD 0 with the same expression; the call is made anyway for the crash oracle |
 | a page that decodes must also describe | `tiff_decode` | `decode_page_samples` calls the tag reader before it reads a pixel |
 | the sample count matches the declared geometry's product | `tiff_decode` | `ImageBuf` sizes its storage from its own dimensions, so this is the row's live check times `Rgb8::CHANNELS` |

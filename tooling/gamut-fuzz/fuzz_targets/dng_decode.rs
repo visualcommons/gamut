@@ -8,21 +8,26 @@
 //! one observable: an over-sized `Vec::with_capacity` costs no resident memory on an
 //! overcommitting kernel, so the engine's limit, not the OS, is the oracle.
 //!
-//! The check beyond the crash oracle is that **the raw image is self-consistent**: whatever the
-//! decode pipeline returns holds exactly `width × height × samples_per_pixel` samples. The
-//! constructors enforce that at construction, but a `RawImage` is handed on through linearisation,
-//! active-area and crop handling before a caller sees it, and it is the value that *arrives* —
-//! after everything that may have rewritten `samples` or `dims` — this asserts on.
+//! This target lists **no check beyond the crash oracle**, and that oracle is what found #564. Its
+//! two assertions are both **structure pins**, labelled as such at the site.
 //!
-//! Injection that proved it fires (re-runnable): have `RawImage::new_cfa` push one extra sample
-//! *after* `check_sample_count` has passed — a constructor whose own gate no longer describes what
-//! it built. The committed seed alone reports it, with no search:
-//! `run.sh dng_decode <seeds> -- -runs=0` gives *"decoded raw holds 49 samples for
-//! Dimensions { width: 8, height: 6 } × 1 planes"*.
+//! **The sample count.** The decoded raw holds exactly `width × height × samples_per_pixel`
+//! samples — but no decode-pipeline defect can make an input fail that. `RawImage`'s fields are
+//! private, and both constructors (`new_cfa`, `new_linear_raw`) refuse a buffer of any other length
+//! through `check_sample_count` before the value exists. After construction the decoder only calls
+//! `with_*` setters — active area, default crop, levels, masked areas, opcode lists, CFA colours
+//! and layout — none of which touches `samples` or `dims`, and it never linearises or crops the
+//! samples themselves: those are *recorded* for a consumer, not applied. So the value that arrives
+//! is the value the constructor checked. The only defect the assertion can report is one inside a
+//! constructor, after its own gate — which is exactly the injection an earlier revision recorded
+//! as its evidence (a `new_cfa` that pushes a sample past `check_sample_count`), and which no file
+//! can express. It is kept because it is free on values already in hand and would report a future
+//! setter that did rewrite the buffer; it is not listed as a check.
 //!
-//! `verify_new_raw_image_digest` is driven for its own reach: on a lossy-compressed raw it walks
-//! the chunk grid and digests the compressed chunks, which `decode` never does. Its verdict is
-//! compared against the decoded model as a **structure pin, not a differential** — both sides read
+//! **The digest verdict.** `verify_new_raw_image_digest` is driven for its own reach: on a
+//! lossy-compressed raw it walks the chunk grid and digests the compressed chunks, which `decode`
+//! never does. Its verdict is compared against the decoded model as a **structure pin, not a
+//! differential** — both sides read
 //! `NewRawImageDigest` out of IFD 0 with the same expression, so the comparison cannot fail while
 //! those two bodies agree. It is kept because the two are genuinely separate readers that a future
 //! change could let drift apart (a `verify` that started selecting the raw IFD's digest, say), and
@@ -59,6 +64,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
+    // Structure pin, not a check: both constructors enforce this count and no later stage touches
+    // `samples` or `dims`, so no input can fail it while that holds (see the module docs).
     let dims = decoded.raw.dimensions();
     let expected = (dims.width as usize)
         .checked_mul(dims.height as usize)
