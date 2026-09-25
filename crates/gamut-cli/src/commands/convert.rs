@@ -1,6 +1,6 @@
 //! `gamut convert` — decode an image and re-encode it with a gamut codec.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use gamut::avif::AvifEncoder;
@@ -86,6 +86,16 @@ pub(crate) struct ConvertArgs {
     /// for other output formats.
     #[arg(long)]
     jxl_container: bool,
+    /// Drop the input's metadata instead of carrying it into the output. By default a PNG input
+    /// re-encoded to PNG keeps its EXIF, ICC profile, XMP packet, text annotations and colour
+    /// chunks; a stripped file is smaller, an unstripped one is colour-accurate, so the default
+    /// is the one that loses nothing. Anything that cannot be carried — the C2PA manifest store,
+    /// signed over the bytes of the file it was made for — and anything carried in a shape the
+    /// PNG specification does not endorse is reported on stderr rather than passed over in
+    /// silence. Currently applies only to the PNG output path with a PNG input; every other pair
+    /// drops metadata regardless.
+    #[arg(long)]
+    strip_metadata: bool,
 }
 
 /// Output container/codec for `gamut convert`.
@@ -242,6 +252,34 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
             if let Some(effort) = args.png_effort {
                 encoder = encoder.with_effort(effort);
             }
+            // Carry the input's metadata rather than dropping it (issue #483). `png_metadata`
+            // reads the file from disk a second time; the *walk* is cheap (it skips IDAT by
+            // length and never inflates a pixel), the second read is not, and it is what the
+            // convenience of taking a path rather than the already-loaded bytes costs. It yields
+            // nothing for an input that is not a PNG.
+            let metadata = (!args.strip_metadata)
+                .then(|| png_metadata(&args.input))
+                .flatten();
+            if let Some(metadata) = &metadata {
+                tracing::info!(
+                    texts = metadata.texts.len(),
+                    exif = metadata.exif.is_some(),
+                    icc = metadata.icc_profile.is_some(),
+                    xmp = metadata.xmp.is_some(),
+                    "carrying input metadata"
+                );
+                encoder = encoder.with_metadata(metadata);
+                // Say what could not come along, and what came along with a caveat. Silent loss
+                // is the defect this path exists to remove, and a payload the spec forbids
+                // carrying is still a payload the caller had.
+                for notice in encoder.metadata_notices() {
+                    if notice.carried() {
+                        tracing::warn!("input metadata carried with a caveat — {notice}");
+                    } else {
+                        tracing::warn!("input metadata not carried — {notice}");
+                    }
+                }
+            }
             encoder.encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
             (rgba.len(), dims)
         }
@@ -322,6 +360,16 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
         out.len(),
     );
     Ok(())
+}
+
+/// The metadata `path` carries, or `None` when it is not a PNG or cannot be read.
+///
+/// Deliberately total: the input has already been decoded successfully by the time this is
+/// called, so an error here means the file is simply not a PNG — a JPEG or WebP input has
+/// metadata of its own, but mapping that into PNG chunks is a cross-format job this command does
+/// not do yet. Failing to *read* metadata must never fail a conversion whose pixels are fine.
+fn png_metadata(path: &Path) -> Option<gamut::png::PngMetadata> {
+    gamut::png::metadata(&std::fs::read(path).ok()?).ok()
 }
 
 /// Picks the output format from `--format`, falling back to the output file's extension.
