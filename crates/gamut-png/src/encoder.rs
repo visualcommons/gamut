@@ -151,7 +151,7 @@ pub enum MetadataNotice {
     /// [`TextKeywordRepertoire`](Self::TextKeywordRepertoire).
     TextKeywordSpacing = 5,
     /// A text annotation **written without its `iTXt` language tag**, because the tag was not
-    /// the ASCII shape §11.3.3.4 requires ("a well-formed language tag defined by [BCP47]").
+    /// the ASCII shape §11.3.3.4 requires ("a well-formed language tag defined by \[BCP47\]").
     /// Written as UTF-8 into a field a reader takes as Latin-1 the tag would not survive the
     /// trip; an empty tag is §11.3.3.4's own way of saying the language is unspecified.
     ItxtLanguageTag = 6,

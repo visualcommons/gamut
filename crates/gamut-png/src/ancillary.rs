@@ -289,7 +289,7 @@ fn text_bytes(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Whether `language` has the shape §11.3.3.4 requires: "The language tag is a well-formed
-/// language tag defined by [BCP47]", whose subtags are ASCII letters and digits joined by
+/// language tag defined by \[BCP47\]", whose subtags are ASCII letters and digits joined by
 /// hyphens. This checks the character set, not full BCP 47 well-formedness.
 fn well_formed_language(language: &str) -> bool {
     language
@@ -492,7 +492,7 @@ impl Ancillary {
     ///
     /// The caller's `kind` is a *preference*, not a guarantee: §11.3.3.2 says outright that "text
     /// containing characters outside the repertoire of ISO/IEC 8859-1 should be encoded using the
-    /// `iTXt` chunk", so a `tEXt`/`zTXt` request whose text leaves [`text_repertoire`] is
+    /// `iTXt` chunk", so a `tEXt`/`zTXt` request whose text [`text_bytes`] cannot encode is
     /// promoted rather than written as bytes a Latin-1 reader mis-renders. The promotion keeps
     /// the caller's *other* choice, compression, because §11.3.3.4 gives `iTXt` a flag of its own.
     ///
@@ -1549,7 +1549,7 @@ mod tests {
     /// contain a zero byte (null character)" — the translated keyword is null-terminated too, so
     /// an embedded null re-frames everything after it.
     ///
-    /// Kills the translated-keyword arm of [`itxt_field_fault`].
+    /// Kills the translated-keyword null check in [`Ancillary::itxt_entry`].
     #[test]
     fn a_null_in_a_translated_keyword_is_refused() {
         let mut a = Ancillary::default();
@@ -1557,7 +1557,7 @@ mod tests {
         assert!(refusal(&a).contains("translated keyword may not contain a null"));
     }
 
-    /// §11.3.3.4: "The language tag is a well-formed language tag defined by [BCP47]", whose
+    /// §11.3.3.4: "The language tag is a well-formed language tag defined by \[BCP47\]", whose
     /// subtags are ASCII letters and digits joined by hyphens. Anything else, written as UTF-8
     /// into a field a reader takes as Latin-1, would not survive the trip — so the **tag** goes
     /// and the annotation stays, an empty tag being §11.3.3.4's own way of saying the language is
