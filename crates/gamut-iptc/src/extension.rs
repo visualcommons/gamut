@@ -1284,7 +1284,10 @@ impl<R: Borrow<W>, W: ?Sized> Projection<R, W> {
     /// Two top-level properties of one name are never read: only one of them could be written
     /// back, which is why [`Reader::read`] refuses the same shape inside a structure.
     fn read(&self, xmp: &XmpMeta) -> Option<R> {
-        let mut matches = xmp.properties.iter().filter(|property| self.names(property));
+        let mut matches = xmp
+            .properties
+            .iter()
+            .filter(|property| self.names(property));
         let property = matches.next()?;
         if matches.next().is_some() {
             return None;
