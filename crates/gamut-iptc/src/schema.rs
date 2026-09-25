@@ -25,16 +25,34 @@ pub mod ns {
     pub const IPTC_CORE: &str = WellKnownNs::Iptc4XmpCore.uri();
     /// IPTC Photo Metadata Extension — `Iptc4xmpExt:`.
     pub const IPTC_EXT: &str = WellKnownNs::Iptc4XmpExt.uri();
+    /// PLUS (Picture Licensing Universal System) Licensing Data Format — `plus:`.
+    ///
+    /// The IPTC Extension schema embeds PLUS 1.2 properties under their own namespace rather than
+    /// re-declaring them; `plus:Licensor` (see [`crate::extension::Licensor`]) is the one gamut
+    /// models. Declared here rather than taken from [`gamut_xmp::WellKnownNs`], which does not
+    /// carry PLUS.
+    pub const PLUS: &str = "http://ns.useplus.org/ldf/xmp/1.0/";
+    /// XMP basic — `xmp:`.
+    ///
+    /// Not an IPTC namespace, and deliberately absent from [`IPTC_NAMESPACES`]; it appears only
+    /// *inside* IPTC Extension structures, as the `xmp:Identifier` field of an
+    /// [`Entity`](crate::extension::Entity).
+    pub const XMP: &str = WellKnownNs::Xmp.uri();
 }
 
 /// The namespaces gamut treats as IPTC-relevant when extracting [`crate::PhotoMetadata`] from a full
 /// XMP graph (see [`crate::PhotoMetadata::from_xmp`]).
+///
+/// [`ns::PLUS`] is included because the IPTC Extension schema defines several of its own properties
+/// — `plus:Licensor` among them — in the PLUS namespace; [`ns::XMP`] is not, because `xmp:` is a
+/// general-purpose namespace whose properties are not IPTC's.
 pub const IPTC_NAMESPACES: &[&str] = &[
     ns::DC,
     ns::PHOTOSHOP,
     ns::XMP_RIGHTS,
     ns::IPTC_CORE,
     ns::IPTC_EXT,
+    ns::PLUS,
 ];
 
 /// How an IPTC field is shaped as an XMP value.
@@ -233,5 +251,15 @@ mod tests {
         assert_eq!(ns::XMP_RIGHTS, "http://ns.adobe.com/xap/1.0/rights/");
         assert_eq!(ns::IPTC_CORE, "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/");
         assert_eq!(ns::IPTC_EXT, "http://iptc.org/std/Iptc4xmpExt/2008-02-29/");
+        assert_eq!(ns::PLUS, "http://ns.useplus.org/ldf/xmp/1.0/");
+        assert_eq!(ns::XMP, "http://ns.adobe.com/xap/1.0/");
+    }
+
+    #[test]
+    fn iptc_namespaces_carries_plus_but_not_xmp_basic() {
+        // The IPTC Extension defines properties in the PLUS namespace, so a graph filtered by
+        // IPTC_NAMESPACES must keep them; xmp: is general-purpose and must not be swept in.
+        assert!(IPTC_NAMESPACES.contains(&ns::PLUS));
+        assert!(!IPTC_NAMESPACES.contains(&ns::XMP));
     }
 }
