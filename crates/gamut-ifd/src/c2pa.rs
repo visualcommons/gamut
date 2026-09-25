@@ -6,8 +6,8 @@
 //! place the workspace states that clause: the tag ([`C2PA_MANIFEST_STORE`]), the placement
 //! rule over a directory chain, the two-range exclusion set an external signer hashes around,
 //! and the read-side locator that recovers those ranges from a file. `gamut-dng` calls it
-//! rather than re-deriving §A.3.6; `gamut-tiff` is planned to do the same (issue #446) and
-//! does not yet.
+//! rather than re-deriving §A.3.6, and so does `gamut-tiff` (issue #446): its encoder places
+//! the store through [`append_store`] and its reader recovers it through [`locate`].
 //!
 //! It is a **locator and placer only**: the store is opaque bytes. Nothing here parses the JUMBF
 //! interior, verifies a hash, checks a signature or reaches a verdict — validation belongs to a
