@@ -1,7 +1,7 @@
 [package]
 name = "gamut-cli"
 description = "Sandbox CLI for the gamut codecs: decode PNG/JPEG/PPM/WebP/JXL and encode AVIF/WebP/TIFF/PNG/JXL/JPEG, plus inspection of the shared color/dsp/bitstream primitives (e.g. `gamut convert input.png output.avif`)."
-version = "0.3.1"
+version = "0.3.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

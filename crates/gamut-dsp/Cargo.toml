@@ -1,7 +1,7 @@
 [package]
 name = "gamut-dsp"
 description = "Shared fixed-point DSP kernels for the gamut codecs: bit-exact AV1 transform kernels (DCT/ADST/identity/WHT), cross-codec integer rounding/clamp math, and µ-law companding."
-version = "2.0.0"
+version = "2.0.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
