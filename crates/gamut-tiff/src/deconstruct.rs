@@ -351,7 +351,6 @@ impl Findings {
         }
     }
 
-    /// Maps the audit walk's lenient findings onto this crate's anomaly taxonomy.
     /// Flags every directory that carries two entries under one tag.
     ///
     /// This re-reads the **raw** entry records rather than consulting the parsed tree, and that is
@@ -411,6 +410,7 @@ impl Findings {
         }
     }
 
+    /// Maps the audit walk's lenient findings onto this crate's anomaly taxonomy.
     fn map_audit_findings(&mut self, findings: &[AuditFinding]) {
         for finding in findings {
             match *finding {
