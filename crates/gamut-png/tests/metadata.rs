@@ -40,10 +40,12 @@ fn every_carrier_round_trips_byte_exact() {
     let exif = tiny_exif();
     let icc = tiny_icc_profile();
     let xmp = "<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?><x:xmpmeta/>";
+    let c2pa = b"\0\0\0\x14jumbopaque store";
     let png = encode(|e| {
         e.with_exif(&exif)
             .with_icc_profile("Tiny", &icc)
             .with_xmp(xmp)
+            .with_c2pa(c2pa)
             .with_text("Author", "nobody")
             .with_compressed_text("Comment", "compressed comment")
             .with_international_text("Title", "international title")
@@ -63,6 +65,7 @@ fn every_carrier_round_trips_byte_exact() {
     assert_eq!(profile.name, "Tiny");
     assert_eq!(profile.profile, icc);
     assert_eq!(meta.xmp.as_deref(), Some(xmp.as_bytes()));
+    assert_eq!(meta.c2pa.as_deref(), Some(&c2pa[..]));
     assert_eq!(meta.gamma, Some(45_455));
     assert_eq!(meta.srgb, Some(SrgbIntent::RelativeColorimetric));
     let chrm = meta.chromaticities.expect("cHRM present");
@@ -87,6 +90,7 @@ fn metadata_agrees_with_decode_field_for_field() {
         e.with_exif(&exif)
             .with_icc_profile("Tiny", &icc)
             .with_xmp("<x:xmpmeta/>")
+            .with_c2pa(b"\0\0\0\x10jumbc2pa")
             .with_text("Author", "nobody")
             .with_gamma(1.0 / 2.2)
             .with_srgb(SrgbIntent::Perceptual)
@@ -98,6 +102,8 @@ fn metadata_agrees_with_decode_field_for_field() {
     assert_eq!(meta.exif, decoded.exif);
     assert_eq!(meta.icc_profile, decoded.icc_profile);
     assert_eq!(meta.xmp, decoded.xmp);
+    assert_eq!(meta.c2pa, decoded.c2pa);
+    assert_eq!(meta.c2pa_ignored, decoded.c2pa_ignored);
     assert_eq!(meta.texts, decoded.texts);
     assert_eq!(meta.gamma, decoded.gamma);
     assert_eq!(meta.chromaticities, decoded.chromaticities);
