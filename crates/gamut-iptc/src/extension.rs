@@ -115,10 +115,10 @@
 //! Retention is not merging. A setter handed values *replaces* the property — every property of
 //! that name, where a graph holds more than one, so the value set is the value read next — and a
 //! replaced property does not keep its qualifiers: the container kind is kept because it is part
-//! of how the values themselves are held, and nothing else is. So the shapes above survive a read-modify-write
-//! because the read declines to report them, not because the setter works around them — a caller
-//! that reads nothing and then deliberately writes a value has replaced the property, qualifiers
-//! and all, which is what a setter is for.
+//! of how the values themselves are held, and nothing else is. So the shapes above survive a
+//! read-modify-write because the read declines to report them, not because the setter works around
+//! them — a caller that reads nothing and then deliberately writes a value has replaced the
+//! property, qualifiers and all, which is what a setter is for.
 
 use std::borrow::Borrow;
 
@@ -359,9 +359,9 @@ fn lang(qualifier: &XmpProperty) -> Option<&str> {
 /// difference between ` 0.50 ` and `0.5`, which the writer's own formatting introduces.
 ///
 /// The comparison is of decimal values, not of the doubles they parse to: a text a double cannot
-/// hold exactly — `0.1000000000000000000001`, a twenty-digit integer, a decimal that underflows to
-/// `0` — parses to a double whose shortest form is *another* decimal, so the writer would change the
-/// value, and the field is not reproduced.
+/// hold exactly — `0.1000000000000000000001`, a twenty-digit integer, a decimal that underflows
+/// to `0` — parses to a double whose shortest form is *another* decimal, so the writer would
+/// change the value, and the field is not reproduced.
 fn same_number(read: &str, emitted: &str) -> bool {
     matches!((real(read), real(emitted)), (Some(read), Some(emitted)) if read == emitted)
 }
@@ -370,8 +370,8 @@ fn same_number(read: &str, emitted: &str) -> bool {
 /// spellings of one value reduce alike: its sign, its integer digits without leading zeros and its
 /// fraction digits without trailing zeros. `None` for text that is not a `Real`.
 ///
-/// A `Real` is an optional sign, then an integer part, a fraction part, or both; it has no exponent,
-/// so `1e-400`, `NaN` and `inf` are not `Real`s. Surrounding whitespace is not part of the value.
+/// A `Real` is an optional sign, then an integer part, a fraction part, or both; it has no
+/// exponent, so `1e-400`, `NaN` and `inf` are not `Real`s. Surrounding whitespace is not part of the value.
 /// A zero keeps its sign: the writer formats a double, which keeps it too, so a read zero and the
 /// zero written for it always agree on it.
 fn real(text: &str) -> Option<(bool, &str, &str)> {
