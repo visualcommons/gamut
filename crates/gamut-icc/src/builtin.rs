@@ -1571,10 +1571,9 @@ mod tests {
                     video_full_range_flag: 1,
                 })
                 .expect("buildable signalling");
-                let lcms = IccProfile::parse(
-                    &lcms2_oracle::cicp(primaries, transfer, 0, 1).to_bytes(),
-                )
-                .expect("lcms2's profile parses");
+                let lcms =
+                    IccProfile::parse(&lcms2_oracle::cicp(primaries, transfer, 0, 1).to_bytes())
+                        .expect("lcms2's profile parses");
                 assert_eq!(
                     ours.get(KnownTag::Cicp),
                     lcms.get(KnownTag::Cicp),
