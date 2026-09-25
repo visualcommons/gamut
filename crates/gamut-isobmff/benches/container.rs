@@ -17,12 +17,11 @@ fn main() {
 
 #[divan::bench(args = [4 * 1024, 256 * 1024])]
 fn write_still(bencher: Bencher, payload: usize) {
-    let img = IsoBmffImage {
-        major_brand: *b"avif",
-        minor_version: 0,
-        compatible_brands: vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
-        primary_item_id: 1,
-        items: vec![Item {
+    let img = IsoBmffImage::new(
+        *b"avif",
+        vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
+        1,
+        vec![Item {
             id: 1,
             item_type: *b"av01",
             name: String::new(),
@@ -63,8 +62,7 @@ fn write_still(bencher: Bencher, payload: usize) {
             ],
             payload: vec![0xA5u8; payload],
         }],
-        groups: vec![],
-    };
+    );
     bencher
         .counter(BytesCount::new(payload))
         .bench_local(|| write(black_box(&img)).unwrap());

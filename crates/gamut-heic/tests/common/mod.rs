@@ -70,14 +70,7 @@ pub fn hvc1_item(id: u32, payload: Vec<u8>) -> Item {
 
 /// Wraps items into a complete `heic` file whose primary is the item with `primary_id`.
 pub fn heic_image(primary_id: u32, items: Vec<Item>) -> IsoBmffImage {
-    IsoBmffImage {
-        major_brand: *b"heic",
-        minor_version: 0,
-        compatible_brands: vec![*b"heic", *b"mif1"],
-        primary_item_id: primary_id,
-        items,
-        groups: vec![],
-    }
+    IsoBmffImage::new(*b"heic", vec![*b"heic", *b"mif1"], primary_id, items)
 }
 
 /// Serialises a model to a clean HEIF file (`ftyp` + `meta` + `mdat`).

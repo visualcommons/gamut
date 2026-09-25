@@ -510,18 +510,17 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
         payload: vec![0x44, 0x55, 0x66, 0x77],
     };
 
-    Ok(IsoBmffImage {
-        major_brand: *b"avif",
-        minor_version: 0,
-        compatible_brands: vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
-        primary_item_id: 1,
-        items: vec![grid, tile_a, tile_b, alpha, exif, xmp, thumb],
-        groups: vec![EntityGroup {
-            group_type: *b"altr",
-            group_id: 1000,
-            entity_ids: vec![1, 7],
-        }],
-    })
+    Ok(IsoBmffImage::new(
+        *b"avif",
+        vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
+        1,
+        vec![grid, tile_a, tile_b, alpha, exif, xmp, thumb],
+    )
+    .with_groups(vec![EntityGroup {
+        group_type: *b"altr",
+        group_id: 1000,
+        entity_ids: vec![1, 7],
+    }]))
 }
 
 #[cfg(test)]

@@ -23,6 +23,11 @@
 //! once both `ftyp` and `meta` have been seen. So the byte-accounting walk and the semantic parse
 //! cannot disagree about *where the primary stream ends*.
 //!
+//! Since #443 [`read`] also *retains* every top-level box other than `ftyp`/`meta`/`mdat` in
+//! [`IsoBmffImage::top_level_boxes`](crate::IsoBmffImage::top_level_boxes); this walk still
+//! reports each as a [`SegmentKind::Box`] with its range, because accounting is about *where* the
+//! bytes are and the model is about *what* they carry.
+//!
 //! They are deliberately **not** one function. [`read`] is strictly stricter: it rejects
 //! `moov`/`trak` in the primary stream with [`Error::Unsupported`](gamut_core::Error::Unsupported)
 //! at the point it meets them. Routing it through this walk would change which error a file
