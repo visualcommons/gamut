@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-icc-v1.0.0...gamut-icc-v2.0.0) - 2026-09-25
+
+### Added
+
+- *(icc)* build ICC profiles from named colour spaces and CICP
+
+### Fixed
+
+- *(icc)* build narrow-range CICP signalling whose range is on Y/Cb/Cr
+- *(icc)* describe a grey profile by the gamma its kTRC holds
+- *(icc)* [**breaking**] decline a CICP triple that does not signal full range
+- *(icc)* bound the grey gamma by what the kTRC actually encodes
+- *(icc)* [**breaking**] build CICP profiles from the transfer H.273 defines
+- *(icc)* adapt built-in colorants to the PCS D50 the profile declares
+
+### Other
+
+- *(icc)* format the lcms2 cicp synthesiser comparison
+- *(icc)* say what actually declines a transfer code point
+- *(icc)* have lcms2 check every built profile's white point, curves and cicp tag
+- *(icc)* gate the SourceProfile divergence figures the docs quote
+- *(icc)* gate the two cross-crate figures the docs still quoted
+- *(icc)* list thiserror among the crate's dependencies
+- *(icc)* disclose the rendering intent every constructor writes
+- *(icc)* cite cicpTag's own clause for the rule that decides the flag
+- *(icc)* name the colorimetry this crate does restate, and its gates
+- *(icc)* say where a SourceProfile bundle and its profile diverge
+- *(icc)* guard the sampled PQ curve at the quantum it claims
+- *(icc)* correct the CIE D50 tristimulus this crate deliberately avoids
+- *(icc)* check the transfer-axis claim about gamut-color in a doctest
+- *(icc)* cite the clauses ICC.1:2022 gives the colorant and chad tags
+- *(icc)* cite cicpType's own clause and quote the tag's mid-grey values
+- *(icc)* write the saturation bound at its shortest exact decimal
+- *(icc)* reformat the transfer code-point sweep assertion
+- *(icc)* quantify the second sanctioned reading of the BT.709 curve
+- *(icc)* stop calling the full-range flag a conformance requirement
+- *(icc)* pin the complement of the encodable transfer code points
+- *(icc)* state the grey gamma limit instead of linking a private const
+- *(icc)* correct the transfer table, the fan-in figure and the PQ limit
+- *(icc)* fold the curveless transfer arm into the wildcard
+- *(icc)* record the built-in profile constructors and their curve choices
+- *(icc)* split the fixed-point conversions by claim
+- merge origin/master into feat/324-cmm-scaffold
+- merge origin/master into feat/322-lcms2-oracle-transforms
+- adopt as_chunks for constant-size slice chunking
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-icc-v0.1.1...gamut-icc-v1.0.0) - 2026-07-18
 
 ### Added

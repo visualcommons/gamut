@@ -1,7 +1,7 @@
 [package]
 name = "gamut"
 description = "Space-efficient image encoding libraries — a unified API over per-format codecs, selected via Cargo features."
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

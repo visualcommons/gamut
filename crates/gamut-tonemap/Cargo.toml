@@ -1,7 +1,7 @@
 [package]
 name = "gamut-tonemap"
 description = "Tone-mapping math primitives: built-in tone curves plus an extensible trait for custom operators."
-version = "1.0.0"
+version = "1.1.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

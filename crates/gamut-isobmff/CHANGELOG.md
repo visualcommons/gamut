@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-isobmff-v2.0.1...gamut-isobmff-v3.0.0) - 2026-09-25
+
+### Added
+
+- *(isobmff)* [**breaking**] model and write top-level boxes
+- *(isobmff)* add an IsoBmffImage constructor and builders
+- *(core)* add structured error diagnostics
+- *(gamut-isobmff)* parse large and uuid boxes
+
+### Fixed
+
+- *(isobmff)* refuse interleaved top-level positions and add push_top_level_box
+- *(isobmff)* bound a top-level box's complete size, not just its payload
+
+### Other
+
+- *(isobmff)* list every move the top-level box round-trip makes
+- *(isobmff)* link read's top-level-box note to the public field
+- *(isobmff)* reach push_top_level_box's last-AfterFtyp arm, order only
+- *(isobmff)* round-trip a non-zero ftyp minor version through the builder
+- *(isobmff)* make TopLevelBox and TopLevelPosition non-exhaustive
+- *(isobmff)* satisfy clippy::redundant_guards in the accounting test
+- *(isobmff)* share the segment walk with avif and heic
+- *(isobmff)* separate the largesize body from the cursor advance
+
 ## [2.0.1](https://github.com/justin13888/gamut/compare/gamut-isobmff-v2.0.0...gamut-isobmff-v2.0.1) - 2026-07-20
 
 ### Other
