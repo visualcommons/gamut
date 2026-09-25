@@ -73,8 +73,10 @@ for dropped in report.dropped() {
 # }
 ```
 
-Every tag CIPA DC-008 itself defines carries the field type and component count that specification
-mandates for it ([`ExifTag::field_types`], [`ExifTag::component_count`]); the nine carried from
+Every tag in the five CIPA DC-008 tables that define one (Table 6, Tables 8 and 9, Table 14 and
+Table 16) carries the field type and component count that table mandates for it
+([`ExifTag::field_types`], [`ExifTag::component_count`]) — the three IFD-pointer tags DC-008 defines
+outside those tables are not catalogued (see [Scope](#scope)); the nine carried from
 other specifications claim no constraint, and their `field_types` is empty. [`set_tag_checked`] is
 the conformant setter — it refuses a value that contradicts them — and it is the crate's only
 checked door. The boundary is doors that admit a **field**: there are nine, and all nine stay

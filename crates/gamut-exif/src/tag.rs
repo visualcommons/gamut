@@ -9,8 +9,8 @@
 //!
 //! # What the spec constrains
 //!
-//! Every tag CIPA DC-008 itself defines carries the `Type` and `Count` columns of the table that
-//! defines it — Table 6 (0th IFD), Tables 8 and 9 (Exif sub-IFD), Table 14 (GPS) and Table 16
+//! Every tag in the five CIPA DC-008 tables that define one carries the `Type` and `Count` columns
+//! of the table that defines it — Table 6 (0th IFD), Tables 8 and 9 (Exif sub-IFD), Table 14 (GPS) and Table 16
 //! (Interoperability) — as [`ExifTag::field_types`] and [`ExifTag::component_count`]. A handful of
 //! catalogued tags come from **other** specifications and are carried only for compatibility
 //! (`ApplicationNotes`, `IPTC-NAA`, `InterColorProfile`, `Rating`, `RatingPercent`, and the DCF-era

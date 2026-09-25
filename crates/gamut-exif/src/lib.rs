@@ -39,9 +39,12 @@
 //! the three uncompressed ones — so an offset with no length is non-conformant under every one of
 //! them.
 //!
-//! Writing has one extra door. Every tag CIPA DC-008 itself defines carries the field type and
-//! component count that specification mandates for it ([`ExifTag::field_types`],
-//! [`ExifTag::component_count`]), and [`set_tag_checked`] refuses a value that contradicts them.
+//! Writing has one extra door. Every tag in the five CIPA DC-008 tables that define one — Table 6,
+//! Tables 8 and 9, Table 14 and Table 16 — carries the field type and component count that table
+//! mandates for it ([`ExifTag::field_types`], [`ExifTag::component_count`]), and
+//! [`set_tag_checked`] refuses a value that contradicts them. The three IFD-pointer tags DC-008
+//! defines in their own sections outside those tables are deliberately not catalogued — see
+//! [`tag`] for why.
 //! A handful of catalogued tags come from other specifications and are carried only for
 //! compatibility; DC-008 mandates nothing for them, their `field_types` is empty, and
 //! [`set_tag_checked`] claims no constraint — see [`tag`] for which they are.

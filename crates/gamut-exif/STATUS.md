@@ -29,8 +29,10 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
 
 ## P10 — what the catalogue now covers
 
-`ExifTag` carries **160** tags: every one of the **151** CIPA DC-008 defines — Table 6 (30, 0th
-IFD), Tables 8 and 9 (88, Exif sub-IFD), Table 14 (32, GPS), Table 16 (1, Interoperability) — plus
+`ExifTag` carries **160** tags: every one of the **151** in the five CIPA DC-008 tables that define
+one — Table 6 (30, 0th IFD), Tables 8 and 9 (88, Exif sub-IFD), Table 14 (32, GPS), Table 16 (1,
+Interoperability) — but not the three IFD-pointer tags DC-008 defines in their own sections outside
+those tables (§4.6.3.1.1, §4.6.3.2.1, §4.6.3.3.1; see `tag.rs` for why), plus
 nine carried from other specifications for compatibility (`ApplicationNotes`, `IPTC-NAA`,
 `InterColorProfile`, `Rating`, `RatingPercent`, and the four DCF-era Interoperability tags beyond
 `InteroperabilityIndex`).
