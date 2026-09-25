@@ -64,3 +64,7 @@ divan.workspace = true
 [[bench]]
 name = "compression"
 harness = false
+
+[[bench]]
+name = "codec"
+harness = false
