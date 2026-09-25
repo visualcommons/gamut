@@ -498,16 +498,20 @@ impl SegmentReport {
 
 /// Whether every byte of `range` in `src` is zero, read in bounded chunks.
 fn all_zero<S: ReadAt>(src: &mut S, range: Range) -> Result<bool> {
-    let mut buf = [0u8; 4096];
-    let mut pos = range.start;
+    /// Bytes per read. The buffer is a stack array, so this also bounds the frame.
+    const CHUNK: usize = 4096;
+    let mut buf = [0u8; CHUNK];
     let end = range.end();
-    while pos < end {
-        let n = usize::try_from((end - pos).min(buf.len() as u64)).unwrap_or(buf.len());
+    // Stepping the range yields the chunk starts, so the range itself bounds the walk. A
+    // hand-advanced cursor is bounded instead by its own arithmetic being right: `pos *= n`
+    // never moves one that starts at zero, and the loop it drove could then be reported only
+    // as a mutation-testing timeout, never as a wrong answer (issue #110).
+    for pos in (range.start..end).step_by(CHUNK) {
+        let n = usize::try_from((end - pos).min(CHUNK as u64)).unwrap_or(CHUNK);
         src.read_exact_at(pos, &mut buf[..n])?;
         if buf[..n].iter().any(|&b| b != 0) {
             return Ok(false);
         }
-        pos += n as u64;
     }
     Ok(true)
 }

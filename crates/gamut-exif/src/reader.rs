@@ -62,7 +62,9 @@ impl ExifReader {
     /// required but absent, an [`ExifError::Ifd`](crate::ExifError::Ifd) when the TIFF stream is
     /// malformed, or (in [`strict`](Self::strict) mode)
     /// [`ExifError::InvalidIfd`](crate::ExifError::InvalidIfd) when a sub-IFD pointer addresses a
-    /// malformed directory.
+    /// malformed directory or [`ExifError::BadThumbnail`](crate::ExifError::BadThumbnail) when the
+    /// 1st IFD's JPEG range is unusable — outside the blob, or an offset with no
+    /// `JPEGInterchangeFormatLength` to size it.
     ///
     /// An offset inside an error message is a position in `bytes` — the buffer the caller handed
     /// in — so for a marked blob it counts the six-byte `Exif\0\0` marker. That is deliberately a
@@ -103,6 +105,14 @@ impl ExifReader {
     /// empty: [`DroppedRegion::TrailingIfd`](crate::DroppedRegion::TrailingIfd) is well-formed and
     /// merely unrepresentable, so strictness has no grounds to reject it and it is reported in both
     /// modes.
+    ///
+    /// The two offset frames of [`parse`](Self::parse) meet here: an offset in a returned
+    /// [`ExifError`](crate::ExifError) is a position in `bytes` and counts any `Exif\0\0` marker,
+    /// while every [`Dropped::offset`](crate::Dropped::offset) in the report is relative to the
+    /// start of the TIFF stream — six smaller for the same position in a marked blob. A caller
+    /// that renders both beside each other must normalise one of them. They *meet* rather than
+    /// always arrive together: the return is a sum type, so a blob whose strict-fatal defect is
+    /// reached after a reportable one yields the error alone and no report.
     pub fn parse_with_report(&self, bytes: &[u8]) -> Result<(Exif, ReadReport)> {
         self.parse_from_with_report(bytes)
     }
@@ -267,12 +277,15 @@ mod tests {
         );
     }
 
-    /// A thumbnail offset with no length is a malformed pair, and strict mode says so.
+    /// A thumbnail offset with no length is an unreadable range, and strict mode says so.
     ///
-    /// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength`
-    /// both mandatory for a compressed thumbnail. Half the pair therefore fails strictness for the
-    /// same reason an out-of-bounds range does — the sibling case above — rather than passing as a
-    /// thumbnail that simply has no bytes. The lenient half of the contract is the report, pinned in
+    /// A `JPEGInterchangeFormat` with nothing to size the read by addresses bytes that cannot be
+    /// fetched, so it fails strictness for the same reason an out-of-bounds range does — the
+    /// sibling case above — rather than passing as a thumbnail that simply has no bytes. The
+    /// message is pinned because it must state that structural fact and *not* claim a missing
+    /// mandatory tag: Exif 3.0 §4.6.9.2 Table 21 makes the pair mandatory only under
+    /// `Compression = Compressed`, and forbids recording either tag under the uncompressed
+    /// columns (issue #574). The lenient half of the contract is the report, pinned in
     /// `tests/report.rs`.
     #[test]
     fn a_thumbnail_offset_without_a_length_is_rejected_strictly() {
@@ -298,8 +311,8 @@ mod tests {
             .expect_err("strict must reject half a thumbnail pair");
         assert_eq!(
             err.to_string(),
-            "invalid thumbnail: JPEGInterchangeFormat without JPEGInterchangeFormatLength",
-            "the message must name which half is missing"
+            "invalid thumbnail: JPEGInterchangeFormat offset with no length to size it",
+            "the message must name the unreadable range, not a missing mandatory tag"
         );
     }
 

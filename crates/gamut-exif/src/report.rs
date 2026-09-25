@@ -58,9 +58,14 @@ pub enum DroppedRegion {
     /// directory survives; only its bytes are lost.
     ///
     /// Reported when the range lies outside the blob ([`DropReason::OutOfBounds`]) and when the
-    /// offset has no length beside it ([`DropReason::Incomplete`]) — Exif 3.0 §4.6.9.2 Table 21
-    /// marks both tags mandatory for a compressed thumbnail, so half the pair addresses bytes
-    /// nothing can size.
+    /// offset has no length beside it ([`DropReason::ThumbnailLengthMissing`]): an offset with
+    /// nothing to size it addresses bytes that cannot be read, which is a loss rather than an
+    /// absent thumbnail. That rule is structural and unconditional here — see
+    /// [`ThumbnailLengthMissing`](DropReason::ThumbnailLengthMissing) — and is *not* derived from
+    /// the pair's support level, which Exif 3.0 §4.6.9.2 Table 21 states only per
+    /// thumbnail-format column. That axis is not the two-valued `Compression` tag, which this
+    /// *reader* does not consult (a parsed [`Thumbnail`](crate::Thumbnail) does expose it, through
+    /// [`compression`](crate::Thumbnail::compression)).
     ThumbnailJpeg = 3,
     /// A top-level directory past the 1st IFD.
     ///
@@ -123,13 +128,36 @@ pub enum DropReason {
     /// Nothing was wrong with the region — it parsed cleanly — but the EXIF model has no place to
     /// put it, so it could not be carried across.
     Unrepresentable = 2,
-    /// The region was addressed but never fully described, so there was no range to read: today
-    /// only a `JPEGInterchangeFormat` offset with no `JPEGInterchangeFormatLength` beside it.
+    /// The 1st IFD carried a `JPEGInterchangeFormat` offset with no `JPEGInterchangeFormatLength`
+    /// beside it, so there was no range to read and the JPEG behind the offset is lost.
+    ///
+    /// Deliberately named for that one site rather than for the shape of the defect: it is the
+    /// only thing this reason ever means, and a generic name on a single-site variant invites
+    /// unrelated reuse that a `#[non_exhaustive]` enum can add a *new* variant for instead.
     ///
     /// Distinct from [`OutOfBounds`](Self::OutOfBounds) — the address may be perfectly valid — and
     /// from [`Malformed`](Self::Malformed), which is about bytes that *were* read and did not
     /// parse. The repair is different in each case, which is why they are different reasons.
-    Incomplete = 3,
+    ///
+    /// Recorded whatever the thumbnail's `Compression` says, because the reason it is a loss is
+    /// **readability**: the read has no length, not a tag is missing where the spec requires one.
+    /// Exif 3.0 §4.6.9.2 Table 21 gives the pair's support level *per column*: mandatory under
+    /// **Compressed**, and `N` (not allowed to record) under all three uncompressed columns.
+    ///
+    /// **Conformance** is a separate axis, and it is only what shows the unconditional rule names
+    /// nothing it should not: the two tags carry the *same* level in every column, so an offset
+    /// with no length is non-conformant under all four and there is no conformant 1st IFD this
+    /// rule wrongly names. Whether to condition it on `Compression` anyway is filed as issue #574,
+    /// and it is a cheap option rather than a costly one — not because
+    /// [`Thumbnail::compression`](crate::Thumbnail::compression) exists (that accessor reads a
+    /// *finished* thumbnail, and the arm #574 would condition returns before one is built) but
+    /// because the 1st IFD is already in scope there and `Compression` is the same one-line
+    /// lookup that reads the offset and the length two lines above. Nothing needs plumbing.
+    ///
+    /// The mirror case in that issue — a length with no offset — is genuinely
+    /// asymmetric and not merely unreached: an offset with no length *addresses bytes*, so
+    /// something is lost, while a length with no offset addresses nothing, so nothing is.
+    ThumbnailLengthMissing = 3,
 }
 
 impl DropReason {
@@ -139,7 +167,7 @@ impl DropReason {
             Self::OutOfBounds => "addresses bytes outside the EXIF blob",
             Self::Malformed => "is not a well-formed directory",
             Self::Unrepresentable => "parsed cleanly but has no place in the EXIF model",
-            Self::Incomplete => "is addressed but never fully described",
+            Self::ThumbnailLengthMissing => "has no JPEGInterchangeFormatLength to size the read",
         }
     }
 }
@@ -321,8 +349,14 @@ mod tests {
             "dropped Thumbnail (tag 0x0201) at offset 1: addresses bytes outside the EXIF blob"
         );
         assert_eq!(
-            Dropped::new(DroppedRegion::ThumbnailJpeg, 42, DropReason::Incomplete).to_string(),
-            "dropped Thumbnail (tag 0x0201) at offset 42: is addressed but never fully described"
+            Dropped::new(
+                DroppedRegion::ThumbnailJpeg,
+                42,
+                DropReason::ThumbnailLengthMissing
+            )
+            .to_string(),
+            "dropped Thumbnail (tag 0x0201) at offset 42: has no JPEGInterchangeFormatLength to \
+             size the read"
         );
     }
 

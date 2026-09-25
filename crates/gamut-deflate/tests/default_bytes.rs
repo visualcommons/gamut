@@ -184,7 +184,7 @@ const PINS: &[Pin] = &[
         digest: 0xb60f_deee_b11e_7422,
     },
     // The clearest ladder in the corpus, and the one that isolates the code-length optimiser:
-    // 1262 -> 1147 -> 1061 on an input compressible almost entirely through Huffman lengths.
+    // 1262 -> 1147 -> 1048 on an input compressible almost entirely through Huffman lengths.
     Pin {
         fixture: "skewed",
         level: Level::Fast,
@@ -200,8 +200,8 @@ const PINS: &[Pin] = &[
     Pin {
         fixture: "skewed",
         level: Level::Best,
-        len: 1061,
-        digest: 0xf014_21a7_4fd2_b82b,
+        len: 1048,
+        digest: 0xd97b_facb_22a9_10d5,
     },
     // Byte-identical at all three levels: every rung recognises the input as incompressible and
     // falls back to the stored floor, 4101 bytes for 4096 of payload. A cost model that stopped
@@ -241,8 +241,8 @@ const PINS: &[Pin] = &[
     Pin {
         fixture: "mixed",
         level: Level::Best,
-        len: 21643,
-        digest: 0x6a34_6952_e9f4_9523,
+        len: 21601,
+        digest: 0x6b73_d9e2_9361_4f30,
     },
 ];
 

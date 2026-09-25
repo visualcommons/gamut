@@ -9,6 +9,16 @@
 //! `mdat`/`idat` placement, multi-extent payloads (concatenated), `pitm` v0/v1, `infe` v2/v3,
 //! `iref` v0/v1, and `ipma` v0/v1 with 8- or 16-bit indices. See `references/isobmff`.
 //!
+//! # Top-level boxes
+//!
+//! Every top-level box of the primary stream other than `ftyp`, `meta` and `mdat` is retained in
+//! [`IsoBmffImage::top_level_boxes`] — a `uuid` box (C2PA's `ContentProvenanceBox` among them),
+//! a `free`/`skip`, a vendor box — with its [`TopLevelPosition`] taken from where it was found:
+//! [`Trailing`](TopLevelPosition::Trailing) once `mdat` has been seen, otherwise
+//! [`AfterFtyp`](TopLevelPosition::AfterFtyp). A `uuid` box *inside* `meta` is not a top-level
+//! box and is never promoted to one; [`crate::walk_meta_children`] surfaces it. `moov`/`trak`
+//! remain [`Error::Unsupported`].
+//!
 //! # Motion-photo tolerance
 //!
 //! The semantic model intentionally covers only the *primary* still-image stream. Real-world
@@ -29,7 +39,7 @@ use gamut_core::{Error, Result};
 use crate::boxes::BoxReader;
 use crate::model::{
     ColourInformation, EntityGroup, IsoBmffImage, Item, ItemReference, NclxColr, Property,
-    PropertyKind,
+    PropertyKind, TopLevelBox, TopLevelPosition,
 };
 
 /// Per-item property associations parsed from `ipma`: each entry is `(item_id, associations)`
@@ -41,6 +51,9 @@ type ItemAssociations = Vec<(u32, Vec<(u16, bool)>)>;
 /// The result is normalised: each item's payload is resolved (multi-extent payloads concatenated,
 /// `idat`-stored data inlined), so writing it back yields an equivalent — not byte-identical —
 /// file. `read(&`[`write`](crate::write)`(&img)?) == img` holds for anything `write` accepts.
+/// Top-level boxes the model does not otherwise own are retained in
+/// [`IsoBmffImage::top_level_boxes`] in file order — every `AfterFtyp` box before every
+/// `Trailing` one, the grouping `write` requires (see [`IsoBmffImage::top_level_boxes`]).
 ///
 /// The top-level walk models only the primary still-image stream and tolerates an appended foreign
 /// "motion photo" stream — see the [module docs](self#motion-photo-tolerance): it stops at a second
@@ -62,6 +75,8 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
     let mut top = BoxReader::new(data);
     let mut ftyp = None;
     let mut meta_body = None;
+    let mut seen_mdat = false;
+    let mut top_level_boxes = Vec::new();
     loop {
         let b = match top.next_box() {
             Ok(Some(b)) => b,
@@ -93,7 +108,19 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
                     "ISOBMFF: image sequences (tracks) not supported",
                 ));
             }
-            _ => {} // tolerate benign unknown top-level boxes (mdat is offset-addressed; free/skip)
+            // mdat is offset-addressed through iloc; its bytes are reached from the items.
+            b"mdat" => seen_mdat = true,
+            // Every other top-level box is retained verbatim, positioned by where it was found.
+            _ => top_level_boxes.push(TopLevelBox {
+                ty: b.ty,
+                user_type: b.user_type,
+                payload: b.payload().to_vec(),
+                position: if seen_mdat {
+                    TopLevelPosition::Trailing
+                } else {
+                    TopLevelPosition::AfterFtyp
+                },
+            }),
         }
     }
 
@@ -174,6 +201,7 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
         primary_item_id: meta.primary_item_id,
         items,
         groups: meta.groups,
+        top_level_boxes,
     })
 }
 

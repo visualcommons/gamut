@@ -29,20 +29,22 @@ security-sensitive `iloc` offset machinery. It is:
 ## Usage
 
 `write` serialises an [`IsoBmffImage`] (its `ftyp` brands, the `pitm` primary item, the image
-items, and any entity groups) into a complete `ftyp` + `meta` + `mdat` file; `read` parses one
-back. Each [`Item`] carries its type, name, optional MIME info, hidden flag, typed `iref`
-references (`auxl`/`cdsc`/`dimg`/`thmb`/`prem`, …), properties, and payload; the writer derives the
-`iloc` offsets and the shared `ipco`/`ipma` so the two are inverse for any file this crate writes.
+items, any entity groups, and any top-level boxes the model does not otherwise own) into a
+complete `ftyp` + `meta` + `mdat` file; `read` parses one back. Each [`Item`] carries its type,
+name, optional MIME info, hidden flag, typed `iref` references
+(`auxl`/`cdsc`/`dimg`/`thmb`/`prem`, …), properties, and payload; the writer derives the `iloc`
+offsets and the shared `ipco`/`ipma` so the two are inverse for any file this crate writes.
+`IsoBmffImage` is `#[non_exhaustive]`: build it with `IsoBmffImage::new(..)` and the `with_*`
+builders.
 
 ```rust
 use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, read, write};
 
-let img = IsoBmffImage {
-    major_brand: *b"avif",
-    minor_version: 0,
-    compatible_brands: vec![*b"avif", *b"mif1", *b"miaf"],
-    primary_item_id: 1,
-    items: vec![Item {
+let img = IsoBmffImage::new(
+    *b"avif",
+    vec![*b"avif", *b"mif1", *b"miaf"],
+    1,
+    vec![Item {
         id: 1,
         item_type: *b"av01",
         name: String::new(),
@@ -56,11 +58,27 @@ let img = IsoBmffImage {
         }],
         payload: vec![/* the coded bitstream, opaque to this crate */],
     }],
-    groups: vec![],
-};
+);
 let bytes = write(&img)?;
 assert_eq!(read(&bytes)?, img);
 ```
+
+A top-level box the model does not otherwise own — the C2PA `ContentProvenanceBox` (a `uuid` box
+with user type `D8FEC3D6-1B0E-483C-9297-5828877EC481`, C2PA 2.4 §A.5.1), a `free`, a vendor box
+— lives in `top_level_boxes` as a [`TopLevelBox`] and is written at its [`TopLevelPosition`]:
+`AfterFtyp` boxes between `ftyp` and `meta` (so before the first `mdat`, the §A.5.3 placement),
+`Trailing` boxes after `mdat`. `read` keeps every such box with the position it found it at, so a
+file carrying one round-trips byte-identically:
+
+```rust
+use gamut_isobmff::TopLevelBox;
+
+let c2pa = TopLevelBox::uuid(C2PA_UUID, manifest_store);
+let img = img.with_top_level_boxes(vec![c2pa]);
+```
+
+The payload stays opaque here; locating and bounding the manifest store inside it is
+[`gamut-heic`](../gamut-heic)'s `c2pa` module.
 
 See [`gamut-avif`](../gamut-avif) for the full encode path that drives this crate (it builds the
 `av1C` record and the AVIF brand set, then calls `write`).
@@ -92,8 +110,9 @@ bounds-checks every read).
 
 Models the HEIF still-image box set: `ftyp`, `meta` (`hdlr`/`pitm`/`iloc`/`iinf`/`iref`/`iprp`/
 `idat`/`grpl`), the `ispe`/`pixi`/`colr` (`nclx` + ICC)/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli`
-properties, opaque codec configuration, and `mdat`. Unrecognised property boxes round-trip
-verbatim. The `grid` and `iovl` derived-image payloads are typed by the opt-in
+properties, opaque codec configuration, `mdat`, and every other top-level box of the primary
+stream (`uuid`/`free`/vendor) as a positioned `TopLevelBox`. Unrecognised property boxes
+round-trip verbatim. The `grid` and `iovl` derived-image payloads are typed by the opt-in
 [`ImageGrid`]/[`ImageOverlay`] helpers. The writer normalises to the smallest box versions; the
 reader additionally accepts the foreign-encoder repertoire (`iloc` v1/v2, `idat` placement,
 multi-extent payloads, 32-bit item ids, 16-bit `ipma` indices, alternate box sizes, and UUID user

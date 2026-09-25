@@ -49,6 +49,14 @@ impl ExifReader {
     /// [`ExifError::Ifd`] when the TIFF stream is malformed or the source fails, or (in
     /// [`strict`](Self::strict) mode) [`ExifError::InvalidIfd`] /
     /// [`ExifError::BadThumbnail`] when a sub-IFD pointer or thumbnail range is unusable.
+    ///
+    /// An offset inside an error message is a position in `source` — the byte source the caller
+    /// handed in — so for a marked source it counts the six-byte `Exif\0\0` marker. That is
+    /// deliberately a different frame from [`Dropped::offset`](crate::Dropped::offset), which is
+    /// relative to the start of the TIFF stream and therefore six smaller for the same position.
+    /// It matters most here: a caller streaming from a file is the one likeliest to correlate an
+    /// error offset against bytes on disk, and it can do so directly only for the error frame —
+    /// a report offset must have the source's own start (and the marker) added back first.
     pub fn parse_from<S: ReadAt>(&self, source: S) -> Result<Exif> {
         self.parse_source(source, &mut ReadReport::new())
     }
@@ -56,6 +64,14 @@ impl ExifReader {
     /// Parses EXIF from a positioned byte source and reports what a lenient parse discarded.
     ///
     /// The streaming twin of [`parse_with_report`](Self::parse_with_report). See [`ReadReport`].
+    ///
+    /// The two frames of [`parse_from`](Self::parse_from) meet here: every
+    /// [`Dropped::offset`](crate::Dropped::offset) in the returned report is relative to the start
+    /// of the TIFF stream, while an offset in a returned [`ExifError`] is a position in `source`
+    /// and includes any `Exif\0\0` marker. A caller that renders both beside each other must
+    /// normalise one of them. They *meet* rather than always arrive together: the return is a sum
+    /// type, so a source whose strict-fatal defect is reached after a reportable one yields the
+    /// error alone and no report.
     ///
     /// # Errors
     ///
@@ -200,10 +216,15 @@ impl ExifReader {
     /// lenient mode an unusable range yields a thumbnail without bytes and a recorded drop; in
     /// strict mode it errors.
     ///
-    /// Exif 3.0 §4.6.9.2 Table 21 marks `JPEGInterchangeFormat` and `JPEGInterchangeFormatLength`
-    /// *both* mandatory for a compressed thumbnail, so an offset without a length is a malformed
-    /// pair, not an absent thumbnail: it addresses bytes nothing can size. A length without an
-    /// offset addresses nothing at all, so nothing was dropped and nothing is reported.
+    /// An offset with no `JPEGInterchangeFormatLength` beside it addresses bytes nothing can size,
+    /// so it is a loss rather than an absent thumbnail — the JPEG behind the offset is unreadable.
+    /// A length with no offset addresses nothing at all, so nothing was dropped and nothing is
+    /// reported. Both halves of that rule are structural and apply whatever the thumbnail's
+    /// `Compression` says: Exif 3.0 §4.6.9.2 Table 21 gives the pair's support level *per
+    /// thumbnail-format column* (mandatory under **Compressed**, `N` — not allowed to record —
+    /// under all three uncompressed ones); that axis is not the two-valued `Compression` tag, which
+    /// this reader does not consult. Whether it should, and whether the length-only case should be
+    /// rejected for symmetry, is issue #574.
     fn read_thumbnail<S: ReadAt>(
         &self,
         ifd: Ifd,
@@ -229,15 +250,18 @@ impl ExifReader {
                 }
             },
             (Some(_), None) if self.strict => {
+                // States the structural fact — a range with no size — rather than naming a missing
+                // mandatory tag: Table 21 makes the sibling mandatory only under `Compression =
+                // Compressed`, and forbids recording it at all under the uncompressed columns.
                 return Err(ExifError::BadThumbnail(
-                    "JPEGInterchangeFormat without JPEGInterchangeFormatLength",
+                    "JPEGInterchangeFormat offset with no length to size it",
                 ));
             }
             (Some(offset), None) => {
                 report.record(Dropped::new(
                     DroppedRegion::ThumbnailJpeg,
                     u64::from(offset),
-                    DropReason::Incomplete,
+                    DropReason::ThumbnailLengthMissing,
                 ));
                 None
             }
@@ -246,6 +270,16 @@ impl ExifReader {
         // The JPEGInterchangeFormat offset is structural — the bytes are captured above and the
         // writer re-synthesises the offset — so drop it from the stored directory (mirroring how the
         // sub-IFD pointer tags are stripped), leaving a value the model can't carry stale.
+        //
+        // The removal is conditioned on bytes having been read, which is #548: when `jpeg` is
+        // `None` the pointer survives into the model and `to_bytes` re-emits it, so the emitted
+        // blob claims a thumbnail the report says was dropped. #548 names only the OutOfBounds
+        // case; the ThumbnailLengthMissing arm above is a SECOND instance of it. What separates
+        // them is not that a strict parse of the re-emitted blob fails — it fails for BOTH, since
+        // an out-of-bounds offset survives the round trip just as an unsized one does — but that
+        // the OutOfBounds instance is pre-existing (`master` already rejects it strictly) while
+        // this one is created by adding the strict arm. Fixing the condition is a
+        // writer behaviour change and belongs to #548, not here.
         let mut ifd = ifd;
         if jpeg.is_some() {
             ifd.remove(ptr);

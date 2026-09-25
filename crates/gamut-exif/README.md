@@ -109,6 +109,30 @@ preserves EXIF sea-level altitude as an orthometric height; the 2D `Wgs84` newty
 drops altitude. Malformed references, rationals, DMS components, and out-of-range positions return
 the typed [`GpsConversionError`].
 
+## Compatibility
+
+**One read verdict changed after 1.0.0.** A 1st IFD carrying `JPEGInterchangeFormat` with no
+`JPEGInterchangeFormatLength` used to parse as a thumbnail that simply had no bytes; it is a
+**loss** — named in the report as `DropReason::ThumbnailLengthMissing`, and **rejected by
+`strict`** with `ExifError::BadThumbnail`. A caller running `strict` over blobs 1.0.0 accepted
+should know the verdict moved.
+
+The rule is about **readability**: an offset with nothing to size it addresses bytes that cannot be
+read, which is what `strict` is for. It is not about a support level, and the reader does not
+consult `Compression` at all.
+
+**Conformance** is the separate question of whether the move is a *fix* or a *redefinition*, and it
+is a fix, so no major version is forced. Exif 3.0 §4.6.9.2 Table 21 states each 1st IFD tag's
+support level per thumbnail-format column: three uncompressed ones distinguished by photometric
+interpretation and planar configuration (Chunky, Planar, YCC), plus **Compressed**. That axis is not
+the two-valued `Compression` tag. The table gives `JPEGInterchangeFormat` and
+`JPEGInterchangeFormatLength` the *same* level in each column: "not allowed to record" under the
+three uncompressed columns, mandatory under Compressed. An offset with no length is therefore
+non-conformant under every column, and no conformant 1st IFD changes verdict. That grounding is what
+this repository ships — the table is vendored under `references/exif/`; the before/after comparison
+measured behind it is recorded in the pull request that introduced the report, not committed here as
+a harness.
+
 ## Scope
 
 v1 covers the **standard CIPA DC-008 tag dictionary** ([`ExifTag`]) — every tag in the five tables
