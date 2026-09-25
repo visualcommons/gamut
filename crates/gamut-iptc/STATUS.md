@@ -46,8 +46,9 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
   covers a field the model does not name, one it names but cannot read, and one it can read but
   could not write back as it stands (an `rdf:resource` where the model writes element text, a
   qualifier, a language beside the default, an unexpected container kind, a coordinate with no XMP
-  `Real` value). Only two differences remain, both idempotent: a structure's fields come back in
-  the model's order, and a number or an `x-default` tag may be re-spelled.
+  `Real` value or one a double would round). Only two differences remain, both idempotent: a
+  structure's fields come back in the model's order, and a number or an `x-default` tag may be
+  re-spelled — a number only to the same decimal value, compared as decimals rather than doubles.
 - **IIM tag table.** `iim::IimTagInfo` now names every dataset IPTC-IIM 4.2 states an octet maximum
   for that `max_octets` can hold: 14 Envelope + 56 Application datasets (chapters 5 and 6 bar
   `2:202`), plus `7:10` Size Mode, the one dataset outside those chapters whose length the spec

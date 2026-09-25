@@ -56,8 +56,10 @@
 //!   holding a language beside the default or plain text written where one belongs, an array of
 //!   any container kind other than the one the model writes, an array holding an item of a kind
 //!   the model does not take, a bare structure where the model writes an array of them, a
-//!   coordinate that is not a value of the XMP `Real` type (`NaN`, an infinity, or a decimal that
-//!   overflows to one), or two fields of a single name.
+//!   coordinate whose text is not an XMP `Real` (`NaN`, an infinity, or exponent notation such as
+//!   `1e-400`), a coordinate whose decimal value a double cannot hold exactly (more significant
+//!   digits than it keeps, or a decimal that underflows or overflows), or two fields of a single
+//!   name.
 //!
 //! `retention_covers_every_shape_the_typed_read_parses_but_cannot_write_back` derives that list
 //! from the module's shape corpus rather than restating it, so it cannot fall out of date.
@@ -71,7 +73,9 @@
 //!   with the retained fields last. A structure's fields are an unordered set (XMP Part 1 §6.3.3),
 //!   so this is a re-ordering and not a loss; values, and the relative order of an array's items,
 //!   are preserved.
-//! - **the lexical form of a number**: a coordinate written `0.50` is re-emitted as `0.5`.
+//! - **the lexical form of a number**: a coordinate written `0.50` is re-emitted as `0.5`. Only
+//!   the spelling changes: the two must be the same decimal value, compared as decimals rather than
+//!   as the doubles they parse to, so a coordinate the writer would round is retained instead.
 //! - **the case of an `x-default` language tag**: an entry tagged `X-Default` is re-emitted as
 //!   `x-default`, which Part 1 §8.2.2.4 matches as the same tag.
 //!
@@ -284,10 +288,11 @@ fn structure(value: &XmpValue) -> Option<&[XmpProperty]> {
 /// reproduces `read`.
 ///
 /// Reproduction is equality of value and qualifiers, with the two lexical re-spellings the module
-/// documents allowed: a number may be written in another form for the same value, and a language
-/// tag may be re-cased, because XMP Part 1 §8.2.2.4 matches tags case-insensitively. A structure's
-/// fields are an unordered set (Part 1 §6.3.3), so the model's field order is not a difference; an
-/// array's items are ordered, and its RDF container kind is part of its value (Part 1 §6.3.4).
+/// documents allowed: a number may be written in another form for the same decimal value, and a
+/// language tag may be re-cased, because XMP Part 1 §8.2.2.4 matches tags case-insensitively. A
+/// structure's fields are an unordered set (Part 1 §6.3.3), so the model's field order is not a
+/// difference; an array's items are ordered, and its RDF container kind is part of its value
+/// (Part 1 §6.3.4).
 fn reproduces(read: &XmpProperty, emitted: &XmpProperty) -> bool {
     read.namespace == emitted.namespace
         && read.name == emitted.name
@@ -349,16 +354,48 @@ fn lang(qualifier: &XmpProperty) -> Option<&str> {
         .flatten()
 }
 
-/// Whether two texts spell the same finite XMP `Real` (Part 1 §8.2.1) — the difference between
-/// ` 0.50 ` and `0.5`, which the writer's own formatting introduces.
+/// Whether two texts are XMP `Real`s (Part 1 §8.2.1.4) spelling the same decimal value — the
+/// difference between ` 0.50 ` and `0.5`, which the writer's own formatting introduces.
+///
+/// The comparison is of decimal values, not of the doubles they parse to: a text a double cannot
+/// hold exactly — `0.1000000000000000000001`, a twenty-digit integer, a decimal that underflows to
+/// `0` — parses to a double whose shortest form is *another* decimal, so the writer would change the
+/// value, and the field is not reproduced.
 fn same_number(read: &str, emitted: &str) -> bool {
-    let number = |text: &str| {
-        text.trim()
-            .parse::<f64>()
-            .ok()
-            .filter(|value| value.is_finite())
+    matches!((real(read), real(emitted)), (Some(read), Some(emitted)) if read == emitted)
+}
+
+/// The decimal value `text` spells as an XMP `Real` (Part 1 §8.2.1.4), reduced so that two
+/// spellings of one value reduce alike: its sign, its integer digits without leading zeros and its
+/// fraction digits without trailing zeros. `None` for text that is not a `Real`.
+///
+/// A `Real` is an optional sign, then an integer part, a fraction part, or both; it has no exponent,
+/// so `1e-400`, `NaN` and `inf` are not `Real`s. Surrounding whitespace is not part of the value.
+/// A zero keeps its sign: the writer formats a double, which keeps it too, so a read zero and the
+/// zero written for it always agree on it.
+fn real(text: &str) -> Option<(bool, &str, &str)> {
+    let text = text.trim();
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
     };
-    matches!((number(read), number(emitted)), (Some(read), Some(emitted)) if read == emitted)
+    let (integer, fraction) = match unsigned.split_once('.') {
+        Some((integer, fraction)) if !fraction.is_empty() => (integer, fraction),
+        Some(_) => return None,
+        None if !unsigned.is_empty() => (unsigned, ""),
+        None => return None,
+    };
+    integer
+        .bytes()
+        .chain(fraction.bytes())
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| {
+            (
+                negative,
+                integer.trim_start_matches('0'),
+                fraction.trim_end_matches('0'),
+            )
+        })
 }
 
 // --- The value each modelled field is read from and written back as ---------------------------
@@ -431,7 +468,9 @@ fn parse_number(value: &XmpValue) -> Option<f64> {
 ///
 /// `NaN` and the infinities are not values of the XMP `Real` type (Part 1 §8.2.1), so they are
 /// never written — and a coordinate stating one in the graph is therefore never consumed, and is
-/// kept verbatim (see the [module docs](self)).
+/// kept verbatim (see the [module docs](self)). A finite value is written in its shortest decimal
+/// form, which is why a coordinate whose decimal value a double does not hold exactly is not
+/// consumed either (see [`same_number`]).
 fn number_value(value: f64) -> Option<XmpValue> {
     value
         .is_finite()
@@ -1843,6 +1882,11 @@ mod tests {
         let coordinate = |text: &str| XmpProperty::new(ns::IPTC_EXT, "rbX", text_value(text));
         assert!(reproduces(&coordinate(" 0.50 "), &coordinate("0.5")));
         assert!(!reproduces(&coordinate("0.5"), &coordinate("0.25")));
+        // A double that formats to another decimal is another value, not another spelling.
+        assert!(!reproduces(
+            &coordinate("12345678901234567891"),
+            &coordinate("12345678901234567000")
+        ));
         assert!(!reproduces(&coordinate("left"), &coordinate("right")));
         // A value of another kind is another value, and a field of another name is another field.
         assert!(!reproduces(
@@ -1857,6 +1901,43 @@ mod tests {
             &coordinate("0.5"),
             &XmpProperty::new(ns::XMP, "rbX", text_value("0.5"))
         ));
+    }
+
+    #[test]
+    fn a_number_reproduces_only_an_xmp_real_of_the_same_decimal_value() {
+        // `same_number` compares decimal values under XMP Part 1 §8.2.1.4's grammar.
+        // Re-spellings of one value: zeros that carry no digit, a `+` sign, an omitted part.
+        for (read, emitted) in [
+            ("0.50", "0.5"),
+            ("05", "5"),
+            ("+0.5", "0.5"),
+            (".5", "0.5"),
+            ("-0.50", "-0.5"),
+            ("100.0", "100"),
+        ] {
+            assert!(same_number(read, emitted), "{read} is {emitted}");
+        }
+        for (read, emitted) in [
+            // Another value: the sign, the integer digits and the fraction digits each count.
+            ("-0.5", "0.5"),
+            ("1.5", "10.5"),
+            ("0.5", "0.05"),
+            // A double that formats to another decimal: more digits than it keeps, an underflow.
+            ("12345678901234567891", "12345678901234567000"),
+            ("0.1000000000000000000001", "0.1"),
+            // Not an XMP Real at all: an exponent, a bare point, a point with no fraction, a
+            // sign or nothing on its own, a sign after a sign.
+            ("1e-400", "0"),
+            ("5e0", "5"),
+            (".", "0"),
+            ("5.", "5"),
+            ("", "0"),
+            ("-", "-0"),
+            ("+-5", "-5"),
+            ("NaN", "NaN"),
+        ] {
+            assert!(!same_number(read, emitted), "{read} is not {emitted}");
+        }
     }
 
     #[test]
@@ -2243,6 +2324,20 @@ mod tests {
                 point,
             ),
             shape(
+                "number: exponent notation, which underflows to zero",
+                ext("rbX", text_value("1e-400")),
+                number,
+                number_parses,
+                point,
+            ),
+            shape(
+                "number: more significant digits than a double keeps",
+                ext("rbX", text_value("12345678901234567891")),
+                number,
+                number_parses,
+                point,
+            ),
+            shape(
                 "nested: a structure carrying a qualifier",
                 qualified(
                     ext(
@@ -2330,6 +2425,8 @@ mod tests {
                 "list: an item that is not text",
                 "list: an item held as rdf:resource",
                 "number: text with no XMP Real value",
+                "number: exponent notation, which underflows to zero",
+                "number: more significant digits than a double keeps",
                 "nested: a structure carrying a qualifier",
                 "nested array: a bare structure where an array belongs",
                 "nested array: an rdf:Bag where an rdf:Seq belongs",
