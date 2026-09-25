@@ -752,6 +752,8 @@ impl IccProfile {
     /// map. Swept over the signal domain at 100 001 points the two diverge by up to **0.735**
     /// absolute, 52× at `V = 0.1`; `SourceProfile::SRGB`, whose transfer *is* its code point,
     /// agrees with its profile to 4.2e-6 — the `s15Fixed16` rounding of the tag, and nothing else.
+    /// All three figures are asserted, at the precision written here, by
+    /// `source_profile_divergence_is_what_the_docs_quote`.
     ///
     /// That is deliberate, and it is the difference between the two axes. A narrow sample range is
     /// a property of the samples, which is why [`from_cicp`](IccProfile::from_cicp) declines one it
@@ -1172,7 +1174,8 @@ mod tests {
     /// `BT2020` maps onto [`BuiltinProfile::Bt2020Pq`] even though the bundle's own `eotf` is a
     /// tone map and the profile's `rTRC` is not: the mapping is on the **code points** the bundle
     /// projects onto, which is what `from_source_profile` is defined over. The divergence that
-    /// follows is documented on the constructor and measured there (up to 0.735 absolute).
+    /// follows is documented on the constructor (up to 0.735 absolute), and that figure is gated
+    /// by `source_profile_divergence_is_what_the_docs_quote`.
     #[test]
     fn source_profiles_map_onto_the_builtin_spaces() {
         let cases = [
@@ -1191,6 +1194,46 @@ mod tests {
                 "{source:?} → {expected:?}"
             );
         }
+    }
+
+    /// The `rTRC` of `profile` evaluated by this crate's own curve evaluator — the tag as written,
+    /// `s15Fixed16` rounding and sampling included.
+    fn red_trc(profile: &IccProfile) -> impl Fn(f64) -> f64 + '_ {
+        move |x| match profile.get(KnownTag::RedTrc) {
+            Some(TagData::ParametricCurve(curve)) => curve.eval(x),
+            Some(TagData::Curve(curve)) => curve.eval(x),
+            other => panic!("an rTRC tone curve, found {other:?}"),
+        }
+    }
+
+    /// The figures `from_source_profile`'s doc and `STATUS.md` quote for how far a
+    /// [`SourceProfile`] bundle's own `eotf` sits from the profile built for it: up to **0.735**
+    /// absolute and **52×** at `V = 0.1` for `BT2020`, against **4.2e-6** for the `SRGB` control.
+    /// Both sides are measured as they ship — the bundle through `gamut-color`'s `eotf`, the
+    /// profile through the `rTRC` tag this module writes — over the 100 001-point sweep the prose
+    /// names. Each bound is half the last digit the prose states, so the gate is exactly as tight
+    /// as the claim; the figures otherwise restate another crate's curve with nothing checking it.
+    #[test]
+    fn source_profile_divergence_is_what_the_docs_quote() {
+        let largest_divergence = |source: SourceProfile| {
+            let profile = IccProfile::from_source_profile(source).expect("a buildable bundle");
+            let trc = red_trc(&profile);
+            (0..=100_000)
+                .map(|step| {
+                    let x = f64::from(step) / 100_000.0;
+                    (source.eotf(x) - trc(x)).abs()
+                })
+                .fold(0.0, f64::max)
+        };
+
+        let bt2020 = largest_divergence(SourceProfile::BT2020);
+        assert!((bt2020 - 0.735).abs() < 5.0e-4, "BT2020: {bt2020}");
+        let srgb = largest_divergence(SourceProfile::SRGB);
+        assert!((srgb - 4.2e-6).abs() < 5.0e-8, "SRGB: {srgb}");
+
+        let profile = IccProfile::from_source_profile(SourceProfile::BT2020).expect("buildable");
+        let ratio = SourceProfile::BT2020.eotf(0.1) / red_trc(&profile)(0.1);
+        assert!((ratio - 52.0).abs() < 0.5, "BT2020 at V = 0.1: {ratio}×");
     }
 
     /// Each space's colorants sum to the media white point the same profile declares — the law a

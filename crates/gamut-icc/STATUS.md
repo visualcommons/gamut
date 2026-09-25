@@ -111,7 +111,9 @@ that is a distinction without a difference — the bundle's transfer *is* code p
 and bundle agree to 4.2e-6, the `s15Fixed16` rounding of the tag. For `SourceProfile::BT2020` it is
 not: that bundle's transfer is ST 2084 **plus a Reinhard tone map to SDR**, while its code point is
 16, which is ST 2084 alone. The profile encodes 16, peak-referred, and over a 100 001-point sweep
-of the signal domain the two curves diverge by up to **0.735** absolute — 52× at `V = 0.1`. This is
+of the signal domain the two curves diverge by up to **0.735** absolute — 52× at `V = 0.1`. All
+three figures in this paragraph are asserted at the precision written here by
+`source_profile_divergence_is_what_the_docs_quote`, beside the constructor they describe. This is
 the opposite call from narrow range above, and deliberately so: a sample range is a property of the
 *samples*, which a full-scale profile genuinely cannot describe, whereas a tone map is gamut-color's
 choice about how to *render* an HDR transfer, and §9.2.17 requires the `cicpType` tag to be
