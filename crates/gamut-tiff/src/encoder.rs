@@ -306,9 +306,31 @@ impl TiffEncoder {
     ///
     /// # Errors
     ///
-    /// As [`encode_image`](EncodeImage::encode_image); additionally [`Error::InvalidInput`] if
-    /// both a store and a reservation were configured, or the store is shorter than
-    /// [`gamut_ifd::c2pa::MIN_STORE_LEN`].
+    /// As [`encode_image`](EncodeImage::encode_image). The configuration refusals below are
+    /// shared by every entry point of this encoder — `encode_image`,
+    /// [`encode_palette8`](Self::encode_palette8) and
+    /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) alike — and each is an
+    /// [`Error::InvalidInput`]. These are raised **before any pixel work**:
+    ///
+    /// * the Exif sub-IFD supplied through [`with_metadata`](Self::with_metadata) is one this
+    ///   crate's reader could not hand back — a pointer-typed field under a pointer tag, a
+    ///   directory hung off a tag the reader does not resolve, a field and a directory under one
+    ///   tag, or nesting deeper than the reader walks (the shapes
+    ///   [`with_metadata`](Self::with_metadata) lists);
+    /// * both a manifest store and a reservation
+    ///   ([`with_c2pa_reserved`](Self::with_c2pa_reserved)) were configured;
+    /// * the store or reservation is shorter than [`gamut_ifd::c2pa::MIN_STORE_LEN`] (8 bytes),
+    ///   or, in BigTIFF, not longer than the entry's 8-byte inline threshold — BigTIFF's minimum
+    ///   is **9**;
+    /// * in a classic TIFF, its length exceeds what the entry's 32-bit `LONG` count can describe
+    ///   (4 GiB);
+    /// * a reservation is longer than a buffer can hold (past `isize::MAX`), refused rather than
+    ///   allocated.
+    ///
+    /// Once the image is encoded, [`gamut_ifd::c2pa::append_store`] refuses a store whose
+    /// *offset* would pass classic TIFF's 4 GiB limit, which depends on the size of the file it
+    /// lands after; and this method alone additionally returns any error [`c2pa_exclusions`]
+    /// raises re-reading the bytes just written.
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
@@ -341,6 +363,12 @@ impl TiffEncoder {
     /// is the 256-entry colour table. Returns the number of bytes written. Palette colour does not
     /// fit the single-buffer [`EncodeImage`] shape (it needs the separate colour table), so it stays
     /// an inherent method.
+    ///
+    /// # Errors
+    ///
+    /// On any of the configuration refusals [`encode_with_report`](Self::encode_with_report)
+    /// lists, and otherwise as [`encode_image`](EncodeImage::encode_image) fails for the same
+    /// compression and strip or tile layout.
     pub fn encode_palette8(
         &self,
         indices: ImageRef<'_, Indexed8>,
@@ -553,7 +581,8 @@ impl TiffEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `pages` is empty.
+    /// Returns [`Error::InvalidInput`] if `pages` is empty, and on any of the configuration
+    /// refusals [`encode_with_report`](Self::encode_with_report) lists.
     pub fn encode_pages_rgb8(
         &self,
         pages: &[ImageRef<'_, Rgb8>],
