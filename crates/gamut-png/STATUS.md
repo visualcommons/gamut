@@ -94,9 +94,17 @@ writes `len` zero bytes in its place. Either is emitted as the **last** chunk be
 `IDAT` — after `PLTE`/`tRNS` and every other ancillary chunk — so the chunk's offset depends only
 on what precedes it and every later byte is `IDAT`/`IEND`. §A.3.2 asks only that it precede
 `IDAT`; last-before-`IDAT` is what makes the reserve-then-fill flow a no-move: encode with the
-reservation, hash with the chunk's span excluded, then encode again with the finished store of the
-same length — the output is byte-reproducible, so the second file differs from the first only in
-the payload and the chunk CRC. `tests/c2pa.rs` pins that as an exact-byte diff.
+reservation, hash with the chunk's span excluded, then write the finished store into that span
+with `fill_c2pa` (below), which rewrites only the payload and the chunk CRC. Encoding again with
+`with_c2pa` and a store of the same length reaches the same bytes — the output is
+byte-reproducible, so the second file differs from the first only in the payload and the chunk CRC,
+which `tests/c2pa.rs` pins as an exact-byte diff — but it costs a second full encode, so it is the
+equivalent alternative rather than the documented step.
+
+A store is bounded by the chunk length field: PNG §5.3 limits it to 2^31 − 1 bytes. An encode
+whose `with_c2pa` store or `with_c2pa_reserved` length exceeds that is rejected with
+`InvalidInput` before any byte is written, rather than truncated into a length field no reader
+accepts.
 
 **Exclusion span, and filling it.** `encode_with_report` (for the file just written) and
 `PngReport::c2pa` (for any file, including an indexed encode) name the chunk's **whole** span —
@@ -109,14 +117,17 @@ claimed segments.
 `fill_c2pa(&mut png, &span, store)` then writes the finished store into that span in place,
 rewriting the payload and the chunk CRC and nothing else — O(store) rather than the O(encode) of a
 second `with_c2pa` pass, and without tying the signature to the encoder reproducing its output.
-Its arguments are validated first (span inside the image, framing a chunk, naming a `caBX`, store
-exactly the reserved length), so a rejected call leaves the file untouched rather than half
+Its arguments are validated first (span inside the image, framing a chunk, naming a `caBX`, the
+span's payload length matching the length the chunk itself declares, store exactly the reserved
+length), so a rejected call leaves the file untouched rather than half
 filled.
 
 A span is **carriage**, not a decode result. The report has no byte budget, so a store past
 `with_max_metadata_bytes` is still spanned here while `decode().c2pa` is `None`; likewise
-`chunk(b"caBX").count` counts CRC-invalid chunks and chunks in the trailer, which `c2pa_ignored`
-does not. Each number answers its own question, and the docs say so rather than promising they
+`chunk(b"caBX").count` counts every `caBX` in the datastream, CRC-invalid chunks and any after
+`IDAT` included, where `c2pa_ignored` counts only the CRC-valid ones the decoder declined to
+surface. A `caBX` after `IEND` is in neither: `deconstruct` stops parsing chunks at `IEND` and
+records the rest as one trailer segment. Each number answers its own question, and the docs say so rather than promising they
 agree.
 
 **Placement is ours, not the format's.** The store is written last before `IDAT` so its offset
