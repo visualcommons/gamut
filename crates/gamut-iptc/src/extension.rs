@@ -112,9 +112,10 @@
 //! property — but only when the read reported one, because a caller cannot have meant to clear a
 //! property it was never shown.
 //!
-//! Retention is not merging. A setter handed values *replaces* the property, and a replaced
-//! property does not keep its qualifiers: the container kind is kept because it is part of how the
-//! values themselves are held, and nothing else is. So the shapes above survive a read-modify-write
+//! Retention is not merging. A setter handed values *replaces* the property — every property of
+//! that name, where a graph holds more than one, so the value set is the value read next — and a
+//! replaced property does not keep its qualifiers: the container kind is kept because it is part
+//! of how the values themselves are held, and nothing else is. So the shapes above survive a read-modify-write
 //! because the read declines to report them, not because the setter works around them — a caller
 //! that reads nothing and then deliberately writes a value has replaced the property, qualifiers
 //! and all, which is what a setter is for.
@@ -1283,10 +1284,7 @@ impl<R: Borrow<W>, W: ?Sized> Projection<R, W> {
     /// Two top-level properties of one name are never read: only one of them could be written
     /// back, which is why [`Reader::read`] refuses the same shape inside a structure.
     fn read(&self, xmp: &XmpMeta) -> Option<R> {
-        let mut matches = xmp
-            .properties
-            .iter()
-            .filter(|property| property.namespace == self.ns && property.name == self.name);
+        let mut matches = xmp.properties.iter().filter(|property| self.names(property));
         let property = matches.next()?;
         if matches.next().is_some() {
             return None;
@@ -1302,16 +1300,40 @@ impl<R: Borrow<W>, W: ?Sized> Projection<R, W> {
 
     /// Replaces the property with `value`, keeping the RDF container kind it already carries.
     ///
+    /// Replacing is total: where the graph holds two or more properties of this name, the value
+    /// takes the first one's place and the others are removed, so that what was set is what
+    /// [`read`](Self::read) reports next. [`XmpMeta::set`] replaces only the first, which would
+    /// leave the graph holding two of one name — a shape the read refuses — and the value just set
+    /// unreadable. The container kind kept is the first one's.
+    ///
     /// Writing nothing removes the property — but only when [`read`](Self::read) reported one. A
     /// property the typed view does not report is one the caller was never shown, so the pair does
     /// not destroy it.
     fn write(&self, xmp: &mut XmpMeta, value: &W) {
         let container = container_of(xmp.get(self.ns, self.name).map(|property| &property.value));
         match (self.emit)(value, container) {
-            Some(value) => xmp.set(XmpProperty::new(self.ns, self.name, value)),
+            Some(value) => self.replace(xmp, XmpProperty::new(self.ns, self.name, value)),
             None if self.read(xmp).is_some() => drop(xmp.remove(self.ns, self.name)),
             None => {}
         }
+    }
+
+    /// Puts `property` in place of the first property of this name, removing every later one, or
+    /// appends it where there is none.
+    fn replace(&self, xmp: &mut XmpMeta, property: XmpProperty) {
+        let Some(first) = xmp.properties.iter().position(|p| self.names(p)) else {
+            xmp.properties.push(property);
+            return;
+        };
+        let later = xmp.properties.split_off(first + 1);
+        xmp.properties[first] = property;
+        xmp.properties
+            .extend(later.into_iter().filter(|p| !self.names(p)));
+    }
+
+    /// Whether `property` is this projection's property.
+    fn names(&self, property: &XmpProperty) -> bool {
+        property.namespace == self.ns && property.name == self.name
     }
 }
 
@@ -2749,6 +2771,43 @@ mod tests {
         assert_eq!(pm.licensors(), Vec::new());
         pm.set_licensors(&pm.licensors());
         assert_eq!(pm.xmp, before);
+    }
+
+    #[test]
+    fn a_setter_handed_values_replaces_every_top_level_property_of_its_name() {
+        // `Projection::replace`: the value takes the first copy's place and the later copies go,
+        // so the value set is the value read back; neighbours on either side are untouched.
+        let licensor = |name: &str| Licensor {
+            name: Some(name.to_owned()),
+            ..Licensor::default()
+        };
+        let named = |name: &str| {
+            XmpProperty::new(
+                ns::PLUS,
+                "Licensor",
+                XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(licensor(name).to_xmp())])),
+            )
+        };
+        let neighbour = |name: &str| XmpProperty::new(ns::XMP, name, text_value(name));
+        let mut pm = PhotoMetadata::new();
+        pm.xmp.properties = vec![
+            neighbour("Before"),
+            named("Agence gamut"),
+            neighbour("Between"),
+            named("Another agency"),
+            neighbour("After"),
+        ];
+        pm.set_licensors(&[licensor("New agency")]);
+        assert_eq!(
+            pm.xmp.properties,
+            [
+                neighbour("Before"),
+                named("New agency"),
+                neighbour("Between"),
+                neighbour("After"),
+            ]
+        );
+        assert_eq!(pm.licensors(), [licensor("New agency")]);
     }
 
     /// One top-level property the typed view projects, for the sweep below.
