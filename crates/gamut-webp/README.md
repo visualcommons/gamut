@@ -62,7 +62,8 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
 - **C2PA manifest stores** — `WebpEncoder::with_c2pa` embeds a finished manifest store as a `C2PA`
   chunk (C2PA 2.4 §A.3.7) and `with_c2pa_reserved` leaves room for one that cannot exist yet,
   because its hard binding digests the finished file. `encode_with_report` returns the file together
-  with the chunk's byte range — the range a `c2pa.hash.data` assertion excludes (§18.5) — and
+  with the chunk's whole byte range, header included (which conflicts with C2PA 2.4 §18.5.1's rule
+  that a `c2pa.hash.data` exclusion not overlap a header or length field; open), and
   `gamut_webp::c2pa_span` recovers that range from any WebP file. The chunk goes last, as §A.3.7
   requires, and no `VP8X` flag advertises it, RFC 9649 defining no C2PA feature bit. A file carries
   exactly one store: `with_unknown_chunks` refuses every FourCC the container defines, the container

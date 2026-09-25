@@ -231,10 +231,18 @@ impl<'a> MetadataChunks<'a> {
 /// Locates the `C2PA` chunk of the WebP file in `data`, returning the byte range its **whole**
 /// on-disk span occupies: the four identifier bytes, the four-byte size field, and the payload.
 ///
-/// That whole span is the range a `c2pa.hash.data` assertion excludes (C2PA 2.4 §18.5), not just
-/// the payload: an update manifest may resize the manifest store, and resizing it changes the value
-/// of the size field as surely as it changes the bytes after it, so a hash that covered the size
-/// field could not survive the update the exclusion exists to permit.
+/// The whole span is reported, rather than the payload alone, because that is the exclusion range
+/// issue #445 specified for a `c2pa.hash.data` assertion. Two limits of that choice are stated here
+/// rather than implied:
+///
+/// - **It does not let a hash survive a resize.** Resizing the store also changes the RIFF
+///   *File Size* field at bytes `4..8` (RFC 9649 §2.4), which lies outside this range and is
+///   therefore hashed. Only a replacement of the **same length** leaves every hashed byte unchanged.
+/// - **It overlaps the chunk's header, which C2PA 2.4 §18.5.1 forbids as written.** §18.5.1 says a
+///   data-hash exclusion range "shall not overlap with any header or length field associated with
+///   that unit, except for freebox or pad data", and makes no exception for RIFF. A signer that
+///   needs the §18.5.1 reading excludes the payload alone, `range.start + 8..range.end`. Which of
+///   the two ranges this function should report is open, pending a maintainer decision.
 ///
 /// The pad byte RIFF appends after an odd-length payload (RFC 9649 §2.3) is **outside** the range.
 /// It is framing the container adds around the chunk, not part of the chunk's data — the same
@@ -1423,9 +1431,10 @@ mod tests {
         assert_eq!(&with_store[12..without.len()], &without[12..]);
     }
 
-    /// `c2pa_span` reports the chunk's whole span — identifier, size field and payload — because
-    /// that is what a `c2pa.hash.data` exclusion covers (C2PA 2.4 §18.5). The RIFF pad byte after an
-    /// odd-length store (§2.3) is framing, so it stays outside both the span and the payload.
+    /// `c2pa_span` reports the chunk's whole span — identifier, size field and payload — the range
+    /// issue #445 specifies (see `c2pa_span` for its conflict with C2PA 2.4 §18.5.1). The RIFF pad
+    /// byte after an odd-length store (§2.3) is framing, so it stays outside both the span and the
+    /// payload.
     #[test]
     fn c2pa_span_covers_the_whole_chunk_but_not_the_pad_byte() {
         let store = b"odd length store!"; // 17 bytes -> one pad byte

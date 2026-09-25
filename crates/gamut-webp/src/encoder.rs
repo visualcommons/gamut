@@ -184,8 +184,8 @@ impl WebpEncoder {
     ///
     /// gamut carries the store; it does not build, hash, sign or validate one — that is a C2PA
     /// implementation's job (`c2pa-rs`). Use [`encode_with_report`](Self::encode_with_report) to
-    /// learn the byte range the store's chunk occupies, which is what a `c2pa.hash.data` assertion
-    /// excludes (§18.5).
+    /// learn the byte range the store's chunk occupies — the exclusion range for a `c2pa.hash.data`
+    /// assertion, subject to the §18.5.1 caveat [`WebpEncodeReport::c2pa`] states.
     ///
     /// The last of [`with_c2pa`](Self::with_c2pa) / [`with_c2pa_reserved`](Self::with_c2pa_reserved)
     /// wins; a file carries exactly one store.
@@ -199,7 +199,7 @@ impl WebpEncoder {
     ///
     /// A store cannot be handed to the encoder complete, because its hard binding digests the
     /// finished file (C2PA 2.4 §15.12.1.1) — which does not exist until the encoder has run. The
-    /// reserve-then-fill flow §18.5 asks for is three steps:
+    /// reserve-then-fill flow is three steps:
     ///
     /// 1. encode with the reservation, through
     ///    [`encode_with_report`](Self::encode_with_report), and keep the reported range;
@@ -208,8 +208,9 @@ impl WebpEncoder {
     ///    reproduces the same file with the reserved bytes replaced.
     ///
     /// The reservation is `len` bytes exactly — no slack is added — so ask for what the signer says
-    /// it needs. A store shorter than the reservation would move every byte after it and invalidate
-    /// the hash, which is why step 3 must match the length rather than merely fit inside it.
+    /// it needs. A store of any other length would change the RIFF *File Size* field at bytes `4..8`,
+    /// which lies outside the reported range and so is hashed, invalidating the hash — which is why
+    /// step 3 must match the length rather than merely fit inside it.
     ///
     /// No upper bound is imposed beyond what the container can express: a signer's `reserve_size` is
     /// its own business, and neither `gamut-avif` nor `gamut-png` caps one either.
@@ -538,10 +539,12 @@ pub struct WebpEncodeReport {
     /// store was configured.
     ///
     /// The range covers the chunk's **whole** span — the four identifier bytes, the four-byte size
-    /// field and the payload — because that is what a `c2pa.hash.data` assertion excludes (C2PA 2.4
-    /// §18.5): an update manifest may resize the store, which changes the size field's value as
-    /// well as the bytes after it. The RIFF pad byte that follows an odd-length store (RFC 9649
-    /// §2.3) is outside the range; it is framing the container adds, not store.
+    /// field and the payload — as [`gamut_riff::c2pa_span`] reports it; that function's docs state
+    /// the span's two limits: it does not let a hash survive a store resize (the RIFF *File Size*
+    /// field at bytes `4..8` changes too and is hashed), and it overlaps the chunk header, which
+    /// C2PA 2.4 §18.5.1 forbids a data-hash exclusion to do (the §18.5.1 range is
+    /// `start + 8..end`). The RIFF pad byte that follows an odd-length store (RFC 9649 §2.3) is
+    /// outside the range; it is framing the container adds, not store.
     pub c2pa: Option<Range<usize>>,
 }
 
@@ -977,7 +980,7 @@ mod tests {
         assert_eq!(report.c2pa, None, "no store was configured");
     }
 
-    /// The reported range is the chunk's whole span (C2PA 2.4 §18.5): identifier, size field and
+    /// The reported range is the chunk's whole span (as #445 specifies): identifier, size field and
     /// payload, with the RIFF pad byte of an odd-length store left outside it.
     #[test]
     fn encode_with_report_names_the_whole_chunk_and_not_its_pad_byte() {
