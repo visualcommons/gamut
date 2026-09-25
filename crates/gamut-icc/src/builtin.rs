@@ -1034,8 +1034,9 @@ mod tests {
         }
     }
 
-    /// A transfer `gamut-color` implements no curve for cannot be built, and neither can
-    /// unmodelled or unspecified primaries. Each rejection is asserted at an input that isolates
+    /// A transfer code point this module has no ICC tone curve for cannot be built — whether or
+    /// not `gamut-color` evaluates it, since transfers are keyed on the raw code point — and
+    /// neither can primaries with no chromaticities, unmodelled or unspecified. Each rejection is asserted at an input that isolates
     /// it: the primaries are valid when the transfer is the reason, and vice versa.
     #[test]
     fn unrepresentable_signalling_is_rejected() {
