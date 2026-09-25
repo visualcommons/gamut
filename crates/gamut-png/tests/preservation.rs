@@ -176,6 +176,27 @@ fn a_profile_and_a_rendering_intent_are_both_carried() {
     assert_eq!(re.srgb, meta.srgb);
 }
 
+/// A profile name is Latin-1 on both sides of the carry (§11.3.2.3), so it goes back as the bytes
+/// it came out as. Written as UTF-8, the 0xE9 below became two bytes, which garbled the name and
+/// pushed this 79-byte one past the 79 bytes the reader accepts — so the profile itself was lost
+/// on read-back, with no notice.
+#[test]
+fn a_latin1_profile_name_of_the_full_length_is_carried_byte_for_byte() {
+    let name = [b"caf\xE9".as_slice(), &[b'n'; 75]].concat();
+    assert_eq!(name.len(), 79);
+    let mut iccp = name.clone();
+    iccp.extend_from_slice(b"\0\0");
+    iccp.extend_from_slice(&zlib(&tiny_icc_profile()));
+    let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iCCP", &iccp)])).unwrap();
+    assert!(meta.icc_profile.is_some(), "the source carries the profile");
+
+    let out = re_encoded_bytes(|e| e.with_metadata(&meta));
+    let payload = chunk_payload(&out, b"iCCP").expect("the profile is written");
+    assert_eq!(&payload[..80], [name.as_slice(), b"\0"].concat());
+    let re = gamut_png::metadata(&out).expect("read back");
+    assert_eq!(re.icc_profile, meta.icc_profile);
+}
+
 /// §11.3.2.6: "RGB is currently the only supported color model in PNG, and as such Matrix
 /// Coefficients shall be set to 0." A source chunk that says otherwise is not a conforming cICP,
 /// so it is dropped rather than reproduced — while a conforming one is carried, which matters

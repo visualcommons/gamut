@@ -604,7 +604,13 @@ impl Ancillary {
             chunk::write_chunk(out, *b"gAMA", &gamma.to_be_bytes());
         }
         if let Some((name, profile)) = &self.iccp {
-            let mut data = name.clone().into_bytes();
+            // §11.3.2.3 gives the profile name the keyword's printable Latin-1 repertoire, and
+            // the reader decodes it byte n → U+00nn, so a carried name goes back as the bytes it
+            // came out as. UTF-8 would turn every name byte ≥ 0x80 into two, and push a 79-byte
+            // name holding one past the 79 bytes the reader accepts, losing the profile. A name a
+            // caller supplies outside Latin-1 has no correct bytes at all; it keeps the UTF-8 it
+            // was written as before this conversion existed (#619 owns validating the name).
+            let mut data = text_bytes(name).unwrap_or_else(|| name.as_bytes().to_vec());
             data.push(0); // null separator
             data.push(0); // compression method: 0 = zlib/deflate
             DeflateEncoder::new()
@@ -1003,6 +1009,22 @@ mod tests {
         let mut none = vec![0u8; 8];
         Ancillary::default().write_post_plte(&mut none, DeflateEncoder::DEFAULT_EFFORT, RGB8);
         assert_eq!(find_chunk(&none, b"caBX"), None);
+    }
+
+    /// §11.3.2.3 gives the profile name printable Latin-1, and the reader decodes it one byte per
+    /// character, so a name written as UTF-8 comes back as a different name — and a 79-byte one
+    /// holding a character above U+007F comes back not at all. Kills the Latin-1 conversion of
+    /// the name in [`Ancillary::write_pre_plte`].
+    #[test]
+    fn an_iccp_profile_name_is_written_as_latin1() {
+        let a = Ancillary {
+            iccp: Some(("café".to_string(), b"profile".to_vec())),
+            ..Default::default()
+        };
+        let mut pre = vec![0u8; 8];
+        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        let iccp = find_chunk(&pre, b"iCCP").unwrap();
+        assert_eq!(&iccp[..5], b"caf\xE9\0");
     }
 
     #[test]
