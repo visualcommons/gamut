@@ -7,13 +7,21 @@
 //!
 //! ## The check beyond the crash oracle
 //!
-//! **The geometry that arrives equals the geometry the tags declare.** `decode_page_samples` reads
-//! the page's dimensions once, runs the strip/tile assembly, the predictor pass and the photometric
-//! unpack, and only then builds the `DecodedImage` those dimensions travel out in; the buffer a
-//! caller receives carries whatever that stage, `RawImage::new` and `convert_from_raw` between them
-//! made of it. A stage that rewrites the geometry it hands on — a crop, an orientation, a tile-grid
-//! rounding — is accepted by every constructor on the way, produces no crash, and is contradicted
-//! only by the tags.
+//! **The geometry that arrives equals the geometry the tags declare.** Its reach is narrow, and is
+//! stated exactly so that nobody reads more into it. Both sides come from one tag reader:
+//! `decode_page_samples` calls the same `info::page_info` that `info_page` returns, so a defect *in
+//! that reader* moves both sides together and this check sees nothing of it. What it does see is
+//! the path the reader's dimensions travel after that, to the buffer a caller receives:
+//!
+//! - the copy into locals, `let (width, height) = (info.width as usize, info.height as usize)`;
+//! - the copy back out, where `decode_page_samples` builds `DecodedImage { dims: Dimensions { width,
+//!   height }, .. }`;
+//! - `convert_from_raw`, which gives its output `src.dims` through `ImageBuf::zeroed`.
+//!
+//! No crop, orientation or tile-rounding stage exists between those points today. Such a stage is
+//! the defect class this check would also report if one were added — accepted by every constructor
+//! on the way, no crash, contradicted only by the tags — but it is a class the code does not hold,
+//! not one the check is currently searching.
 //!
 //! Injection that proved it fires (re-runnable): at the point `decode_page_samples` builds its
 //! `DecodedImage`, swap `width` and `height` — an orientation stage, volume-preserving, so nothing
@@ -98,7 +106,8 @@ fuzz_target!(|data: &[u8]| {
         match (&info, &image) {
             (Ok(info), Ok(image)) => {
                 // The live check: the geometry that arrives, against the geometry the tags
-                // declare. Every stage between the tag reader and this buffer could rewrite it.
+                // declare. Both come from one tag reader, so it reaches only the copies between
+                // that reader and this buffer, and `convert_from_raw`'s dims (module docs).
                 let decoded = image.dimensions();
                 assert_eq!(
                     (decoded.width, decoded.height),

@@ -193,7 +193,12 @@ defect the check named and getting nothing back:
 - **a wrapper against the expression its own body is.** `gamut_ifd::read` against
   `IfdReader::open(..)?.read_file()` is one function call written twice.
 - **two sides that come from one reader.** A decoded-versus-described geometry check sees nothing
-  when the decoder and the probe share a tag reader.
+  *of the reader* when the decoder and the probe share one: a defect there moves both sides
+  together. What it keeps is only the path the reader's values travel afterwards — in
+  `gamut-tiff`, the two lines copying `page_info`'s dimensions into `DecodedImage` and
+  `convert_from_raw`'s output dims. That reach is narrow but not empty (a transposition in those
+  lines fails it on any non-square file), so such a check may be listed, but with that reach
+  written beside it, never as a check on the reader.
 - **a value silently derived from the value it is compared with.** A decode's sample count looks
   like the pixel pipeline's own output, but `gamut_core::convert::convert_from_raw` allocates its
   result as `ImageBuf::<Q>::zeroed(src.dims)` — so the count *is* the dimensions' product, and

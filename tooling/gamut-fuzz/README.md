@@ -121,7 +121,7 @@ assertions are structure pins (below) — and runs for the crash oracle alone, w
 | target | crate | entry points | check beyond the crash oracle |
 |---|---|---|---|
 | `ifd_read` | `gamut-ifd` | `read`, `read_tree`, `read_audited` | the dual-ledger audit is complete — no byte read outside a claim, **and** no claim unread |
-| `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | the geometry the decode hands back equals the geometry the tags declare, after every stage that could rewrite it |
+| `tiff_decode` | `gamut-tiff` | `TiffDecoder::{page_count,info_page,decode_page}` | the geometry the decode hands back equals the geometry the tags declare — reaching only the two lines that copy the shared tag reader's dimensions into `DecodedImage` and `convert_from_raw`'s output dims, never the reader itself |
 | `dng_decode` | `gamut-dng` | `DngDecoder::{decode,verify_new_raw_image_digest}` | none — the crash oracle alone; its two assertions are structure pins |
 | `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `read`, `BoxReader` | the segments tile `0..len` exactly — contiguous, **and** covering to end of file |
 | `heic_container` | `gamut-heic` | `HeifContainer::parse` | every accessor agrees with the segment list, **and** every borrowed slice lies inside `data()` |
@@ -151,7 +151,7 @@ check spans several bodies that each carry the contract on their own.
 |---|---|---|
 | no byte read outside a claim | `ifd_read` | 1 — header claimed as `header_size() - 1` |
 | no claim unread | `ifd_read` | 1 — header claimed as `header_size() + 1` |
-| the geometry that arrives equals the geometry the tags declare | `tiff_decode` | 1 — transpose the `DecodedImage` dimensions |
+| the geometry that arrives equals the geometry the tags declare (reach: the copies after the shared tag reader) | `tiff_decode` | 1 — transpose the `DecodedImage` dimensions |
 | the segments are contiguous | `isobmff_boxes` | 1 — record a box as `b.offset + 8..end` |
 | the segments cover to end of file | `isobmff_boxes` | 1 — `segments.pop()` before the return |
 | every accessor agrees with the segment list | `heic_container` | 6 — `boxes`/`appended_stream`/`trailer`, each under- and over-reporting |
@@ -182,31 +182,34 @@ defect it advertised produced no report:
    expression* on both sides.
 5. `tiff_decode` claimed that `info_page` refuses the index `page_count` returns — which reduces to
    indexing a vector one past its own length, both sides being `read(data)?.ifds`.
-6. `tiff_decode` claimed that the described and decoded geometry agree, which sees only the few
-   lines copying one into the other, because `decode_page_samples` says outright that "everything
-   the page *declares* comes from one shared reader".
-7. `tiff_decode`'s replacement for 5 and 6 — the number of samples the decode physically yielded,
-   against the declared geometry — was **also** one of these, and was listed as the row's check for
-   a round. `convert_from_raw` allocates its output as `ImageBuf::<Q>::zeroed(src.dims)`, so the
-   returned count is the *dimensions'* product by construction: the assertion is the geometry
-   comparison times a constant on both sides, and a transposition injected where the decode builds
-   its `DecodedImage` passes it with exit 0. The geometry pair — dropped as entry 6 — is what fires
-   on that transposition, so it is back, and the sample count is a pin (below).
-8. `isobmff_boxes` claimed the box cursor strictly advances. `BoxReader::next_box` reads its
+6. `tiff_decode`'s replacement for 5 — the number of samples the decode physically yielded, against
+   the declared geometry — was listed as the row's check for a round. `convert_from_raw` allocates
+   its output as `ImageBuf::<Q>::zeroed(src.dims)`, so the returned count is the *dimensions'*
+   product by construction: the assertion is the geometry comparison times a constant on both
+   sides, and a transposition injected where the decode builds its `DecodedImage` passes it with
+   exit 0. It is a pin now (below).
+
+   The geometry comparison itself is **not** on this list, though an earlier round put it here.
+   That round was right about its reach and wrong about what the reach means: because the probe
+   and the decoder share one tag reader, the pair sees nothing of that reader — only the lines that
+   copy its dimensions on to the caller's buffer. That reach is narrow but not empty, and the
+   transposition above is a defect in exactly those lines that any non-square file reports. So it
+   is the row's listed check, with the reach written into the row rather than implied.
+7. `isobmff_boxes` claimed the box cursor strictly advances. `BoxReader::next_box` reads its
    4-byte size and 4-byte type through `take` before any success return, so no declared box size
    can stall the cursor: with the `size < header_size` guard removed, 851 173 executions over
    61 seconds reported nothing, while a `self.pos` rewind reports on the first seed.
-9. `heic_container` checked that the segments tile `0..len`. `HeifContainer::parse` stores
+8. `heic_container` checked that the segments tile `0..len`. `HeifContainer::parse` stores
    `gamut_isobmff::walk_segments(data)?` verbatim, so that is the same assertion over the same
    values as `isobmff_boxes`'s — the same injection produced the *identical* message in both — on a
    narrower input set. Two ten-minute runners searching one function, at a measured-zero marginal
    yield.
-10. `dng_decode` claimed the raw image that *arrives* holds exactly `width × height × planes`
-    samples "after every rewriting stage". There is no such stage: `RawImage`'s fields are private,
-    both constructors refuse any other count through `check_sample_count`, and the decoder only
-    calls `with_*` setters afterwards, none of which touches `samples` or `dims` — linearisation,
-    active area and crop are recorded for a consumer, never applied. The injection that stood as
-    its evidence sat inside a constructor, after its own gate: a defect no file can express.
+9. `dng_decode` claimed the raw image that *arrives* holds exactly `width × height × planes`
+   samples "after every rewriting stage". There is no such stage: `RawImage`'s fields are private,
+   both constructors refuse any other count through `check_sample_count`, and the decoder only
+   calls `with_*` setters afterwards, none of which touches `samples` or `dims` — linearisation,
+   active area and crop are recorded for a consumer, never applied. The injection that stood as
+   its evidence sat inside a constructor, after its own gate: a defect no file can express.
 
 Calling any of them a differential overstated what the tier proves.
 
