@@ -42,14 +42,24 @@ use crate::thumbnail::Thumbnail;
 #[non_exhaustive]
 pub enum TagConstraintError {
     /// The value's field type is not one CIPA DC-008 permits for the tag.
-    #[error("{tag}: CIPA DC-008 requires {expected}, not {actual}")]
+    ///
+    /// Both sides are typed, so a caller can act on the refusal without parsing the message; the
+    /// [`Display`](core::fmt::Display) rendering spells them the way the spec does
+    /// (`"FNumber: CIPA DC-008 requires RATIONAL, not SHORT"`).
+    #[error(
+        "{tag}: CIPA DC-008 requires {}, not {}",
+        spec_type_list(.expected),
+        spec_type_name(*.actual)
+    )]
     FieldType {
         /// The tag's canonical name.
         tag: &'static str,
-        /// The permitted type(s), as the spec writes them (e.g. `"SHORT or LONG"`).
-        expected: String,
-        /// The type the offered value would have been written as.
-        actual: String,
+        /// The permitted type(s): exactly the tag's [`ExifTag::field_types`], never empty here.
+        expected: &'static [FieldType],
+        /// The on-disk field-type code the offered value would have been written with
+        /// ([`Value::type_code`]). A code rather than a [`FieldType`], because a
+        /// [`Value::Unknown`] carries a code no `FieldType` names.
+        actual: u16,
     },
     /// The value has a component count CIPA DC-008 does not allow for the tag.
     #[error("{tag}: CIPA DC-008 requires a count of {expected}, not {actual}")]
@@ -117,8 +127,8 @@ pub fn check_tag(tag: ExifTag, value: &Value) -> core::result::Result<(), TagCon
     if !types.is_empty() && !types.iter().any(|&t| Some(t) == value.field_type()) {
         return Err(TagConstraintError::FieldType {
             tag: tag.name(),
-            expected: spec_type_list(types),
-            actual: spec_type_name(value.type_code()),
+            expected: types,
+            actual: value.type_code(),
         });
     }
 
@@ -603,6 +613,15 @@ mod tests {
     #[test]
     fn check_tag_rejects_a_type_the_spec_does_not_list() {
         let err = check_tag(ExifTag::FNumber, &Value::Short(vec![28])).expect_err("wrong type");
+        // The fields are machine-readable: the tag's own type list and the offered type code.
+        assert_eq!(
+            err,
+            TagConstraintError::FieldType {
+                tag: "FNumber",
+                expected: &[FieldType::Rational],
+                actual: 3,
+            }
+        );
         assert_eq!(
             err.to_string(),
             "FNumber: CIPA DC-008 requires RATIONAL, not SHORT"
