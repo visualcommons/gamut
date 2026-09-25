@@ -227,11 +227,15 @@ The API was frozen after a full-surface review; the additions and breaks:
   returned `Err(Unsupported)`.
 - **Additions since the freeze (#446)** — `TiffMetadata`, `TiffEncodeReport`, `c2pa_exclusions`,
   `tags::C2PA_MANIFEST_STORE`, `TiffEncoder::{with_metadata, with_c2pa_reserved,
-  encode_with_report}`, `TiffDecoder::metadata`, and the `C2paExclusions` re-export that keeps the
-  closure complete. All new items; nothing existing was reshaped. `TiffMetadata` is
-  `#[non_exhaustive]` from the start — a sixth carrier must not cost a major, which is exactly
-  what an exhaustive struct cost `gamut-dng`. The one behavioural change is that tag 52545 is no
-  longer reported as an unknown tag by `deconstruct`, since the crate now reads and writes it.
+  encode_with_report}`, `TiffDecoder::metadata`, the `Anomaly::DuplicateTag` variant (an
+  addition to an enum that was already `#[non_exhaustive]`, so semver-minor), and the
+  `C2paExclusions` re-export that keeps the closure complete. All new items; nothing existing was
+  reshaped. `TiffMetadata` is `#[non_exhaustive]` from the start — a sixth carrier must not cost
+  a major, which is exactly what an exhaustive struct cost `gamut-dng`. Two behavioural changes
+  in `deconstruct`: tag 52545 is no longer reported as an unknown tag, since the crate now reads
+  and writes it; and a directory carrying two entries under one tag is now reported as an
+  `Anomaly::DuplicateTag` of `Severity::Error`, so a file that repeats a tag — previously graded
+  clean — is no longer `is_fully_accounted`.
 - **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
   on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
   diagnostics whose wording is not contractual.
