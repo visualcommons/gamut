@@ -101,10 +101,12 @@ pub fn metadata(data: &[u8]) -> Result<WebpMetadata> {
 /// manifest store.
 ///
 /// The range covers the chunk's **whole** span — the four identifier bytes, the four-byte size
-/// field and the payload — because that is what a `c2pa.hash.data` assertion excludes (C2PA 2.4
-/// §18.5): an update manifest may resize the store, which changes the size field's value as well as
-/// the bytes after it. The RIFF pad byte that follows an odd-length store (RFC 9649 §2.3) is
-/// outside the range; it is framing the container adds, not store.
+/// field and the payload — as [`gamut_riff::c2pa_span`] reports it; that function's docs state the
+/// span's two limits: it does not let a hash survive a store resize (the RIFF *File Size* field at
+/// bytes `4..8` changes too and is hashed), and it overlaps the chunk header, which C2PA 2.4
+/// §18.5.1 forbids a data-hash exclusion to do (the §18.5.1 range is `start + 8..end`). The RIFF
+/// pad byte that follows an odd-length store (RFC 9649 §2.3) is outside the range; it is framing
+/// the container adds, not store.
 ///
 /// This is the read-side twin of the range
 /// [`WebpEncoder::encode_with_report`](crate::WebpEncoder::encode_with_report) returns — the same

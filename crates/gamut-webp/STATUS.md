@@ -78,7 +78,7 @@ a settled charter rather than a wish-list. `gamut-riff` already recognizes every
 | Extended container | `VP8X` | **In scope** | ✅ | ✅ | M3 | Required enabler for lossy alpha, ICC, and metadata. Emitted only when a feature needs it (simple→extended promotion). |
 | Color profile | `ICCP` | **In scope** | ✅ embed | ✅ preserve | M4 | Color correctness on wide-gamut images. |
 | Metadata | `EXIF`, `XMP ` | **In scope** | ✅ embed | ✅ preserve | M4 | Cheap round-trip passthrough; preserved across decode→encode. |
-| C2PA manifest store | `C2PA` | **In scope** | ✅ embed / reserve | ✅ preserve | M4 | Provenance passthrough on the same verbatim terms; C2PA 2.4 §A.3.7 places the chunk, §18.5 defines the exclusion range. Validation is out of scope — see #447. |
+| C2PA manifest store | `C2PA` | **In scope** | ✅ embed / reserve | ✅ preserve | M4 | Provenance passthrough on the same verbatim terms; C2PA 2.4 §A.3.7 places the chunk; the reported exclusion range follows #445 and conflicts with §18.5.1 (open). Validation is out of scope — see #447. |
 | Animation | `ANIM`, `ANMF` | **Out of scope** (tracked only) | ✕ | deferred | M5 | Sequence content, against the image-first charter ("no video sequences") and the single-image `gamut_core` traits. Each `ANMF` frame is an independent keyframe — no codec work needed — but assembly requires a non-trait multi-frame API. Rows kept for container-completeness; a decode-only path may be revisited later. |
 
 Markers: ✅ shipped · ✕ not planned · *deferred* = possible later, no commitment now.
@@ -112,7 +112,7 @@ Owner: [`gamut-riff`](../gamut-riff).
 | `ANMF` per-frame chunk + frame disposal/blend, canvas assembly | §2.7.1.1 | ⊘ | M5 |
 | unknown-chunk passthrough (preserve order) | §2.7.1.6 | ✅ | M4 |
 | `C2PA` manifest store, verbatim, as the **last** sub-chunk of the form | C2PA §A.3.7 | ✅ | M4 |
-| `c2pa.hash.data` exclusion range: whole chunk, pad byte excluded | C2PA §18.5 | ✅ | M4 |
+| `c2pa.hash.data` exclusion range: whole chunk, pad byte excluded | #445; conflicts with C2PA §18.5.1 (open) | ✅ | M4 |
 
 ## B. VP8L bitstream header (RFC 9649 §3.4; Google *Lossless Bitstream*)
 

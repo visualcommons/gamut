@@ -19,8 +19,9 @@ The authority is **RFC 9649 §2** (*WebP Image Format*) and the Google *WebP Con
 in [`references/webp/`](../../references/webp). One carrier comes from outside RFC 9649: the `C2PA` chunk of C2PA 2.4 §A.3.7, whose manifest
 store is carried as opaquely as `ICCP`/`EXIF`/`XMP ` are. The specification is vendored in
 [`references/c2pa/`](../../references/c2pa); §A.3.7 fixes the chunk's identifier and its place as
-the last sub-chunk of the form, and §18.5 fixes what a `c2pa.hash.data` exclusion covers. Nothing
-here parses, signs or validates a store.
+the last sub-chunk of the form; §18.5.1 constrains a `c2pa.hash.data` exclusion, and the span
+reported here conflicts with it (see *Settled design decisions*, where that one is marked open).
+Nothing here parses, signs or validates a store.
 
 The canonical RIFF document is *cited* by RFC 9649
 (as a Library of Congress FDD URL), not vendored, so the wider RIFF vocabulary it defines — `LIST`,
@@ -85,7 +86,7 @@ whose declared owner is this crate. Every row there is ✅ or ⊘ as of v1.
 | `EXIF` / `XMP ` metadata, verbatim, first of each kind wins | §2.7.1.5 | ✅ |
 | Unknown chunks: ignored on read, order preserved, re-emittable | §2.7.1.6 | ✅ |
 | `C2PA` manifest store, verbatim, written as the last sub-chunk of the form | C2PA §A.3.7 | ✅ |
-| `c2pa.hash.data` exclusion span: whole chunk, pad byte excluded | C2PA §18.5 | ✅ |
+| `c2pa.hash.data` exclusion span: whole chunk, pad byte excluded | #445; conflicts with C2PA §18.5.1 (open) | ✅ |
 | `ANIM` / `ANMF` animation | §2.7.1.1 | ⊘ out of scope |
 
 ## Settled design decisions (intentional, not gaps)
@@ -130,11 +131,16 @@ whose declared owner is this crate. Every row there is ✅ or ⊘ as of v1.
   the reserved bits "MUST be 0", so presence is decided by the chunk alone — the same rule the crate
   already applies to `ICCP`/`EXIF`/`XMP `, where flags are advisory.
 - **The reported span is the whole chunk, minus the pad byte.** `c2pa_span` covers the identifier
-  and the size field as well as the payload, because an update manifest may resize the store and
-  that changes the size field's value (§18.5). The RIFF pad byte after an odd-length store stays
-  outside it: §2.3 makes the byte framing the container adds, which is why `Chunk::payload` excludes
-  it too. (§18.7.3.5's *general box hash* draws the boundary the other way, "to the padding byte, if
-  any, inclusive" — that is `c2pa.hash.boxes`, a different assertion this crate does not serve.)
+  and the size field as well as the payload, as issue #445 specifies. That does **not** let a hash
+  survive a store resize: a resize also changes the RIFF *File Size* field at bytes `4..8`, which
+  is outside the span and so hashed; only an equal-length fill leaves the hash intact. It also
+  conflicts with C2PA 2.4 §18.5.1, under which a data-hash exclusion "shall not overlap with any
+  header or length field associated with that unit, except for freebox or pad data", with no RIFF
+  exception; the §18.5.1 range is the payload alone, `span.start + 8..span.end`. Which one the
+  crate reports is open, pending a maintainer decision. The RIFF pad byte after an odd-length store
+  stays outside it: §2.3 makes the byte framing the container adds, which is why `Chunk::payload`
+  excludes it too. (§18.7.3.5's *general box hash* draws the boundary the other way, "to the
+  padding byte, if any, inclusive" — that is `c2pa.hash.boxes`, a different assertion this crate does not serve.)
 - **A non-zero pad byte fails its chunk.** The byte "MUST be 0 to conform with RIFF" (§2.3) and is
   attacker-controlled otherwise; a chunk whose framing is already known bad is never handed out. A
   pad byte *absent* from a final chunk still parses — there is then nothing to check.

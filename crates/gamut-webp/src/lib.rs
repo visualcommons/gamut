@@ -82,7 +82,8 @@
 //!
 //! [`WebpEncoder::encode_with_report`] returns the file together with the chunk's byte range, and
 //! [`c2pa_span`] recovers that range from any WebP file. The range is the chunk's whole span, which
-//! is what a `c2pa.hash.data` assertion excludes (§18.5); [`metadata`] surfaces the store's bytes
+//! overlaps the chunk header that C2PA 2.4 §18.5.1 keeps out of a `c2pa.hash.data` exclusion — see
+//! [`c2pa_span`] for that open conflict; [`metadata`] surfaces the store's bytes
 //! themselves as [`WebpMetadata::c2pa`].
 //!
 //! A file carries **exactly one** store, and that is enforced rather than assumed: the `C2PA` chunk
