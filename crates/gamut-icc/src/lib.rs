@@ -3,8 +3,9 @@
 //! An ICC profile is the self-describing colour-characterization blob embedded in images (the WebP
 //! `ICCP` chunk, the AVIF/HEIF `colr` box of type `prof`, a JPEG `APP2` segment): a 128-byte header,
 //! a tag table, then the tag element data the table points at. It is a flat, offset-indexed binary
-//! format that needs neither the TIFF/IFD machinery nor XML, so this crate depends only on
-//! [`gamut_core`] (plus `md-5`, for the §7.2.18 profile ID).
+//! format that needs neither the TIFF/IFD machinery nor XML, so this crate's whole dependency list
+//! is [`gamut_core`], [`gamut_color`] (the colorimetry behind the built-in profile constructors
+//! below), `md-5` (for the §7.2.18 profile ID) and `thiserror`.
 //!
 //! Layouts follow **ICC.1:2022** (profile version 4.4, equivalent to ISO 15076-1; see
 //! `references/icc`). Profile **v2** — still the most common version in real images — is supported,
@@ -17,6 +18,15 @@
 //! [`IccWriter`] carry options (strict parsing; profile-ID recomputation).
 //! [`IccProfile::validate`] reports any ICC.1:2022 §8 required tags missing for the profile's
 //! device class.
+//!
+//! # Built-in profiles
+//!
+//! [`IccProfile::builtin`] constructs a spec-valid v4 matrix/TRC profile for a named
+//! [`BuiltinProfile`] space, [`IccProfile::gray_with_gamma`] the monochrome equivalent, and
+//! [`IccProfile::from_cicp`] / [`IccProfile::from_source_profile`] the same from what a codec
+//! actually signals — an H.273 code-point triple, or a [`gamut_color::SourceProfile`]. Each
+//! returns `None` for signalling no matrix/TRC profile can describe. The colorimetry behind them
+//! is [`gamut_color`]'s, never restated here; see `src/builtin.rs`.
 //!
 //! ```no_run
 //! use gamut_icc::{IccProfile, KnownTag, TagData};
@@ -38,8 +48,10 @@
 //! defined in §10 — iccMAX's `multiProcessElementsType`, or private/unregistered types — is
 //! preserved verbatim as [`TagData::Raw`], so every profile round-trips losslessly regardless of
 //! what it carries. Applying a profile's transform (a CMM), and building transforms from
-//! [`gamut_color`](https://docs.rs/gamut-color), are out of scope — the `to_f64`/`eval` accessors
-//! are the seam for that — as is **iccMAX** (`ICC.2`), a separate next-generation profile format.
+//! [`gamut_color`], are out of scope — the `to_f64`/`eval` accessors are the seam for that — as is
+//! **iccMAX** (`ICC.2`), a separate next-generation profile format. Note the distinction from the
+//! built-in constructors above: this crate reads `gamut-color`'s colorimetry to *describe* a
+//! colour space, and still applies nothing.
 //!
 //! # Stability
 //!
@@ -62,6 +74,7 @@
 //!   always serializes. The format's `u32` sizes and offsets cap a serialized profile at 4 GiB.
 #![forbid(unsafe_code)]
 
+mod builtin;
 mod bytes;
 mod cicp;
 mod colorant;
@@ -83,6 +96,7 @@ mod tags;
 mod validate;
 mod writer;
 
+pub use builtin::BuiltinProfile;
 pub use cicp::Cicp;
 pub use colorant::{Colorant, ColorantOrder, ColorantTable};
 pub use curve::{Curve, CurveOrParametric, ParametricCurve};
