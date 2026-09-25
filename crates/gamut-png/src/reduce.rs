@@ -556,12 +556,8 @@ fn build_indexed(
         // Trailing fully-opaque entries may be omitted (they default to opaque). With the
         // transparent entries gathered at the front this now trims everything after them.
         //
-        // No length guard: this arm runs only when some entry's alpha is not 255, so the
-        // `last() == 255` test always halts the loop before the vector empties. Ordering makes
-        // that argument stronger rather than weaker -- the entry that halts it is at index 0, so
-        // the loop stops with at least one element left. The `alphas.len() > 1` that used to be
-        // here therefore decided nothing, and `>` vs `>=` was an equivalent mutant no test could
-        // kill (#110) -- removed rather than excluded.
+        // The trim truncates just past the last non-opaque alpha, and this arm runs only when
+        // one exists, so the `tRNS` written here always keeps at least one byte.
         palette::trim_trailing_opaque(&mut alphas);
         Some(alphas)
     } else {
