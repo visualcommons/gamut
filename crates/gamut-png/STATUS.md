@@ -203,6 +203,18 @@ back garbled, and a 79-byte name holding one grew past the 79 bytes the reader a
 the profile itself on read-back. Validating a name a caller supplies by hand — empty, over-long,
 null-bearing or outside Latin-1 — is [#619](https://github.com/visualcommons/gamut/issues/619).
 
+**Auto-reduce keeps to the profile's colour family.** §11.3.2.3: "The color space of the ICC
+profile shall be an RGB color space for color images (color types 2, 3, and 6), or a greyscale
+color space for greyscale images (color types 0 and 4)." Grey content can be written in either
+family, so a reducer free to choose put an RGB profile under a greyscale header — which is what
+`gamut convert`'s default path did to grey content from an RGB file, and libpng rejects that
+pairing and ignores the profile. The reducer now reads the profile's data colour space (ICC.1:2022
+§7.2.6, bytes 16–19) and withholds what falls outside it: greyscale under an RGB profile; the
+palette, and the RGB layout the pixels arrived in, for grey content under a greyscale one. Pixels
+whose own layout contradicts the profile with no reduction to resolve it are written as they are:
+the colour type is then the caller's, and the encoder does not rewrite colour data to match a
+profile.
+
 **Only a null in a keyword refuses the encode. Everything else §11.3.3 asks for is a notice.**
 §15 gives the BCP 14 keywords force "when, and only when, they appear in all capitals", and every
 statement §11.3.3.1 makes about a keyword's shape is lowercase — "Keywords shall contain only

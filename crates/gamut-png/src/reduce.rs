@@ -18,7 +18,48 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
+use crate::color::ColorType;
 use crate::pack::gray8_scale;
+
+/// The PNG colour family an embedded ICC profile pins the written colour type to.
+///
+/// §11.3.2.3: "The color space of the ICC profile shall be an RGB color space for color images
+/// (color types 2, 3, and 6), or a greyscale color space for greyscale images (color types 0 and
+/// 4)." Grey *content* can be written in either family, so a reduction free to choose would put
+/// an RGB profile under a greyscale header — a pairing libpng rejects, ignoring the profile.
+/// Content whose own layout already contradicts the profile has no reduction that fixes it; the
+/// constraint then changes nothing, and the pairing is the caller's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Family {
+    /// No profile, or one whose data colour space no PNG colour type matches: any reduction.
+    Any,
+    /// An RGB profile: colour types 2, 3 and 6.
+    Colour,
+    /// A greyscale profile: colour types 0 and 4.
+    Grey,
+}
+
+impl Family {
+    /// The family `profile`'s header names. ICC.1:2022 §7.2.6 puts the data colour space
+    /// signature at bytes 16–19; Table 19 spells the two PNG can carry `'RGB '` and `'GRAY'`.
+    pub(crate) fn of_profile(profile: &[u8]) -> Self {
+        match profile.get(16..20) {
+            Some(b"RGB ") => Self::Colour,
+            Some(b"GRAY") => Self::Grey,
+            _ => Self::Any,
+        }
+    }
+
+    /// Whether an image written as `color` agrees with this family.
+    pub(crate) fn admits(self, color: ColorType) -> bool {
+        let grey = matches!(color, ColorType::Grayscale | ColorType::GrayscaleAlpha);
+        match self {
+            Self::Any => true,
+            Self::Colour => !grey,
+            Self::Grey => grey,
+        }
+    }
+}
 
 /// A chosen reduced encoding for an image.
 pub enum Reduced {
@@ -255,6 +296,12 @@ fn colour_key(pixels: &[u8], channels: usize) -> Option<[u8; 4]> {
 /// and returns the lossless reductions that beat the input encoding — see [`Reductions`] for why
 /// that is one candidate or two rather than always one.
 pub fn analyze8(pixels: &[u8], channels: usize) -> Reductions {
+    analyze8_for(pixels, channels, Family::Any)
+}
+
+/// [`analyze8`] without the candidates §11.3.2.3 takes away from `family` (see [`Family`]): an
+/// RGB profile gets no greyscale reduction, and a greyscale profile no palette for grey content.
+pub(crate) fn analyze8_for(pixels: &[u8], channels: usize, family: Family) -> Reductions {
     debug_assert!((1..=4).contains(&channels));
     let pixel_count = pixels.len() / channels;
 
@@ -283,9 +330,16 @@ pub fn analyze8(pixels: &[u8], channels: usize) -> Reductions {
         }
     }
 
+    // An RGB profile takes the greyscale family away from grey content (§11.3.2.3). Treated as
+    // colour, the content still reaches the alpha drop, the colour key and the palette.
+    let all_gray = all_gray && family != Family::Colour;
+    // A greyscale profile takes away the palette (colour type 3) — the one colour-family
+    // candidate grey content can reach, since the alpha drop and the colour key follow `all_gray`.
+    let palette_excluded = all_gray && family == Family::Grey;
+
     // Estimate the raw size (bytes before compression) of each viable encoding; smaller is better.
     let input_size = pixel_count * channels;
-    let palette_size = if too_many_colors {
+    let palette_size = if too_many_colors || palette_excluded {
         usize::MAX
     } else {
         let depth = index_bit_depth(palette.len());
@@ -422,6 +476,13 @@ pub fn analyze8(pixels: &[u8], channels: usize) -> Reductions {
 /// finished file would drop the encoder all the way back to 16 bits, throwing away a halving that
 /// costs nothing.
 pub fn analyze16(samples: &[u16], channels: usize) -> Reductions {
+    analyze16_for(samples, channels, Family::Any)
+}
+
+/// [`analyze16`] without the candidates §11.3.2.3 takes away from `family`, as in
+/// [`analyze8_for`]. The plain demotion keeps the input's own layout, so it is never further from
+/// the family than the input already was.
+pub(crate) fn analyze16_for(samples: &[u16], channels: usize, family: Family) -> Reductions {
     debug_assert!((1..=4).contains(&channels));
     if let Some(demoted) = demote16(samples) {
         let plain = |demoted| match channels {
@@ -433,7 +494,7 @@ pub fn analyze16(samples: &[u16], channels: usize) -> Reductions {
             3 => Reduced::Rgb8(demoted),
             _ => Reduced::Rgba8(demoted),
         };
-        return match analyze8(&demoted, channels) {
+        return match analyze8_for(&demoted, channels, family) {
             Reductions::None => Reductions::ChunkFree(plain(demoted)),
             Reductions::ChunkFree(reduced) => Reductions::ChunkFree(reduced),
             Reductions::Chunked {
@@ -456,6 +517,9 @@ pub fn analyze16(samples: &[u16], channels: usize) -> Reductions {
             all_gray &= px[0] == px[1] && px[1] == px[2];
         }
     }
+    // As in `analyze8_for`: an RGB profile takes the greyscale family away from grey content.
+    // There is no 16-bit palette, so a greyscale profile has nothing here to take away.
+    let all_gray = all_gray && family != Family::Colour;
 
     // Unlike the 8-bit analysis there is no size estimate to weigh: the candidates' gates are
     // mutually exclusive, and each strictly shrinks the channel count, so whichever gate matches
@@ -1347,5 +1411,111 @@ mod tests {
             }
             _ => panic!("expected a chunk-free GrayAlpha16Be"),
         }
+    }
+
+    /// A 128-byte profile header whose data colour space (ICC.1:2022 §7.2.6, bytes 16–19) is
+    /// `space`.
+    fn profile(space: &[u8; 4]) -> Vec<u8> {
+        let mut icc = vec![0u8; 128];
+        icc[16..20].copy_from_slice(space);
+        icc
+    }
+
+    #[test]
+    fn a_profile_names_its_family_by_its_data_colour_space() {
+        assert_eq!(Family::of_profile(&profile(b"RGB ")), Family::Colour);
+        assert_eq!(Family::of_profile(&profile(b"GRAY")), Family::Grey);
+        // No PNG colour type carries CMYK, so there is no family to keep a reduction in.
+        assert_eq!(Family::of_profile(&profile(b"CMYK")), Family::Any);
+        // Too short to hold the field at all.
+        assert_eq!(Family::of_profile(&profile(b"RGB ")[..19]), Family::Any);
+    }
+
+    /// §11.3.2.3's two lists, one colour type per assertion so that each alternative of the
+    /// greyscale or-pattern is pinned on its own.
+    #[test]
+    fn each_family_admits_exactly_the_colour_types_section_11_3_2_3_gives_it() {
+        let grey = [ColorType::Grayscale, ColorType::GrayscaleAlpha];
+        let colour = [
+            ColorType::Truecolor,
+            ColorType::Indexed,
+            ColorType::TruecolorAlpha,
+        ];
+        for color in grey {
+            assert!(Family::Grey.admits(color), "{color:?}");
+            assert!(!Family::Colour.admits(color), "{color:?}");
+            assert!(Family::Any.admits(color), "{color:?}");
+        }
+        for color in colour {
+            assert!(Family::Colour.admits(color), "{color:?}");
+            assert!(!Family::Grey.admits(color), "{color:?}");
+            assert!(Family::Any.admits(color), "{color:?}");
+        }
+    }
+
+    /// 64 opaque grey RGBA pixels over four values no sub-byte depth represents, so the palette
+    /// (2-bit indices) beats 8-bit greyscale on the raw estimate.
+    fn four_greys() -> Vec<u8> {
+        (0..64u8)
+            .flat_map(|i| [i % 4 + 1; 3].into_iter().chain([255]))
+            .collect()
+    }
+
+    /// Kills the RGB-profile override of `all_gray` in [`analyze8_for`]: grey content keeps the
+    /// palette and gets the alpha drop to RGB instead of greyscale.
+    #[test]
+    fn an_rgb_profile_takes_greyscale_away_from_grey_content() {
+        assert!(matches!(
+            analyze8(&four_greys(), 4),
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { .. },
+                chunk_free: Some(Reduced::Gray { depth: 8, .. }),
+            }
+        ));
+        assert!(matches!(
+            analyze8_for(&four_greys(), 4, Family::Colour),
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { .. },
+                chunk_free: Some(Reduced::Rgb8(_)),
+            }
+        ));
+    }
+
+    /// Kills `palette_excluded` in [`analyze8_for`]: a greyscale profile takes the palette away
+    /// from grey content, and only from grey content — colour content has no greyscale encoding
+    /// for it to protect.
+    #[test]
+    fn a_greyscale_profile_takes_the_palette_away_from_grey_content_only() {
+        assert!(matches!(
+            analyze8_for(&four_greys(), 4, Family::Grey),
+            Reductions::ChunkFree(Reduced::Gray { depth: 8, .. })
+        ));
+        let four_colours: Vec<u8> = (0..64u8).flat_map(|i| [i % 4 + 1, 9, 9, 255]).collect();
+        assert!(matches!(
+            analyze8_for(&four_colours, 4, Family::Grey),
+            Reductions::Chunked {
+                chunked: Reduced::Indexed { .. },
+                ..
+            }
+        ));
+    }
+
+    /// Kills the RGB-profile override in [`analyze16_for`]'s non-demotable arm.
+    #[test]
+    fn an_rgb_profile_takes_16_bit_greyscale_away_from_grey_content() {
+        let rgba16: Vec<u16> = (0..90u32)
+            .flat_map(|i| {
+                let v = (i * 501 + 1) as u16;
+                [v, v, v, u16::MAX]
+            })
+            .collect();
+        assert!(matches!(
+            analyze16(&rgba16, 4),
+            Reductions::ChunkFree(Reduced::Gray16Be(_))
+        ));
+        assert!(matches!(
+            analyze16_for(&rgba16, 4, Family::Colour),
+            Reductions::ChunkFree(Reduced::Rgb16Be(_))
+        ));
     }
 }

@@ -36,7 +36,7 @@ use crate::decoded::{
 };
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::PngPalette;
-use crate::reduce::{self, Reduced, Reductions};
+use crate::reduce::{self, Family, Reduced, Reductions};
 use crate::{ihdr, pack};
 
 /// IDAT payload cap. A decoder concatenates consecutive IDATs, so the split is transparent; a
@@ -365,6 +365,14 @@ impl PngEncoder {
     ///
     /// Off by default so the output colour type and depth match the input. Enable it — ideally
     /// with [`Level::Best`] and [`FilterStrategy::BruteForce`] — for the smallest possible files.
+    ///
+    /// With an ICC profile set ([`with_icc_profile`](Self::with_icc_profile)), the reduction stays
+    /// in the colour family the profile's header names, as §11.3.2.3 requires ("an RGB color
+    /// space for color images (color types 2, 3, and 6), or a greyscale color space for greyscale
+    /// images (color types 0 and 4)"): grey content under an RGB profile is not reduced to
+    /// greyscale, and grey content under a greyscale profile is not written as a palette or left
+    /// in an RGB layout. Pixels whose own layout contradicts the profile, with no reduction that
+    /// resolves it, are written as they are.
     #[must_use]
     pub fn with_auto_reduce(mut self, enabled: bool) -> Self {
         self.auto_reduce = enabled;
@@ -568,6 +576,11 @@ impl PngEncoder {
     ///
     /// May be combined with [`with_srgb`](Self::with_srgb); see there for why the pair is
     /// written rather than refused, and which chunk a reader honours.
+    ///
+    /// §11.3.2.3 requires an RGB profile for colour types 2, 3 and 6 and a greyscale one for 0
+    /// and 4. Under [`with_auto_reduce`](Self::with_auto_reduce) the reduction keeps to the
+    /// family the profile's header names; otherwise the colour type is the pixels' own, and
+    /// matching the profile to them is the caller's.
     #[must_use]
     pub fn with_icc_profile(mut self, name: &str, profile: &[u8]) -> Self {
         self.ancillary.iccp = Some((name.to_string(), profile.to_vec()));
@@ -964,7 +977,8 @@ impl PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
-                reduce::analyze8(samples, channels),
+                reduce::analyze8_for(samples, channels, self.profile_family()),
+                color,
                 |o| {
                     self.write_png(
                         (dims.width, dims.height),
@@ -998,7 +1012,8 @@ impl PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
-                reduce::analyze16(samples, channels),
+                reduce::analyze16_for(samples, channels, self.profile_family()),
+                color,
                 |o| self.encode_16bit(dims, samples, color, o),
                 out,
             );
@@ -1059,6 +1074,14 @@ impl PngEncoder {
         self.clean_transparent
             .then(|| clean_transparent16(samples, channels))
             .flatten()
+    }
+
+    /// The colour family the embedded ICC profile, if any, pins a reduction to (§11.3.2.3).
+    fn profile_family(&self) -> Family {
+        self.ancillary
+            .iccp
+            .as_ref()
+            .map_or(Family::Any, |(_, profile)| Family::of_profile(profile))
     }
 
     /// Encodes a 16-bit-per-sample image, serialising samples big-endian (PNG's network byte order).
@@ -1215,10 +1238,17 @@ impl PngEncoder {
     /// (+ `tRNS`), or a colour key's `tRNS`. A chunk-free winner adds nothing DEFLATE cannot
     /// compress, so the raw comparison that chose it is sound and it is written immediately;
     /// that case is [`Reductions::ChunkFree`], and the analysis, not this function, decides it.
+    ///
+    /// **An embedded ICC profile narrows the race.** §11.3.2.3 pins the colour type to the
+    /// profile's family, and the analysis already withheld the reductions outside it
+    /// ([`Family`]). `native_color` is the input's own layout: where that is outside the family
+    /// — grey content handed over as RGBA under a greyscale profile — it is not a candidate once
+    /// a reduction exists, however small it compresses.
     fn write_reduced_or_native(
         &self,
         dims: Dimensions,
         reductions: Reductions,
+        native_color: ColorType,
         native: impl FnOnce(&mut Vec<u8>) -> Result<usize>,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
@@ -1238,6 +1268,10 @@ impl PngEncoder {
             if prefers_chunk_free(free_encoding.len(), reduced_encoding.len()) {
                 reduced_encoding = free_encoding;
             }
+        }
+        if !self.profile_family().admits(native_color) {
+            out.extend_from_slice(&reduced_encoding);
+            return Ok(reduced_encoding.len());
         }
         let mut native_encoding = Vec::new();
         native(&mut native_encoding)?;
@@ -1472,7 +1506,8 @@ impl EncodeImage<Gray8> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 image.dimensions(),
-                reduce::analyze8(image.as_samples(), 1),
+                reduce::analyze8_for(image.as_samples(), 1, self.profile_family()),
+                ColorType::Grayscale,
                 |o| self.encode_8bit(image, ColorType::Grayscale, o),
                 out,
             );
@@ -1504,7 +1539,8 @@ impl EncodeImage<Rgb8> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 image.dimensions(),
-                reduce::analyze8(image.as_samples(), 3),
+                reduce::analyze8_for(image.as_samples(), 3, self.profile_family()),
+                ColorType::Truecolor,
                 |o| self.encode_8bit(image, ColorType::Truecolor, o),
                 out,
             );
@@ -1546,7 +1582,8 @@ impl EncodeImage<Gray16> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
-                reduce::analyze16(samples, 1),
+                reduce::analyze16_for(samples, 1, self.profile_family()),
+                ColorType::Grayscale,
                 |o| self.encode_16bit(dims, samples, ColorType::Grayscale, o),
                 out,
             );
@@ -1560,7 +1597,8 @@ impl EncodeImage<Rgb16> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
-                reduce::analyze16(samples, 3),
+                reduce::analyze16_for(samples, 3, self.profile_family()),
+                ColorType::Truecolor,
                 |o| self.encode_16bit(dims, samples, ColorType::Truecolor, o),
                 out,
             );
@@ -1853,5 +1891,77 @@ mod tests {
         assert!(clean_transparent16(&grey, 1).is_none(), "no alpha channel");
         let rgb: [u16; 6] = [1, 2, 0, 4, 5, 6];
         assert!(clean_transparent16(&rgb, 3).is_none(), "no alpha channel");
+    }
+
+    /// A profile header whose data colour space (ICC.1:2022 §7.2.6, bytes 16–19) is `space`.
+    fn icc_profile(space: &[u8; 4]) -> Vec<u8> {
+        let mut icc = vec![0u8; 128];
+        icc[16..20].copy_from_slice(space);
+        icc
+    }
+
+    /// Auto-reduces `samples` as `P` under an optional profile, returning the IHDR colour type.
+    fn reduced_color_type<P: gamut_core::Pixel>(samples: &[P::Sample], icc: Option<&[u8]>) -> u8
+    where
+        PngEncoder: EncodeImage<P>,
+    {
+        let dims = Dimensions::new(8, 8).unwrap();
+        let mut encoder = PngEncoder::new().with_auto_reduce(true);
+        if let Some(icc) = icc {
+            encoder = encoder.with_icc_profile("p", icc);
+        }
+        let png = encoder
+            .encode_to_vec(ImageRef::<P>::new(samples, dims).unwrap())
+            .unwrap();
+        png[25]
+    }
+
+    /// §11.3.2.3 puts an RGB profile under colour types 2, 3 and 6 only. Grey RGBA content with
+    /// 64 distinct levels reduces to greyscale on its own; under an RGB profile it keeps the
+    /// colour family and drops only the opaque alpha. Kills `profile_family` and its use in
+    /// `encode_alpha8`, which the CLI's default convert path reaches.
+    #[test]
+    fn auto_reduce_keeps_grey_content_rgb_under_an_rgb_profile() {
+        let greys: Vec<u8> = (0..64u8)
+            .flat_map(|i| [i * 3; 3].into_iter().chain([255]))
+            .collect();
+        assert_eq!(
+            reduced_color_type::<Rgba8>(&greys, None),
+            ColorType::Grayscale.code()
+        );
+        assert_eq!(
+            reduced_color_type::<Rgba8>(&greys, Some(&icc_profile(b"RGB "))),
+            ColorType::Truecolor.code()
+        );
+    }
+
+    /// The input layout is not a race candidate when it is outside the profile's family and a
+    /// reduction inside it exists. Four grey levels as `Gray8` win the race as themselves with no
+    /// profile; under an RGB profile the palette — colour type 3 — is written instead. Kills the
+    /// native exclusion in `write_reduced_or_native`.
+    #[test]
+    fn auto_reduce_does_not_race_a_native_layout_outside_the_profiles_family() {
+        let greys: Vec<u8> = (0..64u8).map(|i| i % 4 + 1).collect();
+        assert_eq!(
+            reduced_color_type::<Gray8>(&greys, None),
+            ColorType::Grayscale.code()
+        );
+        assert_eq!(
+            reduced_color_type::<Gray8>(&greys, Some(&icc_profile(b"RGB "))),
+            ColorType::Indexed.code()
+        );
+    }
+
+    /// A greyscale profile keeps grey RGBA content in colour types 0 and 4: neither a palette
+    /// nor the RGBA layout it arrived in.
+    #[test]
+    fn auto_reduce_keeps_grey_content_grey_under_a_greyscale_profile() {
+        let greys: Vec<u8> = (0..64u8)
+            .flat_map(|i| [i % 4 + 1; 3].into_iter().chain([255]))
+            .collect();
+        assert_eq!(
+            reduced_color_type::<Rgba8>(&greys, Some(&icc_profile(b"GRAY"))),
+            ColorType::Grayscale.code()
+        );
     }
 }
