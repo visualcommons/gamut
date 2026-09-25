@@ -159,16 +159,19 @@ fn gamut_and_adobe_decoders_agree() {
     }
 }
 
-/// The oracle's memory-stream, no-export decode (`decode_dng_in_memory`) reaches the same
-/// stage-1 image as the file-stream, exporting one (`read_raw_dng`) over a file this crate wrote.
+/// The oracle's memory-stream, no-export decode (`decode_dng_in_memory`) reports the same extent
+/// (width, height, planes, sample count) as the file-stream, exporting one (`read_raw_dng`) over a
+/// file this crate wrote.
 ///
 /// This pins the entry point `cargo bench -p gamut-dng --bench codec` times the Adobe SDK with.
-/// That benchmark's whole claim is that its two sides decode the same thing, so the cheaper entry
-/// point must not be a cheaper *decode*. It lives here, in the gated crate, rather than beside the
+/// It compares extents, not pixels: that entry point deliberately carries no samples out, so the
+/// extent is all it can be checked against. A cheaper entry point that decoded a smaller or
+/// different-shaped image would fail here; one that decoded the same extent to different values
+/// would not. It lives here, in the gated crate, rather than beside the
 /// entry point in `tooling/gamut-dng-oracle`: that crate is excluded from the workspace, so a test
 /// there never runs in automation and could not detect the drift it is written to detect.
 #[test]
-fn adobe_in_memory_decode_matches_the_file_decode() {
+fn adobe_in_memory_decode_reports_the_same_extent_as_the_file_decode() {
     let (dng, raw) = encode_cfa(ByteOrder::LittleEndian, 64, 48, 16);
     let exported = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe file-stream decode");
     let extent = gamut_dng_oracle::decode_dng_in_memory(&dng).expect("adobe memory-stream decode");

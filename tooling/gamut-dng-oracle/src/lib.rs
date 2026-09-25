@@ -394,7 +394,8 @@ pub struct DecodedExtent {
 ///
 /// Use [`read_raw_dng`] when you want the samples; this one when you want the time.
 ///
-/// That the two agree is pinned by `adobe_in_memory_decode_matches_the_file_decode` in
+/// That the two report the same extent is pinned by
+/// `adobe_in_memory_decode_reports_the_same_extent_as_the_file_decode` in
 /// `gamut-dng`'s `tests/roundtrip.rs`, not here: this crate is excluded from the workspace, so a
 /// test in it never runs in automation.
 ///
