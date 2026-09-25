@@ -569,8 +569,11 @@ mod tests {
         // Drift guard on the one column no round trip and no oracle can see. exiv2 titles 28 of
         // the 70 datasets it shares with gamut more briefly than IIM 4.2 names them, so comparing
         // names against exiv2 could only ever pin those 28 to a second hand transcription of the
-        // same page. These names come from the standard's own name column instead, so a mistyped
-        // name fails here even if it is mistyped the same way twice.
+        // same page. These names come from the standard's own name column instead, so a name
+        // mistyped in `KNOWN_TAGS` fails here. A name mistyped *identically* in `KNOWN_TAGS` and in
+        // the committed `tests/data/iim-4.2-dataset-names.tsv` passes: this guard reads the
+        // artefact back and nothing here re-derives it from the PDF. The artefact's never-hand-edit
+        // banner carries that residual, not a gate; re-deriving it in CI is issue #623.
         let standard = standard_dataset_names();
         for t in KNOWN_TAGS {
             assert_eq!(
