@@ -258,7 +258,11 @@ fn an_isobmff_movie_is_refused_by_the_heic_parse_not_declined_by_brand() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}; stderr: {stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout: {stdout}; stderr: {stderr}"
+    );
     assert!(
         stderr.contains("image sequences"),
         "the HEIC container parse must be what refuses the file: {stderr}"
