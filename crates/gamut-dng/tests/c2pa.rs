@@ -53,27 +53,27 @@ fn store_is_written_last_verbatim_and_both_ranges_are_reported() {
         let excl = report.c2pa.expect("a store was written");
 
         assert_eq!(
-            excl.store.end(),
+            excl.store().end(),
             dng.len() as u64,
             "{order:?}: the store is last"
         );
         assert_eq!(
-            slice(&dng, excl.store),
+            slice(&dng, excl.store()),
             bytes.as_slice(),
             "{order:?}: verbatim"
         );
-        assert_eq!(excl.count_field.len, 4);
-        let count = order.u32(slice(&dng, excl.count_field).try_into().expect("4 bytes"));
+        assert_eq!(excl.count_field().len, 4);
+        let count = order.u32(slice(&dng, excl.count_field()).try_into().expect("4 bytes"));
         assert_eq!(
             u64::from(count),
-            excl.store.len,
+            excl.store().len,
             "{order:?}: the count is the length"
         );
         // Inside IFD 0's body, which starts at the header's first-IFD offset.
         let (_, _, ifd0) = read_header(&dng).expect("header");
-        assert!(excl.count_field.start > ifd0);
+        assert!(excl.count_field().start > ifd0);
         assert!(
-            excl.count_field.end() < excl.store.start,
+            excl.count_field().end() < excl.store().start,
             "disjoint, count field first"
         );
 
@@ -108,18 +108,18 @@ fn a_reservation_is_zero_filled_and_otherwise_identical_to_a_store_of_its_size()
     assert_eq!(reserved_report, report);
     let excl = report.c2pa.expect("ranges");
     assert_eq!(
-        slice(&reserved, excl.store),
+        slice(&reserved, excl.store()),
         vec![0u8; bytes.len()].as_slice()
     );
     assert_eq!(
-        &reserved[..excl.store.start as usize],
-        &with[..excl.store.start as usize]
+        &reserved[..excl.store().start as usize],
+        &with[..excl.store().start as usize]
     );
     assert_eq!(reserved.len(), with.len());
 
     // Filling the reservation in place yields the store-carrying file, byte for byte.
     let mut filled = reserved;
-    filled[excl.store.start as usize..].copy_from_slice(&bytes);
+    filled[excl.store().start as usize..].copy_from_slice(&bytes);
     assert_eq!(filled, with);
     gamut_dng_oracle::validate_dng(&filled).expect("Adobe DNG SDK must accept the filled file");
 }
@@ -134,13 +134,13 @@ fn a_store_of_a_different_size_moves_no_other_offset() {
         small_report.c2pa.expect("ranges"),
         large_report.c2pa.expect("ranges"),
     );
-    assert_eq!(s.store.start, l.store.start);
-    assert_eq!(s.count_field, l.count_field);
-    let cf = s.count_field;
+    assert_eq!(s.store().start, l.store().start);
+    assert_eq!(s.count_field(), l.count_field());
+    let cf = s.count_field();
     assert_eq!(&small[..cf.start as usize], &large[..cf.start as usize]);
     assert_eq!(
-        &small[cf.end() as usize..s.store.start as usize],
-        &large[cf.end() as usize..l.store.start as usize]
+        &small[cf.end() as usize..s.store().start as usize],
+        &large[cf.end() as usize..l.store().start as usize]
     );
     assert_ne!(
         slice(&small, cf),
@@ -156,11 +156,11 @@ fn bigtiff_count_field_is_eight_bytes_wide() {
     let (dng, report) =
         encode(&with_store(ByteOrder::BigEndian, bytes.clone()).with_big_tiff(true));
     let excl = report.c2pa.expect("ranges");
-    assert_eq!(excl.count_field.len, 8);
+    assert_eq!(excl.count_field().len, 8);
     let count =
-        ByteOrder::BigEndian.u64(slice(&dng, excl.count_field).try_into().expect("8 bytes"));
-    assert_eq!(count, excl.store.len);
-    assert_eq!(excl.store.end(), dng.len() as u64);
+        ByteOrder::BigEndian.u64(slice(&dng, excl.count_field()).try_into().expect("8 bytes"));
+    assert_eq!(count, excl.store().len);
+    assert_eq!(excl.store().end(), dng.len() as u64);
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
     assert_eq!(decoded.metadata.c2pa, Some(bytes));
     assert_eq!(decoded.c2pa_exclusions, Some(excl));
@@ -229,7 +229,7 @@ fn a_mistyped_c2pa_tag_is_an_extra_not_a_store() {
     let excl = report.c2pa.expect("ranges");
     // The entry's type word is the 2 bytes before its count field: 7 (UNDEFINED) -> 1 (BYTE),
     // the same element size, so the value still decodes.
-    let type_at = excl.count_field.start as usize - 2;
+    let type_at = excl.count_field().start as usize - 2;
     assert_eq!(&dng[type_at..type_at + 2], &[7, 0]);
     dng[type_at..type_at + 2].copy_from_slice(&[1, 0]);
 
@@ -289,18 +289,18 @@ fn a_store_in_a_trailing_ifd_is_found_there() {
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
     assert_eq!(decoded.metadata.c2pa, Some(bytes.clone()));
-    // `C2paExclusions` is `#[non_exhaustive]`, so the two ranges are compared field by field
+    // `C2paExclusions` is `#[non_exhaustive]`, so the two ranges are compared accessor by accessor
     // rather than against a literal.
     let excl = decoded.c2pa_exclusions.expect("ranges");
     assert_eq!(
-        excl.store,
+        excl.store(),
         Range {
             start: store_at,
             len: bytes.len() as u64
         }
     );
     assert_eq!(
-        excl.count_field,
+        excl.count_field(),
         Range {
             start: body + 2 + 4,
             len: 4
@@ -345,9 +345,9 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
 
     let (dng, report) = encode(&with_store(ByteOrder::LittleEndian, smallest.clone()));
     let excl = report.c2pa.expect("classic accepts the smallest store");
-    assert_eq!(excl.store.len, MIN_STORE_LEN as u64);
-    assert_eq!(excl.store.end(), dng.len() as u64);
-    assert_eq!(slice(&dng, excl.store), smallest.as_slice());
+    assert_eq!(excl.store().len, MIN_STORE_LEN as u64);
+    assert_eq!(excl.store().end(), dng.len() as u64);
+    assert_eq!(slice(&dng, excl.store()), smallest.as_slice());
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
     assert_eq!(
         decoded.metadata.c2pa,
@@ -377,7 +377,7 @@ fn a_store_at_the_inline_threshold_is_written_out_of_line_or_refused() {
     let (dng, report) =
         encode(&with_store(ByteOrder::LittleEndian, nine.clone()).with_big_tiff(true));
     let excl = report.c2pa.expect("nine bytes are writable in BigTIFF");
-    assert_eq!(excl.store.end(), dng.len() as u64);
+    assert_eq!(excl.store().end(), dng.len() as u64);
     assert_eq!(
         DngDecoder::new()
             .decode(&dng)
@@ -501,7 +501,7 @@ fn a_single_main_ifd_files_extras_stay_in_ifd0_extra() {
     // IFD 0 holding a field the decoder does not model — the leftover this claim needs.
     let bytes = store(24);
     let (mut dng, report) = encode(&with_store(ByteOrder::LittleEndian, bytes.clone()));
-    let type_at = report.c2pa.expect("ranges").count_field.start as usize - 2;
+    let type_at = report.c2pa.expect("ranges").count_field().start as usize - 2;
     dng[type_at..type_at + 2].copy_from_slice(&[1, 0]);
 
     let decoded = DngDecoder::new().decode(&dng).expect("decode");

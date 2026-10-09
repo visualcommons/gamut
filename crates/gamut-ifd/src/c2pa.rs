@@ -88,18 +88,16 @@ pub const MIN_STORE_LEN: usize = 8;
 /// [`locate`], [`append_store`] or [`new`](Self::new), and the last of those rejects anything
 /// that would break it.
 ///
-/// `#[non_exhaustive]`: §18.5.5's exclusion set is the two ranges below today, and a later
-/// revision naming a third must not be a breaking change. Get one by locating or writing a
-/// store, or build one from its two ranges through the validating [`new`](Self::new).
+/// The fields are private and read through [`store`](Self::store) and
+/// [`count_field`](Self::count_field), so a value cannot be edited into one that breaks the
+/// invariant after it was checked; `#[non_exhaustive]` keeps room for a later §18.5.5 revision
+/// naming a third range. Get one by locating or writing a store, or build one from its two
+/// ranges through the validating [`new`](Self::new).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct C2paExclusions {
-    /// The manifest store's bytes: `len` is the entry's `count`, the store being `UNDEFINED`
-    /// (one byte per element).
-    pub store: Range,
-    /// The entry's `count` field: 4 bytes in classic TIFF, 8 in BigTIFF, at offset 4 of the
-    /// entry record (after the 2-byte tag and 2-byte type).
-    pub count_field: Range,
+    store: Range,
+    count_field: Range,
 }
 
 impl C2paExclusions {
@@ -136,6 +134,20 @@ impl C2paExclusions {
             ));
         }
         Ok(Self { store, count_field })
+    }
+
+    /// The manifest store's bytes: `len` is the entry's `count`, the store being `UNDEFINED`
+    /// (one byte per element).
+    #[must_use]
+    pub fn store(&self) -> Range {
+        self.store
+    }
+
+    /// The entry's `count` field: 4 bytes in classic TIFF, 8 in BigTIFF, at offset 4 of the
+    /// entry record (after the 2-byte tag and 2-byte type).
+    #[must_use]
+    pub fn count_field(&self) -> Range {
+        self.count_field
     }
 }
 
@@ -233,7 +245,9 @@ fn exceeds_offset_width(variant: Variant, end: u64) -> bool {
 ///
 /// Returns [`Error::InvalidInput`] if the container is unreadable (bad header, looping or
 /// runaway chain, no IFD) or the store's declared extent lies outside the source — the same
-/// verdicts [`read`](crate::read) gives such a file — or [`Error::Io`] if the source fails.
+/// verdicts [`read`](crate::read) gives such a file — or overlaps the entry's own count field
+/// (a store offset no writer places, which would break [`C2paExclusions`]' disjointness), or
+/// [`Error::Io`] if the source fails.
 pub fn locate<S: ReadAt>(src: S) -> Result<Option<C2paExclusions>> {
     let mut reader = IfdReader::open(src)?;
     let last = last_ifd(&mut reader)?;
@@ -263,13 +277,18 @@ pub fn locate<S: ReadAt>(src: S) -> Result<Option<C2paExclusions>> {
             "TIFF: C2PA manifest store lies outside the file",
         ));
     }
-    Ok(Some(C2paExclusions {
-        store: Range {
+    // The entry's offset word is the file's to choose, so a hostile one can point the store
+    // back over its own count field. Such a pair is no exclusion set (§18.5.5 hashes around two
+    // disjoint ranges), and the type promises it never holds one: the same validation a host's
+    // hand-built set passes through, raised as an error like an out-of-file extent.
+    C2paExclusions::new(
+        Range {
             start,
             len: entry.count,
         },
         count_field,
-    }))
+    )
+    .map(Some)
 }
 
 /// Appends `store` at the (word-aligned) end of `file` and points the reserved entry at it,
@@ -477,25 +496,25 @@ mod tests {
 
             let found = locate(&bytes[..]).expect("locate").expect("a store");
             assert_eq!(
-                found.store,
+                found.store(),
                 declared_value_span(&report, C2PA_MANIFEST_STORE)
             );
             // Tags sort 256, 258, 52545, 65000: the store is entry 2 of the directory. Count
             // field = body + 2 (entry count) + 2 * 12 + 4 (tag, type).
             let body = ifd_body_offset(&report);
             assert_eq!(
-                found.count_field,
+                found.count_field(),
                 Range {
                     start: body + 2 + 2 * 12 + 4,
                     len: 4
                 },
                 "{order:?}"
             );
-            let at = found.count_field.start as usize;
+            let at = found.count_field().start as usize;
             let count = order.u32(bytes[at..at + 4].try_into().expect("4 bytes"));
-            assert_eq!(u64::from(count), found.store.len, "{order:?}");
+            assert_eq!(u64::from(count), found.store().len, "{order:?}");
             assert_eq!(
-                &bytes[found.store.start as usize..found.store.end() as usize],
+                &bytes[found.store().start as usize..found.store().end() as usize],
                 store().as_slice(),
                 "{order:?}: the store's bytes are verbatim, not byte-swapped"
             );
@@ -517,12 +536,12 @@ mod tests {
         let report = map.finish(None);
         let found = locate(&bytes[..]).expect("locate").expect("a store");
         assert_eq!(
-            found.store,
+            found.store(),
             declared_value_span(&report, C2PA_MANIFEST_STORE)
         );
         let body = ifd_body_offset(&report);
         assert_eq!(
-            found.count_field,
+            found.count_field(),
             Range {
                 start: body + 8 + 2 * 20 + 4,
                 len: 8
@@ -582,7 +601,7 @@ mod tests {
         let report = map.finish(None);
         let found = locate(&bytes[..]).expect("locate").expect("a store");
         assert_eq!(
-            found.store,
+            found.store(),
             declared_value_span(&report, C2PA_MANIFEST_STORE)
         );
         // The second directory is the one whose body holds the count field.
@@ -595,7 +614,7 @@ mod tests {
             })
             .max()
             .expect("two bodies");
-        assert_eq!(found.count_field.start, second_body + 2 + 4);
+        assert_eq!(found.count_field().start, second_body + 2 + 4);
     }
 
     /// The one shape in which a real store packs inline: a BigTIFF entry whose 8-byte value is
@@ -611,10 +630,10 @@ mod tests {
         let found = locate(&bytes[..]).expect("locate").expect("a store");
         // BigTIFF header 16, entry count 8: the entry starts at 24, its count at 28, its value
         // word at 36.
-        assert_eq!(found.count_field, Range { start: 28, len: 8 });
-        assert_eq!(found.store, Range { start: 36, len: 8 });
+        assert_eq!(found.count_field(), Range { start: 28, len: 8 });
+        assert_eq!(found.store(), Range { start: 36, len: 8 });
         assert_eq!(&bytes[36..44], inline.as_slice());
-        assert_eq!(found.store.start, found.count_field.end());
+        assert_eq!(found.store().start, found.count_field().end());
     }
 
     /// A value too short to hold a JUMBF box header is not a manifest store
@@ -645,7 +664,7 @@ mod tests {
         let found = locate(&classic(ifd)[..])
             .expect("locate")
             .expect("exactly the header length is a store");
-        assert_eq!(found.store.len, MIN_STORE_LEN as u64);
+        assert_eq!(found.store().len, MIN_STORE_LEN as u64);
     }
 
     /// §A.3.6 admits one store per asset, so a directory carrying two tag-52545 entries names
@@ -705,7 +724,28 @@ mod tests {
         let bytes =
             write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
         let found = locate(&bytes[..]).expect("locate").expect("a store");
-        assert_eq!(found.store.end(), bytes.len() as u64);
+        assert_eq!(found.store().end(), bytes.len() as u64);
+    }
+
+    /// A hostile offset word can point the store back over its own entry, so the two ranges a
+    /// signer would hash around overlap. `locate` once built that set directly, bypassing the
+    /// validation `C2paExclusions::new` applies, and returned a value breaking the type's
+    /// documented disjointness; it now refuses it, as it refuses an out-of-file extent.
+    #[test]
+    fn locate_rejects_a_store_overlapping_its_own_count_field() {
+        let mut ifd = Ifd::new();
+        ifd.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
+        let mut bytes =
+            write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
+        // The sole entry is at 10, its count field at 14..18 and its offset word at 18. Point the
+        // store at the directory itself (8): 8..40 covers the count field and stays in the file.
+        bytes[18..22].copy_from_slice(&ByteOrder::LittleEndian.pack_u32(8));
+        assert!(bytes.len() >= 8 + store().len(), "in bounds, so only the overlap is wrong");
+        let error = locate(&bytes[..]).expect_err("overlapping ranges");
+        assert_eq!(
+            error.static_message(),
+            Some("TIFF: the C2PA exclusion ranges overlap")
+        );
     }
 
     /// A chain with no directory at all is the container-level error `read` gives it.
@@ -737,13 +777,13 @@ mod tests {
             let excl = append_store(&mut bytes, &store()).expect("append");
             let start = align_word(before.len() as u64);
             assert_eq!(
-                excl.store,
+                excl.store(),
                 Range {
                     start,
                     len: store().len() as u64
                 }
             );
-            assert_eq!(bytes.len() as u64, excl.store.end(), "the store is last");
+            assert_eq!(bytes.len() as u64, excl.store().end(), "the store is last");
             assert_eq!(bytes[before.len()], 0, "one zero byte of alignment filler");
             assert_eq!(
                 &bytes[start as usize..],
@@ -751,7 +791,7 @@ mod tests {
                 "{order:?}: verbatim"
             );
             // Nothing before the filler changed except the entry's count and offset words.
-            let cf = excl.count_field.start as usize;
+            let cf = excl.count_field().start as usize;
             assert_eq!(&bytes[..cf], &before[..cf]);
             assert_eq!(&bytes[cf + 8..before.len()], &before[cf + 8..]);
             assert_eq!(
@@ -777,7 +817,7 @@ mod tests {
             assert!(report.is_fully_classified(), "{order:?}: {report:?}");
             let (_, _, ifd0) = read_header(&bytes).expect("header");
             assert!(report.segments.contains(&Segment {
-                range: excl.store,
+                range: excl.store(),
                 kind: SpanKind::Value {
                     ifd: ifd0,
                     tag: C2PA_MANIFEST_STORE
@@ -804,7 +844,7 @@ mod tests {
         assert_eq!(bytes.len() % 2, 0);
         let len = bytes.len() as u64;
         let excl = append_store(&mut bytes, &store()).expect("append");
-        assert_eq!(excl.store.start, len);
+        assert_eq!(excl.store().start, len);
     }
 
     /// BigTIFF: 8-byte count and offset words are rewritten, and the store reads back.
@@ -815,15 +855,15 @@ mod tests {
         reserve_entry(&mut ifd);
         let mut bytes = write(&file(ByteOrder::BigEndian, Variant::Big, vec![ifd])).expect("write");
         let excl = append_store(&mut bytes, &store()).expect("append");
-        assert_eq!(excl.count_field.len, 8);
-        let cf = excl.count_field.start as usize;
+        assert_eq!(excl.count_field().len, 8);
+        let cf = excl.count_field().start as usize;
         assert_eq!(
             ByteOrder::BigEndian.u64(bytes[cf..cf + 8].try_into().expect("8")),
             store().len() as u64
         );
         assert_eq!(
             ByteOrder::BigEndian.u64(bytes[cf + 8..cf + 16].try_into().expect("8")),
-            excl.store.start
+            excl.store().start
         );
         assert_eq!(
             read(&bytes).expect("read").ifds[0].get(C2PA_MANIFEST_STORE),
@@ -925,7 +965,7 @@ mod tests {
             write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
         let found = locate(&bytes[..]).expect("locate").expect("a store");
         assert_eq!(
-            C2paExclusions::new(found.store, found.count_field).expect("a located set is valid"),
+            C2paExclusions::new(found.store(), found.count_field()).expect("a located set is valid"),
             found,
             "the constructor's fields land in the documented order"
         );
@@ -970,7 +1010,7 @@ mod tests {
 
         // Abutting is legal in both directions...
         let abut_after = C2paExclusions::new(at(14, 4), at(10, 4)).expect("count then store");
-        assert_eq!(abut_after.store, at(14, 4));
+        assert_eq!(abut_after.store(), at(14, 4));
         assert!(
             C2paExclusions::new(at(10, 4), at(14, 4)).is_ok(),
             "store then count"
@@ -1013,7 +1053,7 @@ mod tests {
         let mut bytes =
             write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
         let excl = append_store(&mut bytes, &at_threshold).expect("classic accepts 8 bytes");
-        assert_eq!(excl.store.end(), bytes.len() as u64);
+        assert_eq!(excl.store().end(), bytes.len() as u64);
         assert_eq!(
             read(&bytes).expect("read").ifds[0].get(C2PA_MANIFEST_STORE),
             Some(&Value::Undefined(at_threshold.clone())),
@@ -1041,7 +1081,7 @@ mod tests {
             let mut writable = store()[..MIN_STORE_LEN + 1].to_vec();
             writable[0] ^= 0xFF; // keep it asymmetric
             let excl = append_store(&mut bytes, &writable).expect("nine bytes are writable");
-            assert_eq!(excl.store.end(), bytes.len() as u64);
+            assert_eq!(excl.store().end(), bytes.len() as u64);
             assert_eq!(
                 read(&bytes).expect("read").ifds[0].get(C2PA_MANIFEST_STORE),
                 Some(&Value::Undefined(writable))
