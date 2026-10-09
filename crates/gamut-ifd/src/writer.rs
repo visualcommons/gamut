@@ -387,14 +387,23 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
                     let start = match pinned {
                         Some(pin) => pin.offset,
                         None => {
-                            // Advance to the next word boundary, jumping over any pinned
-                            // range the value would intersect.
+                            // Advance to the next word boundary, jumping over any pinned range
+                            // the value would intersect. `pins` is sorted by offset and validated
+                            // disjoint above, so a jump can never re-expose a pin already behind
+                            // the cursor: one forward pass over the slice settles the placement,
+                            // and the slice is what bounds it. A `while let` driven by `find`
+                            // terminates only while the jump arithmetic really moves the cursor
+                            // forward, so a mutation that stops it moving could be reported only
+                            // as a mutation-testing timeout, never as a wrong answer (issue #110).
+                            // Taking the later of the two positions is what makes a pin the
+                            // value already clears a no-op, so one comparison decides the jump
+                            // where two used to -- and that one is the abutment boundary the
+                            // flow-around tests pin from both sides.
                             let mut c = align_word(cursor as u64);
-                            while let Some(p) = pins
-                                .iter()
-                                .find(|p| p.offset < c.saturating_add(n) && c < p.offset + p.len)
-                            {
-                                c = align_word(p.offset + p.len);
+                            for p in &pins {
+                                if p.offset < c.saturating_add(n) {
+                                    c = c.max(align_word(p.offset + p.len));
+                                }
                             }
                             c
                         }

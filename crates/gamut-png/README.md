@@ -63,7 +63,8 @@ pins the rejection policy. Output size is measured against libpng at zlib level 
 `cargo bench -p gamut-png`, and **enforced** by `tests/size_contract.rs`, whose per-case budgets
 each carry a written justification — a regression in the crate's reason to exist fails the build.
 `STATUS.md` records the measured table; gamut is smaller than libpng-9 on every corpus entry, by
-28-85% wherever a reduction or a filter choice applies and by 0.2% on the incompressible noise row,
+4-85% wherever a reduction or a filter choice applies (4.1% on `sprite_rgba8` and 13.8% on the
+16×16 `tiny_rgb8`, 28.8-84.5% on the other five) and by 0.2% on the incompressible noise row,
 where there is nothing for either encoder to find.
 
 ## License
