@@ -77,7 +77,10 @@ and a caller wanting any of them dropped to the re-exported `gamut-ifd` spine. `
 `TiffDecoder::metadata`. XMP, IPTC-IIM, ICC and C2PA are **opaque bytes carried verbatim** — the
 raw blocks the workspace's metadata facade consumes, as `gamut-png` and `gamut-webp` hand them
 over — so this crate parses, validates and reconciles none of them; the `ExifIFD` is handed over
-as a `gamut_ifd::Ifd`, because it *is* a directory the decoder has already walked.
+as a `gamut_ifd::Ifd`, because it *is* a directory the decoder has already walked. IPTC/NAA is
+written `BYTE` but read typed `BYTE`, `UNDEFINED` or `LONG`: Adobe software writes it `LONG`, and
+libtiff (`tif_dirread.c`, `TIFFTAG_RICHTIFFIPTC`) and exiv2 both read such a block, so a `LONG`
+value yields its on-disk bytes rather than being dropped.
 
 Three consequences are contractual rather than incidental, and are documented where they are made.
 **(a)** The Exif directory's *entries* are carried unchanged but its **ordering is normalised** —

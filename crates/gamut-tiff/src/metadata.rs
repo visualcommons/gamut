@@ -125,7 +125,8 @@ pub struct TiffMetadata {
     /// An XMP packet (UTF-8 RDF/XML), stored in the `XMP` tag (700) as `BYTE`, verbatim.
     pub xmp: Option<Vec<u8>>,
     /// A legacy IPTC-IIM dataset stream, stored in the `IPTC/NAA` tag (33723) as `BYTE`,
-    /// verbatim.
+    /// verbatim. On read the tag is also accepted typed `UNDEFINED` or `LONG` — Adobe software
+    /// writes it as `LONG` — and a `LONG` value yields its on-disk bytes, unswapped.
     ///
     /// Kept as its own carrier rather than folded into [`xmp`](Self::xmp): IIM is a genuinely
     /// separate serialization that real TIFFs hold, and reconciling it into an XMP graph is a
@@ -585,6 +586,24 @@ fn bytes_value(value: Option<&Value>) -> Option<Vec<u8>> {
     value.and_then(Value::as_bytes).map(<[u8]>::to_vec)
 }
 
+/// The IPTC-IIM stream of an `IPTC/NAA` (33723) entry: its `BYTE`/`UNDEFINED` payload, or — the
+/// type Photoshop and other Adobe software write, which TIFF/EP (ISO 12234-2) also names — the
+/// bytes of a `LONG` array as they lie in the file.
+///
+/// libtiff's reader carries the same workaround (`tif_dirread.c`, `TIFFTAG_RICHTIFFIPTC` typed
+/// `TIFF_LONG`: "Adobe's software (wrongly) writes RichTIFFIPTC tag with data type LONG instead
+/// of UNDEFINED"), and exiv2 decodes the tag from its raw data whatever the type. The IIM stream
+/// is a byte stream that was merely labelled `LONG`, so the file's byte order never applied to
+/// it: re-packing each decoded word in that order recovers the bytes on disk. (libtiff instead
+/// hands back the words in *host* order, which equals the file's bytes only on a host of the
+/// file's endianness.)
+fn iptc_value(value: Option<&Value>, order: ByteOrder) -> Option<Vec<u8>> {
+    match value? {
+        Value::Long(words) => Some(words.iter().flat_map(|&w| order.pack_u32(w)).collect()),
+        other => bytes_value(Some(other)),
+    }
+}
+
 /// Reads the metadata a TIFF carries: IFD 0's blocks and Exif sub-IFD, plus the C2PA manifest
 /// store from the last IFD of the main chain (C2PA 2.4 §A.3.6).
 ///
@@ -622,7 +641,7 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
         .and_then(|group| group.ifds.first())
         .cloned();
     let xmp = bytes_value(ifd0.get(tags::XMP));
-    let iptc = bytes_value(ifd0.get(tags::IPTC_NAA));
+    let iptc = iptc_value(ifd0.get(tags::IPTC_NAA), order);
     let icc = bytes_value(ifd0.get(tags::ICC_PROFILE));
     // §A.3.6: one store for the whole asset, in the last IFD of the main chain. `ifds` is that
     // chain, so its last element is where the entry belongs — and a single-page file makes the
@@ -1383,5 +1402,41 @@ mod tests {
         assert_eq!(read.c2pa.as_deref(), Some(&[0xBB; 12][..]));
         // The other blocks stay IFD 0's, so the two directories are not confused for each other.
         assert_eq!(read.xmp.as_deref(), Some(&b"first"[..]));
+    }
+
+    /// Adobe software types `IPTC/NAA` (33723) `LONG`, and the reader used to accept only
+    /// `BYTE`/`UNDEFINED` there, so such a file's IIM stream was silently dropped. The stream is
+    /// the entry's on-disk bytes in either byte order — the words are built from those bytes in
+    /// the file's own order, so a reader that swapped them, or ignored the order, would differ.
+    #[test]
+    fn an_iptc_block_typed_long_reads_back_as_its_on_disk_bytes() {
+        let iim = [0x1c, 0x02, 0x05, 0x00, 0x04, b'T', b'e', b's'];
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            let words = iim
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&c| order.u32(c))
+                .collect();
+            let mut ifd0 = Ifd::new();
+            ifd0.set(tags::IPTC_NAA, Value::Long(words));
+            let bytes = write(&TiffFile {
+                order,
+                variant: Variant::Classic,
+                ifds: vec![ifd0],
+            })
+            .expect("write");
+            assert!(
+                bytes.windows(iim.len()).any(|w| w == iim),
+                "{order:?}: the file holds the stream verbatim"
+            );
+            let back = read_metadata(&bytes).expect("read");
+            assert_eq!(back.iptc.as_deref(), Some(&iim[..]), "{order:?}");
+        }
+        // A type that is neither bytes nor `LONG` is still no IIM stream.
+        assert_eq!(
+            iptc_value(Some(&Value::Short(vec![1])), ByteOrder::LittleEndian),
+            None
+        );
     }
 }
