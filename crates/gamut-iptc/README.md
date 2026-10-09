@@ -82,10 +82,15 @@ The v1 contract, stated precisely:
   (`PhotoMetadata` over `gamut-xmp` types); parsing/serializing the XMP *packet bytes* is
   [`gamut-xmp`](../gamut-xmp)'s job, and the JPEG `APP13`/TIFF tag plumbing is the container's
   (issue #34).
-- **Typed accessors cover every scalar/list IPTC Core property.** The structured
-  `Iptc4xmpCore:CreatorContactInfo` and all IPTC **Extension** structures (image regions, artwork,
-  licensors, …) have no typed model — they still round-trip losslessly as raw properties in
-  `PhotoMetadata::xmp`, reachable via `get_field`/`set_field` where mapped.
+- **Typed accessors cover every scalar/list IPTC Core property**, plus the structured
+  `Iptc4xmpCore:CreatorContactInfo` and the most-used IPTC **Extension** structures — image
+  regions, artwork/object and licensors (`extension`). Reading one and writing it back changes
+  nothing: a field enters the typed value only when what the writer would emit reproduces the field
+  that was read — value, container kind and qualifiers — and every other field is kept in the
+  type's `other` list and re-emitted verbatim. The property itself enters the typed view on the same
+  terms, so a shape the setter could not write back reads as absent and is left where it lies. The remaining Extension structures (locations, persons,
+  controlled-vocabulary terms, …) have no typed model — they still round-trip losslessly as raw
+  properties in `PhotoMetadata::xmp`, reachable via `get_field`/`set_field` where mapped.
 - **Strict write, honest read.** Writing never silently truncates or drops: unencodable text,
   overlong values (octet limits are enforced on write only; overlong wire values are preserved on
   read), and an IIM-inexpressible `photoshop:DateCreated` are hard errors. Reading never guesses: a
@@ -97,8 +102,10 @@ The v1 contract, stated precisely:
   exiv2/ExifTool de-facto behaviour) is this crate's explicit knob. Scalar-shaped IIM datasets that
   repeat on the wire (2:04 Object Attribute Reference, 2:85 By-line Title) reconcile their first
   value; all repeats still round-trip on the IIM side.
-- **IIM records 1–2 are tabled; records 3–9 are preserved.** The tag table names the structural and
-  PMD-mapped datasets; any other dataset in any record round-trips byte-exact without a name.
+- **Datasets with a determinate length are tabled; everything else is preserved.** The tag table
+  names every dataset IIM 4.2 states a maximum octet count for that a `u16` can hold — all of
+  records 1 and 2 bar `2:202` (256000 octets), plus `7:10` Size Mode (one octet). Any other dataset
+  in any record round-trips byte-exact without a name.
 
 ## Status
 
