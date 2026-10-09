@@ -119,7 +119,7 @@ facade does not have.
 An embedded store is not the only way a file carries provenance. C2PA 2.4 §11.5 recommends that a
 claim generator whose manifest lives *externally* add a `dcterms:provenance` key (namespace
 `http://purl.org/dc/terms/`, registered as `gamut_xmp::WellKnownNs::DcTerms`) to the asset's XMP,
-its value the URL of the manifest store, and is explicit that the mechanism is *only* for external
+its value a URI reference (possibly relative) to where the active manifest is, and is explicit that the mechanism is *only* for external
 manifests; §15.5.3.1 lists that key among the places a validator looks when no store is embedded. So
 `c2pa.is_some()` is the wrong question — a file with no embedded store and a `dcterms:provenance` URL
 has Content Credentials — and a boolean is the wrong answer, because a file may carry both.

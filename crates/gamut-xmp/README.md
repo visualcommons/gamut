@@ -73,8 +73,8 @@ padding) and `XmpPacket::parse` the graph — `from_packet` is exactly that comp
 - **Part 2 (standard schemas) is a namespace registry** (`WellKnownNs`), not per-property
   validation: values are uninterpreted text in the model, as the wire format allows. The registry
   also carries the external schemas image-metadata standards layer on XMP — `dcterms` (DCMI
-  Metadata Terms), which C2PA uses for `dcterms:provenance`, the URL of an *external* manifest
-  store (C2PA 2.4 §11.5). gamut-xmp registers the namespace; reading that property as a
+  Metadata Terms), which C2PA uses for `dcterms:provenance`, a URI reference (possibly relative) to
+  an *external* manifest (C2PA 2.4 §11.5). gamut-xmp registers the namespace; reading that property as a
   provenance signal is [`gamut-metadata`](../gamut-metadata)'s job.
 - **Part 3 (storage in files) belongs to the format crates by design.** This crate supplies what
   they need — wrapper-optional parse, bare-body serialization (`to_rdf` / `serialize_body`), and

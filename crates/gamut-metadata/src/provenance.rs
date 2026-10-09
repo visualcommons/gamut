@@ -85,8 +85,8 @@ impl ProvenanceState {
     }
 
     /// The `dcterms:provenance` URL of an external manifest, if the XMP carried one — `Some` for
-    /// [`Remote`](Self::Remote) and [`EmbeddedAndRemote`](Self::EmbeddedAndRemote). Never
-    /// resolved by gamut.
+    /// [`Remote`](Self::Remote) and [`EmbeddedAndRemote`](Self::EmbeddedAndRemote). §11.5 makes
+    /// the value a URI reference, so it may be relative. Never resolved by gamut.
     #[must_use]
     pub fn remote_url(&self) -> Option<&str> {
         match self {
