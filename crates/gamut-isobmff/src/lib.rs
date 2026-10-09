@@ -5,13 +5,18 @@
 //! file (`ftyp` + a `meta` box of image items + `mdat`) and leaves the coded bitstream opaque
 //! ([`PropertyKind::CodecConfiguration`] for the `av1C`/`hvcC` record, [`Item::payload`] for the
 //! samples). [`write()`] serialises an [`IsoBmffImage`]; [`read`] parses one back. The two are
-//! inverse for any file this crate writes (`read(&write(&img)?) == img`).
+//! inverse for any file this crate writes (`read(&write(&img)?) == img`) — which is why [`write()`]
+//! validates the model first and refuses what could not come back, a `top_level_boxes` list that
+//! interleaves positions among it.
 //!
 //! It is image-first: the modelled surface is the HEIF still-image set — `ftyp`, `meta` with
 //! `hdlr`/`pitm`/`iloc`/`iinf`/`iref`/`iprp`/`idat`/`grpl`, the
 //! `ispe`/`pixi`/`colr`/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli` properties, typed item
 //! references (`auxl`/`cdsc`/`dimg`/`thmb`/`prem`, …) and entity groups — plus opaque
-//! codec-configuration and unrecognised properties carried verbatim. The writer normalises to the
+//! codec-configuration and unrecognised properties carried verbatim, and any top-level box the
+//! model does not otherwise own ([`IsoBmffImage::top_level_boxes`]: a C2PA `uuid`
+//! `ContentProvenanceBox`, a `free`, a vendor box), written after `ftyp` or after `mdat` per its
+//! [`TopLevelPosition`]. The writer normalises to the
 //! smallest box versions (`iloc` v0, single extent into `mdat`); the reader additionally accepts
 //! the foreign-encoder repertoire (`iloc` v1/v2, `idat` placement, multi-extent payloads, 32-bit
 //! item ids, 16-bit `ipma` indices). Image sequences/tracks and item protection are out of scope —
@@ -30,14 +35,17 @@
 //! wants to account for something this walk does not model.
 //!
 //! ```
-//! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, read, write};
+//! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, TopLevelBox, read, write};
 //!
-//! let img = IsoBmffImage {
-//!     major_brand: *b"avif",
-//!     minor_version: 0,
-//!     compatible_brands: vec![*b"avif", *b"mif1", *b"miaf"],
-//!     primary_item_id: 1,
-//!     items: vec![Item {
+//! // The C2PA 2.4 §A.5.1 `ContentProvenanceBox` user type; the payload is opaque here.
+//! const C2PA_UUID: [u8; 16] = [
+//!     0xD8, 0xFE, 0xC3, 0xD6, 0x1B, 0x0E, 0x48, 0x3C, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7E, 0xC4, 0x81,
+//! ];
+//! let img = IsoBmffImage::new(
+//!     *b"avif",
+//!     vec![*b"avif", *b"mif1", *b"miaf"],
+//!     1,
+//!     vec![Item {
 //!         id: 1,
 //!         item_type: *b"av01",
 //!         name: String::new(),
@@ -51,8 +59,8 @@
 //!         }],
 //!         payload: vec![1, 2, 3, 4], // the coded bitstream (opaque to this crate)
 //!     }],
-//!     groups: vec![],
-//! };
+//! )
+//! .with_top_level_boxes(vec![TopLevelBox::uuid(C2PA_UUID, b"manifest-store".to_vec())]);
 //! let bytes = write(&img).unwrap();
 //! assert_eq!(read(&bytes).unwrap(), img);
 //! ```
@@ -70,7 +78,7 @@ pub use boxes::{BoxReader, RawBox};
 pub use grid::ImageGrid;
 pub use model::{
     ColourInformation, EntityGroup, IsoBmffImage, Item, ItemReference, NclxColr, Property,
-    PropertyKind,
+    PropertyKind, TopLevelBox, TopLevelPosition,
 };
 pub use overlay::ImageOverlay;
 pub use reader::read;
