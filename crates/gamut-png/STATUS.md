@@ -202,8 +202,9 @@ triple collapses to one grey sample — and omitted, without error, where no los
 exists, since a payload shaped for the wrong colour type is a chunk libpng rejects and drops. A
 caller's palette *index* survives only on the `encode_indexed8` path, whose palette is the caller's;
 under an encoder-derived palette it names nothing and is omitted. This holds across colour
-**types**; on the depth axis a `bKGD` sample is range-checked but not rescaled with a 16→8 demotion
-or a sub-byte packing — that is [#501].
+**types** and depths: a `bKGD` sample is set at the input's depth and mapped exactly as the pixels
+were by a 16→8 demotion or a sub-byte packing, and omitted where that mapping has no exact code for
+it ([#501]).
 
 [#437]: https://github.com/visualcommons/gamut/issues/437
 [#478]: https://github.com/visualcommons/gamut/issues/478
