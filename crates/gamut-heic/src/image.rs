@@ -832,14 +832,13 @@ mod tests {
 
     /// A one-item file whose primary is `item`.
     fn image_of(item: Item) -> HeifImage {
-        HeifImage::new(IsoBmffImage {
-            major_brand: *b"heic",
-            minor_version: 0,
-            compatible_brands: vec![*b"heic", *b"mif1"],
-            primary_item_id: item.id,
-            items: vec![item],
-            groups: vec![],
-        })
+        let primary = item.id;
+        HeifImage::new(IsoBmffImage::new(
+            *b"heic",
+            vec![*b"heic", *b"mif1"],
+            primary,
+            vec![item],
+        ))
         .unwrap()
     }
 
