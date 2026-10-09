@@ -10,6 +10,13 @@
 
 use std::path::PathBuf;
 
+use gamut_isobmff::TopLevelBox;
+
+/// C2PA 2.4 §A.5.1: the `ContentProvenanceBox` user type `D8FEC3D6-1B0E-483C-9297-5828877EC481`.
+const C2PA_UUID: [u8; 16] = [
+    0xD8, 0xFE, 0xC3, 0xD6, 0x1B, 0x0E, 0x48, 0x3C, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7E, 0xC4, 0x81,
+];
+
 /// A real 4:4:4 libavif corpus file. The oracle's `decode_avif` only handles 4:4:4 (the form gamut
 /// emits), so a 4:2:0 fixture would be rejected before the pixel comparison.
 fn corpus_444() -> PathBuf {
@@ -46,5 +53,34 @@ fn remux_preserves_decoded_pixels() {
     assert_eq!(
         original.planes, round_tripped.planes,
         "decoded pixels differ after remux — the container round-trip lost rendering data"
+    );
+}
+
+#[test]
+fn remux_with_a_c2pa_uuid_box_preserves_decoded_pixels() {
+    // A top-level C2PA `ContentProvenanceBox` — a `uuid` box with the §A.5.1 user type, placed
+    // after `ftyp` and before the first `mdat` per §A.5.3 (`TopLevelPosition::AfterFtyp`) — must be
+    // invisible to a conforming reader: libavif decodes the container carrying it to exactly the
+    // pixels it decodes from the original. The payload is opaque bytes standing in for a manifest
+    // store; nothing here validates it. Where the box lands is pinned exact-byte in
+    // gamut-isobmff's `tests/top_level.rs`, not here.
+    let src = std::fs::read(corpus_444()).expect("read the corpus fixture");
+    let mut model = gamut_isobmff::read(&src).expect("gamut-isobmff reads the foreign container");
+    model.push_top_level_box(TopLevelBox::uuid(
+        C2PA_UUID,
+        b"opaque-manifest-store".to_vec(),
+    ));
+    let with_box = gamut_isobmff::write(&model).expect("gamut-isobmff writes the container");
+
+    let original = libavif_oracle::decode_avif(&src).expect("libavif decodes the original");
+    let carrying = libavif_oracle::decode_avif(&with_box)
+        .expect("libavif decodes the container carrying a C2PA uuid box");
+    assert_eq!(
+        (original.width, original.height, original.bit_depth),
+        (carrying.width, carrying.height, carrying.bit_depth),
+    );
+    assert_eq!(
+        original.planes, carrying.planes,
+        "decoded pixels differ once a top-level uuid box is carried"
     );
 }

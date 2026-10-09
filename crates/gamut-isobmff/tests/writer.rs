@@ -4,7 +4,9 @@
 mod common;
 
 use common::{av01_item, image, item};
-use gamut_isobmff::{IsoBmffImage, ItemReference, Property, PropertyKind, write};
+use gamut_isobmff::{
+    IsoBmffImage, ItemReference, Property, PropertyKind, TopLevelBox, TopLevelPosition, write,
+};
 
 #[track_caller]
 fn assert_rejected(img: &IsoBmffImage, expected: &str) {
@@ -111,4 +113,45 @@ fn more_than_255_properties_on_one_item_are_rejected() {
         })
         .collect();
     assert_rejected(&image(vec![it]), "more than 255 properties");
+}
+
+#[test]
+fn top_level_box_types_the_model_emits_itself_are_rejected() {
+    // The writer emits ftyp/meta/mdat from the model; a second one in `top_level_boxes` would not
+    // round-trip (a second ftyp even starts a motion-photo appendix on read).
+    for ty in [b"ftyp", b"meta", b"mdat"] {
+        let img = image(vec![av01_item(1, vec![1])])
+            .with_top_level_boxes(vec![TopLevelBox::new(*ty, vec![])]);
+        assert_rejected(&img, "owned by the model");
+    }
+    // Image sequences are Unsupported on read, so writing one is too.
+    for ty in [b"moov", b"trak"] {
+        let img = image(vec![av01_item(1, vec![1])])
+            .with_top_level_boxes(vec![TopLevelBox::new(*ty, vec![])]);
+        assert_rejected(&img, "image sequences");
+    }
+}
+
+#[test]
+fn top_level_user_type_must_pair_with_the_uuid_type() {
+    // A uuid box carries its 16-byte user type; no other box does (the RawBox split).
+    let img = image(vec![av01_item(1, vec![1])])
+        .with_top_level_boxes(vec![TopLevelBox::new(*b"uuid", vec![1])]);
+    assert_rejected(&img, "user_type is required for uuid boxes");
+
+    let mut mistyped = TopLevelBox::new(*b"free", vec![1]);
+    mistyped.user_type = Some([7; 16]);
+    let img = image(vec![av01_item(1, vec![1])]).with_top_level_boxes(vec![mistyped]);
+    assert_rejected(&img, "user_type is required for uuid boxes");
+}
+
+#[test]
+fn interleaved_top_level_positions_are_rejected() {
+    // The file holds every AfterFtyp box before every Trailing one, so a model listing a Trailing
+    // box first would come back from `read` re-grouped: `write` refuses it instead of reordering.
+    let img = image(vec![av01_item(1, vec![1])]).with_top_level_boxes(vec![
+        TopLevelBox::new(*b"free", vec![1]).with_position(TopLevelPosition::Trailing),
+        TopLevelBox::uuid([0xD8; 16], vec![2]),
+    ]);
+    assert_rejected(&img, "interleave positions");
 }
