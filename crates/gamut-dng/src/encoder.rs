@@ -209,9 +209,10 @@ impl DngEncoder {
     /// place; nothing else in the file moves. `len` must be at least
     /// [`gamut_ifd::c2pa::MIN_STORE_LEN`] (a JUMBF box header) — and, with
     /// [`with_big_tiff`](Self::with_big_tiff), strictly more, since BigTIFF packs an 8-byte
-    /// value inline — and a reservation cannot be
-    /// combined with a store supplied through [`with_metadata`](Self::with_metadata) — either is
-    /// a typed error at encode time.
+    /// value inline — and at most what classic TIFF's 32-bit count describes (without BigTIFF)
+    /// and what a buffer can hold; a reservation cannot be combined with a store supplied
+    /// through [`with_metadata`](Self::with_metadata). Each is a typed error at encode time,
+    /// raised before the reservation is allocated.
     #[must_use]
     pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
         self.c2pa_reserve = Some(len);
@@ -225,21 +226,24 @@ impl DngEncoder {
     /// Returns [`Error::InvalidInput`] if both were requested, if the store is too short to be a
     /// JUMBF box at all ([`c2pa::MIN_STORE_LEN`]), or if it would pack *inline* in this
     /// encoder's container variant — BigTIFF's inline threshold is those same 8 bytes, so a
-    /// BigTIFF store must exceed them to be placeable at the end of the file. All caught here,
-    /// before any pixel work.
+    /// BigTIFF store must exceed them to be placeable at the end of the file; if classic TIFF's
+    /// 32-bit `LONG` count cannot describe it; or if a reservation is longer than a buffer can
+    /// hold ([`zeroed`]). All caught here, before any pixel work.
     fn c2pa_store(&self) -> Result<Option<Cow<'_, [u8]>>> {
-        let store = match (&self.metadata.c2pa, self.c2pa_reserve) {
+        // The *length* is settled before a reservation is materialised, so an unusable one costs
+        // neither the allocation nor the panic `vec![0; len]` raises past `isize::MAX`.
+        let len = match (&self.metadata.c2pa, self.c2pa_reserve) {
             (Some(_), Some(_)) => {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
                     "DNG: supply either a C2PA manifest store or a reservation, not both",
                 ));
             }
-            (Some(store), None) => Cow::Borrowed(store.as_slice()),
-            (None, Some(len)) => Cow::Owned(vec![0; len]),
+            (Some(store), None) => store.len(),
+            (None, Some(len)) => len,
             (None, None) => return Ok(None),
         };
-        if store.len() < c2pa::MIN_STORE_LEN {
+        if len < c2pa::MIN_STORE_LEN {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "DNG: a C2PA manifest store is at least a JUMBF box header (8 bytes)",
@@ -248,13 +252,27 @@ impl DngEncoder {
         // A value no longer than the variant's inline threshold is packed into the entry rather
         // than placed out of line, so it cannot be the run at the end of the file §A.3.6 wants.
         // Only reachable on BigTIFF, whose threshold is the 8 bytes above.
-        if store.len() <= self.variant().inline_threshold() {
+        if len <= self.variant().inline_threshold() {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "DNG: a BigTIFF C2PA manifest store must exceed 8 bytes, or it packs inline",
             ));
         }
-        Ok(Some(store))
+        // Classic TIFF counts an `UNDEFINED` value with a 32-bit `LONG`; BigTIFF's count is
+        // 64-bit. `c2pa::append_store` refuses such a store too, but only once the image has been
+        // compressed and the reservation zero-filled. Necessary, not sufficient: the store's
+        // offset must also fit, and only `append_store` knows the size of the file before it.
+        if uncountable_store_len(self.variant(), len) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: a C2PA manifest store longer than 4 GiB cannot be counted by classic \
+                 TIFF's 32-bit LONG (BigTIFF's count is 64-bit)",
+            ));
+        }
+        Ok(Some(match &self.metadata.c2pa {
+            Some(store) => Cow::Borrowed(store.as_slice()),
+            None => Cow::Owned(zeroed(len)?),
+        }))
     }
 
     /// The container variant this encoder writes (BigTIFF when [`Self::with_big_tiff`] is set).
@@ -301,7 +319,9 @@ impl DngEncoder {
     /// reservation were configured; if the store (or reservation) is shorter than
     /// [`gamut_ifd::c2pa::MIN_STORE_LEN`]; or if, with [`with_big_tiff`](Self::with_big_tiff),
     /// it is exactly `MIN_STORE_LEN` (8) bytes — BigTIFF packs a value that short inline in its
-    /// entry, so it could not be the out-of-line run at the end of the file §A.3.6 wants.
+    /// entry, so it could not be the out-of-line run at the end of the file §A.3.6 wants; or if,
+    /// without BigTIFF, it is longer than a 32-bit `LONG` count describes, or a reservation is
+    /// longer than a buffer can hold.
     pub fn encode_with_report(
         &self,
         raw: &RawImage,
@@ -947,6 +967,36 @@ fn white_level_value(values: &[f64]) -> Result<Value> {
     }
 }
 
+/// Whether classic TIFF's 32-bit `LONG` count cannot describe a `len`-byte store. BigTIFF's count
+/// is 64-bit, so nothing a `usize` holds is uncountable there. A function rather than an inline
+/// guard so a mutant inverting it cannot send an oversized length on to [`zeroed`], which would
+/// be a multi-GiB zero-fill and a timed-out mutant rather than a caught one.
+fn uncountable_store_len(variant: Variant, len: usize) -> bool {
+    match variant {
+        Variant::Classic => u32::try_from(len).is_err(),
+        Variant::Big => false,
+    }
+}
+
+/// A `len`-byte zero-filled C2PA reservation, or a typed error where `vec![0; len]` would panic.
+///
+/// [`DngEncoder::with_c2pa_reserved`] returns `Self`, so it cannot refuse anything itself and the
+/// length it stores is a caller's number that reaches this untouched. Past `isize::MAX` a
+/// `Vec<u8>` cannot exist, and `vec![0; len]` panics with a capacity overflow — which a library
+/// path must not do. Reserving fallibly turns that into [`Error::InvalidInput`]. A reservation the
+/// machine merely lacks memory for still aborts, as any oversized allocation in Rust does.
+fn zeroed(len: usize) -> Result<Vec<u8>> {
+    let mut store = Vec::new();
+    store.try_reserve_exact(len).map_err(|_| {
+        Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: a C2PA manifest store reservation this long cannot be allocated",
+        )
+    })?;
+    store.resize(len, 0);
+    Ok(store)
+}
+
 /// Stores a dimension/count as `SHORT` when it fits, else `LONG` (both valid per TIFF 6.0 §2).
 fn count_value(n: u32) -> Value {
     if n <= u32::from(u16::MAX) {
@@ -1420,5 +1470,37 @@ mod tests {
         assert!(enc.compression == crate::values::Compression::Deflate);
         // A reset to `Default::default()` would clear big_tiff; the real setter must not.
         assert!(enc.big_tiff, "with_compression must keep earlier settings");
+    }
+
+    /// A C2PA reservation's length is a caller's number that `with_c2pa_reserved` cannot refuse,
+    /// and it went straight into `vec![0; len]`, which panics with a capacity overflow past
+    /// `isize::MAX` (#552). `usize::MAX` reaches that on BigTIFF, whose 64-bit count admits it;
+    /// classic TIFF refuses it one check earlier, for its 32-bit count.
+    #[test]
+    fn a_reservation_no_buffer_could_hold_is_refused_instead_of_panicking() {
+        let err = DngEncoder::new()
+            .with_big_tiff(true)
+            .with_c2pa_reserved(usize::MAX)
+            .c2pa_store()
+            .expect_err("no buffer holds usize::MAX bytes");
+        assert!(err.to_string().contains("cannot be allocated"), "{err}");
+
+        let err = DngEncoder::new()
+            .with_c2pa_reserved(usize::MAX)
+            .c2pa_store()
+            .expect_err("classic TIFF cannot count usize::MAX bytes");
+        assert!(err.to_string().contains("32-bit LONG"), "{err}");
+    }
+
+    /// Classic TIFF's count word holds `u32::MAX` and nothing past it; BigTIFF's holds any
+    /// `usize`. Asserted on the predicate, since the accepting side through `c2pa_store` would
+    /// mean zero-filling 4 GiB. 64-bit only: a 32-bit `usize` has no length past `u32::MAX`.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn only_classic_tiff_cannot_count_a_store_past_u32_max() {
+        let max = u32::MAX as usize;
+        assert!(!uncountable_store_len(Variant::Classic, max));
+        assert!(uncountable_store_len(Variant::Classic, max + 1));
+        assert!(!uncountable_store_len(Variant::Big, usize::MAX));
     }
 }

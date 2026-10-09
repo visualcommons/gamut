@@ -216,14 +216,12 @@ fn coded_item(
 }
 
 fn file(primary_id: u32, items: Vec<Item>) -> Vec<u8> {
-    write(&IsoBmffImage {
-        major_brand: *b"heic",
-        minor_version: 0,
-        compatible_brands: vec![*b"heic", *b"mif1"],
-        primary_item_id: primary_id,
+    write(&IsoBmffImage::new(
+        *b"heic",
+        vec![*b"heic", *b"mif1"],
+        primary_id,
         items,
-        groups: vec![],
-    })
+    ))
     .expect("write model")
 }
 
