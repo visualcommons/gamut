@@ -15,6 +15,30 @@
 //! [`Exif::parse`] reads a blob and [`Exif::to_bytes`] re-serialises it (preserving the byte order);
 //! read tags with the typed accessors or the [`ExifTag`] catalogue.
 //!
+//! Two further read entry points sit on [`ExifReader`]:
+//! [`parse_from`](ExifReader::parse_from) reads through [`gamut_ifd::ReadAt`] rather than a slice,
+//! so EXIF can be pulled out of a large raw file without loading it, and
+//! [`parse_with_report`](ExifReader::parse_with_report) returns a [`ReadReport`] naming the
+//! sub-IFDs, thumbnail ranges and trailing directories the lenient reader discarded — see
+//! [`report`] for what that covers and what it deliberately does not. `parse` is the `&[u8]` case
+//! of `parse_from` and stays silent.
+//!
+//! `parse` keeps its signature, its accept/reject verdict and its re-serialised bytes, with two
+//! narrow exceptions, both measured over a 3 144-case truncation-and-corruption sweep against the
+//! previous release. An error message's offset is now a position in the buffer the caller handed
+//! in, so for a marked blob it is six bytes larger than before — the `Exif\0\0` marker — while a
+//! [`Dropped::offset`] stays relative to the TIFF stream; and a 1st IFD carrying
+//! `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` is now named in the report
+//! instead of vanishing, and rejected in [`strict`](ExifReader::strict) mode as the unreadable
+//! range it is — an offset with nothing to size it addresses bytes that cannot be read. That rule
+//! is structural, not a support level: Exif 3.0 §4.6.9.2 Table 21 states the pair's level only *per
+//! thumbnail-format column*, an axis that is not the two-valued `Compression` tag — which this
+//! reader does not consult, though [`Thumbnail::compression`](thumbnail::Thumbnail::compression)
+//! exposes it to callers (issue #574). It refuses no conformant input: the table gives both tags
+//! the same level in all four columns — `M` under **Compressed**, `N` (not allowed to record) under
+//! the three uncompressed ones — so an offset with no length is non-conformant under every one of
+//! them.
+//!
 //! ```
 //! use gamut_exif::{ByteOrder, Exif, ExifTag, Value};
 //!
@@ -35,6 +59,8 @@ pub mod exif;
 pub mod gps;
 pub mod maker_note;
 pub mod reader;
+pub mod report;
+mod stream;
 pub mod tag;
 pub mod thumbnail;
 pub mod value;
@@ -50,6 +76,7 @@ pub use gps::GpsConversionError;
 pub use gps::{GpsAltitude, GpsCoordinate, GpsInfo, GpsReference};
 pub use maker_note::{MakerNote, MakerNoteVendor};
 pub use reader::ExifReader;
+pub use report::{DropReason, Dropped, DroppedRegion, ReadReport};
 pub use tag::{ExifTag, IfdKind};
 pub use thumbnail::Thumbnail;
 pub use value::{Rational, SRational, as_text};

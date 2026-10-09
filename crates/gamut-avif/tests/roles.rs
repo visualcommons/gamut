@@ -126,31 +126,30 @@ fn brands_groups_and_alternatives_pin_exact_values() {
     // non-`altr` (`ster`) — pins `major_brand`/`compatible_brands`/`groups`/`alternatives`
     // against their body-replacement mutants, and the `== b"altr"` filter against its `!=`
     // inversion (which would return the `ster` group instead of the `altr` one).
-    let model = IsoBmffImage {
-        major_brand: *b"avif",
-        minor_version: 0,
-        compatible_brands: vec![*b"mif1", *b"avif"],
-        primary_item_id: 1,
-        items: vec![
+    let model = IsoBmffImage::new(
+        *b"avif",
+        vec![*b"mif1", *b"avif"],
+        1,
+        vec![
             av01_item(1, vec![1, 2, 3, 4]),
             Item {
                 hidden: true,
                 ..av01_item(2, vec![5, 6])
             },
         ],
-        groups: vec![
-            EntityGroup {
-                group_type: *b"ster",
-                group_id: 7,
-                entity_ids: vec![1, 2],
-            },
-            EntityGroup {
-                group_type: *b"altr",
-                group_id: 8,
-                entity_ids: vec![2, 1],
-            },
-        ],
-    };
+    )
+    .with_groups(vec![
+        EntityGroup {
+            group_type: *b"ster",
+            group_id: 7,
+            entity_ids: vec![1, 2],
+        },
+        EntityGroup {
+            group_type: *b"altr",
+            group_id: 8,
+            entity_ids: vec![2, 1],
+        },
+    ]);
     let data = write(&model).unwrap();
     let c = AvifContainer::parse(&data).unwrap();
     let img = c.image();
@@ -272,14 +271,7 @@ fn brand_predicate_distinguishes_av1_and_non_av1() {
         }],
         ..item(1, *b"hvc1", vec![1, 2, 3, 4])
     };
-    let mut model = IsoBmffImage {
-        major_brand: *b"mif1",
-        minor_version: 0,
-        compatible_brands: vec![*b"mif1"],
-        primary_item_id: 1,
-        items: vec![hevc_item],
-        groups: vec![],
-    };
+    let mut model = IsoBmffImage::new(*b"mif1", vec![*b"mif1"], 1, vec![hevc_item]);
     let data = write(&model).unwrap();
     assert!(!AvifContainer::parse(&data).unwrap().image().is_av1_still());
 
