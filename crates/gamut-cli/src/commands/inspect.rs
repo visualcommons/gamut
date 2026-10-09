@@ -561,6 +561,16 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
             ),
         })
         .collect();
+    // `is_intact` also requires IEND, and a datastream can lack it with every segment sound: one
+    // that ends cleanly at a chunk boundary. Counted whenever IEND is absent — a truncated file
+    // lacks it too, and says so twice rather than having one conjunct of the verdict go unlisted —
+    // so a file that is not intact always names at least one finding.
+    if report.chunk(b"IEND").is_none() {
+        findings += 1;
+        if damaged.len() < MAX_LIST {
+            damaged.push("no IEND chunk: the datastream ends without its terminator".to_owned());
+        }
+    }
     // A skip the file itself caused is damage. An over-budget skip is not — nothing is known to be
     // wrong with the file — but it is still a reason this command cannot vouch for it, which is a
     // separate question the verdict below keeps separate.

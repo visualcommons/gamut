@@ -89,7 +89,7 @@ pub struct Chromaticities {
     pub blue: (u32, u32),
 }
 
-/// Coding-independent code points (cICP, §11.3.2.5) identifying the video-signal colour space.
+/// Coding-independent code points (cICP, §11.3.2.6) identifying the video-signal colour space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Cicp {
@@ -137,12 +137,12 @@ pub struct DecodedPng {
     pub palette: Option<PngPalette>,
     /// The tRNS colour key of a greyscale/truecolour image, in native (unscaled) sample units.
     pub transparency: Option<TransparencyKey>,
-    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.4). Feed as
+    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.5). Feed as
     /// `gamut_metadata::MetadataBlock::Exif`.
     pub exif: Option<Vec<u8>>,
     /// The embedded ICC profile (iCCP), inflated. Feed as `MetadataBlock::Icc`.
     pub icc_profile: Option<IccProfile>,
-    /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.2), decompressed if stored
+    /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.4), decompressed if stored
     /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
     /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim: the JUMBF bytes,
@@ -170,7 +170,7 @@ pub struct DecodedPng {
     pub gamma: Option<u32>,
     /// cHRM chromaticities, each coordinate × 100 000.
     pub chromaticities: Option<Chromaticities>,
-    /// sRGB rendering intent (§11.3.2.4).
+    /// sRGB rendering intent (§11.3.2.5).
     pub srgb: Option<SrgbIntent>,
     /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
@@ -213,12 +213,12 @@ pub struct DecodedPng {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PngMetadata {
-    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.4). Feed as
+    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.5). Feed as
     /// `gamut_metadata::MetadataBlock::Exif`.
     pub exif: Option<Vec<u8>>,
     /// The embedded ICC profile (iCCP), inflated. Feed as `MetadataBlock::Icc`.
     pub icc_profile: Option<IccProfile>,
-    /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.2), decompressed if stored
+    /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.4), decompressed if stored
     /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
     /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim and uncompressed —
@@ -246,7 +246,7 @@ pub struct PngMetadata {
     pub gamma: Option<u32>,
     /// cHRM chromaticities, each coordinate × 100 000.
     pub chromaticities: Option<Chromaticities>,
-    /// sRGB rendering intent (§11.3.2.4).
+    /// sRGB rendering intent (§11.3.2.5).
     pub srgb: Option<SrgbIntent>,
     /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
@@ -403,7 +403,7 @@ fn parse_chrm(data: &[u8]) -> Option<Chromaticities> {
     })
 }
 
-/// tEXt (§11.3.3.3): keyword, NUL, Latin-1 text.
+/// tEXt (§11.3.3.2): keyword, NUL, Latin-1 text.
 fn parse_text(data: &[u8]) -> Option<TextChunk> {
     let (keyword, text) = split_keyword(data)?;
     Some(TextChunk {
@@ -414,7 +414,7 @@ fn parse_text(data: &[u8]) -> Option<TextChunk> {
     })
 }
 
-/// zTXt (§11.3.3.4): keyword, NUL, compression method 0, deflated Latin-1 text.
+/// zTXt (§11.3.3.3): keyword, NUL, compression method 0, deflated Latin-1 text.
 fn parse_ztxt(data: &[u8], budget: &mut usize) -> Option<TextChunk> {
     let (keyword, rest) = split_keyword(data)?;
     let (&method, compressed) = rest.split_first()?;
@@ -430,7 +430,7 @@ fn parse_ztxt(data: &[u8], budget: &mut usize) -> Option<TextChunk> {
     })
 }
 
-/// iTXt (§11.3.3.5): keyword, NUL, compression flag, compression method, language tag, NUL,
+/// iTXt (§11.3.3.4): keyword, NUL, compression flag, compression method, language tag, NUL,
 /// translated keyword, NUL, UTF-8 text (deflated when the flag is 1).
 fn parse_itxt(data: &[u8], budget: &mut usize) -> Option<ITxt> {
     let (keyword, rest) = split_keyword(data)?;

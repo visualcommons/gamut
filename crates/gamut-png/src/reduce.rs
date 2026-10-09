@@ -42,7 +42,7 @@ pub enum Reduced {
     GrayAlpha16Be(Vec<u8>),
     /// 16-bit RGB (alpha was fully opaque and dropped), pre-serialised big-endian.
     Rgb16Be(Vec<u8>),
-    /// 8-bit RGB plus a `tRNS` colour key (§11.3.2.1): the alpha channel was binary, every
+    /// 8-bit RGB plus a `tRNS` colour key (§11.3.1.1): the alpha channel was binary, every
     /// transparent pixel shared one colour, and no opaque pixel used it, so that colour can stand
     /// for "transparent" and the fourth channel disappears.
     Rgb8Keyed {
@@ -200,7 +200,7 @@ fn keyed_size(pixel_count: usize, all_gray: bool) -> usize {
 
 /// The colour that can stand for "transparent", if a `tRNS` colour key applies at all.
 ///
-/// Three conditions, all necessary (§11.3.2.1 gives a decoder exactly one transparent colour, not
+/// Three conditions, all necessary (§11.3.1.1 gives a decoder exactly one transparent colour, not
 /// a mask):
 ///
 /// 1. every alpha is 0 or 255 — a partially transparent pixel cannot be expressed by a key;
@@ -504,7 +504,7 @@ fn be_bytes(samples: impl Iterator<Item = u16>) -> Vec<u8> {
 /// Two rules, in priority order:
 ///
 /// 1. **Transparent entries first**, least opaque first. `tRNS` may be shorter than `PLTE` and
-///    every omitted entry defaults to opaque (§11.3.2.1), so gathering the transparent entries at
+///    every omitted entry defaults to opaque (§11.3.1.1), so gathering the transparent entries at
 ///    the front makes the trailing-opaque trim below cut as much as it possibly can. First-
 ///    appearance order left them scattered, so one late transparent entry pinned the whole chunk
 ///    to full length.

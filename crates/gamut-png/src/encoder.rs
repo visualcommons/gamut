@@ -252,11 +252,13 @@ impl PngEncoder {
         self
     }
 
-    /// Records a greyscale background colour (bKGD chunk) for greyscale images.
+    /// Records a greyscale background colour (bKGD chunk) for greyscale images, as a sample at the
+    /// input's bit depth.
     ///
     /// Emitted for the colour type actually **written**, which under
     /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
-    /// that is lossless (to an RGB triple, or to the palette entry holding the grey) and
+    /// that is lossless (to an RGB triple, or to the palette entry holding the grey), rescaled
+    /// exactly as the pixels were where auto-reduce lowers the depth (16→8, sub-byte grey), and
     /// **omitted, without error,** where the written colour type or depth cannot carry it. See
     /// `STATUS.md`, "Chunks that follow the race".
     #[must_use]
@@ -265,13 +267,15 @@ impl PngEncoder {
         self
     }
 
-    /// Records an RGB background colour (bKGD chunk) for truecolour images.
+    /// Records an RGB background colour (bKGD chunk) for truecolour images, as samples at the
+    /// input's bit depth.
     ///
     /// Emitted for the colour type actually **written**, which under
     /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
     /// that is lossless (to one grey sample where the channels agree, or to the palette entry
-    /// holding the colour — an opaque one where a transparent twin exists) and **omitted, without
-    /// error,** where the written colour type or depth cannot carry it. See `STATUS.md`, "Chunks
+    /// holding the colour — an opaque one where a transparent twin exists), rescaled exactly as the
+    /// pixels were where auto-reduce lowers the depth, and **omitted, without error,** where the
+    /// written colour type or depth cannot carry it. See `STATUS.md`, "Chunks
     /// that follow the race".
     #[must_use]
     pub fn with_background_rgb(mut self, red: u16, green: u16, blue: u16) -> Self {
@@ -504,6 +508,8 @@ impl PngEncoder {
                     trns,
                     origin: PaletteOrigin::Caller,
                 }),
+                // The caller's background is a colour in its 8-bit palette's terms.
+                source_depth: 8,
             },
             |out| {
                 chunk::write_chunk(out, *b"PLTE", &plte);
@@ -548,6 +554,7 @@ impl PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
+                8,
                 reduce::analyze8(samples, channels),
                 |o| {
                     self.write_png(
@@ -582,6 +589,7 @@ impl PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
+                16,
                 reduce::analyze16(samples, channels),
                 |o| self.encode_16bit(dims, samples, color, o),
                 out,
@@ -804,23 +812,26 @@ impl PngEncoder {
     fn write_reduced_or_native(
         &self,
         dims: Dimensions,
+        source_depth: u8,
         reductions: Reductions,
         native: impl FnOnce(&mut Vec<u8>) -> Result<usize>,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         let (chunked, chunk_free) = match reductions {
             Reductions::None => return native(out),
-            Reductions::ChunkFree(reduced) => return self.write_reduced(dims, reduced, out),
+            Reductions::ChunkFree(reduced) => {
+                return self.write_reduced(dims, source_depth, reduced, out);
+            }
             Reductions::Chunked {
                 chunked,
                 chunk_free,
             } => (chunked, chunk_free),
         };
         let mut reduced_encoding = Vec::new();
-        self.write_reduced(dims, chunked, &mut reduced_encoding)?;
+        self.write_reduced(dims, source_depth, chunked, &mut reduced_encoding)?;
         if let Some(free) = chunk_free {
             let mut free_encoding = Vec::new();
-            self.write_reduced(dims, free, &mut free_encoding)?;
+            self.write_reduced(dims, source_depth, free, &mut free_encoding)?;
             if prefers_chunk_free(free_encoding.len(), reduced_encoding.len()) {
                 reduced_encoding = free_encoding;
             }
@@ -837,10 +848,12 @@ impl PngEncoder {
         Ok(winner.len())
     }
 
-    /// Writes a reduced encoding chosen by [`reduce::analyze8`] / [`reduce::analyze16`].
+    /// Writes a reduced encoding chosen by [`reduce::analyze8`] / [`reduce::analyze16`], whose
+    /// input samples were `source_depth` (8 or 16) bits — the depth the caller's `bKGD` is at.
     fn write_reduced(
         &self,
         dims: Dimensions,
+        source_depth: u8,
         reduced: Reduced,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
@@ -862,7 +875,7 @@ impl PngEncoder {
                 self.write_png(
                     wh,
                     sample_bytes,
-                    WrittenHeader::new(ColorType::Grayscale, depth),
+                    WrittenHeader::new(ColorType::Grayscale, depth).reduced_from(source_depth),
                     |_| {},
                     out,
                 )
@@ -870,23 +883,23 @@ impl PngEncoder {
             Reduced::GrayAlpha8(samples) => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::GrayscaleAlpha, 8),
+                WrittenHeader::new(ColorType::GrayscaleAlpha, 8).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
             Reduced::Rgb8(samples) => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::Truecolor, 8),
+                WrittenHeader::new(ColorType::Truecolor, 8).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
-            // §11.3.2.1: for truecolour, tRNS is three 16-bit big-endian samples naming the one
+            // §11.3.1.1: for truecolour, tRNS is three 16-bit big-endian samples naming the one
             // colour a decoder renders as fully transparent. At depth 8 the high byte is zero.
             Reduced::Rgb8Keyed { samples, key } => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::Truecolor, 8),
+                WrittenHeader::new(ColorType::Truecolor, 8).reduced_from(source_depth),
                 |out| {
                     let trns = [0, key[0], 0, key[1], 0, key[2]];
                     chunk::write_chunk(out, *b"tRNS", &trns);
@@ -897,35 +910,35 @@ impl PngEncoder {
             Reduced::GrayKeyed { samples, key } => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::Grayscale, 8),
+                WrittenHeader::new(ColorType::Grayscale, 8).reduced_from(source_depth),
                 |out| chunk::write_chunk(out, *b"tRNS", &[0, key]),
                 out,
             ),
             Reduced::Rgba8(samples) => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::TruecolorAlpha, 8),
+                WrittenHeader::new(ColorType::TruecolorAlpha, 8).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
             Reduced::Gray16Be(bytes) => self.write_png(
                 wh,
                 &bytes,
-                WrittenHeader::new(ColorType::Grayscale, 16),
+                WrittenHeader::new(ColorType::Grayscale, 16).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
             Reduced::GrayAlpha16Be(bytes) => self.write_png(
                 wh,
                 &bytes,
-                WrittenHeader::new(ColorType::GrayscaleAlpha, 16),
+                WrittenHeader::new(ColorType::GrayscaleAlpha, 16).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
             Reduced::Rgb16Be(bytes) => self.write_png(
                 wh,
                 &bytes,
-                WrittenHeader::new(ColorType::Truecolor, 16),
+                WrittenHeader::new(ColorType::Truecolor, 16).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
@@ -958,6 +971,7 @@ impl PngEncoder {
                             trns: trns.as_deref(),
                             origin: PaletteOrigin::Derived,
                         }),
+                        source_depth,
                     },
                     |out| {
                         chunk::write_chunk(out, *b"PLTE", &plte);
@@ -1058,6 +1072,7 @@ impl EncodeImage<Gray8> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 image.dimensions(),
+                8,
                 reduce::analyze8(image.as_samples(), 1),
                 |o| self.encode_8bit(image, ColorType::Grayscale, o),
                 out,
@@ -1090,6 +1105,7 @@ impl EncodeImage<Rgb8> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 image.dimensions(),
+                8,
                 reduce::analyze8(image.as_samples(), 3),
                 |o| self.encode_8bit(image, ColorType::Truecolor, o),
                 out,
@@ -1132,6 +1148,7 @@ impl EncodeImage<Gray16> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
+                16,
                 reduce::analyze16(samples, 1),
                 |o| self.encode_16bit(dims, samples, ColorType::Grayscale, o),
                 out,
@@ -1146,6 +1163,7 @@ impl EncodeImage<Rgb16> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
+                16,
                 reduce::analyze16(samples, 3),
                 |o| self.encode_16bit(dims, samples, ColorType::Truecolor, o),
                 out,
@@ -1208,7 +1226,7 @@ mod tests {
     /// discarding the caller's colour *and* every other setting made before them -- and no test
     /// noticed (#110). `with_background_rgb` was covered; these two were not.
     ///
-    /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.5.1): two bytes for
+    /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.4.1): two bytes for
     /// greyscale, one for indexed. Asserting the bytes rather than mere presence is what
     /// distinguishes the right builder from any of them.
     ///

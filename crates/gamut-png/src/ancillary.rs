@@ -28,17 +28,17 @@
 //! exists, omitted otherwise ([`bkgd_for`], [`sbit_for`]) — rather than verbatim, because a
 //! payload shaped for the wrong colour type is a chunk a reader rejects and drops.
 //!
-//! That contract holds across colour **types**. On the depth axis it is weaker: a `bKGD` sample is
-//! checked against the written depth and omitted when out of range, but it is not *rescaled* when
-//! auto-reduce demoted the samples (16→8 by `v / 257`, sub-byte grey by the depth's scale), so a
-//! sample inside the written range keeps its input-depth value. That is issue #501, not this
-//! module's claim.
+//! The same holds on the depth axis. A `bKGD` sample is expressed at the image's bit depth
+//! (§11.3.4.1), and the caller set it at the *input's* depth; auto-reduce may write a lower one
+//! (16→8 where every sample is `k·257`, sub-byte grey where every sample is a multiple of the
+//! depth's scale). The sample is therefore mapped exactly as the pixels were — a value that the
+//! mapping cannot carry exactly is omitted with the chunk ([`WrittenHeader::source_depth`]).
 
 use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::{ColorType, chunk};
 
-/// The rendering intent for an `sRGB` chunk (PNG spec §11.3.3.5).
+/// The rendering intent for an `sRGB` chunk (PNG spec §11.3.2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrgbIntent {
     /// Perceptual (intent code 0).
@@ -268,7 +268,7 @@ pub(crate) struct WrittenPalette<'a> {
     /// The `PLTE` payload: RGB triples.
     pub plte: &'a [u8],
     /// The `tRNS` payload — one alpha per leading entry, entries past its end being opaque
-    /// (§11.3.2.1) — or `None` when every entry is opaque.
+    /// (§11.3.1.1) — or `None` when every entry is opaque.
     pub trns: Option<&'a [u8]>,
     /// Whose palette it is.
     pub origin: PaletteOrigin,
@@ -320,20 +320,36 @@ pub(crate) struct WrittenHeader<'a> {
     pub bit_depth: u8,
     /// The palette for [`ColorType::Indexed`]; `None` otherwise.
     pub palette: Option<WrittenPalette<'a>>,
+    /// The bit depth the caller's `bKGD` samples are expressed at: the input's sample depth, which
+    /// auto-reduce may have lowered to `bit_depth` (or, under a palette, to the 8-bit entries).
+    pub source_depth: u8,
 }
 
 impl WrittenHeader<'static> {
-    /// A header without a palette — every colour type but [`ColorType::Indexed`].
+    /// A header without a palette — every colour type but [`ColorType::Indexed`] — written at
+    /// the input's own depth.
     pub(crate) const fn new(color: ColorType, bit_depth: u8) -> Self {
         Self {
             color,
             bit_depth,
             palette: None,
+            source_depth: bit_depth,
         }
     }
 }
 
-/// The `bKGD` payload for the header actually written (§11.3.5.1), or `None` to omit the chunk.
+impl WrittenHeader<'_> {
+    /// The same header, for an input whose samples were `source_depth` bits before auto-reduce
+    /// lowered them.
+    pub(crate) const fn reduced_from(self, source_depth: u8) -> Self {
+        Self {
+            source_depth,
+            ..self
+        }
+    }
+}
+
+/// The `bKGD` payload for the header actually written (§11.3.4.1), or `None` to omit the chunk.
 ///
 /// The caller's payload names its own colour type by its length — one byte is a palette index,
 /// two a grey sample, six an RGB triple, each sample 16-bit big-endian — and is converted where
@@ -349,8 +365,11 @@ impl WrittenHeader<'static> {
 ///   encoder-derived palette ([`PaletteOrigin::Derived`]) it names an entry in an order the
 ///   caller never saw, and under any other colour type there is no palette at all, so in both
 ///   cases it is omitted;
-/// - a grey or RGB sample must fit the written depth (`value < 1 << depth` below 16 bits); one
-///   that does not is omitted rather than written as a chunk the reader rejects.
+/// - a grey or RGB sample is at the input's depth ([`WrittenHeader::source_depth`]) and is
+///   rescaled to the written one — the written depth, or 8 for a palette entry — exactly as
+///   auto-reduce mapped the pixels ([`rescale`]); one past the input's depth, or one the mapping
+///   cannot carry exactly, is omitted rather than written as a different colour or as a chunk the
+///   reader rejects.
 ///
 /// The rules are the ones a reader applies before honouring the chunk — libpng's
 /// `png_handle_bKGD` rejects a wrong length, an index past the palette and a sample past the
@@ -370,31 +389,53 @@ pub(crate) fn bkgd_for(bkgd: &[u8], written: WrittenHeader<'_>) -> Option<Vec<u8
         [r1, r0, g1, g0, b1, b0] => [sample(r1, r0), sample(g1, g0), sample(b1, b0)],
         _ => return None,
     };
+    let at = |depth: u8| -> Option<[u16; 3]> {
+        let [r, g, b] = rgb.map(|v| rescale(v, written.source_depth, depth));
+        Some([r?, g?, b?])
+    };
     match written.color {
         ColorType::Indexed => {
-            let entry = rgb.map(|v| u8::try_from(v).ok());
+            let entry = at(8)?.map(|v| u8::try_from(v).ok());
             let entry = [entry[0]?, entry[1]?, entry[2]?];
             let index = written.palette?.index_of(entry)?;
             u8::try_from(index).ok().map(|index| vec![index])
         }
         ColorType::Grayscale | ColorType::GrayscaleAlpha => {
             let grey = (rgb[0] == rgb[1] && rgb[1] == rgb[2]).then_some(rgb[0])?;
-            fits_depth(grey, written.bit_depth).then(|| grey.to_be_bytes().to_vec())
+            rescale(grey, written.source_depth, written.bit_depth).map(|v| v.to_be_bytes().to_vec())
         }
-        ColorType::Truecolor | ColorType::TruecolorAlpha => rgb
-            .iter()
-            .all(|&v| fits_depth(v, written.bit_depth))
-            .then(|| rgb.iter().flat_map(|v| v.to_be_bytes()).collect()),
+        ColorType::Truecolor | ColorType::TruecolorAlpha => Some(
+            at(written.bit_depth)?
+                .iter()
+                .flat_map(|v| v.to_be_bytes())
+                .collect(),
+        ),
     }
 }
 
-/// Whether a 16-bit-framed `bKGD` sample is in range for the written depth: any value at 16 bits,
-/// below `1 << depth` otherwise (libpng rejects `buf[0] != 0 || buf[1] >= 1 << bit_depth`).
-fn fits_depth(value: u16, bit_depth: u8) -> bool {
-    bit_depth >= 16 || u32::from(value) < 1u32 << bit_depth
+/// A `bKGD` sample at `from` bits, as the sample at `to` bits that denotes the same intensity —
+/// `value · (2^to − 1) / (2^from − 1)` — or `None` when `value` is past `from`'s range
+/// (libpng rejects `buf[0] != 0 || buf[1] >= 1 << bit_depth`) or the quotient is not exact.
+///
+/// That is exactly the mapping auto-reduce applies to the pixels, which it applies only where it
+/// is exact for every sample: 16→8 is `v / 257` for `v = k·257`, and 8-bit grey packed to depth
+/// `d` is `v / (255 / (2^d − 1))` (§13.12's scale, run backwards). A sample it cannot carry
+/// exactly is a colour the reduced image has no code for, so the chunk is omitted rather than
+/// rounded to a neighbour. At `from == to` it is the identity on the in-range values.
+fn rescale(value: u16, from: u8, to: u8) -> Option<u16> {
+    let max = |depth: u8| (1u32 << depth) - 1;
+    let value = u32::from(value);
+    if value > max(from) {
+        return None;
+    }
+    let scaled = value * max(to);
+    scaled
+        .is_multiple_of(max(from))
+        .then(|| scaled / max(from))
+        .and_then(|v| u16::try_from(v).ok())
 }
 
-/// The `sBIT` payload for the header actually written (§11.3.3.4), or `None` to omit the chunk.
+/// The `sBIT` payload for the header actually written (§11.3.2.4), or `None` to omit the chunk.
 ///
 /// The caller's payload names its own colour type by its length — one entry for grey, two for
 /// grey+alpha, three for RGB (and for a palette, whose entries are RGB), four for RGBA — and is
@@ -630,6 +671,7 @@ mod tests {
                 trns,
                 origin,
             }),
+            source_depth: 8,
         }
     }
 
@@ -664,6 +706,7 @@ mod tests {
                 trns,
                 origin: PaletteOrigin::Derived,
             }),
+            source_depth: 8,
         };
         assert_eq!(
             bkgd_for(&[0, 0, 0, 0, 0, 0], twins(Some(&[0]))),
@@ -719,8 +762,8 @@ mod tests {
     }
 
     #[test]
-    fn a_background_sample_must_fit_the_written_depth() {
-        // 256 does not fit depth 8 in either framing; anything fits depth 16.
+    fn a_background_sample_must_fit_its_own_depth() {
+        // 256 is past depth 8 in either framing; anything fits depth 16.
         assert_eq!(bkgd_for(&[1, 0], header(ColorType::Grayscale, 8)), None);
         assert_eq!(
             bkgd_for(&[1, 0], header(ColorType::Grayscale, 16)),
@@ -730,15 +773,73 @@ mod tests {
             bkgd_for(&[0, 1, 0, 2, 1, 0], header(ColorType::Truecolor, 8)),
             None
         );
-        // Sub-byte grey: 3 is the last code at depth 2, 4 is not one.
+        // Sub-byte grey written at its own depth (bilevel): 1 is the last code, 2 is not one.
         assert_eq!(
-            bkgd_for(&[0, 3], header(ColorType::Grayscale, 2)),
-            Some(vec![0, 3])
+            bkgd_for(&[0, 1], header(ColorType::Grayscale, 1)),
+            Some(vec![0, 1])
         );
-        assert_eq!(bkgd_for(&[0, 4], header(ColorType::Grayscale, 2)), None);
-        assert!(fits_depth(255, 8));
-        assert!(!fits_depth(256, 8));
-        assert!(fits_depth(65535, 16));
+        assert_eq!(bkgd_for(&[0, 2], header(ColorType::Grayscale, 1)), None);
+    }
+
+    /// A header auto-reduce lowered from `source_depth` input samples.
+    fn reduced(color: ColorType, bit_depth: u8, source_depth: u8) -> WrittenHeader<'static> {
+        header(color, bit_depth).reduced_from(source_depth)
+    }
+
+    #[test]
+    fn a_background_sample_is_rescaled_with_the_pixels() {
+        // 8-bit grey packed to depth 2 maps v to v / 85: 170 is code 2, and 3 — a near-black
+        // 8-bit sample that is white at depth 2 — has no code at all.
+        assert_eq!(
+            bkgd_for(&[0, 170], reduced(ColorType::Grayscale, 2, 8)),
+            Some(vec![0, 2])
+        );
+        assert_eq!(bkgd_for(&[0, 3], reduced(ColorType::Grayscale, 2, 8)), None);
+        // Depth 1 maps v to v / 255: an 8-bit 1 is near black, not the white code 1.
+        assert_eq!(bkgd_for(&[0, 1], reduced(ColorType::Grayscale, 1, 8)), None);
+        assert_eq!(
+            bkgd_for(&[0, 255], reduced(ColorType::Grayscale, 1, 8)),
+            Some(vec![0, 1])
+        );
+        // 16→8 maps k·257 to k, and nothing else to anything.
+        assert_eq!(
+            bkgd_for(
+                &[0x14, 0x14, 0x5A, 0x5A, 0xDC, 0xDC],
+                reduced(ColorType::Truecolor, 8, 16)
+            ),
+            Some(vec![0, 20, 0, 90, 0, 220])
+        );
+        assert_eq!(
+            bkgd_for(
+                &[0, 200, 0, 200, 0, 200],
+                reduced(ColorType::Truecolor, 8, 16)
+            ),
+            None,
+            "16-bit 200 is near black; 8-bit 200 is not"
+        );
+        // ...including into a derived palette's 8-bit entries: 16-bit (20, 90, 220)·257 is entry 2.
+        assert_eq!(
+            bkgd_for(
+                &[0x14, 0x14, 0x5A, 0x5A, 0xDC, 0xDC],
+                palette(PaletteOrigin::Derived, None).reduced_from(16)
+            ),
+            Some(vec![2])
+        );
+    }
+
+    #[test]
+    fn rescaling_is_exact_or_nothing() {
+        // The identity at equal depths, up to and including the top code.
+        assert_eq!(rescale(255, 8, 8), Some(255));
+        assert_eq!(rescale(65535, 16, 16), Some(65535));
+        assert_eq!(rescale(256, 8, 8), None, "past the source depth");
+        // The 16→8 and 8→sub-byte scales, both ways round the divisibility test.
+        assert_eq!(rescale(77 * 257, 16, 8), Some(77));
+        assert_eq!(rescale(77 * 257 + 1, 16, 8), None);
+        assert_eq!(rescale(2 * 85, 8, 2), Some(2));
+        assert_eq!(rescale(2 * 85 + 1, 8, 2), None);
+        // 16-bit demoted then packed: 21845 = 85·257 is depth-2 code 1.
+        assert_eq!(rescale(21845, 16, 2), Some(1));
     }
 
     #[test]
