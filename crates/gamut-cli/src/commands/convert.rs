@@ -10,7 +10,7 @@ use gamut::jxl::{
     Container as JxlContainer, Distance as JxlDistance, Effort as JxlEffort, JxlEncoder,
     ModularMode as JxlModularMode,
 };
-use gamut::png::{Level as PngLevel, PngEncoder};
+use gamut::png::{PngEncoder, Preset as PngCodecPreset};
 use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
 use gamut::webp::{Effort as WebpEffort, NearLossless as WebpNearLossless, WebpEncoder};
 
@@ -63,9 +63,17 @@ pub(crate) struct ConvertArgs {
     /// Compress TIFF output with PackBits run-length encoding instead of storing it uncompressed.
     #[arg(long)]
     packbits: bool,
-    /// PNG DEFLATE effort: optimal-parse refinement passes at the always-used best compression
-    /// level (0 = lazy parse only; zopfli's default budget is 15). Omitting it keeps the encoder
-    /// default (6). Ignored for other output formats.
+    /// PNG effort preset: one setting for the five knobs that trade encoding time for output size
+    /// (compression level, DEFLATE effort, filter strategy, optimal-parse span, and lossless
+    /// colour-type reduction). `small` is the default and is what this command has always done;
+    /// `smallest` adds the whole-image filter search, which is much slower. Ignored for other
+    /// output formats.
+    #[arg(long = "png-preset", value_enum, default_value = "small")]
+    png_preset: PngPreset,
+    /// PNG DEFLATE effort: optimal-parse refinement passes, overriding whatever `--png-preset`
+    /// chose (0 = lazy parse only; zopfli's default budget is 15). Only the best compression level
+    /// consults it, so it does nothing under `--png-preset fast` or `balanced`. Omitting it keeps
+    /// the preset's own budget. Ignored for other output formats.
     #[arg(long)]
     png_effort: Option<u8>,
     /// JPEG XL Butteraugli distance for lossy encoding (~1.0 = visually lossless, up to 25.0).
@@ -107,7 +115,8 @@ pub(crate) enum OutputFormat {
     Webp,
     /// TIFF (8-bit RGB; uncompressed, or PackBits with `--packbits`).
     Tiff,
-    /// PNG — lossless; transparency preserved, with automatic lossless colour-type reduction.
+    /// PNG — lossless; transparency preserved, with automatic lossless colour-type reduction at
+    /// the default `--png-preset`.
     Png,
     /// JPEG XL — lossless by default, or lossy at `--jxl-distance`; transparency preserved.
     Jxl,
@@ -138,6 +147,38 @@ pub(crate) enum JxlModular {
     Vardct,
     /// Force the modular path (what lossless output already uses).
     Modular,
+}
+
+/// PNG effort preset for `--png-preset`, naming the rungs of `gamut_png::Preset`.
+///
+/// The discriminants **are** the codec's ladder levels, and `to_codec` resolves them through
+/// [`PngCodecPreset::from_level`] rather than re-deciding the mapping — the same route
+/// `--webp-effort` and `--jxl-effort` take through their own ladders. A named value enum rather
+/// than the siblings' bare integer only because clap prints a rung's doc comment in `--help`,
+/// which a number cannot.
+#[derive(Clone, Copy, ValueEnum)]
+#[repr(u8)]
+pub(crate) enum PngPreset {
+    /// Fastest: greedy matching and one fixed filter, accepting a larger file.
+    Fast = 0,
+    /// The `gamut-png` library default — the balanced speed/size point.
+    Balanced = 1,
+    /// The optimal parse and lossless reduction on one filter heuristic; this command's default.
+    Small = 2,
+    /// Adds the whole-image filter search, zopfli's own refinement budget and a wider
+    /// optimal-parse span. Six times slower than `small` and worth about 3.6% on gamut's corpus,
+    /// but nothing at all on three of its nine rows: measure your own material.
+    Smallest = 3,
+}
+
+impl PngPreset {
+    /// Maps the CLI choice onto the codec's [`PngCodecPreset`] rung.
+    fn to_codec(self) -> PngCodecPreset {
+        // `the_png_preset_flag_offers_exactly_the_codec_ladder` pins that every discriminant here
+        // is a level the codec admits, so the fallback is unreachable; it exists because this is
+        // a CLI and a panic is not an error report.
+        PngCodecPreset::from_level(self as u8).unwrap_or_default()
+    }
 }
 
 impl JpegSubsampling {
@@ -246,9 +287,9 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                 bytes = rgba.len(),
                 "decoded input"
             );
-            let mut encoder = PngEncoder::new()
-                .with_compression(PngLevel::Best)
-                .with_auto_reduce(true);
+            // The preset sets every size/time knob; `--png-effort` still overrides the one it
+            // names, so it must be applied after.
+            let mut encoder = PngEncoder::new().with_preset(args.png_preset.to_codec());
             if let Some(effort) = args.png_effort {
                 encoder = encoder.with_effort(effort);
             }
@@ -392,5 +433,32 @@ fn resolve_format(args: &ConvertArgs) -> Result<OutputFormat, CliError> {
         Some("jpg" | "jpeg") => Ok(OutputFormat::Jpeg),
         Some(other) => Err(CliError::UnsupportedOutput(other.to_string())),
         None => Err(CliError::UnsupportedOutput("<none>".to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::ValueEnum;
+
+    use super::{PngCodecPreset, PngPreset};
+
+    #[test]
+    fn the_png_preset_flag_offers_exactly_the_codec_ladder() {
+        // The flag's values and the codec's rungs are two lists that must stay the same list.
+        // Walking `from_level` from zero is the codec's own enumeration of its ladder, so a rung
+        // added to `gamut_png::Preset` fails here instead of being silently unreachable from the
+        // command line — which is what a hand-written arm-per-variant mapping could not catch.
+        let from_flag: Vec<u8> = PngPreset::value_variants()
+            .iter()
+            .map(|preset| preset.to_codec().level())
+            .collect();
+        let from_codec: Vec<u8> = (0..=u8::MAX)
+            .map_while(PngCodecPreset::from_level)
+            .map(PngCodecPreset::level)
+            .collect();
+        assert!(
+            from_flag == from_codec,
+            "--png-preset offers levels {from_flag:?} against the codec ladder {from_codec:?}"
+        );
     }
 }

@@ -45,7 +45,8 @@ impl DeflateEncoder {
     /// The default [`Level::Best`] optimal-parse limit: the largest span the shortest-path parse
     /// handles in one piece, unless overridden by [`DeflateEncoder::with_optimal_parse_limit`].
     ///
-    /// 1 MiB, chosen so a single span's dynamic program stays cheap in both time and working set.
+    /// 1 MiB, chosen so a single span's dynamic program stays cheap in working set — 12 MiB of
+    /// parse state at most (see [`DeflateEncoder::with_optimal_parse_limit`] for the arithmetic).
     /// Inputs larger than this are parsed as consecutive spans of this size rather than falling
     /// back to lazy matching, so total input size never decides whether the optimal parse runs.
     pub const DEFAULT_OPTIMAL_PARSE_LIMIT: usize = 1 << 20;
@@ -85,11 +86,22 @@ impl DeflateEncoder {
     /// handles in one piece (default [`DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT`]).
     ///
     /// Input longer than the limit is parsed as consecutive spans of this size, each with its own
-    /// refined cost model and each free to reference the history before it, so encode cost grows
-    /// linearly in the input rather than with the span's own super-linear curve. Raising the limit
-    /// lets one cost model span more data — usually a small ratio win on homogeneous input — at a
-    /// disproportionate time cost; lowering it does the reverse. A limit below the 32 KiB LZ77
+    /// refined cost model and each free to reference the history before it. Raising the limit
+    /// lets one cost model span more data — sometimes a small ratio win on homogeneous input, and
+    /// sometimes a small loss: the sign is a property of the data. A limit below the 32 KiB LZ77
     /// window is raised to it: a shorter span would re-prime more history than it parses.
+    ///
+    /// **What the limit costs is memory, not time.** The shortest-path parse holds three
+    /// span-length vectors for each refinement pass — the cost row, the chosen length and the
+    /// chosen distance — which is **12 bytes of working set for every byte of span**, and the
+    /// widest span is `min(max(limit, 32 KiB), input length)`. The limit is the only bound on it:
+    /// set it past the input's length (`usize::MAX`) and one encode's peak memory grows linearly
+    /// and without bound in the input. The parse's work is linear in the input whatever the span,
+    /// so wall time at a fixed [`with_effort`](Self::with_effort) budget stays roughly flat as the
+    /// limit rises — `gamut-png` measured peak resident set 177.9 → 701.8 MiB against
+    /// 133.9 → 132.7 s on a 4096x4096 RGB photograph, default limit against none — though a
+    /// wider span can take more refinement passes to converge on some material, so time is
+    /// data-dependent rather than strictly flat.
     ///
     /// The knob is ignored at every other level.
     #[must_use]
