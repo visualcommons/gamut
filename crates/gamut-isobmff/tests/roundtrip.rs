@@ -11,7 +11,7 @@ mod common;
 use common::{av01_item, image, item};
 use gamut_isobmff::{
     ColourInformation, EntityGroup, IsoBmffImage, Item, ItemReference, NclxColr, Property,
-    PropertyKind, read, write,
+    PropertyKind, TopLevelBox, TopLevelPosition, read, write,
 };
 
 #[track_caller]
@@ -248,4 +248,21 @@ fn unknown_property_preserved_verbatim() {
         },
     });
     assert_roundtrips(&image(vec![it]));
+}
+
+#[test]
+fn top_level_boxes() {
+    // A C2PA-shaped uuid box after ftyp and a trailing free box: type, user type, payload and
+    // position all survive the cycle.
+    let img = image(vec![av01_item(1, vec![1; 8])]).with_top_level_boxes(vec![
+        TopLevelBox::uuid([0xD8; 16], b"manifest-store".to_vec()),
+        TopLevelBox::new(*b"free", vec![0xAA, 0xBB]).with_position(TopLevelPosition::Trailing),
+    ]);
+    assert_roundtrips(&img);
+}
+
+#[test]
+fn ftyp_minor_version() {
+    // A non-zero minor version, set through the builder, survives the cycle.
+    assert_roundtrips(&image(vec![av01_item(1, vec![2; 4])]).with_minor_version(0x0102_0304));
 }

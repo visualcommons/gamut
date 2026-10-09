@@ -53,12 +53,18 @@ impl ReadLedger {
             return;
         }
         let new_start = self.spans[i].start.min(start);
-        let mut new_end = end;
-        let mut j = i;
-        while j < self.spans.len() && self.spans[j].start <= end {
-            new_end = new_end.max(self.spans[j].end());
-            j += 1;
-        }
+        // The spans that merge are the run from `i` whose starts still reach `end`; taking that
+        // run as a sub-slice is what bounds the walk. A hand-advanced index is bounded by its own
+        // arithmetic instead, and the mutant that stalls that arithmetic -- `j *= 1` never
+        // advances an index of zero -- makes the loop spin instead of finishing wrong, so the
+        // escape is reportable only as a mutation-testing timeout and no test can assert on it
+        // (issue #110).
+        let merge_len = self.spans[i..]
+            .iter()
+            .take_while(|s| s.start <= end)
+            .count();
+        let j = i + merge_len;
+        let new_end = self.spans[i..j].iter().fold(end, |e, s| e.max(s.end()));
         self.spans.splice(
             i..j,
             [Range {
@@ -103,43 +109,44 @@ impl ReadLedger {
                 _ => merged.push(r),
             }
         }
-        // Two-pointer subtract of `merged` from the ledger spans.
+        // Subtract `merged` from each ledger span. Both lists are sorted and disjoint, so the
+        // claims that can touch one span are a contiguous run of `merged`: the run that reaches
+        // past the span's start, up to the last that begins before its end. Taking that run as a
+        // sub-slice is what bounds the walk. A cursor advanced by hand is bounded by its own
+        // arithmetic instead, and the mutants of that arithmetic split two ways: one that stalls
+        // the cursor (`pos *= n` never moves one that starts at zero) spins instead of finishing,
+        // and is reportable only as a mutation-testing timeout, while one that merely mis-steps
+        // it returns a wrong answer a test can pin. Only the first kind is unkillable, and
+        // bounding the walk by the data removes it (issue #110).
         let mut out = Vec::new();
-        let mut c = merged.iter().peekable();
         for span in &self.spans {
-            let mut pos = span.start;
             let end = span.end();
-            while pos < end {
-                // Skip claims entirely before `pos`.
-                while c.peek().is_some_and(|r| r.end() <= pos) {
-                    c.next();
-                }
-                match c.peek() {
-                    Some(r) if r.start <= pos => {
-                        // Covered up to the claim's end.
-                        pos = r.end().min(end);
-                    }
-                    // Uncovered up to whichever comes first: the next claim's start, or the end
-                    // of this span.
-                    //
-                    // The two cases were separate arms, split on `r.start < end`. They are the
-                    // same arm: at `r.start == end` the old second arm pushed `end - pos` and set
-                    // `pos = end`, which is exactly what the fallback did, so `<` and `<=` there
-                    // produced identical output and no test could tell them apart. Written as a
-                    // `min` the operator is gone rather than excluded (#110) -- and `min` is not
-                    // equivalent to `max` here, so what replaces it is killable.
-                    next => {
-                        let stop = next.map_or(end, |r| r.start.min(end));
-                        out.push(Range {
-                            start: pos,
-                            len: stop - pos,
-                        });
-                        pos = stop;
-                    }
-                }
+            let live = &merged[merged.partition_point(|r| r.end() <= span.start)..];
+            let touching = live.iter().take_while(|r| r.start < end).count();
+            // Each claim closes the stretch before it and moves the cursor to its own end,
+            // clamped to the span; whatever is left over after the run is the trailing stretch.
+            let mut pos = span.start;
+            for r in &live[..touching] {
+                push_gap(&mut out, pos, r.start);
+                pos = r.end().min(end);
             }
+            push_gap(&mut out, pos, end);
         }
         out
+    }
+}
+
+/// Records `[start, stop)` as unclaimed, unless it is empty.
+///
+/// One guard serves both the stretch before a claim and the one after the last claim, so the
+/// emptiness test is written once. `stop` may be *below* `start` -- a claim reaching back before
+/// the span it is subtracted from starts there -- which is why the test is `>` and not `!=`.
+fn push_gap(out: &mut Vec<Range>, start: u64, stop: u64) {
+    if stop > start {
+        out.push(Range {
+            start,
+            len: stop - start,
+        });
     }
 }
 

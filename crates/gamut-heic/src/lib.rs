@@ -111,12 +111,11 @@
 //! #     v
 //! # }
 //! // A minimal HEVC still: one hvc1 item with an hvcC config and a single IRAP (IDR) NAL payload.
-//! let img = IsoBmffImage {
-//!     major_brand: *b"heic",
-//!     minor_version: 0,
-//!     compatible_brands: vec![*b"heic", *b"mif1"],
-//!     primary_item_id: 1,
-//!     items: vec![Item {
+//! let img = IsoBmffImage::new(
+//!     *b"heic",
+//!     vec![*b"heic", *b"mif1"],
+//!     1,
+//!     vec![Item {
 //!         id: 1,
 //!         item_type: *b"hvc1",
 //!         name: String::new(),
@@ -131,8 +130,7 @@
 //!         // 4-byte length prefix + an IDR_W_RADL NAL (type 19: header byte 0x26).
 //!         payload: vec![0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xDD],
 //!     }],
-//!     groups: vec![],
-//! };
+//! );
 //! let bytes = write(&img).unwrap();
 //!
 //! let container = HeifContainer::parse(&bytes).unwrap();
