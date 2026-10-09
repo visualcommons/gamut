@@ -148,7 +148,7 @@ why; deciding that comparison needs the network, so it is stated there rather th
 | `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | stable (v1, #180)                      |
 | `gamut-cmm`       | ICC colour management module (transform engine) over `gamut-icc` profiles | P1–P8 complete per its STATUS.md — P1–P7 are epic #323, while P8 (pipeline optimization) is #372, which #323 lists out of scope |
 | `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | stable (v1, #189); canonical serializer, UTF-8 packets only |
-| `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | stable (v1, #182); Extension structures pass through as raw XMP |
+| `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | stable (v1, #182); full IIM 4.2 tag table and four typed structured properties (#422); the other eleven Extension structures pass through as raw XMP (#538) |
 | `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | stable (v1); orchestration only. A C2PA manifest store is extracted verbatim but never re-embedded: embedding drops it, or refuses, because its hard binding cannot survive the rewrite |
 | `gamut-tiff`      | TIFF 6.0 encoder/decoder — on the shared `gamut-ifd` container core     | stable (v1, #107); YCbCr/Lab and JPEG-in-TIFF deferred |
 | `gamut-dng`       | DNG 1.7.1 raw encoder + decoder — a TIFF/EP profile over `gamut-ifd`   | encoder + decoder (v1, #109), Adobe DNG SDK-gated |
