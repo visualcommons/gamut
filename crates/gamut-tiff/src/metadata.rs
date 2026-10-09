@@ -681,7 +681,7 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
 ///
 /// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the container is
 /// unreadable (bad header, looping or runaway IFD chain, no IFD) or the store's declared extent
-/// lies outside `file`.
+/// lies outside `file` or overlaps the entry's own count field.
 pub fn c2pa_exclusions(file: &[u8]) -> Result<Option<C2paExclusions>> {
     c2pa::locate(file)
 }
