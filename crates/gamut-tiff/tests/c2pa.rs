@@ -50,7 +50,7 @@ fn encoded_with_store() -> (Vec<u8>, gamut_tiff::TiffEncodeReport) {
 #[test]
 fn the_store_is_written_verbatim_into_a_big_endian_file() {
     let (bytes, report) = encoded_with_store();
-    let range = report.c2pa.expect("a store was written").store;
+    let range = report.c2pa.expect("a store was written").store();
     assert_eq!(
         &bytes[range.start as usize..range.end() as usize],
         STORE,
@@ -71,7 +71,7 @@ fn the_store_is_the_last_thing_in_the_file() {
     // §A.3.6: the store goes at the end so resizing it moves no other offset. If anything were
     // written after it, a signer replacing the store would invalidate those bytes' offsets.
     let (bytes, report) = encoded_with_store();
-    let range = report.c2pa.expect("a store was written").store;
+    let range = report.c2pa.expect("a store was written").store();
     assert_eq!(range.end(), bytes.len() as u64);
     assert_eq!(range.len, STORE.len() as u64);
 }
@@ -83,10 +83,11 @@ fn the_two_exclusion_ranges_are_disjoint() {
     let (_, report) = encoded_with_store();
     let excl = report.c2pa.expect("a store was written");
     assert!(
-        excl.count_field.end() <= excl.store.start || excl.store.end() <= excl.count_field.start,
+        excl.count_field().end() <= excl.store().start
+            || excl.store().end() <= excl.count_field().start,
         "overlapping exclusion ranges: {excl:?}"
     );
-    assert_eq!(excl.count_field.len, 4, "classic TIFF count field");
+    assert_eq!(excl.count_field().len, 4, "classic TIFF count field");
 }
 
 #[test]
@@ -100,7 +101,7 @@ fn a_reservation_is_zero_filled_at_the_offset_the_report_gives() {
         .with_c2pa_reserved(64)
         .encode_with_report(image(&pixels, 17, 13), &mut bytes)
         .expect("encode");
-    let range = report.c2pa.expect("a reservation was written").store;
+    let range = report.c2pa.expect("a reservation was written").store();
     assert_eq!(range.len, 64);
     assert_eq!(&bytes[range.start as usize..range.end() as usize], &[0; 64]);
 }
@@ -117,7 +118,7 @@ fn the_tile_path_places_the_store_too() {
         .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
         .encode_with_report(image(&pixels, 32, 32), &mut bytes)
         .expect("encode");
-    let range = report.c2pa.expect("a store was written").store;
+    let range = report.c2pa.expect("a store was written").store();
     assert_eq!(&bytes[range.start as usize..range.end() as usize], STORE);
 }
 
@@ -135,12 +136,12 @@ fn a_bigtiff_carries_the_store_with_its_wider_count_field() {
         .encode_with_report(image(&pixels, 17, 13), &mut bytes)
         .expect("encode");
     let excl = report.c2pa.expect("a store was written");
-    assert_eq!(excl.count_field.len, 8);
+    assert_eq!(excl.count_field().len, 8);
     assert_eq!(
-        &bytes[excl.store.start as usize..excl.store.end() as usize],
+        &bytes[excl.store().start as usize..excl.store().end() as usize],
         STORE
     );
-    assert_eq!(excl.store.end(), bytes.len() as u64);
+    assert_eq!(excl.store().end(), bytes.len() as u64);
 }
 
 #[test]
@@ -173,7 +174,7 @@ fn the_palette_path_places_the_store_and_reports_it_through_the_locator() {
     let range = c2pa_exclusions(&bytes)
         .expect("locate")
         .expect("a store")
-        .store;
+        .store();
     assert_eq!(&bytes[range.start as usize..range.end() as usize], STORE);
     assert_eq!(range.end(), bytes.len() as u64);
     assert_eq!(
@@ -205,7 +206,7 @@ fn a_multipage_document_puts_the_entry_in_its_last_page() {
     let range = c2pa_exclusions(&bytes)
         .expect("locate")
         .expect("a store")
-        .store;
+        .store();
     assert_eq!(&bytes[range.start as usize..range.end() as usize], STORE);
 }
 
@@ -249,7 +250,7 @@ fn the_pixel_paths_that_pack_their_own_buffer_place_the_store_too() {
         let range = c2pa_exclusions(&bytes)
             .expect("locate")
             .unwrap_or_else(|| panic!("{path} wrote no store"))
-            .store;
+            .store();
         assert_eq!(
             &bytes[range.start as usize..range.end() as usize],
             STORE,
@@ -277,7 +278,7 @@ fn the_deconstruct_accounts_the_store_and_recognises_its_tag() {
     // pixel data must come back as its entry's typed value span — not as an unclassified run,
     // not as a trailer — and its private tag must not be reported as unknown.
     let (bytes, report) = encoded_with_store();
-    let range = report.c2pa.expect("a store was written").store;
+    let range = report.c2pa.expect("a store was written").store();
     let deconstructed = deconstruct(&bytes).expect("deconstruct");
     assert!(
         deconstructed.segments.is_fully_classified(),
