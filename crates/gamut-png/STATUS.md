@@ -220,11 +220,12 @@ color space for greyscale images (color types 0 and 4)." Grey content can be wri
 family, so a reducer free to choose put an RGB profile under a greyscale header — which is what
 `gamut convert`'s default path did to grey content from an RGB file, and libpng rejects that
 pairing and ignores the profile. The reducer now reads the profile's data colour space (ICC.1:2022
-§7.2.6, bytes 16–19) and withholds what falls outside it: greyscale under an RGB profile; the
-palette, and the RGB layout the pixels arrived in, for grey content under a greyscale one. Pixels
-whose own layout contradicts the profile with no reduction to resolve it are written as they are:
-the colour type is then the caller's, and the encoder does not rewrite colour data to match a
-profile.
+§7.2.6, bytes 16–19) and withholds the reductions that fall outside it: greyscale under an RGB
+profile; the palette for grey content under a greyscale one. The layout the pixels arrived in is
+raced against the in-family reductions like any other candidate, even where it contradicts the
+profile, and an in-family reduction replaces it only where it is no larger — auto-reduce never
+grows a file. Where the input wins, or no reduction exists, the colour type is the caller's, and
+the encoder does not rewrite colour data to match a profile.
 
 **Only a null in a keyword refuses the encode. Everything else §11.3.3 asks for is a notice.**
 §15 gives the BCP 14 keywords force "when, and only when, they appear in all capitals", and every

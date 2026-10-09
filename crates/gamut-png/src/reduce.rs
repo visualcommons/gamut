@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use crate::color::ColorType;
 use crate::pack::gray8_scale;
 
 /// The PNG colour family an embedded ICC profile pins the written colour type to.
@@ -47,16 +46,6 @@ impl Family {
             Some(b"RGB ") => Self::Colour,
             Some(b"GRAY") => Self::Grey,
             _ => Self::Any,
-        }
-    }
-
-    /// Whether an image written as `color` agrees with this family.
-    pub(crate) fn admits(self, color: ColorType) -> bool {
-        let grey = matches!(color, ColorType::Grayscale | ColorType::GrayscaleAlpha);
-        match self {
-            Self::Any => true,
-            Self::Colour => !grey,
-            Self::Grey => grey,
         }
     }
 }
@@ -1429,28 +1418,6 @@ mod tests {
         assert_eq!(Family::of_profile(&profile(b"CMYK")), Family::Any);
         // Too short to hold the field at all.
         assert_eq!(Family::of_profile(&profile(b"RGB ")[..19]), Family::Any);
-    }
-
-    /// §11.3.2.3's two lists, one colour type per assertion so that each alternative of the
-    /// greyscale or-pattern is pinned on its own.
-    #[test]
-    fn each_family_admits_exactly_the_colour_types_section_11_3_2_3_gives_it() {
-        let grey = [ColorType::Grayscale, ColorType::GrayscaleAlpha];
-        let colour = [
-            ColorType::Truecolor,
-            ColorType::Indexed,
-            ColorType::TruecolorAlpha,
-        ];
-        for color in grey {
-            assert!(Family::Grey.admits(color), "{color:?}");
-            assert!(!Family::Colour.admits(color), "{color:?}");
-            assert!(Family::Any.admits(color), "{color:?}");
-        }
-        for color in colour {
-            assert!(Family::Colour.admits(color), "{color:?}");
-            assert!(!Family::Grey.admits(color), "{color:?}");
-            assert!(Family::Any.admits(color), "{color:?}");
-        }
     }
 
     /// 64 opaque grey RGBA pixels over four values no sub-byte depth represents, so the palette

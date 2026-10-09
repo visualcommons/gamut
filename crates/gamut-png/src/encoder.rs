@@ -370,9 +370,11 @@ impl PngEncoder {
     /// in the colour family the profile's header names, as §11.3.2.3 requires ("an RGB color
     /// space for color images (color types 2, 3, and 6), or a greyscale color space for greyscale
     /// images (color types 0 and 4)"): grey content under an RGB profile is not reduced to
-    /// greyscale, and grey content under a greyscale profile is not written as a palette or left
-    /// in an RGB layout. Pixels whose own layout contradicts the profile, with no reduction that
-    /// resolves it, are written as they are.
+    /// greyscale, and grey content under a greyscale profile is not written as a palette. A
+    /// reduction never leaves the family; the layout you hand over is still raced against the
+    /// reductions like any other candidate, so pixels whose own layout contradicts the profile are
+    /// written as they are unless an in-family reduction is no larger — auto-reduce never grows a
+    /// file, and the pairing you made is yours, as with auto-reduce off.
     #[must_use]
     pub fn with_auto_reduce(mut self, enabled: bool) -> Self {
         self.auto_reduce = enabled;
@@ -992,7 +994,6 @@ impl PngEncoder {
                 dims,
                 8,
                 reduce::analyze8_for(samples, channels, self.profile_family()),
-                color,
                 |o| {
                     self.write_png(
                         (dims.width, dims.height),
@@ -1028,7 +1029,6 @@ impl PngEncoder {
                 dims,
                 16,
                 reduce::analyze16_for(samples, channels, self.profile_family()),
-                color,
                 |o| self.encode_16bit(dims, samples, color, o),
                 out,
             );
@@ -1260,17 +1260,19 @@ impl PngEncoder {
     /// compress, so the raw comparison that chose it is sound and it is written immediately;
     /// that case is [`Reductions::ChunkFree`], and the analysis, not this function, decides it.
     ///
-    /// **An embedded ICC profile narrows the race.** §11.3.2.3 pins the colour type to the
-    /// profile's family, and the analysis already withheld the reductions outside it
-    /// ([`Family`]). `native_color` is the input's own layout: where that is outside the family
-    /// — grey content handed over as RGBA under a greyscale profile — it is not a candidate once
-    /// a reduction exists, however small it compresses.
+    /// **An embedded ICC profile narrows the reductions, not the race.** §11.3.2.3 pins the colour
+    /// type to the profile's family, and the analysis already withheld the reductions outside it
+    /// ([`Family`]), so no candidate this function adds leaves the family. The unreduced encoding
+    /// is the caller's own layout and stays a candidate even where that layout is outside the
+    /// family — grey content handed over as RGBA under a greyscale profile: an in-family reduction
+    /// replaces it only where it is no larger, exactly as without a profile, because auto-reduce
+    /// never grows a file. Where the input wins, the file keeps the pairing the caller made, as it
+    /// would with auto-reduce off.
     fn write_reduced_or_native(
         &self,
         dims: Dimensions,
         source_depth: u8,
         reductions: Reductions,
-        native_color: ColorType,
         native: impl FnOnce(&mut Vec<u8>) -> Result<usize>,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
@@ -1292,10 +1294,6 @@ impl PngEncoder {
             if prefers_chunk_free(free_encoding.len(), reduced_encoding.len()) {
                 reduced_encoding = free_encoding;
             }
-        }
-        if !self.profile_family().admits(native_color) {
-            out.extend_from_slice(&reduced_encoding);
-            return Ok(reduced_encoding.len());
         }
         let mut native_encoding = Vec::new();
         native(&mut native_encoding)?;
@@ -1535,7 +1533,6 @@ impl EncodeImage<Gray8> for PngEncoder {
                 image.dimensions(),
                 8,
                 reduce::analyze8_for(image.as_samples(), 1, self.profile_family()),
-                ColorType::Grayscale,
                 |o| self.encode_8bit(image, ColorType::Grayscale, o),
                 out,
             );
@@ -1569,7 +1566,6 @@ impl EncodeImage<Rgb8> for PngEncoder {
                 image.dimensions(),
                 8,
                 reduce::analyze8_for(image.as_samples(), 3, self.profile_family()),
-                ColorType::Truecolor,
                 |o| self.encode_8bit(image, ColorType::Truecolor, o),
                 out,
             );
@@ -1613,7 +1609,6 @@ impl EncodeImage<Gray16> for PngEncoder {
                 dims,
                 16,
                 reduce::analyze16_for(samples, 1, self.profile_family()),
-                ColorType::Grayscale,
                 |o| self.encode_16bit(dims, samples, ColorType::Grayscale, o),
                 out,
             );
@@ -1629,7 +1624,6 @@ impl EncodeImage<Rgb16> for PngEncoder {
                 dims,
                 16,
                 reduce::analyze16_for(samples, 3, self.profile_family()),
-                ColorType::Truecolor,
                 |o| self.encode_16bit(dims, samples, ColorType::Truecolor, o),
                 out,
             );
@@ -1966,12 +1960,13 @@ mod tests {
         );
     }
 
-    /// The input layout is not a race candidate when it is outside the profile's family and a
-    /// reduction inside it exists. Four grey levels as `Gray8` win the race as themselves with no
-    /// profile; under an RGB profile the palette — colour type 3 — is written instead. Kills the
-    /// native exclusion in `write_reduced_or_native`.
+    /// The input layout stays a race candidate when it is outside the profile's family: an
+    /// in-family reduction replaces it only where it is no larger. Four grey levels as `Gray8`
+    /// win the race as themselves with no profile, and still do under an RGB profile, where the
+    /// in-family palette — colour type 3 — is the larger file. Pins that `write_reduced_or_native`
+    /// measures the native encoding whatever the profile.
     #[test]
-    fn auto_reduce_does_not_race_a_native_layout_outside_the_profiles_family() {
+    fn auto_reduce_races_a_native_layout_outside_the_profiles_family() {
         let greys: Vec<u8> = (0..64u8).map(|i| i % 4 + 1).collect();
         assert_eq!(
             reduced_color_type::<Gray8>(&greys, None),
@@ -1979,7 +1974,7 @@ mod tests {
         );
         assert_eq!(
             reduced_color_type::<Gray8>(&greys, Some(&icc_profile(b"RGB "))),
-            ColorType::Indexed.code()
+            ColorType::Grayscale.code()
         );
     }
 
