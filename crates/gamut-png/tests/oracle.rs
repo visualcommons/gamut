@@ -322,6 +322,47 @@ fn ancillary_chunks_are_accepted_by_libpng() {
     assert_eq!(dec.pixels, src);
 }
 
+/// The reference reader is the arbiter of whether a file carrying **both** colour chunks is a
+/// file at all. §5.6 Table 5 and §11.3.2.5 say only that `sRGB` "should not" appear beside
+/// `iCCP` — lowercase, and §15 gives the BCP 14 keywords force "when, and only when, they appear
+/// in all capitals" — while §4.3 Table 1 presupposes the pair and ranks it. libpng reads the
+/// datastream and returns the same pixels, so `PngEncoder::with_metadata` carrying both loses a
+/// caller nothing.
+///
+/// Note the oracle's own limit: `libpng_oracle::decode` sets `png_set_benign_errors` and drops
+/// warnings, so what this pins is that the pair is not a *critical* error and the image survives
+/// it, not that libpng raised no warning (issue #502), and it reads no chunk back (issue #572).
+#[test]
+fn a_profile_beside_a_rendering_intent_is_accepted_by_libpng() {
+    let (w, h) = (12u32, 12u32);
+    let src = rgb_pattern(w, h);
+    let dims = Dimensions::new(w, h).unwrap();
+    let mut icc = vec![0u8; 132];
+    icc[0..4].copy_from_slice(&132u32.to_be_bytes());
+    icc[8..12].copy_from_slice(&0x0210_0000u32.to_be_bytes());
+    icc[12..16].copy_from_slice(b"mntr");
+    icc[16..20].copy_from_slice(b"RGB ");
+    icc[20..24].copy_from_slice(b"XYZ ");
+    icc[36..40].copy_from_slice(b"acsp");
+
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .with_icc_profile("both", &icc)
+        .with_srgb(SrgbIntent::Perceptual)
+        .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
+        .expect("encode");
+
+    assert!(contains_chunk(&png, b"iCCP"), "iCCP present");
+    assert!(contains_chunk(&png, b"sRGB"), "sRGB present");
+    assert_eq!(libpng_oracle::decode(&png).pixels, src);
+
+    // gamut's own reader sees both too, which is what makes carrying them preservation rather
+    // than duplication.
+    let meta = gamut_png::metadata(&png).expect("read back");
+    assert_eq!(meta.srgb, Some(SrgbIntent::Perceptual));
+    assert_eq!(meta.icc_profile.expect("profile").profile, icc);
+}
+
 #[test]
 fn metadata_chunks_embed_and_image_survives() {
     let (w, h) = (12u32, 12u32);

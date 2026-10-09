@@ -103,11 +103,60 @@ pub struct Cicp {
     pub full_range: bool,
 }
 
+/// Which of §11.3.3's three chunks carried an annotation, and whether its text was compressed.
+///
+/// The four combinations are the whole space PNG defines, so this enum is closed. It exists so a
+/// re-encode can put an annotation back in the chunk it came out of: without it a `zTXt` is
+/// indistinguishable from a `tEXt` once decoded, and rewriting a compressed 40-byte payload as an
+/// uncompressed one can inflate it fortyfold — preservation that does not preserve.
+///
+/// `#[repr(u8)]` with explicit, permanent discriminants: the value crosses the C ABI as a plain
+/// integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum TextChunkKind {
+    /// `tEXt`: uncompressed Latin-1 (§11.3.3.2).
+    Text = 0,
+    /// `zTXt`: zlib-compressed Latin-1 (§11.3.3.3).
+    CompressedText = 1,
+    /// `iTXt` with the compression flag clear: uncompressed UTF-8 (§11.3.3.4).
+    International = 2,
+    /// `iTXt` with the compression flag set: zlib-compressed UTF-8 (§11.3.3.4).
+    CompressedInternational = 3,
+}
+
+/// How a file framed its XMP packet inside the `iTXt` chunk §11.3.3.1 Table 21 reserves for it.
+///
+/// The packet itself is [`DecodedPng::xmp`] / [`PngMetadata::xmp`]; this is everything *else* the
+/// chunk carried, and it is `Some` exactly when the packet is. It exists for the same reason
+/// [`TextChunkKind`] does — a re-encode has to put the packet back the way it came out — but the
+/// packet is surfaced as its own field rather than as a [`TextChunk`], so the framing needs its
+/// own home. Table 21 *recommends* the null framing (`compressed` clear, both strings empty) for
+/// XMP compliance; it does not require it, and a file that frames it otherwise is still a file
+/// whose bytes have to survive a re-encode.
+///
+/// Marked `#[non_exhaustive]`: consolidating the packet into [`PngMetadata::texts`] would retire
+/// this type, and that is a decision of its own (issue #600). Until then the pairing is a
+/// convention, not a type: a caller assembling a [`PngMetadata`] by hand can set one field
+/// without the other, and the encoder then takes this type's [`Default`] framing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct XmpFraming {
+    /// The chunk's language tag (§11.3.3.4), if it carried a non-empty one.
+    pub language: Option<String>,
+    /// The chunk's translated keyword (§11.3.3.4), if it carried a non-empty one.
+    pub translated_keyword: Option<String>,
+    /// Whether the packet was stored zlib-compressed (§11.3.3.4's compression flag). A packet
+    /// stored compressed and rewritten uncompressed is the same words at many times the size.
+    pub compressed: bool,
+}
+
 /// One text annotation (tEXt/zTXt/iTXt, §11.3.3), decompressed where stored compressed.
 ///
 /// tEXt/zTXt hold Latin-1, mapped code-point-for-code-point into the `String` (lossless);
-/// iTXt holds UTF-8. The XMP packet (`XML:com.adobe.xmp`) is surfaced as [`DecodedPng::xmp`],
-/// not repeated here.
+/// iTXt holds UTF-8. [`kind`](Self::kind) records which chunk it was, so a re-encode can put it
+/// back in the same one. The XMP packet (`XML:com.adobe.xmp`) is surfaced as
+/// [`DecodedPng::xmp`], not repeated here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TextChunk {
@@ -119,6 +168,8 @@ pub struct TextChunk {
     pub language: Option<String>,
     /// The iTXt translated keyword, if the chunk carried one.
     pub translated_keyword: Option<String>,
+    /// The chunk this annotation was stored in, and whether its text was compressed.
+    pub kind: TextChunkKind,
 }
 
 /// Everything a PNG carries: the pixels in their native layout plus the ancillary payloads.
@@ -145,6 +196,9 @@ pub struct DecodedPng {
     /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.4), decompressed if stored
     /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
+    /// How the chunk that carried [`xmp`](Self::xmp) framed it: its compression flag, language
+    /// tag and translated keyword (§11.3.3.4). `Some` exactly when `xmp` is.
+    pub xmp_framing: Option<XmpFraming>,
     /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim: the JUMBF bytes,
     /// uncompressed, exactly as the chunk carries them — opaque here, never parsed or judged.
     /// Feed as `MetadataBlock::C2pa`. The first CRC-valid `caBX` before the first `IDAT`, and
@@ -221,6 +275,9 @@ pub struct PngMetadata {
     /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.4), decompressed if stored
     /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
+    /// How the chunk that carried [`xmp`](Self::xmp) framed it: its compression flag, language
+    /// tag and translated keyword (§11.3.3.4). `Some` exactly when `xmp` is.
+    pub xmp_framing: Option<XmpFraming>,
     /// The C2PA manifest store (the `caBX` chunk, C2PA 2.4 §A.3.2) verbatim and uncompressed —
     /// opaque bytes, never parsed or judged. Feed as `MetadataBlock::C2pa`. The first CRC-valid
     /// `caBX` before the first `IDAT`, and only when it fits the metadata budget; see
@@ -326,9 +383,10 @@ pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata
                 }
             }
             b"iTXt" => match parse_itxt(data, &mut budget) {
-                Some(ITxt::Xmp(packet)) => {
+                Some(ITxt::Xmp(packet, framing)) => {
                     if meta.xmp.is_none() {
                         meta.xmp = Some(packet);
+                        meta.xmp_framing = Some(framing);
                     }
                 }
                 Some(ITxt::Text(text)) => meta.texts.push(text),
@@ -340,12 +398,14 @@ pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata
     meta
 }
 
-/// The standard iTXt keyword carrying an XMP packet (XMP Specification Part 3).
-const XMP_KEYWORD: &str = "XML:com.adobe.xmp";
+/// The standard iTXt keyword carrying an XMP packet (XMP Specification Part 3), reserved for it
+/// by §11.3.3.1 Table 21. Shared with the encoder so the two sides cannot disagree on it.
+pub(crate) const XMP_KEYWORD: &str = "XML:com.adobe.xmp";
 
-/// A parsed iTXt: either the XMP packet or an ordinary text annotation.
+/// A parsed iTXt: either the XMP packet and how its chunk framed it, or an ordinary text
+/// annotation.
 enum ITxt {
-    Xmp(Vec<u8>),
+    Xmp(Vec<u8>, XmpFraming),
     Text(TextChunk),
 }
 
@@ -411,6 +471,7 @@ fn parse_text(data: &[u8]) -> Option<TextChunk> {
         text: latin1(text),
         language: None,
         translated_keyword: None,
+        kind: TextChunkKind::Text,
     })
 }
 
@@ -427,6 +488,7 @@ fn parse_ztxt(data: &[u8], budget: &mut usize) -> Option<TextChunk> {
         text: latin1(&text),
         language: None,
         translated_keyword: None,
+        kind: TextChunkKind::CompressedText,
     })
 }
 
@@ -447,13 +509,28 @@ fn parse_itxt(data: &[u8], budget: &mut usize) -> Option<ITxt> {
         _ => return None,
     };
     if keyword == XMP_KEYWORD {
-        return Some(ITxt::Xmp(text_bytes));
+        // The packet leaves by its own field, so everything the chunk framed it with — the
+        // compression flag above all — leaves beside it rather than with the annotation list.
+        // Without the flag a 71-byte chunk is rewritten as thousands of uncompressed bytes.
+        return Some(ITxt::Xmp(
+            text_bytes,
+            XmpFraming {
+                language: Some(language).filter(|l| !l.is_empty()),
+                translated_keyword: Some(translated).filter(|t| !t.is_empty()),
+                compressed: flag == 1,
+            },
+        ));
     }
     Some(ITxt::Text(TextChunk {
         keyword,
         text: String::from_utf8(text_bytes).ok()?,
         language: Some(language).filter(|l| !l.is_empty()),
         translated_keyword: Some(translated).filter(|t| !t.is_empty()),
+        kind: if flag == 1 {
+            TextChunkKind::CompressedInternational
+        } else {
+            TextChunkKind::International
+        },
     }))
 }
 
@@ -541,6 +618,38 @@ mod tests {
         let meta = collect(&[(*b"iTXt", &itxt)], 1024);
         assert_eq!(meta.xmp.as_deref(), Some(&packet[..]));
         assert!(meta.texts.is_empty());
+    }
+
+    /// The framing §11.3.3.1 Table 21 recommends — "Compression Flag set to 0, and both Language
+    /// Tag and Translated Keyword set to the null string" — reads back as exactly that, so a
+    /// re-encode reproduces it rather than inventing one.
+    ///
+    /// Kills the framing arm of [`parse_itxt`] read the other way from
+    /// `xmp_framing_carries_the_compression_flag`: a mutant that reports every packet compressed,
+    /// or that keeps an empty tag as `Some("")`, would rewrite a Table 21-conforming chunk as
+    /// something else.
+    #[test]
+    fn an_unframed_xmp_packet_reads_back_unframed() {
+        let itxt = b"XML:com.adobe.xmp\0\0\0\0\0<x:xmpmeta/>";
+        let meta = collect(&[(*b"iTXt", itxt)], 1024);
+        assert_eq!(meta.xmp_framing, Some(XmpFraming::default()));
+    }
+
+    /// §11.3.3.4's compression flag, language tag and translated keyword belong to the XMP chunk
+    /// as much as to any other `iTXt`, and the packet's own field cannot hold them. Losing the
+    /// flag alone rewrites a compressed packet at many times its size.
+    ///
+    /// Kills each field of the `ITxt::Xmp` arm of [`parse_itxt`].
+    #[test]
+    fn xmp_framing_carries_the_compression_flag() {
+        let mut itxt = b"XML:com.adobe.xmp\0\x01\0en-GB\0Metadata\0".to_vec();
+        itxt.extend_from_slice(&deflated(b"<x:xmpmeta/>"));
+        let meta = collect(&[(*b"iTXt", &itxt)], 1024);
+        assert_eq!(meta.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
+        let framing = meta.xmp_framing.expect("framed");
+        assert!(framing.compressed);
+        assert_eq!(framing.language.as_deref(), Some("en-GB"));
+        assert_eq!(framing.translated_keyword.as_deref(), Some("Metadata"));
     }
 
     #[test]
