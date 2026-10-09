@@ -50,7 +50,7 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   exiv2 appends `/` to a URI ending in neither `/` nor `#` when registering it with XMPCore
   (`XmpProperties::registerNs`), so the engine re-serializes `dwc` as `…/index.htm/` while gamut
   writes the `…/index.htm` exiv2 documents — pinned in `tests/oracle.rs` as an oracle
-  normalization. Because that normalization is what XMPCore *emits*, `WellKnownNs::from_uri` also
+  normalization. Because that normalization is what exiv2 *emits*, `WellKnownNs::from_uri` also
   recognises `http://rs.tdwg.org/dwc/index.htm/` as a read-only alias (`DWC_URI_TRAILING_SLASH`),
   so a graph parsed from an exiv2-written packet or sidecar re-serializes under `dwc` rather than a
   synthesized prefix; `uri()` still emits the unslashed URI, so gamut's own bytes are unchanged and

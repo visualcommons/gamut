@@ -51,9 +51,10 @@ impl From<WellKnownNs> for Namespace {
 /// schemas, `dcterms`, and the twelve schemas issue #421 selected from those exiv2 documents
 /// (<https://exiv2.org/metadata.html>). It is **not** all of exiv2's documented set: `kipi`,
 /// `mediapro`, `expressionmedia`, `MP`, `MPRI` and `MPReg` (exiv2's
-/// `doc/templates/tags-xmp-*.html.in` pages) are not registered, so a property in one of them serializes under a synthesized
-/// `ns<N>` prefix unless the graph declares a namespace for it. The non-Adobe URIs are each cited on their variant, and all thirty are cross-checked
-/// against XMPCore's own registry in `tests/oracle.rs`.
+/// `doc/templates/tags-xmp-*.html.in` pages) are not registered, so a property in one of them
+/// serializes under a synthesized `ns<N>` prefix unless the graph declares a namespace for it.
+/// The non-Adobe URIs are each cited on their variant, and all thirty are cross-checked against
+/// XMPCore's own registry in `tests/oracle.rs`.
 ///
 /// Marked `#[non_exhaustive]`: the registry grows as gamut's format and metadata crates need
 /// further schemas, and each addition must not be a breaking change. Match with a wildcard arm,
@@ -175,12 +176,13 @@ pub enum WellKnownNs {
     /// URI `http://rs.tdwg.org/dwc/index.htm`, the TDWG Darwin Core namespace as it is used in
     /// XMP; registered by exiv2 (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`).
     ///
-    /// **The only variant with two spellings.** Adobe XMPCore writes this URI with a trailing
-    /// slash ([`DWC_URI_TRAILING_SLASH`]), which [`WellKnownNs::from_uri`] accepts as a read alias
-    /// while [`WellKnownNs::uri`] keeps returning the unslashed form above. Reading does not
-    /// canonicalize, so in a graph parsed from an XMPCore-written packet the properties are keyed
-    /// by the *slashed* URI and `uri()` will not find them; resolve them by the URI the packet
-    /// carries. See [`WellKnownNs::from_uri`] for the whole of it.
+    /// **The only variant with two spellings.** exiv2 writes this URI with a trailing slash
+    /// ([`DWC_URI_TRAILING_SLASH`]; its `XmpProperties::registerNs` appends it), which
+    /// [`WellKnownNs::from_uri`] accepts as a read alias while [`WellKnownNs::uri`] keeps
+    /// returning the unslashed form above. Reading does not canonicalize, so in a graph parsed
+    /// from an exiv2-written packet the properties are keyed by the *slashed* URI and `uri()` will
+    /// not find them; resolve them by the URI the packet carries. See [`WellKnownNs::from_uri`]
+    /// for the whole of it.
     DarwinCore,
 }
 
@@ -305,14 +307,14 @@ impl WellKnownNs {
     /// The schema `uri` identifies, if any.
     ///
     /// An exact match against [`WellKnownNs::uri`], plus one **read alias**: Darwin Core is also
-    /// recognised under [`DWC_URI_TRAILING_SLASH`], the form Adobe XMPCore emits (see that
-    /// constant). The alias is read-only — [`WellKnownNs::uri`] keeps returning the unslashed URI
-    /// exiv2 documents, so gamut's own bytes are unchanged — and it is not a [`WellKnownNs::ALL`]
-    /// entry, so iteration and the URI/prefix uniqueness of the registry are unaffected.
+    /// recognised under [`DWC_URI_TRAILING_SLASH`], the form exiv2 emits (see that constant).
+    /// The alias is read-only — [`WellKnownNs::uri`] keeps returning the unslashed URI exiv2
+    /// documents, so gamut's own bytes are unchanged — and it is not a [`WellKnownNs::ALL`] entry,
+    /// so iteration and the URI/prefix uniqueness of the registry are unaffected.
     ///
     /// **The alias buys a prefix, not a URI.** For every registered URI `from_uri` hands back the
     /// URI it was given — `from_uri(u).map(WellKnownNs::uri) == Some(u)` — and for the alias it does
-    /// not. Nothing rewrites the URI a packet carries, so a graph parsed from an XMPCore-written
+    /// not. Nothing rewrites the URI a packet carries, so a graph parsed from an exiv2-written
     /// packet re-serializes under the `dwc` prefix while its properties stay keyed by
     /// [`DWC_URI_TRAILING_SLASH`]: [`XmpMeta::get_text`] with `WellKnownNs::DarwinCore.uri()`
     /// returns `None` for such a graph. Resolve a property by the URI its packet carries.
@@ -328,7 +330,7 @@ impl WellKnownNs {
     }
 }
 
-/// Darwin Core's namespace URI with the trailing slash Adobe XMPCore emits.
+/// Darwin Core's namespace URI with the trailing slash exiv2 emits.
 ///
 /// exiv2 appends `/` to any namespace URI ending in neither `/` nor `#` before registering it with
 /// XMPCore (`third_party/exiv2/src/properties.cpp`, `XmpProperties::registerNs`), and Darwin Core
@@ -452,7 +454,7 @@ mod tests {
 
     #[test]
     fn from_uri_accepts_the_darwin_core_trailing_slash_alias_without_emitting_it() {
-        // XMPCore emits `.../index.htm/`; reading a packet it wrote must still resolve to the
+        // exiv2 emits `.../index.htm/`; reading a packet it wrote must still resolve to the
         // registered schema, so the graph re-serializes under `dwc` rather than a synthesized
         // prefix. The alias is read-only: `uri()` still emits the unslashed URI exiv2 documents,
         // and the alias is not an ALL entry.
