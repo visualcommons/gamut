@@ -1,6 +1,9 @@
 //! Serialises an [`IsoBmffImage`] into a single-still-image ISOBMFF file.
 //!
-//! The layout is `ftyp` + `meta` + `mdat`. The one keystone is the back-patch: each item's `iloc`
+//! The layout is `ftyp` + `meta` + `mdat`, with the model's [`TopLevelBox`]es interleaved at their
+//! [`TopLevelPosition`]: [`AfterFtyp`](TopLevelPosition::AfterFtyp) boxes between `ftyp` and `meta`
+//! (so before the first `mdat`, where C2PA 2.4 §A.5.3 wants a `ContentProvenanceBox`), and
+//! [`Trailing`](TopLevelPosition::Trailing) boxes after `mdat`. The one keystone is the back-patch: each item's `iloc`
 //! `extent_offset` can only be filled once the `mdat` payload positions are known, so the writer
 //! reserves those 4-byte slots while emitting `meta` and patches them after `mdat` is placed (the
 //! analogue of `gamut-ifd`'s two-pass offset layout). Box byte layouts follow ISO/IEC 14496-12
@@ -13,9 +16,12 @@
 use gamut_core::{Error, Result};
 
 use crate::boxes::BoxBuilder;
-use crate::model::{ColourInformation, EntityGroup, IsoBmffImage, Item, PropertyKind};
+use crate::model::{
+    ColourInformation, EntityGroup, IsoBmffImage, Item, PropertyKind, TopLevelBox, TopLevelPosition,
+};
 
-/// Serialises `image` into a complete ISOBMFF file (`ftyp` + `meta` + `mdat`).
+/// Serialises `image` into a complete ISOBMFF file (`ftyp` + `meta` + `mdat`, with the model's
+/// [`TopLevelBox`]es placed after `ftyp` or after `mdat` per their [`TopLevelPosition`]).
 ///
 /// [`read`](crate::read)`(&write(&image)?)` reproduces `image` for any value this function
 /// accepts.
@@ -25,15 +31,22 @@ use crate::model::{ColourInformation, EntityGroup, IsoBmffImage, Item, PropertyK
 /// Returns [`Error::InvalidInput`] for a model that cannot round-trip: a `primary_item_id` naming
 /// no item, duplicate item ids, an interior NUL in a name/content-type/encoding/aux-type string,
 /// an empty `content_encoding`, a `content_type` on a non-`mime` item (or a `mime` item without
-/// one), or an out-of-range `Rotation`/`Mirror` value. Returns [`Error::Unsupported`] for a model
-/// that does not fit the still-image box versions this crate writes: item ids above `u16::MAX`,
-/// `uri ` items, more than 255 properties or 65 535 reference targets per item, more than 32 767
-/// distinct properties, more than 65 535 items, or a payload/file at 4 GiB or beyond.
+/// one), an out-of-range `Rotation`/`Mirror` value, a top-level box whose type the writer
+/// emits from the model itself (`ftyp`/`meta`/`mdat`) or whose `user_type` does not pair with a
+/// `uuid` type, or a `top_level_boxes` list that interleaves positions (an `AfterFtyp` box after
+/// a `Trailing` one — the file cannot record that order, so `read` could not reproduce it; use
+/// [`IsoBmffImage::push_top_level_box`] to append). Returns [`Error::Unsupported`] for a model
+/// that does not fit the still-image box
+/// versions this crate writes: item ids above `u16::MAX`, `uri ` items, more than 255 properties or
+/// 65 535 reference targets per item, more than 32 767 distinct properties, more than 65 535
+/// items, a `moov`/`trak` top-level box (image sequences), or a payload/box/file at 4 GiB or
+/// beyond.
 #[must_use = "the serialised file is returned, not written anywhere"]
 pub fn write(image: &IsoBmffImage) -> Result<Vec<u8>> {
     validate(image)?;
     let mut bb = BoxBuilder::new();
     write_ftyp(&mut bb, image);
+    write_top_level(&mut bb, &image.top_level_boxes, TopLevelPosition::AfterFtyp);
     let extent_slots = write_meta(&mut bb, image)?;
 
     let mdat_start = bb.begin_box(b"mdat");
@@ -43,6 +56,7 @@ pub fn write(image: &IsoBmffImage) -> Result<Vec<u8>> {
         bb.bytes(&item.payload);
     }
     bb.end_box(mdat_start);
+    write_top_level(&mut bb, &image.top_level_boxes, TopLevelPosition::Trailing);
 
     for (slot, pos) in extent_slots.into_iter().zip(payload_positions) {
         let pos = u32::try_from(pos).map_err(|_| {
@@ -76,6 +90,64 @@ fn validate(image: &IsoBmffImage) -> Result<()> {
             ));
         }
         validate_item(item)?;
+    }
+    // The file holds every AfterFtyp box before every Trailing one, so a model whose list
+    // interleaves the two would come back re-grouped from `read`: refuse it rather than silently
+    // reorder.
+    let mut seen_trailing = false;
+    for top in &image.top_level_boxes {
+        validate_top_level(top)?;
+        match top.position {
+            TopLevelPosition::Trailing => seen_trailing = true,
+            TopLevelPosition::AfterFtyp if seen_trailing => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "ISOBMFF: top_level_boxes interleave positions (an AfterFtyp box follows a \
+                     Trailing one); order them AfterFtyp then Trailing, or append with \
+                     IsoBmffImage::push_top_level_box",
+                ));
+            }
+            TopLevelPosition::AfterFtyp => {}
+        }
+    }
+    Ok(())
+}
+
+/// The largest header a top-level box carries: the 8-byte size/type plus a `uuid` box's 16-byte
+/// user type. The 4 GiB bound below applies it to every box type, so a non-`uuid` box is refused
+/// 16 bytes early — a deliberate simplification at an edge no still image approaches.
+const TOP_LEVEL_HEADER_MAX: usize = 24;
+
+/// A top-level box must be one the model does not already emit, must pair its `user_type` with the
+/// `uuid` type exactly as [`crate::RawBox`] does, and its complete box (header included) must fit
+/// the 32-bit size field.
+fn validate_top_level(top: &TopLevelBox) -> Result<()> {
+    match &top.ty {
+        b"ftyp" | b"meta" | b"mdat" => {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: top-level box type is owned by the model (ftyp/meta/mdat)",
+            ));
+        }
+        b"moov" | b"trak" => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: image sequences (tracks) not supported",
+            ));
+        }
+        _ => {}
+    }
+    if top.user_type.is_some() != (top.ty == *b"uuid") {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: user_type is required for uuid boxes and forbidden otherwise",
+        ));
+    }
+    if u32::try_from(top.payload.len().saturating_add(TOP_LEVEL_HEADER_MAX)).is_err() {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: top-level box at or beyond 4 GiB",
+        ));
     }
     Ok(())
 }
@@ -191,6 +263,19 @@ fn write_ftyp(bb: &mut BoxBuilder, image: &IsoBmffImage) {
         bb.bytes(brand);
     }
     bb.end_box(start);
+}
+
+/// The model's top-level boxes at `position`, in model order: size + type header, the 16-byte user
+/// type for a `uuid` box, then the payload verbatim.
+fn write_top_level(bb: &mut BoxBuilder, boxes: &[TopLevelBox], position: TopLevelPosition) {
+    for top in boxes.iter().filter(|b| b.position == position) {
+        let start = bb.begin_box(&top.ty);
+        if let Some(user_type) = &top.user_type {
+            bb.bytes(user_type);
+        }
+        bb.bytes(&top.payload);
+        bb.end_box(start);
+    }
 }
 
 /// `meta` (FullBox v0) and its children; returns each item's reserved `iloc` `extent_offset` slot
