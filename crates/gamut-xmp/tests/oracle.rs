@@ -109,6 +109,40 @@ fn every_well_known_namespace_survives_xmpcore() {
 }
 
 #[test]
+fn dcterms_provenance_reads_back_from_xmpcore_under_the_dcterms_key() {
+    // C2PA 2.4 §11.5 / §15.5.3.1: the pointer to an *external* manifest store is
+    // `dcterms:provenance`, "a URI reference". Registering the DCMI Terms namespace is what makes
+    // gamut serialize it under the `dcterms` prefix exiv2's own schema registry knows, so the
+    // reference engine reads the property by the key a validator would look for — not under a
+    // synthesized `ns1` — and hands the URL back unchanged.
+    let url = "https://example.com/manifests/photo.c2pa";
+    let dcterms = WellKnownNs::DcTerms.uri();
+    let mut meta = XmpMeta::new();
+    meta.set(XmpProperty::new(
+        dcterms,
+        "provenance",
+        XmpValue::Uri(url.into()),
+    ));
+    let packet = meta.to_packet();
+    assert!(
+        std::str::from_utf8(&packet)
+            .unwrap()
+            .contains("xmlns:dcterms=\"http://purl.org/dc/terms/\""),
+        "the registered prefix must be the one serialized"
+    );
+
+    exiv2_oracle::validate(&packet).expect("exiv2 (Adobe XMPCore) must accept the packet");
+    assert_eq!(
+        exiv2_oracle::get_property(&packet, "Xmp.dcterms.provenance").unwrap(),
+        url
+    );
+
+    let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
+    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    assert_eq!(parsed.get_text(dcterms, "provenance"), Some(url));
+}
+
+#[test]
 fn registered_prefix_packet_is_valid_for_xmpcore() {
     // A packet serialized under a registered custom prefix is real XMP to the reference engine,
     // and the property survives its round-trip.
