@@ -134,12 +134,30 @@ impl C2paSpan {
 /// first chunk that does not frame, so a stream that is not a PNG simply has no store.
 pub(crate) fn find_c2pa(png: &[u8]) -> Option<C2paSpan> {
     let mut reader = ChunkReader::new(png).ok()?;
-    while let Ok(Some(chunk)) = reader.next_chunk() {
-        if chunk.chunk_type == *b"IDAT" || chunk.chunk_type == *b"IEND" {
+    locate_c2pa(core::iter::from_fn(|| {
+        reader
+            .next_chunk()
+            .ok()
+            .flatten()
+            .map(|chunk| (chunk.chunk_type, chunk.crc_ok, chunk.range))
+    }))
+}
+
+/// The store-location rule itself, over a file's chunks in order as `(type, crc_ok, whole span)`:
+/// the first CRC-valid `caBX`, unless an `IDAT` or `IEND` comes first.
+///
+/// The single owner of the rule [`find_c2pa`] documents, so the walk over freshly framed bytes
+/// ([`find_c2pa`]) and the walk over an already-built segment list
+/// ([`PngReport::c2pa`](crate::PngReport::c2pa)) cannot drift apart.
+pub(crate) fn locate_c2pa(
+    chunks: impl IntoIterator<Item = ([u8; 4], bool, Range<usize>)>,
+) -> Option<C2paSpan> {
+    for (chunk_type, crc_ok, range) in chunks {
+        if chunk_type == *b"IDAT" || chunk_type == *b"IEND" {
             return None;
         }
-        if chunk.chunk_type == CABX && chunk.crc_ok {
-            return Some(C2paSpan::of(chunk.range));
+        if chunk_type == CABX && crc_ok {
+            return Some(C2paSpan::of(range));
         }
     }
     None

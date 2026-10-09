@@ -29,7 +29,7 @@ use std::collections::HashMap;
 
 use gamut_core::{Error, Result};
 
-use crate::chunk::{C2paSpan, CABX, ChunkReader, RawChunk, SIGNATURE};
+use crate::chunk::{self, C2paSpan, ChunkReader, RawChunk, SIGNATURE};
 use crate::decoded::PngHeader;
 use crate::decoder::DEFAULT_MAX_IMAGE_BYTES;
 use crate::filter::FilterType;
@@ -436,23 +436,16 @@ impl PngReport {
     /// [`PngDecoder::with_max_metadata_bytes`]: crate::PngDecoder::with_max_metadata_bytes
     #[must_use]
     pub fn c2pa(&self) -> Option<C2paSpan> {
-        for segment in &self.segments {
-            match segment.kind {
-                SegmentKind::Chunk {
-                    chunk_type: CABX,
-                    crc_ok: true,
-                    ..
-                } => return Some(C2paSpan::of(segment.range.clone())),
-                // The datastream's store sits before the pixels; nothing from here on is one.
-                SegmentKind::Chunk { chunk_type, .. }
-                    if &chunk_type == b"IDAT" || &chunk_type == b"IEND" =>
-                {
-                    return None;
-                }
-                _ => {}
-            }
-        }
-        None
+        chunk::locate_c2pa(
+            self.segments
+                .iter()
+                .filter_map(|segment| match segment.kind {
+                    SegmentKind::Chunk {
+                        chunk_type, crc_ok, ..
+                    } => Some((chunk_type, crc_ok, segment.range.clone())),
+                    _ => None,
+                }),
+        )
     }
 
     /// The stats for one chunk type, if the file carries it.
