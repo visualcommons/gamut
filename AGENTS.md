@@ -282,6 +282,25 @@ repo — nothing here sets file modes — so do not work around it by editing bu
   backend, keeping single-threaded backends usable. Stub codecs `gamut-av2`/`gamut-vvc`
   adopt this convention when implemented.
 
+## Issue triage and ordering
+
+- Work moves **up** the dependency graph, never across it. When a defect or missing capability
+  lives in shared logic, fix it in the crate that owns that logic first, and upgrade the dependents
+  afterwards against the fixed API. Never hand-roll a local workaround in a dependent while the
+  owner is unfixed: the workaround becomes a second copy the owner's fix will not reach. Take
+  "lower" from `cargo metadata` (normal and build edges), not from the prose edge list above.
+- This holds whether or not the owning crate is 1.0 or "stable". Every crate is versioned
+  independently, so when a change genuinely improves the shared API, take the **breaking** SemVer
+  bump and migrate the dependents. Preserving a worse contract is not a reason.
+- Record the order on GitHub, not in prose. File the lower-crate issue and link it natively as
+  *blocked by* on every dependent issue. Do not start an issue while any of its blockers is open.
+  Every issue is a sub-issue of exactly one theme epic: attach it when you file it.
+- A pull request writes `Closes #N` only for an issue it delivers in full, and `Part of #N`
+  otherwise. A partial delivery files its remainder as a new issue and names that issue in a
+  comment on the original, so the thread alone says what is left.
+- A correction or supersession goes into the issue it corrects (an edit or a comment), and the
+  correcting issue is closed. It never stays open beside the issue it corrects.
+
 ## Versioning
 
 Each crate is versioned **independently** per SemVer — no shared workspace version, and
