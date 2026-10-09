@@ -740,7 +740,10 @@ mod tests {
         // The sole entry is at 10, its count field at 14..18 and its offset word at 18. Point the
         // store at the directory itself (8): 8..40 covers the count field and stays in the file.
         bytes[18..22].copy_from_slice(&ByteOrder::LittleEndian.pack_u32(8));
-        assert!(bytes.len() >= 8 + store().len(), "in bounds, so only the overlap is wrong");
+        assert!(
+            bytes.len() >= 8 + store().len(),
+            "in bounds, so only the overlap is wrong"
+        );
         let error = locate(&bytes[..]).expect_err("overlapping ranges");
         assert_eq!(
             error.static_message(),
@@ -965,7 +968,8 @@ mod tests {
             write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write");
         let found = locate(&bytes[..]).expect("locate").expect("a store");
         assert_eq!(
-            C2paExclusions::new(found.store(), found.count_field()).expect("a located set is valid"),
+            C2paExclusions::new(found.store(), found.count_field())
+                .expect("a located set is valid"),
             found,
             "the constructor's fields land in the documented order"
         );
