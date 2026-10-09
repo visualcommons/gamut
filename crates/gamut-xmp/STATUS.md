@@ -22,6 +22,14 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   linked exiv2 + expat (`tooling/exiv2-oracle`, built from the `third_party/exiv2` + `third_party/
   expat` submodules). Byte-exact correctness is pinned independently by golden vectors transcribed
   from the Part 1 examples (`tests/golden.rs`).
+- **The schema registry is open — `WellKnownNs` is `#[non_exhaustive]`** (issue #449, a 2.0
+  change). It was exhaustively matchable through 1.x, so every schema the format and metadata crates
+  need would have been a major bump; the attribute pays that once. The first non-Adobe entry is
+  `dcterms` (`http://purl.org/dc/terms/`, DCMI Metadata Terms), registered because C2PA 2.4 §11.5 /
+  §15.5.3.1 point at an *external* manifest store through `dcterms:provenance`. This crate registers
+  the namespace only — what the property *means* is read by `gamut-metadata`, consistent with the
+  registry-not-validator posture below — and `tests/oracle.rs` pins that XMPCore reads the property
+  back under the `Xmp.dcterms.provenance` key its own registry defines.
 
 ## Phases
 

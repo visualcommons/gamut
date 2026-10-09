@@ -40,10 +40,16 @@ impl From<WellKnownNs> for Namespace {
     }
 }
 
-/// The standard XMP schemas (Adobe XMP Parts 1–2). Each maps to a fixed namespace URI and a
-/// conventional prefix via [`WellKnownNs::uri`] / [`WellKnownNs::prefix`]; [`WellKnownNs::from_uri`]
-/// recovers the schema from a URI.
+/// The standard XMP schemas (Adobe XMP Parts 1–2), plus the external schemas image metadata
+/// standards layer on XMP. Each maps to a fixed namespace URI and a conventional prefix via
+/// [`WellKnownNs::uri`] / [`WellKnownNs::prefix`]; [`WellKnownNs::from_uri`] recovers the schema
+/// from a URI.
+///
+/// Marked `#[non_exhaustive]`: the registry grows as gamut's format and metadata crates need
+/// further schemas, and each addition must not be a breaking change. Match with a wildcard arm,
+/// or iterate [`WellKnownNs::ALL`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum WellKnownNs {
     /// `dc` — Dublin Core (title, creator, description, subject, rights, …).
     DublinCore,
@@ -79,6 +85,10 @@ pub enum WellKnownNs {
     Dimensions,
     /// `stRef` — the ResourceRef structure type (used by `xmpMM` references).
     ResourceRef,
+    /// `dcterms` — DCMI Metadata Terms (qualified Dublin Core). Home of `dcterms:provenance`, the
+    /// key C2PA 2.4 §11.5 / §15.5.3.1 uses to point at an **external** manifest store; gamut only
+    /// registers the namespace — the C2PA reading of the property lives in `gamut-metadata`.
+    DcTerms,
 }
 
 impl WellKnownNs {
@@ -101,13 +111,15 @@ impl WellKnownNs {
         WellKnownNs::Pdf,
         WellKnownNs::Dimensions,
         WellKnownNs::ResourceRef,
+        WellKnownNs::DcTerms,
     ];
 
     /// The schema's namespace URI — its canonical identity.
     ///
     /// `dc` is Dublin Core (Part 1 §8.3); the `xmp*` schemas are Part 1 §8.4–8.6; `photoshop`,
     /// `crs` are Part 2 §3.2–3.3. `exif`/`tiff` mirror the EXIF tags into XMP (Part 2 §3.4, defined
-    /// by CIPA DC-010); `Iptc4xmpCore`/`Iptc4xmpExt` are the IPTC Photo Metadata schemas.
+    /// by CIPA DC-010); `Iptc4xmpCore`/`Iptc4xmpExt` are the IPTC Photo Metadata schemas;
+    /// `dcterms` is the DCMI Metadata Terms namespace (`http://purl.org/dc/terms/`).
     #[must_use]
     pub const fn uri(self) -> &'static str {
         match self {
@@ -128,6 +140,7 @@ impl WellKnownNs {
             WellKnownNs::Pdf => "http://ns.adobe.com/pdf/1.3/",
             WellKnownNs::Dimensions => "http://ns.adobe.com/xap/1.0/sType/Dimensions#",
             WellKnownNs::ResourceRef => "http://ns.adobe.com/xap/1.0/sType/ResourceRef#",
+            WellKnownNs::DcTerms => "http://purl.org/dc/terms/",
         }
     }
 
@@ -153,6 +166,7 @@ impl WellKnownNs {
             WellKnownNs::Pdf => "pdf",
             WellKnownNs::Dimensions => "stDim",
             WellKnownNs::ResourceRef => "stRef",
+            WellKnownNs::DcTerms => "dcterms",
         }
     }
 
@@ -183,6 +197,10 @@ mod tests {
         );
         assert_eq!(WellKnownNs::Dimensions.prefix(), "stDim");
         assert_eq!(WellKnownNs::Pdf.uri(), "http://ns.adobe.com/pdf/1.3/");
+        // DCMI Metadata Terms: distinct from Dublin Core *elements* (`/dc/elements/1.1/`) — the
+        // two share a vendor path, so a copy-paste of the wrong one is the likely defect.
+        assert_eq!(WellKnownNs::DcTerms.uri(), "http://purl.org/dc/terms/");
+        assert_eq!(WellKnownNs::DcTerms.prefix(), "dcterms");
 
         for &ns in WellKnownNs::ALL {
             assert_eq!(WellKnownNs::from_uri(ns.uri()), Some(ns));
