@@ -119,7 +119,7 @@ facade does not have.
 An embedded store is not the only way a file carries provenance. C2PA 2.4 §11.5 recommends that a
 claim generator whose manifest lives *externally* add a `dcterms:provenance` key (namespace
 `http://purl.org/dc/terms/`, registered as `gamut_xmp::WellKnownNs::DcTerms`) to the asset's XMP,
-its value the URL of the manifest store, and is explicit that the mechanism is *only* for external
+its value a URI reference (possibly relative) to where the active manifest is, and is explicit that the mechanism is *only* for external
 manifests; §15.5.3.1 lists that key among the places a validator looks when no store is embedded. So
 `c2pa.is_some()` is the wrong question — a file with no embedded store and a `dcterms:provenance` URL
 has Content Credentials — and a boolean is the wrong answer, because a file may carry both.
@@ -135,8 +135,9 @@ and stored nowhere:
 | `Some` | URL | `ProvenanceState::EmbeddedAndRemote(url)` — both reported; a validator uses the embedded store and does not consult the URL (§15.5.2.1, §15.5.3.1) |
 
 `is_embedded()` and `remote_url()` answer the two underlying questions without matching (the enum is
-`#[non_exhaustive]`). An empty `dcterms:provenance` value counts as absent — the spec makes the value
-a URI reference, which an empty string is not. The lens reports what the file carries; it is not a
+`#[non_exhaustive]`). The URL is the `dcterms:provenance` value with surrounding whitespace trimmed,
+otherwise verbatim, and an empty or whitespace-only value counts as absent — the spec makes the value
+a URI reference, which neither an empty string nor surrounding whitespace is part of. The lens reports what the file carries; it is not a
 validity verdict and does not choose between the two sources.
 
 ```rust

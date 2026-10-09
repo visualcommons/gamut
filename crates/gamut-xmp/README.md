@@ -96,10 +96,11 @@ discards the rest, so two `write` outputs concatenated read back as the first al
   validation: values are uninterpreted text in the model, as the wire format allows. The registry
   holds the Adobe Parts 1–2 schemas plus external ones image-metadata standards and deployed
   tools layer on XMP:
-  `dcterms` (DCMI Metadata Terms, which C2PA uses for `dcterms:provenance`, the URL of an
-  *external* manifest store — C2PA 2.4 §11.5; reading that property as a provenance signal is
-  [`gamut-metadata`](../gamut-metadata)'s job), `exifEX`, `aux`, `plus`, `mwg-rs`, `mwg-kw`,
-  `GPano`, `lr`, `MicrosoftPhoto`, `digiKam`, `acdsee`, `crss` and `dwc` — the last twelve being
+  `dcterms` (DCMI Metadata Terms, which C2PA uses for `dcterms:provenance`, a URI reference —
+  possibly relative — to an *external* manifest, C2PA 2.4 §11.5; reading that property as a
+  provenance signal is [`gamut-metadata`](../gamut-metadata)'s job), `exifEX`, `aux`, `plus`,
+  `mwg-rs`, `mwg-kw`, `GPano`, `lr`, `MicrosoftPhoto`, `digiKam`, `acdsee`, `crss` and `dwc` —
+  the last twelve being
   the set issue #421 took from the schemas exiv2 documents (<https://exiv2.org/metadata.html>).
   That is not all of exiv2's documented set: `kipi`, `mediapro`, `expressionmedia`, `MP`, `MPRI`
   and `MPReg` are not registered, so their properties serialize under a synthesized `ns<N>`
