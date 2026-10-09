@@ -1013,6 +1013,7 @@ dependencies = [
 name = "gamut-icc"
 version = "1.0.0"
 dependencies = [
+ "gamut-color",
  "gamut-core",
  "md-5",
  "thiserror 2.0.20",
