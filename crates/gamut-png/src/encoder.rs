@@ -917,7 +917,7 @@ impl PngEncoder {
     ///
     /// `palette` is **cleaned** before it is written, silently and losslessly: an entry nothing in
     /// the file names is dropped, a second entry holding the same RGB *and* alpha as an earlier one
-    /// is merged into it, the trailing opaque `tRNS` bytes §11.3.2.1 lets a chunk omit are omitted,
+    /// is merged into it, the trailing opaque `tRNS` bytes §11.3.1.1 lets a chunk omit are omitted,
     /// the index bit depth is derived from what survives, and the image's indices are renumbered to
     /// match ([`PngPalette::cleaned`]). The colour every pixel resolves to is unchanged, which is
     /// why this reports nothing: a merged entry did not fail to come along, it arrived under
@@ -1926,7 +1926,7 @@ mod tests {
     /// nothing missing from the file to show for it.
     ///
     /// The colour is read back the way §11.3.4.1 says a reader reads it: the index into `PLTE`,
-    /// and the same index into `tRNS` (opaque past its end, §11.3.2.1).
+    /// and the same index into `tRNS` (opaque past its end, §11.3.1.1).
     #[test]
     fn a_colour_background_names_an_entry_holding_its_colour() {
         struct Case {

@@ -119,7 +119,7 @@ impl PngPalette {
     /// - an entry `used` does not mark: 3 `PLTE` bytes naming a colour nothing in the file reads;
     /// - a later entry with the same RGB **and** the same alpha as an earlier one: the same 3
     ///   bytes, for a colour the earlier entry already names;
-    /// - a trailing opaque `tRNS` entry: 1 byte the chunk may simply not carry (§11.3.2.1).
+    /// - a trailing opaque `tRNS` entry: 1 byte the chunk may simply not carry (§11.3.1.1).
     ///
     /// The saving is rarely those bytes. It is that `PLTE` is incompressible and that a shorter
     /// palette may fit a smaller index bit depth — a 256-entry palette holding three colours drops
@@ -176,11 +176,11 @@ impl PngPalette {
     }
 }
 
-/// The alpha a palette entry has when `tRNS` does not carry one for it (§11.3.2.1).
+/// The alpha a palette entry has when `tRNS` does not carry one for it (§11.3.1.1).
 pub(crate) const OPAQUE: u8 = 255;
 
 /// Drops the trailing fully-opaque entries a `tRNS` chunk is allowed to omit: a decoder reads
-/// every entry past the chunk's end as opaque (§11.3.2.1), so those bytes say nothing the absence
+/// every entry past the chunk's end as opaque (§11.3.1.1), so those bytes say nothing the absence
 /// of the bytes does not already say.
 ///
 /// One owner for the rule, because both palette paths need it and a rule restated twice is a rule
@@ -335,7 +335,7 @@ mod tests {
         assert_ne!(remap[0], remap[1]);
     }
 
-    /// An entry the palette leaves out of `tRNS` is opaque (§11.3.2.1), so
+    /// An entry the palette leaves out of `tRNS` is opaque (§11.3.1.1), so
     /// [`PngPalette::cleaned`] must compare it as opaque rather than as absent.
     ///
     /// Entry 1 below carries an explicit `OPAQUE` and entry 2 carries none; they are the same
@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// [`PngPalette::cleaned`] hands back a palette whose `tRNS` payload is already trimmed, so
-    /// the encoder writes the shortest chunk §11.3.2.1 allows.
+    /// the encoder writes the shortest chunk §11.3.1.1 allows.
     #[test]
     fn a_cleaned_palette_carries_a_trimmed_trns() {
         let palette =
