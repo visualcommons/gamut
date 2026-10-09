@@ -94,10 +94,12 @@ walk has a claim to make about the file; this one has none.
 
 **Absence of a store line is not absence of provenance.** A file can carry a genuine
 `ContentProvenanceBox` — right extended type, real JUMBF store — that this reader declines: its
-`FullBox` version is not zero (§A.5.1.2), its `box_purpose` is the auxiliary `merkle` or a value
-this revision does not know (§A.5.3), it is truncated, or no valid JUMBF `LBox` bounds a store
-where its purpose puts one. Such a box gets its own line naming the reason, precisely so a reader
-cannot infer "no provenance" from bytes gamut merely could not read.
+`FullBox` version is not zero (§A.5.1.2), its `box_purpose` is a value C2PA 2.4 does not define
+(§A.5.3, §A.5.4.1.4), it is truncated, or no valid JUMBF `LBox` bounds a store where its purpose
+puts one. Such a box gets its own line naming the reason, precisely so a reader cannot infer "no
+provenance" from bytes gamut merely could not read. An auxiliary `merkle` box (§A.5.4.1.4) is
+conformant framing with no store in it, and is listed as such — counted under the headline and
+given its own line — rather than as unread.
 
 **A caller gating on stdout reads the headline, not the list.** The headline names *every* class
 the scan found that is non-empty — located stores, and boxes no store could be read from — so a file

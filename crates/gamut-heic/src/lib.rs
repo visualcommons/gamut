@@ -27,7 +27,8 @@
 //!   byte range, a size and a `box_purpose` with no bytes attached, rendered by
 //!   [`C2paSummary::report_lines`] with the [`C2PA_NOT_VALIDATED`] disclaimer inline. It also lists
 //!   every C2PA box that yielded *no* store with the reason ([`C2paUnreadBox`]), so a report can
-//!   never present a box gamut could not read through as a file carrying no provenance.
+//!   never present a box gamut could not read through as a file carrying no provenance, and every
+//!   auxiliary `merkle` box ([`C2paMerkleBox`]) as the Merkle-tree box it is.
 //! - [`HeifImage`] — the **role-typed semantic view** over the primary still-image stream, wrapping
 //!   [`gamut_isobmff::IsoBmffImage`]. It reads roles (primary image, alpha/depth auxiliaries,
 //!   thumbnails, Exif/XMP metadata, grid/overlay derivations) as computed lenses over the items,
@@ -162,7 +163,7 @@ pub use backend::{
 };
 pub use c2pa::{
     C2PA_NOT_VALIDATED, C2PA_UUID, C2paBoxPosition, C2paBoxPurpose, C2paManifestStore,
-    C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason,
+    C2paMerkleBox, C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason,
 };
 pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{DecodedFrame, HevcDecoder};

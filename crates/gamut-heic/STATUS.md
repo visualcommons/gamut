@@ -116,8 +116,10 @@ JPEG XL clauses attributing the box to ISO/IEC 18181-2 clause 9.3 rather than de
 asserting it is a deliberate deferral (it narrows what is reported), not an absence of source. The
 constant ISO/IEC 19566-5 genuinely withholds is a different one: the JUMBF Description Box layout
 needed to read the store's JUMBF type UUID, which §11.1.4.2 does give as
-`63327061-0011-0010-8000-00AA00389B71`. See the deferred row below. `merkle` boxes and every
-unrecognised `box_purpose` are not manifest stores and are not reported; a `uuid` box nested in
+`63327061-0011-0010-8000-00AA00389B71`. See the deferred row below. `merkle` boxes (the auxiliary
+Merkle-tree boxes of §A.5.4.1.4) and every unrecognised `box_purpose` are not manifest stores and
+are not reported as stores; the summary lists `merkle` boxes as auxiliary (`C2paSummary::merkle`)
+and an unrecognised purpose as unread. A `uuid` box nested in
 `meta` is not one either and keeps surfacing through `unknown_meta_boxes`. The scan covers the
 top-level boxes of the *primary* stream, so a box inside an appended vendor stream or a trailer is
 not seen — which excludes an `update` box placed, as §A.5.3 requires, last in a motion-photo file
@@ -144,8 +146,10 @@ crate is what makes every host print the same words and none able to reword the 
 
 The summary reports a **third** outcome beside a store and no C2PA box at all: a top-level box whose
 extended type *is* `C2PA_UUID` and that still yields no store — its `FullBox` version or flags are
-non-zero (§A.5.1.2), its `box_purpose` is the auxiliary `merkle` or a value this revision does not
-know (§A.5.3), it is truncated, or no valid JUMBF `LBox` bounds a store where its purpose puts one.
+non-zero (§A.5.1.2), its `box_purpose` is a value C2PA 2.4 does not define (neither §A.5.3's three
+nor §A.5.4.1.4's `merkle`), it is truncated, or no valid JUMBF `LBox` bounds a store where its
+purpose puts one. A conformant auxiliary `merkle` box is none of these: it carries Merkle-tree
+hashes rather than a store, and is listed in `C2paSummary::merkle` with its own line.
 `C2paSummary::unread` lists those with a `C2paUnreadReason`, and `report_lines` gives each one a
 line. Collapsing them into "no manifest store found" would be the mirror of the verdict
 `C2PA_NOT_VALIDATED` prevents: it would let a reader infer *no provenance* from bytes this crate

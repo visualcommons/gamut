@@ -36,6 +36,10 @@ pub const C2PA_UUID: [u8; 16] = [
 /// Length of the `FullBox` version (1 byte) + flags (3 bytes) that follow the `uuid` user type.
 const VERSION_FLAGS_LEN: usize = 4;
 
+/// The `box_purpose` of an auxiliary Merkle-tree box (C2PA 2.4 §A.5.4.1.4): C2PA framing, but
+/// not a manifest store.
+const MERKLE_PURPOSE: &[u8] = b"merkle";
+
 /// Length of the absolute file offset of the first `merkle` box. §A.5.3 places it at the front of
 /// `data` for the `manifest` and `original` purposes; for `update` the specification is silent and
 /// its presence is probed for (see [`C2paBoxPurpose`]).
@@ -128,10 +132,13 @@ const JUMBF_HEADER_LEN: usize = 8;
 ///
 /// # `merkle`
 ///
-/// A fourth purpose, `merkle`, names an *auxiliary* box holding Merkle-tree hashes; §A.5.3 does not
-/// list it among the purposes of a manifest-store box, so a `merkle` box is **not** reported by
-/// [`HeifContainer::c2pa`] or [`HeifContainer::c2pa_manifest_stores`], and neither is any other
-/// unrecognised `box_purpose` value.
+/// A fourth purpose, `merkle`, names an *auxiliary* box holding Merkle-tree hashes for validating
+/// large or fragmented media piecewise (C2PA 2.4 §A.5.4, the box itself §A.5.4.1.4); its `data` is
+/// raw CBOR, not a manifest store. It is therefore **not** reported by [`HeifContainer::c2pa`] or
+/// [`HeifContainer::c2pa_manifest_stores`], and it is not an unreadable store either:
+/// [`HeifContainer::c2pa_summary`] lists it as what it is, in [`C2paSummary::merkle`]. Any other
+/// `box_purpose` value is one this revision does not know
+/// ([`C2paUnreadReason::UnknownPurpose`]).
 ///
 /// Non-exhaustive and with permanent discriminants: a later revision may add a variant without a
 /// breaking change.
@@ -153,7 +160,7 @@ pub enum C2paBoxPurpose {
 
 impl C2paBoxPurpose {
     /// Maps the null-terminated `box_purpose` string's bytes to a manifest-store purpose, or `None`
-    /// for `merkle` and every unrecognised value.
+    /// for `merkle` (see [`MERKLE_PURPOSE`]) and every unrecognised value.
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         match bytes {
             b"manifest" => Some(Self::Manifest),
@@ -269,8 +276,11 @@ impl<'a> HeifContainer<'a> {
     pub fn c2pa_manifest_stores(&self) -> impl Iterator<Item = C2paManifestStore<'a>> + '_ {
         self.top_level_uuid_boxes()
             .filter_map(|(_, _, classified)| match classified {
-                TopLevelUuidBox::ContentProvenance(outcome) => outcome.ok(),
-                TopLevelUuidBox::OtherExtendedType => None,
+                TopLevelUuidBox::ContentProvenance(Ok(ProvenanceContent::Store(store))) => {
+                    Some(store)
+                }
+                TopLevelUuidBox::ContentProvenance(Ok(ProvenanceContent::Merkle) | Err(_))
+                | TopLevelUuidBox::OtherExtendedType => None,
             })
     }
 
@@ -320,11 +330,20 @@ impl<'a> HeifContainer<'a> {
 /// What one top-level `uuid` box turned out to be.
 enum TopLevelUuidBox<'a> {
     /// A C2PA `ContentProvenanceBox` — its extended type is [`C2PA_UUID`] — and what reading it
-    /// yielded: the manifest store it carries, or the reason it carries none.
-    ContentProvenance(Result<C2paManifestStore<'a>, C2paUnreadReason>),
+    /// yielded: the manifest store or auxiliary `merkle` box it is, or the reason it is neither.
+    ContentProvenance(Result<ProvenanceContent<'a>, C2paUnreadReason>),
     /// A `uuid` box carrying some other extended type. §A.5.1.1 makes the extended type the whole
     /// test, so this is not C2PA framing however near the miss.
     OtherExtendedType,
+}
+
+/// What a readable C2PA `ContentProvenanceBox` carries.
+enum ProvenanceContent<'a> {
+    /// A manifest store (`box_purpose` `manifest`, `original` or `update`, §A.5.3).
+    Store(C2paManifestStore<'a>),
+    /// An auxiliary Merkle-tree box (`box_purpose` `merkle`, §A.5.4.1.4), whose `data` is CBOR this
+    /// locator does not read.
+    Merkle,
 }
 
 /// Classifies one top-level `uuid` box body (starting at absolute offset `body_start`).
@@ -356,7 +375,7 @@ fn classify_uuid_box(body: &[u8], body_start: usize) -> TopLevelUuidBox<'_> {
 fn read_content_provenance_box(
     after_uuid: &[u8],
     after_uuid_start: usize,
-) -> Result<C2paManifestStore<'_>, C2paUnreadReason> {
+) -> Result<ProvenanceContent<'_>, C2paUnreadReason> {
     // §A.5.1.2: a FullBox with version 0 and flags 0. `RawBox::payload` strips the user type but not
     // these four bytes, so they are read here.
     let (version_flags, after_full_box) = after_uuid
@@ -372,8 +391,11 @@ fn read_content_provenance_box(
     let mut purpose_and_data = after_full_box.splitn(2, |&b| b == 0);
     let purpose_bytes = purpose_and_data.next().unwrap_or_default();
     let data = purpose_and_data.next().ok_or(C2paUnreadReason::Truncated)?;
-    let purpose = C2paBoxPurpose::from_bytes(purpose_bytes)
-        .ok_or(C2paUnreadReason::NotAManifestStorePurpose)?;
+    if purpose_bytes == MERKLE_PURPOSE {
+        return Ok(ProvenanceContent::Merkle);
+    }
+    let purpose =
+        C2paBoxPurpose::from_bytes(purpose_bytes).ok_or(C2paUnreadReason::UnknownPurpose)?;
 
     // Where the store begins inside `data`: one fixed offset for `manifest`/`original`, whose framing
     // §A.5.3 states, and two probed in order for `update`, whose framing it does not — see
@@ -382,11 +404,11 @@ fn read_content_provenance_box(
     for &prefix in purpose.store_prefix_candidates() {
         if let Some(bytes) = locate_store(data, prefix) {
             let start = data_start + prefix;
-            return Ok(C2paManifestStore {
+            return Ok(ProvenanceContent::Store(C2paManifestStore {
                 bytes,
                 range: start..start + bytes.len(),
                 purpose,
-            });
+            }));
         }
     }
     Err(C2paUnreadReason::NoStoreBound)
@@ -468,9 +490,10 @@ pub enum C2paUnreadReason {
     Truncated = 0,
     /// The `FullBox` version or flags are not zero, which §A.5.1.2 fixes them at.
     NotVersionZero = 1,
-    /// The `box_purpose` is not one §A.5.3 gives a manifest store: the auxiliary `merkle` box, or a
-    /// value this revision does not know.
-    NotAManifestStorePurpose = 2,
+    /// The `box_purpose` is none C2PA 2.4 defines — neither a manifest store's (§A.5.3: `manifest`,
+    /// `original`, `update`) nor the auxiliary `merkle` box's (§A.5.4.1.4), which is not unread
+    /// but listed in [`C2paSummary::merkle`].
+    UnknownPurpose = 2,
     /// No valid JUMBF `LBox` bounds a store where this `box_purpose`'s framing puts one — the
     /// length there is zero, below the 8-byte header it must cover, or overruns the box.
     NoStoreBound = 3,
@@ -485,9 +508,7 @@ impl C2paUnreadReason {
             Self::NotVersionZero => {
                 "its FullBox version or flags are not zero, which C2PA 2.4 §A.5.1.2 fixes them at"
             }
-            Self::NotAManifestStorePurpose => {
-                "its box_purpose is not one C2PA 2.4 §A.5.3 gives a manifest store"
-            }
+            Self::UnknownPurpose => "its box_purpose is none C2PA 2.4 defines (§A.5.3, §A.5.4.1.4)",
             Self::NoStoreBound => {
                 "no valid JUMBF store length sits where its box_purpose puts the store"
             }
@@ -538,7 +559,7 @@ impl C2paBoxPosition {
     pub const fn note(self) -> Option<&'static str> {
         match self {
             Self::AfterMediaData => Some("its box begins after the first mdat box"),
-            _ => None,
+            Self::BeforeMediaData => None,
         }
     }
 }
@@ -557,6 +578,21 @@ pub struct C2paUnreadBox {
     pub range: Range<usize>,
     /// Why no manifest store was read from it.
     pub reason: C2paUnreadReason,
+    /// Where the box sits relative to the file's media data.
+    pub position: C2paBoxPosition,
+}
+
+/// A top-level auxiliary `merkle` box (C2PA 2.4 §A.5.4.1.4): C2PA framing that carries Merkle-tree
+/// hashes for validating media piecewise, not a manifest store. Reported **without its bytes**, by
+/// where the whole box sits, because it is neither a store this locator found nor a box it failed
+/// to read.
+///
+/// Non-exhaustive: a later revision may report more of the box without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paMerkleBox {
+    /// The half-open byte range of the whole `uuid` box.
+    pub range: Range<usize>,
     /// Where the box sits relative to the file's media data.
     pub position: C2paBoxPosition,
 }
@@ -614,6 +650,11 @@ pub struct C2paSummary {
     /// collapse into "none found": the file carries C2PA framing this reader could not read
     /// through, which is not the same fact as carrying none. See [`C2paUnreadReason`].
     pub unread: Vec<C2paUnreadBox>,
+    /// Every top-level auxiliary `merkle` box (C2PA 2.4 §A.5.4.1.4), in file order.
+    ///
+    /// Read correctly and listed as what it is: C2PA framing whose `data` is Merkle-tree hashes, so
+    /// it is neither a located store nor a box that failed to yield one.
+    pub merkle: Vec<C2paMerkleBox>,
     /// How many top-level `uuid` boxes carried an extended type other than [`C2PA_UUID`].
     ///
     /// A **count of bytes present**, not a provenance claim. §A.5.1.1 makes the extended type the
@@ -680,16 +721,24 @@ impl C2paSummary {
     /// The report's head: the headline, and — when the file carries any — the count of top-level
     /// `uuid` boxes whose extended type is not C2PA's.
     ///
-    /// **At most two lines, whatever the file holds**, which is what makes this the part a host
-    /// prints unconditionally. The headline states every non-empty category and carries
-    /// [`C2PA_NOT_VALIDATED`] inline; the second line is a byte count, worded so it cannot be read
-    /// as a provenance claim (see [`other_uuid_boxes`](Self::other_uuid_boxes)).
+    /// **At most three lines, whatever the file holds**, which is what makes this the part a host
+    /// prints unconditionally. The headline states every non-empty store category and carries
+    /// [`C2PA_NOT_VALIDATED`] inline; a count of auxiliary [`merkle`](Self::merkle) boxes follows
+    /// when there are any; the last is a byte count, worded so it cannot be read as a provenance
+    /// claim (see [`other_uuid_boxes`](Self::other_uuid_boxes)).
     ///
     /// Neither line is indented, because neither is a list entry: they are the head a host prints
     /// above whatever it shows of [`detail_lines`](Self::detail_lines), which *is* indented.
     #[must_use]
     pub fn summary_lines(&self) -> Vec<String> {
         let mut lines = vec![self.headline()];
+        if !self.merkle.is_empty() {
+            lines.push(format!(
+                "auxiliary C2PA merkle boxes: {count} (Merkle-tree hashes, C2PA 2.4 §A.5.4; not a \
+                 manifest store)",
+                count = self.merkle.len(),
+            ));
+        }
         if self.other_uuid_boxes > 0 {
             lines.push(format!(
                 "top-level uuid boxes of another extended type: {count} (not the C2PA one; a uuid \
@@ -746,16 +795,17 @@ impl C2paSummary {
             .iter()
             .map(DetailEntry::Store)
             .chain(self.unread.iter().map(DetailEntry::Unread))
+            .chain(self.merkle.iter().map(DetailEntry::Merkle))
             .collect();
         entries.sort_by_key(DetailEntry::start);
         entries
     }
 
-    /// How many lines [`detail_lines`](Self::detail_lines) yields — one per store plus one per
-    /// unread box — without building any of them.
+    /// How many lines [`detail_lines`](Self::detail_lines) yields — one per store, unread box and
+    /// `merkle` box — without building any of them.
     #[must_use]
     pub fn detail_line_count(&self) -> usize {
-        self.stores.len() + self.unread.len()
+        self.stores.len() + self.unread.len() + self.merkle.len()
     }
 
     /// The report's first line: what the scan found, with [`C2PA_NOT_VALIDATED`] inline.
@@ -821,6 +871,8 @@ enum DetailEntry<'a> {
     Store(&'a C2paStoreSummary),
     /// A C2PA box [`C2paSummary::unread`] holds.
     Unread(&'a C2paUnreadBox),
+    /// An auxiliary box [`C2paSummary::merkle`] holds.
+    Merkle(&'a C2paMerkleBox),
 }
 
 impl DetailEntry<'_> {
@@ -829,6 +881,7 @@ impl DetailEntry<'_> {
         match self {
             Self::Store(store) => store.range.start,
             Self::Unread(unread) => unread.range.start,
+            Self::Merkle(merkle) => merkle.range.start,
         }
     }
 
@@ -837,6 +890,7 @@ impl DetailEntry<'_> {
         match self {
             Self::Store(store) => store_line(store),
             Self::Unread(unread) => unread_line(unread),
+            Self::Merkle(merkle) => merkle_line(merkle),
         }
     }
 }
@@ -864,6 +918,17 @@ fn unread_line(unread: &C2paUnreadBox) -> String {
     )
 }
 
+/// The report line for one auxiliary `merkle` box.
+fn merkle_line(merkle: &C2paMerkleBox) -> String {
+    format!(
+        "  auxiliary merkle box at [{start}, {end}): Merkle-tree hashes (C2PA 2.4 §A.5.4.1.4), not a \
+         manifest store{note}",
+        start = merkle.range.start,
+        end = merkle.range.end,
+        note = position_note(merkle.position),
+    )
+}
+
 /// The trailing clause a line carries for its box's position, or nothing when there is none to add.
 fn position_note(position: C2paBoxPosition) -> String {
     position
@@ -886,14 +951,20 @@ impl HeifContainer<'_> {
     pub fn c2pa_summary(&self) -> C2paSummary {
         let mut stores = Vec::new();
         let mut unread = Vec::new();
+        let mut merkle = Vec::new();
         let mut other_uuid_boxes = 0;
         for (range, position, classified) in self.top_level_uuid_boxes() {
             match classified {
-                TopLevelUuidBox::ContentProvenance(Ok(store)) => stores.push(C2paStoreSummary {
-                    range: store.range,
-                    purpose: store.purpose,
-                    position,
-                }),
+                TopLevelUuidBox::ContentProvenance(Ok(ProvenanceContent::Store(store))) => {
+                    stores.push(C2paStoreSummary {
+                        range: store.range,
+                        purpose: store.purpose,
+                        position,
+                    });
+                }
+                TopLevelUuidBox::ContentProvenance(Ok(ProvenanceContent::Merkle)) => {
+                    merkle.push(C2paMerkleBox { range, position });
+                }
                 TopLevelUuidBox::ContentProvenance(Err(reason)) => unread.push(C2paUnreadBox {
                     range,
                     reason,
@@ -905,6 +976,7 @@ impl HeifContainer<'_> {
         C2paSummary {
             stores,
             unread,
+            merkle,
             other_uuid_boxes,
         }
     }
@@ -913,8 +985,8 @@ impl HeifContainer<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        C2PA_NOT_VALIDATED, C2paBoxPosition, C2paBoxPurpose, C2paStoreSummary, C2paSummary,
-        C2paUnreadBox, C2paUnreadReason,
+        C2PA_NOT_VALIDATED, C2paBoxPosition, C2paBoxPurpose, C2paMerkleBox, C2paStoreSummary,
+        C2paSummary, C2paUnreadBox, C2paUnreadReason,
     };
 
     /// A summary of the stores at the given `(start, end, purpose)` triples, all in the window
@@ -930,6 +1002,7 @@ mod tests {
                 })
                 .collect(),
             unread: Vec::new(),
+            merkle: Vec::new(),
             other_uuid_boxes: 0,
         }
     }
@@ -947,8 +1020,37 @@ mod tests {
                     position: C2paBoxPosition::BeforeMediaData,
                 })
                 .collect(),
+            merkle: Vec::new(),
             other_uuid_boxes: 0,
         }
+    }
+
+    /// An auxiliary `merkle` box is its own category: counted in the head, listed in file order
+    /// among the details with its own words, and never worded as a store or as an unread box.
+    #[test]
+    fn a_merkle_box_is_reported_as_auxiliary_in_file_order() {
+        let mut with_merkle = summary(&[(100, 200, C2paBoxPurpose::Manifest)]);
+        with_merkle.merkle.push(C2paMerkleBox {
+            range: 40..90,
+            position: C2paBoxPosition::AfterMediaData,
+        });
+        assert_eq!(with_merkle.detail_line_count(), 2);
+        assert_eq!(
+            with_merkle.summary_lines()[1],
+            "auxiliary C2PA merkle boxes: 1 (Merkle-tree hashes, C2PA 2.4 §A.5.4; not a manifest \
+             store)"
+        );
+        let details: Vec<String> = with_merkle.detail_lines().collect();
+        assert_eq!(
+            details[0],
+            "  auxiliary merkle box at [40, 90): Merkle-tree hashes (C2PA 2.4 §A.5.4.1.4), not a \
+             manifest store; its box begins after the first mdat box"
+        );
+        assert!(
+            details[1].starts_with("  box_purpose \"manifest\""),
+            "{details:?}"
+        );
+        assert!(!with_merkle.headline().contains("could be read"));
     }
 
     #[test]
@@ -1080,9 +1182,10 @@ mod tests {
             }],
             unread: vec![C2paUnreadBox {
                 range: 90..150,
-                reason: C2paUnreadReason::NotAManifestStorePurpose,
+                reason: C2paUnreadReason::UnknownPurpose,
                 position: C2paBoxPosition::BeforeMediaData,
             }],
+            merkle: Vec::new(),
             other_uuid_boxes: 0,
         };
         assert_eq!(
@@ -1097,7 +1200,7 @@ mod tests {
                     .to_owned(),
                 format!(
                     "  unread C2PA box at [90, 150): {}",
-                    C2paUnreadReason::NotAManifestStorePurpose.describe()
+                    C2paUnreadReason::UnknownPurpose.describe()
                 ),
             ]
         );
@@ -1175,7 +1278,7 @@ mod tests {
         let reasons = [
             C2paUnreadReason::Truncated,
             C2paUnreadReason::NotVersionZero,
-            C2paUnreadReason::NotAManifestStorePurpose,
+            C2paUnreadReason::UnknownPurpose,
             C2paUnreadReason::NoStoreBound,
         ];
         for (i, reason) in reasons.iter().enumerate() {

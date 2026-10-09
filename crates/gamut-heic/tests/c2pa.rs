@@ -270,6 +270,7 @@ fn a_summary_holds_no_borrow_of_the_file_it_describes() {
 
     let data = file_with(&[
         c2pa_box("manifest", Some(0), &store(), &[]),
+        c2pa_box("manifesto", Some(0), &store(), &[]),
         c2pa_box("merkle", Some(0), &store(), &[]),
     ]);
     let c = HeifContainer::parse(&data).unwrap();
@@ -278,10 +279,12 @@ fn a_summary_holds_no_borrow_of_the_file_it_describes() {
     // would let inference pick the lifetime again.
     assert_eq!(summary.stores.len(), 1, "the fixture must carry a store");
     assert_eq!(summary.unread.len(), 1, "and an unread C2PA box");
+    assert_eq!(summary.merkle.len(), 1, "and an auxiliary merkle box");
 
     borrows_nothing(&summary);
     borrows_nothing(&summary.stores[0]);
     borrows_nothing(&summary.unread[0]);
+    borrows_nothing(&summary.merkle[0]);
 }
 
 #[test]
@@ -444,7 +447,7 @@ fn non_zero_full_box_flags_are_not_reported() {
 #[test]
 fn merkle_box_is_not_a_manifest_store() {
     // §A.5.3 lists only `manifest`, `original` and `update` as manifest-store purposes; a `merkle`
-    // box holds Merkle-tree hashes, not a store, so it is not reported.
+    // box (§A.5.4.1.4) holds Merkle-tree hashes, not a store, so it is not reported as one.
     let data = file_with(&[uuid_box(&C2PA_UUID, 0, 0, "merkle", &store())]);
     let c = HeifContainer::parse(&data).unwrap();
     assert!(c.c2pa().is_none());
@@ -558,19 +561,34 @@ fn a_c2pa_box_with_a_non_zero_full_box_version_is_reported_as_unread() {
 }
 
 #[test]
-fn a_merkle_box_is_reported_as_unread_rather_than_as_nothing_at_all() {
-    // §A.5.3 gives `merkle` no manifest store, so there is genuinely none to locate; the box itself
-    // is still C2PA framing the file carries.
-    let data = file_with(&[uuid_box(&C2PA_UUID, 0, 0, "merkle", &store())]);
+fn a_merkle_box_is_listed_as_auxiliary_not_as_unread() {
+    // C2PA 2.4 §A.5.4.1.4 defines `merkle` as the purpose of an auxiliary Merkle-tree box: a
+    // conformant box with no manifest store in it, which is not a box gamut failed to read.
+    let inner = uuid_box(&C2PA_UUID, 0, 0, "merkle", &store());
+    let data = file_with(std::slice::from_ref(&inner));
     let c = HeifContainer::parse(&data).unwrap();
 
     let summary = c.c2pa_summary();
     assert!(summary.stores.is_empty());
-    assert_eq!(summary.unread.len(), 1);
+    assert!(summary.unread.is_empty(), "{:?}", summary.unread);
+    assert_eq!(summary.merkle.len(), 1);
     assert_eq!(
-        summary.unread[0].reason,
-        C2paUnreadReason::NotAManifestStorePurpose
+        summary.merkle[0].range,
+        AFTER_FTYP..AFTER_FTYP + inner.len()
     );
+    assert_eq!(summary.merkle[0].position, C2paBoxPosition::BeforeMediaData);
+}
+
+#[test]
+fn an_unknown_box_purpose_is_reported_as_unread() {
+    let data = file_with(&[uuid_box(&C2PA_UUID, 0, 0, "manifesto", &store())]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert!(summary.stores.is_empty());
+    assert!(summary.merkle.is_empty());
+    assert_eq!(summary.unread.len(), 1);
+    assert_eq!(summary.unread[0].reason, C2paUnreadReason::UnknownPurpose);
 }
 
 #[test]
@@ -605,7 +623,7 @@ fn a_c2pa_box_whose_lbox_overruns_it_is_reported_as_unbounded() {
 fn an_unread_boxs_range_covers_the_whole_uuid_box() {
     // The store's own range is unavailable — there is no store — so the whole box is what is
     // reported, header and extended type included, starting right after the 16-byte `ftyp`.
-    let inner = uuid_box(&C2PA_UUID, 0, 0, "merkle", &store());
+    let inner = uuid_box(&C2PA_UUID, 0, 0, "manifesto", &store());
     let data = file_with(std::slice::from_ref(&inner));
     let c = HeifContainer::parse(&data).unwrap();
 
