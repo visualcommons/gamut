@@ -54,11 +54,6 @@ impl ConvSample for u16 {
 ///
 /// Trailing bytes that cannot form a whole sample are ignored; the [`crate::decoder`] sizes the
 /// buffer from the frame geometry, so there are none in practice.
-#[expect(
-    clippy::chunks_exact_to_as_chunks,
-    reason = "as_chunks::<S::BYTES>() needs an associated const as a const-generic \
-              argument, which is unstable (generic_const_exprs)"
-)]
 pub(crate) fn reassemble<S: ConvSample>(src: &[u8]) -> Vec<S> {
     src.chunks_exact(S::BYTES).map(S::from_ne_bytes).collect()
 }
