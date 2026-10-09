@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use crate::pack::gray8_scale;
+use crate::palette;
 
 /// The PNG colour family an embedded ICC profile pins the written colour type to.
 ///
@@ -603,20 +604,14 @@ fn build_indexed(
         })
         .collect();
     let plte: Vec<u8> = ordered.iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
-    let trns = if ordered.iter().any(|c| c[3] != 255) {
+    let trns = if ordered.iter().any(|c| c[3] != palette::OPAQUE) {
         let mut alphas: Vec<u8> = ordered.iter().map(|c| c[3]).collect();
         // Trailing fully-opaque entries may be omitted (they default to opaque). With the
         // transparent entries gathered at the front this now trims everything after them.
         //
-        // No length guard: this arm runs only when some entry's alpha is not 255, so the
-        // `last() == 255` test always halts the loop before the vector empties. Ordering makes
-        // that argument stronger rather than weaker -- the entry that halts it is at index 0, so
-        // the loop stops with at least one element left. The `alphas.len() > 1` that used to be
-        // here therefore decided nothing, and `>` vs `>=` was an equivalent mutant no test could
-        // kill (#110) -- removed rather than excluded.
-        while alphas.last() == Some(&255) {
-            alphas.pop();
-        }
+        // The trim truncates just past the last non-opaque alpha, and this arm runs only when
+        // one exists, so the `tRNS` written here always keeps at least one byte.
+        palette::trim_trailing_opaque(&mut alphas);
         Some(alphas)
     } else {
         None

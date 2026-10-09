@@ -120,7 +120,11 @@ fn indexed_round_trips_at_every_auto_depth() {
             .collect();
         let alpha: Vec<u8> = (0..entries.min(5)).map(|i| (i * 60) as u8).collect();
         let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
-        let (w, h) = (21u32, 9u32);
+        // At least 256 pixels, so the cycling indices below name every entry of even the largest
+        // palette -- `encode_indexed8` drops an entry no pixel names, which would otherwise make
+        // this test about palette cleaning instead of about bit depth. An odd width keeps the
+        // sub-byte depths padding their rows.
+        let (w, h) = (23u32, 13u32);
         let indices: Vec<u8> = (0..(w * h) as usize).map(|i| (i % entries) as u8).collect();
         let mut png = Vec::new();
         PngEncoder::new()
