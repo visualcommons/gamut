@@ -170,7 +170,8 @@ struct TextEntry {
     notices: Vec<MetadataNotice>,
     /// Why this annotation must not be written *at all*, if it must not — a null in the keyword
     /// or in the `iTXt` translated keyword, the two fields a null separator ends, and nothing
-    /// else. Recorded here rather than returned from the setter because the
+    /// else. It refuses the encode only while [`emit`](Self::emit) is set: an entry that is
+    /// dropped anyway writes no chunk to re-frame. Recorded here rather than returned from the setter because the
     /// setters sit behind `#[must_use]` builder methods that have no error channel;
     /// [`Ancillary::validate`] reports it at the encode chokepoint.
     fault: Option<TextFault>,
@@ -547,7 +548,11 @@ impl Ancillary {
 
     /// Refuses an accumulation the spec forbids, before any byte is emitted.
     ///
-    /// **Only a null in a keyword gets here.** A null in a text chunk's keyword or in an `iTXt`
+    /// **Only a null in a keyword of an annotation that is written gets here.** An entry that is
+    /// not emitted anyway — dropped for a null in its text string, a keyword outside Latin-1, a
+    /// non-UTF-8 XMP packet — writes no chunk for the null to re-frame, so its fault refuses
+    /// nothing; the notice that explains the drop is what the caller hears. A null in a text
+    /// chunk's keyword or in an `iTXt`
     /// translated keyword (§11.3.3.2, §11.3.3.4) sits in a field a null separator *ends*, so a
     /// chunk carrying one re-parses as a *different* annotation: the file would mean something
     /// other than what the caller supplied, and no notice can undo that. Everything else §11.3.3
@@ -565,7 +570,7 @@ impl Ancillary {
     /// reader takes the highest-priority one.
     pub(crate) fn validate(&self) -> Result<()> {
         for (index, entry) in self.texts.iter().enumerate() {
-            if let Some(fault) = &entry.fault {
+            if let (true, Some(fault)) = (entry.emit, &entry.fault) {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
                     "PNG: a text annotation breaks the clause of the chunk that would carry it",
@@ -1705,6 +1710,30 @@ mod tests {
         let mut a = Ancillary::default();
         a.add_text_international_tagged("Note", "de", "No\0tiz", "body", false);
         assert!(refusal(&a).contains("translated keyword may not contain a null"));
+    }
+
+    /// A null fault refuses only an annotation that would be written. One also dropped for a null
+    /// in its text string, or for a keyword outside Latin-1, writes no chunk the null could
+    /// re-frame, so the encode proceeds and the drop is reported; the same faults on an emitted
+    /// entry still refuse (the two tests above).
+    ///
+    /// Kills the `emit` guard in [`Ancillary::validate`].
+    #[test]
+    fn a_null_fault_on_an_annotation_never_written_refuses_nothing() {
+        let mut keyword = Ancillary::default();
+        keyword.add_text_latin1("Auth\0or", "before\0after");
+        assert!(keyword.validate().is_ok(), "nothing is written to re-frame");
+        assert_eq!(notices(&keyword), [MetadataNotice::TextStringNull]);
+        assert_eq!(find_chunk(&post_plte(&keyword), b"tEXt"), None);
+
+        let mut translated = Ancillary::default();
+        translated.add_text_international_tagged("\u{153}kw", "de", "No\0tiz", "body", false);
+        assert!(
+            translated.validate().is_ok(),
+            "nothing is written to re-frame"
+        );
+        assert_eq!(notices(&translated), [MetadataNotice::TextKeywordNotLatin1]);
+        assert_eq!(find_chunk(&post_plte(&translated), b"iTXt"), None);
     }
 
     /// §11.3.3.4: "The language tag is a well-formed language tag defined by \[BCP47\]", whose
