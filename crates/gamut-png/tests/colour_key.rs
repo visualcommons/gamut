@@ -1,5 +1,5 @@
 //! The `tRNS` colour key reduction (issue #224, axis 3): dropping a binary alpha channel by
-//! naming one colour "transparent" (§11.3.2.1).
+//! naming one colour "transparent" (§11.3.1.1).
 //!
 //! This is a *lossless* reduction, so the claim is exact: libpng must decode the keyed file to
 //! byte-identical RGBA. That is the only assertion that matters, and it is why every test here
@@ -111,7 +111,7 @@ fn a_colour_key_drops_the_alpha_channel_losslessly() {
 
 #[test]
 fn the_key_is_written_as_sixteen_bit_big_endian_samples() {
-    // §11.3.2.1: truecolour tRNS is three 16-bit big-endian samples, not three bytes. At depth 8
+    // §11.3.1.1: truecolour tRNS is three 16-bit big-endian samples, not three bytes. At depth 8
     // the high byte of each is zero — a decoder reading it as bytes would key on the wrong
     // colour, and libpng's round trip above would fail rather than this, so pin the bytes too.
     let png = encode(&keyable_rgba());

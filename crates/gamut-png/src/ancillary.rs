@@ -22,7 +22,7 @@ use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::{ColorType, chunk};
 
-/// The rendering intent for an `sRGB` chunk (PNG spec §11.3.3.5).
+/// The rendering intent for an `sRGB` chunk (PNG spec §11.3.2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrgbIntent {
     /// Perceptual (intent code 0).
@@ -243,7 +243,7 @@ pub(crate) struct WrittenPalette<'a> {
     /// The `PLTE` payload: RGB triples.
     pub plte: &'a [u8],
     /// The `tRNS` payload — one alpha per leading entry, entries past its end being opaque
-    /// (§11.3.2.1) — or `None` when every entry is opaque.
+    /// (§11.3.1.1) — or `None` when every entry is opaque.
     pub trns: Option<&'a [u8]>,
     /// Whose palette it is.
     pub origin: PaletteOrigin,
@@ -308,7 +308,7 @@ impl WrittenHeader<'static> {
     }
 }
 
-/// The `bKGD` payload for the header actually written (§11.3.5.1), or `None` to omit the chunk.
+/// The `bKGD` payload for the header actually written (§11.3.4.1), or `None` to omit the chunk.
 ///
 /// The caller's payload names its own colour type by its length — one byte is a palette index,
 /// two a grey sample, six an RGB triple, each sample 16-bit big-endian — and is converted where
@@ -369,7 +369,7 @@ fn fits_depth(value: u16, bit_depth: u8) -> bool {
     bit_depth >= 16 || u32::from(value) < 1u32 << bit_depth
 }
 
-/// The `sBIT` payload for the header actually written (§11.3.3.4), or `None` to omit the chunk.
+/// The `sBIT` payload for the header actually written (§11.3.2.4), or `None` to omit the chunk.
 ///
 /// The caller's payload names its own colour type by its length — one entry for grey, two for
 /// grey+alpha, three for RGB (and for a palette, whose entries are RGB), four for RGBA — and is

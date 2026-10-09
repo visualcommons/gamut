@@ -767,7 +767,7 @@ impl PngEncoder {
                 |_| {},
                 out,
             ),
-            // §11.3.2.1: for truecolour, tRNS is three 16-bit big-endian samples naming the one
+            // §11.3.1.1: for truecolour, tRNS is three 16-bit big-endian samples naming the one
             // colour a decoder renders as fully transparent. At depth 8 the high byte is zero.
             Reduced::Rgb8Keyed { samples, key } => self.write_png(
                 wh,
@@ -1094,7 +1094,7 @@ mod tests {
     /// discarding the caller's colour *and* every other setting made before them -- and no test
     /// noticed (#110). `with_background_rgb` was covered; these two were not.
     ///
-    /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.5.1): two bytes for
+    /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.4.1): two bytes for
     /// greyscale, one for indexed. Asserting the bytes rather than mere presence is what
     /// distinguishes the right builder from any of them.
     ///

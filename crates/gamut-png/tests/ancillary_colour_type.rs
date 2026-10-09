@@ -1,5 +1,5 @@
 //! `bKGD` and `sBIT` follow the colour type the encoder actually **writes**, not the one the
-//! caller set them for (PNG §11.3.5.1, §11.3.3.4).
+//! caller set them for (PNG §11.3.4.1, §11.3.2.4).
 //!
 //! Auto-reduce may write a different colour type from the input's — and since the palette and
 //! colour-key candidates are *raced* against the unreduced encoding, which one lands is decided by
@@ -131,7 +131,7 @@ fn black_on_transparent_rgba(side: u32) -> Vec<u8> {
     buf
 }
 
-/// The alpha of palette entry `index` — 255 past the end of `tRNS` (§11.3.2.1).
+/// The alpha of palette entry `index` — 255 past the end of `tRNS` (§11.3.1.1).
 fn palette_alpha(trns: Option<&[u8]>, index: usize) -> u8 {
     trns.and_then(|t| t.get(index).copied()).unwrap_or(255)
 }
@@ -281,7 +281,7 @@ fn rgba_significant_bits_become_three_under_a_palette() {
     assert_eq!(
         read_chunk(&png, b"sBIT"),
         Some(vec![8, 8, 8]),
-        "an indexed sBIT is always three entries, whatever the index depth (§11.3.3.4)"
+        "an indexed sBIT is always three entries, whatever the index depth (§11.3.2.4)"
     );
 }
 
