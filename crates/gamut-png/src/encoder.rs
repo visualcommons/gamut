@@ -26,7 +26,7 @@ use gamut_core::{
 use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::ancillary::{
-    Ancillary, PaletteOrigin, PhysicalUnit, SrgbIntent, WrittenHeader, WrittenPalette,
+    Ancillary, C2paStore, PaletteOrigin, PhysicalUnit, SrgbIntent, WrittenHeader, WrittenPalette,
 };
 use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
@@ -396,7 +396,7 @@ impl PngEncoder {
     /// The last of `with_c2pa` / `with_c2pa_reserved` wins; a file carries exactly one store.
     #[must_use]
     pub fn with_c2pa(mut self, store: &[u8]) -> Self {
-        self.ancillary.c2pa = Some(store.to_vec());
+        self.ancillary.c2pa = Some(C2paStore::Store(store.to_vec()));
         self
     }
 
@@ -431,7 +431,7 @@ impl PngEncoder {
     /// The last of `with_c2pa` / `with_c2pa_reserved` wins; a file carries exactly one store.
     #[must_use]
     pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
-        self.ancillary.c2pa = Some(vec![0; len]);
+        self.ancillary.c2pa = Some(C2paStore::Reserved(len));
         self
     }
 

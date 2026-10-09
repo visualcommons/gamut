@@ -133,7 +133,7 @@ pub(crate) struct Ancillary {
     pub exif: Option<Vec<u8>>,
     /// caBX: the C2PA manifest store, raw and uncompressed (C2PA 2.4 §A.3.2) — or a run of zero
     /// bytes reserving its place. Emitted last, immediately before the first `IDAT`.
-    pub c2pa: Option<Vec<u8>>,
+    pub c2pa: Option<C2paStore>,
     /// tEXt / zTXt / iTXt entries, emitted in insertion order.
     texts: Vec<TextEntry>,
 }
@@ -243,8 +243,35 @@ impl Ancillary {
         }
         // Last, so nothing whose size could shift the store follows it: a reservation filled by
         // a second encode of equal length keeps every offset outside this chunk.
-        if let Some(store) = &self.c2pa {
-            chunk::write_chunk(out, chunk::CABX, store);
+        match &self.c2pa {
+            Some(C2paStore::Store(store)) => chunk::write_chunk(out, chunk::CABX, store),
+            Some(C2paStore::Reserved(len)) => chunk::write_chunk(out, chunk::CABX, &vec![0; *len]),
+            None => {}
+        }
+    }
+}
+
+/// The `caBX` payload the caller asked for.
+///
+/// A reservation is held as its length, not as the zero bytes it stands for, so that the length
+/// is checked against PNG §5.3's 2^31 − 1 bound (in the encoder, before any byte is written)
+/// **before** anything is allocated: [`PngEncoder::with_c2pa_reserved`](crate::PngEncoder::with_c2pa_reserved)
+/// is an infallible builder, and a `usize::MAX` reservation must surface as the documented
+/// `InvalidInput`, not as an allocation failure at the setter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum C2paStore {
+    /// A finished store, written verbatim.
+    Store(Vec<u8>),
+    /// A placeholder of this many zero bytes.
+    Reserved(usize),
+}
+
+impl C2paStore {
+    /// The payload length the chunk will carry.
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Store(store) => store.len(),
+            Self::Reserved(len) => *len,
         }
     }
 }
@@ -589,7 +616,7 @@ mod tests {
     fn the_c2pa_store_is_written_raw_and_last_before_idat() {
         let mut a = Ancillary::default();
         a.add_text_latin1("Before", "set first");
-        a.c2pa = Some(b"\0\0\0\x1fjumb".to_vec());
+        a.c2pa = Some(C2paStore::Store(b"\0\0\0\x1fjumb".to_vec()));
         a.add_text_compressed("After", "set later");
         a.set_time(2026, 9, 6, 0, 0, 0);
         let mut out = vec![0u8; 8];

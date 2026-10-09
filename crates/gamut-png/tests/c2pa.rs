@@ -169,6 +169,25 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
     assert_eq!(&empty[span.chunk.clone()][..8], b"\0\0\0\0caBX");
 }
 
+/// A reservation past PNG §5.3's 2^31 − 1-byte payload bound fails the encode with the documented
+/// `InvalidInput`. `usize::MAX` is the case that pins the order: were the zero run allocated at
+/// the setter, as it once was, this would abort on allocation before the check could answer.
+#[test]
+fn an_oversized_reservation_fails_the_encode_without_allocating_it() {
+    let (src, dims) = rgb_source();
+    let image = ImageRef::<Rgb8>::new(&src, dims).expect("matches");
+    let error = PngEncoder::new()
+        .with_c2pa_reserved(usize::MAX)
+        .encode_with_report(image)
+        .expect_err("no chunk carries usize::MAX bytes");
+    assert!(
+        error
+            .to_string()
+            .contains("chunk payload exceeds 2^31 - 1 bytes"),
+        "{error}"
+    );
+}
+
 /// The reserve-then-fill contract: encoding again with a store of the reserved length changes
 /// **only** bytes inside the chunk's span — the payload and its CRC — and not the length, the
 /// type, or any byte before or after the chunk. Two different equal-length stores likewise
