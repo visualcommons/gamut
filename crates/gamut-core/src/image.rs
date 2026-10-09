@@ -105,7 +105,6 @@ impl<'a, P: Pixel> ImageRef<'a, P> {
     }
 
     /// Iterates the rows top to bottom, each a `width * P::CHANNELS`-sample slice.
-    #[must_use]
     pub fn rows(self) -> impl ExactSizeIterator<Item = &'a [P::Sample]> {
         let row_len = self.dims.width as usize * P::CHANNELS;
         self.data.chunks_exact(row_len)
