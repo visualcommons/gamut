@@ -26,7 +26,7 @@ use gamut_core::{
 use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::ancillary::{
-    Ancillary, PaletteOrigin, PhysicalUnit, SrgbIntent, WrittenHeader, WrittenPalette,
+    Ancillary, C2paStore, PaletteOrigin, PhysicalUnit, SrgbIntent, WrittenHeader, WrittenPalette,
 };
 use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
@@ -459,11 +459,13 @@ impl PngEncoder {
         self
     }
 
-    /// Records a greyscale background colour (bKGD chunk) for greyscale images.
+    /// Records a greyscale background colour (bKGD chunk) for greyscale images, as a sample at the
+    /// input's bit depth.
     ///
     /// Emitted for the colour type actually **written**, which under
     /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
-    /// that is lossless (to an RGB triple, or to the palette entry holding the grey) and
+    /// that is lossless (to an RGB triple, or to the palette entry holding the grey), rescaled
+    /// exactly as the pixels were where auto-reduce lowers the depth (16→8, sub-byte grey), and
     /// **omitted, without error,** where the written colour type or depth cannot carry it. See
     /// `STATUS.md`, "Chunks that follow the race".
     #[must_use]
@@ -472,13 +474,15 @@ impl PngEncoder {
         self
     }
 
-    /// Records an RGB background colour (bKGD chunk) for truecolour images.
+    /// Records an RGB background colour (bKGD chunk) for truecolour images, as samples at the
+    /// input's bit depth.
     ///
     /// Emitted for the colour type actually **written**, which under
     /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
     /// that is lossless (to one grey sample where the channels agree, or to the palette entry
-    /// holding the colour — an opaque one where a transparent twin exists) and **omitted, without
-    /// error,** where the written colour type or depth cannot carry it. See `STATUS.md`, "Chunks
+    /// holding the colour — an opaque one where a transparent twin exists), rescaled exactly as the
+    /// pixels were where auto-reduce lowers the depth, and **omitted, without error,** where the
+    /// written colour type or depth cannot carry it. See `STATUS.md`, "Chunks
     /// that follow the race".
     #[must_use]
     pub fn with_background_rgb(mut self, red: u16, green: u16, blue: u16) -> Self {
@@ -822,10 +826,13 @@ impl PngEncoder {
     /// into a rewritten file is invalid by construction, and `caBX` is *unsafe to copy* for the
     /// same reason. Set only a store computed for the output this encoder is about to write.
     ///
+    /// A chunk's payload is limited to 2^31 − 1 bytes (PNG §5.3); an encode with a longer `store`
+    /// fails with [`Error::InvalidInput`] rather than writing a chunk no reader accepts.
+    ///
     /// The last of `with_c2pa` / `with_c2pa_reserved` wins; a file carries exactly one store.
     #[must_use]
     pub fn with_c2pa(mut self, store: &[u8]) -> Self {
-        self.ancillary.c2pa = Some(store.to_vec());
+        self.ancillary.c2pa = Some(C2paStore::Store(store.to_vec()));
         self
     }
 
@@ -849,7 +856,9 @@ impl PngEncoder {
     /// is why the in-place fill is the documented step 3.
     ///
     /// The reservation is `len` bytes exactly — no slack is added — so ask for what the signer
-    /// says it needs (`c2pa-rs` reports a `reserve_size`).
+    /// says it needs (`c2pa-rs` reports a `reserve_size`). It is bounded like any chunk payload
+    /// by PNG §5.3 to 2^31 − 1 bytes: an encode with a larger `len` fails with
+    /// [`Error::InvalidInput`] rather than writing a chunk no reader accepts.
     ///
     /// The offsets hold for the file as this encoder wrote it. A PNG editor may lawfully insert
     /// another ancillary chunk after the store (PNG §14.3.2), so reserve, hash and fill without
@@ -858,7 +867,7 @@ impl PngEncoder {
     /// The last of `with_c2pa` / `with_c2pa_reserved` wins; a file carries exactly one store.
     #[must_use]
     pub fn with_c2pa_reserved(mut self, len: usize) -> Self {
-        self.ancillary.c2pa = Some(vec![0; len]);
+        self.ancillary.c2pa = Some(C2paStore::Reserved(len));
         self
     }
 
@@ -876,7 +885,9 @@ impl PngEncoder {
     ///
     /// # Errors
     ///
-    /// As [`EncodeImage::encode_image`].
+    /// As [`EncodeImage::encode_image`], which includes rejecting a C2PA store longer than the
+    /// 2^31 − 1 bytes a chunk can carry (PNG §5.3) — so a store that was set always yields
+    /// `Some` span on success.
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
@@ -933,6 +944,8 @@ impl PngEncoder {
                     trns,
                     origin: PaletteOrigin::Caller,
                 }),
+                // The caller's background is a colour in its 8-bit palette's terms.
+                source_depth: 8,
             },
             |out| {
                 chunk::write_chunk(out, *b"PLTE", &plte);
@@ -977,6 +990,7 @@ impl PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
+                8,
                 reduce::analyze8_for(samples, channels, self.profile_family()),
                 color,
                 |o| {
@@ -1012,6 +1026,7 @@ impl PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
+                16,
                 reduce::analyze16_for(samples, channels, self.profile_family()),
                 color,
                 |o| self.encode_16bit(dims, samples, color, o),
@@ -1132,6 +1147,12 @@ impl PngEncoder {
         let bits_per_pixel = color.channels() * bit_depth as usize;
         let bpp = bits_per_pixel.div_ceil(8).max(1);
         let row_bytes = (width as usize * bits_per_pixel).div_ceil(8);
+        // Reject a C2PA store the §5.3 length field cannot carry before any byte is written,
+        // rather than emit a caBX no reader accepts (and a report of `c2pa: None` for a file that
+        // was told to carry one).
+        if let Some(store) = &self.ancillary.c2pa {
+            chunk::check_data_len(store.len())?;
+        }
 
         let start = out.len();
         out.extend_from_slice(&SIGNATURE);
@@ -1247,6 +1268,7 @@ impl PngEncoder {
     fn write_reduced_or_native(
         &self,
         dims: Dimensions,
+        source_depth: u8,
         reductions: Reductions,
         native_color: ColorType,
         native: impl FnOnce(&mut Vec<u8>) -> Result<usize>,
@@ -1254,17 +1276,19 @@ impl PngEncoder {
     ) -> Result<usize> {
         let (chunked, chunk_free) = match reductions {
             Reductions::None => return native(out),
-            Reductions::ChunkFree(reduced) => return self.write_reduced(dims, reduced, out),
+            Reductions::ChunkFree(reduced) => {
+                return self.write_reduced(dims, source_depth, reduced, out);
+            }
             Reductions::Chunked {
                 chunked,
                 chunk_free,
             } => (chunked, chunk_free),
         };
         let mut reduced_encoding = Vec::new();
-        self.write_reduced(dims, chunked, &mut reduced_encoding)?;
+        self.write_reduced(dims, source_depth, chunked, &mut reduced_encoding)?;
         if let Some(free) = chunk_free {
             let mut free_encoding = Vec::new();
-            self.write_reduced(dims, free, &mut free_encoding)?;
+            self.write_reduced(dims, source_depth, free, &mut free_encoding)?;
             if prefers_chunk_free(free_encoding.len(), reduced_encoding.len()) {
                 reduced_encoding = free_encoding;
             }
@@ -1285,10 +1309,12 @@ impl PngEncoder {
         Ok(winner.len())
     }
 
-    /// Writes a reduced encoding chosen by [`reduce::analyze8`] / [`reduce::analyze16`].
+    /// Writes a reduced encoding chosen by [`reduce::analyze8`] / [`reduce::analyze16`], whose
+    /// input samples were `source_depth` (8 or 16) bits — the depth the caller's `bKGD` is at.
     fn write_reduced(
         &self,
         dims: Dimensions,
+        source_depth: u8,
         reduced: Reduced,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
@@ -1310,7 +1336,7 @@ impl PngEncoder {
                 self.write_png(
                     wh,
                     sample_bytes,
-                    WrittenHeader::new(ColorType::Grayscale, depth),
+                    WrittenHeader::new(ColorType::Grayscale, depth).reduced_from(source_depth),
                     |_| {},
                     out,
                 )
@@ -1318,23 +1344,23 @@ impl PngEncoder {
             Reduced::GrayAlpha8(samples) => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::GrayscaleAlpha, 8),
+                WrittenHeader::new(ColorType::GrayscaleAlpha, 8).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
             Reduced::Rgb8(samples) => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::Truecolor, 8),
+                WrittenHeader::new(ColorType::Truecolor, 8).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
-            // §11.3.2.1: for truecolour, tRNS is three 16-bit big-endian samples naming the one
+            // §11.3.1.1: for truecolour, tRNS is three 16-bit big-endian samples naming the one
             // colour a decoder renders as fully transparent. At depth 8 the high byte is zero.
             Reduced::Rgb8Keyed { samples, key } => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::Truecolor, 8),
+                WrittenHeader::new(ColorType::Truecolor, 8).reduced_from(source_depth),
                 |out| {
                     let trns = [0, key[0], 0, key[1], 0, key[2]];
                     chunk::write_chunk(out, *b"tRNS", &trns);
@@ -1345,35 +1371,35 @@ impl PngEncoder {
             Reduced::GrayKeyed { samples, key } => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::Grayscale, 8),
+                WrittenHeader::new(ColorType::Grayscale, 8).reduced_from(source_depth),
                 |out| chunk::write_chunk(out, *b"tRNS", &[0, key]),
                 out,
             ),
             Reduced::Rgba8(samples) => self.write_png(
                 wh,
                 &samples,
-                WrittenHeader::new(ColorType::TruecolorAlpha, 8),
+                WrittenHeader::new(ColorType::TruecolorAlpha, 8).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
             Reduced::Gray16Be(bytes) => self.write_png(
                 wh,
                 &bytes,
-                WrittenHeader::new(ColorType::Grayscale, 16),
+                WrittenHeader::new(ColorType::Grayscale, 16).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
             Reduced::GrayAlpha16Be(bytes) => self.write_png(
                 wh,
                 &bytes,
-                WrittenHeader::new(ColorType::GrayscaleAlpha, 16),
+                WrittenHeader::new(ColorType::GrayscaleAlpha, 16).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
             Reduced::Rgb16Be(bytes) => self.write_png(
                 wh,
                 &bytes,
-                WrittenHeader::new(ColorType::Truecolor, 16),
+                WrittenHeader::new(ColorType::Truecolor, 16).reduced_from(source_depth),
                 |_| {},
                 out,
             ),
@@ -1406,6 +1432,7 @@ impl PngEncoder {
                             trns: trns.as_deref(),
                             origin: PaletteOrigin::Derived,
                         }),
+                        source_depth,
                     },
                     |out| {
                         chunk::write_chunk(out, *b"PLTE", &plte);
@@ -1506,6 +1533,7 @@ impl EncodeImage<Gray8> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 image.dimensions(),
+                8,
                 reduce::analyze8_for(image.as_samples(), 1, self.profile_family()),
                 ColorType::Grayscale,
                 |o| self.encode_8bit(image, ColorType::Grayscale, o),
@@ -1539,6 +1567,7 @@ impl EncodeImage<Rgb8> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 image.dimensions(),
+                8,
                 reduce::analyze8_for(image.as_samples(), 3, self.profile_family()),
                 ColorType::Truecolor,
                 |o| self.encode_8bit(image, ColorType::Truecolor, o),
@@ -1582,6 +1611,7 @@ impl EncodeImage<Gray16> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
+                16,
                 reduce::analyze16_for(samples, 1, self.profile_family()),
                 ColorType::Grayscale,
                 |o| self.encode_16bit(dims, samples, ColorType::Grayscale, o),
@@ -1597,6 +1627,7 @@ impl EncodeImage<Rgb16> for PngEncoder {
         if self.auto_reduce {
             return self.write_reduced_or_native(
                 dims,
+                16,
                 reduce::analyze16_for(samples, 3, self.profile_family()),
                 ColorType::Truecolor,
                 |o| self.encode_16bit(dims, samples, ColorType::Truecolor, o),
@@ -1660,7 +1691,7 @@ mod tests {
     /// discarding the caller's colour *and* every other setting made before them -- and no test
     /// noticed (#110). `with_background_rgb` was covered; these two were not.
     ///
-    /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.5.1): two bytes for
+    /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.4.1): two bytes for
     /// greyscale, one for indexed. Asserting the bytes rather than mere presence is what
     /// distinguishes the right builder from any of them.
     ///

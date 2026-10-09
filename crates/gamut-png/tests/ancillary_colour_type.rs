@@ -1,5 +1,5 @@
 //! `bKGD` and `sBIT` follow the colour type the encoder actually **writes**, not the one the
-//! caller set them for (PNG §11.3.5.1, §11.3.3.4).
+//! caller set them for (PNG §11.3.4.1, §11.3.2.4).
 //!
 //! Auto-reduce may write a different colour type from the input's — and since the palette and
 //! colour-key candidates are *raced* against the unreduced encoding, which one lands is decided by
@@ -20,7 +20,7 @@
 
 mod common;
 
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
+use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgb16, Rgba8};
 use gamut_png::PngEncoder;
 use libpng_oracle::{COLOR_GRAY, COLOR_PALETTE, COLOR_RGB, COLOR_RGBA};
 
@@ -131,7 +131,7 @@ fn black_on_transparent_rgba(side: u32) -> Vec<u8> {
     buf
 }
 
-/// The alpha of palette entry `index` — 255 past the end of `tRNS` (§11.3.2.1).
+/// The alpha of palette entry `index` — 255 past the end of `tRNS` (§11.3.1.1).
 fn palette_alpha(trns: Option<&[u8]>, index: usize) -> u8 {
     trns.and_then(|t| t.get(index).copied()).unwrap_or(255)
 }
@@ -281,7 +281,7 @@ fn rgba_significant_bits_become_three_under_a_palette() {
     assert_eq!(
         read_chunk(&png, b"sBIT"),
         Some(vec![8, 8, 8]),
-        "an indexed sBIT is always three entries, whatever the index depth (§11.3.3.4)"
+        "an indexed sBIT is always three entries, whatever the index depth (§11.3.2.4)"
     );
 }
 
@@ -350,4 +350,61 @@ fn chunks_set_for_the_written_colour_type_pass_through_unchanged() {
     );
     assert_eq!(read_chunk(&png, b"sBIT"), Some(vec![5, 6, 5, 4]));
     assert_eq!(read_chunk(&png, b"bKGD"), Some(vec![0, 1, 0, 2, 0, 3]));
+}
+
+/// The depth axis of the same rule: `bKGD` samples are at the image's bit depth (§11.3.4.1), so when
+/// auto-reduce lowers the depth the caller set them at, the sample is mapped with the pixels
+/// (issue #501).
+#[test]
+fn a_background_follows_a_16_to_8_demotion() {
+    // 1024 distinct k·257 colours: no palette, so the chunk-free 16→8 demotion is written.
+    let side = 32u32;
+    let src: Vec<u16> = (0..side * side)
+        .flat_map(|i| [(i % 251) * 257, (i % 241) * 257, (i % 239) * 257].map(|v| v as u16))
+        .collect();
+    let dims = Dimensions::new(side, side).expect("valid dimensions");
+    let image = ImageRef::<Rgb16>::new(&src, dims).expect("buffer matches dimensions");
+    let mut png = Vec::new();
+    encoder()
+        .with_background_rgb(20 * 257, 90 * 257, 220 * 257)
+        .encode_image(image, &mut png)
+        .expect("encode");
+
+    let decoded = libpng_oracle::decode(&png);
+    assert_eq!(
+        (decoded.color_type, decoded.bit_depth),
+        (COLOR_RGB, 8),
+        "precondition: the 16-bit input was demoted"
+    );
+    assert_eq!(read_chunk(&png, b"bKGD"), Some(vec![0, 20, 0, 90, 0, 220]));
+}
+
+#[test]
+fn a_background_follows_sub_byte_grey_packing() {
+    // Only the four depth-2 levels 0/85/170/255: packed to depth 2, where 170 is code 2.
+    let side = 32u32;
+    let src: Vec<u8> = (0..side * side)
+        .map(|i| [0, 85, 170, 255][(i % 4) as usize])
+        .collect();
+    let dims = Dimensions::new(side, side).expect("valid dimensions");
+    let image = ImageRef::<Gray8>::new(&src, dims).expect("buffer matches dimensions");
+    let encode = |grey: u16| {
+        let mut png = Vec::new();
+        encoder()
+            .with_background_gray(grey)
+            .encode_image(image, &mut png)
+            .expect("encode");
+        png
+    };
+
+    let png = encode(170);
+    let decoded = libpng_oracle::decode(&png);
+    assert_eq!(
+        (decoded.color_type, decoded.bit_depth),
+        (COLOR_GRAY, 2),
+        "precondition: the 8-bit grey input was packed to depth 2"
+    );
+    assert_eq!(read_chunk(&png, b"bKGD"), Some(vec![0, 2]));
+    // An 8-bit 3 is near black; written verbatim it would be depth 2's white. No code holds it.
+    assert_eq!(read_chunk(&encode(3), b"bKGD"), None);
 }

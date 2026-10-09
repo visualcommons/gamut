@@ -24,6 +24,28 @@ pub(crate) const SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A,
 /// spelled in exactly one place and its *bits* are asserted, not only its letters.
 pub(crate) const CABX: [u8; 4] = *b"caBX";
 
+/// The largest chunk payload PNG §5.3 allows: the length field is "limited to 2^31 − 1 bytes".
+pub(crate) const MAX_DATA_LEN: usize = (1 << 31) - 1;
+
+/// Rejects a payload of `len` bytes that the §5.3 length field cannot carry.
+///
+/// [`write_chunk`] casts the length to `u32`, so a payload past [`MAX_DATA_LEN`] would otherwise be
+/// written with a length field every reader refuses (or, past `u32::MAX`, one that is silently
+/// truncated). Callers whose payload size the caller of the encoder chooses check here first.
+///
+/// # Errors
+///
+/// [`Error::InvalidInput`] if `len` exceeds [`MAX_DATA_LEN`].
+pub(crate) fn check_data_len(len: usize) -> Result<()> {
+    if len > MAX_DATA_LEN {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: chunk payload exceeds 2^31 - 1 bytes",
+        ));
+    }
+    Ok(())
+}
+
 /// Appends a complete chunk (`length`, `type`, `data`, `CRC`) to `out`.
 pub(crate) fn write_chunk(out: &mut Vec<u8>, chunk_type: [u8; 4], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
@@ -112,12 +134,30 @@ impl C2paSpan {
 /// first chunk that does not frame, so a stream that is not a PNG simply has no store.
 pub(crate) fn find_c2pa(png: &[u8]) -> Option<C2paSpan> {
     let mut reader = ChunkReader::new(png).ok()?;
-    while let Ok(Some(chunk)) = reader.next_chunk() {
-        if chunk.chunk_type == *b"IDAT" || chunk.chunk_type == *b"IEND" {
+    locate_c2pa(core::iter::from_fn(|| {
+        reader
+            .next_chunk()
+            .ok()
+            .flatten()
+            .map(|chunk| (chunk.chunk_type, chunk.crc_ok, chunk.range))
+    }))
+}
+
+/// The store-location rule itself, over a file's chunks in order as `(type, crc_ok, whole span)`:
+/// the first CRC-valid `caBX`, unless an `IDAT` or `IEND` comes first.
+///
+/// The single owner of the rule [`find_c2pa`] documents, so the walk over freshly framed bytes
+/// ([`find_c2pa`]) and the walk over an already-built segment list
+/// ([`PngReport::c2pa`](crate::PngReport::c2pa)) cannot drift apart.
+pub(crate) fn locate_c2pa(
+    chunks: impl IntoIterator<Item = ([u8; 4], bool, Range<usize>)>,
+) -> Option<C2paSpan> {
+    for (chunk_type, crc_ok, range) in chunks {
+        if chunk_type == *b"IDAT" || chunk_type == *b"IEND" {
             return None;
         }
-        if chunk.chunk_type == CABX && chunk.crc_ok {
-            return Some(C2paSpan::of(chunk.range));
+        if chunk_type == CABX && crc_ok {
+            return Some(C2paSpan::of(range));
         }
     }
     None
@@ -331,6 +371,15 @@ mod tests {
             out,
             vec![0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82]
         );
+    }
+
+    #[test]
+    fn check_data_len_admits_exactly_the_section_5_3_range() {
+        // §5.3: the length field is "limited to 2^31 - 1 bytes". Pinned as a literal because the
+        // constant sits inside the comparison, where the mutation gate cannot reach it.
+        assert_eq!(MAX_DATA_LEN, 0x7FFF_FFFF);
+        assert!(check_data_len(MAX_DATA_LEN).is_ok());
+        assert!(check_data_len(MAX_DATA_LEN + 1).is_err());
     }
 
     #[test]

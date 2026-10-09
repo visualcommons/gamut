@@ -1,5 +1,5 @@
 //! The `tRNS` colour key reduction (issue #224, axis 3): dropping a binary alpha channel by
-//! naming one colour "transparent" (§11.3.2.1).
+//! naming one colour "transparent" (§11.3.1.1).
 //!
 //! This is a *lossless* reduction, so the claim is exact: libpng must decode the keyed file to
 //! byte-identical RGBA. That is the only assertion that matters, and it is why every test here
@@ -111,7 +111,7 @@ fn a_colour_key_drops_the_alpha_channel_losslessly() {
 
 #[test]
 fn the_key_is_written_as_sixteen_bit_big_endian_samples() {
-    // §11.3.2.1: truecolour tRNS is three 16-bit big-endian samples, not three bytes. At depth 8
+    // §11.3.1.1: truecolour tRNS is three 16-bit big-endian samples, not three bytes. At depth 8
     // the high byte of each is zero — a decoder reading it as bytes would key on the wrong
     // colour, and libpng's round trip above would fail rather than this, so pin the bytes too.
     let png = encode(&keyable_rgba());
@@ -312,11 +312,13 @@ fn a_greyscale_colour_key_drops_the_alpha_channel_losslessly() {
 }
 
 /// The greyscale twin of [`a_colour_key_that_would_cost_bytes_is_declined`], and the only test
-/// that can see the `GrayKeyed` member of `write_reduced_or_native`'s `carries_chunks` set.
+/// that can see `reduce::analyze8` hand a `GrayKeyed` winner over as `Reductions::Chunked` -- the
+/// variant `write_reduced_or_native` races -- rather than as a `Reductions::ChunkFree` it writes
+/// unraced.
 ///
 /// [`a_greyscale_colour_key_drops_the_alpha_channel_losslessly`] proves `GrayKeyed` is *reachable*,
-/// but its fixture wins at every size, so dropping `GrayKeyed` from `carries_chunks` -- emitting
-/// the keyed file with no race -- would not change its result. Losing needs a thinner saving: the
+/// but its fixture wins at every size, so routing `GrayKeyed` through `Reductions::ChunkFree` --
+/// emitting the keyed file with no race -- would not change its result. Losing needs a thinner saving: the
 /// `tRNS` costs a flat 14 bytes while dropping the alpha plane saves only one byte per pixel, so a
 /// mostly-opaque image is where the fixed cost wins. A quarter-width transparent border at 16x16
 /// measures 88 bytes as `GrayAlpha8` against 97 for the key, and the encoder must emit the 88.
@@ -374,13 +376,14 @@ fn a_greyscale_colour_key_that_would_cost_bytes_is_declined() {
     );
 }
 
-/// The *losing* side of the race in `write_reduced_or_native`, which its `carries_chunks` set
-/// exists for.
+/// The *losing* side of the race in `write_reduced_or_native`, which `reduce::Reductions::Chunked`
+/// exists to request.
 ///
 /// The other negative tests here stay RGBA because no key was ever *offered* -- partial alpha, two
 /// invisible colours, a collision with a visible pixel. This one offers a perfectly valid key and
-/// has it declined on size alone, which is the only way the `Rgb8Keyed` member of `carries_chunks`
-/// is observable: drop it and the encoder would emit the larger keyed file without racing it.
+/// has it declined on size alone, which is the only way `reduce::analyze8` handing an `Rgb8Keyed`
+/// winner over as `Reductions::Chunked` is observable: hand it over as `Reductions::ChunkFree`
+/// instead and the encoder would emit the larger keyed file without racing it.
 ///
 /// Measured on `keyable_rgba_at(32)`, brute-force filtered at `Level::Best`: plain RGBA is 274
 /// bytes and `RGB + tRNS` is 279 (261 for the RGB stream plus the flat 18-byte chunk). 32 is the

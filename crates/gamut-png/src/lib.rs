@@ -23,8 +23,8 @@
 //! A C2PA manifest store travels in the `caBX` chunk (C2PA 2.4 §A.3.2: ancillary, private,
 //! **unsafe to copy**), raw and uncompressed. gamut locates, bounds, carries and reserves it and
 //! never judges it: the store is opaque bytes here, and validation is `c2pa-rs`'s. On read it is
-//! [`DecodedPng::c2pa`] / [`PngMetadata::c2pa`], the first `caBX` in the file, under the same
-//! metadata budget as every other ancillary payload. On write, [`PngEncoder::with_c2pa`] embeds a
+//! [`DecodedPng::c2pa`] / [`PngMetadata::c2pa`], the first CRC-valid `caBX` before the first
+//! `IDAT`, under the same metadata budget as every other ancillary payload. On write, [`PngEncoder::with_c2pa`] embeds a
 //! store computed for this file and [`PngEncoder::with_c2pa_reserved`] reserves its place, as the
 //! last chunk before `IDAT`; [`PngEncoder::encode_with_report`] and [`PngReport::c2pa`] name the
 //! chunk's **whole** span — length, type, payload and CRC — which is what a `c2pa.hash.data`

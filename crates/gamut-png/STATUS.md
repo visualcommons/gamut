@@ -32,7 +32,7 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | P2 | §6, §9, §11.2.4 | **Keystone:** `EncodeImage<Rgb8>`, filter None, DEFLATE → signature/IHDR/IDAT/IEND | ✅ done |
 | P3 | §9 | All 5 scanline filters (None/Sub/Up/Average/Paeth) + `MinSumAbs` selection | ✅ done |
 | P4 | §6.1 | Colour types: Gray8/Gray16/Rgb16/Rgba8/Rgba16/GrayAlpha8/16 (16-bit big-endian) | ✅ done |
-| P5 | §11.2.2/§11.3.2 | Indexed (`encode_indexed8` + PLTE + tRNS), 8-bit | ✅ done |
+| P5 | §11.2.2/§11.3.1 | Indexed (`encode_indexed8` + PLTE + tRNS), 8-bit | ✅ done |
 | P6 | §7.2 | Sub-byte depths: 1-bit bilevel grey + auto-minimal-depth indexed (1/2/4) | ✅ done |
 | P7 | §11.3 | Standard ancillary chunks: gAMA/cHRM/sRGB/sBIT/bKGD/pHYs/tIME/tEXt/zTXt/iTXt | ✅ done |
 | P8 | §11.3 | Metadata: eXIf, iCCP (deflate-compressed), iTXt-XMP (raw-bytes setters) | ✅ done |
@@ -95,9 +95,17 @@ writes `len` zero bytes in its place. Either is emitted as the **last** chunk be
 `IDAT` — after `PLTE`/`tRNS` and every other ancillary chunk — so the chunk's offset depends only
 on what precedes it and every later byte is `IDAT`/`IEND`. §A.3.2 asks only that it precede
 `IDAT`; last-before-`IDAT` is what makes the reserve-then-fill flow a no-move: encode with the
-reservation, hash with the chunk's span excluded, then encode again with the finished store of the
-same length — the output is byte-reproducible, so the second file differs from the first only in
-the payload and the chunk CRC. `tests/c2pa.rs` pins that as an exact-byte diff.
+reservation, hash with the chunk's span excluded, then write the finished store into that span
+with `fill_c2pa` (below), which rewrites only the payload and the chunk CRC. Encoding again with
+`with_c2pa` and a store of the same length reaches the same bytes — the output is
+byte-reproducible, so the second file differs from the first only in the payload and the chunk CRC,
+which `tests/c2pa.rs` pins as an exact-byte diff — but it costs a second full encode, so it is the
+equivalent alternative rather than the documented step.
+
+A store is bounded by the chunk length field: PNG §5.3 limits it to 2^31 − 1 bytes. An encode
+whose `with_c2pa` store or `with_c2pa_reserved` length exceeds that is rejected with
+`InvalidInput` before any byte is written, rather than truncated into a length field no reader
+accepts.
 
 **Exclusion span, and filling it.** `encode_with_report` (for the file just written) and
 `PngReport::c2pa` (for any file, including an indexed encode) name the chunk's **whole** span —
@@ -110,14 +118,17 @@ claimed segments.
 `fill_c2pa(&mut png, &span, store)` then writes the finished store into that span in place,
 rewriting the payload and the chunk CRC and nothing else — O(store) rather than the O(encode) of a
 second `with_c2pa` pass, and without tying the signature to the encoder reproducing its output.
-Its arguments are validated first (span inside the image, framing a chunk, naming a `caBX`, store
-exactly the reserved length), so a rejected call leaves the file untouched rather than half
+Its arguments are validated first (span inside the image, framing a chunk, naming a `caBX`, the
+span's payload length matching the length the chunk itself declares, store exactly the reserved
+length), so a rejected call leaves the file untouched rather than half
 filled.
 
 A span is **carriage**, not a decode result. The report has no byte budget, so a store past
 `with_max_metadata_bytes` is still spanned here while `decode().c2pa` is `None`; likewise
-`chunk(b"caBX").count` counts CRC-invalid chunks and chunks in the trailer, which `c2pa_ignored`
-does not. Each number answers its own question, and the docs say so rather than promising they
+`chunk(b"caBX").count` counts every `caBX` in the datastream, CRC-invalid chunks and any after
+`IDAT` included, where `c2pa_ignored` counts only the CRC-valid ones the decoder declined to
+surface. A `caBX` after `IEND` is in neither: `deconstruct` stops parsing chunks at `IEND` and
+records the rest as one trailer segment. Each number answers its own question, and the docs say so rather than promising they
 agree.
 
 **Placement is ours, not the format's.** The store is written last before `IDAT` so its offset
@@ -371,7 +382,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 1 | Filter selection | **partial** — MinSumAbs, Entropy and Bigrams per line, plus seven whole-image candidates each fully DEFLATEd. Bigrams is worth 22–32% where it wins (see above). Still missing: per-line trial deflate, `AtomicMin` pruning, and a two-tier cheap-trial codec. [#480]. `FilterStrategy` became `#[non_exhaustive]` with this phase — a heuristic is a measurement result and the set grows with the corpus — which is a **breaking change** for any downstream exhaustive `match`: add a wildcard arm. |
 | 2 | DEFLATE quality | **good, ~2% behind zopfli**, and honestly documented in `gamut-deflate`. Two contained wins remain: an 8-byte-at-a-time match compare, and `parse_dp`'s single-distance relaxation. [#478], [#479] |
 | 3 | Smallest lawful representation | **partial** — every reduction is implemented (grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour) and the key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. What is not done is the **selection**. `reduce::analyze8` still resolves *some* candidates on the raw estimate alone, and a raw estimate cannot see DEFLATE (below). Until the three-candidate race below it resolved all of them, and the eliminated runner-up was often the one that won the finished file: an opaque RGBA image with ≤256 colours kept an alpha channel that was 255 everywhere (349 bytes against 317), and a 16-bit image whose samples are all `k·257` kept all sixteen bits (220 against 172). The estimate now hands the best **chunk-free** candidate over beside the chunk-carrying one and `write_reduced_or_native` measures both, which closes that whole family — the chunk-free gates are mutually exclusive, so at most one such candidate ever exists. The remainder is the *pair* that both carry a chunk: where a palette and a `tRNS` colour key are both lawful, only the raw-smaller one is ever encoded. |
-| 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.2.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. Modified-Zeng ordering and caller-supplied palette cleanup remain. [#482] |
+| 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.1.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. Modified-Zeng ordering and caller-supplied palette cleanup remain. [#482] |
 | 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. A tie keeps the **plain** encoding: cleaning buys its rewritten samples with a size win, and where there is no win there is nothing to buy them with. |
 | 6 | Metadata hygiene | **preserve, never strip** — the encoder emits exactly what the caller set, and `gamut convert` carries a PNG input's metadata into a PNG output unless `--strip-metadata` asks otherwise (see [Metadata preservation](#metadata-preservation-issue-483)). Preserving costs bytes, and that is the trade this axis takes: a smaller file that silently lost a colour profile is not a better one. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
@@ -410,8 +421,12 @@ where the palette won the estimate the reductions it beat — the alpha drop, th
 collapse, the 16→8 demotion — were never encoded, and losing the race dropped the file all the way
 back to *no* reduction. `reduce::Reductions` therefore carries the best chunk-free candidate beside
 the chunk-carrying one, and the race is over three encodings: chunk-carrying, chunk-free,
-unreduced. Ties resolve toward the earlier of `chunked ≻ chunk-free ≻ native` — the more reduced
-encoding, and among equal-length files the one already emitted, so a tie changes no output.
+unreduced. Ties resolve toward the earlier of `chunked ≻ chunk-free ≻ native`. The three are
+information-equivalent — every lossless reduction preserves exactly the same image — so at equal
+size the size contract has nothing to choose between, and the order exists only so that the output
+is a function of the input rather than of which candidate happened to be encoded first (the
+encoder's module doc, *How a tie is broken*; pinned by `size_contract`'s
+`encoded_size_is_deterministic`).
 
 A chunk-free *winner* still pays for nothing: it adds nothing DEFLATE cannot compress, so the raw
 comparison that chose it is sound and it is written straight out. It is a chunk-free *runner-up*
@@ -435,8 +450,9 @@ triple collapses to one grey sample — and omitted, without error, where no los
 exists, since a payload shaped for the wrong colour type is a chunk libpng rejects and drops. A
 caller's palette *index* survives only on the `encode_indexed8` path, whose palette is the caller's;
 under an encoder-derived palette it names nothing and is omitted. This holds across colour
-**types**; on the depth axis a `bKGD` sample is range-checked but not rescaled with a 16→8 demotion
-or a sub-byte packing — that is [#501].
+**types** and depths: a `bKGD` sample is set at the input's depth and mapped exactly as the pixels
+were by a 16→8 demotion or a sub-byte packing, and omitted where that mapping has no exact code for
+it ([#501]).
 
 [#437]: https://github.com/visualcommons/gamut/issues/437
 [#478]: https://github.com/visualcommons/gamut/issues/478
