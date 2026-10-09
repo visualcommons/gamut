@@ -571,6 +571,17 @@ mod tests {
         // zeros exist: unchecked, a `len` just past the bound zero-filled ~4 GiB only for the
         // container writer to refuse the box afterwards. The bound itself is reached through
         // `reserved_payload_len`, so accepting it allocates nothing either.
+        //
+        // Every assertion that could pass a length the bound should refuse goes through
+        // `reserved_payload_len` *before* the one call that builds a payload, so a mutant that
+        // loosens the bound fails fast here instead of zero-filling 4 GiB and timing out.
+        //
+        // The documented figures first, as literals on both sides, so the docs cannot drift
+        // from the constant's arithmetic.
+        assert!(reserved_payload_len(C2paBoxPurpose::Manifest, 4_294_967_250).is_ok());
+        let err = reserved_payload_len(C2paBoxPurpose::Manifest, 4_294_967_251)
+            .expect_err("the first refused length on the manifest framing");
+        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported, "{err}");
         for purpose in [
             C2paBoxPurpose::Manifest,
             C2paBoxPurpose::Original,
@@ -592,11 +603,9 @@ mod tests {
             );
             assert!(format!("{err}").contains("4 GiB"), "{purpose:?}: {err}");
         }
-        // The documented figures, as literals on both sides: the constant is invisible to the
-        // mutation gate, so moving it fails here rather than shipping docs that misstate it.
-        assert!(reserved_payload_len(C2paBoxPurpose::Manifest, 4_294_967_250).is_ok());
+        // And the builder itself refuses through that check, without allocating the slot.
         let err = content_provenance_reserved(C2paBoxPurpose::Manifest, 4_294_967_251)
-            .expect_err("the first refused length, and refused without allocating");
+            .expect_err("refused before the zeros are allocated");
         assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported, "{err}");
     }
 
