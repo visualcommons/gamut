@@ -52,14 +52,12 @@ fn coded_item(id: u32, item_type: [u8; 4], config: [u8; 4]) -> Item {
 
 /// A HEVC still image: major brand `heic`, one `hvc1` item carrying an `hvcC`.
 fn heic_file() -> Vec<u8> {
-    write(&IsoBmffImage {
-        major_brand: *b"heic",
-        minor_version: 0,
-        compatible_brands: vec![*b"heic", *b"mif1"],
-        primary_item_id: 1,
-        items: vec![coded_item(1, *b"hvc1", *b"hvcC")],
-        groups: vec![],
-    })
+    write(&IsoBmffImage::new(
+        *b"heic",
+        vec![*b"heic", *b"mif1"],
+        1,
+        vec![coded_item(1, *b"hvc1", *b"hvcC")],
+    ))
     .expect("valid HEVC still-image model")
 }
 
@@ -67,14 +65,12 @@ fn heic_file() -> Vec<u8> {
 /// item with an `av1C`, and no HEVC brand anywhere. This is the file the major-brand test alone
 /// cannot tell from a HEIC (`references/heif` §7 settles it on the primary item's `hvcC`).
 fn mif1_avif_file() -> Vec<u8> {
-    write(&IsoBmffImage {
-        major_brand: *b"mif1",
-        minor_version: 0,
-        compatible_brands: vec![*b"mif1", *b"miaf", *b"avif"],
-        primary_item_id: 1,
-        items: vec![coded_item(1, *b"av01", *b"av1C")],
-        groups: vec![],
-    })
+    write(&IsoBmffImage::new(
+        *b"mif1",
+        vec![*b"mif1", *b"miaf", *b"avif"],
+        1,
+        vec![coded_item(1, *b"av01", *b"av1C")],
+    ))
     .expect("valid AVIF-shaped model")
 }
 
