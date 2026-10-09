@@ -84,16 +84,29 @@ const MIN_SLOT_LEN: usize = 8;
 /// than returning. Refusing above this ceiling turns that panic into an error, so no reservation
 /// length can panic the library.
 ///
-/// This is a panic guard, not the encoder's effective limit. Long before it, the container writer
-/// refuses the box: a top-level box carries a 32-bit size field, so
-/// [`gamut_isobmff::write`] rejects one at or beyond 4 GiB with
-/// [`Error::Unsupported`](gamut_core::Error::Unsupported). Measured on this framing, the largest
-/// `len` that clears that check is `4_294_967_250` and `4_294_967_251` is refused, and a `len`
-/// just under it aborts in the allocator while the writer copies the payload into the output
-/// buffer. So above the writer's bound lies the writer's error, and below it — for a length the
-/// machine has no memory for — lies the allocator's own limit, which no fallible API here can
-/// intercept.
+/// Which bound is the encoder's effective limit depends on the target's pointer width.
+///
+/// - **64-bit targets:** this is a panic guard, not the effective limit. Long before it,
+///   [`MAX_BOX_PAYLOAD_LEN`] applies: a top-level box carries a 32-bit size field, so a
+///   reservation whose box would reach 4 GiB is refused with [`Error::Unsupported`] — by
+///   [`content_provenance_reserved`], *before* the slot is allocated, with the same bound
+///   [`gamut_isobmff::write`] applies to every top-level box. On this framing the largest `len`
+///   that clears it is `4_294_967_250` and `4_294_967_251` is refused. Below that bound, a `len`
+///   the machine has no memory for still aborts in the allocator (the writer's copy of the payload
+///   into the output buffer needs twice the slot), which no fallible API here can intercept.
+/// - **32-bit targets** (`wasm32`, which `gamut-wasm` builds): `isize::MAX` is `2^31 - 1`, just
+///   under 2 GiB, so this ceiling *is* the effective limit. Every framed box it admits is below
+///   the 4 GiB bound, so the refusal a caller sees is this crate's [`Error::InvalidInput`] and
+///   the `Unsupported` never fires. Not measured on such a target; it follows from the two
+///   constants.
 const MAX_PAYLOAD_LEN: usize = isize::MAX as usize;
+
+/// The longest `ContentProvenanceBox` payload (everything after the user type) whose complete box
+/// still fits a top-level box's 32-bit size field: `u32::MAX` less the 8-byte size/type header and
+/// the 16-byte [`C2PA_UUID`] user type. This is the bound [`gamut_isobmff::write`] enforces on every
+/// top-level box (its 24-byte header allowance is exactly a `uuid` box's header); checking it here
+/// as well lets a reservation be refused before its zeros are allocated rather than after.
+const MAX_BOX_PAYLOAD_LEN: u64 = u32::MAX as u64 - 8 - C2PA_UUID.len() as u64;
 
 /// The `box_purpose` of a C2PA `uuid` box that carries a manifest store (C2PA 2.4 §A.5.3).
 ///
@@ -376,15 +389,31 @@ pub(crate) fn content_provenance_payload(purpose: C2paBoxPurpose, slot: &[u8]) -
 ///
 /// # Errors
 ///
-/// [`Error::InvalidInput`] if `len` is below [`MIN_SLOT_LEN`] — a slot too small to hold a JUMBF
-/// box header can never hold a manifest store — or if the framed payload would exceed
-/// [`MAX_PAYLOAD_LEN`]. Both are refused rather than documented as a precondition, because both
-/// unchecked outcomes were wrong in different ways: the sum wraps in the release profile every
-/// downstream consumer builds with, truncating the framing and emitting a well-formed file whose
-/// C2PA box no locator can find, and just below the wrap it panics inside `Vec` instead. A silent
-/// wrong answer about the range a signer binds, or a panic out of an infallible builder, are both
-/// outcomes this refuses to produce.
+/// As [`reserved_payload_len`], which decides every refusal before anything is allocated.
 pub(crate) fn content_provenance_reserved(purpose: C2paBoxPurpose, len: usize) -> Result<Vec<u8>> {
+    let total = reserved_payload_len(purpose, len)?;
+    let mut payload = content_provenance_framing(purpose, total);
+    payload.resize(total, 0);
+    Ok(payload)
+}
+
+/// The length of the payload [`content_provenance_reserved`] builds for a `len`-byte slot, or why
+/// it cannot be built — decided from the integers alone, so a refused reservation never allocates.
+///
+/// # Errors
+///
+/// - [`Error::InvalidInput`] if `len` is below [`MIN_SLOT_LEN`] — a slot too small to hold a JUMBF
+///   box header can never hold a manifest store — or if the framed payload would exceed
+///   [`MAX_PAYLOAD_LEN`]. Both are refused rather than documented as a precondition, because both
+///   unchecked outcomes were wrong in different ways: the sum wraps in the release profile every
+///   downstream consumer builds with, truncating the framing and emitting a well-formed file
+///   whose C2PA box no locator can find, and just below the wrap it panics inside `Vec` instead.
+///   A silent wrong answer about the range a signer binds, or a panic out of an infallible
+///   builder, are both outcomes this refuses to produce.
+/// - [`Error::Unsupported`] if the payload exceeds [`MAX_BOX_PAYLOAD_LEN`], so the box would reach
+///   4 GiB — the same refusal the container writer would make, made here before the slot's zeros
+///   are allocated rather than after.
+fn reserved_payload_len(purpose: C2paBoxPurpose, len: usize) -> Result<usize> {
     if len < MIN_SLOT_LEN {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
@@ -400,9 +429,13 @@ pub(crate) fn content_provenance_reserved(purpose: C2paBoxPurpose, len: usize) -
                 "AVIF: the reserved C2PA slot exceeds the largest ContentProvenanceBox that fits in memory",
             )
         })?;
-    let mut payload = content_provenance_framing(purpose, total);
-    payload.resize(total, 0);
-    Ok(payload)
+    if u64::try_from(total).map_or(true, |total| total > MAX_BOX_PAYLOAD_LEN) {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: the reserved C2PA slot puts the ContentProvenanceBox at or beyond 4 GiB",
+        ));
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -528,6 +561,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn a_reservation_whose_box_reaches_4_gib_is_refused_before_it_is_allocated() {
+        // A top-level box's size field is 32 bits, so the box (24-byte `uuid` header included)
+        // must stay under 4 GiB. The refusal is decided from the integers, before the slot's
+        // zeros exist: unchecked, a `len` just past the bound zero-filled ~4 GiB only for the
+        // container writer to refuse the box afterwards. The bound itself is reached through
+        // `reserved_payload_len`, so accepting it allocates nothing either.
+        for purpose in [
+            C2paBoxPurpose::Manifest,
+            C2paBoxPurpose::Original,
+            C2paBoxPurpose::Update,
+        ] {
+            let largest =
+                usize::try_from(MAX_BOX_PAYLOAD_LEN).expect("64-bit") - framing_len(purpose);
+            assert_eq!(
+                reserved_payload_len(purpose, largest).expect("the box fits exactly"),
+                largest + framing_len(purpose),
+                "{purpose:?}"
+            );
+            let err = reserved_payload_len(purpose, largest + 1)
+                .expect_err("one byte past the 32-bit box size");
+            assert_eq!(
+                err.kind(),
+                gamut_core::ErrorKind::Unsupported,
+                "{purpose:?}: {err}"
+            );
+            assert!(format!("{err}").contains("4 GiB"), "{purpose:?}: {err}");
+        }
+        // The documented figures, as literals on both sides: the constant is invisible to the
+        // mutation gate, so moving it fails here rather than shipping docs that misstate it.
+        assert!(reserved_payload_len(C2paBoxPurpose::Manifest, 4_294_967_250).is_ok());
+        let err = content_provenance_reserved(C2paBoxPurpose::Manifest, 4_294_967_251)
+            .expect_err("the first refused length, and refused without allocating");
+        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported, "{err}");
     }
 
     #[test]

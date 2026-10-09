@@ -110,9 +110,11 @@ its hard binding digests the finished file — so the encoder reserves rather th
 else in the file moves. `with_c2pa(bytes)` writes a store the caller has already computed over
 this exact output. A `len` that could never hold a store — below the 8-byte JUMBF box header, or
 beyond what a buffer holds — is refused by the encode that follows, since the builder itself cannot
-fail; a third refusal comes from the container writer, which cannot express a top-level box at or
-beyond 4 GiB. That minimum bounds the *reservation* alone: `with_c2pa(bytes)` carries a supplied
-slice verbatim. On read, `AvifContainer::c2pa_slot` reports the located slot's bytes, purpose and
+fail; on 64-bit targets a third refusal, `Error::Unsupported` and made before the slot is
+allocated, is a box at or beyond 4 GiB, which a top-level box's 32-bit size field cannot express
+(on 32-bit targets such as `wasm32` a buffer holds under 2 GiB, so the encode's other refusal is
+the limit and the 4 GiB one is never reached). That minimum bounds
+the *reservation* alone: `with_c2pa(bytes)` carries a supplied slice verbatim. On read, `AvifContainer::c2pa_slot` reports the located slot's bytes, purpose and
 range, and demands nothing of its length: a degenerate slot that is genuinely there is reported
 as found. The store is opaque here — gamut locates and carries, it never validates — and the range
 is for patching and byte accounting, not a hash exclusion range (BMFF assets bind by box path,

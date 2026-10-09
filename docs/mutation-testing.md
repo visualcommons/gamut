@@ -1,9 +1,10 @@
 # Mutation testing
 
-Normative for **how a mutation survey is invoked and what bounds it**. What counts as an
-acceptable survivor or a justified exclusion is `AGENTS.md`'s rule and
-`.cargo/mutants.toml`'s prose; this document is about running the thing without taking the
-machine down.
+Normative for **how a mutation survey is invoked, what bounds it, and how to read what it
+reports**. What counts as an acceptable survivor or a justified exclusion is `AGENTS.md`'s rule
+and `.cargo/mutants.toml`'s prose — this document points at them rather than restating them. It
+is about running the thing without taking the machine down, and about not misreading the result
+once it has run.
 
 ## The one entry point
 
@@ -94,6 +95,80 @@ point of failure, with a message naming the problem. That is the opposite of run
 memory, where the OOM killer picks a victim that may be cargo-mutants itself.
 
 `--dry-run` resolves and prints the whole invocation without running it.
+
+## Reading the result
+
+A run that prints no `MISSED` line is not necessarily a clean run.
+
+**Exit code 3 is a timeout, not a survivor.** A mutant that makes the suite hang is scored
+neither caught nor missed; the runner reports it as `TIMEOUT` and exits 3, and the `--in-diff`
+gate fails on it just as it does on a survivor. Read the counts before triaging: a shard that
+hits its own cap silently stops, so every mutant it never reached is unreported rather than
+caught. For what to do about one, see `AGENTS.md` — a hang is a survivor for policy purposes,
+and the loop that cannot make progress under mutation is usually a loop that should have been
+bounded by the data it walks. Rewriting it as one turns an unkillable `TIMEOUT` into an ordinary
+killable mutant, which is how `gamut-ifd`'s ledger walks lost theirs.
+
+**A verdict can depend on the runner, not only on the code.** A mutant that allocates without
+bound is ended by whichever limit it reaches first: under a tight per-process address-space cap
+the scenario aborts and scores `caught`, under a looser one it runs to the test timeout and
+scores `TIMEOUT`. `run.sh` derives that cap as budget ÷ jobs, so the same mutant can score
+differently on CI and locally — issue #613. Until that is pinned, state the budget beside any
+verdict you report for an allocation-heavy mutant.
+
+**What the tool mutates is a short list**, and everything outside it is invisible to the gate.
+Derive the list instead of trusting a written one — the hand-written version this replaces was
+taken from three crates and was two verbs short. Each rule below matches one verb's exact shape,
+and the `awk` tail is the point of the thing: a line no rule rewrote is printed as `UNCLASSIFIED`
+and the pipeline exits non-zero, so a verb this repository has never seen announces itself instead
+of being folded into the nearest bucket. A derivation that cannot detect a new class would be a
+hand-written list wearing a script — which is what it replaces.
+
+```bash
+cargo mutants --list --no-config | sed -E '
+  s/^.*:[0-9]+:[0-9]+: //
+  s/^replace match guard .* with (true|false) in .*/replace match guard/
+  s/^replace .* -> .* with .*/replace body/
+  s/^replace .* with \(\)$/replace body/
+  s/^replace [-+*\/%&|^<>=!]+ with [-+*\/%&|^<>=!]+( in .*)?$/replace operator/
+  s/^delete (match arm|field|!|-).*/delete \1/
+' | sort | uniq -c | sort -rn | awk '
+  /(replace (operator|body|match guard)|delete (match arm|field|!|-))$/ { print; next }
+  { print "UNCLASSIFIED: " $0 > "/dev/stderr"; bad = 1 }
+  END { exit bad }'
+```
+
+Over the whole tree (25 215 mutants, September 2026) that is exactly seven verbs, and it exits 0:
+16 082 binary or compound-assignment operator swaps, 7 212 function bodies replaced by a default
+value, 917 whole match arms deleted, 540 unary `-` deletions, 269 `!` deletions, 160 match guards
+forced to `true`/`false`, and 35 struct fields deleted from a struct literal. The operator rule
+carries an optional ` in <fn>` tail because 110 of those swaps sit outside any function body —
+`const`/`static` initialisers, and one array length in a signature — so the tool has no function
+name to attach and prints the swap bare; the catch-all this replaces absorbed them silently.
+Nothing else is generated, so the gate can never report:
+
+- a case that is **missing** from a `match` or a table — there is nothing there to mutate, and a
+  survey of nine absent spec-defined cases still scores zero missed;
+- a wrong **literal or `const` inside an expression or a guard operand** — `>= 3` is never
+  mutated into `>= 4`, and a guard's operands are not touched at all, so a test that asserts an
+  error message against its own copy of the literal is self-referential and pins nothing. Assert
+  the value, not the symbol. (A literal that *is* a function body is reachable, because bodies
+  are replaced wholesale: `replace SrgbIntent::code -> u8 with 0` is that mutant.)
+- one **alternative of an or-pattern** — `delete match arm A(v) | B(v)` removes both at once, so
+  a wrong alternative stays green. Assert each alternative separately rather than looping.
+
+**A green mutant can also mean the expression is unobservable.** A `Vec` capacity hint, a
+discarded return value, arithmetic whose operands cannot disagree at the sizes the suite builds:
+none of these can be killed by any test, because nothing depends on them. That is a reason to
+delete the expression, not to test harder — and where deleting it costs something (an extra
+allocation, say), record the cost where the code is.
+
+**Verify a hand-applied mutant the way the tool does.** Commit first, so `git diff` shows exactly
+the mutation and nothing else; apply the expression verbatim from the `--list` line; run the whole
+package suite (`test_workspace = false` — the workspace suite is not what scored it); and re-read
+the file to confirm the edit landed before believing the verdict. A test asserting only `is_err()`
+cannot kill a guard-removal mutant when a later check rejects the same input for a different
+reason — assert the message.
 
 ## Tight debug loops
 
