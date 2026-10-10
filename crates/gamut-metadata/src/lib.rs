@@ -119,6 +119,59 @@
 //! Deferred deliberately: parsing the JUMBF interior, and any manifest validation, signing, or
 //! ingredient authoring — all of which need a trust model this facade does not have.
 //!
+//! # Provenance: embedded, remote, both, or none
+//!
+//! An embedded store is not the only way a file carries provenance. C2PA 2.4 §11.5 recommends that
+//! a claim generator whose manifest lives *externally* add a `dcterms:provenance` URL to the asset's
+//! XMP, and §15.5.3.1 lists it among the places a validator looks when nothing is embedded. A caller
+//! asking "does this image have Content Credentials?" therefore needs more than `c2pa.is_some()`;
+//! [`Metadata::provenance`] answers with a [`ProvenanceState`] that keeps the two sources apart —
+//! [`None`](ProvenanceState::None), [`Remote`](ProvenanceState::Remote),
+//! [`Embedded`](ProvenanceState::Embedded), or [`EmbeddedAndRemote`](ProvenanceState::EmbeddedAndRemote)
+//! — because the key is reserved for external manifests (§11.5) yet a file may carry both, and the
+//! lens reports what the file carries. The URL is reported as found; **gamut never
+//! resolves it**, and the HTTP `Link` header route (§15.5.3.2) is out of scope for a file-format
+//! library — see the [`provenance`] module for both.
+//!
+//! ```
+//! use gamut_metadata::{Metadata, MetadataBlock, ProvenanceState};
+//! use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
+//!
+//! // A file with no embedded manifest store, whose XMP points at an external one.
+//! let mut graph = XmpMeta::new();
+//! graph.set_text(
+//!     WellKnownNs::DcTerms.uri(),
+//!     "provenance",
+//!     "https://example.com/manifests/photo.c2pa",
+//! );
+//! let packet = graph.to_packet();
+//!
+//! let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(&packet)])?;
+//! assert_eq!(meta.c2pa, None); // nothing embedded...
+//! assert_eq!(
+//!     meta.provenance().remote_url(), // ...yet not "no provenance"
+//!     Some("https://example.com/manifests/photo.c2pa")
+//! );
+//! assert!(matches!(meta.provenance(), ProvenanceState::Remote(_)));
+//! # Ok::<(), gamut_metadata::MetadataError>(())
+//! ```
+//!
+//! # Which formats carry what
+//!
+//! The facade never parses a container, so it cannot say whether a *file* has metadata — but it can
+//! say whether gamut's crate for a format can locate or write a given carrier at all, before a
+//! caller pulls that crate in. [`capability::supports`] answers per (format × carrier × direction),
+//! and [`capability::typed_wiring`] says whether the format crate also exposes these typed models
+//! directly (behind its `metadata` feature) rather than as raw bytes:
+//!
+//! ```
+//! use gamut_metadata::capability::{Carrier, Direction, Format, supports, typed_wiring};
+//!
+//! assert!(supports(Format::Jpeg, Carrier::Exif, Direction::Write));
+//! assert!(!supports(Format::Heic, Carrier::Exif, Direction::Write)); // decode-only crate
+//! assert!(typed_wiring(Format::Jpeg));
+//! ```
+//!
 //! # Quick start
 //!
 //! ```
@@ -141,11 +194,13 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod capability;
 pub mod embed;
 pub mod error;
 pub mod extension;
 pub mod extract;
 pub mod metadata;
+pub mod provenance;
 pub mod source;
 
 // Re-export the per-format crates so consumers reach everything through one entry point.
@@ -161,4 +216,5 @@ pub use gamut_iptc as iptc;
 pub use gamut_iptc::{ConflictPolicy, FieldConflict};
 pub use gamut_xmp as xmp;
 pub use metadata::Metadata;
+pub use provenance::ProvenanceState;
 pub use source::MetadataBlock;

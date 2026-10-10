@@ -20,15 +20,16 @@ Dependency edges (a crate depends on those to its right):
   `cmm`, `codec-abi`, `all`); `default = []`. `primitives` re-exports shared `color`/`dsp`/`bitstream`;
   `isobmff`/`metadata`/`tonemap`/`codec-abi` re-export their respective primitive crates;
   `all` includes all of these.
-- **gamut-core** — `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`, plus the
+- **gamut-core** — `EncodeImage`/`DecodeImage` traits, image buffers, `Dimensions`, `Error`, plus the
   format-agnostic `convert` module: the one place any `Pixel` layout converts to another
   (grey↔RGB, alpha add/drop/composite, 8↔16-bit), lossless by default with loss opted into per
   decoder via a `ConvertPolicy`. Format crates decode to what the file carries and delegate the
-  layout change there rather than hand-rolling it. No internal deps; everything else depends on it.
+  layout change there rather than hand-rolling it. No internal deps of its own; each entry below
+  states its own edges, and most — not all — of them include `gamut-core`.
 - **gamut-color** / **gamut-dsp** / **gamut-bitstream** — shared primitives. ← core.
-- **gamut-tonemap** — scalar tone-mapping curves (`ToneCurve` + Reinhard/ACES/Hable/Drago)
-  for HDR→SDR pipelines, between `gamut-color`'s transfer functions and the SDR re-encode.
-  ← core.
+- **gamut-tonemap** — scalar tone-mapping curves for HDR→SDR pipelines: the `ToneCurve` trait
+  over eight operators (Linear/Clamp/Exposure/Reinhard/ReinhardExtended/ACES/Hable/Drago),
+  between `gamut-color`'s transfer functions and the SDR re-encode. ← core.
 - **gamut-codec-abi** — shared codestream-backend seam: `repr(C)` vtables
   (`DecoderVTable`/`EncoderVTable` + `StreamConfig`/`EncodeConfig`/`ImageDesc`) and their
   object-safe Rust twin traits, plus the registry fallback contract by which a foreign
@@ -45,7 +46,7 @@ Dependency edges (a crate depends on those to its right):
   first (and supplies encode on wasm32), and `encode`/`decode` features mean "include the
   built-in tail", not "enable the direction"; container features (ISOBMFF/Exif/XMP/jbrd)
   stay pinned to the built-in path by a host-side veto. ← core, codec-abi, gamut-jxl-sys
-  (encode, non-wasm), external `jxl`.
+  (encode, non-wasm), external `jxl`, metadata (optional, `metadata` feature).
 - **gamut-jxl-sys** — declarations-only `-sys` crate statically building/linking
   **libjxl 0.12.0** via BSD-3-Clause `jpegxl-src` (`links = "jxl"`); native backend for
   gamut-jxl's encoder and its libjxl decode-oracle tests. No gamut deps (C/FFI only);
@@ -53,7 +54,8 @@ Dependency edges (a crate depends on those to its right):
 - **gamut-jpeg** — JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec: baseline sequential DCT
   Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF; opt-in jpegli-style XYB colour mode
   with a static vendored ICC profile), sequential/progressive decoder and progressive encoder
-  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, color, dsp.
+  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, color, dsp,
+  metadata (optional, `metadata` feature).
 - **gamut-avif** ← av1, isobmff, core, color, codec-abi (pluggable `Av1StillEncoder`
   codestream seam; `gamut-av1` is the implicit software tail). **gamut-webp** ← +riff; like
   gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw `MetadataBlock`-ready
@@ -62,9 +64,11 @@ Dependency edges (a crate depends on those to its right):
   (every input byte maps to a box, appended motion-photo stream, or explicit trailer), typed
   `hvcC`/NAL layer, pluggable `HevcDecoder` hook for platform HEVC decoders (HEVC bitstream
   decode itself is out of scope here). Differential oracle: libheif+libde265 (+kvazaar
-  fixture generation), dev-only. ← isobmff, core, color.
+  fixture generation), dev-only. ← isobmff, core, color, metadata (optional, `metadata`
+  feature).
 - **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png;
-  deliberately encoder-only — workspace decoders inflate via `miniz_oxide`. ← core.
+  deliberately encoder-only — workspace decoders inflate via `miniz_oxide`. ← nothing: no dependency
+  at all, not even `gamut-core` (`src/lib.rs:6`).
 - **gamut-png** — PNG codec (3rd edition, W3C): space-efficient encoder and spec-compliant
   decoder — all colour types/bit depths, Adam7 *decoding*, all filters, decode limits for
   hostile input, ancillary metadata surfaced as raw `MetadataBlock`-ready payloads
@@ -74,7 +78,7 @@ Dependency edges (a crate depends on those to its right):
 - **gamut-ifd** — TIFF/IFD container core (byte order, field types, IFD read/write); a
   low-level container primitive (sibling to bitstream), shared by `gamut-tiff` and EXIF
   metadata. ← core. Optional `bigtiff` feature adds 64-bit BigTIFF. Per-format metadata
-  crates (**gamut-exif** ← ifd; **gamut-icc**; **gamut-xmp**; **gamut-iptc** ← xmp) and the
+  crates (**gamut-exif** ← ifd; **gamut-icc** ← color; **gamut-xmp**; **gamut-iptc** ← xmp) and the
   **gamut-metadata** facade (← exif/xmp/icc/iptc) layer on top under the `metadata` feature;
   format crates consume the facade for embedded metadata.
 - **gamut-cmm** — ICC colour management module (epic #323): the transform engine — a
@@ -103,6 +107,45 @@ Dependency edges (a crate depends on those to its right):
 - Correctness: implement the specification claimed; test thoroughly against the crate's
   oracle. Mutation testing should pass with only non-redundant, high-value tests;
   exclusions need strictly strong justification.
+- Mutation survivors: **remove the mutant before you exclude it.** A survivor is first a
+  question about the code, not about the suite — rewrite so the operator has no equivalent twin
+  (disjoint bit lanes `a << n | b` become arithmetic; a `bool` is decided where the question is
+  asked; a guard the constructor already makes is deleted; two match arms returning the same
+  thing collapse into one), *then* write the test that kills what is left. A mutant that hangs
+  the suite is a survivor too — it can be scored only as a TIMEOUT — and a loop bounded by the
+  data it walks instead of by its own arithmetic does not produce one. An exclusion is the last
+  resort and must argue that **no** input can distinguish the mutant, or that the only thing it
+  moves is a choice the format leaves free. Exclusions live only in `.cargo/mutants.toml`, one
+  regex per *claim* — several generated mutants only when they are one statement or one site's
+  operator class and a single argument covers them all, and the comment says so — anchored so it
+  cannot also cover a killable sibling (`file:line:column` for an operator mutation, the function
+  signature for a whole-body one, and that file's header states which trades what), never as a
+  `#[mutants::skip]` attribute in source: one reviewable list beats a scatter, and a glob may
+  exclude a path but never a live code path. Removing a mutant structurally is not free either:
+  the rewrite takes the site's killable siblings with it, so the code is afterwards covered by
+  fewer mutants — say so where the rewrite lands, and never let a shrinking survey read as a
+  strengthening one. Before paying to kill a survivor, ask whether the mutated expression is
+  observable at all — a capacity hint or a discarded return value is not — and if you buy the
+  signal anyway, record what it cost.
+- **Never narrow a contract to make a mutant assertable.** The test is whether any conformant
+  input can tell the old bound from the new. If none can — the spec's own clause puts every
+  conformant value inside the tighter bound — then the loose bound was arbitrary and tightening
+  it is a correction, which cites the clause that permits it. If one can, the bound is the
+  deliverable and the gate is only the instrument: reach the boundary with a fixture or an
+  internal seam, or take the exclusion and write the argument down. A limit lowered to bring a
+  boundary within the suite's reach is how an encoder ends up emitting a file its own reader
+  refuses. Conformance is the floor of that test, not the whole of it: a **reader**'s loose bound
+  is exactly what carries the non-conformant files the world actually holds, so narrowing one
+  additionally requires naming what it stops accepting, in the same place as the clause — the
+  trade is then visible rather than implied.
+- The gate is blind to everything it cannot mutate: a match arm that is *missing*, a literal or
+  `const` **inside an expression or a guard operand** (a body that is just a literal is replaced
+  wholesale, so that one is reachable), and a single alternative of an or-pattern (only whole
+  arms are deleted, so assert each alternative separately). Derive that vocabulary rather than
+  trusting a written list of it — `docs/mutation-testing.md` carries the one-line command and
+  what it returns today. Completeness against the spec is still the spec's job. Run surveys only
+  through the memory-capped `mise run mutants`; `docs/mutation-testing.md` has the rest,
+  including that exit code 3 is a timeout, not a clean run.
 - Test scope: **a test names one thing and fails for one reason.** Minimise its *reach* — the
   modules a defect in which can fail it — and name it for that reach. Placement is mechanical, not
   taste: if the assertion reads a non-`pub` item it goes inline in `#[cfg(test)] mod tests` beside
@@ -242,6 +285,25 @@ repo — nothing here sets file modes — so do not work around it by editing bu
   **not** a supertrait of `Decoder`/`Encoder`; a host bounds `Send` at the point it inserts a
   backend, keeping single-threaded backends usable. Stub codecs `gamut-av2`/`gamut-vvc`
   adopt this convention when implemented.
+
+## Issue triage and ordering
+
+- Work moves **up** the dependency graph, never across it. When a defect or missing capability
+  lives in shared logic, fix it in the crate that owns that logic first, and upgrade the dependents
+  afterwards against the fixed API. Never hand-roll a local workaround in a dependent while the
+  owner is unfixed: the workaround becomes a second copy the owner's fix will not reach. Take
+  "lower" from `cargo metadata` (normal and build edges), not from the prose edge list above.
+- This holds whether or not the owning crate is 1.0 or "stable". Every crate is versioned
+  independently, so when a change genuinely improves the shared API, take the **breaking** SemVer
+  bump and migrate the dependents. Preserving a worse contract is not a reason.
+- Record the order on GitHub, not in prose. File the lower-crate issue and link it natively as
+  *blocked by* on every dependent issue. Do not start an issue while any of its blockers is open.
+  Every issue is a sub-issue of exactly one theme epic: attach it when you file it.
+- A pull request writes `Closes #N` only for an issue it delivers in full, and `Part of #N`
+  otherwise. A partial delivery files its remainder as a new issue and names that issue in a
+  comment on the original, so the thread alone says what is left.
+- A correction or supersession goes into the issue it corrects (an edit or a comment), and the
+  correcting issue is closed. It never stays open beside the issue it corrects.
 
 ## Versioning
 

@@ -195,15 +195,18 @@ opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
   the store at `align_word(len)`, patching only the entry's `count` and value/offset words. The
   alternative — a `WriteOptions` directive placing a tag's value at the end of the *stream* —
   would still sit before the codec's pixel data, which is not "the end of the file".
-- **The exclusion set is two ranges** (§18.5.5): `C2paExclusions { store, count_field }`, the
-  count field being the offset-width word at entry offset 4 (4 bytes classic, 8 BigTIFF). They
-  are disjoint by construction, and reported in the crate's own `Range` (u64 start/len) — the
+- **The exclusion set is two ranges** (§18.5.5): `C2paExclusions::store()` and
+  `count_field()`, the count field being the offset-width word at entry offset 4 (4 bytes
+  classic, 8 BigTIFF). They are disjoint — every constructor checks it and the fields are
+  private, so a value cannot be edited out of the invariant — and reported in the crate's own `Range` (u64 start/len) — the
   same measure the segment map uses — rather than `core::ops::Range<usize>`.
 - **Read side.** `locate` walks the chain to its last directory over any `ReadAt` source and
   reports the ranges for an out-of-line *or* inline store; a tag-52545 entry of another type, or
   one in a non-last directory, is "no store" (never an error), so a decoder can still surface
   it as an unmodelled field. A store declared past the end of the file is `InvalidInput`, the
-  verdict `read` gives the same file.
+  verdict `read` gives the same file; so is one whose offset points it back over its own count
+  field — a hostile file's ranges go through the same validation as a host's hand-built set
+  (`C2paExclusions::new`) rather than being returned overlapping.
 - **Endianness.** §A.3.6 says the header's `ByteOrder` "does not govern the endianness of the
   embedded C2PA Manifest Store": the bytes cross verbatim in both directions, pinned on `MM`
   fixtures whose store is asymmetric.

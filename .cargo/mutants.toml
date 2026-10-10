@@ -77,12 +77,44 @@ gitignore = true
 # full DWARF, once per mutant.
 profile = "mutants"
 
-# Provably-equivalent mutants: ones that cannot change observable behaviour, so no test can kill
-# them. They are excluded here (with the reason) rather than papered over with contrived tests.
-# Each regex is scoped to one function + operator so it can only match the intended mutant — never
-# a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
-# an entry.
+# Mutants that stay out of the survey, in two labelled groups. Which group an entry belongs in is
+# the claim its comment has to argue, and the two claims are different things:
+#
+#   1. UNKILLABLE — no test can distinguish the mutant. Either it cannot change observable
+#      behaviour at all (provably equivalent), or it moves only a choice the format leaves free, so
+#      the crate emits a different but equally valid encoding that every round-trip and oracle test
+#      accepts. The second kind is NOT equivalence: an entry claiming it says so, names the encoder
+#      decision it moves, and cites the issue that owns the heuristic.
+#   2. NON-TERMINATING — the mutant IS detected (the suite does not pass) but only ever as a
+#      TIMEOUT, because the run never produces an output a test could assert on. Excluded so the
+#      gate reports the same verdict on every runner.
+#
+# An exclusion is the last resort either way: `AGENTS.md` requires trying to remove the mutant
+# structurally first, and for group 2 that usually means bounding the loop by the data it walks,
+# which turns the hang into an ordinary killable mutant. Note what that costs: the rewrite takes the
+# site's killable siblings with it, so the code is afterwards covered by fewer mutants than before.
+#
+# One entry per *claim*, not per generated mutant. An entry may match several mutants only when they
+# are the same statement (or the same operator class at one site) and one argument covers all of
+# them — `decode_image_data`'s three `i += 1`, `build_optimal_table`'s `-= -> +=`/`/=` — and its
+# comment says so. It must never reach a mutant nobody argued for, which is what the anchor is for,
+# and the two anchors trade against each other:
+#
+#   * `file:line:column` pins one mutant exactly, so a killable sibling of the same shape in the
+#     same function stays in the survey. It silently stops matching the moment code above it moves,
+#     and a suppressed timeout then returns as a red gate at an unrelated commit. Use it when such a
+#     sibling exists — most operator mutations.
+#   * the function signature survives movement but covers every mutant the signature admits, so it
+#     can also cover one nobody argued for. Use it when the name is unique workspace-wide and the
+#     claim is about a whole-body replacement, where naming the return type is itself the anchor
+#     (`reference_changes -> (usize, usize)`), leaving every operator mutation inside the function
+#     in the survey.
+#
+# Keep this list short and justified; a gap is *not* an excuse for an entry.
 exclude_re = [
+    # -----------------------------------------------------------------------------------------
+    # GROUP 1 — UNKILLABLE: provably equivalent, or a correctness-preserving free choice.
+    # -----------------------------------------------------------------------------------------
     # gamut-png PngPalette::is_empty -- equivalent by the type's construction invariant.
     # `with_transparency` is the only constructor (`new` delegates to it) and it refuses an empty
     # `rgb`, so `self.rgb.is_empty()` is invariantly false for every value that can exist. A mutant
@@ -109,6 +141,17 @@ exclude_re = [
     # set-equality test missed it, but the canonical form is not. `subtract_is_the_set_difference`
     # kills it and shrinks to `reads = [{2747, 103}], claims = [{2748, 0}]`.
     'replace match guard r\.start <= last\.end\(\) with false in ReadLedger::subtract',
+    # gamut-ifd `ReadLedger::subtract` — the `take_while` that bounds the run of claims touching a
+    # span, `r.start < end`, relaxed to `<=`. `merged` is coalesced and its zero-length claims are
+    # filtered out, so at most one claim can begin exactly at a span's end, and that claim
+    # contributes nothing the tail would not: the loop pushes the same `[pos, end)` gap for it that
+    # the trailing push would have pushed, then sets `pos = r.end().min(end)`, which is `end`, after
+    # which the trailing push emits nothing. The output is byte-identical, so no input distinguishes
+    # the mutant. Verified as well as argued: over every ledger/claim pair drawn from a 10-cell
+    # universe (1 048 576 pairs) the mutant's outputs fingerprint identically to the original's.
+    # Line/column-anchored, not named: the `==` and `>` twins of this very comparison shorten the
+    # run and ARE caught, as are every other comparison in the function.
+    'track\.rs:125:63: replace < with <= in ReadLedger::subtract$',
     # gamut-dng rewrite::write — the pin-fallback match guard. With `pin == None` the guard is
     # the only difference between "return the error" and "retry the identical un-pinned write
     # and return its (identical) error": `write_with` is deterministic in its inputs, so forcing
@@ -212,23 +255,6 @@ exclude_re = [
     # occupies and `|` == `^`. Provably equivalent, as above. (`read_golomb`'s own mutants are
     # killed by the golomb tests; only these two accumulator ORs are unkillable.)
     "symbol\\.rs:.*: replace \\| with \\^ in SymbolDecoder<.a>::read_(f|literal)$",
-    # gamut-bitstream `BitReader::f64` — a non-terminating mutant, not a behavioural escape.
-    # `while left > 0` over a `u32` mutated to `>= 0` is always true; `take` becomes
-    # `0.min(32) == 0`, `f(0)` returns 0 and `left -= 0` never advances, so the loop spins and the
-    # scenario is reportable only as a TIMEOUT. Line- and column-anchored so it matches exactly
-    # this hang and leaves the sibling `n > 64` guard mutants — which DO terminate and ARE caught
-    # by `f_rejects_oversized_and_truncated_fields` — in the survey. Same shape as the
-    # gamut-jpeg `BitReader`/`Reader` hang exclusions below.
-    "bitreader\\.rs:125:20: replace > with >= in BitReader<.a>::f64$",
-    # gamut-bitstream `SymbolDecoder::read_golomb` — the other non-terminating mutant.
-    # `length += 1` mutated to `*= 1` pins `length` at 0, so `length < max_bits` never stops the
-    # unary-prefix loop; against a stream that never terminates the prefix (the all-zero buffer
-    # `read_golomb_caps_the_prefix_even_when_the_stream_never_terminates_it` feeds it, and the
-    # zero padding past the end keeps `read_bool` returning false) the loop spins. It is *detected*
-    # — the suite does not pass — but only ever as a TIMEOUT, at 60s a scenario. Line- and
-    # column-anchored: the `-=` sibling on the same line underflows `length` into a panic and IS
-    # caught, as are every other mutant in this function now that the golomb tests exist.
-    "symbol\\.rs:430:20: replace \\+= with \\*= in SymbolDecoder<.a>::read_golomb$",
     # gamut-tiff `within_size_limit` is the shared *allocation* guard behind `stored_total`
     # (decode_page_samples) and `tile_size` (decode_tiles): relaxing `>` to `==`/`>=` only changes
     # whether a 64 MiB+ buffer is reserved before the (still inevitable) decode error — the malformed
@@ -571,46 +597,6 @@ exclude_re = [
     # than matching every comparison in the function.
     'replace && with \|\| in canonical_codes',
     'replace > with >= in canonical_codes',
-    # gamut-webp `BoolDecoder::get_bool` renormalisation: `self.range *= 2` under
-    # `while self.range < 128`. Reversed to `/= 2` the range shrinks toward zero, never reaches
-    # 128, and the loop never returns -- reportable only as a TIMEOUT.
-    #
-    # The statement is written `*= 2` rather than `<<= 1` precisely so this entry can name it. The
-    # `self.value <<= 1` on the line above is the same operator applied to a different field, and
-    # reversing *that* one is caught -- so a `<<=`-shaped exclusion would have hidden real
-    # coverage, and a line-anchored one stops matching as soon as anything above it moves.
-    'replace \*= with /= in BoolDecoder<.a>::get_bool',
-    # gamut-webp hang-on-mutation timeouts: two cursor advances that stop advancing.
-    #
-    # `decode_image_data` advances `i` with `i += 1` in three branches of one `while i < n` loop
-    # -- the literal, the copy and the cache paths. Mutated to `*= 1` each pins `i` (it is >= 1 by
-    # the time any of them runs a second time), so the loop never terminates and cargo-mutants can
-    # only ever report TIMEOUT. All three are the same statement in the same loop, which is why one
-    # entry covers them. The `-=` siblings are deliberately NOT excluded: they underflow at `i == 0`
-    # and panic, so they terminate and are caught.
-    #
-    # `code_length_count` counts down with `count -= 1` under `while count > 4 && ...`. Mutated to
-    # `/= 1` the count never changes and the loop spins. (`+=` grows it out of the array's range and
-    # panics, so that one is caught and stays.)
-    'replace \+= with \*= in decode_image_data',
-    # `tokenize` is the encoder's mirror of that loop: three `i += 1` in one `while i < n`, pinned
-    # the same way by `*= 1`. Its `-=` siblings terminate too -- they underflow and panic -- so they
-    # stay in the survey, and one of them is what caught this reasoning being checked rather than
-    # assumed.
-    'replace \+= with \*= in tokenize',
-    # `build_length_limited_lengths` raises the histogram's floor and rebuilds until the tree fits
-    # `max_len`. `if max_depth <= max_len { return }` is the loop's only exit, so reversing it to
-    # `>` means the loop returns exactly when it should keep going and spins when it should stop:
-    # once the tree fits, `count_min` saturates and every further pass produces the same
-    # already-flat tree. Non-terminating, reportable only as a TIMEOUT. It is the sole `<=` in the
-    # function, so this names it unambiguously.
-    'replace <= with > in build_length_limited_lengths',
-    # `BoolDecoder::get_tree_start` descends a tree until it reaches a leaf, which `i <= 0` marks.
-    # That test is the descent's only exit, so reversing it keeps the loop going at every leaf --
-    # confirmed by applying it against a 120s cap, which the suite exceeds rather than failing. It
-    # is the sole `<=` in the function.
-    "replace <= with > in BoolDecoder<.a>::get_tree_start",
-    'replace -= with /= in code_length_count',
     # gamut-webp `vp8l::prefix::code_length_count`: the trim's floor, `count > 4`, relaxed to
     # `>= 4`. Reaching 3 would underflow the caller's `- 4` on a `usize` and panic, but the loop
     # can never get there.
@@ -667,69 +653,6 @@ exclude_re = [
     # equivalent. The clamp itself stays, per the never-panic-on-untrusted-input policy.
     'replace - with \+ in DecodedImage::sample',
     'replace - with / in DecodedImage::sample',
-    # gamut-jpeg entropy-reader hang-on-mutation timeouts (unkillable by any finite test). Each
-    # mutation turns an inherently-terminating advance loop into a non-terminating one: no test can
-    # observe a decoded result because execution never returns, so cargo-mutants can only ever report
-    # a TIMEOUT (exit 3, gate-failing) — never a catchable behavioural escape. Line/column-anchored so
-    # each regex matches EXACTLY its hang mutant and leaves the sibling arithmetic mutants (which DO
-    # terminate and ARE caught) in the survey. These are the byte/bit cursor's own accounting; the
-    # correct advance is exercised end-to-end by the decode battery.
-    #
-    # BitReader::fetch — the destuffing byte cursor. `self.pos += 1` (97, 108) mutated to `*= 1`
-    # leaves `pos` pinned (pos ≥ 1 is invariant once decoding), so `end_marker`/`take_restart`'s
-    # `loop { fetch }` re-reads the same byte forever; `-=` (97, 103, 108) walks `pos` backwards and
-    # never reaches the terminating marker/EOF. (`103 *=` scales `pos += 2` forward, so it DOES reach
-    # EOF and is caught — deliberately not excluded here.)
-    "scan\\.rs:108:26: replace \\+= with (\\*|-)= in BitReader",
-    "scan\\.rs:114:30: replace \\+= with -= in BitReader",
-    "scan\\.rs:119:30: replace \\+= with (\\*|-)= in BitReader",
-    # BitReader::ensure — `self.bit_count += 8` in the *marker-padding* arm (134) mutated to `*= 8`
-    # keeps the count at 0 (0·8 = 0) while `fetch` returns `Marker` without advancing, so
-    # `while bit_count < n` spins forever. (The data arm at 130 advances `pos` to EOF and terminates,
-    # and `134 -=` underflows into an error — both caught, both left in the survey.)
-    "scan\\.rs:145:36: replace \\+= with \\*= in BitReader",
-    # BitReader::read_bits — `self.bit_count -= n` mutated to `+= n` makes the buffered-bit count
-    # grow without bound so `ensure` never refills and the reader never advances to a marker: the
-    # decode does not terminate. (`read_bit`'s own `-= 1` at 157 is a distinct, caught mutant.)
-    "replace -= with \\+= in BitReader<'a>::read_bits",
-    # decode_symbol / decode_block stubbed to a constant consume no entropy bits; for a Y=0 (DNL)
-    # frame the row count is unknown and the MCU loop runs until `at_data_end` — which never fires
-    # because nothing is ever consumed — so the loop never terminates. (For a Y-known frame the same
-    # stub yields wrong pixels and is caught, but the Y=0 tests hang first, forcing a TIMEOUT.)
-    'replace decode_symbol -> Result<u8> with Ok\(0\)',
-    "replace Ctx<'_>::decode_block -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
-    # syntax::Reader::u8 — the segment cursor. `self.pos += 1` mutated to `*= 1` pins `pos`, so the
-    # `while r.remaining() > 0` table loops in parse_dqt/parse_dht never make progress and never
-    # terminate. (The `-=` sibling walks `pos` backwards into an out-of-range read that errors, and is
-    # caught — only the non-terminating `*=` is excluded.)
-    "replace \\+= with \\*= in Reader<'a>::u8",
-    # gamut-jpeg progressive AC refinement (decode_ac_refine) — the coefficient cursor `k += 1` in the
-    # do-while advance loop (893) and the EOB-run correction-bit tail loop (917). Mutated to `*= 1` it
-    # pins `k` (k ≥ Ss ≥ 1, so k·1 = k) and the `while k <= se` loop spins forever — non-terminating,
-    # reportable only as a TIMEOUT, never a catchable behavioural escape. Line/col-anchored so each
-    # matches exactly its hang mutant; the `-=` siblings walk `k` backwards into a usize underflow that
-    # panics and ARE caught. Same shape as the sequential BitReader/Reader hang exclusions above.
-    # gamut-tiff CCITT G4 `reference_changes` and LZW `BitReader::read`, stubbed to a constant.
-    # Both are cursor-advance functions whose callers loop until the cursor passes a bound, so a
-    # constant return removes the only thing that ends the loop -- non-terminating, and reportable
-    # only as a TIMEOUT (exit 3, gate-failing), never as a catchable behavioural escape. Same shape
-    # and justification as the gamut-jpeg entropy-reader hangs above.
-    #
-    # `reference_changes` returns b1/b2, the changing elements strictly right of a0. Every one of
-    # the four constants puts b2 at or behind a0, so `encode_row` takes pass mode, assigns
-    # `a0 = b2`, and finds the same b2 on the next pass, forever. `BitReader::read` stubbed to
-    # `Some(0)`/`Some(1)` returns a code that is never EOI, so `decode`'s loop never reaches its
-    # terminating code and the string table grows without bound.
-    #
-    # Anchored on the function signature rather than on line:col, unlike the jpeg entries above: a
-    # line-anchored regex silently stops matching when code above it moves, which turns a suppressed
-    # timeout back into a red gate at an unrelated moment. Both names are unique workspace-wide, and
-    # the anchors name the return type, so only the whole-body replacements match -- every operator
-    # mutation inside either function stays in the survey, and this branch kills several of them.
-    'replace reference_changes -> \(usize, usize\) with \((0|1), (0|1)\)',
-    "replace BitReader<'_>::read -> Option<u32> with Some\\((0|1)\\)",
-    "scan\\.rs:893:19: replace \\+= with \\*= in decode_ac_refine",
-    "scan\\.rs:917:15: replace \\+= with \\*= in decode_ac_refine",
     # gamut-jpeg `refine` (§G.1.2.3 correction) sign test `if coeff > 0`: `refine` is only ever called
     # on a NON-zero coefficient — both call sites guard `block[nat] != 0` before calling it — so the
     # only value at which `>` and `>=` disagree (coeff == 0) is unreachable, making `> -> >=` provably
@@ -744,28 +667,19 @@ exclude_re = [
     # is reached only when `abs == 1`, i.e. `|coeff| >> al == 1`, which forces `coeff != 0`; `coeff > 0`
     # and `coeff >= 0` therefore agree on every value that reaches it. (`> -> <`/`> -> ==` flip the sign
     # for real inputs and ARE caught by `ac_refine_sign_and_eob_fold_round_trip`'s negative coefficient.)
-    # gamut-jpeg `build_optimal_table` (Annex K.2 length limiting) — the borrow-length search
-    # `let mut j = i - 2; while bits[j] == 0 { j -= 1; }` walks down to the longest shorter length that
-    # still has a code. Mutating the `j -= 1` step turns this terminating descent into a non-terminating
-    # loop: `-= -> /=` pins `j` (`j / 1 == j`) so `while bits[j] == 0` spins forever once it enters, and
-    # `-= -> +=` walks `j` upward into the length whose redistribution nets zero change to `bits[i]`, so
-    # the enclosing `while bits[i] > 0` never makes progress. Neither can be observed as a decoded
-    # result (execution never returns) — cargo-mutants can only ever report a TIMEOUT, never a catchable
-    # behavioural escape. Line/column-anchored so each matches EXACTLY its hang mutant; the redistribution
-    # arithmetic (`bits[i] -= 2`, `bits[i-1] += 1`, …) and the `i - 2` start ARE caught by the exact-BITS
-    # golden in `optimal_skewed_frequencies_force_16_bit_limiting`. Same shape as the scan.rs cursor hangs.
-    'huffman\.rs:365:19: replace -= with (\+|/)= in build_optimal_table',
-    # gamut-jpeg `rd` (issue #333) — non-terminating and provably-equivalent mutants, line/column
-    # anchored so each matches EXACTLY its mutant and leaves every sibling in the survey.
+    'progressive\.rs:493:41: replace > with >=',
+    # 459:55 `.find(|&k| (block[ZIGZAG[k]].abs() >> al) == 1)` computes `eob_pos`, the last coefficient
+    # that becomes newly-nonzero this scan. It gates ONLY whether a >15 run of zero-history coefficients
+    # ending at an *already-nonzero* coefficient is coded as a ZRL or folded into the EOB run — a free
+    # choice in EOB/ZRL segmentation (§G.1.2.3): both are valid codings of the identical coefficients,
+    # and the decoder reconstructs the same values from either, so no decode-parity test can distinguish
+    # `== 1` from `!= 1`. (The `abs == 0` and `abs > 1` branch tests, which DO change coefficients, are
+    # caught — this line:col anchor leaves them in the survey.)
+    'progressive\.rs:459:55: replace == with !=',
+    # gamut-jpeg `rd` (issue #333) — the module's provably-equivalent mutants, line/column anchored
+    # so each matches EXACTLY its mutant and leaves every sibling in the survey. The same module's
+    # non-terminating mutants make the other claim and sit in GROUP 2, not here.
     #
-    # isqrt's ascending settle `while (r + 1) * (r + 1) <= n { r += 1 }`: `* -> /` turns the
-    # probe into `(r+1)/(r+1) = 1 <= n`, true for every n >= 1, and `+= -> *=` pins `r` at its
-    # seed (`r * 1 == r`) — in both the loop never terminates, so cargo-mutants can only report a
-    # TIMEOUT, never a catchable behavioural escape (the same shape as the scan.rs cursor hangs).
-    # The seed arithmetic, the `<=` boundary, and `+= -> -=` (which walks r negative and returns
-    # a wrong root) ARE caught by the exact isqrt cases incl. the 2^52 - 1 rounded-up-seed pin.
-    'rd\.rs:110:19: replace \* with / in isqrt',
-    'rd\.rs:111:11: replace \+= with \*= in isqrt',
     # `(run % 16) as u8` feeding `pack_nibbles(run, size)`: `% -> +` maps run r (< 16 after the
     # ZRL split) to r + 16, and `pack_nibbles` computes `(hi << 4) + lo` on u8, where
     # `(r + 16) << 4 ≡ r << 4 (mod 256)` — the added bit is exactly the one the shift discards,
@@ -777,20 +691,6 @@ exclude_re = [
     # `<=` disagree is unreachable. Provably equivalent (same shape as the `refine` sign-test
     # entry above). (`< -> >` flips real signs and IS caught by the entropy-decode round-trip.)
     'rd\.rs:271:36: replace < with <= in trellis_quantize',
-    # Backtrack terminator `node = (j > 0).then_some((j, jc))`: node j = 0 is the virtual start
-    # whose parent is (0, 0), so `> -> >=` (and `> -> ==`, which chains INTO j = 0) re-visits the
-    # same node forever — non-terminating, TIMEOUT-only. (`> -> <` truncates real chains and IS
-    # caught by the trellis round-trip tests.)
-    'rd\.rs:273:19: replace > with (>=|==) in trellis_quantize',
-    'progressive\.rs:493:41: replace > with >=',
-    # 459:55 `.find(|&k| (block[ZIGZAG[k]].abs() >> al) == 1)` computes `eob_pos`, the last coefficient
-    # that becomes newly-nonzero this scan. It gates ONLY whether a >15 run of zero-history coefficients
-    # ending at an *already-nonzero* coefficient is coded as a ZRL or folded into the EOB run — a free
-    # choice in EOB/ZRL segmentation (§G.1.2.3): both are valid codings of the identical coefficients,
-    # and the decoder reconstructs the same values from either, so no decode-parity test can distinguish
-    # `== 1` from `!= 1`. (The `abs == 0` and `abs > 1` branch tests, which DO change coefficients, are
-    # caught — this line:col anchor leaves them in the survey.)
-    'progressive\.rs:459:55: replace == with !=',
     # gamut-heic (issue #238) — behaviourally-equivalent survivors.
     # `Reader::u48` (hvcc.rs) assembles a 48-bit big-endian value byte-by-byte via
     # `(acc << 8) | u64::from(byte)`: the running accumulator is shifted up 8 bits before each OR, so
@@ -973,4 +873,162 @@ exclude_re = [
     # it cannot also cover the observable `>` in the deferral probe, which the lazy-parse tests
     # kill.
     'replace > with >= in nonempty_match',
+    # -----------------------------------------------------------------------------------------
+    # GROUP 2 — NON-TERMINATING: detected, but reportable only as a TIMEOUT.
+    #
+    # Each mutant below stops a loop making progress, so the suite hangs instead of failing and
+    # cargo-mutants can score it only as a timeout (exit 3, gate-failing). Where the loop could be
+    # bounded by the data it walks instead of by its own arithmetic, it was, and the mutant became
+    # an ordinary killable one — `ReadLedger::record`/`subtract` in gamut-ifd are the worked
+    # example (issue #110), and nothing from that crate is left in this group. What remains is
+    # where no such rewrite exists.
+    # -----------------------------------------------------------------------------------------
+    # gamut-bitstream `BitReader::f64` — a non-terminating mutant, not a behavioural escape.
+    # `while left > 0` over a `u32` mutated to `>= 0` is always true; `take` becomes
+    # `0.min(32) == 0`, `f(0)` returns 0 and `left -= 0` never advances, so the loop spins and the
+    # scenario is reportable only as a TIMEOUT. Line- and column-anchored so it matches exactly
+    # this hang and leaves the sibling `n > 64` guard mutants — which DO terminate and ARE caught
+    # by `f_rejects_oversized_and_truncated_fields` — in the survey. Same shape as the
+    # gamut-jpeg `BitReader`/`Reader` hang exclusions below.
+    "bitreader\\.rs:125:20: replace > with >= in BitReader<.a>::f64$",
+    # gamut-bitstream `SymbolDecoder::read_golomb` — the other non-terminating mutant.
+    # `length += 1` mutated to `*= 1` pins `length` at 0, so `length < max_bits` never stops the
+    # unary-prefix loop; against a stream that never terminates the prefix (the all-zero buffer
+    # `read_golomb_caps_the_prefix_even_when_the_stream_never_terminates_it` feeds it, and the
+    # zero padding past the end keeps `read_bool` returning false) the loop spins. It is *detected*
+    # — the suite does not pass — but only ever as a TIMEOUT, at 60s a scenario. Line- and
+    # column-anchored: the `-=` sibling on the same line underflows `length` into a panic and IS
+    # caught, as are every other mutant in this function now that the golomb tests exist.
+    "symbol\\.rs:430:20: replace \\+= with \\*= in SymbolDecoder<.a>::read_golomb$",
+    # gamut-webp `BoolDecoder::get_bool` renormalisation: `self.range *= 2` under
+    # `while self.range < 128`. Reversed to `/= 2` the range shrinks toward zero, never reaches
+    # 128, and the loop never returns -- reportable only as a TIMEOUT.
+    #
+    # The statement is written `*= 2` rather than `<<= 1` precisely so this entry can name it. The
+    # `self.value <<= 1` on the line above is the same operator applied to a different field, and
+    # reversing *that* one is caught -- so a `<<=`-shaped exclusion would have hidden real
+    # coverage, and a line-anchored one stops matching as soon as anything above it moves.
+    'replace \*= with /= in BoolDecoder<.a>::get_bool',
+    # gamut-webp hang-on-mutation timeouts: cursor advances and loop exits that stop making
+    # progress. Each entry carries the paragraph directly above it.
+    #
+    # `decode_image_data` advances `i` with `i += 1` in three branches of one `while i < n` loop
+    # -- the literal, the copy and the cache paths. Mutated to `*= 1` each pins `i` (it is >= 1 by
+    # the time any of them runs a second time), so the loop never terminates and cargo-mutants can
+    # only ever report TIMEOUT. All three are the same statement in the same loop, which is why one
+    # entry covers them. The `-=` siblings are deliberately NOT excluded: they underflow at `i == 0`
+    # and panic, so they terminate and are caught.
+    'replace \+= with \*= in decode_image_data',
+    # `tokenize` is the encoder's mirror of that loop: three `i += 1` in one `while i < n`, pinned
+    # the same way by `*= 1`. Its `-=` siblings terminate too -- they underflow and panic -- so they
+    # stay in the survey, and one of them is what caught this reasoning being checked rather than
+    # assumed.
+    'replace \+= with \*= in tokenize',
+    # `build_length_limited_lengths` raises the histogram's floor and rebuilds until the tree fits
+    # `max_len`. `if max_depth <= max_len { return }` is the loop's only exit, so reversing it to
+    # `>` means the loop returns exactly when it should keep going and spins when it should stop:
+    # once the tree fits, `count_min` saturates and every further pass produces the same
+    # already-flat tree. Non-terminating, reportable only as a TIMEOUT. It is the sole `<=` in the
+    # function, so this names it unambiguously.
+    'replace <= with > in build_length_limited_lengths',
+    # `BoolDecoder::get_tree_start` descends a tree until it reaches a leaf, which `i <= 0` marks.
+    # That test is the descent's only exit, so reversing it keeps the loop going at every leaf --
+    # confirmed by applying it against a 120s cap, which the suite exceeds rather than failing. It
+    # is the sole `<=` in the function.
+    "replace <= with > in BoolDecoder<.a>::get_tree_start",
+    # `code_length_count` counts down with `count -= 1` under `while count > 4 && ...`. Mutated to
+    # `/= 1` the count never changes and the loop spins. (`+=` grows it out of the array's range and
+    # panics, so that one is caught and stays.)
+    'replace -= with /= in code_length_count',
+    # gamut-jpeg entropy-reader hang-on-mutation timeouts (unkillable by any finite test). Each
+    # mutation turns an inherently-terminating advance loop into a non-terminating one: no test can
+    # observe a decoded result because execution never returns, so cargo-mutants can only ever report
+    # a TIMEOUT (exit 3, gate-failing) — never a catchable behavioural escape. Line/column-anchored so
+    # each regex matches EXACTLY its hang mutant and leaves the sibling arithmetic mutants (which DO
+    # terminate and ARE caught) in the survey. These are the byte/bit cursor's own accounting; the
+    # correct advance is exercised end-to-end by the decode battery.
+    #
+    # BitReader::fetch — the destuffing byte cursor. `self.pos += 1` (97, 108) mutated to `*= 1`
+    # leaves `pos` pinned (pos ≥ 1 is invariant once decoding), so `end_marker`/`take_restart`'s
+    # `loop { fetch }` re-reads the same byte forever; `-=` (97, 103, 108) walks `pos` backwards and
+    # never reaches the terminating marker/EOF. (`103 *=` scales `pos += 2` forward, so it DOES reach
+    # EOF and is caught — deliberately not excluded here.)
+    "scan\\.rs:108:26: replace \\+= with (\\*|-)= in BitReader",
+    "scan\\.rs:114:30: replace \\+= with -= in BitReader",
+    "scan\\.rs:119:30: replace \\+= with (\\*|-)= in BitReader",
+    # BitReader::ensure — `self.bit_count += 8` in the *marker-padding* arm (134) mutated to `*= 8`
+    # keeps the count at 0 (0·8 = 0) while `fetch` returns `Marker` without advancing, so
+    # `while bit_count < n` spins forever. (The data arm at 130 advances `pos` to EOF and terminates,
+    # and `134 -=` underflows into an error — both caught, both left in the survey.)
+    "scan\\.rs:145:36: replace \\+= with \\*= in BitReader",
+    # BitReader::read_bits — `self.bit_count -= n` mutated to `+= n` makes the buffered-bit count
+    # grow without bound so `ensure` never refills and the reader never advances to a marker: the
+    # decode does not terminate. (`read_bit`'s own `-= 1` at 157 is a distinct, caught mutant.)
+    "replace -= with \\+= in BitReader<'a>::read_bits",
+    # decode_symbol / decode_block stubbed to a constant consume no entropy bits; for a Y=0 (DNL)
+    # frame the row count is unknown and the MCU loop runs until `at_data_end` — which never fires
+    # because nothing is ever consumed — so the loop never terminates. (For a Y-known frame the same
+    # stub yields wrong pixels and is caught, but the Y=0 tests hang first, forcing a TIMEOUT.)
+    'replace decode_symbol -> Result<u8> with Ok\(0\)',
+    "replace Ctx<'_>::decode_block -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
+    # syntax::Reader::u8 — the segment cursor. `self.pos += 1` mutated to `*= 1` pins `pos`, so the
+    # `while r.remaining() > 0` table loops in parse_dqt/parse_dht never make progress and never
+    # terminate. (The `-=` sibling walks `pos` backwards into an out-of-range read that errors, and is
+    # caught — only the non-terminating `*=` is excluded.)
+    "replace \\+= with \\*= in Reader<'a>::u8",
+    # gamut-jpeg progressive AC refinement (decode_ac_refine) — the coefficient cursor `k += 1` in the
+    # do-while advance loop (893) and the EOB-run correction-bit tail loop (917). Mutated to `*= 1` it
+    # pins `k` (k ≥ Ss ≥ 1, so k·1 = k) and the `while k <= se` loop spins forever — non-terminating,
+    # reportable only as a TIMEOUT, never a catchable behavioural escape. Line/col-anchored so each
+    # matches exactly its hang mutant; the `-=` siblings walk `k` backwards into a usize underflow that
+    # panics and ARE caught. Same shape as the sequential BitReader/Reader hang exclusions above.
+    "scan\\.rs:893:19: replace \\+= with \\*= in decode_ac_refine",
+    "scan\\.rs:917:15: replace \\+= with \\*= in decode_ac_refine",
+    # gamut-jpeg `build_optimal_table` (Annex K.2 length limiting) — the borrow-length search
+    # `let mut j = i - 2; while bits[j] == 0 { j -= 1; }` walks down to the longest shorter length that
+    # still has a code. Mutating the `j -= 1` step turns this terminating descent into a non-terminating
+    # loop: `-= -> /=` pins `j` (`j / 1 == j`) so `while bits[j] == 0` spins forever once it enters, and
+    # `-= -> +=` walks `j` upward into the length whose redistribution nets zero change to `bits[i]`, so
+    # the enclosing `while bits[i] > 0` never makes progress. Neither can be observed as a decoded
+    # result (execution never returns) — cargo-mutants can only ever report a TIMEOUT, never a catchable
+    # behavioural escape. Line/column-anchored so each matches EXACTLY its hang mutant; the redistribution
+    # arithmetic (`bits[i] -= 2`, `bits[i-1] += 1`, …) and the `i - 2` start ARE caught by the exact-BITS
+    # golden in `optimal_skewed_frequencies_force_16_bit_limiting`. Same shape as the scan.rs cursor hangs.
+    'huffman\.rs:365:19: replace -= with (\+|/)= in build_optimal_table',
+    # gamut-jpeg `rd` (issue #333) — the module's non-terminating mutants, line/column anchored so
+    # each matches EXACTLY its mutant and leaves every sibling in the survey. The same module's
+    # provably-equivalent mutants make the other claim and sit in GROUP 1.
+    #
+    # isqrt's ascending settle `while (r + 1) * (r + 1) <= n { r += 1 }`: `* -> /` turns the
+    # probe into `(r+1)/(r+1) = 1 <= n`, true for every n >= 1, and `+= -> *=` pins `r` at its
+    # seed (`r * 1 == r`) — in both the loop never terminates, so cargo-mutants can only report a
+    # TIMEOUT, never a catchable behavioural escape (the same shape as the scan.rs cursor hangs).
+    # The seed arithmetic, the `<=` boundary, and `+= -> -=` (which walks r negative and returns
+    # a wrong root) ARE caught by the exact isqrt cases incl. the 2^52 - 1 rounded-up-seed pin.
+    'rd\.rs:110:19: replace \* with / in isqrt',
+    'rd\.rs:111:11: replace \+= with \*= in isqrt',
+    # Backtrack terminator `node = (j > 0).then_some((j, jc))`: node j = 0 is the virtual start
+    # whose parent is (0, 0), so `> -> >=` (and `> -> ==`, which chains INTO j = 0) re-visits the
+    # same node forever — non-terminating, TIMEOUT-only. (`> -> <` truncates real chains and IS
+    # caught by the trellis round-trip tests.)
+    'rd\.rs:273:19: replace > with (>=|==) in trellis_quantize',
+    # gamut-tiff CCITT G4 `reference_changes` and LZW `BitReader::read`, stubbed to a constant.
+    # Both are cursor-advance functions whose callers loop until the cursor passes a bound, so a
+    # constant return removes the only thing that ends the loop -- non-terminating, and reportable
+    # only as a TIMEOUT (exit 3, gate-failing), never as a catchable behavioural escape. Same shape
+    # and justification as the gamut-jpeg entropy-reader hangs above.
+    #
+    # `reference_changes` returns b1/b2, the changing elements strictly right of a0. Every one of
+    # the four constants puts b2 at or behind a0, so `encode_row` takes pass mode, assigns
+    # `a0 = b2`, and finds the same b2 on the next pass, forever. `BitReader::read` stubbed to
+    # `Some(0)`/`Some(1)` returns a code that is never EOI, so `decode`'s loop never reaches its
+    # terminating code and the string table grows without bound.
+    #
+    # Anchored on the function signature rather than on line:col, unlike the jpeg entries above: a
+    # line-anchored regex silently stops matching when code above it moves, which turns a suppressed
+    # timeout back into a red gate at an unrelated moment. Both names are unique workspace-wide, and
+    # the anchors name the return type, so only the whole-body replacements match -- every operator
+    # mutation inside either function stays in the survey, and this branch kills several of them.
+    'replace reference_changes -> \(usize, usize\) with \((0|1), (0|1)\)',
+    "replace BitReader<'_>::read -> Option<u32> with Some\\((0|1)\\)",
 ]

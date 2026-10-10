@@ -115,10 +115,22 @@ jobs:
       # One target's crash says nothing about another's, so a failure must not cancel the rest.
       fail-fast: false
       matrix:
-        # One entry per file in tooling/gamut-fuzz/fuzz_targets. A matrix rather than three steps
-        # in one job, so each target gets the full time budget below in parallel instead of the
-        # job's wall time growing with every crate that gains laws.
-        target: [ifd_read_ledger, core_convert, tonemap_curves]
+        # One entry per file in tooling/gamut-fuzz/fuzz_targets. A matrix rather than one job with
+        # a step per target, so each target gets the full time budget below in parallel instead of
+        # the job's wall time growing with every crate that gains laws or a parser entry point.
+        target:
+          - ifd_read_ledger
+          - core_convert
+          - tonemap_curves
+          # The parser entry points (#264): the untrusted-input surface `docs/testing.md`'s
+          # per-crate table names, one target per entry point rather than per crate, because
+          # gamut-heic's container walk and its `hvcC`/NAL layer are two independent surfaces.
+          - ifd_read
+          - tiff_decode
+          - dng_decode
+          - isobmff_boxes
+          - heic_container
+          - heic_hvcc
     env:
       MISE_TASK_RUN_AUTO_INSTALL: false
     steps:
@@ -158,6 +170,17 @@ jobs:
         # A crash found here is minimised and promoted into a NAMED DETERMINISTIC TEST in the
         # crate's own suite -- the corpus is a search aid, not the regression record -- so a
         # failure of this job is a signal to go and write that test, not to re-run until green.
+        #
+        # EXPECTED RED: `tiff_decode` and `dng_decode` fail today on filed, accepted defects
+        # (#563, #564). They are deliberately not narrowed to make these rows green; read the
+        # per-row status rather than this workflow's aggregate until both close. Restoring the
+        # aggregate's meaning is #593.
+        #
+        # CADENCE (#594), decided: this job stays on the workflow's own trigger. Nothing
+        # accumulates between runs -- each starts from the committed seeds and discards what the
+        # engine finds -- so a run is ten minutes of cold search whatever the cadence, and running
+        # less often just searches less. Persisting the corpus (#603) is the change that makes
+        # frequency and this time budget worth tuning; the README states the full argument.
         run: mise run fuzz ${{ matrix.target }} -- -max_total_time=600
       - name: Upload any crash artifacts
         if: failure()
@@ -186,7 +209,64 @@ jobs:
           # vendored codecs. `aom`/`dav1d` are `update = none` and arrive via the fetch below.
           submodules: recursive
       - name: Install system build deps (pkg-config; nasm is vendored, rest via mise)
-        run: sudo apt-get update && sudo apt-get install -y pkg-config
+        # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
+        # Chrome/Microsoft source on the runner image makes `apt-get update` exit 100, so drop
+        # the entries this project does not consume, then update and install unmasked. Full
+        # rationale, and why classification is per source entry, is in ci.yml.
+        run: |
+          # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          prune='
+          function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
+          function flush(  i) {
+            if (n == 0) return
+            if (uri == "" || ok(uri)) { for (i = 0; i < n; i++) print s[i]; if (uri != "") keep++ } else drop++
+            n = 0; uri = ""
+          }
+          /^[ \t]*(deb|deb-src)[ \t]/ { flush(); if (ok($0)) { print; keep++ } else drop++; next }
+          /^[ \t]*$/ { flush(); print; next }
+          /^[ \t]*URIs:/ { uri = $0 }
+          { s[n++] = $0 }
+          END { flush(); exit (keep > 0 ? 0 : 10) }'
+          work=$(mktemp -d)
+          ubuntu=0
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            out="$work/$(echo "$f" | tr / _)"
+            rc=0
+            sudo awk "$prune" "$f" > "$out" || rc=$?
+            case "$rc" in
+              0) ubuntu=$((ubuntu + 1)) ;;
+              10) ;;
+              *) echo "::error::could not read or classify $f (awk exit $rc); not guessing at it"
+                 exit 1 ;;
+            esac
+            echo "$rc" > "$out.rc"
+          done
+          if [ "$ubuntu" -eq 0 ]; then
+            # Classification recognised nothing as Ubuntu's -- a re-hosted archive, a renamed mirrorlist.
+            # Prune nothing and carry on: that is exactly how this step behaved before the guard existed,
+            # whereas failing here would turn one runner-image change into a total outage across every
+            # job. A genuinely unreachable archive, or a missing package, still fails loudly at the
+            # unmasked `update`/`install` below.
+            echo "::warning::no Ubuntu apt source recognised; standing down and leaving sources as they are"
+          else
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              [ -f "$f" ] || continue
+              out="$work/$(echo "$f" | tr / _)"
+              if [ "$(cat "$out.rc")" = 10 ]; then
+                echo "removing third-party source $f"
+                sudo rm -f "$f"
+              elif sudo cmp -s "$out" "$f"; then
+                echo "keeping $f"
+              else
+                echo "dropping third-party entries from $f"
+                sudo rm -f "$f"
+                sudo cp "$out" "$f"
+              fi
+            done
+          fi
+          sudo apt-get update
+          sudo apt-get install -y pkg-config
       - uses: jdx/mise-action@v4
         with:
           install_args: cmake ninja meson
@@ -229,7 +309,64 @@ jobs:
           # the explicit step below is what pulls it. The C oracles under third_party/ are.
           submodules: recursive
       - name: Install system build deps (pkg-config; nasm is vendored, rest via mise)
-        run: sudo apt-get update && sudo apt-get install -y pkg-config
+        # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
+        # Chrome/Microsoft source on the runner image makes `apt-get update` exit 100, so drop
+        # the entries this project does not consume, then update and install unmasked. Full
+        # rationale, and why classification is per source entry, is in ci.yml.
+        run: |
+          # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          prune='
+          function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
+          function flush(  i) {
+            if (n == 0) return
+            if (uri == "" || ok(uri)) { for (i = 0; i < n; i++) print s[i]; if (uri != "") keep++ } else drop++
+            n = 0; uri = ""
+          }
+          /^[ \t]*(deb|deb-src)[ \t]/ { flush(); if (ok($0)) { print; keep++ } else drop++; next }
+          /^[ \t]*$/ { flush(); print; next }
+          /^[ \t]*URIs:/ { uri = $0 }
+          { s[n++] = $0 }
+          END { flush(); exit (keep > 0 ? 0 : 10) }'
+          work=$(mktemp -d)
+          ubuntu=0
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            out="$work/$(echo "$f" | tr / _)"
+            rc=0
+            sudo awk "$prune" "$f" > "$out" || rc=$?
+            case "$rc" in
+              0) ubuntu=$((ubuntu + 1)) ;;
+              10) ;;
+              *) echo "::error::could not read or classify $f (awk exit $rc); not guessing at it"
+                 exit 1 ;;
+            esac
+            echo "$rc" > "$out.rc"
+          done
+          if [ "$ubuntu" -eq 0 ]; then
+            # Classification recognised nothing as Ubuntu's -- a re-hosted archive, a renamed mirrorlist.
+            # Prune nothing and carry on: that is exactly how this step behaved before the guard existed,
+            # whereas failing here would turn one runner-image change into a total outage across every
+            # job. A genuinely unreachable archive, or a missing package, still fails loudly at the
+            # unmasked `update`/`install` below.
+            echo "::warning::no Ubuntu apt source recognised; standing down and leaving sources as they are"
+          else
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              [ -f "$f" ] || continue
+              out="$work/$(echo "$f" | tr / _)"
+              if [ "$(cat "$out.rc")" = 10 ]; then
+                echo "removing third-party source $f"
+                sudo rm -f "$f"
+              elif sudo cmp -s "$out" "$f"; then
+                echo "keeping $f"
+              else
+                echo "dropping third-party entries from $f"
+                sudo rm -f "$f"
+                sudo cp "$out" "$f"
+              fi
+            done
+          fi
+          sudo apt-get update
+          sudo apt-get install -y pkg-config
       - uses: jdx/mise-action@v4
         with:
           install_args: cmake ninja meson

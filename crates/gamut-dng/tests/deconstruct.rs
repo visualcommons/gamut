@@ -102,7 +102,7 @@ fn a_c2pa_store_at_the_end_of_the_file_is_the_entrys_value_span() {
         assert_clean(&report);
         assert!(
             report.segments.segments.contains(&Segment {
-                range: excl.store,
+                range: excl.store(),
                 kind: SpanKind::Value {
                     ifd: ifd0,
                     tag: C2PA_MANIFEST_STORE,
