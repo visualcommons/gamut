@@ -3,9 +3,14 @@
 //! panic, a hang, or unbounded allocation (STATUS P6).
 //!
 //! Every input is also driven through the streaming [`IfdReader`] and the two entry points must
-//! *agree* — both parse to equal files, or both fail. The slice functions are thin wrappers over
-//! the streaming engine (one parser), so this differential layer is now a regression gate on the
-//! wrappers themselves staying faithful.
+//! *agree* — both parse to equal files, or both fail. This is a **structure pin, not a
+//! differential**: `read` is *defined* as `IfdReader::open(data)?.read_file()` (and `read_tree`
+//! likewise), so the two sides are one parser reached twice and the comparison cannot fail while
+//! those bodies stand. It is kept because a `read` that stopped delegating — growing a second
+//! directory walk, and with it a second set of hostile-input guards to drift — is exactly the
+//! regression the crate's one-parser design exists to prevent. Being unfalsifiable by input, it
+//! belongs here, over this bounded corpus, and not in the unbounded fuzz tier, where it would cost
+//! half of every execution and search for a counterexample that does not exist.
 
 use gamut_ifd::{
     ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_audited, read_tree, write,
@@ -73,7 +78,7 @@ fn survives(data: &[u8]) {
 }
 
 #[test]
-fn specific_malformed_inputs_error_without_panic() {
+fn specific_malformed_inputs_yield_typed_errors_not_panics() {
     let cases: &[&[u8]] = &[
         b"",
         b"II",
@@ -83,7 +88,11 @@ fn specific_malformed_inputs_error_without_panic() {
         b"MM\x00\x2a\xff\xff\xff\x7f",     // first-IFD offset past EOF (big-endian)
         b"II\x2a\x00\x08\x00\x00\x00",     // first IFD at EOF
         b"II\x2a\x00\x08\x00\x00\x00\xff", // truncated IFD count
-        b"II\x2a\x00\x00\x00\x00\x00",     // first-IFD offset 0 (no IFD)
+        // A whole entry count of 65 535 with no entry bytes at all behind it — the count is
+        // present and well-formed, so the reader reaches the point of sizing the directory from
+        // it. Nothing may be reserved for the 786 KiB it claims in a ten-byte file.
+        b"II\x2a\x00\x08\x00\x00\x00\xff\xff",
+        b"II\x2a\x00\x00\x00\x00\x00", // first-IFD offset 0 (no IFD)
         // A 1-entry IFD whose value count is huge (byte-length overflow path), then truncated.
         b"II\x2a\x00\x08\x00\x00\x00\x01\x00\x00\x01\x03\x00\xff\xff\xff\xff\x08\x00\x00\x00\x00\x00\x00\x00",
         // An IFD whose next-IFD pointer loops back to itself.
@@ -94,6 +103,13 @@ fn specific_malformed_inputs_error_without_panic() {
     }
     // The loop case must be a typed error, not a hang.
     assert!(read(b"II\x2a\x00\x08\x00\x00\x00\x00\x00\x08\x00\x00\x00").is_err());
+    // The hostile entry count must be refused against the source length, not merely survived.
+    assert!(
+        read(b"II\x2a\x00\x08\x00\x00\x00\xff\xff")
+            .expect_err("65 535 entries in a ten-byte file")
+            .to_string()
+            .contains("IFD extends past end of file")
+    );
 }
 
 #[test]

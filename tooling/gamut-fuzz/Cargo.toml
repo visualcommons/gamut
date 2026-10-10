@@ -30,12 +30,21 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-# Each target's crate is pulled in with `test-support`, the `doc(hidden)` feature that exposes its
-# `invariants` module. That feature is never enabled by the `gamut` umbrella, so the shipped
+# A *law* target's crate is pulled in with `test-support`, the `doc(hidden)` feature that exposes
+# its `invariants` module. That feature is never enabled by the `gamut` umbrella, so the shipped
 # surface and `mise run check-ffi-features` are unaffected — verified in #434.
-gamut-ifd = { path = "../../crates/gamut-ifd", features = ["test-support"] }
+#
+# A *robustness* target's crate needs no such feature: it drives the crate's ordinary public
+# parser entry point on the engine's raw bytes, which is exactly the surface a caller has.
+# `bigtiff` is on for gamut-ifd so the 64-bit variant is reachable from the same byte string
+# rather than being silently rejected at the magic number.
+gamut-ifd = { path = "../../crates/gamut-ifd", features = ["bigtiff", "test-support"] }
 gamut-core = { path = "../../crates/gamut-core", features = ["test-support"] }
 gamut-tonemap = { path = "../../crates/gamut-tonemap", features = ["test-support"] }
+gamut-tiff = { path = "../../crates/gamut-tiff" }
+gamut-dng = { path = "../../crates/gamut-dng" }
+gamut-isobmff = { path = "../../crates/gamut-isobmff" }
+gamut-heic = { path = "../../crates/gamut-heic" }
 
 [[bin]]
 name = "ifd_read_ledger"
@@ -54,6 +63,48 @@ bench = false
 [[bin]]
 name = "tonemap_curves"
 path = "fuzz_targets/tonemap_curves.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ifd_read"
+path = "fuzz_targets/ifd_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tiff_decode"
+path = "fuzz_targets/tiff_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dng_decode"
+path = "fuzz_targets/dng_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "isobmff_boxes"
+path = "fuzz_targets/isobmff_boxes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "heic_container"
+path = "fuzz_targets/heic_container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "heic_hvcc"
+path = "fuzz_targets/heic_hvcc.rs"
 test = false
 doc = false
 bench = false
