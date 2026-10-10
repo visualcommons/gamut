@@ -63,7 +63,10 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
   `LinearizationTable`, `MaskedAreas`), active area, default crop, and 8/10/12/14/16-bit packing;
   typed `OpcodeList1/2/3` containers (parse + pass-through write); an embedded RGB preview;
   EXIF/XMP/IPTC/ICC metadata — the `ExifIFD` carried whole as `gamut-metadata`'s `Exif`, the
-  XMP/IPTC-IIM/ICC payloads verbatim and handed over as its `MetadataBlock`s; classic TIFF and
+  XMP/IPTC-IIM/ICC payloads verbatim and handed over as its `MetadataBlock`s; a **C2PA manifest
+  store** (C2PA 2.4 §A.3.6, tag 52545) typed on both sides — written last in the file, or
+  reserved zero-filled with `with_c2pa_reserved`, with `encode_with_report` returning the two
+  exclusion ranges (§18.5.5) an external signer hashes around; classic TIFF and
   **BigTIFF**; the minimal `DNGVersion` and the
   spec's `DNGBackwardVersion` raises computed automatically.
 - **Beyond the raw image** (decode): every other image IFD as a typed `SubImage` — previews,

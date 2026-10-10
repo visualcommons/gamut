@@ -508,6 +508,7 @@ fn metadata_embeds_and_roundtrips() {
         xmp: Some(br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>"#.to_vec()),
         iptc: Some(vec![0x1c, 0x02, 0x05, 0x00, 0x03, b'a', b'b', b'c']),
         icc: Some(vec![0u8; 16]),
+        c2pa: None,
     };
     let mut dng = Vec::new();
     DngEncoder::new()
