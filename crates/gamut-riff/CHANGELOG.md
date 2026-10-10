@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/visualcommons/gamut/compare/gamut-riff-v0.1.3...gamut-riff-v1.0.0) - 2026-10-10
+
+### Added
+
+- *(riff)* [**breaking**] carry the C2PA manifest store in the C2PA chunk
+- *(riff)* [**breaking**] enforce reconstruction-chunk order and carry unknown chunks
+- *(riff)* [**breaking**] validate the spec's size and canvas bounds
+- *(core)* add structured error diagnostics
+
+### Fixed
+
+- *(riff)* [**breaking**] keep a carried C2PA chunk when no store is configured
+- *(riff)* let the c2pa field own the C2PA chunk it writes
+
+### Other
+
+- *(webp)* correct the C2PA exclusion-span rationale
+- *(riff)* clarify the c2pa_span walk and its pad-byte note
+- *(ifd)* close the mutation survivors the corpus pass left
+- *(riff)* release v1.0.0
+- *(riff)* ledger the v1 surface and correct the RFC citations
+- *(riff)* spec fixtures, robustness sweep, and a libwebp demux oracle
+- *(riff)* [**breaking**] narrow the frozen public surface
+- *(riff)* drop the unused gamut-bitstream dependency
+
 ## [0.1.3](https://github.com/visualcommons/gamut/compare/gamut-riff-v0.1.2...gamut-riff-v0.1.3) - 2026-07-30
 
 ### Added

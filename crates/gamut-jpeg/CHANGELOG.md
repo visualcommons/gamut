@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/visualcommons/gamut/compare/gamut-jpeg-v0.1.0...gamut-jpeg-v0.1.1) - 2026-10-10
+
+### Added
+
+- *(jpeg)* wire the gamut-metadata facade behind a `metadata` feature
+- *(jpeg)* add the XYB colour encode path
+- *(jpeg)* rate-distortion optimized coefficient selection
+- *(jpeg)* route typed presentation through gamut-core convert
+- *(jpeg)* accept caller-supplied quantization tables
+- *(jpeg)* emit optimized baseline Huffman tables
+- *(core)* add structured error diagnostics
+- *(gamut-jpeg)* add decoder resource limits
+
+### Other
+
+- *(jpeg)* reformat the metadata wiring with the workspace rustfmt
+- deny unsafe in the hot-path crates instead of forbidding it
+- *(jpeg)* name the prefix-free check for the one claim it makes
+- adopt as_chunks for constant-size slice chunking
+- merge origin/master into feat/268-pixel-conversion
+- *(jpeg)* pin the XYB byte count to the appended output
+- merge feat/333-jpeg-trellis-adaptive-quant into feat/334-jpeg-xyb-color
+- *(jpeg)* kill the RD trellis mutation survivors
+- close the mutation-testing gaps in the conversion paths
+- merge origin/master into feat/268-pixel-conversion
+- *(jpeg)* ledger the RD-optimized coefficient selection
+- *(jpeg)* ledger the caller-supplied quantization tables
+- *(jpeg)* record the optimized baseline table surface
+
 ## [0.1.0](https://github.com/justin13888/gamut/releases/tag/gamut-jpeg-v0.1.0) - 2026-07-18
 
 ### Added

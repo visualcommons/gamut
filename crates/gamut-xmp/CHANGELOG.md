@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-xmp-v1.0.0...gamut-xmp-v2.0.0) - 2026-10-10
+
+### Added
+
+- *(xmp)* accept on read the Darwin Core URI XMPCore emits
+- *(xmp)* give a sidecar's missing wrapper its own error
+- *(xmp)* read and write XMP sidecar files
+- *(xmp)* register the twelve schemas exiv2 documents
+- *(xmp)* [**breaking**] register the dcterms namespace and open WellKnownNs
+- *(core)* add structured error diagnostics
+
+### Other
+
+- *(xmp)* attribute the Darwin Core trailing slash to exiv2, not XMPCore
+- Merge remote-tracking branch 'origin/feat/449-xmp-dcterms-provenance' into feat/421-xmp-schemas-sidecars
+- *(metadata)* call dcterms:provenance a URI reference, not a URL
+- *(xmp)* narrow the registry claim to the issue #421 set of exiv2 schemas
+- *(xmp)* record that a catenated sidecar keeps only its first packet
+- *(xmp)* close from_uri over the alias family exiv2 generates
+- *(xmp)* warn on the Darwin Core variant that XMPCore spells its URI differently
+- *(xmp)* state where the sidecar rule and the dwc alias diverge
+- *(xmp)* check end of input before matching sidecar prolog events
+- *(xmp)* separate the set/get round trip from the replacement rule
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-xmp-v0.1.1...gamut-xmp-v1.0.0) - 2026-07-18
 
 ### Added

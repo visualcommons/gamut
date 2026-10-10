@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/visualcommons/gamut/compare/gamut-v0.3.2...gamut-v0.4.0) - 2026-10-10
+
+### Added
+
+- *(gamut)* forward the format crates' `metadata` features from the umbrella
+- *(gamut-cmm)* new crate with the pipeline/stage model
+- *(metadata)* [**breaking**] carry downstream typed models in a namespaced extension table
+
+### Other
+
+- *(gamut)* scope the forward pin to the metadata feature's own entries
+- *(gamut)* pin the umbrella's three metadata feature forwards
+- *(gamut)* state what the umbrella tests cannot catch
+- merge origin/master into feat/324-cmm-scaffold
+- merge feat/333-jpeg-trellis-adaptive-quant into feat/334-jpeg-xyb-color
+- *(gamut)* pin the XYB ICC profile at the umbrella
+- wire gamut-cmm into the workspace docs
+
 ## [0.3.2](https://github.com/visualcommons/gamut/compare/gamut-v0.3.1...gamut-v0.3.2) - 2026-07-30
 
 ### Other

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/visualcommons/gamut/compare/gamut-cli-v0.3.1...gamut-cli-v0.3.2) - 2026-10-10
+
+### Added
+
+- *(cli)* add --webp-effort and --webp-near-lossless
+- *(cli)* decode PNG and JPEG through gamut's own decoders
+- *(cli)* add --png-effort to convert
+- *(cli)* add --jxl-modular to gamut convert
+
+### Fixed
+
+- *(webp)* quantize near-lossless uniformly and never inflate
+
+### Other
+
+- *(cli)* build the isobmff demo image through the constructor
+- merge origin/master into feat/261-webp-encoder-knobs
+- adopt as_chunks for constant-size slice chunking
+- merge origin/master into feat/261-webp-encoder-knobs
+- merge origin/master into feat/268-pixel-conversion
+- merge origin/master into feat/268-pixel-conversion
+
 ## [0.3.1](https://github.com/visualcommons/gamut/compare/gamut-cli-v0.3.0...gamut-cli-v0.3.1) - 2026-07-30
 
 ### Other

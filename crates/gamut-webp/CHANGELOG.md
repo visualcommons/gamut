@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.1...gamut-webp-v0.4.0) - 2026-10-10
+
+### Added
+
+- *(webp)* carry the C2PA manifest store in the C2PA chunk
+- *(cli)* add --webp-effort and --webp-near-lossless
+- *(webp)* fill in the VP8 effort ladder
+- *(webp)* add near-lossless preprocessing
+- *(webp)* fill in the VP8L effort ladder
+- *(webp)* [**breaking**] require an explicit policy for lossy presentation
+- *(webp)* add the compression-effort knob
+- *(riff)* [**breaking**] enforce reconstruction-chunk order and carry unknown chunks
+- *(riff)* [**breaking**] validate the spec's size and canvas bounds
+- *(core)* add structured error diagnostics
+
+### Fixed
+
+- *(webp)* [**breaking**] ask gamut-riff which chunks it writes rather than listing them
+- *(webp)* [**breaking**] refuse a chunk that would displace one of the encoder's own
+- *(webp)* guarantee the run-length loop advances
+- *(webp)* discard a zero-length LZ77 match instead of looping on it
+- *(webp)* [**breaking**] report an oversized VP8 control partition
+- *(webp)* widen the probability-cost accumulator to u64
+- *(webp)* quantize near-lossless uniformly and never inflate
+- *(webp)* make VP8L entropy-group assignment deterministic
+
+### Other
+
+- *(webp)* correct the C2PA exclusion-span rationale
+- *(webp)* band the segmentation fixture across all four segments
+- *(webp)* re-attach a #[test] and drop a one-element loop
+- *(webp)* pin the entropy image's block-size field
+- *(webp)* pin the degenerate histograms, and count used symbols with !=
+- *(webp)* mask the LZ77 extra bits instead of subtracting an offset
+- *(webp)* write the partition size as little-endian bytes
+- *(webp)* reconstruct a macroblock that is both B_PRED and skipped
+- *(webp)* write the bool decoder's range doubling as a multiply
+- *(webp)* read the partition size as one integer, and pin its high byte
+- *(webp)* drop a cache-bits guard the constructor already makes
+- *(webp)* size the prefix-code descriptions, and name the trim's floor
+- *(webp)* pin the segmented stream, which nothing else could see
+- *(webp)* pin the canonical code assignment for a sparse alphabet
+- *(webp)* separate the decode and encode poisoning paths
+- *(webp)* use is_multiple_of in the break-even search
+- *(webp)* pin the deferral's strictness and exclude the equivalent mutants
+- *(webp)* pin the deferred parse's tokens, not just that it differs
+- *(webp)* drive the lazy parse and cache deltas directly
+- *(webp)* add the tiled fixture for the VP8L parse plans
+- *(webp)* add the smooth high-quality fixture to the effort pins
+- *(webp)* give the effort pins fixtures the decisions are visible in
+- *(webp)* pin the effort ladder's output and its boundary decisions
+- merge origin/master into feat/261-webp-encoder-knobs
+- adopt as_chunks for constant-size slice chunking
+- merge origin/master into feat/261-webp-encoder-knobs
+- *(webp)* repair two comments the effort work left behind
+- close the mutation-testing gaps in the conversion paths
+- merge origin/master into feat/268-pixel-conversion
+- *(webp)* resolve VP8L distance codes from a table
+- *(webp)* route VP8L encoding through a candidate-plan harness
+- *(webp)* emit the smallest VP8L prefix-code description
+- *(webp)* [**breaking**] future-proof the v1 public API
+- *(riff)* ledger the v1 surface and correct the RFC citations
+
 ## [0.3.1](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.0...gamut-webp-v0.3.1) - 2026-07-30
 
 ### Added
