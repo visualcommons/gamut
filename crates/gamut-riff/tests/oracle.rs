@@ -8,7 +8,7 @@ mod common;
 
 use common::{libwebp_demux, libwebp_encode_lossless, rgb_image};
 use gamut_riff::{
-    Chunk, FourCc, MetadataChunks, RiffReader, Vp8xHeader, WebpChunkId, WebpLayout,
+    Chunk, FourCc, MetadataChunks, RiffReader, Vp8xHeader, WebpChunkId, WebpLayout, c2pa_span,
     write_extended_preserving, write_simple_lossless,
 };
 
@@ -78,6 +78,7 @@ fn libwebp_agrees_on_the_extended_container_and_its_metadata() {
             icc: Some(icc),
             exif: Some(exif),
             xmp: Some(xmp),
+            c2pa: None,
         },
         &[(FourCc::VP8L, &vp8l)],
         &[],
@@ -168,6 +169,65 @@ fn an_odd_sized_payload_round_trips_through_libwebp() {
         vec![(*b"EXIF", odd_exif), (*b"XMP ", &b"<x/>"[..])],
         "the pad byte is framing, never part of a payload"
     );
+}
+
+#[test]
+fn libwebp_reads_a_file_carrying_a_c2pa_store_unchanged() {
+    // C2PA 2.4 §A.3.7 puts the manifest store in a `C2PA` chunk, which RFC 9649 does not define —
+    // so to the reference demuxer it is an unknown chunk it "SHOULD ignore" (§2.7.1.6). Embedding
+    // one must therefore change nothing libwebp sees: same canvas, same metadata chunks, and the
+    // store-free file byte for byte as the prefix, so nothing ahead of the store moved.
+    let (w, h) = (20u32, 7u32);
+    let (vp8l, _, _) = libwebp_vp8l(w, h);
+    let header = Vp8xHeader {
+        canvas_width: w,
+        canvas_height: h,
+        ..Default::default()
+    };
+    let metadata = MetadataChunks {
+        icc: Some(b"an ICC profile"),
+        exif: Some(b"exif payload"),
+        xmp: Some(b"<x:xmpmeta/>"),
+        c2pa: None,
+    };
+    let without = write_extended_preserving(&header, &metadata, &[(FourCc::VP8L, &vp8l)], &[])
+        .expect("write");
+    let store = &b"a C2PA manifest store"[..];
+    let with_store = write_extended_preserving(
+        &header,
+        &MetadataChunks {
+            c2pa: Some(store),
+            ..metadata
+        },
+        &[(FourCc::VP8L, &vp8l)],
+        &[],
+    )
+    .expect("write");
+
+    assert_eq!(
+        with_store[12..without.len()],
+        without[12..],
+        "the store is appended; nothing before it moves"
+    );
+
+    let plain = libwebp_demux(&without).expect("libwebp accepts the store-free file");
+    let signed = libwebp_demux(&with_store).expect("libwebp accepts the file carrying the store");
+    assert_eq!(
+        (signed.canvas_width, signed.canvas_height),
+        (plain.canvas_width, plain.canvas_height),
+        "the canvas is untouched"
+    );
+    assert_eq!(
+        signed.metadata, plain.metadata,
+        "libwebp recovers the same metadata chunks, and never the store among them"
+    );
+
+    // And the store is exactly where gamut-riff says it is.
+    let span = c2pa_span(&with_store)
+        .expect("parse")
+        .expect("the store was embedded");
+    assert_eq!(&with_store[span.start..span.start + 4], b"C2PA");
+    assert_eq!(&with_store[span.start + 8..span.end], store);
 }
 
 #[test]

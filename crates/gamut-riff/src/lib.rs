@@ -8,7 +8,9 @@
 //! specification in `references/webp/`; the crate's `STATUS.md` ledgers the v1 surface, and
 //! `gamut-webp/STATUS.md` section A is the per-requirement conformance table this crate owns.
 //! Metadata chunks (`ICCP`/`EXIF`/`XMP `) are carried verbatim through [`MetadataChunks`] and
-//! [`write_extended_with_metadata`], never parsed or reserialized.
+//! [`write_extended_with_metadata`], never parsed or reserialized, as is the `C2PA` manifest store
+//! of C2PA 2.4 §A.3.7 — the one carrier RFC 9649 does not define, placed last as §A.3.7 requires
+//! and located by [`c2pa_span`].
 //!
 //! # Reading
 //!
@@ -17,7 +19,7 @@
 //! | Reader | Yields | Rejects |
 //! | ------ | ------ | ------- |
 //! | [`RiffReader`] | every chunk, in file order | only what it cannot frame |
-//! | [`MetadataChunks::read`] | the `ICCP`/`EXIF`/`XMP ` triple | malformed framing |
+//! | [`MetadataChunks::read`] | the `ICCP`/`EXIF`/`XMP `/`C2PA` payloads | malformed framing |
 //! | [`WebpLayout::parse`] | every chunk sorted into its role | + chunks out of the spec's order |
 //!
 //! Animation (`ANIM`/`ANMF`) is out of scope: the FourCCs are recognised, so an animated file is
@@ -46,8 +48,8 @@ pub use chunk::Chunk;
 pub use fourcc::FourCc;
 pub use reader::RiffReader;
 pub use webp::{
-    MAX_CANVAS_DIMENSION, MetadataChunks, VP8X_PAYLOAD_LEN, Vp8xHeader, WebpChunkId, WebpLayout,
-    write_extended, write_extended_preserving, write_extended_with_metadata, write_simple_lossless,
-    write_simple_lossy,
+    C2PA_FOURCC, MAX_CANVAS_DIMENSION, MetadataChunks, VP8X_PAYLOAD_LEN, Vp8xHeader, WebpChunkId,
+    WebpLayout, c2pa_span, write_extended, write_extended_preserving, write_extended_with_metadata,
+    write_simple_lossless, write_simple_lossy,
 };
 pub use writer::RiffWriter;
