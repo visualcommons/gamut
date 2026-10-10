@@ -1491,6 +1491,21 @@ mod tests {
             }
         }
 
+        /// The oracle's non-exporting entry point (`decode_lossless_jpeg_extent`) reaches the
+        /// same decode as the exporting one: same stream in, same sample count out. The codec
+        /// benchmark times the pair against each other to price the FFI export path, and that
+        /// subtraction is only a price if the two decodes are otherwise identical.
+        #[test]
+        fn sdk_extent_entry_counts_the_same_samples_as_the_exporting_entry() {
+            let samples = test_samples(8, 8, 3, 16);
+            let stream = encode(&samples, 8, 8, 3, 16).expect("encode");
+            let exported =
+                gamut_dng_oracle::decode_lossless_jpeg(&stream, samples.len()).expect("SDK decode");
+            let counted = gamut_dng_oracle::decode_lossless_jpeg_extent(&stream, samples.len())
+                .expect("SDK extent decode");
+            assert_eq!(counted, exported.len());
+        }
+
         #[test]
         fn sdk_matches_every_predictor() {
             for predictor in 1..=7u8 {
