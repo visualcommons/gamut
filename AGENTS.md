@@ -20,15 +20,16 @@ Dependency edges (a crate depends on those to its right):
   `cmm`, `codec-abi`, `all`); `default = []`. `primitives` re-exports shared `color`/`dsp`/`bitstream`;
   `isobmff`/`metadata`/`tonemap`/`codec-abi` re-export their respective primitive crates;
   `all` includes all of these.
-- **gamut-core** — `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`, plus the
+- **gamut-core** — `EncodeImage`/`DecodeImage` traits, image buffers, `Dimensions`, `Error`, plus the
   format-agnostic `convert` module: the one place any `Pixel` layout converts to another
   (grey↔RGB, alpha add/drop/composite, 8↔16-bit), lossless by default with loss opted into per
   decoder via a `ConvertPolicy`. Format crates decode to what the file carries and delegate the
-  layout change there rather than hand-rolling it. No internal deps; everything else depends on it.
+  layout change there rather than hand-rolling it. No internal deps of its own; each entry below
+  states its own edges, and most — not all — of them include `gamut-core`.
 - **gamut-color** / **gamut-dsp** / **gamut-bitstream** — shared primitives. ← core.
-- **gamut-tonemap** — scalar tone-mapping curves (`ToneCurve` + Reinhard/ACES/Hable/Drago)
-  for HDR→SDR pipelines, between `gamut-color`'s transfer functions and the SDR re-encode.
-  ← core.
+- **gamut-tonemap** — scalar tone-mapping curves for HDR→SDR pipelines: the `ToneCurve` trait
+  over eight operators (Linear/Clamp/Exposure/Reinhard/ReinhardExtended/ACES/Hable/Drago),
+  between `gamut-color`'s transfer functions and the SDR re-encode. ← core.
 - **gamut-codec-abi** — shared codestream-backend seam: `repr(C)` vtables
   (`DecoderVTable`/`EncoderVTable` + `StreamConfig`/`EncodeConfig`/`ImageDesc`) and their
   object-safe Rust twin traits, plus the registry fallback contract by which a foreign
@@ -45,7 +46,7 @@ Dependency edges (a crate depends on those to its right):
   first (and supplies encode on wasm32), and `encode`/`decode` features mean "include the
   built-in tail", not "enable the direction"; container features (ISOBMFF/Exif/XMP/jbrd)
   stay pinned to the built-in path by a host-side veto. ← core, codec-abi, gamut-jxl-sys
-  (encode, non-wasm), external `jxl`.
+  (encode, non-wasm), external `jxl`, metadata (optional, `metadata` feature).
 - **gamut-jxl-sys** — declarations-only `-sys` crate statically building/linking
   **libjxl 0.12.0** via BSD-3-Clause `jpegxl-src` (`links = "jxl"`); native backend for
   gamut-jxl's encoder and its libjxl decode-oracle tests. No gamut deps (C/FFI only);
@@ -53,7 +54,8 @@ Dependency edges (a crate depends on those to its right):
 - **gamut-jpeg** — JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec: baseline sequential DCT
   Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF; opt-in jpegli-style XYB colour mode
   with a static vendored ICC profile), sequential/progressive decoder and progressive encoder
-  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, color, dsp.
+  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, color, dsp,
+  metadata (optional, `metadata` feature).
 - **gamut-avif** ← av1, isobmff, core, color, codec-abi (pluggable `Av1StillEncoder`
   codestream seam; `gamut-av1` is the implicit software tail). **gamut-webp** ← +riff; like
   gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw `MetadataBlock`-ready
@@ -62,9 +64,11 @@ Dependency edges (a crate depends on those to its right):
   (every input byte maps to a box, appended motion-photo stream, or explicit trailer), typed
   `hvcC`/NAL layer, pluggable `HevcDecoder` hook for platform HEVC decoders (HEVC bitstream
   decode itself is out of scope here). Differential oracle: libheif+libde265 (+kvazaar
-  fixture generation), dev-only. ← isobmff, core, color.
+  fixture generation), dev-only. ← isobmff, core, color, metadata (optional, `metadata`
+  feature).
 - **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png;
-  deliberately encoder-only — workspace decoders inflate via `miniz_oxide`. ← core.
+  deliberately encoder-only — workspace decoders inflate via `miniz_oxide`. ← nothing: no dependency
+  at all, not even `gamut-core` (`src/lib.rs:6`).
 - **gamut-png** — PNG codec (3rd edition, W3C): space-efficient encoder and spec-compliant
   decoder — all colour types/bit depths, Adam7 *decoding*, all filters, decode limits for
   hostile input, ancillary metadata surfaced as raw `MetadataBlock`-ready payloads

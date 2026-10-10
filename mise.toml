@@ -195,6 +195,25 @@ run = "git submodule update --init --checkout third_party/gamut-dng-samples"
 description = "Coverage-guided fuzzing of the invariants laws; `mise run fuzz <target>`"
 run = "./tooling/gamut-fuzz/run.sh"
 
+# The compile half of the tier above -- the only part of it the per-PR lane can afford, and the
+# same argument `check-dng-real` below makes for the other excluded `tooling/` crate: `gamut-fuzz`
+# is workspace-excluded *and* nothing depends on it, so `clippy --workspace --all-targets` and
+# `test --workspace` never build it, and an API change in gamut-ifd, gamut-tiff, gamut-dng,
+# gamut-isobmff or gamut-heic can break every target while all four required checks stay green.
+# Build-only: no nightly, no sanitizer, no engine, so it stays bounded and reproducible and does
+# not put a coverage-guided run on the pull-request path (docs/testing.md).
+[tasks.check-fuzz]
+description = "Compile the fuzz tier's targets (no nightly, no engine)"
+run = "cargo check --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets"
+
+# The drift guard for the three hand-maintained lists that describe the same target set: the files
+# under `fuzz_targets/`, the `[[bin]]` entries, and `extended.yml`'s fuzz matrix. Missing from the
+# third means the target is written, reviewed, committed -- and never run, silently. Pure text: no
+# cargo, no toolchain, no network, which is why CI runs it in the cheap `Format & Metadata` job.
+[tasks.check-fuzz-matrix]
+description = "Reconcile the fuzz targets across fuzz_targets/, Cargo.toml and extended.yml"
+run = "./tooling/gamut-fuzz/check-targets.sh"
+
 [tasks.test-dng-real]
 description = "Validate gamut-dng against real camera DNGs (issue #174; needs fetch-dng-samples)"
 run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
@@ -209,6 +228,43 @@ run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
 [tasks.check-dng-real]
 description = "Compile the real-camera DNG conformance tier (no corpus needed)"
 run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml --all-targets"
+
+# The C2PA differential oracle (issue #447 under the #239 epic). Like the tier above it is
+# workspace-excluded *and* nothing depends on it, so no per-PR gate reaches it; unlike that tier it
+# needs no corpus and no native toolchain — `c2pa-rs` is a pure-Rust crate built
+# `--no-default-features --features rust_native_crypto`, which is what keeps its vendored OpenSSL
+# out of this repository entirely. It is still kept off `mise run test` because a shipped crate
+# must never gain an edge to it, and the excluded manifest is what enforces that.
+#
+# `--locked` is what makes the committed `tooling/c2pa-oracle/Cargo.lock` load-bearing. Without it
+# cargo silently re-resolves the 307 transitive packages under the pinned `c2pa` (the figure is
+# derived in `tooling/c2pa-oracle/README.md`) and writes the result over the committed file, so the
+# crate's own resolved-graph assertion would be reading a resolution cargo had produced moments
+# earlier. With it, a lockfile that is missing or out of date fails the task instead of being
+# regenerated.
+#
+# That lockfile also records the 15 `gamut-*` crates this one reaches by path (it is workspace-
+# `exclude`d, so the root lockfile does not stand in for it). A release-plz version bump or a
+# dependency change in any of them therefore fails both tasks with "cannot update the lock file …
+# --locked was passed" even though nothing here changed. Refresh with
+# `cargo update --workspace --manifest-path tooling/c2pa-oracle/Cargo.toml` (path entries only; the
+# registry graph under `c2pa` stays put) and commit it — `tooling/c2pa-oracle/README.md`,
+# "Refreshing the lockfile after a gamut crate changes".
+[tasks.test-c2pa]
+description = "Cross-check gamut's C2PA carriage against c2pa-rs, both directions (issue #447)"
+run = "cargo test --locked --manifest-path tooling/c2pa-oracle/Cargo.toml"
+
+# The compile half, shaped after `check-dng-real`: a `gamut-avif` or `gamut-heic` API change can
+# break this crate while every per-PR gate stays green, and `check` catches that in seconds without
+# signing anything.
+#
+# Unlike `check-dng-real`, **neither of these two tasks is called by any workflow in `.github/`.**
+# The crate's whole automated reach today is `fmt-tooling-check`, which `fmt-check` hangs off, so a
+# compile break or a differential regression is caught only when someone runs these by hand.
+# Wiring them up — `check-c2pa` in the per-PR lint lane, `test-c2pa` in extended — is issue #541.
+[tasks.check-c2pa]
+description = "Compile the C2PA differential oracle (no signing, no corpus)"
+run = "cargo check --locked --manifest-path tooling/c2pa-oracle/Cargo.toml --all-targets"
 
 # Doctests only. On stable, `cargo llvm-cov` cannot instrument doctests (that needs nightly), so
 # the coverage gate — which CI uses as its green-test gate — silently skips them. This task is the
@@ -295,6 +351,39 @@ run = "./tooling/mutants/run.sh --crate"
 [tasks.check-tests]
 description = "Enforce the mechanical test conventions in docs/testing.md"
 run = "./tooling/check-tests/run.sh"
+
+# Nothing read the README crates table, so it drifted: fixing issue #425 meant correcting
+# twenty-three of its twenty-eight rows and adding four crates that had no row at all. `versions`
+# only lists `name version` and asserts nothing, and `check-msrv` greps the README for one number,
+# so neither would have caught it. This gates the table's *membership* -- every workspace crate
+# has a row, every row names a real crate, no crate twice -- each crate row's *shape* (three cells
+# whose Purpose and Status each render as something, and not hidden inside an HTML comment or a
+# code fence), and the table's *context*: EVERY crate row in the section must render inside ONE
+# table, headed by a delimiter row directly under a header row of the same width, since anything
+# else renders some or all of the rows as literal text. It also checks the claim forms `cargo
+# metadata` can decide, because a hand-maintained list of crates is the defect this task exists
+# to catch, one level down. Those forms are NOT enumerated here: this comment named three of them
+# while the script checked five, which is the same defect a third time. The script header says
+# where the list lives and how to print it -- `grep -n 'CLAIM FORM:'` over the script.
+#
+# It gates nothing else about the prose, so a green run means "every crate has a well-formed row
+# inside a real table, and the claims cargo can settle are settled", not "the table is true". A
+# row's prose answers to the crate's own source -- the code that ships. lib.rs, then Cargo.toml,
+# then STATUS.md is where to look, but each is a summary and any of them can be stale (issues
+# #545, #560), so a row must be true of the crate rather than faithful to a file. What the guard
+# deliberately does not check is written down once, in the script header.
+[tasks.check-readme-crates]
+description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, renders as one table under a header and delimiter row of matching width, gives each crate a three-cell row whose Purpose and Status render as something, and agrees with cargo metadata wherever the section makes a claim in one of the forms the guard checks"
+run = "./tooling/check-readme-crates/run.sh"
+
+# The guard's own regression battery: single-edit fixtures over the repository README, each
+# asserting the exit code and the message the guard owes it. Not part of `check-readme-crates`,
+# and not in CI: it is for whoever changes the guard, and it costs a `cargo metadata` per fixture.
+# `CHECK_README_AWK` selects the interpreter, so the portability claim is re-runnable rather than
+# asserted -- e.g. `CHECK_README_AWK='gawk --posix' mise run check-readme-crates-fixtures`.
+[tasks.check-readme-crates-fixtures]
+description = "Run the README crates-table guard against its own fixture battery"
+run = "./tooling/check-readme-crates/fixtures.sh"
 
 [tasks.check-release-deps]
 description = "Reject publishable dev-only workspace edges that release-plz cannot order"
