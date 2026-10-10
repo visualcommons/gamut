@@ -35,7 +35,10 @@ use crate::palette::PngPalette;
 use crate::{adam7, inflate, pack};
 
 /// Default cap on the decoded sample buffer: 64 MiB, a 4096×4096 RGBA8 image.
-const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
+///
+/// `pub(crate)` because [`crate::deconstruct`] reports against the same budget: a file this
+/// decoder decodes is one the report walk will inflate to count filters.
+pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
 /// Default cumulative cap on inflated metadata (iCCP/zTXt/iTXt) payloads: 16 MiB.
 const DEFAULT_MAX_METADATA_BYTES: usize = 16 << 20;
 /// The spec's own dimension bound (§11.2.1): width and height are 1 ..= 2³¹ − 1.
@@ -360,17 +363,17 @@ impl PngDecoder {
                 "PNG: image exceeds the dimension limit",
             ));
         }
-        let (width, height) = (header.width as usize, header.height as usize);
-        // Budget the *decoded* representation: one byte per sample below depth 16 (sub-byte
-        // depths are unpacked), two above.
-        let bytes_per_sample = if header.bit_depth == 16 { 2 } else { 1 };
-        let native_bytes = width
-            .checked_mul(height)
-            .and_then(|pixels| pixels.checked_mul(header.color.channels()))
-            .and_then(|samples| samples.checked_mul(bytes_per_sample))
-            .ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: image dimensions overflow")
-            })?;
+        // Budget the *decoded* representation, via the one definition of that quantity, so the
+        // report walk in `crate::deconstruct` cannot come to budget a different one.
+        let native_bytes = ihdr::native_bytes(
+            header.width,
+            header.height,
+            header.color.channels(),
+            header.bit_depth,
+        )
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: image dimensions overflow")
+        })?;
         if native_bytes > self.max_image_bytes {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -1323,8 +1326,9 @@ mod tests {
         assert_eq!(decoded.as_samples(), expected);
     }
 
-    /// Hand-assembles a greyscale PNG from raw parts (the encoder cannot write interlaced files
-    /// or greyscale/truecolour tRNS colour keys).
+    /// Hand-assembles a greyscale PNG from raw parts (the encoder cannot write interlaced files,
+    /// and choosing the colour key by hand keeps the decoder's claim independent of
+    /// `reduce`'s).
     fn build_gray_png(
         width: u32,
         height: u32,

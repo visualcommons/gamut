@@ -15,6 +15,14 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Re-exports the encoder's pipeline stages (`src/stages.rs`) so `benches/encode.rs` -- an external
+# crate, which can only see `pub` -- can time them one at a time (issue #224). Additive,
+# `doc(hidden)`, no SemVer guarantee, and never enabled by the `gamut` umbrella, so the shipped
+# surface and `mise run check-ffi-features` are unaffected. The module is re-exports only, so it
+# adds no coverage regions and no mutants.
+test-support = []
+
 [dependencies]
 gamut-core.workspace = true
 # The shared codestream-backend seam (issue #272): the `repr(C)` vtable + fallback contract the
@@ -26,6 +34,11 @@ gamut-deflate.workspace = true
 # is deliberately encoder-only, and its docs bless miniz_oxide as the decode-side inflate (the same
 # choice gamut-dng made); revisiting an in-house inflater is tracked by issue #196.
 miniz_oxide = "0.8"
+# CRC-32 (ISO-HDLC) for every chunk, IDAT included, so it is on the critical path of every encode.
+# Hardware-accelerated (x86-64 PCLMULQDQ/AVX-512, aarch64 `crc32`) with a table fallback elsewhere,
+# including wasm32. MIT/Apache-2.0, pure Rust, and it keeps its `unsafe` to itself -- gamut-png
+# stays 100% safe Rust. Replaces a hand-written byte-at-a-time table loop; see `src/crc32.rs`.
+crc32fast = "1.5"
 
 [dev-dependencies]
 # Differential cross-check oracle: a vendored, statically-linked libpng (built from the
@@ -33,3 +46,12 @@ miniz_oxide = "0.8"
 # directions: it decodes the gamut encoder's output, and it generates the fixture corpus (and the
 # reference pixels) the gamut decoder is differentially checked against.
 libpng-oracle = { path = "../../tooling/libpng-oracle" }
+# Benchmark harness (issue #149) plus this crate's own `test-support` feature, which the bench
+# target needs to reach the pipeline stages. A self dev-dependency is the standard way to enable an
+# own feature for tests and benches only; `mise run check-release-deps` skips self-edges.
+divan.workspace = true
+gamut-png = { path = ".", features = ["test-support"] }
+
+[[bench]]
+name = "encode"
+harness = false
