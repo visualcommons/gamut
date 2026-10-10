@@ -62,7 +62,21 @@ on a hand-written golden bitstream.
   (samples stay in coded order, decoders apply the transform).
 - **Exif / XMP container boxes.** `with_exif` (raw EXIF; the 4-byte tiff-offset prefix is added
   automatically) and `with_xmp`, written as uncompressed `Exif` / `xml ` boxes; requires
-  `Container::IsoBmff` (a typed error otherwise).
+  `Container::IsoBmff` (a typed error otherwise). **Read back** by `JxlDecoder::metadata` →
+  `JxlMetadata { exif, xmp, icc }` (issue #420): the crate walks the container's top-level box
+  sequence itself (jxl-rs does not expose auxiliary boxes — ledger below), applies the `Exif`
+  payload's tiff-header offset, takes the first box of a kind, refuses a Brotli-compressed
+  (`brob`) `Exif`/`xml ` box as `Unsupported`, and reports the codestream ICC profile alongside.
+- **Typed metadata** (issue #420) behind the opt-in **`metadata`** feature (a normal, optional
+  dependency on `gamut-metadata`): `JxlMetadata::blocks` / `metadata` (the facade's
+  `MetadataBlock`s / `Metadata`), `JxlEncoder::with_metadata(&Metadata)` (default
+  `MetadataEmbedder`) and `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies),
+  routing EXIF (`Exif\0\0` stripped) and XMP to the boxes and the ICC profile to `ColorSpec::Icc`.
+  IPTC-IIM and C2PA blocks are typed `Unsupported`; a C2PA store is never copied forward (facade
+  policy). **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no
+  JPEG XL reader), so "exiv2 reads the boxes out of the `.jxl`" is untested; the box payloads are
+  pinned byte-exact by the raw box scan of libjxl's output (below), and the leaf crates pin the
+  payloads against exiv2 (#510).
 - **Full pixel decode (jxl-rs).** Decodes the entire ISO/IEC 18181-1 pixel surface jxl-rs
   covers — VarDCT and Modular (RCT/palette/squeeze), XYB, splines/patches/noise/spot colours,
   progressive-encoded streams, and both `jxlc`/`jxlp` container framings — reshaping to the
@@ -117,9 +131,10 @@ unlocks it.
 - **JPEG reconstruction on decode.** gamut writes `jbrd` streams whose original JPEG the *libjxl*
   decoder reconstructs bit-for-bit; a pure-Rust reconstruction API is blocked on jxl-rs shipping
   its `jpeg-reconstruction` feature (ledger below).
-- **Reading Exif / XMP boxes back on decode.** gamut writes the boxes; surfacing them from incoming
-  streams is blocked on jxl-rs exposing box contents (ledger below) and ties into the
-  `gamut-metadata` facade (issue #34) for typed parsing.
+- **Brotli-compressed metadata boxes (`brob`).** `JxlDecoder::metadata` locates uncompressed
+  `Exif` / `xml ` boxes (delivered, #420); a `brob`-wrapped one is a typed `Unsupported` because
+  decompressing it needs a Brotli dependency this crate does not carry. Unlocks with that
+  dependency decision (#510).
 - **Premultiplied (associated) alpha decode.** Rejected today; unlocks with an un-premultiply step in
   `convert` (deliberately deferred: an integer un-premultiply is an approximate inverse — alpha = 0
   is unrecoverable — so it belongs behind an explicit opt-in, not a silent default).
@@ -200,8 +215,9 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   short prefixes, every single-bit flip over the first 256 bytes) driven through the partial path in
   `tests/robustness.rs`; no panic has been observed. The default `DecodeImage` path never flushes.
 - **Container Exif / XMP metadata not exposed.** jxl-rs does not surface the `Exif`/`xml ` box bytes
-  ([#674](https://github.com/libjxl/jxl-rs/issues/674)) — the upstream half of gamut's deferred
-  *read-back* support (gamut's encoder writes the boxes today).
+  ([#674](https://github.com/libjxl/jxl-rs/issues/674)), and its box-header parser is
+  `pub(super)`. gamut-jxl therefore locates the boxes with its own top-level box walk
+  (`JxlDecoder::metadata`, #420); when jxl-rs exposes box events the walk can be replaced.
 - **CMYK.** Parsed but not presentable (see Out of scope).
 
 ## Oracle & test regime
@@ -257,7 +273,10 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   pinned by hand-reversal; explicit Identity is byte-identical to the default stream.
 - **Metadata boxes.** Exact `Exif` (tiff-offset prefix included) and `xml ` box payloads pinned by
   a raw box scan; pixels stay bit-exact with boxes present; Codestream+metadata and empty payloads
-  are typed errors.
+  are typed errors. Read-back: `JxlDecoder::metadata` returns what `with_exif` / `with_xmp` /
+  `ColorSpec::Icc` wrote (`tests/metadata.rs`), the box walk's size forms and hostile-input
+  refusals are unit-tested beside it, and with the `metadata` feature the facade's typed
+  extract → embed → extract equality holds through the container (`tests/metadata_facade.rs`).
 - **Signatures / conversions.** Codestream vs. container signature bytes and the
   gray→RGB / RGBA→RGB / RGB→gray-rejection conversion contracts are pinned.
 - **Mutants:** zero unjustified survivors; the only `exclude_re` entries carry strong justifications

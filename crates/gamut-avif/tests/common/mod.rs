@@ -3,6 +3,8 @@
 //! normalising writer cannot express.
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
+use gamut_avif::{Av1Config, Av1StillDecoder, DecodedFrame};
+use gamut_core::{Error, Result};
 use gamut_isobmff::{IsoBmffImage, Item, ItemReference, Property, PropertyKind, write};
 
 /// A minimal valid `av1C` record: High profile (4:4:4), level 0, 8-bit, empty `configOBUs`.
@@ -153,4 +155,36 @@ pub fn iinf_v0(infes: &[Vec<u8>]) -> Vec<u8> {
 /// A `meta` FullBox with the given children.
 pub fn meta(children: &[Vec<u8>]) -> Vec<u8> {
     full(b"meta", 0, 0, &cat(children))
+}
+
+// ---- oracle bridges -------------------------------------------------------------------------
+
+/// [`Av1StillDecoder`] implemented with the real dav1d decoder (`dav1d-oracle`), bridged exactly
+/// the way a platform decoder would be: the typed `av1C` and the raw item payload are assembled
+/// into one self-contained temporal unit with [`Av1Config::full_stream`] and handed to a Section-5
+/// decoder.
+///
+/// Shared here because more than one integration test decodes a file it just encoded; each binary
+/// that does declares `mod common;` and the rest carry it under this file's `allow(dead_code)`.
+pub struct Dav1dDecoder;
+
+impl Av1StillDecoder for Dav1dDecoder {
+    fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> Result<DecodedFrame> {
+        let mut stream = Vec::new();
+        config.full_stream(payload, &mut stream)?;
+        let picture = dav1d_oracle::decode_obu(&stream)
+            .map_err(|_| Error::InvalidInput("common: dav1d rejected the stream"))?;
+        let [y, u, v] = picture.planes;
+        // `DecodedFrame::new` validates the plane lengths against the av1C-derived chroma, so a
+        // config/codestream mismatch fails loudly here rather than decoding to nonsense.
+        DecodedFrame::new(
+            picture.width,
+            picture.height,
+            picture.bit_depth,
+            config.chroma_format(),
+            y,
+            u,
+            v,
+        )
+    }
 }
