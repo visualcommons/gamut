@@ -121,6 +121,20 @@
 //! # Ok::<(), gamut_core::Error>(())
 //! ```
 //!
+//! # Content credentials (C2PA)
+//!
+//! A C2PA manifest store is bound to the finished file, so it cannot be handed to the encoder
+//! complete. The encoder therefore **reserves**: [`AvifEncoder::with_c2pa_reserved`] writes the
+//! C2PA `ContentProvenanceBox` — a top-level `uuid` box with user type [`C2PA_UUID`], after
+//! `ftyp` (C2PA 2.4 §A.5.1, §A.5.3) — around a slot of zero bytes, and
+//! [`AvifEncoder::encode_with_report`] returns the bytes `encode_to_vec` would plus the slot's
+//! range ([`AvifEncodeReport::c2pa`]), which an external signer patches in place; nothing after
+//! the slot moves. [`AvifEncoder::with_c2pa`] writes a store already computed over this exact
+//! output. On read, [`AvifContainer::c2pa_slot`] / [`AvifContainer::c2pa_slots`] report each
+//! located [`C2paSlot`] — slot bytes, file range and [`C2paBoxPurpose`]. The store is
+//! opaque throughout: nothing here validates it, and the range is for patching and byte
+//! accounting, not a hash exclusion range (BMFF assets bind by box path, §18.6).
+//!
 //! # Supported / deferred
 //!
 //! gamut is image-first, so only the still-image (intra) subset of AV1 is in scope — no sequences or
@@ -131,8 +145,9 @@
 //! [`AvifEncoder::with_color_range`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
 //! [`AvifEncoder::with_mirror`]); the **colour and metadata surface** — CICP primaries and transfer
 //! ([`AvifEncoder::with_primaries`] / [`AvifEncoder::with_transfer`]), an embedded ICC profile
-//! ([`AvifEncoder::with_icc_profile`]), and Exif / XMP items
-//! ([`AvifEncoder::with_exif`] / [`AvifEncoder::with_xmp`]); and the **container decode surface** above (full read of items,
+//! ([`AvifEncoder::with_icc_profile`]), Exif / XMP items
+//! ([`AvifEncoder::with_exif`] / [`AvifEncoder::with_xmp`]), and a reserved or written C2PA
+//! manifest store (above); and the **container decode surface** above (full read of items,
 //! properties, derivations, and metadata; planar, 8-bit and high-bit-depth RGBA presentation around
 //! a caller decoder). Output is validated end-to-end against `libavif` (its dav1d-backed reference
 //! container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the AV1
@@ -154,6 +169,7 @@
 
 mod av1c;
 pub mod backend;
+mod c2pa;
 mod config;
 mod container;
 mod decode;
@@ -164,10 +180,11 @@ mod transform;
 
 pub use av1c::{Av1Config, ChromaFormat};
 pub use backend::{AV1_CODEC_ID, AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder};
+pub use c2pa::{C2PA_UUID, C2paBoxPurpose, C2paSlot};
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodedFrame};
-pub use encoder::AvifEncoder;
+pub use encoder::{AvifEncodeReport, AvifEncoder};
 pub use gamut_core::Dimensions;
 pub use image::{
     AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, PixelAspectRatio,

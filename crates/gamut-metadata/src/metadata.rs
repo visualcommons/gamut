@@ -3,12 +3,13 @@
 use gamut_exif::{Exif, Value};
 use gamut_icc::IccProfile;
 use gamut_iptc::PhotoMetadata;
-use gamut_xmp::XmpMeta;
+use gamut_xmp::{WellKnownNs, XmpMeta};
 
 use crate::embed::{EncodedMetadata, MetadataEmbedder};
 use crate::error::Result;
 use crate::extension::MetadataExtension;
 use crate::extract::MetadataExtractor;
+use crate::provenance::ProvenanceState;
 use crate::source::MetadataBlock;
 
 /// All of an image's metadata, unified across the carriers a container holds.
@@ -70,6 +71,10 @@ pub struct Metadata {
     /// There is deliberately no byte range beside it: an offset is a property of one file, and
     /// would become a lie the moment this model were embedded into another. Ranges stay with the
     /// format crate that knows the file.
+    ///
+    /// `Some` here is one of two provenance sources — the other is a `dcterms:provenance` URL in
+    /// [`xmp`](Self::xmp) — so ask [`provenance`](Self::provenance) rather than `is_some()` when
+    /// the question is "does this image have Content Credentials?".
     pub c2pa: Option<Vec<u8>>,
     /// Data none of the carriers above models, in namespaces the caller owns.
     ///
@@ -135,6 +140,38 @@ impl Metadata {
     pub fn iptc(&self) -> Option<PhotoMetadata> {
         let pm = PhotoMetadata::from_xmp(self.xmp.as_ref()?);
         (!pm.xmp.properties.is_empty()).then_some(pm)
+    }
+
+    /// Where this image's C2PA provenance lives: embedded, remote, both, or nowhere.
+    ///
+    /// A *computed lens* over two independent sources, stored nowhere: [`c2pa`](Self::c2pa) being
+    /// `Some` means a manifest store is embedded, and a simple `dcterms:provenance` property in
+    /// [`xmp`](Self::xmp) (namespace [`WellKnownNs::DcTerms`], C2PA 2.4 §11.5 / §15.5.3.1) means
+    /// an external manifest lives at that URL. Neither source suppresses the other: the key is
+    /// reserved for external manifests (§11.5), but nothing stops a file from carrying both, and
+    /// this reports what the file carries rather than choosing between them.
+    ///
+    /// The URL comes back as the XMP carried it, with surrounding whitespace trimmed; **gamut
+    /// never resolves it** (see [`ProvenanceState`]). A value that is empty or whitespace-only is
+    /// treated as no URL — §11.5 makes the value a URI reference, which neither is — and a
+    /// non-simple value (an array or structure) is ignored. Should a non-canonical graph carry
+    /// the property twice, the first occurrence wins, as [`XmpMeta::get`] defines. The HTTP `Link`
+    /// header route of §15.5.3.2 is deliberately not modelled: see the
+    /// [`provenance`](crate::provenance) module.
+    #[must_use]
+    pub fn provenance(&self) -> ProvenanceState {
+        let remote = self
+            .xmp
+            .as_ref()
+            .and_then(|xmp| xmp.get_text(WellKnownNs::DcTerms.uri(), "provenance"))
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        match (self.c2pa.is_some(), remote) {
+            (false, None) => ProvenanceState::None,
+            (false, Some(url)) => ProvenanceState::Remote(url.to_owned()),
+            (true, None) => ProvenanceState::Embedded,
+            (true, Some(url)) => ProvenanceState::EmbeddedAndRemote(url.to_owned()),
+        }
     }
 
     /// The value bound to `key` in `namespace`, or `None` when the model carries no such
@@ -248,6 +285,81 @@ mod tests {
                 ..Default::default()
             }
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn provenance_treats_an_empty_dcterms_value_as_no_url() {
+        // §11.5 makes the value a URI reference; an empty element is not one, so it must not
+        // surface as Remote("") for a caller to try to fetch.
+        let empty = Metadata {
+            xmp: Some(xmp_with(WellKnownNs::DcTerms.uri(), "provenance", "")),
+            ..Default::default()
+        };
+        assert_eq!(empty.provenance(), ProvenanceState::None);
+
+        let with_store = Metadata {
+            c2pa: Some(vec![0x00, 0x00, 0x00, 0x14]),
+            ..empty
+        };
+        assert_eq!(with_store.provenance(), ProvenanceState::Embedded);
+    }
+
+    #[test]
+    fn provenance_trims_the_url_and_treats_whitespace_only_as_no_url() {
+        // The same reason as the empty value: a URI reference has no surrounding whitespace, and
+        // `Remote("   ")` would hand a caller nothing to fetch. Padding around a real URL is
+        // pretty-printing noise, not part of the reference.
+        let blank = Metadata {
+            xmp: Some(xmp_with(WellKnownNs::DcTerms.uri(), "provenance", " \n\t ")),
+            ..Default::default()
+        };
+        assert_eq!(blank.provenance(), ProvenanceState::None);
+        let blank_with_store = Metadata {
+            c2pa: Some(vec![0x00, 0x00, 0x00, 0x14]),
+            ..blank
+        };
+        assert_eq!(blank_with_store.provenance(), ProvenanceState::Embedded);
+
+        let padded = Metadata {
+            xmp: Some(xmp_with(
+                WellKnownNs::DcTerms.uri(),
+                "provenance",
+                "\n  https://example.com/m.c2pa  \n",
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            padded.provenance(),
+            ProvenanceState::Remote("https://example.com/m.c2pa".to_owned())
+        );
+    }
+
+    #[test]
+    fn provenance_reads_only_the_dcterms_namespace() {
+        // Same local name in Dublin Core *elements* (`dc:`) is a different property; the two
+        // namespaces share a vendor path, so the mix-up is the likely defect.
+        let dc = Metadata {
+            xmp: Some(xmp_with(
+                WellKnownNs::DublinCore.uri(),
+                "provenance",
+                "https://example.com/m.c2pa",
+            )),
+            ..Default::default()
+        };
+        assert_eq!(dc.provenance(), ProvenanceState::None);
+
+        let dcterms = Metadata {
+            xmp: Some(xmp_with(
+                WellKnownNs::DcTerms.uri(),
+                "provenance",
+                "https://example.com/m.c2pa",
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            dcterms.provenance(),
+            ProvenanceState::Remote("https://example.com/m.c2pa".to_owned())
         );
     }
 

@@ -739,6 +739,7 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-isobmff",
+ "gamut-metadata",
  "libheif-oracle",
 ]
 
@@ -798,6 +799,7 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
+ "gamut-metadata",
  "libjpeg-oracle",
 ]
 
@@ -808,6 +810,7 @@ dependencies = [
  "gamut-codec-abi",
  "gamut-core",
  "gamut-jxl-sys",
+ "gamut-metadata",
  "jxl",
 ]
 
