@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/visualcommons/gamut/compare/gamut-av1-v0.4.1...gamut-av1-v0.5.0) - 2026-10-10
+
+### Added
+
+- *(av1)* encode 10- and 12-bit samples
+- *(av1)* encode monochrome still pictures
+- *(avif)* complete the 4:2:2 coding path
+- *(avif)* [**breaking**] default lossy output to 4:2:0 and expose the chroma format
+- *(av1)* encode 4:2:0 chroma
+- *(av1)* parse OBUs and the AV1 sequence and frame headers
+- *(av1)* add the 32-coefficient eob CDF and complete Max_Tx_Size_Rect
+- *(av1)* [**breaking**] give every coded plane its own sample geometry
+- *(av1)* adapt CDFs while coding tiles
+- *(avif)* code the lossy path in YCbCr
+- *(av1)* parameterise the still encoder's colour signalling
+- *(core)* add structured error diagnostics
+
+### Fixed
+
+- *(av1)* name monochrome when the decoder refuses a monochrome stream
+- *(av1)* check every OBU's trailing bits against its declared size
+- *(av1)* close two conformance gaps the subsampled path opened
+- *(av1)* step the deblock neighbour by the plane's subsampling
+
+### Other
+
+- *(av1)* separate CDF adaptation from context independence
+- merge feat/397-avif-alpha-aux into feat/398-av1-high-bitdepth
+- Merge pull request #403 from visualcommons/feat/391-avif-422-profile2
+- Merge pull request #402 from visualcommons/feat/390-avif-420-profile0
+- *(av1)* kill the mutants the header layer pulled into the diff
+- *(av1)* pin the vertical-split decision where it is observable
+- Merge branch 'feat/390-avif-420-profile0' into feat/391-avif-422-profile2
+- *(av1)* drop the surface entries this slice implements
+- Merge remote-tracking branch 'origin/master' into feat/390-avif-420-profile0
+- *(av1)* correct the sequence-header docs for the 10/12-bit profiles
+- *(av1)* supply the monochrome flag at the header parse call sites
+- Merge remote-tracking branch 'origin/master' into feat/259-avif-decoder
+- *(av1)* kill the mutants the high-bit-depth slice pulled into the diff
+- *(av1)* record the high-bit-depth sample path
+- *(av1)* check the 10- and 12-bit path against libaom and dav1d
+- merge feat/390-avif-420-profile0 into feat/391-avif-422-profile2
+- *(av1)* shape the CfL selection so its conditions are testable
+- *(av1)* kill the surviving tile-spacing and lr_params mutants
+- merge feat/390-avif-420-profile0 into feat/391-avif-422-profile2
+- make the last three chroma mutants observable
+- merge feat/390-avif-420-profile0 into feat/391-avif-422-profile2
+- close the remaining chroma mutation gaps
+- *(av1)* kill the mutants the monochrome slice pulled into the diff
+- *(av1)* record monochrome encoding in the README and status ledger
+- *(av1)* cover the header syntax the encoders never emit
+- cover the chroma derivations directly, not through an encode
+- *(av1)* check the decoder's header layer against libaom
+- *(av1)* code the residual, contexts and CfL per plane
+- Merge pull request #394 from visualcommons/feat/389-av1-per-plane-geometry
+- *(av1)* kill the mutants the geometry refactor pulled into the diff
+- mark the aom/dav1d submodules `update = none`
+- Merge branch 'master' into feat/335-avif-ycbcr-matrix
+- *(av1)* record CDF adaptation in STATUS and README
+- *(avif)* record the YCbCr matrix surface
+
 ## [0.4.1](https://github.com/justin13888/gamut/compare/gamut-av1-v0.4.0...gamut-av1-v0.4.1) - 2026-07-20
 
 ### Other

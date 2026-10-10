@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/visualcommons/gamut/compare/gamut-png-v0.1.0...gamut-png-v0.1.1) - 2026-10-10
+
+### Added
+
+- *(gamut-png)* read metadata without decoding pixels
+- *(png)* extend lossless auto-reduce to grey and 16-bit inputs
+- *(png)* route typed presentation through gamut-core convert
+- *(png)* plumb DEFLATE effort through PngEncoder::with_effort
+- *(core)* add structured error diagnostics
+
+### Other
+
+- *(png)* pin the tRNS overhead term with a translucent palette
+- Merge pull request #486 from visualcommons/chore/110-survey-tier1-rest
+- *(png)* close the remaining survivors of the first survey
+- *(png)* pin the encoding analyze8 chooses, not just that it reduces
+- deny unsafe in the hot-path crates instead of forbidding it
+- *(png)* pin each auto-reduce claim separately
+- adopt as_chunks for constant-size slice chunking
+- merge origin/master into feat/268-pixel-conversion
+- close the mutation-testing gaps in the conversion paths
+- *(png)* close the mutation gaps in the reduce/decoder extension
+
 ## [0.1.0](https://github.com/justin13888/gamut/releases/tag/gamut-png-v0.1.0) - 2026-07-18
 
 ### Added
