@@ -137,12 +137,126 @@ fn obu(ty: u8, payload: &[u8]) -> Vec<u8> {
     v
 }
 
-/// A conforming still payload carrying `(base, w, h)` for the mock: a reduced-still-picture
-/// sequence header OBU followed by a frame OBU.
-fn coded_payload(base: u8, w: u32, h: u32) -> Vec<u8> {
-    let mut p = obu(1, &[0x18]); // seq_profile 0 | still_picture 1 | reduced_still_picture 1
+/// A most-significant-bit-first bit packer for hand-built OBU payloads.
+#[derive(Default)]
+struct Bits {
+    bytes: Vec<u8>,
+    used: u32,
+}
+
+impl Bits {
+    /// Appends the low `n` bits of `value`, most significant first.
+    fn put(&mut self, n: u32, value: u32) -> &mut Self {
+        for i in (0..n).rev() {
+            if self.used.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            let bit = ((value >> i) & 1) as u8;
+            *self.bytes.last_mut().unwrap() |= bit << (7 - self.used % 8);
+            self.used += 1;
+        }
+        self
+    }
+
+    /// AV1 `trailing_bits()` (§5.3.4): a one bit, then zeros to the byte boundary.
+    fn finish(&mut self) -> Vec<u8> {
+        self.put(1, 1);
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+/// The colour signalling a [`seq_header`] codes in its `color_config()`.
+#[derive(Clone, Copy)]
+struct SeqColour {
+    /// `(color_primaries, transfer_characteristics, matrix_coefficients)`, or `None` for
+    /// `color_description_present_flag = 0` (all three unspecified).
+    cicp: Option<(u8, u8, u8)>,
+    /// `color_range`.
+    full_range: bool,
+}
+
+/// What every fixture without an explicit colour codes: no colour description (so matrix 2,
+/// unspecified, which the RGBA surface presents as BT.601) and studio range.
+const SEQ_UNSPECIFIED_LIMITED: SeqColour = SeqColour {
+    cicp: None,
+    full_range: false,
+};
+
+/// A conformant reduced-still-picture sequence header OBU payload (AV1 §5.5) for the fixture
+/// chroma layout (`0` mono, `1` 4:2:0, `2` 4:2:2, `3` 4:4:4) and bit depth, with a 1×1 maximum
+/// frame size — the profile is the one §5.5.2 requires for that layout.
+fn seq_header(chroma_idc: u8, bd: u8, colour: SeqColour) -> Vec<u8> {
+    let profile = match (chroma_idc, bd) {
+        (_, 12) | (2, _) => 2,
+        (3, _) => 1,
+        _ => 0,
+    };
+    let mut b = Bits::default();
+    // seq_profile | still_picture | reduced_still_picture_header | seq_level_idx[0]
+    b.put(3, profile).put(1, 1).put(1, 1).put(5, 0);
+    // frame_{width,height}_bits_minus_1 = 0, max_frame_{width,height}_minus_1 = 0
+    b.put(4, 0).put(4, 0).put(1, 0).put(1, 0);
+    // use_128x128_superblock, enable_{filter_intra,intra_edge_filter,superres,cdef,restoration}
+    b.put(6, 0);
+    // color_config(): high_bitdepth, twelve_bit (profile 2 only), mono_chrome (not profile 1)
+    b.put(1, u32::from(bd > 8));
+    if profile == 2 && bd > 8 {
+        b.put(1, u32::from(bd == 12));
+    }
+    if profile != 1 {
+        b.put(1, u32::from(chroma_idc == 0));
+    }
+    match colour.cicp {
+        Some((cp, tc, mc)) => {
+            b.put(1, 1)
+                .put(8, cp.into())
+                .put(8, tc.into())
+                .put(8, mc.into());
+        }
+        None => {
+            b.put(1, 0);
+        }
+    }
+    // The §5.5.2 sRGB shortcut (BT.709 / sRGB / identity) codes neither range nor subsampling;
+    // the fixtures never use it, and a mistaken one would desync every later bit.
+    assert_ne!(colour.cicp, Some((1, 13, 0)), "fixture: sRGB shortcut");
+    b.put(1, u32::from(colour.full_range)); // color_range
+    if chroma_idc != 0 {
+        if profile == 2 && bd == 12 {
+            // subsampling_x, then subsampling_y when x is set
+            match chroma_idc {
+                3 => b.put(1, 0),
+                2 => b.put(1, 1).put(1, 0),
+                _ => b.put(1, 1).put(1, 1),
+            };
+        }
+        if chroma_idc == 1 {
+            b.put(2, 0); // chroma_sample_position
+        }
+        b.put(1, 0); // separate_uv_delta_q
+    }
+    b.put(1, 0); // film_grain_params_present
+    b.finish()
+}
+
+/// A conforming still payload carrying `(base, w, h)` for the mock: a sequence header OBU coding
+/// `colour` for the given layout, followed by a frame OBU.
+fn coded_payload_with(
+    chroma_idc: u8,
+    bd: u8,
+    colour: SeqColour,
+    base: u8,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    let mut p = obu(1, &seq_header(chroma_idc, bd, colour));
     p.extend_from_slice(&obu(6, &[base, w as u8, h as u8]));
     p
+}
+
+/// [`coded_payload_with`] at the fixtures' default colour, [`SEQ_UNSPECIFIED_LIMITED`].
+fn coded_payload(chroma_idc: u8, bd: u8, base: u8, w: u32, h: u32) -> Vec<u8> {
+    coded_payload_with(chroma_idc, bd, SEQ_UNSPECIFIED_LIMITED, base, w, h)
 }
 
 fn prop_av1c(data: Vec<u8>) -> Property {
@@ -190,7 +304,7 @@ fn coded_item(
     properties.extend(extra);
     Item {
         properties,
-        payload: coded_payload(base, w, h),
+        payload: coded_payload(chroma_idc, bd, base, w, h),
         ..base_item(id, *b"av01")
     }
 }
@@ -209,7 +323,7 @@ fn file(primary_id: u32, items: Vec<Item>) -> Vec<u8> {
 
 #[test]
 fn coded_planar_passes_exact_config_and_payload_and_gradient() {
-    let payload = coded_payload(20, 4, 4);
+    let payload = coded_payload(1, 8, 20, 4, 4);
     let item = coded_item(1, 1, 8, 20, 4, 4, vec![]); // 4:2:0, 8-bit
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
@@ -246,7 +360,7 @@ fn non_conforming_payload_never_reaches_the_decoder() {
     // A payload whose only frame precedes its sequence header must be refused by the pipeline
     // (validate_still_payload) before the codec hook is asked to decode it.
     let mut payload = obu(6, &[0x10, 4, 4]);
-    payload.extend_from_slice(&obu(1, &[0x18]));
+    payload.extend_from_slice(&obu(1, &seq_header(1, 8, SEQ_UNSPECIFIED_LIMITED)));
     let item = Item {
         properties: vec![prop_av1c(av1c_record(1, 8))],
         payload,
@@ -303,7 +417,7 @@ fn non_av1_coded_item_is_unsupported() {
 #[test]
 fn av1_item_without_av1c_is_invalid() {
     let item = Item {
-        payload: coded_payload(1, 2, 2),
+        payload: coded_payload(1, 8, 1, 2, 2),
         ..base_item(1, *b"av01")
     };
     let bytes = file(1, vec![item]);

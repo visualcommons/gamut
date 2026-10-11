@@ -61,6 +61,7 @@
 //! [`AvifImage::decode_item_rgba8`]; anything outside it is [`Error::Unsupported`] on *those*
 //! surfaces while the planar surface still delivers the samples.
 
+use gamut_av1::SequenceHeader;
 use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, YcbcrMatrix, ycbcr_to_rgb};
 use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8, Rgba16};
 use gamut_isobmff::ColourInformation;
@@ -314,7 +315,8 @@ impl AvifImage {
     /// - **nclx matrix 2 (unspecified)** — treated as BT.601, matching libavif's fallback for
     ///   unspecified matrix coefficients (real-world AVIFs commonly stamp CICP 2/2/2).
     /// - **Monochrome** — luma replicated to gray, range-expanded for limited range.
-    /// - **Missing `colr`** — defaults to **BT.601, limited range** (justification below).
+    /// - **Missing `colr`** — the matrix and range come from the AV1 sequence header's
+    ///   `color_config` (details below), then follow the rules above.
     /// - Anything else — YCgCo, the chromaticity-derived matrices (12/13/14), an ICC-only `colr`,
     ///   or a coded depth CICP does not model — is [`Error::Unsupported`]. On *this* surface a
     ///   `bit_depth > 8` frame is too: narrowing it would trade an honest error for silent quality
@@ -326,12 +328,14 @@ impl AvifImage {
     /// so the 8-bit BT.601 output this crate has always produced, which the libavif differential
     /// bound pins, stays byte-identical.
     ///
-    /// The missing-`colr` default is BT.601 limited range, matching the posture `gamut-heic`
-    /// documents for HEIF. AVIF technically defers an absent `colr` to the AV1 sequence header's
-    /// `color_config`, which this container layer deliberately does not parse — a caller needing
-    /// seq-header-driven colour works from the planar surface (the divergence is intentional and
-    /// pinned by the conformance suite, which uses explicit-`colr` fixtures for pixel
-    /// comparisons).
+    /// **Missing `colr`.** AVIF v1.2.0 §2.2.1 defers an item without a `colr` to the AV1 sequence
+    /// header's `color_config`, and so does this surface: `matrix_coefficients` and `color_range`
+    /// are read from the header [`av1_sequence_header`](Self::av1_sequence_header) parses — for a
+    /// `grid` the first tile's, for an `iden` its source's, as libavif does. A header with
+    /// `color_description_present_flag = 0` signals matrix 2 (unspecified) and so presents as
+    /// BT.601, at the range it codes. A `colr` that *is* present always wins over the header,
+    /// including when the two disagree. A sequence header that does not parse is an error here,
+    /// never a guessed default; the planar surface still delivers the samples.
     ///
     /// **Chroma upsampling** is nearest-neighbour, co-sited (4:2:0 / 4:2:2 → 4:4:4) — the
     /// deliberate space/time tradeoff for a container-layer presentation helper; a caller wanting
@@ -402,8 +406,8 @@ impl AvifImage {
     ///
     /// **Colour policy.** As [`decode_item_rgba8`](Self::decode_item_rgba8), which documents the
     /// shared policy in full: nclx matrices 1 (BT.709), 2/5/6 (BT.601 and its aliases) and 9
-    /// (BT.2020 non-constant luminance), identity (0) at 4:4:4, monochrome, and the missing-`colr`
-    /// BT.601 limited default. Beyond 8 bits every matrix — BT.601 included — goes through the
+    /// (BT.2020 non-constant luminance), identity (0) at 4:4:4, monochrome, and a missing `colr`
+    /// resolved from the AV1 sequence header. Beyond 8 bits every matrix — BT.601 included — goes through the
     /// H.273-derived [`YcbcrMatrix`].
     ///
     /// # Errors
@@ -614,7 +618,7 @@ impl AvifImage {
         } else {
             // The planar path applies its own cycle/depth guard for `id`.
             let frame = self.decode_planar_inner(id, decoder, stack)?;
-            let mut rgba = frame_to_rgba(&item, &frame)?;
+            let mut rgba = frame_to_rgba(&frame, self.colour_params(&item)?)?;
             let (w, h) = (frame.width, frame.height);
             if let Some(alpha) = self.alpha_auxiliary_of(id) {
                 let alpha_frame = self.decode_planar_inner(alpha.id(), decoder, stack)?;
@@ -812,24 +816,48 @@ fn rescale<T: RgbaSample>(s: u16, max_in: u32) -> T {
 
 // ---- colour conversion -----------------------------------------------------------------------
 
-/// The presentation matrix coefficients and signal range for an item: its nclx `colr`, or the
-/// documented BT.601-limited default when absent.
-fn colour_params(item: &AvifItem<'_>) -> Result<(u16, ColorRange)> {
-    match item.colour() {
-        // Default when no `colr`: BT.601 (matrix 6), limited range — see `decode_item_rgba8`.
-        None => Ok((6, ColorRange::Limited)),
-        Some(ColourInformation::Nclx(nclx)) => {
-            let range = if nclx.full_range {
-                ColorRange::Full
-            } else {
-                ColorRange::Limited
-            };
-            Ok((nclx.matrix_coefficients, range))
+impl AvifImage {
+    /// The presentation matrix coefficients and signal range for `item`: its nclx `colr` when it
+    /// carries one, else the `color_config` of the AV1 sequence header its samples were coded
+    /// under (AVIF v1.2.0 §2.2.1; see `decode_item_rgba8`).
+    fn colour_params(&self, item: &AvifItem<'_>) -> Result<(u16, ColorRange)> {
+        let (matrix, full_range) = match item.colour() {
+            None => {
+                let colour = self.sample_sequence_header(item.id())?.color;
+                (u16::from(colour.matrix_coefficients), colour.full_range)
+            }
+            Some(ColourInformation::Nclx(nclx)) => (nclx.matrix_coefficients, nclx.full_range),
+            Some(_) => {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: ICC-profile colr is not supported on the RGBA surface (use the planar \
+                     surface)",
+                ));
+            }
+        };
+        let range = if full_range {
+            ColorRange::Full
+        } else {
+            ColorRange::Limited
+        };
+        Ok((matrix, range))
+    }
+
+    /// The sequence header of the coded item whose samples item `id` presents: `id` itself when
+    /// it is coded; for a `grid`, its **first** tile (the one libavif harvests an absent `colr`
+    /// from); for an `iden`, its sole source — followed down to a coded item.
+    ///
+    /// Carries no cycle or depth guard of its own because it is only reached after
+    /// [`decode_planar_inner`](Self::decode_planar_inner) has walked these same `dimg` edges under
+    /// both, so the walk is known to be finite.
+    fn sample_sequence_header(&self, id: u32) -> Result<SequenceHeader> {
+        if let Some(item) = self.item(id)
+            && let (ItemKind::Grid | ItemKind::Identity, [first, ..]) =
+                (item.kind(), item.derivation_target_ids())
+        {
+            return self.sample_sequence_header(*first);
         }
-        Some(_) => Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "AVIF: ICC-profile colr is not supported on the RGBA surface (use the planar surface)",
-        )),
+        self.av1_sequence_header(id)
     }
 }
 
@@ -861,7 +889,8 @@ impl Converter {
                  12 and 16 bits)",
             )
         };
-        // Unspecified defaults to BT.601 here, as it does when no `colr` is present at all.
+        // Unspecified defaults to BT.601 here — including from a `colr`-less item whose sequence
+        // header codes no colour description.
         let coefficients = if matrix == 2 {
             MatrixCoefficients::Bt601
         } else {
@@ -888,12 +917,14 @@ impl Converter {
 
 /// Converts a planar [`DecodedFrame`] to an interleaved RGBA buffer (opaque alpha) at the
 /// presentation sample width `T`, applying this crate's colour policy (see
-/// [`AvifImage::decode_item_rgba8`]).
-fn frame_to_rgba<T: RgbaSample>(item: &AvifItem<'_>, frame: &DecodedFrame) -> Result<Vec<T>> {
+/// [`AvifImage::decode_item_rgba8`]) to the item's resolved `(matrix_coefficients, range)`.
+fn frame_to_rgba<T: RgbaSample>(
+    frame: &DecodedFrame,
+    (matrix, range): (u16, ColorRange),
+) -> Result<Vec<T>> {
     if frame.bit_depth > T::MAX_CODED_DEPTH {
         return Err(Error::unsupported(env!("CARGO_PKG_NAME"), T::WIDER_SURFACE));
     }
-    let (matrix, range) = colour_params(item)?;
     let (w, h) = (frame.width as usize, frame.height as usize);
     let max_in = (1u32 << frame.bit_depth) - 1;
     let opaque = T::narrow(T::MAX);
