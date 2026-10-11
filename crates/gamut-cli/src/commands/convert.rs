@@ -93,7 +93,9 @@ pub(crate) struct ConvertArgs {
     /// signed over the bytes of the file it was made for — and anything carried in a shape the
     /// PNG specification does not endorse is reported on stderr rather than passed over in
     /// silence. Applies to the PNG output path with a PNG input, and to AVIF output, which carries
-    /// the ICC profile and Exif of a PNG, JPEG, WebP or JPEG XL input; every other pair drops
+    /// the ICC profile and Exif of a PNG, JPEG, WebP or JPEG XL input (the ICC profile only where
+    /// it describes the decoded pixels — not for a lossy, XYB-coded JPEG XL, and not for a grey
+    /// image with alpha or 16-bit samples, which AVIF codes as colour); every other pair drops
     /// metadata regardless.
     #[arg(long)]
     strip_metadata: bool,

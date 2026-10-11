@@ -80,6 +80,23 @@ pub(crate) struct InputMetadata {
     pub(crate) exif: Option<Vec<u8>>,
 }
 
+impl InputMetadata {
+    /// The metadata as it describes the decoded image in `layout`, given whether the file's
+    /// samples are `grey`.
+    ///
+    /// A grey image widened to an RGB(A) layout keeps its pixels but not its ICC profile: a grey
+    /// profile's data colour space is `GRAY` (ICC.1:2022 §7.2.6, Table 19), which cannot describe
+    /// three-channel data, and a reader may ignore or reject the image for it. The profile is
+    /// dropped rather than replaced — the widened image is then untagged (sRGB by default), which
+    /// is how every grey image left this CLI before ICC was carried at all.
+    fn for_layout(mut self, grey: bool, layout: Layout) -> Self {
+        if grey && layout != Layout::Gray8 {
+            self.icc = None;
+        }
+        self
+    }
+}
+
 /// Which of [`NativeImage`]'s layouts holds an image without loss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Layout {
@@ -135,7 +152,9 @@ macro_rules! decode_as {
 /// - **PPM** (through the `image` crate): its colour type.
 ///
 /// Metadata is best-effort: the pixels have decoded by the time it is read, so a payload that
-/// cannot be read is simply absent rather than failing the conversion.
+/// cannot be read is simply absent rather than failing the conversion. An ICC profile is returned
+/// only when it describes the decoded pixels: not for an XYB-coded JPEG XL (decoded to sRGB), and
+/// not for a grey image widened to an RGB(A) layout.
 pub(crate) fn decode_native(path: &Path) -> Result<(NativeImage, InputMetadata), CliError> {
     let bytes = std::fs::read(path).map_err(|source| CliError::Io {
         path: path.to_path_buf(),
@@ -177,18 +196,22 @@ fn decode_native_bytes(
     if is_jxl(bytes) {
         let decoder = JxlDecoder::new().with_convert_policy(lossy);
         let info = decoder.info(bytes)?;
+        let grey = info.color_channels == 1;
         let layout = Layout::pick(
-            info.color_channels == 1,
+            grey,
             info.has_alpha,
             info.is_float || info.bits_per_sample > 8,
         );
+        // An XYB-coded stream decodes to sRGB, not into its embedded ICC profile, so the profile
+        // describes the original image rather than these pixels and is not carried.
         let metadata = decoder
             .metadata(bytes)
             .map(|m| InputMetadata {
-                icc: m.icc,
+                icc: m.icc.filter(|_| info.uses_original_profile),
                 exif: m.exif,
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .for_layout(grey, layout);
         return Ok((decode_as!(decoder, bytes, layout), metadata));
     }
 
@@ -204,15 +227,16 @@ fn decode_native_bytes(
                 .palette
                 .as_ref()
                 .is_some_and(|palette| palette.has_transparency());
-        let layout = Layout::pick(
-            color == PngColorType::Grayscale,
-            alpha,
-            decoded.header.bit_depth == 16,
+        let grey = matches!(
+            color,
+            PngColorType::Grayscale | PngColorType::GrayscaleAlpha
         );
+        let layout = Layout::pick(grey, alpha, decoded.header.bit_depth == 16);
         let metadata = InputMetadata {
             icc: decoded.icc_profile.map(|icc| icc.profile),
             exif: decoded.exif,
-        };
+        }
+        .for_layout(grey, layout);
         return Ok((decode_as!(decoder, bytes, layout), metadata));
     }
 
@@ -705,6 +729,102 @@ mod tests {
             .encode_to_vec(ImageRef::<Gray16>::new(&[0, 0x8080], dims).unwrap())
             .unwrap();
         assert_eq!(native_layout(&png), Layout::Rgb16);
+    }
+
+    /// The ICC profile `decode_native_bytes` read for `bytes`.
+    fn native_icc(bytes: &[u8]) -> Option<Vec<u8>> {
+        decode_native_bytes(Path::new("mem"), bytes).unwrap().1.icc
+    }
+
+    #[test]
+    fn metadata_for_layout_drops_icc_only_from_widened_grey() {
+        let tagged = || InputMetadata {
+            icc: Some(vec![1]),
+            exif: Some(vec![2]),
+        };
+        assert!(tagged().for_layout(true, Layout::Gray8).icc.is_some());
+        let widened = tagged().for_layout(true, Layout::Rgb16);
+        assert!(widened.icc.is_none());
+        assert!(widened.exif.is_some(), "Exif is layout-independent");
+        assert!(tagged().for_layout(false, Layout::Rgb16).icc.is_some());
+    }
+
+    #[test]
+    fn native_png_drops_a_grey_profile_when_widened() {
+        use gamut::core::Gray16;
+        use gamut::icc::IccProfile;
+        use gamut::png::PngEncoder;
+
+        let grey_icc = IccProfile::gray_with_gamma(2.2)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let dims = Dimensions {
+            width: 2,
+            height: 1,
+        };
+        let encoder = || PngEncoder::new().with_icc_profile("grey", &grey_icc);
+        let grey8 = encoder()
+            .encode_to_vec(ImageRef::<Gray8>::new(&[0, 0x80], dims).unwrap())
+            .unwrap();
+        let grey16 = encoder()
+            .encode_to_vec(ImageRef::<Gray16>::new(&[0, 0x8080], dims).unwrap())
+            .unwrap();
+        assert_eq!(native_icc(&grey8), Some(grey_icc.clone()));
+        assert_eq!(native_icc(&grey16), None);
+    }
+
+    #[test]
+    fn native_jxl_carries_its_icc_only_when_pixels_decode_into_it() {
+        use gamut::icc::{BuiltinProfile, Curve, IccProfile, KnownTag, TagData};
+        use gamut::jxl::{ColorSpec, Distance};
+
+        // libjxl re-signals a profile it can express as a structured encoding (one with a `cicp`
+        // tag, or a matrix/TRC profile with an analytic curve) instead of embedding it, so the
+        // `cicp` tag goes and the TRCs become a sampled smoothstep (3x^2 - 2x^3), which no gamma
+        // or standard transfer function fits.
+        let mut profile = IccProfile::builtin(BuiltinProfile::DisplayP3).unwrap();
+        profile
+            .tags
+            .retain(|(signature, _)| *signature != KnownTag::Cicp.into());
+        let table: Vec<u16> = (0..=16u32)
+            .map(|i| {
+                let x = f64::from(i) / 16.0;
+                ((3.0 * x * x - 2.0 * x * x * x) * 65535.0).round() as u16
+            })
+            .collect();
+        for (signature, data) in &mut profile.tags {
+            if [KnownTag::RedTrc, KnownTag::GreenTrc, KnownTag::BlueTrc]
+                .into_iter()
+                .any(|trc| *signature == trc.into())
+            {
+                *data = TagData::Curve(Curve::Sampled(table.clone()));
+            }
+        }
+        let icc = profile.to_bytes().unwrap();
+        let rgb: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 5) as u8).collect();
+        let encode = |encoder: JxlEncoder| {
+            let mut out = Vec::new();
+            encoder
+                .with_color(ColorSpec::Icc(icc.clone()))
+                .encode_image(
+                    ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap(),
+                    &mut out,
+                )
+                .unwrap();
+            out
+        };
+        let lossless = encode(JxlEncoder::lossless());
+        let xyb = encode(JxlEncoder::lossy(Distance::new(1.0).unwrap()));
+        // Both streams embed the profile; only the XYB one decodes to sRGB instead of into it.
+        assert!(
+            JxlDecoder::new()
+                .embedded_icc_profile(&xyb)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(native_icc(&lossless), Some(icc));
+        assert_eq!(native_icc(&xyb), None);
     }
 
     #[test]
