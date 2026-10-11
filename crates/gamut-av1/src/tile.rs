@@ -3849,7 +3849,7 @@ mod tests {
     /// A 64x64 identity frame of high-contrast texture: every 8x8 is textured enough to split.
     fn busy64() -> Planar8 {
         let mut rgb = vec![0u8; 64 * 64 * 3];
-        for (i, px) in rgb.chunks_exact_mut(3).enumerate() {
+        for (i, px) in rgb.as_chunks_mut::<3>().0.iter_mut().enumerate() {
             let (x, y) = (i % 64, i / 64);
             px.copy_from_slice(&[((x * 37) ^ (y * 91)) as u8, (x * 13 + y * 7) as u8, 128]);
         }
@@ -3877,17 +3877,19 @@ mod tests {
         128.0 + 90.0 * ((x * 0.8 + y * 0.55) / 2.3).sin() + 20.0 * (y / 5.0).cos()
     }
 
+    /// `select_luma_mode_nxn`'s answer: `(YMode, AngleDeltaY, filter-intra mode)`.
+    type NxnMode = (u8, i8, Option<u8>);
+    /// `select_luma_mode`'s answer: `(YMode, filter-intra mode)`.
+    type Mode4x4 = (u8, Option<u8>);
+
     /// Luma decisions of the square-block mode searches over a 64x64 frame (one superblock) whose
     /// luma is `luma(x, y)`, with the reconstruction primed to the source so every predictor sees
     /// real neighbours: `(YMode, AngleDeltaY, filter-intra)` for each interior 8x8, then for each
     /// interior 4x4.
-    fn mode_decisions(
-        speed: Speed,
-        luma: fn(f64, f64) -> f64,
-    ) -> (Vec<(u8, i8, Option<u8>)>, Vec<(u8, Option<u8>)>) {
+    fn mode_decisions(speed: Speed, luma: fn(f64, f64) -> f64) -> (Vec<NxnMode>, Vec<Mode4x4>) {
         const N: usize = 64;
         let mut rgb = vec![0u8; N * N * 3];
-        for (i, px) in rgb.chunks_exact_mut(3).enumerate() {
+        for (i, px) in rgb.as_chunks_mut::<3>().0.iter_mut().enumerate() {
             let v = luma((i % N) as f64, (i / N) as f64);
             px.copy_from_slice(&[128, v as u8, 128]);
         }
