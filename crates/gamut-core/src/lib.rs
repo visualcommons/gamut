@@ -24,6 +24,9 @@
 //! - **The length invariant lives on the buffers, not on [`Dimensions`].** [`Dimensions`] is a plain
 //!   value type with public fields; non-emptiness and `len == width * height * channels` are
 //!   enforced once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs receive a known-good buffer.
+//! - **Byte accounting shares its shape and law, not its walks.** [`segment::Segment`] is generic
+//!   over each format's own `kind` enum and [`segment::covers`] is the one "tiles `0..len`"
+//!   predicate; the walks that produce the segments stay format-specific.
 //!
 //! # Example
 //!
@@ -63,6 +66,7 @@ mod image;
 pub mod invariants;
 pub mod luminance;
 mod pixel;
+pub mod segment;
 
 pub use image::{ImageBuf, ImageRef};
 pub use pixel::{

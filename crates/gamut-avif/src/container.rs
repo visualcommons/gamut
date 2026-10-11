@@ -25,12 +25,13 @@ use crate::image::AvifImage;
 ///
 /// [`segments`](Self::segments) is contiguous, non-overlapping, and covers `0..data.len()`
 /// exactly: `segments[0].range.start == 0`, each `segments[i].range.end ==
-/// segments[i+1].range.start`, and the last `range.end == data.len()`. This is the "structurally
-/// impossible to ignore any bits" guarantee issue #250 inherits from the HEIF surface — it holds
-/// by construction and is pinned by the crate's tests. Every primary-stream top-level box
-/// (including unrecognised ones such as a Google `mpvd`) is a [`SegmentKind::Box`]; an appended
-/// foreign stream is a single [`SegmentKind::AppendedStream`]; any trailing non-box bytes are a
-/// single [`SegmentKind::Trailer`].
+/// segments[i+1].range.start`, and the last `range.end == data.len()` (the shared
+/// [`gamut_core::segment::covers`] predicate). This is the "structurally impossible to ignore any
+/// bits" guarantee issue #250 inherits from the HEIF surface — it holds by construction and is
+/// pinned by the crate's tests. Every primary-stream top-level box (including unrecognised ones
+/// such as a Google `mpvd`) is a [`SegmentKind::Box`]; an appended foreign stream is a single
+/// [`SegmentKind::AppendedStream`]; any trailing non-box bytes are a single
+/// [`SegmentKind::Trailer`].
 ///
 /// The [`image`](Self::image) field is the role-typed semantic view of the *primary* still-image
 /// stream. Boxes inside `meta` that [`gamut_isobmff::read`] does not consume (e.g. a `dinf`/`dref`
