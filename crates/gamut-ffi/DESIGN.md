@@ -170,7 +170,7 @@ void gamut_avif_image_free(GamutAvifImage *image);
 
 - **Setters** map the `AvifEncoder::with_*` builders one-to-one
   (`gamut_avif_encoder_set_{matrix,primaries,transfer,color_range,chroma,bit_depth,
-  premultiplied_alpha,rotation,mirror,icc_profile,exif,xmp}`). CICP values cross as their
+  premultiplied_alpha,rotation,mirror,icc_profile,exif,xmp,c2pa_reserved,c2pa}`). CICP values cross as their
   ITU-T H.273 code points and bit depth as a bit count, mapped by `gamut-color`'s own
   `from_code_point`/`from_flag`/`from_bits` (a direct dependency of this crate for that reason);
   chroma subsampling and mirror cross as `GAMUT_CHROMA_SUBSAMPLING_*` / `GAMUT_AVIF_MIRROR_*`
@@ -179,6 +179,21 @@ void gamut_avif_image_free(GamutAvifImage *image);
   or `GAMUT_STATUS_INVALID_INPUT` (not one of the defined flag/constant values) and leaves the
   encoder unchanged; a null handle is `GAMUT_STATUS_NULL_ARGUMENT` before either. Lossy mode and
   quality are construction-time, as in Rust (`gamut_avif_encoder_new_lossy`).
+- **C2PA slot** (issue #673): `gamut_avif_encoder_set_c2pa_reserved(encoder, size_t len)` and
+  `gamut_avif_encoder_set_c2pa(encoder, const uint8_t *store, size_t len)` map
+  `with_c2pa_reserved` / `with_c2pa` under the setter conventions above (an unusable reservation
+  length is refused by the encode, as in Rust). Every encode entry point runs
+  `encode_with_report` — the same bytes as `encode_to_vec` — and the handle keeps the report's
+  slot range, read back with
+  `gamut_avif_encoder_c2pa_slot(const GamutAvifEncoder *, bool *present, size_t *offset,
+  size_t *len)`. The shape is a **per-handle last-encode report**, not report-returning encode
+  variants: `AvifEncodeReport` is `#[non_exhaustive]`, so each placement it gains later becomes
+  one more accessor here, where out-param variants would multiply the five per-layout encode
+  entry points (or break their signatures) every time. The report is the handle's one piece of
+  state an encode writes; it lives in a `Cell` beside `inner` (stamped through `seam_handle!`'s
+  `fields` entry), so the encode entry points keep their `const` handle. It is cleared when an
+  encode starts, so it is absent before the first encode, after any non-OK encode, and when no
+  slot was configured; a zero-length slot (an empty store) is present. Setters do not touch it.
 - **Encode output** is a `Box<[u8]>` handed out as `(uint8_t *, size_t)` and released with
   `gamut_bytes_free(data, len)` — the length alone recovers the layout, so C carries no
   capacity. On any non-OK status the out-params are `NULL`/`0`.
@@ -194,9 +209,7 @@ void gamut_avif_image_free(GamutAvifImage *image);
   `dimensions` (the primary item's `ispe`). An absent payload is `GAMUT_OK` with `NULL`/`0`; a
   primary or alpha item that is derived (`grid`/`iden`/`iovl`) or not AV1 has no single
   codestream and is `GAMUT_STATUS_UNSUPPORTED`.
-- **Not yet exposed**: the C2PA slot setters (`with_c2pa_reserved` / `with_c2pa`), whose use
-  needs the encode report's slot range to cross the boundary too (issue #673); the alpha
-  quality setter over the shipped `with_alpha_quality` (issue #692); the encoder knobs the
+- **Not yet exposed**: the alpha quality setter over the shipped `with_alpha_quality` (issue #692); the encoder knobs the
   Rust API has not shipped yet (speed, threads — issues #654, #655) join as setters when they
   land; AVIF decode waits for the decoder registry (above). Error messages: these entry points
   return only the `gamut_status_t` code (`status_of` maps `Error::kind()`), so neither the
