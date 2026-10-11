@@ -31,7 +31,8 @@
 #   RUST_TEST_THREADS         test threads per scenario      (derived)
 #   TMPDIR                    where build directories live   (default: target/mutants-tmp)
 #   GAMUT_MUTANTS_NO_CGROUP=1 skip the systemd memory scope
-#   GAMUT_MUTANTS_NO_ULIMIT=1 skip the per-process address-space limit
+#   GAMUT_MUTANTS_NO_ULIMIT=1 skip the per-process address-space limit (a fixed 6 GiB, not
+#                             derived and not overridable: it decides verdicts, see below)
 #
 # Every derived value is overridable: set it in the environment and the derivation leaves it
 # alone.
@@ -224,7 +225,7 @@ fi
 : "${budget_source:=explicit}"
 
 # Clamp. The floor is the 6 GiB a single package's build and test needs, which is also the
-# per-process address-space floor below — going under it would leave the two guards inverted,
+# fixed per-process address-space limit below — going under it would leave the two guards inverted,
 # with a process permitted more than the group it runs in. The ceiling is where more concurrency
 # stops paying: the vendored C++ translation units are the bottleneck and do not divide further.
 [ "$budget_gb" -lt 6 ] && budget_gb=6
@@ -268,7 +269,7 @@ CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$cargo_jobs}"
 CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$cmake_level}"
 
 # Each of the five is overridable, so each may arrive as anything. Reject what cannot be a
-# count before it reaches the arithmetic below (MUTANTS_JOBS divides the address-space limit)
+# count before it reaches the arithmetic below (MUTANTS_JOBS multiplies the disk estimate)
 # or the tools themselves, where zero means "unlimited" to some of them.
 for dial in MUTANTS_JOBS MUTANTS_JOBSERVER_TASKS CARGO_BUILD_JOBS CMAKE_BUILD_PARALLEL_LEVEL RUST_TEST_THREADS; do
 	eval "value=\${$dial:-}"
@@ -388,9 +389,27 @@ fi
 # away every result. The per-process address-space limit is what makes the runaway abort itself
 # first, so it is scored `caught` and the run continues.
 
-ulimit_kb=$((budget_gb * 1024 * 1024 / MUTANTS_JOBS))
-floor_kb=$((6 * 1024 * 1024)) # a full build+test of one package fits in 6 GiB of address space
-[ "$ulimit_kb" -lt "$floor_kb" ] && ulimit_kb="$floor_kb"
+#
+# The limit is a constant, not a share of the budget (issue #613). A mutant that allocates
+# without bound is scored by whichever limit it meets first: this one aborts it as `caught`, the
+# test timeout ends it as `TIMEOUT` (exit 3, which fails the gate). When the limit was
+# budget ÷ jobs, the same mutant scored `caught` on an 8 GiB workstation and `TIMEOUT` on a
+# 14 GiB CI runner, so the verdict was a property of the machine. A fixed limit makes it one of
+# the code. The budget still derives every parallelism dial above; only this ceiling is pinned.
+#
+# Why 6 GiB: it is the smallest address space a full build and test of one package fits in, and
+# it is the budget's clamp floor, so no budget the runner accepts is smaller than one process may
+# map — the per-process guard always fires before the cgroup's. The derived job count keeps that
+# true for every scenario at once: the derived job count is 1, or at most budget ÷ 8, so
+# jobs × 6 GiB never exceeds the budget (an explicit MUTANTS_JOBS can break this; the cgroup is
+# then the backstop).
+#
+# Ordered against the test timeout (`minimum_test_timeout = 60` in .cargo/mutants.toml): a
+# runaway reaches 6 GiB inside 60 s at any sustained rate above ~100 MiB/s, which an allocation
+# loop exceeds by an order of magnitude, so it meets this limit first everywhere. The smaller the
+# constant, the wider that margin — a reason not to raise it without measuring a package that
+# needs more.
+ulimit_kb=$((6 * 1024 * 1024))
 
 # `--gitignore=false`: copy the tree verbatim rather than filtering it through .gitignore.
 #
