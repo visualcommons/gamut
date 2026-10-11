@@ -52,12 +52,16 @@
 //!   the public API (errors are surfaced via [`XmpError`]), so it can be changed without a breaking
 //!   change.
 //! - **Memory-safe on hostile input.** `#![forbid(unsafe_code)]` — XMP is XML from untrusted files.
+//! - **Sidecars are bytes too.** [`XmpSidecar`] reads and writes the standalone `.xmp` file RAW
+//!   workflows keep beside an image (Part 3, "External storage of metadata"); the crate has no
+//!   filesystem API, so the caller owns the path.
 #![forbid(unsafe_code)]
 
 pub mod error;
 pub mod model;
 pub mod namespace;
 pub mod packet;
+pub mod sidecar;
 pub mod writer;
 // The reader has no configuration — `XmpMeta::from_packet` is the entry point and auto-detects the
 // wrapper, encoding, and input form — so the module carries only that `impl` and stays private.
@@ -65,6 +69,9 @@ mod reader;
 
 pub use error::{Result, XmpError};
 pub use model::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
-pub use namespace::{Namespace, RDF_NAMESPACE, WellKnownNs, XML_NAMESPACE, XMPMETA_NAMESPACE};
+pub use namespace::{
+    DWC_URI_TRAILING_SLASH, Namespace, RDF_NAMESPACE, WellKnownNs, XML_NAMESPACE, XMPMETA_NAMESPACE,
+};
 pub use packet::XmpPacket;
+pub use sidecar::XmpSidecar;
 pub use writer::XmpWriter;
