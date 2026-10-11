@@ -492,3 +492,69 @@ fn odd_and_tiny_sizes_round_trip_with_alpha() {
         assert_eq!(rgba, px, "{w}x{h}");
     }
 }
+
+/// A transparent-edge fixture: a smooth opaque gradient on the left, a soft three-pixel alpha
+/// edge, and a fully transparent right half hiding high-frequency noise — the case clean alpha
+/// exists for.
+fn transparent_edge_rgba() -> Vec<u8> {
+    const SIDE: u32 = 64;
+    let mut px = Vec::with_capacity((SIDE * SIDE * 4) as usize);
+    let mut noise = 0x1234_5678u32;
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            noise ^= noise << 13;
+            noise ^= noise >> 17;
+            noise ^= noise << 5;
+            let alpha = match x {
+                0..30 => 255,
+                30 => 170,
+                31 => 85,
+                32 => 20,
+                _ => 0,
+            };
+            let [r, g, b, _] = noise.to_le_bytes();
+            let (r, g, b) = if alpha == 0 {
+                (r, g, b)
+            } else {
+                ((x * 4) as u8, (y * 4) as u8, 128)
+            };
+            px.extend_from_slice(&[r, g, b, alpha]);
+        }
+    }
+    px
+}
+
+#[test]
+fn clean_alpha_shrinks_a_lossy_transparent_edge_and_libavif_decodes_it() {
+    const SIDE: u32 = 64;
+    let dims = Dimensions {
+        width: SIDE,
+        height: SIDE,
+    };
+    let px = transparent_edge_rgba();
+    let encode = |enc: AvifEncoder| {
+        enc.encode_to_vec(ImageRef::<Rgba8>::new(&px, dims).expect("buffer matches dimensions"))
+            .expect("encode")
+    };
+    let dirty = encode(AvifEncoder::lossy(60));
+    let clean = encode(AvifEncoder::lossy(60).with_clean_alpha(true));
+
+    // Reported, not just asserted: the size the hidden noise was costing.
+    eprintln!(
+        "transparent-edge 64x64 lossy(60): dirty {} B, clean {} B",
+        dirty.len(),
+        clean.len()
+    );
+    assert!(
+        clean.len() < dirty.len(),
+        "clean {} B is not smaller than dirty {} B",
+        clean.len(),
+        dirty.len()
+    );
+    // Cleaning touches colour only: the alpha item is the same stream either way.
+    assert_eq!(item_payloads(&clean).1, item_payloads(&dirty).1);
+
+    let (w, h, _) = libavif_oracle::decode_rgba(&clean).expect("libavif decodes");
+    assert_eq!((w, h), (SIDE, SIDE));
+    assert!(libavif_oracle::introspect(&clean).unwrap().alpha_present);
+}
