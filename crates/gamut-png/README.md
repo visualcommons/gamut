@@ -32,11 +32,18 @@ Graphics, W3C 3rd edition) images:
 
 ```rust
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
-use gamut_png::{PngDecoder, PngEncoder};
+use gamut_png::{PngDecoder, PngEncoder, Preset};
 
 let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h)?)?;
 let mut png = Vec::new();
 PngEncoder::new().encode_image(image, &mut png)?;
+
+// Or pick a point on the size/time ladder instead of setting five knobs by hand.
+// `Preset::Balanced` is the default above, byte for byte.
+let mut small = Vec::new();
+PngEncoder::new()
+    .with_preset(Preset::Smallest)
+    .encode_image(image, &mut small)?;
 
 // Typed decode: lossless widening only (e.g. greyscale or palette as RGBA).
 let decoded: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&png)?;
@@ -58,7 +65,10 @@ Built incrementally; each phase is conformance-checked against libpng (see [STAT
 Encoder scope: all five colour types, bit depths 1/2/4/8/16, palette, the five scanline filters,
 lossless reductions over every input layout (palette, grey, alpha drop, sub-byte grey packing,
 16→8 demotion), the standard colour/text ancillary chunks, and embedded metadata
-(eXIf/iCCP/iTXt, and the C2PA manifest store with a reserve-then-fill slot). Decoder scope:
+(eXIf/iCCP/iTXt, and the C2PA manifest store with a reserve-then-fill slot). Encoding effort is
+either five independent knobs or one `Preset` rung composing them — `Fast`, `Balanced`, `Small`,
+`Smallest` — measured in [STATUS.md](STATUS.md#the-effort-ladder-issue-484); the ladder is steep in
+time and shallow in size, so the rung is a real choice rather than a formality. Decoder scope:
 everything above plus Adam7 **decoding** and decode limits.
 Out of scope: Adam7 *encoding* and animation (APNG decodes as its default image).
 

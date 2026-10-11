@@ -102,11 +102,12 @@ Every `extern "C"` entry point wraps its body in `catch_unwind`; a panic becomes
 
 - **Consumer boundary (C calls Rust)** — the part tooling generates: each format crate's
   object-safe `EncodeImage<P>` / `DecodeImage<P>` impls are exported per
-  (codec, `PixelFormat`) pair, enumerated mechanically from `gamut_core::PixelFormat::ALL` ×
-  the crate's impl set: **one entry point per pair**, e.g. `gamut_png_encoder_encode_rgb8`
-  (settled by the AVIF slice, issue #666). A per-pair entry point lets 16-bit samples cross as
-  `const uint16_t *`, so the C compiler checks the sample type, where a single entry point
-  dispatching on a `gamut_pixel_format_t` would take `const void *`.
+  (codec, `PixelFormat`) pair, enumerated mechanically from the `gamut_core::PixelFormat::ALL`
+  slice × the crate's impl set: **one entry point per pair**, e.g.
+  `gamut_png_encoder_encode_rgb8` (settled by the AVIF slice, issue #666). A per-pair entry
+  point lets 16-bit samples cross as `const uint16_t *`, so the C compiler checks the sample
+  type, where a single entry point dispatching on a `gamut_pixel_format_t` would take
+  `const void *`.
 - **Provider boundary (C implements Rust traits)** — carried by **`gamut-codec-abi`**
   (issue #241, sub-issue #272): its `#[repr(C)]` descriptors/vtables and `Foreign*` bridges are
   the sanctioned mechanism for foreign implementations plugging into gamut, including

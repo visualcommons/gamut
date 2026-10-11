@@ -302,11 +302,17 @@ pub struct SequenceHeader {
 impl SequenceHeader {
     /// Parses a sequence header OBU payload (§5.5.1), including the OBU's trailing bits (§5.3.1).
     ///
+    /// `payload` is the OBU's payload alone — the bytes after the OBU header and its `obu_size`
+    /// field — so a container that has already split its OBUs (an AVIF item, an `av1C`
+    /// `configOBUs`) reads the header through this one parser rather than a second copy of §5.5.
+    /// It reads syntax only: no [`DecodeLimits`](crate::DecodeLimits) are applied and no tool is
+    /// refused, so a header this crate cannot *decode* still parses.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if the payload is truncated, internally inconsistent, or
     /// does not end in the `trailing_bits()` the OBU's declared size requires.
-    pub(crate) fn parse(payload: &[u8]) -> Result<Self> {
+    pub fn parse(payload: &[u8]) -> Result<Self> {
         let mut r = BitReader::new(payload);
         let header = Self::parse_syntax(&mut r)?;
         // §5.3.1 ends every OBU but a tile group, tile list or frame with

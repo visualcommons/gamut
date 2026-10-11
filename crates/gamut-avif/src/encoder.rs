@@ -10,6 +10,7 @@ use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
     Planar16, RgbToYcbcr, TransferCharacteristics,
 };
+use gamut_core::convert::{ConvertPolicy, convert};
 use gamut_core::{
     Dimensions, EncodeImage, Error, Gray8, ImageRef, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
@@ -94,6 +95,10 @@ struct ImageTransform {
 /// | [`Gray8`] | one **monochrome** item — not R=G=B replication |
 /// | [`Rgb16`] | one 4:4:4 colour item at [`AvifEncoder::with_bit_depth`]'s depth |
 /// | [`Rgba16`] | that, plus a monochrome alpha auxiliary at the same depth |
+///
+/// The 8-bit inputs code at 8 bits unless [`AvifEncoder::with_bit_depth`] asks for 10 or 12, in
+/// which case they are widened by bit replication first; the 16-bit inputs code at 12 unless it
+/// asks for 10.
 ///
 /// Alpha is coded as its own AV1 still: AVIF v1.2.0 §4.1 makes `mono_chrome = 1` and full range a
 /// *shall* for an AV1 auxiliary image item, and the auxiliary is linked to the colour item by an
@@ -305,10 +310,33 @@ impl AvifEncoder {
         self
     }
 
-    /// Selects the depth **16-bit inputs** are coded at: [`BitDepth::Ten`] or
-    /// [`BitDepth::Twelve`] (the default). Any other depth is rejected at encode time.
+    /// Selects the depth the samples are coded at: [`BitDepth::Ten`] or [`BitDepth::Twelve`] for
+    /// any input, or [`BitDepth::Eight`] for an 8-bit one.
     ///
-    /// # What happens to the low bits
+    /// Without this call each input codes at its own default — **8** for [`Rgb8`], [`Rgba8`] and
+    /// [`Gray8`], **12** for [`Rgb16`] and [`Rgba16`] — so an encoder that never sets it writes
+    /// exactly the bytes it wrote before 8-bit inputs honoured it. A depth AV1 cannot code
+    /// ([`BitDepth::Sixteen`], §6.4.1), and [`BitDepth::Eight`] for a 16-bit input, are rejected
+    /// at encode time.
+    ///
+    /// # Widening an 8-bit input
+    ///
+    /// An 8-bit input coded at 10 or 12 bits is widened by **bit replication** — the byte is
+    /// repeated into the low bits, `(x << 2) | (x >> 6)` at 10 bits — *before* colour conversion,
+    /// so the matrix and the chroma averaging run at the coded precision. Replication maps `0` to
+    /// `0` and `255` to the coded maximum, and the input byte is the top 8 bits of every coded
+    /// sample, so:
+    ///
+    /// > A lossless encode of an 8-bit input at 10 or 12 bits is exact: narrowing the decoded
+    /// > samples back to 8 bits (`sample >> (depth - 8)`) reproduces the input.
+    ///
+    /// The wider depth adds no information the caller did not have. What it buys on the lossy path
+    /// is precision *inside the codec*: the YCbCr conversion and the quantizer round at 10 or 12
+    /// bits rather than 8, which is what can reduce banding in smooth gradients. The
+    /// widened copy of the image is held for the duration of the encode — two bytes per sample,
+    /// on top of the planes every encode builds.
+    ///
+    /// # Narrowing a 16-bit input
     ///
     /// [`Rgb16`] and [`Rgba16`] carry samples on `gamut-core`'s canonical **full 16-bit scale**,
     /// while AV1 codes 8, 10 or 12. The encoder narrows by **truncation** — `sample >> (16 -
@@ -323,11 +351,30 @@ impl AvifEncoder {
     /// A caller who wants a different tradeoff — dithering, or a rounded narrowing — applies it
     /// before handing the image over.
     ///
-    /// **Ignored by the 8-bit inputs.** [`Rgb8`], [`Rgba8`] and [`Gray8`] always code 8-bit:
-    /// widening them would claim precision the caller never had.
+    /// Either way the alpha auxiliary of an RGBA input codes at the colour item's depth, as AVIF
+    /// v1.2.0 §4.1 requires.
     #[must_use]
     pub fn with_bit_depth(mut self, bit_depth: BitDepth) -> Self {
-        self.config.bit_depth = bit_depth;
+        self.config.bit_depth = Some(bit_depth);
+        self
+    }
+
+    /// Codes the **alpha auxiliary item** at its own lossy `quality` (`0..=100`, higher = larger
+    /// output, closer to the source; values above `100` are clamped), independent of the colour
+    /// item's.
+    ///
+    /// The value goes through exactly the mapping [`AvifEncoder::lossy`]'s `quality` does, so
+    /// `lossy(q).with_alpha_quality(q)` codes the same bytes as `lossy(q)`. Without this call
+    /// alpha follows the colour quality (see [`AvifConfig::alpha_quality`]). Opacity edges are
+    /// often more visible than colour error, so a caller trading colour bits for size may want
+    /// alpha finer than colour; a mask that is already blocky can go coarser.
+    ///
+    /// **Ignored by [`AvifMode::Lossless`]**, which codes alpha bit-exactly at `base_q_idx 0`
+    /// whatever is set here, exactly as it ignores the colour `quality` — and by every input
+    /// without an alpha channel, which has no auxiliary item to code.
+    #[must_use]
+    pub fn with_alpha_quality(mut self, quality: u8) -> Self {
+        self.config.alpha_quality = Some(quality);
         self
     }
 
@@ -398,17 +445,36 @@ impl AvifEncoder {
         }
     }
 
-    /// The depth a 16-bit input is coded at, rejecting one AV1 cannot express.
+    /// The depth a 16-bit input is coded at — 12 when unset — rejecting one AV1 cannot express.
     ///
     /// §6.4.1 defines 8, 10 and 12. [`BitDepth::Sixteen`] is a `gamut-color` depth for the
     /// interleaved 16-bit pipelines, and [`BitDepth::Eight`] would silently discard the input's
-    /// whole point, so both are refused rather than quietly reinterpreted.
+    /// whole point, so both are refused rather than quietly reinterpreted. Twelve is the default
+    /// because narrowing 16 bits to 12 discards the least, and 12-bit is a depth every AVIF reader
+    /// that handles high bit depth decodes.
     fn coded_bit_depth(&self) -> Result<BitDepth> {
-        match self.config.bit_depth {
-            BitDepth::Ten | BitDepth::Twelve => Ok(self.config.bit_depth),
+        match self.config.bit_depth.unwrap_or(BitDepth::Twelve) {
+            depth @ (BitDepth::Ten | BitDepth::Twelve) => Ok(depth),
             _ => Err(gamut_core::Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "AVIF: a 16-bit input codes at 10 or 12 bits (AV1 \u{a7}6.4.1); \
+                 select one with AvifEncoder::with_bit_depth",
+            )),
+        }
+    }
+
+    /// The depth an 8-bit input is **widened** to, or `None` to code it at 8 bits — the default,
+    /// and what an explicit [`BitDepth::Eight`] asks for.
+    ///
+    /// [`BitDepth::Sixteen`] is refused rather than clamped: AV1 codes no 16-bit samples
+    /// (§6.4.1), and quietly coding 12 would hand back a depth the caller did not ask for.
+    fn widened_bit_depth(&self) -> Result<Option<BitDepth>> {
+        match self.config.bit_depth {
+            None | Some(BitDepth::Eight) => Ok(None),
+            Some(depth @ (BitDepth::Ten | BitDepth::Twelve)) => Ok(Some(depth)),
+            Some(_) => Err(gamut_core::Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: an 8-bit input codes at 8, 10 or 12 bits (AV1 \u{a7}6.4.1); \
                  select one with AvifEncoder::with_bit_depth",
             )),
         }
@@ -420,6 +486,18 @@ impl AvifEncoder {
         match self.config.mode {
             AvifMode::Lossless => 0,
             AvifMode::Lossy => quality_to_quant(self.config.quality),
+        }
+    }
+
+    /// The AV1 `base_q_idx` the **alpha auxiliary** codes at: `0` on the lossless path, otherwise
+    /// the quality mapping applied to [`AvifConfig::alpha_quality`], or to the colour quality when
+    /// that is unset.
+    fn alpha_base_q_idx(&self) -> u8 {
+        match self.config.mode {
+            AvifMode::Lossless => 0,
+            AvifMode::Lossy => {
+                quality_to_quant(self.config.alpha_quality.unwrap_or(self.config.quality))
+            }
         }
     }
 
@@ -1107,7 +1185,15 @@ impl EncodeImage<Rgb8> for AvifEncoder {
     /// Maps the RGB image to AV1 planes — identity GBR at 4:4:4, or YCbCr through the configured
     /// matrix at [`with_chroma`](AvifEncoder::with_chroma)'s sampling — and wraps the temporal unit
     /// in an AVIF file.
+    ///
+    /// At a [`with_bit_depth`](AvifEncoder::with_bit_depth) of 10 or 12 the image is first widened
+    /// to [`Rgb16`] and coded exactly as [`EncodeImage<Rgb16>`] codes it, which narrows back to the
+    /// coded depth: `x * 257 >> (16 - depth)` is the bit replication of `x` to that depth.
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.widened_bit_depth()?.is_some() {
+            let wide = convert::<Rgb8, Rgb16>(image, ConvertPolicy::lossless())?;
+            return EncodeImage::<Rgb16>::encode_image(self, wide.as_ref(), out);
+        }
         let dims = image.dimensions();
         let colour = self.colour();
         let planes = match colour.matrix {
@@ -1142,8 +1228,10 @@ impl EncodeImage<Rgba8> for AvifEncoder {
     /// as [`EncodeImage<Rgb8>`] would, the alpha as a monochrome auxiliary — and wraps both in one
     /// AVIF file.
     ///
-    /// Alpha is coded at the same `base_q_idx` as the colour, so a lossless encode round-trips
-    /// alpha bit-exactly and a lossy one quantizes it alongside the colour. It carries no `colr`
+    /// Alpha is coded at the colour's `base_q_idx` unless
+    /// [`with_alpha_quality`](AvifEncoder::with_alpha_quality) gives it its own, so a lossless
+    /// encode round-trips alpha bit-exactly and a lossy one quantizes it at the alpha quality
+    /// (defaulting to the colour quality). It carries no `colr`
     /// and goes through no matrix: opacity is not colour (AVIF v1.2.0 §4.1).
     ///
     /// # Chroma
@@ -1154,7 +1242,15 @@ impl EncodeImage<Rgba8> for AvifEncoder {
     /// not yet expose; the request describes the buffer truthfully rather than the configuration,
     /// so nothing mis-signals — an RGBA encode is simply larger than the same image without alpha.
     /// Tracked in `STATUS.md`.
+    ///
+    /// At a [`with_bit_depth`](AvifEncoder::with_bit_depth) of 10 or 12 the image — alpha
+    /// included — is widened to [`Rgba16`] and coded exactly as [`EncodeImage<Rgba16>`] codes it,
+    /// so the alpha auxiliary keeps the colour item's depth (AVIF v1.2.0 §4.1).
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.widened_bit_depth()?.is_some() {
+            let wide = convert::<Rgba8, Rgba16>(image, ConvertPolicy::lossless())?;
+            return EncodeImage::<Rgba16>::encode_image(self, wide.as_ref(), out);
+        }
         let dims = image.dimensions();
         let colour = self.colour();
         let planes = match colour.matrix {
@@ -1164,11 +1260,16 @@ impl EncodeImage<Rgba8> for AvifEncoder {
                 Planar8::from_rgba8_matrix_view(image, m)
             }
         };
-        let base_q_idx = self.base_q_idx();
-        let still = self.colour_still(&planes, dims, base_q_idx, colour, planes.subsampling())?;
+        let still = self.colour_still(
+            &planes,
+            dims,
+            self.base_q_idx(),
+            colour,
+            planes.subsampling(),
+        )?;
         let alpha = monochrome_still(
             &Planar8::from_rgba8_alpha_view(image),
-            base_q_idx,
+            self.alpha_base_q_idx(),
             self.monochrome_colour(),
         )?;
         self.emit(&still, dims, Some(&alpha), out)
@@ -1216,11 +1317,10 @@ impl EncodeImage<Rgba16> for AvifEncoder {
                 Planar16::from_rgba16_matrix_view(image, m)
             }
         };
-        let base_q_idx = self.base_q_idx();
-        let still = self.colour_still16(&planes, dims, base_q_idx, colour)?;
+        let still = self.colour_still16(&planes, dims, self.base_q_idx(), colour)?;
         let alpha = monochrome_still16(
             &Planar16::from_rgba16_alpha_view(image, depth),
-            base_q_idx,
+            self.alpha_base_q_idx(),
             self.monochrome_colour(),
         )?;
         self.emit(&still, dims, Some(&alpha), out)
@@ -1234,15 +1334,45 @@ impl EncodeImage<Gray8> for AvifEncoder {
     /// Replicating the samples into three equal planes would code two constant chroma planes and
     /// then claim three channels for an image that has one. The matrix and range knobs do not
     /// apply (see [`AvifEncoder::with_matrix`]); the primaries and transfer tags do.
+    ///
+    /// At a [`with_bit_depth`](AvifEncoder::with_bit_depth) of 10 or 12 the samples are widened by
+    /// bit replication and coded as a monochrome item at that depth.
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
-        let still = monochrome_still(
-            &Planar8::from_gray8_view(image),
-            self.base_q_idx(),
-            self.monochrome_colour(),
-        )?;
+        let still = match self.widened_bit_depth()? {
+            None => monochrome_still(
+                &Planar8::from_gray8_view(image),
+                self.base_q_idx(),
+                self.monochrome_colour(),
+            )?,
+            Some(depth) => monochrome_still16(
+                &gray8_widened(image, depth)?,
+                self.base_q_idx(),
+                self.monochrome_colour(),
+            )?,
+        };
         self.emit(&still, dims, None, out)
     }
+}
+
+/// A [`Gray8`] image widened to `depth` by bit replication, as a single-plane monochrome buffer.
+///
+/// `gamut-color` has no grey constructor for [`Planar16`], so the image goes through the two
+/// conversions that already own each half rather than a third copy of either: `gamut-core`'s
+/// lossless widening replicates the grey into an [`Rgb16`] image at full 16-bit scale, and
+/// [`Planar16::from_rgb16_identity_view`] narrows it to `depth`, whose `Y = G` plane is the grey.
+/// The two chroma planes it also builds are discarded. That is three times the transient memory a
+/// dedicated grey constructor would need, paid only on this opt-in path.
+fn gray8_widened(image: ImageRef<'_, Gray8>, depth: BitDepth) -> Result<Planar16> {
+    let wide = convert::<Gray8, Rgb16>(image, ConvertPolicy::lossless())?;
+    let gbr = Planar16::from_rgb16_identity_view(wide.as_ref(), depth);
+    Planar16::from_planes_subsampled(
+        image.width(),
+        image.height(),
+        ChromaSubsampling::Cs400,
+        depth,
+        [gbr.plane(0).to_vec(), Vec::new(), Vec::new()],
+    )
 }
 
 #[cfg(test)]
@@ -1473,6 +1603,34 @@ mod tests {
         let lossy = AvifEncoder::lossy(80).config();
         assert_eq!(lossy.mode, AvifMode::Lossy);
         assert_eq!(lossy.quality, 80);
+    }
+
+    #[test]
+    fn alpha_base_q_idx_follows_alpha_quality_then_colour_quality() {
+        // Unset: alpha codes at the colour item's quantizer, so the pre-knob bytes hold.
+        let follows = AvifEncoder::lossy(50);
+        assert_eq!(follows.config().alpha_quality, None);
+        assert_eq!(follows.alpha_base_q_idx(), 127);
+        assert_eq!(follows.alpha_base_q_idx(), follows.base_q_idx());
+        // Set: its own value through the same mapping, leaving the colour quantizer alone.
+        let own = AvifEncoder::lossy(50).with_alpha_quality(90);
+        assert_eq!(own.config().alpha_quality, Some(90));
+        assert_eq!(own.alpha_base_q_idx(), 25);
+        assert_eq!(own.base_q_idx(), 127);
+        // The clamp is the colour quality's: above 100 behaves as 100.
+        assert_eq!(
+            AvifEncoder::lossy(50)
+                .with_alpha_quality(200)
+                .alpha_base_q_idx(),
+            1
+        );
+        // Lossless ignores it and codes alpha on the lossless path.
+        assert_eq!(
+            AvifEncoder::lossless()
+                .with_alpha_quality(10)
+                .alpha_base_q_idx(),
+            0
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub enum AvifMode {
 /// `quality` and `matrix` consistent.
 ///
 /// `#[non_exhaustive]`: the configuration is an open set — fields for deferred encoder knobs
-/// (speed, rate control, bit depth; see `STATUS.md`) are added as they ship.
+/// (speed, rate control; see `STATUS.md`) are added as they ship.
 /// Read it as the snapshot returned by [`AvifEncoder::config`](crate::AvifEncoder::config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -46,6 +46,17 @@ pub struct AvifConfig {
     /// Lossy quality factor, `0..=100`. Values above `100` behave as `100` (the encoder clamps
     /// silently) — a frozen v1 contract.
     pub quality: u8,
+    /// Lossy quality factor for the **alpha auxiliary item**, `0..=100` on the same scale and
+    /// through the same `base_q_idx` mapping as `quality`, or `None` to code alpha at `quality`.
+    ///
+    /// `None` (the default) keeps alpha on the colour item's quantizer, so an encoder that never
+    /// sets this writes exactly the bytes it wrote before the knob existed. Values above `100`
+    /// behave as `100`, as for `quality`. Applies only to inputs that carry alpha
+    /// ([`Rgba8`](gamut_core::Rgba8), [`Rgba16`](gamut_core::Rgba16)) and only to
+    /// [`AvifMode::Lossy`]: [`AvifMode::Lossless`] **ignores** it, exactly as it ignores
+    /// `quality`, and codes alpha bit-exactly. Set it with
+    /// [`AvifEncoder::with_alpha_quality`](crate::AvifEncoder::with_alpha_quality).
+    pub alpha_quality: Option<u8>,
     /// The CICP matrix the samples are coded through.
     ///
     /// [`MatrixCoefficients::Identity`] carries R'G'B' directly as GBR planes — the only way to be
@@ -85,14 +96,18 @@ pub struct AvifConfig {
     /// metadata properties (`mdcv`/`clli`) are still deferred (`STATUS.md`). Defaults to
     /// [`TransferCharacteristics::Srgb`].
     pub transfer: TransferCharacteristics,
-    /// The depth **16-bit inputs** are coded at: [`BitDepth::Ten`] or [`BitDepth::Twelve`],
-    /// defaulting to twelve.
+    /// The depth the samples are coded at, or `None` for the input's own default: **8** for an
+    /// 8-bit input ([`Rgb8`](gamut_core::Rgb8), [`Rgba8`](gamut_core::Rgba8),
+    /// [`Gray8`](gamut_core::Gray8)) and **12** for a 16-bit one
+    /// ([`Rgb16`](gamut_core::Rgb16), [`Rgba16`](gamut_core::Rgba16)).
     ///
-    /// It selects a coding depth, not a conversion: an 8-bit input codes 8-bit whatever this says,
-    /// because widening samples the caller never had would invent precision. A 16-bit input is
-    /// narrowed to this depth by truncation — see
-    /// [`AvifEncoder::with_bit_depth`](crate::AvifEncoder::with_bit_depth).
-    pub bit_depth: BitDepth,
+    /// `None` and an explicit choice are different requests, which is why this is an `Option`: the
+    /// default codes each input at a depth that suits it, while an explicit [`BitDepth::Ten`] or
+    /// [`BitDepth::Twelve`] applies to *every* input — an 8-bit input is widened to it by bit
+    /// replication, a 16-bit one narrowed to it by truncation. [`BitDepth::Eight`] is accepted for
+    /// 8-bit inputs only. See
+    /// [`AvifEncoder::with_bit_depth`](crate::AvifEncoder::with_bit_depth) for both conversions.
+    pub bit_depth: Option<BitDepth>,
 }
 
 impl Default for AvifConfig {
@@ -100,12 +115,13 @@ impl Default for AvifConfig {
         Self {
             mode: AvifMode::Lossless,
             quality: 75,
+            alpha_quality: None,
             matrix: MatrixCoefficients::Identity,
             range: ColorRange::Full,
             chroma: ChromaSubsampling::Cs444,
             primaries: ColourPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
-            bit_depth: BitDepth::Twelve,
+            bit_depth: None,
         }
     }
 }
@@ -119,13 +135,15 @@ mod tests {
         let c = AvifConfig::default();
         assert_eq!(c.mode, AvifMode::Lossless);
         assert_eq!(c.quality, 75);
+        // Unset: alpha follows `quality`, so the default encoder's bytes predate the knob.
+        assert_eq!(c.alpha_quality, None);
         assert_eq!(c.matrix, MatrixCoefficients::Identity);
         assert_eq!(c.range, ColorRange::Full);
         assert_eq!(c.primaries, ColourPrimaries::Bt709);
         assert_eq!(c.transfer, TransferCharacteristics::Srgb);
-        // 16-bit inputs default to the deepest AV1 depth: narrowing 16 bits to 12 discards the
-        // least, and 12-bit 4:4:4 is a profile every AVIF reader that handles high bit depth has.
-        assert_eq!(c.bit_depth, BitDepth::Twelve);
+        // Unset: each input codes at its own default depth (8 for 8-bit, 12 for 16-bit), so the
+        // default encoder's 8-bit bytes predate the knob reaching 8-bit inputs.
+        assert_eq!(c.bit_depth, None);
         assert_eq!(AvifMode::default(), AvifMode::Lossless);
     }
 

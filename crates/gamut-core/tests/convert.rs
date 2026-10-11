@@ -6,7 +6,7 @@
 
 use gamut_core::convert::{
     AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy, RawImage, convert, convert_from_raw,
-    convert_from_raw_into,
+    convert_from_raw_into, premultiply_alpha, unpremultiply_alpha,
 };
 use gamut_core::{
     Dimensions, ErrorKind, Gray8, Gray16, GrayAlpha8, ImageBuf, ImageRef, PixelFormat, Rgb8, Rgb16,
@@ -263,4 +263,25 @@ fn gray_alpha_widens_and_narrows_on_the_axes_it_should() {
         .as_samples(),
         &[10, 200]
     );
+}
+
+/// Associated alpha is an explicit in-place step on an owned buffer, not a `ConvertPolicy`
+/// conversion: a caller that wants to keep the unassociated image premultiplies a clone, and the
+/// layout brand is unchanged either way.
+#[test]
+fn premultiplying_a_clone_keeps_the_unassociated_image() {
+    let d = dims(2, 1);
+    // Opaque red, and half-transparent white.
+    let straight = ImageBuf::<Rgba8>::new(vec![255, 0, 0, 255, 255, 255, 255, 128], d).unwrap();
+
+    let mut associated = straight.clone();
+    premultiply_alpha(&mut associated);
+    assert_eq!(
+        associated.as_samples(),
+        &[255, 0, 0, 255, 128, 128, 128, 128]
+    );
+    assert_eq!(straight.as_samples(), &[255, 0, 0, 255, 255, 255, 255, 128]);
+
+    unpremultiply_alpha(&mut associated);
+    assert_eq!(associated, straight);
 }
