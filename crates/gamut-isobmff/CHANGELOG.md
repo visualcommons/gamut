@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(isobmff)* typed `mdcv` mastering-display property (`PropertyKind::MasteringDisplayColourVolume`):
+  strict 24-byte read, byte-exact write. A file whose `mdcv` body is not exactly 24 bytes, which
+  was previously carried verbatim as `PropertyKind::Other`, is now rejected as invalid input.
+
 ## [2.0.1](https://github.com/justin13888/gamut/compare/gamut-isobmff-v2.0.0...gamut-isobmff-v2.0.1) - 2026-07-20
 
 ### Other

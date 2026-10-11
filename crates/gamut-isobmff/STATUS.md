@@ -31,7 +31,7 @@ files.
 | Phase | Spec | Scope | Status |
 | ----- | ---- | ----- | ------ |
 | P1 | 14496-12 §4.2 | Typed box-tree model (`IsoBmffImage`/`Item`/`ItemReference`/`EntityGroup`/`Property`/`PropertyKind`) + low-level `BoxBuilder`/`BoxReader` | ✅ done |
-| P2 | 14496-12; 23008-12 | Writer: `ftyp`, `meta` (`hdlr`/`pitm`/`iloc` v0/`iinf`+`infe` v2/`iref` v0/`iprp`/`grpl`), `mdat`; `ispe`/`pixi`/`colr` (`nclx`+ICC)/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli` properties; opaque codec config; model validation (typed errors, no silent truncation) | ✅ done |
+| P2 | 14496-12; 23008-12 | Writer: `ftyp`, `meta` (`hdlr`/`pitm`/`iloc` v0/`iinf`+`infe` v2/`iref` v0/`iprp`/`grpl`), `mdat`; `ispe`/`pixi`/`colr` (`nclx`+ICC)/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli`/`mdcv` properties; opaque codec config; model validation (typed errors, no silent truncation) | ✅ done |
 | P3 | 14496-12 | **Keystone** — `iloc` extent back-patch + shared `ipco` dedup → per-item `ipma` (8/16-bit forms) | ✅ done |
 | P4 | 14496-12; 23008-12 | Reader: bounds-checked box walk including `largesize`, size-0, and UUID user types; foreign-file repertoire (`iloc` v0–v2, `mdat`/`idat`, base offsets, 0/4/8-byte fields, multi-extent, `pitm`/`ipma` v0–v1, `infe` v2–v3, `iref` v0–v1); motion-photo tolerance (stop at a second top-level `ftyp` / at a malformed trailing box once `ftyp`+`meta` are seen); `read(&write)` round-trip; unrecognised property boxes preserved verbatim | ✅ done |
 | P5 | — | Robustness: truncation/overrun/size/index guards ✅; counts never trusted for allocation ✅; total payload capped at input size (anti amplification) ✅; spec fixtures independent of the writer ✅; fuzz corpus ☐ | ◑ partial |
@@ -135,10 +135,12 @@ writer's `BoxBuilder` stay crate-private. Additive (semver-minor).
 
 ## Deferred (planned, additive — no model reshape)
 
-- **Typed `mdcv`/`cclv`/`amve`/`reve`/`ndwt` HDR properties.** Carried verbatim as
-  `PropertyKind::Other` (exactly what libavif does — it types only `clli`, which we also type).
-  No vendored primary source pins their field layouts yet; `PropertyKind` is `#[non_exhaustive]`
-  so typing one later is semver-minor.
+- **Typed `cclv`/`amve`/`reve`/`ndwt` HDR properties.** Carried verbatim as
+  `PropertyKind::Other`. No vendored primary source pins their field layouts yet;
+  `PropertyKind` is `#[non_exhaustive]` so typing one later is semver-minor. (`mdcv` is typed as
+  `PropertyKind::MasteringDisplayColourVolume`: its 24-byte layout is the 14496-12 syntax that
+  AV1-ISOBMFF §2.3.4 states is identical to `SmDm`'s. The reader rejects an `mdcv` whose body is
+  not exactly 24 bytes, which it previously carried verbatim as `Other`.)
 - **Writer emission options** (`idat` placement, multi-extent, `iloc` v1/v2, 32-bit-id boxes).
   The writer intentionally normalises; if a consumer ever needs layout control it arrives as a
   separate options-taking entry point (semver-minor), not a change to `write`.

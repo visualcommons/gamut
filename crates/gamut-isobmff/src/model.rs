@@ -308,8 +308,7 @@ pub struct Property {
 /// An item property box (`ipco` child). The HEIF still-image properties are modelled structurally;
 /// any other property box (including a codec configuration) is carried verbatim so it round-trips.
 ///
-/// Non-exhaustive: a property currently carried as [`Other`](Self::Other) (e.g. `mdcv`, `cclv`,
-/// `amve`) may gain a typed variant in a future minor release, so match with a wildcard arm and do
+/// Non-exhaustive: a property currently carried as [`Other`](Self::Other) (e.g. `cclv`, `amve`) may gain a typed variant in a future minor release, so match with a wildcard arm and do
 /// not rely on a specific box type staying inside `Other`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -378,6 +377,22 @@ pub enum PropertyKind {
         max_content_light_level: u16,
         /// Maximum picture average light level (`MaxPALL`).
         max_pic_average_light_level: u16,
+    },
+    /// `mdcv` mastering display colour volume — the SMPTE ST 2086 mastering-display metadata, as
+    /// stored (ISO/IEC 14496-12 `MasteringDisplayColourVolumeBox`, a plain `Box` with the
+    /// `SmDm` field layout, per AV1-ISOBMFF §2.3.4; semantics from the HEVC SEI, ISO/IEC 23008-2
+    /// §D.3.28). Exactly 24 bytes on the wire; a reader rejects any other length as malformed.
+    MasteringDisplayColourVolume {
+        /// The three display primaries as `[x, y]` CIE 1931 chromaticity pairs in units of
+        /// 0.00002, in stored order. The HEVC convention orders them green, blue, red; the box
+        /// does not enforce an order, so they are kept exactly as stored.
+        display_primaries: [[u16; 2]; 3],
+        /// The white point as an `[x, y]` CIE 1931 chromaticity pair in units of 0.00002.
+        white_point: [u16; 2],
+        /// Nominal maximum display luminance, in units of 0.0001 cd/m².
+        max_display_mastering_luminance: u32,
+        /// Nominal minimum display luminance, in units of 0.0001 cd/m².
+        min_display_mastering_luminance: u32,
     },
     /// A codec configuration property (e.g. `av1C`, `hvcC`) carried as opaque bytes — the container
     /// never interprets the coded-format record. `kind` is the box type; `data` is its body.
