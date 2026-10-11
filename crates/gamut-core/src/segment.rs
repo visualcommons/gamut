@@ -64,12 +64,13 @@ where
 mod tests {
     use super::*;
 
-    /// Builds segments with unit kinds from bare ranges — the kind plays no part in tiling.
-    fn segs(ranges: &[Range<usize>]) -> Vec<Segment<()>> {
-        ranges
+    /// Builds segments with unit kinds from `(start, end)` pairs — the kind plays no part in
+    /// tiling. Pairs rather than range literals so a reversed range can be written at all.
+    fn segs(bounds: &[(usize, usize)]) -> Vec<Segment<()>> {
+        bounds
             .iter()
-            .map(|r| Segment {
-                range: r.clone(),
+            .map(|&(start, end)| Segment {
+                range: start..end,
                 kind: (),
             })
             .collect()
@@ -77,8 +78,8 @@ mod tests {
 
     #[test]
     fn contiguous_segments_ending_at_len_cover() {
-        assert!(covers(&segs(&[0..3, 3..4, 4..10]), 10));
-        assert!(covers(&segs(&[0..1]), 1));
+        assert!(covers(&segs(&[(0, 3), (3, 4), (4, 10)]), 10));
+        assert!(covers(&segs(&[(0, 1)]), 1));
     }
 
     #[test]
@@ -89,45 +90,45 @@ mod tests {
 
     #[test]
     fn a_first_segment_not_at_zero_does_not_cover() {
-        assert!(!covers(&segs(&[1..10]), 10));
+        assert!(!covers(&segs(&[(1, 10)]), 10));
     }
 
     #[test]
     fn a_gap_does_not_cover() {
-        assert!(!covers(&segs(&[0..3, 4..10]), 10));
+        assert!(!covers(&segs(&[(0, 3), (4, 10)]), 10));
     }
 
     #[test]
     fn an_overlap_does_not_cover() {
-        assert!(!covers(&segs(&[0..4, 3..10]), 10));
+        assert!(!covers(&segs(&[(0, 4), (3, 10)]), 10));
     }
 
     #[test]
     fn an_empty_segment_does_not_cover() {
         // Chained correctly, but a zero-length segment classifies no byte.
-        assert!(!covers(&segs(&[0..3, 3..3, 3..10]), 10));
-        assert!(!covers(&segs(&[0..0]), 0));
+        assert!(!covers(&segs(&[(0, 3), (3, 3), (3, 10)]), 10));
+        assert!(!covers(&segs(&[(0, 0)]), 0));
     }
 
     #[test]
     fn a_reversed_segment_does_not_cover() {
         // `start > end` chains back to the start of a following segment but claims no byte.
-        assert!(!covers(&segs(&[0..5, 5..2, 2..10]), 10));
+        assert!(!covers(&segs(&[(0, 5), (5, 2), (2, 10)]), 10));
     }
 
     #[test]
     fn a_short_tail_does_not_cover() {
-        assert!(!covers(&segs(&[0..3, 3..9]), 10));
+        assert!(!covers(&segs(&[(0, 3), (3, 9)]), 10));
     }
 
     #[test]
     fn a_long_tail_does_not_cover() {
-        assert!(!covers(&segs(&[0..3, 3..11]), 10));
+        assert!(!covers(&segs(&[(0, 3), (3, 11)]), 10));
     }
 
     #[test]
     fn out_of_order_segments_do_not_cover() {
-        assert!(!covers(&segs(&[3..10, 0..3]), 10));
+        assert!(!covers(&segs(&[(3, 10), (0, 3)]), 10));
     }
 
     #[test]
