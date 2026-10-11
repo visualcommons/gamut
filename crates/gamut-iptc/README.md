@@ -102,10 +102,10 @@ The v1 contract, stated precisely:
   exiv2/ExifTool de-facto behaviour) is this crate's explicit knob. Scalar-shaped IIM datasets that
   repeat on the wire (2:04 Object Attribute Reference, 2:85 By-line Title) reconcile their first
   value; all repeats still round-trip on the IIM side.
-- **Datasets with a determinate length are tabled; everything else is preserved.** The tag table
-  names every dataset IIM 4.2 states a maximum octet count for that a `u16` can hold — all of
-  records 1 and 2 bar `2:202` (256000 octets), plus `7:10` Size Mode (one octet). Any other dataset
-  in any record round-trips byte-exact without a name.
+- **Every dataset IIM 4.2 defines is tabled; everything else is preserved.** The tag table names
+  all of records 1, 2, 7, 8 and 9, with `max_octets` `None` where the spec states no maximum
+  (`7:20`, `7:90`, `7:95`, `8:10`, `9:10`). Any other dataset in any record round-trips byte-exact
+  without a name.
 
 ## Status
 

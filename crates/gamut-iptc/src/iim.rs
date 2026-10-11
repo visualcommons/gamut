@@ -51,111 +51,121 @@ pub struct IimTagInfo {
     pub name: &'static str,
     /// Whether the dataset may legitimately appear more than once (IPTC-IIM 4.2 Ch. 4 §1.4).
     pub repeatable: bool,
-    /// The maximum length of the value field in octets.
-    pub max_octets: u16,
+    /// The maximum length of the value field in octets, or `None` where IPTC-IIM 4.2 states no
+    /// maximum (e.g. `8:10` Subfile, the objectdata itself, or the record 7 and 9 size datasets,
+    /// each "a binary number" of unstated width).
+    pub max_octets: Option<u32>,
     /// How the value octets are interpreted.
     pub kind: IimFieldKind,
 }
 
 use IimFieldKind::{Binary, Date, Graphic, Time};
 
-/// Every IIM dataset gamut names: the complete Envelope (record 1) and Application (record 2)
-/// dataset sets of IPTC-IIM 4.2 chapters 5 and 6, plus `7:10` Size Mode.
+/// Every IIM dataset IPTC-IIM 4.2 defines: the Envelope (record 1) and Application (record 2)
+/// datasets of chapters 5 and 6, the Pre-ObjectData Descriptor (record 7, Ch. 11), ObjectData
+/// (record 8, Ch. 12) and Post-ObjectData Descriptor (record 9, Ch. 13) datasets.
 ///
 /// Sourced from the IPTC-IIM 4.2 dataset definitions (`references/iptc/iim-4.2.pdf`); the subset
 /// IPTC Photo Metadata maps to XMP is additionally cross-checked against the machine-readable
 /// technical reference (`references/iptc/iptc-pmd-techreference_2025.1.json`) by
 /// `tests/techreference.rs`.
 ///
-/// A dataset is named when IIM 4.2 states a maximum value length that is determinate *and* fits
-/// [`IimTagInfo::max_octets`]'s `u16`. Exactly six do not, and are deliberately absent: `2:202`
-/// ObjectData Preview Data (256000 octets, beyond `u16`) and `7:20`, `7:90`, `7:95`, `8:10` and
-/// `9:10`, whose value is "a binary number" of unstated width. `7:10` Size Mode is the one dataset
-/// outside chapters 5 and 6 that *is* named, because the spec fixes it at "one octet" (IIM 4.2
-/// Ch. 11). Records 3 (a separate publication), 4 and 5 (not allocated) and 6 (IIM 4.2 Appendix F
-/// defines method identifiers, not datasets) carry no dataset definitions in the vendored spec at
-/// all. Every unmodeled dataset in any record still round-trips byte-exact.
+/// [`IimTagInfo::max_octets`] is `None` exactly where the spec states no maximum: `7:20`, `7:90`,
+/// `7:95` and `9:10`, whose value is "a binary number" of unstated width, and `8:10` Subfile, the
+/// objectdata itself. Records 3 (a separate publication), 4 and 5 (not allocated) and 6 (IIM 4.2
+/// Appendix F defines method identifiers, not datasets) carry no dataset definitions in the
+/// vendored spec at all. A dataset with no entry — in any record — still round-trips byte-exact.
 #[rustfmt::skip]
 const KNOWN_TAGS: &[IimTagInfo] = &[
     // Envelope record (1) — IIM 4.2 Chapter 5.
-    IimTagInfo { record: 1, dataset: 0, name: "Model Version", repeatable: false, max_octets: 2, kind: Binary },
-    IimTagInfo { record: 1, dataset: 5, name: "Destination", repeatable: true, max_octets: 1024, kind: Graphic },
-    IimTagInfo { record: 1, dataset: 20, name: "File Format", repeatable: false, max_octets: 2, kind: Binary },
-    IimTagInfo { record: 1, dataset: 22, name: "File Format Version", repeatable: false, max_octets: 2, kind: Binary },
-    IimTagInfo { record: 1, dataset: 30, name: "Service Identifier", repeatable: false, max_octets: 10, kind: Graphic },
-    IimTagInfo { record: 1, dataset: 40, name: "Envelope Number", repeatable: false, max_octets: 8, kind: Graphic },
-    IimTagInfo { record: 1, dataset: 50, name: "Product I.D.", repeatable: true, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 1, dataset: 60, name: "Envelope Priority", repeatable: false, max_octets: 1, kind: Graphic },
-    IimTagInfo { record: 1, dataset: 70, name: "Date Sent", repeatable: false, max_octets: 8, kind: Date },
-    IimTagInfo { record: 1, dataset: 80, name: "Time Sent", repeatable: false, max_octets: 11, kind: Time },
-    IimTagInfo { record: 1, dataset: 90, name: "Coded Character Set", repeatable: false, max_octets: 32, kind: Binary },
-    IimTagInfo { record: 1, dataset: 100, name: "UNO", repeatable: false, max_octets: 80, kind: Graphic },
-    IimTagInfo { record: 1, dataset: 120, name: "ARM Identifier", repeatable: false, max_octets: 2, kind: Binary },
-    IimTagInfo { record: 1, dataset: 122, name: "ARM Version", repeatable: false, max_octets: 2, kind: Binary },
+    IimTagInfo { record: 1, dataset: 0, name: "Model Version", repeatable: false, max_octets: Some(2), kind: Binary },
+    IimTagInfo { record: 1, dataset: 5, name: "Destination", repeatable: true, max_octets: Some(1024), kind: Graphic },
+    IimTagInfo { record: 1, dataset: 20, name: "File Format", repeatable: false, max_octets: Some(2), kind: Binary },
+    IimTagInfo { record: 1, dataset: 22, name: "File Format Version", repeatable: false, max_octets: Some(2), kind: Binary },
+    IimTagInfo { record: 1, dataset: 30, name: "Service Identifier", repeatable: false, max_octets: Some(10), kind: Graphic },
+    IimTagInfo { record: 1, dataset: 40, name: "Envelope Number", repeatable: false, max_octets: Some(8), kind: Graphic },
+    IimTagInfo { record: 1, dataset: 50, name: "Product I.D.", repeatable: true, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 1, dataset: 60, name: "Envelope Priority", repeatable: false, max_octets: Some(1), kind: Graphic },
+    IimTagInfo { record: 1, dataset: 70, name: "Date Sent", repeatable: false, max_octets: Some(8), kind: Date },
+    IimTagInfo { record: 1, dataset: 80, name: "Time Sent", repeatable: false, max_octets: Some(11), kind: Time },
+    IimTagInfo { record: 1, dataset: 90, name: "Coded Character Set", repeatable: false, max_octets: Some(32), kind: Binary },
+    IimTagInfo { record: 1, dataset: 100, name: "UNO", repeatable: false, max_octets: Some(80), kind: Graphic },
+    IimTagInfo { record: 1, dataset: 120, name: "ARM Identifier", repeatable: false, max_octets: Some(2), kind: Binary },
+    IimTagInfo { record: 1, dataset: 122, name: "ARM Version", repeatable: false, max_octets: Some(2), kind: Binary },
     // Application record (2) — IIM 4.2 Chapter 6.
-    IimTagInfo { record: 2, dataset: 0, name: "Record Version", repeatable: false, max_octets: 2, kind: Binary },
-    IimTagInfo { record: 2, dataset: 3, name: "Object Type Reference", repeatable: false, max_octets: 67, kind: Graphic },
+    IimTagInfo { record: 2, dataset: 0, name: "Record Version", repeatable: false, max_octets: Some(2), kind: Binary },
+    IimTagInfo { record: 2, dataset: 3, name: "Object Type Reference", repeatable: false, max_octets: Some(67), kind: Graphic },
     // 68 per the IIM 4.2 wire form (3-digit reference number + ':' + up to 64 octets of text); the
     // PMD tech-reference JSON's IIMmaxbytes records 64 (text only) — see tests/techreference.rs.
-    IimTagInfo { record: 2, dataset: 4, name: "Object Attribute Reference", repeatable: true, max_octets: 68, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 5, name: "Object Name", repeatable: false, max_octets: 64, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 7, name: "Edit Status", repeatable: false, max_octets: 64, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 8, name: "Editorial Update", repeatable: false, max_octets: 2, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 10, name: "Urgency", repeatable: false, max_octets: 1, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 12, name: "Subject Reference", repeatable: true, max_octets: 236, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 15, name: "Category", repeatable: false, max_octets: 3, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 20, name: "Supplemental Category", repeatable: true, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 22, name: "Fixture Identifier", repeatable: false, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 25, name: "Keywords", repeatable: true, max_octets: 64, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 26, name: "Content Location Code", repeatable: true, max_octets: 3, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 27, name: "Content Location Name", repeatable: true, max_octets: 64, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 30, name: "Release Date", repeatable: false, max_octets: 8, kind: Date },
-    IimTagInfo { record: 2, dataset: 35, name: "Release Time", repeatable: false, max_octets: 11, kind: Time },
-    IimTagInfo { record: 2, dataset: 37, name: "Expiration Date", repeatable: false, max_octets: 8, kind: Date },
-    IimTagInfo { record: 2, dataset: 38, name: "Expiration Time", repeatable: false, max_octets: 11, kind: Time },
-    IimTagInfo { record: 2, dataset: 40, name: "Special Instructions", repeatable: false, max_octets: 256, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 42, name: "Action Advised", repeatable: false, max_octets: 2, kind: Graphic },
+    IimTagInfo { record: 2, dataset: 4, name: "Object Attribute Reference", repeatable: true, max_octets: Some(68), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 5, name: "Object Name", repeatable: false, max_octets: Some(64), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 7, name: "Edit Status", repeatable: false, max_octets: Some(64), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 8, name: "Editorial Update", repeatable: false, max_octets: Some(2), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 10, name: "Urgency", repeatable: false, max_octets: Some(1), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 12, name: "Subject Reference", repeatable: true, max_octets: Some(236), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 15, name: "Category", repeatable: false, max_octets: Some(3), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 20, name: "Supplemental Category", repeatable: true, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 22, name: "Fixture Identifier", repeatable: false, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 25, name: "Keywords", repeatable: true, max_octets: Some(64), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 26, name: "Content Location Code", repeatable: true, max_octets: Some(3), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 27, name: "Content Location Name", repeatable: true, max_octets: Some(64), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 30, name: "Release Date", repeatable: false, max_octets: Some(8), kind: Date },
+    IimTagInfo { record: 2, dataset: 35, name: "Release Time", repeatable: false, max_octets: Some(11), kind: Time },
+    IimTagInfo { record: 2, dataset: 37, name: "Expiration Date", repeatable: false, max_octets: Some(8), kind: Date },
+    IimTagInfo { record: 2, dataset: 38, name: "Expiration Time", repeatable: false, max_octets: Some(11), kind: Time },
+    IimTagInfo { record: 2, dataset: 40, name: "Special Instructions", repeatable: false, max_octets: Some(256), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 42, name: "Action Advised", repeatable: false, max_octets: Some(2), kind: Graphic },
     // 2:45, 2:47 and 2:50 take the formats of 1:30, 1:70 and 1:40 respectively (IIM 4.2 Ch. 6).
-    IimTagInfo { record: 2, dataset: 45, name: "Reference Service", repeatable: true, max_octets: 10, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 47, name: "Reference Date", repeatable: true, max_octets: 8, kind: Date },
-    IimTagInfo { record: 2, dataset: 50, name: "Reference Number", repeatable: true, max_octets: 8, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 55, name: "Date Created", repeatable: false, max_octets: 8, kind: Date },
-    IimTagInfo { record: 2, dataset: 60, name: "Time Created", repeatable: false, max_octets: 11, kind: Time },
-    IimTagInfo { record: 2, dataset: 62, name: "Digital Creation Date", repeatable: false, max_octets: 8, kind: Date },
-    IimTagInfo { record: 2, dataset: 63, name: "Digital Creation Time", repeatable: false, max_octets: 11, kind: Time },
-    IimTagInfo { record: 2, dataset: 65, name: "Originating Program", repeatable: false, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 70, name: "Program Version", repeatable: false, max_octets: 10, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 75, name: "Object Cycle", repeatable: false, max_octets: 1, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 80, name: "By-line", repeatable: true, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 85, name: "By-line Title", repeatable: true, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 90, name: "City", repeatable: false, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 92, name: "Sub-location", repeatable: false, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 95, name: "Province/State", repeatable: false, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 100, name: "Country/Primary Location Code", repeatable: false, max_octets: 3, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 101, name: "Country/Primary Location Name", repeatable: false, max_octets: 64, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 103, name: "Original Transmission Reference", repeatable: false, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 105, name: "Headline", repeatable: false, max_octets: 256, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 110, name: "Credit", repeatable: false, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 115, name: "Source", repeatable: false, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 116, name: "Copyright Notice", repeatable: false, max_octets: 128, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 118, name: "Contact", repeatable: true, max_octets: 128, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 120, name: "Caption/Abstract", repeatable: false, max_octets: 2000, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 122, name: "Writer/Editor", repeatable: true, max_octets: 32, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 125, name: "Rasterized Caption", repeatable: false, max_octets: 7360, kind: Binary },
-    IimTagInfo { record: 2, dataset: 130, name: "Image Type", repeatable: false, max_octets: 2, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 131, name: "Image Orientation", repeatable: false, max_octets: 1, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 135, name: "Language Identifier", repeatable: false, max_octets: 3, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 150, name: "Audio Type", repeatable: false, max_octets: 2, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 151, name: "Audio Sampling Rate", repeatable: false, max_octets: 6, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 152, name: "Audio Sampling Resolution", repeatable: false, max_octets: 2, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 153, name: "Audio Duration", repeatable: false, max_octets: 6, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 154, name: "Audio Outcue", repeatable: false, max_octets: 64, kind: Graphic },
-    IimTagInfo { record: 2, dataset: 200, name: "ObjectData Preview File Format", repeatable: false, max_octets: 2, kind: Binary },
-    IimTagInfo { record: 2, dataset: 201, name: "ObjectData Preview File Format Version", repeatable: false, max_octets: 2, kind: Binary },
+    IimTagInfo { record: 2, dataset: 45, name: "Reference Service", repeatable: true, max_octets: Some(10), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 47, name: "Reference Date", repeatable: true, max_octets: Some(8), kind: Date },
+    IimTagInfo { record: 2, dataset: 50, name: "Reference Number", repeatable: true, max_octets: Some(8), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 55, name: "Date Created", repeatable: false, max_octets: Some(8), kind: Date },
+    IimTagInfo { record: 2, dataset: 60, name: "Time Created", repeatable: false, max_octets: Some(11), kind: Time },
+    IimTagInfo { record: 2, dataset: 62, name: "Digital Creation Date", repeatable: false, max_octets: Some(8), kind: Date },
+    IimTagInfo { record: 2, dataset: 63, name: "Digital Creation Time", repeatable: false, max_octets: Some(11), kind: Time },
+    IimTagInfo { record: 2, dataset: 65, name: "Originating Program", repeatable: false, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 70, name: "Program Version", repeatable: false, max_octets: Some(10), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 75, name: "Object Cycle", repeatable: false, max_octets: Some(1), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 80, name: "By-line", repeatable: true, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 85, name: "By-line Title", repeatable: true, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 90, name: "City", repeatable: false, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 92, name: "Sub-location", repeatable: false, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 95, name: "Province/State", repeatable: false, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 100, name: "Country/Primary Location Code", repeatable: false, max_octets: Some(3), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 101, name: "Country/Primary Location Name", repeatable: false, max_octets: Some(64), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 103, name: "Original Transmission Reference", repeatable: false, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 105, name: "Headline", repeatable: false, max_octets: Some(256), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 110, name: "Credit", repeatable: false, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 115, name: "Source", repeatable: false, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 116, name: "Copyright Notice", repeatable: false, max_octets: Some(128), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 118, name: "Contact", repeatable: true, max_octets: Some(128), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 120, name: "Caption/Abstract", repeatable: false, max_octets: Some(2000), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 122, name: "Writer/Editor", repeatable: true, max_octets: Some(32), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 125, name: "Rasterized Caption", repeatable: false, max_octets: Some(7360), kind: Binary },
+    IimTagInfo { record: 2, dataset: 130, name: "Image Type", repeatable: false, max_octets: Some(2), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 131, name: "Image Orientation", repeatable: false, max_octets: Some(1), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 135, name: "Language Identifier", repeatable: false, max_octets: Some(3), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 150, name: "Audio Type", repeatable: false, max_octets: Some(2), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 151, name: "Audio Sampling Rate", repeatable: false, max_octets: Some(6), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 152, name: "Audio Sampling Resolution", repeatable: false, max_octets: Some(2), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 153, name: "Audio Duration", repeatable: false, max_octets: Some(6), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 154, name: "Audio Outcue", repeatable: false, max_octets: Some(64), kind: Graphic },
+    IimTagInfo { record: 2, dataset: 200, name: "ObjectData Preview File Format", repeatable: false, max_octets: Some(2), kind: Binary },
+    IimTagInfo { record: 2, dataset: 201, name: "ObjectData Preview File Format Version", repeatable: false, max_octets: Some(2), kind: Binary },
+    // "Optional, not repeatable; maximum size of 256000 octets consisting of binary data."
+    IimTagInfo { record: 2, dataset: 202, name: "ObjectData Preview Data", repeatable: false, max_octets: Some(256_000), kind: Binary },
     // Pre-ObjectData Descriptor record (7) — IIM 4.2 Chapter 11. Only 7:10 states a determinate
     // length ("Mandatory, not repeatable, one octet"); 7:20, 7:90 and 7:95 are "a binary number"
-    // of unstated width, as are 8:10 and 9:10.
-    IimTagInfo { record: 7, dataset: 10, name: "Size Mode", repeatable: false, max_octets: 1, kind: Binary },
+    // of unstated width (7:20: "the largest number is not defined").
+    IimTagInfo { record: 7, dataset: 10, name: "Size Mode", repeatable: false, max_octets: Some(1), kind: Binary },
+    IimTagInfo { record: 7, dataset: 20, name: "Max Subfile Size", repeatable: false, max_octets: None, kind: Binary },
+    IimTagInfo { record: 7, dataset: 90, name: "ObjectData Size Announced", repeatable: false, max_octets: None, kind: Binary },
+    IimTagInfo { record: 7, dataset: 95, name: "Maximum ObjectData Size", repeatable: false, max_octets: None, kind: Binary },
+    // ObjectData record (8) — IIM 4.2 Chapter 12: "Mandatory, repeatable", the objectdata itself.
+    IimTagInfo { record: 8, dataset: 10, name: "Subfile", repeatable: true, max_octets: None, kind: Binary },
+    // Post-ObjectData Descriptor record (9) — IIM 4.2 Chapter 13: "Mandatory, not repeatable. A
+    // binary number."
+    IimTagInfo { record: 9, dataset: 10, name: "Confirmed ObjectData Size", repeatable: false, max_octets: None, kind: Binary },
 ];
 
 impl IimTagInfo {
@@ -182,7 +192,7 @@ impl IimTagInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IimDataSet {
     /// The record number this dataset belongs to (IPTC-IIM 4.2 §1.1: 1 = Envelope, 2 = Application;
-    /// records 3–9 are unnamed apart from `7:10` and round-trip as raw datasets).
+    /// 7–9 frame the objectdata; records 3–6 define no datasets gamut names and round-trip raw).
     pub record: u8,
     /// The dataset number within the record.
     pub dataset: u8,
@@ -338,7 +348,7 @@ mod tests {
         let kw = IimTagInfo::lookup(2, 25).unwrap();
         assert_eq!(kw.name, "Keywords");
         assert!(kw.repeatable);
-        assert_eq!(kw.max_octets, 64);
+        assert_eq!(kw.max_octets, Some(64));
         assert_eq!(kw.kind, IimFieldKind::Graphic);
 
         assert_eq!(IimTagInfo::lookup(2, 0).unwrap().kind, IimFieldKind::Binary);
@@ -347,12 +357,12 @@ mod tests {
         assert!(!IimTagInfo::lookup(2, 90).unwrap().repeatable);
         // 2:04 maps to a single XMP property but is repeatable on the IIM wire.
         assert!(IimTagInfo::lookup(2, 4).unwrap().repeatable);
-        assert_eq!(IimTagInfo::lookup(2, 4).unwrap().max_octets, 68);
+        assert_eq!(IimTagInfo::lookup(2, 4).unwrap().max_octets, Some(68));
         assert!(IimTagInfo::lookup(9, 99).is_none());
 
         let set = ds(2, 25, b"sky");
         assert_eq!(set.name(), Some("Keywords"));
-        assert_eq!(set.info().unwrap().max_octets, 64);
+        assert_eq!(set.info().unwrap().max_octets, Some(64));
         assert_eq!(ds(2, 99, b"x").name(), None);
     }
 
@@ -360,12 +370,12 @@ mod tests {
     fn known_tags_are_well_formed() {
         for t in KNOWN_TAGS {
             assert!(
-                matches!(t.record, 1 | 2 | 7),
+                matches!(t.record, 1 | 2 | 7..=9),
                 "unexpected record {}",
                 t.record
             );
             assert!(!t.name.is_empty());
-            assert!(t.max_octets > 0);
+            assert_ne!(t.max_octets, Some(0), "{}:{}", t.record, t.dataset);
             // No duplicate (record, dataset) entries, and no duplicate names.
             let count = KNOWN_TAGS
                 .iter()
@@ -391,8 +401,22 @@ mod tests {
         // mis-transcribed length on any of the nine date/time datasets shows up here.
         for t in KNOWN_TAGS {
             match t.kind {
-                Date => assert_eq!(t.max_octets, 8, "{}:{} {}", t.record, t.dataset, t.name),
-                Time => assert_eq!(t.max_octets, 11, "{}:{} {}", t.record, t.dataset, t.name),
+                Date => assert_eq!(
+                    t.max_octets,
+                    Some(8),
+                    "{}:{} {}",
+                    t.record,
+                    t.dataset,
+                    t.name
+                ),
+                Time => assert_eq!(
+                    t.max_octets,
+                    Some(11),
+                    "{}:{} {}",
+                    t.record,
+                    t.dataset,
+                    t.name
+                ),
                 Binary | Graphic => {}
             }
         }
@@ -402,23 +426,35 @@ mod tests {
     }
 
     #[test]
-    fn only_datasets_with_a_determinate_octet_maximum_are_named() {
-        // `max_octets` is a `u16` and can only state a determinate maximum, so the six datasets
-        // IIM 4.2 gives none it can hold are absent: `2:202` ObjectData Preview Data (256000
-        // octets, beyond `u16`) and 7:20/7:90/7:95/8:10/9:10 ("a binary number" of unstated
-        // width).
-        for (record, dataset) in [(2, 202), (7, 20), (7, 90), (7, 95), (8, 10), (9, 10)] {
-            assert!(
-                IimTagInfo::lookup(record, dataset).is_none(),
-                "{record}:{dataset} is named but has no octet maximum `max_octets` can state"
-            );
-        }
-        // 7:10 Size Mode is the boundary case that keeps the criterion honest: it is outside
-        // chapters 5 and 6, but IIM 4.2 Ch. 11 fixes it at one octet, so it is named.
-        assert_eq!(IimTagInfo::lookup(7, 10).map(|t| t.max_octets), Some(1));
-        // Everything else in chapters 5 and 6 is named: 14 Envelope + 56 Application datasets.
+    fn octet_maximum_is_none_exactly_where_the_spec_states_none() {
+        // IIM 4.2 Ch. 11-13: 7:20/7:90/7:95/9:10 are "a binary number" of unstated width and 8:10
+        // is the objectdata itself, so no maximum is recorded for them.
+        let unbounded: Vec<(u8, u8)> = KNOWN_TAGS
+            .iter()
+            .filter(|t| t.max_octets.is_none())
+            .map(|t| (t.record, t.dataset))
+            .collect();
+        assert_eq!(unbounded, [(7, 20), (7, 90), (7, 95), (8, 10), (9, 10)]);
+        // Determinate maxima beside them: 2:202's "maximum size of 256000 octets" (Ch. 6), beyond
+        // a `u16`, and 7:10's "one octet" (Ch. 11).
+        assert_eq!(
+            IimTagInfo::lookup(2, 202).and_then(|t| t.max_octets),
+            Some(256_000)
+        );
+        assert_eq!(
+            IimTagInfo::lookup(7, 10).and_then(|t| t.max_octets),
+            Some(1)
+        );
+        // 8:10 Subfile is the one repeatable dataset outside records 1 and 2 ("Mandatory,
+        // repeatable", Ch. 12).
+        assert!(IimTagInfo::lookup(8, 10).is_some_and(|t| t.repeatable));
+        // Every dataset the standard defines is named: 14 Envelope + 57 Application datasets,
+        // four Pre-ObjectData, one ObjectData and one Post-ObjectData Descriptor dataset.
         assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 1).count(), 14);
-        assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 2).count(), 56);
+        assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 2).count(), 57);
+        assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 7).count(), 4);
+        assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 8).count(), 1);
+        assert_eq!(KNOWN_TAGS.iter().filter(|t| t.record == 9).count(), 1);
     }
 
     /// The text of a vendored file, relative to the workspace root.
@@ -566,8 +602,8 @@ mod tests {
 
     #[test]
     fn tag_table_names_match_the_standards_own_dataset_names() {
-        // Drift guard on the one column no round trip and no oracle can see. exiv2 titles 28 of
-        // the 70 datasets it shares with gamut more briefly than IIM 4.2 names them, so comparing
+        // Drift guard on the one column no round trip and no oracle can see. exiv2 titles 29 of
+        // the 71 datasets it shares with gamut more briefly than IIM 4.2 names them, so comparing
         // names against exiv2 could only ever pin those 28 to a second hand transcription of the
         // same page. These names come from the standard's own name column instead, so a name
         // mistyped in `KNOWN_TAGS` fails here. A name mistyped *identically* in `KNOWN_TAGS` and in
@@ -584,17 +620,13 @@ mod tests {
                 t.dataset
             );
         }
-        // ...and the only datasets the standard names that gamut does not are the six with no
-        // octet maximum `max_octets` can state (see the test above, and issue #539).
+        // ...and every dataset the standard names, gamut names too.
         let unnamed: Vec<(u8, u8)> = standard
             .keys()
             .copied()
             .filter(|&(record, dataset)| IimTagInfo::lookup(record, dataset).is_none())
             .collect();
-        assert_eq!(
-            unnamed,
-            [(2, 202), (7, 20), (7, 90), (7, 95), (8, 10), (9, 10)]
-        );
+        assert_eq!(unnamed, []);
     }
 
     #[test]
@@ -612,16 +644,18 @@ mod tests {
         );
         for t in KNOWN_TAGS {
             let Some(row) = exiv2.get(&(t.record, t.dataset)) else {
-                // exiv2 tables records 1 and 2 only; 7:10 comes from the standard alone.
-                assert_eq!(
-                    ((t.record, t.dataset), t.name),
-                    ((7, 10), "Size Mode"),
-                    "a dataset outside exiv2's table must be 7:10 Size Mode"
+                // exiv2 tables records 1 and 2 only; records 7-9 come from the standard alone.
+                assert!(
+                    matches!(t.record, 7..=9),
+                    "{}:{} {} is in records 1-2 but not in exiv2's table",
+                    t.record,
+                    t.dataset,
+                    t.name
                 );
                 continue;
             };
             let where_ = format!("{}:{} {}", t.record, t.dataset, t.name);
-            assert_eq!(u32::from(t.max_octets), row.max, "{where_}: octet maximum");
+            assert_eq!(t.max_octets, Some(row.max), "{where_}: octet maximum");
             assert_eq!(t.repeatable, row.repeatable, "{where_}: repeatability");
             let expected = match row.kind.as_str() {
                 // exiv2 types 1:90 Coded Character Set as a string; IIM 4.2 Ch. 5 makes it ISO
@@ -636,11 +670,8 @@ mod tests {
             };
             assert_eq!(t.kind, expected, "{where_}: value kind");
         }
-        // ...and nothing exiv2 documents is missing, apart from the one row `u16` cannot state.
+        // ...and nothing exiv2 documents is missing.
         for &(record, dataset) in exiv2.keys() {
-            if (record, dataset) == (2, 202) {
-                continue;
-            }
             assert!(
                 IimTagInfo::lookup(record, dataset).is_some(),
                 "exiv2 documents {record}:{dataset} but gamut does not name it"
