@@ -17,11 +17,14 @@
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy};
 use gamut_core::invariants::{
     NARROW_FORMATS, Violation, acceptance_is_independent_of_the_samples,
-    converting_a_layout_to_itself_changes_nothing, normalise_dims,
+    converting_a_layout_to_itself_changes_nothing, normalise_dims, opaque_pixels_are_fixed_points,
     output_shape_matches_the_target_layout, palette_and_cmyk_convert_only_to_themselves,
-    the_in_place_door_matches_the_allocating_door,
+    premultiply_round_trip_is_bounded_and_idempotent, premultiply_rounds_to_nearest,
+    the_in_place_door_matches_the_allocating_door, unpremultiply_rounds_to_nearest_or_clamps,
 };
-use gamut_core::{Bilevel, Cmyk8, Dimensions, Gray8, GrayAlpha8, Indexed8, Rgb8, Rgba8};
+use gamut_core::{
+    Bilevel, Cmyk8, Dimensions, Gray8, GrayAlpha8, GrayAlpha16, Indexed8, Rgb8, Rgba8, Rgba16,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Runs a two-parameter law for every 8-bit target layout, stopping at the first violation.
@@ -155,4 +158,45 @@ fuzz_target!(|data: &[u8]| {
         )*};
     }
     identity!(Gray8, Bilevel, Indexed8, Rgb8, Rgba8, Cmyk8, GrayAlpha8);
+
+    // Laws 6-9: the associated-alpha laws, for every alpha-carrying layout at both widths. They
+    // say nothing about a buffer of the wrong length, so the sample bytes are cycled to exactly
+    // the length `dims` needs rather than leaving most inputs vacuous; the 16-bit layouts read
+    // them as big-endian pairs.
+    macro_rules! associated_alpha {
+        ($($p:ty => $read:expr),* $(,)?) => {$(
+            let wanted = dims
+                .sample_count(<$p as gamut_core::Pixel>::CHANNELS)
+                .expect("normalise_dims bounds the sample count");
+            let buffer: Vec<<$p as gamut_core::Pixel>::Sample> = $read(wanted);
+            for result in [
+                opaque_pixels_are_fixed_points::<$p>(dims, &buffer),
+                premultiply_rounds_to_nearest::<$p>(dims, &buffer),
+                unpremultiply_rounds_to_nearest_or_clamps::<$p>(dims, &buffer),
+                premultiply_round_trip_is_bounded_and_idempotent::<$p>(dims, &buffer),
+            ] {
+                if let Err(violation) = result {
+                    panic!("{violation}");
+                }
+            }
+        )*};
+    }
+    let narrow = |wanted: usize| {
+        samples
+            .iter()
+            .copied()
+            .cycle()
+            .take(wanted)
+            .collect::<Vec<u8>>()
+    };
+    let wide = |wanted: usize| {
+        let mut bytes = samples.iter().copied().cycle();
+        (0..wanted)
+            .map(|_| {
+                let high = bytes.next().unwrap_or(0);
+                u16::from(high) << 8 | u16::from(bytes.next().unwrap_or(0))
+            })
+            .collect::<Vec<u16>>()
+    };
+    associated_alpha!(Rgba8 => narrow, GrayAlpha8 => narrow, Rgba16 => wide, GrayAlpha16 => wide);
 });
