@@ -33,6 +33,17 @@
 //! transform requiring an ICC rendering intent — not a layout rearrangement. Both refuse with a
 //! message naming the missing machinery rather than silently applying a naive approximation.
 //!
+//! # Associated (premultiplied) alpha
+//!
+//! Every gamut buffer with an alpha channel carries **unassociated** alpha ([`ColorModel::Rgba`],
+//! [`ColorModel::GrayAlpha`]). A format or pipeline that wants associated alpha — an AVIF encoder
+//! declaring its colour premultiplied, a compositor — converts in place with
+//! [`premultiply_alpha`], and back with [`unpremultiply_alpha`]. These are explicit operations, not
+//! [`ConvertPolicy`] conversions: the layout does not change (an [`Rgba8`](crate::Rgba8) buffer
+//! stays an `Rgba8` buffer), only the meaning of its colour samples does, and premultiplying is
+//! lossy wherever alpha is below full scale. Both leave a fully opaque pixel unchanged, and both
+//! leave a layout without an alpha channel unchanged, since every one of its pixels is opaque.
+//!
 //! # Example
 //!
 //! ```
@@ -669,6 +680,117 @@ pub fn convert<P: Pixel, Q: Pixel>(
     convert_from_raw(src.as_raw(), policy)
 }
 
+/// The largest code value a sample of type `S` holds: 255 for `u8`, 65535 for `u16`.
+fn code_max<S: Sample>() -> u64 {
+    (1 << (8 * core::mem::size_of::<S>())) - 1
+}
+
+/// A sample's own code value, read back off the full-range scale `S` widens onto.
+///
+/// Exact for both sample widths: `u8` widens by multiplying by 257 = 65535 / 255, and `u16` is the
+/// identity.
+fn to_code<S: Sample>(sample: S, max: u64) -> u64 {
+    u64::from(sample.to_full_range_u16()) * max / 65_535
+}
+
+/// The sample holding code value `code`, which must not exceed `max`. The exact inverse of
+/// [`to_code`].
+fn from_code<S: Sample>(code: u64, max: u64) -> S {
+    S::from_full_range_u16((code * 65_535 / max) as u16)
+}
+
+/// Associates one colour code value with its pixel's alpha: `round(colour * alpha / max)`.
+///
+/// `max` is odd for both sample widths, so `colour * alpha / max` is never exactly half-way between
+/// two integers and round-half-up is round-to-nearest without a tie to break.
+fn premultiply_code(colour: u64, alpha: u64, max: u64) -> u64 {
+    (colour * alpha + max / 2) / max
+}
+
+/// Dissociates one colour code value from its pixel's alpha: `round(colour * max / alpha)`,
+/// clamped to `max`.
+///
+/// A fully transparent pixel has no recoverable colour and yields 0. The clamp only acts on input
+/// that was never validly premultiplied — associated colour above its own alpha — which a reader
+/// still meets in the wild.
+fn unpremultiply_code(colour: u64, alpha: u64, max: u64) -> u64 {
+    if alpha == 0 {
+        return 0;
+    }
+    ((colour * max + alpha / 2) / alpha).min(max)
+}
+
+/// Rewrites every colour sample of `image` as `op(colour, alpha, max)`, leaving alpha untouched.
+///
+/// A layout without an alpha channel is opaque throughout, and both operations leave an opaque
+/// pixel unchanged, so such a layout is left alone rather than refused.
+fn apply_alpha<P: Pixel>(image: &mut ImageBuf<P>, op: fn(u64, u64, u64) -> u64) {
+    if !has_alpha(P::MODEL) {
+        return;
+    }
+    let max = code_max::<P::Sample>();
+    // Both alpha-carrying models store alpha after their colour channels.
+    let alpha_index = P::CHANNELS - 1;
+    for pixel in image.as_mut_samples().chunks_exact_mut(P::CHANNELS) {
+        let (colour, alpha) = pixel.split_at_mut(alpha_index);
+        let alpha = to_code(alpha[0], max);
+        for sample in colour {
+            *sample = from_code(op(to_code(*sample, max), alpha, max), max);
+        }
+    }
+}
+
+/// Converts `image` from unassociated to associated (premultiplied) alpha, in place.
+///
+/// Each colour sample becomes `round(colour * alpha / max)`, where `max` is the sample type's full
+/// scale (255 or 65535); alpha itself is unchanged. A fully opaque pixel is unchanged and a fully
+/// transparent one becomes transparent black.
+///
+/// **Lossy** wherever alpha is below full scale: a pixel of alpha `a` keeps only `a + 1` distinct
+/// colour levels, so [`unpremultiply_alpha`] recovers the original only to within
+/// `⌊(a + max) / 2a⌋` code values. To keep the unassociated image, premultiply a
+/// [`clone`](Clone::clone) of it.
+///
+/// A layout without an alpha channel is fully opaque, so it is left unchanged.
+///
+/// ```
+/// use gamut_core::{convert::premultiply_alpha, Dimensions, ImageBuf, Rgba8};
+///
+/// let dims = Dimensions::new(2, 1).unwrap();
+/// // Half-transparent white, and opaque orange.
+/// let mut image = ImageBuf::<Rgba8>::new(vec![255, 255, 255, 128, 255, 128, 0, 255], dims).unwrap();
+/// premultiply_alpha(&mut image);
+/// assert_eq!(image.as_samples(), &[128, 128, 128, 128, 255, 128, 0, 255]);
+/// ```
+pub fn premultiply_alpha<P: Pixel>(image: &mut ImageBuf<P>) {
+    apply_alpha(image, premultiply_code);
+}
+
+/// Converts `image` from associated (premultiplied) to unassociated alpha, in place.
+///
+/// Each colour sample becomes `round(colour * max / alpha)`, clamped to `max`, where `max` is the
+/// sample type's full scale (255 or 65535); alpha itself is unchanged. A fully opaque pixel is
+/// unchanged, and a fully transparent one — whose colour premultiplication erased — becomes
+/// transparent black.
+///
+/// The inverse of [`premultiply_alpha`] only up to the precision premultiplying discarded; see
+/// there for the bound. Re-premultiplying the result does reproduce the associated image exactly.
+///
+/// A layout without an alpha channel is fully opaque, so it is left unchanged.
+///
+/// ```
+/// use gamut_core::{convert::unpremultiply_alpha, Dimensions, ImageBuf, Rgba8};
+///
+/// let dims = Dimensions::new(2, 1).unwrap();
+/// // Half-transparent white, premultiplied; and fully transparent.
+/// let mut image = ImageBuf::<Rgba8>::new(vec![128, 128, 128, 128, 0, 0, 0, 0], dims).unwrap();
+/// unpremultiply_alpha(&mut image);
+/// assert_eq!(image.as_samples(), &[255, 255, 255, 128, 0, 0, 0, 0]);
+/// ```
+pub fn unpremultiply_alpha<P: Pixel>(image: &mut ImageBuf<P>) {
+    apply_alpha(image, unpremultiply_code);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1105,6 +1227,98 @@ mod tests {
         assert_eq!(base.with_background([1, 2, 3]).background, [1, 2, 3]);
         assert_eq!(base.with_threshold(7).threshold, 7);
         assert_eq!(base.with_threshold(7).background, [0; 3]);
+    }
+
+    /// One image of layout `P` holding `samples`, laid out as a single row.
+    fn row<P: Pixel>(samples: Vec<P::Sample>) -> ImageBuf<P> {
+        let width = u32::try_from(samples.len() / P::CHANNELS).unwrap();
+        ImageBuf::new(samples, dims(width, 1)).unwrap()
+    }
+
+    #[test]
+    fn code_values_round_trip_through_the_full_range_scale_at_both_widths() {
+        assert_eq!(code_max::<u8>(), 255);
+        assert_eq!(code_max::<u16>(), 65_535);
+        for code in [0u8, 1, 128, 254, 255] {
+            assert_eq!(to_code(code, 255), u64::from(code));
+            assert_eq!(from_code::<u8>(u64::from(code), 255), code);
+        }
+        for code in [0u16, 1, 0x8000, 0xFFFE, 0xFFFF] {
+            assert_eq!(to_code(code, 65_535), u64::from(code));
+            assert_eq!(from_code::<u16>(u64::from(code), 65_535), code);
+        }
+    }
+
+    #[test]
+    fn premultiply_rounds_to_nearest() {
+        // 1 * 128 / 255 = 0.502: nearest is 1, truncation gives 0.
+        assert_eq!(premultiply_code(1, 128, 255), 1);
+        // 1 * 127 / 255 = 0.498: nearest is 0, so the addend must be half of max and not more.
+        assert_eq!(premultiply_code(1, 127, 255), 0);
+        assert_eq!(premultiply_code(200, 128, 255), 100); // 100.39
+        assert_eq!(premultiply_code(255, 0, 255), 0);
+        assert_eq!(premultiply_code(77, 255, 255), 77);
+        // 16-bit: 1 * 32768 / 65535 = 0.500008, just above the half.
+        assert_eq!(premultiply_code(1, 32_768, 65_535), 1);
+        assert_eq!(premultiply_code(1, 32_767, 65_535), 0);
+    }
+
+    #[test]
+    fn unpremultiply_rounds_to_nearest_and_clamps() {
+        // 1 * 255 / 4 = 63.75: nearest is 64, truncation gives 63.
+        assert_eq!(unpremultiply_code(1, 4, 255), 64);
+        // 1 * 255 / 2 = 127.5, a tie, which rounds half up.
+        assert_eq!(unpremultiply_code(1, 2, 255), 128);
+        // 3 * 255 / 7 = 109.29: half of alpha (3) is the whole addend; more would reach 110.
+        assert_eq!(unpremultiply_code(3, 7, 255), 109);
+        assert_eq!(unpremultiply_code(100, 128, 255), 199); // 199.2
+        assert_eq!(unpremultiply_code(77, 255, 255), 77);
+        // Colour above its own alpha was never validly premultiplied; it clamps to full scale.
+        assert_eq!(unpremultiply_code(200, 100, 255), 255);
+        assert_eq!(unpremultiply_code(2, 1, 65_535), 65_535);
+        // Transparent: nothing to recover, and no division by zero.
+        assert_eq!(unpremultiply_code(9, 0, 255), 0);
+        assert_eq!(unpremultiply_code(1, 2, 65_535), 32_768);
+    }
+
+    #[test]
+    fn premultiplying_rewrites_colour_and_keeps_alpha() {
+        let mut rgba = row::<Rgba8>(vec![200, 100, 50, 128, 9, 9, 9, 0, 1, 2, 3, 255]);
+        premultiply_alpha(&mut rgba);
+        assert_eq!(
+            rgba.as_samples(),
+            &[100, 50, 25, 128, 0, 0, 0, 0, 1, 2, 3, 255]
+        );
+        unpremultiply_alpha(&mut rgba);
+        assert_eq!(
+            rgba.as_samples(),
+            &[199, 100, 50, 128, 0, 0, 0, 0, 1, 2, 3, 255]
+        );
+
+        let mut wide = row::<Rgba16>(vec![0xFFFF, 0x8000, 1, 0x8000]);
+        premultiply_alpha(&mut wide);
+        assert_eq!(wide.as_samples(), &[0x8000, 0x4000, 1, 0x8000]);
+    }
+
+    #[test]
+    fn grey_alpha_layouts_carry_alpha_in_their_second_channel() {
+        let mut narrow = row::<GrayAlpha8>(vec![200, 128, 255, 0]);
+        premultiply_alpha(&mut narrow);
+        assert_eq!(narrow.as_samples(), &[100, 128, 0, 0]);
+
+        let mut wide = row::<GrayAlpha16>(vec![0x8000, 0x8000]);
+        unpremultiply_alpha(&mut wide);
+        assert_eq!(wide.as_samples(), &[0xFFFF, 0x8000]);
+    }
+
+    #[test]
+    fn a_layout_without_alpha_is_opaque_and_left_unchanged() {
+        // Were the last channel read as alpha, blue = 0 would erase red and green.
+        let mut rgb = row::<Rgb8>(vec![200, 100, 0]);
+        premultiply_alpha(&mut rgb);
+        assert_eq!(rgb.as_samples(), &[200, 100, 0]);
+        unpremultiply_alpha(&mut rgb);
+        assert_eq!(rgb.as_samples(), &[200, 100, 0]);
     }
 
     #[test]
