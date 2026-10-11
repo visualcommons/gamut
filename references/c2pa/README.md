@@ -100,7 +100,7 @@ vendored **verbatim and unmodified**; no derivative was made.
 | crate | clause | what it takes from here |
 | --- | --- | --- |
 | `gamut-metadata` | §9.1, §11.1.4.2, §15.12.1.1, §9.2.6 | one hard binding per standard manifest; the store is a JUMBF superbox; the exclusion contract that makes a copied-forward manifest invalid |
-| `gamut-heic` | §A.5.1–§A.5.3, §A.5.6, §15.12.2, §18.6 | top-level `uuid` box, user type `D8FEC3D6-…-C481`; `box_purpose` and the 8-byte merkle offset; BMFF excludes by box path, not byte offset |
+| `gamut-heic` | §A.5.1–§A.5.4, §A.5.6, §15.12.2, §18.6 | top-level `uuid` box, user type `D8FEC3D6-…-C481`; `box_purpose` and the 8-byte merkle offset; BMFF excludes by box path, not byte offset |
 | `gamut-isobmff` | §A.5.3 | placement: after `ftyp`, before the first `mdat` and before any `moov` |
 | `gamut-avif` | §A.5 | same BMFF carriage; AVIF is named explicitly in §A.5.1 |
 | `gamut-png` | §A.3.2, §18.5.4 | `caBX` chunk — ancillary, private, not-safe-to-copy; should precede `IDAT`. §18.5.4 says it is *important* that the chunk's `Length` and `caBX` type bytes go inside the exclusion range — neither `shall` nor `should` |
