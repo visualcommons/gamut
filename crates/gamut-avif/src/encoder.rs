@@ -331,6 +331,25 @@ impl AvifEncoder {
         self
     }
 
+    /// Codes the **alpha auxiliary item** at its own lossy `quality` (`0..=100`, higher = larger
+    /// output, closer to the source; values above `100` are clamped), independent of the colour
+    /// item's.
+    ///
+    /// The value goes through exactly the mapping [`AvifEncoder::lossy`]'s `quality` does, so
+    /// `lossy(q).with_alpha_quality(q)` codes the same bytes as `lossy(q)`. Without this call
+    /// alpha follows the colour quality (see [`AvifConfig::alpha_quality`]). Opacity edges are
+    /// often more visible than colour error, so a caller trading colour bits for size may want
+    /// alpha finer than colour; a mask that is already blocky can go coarser.
+    ///
+    /// **Ignored by [`AvifMode::Lossless`]**, which codes alpha bit-exactly at `base_q_idx 0`
+    /// whatever is set here, exactly as it ignores the colour `quality` — and by every input
+    /// without an alpha channel, which has no auxiliary item to code.
+    #[must_use]
+    pub fn with_alpha_quality(mut self, quality: u8) -> Self {
+        self.config.alpha_quality = Some(quality);
+        self
+    }
+
     /// Declares that the colour values of an RGBA input are **premultiplied** by their alpha —
     /// i.e. already multiplied through, so a fully transparent pixel carries zeroed colour.
     ///
@@ -420,6 +439,18 @@ impl AvifEncoder {
         match self.config.mode {
             AvifMode::Lossless => 0,
             AvifMode::Lossy => quality_to_quant(self.config.quality),
+        }
+    }
+
+    /// The AV1 `base_q_idx` the **alpha auxiliary** codes at: `0` on the lossless path, otherwise
+    /// the quality mapping applied to [`AvifConfig::alpha_quality`], or to the colour quality when
+    /// that is unset.
+    fn alpha_base_q_idx(&self) -> u8 {
+        match self.config.mode {
+            AvifMode::Lossless => 0,
+            AvifMode::Lossy => {
+                quality_to_quant(self.config.alpha_quality.unwrap_or(self.config.quality))
+            }
         }
     }
 
@@ -1142,8 +1173,10 @@ impl EncodeImage<Rgba8> for AvifEncoder {
     /// as [`EncodeImage<Rgb8>`] would, the alpha as a monochrome auxiliary — and wraps both in one
     /// AVIF file.
     ///
-    /// Alpha is coded at the same `base_q_idx` as the colour, so a lossless encode round-trips
-    /// alpha bit-exactly and a lossy one quantizes it alongside the colour. It carries no `colr`
+    /// Alpha is coded at the colour's `base_q_idx` unless
+    /// [`with_alpha_quality`](AvifEncoder::with_alpha_quality) gives it its own, so a lossless
+    /// encode round-trips alpha bit-exactly and a lossy one quantizes it at the alpha quality
+    /// (defaulting to the colour quality). It carries no `colr`
     /// and goes through no matrix: opacity is not colour (AVIF v1.2.0 §4.1).
     ///
     /// # Chroma
@@ -1164,11 +1197,16 @@ impl EncodeImage<Rgba8> for AvifEncoder {
                 Planar8::from_rgba8_matrix_view(image, m)
             }
         };
-        let base_q_idx = self.base_q_idx();
-        let still = self.colour_still(&planes, dims, base_q_idx, colour, planes.subsampling())?;
+        let still = self.colour_still(
+            &planes,
+            dims,
+            self.base_q_idx(),
+            colour,
+            planes.subsampling(),
+        )?;
         let alpha = monochrome_still(
             &Planar8::from_rgba8_alpha_view(image),
-            base_q_idx,
+            self.alpha_base_q_idx(),
             self.monochrome_colour(),
         )?;
         self.emit(&still, dims, Some(&alpha), out)
@@ -1216,11 +1254,10 @@ impl EncodeImage<Rgba16> for AvifEncoder {
                 Planar16::from_rgba16_matrix_view(image, m)
             }
         };
-        let base_q_idx = self.base_q_idx();
-        let still = self.colour_still16(&planes, dims, base_q_idx, colour)?;
+        let still = self.colour_still16(&planes, dims, self.base_q_idx(), colour)?;
         let alpha = monochrome_still16(
             &Planar16::from_rgba16_alpha_view(image, depth),
-            base_q_idx,
+            self.alpha_base_q_idx(),
             self.monochrome_colour(),
         )?;
         self.emit(&still, dims, Some(&alpha), out)
@@ -1473,6 +1510,34 @@ mod tests {
         let lossy = AvifEncoder::lossy(80).config();
         assert_eq!(lossy.mode, AvifMode::Lossy);
         assert_eq!(lossy.quality, 80);
+    }
+
+    #[test]
+    fn alpha_base_q_idx_follows_alpha_quality_then_colour_quality() {
+        // Unset: alpha codes at the colour item's quantizer, so the pre-knob bytes hold.
+        let follows = AvifEncoder::lossy(50);
+        assert_eq!(follows.config().alpha_quality, None);
+        assert_eq!(follows.alpha_base_q_idx(), 127);
+        assert_eq!(follows.alpha_base_q_idx(), follows.base_q_idx());
+        // Set: its own value through the same mapping, leaving the colour quantizer alone.
+        let own = AvifEncoder::lossy(50).with_alpha_quality(90);
+        assert_eq!(own.config().alpha_quality, Some(90));
+        assert_eq!(own.alpha_base_q_idx(), 25);
+        assert_eq!(own.base_q_idx(), 127);
+        // The clamp is the colour quality's: above 100 behaves as 100.
+        assert_eq!(
+            AvifEncoder::lossy(50)
+                .with_alpha_quality(200)
+                .alpha_base_q_idx(),
+            1
+        );
+        // Lossless ignores it and codes alpha on the lossless path.
+        assert_eq!(
+            AvifEncoder::lossless()
+                .with_alpha_quality(10)
+                .alpha_base_q_idx(),
+            0
+        );
     }
 
     #[test]

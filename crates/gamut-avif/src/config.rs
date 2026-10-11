@@ -46,6 +46,17 @@ pub struct AvifConfig {
     /// Lossy quality factor, `0..=100`. Values above `100` behave as `100` (the encoder clamps
     /// silently) — a frozen v1 contract.
     pub quality: u8,
+    /// Lossy quality factor for the **alpha auxiliary item**, `0..=100` on the same scale and
+    /// through the same `base_q_idx` mapping as `quality`, or `None` to code alpha at `quality`.
+    ///
+    /// `None` (the default) keeps alpha on the colour item's quantizer, so an encoder that never
+    /// sets this writes exactly the bytes it wrote before the knob existed. Values above `100`
+    /// behave as `100`, as for `quality`. Applies only to inputs that carry alpha
+    /// ([`Rgba8`](gamut_core::Rgba8), [`Rgba16`](gamut_core::Rgba16)) and only to
+    /// [`AvifMode::Lossy`]: [`AvifMode::Lossless`] **ignores** it, exactly as it ignores
+    /// `quality`, and codes alpha bit-exactly. Set it with
+    /// [`AvifEncoder::with_alpha_quality`](crate::AvifEncoder::with_alpha_quality).
+    pub alpha_quality: Option<u8>,
     /// The CICP matrix the samples are coded through.
     ///
     /// [`MatrixCoefficients::Identity`] carries R'G'B' directly as GBR planes — the only way to be
@@ -100,6 +111,7 @@ impl Default for AvifConfig {
         Self {
             mode: AvifMode::Lossless,
             quality: 75,
+            alpha_quality: None,
             matrix: MatrixCoefficients::Identity,
             range: ColorRange::Full,
             chroma: ChromaSubsampling::Cs444,
@@ -119,6 +131,8 @@ mod tests {
         let c = AvifConfig::default();
         assert_eq!(c.mode, AvifMode::Lossless);
         assert_eq!(c.quality, 75);
+        // Unset: alpha follows `quality`, so the default encoder's bytes predate the knob.
+        assert_eq!(c.alpha_quality, None);
         assert_eq!(c.matrix, MatrixCoefficients::Identity);
         assert_eq!(c.range, ColorRange::Full);
         assert_eq!(c.primaries, ColourPrimaries::Bt709);
