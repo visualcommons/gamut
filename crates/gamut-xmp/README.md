@@ -108,8 +108,9 @@ discards the rest, so two `write` outputs concatenated read back as the first al
   fixes the prefix its properties serialize under — the one Adobe XMPCore keys them by — and
   nothing more; each non-Adobe URI is cited on its variant, and every one is vouched for by the
   reference engine in `tests/oracle.rs`. `exifEX` is registered under `http://cipa.jp/exif/1.0/`
-  (CIPA DC-010, the URI the reference engine and deployed writers use); the Exif 3.0 text's
-  annotation examples bind the same prefix to `…/exif/2.32/`, which is not registered.
+  (CIPA DC-010-2026 Tables 1/6/20, vendored under `references/exif/`; also the URI the reference
+  engine binds). `…/exif/2.32/`, which the Exif 3.0 text's annotation examples still show, is not
+  registered: DC-010-2026 retires it and declares it unrelated to `…/exif/1.0/`.
 - **Part 3 (storage in files) belongs to the format crates by design.** This crate supplies what
   they need — wrapper-optional parse, bare-body serialization (`to_rdf` / `serialize_body`), and
   the writability/padding envelope for in-place editing. Locating packets inside JPEG/TIFF/PNG
