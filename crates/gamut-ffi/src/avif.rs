@@ -1570,6 +1570,55 @@ mod tests {
         );
     }
 
+    /// A setter rebuilds the handle's encoder through a consuming `with_*` builder; the backend
+    /// registry must travel with it (DESIGN.md decision 4 rests on this). The fake backend
+    /// accepts every job, counts each `encode` through `ctx`, and fails it terminally, so the
+    /// built-in tail can never mask a dropped registry: the encode fails only if it ran.
+    #[test]
+    fn setter_after_push_backend_keeps_the_backend() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use gamut_codec_abi::{ABI_VERSION, EncodeConfig, ImageDesc, Status, WriteFn};
+
+        unsafe extern "C" fn accept(_: *mut c_void, _: *const EncodeConfig) -> Status {
+            Status::OK
+        }
+        unsafe extern "C" fn count_and_fail(
+            ctx: *mut c_void,
+            _: *const EncodeConfig,
+            _: *const ImageDesc,
+            _: WriteFn,
+            _: *mut c_void,
+        ) -> Status {
+            // SAFETY: `ctx` is the test's live `AtomicUsize`, which outlives the handle.
+            unsafe { &*ctx.cast_const().cast::<AtomicUsize>() }.fetch_add(1, Ordering::SeqCst);
+            Status(-2)
+        }
+        let vtable = EncoderVTable {
+            abi_version: ABI_VERSION,
+            supports: Some(accept),
+            encode: Some(count_and_fail),
+            destroy: None,
+        };
+        let encodes = AtomicUsize::new(0);
+        let ctx = ptr::from_ref(&encodes).cast_mut().cast();
+
+        let encoder = gamut_avif_encoder_new();
+        assert_eq!(
+            unsafe { gamut_avif_encoder_push_backend(encoder, &vtable, ctx) },
+            GAMUT_OK
+        );
+        assert_eq!(
+            unsafe { gamut_avif_encoder_set_rotation(encoder, 1) },
+            GAMUT_OK
+        );
+        let result = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4);
+        unsafe { gamut_avif_encoder_free(encoder) };
+
+        assert_eq!(result, Err(GAMUT_STATUS_INVALID_INPUT));
+        assert_eq!(encodes.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn mirror_setter_maps_each_constant() {
         assert_setter(
