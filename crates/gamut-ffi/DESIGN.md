@@ -170,7 +170,8 @@ void gamut_avif_image_free(GamutAvifImage *image);
 
 - **Setters** map the `AvifEncoder::with_*` builders one-to-one
   (`gamut_avif_encoder_set_{matrix,primaries,transfer,color_range,chroma,bit_depth,
-  premultiplied_alpha,rotation,mirror,icc_profile,exif,xmp,c2pa_reserved,c2pa}`). CICP values cross as their
+  alpha_quality,premultiplied_alpha,rotation,mirror,icc_profile,exif,xmp,c2pa_reserved,
+  c2pa}`). CICP values cross as their
   ITU-T H.273 code points and bit depth as a bit count, mapped by `gamut-color`'s own
   `from_code_point`/`from_flag`/`from_bits` (a direct dependency of this crate for that reason);
   chroma subsampling and mirror cross as `GAMUT_CHROMA_SUBSAMPLING_*` / `GAMUT_AVIF_MIRROR_*`
@@ -209,9 +210,8 @@ void gamut_avif_image_free(GamutAvifImage *image);
   `dimensions` (the primary item's `ispe`). An absent payload is `GAMUT_OK` with `NULL`/`0`; a
   primary or alpha item that is derived (`grid`/`iden`/`iovl`) or not AV1 has no single
   codestream and is `GAMUT_STATUS_UNSUPPORTED`.
-- **Not yet exposed**: the alpha quality setter over the shipped `with_alpha_quality` (issue #692); the encoder knobs the
-  Rust API has not shipped yet (speed, threads — issues #654, #655) join as setters when they
-  land; AVIF decode waits for the decoder registry (above). Error messages: these entry points
+- **Not yet exposed**: the encoder knobs the Rust API has not shipped yet (speed, threads —
+  issues #654, #655) join as setters when they land; AVIF decode waits for the decoder registry (above). Error messages: these entry points
   return only the `gamut_status_t` code (`status_of` maps `Error::kind()`), so neither the
   borrowed `const char*` message nor the thread-local last-error string promised under Errors is
   reachable from C yet; both arrive with the rest of the consumer boundary (issue #242).
