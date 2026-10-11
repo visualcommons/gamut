@@ -3,7 +3,9 @@
 The target specification for the C API of the gamut codecs (issue #242). The **provider
 boundary** — the per-format `push_backend` entry points of issue #280 — is implemented (see
 [Provider boundary](#provider-boundary-implemented-issue-280)); the consumer-boundary
-conversion — largely automated from the Rust API, per-crate — has not started. This document
+conversion — largely automated from the Rust API, per-crate — has one hand-written slice so far,
+AVIF (issue #666, see [AVIF consumer entry points](#avif-consumer-entry-points-issue-666)),
+which settles the shape the rest follows. This document
 fixes the conventions that conversion tooling generates against and that the Rust API is kept
 compatible with (see the "C portability" convention in the repository `AGENTS.md`).
 
@@ -36,16 +38,21 @@ Stateful or Rust-rich types — encoders, decoders, rich decode results (`Decode
 cross the boundary as opaque pointers with `_new`/`_free` lifecycles. Rust `with_*` builder
 methods map to `gamut_*_set_*` functions returning a status code.
 
-Plain-data types cross **by value**: `gamut_core::Dimensions` (`#[repr(C)]`, width then height),
+Plain-data types cross **by value**: `gamut_core::Dimensions` (`#[repr(C)]`, width then height;
+the AVIF slice passes it as its two fields, see [Buffers](#buffers)),
 `gamut_core::PixelFormat` and `ColorModel` (`#[repr(u32)]`, explicit permanent discriminants),
 and any format-crate enum once it is repr-pinned during its conversion pass.
 
 ## Buffers
 
 All byte buffers are pointer + length pairs (`const uint8_t *data, size_t len`). An image
-crosses as `(samples_ptr, samples_len, gamut_dimensions_t, gamut_pixel_format_t)` and is
-validated at the boundary with exactly the semantics of `ImageRef::new` (length =
-`width * height * channels`, non-empty dimensions).
+crosses as `(samples_ptr, samples_len, uint32_t width, uint32_t height)` — the pixel format is
+named by the entry point (see [Trait mapping](#trait-mapping)), the sample pointer is typed by it
+(`const uint8_t *` / `const uint16_t *`), and `samples_len` counts samples — and is validated at
+the boundary with exactly the semantics of `ImageRef::new` (length =
+`width * height * channels`, non-empty dimensions). Width and height cross as two scalars rather
+than a `gamut_dimensions_t`: the header is generated without parsing `gamut-core`, and two
+`uint32_t` arguments need no struct declaration on either side.
 
 ## Errors
 
@@ -96,8 +103,10 @@ Every `extern "C"` entry point wraps its body in `catch_unwind`; a panic becomes
 - **Consumer boundary (C calls Rust)** — the part tooling generates: each format crate's
   object-safe `EncodeImage<P>` / `DecodeImage<P>` impls are exported per
   (codec, `PixelFormat`) pair, enumerated mechanically from `gamut_core::PixelFormat::ALL` ×
-  the crate's impl set (e.g. `gamut_png_encoder_encode_rgb8`, or a single entry point
-  dispatching on a `gamut_pixel_format_t` argument — chosen at conversion kickoff, uniformly).
+  the crate's impl set: **one entry point per pair**, e.g. `gamut_png_encoder_encode_rgb8`
+  (settled by the AVIF slice, issue #666). A per-pair entry point lets 16-bit samples cross as
+  `const uint16_t *`, so the C compiler checks the sample type, where a single entry point
+  dispatching on a `gamut_pixel_format_t` would take `const void *`.
 - **Provider boundary (C implements Rust traits)** — carried by **`gamut-codec-abi`**
   (issue #241, sub-issue #272): its `#[repr(C)]` descriptors/vtables and `Foreign*` bridges are
   the sanctioned mechanism for foreign implementations plugging into gamut, including
@@ -137,7 +146,59 @@ gamut_status_t gamut_png_encoder_push_backend(GamutPngEncoder *encoder,
   `Av1StillDecoder` is threaded per call, and the planned in-house decoder (issue #259) will
   make it optional. The decode direction joins the C surface when that registry exists.
 
-### Drift locking
+## AVIF consumer entry points (issue #666)
+
+The first consumer-boundary slice, hand-written over `gamut::avif`; each entry point is a
+living shim over one Rust call.
+
+```c
+/* Encode: one entry point per EncodeImage layout (rgb8, rgba8, gray8, rgb16, rgba16). */
+GamutAvifEncoder *gamut_avif_encoder_new_lossy(uint8_t quality);  /* AvifEncoder::lossy */
+gamut_status_t gamut_avif_encoder_encode_rgba8(const GamutAvifEncoder *encoder,
+                                               const uint8_t *samples, size_t samples_len,
+                                               uint32_t width, uint32_t height,
+                                               uint8_t **out, size_t *out_len);
+void gamut_bytes_free(uint8_t *data, size_t len);
+
+/* Parse: an owned handle with borrowed accessors. */
+gamut_status_t gamut_avif_image_parse(const uint8_t *data, size_t len, GamutAvifImage **out);
+gamut_status_t gamut_avif_image_primary_codestream(const GamutAvifImage *image,
+                                                   const uint8_t **data, size_t *len);
+void gamut_avif_image_free(GamutAvifImage *image);
+```
+
+- **Setters** map the `AvifEncoder::with_*` builders one-to-one
+  (`gamut_avif_encoder_set_{matrix,primaries,transfer,color_range,chroma,bit_depth,
+  premultiplied_alpha,rotation,mirror,icc_profile,exif,xmp}`). CICP values cross as their
+  ITU-T H.273 code points and bit depth as a bit count, mapped by `gamut-color`'s own
+  `from_code_point`/`from_flag`/`from_bits` (a direct dependency of this crate for that reason);
+  chroma subsampling and mirror cross as `GAMUT_CHROMA_SUBSAMPLING_*` / `GAMUT_AVIF_MIRROR_*`
+  constants, the chroma ones const-locked to `ChromaSubsampling`'s discriminants. A value the
+  mapping rejects returns `GAMUT_STATUS_UNSUPPORTED` (a code point or depth gamut does not model)
+  or `GAMUT_STATUS_INVALID_INPUT` (not one of the defined flag/constant values) and leaves the
+  encoder unchanged; a null handle is `GAMUT_STATUS_NULL_ARGUMENT` before either. Lossy mode and
+  quality are construction-time, as in Rust (`gamut_avif_encoder_new_lossy`).
+- **Encode output** is a `Box<[u8]>` handed out as `(uint8_t *, size_t)` and released with
+  `gamut_bytes_free(data, len)` — the length alone recovers the layout, so C carries no
+  capacity. On any non-OK status the out-params are `NULL`/`0`.
+- **Sample buffers** are validated with `ImageRef::new`'s semantics (length in *samples*); a
+  misaligned `const uint16_t *` is `GAMUT_STATUS_INVALID_INPUT`, never dereferenced.
+- **Byte inputs**: `NULL` with `len == 0` is the empty slice; `NULL` with a non-zero `len` is
+  `GAMUT_STATUS_NULL_ARGUMENT`.
+- **Parse** runs `AvifContainer::parse` and keeps (a clone of) its owned `AvifImage`, so the
+  handle never borrows the caller's input. Accessors write borrowed `(const uint8_t *, size_t)`
+  pairs valid until `gamut_avif_image_free`: `primary_codestream`, `alpha_codestream`, `av1c`
+  (the `av1C` record body), `exif` (raw, including HEIF's 4-byte `exif_tiff_header_offset`, as
+  the Rust `AvifImage::exif` exposes it), `xmp`, `icc_profile`; plus `is_premultiplied` and
+  `dimensions` (the primary item's `ispe`). An absent payload is `GAMUT_OK` with `NULL`/`0`; a
+  primary or alpha item that is derived (`grid`/`iden`/`iovl`) or not AV1 has no single
+  codestream and is `GAMUT_STATUS_UNSUPPORTED`.
+- **Not yet exposed**: the C2PA slot setters (`with_c2pa_reserved` / `with_c2pa`), whose use
+  needs the encode report's slot range to cross the boundary too (issue #673); the encoder
+  knobs the Rust API has not shipped yet (speed, threads, alpha quality — issues #654, #655,
+  #656) join as setters when they land; AVIF decode waits for the decoder registry (above).
+
+## Drift locking
 
 The FFI surface must never constrain the idiomatic Rust API, but any drift between the two must
 fail loudly, at compile time wherever structurally possible:
@@ -178,8 +239,9 @@ matrix:
 
 ## First-pass scope
 
-Shipped: the provider boundary above (issue #280). Next: the core `EncodeImage`/`DecodeImage`
-trait pair and the builder configs of each format crate (issue #242). Excluded initially
+Shipped: the provider boundary above (issue #280), and AVIF encode, config setters and container
+parse (issue #666). Next: the core `EncodeImage`/`DecodeImage` trait pair and the builder
+configs of the other format crates (issue #242). Excluded initially
 (revisited per crate as conversion proceeds): rich ad-hoc surfaces
 (`DecodedPng`/`PngImage`, jpeg `info()`/`metadata()`, HEIC item/metadata detail), the tiff/ifd
 low-level writer functions, and the `primitives` re-exports. The C surface is feature-gated
