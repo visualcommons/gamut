@@ -331,6 +331,7 @@ copy, which is what a decoder does for an independently decodable tile.
 | Subsampled chroma at 10/12-bit (`with_chroma` reaches the `Rgb16` path; `Planar16::from_rgb16_matrix_subsampled` shares `Planar8`'s box filter, so the two cannot drift) | — | ✅ (#399) | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ✅ (`Planar16`; 16-bit input narrows to a 10/12-bit coded depth — float HDR ☐) | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
+| separate alpha quality (`AvifEncoder::with_alpha_quality` / `AvifConfig::alpha_quality`; same 0..=100 → `base_q_idx` mapping, `None` follows `quality`, ignored when lossless) | gamut-avif/av1 | ✅ (#656; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
 | AVIF container decode + codestream handoff (`AvifContainer`/`AvifImage`/`Av1StillDecoder`) | gamut-avif §L | ✅ | D |
 | AV1 **encode** backend seam (`Av1StillEncoder`/`Av1EncodeRequest`/`push_backend`/`AbiAv1StillEncoder`) | gamut-avif §M | ✅ | D |
 | AV1 **decode** backend registry (`push_decode_backend`/`AbiAv1StillDecoder` around `Av1StillDecoder`) | gamut-avif §M | ☐ | D |
