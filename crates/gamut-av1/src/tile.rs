@@ -116,7 +116,8 @@ const ALL_ANGLE_DELTAS: [i8; 7] = [-3, -2, -1, 0, 1, 2, 3];
 const ALL_CFL_MAGNITUDES: [i32; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
 /// The `TX_SET_INTRA_2` types tried after `DCT_DCT`, with their `Tx_Type_Intra_Inv_Set2` symbols,
-/// cheapest-to-try-first: a pruned search keeps a prefix.
+/// in the order the full search has always tried them (which decides ties): a pruned search keeps
+/// a prefix, so `ADST_ADST` is the one extra type a two-type search tries.
 const TX_TYPE_TRIALS: [(TxType, usize); 4] = [
     (TxType::AdstAdst, 2),
     (TxType::AdstDct, 3),
