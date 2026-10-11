@@ -25,6 +25,12 @@ gamut = { workspace = true }
 # entry (enforced by `mise run check-ffi-features`) — so the seam crate is a direct,
 # unconditional dependency, exactly as in the format crates themselves.
 gamut-codec-abi = { workspace = true }
+# The CICP / bit-depth / chroma vocabulary the consumer-boundary config setters map C integers
+# onto (`MatrixCoefficients::from_code_point`, `BitDepth::from_bits`, …). The umbrella only
+# re-exports it under `primitives`, and a format feature may forward nothing but `gamut/<name>`
+# (`mise run check-ffi-features`), so — like the seam crate above — it is a direct,
+# unconditional dependency. It is already in every format build's graph via the format crates.
+gamut-color = { workspace = true }
 
 # Strictly mirrors the `gamut` umbrella's feature table (enforced by `mise run
 # check-ffi-features`): every feature forwards the same-named gamut feature, so gamut-ffi built
