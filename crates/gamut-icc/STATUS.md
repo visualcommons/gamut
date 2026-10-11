@@ -95,15 +95,13 @@ Declined: HLG (code 18) and Unspecified (code 2) have neither a §10.18 closed f
 gamut-color EOTF to sample from, and every other H.273 code point is unmodelled here. The transfer
 axis is keyed on the **raw code point**, not on `gamut_color::cicp::TransferCharacteristics`,
 because the set of curves an ICC tag can encode is not the set gamut-color can evaluate: codes 6
-and 15 have no `TransferCharacteristics` variant at all; code 1 has one but no `eotf_for` curve;
-and code 14 has an `eotf_for` curve that is **not this one** — `bt2020_pq_to_sdr`, a PQ EOTF plus
-a tone map to SDR, which at `V = 0.5` is 20.3 % above what Table 3 gives code 14. All four are
-exactly encodable here as the one curve Table 3 defines. That the two crates read code point 14
-differently is a `gamut-color` question, filed as
-[#605](https://github.com/visualcommons/gamut/issues/605) rather than resolved here. Each claim
-about gamut-color above is an assertion in the doctest on `src/builtin.rs`'s module documentation:
-which of the four code points `TransferCharacteristics::from_code_point` models, which of those
-`eotf_for` returns a curve for, and the 20.3 % by which that curve exceeds Table 3's at `V = 0.5`.
+and 15 have no `TransferCharacteristics` variant at all, while codes 1 and 14 do, and `eotf_for`
+maps both to the same Table 3 curve this crate writes (`gamut_color::transfer::bt709_eotf`, whose
+α and β — `BT709_ALPHA` / `BT709_BETA` — the parametric tag borrows rather than restates). All four
+are exactly encodable here as the one curve Table 3 defines. Each claim about gamut-color above is
+an assertion in the doctest on `src/builtin.rs`'s module documentation: which of the four code
+points `TransferCharacteristics::from_code_point` models, and that `eotf_for` evaluates Table 3's
+`0.259719` at `V = 0.5` for both of those.
 
 **A `SourceProfile` bundle's own curve is not always the profile's curve.** `from_source_profile`
 projects the bundle onto its two CICP code points and builds from those. For `SourceProfile::SRGB`
