@@ -1112,12 +1112,17 @@ mod tests {
         // `deconstruct` graded the file clean, so nothing in the round trip could see it. The
         // *message* is the claim: the tag is a standard pointer tag and the value is a `SHORT`, so
         // neither of the other clauses applies to this tree.
+        //
+        // `gamut-ifd`'s setters now keep a tag in one store (the later call wins, #601), so the
+        // conflict is built the one way still open: attaching the group under a free tag and
+        // retagging it in place through `sub_ifds_mut`.
         for &tag in EXIF_SUBTREE_POINTER_TAGS {
             let mut child = Ifd::new();
             child.set(1, Value::Ascii("R98".into()));
             let mut exif = exif_ifd();
             exif.set(tag, Value::Short(vec![7]));
-            exif.set_sub_ifd(tag, vec![child]);
+            exif.set_sub_ifd(u16::MAX, vec![child]);
+            exif.sub_ifds_mut()[0].tag = tag;
             let Err(err) = TiffMetadata::new().with_exif(exif).check() else {
                 panic!("tag {tag}: two entries under one tag is not a directory");
             };
