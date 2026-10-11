@@ -402,7 +402,7 @@ impl Av1Config {
 
 /// The payload of the first sequence header OBU in a low-overhead OBU `stream`, or `None` when it
 /// has none. Stops at the first sequence header, so a split error *after* it is not reported.
-fn first_sequence_header(stream: &[u8]) -> Result<Option<&[u8]>> {
+pub(crate) fn first_sequence_header(stream: &[u8]) -> Result<Option<&[u8]>> {
     for obu in iter_obus(stream) {
         let obu = obu?;
         if obu.header.obu_type == ObuType::SequenceHeader {

@@ -34,13 +34,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill};
+use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, SequenceHeader, Subsampling};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::{BitDepth, ChromaSubsampling, ColorRange, Planar8, Planar16};
+use gamut_color::{
+    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
+    Planar16, TransferCharacteristics,
+};
 use gamut_core::{Dimensions, Error, PixelFormat, Result};
 
-use crate::av1c::Av1Config;
-use crate::obu::{ObuType, iter_obus};
+use crate::av1c::{Av1Config, first_sequence_header};
 
 /// The `codec_id` `gamut-avif` stamps into a [`EncodeConfig`] when it drives a
 /// [`gamut_codec_abi`] backend: the big-endian `av01` FourCC — the same four bytes AV1-ISOBMFF
@@ -280,10 +282,10 @@ pub(crate) fn run_backends(
 ///
 /// # Errors
 ///
-/// - [`Error::InvalidInput`] if the stream has no parsable reduced-still-picture sequence header,
-///   or if its coded dimensions disagree with `dims` (which the container's `ispe` states).
-/// - [`Error::Unsupported`] if the sequence header is not `reduced_still_picture_header = 1`, or
-///   its `seq_profile`/depth pair is not one this surface can describe.
+/// - [`Error::InvalidInput`] if the stream has no sequence header `gamut-av1` can parse, or if its
+///   coded dimensions disagree with `dims` (which the container's `ispe` states).
+/// - [`Error::Unsupported`] if the sequence header is not `reduced_still_picture_header = 1`, is
+///   monochrome, or leaves its colour undescribed.
 /// - [`Error::InvalidInput`] if the stream's coded depth is not the one the request asked for —
 ///   the container's `av1C` and `pixi` would otherwise lie about the payload.
 /// - Whatever [`Av1Config::validate_still_payload`] reports for a non-conformant item payload.
@@ -377,97 +379,98 @@ struct SeqHeaderParams {
 }
 
 impl SeqHeaderParams {
-    /// Reads the (single) sequence header OBU in `payload`, through `color_config()`.
+    /// Reads the first sequence header OBU in `payload` through `gamut-av1`'s
+    /// [`SequenceHeader::parse`] — the workspace's one AV1 §5.5 parser, the same one
+    /// [`Av1Config::sequence_header`] reads a decoded item through, so the encode and decode paths
+    /// cannot disagree about a field — and projects it onto what the container mirrors.
     ///
-    /// Only the `reduced_still_picture_header = 1` layout is read — the shape AVIF still images
-    /// use (AV1 §5.5.1: with the reduced header the syntax runs `seq_profile(3)`,
-    /// `still_picture(1)`, `reduced_still_picture_header(1)`, `seq_level_idx[0](5)`,
-    /// `frame_width_bits_minus_1(4)`, `frame_height_bits_minus_1(4)`,
-    /// `max_frame_width_minus_1(n)`, `max_frame_height_minus_1(m)`, then `use_128x128_superblock`,
-    /// `enable_filter_intra`, `enable_intra_edge_filter`, `enable_superres`, `enable_cdef`,
-    /// `enable_restoration`, and `color_config()`).
+    /// The projection refuses the headers this surface cannot describe: anything but
+    /// `reduced_still_picture_header = 1` (the shape AVIF still images use), a monochrome stream
+    /// (the item being built is the three-plane colour item), undescribed colour, and the sRGB
+    /// shortcut on a profile that fixes subsampled chroma.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidInput`] if the stream has no sequence header OBU, does not split into
+    ///   OBUs, or carries a header [`SequenceHeader::parse`] rejects (truncated, a reserved
+    ///   `seq_profile`, or not ending in the §5.3.1 `trailing_bits()` its size declares) — the
+    ///   parser's own error is kept as the detail.
+    /// - [`Error::Unsupported`] for the first three refusals above.
+    /// - [`Error::InvalidInput`] for the shortcut/profile contradiction.
     fn parse(payload: &[u8]) -> Result<Self> {
-        let seq = iter_obus(payload)
-            .find_map(|obu| match obu {
-                Ok(obu) if obu.header.obu_type == ObuType::SequenceHeader => Some(Ok(obu.payload)),
-                Ok(_) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .ok_or_else(|| {
-                Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "AVIF: AV1 backend stream has no sequence header OBU",
-                )
-            })??;
-        let mut r = BitReader::new(seq);
-        let seq_profile = r.bits(3)? as u8;
-        // Checked here, not by the caller, because `color_config()`'s *layout* depends on it: only
-        // `seq_profile == 2` codes `twelve_bit`, and only `seq_profile != 1` codes `mono_chrome`.
-        // Reading the colour fields off a profile this parser cannot describe would misparse them
-        // before anyone had a chance to reject the stream.
-        //
-        // All three profiles are admitted: 0 is 4:2:0 (and the one a monochrome stream would use,
-        // which the `mono_chrome` bit below still rejects — the container surface this rebuilds an
-        // `av1C` for describes a three-plane colour item), 1 is 4:4:4, 2 is 4:2:2 or any 12-bit
-        // layout.
-        if seq_profile > 2 {
-            return Err(Error::unsupported(
+        let seq = first_sequence_header(payload)?.ok_or_else(|| {
+            Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 backend stream must use seq_profile 0, 1 or 2",
-            ));
-        }
-        let _still_picture = r.bits(1)?;
-        if r.bits(1)? != 1 {
+                "AVIF: AV1 backend stream has no sequence header OBU",
+            )
+        })?;
+        // Wrapped rather than propagated, so every refusal of a backend stream stays this crate's
+        // own error with a stable message, whichever layer found the defect.
+        let header = SequenceHeader::parse(seq).map_err(|e| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend sequence header is malformed",
+            )
+            .with_detail(e.to_string())
+        })?;
+        if !header.reduced_still_picture_header {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "AVIF: AV1 backend stream must set reduced_still_picture_header",
             ));
         }
-        let seq_level_idx_0 = r.bits(5)? as u8;
-        let width_bits = r.bits(4)? + 1;
-        let height_bits = r.bits(4)? + 1;
-        let width = r.bits(width_bits)? + 1;
-        let height = r.bits(height_bits)? + 1;
-        // `frame_id_numbers_present_flag` is inferred 0 under the reduced header; the six enable
-        // flags below carry no information the container needs, but they must be stepped over to
-        // reach `color_config()`.
-        r.bits(6)?; // use_128x128_superblock, filter_intra, intra_edge_filter, superres, cdef, restoration
-
-        // color_config() (§5.5.2): `high_bitdepth`, then `twelve_bit` only under profile 2 —
-        // `&&` short-circuits, so the bit is consumed exactly when the syntax codes it.
-        let high_bitdepth = r.bits(1)? != 0;
-        let twelve_bit = seq_profile == 2 && high_bitdepth && r.bits(1)? != 0;
-        let bit_depth = match (high_bitdepth, twelve_bit) {
-            (false, _) => BitDepth::Eight,
-            (true, false) => BitDepth::Ten,
-            (true, true) => BitDepth::Twelve,
+        let color = header.color;
+        let chroma = match color.subsampling {
+            Subsampling::Monochrome => {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: AV1 backend stream must be three-plane (mono_chrome = 0)",
+                ));
+            }
+            Subsampling::Yuv444 => ChromaSubsampling::Cs444,
+            Subsampling::Yuv422 => ChromaSubsampling::Cs422,
+            Subsampling::Yuv420 => ChromaSubsampling::Cs420,
         };
-        // `mono_chrome` is coded for every profile except High.
-        if seq_profile != 1 && r.bits(1)? != 0 {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 backend stream must be three-plane (mono_chrome = 0)",
-            ));
-        }
-        // `color_description_present_flag = 0` leaves all three code points UNSPECIFIED (2), which
-        // the container would have to stamp verbatim into `colr` — and which can never match the
-        // concrete triple the request carries. Reject it here, with a message that says why,
-        // rather than let it fall out of the colour comparison as a confusing mismatch.
-        if r.bits(1)? != 1 {
+        let colour = (
+            u16::from(color.color_primaries),
+            u16::from(color.transfer_characteristics),
+            u16::from(color.matrix_coefficients),
+            color.full_range,
+        );
+        // `color_description_present_flag = 0` leaves all three code points UNSPECIFIED, which the
+        // container would have to stamp verbatim into `colr` — and which can never match the
+        // concrete triple a three-plane request carries (the encoder refuses an unspecified
+        // matrix). Reject it here, with a message that says why, rather than let it fall out of
+        // the colour comparison as a confusing mismatch.
+        //
+        // The parsed header does not keep the flag, and does not need to: §5.5.2 gives an absent
+        // description exactly the semantics of coding CP/TC/MC_UNSPECIFIED, so a stream that
+        // codes that triple explicitly says the same thing and is refused the same way.
+        if (colour.0, colour.1, colour.2)
+            == (
+                ColourPrimaries::Unspecified.code_point(),
+                TransferCharacteristics::Unspecified.code_point(),
+                MatrixCoefficients::Unspecified.code_point(),
+            )
+        {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "AVIF: AV1 backend stream must set color_description_present_flag",
             ));
         }
-        let cp = r.bits(8)? as u16;
-        let tc = r.bits(8)? as u16;
-        let mc = r.bits(8)? as u16;
-        // The §5.5.2 shortcut: BT.709 primaries + sRGB transfer + identity matrix infer full range
-        // (and 4:4:4) with no coded bit; every other triple codes `color_range`.
-        let shortcut = cp == 1 && tc == 13 && mc == 0;
-        // Under the shortcut the subsampling is inferred as 4:4:4 and no bit is coded, so a stream
-        // whose profile *forces* a subsampled layout asserts two chroma formats at once. libaom
-        // asserts against exactly that construction, so no conformant encoder emits it.
+        // `gamut-av1` derives `BitDepth` as 8, 10 or 12 (§5.5.2), so the `None` arm is
+        // unreachable; it is an error rather than a panic because library code may not unwrap.
+        let bit_depth = BitDepth::from_bits(color.bit_depth).ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend sequence header is malformed",
+            )
+        })?;
+        // The §5.5.2 sRGB shortcut (BT.709 + sRGB + identity) infers 4:4:4 with no coded bit,
+        // whatever the profile, so a stream whose profile *forces* a subsampled layout asserts two
+        // chroma formats at once. libaom asserts against exactly that construction, so no
+        // conformant encoder emits it. Under such a profile 4:4:4 arises *only* through the
+        // shortcut, so the inferred layout alone detects it.
         //
         // Which profiles force one depends on the depth, and that is why this is not simply
         // `seq_profile != 1`: profile 0 is always 4:2:0, and profile 2 is fixed at 4:2:2 only
@@ -476,91 +479,24 @@ impl SeqHeaderParams {
         // what a lossless high-bit-depth encode produces, so rejecting it here would refuse the
         // most ordinary stream on this path.
         let forces_subsampled =
-            seq_profile == 0 || (seq_profile == 2 && bit_depth != BitDepth::Twelve);
-        if shortcut && forces_subsampled {
+            header.seq_profile == 0 || (header.seq_profile == 2 && bit_depth != BitDepth::Twelve);
+        if chroma == ChromaSubsampling::Cs444 && forces_subsampled {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "AVIF: AV1 backend stream takes the sRGB color_config shortcut, which infers 4:4:4, \
                  but its seq_profile declares subsampled chroma",
             ));
         }
-        let full_range = if shortcut { true } else { r.bits(1)? == 1 };
-        // §5.5.2 *derives* the subsampling from `seq_profile` rather than always coding it —
-        // profile 0 is 4:2:0, profile 1 is 4:4:4, profile 2 is 4:2:2 — with one exception: profile
-        // 2 at 12-bit codes the pair, the only configuration in which Professional is not fixed at
-        // 4:2:2. `subsampling_y` is read only when `subsampling_x` is 1, so the syntax cannot
-        // express (0, 1) and there is no fourth case to handle.
-        let chroma = if shortcut {
-            ChromaSubsampling::Cs444
-        } else {
-            match seq_profile {
-                0 => ChromaSubsampling::Cs420,
-                1 => ChromaSubsampling::Cs444,
-                _ if bit_depth == BitDepth::Twelve => {
-                    if r.bits(1)? == 0 {
-                        ChromaSubsampling::Cs444
-                    } else if r.bits(1)? == 0 {
-                        ChromaSubsampling::Cs422
-                    } else {
-                        ChromaSubsampling::Cs420
-                    }
-                }
-                _ => ChromaSubsampling::Cs422,
-            }
-        };
-        // Coded only when both axes are subsampled, and only outside the shortcut — which codes
-        // nothing after the colour description.
-        let mut chroma_sample_position = 0u8;
-        if !shortcut && chroma == ChromaSubsampling::Cs420 {
-            chroma_sample_position = r.bits(2)? as u8;
-        }
-        let colour = (cp, tc, mc, full_range);
         Ok(Self {
             bit_depth,
-            seq_profile,
-            seq_level_idx_0,
-            width,
-            height,
+            seq_profile: header.seq_profile,
+            seq_level_idx_0: header.seq_level_idx,
+            width: header.max_frame_width,
+            height: header.max_frame_height,
             colour,
             chroma,
-            chroma_sample_position,
+            chroma_sample_position: color.chroma_sample_position,
         })
-    }
-}
-
-/// A minimal MSB-first bit reader over an OBU payload (AV1 §4.10.2 `f(n)`).
-struct BitReader<'a> {
-    /// The bytes being read.
-    data: &'a [u8],
-    /// Bit cursor, counted from the MSB of `data[0]`.
-    pos: u32,
-}
-
-impl<'a> BitReader<'a> {
-    /// Starts a reader at bit 0 of `data`.
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    /// Reads the next `n` bits (`n <= 32`) MSB-first.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if fewer than `n` bits remain.
-    fn bits(&mut self, n: u32) -> Result<u32> {
-        let mut value = 0u32;
-        for _ in 0..n {
-            let byte = self.data.get((self.pos / 8) as usize).ok_or_else(|| {
-                Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "AVIF: AV1 backend sequence header truncated",
-                )
-            })?;
-            let bit = (byte >> (7 - self.pos % 8)) & 1;
-            value = (value << 1) | u32::from(bit);
-            self.pos += 1;
-        }
-        Ok(value)
     }
 }
 
@@ -761,7 +697,7 @@ impl LateDecline {
     }
 }
 
-/// Direct tests of the private sequence-header parser.
+/// Direct tests of the private sequence-header projection.
 ///
 /// [`SeqHeaderParams::parse`] is reachable from the integration suite only through
 /// [`still_from_backend_obus`], which checks the coded **bit depth before the chroma format**. Every
@@ -867,12 +803,13 @@ mod tests {
             if (sx, sy) == (1, 1) {
                 b.put(csp, 2);
             }
-            // The tail §5.5.2 codes after the chroma fields. Present so a parser that reads one bit
-            // too many finds a real field rather than running off the payload — the failure should
-            // be a wrong value, not a truncation error.
-            b.put(0, 1); // separate_uv_delta_q
-            b.put(0, 1); // film_grain_params_present
         }
+        // The tail §5.5.1/§5.5.2 code after the chroma fields — under the shortcut too, which
+        // skips only `color_range`, the subsampling pair and the sample position — then the §5.3.1
+        // `trailing_bits()` that `SequenceHeader::parse` requires to close the OBU.
+        b.put(0, 1) // separate_uv_delta_q
+            .put(0, 1) // film_grain_params_present
+            .put(1, 1); // trailing_one_bit; the zero pad is the writer's own
         let payload = std::mem::take(&mut b.bytes);
         let mut obus = vec![0x0A, payload.len() as u8];
         obus.extend_from_slice(&payload);
@@ -952,8 +889,8 @@ mod tests {
         assert_parse(&obus, BitDepth::Twelve, 2, ChromaSubsampling::Cs420, 2);
     }
 
-    /// The §5.5.2 sRGB shortcut infers 4:4:4 and codes nothing after the colour description — so
-    /// `chroma_sample_position` stays 0 even though the inferred layout is not 4:2:0.
+    /// The §5.5.2 sRGB shortcut infers 4:4:4 and codes no sample position — so
+    /// `chroma_sample_position` stays 0.
     #[test]
     fn the_srgb_shortcut_infers_four_four_four_and_codes_no_sample_position() {
         let obus = seq_header_obus(1, false, false, 0, None, 0);
@@ -961,5 +898,43 @@ mod tests {
         assert_eq!(h.chroma, ChromaSubsampling::Cs444);
         assert_eq!(h.chroma_sample_position, 0);
         assert_eq!(h.colour, (1, 13, 0, true), "the shortcut infers full range");
+    }
+
+    /// An explicitly coded CP/TC/MC_UNSPECIFIED triple is refused exactly as an absent colour
+    /// description is: §5.5.2 gives the absent flag that very triple, so the two streams say the
+    /// same thing, and the parsed header keeps no flag to tell them apart.
+    #[test]
+    fn an_explicitly_unspecified_triple_is_refused_as_undescribed() {
+        let (wbits, hbits) = (dim_bits(W), dim_bits(H));
+        let mut b = BitWriter::default();
+        b.put(1, 3) // seq_profile = High, so no mono_chrome bit
+            .put(1, 1) // still_picture
+            .put(1, 1) // reduced_still_picture_header
+            .put(0, 5) // seq_level_idx[0]
+            .put(wbits - 1, 4)
+            .put(hbits - 1, 4)
+            .put(W - 1, wbits)
+            .put(H - 1, hbits)
+            .put(0, 6) // the six enable flags
+            .put(0, 1) // high_bitdepth
+            .put(1, 1) // color_description_present_flag
+            .put(2, 8) // color_primaries = UNSPECIFIED
+            .put(2, 8) // transfer_characteristics = UNSPECIFIED
+            .put(2, 8) // matrix_coefficients = UNSPECIFIED
+            .put(1, 1) // color_range
+            .put(0, 1) // separate_uv_delta_q
+            .put(0, 1) // film_grain_params_present
+            .put(1, 1); // trailing_one_bit
+        let payload = std::mem::take(&mut b.bytes);
+        let mut obus = vec![0x0A, payload.len() as u8];
+        obus.extend_from_slice(&payload);
+        let Err(err) = SeqHeaderParams::parse(&obus) else {
+            panic!("an unspecified colour description is refused");
+        };
+        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(
+            err.static_message(),
+            Some("AVIF: AV1 backend stream must set color_description_present_flag")
+        );
     }
 }
