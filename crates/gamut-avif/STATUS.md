@@ -327,6 +327,7 @@ copy, which is what a decoder does for an independently decodable tile.
 | `AvifEncoder::{with_matrix, with_color_range}` colour selection | gamut-avif | ✅ (#335) | M2 |
 | `Rgba8` input + alpha-plane extraction; `Gray8` input | gamut-color/avif | ✅ (#397; `Planar8::from_rgba8_*_view`/`from_gray8_view`) | M3 |
 | `Rgb16`/`Rgba16` input → 10/12-bit AVIF (`with_bit_depth`) | gamut-color/avif | ✅ (#399; `Planar16::from_rgb16_*_view`/`from_rgba16_*_view`) | M2 |
+| `Rgb8`/`Rgba8`/`Gray8` input → 10/12-bit AVIF (`with_bit_depth`; widened by bit replication through `gamut_core::convert` before colour conversion, so lossless narrows back exactly; unset keeps 8) | gamut-avif | ✅ (#659; `Gray8` builds a throwaway `Rgb16` for want of a grey `Planar16` constructor) | M3 |
 | Subsampled chroma on the `Rgba8`/`Rgba16` paths (`with_chroma` is honoured for `Rgb8`/`Rgb16`, but an RGBA colour item is always 4:4:4 — neither `Planar8` nor `Planar16` has a 4-stride downsampler) | — | ☐ | M3 |
 | Subsampled chroma at 10/12-bit (`with_chroma` reaches the `Rgb16` path; `Planar16::from_rgb16_matrix_subsampled` shares `Planar8`'s box filter, so the two cannot drift) | — | ✅ (#399) | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ✅ (`Planar16`; 16-bit input narrows to a 10/12-bit coded depth — float HDR ☐) | M2/M4 |

@@ -1,4 +1,5 @@
-//! 16-bit input → 10/12-bit AVIF: what the container claims, and what a real reader gets back.
+//! 16-bit input → 10/12-bit AVIF, and 8-bit input widened to 10/12 bits: what the container
+//! claims, and what a real reader gets back.
 //!
 //! `Rgb16`/`Rgba16` carry samples on `gamut-core`'s full 16-bit scale while AV1 codes 8, 10 or 12,
 //! so the slice's whole contract is the narrowing and the depth signalling that must agree with it
@@ -14,7 +15,9 @@ use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, ChromaFormat, DecodedFrame,
 };
 use gamut_color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
-use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Result, Rgb16, Rgba16};
+use gamut_core::{
+    Dimensions, EncodeImage, Error, Gray8, ImageRef, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+};
 
 const W: u32 = 34;
 const H: u32 = 18;
@@ -239,8 +242,8 @@ fn only_ten_and_twelve_bit_coding_is_offered() {
             "{bits:?}"
         );
     }
-    // The default needs no knob at all.
-    assert_eq!(AvifEncoder::new().config().bit_depth, BitDepth::Twelve);
+    // The default needs no knob at all: unset, a 16-bit input codes at 12.
+    assert_eq!(AvifEncoder::new().config().bit_depth, None);
     let default_avif = AvifEncoder::new()
         .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).unwrap())
         .expect("encode");
@@ -345,4 +348,236 @@ fn the_identity_matrix_stays_four_four_four_at_high_bit_depth() {
         .expect("an av01 item has an av1C")
         .expect("the record parses");
     assert_eq!(cfg.chroma_format(), ChromaFormat::Yuv444);
+}
+
+// ---- 8-bit input coded at 10/12 bits (#659) ---------------------------------------------------
+
+/// An 8-bit source whose samples span the whole byte — `0` and `255` both occur, so a widening that
+/// failed to reach the coded maximum (a plain shift instead of replication) shows at the top — with
+/// enough structure that a channel mix-up cannot coincide with the right answer.
+fn rgba8_at(x: u32, y: u32) -> [u8; 4] {
+    if (x, y) == (0, 0) {
+        return [0, 0, 0, 0];
+    }
+    if (x, y) == (W - 1, H - 1) {
+        return [255, 255, 255, 255];
+    }
+    [
+        ((x * 37 + y * 11) % 256) as u8,
+        ((x * 7 + y * 53) % 256) as u8,
+        ((x ^ (y * 5)) * 29 % 256) as u8,
+        ((x * 13 + y * 101) % 256) as u8,
+    ]
+}
+
+fn source8(channels: usize) -> Vec<u8> {
+    (0..H)
+        .flat_map(|y| (0..W).flat_map(move |x| rgba8_at(x, y)[..channels].to_vec()))
+        .collect()
+}
+
+/// `x` widened to `bits` by bit replication — the byte repeated into the low bits, which is what a
+/// reader narrowing back by `>> (bits - 8)` inverts exactly.
+fn replicate(x: u8, bits: BitDepth) -> u16 {
+    let up = u32::from(bits.bits()) - 8;
+    (u16::from(x) << up) | (u16::from(x) >> (8 - up))
+}
+
+/// The plane a conformant decoder must produce for an identity-coded 8-bit source at `bits`, in
+/// AV1's GBR order.
+fn expected_plane8(plane: usize, bits: BitDepth) -> Vec<u16> {
+    let channel = [1usize, 2, 0][plane];
+    (0..H)
+        .flat_map(|y| (0..W).map(move |x| replicate(rgba8_at(x, y)[channel], bits)))
+        .collect()
+}
+
+#[test]
+fn lossless_rgb8_widens_by_replication_and_narrows_back_exactly() {
+    let px = source8(3);
+    for bits in [BitDepth::Ten, BitDepth::Twelve] {
+        let avif = AvifEncoder::new()
+            .with_bit_depth(bits)
+            .encode_to_vec(ImageRef::<Rgb8>::new(&px, DIMS).unwrap())
+            .expect("encode");
+        let decoded = libavif_oracle::decode_avif(&avif)
+            .unwrap_or_else(|e| panic!("libavif decode failed at {bits:?}: {e}"));
+        assert_eq!(decoded.bit_depth, bits.bits(), "{bits:?}: coded depth");
+        for plane in 0..3 {
+            assert_eq!(
+                decoded.planes[plane],
+                expected_plane8(plane, bits),
+                "{bits:?}: plane {plane}"
+            );
+        }
+        // The contract a caller relies on: narrowing the decoded samples back to 8 bits reproduces
+        // the input exactly. Re-assembled from GBR planes into interleaved RGB.
+        let shift = bits.bits() - 8;
+        let narrowed: Vec<u8> = (0..px.len() / 3)
+            .flat_map(|i| [2usize, 0, 1].map(|p| (decoded.planes[p][i] >> shift) as u8))
+            .collect();
+        assert_eq!(narrowed, px, "{bits:?}: narrowed round trip");
+    }
+}
+
+#[test]
+fn rgba8_widens_its_alpha_to_the_colour_depth() {
+    // AVIF v1.2.0 §4.1: the auxiliary codes at the master's depth, so a widened colour item drags
+    // its alpha along — checked through dav1d at the alpha's own depth.
+    let px = source8(4);
+    for bits in [BitDepth::Ten, BitDepth::Twelve] {
+        let avif = AvifEncoder::new()
+            .with_bit_depth(bits)
+            .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+            .expect("encode");
+        let container = AvifContainer::parse(&avif).expect("parses");
+        let img = container.image();
+        let primary = img.primary_item();
+        assert_eq!(
+            primary.bits_per_channel(),
+            Some(&[bits.bits(), bits.bits(), bits.bits()][..]),
+            "{bits:?}: colour pixi"
+        );
+        let colour = img
+            .decode_item_planar(primary.id(), &mut Dav1dDecoder)
+            .expect("dav1d decodes the primary");
+        assert_eq!(
+            colour.y(),
+            expected_plane8(0, bits),
+            "{bits:?}: colour luma"
+        );
+
+        let alpha = img
+            .alpha_auxiliary_of(primary.id())
+            .expect("the colour item has an alpha auxiliary");
+        assert_eq!(alpha.bits_per_channel(), Some(&[bits.bits()][..]));
+        let frame = img
+            .decode_item_planar(alpha.id(), &mut Dav1dDecoder)
+            .expect("dav1d decodes the auxiliary");
+        assert_eq!(frame.bit_depth(), bits.bits(), "{bits:?}: alpha codestream");
+        let want: Vec<u16> = (0..H)
+            .flat_map(|y| (0..W).map(move |x| replicate(rgba8_at(x, y)[3], bits)))
+            .collect();
+        assert_eq!(frame.y(), want, "{bits:?}: alpha plane");
+    }
+}
+
+#[test]
+fn gray8_widens_to_a_deeper_monochrome_item() {
+    let px = source8(1);
+    for bits in [BitDepth::Ten, BitDepth::Twelve] {
+        let avif = AvifEncoder::new()
+            .with_bit_depth(bits)
+            .encode_to_vec(ImageRef::<Gray8>::new(&px, DIMS).unwrap())
+            .expect("encode");
+        let decoded = libavif_oracle::decode_avif(&avif)
+            .unwrap_or_else(|e| panic!("libavif decode failed at {bits:?}: {e}"));
+        assert!(decoded.monochrome(), "{bits:?}: still one plane");
+        assert_eq!(decoded.bit_depth, bits.bits(), "{bits:?}: coded depth");
+        let want: Vec<u16> = px.iter().map(|&g| replicate(g, bits)).collect();
+        assert_eq!(decoded.planes[0], want, "{bits:?}: luma");
+        let container = AvifContainer::parse(&avif).expect("parses");
+        assert_eq!(
+            container.image().primary_item().bits_per_channel(),
+            Some(&[bits.bits()][..]),
+            "{bits:?}: pixi"
+        );
+    }
+}
+
+/// Mean and maximum per-channel difference between libavif's 8-bit RGB presentation of `avif` and
+/// the RGB source.
+fn rgb_error(avif: &[u8], rgb: &[u8]) -> (f64, u8) {
+    let (w, h, rgba) = libavif_oracle::decode_rgba(avif).expect("libavif decodes");
+    assert_eq!((w, h), (W, H));
+    let diffs: Vec<u8> = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| &p[..3])
+        .zip(rgb)
+        .map(|(a, b)| a.abs_diff(*b))
+        .collect();
+    let mean = diffs.iter().map(|&d| f64::from(d)).sum::<f64>() / diffs.len() as f64;
+    (mean, diffs.iter().copied().max().unwrap_or(0))
+}
+
+#[test]
+fn lossy_rgb8_codes_deeper_and_stays_within_the_quality_bound() {
+    // A smooth gradient — the content deeper coding is for. The structured source the lossless
+    // tests use is near-noise per pixel, which 4:2:0 chroma cannot carry at any depth.
+    let px: Vec<u8> = (0..H)
+        .flat_map(|y| {
+            (0..W).flat_map(move |x| {
+                [
+                    (x * 255 / (W - 1)) as u8,
+                    (y * 255 / (H - 1)) as u8,
+                    ((x + y) * 255 / (W + H - 2)) as u8,
+                ]
+            })
+        })
+        .collect();
+    let image = ImageRef::<Rgb8>::new(&px, DIMS).unwrap();
+    for bits in [BitDepth::Ten, BitDepth::Twelve] {
+        let avif = AvifEncoder::lossy(90)
+            .with_bit_depth(bits)
+            .encode_to_vec(image)
+            .expect("encode");
+        assert_eq!(
+            libavif_oracle::introspect(&avif).unwrap().depth,
+            bits.bits(),
+            "{bits:?}: coded depth"
+        );
+        // The bound is the 8-bit encode's own at this quality, measured against libavif v1.4.2 at
+        // mean 3.59 / max 18 (10-bit: 3.55 / 13; 12-bit: 3.58 / 14): coding deeper must not cost
+        // fidelity the 8-bit path keeps. Exactness is the lossless tests' job.
+        let (mean, max) = rgb_error(&avif, &px);
+        assert!(
+            mean <= 3.6 && max <= 18,
+            "{bits:?}: lossy error too large (mean {mean:.3}, max {max})"
+        );
+    }
+}
+
+#[test]
+fn eight_bit_input_codes_at_eight_unless_asked() {
+    let px = source8(3);
+    let image = ImageRef::<Rgb8>::new(&px, DIMS).unwrap();
+    // Unset is 8 for an 8-bit input — the bytes it always wrote — and an explicit `Eight` is the
+    // same request, so the two encodes are identical.
+    let default_avif = AvifEncoder::new().encode_to_vec(image).expect("encode");
+    assert_eq!(libavif_oracle::introspect(&default_avif).unwrap().depth, 8);
+    let eight = AvifEncoder::new()
+        .with_bit_depth(BitDepth::Eight)
+        .encode_to_vec(image)
+        .expect("encode");
+    assert_eq!(eight, default_avif, "explicit Eight is the default");
+    assert_eq!(
+        AvifEncoder::new()
+            .with_bit_depth(BitDepth::Ten)
+            .config()
+            .bit_depth,
+        Some(BitDepth::Ten)
+    );
+
+    // Sixteen is no AV1 depth (§6.4.1): refused on every 8-bit input rather than clamped to 12.
+    let encoder = AvifEncoder::new().with_bit_depth(BitDepth::Sixteen);
+    let message = Some(
+        "AVIF: an 8-bit input codes at 8, 10 or 12 bits (AV1 §6.4.1); \
+         select one with AvifEncoder::with_bit_depth",
+    );
+    let rgba = source8(4);
+    let gray = source8(1);
+    let errors = [
+        encoder.encode_to_vec(image).expect_err("Rgb8"),
+        encoder
+            .encode_to_vec(ImageRef::<Rgba8>::new(&rgba, DIMS).unwrap())
+            .expect_err("Rgba8"),
+        encoder
+            .encode_to_vec(ImageRef::<Gray8>::new(&gray, DIMS).unwrap())
+            .expect_err("Gray8"),
+    ];
+    for err in errors {
+        assert_eq!(err.static_message(), message);
+    }
 }
