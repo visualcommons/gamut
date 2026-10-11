@@ -21,9 +21,10 @@ use gamut_isobmff::{
 
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
 use crate::c2pa::{
-    C2PA_UUID, C2paBoxPurpose, content_provenance_payload, content_provenance_reserved, slots,
+    C2PA_UUID, C2paBoxPurpose, content_provenance_payload, content_provenance_reserved,
 };
 use crate::config::{AvifConfig, AvifMode};
+use crate::container::AvifContainer;
 use crate::image::ALPHA_AUX_URN;
 use crate::transform::{Mirror, Rotation};
 
@@ -48,7 +49,8 @@ impl std::fmt::Debug for SlotSource {
 }
 
 /// What [`AvifEncoder::encode_with_report`] found out about the file it just produced, beyond the
-/// bytes: where the container placed the things a caller has to come back to.
+/// bytes: how the file splits between the coded images and the container around them, and where
+/// the container placed the things a caller has to come back to.
 ///
 /// Non-exhaustive: a later minor release may report more placements. Construct nothing here — the
 /// encoder fills it in, and the type deliberately implements no [`Default`], so the only way to
@@ -66,6 +68,16 @@ pub struct AvifEncodeReport {
     /// hard binding excludes by box path, not byte offset (C2PA 2.4 §18.6, §A.5.6); see
     /// [`C2paSlot`](crate::C2paSlot).
     pub c2pa: Option<Range<usize>>,
+    /// The length in bytes of the **colour** image's AV1 codestream — the primary item's payload,
+    /// which is the sum of its `iloc` extent lengths (ISO/IEC 14496-12 §8.11.3).
+    pub color_bytes: usize,
+    /// The length in bytes of the **alpha** auxiliary item's AV1 codestream (its `iloc` extent
+    /// lengths, as for [`color_bytes`](Self::color_bytes)), or `0` when the file carries no alpha
+    /// auxiliary — every input without an alpha channel.
+    ///
+    /// What is left of the file, `file.len() - color_bytes - alpha_bytes`, is the container and
+    /// whatever metadata (ICC, Exif, XMP, C2PA) it carries.
+    pub alpha_bytes: usize,
 }
 
 /// The encoder's display-orientation transforms, applied by a reader at display time (the stored
@@ -653,23 +665,28 @@ impl AvifEncoder {
         self
     }
 
-    /// Encodes `image` as [`EncodeImage::encode_to_vec`] would, and additionally reports where the
+    /// Encodes `image` as [`EncodeImage::encode_to_vec`] would, and additionally reports how the
+    /// file splits between the colour codestream, the alpha codestream and the container
+    /// ([`AvifEncodeReport::color_bytes`], [`AvifEncodeReport::alpha_bytes`]), and where the
     /// container placed what a caller has to come back to — today the C2PA manifest-store slot
     /// ([`AvifEncodeReport::c2pa`]).
     ///
     /// The bytes are exactly the bytes `encode_to_vec` produces: this is the same encode with a
     /// report alongside, not a different code path, so the object-safe `EncodeImage` entry point
-    /// stays what it is. The range is found by running the crate's own locator over the finished
-    /// file — the same one [`AvifContainer::c2pa_slot`](crate::AvifContainer::c2pa_slot) uses — so what the
-    /// encoder reports is, by construction, what a reader of the file finds.
+    /// stays what it is. Every figure is found by parsing the finished file with
+    /// [`AvifContainer::parse`] — the sizes from the colour and alpha items' `iloc` extents, the
+    /// range from [`AvifContainer::c2pa_slot`] — so what the encoder reports is, by construction,
+    /// what a reader of the file finds. That parse is the price of the report over a plain
+    /// `encode_to_vec`: one container walk of the output, small beside the AV1 encode.
     ///
     /// # Errors
     ///
     /// As [`EncodeImage::encode_image`] — which includes [`Error::InvalidInput`] for a
     /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) length that cannot be framed — and
-    /// additionally [`Error::InvalidInput`] if a C2PA slot was configured but cannot be located in
-    /// the file just written, which would mean the writer and the locator disagree about the box
-    /// framing and is never expected.
+    /// additionally an error if the file just written does not parse with
+    /// [`AvifContainer::parse`], or [`Error::InvalidInput`] if a C2PA slot was configured but
+    /// cannot be located in it. Either would mean the writer and the reader disagree about the
+    /// container, and is never expected.
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
@@ -678,11 +695,11 @@ impl AvifEncoder {
         Self: EncodeImage<P>,
     {
         let bytes = self.encode_to_vec(image)?;
+        let container = AvifContainer::parse(&bytes)?;
         let c2pa = match self.c2pa {
             None => None,
             Some(_) => {
-                let (segments, _) = gamut_isobmff::walk_segments(&bytes)?;
-                let store = slots(&segments).next().ok_or_else(|| {
+                let store = container.c2pa_slot().ok_or_else(|| {
                     Error::invalid_input(
                         env!("CARGO_PKG_NAME"),
                         "AVIF: the C2PA box this encoder wrote cannot be located in its own output",
@@ -691,7 +708,22 @@ impl AvifEncoder {
                 Some(store.range)
             }
         };
-        Ok((bytes, AvifEncodeReport { c2pa }))
+        // The item payloads are what `iloc` resolves — the concatenation of each item's extents —
+        // so their lengths are the extent-length sums a reader of this file finds.
+        let image = container.image();
+        let primary = image.primary_item();
+        let color_bytes = primary.as_isobmff_item().payload.len();
+        let alpha_bytes = image
+            .alpha_auxiliary_of(primary.id())
+            .map_or(0, |alpha| alpha.as_isobmff_item().payload.len());
+        Ok((
+            bytes,
+            AvifEncodeReport {
+                c2pa,
+                color_bytes,
+                alpha_bytes,
+            },
+        ))
     }
 
     /// Records an `irot` display [`Rotation`] applied by a reader (the stored pixels are unchanged,
