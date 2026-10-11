@@ -225,9 +225,10 @@ fi
 : "${budget_source:=explicit}"
 
 # Clamp. The floor is the 6 GiB a single package's build and test needs, which is also the
-# fixed per-process address-space limit below — going under it would leave the two guards inverted,
-# with a process permitted more than the group it runs in. The ceiling is where more concurrency
-# stops paying: the vendored C++ translation units are the bottleneck and do not divide further.
+# fixed per-process address-space limit below — going under it would leave the two guards
+# inverted, with a process permitted more than the group it runs in. The ceiling is where more
+# concurrency stops paying: the vendored C++ translation units are the bottleneck and do not
+# divide further.
 [ "$budget_gb" -lt 6 ] && budget_gb=6
 [ "$budget_gb" -gt 32 ] && budget_gb=32
 
@@ -399,9 +400,9 @@ fi
 #
 # Why 6 GiB: it is the smallest address space a full build and test of one package fits in, and
 # it is the budget's clamp floor, so no budget the runner accepts is smaller than one process may
-# map — the per-process guard always fires before the cgroup's. The derived job count keeps that
-# true for every scenario at once: the derived job count is 1, or at most budget ÷ 8, so
-# jobs × 6 GiB never exceeds the budget (an explicit MUTANTS_JOBS can break this; the cgroup is
+# map — the per-process guard always fires before the cgroup's. That holds for every scenario at
+# once: the derived job count is 1, or at most budget ÷ 8, so jobs × 6 GiB never exceeds the
+# budget (an explicit MUTANTS_JOBS can break this; the cgroup is
 # then the backstop).
 #
 # Ordered against the test timeout (`minimum_test_timeout = 60` in .cargo/mutants.toml): a
