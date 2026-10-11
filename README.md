@@ -239,6 +239,8 @@ cargo test --workspace
 | `mise run check-commits` | Check commits are Conventional Commits |
 | `mise run check-readme-crates` | Check this README's crates table names every workspace crate, no phantom or duplicate ones, stands under its delimiter row, and gives each crate a three-cell row |
 | `mise run coverage`  | Run tests with coverage (min 80%)        |
+| `mise run bench`     | Run performance benchmarks (Divan; see [docs/benchmarking.md](docs/benchmarking.md)) |
+| `mise run bench-test` | Run every bench once to prove it still executes (no timings) |
 | `mise run check-cross <triple>` | Cross-compile-check the libs for a target (extended CI; master/manual) |
 | `mise run check-msrv` | Check the libs compile on the documented MSRV (extended CI; master/manual) |
 | `mise run versions`  | List every crate's version               |

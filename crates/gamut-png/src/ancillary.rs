@@ -2,12 +2,27 @@
 //!
 //! These are optional. The encoder accumulates whatever the caller sets and emits the chunks in the
 //! order PNG requires (Table 7): colour-space chunks before `PLTE`, the rest before `IDAT`.
+//!
+//! Two of them, `bKGD` and `sBIT`, have a payload whose shape is the image's colour type, and the
+//! encoder does not always write the colour type the caller set them for: auto-reduce may write a
+//! palette, a greyscale or a colour-keyed truecolour image in place of the input's layout, and the
+//! palette and colour-key candidates are *raced* against the unreduced encoding on compressed
+//! size, so which one lands is not knowable when the chunk is set. Both are therefore emitted for
+//! the header actually written — converted across colour types where a lossless conversion
+//! exists, omitted otherwise ([`bkgd_for`], [`sbit_for`]) — rather than verbatim, because a
+//! payload shaped for the wrong colour type is a chunk a reader rejects and drops.
+//!
+//! The same holds on the depth axis. A `bKGD` sample is expressed at the image's bit depth
+//! (§11.3.4.1), and the caller set it at the *input's* depth; auto-reduce may write a lower one
+//! (16→8 where every sample is `k·257`, sub-byte grey where every sample is a multiple of the
+//! depth's scale). The sample is therefore mapped exactly as the pixels were — a value that the
+//! mapping cannot carry exactly is omitted with the chunk ([`WrittenHeader::source_depth`]).
 
 use gamut_deflate::{DeflateEncoder, Level};
 
-use crate::chunk;
+use crate::{ColorType, chunk};
 
-/// The rendering intent for an `sRGB` chunk (PNG spec §11.3.3.5).
+/// The rendering intent for an `sRGB` chunk (PNG spec §11.3.2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrgbIntent {
     /// Perceptual (intent code 0).
@@ -139,8 +154,9 @@ impl Ancillary {
     }
 
     /// Emits the colour-space chunks that must precede `PLTE` (PNG Table 7). `effort` is the
-    /// encoder's [`Level::Best`] budget, applied to the compressed `iCCP` payload.
-    pub(crate) fn write_pre_plte(&self, out: &mut Vec<u8>, effort: u8) {
+    /// encoder's [`Level::Best`] budget, applied to the compressed `iCCP` payload; `written` is
+    /// the IHDR these chunks sit under, which `sBIT` must agree with.
+    pub(crate) fn write_pre_plte(&self, out: &mut Vec<u8>, effort: u8, written: WrittenHeader<'_>) {
         if let Some(chrm) = self.chrm {
             let mut data = [0u8; 32];
             for (slot, value) in chrm.iter().enumerate() {
@@ -161,8 +177,12 @@ impl Ancillary {
                 .zlib_compress(profile, &mut data);
             chunk::write_chunk(out, *b"iCCP", &data);
         }
-        if let Some(sbit) = &self.sbit {
-            chunk::write_chunk(out, *b"sBIT", sbit);
+        if let Some(sbit) = self
+            .sbit
+            .as_deref()
+            .and_then(|sbit| sbit_for(sbit, written.color, written.bit_depth))
+        {
+            chunk::write_chunk(out, *b"sBIT", &sbit);
         }
         if let Some(intent) = self.srgb {
             chunk::write_chunk(out, *b"sRGB", &[intent]);
@@ -170,13 +190,23 @@ impl Ancillary {
     }
 
     /// Emits the remaining ancillary chunks that precede `IDAT` (after any `PLTE`/`tRNS`).
-    /// `effort` is the encoder's [`Level::Best`] budget, applied to compressed `zTXt` payloads.
-    pub(crate) fn write_post_plte(&self, out: &mut Vec<u8>, effort: u8) {
+    /// `effort` is the encoder's [`Level::Best`] budget, applied to compressed `zTXt` payloads;
+    /// `written` is the IHDR (and palette) these chunks sit under, which `bKGD` must agree with.
+    pub(crate) fn write_post_plte(
+        &self,
+        out: &mut Vec<u8>,
+        effort: u8,
+        written: WrittenHeader<'_>,
+    ) {
         if let Some(exif) = &self.exif {
             chunk::write_chunk(out, *b"eXIf", exif);
         }
-        if let Some(bkgd) = &self.bkgd {
-            chunk::write_chunk(out, *b"bKGD", bkgd);
+        if let Some(bkgd) = self
+            .bkgd
+            .as_deref()
+            .and_then(|bkgd| bkgd_for(bkgd, written))
+        {
+            chunk::write_chunk(out, *b"bKGD", &bkgd);
         }
         if let Some((x, y, unit)) = self.phys {
             let mut data = [0u8; 9];
@@ -192,6 +222,234 @@ impl Ancillary {
             write_text(out, entry, effort);
         }
     }
+}
+
+/// Whose palette an indexed image is written with — which decides what a caller's palette
+/// *index* refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaletteOrigin {
+    /// The caller's own palette (`encode_indexed8`): an index the caller set names one of its
+    /// entries.
+    Caller,
+    /// A palette the encoder derived from the pixels under auto-reduce, in an order the caller
+    /// never saw (transparent entries first, then by luma): an index the caller set names nothing
+    /// in it.
+    Derived,
+}
+
+/// The palette an indexed image is written with.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WrittenPalette<'a> {
+    /// The `PLTE` payload: RGB triples.
+    pub plte: &'a [u8],
+    /// The `tRNS` payload — one alpha per leading entry, entries past its end being opaque
+    /// (§11.3.1.1) — or `None` when every entry is opaque.
+    pub trns: Option<&'a [u8]>,
+    /// Whose palette it is.
+    pub origin: PaletteOrigin,
+}
+
+impl WrittenPalette<'_> {
+    /// The number of entries.
+    fn len(self) -> usize {
+        self.plte.len() / 3
+    }
+
+    /// Entry `index`'s alpha: its `tRNS` byte, or 255 past the end of `tRNS`.
+    fn alpha(self, index: usize) -> u8 {
+        self.trns
+            .and_then(|trns| trns.get(index).copied())
+            .unwrap_or(255)
+    }
+
+    /// The index of the entry holding `rgb`, preferring an opaque one.
+    ///
+    /// A background is a colour a viewer sees, so where a triple appears both as an opaque entry
+    /// and as a transparent one — which the encoder's transparent-first ordering puts *first*,
+    /// and which transparent cleanup manufactures whenever the image has opaque black — the
+    /// opaque entry is the one meant. A triple that appears only under transparency still names
+    /// that entry: its RGB is what a compositing reader paints.
+    fn index_of(self, rgb: [u8; 3]) -> Option<usize> {
+        let matches = || {
+            self.plte
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .enumerate()
+                .filter(move |(_, entry)| **entry == rgb)
+                .map(|(index, _)| index)
+        };
+        matches()
+            .find(|&index| self.alpha(index) == 255)
+            .or_else(|| matches().next())
+    }
+}
+
+/// The IHDR — and, for an indexed image, the palette — the ancillary chunks are written under:
+/// what a colour-type-shaped payload has to agree with.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WrittenHeader<'a> {
+    /// The colour type IHDR declares.
+    pub color: ColorType,
+    /// The bit depth IHDR declares.
+    pub bit_depth: u8,
+    /// The palette for [`ColorType::Indexed`]; `None` otherwise.
+    pub palette: Option<WrittenPalette<'a>>,
+    /// The bit depth the caller's `bKGD` samples are expressed at: the input's sample depth, which
+    /// auto-reduce may have lowered to `bit_depth` (or, under a palette, to the 8-bit entries).
+    pub source_depth: u8,
+}
+
+impl WrittenHeader<'static> {
+    /// A header without a palette — every colour type but [`ColorType::Indexed`] — written at
+    /// the input's own depth.
+    pub(crate) const fn new(color: ColorType, bit_depth: u8) -> Self {
+        Self {
+            color,
+            bit_depth,
+            palette: None,
+            source_depth: bit_depth,
+        }
+    }
+}
+
+impl WrittenHeader<'_> {
+    /// The same header, for an input whose samples were `source_depth` bits before auto-reduce
+    /// lowered them.
+    pub(crate) const fn reduced_from(self, source_depth: u8) -> Self {
+        Self {
+            source_depth,
+            ..self
+        }
+    }
+}
+
+/// The `bKGD` payload for the header actually written (§11.3.4.1), or `None` to omit the chunk.
+///
+/// The caller's payload names its own colour type by its length — one byte is a palette index,
+/// two a grey sample, six an RGB triple, each sample 16-bit big-endian — and is converted where
+/// the written header can carry the same colour losslessly:
+///
+/// - a grey sample and an RGB triple whose channels agree are the same colour, either way round;
+/// - an RGB or grey colour under a palette becomes the index of the entry holding it — which
+///   exists whenever the background colour occurs in the image, since the palette is built from
+///   the image — preferring an opaque entry over a transparent twin of the same triple
+///   ([`WrittenPalette::index_of`]), and is omitted when no entry does;
+/// - a palette index names a colour only inside the palette the caller supplied. It is kept,
+///   when in range, on the `encode_indexed8` path, whose palette is the caller's; under an
+///   encoder-derived palette ([`PaletteOrigin::Derived`]) it names an entry in an order the
+///   caller never saw, and under any other colour type there is no palette at all, so in both
+///   cases it is omitted;
+/// - a grey or RGB sample is at the input's depth ([`WrittenHeader::source_depth`]) and is
+///   rescaled to the written one — the written depth, or 8 for a palette entry — exactly as
+///   auto-reduce mapped the pixels ([`rescale`]); one past the input's depth, or one the mapping
+///   cannot carry exactly, is omitted rather than written as a different colour or as a chunk the
+///   reader rejects.
+///
+/// The rules are the ones a reader applies before honouring the chunk — libpng's
+/// `png_handle_bKGD` rejects a wrong length, an index past the palette and a sample past the
+/// depth — so "converted or omitted" means "never dropped on read".
+pub(crate) fn bkgd_for(bkgd: &[u8], written: WrittenHeader<'_>) -> Option<Vec<u8>> {
+    let sample = |hi: u8, lo: u8| u16::from_be_bytes([hi, lo]);
+    let rgb: [u16; 3] = match *bkgd {
+        [index] => {
+            // An index names an entry only in the palette the caller supplied.
+            let palette = written.palette?;
+            return (written.color == ColorType::Indexed
+                && palette.origin == PaletteOrigin::Caller
+                && usize::from(index) < palette.len())
+            .then(|| vec![index]);
+        }
+        [hi, lo] => [sample(hi, lo); 3],
+        [r1, r0, g1, g0, b1, b0] => [sample(r1, r0), sample(g1, g0), sample(b1, b0)],
+        _ => return None,
+    };
+    let at = |depth: u8| -> Option<[u16; 3]> {
+        let [r, g, b] = rgb.map(|v| rescale(v, written.source_depth, depth));
+        Some([r?, g?, b?])
+    };
+    match written.color {
+        ColorType::Indexed => {
+            let entry = at(8)?.map(|v| u8::try_from(v).ok());
+            let entry = [entry[0]?, entry[1]?, entry[2]?];
+            let index = written.palette?.index_of(entry)?;
+            u8::try_from(index).ok().map(|index| vec![index])
+        }
+        ColorType::Grayscale | ColorType::GrayscaleAlpha => {
+            let grey = (rgb[0] == rgb[1] && rgb[1] == rgb[2]).then_some(rgb[0])?;
+            rescale(grey, written.source_depth, written.bit_depth).map(|v| v.to_be_bytes().to_vec())
+        }
+        ColorType::Truecolor | ColorType::TruecolorAlpha => Some(
+            at(written.bit_depth)?
+                .iter()
+                .flat_map(|v| v.to_be_bytes())
+                .collect(),
+        ),
+    }
+}
+
+/// A `bKGD` sample at `from` bits, as the sample at `to` bits that denotes the same intensity —
+/// `value · (2^to − 1) / (2^from − 1)` — or `None` when `value` is past `from`'s range
+/// (libpng rejects `buf[0] != 0 || buf[1] >= 1 << bit_depth`) or the quotient is not exact.
+///
+/// That is exactly the mapping auto-reduce applies to the pixels, which it applies only where it
+/// is exact for every sample: 16→8 is `v / 257` for `v = k·257`, and 8-bit grey packed to depth
+/// `d` is `v / (255 / (2^d − 1))` (§13.12's scale, run backwards). A sample it cannot carry
+/// exactly is a colour the reduced image has no code for, so the chunk is omitted rather than
+/// rounded to a neighbour. At `from == to` it is the identity on the in-range values.
+fn rescale(value: u16, from: u8, to: u8) -> Option<u16> {
+    let max = |depth: u8| (1u32 << depth) - 1;
+    let value = u32::from(value);
+    if value > max(from) {
+        return None;
+    }
+    let scaled = value * max(to);
+    scaled
+        .is_multiple_of(max(from))
+        .then(|| scaled / max(from))
+        .and_then(|v| u16::try_from(v).ok())
+}
+
+/// The `sBIT` payload for the header actually written (§11.3.2.4), or `None` to omit the chunk.
+///
+/// The caller's payload names its own colour type by its length — one entry for grey, two for
+/// grey+alpha, three for RGB (and for a palette, whose entries are RGB), four for RGBA — and is
+/// converted where every channel the written image has is described:
+///
+/// - dropping a channel the written image no longer has is lossless — RGBA to RGB or to a palette
+///   drops the alpha entry, RGB to grey keeps the one value the three agreed on;
+/// - grey and RGB are interchangeable where the three RGB entries agree;
+/// - an alpha entry cannot be invented, so a payload without one is omitted under an alpha
+///   colour type — a case no reduction reaches, since reductions only drop channels.
+///
+/// Every entry must then be `1..=depth`, where a palette's depth is that of its 8-bit entries
+/// (libpng rejects `buf[i] == 0 || buf[i] > maxbits`). An entry the written depth cannot hold is
+/// omitted with the chunk: a claim of twelve significant bits over an image demoted to eight is
+/// not one the file can carry.
+pub(crate) fn sbit_for(sbit: &[u8], color: ColorType, bit_depth: u8) -> Option<Vec<u8>> {
+    let (rgb, alpha) = match *sbit {
+        [g] => ([g; 3], None),
+        [g, a] => ([g; 3], Some(a)),
+        [r, g, b] => ([r, g, b], None),
+        [r, g, b, a] => ([r, g, b], Some(a)),
+        _ => return None,
+    };
+    let grey = || (rgb[0] == rgb[1] && rgb[1] == rgb[2]).then_some(rgb[0]);
+    let entries = match color {
+        ColorType::Grayscale => vec![grey()?],
+        ColorType::GrayscaleAlpha => vec![grey()?, alpha?],
+        ColorType::Truecolor | ColorType::Indexed => rgb.to_vec(),
+        ColorType::TruecolorAlpha => vec![rgb[0], rgb[1], rgb[2], alpha?],
+    };
+    let max_bits = if color == ColorType::Indexed {
+        8
+    } else {
+        bit_depth
+    };
+    entries
+        .iter()
+        .all(|&bits| (1..=max_bits).contains(&bits))
+        .then_some(entries)
 }
 
 /// Serialises one text chunk (tEXt / zTXt / iTXt).
@@ -229,6 +487,9 @@ fn write_text(out: &mut Vec<u8>, entry: &TextEntry, effort: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The header the pre-existing serialisation tests were written against: 8-bit truecolour.
+    const RGB8: WrittenHeader<'static> = WrittenHeader::new(ColorType::Truecolor, 8);
 
     fn find_chunk(png: &[u8], ty: &[u8; 4]) -> Option<Vec<u8>> {
         // Walk the chunk stream (after the 8-byte signature) and return a chunk's data.
@@ -270,7 +531,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = vec![0u8; 8]; // fake signature
-        a.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT);
+        a.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
         assert_eq!(
             find_chunk(&out, b"gAMA"),
             Some(45455u32.to_be_bytes().to_vec())
@@ -286,7 +547,7 @@ mod tests {
         a.set_time(2026, 6, 13, 1, 2, 3);
         a.add_text_latin1("Title", "hi");
         let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT);
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
         let phys = find_chunk(&out, b"pHYs").unwrap();
         assert_eq!(&phys[0..4], 2835u32.to_be_bytes());
         assert_eq!(phys[8], 1); // metre
@@ -305,14 +566,14 @@ mod tests {
             ..Default::default()
         };
         let mut pre = vec![0u8; 8];
-        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_EFFORT);
+        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_EFFORT, RGB8);
         let iccp = find_chunk(&pre, b"iCCP").unwrap();
         assert_eq!(&iccp[..2], b"p\0"); // profile name + null
         assert_eq!(iccp[2], 0); // compression method
         assert_eq!(iccp[3], 0x78); // zlib CMF byte begins the compressed profile
 
         let mut post = vec![0u8; 8];
-        a.write_post_plte(&mut post, DeflateEncoder::DEFAULT_EFFORT);
+        a.write_post_plte(&mut post, DeflateEncoder::DEFAULT_EFFORT, RGB8);
         assert_eq!(
             find_chunk(&post, b"eXIf").unwrap(),
             vec![0x49, 0x49, 0x2A, 0x00]
@@ -326,10 +587,281 @@ mod tests {
         let mut a = Ancillary::default();
         a.add_text_compressed("Comment", "the quick brown fox");
         let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT);
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
         let data = find_chunk(&out, b"zTXt").unwrap();
         assert_eq!(&data[..8], b"Comment\0");
         assert_eq!(data[8], 0); // compression method
         assert_eq!(data[9], 0x78); // the zlib CMF byte begins the compressed text
+    }
+
+    fn header(color: ColorType, bit_depth: u8) -> WrittenHeader<'static> {
+        WrittenHeader::new(color, bit_depth)
+    }
+
+    /// Three entries: red, a grey, blue.
+    const PLTE: [u8; 9] = [200, 30, 60, 77, 77, 77, 20, 90, 220];
+
+    fn palette(origin: PaletteOrigin, trns: Option<&'static [u8]>) -> WrittenHeader<'static> {
+        WrittenHeader {
+            color: ColorType::Indexed,
+            bit_depth: 8,
+            palette: Some(WrittenPalette {
+                plte: &PLTE,
+                trns,
+                origin,
+            }),
+            source_depth: 8,
+        }
+    }
+
+    /// The caller's own opaque palette, at index depth 8.
+    fn indexed(bit_depth: u8) -> WrittenHeader<'static> {
+        WrittenHeader {
+            bit_depth,
+            ..palette(PaletteOrigin::Caller, None)
+        }
+    }
+
+    #[test]
+    fn a_background_index_survives_only_inside_the_callers_palette() {
+        assert_eq!(bkgd_for(&[2], indexed(2)), Some(vec![2]));
+        assert_eq!(bkgd_for(&[3], indexed(2)), None, "past the palette");
+        // An encoder-derived palette is in an order the caller never saw.
+        assert_eq!(bkgd_for(&[2], palette(PaletteOrigin::Derived, None)), None);
+        // And under any other colour type there is no palette at all.
+        assert_eq!(bkgd_for(&[0], header(ColorType::TruecolorAlpha, 8)), None);
+        assert_eq!(bkgd_for(&[0], header(ColorType::Grayscale, 8)), None);
+    }
+
+    #[test]
+    fn a_colour_with_a_transparent_twin_names_the_opaque_entry() {
+        // Two black entries: the transparent one first, as the encoder orders them.
+        const BLACKS: [u8; 9] = [0, 0, 0, 0, 0, 0, 20, 90, 220];
+        let twins = |trns: Option<&'static [u8]>| WrittenHeader {
+            color: ColorType::Indexed,
+            bit_depth: 8,
+            palette: Some(WrittenPalette {
+                plte: &BLACKS,
+                trns,
+                origin: PaletteOrigin::Derived,
+            }),
+            source_depth: 8,
+        };
+        assert_eq!(
+            bkgd_for(&[0, 0, 0, 0, 0, 0], twins(Some(&[0]))),
+            Some(vec![1])
+        );
+        // Past the end of tRNS every entry is opaque, so the first match is opaque and wins.
+        assert_eq!(bkgd_for(&[0, 0, 0, 0, 0, 0], twins(None)), Some(vec![0]));
+        // A triple that exists only under transparency still names that entry: its RGB is what a
+        // compositing reader paints.
+        assert_eq!(
+            bkgd_for(&[0, 0, 0, 0, 0, 0], twins(Some(&[0, 0]))),
+            Some(vec![0])
+        );
+        // Derivation is independent of the origin: an RGB colour resolves against either.
+        assert_eq!(
+            bkgd_for(&[0, 20, 0, 90, 0, 220], twins(Some(&[0]))),
+            Some(vec![2])
+        );
+    }
+
+    #[test]
+    fn a_colour_under_a_palette_becomes_the_index_of_its_entry() {
+        // RGB (20, 90, 220) is entry 2; grey 77 is entry 1; (1, 2, 3) is nowhere.
+        assert_eq!(bkgd_for(&[0, 20, 0, 90, 0, 220], indexed(8)), Some(vec![2]));
+        assert_eq!(bkgd_for(&[0, 77], indexed(8)), Some(vec![1]));
+        assert_eq!(bkgd_for(&[0, 1, 0, 2, 0, 3], indexed(8)), None);
+        // A 16-bit sample has no 8-bit palette entry.
+        assert_eq!(bkgd_for(&[1, 0, 1, 0, 1, 0], indexed(8)), None);
+    }
+
+    #[test]
+    fn grey_and_rgb_backgrounds_convert_where_the_channels_agree() {
+        assert_eq!(
+            bkgd_for(&[0, 77, 0, 77, 0, 77], header(ColorType::Grayscale, 8)),
+            Some(vec![0, 77])
+        );
+        assert_eq!(
+            bkgd_for(&[0, 77, 0, 77, 0, 78], header(ColorType::GrayscaleAlpha, 8)),
+            None,
+            "not a grey"
+        );
+        assert_eq!(
+            bkgd_for(&[0, 77], header(ColorType::Truecolor, 8)),
+            Some(vec![0, 77, 0, 77, 0, 77])
+        );
+        // Same colour type: byte for byte.
+        assert_eq!(
+            bkgd_for(&[0, 1, 0, 2, 0, 3], header(ColorType::TruecolorAlpha, 8)),
+            Some(vec![0, 1, 0, 2, 0, 3])
+        );
+        // A wrong-length payload has no colour type at all.
+        assert_eq!(bkgd_for(&[1, 2, 3], header(ColorType::Truecolor, 8)), None);
+    }
+
+    #[test]
+    fn a_background_sample_must_fit_its_own_depth() {
+        // 256 is past depth 8 in either framing; anything fits depth 16.
+        assert_eq!(bkgd_for(&[1, 0], header(ColorType::Grayscale, 8)), None);
+        assert_eq!(
+            bkgd_for(&[1, 0], header(ColorType::Grayscale, 16)),
+            Some(vec![1, 0])
+        );
+        assert_eq!(
+            bkgd_for(&[0, 1, 0, 2, 1, 0], header(ColorType::Truecolor, 8)),
+            None
+        );
+        // Sub-byte grey written at its own depth (bilevel): 1 is the last code, 2 is not one.
+        assert_eq!(
+            bkgd_for(&[0, 1], header(ColorType::Grayscale, 1)),
+            Some(vec![0, 1])
+        );
+        assert_eq!(bkgd_for(&[0, 2], header(ColorType::Grayscale, 1)), None);
+    }
+
+    /// A header auto-reduce lowered from `source_depth` input samples.
+    fn reduced(color: ColorType, bit_depth: u8, source_depth: u8) -> WrittenHeader<'static> {
+        header(color, bit_depth).reduced_from(source_depth)
+    }
+
+    #[test]
+    fn a_background_sample_is_rescaled_with_the_pixels() {
+        // 8-bit grey packed to depth 2 maps v to v / 85: 170 is code 2, and 3 — a near-black
+        // 8-bit sample that is white at depth 2 — has no code at all.
+        assert_eq!(
+            bkgd_for(&[0, 170], reduced(ColorType::Grayscale, 2, 8)),
+            Some(vec![0, 2])
+        );
+        assert_eq!(bkgd_for(&[0, 3], reduced(ColorType::Grayscale, 2, 8)), None);
+        // Depth 1 maps v to v / 255: an 8-bit 1 is near black, not the white code 1.
+        assert_eq!(bkgd_for(&[0, 1], reduced(ColorType::Grayscale, 1, 8)), None);
+        assert_eq!(
+            bkgd_for(&[0, 255], reduced(ColorType::Grayscale, 1, 8)),
+            Some(vec![0, 1])
+        );
+        // 16→8 maps k·257 to k, and nothing else to anything.
+        assert_eq!(
+            bkgd_for(
+                &[0x14, 0x14, 0x5A, 0x5A, 0xDC, 0xDC],
+                reduced(ColorType::Truecolor, 8, 16)
+            ),
+            Some(vec![0, 20, 0, 90, 0, 220])
+        );
+        assert_eq!(
+            bkgd_for(
+                &[0, 200, 0, 200, 0, 200],
+                reduced(ColorType::Truecolor, 8, 16)
+            ),
+            None,
+            "16-bit 200 is near black; 8-bit 200 is not"
+        );
+        // ...including into a derived palette's 8-bit entries: 16-bit (20, 90, 220)·257 is entry 2.
+        assert_eq!(
+            bkgd_for(
+                &[0x14, 0x14, 0x5A, 0x5A, 0xDC, 0xDC],
+                palette(PaletteOrigin::Derived, None).reduced_from(16)
+            ),
+            Some(vec![2])
+        );
+    }
+
+    #[test]
+    fn rescaling_is_exact_or_nothing() {
+        // The identity at equal depths, up to and including the top code.
+        assert_eq!(rescale(255, 8, 8), Some(255));
+        assert_eq!(rescale(65535, 16, 16), Some(65535));
+        assert_eq!(rescale(256, 8, 8), None, "past the source depth");
+        // The 16→8 and 8→sub-byte scales, both ways round the divisibility test.
+        assert_eq!(rescale(77 * 257, 16, 8), Some(77));
+        assert_eq!(rescale(77 * 257 + 1, 16, 8), None);
+        assert_eq!(rescale(2 * 85, 8, 2), Some(2));
+        assert_eq!(rescale(2 * 85 + 1, 8, 2), None);
+        // 16-bit demoted then packed: 21845 = 85·257 is depth-2 code 1.
+        assert_eq!(rescale(21845, 16, 2), Some(1));
+    }
+
+    #[test]
+    fn significant_bits_follow_the_written_channels() {
+        // Dropping a channel the written image no longer has.
+        assert_eq!(
+            sbit_for(&[5, 6, 5, 4], ColorType::Truecolor, 8),
+            Some(vec![5, 6, 5])
+        );
+        assert_eq!(
+            sbit_for(&[5, 6, 5, 4], ColorType::Indexed, 1),
+            Some(vec![5, 6, 5]),
+            "a palette's sBIT is three entries at any index depth"
+        );
+        assert_eq!(
+            sbit_for(&[7, 7, 7, 4], ColorType::GrayscaleAlpha, 8),
+            Some(vec![7, 4])
+        );
+        assert_eq!(sbit_for(&[7, 7, 7], ColorType::Grayscale, 8), Some(vec![7]));
+        assert_eq!(sbit_for(&[7, 4], ColorType::Grayscale, 8), Some(vec![7]));
+        // Grey to RGB where the channels agree, and never to a differing RGB.
+        assert_eq!(sbit_for(&[7], ColorType::Truecolor, 8), Some(vec![7, 7, 7]));
+        assert_eq!(sbit_for(&[5, 6, 5], ColorType::Grayscale, 8), None);
+        // All three must agree, not any two: one agreeing pair is still not a grey.
+        assert_eq!(sbit_for(&[5, 5, 6], ColorType::Grayscale, 8), None);
+        assert_eq!(sbit_for(&[6, 5, 5], ColorType::GrayscaleAlpha, 8), None);
+        // An alpha entry cannot be invented.
+        assert_eq!(sbit_for(&[5, 6, 5], ColorType::TruecolorAlpha, 8), None);
+        assert_eq!(sbit_for(&[7], ColorType::GrayscaleAlpha, 8), None);
+        // Same colour type: byte for byte; a wrong length has no colour type.
+        assert_eq!(
+            sbit_for(&[5, 6, 5, 4], ColorType::TruecolorAlpha, 8),
+            Some(vec![5, 6, 5, 4])
+        );
+        assert_eq!(sbit_for(&[], ColorType::Truecolor, 8), None);
+        assert_eq!(sbit_for(&[1, 2, 3, 4, 5], ColorType::Truecolor, 8), None);
+    }
+
+    #[test]
+    fn a_significant_bit_count_is_one_to_the_written_depth() {
+        assert_eq!(sbit_for(&[8], ColorType::Grayscale, 8), Some(vec![8]));
+        assert_eq!(
+            sbit_for(&[9], ColorType::Grayscale, 8),
+            None,
+            "past the depth"
+        );
+        assert_eq!(
+            sbit_for(&[0], ColorType::Grayscale, 8),
+            None,
+            "zero is not a count"
+        );
+        assert_eq!(sbit_for(&[12], ColorType::Grayscale, 16), Some(vec![12]));
+        // A palette's entries are 8-bit whatever the index depth.
+        assert_eq!(
+            sbit_for(&[8, 8, 8], ColorType::Indexed, 1),
+            Some(vec![8, 8, 8])
+        );
+        assert_eq!(sbit_for(&[9, 8, 8], ColorType::Indexed, 8), None);
+        // Sub-byte grey: the count cannot exceed the depth.
+        assert_eq!(sbit_for(&[2], ColorType::Grayscale, 2), Some(vec![2]));
+        assert_eq!(sbit_for(&[3], ColorType::Grayscale, 2), None);
+    }
+
+    #[test]
+    fn the_writers_emit_the_converted_chunk_or_none() {
+        // The two `write_*` entry points route through the conversions rather than emitting the
+        // stored bytes: a four-entry sBIT under a written palette comes out as three, and an RGB
+        // background under a written greyscale it cannot name comes out not at all.
+        let a = Ancillary {
+            sbit: Some(vec![5, 6, 5, 4]),
+            bkgd: Some(vec![0, 1, 0, 2, 0, 3]),
+            ..Default::default()
+        };
+        let mut pre = vec![0u8; 8];
+        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_EFFORT, indexed(8));
+        assert_eq!(find_chunk(&pre, b"sBIT"), Some(vec![5, 6, 5]));
+
+        let mut post = vec![0u8; 8];
+        a.write_post_plte(
+            &mut post,
+            DeflateEncoder::DEFAULT_EFFORT,
+            header(ColorType::Grayscale, 8),
+        );
+        assert_eq!(find_chunk(&post, b"bKGD"), None);
     }
 }

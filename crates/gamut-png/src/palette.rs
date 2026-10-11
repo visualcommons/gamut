@@ -1,4 +1,4 @@
-//! Palette (PLTE) and palette transparency (tRNS) for indexed-colour PNG (PNG spec §11.2.2/§11.3.2).
+//! Palette (PLTE) and palette transparency (tRNS) for indexed-colour PNG (PNG spec §11.2.2/§11.3.1).
 
 use gamut_core::{Error, Result};
 
