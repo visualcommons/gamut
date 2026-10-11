@@ -7,7 +7,7 @@
 //! an 8-bit buffer cannot need: the [`BitDepth`] its samples are coded at. `u16` is storage, `10`
 //! or `12` is meaning, and every sample is validated against it at construction.
 
-use gamut_core::{Dimensions, Error, ImageRef, Result, Rgb16, Rgba16};
+use gamut_core::{Dimensions, Error, Gray16, ImageRef, Result, Rgb16, Rgba16};
 
 use crate::format::{BitDepth, ChromaSubsampling};
 use crate::planar::downsample_box;
@@ -353,6 +353,46 @@ impl Planar16 {
         }
     }
 
+    /// Wraps a 16-bit grayscale image as **monochrome** planes ([`ChromaSubsampling::Cs400`]) at
+    /// `bit_depth`: one luma plane carrying each sample's top `bit_depth` bits, and no chroma.
+    ///
+    /// The 16-bit twin of [`Planar8::from_gray8_view`](crate::Planar8::from_gray8_view), narrowed
+    /// exactly as [`from_rgb16_identity_view`](Self::from_rgb16_identity_view) narrows — so the
+    /// same source narrowed to 10 and to 12 bits agrees on the 10 bits they share. Grayscale *is*
+    /// the luma plane, so it goes through no matrix, and building it costs one plane rather than
+    /// the three a detour through RGB would.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_color::{BitDepth, ChromaSubsampling, Planar16};
+    /// use gamut_core::{Dimensions, Gray16, ImageRef};
+    ///
+    /// let grey = [0xFFFFu16, 0x8000, 0x0001];
+    /// let img = ImageRef::<Gray16>::new(&grey, Dimensions::new(3, 1)?)?;
+    /// let p = Planar16::from_gray16_view(img, BitDepth::Ten);
+    /// assert_eq!(p.subsampling(), ChromaSubsampling::Cs400);
+    /// // Each sample's top 10 bits; no chroma planes.
+    /// assert_eq!(p.plane(0), &[0x3FF, 0x200, 0x000]);
+    /// assert!(p.plane(1).is_empty() && p.plane(2).is_empty());
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    #[must_use]
+    pub fn from_gray16_view(img: ImageRef<'_, Gray16>, bit_depth: BitDepth) -> Self {
+        let shift = narrowing_shift(bit_depth);
+        Self {
+            width: img.width(),
+            height: img.height(),
+            subsampling: ChromaSubsampling::Cs400,
+            bit_depth,
+            planes: [
+                img.as_samples().iter().map(|&s| s >> shift).collect(),
+                Vec::new(),
+                Vec::new(),
+            ],
+        }
+    }
+
     /// Image width in samples.
     #[must_use]
     pub fn width(&self) -> u32 {
@@ -607,6 +647,28 @@ mod tests {
         assert_eq!(alpha.plane(0), &want[..]);
         assert!(alpha.plane(1).is_empty());
         assert_eq!(alpha.plane_dimensions(1), (0, 0));
+    }
+
+    #[test]
+    fn gray16_view_is_a_monochrome_plane_of_each_samples_top_bits() {
+        let grey: Vec<u16> = vec![0xFFFF, 0xABCD, 0x8000, 0x7FFF, 0x003F, 0x0040];
+        let img = ImageRef::<Gray16>::new(&grey, Dimensions::new(3, 2).unwrap()).unwrap();
+
+        let ten = Planar16::from_gray16_view(img, BitDepth::Ten);
+        assert_eq!((ten.width(), ten.height()), (3, 2));
+        assert_eq!(ten.bit_depth(), BitDepth::Ten);
+        assert_eq!(ten.subsampling(), ChromaSubsampling::Cs400);
+        // Truncated, not rounded: 0x003F's top 10 bits are 0, 0x0040's are 1.
+        assert_eq!(ten.plane(0), &[0x3FF, 0x2AF, 0x200, 0x1FF, 0x000, 0x001]);
+        assert!(ten.plane(1).is_empty() && ten.plane(2).is_empty());
+        assert_eq!(ten.plane_dimensions(1), (0, 0));
+
+        let twelve = Planar16::from_gray16_view(img, BitDepth::Twelve);
+        assert_eq!(twelve.bit_depth(), BitDepth::Twelve);
+        assert_eq!(twelve.plane(0), &[0xFFF, 0xABC, 0x800, 0x7FF, 0x003, 0x004]);
+        // A pure prefix: the 12-bit plane's top 10 bits are the 10-bit plane.
+        let prefix: Vec<u16> = twelve.plane(0).iter().map(|&s| s >> 2).collect();
+        assert_eq!(prefix, ten.plane(0));
     }
 
     #[test]
