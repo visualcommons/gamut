@@ -51,6 +51,7 @@ fn every_carrier_round_trips_byte_exact() {
             .with_international_text("Title", "international title")
             .with_gamma(1.0 / 2.2)
             .with_srgb(SrgbIntent::RelativeColorimetric)
+            .with_cicp(9, 16, true)
             .with_chromaticities(
                 (0.3127, 0.3290),
                 (0.6400, 0.3300),
@@ -68,6 +69,16 @@ fn every_carrier_round_trips_byte_exact() {
     assert_eq!(meta.c2pa.as_deref(), Some(&c2pa[..]));
     assert_eq!(meta.gamma, Some(45_455));
     assert_eq!(meta.srgb, Some(SrgbIntent::RelativeColorimetric));
+    let cicp = meta.cicp.expect("cICP present");
+    assert_eq!(
+        (
+            cicp.color_primaries,
+            cicp.transfer_function,
+            cicp.matrix_coefficients,
+            cicp.full_range
+        ),
+        (9, 16, 0, true)
+    );
     let chrm = meta.chromaticities.expect("cHRM present");
     assert_eq!(chrm.white, (31_270, 32_900));
     assert_eq!(chrm.red, (64_000, 33_000));
@@ -93,7 +104,17 @@ fn metadata_agrees_with_decode_field_for_field() {
             .with_c2pa(b"\0\0\0\x10jumbc2pa")
             .with_text("Author", "nobody")
             .with_gamma(1.0 / 2.2)
+            .with_chromaticities(
+                (0.3127, 0.3290),
+                (0.6400, 0.3300),
+                (0.3000, 0.6000),
+                (0.1500, 0.0600),
+            )
+            // Every colour chunk at once, including the sRGB/iCCP pair §4.3 Table 1 ranks: a
+            // comparison of two `None`s would not see a chunk wired into one walk and not the
+            // other.
             .with_srgb(SrgbIntent::Perceptual)
+            .with_cicp(1, 13, true)
     });
 
     let meta = gamut_png::metadata(&png).unwrap();
@@ -109,10 +130,16 @@ fn metadata_agrees_with_decode_field_for_field() {
     assert_eq!(meta.chromaticities, decoded.chromaticities);
     assert_eq!(meta.srgb, decoded.srgb);
     assert_eq!(meta.cicp, decoded.cicp);
+    // A `None` on both sides would pass every comparison above, so pin that the file really did
+    // carry each field.
+    assert!(meta.exif.is_some() && meta.icc_profile.is_some() && meta.xmp.is_some());
+    assert!(meta.c2pa.is_some() && !meta.texts.is_empty());
+    assert!(meta.gamma.is_some() && meta.chromaticities.is_some());
+    assert!(meta.srgb.is_some() && meta.cicp.is_some());
 }
 
 /// The probe case from #379: cICP is uncompressed, so a colour-space probe costs a chunk walk and
-/// nothing more. The encoder cannot write cICP, so the chunk is built by hand.
+/// nothing more. Built by hand so the assertion reads the walk, not the encoder's own chunk.
 #[test]
 fn cicp_is_read_without_inflating_anything() {
     // BT.2020 primaries (9), PQ transfer (16), RGB matrix (0), full range.

@@ -436,6 +436,7 @@ impl PngDecoder {
             exif: meta.exif,
             icc_profile: meta.icc_profile,
             xmp: meta.xmp,
+            xmp_framing: meta.xmp_framing,
             c2pa: meta.c2pa,
             c2pa_ignored: meta.c2pa_ignored,
             texts: meta.texts,
@@ -1648,6 +1649,7 @@ mod tests {
         PngEncoder::new()
             .with_gamma(1.0 / 2.2)
             .with_srgb(SrgbIntent::Perceptual)
+            .with_cicp(9, 16, true)
             .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
             .with_exif(&exif)
             .with_icc_profile("prof", b"not-a-real-profile-but-bytes")
@@ -1690,7 +1692,16 @@ mod tests {
         assert_eq!(decoded.texts[1].text, comment);
         assert!(decoded.palette.is_none());
         assert!(decoded.transparency.is_none());
-        assert!(decoded.cicp.is_none());
+        let cicp = decoded.cicp.expect("cICP present");
+        assert_eq!(
+            (
+                cicp.color_primaries,
+                cicp.transfer_function,
+                cicp.matrix_coefficients,
+                cicp.full_range
+            ),
+            (9, 16, 0, true)
+        );
     }
 
     #[test]
