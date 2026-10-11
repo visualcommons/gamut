@@ -102,6 +102,39 @@ exactly, and a second test proves each is a naming difference rather than a miss
 | `0x02BC` | `ApplicationNotes` (TIFF/EP lineage) | `XMLPacket` (the XMP specification's name) |
 | `0x83BB` | `IPTC-NAA` (TIFF/EP lineage, hyphenated) | `IPTCNAA` |
 
+### Where exiv2 and CIPA DC-008 disagree on a value
+
+`tests/describe_oracle.rs` (issue #533) checks the `describe` tables against exiv2's interpreted
+rendering, `Exifdatum::print` through `exiv2_oracle::exif_print`. For each of the 39 described tags
+it writes every value the tag's field can hold — each 7-bit character, byte or `SHORT` — and
+records which codes exiv2 interprets and how it words them. DC-008 wins wherever the two differ, as
+for names above; the test pins both kinds of difference exactly, so a transcription that invents,
+drops or swaps a code fails, and so does a divergence that goes away.
+
+**Domain** — the codes only one side defines:
+
+| Tag | exiv2 only | DC-008 only | Why |
+| --- | --- | --- | --- |
+| `Compression` | 32 codes | — | exiv2 reads it as TIFF's tag (CCITT, LZW, deflate, JBIG, DNG, vendor raw); §4.6.5.1.1 restricts Exif to 1 and 6 |
+| `PhotometricInterpretation` | 14 codes | — | likewise TIFF's and DNG's; §4.6.5.1.3 restricts Exif to RGB and YCbCr |
+| `ResolutionUnit`, `FocalPlaneResolutionUnit` | 1 (`none`) | — | TIFF 6.0's value; DC-008 §4.6.5.1.11 reserves it |
+| `ColorSpace` | 2 (`Adobe RGB`) | — | assigned by neither vendored edition |
+| `SensitivityType` | — | 0–7 | exiv2 has no interpreter for the tag and prints the number |
+| `LightSource` | — | 16 (`Warm white fluorescent`) | in both vendored editions (2.32, 3.0); exiv2's table stops at 15 |
+| `FileSource` | — | 0 (`others`) | in both vendored editions; exiv2's table starts at 1 |
+| `GPSAltitudeRef` | — | 2, 3 (sea-level references) | new in Exif 3.0; exiv2 0.28 keeps 2.32's two codes |
+
+**Wording** — 59 codes both define, worded differently even ignoring case. Most are exiv2
+abbreviating (`inch`, `km/h`, `North`) or dropping DC-008's gloss (`Creative program`); the
+substantive ones are `Orientation` (exiv2 names the corner, `top, left`, where §4.6.5.1.6 states the
+row and column in full), `GPSAltitudeRef` 0 and 1 (exiv2 keeps 2.32's sea-level reading; 3.0 made
+them ellipsoidal), and `LightSource` 13–15, whose colour-temperature ranges in exiv2 match neither
+vendored edition. The full list, each with its reason, is `WORDING_DIVERGENCES` in the test.
+
+What the differential cannot see is a swap between two codes exiv2 already words differently (say
+`Orientation` 1 and 2): both stay divergent against the same exiv2 text. Those rows rest on the
+transcription from DC-008 and the structural checks in `src/describe.rs`.
+
 ## Intentionally deferred (additive under the `#[non_exhaustive]` surface)
 
 - **Per-vendor MakerNote decoding** (Canon/Nikon/Sony/…). The crate preserves the block verbatim
@@ -114,12 +147,6 @@ exactly, and a second test proves each is a naming difference rather than a miss
   specifications and transcribing from those, not copying a table out of the oracle, so they are a
   separate deliverable. Unknown and MakerNote tags still round-trip losslessly because the raw
   `gamut_ifd::Ifd` is retained.
-- **A rendered-value differential.** `tooling/exiv2-oracle` exposes `Exiv2::Exifdatum::toString()`
-  (the raw value) but not `print()` (exiv2's *interpreted* value), so the `describe` tables are
-  transcribed from CIPA DC-008 and checked structurally — each table ascending and distinct,
-  `describe` exactly a lookup into `described_values`, and each `Flash` bit field a function of its
-  own bits only — but not against exiv2's rendering. Exposing `print()` in the oracle shim would
-  make that differential possible (issue #533).
 - **A re-derivation of the `Type`/`Count` columns.** They were transcribed by hand from the
   vendored specification and cross-checked once against the per-tag prose blocks, but nothing in
   the repository recomputes them, and mutation testing cannot see a wrong constant in a macro
