@@ -14,10 +14,18 @@ Graphics, W3C 3rd edition) images:
   concern at higher levels.
 - **Spec-compliant decoding** (issue #249). Every colour type and bit depth, Adam7 interlacing,
   all five filters, and ancillary metadata surfaced as raw payloads (eXIf, inflated iCCP, XMP,
-  tEXt/zTXt/iTXt) ready for `gamut_metadata::MetadataBlock`, plus parsed gAMA/cHRM/sRGB/cICP
-  values. Hostile input is bounded: configurable dimension caps and byte budgets guard every
-  allocation, and zlib bombs (IDAT or metadata) fail cleanly. Inflation uses `miniz_oxide`, the
-  workspace's blessed decode-side inflate.
+  tEXt/zTXt/iTXt, and the C2PA manifest store in `caBX`) ready for
+  `gamut_metadata::MetadataBlock`, plus parsed gAMA/cHRM/sRGB/cICP values. Hostile input is
+  bounded: configurable dimension caps and byte budgets guard every allocation, and zlib bombs
+  (IDAT or metadata) fail cleanly. Inflation uses `miniz_oxide`, the workspace's blessed
+  decode-side inflate.
+- **C2PA carriage** (issue #440). The manifest store is located, bounded, carried and reserved —
+  never parsed or judged. `with_c2pa` / `with_c2pa_reserved` put it as the last chunk before
+  `IDAT`; `encode_with_report` / `PngReport::c2pa` name the chunk's whole span (length, type,
+  payload, CRC) for the `c2pa.hash.data` exclusion; and `fill_c2pa` writes the signed store into
+  that span in place, changing no byte outside it. On read the store is the first CRC-valid `caBX`
+  before `IDAT`; every other one in the datastream is counted in `c2pa_ignored`, never surfaced.
+  Validation is `c2pa-rs`'s.
 - **Memory-safe.** 100% safe Rust (`#![deny(unsafe_code)]`).
 
 ## Usage
@@ -50,7 +58,8 @@ Built incrementally; each phase is conformance-checked against libpng (see [STAT
 Encoder scope: all five colour types, bit depths 1/2/4/8/16, palette, the five scanline filters,
 lossless reductions over every input layout (palette, grey, alpha drop, sub-byte grey packing,
 16→8 demotion), the standard colour/text ancillary chunks, and embedded metadata
-(eXIf/iCCP/iTXt). Decoder scope: everything above plus Adam7 **decoding** and decode limits.
+(eXIf/iCCP/iTXt, and the C2PA manifest store with a reserve-then-fill slot). Decoder scope:
+everything above plus Adam7 **decoding** and decode limits.
 Out of scope: Adam7 *encoding* and animation (APNG decodes as its default image).
 
 ## Validation
