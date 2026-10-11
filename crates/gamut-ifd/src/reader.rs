@@ -223,7 +223,8 @@ pub fn read(data: &[u8]) -> Result<TiffFile> {
 /// assert_eq!(scope.max_depth(), 2);
 /// // The cap is a ceiling a caller can lower, never raise.
 /// assert_eq!(scope.with_max_depth(100).max_depth(), 2);
-/// assert_eq!(SubtreeScope::new(&[], &[]).with_max_depth(100).max_depth(), SubtreeScope::MAX_DEPTH);
+/// let widest = SubtreeScope::new(&[], &[]).with_max_depth(100);
+/// assert_eq!(widest.max_depth(), SubtreeScope::MAX_DEPTH);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubtreeScope<'a> {
