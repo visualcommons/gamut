@@ -115,8 +115,8 @@ drops or swaps a code fails, and so does a divergence that goes away.
 
 | Tag | exiv2 only | DC-008 only | Why |
 | --- | --- | --- | --- |
-| `Compression` | 32 codes | — | exiv2 reads it as TIFF's tag (CCITT, LZW, deflate, JBIG, DNG, vendor raw); §4.6.5.1.1 restricts Exif to 1 and 6 |
-| `PhotometricInterpretation` | 14 codes | — | likewise TIFF's and DNG's; §4.6.5.1.3 restricts Exif to RGB and YCbCr |
+| `Compression` | 32 codes | — | exiv2 reads it as TIFF's tag (CCITT, LZW, deflate, JBIG, DNG, vendor raw); §4.6.5.1.4 restricts Exif to 1 and 6 |
+| `PhotometricInterpretation` | 14 codes | — | likewise TIFF's and DNG's; §4.6.5.1.5 restricts Exif to RGB and YCbCr |
 | `ResolutionUnit`, `FocalPlaneResolutionUnit` | 1 (`none`) | — | TIFF 6.0's value; DC-008 §4.6.5.1.11 reserves it |
 | `ColorSpace` | 2 (`Adobe RGB`) | — | assigned by neither vendored edition |
 | `SensitivityType` | — | 0–7 | exiv2 has no interpreter for the tag and prints the number |

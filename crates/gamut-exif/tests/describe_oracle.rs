@@ -108,7 +108,7 @@ fn described_tags() -> impl Iterator<Item = ExifTag> {
 /// The tags whose domains differ: the tag, the codes only exiv2 interprets, and the codes only
 /// DC-008 defines. Each sweep is over every value the tag's field can hold.
 const DOMAIN_DIVERGENCES: &[(&str, &[u32], &[u32])] = &[
-    // §4.6.5.1.1 restricts Exif to uncompressed and JPEG; exiv2 reads the tag as TIFF's, with
+    // §4.6.5.1.4 restricts Exif to uncompressed and JPEG; exiv2 reads the tag as TIFF's, with
     // TIFF's other codecs (CCITT, LZW, deflate, JBIG), DNG's (lossy JPEG, JPEG XL) and vendor raw
     // compressions.
     (
@@ -120,7 +120,7 @@ const DOMAIN_DIVERGENCES: &[(&str, &[u32], &[u32])] = &[
         ],
         &[],
     ),
-    // §4.6.5.1.3 restricts Exif to RGB and YCbCr; exiv2 reads the tag as TIFF's, with DNG's
+    // §4.6.5.1.5 restricts Exif to RGB and YCbCr; exiv2 reads the tag as TIFF's, with DNG's
     // additions (Linear Raw, Depth Map, Photometric Mask).
     (
         "PhotometricInterpretation",
@@ -132,17 +132,17 @@ const DOMAIN_DIVERGENCES: &[(&str, &[u32], &[u32])] = &[
     // §4.6.5.1.11 reserves 1; exiv2 renders it "none", as TIFF 6.0 defines it. The focal-plane
     // unit (below) shares the table (§4.6.6.7.28), and exiv2 shares it too.
     ("ResolutionUnit", &[1], &[]),
-    // DC-008 §4.6.6.7.13 assigns these; exiv2 has no interpretation of the tag at all and prints
+    // DC-008 §4.6.6.7.7 assigns these; exiv2 has no interpretation of the tag at all and prints
     // the raw number.
     ("SensitivityType", &[], &[0, 1, 2, 3, 4, 5, 6, 7]),
-    // "Warm white fluorescent" (§4.6.6.7.19), present in both vendored editions (2.32 and 3.0);
+    // "Warm white fluorescent" (§4.6.6.7.20), present in both vendored editions (2.32 and 3.0);
     // exiv2's table stops at 15.
     ("LightSource", &[], &[16]),
-    // §4.6.6.1.4 defines sRGB and Uncalibrated only; exiv2 also names 2 "Adobe RGB", which
+    // §4.6.6.2.1 defines sRGB and Uncalibrated only; exiv2 also names 2 "Adobe RGB", which
     // neither vendored edition assigns.
     ("ColorSpace", &[2], &[]),
     ("FocalPlaneResolutionUnit", &[1], &[]),
-    // "others" (§4.6.6.8.1), present in both vendored editions; exiv2's table starts at 1.
+    // "others" (§4.6.6.7.32), present in both vendored editions; exiv2's table starts at 1.
     ("FileSource", &[], &[0]),
     // The sea-level references (§4.6.7.1.6) are new in Exif 3.0 — 2.32 has only 0 and 1 — and
     // exiv2 0.28 has not added them.
@@ -194,7 +194,7 @@ const WORDING_DIVERGENCES: &[(&str, u32, &str)] = &[
     ("SensingMethod", 4, "Three-chip color area"),
     ("SensingMethod", 5, "Color sequential area"),
     ("SensingMethod", 8, "Color sequential linear"),
-    // exiv2 names the device; DC-008 §4.6.6.8.1 describes it.
+    // exiv2 names the device; DC-008 §4.6.6.7.32 describes it.
     ("FileSource", 1, "Film scanner"),
     ("FileSource", 2, "Reflexion print scanner"),
     ("FileSource", 3, "Digital still camera"),
@@ -206,7 +206,7 @@ const WORDING_DIVERGENCES: &[(&str, u32, &str)] = &[
     ("WhiteBalance", 1, "Manual"),
     ("Saturation", 1, "Low"),
     ("Saturation", 2, "High"),
-    // exiv2 renders the XMP-style identifier rather than DC-008 §4.6.6.7.47's phrase.
+    // exiv2 renders a CamelCase identifier rather than DC-008 §4.6.6.7.47's phrase.
     ("CompositeImage", 1, "NonComposite"),
     ("CompositeImage", 2, "GeneralComposite"),
     ("CompositeImage", 3, "CompositeCapturedWhenShooting"),
