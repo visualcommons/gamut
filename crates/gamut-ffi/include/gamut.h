@@ -625,6 +625,68 @@ gamut_status_t gamut_avif_encoder_set_xmp(struct GamutAvifEncoder *encoder,
                                           size_t len);
 
 /**
+ * Reserves a `len`-byte slot of zeros for a C2PA manifest store, framed as a top-level
+ * `ContentProvenanceBox` (`box_purpose` `manifest`) after `ftyp`, for an external signer to
+ * fill in after encoding (`AvifEncoder::with_c2pa_reserved`). After an encode,
+ * `gamut_avif_encoder_c2pa_slot` reports where the slot landed; the signer writes a store of at
+ * most `len` bytes there, and nothing else in the file moves.
+ *
+ * This setter cannot reject `len`: as in Rust, an unusable length (below 8 bytes, or one too
+ * large to frame) is refused by the encode that follows (`GAMUT_STATUS_INVALID_INPUT`, or
+ * `GAMUT_STATUS_UNSUPPORTED` for a box at or beyond 4 GiB). This call, or
+ * `gamut_avif_encoder_set_c2pa`, replaces any earlier one. Returns
+ * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_c2pa_reserved(struct GamutAvifEncoder *encoder, size_t len);
+
+/**
+ * Writes `store` — a C2PA manifest store already computed over this exact output — into the
+ * `ContentProvenanceBox` slot (`AvifEncoder::with_c2pa`): the re-encode half of the
+ * reserve-then-fill flow, framed exactly as `gamut_avif_encoder_set_c2pa_reserved` with the
+ * store in place of the zeros. The bytes are copied verbatim and unchecked, with no minimum
+ * length. This call, or `gamut_avif_encoder_set_c2pa_reserved`, replaces any earlier one.
+ *
+ * Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder, or a `NULL` `store` with a non-zero
+ * `len`.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle; a non-`NULL` `store` points to `len` readable
+ * bytes.
+ */
+gamut_status_t gamut_avif_encoder_set_c2pa(struct GamutAvifEncoder *encoder,
+                                           const uint8_t *store,
+                                           size_t len);
+
+/**
+ * Reports where the most recent encode through `encoder` placed the C2PA manifest-store slot
+ * (`AvifEncodeReport::c2pa`, the range `AvifEncoder::encode_with_report` returns): on
+ * `GAMUT_OK`, `*present` says whether there is one, and `*offset`/`*len` are its byte range
+ * within that encode's output (`0`/`0` when absent). The slot is absent before the first
+ * encode, after an encode that did not return `GAMUT_OK`, and when neither
+ * `gamut_avif_encoder_set_c2pa_reserved` nor `gamut_avif_encoder_set_c2pa` was set; a
+ * zero-length slot (`gamut_avif_encoder_set_c2pa` with an empty store) is present.
+ *
+ * The range is the one a signer patches at — not a hash exclusion range, which C2PA's BMFF
+ * binding expresses by box path. Changing a setting does not change the report; the next
+ * encode does. Returns `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument, writing
+ * `false`/`0`/`0` through the out-params when all three are non-`NULL`.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle; `present`, `offset` and `len` are `NULL` or
+ * writable.
+ */
+gamut_status_t gamut_avif_encoder_c2pa_slot(const struct GamutAvifEncoder *encoder,
+                                            bool *present,
+                                            size_t *offset,
+                                            size_t *len);
+
+/**
  * Encodes interleaved 8-bit RGB samples to an AVIF file.
  *
  * `samples_len` counts samples (`width * height * 3`). On `GAMUT_OK`, `*out`/`*out_len` hold a

@@ -17,14 +17,17 @@
 //! - **Encode** is one entry point per input layout the Rust encoder implements
 //!   `EncodeImage` for (`rgb8`, `rgba8`, `gray8`, `rgb16`, `rgba16`), so 16-bit samples cross as
 //!   `const uint16_t *` and the C compiler checks the sample type. The output is a Rust-owned
-//!   buffer released with `gamut_bytes_free`.
+//!   buffer released with `gamut_bytes_free`. Each encode also records where it placed the
+//!   C2PA manifest-store slot, read back with `gamut_avif_encoder_c2pa_slot` (issue #673).
 //! - **Config setters** (`gamut_avif_encoder_set_*`) map the Rust `with_*` builders one-to-one;
 //!   lossy mode and quality are fixed at construction, exactly as in Rust
 //!   (`gamut_avif_encoder_new_lossy` ↔ `AvifEncoder::lossy`).
 //! - **Parse** returns an owned [`GamutAvifImage`]; every accessor hands out pointers borrowed
 //!   from it, valid until `gamut_avif_image_free`.
 
+use core::cell::Cell;
 use core::ffi::c_void;
+use core::ops::Range;
 use core::ptr;
 
 use gamut::avif::{AvifContainer, AvifEncoder, AvifImage, AvifItem, Mirror, Rotation};
@@ -69,12 +72,20 @@ const _: () = {
 /// Opaque handle over a `gamut::avif::AvifEncoder` and its backend registry.
 pub struct GamutAvifEncoder {
     inner: AvifEncoder,
+    /// The C2PA slot range of the most recent encode through this handle
+    /// (`AvifEncodeReport::c2pa`), read back by `gamut_avif_encoder_c2pa_slot`. `None` before
+    /// the first encode, after a failed one, and when no slot was configured.
+    ///
+    /// A `Cell` because the encode entry points take a `const` handle (an encode never changes
+    /// the configuration); handles are single-threaded, so the interior mutability is unshared.
+    c2pa: Cell<Option<Range<usize>>>,
 }
 
 seam_handle! {
     handle = GamutAvifEncoder,
     host = gamut::avif::AvifEncoder,
     new = gamut::avif::AvifEncoder::new(),
+    fields = { c2pa: Cell::new(None) },
     seam = encoder,
     push = |host, backend| { host.push_backend(gamut::avif::AbiAv1StillEncoder::new(backend)); },
     fns = (gamut_avif_encoder_new, gamut_avif_encoder_free, gamut_avif_encoder_push_backend),
@@ -132,6 +143,11 @@ impl GamutAvifEncoder {
         AvifEncoder: EncodeImage<P>,
     {
         guard::status(|| {
+            // SAFETY: a non-null handle is live per contract. The previous encode's report is
+            // dropped before anything can fail, so a non-OK status never leaves one standing.
+            if let Some(this) = unsafe { encoder.as_ref() } {
+                this.c2pa.take();
+            }
             if out.is_null() || out_len.is_null() {
                 return GAMUT_STATUS_NULL_ARGUMENT;
             }
@@ -162,8 +178,11 @@ impl GamutAvifEncoder {
                 Ok(image) => image,
                 Err(error) => return status_of(&error),
             };
-            match this.inner.encode_to_vec(image) {
-                Ok(bytes) => {
+            // `encode_with_report` is `encode_to_vec` with the report alongside — the same bytes
+            // — so every encode keeps the slot range `gamut_avif_encoder_c2pa_slot` reads.
+            match this.inner.encode_with_report(image) {
+                Ok((bytes, report)) => {
+                    this.c2pa.set(report.c2pa);
                     let (data, len) = bytes_out(bytes);
                     // SAFETY: as the clearing writes above.
                     unsafe {
@@ -198,6 +217,7 @@ pub extern "C" fn gamut_avif_encoder_new_lossy(quality: u8) -> *mut GamutAvifEnc
     guard::ptr(|| {
         Box::into_raw(Box::new(GamutAvifEncoder {
             inner: AvifEncoder::lossy(quality),
+            c2pa: Cell::new(None),
         }))
     })
 }
@@ -529,6 +549,106 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_xmp(
             e.with_xmp(b)
         })
     }
+}
+
+/// Reserves a `len`-byte slot of zeros for a C2PA manifest store, framed as a top-level
+/// `ContentProvenanceBox` (`box_purpose` `manifest`) after `ftyp`, for an external signer to
+/// fill in after encoding (`AvifEncoder::with_c2pa_reserved`). After an encode,
+/// `gamut_avif_encoder_c2pa_slot` reports where the slot landed; the signer writes a store of at
+/// most `len` bytes there, and nothing else in the file moves.
+///
+/// This setter cannot reject `len`: as in Rust, an unusable length (below 8 bytes, or one too
+/// large to frame) is refused by the encode that follows (`GAMUT_STATUS_INVALID_INPUT`, or
+/// `GAMUT_STATUS_UNSUPPORTED` for a box at or beyond 4 GiB). This call, or
+/// `gamut_avif_encoder_set_c2pa`, replaces any earlier one. Returns
+/// `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_c2pa_reserved(
+    encoder: *mut GamutAvifEncoder,
+    len: usize,
+) -> GamutStatus {
+    unsafe {
+        GamutAvifEncoder::configure(encoder, Some(len), GAMUT_OK, |e, l| e.with_c2pa_reserved(l))
+    }
+}
+
+/// Writes `store` — a C2PA manifest store already computed over this exact output — into the
+/// `ContentProvenanceBox` slot (`AvifEncoder::with_c2pa`): the re-encode half of the
+/// reserve-then-fill flow, framed exactly as `gamut_avif_encoder_set_c2pa_reserved` with the
+/// store in place of the zeros. The bytes are copied verbatim and unchecked, with no minimum
+/// length. This call, or `gamut_avif_encoder_set_c2pa_reserved`, replaces any earlier one.
+///
+/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder, or a `NULL` `store` with a non-zero
+/// `len`.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle; a non-`NULL` `store` points to `len` readable
+/// bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_c2pa(
+    encoder: *mut GamutAvifEncoder,
+    store: *const u8,
+    len: usize,
+) -> GamutStatus {
+    // SAFETY: per this fn's contract.
+    let value = unsafe { bytes_in(store, len) };
+    unsafe {
+        GamutAvifEncoder::configure(encoder, value, GAMUT_STATUS_NULL_ARGUMENT, |e, b| {
+            e.with_c2pa(b)
+        })
+    }
+}
+
+/// Reports where the most recent encode through `encoder` placed the C2PA manifest-store slot
+/// (`AvifEncodeReport::c2pa`, the range `AvifEncoder::encode_with_report` returns): on
+/// `GAMUT_OK`, `*present` says whether there is one, and `*offset`/`*len` are its byte range
+/// within that encode's output (`0`/`0` when absent). The slot is absent before the first
+/// encode, after an encode that did not return `GAMUT_OK`, and when neither
+/// `gamut_avif_encoder_set_c2pa_reserved` nor `gamut_avif_encoder_set_c2pa` was set; a
+/// zero-length slot (`gamut_avif_encoder_set_c2pa` with an empty store) is present.
+///
+/// The range is the one a signer patches at — not a hash exclusion range, which C2PA's BMFF
+/// binding expresses by box path. Changing a setting does not change the report; the next
+/// encode does. Returns `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument, writing
+/// `false`/`0`/`0` through the out-params when all three are non-`NULL`.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle; `present`, `offset` and `len` are `NULL` or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_c2pa_slot(
+    encoder: *const GamutAvifEncoder,
+    present: *mut bool,
+    offset: *mut usize,
+    len: *mut usize,
+) -> GamutStatus {
+    guard::status(|| {
+        if present.is_null() || offset.is_null() || len.is_null() {
+            return GAMUT_STATUS_NULL_ARGUMENT;
+        }
+        // SAFETY: the three out-params are non-null and writable per contract.
+        let write = |slot: Option<Range<usize>>| unsafe {
+            present.write(slot.is_some());
+            let range = slot.unwrap_or_default();
+            offset.write(range.start);
+            len.write(range.len());
+        };
+        // SAFETY: null is rejected here; a non-null handle is live per contract.
+        let Some(this) = (unsafe { encoder.as_ref() }) else {
+            write(None);
+            return GAMUT_STATUS_NULL_ARGUMENT;
+        };
+        let slot = this.c2pa.take();
+        this.c2pa.set(slot.clone());
+        write(slot);
+        GAMUT_OK
+    })
 }
 
 /// Encodes interleaved 8-bit RGB samples to an AVIF file.
@@ -1690,6 +1810,174 @@ mod tests {
         }
         outputs.dedup();
         assert_eq!(outputs.len(), 3, "each payload lands in its own box");
+    }
+
+    /// The handle's C2PA slot report as `gamut_avif_encoder_c2pa_slot` gives it.
+    fn c2pa_slot(encoder: *const GamutAvifEncoder) -> Option<Range<usize>> {
+        let (mut present, mut offset, mut len) = (true, usize::MAX, usize::MAX);
+        assert_eq!(
+            unsafe { gamut_avif_encoder_c2pa_slot(encoder, &mut present, &mut offset, &mut len) },
+            GAMUT_OK
+        );
+        if present {
+            Some(offset..offset + len)
+        } else {
+            assert_eq!((offset, len), (0, 0), "an absent slot has no range");
+            None
+        }
+    }
+
+    #[test]
+    fn c2pa_setters_and_slot_match_encode_with_report() {
+        type Configure = fn(*mut GamutAvifEncoder);
+        let cases: [(Configure, Builder); 4] = [
+            (
+                |e| {
+                    assert_eq!(
+                        unsafe { gamut_avif_encoder_set_c2pa_reserved(e, 96) },
+                        GAMUT_OK
+                    )
+                },
+                |e| e.with_c2pa_reserved(96),
+            ),
+            (
+                |e| {
+                    let store = b"a-signed-manifest-store";
+                    let status = unsafe { gamut_avif_encoder_set_c2pa(e, store.as_ptr(), 23) };
+                    assert_eq!(status, GAMUT_OK);
+                },
+                |e| e.with_c2pa(b"a-signed-manifest-store"),
+            ),
+            // `NULL` with a zero length is the empty store: a present, zero-length slot.
+            (
+                |e| {
+                    assert_eq!(
+                        unsafe { gamut_avif_encoder_set_c2pa(e, ptr::null(), 0) },
+                        GAMUT_OK
+                    )
+                },
+                |e| e.with_c2pa(&[]),
+            ),
+            (|_| {}, |e| e),
+        ];
+        let rgb = ramp8(3);
+        let mut slots = Vec::new();
+        for (configure, with) in cases {
+            let encoder = gamut_avif_encoder_new();
+            configure(encoder);
+            let c = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &rgb, 4, 4).unwrap();
+            let slot = c2pa_slot(encoder);
+            unsafe { gamut_avif_encoder_free(encoder) };
+
+            let image = ImageRef::<Rgb8>::new(
+                &rgb,
+                Dimensions {
+                    width: 4,
+                    height: 4,
+                },
+            )
+            .unwrap();
+            let (rust, report) = with(AvifEncoder::new()).encode_with_report(image).unwrap();
+            assert_eq!(c, rust);
+            assert_eq!(slot, report.c2pa);
+            slots.push(slot);
+        }
+        // Each slot is the one its setter asked for, read back out of the C output.
+        assert_eq!(slots[0].as_ref().map(ExactSizeIterator::len), Some(96));
+        assert_eq!(slots[1].as_ref().map(ExactSizeIterator::len), Some(23));
+        assert_eq!(slots[2].as_ref().map(ExactSizeIterator::len), Some(0));
+        assert_eq!(slots[3], None);
+    }
+
+    #[test]
+    fn c2pa_slot_reports_only_the_last_successful_encode() {
+        let encoder = gamut_avif_encoder_new();
+        assert_eq!(c2pa_slot(encoder), None, "no encode has run yet");
+        unsafe {
+            assert_eq!(gamut_avif_encoder_set_c2pa_reserved(encoder, 64), GAMUT_OK);
+        }
+        let first = c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4).unwrap();
+        let slot = c2pa_slot(encoder).expect("the reserved slot is reported");
+        assert_eq!(
+            &first[slot.clone()],
+            &[0; 64],
+            "the slot is the reserved zeros"
+        );
+        // Reading the report does not consume it, and a setting alone does not change it.
+        assert_eq!(c2pa_slot(encoder), Some(slot.clone()));
+        unsafe {
+            assert_eq!(gamut_avif_encoder_set_c2pa_reserved(encoder, 4), GAMUT_OK);
+        }
+        assert_eq!(c2pa_slot(encoder), Some(slot));
+        // A failed encode (a reservation below 8 bytes) clears it, as does a boundary failure.
+        assert_eq!(
+            c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4),
+            Err(GAMUT_STATUS_INVALID_INPUT)
+        );
+        assert_eq!(c2pa_slot(encoder), None);
+        unsafe {
+            assert_eq!(gamut_avif_encoder_set_c2pa_reserved(encoder, 64), GAMUT_OK);
+        }
+        c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4).unwrap();
+        let mut out_len = 0;
+        let status = unsafe {
+            gamut_avif_encoder_encode_rgb8(
+                encoder,
+                ramp8(3).as_ptr(),
+                48,
+                4,
+                4,
+                ptr::null_mut(),
+                &mut out_len,
+            )
+        };
+        assert_eq!(status, GAMUT_STATUS_NULL_ARGUMENT);
+        assert_eq!(c2pa_slot(encoder), None);
+        unsafe { gamut_avif_encoder_free(encoder) };
+    }
+
+    #[test]
+    fn c2pa_entry_points_reject_null_arguments() {
+        let encoder = gamut_avif_encoder_new();
+        let (mut present, mut offset, mut len) = (true, 1, 1);
+        unsafe {
+            assert_eq!(
+                gamut_avif_encoder_set_c2pa(encoder, ptr::null(), 1),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_c2pa(ptr::null_mut(), ptr::null(), 0),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_c2pa_reserved(ptr::null_mut(), 64),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            // Each null out-param is refused on its own, leaving the others untouched.
+            assert_eq!(
+                gamut_avif_encoder_c2pa_slot(encoder, ptr::null_mut(), &mut offset, &mut len),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_c2pa_slot(encoder, &mut present, ptr::null_mut(), &mut len),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_c2pa_slot(encoder, &mut present, &mut offset, ptr::null_mut()),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!((present, offset, len), (true, 1, 1));
+            // A null handle clears the out-params.
+            assert_eq!(
+                gamut_avif_encoder_c2pa_slot(ptr::null(), &mut present, &mut offset, &mut len),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!((present, offset, len), (false, 0, 0));
+        }
+        // A rejected store leaves the encoder without a slot.
+        c_encode(encoder, gamut_avif_encoder_encode_rgb8, &ramp8(3), 4, 4).unwrap();
+        assert_eq!(c2pa_slot(encoder), None);
+        unsafe { gamut_avif_encoder_free(encoder) };
     }
 
     #[test]
