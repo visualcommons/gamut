@@ -2,18 +2,19 @@
 
 **v1 stabilization: GitHub issue #192.** `gamut-dsp` is the workspace's shared signal-processing
 kernel library: spec-exact transform kernels, quantization rounding, and companding, implemented
-once and consumed by the codec crates (`gamut-av1` today for the transform family, `gamut-webp`
-for the shared quantize rounding, with `gamut-tiff`/`gamut-jxl`/`gamut-av2`/`gamut-vvc` declaring
-the edge for future kernels). It is a leaf crate — **zero dependencies** — and
-`#![forbid(unsafe_code)]`.
+once and consumed by the codec crates (`gamut-av1` for the AV1 transform family, `gamut-jpeg` for the
+JPEG-1 8×8 DCT, `gamut-webp` for the shared quantize rounding, with `gamut-av2`/`gamut-vvc`
+declaring the edge for future kernels). It is a leaf crate — **zero dependencies** — and
+`#![deny(unsafe_code)]` (a hot-path crate: `deny`, not `forbid`, so a benchmarked win may take a
+site exception; none does today).
 
 **Keystone:** the split between *normative* and *chosen* math, under a namespace rule that keeps
 every future standard additive. The `inverse_*` kernels are bit-exact transcriptions of the AV1
 decoder processes — their behaviour is the spec's, frozen forever. The `forward_*` kernels are
 encoder choices whose only contract is consistency with their paired inverse, so their internals
 (basis tables, SIMD) may be rewritten freely under frozen signatures. And because the surface is
-one module per spec family with nothing at the crate root, a future `jpeg`/`jxl`/`av2` module can
-never collide with an existing name.
+one module per spec family with nothing at the crate root — `av1`, `jpeg` and `math` today — a
+future `jxl`/`av2` module can never collide with an existing name.
 
 ## Public surface (frozen at v1)
 
@@ -23,6 +24,7 @@ never collide with an existing name.
 | `av1::inverse_adst` / `av1::forward_adst` | same shape, `n ∈ 2..=4`; DST-VII at size 4, DST-IV at 8/16 (a spec quirk, documented) | frozen |
 | `av1::inverse_identity` / `av1::forward_identity` | same shape, `n ∈ 2..=5`; pure per-element √2-step scaling | frozen |
 | `av1::forward_wht4x4` / `av1::inverse_wht4x4` | complete 2-D 4×4 lossless block pair over by-value `[i32; 16]`; exact algebraic round-trip | frozen |
+| `jpeg::fdct8x8` / `jpeg::idct8x8` | in-place 2-D 8×8 kernels over a raster-order `&mut [i32; 64]`; separable `f64` evaluation of the T.81 §A.3.3 ideal equations, rounded once | frozen; fast fixed-point kernels are additive |
 | `math::round2` `math::round2_signed` `math::clip3` `math::round_div_nearest` | scalar integer ops: AV1 §4.7 rounding/clamp plus the AV1+VP8 forward-quantize rounding | frozen; new fns are additive |
 
 Adding modules or functions stays backward-compatible; removing or reshaping any of the above
@@ -64,8 +66,12 @@ would not.
 
 ## Deferred / tracked follow-ups (all additive — none blocks v1)
 
-- **`jpeg` module** — the ITU-T T.81 8×8 DCT (and friends) for `gamut-tiff`'s JPEG-in-TIFF
-  compression; the tiff→dsp dependency edge is already declared for it.
+- **JPEG-in-TIFF consumer** — the `jpeg` module ships (see the surface table) and `gamut-jpeg`
+  consumes it; what is deferred is `gamut-tiff`'s JPEG-in-TIFF compression, a consumer outside
+  this crate. `gamut-tiff` does not declare a dsp edge today; it adds one, or reaches the kernels
+  through `gamut-jpeg`, when that compression lands.
+- **Fast fixed-point `jpeg` DCT kernels** — the shipped pair favours a legible spec-faithful
+  reference (issue #28 scope note); faster kernels land behind the same signatures.
 - **`jxl` / `av2` modules** — kernels for the JPEG XL and AV2 codecs as those stub crates grow
   real surfaces (`av2` may re-export `av1` kernels where AVM inherits them).
 - **`forward_adst` const basis tables** — replace the per-call impulse-response derivation with
@@ -79,8 +85,11 @@ Backed by inline unit tests per kernel — independent naive float oracles (prop
 transcription is pinned against DCT-III / DST-VII / DST-IV directly), exact golden snapshots in
 *both* directions (a uniform scale or rounding regression cannot hide in the proportional
 oracle), adversarial clamp-saturation probes proving the `r` range is wired through the
-butterflies, ±2¹⁹/±4095 headroom probes under debug overflow checks — plus `tests/surface.rs`, which drives all 16 public functions
-through their `gamut_dsp::module::item` paths only, and the compiled crate-root doctest.
+butterflies, ±2¹⁹/±4095 headroom probes under debug overflow checks; the `jpeg` pair is pinned
+inline against a direct evaluation of the §A.3.3 double sum, plus DC, orientation and round-trip
+probes — plus `tests/surface.rs`, which drives the 12 `av1`/`math` public functions through their
+`gamut_dsp::module::item` paths only (the two `jpeg` functions are not yet in it), and the
+compiled crate-root doctest.
 Bit-exactness of the inverse kernels against dav1d/libaom lands transitively through the 2-D
 pipeline's conformance suites in `gamut-av1`/`gamut-avif`. The divan bench harness
 (`benches/transforms.rs`, issue #149) tracks DCT/ADST/WHT throughput — this crate is a real
