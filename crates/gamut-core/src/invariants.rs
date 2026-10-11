@@ -20,8 +20,11 @@
 //! This module is the test oracle, not the system under test, so `.cargo/mutants.toml` excludes
 //! `crates/*/src/invariants.rs` from mutation.
 
-use crate::convert::{ConvertPolicy, RawImage, convert_from_raw, convert_from_raw_into};
-use crate::{Dimensions, ErrorKind, Pixel, PixelFormat, Sample};
+use crate::convert::{
+    ConvertPolicy, RawImage, convert_from_raw, convert_from_raw_into, premultiply_alpha,
+    unpremultiply_alpha,
+};
+use crate::{ColorModel, Dimensions, ErrorKind, ImageBuf, Pixel, PixelFormat, Sample};
 
 /// The largest edge a normalised dimension can take.
 ///
@@ -395,6 +398,251 @@ pub fn widening_to_16_bit_and_back_is_exact<
     Ok(())
 }
 
+// ---- associated alpha ----------------------------------------------------------------------
+//
+// `premultiply_alpha` / `unpremultiply_alpha` have no oracle either: the competitor that prompted
+// them (ravif's `convert_alpha_8bit`) is defective, so it is a counter-example, not a reference.
+// The laws below state the arithmetic over the *rationals* — "the nearest integer to c·a/max" —
+// rather than restating the integer formula the implementation evaluates, so a wrong rounding
+// addend, a truncation, or a missing clamp is visible as a broken inequality.
+
+/// The full scale of `S` as a code value, decided from its width rather than through `convert`'s
+/// own helper so a defect there cannot cancel out here.
+fn alpha_code_max<S: Sample>() -> u64 {
+    match core::mem::size_of::<S>() {
+        1 => 255,
+        _ => 65_535,
+    }
+}
+
+/// A sample's code value: its full-range widening divided by the widening factor (257 or 1).
+fn alpha_code<S: Sample>(sample: S) -> u64 {
+    u64::from(sample.to_full_range_u16()) / (65_535 / alpha_code_max::<S>())
+}
+
+/// One pixel's colour and alpha code values: `(colours, alpha)`, alpha being the last channel.
+fn split_pixel<S: Sample>(pixel: &[S]) -> (Vec<u64>, u64) {
+    let (colour, alpha) = pixel.split_at(pixel.len() - 1);
+    (
+        colour.iter().map(|&s| alpha_code(s)).collect(),
+        alpha_code(alpha[0]),
+    )
+}
+
+/// Builds the owned image these laws operate on, or `None` when the description is not an image of
+/// an alpha-carrying layout (which no alpha law has anything to say about).
+fn alpha_image<P: Pixel>(dims: Dimensions, samples: &[P::Sample]) -> Option<ImageBuf<P>> {
+    if !matches!(
+        P::FORMAT.color_model(),
+        ColorModel::Rgba | ColorModel::GrayAlpha
+    ) {
+        return None;
+    }
+    ImageBuf::<P>::new(samples.to_vec(), dims).ok()
+}
+
+/// Law: a fully opaque pixel is a fixed point of both [`premultiply_alpha`] and
+/// [`unpremultiply_alpha`].
+///
+/// The issue that introduced the operations makes this the first acceptance criterion, and it is
+/// where ravif's premultiplication fails outright (it maps `a == 255` to transparent black).
+///
+/// # Errors
+///
+/// Returns the first opaque pixel either operation altered.
+pub fn opaque_pixels_are_fixed_points<P: Pixel>(
+    dims: Dimensions,
+    samples: &[P::Sample],
+) -> Result<(), Violation> {
+    const LAW: &str = "opaque_pixels_are_fixed_points";
+
+    let Some(original) = alpha_image::<P>(dims, samples) else {
+        return Ok(());
+    };
+    let max = alpha_code_max::<P::Sample>();
+    let mut premultiplied = original.clone();
+    premultiply_alpha(&mut premultiplied);
+    let mut unpremultiplied = original.clone();
+    unpremultiply_alpha(&mut unpremultiplied);
+
+    let pixels = original.as_samples().chunks_exact(P::CHANNELS);
+    let forward = premultiplied.as_samples().chunks_exact(P::CHANNELS);
+    let backward = unpremultiplied.as_samples().chunks_exact(P::CHANNELS);
+    for (index, ((source, there), back)) in pixels.zip(forward).zip(backward).enumerate() {
+        if split_pixel(source).1 != max {
+            continue;
+        }
+        if there != source || back != source {
+            return Err(Violation::new(
+                LAW,
+                format!(
+                    "{:?} pixel {index} {source:?}: premultiplied to {there:?}, unpremultiplied to {back:?}",
+                    P::FORMAT
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Law: [`premultiply_alpha`] keeps alpha and replaces each colour code `c` with the integer
+/// nearest `c · a / max`.
+///
+/// `max` is odd at both widths, so `c · a / max` is never half-way and "nearest" is unique:
+/// `|p · max − c · a| ≤ max / 2`. That also bounds associated colour by its alpha (`p ≤ a`), the
+/// well-formedness condition of associated alpha, and sends a transparent pixel to black.
+///
+/// # Errors
+///
+/// Returns the first sample that is not the nearest integer, or whose alpha changed.
+pub fn premultiply_rounds_to_nearest<P: Pixel>(
+    dims: Dimensions,
+    samples: &[P::Sample],
+) -> Result<(), Violation> {
+    const LAW: &str = "premultiply_rounds_to_nearest";
+
+    let Some(original) = alpha_image::<P>(dims, samples) else {
+        return Ok(());
+    };
+    let max = alpha_code_max::<P::Sample>();
+    let mut premultiplied = original.clone();
+    premultiply_alpha(&mut premultiplied);
+
+    let pixels = original.as_samples().chunks_exact(P::CHANNELS);
+    let results = premultiplied.as_samples().chunks_exact(P::CHANNELS);
+    for (index, (source, result)) in pixels.zip(results).enumerate() {
+        let (colours, alpha) = split_pixel(source);
+        let (associated, kept_alpha) = split_pixel(result);
+        let nearest = colours
+            .iter()
+            .zip(&associated)
+            .all(|(&c, &p)| 2 * (p * max).abs_diff(c * alpha) <= max);
+        if kept_alpha != alpha || !nearest {
+            return Err(Violation::new(
+                LAW,
+                format!(
+                    "{:?} pixel {index} {source:?} premultiplied to {result:?}",
+                    P::FORMAT
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Law: [`unpremultiply_alpha`] keeps alpha and replaces each colour code `p` with the integer
+/// nearest `p · max / a`, clamped to `max`; a transparent pixel becomes black.
+///
+/// Stated for **arbitrary** associated input, not only what [`premultiply_alpha`] produces: a
+/// reader meets colour above its alpha in real files, and the clamp is what keeps it in range.
+///
+/// # Errors
+///
+/// Returns the first sample that is neither the nearest integer nor the clamp, or whose alpha
+/// changed.
+pub fn unpremultiply_rounds_to_nearest_or_clamps<P: Pixel>(
+    dims: Dimensions,
+    samples: &[P::Sample],
+) -> Result<(), Violation> {
+    const LAW: &str = "unpremultiply_rounds_to_nearest_or_clamps";
+
+    let Some(original) = alpha_image::<P>(dims, samples) else {
+        return Ok(());
+    };
+    let max = alpha_code_max::<P::Sample>();
+    let mut unpremultiplied = original.clone();
+    unpremultiply_alpha(&mut unpremultiplied);
+
+    let pixels = original.as_samples().chunks_exact(P::CHANNELS);
+    let results = unpremultiplied.as_samples().chunks_exact(P::CHANNELS);
+    for (index, (source, result)) in pixels.zip(results).enumerate() {
+        let (associated, alpha) = split_pixel(source);
+        let (colours, kept_alpha) = split_pixel(result);
+        let lawful = associated.iter().zip(&colours).all(|(&p, &c)| {
+            if alpha == 0 {
+                c == 0
+            } else if c == max {
+                // Clamped, or genuinely nearest to full scale: p·max/a ≥ max − ½.
+                2 * p * max >= (2 * max - 1) * alpha
+            } else {
+                2 * (c * alpha).abs_diff(p * max) <= alpha
+            }
+        });
+        if kept_alpha != alpha || !lawful {
+            return Err(Violation::new(
+                LAW,
+                format!(
+                    "{:?} pixel {index} {source:?} unpremultiplied to {result:?}",
+                    P::FORMAT
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Law: unpremultiplying a premultiplied image recovers each colour code `c` of a pixel with alpha
+/// `a > 0` to within `⌊(a + max) / 2a⌋`, and re-premultiplying that result reproduces the
+/// premultiplied image exactly.
+///
+/// The bound is the quantisation premultiplying incurs: the associated value is off by at most ½,
+/// which dividing by `a / max` magnifies to `max / 2a`, plus ½ for the final rounding. It is one
+/// code value only where `a` is at least about half of full scale; at `a = 1` an 8-bit colour keeps
+/// one bit, and nothing can recover the rest. The second half is exact because unpremultiplying
+/// errs by at most ½ on the unassociated scale, which `a / max ≤ 1` shrinks below ½ again.
+///
+/// # Errors
+///
+/// Returns the first pixel that breaks either half.
+pub fn premultiply_round_trip_is_bounded_and_idempotent<P: Pixel>(
+    dims: Dimensions,
+    samples: &[P::Sample],
+) -> Result<(), Violation> {
+    const LAW: &str = "premultiply_round_trip_is_bounded_and_idempotent";
+
+    let Some(original) = alpha_image::<P>(dims, samples) else {
+        return Ok(());
+    };
+    let max = alpha_code_max::<P::Sample>();
+    let mut associated = original.clone();
+    premultiply_alpha(&mut associated);
+    let mut recovered = associated.clone();
+    unpremultiply_alpha(&mut recovered);
+    let mut again = recovered.clone();
+    premultiply_alpha(&mut again);
+
+    let pixels = original.as_samples().chunks_exact(P::CHANNELS);
+    let backs = recovered.as_samples().chunks_exact(P::CHANNELS);
+    for (index, (source, back)) in pixels.zip(backs).enumerate() {
+        let (colours, alpha) = split_pixel(source);
+        let (recovered_colours, _) = split_pixel(back);
+        let bounded = alpha == 0
+            || colours
+                .iter()
+                .zip(&recovered_colours)
+                .all(|(&c, &r)| c.abs_diff(r) <= (alpha + max) / (2 * alpha));
+        if !bounded {
+            return Err(Violation::new(
+                LAW,
+                format!(
+                    "{:?} pixel {index} {source:?} came back as {back:?}",
+                    P::FORMAT
+                ),
+            ));
+        }
+    }
+    if again != associated {
+        return Err(Violation::new(
+            LAW,
+            format!(
+                "{:?}: re-premultiplying the recovered image did not reproduce the associated one",
+                P::FORMAT
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::{Just, Strategy, prop_assert, prop_oneof, proptest};
@@ -402,10 +650,13 @@ mod tests {
 
     use super::{
         MAX_EDGE, NARROW_FORMATS, Violation, WIDE_FORMATS,
-        acceptance_is_independent_of_the_samples, converting_a_layout_to_itself_changes_nothing,
-        normalise_dims, output_shape_matches_the_target_layout,
-        palette_and_cmyk_convert_only_to_themselves, the_in_place_door_matches_the_allocating_door,
-        widening_to_16_bit_and_back_is_exact,
+        acceptance_is_independent_of_the_samples, alpha_image,
+        converting_a_layout_to_itself_changes_nothing, normalise_dims,
+        opaque_pixels_are_fixed_points, output_shape_matches_the_target_layout,
+        palette_and_cmyk_convert_only_to_themselves,
+        premultiply_round_trip_is_bounded_and_idempotent, premultiply_rounds_to_nearest,
+        split_pixel, the_in_place_door_matches_the_allocating_door,
+        unpremultiply_rounds_to_nearest_or_clamps, widening_to_16_bit_and_back_is_exact,
     };
     use crate::convert::{AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy};
     use crate::{
@@ -655,6 +906,95 @@ mod tests {
             exact!(Rgba8, Rgba16);
             exact!(GrayAlpha8, GrayAlpha16);
         }
+
+        /// Every associated-alpha law holds for every alpha-carrying layout, at both widths.
+        ///
+        /// Alpha is drawn from {0, full scale, anything} in equal parts: uniform 16-bit samples
+        /// would almost never be opaque or transparent, which are exactly the pixels the
+        /// fixed-point and transparent-black clauses are about.
+        #[test]
+        fn associated_alpha_laws_hold_for_every_alpha_layout(
+            dims in dimensions(),
+            colours in proptest::collection::vec(proptest::num::u16::ANY, (MAX_EDGE * MAX_EDGE * 3) as usize),
+            alphas in proptest::collection::vec(
+                prop_oneof![Just(0u16), Just(u16::MAX), proptest::num::u16::ANY],
+                (MAX_EDGE * MAX_EDGE) as usize,
+            ),
+        ) {
+            macro_rules! laws {
+                ($p:ty, $sample:ty, $narrow:expr) => {{
+                    let pixels = dims.sample_count(1).expect("bounded dims");
+                    let colour_channels = <$p as Pixel>::CHANNELS - 1;
+                    let mut samples: Vec<$sample> = Vec::new();
+                    for pixel in 0..pixels {
+                        for channel in 0..colour_channels {
+                            samples.push($narrow(colours[pixel * 3 + channel]));
+                        }
+                        samples.push($narrow(alphas[pixel]));
+                    }
+                    for result in [
+                        opaque_pixels_are_fixed_points::<$p>(dims, &samples),
+                        premultiply_rounds_to_nearest::<$p>(dims, &samples),
+                        unpremultiply_rounds_to_nearest_or_clamps::<$p>(dims, &samples),
+                        premultiply_round_trip_is_bounded_and_idempotent::<$p>(dims, &samples),
+                    ] {
+                        prop_assert!(result.is_ok(), "{}", describe(&result));
+                    }
+                }};
+            }
+            // The high byte keeps 0 and full scale at 0 and 255.
+            let narrow = |v: u16| (v >> 8) as u8;
+            let wide = |v: u16| v;
+            laws!(Rgba8, u8, narrow);
+            laws!(GrayAlpha8, u8, narrow);
+            laws!(Rgba16, u16, wide);
+            laws!(GrayAlpha16, u16, wide);
+        }
+    }
+
+    /// Every (colour, alpha) pair an 8-bit pixel can hold, once each: 65536 pixels.
+    ///
+    /// The 8-bit domain is small enough to settle exhaustively rather than sample, so the laws are
+    /// proven over it instead of probed. Each colour channel walks the full range in a different
+    /// order, so a defect confined to one channel position still meets every pair.
+    #[test]
+    fn associated_alpha_laws_hold_for_every_8_bit_pair() {
+        let dims = Dimensions::new(256, 256).expect("non-zero");
+        let mut rgba = Vec::with_capacity(256 * 256 * 4);
+        let mut grey_alpha = Vec::with_capacity(256 * 256 * 2);
+        for alpha in 0..=u8::MAX {
+            for colour in 0..=u8::MAX {
+                rgba.extend_from_slice(&[colour, u8::MAX - colour, colour.rotate_left(4), alpha]);
+                grey_alpha.extend_from_slice(&[colour, alpha]);
+            }
+        }
+
+        for result in [
+            opaque_pixels_are_fixed_points::<Rgba8>(dims, &rgba),
+            premultiply_rounds_to_nearest::<Rgba8>(dims, &rgba),
+            unpremultiply_rounds_to_nearest_or_clamps::<Rgba8>(dims, &rgba),
+            premultiply_round_trip_is_bounded_and_idempotent::<Rgba8>(dims, &rgba),
+            opaque_pixels_are_fixed_points::<GrayAlpha8>(dims, &grey_alpha),
+            premultiply_rounds_to_nearest::<GrayAlpha8>(dims, &grey_alpha),
+            unpremultiply_rounds_to_nearest_or_clamps::<GrayAlpha8>(dims, &grey_alpha),
+            premultiply_round_trip_is_bounded_and_idempotent::<GrayAlpha8>(dims, &grey_alpha),
+        ] {
+            assert!(result.is_ok(), "{}", describe(&result));
+        }
+    }
+
+    #[test]
+    fn the_alpha_laws_govern_only_alpha_layouts() {
+        // A layout without alpha is outside every alpha law, so it passes vacuously...
+        let dims = Dimensions::new(1, 1).expect("non-zero");
+        assert!(alpha_image::<Rgb8>(dims, &[1, 2, 3]).is_none());
+        // ...while an alpha layout is governed: a mis-sized buffer is the only other way out.
+        assert!(alpha_image::<Rgba8>(dims, &[1, 2, 3, 4]).is_some());
+        assert!(alpha_image::<Rgba8>(dims, &[1, 2, 3]).is_none());
+
+        // The code-value helpers the laws read pixels through must agree with the samples.
+        assert_eq!(split_pixel(&[7u8, 9, 255]), (vec![7, 9], 255));
+        assert_eq!(split_pixel(&[7u16, 0xFFFF]), (vec![7], 65_535));
     }
 
     // ---- the laws' own guards --------------------------------------------------------------
