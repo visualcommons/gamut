@@ -37,7 +37,7 @@
 //! **Encode speed** is a [`Speed`] preset ([`encode_still_intra_with_speed`],
 //! [`encode_still_intra16_with_speed`]): each step prunes the lossy mode-decision search — the
 //! angle refinement, filter-intra, the CfL alpha ladder, the transform-type set, rectangular and
-//! sub-8×8 partitions, palette — trading coded size for time. The default, [`Speed::Thorough`],
+//! sub-8×8 partitions, palette — to save encode time. The default, [`Speed::Thorough`],
 //! is the full search, and every entry point without a `speed` argument uses it.
 //!
 //! The remaining surface (quantizer matrices and the AVIF-level

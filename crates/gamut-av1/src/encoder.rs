@@ -8,8 +8,8 @@ use gamut_core::{Error, Result};
 use crate::headers::{self, Av1Colour, Av1StillConfig};
 use crate::tile::{FrameEncoder, Reconstruction, Search};
 
-/// How much mode-decision search the lossy intra encoder runs: a preset that trades coded size
-/// for encode time.
+/// How much mode-decision search the lossy intra encoder runs: a preset that trades search for
+/// encode time.
 ///
 /// Every preset produces a conformant stream that a decoder reconstructs bit-exactly to the
 /// encoder's own [`ReconImage`]; they differ only in which candidates the encoder *tries* before
@@ -17,12 +17,19 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 /// preset never considers a candidate a slower one skips. The default, [`Speed::Thorough`], is the
 /// full search, and is what every entry point without a `speed` argument uses.
 ///
-/// | Preset | Pruned relative to the one above | What it costs |
+/// | Preset | Pruned relative to the one above | Search time saved |
 /// |---|---|---|
 /// | [`Thorough`](Self::Thorough) | nothing: every directional mode at `AngleDeltaY ∈ [-3, 3]`, five filter-intra modes, CfL `\|alpha\|` 1..=16, all five `TX_SET_INTRA_2` types, rectangular partitions, 4×4 leaves, palette | — |
-/// | [`Balanced`](Self::Balanced) | directional modes are tried at `AngleDeltaY = 0` only (8 instead of 56 directional predictions per ≥8×8 block) | edges a few degrees off a base angle predict less sharply |
-/// | [`Fast`](Self::Fast) | filter-intra is not tried; CfL tries `\|alpha\|` ∈ {1, 2, 4, 8, 16} only; the transform type is `DCT_DCT` or `ADST_ADST` | textured blocks and chroma that tracks luma code larger residuals |
-/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | the largest files: screen content loses palette, edges lose directional prediction |
+/// | [`Balanced`](Self::Balanced) | directional modes are tried at `AngleDeltaY = 0` only | 48 of the 56 directional predictions per ≥8×8 block |
+/// | [`Fast`](Self::Fast) | filter-intra is not tried; CfL tries `\|alpha\|` ∈ {1, 2, 4, 8, 16} only; the transform type is `DCT_DCT` or `ADST_ADST` | 5 filter-intra predictions per block, 22 of 32 CfL trials per chroma plane, 3 of 4 extra forward transforms per luma transform |
+/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional prediction, the CfL and palette scans, the last extra transform, and the 4×4 mode searches the floor removes |
+///
+/// **What the time buys is not guaranteed to be smaller files.** The mode decisions score each
+/// candidate by its prediction error (or a coefficient-count proxy) against the source, not by
+/// rate and distortion together, so a candidate the full search prefers can cost more bits — or
+/// reconstruct worse — than one a pruned search settles for. Measured on synthetic content the
+/// pruned presets were often both smaller and no worse in PSNR at the same `qindex`; treat the
+/// presets as a time control, and compare sizes on your own content.
 ///
 /// The presets prune *search*, so they move only lossy encodes. Lossless coding (`qindex = 0`)
 /// has a single fixed path — `DC_PRED` and the 4×4 Walsh–Hadamard transform — and is identical at
@@ -156,8 +163,8 @@ pub fn encode_still_intra_with(
     encode_still_intra_with_speed(planes, qindex, colour, Speed::default())
 }
 
-/// Like [`encode_still_intra_with`] but runs the mode-decision search at `speed`, trading coded
-/// size for encode time as the [`Speed`] table describes. [`Speed::Thorough`] produces exactly the
+/// Like [`encode_still_intra_with`] but runs the mode-decision search at `speed`, pruning it for
+/// encode time as the [`Speed`] table describes. [`Speed::Thorough`] produces exactly the
 /// stream [`encode_still_intra_with`] does.
 ///
 /// # Errors

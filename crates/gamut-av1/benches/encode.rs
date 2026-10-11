@@ -57,7 +57,7 @@ fn encode_intra(bencher: Bencher, qindex: u8) {
 }
 
 /// The [`Speed`] presets at one mid quantizer, indexed into [`Speed::ALL`] (slowest first): the
-/// time side of the size/time trade each preset documents.
+/// encode time each preset's pruning buys.
 #[divan::bench(args = [0, 1, 2, 3])]
 fn encode_intra_speed(bencher: Bencher, preset: usize) {
     let planes = gradient_planes();
