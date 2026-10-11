@@ -99,16 +99,6 @@ const DIRECTIONAL_MODES: [u8; 8] = [
     V_PRED, H_PRED, D45_PRED, D135_PRED, D113_PRED, D157_PRED, D203_PRED, D67_PRED,
 ];
 
-/// The non-directional subset of [`LUMA_MODES`], in the same order (so `DC_PRED` stays first and
-/// keeps winning ties): the 4×4 candidate set when directional modes are pruned.
-const NONDIR_LUMA_MODES: [u8; 5] = [
-    DC_PRED,
-    SMOOTH_PRED,
-    SMOOTH_V_PRED,
-    SMOOTH_H_PRED,
-    PAETH_PRED,
-];
-
 /// Every `AngleDeltaY` (§5.11.42), in the order the full search tries them.
 const ALL_ANGLE_DELTAS: [i8; 7] = [-3, -2, -1, 0, 1, 2, 3];
 
@@ -134,9 +124,11 @@ const TX_TYPE_TRIALS: [(TxType, usize); 4] = [
 /// whose inversion no output could detect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Search {
-    /// The 4×4 luma candidates, `DC_PRED` first.
-    modes_4x4: &'static [u8],
-    /// The directional base modes a square ≥8×8 block tries.
+    /// The directional base modes a square ≥8×8 block tries. There is no 4×4 counterpart: the
+    /// one preset that prunes directional modes (`Fastest`) also never codes a lossy 4×4 block —
+    /// `split_from` 16 stops chosen 8×8 splits, and on the even `MiCols`/`MiRows` grid no 8×8
+    /// block overhangs the frame, so none is forced — so `select_luma_mode` always tries every
+    /// [`LUMA_MODES`] entry.
     directional: &'static [u8],
     /// The `AngleDeltaY` values each directional base mode is tried at.
     angle_deltas: &'static [i8],
@@ -161,7 +153,6 @@ impl Search {
     /// The search a [`Speed`] preset runs. The table is documented on [`Speed`].
     pub(crate) fn for_speed(speed: Speed) -> Self {
         let thorough = Self {
-            modes_4x4: &LUMA_MODES,
             directional: &DIRECTIONAL_MODES,
             angle_deltas: &ALL_ANGLE_DELTAS,
             filter_intra_modes: 5,
@@ -186,7 +177,6 @@ impl Search {
             Speed::Balanced => balanced,
             Speed::Fast => fast,
             Speed::Fastest => Self {
-                modes_4x4: &NONDIR_LUMA_MODES,
                 directional: &[],
                 cfl_magnitudes: None,
                 tx_type_trials: 0,
@@ -2724,8 +2714,8 @@ impl<'a> FrameEncoder<'a> {
         };
         let mut best_mode = DC_PRED;
         let mut best_sad = sad(&self.predict_4x4(0, sx, sy, DC_PRED));
-        // Both candidate sets open with `DC_PRED`, the baseline just scored.
-        for &mode in &self.search.modes_4x4[1..] {
+        // `LUMA_MODES` opens with `DC_PRED`, the baseline just scored.
+        for &mode in &LUMA_MODES[1..] {
             let s = sad(&self.predict_4x4(0, sx, sy, mode));
             if s < best_sad {
                 best_sad = s;
@@ -3948,14 +3938,15 @@ mod tests {
 
     #[test]
     fn directional_modes_are_tried_only_below_the_fastest_preset() {
-        let (nxn, four) = mode_decisions(Speed::Fast, stripes);
+        // ≥8×8 only: `Fastest` codes no lossy 4×4 block (see `Search::directional`), so the 4×4
+        // search has no pruned configuration to pin.
+        let (nxn, _) = mode_decisions(Speed::Fast, stripes);
         assert!(
-            nxn.iter().any(|d| is_directional(d.0)) && four.iter().any(|d| is_directional(d.0)),
-            "stripes pick a directional mode at each size: {nxn:?} {four:?}"
+            nxn.iter().any(|d| is_directional(d.0)),
+            "stripes pick a directional mode: {nxn:?}"
         );
-        let (nxn, four) = mode_decisions(Speed::Fastest, stripes);
+        let (nxn, _) = mode_decisions(Speed::Fastest, stripes);
         assert!(nxn.iter().all(|d| !is_directional(d.0)), "{nxn:?}");
-        assert!(four.iter().all(|d| !is_directional(d.0)), "{four:?}");
     }
 
     /// A 4:2:0 `Planar8` whose planes are filled by `f(plane, x, y)` at each plane's own size.
