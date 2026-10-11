@@ -195,9 +195,10 @@ void gamut_avif_image_free(GamutAvifImage *image);
   primary or alpha item that is derived (`grid`/`iden`/`iovl`) or not AV1 has no single
   codestream and is `GAMUT_STATUS_UNSUPPORTED`.
 - **Not yet exposed**: the C2PA slot setters (`with_c2pa_reserved` / `with_c2pa`), whose use
-  needs the encode report's slot range to cross the boundary too (issue #673); the encoder
-  knobs the Rust API has not shipped yet (speed, threads, alpha quality — issues #654, #655,
-  #656) join as setters when they land; AVIF decode waits for the decoder registry (above).
+  needs the encode report's slot range to cross the boundary too (issue #673); the alpha
+  quality setter over the shipped `with_alpha_quality` (issue #692); the encoder knobs the
+  Rust API has not shipped yet (speed, threads — issues #654, #655) join as setters when they
+  land; AVIF decode waits for the decoder registry (above).
 
 ## Drift locking
 
