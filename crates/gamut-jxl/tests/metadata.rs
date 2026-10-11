@@ -129,3 +129,44 @@ fn empty_metadata_payload_is_rejected() {
     assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err:?}");
     assert_eq!(err.static_message(), Some("JXL: empty metadata payload"));
 }
+
+#[test]
+fn decoder_reads_the_exif_and_xmp_boxes_back() {
+    // The read-back half of the box contract: what `with_exif` / `with_xmp` wrote comes back as
+    // the TIFF stream (offset applied) and the packet, with no ICC for the default sRGB signal.
+    let jxl = encode_with(|enc| enc.with_exif(EXIF).with_xmp(XMP));
+    let meta = JxlDecoder::new().metadata(&jxl).expect("metadata");
+    assert_eq!(meta.exif.as_deref(), Some(EXIF));
+    assert_eq!(meta.xmp.as_deref(), Some(XMP.as_bytes()));
+    assert_eq!(meta.icc, None);
+
+    // A container with no boxes, and a bare codestream, both report nothing.
+    let empty = encode_with(|enc| enc);
+    assert_eq!(
+        JxlDecoder::new().metadata(&empty).expect("metadata"),
+        gamut_jxl::JxlMetadata::default()
+    );
+    let dims = Dimensions::new(12, 9).unwrap();
+    let samples = gen_u8(12, 9, 3);
+    let image = ImageRef::<Rgb8>::new(&samples, dims).unwrap();
+    let bare = JxlEncoder::lossless().encode_to_vec(image).unwrap();
+    assert_eq!(
+        JxlDecoder::new().metadata(&bare).expect("metadata"),
+        gamut_jxl::JxlMetadata::default()
+    );
+}
+
+#[test]
+fn metadata_reports_the_codestream_icc_profile() {
+    // The ICC field is the codestream's embedded profile (the libjxl-synthesized sRGB one, as the
+    // colour tests use), byte-for-byte, alongside the boxes.
+    let srgb = common::icc_profile(&encode_with(|enc| enc)).expect("oracle synthesizes sRGB");
+    let jxl = encode_with(|enc| {
+        enc.with_color(gamut_jxl::ColorSpec::Icc(srgb.clone()))
+            .with_xmp(XMP)
+    });
+    let meta = JxlDecoder::new().metadata(&jxl).expect("metadata");
+    assert_eq!(meta.icc.as_deref(), Some(srgb.as_slice()));
+    assert_eq!(meta.xmp.as_deref(), Some(XMP.as_bytes()));
+    assert_eq!(meta.exif, None);
+}

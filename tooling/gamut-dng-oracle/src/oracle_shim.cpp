@@ -3,6 +3,11 @@
 // negative, and read its stage-1 (raw) image. If any of that throws, the file is not a valid DNG
 // the reference implementation accepts.
 
+// `dladdr` (used by `gdng_zlib_identity`) is a GNU extension; glibc hides it otherwise.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #include "dng_auto_ptr.h"
 #include "dng_camera_profile.h"
 #include "dng_color_spec.h"
@@ -21,17 +26,23 @@
 #include "dng_stream.h"
 #include "dng_tag_types.h"
 
+#include <zlib.h>
+
+#include <climits>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
+#include <string>
 #include <vector>
 
 namespace {
 
-// Parses `path` into a negative and reads its stage-1 (raw) image. Shared by the entry points.
-dng_error_code read_negative(const char *path, dng_host &host, dng_info &info,
+// Parses `stream` into a negative and reads its stage-1 (raw) image. This is the SDK flow every
+// decoding entry point here runs, in one place: the file-stream and memory-stream entry points
+// differ only in which `dng_stream` they hand it, so neither can drift from the other.
+dng_error_code read_negative(dng_stream &stream, dng_host &host, dng_info &info,
                              AutoPtr<dng_negative> &negative) {
-  dng_file_stream stream(path);
   info.Parse(host, stream);
   info.PostParse(host);
   if (!info.IsValidDNG()) {
@@ -42,6 +53,13 @@ dng_error_code read_negative(const char *path, dng_host &host, dng_info &info,
   negative->PostParse(host, stream, info);
   negative->ReadStage1Image(host, stream, info);
   return dng_error_none;
+}
+
+// The same flow over the file at `path`. Opening the stream is the whole of the difference.
+dng_error_code read_negative(const char *path, dng_host &host, dng_info &info,
+                             AutoPtr<dng_negative> &negative) {
+  dng_file_stream stream(path);
+  return read_negative(stream, host, info, negative);
 }
 
 // Copies a 16-bit-typed `dng_image` into a freshly `malloc`d interleaved `uint16` buffer,
@@ -83,6 +101,70 @@ dng_error_code copy_short_image(const dng_image *image, uint32_t *out_w, uint32_
 }
 
 } // namespace
+
+namespace {
+
+// The resolved path of the shared object `zlibVersion` came from, or an empty string when the
+// loader cannot report one. Computed once; the storage lives for the process.
+const std::string &resolved_zlib_path() {
+  static const std::string path = [] {
+    Dl_info info;
+    if (dladdr(reinterpret_cast<const void *>(&zlibVersion), &info) == 0 ||
+        info.dli_fname == nullptr) {
+      return std::string();
+    }
+    char resolved[PATH_MAX];
+    return std::string(realpath(info.dli_fname, resolved) ? resolved : info.dli_fname);
+  }();
+  return path;
+}
+
+} // namespace
+
+// Identifies the zlib the SDK's Deflate reader is actually calling: its `zlibVersion()` string
+// followed, where the loader can tell us, by the resolved path of the shared object the symbol
+// came from.
+//
+// The path is the part that matters. `zlibVersion()` reports the string the loaded build carries,
+// so it separates the two candidates -- the copy a build script left at
+// `<target>/release/build/*/out/zlib-prefix/lib/libz.so.1.3.1` and whatever the platform installed
+// -- only when the platform's build renamed itself. On a box shipping stock zlib 1.3.1 both answer
+// "1.3.1" and the version says nothing; `dladdr` plus `realpath` names each one exactly either
+// way. The identification cannot rest on a fork choosing to rename itself.
+//
+// This matters to a *measurement*, not to correctness. `build.rs` links the system libz
+// dynamically (`-lz`), so the SDK's Deflate decode is a measured code path this oracle neither
+// builds nor pins: which libz the dynamic linker resolves is a property of the machine, and of
+// the launcher, since cargo puts every build script's native search path on `LD_LIBRARY_PATH`.
+// Inflate implementations differ by well over the margin that separates "gamut is faster" from
+// "the SDK is faster" on a Deflate row, so a Deflate throughput ratio is not interpretable
+// without this string beside it.
+//
+// The returned pointer has static storage duration and lives for the process.
+extern "C" const char *gdng_zlib_identity(void) {
+  static const std::string identity = [] {
+    std::string text = zlibVersion();
+    const std::string &path = resolved_zlib_path();
+    if (!path.empty()) {
+      text += " from ";
+      text += path;
+    }
+    return text;
+  }();
+  return identity.c_str();
+}
+
+// The resolved path alone, or `nullptr` when the loader cannot report one -- the same string
+// `gdng_zlib_identity` appends, handed over unformatted so a caller can *test* it rather than
+// print it. A caller that finds this path inside a Cargo build directory knows the loader
+// resolved libz from the build graph rather than from the platform, which is a resolution nobody
+// else reproduces.
+//
+// The returned pointer has static storage duration and lives for the process.
+extern "C" const char *gdng_zlib_path(void) {
+  const std::string &path = resolved_zlib_path();
+  return path.empty() ? nullptr : path.c_str();
+}
 
 // The code gdng_validate returns when the SDK marks the negative damaged (a stored
 // RawImageDigest/NewRawImageDigest that does not match the image data). The SDK's non-validate
@@ -139,6 +221,58 @@ extern "C" int gdng_read_raw(const char *path, uint32_t *out_w, uint32_t *out_h,
   } catch (...) {
     return dng_error_unknown;
   }
+}
+
+// Decodes the DNG held in `data`/`len` and reports the extent of the stage-1 (raw) image it
+// produced, without exporting the samples. This is the *timed* decode entry point (issue #163):
+// it exists so a throughput benchmark can compare the reference implementation against gamut's
+// `DngDecoder` on the same terms, and it differs from `gdng_read_raw` in exactly two ways, both
+// of which remove work gamut's decoder does not do either:
+//
+//   * it reads from a memory stream rather than a `dng_file_stream`, so no temporary file is
+//     written and no filesystem is touched inside the measured region, and
+//   * it stops once `ReadStage1Image` has materialised the image, skipping the
+//     `copy_short_image` export pass — an extra full-image `malloc` + `memcpy` that only the FFI
+//     boundary needs.
+//
+// Everything else is the same parse → build-negative → read-stage-1 flow as `gdng_read_raw`.
+// Returns `dng_error_none` on success, or the SDK error code.
+extern "C" int gdng_decode_dng_in_memory(const uint8_t *data, size_t len, uint32_t *out_w,
+                                         uint32_t *out_h, uint32_t *out_planes, size_t *out_len) {
+  *out_w = 0;
+  *out_h = 0;
+  *out_planes = 0;
+  *out_len = 0;
+  if (len > 0xFFFFFFFFu) {
+    return dng_error_bad_format;
+  }
+  try {
+    dng_host host;
+    dng_info info;
+    AutoPtr<dng_negative> negative;
+    dng_stream stream(data, static_cast<uint32>(len));
+    dng_error_code rc = read_negative(stream, host, info, negative);
+    if (rc != dng_error_none) {
+      return rc;
+    }
+    const dng_image *image = negative->Stage1Image();
+    if (image == nullptr) {
+      return dng_error_unknown;
+    }
+    dng_rect bounds = image->Bounds();
+    uint32 w = static_cast<uint32>(bounds.r - bounds.l);
+    uint32 h = static_cast<uint32>(bounds.b - bounds.t);
+    uint32 planes = image->Planes();
+    *out_w = w;
+    *out_h = h;
+    *out_planes = planes;
+    *out_len = static_cast<size_t>(w) * static_cast<size_t>(h) * static_cast<size_t>(planes);
+  } catch (const dng_exception &except) {
+    return except.ErrorCode();
+  } catch (...) {
+    return dng_error_unknown;
+  }
+  return dng_error_none;
 }
 
 // Reads the DNG at `path` and returns its stage-2 (linearized) image — the SDK's application of
@@ -222,6 +356,11 @@ extern "C" int gdng_decode_lossless_jpeg(const uint8_t *data, size_t len, size_t
                                          uint16_t **out_data, size_t *out_len) {
   *out_data = nullptr;
   *out_len = 0;
+  // The same narrowing guard `gdng_decode_lossless_jpeg_extent` carries, for the reason stated
+  // there: the two are timed against each other and must accept exactly the same inputs.
+  if (len > 0xFFFFFFFFu) {
+    return dng_error_bad_format;
+  }
   try {
     dng_stream stream(data, static_cast<uint32>(len));
     buffer_spooler spooler;
@@ -238,6 +377,39 @@ extern "C" int gdng_decode_lossless_jpeg(const uint8_t *data, size_t len, size_t
     memcpy(buffer, spooler.bytes.data(), byte_count);
     *out_data = buffer;
     *out_len = expected_samples;
+    return dng_error_none;
+  } catch (const dng_exception &except) {
+    return except.ErrorCode();
+  } catch (...) {
+    return dng_error_unknown;
+  }
+}
+
+// Decodes the same bare lossless-JPEG stream as `gdng_decode_lossless_jpeg` but stops at the
+// spooler: it reports how many samples the SDK produced and exports none of them. The only
+// difference between the two entry points is the FFI export path (the `malloc` plus the `memcpy`
+// out of the spool buffer), so timing them against each other measures that export cost and
+// nothing else. Returns `dng_error_none` on success or the SDK error code.
+extern "C" int gdng_decode_lossless_jpeg_extent(const uint8_t *data, size_t len,
+                                                size_t expected_samples, size_t *out_len) {
+  *out_len = 0;
+  // `dng_stream` takes a 32-bit length; a longer buffer would be silently truncated. The guard
+  // has to be identical to `gdng_decode_lossless_jpeg`'s: these two are timed against each other,
+  // so any check one runs and the other does not is a difference in the measured region as well
+  // as a difference in what each accepts.
+  if (len > 0xFFFFFFFFu) {
+    return dng_error_bad_format;
+  }
+  try {
+    dng_stream stream(data, static_cast<uint32>(len));
+    buffer_spooler spooler;
+    uint32 byte_count = static_cast<uint32>(expected_samples * sizeof(uint16_t));
+    DecodeLosslessJPEG<Scalar>(stream, spooler, byte_count, byte_count, false,
+                               static_cast<uint64>(len));
+    if (spooler.bytes.size() != byte_count) {
+      return dng_error_bad_format;
+    }
+    *out_len = spooler.bytes.size() / sizeof(uint16_t);
     return dng_error_none;
   } catch (const dng_exception &except) {
     return except.ErrorCode();
