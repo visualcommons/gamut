@@ -1,0 +1,64 @@
+# Dev-only differential oracle: NOT a member of the gamut workspace (listed under
+# `[workspace].exclude` in the root manifest). Nothing depends on it — it is invoked directly by
+# manifest path, via `mise run test-c2pa`, so `cargo test --workspace --all-features` never builds
+# or runs it.
+#
+# It drives `c2pa-rs`, the C2PA reference implementation, against gamut's container crates in both
+# of the directions the #239 epic names: gamut reserves a manifest-store slot and an external
+# signer completes it, and `c2pa-rs` embeds a store that gamut must locate at the identical byte
+# range. See README.md for why gamut owns the locate/bound step at all.
+[package]
+name = "c2pa-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only differential oracle: cross-checks gamut's C2PA manifest-store carriage against c2pa-rs, in both directions (issue #447)."
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+# The oracle itself: the C2PA reference implementation (Apache-2.0 OR MIT).
+#
+# `default-features = false` is NOT optional, and `tests/build_configuration.rs` fails if this
+# line ever loses it. c2pa's default feature set is `["openssl", "default_http"]`; the `openssl`
+# feature pulls OpenSSL in **vendored**, compiling it from C source into a dev build. The #239
+# epic's "no crypto in the shipped graph" criterion exists to keep that out, and a vendored
+# OpenSSL build would also make this the slowest thing in CI. `rust_native_crypto` is the
+# pure-Rust signing/verification backend that replaces it; dropping `default_http` additionally
+# drops reqwest and ureq, which this oracle never needs because it fetches no remote manifests.
+#
+# Pinned to an exact version, not a caret range: `README.md` cites c2pa-rs's own source **by line
+# number** for two claims it records, and a `^` range lets a patch release move those lines under
+# a citation nobody re-checked.
+#
+# The pin holds this one line and nothing else. The 307 transitive packages under it — the
+# version-aware closure of its lockfile entries, derived in `README.md` — are held by `Cargo.lock`,
+# which is committed for this crate alone against the blanket `tooling/*/Cargo.lock` rule — the
+# exception, and why it is made, are recorded in `.gitignore`. That, and not the fact that nothing
+# else in the tree depends on `c2pa`, is what the exception rests on: the single-dependent fact
+# bears on the feature line above (no other dependent can unify `openssl` back on) and says nothing
+# about which versions those 307 packages resolve to. `mise run
+# test-c2pa` and `check-c2pa` pass `--locked`, so the committed resolution is the one that is
+# used; without both, the no-OpenSSL assertion in `tests/build_configuration.rs` could only ever
+# inspect a resolution cargo had just written for it, which the pin does nothing to constrain.
+c2pa = { version = "=0.90.21", default-features = false, features = ["rust_native_crypto"] }
+
+[dev-dependencies]
+# The crates under test. Both locate a C2PA manifest store in a top-level ISOBMFF `uuid`
+# `ContentProvenanceBox`; `gamut-avif` additionally *reserves* and *writes* one, which is the only
+# direction that needs a gamut encoder.
+gamut-avif = { path = "../../crates/gamut-avif" }
+gamut-heic = { path = "../../crates/gamut-heic" }
+gamut-core = { path = "../../crates/gamut-core" }
+# The metadata facade, for `tests/no_copy_forward.rs` only: its `C2paPolicy` is the mechanism that
+# refuses to carry a parent's manifest store into a derivative, and the test drives it rather than
+# asserting a re-encode happens not to emit one.
+gamut-metadata = { path = "../../crates/gamut-metadata" }
+
+# Keeps this manifest from being read as a member of any workspace above it — the same guard
+# `tooling/gamut-fuzz/Cargo.toml` carries. Without it, cargo walks past `tooling/` looking for a
+# workspace root, which in a nested git worktree finds the primary checkout's manifest and makes
+# every invocation depend on where the tree happens to sit.
+[workspace]
