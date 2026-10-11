@@ -774,7 +774,11 @@ pub fn premultiply_alpha<P: Pixel>(image: &mut ImageBuf<P>) {
 /// transparent black.
 ///
 /// The inverse of [`premultiply_alpha`] only up to the precision premultiplying discarded; see
-/// there for the bound. Re-premultiplying the result does reproduce the associated image exactly.
+/// there for the bound. For well-formed associated input — every colour sample at most its pixel's
+/// alpha, as [`premultiply_alpha`] always produces — re-premultiplying the result reproduces the
+/// associated image exactly. Colour above alpha is malformed but still accepted: it is clamped to
+/// `max`, so re-premultiplying gives back the alpha rather than the original colour (8-bit colour
+/// 200 at alpha 100 unpremultiplies to 255 and re-premultiplies to 100).
 ///
 /// A layout without an alpha channel is fully opaque, so it is left unchanged.
 ///
