@@ -2110,6 +2110,10 @@ mod tests {
                 GAMUT_STATUS_NULL_ARGUMENT
             );
             assert_eq!(
+                gamut_avif_encoder_set_alpha_quality(null, 90),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
                 gamut_avif_encoder_set_premultiplied_alpha(null, true),
                 GAMUT_STATUS_NULL_ARGUMENT
             );
