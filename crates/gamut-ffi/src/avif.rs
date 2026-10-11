@@ -397,6 +397,29 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_bit_depth(
     }
 }
 
+/// Codes an RGBA input's alpha auxiliary at its own lossy `quality` (`0..=100`, higher = larger
+/// and closer to the source; values above `100` are clamped), independent of the colour quality
+/// fixed at construction (`AvifEncoder::with_alpha_quality`). Without this call alpha follows
+/// the colour quality. Ignored by a lossless encoder, which codes alpha bit-exactly, and by
+/// inputs without alpha.
+///
+/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_alpha_quality(
+    encoder: *mut GamutAvifEncoder,
+    quality: u8,
+) -> GamutStatus {
+    unsafe {
+        GamutAvifEncoder::configure(encoder, Some(quality), GAMUT_OK, |e, q| {
+            e.with_alpha_quality(q)
+        })
+    }
+}
+
 /// Declares that an RGBA input's colour values are already premultiplied by alpha
 /// (`AvifEncoder::with_premultiplied_alpha`) — a declaration, not a conversion; written as a
 /// `prem` reference. Ignored by inputs without alpha.
@@ -1756,6 +1779,20 @@ mod tests {
     }
 
     #[test]
+    fn alpha_quality_setter_forwards_the_quality() {
+        // Both values sit away from the handle's colour quality (50) and from each other, so
+        // the forwarded value, not merely the call, decides the alpha auxiliary's bytes.
+        assert_setter(
+            gamut_avif_encoder_set_alpha_quality,
+            &[
+                (10, |e| e.with_alpha_quality(10)),
+                (90, |e| e.with_alpha_quality(90)),
+            ],
+            Layout::Rgba8,
+        );
+    }
+
+    #[test]
     fn premultiplied_setter_maps_the_flag() {
         assert_setter(
             gamut_avif_encoder_set_premultiplied_alpha,
@@ -2070,6 +2107,10 @@ mod tests {
             );
             assert_eq!(
                 gamut_avif_encoder_set_mirror(null, 0),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_alpha_quality(null, 90),
                 GAMUT_STATUS_NULL_ARGUMENT
             );
             assert_eq!(

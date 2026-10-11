@@ -532,6 +532,22 @@ gamut_status_t gamut_avif_encoder_set_chroma(struct GamutAvifEncoder *encoder, u
 gamut_status_t gamut_avif_encoder_set_bit_depth(struct GamutAvifEncoder *encoder, uint32_t bits);
 
 /**
+ * Codes an RGBA input's alpha auxiliary at its own lossy `quality` (`0..=100`, higher = larger
+ * and closer to the source; values above `100` are clamped), independent of the colour quality
+ * fixed at construction (`AvifEncoder::with_alpha_quality`). Without this call alpha follows
+ * the colour quality. Ignored by a lossless encoder, which codes alpha bit-exactly, and by
+ * inputs without alpha.
+ *
+ * Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_alpha_quality(struct GamutAvifEncoder *encoder,
+                                                    uint8_t quality);
+
+/**
  * Declares that an RGBA input's colour values are already premultiplied by alpha
  * (`AvifEncoder::with_premultiplied_alpha`) — a declaration, not a conversion; written as a
  * `prem` reference. Ignored by inputs without alpha.
