@@ -466,11 +466,11 @@ fn appended_stream_preserves_decode_and_accounts_every_byte() {
     let c_appended = AvifContainer::parse(&appended).unwrap();
     // Every byte accounted: contiguous segments covering 0..len.
     let segs = c_appended.segments();
-    assert_eq!(segs[0].range.start, 0);
-    for pair in segs.windows(2) {
-        assert_eq!(pair[0].range.end, pair[1].range.start);
-    }
-    assert_eq!(segs.last().unwrap().range.end, appended.len());
+    assert!(
+        gamut_core::segment::covers(segs, appended.len()),
+        "segments must tile the file: {:?}",
+        segs.iter().map(|s| s.range.clone()).collect::<Vec<_>>()
+    );
     assert_eq!(
         c_appended.appended_stream().map(<[u8]>::len),
         Some(appended.len() - clean.len())
