@@ -136,6 +136,66 @@ fn assert_gamut_encode_libwebp_decode(rgb: &[u8], w: u32, h: u32, label: &str) {
 }
 
 #[test]
+fn libwebp_decodes_a_file_carrying_a_c2pa_store_to_the_source_pixels() {
+    // A `C2PA` chunk (C2PA 2.4 §A.3.7) is not an RFC 9649 chunk, so to the reference decoder it is
+    // an unknown chunk it "SHOULD ignore" (§2.7.1.6). Embedding a manifest store must therefore be
+    // invisible to it: the same pixels out, and the same file as an unsigned encode with the store's
+    // chunk appended — nothing ahead of it moved.
+    let (w, h) = (32u32, 24u32);
+    let rgb = rgba_to_rgb(&pattern_rgba(w, h));
+    let image = || {
+        ImageRef::<Rgb8>::new(
+            &rgb,
+            Dimensions {
+                width: w,
+                height: h,
+            },
+        )
+        .unwrap()
+    };
+    let store = &b"an opaque C2PA manifest store"[..];
+    // Both files carry Exif, so both are already in the extended format and the only difference
+    // between them is the store's own chunk rather than the `VP8X` promotion.
+    let mut plain = Vec::new();
+    WebpEncoder::lossless()
+        .with_exif(b"exif payload")
+        .encode_image(image(), &mut plain)
+        .expect("gamut encode");
+    let (signed, report) = WebpEncoder::lossless()
+        .with_exif(b"exif payload")
+        .with_c2pa(store)
+        .encode_with_report(image())
+        .expect("gamut encode");
+
+    let decoded = libwebp_decode_rgba(&signed);
+    assert_eq!(
+        (decoded.width, decoded.height),
+        (w, h),
+        "libwebp reads the canvas"
+    );
+    assert_eq!(
+        rgba_to_rgb(&decoded.rgba),
+        rgb,
+        "libwebp recovers the source pixels through the store"
+    );
+
+    // The store is the only thing added, and it is where the report says it is.
+    let span = report.c2pa.expect("a store was configured");
+    assert_eq!(&signed[span.start..span.start + 4], b"C2PA");
+    assert_eq!(&signed[span.start + 8..span.end], store);
+    assert_eq!(
+        signed.len() - plain.len(),
+        span.len() + span.len() % 2,
+        "only the store's chunk and its pad byte were added"
+    );
+    assert_eq!(
+        signed[12..span.start],
+        plain[12..],
+        "everything ahead of the store is byte-identical"
+    );
+}
+
+#[test]
 fn libwebp_decodes_every_gamut_encoder_path() {
     // Each image steers gamut's encoder down a different path; libwebp must decode them all.
     let (w, h) = (40u32, 40u32);

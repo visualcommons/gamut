@@ -1,12 +1,18 @@
-//! Optional metadata embedded in a DNG: an EXIF sub-IFD plus XMP / IPTC / ICC blocks.
+//! Optional metadata embedded in a DNG: an EXIF sub-IFD plus XMP / IPTC / ICC / C2PA blocks.
 //!
 //! The models are the workspace's, not this crate's. EXIF is
 //! [`gamut_metadata::exif::Exif`] — DNG's `ExifIFD` (34665) *is* an EXIF sub-IFD, so the facade's
 //! model describes it exactly and this crate no longer redefines a hand-picked subset of its
-//! fields. XMP (700), IPTC-IIM (33723) and ICC (34675) are single opaque payloads in the file, so
-//! they are carried verbatim as the byte blocks the facade consumes — the same shape
-//! `gamut-png` and `gamut-webp` hand over — and [`DngMetadata::blocks`] presents them as
-//! [`MetadataBlock`]s ready for [`gamut_metadata::Metadata::from_blocks`].
+//! fields. XMP (700), IPTC-IIM (33723), ICC (34675) and the C2PA manifest store (52545) are
+//! single opaque payloads in the file, so they are carried verbatim as the byte blocks the
+//! facade consumes — the same shape `gamut-png` and `gamut-webp` hand over — and
+//! [`DngMetadata::blocks`] presents them as [`MetadataBlock`]s ready for
+//! [`gamut_metadata::Metadata::from_blocks`].
+//!
+//! The C2PA store is the one carrier with a placement rule of its own (C2PA 2.4 §A.3.6: the
+//! last main IFD, at the end of the file) and a signer's exclusion contract (§18.5.5); both are
+//! [`gamut_ifd::c2pa`]'s, and the encoder applies them — see
+//! [`DngEncoder::encode_with_report`](crate::DngEncoder::encode_with_report).
 
 use gamut_ifd::{Ifd, Value};
 use gamut_metadata::MetadataBlock;
@@ -20,10 +26,10 @@ use crate::tags;
 /// emit a directory a conforming reader may reject.
 const DEFAULT_EXIF_VERSION: &[u8; 4] = b"0230";
 
-/// Metadata to embed in a DNG: an EXIF sub-IFD and/or opaque XMP / IPTC / ICC blocks.
+/// Metadata to embed in a DNG: an EXIF sub-IFD and/or opaque XMP / IPTC / ICC / C2PA blocks.
 ///
 /// Construct one as a struct literal — it is deliberately exhaustive (see `STATUS.md`), so the
-/// four carriers a DNG holds are visible at the point of use:
+/// five carriers a DNG holds are visible at the point of use:
 ///
 /// ```
 /// use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, Value};
@@ -37,6 +43,7 @@ const DEFAULT_EXIF_VERSION: &[u8; 4] = b"0230";
 ///     xmp: None,
 ///     iptc: None,
 ///     icc: None,
+///     c2pa: None,
 /// };
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -61,10 +68,26 @@ pub struct DngMetadata {
     pub iptc: Option<Vec<u8>>,
     /// An ICC profile, stored in the `ICCProfile` tag (34675), verbatim.
     pub icc: Option<Vec<u8>>,
+    /// A C2PA manifest store, stored in the `C2PA` tag
+    /// ([`gamut_ifd::c2pa::C2PA_MANIFEST_STORE`], 52545, type `UNDEFINED`), verbatim.
+    ///
+    /// **Opaque, and bound to one exact file.** A manifest store is a signed hash over the
+    /// bytes *around* it (C2PA 2.4 §18.5), so the only store valid here is one an external
+    /// signer computed over this encoder's own output — through
+    /// [`DngEncoder::with_c2pa_reserved`](crate::DngEncoder::with_c2pa_reserved) and the
+    /// exclusion ranges [`DngEncoder::encode_with_report`](crate::DngEncoder::encode_with_report)
+    /// reports. A store copied out of another file is invalid by construction, which is why
+    /// [`gamut_metadata::Metadata::encode`] never hands one back
+    /// ([`gamut_metadata::C2paPolicy`]). The bytes are written exactly as given: the TIFF byte
+    /// order does not govern them (§A.3.6). On decode this is the store the file carries in the
+    /// last IFD of its main chain; its byte ranges are
+    /// [`DecodedDng::c2pa_exclusions`](crate::DecodedDng::c2pa_exclusions).
+    pub c2pa: Option<Vec<u8>>,
 }
 
 impl DngMetadata {
-    /// The byte-carried blocks — XMP, IPTC-IIM and ICC — as [`MetadataBlock`]s, ready for
+    /// The byte-carried blocks — XMP, IPTC-IIM, ICC and the C2PA store — as [`MetadataBlock`]s,
+    /// ready for
     /// [`gamut_metadata::Metadata::from_blocks`] or a
     /// [`MetadataExtractor`](gamut_metadata::MetadataExtractor) with a chosen
     /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy).
@@ -93,6 +116,9 @@ impl DngMetadata {
         if let Some(icc) = &self.icc {
             blocks.push(MetadataBlock::Icc(icc));
         }
+        if let Some(c2pa) = &self.c2pa {
+            blocks.push(MetadataBlock::C2pa(c2pa));
+        }
         blocks
     }
 
@@ -106,10 +132,18 @@ impl DngMetadata {
 
     /// Whether there is nothing to embed.
     pub(crate) fn is_empty(&self) -> bool {
-        self.exif_ifd().is_none() && self.xmp.is_none() && self.iptc.is_none() && self.icc.is_none()
+        self.exif_ifd().is_none()
+            && self.xmp.is_none()
+            && self.iptc.is_none()
+            && self.icc.is_none()
+            && self.c2pa.is_none()
     }
 
     /// Writes the XMP / IPTC / ICC blocks into `ifd0` and returns the EXIF sub-IFD, if any.
+    ///
+    /// The C2PA store is deliberately **not** written here: its value must land at the end of
+    /// the file (C2PA 2.4 §A.3.6), after the image data, which only the encoder can arrange once
+    /// the rest of the file exists ([`gamut_ifd::c2pa::append_store`]).
     pub(crate) fn apply(&self, ifd0: &mut Ifd) -> Option<Ifd> {
         if let Some(xmp) = &self.xmp {
             ifd0.set(tags::XMP, Value::Byte(xmp.clone()));
@@ -182,6 +216,7 @@ mod tests {
             exif: Some(exif),
             xmp: Some(b"<x:xmpmeta/>".to_vec()),
             icc: Some(vec![0u8; 8]),
+            c2pa: Some(vec![0u8; 16]),
             ..Default::default()
         };
         assert!(!meta.is_empty());
@@ -191,6 +226,8 @@ mod tests {
             Some(&Value::Byte(b"<x:xmpmeta/>".to_vec()))
         );
         assert!(ifd.get(tags::ICC_PROFILE).is_some());
+        // The store is the encoder's to place, so `apply` leaves the directory without it.
+        assert!(ifd.get(gamut_ifd::c2pa::C2PA_MANIFEST_STORE).is_none());
         assert_eq!(
             written.get(tags::ISO_SPEED_RATINGS),
             Some(&Value::Short(vec![400]))
@@ -246,6 +283,10 @@ mod tests {
                 icc: Some(vec![1]),
                 ..Default::default()
             },
+            DngMetadata {
+                c2pa: Some(vec![1]),
+                ..Default::default()
+            },
         ];
         for (i, meta) in singles.iter().enumerate() {
             assert!(!meta.is_empty(), "block {i} alone must be non-empty");
@@ -262,6 +303,7 @@ mod tests {
             xmp: Some(b"<x:xmpmeta/>".to_vec()),
             iptc: Some(vec![0x1c, 0x02, 0x05]),
             icc: Some(vec![7u8; 4]),
+            c2pa: Some(b"\0\0\0\x14jumbc2pa".to_vec()),
         };
         assert_eq!(
             meta.blocks(),
@@ -269,6 +311,7 @@ mod tests {
                 MetadataBlock::Xmp(b"<x:xmpmeta/>"),
                 MetadataBlock::IptcIim(&[0x1c, 0x02, 0x05]),
                 MetadataBlock::Icc(&[7u8; 4]),
+                MetadataBlock::C2pa(b"\0\0\0\x14jumbc2pa"),
             ]
         );
     }
