@@ -407,8 +407,8 @@ impl AvifImage {
     /// **Colour policy.** As [`decode_item_rgba8`](Self::decode_item_rgba8), which documents the
     /// shared policy in full: nclx matrices 1 (BT.709), 2/5/6 (BT.601 and its aliases) and 9
     /// (BT.2020 non-constant luminance), identity (0) at 4:4:4, monochrome, and a missing `colr`
-    /// resolved from the AV1 sequence header. Beyond 8 bits every matrix — BT.601 included — goes through the
-    /// H.273-derived [`YcbcrMatrix`].
+    /// resolved from the AV1 sequence header. Beyond 8 bits every matrix — BT.601 included — goes
+    /// through the H.273-derived [`YcbcrMatrix`].
     ///
     /// # Errors
     ///
