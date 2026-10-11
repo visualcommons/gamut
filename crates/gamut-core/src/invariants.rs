@@ -729,11 +729,13 @@ mod tests {
         // A drifting table would silently shrink the matrix the properties run over, which no
         // property could report because it would simply stop being asked.
         let eight_bit: Vec<PixelFormat> = PixelFormat::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|f| f.bytes_per_sample() == 1)
             .collect();
         let sixteen_bit: Vec<PixelFormat> = PixelFormat::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|f| f.bytes_per_sample() == 2)
             .collect();
 

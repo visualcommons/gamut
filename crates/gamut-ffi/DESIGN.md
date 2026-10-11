@@ -95,8 +95,8 @@ Every `extern "C"` entry point wraps its body in `catch_unwind`; a panic becomes
 
 - **Consumer boundary (C calls Rust)** — the part tooling generates: each format crate's
   object-safe `EncodeImage<P>` / `DecodeImage<P>` impls are exported per
-  (codec, `PixelFormat`) pair, enumerated mechanically from `gamut_core::PixelFormat::ALL` ×
-  the crate's impl set (e.g. `gamut_png_encoder_encode_rgb8`, or a single entry point
+  (codec, `PixelFormat`) pair, enumerated mechanically from the `gamut_core::PixelFormat::ALL`
+  slice × the crate's impl set (e.g. `gamut_png_encoder_encode_rgb8`, or a single entry point
   dispatching on a `gamut_pixel_format_t` argument — chosen at conversion kickoff, uniformly).
 - **Provider boundary (C implements Rust traits)** — carried by **`gamut-codec-abi`**
   (issue #241, sub-issue #272): its `#[repr(C)]` descriptors/vtables and `Foreign*` bridges are

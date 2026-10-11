@@ -110,8 +110,8 @@ pub enum ColorModel {
 /// The FFI/dispatch mirror of the compile-time `Pixel` matrix (issue #242): where the type
 /// system selects a codec impl through the marker type, a boundary that only has runtime
 /// information (a C caller, a plugin registry) selects the same layout by tag and dispatches to
-/// the monomorphized impl. [`PixelFormat::ALL`] enumerates the matrix for tooling that generates
-/// such dispatch.
+/// the monomorphized impl. [`PixelFormat::ALL`] enumerates the matrix, as a slice, for tooling
+/// that generates such dispatch.
 ///
 /// Discriminants are explicit and permanent — they are C ABI values; new variants append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -145,7 +145,11 @@ pub enum PixelFormat {
 impl PixelFormat {
     /// Every pixel format, in discriminant order — the full codec × layout monomorphization
     /// matrix for tooling that enumerates it (each entry is some marker's [`Pixel::FORMAT`]).
-    pub const ALL: [PixelFormat; 11] = [
+    ///
+    /// A slice rather than a fixed-length array, like every other `ALL` in the workspace: the
+    /// enum is `#[non_exhaustive]` and appends variants, and appending to a slice changes its
+    /// contents, never its type. Read the count from `ALL.len()` at runtime.
+    pub const ALL: &'static [PixelFormat] = &[
         PixelFormat::Gray8,
         PixelFormat::Bilevel,
         PixelFormat::Indexed8,
@@ -387,12 +391,39 @@ mod tests {
             Rgba16::FORMAT,
             GrayAlpha16::FORMAT,
         ];
-        assert_eq!(PixelFormat::ALL, formats);
+        assert_eq!(PixelFormat::ALL, formats.as_slice());
         for (i, a) in PixelFormat::ALL.iter().enumerate() {
             for b in &PixelFormat::ALL[i + 1..] {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn pixel_format_all_is_a_slice_of_every_variant_in_discriminant_order() {
+        // Ascription: reverting `ALL` to a fixed-length array fails to compile here (#629).
+        let all: &'static [PixelFormat] = PixelFormat::ALL;
+        // Contiguous from 0 in order: no gap, duplicate or reordering.
+        for (i, format) in all.iter().enumerate() {
+            assert_eq!(*format as usize, i, "{format:?} is out of place");
+        }
+        // Discriminants append, so the newest variant has the highest one and must close the
+        // slice. In-crate this match is exhaustive despite `#[non_exhaustive]`: appending a
+        // variant fails to compile until it is named newest, and then fails above until listed.
+        let is_newest = |format: PixelFormat| match format {
+            PixelFormat::GrayAlpha16 => true,
+            PixelFormat::Gray8
+            | PixelFormat::Bilevel
+            | PixelFormat::Indexed8
+            | PixelFormat::Rgb8
+            | PixelFormat::Rgba8
+            | PixelFormat::Cmyk8
+            | PixelFormat::GrayAlpha8
+            | PixelFormat::Gray16
+            | PixelFormat::Rgb16
+            | PixelFormat::Rgba16 => false,
+        };
+        assert!(all.last().is_some_and(|&last| is_newest(last)));
     }
 
     #[test]

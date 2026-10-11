@@ -1036,8 +1036,8 @@ mod tests {
         // Drives all 11 x 11 = 121 pairs. Under `permissive` every pair must succeed except those
         // involving the two layouts this module deliberately excludes; under `lossless` a pair may
         // additionally refuse, but must never panic or produce a wrongly sized buffer.
-        for src in PixelFormat::ALL {
-            for dst in PixelFormat::ALL {
+        for &src in PixelFormat::ALL {
+            for &dst in PixelFormat::ALL {
                 let bytes = sample_pixel(src);
                 let result = if src.bytes_per_sample() == 1 {
                     run_pair(RawImage::new(&bytes, src, dims(1, 1)).unwrap(), dst)
