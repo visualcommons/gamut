@@ -132,6 +132,26 @@ int exiv2_exif_get(const char* data, size_t len, const char* key, char** out_buf
     }
 }
 
+// Reads one tag's *interpreted* value by exiv2 key — `Exifdatum::print`, exiv2's human-readable
+// rendering (`Exif.Image.Orientation` = 1 prints as "top, left"), as opposed to `toString`'s raw
+// value. A value exiv2 has no interpretation for prints as its raw value in parentheses ("(9)").
+// Returns 4 if the tag is absent.
+int exiv2_exif_print(const char* data, size_t len, const char* key, char** out_buf, size_t* out_len) {
+    try {
+        Exiv2::ExifData exifData;
+        Exiv2::ExifParser::decode(
+            exifData, reinterpret_cast<const Exiv2::byte*>(data), len);
+        auto pos = exifData.findKey(Exiv2::ExifKey(key));
+        if (pos == exifData.end()) {
+            return 4;
+        }
+        *out_buf = dup_bytes(pos->print(&exifData), out_len);
+        return *out_buf != nullptr ? 0 : 3;
+    } catch (...) {
+        return 1;
+    }
+}
+
 // Decodes then re-encodes the EXIF buffer via exiv2, returning its canonical TIFF bytes in
 // `*out_buf` (a fresh bare TIFF stream in the decoded byte order).
 int exiv2_exif_roundtrip(const char* data, size_t len, char** out_buf, size_t* out_len) {
