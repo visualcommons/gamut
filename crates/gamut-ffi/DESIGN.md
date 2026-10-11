@@ -198,7 +198,10 @@ void gamut_avif_image_free(GamutAvifImage *image);
   needs the encode report's slot range to cross the boundary too (issue #673); the alpha
   quality setter over the shipped `with_alpha_quality` (issue #692); the encoder knobs the
   Rust API has not shipped yet (speed, threads — issues #654, #655) join as setters when they
-  land; AVIF decode waits for the decoder registry (above).
+  land; AVIF decode waits for the decoder registry (above). Error messages: these entry points
+  return only the `gamut_status_t` code (`status_of` maps `Error::kind()`), so neither the
+  borrowed `const char*` message nor the thread-local last-error string promised under Errors is
+  reachable from C yet; both arrive with the rest of the consumer boundary (issue #242).
 
 ## Drift locking
 
