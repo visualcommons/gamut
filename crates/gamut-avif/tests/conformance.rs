@@ -10,10 +10,9 @@
 
 use std::path::PathBuf;
 
-use gamut_av1::Subsampling;
 use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, AvifImage, ChromaFormat, DecodedFrame,
-    Mirror, Rotation,
+    Mirror, Rotation, Subsampling,
 };
 use gamut_color::{ColorRange, MatrixCoefficients};
 use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};

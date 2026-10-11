@@ -25,7 +25,8 @@
 //!   [`gamut_isobmff::IsoBmffImage`]: the validated primary item, alpha/depth auxiliaries,
 //!   thumbnails, Exif/XMP payloads, grid/overlay derivations, and typed properties including the
 //!   [`Av1Config`] `av1C` record ([`AvifItem::av1_config`]), the parsed AV1
-//!   [`SequenceHeader`] ([`AvifImage::av1_sequence_header`]), and the OBU layer
+//!   [`SequenceHeader`] ([`AvifImage::av1_sequence_header`], with its [`ColorConfig`] and
+//!   [`Subsampling`] field types), and the OBU layer
 //!   ([`iter_obus`]/[`ObuType`]).
 //!
 //! Around the seam, [`AvifImage::decode_item_planar`] resolves item derivation (`grid`/`iden`)
@@ -193,7 +194,7 @@ pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodedFrame};
 pub use encoder::{AvifEncodeReport, AvifEncoder};
-pub use gamut_av1::SequenceHeader;
+pub use gamut_av1::{ColorConfig, SequenceHeader, Subsampling};
 pub use gamut_core::Dimensions;
 pub use image::{
     AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, PixelAspectRatio,
