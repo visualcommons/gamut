@@ -242,20 +242,22 @@ fn a_mistyped_c2pa_tag_is_an_extra_not_a_store() {
     }));
 }
 
-/// Appends a directory holding only `entries` to the end of `dng` and links IFD 0's next-IFD
-/// pointer to it — the "only entity within a new IFD following the existing one" form §A.3.6
-/// allows for a single-main-IFD asset. Little-endian classic TIFF; each entry is
+/// Appends a directory holding only `entries` to the end of `dng` and links the main chain's
+/// current last directory to it — for a single-main-IFD file, the "only entity within a new IFD
+/// following the existing one" form §A.3.6 allows. Little-endian classic TIFF; each entry is
 /// `(tag, type, count, value/offset word)`. Returns the new directory's offset.
 fn append_trailing_ifd(dng: &mut Vec<u8>, entries: &[(u16, u16, u32, u32)]) -> u64 {
     let le = ByteOrder::LittleEndian;
-    let (_, _, ifd0) = read_header(dng).expect("header");
-    let n0 = usize::from(le.u16(dng[ifd0 as usize..ifd0 as usize + 2].try_into().expect("2")));
-    let next_at = ifd0 as usize + 2 + n0 * 12;
-    assert_eq!(
-        &dng[next_at..next_at + 4],
-        &[0, 0, 0, 0],
-        "IFD 0 was the last directory"
-    );
+    let (_, _, mut ifd) = read_header(dng).expect("header");
+    let next_at = loop {
+        let n = usize::from(le.u16(dng[ifd as usize..ifd as usize + 2].try_into().expect("2")));
+        let next_at = ifd as usize + 2 + n * 12;
+        let next = le.u32(dng[next_at..next_at + 4].try_into().expect("4"));
+        if next == 0 {
+            break next_at;
+        }
+        ifd = u64::from(next);
+    };
 
     let body = align_word(dng.len() as u64);
     dng.resize(body as usize, 0);
@@ -518,6 +520,33 @@ fn a_single_main_ifd_files_extras_stay_in_ifd0_extra() {
         "IFD 0 is surfaced already, so nothing is collected as trailing: {:?}",
         decoded.trailing_extra
     );
+}
+
+/// An image-less main-chain page that is neither IFD 0 nor the last directory reaches
+/// `interior_extra`, keyed by its chain position (issue #525) — and only it: IFD 0 stays in
+/// `ifd0_extra` and the last page in `trailing_extra`, so no field is reported twice.
+#[test]
+fn an_interior_image_less_page_is_surfaced_per_page() {
+    let (mut dng, _) = encode(&DngEncoder::new());
+    // Software (305) ASCII, inline: "a" on the interior page, "b" on the trailing one.
+    append_trailing_ifd(&mut dng, &[(305, 2, 2, u32::from_le_bytes(*b"a\0\0\0"))]);
+    append_trailing_ifd(&mut dng, &[(305, 2, 2, u32::from_le_bytes(*b"b\0\0\0"))]);
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    let software = |text: &str| RawTag {
+        tag: 305,
+        value: Value::Ascii(text.to_owned()),
+    };
+    assert_eq!(
+        decoded.interior_extra.len(),
+        1,
+        "{:?}",
+        decoded.interior_extra
+    );
+    assert_eq!(decoded.interior_extra[0].page, 1);
+    assert_eq!(decoded.interior_extra[0].tags, [software("a")]);
+    assert_eq!(decoded.trailing_extra, [software("b")]);
+    assert!(!decoded.ifd0_extra.iter().any(|t| t.tag == 305));
 }
 
 /// A store this decoder *does* accept is consumed, not also reported as an unmodelled field —

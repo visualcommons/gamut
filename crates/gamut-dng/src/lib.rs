@@ -41,11 +41,12 @@
 //!   byte-exactly. Opcode lists are typed [`OpcodeList`] containers.
 //! - **Integrity & explicitness**: the encoder writes the SDK-bit-exact `NewRawImageDigest`
 //!   ([`RawImage::new_raw_image_digest`]), and the decoder surfaces unmodelled fields verbatim
-//!   as typed [`RawTag`]s — from IFD 0, the raw IFD, every image sub-IFD, and the last
-//!   directory of the main chain when it is none of those. Two documented residues aside — a
-//!   duplicated tag keeps the last entry (the IFD core's model), and an *interior* main-chain
-//!   page carrying no image reaches no typed channel (issue #525) — nothing in a file is
-//!   silently dropped, and [`deconstruct`] accounts for every byte either way.
+//!   as typed [`RawTag`]s — from IFD 0, the raw IFD, every image sub-IFD, the last directory of
+//!   the main chain when it is none of those, and per page ([`PageExtra`]) every earlier
+//!   main-chain page that is none of those either. Two documented residues aside — a duplicated
+//!   tag keeps the last entry (the IFD core's model), and an image-less directory reached only
+//!   through `SubIFDs` reaches no typed channel (issue #667) — nothing in a file is silently
+//!   dropped, and [`deconstruct`] accounts for every byte either way.
 //!
 //! An **Apple ProRAW** DNG (1.7, JPEG XL, tiled, LinearRaw, semantic masks, gain map) therefore
 //! decodes fully. Full demosaicing and colour rendering are a raw *processor's* job and stay out
@@ -97,7 +98,7 @@ mod writer;
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
 // not also depend on `gamut-core` directly, along with the byte-order selector from the IFD core.
 pub use color_profile::{ColorProfileInfo, HsvDelta, HsvTable, NoiseModel, NoiseProfile};
-pub use decoder::{DecodedDng, DigestCheck, DngDecoder, RawTag};
+pub use decoder::{DecodedDng, DigestCheck, DngDecoder, PageExtra, RawTag};
 pub use deconstruct::{
     Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag, deconstruct,
 };
