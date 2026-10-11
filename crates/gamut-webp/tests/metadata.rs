@@ -1,5 +1,5 @@
 //! Embedded-metadata round-trips: the `ICCP` colour profile and the `EXIF` / `XMP ` chunks
-//! (RFC 9649 §2.7.2-§2.7.3).
+//! (RFC 9649 §2.7.2-§2.7.3), plus the `C2PA` manifest store (C2PA 2.4 §A.3.7).
 //!
 //! The contract under test is byte fidelity plus container conformance — a payload handed to
 //! `WebpEncoder::with_*` comes back from `gamut_webp::metadata` unchanged, the `VP8X` feature flags
@@ -17,6 +17,8 @@ const ICC: &[u8] = &[0x5a; 200];
 const EXIF: &[u8] = b"II\x2a\x00\x08\x00\x00\x00exif-payload";
 /// An XMP packet, likewise odd-length.
 const XMP: &[u8] = b"<?xpacket begin='\xef\xbb\xbf'?><x:xmpmeta/><?xpacket end='w'?>";
+/// A stand-in C2PA manifest store, of odd length so the RIFF pad byte cannot leak into it.
+const C2PA: &[u8] = b"opaque C2PA manifest store";
 
 fn dims(width: u32, height: u32) -> Dimensions {
     Dimensions { width, height }
@@ -423,6 +425,7 @@ fn unknown_chunks_survive_a_decode_re_encode_cycle() {
     WebpEncoder::lossless()
         .with_exif(b"exif payload")
         .with_unknown_chunks(&[(odd, b"private payload")])
+        .expect("a private FourCC is accepted")
         .encode_image(image, &mut original)
         .expect("encode");
 
@@ -445,6 +448,7 @@ fn unknown_chunks_survive_a_decode_re_encode_cycle() {
     WebpEncoder::lossless()
         .with_exif(b"exif payload")
         .with_unknown_chunks(&carried)
+        .expect("carried chunks are private")
         .encode_image(
             ImageRef::<Rgb8>::new(decoded.as_samples(), decoded.dimensions()).unwrap(),
             &mut rewritten,
@@ -471,6 +475,7 @@ fn an_unknown_chunk_alone_promotes_a_file_to_the_extended_format() {
     let mut file = Vec::new();
     WebpEncoder::lossless()
         .with_unknown_chunks(&[(FourCc::from(PRIVATE), b"payload")])
+        .expect("a private FourCC is accepted")
         .encode_image(image, &mut file)
         .expect("encode");
 
@@ -487,10 +492,142 @@ fn no_unknown_chunks_leaves_a_simple_file_simple() {
     let mut file = Vec::new();
     WebpEncoder::lossless()
         .with_unknown_chunks(&[])
+        .expect("an empty list is accepted")
         .encode_image(image, &mut file)
         .expect("encode");
 
     let layout = WebpLayout::parse(&file).expect("parse");
     assert!(layout.vp8x.is_none(), "still the simple format");
     assert!(layout.unknown.is_empty());
+}
+
+#[test]
+fn a_store_alone_promotes_a_file_to_the_extended_format_and_goes_last() {
+    // Only the extended format has a place for a `C2PA` chunk, and C2PA 2.4 §A.3.7 puts it at the
+    // very end of the form — behind the metadata and behind the preserved unknown chunks, which is
+    // the placement nothing else in this crate's chunk order would produce.
+    for (label, encoder) in encoders() {
+        let file = encode_rgb(
+            &encoder
+                .clone()
+                .with_exif(EXIF)
+                .with_xmp(XMP)
+                .with_icc_profile(ICC)
+                .with_c2pa(C2PA)
+                .with_unknown_chunks(&[(FourCc::from(*b"XYZW"), b"private")])
+                .expect("a private FourCC is accepted"),
+            &rgb(16, 16),
+            dims(16, 16),
+        );
+        let ids = chunks(&file);
+        assert_eq!(
+            ids.last().map(|f| *f.as_bytes()),
+            Some(*b"C2PA"),
+            "{label}: the store is the last sub-chunk"
+        );
+        assert_eq!(
+            ids.iter().filter(|f| f.as_bytes() == b"C2PA").count(),
+            1,
+            "{label}: exactly one store chunk"
+        );
+    }
+}
+
+#[test]
+fn the_store_round_trips_byte_exactly_and_sets_no_vp8x_flag() {
+    // The store crosses the boundary verbatim — the pad byte its odd length forces must not be read
+    // back as part of it — and RFC 9649 §2.5 defines no C2PA feature bit, so a store must leave the
+    // `VP8X` flag byte exactly as a store-free file has it.
+    assert_eq!(
+        C2PA.len() % 2,
+        0,
+        "sanity: adjust the fixture if this changes"
+    );
+    let odd = &C2PA[..C2PA.len() - 1];
+    assert_eq!(odd.len() % 2, 1);
+    for (label, encoder) in encoders() {
+        let file = encode_rgb(&encoder.clone().with_c2pa(odd), &rgb(16, 16), dims(16, 16));
+        let meta = gamut_webp::metadata(&file).expect("read metadata");
+        assert_eq!(meta.c2pa.as_deref(), Some(odd), "{label}: verbatim");
+        assert_eq!(
+            read(&file),
+            want(None, None, None),
+            "{label}: no other carrier"
+        );
+
+        let flagged = encode_rgb(
+            &encoder
+                .clone()
+                .with_unknown_chunks(&[(FourCc::from(*b"XYZW"), b"x")])
+                .expect("a private FourCC is accepted"),
+            &rgb(16, 16),
+            dims(16, 16),
+        );
+        assert_eq!(
+            vp8x(&file),
+            vp8x(&flagged),
+            "{label}: a store sets no feature flag"
+        );
+    }
+}
+
+#[test]
+fn c2pa_span_reads_back_the_range_the_store_occupies() {
+    // The read-side accessor must find the store in a finished file — including one whose earlier
+    // chunks are odd-length, whose pad bytes it therefore has to count — and report the chunk's
+    // whole span, not just the payload.
+    let file = encode_rgb(
+        &WebpEncoder::lossless().with_exif(EXIF).with_c2pa(C2PA),
+        &rgb(8, 8),
+        dims(8, 8),
+    );
+    let span = gamut_webp::c2pa_span(&file)
+        .expect("parse")
+        .expect("the store was embedded");
+    assert_eq!(&file[span.start..span.start + 4], b"C2PA");
+    assert_eq!(&file[span.start + 8..span.end], C2PA);
+    assert_eq!(span.len(), 8 + C2PA.len());
+}
+
+#[test]
+fn a_file_without_a_store_reports_no_span_and_no_store() {
+    // The converse: an ordinary file must not be handed a range to exclude.
+    let file = encode_rgb(
+        &WebpEncoder::lossless().with_exif(EXIF),
+        &rgb(8, 8),
+        dims(8, 8),
+    );
+    assert_eq!(gamut_webp::c2pa_span(&file).expect("parse"), None);
+    assert_eq!(gamut_webp::metadata(&file).expect("read").c2pa, None);
+}
+
+#[test]
+fn a_store_survives_a_decode_re_encode_cycle_exactly_once() {
+    // A `C2PA` chunk is not an unknown chunk, so a caller who carries unknown chunks forward with
+    // `WebpLayout::parse` + `with_unknown_chunks` must not also carry the store and duplicate it.
+    let file = encode_rgb(
+        &WebpEncoder::lossless().with_c2pa(C2PA),
+        &rgb(8, 8),
+        dims(8, 8),
+    );
+    let layout = WebpLayout::parse(&file).expect("parse");
+    assert!(
+        layout.unknown.is_empty(),
+        "the store is not an unknown chunk"
+    );
+
+    let carried: Vec<(FourCc, &[u8])> = layout
+        .unknown
+        .iter()
+        .map(|c| (c.fourcc, c.payload))
+        .collect();
+    let again = encode_rgb(
+        &WebpEncoder::lossless()
+            .with_c2pa(layout.metadata.c2pa.expect("the store was read back"))
+            .with_unknown_chunks(&carried)
+            .expect("carried chunks are private"),
+        &rgb(8, 8),
+        dims(8, 8),
+    );
+    assert_eq!(again, file);
 }

@@ -50,6 +50,7 @@ internal encode→decode round-trips guard every lossless path.
 | P23 | —       | **Explicitness**: every unmodelled IFD field surfaces verbatim as a typed `RawTag` (`ifd0_extra`/`raw_extra`/per-sub-image), via a consumption-tracking reader — issue #109's "all metadata explicitly represented" clause. The EXIF sub-IFD needs no extras list of its own since #353: it arrives whole, inside `Exif` | ✅ done |
 | P24 | Ch2-4   | **Real camera conformance** (#174): the `gamut-dng-samples` corpus + `tooling/gamut-dng-real-conformance`; `Predictor`/`PlanarConfiguration` honoured, byte accounting and the preserving rewrite fixed for real files, optional camera profile | ✅ done |
 | P25 | Ch6     | **Colour projection** (#353): the camera-profile colour tags `CameraProfile` does not model — hue/sat and look tables (dims/data/encoding), `ProfileToneCurve`, `BaselineExposureOffset`, the DNG 1.6 third calibration set, `ReductionMatrix1/2/3` — as a typed read-direction `ColorProfileInfo`, plus the raw IFD's `NoiseProfile` as a typed `NoiseProfile`; a value outside the spec's domain stays in the extras | ✅ done |
+| P26 | C2PA §A.3.6, §18.5.5 | **C2PA manifest store** (#442): typed on both sides (`DngMetadata::c2pa`), entry in IFD 0 with the value last in the file, a zero-filled reservation (`with_c2pa_reserved`), both exclusion ranges reported (`encode_with_report` / `DecodedDng::c2pa_exclusions`), bytes verbatim in either byte order, Adobe-validated | ✅ done |
 
 ## Apple ProRAW (DNG 1.7 + JPEG XL): fully covered for decode
 
@@ -178,6 +179,91 @@ now — `gamut-dng-oracle` exposes the reference implementation's own derivation
 (`dng_color_spec::SetWhiteXY`), and the single-illuminant, interpolated and clamped cases are all
 required to agree with it.
 
+## C2PA manifest store (issue #442, epic #239) — a `DngMetadata` break
+
+The store (C2PA 2.4 §A.3.6: tag 52545 / `0xCD41`, type `UNDEFINED`) was already *visible* — a
+decoded file carried it as an untyped `RawTag` — but had no name, no placement rule and no
+exclusion ranges. Now:
+
+- **`DngMetadata::c2pa: Option<Vec<u8>>`** is the fifth carrier, on the same terms as XMP /
+  IPTC-IIM / ICC: opaque bytes, verbatim in both directions, handed over by `blocks()` as
+  `MetadataBlock::C2pa`. `DngMetadata` is deliberately exhaustive (see the freeze decisions),
+  so this is **semver-major**: every struct literal gains `c2pa: None`. Unlike the other
+  carriers, a store is bound to one exact file — it is a signed hash over the bytes around it —
+  so the only valid input is one an external signer computed over *this* encoder's output;
+  `gamut_metadata::Metadata::encode` never hands one back (`C2paPolicy::Drop`).
+- **Placement** is `gamut_ifd::c2pa`'s (the shared statement of §A.3.6, reused by #446): the
+  entry goes in IFD 0 — the last and only IFD of this crate's main chain, the form the Adobe
+  SDK reads without surprise — as an inline placeholder while the tree is laid out, and the
+  store's bytes are appended **after the image data, last in the file**, with only the entry's
+  count/offset words patched. The alternative §A.3.6 form, a trailing IFD holding only the
+  entry, is *read* (the decoder consults the last main-chain IFD) but not written.
+- **A reservation.** `DngEncoder::with_c2pa_reserved(len)` writes `len` zero bytes where the
+  store goes; `encode_with_report` returns `DngEncodeReport { len, c2pa: Option<C2paExclusions> }`
+  with the **two disjoint ranges** §18.5.5 needs — the store, and the entry's `count` field (4
+  bytes classic, 8 BigTIFF) — so a signer hashes around them and overwrites the reservation in
+  place. A reservation and a same-sized store produce byte-identical files outside the store
+  range, and a store of a different size changes the count field and nothing else: the epic's
+  "nothing after placement moves a byte" criterion, tested exactly. `encode` is unchanged (it
+  delegates), and `EncodeImage` is untouched. A store and a reservation together, or a store
+  shorter than a JUMBF box header (8 bytes), are typed errors before any pixel work.
+- **Decode.** `DecodedDng::c2pa_exclusions` carries the ranges `gamut_ifd::c2pa::locate` finds,
+  alongside the bytes in `metadata.c2pa`. A tag-52545 entry of another type is not a store and
+  stays in `ifd0_extra`; so does one in IFD 0 when the main chain continues past it.
+- **Byte accounting.** `deconstruct` claims the store as IFD 0's `Value { tag: 52545 }` span and
+  the alignment filler before it as `Padding` — a store at the end of the file is never a
+  `Trailer` — so a store-carrying file is fully classified. 52545 is in `tags::KNOWN_TAGS`
+  (aliasing `gamut_ifd::c2pa::C2PA_MANIFEST_STORE`, where the clause is stated), so
+  `is_fully_accounted()` stays **true** for a file this encoder writes: a manifest store gamut
+  itself embedded is not a private tag.
+- **Lengths.** A store shorter than a JUMBF box header (8 bytes) is refused by the encoder and
+  read as *absent* by the decoder — the split `references/c2pa/README.md` prescribes, and what
+  makes decode → encode of a foreign file carrying a stub value work. In **BigTIFF** the inline
+  threshold is those same 8 bytes, so a store must exceed them or it would pack into the entry
+  instead of landing at the end of the file; the encoder refuses that case with its own message
+  rather than writing a file whose exclusion ranges cover bytes no reader reads back.
+- **Duplicates.** Two tag-52545 entries in the last main IFD name no single store (§A.3.6: one
+  per asset), so both `metadata.c2pa` and `c2pa_exclusions` report absence rather than
+  describing different byte runs. The two surfaces cannot drift apart: the ranges are located
+  first and the bytes are taken *only* if that succeeded, so one rule decides both. (Reading the
+  bytes independently is what made them disagree — the eager `Ifd` keeps the last duplicate, so
+  the bytes surface reported that entry while the ranges reported none, and re-encoding produced
+  a one-entry file carrying only the last duplicate.) On the write side, `append_store` names a
+  duplicated entry as the problem instead of claiming the entry is missing.
+- **A declined field still reaches the caller.** A tag-52545 field the decoder declines to read
+  as a store — wrong type, or too short — arrives verbatim. Where it lands depends on the
+  directory: IFD 0's go to `ifd0_extra`, and the last main-chain directory's to the new
+  `DecodedDng::trailing_extra`. **A duplicated entry is the one partial case**: the typed
+  channels carry `gamut-ifd`'s eager `Ifd`, which keeps the *last* of several entries under one
+  tag, so the last duplicate's bytes arrive and the earlier ones do not. Carrying both would
+  mean changing that last-wins model, which every consumer of the IFD core shares; a file with
+  two stores is malformed under §A.3.6 in any case, and `deconstruct` still accounts for every
+  byte of both. That field exists because §A.3.6's other lawful placement (the
+  store as "the only entity within a new IFD following the existing one") produces a directory
+  with no image, which is therefore neither IFD 0, nor the raw IFD, nor a `SubImage` — so before
+  it, such a directory's fields reached no surface at all. It is empty for every file this crate
+  writes, which puts the entry in IFD 0.
+- **Version.** Carrying the tag raises neither `DNGVersion` nor `DNGBackwardVersion`: like XMP
+  and ICC it is metadata a reader may ignore, and the tag is C2PA's, not a DNG feature a
+  reader must implement (the SDK's tag table names it as `tcC2PAManifest` and validates a file
+  carrying it).
+- **A store and a reservation together is an error, deliberately.** The signer flow is reserve →
+  sign → re-encode with the store, which sets one at a time; setting both is a caller mistake,
+  and letting either silently win would hide it.
+- **Writing §A.3.6's trailing-IFD form is out of scope, deliberately.** For a single-main-IFD
+  asset the clause permits the entry either in that IFD or as the only entity of a new IFD
+  following it. This crate writes one main IFD and uses the in-IFD form, which is lawful and is
+  what the Adobe SDK reads without surprise. The **decoder** reads both, since it consults the
+  last IFD of the chain whatever its shape.
+- **The one directory still not surfaced.** An *interior* main-chain page — neither the first
+  nor the last — that carries no image data is no `SubImage` either, so its fields reach no
+  verbatim channel. That predates #442 and is not what §A.3.6 creates (the store's own placement
+  is the *last* directory, which `trailing_extra` now covers); `deconstruct` still accounts for
+  its bytes. Filed as #525.
+- **Not done here.** The store is never parsed; a `DngRewrite` of a file carrying one relocates
+  it into the value pool like any other value (a rewrite invalidates the binding regardless);
+  the behavioural `c2pa-rs` oracle is #447's.
+
 ## Bridge surface for external RAW pipelines (issue #253)
 
 Downstream raw *processors* (e.g. rawshift) consume gamut-dng's decode as their DNG front end and
@@ -225,12 +311,15 @@ separate path (below).
   #353 did to `DngMetadata::exif`, changing one's type — is accepted as semver-major.
   `ExifMetadata` was on this list until #353 retired it in favour of `gamut-exif`'s `Exif`, whose
   own construction is `Exif::new(order)` plus `set_tag`/`exif_ifd_mut`; `DngMetadata` itself is
-  still a struct literal, so the four carriers stay visible at the point of use. `GainValues`
+  still a struct literal, so the carriers (five since #442 added `c2pa`) stay visible at the
+  point of use. `GainValues`
   stays exhaustive — its four variants are the spec's closed `DataType` set.
 - Re-export closure: everything on the crate root, including `RawPhotometry`, `cfa_color`,
-  `opcode_id`, `new_subfile_type`, `gamut_ifd::Value` (the `RawTag` payload type), and the
+  `opcode_id`, `new_subfile_type`, `gamut_ifd::Value` (the `RawTag` payload type), the
   metadata surface's own types — `Exif`, `ExifTag`, `Rational` and `MetadataBlock` — so a caller
-  builds and reads `DngMetadata` without a direct `gamut-metadata` dependency;
+  builds and reads `DngMetadata` without a direct `gamut-metadata` dependency, and (since #442)
+  the whole C2PA surface this crate's docs name: `C2paExclusions`, `C2PA_MANIFEST_STORE` and
+  `MIN_STORE_LEN`, so a signer needs no direct `gamut-ifd` dependency either;
   `lossless_jpeg::{encode, decode}` stay module-scoped deliberately (a codec namespace).
 - `Compression::is_supported` became `is_decodable` (every decodable scheme encodes, with the
   documented `jxl-encode`/Deflate-depth caveats).
@@ -261,6 +350,210 @@ crate encoded with before:
 
 The Adobe DNG SDK validates the output on every fixture the oracle covers (CFA and LinearRaw,
 8- and 16-bit, strips and tiles), so the migration is correctness-neutral.
+
+## Codec benchmark harness (#163)
+
+`cargo bench -p gamut-dng --bench codec` measures **encode and decode throughput across the whole
+shipped codec matrix** — uncompressed, Deflate and lossless JPEG, each for CFA and `LinearRaw`
+photometry — and puts gamut's decode next to the **Adobe DNG SDK's**. (The older `--bench
+compression` is narrower and stays as it is: it answers the #196 question, "which DEFLATE encoder
+should the ZIP path use", on packed payloads.) Fixtures are synthesised in-process, so the harness
+needs no sample corpus and runs by default; the ~178 MiB real-camera submodule behind `mise run
+fetch-dng-samples` is deliberately not a prerequisite.
+
+**What is timed.** The codec call, the allocation and growth of the buffer it produces, and that
+buffer's teardown — the last of those explicitly, because divan would otherwise defer a returned
+value's drop past the timed region, which would charge gamut nothing for freeing a decoded image
+while the SDK's `dng_negative` destructor runs inside its own call. Fixture synthesis, the
+`RawImage`/`CameraProfile` build, and the encode that produces the bytes a decode benchmark reads
+are all outside it. Nothing touches the filesystem.
+
+**Whether the comparison is fair.** Every asymmetry between the two implementations is either
+removed or measured; none is left as an adjective.
+
+- **Neither side pays for the FFI boundary on the way in.** The oracle gained a timed entry point,
+  `decode_dng_in_memory`, which hands the SDK a `dng_stream` over the caller's own bytes: no
+  temporary file, no import copy, the same buffer gamut parses.
+- **Neither side pays for it on the way out, in the container comparison.** That entry point
+  reports the decoded image's extent and exports no samples, so the reference implementation is not
+  charged for a `malloc` + `memcpy` that exists only because the caller is in Rust.
+- **The one asymmetry left in `decode_dng` is the IFD-0 preview** (plus the metadata
+  reconstruction), which `DngDecoder::decode` performs and `ReadStage1Image` does not. Its volume
+  is exact, and it is the volume the *decoder materialises*, not the one the file stores: the
+  preview is written at 8 bits, but every sub-image is surfaced as `SubImageData::Decoded(
+  Vec<u16>)`, so the buffer gamut allocates, fills and frees is `⌊w/2⌋ × ⌊h/2⌋ × 3 × 2` bytes
+  against the raw's `w × h × planes × 2` — 75 % of a 16-bit CFA frame and 25 % of a `LinearRaw`
+  one. On the **uncompressed** rows that volume goes into gamut's divan counter, so the
+  **median-time** column is the uncorrected ratio and the **throughput** column the corrected one.
+  On the **compressed** rows it does not. Correcting there charges preview bytes at the raw path's
+  per-byte rate, and under Deflate or lossless JPEG a raw byte carries entropy-coding work a
+  preview byte does not, so the arithmetic yields a lower bound on gamut's ratio rather than a
+  measurement of it; the harness prints no number for it and says so, in the fixture table and in
+  the epilogue below it. Read a compressed row as: gamut's figure includes preview and metadata
+  work the reference arm does not do, by an amount this harness does not measure. It is not
+  normalised away by changing the codec: gamut exposes no raw-image-only decode entry point, and
+  adding one so a benchmark reads better would be the wrong direction of causation.
+- **The one asymmetry left in `decode_lossless_jpeg` is the FFI export path, and a third arm
+  bounds it.** `adobe-sdk-no-export` runs the identical `DecodeLosslessJPEG<Scalar>` into the
+  identical spool buffer and stops before the `malloc`/`memcpy`/`Vec` copies. Across sixteen
+  case-runs the gap between the two SDK arms spans −4 % to +64 %: an effect below this harness's
+  run-to-run spread on a shared machine, whose *sign* is not resolved. What that supports is a
+  **bound** — on the runs where neither SDK arm was disturbed the gap is under 3 %, and the
+  fairness claim needs only that the export path cannot account for a 30×-plus ratio — not a
+  figure for what the export path costs. Earlier revisions of this section quoted 0.3–1.9 % as
+  though it were the cost; it was two samples of a quantity at the noise floor.
+- **On the Deflate rows neither arm's inflate is gamut-authored, and only one of the two is
+  pinned.** `gamut-deflate` is deliberately encoder-only, so this crate inflates with
+  `miniz_oxide`; the oracle's `build.rs` links the system libz dynamically (`-lz`), because the
+  SDK includes `<zlib.h>` unconditionally. A `*/deflate` row is therefore **`miniz_oxide` against
+  whatever libz the loader resolved** — not gamut's own codec against the SDK's. The distinction
+  that decides whether the row is reproducible is **pinning**, not authorship: `miniz_oxide` is
+  pinned by `Cargo.lock` to one version and one checksum, so every run of this harness anywhere
+  inflates with the same code, while the system libz is pinned by nothing. Not by a version: the
+  loader chooses between a copy a dev oracle built under `target/` and whatever the platform
+  installed, and `zlibVersion()` separates those two only when the platform's build renamed itself.
+  This box's did — it answers `"1.3.1.zlib-ng"` where the build-tree copy answers `"1.3.1"` — but a
+  box shipping stock zlib 1.3.1 gives two resolutions that answer identically, so what identifies
+  the loaded library cannot be the version string.
+  And not even by the machine: `cargo bench` puts every build script's native search path on
+  `LD_LIBRARY_PATH`, so it resolves whichever stock zlib a dev oracle in the graph has built under
+  `target/` (`gamut-dng` dev-depends on `libtiff-oracle`, which builds one, so `cargo bench -p
+  gamut-dng` on its own is enough), while running the same binary directly resolves the platform's.
+  Measured here, that choice moves the reference arm by 1.2–1.3× and moves gamut's arm not at all —
+  enough to reverse which side of 1.0 a Deflate row falls on, with no defect in either
+  implementation. The harness therefore prints the resolved library above its divan output
+  (`zlibVersion()` plus the path `dladdr` reports; the path is what identifies the resolution,
+  because two stock builds of one version are indistinguishable by version string) and **warns
+  when that path lies inside a build directory**, because a resolution
+  that came from the build graph rather than from the platform is one nobody else reproduces. A
+  Deflate figure below travels with the library it was taken against or not at all. Pinning that
+  library for the benchmark while keeping `-lz` for conformance is filed as **#618** and not taken
+  here: it is a build-system change to a crate every `gamut-dng` test links, and it belongs to its
+  own change rather than to the one that added the benchmark.
+
+**Each pair is one benchmark, not two.** `decode_dng` and `decode_lossless_jpeg` take the
+implementation as a divan *argument* rather than living in a benchmark each. Separate benchmarks
+run in name order, which measures every reference case minutes away from its counterpart; on a
+shared machine that drifts, a ratio measured minutes apart is not a ratio. As arguments the pair
+members run back to back under the same instantaneous load, and the argument names are ordered so
+divan's own name sort keeps them adjacent.
+
+Interleaving is kept on that argument alone. An earlier revision of this section also credited it
+with a 25–30 % shift in the two Deflate ratios; that attribution is **withdrawn**. Those are the two
+rows now known to depend on which libz the machine resolves, an effect of the same magnitude and the
+same sign, and this round did not re-run the non-interleaved arrangement under a pinned library, so
+the shift is not this section's to explain.
+
+There is no `encode` arm for the SDK: the oracle shim wraps the SDK's *reader*, not its writer, so
+no reference encode number exists and none is invented. Encode is reported for gamut alone.
+
+**Alternate the arm order between runs.** Adjacent is not simultaneous: divan cannot interleave a
+pair *per sample*, so one arm always runs first and inherits nothing while the second inherits the
+caches and the frequency governor the first left. divan's sort is reversible, so the control
+already exists — `--sortr name` runs the gamut arm first — and a published ratio is the mean of one
+run each way. Measured across the eight runs below, the order is worth about a percent, well under
+the run-to-run spread; it is corrected for because it is one-directional, not because it is large.
+
+**No absolute figures are pinned here.** Unlike the #196 numbers above — a ratio comparison between
+two encoders in the same process, which is robust to a loaded machine — throughput in MB/s is a
+property of the machine that produced it. Run the harness on the box you care about.
+
+**What the harness measured.** Eight runs, 100 samples each, 512×384 at 16 bits, on a shared
+machine at one-minute load averages of 15 to 38 (bracketed by `uptime` per run): two repetitions of
+`{stock zlib, zlib-ng} × {reference arm first, gamut arm first}`. Ratios only, medians unless
+marked; every row of the matrix is here, including the ones that do not fit a tidy story, and the
+raw divan output for all eight is published with the pull request rather than summarised into these
+cells.
+
+Whole-file decode, gamut ÷ Adobe DNG SDK, median time — uncorrected, which is what the harness now
+prints on the compressed rows:
+
+| `decode_dng` case          | stock zlib 1.3.1            | zlib-ng 2.3.3               |
+| -------------------------- | --------------------------- | --------------------------- |
+| `cfa/uncompressed`         | 2.17, 2.27, 2.23, 2.21      | 2.52, 2.26, 2.14, 2.34      |
+| `cfa/deflate`              | 0.94, 0.94, 0.94, (2.71)    | 1.23, 1.25, 1.26, 1.17      |
+| `cfa/lossless-jpeg`        | 83, 50, 89, (18)            | 87, 45, 66, 92              |
+| `linear-raw/uncompressed`  | 1.73, 1.72, 1.79, 1.79      | 1.84, 1.70, 1.78, 1.82      |
+| `linear-raw/deflate`       | 1.00, 0.90, 0.97, 0.84      | 1.41, 1.28, 1.28, 1.28      |
+| `linear-raw/lossless-jpeg` | 35, 101, 60, 47             | 47, 47, 75, 57              |
+
+The four cells per column are, in order, `{rep 1, rep 2} × {reference arm first, gamut arm first}`.
+The parenthesised `cfa` figures come from the noisiest run in the set (load 36.8); its
+*fastest*-sample ratios are 0.97 and 27, in line with the rest. The `uncompressed` rows are quoted
+uncorrected here; with the preview correction the harness applies to them, they read 1.24–1.44 and
+1.36–1.47 respectively.
+
+Bare codestream decode, which carries no container asymmetry — same SOF3 stream in, same samples
+out, one counter for all three arms. Medians are unusable here (gamut's arm is ~100 ms, long enough
+to swallow a scheduling event whole), so the fastest-sample ratio is given alongside:
+
+| `decode_lossless_jpeg` case | gamut ÷ SDK, median | gamut ÷ SDK, fastest sample |
+| --------------------------- | ------------------- | --------------------------- |
+| `cfa`                       | 45–92               | 34–61                       |
+| `linear-raw`                | 42–91               | 41–63                       |
+
+**The two Deflate rows depend on a library this repository does not build**, and that is the whole
+of a discrepancy an independent re-measurement raised against an earlier revision of this section.
+The earlier figures (0.94–0.97, gamut faster) and the independent ones (1.20–1.26, the SDK faster)
+are **both correct**, and the eight runs above reproduce both: 0.94 under stock zlib 1.3.1, 1.17–1.26
+under zlib-ng 2.3.3, at every load from 15 to 38 and in both arm orders. The isolating evidence is
+that the *gamut* arm does not move between the two — its `cfa/deflate` median is 1.04–1.05 ms under
+either library — while the reference arm moves from 0.83 ms to 0.97–1.11 ms. Neither measurement was
+wrong; the harness failed to say which inflate implementation it had measured, so two correct runs
+looked like a contradiction. It now prints it.
+
+**What the harness found.** Two defects, both filed rather than fixed here — a benchmark that
+measures the codec is not the place to change it:
+
+- **#583, lossless-JPEG decode speed.** The isolating evidence is the **codestream pair** above,
+  which carries no container asymmetry and whose one residual bias — the FFI export path — is
+  bounded well below the effect: there gamut is **one and a half to two orders of magnitude
+  slower** than the reference implementation. Across eight runs, on both photometries and in both
+  arm orders, no fastest-sample ratio is below **34×** and the medians centre near 50–60×; the
+  earlier "56–59×" was a two-run figure and is not reproducible to that precision on a loaded box,
+  but nothing in the eight runs brings the effect near parity. `lossless_jpeg::decode_symbol` scans
+  the whole 256-entry code table once per candidate bit length, so a symbol costs ~1000 comparisons
+  where the reference implementation spends one table probe.
+
+  The whole-file rows are published above in full rather than filtered to the ones that agree. Two
+  of them are not close to parity: `cfa/uncompressed` at 2.1–2.5× and `linear-raw/uncompressed` at
+  1.7–1.8×. Those are the rows the preview correction applies to, and corrected they read 1.2–1.4×
+  and 1.4–1.5×; the remainder is the fixed IFD and metadata reconstruction, which does not scale
+  with the frame and therefore dominates exactly where the raw path is little more than a `memcpy`.
+  This harness measures that gap and does not attribute it further — and #583's isolation does not
+  rest on it.
+- **#584, CFA lossless-JPEG size.** Quoted throughout against **one** denominator, the raw sample
+  volume (393 216 bytes for this fixture): `cfa/uncompressed` writes a 541 440-byte file (137.7 %)
+  and `cfa/lossless-jpeg` a 618 800-byte one (157.4 %), so turning compression on makes the file
+  **14.3 % larger**. The encoder hands the mosaic to `lossless_jpeg::encode` as one full-width
+  component, so predictor 1 differences a red photosite against its green neighbour. Declaring the
+  same samples as `(width / 2, height, 2)` — the reshape DNG 1.7.1.0 p. 20 describes, which needs
+  no sample reordering and which this crate's decoder already reads — takes the codestream from
+  470 576 bytes to 359 888. Both files carry an identical 148 224 bytes of preview and directory,
+  so the reshaped file would be 508 112 bytes, **129.2 %** of raw: **6.2 % smaller than the
+  uncompressed file**, not the ~33 % a reader gets by chaining the codestream ratio onto the file
+  ratio.
+
+**The fixture table is not a codec gate, and should not become one.** #584's verification section
+proposes pinning the encoder to the sizes this harness prints. It should not be: the margin is a
+property of frame-uniform synthetic gains — one gain per CFA colour across the entire frame, which
+is what makes the interleaved-component reshape win so cleanly — and pinning an encoder requirement
+to a single synthetic fixture is precisely the failure a benchmark harness exists to avoid.
+Re-measure on the real-camera corpus (`mise run fetch-dng-samples`, then `mise run test-dng-real`)
+before the encoder changes, and gate on that if anything is to be gated.
+
+#584 is a byte quantity and reproduces anywhere. #583 is a ratio, and the only outside code in its
+measured path is the SDK's own lossless-JPEG decoder, built here from the committed SDK source — so
+unlike the Deflate rows it does not depend on what the machine has installed.
+
+**Both issues were filed from the first revision of this section and still quote figures it has
+since withdrawn**: #583 asserts the two Deflate ratios and rests its localisation argument on them,
+omitting the uncompressed rows that falsify it, and its verification command names benchmarks that
+no longer exist (the arms were merged into one benchmark taking the implementation as an argument —
+`cargo bench -p gamut-dng --bench codec -- decode_lossless_jpeg`); #584 quotes a fixture-table
+column this harness no longer prints, whose preview model has since doubled. **#617** states
+precisely which figure in each is withdrawn and what replaced it. This section is that replacement
+text; the two findings themselves stand.
 
 ## Deferred / out of scope
 
@@ -302,7 +595,8 @@ use; additions are semver-additive.
 - **JPEG-compressed previews as pixels** — surfaced as verbatim chunks (`SubImageData::
   Undecoded`); decoding them needs the baseline DCT codec above.
 - **Advanced 1.7 metadata without a typed surface** (`RGBTables`, `ImageStats`,
-  `ImageSequenceInfo`, `ProfileDynamicRange`, C2PA) — explicitly surfaced as typed `RawTag`s.
+  `ImageSequenceInfo`, `ProfileDynamicRange`) — explicitly surfaced as typed `RawTag`s. (The
+  C2PA manifest store left this list in #442: `DngMetadata::c2pa`.)
 - **The GPS sub-IFD (`GPSInfo`, 34853) and an EXIF 0th IFD / thumbnail** — `DngMetadata::exif`
   is a whole `gamut_exif::Exif`, so those directories are *expressible* in the encoder input,
   but only its Exif sub-IFD is written: IFD 0 and the preview sub-IFDs are the DNG container's

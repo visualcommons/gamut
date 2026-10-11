@@ -89,6 +89,13 @@ metadata = [
     "dep:gamut-icc",
     "dep:gamut-iptc",
     "dep:gamut-ifd",
+    # The format crates' own `metadata` features, which turn on their typed accessors
+    # (`blocks()` / `metadata()` / `with_metadata`). Weak (`?/`), so each one is enabled only
+    # when that format's feature already pulled the crate in: `metadata` alone must not drag a
+    # codec into the build, and a format alone must not drag the facade in.
+    "gamut-jpeg?/metadata",
+    "gamut-jxl?/metadata",
+    "gamut-heic?/metadata",
 ]
 # The ICC colour management module (transform engine) over gamut-icc profiles.
 cmm = ["dep:gamut-cmm"]

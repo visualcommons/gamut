@@ -44,6 +44,16 @@ pub enum XmpError {
     /// requires the language tags to be unique. The string is the duplicated tag.
     #[error("XMP: duplicate xml:lang '{0}' in an alternative array")]
     DuplicateLang(String),
+
+    /// A sidecar file's document element was not `x:xmpmeta`; the string names the element found.
+    ///
+    /// Raised only by [`crate::XmpSidecar::read`]. The wrapper is **optional** in an embedded
+    /// packet (Part 1 §7.3.3, and [`crate::XmpWriter::wrap_xmpmeta`] can omit it), so this is not
+    /// a prohibited construct — it is the one thing a standalone `.xmp` file needs beyond a packet
+    /// body, because §7.3.3 gives `x:xmpmeta` exactly the job of identifying XMP inside general
+    /// XML text. A bare `rdf:RDF` document is valid XMP for [`crate::XmpMeta::from_packet`].
+    #[error("XMP: sidecar document element is <{0}>, not x:xmpmeta")]
+    MissingXmpMeta(String),
 }
 
 /// A specialized [`Result`](core::result::Result) for the XMP read path.
@@ -98,6 +108,12 @@ mod tests {
         ));
         assert!(matches!(
             gamut_core::Error::from(XmpError::DuplicateLang("en".into())),
+            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
+        ));
+        // A sidecar without its wrapper is bad input, not an unimplemented feature: the caller
+        // fixes it by handing the bytes to `XmpMeta::from_packet` or wrapping them.
+        assert!(matches!(
+            gamut_core::Error::from(XmpError::MissingXmpMeta("RDF".into())),
             gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
