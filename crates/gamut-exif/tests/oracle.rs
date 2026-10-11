@@ -6,42 +6,10 @@
 //!
 //! Requires the `third_party/exiv2` + `third_party/expat` submodules and a C++ toolchain.
 
-use std::sync::{Mutex, PoisonError};
-
+use exiv2_oracle::{exif_count, exif_get, exif_roundtrip};
 use gamut_exif::{
     ByteOrder, Exif, ExifTag, ExifWriter, FieldType, IfdKind, Rational, TagCount, Value,
 };
-
-/// Serialises every exiv2 call this file makes.
-///
-/// `exiv2-oracle` puts its **XMP** entry points behind a lock, because XMPCore keeps global state
-/// and is documented as not thread-safe; its **EXIF** entry points are unguarded. This file is the
-/// only caller of those, and `cargo test` runs its `#[test]`s on separate threads, so they reach
-/// exiv2 concurrently — which segfaulted inside the C++ library on CI (one mutation shard's
-/// baseline crashed while another shard of the *same commit* passed, so the failure is a race, not
-/// a bad input). Taking this lock per call means exiv2 only ever runs single-threaded here.
-///
-/// The guard belongs in `tooling/exiv2-oracle` beside the XMP one, where it would protect every
-/// future caller; that is issue #536.
-static EXIV2: Mutex<()> = Mutex::new(());
-
-/// Runs `f` with exiv2 exclusively held. Poisoning is ignored: the lock guards no Rust data.
-fn exclusively<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = EXIV2.lock().unwrap_or_else(PoisonError::into_inner);
-    f()
-}
-
-fn exif_count(bytes: &[u8]) -> Result<usize, String> {
-    exclusively(|| exiv2_oracle::exif_count(bytes))
-}
-
-fn exif_get(bytes: &[u8], key: &str) -> Result<String, String> {
-    exclusively(|| exiv2_oracle::exif_get(bytes, key))
-}
-
-fn exif_roundtrip(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    exclusively(|| exiv2_oracle::exif_roundtrip(bytes))
-}
 
 /// A representative model spanning the 0th IFD and the Exif sub-IFD.
 fn sample() -> Exif {
