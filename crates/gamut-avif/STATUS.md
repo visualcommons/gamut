@@ -21,7 +21,9 @@ has landed), `D` where a deferred row has no milestone, `OOS` where the disposit
 - **M2** — Pixel formats: 10/12-bit, 4:2:0/4:2:2, monochrome, profiles 0 & 2, `MA1B` baseline
   brand, and chroma resampling. *(The RGB↔YCbCr matrices and limited range landed early, with
   issue #335 — they need no plane-geometry change. Monochrome landed with #396; 4:2:0, profile 0
-  and `MA1B` landed with #390; 4:2:2 with #391. What remains is 10/12-bit.)*
+  and `MA1B` landed with #390; 4:2:2 with #391; 10/12-bit end to end with #398/#399, and 8-bit
+  input coded at 10/12 bits with #659. What remains is subsampled chroma on the `Rgba8`/`Rgba16`
+  paths — see **Deferred** under Scope & dispositions.)*
 - **M3** — Alpha & auxiliary: alpha aux item, `auxC`/`auxl`, premultiplied (`prem`), depth maps.
 - **M4** — Color & metadata: ICC profiles, Exif/XMP items, HDR (PQ/HLG, `mdcv`/`clli`), film grain.
 - **M5** — Container transforms & derivation: `irot`/`imir`/`clap`/`pasp`, `grid`/overlay,
@@ -32,8 +34,8 @@ has landed), `D` where a deferred row has no milestone, `OOS` where the disposit
 **Implemented (v1.0).** Lossless (decoded output bit-exact to the input, at the coded depth) and
 lossy AV1 intra encoding at 8/10/12-bit, from `Rgb8`/`Rgba8`/`Gray8`/`Rgb16`/`Rgba16` — identity
 matrix at 4:4:4 for lossless, **BT.709 YCbCr at 4:2:0 by default** for lossy, with
-BT.601/BT.2020-NCL, studio range and 4:4:4 / 4:2:2 selectable (the `Rgb8` path; `Rgba8` and the
-16-bit paths are 4:4:4 — see the ☐ rows below) — wrapped as a conformant MIAF/AVIF `av01` item
+BT.601/BT.2020-NCL, studio range and 4:4:4 / 4:2:2 selectable (the `Rgb8`/`Rgb16` paths; the
+`Rgba8`/`Rgba16` paths are 4:4:4 — see the ☐ rows below) — wrapped as a conformant MIAF/AVIF `av01` item
 (plus a monochrome alpha auxiliary when the input carries one) — brands `avif`/`mif1`/`miaf` plus
 the profile brand every coded item earns together (`MA1B` when all are AV1 Main, `MA1A` when all
 are High, neither for a mixed or 4:2:2 file), the AVIF §9.1.1 minimum box set, cross-box
