@@ -579,8 +579,39 @@ fn backend_stream_without_sequence_header_is_rejected() {
 /// A sequence header without `reduced_still_picture_header` is out of the v1 surface's scope.
 #[test]
 fn backend_stream_must_be_a_reduced_still_picture() {
-    // seq header OBU payload byte 0: seq_profile(3)=1 | still_picture(1)=1 | reduced(1)=0 | …
-    let payload = [0b0011_0000u8, 0x00, 0x00, 0x00];
+    // A well-formed *general* sequence header (§5.5.1, `reduced_still_picture_header = 0`) for the
+    // fixture's dimensions, so the refusal is of the layout and not of a malformed header.
+    let (wbits, hbits) = (dim_bits(W), dim_bits(H));
+    let mut b = Bits::new();
+    b.put(1, 3) // seq_profile = High
+        .put(1, 1) // still_picture
+        .put(0, 1) // reduced_still_picture_header
+        .put(0, 1) // timing_info_present_flag
+        .put(0, 1) // initial_display_delay_present_flag
+        .put(0, 5) // operating_points_cnt_minus_1
+        .put(0, 12) // operating_point_idc[0]
+        .put(0, 5) // seq_level_idx[0] (≤ 7, so no seq_tier)
+        .put(wbits - 1, 4)
+        .put(hbits - 1, 4)
+        .put(W - 1, wbits)
+        .put(H - 1, hbits)
+        .put(0, 1) // frame_id_numbers_present_flag
+        .put(0, 3) // use_128x128_superblock, enable_filter_intra, enable_intra_edge_filter
+        .put(0, 4) // interintra_compound, masked_compound, warped_motion, dual_filter
+        .put(0, 1) // enable_order_hint
+        .put(1, 1) // seq_choose_screen_content_tools
+        .put(1, 1) // seq_choose_integer_mv
+        .put(0, 3) // enable_superres, enable_cdef, enable_restoration
+        .put(0, 1) // high_bitdepth
+        .put(1, 1) // color_description_present_flag
+        .put(1, 8) // color_primaries = BT.709
+        .put(13, 8) // transfer_characteristics = sRGB
+        .put(1, 8) // matrix_coefficients = BT.709
+        .put(1, 1) // color_range
+        .put(0, 1) // separate_uv_delta_q
+        .put(0, 1) // film_grain_params_present
+        .put(1, 1); // trailing_one_bit
+    let payload = b.finish();
     let mut obus = vec![0x0A, payload.len() as u8];
     obus.extend_from_slice(&payload);
     let log = log();
@@ -594,12 +625,12 @@ fn backend_stream_must_be_a_reduced_still_picture() {
     );
 }
 
-/// Only `seq_profile = 1` (High — 8-bit 4:4:4) can be described by the v1 `av1C`/`colr` boxes.
+/// A reserved `seq_profile` is a malformed header, refused before its colour fields are read.
 #[test]
 fn backend_stream_must_use_a_describable_profile() {
     // seq_profile(3)=3 | still_picture=1 | reduced=1 | seq_level_idx[0](5) | width/height bits.
     // 0b011_1_1_000 = 0x78. §6.4.1 reserves 3..=7, and `color_config()`'s own layout depends on the
-    // profile, so a stream this parser cannot describe is refused before its colour fields are read.
+    // profile, so the shared parser rejects it before reading any colour field.
     let payload = [0x78u8, 0b0001_0101, 0b0100_0000, 0x00, 0x00, 0x00];
     let mut obus = vec![0x0A, payload.len() as u8];
     obus.extend_from_slice(&payload);
@@ -609,8 +640,8 @@ fn backend_stream_must_use_a_describable_profile() {
     let err = encode(&encoder).expect_err("a reserved profile is rejected");
     assert_owned_error(
         &err,
-        ErrorKind::Unsupported,
-        "AVIF: AV1 backend stream must use seq_profile 0, 1 or 2",
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend sequence header is malformed",
     );
 }
 
@@ -743,6 +774,9 @@ fn seq_header_obu(
             b.put(0, 2); // chroma_sample_position = CSP_UNKNOWN
         }
     }
+    b.put(0, 1) // separate_uv_delta_q
+        .put(0, 1) // film_grain_params_present
+        .put(1, 1); // trailing_one_bit (§5.3.1); `finish` zero-pads the rest
     let payload = b.finish();
     let mut obus = vec![0x0A, payload.len() as u8];
     obus.extend_from_slice(&payload);
@@ -884,6 +918,11 @@ fn backend_stream_shortcut_must_not_contradict_its_profile() {
     w.push_bits(1, 8); // color_primaries = BT.709
     w.push_bits(13, 8); // transfer_characteristics = sRGB
     w.push_bits(0, 8); // matrix_coefficients = identity
+    // The shortcut codes no color_range, subsampling or sample position, but the rest of the
+    // header still follows, closed by the §5.3.1 trailing bits.
+    w.push_bits(0, 1); // separate_uv_delta_q
+    w.push_bits(0, 1); // film_grain_params_present
+    w.push_bits(1, 1); // trailing_one_bit; the zero pad is the writer's own
     let payload = w.finish();
     let mut obus = vec![0x0A, payload.len() as u8];
     obus.extend_from_slice(&payload);
@@ -1044,7 +1083,7 @@ fn truncated_sequence_header_is_reported() {
     assert_owned_error(
         &err,
         ErrorKind::InvalidInput,
-        "AVIF: AV1 backend sequence header truncated",
+        "AVIF: AV1 backend sequence header is malformed",
     );
 }
 
@@ -1333,6 +1372,8 @@ fn backend_stream_may_use_the_professional_profile() {
     w.push_bits(1, 1); // color_range = full
     // 4:2:2 codes no chroma_sample_position.
     w.push_bits(0, 1); // separate_uv_delta_q
+    w.push_bits(0, 1); // film_grain_params_present
+    w.push_bits(1, 1); // trailing_one_bit (§5.3.1); the zero pad is the writer's own
     let payload = w.finish();
     let mut obus = vec![0x0A, payload.len() as u8];
     obus.extend_from_slice(&payload);
