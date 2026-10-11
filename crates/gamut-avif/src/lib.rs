@@ -179,11 +179,17 @@
 mod av1c;
 pub mod backend;
 mod c2pa;
+mod clean_alpha;
 mod config;
 mod container;
 mod decode;
 mod encoder;
 mod image;
+/// Executable laws for this crate's sample transforms, shared by its property tests and the
+/// out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod invariants;
 mod obu;
 mod transform;
 

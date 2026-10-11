@@ -23,6 +23,7 @@ use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSl
 use crate::c2pa::{
     C2PA_UUID, C2paBoxPurpose, content_provenance_payload, content_provenance_reserved,
 };
+use crate::clean_alpha::clean_rgba;
 use crate::config::{AvifConfig, AvifMode};
 use crate::container::AvifContainer;
 use crate::image::ALPHA_AUX_URN;
@@ -406,6 +407,32 @@ impl AvifEncoder {
     pub fn with_premultiplied_alpha(mut self, premultiplied: bool) -> Self {
         self.premultiplied = premultiplied;
         self
+    }
+
+    /// Cleans the colour hidden under transparent pixels before a **lossy** encode: each
+    /// non-opaque pixel's colour is replaced by a blurred bleed of the visible edge around it, so
+    /// the coder spends no bits on colour nobody sees and the visible edge does not ring against
+    /// it.
+    ///
+    /// What a reader displays does not change: alpha and opaque pixels are untouched, a fully
+    /// transparent pixel's colour is invisible, and a semi-transparent pixel's colour moves only
+    /// within the range that premultiplies to the same value. Only the decoded *unassociated*
+    /// colour under transparency differs from the source, which is why it is opt-in (see
+    /// [`AvifConfig::clean_alpha`]).
+    ///
+    /// **Ignored by [`AvifMode::Lossless`]**, which stays bit-exact; by
+    /// [`with_premultiplied_alpha(true)`](AvifEncoder::with_premultiplied_alpha), whose colour is
+    /// the composite itself; and by every input without an alpha channel.
+    #[must_use]
+    pub fn with_clean_alpha(mut self, clean: bool) -> Self {
+        self.config.clean_alpha = clean;
+        self
+    }
+
+    /// Whether an RGBA encode cleans the colour under its transparent pixels: asked for, lossy,
+    /// and unassociated (see [`AvifEncoder::with_clean_alpha`]).
+    fn cleans_alpha(&self) -> bool {
+        self.config.clean_alpha && self.config.mode == AvifMode::Lossy && !self.premultiplied
     }
 
     /// The colour signalling and plane layout this encoder's configuration selects.
@@ -1283,6 +1310,13 @@ impl EncodeImage<Rgba8> for AvifEncoder {
             let wide = convert::<Rgba8, Rgba16>(image, ConvertPolicy::lossless())?;
             return EncodeImage::<Rgba16>::encode_image(self, wide.as_ref(), out);
         }
+        let cleaned;
+        let image = if self.cleans_alpha() {
+            cleaned = clean_rgba(image.as_samples(), image.width() as usize);
+            ImageRef::<Rgba8>::new(&cleaned, image.dimensions())?
+        } else {
+            image
+        };
         let dims = image.dimensions();
         let colour = self.colour();
         let planes = match colour.matrix {
@@ -1339,6 +1373,13 @@ impl EncodeImage<Rgba16> for AvifEncoder {
     /// configured coding depth — AVIF v1.2.0 §4.1 requires the auxiliary to match the master's
     /// depth.
     fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
+        let cleaned;
+        let image = if self.cleans_alpha() {
+            cleaned = clean_rgba(image.as_samples(), image.width() as usize);
+            ImageRef::<Rgba16>::new(&cleaned, image.dimensions())?
+        } else {
+            image
+        };
         let dims = image.dimensions();
         let depth = self.coded_bit_depth()?;
         let colour = self.colour();
@@ -1662,6 +1703,96 @@ mod tests {
                 .with_alpha_quality(10)
                 .alpha_base_q_idx(),
             0
+        );
+    }
+
+    #[test]
+    fn cleans_alpha_only_when_asked_lossy_and_unassociated() {
+        assert!(!AvifEncoder::lossy(50).cleans_alpha(), "opt-in");
+        assert!(AvifEncoder::lossy(50).with_clean_alpha(true).cleans_alpha());
+        assert!(
+            !AvifEncoder::lossy(50)
+                .with_clean_alpha(true)
+                .with_clean_alpha(false)
+                .cleans_alpha(),
+            "the last call wins"
+        );
+        assert!(
+            !AvifEncoder::lossless()
+                .with_clean_alpha(true)
+                .cleans_alpha(),
+            "lossless stays bit-exact"
+        );
+        assert!(
+            !AvifEncoder::lossy(50)
+                .with_clean_alpha(true)
+                .with_premultiplied_alpha(true)
+                .cleans_alpha(),
+            "premultiplied colour is the composite itself"
+        );
+    }
+
+    /// An 8×8 RGBA image: an opaque, semi-transparent and transparent band, with noisy colour
+    /// everywhere — including under the transparency, where cleaning has something to remove.
+    fn banded_rgba8() -> Vec<u8> {
+        let mut px = Vec::with_capacity(8 * 8 * 4);
+        for y in 0u32..8 {
+            for x in 0u32..8 {
+                let alpha = [255, 255, 128, 40, 0, 0, 0, 0][x as usize];
+                px.extend_from_slice(&[
+                    (x * 37 + y * 101) as u8,
+                    (x * y * 53 + 7) as u8,
+                    (x ^ y).wrapping_mul(29) as u8,
+                    alpha,
+                ]);
+            }
+        }
+        px
+    }
+
+    const BANDED: Dimensions = Dimensions {
+        width: 8,
+        height: 8,
+    };
+
+    #[test]
+    fn rgba8_encode_codes_the_cleaned_colour_when_cleaning_applies() {
+        let px = banded_rgba8();
+        let cleaned = clean_rgba(&px, 8);
+        assert_ne!(
+            cleaned, px,
+            "the fixture hides colour for cleaning to change"
+        );
+        let encode = |enc: AvifEncoder, px: &[u8]| {
+            enc.encode_to_vec(ImageRef::<Rgba8>::new(px, BANDED).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            encode(AvifEncoder::lossy(50).with_clean_alpha(true), &px),
+            encode(AvifEncoder::lossy(50), &cleaned)
+        );
+        // Not applying is coding the source as given.
+        assert_eq!(
+            encode(AvifEncoder::lossless().with_clean_alpha(true), &px),
+            encode(AvifEncoder::lossless(), &px)
+        );
+    }
+
+    #[test]
+    fn rgba16_encode_codes_the_cleaned_colour_when_cleaning_applies() {
+        let px: Vec<u16> = banded_rgba8()
+            .into_iter()
+            .map(|s| u16::from(s) * 257)
+            .collect();
+        let cleaned = clean_rgba(&px, 8);
+        assert_ne!(cleaned, px);
+        let encode = |enc: AvifEncoder, px: &[u16]| {
+            enc.encode_to_vec(ImageRef::<Rgba16>::new(px, BANDED).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            encode(AvifEncoder::lossy(50).with_clean_alpha(true), &px),
+            encode(AvifEncoder::lossy(50), &cleaned)
         );
     }
 

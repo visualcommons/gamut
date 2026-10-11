@@ -108,6 +108,20 @@ pub struct AvifConfig {
     /// 8-bit inputs only. See
     /// [`AvifEncoder::with_bit_depth`](crate::AvifEncoder::with_bit_depth) for both conversions.
     pub bit_depth: Option<BitDepth>,
+    /// Whether to replace the colour hidden under transparent and semi-transparent pixels with a
+    /// smooth bleed of the visible edge before coding, so a lossy encode spends no bits on colour
+    /// nobody sees and does not ring at alpha edges.
+    ///
+    /// The premultiplied composite is unchanged by construction: alpha and opaque pixels are
+    /// untouched, and a semi-transparent pixel's colour moves only within the range that
+    /// premultiplies to the same value. `false` (the default) codes the colour as given. Applies
+    /// only to [`AvifMode::Lossy`] encodes of inputs with **unassociated** alpha
+    /// ([`Rgba8`](gamut_core::Rgba8), [`Rgba16`](gamut_core::Rgba16)): [`AvifMode::Lossless`]
+    /// **ignores** it and stays bit-exact, and so does an encoder with
+    /// [`with_premultiplied_alpha(true)`](crate::AvifEncoder::with_premultiplied_alpha), whose
+    /// colour already *is* the composite. Set it with
+    /// [`AvifEncoder::with_clean_alpha`](crate::AvifEncoder::with_clean_alpha).
+    pub clean_alpha: bool,
 }
 
 impl Default for AvifConfig {
@@ -122,6 +136,7 @@ impl Default for AvifConfig {
             primaries: ColourPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
             bit_depth: None,
+            clean_alpha: false,
         }
     }
 }
@@ -144,6 +159,8 @@ mod tests {
         // Unset: each input codes at its own default depth (8 for 8-bit, 12 for 16-bit), so the
         // default encoder's 8-bit bytes predate the knob reaching 8-bit inputs.
         assert_eq!(c.bit_depth, None);
+        // Opt-in: hidden colour is coded as given unless the caller asks for it to be cleaned.
+        assert!(!c.clean_alpha);
         assert_eq!(AvifMode::default(), AvifMode::Lossless);
     }
 
