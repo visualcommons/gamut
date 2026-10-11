@@ -24,7 +24,9 @@
 //! - [`AvifImage`] / [`AvifItem`] — the **role-typed semantic view** over
 //!   [`gamut_isobmff::IsoBmffImage`]: the validated primary item, alpha/depth auxiliaries,
 //!   thumbnails, Exif/XMP payloads, grid/overlay derivations, and typed properties including the
-//!   [`Av1Config`] `av1C` record ([`AvifItem::av1_config`]) and the OBU layer
+//!   [`Av1Config`] `av1C` record ([`AvifItem::av1_config`]), the parsed AV1
+//!   [`SequenceHeader`] ([`AvifImage::av1_sequence_header`], with its [`ColorConfig`] and
+//!   [`Subsampling`] field types), and the OBU layer
 //!   ([`iter_obus`]/[`ObuType`]).
 //!
 //! Around the seam, [`AvifImage::decode_item_planar`] resolves item derivation (`grid`/`iden`)
@@ -80,8 +82,9 @@
 //!                 data: vec![0x81, 0x00, 0x1C, 0x00],
 //!             },
 //!         }],
-//!         // seq header OBU (reduced_still_picture_header = 1) + frame OBU.
-//!         payload: vec![0x0A, 0x01, 0x18, 0x32, 0x03, 0xAA, 0xBB, 0xCC],
+//!         // Sequence header OBU (reduced_still_picture_header = 1, 2x2, 8-bit monochrome, no
+//!         // colour description, studio range) + frame OBU.
+//!         payload: vec![0x0A, 0x04, 0x18, 0x00, 0x30, 0x11, 0x32, 0x03, 0xAA, 0xBB, 0xCC],
 //!     }],
 //! );
 //! let bytes = write(&img).unwrap();
@@ -89,6 +92,12 @@
 //! let container = AvifContainer::parse(&bytes).unwrap();
 //! assert!(container.image().is_av1_still());
 //! assert_eq!(container.image().primary_item().id(), 1);
+//!
+//! // The item has no `colr`, so the RGBA surface takes its colour from this sequence header.
+//! let header = container.image().av1_sequence_header(1).unwrap();
+//! assert_eq!((header.max_frame_width, header.max_frame_height), (2, 2));
+//! assert_eq!(header.color.bit_depth, 8);
+//! assert!(!header.color.full_range);
 //!
 //! // Decode the primary image to RGBA through the stub decoder.
 //! let rgba = container.decode_primary_rgba8(&mut GrayStub).unwrap();
@@ -185,6 +194,7 @@ pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodedFrame};
 pub use encoder::{AvifEncodeReport, AvifEncoder};
+pub use gamut_av1::{ColorConfig, SequenceHeader, Subsampling};
 pub use gamut_core::Dimensions;
 pub use image::{
     AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, PixelAspectRatio,

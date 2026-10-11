@@ -363,7 +363,8 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | `Av1StillDecoder` seam + validating `DecodedFrame` contract | (crate API) | ✅ | S3 |
 | Planar pipeline: coded / `iden` / `grid` assembly (uniform tiles, checked canvas, crop) | 23008-12 §6.6.2.3.2 | ✅ | S3 |
 | Derivation cycle + depth guards | (hardening) | ✅ | S3 |
-| RGBA path: identity / BT.601 (mc 2/5/6) / BT.709 (1) / BT.2020 NCL (9) / monochrome; missing-`colr` default | H.273; AVIF §2.2 | ✅ | S3/S6 |
+| RGBA path: identity / BT.601 (mc 2/5/6) / BT.709 (1) / BT.2020 NCL (9) / monochrome; missing `colr` → AV1 sequence header `color_config` (grid: first tile) | H.273; AVIF §2.2.1 | ✅ | S3/S6, #651 |
+| Typed AV1 sequence header per item (`AvifImage::av1_sequence_header`, payload then `configOBUs`, via `gamut-av1`'s parser) | AV1 §5.5; AVIF §2.1 | ✅ | #651 |
 | High-bit-depth surface `decode_item_rgba16`/`decode_primary_rgba16` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
 | Alpha merge (luma-plane, non-mono accepted, bit-depth rescale) | AVIF §4.1 | ✅ | S3 |
 | `clap`/`irot`/`imir` application in `ipma` order (2022 `imir` axis semantics) | 23008-12:2022 §6.5.12; 14496-12 §12.1.4 | ✅ | S3 |
