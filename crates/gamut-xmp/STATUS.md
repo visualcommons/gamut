@@ -42,12 +42,12 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   reference for all twelve is exiv2's own registry (`third_party/exiv2/src/properties.cpp`,
   `xmpNsInfo`), and `tests/oracle.rs` reads a documented property of each back from XMPCore by its
   `Xmp.<prefix>.<name>` key, which fails for a wrong URI *or* a wrong prefix. The registry stays a
-  registry: nothing about a value is interpreted. Two divergences are recorded rather than hidden:
-  `exifEX` is `http://cipa.jp/exif/1.0/` (the URI exiv2 and XMPCore bind) although the vendored Exif
-  3.0 text's annotation examples (Annex J.2–J.3) bind the prefix to `…/exif/2.32/` — CIPA DC-010
-  itself is not vendored, so this one entry rests on the oracle rather than on a specification under
-  `references/`, tracked in issue #516; and
-  exiv2 appends `/` to a URI ending in neither `/` nor `#` when registering it with XMPCore
+  registry: nothing about a value is interpreted. `exifEX` is the exception to the oracle-only
+  sourcing: its URI `http://cipa.jp/exif/1.0/` is cited from the vendored CIPA DC-010-2026
+  (`references/exif/exif-xmp-dc-010-2026.pdf`, Tables 1/6/20), which also retires
+  `…/exif/2.32/` — the URI the Exif 3.0 text's annotation examples (Annex J.2–J.3) still show — so
+  that URI is deliberately not registered (issue #516). One divergence is recorded rather than
+  hidden: exiv2 appends `/` to a URI ending in neither `/` nor `#` when registering it with XMPCore
   (`XmpProperties::registerNs`), so the engine re-serializes `dwc` as `…/index.htm/` while gamut
   writes the `…/index.htm` exiv2 documents — pinned in `tests/oracle.rs` as an oracle
   normalization. Because that normalization is what exiv2 *emits*, `WellKnownNs::from_uri` also
