@@ -15,6 +15,11 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes the `invariants` module to the out-of-tree fuzz driver. `doc(hidden)`, no SemVer
+# guarantee, and never enabled by the `gamut` umbrella; the crate's own tests get it via `cfg(test)`.
+test-support = []
+
 [dependencies]
 gamut-core.workspace = true
 gamut-color.workspace = true
@@ -33,6 +38,7 @@ libavif-oracle = { path = "../../tooling/libavif-oracle" }
 # Av1StillDecoder bridge — the exact seam a platform decoder plugs into.
 dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
 divan.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "encode"
