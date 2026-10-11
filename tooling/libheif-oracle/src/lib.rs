@@ -588,6 +588,30 @@ pub struct EncodeOpts {
     /// container-conformance suite that compares presentation pixels therefore wants an explicit
     /// `colr` so both readers agree on the colour policy.
     pub nclx: Option<NclxProfile>,
+    /// If set, attach this mastering display colour volume to the source image
+    /// (`heif_image_set_mastering_display_colour_volume`), which libheif writes as an `mdcv` item
+    /// property on the primary image.
+    pub mdcv: Option<MasteringDisplay>,
+}
+
+/// A mastering display colour volume ([`EncodeOpts::mdcv`]) in libheif's
+/// `heif_mastering_display_colour_volume` field layout and units: chromaticities in increments
+/// of 0.00002, luminances in 0.0001 cd/m². The primaries are passed through in the given index
+/// order; libheif does not reorder them.
+#[derive(Debug, Clone, Copy)]
+pub struct MasteringDisplay {
+    /// `display_primaries_x[c]` for `c` in `0..3`.
+    pub display_primaries_x: [u16; 3],
+    /// `display_primaries_y[c]` for `c` in `0..3`.
+    pub display_primaries_y: [u16; 3],
+    /// `white_point_x`.
+    pub white_point_x: u16,
+    /// `white_point_y`.
+    pub white_point_y: u16,
+    /// `max_display_mastering_luminance`.
+    pub max_display_mastering_luminance: u32,
+    /// `min_display_mastering_luminance`.
+    pub min_display_mastering_luminance: u32,
 }
 
 /// A CICP `nclx` colour profile ([`EncodeOpts::nclx`]) — the four code points libheif writes into a
@@ -705,6 +729,17 @@ unsafe fn encode_body(
                     *d.add(3) = rgba8[s + 3];
                 }
             }
+        }
+        if let Some(m) = opts.mdcv {
+            let mdcv = sys::heif_mastering_display_colour_volume {
+                display_primaries_x: m.display_primaries_x,
+                display_primaries_y: m.display_primaries_y,
+                white_point_x: m.white_point_x,
+                white_point_y: m.white_point_y,
+                max_display_mastering_luminance: m.max_display_mastering_luminance,
+                min_display_mastering_luminance: m.min_display_mastering_luminance,
+            };
+            sys::heif_image_set_mastering_display_colour_volume(img, &mdcv);
         }
 
         // ---- Encoder. ----
