@@ -10,17 +10,247 @@
 //! wrong one for this CLI — so every decoder here is given
 //! [`ConvertPolicy::permissive`](gamut::core::convert::ConvertPolicy::permissive), the CLI opting
 //! into the loss explicitly on the user's behalf.
+//!
+//! [`decode_native`] is the other door, for an encoder that takes more than one layout (AVIF): it
+//! asks each decoder for the narrowest of five layouts that holds the file *without* loss — grey,
+//! RGB or RGBA, at 8 or 16 bits — so the encoder sees the alpha and the precision the file
+//! carries, and it reads the file's ICC profile and Exif alongside.
 
 use std::path::Path;
 
 use gamut::core::convert::{ConvertPolicy, convert};
-use gamut::core::{DecodeImage, Dimensions, ImageBuf, Rgb8, Rgba8};
+use gamut::core::{
+    DecodeImage, Dimensions, ErrorKind, Gray8, ImageBuf, Rgb8, Rgb16, Rgba8, Rgba16,
+};
 use gamut::jpeg::JpegDecoder;
 use gamut::jxl::JxlDecoder;
-use gamut::png::PngDecoder;
+use gamut::png::{ColorType as PngColorType, PngDecoder};
 use gamut::webp::WebpDecoder;
 
 use crate::error::CliError;
+
+/// A decoded image in the narrowest layout that holds the input without loss.
+///
+/// The five layouts are the ones `AvifEncoder` codes: a grey image with 16-bit samples has no
+/// `Gray16` encode to go to, so it widens (losslessly) to [`Rgb16`].
+pub(crate) enum NativeImage {
+    /// 8-bit greyscale without alpha.
+    Gray8(ImageBuf<Gray8>),
+    /// 8-bit colour without alpha (or a palette without transparency).
+    Rgb8(ImageBuf<Rgb8>),
+    /// 8-bit samples with alpha, grey or colour.
+    Rgba8(ImageBuf<Rgba8>),
+    /// Samples wider than 8 bits, without alpha.
+    Rgb16(ImageBuf<Rgb16>),
+    /// Samples wider than 8 bits, with alpha.
+    Rgba16(ImageBuf<Rgba16>),
+}
+
+impl NativeImage {
+    /// The image's dimensions.
+    pub(crate) fn dimensions(&self) -> Dimensions {
+        match self {
+            Self::Gray8(img) => img.dimensions(),
+            Self::Rgb8(img) => img.dimensions(),
+            Self::Rgba8(img) => img.dimensions(),
+            Self::Rgb16(img) => img.dimensions(),
+            Self::Rgba16(img) => img.dimensions(),
+        }
+    }
+
+    /// The size of the decoded sample buffer in bytes.
+    pub(crate) fn byte_len(&self) -> usize {
+        match self {
+            Self::Gray8(img) => img.as_samples().len(),
+            Self::Rgb8(img) => img.as_samples().len(),
+            Self::Rgba8(img) => img.as_samples().len(),
+            Self::Rgb16(img) => img.as_samples().len() * 2,
+            Self::Rgba16(img) => img.as_samples().len() * 2,
+        }
+    }
+}
+
+/// The input metadata an encoder can carry: the ICC profile and the Exif TIFF stream, each
+/// verbatim from the input file.
+#[derive(Default)]
+pub(crate) struct InputMetadata {
+    /// The embedded ICC profile.
+    pub(crate) icc: Option<Vec<u8>>,
+    /// The Exif payload as a bare TIFF stream (starting `II`/`MM`, no `Exif\0\0` prefix).
+    pub(crate) exif: Option<Vec<u8>>,
+}
+
+/// Which of [`NativeImage`]'s layouts holds an image without loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    Gray8,
+    Rgb8,
+    Rgba8,
+    Rgb16,
+    Rgba16,
+}
+
+impl Layout {
+    /// The narrowest layout for an image that is grey or colour, has alpha or not, and has samples
+    /// wider than 8 bits or not. Grey with alpha or wide grey has no grey layout to go to, so it
+    /// takes the RGB(A) one.
+    fn pick(grey: bool, alpha: bool, wide: bool) -> Self {
+        match (alpha, wide) {
+            (false, false) if grey => Self::Gray8,
+            (false, false) => Self::Rgb8,
+            (true, false) => Self::Rgba8,
+            (false, true) => Self::Rgb16,
+            (true, true) => Self::Rgba16,
+        }
+    }
+}
+
+/// Decodes `decoder`'s view of `bytes` in `layout`. A macro because each arm instantiates
+/// `DecodeImage` at a different pixel type; only decoders implementing all five can take it.
+macro_rules! decode_as {
+    ($decoder:expr, $bytes:expr, $layout:expr) => {{
+        let decoder = $decoder;
+        match $layout {
+            Layout::Gray8 => NativeImage::Gray8(decoder.decode_image($bytes)?),
+            Layout::Rgb8 => NativeImage::Rgb8(decoder.decode_image($bytes)?),
+            Layout::Rgba8 => NativeImage::Rgba8(decoder.decode_image($bytes)?),
+            Layout::Rgb16 => NativeImage::Rgb16(decoder.decode_image($bytes)?),
+            Layout::Rgba16 => NativeImage::Rgba16(decoder.decode_image($bytes)?),
+        }
+    }};
+}
+
+/// Decodes a supported image file (PNG, JPEG, PPM/P6, WebP, or JPEG XL) in the narrowest layout
+/// that holds it without loss, and reads its ICC profile and Exif.
+///
+/// What decides the layout, per format:
+///
+/// - **PNG**: the colour type and bit depth, with a `tRNS` chunk (palette alpha or a colour key)
+///   counting as alpha. Learning about `tRNS` takes a full decode, so a PNG is decoded twice.
+/// - **JPEG**: one component is grey, anything else colour; always 8-bit, never alpha.
+/// - **WebP**: always 8-bit colour; alpha when the decoder reports the file carries any, which it
+///   decides from the pixels of a lossless file — so a transparent WebP is decoded twice.
+/// - **JPEG XL**: the image header's channel count, alpha flag and bits per sample (a float stream
+///   is wide).
+/// - **PPM** (through the `image` crate): its colour type.
+///
+/// Metadata is best-effort: the pixels have decoded by the time it is read, so a payload that
+/// cannot be read is simply absent rather than failing the conversion.
+pub(crate) fn decode_native(path: &Path) -> Result<(NativeImage, InputMetadata), CliError> {
+    let bytes = std::fs::read(path).map_err(|source| CliError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    decode_native_bytes(path, &bytes)
+}
+
+/// The filesystem-free core of [`decode_native`]; `path` only labels errors.
+fn decode_native_bytes(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<(NativeImage, InputMetadata), CliError> {
+    // The layout is chosen so no conversion loses anything; the permissive policy only matters
+    // where no layout can (a float JPEG XL narrowing to 16 bits), as on the fixed-layout path.
+    let lossy = ConvertPolicy::permissive();
+
+    if is_webp(bytes) {
+        // Ask for RGB under the *lossless* policy: the decoder refuses it exactly when the file
+        // carries alpha, and only then is RGBA decoded.
+        let image = match WebpDecoder::new().decode_image(bytes) {
+            Ok(rgb) => NativeImage::Rgb8(rgb),
+            Err(err) if err.kind() == ErrorKind::Unsupported => NativeImage::Rgba8(
+                WebpDecoder::new()
+                    .convert_policy(lossy)
+                    .decode_image(bytes)?,
+            ),
+            Err(err) => return Err(err.into()),
+        };
+        let metadata = gamut::webp::metadata(bytes)
+            .map(|m| InputMetadata {
+                icc: m.icc,
+                exif: m.exif,
+            })
+            .unwrap_or_default();
+        return Ok((image, metadata));
+    }
+
+    if is_jxl(bytes) {
+        let decoder = JxlDecoder::new().with_convert_policy(lossy);
+        let info = decoder.info(bytes)?;
+        let layout = Layout::pick(
+            info.color_channels == 1,
+            info.has_alpha,
+            info.is_float || info.bits_per_sample > 8,
+        );
+        let metadata = decoder
+            .metadata(bytes)
+            .map(|m| InputMetadata {
+                icc: m.icc,
+                exif: m.exif,
+            })
+            .unwrap_or_default();
+        return Ok((decode_as!(decoder, bytes, layout), metadata));
+    }
+
+    if is_png(bytes) {
+        let decoder = PngDecoder::new().convert_policy(lossy);
+        let decoded = decoder.decode(bytes)?;
+        let color = decoded.header.color_type;
+        let alpha = matches!(
+            color,
+            PngColorType::GrayscaleAlpha | PngColorType::TruecolorAlpha
+        ) || decoded.transparency.is_some()
+            || decoded
+                .palette
+                .as_ref()
+                .is_some_and(|palette| palette.has_transparency());
+        let layout = Layout::pick(
+            color == PngColorType::Grayscale,
+            alpha,
+            decoded.header.bit_depth == 16,
+        );
+        let metadata = InputMetadata {
+            icc: decoded.icc_profile.map(|icc| icc.profile),
+            exif: decoded.exif,
+        };
+        return Ok((decode_as!(decoder, bytes, layout), metadata));
+    }
+
+    if is_jpeg(bytes) {
+        let decoder = JpegDecoder::new().convert_policy(lossy);
+        let image = if gamut::jpeg::info(bytes)?.components == 1 {
+            NativeImage::Gray8(decoder.decode_image(bytes)?)
+        } else {
+            NativeImage::Rgb8(decoder.decode_image(bytes)?)
+        };
+        let metadata = gamut::jpeg::metadata(bytes)
+            .map(|m| InputMetadata {
+                icc: m.icc,
+                exif: m.exif,
+            })
+            .unwrap_or_default();
+        return Ok((image, metadata));
+    }
+
+    let decoded = image::load_from_memory(bytes).map_err(|source| CliError::Decode {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let color = decoded.color();
+    let channel_bits = color.bits_per_pixel() / u16::from(color.channel_count());
+    let dims = Dimensions {
+        width: decoded.width(),
+        height: decoded.height(),
+    };
+    let image = match Layout::pick(!color.has_color(), color.has_alpha(), channel_bits > 8) {
+        Layout::Gray8 => NativeImage::Gray8(ImageBuf::new(decoded.to_luma8().into_raw(), dims)?),
+        Layout::Rgb8 => NativeImage::Rgb8(ImageBuf::new(decoded.to_rgb8().into_raw(), dims)?),
+        Layout::Rgba8 => NativeImage::Rgba8(ImageBuf::new(decoded.to_rgba8().into_raw(), dims)?),
+        Layout::Rgb16 => NativeImage::Rgb16(ImageBuf::new(decoded.to_rgb16().into_raw(), dims)?),
+        Layout::Rgba16 => NativeImage::Rgba16(ImageBuf::new(decoded.to_rgba16().into_raw(), dims)?),
+    };
+    Ok((image, InputMetadata::default()))
+}
 
 /// Unwraps a gamut decode into the flat `(samples, dimensions)` pair the encoders take, choosing
 /// the RGB or RGBA layout by `want_alpha`.
@@ -371,6 +601,110 @@ mod tests {
             assert_eq!(px[1], px[2]);
             assert_eq!(px[3], 0xff);
         }
+    }
+
+    /// The layout `decode_native_bytes` chose for `bytes`.
+    fn native_layout(bytes: &[u8]) -> Layout {
+        match decode_native_bytes(Path::new("mem"), bytes).unwrap().0 {
+            NativeImage::Gray8(_) => Layout::Gray8,
+            NativeImage::Rgb8(_) => Layout::Rgb8,
+            NativeImage::Rgba8(_) => Layout::Rgba8,
+            NativeImage::Rgb16(_) => Layout::Rgb16,
+            NativeImage::Rgba16(_) => Layout::Rgba16,
+        }
+    }
+
+    #[test]
+    fn layout_pick_is_the_narrowest_lossless_layout() {
+        assert_eq!(Layout::pick(true, false, false), Layout::Gray8);
+        assert_eq!(Layout::pick(false, false, false), Layout::Rgb8);
+        assert_eq!(Layout::pick(true, true, false), Layout::Rgba8);
+        assert_eq!(Layout::pick(false, true, false), Layout::Rgba8);
+        assert_eq!(Layout::pick(true, false, true), Layout::Rgb16);
+        assert_eq!(Layout::pick(false, true, true), Layout::Rgba16);
+    }
+
+    #[test]
+    fn native_webp_keeps_alpha_only_when_the_file_has_it() {
+        let opaque = [
+            1, 2, 3, 0xff, 4, 5, 6, 0xff, 7, 8, 9, 0xff, 10, 11, 12, 0xff,
+        ];
+        let transparent = [
+            1, 2, 3, 0x00, 4, 5, 6, 0x80, 7, 8, 9, 0xff, 10, 11, 12, 0xff,
+        ];
+        assert_eq!(native_layout(&lossless_webp(2, 2, &opaque)), Layout::Rgb8);
+        assert_eq!(
+            native_layout(&lossless_webp(2, 2, &transparent)),
+            Layout::Rgba8
+        );
+    }
+
+    #[test]
+    fn native_jxl_keeps_alpha() {
+        let rgba = [
+            1, 2, 3, 0x00, 4, 5, 6, 0x80, 7, 8, 9, 0xff, 10, 11, 12, 0xff,
+        ];
+        assert_eq!(native_layout(&lossless_jxl(2, 2, &rgba)), Layout::Rgba8);
+    }
+
+    #[test]
+    fn native_grey_jpeg_stays_grey() {
+        use gamut::jpeg::JpegEncoder;
+
+        let dims = Dimensions {
+            width: 8,
+            height: 8,
+        };
+        let mut jpeg = Vec::new();
+        JpegEncoder::new()
+            .encode_image(
+                ImageRef::<Gray8>::new(&[0x40; 64], dims).unwrap(),
+                &mut jpeg,
+            )
+            .unwrap();
+        assert_eq!(native_layout(&jpeg), Layout::Gray8);
+    }
+
+    #[test]
+    fn native_png_counts_a_trns_palette_as_alpha() {
+        use gamut::core::Indexed8;
+        use gamut::png::{PngEncoder, PngPalette};
+
+        let dims = Dimensions {
+            width: 2,
+            height: 1,
+        };
+        let encode = |palette: PngPalette| {
+            let mut png = Vec::new();
+            PngEncoder::new()
+                .encode_indexed8(
+                    ImageRef::<Indexed8>::new(&[0, 1], dims).unwrap(),
+                    &palette,
+                    &mut png,
+                )
+                .unwrap();
+            png
+        };
+        let colours = [[0, 0, 0], [255, 255, 255]];
+        let opaque = PngPalette::new(&colours).unwrap();
+        let keyed = PngPalette::with_transparency(&colours, &[0]).unwrap();
+        assert_eq!(native_layout(&encode(opaque)), Layout::Rgb8);
+        assert_eq!(native_layout(&encode(keyed)), Layout::Rgba8);
+    }
+
+    #[test]
+    fn native_sixteen_bit_grey_png_widens_to_rgb16() {
+        use gamut::core::Gray16;
+        use gamut::png::PngEncoder;
+
+        let dims = Dimensions {
+            width: 2,
+            height: 1,
+        };
+        let png = PngEncoder::new()
+            .encode_to_vec(ImageRef::<Gray16>::new(&[0, 0x8080], dims).unwrap())
+            .unwrap();
+        assert_eq!(native_layout(&png), Layout::Rgb16);
     }
 
     #[test]
