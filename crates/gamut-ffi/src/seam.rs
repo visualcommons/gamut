@@ -10,20 +10,23 @@
 //! handle proves the same lifecycle without hand-copied test code.
 //!
 //! Convention: the handle struct is handwritten (cbindgen needs to see it for the opaque
-//! forward declaration) and holds its host in a field named `inner`.
+//! forward declaration) and holds its host in a field named `inner`. A handle that carries
+//! per-handle state beside its host names each extra field's initial value in an optional
+//! `fields = { name: value, … }` entry, which `_new` fills in alongside `inner`.
 
 macro_rules! seam_handle {
     (
         handle = $Handle:ident,
         host = $Host:ty,
         new = $new:expr,
+        $(fields = { $($field:ident : $value:expr),* $(,)? },)?
         seam = decoder,
         push = |$host:ident, $backend:ident| $push:expr,
         fns = ($new_fn:ident, $free_fn:ident, $push_fn:ident),
         tests = $tests:ident $(,)?
     ) => {
         seam_handle!(@impl
-            $Handle, $Host, $new,
+            $Handle, $Host, $new, { $($($field : $value),*)? },
             ::gamut_codec_abi::DecoderVTable,
             ::gamut_codec_abi::bridge::ForeignDecoder,
             crate::test_support::decoder_vtable,
@@ -36,13 +39,14 @@ macro_rules! seam_handle {
         handle = $Handle:ident,
         host = $Host:ty,
         new = $new:expr,
+        $(fields = { $($field:ident : $value:expr),* $(,)? },)?
         seam = encoder,
         push = |$host:ident, $backend:ident| $push:expr,
         fns = ($new_fn:ident, $free_fn:ident, $push_fn:ident),
         tests = $tests:ident $(,)?
     ) => {
         seam_handle!(@impl
-            $Handle, $Host, $new,
+            $Handle, $Host, $new, { $($($field : $value),*)? },
             ::gamut_codec_abi::EncoderVTable,
             ::gamut_codec_abi::bridge::ForeignEncoder,
             crate::test_support::encoder_vtable,
@@ -52,7 +56,7 @@ macro_rules! seam_handle {
         );
     };
     (@impl
-        $Handle:ident, $Host:ty, $new:expr,
+        $Handle:ident, $Host:ty, $new:expr, { $($field:ident : $value:expr),* },
         $VTable:ty, $Foreign:ty, $vt_builder:path,
         |$host:ident, $backend:ident| $push:expr,
         ($new_fn:ident, $free_fn:ident, $push_fn:ident),
@@ -60,7 +64,9 @@ macro_rules! seam_handle {
     ) => {
         impl $Handle {
             fn ffi_new() -> *mut Self {
-                crate::guard::ptr(|| Box::into_raw(Box::new(Self { inner: $new })))
+                crate::guard::ptr(|| {
+                    Box::into_raw(Box::new(Self { inner: $new, $($field: $value),* }))
+                })
             }
 
             /// # Safety
