@@ -2221,3 +2221,266 @@ fn unspecified_matrix_falls_back_to_bt601() {
     };
     assert_eq!(decode(2), decode(6));
 }
+
+// ---- the AV1 sequence header: typed per item, and the colour of a `colr`-less item (#651) -----
+
+/// BT.709 primaries, transfer and matrix at full range — a header that moves a presentation off
+/// the BT.601-limited one on both axes at once.
+const SEQ_BT709_FULL: SeqColour = SeqColour {
+    cicp: Some((1, 1, 1)),
+    full_range: true,
+};
+
+/// A coded 4:2:0 8-bit 4x4 item whose sequence header codes `seq`, carrying `props`.
+fn seq_coloured_item(id: u32, seq: SeqColour, props: Vec<Property>) -> Item {
+    Item {
+        payload: coded_payload_with(1, 8, seq, 15, 4, 4),
+        ..coded_item(id, 1, 8, 15, 4, 4, props)
+    }
+}
+
+/// The 8-bit RGBA samples of item 1 of a file holding `items`.
+fn rgba_of(items: Vec<Item>) -> Vec<u8> {
+    let bytes = file(1, items);
+    AvifContainer::parse(&bytes)
+        .unwrap()
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap()
+        .into_samples()
+}
+
+#[test]
+fn colr_less_item_presents_with_its_sequence_headers_matrix_and_range() {
+    let from_header = rgba_of(vec![seq_coloured_item(1, SEQ_BT709_FULL, vec![])]);
+    let from_colr = rgba_of(vec![seq_coloured_item(
+        1,
+        SEQ_UNSPECIFIED_LIMITED,
+        vec![colr(1, true)],
+    )]);
+    assert_eq!(from_header, from_colr);
+    // The header moved the result: it is not the BT.601-limited presentation of the same samples.
+    let bt601_limited = rgba_of(vec![seq_coloured_item(
+        1,
+        SEQ_UNSPECIFIED_LIMITED,
+        vec![colr(6, false)],
+    )]);
+    assert_ne!(from_header, bt601_limited);
+}
+
+#[test]
+fn colr_less_item_takes_the_range_of_a_header_without_a_colour_description() {
+    // color_description_present_flag = 0 leaves the matrix unspecified (presented as BT.601), but
+    // the coded color_range still applies.
+    let seq = SeqColour {
+        cicp: None,
+        full_range: true,
+    };
+    assert_eq!(
+        rgba_of(vec![seq_coloured_item(1, seq, vec![])]),
+        rgba_of(vec![seq_coloured_item(
+            1,
+            SEQ_UNSPECIFIED_LIMITED,
+            vec![colr(6, true)]
+        )]),
+    );
+}
+
+#[test]
+fn a_present_colr_wins_over_the_sequence_header() {
+    assert_eq!(
+        rgba_of(vec![seq_coloured_item(
+            1,
+            SEQ_BT709_FULL,
+            vec![colr(6, false)]
+        )]),
+        rgba_of(vec![seq_coloured_item(
+            1,
+            SEQ_UNSPECIFIED_LIMITED,
+            vec![colr(6, false)]
+        )]),
+    );
+}
+
+#[test]
+fn colr_less_grid_takes_its_colour_from_the_first_tiles_header() {
+    // The tiles disagree; libavif harvests an absent colr from the first, so must this.
+    let grid = |grid_props: Vec<Property>, first: SeqColour, second: SeqColour| {
+        vec![
+            Item {
+                properties: grid_props,
+                ..grid_item(1, 1, 2, 8, 4, &[2, 3])
+            },
+            Item {
+                hidden: true,
+                ..seq_coloured_item(2, first, vec![])
+            },
+            Item {
+                hidden: true,
+                ..seq_coloured_item(3, second, vec![])
+            },
+        ]
+    };
+    assert_eq!(
+        rgba_of(grid(vec![], SEQ_BT709_FULL, SEQ_UNSPECIFIED_LIMITED)),
+        rgba_of(grid(
+            vec![colr(1, true)],
+            SEQ_UNSPECIFIED_LIMITED,
+            SEQ_UNSPECIFIED_LIMITED
+        )),
+    );
+}
+
+#[test]
+fn colr_less_iden_takes_its_colour_from_its_sources_header() {
+    let iden = |iden_props: Vec<Property>, source: SeqColour| {
+        vec![
+            Item {
+                references: vec![dimg(&[2])],
+                properties: iden_props,
+                ..base_item(1, *b"iden")
+            },
+            Item {
+                hidden: true,
+                ..seq_coloured_item(2, source, vec![])
+            },
+        ]
+    };
+    assert_eq!(
+        rgba_of(iden(vec![], SEQ_BT709_FULL)),
+        rgba_of(iden(vec![colr(1, true)], SEQ_UNSPECIFIED_LIMITED)),
+    );
+}
+
+#[test]
+fn colr_less_item_with_a_malformed_header_is_refused_on_rgba_only() {
+    // A truncated sequence header (one byte) passes the still-payload peek but not the parse: the
+    // RGBA surface refuses rather than guess a colour, and the planar surface still delivers.
+    let mut payload = obu(1, &[0x18]);
+    payload.extend_from_slice(&obu(6, &[15, 4, 4]));
+    let item = Item {
+        payload,
+        ..coded_item(1, 1, 8, 15, 4, 4, vec![])
+    };
+    let bytes = file(1, vec![item]);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    assert!(
+        container
+            .decode_item_planar(1, &mut Mock::default())
+            .is_ok()
+    );
+    assert!(matches!(
+        container.decode_item_rgba8(1, &mut Mock::default()),
+        Err(error) if error.kind() == ErrorKind::InvalidInput
+    ));
+}
+
+#[test]
+fn av1_sequence_header_reads_the_primary_and_alpha_items() {
+    let bytes = file(
+        1,
+        vec![
+            seq_coloured_item(1, SEQ_BT709_FULL, vec![]),
+            alpha_aux(2, 1, 0, 4, 4),
+        ],
+    );
+    let container = AvifContainer::parse(&bytes).unwrap();
+    let image = container.image();
+
+    let primary = image.av1_sequence_header(1).unwrap();
+    assert_eq!(primary.seq_profile, 0);
+    assert!(primary.still_picture);
+    assert!(primary.reduced_still_picture_header);
+    assert_eq!((primary.max_frame_width, primary.max_frame_height), (1, 1));
+    assert_eq!(primary.color.bit_depth, 8);
+    assert_eq!(primary.color.subsampling, gamut_av1::Subsampling::Yuv420);
+    assert_eq!(
+        (
+            primary.color.color_primaries,
+            primary.color.transfer_characteristics,
+            primary.color.matrix_coefficients,
+        ),
+        (1, 1, 1)
+    );
+    assert!(primary.color.full_range);
+
+    let alpha_id = image.alpha_auxiliary_of(1).unwrap().id();
+    let alpha = image.av1_sequence_header(alpha_id).unwrap();
+    assert_eq!(alpha.color.subsampling, gamut_av1::Subsampling::Monochrome);
+    assert_eq!(alpha.color.matrix_coefficients, 2);
+    assert!(!alpha.color.full_range);
+}
+
+/// An item whose `av1C` carries `config_header` in its `configOBUs` and whose payload carries
+/// `payload_header` (when `Some`) before the frame OBU.
+fn config_obus_item(config_header: &[u8], payload_header: Option<&[u8]>) -> Item {
+    let mut record = av1c_record(3, 8);
+    record.extend_from_slice(&obu(1, config_header));
+    let mut payload = payload_header.map(|h| obu(1, h)).unwrap_or_default();
+    payload.extend_from_slice(&obu(6, &[1, 2, 2]));
+    Item {
+        properties: vec![prop_av1c(record)],
+        payload,
+        ..base_item(1, *b"av01")
+    }
+}
+
+#[test]
+fn av1_sequence_header_falls_back_to_config_obus() {
+    let header = seq_header(3, 8, SEQ_BT709_FULL);
+    let bytes = file(1, vec![config_obus_item(&header, None)]);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    let parsed = container.image().av1_sequence_header(1).unwrap();
+    assert_eq!(parsed.color.subsampling, gamut_av1::Subsampling::Yuv444);
+    assert_eq!(parsed.color.matrix_coefficients, 1);
+}
+
+#[test]
+fn av1_sequence_header_prefers_the_payload_over_config_obus() {
+    let in_config = seq_header(3, 8, SEQ_BT709_FULL);
+    let in_payload = seq_header(1, 8, SEQ_UNSPECIFIED_LIMITED);
+    let bytes = file(1, vec![config_obus_item(&in_config, Some(&in_payload))]);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    let parsed = container.image().av1_sequence_header(1).unwrap();
+    assert_eq!(parsed.color.subsampling, gamut_av1::Subsampling::Yuv420);
+    assert_eq!(parsed.color.matrix_coefficients, 2);
+}
+
+#[test]
+fn av1_sequence_header_refuses_an_item_without_one() {
+    let refused = |items: Vec<Item>, id: u32| {
+        let bytes = file(1, items);
+        let container = AvifContainer::parse(&bytes).unwrap();
+        matches!(
+            container.image().av1_sequence_header(id),
+            Err(error) if error.kind() == ErrorKind::InvalidInput
+        )
+    };
+    let coded = || coded_item(1, 1, 8, 15, 4, 4, vec![]);
+    // No item with that id.
+    assert!(refused(vec![coded()], 9));
+    // An item with no av1C (a grid).
+    assert!(refused(
+        vec![
+            grid_item(1, 1, 1, 4, 4, &[2]),
+            Item {
+                hidden: true,
+                ..coded_item(2, 1, 8, 15, 4, 4, vec![])
+            }
+        ],
+        1
+    ));
+    // An AV1 item whose payload and configOBUs both lack a sequence header.
+    let headerless = Item {
+        payload: obu(6, &[15, 4, 4]),
+        ..coded_item(1, 1, 8, 15, 4, 4, vec![])
+    };
+    assert!(refused(vec![headerless], 1));
+    // A malformed (truncated) sequence header.
+    let mut truncated = obu(1, &[0x18]);
+    truncated.extend_from_slice(&obu(6, &[15, 4, 4]));
+    let malformed = Item {
+        payload: truncated,
+        ..coded_item(1, 1, 8, 15, 4, 4, vec![])
+    };
+    assert!(refused(vec![malformed], 1));
+}
