@@ -24,7 +24,7 @@ future `jxl`/`av2` module can never collide with an existing name.
 | `av1::inverse_adst` / `av1::forward_adst` | same shape, `n ∈ 2..=4`; DST-VII at size 4, DST-IV at 8/16 (a spec quirk, documented) | frozen |
 | `av1::inverse_identity` / `av1::forward_identity` | same shape, `n ∈ 2..=5`; pure per-element √2-step scaling | frozen |
 | `av1::forward_wht4x4` / `av1::inverse_wht4x4` | complete 2-D 4×4 lossless block pair over by-value `[i32; 16]`; exact algebraic round-trip | frozen |
-| `jpeg::fdct8x8` / `jpeg::idct8x8` | in-place 2-D 8×8 kernels over a raster-order `&mut [i32; 64]`; separable `f64` evaluation of the T.81 §A.3.3 ideal equations, rounded once | frozen; fast fixed-point kernels are additive |
+| `jpeg::fdct8x8` / `jpeg::idct8x8` | in-place 2-D 8×8 kernels over a raster-order `&mut [i32; 64]`; separable `f64` evaluation of the T.81 §A.3.3 ideal equations, rounded once | frozen, signature *and* output (see the decision below); fast fixed-point kernels are additive new functions |
 | `math::round2` `math::round2_signed` `math::clip3` `math::round_div_nearest` | scalar integer ops: AV1 §4.7 rounding/clamp plus the AV1+VP8 forward-quantize rounding | frozen; new fns are additive |
 
 Adding modules or functions stays backward-compatible; removing or reshaping any of the above
@@ -63,6 +63,14 @@ would not.
 - **`math` ops carry AV1 §4.7 names but serve every codec.** `Round2`/`Round2Signed`/`Clip3` are
   the operations other codec specs define equivalents of, and `round_div_nearest` is already
   shared by the AV1 and VP8 forward quantizers — that is why they live outside the `av1` module.
+- **The `jpeg` pair is frozen at v1, output included.** Issue #192 froze the `av1`/`math`
+  surface before the `jpeg` module landed; this entry extends the freeze to it (issue #545).
+  `fdct8x8`/`idct8x8` are documented as the §A.3.3 ideal values rounded once (ties away from
+  zero), and `gamut-jpeg`'s encoded coefficients and decoded samples follow from that exact
+  output. A fixed-point fast kernel cannot reproduce it bit for bit, so it may not replace either
+  body: fast kernels arrive as *new* functions beside the pair, which stays the reference. Only
+  internals that keep every output identical (e.g. a const cosine table) may change under the
+  frozen signatures.
 
 ## Deferred / tracked follow-ups (all additive — none blocks v1)
 
@@ -71,7 +79,8 @@ would not.
   this crate. `gamut-tiff` does not declare a dsp edge today; it adds one, or reaches the kernels
   through `gamut-jpeg`, when that compression lands.
 - **Fast fixed-point `jpeg` DCT kernels** — the shipped pair favours a legible spec-faithful
-  reference (issue #28 scope note); faster kernels land behind the same signatures.
+  reference (issue #28 scope note); faster kernels land as new functions beside the pair, which
+  keeps its exact output (see the settled decision above).
 - **`jxl` / `av2` modules** — kernels for the JPEG XL and AV2 codecs as those stub crates grow
   real surfaces (`av2` may re-export `av1` kernels where AVM inherits them).
 - **`forward_adst` const basis tables** — replace the per-call impulse-response derivation with
