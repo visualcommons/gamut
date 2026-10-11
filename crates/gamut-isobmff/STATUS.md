@@ -35,7 +35,7 @@ files.
 | P3 | 14496-12 | **Keystone** — `iloc` extent back-patch + shared `ipco` dedup → per-item `ipma` (8/16-bit forms) | ✅ done |
 | P4 | 14496-12; 23008-12 | Reader: bounds-checked box walk including `largesize`, size-0, and UUID user types; foreign-file repertoire (`iloc` v0–v2, `mdat`/`idat`, base offsets, 0/4/8-byte fields, multi-extent, `pitm`/`ipma` v0–v1, `infe` v2–v3, `iref` v0–v1); motion-photo tolerance (stop at a second top-level `ftyp` / at a malformed trailing box once `ftyp`+`meta` are seen); `read(&write)` round-trip; unrecognised property boxes preserved verbatim | ✅ done |
 | P5 | — | Robustness: truncation/overrun/size/index guards ✅; counts never trusted for allocation ✅; total payload capped at input size (anti amplification) ✅; spec fixtures independent of the writer ✅; fuzz corpus ☐ | ◑ partial |
-| P6 | — | Differential oracle: libavif/dav1d parses the container and reproduces pixels (via `gamut-avif/tests/decode_roundtrip.rs`) | ✅ via codec |
+| P6 | — | Differential oracle: libavif/dav1d parses the container and reproduces pixels (via `gamut-avif/tests/decode_roundtrip.rs`); a libheif-written `mdcv` reads back as the typed property with the values libheif was given (`gamut-heic/tests/oracle_isobmff_mdcv.rs`) | ✅ via codec |
 | P7 | 14496-12 §4.2; C2PA 2.4 §A.5.3 | Top-level boxes the model does not otherwise own (`IsoBmffImage::top_level_boxes`, #443): retained on read with the position they were found at, written after `ftyp` (`AfterFtyp`) or after `mdat` (`Trailing`); `read`→`write` byte-identical for a file *this crate wrote* carrying them (foreign files stay equivalent-but-normalised); libavif decodes an AVIF carrying a C2PA `uuid` box unchanged (`gamut-avif/tests/remux_roundtrip.rs`) | ✅ done |
 
 ## Demonstration surface
@@ -141,12 +141,6 @@ writer's `BoxBuilder` stay crate-private. Additive (semver-minor).
   `PropertyKind::MasteringDisplayColourVolume`: its 24-byte layout is the 14496-12 syntax that
   AV1-ISOBMFF §2.3.4 states is identical to `SmDm`'s. The reader rejects an `mdcv` whose body is
   not exactly 24 bytes, which it previously carried verbatim as `Other`.)
-- **External-writer `mdcv` fixture** (#699, remainder of #645). The typed `mdcv` layout is pinned
-  only by hand-authored exact-byte tests written from the 14496-12 syntax; no committed fixture
-  carries an `mdcv` box. The pinned libavif does not write one (`src/write.c` hard-codes
-  `hasMdcv = AVIF_FALSE`), so the external writer is libheif: a libheif-written `mdcv` read back
-  unchanged through this reader, hosted in `gamut-heic`, which already owns the libheif oracle
-  (this crate takes no oracle dev-dependency).
 - **Writer emission options** (`idat` placement, multi-extent, `iloc` v1/v2, 32-bit-id boxes).
   The writer intentionally normalises; if a consumer ever needs layout control it arrives as a
   separate options-taking entry point (semver-minor), not a change to `write`.
