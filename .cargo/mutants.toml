@@ -245,7 +245,7 @@ exclude_re = [
     # `x = (x << 1) | u32::from(bit)` and `x = (x << take) | u64::from(f(take)?)`. The shift vacates
     # exactly the bits the right operand occupies -- one bit, or `take` bits against a value `f(take)`
     # bounds below `2^take` -- so the operands are disjoint and `|` == `^` for every input. Provably
-    # equivalent: the same shape as `BoolDecoder::get_literal` and `backend::BitReader::bits` below.
+    # equivalent: the same shape as `BoolDecoder::get_literal` below.
     # Path-anchored because a bare `::f` would also match gamut-jpeg's unrelated `BitReader::fetch`.
     # (`| -> &` in the same lines IS killed by `f_reads_back_what_the_writer_wrote`, which reads
     # fields with bits set, so only the `^` mutant is excluded.)
