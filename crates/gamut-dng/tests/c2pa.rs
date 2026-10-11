@@ -546,7 +546,9 @@ fn an_interior_image_less_page_is_surfaced_per_page() {
     assert_eq!(decoded.interior_extra[0].page, 1);
     assert_eq!(decoded.interior_extra[0].tags, [software("a")]);
     assert_eq!(decoded.trailing_extra, [software("b")]);
-    assert!(!decoded.ifd0_extra.iter().any(|t| t.tag == 305));
+    // IFD 0 carries the encoder's own `Software`; neither appended page's value is in it.
+    assert!(!decoded.ifd0_extra.contains(&software("a")));
+    assert!(!decoded.ifd0_extra.contains(&software("b")));
 }
 
 /// A store this decoder *does* accept is consumed, not also reported as an unmodelled field —
