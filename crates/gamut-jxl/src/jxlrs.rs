@@ -60,6 +60,7 @@ pub(crate) fn info(data: &[u8]) -> Result<JxlInfo> {
         },
         has_alpha,
         animated: basic.animation.is_some(),
+        uses_original_profile: basic.uses_original_profile,
     })
 }
 
@@ -123,6 +124,16 @@ pub struct JxlInfo {
     pub has_alpha: bool,
     /// Whether the stream is animated (which pixel decoding rejects).
     pub animated: bool,
+    /// Whether the samples are coded in the stream's original colour space, so decoded pixels are
+    /// in the colour encoding the stream embeds — the inverse of the image header's `xyb_encoded`
+    /// flag (`references/jxl/format_overview.md`, "Color Management").
+    ///
+    /// `false` for an XYB-coded (lossy) stream, whose signalled colour space is only a suggested
+    /// target: decoded pixels are rendered to the embedded *structured* encoding where it has one,
+    /// and to sRGB when it embeds an ICC profile (no colour-management transform is applied), so
+    /// that profile describes the original image, not the decoded pixels — re-tagging them with it
+    /// mislabels them.
+    pub uses_original_profile: bool,
 }
 
 /// How much of the image a best-effort decode of a possibly-truncated stream produced.

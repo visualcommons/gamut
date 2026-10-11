@@ -15,7 +15,7 @@ use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
 use gamut::webp::{Effort as WebpEffort, NearLossless as WebpNearLossless, WebpEncoder};
 
 use crate::error::CliError;
-use crate::input::{decode_rgb8, decode_rgba8};
+use crate::input::{InputMetadata, NativeImage, decode_native, decode_rgb8, decode_rgba8};
 
 /// Arguments for `gamut convert`.
 #[derive(Args)]
@@ -100,8 +100,11 @@ pub(crate) struct ConvertArgs {
     /// is the one that loses nothing. Anything that cannot be carried — the C2PA manifest store,
     /// signed over the bytes of the file it was made for — and anything carried in a shape the
     /// PNG specification does not endorse is reported on stderr rather than passed over in
-    /// silence. Currently applies only to the PNG output path with a PNG input; every other pair
-    /// drops metadata regardless.
+    /// silence. Applies to the PNG output path with a PNG input, and to AVIF output, which carries
+    /// the ICC profile and Exif of a PNG, JPEG, WebP or JPEG XL input (the ICC profile only where
+    /// it describes the decoded pixels — not for a lossy, XYB-coded JPEG XL, and not for a grey
+    /// image with alpha or 16-bit samples, which AVIF codes as colour); every other pair drops
+    /// metadata regardless.
     #[arg(long)]
     strip_metadata: bool,
 }
@@ -109,7 +112,8 @@ pub(crate) struct ConvertArgs {
 /// Output container/codec for `gamut convert`.
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum OutputFormat {
-    /// AVIF (8-bit RGB; lossless or lossy intra via `--qindex`).
+    /// AVIF — lossless or lossy intra via `--qindex`; keeps the input's alpha and grey, and codes
+    /// a 16-bit input at 12 bits.
     Avif,
     /// WebP — lossless (VP8L) or lossy (VP8, with `--lossy`); transparency is preserved.
     Webp,
@@ -210,22 +214,34 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
     let mut out = Vec::new();
     let (raw_len, dims) = match format {
         OutputFormat::Avif => {
-            let (rgb, dims) = decode_rgb8(&args.input)?;
+            // The input's own layout, so alpha and 16-bit precision reach the encoder (issue
+            // #663); a 16-bit input codes at the encoder's default depth, 12 bits.
+            let (image, metadata) = decode_native(&args.input)?;
+            let dims = image.dimensions();
             tracing::info!(
                 width = dims.width,
                 height = dims.height,
-                bytes = rgb.len(),
+                bytes = image.byte_len(),
                 "decoded input"
             );
             // `AvifEncoder` migrated from a raw `base_q_idx` to a lossless()/lossy(quality) model;
             // qindex 0 keeps the lossless default, any nonzero value selects lossy at --quality.
-            let encoder = if args.qindex == 0 {
+            let mut encoder = if args.qindex == 0 {
                 AvifEncoder::lossless()
             } else {
                 AvifEncoder::lossy(args.quality)
             };
-            encoder.encode_image(ImageRef::<Rgb8>::new(&rgb, dims)?, &mut out)?;
-            (rgb.len(), dims)
+            if !args.strip_metadata {
+                encoder = with_avif_metadata(encoder, metadata);
+            }
+            match &image {
+                NativeImage::Gray8(img) => encoder.encode_image(img.as_ref(), &mut out)?,
+                NativeImage::Rgb8(img) => encoder.encode_image(img.as_ref(), &mut out)?,
+                NativeImage::Rgba8(img) => encoder.encode_image(img.as_ref(), &mut out)?,
+                NativeImage::Rgb16(img) => encoder.encode_image(img.as_ref(), &mut out)?,
+                NativeImage::Rgba16(img) => encoder.encode_image(img.as_ref(), &mut out)?,
+            };
+            (image.byte_len(), dims)
         }
         OutputFormat::Webp => {
             // RGBA so transparency survives; `encode_rgba8` emits a simple file when fully opaque.
@@ -411,6 +427,29 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
 /// not do yet. Failing to *read* metadata must never fail a conversion whose pixels are fine.
 fn png_metadata(path: &Path) -> Option<gamut::png::PngMetadata> {
     gamut::png::metadata(&std::fs::read(path).ok()?).ok()
+}
+
+/// Carries the input's ICC profile and Exif into an AVIF encode, both verbatim.
+///
+/// The encoder does not validate the Exif stream, and libavif rejects a whole file whose Exif item
+/// is not a TIFF stream — so a payload that does not open with a TIFF byte-order header (`II*\0` or
+/// `MM\0*`, TIFF 6.0 §2) is left out with a warning rather than written into a file a reader then
+/// refuses. Every input decoder already strips JPEG's `Exif\0\0` prefix; one still present is a
+/// malformed WebP `EXIF` chunk, and it falls under the same rule.
+fn with_avif_metadata(mut encoder: AvifEncoder, metadata: InputMetadata) -> AvifEncoder {
+    if let Some(icc) = &metadata.icc {
+        tracing::info!(bytes = icc.len(), "carrying input ICC profile");
+        encoder = encoder.with_icc_profile(icc);
+    }
+    if let Some(exif) = &metadata.exif {
+        if exif.starts_with(b"II*\0") || exif.starts_with(b"MM\0*") {
+            tracing::info!(bytes = exif.len(), "carrying input Exif");
+            encoder = encoder.with_exif(exif);
+        } else {
+            tracing::warn!("input metadata not carried — the Exif payload is not a TIFF stream");
+        }
+    }
+    encoder
 }
 
 /// Picks the output format from `--format`, falling back to the output file's extension.

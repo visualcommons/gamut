@@ -375,8 +375,9 @@ impl JxlDecoder {
     ///
     /// Only the stream's headers are parsed; no pixels are decoded. The returned bytes are exactly
     /// the attached profile (what [`crate::ColorSpec::Icc`] set at encode time, when the stream was
-    /// produced by gamut). This is a metadata accessor: the pixel-decoding paths still return
-    /// samples in the stream's own colour encoding, without applying any ICC transform.
+    /// produced by gamut). This is a metadata accessor: the pixel-decoding paths apply no ICC
+    /// transform, so decoded samples are in this profile only when
+    /// [`JxlInfo::uses_original_profile`] is `true`; an XYB-coded stream decodes to sRGB instead.
     ///
     /// # Errors
     ///
