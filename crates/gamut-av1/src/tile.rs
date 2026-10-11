@@ -23,12 +23,16 @@
 //!
 //! The frame is coded on the MI-unit grid (`mi_cols*4 × mi_rows*4`, dimensions rounded up to a
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
+//!
+//! How many of those candidates the lossy path actually tries is a [`Search`], resolved from the
+//! caller's `Speed` preset; the full search is the default.
 
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::{ChromaSubsampling, Planar8, Planar16, clip_pixel};
 use gamut_dsp::math::{round2, round2_signed};
 
 use crate::cdf;
+use crate::encoder::Speed;
 use crate::geom::{PlaneGeom, has_chroma, plane_residual_size};
 use crate::quant::{ac_q, dc_q, dequant, quantize};
 use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
@@ -94,6 +98,105 @@ const LUMA_MODES: [u8; 13] = [
 const DIRECTIONAL_MODES: [u8; 8] = [
     V_PRED, H_PRED, D45_PRED, D135_PRED, D113_PRED, D157_PRED, D203_PRED, D67_PRED,
 ];
+
+/// The non-directional subset of [`LUMA_MODES`], in the same order (so `DC_PRED` stays first and
+/// keeps winning ties): the 4×4 candidate set when directional modes are pruned.
+const NONDIR_LUMA_MODES: [u8; 5] = [
+    DC_PRED,
+    SMOOTH_PRED,
+    SMOOTH_V_PRED,
+    SMOOTH_H_PRED,
+    PAETH_PRED,
+];
+
+/// Every `AngleDeltaY` (§5.11.42), in the order the full search tries them.
+const ALL_ANGLE_DELTAS: [i8; 7] = [-3, -2, -1, 0, 1, 2, 3];
+
+/// Every `CflAlpha` magnitude (§5.11.45), each tried with both signs.
+const ALL_CFL_MAGNITUDES: [i32; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
+/// The `TX_SET_INTRA_2` types tried after `DCT_DCT`, with their `Tx_Type_Intra_Inv_Set2` symbols,
+/// cheapest-to-try-first: a pruned search keeps a prefix.
+const TX_TYPE_TRIALS: [(TxType, usize); 4] = [
+    (TxType::AdstAdst, 2),
+    (TxType::AdstDct, 3),
+    (TxType::DctAdst, 4),
+    (TxType::Idtx, 0),
+];
+
+/// The mode-decision search a frame runs: a [`Speed`] preset resolved into per-tool candidate
+/// sets. Every field narrows what the encoder *tries*; none changes how a chosen candidate is
+/// signalled or reconstructed, so every value codes a conformant, bit-exact stream.
+///
+/// The limits are candidate lists rather than on/off flags wherever an off flag would only skip
+/// work whose result is already discarded: an empty list does no work, and there is no guard left
+/// whose inversion no output could detect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Search {
+    /// The 4×4 luma candidates, `DC_PRED` first.
+    modes_4x4: &'static [u8],
+    /// The directional base modes a square ≥8×8 block tries.
+    directional: &'static [u8],
+    /// The `AngleDeltaY` values each directional base mode is tried at.
+    angle_deltas: &'static [i8],
+    /// How many recursive filter-intra modes (`0..n`) a `DC_PRED` block tries.
+    filter_intra_modes: u8,
+    /// The CfL alpha magnitudes tried, or `None` to code chroma `DC_PRED` without searching.
+    cfl_magnitudes: Option<&'static [i32]>,
+    /// How many of [`TX_TYPE_TRIALS`] a square luma transform tries after `DCT_DCT`.
+    tx_type_trials: usize,
+    /// The square sizes `decide_rect` may code as two rectangular halves.
+    rect_sizes: &'static [usize],
+    /// The smallest square block side the partition search may *choose* to split: 8 lets it reach
+    /// 4×4 leaves, 16 stops it at 8×8. A split the frame edge forces is taken whatever this says.
+    /// Stored as the split threshold itself rather than as the leaf size, so the comparison that
+    /// reads it has no arithmetic whose mutants would agree on every block size.
+    split_from: usize,
+    /// Whether `decide_palette` looks for a luma palette.
+    palette: bool,
+}
+
+impl Search {
+    /// The search a [`Speed`] preset runs. The table is documented on [`Speed`].
+    pub(crate) fn for_speed(speed: Speed) -> Self {
+        let thorough = Self {
+            modes_4x4: &LUMA_MODES,
+            directional: &DIRECTIONAL_MODES,
+            angle_deltas: &ALL_ANGLE_DELTAS,
+            filter_intra_modes: 5,
+            cfl_magnitudes: Some(&ALL_CFL_MAGNITUDES),
+            tx_type_trials: TX_TYPE_TRIALS.len(),
+            rect_sizes: &[16, 32],
+            split_from: 8,
+            palette: true,
+        };
+        let balanced = Self {
+            angle_deltas: &[0],
+            ..thorough
+        };
+        let fast = Self {
+            filter_intra_modes: 0,
+            cfl_magnitudes: Some(&[1, 2, 4, 8, 16]),
+            tx_type_trials: 1,
+            ..balanced
+        };
+        match speed {
+            Speed::Thorough => thorough,
+            Speed::Balanced => balanced,
+            Speed::Fast => fast,
+            Speed::Fastest => Self {
+                modes_4x4: &NONDIR_LUMA_MODES,
+                directional: &[],
+                cfl_magnitudes: None,
+                tx_type_trials: 0,
+                rect_sizes: &[],
+                split_from: 16,
+                palette: false,
+                ..fast
+            },
+        }
+    }
+}
 
 /// `Filter_Intra_Mode_To_Intra_Dir[INTRA_FILTER_MODES]` (§9.3): maps a filter-intra mode to the
 /// `intraDir` used to select the 16×16 transform-type CDF (§9.4). Order:
@@ -503,6 +606,8 @@ pub(crate) struct FrameEncoder<'a> {
     /// `[(by + 1) * BD_STRIDE + (bx + 1)]` for superblock-relative `(by, bx)` in `-1..=16`. Drives
     /// the above-right / below-left reference-sample availability for directional prediction.
     block_decoded: Vec<u8>,
+    /// The candidate sets the lossy mode decisions search (full by default).
+    search: Search,
 }
 
 /// Row stride of [`FrameEncoder::block_decoded`]: a 64×64 superblock is 16 MI wide, plus the `-1`
@@ -646,7 +751,14 @@ impl<'a> FrameEncoder<'a> {
             sb_r: 0,
             sb_c: 0,
             block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
+            search: Search::for_speed(Speed::default()),
         }
+    }
+
+    /// Replaces the mode-decision search (the full one by default).
+    pub(crate) fn with_search(mut self, search: Search) -> Self {
+        self.search = search;
+        self
     }
 
     /// `clear_block_decoded_flags` (§5.11.3) for the luma plane of the superblock at MI `(r, c)`:
@@ -835,10 +947,13 @@ impl<'a> FrameEncoder<'a> {
                 // and one matching rectangular transform.
                 cdf::encode(&mut self.sym, d, self.cdfs.partition(bsl, ctx));
                 d
-            } else if (8..=64).contains(&bw) && !self.should_split(r, c, bw) {
+            } else if (8..=64).contains(&bw)
+                && (bw < self.search.split_from || !self.should_split(r, c, bw))
+            {
                 // Lossy: an 8×8…64×64 region coded as a single PARTITION_NONE block + one
                 // TX_8X8…TX_64X64 when it is smooth enough; otherwise split for per-block
-                // mode/transform adaptation (each SPLIT halves, recursing down to 4×4 as needed).
+                // mode/transform adaptation (each SPLIT halves, recursing down to 4×4 as needed,
+                // or until the block is smaller than the search's `split_from`).
                 cdf::encode(&mut self.sym, 0, self.cdfs.partition(bsl, ctx)); // PARTITION_NONE
                 0
             } else {
@@ -1104,6 +1219,11 @@ impl<'a> FrameEncoder<'a> {
     /// and the per-pixel index map. This is a quality decision; any choice reconstructs
     /// bit-exactly, so only the signaling has to be correct.
     fn decide_palette(&self, r: usize, c: usize, bw: usize) -> Option<PaletteBlock> {
+        // A pruned search does not look for a palette at all — which also stops `should_split`
+        // keeping a palette-able region whole for one.
+        if !self.search.palette {
+            return None;
+        }
         let (sx, sy) = (c * 4, r * 4);
         // Distinct luma colors, kept sorted as they are found. A presence array would have to be
         // `1 << BitDepth` entries and reallocated per candidate block; the palette can hold at most
@@ -1335,7 +1455,9 @@ impl<'a> FrameEncoder<'a> {
     /// transform. A quality decision (every choice reconstructs bit-exactly); the threshold is a
     /// deterministic placeholder. `None` falls through to the NONE/SPLIT decision.
     fn decide_rect(&self, r: usize, c: usize, bw: usize) -> Option<usize> {
-        if bw != 16 && bw != 32 {
+        // 16 and 32 under the full search, none under a pruned one. A list rather than the two
+        // `bw != 16 && bw != 32` comparisons it replaced, which also retires that `&&`'s mutant.
+        if !self.search.rect_sizes.contains(&bw) {
             return None;
         }
         let n4 = bw / 4;
@@ -1974,12 +2096,7 @@ impl<'a> FrameEncoder<'a> {
             self.quantize_tx(res, tx_size, TxType::DctDct),
         );
         let mut best_cost = cost(&best.2);
-        for (tx, sym) in [
-            (TxType::AdstAdst, 2usize),
-            (TxType::AdstDct, 3),
-            (TxType::DctAdst, 4),
-            (TxType::Idtx, 0),
-        ] {
+        for &(tx, sym) in &TX_TYPE_TRIALS[..self.search.tx_type_trials] {
             let levels = self.quantize_tx(res, tx_size, tx);
             let c = cost(&levels);
             if c < best_cost {
@@ -2606,7 +2723,8 @@ impl<'a> FrameEncoder<'a> {
         };
         let mut best_mode = DC_PRED;
         let mut best_sad = sad(&self.predict_4x4(0, sx, sy, DC_PRED));
-        for &mode in &LUMA_MODES[1..] {
+        // Both candidate sets open with `DC_PRED`, the baseline just scored.
+        for &mode in &self.search.modes_4x4[1..] {
             let s = sad(&self.predict_4x4(0, sx, sy, mode));
             if s < best_sad {
                 best_sad = s;
@@ -2617,7 +2735,7 @@ impl<'a> FrameEncoder<'a> {
         // so the extra `use_filter_intra` signaling is spent only when it pays off.
         let mut best_fi: Option<u8> = None;
         let mut best_fi_sad = i32::MAX;
-        for fi in 0..5u8 {
+        for fi in 0..self.search.filter_intra_modes {
             let s = sad(&self.predict_filter_intra(0, sx, sy, 4, fi));
             if s < best_fi_sad {
                 best_fi_sad = s;
@@ -2684,8 +2802,8 @@ impl<'a> FrameEncoder<'a> {
                 best = (mode, 0);
             }
         }
-        for &mode in &DIRECTIONAL_MODES {
-            for ad in -3..=3i8 {
+        for &mode in self.search.directional {
+            for &ad in self.search.angle_deltas {
                 let s = sad(&self.predict_directional(0, sx, sy, n, mode, ad));
                 if s < best_sad {
                     best_sad = s;
@@ -2696,7 +2814,7 @@ impl<'a> FrameEncoder<'a> {
         // Recursive filter-intra (signaled as DC_PRED + use_filter_intra); strict improvement only.
         let mut best_fi: Option<u8> = None;
         let mut best_fi_sad = i32::MAX;
-        for fi in 0..5u8 {
+        for fi in 0..self.search.filter_intra_modes {
             let s = sad(&self.predict_filter_intra(0, sx, sy, n, fi));
             if s < best_fi_sad {
                 best_fi_sad = s;
@@ -2762,6 +2880,8 @@ impl<'a> FrameEncoder<'a> {
     /// applied to the true reconstruction in [`Self::apply_cfl`], so the result is bit-exact either
     /// way). Returns `(CflAlphaU, CflAlphaV)`, each in `-16..=16` and not both zero.
     fn select_cfl(&self, sx: usize, sy: usize, w: usize, h: usize) -> Option<(i32, i32)> {
+        // A search without CfL codes plain `DC_PRED` chroma and skips the luma pass below.
+        let magnitudes = self.search.cfl_magnitudes?;
         // Source luma high-frequency, mirroring apply_cfl's box sum but over the *source* rather
         // than the reconstruction. Unlike apply_cfl this needs no edge clamp: `sample` already
         // replicates at the plane edge.
@@ -2799,10 +2919,11 @@ impl<'a> FrameEncoder<'a> {
                 }
                 s
             };
-            // alpha 0 (plain DC) is the baseline; CflAlpha magnitudes are 1..=16, either sign.
+            // alpha 0 (plain DC) is the baseline; CflAlpha magnitudes are 1..=16 (the search's
+            // subset of them), either sign.
             let mut best = 0i32;
             let mut best_sad = sad(0);
-            for mag in 1..=16 {
+            for &mag in magnitudes {
                 for &a in &[mag, -mag] {
                     let s = sad(a);
                     if s < best_sad {
@@ -3614,6 +3735,224 @@ mod tests {
         );
         let e = FrameEncoder::new(&flat, 40);
         assert_eq!(e.select_cfl(0, 0, 4, 4), None);
+    }
+
+    /// `planes`' encoder at `qindex`, running the search `speed` resolves to.
+    fn at_speed(planes: &Planar8, qindex: u8, speed: Speed) -> FrameEncoder<'_> {
+        FrameEncoder::new(planes, qindex).with_search(Search::for_speed(speed))
+    }
+
+    #[test]
+    fn select_cfl_tries_only_the_preset_alpha_ladder() {
+        // Chroma rising 4 per step against luma rising 128 in `L` wants alpha 2 (derived in the
+        // test above). 2 is on the thinned `Fast` ladder, so that preset still finds it; the
+        // `Fastest` preset searches no alpha at all and codes plain DC_PRED chroma.
+        let up = planes_420_with(16, 16, |p, x, _| {
+            if p == 0 {
+                (100 + x * 8) as u8
+            } else {
+                (122 + x * 4) as u8
+            }
+        });
+        assert_eq!(
+            at_speed(&up, 40, Speed::Fast).select_cfl(0, 0, 4, 4),
+            Some((2, 2))
+        );
+        assert_eq!(
+            at_speed(&up, 40, Speed::Fastest).select_cfl(0, 0, 4, 4),
+            None
+        );
+
+        // Chroma rising 6 per step wants alpha 3, which the thinned ladder does not hold: `Fast`
+        // must settle on a ladder rung instead.
+        let steep = planes_420_with(16, 16, |p, x, _| {
+            if p == 0 {
+                (100 + x * 8) as u8
+            } else {
+                (119 + x * 6) as u8
+            }
+        });
+        assert_eq!(
+            at_speed(&steep, 40, Speed::Thorough).select_cfl(0, 0, 4, 4),
+            Some((3, 3))
+        );
+        let (au, _) = at_speed(&steep, 40, Speed::Fast)
+            .select_cfl(0, 0, 4, 4)
+            .expect("correlated chroma still wants CfL");
+        assert!([2, 4].contains(&au), "alpha {au} is not on the Fast ladder");
+    }
+
+    #[test]
+    fn select_tx_type_tries_only_the_preset_types() {
+        // A lone non-DC impulse is the residual IDTX codes best (see
+        // `tx_type_selection_matches_set2_mapping`). `Fast` tries DCT_DCT and ADST_ADST only, and
+        // `Fastest` DCT_DCT alone, so neither may answer IDTX.
+        let p = grey4x4();
+        let mut impulse = [0i32; 16];
+        impulse[5] = 220;
+        let pick = |speed| {
+            let (tx, sym, _) = at_speed(&p, 48, speed).select_tx_type(&impulse, TxSize::Tx4x4);
+            (tx, sym)
+        };
+        assert!(matches!(pick(Speed::Thorough), (TxType::Idtx, 0)));
+        assert!(matches!(
+            pick(Speed::Fast),
+            (TxType::DctDct, 1) | (TxType::AdstAdst, 2)
+        ));
+        assert!(matches!(pick(Speed::Fastest), (TxType::DctDct, 1)));
+    }
+
+    #[test]
+    fn decide_palette_is_skipped_by_the_fastest_preset() {
+        // Two luma colours over flat mid-grey chroma (the DC prediction of a block with no
+        // neighbours) is a palette block under every other preset.
+        let two = flat_chroma_luma(
+            16,
+            ChromaSubsampling::Cs444,
+            |x, _| {
+                if x < 8 { 30 } else { 210 }
+            },
+        );
+        assert!(
+            at_speed(&two, 40, Speed::Fast)
+                .decide_palette(0, 0, 16)
+                .is_some()
+        );
+        assert!(
+            at_speed(&two, 40, Speed::Fastest)
+                .decide_palette(0, 0, 16)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn decide_rect_is_skipped_by_the_fastest_preset() {
+        // A midline edge between two flat halves is PARTITION_VERT under the full search
+        // (`a_vertical_split_needs_both_halves_smooth_and_a_textured_whole`).
+        let edge = flat_chroma_luma(
+            16,
+            ChromaSubsampling::Cs444,
+            |x, _| {
+                if x < 8 { 20 } else { 200 }
+            },
+        );
+        assert_eq!(
+            at_speed(&edge, 40, Speed::Fast).decide_rect(0, 0, 16),
+            Some(2)
+        );
+        assert_eq!(
+            at_speed(&edge, 40, Speed::Fastest).decide_rect(0, 0, 16),
+            None
+        );
+    }
+
+    /// A 64x64 identity frame of high-contrast texture: every 8x8 is textured enough to split.
+    fn busy64() -> Planar8 {
+        let mut rgb = vec![0u8; 64 * 64 * 3];
+        for (i, px) in rgb.chunks_exact_mut(3).enumerate() {
+            let (x, y) = (i % 64, i / 64);
+            px.copy_from_slice(&[((x * 37) ^ (y * 91)) as u8, (x * 13 + y * 7) as u8, 128]);
+        }
+        Planar8::from_rgb8_identity(&rgb, 64, 64).unwrap()
+    }
+
+    #[test]
+    fn encode_partition_stops_splitting_at_the_preset_floor() {
+        // `Mi_Width_Log2` 0 is a 4-sample-wide block. Under the full search this texture splits
+        // down to 4x4 leaves; the `Fastest` preset stops choosing a split below 8x8, and a 64x64
+        // frame forces none.
+        let p = busy64();
+        let leaves = |speed| {
+            let mut e = at_speed(&p, 40, speed);
+            e.clear_block_decoded(0, 0);
+            e.encode_partition(0, 0, 64);
+            e.mi_bsl.iter().filter(|&&bsl| bsl == 0).count()
+        };
+        assert!(leaves(Speed::Thorough) > 0, "the full search reaches 4x4");
+        assert_eq!(leaves(Speed::Fastest), 0, "no 4x4 leaf by choice");
+    }
+
+    /// Off-axis stripes: content directional prediction wins on, at a base angle plus a delta.
+    fn stripes(x: f64, y: f64) -> f64 {
+        128.0 + 90.0 * ((x * 0.8 + y * 0.55) / 2.3).sin() + 20.0 * (y / 5.0).cos()
+    }
+
+    /// Luma decisions of the square-block mode searches over a 64x64 frame (one superblock) whose
+    /// luma is `luma(x, y)`, with the reconstruction primed to the source so every predictor sees
+    /// real neighbours: `(YMode, AngleDeltaY, filter-intra)` for each interior 8x8, then for each
+    /// interior 4x4.
+    fn mode_decisions(
+        speed: Speed,
+        luma: fn(f64, f64) -> f64,
+    ) -> (Vec<(u8, i8, Option<u8>)>, Vec<(u8, Option<u8>)>) {
+        const N: usize = 64;
+        let mut rgb = vec![0u8; N * N * 3];
+        for (i, px) in rgb.chunks_exact_mut(3).enumerate() {
+            let v = luma((i % N) as f64, (i / N) as f64);
+            px.copy_from_slice(&[128, v as u8, 128]);
+        }
+        let p = Planar8::from_rgb8_identity(&rgb, N as u32, N as u32).unwrap();
+        let mut e = at_speed(&p, 40, speed);
+        let cw = e.geom[0].coded_w;
+        for y in 0..N {
+            for x in 0..N {
+                e.recon[0][y * cw + x] = e.sample(0, x, y) as u16;
+            }
+        }
+        e.block_decoded.iter_mut().for_each(|b| *b = 1);
+        let mut nxn = Vec::new();
+        let mut four = Vec::new();
+        for sy in (8..N - 8).step_by(8) {
+            for sx in (8..N - 8).step_by(8) {
+                nxn.push(e.select_luma_mode_nxn(sx, sy, 8));
+            }
+        }
+        for sy in (4..N - 4).step_by(4) {
+            for sx in (4..N - 4).step_by(4) {
+                four.push(e.select_luma_mode(sx, sy));
+            }
+        }
+        (nxn, four)
+    }
+
+    #[test]
+    fn select_luma_mode_nxn_refines_angles_only_under_the_full_search() {
+        let (thorough, _) = mode_decisions(Speed::Thorough, stripes);
+        assert!(
+            thorough.iter().any(|&(_, ad, _)| ad != 0),
+            "off-axis stripes take an angle refinement somewhere: {thorough:?}"
+        );
+        let (balanced, _) = mode_decisions(Speed::Balanced, stripes);
+        assert!(balanced.iter().all(|&(_, ad, _)| ad == 0), "{balanced:?}");
+    }
+
+    /// Smooth, curved shading: content the recursive filter-intra predictor wins on.
+    fn shading(x: f64, y: f64) -> f64 {
+        128.0 + 60.0 * (x / 9.0).sin() * (y / 11.0).cos() + 0.4 * x
+    }
+
+    #[test]
+    fn filter_intra_is_tried_only_below_the_fast_preset() {
+        let (nxn, four) = mode_decisions(Speed::Balanced, shading);
+        assert!(
+            nxn.iter().any(|d| d.2.is_some()) && four.iter().any(|d| d.1.is_some()),
+            "some block of each size prefers filter-intra: {nxn:?} {four:?}"
+        );
+        let (nxn, four) = mode_decisions(Speed::Fast, shading);
+        assert!(nxn.iter().all(|d| d.2.is_none()), "{nxn:?}");
+        assert!(four.iter().all(|d| d.1.is_none()), "{four:?}");
+    }
+
+    #[test]
+    fn directional_modes_are_tried_only_below_the_fastest_preset() {
+        let (nxn, four) = mode_decisions(Speed::Fast, stripes);
+        assert!(
+            nxn.iter().any(|d| is_directional(d.0)) && four.iter().any(|d| is_directional(d.0)),
+            "stripes pick a directional mode at each size: {nxn:?} {four:?}"
+        );
+        let (nxn, four) = mode_decisions(Speed::Fastest, stripes);
+        assert!(nxn.iter().all(|d| !is_directional(d.0)), "{nxn:?}");
+        assert!(four.iter().all(|d| !is_directional(d.0)), "{four:?}");
     }
 
     /// A 4:2:0 `Planar8` whose planes are filled by `f(plane, x, y)` at each plane's own size.

@@ -7,7 +7,10 @@
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
-use gamut_av1::{encode_still_intra, encode_still_lossless_identity};
+use gamut_av1::{
+    Av1Colour, Speed, encode_still_intra, encode_still_intra_with_speed,
+    encode_still_lossless_identity,
+};
 use gamut_color::Planar8;
 
 fn main() {
@@ -51,4 +54,18 @@ fn encode_intra(bencher: Bencher, qindex: u8) {
     bencher
         .counter(BytesCount::new(source_bytes()))
         .bench_local(|| encode_still_intra(black_box(&planes), qindex).unwrap());
+}
+
+/// The [`Speed`] presets at one mid quantizer, indexed into [`Speed::ALL`] (slowest first): the
+/// time side of the size/time trade each preset documents.
+#[divan::bench(args = [0, 1, 2, 3])]
+fn encode_intra_speed(bencher: Bencher, preset: usize) {
+    let planes = gradient_planes();
+    let speed = Speed::ALL[preset];
+    bencher
+        .counter(BytesCount::new(source_bytes()))
+        .bench_local(|| {
+            encode_still_intra_with_speed(black_box(&planes), 96, Av1Colour::default(), speed)
+                .unwrap()
+        });
 }
