@@ -141,6 +141,12 @@ writer's `BoxBuilder` stay crate-private. Additive (semver-minor).
   `PropertyKind::MasteringDisplayColourVolume`: its 24-byte layout is the 14496-12 syntax that
   AV1-ISOBMFF §2.3.4 states is identical to `SmDm`'s. The reader rejects an `mdcv` whose body is
   not exactly 24 bytes, which it previously carried verbatim as `Other`.)
+- **External-writer `mdcv` fixture** (#699, remainder of #645). The typed `mdcv` layout is pinned
+  only by hand-authored exact-byte tests written from the 14496-12 syntax; no committed fixture
+  carries an `mdcv` box. The pinned libavif does not write one (`src/write.c` hard-codes
+  `hasMdcv = AVIF_FALSE`), so the external writer is libheif: a libheif-written `mdcv` read back
+  unchanged through this reader, hosted in `gamut-heic`, which already owns the libheif oracle
+  (this crate takes no oracle dev-dependency).
 - **Writer emission options** (`idat` placement, multi-extent, `iloc` v1/v2, 32-bit-id boxes).
   The writer intentionally normalises; if a consumer ever needs layout control it arrives as a
   separate options-taking entry point (semver-minor), not a change to `write`.
