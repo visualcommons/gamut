@@ -11,26 +11,15 @@ mod common;
 use common::{c2pa_box, cat, clean_file, hvc1_item, jumbf_store};
 use gamut_heic::{HeifContainer, SegmentKind};
 
-/// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next
-/// start (contiguous, non-overlapping), and the last ends at `len` — the every-byte invariant.
+/// Asserts the every-byte invariant through the shared predicate,
+/// [`gamut_core::segment::covers`], whose own negative cases are pinned once in `gamut-core`
+/// (#500).
 fn assert_covers(container: &HeifContainer, len: usize) {
     let segs = container.segments();
-    assert!(!segs.is_empty(), "at least one segment");
-    assert_eq!(segs[0].range.start, 0, "coverage starts at 0");
-    for pair in segs.windows(2) {
-        assert_eq!(
-            pair[0].range.end, pair[1].range.start,
-            "segments are contiguous and non-overlapping"
-        );
-    }
-    assert_eq!(
-        segs.last().unwrap().range.end,
-        len,
-        "coverage runs to end of file"
+    assert!(
+        gamut_core::segment::covers(segs, len),
+        "segments must tile 0..{len}: {segs:?}"
     );
-    for s in segs {
-        assert!(s.range.end > s.range.start, "no empty segment");
-    }
 }
 
 /// The top-level box types, in order (the `SegmentKind::Box` segments).

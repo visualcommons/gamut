@@ -164,11 +164,10 @@ fn written_top_level_boxes_are_fully_accounted() {
     let f = write(&image_with_both_positions()).unwrap();
     let (segments, _) = walk_segments(&f).unwrap();
 
-    assert_eq!(segments[0].range.start, 0);
-    for pair in segments.windows(2) {
-        assert_eq!(pair[0].range.end, pair[1].range.start, "contiguous");
-    }
-    assert_eq!(segments.last().unwrap().range.end, f.len());
+    assert!(
+        gamut_core::segment::covers(&segments, f.len()),
+        "segments must tile the file: {segments:?}"
+    );
     let kinds: Vec<[u8; 4]> = segments
         .iter()
         .map(|s| match &s.kind {

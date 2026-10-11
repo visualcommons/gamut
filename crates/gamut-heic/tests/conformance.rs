@@ -701,14 +701,11 @@ fn t5_motion_photo_overlay_decodes_identically() {
 
     // Every byte is accounted for (the crate's every-byte invariant) and the last segment reaches EOF.
     let segs = container.segments();
-    assert_eq!(segs.first().unwrap().range.start, 0);
-    assert_eq!(segs.last().unwrap().range.end, file.len());
-    for w in segs.windows(2) {
-        assert_eq!(
-            w[0].range.end, w[1].range.start,
-            "segments must be contiguous"
-        );
-    }
+    assert!(
+        gamut_core::segment::covers(segs, file.len()),
+        "segments must tile the file: {:?}",
+        segs.iter().map(|s| s.range.clone()).collect::<Vec<_>>()
+    );
 
     // The still decodes identically to the pristine file — appended data changes nothing.
     let pristine_pixels = HeifContainer::parse(pristine)

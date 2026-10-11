@@ -37,20 +37,16 @@
 //! contract and not worth churning to remove a third copy of a loop. Callers wanting both get
 //! both: parse with [`read`], account with [`walk_segments`].
 
-use core::ops::Range;
-
 use gamut_core::Result;
 
 use crate::boxes::BoxReader;
 
 /// One contiguous run of the input file, tagged by what it holds ([`SegmentKind`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Segment<'a> {
-    /// The half-open byte range this segment occupies within the input (`start..end`).
-    pub range: Range<usize>,
-    /// What the bytes in [`range`](Self::range) are.
-    pub kind: SegmentKind<'a>,
-}
+///
+/// The shared [`gamut_core::segment::Segment`] over this format's kind, so a
+/// [`walk_segments`] result is checked by the one tiling predicate,
+/// [`gamut_core::segment::covers`], rather than a copy of it here (#500).
+pub type Segment<'a> = gamut_core::segment::Segment<SegmentKind<'a>>;
 
 /// What a [`Segment`] holds.
 ///
