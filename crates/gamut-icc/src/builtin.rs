@@ -943,7 +943,7 @@ impl IccProfile {
 #[cfg(test)]
 mod tests {
     use gamut_color::SourceTransfer;
-    use gamut_color::transfer::srgb_eotf;
+    use gamut_color::transfer::{adobe_rgb_eotf_standard, prophoto_rgb_eotf_standard, srgb_eotf};
     use lcms2_oracle::tag;
 
     use super::*;
@@ -1153,6 +1153,16 @@ mod tests {
         }
     }
 
+    /// A built-in space and the `gamut-color` function its tone curve must reproduce.
+    type StandardCurve = (BuiltinProfile, fn(f64) -> f64);
+
+    /// The two spaces with no transfer code point, each against `gamut-color`'s **standard**
+    /// curve for its encoding — the curve they are built to carry, not the encoder-exact one.
+    const UNCODED_STANDARD_CURVES: [StandardCurve; 2] = [
+        (BuiltinProfile::AdobeRgb, adobe_rgb_eotf_standard),
+        (BuiltinProfile::ProPhotoRgb, prophoto_rgb_eotf_standard),
+    ];
+
     /// The two uncoded spaces carry their encodings' **standard** curves, which reproduce
     /// `gamut-color`'s own `adobe_rgb_eotf_standard` and `prophoto_rgb_eotf_standard` — not the
     /// encoder-exact `x^2.2` and `x^1.8` the matching `SourceProfile` bundles linearize with.
@@ -1162,12 +1172,7 @@ mod tests {
     /// parameter of either tag; Adobe's `563 / 256` is exact.
     #[test]
     fn uncoded_space_curves_match_gamut_color_standard_curves() {
-        use gamut_color::transfer::{adobe_rgb_eotf_standard, prophoto_rgb_eotf_standard};
-        let curves: [(BuiltinProfile, fn(f64) -> f64); 2] = [
-            (BuiltinProfile::AdobeRgb, adobe_rgb_eotf_standard),
-            (BuiltinProfile::ProPhotoRgb, prophoto_rgb_eotf_standard),
-        ];
-        for (space, standard) in curves {
+        for (space, standard) in UNCODED_STANDARD_CURVES {
             let TagData::ParametricCurve(curve) = space.parts().trc.tag() else {
                 panic!("{space:?} is encoded as a parametricCurveType");
             };
@@ -1731,12 +1736,7 @@ mod tests {
     /// is keyed on transfer code points, which neither curve has. Same two-quanta tolerance.
     #[test]
     fn oracle_uncoded_space_curves_match_gamut_color_through_lcms() {
-        use gamut_color::transfer::{adobe_rgb_eotf_standard, prophoto_rgb_eotf_standard};
-        let curves: [(BuiltinProfile, fn(f64) -> f64); 2] = [
-            (BuiltinProfile::AdobeRgb, adobe_rgb_eotf_standard),
-            (BuiltinProfile::ProPhotoRgb, prophoto_rgb_eotf_standard),
-        ];
-        for (space, standard) in curves {
+        for (space, standard) in UNCODED_STANDARD_CURVES {
             let ours = opened_by_lcms(&IccProfile::builtin(space).expect("buildable"));
             let toe = (0..64).map(|step| f64::from(step) / 2048.0);
             let body = (0..=64).map(|step| f64::from(step) / 64.0);
