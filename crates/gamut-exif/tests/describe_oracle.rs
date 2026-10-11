@@ -234,10 +234,12 @@ const WORDING_DIVERGENCES: &[(&str, u32, &str)] = &[
     ("GPSDifferential", 1, "Correction applied"),
 ];
 
-/// Every tag's domain under both readings, swept once and shared by the two tests.
-fn readings() -> &'static [(ExifTag, Vec<(u32, String)>)] {
-    static READINGS: std::sync::OnceLock<Vec<(ExifTag, Vec<(u32, String)>)>> =
-        std::sync::OnceLock::new();
+/// A described tag and the codes exiv2 interprets for it, each with exiv2's text.
+type Reading = (ExifTag, Vec<(u32, String)>);
+
+/// Every described tag's exiv2 reading, swept once and shared by the two tests.
+fn readings() -> &'static [Reading] {
+    static READINGS: std::sync::OnceLock<Vec<Reading>> = std::sync::OnceLock::new();
     READINGS.get_or_init(|| {
         described_tags()
             .map(|tag| {
