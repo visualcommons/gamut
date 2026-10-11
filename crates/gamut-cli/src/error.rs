@@ -65,6 +65,24 @@ pub(crate) enum CliError {
         brand: String,
     },
 
+    /// `gamut convert` left an existing output file alone because `-f`/`--overwrite` was not
+    /// given. It counts as a failed conversion: the output asked for was not produced.
+    #[error("{path} already exists; skipping it (pass -f/--overwrite to replace it)")]
+    OutputExists {
+        /// The output file that already exists.
+        path: PathBuf,
+    },
+
+    /// Some conversions of a multi-input `gamut convert` failed. Each failure has already been
+    /// reported on stderr as it happened; this is the summary that drives the non-zero exit code.
+    #[error("{failed} of {total} conversions failed")]
+    BatchFailed {
+        /// How many inputs failed.
+        failed: usize,
+        /// How many inputs were given.
+        total: usize,
+    },
+
     /// A command argument was malformed in a way clap could not catch.
     #[error("invalid argument: {0}")]
     Usage(String),
