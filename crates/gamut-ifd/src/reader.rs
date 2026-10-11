@@ -4,6 +4,8 @@
 //! bounds-checked, the IFD chain is guarded against loops and runaway length, and unknown field
 //! types are preserved verbatim ([`Value::Unknown`]) rather than trusted or dropped.
 
+use std::collections::BTreeSet;
+
 use gamut_core::{Error, Result};
 
 use crate::{ByteOrder, Ifd, Value, Variant};
@@ -197,10 +199,88 @@ pub fn read(data: &[u8]) -> Result<TiffFile> {
     crate::IfdReader::open(data)?.read_file()
 }
 
-/// An upper bound on the sub-IFD nesting depth [`read_tree`] follows, bounding hostile pointer
-/// graphs. The deepest legitimate trees (a DNG raw sub-IFD, or EXIF's Exif → Interop chain) are
-/// three levels.
-const MAX_SUBIFD_DEPTH: usize = 16;
+/// Which sub-IFD pointer tags a subtree walk ([`resolve_subtree`], [`read_tree`]) follows at each
+/// level, and how many levels below the starting directory it may descend.
+///
+/// The walk starts at a **root** directory (depth 0) and follows `root_tags` there, and
+/// `nested_tags` at every directory it reaches below it. Two lists rather than one because the
+/// two levels can answer opposite questions: a codec reading one page's metadata may want to
+/// follow only `ExifIFD` at the page itself (a `SubIFDs` target it throws away must not be able to
+/// fail it) yet every standard pointer inside the Exif directory (a pointer left unresolved there
+/// is a stale absolute offset in a directory it hands back). [`read_tree`] uses one list for both.
+///
+/// A directory nested deeper than [`max_depth`](Self::max_depth) is refused, never walked: the
+/// bound is what stops a few-kilobyte hostile file from nesting enough directories to exhaust the
+/// stack. It defaults to, and can only be tightened below, [`MAX_DEPTH`](Self::MAX_DEPTH).
+///
+/// ```
+/// use gamut_ifd::SubtreeScope;
+/// use gamut_ifd::tags::{EXIF_IFD, STANDARD_POINTER_TAGS};
+///
+/// let scope = SubtreeScope::new(&[EXIF_IFD], STANDARD_POINTER_TAGS).with_max_depth(2);
+/// assert_eq!(scope.tags_at(0), &[EXIF_IFD]);
+/// assert_eq!(scope.tags_at(1), STANDARD_POINTER_TAGS);
+/// assert_eq!(scope.max_depth(), 2);
+/// // The cap is a ceiling a caller can lower, never raise.
+/// assert_eq!(scope.with_max_depth(100).max_depth(), 2);
+/// assert_eq!(SubtreeScope::new(&[], &[]).with_max_depth(100).max_depth(), SubtreeScope::MAX_DEPTH);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubtreeScope<'a> {
+    root_tags: &'a [u16],
+    nested_tags: &'a [u16],
+    max_depth: usize,
+}
+
+impl<'a> SubtreeScope<'a> {
+    /// The deepest nesting any walk follows: fifteen directories below the root, sixteen levels in
+    /// all. The deepest legitimate trees (a DNG raw sub-IFD, or EXIF's IFD 0 → Exif → Interop
+    /// chain) are three levels; a generic walk is handed arbitrary tags, so it allows headroom.
+    pub const MAX_DEPTH: usize = 15;
+
+    /// A scope following `root_tags` at the root directory and `nested_tags` at every directory
+    /// below it, to the full [`MAX_DEPTH`](Self::MAX_DEPTH).
+    ///
+    /// A named tag whose value is not an offset array (`LONG`, the typed `IFD`, or BigTIFF
+    /// `LONG8`/`IFD8`) is left in place as a regular field.
+    #[must_use]
+    pub const fn new(root_tags: &'a [u16], nested_tags: &'a [u16]) -> Self {
+        Self {
+            root_tags,
+            nested_tags,
+            max_depth: Self::MAX_DEPTH,
+        }
+    }
+
+    /// Lowers the depth bound to `max_depth` levels below the root; a value above the current
+    /// bound leaves it unchanged, so no scope ever walks deeper than
+    /// [`MAX_DEPTH`](Self::MAX_DEPTH). At `0` the walk reaches no child at all, so any followed
+    /// pointer in the root is refused.
+    #[must_use]
+    pub fn with_max_depth(self, max_depth: usize) -> Self {
+        Self {
+            max_depth: max_depth.min(self.max_depth),
+            ..self
+        }
+    }
+
+    /// The pointer tags followed in a directory at `depth` below the root: the root tags at depth
+    /// 0, the nested tags everywhere else.
+    #[must_use]
+    pub const fn tags_at(&self, depth: usize) -> &'a [u16] {
+        if depth == 0 {
+            self.root_tags
+        } else {
+            self.nested_tags
+        }
+    }
+
+    /// The deepest level below the root a directory may sit at.
+    #[must_use]
+    pub const fn max_depth(&self) -> usize {
+        self.max_depth
+    }
+}
 
 /// The file offsets a sub-IFD pointer value carries: a `LONG` array (TIFF 6.0 §2), the typed
 /// `IFD` (13) form of TIFF Technical Note 1, or the 64-bit `LONG8`/`IFD8` forms BigTIFF writers
@@ -230,46 +310,111 @@ pub(crate) fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] under the same conditions as [`read`], or if the pointer graph
-/// is not a tree: a repeated or self-referential child offset, or nesting deeper than 16 levels.
+/// is not a tree: a repeated or self-referential child offset, or nesting deeper than 16 levels
+/// ([`SubtreeScope::MAX_DEPTH`] below each page).
 pub fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
     crate::IfdReader::open(data)?.read_tree(pointer_tags)
 }
 
-/// Follows each of `tags` in `ifd` (and, recursively, in the children), replacing the pointer
-/// field with a parsed sub-IFD group. `visited` spans the whole walk so a hostile pointer graph
-/// (a cycle, or two pointers claiming one directory) fails instead of looping.
+/// Resolves the sub-IFD pointers of **one directory's subtree**: each pointer field `scope` names
+/// in `ifd`, and recursively in the children it reaches, is replaced by a
+/// [`sub_ifds`](Ifd::sub_ifds) group holding the parsed children — what [`read_tree`] does for
+/// every page of a file, applied to a single directory a caller already holds.
+///
+/// That scoping is the point. [`read_tree`] resolves its list at every node of every page, so a
+/// dangling pointer on a page the caller discards fails the whole read; this walks only the
+/// subtree below `ifd`, with a per-level tag list and depth bound ([`SubtreeScope`]).
+///
+/// `fetch` parses the directory at a file offset, so the walk serves any source: a closure over
+/// [`read_ifd_at`] for a slice, or over [`IfdReader`](crate::IfdReader) for a stream. The guards
+/// are the ones [`read_tree`] uses — they exist once — and apply to this call's walk: a cycle, two
+/// pointers naming one directory, or nesting past the scope's depth bound fails rather than loops.
+///
+/// ```
+/// use gamut_ifd::{ByteOrder, Ifd, SubtreeScope, TiffFile, Value, Variant};
+/// use gamut_ifd::{read, read_ifd_at, resolve_subtree, write};
+/// use gamut_ifd::tags::{EXIF_IFD, SUB_IFDS};
+///
+/// let mut exif = Ifd::new();
+/// exif.set(33434, Value::Rational(vec![(1, 200)])); // ExposureTime
+/// let mut page = Ifd::new();
+/// page.set_sub_ifd(EXIF_IFD, vec![exif.clone()]);
+/// page.set(SUB_IFDS, Value::Long(vec![0xFFFF_FFF0])); // dangling: points past the end
+/// let bytes = write(&TiffFile {
+///     order: ByteOrder::LittleEndian,
+///     variant: Variant::Classic,
+///     ifds: vec![page],
+/// })
+/// .unwrap();
+///
+/// // Follow only `ExifIFD` at the page, so the dangling `SubIFDs` cannot fail the walk.
+/// let mut ifd0 = read(&bytes).unwrap().ifds.swap_remove(0);
+/// let scope = SubtreeScope::new(&[EXIF_IFD], &[]);
+/// resolve_subtree(&mut ifd0, scope, |offset| {
+///     read_ifd_at(&bytes, offset, ByteOrder::LittleEndian, Variant::Classic)
+/// })
+/// .unwrap();
+/// assert_eq!(ifd0.sub_ifds()[0].ifds, [exif]);
+/// assert_eq!(ifd0.get(SUB_IFDS), Some(&Value::Long(vec![0xFFFF_FFF0])));
+/// ```
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if two pointers in the subtree name one directory (including a
+/// cycle back to a visited one), or a directory sits deeper than
+/// [`max_depth`](SubtreeScope::max_depth); and propagates any error `fetch` returns for a
+/// pointer target unchanged. On error `ifd` may be partially resolved.
+pub fn resolve_subtree(
+    ifd: &mut Ifd,
+    scope: SubtreeScope<'_>,
+    mut fetch: impl FnMut(u64) -> Result<Ifd>,
+) -> Result<()> {
+    resolve_pointers_with(&mut fetch, ifd, scope, &mut BTreeSet::new(), 0)
+}
+
+/// Follows each of `scope`'s tags in `ifd` (and, recursively, in the children), replacing the
+/// pointer field with a parsed sub-IFD group. `ifd` sits `depth` levels below the walk's root.
+/// `visited` spans the whole walk so a hostile pointer graph (a cycle, or two pointers claiming
+/// one directory) fails instead of looping.
 ///
 /// `fetch` parses the directory at an offset — a closure over [`read_ifd_at`] for the slice
 /// path, or over [`IfdReader::read_ifd`](crate::IfdReader::read_ifd) for the streaming path —
 /// so the depth and cycle guards exist exactly once.
+///
+/// `visited` is a **set**, not a list, and that is hardening rather than style: nothing bounds
+/// how many offsets one pointer array holds, so a linear membership scan makes the walk quadratic
+/// in a number a hostile file chooses. Measured in release on hand-built files whose single
+/// `ExifIFD` array names N distinct empty directories (in `gamut-tiff`, before this walk was
+/// hoisted here), a scanned list took 0.24 s at 0.6 MB and 4.2 s at 2.3 MB; a set answered the
+/// same files in 5 ms and 27 ms. What still has no bound is the *breadth* of one pointer array;
+/// that is issue #579.
 pub(crate) fn resolve_pointers_with(
     fetch: &mut dyn FnMut(u64) -> Result<Ifd>,
     ifd: &mut Ifd,
-    tags: &[u16],
-    visited: &mut Vec<u64>,
+    scope: SubtreeScope<'_>,
+    visited: &mut BTreeSet<u64>,
     depth: usize,
 ) -> Result<()> {
-    if depth > MAX_SUBIFD_DEPTH {
+    if depth > scope.max_depth() {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "TIFF: sub-IFD tree too deep",
         ));
     }
-    for &tag in tags {
+    for &tag in scope.tags_at(depth) {
         let Some(offsets) = ifd.get(tag).and_then(pointer_offsets) else {
             continue;
         };
         let mut children = Vec::with_capacity(offsets.len());
         for off in offsets {
-            if visited.contains(&off) {
+            if !visited.insert(off) {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
                     "TIFF: sub-IFD pointer loop",
                 ));
             }
-            visited.push(off);
             let mut child = fetch(off)?;
-            resolve_pointers_with(fetch, &mut child, tags, visited, depth + 1)?;
+            resolve_pointers_with(fetch, &mut child, scope, visited, depth + 1)?;
             children.push(child);
         }
         ifd.remove(tag);
@@ -551,7 +696,7 @@ mod tests {
     fn read_tree_allows_exactly_max_depth() {
         let mut ifd = Ifd::new();
         ifd.set(256, Value::Short(vec![1]));
-        // 15 nestings put the deepest directory at depth 16 (the root is depth 1).
+        // 15 nestings put the deepest directory at `SubtreeScope::MAX_DEPTH` below the root.
         for _ in 0..15 {
             let mut parent = Ifd::new();
             parent.set_sub_ifd(330, vec![ifd]);
@@ -583,6 +728,123 @@ mod tests {
         })
         .expect("write");
         assert!(read_tree(&bytes, &[330]).is_err());
+    }
+
+    /// Writes `root` as the single page of a little-endian classic file and returns the bytes
+    /// with the page read back flat — its pointers still integer fields.
+    fn written_root(root: Ifd) -> (Vec<u8>, Ifd) {
+        let bytes = crate::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![root],
+        })
+        .expect("write");
+        let flat = read(&bytes).expect("read").ifds.swap_remove(0);
+        (bytes, flat)
+    }
+
+    /// Runs [`resolve_subtree`] over `ifd` with the slice fetch.
+    fn resolve(bytes: &[u8], ifd: &mut Ifd, scope: SubtreeScope<'_>) -> Result<()> {
+        resolve_subtree(ifd, scope, |off| {
+            read_ifd_at(bytes, off, ByteOrder::LittleEndian, Variant::Classic)
+        })
+    }
+
+    /// A one-entry directory distinguishable by `marker`.
+    fn leaf(marker: u16) -> Ifd {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![marker]));
+        ifd
+    }
+
+    #[test]
+    fn resolve_subtree_follows_root_tags_at_the_root_and_nested_tags_below_it() {
+        // Root: an Exif pointer (root tag) and a GPS pointer (nested-only tag). Inside the Exif
+        // directory: an Interop pointer (nested tag) and an Exif pointer (root-only tag). Only
+        // the level's own list is followed, so each directory keeps the other list's pointer.
+        let mut exif = leaf(1);
+        exif.set_sub_ifd(40965, vec![leaf(2)]);
+        exif.set_sub_ifd(34665, vec![leaf(3)]);
+        let mut root = leaf(0);
+        root.set_sub_ifd(34665, vec![exif]);
+        root.set_sub_ifd(34853, vec![leaf(4)]);
+        let (bytes, mut ifd) = written_root(root);
+
+        resolve(&bytes, &mut ifd, SubtreeScope::new(&[34665], &[40965])).expect("resolve");
+        assert!(
+            ifd.get(34853).is_some(),
+            "a nested-only tag stays a field at the root"
+        );
+        let [group] = ifd.sub_ifds() else {
+            panic!("exactly the root tag's group: {:?}", ifd.sub_ifds());
+        };
+        assert_eq!(group.tag, 34665);
+        let exif = &group.ifds[0];
+        assert!(
+            exif.get(34665).is_some(),
+            "a root-only tag stays a field below the root"
+        );
+        assert_eq!(exif.sub_ifds().len(), 1);
+        assert_eq!(exif.sub_ifds()[0].tag, 40965);
+        assert_eq!(exif.sub_ifds()[0].ifds, [leaf(2)]);
+    }
+
+    /// A chain of `levels` directories below a root, each linked by tag 330.
+    fn nested(levels: usize) -> Ifd {
+        let mut ifd = leaf(9);
+        for _ in 0..levels {
+            let mut parent = Ifd::new();
+            parent.set_sub_ifd(330, vec![ifd]);
+            ifd = parent;
+        }
+        ifd
+    }
+
+    #[test]
+    fn resolve_subtree_admits_exactly_the_scoped_depth() {
+        let scope = SubtreeScope::new(&[330], &[330]).with_max_depth(2);
+        let (bytes, mut ifd) = written_root(nested(2));
+        resolve(&bytes, &mut ifd, scope).expect("two levels below the root is the bound");
+        let (bytes, mut ifd) = written_root(nested(3));
+        let err = resolve(&bytes, &mut ifd, scope).expect_err("three is past it");
+        assert!(err.to_string().contains("sub-IFD tree too deep"), "{err}");
+    }
+
+    #[test]
+    fn with_max_depth_never_raises_the_bound() {
+        // Asking for more than the ceiling keeps the ceiling, so the walk still refuses the
+        // sixteenth level below the root.
+        let scope = SubtreeScope::new(&[330], &[330]).with_max_depth(100);
+        assert_eq!(scope.max_depth(), SubtreeScope::MAX_DEPTH);
+        let (bytes, mut ifd) = written_root(nested(SubtreeScope::MAX_DEPTH + 1));
+        assert!(resolve(&bytes, &mut ifd, scope).is_err());
+    }
+
+    #[test]
+    fn resolve_subtree_rejects_two_pointers_naming_one_directory() {
+        // The root's tag-330 array names the directory at 26 twice; the fetch stands in for a
+        // file, so only the walk's own guard can refuse it.
+        let mut root = Ifd::new();
+        root.set(330, Value::Long(vec![26, 26]));
+        let mut fetched = Vec::new();
+        let err = resolve_subtree(&mut root, SubtreeScope::new(&[330], &[]), |off| {
+            fetched.push(off);
+            Ok(Ifd::new())
+        })
+        .expect_err("one directory claimed twice");
+        assert!(err.to_string().contains("sub-IFD pointer loop"), "{err}");
+        assert_eq!(fetched, [26], "the repeat is refused before it is fetched");
+    }
+
+    #[test]
+    fn resolve_subtree_propagates_the_fetch_error_unchanged() {
+        let mut root = Ifd::new();
+        root.set(330, Value::Long(vec![26]));
+        let err = resolve_subtree(&mut root, SubtreeScope::new(&[330], &[]), |_| {
+            Err(Error::invalid_input("probe", "the fetch's own refusal"))
+        })
+        .expect_err("fetch failed");
+        assert!(err.to_string().contains("the fetch's own refusal"), "{err}");
     }
 
     #[test]
