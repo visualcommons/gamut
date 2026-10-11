@@ -306,6 +306,39 @@ mod tests {
         assert_eq!(&out[8..12], &[66, 33, 0, 0]);
     }
 
+    /// The row case at 16 bits: the same image on the 16-bit scale cleans to the same picture,
+    /// so the 16-bit sample is read and written on its own scale.
+    #[test]
+    fn transparent_colour_is_replaced_on_the_16_bit_scale() {
+        let rgba: [u16; 12] = [51400, 0, 0, 65535, 0, 65535, 0, 0, 0, 0, 65535, 0];
+        assert_eq!(
+            clean_rgba(&rgba, 3),
+            [51400, 0, 0, 65535, 51400, 0, 0, 0, 51400, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn only_visible_pixels_that_border_transparency_set_the_fallback() {
+        // Row: [D 0,0,200 a=255] [A 100,0,0 a=255] [T] [T] [T]. D's window (D, A) holds no
+        // transparent pixel, so the fallback is A's colour alone. Pixels 3 and 4 have all-
+        // transparent windows, so both bleed it and pixel 4 blurs to it.
+        let rgba: [u8; 20] = [
+            0, 0, 200, 255, 100, 0, 0, 255, 9, 9, 9, 0, 9, 9, 9, 0, 9, 9, 9, 0,
+        ];
+        assert_eq!(&clean_rgba(&rgba, 5)[16..20], &[100, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_blur_reads_the_neighbourhood_across_rows() {
+        // 2×2: opaque red over opaque blue in column 0, transparent column 1. Both edge pixels
+        // weigh 1, so the fallback — and both transparent pixels' bleed — is (100, 0, 100). The
+        // blur at (1, 0) averages all four bled pixels: red, blue and two (100, 0, 100).
+        let rgba: [u8; 16] = [200, 0, 0, 255, 9, 9, 9, 0, 0, 0, 200, 255, 9, 9, 9, 0];
+        let out = clean_rgba(&rgba, 2);
+        assert_eq!(&out[4..8], &[100, 0, 100, 0]);
+        assert_eq!(&out[12..16], &[100, 0, 100, 0]);
+    }
+
     #[test]
     fn a_fully_transparent_image_becomes_black() {
         let rgba: [u8; 16] = [1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0];

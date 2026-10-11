@@ -11,12 +11,28 @@
 //! opaque colour identical, and every colour channel premultiplying to the value it did before.
 //! [`premultiply`] is written here, from the definition `round(c·a / MAX)`, rather than borrowed
 //! from the cleaner, so a defect in the cleaner's own interval arithmetic cannot cancel against
-//! the oracle.
+//! the oracle. For the same reason the law reads samples through its own [`Scale`], not the
+//! cleaner's `Sample` trait: a defect in how the cleaner widens a sample would otherwise blind
+//! the oracle to it too.
 //!
 //! This module is the test oracle, not the system under test, so `.cargo/mutants.toml` excludes
 //! `crates/*/src/invariants.rs` from mutation.
 
-use crate::clean_alpha::{Sample, clean_rgba};
+use crate::clean_alpha::clean_rgba;
+
+/// A sample type the law reads, with the alpha value that means fully opaque.
+pub(crate) trait Scale: Copy + Into<u32> {
+    /// Full opacity, and the top of the colour scale.
+    const MAX: u32;
+}
+
+impl Scale for u8 {
+    const MAX: u32 = u8::MAX as u32;
+}
+
+impl Scale for u16 {
+    const MAX: u32 = u16::MAX as u32;
+}
 
 /// A law that did not hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,13 +71,13 @@ impl core::fmt::Display for Violation {
 ///
 /// Written as `(2·c·a + MAX) / (2·MAX)` — the rounding definition itself, not the `+ (MAX−1)/2`
 /// shortcut the cleaner's interval derivation uses — so the two agree only if both are right.
-pub(crate) fn premultiply<S: Sample>(c: u32, a: u32) -> u32 {
+pub(crate) fn premultiply<S: Scale>(c: u32, a: u32) -> u32 {
     let max = u64::from(S::MAX);
     ((2 * u64::from(c) * u64::from(a) + max) / (2 * max)) as u32
 }
 
 /// The law: `cleaned` composites exactly as `original` does. Both are packed RGBA.
-pub(crate) fn composite_is_unchanged<S: Sample>(
+pub(crate) fn composite_is_unchanged<S: Scale>(
     original: &[S],
     cleaned: &[S],
 ) -> Result<(), Violation> {
@@ -74,15 +90,15 @@ pub(crate) fn composite_is_unchanged<S: Sample>(
     }
     let (before_px, after_px) = (original.as_chunks::<4>().0, cleaned.as_chunks::<4>().0);
     for (i, (before, after)) in before_px.iter().zip(after_px).enumerate() {
-        let a = before[3].get();
-        if after[3].get() != a {
+        let (a, a2): (u32, u32) = (before[3].into(), after[3].into());
+        if a2 != a {
             return Err(Violation::new(
                 LAW,
-                format!("pixel {i}: alpha {a} became {}", after[3].get()),
+                format!("pixel {i}: alpha {a} became {a2}"),
             ));
         }
         for ch in 0..3 {
-            let (c, c2) = (before[ch].get(), after[ch].get());
+            let (c, c2): (u32, u32) = (before[ch].into(), after[ch].into());
             if a == S::MAX && c2 != c {
                 return Err(Violation::new(
                     LAW,
