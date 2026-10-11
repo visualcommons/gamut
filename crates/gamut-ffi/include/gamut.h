@@ -30,9 +30,46 @@
 #define GAMUT_CODEC_ABI_VERSION 1
 
 /**
+ * `gamut_avif_encoder_set_chroma` value: 4:4:4, full-resolution chroma.
+ */
+#define GAMUT_CHROMA_SUBSAMPLING_444 0
+
+/**
+ * `gamut_avif_encoder_set_chroma` value: 4:2:2, horizontally halved chroma.
+ */
+#define GAMUT_CHROMA_SUBSAMPLING_422 1
+
+/**
+ * `gamut_avif_encoder_set_chroma` value: 4:2:0, chroma halved in both directions.
+ */
+#define GAMUT_CHROMA_SUBSAMPLING_420 2
+
+/**
+ * `gamut_avif_encoder_set_chroma` value: 4:0:0, monochrome (no chroma planes).
+ */
+#define GAMUT_CHROMA_SUBSAMPLING_400 3
+
+/**
+ * `gamut_avif_encoder_set_mirror` value: top and bottom exchanged (the `imir` axis `0`,
+ * ISO/IEC 23008-12:2022 §6.5.12).
+ */
+#define GAMUT_AVIF_MIRROR_TOP_BOTTOM 0
+
+/**
+ * `gamut_avif_encoder_set_mirror` value: left and right exchanged (the `imir` axis `1`).
+ */
+#define GAMUT_AVIF_MIRROR_LEFT_RIGHT 1
+
+/**
  * Opaque handle over a `gamut::avif::AvifEncoder` and its backend registry.
  */
 typedef struct GamutAvifEncoder GamutAvifEncoder;
+
+/**
+ * Opaque handle over a parsed AVIF file (`gamut::avif::AvifImage`, the role-typed view
+ * `AvifContainer::parse` builds). It owns every payload, so it outlives the input buffer.
+ */
+typedef struct GamutAvifImage GamutAvifImage;
 
 /**
  * Opaque handle over the HEIC HEVC-decode backend registry (push order).
@@ -349,6 +386,20 @@ extern "C" {
 #endif // __cplusplus
 
 /**
+ * Frees a byte buffer the library returned through a `uint8_t **out, size_t *out_len` pair
+ * (an encode output). No-op on `NULL`.
+ *
+ * Allocator symmetry (`DESIGN.md`): Rust-allocated memory is released only here, never with
+ * C's `free()`; and only Rust-allocated buffers are released here.
+ *
+ * # Safety
+ *
+ * `data` is `NULL`, or exactly a pointer the library wrote to an `out` parameter together with
+ * the `len` it wrote to the matching `out_len`, not already freed.
+ */
+void gamut_bytes_free(uint8_t *data, size_t len);
+
+/**
  * Creates an AVIF encoder with default (lossless) settings and an empty backend registry.
  *
  * Returns `NULL` only if construction panics. Free with `gamut_avif_encoder_free`.
@@ -356,13 +407,24 @@ extern "C" {
 struct GamutAvifEncoder *gamut_avif_encoder_new(void);
 
 /**
- * Frees an encoder created by `gamut_avif_encoder_new`, running each adopted backend's
- * `destroy` exactly once. No-op on `NULL`.
+ * Creates a **lossy** AVIF encoder at `quality` (`0..=100`, higher = larger and closer to the
+ * source; values above `100` are clamped), with an empty backend registry.
+ *
+ * Lossy stills default to BT.709 YCbCr at 4:2:0; override with `gamut_avif_encoder_set_matrix`
+ * and `gamut_avif_encoder_set_chroma`. Mode and quality are fixed for the handle's lifetime,
+ * as they are for the Rust `AvifEncoder::lossy` it wraps. Returns `NULL` only if construction
+ * panics. Free with `gamut_avif_encoder_free`.
+ */
+struct GamutAvifEncoder *gamut_avif_encoder_new_lossy(uint8_t quality);
+
+/**
+ * Frees an encoder created by `gamut_avif_encoder_new` or `gamut_avif_encoder_new_lossy`,
+ * running each adopted backend's `destroy` exactly once. No-op on `NULL`.
  *
  * # Safety
  *
- * `encoder` is `NULL` or a pointer returned by `gamut_avif_encoder_new` that has not already
- * been freed.
+ * `encoder` is `NULL` or a pointer returned by `gamut_avif_encoder_new` or
+ * `gamut_avif_encoder_new_lossy` that has not already been freed.
  */
 void gamut_avif_encoder_free(struct GamutAvifEncoder *encoder);
 
@@ -384,6 +446,423 @@ void gamut_avif_encoder_free(struct GamutAvifEncoder *encoder);
 gamut_status_t gamut_avif_encoder_push_backend(struct GamutAvifEncoder *encoder,
                                                const struct GamutEncoderVTable *vtable,
                                                void *ctx);
+
+/**
+ * Selects the CICP (ITU-T H.273) matrix the samples are coded through (`AvifEncoder::with_matrix`).
+ *
+ * Identity (`0`), BT.709 (`1`), BT.601 (`6`) and BT.2020 NCL (`9`) encode; another code point
+ * gamut models is accepted here and rejected at encode time. Ignored by a lossless encoder,
+ * which always codes the identity matrix. Returns `GAMUT_STATUS_UNSUPPORTED` for a code point
+ * gamut does not model, `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_matrix(struct GamutAvifEncoder *encoder, uint16_t code_point);
+
+/**
+ * Tags the image with CICP colour primaries (`AvifEncoder::with_primaries`) — a tag, not a
+ * conversion; honoured in lossless and lossy mode alike.
+ *
+ * Returns `GAMUT_STATUS_UNSUPPORTED` for a code point gamut does not model,
+ * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_primaries(struct GamutAvifEncoder *encoder,
+                                                uint16_t code_point);
+
+/**
+ * Tags the image with CICP transfer characteristics (`AvifEncoder::with_transfer`) — a tag,
+ * not a conversion; honoured in lossless and lossy mode alike.
+ *
+ * Returns `GAMUT_STATUS_UNSUPPORTED` for a code point gamut does not model,
+ * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_transfer(struct GamutAvifEncoder *encoder,
+                                               uint16_t code_point);
+
+/**
+ * Selects the signal range by its H.273 `full_range` flag (`0` limited, `1` full;
+ * `AvifEncoder::with_color_range`). Ignored by a lossless encoder.
+ *
+ * Returns `GAMUT_STATUS_INVALID_INPUT` for any other flag value,
+ * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_color_range(struct GamutAvifEncoder *encoder,
+                                                  uint8_t full_range);
+
+/**
+ * Selects the chroma subsampling, one of the `GAMUT_CHROMA_SUBSAMPLING_*` constants
+ * (`AvifEncoder::with_chroma`). Ignored by a lossless encoder and by the identity matrix,
+ * which always keep 4:4:4.
+ *
+ * Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants,
+ * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_chroma(struct GamutAvifEncoder *encoder, uint8_t chroma);
+
+/**
+ * Selects the depth 16-bit inputs are coded at, in bits (`AvifEncoder::with_bit_depth`):
+ * `10` or `12` (the default) encode; `8` and `16` are accepted here and rejected by a 16-bit
+ * encode. Ignored by the 8-bit inputs, which always code 8-bit.
+ *
+ * Returns `GAMUT_STATUS_UNSUPPORTED` for a depth gamut does not model,
+ * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_bit_depth(struct GamutAvifEncoder *encoder, uint32_t bits);
+
+/**
+ * Declares that an RGBA input's colour values are already premultiplied by alpha
+ * (`AvifEncoder::with_premultiplied_alpha`) — a declaration, not a conversion; written as a
+ * `prem` reference. Ignored by inputs without alpha.
+ *
+ * Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_premultiplied_alpha(struct GamutAvifEncoder *encoder,
+                                                          bool premultiplied);
+
+/**
+ * Records an `irot` display rotation of `quarter_turns_ccw` anti-clockwise quarter turns
+ * (`0..=3`; `0` writes no `irot`), applied by a reader — the stored pixels are unchanged
+ * (`AvifEncoder::with_rotation`).
+ *
+ * Returns `GAMUT_STATUS_INVALID_INPUT` for a value above `3`, `GAMUT_STATUS_NULL_ARGUMENT` on
+ * a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_rotation(struct GamutAvifEncoder *encoder,
+                                               uint8_t quarter_turns_ccw);
+
+/**
+ * Records an `imir` display mirror, one of the `GAMUT_AVIF_MIRROR_*` constants, applied by a
+ * reader — the stored pixels are unchanged (`AvifEncoder::with_mirror`). As in Rust, a mirror
+ * once set can be replaced but not removed.
+ *
+ * Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants,
+ * `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_mirror(struct GamutAvifEncoder *encoder, uint8_t mirror);
+
+/**
+ * Embeds an ICC profile, carried verbatim as a `colr` `prof` box
+ * (`AvifEncoder::with_icc_profile`). The bytes are copied; a later call replaces them.
+ *
+ * Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder, or a `NULL` `data` with a
+ * non-zero `len`.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle; a non-`NULL` `data` points to `len` readable
+ * bytes.
+ */
+gamut_status_t gamut_avif_encoder_set_icc_profile(struct GamutAvifEncoder *encoder,
+                                                  const uint8_t *data,
+                                                  size_t len);
+
+/**
+ * Attaches Exif metadata (`AvifEncoder::with_exif`): a **bare TIFF stream** (byte-order mark,
+ * `42`, first-IFD offset — not the `Exif\0\0`-prefixed form). The encoder adds HEIF's 4-byte
+ * `exif_tiff_header_offset` prefix. The bytes are copied verbatim, unvalidated; a later call
+ * replaces them.
+ *
+ * Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder, or a `NULL` `data` with a
+ * non-zero `len`.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle; a non-`NULL` `data` points to `len` readable
+ * bytes.
+ */
+gamut_status_t gamut_avif_encoder_set_exif(struct GamutAvifEncoder *encoder,
+                                           const uint8_t *data,
+                                           size_t len);
+
+/**
+ * Attaches an XMP packet, carried verbatim as an `application/rdf+xml` `mime` item
+ * (`AvifEncoder::with_xmp`). The bytes are copied; a later call replaces them.
+ *
+ * Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder, or a `NULL` `data` with a
+ * non-zero `len`.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle; a non-`NULL` `data` points to `len` readable
+ * bytes.
+ */
+gamut_status_t gamut_avif_encoder_set_xmp(struct GamutAvifEncoder *encoder,
+                                          const uint8_t *data,
+                                          size_t len);
+
+/**
+ * Encodes interleaved 8-bit RGB samples to an AVIF file.
+ *
+ * `samples_len` counts samples (`width * height * 3`). On `GAMUT_OK`, `*out`/`*out_len` hold a
+ * Rust-owned buffer to release with `gamut_bytes_free(*out, *out_len)`; on any other status they
+ * are `NULL`/`0` (whenever they are non-`NULL`). Returns `GAMUT_STATUS_NULL_ARGUMENT` for a
+ * `NULL` encoder, `samples`, `out` or `out_len`, `GAMUT_STATUS_INVALID_INPUT` when
+ * `samples_len` does not match the dimensions or a dimension is zero, and otherwise the
+ * encoder's own error status.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle; a non-`NULL` `samples` points to `samples_len`
+ * readable samples; `out` and `out_len` are `NULL` or writable.
+ */
+gamut_status_t gamut_avif_encoder_encode_rgb8(const struct GamutAvifEncoder *encoder,
+                                              const uint8_t *samples,
+                                              size_t samples_len,
+                                              uint32_t width,
+                                              uint32_t height,
+                                              uint8_t **out,
+                                              size_t *out_len);
+
+/**
+ * Encodes interleaved 8-bit RGBA samples (unassociated alpha unless
+ * `gamut_avif_encoder_set_premultiplied_alpha` says otherwise) to an AVIF file with an alpha
+ * auxiliary. `samples_len` counts samples (`width * height * 4`); otherwise as
+ * `gamut_avif_encoder_encode_rgb8`.
+ *
+ * # Safety
+ *
+ * As `gamut_avif_encoder_encode_rgb8`.
+ */
+gamut_status_t gamut_avif_encoder_encode_rgba8(const struct GamutAvifEncoder *encoder,
+                                               const uint8_t *samples,
+                                               size_t samples_len,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               uint8_t **out,
+                                               size_t *out_len);
+
+/**
+ * Encodes 8-bit greyscale samples to a monochrome AVIF file. `samples_len` counts samples
+ * (`width * height`); otherwise as `gamut_avif_encoder_encode_rgb8`.
+ *
+ * # Safety
+ *
+ * As `gamut_avif_encoder_encode_rgb8`.
+ */
+gamut_status_t gamut_avif_encoder_encode_gray8(const struct GamutAvifEncoder *encoder,
+                                               const uint8_t *samples,
+                                               size_t samples_len,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               uint8_t **out,
+                                               size_t *out_len);
+
+/**
+ * Encodes interleaved 16-bit RGB samples (full 16-bit scale), coded at the depth
+ * `gamut_avif_encoder_set_bit_depth` selects. `samples_len` counts samples
+ * (`width * height * 3`), and `samples` must be aligned for `uint16_t`
+ * (`GAMUT_STATUS_INVALID_INPUT` otherwise); otherwise as `gamut_avif_encoder_encode_rgb8`.
+ *
+ * # Safety
+ *
+ * As `gamut_avif_encoder_encode_rgb8`.
+ */
+gamut_status_t gamut_avif_encoder_encode_rgb16(const struct GamutAvifEncoder *encoder,
+                                               const uint16_t *samples,
+                                               size_t samples_len,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               uint8_t **out,
+                                               size_t *out_len);
+
+/**
+ * Encodes interleaved 16-bit RGBA samples (full 16-bit scale) with an alpha auxiliary.
+ * `samples_len` counts samples (`width * height * 4`); otherwise as
+ * `gamut_avif_encoder_encode_rgb16`.
+ *
+ * # Safety
+ *
+ * As `gamut_avif_encoder_encode_rgb8`.
+ */
+gamut_status_t gamut_avif_encoder_encode_rgba16(const struct GamutAvifEncoder *encoder,
+                                                const uint16_t *samples,
+                                                size_t samples_len,
+                                                uint32_t width,
+                                                uint32_t height,
+                                                uint8_t **out,
+                                                size_t *out_len);
+
+/**
+ * Parses an AVIF file into an owned image handle (`AvifContainer::parse`).
+ *
+ * On `GAMUT_OK`, `*out` is a handle to release with `gamut_avif_image_free`; it copies what it
+ * keeps, so `data` may be freed as soon as this returns. On any other status `*out` is `NULL`.
+ * Returns `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` `out`, or a `NULL` `data` with a non-zero
+ * `len`, and otherwise the parser's error status (`GAMUT_STATUS_INVALID_INPUT` for a malformed
+ * file, `GAMUT_STATUS_UNSUPPORTED` for an out-of-scope one such as an image sequence).
+ *
+ * # Safety
+ *
+ * A non-`NULL` `data` points to `len` readable bytes; `out` is `NULL` or writable.
+ */
+gamut_status_t gamut_avif_image_parse(const uint8_t *data, size_t len, struct GamutAvifImage **out);
+
+/**
+ * Frees an image created by `gamut_avif_image_parse`, invalidating every pointer its
+ * accessors returned. No-op on `NULL`.
+ *
+ * # Safety
+ *
+ * `image` is `NULL` or a pointer returned by `gamut_avif_image_parse` that has not already
+ * been freed.
+ */
+void gamut_avif_image_free(struct GamutAvifImage *image);
+
+/**
+ * The primary item's AV1 codestream (the `av01` item payload: a low-overhead OBU stream),
+ * borrowed from `image`.
+ *
+ * Returns `GAMUT_STATUS_UNSUPPORTED` (with `*data == NULL`, `*len == 0`) when the primary item
+ * is derived (`grid`, `iden`, `iovl`) or not AV1, so it has no single codestream;
+ * `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
+ *
+ * # Safety
+ *
+ * `image` is `NULL` or a live image handle; `data` and `len` are `NULL` or writable. The
+ * returned pointer is valid until `gamut_avif_image_free`.
+ */
+gamut_status_t gamut_avif_image_primary_codestream(const struct GamutAvifImage *image,
+                                                   const uint8_t **data,
+                                                   size_t *len);
+
+/**
+ * The AV1 codestream of the primary item's alpha auxiliary, borrowed from `image`.
+ *
+ * `GAMUT_OK` with `*data == NULL`, `*len == 0` when the image has no alpha. Returns
+ * `GAMUT_STATUS_UNSUPPORTED` when the alpha item is derived or not AV1;
+ * `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
+ *
+ * # Safety
+ *
+ * As `gamut_avif_image_primary_codestream`.
+ */
+gamut_status_t gamut_avif_image_alpha_codestream(const struct GamutAvifImage *image,
+                                                 const uint8_t **data,
+                                                 size_t *len);
+
+/**
+ * The primary item's `av1C` AV1 codec-configuration record body (AV1-ISOBMFF §2.3.3: four
+ * header bytes, then any `configOBUs`), borrowed from `image`.
+ *
+ * `GAMUT_OK` with `*data == NULL`, `*len == 0` when the item carries no `av1C`. Returns
+ * `GAMUT_STATUS_UNSUPPORTED` when the primary item is derived or not AV1, as
+ * `gamut_avif_image_primary_codestream`; `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
+ *
+ * # Safety
+ *
+ * As `gamut_avif_image_primary_codestream`.
+ */
+gamut_status_t gamut_avif_image_av1c(const struct GamutAvifImage *image,
+                                     const uint8_t **data,
+                                     size_t *len);
+
+/**
+ * The Exif payload describing the primary item, borrowed from `image` — **raw**, including
+ * HEIF's 4-byte big-endian `exif_tiff_header_offset` prefix (as `AvifImage::exif` exposes it
+ * and libheif returns it); the TIFF stream starts that many bytes after the prefix.
+ *
+ * `GAMUT_OK` with `*data == NULL`, `*len == 0` when there is none;
+ * `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
+ *
+ * # Safety
+ *
+ * As `gamut_avif_image_primary_codestream`.
+ */
+gamut_status_t gamut_avif_image_exif(const struct GamutAvifImage *image,
+                                     const uint8_t **data,
+                                     size_t *len);
+
+/**
+ * The XMP packet describing the primary item, borrowed from `image`, verbatim.
+ *
+ * `GAMUT_OK` with `*data == NULL`, `*len == 0` when there is none;
+ * `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
+ *
+ * # Safety
+ *
+ * As `gamut_avif_image_primary_codestream`.
+ */
+gamut_status_t gamut_avif_image_xmp(const struct GamutAvifImage *image,
+                                    const uint8_t **data,
+                                    size_t *len);
+
+/**
+ * The primary item's ICC profile (a `colr` box of type `prof` or `rICC`), borrowed from
+ * `image`, verbatim.
+ *
+ * `GAMUT_OK` with `*data == NULL`, `*len == 0` when there is none;
+ * `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
+ *
+ * # Safety
+ *
+ * As `gamut_avif_image_primary_codestream`.
+ */
+gamut_status_t gamut_avif_image_icc_profile(const struct GamutAvifImage *image,
+                                            const uint8_t **data,
+                                            size_t *len);
+
+/**
+ * Writes whether the primary item's colour values are premultiplied by its alpha auxiliary
+ * (a `prem` reference; `AvifImage::is_premultiplied`) to `*premultiplied`.
+ *
+ * Returns `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
+ *
+ * # Safety
+ *
+ * `image` is `NULL` or a live image handle; `premultiplied` is `NULL` or writable.
+ */
+gamut_status_t gamut_avif_image_is_premultiplied(const struct GamutAvifImage *image,
+                                                 bool *premultiplied);
+
+/**
+ * Writes the primary item's stored dimensions (its `ispe` property, before any `clap`/`irot`
+ * display transform) to `*width` and `*height`.
+ *
+ * Returns `GAMUT_STATUS_INVALID_INPUT` (with both `0`) when the primary item has no usable
+ * `ispe`, which every image item must carry (ISO/IEC 23008-12 §6.5.3);
+ * `GAMUT_STATUS_NULL_ARGUMENT` for a `NULL` argument.
+ *
+ * # Safety
+ *
+ * `image` is `NULL` or a live image handle; `width` and `height` are `NULL` or writable.
+ */
+gamut_status_t gamut_avif_image_dimensions(const struct GamutAvifImage *image,
+                                           uint32_t *width,
+                                           uint32_t *height);
 
 /**
  * Creates a HEIC decoder with an empty backend registry.
