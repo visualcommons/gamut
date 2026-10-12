@@ -105,6 +105,38 @@ impl Gamut {
             Gamut::ProPhotoRgb => &M1_PROPHOTO_RGB,
         }
     }
+
+    /// The CIE 1931 chromaticities of this gamut: `([R, G, B], white)`, each an `(x, y)` pair.
+    ///
+    /// Total, unlike [`ColourPrimaries::chromaticities`](crate::cicp::ColourPrimaries::chromaticities):
+    /// every `Gamut` has primaries, including the two with no ITU-T H.273 code point (Adobe RGB
+    /// and ProPhoto RGB). Where a gamut *does* have a code point the two accessors return the same
+    /// numbers. ProPhoto RGB is the one gamut whose white is D50 rather than D65.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_color::Gamut;
+    /// use gamut_color::matrix::D50;
+    ///
+    /// let (primaries, white) = Gamut::ProPhotoRgb.chromaticities();
+    /// assert_eq!(white, D50);
+    /// assert_eq!(primaries[2], [0.036598, 0.000105]);
+    /// ```
+    #[must_use]
+    pub fn chromaticities(self) -> ([[f64; 2]; 3], [f64; 2]) {
+        use crate::matrix::{
+            ADOBE_RGB_PRIMARIES, BT2020_PRIMARIES, D50, D65, DISPLAY_P3_PRIMARIES,
+            PROPHOTO_PRIMARIES, SRGB_PRIMARIES,
+        };
+        match self {
+            Gamut::Srgb => (SRGB_PRIMARIES, D65),
+            Gamut::DisplayP3 => (DISPLAY_P3_PRIMARIES, D65),
+            Gamut::AdobeRgb => (ADOBE_RGB_PRIMARIES, D65),
+            Gamut::Bt2020 => (BT2020_PRIMARIES, D65),
+            Gamut::ProPhotoRgb => (PROPHOTO_PRIMARIES, D50),
+        }
+    }
 }
 
 /// Convert linear RGB to OKLab using the source `gamut`'s `M1` matrix.
@@ -143,6 +175,48 @@ pub fn oklab_to_linear_srgb(lab: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two gamuts with no H.273 code point carry the chromaticities their own encoding
+    /// documents publish, transcribed here independently of `matrix.rs`: Adobe RGB (1998) Color
+    /// Image Encoding §4.3.1.1 (`references/color/adobe-rgb-1998.pdf`) to the four places it
+    /// states, and the ROMM RGB white paper (`references/color/romm-rgb.pdf`, the free stand-in
+    /// for ISO 22028-2) to *its* four places — the crate carries ProPhoto to six, so the ROMM
+    /// gate is half the paper's last digit. These are the only two `Gamut`s
+    /// `ColourPrimaries::chromaticities` cannot vouch for.
+    #[test]
+    fn uncoded_gamuts_carry_their_published_chromaticities() {
+        assert_eq!(
+            Gamut::AdobeRgb.chromaticities(),
+            (
+                [[0.6400, 0.3300], [0.2100, 0.7100], [0.1500, 0.0600]],
+                [0.3127, 0.3290]
+            )
+        );
+        let (primaries, white) = Gamut::ProPhotoRgb.chromaticities();
+        let romm = [[0.7347, 0.2653], [0.1596, 0.8404], [0.0366, 0.0001]];
+        for (got, want) in primaries.iter().flatten().zip(romm.iter().flatten()) {
+            assert!((got - want).abs() <= 0.5e-4, "ROMM primary {got} vs {want}");
+        }
+        assert_eq!(white, [0.3457, 0.3585], "ROMM white is D50");
+    }
+
+    /// Where a gamut has an H.273 primaries code point, the total accessor agrees with the
+    /// code-point one: the two must never become two copies of the same colorimetry.
+    #[test]
+    fn coded_gamuts_agree_with_their_colour_primaries() {
+        use crate::cicp::ColourPrimaries;
+        for (gamut, primaries) in [
+            (Gamut::Srgb, ColourPrimaries::Bt709),
+            (Gamut::DisplayP3, ColourPrimaries::DisplayP3),
+            (Gamut::Bt2020, ColourPrimaries::Bt2020),
+        ] {
+            assert_eq!(
+                Some(gamut.chromaticities()),
+                primaries.chromaticities(),
+                "{gamut:?}"
+            );
+        }
+    }
 
     // The matrix literals need no relationship tests of their own: `derived_matrices_match_literals`
     // (matrix.rs) re-derives every `M1_*` table element-wise to 1e-7, and the golden vectors below

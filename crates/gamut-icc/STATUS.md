@@ -47,21 +47,24 @@ so no profile is rejected for carrying an unmodelled tag.
 `IccProfile::builtin`, `gray_with_gamma`, `from_cicp` and `from_source_profile` construct
 spec-valid v4 three-component matrix/TRC display profiles (§8.4). All four return `Option`: the
 colorimetry they resolve is **gamut-color's, and whatever gamut-color can supply is never retyped
-here** — primaries and white point come from `ColourPrimaries::chromaticities`, the RGB→XYZ
-construction and Bradford adaptation from `gamut_color::matrix`, the ST 2084 curve from
-`gamut_color::transfer` — and those constructors are themselves fallible, so an input whose
-colorimetry cannot be resolved is declined rather than given a profile whose colorants are silently
-the PCS axes.
+here** — primaries and white point come from `ColourPrimaries::chromaticities` for a CICP code
+point and from `Gamut::chromaticities` for a named space, the RGB→XYZ
+construction and Bradford adaptation from `gamut_color::matrix`, the ST 2084 curve and H.273
+§8.2's BT.709-family α and β (`BT709_ALPHA` / `BT709_BETA`) from `gamut_color::transfer` — and
+those constructors are themselves fallible, so an input whose colorimetry cannot be resolved is
+declined rather than given a profile whose colorants are silently the PCS axes.
 
-Three published constants gamut-color does *not* supply are written out here, because an ICC tag
+Four published constants gamut-color does *not* supply are written out here, because an ICC tag
 needs them in a form no gamut-color function returns, and each is gated rather than trusted:
-H.273 §8.2's β (`BT709_BETA`, from which α is derived rather than restated), pinned by
-`bt709_curve_inverts_the_h273_transfer` against an independent forward transcription of Table 3 and
-by the lcms2 oracle; the IEC 61966-2-1 `(g, a, b, c, d)` parameter set for §10.18 type 3, pinned by
+the IEC 61966-2-1 `(g, a, b, c, d)` parameter set for §10.18 type 3, pinned by
 `srgb_parametric_curve_matches_gamut_color` against `gamut_color::transfer::srgb_eotf` and by
-`oracle_every_encodable_transfer_matches_its_curve_through_lcms`; and the PCS D50 of §7.2.16, which is an ICC fact rather than
+`oracle_every_encodable_transfer_matches_its_curve_through_lcms`; Adobe RGB (1998)'s `563 / 256`
+exponent and the ROMM RGB `(g, a, b, c, d)` set, pinned by
+`uncoded_space_curves_match_gamut_color_standard_curves` against gamut-color's
+`adobe_rgb_eotf_standard` / `prophoto_rgb_eotf_standard` and by
+`oracle_uncoded_space_curves_match_gamut_color_through_lcms`; and the PCS D50 of §7.2.16, which is an ICC fact rather than
 a CIE one (see "PCS white" below), pinned by `colorants_sum_to_the_declared_media_white_point` and
-the lcms2 colorant oracle. `src/builtin.rs`'s module documentation tabulates the three. Colorimetry is not the only
+the lcms2 colorant oracle. `src/builtin.rs`'s module documentation tabulates the four. Colorimetry is not the only
 reason to decline: `from_cicp` also refuses signalling this profile *shape* cannot carry, which is
 where narrow range lands — see "CICP fields the profile does not build from" below. `builtin`
 yields `Some` for every `BuiltinProfile` in this release and a test pins that.
@@ -73,12 +76,20 @@ other way would invert the layering and give a widely-depended-on crate a profil
 has no use for. (Contrast `gamut-cmm → gamut-icc` below: applying a profile is a layer above
 parsing one; *describing* a colour space is a layer below.)
 
-**The buildable set is exactly what gamut-color can express on the two CICP axes**, because a
-matrix/TRC profile *is* a (primaries, transfer) pair: sRGB, linear sRGB, Display P3 and BT.2100 PQ.
-`SourceProfile::ADOBE_RGB` and `PROPHOTO_RGB` return `None` from both `colour_primaries()` and
-`transfer_characteristics()`, and their chromaticities are private to gamut-color, so
-`from_source_profile` declines them rather than restating tables this crate does not own. Adding
-them needs a public chromaticity accessor in gamut-color first — tracked separately.
+**The buildable set is what gamut-color can express**, because a matrix/TRC profile *is* a
+(primaries, transfer) pair. Four built-in spaces are coded on the two CICP axes — sRGB, linear sRGB,
+Display P3 and BT.2100 PQ — and carry a `cicpType` tag. Two are not: Adobe RGB (1998) and ProPhoto
+RGB (`BuiltinProfile::AdobeRgb = 4`, `ProPhotoRgb = 5`, issue #537) have no ITU-T H.273 code point
+on either axis, so their primaries come from gamut-color's total `Gamut::chromaticities`, their
+profiles carry **no** `cicpType` tag (§9.2.17 requires it to be equivalent to the encoding, and
+`Unspecified` is not), and `BuiltinProfile::cicp` returns `None` for them. Each carries its
+encoding's **standard** curve rather than gamut-color's encoder-exact one, because a profile is
+read by third-party CMMs: Adobe RGB (1998) §4.3.1.2's `X^(563/256)` as `parametricCurveType` type 0
+(exact in `s15Fixed16`), and the ROMM `X^1.8` with its linear toe `X / 16` below `X = 1/32` as type
+3. `from_source_profile` builds `SourceProfile::ADOBE_RGB` / `PROPHOTO_RGB` as those two spaces,
+and declines any other bundle missing a CICP axis (a hand-assembled mixture names no space).
+ProPhoto is the one space whose own white is D50, so its `chad` is not a real adaptation — only the
+CIE-to-ICC D50 step below, 2.5e-4 from the identity at its largest element (`prophoto_chad_is_near_the_identity`).
 
 **Tone-curve shape per transfer.** A `parametricCurveType` (§10.18) is used wherever ITU-T H.273
 gives the transfer a closed form ICC also defines, and a sampled `curveType` (§10.6) otherwise:
@@ -104,13 +115,16 @@ points `TransferCharacteristics::from_code_point` models, and that `eotf_for` ev
 `0.259719` at `V = 0.5` for both of those.
 
 **A `SourceProfile` bundle's own curve is not always the profile's curve.** `from_source_profile`
-projects the bundle onto its two CICP code points and builds from those. For `SourceProfile::SRGB`
+projects a coded bundle onto its two CICP code points and builds from those. The two uncoded
+bundles linearize with gamut-color's encoder-exact `x^2.2` / `x^1.8` while their profiles carry
+the standard curves above, a divergence of up to **1.3e-4** (Adobe) and **4.2e-4** (ProPhoto,
+inside the toe) over the same sweep, gated by the same test. For `SourceProfile::SRGB`
 that is a distinction without a difference — the bundle's transfer *is* code point 13, and profile
 and bundle agree to 4.2e-6, the `s15Fixed16` rounding of the tag. For `SourceProfile::BT2020` it is
 not: that bundle's transfer is ST 2084 **plus a Reinhard tone map to SDR**, while its code point is
 16, which is ST 2084 alone. The profile encodes 16, peak-referred, and over a 100 001-point sweep
 of the signal domain the two curves diverge by up to **0.735** absolute — 52× at `V = 0.1`. All
-three figures in this paragraph are asserted at the precision written here by
+five figures in this paragraph are asserted at the precision written here by
 `source_profile_divergence_is_what_the_docs_quote`, beside the constructor they describe. This is
 the opposite call from narrow-range RGB below, and deliberately so: a sample range is a property of
 the *samples*, which a full-scale profile genuinely cannot describe, whereas a tone map is gamut-color's
@@ -204,7 +218,9 @@ serialized, compared against something this crate did not compute:
 
 | What lcms2 checks | Over which profiles | Test |
 | --- | --- | --- |
-| Colorants equal the ones lcms2 derives from the same chromaticities (four `s15Fixed16` quanta) | `from_cicp` for **every** primaries code point it builds — 1, 5, 6, 9, 12 — which covers the built-in spaces' three | `oracle_colorants_match_lcms_for_every_buildable_primaries` |
+| Colorants equal the ones lcms2 derives from the same chromaticities (four `s15Fixed16` quanta) | `from_cicp` for **every** primaries code point it builds — 1, 5, 6, 9, 12 — which covers the coded built-in spaces' three | `oracle_colorants_match_lcms_for_every_buildable_primaries` |
+| The same colorant check | **every** `BuiltinProfile`, including Adobe RGB and ProPhoto RGB, which no code point reaches | `oracle_colorants_match_lcms_for_every_builtin_space` |
+| All three TRCs evaluate to gamut-color's standard curve (two `uInt16` quanta) | Adobe RGB and ProPhoto RGB, through the ROMM toe | `oracle_uncoded_space_curves_match_gamut_color_through_lcms` |
 | `mediaWhitePointTag` equals the D50 lcms2 writes itself | every `BuiltinProfile` and the grey constructor | `oracle_media_white_point_matches_lcms` |
 | All three TRCs evaluate to the transfer's own curve (two `uInt16` quanta) | `from_cicp` for **every** encodable transfer — 1, 6, 8, 13, 14, 15, 16 — against H.273 Table 3, the identity, lcms2's own sRGB and `gamut-color`'s `pq_eotf` | `oracle_every_encodable_transfer_matches_its_curve_through_lcms` |
 | The `cicpType` tag equals the one lcms2's own `cicp` synthesiser writes | every buildable (primaries, transfer) pair, built from an `nclx`-style matrix 9 | `oracle_cicp_tag_matches_the_lcms_synthesiser` |
