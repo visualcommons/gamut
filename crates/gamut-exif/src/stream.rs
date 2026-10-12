@@ -12,6 +12,8 @@
 //! drift. It is deliberately synchronous: an async caller drives a [`ReadAt`] source itself, which
 //! keeps a runtime dependency out of a crate that has none.
 
+use std::collections::BTreeSet;
+
 use gamut_core::ErrorKind;
 use gamut_ifd::{
     AuditFinding, AuditSpec, Ifd, IfdReader, RawIfd, ReadAt, SegmentReport, tags as ifd_tags,
@@ -206,7 +208,7 @@ impl ExifReader {
             report,
         )?;
         let maker_note_at = match (&exif, exif_ifd_at) {
-            (Some(_), Some(at)) => maker_note_offset(&mut reader, at)?,
+            (Some(_), Some(at)) => maker_note_offset(&mut reader, at, report)?,
             _ => None,
         };
 
@@ -475,6 +477,18 @@ fn read_range<S: ReadAt>(
 /// The absolute offset of the Exif sub-IFD's out-of-line `MakerNote` value in the TIFF stream, or
 /// `None` if the note is absent or inline.
 ///
+/// The offset is taken from the **one** `MakerNote` entry the model holds, so the pin and the
+/// note's bytes always describe the same record (#790). A directory may carry the tag more than
+/// once, and its decode keeps only one occurrence: the last, or under
+/// [`recover_entries`](ExifReader::recover_entries) the last *readable* one. Every other
+/// occurrence the decode discarded — shadowed, or skipped as unreadable — is already named in
+/// `report` as an Exif-IFD [`DroppedEntry`] at its record's offset, so the survivor is the entry
+/// `report` does not name. Reading that answer off the decode's own findings, rather than
+/// re-deriving "last" or "last readable" here, keeps the rule in one place. The match is by record
+/// offset *within the Exif IFD*: a record offset is unique within one directory, but a hostile
+/// file can overlap two directories so that one record is shadowed in one and the survivor in the
+/// other.
+///
 /// A failure here is propagated rather than folded into `None`. The offset is what
 /// [`ExifWriter`](crate::ExifWriter) uses to *pin* the note in place on a rewrite, so losing it
 /// silently re-emits a vendor MakerNote unpinned — wrong bytes, no error, and nothing in the
@@ -483,6 +497,7 @@ fn read_range<S: ReadAt>(
 fn maker_note_offset<S: ReadAt>(
     reader: &mut IfdReader<S>,
     exif_ifd_at: u64,
+    report: &ReadReport,
 ) -> Result<Option<u64>> {
     // Every error propagates, with no lenient arm — deliberately. This is reached only when
     // `follow` has already read and decoded this exact directory at this exact offset, so a
@@ -495,7 +510,19 @@ fn maker_note_offset<S: ReadAt>(
     // what keeps a vendor MakerNote's TIFF-absolute internal offsets valid on a rewrite, so
     // continuing would re-emit the note unpinned, with wrong bytes and nothing in the report.
     let raw: RawIfd = reader.read_ifd(exif_ifd_at)?;
-    let Some(entry) = raw.entry(ifd_tags::MAKER_NOTE) else {
+    // Collected once into a set: a hostile Exif IFD of 65 535 duplicate `MakerNote`s drops all but
+    // one, and probing the report's list per candidate would make this pass quadratic.
+    let discarded: BTreeSet<u64> = report
+        .dropped_entries()
+        .iter()
+        .filter(|d| d.ifd() == IfdKind::Exif)
+        .map(|d| d.offset())
+        .collect();
+    let Some(entry) = raw
+        .entries
+        .iter()
+        .find(|e| e.tag == ifd_tags::MAKER_NOTE && !discarded.contains(&e.offset))
+    else {
         return Ok(None);
     };
     Ok(reader.value_offset(entry))
@@ -1367,6 +1394,92 @@ mod tests {
             assert_eq!(report.dropped().len(), 1, "{reader:?}: {report:?}");
             assert_eq!(report.dropped()[0].region(), DroppedRegion::TrailingIfd);
         }
+    }
+
+    /// The first and second `MakerNote` values of [`duplicate_maker_note_blob`]: nine bytes each,
+    /// too wide to sit inline, so each has a real source offset.
+    const FIRST_NOTE: &[u8] = b"first\0\0\0\0";
+    const SECOND_NOTE: &[u8] = b"second\0\0\0";
+
+    /// A marked blob whose Exif IFD carries two out-of-line `MakerNote` entries, [`FIRST_NOTE`]
+    /// then [`SECOND_NOTE`]. `write` cannot emit a duplicate, so the second is written as
+    /// `UserComment` (0x9286, the next tag up in that directory) and its record's tag patched to
+    /// `MakerNote`. With `second_readable` false its value offset is also patched past the stream,
+    /// so only a recovering reader keeps the directory. Returns the blob and each note's value
+    /// offset in the TIFF stream, in file order.
+    fn duplicate_maker_note_blob(second_readable: bool) -> (Vec<u8>, [u64; 2]) {
+        let mut exif = Ifd::new();
+        exif.set(ifd_tags::MAKER_NOTE, Value::Undefined(FIRST_NOTE.to_vec()));
+        exif.set(0x9286, Value::Undefined(SECOND_NOTE.to_vec()));
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
+        let mut tiff = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image],
+        })
+        .expect("write");
+        let record = |tag: u16| {
+            let [lo, hi] = tag.to_le_bytes();
+            let head = [lo, hi, 7, 0, 9, 0, 0, 0]; // UNDEFINED, count 9
+            tiff.windows(head.len())
+                .position(|w| w == head)
+                .expect("the record")
+        };
+        let (first, second) = (record(ifd_tags::MAKER_NOTE), record(0x9286));
+        let word = |at: usize| {
+            u64::from(u32::from_le_bytes(
+                tiff[at + 8..at + 12].try_into().expect("four bytes"),
+            ))
+        };
+        let offsets = [word(first), word(second)];
+        tiff[second..second + 2].copy_from_slice(&ifd_tags::MAKER_NOTE.to_le_bytes());
+        if !second_readable {
+            tiff[second + 8..second + 12].copy_from_slice(&0xFFFF_0000u32.to_le_bytes());
+        }
+        let mut data = MARKER.to_vec();
+        data.extend(tiff);
+        (data, offsets)
+    }
+
+    /// With two `MakerNote` entries the model keeps the last, so the pin is the last one's value
+    /// offset — not the shadowed first's, which would place the surviving note where its absolute
+    /// internal offsets were never computed for (#790). Swept over every mode, since every entry
+    /// is readable and no mode decodes the directory differently.
+    #[test]
+    fn a_duplicated_maker_note_pins_the_survivor() {
+        let (data, [_, second]) = duplicate_maker_note_blob(true);
+        for reader in [
+            ExifReader::new(),
+            ExifReader::new().strict(true),
+            ExifReader::new().recover_entries(true),
+        ] {
+            let exif = reader.parse(&data).expect("parse");
+            assert_eq!(
+                exif.get(IfdKind::Exif, ifd_tags::MAKER_NOTE),
+                Some(&Value::Undefined(SECOND_NOTE.to_vec())),
+                "{reader:?}: the model keeps the last note"
+            );
+            assert_eq!(exif.maker_note_offset(), Some(second), "{reader:?}");
+        }
+    }
+
+    /// Under recovery an unreadable last `MakerNote` is skipped and shadows nothing, so the model
+    /// keeps the first — and the pin follows it, not the skipped entry's out-of-bounds offset.
+    #[test]
+    fn a_recovered_maker_note_pins_the_readable_survivor() {
+        let (data, [first, _]) = duplicate_maker_note_blob(false);
+        let exif = ExifReader::new()
+            .recover_entries(true)
+            .parse(&data)
+            .expect("parse");
+        assert_eq!(
+            exif.get(IfdKind::Exif, ifd_tags::MAKER_NOTE),
+            Some(&Value::Undefined(FIRST_NOTE.to_vec())),
+            "the model keeps the readable note"
+        );
+        assert_eq!(exif.maker_note_offset(), Some(first));
     }
 
     /// `address_reason` splits the two defects the report distinguishes, and the boundary is the
