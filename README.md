@@ -313,8 +313,9 @@ necessary but not sufficient. Review your output before opening a PR.
 Every crate is versioned **independently** following [SemVer](https://semver.org), based on
 its own changes. There is **no** guarantee that versions line up across the workspace — a
 change to one codec bumps only that crate (and anything that depends on it), so version
-numbers drift apart over time. Only `version` is per-crate; shared metadata such as the
-edition and [MSRV](#minimum-supported-rust-version) stays workspace-owned.
+numbers drift apart over time. `version` is one of the few keys each crate manifest sets
+itself ([Crates](#crates) lists them all); shared metadata such as the edition and
+[MSRV](#minimum-supported-rust-version) stays workspace-owned.
 
 Bumps are automated: [release-plz](https://release-plz.dev) reads each crate's
 conventional-commit history, computes its next version, and updates dependents' requirements
