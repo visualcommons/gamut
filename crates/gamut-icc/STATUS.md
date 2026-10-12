@@ -182,14 +182,25 @@ illuminant is an ICC fact, so this crate owns it. Both tristimuli and the 2e-4 g
 `the_two_d50_tristimuli_the_doc_names_are_what_the_constants_hold`, so this figure cannot drift
 from the constants it describes.
 
-**Known limit: the BT.2100 PQ profile is peak-referred.** Its `curveType` samples ST 2084
+**The BT.2100 PQ profile is peak-referred, by decision ([#557]).** Its `curveType` samples ST 2084
 normalized to the transfer's own 10 000 cd/m² peak, so signal maps to media-relative luminance as a
-fraction of that peak. A diffuse-white signal (the ~203 cd/m² BT.2408 reference white) therefore
-evaluates to roughly 0.02 media-relative, and a CMM rendering such content through this profile
-puts it near black. That is mathematically correct for a peak-referred profile and it is not what a
-caller embedding the profile alongside SDR-referred content necessarily expects; choosing a
-diffuse-white-referred normalization instead is a colour-appearance decision with its own
-consequences, so it is tracked separately rather than changed silently here.
+fraction of that peak. A diffuse-white signal (the 203 cd/m² BT.2408 reference white, `V` ≈ 0.58)
+therefore lands at 0.0203 of media white: lcms2 measures `Y` = 0.020294 through the built-in
+profile into its own XYZ profile, identically under media-relative colorimetric, ICC-absolute
+colorimetric (the `mediaWhitePointTag` is the PCS D50, so absolute scaling is the identity) and
+perceptual (a matrix/TRC profile has no perceptual table) intents; into lcms2's own sRGB at
+media-relative intent the same signal is 0.152965, code 39 of 255 — dark grey where SDR-referred
+content expects white. That is kept as `Bt2020Pq`'s only behaviour, with no diffuse-white-referred
+sibling and no parameter: peak-referred is right for embedding beside HDR content in an HDR-aware
+pipeline, and *no* normalization is right for an SDR CMM — referring the curve to diffuse white
+clips the top ~5.6 stops of the PQ range with no roll-off, because a matrix/TRC profile has nowhere
+to put a tone curve that is not also the transfer's. For an SDR rendering, tone-map the samples
+with `gamut-tonemap`'s `ToneCurve` operators and embed an SDR profile (`Srgb`, `DisplayP3`) instead.
+`validate()` reports nothing about it: the profile is conforming. Both measurements are asserted by
+`oracle_pq_diffuse_white_lands_at_its_share_of_the_peak` and
+`oracle_pq_diffuse_white_is_dark_grey_in_lcms_srgb` (`tests/oracle.rs`).
+
+[#557]: https://github.com/visualcommons/gamut/issues/557
 
 **Rendering intent.** Every constructor writes `Perceptual` in the header's rendering-intent field
 (§7.2.15), `ProfileHeader::new`'s default. It is a surprising default on a colorimetrically exact
@@ -210,9 +221,12 @@ serialized, compared against something this crate did not compute:
 | The `cicpType` tag equals the one lcms2's own `cicp` synthesiser writes | every buildable (primaries, transfer) pair, built from an `nclx`-style matrix 9 | `oracle_cicp_tag_matches_the_lcms_synthesiser` |
 | The grey gamma lcms2 estimates is the one asked for | `gray_with_gamma` at 1.0, 1.8, 2.2 | `oracle_gray_gamma_matches_lcms` |
 | A transform through our sRGB into lcms2's own sRGB is the identity to one 8-bit code | sRGB | `oracle_transform_through_our_srgb_is_the_identity` |
+| A 203 cd/m² PQ signal lands at 0.0203 of lcms2's D50 media white (two `uInt16` quanta), under media-relative, absolute and perceptual intents | BT.2100 PQ | `oracle_pq_diffuse_white_lands_at_its_share_of_the_peak` |
+| The same signal into lcms2's own sRGB, media-relative, is `srgb_oetf(0.0203)` to 1e-4 | BT.2100 PQ | `oracle_pq_diffuse_white_is_dark_grey_in_lcms_srgb` |
 
 Not checked by lcms2: the `chad` tag's contents (it is read only through the colorants it
-produced), and any `from_cicp` profile's end-to-end transform other than sRGB's.
+produced), and any `from_cicp` profile's end-to-end transform other than sRGB's and BT.2100 PQ's
+neutral axis at diffuse white.
 
 ## Deferred / intentional leniencies
 
