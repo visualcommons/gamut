@@ -19,12 +19,9 @@ const SIDE: u32 = 128;
 
 /// The quantizer ladder each curve is sampled at, up to the top of the range.
 ///
-/// The rungs above 160 keep the coarsest steps under the BD-rate assertion (issue #755): with
-/// partitions forced by a texture test, the photo was coded in 4×4 transforms throughout, and at
-/// `qindex` 240 the full search took `IDTX` on 296 of them, leaving 447 B / 28.94 dB against
-/// `Fast`'s 470 B / 30.55 dB. Partitions and transform depth chosen by rate–distortion trial code
-/// no 4×4 photo transform at all from `qindex` 80 up, and these rungs fail if a later change
-/// brings that loss back.
+/// The rungs above 160 sample the coarsest steps (issue #755), where the full search once lost
+/// to `Fast`; [`the_full_search_is_not_below_any_pruned_preset_at_the_coarsest_rung`] is what
+/// holds that point, because the BD-rate assertion alone cannot.
 const LADDER: [u8; 6] = [40, 80, 120, 160, 200, 240];
 
 /// Builds identity planes (Y=G, U=B, V=R) from an RGB generator.
@@ -135,6 +132,53 @@ fn bd_rate(anchor: &[(f64, f64)], test: &[(f64, f64)]) -> f64 {
         diff += log_rate_at(&test, p) - log_rate_at(&anchor, p);
     }
     ((diff / (STEPS + 1) as f64).exp() - 1.0) * 100.0
+}
+
+/// PSNR at `bytes` on the curve through `points`, piecewise-linear in `log(rate)` and extended
+/// past either end along its outermost segment.
+fn psnr_at(points: &[(f64, f64)], bytes: f64) -> f64 {
+    let mut points = points.to_vec();
+    points.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let seg = points
+        .windows(2)
+        .find(|w| bytes <= w[1].1)
+        .unwrap_or(&points[points.len() - 2..]);
+    let (r0, p0) = (seg[0].1.ln(), seg[0].0);
+    let (r1, p1) = (seg[1].1.ln(), seg[1].0);
+    p0 + (p1 - p0) * (bytes.ln() - r0) / (r1 - r0)
+}
+
+#[test]
+fn the_full_search_is_not_below_any_pruned_preset_at_the_coarsest_rung() {
+    // Issue #755: with partitions forced by a texture test, the photo was coded in 4×4
+    // transforms throughout, and at `qindex` 240 the full search took `IDTX` on 296 of them,
+    // leaving 447 B / 28.94 dB against `Fast`'s 470 B / 30.55 dB. The BD-rate assertion did not
+    // see it (Thorough −9.46% against Fast): it averages only over the PSNR range both curves
+    // share, and Thorough's sunken point lay below Fast's lowest PSNR. So the coarsest rung is
+    // held on its own, as the issue's done criterion states it: at a pruned preset's byte count,
+    // the full search's curve reaches at least that preset's PSNR.
+    let src = photo();
+    let rung = LADDER.len() - 1;
+    let thorough = curve(&src, Speed::Thorough);
+    let mut below = Vec::new();
+    for &speed in &Speed::ALL[1..] {
+        let (psnr, bytes) = curve(&src, speed)[rung];
+        let reached = psnr_at(&thorough, bytes);
+        eprintln!(
+            "photo q{} {speed:?} {bytes} B {psnr:.2} dB; Thorough at {bytes} B: {reached:.2} dB",
+            LADDER[rung]
+        );
+        if reached < psnr {
+            below.push(format!(
+                "{speed:?}: {reached:.2} dB < {psnr:.2} dB at {bytes} B"
+            ));
+        }
+    }
+    assert!(
+        below.is_empty(),
+        "the full search falls below a pruned preset at q{}: {below:?}",
+        LADDER[rung]
+    );
 }
 
 #[test]
