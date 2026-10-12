@@ -75,6 +75,12 @@ pub mod cct;
 pub mod cicp;
 pub mod format;
 pub mod gamut_map;
+// Executable laws for this crate's constructors, shared by its property tests and the
+// out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
+// A plain comment, not `///`, so rustdoc resolves the module's own `//!` links in its scope.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod invariants;
 pub mod lab;
 pub mod linalg;
 pub mod matrix;
