@@ -67,6 +67,10 @@ on a hand-written golden bitstream.
   sequence itself (jxl-rs does not expose auxiliary boxes — ledger below), applies the `Exif`
   payload's tiff-header offset, takes the first box of a kind, refuses a Brotli-compressed
   (`brob`) `Exif`/`xml ` box as `Unsupported`, and reports the codestream ICC profile alongside.
+  `metadata` is strict — a codestream fault fails it even once the boxes are located — so
+  `JxlDecoder::metadata_boxes` (#627) is the box-only half: the same walk and refusals, never
+  parses the codestream, leaves `icc` as `None` (not consulted), and still returns the `Exif` /
+  `xml ` boxes of a file whose codestream is damaged, truncated, or refused.
 - **Typed metadata** (issue #420) behind the opt-in **`metadata`** feature (a normal, optional
   dependency on `gamut-metadata`): `JxlMetadata::blocks` / `metadata` (the facade's
   `MetadataBlock`s / `Metadata`), `JxlEncoder::with_metadata(&Metadata)` (default
@@ -217,7 +221,8 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
 - **Container Exif / XMP metadata not exposed.** jxl-rs does not surface the `Exif`/`xml ` box bytes
   ([#674](https://github.com/libjxl/jxl-rs/issues/674)), and its box-header parser is
   `pub(super)`. gamut-jxl therefore locates the boxes with its own top-level box walk
-  (`JxlDecoder::metadata`, #420); when jxl-rs exposes box events the walk can be replaced.
+  (`JxlDecoder::metadata`, #420, and its codestream-free half `JxlDecoder::metadata_boxes`, #627);
+  when jxl-rs exposes box events the walk can be replaced.
 - **CMYK.** Parsed but not presentable (see Out of scope).
 
 ## Oracle & test regime
@@ -275,8 +280,10 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   a raw box scan; pixels stay bit-exact with boxes present; Codestream+metadata and empty payloads
   are typed errors. Read-back: `JxlDecoder::metadata` returns what `with_exif` / `with_xmp` /
   `ColorSpec::Icc` wrote (`tests/metadata.rs`), the box walk's size forms and hostile-input
-  refusals are unit-tested beside it, and with the `metadata` feature the facade's typed
-  extract → embed → extract equality holds through the container (`tests/metadata_facade.rs`).
+  refusals are unit-tested beside it (as is `metadata_boxes` returning the boxes past a codestream
+  `metadata` refuses, and an empty result for a bare codestream), and with the `metadata` feature
+  the facade's typed extract → embed → extract equality holds through the container
+  (`tests/metadata_facade.rs`).
 - **Signatures / conversions.** Codestream vs. container signature bytes and the
   gray→RGB / RGBA→RGB / RGB→gray-rejection conversion contracts are pinned.
 - **Mutants:** zero unjustified survivors; the only `exclude_re` entries carry strong justifications
