@@ -621,8 +621,8 @@ fn decode_metadata(
 const MAX_EXIF_POINTER_DEPTH: usize = 1;
 
 /// Replaces each standard pointer field of the Exif directory (`SubIFDs`, `ExifIFD`, `GPSInfo`,
-/// `InteroperabilityIFD` — [`STANDARD_POINTER_TAGS`](gamut_ifd::tags::STANDARD_POINTER_TAGS))
-/// with a sub-IFD group holding the directories it points at, which `fetch` parses by offset.
+/// `InteroperabilityIFD` — [`STANDARD_POINTER_TAGS`]) with a sub-IFD group holding the
+/// directories it points at, which `fetch` parses by offset.
 ///
 /// A pointer left as a field is a raw absolute offset into *this* file: it means nothing in a
 /// directory handed to a caller, and [`DngEncoder`](crate::DngEncoder) refuses to write one, so a
