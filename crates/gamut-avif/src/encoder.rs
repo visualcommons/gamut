@@ -1139,8 +1139,9 @@ impl AvifEncoder {
     /// the slot is allocated, and refuses as
     /// [`Error::Unsupported`](gamut_core::Error::Unsupported) — the kind the container writer
     /// would give. It is the encoder's effective ceiling: on this framing the largest `len` that
-    /// clears it is `4_294_967_250`, and `4_294_967_251` is refused. Whether that refusal should
-    /// instead be an `InvalidInput` is issue #576. On **32-bit** targets (`wasm32`) a buffer
+    /// clears it is `4_294_967_250`, and `4_294_967_251` is refused. It is `Unsupported` rather
+    /// than `InvalidInput` because such a box is well-formed ISOBMFF (a 64-bit `largesize`) that
+    /// the writer does not emit, so the limit is a capability, not bad input. On **32-bit** targets (`wasm32`) a buffer
     /// holds under 2 GiB, so this crate's own `InvalidInput` is the effective ceiling and the
     /// 4 GiB refusal is never reached.
     ///

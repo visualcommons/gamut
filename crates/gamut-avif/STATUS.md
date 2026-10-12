@@ -74,8 +74,10 @@ included, could find. On 64-bit targets a **third** refusal sits between them: a
 32-bit size field, so a `ContentProvenanceBox` at or beyond 4 GiB cannot be written. This crate
 applies the container writer's top-level-box bound itself, before the slot is allocated, and
 refuses as `Error::Unsupported` — the kind `gamut-isobmff` would give. There that is the effective
-ceiling — the largest `len` that clears it is `4_294_967_250` and `4_294_967_251` is refused — and
-whether the refusal should be an `InvalidInput` instead is **#576**. On 32-bit targets (`wasm32`,
+ceiling — the largest `len` that clears it is `4_294_967_250` and `4_294_967_251` is refused. The
+kind is `Unsupported` rather than `InvalidInput` by decision (#576): such a box is well-formed
+ISOBMFF through a 64-bit `largesize`, which the writer does not emit, so the limit is the writer's
+capability, not malformed input. On 32-bit targets (`wasm32`,
 built by `gamut-wasm`) a buffer holds under 2 GiB, so this crate's own `InvalidInput` is the
 effective ceiling and the 4 GiB refusal never fires.
 
