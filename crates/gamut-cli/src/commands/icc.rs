@@ -3,7 +3,8 @@
 //! Reads the raw ICC blob from a JPEG `APP2` segment, a PNG `iCCP` chunk (both via the `image`
 //! crate, which reassembles/inflates them), or a TIFF/DNG `ICCProfile` tag (34675, via `gamut-tiff`)
 //! — or treats the whole file as a standalone `.icc`/`.icm` profile — then parses it with
-//! [`gamut::icc`] and prints the header, the decoded tags, and the ICC.1:2022 §8 conformance verdict.
+//! [`gamut::icc`] and prints the header, the decoded tags, and the ICC.1:2022 conformance verdict
+//! (the §8 required tags, and §10.3's `cicp` MatrixCoefficients rule).
 //! This is the end-to-end check that gamut-icc parses real profiles from real cameras.
 
 use std::io::Cursor;
@@ -179,7 +180,7 @@ fn print_report(path: &Path, format: Format, blob: &[u8], profile: &IccProfile, 
 
     let issues = profile.validate();
     if issues.is_empty() {
-        println!("  conformance:      OK (all §8 required tags present)");
+        println!("  conformance:      OK (§8 required tags present, §10.3 cicp rule met)");
     } else {
         println!("  conformance:      {} unmet requirement(s):", issues.len());
         for issue in &issues {

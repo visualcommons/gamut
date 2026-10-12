@@ -24,7 +24,7 @@ serialization as an equivalent profile.
 | P7 | — | v2 legacy quirks (`textDescriptionType`) | ✅ |
 | P8 | — | lcms2 differential oracle gate | ✅ |
 | P9 | §10 | **Full §10 coverage** — every remaining element type decoded (see below) | ✅ |
-| P10 | §8 | Profile-class conformance validation (`IccProfile::validate`) | ✅ |
+| P10 | §8, §10.3 | Profile-class conformance validation (`IccProfile::validate`), plus the `cicpType` `MatrixCoefficients` clause (issue #587) | ✅ |
 | P11 | — | **v1 stabilization** (issue #180): API-surface hardening (private modules, `Eq` model, std conversion traits, validated fallible writes, `ProfileHeader::new`) + spec-citation audit | ✅ |
 | P12 | §8.4, §9.2 | **Built-in profiles** (issue #424): `IccProfile::builtin` / `gray_with_gamma` / `from_cicp` / `from_source_profile` | ✅ |
 
@@ -256,6 +256,28 @@ serialized, compared against something this crate did not compute:
 Not checked by lcms2: the `chad` tag's contents (it is read only through the colorants it
 produced), and any `from_cicp` profile's end-to-end transform other than sRGB's and BT.2100 PQ's
 neutral axis at diffuse white.
+
+## Conformance validation
+
+`IccProfile::validate` reports, as `Conformance` entries, the §8 required tags a profile's device
+class is missing and — the one tag *content* rule it checks — §10.3's clause tying a `cicp` tag's
+`MatrixCoefficients` to the header's data colour space: `0` for RGB and XYZ, non-zero for YCbCr.
+Both directions are `shall`s, so a breach is reported with the same weight as a missing required
+tag rather than as a separate warning tier; `validate` never refuses a profile, so the profile
+still parses, round-trips and transforms. The entry's `requirement` names the data colour space and
+the offending value, and its `missing` is empty because no tag is absent.
+
+This changes the verdict on real-world input: an RGB profile whose `cicp` tag copies an `nclx`
+box's coefficients (1, 5, 6, 9 …) verbatim was reported clean and now carries a §10.3 entry.
+Measured before the change, nothing the repository holds moves: `references/` carries no profile
+files (only the specification PDFs), the only checked-in profiles —
+`crates/gamut-jpeg/src/xyb/xyb-srgb.icc` and the one inside
+`crates/gamut-jpeg/tests/goldens/gray_meta.jpg` — carry no `cicp` tag, every built-in constructor
+writes `MatrixCoefficients` `0` into an RGB profile, and the lcms2-synthesized `cicp` fixture is
+`9-16-0-1` on an RGB header.
+
+Not checked: §9.2.17's rule that a `cicp` tag appear only in Input or Display profiles with an RGB,
+YCbCr or XYZ data colour space, and every other tag-content rule of §10.
 
 ## Deferred / intentional leniencies
 

@@ -17,7 +17,8 @@
 //! up with [`IccProfile::get`], optionally via the [`KnownTag`] catalogue. [`IccReader`] and
 //! [`IccWriter`] carry options (strict parsing; profile-ID recomputation).
 //! [`IccProfile::validate`] reports any ICC.1:2022 §8 required tags missing for the profile's
-//! device class.
+//! device class, and a `cicp` tag whose `MatrixCoefficients` breaks §10.3 for the header's data
+//! colour space.
 //!
 //! # Built-in profiles
 //!
