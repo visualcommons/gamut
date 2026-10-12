@@ -204,8 +204,10 @@ Neither bound is colorimetric, and that is the stated policy (#589): `gray_with_
 parameter no range beyond its `s15Fixed16` type, so a narrower sanity range would be this crate's
 judgement of the caller's colorimetry rather than conformance, and adding one to the shipped
 constructor would be a breaking change with no caller evidence behind it. A guard against a units
-mistake (`2.2e-5`, or a raw `s15Fixed16` passed as a gamma) belongs to the caller, or to a future
-additive checked constructor beside this one.
+mistake such as `2.2e-5`, which the encoding bound accepts, belongs to the caller, or to a future
+additive checked constructor beside this one. A raw `s15Fixed16` passed as a gamma is not such a
+case for any gamma of `0.5` or more: its raw value (`2.2` → `144179`) is at least `32768`, above
+the top bound, so the encoding bound already declines it.
 
 The `profileDescriptionTag` names the gamma the tag **holds**, not the one requested:
 `gray_with_gamma(2.2)` is described as `Grey gamma 2.1999969482421875`. At the smallest accepted
