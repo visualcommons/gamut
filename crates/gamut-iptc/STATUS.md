@@ -87,8 +87,9 @@ drops a value a caller set says so:
 - **A structured field the projection cannot express reads as absent** — a URL held as
   `rdf:resource`, a value carrying a qualifier, a language alternative with entries beside the
   default, an unexpected container kind. Nothing is lost: the field is in the type's `other` list
-  and the graph keeps it verbatim. Whether the model should widen to report the value as well is
-  issue #609.
+  and the graph keeps it verbatim. The model deliberately does not widen to report the value as
+  well (issue #609): the typed view stays plain data, and the module docs' *The typed view stays
+  plain data* records why. Every type is `#[non_exhaustive]`, so a later widening can be additive.
 - **A whole structured property the projection cannot express reads as absent, on the same terms.**
   `creator_contact_info`, `image_regions`, `artwork_or_objects` and `licensors` report a value only
   when writing it back would give the property back — so a bare structure written where the standard
