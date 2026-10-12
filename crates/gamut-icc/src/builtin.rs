@@ -837,9 +837,14 @@ impl IccProfile {
     /// description string and the tag.
     ///
     /// That range is what the format can encode, not what is colorimetrically sensible — a gamma
-    /// of `1e-5` is encodable and useless. Whether the constructor should also refuse a
-    /// meaningless gamma is deliberately left open; see
-    /// <https://github.com/visualcommons/gamut/issues/589>.
+    /// of `1e-5` or `30 000` is encodable and useless, and both are accepted. This is policy, not
+    /// an oversight: the constructor is a faithful encoder, and ICC.1:2022 §10.18 states no range
+    /// for the type 0 parameter beyond its `s15Fixed16` type, so any narrower bound would be this
+    /// crate judging the caller's colorimetry with no clause behind it. Real grey profiles carry
+    /// roughly `1.0 ..= 3.0`; a caller that wants to catch a units mistake (a gamma passed as
+    /// `2.2e-5`, or a raw `s15Fixed16`) checks its own input, and a checked constructor that
+    /// refuses outside a sanity range would be an additive API alongside this one, not a change
+    /// to it. See <https://github.com/visualcommons/gamut/issues/589>.
     ///
     /// The `profileDescriptionTag` names the gamma the `kTRC` **holds**, not the one that was
     /// asked for: an accepted `gamma` is rounded to the tag's `s15Fixed16` parameter first and

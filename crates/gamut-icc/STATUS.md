@@ -199,6 +199,14 @@ trillion) and evaluate identically, so nothing is saved from misrendering there.
 a domain stated at both ends is easier to reason about than one open at the top, and the crate says
 which kind each end is rather than implying both refuse harm.
 
+Neither bound is colorimetric, and that is the stated policy (#589): `gray_with_gamma(1e-5)` and
+`gray_with_gamma(30000.0)` are encodable, useless, and accepted. ICC.1:2022 §10.18 gives the type 0
+parameter no range beyond its `s15Fixed16` type, so a narrower sanity range would be this crate's
+judgement of the caller's colorimetry rather than conformance, and adding one to the shipped
+constructor would be a breaking change with no caller evidence behind it. A guard against a units
+mistake (`2.2e-5`, or a raw `s15Fixed16` passed as a gamma) belongs to the caller, or to a future
+additive checked constructor beside this one.
+
 The `profileDescriptionTag` names the gamma the tag **holds**, not the one requested:
 `gray_with_gamma(2.2)` is described as `Grey gamma 2.1999969482421875`. At the smallest accepted
 gamma the two differ by a factor of two, and a profile whose description contradicts its own tag is
