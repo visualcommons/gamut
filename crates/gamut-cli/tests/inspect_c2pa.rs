@@ -1,18 +1,20 @@
-//! End-to-end tests for `gamut inspect`'s HEIC arm: which containers it accepts, and what the C2PA
-//! report says once it does.
+//! End-to-end tests for `gamut inspect`'s C2PA section: which containers each arm accepts, and
+//! what the report says once it does — HEIC (#448), and AVIF, WebP, TIFF and DNG (#530).
 //!
 //! These drive the built `gamut` binary (`CARGO_BIN_EXE_gamut`) so they exercise the real command
 //! path — the format sniff, the container confirmation, and the lines that reach stdout — the way a
-//! user runs it. What each line *means* is `gamut-heic`'s contract and is pinned by that crate's
-//! tests; what is pinned here is that this binary routes the file correctly and prints the crate's
-//! words through, unabridged.
+//! user runs it. What each line *means* is the format crate's contract and is pinned by that
+//! crate's tests; what is pinned here is that this binary routes the file correctly and prints the
+//! crate's words through, unabridged, without moving any verdict.
 //!
-//! Fixtures are built by `gamut::isobmff::write` and then have hand-authored top-level boxes spliced
-//! in after `ftyp`, since a C2PA `uuid` box is not part of the writer's model. C2PA clause
-//! references are to the 2.4 specification.
+//! HEIC fixtures are built by `gamut::isobmff::write` and then have hand-authored top-level boxes
+//! spliced in after `ftyp`, since a C2PA `uuid` box is not part of the writer's model; the other
+//! formats' fixtures come from gamut's own encoders, whose reported ranges are what the report must
+//! repeat. C2PA clause references are to the 2.4 specification.
 
 use std::process::{Command, Output};
 
+use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut::isobmff::{IsoBmffImage, Item, Property, PropertyKind, write};
 
 /// The C2PA `ContentProvenanceBox` extended (user) type — C2PA 2.4 §A.5.1.1.
@@ -207,10 +209,11 @@ fn a_c2pa_box_that_yields_no_store_is_not_reported_as_a_file_without_provenance(
 }
 
 #[test]
-fn an_avif_whose_major_brand_is_mif1_is_not_reported_as_a_heic() {
+fn an_avif_whose_major_brand_is_mif1_is_reported_as_an_avif_not_a_heic() {
     // `mif1` is the generic MIAF structural brand, so a major-brand test alone accepts this file
-    // and would report an AVIF's C2PA box as a HEIC's. The confirmation is `gamut-heic`'s own
-    // still-image predicate, applied after the parse.
+    // and would report an AVIF's C2PA box as a HEIC's. The confirmations are `gamut-heic`'s and
+    // `gamut-avif`'s own still-image predicates, applied after the parse: the HEIC one declines the
+    // file and the AVIF one claims it.
     let file = splice_after_ftyp(
         &mif1_avif_file(),
         &[uuid_box(
@@ -222,6 +225,34 @@ fn an_avif_whose_major_brand_is_mif1_is_not_reported_as_a_heic() {
     );
     let out = run_inspect("mif1.avif", &file, None);
     let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains(": AVIF\n"), "{stdout}");
+    assert!(!stdout.contains("HEIF/HEIC"), "{stdout}");
+    // AVIF reports the box-bounded slot after the 8-byte merkle offset: the 14-byte store.
+    assert!(
+        stdout.contains("box_purpose \"manifest\": 14-byte slot"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn an_isobmff_still_image_neither_crate_confirms_is_an_unsupported_container() {
+    // A `mif1` file whose primary item is neither HEVC nor AV1: both predicates decline it, so the
+    // command names the brand rather than reporting anyone's provenance for it.
+    let file = write(&IsoBmffImage::new(
+        *b"mif1",
+        vec![*b"mif1", *b"miaf"],
+        1,
+        vec![coded_item(1, *b"j2k1", *b"j2kH")],
+    ))
+    .expect("valid MIAF-shaped model");
+    let out = run_inspect("other.heif", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert!(!out.status.success(), "stdout: {stdout}");
@@ -231,7 +262,7 @@ fn an_avif_whose_major_brand_is_mif1_is_not_reported_as_a_heic() {
     );
     assert!(
         !stdout.contains("C2PA"),
-        "nothing about the AVIF's provenance may be printed: {stdout}"
+        "nothing about the file's provenance may be printed: {stdout}"
     );
 }
 
@@ -471,4 +502,258 @@ fn the_capped_list_is_the_files_first_boxes_and_not_its_first_stores() {
     );
     // One store is past the cut, so the tail counts it and no kind was hidden as a kind.
     assert!(stdout.contains("… and 1 more"), "{stdout}");
+}
+
+/// An 8×8 RGB image, the same for every encoder below.
+fn rgb_image(rgb: &[u8]) -> ImageRef<'_, Rgb8> {
+    ImageRef::new(rgb, Dimensions::new(8, 8).expect("dimensions")).expect("buffer matches")
+}
+
+/// Asserts the four fragments of the non-validation disclaimer reached `stdout`.
+fn assert_disclaimed(stdout: &str) {
+    for fragment in [
+        "no signature",
+        "no hash binding",
+        "no trust list",
+        "c2pa-rs",
+    ] {
+        assert!(stdout.contains(fragment), "{fragment}: {stdout}");
+    }
+}
+
+#[test]
+fn an_avif_the_encoder_signed_reports_its_slot_at_the_encoders_range() {
+    // Sniffed through `ftyp`, confirmed by `gamut-avif`'s predicate, and reported from its summary:
+    // the slot's range is the one the encoder reported, and its bytes are never printed.
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let store = b"STORE-BYTES-NEVER-PRINTED";
+    let (file, report) = gamut::avif::AvifEncoder::new()
+        .with_c2pa(store)
+        .encode_with_report(rgb_image(&rgb))
+        .expect("encode");
+    let range = report.c2pa.expect("a slot was written");
+    let out = run_inspect("signed.avif", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[0].ends_with(": AVIF"), "{stdout}");
+    assert!(
+        lines[1].contains("1 manifest store located, NOT VALIDATED"),
+        "{stdout}"
+    );
+    assert_disclaimed(&stdout);
+    assert!(
+        stdout.contains(&format!(
+            "box_purpose \"manifest\": {}-byte slot (store plus any padding) at [{}, {})",
+            store.len(),
+            range.start,
+            range.end
+        )),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("STORE-BYTES"), "{stdout}");
+
+    // Without a store, absence is reported — at exit 0, with the disclaimer still inline.
+    let plain = gamut::avif::AvifEncoder::new()
+        .encode_to_vec(rgb_image(&rgb))
+        .expect("encode");
+    let out = run_inspect("plain.avif", &plain, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("no manifest store found"), "{stdout}");
+    assert_disclaimed(&stdout);
+}
+
+#[test]
+fn forcing_the_avif_format_says_the_format_was_asserted() {
+    let out = run_inspect("forced.heic", &mif1_avif_file(), Some("avif"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains(": AVIF (asserted by --format, not detected)\n"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_webp_reports_its_c2pa_chunk_store_and_exits_zero() {
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let store = b"STORE-BYTES-NEVER-PRINTED";
+    let mut file = Vec::new();
+    gamut::webp::WebpEncoder::lossless()
+        .with_c2pa(store)
+        .encode_image(rgb_image(&rgb), &mut file)
+        .expect("encode");
+    let span = gamut::webp::c2pa_span(&file)
+        .expect("walk")
+        .expect("a chunk");
+    let out = run_inspect("signed.webp", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[0].ends_with(": WebP"), "{stdout}");
+    assert!(
+        lines[1].contains("1 manifest store located, NOT VALIDATED"),
+        "{stdout}"
+    );
+    assert_disclaimed(&stdout);
+    // The store is the chunk's payload: its span less the 8-byte chunk header.
+    assert!(
+        stdout.contains(&format!(
+            "C2PA chunk: {}-byte store at [{}, {}) — located, not validated\n",
+            store.len(),
+            span.start + 8,
+            span.end
+        )),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("STORE-BYTES"), "{stdout}");
+}
+
+#[test]
+fn a_file_that_is_not_a_webp_is_refused_by_the_riff_walk_when_forced() {
+    let out = run_inspect("not.webp", &heic_file(), Some("webp"));
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "no report may be printed");
+}
+
+#[test]
+fn a_tiff_reports_its_store_beside_the_accounting_without_moving_the_verdict() {
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let encode = |metadata: gamut::tiff::TiffMetadata| {
+        let mut file = Vec::new();
+        let report = gamut::tiff::TiffEncoder::new()
+            .with_metadata(metadata)
+            .encode_with_report(rgb_image(&rgb), &mut file)
+            .expect("encode");
+        (file, report)
+    };
+    let (plain, _) = encode(gamut::tiff::TiffMetadata::new());
+    let (signed, report) =
+        encode(gamut::tiff::TiffMetadata::new().with_c2pa(b"STORE-BYTES-NEVER-PRINTED".to_vec()));
+    let store = report.c2pa.expect("a store was written").store();
+
+    let plain_out = run_inspect("plain.tif", &plain, None);
+    let out = run_inspect("signed.tif", &signed, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Additive: the store changes no verdict — the signed file exits exactly as the plain one.
+    assert_eq!(out.status.code(), plain_out.status.code(), "{stdout}");
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("fully accounted:  yes"), "{stdout}");
+    assert!(
+        stdout.contains("C2PA: 1 manifest store located, NOT VALIDATED"),
+        "{stdout}"
+    );
+    assert_disclaimed(&stdout);
+    assert!(
+        stdout.contains(&format!(
+            "tag 52545 in IFD 0: 25-byte store at [{}, {}) — located, not validated",
+            store.start,
+            store.end()
+        )),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("STORE-BYTES"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&plain_out.stdout)
+            .contains("C2PA: no manifest store found in the main IFD chain"),
+        "{}",
+        String::from_utf8_lossy(&plain_out.stdout)
+    );
+}
+
+#[test]
+fn a_tiff_whose_store_entry_is_mistyped_is_not_reported_as_without_provenance() {
+    // §A.3.6 fixes the entry's type at UNDEFINED; a BYTE-typed one yields no store, but the entry
+    // is there, and the absence wording must not be printed for it.
+    let mut ifd = gamut::tiff::Ifd::new();
+    ifd.set(256, gamut::tiff::Value::Short(vec![1]));
+    ifd.set(52545, gamut::tiff::Value::Byte(vec![0x10; 12]));
+    let file = gamut::tiff::write(&gamut::tiff::TiffFile {
+        order: gamut::tiff::ByteOrder::LittleEndian,
+        variant: gamut::tiff::Variant::Classic,
+        ifds: vec![ifd],
+    })
+    .expect("write");
+    let out = run_inspect("mistyped.tif", &file, Some("tiff"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(!stdout.contains("no manifest store found"), "{stdout}");
+    assert!(stdout.contains("NOT absence of provenance"), "{stdout}");
+    assert!(
+        stdout.contains("unread tag 52545 entry in IFD 0 at [10, 22): its field type is not"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_dng_reports_its_reserved_store_beside_the_accounting() {
+    use gamut::dng::{CalibrationIlluminant, CameraProfile, DngEncoder, RawImage, cfa_color};
+
+    let samples: Vec<u16> = (0..16u16 * 16).map(|i| (i * 37) % 4096).collect();
+    let raw = RawImage::new_cfa(
+        Dimensions::new(16, 16).expect("dimensions"),
+        16,
+        (2, 2),
+        vec![
+            cfa_color::RED,
+            cfa_color::GREEN,
+            cfa_color::GREEN,
+            cfa_color::BLUE,
+        ],
+        samples,
+    )
+    .expect("raw")
+    .with_black_level(0.0)
+    .expect("black level")
+    .with_white_level(4095.0)
+    .expect("white level");
+    let profile = CameraProfile::new(
+        "gamut TestCam",
+        [
+            0.6722, -0.0635, -0.0963, -0.4287, 1.2460, 0.2028, -0.0908, 0.2162, 0.5668,
+        ],
+        CalibrationIlluminant::D65,
+        [0.5128, 1.0, 0.7059],
+    )
+    .expect("profile");
+    let mut file = Vec::new();
+    let report = DngEncoder::new()
+        .with_c2pa_reserved(64)
+        .encode_with_report(&raw, &profile, &mut file)
+        .expect("encode");
+    let store = report.c2pa.expect("a reservation was written").store();
+    let out = run_inspect("signed.dng", &file, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(stdout.starts_with("inspecting "), "{stdout}");
+    assert!(stdout.contains(" as DNG\n"), "{stdout}");
+    assert!(
+        stdout.contains("C2PA: 1 manifest store located, NOT VALIDATED"),
+        "{stdout}"
+    );
+    assert_disclaimed(&stdout);
+    assert!(
+        stdout.contains(&format!(
+            "tag 52545 in IFD 0: 64-byte store at [{}, {})",
+            store.start,
+            store.end()
+        )),
+        "{stdout}"
+    );
 }

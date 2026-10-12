@@ -56,7 +56,7 @@ pub(crate) enum CliError {
     /// reports on — an AVIF, say, which may carry the generic `mif1` brand as its major brand.
     /// Nothing is printed to stdout for it: this arm has no slice for that container.
     #[error(
-        "{path}: unsupported container brand '{brand}' — gamut inspect reads HEVC still images (HEIF/HEIC) here"
+        "{path}: unsupported container brand '{brand}' — gamut inspect reads HEVC (HEIF/HEIC) and AV1 (AVIF) still images here"
     )]
     UnsupportedContainer {
         /// The input file.
