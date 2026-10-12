@@ -1,17 +1,17 @@
 //! Executable laws for this crate's sample transforms and decode budget, shared by the property
 //! tests and the fuzz tier.
 //!
-//! Each function takes plain data, checks one law, and returns a [`Violation`] naming what broke
-//! it. Nothing here panics on a well-formed input, so the same body runs under a pinned-seed
-//! `proptest` in the per-PR gate and under a corpus-guided driver in extended CI
-//! (`docs/testing.md`).
+//! Each function takes plain data, checks one law, and returns a
+//! [`Violation`](crate::invariants::Violation) naming what broke it. Nothing here panics on a
+//! well-formed input, so the same body runs under a pinned-seed `proptest` in the per-PR gate and
+//! under a corpus-guided driver in extended CI (`docs/testing.md`).
 //!
 //! **Clean alpha** (issue #657): cleaning the colour under transparent pixels must leave the
 //! **premultiplied composite** of every pixel unchanged — alpha identical, opaque colour
 //! identical, and every colour channel premultiplying to the value it did before.
-//! [`premultiply`] is written here, from the definition `round(c·a / MAX)`, rather than borrowed
+//! `premultiply` is written here, from the definition `round(c·a / MAX)`, rather than borrowed
 //! from the cleaner, so a defect in the cleaner's own interval arithmetic cannot cancel against
-//! the oracle. For the same reason the law reads samples through its own [`Scale`], not the
+//! the oracle. For the same reason the law reads samples through its own `Scale`, not the
 //! cleaner's `Sample` trait: a defect in how the cleaner widens a sample would otherwise blind
 //! the oracle to it too.
 //!
