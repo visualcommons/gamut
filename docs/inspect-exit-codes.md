@@ -8,7 +8,7 @@ about the verdict the command turns those findings into.
 Source: `crates/gamut-cli/src/commands/inspect.rs`, `crates/gamut-cli/src/main.rs`,
 `crates/gamut-png/src/deconstruct.rs`, `crates/gamut-tiff/src/deconstruct.rs`,
 `crates/gamut-dng/src/deconstruct.rs`, `crates/gamut-heic/src/c2pa.rs`, `crates/gamut-avif/src/c2pa.rs`,
-`crates/gamut-riff/src/webp.rs`, `crates/gamut-ifd/src/c2pa.rs`.
+`crates/gamut-riff/src/webp.rs`, `crates/gamut-ifd/src/c2pa.rs`, `crates/gamut-png/src/chunk.rs`.
 
 ## There are two exit codes
 
@@ -64,7 +64,8 @@ with that error and no report.
   crates. The C2PA section prints beside it and never moves it (see below).
 - **PNG** — `PngReport::is_verified()`: `is_intact()` **and** `FilterScan::is_counted()`, i.e.
   every byte classified, every chunk CRC valid, IEND present, no trailing bytes after it, no
-  truncated tail, nothing the filter scan found damaging — *and the filter scan actually ran*.
+  truncated tail, nothing the filter scan found damaging — *and the filter scan actually ran*. The
+  C2PA section prints beside it and never moves it (see below).
 - **HEIC / AVIF / WebP** — **no gate**; see the section below. Exit `0` whenever the format crate's
   parse succeeds and the container is the one the arm reads.
 
@@ -204,7 +205,7 @@ and `gamut-cli`'s `tests/inspect_c2pa.rs` pins that this command carries it to t
 unabridged. The store's bytes are never printed at any verbosity: they are opaque to gamut,
 routinely hundreds of kilobytes, and a byte range is what a caller hands to `c2pa-rs`.
 
-## The same section for AVIF, WebP, TIFF and DNG
+## The same section for AVIF, WebP, TIFF, DNG and PNG
 
 Each of these renders its own crate's `C2paSummary` through the same head-then-capped-detail
 printing as HEIC, with the same rules: the headline carries the non-validation disclaimer inline,
@@ -246,9 +247,20 @@ The binary-level claims for these arms are pinned in `crates/gamut-cli/tests/ins
 HEIC's; the wording and the categories are each format crate's own contract, pinned there inside the
 mutation gate.
 
-**PNG has no C2PA section yet.** `gamut-png` locates a `caBX` store, but wiring it into this command
-is a separate slice (issue #727), held back while `gamut-png` is being reworked elsewhere; until it
-lands, a PNG's report says nothing about C2PA either way, and that silence is not absence.
+- **PNG** (`gamut_png::c2pa_summary`, issue #727) — **additive**, as for TIFF/DNG: the section
+  prints after the byte-accounting report, and the verdict (`is_verified()`) never moves for it. The
+  store (§A.3.2: one per file, raw in a `caBX` chunk before the first `IDAT`) is the span
+  `PngReport::c2pa()` names, reported as `caBX chunk at [a, b): N-byte store at [c, d)` — the whole
+  chunk, which a `c2pa.hash.data` assertion excludes (§18.5.4), and the store's own bytes inside it.
+  Every other `caBX` chunk is listed as an unread `N-byte payload` with its reason: its CRC does not
+  match (PNG §13.1), it follows the first `IDAT`, it follows `IEND` (the walk frames chunks in the
+  bytes after `IEND` to find these, which the accounting reports as one trailer), or an earlier
+  `caBX` is already the store. Position outranks damage, and damage outranks duplication, so each
+  chunk gets the first reason that applies. A file whose every `caBX` is unread reads `no manifest
+  store could be read, but N caBX chunks are present — that is NOT absence of provenance`; a file
+  with none reads `no caBX chunk found`. An appended `caBX` still leaves the trailer finding the
+  accounting reports, so such a file exits `1` — for the trailer, exactly as it would with any other
+  bytes there.
 
 ## `--output json`: the same facts, as data
 
@@ -292,8 +304,8 @@ Then, per format:
   `{"counted": false, "reason", "damage", "description"}`, `reason` being one of the skip reasons
   in the table below — `passes` (Adam7), `findings` (`kind`: `crc_mismatch`, `truncated`,
   `trailing_bytes`, `missing_iend` or `filter_scan_damage`, with the offending `range` where there
-  is one), and the three predicates `fully_classified`, `intact` and `verified` (the gate). No `c2pa`
-  member yet: issue #727. A non-finite ratio (`bits_per_pixel`, `idat.ratio`) is `null`.
+  is one), the three predicates `fully_classified`, `intact` and `verified` (the gate), and `c2pa`.
+  A non-finite ratio (`bits_per_pixel`, `idat.ratio`) is `null`.
 - **HEIC / AVIF / WebP** — `c2pa` and nothing else, as in the text report.
 
 The `c2pa` object is the format crate's `C2paSummary` as data:
@@ -303,6 +315,7 @@ The `c2pa` object is the format crate's `C2paSummary` as data:
 | HEIC, AVIF | `stores` (`purpose`, `extent`, `size`, `range`, `position`), `unread` (`range`, `reason`, `description`, `position`), `merkle` (`range`, `position`), `other_uuid_boxes` |
 | WebP | `stores` (`size`, `range`, `position`), `unread` (`range`, `position`) |
 | TIFF, DNG | `store` — `null`, or `size`, `range`, `count_field` (the two §18.5.5 exclusion ranges) and `ifd` — and `unread` (`entry`, `ifd`, `reason`, `description`) |
+| PNG | `store` — `null`, or `size`, `range` (the store's bytes) and `chunk` (the whole `caBX` chunk, the §18.5.4 exclusion) — and `unread` (`size`, `chunk`, `reason`, `description`), `reason` being `crc_mismatch`, `after_idat`, `after_iend` or `duplicate` |
 
 Two things the text report guarantees carry over unchanged:
 

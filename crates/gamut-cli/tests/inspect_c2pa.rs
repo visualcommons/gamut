@@ -1,5 +1,6 @@
 //! End-to-end tests for `gamut inspect`'s C2PA section: which containers each arm accepts, and
-//! what the report says once it does — HEIC (#448), and AVIF, WebP, TIFF and DNG (#530).
+//! what the report says once it does — HEIC (#448), AVIF, WebP, TIFF and DNG (#530), and PNG
+//! (#727).
 //!
 //! These drive the built `gamut` binary (`CARGO_BIN_EXE_gamut`) so they exercise the real command
 //! path — the format sniff, the container confirmation, and the lines that reach stdout — the way a
@@ -760,6 +761,99 @@ fn a_dng_reports_its_reserved_store_beside_the_accounting() {
     );
 }
 
+/// A PNG the encoder signed with `store`, and the `caBX` chunk span it reported.
+fn signed_png(store: &[u8]) -> (Vec<u8>, gamut::png::C2paSpan) {
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let (file, report) = gamut::png::PngEncoder::new()
+        .with_c2pa(store)
+        .encode_with_report(rgb_image(&rgb))
+        .expect("encode");
+    (file, report.c2pa.expect("a store was written"))
+}
+
+#[test]
+fn a_png_reports_its_store_beside_the_accounting_without_moving_the_verdict() {
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let plain = gamut::png::PngEncoder::new()
+        .encode_to_vec(rgb_image(&rgb))
+        .expect("encode");
+    let (signed, span) = signed_png(b"STORE-BYTES-NEVER-PRINTED");
+
+    let plain_out = run_inspect("plain.png", &plain, None);
+    let out = run_inspect("signed.png", &signed, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // Additive: the store changes no verdict — the signed file exits exactly as the plain one.
+    assert_eq!(out.status.code(), plain_out.status.code(), "{stdout}");
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("verified:      yes"), "{stdout}");
+    assert!(
+        stdout.contains("C2PA: 1 manifest store located, NOT VALIDATED"),
+        "{stdout}"
+    );
+    assert_disclaimed(&stdout);
+    assert!(
+        stdout.contains(&format!(
+            "caBX chunk at [{}, {}): 25-byte store at [{}, {}) — located, not validated\n",
+            span.chunk.start, span.chunk.end, span.payload.start, span.payload.end
+        )),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("STORE-BYTES"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&plain_out.stdout).contains("C2PA: no caBX chunk found"),
+        "{}",
+        String::from_utf8_lossy(&plain_out.stdout)
+    );
+}
+
+#[test]
+fn a_cabx_appended_after_iend_is_listed_as_unread_not_as_absence() {
+    // The appended chunk is a real, CRC-valid caBX — the one the encoder framed — copied past
+    // IEND, where it is not the store but is C2PA framing all the same.
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let plain = gamut::png::PngEncoder::new()
+        .encode_to_vec(rgb_image(&rgb))
+        .expect("encode");
+    let (signed, span) = signed_png(b"STORE-BYTES-NEVER-PRINTED");
+    let chunk = &signed[span.chunk.clone()];
+    let mut appended = plain.clone();
+    appended.extend_from_slice(chunk);
+    // The same bytes under another chunk type: the trailer finding alone, for the verdict.
+    let mut renamed = plain.clone();
+    renamed.extend_from_slice(chunk);
+    renamed[plain.len() + 4..plain.len() + 8].copy_from_slice(b"teXt");
+
+    let out = run_inspect("appended.png", &appended, None);
+    let baseline = run_inspect("renamed.png", &renamed, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // The trailer is a finding either way; the caBX chunk in it moves nothing.
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert_eq!(out.status.code(), baseline.status.code(), "{stdout}");
+    assert!(!stdout.contains("no caBX chunk found"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "C2PA: no manifest store could be read, but 1 caBX chunk is present — that is NOT \
+             absence of provenance"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "unread caBX chunk at [{}, {}): 25-byte payload — it follows IEND",
+            plain.len(),
+            plain.len() + chunk.len()
+        )),
+        "{stdout}"
+    );
+    assert!(
+        String::from_utf8_lossy(&baseline.stdout).contains("C2PA: no caBX chunk found"),
+        "{}",
+        String::from_utf8_lossy(&baseline.stdout)
+    );
+}
+
 // `--output json` (#596): the same facts as data. Each test reads the document back as JSON and
 // compares it with what the format crate itself reports for the file, so what is pinned is that the
 // command carries the crate's summary through whole, not what the summary says.
@@ -1077,4 +1171,68 @@ fn json_output_lists_a_mistyped_tiff_store_entry_as_unread_with_its_reason() {
     assert_eq!(unread[0]["entry"], json_range(22, 34));
     assert_eq!(unread[0]["ifd"], 0);
     assert_eq!(unread[0]["reason"], "not_undefined");
+}
+
+#[test]
+fn json_output_reports_a_png_store_and_every_other_cabx_with_its_reason() {
+    // Copies of the encoder's own CRC-valid caBX chunk, spliced in one per reason: a second one
+    // right behind the store, a damaged one behind that, one between the IDATs and IEND, and one
+    // after IEND.
+    let (signed, span) = signed_png(b"STORE-BYTES-NEVER-PRINTED");
+    let chunk = &signed[span.chunk.clone()];
+    let mut damaged = chunk.to_vec();
+    *damaged.last_mut().expect("a CRC") ^= 0xFF;
+    let iend = signed.len() - 12;
+    let mut file = signed[..span.chunk.end].to_vec();
+    let mut starts = Vec::new();
+    for (copy, rest) in [
+        (chunk, &[][..]),
+        (&damaged[..], &signed[span.chunk.end..iend]),
+        (chunk, &signed[iend..]),
+        (chunk, &[][..]),
+    ] {
+        starts.push(file.len());
+        file.extend_from_slice(copy);
+        file.extend_from_slice(rest);
+    }
+    let (out, doc) = run_inspect_json("signed-json.png", &file, None);
+
+    assert_eq!(doc["format"], "png");
+    // The damaged copy and the appended one are findings; the C2PA member reports them and moves
+    // nothing.
+    assert_eq!(out.status.code(), Some(1), "{doc}");
+    assert_eq!(doc["verified"], false);
+    let store = &doc["c2pa"]["store"];
+    assert_eq!(store["size"], 25);
+    assert_eq!(
+        store["range"],
+        json_range(span.payload.start as u64, span.payload.end as u64)
+    );
+    assert_eq!(
+        store["chunk"],
+        json_range(span.chunk.start as u64, span.chunk.end as u64)
+    );
+    let unread = &doc["c2pa"]["unread"];
+    assert_eq!(unread.as_array().map(Vec::len), Some(4), "{doc}");
+    for (i, (start, reason)) in starts
+        .into_iter()
+        .zip(["duplicate", "crc_mismatch", "after_idat", "after_iend"])
+        .enumerate()
+    {
+        assert_eq!(unread[i]["size"], 25, "{doc}");
+        assert_eq!(
+            unread[i]["chunk"],
+            json_range(start as u64, (start + chunk.len()) as u64)
+        );
+        assert_eq!(unread[i]["reason"], reason, "{doc}");
+    }
+    assert_eq!(
+        unread[3]["description"],
+        gamut::png::C2paUnreadReason::AfterIend.describe()
+    );
+    assert_eq!(doc["c2pa"]["not_validated"], gamut::png::C2PA_NOT_VALIDATED);
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("STORE-BYTES"),
+        "{doc}"
+    );
 }
