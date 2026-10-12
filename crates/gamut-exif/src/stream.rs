@@ -12,6 +12,8 @@
 //! drift. It is deliberately synchronous: an async caller drives a [`ReadAt`] source itself, which
 //! keeps a runtime dependency out of a crate that has none.
 
+use std::collections::BTreeSet;
+
 use gamut_core::ErrorKind;
 use gamut_ifd::{
     AuditFinding, AuditSpec, Ifd, IfdReader, RawIfd, ReadAt, SegmentReport, tags as ifd_tags,
@@ -508,16 +510,18 @@ fn maker_note_offset<S: ReadAt>(
     // what keeps a vendor MakerNote's TIFF-absolute internal offsets valid on a rewrite, so
     // continuing would re-emit the note unpinned, with wrong bytes and nothing in the report.
     let raw: RawIfd = reader.read_ifd(exif_ifd_at)?;
-    let discarded = |at: u64| {
-        report
-            .dropped_entries()
-            .iter()
-            .any(|d| d.ifd() == IfdKind::Exif && d.offset() == at)
-    };
+    // Collected once into a set: a hostile Exif IFD of 65 535 duplicate `MakerNote`s drops all but
+    // one, and probing the report's list per candidate would make this pass quadratic.
+    let discarded: BTreeSet<u64> = report
+        .dropped_entries()
+        .iter()
+        .filter(|d| d.ifd() == IfdKind::Exif)
+        .map(|d| d.offset())
+        .collect();
     let Some(entry) = raw
         .entries
         .iter()
-        .find(|e| e.tag == ifd_tags::MAKER_NOTE && !discarded(e.offset))
+        .find(|e| e.tag == ifd_tags::MAKER_NOTE && !discarded.contains(&e.offset))
     else {
         return Ok(None);
     };
