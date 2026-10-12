@@ -256,8 +256,9 @@ impl JxlEncoder {
     /// default [`MetadataEmbedder`](gamut_metadata::MetadataEmbedder) and routes each carrier to
     /// the matching setter — EXIF to [`with_exif`](Self::with_exif) (the facade's `Exif\0\0`
     /// signature stripped, since the `Exif` box carries the TIFF stream), XMP to
-    /// [`with_xmp`](Self::with_xmp), and the ICC profile to [`with_color`](Self::with_color) as
-    /// [`ColorSpec::Icc`] — in JPEG XL the profile *is* the codestream's colour encoding, not a
+    /// [`with_xmp`](Self::with_xmp), and the ICC profile to the encoder's colour encoding as
+    /// [`ColorSpec::Icc`] (without making it an explicit [`with_color`](Self::with_color) choice) —
+    /// in JPEG XL the profile *is* the codestream's colour encoding, not a
     /// container box, and it is validated against the image's colour family at encode time. Returns
     /// the updated encoder for chaining.
     ///
@@ -361,7 +362,9 @@ impl JxlEncoder {
             self = self.with_xmp(xmp);
         }
         if let Some(icc) = &encoded.icc {
-            self = self.with_color(ColorSpec::Icc(icc.clone()));
+            // Assigned directly, not through `with_color`: a routed profile is not an explicit
+            // choice, so a later metadata call may replace it (last write wins).
+            self.color = ColorSpec::Icc(icc.clone());
         }
         Ok(self)
     }
@@ -712,6 +715,17 @@ mod tests {
             .with_encoded_metadata(&icc_blocks(b"profile"))
             .unwrap();
         assert_eq!(enc.color(), &ColorSpec::Icc(b"profile".to_vec()));
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_second_metadata_profile_replaces_one_routed_in_by_metadata() {
+        let enc = JxlEncoder::new()
+            .with_encoded_metadata(&icc_blocks(b"first"))
+            .unwrap()
+            .with_encoded_metadata(&icc_blocks(b"second"))
+            .unwrap();
+        assert_eq!(enc.color(), &ColorSpec::Icc(b"second".to_vec()));
     }
 
     #[cfg(feature = "metadata")]
