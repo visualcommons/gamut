@@ -90,17 +90,21 @@ over normalised inputs, per the section above.
 | target | crate | laws |
 |---|---|---|
 | `ifd_read_ledger` | `gamut-ifd` | `ledger_is_canonical`, `subtract_is_set_difference` |
+| `ifd_one_store` | `gamut-ifd` | `setters_keep_one_store_per_tag`, `one_store_per_tag` |
 | `core_convert` | `gamut-core` | `acceptance_is_independent_of_the_samples`, `output_shape_matches_the_target_layout`, `palette_and_cmyk_convert_only_to_themselves`, `the_in_place_door_matches_the_allocating_door`, `converting_a_layout_to_itself_changes_nothing` |
 | `tonemap_curves` | `gamut-tonemap` | `output_is_non_negative_and_never_nan`, `map_slice_is_elementwise_map`, `map_slice_is_order_independent`, `monotonic_non_decreasing` |
 | `avif_clean_alpha` | `gamut-avif` | `cleaning_8_bit_rgba_keeps_the_composite`, `cleaning_16_bit_rgba_keeps_the_composite` |
 | `avif_parse_decode` | `gamut-avif` | `decoding_stays_within_limits` |
 
-One file per crate, deliberately, so adding a crate is an additive change — with one exception:
-`gamut-avif` has two, because its two laws need different inputs. `avif_clean_alpha` normalises the
-engine's bytes into an RGBA image; `avif_parse_decode` hands them, unchanged, to
-`AvifContainer::parse` and then decodes every item through a stub AV1 decoder, so it is also the
-crate's parser robustness target (`docs/testing.md`'s "Fuzz entry point" for `gamut-avif`). Its
-size limits come from the input's last four bytes, which an AVIF parser keeps as a trailer, so its
+One file per crate, deliberately, so adding a crate is an additive change — with two exceptions,
+both because a crate's laws need different inputs. `gamut-ifd` has two: `ifd_read_ledger` reads
+the bytes as byte ranges, `ifd_one_store` as setter calls — once as a flat edit sequence for
+`setters_keep_one_store_per_tag`, once as a program building a nested directory tree for
+`one_store_per_tag`, whose descent into children the flat law never reaches. `gamut-avif` has two:
+`avif_clean_alpha` normalises the engine's bytes into an RGBA image; `avif_parse_decode` hands
+them, unchanged, to `AvifContainer::parse` and then decodes every item through a stub AV1 decoder,
+so it is also the crate's parser robustness target (`docs/testing.md`'s "Fuzz entry point" for
+`gamut-avif`). Its size limits come from the input's last four bytes, which an AVIF parser keeps as a trailer, so its
 seeds are unmodified AVIF files. The stub serves every decode it is asked for: how many a file can
 demand is bounded by the library's own work caps (#762), held at the target's ceiling, which the
 target therefore searches.

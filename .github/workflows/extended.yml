@@ -120,6 +120,7 @@ jobs:
         # the job's wall time growing with every crate that gains laws or a parser entry point.
         target:
           - ifd_read_ledger
+          - ifd_one_store
           - core_convert
           - tonemap_curves
           - avif_clean_alpha

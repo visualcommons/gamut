@@ -55,6 +55,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "ifd_one_store"
+path = "fuzz_targets/ifd_one_store.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "core_convert"
 path = "fuzz_targets/core_convert.rs"
 test = false
