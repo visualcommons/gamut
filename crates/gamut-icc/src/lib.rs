@@ -24,7 +24,9 @@
 //! [`IccProfile::builtin`] constructs a spec-valid v4 matrix/TRC profile for a named
 //! [`BuiltinProfile`] space, [`IccProfile::gray_with_gamma`] the monochrome equivalent, and
 //! [`IccProfile::from_cicp`] / [`IccProfile::from_source_profile`] the same from what a codec
-//! actually signals — an H.273 code-point triple, or a [`gamut_color::SourceProfile`]. Each
+//! actually signals — an H.273 code-point triple, or a [`gamut_color::SourceProfile`].
+//! [`IccProfile::from_cicp_with`] takes a [`CicpTransferReading`] as well, for the BT.1886
+//! display reading of the BT.709-family transfers in place of the literal inverse OETF. Each
 //! returns `None` for signalling no matrix/TRC profile can describe. The colorimetry behind them
 //! is [`gamut_color`]'s, never restated here; see `src/builtin.rs`.
 //!
@@ -96,7 +98,7 @@ mod tags;
 mod validate;
 mod writer;
 
-pub use builtin::BuiltinProfile;
+pub use builtin::{BuiltinProfile, CicpTransferReading};
 pub use cicp::Cicp;
 pub use colorant::{Colorant, ColorantOrder, ColorantTable};
 pub use curve::{Curve, CurveOrParametric, ParametricCurve};
