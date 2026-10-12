@@ -110,8 +110,9 @@ universe so an arbitrary byte string maps to a cheap case. Two drivers call it:
   passing against its own copy. The `test-support` feature and the plain-function shape of the
   laws are what it attaches to.
 
-`gamut_ifd::invariants` is the worked example. The `test-support` feature exposes the module to the
-fuzz driver; it is **never re-exported by the `gamut` umbrella**, so the shipped surface and
+`gamut_ifd::invariants` is the worked example: each of its laws has both drivers — the read
+ledger's through `ifd_read_ledger`, one-tag-one-store's through `ifd_one_store`. The `test-support`
+feature exposes the module to the fuzz driver; it is **never re-exported by the `gamut` umbrella**, so the shipped surface and
 `mise run check-ffi-features` are unaffected, and the crate's own tests get the module without it.
 
 ### Every property pins its seed
