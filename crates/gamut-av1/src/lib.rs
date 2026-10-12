@@ -47,8 +47,10 @@
 //! **Encode speed** is a [`Speed`] preset ([`encode_still_intra_with_speed`],
 //! [`encode_still_intra16_with_speed`]): each step prunes the lossy mode-decision search — the
 //! angle refinement, filter-intra, the CfL alpha ladder, the transform-type set, rectangular and
-//! sub-8×8 partitions, palette — to save encode time. The default, [`Speed::Thorough`],
-//! is the full search, and every entry point without a `speed` argument uses it.
+//! sub-8×8 partitions, palette — to save encode time. The default, [`Speed::Balanced`], is the
+//! middle preset, and every entry point without a `speed` argument uses it; the full search,
+//! [`Speed::Thorough`], is chosen explicitly. No preset shortens the loop-filter search, which
+//! runs on one thread whatever the thread count.
 //!
 //! **Tiling and threads** are [`EncodeOptions`] too ([`encode_still_intra_with_options`],
 //! [`encode_still_intra16_with_options`]): a [`Tiling`] picks the uniform tile layout (log2 tile

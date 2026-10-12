@@ -18,8 +18,9 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 /// Every preset produces a conformant stream that a decoder reconstructs bit-exactly to the
 /// encoder's own [`ReconImage`]; they differ only in which candidates the encoder *tries* before
 /// it commits to one. Each step down the list prunes search the step above it runs, so a faster
-/// preset never considers a candidate a slower one skips. The default, [`Speed::Thorough`], is the
-/// full search, and is what every entry point without a `speed` argument uses.
+/// preset never considers a candidate a slower one skips. The default, [`Speed::Balanced`], is the
+/// middle preset, and is what every entry point without a `speed` argument uses; the full search,
+/// [`Speed::Thorough`], is chosen explicitly.
 ///
 /// | Preset | Pruned relative to the one above | Search time saved |
 /// |---|---|---|
@@ -53,6 +54,12 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 /// restoration unit is restored has its tiles coded a second time to signal the units, replaying
 /// every block decision of the first pass rather than searching again.
 ///
+/// **What a preset does not shorten.** The loop-filter search — the deblocking level, then the
+/// CDEF strengths — is the same search at every preset, so it costs the same whichever one is
+/// chosen; a faster preset saves mode-decision time only. It runs once per frame over the whole
+/// reconstruction, on one thread whatever [`EncodeOptions::threads`] says, and measured it is
+/// about 6–8% of the tile-coding time (see `choose_filters` in `tile.rs`).
+///
 /// The discriminants are permanent identifiers for C callers, not an ordering promise: a preset
 /// added later is appended with the next free value wherever it falls on the speed axis.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -60,9 +67,9 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 #[non_exhaustive]
 pub enum Speed {
     /// The full search.
-    #[default]
     Thorough = 0,
-    /// Directional modes without the fine angle refinement.
+    /// Directional modes without the fine angle refinement. The default.
+    #[default]
     Balanced = 1,
     /// Additionally drops filter-intra, thins the CfL alpha ladder, and narrows the transform-type
     /// search to two types.
@@ -82,7 +89,7 @@ impl Speed {
 ///
 /// Plain data: build it from [`Default`] and the `with_*` setters, or set the public fields of a
 /// default value. The default is what every entry point without an `options` argument encodes
-/// with: the full search ([`Speed::Thorough`]), the [`Tiling::default`] layout, and one thread.
+/// with: the middle preset ([`Speed::Balanced`]), the [`Tiling::default`] layout, and one thread.
 ///
 /// ```
 /// use std::num::NonZeroUsize;
@@ -111,6 +118,9 @@ pub struct EncodeOptions {
     /// spawn, the tiles are always coded one after another.
     ///
     /// [`std::thread::available_parallelism`] returns this type, so it can be passed straight in.
+    ///
+    /// Only the tile coding is concurrent: the loop-filter search that follows it (the deblocking
+    /// level, then the CDEF strengths, once per frame) runs on one thread whatever this says.
     pub threads: NonZeroUsize,
 }
 
@@ -212,6 +222,9 @@ pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> 
 /// ≤ 20, 1 if ≤ 60, 2 if ≤ 120, else 3). Returns the encoded still and the reconstruction (the
 /// exact decoder output) for verification.
 ///
+/// A lossy encode runs the default [`Speed`] preset, [`Speed::Balanced`];
+/// [`encode_still_intra_with_speed`] chooses another.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] for zero-sized images, or [`Error::Unsupported`] if the
@@ -246,8 +259,8 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
 /// [`MatrixCoefficients::Identity`] — AV1 §6.4.2 permits that matrix only at subsampling 0/0, and
 /// §5.5.2 infers 1/1 for a monochrome stream.
 ///
-/// This runs the full search ([`Speed::Thorough`]); [`encode_still_intra_with_speed`] chooses a
-/// faster preset.
+/// This runs the default preset ([`Speed::Balanced`]); [`encode_still_intra_with_speed`] chooses
+/// another, including the full search ([`Speed::Thorough`]).
 pub fn encode_still_intra_with(
     planes: &Planar8,
     qindex: u8,
@@ -257,8 +270,8 @@ pub fn encode_still_intra_with(
 }
 
 /// Like [`encode_still_intra_with`] but runs the mode-decision search at `speed`, pruning it for
-/// encode time as the [`Speed`] table describes. [`Speed::Thorough`] produces exactly the
-/// stream [`encode_still_intra_with`] does.
+/// encode time as the [`Speed`] table describes. [`Speed::default`] ([`Speed::Balanced`]) produces
+/// exactly the stream [`encode_still_intra_with`] does.
 ///
 /// # Errors
 ///
@@ -494,8 +507,8 @@ fn append_tiles(frame_payload: &mut Vec<u8>, tile_bytes: &[Vec<u8>]) {
 /// Superres has no high-bit-depth entry point: [`encode_still_intra_superres`] takes a
 /// [`Planar8`], and its source downscale is written for 8-bit samples.
 ///
-/// This runs the full search ([`Speed::Thorough`]); [`encode_still_intra16_with_speed`] chooses a
-/// faster preset.
+/// This runs the default preset ([`Speed::Balanced`]); [`encode_still_intra16_with_speed`] chooses
+/// another, including the full search ([`Speed::Thorough`]).
 pub fn encode_still_intra16_with(
     planes: &Planar16,
     qindex: u8,
@@ -505,8 +518,8 @@ pub fn encode_still_intra16_with(
 }
 
 /// Like [`encode_still_intra16_with`] but runs the mode-decision search at `speed`, as the
-/// [`Speed`] table describes. [`Speed::Thorough`] produces exactly the stream
-/// [`encode_still_intra16_with`] does.
+/// [`Speed`] table describes. [`Speed::default`] ([`Speed::Balanced`]) produces exactly the
+/// stream [`encode_still_intra16_with`] does.
 ///
 /// # Errors
 ///
@@ -1071,7 +1084,8 @@ mod tests {
         Planar8::from_rgb8_identity(&rgb, w, h).unwrap()
     }
 
-    /// `p` coded at `qindex` with the full search and no superres, as `encode_with` codes it.
+    /// `p` coded at `qindex` with the full search and no superres, as `encode_with` codes it at
+    /// [`Speed::Thorough`].
     fn coded_frame(p: &Planar8, qindex: u8) -> CodedFrame {
         let (w, h) = (p.width() as usize, p.height() as usize);
         let config = still_config(
@@ -1234,18 +1248,18 @@ mod tests {
     }
 
     #[test]
-    fn the_default_speed_is_the_thorough_search_the_speedless_entry_points_run() {
-        // `encode_still_intra_with` and `encode_still_intra16_with` must stay the full-search
-        // encode, which `encoded_bitstream_is_stable` pins. They reach it through
-        // `Speed::default()`, so the default must be the full search, and the explicit-speed entry
-        // points at that preset must be the same encode byte for byte.
-        assert_eq!(Speed::default(), Speed::Thorough);
+    fn the_default_speed_is_the_balanced_search_the_speedless_entry_points_run() {
+        // `encode_still_intra_with` and `encode_still_intra16_with` run the middle preset, which
+        // `encoded_bitstream_is_stable` pins. They reach it through `Speed::default()`, so the
+        // default must be `Balanced`, and the explicit-speed entry points at that preset must be
+        // the same encode byte for byte.
+        assert_eq!(Speed::default(), Speed::Balanced);
         let p = planes(64, 48, |x, y| {
             [(x * 7 + y) as u8, (x ^ (y * 3)) as u8, (x + y * 5) as u8]
         });
         let colour = Av1Colour::default();
         let plain = encode_still_intra_with(&p, 40, colour).unwrap().0.obus;
-        let speed = encode_still_intra_with_speed(&p, 40, colour, Speed::Thorough).unwrap();
+        let speed = encode_still_intra_with_speed(&p, 40, colour, Speed::Balanced).unwrap();
         assert_eq!(plain, speed.0.obus);
 
         let deep = Planar16::from_planes(
@@ -1256,16 +1270,16 @@ mod tests {
         )
         .unwrap();
         let plain = encode_still_intra16_with(&deep, 40, colour).unwrap().0.obus;
-        let speed = encode_still_intra16_with_speed(&deep, 40, colour, Speed::Thorough).unwrap();
+        let speed = encode_still_intra16_with_speed(&deep, 40, colour, Speed::Balanced).unwrap();
         assert_eq!(plain, speed.0.obus);
     }
 
     #[test]
     fn the_default_options_are_the_encode_without_options() {
-        // `EncodeOptions::default()` must be the full search on the legacy two-column layout on one
-        // thread, so the option-taking entry points reproduce the pinned streams above.
+        // `EncodeOptions::default()` must be the `Balanced` preset on the legacy two-column layout
+        // on one thread, so the option-taking entry points reproduce the pinned streams above.
         let options = EncodeOptions::default();
-        assert_eq!(options.speed, Speed::Thorough);
+        assert_eq!(options.speed, Speed::Balanced);
         assert_eq!(options.tiling, Tiling::new(1, 0));
         assert_eq!(options.threads.get(), 1);
         let built = EncodeOptions::default()
