@@ -1912,6 +1912,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn widened_rgba8_encode_premultiplies_after_widening_on_premultiply_on_encode() {
+        let px = banded_rgba8();
+        let narrow = ImageRef::<Rgba8>::new(&px, BANDED).unwrap();
+        // Widen first, then premultiply at 16-bit precision (decision 5 of #710) ...
+        let mut wide = convert::<Rgba8, Rgba16>(narrow, ConvertPolicy::lossless()).unwrap();
+        premultiply_alpha(&mut wide);
+        // ... which differs from premultiplying at 8 bits and widening the result, so the
+        // comparison below pins the order and not just that premultiplication happened.
+        let mut narrow_first = ImageBuf::<Rgba8>::new(px.clone(), BANDED).unwrap();
+        premultiply_alpha(&mut narrow_first);
+        let narrow_first =
+            convert::<Rgba8, Rgba16>(narrow_first.as_ref(), ConvertPolicy::lossless()).unwrap();
+        assert_ne!(wide.as_samples(), narrow_first.as_samples());
+        for depth in [BitDepth::Ten, BitDepth::Twelve] {
+            let enc = AvifEncoder::lossless().with_bit_depth(depth);
+            assert_eq!(
+                enc.clone()
+                    .with_alpha_mode(AlphaMode::PremultiplyOnEncode)
+                    .encode_to_vec(narrow)
+                    .unwrap(),
+                enc.with_alpha_mode(AlphaMode::Premultiplied)
+                    .encode_to_vec(wide.as_ref())
+                    .unwrap(),
+                "{depth:?}"
+            );
+        }
+    }
+
     /// An 8×8 RGBA image: an opaque, semi-transparent and transparent band, with noisy colour
     /// everywhere — including under the transparency, where cleaning has something to remove.
     fn banded_rgba8() -> Vec<u8> {
