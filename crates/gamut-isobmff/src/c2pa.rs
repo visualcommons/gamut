@@ -257,8 +257,23 @@ impl C2paUnreadReason {
 ///
 /// The slot is **box-bounded**: it runs from just after the merkle offset to the end of the `uuid`
 /// box, so for a filled box it is the store **plus any padding** §A.5.3 permits, and for a
-/// reservation nobody has filled it is all zeros. [`store`](Self::store) is the store alone. See
-/// the [module docs](self) for why the lens reports both and the range is not an exclusion range.
+/// reservation nobody has filled it is all zeros. [`store`](Self::store) is the store alone,
+/// trimmed to its own JUMBF `LBox` so the padding is excluded.
+///
+/// # Two bounds, two names
+///
+/// The slot is what a writer reserves and a signer patches, and the only region an unfilled
+/// reservation *has*: an all-zero slot carries no store length to trim to, so a store-only lens
+/// would report a reservation as absent. The store is what a reader hands a validator. Both come
+/// from this one lens, so `gamut-heic` (which reports the store) and `gamut-avif` (which reports
+/// the slot) agree byte for byte wherever they name the same region (#505).
+///
+/// # The range is not an exclusion range
+///
+/// [`range`](Self::range) is for patching, extraction and byte accounting. A BMFF asset's hard
+/// binding is `c2pa.hash.bmff.v3`, which excludes content by **box path**, not by byte offset
+/// (C2PA 2.4 §18.6, §A.5.6), so hashing "everything but this range" is not how a BMFF manifest is
+/// bound.
 ///
 /// Non-exhaustive: a later revision may report more of the box's framing without a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -22,165 +22,20 @@
 //! flags, then the null-terminated `box_purpose`, then `data`. What sits at the front of `data`
 //! depends on the purpose ([`C2paBoxPurpose`]), and what bounds the store inside it is the store's
 //! own JUMBF `LBox` ([`C2paManifestStore`]).
+//!
+//! That framing is not this crate's: it is read through [`gamut_isobmff::C2paUuidBox`], the one
+//! lens `gamut-avif` reads through too (#505), and [`C2PA_UUID`], [`C2paBoxPurpose`] and
+//! [`C2paUnreadReason`] are `gamut-isobmff`'s, re-exported. The lens locates the box-bounded
+//! *slot* after the merkle offset; this crate reports the *store* at its front
+//! ([`gamut_isobmff::C2paSlot::store`]), so where the two crates both name the store they agree
+//! byte for byte.
 use core::ops::Range;
 
+#[cfg(doc)]
+use gamut_isobmff::C2PA_UUID;
+use gamut_isobmff::{C2paBoxPurpose, C2paSlot, C2paUnreadReason, C2paUuidBox};
+
 use crate::container::{HeifContainer, SegmentKind};
-
-/// The 16-byte extended (user) type identifying a `uuid` box as a C2PA `ContentProvenanceBox`.
-///
-/// `D8FEC3D6-1B0E-483C-9297-5828877EC481`, fixed by C2PA 2.4 §A.5.1.1.
-pub const C2PA_UUID: [u8; 16] = [
-    0xD8, 0xFE, 0xC3, 0xD6, 0x1B, 0x0E, 0x48, 0x3C, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7E, 0xC4, 0x81,
-];
-
-/// Length of the `FullBox` version (1 byte) + flags (3 bytes) that follow the `uuid` user type.
-const VERSION_FLAGS_LEN: usize = 4;
-
-/// The `box_purpose` of an auxiliary Merkle-tree box (C2PA 2.4 §A.5.4.1.4): C2PA framing, but
-/// not a manifest store.
-const MERKLE_PURPOSE: &[u8] = b"merkle";
-
-/// Length of the absolute file offset of the first `merkle` box. §A.5.3 places it at the front of
-/// `data` for the `manifest` and `original` purposes; for `update` the specification is silent and
-/// its presence is probed for (see [`C2paBoxPurpose`]).
-const MERKLE_OFFSET_LEN: usize = 8;
-
-/// Minimum length of a JUMBF box: its 4-byte `LBox` plus its 4-byte `TBox`. See
-/// [`C2paManifestStore`] for how far this shape is traceable to a vendored source.
-const JUMBF_HEADER_LEN: usize = 8;
-
-/// The `box_purpose` of a C2PA `uuid` box that carries a manifest store (C2PA 2.4 §A.5.3).
-///
-/// §A.5.3 admits exactly three purposes for a box that carries a manifest store. What sits at the
-/// front of the box's `data` field, ahead of the store itself, differs between them:
-///
-/// | `box_purpose` | Meaning (§A.5.3) | Start of `data` |
-/// | --- | --- | --- |
-/// | `manifest` | the ordinary manifest store | the 8-byte absolute file offset of the first `merkle` box (zero if the file has none), then the store, then zero or more padding bytes — stated by §A.5.3 |
-/// | `original` | the unchanged store of a file that is mid-update; a sibling `update` box is present | as `manifest`: §A.5.3 places the offset "inside the 'uuid' box of type manifest **or original**", and states that "the original and manifest boxes are identical apart from value of box_purpose" |
-/// | `update` | a store holding update manifests only | **not stated by the specification** — probed for, see below |
-///
-/// # `update`: the specification does not say, so the offset is probed for
-///
-/// §A.5.3 never describes an `update` box's framing. Its only sentence about that purpose constrains
-/// the store's *contents* ("shall only contain update manifests"), not the bytes around it, and the
-/// "manifest or original" phrasing above is explained by manifest and original being declared
-/// identical to each other rather than by any contrast with `update`. The silence is a gap in the
-/// specification, not a prohibition.
-///
-/// The reference implementation fills that gap in one direction. `c2pa-rs`
-/// (`sdk/src/asset_handlers/bmff_io.rs`, whose supported types include `heic`, `heif` and `avif`)
-/// writes the 8-byte offset ahead of an `update` store exactly as it does for `manifest` and
-/// `original` — zero-filled, an update box having no `merkle` box to point at — and its reader skips
-/// those 8 bytes for all three purposes. Mid-update files in circulation therefore carry the offset.
-///
-/// Rather than pick one reading and mis-locate the store under the other, this crate **probes**: for
-/// `update` it looks for the store at offset 8 first and falls back to offset 0 when the `LBox` read
-/// there is not a valid bound (zero, below the 8-byte JUMBF header, or overrunning the box). The
-/// first candidate yielding a valid bound wins; if neither does, nothing is reported. `manifest` and
-/// `original` are *not* probed: the specification states their framing, so a single offset is used.
-///
-/// ## How strong the probe is, exactly
-///
-/// Every location decision here — the probed `update` offsets and the single stated offset alike —
-/// is settled by `LBox` validity alone, and that discriminator is **content-dependent**, because a
-/// JUMBF superbox's interior is itself length-prefixed.
-///
-/// The mis-bounding shape is therefore the same in every case, and is stated once. A manifest
-/// store is `LBox` (bytes 0..4), `TBox` (4..8), then its interior, so reading an `LBox` 8 bytes
-/// into a store that does *not* begin with a merkle offset lands past both header fields, on the
-/// first interior box's own length — small, plausible and in-bounds, so it can read as a valid
-/// bound and be accepted, trimming the reported store to a fragment of itself. A wrong offset does
-/// **not** always fail.
-///
-/// What differs between the purposes is only how a file gets into that state:
-///
-/// - A **spec-conformant** `manifest` or `original` store is located exactly: §A.5.3 states that
-///   its `data` opens with the merkle offset, and that offset is used, not probed. A store written
-///   *without* it is out of spec, and is then mis-bounded by the same mechanism rather than
-///   rejected — the single offset is not self-checking either.
-/// - An `update` store written with the `c2pa-rs` merkle offset is located exactly: offset 8 lands
-///   on the store's own `LBox`, and it is tried first.
-/// - An `update` store written **without** the offset is the one in-spec layout exposed to the
-///   hazard, §A.5.3 having stated no framing for that purpose. No known writer emits it: `c2pa-rs`
-///   is the only implementation and it always writes the offset.
-///
-/// The fallback is still strictly better than unconditionally skipping 8 bytes: it runs only when
-/// offset 8 yields no valid bound, so it can rescue a file the fixed offset would have missed and
-/// can never spoil one the fixed offset would have got right.
-///
-/// ## What would make this exact
-///
-/// A `TBox` check. A store's own header is `LBox` then `jumb`, whereas a wrong offset lands on an
-/// interior box carrying its own type — so in every mis-bounding above, the four bytes after the
-/// accepted length are not `jumb`. Comparing them would reject the wrong candidate outright.
-///
-/// That constant *is* traceable to the vendored specification, contrary to what a first reading
-/// suggests: §A.3.9 requires a JPEG XL file to carry the store in a "JUMBF (`jumb`) superbox", and
-/// §15.12.3.2 calls it "a top level JUMBF box (JUMB)". Both sentences are JPEG XL clauses, and both
-/// attribute the box to ISO/IEC 18181-2 clause 9.3 rather than defining it, which is why this crate
-/// does not yet assert it: adding the check narrows what is reported, on a trace the specification
-/// makes in passing about a different container. That is a deliberate deferral, not an absence of
-/// source.
-///
-/// What ISO/IEC 19566-5 genuinely withholds is a *different* constant — the JUMBF Description Box
-/// layout needed to read the manifest store's JUMBF type UUID, which §11.1.4.2 does give as
-/// `63327061-0011-0010-8000-00AA00389B71`. Confirming the store by its type UUID, the check the
-/// specification itself describes, stays blocked on that document. Either route, or a
-/// `c2pa-rs`-generated oracle fixture settling the layout empirically, is tracked as a deferred row
-/// in the crate's `STATUS.md`.
-///
-/// # `merkle`
-///
-/// A fourth purpose, `merkle`, names an *auxiliary* box holding Merkle-tree hashes for validating
-/// large or fragmented media piecewise (C2PA 2.4 §A.5.4, the box itself §A.5.4.1.4); its `data` is
-/// raw CBOR, not a manifest store. It is therefore **not** reported by [`HeifContainer::c2pa`] or
-/// [`HeifContainer::c2pa_manifest_stores`], and it is not an unreadable store either:
-/// [`HeifContainer::c2pa_summary`] lists it as what it is, in [`C2paSummary::merkle`]. Any other
-/// `box_purpose` value is one this revision does not know
-/// ([`C2paUnreadReason::UnknownPurpose`]).
-///
-/// Non-exhaustive and with permanent discriminants: a later revision may add a variant without a
-/// breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-#[repr(u8)]
-pub enum C2paBoxPurpose {
-    /// `manifest` — the ordinary manifest store. Its `data` opens with the 8-byte absolute file
-    /// offset of the first auxiliary `merkle` box (zero when the file has none).
-    Manifest = 0,
-    /// `original` — the untouched store of a file being updated; a sibling `update` box is present.
-    /// Its `data` is framed exactly as `manifest`'s, merkle offset included.
-    Original = 1,
-    /// `update` — a store containing update manifests only. The specification does not state
-    /// whether the 8-byte merkle offset precedes its store, so both layouts are probed for; see the
-    /// [type docs](Self).
-    Update = 2,
-}
-
-impl C2paBoxPurpose {
-    /// Maps the null-terminated `box_purpose` string's bytes to a manifest-store purpose, or `None`
-    /// for `merkle` (see [`MERKLE_PURPOSE`]) and every unrecognised value.
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        match bytes {
-            b"manifest" => Some(Self::Manifest),
-            b"original" => Some(Self::Original),
-            b"update" => Some(Self::Update),
-            _ => None,
-        }
-    }
-
-    /// The offsets into `data`, in probe order, at which this purpose's manifest store may begin.
-    ///
-    /// One candidate where §A.5.3 states the framing; two where it is silent (see the
-    /// [type docs](Self)).
-    const fn store_prefix_candidates(self) -> &'static [usize] {
-        match self {
-            Self::Manifest | Self::Original => &[MERKLE_OFFSET_LEN],
-            Self::Update => &[MERKLE_OFFSET_LEN, 0],
-        }
-    }
-}
 
 /// A C2PA manifest store located in a HEIF file: the store's opaque bytes, its exact byte range in
 /// the file, and the `box_purpose` of the `uuid` box that carried it.
@@ -227,6 +82,19 @@ pub struct C2paManifestStore<'a> {
     pub range: Range<usize>,
     /// The `box_purpose` of the `uuid` box that carried this store.
     pub purpose: C2paBoxPurpose,
+}
+
+impl<'a> C2paManifestStore<'a> {
+    /// The store at the front of a slot the shared lens located, trimmed to its own JUMBF `LBox`,
+    /// or `None` when the slot holds no valid bound ([`C2paUnreadReason::NoStoreBound`]).
+    fn from_slot(slot: &C2paSlot<'a>) -> Option<Self> {
+        let bytes = slot.store()?;
+        Some(Self {
+            bytes,
+            range: slot.range.start..slot.range.start + bytes.len(),
+            purpose: slot.purpose,
+        })
+    }
 }
 
 impl<'a> HeifContainer<'a> {
@@ -276,11 +144,10 @@ impl<'a> HeifContainer<'a> {
     pub fn c2pa_manifest_stores(&self) -> impl Iterator<Item = C2paManifestStore<'a>> + '_ {
         self.top_level_uuid_boxes()
             .filter_map(|(_, _, classified)| match classified {
-                TopLevelUuidBox::ContentProvenance(Ok(ProvenanceContent::Store(store))) => {
-                    Some(store)
+                C2paUuidBox::Slot(slot) => C2paManifestStore::from_slot(&slot),
+                C2paUuidBox::Merkle | C2paUuidBox::Unread(_) | C2paUuidBox::OtherExtendedType => {
+                    None
                 }
-                TopLevelUuidBox::ContentProvenance(Ok(ProvenanceContent::Merkle) | Err(_))
-                | TopLevelUuidBox::OtherExtendedType => None,
             })
     }
 
@@ -295,7 +162,7 @@ impl<'a> HeifContainer<'a> {
     /// simply whether an `mdat` or a `moov` box has already been passed when this box is reached.
     fn top_level_uuid_boxes(
         &self,
-    ) -> impl Iterator<Item = (Range<usize>, C2paBoxPosition, TopLevelUuidBox<'a>)> + '_ {
+    ) -> impl Iterator<Item = (Range<usize>, C2paBoxPosition, C2paUuidBox<'a>)> + '_ {
         self.segments()
             .iter()
             .scan(C2paBoxPosition::BeforeMediaData, |position, segment| {
@@ -304,20 +171,9 @@ impl<'a> HeifContainer<'a> {
                         *position = position.passing(ty);
                         None
                     }
-                    SegmentKind::Box { ty, body } if &ty == b"uuid" => {
-                        // `range` spans the header and the body, so `range.end - body.len()` is the
-                        // absolute offset of the body — correct for an 8-byte header and a 16-byte
-                        // largesize one alike, without the container needing to report the header
-                        // width.
-                        segment.range.end.checked_sub(body.len()).map(|body_start| {
-                            (
-                                segment.range.clone(),
-                                *position,
-                                classify_uuid_box(body, body_start),
-                            )
-                        })
-                    }
-                    _ => None,
+                    // `classify` is `None` for every segment that is not a top-level `uuid` box.
+                    _ => C2paUuidBox::classify(segment)
+                        .map(|classified| (segment.range.clone(), *position, classified)),
                 };
                 // `scan` stops at the first `None` it yields, so every segment yields `Some`; the
                 // inner `Option` is what filters.
@@ -325,111 +181,6 @@ impl<'a> HeifContainer<'a> {
             })
             .flatten()
     }
-}
-
-/// What one top-level `uuid` box turned out to be.
-enum TopLevelUuidBox<'a> {
-    /// A C2PA `ContentProvenanceBox` — its extended type is [`C2PA_UUID`] — and what reading it
-    /// yielded: the manifest store or auxiliary `merkle` box it is, or the reason it is neither.
-    ContentProvenance(Result<ProvenanceContent<'a>, C2paUnreadReason>),
-    /// A `uuid` box carrying some other extended type. §A.5.1.1 makes the extended type the whole
-    /// test, so this is not C2PA framing however near the miss.
-    OtherExtendedType,
-}
-
-/// What a readable C2PA `ContentProvenanceBox` carries.
-enum ProvenanceContent<'a> {
-    /// A manifest store (`box_purpose` `manifest`, `original` or `update`, §A.5.3).
-    Store(C2paManifestStore<'a>),
-    /// An auxiliary Merkle-tree box (`box_purpose` `merkle`, §A.5.4.1.4), whose `data` is CBOR this
-    /// locator does not read.
-    Merkle,
-}
-
-/// Classifies one top-level `uuid` box body (starting at absolute offset `body_start`).
-///
-/// [`TopLevelUuidBox::OtherExtendedType`] means the box is not a C2PA `ContentProvenanceBox` at all
-/// — a vendor `uuid` box, which is no evidence of provenance and must not be reported as one.
-fn classify_uuid_box(body: &[u8], body_start: usize) -> TopLevelUuidBox<'_> {
-    // §A.5.1.1: the extended type is what makes a `uuid` box a ContentProvenanceBox.
-    //
-    // The short-body arm is unreachable, not a classification: `gamut_isobmff::BoxReader::next_box`
-    // rejects a `uuid` box whose body cannot hold its complete 16-byte user type with a fatal
-    // "truncated uuid user type", so `HeifContainer::parse` fails and no summary is produced at
-    // all. The split is written to be total anyway, because this function must not depend on a
-    // guarantee its own signature does not carry.
-    let Some((extended_type, after_uuid)) = body.split_at_checked(C2PA_UUID.len()) else {
-        return TopLevelUuidBox::OtherExtendedType;
-    };
-    if extended_type != &C2PA_UUID[..] {
-        return TopLevelUuidBox::OtherExtendedType;
-    }
-    TopLevelUuidBox::ContentProvenance(read_content_provenance_box(
-        after_uuid,
-        body_start + C2PA_UUID.len(),
-    ))
-}
-
-/// Reads what follows the [`C2PA_UUID`] extended type of a box already known to carry it, per
-/// §A.5.1.2 and §A.5.3. `after_uuid_start` is that slice's absolute offset in the file.
-fn read_content_provenance_box(
-    after_uuid: &[u8],
-    after_uuid_start: usize,
-) -> Result<ProvenanceContent<'_>, C2paUnreadReason> {
-    // §A.5.1.2: a FullBox with version 0 and flags 0. `RawBox::payload` strips the user type but not
-    // these four bytes, so they are read here.
-    let (version_flags, after_full_box) = after_uuid
-        .split_at_checked(VERSION_FLAGS_LEN)
-        .ok_or(C2paUnreadReason::Truncated)?;
-    if version_flags != &[0u8; VERSION_FLAGS_LEN][..] {
-        return Err(C2paUnreadReason::NotVersionZero);
-    }
-
-    // `string box_purpose` — null-terminated, per §A.5.1.2. Splitting on the NUL yields the string
-    // and everything after it; a body with no NUL yields only a first part, and that missing second
-    // part is the truncation. `splitn` always yields a first part, empty slice included.
-    let mut purpose_and_data = after_full_box.splitn(2, |&b| b == 0);
-    let purpose_bytes = purpose_and_data.next().unwrap_or_default();
-    let data = purpose_and_data.next().ok_or(C2paUnreadReason::Truncated)?;
-    if purpose_bytes == MERKLE_PURPOSE {
-        return Ok(ProvenanceContent::Merkle);
-    }
-    let purpose =
-        C2paBoxPurpose::from_bytes(purpose_bytes).ok_or(C2paUnreadReason::UnknownPurpose)?;
-
-    // Where the store begins inside `data`: one fixed offset for `manifest`/`original`, whose framing
-    // §A.5.3 states, and two probed in order for `update`, whose framing it does not — see
-    // `C2paBoxPurpose`. The first candidate whose `LBox` is a valid bound wins.
-    let data_start = after_uuid_start + (after_uuid.len() - data.len());
-    for &prefix in purpose.store_prefix_candidates() {
-        if let Some(bytes) = locate_store(data, prefix) {
-            let start = data_start + prefix;
-            return Ok(ProvenanceContent::Store(C2paManifestStore {
-                bytes,
-                range: start..start + bytes.len(),
-                purpose,
-            }));
-        }
-    }
-    Err(C2paUnreadReason::NoStoreBound)
-}
-
-/// Reads the JUMBF `LBox` sitting `prefix` bytes into `data` and returns the store it bounds, or
-/// `None` if there is no valid bound there.
-///
-/// A JUMBF box opens with a 4-byte big-endian length covering the whole box; that length, not the
-/// enclosing `uuid` box, bounds the store, since §A.5.3 allows unused padding bytes after it (see
-/// [`C2paManifestStore`] for how far that framing is traceable). A length below the 8-byte header it
-/// must itself cover, or one overrunning the bytes actually present, is not a valid bound.
-fn locate_store(data: &[u8], prefix: usize) -> Option<&[u8]> {
-    let store_and_padding = data.get(prefix..)?;
-    let lbox_bytes: [u8; 4] = store_and_padding.get(..4)?.try_into().ok()?;
-    let lbox = u32::from_be_bytes(lbox_bytes) as usize;
-    if lbox < JUMBF_HEADER_LEN {
-        return None;
-    }
-    // The same `get` rejects an `LBox` that overruns the box.
-    store_and_padding.get(..lbox)
 }
 
 /// What a report of a located manifest store has to say beside it, because locating one is not
@@ -447,74 +198,6 @@ fn locate_store(data: &[u8], prefix: usize) -> Option<&[u8]> {
 /// the stores, never as a footnote a reader can skip.
 pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
      it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
-
-impl C2paBoxPurpose {
-    /// The `box_purpose` string this purpose is written as in the file (C2PA 2.4 §A.5.3).
-    ///
-    /// The exact inverse of the parse: `from_bytes` maps these bytes back to
-    /// this variant.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Manifest => "manifest",
-            Self::Original => "original",
-            Self::Update => "update",
-        }
-    }
-}
-
-/// Why a top-level C2PA `ContentProvenanceBox` yielded no manifest store.
-///
-/// The box is a C2PA box — its extended type is [`C2PA_UUID`] — so the file *does* carry
-/// provenance framing; only the store inside it could not be read. That distinction is the reason
-/// this type exists: reporting such a box as "no manifest store found" would let a reader infer
-/// *no provenance* from a box gamut merely could not read, which is the mirror of the verdict
-/// [`C2PA_NOT_VALIDATED`] exists to prevent.
-///
-/// A `uuid` box whose extended type is **not** [`C2PA_UUID`] is not one of these. §A.5.1.1 makes
-/// the extended type the whole test, and an ordinary file carries vendor `uuid` boxes that are no
-/// evidence of provenance; a near-miss on the sixteen bytes is a box of another type, not a damaged
-/// C2PA one. It is never given a reason — the specification has no notion of an approximate
-/// extended type — but it is not passed over in silence either: it is counted in
-/// [`C2paSummary::other_uuid_boxes`], because a report in which a one-byte miss and no box at all
-/// read identically hides exactly the file a reader most needs to look at.
-///
-/// Non-exhaustive and with permanent discriminants: a later revision may distinguish a further
-/// reason without a breaking change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-#[repr(u8)]
-pub enum C2paUnreadReason {
-    /// The box ends before the framing §A.5.1.2 requires — the `FullBox` version and flags, or the
-    /// NUL that terminates `box_purpose`.
-    Truncated = 0,
-    /// The `FullBox` version or flags are not zero, which §A.5.1.2 fixes them at.
-    NotVersionZero = 1,
-    /// The `box_purpose` is none C2PA 2.4 defines — neither a manifest store's (§A.5.3: `manifest`,
-    /// `original`, `update`) nor the auxiliary `merkle` box's (§A.5.4.1.4), which is not unread
-    /// but listed in [`C2paSummary::merkle`].
-    UnknownPurpose = 2,
-    /// No valid JUMBF `LBox` bounds a store where this `box_purpose`'s framing puts one — the
-    /// length there is zero, below the 8-byte header it must cover, or overruns the box.
-    NoStoreBound = 3,
-}
-
-impl C2paUnreadReason {
-    /// A one-clause explanation, for the line [`C2paSummary::report_lines`] renders.
-    #[must_use]
-    pub const fn describe(self) -> &'static str {
-        match self {
-            Self::Truncated => "the box ends before the framing C2PA 2.4 §A.5.1.2 requires",
-            Self::NotVersionZero => {
-                "its FullBox version or flags are not zero, which C2PA 2.4 §A.5.1.2 fixes them at"
-            }
-            Self::UnknownPurpose => "its box_purpose is none C2PA 2.4 defines (§A.5.3, §A.5.4.1.4)",
-            Self::NoStoreBound => {
-                "no valid JUMBF store length sits where its box_purpose puts the store"
-            }
-        }
-    }
-}
 
 /// Where a top-level `uuid` box sits relative to the file's media data — a **positional fact about
 /// bytes**, and never a verdict.
@@ -1015,22 +698,27 @@ impl HeifContainer<'_> {
         let mut other_uuid_boxes = 0;
         for (range, position, classified) in self.top_level_uuid_boxes() {
             match classified {
-                TopLevelUuidBox::ContentProvenance(Ok(ProvenanceContent::Store(store))) => {
-                    stores.push(C2paStoreSummary {
+                C2paUuidBox::Slot(slot) => match C2paManifestStore::from_slot(&slot) {
+                    Some(store) => stores.push(C2paStoreSummary {
                         range: store.range,
                         purpose: store.purpose,
                         position,
-                    });
-                }
-                TopLevelUuidBox::ContentProvenance(Ok(ProvenanceContent::Merkle)) => {
+                    }),
+                    None => unread.push(C2paUnreadBox {
+                        range,
+                        reason: C2paUnreadReason::NoStoreBound,
+                        position,
+                    }),
+                },
+                C2paUuidBox::Merkle => {
                     merkle.push(C2paMerkleBox { range, position });
                 }
-                TopLevelUuidBox::ContentProvenance(Err(reason)) => unread.push(C2paUnreadBox {
+                C2paUuidBox::Unread(reason) => unread.push(C2paUnreadBox {
                     range,
                     reason,
                     position,
                 }),
-                TopLevelUuidBox::OtherExtendedType => other_uuid_boxes += 1,
+                C2paUuidBox::OtherExtendedType => other_uuid_boxes += 1,
             }
         }
         C2paSummary {
@@ -1045,8 +733,8 @@ impl HeifContainer<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        C2PA_NOT_VALIDATED, C2paBoxPosition, C2paBoxPurpose, C2paMerkleBox, C2paPresence,
-        C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason,
+        C2PA_NOT_VALIDATED, C2paBoxPosition, C2paBoxPurpose, C2paManifestStore, C2paMerkleBox,
+        C2paPresence, C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason, C2paUuidBox,
     };
 
     /// A summary of the stores at the given `(start, end, purpose)` triples, all in the window
@@ -1143,19 +831,46 @@ mod tests {
     }
 
     #[test]
-    fn a_purpose_renders_as_the_box_purpose_string_it_parses_from() {
-        for purpose in [
-            C2paBoxPurpose::Manifest,
+    fn a_store_is_the_front_of_its_slot_up_to_its_lbox() {
+        use gamut_isobmff::{C2PA_UUID, Segment, SegmentKind, content_provenance_payload};
+        // A 12-byte store (`LBox` 12) followed by 5 padding bytes, in an `original` box at 100.
+        let mut slot_bytes = 12u32.to_be_bytes().to_vec();
+        slot_bytes.extend_from_slice(b"jumbabcd");
+        slot_bytes.extend_from_slice(&[0xEE; 5]);
+        let mut body = C2PA_UUID.to_vec();
+        body.extend_from_slice(&content_provenance_payload(
             C2paBoxPurpose::Original,
-            C2paBoxPurpose::Update,
-        ] {
-            assert_eq!(
-                C2paBoxPurpose::from_bytes(purpose.as_str().as_bytes()),
-                Some(purpose),
-                "{} must parse back to the purpose that renders it",
-                purpose.as_str()
-            );
-        }
+            &slot_bytes,
+        ));
+        let segment = Segment {
+            range: 100..108 + body.len(),
+            kind: SegmentKind::Box {
+                ty: *b"uuid",
+                body: &body,
+            },
+        };
+        let Some(C2paUuidBox::Slot(slot)) = C2paUuidBox::classify(&segment) else {
+            panic!("an original slot");
+        };
+        let store = C2paManifestStore::from_slot(&slot).expect("an LBox-bounded store");
+        assert_eq!(store.bytes, &slot_bytes[..12]);
+        assert_eq!(store.range, slot.range.start..slot.range.start + 12);
+        assert_eq!(store.purpose, C2paBoxPurpose::Original);
+        // The same slot zeroed is a reservation: no store, which the summary calls NoStoreBound.
+        let mut zeroed = body.clone();
+        let len = zeroed.len();
+        zeroed[len - slot_bytes.len()..].fill(0);
+        let segment = Segment {
+            range: 100..108 + zeroed.len(),
+            kind: SegmentKind::Box {
+                ty: *b"uuid",
+                body: &zeroed,
+            },
+        };
+        let Some(C2paUuidBox::Slot(slot)) = C2paUuidBox::classify(&segment) else {
+            panic!("an original slot");
+        };
+        assert_eq!(C2paManifestStore::from_slot(&slot), None);
     }
 
     #[test]
@@ -1358,31 +1073,6 @@ mod tests {
                 ),
             ]
         );
-    }
-
-    #[test]
-    fn every_unread_reason_describes_itself_distinctly() {
-        // A reason a reader cannot tell from another reason is not a reason: the whole point of
-        // reporting the box is naming what stopped it being read.
-        let reasons = [
-            C2paUnreadReason::Truncated,
-            C2paUnreadReason::NotVersionZero,
-            C2paUnreadReason::UnknownPurpose,
-            C2paUnreadReason::NoStoreBound,
-        ];
-        for (i, reason) in reasons.iter().enumerate() {
-            assert!(
-                !reason.describe().is_empty(),
-                "{reason:?} must describe itself"
-            );
-            for other in &reasons[i + 1..] {
-                assert_ne!(
-                    reason.describe(),
-                    other.describe(),
-                    "{reason:?} and {other:?} must read differently"
-                );
-            }
-        }
     }
 
     #[test]
