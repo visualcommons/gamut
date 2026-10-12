@@ -42,7 +42,7 @@
 //! read-side locator as [`c2pa_exclusions`].
 
 use gamut_core::{Error, Result};
-use gamut_ifd::c2pa::{self, C2paExclusions};
+use gamut_ifd::c2pa::{self, C2paExclusions, C2paSummary};
 use gamut_ifd::{
     ByteOrder, Ifd, SubtreeScope, Value, read, read_header, read_ifd_at, resolve_subtree,
 };
@@ -602,6 +602,24 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
 /// lies outside `file` or overlaps the entry's own count field.
 pub fn c2pa_exclusions(file: &[u8]) -> Result<Option<C2paExclusions>> {
     c2pa::locate(file)
+}
+
+/// A non-validating report of the C2PA manifest store `file` carries, for a host to print: the
+/// store [`c2pa_exclusions`] locates, and every tag-52545 entry of the main IFD chain that yields
+/// none — misplaced in an earlier directory, mistyped, duplicated, too short, or pointing outside
+/// the file or over its own count field — with the reason, rather than reporting it as absence.
+///
+/// [`C2paSummary::report_lines`](gamut_ifd::c2pa::C2paSummary::report_lines) renders it, with the
+/// non-validation disclaimer inline; the store's bytes are never part of it. See
+/// [`gamut_ifd::c2pa::summarize`], which this delegates to, for the whole contract.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the container is
+/// unreadable (bad header, looping or runaway IFD chain, no IFD). An unreadable store is not an
+/// error here; it is listed.
+pub fn c2pa_summary(file: &[u8]) -> Result<C2paSummary> {
+    c2pa::summarize(file)
 }
 
 #[cfg(test)]
@@ -1297,6 +1315,32 @@ mod tests {
         let bytes = file_with(ifd0);
         assert_eq!(read_metadata(&bytes).expect("read").c2pa, Some(store));
         assert!(c2pa_exclusions(&bytes).expect("locate").is_some());
+    }
+
+    #[test]
+    fn the_summary_reports_the_located_store_and_lists_an_unreadable_one() {
+        // The report is the locator's view for a host to print: the store `c2pa_exclusions` finds,
+        // and — where the locator says absence — the entry that is present but yields no store.
+        let mut ifd0 = Ifd::new();
+        ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Undefined(vec![0x10; 12]));
+        let bytes = file_with(ifd0);
+        let summary = c2pa_summary(&bytes).expect("summarize");
+        let store = summary.store.expect("a store");
+        assert_eq!(
+            Some(store.exclusions),
+            c2pa_exclusions(&bytes).expect("locate")
+        );
+        assert!(summary.unread.is_empty());
+
+        let mut ifd0 = Ifd::new();
+        ifd0.set(tags::C2PA_MANIFEST_STORE, Value::Byte(vec![0x10; 12]));
+        let summary = c2pa_summary(&file_with(ifd0)).expect("summarize");
+        assert_eq!(summary.store, None);
+        assert_eq!(summary.unread.len(), 1);
+        assert_eq!(
+            summary.unread[0].reason,
+            gamut_ifd::c2pa::C2paUnreadReason::NotUndefined
+        );
     }
 
     #[test]
