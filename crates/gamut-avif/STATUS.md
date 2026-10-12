@@ -60,8 +60,10 @@ writes a store the caller has already computed over this exact output, and
 the offset is known before the signer runs. Nothing after placement moves a byte
 (`tests/c2pa.rs`, exact-byte). The read side, `AvifContainer::c2pa_slot` / `c2pa_slots`,
 locates every top-level C2PA `uuid` box and reports its purpose, slot bytes and file range as a
-`C2paSlot` (named for the box-bounded slot it reports, not for a trimmed store). The
-object-safe `EncodeImage` entry point is untouched. libavif and dav1d decode a file carrying the
+`C2paSlot` (named for the box-bounded slot it reports, not for a trimmed store). Since #505 the
+framing on both sides — `C2PA_UUID`, `C2paBoxPurpose`, `C2paSlot`, `C2paUnreadReason`, the lens
+and the payload builders — is `gamut-isobmff`'s, re-exported here and shared with `gamut-heic`,
+so a reservation refusal now names `gamut-isobmff` as its origin. The object-safe `EncodeImage` entry point is untouched. libavif and dav1d decode a file carrying the
 box to the same pixels as one without.
 
 `with_c2pa_reserved` is an infallible builder, so an unusable `len` is refused by the **encode**
@@ -383,17 +385,24 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | libavif structure/metadata/pixels + dav1d planar bit-exact differential suite | (oracle) | ✅ | S4 |
 | C2PA manifest-store locator (`AvifContainer::c2pa_slot` / `c2pa_slots`): every top-level `uuid` box with the C2PA user type → `box_purpose`, slot bytes, file range, in file order | C2PA 2.4 §A.5.1–§A.5.3; §18.6 | ✅ (#444) | — |
 
-**C2PA — five recorded limits (#444).** (1) *A slot, not a trimmed store.* `C2paSlot::slot_bytes`
-/ `range` run from just after the merkle offset to the end of the `uuid` box, so they include any
-unused padding §A.5.3 permits after the store, and a reserved-but-unfilled slot reads back as
-zeros. `gamut-heic`'s `C2paManifestStore` (#429) instead trims to the store's own JUMBF `LBox`, so
-the two crates can report different lengths for one file; the AVIF type is *named* for the slot so
-the two claims cannot be confused across the umbrella's re-exports. The bound is deliberate — an
-`LBox` trim cannot locate a reservation, which has no `LBox` — and unifying the two lenses is
-**#505**. (2) *`update` framing is probed, not stated.* §A.5.3 gives the merkle offset only for
-`manifest`/`original`; `update` is probed over the same `[8, 0]` candidates `gamut-heic` uses, so a
-prefix-less `update` store shorter than 8 bytes is located rather than dropped. A *longer*
-prefix-less one is still reported 8 bytes short — that needs the `LBox` check, also #505. (3) *The
+**C2PA — five recorded limits (#444, #505).** (1) *A slot, not a trimmed store.*
+`C2paSlot::slot_bytes` / `range` run from just after the merkle offset to the end of the `uuid`
+box, so they include any unused padding §A.5.3 permits after the store, and a reserved-but-unfilled
+slot reads back as zeros. The bound is deliberate — an `LBox` trim cannot locate a reservation,
+which has no `LBox` — and since #505 it is decided once, in `gamut-isobmff`'s lens, for both
+crates: the slot is the located unit, and `C2paSlot::store` is the same slot trimmed to the store's
+own JUMBF `LBox` (`C2paSlot::store_range` gives its file range), which is exactly what
+`gamut-heic`'s `C2paManifestStore` reports. The **report** names both regions as `gamut-heic`'s does
+and under the same names: `C2paSummary`'s `C2paStoreSummary::range` is the trimmed store and its
+`slot` field the padded slot, and a slot that bounds no store (an unfilled reservation) is listed
+as unread with `C2paUnreadReason::NoStoreBound` — so the two crates report the same bytes for one
+padded store (#505). The slot locator `c2pa_slot`/`c2pa_slots` and the encoder report stay
+slot-bounded, because patching a reservation is what they are for. (2) *`update` framing is probed, not stated.* §A.5.3 gives the merkle offset only for
+`manifest`/`original`; for `update` the shared lens probes the store's `LBox` — after the offset
+unless only the start of `data` bounds a store — so a prefix-less `update` store is located at its
+true start (`C2paSlot::merkle_offset` is then `None`) rather than reported 8 bytes short. A `data`
+shorter than the offset is the slot whole, as before. The probe is content-dependent; see
+`gamut-isobmff`'s `C2paBoxPurpose`. (3) *The
 range is not an exclusion range.* BMFF assets bind with `c2pa.hash.bmff.v3`, which excludes by box
 path (§18.6, §A.5.6); the range is for patching and byte accounting, and no type is named
 "exclusion". (4) *The encoder writes `manifest` only.* The read side reports all three purposes;
@@ -401,9 +410,10 @@ producing an `original`/`update` pair is a manifest-update operation on an exist
 #444. The reserve → sign → validate direction against `c2pa-rs` is #447's. (5) *The range is a
 bare `Range<usize>`.* Limit (3) is documented at every site but not enforced by a type, so nothing
 stops a caller feeding the reported range to a hash as an exclusion range. A newtype that makes
-that unrepresentable is deferred to **#505**, so it can land in `gamut-heic` and `gamut-avif`
-together under one name rather than as an AVIF-only spelling that would be renamed on adoption;
-#505's text tracks the lens unification and does not yet name the newtype.
+that unrepresentable is still deferred: #505 moved the lens without it, because a range newtype
+changes the public field types of both crates' C2PA structs (a breaking change neither issue
+scoped), and it is tracked as **#780** so it lands in `gamut-heic` and `gamut-avif` together
+under one name.
 
 **Deferred (additive) for the decode surface:** the backend registry + `gamut-codec-abi` adapter
 around `Av1StillDecoder` — section M reserves its name and shape; the typed trait itself already

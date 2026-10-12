@@ -215,12 +215,11 @@ code**. What differs is only what each container can carry.
 
 - **AVIF** (`AvifContainer::c2pa_summary()`, `gamut-avif`) — the HEIC table above row for row, over
   the same top-level `ContentProvenanceBox` (§A.5.1, §A.5.3): stores, boxes no store could be read
-  from (a non-zero `FullBox` version, an undefined `box_purpose`, or a box that ends before its
-  framing), auxiliary `merkle` boxes, the count of `uuid` boxes of another extended type, and the
-  past-`mdat` position note. One difference is stated on the line itself: AVIF reports the
-  box-bounded **slot** after the merkle offset — the store *plus any padding* — not a store trimmed
-  to its JUMBF `LBox` as HEIC does, so a store line reads `N-byte slot (store plus any padding) at
-  [a, b)`. Unifying the two lenses is issue #505. Exit `0` whatever it finds.
+  from (a non-zero `FullBox` version, an undefined `box_purpose`, a box that ends before its
+  framing, or a slot whose JUMBF `LBox` bounds no store — an unfilled reservation among them),
+  auxiliary `merkle` boxes, the count of `uuid` boxes of another extended type, and the past-`mdat`
+  position note. A store line names the store trimmed to its JUMBF `LBox`, exactly as HEIC's does:
+  both read the one `gamut-isobmff` lens (issue #505). Exit `0` whatever it finds.
 - **WebP** (`gamut_webp::c2pa_summary`, `gamut-riff`) — one line per `C2PA` chunk (§A.3.7) with its
   store's size and range: the chunk's payload, without the 8-byte chunk header `c2pa_span` includes.
   A chunk another chunk follows says so (`another chunk follows it, where C2PA 2.4 §A.3.7 places it
@@ -312,7 +311,7 @@ The `c2pa` object is the format crate's `C2paSummary` as data:
 
 | Format | Members |
 | --- | --- |
-| HEIC, AVIF | `stores` (`purpose`, `extent`, `size`, `range`, `position`), `unread` (`range`, `reason`, `description`, `position`), `merkle` (`range`, `position`), `other_uuid_boxes` |
+| HEIC, AVIF | `stores` (`purpose`, `extent`, `size`, `range`, `slot`, `position`), `unread` (`range`, `reason`, `description`, `position`), `merkle` (`range`, `position`), `other_uuid_boxes` |
 | WebP | `stores` (`size`, `range`, `position`), `unread` (`range`, `position`) |
 | TIFF, DNG | `store` — `null`, or `size`, `range`, `count_field` (the two §18.5.5 exclusion ranges) and `ifd` — and `unread` (`entry`, `ifd`, `reason`, `description`) |
 | PNG | `store` — `null`, or `size`, `range` (the store's bytes) and `chunk` (the whole `caBX` chunk, the §18.5.4 exclusion) — and `unread` (`size`, `chunk`, `reason`, `description`), `reason` being `crc_mismatch`, `after_idat`, `after_iend` or `duplicate` |
@@ -325,8 +324,10 @@ Two things the text report guarantees carry over unchanged:
 2. **No store bytes**, at any verbosity: a store is reported by its range and size, which is what a
    caller hands to `c2pa-rs`.
 
-A store's `extent` says what its `size` measures: `store` for HEIC (trimmed to its JUMBF `LBox`),
-`slot` for AVIF (the store plus any padding; issue #505). A HEIC `position` is
+A store's `extent` says what its `size` and `range` measure: `store` for both HEIC and AVIF (trimmed
+to its JUMBF `LBox`), and `slot` is the box-bounded range the store sits at the front of (the store
+plus any padding) — the same two regions from both crates (issue #505). An AVIF slot that holds no
+store, such as an unfilled reservation, is an `unread` entry with reason `no_store_bound`. A HEIC `position` is
 `before_media_data`, `after_media_data` or `after_movie_box`; an AVIF one either of the first two; a
 WebP one `last` or `before_later_chunks`. Absence of a store is not absence of provenance in the
 document either: a non-empty `unread` beside an empty `stores` (or a `null` `store`) is C2PA framing

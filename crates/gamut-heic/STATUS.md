@@ -131,6 +131,19 @@ reaches no verdict. The reported range is for observability and byte accounting 
 a BMFF exclusion range, since `c2pa.hash.bmff.v3` excludes by box path, not by byte offset (§18.6,
 §A.5.6). Nothing inside the store is parsed, no hash is computed and no signature is checked.
 
+**Shared framing (issue #505).** The framing above is no longer this crate's own parse: the user
+type, `box_purpose`, merkle offset, `LBox` bound and `update` probe live in `gamut-isobmff`'s
+`C2paUuidBox` lens, which `gamut-avif` reads through too, and `C2PA_UUID`, `C2paBoxPurpose` and
+`C2paUnreadReason` are that crate's types, re-exported here. The lens locates the box-bounded
+*slot* after the merkle offset; this crate reports the *store* at its front (`C2paSlot::store`),
+so `C2paManifestStore` is unchanged in what it bounds and the two crates now agree byte for byte
+on the store. Both regions are reported, in both crates, under the same names:
+`C2paManifestStore::slot` and `C2paStoreSummary::slot` carry the padded slot beside the store's
+`range`, exactly as `gamut-avif`'s `C2paStoreSummary` does. Two observable differences from the private parse it replaces: a `manifest` or
+`original` box whose `data` is shorter than the 8-byte merkle offset is now `Truncated` (the
+framing ends early) rather than `NoStoreBound`, and `C2paUnreadReason::Truncated`'s description
+names §A.5.1.2/§A.5.3, the clauses whose framing it is cut short of.
+
 **Implemented (S7, issue #448).** `HeifContainer::c2pa_summary` is the same scan shaped for
 *reporting*: a `C2paSummary` of `C2paStoreSummary` entries — a half-open range, a size and a
 `box_purpose` per store, in file order — and `report_lines`, which renders them. The bytes are

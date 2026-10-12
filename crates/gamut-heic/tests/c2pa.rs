@@ -328,6 +328,12 @@ fn store_is_trimmed_to_its_lbox_not_to_the_box_length() {
     let found = c.c2pa().expect("manifest store located");
     assert_eq!(found.range, 61..73);
     assert_eq!(found.bytes, store.as_slice());
+    // The padded slot is reported beside it, under its own name, by the accessor and the summary
+    // alike — the two ranges `gamut-avif` reports for the same box (#505).
+    assert_eq!(found.slot, 61..173);
+    let summary = c.c2pa_summary();
+    assert_eq!(summary.stores[0].range, 61..73);
+    assert_eq!(summary.stores[0].slot, 61..173);
 }
 
 #[test]

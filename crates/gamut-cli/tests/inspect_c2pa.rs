@@ -234,9 +234,9 @@ fn an_avif_whose_major_brand_is_mif1_is_reported_as_an_avif_not_a_heic() {
     );
     assert!(stdout.contains(": AVIF\n"), "{stdout}");
     assert!(!stdout.contains("HEIF/HEIC"), "{stdout}");
-    // AVIF reports the box-bounded slot after the 8-byte merkle offset: the 14-byte store.
+    // AVIF reports the store after the 8-byte merkle offset, trimmed to its `LBox`: 14 bytes.
     assert!(
-        stdout.contains("box_purpose \"manifest\": 14-byte slot"),
+        stdout.contains("box_purpose \"manifest\": 14 bytes at"),
         "{stdout}"
     );
 }
@@ -524,13 +524,13 @@ fn assert_disclaimed(stdout: &str) {
 }
 
 #[test]
-fn an_avif_the_encoder_signed_reports_its_slot_at_the_encoders_range() {
+fn an_avif_the_encoder_signed_reports_its_store_at_the_encoders_range() {
     // Sniffed through `ftyp`, confirmed by `gamut-avif`'s predicate, and reported from its summary:
-    // the slot's range is the one the encoder reported, and its bytes are never printed.
+    // the store fills the slot the encoder reported, and its bytes are never printed.
     let rgb = [0x40u8; 8 * 8 * 3];
-    let store = b"STORE-BYTES-NEVER-PRINTED";
+    let store = jumbf_store(b"STORE-BYTES-NEVER-PRINTED");
     let (file, report) = gamut::avif::AvifEncoder::new()
-        .with_c2pa(store)
+        .with_c2pa(&store)
         .encode_with_report(rgb_image(&rgb))
         .expect("encode");
     let range = report.c2pa.expect("a slot was written");
@@ -551,7 +551,7 @@ fn an_avif_the_encoder_signed_reports_its_slot_at_the_encoders_range() {
     assert_disclaimed(&stdout);
     assert!(
         stdout.contains(&format!(
-            "box_purpose \"manifest\": {}-byte slot (store plus any padding) at [{}, {})",
+            "box_purpose \"manifest\": {} bytes at [{}, {})",
             store.len(),
             range.start,
             range.end
@@ -926,6 +926,10 @@ fn json_output_lists_every_heic_c2pa_box_past_the_text_cap() {
             json["range"],
             json_range(store.range.start as u64, store.range.end as u64)
         );
+        assert_eq!(
+            json["slot"],
+            json_range(store.slot.start as u64, store.slot.end as u64)
+        );
         assert_eq!(json["position"], "before_media_data");
     }
     let unread = &doc["c2pa"]["unread"];
@@ -978,25 +982,31 @@ fn json_output_says_a_forced_format_was_asserted() {
 }
 
 #[test]
-fn json_output_reports_an_avif_slot_at_the_encoders_range() {
+fn json_output_reports_an_avif_store_and_its_slot_at_the_encoders_range() {
+    // 4 bytes of padding after the store: `range` stops at the `LBox`, `slot` is the encoder's.
     let rgb = [0x40u8; 8 * 8 * 3];
-    let store = b"STORE-BYTES-NEVER-PRINTED";
+    let store = jumbf_store(b"STORE-BYTES-NEVER-PRINTED");
+    let padded = [&store[..], &[0xEE; 4]].concat();
     let (file, report) = gamut::avif::AvifEncoder::new()
-        .with_c2pa(store)
+        .with_c2pa(&padded)
         .encode_with_report(rgb_image(&rgb))
         .expect("encode");
-    let range = report.c2pa.expect("a slot was written");
+    let slot = report.c2pa.expect("a slot was written");
     let (out, doc) = run_inspect_json("signed-json.avif", &file, None);
 
     assert!(out.status.success(), "{doc}");
     assert_eq!(doc["format"], "avif");
     let stores = &doc["c2pa"]["stores"];
     assert_eq!(stores.as_array().map(Vec::len), Some(1), "{doc}");
-    assert_eq!(stores[0]["extent"], "slot");
+    assert_eq!(stores[0]["extent"], "store");
     assert_eq!(stores[0]["size"], store.len());
     assert_eq!(
         stores[0]["range"],
-        json_range(range.start as u64, range.end as u64)
+        json_range(slot.start as u64, (slot.start + store.len()) as u64)
+    );
+    assert_eq!(
+        stores[0]["slot"],
+        json_range(slot.start as u64, slot.end as u64)
     );
     assert_eq!(
         doc["c2pa"]["not_validated"],
@@ -1051,6 +1061,31 @@ fn json_output_lists_an_avifs_unread_and_merkle_boxes_after_its_media_data() {
         )
     );
     assert_eq!(merkle[0]["position"], "after_media_data");
+}
+
+#[test]
+fn json_output_lists_an_unfilled_reserved_avif_slot_as_bounding_no_store() {
+    // `with_c2pa_reserved` writes a zero-filled slot: a zero `LBox` bounds no JUMBF store, so the
+    // box is unread with `no_store_bound` rather than reported as a store.
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let file = gamut::avif::AvifEncoder::new()
+        .with_c2pa_reserved(64)
+        .encode_to_vec(rgb_image(&rgb))
+        .expect("encode");
+    let summary = gamut::avif::AvifContainer::parse(&file)
+        .expect("parse")
+        .c2pa_summary();
+    let (out, doc) = run_inspect_json("reserved.avif", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["c2pa"]["stores"], serde_json::json!([]), "{doc}");
+    let unread = &doc["c2pa"]["unread"];
+    assert_eq!(unread.as_array().map(Vec::len), Some(1), "{doc}");
+    assert_eq!(unread[0]["reason"], "no_store_bound");
+    assert_eq!(
+        unread[0]["description"],
+        summary.unread[0].reason.describe()
+    );
 }
 
 #[test]

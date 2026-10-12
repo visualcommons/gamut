@@ -109,10 +109,56 @@ Two costs of retaining rather than dropping, accepted knowingly:
   once as the item's payload in `mdat`. No known encoder does this; a file that does still
   decodes identically, it is merely larger.
 
-Deliberately **not** here: parsing the C2PA `box_purpose`, merkle offset or JUMBF `LBox` — that
-typed lens is `gamut-heic`'s `c2pa` module (#429); modelling a manifest store as an item (C2PA
-Appendix A defines only the top-level `uuid` carriage for BMFF); promoting a `uuid` box found
-inside `meta` (surfaced by `walk_meta_children`) to the top level.
+Deliberately **not** here: modelling a manifest store as an item (C2PA Appendix A defines only the
+top-level `uuid` carriage for BMFF); promoting a `uuid` box found inside `meta` (surfaced by
+`walk_meta_children`) to the top level. The C2PA framing *inside* a top-level `uuid` box is here
+since #505 — see the next section.
+
+## C2PA `ContentProvenanceBox` framing (#505)
+
+`gamut-heic` (#429) and `gamut-avif` (#444) each carried their own parse of the C2PA 2.4 §A.5.1.2 /
+§A.5.3 framing and reported different bytes for the same store. The framing now lives here, once,
+and both consumers call it: `C2PA_UUID`, `C2paBoxPurpose`, `C2paUnreadReason`, the lens
+`C2paUuidBox::classify` over a top-level `Segment` (→ `Slot(C2paSlot)` / `Merkle` / `Unread(reason)`
+/ `OtherExtendedType`), and the writer-side builders `content_provenance_payload` /
+`content_provenance_reserved` (zero `FullBox` version/flags, NUL-terminated `box_purpose`, zero
+8-byte merkle offset, then the slot). Additive (semver-minor); both consumers re-export the shared
+types under their old paths, so their surfaces are minor too.
+
+**Decision — how the store is bounded: both, under two names.** The lens's located unit is the
+**slot** (`C2paSlot::slot_bytes` / `range`): every byte of `data` after the merkle offset to the end
+of the box, store plus §A.5.3 padding. The **store** is `C2paSlot::store()`: the slot's front
+trimmed to the store's own JUMBF `LBox` under `references/c2pa/README.md`'s *refuse rather than
+guess* rule — an `LBox` below the 8-byte JUMBF header, overrunning the slot, or with fewer than four
+bytes to read it from is no store (`None`), never an error and never a truncated store. Rejected:
+reporting only the trimmed store, because a reservation (`content_provenance_reserved`, all zeros)
+has no `LBox`, so `gamut-avif`'s reserve → report → patch flow would find nothing to patch; and
+reporting only the slot, because that would silently widen `gamut-heic`'s documented
+`C2paManifestStore` contract to include padding. `C2paSlot::store_range` is the store's file range,
+so neither consumer does that arithmetic itself. Both consumers report both regions under the same
+names: each `C2paStoreSummary` carries the store as `range` and the slot as `slot`, and a slot that
+bounds no store is unread (`NoStoreBound`) in both, so the two crates report the same bytes for one
+padded store. Only `gamut-avif`'s slot locator (`c2pa_slot`/`c2pa_slots`) and encoder report name the
+slot alone, because patching a reservation is what they exist for.
+
+**Decision — `update` is probed, by `LBox` validity.** §A.5.3 states the 8-byte merkle offset for
+`manifest` and `original` and is silent for `update`; `c2pa-rs` writes it for all three. So
+`manifest`/`original` use the stated offset (a `data` shorter than it is `Truncated`), and `update`
+places its slot after the offset unless the `LBox` there bounds no store **and** the one at the
+start of `data` does — then at the start, with `merkle_offset: None`. A `data` shorter than the
+offset is the slot whole. Rejected: assuming the offset for `update` (it mis-reads a prefix-less
+store, a layout the specification does not exclude); probing by length alone (`gamut-avif`'s
+previous rule, which reported a longer prefix-less store 8 bytes short). The probe is
+content-dependent — an `LBox` read 8 bytes into a prefix-less store can land on a plausible interior
+length — so a prefix-less `update` store whose interior happens to bound at offset 8 is still
+mis-placed; no known writer emits that layout. A `jumb` `TBox` check would make it exact; it stays
+deferred (it narrows what is reported, on a clause the specification states only for JPEG XL) and
+is tracked by `gamut-heic`'s `STATUS.md` deferred row.
+
+Out of scope here: where a box sits relative to `mdat`/`moov` (each consumer's `C2paBoxPosition`),
+the non-validating report types (`C2paSummary` and kin, still one per consumer), and a range
+newtype that makes "this is not an exclusion range" unrepresentable (a breaking change to both
+consumers' public fields, #780).
 
 **Semver:** adding the field made `IsoBmffImage` `#[non_exhaustive]` (a major bump); construct it
 with `IsoBmffImage::new(..)` plus `with_minor_version`/`with_groups`/`with_top_level_boxes`, so the
