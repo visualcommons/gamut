@@ -1724,7 +1724,52 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_LIST, brand_label, hidden_entries};
+    use super::{Json, MAX_LIST, brand_label, hidden_entries};
+
+    /// The compact text of `value`.
+    fn json_text(value: &Json) -> String {
+        let mut out = String::new();
+        value.write(&mut out);
+        out
+    }
+
+    #[test]
+    fn a_json_string_escapes_what_rfc_8259_requires_and_nothing_else() {
+        // A path or a chunk type is chosen by the input, so a quote, a backslash or a control
+        // character in it must stay inside the literal; anything else is UTF-8 and passes through.
+        assert_eq!(
+            json_text(&Json::from("a\"b\\c\nd\re\tf\u{0}g\u{1f}h é…")),
+            "\"a\\\"b\\\\c\\nd\\re\\tf\\u0000g\\u001fh é…\""
+        );
+        // U+007F is not a control character RFC 8259 asks to escape.
+        assert_eq!(json_text(&Json::from("\u{7f}")), "\"\u{7f}\"");
+    }
+
+    #[test]
+    fn a_json_document_is_written_compactly_in_member_order() {
+        let doc = Json::Object(vec![
+            ("z", Json::Array(vec![Json::from(1u8), Json::Null])),
+            ("a", Json::Bool(false)),
+            ("m", Json::Object(vec![])),
+            ("e", Json::Array(vec![])),
+            ("t", Json::Bool(true)),
+            ("big", Json::from(u64::MAX)),
+        ]);
+        assert_eq!(
+            json_text(&doc),
+            "{\"z\":[1,null],\"a\":false,\"m\":{},\"e\":[],\"t\":true,\"big\":18446744073709551615}"
+        );
+    }
+
+    #[test]
+    fn a_json_float_is_a_number_when_finite_and_null_otherwise() {
+        // JSON has no NaN or infinity; a ratio over an empty stream must not break the document.
+        assert_eq!(json_text(&Json::Float(0.5)), "0.5");
+        assert_eq!(json_text(&Json::Float(2.0)), "2");
+        assert_eq!(json_text(&Json::Float(f64::NAN)), "null");
+        assert_eq!(json_text(&Json::Float(f64::INFINITY)), "null");
+        assert_eq!(json_text(&Json::Float(f64::NEG_INFINITY)), "null");
+    }
 
     #[test]
     fn a_brand_label_escapes_every_byte_that_is_not_printable_ascii() {

@@ -157,3 +157,129 @@ fn a_png_that_ends_cleanly_without_iend_lists_the_missing_iend_as_its_finding() 
         "{stderr}"
     );
 }
+
+// `--output json` (#596): the same verdicts and facts as one JSON document, with the exit code and
+// the stderr message unchanged.
+
+/// Runs `gamut inspect --output json <file>` and parses stdout as one JSON document.
+fn run_inspect_json(name: &str, bytes: &[u8]) -> (Output, serde_json::Value) {
+    let path = std::env::temp_dir().join(format!(
+        "gamut-inspect-json-test-{}-{name}.png",
+        std::process::id()
+    ));
+    std::fs::write(&path, bytes).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_gamut"))
+        .args(["inspect", "--output", "json"])
+        .arg(&path)
+        .output()
+        .expect("run gamut inspect");
+    let _ = std::fs::remove_file(&path);
+    let doc = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not one JSON document ({e}): {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    (output, doc)
+}
+
+#[test]
+fn json_output_of_a_verified_png_carries_its_header_chunks_and_filter_histogram() {
+    let png = sound_png();
+    let (out, doc) = run_inspect_json("json-verified", &png);
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["format"], "png");
+    assert_eq!(
+        doc["image"],
+        serde_json::json!({
+            "width": 8, "height": 8, "color_type": 2, "bit_depth": 8, "interlaced": false
+        })
+    );
+    assert_eq!(doc["file_len"], png.len());
+    let types: Vec<&str> = doc["chunks"]
+        .as_array()
+        .expect("chunks")
+        .iter()
+        .map(|c| c["type"].as_str().expect("type"))
+        .collect();
+    assert_eq!(types, ["IHDR", "IDAT", "IEND"], "{doc}");
+    assert_eq!(doc["filters"]["counted"], true);
+    assert_eq!(doc["filters"]["scanlines"], 8);
+    assert_eq!(doc["findings"], serde_json::json!([]));
+    assert_eq!(doc["fully_classified"], true);
+    assert_eq!(doc["intact"], true);
+    assert_eq!(doc["verified"], true);
+}
+
+#[test]
+fn json_output_of_an_unread_png_names_the_skip_reason_and_keeps_exit_one() {
+    let (out, doc) = run_inspect_json("json-unread", &intact_but_unread_png());
+    assert_eq!(out.status.code(), Some(1), "{doc}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not verified"),
+        "the stderr verdict is the same as the text report's"
+    );
+    assert_eq!(
+        doc["filters"],
+        serde_json::json!({
+            "counted": false,
+            "reason": "implausible_inflation",
+            "damage": false,
+            "description":
+                "the IDAT stream is too short to plausibly inflate to the image the header declares"
+        })
+    );
+    assert_eq!(doc["intact"], true);
+    assert_eq!(doc["verified"], false);
+}
+
+#[test]
+fn json_output_lists_every_png_finding_past_the_text_cap() {
+    // Twenty-five ancillary chunks whose CRCs do not match, then a missing IEND: the text report
+    // shows twenty findings and a tail; the document carries all twenty-six, in report order.
+    let mut png = sound_png();
+    png.truncate(png.len() - 12);
+    let first_bad = png.len();
+    for _ in 0..25 {
+        push_chunk(&mut png, b"teXt", b"x");
+        let last = png.len() - 1;
+        png[last] ^= 0xFF;
+    }
+    let (out, doc) = run_inspect_json("json-findings", &png);
+    assert_eq!(out.status.code(), Some(1), "{doc}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("26 finding(s)"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let findings = doc["findings"].as_array().expect("findings");
+    assert_eq!(findings.len(), 26, "{doc}");
+    assert_eq!(findings[0]["kind"], "crc_mismatch");
+    assert_eq!(
+        findings[0]["range"],
+        serde_json::json!({ "start": first_bad, "end": first_bad + 13 })
+    );
+    assert_eq!(findings[25]["kind"], "missing_iend");
+    assert_eq!(doc["intact"], false);
+}
+
+#[test]
+fn json_output_prints_nothing_for_a_file_the_walk_cannot_open() {
+    let path = std::env::temp_dir().join(format!(
+        "gamut-inspect-json-test-{}-garbage.png",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0],
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_gamut"))
+        .args(["inspect", "--output", "json"])
+        .arg(&path)
+        .output()
+        .expect("run gamut inspect");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "no partial document may be printed");
+}
