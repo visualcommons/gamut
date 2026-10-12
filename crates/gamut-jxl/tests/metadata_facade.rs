@@ -1,7 +1,7 @@
 //! The `metadata` feature through the container: the facade's keystone equality
 //! (extract → embed → extract over EXIF / XMP / ICC) extended through a real `.jxl` stream, the
 //! routing of each `EncodedMetadata` carrier to its setter, and the typed refusals for carriers the
-//! container cannot write.
+//! container cannot write or a profile that conflicts with an explicit `ColorSpec`.
 //!
 //! Needs both codec halves plus the facade; compiled only when all are available.
 #![cfg(all(
@@ -15,7 +15,9 @@ mod common;
 
 use common::gen_u8;
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
-use gamut_jxl::{Container, EncodedMetadata, JxlDecoder, JxlEncoder, Metadata, MetadataBlock};
+use gamut_jxl::{
+    ColorSpec, Container, EncodedMetadata, JxlDecoder, JxlEncoder, Metadata, MetadataBlock,
+};
 use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
 
@@ -139,6 +141,21 @@ fn unwritable_carriers_are_typed_errors() {
         .unwrap_err();
     assert_eq!(err.kind(), ErrorKind::InvalidInput);
     assert_eq!(err.static_message(), Some("JXL: XMP packet is not UTF-8"));
+}
+
+#[test]
+fn a_typed_profile_refuses_to_replace_an_explicit_color_spec() {
+    // Issue #626: `with_metadata` inherits the conflict rule; the explicit sRGB choice is not
+    // silently traded for the model's profile.
+    let err = container_encoder()
+        .with_color(ColorSpec::Srgb)
+        .with_metadata(&typed())
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        err.static_message(),
+        Some("JXL: metadata ICC profile conflicts with the explicit ColorSpec")
+    );
 }
 
 #[test]

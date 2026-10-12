@@ -95,6 +95,11 @@ pub struct JxlEncoder {
     container: Container,
     /// The colour interpretation signalled for the pixel samples.
     color: ColorSpec,
+    /// Whether `color` is the caller's explicit choice through [`JxlEncoder::with_color`], as
+    /// against the default or a profile routed in from metadata. A metadata ICC profile that
+    /// differs from an explicit choice is refused rather than allowed to replace it (issue #626).
+    /// Provenance, not configuration: it does not take part in `PartialEq`.
+    color_explicit: bool,
     /// The display orientation signalled for the coded samples.
     orientation: Orientation,
     /// Raw EXIF payload for an `Exif` container box, if any.
@@ -133,6 +138,7 @@ impl Default for JxlEncoder {
             modular: ModularMode::default(),
             container: Container::default(),
             color: ColorSpec::default(),
+            color_explicit: false,
             orientation: Orientation::default(),
             exif: None,
             xmp: None,
@@ -199,9 +205,15 @@ impl JxlEncoder {
     /// The encoder never converts pixels between colour spaces — this only declares how the
     /// caller's samples are to be interpreted. An [`ColorSpec::Icc`] profile is validated against
     /// the image's colour family when encoding.
+    ///
+    /// The choice is **explicit**: a later [`with_metadata`](Self::with_metadata) whose model
+    /// carries a different ICC profile is refused rather than allowed to replace it (see the
+    /// precedence note there). Calling this *after* `with_metadata` is the deliberate override —
+    /// like every other builder, the later call wins.
     #[must_use]
     pub fn with_color(mut self, color: ColorSpec) -> Self {
         self.color = color;
+        self.color_explicit = true;
         self
     }
 
@@ -244,8 +256,9 @@ impl JxlEncoder {
     /// default [`MetadataEmbedder`](gamut_metadata::MetadataEmbedder) and routes each carrier to
     /// the matching setter — EXIF to [`with_exif`](Self::with_exif) (the facade's `Exif\0\0`
     /// signature stripped, since the `Exif` box carries the TIFF stream), XMP to
-    /// [`with_xmp`](Self::with_xmp), and the ICC profile to [`with_color`](Self::with_color) as
-    /// [`ColorSpec::Icc`] — in JPEG XL the profile *is* the codestream's colour encoding, not a
+    /// [`with_xmp`](Self::with_xmp), and the ICC profile to the encoder's colour encoding as
+    /// [`ColorSpec::Icc`] (without making it an explicit [`with_color`](Self::with_color) choice) —
+    /// in JPEG XL the profile *is* the codestream's colour encoding, not a
     /// container box, and it is validated against the image's colour family at encode time. Returns
     /// the updated encoder for chaining.
     ///
@@ -258,18 +271,25 @@ impl JxlEncoder {
     ///
     /// # Precedence
     ///
-    /// A carrier **absent** from the model leaves any earlier setting untouched. A carrier
-    /// **present** in it overwrites one, because each is routed to the raw setter — and for ICC
-    /// that setter is [`with_color`](Self::with_color), so a profile in the model replaces a
-    /// [`ColorSpec`] chosen before this call, not merely an earlier profile. Call this before
-    /// [`with_color`](Self::with_color) when the explicit colour choice is meant to win. Whether
-    /// last-write-wins is the right rule for a colour encoding, or the conflict should be refused,
-    /// is open (issue #626); this documents what it does today rather than settling it.
+    /// A carrier **absent** from the model leaves any earlier setting untouched. A present EXIF or
+    /// XMP carrier overwrites an earlier one, because each is routed to its raw setter — a
+    /// container box, so only a previous payload is replaced.
+    ///
+    /// ICC is different: in JPEG XL the profile *is* the codestream's colour encoding, so routing
+    /// it would replace a [`ColorSpec`] the caller chose through another API. A present profile
+    /// therefore **refuses to override an explicit choice**: when [`with_color`](Self::with_color)
+    /// was called earlier with anything other than this very profile, this returns
+    /// [`Error::InvalidInput`] instead of discarding the choice. Absent an explicit choice (the
+    /// sRGB default, or a profile an earlier metadata call routed in) the profile is applied. To
+    /// encode with a colour encoding other than the model's profile, call
+    /// [`with_color`](Self::with_color) *after* this method — the later explicit call wins — or
+    /// clear the model's ICC field.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message is
-    /// carried as [`Error::detail`]), and whatever
+    /// carried as [`Error::detail`]) or when its ICC profile conflicts with an explicit
+    /// [`ColorSpec`] (see Precedence), and whatever
     /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
     #[cfg(feature = "metadata")]
     pub fn with_metadata(self, meta: &gamut_metadata::Metadata) -> Result<Self> {
@@ -289,17 +309,18 @@ impl JxlEncoder {
     ///
     /// Only the carriers JPEG XL can write are accepted: EXIF (`Exif` box), XMP (`xml ` box) and
     /// ICC (the codestream colour encoding). Fields that are `None` leave any earlier setting
-    /// untouched; a field that is `Some` overwrites one, and for ICC that means replacing the
-    /// encoder's [`ColorSpec`] — see the precedence note on
-    /// [`with_metadata`](Self::with_metadata).
+    /// untouched; an EXIF or XMP field that is `Some` overwrites one, while an ICC field that is
+    /// `Some` sets the encoder's [`ColorSpec`] only when no different explicit choice was made —
+    /// see the precedence note on [`with_metadata`](Self::with_metadata).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (JPEG XL has
     /// no carrier for it) or a C2PA manifest store (the `jumb` box is not written by this crate,
     /// and a store must not be copied forward in any case), and [`Error::InvalidInput`] when the
-    /// XMP packet is not UTF-8 (the `xml ` box holds text). Nothing is applied when an error is
-    /// returned.
+    /// XMP packet is not UTF-8 (the `xml ` box holds text) or when the ICC profile differs from a
+    /// [`ColorSpec`] set explicitly through [`with_color`](Self::with_color). Nothing is applied
+    /// when an error is returned.
     #[cfg(feature = "metadata")]
     pub fn with_encoded_metadata(
         mut self,
@@ -317,6 +338,15 @@ impl JxlEncoder {
                 "JXL: C2PA manifest store (jumb box) embedding is not supported",
             ));
         }
+        if let Some(icc) = &encoded.icc
+            && self.color_explicit
+            && !matches!(&self.color, ColorSpec::Icc(chosen) if chosen == icc)
+        {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: metadata ICC profile conflicts with the explicit ColorSpec",
+            ));
+        }
         let xmp = encoded
             .xmp
             .as_deref()
@@ -332,7 +362,9 @@ impl JxlEncoder {
             self = self.with_xmp(xmp);
         }
         if let Some(icc) = &encoded.icc {
-            self = self.with_color(ColorSpec::Icc(icc.clone()));
+            // Assigned directly, not through `with_color`: a routed profile is not an explicit
+            // choice, so a later metadata call may replace it (last write wins).
+            self.color = ColorSpec::Icc(icc.clone());
         }
         Ok(self)
     }
@@ -639,6 +671,71 @@ mod tests {
             Some("JXL: metadata does not serialize")
         );
         assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+    }
+
+    /// Facade blocks carrying only the ICC profile `icc`.
+    #[cfg(feature = "metadata")]
+    fn icc_blocks(icc: &[u8]) -> gamut_metadata::EncodedMetadata {
+        let mut encoded = gamut_metadata::EncodedMetadata::default();
+        encoded.icc = Some(icc.to_vec());
+        encoded
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_metadata_profile_refuses_to_replace_an_explicit_color_spec() {
+        // Issue #626: an explicit choice — even the default's own value — is not overwritten.
+        for chosen in [ColorSpec::Srgb, ColorSpec::Icc(b"other".to_vec())] {
+            let err = JxlEncoder::new()
+                .with_color(chosen)
+                .with_encoded_metadata(&icc_blocks(b"profile"))
+                .unwrap_err();
+            assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+            assert_eq!(
+                err.static_message(),
+                Some("JXL: metadata ICC profile conflicts with the explicit ColorSpec")
+            );
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_metadata_profile_applies_when_no_color_spec_was_chosen() {
+        let enc = JxlEncoder::new()
+            .with_encoded_metadata(&icc_blocks(b"profile"))
+            .unwrap();
+        assert_eq!(enc.color(), &ColorSpec::Icc(b"profile".to_vec()));
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_metadata_profile_equal_to_the_explicit_one_is_no_conflict() {
+        let enc = JxlEncoder::new()
+            .with_color(ColorSpec::Icc(b"profile".to_vec()))
+            .with_encoded_metadata(&icc_blocks(b"profile"))
+            .unwrap();
+        assert_eq!(enc.color(), &ColorSpec::Icc(b"profile".to_vec()));
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_second_metadata_profile_replaces_one_routed_in_by_metadata() {
+        let enc = JxlEncoder::new()
+            .with_encoded_metadata(&icc_blocks(b"first"))
+            .unwrap()
+            .with_encoded_metadata(&icc_blocks(b"second"))
+            .unwrap();
+        assert_eq!(enc.color(), &ColorSpec::Icc(b"second".to_vec()));
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn an_explicit_color_spec_after_the_metadata_overrides_its_profile() {
+        let enc = JxlEncoder::new()
+            .with_encoded_metadata(&icc_blocks(b"profile"))
+            .unwrap()
+            .with_color(ColorSpec::Pq);
+        assert_eq!(enc.color(), &ColorSpec::Pq);
     }
 
     #[test]
