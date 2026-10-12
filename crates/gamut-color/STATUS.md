@@ -75,9 +75,11 @@ tolerance-level, not bit-for-bit.
   a policy choice belonging to the format layer.
 - **Row / SIMD YCbCr ↔ RGB** — `YcbcrMatrix::to_rgb` and `RgbToYcbcr::from_rgb` are scalar and
   `#[inline]`; a subsampling-aware row API is additive if profiling asks for it.
-- **HLG transfer curve** — `eotf_for` returns `None` for it (M4 HDR). The BT.709-family curve
-  (H.273 code points 1 and 14) is implemented as `bt709_eotf` / `bt709_oetf`; code points 6 and 15,
-  the same curve per Table 3, have no `TransferCharacteristics` variant yet.
+- **HLG display OOTF** — the HLG transfer (H.273 code point 18) is implemented scene-referred, as
+  `hlg_oetf` / `hlg_inverse_oetf` (issue #555); the BT.2100 HLG *EOTF*, which adds a system gamma
+  set by the display's peak luminance, is not modelled. The BT.709-family curve (H.273 code
+  points 1 and 14) is implemented as `bt709_eotf` / `bt709_oetf`; code points 6 and 15, the same
+  curve per Table 3, have no `TransferCharacteristics` variant yet.
 - **Better chroma resampling** (sharp-YUV-style) — the box filter is the documented baseline.
 - **Bit-reproducible math substrate** — chromahash's `cbrt_halley`/portable-pow tier is
   deliberately not ported (Tier-1 policy, issue #37).
