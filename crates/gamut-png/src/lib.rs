@@ -63,6 +63,11 @@
 // the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
 #![deny(unsafe_code)]
 
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 mod abi;
 mod adam7;
 mod ancillary;
