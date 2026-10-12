@@ -152,11 +152,7 @@ fn the_crate_locates_the_slot_it_reserved_at_the_reported_range() {
         .expect("encode");
     let container = AvifContainer::parse(&bytes).expect("gamut-avif parses its own output");
     let store = container.c2pa_slot().expect("the slot is located");
-    assert_eq!(
-        Some(store.range),
-        report.c2pa,
-        "reader and writer agree"
-    );
+    assert_eq!(Some(store.range), report.c2pa, "reader and writer agree");
     assert_eq!(
         store.slot_bytes,
         &[0u8; 128][..],
