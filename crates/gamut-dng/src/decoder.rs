@@ -1262,10 +1262,15 @@ fn decode_image_data(
                 ));
             }
             let mut samples = Vec::new();
-            for band in 0..down {
-                // Sliced rather than `chunks(across)`: a zero `ImageWidth` reaches here (the raw
-                // path checks `Dimensions` afterwards) with `across == 0`, which `chunks` rejects.
-                let tiles = chunks[band * across..(band + 1) * across]
+            // The bands are walked over the chunks the file holds, not counted over `0..down`: a
+            // zero `ImageWidth` reaches here (the raw path checks `Dimensions` afterwards) with
+            // `across == 0` and no chunks, while `ImageLength = u32::MAX` over `TileLength = 1`
+            // still declares ~4.29e9 bands, so a counted loop would make that many empty passes.
+            // `max(1)` only keeps `chunks` (which rejects 0) callable on that empty slice. This
+            // replaces index arithmetic (`band * across` slicing) and its operator mutants: the
+            // tile-count check above is what pins one band to `across` chunks.
+            for (band, band_chunks) in chunks.chunks(across.max(1)).enumerate() {
+                let tiles = band_chunks
                     .iter()
                     .map(|chunk| decode_chunk_samples(layout, chunk, tile_width, tile_height))
                     .collect::<Result<Vec<_>>>()?;

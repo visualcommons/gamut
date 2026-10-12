@@ -99,6 +99,25 @@ fn a_strip_declaring_huge_geometry_is_rejected_without_a_geometry_sized_allocati
     assert_truncated(&dng);
 }
 
+/// A zero-width tiled raw: `ImageWidth = 0` over empty tile arrays, with `ImageLength = u32::MAX`
+/// in one-row tiles. The tile grid is zero tiles across by ~4.29e9 down, so assembly must walk the
+/// (absent) chunks rather than count the declared bands, and the empty image then fails
+/// `Dimensions` as a typed error — neither a panic on the zero-wide band nor billions of passes.
+#[test]
+fn a_zero_width_tiled_raw_is_rejected_as_invalid_input() {
+    let dng = patched_raw_ifd(DngEncoder::new().with_tiling(16, 16), |raw| {
+        raw.set(tags::IMAGE_WIDTH, Value::Long(vec![0]));
+        raw.set(tags::IMAGE_LENGTH, Value::Long(vec![u32::MAX]));
+        raw.set(tags::TILE_LENGTH, Value::Long(vec![1]));
+        raw.set(tags::TILE_OFFSETS, Value::Long(vec![]));
+        raw.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![]));
+    });
+    let error = DngDecoder::new()
+        .decode(&dng)
+        .expect_err("a zero-width raw has no pixels");
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+}
+
 /// The tiled twin: one `60000 × 60000` tile over a 16×16 tile's bytes. Pins the tile path — the
 /// assembled image and the per-tile unpack — to the data.
 #[test]
