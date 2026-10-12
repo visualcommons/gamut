@@ -483,6 +483,27 @@ impl<'a> AvifItem<'a> {
         })
     }
 
+    /// The `mdcv` mastering display colour volume (SMPTE ST 2086 primaries, white point and
+    /// luminance range), if present. Values are the raw stored code points, as
+    /// [`MasteringDisplay`] documents.
+    #[must_use]
+    pub fn mastering_display(&self) -> Option<MasteringDisplay> {
+        self.find_property(|kind| match *kind {
+            PropertyKind::MasteringDisplayColourVolume {
+                display_primaries,
+                white_point,
+                max_display_mastering_luminance,
+                min_display_mastering_luminance,
+            } => Some(MasteringDisplay {
+                display_primaries,
+                white_point,
+                max_display_mastering_luminance,
+                min_display_mastering_luminance,
+            }),
+            _ => None,
+        })
+    }
+
     /// The raw codec-configuration record as `(box type, body)` — the `av1C`/`hvcC` bytes, kept
     /// opaque. `None` if the item has no codec configuration. For the typed AV1 record use
     /// [`av1_config`](Self::av1_config).
@@ -708,6 +729,29 @@ pub struct ContentLightLevel {
     pub max_content_light_level: u16,
     /// Maximum picture average light level (`MaxPALL`).
     pub max_pic_average_light_level: u16,
+}
+
+/// The `mdcv` mastering display colour volume — SMPTE ST 2086 metadata describing the display the
+/// content was mastered on (ISO/IEC 14496-12 `MasteringDisplayColourVolumeBox`, field layout per
+/// AV1-ISOBMFF §2.3.4; semantics from the HEVC mastering display colour volume SEI, ISO/IEC
+/// 23008-2 Annex D). A computed view of [`PropertyKind::MasteringDisplayColourVolume`].
+///
+/// Every field is the stored integer code point, not a converted float, so a value read from one
+/// file and written to another is bit-exact. Neither the reader nor the encoder range-checks them:
+/// the box does not, and a reader rejecting out-of-range SEI values would refuse files the world
+/// holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MasteringDisplay {
+    /// The three display primaries as `[x, y]` CIE 1931 chromaticity pairs in units of 0.00002,
+    /// in stored order. The HEVC convention orders them green, blue, red; the box does not
+    /// enforce an order, so they are kept exactly as stored.
+    pub display_primaries: [[u16; 2]; 3],
+    /// The white point as an `[x, y]` CIE 1931 chromaticity pair in units of 0.00002.
+    pub white_point: [u16; 2],
+    /// Nominal maximum display luminance, in units of 0.0001 cd/m².
+    pub max_display_mastering_luminance: u32,
+    /// Nominal minimum display luminance, in units of 0.0001 cd/m².
+    pub min_display_mastering_luminance: u32,
 }
 
 /// Whether `item_type` names a coded (pixel-bearing) image item rather than a derived, metadata,

@@ -233,6 +233,10 @@ pub struct AvifStructure {
     pub exif: Vec<u8>,
     /// The XMP packet (empty if none).
     pub xmp: Vec<u8>,
+    /// The `clli` content light level `[maxCLL, maxPALL]`. libavif reports an absent box as
+    /// `[0, 0]`, so absence and an all-zero box are indistinguishable here. (The pinned libavif
+    /// skips `mdcv` entirely, so there is no field for it.)
+    pub clli: [u16; 2],
 }
 
 /// Parses an AVIF file's container structure with libavif — `avifDecoderParse` only, no pixel
@@ -297,6 +301,7 @@ unsafe fn introspect_inner(avif: &[u8]) -> Result<AvifStructure, String> {
                 icc: rw_data(&image.icc),
                 exif: rw_data(&image.exif),
                 xmp: rw_data(&image.xmp),
+                clli: [image.clli.maxCLL, image.clli.maxPALL],
             })
         })();
         sys::avifDecoderDestroy(decoder);
