@@ -24,14 +24,14 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 /// | [`Thorough`](Self::Thorough) | nothing: every directional mode at `AngleDeltaY ∈ [-3, 3]`, five filter-intra modes, CfL `\|alpha\|` 1..=16, all five `TX_SET_INTRA_2` types, rectangular partitions, 4×4 leaves, palette | — |
 /// | [`Balanced`](Self::Balanced) | directional modes are tried at `AngleDeltaY = 0` only | 48 of the 56 directional trials per ≥8×8 block |
 /// | [`Fast`](Self::Fast) | filter-intra is not tried; CfL tries `\|alpha\|` ∈ {1, 2, 4, 8, 16} only; the transform type is `DCT_DCT` or `ADST_ADST` | 5 filter-intra trials per block up to 32×32, 22 of 32 CfL trials per chroma plane, 3 of 4 extra transform-type trials per luma transform |
-/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional trial, the CfL trials and palette scan, the last extra transform-type trial, and the 8×8 split trials with the 4×4 mode searches they bring |
+/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional trial, the CfL trials and palette scan, the last extra transform-type trial, the `PARTITION_HORZ`/`PARTITION_VERT` rate–distortion trials of every 16×16 and 32×32 region, and the 8×8 split trials with the 4×4 mode searches they bring |
 ///
 /// **How candidates are weighed.** Every decision the presets prune — the partition of each 8×8 to
 /// 64×64 region (whole, two rectangular halves, or four quadrants), the luma mode, filter-intra,
-/// the transform depth, the transform type and the CfL alphas — ranks its candidates by
-/// rate–distortion cost: each candidate is trialled, its squared error measured on the
-/// reconstruction a decoder would produce, and weighed against its rate priced from the adapting
-/// CDFs. The partition search is bottom-up: a region's four-quadrant alternative codes each
+/// the transform type and the CfL alphas — and the transform depth, which every preset searches
+/// in full, ranks its candidates by rate–distortion cost: each candidate is trialled, its squared
+/// error measured on the reconstruction a decoder would produce, and weighed against its rate
+/// priced from the adapting CDFs. The partition search is bottom-up: a region's four-quadrant alternative codes each
 /// quadrant as the same search chooses for it, and every decision a trial reaches is kept and
 /// reused rather than searched again, so the search costs time linear in its depth. The luma mode
 /// and transform depth are chosen together in two passes: every pairing is trialled with
