@@ -22,16 +22,22 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 /// | Preset | Pruned relative to the one above | Search time saved |
 /// |---|---|---|
 /// | [`Thorough`](Self::Thorough) | nothing: every directional mode at `AngleDeltaY ∈ [-3, 3]`, five filter-intra modes, CfL `\|alpha\|` 1..=16, all five `TX_SET_INTRA_2` types, rectangular partitions, 4×4 leaves, palette | — |
-/// | [`Balanced`](Self::Balanced) | directional modes are tried at `AngleDeltaY = 0` only | 48 of the 56 directional predictions per ≥8×8 block |
-/// | [`Fast`](Self::Fast) | filter-intra is not tried; CfL tries `\|alpha\|` ∈ {1, 2, 4, 8, 16} only; the transform type is `DCT_DCT` or `ADST_ADST` | 5 filter-intra predictions per block, 22 of 32 CfL trials per chroma plane, 3 of 4 extra forward transforms per luma transform |
-/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional prediction, the CfL and palette scans, the last extra transform, and the 4×4 mode searches the floor removes |
+/// | [`Balanced`](Self::Balanced) | directional modes are tried at `AngleDeltaY = 0` only | 48 of the 56 directional trials per ≥8×8 block |
+/// | [`Fast`](Self::Fast) | filter-intra is not tried; CfL tries `\|alpha\|` ∈ {1, 2, 4, 8, 16} only; the transform type is `DCT_DCT` or `ADST_ADST` | 5 filter-intra trials per block up to 32×32, 22 of 32 CfL trials per chroma plane, 3 of 4 extra transform-type trials per luma transform |
+/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional trial, the CfL trials and palette scan, the last extra transform-type trial, and the 8×8 split trials with the 4×4 mode searches they bring |
 ///
-/// **What the time buys is not guaranteed to be smaller files.** The mode decisions score each
-/// candidate by its prediction error (or a coefficient-count proxy) against the source, not by
-/// rate and distortion together, so a candidate the full search prefers can cost more bits — or
-/// reconstruct worse — than one a pruned search settles for. Measured on synthetic content the
-/// pruned presets were often both smaller and no worse in PSNR at the same `qindex`; treat the
-/// presets as a time control, and compare sizes on your own content.
+/// **How candidates are weighed.** Every decision the presets prune — the luma mode, filter-intra,
+/// the transform type, the CfL alphas, and whether an 8×8 block splits into 4×4 leaves — ranks its
+/// candidates by rate–distortion cost: each candidate is trialled, its squared error measured on
+/// the reconstruction a decoder would produce, and weighed against its rate priced from the
+/// adapting CDFs. The luma mode is chosen in two passes where its transforms have a type to
+/// search: every candidate is trialled with `DCT_DCT` alone, and the eight cheapest again with
+/// the transform-type search. The decisions are made block by block, before the in-loop filters,
+/// so a slower preset is not guaranteed smaller output on every image; measured on the fixed
+/// corpus in `tests/preset_rd.rs`, [`Thorough`](Self::Thorough) needs fewer bits than every
+/// faster preset for the same PSNR. The partition of 16×16 and larger blocks, the rectangular
+/// partitions, the transform depth and palette are still decided by texture tests, at every
+/// preset.
 ///
 /// The presets prune *search*, so they move only lossy encodes. Lossless coding (`qindex = 0`)
 /// has a single fixed path — `DC_PRED` and the 4×4 Walsh–Hadamard transform — and is identical at
@@ -44,7 +50,7 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 #[repr(u8)]
 #[non_exhaustive]
 pub enum Speed {
-    /// The full search; reproduces the encoder's output from before speed presets existed.
+    /// The full search.
     #[default]
     Thorough = 0,
     /// Directional modes without the fine angle refinement.
@@ -66,8 +72,8 @@ impl Speed {
 /// signalling, which every entry point takes directly).
 ///
 /// Plain data: build it from [`Default`] and the `with_*` setters, or set the public fields of a
-/// default value. The default reproduces the encoder's output from before the options existed —
-/// the full search, the [`Tiling::default`] layout, and one thread.
+/// default value. The default is what every entry point without an `options` argument encodes
+/// with: the full search ([`Speed::Thorough`]), the [`Tiling::default`] layout, and one thread.
 ///
 /// ```
 /// use std::num::NonZeroUsize;
@@ -1048,32 +1054,33 @@ mod tests {
         };
         let cases: &[(u8, u32, u32, u8, u64)] = &[
             (0, 40, 24, 0, 0x5728_aabc_5720_858a),
-            (1, 64, 64, 1, 0xa6ac_d7ee_70b8_7653),
+            (1, 64, 64, 1, 0x177b_df34_05e6_6663),
             (2, 32, 32, 40, 0xad7f_19dc_a8cb_bf32),
-            (3, 48, 48, 16, 0x4d6f_bb67_2399_a35e),
+            (3, 48, 48, 16, 0x1550_7e23_d162_f266),
             (4, 64, 48, 90, 0x5fed_6011_e0a0_278c),
-            (0, 100, 80, 8, 0x8302_4eaa_7b86_ddc7),
+            (0, 100, 80, 8, 0x9284_36c0_b8d2_8759),
             // One tile: two would leave the second 2 samples wide (Annex A.3, CroppedTileWidth).
-            (0, 130, 70, 120, 0x9282_57df_6360_f971),
+            (0, 130, 70, 120, 0x30a2_32cb_6107_fbf8),
             (2, 64, 64, 200, 0x307c_fb34_8720_4baf),
-            (3, 96, 96, 60, 0x0540_b9da_a870_9e1a),
+            (3, 96, 96, 60, 0x3d5c_b862_2d85_f93b),
             (4, 128, 64, 30, 0x800d_d57f_9bd3_5fae),
         ];
-        for &(id, w, h, q, want) in cases {
-            let p = planes(w, h, |x, y| pat(id, x, y));
-            let obus = encode_still_intra(&p, q).unwrap().0.obus;
-            assert_eq!(
-                fnv1a(&obus),
-                want,
-                "bitstream changed for pat{id} {w}x{h} q{q}"
-            );
-        }
+        // Every case is encoded before any is compared, so one run reports every pin that moved.
+        let got: Vec<(u8, u32, u32, u8, u64)> = cases
+            .iter()
+            .map(|&(id, w, h, q, _)| {
+                let p = planes(w, h, |x, y| pat(id, x, y));
+                let obus = encode_still_intra(&p, q).unwrap().0.obus;
+                (id, w, h, q, fnv1a(&obus))
+            })
+            .collect();
+        assert_eq!(got, cases, "a pattern's bitstream changed");
     }
 
     #[test]
     fn the_default_speed_is_the_thorough_search_the_speedless_entry_points_run() {
-        // `encode_still_intra_with` and `encode_still_intra16_with` must stay the encode they were
-        // before presets existed, which `encoded_bitstream_is_stable` pins. They reach it through
+        // `encode_still_intra_with` and `encode_still_intra16_with` must stay the full-search
+        // encode, which `encoded_bitstream_is_stable` pins. They reach it through
         // `Speed::default()`, so the default must be the full search, and the explicit-speed entry
         // points at that preset must be the same encode byte for byte.
         assert_eq!(Speed::default(), Speed::Thorough);
@@ -1305,13 +1312,13 @@ mod tests {
             }
         });
         let cases: &[(Speed, u8, u64)] = &[
-            (Speed::Thorough, 40, 0x8c8a_ad7a_49f7_978e),
-            (Speed::Balanced, 40, 0x7497_c64b_461f_d0c1),
-            (Speed::Fast, 40, 0x79cf_ce91_a105_bb72),
-            (Speed::Fastest, 40, 0x5a5d_4d4d_261d_708b),
-            (Speed::Balanced, 120, 0x53ee_4d23_8903_096b),
-            (Speed::Fast, 120, 0x11b1_d0cb_9079_b3ad),
-            (Speed::Fastest, 120, 0x486f_194f_784f_efb1),
+            (Speed::Thorough, 40, 0xcf58_54f5_27e6_5f22),
+            (Speed::Balanced, 40, 0x200f_31c7_392c_f008),
+            (Speed::Fast, 40, 0x81fc_3c50_6d1f_af6b),
+            (Speed::Fastest, 40, 0x8c07_5f06_da36_ed6b),
+            (Speed::Balanced, 120, 0x15ed_afbe_e48c_f7c0),
+            (Speed::Fast, 120, 0x5b33_df99_1ecd_416d),
+            (Speed::Fastest, 120, 0xa961_d343_7869_f44f),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
         let got: Vec<(Speed, u8, u64)> = cases
