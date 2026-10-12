@@ -271,3 +271,70 @@ fn encoder_preview_is_surfaced_as_a_decoded_sub_image() {
     );
     assert!(decoded.depth_info.is_none());
 }
+
+/// The crate's own encoder output decodes with an empty `sub_ifd_extra`: every `SubIFDs` child
+/// it writes carries an image, so none is an image-less directory (issue #814).
+#[test]
+fn encoder_output_has_no_sub_ifd_extra() {
+    let raw = common::sample_raw(32, 24, 12);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.sub_ifd_extra, []);
+}
+
+/// An image-bearing `SubIFDs` child — here a 1x1 RGB preview beside the raw — becomes a
+/// sub-image carrying its own unmodelled fields, and so stays out of `sub_ifd_extra`, which
+/// covers only image-less directories (issue #814).
+#[test]
+fn an_image_bearing_sub_ifd_preview_stays_out_of_sub_ifd_extra() {
+    use gamut_dng::tags;
+    // Both images read their strip from the file's own first bytes, so the fixture needs no
+    // offset fix-up after writing.
+    let image = |photometric: u16, spp: u16| {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![1]));
+        ifd.set(
+            tags::BITS_PER_SAMPLE,
+            Value::Short(vec![8; usize::from(spp)]),
+        );
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
+        ifd.set(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            Value::Short(vec![photometric]),
+        );
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![u32::from(spp)]));
+        ifd
+    };
+    let raw = image(34892, 1);
+    let mut preview = image(2, 3);
+    preview.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
+    preview.set(0x9AAA, Value::Short(vec![7]));
+    let mut ifd0 = Ifd::new();
+    ifd0.set(tags::DNG_VERSION, Value::Byte(vec![1, 7, 1, 0]));
+    ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw, preview]);
+    let dng = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.sub_ifd_extra, []);
+    let [preview] = &decoded.sub_images[..] else {
+        panic!("one sub-image expected: {:?}", decoded.sub_images);
+    };
+    assert_eq!(preview.kind, SubImageKind::Preview);
+    assert_eq!(
+        preview.extra_tags,
+        [gamut_dng::RawTag {
+            tag: 0x9AAA,
+            value: Value::Short(vec![7]),
+        }]
+    );
+}
