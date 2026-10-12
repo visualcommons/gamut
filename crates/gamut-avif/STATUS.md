@@ -85,8 +85,8 @@ The **read** side demands nothing of a slot's length: it reports a degenerate sl
 finds, with its true range. That is not a "strict writer, permissive reader" asymmetry — the
 minimum bounds the *reservation* path alone. `with_c2pa(bytes)` carries a caller-supplied slice
 verbatim, as every other metadata payload in this workspace is carried, so this crate does write
-and then locate a slot shorter than a JUMBF box header; whether the minimum should apply there too
-is **#577**. See the C2PA note under section L for the five recorded limits.
+and then locate a slot shorter than a JUMBF box header. That builder applies no minimum by
+decision (**#577**): a length floor would be the only content judgement the C2PA surface makes. See the C2PA note under section L for the five recorded limits.
 
 **Deferred (planned, additive).** Every ☐ row below: 4:2:0/4:2:2 and `MA1B` landed with
 #390/#391, the alpha auxiliary, `Gray8` and monochrome surface with #396/#397, and the 10/12-bit

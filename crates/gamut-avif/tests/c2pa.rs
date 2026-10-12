@@ -172,6 +172,30 @@ fn the_crate_locates_the_slot_it_reserved_at_the_reported_range() {
 }
 
 #[test]
+fn with_c2pa_writes_and_locates_a_store_shorter_than_a_jumbf_box_header() {
+    // Issue #577 decided that `with_c2pa` carries a caller-supplied store verbatim with no length
+    // floor, unlike `with_c2pa_reserved`, which refuses a reservation below the 8-byte JUMBF box
+    // header (that refusal is swept inline in `src/c2pa.rs`). This pins the other half: every
+    // length the reservation path refuses is accepted here, reported at its true length, and
+    // located again by the crate's own reader. It is a contract pin, not a mutant kill: the
+    // decision is the *absence* of a guard, which no mutation operator can introduce.
+    let rgb = source_rgb();
+    for len in 0..8 {
+        let store = payload(0x44, len);
+        let (bytes, report) = AvifEncoder::new()
+            .with_c2pa(&store)
+            .encode_with_report(image(&rgb))
+            .unwrap_or_else(|err| panic!("a {len}-byte store is written: {err}"));
+        let range = report.c2pa.expect("a slot was written");
+        assert_eq!(&bytes[range.clone()], &store[..], "{len}");
+        let container = AvifContainer::parse(&bytes).expect("gamut-avif parses its own output");
+        let slot = container.c2pa_slot().expect("the short slot is located");
+        assert_eq!(slot.range, range, "{len}");
+        assert_eq!(slot.slot_bytes, &store[..], "{len}");
+    }
+}
+
+#[test]
 fn a_file_mid_update_reports_its_original_and_update_stores_in_file_order() {
     // The §A.5.3 mid-update shape: the previous store re-labelled `original` where it was (after
     // `ftyp`), and an `update` store as the last box of the file. The payloads are transcribed
