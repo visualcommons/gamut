@@ -56,9 +56,10 @@ fn inspect(input: &Path) -> Result<(), CliError> {
 }
 
 /// The image-*sequence* brands: AVIF §6.3's `avis`, and ISO/IEC 23008-12's sequence structural
-/// brand `msf1` with its HEVC sequence brands `hevc`/`hevx`. Each one promises a track, and the
-/// remuxed copy carries none.
-const SEQUENCE_BRANDS: [[u8; 4]; 4] = [*b"avis", *b"msf1", *b"hevc", *b"hevx"];
+/// brand `msf1` with its HEVC sequence brands `hevc`/`hevx` and layered-HEVC sequence brands
+/// `hevm`/`hevs` (Annex B; their image-item twins `heim`/`heis` are kept). Each one promises a
+/// track, and the remuxed copy carries none.
+const SEQUENCE_BRANDS: [[u8; 4]; 6] = [*b"avis", *b"msf1", *b"hevc", *b"hevx", *b"hevm", *b"hevs"];
 
 /// Rebrands a model read from a file that may carry an image-sequence track as the still-only file
 /// `write` produces from it.
@@ -600,10 +601,12 @@ mod tests {
     fn remux_drops_each_heif_sequence_brand() {
         let mut model = demo_image().expect("demo image builds");
         model.major_brand = *b"heic";
-        model.compatible_brands = vec![*b"hevc", *b"mif1", *b"hevx"];
+        model.compatible_brands = vec![
+            *b"hevc", *b"mif1", *b"hevx", *b"heim", *b"hevm", *b"heis", *b"hevs",
+        ];
         drop_sequence_brands(&mut model).expect("the major brand is a still brand");
         assert_eq!(model.major_brand, *b"heic");
-        assert_eq!(model.compatible_brands, [*b"mif1"]);
+        assert_eq!(model.compatible_brands, [*b"mif1", *b"heim", *b"heis"]);
     }
 
     #[test]
