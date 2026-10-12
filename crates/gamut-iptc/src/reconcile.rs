@@ -157,9 +157,12 @@ fn read_iim_field(iim: &IimBlock, row: &FieldMap, charset: IimCharset) -> Vec<St
 }
 
 /// Appends a dataset, rejecting a value that exceeds the dataset's maximum octet length.
+///
+/// A dataset gamut does not name, or one IPTC-IIM 4.2 states no maximum for, is not checked. A
+/// maximum beyond `usize` cannot be exceeded by a value held in memory.
 fn push_dataset(out: &mut Vec<IimDataSet>, record: u8, dataset: u8, data: Vec<u8>) -> Result<()> {
-    if let Some(info) = IimTagInfo::lookup(record, dataset)
-        && data.len() > usize::from(info.max_octets)
+    if let Some(max) = IimTagInfo::lookup(record, dataset).and_then(|info| info.max_octets)
+        && usize::try_from(max).is_ok_and(|max| data.len() > max)
     {
         return Err(IptcError::Malformed(
             "IPTC IIM: value exceeds the dataset's maximum length",
@@ -248,6 +251,27 @@ mod tests {
             merged.simple(crate::schema::ns::PHOTOSHOP, "DateCreated"),
             Some("1990-01-27T13:30:15+01:00")
         );
+    }
+
+    #[test]
+    fn push_dataset_accepts_exactly_the_maximum_and_rejects_one_octet_more() {
+        // 2:25 Keywords: 64 octets (IIM 4.2 Ch. 6).
+        let mut out = Vec::new();
+        push_dataset(&mut out, 2, 25, vec![b'k'; 64]).unwrap();
+        assert_eq!(out, [ds(2, 25, &[b'k'; 64])]);
+        assert!(matches!(
+            push_dataset(&mut out, 2, 25, vec![b'k'; 65]),
+            Err(IptcError::Malformed(_))
+        ));
+        assert_eq!(out.len(), 1, "a rejected value is not appended");
+    }
+
+    #[test]
+    fn push_dataset_skips_the_check_where_no_maximum_is_stated() {
+        // 8:10 Subfile has no spec-stated maximum; a value past every `u16` bound is accepted.
+        let mut out = Vec::new();
+        push_dataset(&mut out, 8, 10, vec![0; 70_000]).unwrap();
+        assert_eq!(out.len(), 1);
     }
 
     #[test]
