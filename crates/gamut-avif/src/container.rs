@@ -68,7 +68,9 @@ impl<'a> AvifContainer<'a> {
     /// hidden. A malformed top-level box *before* both `ftyp` and `meta` are seen is a parse
     /// error; after that it is retained as a [`SegmentKind::Trailer`]. A `moov`/`trak` beside the
     /// `meta` still is not an error: it is skipped, and its bytes are one opaque
-    /// [`segments`](Self::segments) entry.
+    /// [`segments`](Self::segments) entry, so an `avis` image sequence that carries a primary
+    /// still item parses to that still ([`has_image_sequence`](Self::has_image_sequence) reports
+    /// the track).
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         // Semantic parse first: it enforces the stricter rules (refusing a sequence-only file,
         // missing required boxes, …). Because it succeeds only once `ftyp`+`meta`
@@ -128,6 +130,21 @@ impl<'a> AvifContainer<'a> {
             SegmentKind::Trailer(bytes) => Some(bytes),
             _ => None,
         })
+    }
+
+    /// Whether the file also carries an image sequence: a top-level `moov` box in the primary
+    /// stream (an `avis` file's track, AVIF v1.2.0 §7, whose `trak` boxes live inside it per
+    /// ISO/IEC 14496-12 §8.3.1).
+    ///
+    /// The sequence itself is never decoded — gamut is image-first — but the file's `meta`
+    /// primary still is parsed and decodes like any other still, so a caller can tell a plain
+    /// still apart from a sequence's still image. A `moov` inside an
+    /// [`appended_stream`](Self::appended_stream) (e.g. a motion-photo MP4) belongs to that
+    /// foreign stream, not to this file's image, and does not count; neither does the file's
+    /// `ftyp` brand list, which declares conformance rather than content.
+    #[must_use]
+    pub fn has_image_sequence(&self) -> bool {
+        self.boxes().any(|(ty, _)| ty == *b"moov")
     }
 
     /// The role-typed semantic view of the primary still-image stream.
