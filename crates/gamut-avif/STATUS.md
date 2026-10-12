@@ -407,7 +407,7 @@ bare `Range<usize>`.* Limit (3) is documented at every site but not enforced by 
 stops a caller feeding the reported range to a hash as an exclusion range. A newtype that makes
 that unrepresentable is still deferred: #505 moved the lens without it, because a range newtype
 changes the public field types of both crates' C2PA structs (a breaking change neither issue
-scoped), and it is tracked as its own issue so it lands in `gamut-heic` and `gamut-avif` together
+scoped), and it is tracked as **#780** so it lands in `gamut-heic` and `gamut-avif` together
 under one name.
 
 **Deferred (additive) for the decode surface:** the backend registry + `gamut-codec-abi` adapter
