@@ -11,7 +11,10 @@
 //! - all `xmlns` declarations on `rdf:RDF`, ordered `rdf` first then alphabetically by prefix, with
 //!   unknown namespaces given stable `ns1`, `ns2`, … prefixes unless a preferred prefix is
 //!   registered via [`XmpWriter::with_namespace`];
-//! - one-space-per-level indentation, UTF-8, no byte-order mark.
+//! - one-space-per-level indentation, UTF-8, no byte-order mark;
+//! - a property, qualifier, or structure field whose local name is not an XML `NCName` (Namespaces
+//!   in XML 1.0 §3, over XML 1.0 §2.3's `Name`) is dropped with its whole subtree, since no
+//!   well-formed element can carry it — see [`XmpWriter::serialize_body`].
 //!
 //! [`XmpMeta::to_packet`] / [`XmpMeta::to_rdf`] are the shortcuts; [`XmpWriter`] exposes the knobs
 //! (the `x:xmpmeta` wrapper, writability, padding, and namespace prefixes).
@@ -112,6 +115,26 @@ impl XmpWriter {
     }
 
     /// Serializes the canonical RDF/XML body (no `<?xpacket?>` wrapper).
+    ///
+    /// The writer stays infallible, so a node that cannot be written is skipped instead of
+    /// failing, the way an unusable prefix registration is: a property, qualifier, or structure
+    /// field whose local name ([`XmpProperty::name`]) is not an XML `NCName` — empty, starting with
+    /// a digit, `-` or `.`, or holding whitespace, a `:`, or any other character outside XML
+    /// 1.0 §2.3's `NameChar` — is dropped together with its value and qualifiers, and a namespace
+    /// only it used is not declared. The rest of the graph is written exactly as if that node had
+    /// never been there, so the output is always well-formed and parses back to the graph minus the
+    /// dropped nodes.
+    ///
+    /// ```
+    /// use gamut_xmp::{XmpMeta, XmpWriter};
+    ///
+    /// let mut meta = XmpMeta::new();
+    /// meta.set_text("http://purl.org/dc/elements/1.1/", "format", "text/plain");
+    /// meta.set_text("http://purl.org/dc/elements/1.1/", "has space", "dropped");
+    /// let rdf = XmpWriter::new().serialize_body(&meta);
+    /// assert!(rdf.contains("<dc:format>text/plain</dc:format>"));
+    /// assert!(!rdf.contains("dropped"));
+    /// ```
     #[must_use]
     pub fn serialize_body(&self, meta: &XmpMeta) -> String {
         let ns = NsMap::gather(meta, &self.namespaces);
@@ -133,11 +156,12 @@ impl XmpWriter {
 
         let desc_level = rdf_level + 1;
         indent(&mut out, desc_level);
-        if meta.properties.is_empty() {
+        let properties: Vec<&XmpProperty> = writable(&meta.properties).collect();
+        if properties.is_empty() {
             out.push_str("<rdf:Description rdf:about=\"\"/>\n");
         } else {
             out.push_str("<rdf:Description rdf:about=\"\">\n");
-            for property in &meta.properties {
+            for property in properties {
                 emit_property(&mut out, desc_level + 1, property, &ns);
             }
             indent(&mut out, desc_level);
@@ -153,7 +177,8 @@ impl XmpWriter {
     }
 
     /// Serializes a full XMP packet: the `<?xpacket?>` header, the canonical body, padding (if
-    /// writable), and the trailer. UTF-8, no byte-order mark.
+    /// writable), and the trailer. UTF-8, no byte-order mark. A node whose local name is not an
+    /// XML `NCName` is dropped, as [`XmpWriter::serialize_body`] describes.
     #[must_use]
     pub fn serialize(&self, meta: &XmpMeta) -> Vec<u8> {
         let mut out = String::new();
@@ -220,7 +245,12 @@ impl<'a> NsMap<'a> {
         map
     }
 
+    /// Records the namespaces a property's subtree uses, unless the writer drops that subtree for
+    /// its unwritable name — so a namespace only a dropped node used is never declared.
     fn visit_property(&mut self, property: &XmpProperty) {
+        if !is_ncname(&property.name) {
+            return;
+        }
         self.add(&property.namespace);
         self.visit_value(&property.value);
         for qualifier in &property.qualifiers {
@@ -344,7 +374,7 @@ fn emit_node(
     ns: &NsMap,
 ) {
     let lang = lang_of(qualifiers);
-    let general: Vec<&XmpProperty> = qualifiers.iter().filter(|q| !is_lang(q)).collect();
+    let general: Vec<&XmpProperty> = writable(qualifiers).filter(|q| !is_lang(q)).collect();
 
     if general.is_empty() {
         emit_value_element(out, level, tag, lang, value, ns);
@@ -406,7 +436,7 @@ fn emit_value_element(
             out.push_str(">\n");
             indent(out, level + 1);
             out.push_str("<rdf:Description>\n");
-            for field in fields {
+            for field in writable(fields) {
                 emit_property(out, level + 2, field, ns);
             }
             indent(out, level + 1);
@@ -462,6 +492,51 @@ fn push_lang(out: &mut String, lang: Option<&str>) {
 /// Whether a qualifier is `xml:lang`.
 fn is_lang(qualifier: &XmpProperty) -> bool {
     qualifier.namespace == XML_NAMESPACE && qualifier.name == "lang"
+}
+
+/// The nodes of a property list the writer can emit: those whose local name is an XML `NCName`.
+///
+/// Every emission site (top-level properties, structure fields, qualifiers) walks its list through
+/// this filter exactly once, so a node is either written whole or not at all; the namespace sweep
+/// makes the same decision in [`NsMap::visit_property`].
+fn writable(properties: &[XmpProperty]) -> impl Iterator<Item = &XmpProperty> {
+    properties.iter().filter(|p| is_ncname(&p.name))
+}
+
+/// Whether `name` is an XML `NCName` (Namespaces in XML 1.0 §3): a `NameStartChar` then any number
+/// of `NameChar`s (XML 1.0 Fifth Edition §2.3), with no `:`. Unlike [`is_usable_prefix`], the full
+/// Unicode repertoire of the productions is accepted — a local name is data, not a cosmetic the
+/// writer could substitute, so any name a conformant document can carry must survive.
+fn is_ncname(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(is_name_start_char) && chars.all(is_name_char)
+}
+
+/// XML 1.0 §2.3 `NameStartChar`, without the `:` that `NCName` excludes.
+fn is_name_start_char(c: char) -> bool {
+    matches!(c,
+        'A'..='Z'
+        | '_'
+        | 'a'..='z'
+        | '\u{C0}'..='\u{D6}'
+        | '\u{D8}'..='\u{F6}'
+        | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}'
+        | '\u{37F}'..='\u{1FFF}'
+        | '\u{200C}'..='\u{200D}'
+        | '\u{2070}'..='\u{218F}'
+        | '\u{2C00}'..='\u{2FEF}'
+        | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}'
+        | '\u{FDF0}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{EFFFF}')
+}
+
+/// XML 1.0 §2.3 `NameChar`, without the `:` that `NCName` excludes.
+fn is_name_char(c: char) -> bool {
+    is_name_start_char(c)
+        || matches!(c,
+            '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
 }
 
 /// Whether a registered prefix can be used in serialization: `rdf` and `xml` are reserved, the
@@ -940,6 +1015,134 @@ mod tests {
             out.contains("rdf:resource=\"u&#x9;v&#xA;w&#xD;x\""),
             "attributes escape TAB, LF, and CR: {out}"
         );
+    }
+
+    /// Local names that cannot form a well-formed element: empty, a space, a leading digit, a `:`
+    /// (a QName, not an `NCName`), and a leading `-` / `.` (legal `NameChar`s, not start chars).
+    const BAD_NAMES: [&str; 6] = ["", "has space", "1digit", "a:b", "-x", ".x"];
+
+    #[test]
+    fn is_ncname_rejects_unwritable_local_names() {
+        for bad in BAD_NAMES {
+            assert!(!is_ncname(bad), "{bad:?} is not an NCName");
+        }
+    }
+
+    #[test]
+    fn is_ncname_accepts_one_of_each_name_start_range() {
+        // One representative per NameStartChar alternative (XML 1.0 §2.3), each as the whole name.
+        for c in [
+            'A',
+            '_',
+            'z',
+            '\u{C0}',
+            '\u{D8}',
+            '\u{F8}',
+            '\u{370}',
+            '\u{37F}',
+            '\u{200C}',
+            '\u{2070}',
+            '\u{2C00}',
+            '\u{3001}',
+            '\u{F900}',
+            '\u{FDF0}',
+            '\u{10000}',
+        ] {
+            assert!(is_ncname(&c.to_string()), "{c:?} starts a name");
+        }
+    }
+
+    #[test]
+    fn is_ncname_accepts_name_chars_only_after_the_start() {
+        // One representative per NameChar-only alternative: legal after the first char, not as it.
+        for c in ['-', '.', '7', '\u{B7}', '\u{300}', '\u{203F}'] {
+            assert!(is_ncname(&format!("a{c}")), "{c:?} continues a name");
+            assert!(!is_ncname(&c.to_string()), "{c:?} cannot start a name");
+        }
+        // Outside every range: between alternatives, and past the last.
+        for c in ['\u{D7}', '\u{2000}', '\u{F0000}'] {
+            assert!(!is_ncname(&format!("a{c}")), "{c:?} is not a NameChar");
+        }
+    }
+
+    #[test]
+    fn unwritable_top_level_property_is_dropped_with_its_namespace() {
+        for bad in BAD_NAMES {
+            let out = body(vec![
+                XmpProperty::new(XMP, "Rating", XmpValue::Simple("3".into())),
+                XmpProperty::new(DC, bad, XmpValue::Simple("gone".into())),
+            ]);
+            assert_eq!(
+                out,
+                body(vec![XmpProperty::new(
+                    XMP,
+                    "Rating",
+                    XmpValue::Simple("3".into())
+                )]),
+                "property named {bad:?} must be dropped, and dc left undeclared"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_of_only_unwritable_properties_self_closes_description() {
+        let out = body(vec![XmpProperty::new(
+            DC,
+            "",
+            XmpValue::Simple("gone".into()),
+        )]);
+        assert_eq!(out, body(vec![]));
+    }
+
+    #[test]
+    fn unwritable_structure_field_is_dropped() {
+        let thumb = |fields| XmpProperty::new(XMP, "Thumb", XmpValue::Structured(fields));
+        let w = XmpProperty::new(XMP, "w", XmpValue::Simple("9".into()));
+        let out = body(vec![thumb(vec![
+            w.clone(),
+            XmpProperty::new(XMP, "1digit", XmpValue::Simple("gone".into())),
+        ])]);
+        assert_eq!(out, body(vec![thumb(vec![w])]));
+    }
+
+    #[test]
+    fn unwritable_qualifier_is_dropped_and_leaves_the_plain_form() {
+        // The only general qualifier is unwritable, so the value keeps the plain element form
+        // rather than an `rdf:value` wrapper around nothing — on a property and on an array item.
+        let bad = XmpProperty::new(XMP, "a:b", XmpValue::Simple("gone".into()));
+        let prop = XmpProperty {
+            namespace: DC.into(),
+            name: "rights".into(),
+            value: XmpValue::Simple("v".into()),
+            qualifiers: vec![bad.clone()],
+        };
+        let mut item = XmpItem::new(XmpValue::Simple("a".into()));
+        item.qualifiers.push(bad);
+        let list = XmpProperty::new(DC, "subject", XmpValue::Array(XmpArray::Bag(vec![item])));
+        let out = body(vec![prop, list]);
+        assert_eq!(
+            out,
+            body(vec![
+                XmpProperty::new(DC, "rights", XmpValue::Simple("v".into())),
+                XmpProperty::new(
+                    DC,
+                    "subject",
+                    XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(XmpValue::Simple(
+                        "a".into()
+                    ))]))
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn non_ascii_local_name_is_written() {
+        let out = body(vec![XmpProperty::new(
+            DC,
+            "título",
+            XmpValue::Simple("v".into()),
+        )]);
+        assert!(out.contains("<dc:título>v</dc:título>"), "got:\n{out}");
     }
 
     #[test]
