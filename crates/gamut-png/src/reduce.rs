@@ -104,7 +104,7 @@ pub enum Reduced {
     },
 }
 
-/// What [`analyze8`] / [`analyze16`] offer the encoder for one image.
+/// What [`analyze8_for`] / [`analyze16_for`] offer the encoder for one image.
 ///
 /// The estimate that ranks the candidates counts *raw* bytes, which does not predict compressed
 /// size: a palette's `PLTE` (and often `tRNS`) and a colour key's `tRNS` are flat, incompressible
@@ -149,7 +149,7 @@ pub(crate) fn index_bit_depth(palette_len: usize) -> u8 {
 ///
 /// 1. Transparent pixels all become identical, so `Sub` and `Paeth` filter a run of them to
 ///    zeros instead of to whatever noise the source happened to carry.
-/// 2. [`analyze8`] keys its palette on the whole RGBA quad, so two invisible pixels that differ
+/// 2. [`analyze8_for`] keys its palette on the whole RGBA quad, so two invisible pixels that differ
 ///    only in their unseen colour cost two palette entries today. This collapses every
 ///    transparent pixel to a single entry.
 /// 3. It is the precondition for a `tRNS` colour key, which needs one colour to stand for
@@ -285,11 +285,15 @@ fn colour_key(pixels: &[u8], channels: usize) -> Option<[u8; 4]> {
 /// Analyses interleaved 8-bit samples (`channels`: 1 = grey, 2 = grey+alpha, 3 = RGB, 4 = RGBA)
 /// and returns the lossless reductions that beat the input encoding — see [`Reductions`] for why
 /// that is one candidate or two rather than always one.
+///
+/// The encoder itself calls [`analyze8_for`]; this `Family::Any` entry exists only for the unit
+/// tests and the `stages` re-export the benchmarks drive, so it is compiled only for them.
+#[cfg(any(test, feature = "test-support"))]
 pub fn analyze8(pixels: &[u8], channels: usize) -> Reductions {
     analyze8_for(pixels, channels, Family::Any)
 }
 
-/// [`analyze8`] without the candidates §11.3.2.3 takes away from `family` (see [`Family`]): an
+/// `analyze8` without the candidates §11.3.2.3 takes away from `family` (see [`Family`]): an
 /// RGB profile gets no greyscale reduction, and a greyscale profile no palette for grey content.
 pub(crate) fn analyze8_for(pixels: &[u8], channels: usize, family: Family) -> Reductions {
     debug_assert!((1..=4).contains(&channels));
@@ -465,11 +469,15 @@ pub(crate) fn analyze8_for(pixels: &[u8], channels: usize, family: Family) -> Re
 /// of its own, the demotion itself becomes that runner-up. Without it a palette that loses the
 /// finished file would drop the encoder all the way back to 16 bits, throwing away a halving that
 /// costs nothing.
+///
+/// Compiled only for the unit tests and the `stages` re-export, as [`analyze8`] is; the encoder
+/// calls [`analyze16_for`].
+#[cfg(any(test, feature = "test-support"))]
 pub fn analyze16(samples: &[u16], channels: usize) -> Reductions {
     analyze16_for(samples, channels, Family::Any)
 }
 
-/// [`analyze16`] without the candidates §11.3.2.3 takes away from `family`, as in
+/// `analyze16` without the candidates §11.3.2.3 takes away from `family`, as in
 /// [`analyze8_for`]. The plain demotion keeps the input's own layout, so it is never further from
 /// the family than the input already was.
 pub(crate) fn analyze16_for(samples: &[u16], channels: usize, family: Family) -> Reductions {
