@@ -303,16 +303,18 @@ names a duplicated entry as a duplicate rather than mis-reporting it as a missin
 
 ## Seeds
 
-`corpus/<target>/` holds a small **curated seed set**, tracked despite `.gitignore` listing
-`tooling/gamut-fuzz/corpus/` — that ignore is there so the engine's *search state* is never
-committed, and force-adding the seeds keeps exactly that split: the seeds are tracked, everything
-libFuzzer writes beside them stays ignored. `cargo fuzz` uses the directory as its corpus with no
-extra wiring, so `mise run fuzz <target>` picks them up.
+`corpus/<target>/` holds a small **curated seed set**. The root `.gitignore` ignores everything
+under `tooling/gamut-fuzz/corpus/` so the engine's *search state* is never committed, and then
+re-includes each seed **by its full path**, one negation per file — so the ignore file itself is
+the list of what is tracked here. `cargo fuzz` uses the directory as its corpus with no extra
+wiring, so `mise run fuzz <target>` picks them up.
 
 Running a target writes its new findings into the same directory — a few minutes of `heic_hvcc`
-adds a couple of hundred files — and those stay untracked, which is the point. **Never
-`git add -f` the whole directory a second time**: add the one seed you mean by path, or the
-engine's search state goes in with it.
+adds a couple of hundred files — and those stay ignored, which is the point. That is also why the
+negations name files rather than patterns: libFuzzer names its findings by content hash, and a
+wildcard broad enough to cover the next seed would sooner or later cover them too. To add a seed,
+append its `!tooling/gamut-fuzz/corpus/<target>/<file>` line to `.gitignore` and `git add` it by
+path; **never `git add -f`** the directory, or the engine's search state goes in with it.
 
 They are seeds, **not** the regression record. `corpus/ifd_read/` carries the thirteen cases
 enumerated on issue #264 (contributed from rawshift's deleted in-repo TIFF parser) — eleven that
