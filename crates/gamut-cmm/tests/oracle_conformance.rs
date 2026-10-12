@@ -309,6 +309,7 @@ fn conformance_pairs_battery() {
                         intent: our_intent,
                         black_point_compensation: bpc,
                         optimization: PipelineOptimization::None,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap();
@@ -498,6 +499,7 @@ fn optimized_transforms_stay_inside_the_precision_budget() {
                         intent: our_intent,
                         black_point_compensation: false,
                         optimization,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap()
@@ -685,6 +687,7 @@ fn multiprofile_chain_matches_lcms2() {
                         intent: our_intent,
                         black_point_compensation: bpc,
                         optimization: PipelineOptimization::None,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap();
@@ -715,6 +718,7 @@ fn multiprofile_chain_matches_lcms2() {
                         intent: our_intent,
                         black_point_compensation: bpc,
                         optimization: PipelineOptimization::None,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap();
@@ -955,6 +959,7 @@ fn proofing_matches_lcms2() {
                         proofing_intent: our_proof_intent,
                         black_point_compensation: bpc,
                         optimization: PipelineOptimization::None,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap();
@@ -1003,6 +1008,7 @@ fn proofing_matches_lcms2() {
             proofing_intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         },
     )
     .unwrap();
@@ -1013,6 +1019,7 @@ fn proofing_matches_lcms2() {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         },
     )
     .unwrap();
@@ -1147,4 +1154,198 @@ fn pixel_buffers_ride_the_conformance_transforms() {
             assert_eq!(out[ch], expected, "pixel {px:?} channel {ch}");
         }
     }
+}
+
+/// A `gamut-icc` built-in, serialized once and read back by both sides — the same-bytes
+/// methodology of [`reopen`], from the other end: these profiles carry the `cicp` tag lcms2's
+/// synthesizers do not write.
+fn reopen_builtin(profile: &IccProfile) -> (IccProfile, Profile) {
+    let bytes = profile.to_bytes().expect("a built-in profile serializes");
+    let parsed = IccProfile::parse(&bytes).expect("gamut-icc reads its own bytes");
+    let oracle = Profile::from_bytes(&bytes).expect("lcms2 reads the gamut-icc-written profile");
+    (parsed, oracle)
+}
+
+/// Runs `pairs` of `gamut-icc` built-ins carrying `cicp` tags — sRGB (transfer 13, a
+/// `parametricCurveType`), BT.709 (1, the H.273 parametric encoding) and BT.2100 PQ (16, a
+/// 1024-entry `curveType`) — through every intent × BPC cell, at `prefer_cicp_transfer`, against
+/// the battery's TIGHT and LOOSE oracle configurations over the same 60-pixel sweep. Returns
+/// the (TIGHT, LOOSE) worst cells. lcms2 never reads the `cicp` tag: it interpolates the TRCs.
+fn cicp_pairs(pairs: &[(&str, &str)], prefer_cicp_transfer: bool) -> (Worst, Worst) {
+    use gamut_icc::{BuiltinProfile, Cicp};
+    set_quiet_log_handler();
+    let bt709 = IccProfile::from_cicp(Cicp {
+        colour_primaries: 1,
+        transfer_characteristics: 1,
+        matrix_coefficients: 0,
+        video_full_range_flag: 1,
+    })
+    .expect("BT.709 is a built-in CICP triple");
+    let members = [
+        ("srgb", IccProfile::builtin(BuiltinProfile::Srgb).unwrap()),
+        ("bt709", bt709),
+        ("pq", IccProfile::builtin(BuiltinProfile::Bt2020Pq).unwrap()),
+    ]
+    .map(|(name, profile)| (name, reopen_builtin(&profile)));
+    let get = |name: &str| {
+        &members
+            .iter()
+            .find(|(member, _)| *member == name)
+            .expect("member")
+            .1
+    };
+    let lab = lab4();
+    let (mut tight, mut loose) = (Worst::default(), Worst::default());
+    for &(src_name, dst_name) in pairs {
+        let (src_parsed, src_oracle) = get(src_name);
+        let (dst_parsed, dst_oracle) = get(dst_name);
+        let lens = Transform::new(
+            dst_oracle,
+            TYPE_RGB_DBL,
+            &lab,
+            TYPE_Lab_DBL,
+            INTENT_RELATIVE_COLORIMETRIC,
+            FLAGS_NOCACHE,
+        );
+        for (our_intent, lcms_intent) in INTENTS {
+            for bpc in [false, true] {
+                if bpc && our_intent == RenderingIntent::IccAbsoluteColorimetric {
+                    continue;
+                }
+                let cell = format!("{src_name}->{dst_name} {our_intent:?} bpc={bpc}");
+                let bpc_flag = if bpc { FLAGS_BLACKPOINTCOMPENSATION } else { 0 };
+                let ours = IccTransform::between(
+                    src_parsed,
+                    dst_parsed,
+                    TransformOptions {
+                        intent: our_intent,
+                        black_point_compensation: bpc,
+                        prefer_cicp_transfer,
+                        ..TransformOptions::default()
+                    },
+                )
+                .unwrap();
+                let lcms_tight = Transform::new(
+                    src_oracle,
+                    TYPE_RGB_DBL,
+                    dst_oracle,
+                    TYPE_RGB_DBL,
+                    lcms_intent,
+                    FLAGS_NOOPTIMIZE | FLAGS_NOCACHE | bpc_flag,
+                );
+                let lcms_loose = Transform::new(
+                    src_oracle,
+                    TYPE_RGB_16,
+                    dst_oracle,
+                    TYPE_RGB_16,
+                    lcms_intent,
+                    bpc_flag | FLAGS_NOWHITEONWHITEFIXUP,
+                );
+                for device in sweep(3, 60, 0x000C_C1C9 ^ u64::from(lcms_intent)) {
+                    let got = eval_ours(&ours, &device);
+                    let want = clamp01(lcms_tight.apply_f64(&device, 1, 3));
+                    tight.feed(lens_delta_e(&lens, &got, &want, 1.0), &cell);
+                    let device16: Vec<u16> = device
+                        .iter()
+                        .map(|&v| {
+                            #[expect(
+                                clippy::cast_possible_truncation,
+                                clippy::cast_sign_loss,
+                                reason = "v is in [0, 1]"
+                            )]
+                            {
+                                (v * 65535.0 + 0.5) as u16
+                            }
+                        })
+                        .collect();
+                    let device_q: Vec<f64> =
+                        device16.iter().map(|&v| f64::from(v) / 65535.0).collect();
+                    let got = eval_ours(&ours, &device_q);
+                    let want: Vec<f64> = lcms_loose
+                        .apply_u16(&device16, 1, 3)
+                        .iter()
+                        .map(|&v| f64::from(v) / 65535.0)
+                        .collect();
+                    loose.feed(lens_delta_e(&lens, &got, &want, 1.0), &cell);
+                }
+            }
+        }
+    }
+    (tight, loose)
+}
+
+/// Asserts a [`cicp_pairs`] result against a (TIGHT max, LOOSE max, LOOSE mean) budget.
+fn assert_within(label: &str, (tight, loose): &(Worst, Worst), bounds: [f64; 3]) {
+    eprintln!(
+        "{label}: tight {:.3e} ({}), loose {:.3e} ({}) mean {:.3e}",
+        tight.value,
+        tight.cell,
+        loose.value,
+        loose.cell,
+        loose.mean(),
+    );
+    let [tight_bound, loose_bound, mean_bound] = bounds;
+    assert!(
+        tight.value < tight_bound,
+        "{label}: tight at {}",
+        tight.cell
+    );
+    assert!(
+        loose.value < loose_bound,
+        "{label}: loose at {}",
+        loose.cell
+    );
+    assert!(loose.mean() < mean_bound, "{label}: loose mean");
+}
+
+/// Issue #555's acceptance, for the parametric encodings: with `prefer_cicp_transfer` on, the
+/// sRGB ↔ BT.709 pairs stay inside the **published** shaper-class budgets the battery asserts.
+/// Measured: TIGHT 8.59e-4 (1.83e-5 with the option off — the closed forms move the result by
+/// the `s15Fixed16` parameter quantization the TRC tags carry), LOOSE 2.18e-3, mean 4.80e-4.
+#[test]
+fn cicp_preferring_transforms_match_lcms2() {
+    let pairs = [("srgb", "bt709"), ("bt709", "srgb")];
+    assert_within(
+        "parametric, cicp preferred",
+        &cicp_pairs(&pairs, true),
+        [
+            TIGHT_SHAPER_BOUND,
+            LOOSE_SHAPER_BOUND,
+            LOOSE_SHAPER_MEAN_BOUND,
+        ],
+    );
+}
+
+// The BT.2100 PQ pairs have no published class, and the option is not why. Measured, both paths:
+//
+//   path                    tight max   worst tight cell             loose max   loose mean
+//   TRC tags (option off)   2.74e-2     srgb->pq relative            1.36e0      3.18e-2
+//   cicp closed form (on)   3.97e-2     srgb->pq relative            1.36e0      3.17e-2
+//
+// The **default** path already sits 14× over TIGHT_SHAPER_BOUND: lcms2 evaluates the 1024-entry
+// ST 2084 table through 16-bit interpolation, and PQ's steep inverse near black turns that into
+// ΔE₀₀ through the lens (itself the same table). With the option on, the remaining distance is
+// lcms2's, not ours: the closed form is exact, and the device-space gap is the reversed table's
+// own error — at black lcms2 encodes 0.0547 where ST 2084 gives c1^m2 = 7.3e-7. So these pairs get
+// their own class, bounded at ~2.5× over the worse of the two paths, and **both** paths are
+// gated: a regression in either the option or the default PQ handling trips it.
+const TIGHT_SAMPLED_PQ_BOUND: f64 = 1e-1; // 2.52× over 3.97e-2
+const LOOSE_SAMPLED_PQ_BOUND: f64 = 3.0; // 2.20× over 1.36e0
+const LOOSE_SAMPLED_PQ_MEAN_BOUND: f64 = 1e-1; // 3.15× over 3.18e-2
+
+#[test]
+fn sampled_pq_transforms_stay_inside_their_class_budget() {
+    let pairs = [
+        ("srgb", "pq"),
+        ("pq", "srgb"),
+        ("bt709", "pq"),
+        ("pq", "bt709"),
+    ];
+    let bounds = [
+        TIGHT_SAMPLED_PQ_BOUND,
+        LOOSE_SAMPLED_PQ_BOUND,
+        LOOSE_SAMPLED_PQ_MEAN_BOUND,
+    ];
+    assert_within("pq, TRC tags", &cicp_pairs(&pairs, false), bounds);
+    assert_within("pq, cicp preferred", &cicp_pairs(&pairs, true), bounds);
 }
