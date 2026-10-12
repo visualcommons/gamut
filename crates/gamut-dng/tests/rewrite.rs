@@ -5,8 +5,12 @@
 
 mod common;
 
-use gamut_dng::{DngEncoder, DngRewrite, MakerNotePreservation, deconstruct};
-use gamut_ifd::{Ifd, UnknownValue, Value, tags as ifd_tags};
+use gamut_core::ErrorKind;
+use gamut_dng::{
+    ByteOrder, DngEncoder, DngMetadata, DngRewrite, Exif, ExifTag, MakerNotePreservation,
+    deconstruct,
+};
+use gamut_ifd::{FieldType, Ifd, UnknownValue, Value, Variant, tags as ifd_tags};
 
 /// A small encoded CFA DNG to rewrite.
 fn sample_dng() -> Vec<u8> {
@@ -161,4 +165,75 @@ fn maker_note_pins_at_its_original_offset_across_an_edit() {
     // And the result still classifies fully (the pin's filler is declared padding).
     let report = deconstruct(&out.bytes).expect("deconstruct");
     assert!(report.segments.is_fully_classified(), "{report:?}");
+}
+
+/// Issue #610: every Exif field the encoder accepts under a standard pointer tag is one the
+/// preserving rewrite opens and hands back as that same field, and the encoder refuses exactly
+/// the entries the rewrite would follow as a pointer.
+///
+/// `DngRewrite::open` resolves the flat standard pointer list at every node, so a field written
+/// under one of those tags is followed whenever its on-disk type code is a pointer's own. The
+/// sweep is derived, not listed: every recognised type code, carried as `Value::Unknown` (the
+/// shape whose in-memory variant and on-disk code disagree, so a variant-shaped check misses it),
+/// under each pointer tag, in classic TIFF and BigTIFF. A code whose single value is wider than
+/// the variant's value word is skipped: its word would be a raw file offset, a malformed entry
+/// rather than a misclassified pointer (issue #608).
+#[test]
+fn every_exif_field_the_encoder_accepts_under_a_pointer_tag_reopens_as_that_field() {
+    let raw = common::sample_raw(16, 12, 16);
+    for big_tiff in [false, true] {
+        let variant = if big_tiff {
+            Variant::Big
+        } else {
+            Variant::Classic
+        };
+        let codes = (0..=u16::MAX).filter(|&code| {
+            FieldType::from_code(code).is_some_and(|ty| ty.size() <= variant.offset_size())
+        });
+        for code in codes {
+            let word = vec![8u8; variant.offset_size()];
+            let value = Value::Unknown(
+                UnknownValue::new(code, 1, &word, ByteOrder::LittleEndian, variant)
+                    .expect("a word of the variant's width"),
+            );
+            for &tag in ifd_tags::STANDARD_POINTER_TAGS {
+                let mut exif = Exif::new(ByteOrder::LittleEndian);
+                exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![100]));
+                exif.exif_ifd_mut().set(tag, value.clone());
+                let mut dng = Vec::new();
+                let encoded = DngEncoder::new()
+                    .with_big_tiff(big_tiff)
+                    .with_metadata(DngMetadata {
+                        exif: Some(exif),
+                        ..Default::default()
+                    })
+                    .encode(&raw, &common::sample_profile(), &mut dng);
+                let context = format!("code {code} under {tag}, BigTIFF {big_tiff}");
+                if matches!(code, 4 | 13 | 16 | 18) {
+                    assert!(
+                        matches!(&encoded, Err(e) if e.kind() == ErrorKind::InvalidInput),
+                        "{context}: {encoded:?}"
+                    );
+                    continue;
+                }
+                encoded.unwrap_or_else(|e| panic!("{context}: {e}"));
+                let reopened = DngRewrite::open(&dng).unwrap_or_else(|e| panic!("{context}: {e}"));
+                let exif_dir = &reopened.file().ifds[0]
+                    .sub_ifds()
+                    .iter()
+                    .find(|g| g.tag == ifd_tags::EXIF_IFD)
+                    .expect("exif sub-IFD")
+                    .ifds[0];
+                assert_eq!(
+                    exif_dir.get(tag).map(Value::type_code),
+                    Some(code),
+                    "{context}"
+                );
+                assert!(
+                    exif_dir.sub_ifds().iter().all(|g| g.tag != tag),
+                    "{context}"
+                );
+            }
+        }
+    }
 }
