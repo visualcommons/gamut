@@ -149,9 +149,9 @@ impl TiffEncoder {
     ///   (34665), `GPSInfo` (34853), `InteroperabilityIFD` (40965) — whose **on-disk type code**
     ///   is a pointer's own (`LONG` 4, `IFD` 13, `LONG8` 16, `IFD8` 18). The reader decides
     ///   "pointer" from the entry it parses, so it would follow that integer as an offset into a
-    ///   file it never came from. The code and not the [`Value`](gamut_ifd::Value) variant is what
-    ///   is checked, because a `Value::Unknown` carries an arbitrary code beside its word and the
-    ///   writer emits that code verbatim. A value of any other type under those tags is not a
+    ///   file it never came from. The code ([`Value::type_code`](gamut_ifd::Value::type_code))
+    ///   is what is checked, because it is what the reader classifies by. A value of any other
+    ///   type under those tags is not a
     ///   pointer to either side, and is written and read back unchanged;
     /// * a **group** under any other tag: the reader resolves only those four inside the Exif
     ///   subtree, so a group elsewhere comes back as the raw offset this encoder gave it;

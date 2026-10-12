@@ -38,6 +38,10 @@ impl UnknownValue {
     /// unrecognised the element size is unknown, so the declared `count` has nothing to size
     /// against and is kept as given.
     ///
+    /// "Recognised" is this build's [`FieldType::from_code`]: BigTIFF's `LONG8`/`SLONG8`/`IFD8`
+    /// (16–18) are recognised only with the `bigtiff` feature, matching what this build's reader
+    /// would capture as unknown.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if `type_code` is a recognised field type, or if `word`

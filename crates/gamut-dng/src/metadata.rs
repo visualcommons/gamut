@@ -195,13 +195,13 @@ const EXIF_SUBTREE_POINTER_TAGS: &[u16] = gamut_ifd::tags::STANDARD_POINTER_TAGS
 /// `LONG` (4), the typed `IFD` (13) of TIFF Technical Note 1, and BigTIFF's `LONG8` (16) /
 /// `IFD8` (18) — the set [`gamut_ifd::read_tree`] follows.
 ///
-/// Stated as **codes** rather than as [`Value`] variants, because the check answers about a
-/// value a *caller* built, which nothing has written yet: [`gamut_ifd::UnknownValue`] carries an
-/// arbitrary type code beside its value word, [`gamut_ifd::write`] emits that code verbatim, and
-/// the reader classifies the entry by it. A `Value::Unknown` at 4, 13, 16 or 18 is therefore a
-/// plain field to a variant-shaped predicate and a **pointer** to the reader. The code is the one
-/// discriminator that survives the write/read boundary ([`Value::type_code`], total over every
-/// variant), so the writer asks about the code.
+/// Stated as **codes** rather than as [`Value`] variants, because the reader classifies an entry
+/// by the code it parses, and the code is the one discriminator that survives the write/read
+/// boundary ([`Value::type_code`], total over every variant). A `Value::Unknown` once carried an
+/// arbitrary code beside its word, so one built at 4, 13, 16 or 18 was a plain field to a
+/// variant-shaped predicate and a **pointer** to the reader; [`gamut_ifd::UnknownValue::new`]
+/// now refuses every recognised code, so variant and code agree for every value a caller can
+/// build, and asking the code stays correct either way.
 const POINTER_TYPE_CODES: &[u16] = &[4, 13, 16, 18];
 
 /// The refusal earned by a field under a tag in [`EXIF_SUBTREE_POINTER_TAGS`] whose on-disk type
@@ -466,38 +466,21 @@ mod tests {
     }
 
     /// Every value whose on-disk type code makes the reader follow it as a pointer: the four
-    /// natural variants and [`Value::Unknown`] at each of the four codes, at the width each code
-    /// fits.
+    /// natural variants. `Value::Unknown` cannot carry any of the four codes, because
+    /// [`gamut_ifd::UnknownValue::new`] refuses a recognised one (#608).
     fn pointer_typed_values() -> Vec<Value> {
-        let unknown = |code: u16, variant: Variant| {
-            Value::Unknown(
-                gamut_ifd::UnknownValue::new(
-                    code,
-                    1,
-                    &vec![8u8; variant.offset_size()],
-                    ByteOrder::LittleEndian,
-                    variant,
-                )
-                .expect("a word of the variant's width"),
-            )
-        };
         vec![
             Value::Long(vec![8]),
             Value::Ifd(vec![8]),
             Value::Long8(vec![8]),
             Value::Ifd8(vec![8]),
-            unknown(4, Variant::Classic),
-            unknown(13, Variant::Classic),
-            unknown(16, Variant::Big),
-            unknown(18, Variant::Big),
         ]
     }
 
     #[test]
     fn check_refuses_a_pointer_typed_field_under_every_standard_pointer_tag() {
         // The reader resolves the flat standard list at every node, so each of the four tags is a
-        // pointer inside the Exif directory, and the type is judged by on-disk code: the
-        // `Unknown` forms are the ones a variant-shaped check would let through.
+        // pointer inside the Exif directory, and the type is judged by on-disk code.
         for &tag in EXIF_SUBTREE_POINTER_TAGS {
             for value in pointer_typed_values() {
                 let mut exif = exif_dir();
@@ -513,14 +496,14 @@ mod tests {
     #[test]
     fn check_accepts_a_field_of_any_other_type_under_a_pointer_tag() {
         // The reader leaves every non-pointer type in place as a field, so the writer must too:
-        // a `SHORT` under `InteroperabilityIFD`, and an unknown-typed entry at a code adjacent to
-        // the pointer codes.
+        // a `SHORT` under `InteroperabilityIFD`, and an unknown-typed entry at 14, the unclaimed
+        // code adjacent to the pointer code 13.
         for &tag in EXIF_SUBTREE_POINTER_TAGS {
             for value in [
                 Value::Short(vec![8]),
                 Value::Unknown(
                     gamut_ifd::UnknownValue::new(
-                        3,
+                        14,
                         1,
                         &[8, 0, 0, 0],
                         ByteOrder::LittleEndian,

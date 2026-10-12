@@ -93,9 +93,9 @@ compression schemes land additively on this frozen surface (see Status).
   a field and a group; and it may not carry a *plain field* under one of those four tags whose
   **on-disk type code** is a pointer's own (`LONG` 4, `IFD` 13, `LONG8` 16, `IFD8` 18), because
   the reader decides "pointer" from the entry it parses and would follow that integer as a file
-  offset. It is the code and not the in-memory `Value` variant that is checked, since a
-  `Value::Unknown` carries an arbitrary code beside its word and the writer emits that code
-  verbatim. A value of any other type under those tags is not a pointer to either side and
+  offset. It is the code (`Value::type_code`) that is checked, since that is what the reader
+  classifies by; `gamut_ifd::UnknownValue::new` refuses every recognised code, so a
+  `Value::Unknown` can never stand in for a pointer-typed entry. A value of any other type under those tags is not a pointer to either side and
   round-trips unchanged. A caller's directory nested deeper, hung off any other tag, repeating a
   tag, or carrying such a field is refused by the encode — with its own message per case — rather
   than written into a file this crate could not read back unchanged.

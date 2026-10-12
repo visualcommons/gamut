@@ -167,17 +167,40 @@ fn maker_note_pins_at_its_original_offset_across_an_edit() {
     assert!(report.segments.is_fully_classified(), "{report:?}");
 }
 
+/// One natural value of `ty`, a single element where the type is numeric.
+fn canonical_value(ty: FieldType) -> Value {
+    match ty {
+        FieldType::Byte => Value::Byte(vec![8]),
+        FieldType::Ascii => Value::Ascii("ab".into()),
+        FieldType::Short => Value::Short(vec![8]),
+        FieldType::Long => Value::Long(vec![8]),
+        FieldType::Rational => Value::Rational(vec![(1, 2)]),
+        FieldType::SByte => Value::SByte(vec![8]),
+        FieldType::Undefined => Value::Undefined(vec![8]),
+        FieldType::SShort => Value::SShort(vec![8]),
+        FieldType::SLong => Value::SLong(vec![8]),
+        FieldType::SRational => Value::SRational(vec![(1, 2)]),
+        FieldType::Float => Value::Float(vec![1.0]),
+        FieldType::Double => Value::Double(vec![1.0]),
+        FieldType::Ifd => Value::Ifd(vec![8]),
+        FieldType::Utf8 => Value::Utf8("ab".into()),
+        FieldType::Long8 => Value::Long8(vec![8]),
+        FieldType::SLong8 => Value::SLong8(vec![8]),
+        FieldType::Ifd8 => Value::Ifd8(vec![8]),
+    }
+}
+
 /// Issue #610: every Exif field the encoder accepts under a standard pointer tag is one the
 /// preserving rewrite opens and hands back as that same field, and the encoder refuses exactly
 /// the entries the rewrite would follow as a pointer.
 ///
 /// `DngRewrite::open` resolves the flat standard pointer list at every node, so a field written
 /// under one of those tags is followed whenever its on-disk type code is a pointer's own. The
-/// sweep is derived, not listed: every recognised type code, carried as `Value::Unknown` (the
-/// shape whose in-memory variant and on-disk code disagree, so a variant-shaped check misses it),
-/// under each pointer tag, in classic TIFF and BigTIFF. A code whose single value is wider than
-/// the variant's value word is skipped: its word would be a raw file offset, a malformed entry
-/// rather than a misclassified pointer (issue #608).
+/// sweep is derived, not listed: every recognised type code carried as its natural `Value`
+/// variant, plus `Value::Unknown` at a few codes no field type claims, under each pointer tag, in
+/// classic TIFF and BigTIFF. `Unknown` appears only at unclaimed codes because
+/// `UnknownValue::new` refuses a recognised one (issue #608) — that refusal is what keeps a
+/// value's in-memory variant and its on-disk code in agreement.
 #[test]
 fn every_exif_field_the_encoder_accepts_under_a_pointer_tag_reopens_as_that_field() {
     let raw = common::sample_raw(16, 12, 16);
@@ -187,15 +210,21 @@ fn every_exif_field_the_encoder_accepts_under_a_pointer_tag_reopens_as_that_fiel
         } else {
             Variant::Classic
         };
-        let codes = (0..=u16::MAX).filter(|&code| {
-            FieldType::from_code(code).is_some_and(|ty| ty.size() <= variant.offset_size())
-        });
-        for code in codes {
-            let word = vec![8u8; variant.offset_size()];
-            let value = Value::Unknown(
+        let word = vec![8u8; variant.offset_size()];
+        let unknown = |code: u16| {
+            Value::Unknown(
                 UnknownValue::new(code, 1, &word, ByteOrder::LittleEndian, variant)
-                    .expect("a word of the variant's width"),
-            );
+                    .expect("an unclaimed code and a word of the variant's width"),
+            )
+        };
+        let recognised = (0..=u16::MAX)
+            .filter_map(FieldType::from_code)
+            .map(|ty| (ty.code(), canonical_value(ty)));
+        let unclaimed = (0..=u16::MAX)
+            .filter(|&code| FieldType::from_code(code).is_none())
+            .take(3)
+            .map(|code| (code, unknown(code)));
+        for (code, value) in recognised.chain(unclaimed) {
             for &tag in ifd_tags::STANDARD_POINTER_TAGS {
                 let mut exif = Exif::new(ByteOrder::LittleEndian);
                 exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![100]));
