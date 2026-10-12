@@ -17,8 +17,15 @@ use gamut_color::Planar8;
 /// Side of the square corpus images.
 const SIDE: u32 = 128;
 
-/// The quantizer ladder each curve is sampled at.
-const LADDER: [u8; 4] = [40, 80, 120, 160];
+/// The quantizer ladder each curve is sampled at, up to the top of the range.
+///
+/// The rungs above 160 keep the coarsest steps under the BD-rate assertion (issue #755): with
+/// partitions forced by a texture test, the photo was coded in 4×4 transforms throughout, and at
+/// `qindex` 240 the full search took `IDTX` on 296 of them, leaving 447 B / 28.94 dB against
+/// `Fast`'s 470 B / 30.55 dB. Partitions and transform depth chosen by rate–distortion trial code
+/// no 4×4 photo transform at all from `qindex` 80 up, and these rungs fail if a later change
+/// brings that loss back.
+const LADDER: [u8; 6] = [40, 80, 120, 160, 200, 240];
 
 /// Builds identity planes (Y=G, U=B, V=R) from an RGB generator.
 fn planes(f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {
