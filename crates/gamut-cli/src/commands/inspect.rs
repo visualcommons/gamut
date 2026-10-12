@@ -1361,6 +1361,7 @@ fn heic_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
                             ("extent", Json::from("store")),
                             ("size", Json::from(s.size())),
                             ("range", span(s.range.start, s.range.end)),
+                            ("slot", span(s.slot.start, s.slot.end)),
                             ("position", Json::from(position(s.position))),
                         ])
                     })
@@ -1405,9 +1406,9 @@ fn heic_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
 
 /// An AVIF `C2paSummary` as data — [`heic_c2pa_json`]'s shape over `gamut-avif`'s summary.
 ///
-/// A store's `extent` is `"slot"`: `gamut-avif` reports the box-bounded slot after the merkle
-/// offset, the store *plus any padding*, where `gamut-heic` trims to the store's JUMBF `LBox`
-/// (issue #505), so the two sizes are not the same measurement.
+/// Both crates' summaries name the same two regions (issue #505): `range` (and `size`) the store
+/// trimmed to its JUMBF `LBox`, so `extent` is `"store"` for both, and `slot` the box-bounded slot
+/// after the merkle offset — the store *plus any padding*.
 fn avif_c2pa_json(summary: &gamut::avif::C2paSummary) -> Json {
     use gamut::avif::{C2paBoxPosition as Position, C2paUnreadReason as Reason};
     let position = |p: Position| match p {
@@ -1419,6 +1420,7 @@ fn avif_c2pa_json(summary: &gamut::avif::C2paSummary) -> Json {
         Reason::Truncated => "truncated",
         Reason::NotVersionZero => "not_version_zero",
         Reason::UnknownPurpose => "unknown_purpose",
+        Reason::NoStoreBound => "no_store_bound",
         _ => "other",
     };
     Json::Object(vec![
@@ -1432,9 +1434,10 @@ fn avif_c2pa_json(summary: &gamut::avif::C2paSummary) -> Json {
                     .map(|s| {
                         Json::Object(vec![
                             ("purpose", Json::from(s.purpose.as_str())),
-                            ("extent", Json::from("slot")),
+                            ("extent", Json::from("store")),
                             ("size", Json::from(s.size())),
                             ("range", span(s.range.start, s.range.end)),
+                            ("slot", span(s.slot.start, s.slot.end)),
                             ("position", Json::from(position(s.position))),
                         ])
                     })
