@@ -176,6 +176,21 @@ Dependency edges (a crate depends on those to its right):
   specs (in `references/`) and the oracle claimed in the crate's docs.
 - Design and documentation: public API is usable without reading docs; document features
   not yet planned or deferred.
+- Authority for a documented claim. Every claim a document makes about a crate — `AGENTS.md`, the
+  README crates table, a crate `README.md`, docs.rs module docs, a `Cargo.toml` `description`,
+  `STATUS.md` — answers to **the crate's own source, the code that ships**; each of those files is
+  a summary, and any of them can be stale (#545, #560). For an **existence or capability** claim
+  (*does this module, item, pixel layout, bit depth or feature exist*) consult, in order:
+  `lib.rs` and the module tree and `pub` items it declares (its declarations and impls, not its
+  doc comments, which are summaries like the rest), then `Cargo.toml` (features, dependencies),
+  then `STATUS.md`. A later source never overrides an earlier one on such a claim: a `STATUS.md`
+  listing as deferred a module `lib.rs` declares `pub` is wrong, and the fix lands in the
+  document, never by withholding the code. `STATUS.md` alone owns **intent and disposition** —
+  what is planned, deferred, out of scope, or finished and supported — and the order says nothing
+  there: a `pub` item can exist and still be incomplete or unstable, so the source settles
+  *that it exists* and `STATUS.md` settles *what is promised about it*. A document that
+  contradicts its crate is corrected in the same change that notices it, or filed. Tooling that
+  checks a claim (`tooling/check-readme-crates/run.sh`) cites this rule rather than restating it.
 - No duplication: maximally depend on other `gamut` crates and maintainer-approved external
   crates over reimplementing.
 
