@@ -21,6 +21,9 @@
 #   * a row inside an HTML comment or a fenced code block is not a row. Both render as something
 #     other than a table cell, so a crate documented only there is documented nowhere, and the
 #     membership check must see it as missing rather than as present;
+#   * (outside the section) every `gamut = ...` dependency line in a fenced block names the
+#     umbrella's own release line, in this README and in the umbrella crate's own
+#     (`crates/gamut/README.md`) -- see the Usage-snippet block near the end, issue #559;
 #   * EVERY crate row in the section lives inside ONE rendered table. A table is a header row
 #     immediately followed by a GFM delimiter row of the same width, neither indented four spaces
 #     or more, and it ends at the first line that is not a table row. That is a claim about the
@@ -113,22 +116,26 @@ set -euo pipefail
 
 # With no argument, check the repository's own README from wherever the task was invoked. With
 # one, check that file as given -- so a caller can point the guard at a candidate README without
-# the working directory changing what "README.md" means.
+# the working directory changing what "README.md" means. Any further arguments are files read
+# only for their Usage snippet (see that block near the end); with no argument at all that is the
+# umbrella crate's own README, the page crates.io shows for `gamut`.
 if [ "$#" -eq 0 ]; then
     root="$(git rev-parse --show-toplevel)" || {
         echo "check-readme-crates: not inside a git repository, and no README path was given"
         exit 1
     }
     cd "$root" || exit 1
-    readme="README.md"
-else
-    readme="$1"
+    set -- README.md crates/gamut/README.md
 fi
+readme="$1"
+usage_files=("$@")
 
-test -f "$readme" || {
-    echo "check-readme-crates: no such file: $readme"
-    exit 1
-}
+for f in "${usage_files[@]}"; do
+    test -f "$f" || {
+        echo "check-readme-crates: no such file: $f"
+        exit 1
+    }
+done
 
 # One pass over the file emits every stream -- `NAME` for membership, `BAD` for shape, `ORPHAN`
 # and `SPLIT` for the table context, `VER`/`CONS`/`ALWAYS`/`FEAT`/`CITE` for the claims -- so the
@@ -142,8 +149,37 @@ test -f "$readme" || {
 # `CHECK_README_AWK` picks the interpreter, unquoted so `CHECK_README_AWK='gawk --posix'` works.
 # The portability claim is only worth what someone can re-run: `fixtures.sh` beside this file
 # drives the whole battery through here once per interpreter available on the machine.
+#
+# Fenced code blocks are recognised in exactly one place, `fence_lib`, which both the scan and the
+# Usage-snippet reader prepend to their programs: two readers of one file must not disagree about
+# which of its lines are code.
+fence_lib='
+        # An opening fence: three or more backticks or tildes at the start of the line. On a
+        # match, records the fence character and run length `is_fence_close` holds the close to.
+        function fence_open(line,   marker) {
+            if (!match(line, /^ *(```+|~~~+)/)) { return 0 }
+            marker = substr(line, RSTART, RLENGTH)
+            sub(/^ +/, "", marker)
+            fence_char = substr(marker, 1, 1)
+            fence_len = length(marker)
+            return 1
+        }
+
+        # A closing fence: the opening fence character, repeated at least as many times, and
+        # nothing else on the line.
+        function is_fence_close(line,   m, i) {
+            m = line
+            sub(/^ */, "", m)
+            sub(/[ \t]*$/, "", m)
+            if (length(m) < fence_len) { return 0 }
+            for (i = 1; i <= length(m); i++) {
+                if (substr(m, i, 1) != fence_char) { return 0 }
+            }
+            return 1
+        }
+'
 scan="$(
-    LC_ALL=C ${CHECK_README_AWK:-awk} '
+    LC_ALL=C ${CHECK_README_AWK:-awk} "$fence_lib"'
         BEGIN {
             # An escaped pipe is content, not a column separator, so it is swapped for a control
             # byte before the split and swapped back before the cell is judged.
@@ -197,19 +233,6 @@ scan="$(
             sub(/^[ \t]+/, "", s)
             sub(/[ \t]+$/, "", s)
             return s
-        }
-
-        # A closing fence: the opening fence character, repeated at least as many times, and
-        # nothing else on the line.
-        function is_fence_close(line,   m, i) {
-            m = line
-            sub(/^ */, "", m)
-            sub(/[ \t]*$/, "", m)
-            if (length(m) < fence_len) { return 0 }
-            for (i = 1; i <= length(m); i++) {
-                if (substr(m, i, 1) != fence_char) { return 0 }
-            }
-            return 1
         }
 
         # The level of an ATX heading (1-6), with its text left in `htext`, or 0. Up to three
@@ -464,11 +487,7 @@ scan="$(
 
             cur = strip_comments(line)
 
-            if (match(cur, /^ *(```+|~~~+)/)) {
-                marker = substr(cur, RSTART, RLENGTH)
-                sub(/^ +/, "", marker)
-                fence_char = substr(marker, 1, 1)
-                fence_len = length(marker)
+            if (fence_open(cur)) {
                 in_fence = 1
                 in_table = 0
                 prev = ""
@@ -941,8 +960,87 @@ if [ -n "$extdep_claims" ]; then
     fi
 fi
 
+# The Usage snippet (issue #559). Outside `## Crates`, and the one claim in the README a reader
+# copies verbatim: by the time anyone looked it pinned `gamut = "0.1"` while the umbrella was at
+# 0.3.2, and `^0.1` still resolves, so a new user silently got a crate two breaking releases old.
+#
+# The same holds for the umbrella crate's own README (`crates/gamut/README.md`, its manifest's
+# `readme`), which is what crates.io shows on the `gamut` page and carries its own copy of the
+# snippet: it goes stale on exactly the same bump, so it is read by exactly the same rule. With no
+# argument both files are checked; a caller naming files names every one it wants read.
+#
+# Every `gamut = ...` dependency line inside a fenced code block anywhere in the file is read --
+# the inline-table form and the bare-string form, with its keys in any order -- and its version
+# requirement must name the umbrella's own manifest version to the precision written, exactly as
+# a row's `vN.M` token does: the requirement's components are a prefix of the manifest version,
+# and at least as long as the release line caret compatibility spans (`0.3` for 0.3.2, `1` for
+# 1.4.0, `0.0.7` for 0.0.7). So `0.3` and `0.3.2` pass for 0.3.2; `0.1`, `0.3.0` (an older patch
+# than the tree's) and `0` (all of 0.x) do not. A leading `^` is the same requirement and is
+# accepted; any other operator is refused, because the snippet's job is to name the line to use.
+#
+# The authority is the manifest, not crates.io, for the reason the table's version tokens give:
+# deciding what the index serves needs the network. The consequence is that the release pull
+# request bumping the umbrella's minor (or, after 1.0, major) fails this check until it also
+# moves the snippet -- which is exactly the moment the snippet goes stale.
+#
+# At least one such line must exist in each file. A snippet rewritten into a form this does not
+# read (a `[dependencies.gamut]` table, say) would otherwise pass by saying nothing, and silence is
+# the defect this check is for; extend the reader rather than the exemption.
+#
+# What is a fence is decided by `fence_lib`, the scan's own reader, so a four-backtick fence
+# wrapping a nested three-backtick example stays one block here exactly as it does there.
+umbrella_version="$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "gamut") | .version')"
+# The release line caret compatibility spans: every component up to and including the first
+# non-zero one (all three if they are all zero).
+umbrella_line="$(printf '%s\n' "$umbrella_version" | awk -F'[.+-]' '{
+    out = $1; if ($1 != "0") { print out; exit }
+    out = out "." $2; if ($2 != "0") { print out; exit }
+    print out "." $3 }')"
+for usage_file in "${usage_files[@]}"; do
+    usage_lines="$(LC_ALL=C ${CHECK_README_AWK:-awk} "$fence_lib"'
+        { line = $0; sub(/\r$/, "", line) }
+        in_fence {
+            if (is_fence_close(line)) { in_fence = 0 }
+            else if (line ~ /^[ \t]*gamut[ \t]*=/) { print NR "\t" line }
+            next
+        }
+        fence_open(line) { in_fence = 1 }
+    ' "$usage_file")"
+    if [ -z "$usage_lines" ]; then
+        fail=1
+        echo "check-readme-crates: $usage_file has no \`gamut = ...\` dependency line in a code block,"
+        echo "  so nothing tells a reader which version of the umbrella to depend on. Write one as"
+        echo "  gamut = { version = \"X.Y\", features = [...] } -- or gamut = \"X.Y\" -- in a fence."
+        continue
+    fi
+    usage_errors="$(
+        printf '%s\n' "$usage_lines" | while IFS="$(printf '\t')" read -r lineno text; do
+            req="$(printf '%s\n' "$text" |
+                sed -n -e 's/^[ \t]*gamut[ \t]*=[ \t]*"\([^"]*\)".*/\1/p' \
+                    -e 's/^[ \t]*gamut[ \t]*=[ \t]*{.*[{ ,]version[ \t]*=[ \t]*"\([^"]*\)".*/\1/p')"
+            req="${req#^}"
+            if ! printf '%s\n' "$req" | grep -qE '^[0-9]+(\.[0-9]+){0,2}$'; then
+                echo "  line $lineno: no plain version requirement readable in: $text"
+            elif [ "${req#"$umbrella_line"}" = "$req" ] ||
+                { [ "$req" != "$umbrella_version" ] &&
+                    [ "${umbrella_version#"$req".}" = "$umbrella_version" ]; }; then
+                echo "  line $lineno: requires \"$req\"; the umbrella's manifest is $umbrella_version (want \"$umbrella_line\")"
+            fi
+        done
+        true
+    )"
+    if [ -n "$usage_errors" ]; then
+        fail=1
+        echo "check-readme-crates: \`gamut\` dependency lines in $usage_file that the umbrella's manifest refutes:"
+        echo "$usage_errors"
+        echo "  A snippet names the umbrella's own Cargo.toml version, to whatever precision it writes,"
+        echo "  and no coarser than the release line caret compatibility spans."
+    fi
+done
+
 if [ "$fail" -eq 0 ]; then
     echo "README crates table lists every workspace crate ($(echo "$workspace_crates" | wc -l) crates)"
+    echo "Usage snippet in ${usage_files[*]} names the umbrella's release line ($umbrella_line, manifest $umbrella_version)"
 fi
 
 exit "$fail"
