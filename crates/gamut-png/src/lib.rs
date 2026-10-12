@@ -30,7 +30,9 @@
 //! chunk's **whole** span — length, type, payload and CRC — which is what a `c2pa.hash.data`
 //! assertion excludes (§18.5.4). [`fill_c2pa`] then writes the finished store into that span in
 //! place, rewriting only the payload and the chunk CRC, so the file the signer hashed is the file
-//! it signed.
+//! it signed. For a reader rather than a signer, [`c2pa_summary`] reports the same store beside
+//! every other `caBX` chunk the file carries — each with the reason it is not the store — and
+//! renders the lines, with [`C2PA_NOT_VALIDATED`] inline, that `gamut inspect` prints.
 //!
 //! # Pluggable IDAT backends
 //!
@@ -87,7 +89,10 @@ pub mod stages;
 pub use abi::{AbiDeflater, AbiInflater, CODEC_ID_ZLIB, PIXEL_FORMAT_FILTERED_BYTES};
 pub use ancillary::{PhysicalUnit, SrgbIntent};
 pub use backend::{IdatDeflater, IdatInflater, IdatInfo};
-pub use chunk::{C2paSpan, fill_c2pa};
+pub use chunk::{
+    C2PA_NOT_VALIDATED, C2paSpan, C2paSummary, C2paUnreadChunk, C2paUnreadReason, c2pa_summary,
+    fill_c2pa,
+};
 pub use color::ColorType;
 pub use decoded::{
     Chromaticities, Cicp, DecodedPng, IccProfile, PngHeader, PngImage, PngMetadata, TextChunk,

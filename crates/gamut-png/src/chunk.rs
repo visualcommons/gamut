@@ -146,21 +146,314 @@ pub(crate) fn find_c2pa(png: &[u8]) -> Option<C2paSpan> {
 /// The store-location rule itself, over a file's chunks in order as `(type, crc_ok, whole span)`:
 /// the first CRC-valid `caBX`, unless an `IDAT` or `IEND` comes first.
 ///
-/// The single owner of the rule [`find_c2pa`] documents, so the walk over freshly framed bytes
-/// ([`find_c2pa`]) and the walk over an already-built segment list
-/// ([`PngReport::c2pa`](crate::PngReport::c2pa)) cannot drift apart.
+/// One of the two walks over [`StoreRule`], the single owner of the rule [`find_c2pa`] documents,
+/// so the walk over freshly framed bytes ([`find_c2pa`]), the walk over an already-built segment
+/// list ([`PngReport::c2pa`](crate::PngReport::c2pa)) and the report [`c2pa_summary`] cannot drift
+/// apart. This walk stops pulling chunks as soon as the rule can locate no store, so
+/// [`find_c2pa`] never frames — and never CRCs — the image data behind the first `IDAT`.
 pub(crate) fn locate_c2pa(
     chunks: impl IntoIterator<Item = ([u8; 4], bool, Range<usize>)>,
 ) -> Option<C2paSpan> {
+    let mut rule = StoreRule::default();
     for (chunk_type, crc_ok, range) in chunks {
-        if chunk_type == *b"IDAT" || chunk_type == *b"IEND" {
-            return None;
-        }
-        if chunk_type == CABX && crc_ok {
+        if rule.step(chunk_type, crc_ok) == Verdict::Store {
             return Some(C2paSpan::of(range));
+        }
+        if !rule.can_locate() {
+            return None;
         }
     }
     None
+}
+
+/// Where a chunk walk stands against the two landmarks the store rule reads. Ordered, so a walk
+/// only ever moves forward: an `IDAT` after `IEND` does not bring the trailer back into the
+/// datastream.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Landmark {
+    /// No `IDAT` and no `IEND` yet: where C2PA 2.4 §A.3.2 places the store.
+    #[default]
+    BeforeIdat,
+    /// Past the first `IDAT`, inside the datastream.
+    AfterIdat,
+    /// Past `IEND`: not in the datastream at all (PNG §13.2).
+    AfterIend,
+}
+
+/// What [`StoreRule::step`] makes of one chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Not a `caBX` chunk.
+    NotCabx,
+    /// The file's manifest store.
+    Store,
+    /// A `caBX` chunk the rule declines, and why.
+    Unread(C2paUnreadReason),
+}
+
+/// The store-location rule as a state machine over a file's chunks in order — the one place it
+/// is written. A `caBX` chunk is the store when it is the first CRC-valid one before the first
+/// `IDAT`; every other `caBX` is declined with the first reason that applies, position before
+/// damage before duplication.
+#[derive(Debug, Default)]
+struct StoreRule {
+    landmark: Landmark,
+    located: bool,
+}
+
+impl StoreRule {
+    /// Classifies the next chunk, then moves past it.
+    fn step(&mut self, chunk_type: [u8; 4], crc_ok: bool) -> Verdict {
+        let verdict = if chunk_type != CABX {
+            Verdict::NotCabx
+        } else if let Some(reason) = self.decline(crc_ok) {
+            Verdict::Unread(reason)
+        } else {
+            self.located = true;
+            Verdict::Store
+        };
+        match &chunk_type {
+            b"IDAT" => self.landmark = self.landmark.max(Landmark::AfterIdat),
+            b"IEND" => self.landmark = Landmark::AfterIend,
+            _ => {}
+        }
+        verdict
+    }
+
+    /// Why a `caBX` chunk at the walk's current position is not the store, or `None` when it is.
+    fn decline(&self, crc_ok: bool) -> Option<C2paUnreadReason> {
+        match self.landmark {
+            Landmark::AfterIend => Some(C2paUnreadReason::AfterIend),
+            Landmark::AfterIdat => Some(C2paUnreadReason::AfterIdat),
+            Landmark::BeforeIdat if !crc_ok => Some(C2paUnreadReason::CrcMismatch),
+            Landmark::BeforeIdat if self.located => Some(C2paUnreadReason::Duplicate),
+            Landmark::BeforeIdat => None,
+        }
+    }
+
+    /// Whether a later chunk could still be the store: only before the first `IDAT`. Once it is
+    /// false every `caBX` the walk meets is declined, which is what lets [`locate_c2pa`] stop.
+    fn can_locate(&self) -> bool {
+        self.landmark == Landmark::BeforeIdat
+    }
+}
+
+/// What a report of a located manifest store has to say beside it, because locating one is not
+/// validating it.
+///
+/// C2PA 2.4 §15.12 puts validation on a validator; this crate holds no COSE, X.509, RFC 3161 or
+/// trust-list code and never reports a validity verdict. "C2PA: present" printed beside EXIF and
+/// ICC reads as *verified* to anyone who has seen a Content Credentials badge, so
+/// [`C2paSummary::summary_lines`] carries this text in the line that reports the store, never as a
+/// footnote. The same sentence `gamut-heic` carries, so every container reports alike.
+pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
+     it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
+
+/// Why a `caBX` chunk yielded no manifest store.
+///
+/// The chunk *is* there, so the file carries C2PA framing; only a store could not be read from it.
+/// [`PngReport::c2pa`](crate::PngReport::c2pa) reports every one of these as absence, which is
+/// right for a signer that wants a span to hash around — and wrong for a report, which would then
+/// let a reader infer *no provenance* from a chunk gamut merely declined. [`c2pa_summary`] lists
+/// them instead.
+///
+/// Non-exhaustive and with permanent discriminants: a later revision may distinguish a further
+/// reason without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum C2paUnreadReason {
+    /// The chunk's CRC-32 does not match (PNG §5.5). §13.1 lets a reader skip a damaged ancillary
+    /// chunk, and gamut's decoder does, so the span a signer excludes never names one.
+    CrcMismatch = 0,
+    /// The chunk follows the first `IDAT`. C2PA 2.4 §A.3.2 places the store before it and calls
+    /// data after it bad-form, so an appended chunk never becomes the file's store.
+    AfterIdat = 1,
+    /// The chunk follows `IEND`, outside the datastream (PNG §5.6, §13.2) — appended to a finished
+    /// file.
+    AfterIend = 2,
+    /// An earlier `caBX` chunk is the store. C2PA 2.4 §A.3.2 admits one per file, and gamut's
+    /// readers take the first.
+    Duplicate = 3,
+}
+
+impl C2paUnreadReason {
+    /// A one-clause explanation, for the line [`C2paSummary::detail_lines`] renders.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::CrcMismatch => {
+                "its CRC does not match, and PNG §13.1 lets a reader skip a damaged ancillary chunk"
+            }
+            Self::AfterIdat => {
+                "it follows the first IDAT, where C2PA 2.4 §A.3.2 places the store before it"
+            }
+            Self::AfterIend => "it follows IEND, outside the PNG datastream (PNG §13.2)",
+            Self::Duplicate => {
+                "an earlier caBX chunk is the store, and C2PA 2.4 §A.3.2 admits one per file"
+            }
+        }
+    }
+}
+
+/// A `caBX` chunk that yielded no store: where it sits, and why. Reported without its bytes.
+///
+/// Non-exhaustive: a later revision may report more without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paUnreadChunk {
+    /// The chunk's whole span and its payload, as for a store.
+    pub span: C2paSpan,
+    /// Why no store was read from it.
+    pub reason: C2paUnreadReason,
+}
+
+/// A non-validating report of the C2PA manifest store a PNG carries: the store
+/// [`PngReport::c2pa`](crate::PngReport::c2pa) locates, if any, and every other `caBX` chunk in the
+/// file with the reason it yielded none.
+///
+/// Built by [`c2pa_summary`]. The summary carries the facts and renders the lines, so every host
+/// prints the same words and none can drop [`C2PA_NOT_VALIDATED`] while rewording them — the shape
+/// and wording of the TIFF/DNG summary in `gamut-ifd`, repeated for PNG (issue #727), with one store
+/// rather than a list because §A.3.2 admits one per file, as §A.3.6 does for TIFF.
+///
+/// Non-exhaustive: a later revision may report more without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct C2paSummary {
+    /// The located store — `Some` exactly when [`PngReport::c2pa`](crate::PngReport::c2pa) names
+    /// one, and the same span.
+    pub store: Option<C2paSpan>,
+    /// Every other `caBX` chunk, in file order — including any framed in the bytes after `IEND`.
+    pub unread: Vec<C2paUnreadChunk>,
+}
+
+impl C2paSummary {
+    /// The whole human-readable report, uncapped: [`summary_lines`](Self::summary_lines) followed
+    /// by every [`detail_lines`](Self::detail_lines) entry. A terminal host should cap the detail
+    /// lines instead, reporting [`detail_line_count`](Self::detail_line_count) beside them.
+    #[must_use]
+    pub fn report_lines(&self) -> Vec<String> {
+        let mut lines = self.summary_lines();
+        lines.extend(self.detail_lines());
+        lines
+    }
+
+    /// The report's head: one headline, not indented, carrying [`C2PA_NOT_VALIDATED`] inline. Four
+    /// outcomes, because a file whose `caBX` chunks yielded no store is neither "located" nor "none
+    /// found".
+    #[must_use]
+    pub fn summary_lines(&self) -> Vec<String> {
+        let unread = self.unread.len();
+        let present = format!(
+            "{unread} caBX chunk{noun} present",
+            noun = if unread == 1 { " is" } else { "s are" }
+        );
+        let headline = match (self.store.is_some(), unread) {
+            (false, 0) => format!("C2PA: no caBX chunk found — {C2PA_NOT_VALIDATED}"),
+            (false, _) => format!(
+                "C2PA: no manifest store could be read, but {present} — that is NOT absence of \
+                 provenance — {C2PA_NOT_VALIDATED}"
+            ),
+            (true, 0) => {
+                format!("C2PA: 1 manifest store located, NOT VALIDATED — {C2PA_NOT_VALIDATED}")
+            }
+            (true, _) => format!(
+                "C2PA: 1 manifest store located, NOT VALIDATED, and {present} from which no store \
+                 could be read — {C2PA_NOT_VALIDATED}"
+            ),
+        };
+        vec![headline]
+    }
+
+    /// One line per `caBX` chunk — the store and the unread ones — **in file order**, so a host
+    /// that caps the list hides the file's last chunks rather than one kind of chunk. Each line is
+    /// indented two spaces relative to the headline and built on demand: the chunk's half-open
+    /// range, its payload's size, and the payload's range for the store or the reason none was
+    /// read for an unread chunk.
+    pub fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
+        let mut entries: Vec<(&C2paSpan, Option<C2paUnreadReason>)> = self
+            .store
+            .iter()
+            .map(|span| (span, None))
+            .chain(self.unread.iter().map(|u| (&u.span, Some(u.reason))))
+            .collect();
+        // Different chunks occupy disjoint ranges, so the lower start is the earlier chunk.
+        entries.sort_by_key(|(span, _)| span.chunk.start);
+        entries.into_iter().map(|(span, reason)| {
+            let (start, end, size) = (span.chunk.start, span.chunk.end, span.payload.len());
+            match reason {
+                None => format!(
+                    "  caBX chunk at [{start}, {end}): {size}-byte store at [{}, {}) — located, \
+                     not validated",
+                    span.payload.start, span.payload.end,
+                ),
+                Some(reason) => format!(
+                    "  unread caBX chunk at [{start}, {end}): {size}-byte payload — {}",
+                    reason.describe()
+                ),
+            }
+        })
+    }
+
+    /// How many lines [`detail_lines`](Self::detail_lines) yields, without building any — the
+    /// number of `caBX` chunks in the file.
+    #[must_use]
+    pub fn detail_line_count(&self) -> usize {
+        self.unread.len() + usize::from(self.store.is_some())
+    }
+}
+
+/// A non-validating summary of the `caBX` chunks of the PNG in `png`: the store
+/// [`PngReport::c2pa`](crate::PngReport::c2pa) locates, and every other `caBX` chunk with the
+/// reason it yields none. See [`C2paSummary`] for what it is for and [`C2PA_NOT_VALIDATED`] for
+/// what has to be said beside it.
+///
+/// Where the locator answers a signer — one span to hash around, or absence — this answers a
+/// reader: a `caBX` chunk that is damaged, follows the first `IDAT`, is appended after `IEND`, or
+/// repeats the store is listed rather than reported as absence. To find the appended ones the walk
+/// frames chunks past `IEND` too, which [`deconstruct`](crate::deconstruct) accounts as one opaque
+/// trailer; it stops at end of input or at the first chunk that does not frame, which
+/// `deconstruct` reports as a truncated tail.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if `png` does not start with the PNG signature.
+///
+/// # Example
+///
+/// ```
+/// use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+/// use gamut_png::{PngEncoder, c2pa_summary};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let pixels = vec![0u8; 3 * 4];
+/// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
+/// let (png, report) = PngEncoder::new()
+///     .with_c2pa_reserved(16)
+///     .encode_with_report(image)?;
+///
+/// let summary = c2pa_summary(&png)?;
+/// assert_eq!(summary.store, report.c2pa);
+/// assert!(summary.summary_lines()[0].contains("NOT VALIDATED"));
+/// # Ok(())
+/// # }
+/// ```
+pub fn c2pa_summary(png: &[u8]) -> Result<C2paSummary> {
+    let mut reader = ChunkReader::new(png)?;
+    let mut rule = StoreRule::default();
+    let mut summary = C2paSummary::default();
+    while let Ok(Some(chunk)) = reader.next_chunk() {
+        match rule.step(chunk.chunk_type, chunk.crc_ok) {
+            Verdict::NotCabx => {}
+            Verdict::Store => summary.store = Some(C2paSpan::of(chunk.range)),
+            Verdict::Unread(reason) => summary.unread.push(C2paUnreadChunk {
+                span: C2paSpan::of(chunk.range),
+                reason,
+            }),
+        }
+    }
+    Ok(summary)
 }
 
 /// Iterates the chunks of a PNG stream after validating the signature (§5.2).
@@ -707,6 +1000,202 @@ mod tests {
         write_chunk(&mut none, *b"IEND", &[]);
         assert_eq!(find_c2pa(&none), None);
         assert_eq!(find_c2pa(b"not a png"), None);
+    }
+
+    /// Appends a `caBX` chunk carrying `payload` whose CRC does not match.
+    fn write_damaged_cabx(png: &mut Vec<u8>, payload: &[u8]) {
+        write_chunk(png, CABX, payload);
+        let last = png.len() - 1;
+        png[last] ^= 0xFF;
+    }
+
+    /// One `caBX` chunk per reason, around the store: a damaged one ahead of it, a second valid
+    /// one after it, one after the first `IDAT`, and two appended after `IEND` — the second behind
+    /// an `IDAT` that must not bring the trailer back into the datastream. Returns the file and the
+    /// start of each `caBX` chunk, in file order.
+    fn every_kind_of_cabx() -> (Vec<u8>, [usize; 6]) {
+        let mut png = SIGNATURE.to_vec();
+        write_chunk(&mut png, *b"IHDR", &[0; 13]);
+        let damaged = png.len();
+        write_damaged_cabx(&mut png, b"damaged!");
+        let store = png.len();
+        write_chunk(&mut png, CABX, b"the store");
+        let duplicate = png.len();
+        write_chunk(&mut png, CABX, b"second");
+        write_chunk(&mut png, *b"IDAT", b"zz");
+        let after_idat = png.len();
+        write_chunk(&mut png, CABX, b"late");
+        write_chunk(&mut png, *b"IEND", &[]);
+        let after_iend = png.len();
+        write_chunk(&mut png, CABX, b"appended");
+        write_chunk(&mut png, *b"IDAT", b"zz");
+        let behind_idat = png.len();
+        write_chunk(&mut png, CABX, b"again");
+        (
+            png,
+            [
+                damaged,
+                store,
+                duplicate,
+                after_idat,
+                after_iend,
+                behind_idat,
+            ],
+        )
+    }
+
+    /// The summary's store is the locator's, and every other `caBX` chunk is listed in file order
+    /// with the first reason that applies to it — none is dropped as absence.
+    #[test]
+    fn c2pa_summary_names_the_locators_store_and_lists_every_other_cabx_with_its_reason() {
+        let (
+            png,
+            [
+                damaged,
+                store,
+                duplicate,
+                after_idat,
+                after_iend,
+                behind_idat,
+            ],
+        ) = every_kind_of_cabx();
+        let summary = c2pa_summary(&png).expect("a PNG signature");
+
+        assert_eq!(summary.store, find_c2pa(&png));
+        assert_eq!(summary.store, Some(C2paSpan::of(store..store + 12 + 9)));
+        let unread: Vec<_> = summary
+            .unread
+            .iter()
+            .map(|u| (u.span.clone(), u.reason))
+            .collect();
+        assert_eq!(
+            unread,
+            [
+                (damaged, 8, C2paUnreadReason::CrcMismatch),
+                (duplicate, 6, C2paUnreadReason::Duplicate),
+                (after_idat, 4, C2paUnreadReason::AfterIdat),
+                (after_iend, 8, C2paUnreadReason::AfterIend),
+                (behind_idat, 5, C2paUnreadReason::AfterIend),
+            ]
+            .map(|(start, len, reason)| (C2paSpan::of(start..start + 12 + len), reason))
+        );
+    }
+
+    /// A damaged chunk appended after `IDAT` is reported for its position, not its damage: the
+    /// position alone already rules it out, and that is the reason a writer can act on.
+    #[test]
+    fn position_outranks_damage_among_the_reasons() {
+        let mut png = SIGNATURE.to_vec();
+        write_chunk(&mut png, *b"IHDR", &[0; 13]);
+        write_chunk(&mut png, *b"IDAT", b"zz");
+        write_damaged_cabx(&mut png, b"late and damaged");
+        let summary = c2pa_summary(&png).expect("a PNG signature");
+        assert_eq!(summary.store, None);
+        assert_eq!(summary.unread[0].reason, C2paUnreadReason::AfterIdat);
+    }
+
+    /// The walk is tolerant past the signature: a tail that does not frame ends it, keeping what
+    /// it already found, while a stream that is not a PNG at all is an error rather than a file
+    /// with no store.
+    #[test]
+    fn c2pa_summary_stops_at_a_tail_that_does_not_frame_and_refuses_a_non_png() {
+        let mut png = SIGNATURE.to_vec();
+        write_chunk(&mut png, *b"IHDR", &[0; 13]);
+        write_chunk(&mut png, CABX, b"jumbf!!!");
+        png.extend_from_slice(&[0, 0, 0, 99, b'I', b'D']);
+        let summary = c2pa_summary(&png).expect("a PNG signature");
+        assert_eq!(summary.store, find_c2pa(&png));
+        assert!(summary.store.is_some());
+        assert!(summary.unread.is_empty());
+
+        assert!(c2pa_summary(b"not a png").is_err());
+    }
+
+    /// [`locate_c2pa`] stops pulling chunks once the rule can locate no store, so the encoder's
+    /// report never frames or CRCs the image data behind the first `IDAT`. Observable only
+    /// through the iterator it is handed, so that is what is counted.
+    #[test]
+    fn locating_pulls_no_chunk_past_the_first_idat() {
+        let pulled = core::cell::Cell::new(0);
+        let chunks = [*b"IHDR", *b"IDAT", *b"IDAT", CABX]
+            .into_iter()
+            .inspect(|_| pulled.set(pulled.get() + 1))
+            .map(|chunk_type| (chunk_type, true, 0..12));
+        assert_eq!(locate_c2pa(chunks), None);
+        assert_eq!(pulled.get(), 2, "IHDR and the first IDAT, nothing after");
+    }
+
+    /// Who reads the summary needs one of four headlines, each carrying the disclaimer, and the
+    /// count of declined chunks in its own number.
+    #[test]
+    fn the_headline_has_four_outcomes_each_disclaimed() {
+        let span = |start: usize| C2paSpan::of(start..start + 20);
+        let unread = |start: usize| C2paUnreadChunk {
+            span: span(start),
+            reason: C2paUnreadReason::AfterIend,
+        };
+        let headline = |store: Option<C2paSpan>, unread: Vec<C2paUnreadChunk>| {
+            let lines = C2paSummary { store, unread }.summary_lines();
+            assert_eq!(lines.len(), 1);
+            lines.into_iter().next().unwrap_or_default()
+        };
+        let disclaimed = |suffix: &str| format!("{suffix} — {C2PA_NOT_VALIDATED}");
+
+        assert_eq!(
+            headline(None, vec![]),
+            disclaimed("C2PA: no caBX chunk found")
+        );
+        assert_eq!(
+            headline(None, vec![unread(40)]),
+            disclaimed(
+                "C2PA: no manifest store could be read, but 1 caBX chunk is present — that is \
+                 NOT absence of provenance"
+            )
+        );
+        assert_eq!(
+            headline(Some(span(40)), vec![]),
+            disclaimed("C2PA: 1 manifest store located, NOT VALIDATED")
+        );
+        assert_eq!(
+            headline(Some(span(40)), vec![unread(80), unread(120)]),
+            disclaimed(
+                "C2PA: 1 manifest store located, NOT VALIDATED, and 2 caBX chunks are present \
+                 from which no store could be read"
+            )
+        );
+    }
+
+    /// The detail lines are in file order whichever list a chunk is in, each reason renders its
+    /// own clause, and the count matches the lines without building them.
+    #[test]
+    fn detail_lines_render_every_cabx_in_file_order() {
+        let (png, _) = every_kind_of_cabx();
+        let summary = c2pa_summary(&png).expect("a PNG signature");
+        let lines: Vec<String> = summary.detail_lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "  unread caBX chunk at [33, 53): 8-byte payload — its CRC does not match, and \
+                 PNG §13.1 lets a reader skip a damaged ancillary chunk",
+                "  caBX chunk at [53, 74): 9-byte store at [61, 70) — located, not validated",
+                "  unread caBX chunk at [74, 92): 6-byte payload — an earlier caBX chunk is the \
+                 store, and C2PA 2.4 §A.3.2 admits one per file",
+                "  unread caBX chunk at [106, 122): 4-byte payload — it follows the first IDAT, \
+                 where C2PA 2.4 §A.3.2 places the store before it",
+                "  unread caBX chunk at [134, 154): 8-byte payload — it follows IEND, outside the \
+                 PNG datastream (PNG §13.2)",
+                "  unread caBX chunk at [168, 185): 5-byte payload — it follows IEND, outside the \
+                 PNG datastream (PNG §13.2)",
+            ]
+        );
+        assert_eq!(summary.detail_line_count(), 6);
+        let mut report = summary.summary_lines();
+        report.extend(lines);
+        assert_eq!(summary.report_lines(), report);
+
+        let empty = C2paSummary::default();
+        assert_eq!(empty.detail_line_count(), 0);
+        assert_eq!(empty.detail_lines().count(), 0);
     }
 
     #[test]
