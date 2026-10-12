@@ -14,13 +14,14 @@
 //! §2). [`read`] / [`read_header`] parse a stream into a [`TiffFile`]; [`write()`] serialises one
 //! back, laying out the IFD chain and out-of-line value pool with the two-pass offset machinery.
 //! [`read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
-//! well-known structural ones live in [`tags`]). The one cross-format payload a TIFF-based file
-//! carries by tag — the C2PA manifest store — has its placement rule and exclusion ranges stated
-//! once, in [`c2pa`], for every TIFF-based codec to share. For strict archival decoding, [`audit`]
-//! classifies **every byte** of a stream into typed segments ([`SegmentReport`]) under a
-//! dual-ledger cross-check: a [`Tracked`] source records what the parse physically read, and
-//! the claims must match — byte accounting as a machine-checked proof, not a promise
-//! (issue #263).
+//! well-known structural ones live in [`tags`]); [`resolve_subtree`] runs the same guarded walk
+//! over **one** directory a caller already holds, scoped per level by a [`SubtreeScope`]. The
+//! one cross-format payload a TIFF-based file carries by tag — the C2PA manifest store — has its
+//! placement rule and exclusion ranges stated once, in [`c2pa`], for every TIFF-based codec to
+//! share. For strict archival decoding, [`audit`] classifies **every byte** of a stream into typed
+//! segments ([`SegmentReport`]) under a dual-ledger cross-check: a [`Tracked`] source records what
+//! the parse physically read, and the claims must match — byte accounting as a machine-checked
+//! proof, not a promise (issue #263).
 //!
 //! ## Streaming
 //!
@@ -99,7 +100,10 @@ pub use audit::{
 };
 pub use byte_order::ByteOrder;
 pub use entry::{Field, Ifd, SubIfd, Variant};
-pub use reader::{TiffFile, read, read_audited, read_header, read_ifd_at, read_tree};
+pub use reader::{
+    SubtreeScope, TiffFile, read, read_audited, read_header, read_ifd_at, read_tree,
+    resolve_subtree,
+};
 pub use segment::{
     Claim, Conflict, DataLabel, Range, Segment, SegmentMap, SegmentReport, SharedSpan, SpanKind,
 };
