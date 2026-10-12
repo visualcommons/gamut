@@ -29,9 +29,19 @@ impl UnknownValue {
     /// Captures an unknown-type entry record: its type code, declared count, and value/offset
     /// word. `word` must be exactly `variant.offset_size()` bytes, as stored, in `order`.
     ///
+    /// `type_code` must be one [`FieldType::from_code`] does **not** recognise. The reader
+    /// classifies a written entry by its code, so an `Unknown` at a recognised code would come
+    /// back as a different value — a pointer at `LONG`/`IFD`/`LONG8`/`IFD8`, or an unreadable
+    /// out-of-line reference wherever the type's sized extent exceeds the word — and the
+    /// in-memory variant would disagree with the file. The reader itself only ever captures an
+    /// unrecognised code, so every value it produces is accepted here. With the code
+    /// unrecognised the element size is unknown, so the declared `count` has nothing to size
+    /// against and is kept as given.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `word` is not exactly the variant's offset width.
+    /// Returns [`Error::InvalidInput`] if `type_code` is a recognised field type, or if `word`
+    /// is not exactly the variant's offset width.
     pub fn new(
         type_code: u16,
         count: u64,
@@ -39,6 +49,12 @@ impl UnknownValue {
         order: ByteOrder,
         variant: Variant,
     ) -> Result<Self> {
+        if FieldType::from_code(type_code).is_some() {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: unknown-type code must not be a recognised field type",
+            ));
+        }
         if word.len() != variant.offset_size() {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -899,6 +915,27 @@ mod tests {
                     Variant::Big
                 )
                 .is_err()
+            );
+        }
+    }
+
+    /// A recognised type code is not an unknown-type entry: the reader would classify it by the
+    /// code, so the constructor refuses every code [`FieldType::from_code`] accepts — swept over
+    /// the whole `u16` space rather than listed — and accepts every code it does not.
+    #[test]
+    fn unknown_value_refuses_every_recognised_type_code() {
+        for code in 0..=u16::MAX {
+            let built = UnknownValue::new(
+                code,
+                1,
+                &[8, 0, 0, 0],
+                ByteOrder::LittleEndian,
+                Variant::Classic,
+            );
+            assert_eq!(
+                built.is_ok(),
+                FieldType::from_code(code).is_none(),
+                "type code {code}"
             );
         }
     }
