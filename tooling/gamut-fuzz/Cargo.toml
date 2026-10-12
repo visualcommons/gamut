@@ -41,6 +41,7 @@ libfuzzer-sys = "0.4"
 gamut-ifd = { path = "../../crates/gamut-ifd", features = ["bigtiff", "test-support"] }
 gamut-core = { path = "../../crates/gamut-core", features = ["test-support"] }
 gamut-tonemap = { path = "../../crates/gamut-tonemap", features = ["test-support"] }
+gamut-avif = { path = "../../crates/gamut-avif", features = ["test-support"] }
 gamut-tiff = { path = "../../crates/gamut-tiff" }
 gamut-dng = { path = "../../crates/gamut-dng" }
 gamut-isobmff = { path = "../../crates/gamut-isobmff" }
@@ -63,6 +64,13 @@ bench = false
 [[bin]]
 name = "tonemap_curves"
 path = "fuzz_targets/tonemap_curves.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "avif_clean_alpha"
+path = "fuzz_targets/avif_clean_alpha.rs"
 test = false
 doc = false
 bench = false
