@@ -23,7 +23,9 @@
 //!   [`HeifContainer::c2pa`] is a lens over the same walk: it locates the C2PA manifest store in a
 //!   top-level `uuid` `ContentProvenanceBox` and reports it as opaque bytes plus its exact byte
 //!   range ([`C2paManifestStore`] — a locator, never a validator).
-//!   [`HeifContainer::c2pa_summary`] is that lens shaped for *reporting*: presence, and per store a
+//!   [`HeifContainer::c2pa_summary`] is that lens shaped for *reporting*: presence as a
+//!   [`C2paPresence`] answer that keeps "C2PA framing, no store read" apart from "no C2PA box"
+//!   ([`C2paSummary::presence`]), and per store a
 //!   byte range, a size and a `box_purpose` with no bytes attached, rendered by
 //!   [`C2paSummary::report_lines`] with the [`C2PA_NOT_VALIDATED`] disclaimer inline. It also lists
 //!   every C2PA box that yielded *no* store with the reason ([`C2paUnreadBox`]), so a report can
@@ -179,7 +181,7 @@ pub use backend::{
 };
 pub use c2pa::{
     C2PA_NOT_VALIDATED, C2PA_UUID, C2paBoxPosition, C2paBoxPurpose, C2paManifestStore,
-    C2paMerkleBox, C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason,
+    C2paMerkleBox, C2paPresence, C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason,
 };
 pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{DecodedFrame, HevcDecoder};

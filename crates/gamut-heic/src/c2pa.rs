@@ -642,6 +642,51 @@ impl C2paStoreSummary {
     }
 }
 
+/// What a file's top-level boxes say about C2PA, as one answer a host can match on: the shape of
+/// the question "does this file carry C2PA?", which has more than two answers.
+///
+/// Returned by [`C2paSummary::presence`]. Each variant is a **fact about bytes this reader
+/// walked**, never a provenance verdict — not even [`StoreLocated`](Self::StoreLocated), which
+/// says a store was *located* and nothing about whether it validates (see
+/// [`C2PA_NOT_VALIDATED`]). The variants are decided in declaration order, so each one is the
+/// strongest statement the summary supports; the lists on [`C2paSummary`] still hold every box,
+/// whichever variant is returned.
+///
+/// The middle answers are why this is not a `bool`. A file whose only `ContentProvenanceBox` has
+/// a non-zero `FullBox` version — among other things, what a signed file corrupted in transit
+/// looks like — carries C2PA framing and yields no store, and a boolean "is a store present?"
+/// answers it exactly as it answers a file with no C2PA box at all. Matching on this type makes
+/// that case one a host has to name.
+///
+/// [`other_uuid_boxes`](C2paSummary::other_uuid_boxes) is deliberately **not** an input: a
+/// top-level `uuid` box of another extended type is not C2PA framing (C2PA 2.4 §A.5.1.1), so a file
+/// whose only such box is one byte off the C2PA type answers [`NoC2paBox`](Self::NoC2paBox), and
+/// that count is the separate byte fact a report states beside it.
+///
+/// Non-exhaustive and with permanent discriminants: a later revision may distinguish a further
+/// answer without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum C2paPresence {
+    /// At least one manifest store was located ([`C2paSummary::stores`] is non-empty). Located,
+    /// **not validated**; boxes that yielded no store may sit beside it in
+    /// [`C2paSummary::unread`].
+    StoreLocated = 0,
+    /// No store was located, but at least one top-level C2PA box yielded none
+    /// ([`C2paSummary::unread`] is non-empty): the file carries C2PA framing this reader could not
+    /// read through. This is **not** absence of provenance.
+    FramingUnread = 1,
+    /// No store was located and no C2PA box failed to yield one, but the file carries auxiliary
+    /// `merkle` boxes ([`C2paSummary::merkle`], C2PA 2.4 §A.5.4.1.4): C2PA framing, read correctly,
+    /// that holds Merkle-tree hashes rather than a manifest store. Not absence of C2PA framing.
+    AuxiliaryOnly = 2,
+    /// No top-level `uuid` box carries the C2PA extended type. Says nothing about provenance
+    /// carried anywhere this reader does not look, and nothing about
+    /// [`other_uuid_boxes`](C2paSummary::other_uuid_boxes).
+    NoC2paBox = 3,
+}
+
 /// A non-validating report of the C2PA manifest stores a HEIF file carries — presence, and for
 /// each store its byte range, its size and its `box_purpose`.
 ///
@@ -696,24 +741,24 @@ pub struct C2paSummary {
 }
 
 impl C2paSummary {
-    /// Whether the file carries a manifest store this reader could **read**.
+    /// Which C2PA answer the file's top-level boxes support — a store located, C2PA framing that
+    /// yielded no store, only auxiliary `merkle` boxes, or no C2PA box — as one value a host
+    /// matches on. See [`C2paPresence`] for what each answer does and does not claim.
     ///
-    /// # A host that reports this predicate on its own reintroduces the defect
-    ///
-    /// `false` here is not "no provenance", and it is not even "no C2PA box". A file whose only
-    /// `ContentProvenanceBox` has a non-zero `FullBox` version — among other things, what a signed
-    /// file corrupted in transit looks like — plainly carries C2PA framing and still answers
-    /// `false`, because no *store* was read from it. Printing "C2PA: none" from this alone is
-    /// exactly the inference [`unread`](Self::unread) exists to prevent, and it is why the report
-    /// is rendered by [`report_lines`](Self::report_lines) rather than assembled per host: those
-    /// lines keep all three outcomes apart and this boolean cannot.
-    ///
-    /// Read [`unread`](Self::unread) and [`other_uuid_boxes`](Self::other_uuid_boxes) beside it, or
-    /// render the report instead of this. Whether a two-valued accessor should answer a
-    /// three-valued question at all is issue #597.
+    /// A host that prints its own words for a variant still owes the reader
+    /// [`C2PA_NOT_VALIDATED`]; [`report_lines`](Self::report_lines) renders the pinned wording with
+    /// the disclaimer inline.
     #[must_use]
-    pub fn is_present(&self) -> bool {
-        !self.stores.is_empty()
+    pub fn presence(&self) -> C2paPresence {
+        if !self.stores.is_empty() {
+            C2paPresence::StoreLocated
+        } else if !self.unread.is_empty() {
+            C2paPresence::FramingUnread
+        } else if !self.merkle.is_empty() {
+            C2paPresence::AuxiliaryOnly
+        } else {
+            C2paPresence::NoC2paBox
+        }
     }
 
     /// The whole human-readable report, uncapped: [`summary_lines`](Self::summary_lines) followed
@@ -1000,8 +1045,8 @@ impl HeifContainer<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        C2PA_NOT_VALIDATED, C2paBoxPosition, C2paBoxPurpose, C2paMerkleBox, C2paStoreSummary,
-        C2paSummary, C2paUnreadBox, C2paUnreadReason,
+        C2PA_NOT_VALIDATED, C2paBoxPosition, C2paBoxPurpose, C2paMerkleBox, C2paPresence,
+        C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason,
     };
 
     /// A summary of the stores at the given `(start, end, purpose)` triples, all in the window
@@ -1068,6 +1113,35 @@ mod tests {
         assert!(!with_merkle.headline().contains("could be read"));
     }
 
+    /// `presence` takes the strongest answer the lists support: a located store outranks an unread
+    /// box, which outranks an auxiliary `merkle` box, which outranks nothing.
+    #[test]
+    fn presence_names_the_strongest_category_the_lists_hold() {
+        let merkle = C2paMerkleBox {
+            range: 40..90,
+            position: C2paBoxPosition::BeforeMediaData,
+        };
+
+        let mut merkle_only = C2paSummary::default();
+        merkle_only.merkle.push(merkle.clone());
+        assert_eq!(merkle_only.presence(), C2paPresence::AuxiliaryOnly);
+
+        let mut unread_and_merkle = unread_summary(&[(100, 200, C2paUnreadReason::Truncated)]);
+        unread_and_merkle.merkle.push(merkle);
+        assert_eq!(unread_and_merkle.presence(), C2paPresence::FramingUnread);
+
+        let mut store_and_unread = summary(&[(61, 90, C2paBoxPurpose::Manifest)]);
+        store_and_unread.unread = unread_summary(&[(100, 200, C2paUnreadReason::Truncated)]).unread;
+        assert_eq!(store_and_unread.presence(), C2paPresence::StoreLocated);
+
+        // Another extended type is not C2PA framing (§A.5.1.1), so it never lifts the answer.
+        let near_miss = C2paSummary {
+            other_uuid_boxes: 1,
+            ..C2paSummary::default()
+        };
+        assert_eq!(near_miss.presence(), C2paPresence::NoC2paBox);
+    }
+
     #[test]
     fn a_purpose_renders_as_the_box_purpose_string_it_parses_from() {
         for purpose in [
@@ -1110,7 +1184,7 @@ mod tests {
     #[test]
     fn an_absent_store_is_reported_as_absent_and_still_says_gamut_never_validates() {
         let none = C2paSummary::default();
-        assert!(!none.is_present());
+        assert_eq!(none.presence(), C2paPresence::NoC2paBox);
         assert_eq!(
             none.report_lines(),
             vec![format!(
@@ -1123,7 +1197,7 @@ mod tests {
     #[test]
     fn one_store_is_reported_with_its_purpose_size_and_half_open_range() {
         let one = summary(&[(61, 90, C2paBoxPurpose::Manifest)]);
-        assert!(one.is_present());
+        assert_eq!(one.presence(), C2paPresence::StoreLocated);
         assert_eq!(
             one.report_lines(),
             vec![
@@ -1140,7 +1214,7 @@ mod tests {
         // framing, so the wording a file with *no* C2PA box gets would let a reader infer absence
         // of provenance from bytes gamut could not read.
         let one = unread_summary(&[(16, 106, C2paUnreadReason::NotVersionZero)]);
-        assert!(!one.is_present());
+        assert_eq!(one.presence(), C2paPresence::FramingUnread);
         assert_eq!(
             one.report_lines(),
             vec![
