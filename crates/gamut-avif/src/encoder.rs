@@ -1,11 +1,12 @@
 //! The AVIF still-image encoder: RGB → identity planes → AV1 temporal unit → ISOBMFF container.
 
+use core::num::NonZeroUsize;
 use core::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{
-    Av1Colour, Av1StillConfig, EncodedStill, Speed, encode_still_intra_with_speed,
-    encode_still_intra16_with_speed,
+    Av1Colour, Av1StillConfig, EncodeOptions, EncodedStill, Speed, encode_still_intra_with_options,
+    encode_still_intra16_with_options,
 };
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
@@ -198,6 +199,9 @@ pub struct AvifEncoder {
     /// The `gamut-av1` mode-decision search preset every AV1 still of the file is coded at —
     /// colour and alpha alike. See [`AvifEncoder::with_speed`].
     speed: Speed,
+    /// The most threads an encode may use; `None` is the machine's available parallelism. See
+    /// [`AvifEncoder::with_threads`].
+    threads: Option<NonZeroUsize>,
     /// Pluggable AV1 still-encode backends, tried in push order before the `gamut-av1` tail.
     /// Shared (not copied) by [`Clone`] — see [`AvifEncoder::push_backend`].
     backends: Vec<BackendSlot>,
@@ -220,6 +224,7 @@ impl std::fmt::Debug for AvifEncoder {
             .field("alpha_mode", &self.alpha_mode)
             .field("keep_opaque_alpha", &self.keep_opaque_alpha)
             .field("speed", &self.speed)
+            .field("threads", &self.threads)
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -260,6 +265,7 @@ impl AvifEncoder {
             alpha_mode: AlphaMode::Unassociated,
             keep_opaque_alpha: false,
             speed: Speed::Thorough,
+            threads: Some(NonZeroUsize::MIN),
             backends: Vec::new(),
         }
     }
@@ -289,6 +295,7 @@ impl AvifEncoder {
             alpha_mode: AlphaMode::Unassociated,
             keep_opaque_alpha: false,
             speed: Speed::Thorough,
+            threads: Some(NonZeroUsize::MIN),
             backends: Vec::new(),
         }
     }
@@ -568,6 +575,94 @@ impl AvifEncoder {
     #[must_use]
     pub fn speed(&self) -> Speed {
         self.speed
+    }
+
+    /// Caps the threads an encode may use: `Some(n)` uses at most `n`, and `None` uses
+    /// [`std::thread::available_parallelism`] (one where the platform cannot report it). The
+    /// default is `Some(1)`: an encoder without this call spawns no thread.
+    ///
+    /// **The output does not depend on it.** Every thread count codes exactly the bytes one thread
+    /// does, so this is purely a time-for-memory control:
+    ///
+    /// - An RGBA input's colour item and alpha auxiliary are two independent AV1 stills. With two
+    ///   or more threads the alpha is coded on a scoped thread while the colour is coded on the
+    ///   calling one; the colour gets the larger half of the budget and the alpha the rest.
+    /// - Each still is coded in `gamut-av1`'s tile layout, and its tiles are coded concurrently on
+    ///   that still's share (see [`gamut_av1::EncodeOptions::threads`]). The layout is
+    ///   `gamut-av1`'s default whatever the thread count — it is what decides the bytes — so a
+    ///   still with fewer tiles than threads leaves the extra threads unused.
+    ///
+    /// Each extra thread holds its own copy of the encoder's frame state, so peak memory grows
+    /// with the count. A thread the platform refuses to spawn has its work done on the calling
+    /// thread instead: running out of threads costs time, never the encode. On a `wasm32` target
+    /// without threads (`wasm32-unknown-unknown`), where every spawn fails, everything therefore
+    /// runs on the calling thread; `gamut-av1` codes a still's tiles one after another on any
+    /// `wasm32` target.
+    ///
+    /// A [pushed backend](Self::push_backend) runs on the calling thread and receives the colour
+    /// item's share as [`Av1EncodeRequest::threads`], a hint it may ignore.
+    #[must_use]
+    pub fn with_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// The thread cap this encoder runs under — `Some(1)` unless
+    /// [`with_threads`](Self::with_threads) chose another; `None` is the machine's available
+    /// parallelism.
+    #[must_use]
+    pub fn threads(&self) -> Option<NonZeroUsize> {
+        self.threads
+    }
+
+    /// The thread budget one encode runs under: the configured cap, or the machine's available
+    /// parallelism for `None`.
+    fn thread_budget(&self) -> NonZeroUsize {
+        self.threads
+            .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+    }
+
+    /// The `gamut-av1` options a still is coded under: this encoder's preset, `gamut-av1`'s
+    /// default tile layout, and `threads`.
+    fn av1_options(&self, threads: NonZeroUsize) -> EncodeOptions {
+        EncodeOptions::default()
+            .with_speed(self.speed)
+            .with_threads(threads)
+    }
+
+    /// Codes an RGBA input's two stills — `colour` on the calling thread, `alpha` beside it on a
+    /// scoped thread when the budget has room for one — each handed its share of the budget
+    /// ([`split_threads`]). Returns the colour still, then the alpha one.
+    ///
+    /// The colour still is the one a [pushed backend](Self::push_backend) may produce, so keeping
+    /// it on the calling thread keeps every backend call there. The order the two finish in is
+    /// unobservable: each still is a pure function of its own inputs.
+    fn colour_and_alpha<C, A>(&self, colour: C, alpha: A) -> Result<(EncodedStill, EncodedStill)>
+    where
+        C: FnOnce(NonZeroUsize) -> Result<EncodedStill>,
+        A: Fn(NonZeroUsize) -> Result<EncodedStill> + Sync,
+    {
+        let (colour_threads, alpha_threads) = split_threads(self.thread_budget());
+        let Some(alpha_threads) = alpha_threads else {
+            return Ok((colour(colour_threads)?, alpha(colour_threads)?));
+        };
+        std::thread::scope(|scope| {
+            let alpha = &alpha;
+            let spawned = std::thread::Builder::new()
+                .name("gamut-avif-alpha".into())
+                .spawn_scoped(scope, move || alpha(alpha_threads));
+            let colour = colour(colour_threads);
+            // A thread the platform cannot spawn (every one, on a threadless `wasm32`) has its still coded
+            // here instead. A panic on the alpha thread resumes on this one, as it would have had
+            // the alpha been coded here.
+            let alpha = match spawned {
+                Ok(handle) => handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(_) => alpha(alpha_threads),
+            };
+            Ok((colour?, alpha?))
+        })
     }
 
     /// The colour samples an RGBA `image` codes as instead, when its alpha is to be dropped: every
@@ -1143,7 +1238,7 @@ impl AvifEncoder {
     }
 
     /// Encodes the **colour** planes, offering the job to the registered backends in push order
-    /// before falling through to the built-in `gamut-av1` tail.
+    /// before falling through to the built-in `gamut-av1` tail, on at most `threads` threads.
     fn colour_still(
         &self,
         planes: &Planar8,
@@ -1151,6 +1246,7 @@ impl AvifEncoder {
         base_q_idx: u8,
         colour: Av1Colour,
         chroma: ChromaSubsampling,
+        threads: NonZeroUsize,
     ) -> Result<EncodedStill> {
         let request = Av1EncodeRequest::new(
             dims,
@@ -1159,13 +1255,20 @@ impl AvifEncoder {
             chroma,
             BitDepth::Eight,
             self.speed,
+            threads,
         );
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::Eight(planes))?
         {
             Some(obus) => {
                 crate::backend::still_from_backend_obus(obus, dims, colour, chroma, BitDepth::Eight)
             }
-            None => Ok(encode_still_intra_with_speed(planes, base_q_idx, colour, self.speed)?.0),
+            None => Ok(encode_still_intra_with_options(
+                planes,
+                base_q_idx,
+                colour,
+                self.av1_options(threads),
+            )?
+            .0),
         }
     }
 
@@ -1178,6 +1281,7 @@ impl AvifEncoder {
         dims: Dimensions,
         base_q_idx: u8,
         colour: Av1Colour,
+        threads: NonZeroUsize,
     ) -> Result<EncodedStill> {
         let bit_depth = planes.bit_depth();
         // Read off the buffer, not the configuration, exactly as the 8-bit path does: §6.4.2
@@ -1185,13 +1289,20 @@ impl AvifEncoder {
         // downsampler, so either can carry 4:4:4 planes while `with_chroma` says otherwise. The
         // request must describe the planes it actually carries.
         let chroma = planes.subsampling();
-        let request =
-            Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, bit_depth, self.speed);
+        let request = Av1EncodeRequest::new(
+            dims, base_q_idx, colour, chroma, bit_depth, self.speed, threads,
+        );
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::High(planes))? {
             Some(obus) => {
                 crate::backend::still_from_backend_obus(obus, dims, colour, chroma, bit_depth)
             }
-            None => Ok(encode_still_intra16_with_speed(planes, base_q_idx, colour, self.speed)?.0),
+            None => Ok(encode_still_intra16_with_options(
+                planes,
+                base_q_idx,
+                colour,
+                self.av1_options(threads),
+            )?
+            .0),
         }
     }
 
@@ -1222,9 +1333,9 @@ fn monochrome_still(
     planes: &Planar8,
     base_q_idx: u8,
     colour: Av1Colour,
-    speed: Speed,
+    options: EncodeOptions,
 ) -> Result<EncodedStill> {
-    Ok(encode_still_intra_with_speed(planes, base_q_idx, colour, speed)?.0)
+    Ok(encode_still_intra_with_options(planes, base_q_idx, colour, options)?.0)
 }
 
 /// The high-bit-depth [`monochrome_still`]; the registry is skipped for the same reason.
@@ -1232,9 +1343,20 @@ fn monochrome_still16(
     planes: &Planar16,
     base_q_idx: u8,
     colour: Av1Colour,
-    speed: Speed,
+    options: EncodeOptions,
 ) -> Result<EncodedStill> {
-    Ok(encode_still_intra16_with_speed(planes, base_q_idx, colour, speed)?.0)
+    Ok(encode_still_intra16_with_options(planes, base_q_idx, colour, options)?.0)
+}
+
+/// Splits a thread `budget` between an RGBA input's colour still and its alpha auxiliary: the
+/// colour gets the larger half (it codes three planes to the alpha's one) and the alpha the rest,
+/// so the two together never exceed the budget. `None` for the alpha — a budget of one — codes the
+/// two one after the other, each on the whole budget.
+fn split_threads(budget: NonZeroUsize) -> (NonZeroUsize, Option<NonZeroUsize>) {
+    let alpha = budget.get() / 2;
+    // `budget - alpha` is `ceil(budget / 2) >= 1`, so the fallback is never taken.
+    let colour = NonZeroUsize::new(budget.get() - alpha).unwrap_or(budget);
+    (colour, NonZeroUsize::new(alpha))
 }
 
 /// The `pixi` bits-per-channel list for a coded item: one entry per coded plane, each carrying the
@@ -1483,7 +1605,14 @@ impl EncodeImage<Rgb8> for AvifEncoder {
         // Pluggable backends first, in push order; `gamut-av1` is the implicit tail when every
         // backend declines (and the only path taken by an encoder with no backends, which is why
         // the default output is byte-identical to the pre-backend encoder).
-        let still = self.colour_still(&planes, dims, self.base_q_idx(), colour, chroma)?;
+        let still = self.colour_still(
+            &planes,
+            dims,
+            self.base_q_idx(),
+            colour,
+            chroma,
+            self.thread_budget(),
+        )?;
         self.emit(&still, dims, None, out)
     }
 }
@@ -1534,18 +1663,26 @@ impl EncodeImage<Rgba8> for AvifEncoder {
                 Planar8::from_rgba8_matrix_view(image, m)
             }
         };
-        let still = self.colour_still(
-            &planes,
-            dims,
-            self.base_q_idx(),
-            colour,
-            planes.subsampling(),
-        )?;
-        let alpha = monochrome_still(
-            &Planar8::from_rgba8_alpha_view(image),
-            self.alpha_base_q_idx(),
-            self.monochrome_colour(),
-            self.speed,
+        let alpha_planes = Planar8::from_rgba8_alpha_view(image);
+        let (still, alpha) = self.colour_and_alpha(
+            |threads| {
+                self.colour_still(
+                    &planes,
+                    dims,
+                    self.base_q_idx(),
+                    colour,
+                    planes.subsampling(),
+                    threads,
+                )
+            },
+            |threads| {
+                monochrome_still(
+                    &alpha_planes,
+                    self.alpha_base_q_idx(),
+                    self.monochrome_colour(),
+                    self.av1_options(threads),
+                )
+            },
         )?;
         self.emit(&still, dims, Some(&alpha), out)
     }
@@ -1572,7 +1709,13 @@ impl EncodeImage<Rgb16> for AvifEncoder {
                 Planar16::from_rgb16_matrix_subsampled(image, m, self.chroma())?
             }
         };
-        let still = self.colour_still16(&planes, dims, self.base_q_idx(), colour)?;
+        let still = self.colour_still16(
+            &planes,
+            dims,
+            self.base_q_idx(),
+            colour,
+            self.thread_budget(),
+        )?;
         self.emit(&still, dims, None, out)
     }
 }
@@ -1601,12 +1744,17 @@ impl EncodeImage<Rgba16> for AvifEncoder {
                 Planar16::from_rgba16_matrix_view(image, m)
             }
         };
-        let still = self.colour_still16(&planes, dims, self.base_q_idx(), colour)?;
-        let alpha = monochrome_still16(
-            &Planar16::from_rgba16_alpha_view(image, depth),
-            self.alpha_base_q_idx(),
-            self.monochrome_colour(),
-            self.speed,
+        let alpha_planes = Planar16::from_rgba16_alpha_view(image, depth);
+        let (still, alpha) = self.colour_and_alpha(
+            |threads| self.colour_still16(&planes, dims, self.base_q_idx(), colour, threads),
+            |threads| {
+                monochrome_still16(
+                    &alpha_planes,
+                    self.alpha_base_q_idx(),
+                    self.monochrome_colour(),
+                    self.av1_options(threads),
+                )
+            },
         )?;
         self.emit(&still, dims, Some(&alpha), out)
     }
@@ -1624,18 +1772,19 @@ impl EncodeImage<Gray8> for AvifEncoder {
     /// bit replication and coded as a monochrome item at that depth.
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
+        let options = self.av1_options(self.thread_budget());
         let still = match self.widened_bit_depth()? {
             None => monochrome_still(
                 &Planar8::from_gray8_view(image),
                 self.base_q_idx(),
                 self.monochrome_colour(),
-                self.speed,
+                options,
             )?,
             Some(depth) => monochrome_still16(
                 &gray8_widened(image, depth)?,
                 self.base_q_idx(),
                 self.monochrome_colour(),
-                self.speed,
+                options,
             )?,
         };
         self.emit(&still, dims, None, out)
@@ -2660,7 +2809,7 @@ mod tests {
                     .payload
                     .clone()
             };
-            let want = encode_still_intra16_with_speed(
+            let want = gamut_av1::encode_still_intra16_with_speed(
                 &gray8_widened(image, depth).unwrap(),
                 127,
                 Av1Colour::monochrome(),
@@ -2677,5 +2826,45 @@ mod tests {
                 "{depth:?}: the fixture separates the presets"
             );
         }
+    }
+
+    /// The colour still gets `ceil(budget / 2)` threads and the alpha `floor(budget / 2)`, so the
+    /// two never exceed the budget; a budget of one runs them one after the other. The alpha share
+    /// is invisible in the output, so it is pinned here.
+    #[test]
+    fn split_threads_gives_the_colour_the_larger_half() {
+        let split = |budget| {
+            let (colour, alpha) = split_threads(NonZeroUsize::new(budget).unwrap());
+            (colour.get(), alpha.map(NonZeroUsize::get))
+        };
+        assert_eq!(split(1), (1, None));
+        assert_eq!(split(2), (1, Some(1)));
+        assert_eq!(split(3), (2, Some(1)));
+        assert_eq!(split(4), (2, Some(2)));
+        assert_eq!(split(7), (4, Some(3)));
+    }
+
+    /// With a budget of two the alpha still is coded on its own scoped thread; a panic there
+    /// reaches the caller with its own payload, as it would had the alpha been coded inline,
+    /// rather than being swallowed or replaced by the join's error.
+    #[test]
+    fn colour_and_alpha_resumes_an_alpha_thread_panic_on_the_caller() {
+        let encoder = AvifEncoder::lossless().with_threads(NonZeroUsize::new(2));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            encoder.colour_and_alpha(
+                |_| {
+                    Err(gamut_core::Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        "colour stand-in",
+                    ))
+                },
+                |_| -> Result<EncodedStill> { panic!("alpha thread panicked") },
+            )
+        }));
+        let payload = caught.expect_err("the alpha thread's panic reaches the caller");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"alpha thread panicked")
+        );
     }
 }
