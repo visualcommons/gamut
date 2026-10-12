@@ -87,12 +87,12 @@ pub struct TiffMetadata {
     /// silently repaired, which is worth knowing before using a re-encode to prove a file
     /// unmodified.
     ///
-    /// **One directory, and on read a loss this field cannot report.** The field holds a single
-    /// directory, and an `ExifIFD` entry names one (its `count` is 1). A source file whose
-    /// `ExifIFD` entry instead carries an **array** of offsets comes back as the **first**
-    /// directory only; the others are dropped without an error or a report. That is deferred
-    /// rather than decided (issue #599), and until it lands a re-encode of such a file loses
-    /// every Exif directory after the first — use
+    /// **One directory, and an array of them is refused.** The field holds a single directory,
+    /// and an `ExifIFD` entry names one (EXIF 2.32 §4.6.3 A fixes its `count` at 1). A source
+    /// file whose `ExifIFD` entry instead carries an **array** of two or more offsets is refused
+    /// by [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) with
+    /// [`Error::InvalidInput`](gamut_core::Error::InvalidInput) rather than narrowed to its first
+    /// directory, which would drop the rest without a report — use
     /// [`deconstruct`](crate::deconstruct) to see the whole array.
     ///
     /// The one shape the model can express and the file cannot is a tag holding **both** a field
@@ -414,6 +414,18 @@ const FIELD_BESIDE_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may not carry bo
      and a sub-IFD group under one tag, which would be written as two entries under that tag \
      (TIFF 6.0 §2 allows one) and read back as only one of them";
 
+/// The refusal [`read_metadata`] returns for an IFD-0 `ExifIFD` entry naming **two or more**
+/// directories.
+///
+/// EXIF 2.32 §4.6.3 A fixes the Exif IFD Pointer's count at 1, so no conformant file reaches this.
+/// [`TiffMetadata::exif`] holds one directory, and the alternative to refusing is returning the
+/// first and dropping the rest with nothing to say so — a loss a re-encode then makes permanent.
+/// What this stops accepting is exactly that non-conformant array, which
+/// [`deconstruct`](crate::deconstruct) still walks in full. Named so the test pins the refusal
+/// itself rather than any `InvalidInput` the read could earn.
+const EXIF_ARRAY_REFUSAL: &str = "TIFF: the ExifIFD entry names more than one directory, and \
+     EXIF 2.32 §4.6.3 allows one (count 1); returning only the first would drop the rest";
+
 /// The writer's side of what the reader delivers: refuses an Exif subtree this crate could not
 /// hand back unchanged, `depth` further levels being all that is left below `ifd`.
 ///
@@ -552,12 +564,24 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
     resolve_subtree(ifd0, metadata_scope(), |offset| {
         read_ifd_at(data, offset, order, variant)
     })?;
-    let exif = ifd0
+    // Matched on the array's shape rather than tested against a length bound, so each of the
+    // three outcomes is one arm and no operator has an equivalent twin.
+    let exif = match ifd0
         .sub_ifds()
         .iter()
         .find(|group| group.tag == tags::EXIF_IFD)
-        .and_then(|group| group.ifds.first())
-        .cloned();
+        .map(|group| group.ifds.as_slice())
+        .unwrap_or_default()
+    {
+        [] => None,
+        [exif] => Some(exif.clone()),
+        [_, _, ..] => {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                EXIF_ARRAY_REFUSAL,
+            ));
+        }
+    };
     let xmp = bytes_value(ifd0.get(tags::XMP));
     let iptc = iptc_value(ifd0.get(tags::IPTC_NAA), order);
     let icc = bytes_value(ifd0.get(tags::ICC_PROFILE));
@@ -837,6 +861,26 @@ mod tests {
             Some(Value::Long8(_))
         ));
         assert_eq!(read_metadata(&bytes).expect("read").exif, Some(exif_ifd()));
+    }
+
+    #[test]
+    fn read_metadata_refuses_an_exif_ifd_array_rather_than_keeping_its_first() {
+        // Issue #599: `read_metadata` took the group's first directory and dropped the rest, so a
+        // two-offset `ExifIFD` came back as one directory with nothing to say the second was gone.
+        // The second directory differs from the first, so a reader that kept either would pass
+        // `expect_err` only by refusing.
+        let mut second = Ifd::new();
+        second.set(33434, Value::Rational(vec![(1, 60)])); // ExposureTime
+        let mut ifd0 = Ifd::new();
+        ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif_ifd(), second]);
+        let bytes = file_with(ifd0);
+        assert_eq!(
+            read(&bytes).expect("read").ifds[0].get(tags::EXIF_IFD),
+            Some(&Value::Long(vec![26, 44])),
+            "the fixture must carry a two-offset ExifIFD array"
+        );
+        let err = read_metadata(&bytes).expect_err("an ExifIFD array of two directories");
+        assert_eq!(err.static_message(), Some(EXIF_ARRAY_REFUSAL), "{err}");
     }
 
     #[test]
