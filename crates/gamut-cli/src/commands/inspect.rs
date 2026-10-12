@@ -1373,8 +1373,8 @@ fn heic_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
                             ("purpose", Json::from(s.purpose.as_str())),
                             ("extent", Json::from("store")),
                             ("size", Json::from(s.size())),
-                            ("range", span(s.range.start, s.range.end)),
-                            ("slot", span(s.slot.start, s.slot.end)),
+                            ("range", span(s.range.start(), s.range.end())),
+                            ("slot", span(s.slot.start(), s.slot.end())),
                             ("position", Json::from(position(s.position))),
                         ])
                     })
@@ -1389,7 +1389,7 @@ fn heic_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
                     .iter()
                     .map(|u| {
                         Json::Object(vec![
-                            ("range", span(u.range.start, u.range.end)),
+                            ("range", span(u.range.start(), u.range.end())),
                             ("reason", Json::from(reason(u.reason))),
                             ("description", Json::from(u.reason.describe())),
                             ("position", Json::from(position(u.position))),
@@ -1406,7 +1406,7 @@ fn heic_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
                     .iter()
                     .map(|m| {
                         Json::Object(vec![
-                            ("range", span(m.range.start, m.range.end)),
+                            ("range", span(m.range.start(), m.range.end())),
                             ("position", Json::from(position(m.position))),
                         ])
                     })
@@ -1449,8 +1449,8 @@ fn avif_c2pa_json(summary: &gamut::avif::C2paSummary) -> Json {
                             ("purpose", Json::from(s.purpose.as_str())),
                             ("extent", Json::from("store")),
                             ("size", Json::from(s.size())),
-                            ("range", span(s.range.start, s.range.end)),
-                            ("slot", span(s.slot.start, s.slot.end)),
+                            ("range", span(s.range.start(), s.range.end())),
+                            ("slot", span(s.slot.start(), s.slot.end())),
                             ("position", Json::from(position(s.position))),
                         ])
                     })
@@ -1465,7 +1465,7 @@ fn avif_c2pa_json(summary: &gamut::avif::C2paSummary) -> Json {
                     .iter()
                     .map(|u| {
                         Json::Object(vec![
-                            ("range", span(u.range.start, u.range.end)),
+                            ("range", span(u.range.start(), u.range.end())),
                             ("reason", Json::from(reason(u.reason))),
                             ("description", Json::from(u.reason.describe())),
                             ("position", Json::from(position(u.position))),
@@ -1482,7 +1482,7 @@ fn avif_c2pa_json(summary: &gamut::avif::C2paSummary) -> Json {
                     .iter()
                     .map(|m| {
                         Json::Object(vec![
-                            ("range", span(m.range.start, m.range.end)),
+                            ("range", span(m.range.start(), m.range.end())),
                             ("position", Json::from(position(m.position))),
                         ])
                     })

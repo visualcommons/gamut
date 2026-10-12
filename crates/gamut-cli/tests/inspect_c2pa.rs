@@ -553,8 +553,8 @@ fn an_avif_the_encoder_signed_reports_its_store_at_the_encoders_range() {
         stdout.contains(&format!(
             "box_purpose \"manifest\": {} bytes at [{}, {})",
             store.len(),
-            range.start,
-            range.end
+            range.start(),
+            range.end()
         )),
         "{stdout}"
     );
@@ -924,11 +924,11 @@ fn json_output_lists_every_heic_c2pa_box_past_the_text_cap() {
         assert_eq!(json["size"], store.size());
         assert_eq!(
             json["range"],
-            json_range(store.range.start as u64, store.range.end as u64)
+            json_range(store.range.start() as u64, store.range.end() as u64)
         );
         assert_eq!(
             json["slot"],
-            json_range(store.slot.start as u64, store.slot.end as u64)
+            json_range(store.slot.start() as u64, store.slot.end() as u64)
         );
         assert_eq!(json["position"], "before_media_data");
     }
@@ -938,8 +938,8 @@ fn json_output_lists_every_heic_c2pa_box_past_the_text_cap() {
     assert_eq!(
         unread[0]["range"],
         json_range(
-            summary.unread[0].range.start as u64,
-            summary.unread[0].range.end as u64
+            summary.unread[0].range.start() as u64,
+            summary.unread[0].range.end() as u64
         )
     );
     assert_eq!(doc["c2pa"]["merkle"], serde_json::json!([]));
@@ -1002,11 +1002,11 @@ fn json_output_reports_an_avif_store_and_its_slot_at_the_encoders_range() {
     assert_eq!(stores[0]["size"], store.len());
     assert_eq!(
         stores[0]["range"],
-        json_range(slot.start as u64, (slot.start + store.len()) as u64)
+        json_range(slot.start() as u64, (slot.start() + store.len()) as u64)
     );
     assert_eq!(
         stores[0]["slot"],
-        json_range(slot.start as u64, slot.end as u64)
+        json_range(slot.start() as u64, slot.end() as u64)
     );
     assert_eq!(
         doc["c2pa"]["not_validated"],
@@ -1041,8 +1041,8 @@ fn json_output_lists_an_avifs_unread_and_merkle_boxes_after_its_media_data() {
     assert_eq!(
         unread[0]["range"],
         json_range(
-            summary.unread[0].range.start as u64,
-            summary.unread[0].range.end as u64
+            summary.unread[0].range.start() as u64,
+            summary.unread[0].range.end() as u64
         )
     );
     assert_eq!(unread[0]["reason"], "not_version_zero");
@@ -1056,8 +1056,8 @@ fn json_output_lists_an_avifs_unread_and_merkle_boxes_after_its_media_data() {
     assert_eq!(
         merkle[0]["range"],
         json_range(
-            summary.merkle[0].range.start as u64,
-            summary.merkle[0].range.end as u64
+            summary.merkle[0].range.start() as u64,
+            summary.merkle[0].range.end() as u64
         )
     );
     assert_eq!(merkle[0]["position"], "after_media_data");
