@@ -1550,9 +1550,9 @@ impl PngEncoder {
         }
     }
 
-    /// Writes the smallest of the encodings [`reduce::analyze8`] / [`reduce::analyze16`] made
-    /// reachable: the reduction they ranked first, the best reduction that adds no chunk, and the
-    /// image encoded untouched.
+    /// Writes the smallest of the encodings [`reduce::analyze8_for`] / [`reduce::analyze16_for`]
+    /// made reachable: the reduction they ranked first, the best reduction that adds no chunk, and
+    /// the image encoded untouched.
     ///
     /// The analysis chooses by comparing **raw** sizes, and raw size does not predict compressed
     /// size when one candidate's bytes are incompressible and the other's are not. A palette
@@ -1635,8 +1635,9 @@ impl PngEncoder {
         Ok(winner.len())
     }
 
-    /// Writes a reduced encoding chosen by [`reduce::analyze8`] / [`reduce::analyze16`], whose
-    /// input samples were `source_depth` (8 or 16) bits — the depth the caller's `bKGD` is at.
+    /// Writes a reduced encoding chosen by [`reduce::analyze8_for`] / [`reduce::analyze16_for`],
+    /// whose input samples were `source_depth` (8 or 16) bits — the depth the caller's `bKGD` is
+    /// at.
     fn write_reduced(
         &self,
         dims: Dimensions,
