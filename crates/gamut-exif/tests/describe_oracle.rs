@@ -27,15 +27,9 @@
 //! Requires the `third_party/exiv2` + `third_party/expat` submodules and a C++ toolchain.
 #![cfg(feature = "describe")]
 
-use std::sync::{Mutex, PoisonError};
-
+use exiv2_oracle::exif_print;
 use gamut_exif::describe::described_values;
 use gamut_exif::{ByteOrder, Exif, ExifTag, ExifWriter, FieldType, IfdKind, Value};
-
-/// Serialises every exiv2 call this file makes: `exiv2-oracle`'s EXIF entry points are not
-/// guarded, and `cargo test` runs the tests below on separate threads. `tests/oracle.rs` explains
-/// the crash this prevents; moving the guard into the oracle itself is issue #536.
-static EXIV2: Mutex<()> = Mutex::new(());
 
 /// The `Exif.<group>` prefix exiv2 keys a directory's tags under. Every described tag lives in
 /// the 0th IFD, the Exif sub-IFD or the GPS sub-IFD.
@@ -87,11 +81,8 @@ fn exiv2_reading(tag: ExifTag, code: u32) -> Option<String> {
         .write(&exif)
         .expect("gamut writes the tag");
     let key = format!("{}.{}", exiv2_group(tag.ifd()), tag.name());
-    let printed = {
-        let _guard = EXIV2.lock().unwrap_or_else(PoisonError::into_inner);
-        exiv2_oracle::exif_print(&bytes, &key)
-    }
-    .unwrap_or_else(|e| panic!("exiv2 reads {key} = {code}: {e}"));
+    let printed =
+        exif_print(&bytes, &key).unwrap_or_else(|e| panic!("exiv2 reads {key} = {code}: {e}"));
 
     let raw = code.to_string();
     (printed != raw && printed != format!("({raw})")).then_some(printed)

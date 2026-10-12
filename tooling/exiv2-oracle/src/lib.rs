@@ -12,14 +12,26 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-/// Exiv2's `XmpParser` (Adobe XMPCore underneath) keeps global state and is documented as not
-/// thread-safe; every FFI call is serialized behind this lock so parallel `cargo test` threads
-/// cannot race it into spurious parse failures.
-static XMP_LOCK: Mutex<()> = Mutex::new(());
+/// Serializes every call into exiv2, the XMP and the EXIF entry points alike, so parallel
+/// `cargo test` threads only ever reach the C++ library one at a time.
+///
+/// - **XMP:** exiv2's `XmpParser` (Adobe XMPCore underneath) keeps global state and is documented
+///   as not thread-safe; unserialized, parallel threads race it into spurious parse failures.
+/// - **EXIF:** unserialized, `gamut-exif`'s oracle suite segfaulted (SIGSEGV) inside exiv2 on CI
+///   once it ran several `#[test]`s concurrently: one mutation shard's baseline crashed while
+///   another shard's baseline of the same commit passed, so the failure is a race, not a bad
+///   input. No stack trace has located the faulting line, so this lock is the conservative
+///   answer to a nondeterministic crash under concurrency, not a proof that exiv2's TIFF path is
+///   unsafe. Whoever shows that path *is* thread-safe and finds the crash elsewhere should record
+///   it here and reopen the question (issue #536).
+///
+/// One lock for both halves costs nothing that matters: these are dev-only oracle calls, and
+/// contention is negligible next to the C++ work each one does.
+static EXIV2_LOCK: Mutex<()> = Mutex::new(());
 
-/// Acquires the XMPCore serialization lock, ignoring poisoning (the lock guards no Rust data).
+/// Acquires the exiv2 serialization lock, ignoring poisoning (the lock guards no Rust data).
 fn lock() -> MutexGuard<'static, ()> {
-    XMP_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    EXIV2_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 unsafe extern "C" {
@@ -160,6 +172,7 @@ pub fn property_count(xmp: &[u8]) -> Result<usize, String> {
 ///
 /// Returns a message if exiv2 rejects the stream.
 pub fn exif_count(data: &[u8]) -> Result<usize, String> {
+    let _guard = lock();
     let mut count: usize = 0;
     // SAFETY: `data` is a valid byte range; `count` is written only on success.
     let code = unsafe { exiv2_exif_count(data.as_ptr().cast(), data.len(), &mut count) };
@@ -208,6 +221,7 @@ type ExifReadFn = unsafe extern "C" fn(
 
 /// Calls one keyed EXIF reader of the shim and takes ownership of the string it returns.
 fn exif_read(read: ExifReadFn, data: &[u8], key: &str) -> Result<String, String> {
+    let _guard = lock();
     let ckey = CString::new(key).map_err(|e| e.to_string())?;
     let mut buf: *mut c_char = std::ptr::null_mut();
     let mut len: usize = 0;
@@ -236,6 +250,7 @@ fn exif_read(read: ExifReadFn, data: &[u8], key: &str) -> Result<String, String>
 ///
 /// Returns a message if exiv2 fails to decode or re-encode the stream.
 pub fn exif_roundtrip(data: &[u8]) -> Result<Vec<u8>, String> {
+    let _guard = lock();
     let mut buf: *mut c_char = std::ptr::null_mut();
     let mut len: usize = 0;
     // SAFETY: `data` is valid; `buf`/`len` are written only on success.
