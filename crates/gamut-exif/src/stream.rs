@@ -20,7 +20,9 @@ use gamut_ifd::{
 use crate::error::{ExifError, Result};
 use crate::exif::{EXIF_IFD_POINTER, Exif, MARKER};
 use crate::reader::ExifReader;
-use crate::report::{DropReason, Dropped, DroppedEntry, DroppedRegion, ReadReport};
+use crate::report::{
+    DropReason, Dropped, DroppedEntry, DroppedRegion, EntryDropReason, ReadReport,
+};
 use crate::tag::{ExifTag, IfdKind};
 use crate::thumbnail::Thumbnail;
 
@@ -108,6 +110,61 @@ impl ExifReader {
         self.recover_entries && !self.strict
     }
 
+    /// Decodes one directory the model keeps, with the findings naming what the decode discarded
+    /// from it: every shadowed duplicate-tag entry, and — when [`recovers`](Self::recovers) — every
+    /// entry whose value could not be read. Every directory this crate keeps is decoded here, so
+    /// no decode drops an entry without [`record_entries`] seeing it.
+    fn decode<S: ReadAt>(
+        &self,
+        reader: &mut IfdReader<S>,
+        raw: &RawIfd,
+    ) -> gamut_core::Result<(Ifd, Vec<AuditFinding>)> {
+        if self.recovers() {
+            reader.decode_ifd_lenient(raw)
+        } else {
+            reader.decode_ifd_reporting(raw)
+        }
+    }
+
+    /// The top-level chain: the 0th and 1st IFDs decoded through [`decode`](Self::decode), each
+    /// discarded entry recorded against its directory, plus the offsets of every trailing
+    /// directory for [`record_trailing`].
+    ///
+    /// The chain is walked once, through [`IfdReader::ifds`] — the same loop and runaway guards as
+    /// [`IfdReader::read_file`], whose directory-body failures stay fatal here as they are there.
+    /// The walk reads every directory body before decoding any, so a file with both a broken chain
+    /// and an unreadable value in an earlier directory reports the chain's error where `read_file`
+    /// would report the value's; both are the same [`ExifError::Ifd`] kind.
+    ///
+    /// A trailing directory's entries are never reported: the model discards it whole, as
+    /// [`DroppedRegion::TrailingIfd`]. Without recovery it is still decoded, so an unreadable value
+    /// in it stays fatal exactly as under `read_file`; under recovery it is not, since a value of
+    /// it has nothing to recover into.
+    fn top_level<S: ReadAt>(
+        &self,
+        reader: &mut IfdReader<S>,
+        report: &mut ReadReport,
+    ) -> Result<(Vec<Ifd>, Vec<u64>)> {
+        let raws = reader.ifds().collect::<gamut_core::Result<Vec<RawIfd>>>()?;
+        if raws.is_empty() {
+            // A chain with no directory at all: `read_file` owns that error.
+            reader.read_file()?;
+        }
+        let mut pages = Vec::with_capacity(2);
+        for (raw, kind) in raws.iter().zip([IfdKind::Image, IfdKind::Thumbnail]) {
+            let (ifd, findings) = self.decode(reader, raw)?;
+            record_entries(&findings, kind, report);
+            pages.push(ifd);
+        }
+        let trailing = &raws[pages.len()..];
+        if !self.recovers() {
+            for raw in trailing {
+                reader.decode_ifd(raw)?;
+            }
+        }
+        Ok((pages, trailing.iter().map(|raw| raw.offset).collect()))
+    }
+
     /// The crate's one parse engine: marker handling, the top-level chain, the thumbnail, and the
     /// three pointer-addressed sub-IFDs, recording into `report` whatever leniency discards.
     pub(crate) fn parse_source<S: ReadAt>(
@@ -121,13 +178,7 @@ impl ExifReader {
         let mut reader = IfdReader::open(source.rebased(base))?;
         let order = reader.order();
 
-        let (pages, trailing) = if self.recovers() {
-            let (pages, trailing) = top_level_recovering(&mut reader, report)?;
-            (pages, Some(trailing))
-        } else {
-            (reader.read_file()?.ifds, None)
-        };
-        let has_trailing = pages.len() > 2;
+        let (pages, trailing) = self.top_level(&mut reader, report)?;
         let mut ifds = pages.into_iter();
         let mut image = ifds.next().ok_or(ExifError::Truncated)?;
         // The next-IFD chain's second entry is the thumbnail directory (1st IFD), if any.
@@ -137,10 +188,7 @@ impl ExifReader {
         };
         // EXIF defines exactly two top-level directories, so anything further down the chain has
         // nowhere to go in the model. Name it rather than letting the iterator drop it silently.
-        match trailing {
-            Some(offsets) => record_trailing(offsets, report),
-            None => record_trailing_ifds(&mut reader, has_trailing, report)?,
-        }
+        record_trailing(trailing, report);
 
         // The Exif sub-IFD's own offset, captured before `follow` strips the pointer: the
         // maker-note pin needs the note value's absolute source position.
@@ -225,8 +273,8 @@ impl ExifReader {
     /// reporting a structurally perfect directory as malformed because a disk read failed would be
     /// a lie about the file.
     ///
-    /// `kind` names the directory for the entries a [`recover_entries`](Self::recover_entries)
-    /// decode skips in it; they are recorded only for a directory that survives.
+    /// `kind` names the directory for the entries [`decode`](Self::decode) discards from it; they
+    /// are recorded only for a directory that survives.
     fn follow<S: ReadAt>(
         &self,
         parent: &mut Ifd,
@@ -244,14 +292,12 @@ impl ExifReader {
             return Ok(None);
         };
         let offset = u64::from(offset);
-        let followed = match reader.read_ifd(offset) {
-            Ok(raw) if self.recovers() => reader.decode_ifd_lenient(&raw).map(|(ifd, findings)| {
-                record_unreadable(&findings, kind, report);
+        let followed = reader.read_ifd(offset).and_then(|raw| {
+            self.decode(reader, &raw).map(|(ifd, findings)| {
+                record_entries(&findings, kind, report);
                 ifd
-            }),
-            Ok(raw) => reader.decode_ifd(&raw),
-            Err(e) => Err(e),
-        };
+            })
+        });
         parent.remove(ptr);
         match followed {
             Ok(ifd) => Ok(Some(ifd)),
@@ -346,35 +392,8 @@ impl ExifReader {
     }
 }
 
-/// Records the top-level directories past the 1st IFD, which parse cleanly but have nowhere to go
-/// in the [`Exif`] model.
-///
-/// The offsets come from a second walk of the next-IFD chain, which is the single source of truth
-/// for *which* directories are trailing — `has_trailing` only says whether the walk is worth
-/// starting. That costs a re-read of the directory bodies, so it runs **only** when there is
-/// something to report: a well-formed EXIF blob has one or two directories and never reaches it,
-/// leaving the lazy read bound untouched.
-///
-/// A source that dies between the two walks turns a would-be success into an error. That is the
-/// same rule the rest of this module follows — a transport failure is propagated, never swallowed —
-/// and swallowing it only here would be the inconsistency.
-fn record_trailing_ifds<S: ReadAt>(
-    reader: &mut IfdReader<S>,
-    has_trailing: bool,
-    report: &mut ReadReport,
-) -> Result<()> {
-    if !has_trailing {
-        return Ok(());
-    }
-    let mut offsets = Vec::new();
-    for raw in reader.ifds().skip(2) {
-        offsets.push(raw?.offset);
-    }
-    record_trailing(offsets, report);
-    Ok(())
-}
-
-/// Records each of `offsets` as a [`DroppedRegion::TrailingIfd`], in chain order.
+/// Records each of `offsets` — the top-level directories past the 1st IFD, which parse cleanly but
+/// have nowhere to go in the [`Exif`] model — as a [`DroppedRegion::TrailingIfd`], in chain order.
 fn record_trailing(offsets: Vec<u64>, report: &mut ReadReport) {
     for offset in offsets {
         report.record(Dropped::new(
@@ -385,42 +404,22 @@ fn record_trailing(offsets: Vec<u64>, report: &mut ReadReport) {
     }
 }
 
-/// The top-level chain under [`ExifReader::recover_entries`]: the 0th and 1st IFDs decoded
-/// leniently, each skipped entry recorded against its directory, plus the offsets of every
-/// trailing directory for [`record_trailing`].
-///
-/// The chain is walked once, through [`IfdReader::ifds`] — the same loop and runaway guards as
-/// [`IfdReader::read_file`], whose directory-body failures stay fatal here as they are there.
-/// Trailing directories are read (their bodies are how the chain continues) but never decoded:
-/// the model discards them whole, so a value of theirs has nothing to recover into.
-fn top_level_recovering<S: ReadAt>(
-    reader: &mut IfdReader<S>,
-    report: &mut ReadReport,
-) -> Result<(Vec<Ifd>, Vec<u64>)> {
-    let raws = reader.ifds().collect::<gamut_core::Result<Vec<RawIfd>>>()?;
-    if raws.is_empty() {
-        // A chain with no directory at all: `read_file` owns that error, so both modes return
-        // the identical one.
-        reader.read_file()?;
-    }
-    let mut pages = Vec::with_capacity(2);
-    for (raw, kind) in raws.iter().zip([IfdKind::Image, IfdKind::Thumbnail]) {
-        let (ifd, findings) = reader.decode_ifd_lenient(raw)?;
-        record_unreadable(&findings, kind, report);
-        pages.push(ifd);
-    }
-    let trailing = raws.iter().skip(2).map(|raw| raw.offset).collect();
-    Ok((pages, trailing))
-}
-
-/// Records every [`AuditFinding::UnreadableEntry`] in `findings` as a [`DroppedEntry`] of `kind`,
-/// in order. Shadowed-entry findings are not surfaced by this report (see the
-/// [`report`](crate::report) module).
-fn record_unreadable(findings: &[AuditFinding], kind: IfdKind, report: &mut ReadReport) {
+/// Records every entry `findings` says a decode of directory `kind` discarded as a
+/// [`DroppedEntry`], in the findings' order: an [`AuditFinding::UnreadableEntry`] as
+/// [`EntryDropReason::Unreadable`], an [`AuditFinding::ShadowedEntry`] as
+/// [`EntryDropReason::Shadowed`]. A directory decode emits no other finding.
+fn record_entries(findings: &[AuditFinding], kind: IfdKind, report: &mut ReadReport) {
     for finding in findings {
-        if let AuditFinding::UnreadableEntry { tag, offset, .. } = *finding {
-            report.record_entry(DroppedEntry::new(kind, tag, offset));
-        }
+        let (tag, offset, reason) = match *finding {
+            AuditFinding::UnreadableEntry { tag, offset, .. } => {
+                (tag, offset, EntryDropReason::Unreadable)
+            }
+            AuditFinding::ShadowedEntry { tag, offset, .. } => {
+                (tag, offset, EntryDropReason::Shadowed)
+            }
+            _ => continue,
+        };
+        report.record_entry(DroppedEntry::new(kind, tag, offset, reason));
     }
 }
 
@@ -1241,6 +1240,133 @@ mod tests {
         assert_eq!(report.dropped().len(), 1, "{report:?}");
         assert_eq!(report.dropped()[0].region(), DroppedRegion::TrailingIfd);
         assert_eq!(report.byte_audit(), None);
+    }
+
+    /// The tag [`shadowed_blob`] writes twice in every directory.
+    const DUPLICATE: u16 = 0xFDE8;
+
+    /// A marked blob with all five directories, each carrying [`DUPLICATE`] twice: first as
+    /// `SHORT 1`, then as `SHORT 2`. `write` cannot emit a duplicate, so each directory is written
+    /// with `DUPLICATE` and `DUPLICATE + 1` — adjacent records, since every other tag is lower —
+    /// and the second record's tag is then patched to `DUPLICATE`. Returns the blob and the offset
+    /// of each shadowed (first) record in the TIFF stream, in file order.
+    fn shadowed_blob() -> (Vec<u8>, Vec<u64>) {
+        let mut dirs: [Ifd; 5] = Default::default();
+        for dir in &mut dirs {
+            dir.set(DUPLICATE, Value::Short(vec![1]));
+            dir.set(DUPLICATE + 1, Value::Short(vec![2]));
+        }
+        let [mut image, thumb, mut exif, gps, interop] = dirs;
+        exif.set_sub_ifd(INTEROP_IFD_POINTER, vec![interop]);
+        image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
+        image.set_sub_ifd(GPS_IFD_POINTER, vec![gps]);
+        let mut tiff = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image, thumb],
+        })
+        .expect("write");
+        let [lo, hi] = (DUPLICATE + 1).to_le_bytes();
+        let survivor = [lo, hi, 3, 0, 1, 0, 0, 0, 2, 0, 0, 0]; // SHORT, count 1, value 2
+        let hits: Vec<usize> = tiff
+            .windows(survivor.len())
+            .enumerate()
+            .filter(|(_, w)| *w == survivor)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hits.len(), 5, "one survivor record per directory");
+        for &at in &hits {
+            tiff[at..at + 2].copy_from_slice(&DUPLICATE.to_le_bytes());
+        }
+        let mut data = MARKER.to_vec();
+        data.extend(tiff);
+        (data, hits.iter().map(|&at| at as u64 - 12).collect())
+    }
+
+    /// Every directory the model keeps names its shadowed duplicate — by directory, in the
+    /// reader's directory order, at the offset of the shadowed record itself — while the model
+    /// holds the survivor, and no region is dropped. The same report comes back strict, lenient
+    /// and recovering: every entry was read, so no mode has grounds to treat it differently.
+    #[test]
+    fn every_kept_directory_names_its_shadowed_duplicate_in_every_mode() {
+        let (data, records) = shadowed_blob();
+        for reader in [
+            ExifReader::new(),
+            ExifReader::new().strict(true),
+            ExifReader::new().recover_entries(true),
+        ] {
+            let (exif, report) = reader.parse_with_report(&data).expect("parse");
+            assert_eq!(report.dropped(), &[], "{reader:?}");
+            let entries = report.dropped_entries();
+            assert_eq!(
+                entries.iter().map(|e| e.ifd()).collect::<Vec<_>>(),
+                [
+                    IfdKind::Image,
+                    IfdKind::Thumbnail,
+                    IfdKind::Exif,
+                    IfdKind::Gps,
+                    IfdKind::Interop
+                ],
+                "{reader:?}"
+            );
+            let mut offsets = Vec::new();
+            for entry in entries {
+                assert_eq!(entry.tag(), DUPLICATE, "{reader:?}");
+                assert_eq!(entry.reason(), EntryDropReason::Shadowed, "{reader:?}");
+                assert_eq!(
+                    exif.get(entry.ifd(), DUPLICATE),
+                    Some(&Value::Short(vec![2])),
+                    "{reader:?}: the last occurrence survives"
+                );
+                offsets.push(entry.offset());
+            }
+            offsets.sort_unstable();
+            assert_eq!(offsets, records, "{reader:?}");
+        }
+    }
+
+    /// The model holds one value per tag, so the rewrite carries only the survivors and parses
+    /// back with nothing to report: the report was the only record of the shadowed entries.
+    #[test]
+    fn a_shadowed_parse_round_trips_without_the_shadowed_entries() {
+        let (data, _) = shadowed_blob();
+        let exif = ExifReader::new().parse(&data).expect("parse");
+        let (again, report) = ExifReader::new()
+            .parse_with_report(&exif.to_bytes().expect("to_bytes"))
+            .expect("reparse");
+        assert!(report.is_empty(), "{report:?}");
+        assert_eq!(
+            again.get(IfdKind::Interop, DUPLICATE),
+            Some(&Value::Short(vec![2]))
+        );
+    }
+
+    /// A trailing directory is discarded whole, so a duplicate inside it is not named a second
+    /// time as an entry: the `TrailingIfd` region is the one record of it, in both walks.
+    #[test]
+    fn a_shadowed_entry_in_a_trailing_directory_is_not_named_as_an_entry() {
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        let mut trailing = Ifd::new();
+        trailing.set(DUPLICATE, Value::Short(vec![1]));
+        trailing.set(DUPLICATE + 1, Value::Short(vec![2]));
+        let mut tiff = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image, Ifd::new(), trailing],
+        })
+        .expect("write");
+        let at = tiff
+            .windows(2)
+            .position(|w| w == (DUPLICATE + 1).to_le_bytes())
+            .expect("the second record");
+        tiff[at..at + 2].copy_from_slice(&DUPLICATE.to_le_bytes());
+        for reader in [ExifReader::new(), ExifReader::new().recover_entries(true)] {
+            let (_, report) = reader.parse_with_report(&tiff).expect("parse");
+            assert_eq!(report.dropped_entries(), &[], "{reader:?}");
+            assert_eq!(report.dropped().len(), 1, "{reader:?}: {report:?}");
+            assert_eq!(report.dropped()[0].region(), DroppedRegion::TrailingIfd);
+        }
     }
 
     /// `address_reason` splits the two defects the report distinguishes, and the boundary is the

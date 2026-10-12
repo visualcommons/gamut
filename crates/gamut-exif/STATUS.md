@@ -26,6 +26,7 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
 | P8 | — | exiv2 differential gate + golden fixtures | ✅ |
 | P9 | §4.6 | `ReadAt` streaming entry point + lenient-drop report (`ReadReport`, scoped to the regions `DroppedRegion` names) | ✅ |
 | P11 | §4.6 | Read-report depth (issue #521): opt-in per-entry recovery (`ExifReader::recover_entries` → `ReadReport::dropped_entries`, over `gamut_ifd::IfdReader::decode_ifd_lenient`), opt-in byte-completeness verdict (`ExifReader::audit_bytes` → `ReadReport::byte_audit`), real-camera-DNG laziness case (`tooling/gamut-dng-real-conformance/tests/exif_laziness.rs`, extended tier) | ✅ |
+| P12 | §4.6 | Shadowed duplicate tags (issue #719): every directory the model keeps is decoded through `gamut_ifd::IfdReader::decode_ifd_reporting` (or `decode_ifd_lenient` under recovery), and each entry a repeated tag shadowed is a `ReadReport::dropped_entries` record with `EntryDropReason::Shadowed`, in every mode | ✅ |
 | P10 | §4.6 | Full DC-008 tag breadth + per-tag value shape + value descriptions (issue #417) | ✅ |
 
 ## P10 — what the catalogue now covers
@@ -155,19 +156,6 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
   is caught by nothing (issue #544).
 - **Uncompressed strip-based thumbnails** are read (as their directory) but not re-embedded; JPEG
   thumbnails round-trip fully.
-- **A signal for a shadowed duplicate tag.** `gamut_ifd::IfdReader::decode_ifd` builds a directory
-  with `Ifd::set`, which is last-wins, so two entries for one tag decode to the second and the
-  first is discarded. `ReadReport::is_empty()` is therefore a verdict over the regions it covers,
-  **not** "this parse lost nothing"; both the report's module docs and the README say so.
-
-  The deferral is a layering decision, **not** an inability to observe: `RawIfd::entries` is public
-  and in on-disk order and `follow` already holds the `RawIfd`, so `raw.entries.len() !=
-  ifd.fields().len()` would detect a shadowed tag here in three lines. What `gamut-exif` cannot do
-  is say *what* was lost without re-decoding the shadowed entry — and `gamut-tiff` and `gamut-dng`
-  need the same signal, so it belongs in the shared layer (issue #528). Issue #528's own body
-  states the weaker, incorrect reason; read it with this correction.
-  `gamut-ifd` now emits the signal (`AuditFinding::ShadowedEntry`, from `decode_ifd_reporting` and
-  `decode_ifd_lenient`); surfacing it in `ReadReport` is issue #719.
 - **An async entry point.** Declined rather than deferred: `parse_from` is synchronous over
   `gamut_ifd::ReadAt`, and an async caller drives that source itself. A `tokio` feature would put a
   runtime dependency in a crate that has none and constrain the public shape against the

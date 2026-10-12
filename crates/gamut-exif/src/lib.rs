@@ -110,7 +110,7 @@ pub use gps::GpsConversionError;
 pub use gps::{GpsAltitude, GpsCoordinate, GpsInfo, GpsReference};
 pub use maker_note::{MakerNote, MakerNoteVendor};
 pub use reader::ExifReader;
-pub use report::{DropReason, Dropped, DroppedEntry, DroppedRegion, ReadReport};
+pub use report::{DropReason, Dropped, DroppedEntry, DroppedRegion, EntryDropReason, ReadReport};
 pub use tag::{ExifTag, IfdKind, TagCount};
 pub use thumbnail::Thumbnail;
 pub use value::{Rational, SRational, as_text};
