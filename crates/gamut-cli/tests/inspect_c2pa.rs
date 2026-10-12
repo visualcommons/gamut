@@ -696,7 +696,8 @@ fn a_tiff_whose_store_entry_is_mistyped_is_not_reported_as_without_provenance() 
     assert!(!stdout.contains("no manifest store found"), "{stdout}");
     assert!(stdout.contains("NOT absence of provenance"), "{stdout}");
     assert!(
-        stdout.contains("unread tag 52545 entry in IFD 0 at [10, 22): its field type is not"),
+        // Entry 1 of the directory at 8, after tag 256's: 8 + 2 + 12.
+        stdout.contains("unread tag 52545 entry in IFD 0 at [22, 34): its field type is not"),
         "{stdout}"
     );
 }

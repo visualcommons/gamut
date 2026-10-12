@@ -159,8 +159,8 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
 
     // PNG's report is a different shape -- it has no IFD tree and no tag vocabulary, but it does
     // carry compression figures the others have no equivalent for -- so it prints on its own path
-    // rather than being flattened into `Summary`. HEIC's is not a deconstruct at all: it answers
-    // the provenance question and gates nothing (see the module docs).
+    // rather than being flattened into `Summary`. HEIC's, AVIF's and WebP's are not a deconstruct
+    // at all: they answer the provenance question and gate nothing (see the module docs).
     let route = match args.format {
         Some(_) => Route::Forced,
         None => Route::Sniffed,
