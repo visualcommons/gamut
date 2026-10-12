@@ -189,11 +189,11 @@ section describes; only a test that drives the built binary is. Those tests are 
 The wording of each line, the headline's four shapes and the file ordering are `gamut-heic`'s own
 contract and are pinned there, inside the mutation gate.
 
-**A machine consumer has no surface here yet.** Every distinction above is carried by stdout prose
-and none by the exit code, which is deliberate — two exit codes are the command's contract, and a
-third would not fit the outcomes anyway. Structured output is the answer and is tracked in
-issue #596; until it lands, a caller matching on wording is matching on wording this document is
-free to improve.
+**A machine consumer reads `--output json`, not the prose.** Every distinction above is carried by
+stdout and none by the exit code, which is deliberate — two exit codes are the command's contract,
+and a third would not fit the outcomes anyway. The JSON document (see
+[below](#--output-json-the-same-facts-as-data)) carries each of them as data, uncapped; a caller
+matching on the text report's wording is matching on wording this document is free to improve.
 
 Nothing in that report is a verdict. gamut locates a manifest store and never validates one — no
 signature, no hash binding, no trust list (C2PA 2.4 §15.12; `references/c2pa/README.md`) — and the
@@ -249,6 +249,76 @@ mutation gate.
 **PNG has no C2PA section yet.** `gamut-png` locates a `caBX` store, but wiring it into this command
 is a separate slice (issue #727), held back while `gamut-png` is being reworked elsewhere; until it
 lands, a PNG's report says nothing about C2PA either way, and that silence is not absence.
+
+## `--output json`: the same facts, as data
+
+`--output json` (default `--output text`) replaces the text report with **one JSON document**
+(RFC 8259) on stdout, built from the same values the text report renders. It is a rendering, not a
+verdict: **the exit code and the stderr message are exactly those of the text report** for the same
+file, so a gate that fails still prints its document first and then exits `1` with the same
+`<path>: not fully accounted — …` / `not verified — …` / `not a complete, undamaged PNG datastream —
+…` line. A file the walk cannot open prints **nothing** on stdout, as in text mode — a consumer
+never receives half a document.
+
+No list is capped. The twenty-entry cut is a terminal-presentation decision, so the document lists
+every entry the format crate reports — every C2PA box, every unknown tag, every PNG finding — in the
+order the text report would print them. Every byte range is a half-open `{"start", "end"}` object.
+Enumerated values (`reason`, `position`, `kind`, `severity`) are `snake_case` identifiers; a value
+the command does not know yet (every such type is non-exhaustive) is `"other"`, never omitted.
+
+Every document opens with:
+
+| Member | Value |
+| --- | --- |
+| `path` | the input path, as given (lossily, where it is not UTF-8) |
+| `format` | the arm that read it: `tiff`, `dng`, `png`, `heic`, `avif` or `webp` (the `--format` value names) |
+| `format_source` | `detected` when the sniff chose the format, `asserted` when `--format` did — the text report's `(asserted by --format, not detected)` |
+
+Then, per format:
+
+- **TIFF / DNG** — `accounting` (`file_len`, `classified_bytes`, `unclassified_bytes`,
+  `segment_count`, and the `unclassified`, `conflicts`, `out_of_bounds`, `unclaimed_reads` and
+  `unread_claims` range lists, plus the `shared_values` count); `unknown_field_types`
+  (`page`, `tag`, `type_code`, `count`); `unknown_tags` (`page`, `tag`, `field_type`, `count`);
+  `anomalies` (`kind`, `severity` and the variant's fields); the two predicates `fully_classified`
+  and `fully_accounted` (the gate); and `c2pa`.
+- **PNG** — `image` (`width`, `height`, `color_type` as the IHDR code, `bit_depth`, `interlaced`),
+  `file_len`, `bits_per_pixel`, `idat` (`compressed`, `filtered`, `ratio`), `overhead_bytes`,
+  `framing_bytes`, `chunks` (`type`, `count`, `payload_bytes`, `framing_bytes`, `ancillary`),
+  `filters` — `{"counted": true, "none", "sub", "up", "average", "paeth", "scanlines"}` or
+  `{"counted": false, "reason", "damage", "description"}`, `reason` being one of the skip reasons
+  in the table below — `passes` (Adam7), `findings` (`kind`: `crc_mismatch`, `truncated`,
+  `trailing_bytes`, `missing_iend` or `filter_scan_damage`, with the offending `range` where there
+  is one), and the three predicates `fully_classified`, `intact` and `verified` (the gate). No `c2pa`
+  member yet: issue #727. A non-finite ratio (`bits_per_pixel`, `idat.ratio`) is `null`.
+- **HEIC / AVIF / WebP** — `c2pa` and nothing else, as in the text report.
+
+The `c2pa` object is the format crate's `C2paSummary` as data:
+
+| Format | Members |
+| --- | --- |
+| HEIC, AVIF | `stores` (`purpose`, `extent`, `size`, `range`, `position`), `unread` (`range`, `reason`, `description`, `position`), `merkle` (`range`, `position`), `other_uuid_boxes` |
+| WebP | `stores` (`size`, `range`, `position`), `unread` (`range`, `position`) |
+| TIFF, DNG | `store` — `null`, or `size`, `range`, `count_field` (the two §18.5.5 exclusion ranges) and `ifd` — and `unread` (`entry`, `ifd`, `reason`, `description`) |
+
+Two things the text report guarantees carry over unchanged:
+
+1. **`not_validated`** — every `c2pa` object carries the format crate's own `C2PA_NOT_VALIDATED`
+   sentence. "A store is present" reads as *verified* to a program's author no less than to a
+   terminal's reader, and a member a consumer can display is how the disclaimer survives the trip.
+2. **No store bytes**, at any verbosity: a store is reported by its range and size, which is what a
+   caller hands to `c2pa-rs`.
+
+A store's `extent` says what its `size` measures: `store` for HEIC (trimmed to its JUMBF `LBox`),
+`slot` for AVIF (the store plus any padding; issue #505). A HEIC `position` is
+`before_media_data`, `after_media_data` or `after_movie_box`; an AVIF one either of the first two; a
+WebP one `last` or `before_later_chunks`. Absence of a store is not absence of provenance in the
+document either: a non-empty `unread` beside an empty `stores` (or a `null` `store`) is C2PA framing
+gamut could not read through.
+
+The document is pinned against each format crate's own summary by the `json_output_*` tests in
+`crates/gamut-cli/tests/inspect.rs` and `tests/inspect_c2pa.rs`, and the writer's escaping by the
+unit tests in `inspect.rs`.
 
 ## PNG alone has a third outcome
 

@@ -50,6 +50,17 @@
 //! declined would echo the caller's assertion back as a finding. A WebP needs no such label: the
 //! RIFF walk itself refuses a file without the `RIFF` magic and the `WEBP` form.
 //!
+//! # `--output json`
+//!
+//! The same facts as one JSON document (issue #596), for a caller that would otherwise match on
+//! the text report's wording. Each arm builds its facts once and renders them either way — a TIFF
+//! or DNG [`Summary`] entry carries its text line and its JSON object side by side, and a PNG
+//! finding is rendered from one [`PngFinding`] — so the two outputs cannot list different things.
+//! Nothing is capped in JSON: the twenty-entry cut is a terminal-presentation decision. Each `c2pa`
+//! object carries its crate's `C2PA_NOT_VALIDATED` and never a store's bytes, and the exit code is
+//! the text report's. The writer is [`Json`], hand-written because the command only ever emits
+//! JSON and the workspace keeps `serde_json` dev-only.
+//!
 //! The contract itself — the gate per format, the two exit codes, the budgets, and every reason
 //! the PNG filter scan declines — is recorded in `docs/inspect-exit-codes.md`, which is normative
 //! for it. What follows is why the code is shaped that way.
