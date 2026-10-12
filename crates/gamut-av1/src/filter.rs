@@ -1396,15 +1396,26 @@ mod tests {
     fn each_restoration_unit_is_restored_only_where_restoring_it_removes_error() {
         // A 520×4 luma frame on a 528 stride: two columns of units — the 8 columns past 512 are
         // absorbed into the second — and one row. Unit 0 is closer to the source restored, unit 1
-        // closer left alone; the coded-grid padding past column 520 holds a value that would make
-        // restoring unit 1 win, were it counted.
+        // closer left alone. Every sample differs from its neighbours, so a sample compared at the
+        // wrong index (the source is on a `width` stride, the planes on `stride`) moves the sums;
+        // and the coded-grid padding past column 520 holds a value that would make restoring unit
+        // 1 win, were it counted.
         let (w, h, stride) = (520usize, 4usize, 528usize);
-        let source = vec![100u8; w * h];
+        let level = |x: usize, y: usize| 60 + ((x * 7 + y * 31) % 97) as u16;
+        let mut source = vec![0u16; w * h];
         let mut cdef = vec![0u16; stride * h];
-        let mut restored = vec![100u16; stride * h];
+        let mut restored: Vec<u16> = (0..stride * h)
+            .map(|i| level(i % stride, i / stride))
+            .collect();
         for y in 0..h {
             for x in 0..w {
-                let (off, on) = if x < 256 { (104, 101) } else { (101, 104) };
+                let s = level(x, y);
+                let (off, on) = if x < 256 {
+                    (s + 4, s + 1)
+                } else {
+                    (s + 1, s + 4)
+                };
+                source[y * w + x] = s;
                 cdef[y * stride + x] = off;
                 restored[y * stride + x] = on;
             }

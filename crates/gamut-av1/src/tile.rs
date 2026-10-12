@@ -29,7 +29,8 @@
 //! ([`FrameEncoder::recoding`]). The second pass replays every partition and mode decision the
 //! first one coded, superblock by superblock, rather than searching again: nothing it decides
 //! reads the restoration symbols, so the replayed blocks reconstruct exactly as the first pass's
-//! did.
+//! did. The record costs one small entry per coded block and per decided partition, held for the
+//! whole frame; the second pass costs the coding without the search.
 //!
 //! The frame is coded on the MI-unit grid (`mi_cols*4 × mi_rows*4`, dimensions rounded up to a
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
@@ -504,7 +505,7 @@ pub(crate) fn lr_unit_count(size: usize, unit: usize) -> usize {
 
 /// The partition and mode decisions one superblock was coded with, in the order its blocks were
 /// coded: what [`FrameEncoder::recoding`] replays instead of searching again.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SbDecisions {
     partitions: Vec<DecidedPartition>,
     blocks: Vec<Decided>,
@@ -4316,7 +4317,7 @@ struct LumaMode {
 }
 
 /// A block's mode decisions, reached while it was trialled: see [`FrameEncoder::decided`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Decided {
     /// The block: MI `(r, c)` and its width and height in samples.
     at: (usize, usize, usize, usize),
@@ -4327,7 +4328,7 @@ struct Decided {
 }
 
 /// A region's partition, reached while it was trialled: see [`FrameEncoder::decided_partitions`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DecidedPartition {
     /// The region: MI `(r, c)` and its side in samples.
     at: (usize, usize, usize),
@@ -6802,13 +6803,19 @@ mod tests {
         assert_eq!(d45[15], 80);
     }
 
-    /// A smooth 64×64 field: its quantization artefacts are what the in-loop filters remove.
-    fn smooth_64() -> Planar8 {
+    /// A smooth `side`×`side` field: its quantization artefacts are what the in-loop filters
+    /// remove.
+    fn smooth(side: u32) -> Planar8 {
         let wave = |x: u32, y: u32| {
             let g = 128.0 + 60.0 * (f64::from(x) / 23.0).sin() * (f64::from(y) / 31.0).cos();
             g as u8
         };
-        planes_with(64, 64, wave, |x, y| 255 - wave(x, y))
+        planes_with(side, side, wave, |x, y| 255 - wave(x, y))
+    }
+
+    /// [`smooth`] at one superblock.
+    fn smooth_64() -> Planar8 {
+        smooth(64)
     }
 
     /// `p` coded at `qindex` in one tile, as a frame's first pass codes it.
@@ -6816,6 +6823,55 @@ mod tests {
         let (w, h) = (p.width() as usize, p.height() as usize);
         let layout = TileLayout::resolve(crate::headers::Tiling::SINGLE, w, h, 0, None);
         FrameEncoder::new(p, qindex).encode(&layout, NonZeroUsize::MIN)
+    }
+
+    /// The partition the record `decisions` holds for the 64×64 superblock root at MI `(r, c)`.
+    fn root_partition(decisions: &SbDecisions, r: usize, c: usize) -> Option<usize> {
+        decisions
+            .partitions
+            .iter()
+            .find(|d| d.at == (r, c, 64))
+            .map(|d| d.bp)
+    }
+
+    #[test]
+    fn each_superblock_is_recorded_at_its_own_raster_index() {
+        // A 128×128 frame is a 2×2 superblock grid; superblock `i` is at MI (16 * (i / 2),
+        // 16 * (i % 2)), and its record holds that root's partition and no other root's.
+        let (_, first) = first_pass(&smooth(128), 110);
+        assert_eq!(first.decisions.len(), 4);
+        for (i, decisions) in first.decisions.iter().enumerate() {
+            let (r, c) = (16 * (i / 2), 16 * (i % 2));
+            assert!(root_partition(decisions, r, c).is_some(), "superblock {i}");
+            assert!(!decisions.blocks.is_empty(), "superblock {i}");
+            for d in &decisions.blocks {
+                let (br, bc) = (d.at.0, d.at.1);
+                assert!(
+                    (r..r + 16).contains(&br) && (c..c + 16).contains(&bc),
+                    "{:?}",
+                    d.at
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_tile_coded_on_another_thread_brings_its_record_back() {
+        // Two tile columns on two threads: the right tile is coded in a clone, and its
+        // superblocks' records must be merged back exactly as coding both tiles here records them.
+        let p = smooth(128);
+        let layout = TileLayout::resolve(crate::headers::Tiling::new(1, 0), 128, 128, 0, None);
+        assert_eq!(layout.num_tiles(), 2);
+        let record = |threads: usize| {
+            let threads = NonZeroUsize::new(threads).unwrap();
+            FrameEncoder::new(&p, 110)
+                .encode(&layout, threads)
+                .1
+                .decisions
+        };
+        let (one, two) = (record(1), record(2));
+        assert!(one.iter().all(|d| !d.blocks.is_empty()));
+        assert_eq!(one, two);
     }
 
     #[test]
@@ -6869,15 +6925,17 @@ mod tests {
 
     #[test]
     fn recoding_codes_each_superblock_as_the_first_pass_recorded_it() {
-        // Doctor the first pass's record so the 64×64 root takes a partition its own search did
-        // not: a second pass that searched instead of replaying would choose the original again.
-        let p = smooth_64();
+        // Doctor the first pass's record so one superblock root takes a partition its own search
+        // did not: a second pass that searched instead of replaying would choose the original
+        // again. The doctored root is the last of a 2×2 grid, so the replay must also find each
+        // superblock's record at its own index.
+        let p = smooth(128);
         let (_, first) = first_pass(&p, 110);
         let mut record = (*first.decisions).clone();
-        let root = record[0]
+        let root = record[3]
             .partitions
             .iter_mut()
-            .find(|d| d.at == (0, 0, 64))
+            .find(|d| d.at == (16, 16, 64))
             .expect("the root partition is recorded");
         let doctored = if root.bp == 3 { 0 } else { 3 };
         root.bp = doctored;
@@ -6885,7 +6943,7 @@ mod tests {
             decisions: Arc::new(record),
             ..first
         };
-        let layout = TileLayout::resolve(crate::headers::Tiling::SINGLE, 64, 64, 0, None);
+        let layout = TileLayout::resolve(crate::headers::Tiling::SINGLE, 128, 128, 0, None);
         let lr = LrUnits {
             cols: 1,
             rows: 1,
@@ -6894,11 +6952,8 @@ mod tests {
         let (_, second) = FrameEncoder::new(&p, 110)
             .recoding(&first, lr, None)
             .encode(&layout, NonZeroUsize::MIN);
-        let replayed = second.decisions[0]
-            .partitions
-            .iter()
-            .find(|d| d.at == (0, 0, 64))
-            .map(|d| d.bp);
-        assert_eq!(replayed, Some(doctored));
+        assert_eq!(root_partition(&second.decisions[3], 16, 16), Some(doctored));
+        // The undoctored superblocks replay as recorded.
+        assert_eq!(second.decisions[..3], first.decisions[..3]);
     }
 }

@@ -98,7 +98,8 @@ fn fixture_planes(colour: Av1Colour, chroma: ChromaSubsampling) -> Planar8 {
 /// mode decisions moved to rate–distortion cost (#698), taking it to 787 — the fixture is
 /// position noise no prediction follows, and the decoded PSNR rose from 12.22 to 12.34 dB; and
 /// again when the partitions from 16×16 up, the rectangular halves and the transform depth moved
-/// to rate–distortion cost too (#753), taking it to 703. The lossless golden is unaffected by
+/// to rate–distortion cost too (#753), taking it to 703; and again when the in-loop filters were
+/// chosen against the source instead of fixed by `qindex` (#754), taking it to 700. The lossless golden is unaffected by
 /// both colour changes and by the rate–distortion search: lossless stays on the identity matrix at 4:4:4, which AV1 §6.4.2
 /// requires of it, and has a single fixed coding path.
 #[test]

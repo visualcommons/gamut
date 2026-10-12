@@ -295,9 +295,9 @@ copy, which is what a decoder does for an independently decodable tile.
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4/8×8/16×16, narrow + wide + widest) | M1 |
-| CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy; `Cdef_Uv_Dir` incl. the non-identity 4:2:2 row) | M1 |
-| loop restoration: Wiener (luma) + stripe boundaries + per-SB unit signaling | §5.9.20,§7.17 | ✅ (Wiener luma; self-guided/chroma deferred) | M1 |
+| deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4/8×8/16×16, narrow + wide + widest; one frame level, chosen against the source, 0 = off) | M1 |
+| CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy; `Cdef_Uv_Dir` incl. the non-identity 4:2:2 row; one strength set per frame, `cdef_bits = 0`, luma and chroma pairs chosen against the source; per-superblock `cdef_idx` deferred) | M1 |
+| loop restoration: Wiener (luma) + stripe boundaries + per-SB unit signaling | §5.9.20,§7.17 | ✅ (Wiener luma with the default taps, on or off per 256×256 unit by distortion, `RESTORE_NONE` when no unit gains; fitted taps, self-guided and chroma deferred) | M1 |
 | superres horizontal upscaling (8-tap polyphase, LR after upscale) | §5.9.8,§7.16 | ✅ (opt-in via `encode_still_intra_superres`) | M1 |
 | film grain synthesis | §5.9.30,§7.18.3 | ☐ | M4 |
 
