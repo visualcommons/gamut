@@ -199,7 +199,7 @@ pub use c2pa::{C2PA_UUID, C2paBoxPurpose, C2paSlot};
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodedFrame};
-pub use encoder::{AvifEncodeReport, AvifEncoder};
+pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder};
 pub use gamut_av1::{ColorConfig, SequenceHeader, Subsampling};
 pub use gamut_core::Dimensions;
 pub use image::{
