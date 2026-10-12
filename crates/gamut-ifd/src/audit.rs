@@ -246,7 +246,7 @@ impl<S: ReadAt> Auditor<S> {
         // time as a sub-IFD (`visited` holds only sub-IFD targets). The directory's shadowed
         // entries were already recorded by the chain read, so that second decode records none.
         let reported = shadowing_directories(&self.findings);
-        let mut visited: Vec<u64> = Vec::new();
+        let mut visited = BTreeSet::new();
         for (page, ifd) in file.ifds.iter_mut().enumerate() {
             declare_extents(spec, ifd, &mut self.map);
             follow_subifds(
@@ -389,6 +389,9 @@ fn shadowing_directories(findings: &[AuditFinding]) -> BTreeSet<u64> {
 /// target is followed as [`AuditFinding::ChainedSubIfd`]. A target's
 /// [`AuditFinding::ShadowedEntry`] findings are recorded unless `reported` says the directory's
 /// were recorded already, so each directory reports its shadowed entries once.
+///
+/// `visited` is a set for the reason `resolve_pointers_with` gives: a pointer array's breadth is
+/// chosen by the file, so a linear membership scan would make the audit quadratic in it.
 #[expect(
     clippy::too_many_arguments,
     reason = "internal recursive walk threading its full context"
@@ -398,7 +401,7 @@ fn follow_subifds<S: ReadAt>(
     map: &mut SegmentMap,
     spec: &dyn AuditSpec,
     ifd: &mut Ifd,
-    visited: &mut Vec<u64>,
+    visited: &mut BTreeSet<u64>,
     reported: &BTreeSet<u64>,
     page: usize,
     depth: usize,
@@ -414,7 +417,7 @@ fn follow_subifds<S: ReadAt>(
             while offset != 0 {
                 let refusal = if depth + 1 > MAX_SUBIFD_DEPTH {
                     Some(SkipReason::TooDeep)
-                } else if visited.contains(&offset) {
+                } else if !visited.insert(offset) {
                     Some(SkipReason::Cycle)
                 } else {
                     None
@@ -428,7 +431,6 @@ fn follow_subifds<S: ReadAt>(
                     });
                     break;
                 }
-                visited.push(offset);
                 let mut shadowed = Vec::new();
                 let (mut child, next) =
                     match reader.read_ifd_at_reporting(offset, map, &mut shadowed, 0) {
