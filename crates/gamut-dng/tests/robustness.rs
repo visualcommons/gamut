@@ -1,5 +1,6 @@
 //! Robustness: the raw decoder sizes its buffers from the bytes a file holds, never from the
-//! geometry its tags declare (issue #564).
+//! geometry its tags declare (issue #564) or a lossless-JPEG chunk's SOF3 header declares
+//! (issue #758).
 //!
 //! `ImageWidth`/`ImageLength` are two tag values. Patched to `60000` each over a tiny encoded raw,
 //! they used to make the decoder reserve `60000 × 60000` samples (7.2 GB) before noticing the data
@@ -129,4 +130,23 @@ fn a_tile_declaring_huge_geometry_is_rejected_without_a_geometry_sized_allocatio
         raw.set(tags::TILE_LENGTH, Value::Short(vec![60000]));
     });
     assert_truncated(&dng);
+}
+
+/// Issue #758: a lossless-JPEG chunk's own SOF3 header declaring `65535 × 65535 × 4` samples
+/// (34 GB of `u16`) over a two-byte scan. The decoder must refuse it from the scan length before
+/// reserving the frame — the reservation this binary's allocator would refuse.
+#[test]
+fn a_lossless_jpeg_frame_larger_than_its_scan_is_rejected_without_a_header_sized_allocation() {
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xC3, 0, 20, 16, 0xFF, 0xFF, 0xFF, 0xFF, 4];
+    for id in 1..=4 {
+        jpeg.extend_from_slice(&[id, 0x11, 0]);
+    }
+    // One DC table: a single 1-bit code for category 0.
+    jpeg.extend_from_slice(&[0xFF, 0xC4, 0, 20, 0x00, 1]);
+    jpeg.extend_from_slice(&[0; 15]);
+    jpeg.push(0);
+    jpeg.extend_from_slice(&[0xFF, 0xDA, 0, 14, 4, 1, 0, 2, 0, 3, 0, 4, 0, 1, 0, 0]);
+    jpeg.extend_from_slice(&[0xFF, 0xD9]);
+    let error = gamut_dng::lossless_jpeg::decode(&jpeg).expect_err("the scan holds 16 bits");
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
 }
