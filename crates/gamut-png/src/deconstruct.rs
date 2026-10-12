@@ -263,7 +263,8 @@ pub struct PngReport {
     /// IHDR: dimensions, bit depth, colour type, interlace method.
     pub header: PngHeader,
     /// Every byte of the input in file order — contiguous, non-overlapping, covering
-    /// `0..file_len` exactly. See the [every-byte invariant](self#the-every-byte-invariant).
+    /// `0..file_len` exactly — the every-byte invariant, which
+    /// [`is_fully_classified`](Self::is_fully_classified) re-derives from this list.
     pub segments: Vec<Segment>,
     /// Per-chunk-type totals, in first-appearance order.
     pub chunks: Vec<ChunkStats>,

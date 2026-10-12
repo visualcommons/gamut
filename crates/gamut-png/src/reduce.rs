@@ -283,7 +283,7 @@ fn colour_key(pixels: &[u8], channels: usize) -> Option<[u8; 4]> {
 }
 
 /// Analyses interleaved 8-bit samples (`channels`: 1 = grey, 2 = grey+alpha, 3 = RGB, 4 = RGBA)
-/// and returns the lossless reductions that beat the input encoding — see [`Reductions`] for why
+/// and returns the lossless reductions that beat the input encoding — see `Reductions` for why
 /// that is one candidate or two rather than always one.
 pub fn analyze8(pixels: &[u8], channels: usize) -> Reductions {
     analyze8_for(pixels, channels, Family::Any)

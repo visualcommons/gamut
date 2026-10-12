@@ -311,13 +311,10 @@ run = "cargo test --workspace --all-features --doc"
 # the log it went to; links broke as a side effect of unrelated, correct refactors (an import
 # narrowed, a module un-published) with no signal at the point of change. `--all-features` so
 # feature-gated items' docs are checked too. `--no-deps` keeps it to this workspace's own docs.
-#
-# `gamut-png` is excluded only until issue #714 repairs its four broken links; that issue removes
-# this `--exclude`.
 [tasks.doc]
 description = "Build the workspace's rustdoc with warnings as errors (broken intra-doc links fail)"
 env = { RUSTDOCFLAGS = "-D warnings" }
-run = "cargo doc --workspace --all-features --no-deps --exclude gamut-png"
+run = "cargo doc --workspace --all-features --no-deps"
 
 # Divan; issue #149. Like `test`, this builds the codec crates' cross-check-oracle
 # dev-dependencies, so it needs the submodules (including `fetch-av1-oracles`) + C toolchain.
