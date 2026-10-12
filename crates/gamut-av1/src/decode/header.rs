@@ -1067,12 +1067,10 @@ mod tests {
         let cfg = crate::decode::testutil::still_config(width, height, Av1Colour::default());
         let seq_payload =
             crate::headers::sequence_header_payload(&cfg, width, height, lossy, superres.is_some());
-        let mi_cols = 2 * ((width + 7) >> 3);
-        let mi_rows = 2 * ((height + 7) >> 3);
         let layout = crate::headers::TileLayout::resolve(
             crate::headers::Tiling::default(),
-            mi_cols as usize,
-            mi_rows as usize,
+            width as usize,
+            height as usize,
             cfg.seq_level_idx_0,
             superres,
         );
@@ -1831,8 +1829,8 @@ mod tests {
         let seq = SequenceHeader::parse(&seq_payload).unwrap();
         let layout = crate::headers::TileLayout::resolve(
             crate::headers::Tiling::default(),
-            16,
-            16,
+            64,
+            64,
             cfg.seq_level_idx_0,
             None,
         );

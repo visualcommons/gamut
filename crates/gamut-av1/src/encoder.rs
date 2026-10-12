@@ -534,13 +534,11 @@ pub fn encode_still_intra16_with_options(
         colour,
     )?;
 
-    let mi_cols = 2 * ((width + 7) >> 3);
-    let mi_rows = 2 * ((height + 7) >> 3);
     let seq_payload = headers::sequence_header_payload(&config, width, height, qindex > 0, false);
     let layout = TileLayout::resolve(
         options.tiling,
-        mi_cols as usize,
-        mi_rows as usize,
+        width as usize,
+        height as usize,
         config.seq_level_idx_0,
         None,
     );
@@ -628,15 +626,12 @@ fn encode_with(
         colour,
     )?;
 
-    let mi_cols = 2 * ((coded_w + 7) >> 3);
-    let mi_rows = 2 * ((height + 7) >> 3);
-
     let seq_payload =
         headers::sequence_header_payload(&config, width, height, qindex > 0, coded_denom.is_some());
     let layout = TileLayout::resolve(
         options.tiling,
-        mi_cols as usize,
-        mi_rows as usize,
+        coded_w as usize,
+        height as usize,
         config.seq_level_idx_0,
         coded_denom,
     );
