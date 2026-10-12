@@ -591,12 +591,21 @@ impl Trc {
     /// [`CicpTransferReading::InverseOetf`], and the BT.1886 pure gamma under
     /// [`CicpTransferReading::Bt1886Display`]. `reading` changes nothing else.
     ///
+    /// Code points 4 and 5 are Table 3's "assumed display gamma" 2.2 (Rec. ITU-R BT.470-6
+    /// System M) and 2.8 (System B, G): pure power functions, so each is §10.18 function type 0
+    /// exactly, the same shape linear (8) takes with `g = 1`. They are display gammas already, so
+    /// the BT.1886 reading does not reach them.
+    ///
     /// Everything else is declined, including HLG (18) and Unspecified (2), which have no
-    /// `parametricCurveType` form and no `gamut-color` EOTF to sample.
+    /// `parametricCurveType` form and no `gamut-color` EOTF to sample. SMPTE ST 240 (7) is also
+    /// declined: its inverse is a §10.18 type 3 closed form, but it needs its own α/β and toe
+    /// constants, which nothing here or in `gamut-color` yet supplies or gates.
     fn for_code_point(transfer: u8, reading: CicpTransferReading) -> Option<Self> {
         match (transfer, reading) {
             (1 | 6 | 14 | 15, CicpTransferReading::InverseOetf) => Some(Trc::Bt709),
             (1 | 6 | 14 | 15, CicpTransferReading::Bt1886Display) => Some(Trc::Gamma(BT1886_GAMMA)),
+            (4, _) => Some(Trc::Gamma(2.2)),
+            (5, _) => Some(Trc::Gamma(2.8)),
             (8, _) => Some(Trc::Gamma(1.0)),
             (13, _) => Some(Trc::Srgb),
             (16, _) => Some(Trc::Pq),
@@ -1485,11 +1494,11 @@ mod tests {
     #[test]
     fn no_unlisted_transfer_code_point_is_encodable() {
         // ICC.1:2022 §10.18 gives a closed form, or gamut-color an EOTF to sample, for exactly
-        // these ITU-T H.273 Table 3 code points: the BT.709 family (1, 6, 14, 15), linear (8),
-        // sRGB (13) and PQ (16). Every other byte — reserved, unspecified, the two logarithmic
-        // curves, ST 240, the BT.470-6 display gammas, HLG, and everything H.273 has not
-        // assigned — has no ICC tone curve here.
-        const ENCODABLE: [u8; 7] = [1, 6, 8, 13, 14, 15, 16];
+        // these ITU-T H.273 Table 3 code points: the BT.709 family (1, 6, 14, 15), the BT.470-6
+        // display gammas 2.2 (4) and 2.8 (5), linear (8), sRGB (13) and PQ (16). Every other
+        // byte — reserved, unspecified, the two logarithmic curves, ST 240, HLG, and everything
+        // H.273 has not assigned — has no ICC tone curve here.
+        const ENCODABLE: [u8; 9] = [1, 4, 5, 6, 8, 13, 14, 15, 16];
 
         for code in 0..=u8::MAX {
             if ENCODABLE.contains(&code) {
@@ -2053,9 +2062,10 @@ mod tests {
 
     /// lcms2 evaluates the three TRCs of the profile built for **every** encodable transfer code
     /// point to that transfer's own curve, taken from a source independent of the tag: H.273
-    /// Table 3's forward function for the BT.709 family, the identity for linear, lcms2's own sRGB
-    /// for sRGB, and `gamut-color`'s `pq_eotf` for PQ. The linear and PQ tags are otherwise only
-    /// checked by this crate's own evaluator. An independent CMM reading an independent
+    /// Table 3's forward function for the BT.709 family, Table 3's assumed display gammas written
+    /// out as `V^2.2` and `V^2.8` for code points 4 and 5, the identity for linear, lcms2's own
+    /// sRGB for sRGB, and `gamut-color`'s `pq_eotf` for PQ. The display-gamma, linear and PQ tags
+    /// are otherwise only checked by this crate's own evaluator. An independent CMM reading an independent
     /// transcription of each curve is what says the tag this module *wrote* — function type,
     /// parameter order, `s15Fixed16` encoding, sampling — is the curve, not just that this
     /// crate's evaluator agrees with itself.
@@ -2069,13 +2079,15 @@ mod tests {
     fn oracle_every_encodable_transfer_matches_its_curve_through_lcms() {
         let srgb = lcms2_oracle::srgb();
         let peak = pq_eotf(1.0);
-        for code in [1_u8, 6, 8, 13, 14, 15, 16] {
+        for code in [1_u8, 4, 5, 6, 8, 13, 14, 15, 16] {
             let ours = opened_by_lcms(&rgb_cicp(1, code).expect("an encodable transfer"));
             for step in 0..=64 {
                 let light_or_signal = f64::from(step) / 64.0;
                 // (signal, the light that signal must decode to)
                 let (signal, want) = match code {
                     1 | 6 | 14 | 15 => (h273_bt709_oetf(light_or_signal), light_or_signal),
+                    4 => (light_or_signal, light_or_signal.powf(2.2)),
+                    5 => (light_or_signal, light_or_signal.powf(2.8)),
                     8 => (light_or_signal, light_or_signal),
                     13 => (
                         light_or_signal,
@@ -2156,7 +2168,7 @@ mod tests {
     #[test]
     fn oracle_cicp_tag_matches_the_lcms_synthesiser() {
         for primaries in buildable_primaries() {
-            for transfer in [1_u8, 6, 8, 13, 14, 15, 16] {
+            for transfer in [1_u8, 4, 5, 6, 8, 13, 14, 15, 16] {
                 let ours = IccProfile::from_cicp(Cicp {
                     colour_primaries: primaries,
                     transfer_characteristics: transfer,

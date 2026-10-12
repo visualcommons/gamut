@@ -97,6 +97,7 @@ gives the transfer a closed form ICC also defines, and a sampled `curveType` (§
 | Transfer (H.273) | ICC encoding | Deciding clause |
 | ---------------- | ------------ | --------------- |
 | Linear (code 8) | `parametricCurveType` type 0, `g = 1` | §10.18 type 0 is `Y = X^g` exactly |
+| Assumed display gamma 2.2 / 2.8 — Rec. ITU-R BT.470-6 System M (code 4) / System B, G (code 5) (issue #588) | `parametricCurveType` type 0, `g = 2.2` / `g = 2.8` | Table 3 gives each as a pure power function; §10.18 type 0 is `Y = X^g` exactly. Already display gammas, so the BT.1886 reading does not reach them |
 | BT.709 family (codes 1, 6, 14, 15) — the default, literal reading | `parametricCurveType` type 3, `(g, a, b, c, d)` | Table 3 gives all four one curve — "functionally the same as the values 1, 6 and 15" — with α = 1 + 5.5β and β = 0.018053968510807…; its inverse is §10.18 type 3 exactly |
 | BT.709 family under `CicpTransferReading::Bt1886Display` (`from_cicp_with`, issue #586) | `parametricCurveType` type 0, `g = 2.4` | H.273 §8.2 NOTE 1 names the Rec. ITU-R BT.1886 EOTF for flat-panel displays; at reference black zero BT.1886 Annex 1's `a (max[(V + b), 0])^γ` is `V^2.4`, §10.18 type 0 exactly |
 | sRGB / IEC 61966-2-1 (code 13) | `parametricCurveType` type 3, `(g, a, b, c, d)` | §10.18 type 3 is the spec's own piecewise form |
@@ -104,7 +105,10 @@ gives the transfer a closed form ICC also defines, and a sampled `curveType` (§
 | PQ / ST 2084 (code 16) | `curveType`, 1024 `uInt16` samples | §10.18 defines no closed form for PQ; 1024 points keep interpolation error under one `uInt16` quantum — measured 0.986, guarded at 1 |
 
 Declined: HLG (code 18) and Unspecified (code 2) have neither a §10.18 closed form nor a
-gamut-color EOTF to sample from, and every other H.273 code point is unmodelled here. The transfer
+gamut-color EOTF to sample from, and every other H.273 code point is unmodelled here. SMPTE ST 240
+(code 7) is declined by choice rather than by necessity: its inverse is a §10.18 type 3 closed form,
+but it needs its own α/β and toe constants, which nothing here or in gamut-color yet supplies or
+gates, and it is far rarer than codes 4 and 5. The transfer
 axis is keyed on the **raw code point**, not on `gamut_color::cicp::TransferCharacteristics`,
 because the set of curves an ICC tag can encode is not the set gamut-color can evaluate: codes 6
 and 15 have no `TransferCharacteristics` variant at all, while codes 1 and 14 do, and `eotf_for`
@@ -245,7 +249,7 @@ serialized, compared against something this crate did not compute:
 | The same colorant check | **every** `BuiltinProfile`, including Adobe RGB and ProPhoto RGB, which no code point reaches | `oracle_colorants_match_lcms_for_every_builtin_space` |
 | All three TRCs evaluate to gamut-color's standard curve (two `uInt16` quanta) | Adobe RGB and ProPhoto RGB, through the ROMM toe | `oracle_uncoded_space_curves_match_gamut_color_through_lcms` |
 | `mediaWhitePointTag` equals the D50 lcms2 writes itself | every `BuiltinProfile` and the grey constructor | `oracle_media_white_point_matches_lcms` |
-| All three TRCs evaluate to the transfer's own curve (two `uInt16` quanta) | `from_cicp` for **every** encodable transfer — 1, 6, 8, 13, 14, 15, 16 — against H.273 Table 3, the identity, lcms2's own sRGB and `gamut-color`'s `pq_eotf` | `oracle_every_encodable_transfer_matches_its_curve_through_lcms` |
+| All three TRCs evaluate to the transfer's own curve (two `uInt16` quanta) | `from_cicp` for **every** encodable transfer — 1, 4, 5, 6, 8, 13, 14, 15, 16 — against H.273 Table 3, its display gammas `V^2.2` and `V^2.8`, the identity, lcms2's own sRGB and `gamut-color`'s `pq_eotf` | `oracle_every_encodable_transfer_matches_its_curve_through_lcms` |
 | All three TRCs evaluate to BT.1886 Annex 1's `V^2.4` (two `uInt16` quanta) | `from_cicp_with` under `CicpTransferReading::Bt1886Display`, for codes 1, 6, 14 and 15 | `oracle_bt1886_reading_matches_its_curve_through_lcms` |
 | The `cicpType` tag equals the one lcms2's own `cicp` synthesiser writes | every buildable (primaries, transfer) pair, built from an `nclx`-style matrix 9 | `oracle_cicp_tag_matches_the_lcms_synthesiser` |
 | The grey gamma lcms2 estimates is the one asked for | `gray_with_gamma` at 1.0, 1.8, 2.2 | `oracle_gray_gamma_matches_lcms` |
