@@ -43,6 +43,20 @@ fn valid_stream(variant: Variant) -> Vec<u8> {
     .expect("write")
 }
 
+/// Asserts two parses are the same file by their `Debug` rendering, not by `==`.
+///
+/// `TiffFile` derives `PartialEq` but not `Eq`: a `FLOAT`/`DOUBLE` field holds `f32`/`f64`, and
+/// `NaN != NaN` makes `==` non-reflexive, so two identical parses of a file carrying a NaN would
+/// compare unequal (issue #592). The `Debug` form is total over every value the reader produces
+/// and renders each NaN the same way, so it is reflexive where `==` is not.
+fn assert_same_parse(a: &TiffFile, b: &TiffFile, what: &str) {
+    assert_eq!(
+        format!("{a:?}"),
+        format!("{b:?}"),
+        "{what} parse disagreement"
+    );
+}
+
 /// All readers must survive `data` without panicking; the parse may succeed or fail, but the
 /// slice and streaming paths must agree (equal files, or both errors — the *messages* may
 /// differ, since bounds failures legitimately phrase differently across the two data flows).
@@ -50,14 +64,14 @@ fn survives(data: &[u8]) {
     let slice = read(data);
     let stream = IfdReader::open(data).and_then(|mut r| r.read_file());
     match (&slice, &stream) {
-        (Ok(a), Ok(b)) => assert_eq!(a, b, "flat parse disagreement"),
+        (Ok(a), Ok(b)) => assert_same_parse(a, b, "flat"),
         (Err(_), Err(_)) => {}
         _ => panic!("flat readers disagree: slice {slice:?} vs stream {stream:?}"),
     }
     let slice_tree = read_tree(data, POINTER_TAGS);
     let stream_tree = IfdReader::open(data).and_then(|mut r| r.read_tree(POINTER_TAGS));
     match (&slice_tree, &stream_tree) {
-        (Ok(a), Ok(b)) => assert_eq!(a, b, "tree parse disagreement"),
+        (Ok(a), Ok(b)) => assert_same_parse(a, b, "tree"),
         (Err(_), Err(_)) => {}
         _ => panic!("tree readers disagree: slice {slice_tree:?} vs stream {stream_tree:?}"),
     }
@@ -110,6 +124,28 @@ fn specific_malformed_inputs_yield_typed_errors_not_panics() {
             .to_string()
             .contains("IFD extends past end of file")
     );
+}
+
+/// A well-formed `FLOAT` field holding a NaN must pass the reader-agreement pin: the corpus above
+/// never produces one, but a hostile file does, and `==` on the two identical parses would report
+/// a disagreement (issue #592).
+#[test]
+fn nan_float_field_passes_reader_agreement() {
+    let data: &[u8] = &[
+        b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD at 8
+        0x01, 0x00, // entry count = 1
+        0x00, 0x01, // tag 256
+        0x0b, 0x00, // type FLOAT
+        0x01, 0x00, 0x00, 0x00, // count = 1 (inline)
+        0x00, 0x00, 0xc0, 0x7f, // quiet NaN
+        0x00, 0x00, 0x00, 0x00, // next IFD = 0
+    ];
+    let file = read(data).expect("NaN field parses");
+    assert!(
+        matches!(file.ifds[0].get(256), Some(Value::Float(v)) if v.len() == 1 && v[0].is_nan()),
+        "fixture must carry a NaN"
+    );
+    survives(data);
 }
 
 #[test]
