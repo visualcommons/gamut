@@ -6,8 +6,8 @@
 //! behind a solid colour. The grid tests compare against independently-written references.
 
 use gamut_avif::{
-    Av1Config, Av1StillDecoder, AvifContainer, ChromaFormat, DecodedFrame, ObuType, Subsampling,
-    iter_obus,
+    Av1Config, Av1StillDecoder, AvifContainer, ChromaFormat, DecodeLimits, DecodedFrame, ObuType,
+    Subsampling, iter_obus,
 };
 use gamut_color::{ColorRange, ycbcr_to_rgb};
 use gamut_core::{Error, ErrorKind, Result};
@@ -2484,4 +2484,173 @@ fn av1_sequence_header_refuses_an_item_without_one() {
         ..coded_item(1, 1, 8, 15, 4, 4, vec![])
     };
     assert!(refused(vec![malformed], 1));
+}
+
+// ---- decode resource limits (issue #653) -----------------------------------------------------
+
+/// The `(kind, message)` of a refusal, for asserting which cap refused a decode.
+fn limit_refusal<T>(result: Result<T>) -> (ErrorKind, Option<&'static str>) {
+    match result {
+        Ok(_) => panic!("expected a refusal"),
+        Err(error) => (error.kind(), error.static_message()),
+    }
+}
+
+const DIMENSION_REFUSAL: (ErrorKind, Option<&str>) = (
+    ErrorKind::Unsupported,
+    Some("AVIF: image dimension exceeds DecodeLimits::max_dimension"),
+);
+const PIXEL_REFUSAL: (ErrorKind, Option<&str>) = (
+    ErrorKind::Unsupported,
+    Some("AVIF: image pixel count exceeds DecodeLimits::max_pixels"),
+);
+
+/// An `iovl` of the given canvas over one hidden 2x2 4:4:4 input.
+fn overlay_file(ow: u32, oh: u32) -> Vec<u8> {
+    let input = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 10, 2, 2, vec![])
+    };
+    let overlay = Item {
+        references: vec![dimg(&[2])],
+        payload: ImageOverlay {
+            canvas_fill_value: [0; 4],
+            output_width: ow,
+            output_height: oh,
+            offsets: vec![(0, 0)],
+        }
+        .to_bytes()
+        .unwrap(),
+        ..base_item(1, *b"iovl")
+    };
+    file(1, vec![overlay, input])
+}
+
+#[test]
+fn a_65535_squared_overlay_is_refused_by_the_default_limits_before_anything_is_decoded() {
+    // 65535 x 65535 RGBA is 16 GiB at 8 bits and 32 GiB at 16. The canvas is refused from its
+    // declaration: the input is never decoded (`NeverCalled`) and the canvas never allocated
+    // (this test would otherwise exhaust memory rather than return).
+    let bytes = overlay_file(65535, 65535);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    assert_eq!(
+        limit_refusal(container.decode_primary_rgba8(&mut NeverCalled)),
+        DIMENSION_REFUSAL
+    );
+    assert_eq!(
+        limit_refusal(container.decode_primary_rgba16(&mut NeverCalled)),
+        DIMENSION_REFUSAL
+    );
+}
+
+#[test]
+fn an_overlay_canvas_past_the_pixel_cap_is_refused_and_one_at_it_composites() {
+    let bytes = overlay_file(4, 3);
+    let image = AvifContainer::parse(&bytes).unwrap().image().clone();
+    assert_eq!(
+        limit_refusal(image.decode_item_rgba8_with_limits(
+            1,
+            &mut NeverCalled,
+            DecodeLimits::new(4, 11)
+        )),
+        PIXEL_REFUSAL
+    );
+    let rgba = image
+        .decode_item_rgba16_with_limits(1, &mut Mock::default(), DecodeLimits::new(4, 12))
+        .unwrap();
+    assert_eq!((rgba.width(), rgba.height()), (4, 3));
+}
+
+#[test]
+fn a_grid_output_past_the_limits_is_refused_before_any_tile_is_decoded() {
+    let bytes = file(
+        1,
+        vec![
+            grid_item(1, 1, 2, 4, 2, &[2, 3]),
+            mono_tile(2, 10),
+            mono_tile(3, 40),
+        ],
+    );
+    let image = AvifContainer::parse(&bytes).unwrap().image().clone();
+    assert_eq!(
+        limit_refusal(image.decode_item_planar_with_limits(
+            1,
+            &mut NeverCalled,
+            DecodeLimits::new(3, 100)
+        )),
+        DIMENSION_REFUSAL
+    );
+    let frame = image
+        .decode_item_planar_with_limits(1, &mut Mock::default(), DecodeLimits::new(4, 8))
+        .unwrap();
+    assert_eq!((frame.width(), frame.height()), (4, 2));
+}
+
+#[test]
+fn a_grid_whose_tiles_overhang_past_the_limits_stops_after_its_first_tile() {
+    // Two 2x2 tiles fill a 4x2 canvas cropped to 3x2: the output is within a 3-pixel dimension
+    // cap, the canvas is not, and it is refused once the first tile fixes the tile size.
+    let bytes = file(
+        1,
+        vec![
+            grid_item(1, 1, 2, 3, 2, &[2, 3]),
+            mono_tile(2, 10),
+            mono_tile(3, 40),
+        ],
+    );
+    let image = AvifContainer::parse(&bytes).unwrap().image().clone();
+    let mut mock = Mock::default();
+    assert_eq!(
+        limit_refusal(image.decode_item_planar_with_limits(
+            1,
+            &mut mock,
+            DecodeLimits::new(3, 100)
+        )),
+        DIMENSION_REFUSAL
+    );
+    assert_eq!(mock.calls.len(), 1);
+}
+
+#[test]
+fn a_coded_item_whose_ispe_is_past_the_limits_never_reaches_the_decoder() {
+    let ispe = Property {
+        essential: false,
+        kind: PropertyKind::ImageSpatialExtents {
+            width: 4,
+            height: 4,
+        },
+    };
+    let bytes = file(1, vec![coded_item(1, 1, 8, 20, 4, 4, vec![ispe])]);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    assert_eq!(
+        limit_refusal(container.image().decode_item_planar_with_limits(
+            1,
+            &mut NeverCalled,
+            DecodeLimits::new(4, 15)
+        )),
+        PIXEL_REFUSAL
+    );
+}
+
+#[test]
+fn a_decoded_frame_past_the_limits_is_refused() {
+    // No `ispe`: the 4x4 frame the decoder returns is the first size the pipeline sees.
+    let bytes = file(1, vec![coded_item(1, 1, 8, 20, 4, 4, vec![])]);
+    let image = AvifContainer::parse(&bytes).unwrap().image().clone();
+    assert_eq!(
+        limit_refusal(
+            image.decode_primary_rgba8_with_limits(&mut Mock::default(), DecodeLimits::new(3, 100))
+        ),
+        DIMENSION_REFUSAL
+    );
+    assert_eq!(
+        limit_refusal(
+            image.decode_primary_rgba16_with_limits(&mut Mock::default(), DecodeLimits::new(4, 15))
+        ),
+        PIXEL_REFUSAL
+    );
+    let rgba = image
+        .decode_primary_rgba8_with_limits(&mut Mock::default(), DecodeLimits::new(4, 16))
+        .unwrap();
+    assert_eq!((rgba.width(), rgba.height()), (4, 4));
 }
