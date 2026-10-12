@@ -39,9 +39,11 @@ fn public_enums_round_trip_by_variant_name() {
     round_trip(&[
         TransferCharacteristics::Bt709,
         TransferCharacteristics::Unspecified,
+        TransferCharacteristics::Bt601,
         TransferCharacteristics::Linear,
         TransferCharacteristics::Srgb,
         TransferCharacteristics::Bt2020_10,
+        TransferCharacteristics::Bt2020_12,
         TransferCharacteristics::Pq,
         TransferCharacteristics::Hlg,
     ]);
