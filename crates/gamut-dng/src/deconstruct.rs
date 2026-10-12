@@ -413,6 +413,7 @@ impl Findings {
                         detail: match reason {
                             SkipReason::Cycle => "DNG: sub-IFD offset revisited (possible cycle)",
                             SkipReason::TooDeep => "DNG: sub-IFD nesting too deep",
+                            SkipReason::OverBudget => "DNG: sub-IFD budget exhausted",
                             _ => "DNG: sub-IFD could not be parsed",
                         },
                         severity: Severity::Error,
@@ -493,6 +494,33 @@ impl DngDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sub-IFD target the audit skipped because the walk had spent its directory budget is
+    /// reported as budget exhaustion, not as a target that could not be parsed: it was never
+    /// attempted.
+    ///
+    /// Driven through `map_audit_findings` directly rather than a file, because reaching the
+    /// budget end to end takes 65,536 parsed sub-IFDs, and `gamut-ifd`'s own audit test already
+    /// pins that the walk emits `SkipReason::OverBudget` there; what this crate owns is only the
+    /// mapping. Deleting the `OverBudget` arm falls through to "could not be parsed".
+    #[test]
+    fn map_audit_findings_reports_an_over_budget_sub_ifd_as_budget_exhausted() {
+        let mut findings = Findings::default();
+        findings.map_audit_findings(&[AuditFinding::SkippedSubIfd {
+            page: 0,
+            tag: 330,
+            offset: 26,
+            reason: SkipReason::OverBudget,
+        }]);
+        assert_eq!(
+            findings.anomalies,
+            [Anomaly::Structure {
+                page: 0,
+                detail: "DNG: sub-IFD budget exhausted",
+                severity: Severity::Error,
+            }]
+        );
+    }
 
     /// A directory that repeats a tag is graded: the audit's shadowed-entry finding folds into one
     /// `DuplicateTag` naming the directory by offset and counting both entries.
