@@ -175,12 +175,14 @@ fn libavif_reconstructs_a_multithreaded_rgba_encode_to_the_av1_reconstruction() 
         matrix: MatrixCoefficients::Bt709,
         ..Av1Colour::default()
     };
+    let speed = AvifEncoder::lossy(50).speed();
     let (_, colour_recon) =
-        gamut_av1::encode_still_intra_with(&colour_planes, Q50, colour).unwrap();
-    let (_, alpha_recon) = gamut_av1::encode_still_intra_with(
+        gamut_av1::encode_still_intra_with_speed(&colour_planes, Q50, colour, speed).unwrap();
+    let (_, alpha_recon) = gamut_av1::encode_still_intra_with_speed(
         &Planar8::from_rgba8_alpha_view(image),
         Q50,
         Av1Colour::monochrome(),
+        speed,
     )
     .unwrap();
 

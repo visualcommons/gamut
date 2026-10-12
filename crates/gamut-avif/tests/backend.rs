@@ -63,10 +63,15 @@ fn chroma_for(colour: Av1Colour) -> ChromaSubsampling {
 
 fn builtin_obus(base_q_idx: u8, colour: Av1Colour, chroma: ChromaSubsampling) -> Vec<u8> {
     let planes = fixture_planes(colour, chroma);
-    gamut_av1::encode_still_intra_with(&planes, base_q_idx, colour)
-        .unwrap()
-        .0
-        .obus
+    gamut_av1::encode_still_intra_with_speed(
+        &planes,
+        base_q_idx,
+        colour,
+        AvifEncoder::new().speed(),
+    )
+    .unwrap()
+    .0
+    .obus
 }
 
 /// The fixture in the plane layout `colour` describes: identity GBR, or YCbCr through its matrix.
@@ -203,12 +208,15 @@ impl Av1StillEncoder for Wide {
         *self.depth_seen.lock().unwrap() = Some(req.bit_depth());
         *self.speed_seen.lock().unwrap() = Some(req.speed());
         assert_eq!(planes.bit_depth(), req.bit_depth());
-        Ok(
-            gamut_av1::encode_still_intra16_with(planes, req.base_q_idx(), req.colour())
-                .expect("the built-in encoder handles the request")
-                .0
-                .obus,
+        Ok(gamut_av1::encode_still_intra16_with_speed(
+            planes,
+            req.base_q_idx(),
+            req.colour(),
+            req.speed(),
         )
+        .expect("the built-in encoder handles the request")
+        .0
+        .obus)
     }
 }
 
@@ -298,11 +306,14 @@ fn a_backend_stream_at_the_wrong_depth_is_rejected() {
                 BitDepth::Ten,
                 std::array::from_fn(|i| planes.plane(i).iter().map(|&s| s >> 2).collect()),
             )?;
-            Ok(
-                gamut_av1::encode_still_intra16_with(&ten, req.base_q_idx(), req.colour())?
-                    .0
-                    .obus,
-            )
+            Ok(gamut_av1::encode_still_intra16_with_speed(
+                &ten,
+                req.base_q_idx(),
+                req.colour(),
+                req.speed(),
+            )?
+            .0
+            .obus)
         }
     }
     let mut encoder = AvifEncoder::new();
@@ -1478,10 +1489,15 @@ fn abi_adapter_lowers_a_high_bit_depth_job() {
     .unwrap();
     let planes =
         Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs420).expect("planes");
-    let obus = gamut_av1::encode_still_intra16_with(&planes, 127, colour)
-        .expect("the built-in encoder handles the request")
-        .0
-        .obus;
+    let obus = gamut_av1::encode_still_intra16_with_speed(
+        &planes,
+        127,
+        colour,
+        AvifEncoder::lossy(50).speed(),
+    )
+    .expect("the built-in encoder handles the request")
+    .0
+    .obus;
     // Two chunks, so the adapter's accumulation is exercised rather than a single hand-off.
     let (head, tail) = obus.split_at(7);
     let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(

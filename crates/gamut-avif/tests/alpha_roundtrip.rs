@@ -465,10 +465,11 @@ fn lossy_alpha_is_the_av1_reconstruction_of_the_alpha_plane() {
     let px = source_rgba();
     let alpha_planes =
         gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, DIMS).unwrap());
-    let (_, recon) = gamut_av1::encode_still_intra_with(
+    let (_, recon) = gamut_av1::encode_still_intra_with_speed(
         &alpha_planes,
         quality_to_quant(QUALITY),
         gamut_av1::Av1Colour::monochrome(),
+        AvifEncoder::lossy(QUALITY).speed(),
     )
     .expect("the alpha plane encodes");
 
@@ -499,15 +500,21 @@ fn item_payloads(avif: &[u8]) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The built-in encoder's monochrome stream for the source's alpha plane at `base_q_idx` — what
-/// the alpha item must carry, byte for byte, when it is coded at that index.
+/// the alpha item must carry, byte for byte, when it is coded at that index (at the speed an
+/// encoder that never chose one codes).
 fn alpha_stream_at(base_q_idx: u8) -> Vec<u8> {
     let px = source_rgba();
     let planes =
         gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, DIMS).unwrap());
-    gamut_av1::encode_still_intra_with(&planes, base_q_idx, gamut_av1::Av1Colour::monochrome())
-        .expect("the alpha plane encodes")
-        .0
-        .obus
+    gamut_av1::encode_still_intra_with_speed(
+        &planes,
+        base_q_idx,
+        gamut_av1::Av1Colour::monochrome(),
+        AvifEncoder::new().speed(),
+    )
+    .expect("the alpha plane encodes")
+    .0
+    .obus
 }
 
 #[test]
@@ -584,10 +591,11 @@ fn a_finer_alpha_quality_decodes_closer_to_the_source_through_libavif() {
     let fine = decoded_alpha(&encode_rgba(
         &AvifEncoder::lossy(COLOUR_Q).with_alpha_quality(ALPHA_Q),
     ));
-    let (_, recon) = gamut_av1::encode_still_intra_with(
+    let (_, recon) = gamut_av1::encode_still_intra_with_speed(
         &alpha_planes,
         quality_to_quant(ALPHA_Q),
         gamut_av1::Av1Colour::monochrome(),
+        AvifEncoder::lossy(COLOUR_Q).speed(),
     )
     .expect("the alpha plane encodes");
     assert_eq!(fine, recon.planes[0]);
