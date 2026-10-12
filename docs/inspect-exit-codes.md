@@ -264,7 +264,10 @@ No list is capped. The twenty-entry cut is a terminal-presentation decision, so 
 every entry the format crate reports — every C2PA box, every unknown tag, every PNG finding — in the
 order the text report would print them. Every byte range is a half-open `{"start", "end"}` object.
 Enumerated values (`reason`, `position`, `kind`, `severity`) are `snake_case` identifiers; a value
-the command does not know yet (every such type is non-exhaustive) is `"other"`, never omitted.
+the command does not know yet (every such type is non-exhaustive) is `"other"`, never omitted. That
+includes an anomaly `severity` the command does not know, and the severity of an anomaly `kind` it
+does not know: the text report labels both `[error]`, the conservative reading for a terminal, but
+the document says `"other"` rather than claim a level nobody classified.
 
 Every document opens with:
 

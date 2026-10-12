@@ -344,7 +344,7 @@ fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
                 detail,
                 severity,
                 ..
-            } => anomaly_structure(*page, detail, severity_label_tiff(*severity)),
+            } => anomaly_structure(*page, detail, severity_level_tiff(*severity)),
             Anomaly::DuplicateTag {
                 ifd,
                 tag,
@@ -356,7 +356,7 @@ fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
                 *ifd,
                 *tag,
                 *entries,
-                severity_label_tiff(*severity),
+                severity_level_tiff(*severity),
             ),
             // `Anomaly` is non-exhaustive; render future categories generically.
             other => anomaly_other(format!("{other:?}")),
@@ -406,7 +406,7 @@ fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
                 detail,
                 severity,
                 ..
-            } => anomaly_structure(*page, detail, severity_label_dng(*severity)),
+            } => anomaly_structure(*page, detail, severity_level_dng(*severity)),
             Anomaly::DuplicateTag {
                 ifd,
                 tag,
@@ -418,7 +418,7 @@ fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
                 *ifd,
                 *tag,
                 *entries,
-                severity_label_dng(*severity),
+                severity_level_dng(*severity),
             ),
             // `Anomaly` is non-exhaustive; render future categories generically.
             other => anomaly_other(format!("{other:?}")),
@@ -434,23 +434,54 @@ fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
     }
 }
 
-/// Renders a TIFF anomaly severity.
-fn severity_label_tiff(severity: gamut::tiff::Severity) -> &'static str {
-    match severity {
-        gamut::tiff::Severity::Warning => "warning",
-        gamut::tiff::Severity::Error => "error",
-        // `Severity` is non-exhaustive; treat future levels as errors (the conservative label).
-        _ => "error",
+/// An anomaly severity as this command knows it. `Other` is a level the format crate added after
+/// this command was written (`Severity` is non-exhaustive), or the unknown severity of an anomaly
+/// category this command does not know yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Level {
+    Warning,
+    Error,
+    Other,
+}
+
+impl Level {
+    /// The text report's bracketed label. An unknown level prints as `error`, the conservative
+    /// label, exactly as the text report always has.
+    fn text(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error | Self::Other => "error",
+        }
+    }
+
+    /// The JSON `severity` identifier. An unknown level is `"other"`, as every unknown enumerated
+    /// value in the document is, so the document never names an unknown level as a known one.
+    fn json(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Other => "other",
+        }
     }
 }
 
-/// Renders a DNG anomaly severity.
-fn severity_label_dng(severity: gamut::dng::Severity) -> &'static str {
+/// Classifies a TIFF anomaly severity.
+fn severity_level_tiff(severity: gamut::tiff::Severity) -> Level {
     match severity {
-        gamut::dng::Severity::Warning => "warning",
-        gamut::dng::Severity::Error => "error",
-        // `Severity` is non-exhaustive; treat future levels as errors (the conservative label).
-        _ => "error",
+        gamut::tiff::Severity::Warning => Level::Warning,
+        gamut::tiff::Severity::Error => Level::Error,
+        // `Severity` is non-exhaustive.
+        _ => Level::Other,
+    }
+}
+
+/// Classifies a DNG anomaly severity.
+fn severity_level_dng(severity: gamut::dng::Severity) -> Level {
+    match severity {
+        gamut::dng::Severity::Warning => Level::Warning,
+        gamut::dng::Severity::Error => Level::Error,
+        // `Severity` is non-exhaustive.
+        _ => Level::Other,
     }
 }
 
@@ -510,12 +541,12 @@ fn anomaly_unparsable_tag(page: usize, tag: u16, detail: &str) -> Listed {
 }
 
 /// An `Anomaly::Structure`, shared by TIFF and DNG.
-fn anomaly_structure(page: usize, detail: &str, severity: &'static str) -> Listed {
+fn anomaly_structure(page: usize, detail: &str, severity: Level) -> Listed {
     Listed {
-        line: format!("[{severity}] page {page}: {detail}"),
+        line: format!("[{}] page {page}: {detail}", severity.text()),
         json: Json::Object(vec![
             ("kind", Json::from("structure")),
-            ("severity", Json::from(severity)),
+            ("severity", Json::from(severity.json())),
             ("page", Json::from(page)),
             ("detail", Json::from(detail)),
         ]),
@@ -529,13 +560,13 @@ fn anomaly_duplicate_tag(
     ifd: u64,
     tag: u16,
     entries: usize,
-    severity: &'static str,
+    severity: Level,
 ) -> Listed {
     Listed {
         line: format!("[error] {debug}"),
         json: Json::Object(vec![
             ("kind", Json::from("duplicate_tag")),
-            ("severity", Json::from(severity)),
+            ("severity", Json::from(severity.json())),
             ("ifd_offset", Json::from(ifd)),
             ("tag", Json::from(tag)),
             ("entries", Json::from(entries)),
@@ -544,13 +575,14 @@ fn anomaly_duplicate_tag(
 }
 
 /// An anomaly of a category this command does not know yet (`Anomaly` is non-exhaustive),
-/// rendered from its `Debug` form, as an error.
+/// rendered from its `Debug` form. Its severity is unknown too: the text label is the
+/// conservative `error` it always was, the JSON identifier is `"other"`.
 fn anomaly_other(debug: String) -> Listed {
     Listed {
-        line: format!("[error] {debug}"),
+        line: format!("[{}] {debug}", Level::Other.text()),
         json: Json::Object(vec![
             ("kind", Json::from("other")),
-            ("severity", Json::from("error")),
+            ("severity", Json::from(Level::Other.json())),
             ("detail", Json::from(debug)),
         ]),
     }
@@ -1735,7 +1767,7 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Json, MAX_LIST, brand_label, hidden_entries};
+    use super::{Json, Level, MAX_LIST, anomaly_other, brand_label, hidden_entries};
 
     /// The compact text of `value`.
     fn json_text(value: &Json) -> String {
@@ -1807,5 +1839,24 @@ mod tests {
         // A list that fits hides nothing, from either caller.
         assert_eq!(hidden_entries(MAX_LIST, MAX_LIST), 0);
         assert_eq!(hidden_entries(3, 3), 0);
+    }
+
+    #[test]
+    fn an_unknown_severity_is_other_in_json_and_error_in_text() {
+        // docs/inspect-exit-codes.md: every unknown enumerated value, `severity` included, is
+        // `"other"` in the document; the text report keeps its conservative `[error]` label.
+        assert_eq!(Level::Other.json(), "other");
+        assert_eq!(Level::Other.text(), "error");
+        let other = anomaly_other("Future".to_owned());
+        assert_eq!(other.line, "[error] Future");
+        assert_eq!(
+            json_text(&other.json),
+            "{\"kind\":\"other\",\"severity\":\"other\",\"detail\":\"Future\"}"
+        );
+        // The two known levels keep one word in both renderings.
+        for (level, word) in [(Level::Warning, "warning"), (Level::Error, "error")] {
+            assert_eq!(level.json(), word);
+            assert_eq!(level.text(), word);
+        }
     }
 }
