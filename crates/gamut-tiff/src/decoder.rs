@@ -218,7 +218,10 @@ impl TiffDecoder {
     /// pointers naming one directory, or nesting below the `ExifIFD` → `InteroperabilityIFD` pair
     /// — two levels under IFD 0, the deepest tree those two tags legitimately reach (EXIF 2.3
     /// §4.6.3), and the same bound
-    /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) writes within.
+    /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) writes within. It is also
+    /// returned for an IFD-0 `ExifIFD` entry naming **two or more** directories: EXIF 2.32
+    /// §4.6.3 A fixes its count at 1, [`TiffMetadata::exif`] holds one, and keeping only the first
+    /// would drop the rest silently. [`deconstruct`](crate::deconstruct) still walks such a file.
     ///
     /// Which pointers are followed depends on the **level**, so which ones can fail this call does
     /// too. At **IFD 0** only `ExifIFD` (34665) is followed: a `SubIFDs` (330), `GPSInfo` (34853)
