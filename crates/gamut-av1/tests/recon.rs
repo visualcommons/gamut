@@ -880,7 +880,14 @@ fn restoration_units_decided_one_by_one_match_both_decoders() {
     // units the encoder decides differently — the smooth field's left unit is restored and the
     // others are not (pinned by the encoder's own unit test) — so each unit's `use_wiener` is
     // coded at its own superblock and applied to its own samples, and both decoders must agree.
-    let (still, recon) = encode_still_intra(&planes(640, 64, smooth_field), 110).unwrap();
+    // That unit test codes the full search, so this one names `Thorough` to code the same frame.
+    let (still, recon) = encode_still_intra_with_speed(
+        &planes(640, 64, smooth_field),
+        110,
+        Av1Colour::default(),
+        Speed::Thorough,
+    )
+    .unwrap();
     let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
     assert_eq!(
         header.frame.lr.frame_restoration_type[0],

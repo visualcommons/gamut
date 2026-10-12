@@ -36,7 +36,7 @@
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
 //!
 //! How many of those candidates the lossy path actually tries is a [`Search`], resolved from the
-//! caller's `Speed` preset; the full search is the default. The partition (bottom-up, 8×8 to
+//! caller's `Speed` preset; a bare `FrameEncoder` runs the full search. The partition (bottom-up, 8×8 to
 //! 64×64), the luma mode (with filter-intra) jointly with the transform depth, the transform type
 //! and the CfL alphas are each decided by rate–distortion cost:
 //! every candidate is *trialled* — reconstructed exactly as it would be coded, its symbols priced
@@ -829,7 +829,10 @@ impl<'a> FrameEncoder<'a> {
             sb_r: 0,
             sb_c: 0,
             block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
-            search: Search::for_speed(Speed::default()),
+            // The full search, not `Speed::default()`: every public entry point replaces this
+            // with its caller's preset through `with_search`, so only the crate's own tests
+            // construct an encoder that keeps it, and they are written against the full search.
+            search: Search::for_speed(Speed::Thorough),
             decided: Vec::new(),
             decided_partitions: Vec::new(),
             sb_decisions: SbDecisions::default(),
@@ -1148,6 +1151,13 @@ impl<'a> FrameEncoder<'a> {
     /// Chooses the deblocking level and then the CDEF strengths by the distortion each leaves
     /// against the source, on the coded tiles' unfiltered reconstruction `planes`, as
     /// [`crate::filter::choose_deblock_level`] and [`crate::filter::choose_cdef`] search them.
+    ///
+    /// Cost: this is called once per frame, from the frame-level path after `encode_tiles` has
+    /// returned, over the whole reconstruction. It is the same search at every `Speed`, so a
+    /// faster preset does not shorten it, and it runs on one thread whatever the caller's thread
+    /// cap — only the tile coding before it is concurrent. Measured, it is about 6–8% of the
+    /// tile-coding time: 0.65 s against 11.0 s at 256×256, and 2.68 s against 33.0 s at 512×512.
+    /// It is deliberately neither pruned nor threaded here (issue #798 records only its cost).
     fn choose_filters(&self, planes: &[Vec<u16>; 3]) -> FrameFilters {
         let deblock_level = crate::filter::choose_deblock_level(|level| {
             let mut deblocked = planes.clone();

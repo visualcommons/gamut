@@ -142,8 +142,13 @@ fn lossy_roundtrip_via_libavif() {
                 gamut_color::ChromaSubsampling::Cs420,
             )
             .unwrap();
-            let (_, recon) =
-                gamut_av1::encode_still_intra_with(&planes, qidx, lossy_colour()).unwrap();
+            let (_, recon) = gamut_av1::encode_still_intra_with_speed(
+                &planes,
+                qidx,
+                lossy_colour(),
+                AvifEncoder::lossy(quality).speed(),
+            )
+            .unwrap();
 
             let decoded = libavif_oracle::decode_avif(&avif)
                 .unwrap_or_else(|e| panic!("libavif decode failed for {w}x{h} q{quality}: {e}"));
@@ -374,9 +379,13 @@ fn every_chroma_format_roundtrips_via_libavif() {
             let planes =
                 gamut_color::Planar8::from_rgb8_matrix_subsampled(img, lossy_matrix(), chroma)
                     .unwrap();
-            let (_, recon) =
-                gamut_av1::encode_still_intra_with(&planes, quality_to_quant(60), lossy_colour())
-                    .unwrap();
+            let (_, recon) = gamut_av1::encode_still_intra_with_speed(
+                &planes,
+                quality_to_quant(60),
+                lossy_colour(),
+                AvifEncoder::lossy(60).speed(),
+            )
+            .unwrap();
 
             let decoded = libavif_oracle::decode_avif(&avif)
                 .unwrap_or_else(|e| panic!("libavif decode failed for {chroma:?} {w}x{h}: {e}"));

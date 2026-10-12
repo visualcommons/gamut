@@ -12,7 +12,7 @@
 //! Building this needs the `third_party/libavif` + `third_party/dav1d` submodules and a C
 //! toolchain, like the crate's other oracle tests.
 
-use gamut_av1::{Av1Colour, encode_still_intra_with, encode_still_intra16_with};
+use gamut_av1::{Av1Colour, encode_still_intra_with_speed, encode_still_intra16_with_speed};
 use gamut_avif::{
     AlphaMode, Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, DecodedFrame, RawPlanes,
 };
@@ -187,10 +187,11 @@ fn lossy_subsampled_planes_decode_to_gamut_av1s_own_reconstruction() {
     let raw = RawPlanes::eight(&p8, None, MatrixCoefficients::Bt601, ColorRange::Limited).unwrap();
     let decoded = libavif_oracle::decode_avif(&encoder.encode_raw_planes_to_vec(raw).unwrap())
         .expect("libavif decodes");
-    let (_, recon) = encode_still_intra_with(
+    let (_, recon) = encode_still_intra_with_speed(
         &p8,
         quality_to_quant(QUALITY),
         colour(MatrixCoefficients::Bt601),
+        encoder.speed(),
     )
     .unwrap();
     assert_eq!(decoded.yuv_format, yuv_format(ChromaSubsampling::Cs420));
@@ -208,10 +209,11 @@ fn lossy_subsampled_planes_decode_to_gamut_av1s_own_reconstruction() {
     .unwrap();
     let decoded = libavif_oracle::decode_avif(&encoder.encode_raw_planes_to_vec(raw).unwrap())
         .expect("libavif decodes");
-    let (_, recon) = encode_still_intra16_with(
+    let (_, recon) = encode_still_intra16_with_speed(
         &p16,
         quality_to_quant(QUALITY),
         colour(MatrixCoefficients::Bt2020Ncl),
+        encoder.speed(),
     )
     .unwrap();
     assert_eq!(decoded.yuv_format, yuv_format(ChromaSubsampling::Cs422));
