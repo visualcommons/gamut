@@ -92,14 +92,18 @@ pub struct TransformOptions {
     /// What it buys is precision in the **PCS → device** direction of a sampled curve, whose
     /// inverse otherwise comes from lcms2's numeric table reversal. Measured on the BT.2100 PQ
     /// built-in profile (`gamut_icc::BuiltinProfile::Bt2020Pq`, a 1024-entry `curveType`):
-    /// the reversed table misses ST 2084's inverse by up to `5.5e-2` of signal — at black,
-    /// where the table's quantized-to-zero leading run maps linear `0` to signal `≈ 0.055` —
-    /// and the closed form is exact; device → PCS gains only the table's `1.5e-5`. It does
-    /// **not** buy speed: per sample, the closed-form ST 2084 pair is ~3.5× *slower* than the
-    /// sampled curve and its reversal, and on parametric sRGB/BT.709 curves the two are
-    /// within ~1.1× forward (the closed inverse is ~1.7× faster than the analytic parametric
-    /// one). Hence the default: off keeps every transform lcms2-identical in construction —
-    /// the oracle reads the TRC tags — and spends nothing a caller did not ask for.
+    /// the reversed table misses ST 2084's inverse by up to `5.5e-2` of signal at black (the
+    /// table's leading run quantizes to zero, so linear `0` encodes to `≈ 0.055`), `3.6e-2`
+    /// around 1 cd/m², `3.7e-4` above 10 cd/m² — and the closed form is exact. Device → PCS
+    /// gains only the table's `1.5e-5`, and a parametric sRGB or BT.709 curve under `1e-5`
+    /// either way.
+    ///
+    /// It does **not** buy speed. On a 256×256 8-bit buffer (`cargo bench -p gamut-cmm --
+    /// cicp_transfer`), sRGB → PQ runs 1.2–1.7× slower with the option on and PQ → sRGB no
+    /// faster: ST 2084's closed form costs two `powf` per sample where the sampled curve
+    /// costs one interpolation. Hence the default: off keeps every transform built exactly as
+    /// lcms2 builds it — the oracle reads the TRC tags — and spends nothing a caller did not
+    /// ask for.
     pub prefer_cicp_transfer: bool,
 }
 

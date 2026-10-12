@@ -26,7 +26,7 @@ use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
 use gamut_cmm::{IccTransform, PipelineOptimization, TransformOptions, transform_interleaved_u8};
 use gamut_core::PixelFormat;
-use gamut_icc::{IccProfile, RenderingIntent};
+use gamut_icc::{BuiltinProfile, IccProfile, RenderingIntent};
 use lcms2_oracle::{
     FLAGS_NOOPTIMIZE, INTENT_RELATIVE_COLORIMETRIC, Profile, TYPE_CMYK_8, TYPE_RGB_8, Transform,
     cmyk_prtr_v4, display_p3_srgb_trc, set_quiet_log_handler, srgb,
@@ -241,4 +241,60 @@ fn build_shaper_pair(bencher: Bencher, level: PipelineOptimization) {
         )
         .expect("the benchmark profiles link")
     });
+}
+
+/// `TransformOptions::prefer_cicp_transfer` (issue #555): the per-pixel cost of evaluating a
+/// `cicp`-tagged profile's transfer in closed form against interpolating its TRC tags. The
+/// pairs are `gamut-icc`'s built-ins, which carry the tag: sRGB (a `parametricCurveType`)
+/// and BT.2100 PQ (a 1024-entry `curveType`), in both directions so each end of the link is
+/// timed as a forward curve and as an inverse. `args` is the option.
+fn bench_cicp(bencher: Bencher, src: BuiltinProfile, dst: BuiltinProfile, prefer_cicp: bool) {
+    let src = IccProfile::builtin(src).expect("built-in");
+    let dst = IccProfile::builtin(dst).expect("built-in");
+    let transform = IccTransform::between(
+        &src,
+        &dst,
+        TransformOptions {
+            intent: RenderingIntent::MediaRelativeColorimetric,
+            prefer_cicp_transfer: prefer_cicp,
+            ..TransformOptions::default()
+        },
+    )
+    .expect("the built-ins link");
+    let input = gradient(3);
+    let mut output = vec![0u8; pixels() * 3];
+    bencher.counter(ItemsCount::new(pixels())).bench_local(|| {
+        transform_interleaved_u8(
+            &transform,
+            PixelFormat::Rgb8,
+            black_box(&input),
+            PixelFormat::Rgb8,
+            &mut output,
+        )
+        .expect("the buffers match the transform");
+    });
+}
+
+mod cicp_transfer {
+    use super::{Bencher, BuiltinProfile, bench_cicp};
+
+    #[divan::bench(args = [false, true])]
+    fn srgb_to_pq(bencher: Bencher, prefer_cicp: bool) {
+        bench_cicp(
+            bencher,
+            BuiltinProfile::Srgb,
+            BuiltinProfile::Bt2020Pq,
+            prefer_cicp,
+        );
+    }
+
+    #[divan::bench(args = [false, true])]
+    fn pq_to_srgb(bencher: Bencher, prefer_cicp: bool) {
+        bench_cicp(
+            bencher,
+            BuiltinProfile::Bt2020Pq,
+            BuiltinProfile::Srgb,
+            prefer_cicp,
+        );
+    }
 }

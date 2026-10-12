@@ -50,7 +50,8 @@
 //! - [`transform`] — the object-safe [`Transform`] entry trait every runnable transform
 //!   implements, and [`IccTransform`]/[`TransformOptions`]: two profiles linked end to end
 //!   at a rendering intent, with the ICC-absolute white scaling and black-point compensation
-//!   applied at the PCS seam.
+//!   applied at the PCS seam — and, opt-in, a shaper profile's `cicp`-signalled transfer
+//!   evaluated in closed form ([`TransformOptions::prefer_cicp_transfer`]).
 //! - [`chain`] — multi-profile chaining ([`IccTransform::chain`]), device-link transforms
 //!   ([`IccTransform::device_link`]), and soft-proofing
 //!   ([`IccTransform::proofing`]/[`ProofingOptions`]) — lcms2's `DefaultICCintents`
