@@ -41,6 +41,7 @@ fn options(intent: RenderingIntent, optimization: PipelineOptimization) -> Trans
         intent,
         black_point_compensation: false,
         optimization,
+        prefer_cicp_transfer: false,
     }
 }
 

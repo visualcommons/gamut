@@ -5,18 +5,21 @@
 //! §8.4) — or, for [`IccProfile::gray_with_gamma`], the monochrome model of the same class.
 //!
 //! **Colorimetry `gamut-color` can supply is never retyped here**: the primaries and white point
-//! come from [`gamut_color::cicp::ColourPrimaries::chromaticities`], the RGB→XYZ construction and
+//! come from [`gamut_color::cicp::ColourPrimaries::chromaticities`] for a CICP code point and from
+//! [`gamut_color::Gamut::chromaticities`] for a named space, the RGB→XYZ construction and
 //! the Bradford adaptation to the D50 PCS from [`gamut_color::matrix`], and the ST 2084 curve and
 //! the BT.709-family α and β ([`BT709_ALPHA`] / [`BT709_BETA`], H.273 §8.2) from
 //! [`gamut_color::transfer`].
 //!
-//! Two published constants it does not supply *are* written here, because an ICC tag needs them
+//! Four published constants it does not supply *are* written here, because an ICC tag needs them
 //! in a form no `gamut-color` function returns. Each is gated against something outside this
 //! module rather than trusted:
 //!
 //! | Restated here | Why it cannot be borrowed | What gates it |
 //! | --- | --- | --- |
 //! | The IEC 61966-2-1 `(g, a, b, c, d)` set for [`Trc::Srgb`] | `gamut_color::transfer::srgb_eotf` is a *function*; §10.18 type 3 needs its five parameters | `srgb_parametric_curve_matches_gamut_color` against that function, and `oracle_every_encodable_transfer_matches_its_curve_through_lcms` against lcms2's own sRGB |
+//! | [`ADOBE_RGB_GAMMA`], `563 / 256` (Adobe RGB (1998) §4.3.1.2) | `gamut_color::transfer::adobe_rgb_eotf_standard` is a *function*; §10.18 type 0 needs its exponent | `uncoded_space_curves_match_gamut_color_standard_curves` against that function, and `oracle_uncoded_space_curves_match_gamut_color_through_lcms` through lcms2 |
+//! | The ROMM RGB `(g, a, b, c, d)` set for [`Trc::Romm`] (ISO 22028-2, via the ROMM RGB white paper) | `gamut_color::transfer::prophoto_rgb_eotf_standard` is a *function*; §10.18 type 3 needs its five parameters | the same two tests, against `prophoto_rgb_eotf_standard` |
 //! | The PCS D50, via [`XyzNumber::D50`] | It is an **ICC** fact (§7.2.16), not a CIE one; see [`pcs_d50_chromaticity`] | `colorants_sum_to_the_declared_media_white_point`, and the lcms2 colorant oracle |
 //!
 //! Everything else this module contributes is ICC encoding, not colour science.
@@ -25,15 +28,20 @@
 //!
 //! A matrix/TRC profile *is* a (primaries, transfer) pair, and the two axes are resolved from
 //! different places. **Primaries** come from `gamut-color`: a code point it gives no
-//! chromaticities for cannot be described, which is why [`gamut_color::SourceProfile`]'s
-//! `ADOBE_RGB` and `PROPHOTO_RGB` — `None` from both
-//! [`colour_primaries`](gamut_color::SourceProfile::colour_primaries) and
-//! [`transfer_characteristics`](gamut_color::SourceProfile::transfer_characteristics), with
-//! chromaticities private to `gamut-color` — are declined by
-//! [`IccProfile::from_source_profile`] rather than having their tables retyped here.
-//! **Transfers** are keyed on the raw ITU-T H.273 code point, because the set of curves an ICC
-//! tag can *encode* is not the set `gamut-color` can *evaluate*: H.273 Table 3's code points 1,
-//! 6, 14 and 15 are one curve with a closed form ICC.1:2022 §10.18 defines exactly, so this
+//! chromaticities for cannot be described. Adobe RGB and ProPhoto RGB have no ITU-T H.273 code
+//! point on either axis — [`gamut_color::SourceProfile`]'s `ADOBE_RGB` and `PROPHOTO_RGB` return
+//! `None` from both [`colour_primaries`](gamut_color::SourceProfile::colour_primaries) and
+//! [`transfer_characteristics`](gamut_color::SourceProfile::transfer_characteristics) — so they
+//! are reachable only as the named [`BuiltinProfile::AdobeRgb`] and
+//! [`BuiltinProfile::ProPhotoRgb`], whose primaries come from the total
+//! [`Gamut::chromaticities`](gamut_color::Gamut::chromaticities), whose curves are each
+//! encoding's standard one, and whose profiles carry no `cicpType` tag. ProPhoto is the one space
+//! whose own white is D50, so its `chad` is not a real adaptation — only the step from the CIE
+//! chromaticity `(0.3457, 0.3585)` to the PCS's rounded `XYZNumber` (see
+//! [`pcs_d50_chromaticity`]), 2.5e-4 from the identity at its largest element.
+//! **Transfers** of a CICP triple are keyed on the raw ITU-T H.273 code point, because the set of
+//! curves an ICC tag can *encode* is not the set `gamut-color` can *evaluate*: H.273 Table 3's
+//! code points 1, 6, 14 and 15 are one curve with a closed form ICC.1:2022 §10.18 defines exactly, so this
 //! module encodes all four, while `gamut_color::cicp::TransferCharacteristics` models only two of
 //! them (1 and 14). `gamut_color::transfer::eotf_for` maps both of those to the same Table 3
 //! curve this module writes.
@@ -139,6 +147,37 @@
 //! reading as an option is tracked at
 //! <https://github.com/visualcommons/gamut/issues/586>.
 //!
+//! # HDR: the PQ profile is peak-referred
+//!
+//! [`BuiltinProfile::Bt2020Pq`] (and [`IccProfile::from_cicp`] for transfer 16) samples the
+//! ST 2084 EOTF divided by its own 10 000 cd/m² peak, so media white *is* that peak. A
+//! diffuse-white signal — BT.2408's 203 cd/m² HDR reference white, `V` ≈ 0.58 — therefore lands
+//! at 203 / 10 000 = 0.0203 of media white, and a CMM converting it to sRGB writes ≈ 0.153 (code
+//! 39 of 255): dark grey where SDR-referred content expects white. lcms2 measures exactly that,
+//! identically under media-relative colorimetric, ICC-absolute colorimetric and perceptual
+//! intents (`oracle_pq_diffuse_white_lands_at_its_share_of_the_peak` and
+//! `oracle_pq_diffuse_white_is_dark_grey_in_lcms_srgb` in `tests/oracle.rs`).
+//!
+//! This is kept as the one behaviour, with no diffuse-white-referred sibling and no parameter
+//! (issue <https://github.com/visualcommons/gamut/issues/557>), because neither normalization
+//! makes a matrix/TRC profile an HDR→SDR renderer:
+//!
+//! * **Embedding beside HDR content for an HDR-aware pipeline**: peak-referred is right. It is
+//!   the only normalization that keeps the whole PQ range inside the `[0, 1]` a `curveType`
+//!   encodes, so no signal value is clipped by the profile itself.
+//! * **Embedding so an SDR CMM produces something viewable**: neither is right. Referring the
+//!   curve to diffuse white puts 203 cd/m² on media white but clips every highlight above it —
+//!   the top ~5.6 stops of the PQ range — with no roll-off, because a matrix/TRC profile has
+//!   nowhere to put a tone curve that is not also the transfer's.
+//!
+//! So for an SDR rendering, do not embed this profile: decode PQ to light, tone-map it with
+//! `gamut-tonemap` (Reinhard, ACES, Hable, Drago — its `ToneCurve` operators), re-encode, and
+//! embed an SDR profile such as [`BuiltinProfile::Srgb`] or [`BuiltinProfile::DisplayP3`].
+//!
+//! [`IccProfile::validate`] reports nothing about this: the profile is conforming, and the
+//! normalization is a statement about which white the caller's content is graded to, which no
+//! profile-level check can see.
+//!
 //! # Rendering intent
 //!
 //! Every profile built here carries `Perceptual` in the header's rendering-intent field (§7.2.15),
@@ -166,11 +205,11 @@
 //! an ID with [`IccWriter::recompute_profile_id`](crate::IccWriter::recompute_profile_id) if one
 //! is wanted.
 
-use gamut_color::SourceProfile;
 use gamut_color::cicp::{ColourPrimaries, TransferCharacteristics};
 use gamut_color::linalg::mat_mul3;
 use gamut_color::matrix::{bradford_adapt, rgb_to_xyz_matrix};
 use gamut_color::transfer::{BT709_ALPHA, BT709_BETA, pq_eotf};
+use gamut_color::{Gamut, SourceProfile};
 
 use crate::cicp::Cicp;
 use crate::curve::{Curve, ParametricCurve};
@@ -197,6 +236,17 @@ const SAMPLED_TRC_POINTS: usize = 1024;
 /// A 3×3 matrix in row-major order — the shape `gamut_color::matrix` produces and consumes.
 type Matrix3 = [[f64; 3]; 3];
 
+/// CIE 1931 `([R, G, B], white)` chromaticities — the shape both
+/// [`ColourPrimaries::chromaticities`] and [`Gamut::chromaticities`] return.
+type Chromaticities = ([[f64; 2]; 3], [f64; 2]);
+
+/// Adobe RGB (1998) Color Image Encoding §4.3.1.2: the inverse colour component transfer is the
+/// pure power `X^2.19921875`, "obtained from 2 51/256" (hexadecimal `02.33`) — so `563 / 256`,
+/// exact in `s15Fixed16`, and with no linear segment. Pinned against
+/// `gamut_color::transfer::adobe_rgb_eotf_standard` by
+/// `uncoded_space_curves_match_gamut_color_standard_curves`.
+const ADOBE_RGB_GAMMA: f64 = 563.0 / 256.0;
+
 /// A colour space [`IccProfile::builtin`] can construct without any further input.
 ///
 /// `#[non_exhaustive]` with explicit, permanently assigned discriminants: variants are appended as
@@ -215,68 +265,122 @@ pub enum BuiltinProfile {
     DisplayP3 = 2,
     /// BT.2100 PQ: BT.2020 primaries, D65 white, the SMPTE ST 2084 transfer normalized to its
     /// 10 000 cd/m² peak.
+    ///
+    /// **Peak-referred, by decision**: media white is the 10 000 cd/m² peak, so a diffuse-white
+    /// signal (BT.2408's 203 cd/m²) is 0.0203 of media white and an SDR CMM renders it dark
+    /// grey. That is the profile to embed beside HDR content for an HDR-aware pipeline; for an
+    /// SDR rendering, tone-map the samples with `gamut-tonemap` and embed an SDR profile such as
+    /// [`BuiltinProfile::Srgb`] instead. See the module documentation's *HDR: the PQ profile is
+    /// peak-referred*.
     Bt2020Pq = 3,
+    /// Adobe RGB (1998): its own primaries, D65 white, the standard `X^(563/256)` transfer.
+    /// ITU-T H.273 has no code point for either axis, so the profile carries no `cicpType` tag.
+    AdobeRgb = 4,
+    /// ProPhoto RGB (ROMM RGB, ISO 22028-2): its own primaries, D50 white, the standard
+    /// `X^1.8` transfer with its linear toe. ITU-T H.273 has no code point for either axis, so
+    /// the profile carries no `cicpType` tag.
+    ProPhotoRgb = 5,
+}
+
+/// What a [`BuiltinProfile`] is built from.
+#[derive(Debug, Clone, Copy)]
+struct Space {
+    /// The colour-science gamut whose chromaticities give the colorants. Total, so every space
+    /// has primaries whether or not ITU-T H.273 gives them a code point.
+    gamut: Gamut,
+    /// The two CICP axes the space is defined by, when H.273 has a code point for both; this is
+    /// what the `cicpType` tag records.
+    axes: Option<(ColourPrimaries, TransferCharacteristics)>,
+    /// The tone curve that encodes the space's transfer.
+    trc: Trc,
+    /// The text of the `profileDescriptionTag`.
+    description: &'static str,
 }
 
 impl BuiltinProfile {
-    /// The two CICP axes this space is defined by, the tone curve that encodes its transfer, and
-    /// the text of its `profileDescriptionTag`.
+    /// The gamut, CICP axes, tone curve and description this space is built from.
     ///
     /// The curve is named here rather than derived through [`Trc::for_code_point`] so that
-    /// [`IccProfile::builtin`] is total with no unreachable fallback; that the two agree is
-    /// pinned by `each_builtin_space_names_the_curve_for_its_own_transfer`.
-    fn parts(self) -> (ColourPrimaries, TransferCharacteristics, Trc, &'static str) {
-        match self {
+    /// [`IccProfile::builtin`] is total with no unreachable fallback, and so that a space with no
+    /// transfer code point still has one; that the two agree wherever there is a code point is
+    /// pinned by `each_coded_space_names_the_curve_for_its_own_transfer`.
+    fn parts(self) -> Space {
+        let (gamut, axes, trc, description) = match self {
             BuiltinProfile::Srgb => (
-                ColourPrimaries::Bt709,
-                TransferCharacteristics::Srgb,
+                Gamut::Srgb,
+                Some((ColourPrimaries::Bt709, TransferCharacteristics::Srgb)),
                 Trc::Srgb,
                 "sRGB",
             ),
             BuiltinProfile::LinearSrgb => (
-                ColourPrimaries::Bt709,
-                TransferCharacteristics::Linear,
+                Gamut::Srgb,
+                Some((ColourPrimaries::Bt709, TransferCharacteristics::Linear)),
                 Trc::Gamma(1.0),
                 "Linear sRGB",
             ),
             BuiltinProfile::DisplayP3 => (
-                ColourPrimaries::DisplayP3,
-                TransferCharacteristics::Srgb,
+                Gamut::DisplayP3,
+                Some((ColourPrimaries::DisplayP3, TransferCharacteristics::Srgb)),
                 Trc::Srgb,
                 "Display P3",
             ),
             BuiltinProfile::Bt2020Pq => (
-                ColourPrimaries::Bt2020,
-                TransferCharacteristics::Pq,
+                Gamut::Bt2020,
+                Some((ColourPrimaries::Bt2020, TransferCharacteristics::Pq)),
                 Trc::Pq,
                 "BT.2100 PQ",
             ),
+            BuiltinProfile::AdobeRgb => (
+                Gamut::AdobeRgb,
+                None,
+                Trc::Gamma(ADOBE_RGB_GAMMA),
+                "Adobe RGB (1998) compatible",
+            ),
+            BuiltinProfile::ProPhotoRgb => (
+                Gamut::ProPhotoRgb,
+                None,
+                Trc::Romm,
+                "ProPhoto RGB (ROMM) compatible",
+            ),
+        };
+        Space {
+            gamut,
+            axes,
+            trc,
+            description,
         }
     }
 
     /// Every space, for the exhaustive sweeps that must not miss one.
-    const ALL: [BuiltinProfile; 4] = [
+    const ALL: [BuiltinProfile; 6] = [
         BuiltinProfile::Srgb,
         BuiltinProfile::LinearSrgb,
         BuiltinProfile::DisplayP3,
         BuiltinProfile::Bt2020Pq,
+        BuiltinProfile::AdobeRgb,
+        BuiltinProfile::ProPhotoRgb,
     ];
 
     /// The `cicpType` value this space signals: its two axes, the identity matrix coefficients
     /// (H.273 code point 0 — the profile describes RGB, not a luma–chroma encoding), and the
     /// full-range flag.
     ///
+    /// `None` for a space ITU-T H.273 has no code points for — Adobe RGB and ProPhoto RGB — whose
+    /// profile accordingly carries no `cicpType` tag: §9.2.17 requires the tag to be equivalent
+    /// to the encoding the profile represents, and `Unspecified` on both axes is not.
+    ///
     /// # Examples
     ///
     /// ```
     /// use gamut_icc::BuiltinProfile;
-    /// let cicp = BuiltinProfile::Bt2020Pq.cicp();
+    /// let cicp = BuiltinProfile::Bt2020Pq.cicp().expect("BT.2100 PQ has code points");
     /// assert_eq!((cicp.colour_primaries, cicp.transfer_characteristics), (9, 16));
+    /// assert_eq!(BuiltinProfile::AdobeRgb.cicp(), None);
     /// ```
     #[must_use]
-    pub fn cicp(self) -> Cicp {
-        let (primaries, transfer, _, _) = self.parts();
-        cicp_of(primaries, transfer)
+    pub fn cicp(self) -> Option<Cicp> {
+        let (primaries, transfer) = self.parts().axes?;
+        Some(cicp_of(primaries, transfer))
     }
 
     /// The space whose axes are exactly `primaries` and the H.273 transfer code point
@@ -284,9 +388,22 @@ impl BuiltinProfile {
     /// instead of describing it by code point.
     fn for_axes(primaries: ColourPrimaries, transfer: u8) -> Option<Self> {
         Self::ALL.into_iter().find(|space| {
-            let (p, t, _, _) = space.parts();
-            p == primaries && cicp_byte(t.code_point()) == transfer
+            space
+                .parts()
+                .axes
+                .is_some_and(|(p, t)| p == primaries && cicp_byte(t.code_point()) == transfer)
         })
+    }
+
+    /// The space a [`SourceProfile`] bundle with no CICP axes names, if it names one: the two
+    /// uncoded bundles `gamut-color` defines map onto the two uncoded spaces here. Any other
+    /// combination of an uncoded gamut or transfer is a mixture this module has no space for.
+    fn for_uncoded_source(source: SourceProfile) -> Option<Self> {
+        match source {
+            SourceProfile::ADOBE_RGB => Some(BuiltinProfile::AdobeRgb),
+            SourceProfile::PROPHOTO_RGB => Some(BuiltinProfile::ProPhotoRgb),
+            _ => None,
+        }
     }
 }
 
@@ -405,6 +522,9 @@ enum Trc {
     /// §8.2 NOTE 1 sanctions a second one for display profiles, which the module docs quantify
     /// against this one.
     Bt709,
+    /// ROMM RGB (ISO 22028-2), the ProPhoto transfer: `Y = X^1.8` above `X = 1/32`, and the
+    /// linear toe `Y = X / 16` below it. A `parametricCurveType` function type 3, exactly.
+    Romm,
     /// SMPTE ST 2084 (PQ) normalized to its peak. ICC.1:2022 §10.18 defines no closed form for
     /// it, so it is a sampled `curveType` (§10.6).
     Pq,
@@ -465,6 +585,19 @@ impl Trc {
                 .map(S15Fixed16::from_f64)
                 .collect(),
             }),
+            // ROMM RGB: the white paper's encoding is `16 Rr` below `Et = 1/512` and
+            // `Rr^(1/1.8)` above, so its inverse is `X / 16` below `16 Et = 1/32` and `X^1.8` above
+            // — §10.18 type 3 with `a = 1` and `b = 0`. Every parameter but `g` is a power of two
+            // and exact in `s15Fixed16`. Pinned against
+            // `gamut_color::transfer::prophoto_rgb_eotf_standard` by
+            // `uncoded_space_curves_match_gamut_color_standard_curves`.
+            Trc::Romm => TagData::ParametricCurve(ParametricCurve {
+                function_type: 3,
+                params: [1.8, 1.0, 0.0, 1.0 / 16.0, 1.0 / 32.0]
+                    .into_iter()
+                    .map(S15Fixed16::from_f64)
+                    .collect(),
+            }),
             Trc::Pq => TagData::Curve(Curve::Sampled(pq_samples())),
         }
     }
@@ -515,13 +648,12 @@ fn pcs_d50_chromaticity() -> [f64; 2] {
 /// Every §9.2.x citation in this crate uses the heading numbering. No gate checks that yet;
 /// <https://github.com/visualcommons/gamut/issues/606> is the one that would.
 ///
-/// `None` when the primaries cannot be turned into colorants at all: a code point that names no
-/// chromaticities ([`ColourPrimaries::Unspecified`], and any later variant `gamut-color` adds
-/// without them), or chromaticities degenerate enough to have no RGB→XYZ or adaptation matrix.
-/// Declining here is what stops a profile claiming the PCS axes as its primaries, so the guard is
-/// structural: no caller has to know which code points are colorimetrically empty.
-fn colorants_d50(primaries: ColourPrimaries) -> Option<(Matrix3, Matrix3)> {
-    let (rgb, white) = primaries.chromaticities()?;
+/// `None` when the chromaticities are degenerate enough to have no RGB→XYZ or adaptation matrix.
+/// A code point that names no chromaticities at all ([`ColourPrimaries::Unspecified`], and any
+/// later variant `gamut-color` adds without them) never reaches here: [`IccProfile::from_cicp`]
+/// declines it on the `Option` [`ColourPrimaries::chromaticities`] returns, which is what stops a
+/// profile claiming the PCS axes as its primaries.
+fn colorants_d50((rgb, white): Chromaticities) -> Option<(Matrix3, Matrix3)> {
     let rgb_to_xyz = rgb_to_xyz_matrix(&rgb, white)?;
     let chad = bradford_adapt(white, pcs_d50_chromaticity())?;
     Some((mat_mul3(&chad, &rgb_to_xyz), chad))
@@ -539,17 +671,19 @@ fn mluc(text: &str) -> TagData {
     })
 }
 
-/// The three-component matrix/TRC display profile for a pair of CICP axes (ICC.1:2022 §8.4).
+/// The three-component matrix/TRC display profile for a set of chromaticities and a tone curve
+/// (ICC.1:2022 §8.4).
 ///
 /// `cicp` is the `cicpType` element to record the signalling the profile was built from, already
-/// normalized for §10.3. `None` when [`colorants_d50`] declines the primaries.
+/// normalized for §10.3, or `None` for a space with no CICP code points, whose profile then
+/// carries no `cicpType` tag. `None` when [`colorants_d50`] declines the chromaticities.
 fn rgb_matrix_trc(
-    primaries: ColourPrimaries,
+    chromaticities: Chromaticities,
     trc: Trc,
     description: &str,
-    cicp: Cicp,
+    cicp: Option<Cicp>,
 ) -> Option<IccProfile> {
-    let (colorants, chad) = colorants_d50(primaries)?;
+    let (colorants, chad) = colorants_d50(chromaticities)?;
     // A colorant tag is a *column* of the RGB→XYZ matrix: the XYZ of that primary at full scale.
     let column = |j: usize| {
         TagData::Xyz(vec![XyzNumber::from_f64([
@@ -565,24 +699,25 @@ fn rgb_matrix_trc(
             .collect(),
     );
     let curve = trc.tag();
+    let mut tags = vec![
+        (KnownTag::ProfileDescription.into(), mluc(description)),
+        (KnownTag::Copyright.into(), mluc(COPYRIGHT)),
+        (
+            KnownTag::MediaWhitePoint.into(),
+            TagData::Xyz(vec![XyzNumber::D50]),
+        ),
+        (KnownTag::ChromaticAdaptation.into(), chad_tag),
+        (KnownTag::RedColorant.into(), column(0)),
+        (KnownTag::GreenColorant.into(), column(1)),
+        (KnownTag::BlueColorant.into(), column(2)),
+        (KnownTag::RedTrc.into(), curve.clone()),
+        (KnownTag::GreenTrc.into(), curve.clone()),
+        (KnownTag::BlueTrc.into(), curve),
+    ];
+    tags.extend(cicp.map(|cicp| (KnownTag::Cicp.into(), TagData::Cicp(cicp))));
     Some(IccProfile {
         header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
-        tags: vec![
-            (KnownTag::ProfileDescription.into(), mluc(description)),
-            (KnownTag::Copyright.into(), mluc(COPYRIGHT)),
-            (
-                KnownTag::MediaWhitePoint.into(),
-                TagData::Xyz(vec![XyzNumber::D50]),
-            ),
-            (KnownTag::ChromaticAdaptation.into(), chad_tag),
-            (KnownTag::RedColorant.into(), column(0)),
-            (KnownTag::GreenColorant.into(), column(1)),
-            (KnownTag::BlueColorant.into(), column(2)),
-            (KnownTag::RedTrc.into(), curve.clone()),
-            (KnownTag::GreenTrc.into(), curve.clone()),
-            (KnownTag::BlueTrc.into(), curve),
-            (KnownTag::Cicp.into(), TagData::Cicp(cicp)),
-        ],
+        tags,
     })
 }
 
@@ -610,8 +745,13 @@ impl IccProfile {
     /// ```
     #[must_use]
     pub fn builtin(space: BuiltinProfile) -> Option<Self> {
-        let (primaries, _, trc, description) = space.parts();
-        rgb_matrix_trc(primaries, trc, description, space.cicp())
+        let Space {
+            gamut,
+            trc,
+            description,
+            ..
+        } = space.parts();
+        rgb_matrix_trc(gamut.chromaticities(), trc, description, space.cicp())
     }
 
     /// A v4 monochrome display profile with a pure-gamma grey tone curve (`Y = X^gamma`).
@@ -742,26 +882,34 @@ impl IccProfile {
             return None;
         }
         let primaries = ColourPrimaries::from_code_point(u16::from(cicp.colour_primaries))?;
+        let chromaticities = primaries.chromaticities()?;
         let trc = Trc::for_code_point(cicp.transfer_characteristics)?;
         let named = BuiltinProfile::for_axes(primaries, cicp.transfer_characteristics);
         let description = match named {
-            Some(space) => space.parts().3.to_owned(),
+            Some(space) => space.parts().description.to_owned(),
             None => format!(
                 "CICP {}/{}",
                 cicp.colour_primaries, cicp.transfer_characteristics
             ),
         };
-        rgb_matrix_trc(primaries, trc, &description, rgb_conforming_cicp(cicp))
+        rgb_matrix_trc(
+            chromaticities,
+            trc,
+            &description,
+            Some(rgb_conforming_cicp(cicp)),
+        )
     }
 
     /// A v4 matrix/TRC display profile for a [`SourceProfile`] — `gamut-color`'s
     /// `(gamut, transfer)` bundle.
     ///
-    /// Returns `None` for a bundle with no CICP axes: `ADOBE_RGB` and `PROPHOTO_RGB` have neither
-    /// a primaries nor a transfer code point, and their chromaticities are private to
-    /// `gamut-color`, so this crate cannot describe them without restating tables it does not own.
+    /// A bundle with both CICP axes is built through [`from_cicp`](IccProfile::from_cicp). The two
+    /// bundles with neither — `ADOBE_RGB` and `PROPHOTO_RGB` — are built as
+    /// [`BuiltinProfile::AdobeRgb`] and [`BuiltinProfile::ProPhotoRgb`], with no `cicpType` tag.
+    /// Returns `None` for any other bundle missing an axis: a hand-assembled mixture such as Adobe
+    /// RGB primaries under the sRGB transfer names no space this module builds.
     ///
-    /// # The profile is the code point, not the bundle's own curve
+    /// # The profile is the standard space, not the bundle's own curve
     ///
     /// A [`SourceProfile`] is a *rendering* bundle, and for one of them the profile built here and
     /// the bundle's own [`eotf`](SourceProfile::eotf) are not the same curve.
@@ -771,12 +919,21 @@ impl IccProfile {
     /// map. Swept over the signal domain at 100 001 points the two diverge by up to **0.735**
     /// absolute, 52× at `V = 0.1`; `SourceProfile::SRGB`, whose transfer *is* its code point,
     /// agrees with its profile to 4.2e-6 — the `s15Fixed16` rounding of the tag, and nothing else.
-    /// All three figures are asserted, at the precision written here, by
+    ///
+    /// The two uncoded bundles diverge for a smaller reason. `gamut-color` linearizes them with
+    /// its *encoder-exact* curves — Adobe as a pure `x^2.2`, ProPhoto as a pure `x^1.8` — while
+    /// the profile carries each encoding's **standard** curve: `X^(563/256)` for Adobe RGB, and
+    /// for ProPhoto the ROMM `X^1.8` with its linear toe below `X = 1/32`. A profile is handed to
+    /// a third-party CMM, which should read the space its name promises. Over the same sweep the
+    /// Adobe bundle diverges from its profile by up to **1.3e-4**, and the ProPhoto bundle by up
+    /// to **4.2e-4**, inside the toe.
+    ///
+    /// All five figures are asserted, at the precision written here, by
     /// `source_profile_divergence_is_what_the_docs_quote`.
     ///
-    /// That is deliberate, and it is the difference between the two axes. A narrow sample range is
-    /// a property of the samples, which is why [`from_cicp`](IccProfile::from_cicp) declines one it
-    /// cannot describe. A tone map is not: it is `gamut-color`'s choice about how to *render* an
+    /// The tone map's omission is deliberate, and it is the difference between the two axes. A
+    /// narrow sample range is a property of the samples, which is why
+    /// [`from_cicp`](IccProfile::from_cicp) declines one it cannot describe. A tone map is not: it is `gamut-color`'s choice about how to *render* an
     /// HDR transfer into SDR, and an ICC transfer tag is the encoding the code point names.
     /// Writing the tone map into the tag would hand a CMM a curve no other reader of the same CICP
     /// triple would produce, and would contradict the `cicpType` tag written beside it (ICC.1:2022
@@ -794,19 +951,24 @@ impl IccProfile {
     ///     IccProfile::from_source_profile(SourceProfile::SRGB),
     ///     IccProfile::builtin(BuiltinProfile::Srgb),
     /// );
-    /// assert!(IccProfile::from_source_profile(SourceProfile::ADOBE_RGB).is_none());
+    /// assert_eq!(
+    ///     IccProfile::from_source_profile(SourceProfile::ADOBE_RGB),
+    ///     IccProfile::builtin(BuiltinProfile::AdobeRgb),
+    /// );
     /// ```
     #[must_use]
     pub fn from_source_profile(source: SourceProfile) -> Option<Self> {
-        let primaries = source.colour_primaries()?;
-        let transfer = source.transfer_characteristics()?;
-        Self::from_cicp(cicp_of(primaries, transfer))
+        match (source.colour_primaries(), source.transfer_characteristics()) {
+            (Some(primaries), Some(transfer)) => Self::from_cicp(cicp_of(primaries, transfer)),
+            _ => BuiltinProfile::for_uncoded_source(source).and_then(Self::builtin),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use gamut_color::transfer::srgb_eotf;
+    use gamut_color::SourceTransfer;
+    use gamut_color::transfer::{adobe_rgb_eotf_standard, prophoto_rgb_eotf_standard, srgb_eotf};
     use lcms2_oracle::tag;
 
     use super::*;
@@ -816,13 +978,10 @@ mod tests {
     /// pins the *tag set* each constructor emits, not its colorimetry.
     #[test]
     fn every_constructor_satisfies_the_section_8_display_model() {
-        let profiles = [
-            ("srgb", IccProfile::builtin(BuiltinProfile::Srgb)),
-            ("linear", IccProfile::builtin(BuiltinProfile::LinearSrgb)),
-            ("p3", IccProfile::builtin(BuiltinProfile::DisplayP3)),
-            ("pq", IccProfile::builtin(BuiltinProfile::Bt2020Pq)),
-            ("gray", IccProfile::gray_with_gamma(2.2)),
-        ];
+        let profiles = BuiltinProfile::ALL
+            .into_iter()
+            .map(|space| (format!("{space:?}"), IccProfile::builtin(space)))
+            .chain([("gray".to_owned(), IccProfile::gray_with_gamma(2.2))]);
         for (label, profile) in profiles {
             let profile = profile.unwrap_or_else(|| panic!("{label}: constructed"));
             assert_eq!(profile.validate(), vec![], "{label}: §8 conformance");
@@ -959,13 +1118,16 @@ mod tests {
         }
     }
 
-    /// The four built-in spaces have four distinct sets of axes, and each round-trips through its
-    /// `cicpType` value back to itself. A space whose `parts` named the wrong code point would
-    /// collide with another or fail to round-trip.
+    /// The four coded built-in spaces have four distinct sets of axes, and each round-trips
+    /// through its `cicpType` value back to itself. A space whose `parts` named the wrong code
+    /// point would collide with another or fail to round-trip; one whose `gamut` disagreed with
+    /// its primaries code point would build a different profile from each path.
     #[test]
     fn each_builtin_space_round_trips_through_its_cicp_value() {
         for space in BuiltinProfile::ALL {
-            let (primaries, transfer, _, _) = space.parts();
+            let Some((primaries, transfer)) = space.parts().axes else {
+                continue;
+            };
             assert_eq!(
                 BuiltinProfile::for_axes(primaries, cicp_byte(transfer.code_point())),
                 Some(space),
@@ -974,7 +1136,7 @@ mod tests {
             let built = IccProfile::builtin(space);
             assert!(built.is_some(), "{space:?} builds");
             assert_eq!(
-                IccProfile::from_cicp(space.cicp()),
+                IccProfile::from_cicp(space.cicp().expect("a coded space")),
                 built,
                 "{space:?} builds the same profile from its own CICP value"
             );
@@ -985,12 +1147,97 @@ mod tests {
     /// the curve directly so that `builtin` needs no fallback, and this is what stops the two
     /// halves of that statement drifting apart.
     #[test]
-    fn each_builtin_space_names_the_curve_for_its_own_transfer() {
+    fn each_coded_space_names_the_curve_for_its_own_transfer() {
         for space in BuiltinProfile::ALL {
-            let (_, transfer, trc, _) = space.parts();
-            let code = cicp_byte(transfer.code_point());
-            assert_eq!(Trc::for_code_point(code), Some(trc), "{space:?}");
+            let Space { axes, trc, .. } = space.parts();
+            if let Some((_, transfer)) = axes {
+                let code = cicp_byte(transfer.code_point());
+                assert_eq!(Trc::for_code_point(code), Some(trc), "{space:?}");
+            }
         }
+    }
+
+    /// Exactly Adobe RGB and ProPhoto RGB have no CICP axes, and their profiles accordingly carry
+    /// no `cicpType` tag — §9.2.17 requires the tag to be equivalent to the encoding, which
+    /// `Unspecified` is not. Every coded space writes one. Asserted per space, so a coded space
+    /// that lost its axes fails here rather than slipping into the uncoded path.
+    #[test]
+    fn only_the_uncoded_spaces_omit_the_cicp_tag() {
+        for space in BuiltinProfile::ALL {
+            let uncoded = matches!(
+                space,
+                BuiltinProfile::AdobeRgb | BuiltinProfile::ProPhotoRgb
+            );
+            assert_eq!(space.cicp().is_none(), uncoded, "{space:?} axes");
+            let profile = IccProfile::builtin(space).expect("buildable");
+            assert_eq!(
+                profile.get(KnownTag::Cicp).is_none(),
+                uncoded,
+                "{space:?} cicp tag"
+            );
+        }
+    }
+
+    /// A built-in space and the `gamut-color` function its tone curve must reproduce.
+    type StandardCurve = (BuiltinProfile, fn(f64) -> f64);
+
+    /// The two spaces with no transfer code point, each against `gamut-color`'s **standard**
+    /// curve for its encoding — the curve they are built to carry, not the encoder-exact one.
+    const UNCODED_STANDARD_CURVES: [StandardCurve; 2] = [
+        (BuiltinProfile::AdobeRgb, adobe_rgb_eotf_standard),
+        (BuiltinProfile::ProPhotoRgb, prophoto_rgb_eotf_standard),
+    ];
+
+    /// The two uncoded spaces carry their encodings' **standard** curves, which reproduce
+    /// `gamut-color`'s own `adobe_rgb_eotf_standard` and `prophoto_rgb_eotf_standard` — not the
+    /// encoder-exact `x^2.2` and `x^1.8` the matching `SourceProfile` bundles linearize with.
+    /// Sampled densely below `1/32` as well, so the ROMM toe and its knee are both reached.
+    ///
+    /// The tolerance is the `s15Fixed16` rounding of ROMM's `g = 1.8` — the only inexact
+    /// parameter of either tag; Adobe's `563 / 256` is exact.
+    #[test]
+    fn uncoded_space_curves_match_gamut_color_standard_curves() {
+        for (space, standard) in UNCODED_STANDARD_CURVES {
+            let TagData::ParametricCurve(curve) = space.parts().trc.tag() else {
+                panic!("{space:?} is encoded as a parametricCurveType");
+            };
+            let toe = (0..64).map(|step| f64::from(step) / 2048.0);
+            let body = (0..=100).map(|step| f64::from(step) / 100.0);
+            for x in toe.chain(body) {
+                let (got, want) = (curve.eval(x), standard(x));
+                assert!(
+                    (got - want).abs() < 1.0e-6,
+                    "{space:?} TRC at {x}: {got} vs {want}"
+                );
+            }
+        }
+    }
+
+    /// ProPhoto RGB is the one built-in space whose own white is D50, so its `chad` is not a real
+    /// chromatic adaptation: only the step from the CIE D50 chromaticity to the PCS's rounded
+    /// `XYZNumber`, 2.5e-4 from the identity at its largest element as the module docs and
+    /// `STATUS.md` quote — gated at half that figure's last digit. Adobe RGB — D65, like every
+    /// other built-in space — is the control: a real Bradford adaptation, more than 1e-2 from the
+    /// identity on some element.
+    #[test]
+    fn prophoto_chad_is_near_the_identity() {
+        let off_identity = |space: BuiltinProfile| {
+            let (_, chad) = colorants_d50(space.parts().gamut.chromaticities()).expect("modelled");
+            let mut worst = 0.0_f64;
+            for (i, row) in chad.iter().enumerate() {
+                for (j, &v) in row.iter().enumerate() {
+                    worst = worst.max((v - f64::from(u8::from(i == j))).abs());
+                }
+            }
+            worst
+        };
+        let prophoto = off_identity(BuiltinProfile::ProPhotoRgb);
+        assert!(
+            (prophoto - 2.5e-4).abs() < 5.0e-6,
+            "ProPhoto chad off identity by {prophoto}"
+        );
+        let adobe = off_identity(BuiltinProfile::AdobeRgb);
+        assert!(adobe > 1.0e-2, "Adobe chad off identity by {adobe}");
     }
 
     /// No transfer code point outside the encodable set builds a tone curve.
@@ -1238,8 +1485,9 @@ mod tests {
         }
     }
 
-    /// `SourceProfile`'s bundles map onto the built-in spaces, and the two with no CICP axes are
-    /// declined rather than approximated.
+    /// `SourceProfile`'s bundles map onto the built-in spaces — the two with no CICP axes onto
+    /// the two uncoded spaces — and a mixture with an uncoded axis is declined rather than
+    /// approximated.
     ///
     /// `BT2020` maps onto [`BuiltinProfile::Bt2020Pq`] even though the bundle's own `eotf` is a
     /// tone map and the profile's `rTRC` is not: the mapping is on the **code points** the bundle
@@ -1253,8 +1501,19 @@ mod tests {
             (SourceProfile::LINEAR_SRGB, Some(BuiltinProfile::LinearSrgb)),
             (SourceProfile::DISPLAY_P3, Some(BuiltinProfile::DisplayP3)),
             (SourceProfile::BT2020, Some(BuiltinProfile::Bt2020Pq)),
-            (SourceProfile::ADOBE_RGB, None),
-            (SourceProfile::PROPHOTO_RGB, None),
+            (SourceProfile::ADOBE_RGB, Some(BuiltinProfile::AdobeRgb)),
+            (
+                SourceProfile::PROPHOTO_RGB,
+                Some(BuiltinProfile::ProPhotoRgb),
+            ),
+            // A hand-assembled mixture with an uncoded axis names no space: declined.
+            (
+                SourceProfile {
+                    transfer: SourceTransfer::Srgb,
+                    ..SourceProfile::ADOBE_RGB
+                },
+                None,
+            ),
         ];
         for (source, expected) in cases {
             let want = expected.and_then(IccProfile::builtin);
@@ -1278,7 +1537,9 @@ mod tests {
 
     /// The figures `from_source_profile`'s doc and `STATUS.md` quote for how far a
     /// [`SourceProfile`] bundle's own `eotf` sits from the profile built for it: up to **0.735**
-    /// absolute and **52×** at `V = 0.1` for `BT2020`, against **4.2e-6** for the `SRGB` control.
+    /// absolute and **52×** at `V = 0.1` for `BT2020`, against **4.2e-6** for the `SRGB` control,
+    /// and **1.3e-4** / **4.2e-4** for the encoder-exact `ADOBE_RGB` / `PROPHOTO_RGB` bundles
+    /// against the standard curves their profiles carry.
     /// Both sides are measured as they ship — the bundle through `gamut-color`'s `eotf`, the
     /// profile through the `rTRC` tag this module writes — over the 100 001-point sweep the prose
     /// names. Each bound is half the last digit the prose states, so the gate is exactly as tight
@@ -1300,6 +1561,13 @@ mod tests {
         assert!((bt2020 - 0.735).abs() < 5.0e-4, "BT2020: {bt2020}");
         let srgb = largest_divergence(SourceProfile::SRGB);
         assert!((srgb - 4.2e-6).abs() < 5.0e-8, "SRGB: {srgb}");
+        let adobe = largest_divergence(SourceProfile::ADOBE_RGB);
+        assert!((adobe - 1.3e-4).abs() < 5.0e-6, "ADOBE_RGB: {adobe}");
+        let prophoto = largest_divergence(SourceProfile::PROPHOTO_RGB);
+        assert!(
+            (prophoto - 4.2e-4).abs() < 5.0e-6,
+            "PROPHOTO_RGB: {prophoto}"
+        );
 
         let profile = IccProfile::from_source_profile(SourceProfile::BT2020).expect("buildable");
         let ratio = SourceProfile::BT2020.eotf(0.1) / red_trc(&profile)(0.1);
@@ -1313,8 +1581,11 @@ mod tests {
     fn colorants_sum_to_the_declared_media_white_point() {
         let want = XyzNumber::D50.to_f64();
         for space in BuiltinProfile::ALL {
-            let (primaries, _, _, label) = space.parts();
-            let (colorants, _) = colorants_d50(primaries).expect("a modelled code point");
+            let Space {
+                gamut, description, ..
+            } = space.parts();
+            let label = description;
+            let (colorants, _) = colorants_d50(gamut.chromaticities()).expect("a modelled gamut");
             for axis in 0..3 {
                 let sum: f64 = colorants[axis].iter().sum();
                 assert!(
@@ -1439,20 +1710,75 @@ mod tests {
         for code in codes {
             let primaries =
                 ColourPrimaries::from_code_point(u16::from(code)).expect("a modelled code point");
-            let (rgb, white) = primaries.chromaticities().expect("a modelled code point");
-            let reference = lcms2_oracle::rgb_matrix_shaper(white, rgb, [2.2, 2.2, 2.2]);
-            let ours = opened_by_lcms(&rgb_cicp(code, 13).expect("buildable"));
-            for (name, sig) in [
-                ("red", tag::RED_COLORANT),
-                ("green", tag::GREEN_COLORANT),
-                ("blue", tag::BLUE_COLORANT),
-            ] {
-                let got = ours.read_xyz(sig).expect("colorant present");
-                let want = reference.read_xyz(sig).expect("colorant present");
-                for axis in 0..3 {
+            let chromaticities = primaries.chromaticities().expect("a modelled code point");
+            let profile = rgb_cicp(code, 13).expect("buildable");
+            assert_colorants_match_lcms(&format!("primaries {code}"), &profile, chromaticities);
+        }
+    }
+
+    /// The colorants lcms2 reads back from `profile` against the ones it derives itself from
+    /// `chromaticities`, to four `s15Fixed16` quanta — the gate both colorant oracles share.
+    fn assert_colorants_match_lcms(
+        label: &str,
+        profile: &IccProfile,
+        (rgb, white): Chromaticities,
+    ) {
+        let reference = lcms2_oracle::rgb_matrix_shaper(white, rgb, [2.2, 2.2, 2.2]);
+        let ours = opened_by_lcms(profile);
+        for (name, sig) in [
+            ("red", tag::RED_COLORANT),
+            ("green", tag::GREEN_COLORANT),
+            ("blue", tag::BLUE_COLORANT),
+        ] {
+            let got = ours.read_xyz(sig).expect("colorant present");
+            let want = reference.read_xyz(sig).expect("colorant present");
+            for axis in 0..3 {
+                assert!(
+                    (got[axis] - want[axis]).abs() < 4.0 / 65536.0,
+                    "{label} {name} colorant [{axis}]: {got:?} vs {want:?}"
+                );
+            }
+        }
+    }
+
+    /// lcms2 re-opens **every** built-in space and reports the colorants it derives from the same
+    /// chromaticities itself — the acceptance gate for the two spaces no CICP code point reaches,
+    /// which `oracle_colorants_match_lcms_for_every_buildable_primaries` therefore cannot see:
+    /// Adobe RGB, and ProPhoto RGB, whose D50 white makes it the one space where the adaptation
+    /// lcms2 performs from the same white is (nearly) the identity. Same tolerance as that test.
+    #[test]
+    fn oracle_colorants_match_lcms_for_every_builtin_space() {
+        for space in BuiltinProfile::ALL {
+            let profile = IccProfile::builtin(space).expect("buildable");
+            let chromaticities = space.parts().gamut.chromaticities();
+            assert_colorants_match_lcms(&format!("{space:?}"), &profile, chromaticities);
+        }
+    }
+
+    /// lcms2 evaluates the three TRCs of the two uncoded spaces to `gamut-color`'s standard
+    /// curves — `adobe_rgb_eotf_standard` and `prophoto_rgb_eotf_standard`, the latter sampled
+    /// through its toe as well. `oracle_every_encodable_transfer_matches_its_curve_through_lcms`
+    /// is keyed on transfer code points, which neither curve has. Same two-quanta tolerance.
+    #[test]
+    fn oracle_uncoded_space_curves_match_gamut_color_through_lcms() {
+        for (space, standard) in UNCODED_STANDARD_CURVES {
+            let ours = opened_by_lcms(&IccProfile::builtin(space).expect("buildable"));
+            let toe = (0..64).map(|step| f64::from(step) / 2048.0);
+            let body = (0..=64).map(|step| f64::from(step) / 64.0);
+            for signal in toe.chain(body) {
+                for (channel, sig) in [
+                    ("r", tag::RED_TRC),
+                    ("g", tag::GREEN_TRC),
+                    ("b", tag::BLUE_TRC),
+                ] {
+                    let got = f64::from(
+                        ours.eval_tone_curve(sig, signal as f32)
+                            .expect("TRC present"),
+                    );
+                    let want = standard(signal);
                     assert!(
-                        (got[axis] - want[axis]).abs() < 4.0 / 65536.0,
-                        "primaries {code} {name} colorant [{axis}]: {got:?} vs {want:?}"
+                        (got - want).abs() < 2.0 / 65535.0,
+                        "{space:?} {channel}TRC at V = {signal}: {got} vs {want}"
                     );
                 }
             }

@@ -562,6 +562,23 @@ gamut_status_t gamut_avif_encoder_set_premultiplied_alpha(struct GamutAvifEncode
                                                           bool premultiplied);
 
 /**
+ * Keeps the alpha auxiliary of an RGBA input whose every alpha sample is fully opaque (255, or
+ * 65535) when `keep` is `true` (`AvifEncoder::with_keep_opaque_alpha`). Without this call, or
+ * with `false`, such an input drops its alpha and encodes as the file
+ * `gamut_avif_encoder_encode_rgb8` / `gamut_avif_encoder_encode_rgb16` writes for its colour.
+ * Set it when a consumer needs the alpha item present regardless of its values. Ignored by
+ * inputs without alpha and by inputs with any non-opaque alpha sample, which always keep it.
+ *
+ * Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_avif_encoder_set_keep_opaque_alpha(struct GamutAvifEncoder *encoder,
+                                                        bool keep);
+
+/**
  * Records an `irot` display rotation of `quarter_turns_ccw` anti-clockwise quarter turns
  * (`0..=3`; `0` writes no `irot`), applied by a reader — the stored pixels are unchanged
  * (`AvifEncoder::with_rotation`).
@@ -728,8 +745,10 @@ gamut_status_t gamut_avif_encoder_encode_rgb8(const struct GamutAvifEncoder *enc
 /**
  * Encodes interleaved 8-bit RGBA samples (unassociated alpha unless
  * `gamut_avif_encoder_set_premultiplied_alpha` says otherwise) to an AVIF file with an alpha
- * auxiliary. `samples_len` counts samples (`width * height * 4`); otherwise as
- * `gamut_avif_encoder_encode_rgb8`.
+ * auxiliary. An input whose every alpha sample is 255 is fully opaque: its alpha is dropped
+ * and the file is the one `gamut_avif_encoder_encode_rgb8` writes for its colour, with no
+ * alpha auxiliary, unless `gamut_avif_encoder_set_keep_opaque_alpha` keeps it. `samples_len`
+ * counts samples (`width * height * 4`); otherwise as `gamut_avif_encoder_encode_rgb8`.
  *
  * # Safety
  *
@@ -778,8 +797,12 @@ gamut_status_t gamut_avif_encoder_encode_rgb16(const struct GamutAvifEncoder *en
                                                size_t *out_len);
 
 /**
- * Encodes interleaved 16-bit RGBA samples (full 16-bit scale) with an alpha auxiliary.
- * `samples_len` counts samples (`width * height * 4`); otherwise as
+ * Encodes interleaved 16-bit RGBA samples (full 16-bit scale) with an alpha auxiliary. An
+ * input whose every alpha sample is 65535 is fully opaque: its alpha is dropped and the file is
+ * the one `gamut_avif_encoder_encode_rgb16` writes for its colour, with no alpha auxiliary,
+ * unless `gamut_avif_encoder_set_keep_opaque_alpha` keeps it. Opacity is judged on the input
+ * samples, so an alpha of 65534 keeps the auxiliary even where it truncates to the coded
+ * maximum. `samples_len` counts samples (`width * height * 4`); otherwise as
  * `gamut_avif_encoder_encode_rgb16`.
  *
  * # Safety

@@ -52,8 +52,10 @@ std::fs::write("out.avif", &avif).unwrap();
 `AvifEncoder` implements [`gamut_core::EncodeImage`] for `Rgb8`, `Rgba8`, `Gray8`, `Rgb16` and
 `Rgba16`, so the input is a typed [`gamut_core::ImageRef`] and handing it an unsupported pixel
 layout is a compile error. `Rgba8`/`Rgba16` split into a 4:4:4 colour item plus a monochrome **alpha
-auxiliary item** (`auxC`/`auxl`, with `prem` when `with_premultiplied_alpha(true)` declares the
-colour premultiplied); `Gray8` is a single monochrome item rather than R=G=B replication. A file
+auxiliary item** (`auxC`/`auxl`, with `prem` when `with_alpha_mode` declares the colour
+premultiplied — `AlphaMode::Premultiplied` for colour the caller already premultiplied,
+`AlphaMode::PremultiplyOnEncode` to have the encoder premultiply unassociated colour first, which is
+lossy in the colour channels even on the lossless path); `Gray8` is a single monochrome item rather than R=G=B replication. A file
 carrying a monochrome item signals only the general AVIF brands — the Advanced Profile brand `MA1A`
 requires every image item to be AV1 High Profile (AVIF v1.2.0 §8.3).
 

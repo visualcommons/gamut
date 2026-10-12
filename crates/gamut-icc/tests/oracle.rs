@@ -3,8 +3,14 @@
 //! `.icc` fixtures are committed; gamut-icc decodes the same bytes and the decoded values are
 //! asserted equal to what lcms2 reports.
 
-use gamut_icc::{IccProfile, KnownTag, ProfileHeader, ProfileId, S15Fixed16, Signature, TagData};
-use lcms2_oracle::tag;
+use gamut_color::transfer::{pq_eotf, pq_oetf, srgb_oetf};
+use gamut_icc::{
+    BuiltinProfile, IccProfile, KnownTag, ProfileHeader, ProfileId, S15Fixed16, Signature, TagData,
+};
+use lcms2_oracle::{
+    FLAGS_NOOPTIMIZE, INTENT_ABSOLUTE_COLORIMETRIC, INTENT_PERCEPTUAL,
+    INTENT_RELATIVE_COLORIMETRIC, TYPE_RGB_DBL, TYPE_XYZ_DBL, Transform, tag,
+};
 
 /// The Rec.709/sRGB primaries and D65 white point, for synthesizing matrix/TRC profiles.
 const D65: [f64; 2] = [0.3127, 0.3290];
@@ -545,4 +551,102 @@ fn devicelink_sequence_tags_decode() {
         !psid.entries.is_empty(),
         "psid should have at least one entry"
     );
+}
+
+/// The BT.2408 HDR reference white, 203 cd/m², as the ST 2084 signal that encodes it.
+fn pq_diffuse_white_signal() -> f64 {
+    pq_oetf(203.0)
+}
+
+/// The built-in BT.2100 PQ profile, opened by lcms2 from the bytes this crate serializes.
+fn builtin_pq_opened_by_lcms() -> lcms2_oracle::Profile {
+    let bytes = IccProfile::builtin(BuiltinProfile::Bt2020Pq)
+        .expect("a modelled space")
+        .to_bytes()
+        .expect("serializes");
+    lcms2_oracle::Profile::from_bytes(&bytes).expect("lcms2 opens the built-in PQ profile")
+}
+
+/// Issue #557's measurement: lcms2 transforms a diffuse-white PQ signal through
+/// `builtin(Bt2020Pq)` into lcms2's own XYZ identity profile and lands it at
+/// `pq_eotf(V) / pq_eotf(1)` = 203 / 10 000 = 0.0203 of lcms2's own D50 media white — the
+/// peak-referred normalization the issue decided to keep.
+///
+/// The intent is stated, and the answer is the same under every intent tried. **Media-relative
+/// colorimetric** is the one the measurement is about. **ICC-absolute colorimetric** agrees because
+/// the profile's `mediaWhitePointTag` *is* the PCS D50, so absolute scaling is the identity — the
+/// peak is media white in either reading. **Perceptual**, the header's own default, agrees because
+/// a matrix/TRC profile carries no perceptual table and lcms2 falls back to the colorimetric
+/// matrix/TRC. A diffuse-white-referred profile would instead land this signal on 1.0, so the
+/// test tells the two normalizations apart by a factor of 49.
+///
+/// The tolerance is two `uInt16` quanta of `Y`: the sampled tone curve interpolates to within one
+/// (see `SAMPLED_TRC_POINTS` in `src/builtin.rs`), and the `s15Fixed16` colorants round on top.
+/// Measured: `Y` = 0.020294, 5.8e-6 (0.38 quanta) under 0.0203, identically under all three
+/// intents.
+#[test]
+fn oracle_pq_diffuse_white_lands_at_its_share_of_the_peak() {
+    let ours = builtin_pq_opened_by_lcms();
+    let pcs = lcms2_oracle::xyz();
+    let white = lcms2_oracle::srgb()
+        .read_xyz(tag::MEDIA_WHITE_POINT)
+        .expect("lcms2's own D50 media white");
+    let signal = pq_diffuse_white_signal();
+    let share = pq_eotf(signal) / pq_eotf(1.0);
+    assert!((share - 0.0203).abs() < 1e-9, "share of the peak: {share}");
+    for (label, intent) in [
+        ("media-relative colorimetric", INTENT_RELATIVE_COLORIMETRIC),
+        ("ICC-absolute colorimetric", INTENT_ABSOLUTE_COLORIMETRIC),
+        ("perceptual", INTENT_PERCEPTUAL),
+    ] {
+        let xyz = Transform::new(
+            &ours,
+            TYPE_RGB_DBL,
+            &pcs,
+            TYPE_XYZ_DBL,
+            intent,
+            FLAGS_NOOPTIMIZE,
+        )
+        .apply_f64(&[signal; 3], 1, 3);
+        for axis in 0..3 {
+            assert!(
+                (xyz[axis] - share * white[axis]).abs() < 2.0 / 65535.0,
+                "{label} [{axis}]: {xyz:?} vs {share} × {white:?}"
+            );
+        }
+    }
+}
+
+/// What issue #557's peak-referred profile means for an SDR CMM: lcms2 transforms the same
+/// diffuse-white PQ signal through `builtin(Bt2020Pq)` into lcms2's own sRGB profile, at
+/// media-relative colorimetric intent, and writes the neutral sRGB value that encodes 0.0203 of
+/// sRGB white — `srgb_oetf(0.0203)` ≈ 0.153, code 39 of 255, a dark grey where SDR-referred
+/// content expects white. That is why the documented route to an SDR rendering is a tone map and
+/// an SDR profile, not this one.
+///
+/// The tolerance is 1e-4 in the sRGB signal: lcms2 inverts its own `s15Fixed16`-rounded
+/// parametric sRGB curve rather than `gamut-color`'s closed form, and that difference plus the
+/// first test's 0.38 quanta measure 2.5e-5 here (0.152965 against 0.152990), while the
+/// 0.0203-versus-1.0 question moves this value by 0.85.
+#[test]
+fn oracle_pq_diffuse_white_is_dark_grey_in_lcms_srgb() {
+    let ours = builtin_pq_opened_by_lcms();
+    let srgb = lcms2_oracle::srgb();
+    let signal = pq_diffuse_white_signal();
+    let want = srgb_oetf(pq_eotf(signal) / pq_eotf(1.0));
+    let rgb = Transform::new(
+        &ours,
+        TYPE_RGB_DBL,
+        &srgb,
+        TYPE_RGB_DBL,
+        INTENT_RELATIVE_COLORIMETRIC,
+        FLAGS_NOOPTIMIZE,
+    )
+    .apply_f64(&[signal; 3], 1, 3);
+    for (channel, got) in ["r", "g", "b"].into_iter().zip(rgb) {
+        assert!(
+            (got - want).abs() < 1e-4,
+            "{channel}: {got} vs srgb_oetf(0.0203) = {want}"
+        );
+    }
 }

@@ -159,7 +159,8 @@ fn pcs_seam(
 
 /// The chain engine: composes `profiles` into one pipeline with per-hop `intents` and
 /// `bpc_flags` (all three slices share their length; the crate-internal callers guarantee
-/// it). See the module docs for the transcribed algorithm.
+/// it). See the module docs for the transcribed algorithm. `prefer_cicp` applies to every
+/// hop's shaper tone curves ([`TransformOptions::prefer_cicp_transfer`]).
 ///
 /// # Errors
 ///
@@ -170,6 +171,7 @@ pub(crate) fn link_chain(
     profiles: &[&IccProfile],
     intents: &[RenderingIntent],
     bpc_flags: &[bool],
+    prefer_cicp: bool,
 ) -> Result<Pipeline> {
     debug_assert_eq!(profiles.len(), intents.len());
     debug_assert_eq!(profiles.len(), bpc_flags.len());
@@ -212,9 +214,9 @@ pub(crate) fn link_chain(
             };
             with_seam(pcs_seam(current_space, entry_space, m, off)?, lut)?
         } else if is_input {
-            link::device_to_pcs(profile, hop_intent)?
+            link::hop_device_to_pcs(profile, hop_intent, prefer_cicp)?
         } else {
-            let lut = link::pcs_to_device(profile, hop_intent)?;
+            let lut = link::hop_pcs_to_device(profile, hop_intent, prefer_cicp)?;
             let (m, off) = conversion_layer(profiles[i - 1], profile, hop_intent, bpc_flags[i]);
             with_seam(pcs_seam(current_space, entry_space, m, off)?, lut)?
         };
@@ -270,6 +272,10 @@ pub struct ProofingOptions {
     /// How far to collapse the assembled four-hop pipeline before evaluating it — as
     /// [`TransformOptions::optimization`], and defaulting the same way (off).
     pub optimization: PipelineOptimization,
+    /// Evaluate the shaper profiles' tone curves from their `cicp` tags, on every hop — as
+    /// [`TransformOptions::prefer_cicp_transfer`], whose docs carry the conditions and the
+    /// measured trade.
+    pub prefer_cicp_transfer: bool,
 }
 
 impl IccTransform {
@@ -306,7 +312,7 @@ impl IccTransform {
         let intents = vec![options.intent; profiles.len()];
         let bpc_flags = vec![options.black_point_compensation; profiles.len()];
         Self::from_pipeline(
-            link_chain(profiles, &intents, &bpc_flags)?,
+            link_chain(profiles, &intents, &bpc_flags, options.prefer_cicp_transfer)?,
             options.optimization,
         )
     }
@@ -329,7 +335,9 @@ impl IccTransform {
     /// [`optimization`](TransformOptions::optimization) are consumed:
     /// [`black_point_compensation`](TransformOptions::black_point_compensation) is
     /// **ignored**, because a device link applies no PCS-seam adjustment at all (the
-    /// paragraph above — a link is a finished rendering). The whole options struct is taken
+    /// paragraph above — a link is a finished rendering), and
+    /// [`prefer_cicp_transfer`](TransformOptions::prefer_cicp_transfer) has nothing to act on,
+    /// because a link is read from its A2B tag alone. The whole options struct is taken
     /// anyway so every [`IccTransform`] constructor opts into optimization the same way.
     ///
     /// # Errors
@@ -387,7 +395,12 @@ impl IccTransform {
             false,
         ];
         Self::from_pipeline(
-            link_chain(&profiles, &intents, &bpc_flags)?,
+            link_chain(
+                &profiles,
+                &intents,
+                &bpc_flags,
+                options.prefer_cicp_transfer,
+            )?,
             options.optimization,
         )
     }
@@ -504,7 +517,7 @@ mod tests {
     /// caller that would have rejected the input anyway.
     #[test]
     fn an_empty_chain_is_reported_not_panicked() {
-        let err = link_chain(&[], &[], &[]).expect_err("an empty chain has nothing to link");
+        let err = link_chain(&[], &[], &[], false).expect_err("an empty chain has nothing to link");
         assert!(
             matches!(err, CmmError::ChainMismatch(m) if m.contains("at least two profiles")),
             "unexpected error: {err}"
@@ -552,6 +565,7 @@ mod tests {
                     intent,
                     black_point_compensation,
                     optimization: PipelineOptimization::None,
+                    prefer_cicp_transfer: false,
                 };
                 let between = IccTransform::between(&src, &dst, options).unwrap();
                 let chain = IccTransform::chain(&[&src, &dst], options).unwrap();
@@ -578,6 +592,7 @@ mod tests {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         };
         let pair = IccTransform::between(&src, &dst, options).unwrap();
         let chained = IccTransform::chain(&[&src, &lab, &dst], options).unwrap();
@@ -705,6 +720,7 @@ mod tests {
             proofing_intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         };
         let proofed = IccTransform::proofing(&src, &dst, &src, options).unwrap();
         let plain = IccTransform::between(
@@ -714,6 +730,7 @@ mod tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -763,5 +780,56 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The sRGB and BT.2100 PQ built-ins, both carrying `cicp` tags.
+    fn srgb_and_pq() -> (IccProfile, IccProfile) {
+        (
+            IccProfile::builtin(gamut_icc::BuiltinProfile::Srgb).unwrap(),
+            IccProfile::builtin(gamut_icc::BuiltinProfile::Bt2020Pq).unwrap(),
+        )
+    }
+
+    /// Where device black lands in the PQ destination, given the option: the closed-form
+    /// ST 2084 inverse puts it at `c1^m2`, the PQ TRC's sampled reversal at ≈ 0.0547.
+    fn assert_pq_black(out: [f64; 3], prefer_cicp: bool) {
+        let want = if prefer_cicp {
+            gamut_color::transfer::pq_oetf_normalized(0.0)
+        } else {
+            0.0547
+        };
+        for channel in out {
+            assert!((channel - want).abs() < 1e-4, "{out:?}, want {want}");
+        }
+    }
+
+    #[test]
+    fn chain_honours_prefer_cicp_transfer() {
+        let (srgb, pq) = srgb_and_pq();
+        for prefer_cicp_transfer in [false, true] {
+            let options = TransformOptions {
+                intent: RenderingIntent::MediaRelativeColorimetric,
+                prefer_cicp_transfer,
+                ..TransformOptions::default()
+            };
+            let chained = IccTransform::chain(&[&srgb, &pq], options).unwrap();
+            assert_pq_black(eval3(&chained, &[0.0; 3]), prefer_cicp_transfer);
+        }
+    }
+
+    #[test]
+    fn proofing_honours_prefer_cicp_transfer() {
+        let (srgb, pq) = srgb_and_pq();
+        for prefer_cicp_transfer in [false, true] {
+            let options = ProofingOptions {
+                intent: RenderingIntent::MediaRelativeColorimetric,
+                proofing_intent: RenderingIntent::MediaRelativeColorimetric,
+                black_point_compensation: false,
+                optimization: PipelineOptimization::None,
+                prefer_cicp_transfer,
+            };
+            let proofed = IccTransform::proofing(&srgb, &pq, &srgb, options).unwrap();
+            assert_pq_black(eval3(&proofed, &[0.0; 3]), prefer_cicp_transfer);
+        }
     }
 }

@@ -12,9 +12,9 @@
 //! and the checked-out submodules (`git submodule update --init --recursive` plus `mise run
 //! fetch-av1-oracles`).
 
-use gamut_avif::{AvifContainer, AvifEncoder, AvifItem, ChromaFormat};
+use gamut_avif::{AlphaMode, AvifContainer, AvifEncoder, AvifItem, ChromaFormat};
 use gamut_color::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
-use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgba8};
+use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgb16, Rgba8, Rgba16};
 
 const W: u32 = 34;
 const H: u32 = 18;
@@ -185,6 +185,111 @@ fn premultiplication_is_declared_only_when_asked() {
     );
 }
 
+/// [`source_rgba`] with every alpha sample fully opaque. The colour still varies, so an opacity
+/// test that read a colour channel instead of alpha would see non-maximal samples.
+fn opaque_rgba() -> Vec<u8> {
+    let mut px = source_rgba();
+    for alpha in px.iter_mut().skip(3).step_by(4) {
+        *alpha = u8::MAX;
+    }
+    px
+}
+
+/// The 16-bit twin of [`opaque_rgba`], each byte widened by replication.
+fn opaque_rgba16() -> Vec<u16> {
+    opaque_rgba()
+        .iter()
+        .map(|&s| u16::from(s) * 0x101)
+        .collect()
+}
+
+/// Every pixel's first three samples: the colour of an RGBA buffer without its alpha.
+fn colour_of<S: Copy>(rgba: &[S]) -> Vec<S> {
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, _]| [r, g, b])
+        .collect()
+}
+
+/// Whether the file's primary item has an alpha auxiliary, as a reader would find it.
+fn has_alpha_auxiliary(avif: &[u8]) -> bool {
+    let container = AvifContainer::parse(avif).expect("our own reader parses the file");
+    let img = container.image();
+    img.alpha_auxiliary_of(img.primary_item().id()).is_some()
+}
+
+#[test]
+fn an_opaque_rgba8_is_coded_as_its_rgb8() {
+    let px = opaque_rgba();
+    let rgb = colour_of(&px);
+    // Lossy too, so the RGB path's 4:2:0 — which the RGBA path does not honour — is reached; and
+    // a premultiplying mode, which on opaque pixels changes nothing and so declares nothing.
+    for encoder in [
+        AvifEncoder::new(),
+        AvifEncoder::lossy(60),
+        AvifEncoder::new().with_alpha_mode(AlphaMode::PremultiplyOnEncode),
+    ] {
+        let from_rgba = encoder
+            .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+            .expect("encode RGBA");
+        let from_rgb = encoder
+            .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, DIMS).unwrap())
+            .expect("encode RGB");
+        assert_eq!(from_rgba, from_rgb, "{encoder:?}");
+    }
+}
+
+#[test]
+fn an_opaque_rgba16_is_coded_as_its_rgb16() {
+    let px = opaque_rgba16();
+    let rgb = colour_of(&px);
+    let encoder = AvifEncoder::new();
+    let from_rgba = encoder
+        .encode_to_vec(ImageRef::<Rgba16>::new(&px, DIMS).unwrap())
+        .expect("encode RGBA");
+    let from_rgb = encoder
+        .encode_to_vec(ImageRef::<Rgb16>::new(&rgb, DIMS).unwrap())
+        .expect("encode RGB");
+    assert_eq!(from_rgba, from_rgb);
+}
+
+#[test]
+fn one_non_opaque_alpha_sample_keeps_the_alpha_auxiliary() {
+    // The last pixel, so a scan that stopped early would miss it; one code below the maximum, so
+    // the test is opacity and not merely transparency.
+    let mut px = opaque_rgba();
+    let last = px.len() - 1;
+    px[last] = u8::MAX - 1;
+    let avif = AvifEncoder::new()
+        .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+        .expect("encode");
+    assert!(has_alpha_auxiliary(&avif));
+}
+
+#[test]
+fn a_16_bit_alpha_below_full_scale_keeps_the_alpha_auxiliary() {
+    // 65534 truncates to the 12-bit maximum, so the *coded* alpha is opaque — but opacity is
+    // judged on the caller's samples, and the caller's are not all opaque.
+    let mut px = opaque_rgba16();
+    let last = px.len() - 1;
+    px[last] = u16::MAX - 1;
+    let avif = AvifEncoder::new()
+        .encode_to_vec(ImageRef::<Rgba16>::new(&px, DIMS).unwrap())
+        .expect("encode");
+    assert!(has_alpha_auxiliary(&avif));
+}
+
+#[test]
+fn keep_opaque_alpha_keeps_the_alpha_auxiliary_of_an_opaque_rgba8() {
+    let px = opaque_rgba();
+    let avif = AvifEncoder::new()
+        .with_keep_opaque_alpha(true)
+        .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+        .expect("encode");
+    assert!(has_alpha_auxiliary(&avif));
+}
+
 #[test]
 fn grayscale_is_one_monochrome_item() {
     let avif = encode_gray(&AvifEncoder::new());
@@ -259,6 +364,52 @@ fn lossless_rgba_round_trips_through_libavif() {
     // `ispe` requirement among them.
     let strict = libavif_oracle::decode_avif(&avif).expect("strict libavif decode");
     assert!(!strict.monochrome(), "the colour item stays 4:4:4");
+}
+
+#[test]
+fn premultiply_on_encode_round_trips_through_libavif_within_rounding() {
+    // The caller's colour is unassociated; the encoder premultiplies it and declares `prem`.
+    // libavif must see the declaration and un-premultiply on its own, giving back the source:
+    // alpha exactly (premultiplying never touches it), opaque pixels exactly, and every other
+    // colour within the rounding premultiplication costs — round-to-nearest both ways leaves at
+    // most ⌊(a + 255) / 2a⌋ code values at alpha `a`. A fully transparent pixel keeps no colour.
+    let avif = encode_rgba(&AvifEncoder::new().with_alpha_mode(AlphaMode::PremultiplyOnEncode));
+    assert!(
+        libavif_oracle::introspect(&avif)
+            .expect("libavif parses")
+            .premultiplied_alpha
+    );
+
+    let (w, h, rgba) = libavif_oracle::decode_rgba(&avif).expect("libavif decodes");
+    assert_eq!((w, h), (W, H));
+    let source = source_rgba();
+    let mut opaque = 0;
+    for (i, (got, want)) in rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(source.as_chunks::<4>().0)
+        .enumerate()
+    {
+        let a = want[3];
+        assert_eq!(got[3], a, "alpha of pixel {i}");
+        let bound = match a {
+            0 => continue,
+            255 => {
+                opaque += 1;
+                0
+            }
+            a => (u16::from(a) + 255) / (2 * u16::from(a)),
+        };
+        for c in 0..3 {
+            let err = u16::from(got[c]).abs_diff(u16::from(want[c]));
+            assert!(
+                err <= bound,
+                "pixel {i} channel {c} at alpha {a}: {got:?} vs {want:?}"
+            );
+        }
+    }
+    assert!(opaque > 0, "the source has opaque pixels to hold exact");
 }
 
 #[test]

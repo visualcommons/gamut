@@ -188,7 +188,9 @@ fn encode_with_report_sizes_are_the_colour_and_alpha_iloc_extents() {
         },
     )
     .unwrap();
-    let encoder = gamut_avif::AvifEncoder::new();
+    // The fixture's alpha is opaque, which by default codes no alpha auxiliary at all; keep it, so
+    // there is an alpha extent to report.
+    let encoder = gamut_avif::AvifEncoder::new().with_keep_opaque_alpha(true);
     let (bytes, report) = encoder.encode_with_report(image).unwrap();
     assert_eq!(bytes, encoder.encode_to_vec(image).unwrap());
 

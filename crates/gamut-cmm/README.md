@@ -111,6 +111,7 @@ let fast = IccTransform::between(&src, &dst, TransformOptions {
     intent: RenderingIntent::MediaRelativeColorimetric,
     black_point_compensation: false,
     optimization: PipelineOptimization::Precalculate,
+    ..TransformOptions::default()
 })?;
 ```
 

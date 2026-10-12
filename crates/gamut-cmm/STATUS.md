@@ -32,6 +32,7 @@ that add behaviour (#325 onward).
 | P6 | #329 | Rendering intents + black-point compensation: `IccTransform::between`/`TransformOptions` (the first end-to-end transform), ICC-absolute white scaling (`intent`), black-point detection + compensation (`bpc`) | ✅ |
 | P7 | #330 | Transform chaining (`IccTransform::chain`), device links (`IccTransform::device_link`), soft proofing (`IccTransform::proofing`/`ProofingOptions`), gamut check (`GamutCheck`), typed pixel buffers (`image`), and the epic's max-ΔE₀₀ conformance gate | ✅ |
 | P8 | #372 | Pipeline optimization: the opt-in `PipelineOptimization` knob (`optimize`) — identity elision, matrix folding, curve joining, CLUT resampling — threaded through every transform constructor, default off, with divan throughput benches | ✅ |
+| — | #555 | `TransformOptions::prefer_cicp_transfer`: closed-form evaluation of a shaper profile's `cicp`-signalled transfer, checked against its TRC; default off on the measured trade (below) | ✅ |
 
 ## Settled decisions (P2, tone curves)
 
@@ -367,6 +368,59 @@ below). Building the resampled transform costs 4.8 ms against 0.16 ms unoptimize
 pipeline evaluations for a 33³ grid), so the tier pays off from roughly one 256×256 buffer
 onward; its `f64` node table is ~6.9 MB at 3×3 channels.
 
+## Settled decisions (#555, CICP-signalled transfer characteristics)
+
+`TransformOptions::prefer_cicp_transfer` (and its `ProofingOptions` twin; `GamutCheck::new`
+honours it on all three legs) evaluates a matrix/TRC profile's tone curves in closed form from
+the ITU-T H.273 transfer its `cicp` tag (ICC.1:2022 §10.3) names. It is **shipped, default off**,
+on the measurements below; moxcms's equivalent (`allow_use_cicp_transfer`) defaults on, and that
+analogy was deliberately not followed.
+
+- **Closed forms come from `gamut-color`.** `standard_eotf_for`/`standard_oetf_for` — the
+  standards-pure dispatch whose PQ arm is ST 2084 normalized to its 10 000 cd/m² peak, not
+  `eotf_for`'s encoder-exact SDR tone map — reach code points 1, 8, 13, 14, 16 and 18 (HLG,
+  scene-referred, added with this work). Code point 8 builds the structural identity so the
+  optimizer still elides it. Code points 6 and 15 (the same curve as 1 and 14 in H.273 Table
+  3) have no `TransferCharacteristics` variant yet, so a profile signalling them keeps its TRC.
+- **Equivalence is checked, not assumed.** §10.3 says the tag's encoding *shall* be equivalent
+  to the profile's; a profile in the wild may violate it. The closed form replaces a curve
+  only if the two agree within `2⁻⁸` at every point of the 4096-point grid `is_monotonic`
+  probes. That bound sits between what an *encoding* of a named curve misses it by (1.5e-5 for
+  the PQ built-in's 1024-entry table, 4.2e-6 / 1.3e-6 for the sRGB / BT.709 parametric
+  encodings, 1.7e-3 for a 16-entry sRGB table) and what a *different* curve does (gamma 2.2
+  or Adobe RGB's `x^(563/256)` labelled sRGB: 8.5e-3 / 8.6e-3). So the option never changes
+  how a mislabelled profile renders, and the TRC tags are still read and validated first.
+- **Shaper profiles only.** LUT-based profiles' curves are not the profile's transfer
+  function; device links read only their A2B tag.
+- **Default off, because the speed claim failed and the precision claim is one-directional.**
+  Precision: the PQ built-in's reversed table misses ST 2084's inverse by up to 5.5e-2 of
+  signal at black (its leading run quantizes to zero, so linear 0 encodes to ≈ 0.055),
+  3.6e-2 around 1 cd/m² and 3.7e-4 above 10 cd/m²; the closed form is exact. Device → PCS
+  gains only the table's 1.5e-5, and the parametric sRGB/BT.709 curves are within 1e-5 either
+  way. Speed, `cargo bench -p gamut-cmm -- cicp_transfer` (256×256 `u8`, fastest of 100
+  samples on a loaded machine — read the ratios):
+
+  | scenario | TRC tags | closed form |
+  |----------|----------|-------------|
+  | sRGB → BT.2100 PQ | 6.35–8.95 ms | 10.96–10.98 ms |
+  | BT.2100 PQ → sRGB | 7.33–10.06 ms | 9.89–9.98 ms |
+
+  ST 2084 costs two `powf` per sample where a sampled curve costs one interpolation, so the
+  option is never faster. Off, every transform is built exactly as lcms2 builds it.
+
+| class | path | TIGHT max ΔE₀₀ | LOOSE max / mean | asserted |
+|-------|------|----------------|------------------|----------|
+| sRGB ↔ BT.709 (parametric) | option on | 8.59e-4 | 2.18e-3 / 4.80e-4 | the published shaper budgets, `< 2e-3` / `< 1.0` / `< 3e-2` |
+| sRGB/BT.709 ↔ BT.2100 PQ | TRC tags | 2.74e-2 | 1.36e0 / 3.18e-2 | own class, `< 1e-1` / `< 3.0` / `< 1e-1` |
+| sRGB/BT.709 ↔ BT.2100 PQ | option on | 3.97e-2 | 1.36e0 / 3.17e-2 | same class |
+
+The PQ pairs are outside the shaper budgets on the **default** path already (14× over TIGHT):
+lcms2 evaluates the 1024-entry table through 16-bit interpolation and PQ's steep inverse near
+black amplifies it, through a lens that is that same table. With the option on, what is left is
+lcms2's error, not this crate's — at black lcms2 encodes 0.0547 where ST 2084 gives 7.3e-7. Both
+paths are gated (`tests/oracle_conformance.rs`, `cicp_preferring_transforms_match_lcms2`,
+`sampled_pq_transforms_stay_inside_their_class_budget`).
+
 ## Conformance gate (P7)
 
 `tests/oracle_conformance.rs` — the epic's acceptance badge. Battery pairs (shaper↔shaper,
@@ -422,6 +476,8 @@ lcms2's reference answer there and what it diverges from is lcms2's grid. The sh
 | White-point ("scum dot") fixup on a resampled CLUT | lcms2's `PatchLUT` snaps the input white node onto the output white in a precalculated table (`cmsFLAGS_NOWHITEONWHITEFIXUP` disables it, as the conformance gate does). An lcms2 aesthetic with no ICC.1 basis; the resampling pass does not replicate it. | ✗ out of scope |
 | Public per-hop intent/BPC arrays | The chain internals already take them (proofing uses them); the public `chain` API stays single-intent until a consumer needs lcms2's `cmsCreateExtendedTransform` shape. | ☐ deferred |
 | Named-colour profiles | No continuous pixel transform; rejected with a typed error everywhere. | ✗ out of scope |
+| `prefer_cicp_transfer` for H.273 transfer code points 6 and 15 | Same curve as 1 and 14, but `gamut-color`'s `TransferCharacteristics` has no variant for them, so `standard_eotf_for` cannot be asked; reaches the option with no change here once it does (#675). | ☐ deferred |
+| Public `prefer_cicp` on `link::device_to_pcs`/`pcs_to_device` | The per-profile builders stay TRC-only (and so does black-point *detection*, which runs through them); the option lives on the transform constructors. | ☐ deferred |
 | K-preserving intents (`INTENT_PRESERVE_K_*`) | lcms2 extensions beyond the four ICC intents (`cmscnvrt.c` dispatch table); no ICC.1 basis. | ☐ unplanned |
 
 ## Validation

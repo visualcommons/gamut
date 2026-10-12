@@ -32,10 +32,11 @@ pub(crate) const SRGB_PRIMARIES: [[f64; 2]; 3] =
     [[0.6400, 0.3300], [0.3000, 0.6000], [0.1500, 0.0600]];
 pub(crate) const DISPLAY_P3_PRIMARIES: [[f64; 2]; 3] =
     [[0.6800, 0.3200], [0.2650, 0.6900], [0.1500, 0.0600]];
-const ADOBE_RGB_PRIMARIES: [[f64; 2]; 3] = [[0.6400, 0.3300], [0.2100, 0.7100], [0.1500, 0.0600]];
+pub(crate) const ADOBE_RGB_PRIMARIES: [[f64; 2]; 3] =
+    [[0.6400, 0.3300], [0.2100, 0.7100], [0.1500, 0.0600]];
 pub(crate) const BT2020_PRIMARIES: [[f64; 2]; 3] =
     [[0.7080, 0.2920], [0.1700, 0.7970], [0.1310, 0.0460]];
-const PROPHOTO_PRIMARIES: [[f64; 2]; 3] = [
+pub(crate) const PROPHOTO_PRIMARIES: [[f64; 2]; 3] = [
     [0.734699, 0.265301],
     [0.159597, 0.840403],
     [0.036598, 0.000105],
@@ -49,17 +50,6 @@ pub(crate) const BT601_625_PRIMARIES: [[f64; 2]; 3] =
     [[0.6400, 0.3300], [0.2900, 0.6000], [0.1500, 0.0600]];
 pub(crate) const BT601_525_PRIMARIES: [[f64; 2]; 3] =
     [[0.6300, 0.3400], [0.3100, 0.5950], [0.1550, 0.0700]];
-
-/// The `(primaries, white)` for a [`Gamut`].
-fn gamut_chromaticities(gamut: Gamut) -> ([[f64; 2]; 3], [f64; 2]) {
-    match gamut {
-        Gamut::Srgb => (SRGB_PRIMARIES, D65),
-        Gamut::DisplayP3 => (DISPLAY_P3_PRIMARIES, D65),
-        Gamut::AdobeRgb => (ADOBE_RGB_PRIMARIES, D65),
-        Gamut::Bt2020 => (BT2020_PRIMARIES, D65),
-        Gamut::ProPhotoRgb => (PROPHOTO_PRIMARIES, D50),
-    }
-}
 
 /// Convert a CIE 1931 chromaticity `(x, y)` to tristimulus `XYZ` at unit `Y`.
 /// Precondition: `y != 0` (a zero `y` yields non-finite components).
@@ -117,7 +107,7 @@ pub fn derive_m1(gamut: Gamut) -> Option<[[f64; 3]; 3]> {
     let m_xyz_srgb = rgb_to_xyz_matrix(&SRGB_PRIMARIES, D65)?;
     let m_lms = mat_mul3(&M1_SRGB, &mat_inv_3x3(&m_xyz_srgb)?);
 
-    let (primaries, white) = gamut_chromaticities(gamut);
+    let (primaries, white) = gamut.chromaticities();
     let mut m_xyz = rgb_to_xyz_matrix(&primaries, white)?;
     if white != D65 {
         let m_adapt = bradford_adapt(white, D65)?;
