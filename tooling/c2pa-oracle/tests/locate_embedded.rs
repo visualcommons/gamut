@@ -25,10 +25,10 @@ mod common;
 
 use c2pa::ValidationState;
 use c2pa_oracle::{
-    AVIF_MIME, HEIC_MIME, JUMBF_SUPERBOX_TYPE, embed, jumbf_superbox_span, read,
-    read_with_external_store,
+    AVIF_MIME, Filled, HEIC_MIME, JUMBF_SUPERBOX_TYPE, embed, jumbf_superbox_span, read,
+    read_with_external_store, reserve_then_fill_padded,
 };
-use common::plain_avif;
+use common::{PADDING, plain_avif, reserve_avif};
 use gamut_avif::AvifContainer;
 use gamut_heic::HeifContainer;
 
@@ -36,6 +36,21 @@ use gamut_heic::HeifContainer;
 /// embedded a store into, itself choosing the placement.
 fn signed_avif() -> Vec<u8> {
     embed(AVIF_MIME, &plain_avif()).expect("c2pa-rs embeds a store into the gamut-encoded AVIF")
+}
+
+/// The one fixture on which the two locators' bounds differ: a slot reserved [`PADDING`] bytes
+/// longer than the store signed into it, the remainder zero-filled — what a signer that reserves
+/// generously produces, and what c2pa-rs's own embedder never does (see
+/// `c2pa_rs_leaves_no_padding_between_the_store_and_the_end_of_its_box`).
+fn padded_avif() -> Filled {
+    reserve_then_fill_padded(AVIF_MIME, PADDING, reserve_avif)
+        .expect("reserve a padded slot, sign and patch")
+}
+
+/// Where the store alone sits in a [`padded_avif`]: from the slot's start through the store's own
+/// `LBox`, derived from the store's JUMBF header and not from either locator.
+fn store_span(filled: &Filled) -> std::ops::Range<usize> {
+    jumbf_superbox_span(&filled.asset).expect("the padded asset carries a JUMBF superbox")
 }
 
 #[test]
@@ -51,7 +66,9 @@ fn gamut_avif_bounds_the_store_c2pa_rs_embedded_by_the_box_that_carries_it() {
     // holds gamut to is therefore containment, not equality: the slot begins exactly where the
     // store begins and holds every byte of it. Whether c2pa-rs leaves padding at all is c2pa-rs's
     // business, and it is pinned on its own below — so a future padding c2pa-rs fails *that* test
-    // rather than being misread here as gamut mis-locating.
+    // rather than being misread here as gamut mis-locating. That gamut-avif really does hold
+    // padding inside its range is shown on a padded fixture, by
+    // `gamut_avif_bounds_a_padded_slot_by_its_box_padding_included`.
     assert_eq!(
         slot.range.start, expected.start,
         "gamut-avif's reported range must begin at the store c2pa-rs embedded, not before or \
@@ -160,5 +177,89 @@ fn the_same_bytes_validate_when_offered_to_c2pa_rs_as_heic() {
     assert_eq!(
         read(HEIC_MIME, &asset).expect("the signed asset carries a store"),
         read(AVIF_MIME, &asset).expect("the signed asset carries a store"),
+    );
+}
+
+#[test]
+fn gamut_avif_bounds_a_padded_slot_by_its_box_padding_included() {
+    let filled = padded_avif();
+    let container = AvifContainer::parse(&filled.asset).expect("the padded asset parses");
+    let slot = container.c2pa_slot().expect("gamut-avif locates the slot");
+
+    // `C2paSlot::slot_bytes`: "the store, then any padding". Against a real padded file that is
+    // the whole reserved slot, not the store alone.
+    assert_eq!(
+        slot.range, filled.slot,
+        "gamut-avif must report the box-bounded slot — store plus padding — on a padded file"
+    );
+}
+
+#[test]
+fn gamut_heic_bounds_a_padded_slot_by_the_stores_lbox_alone() {
+    let filled = padded_avif();
+    let container = HeifContainer::parse(&filled.asset).expect("the padded asset parses");
+    let store = container.c2pa().expect("gamut-heic locates the store");
+
+    assert_eq!(
+        (store.range.clone(), store.bytes),
+        (store_span(&filled), filled.store.as_slice()),
+        "gamut-heic must trim to the store's own `LBox` and leave the padding out"
+    );
+}
+
+#[test]
+fn on_a_padded_slot_the_two_locators_start_together_and_gamut_avif_ends_after_gamut_heic() {
+    let filled = padded_avif();
+    let avif = AvifContainer::parse(&filled.asset)
+        .expect("the padded asset parses")
+        .c2pa_slot()
+        .expect("gamut-avif locates the slot")
+        .range;
+    let heic = HeifContainer::parse(&filled.asset)
+        .expect("the padded asset parses")
+        .c2pa()
+        .expect("gamut-heic locates the store")
+        .range;
+
+    // The documented relation between the two bounds, stated without either exact range: a
+    // consumer holding both may rely on it. The two tests above pin each range; this one pins
+    // that the divergence is *this* shape — same start, box end strictly past the `LBox` end by
+    // exactly the padding — rather than any other way two ranges can differ.
+    assert_eq!(
+        (avif.start, avif.end - heic.end),
+        (heic.start, PADDING),
+        "gamut-avif's range must start where gamut-heic's does and run on by the padding"
+    );
+}
+
+#[test]
+fn c2pa_rs_validates_the_lbox_bounded_store_read_out_of_a_padded_slot() {
+    let filled = padded_avif();
+    let located = &filled.asset[store_span(&filled)];
+
+    assert_eq!(
+        read_with_external_store(AVIF_MIME, located, &filled.asset)
+            .expect("the LBox-bounded bytes parse as a manifest store"),
+        ValidationState::Valid,
+        "c2pa-rs must accept the store gamut-heic's bound extracts from a padded slot"
+    );
+}
+
+#[test]
+fn c2pa_rs_ignores_the_zero_padding_after_the_store_in_box_bounded_bytes() {
+    let filled = padded_avif();
+    let located = &filled.asset[filled.slot.clone()];
+
+    // An observation about the reference implementation, not a rule: handed the store *and* the
+    // padding after it, as a sidecar, c2pa-rs reads the outer superbox by its own `LBox` and
+    // ignores what follows. So `gamut-avif`'s box-bounded `slot_bytes` can be handed to c2pa-rs
+    // untrimmed. A release that started refusing trailing bytes would fail this test — named for
+    // c2pa-rs, because c2pa-rs is what it measures — and a caller would then have to trim to the
+    // `LBox`, which is `gamut-heic`'s bound.
+    assert_eq!(
+        read_with_external_store(AVIF_MIME, located, &filled.asset)
+            .expect("the box-bounded bytes parse as a manifest store"),
+        ValidationState::Valid,
+        "c2pa-rs accepts a store followed by zero padding as an external manifest"
     );
 }
