@@ -12,8 +12,8 @@ use gamut_heic::{
     ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder, iter_nal_units,
 };
 use gamut_isobmff::{
-    ColourInformation, ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, NclxColr,
-    Property, PropertyKind, write,
+    CleanAperture, ColourInformation, ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference,
+    NclxColr, Property, PropertyKind, write,
 };
 
 // ---- deterministic mock decoder --------------------------------------------------------------
@@ -162,7 +162,7 @@ fn imir(axis: u8) -> Property {
 fn clap(wn: u32, wd: u32, hn: u32, hd: u32, hon: u32, hod: u32, von: u32, vod: u32) -> Property {
     Property {
         essential: true,
-        kind: PropertyKind::CleanAperture {
+        kind: PropertyKind::CleanAperture(CleanAperture {
             width_n: wn,
             width_d: wd,
             height_n: hn,
@@ -171,7 +171,7 @@ fn clap(wn: u32, wd: u32, hn: u32, hd: u32, hon: u32, hod: u32, von: u32, vod: u
             horiz_off_d: hod,
             vert_off_n: von,
             vert_off_d: vod,
-        },
+        }),
     }
 }
 

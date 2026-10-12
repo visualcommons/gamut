@@ -529,38 +529,26 @@ fn serialize_property(kind: &PropertyKind) -> Vec<u8> {
             bb.u8(*axis); // reserved(7) | axis(1); range pre-validated
             bb.end_box(start);
         }
-        PropertyKind::CleanAperture {
-            width_n,
-            width_d,
-            height_n,
-            height_d,
-            horiz_off_n,
-            horiz_off_d,
-            vert_off_n,
-            vert_off_d,
-        } => {
+        PropertyKind::CleanAperture(clap) => {
             let start = bb.begin_box(b"clap");
             for value in [
-                width_n,
-                width_d,
-                height_n,
-                height_d,
-                horiz_off_n,
-                horiz_off_d,
-                vert_off_n,
-                vert_off_d,
+                clap.width_n,
+                clap.width_d,
+                clap.height_n,
+                clap.height_d,
+                clap.horiz_off_n,
+                clap.horiz_off_d,
+                clap.vert_off_n,
+                clap.vert_off_d,
             ] {
-                bb.u32(*value);
+                bb.u32(value);
             }
             bb.end_box(start);
         }
-        PropertyKind::PixelAspectRatio {
-            h_spacing,
-            v_spacing,
-        } => {
+        PropertyKind::PixelAspectRatio(pasp) => {
             let start = bb.begin_box(b"pasp");
-            bb.u32(*h_spacing);
-            bb.u32(*v_spacing);
+            bb.u32(pasp.h_spacing);
+            bb.u32(pasp.v_spacing);
             bb.end_box(start);
         }
         PropertyKind::AuxiliaryType {
@@ -574,29 +562,26 @@ fn serialize_property(kind: &PropertyKind) -> Vec<u8> {
             bb.bytes(aux_subtype);
             bb.end_box(start);
         }
-        PropertyKind::ContentLightLevel {
-            max_content_light_level,
-            max_pic_average_light_level,
-        } => {
+        PropertyKind::ContentLightLevel(clli) => {
             let start = bb.begin_box(b"clli");
-            bb.u16(*max_content_light_level);
-            bb.u16(*max_pic_average_light_level);
+            bb.u16(clli.max_content_light_level);
+            bb.u16(clli.max_pic_average_light_level);
             bb.end_box(start);
         }
-        PropertyKind::MasteringDisplayColourVolume {
-            display_primaries,
-            white_point,
-            max_display_mastering_luminance,
-            min_display_mastering_luminance,
-        } => {
+        PropertyKind::MasteringDisplayColourVolume(mdcv) => {
             // Plain Box (no FullBox header): 3 × [x, y], then the white point, then the two
             // luminance bounds — 24 bytes, every field big-endian as stored.
             let start = bb.begin_box(b"mdcv");
-            for value in display_primaries.iter().chain([white_point]).flatten() {
+            for value in mdcv
+                .display_primaries
+                .iter()
+                .chain([&mdcv.white_point])
+                .flatten()
+            {
                 bb.u16(*value);
             }
-            bb.u32(*max_display_mastering_luminance);
-            bb.u32(*min_display_mastering_luminance);
+            bb.u32(mdcv.max_display_mastering_luminance);
+            bb.u32(mdcv.min_display_mastering_luminance);
             bb.end_box(start);
         }
         PropertyKind::CodecConfiguration { kind, data } | PropertyKind::Other { kind, data } => {
@@ -614,12 +599,14 @@ mod tests {
 
     #[test]
     fn serialize_property_writes_mdcv_as_a_24_byte_plain_box() {
-        let bytes = serialize_property(&PropertyKind::MasteringDisplayColourVolume {
-            display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
-            white_point: [15635, 16450],
-            max_display_mastering_luminance: 10_000_000,
-            min_display_mastering_luminance: 50,
-        });
+        let bytes = serialize_property(&PropertyKind::MasteringDisplayColourVolume(
+            crate::model::MasteringDisplay {
+                display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
+                white_point: [15635, 16450],
+                max_display_mastering_luminance: 10_000_000,
+                min_display_mastering_luminance: 50,
+            },
+        ));
         assert_eq!(
             bytes,
             [

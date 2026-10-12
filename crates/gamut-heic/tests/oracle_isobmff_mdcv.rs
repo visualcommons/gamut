@@ -58,12 +58,14 @@ fn read_types_libheif_written_mdcv_with_the_values_libheif_was_given() {
 
     assert_eq!(
         typed,
-        [&PropertyKind::MasteringDisplayColourVolume {
-            display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
-            white_point: [15635, 16450],
-            max_display_mastering_luminance: 10_000_000,
-            min_display_mastering_luminance: 50,
-        }],
+        [&PropertyKind::MasteringDisplayColourVolume(
+            gamut_isobmff::MasteringDisplay {
+                display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
+                white_point: [15635, 16450],
+                max_display_mastering_luminance: 10_000_000,
+                min_display_mastering_luminance: 50,
+            }
+        )],
         "exactly one typed mdcv, carrying the input values in stored order"
     );
 }

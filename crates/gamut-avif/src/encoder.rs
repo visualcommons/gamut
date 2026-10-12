@@ -1477,21 +1477,13 @@ impl AvifEncoder {
         if let Some(level) = self.content_light_level {
             properties.push(Property {
                 essential: false,
-                kind: PropertyKind::ContentLightLevel {
-                    max_content_light_level: level.max_content_light_level,
-                    max_pic_average_light_level: level.max_pic_average_light_level,
-                },
+                kind: PropertyKind::ContentLightLevel(level),
             });
         }
         if let Some(display) = self.mastering_display {
             properties.push(Property {
                 essential: false,
-                kind: PropertyKind::MasteringDisplayColourVolume {
-                    display_primaries: display.display_primaries,
-                    white_point: display.white_point,
-                    max_display_mastering_luminance: display.max_display_mastering_luminance,
-                    min_display_mastering_luminance: display.min_display_mastering_luminance,
-                },
+                kind: PropertyKind::MasteringDisplayColourVolume(display),
             });
         }
         // Transformative properties are essential (MIAF §7.3.6.7); applied irot-then-imir.

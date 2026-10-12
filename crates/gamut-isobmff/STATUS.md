@@ -138,12 +138,26 @@ prefix without changing the existing `body` view. The public surface is the walk
 (`new`/`next_box`/`position`/`remaining` + `RawBox` fields/`payload`); scalar field readers and the
 writer's `BoxBuilder` stay crate-private. Additive (semver-minor).
 
+## Typed property values
+
+The fixed-layout `clap`/`pasp`/`clli`/`mdcv` properties are plain `Copy` structs owned here —
+`CleanAperture`, `PixelAspectRatio`, `ContentLightLevel`, `MasteringDisplay` — and the matching
+`PropertyKind` variants carry them as tuple payloads (`PropertyKind::CleanAperture(CleanAperture)`,
+…, `PropertyKind::MasteringDisplayColourVolume(MasteringDisplay)`). `gamut-avif` and `gamut-heic`
+re-export these types rather than each defining its own copy (#743), so a value read from one
+format's accessor is the value the other's writer or model takes. Field names and values are
+unchanged from the former inline variant fields.
+
+**Semver:** moving the fields from struct-like variants into tuple payloads is a major bump — a
+`PropertyKind::CleanAperture { width_n, .. }` pattern becomes `PropertyKind::CleanAperture(clap)`
+with `clap.width_n`.
+
 ## Deferred (planned, additive — no model reshape)
 
 - **Typed `cclv`/`amve`/`reve`/`ndwt` HDR properties.** Carried verbatim as
   `PropertyKind::Other`. No vendored primary source pins their field layouts yet;
   `PropertyKind` is `#[non_exhaustive]` so typing one later is semver-minor. (`mdcv` is typed as
-  `PropertyKind::MasteringDisplayColourVolume`: its 24-byte layout is the 14496-12 syntax that
+  `PropertyKind::MasteringDisplayColourVolume(MasteringDisplay)`: its 24-byte layout is the 14496-12 syntax that
   AV1-ISOBMFF §2.3.4 states is identical to `SmDm`'s. The reader rejects an `mdcv` whose body is
   not exactly 24 bytes, which it previously carried verbatim as `Other`.)
 - **Writer emission options** (`idat` placement, multi-extent, `iloc` v1/v2, 32-bit-id boxes).

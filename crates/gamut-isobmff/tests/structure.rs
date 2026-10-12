@@ -6,7 +6,8 @@ mod common;
 
 use common::{av01_item, image, item};
 use gamut_isobmff::{
-    ColourInformation, EntityGroup, ItemReference, NclxColr, Property, PropertyKind, read, write,
+    CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, ItemReference, NclxColr,
+    PixelAspectRatio, Property, PropertyKind, read, write,
 };
 
 fn be32(buf: &[u8], p: usize) -> u32 {
@@ -101,7 +102,7 @@ fn property_bodies_are_exact() {
         },
         Property {
             essential: true,
-            kind: PropertyKind::CleanAperture {
+            kind: PropertyKind::CleanAperture(CleanAperture {
                 width_n: 1,
                 width_d: 2,
                 height_n: 3,
@@ -110,21 +111,21 @@ fn property_bodies_are_exact() {
                 horiz_off_d: 6,
                 vert_off_n: 7,
                 vert_off_d: 8,
-            },
+            }),
         },
         Property {
             essential: false,
-            kind: PropertyKind::PixelAspectRatio {
+            kind: PropertyKind::PixelAspectRatio(PixelAspectRatio {
                 h_spacing: 9,
                 v_spacing: 10,
-            },
+            }),
         },
         Property {
             essential: false,
-            kind: PropertyKind::ContentLightLevel {
+            kind: PropertyKind::ContentLightLevel(ContentLightLevel {
                 max_content_light_level: 0x1234,
                 max_pic_average_light_level: 0x0056,
-            },
+            }),
         },
         Property {
             essential: false,

@@ -337,33 +337,10 @@ pub enum PropertyKind {
     /// right parts (ISO/IEC 23008-12:2022 §6.5.12, the semantics libheif and libavif implement).
     Mirror(u8),
     /// `clap` clean aperture — the displayed crop as fractional width/height/centre-offsets
-    /// (ISO/IEC 14496-12 §12.1.4). Fields are the raw unsigned 32-bit box values; the offset
-    /// numerators are interpreted as two's-complement signed by consumers (MIAF §7.3.6.7).
-    CleanAperture {
-        /// Clean-aperture width numerator.
-        width_n: u32,
-        /// Clean-aperture width denominator.
-        width_d: u32,
-        /// Clean-aperture height numerator.
-        height_n: u32,
-        /// Clean-aperture height denominator.
-        height_d: u32,
-        /// Horizontal centre-offset numerator (signed, stored as the raw two's-complement bits).
-        horiz_off_n: u32,
-        /// Horizontal centre-offset denominator.
-        horiz_off_d: u32,
-        /// Vertical centre-offset numerator (signed, stored as the raw two's-complement bits).
-        vert_off_n: u32,
-        /// Vertical centre-offset denominator.
-        vert_off_d: u32,
-    },
+    /// (ISO/IEC 14496-12 §12.1.4).
+    CleanAperture(CleanAperture),
     /// `pasp` pixel aspect ratio — `h_spacing:v_spacing` (ISO/IEC 14496-12 §12.1.4).
-    PixelAspectRatio {
-        /// Relative horizontal pixel spacing.
-        h_spacing: u32,
-        /// Relative vertical pixel spacing.
-        v_spacing: u32,
-    },
+    PixelAspectRatio(PixelAspectRatio),
     /// `auxC` auxiliary type — what an auxiliary (non-displayed) image is, e.g.
     /// `urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` for an alpha plane
     /// (ISO/IEC 23008-12 §6.5.8; MIAF §7.3.5).
@@ -373,30 +350,12 @@ pub enum PropertyKind {
         /// Format-specific subtype bytes following the URN, usually empty.
         aux_subtype: Vec<u8>,
     },
-    /// `clli` content light level — HDR `MaxCLL`/`MaxPALL` in cd/m² (ISO/IEC 14496-12;
-    /// semantics from the HEVC SEI, ISO/IEC 23008-2 §D.3.35).
-    ContentLightLevel {
-        /// Maximum content light level (`MaxCLL`).
-        max_content_light_level: u16,
-        /// Maximum picture average light level (`MaxPALL`).
-        max_pic_average_light_level: u16,
-    },
+    /// `clli` content light level — HDR `MaxCLL`/`MaxPALL` in cd/m² (ISO/IEC 14496-12).
+    ContentLightLevel(ContentLightLevel),
     /// `mdcv` mastering display colour volume — the SMPTE ST 2086 mastering-display metadata, as
-    /// stored (ISO/IEC 14496-12 `MasteringDisplayColourVolumeBox`, a plain `Box` with the
-    /// `SmDm` field layout, per AV1-ISOBMFF §2.3.4; semantics from the HEVC mastering display
-    /// colour volume SEI, ISO/IEC 23008-2 Annex D). Exactly 24 bytes on the wire; a reader rejects any other length as malformed.
-    MasteringDisplayColourVolume {
-        /// The three display primaries as `[x, y]` CIE 1931 chromaticity pairs in units of
-        /// 0.00002, in stored order. The HEVC convention orders them green, blue, red; the box
-        /// does not enforce an order, so they are kept exactly as stored.
-        display_primaries: [[u16; 2]; 3],
-        /// The white point as an `[x, y]` CIE 1931 chromaticity pair in units of 0.00002.
-        white_point: [u16; 2],
-        /// Nominal maximum display luminance, in units of 0.0001 cd/m².
-        max_display_mastering_luminance: u32,
-        /// Nominal minimum display luminance, in units of 0.0001 cd/m².
-        min_display_mastering_luminance: u32,
-    },
+    /// stored (ISO/IEC 14496-12 `MasteringDisplayColourVolumeBox`). Exactly 24 bytes on the wire;
+    /// a reader rejects any other length as malformed.
+    MasteringDisplayColourVolume(MasteringDisplay),
     /// A codec configuration property (e.g. `av1C`, `hvcC`) carried as opaque bytes — the container
     /// never interprets the coded-format record. `kind` is the box type; `data` is its body.
     CodecConfiguration {
@@ -444,4 +403,72 @@ pub struct NclxColr {
     pub matrix_coefficients: u16,
     /// Full-range (vs limited-range) flag.
     pub full_range: bool,
+}
+
+/// The `clap` clean-aperture crop as fractional width/height and centre offsets (ISO/IEC 14496-12
+/// §12.1.4), carried by [`PropertyKind::CleanAperture`]. Fields are the raw unsigned 32-bit box
+/// values; the offset numerators are the raw two's-complement bits, interpreted as signed by
+/// consumers (MIAF §7.3.6.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CleanAperture {
+    /// Clean-aperture width numerator.
+    pub width_n: u32,
+    /// Clean-aperture width denominator.
+    pub width_d: u32,
+    /// Clean-aperture height numerator.
+    pub height_n: u32,
+    /// Clean-aperture height denominator.
+    pub height_d: u32,
+    /// Horizontal centre-offset numerator (signed, stored as the raw two's-complement bits).
+    pub horiz_off_n: u32,
+    /// Horizontal centre-offset denominator.
+    pub horiz_off_d: u32,
+    /// Vertical centre-offset numerator (signed, stored as the raw two's-complement bits).
+    pub vert_off_n: u32,
+    /// Vertical centre-offset denominator.
+    pub vert_off_d: u32,
+}
+
+/// The `pasp` pixel aspect ratio `h_spacing : v_spacing` (ISO/IEC 14496-12 §12.1.4), carried by
+/// [`PropertyKind::PixelAspectRatio`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelAspectRatio {
+    /// Relative horizontal pixel spacing.
+    pub h_spacing: u32,
+    /// Relative vertical pixel spacing.
+    pub v_spacing: u32,
+}
+
+/// The `clli` content light level `MaxCLL`/`MaxPALL`, in cd/m² (ISO/IEC 14496-12; semantics from
+/// the HEVC SEI, ISO/IEC 23008-2 §D.3.35), carried by [`PropertyKind::ContentLightLevel`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentLightLevel {
+    /// Maximum content light level (`MaxCLL`).
+    pub max_content_light_level: u16,
+    /// Maximum picture average light level (`MaxPALL`).
+    pub max_pic_average_light_level: u16,
+}
+
+/// The `mdcv` mastering display colour volume — SMPTE ST 2086 metadata describing the display the
+/// content was mastered on (ISO/IEC 14496-12 `MasteringDisplayColourVolumeBox`, a plain `Box` with
+/// the `SmDm` field layout per AV1-ISOBMFF §2.3.4; semantics from the HEVC mastering display
+/// colour volume SEI, ISO/IEC 23008-2 Annex D), carried by
+/// [`PropertyKind::MasteringDisplayColourVolume`].
+///
+/// Every field is the stored integer code point, not a converted float, so a value read from one
+/// file and written to another is bit-exact. Neither the reader nor the writer range-checks them:
+/// the box does not, and a reader rejecting out-of-range SEI values would refuse files the world
+/// holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MasteringDisplay {
+    /// The three display primaries as `[x, y]` CIE 1931 chromaticity pairs in units of 0.00002,
+    /// in stored order. The HEVC convention orders them green, blue, red; the box does not
+    /// enforce an order, so they are kept exactly as stored.
+    pub display_primaries: [[u16; 2]; 3],
+    /// The white point as an `[x, y]` CIE 1931 chromaticity pair in units of 0.00002.
+    pub white_point: [u16; 2],
+    /// Nominal maximum display luminance, in units of 0.0001 cd/m².
+    pub max_display_mastering_luminance: u32,
+    /// Nominal minimum display luminance, in units of 0.0001 cd/m².
+    pub min_display_mastering_luminance: u32,
 }

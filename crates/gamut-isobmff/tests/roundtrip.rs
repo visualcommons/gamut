@@ -10,8 +10,9 @@ mod common;
 
 use common::{av01_item, image, item};
 use gamut_isobmff::{
-    ColourInformation, EntityGroup, IsoBmffImage, Item, ItemReference, NclxColr, Property,
-    PropertyKind, TopLevelBox, TopLevelPosition, read, write,
+    CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, IsoBmffImage, Item,
+    ItemReference, MasteringDisplay, NclxColr, PixelAspectRatio, Property, PropertyKind,
+    TopLevelBox, TopLevelPosition, read, write,
 };
 
 #[track_caller]
@@ -119,23 +120,23 @@ fn hdr_and_aspect_properties() {
     let mut item = av01_item(1, vec![8; 12]);
     item.properties.push(Property {
         essential: false,
-        kind: PropertyKind::ContentLightLevel {
+        kind: PropertyKind::ContentLightLevel(ContentLightLevel {
             max_content_light_level: 1000,
             max_pic_average_light_level: 400,
-        },
+        }),
     });
     item.properties.push(Property {
         essential: false,
-        kind: PropertyKind::MasteringDisplayColourVolume {
+        kind: PropertyKind::MasteringDisplayColourVolume(MasteringDisplay {
             display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
             white_point: [15635, 16450],
             max_display_mastering_luminance: 10_000_000,
             min_display_mastering_luminance: 50,
-        },
+        }),
     });
     item.properties.push(Property {
         essential: true,
-        kind: PropertyKind::CleanAperture {
+        kind: PropertyKind::CleanAperture(CleanAperture {
             width_n: 40,
             width_d: 1,
             height_n: 30,
@@ -144,14 +145,14 @@ fn hdr_and_aspect_properties() {
             horiz_off_d: 2,
             vert_off_n: 1,
             vert_off_d: 2,
-        },
+        }),
     });
     item.properties.push(Property {
         essential: false,
-        kind: PropertyKind::PixelAspectRatio {
+        kind: PropertyKind::PixelAspectRatio(PixelAspectRatio {
             h_spacing: 4,
             v_spacing: 3,
-        },
+        }),
     });
     assert_roundtrips(&image(vec![item]));
 }
