@@ -7,16 +7,16 @@
 //! **Colorimetry `gamut-color` can supply is never retyped here**: the primaries and white point
 //! come from [`gamut_color::cicp::ColourPrimaries::chromaticities`] for a CICP code point and from
 //! [`gamut_color::Gamut::chromaticities`] for a named space, the RGB→XYZ construction and
-//! the Bradford adaptation to the D50 PCS from [`gamut_color::matrix`], and the ST 2084 curve from
+//! the Bradford adaptation to the D50 PCS from [`gamut_color::matrix`], and the ST 2084 curve and
+//! the BT.709-family α and β ([`BT709_ALPHA`] / [`BT709_BETA`], H.273 §8.2) from
 //! [`gamut_color::transfer`].
 //!
-//! Five published constants it does not supply *are* written here, because an ICC tag needs them
+//! Four published constants it does not supply *are* written here, because an ICC tag needs them
 //! in a form no `gamut-color` function returns. Each is gated against something outside this
 //! module rather than trusted:
 //!
 //! | Restated here | Why it cannot be borrowed | What gates it |
 //! | --- | --- | --- |
-//! | [`BT709_BETA`] (H.273 §8.2); [`BT709_ALPHA`] is *derived* from it, not restated | `gamut-color` has no BT.709-family curve at all — see "Which spaces" | `bt709_curve_inverts_the_h273_transfer`, against `h273_bt709_oetf`, a forward transcription of Table 3 that restates α and β on purpose so no mistyped digit is shared; and `oracle_every_encodable_transfer_matches_its_curve_through_lcms` through lcms2 |
 //! | The IEC 61966-2-1 `(g, a, b, c, d)` set for [`Trc::Srgb`] | `gamut_color::transfer::srgb_eotf` is a *function*; §10.18 type 3 needs its five parameters | `srgb_parametric_curve_matches_gamut_color` against that function, and `oracle_every_encodable_transfer_matches_its_curve_through_lcms` against lcms2's own sRGB |
 //! | [`ADOBE_RGB_GAMMA`], `563 / 256` (Adobe RGB (1998) §4.3.1.2) | `gamut_color::transfer::adobe_rgb_eotf_standard` is a *function*; §10.18 type 0 needs its exponent | `uncoded_space_curves_match_gamut_color_standard_curves` against that function, and `oracle_uncoded_space_curves_match_gamut_color_through_lcms` through lcms2 |
 //! | The ROMM RGB `(g, a, b, c, d)` set for [`Trc::Romm`] (ISO 22028-2, via the ROMM RGB white paper) | `gamut_color::transfer::prophoto_rgb_eotf_standard` is a *function*; §10.18 type 3 needs its five parameters | the same two tests, against `prophoto_rgb_eotf_standard` |
@@ -43,12 +43,8 @@
 //! curves an ICC tag can *encode* is not the set `gamut-color` can *evaluate*: H.273 Table 3's
 //! code points 1, 6, 14 and 15 are one curve with a closed form ICC.1:2022 §10.18 defines exactly, so this
 //! module encodes all four, while `gamut_color::cicp::TransferCharacteristics` models only two of
-//! them (1 and 14) and `gamut_color::transfer::eotf_for` returns a curve for only one — code
-//! point 14, which it maps to `bt2020_pq_to_sdr`, a PQ EOTF followed by a tone map to SDR rather
-//! than Table 3's curve. Keying on the code point is what keeps that tone map out of an ICC tag:
-//! at `V = 0.5` it evaluates 20.3 % above the curve this module writes for the same code point.
-//! Which of the two readings of code point 14 is right is `gamut-color`'s question, not this
-//! crate's, and is tracked at <https://github.com/visualcommons/gamut/issues/605>.
+//! them (1 and 14). `gamut_color::transfer::eotf_for` maps both of those to the same Table 3
+//! curve this module writes.
 //!
 //! ```
 //! use gamut_color::cicp::TransferCharacteristics as Tc;
@@ -60,12 +56,12 @@
 //! assert_eq!(Tc::from_code_point(14), Some(Tc::Bt2020_10));
 //! assert_eq!(Tc::from_code_point(6), None);
 //! assert_eq!(Tc::from_code_point(15), None);
-//! // … and exactly one of those two has an EOTF, which is not this curve: at V = 0.5 it sits
-//! // 20.3 % above Table 3's 0.259719, the light this module writes for the same code point
-//! // (pinned by `bt709_curve_inverts_the_h273_transfer`).
-//! assert!(eotf_for(Tc::Bt709).is_none());
-//! let tone_mapped = eotf_for(Tc::Bt2020_10).expect("code point 14 has an EOTF")(0.5);
-//! assert!(((tone_mapped / 0.259_719 - 1.0) * 100.0 - 20.3).abs() < 0.05);
+//! // … and both evaluate Table 3's curve: V = 0.5 is 0.259719 in light, the value this module
+//! // writes for the same code points (pinned by `bt709_curve_inverts_the_h273_transfer`).
+//! for tc in [Tc::Bt709, Tc::Bt2020_10] {
+//!     let light = eotf_for(tc).expect("BT.709-family code point has an EOTF")(0.5);
+//!     assert!((light - 0.259_719).abs() < 1e-6);
+//! }
 //!
 //! // All four are encodable here regardless; that they encode one curve is pinned by
 //! // `every_bt709_family_code_point_builds_the_same_curve`.
@@ -181,7 +177,7 @@
 use gamut_color::cicp::{ColourPrimaries, TransferCharacteristics};
 use gamut_color::linalg::mat_mul3;
 use gamut_color::matrix::{bradford_adapt, rgb_to_xyz_matrix};
-use gamut_color::transfer::pq_eotf;
+use gamut_color::transfer::{BT709_ALPHA, BT709_BETA, pq_eotf};
 use gamut_color::{Gamut, SourceProfile};
 
 use crate::cicp::Cicp;
@@ -212,15 +208,6 @@ type Matrix3 = [[f64; 3]; 3];
 /// CIE 1931 `([R, G, B], white)` chromaticities — the shape both
 /// [`ColourPrimaries::chromaticities`] and [`Gamut::chromaticities`] return.
 type Chromaticities = ([[f64; 2]; 3], [f64; 2]);
-
-/// ITU-T H.273 (07/2024) §8.2: for `TransferCharacteristics` 1, 6, 14 and 15, β is "the positive
-/// constant necessary for the curve segments that meet at the value β to have continuity of both
-/// value and slope", stated there as `0.018053968510807...`.
-const BT709_BETA: f64 = 0.018_053_968_510_807;
-
-/// ITU-T H.273 (07/2024) §8.2: `α = 1 + 5.5 * β = 1.099296826809442...`, derived from
-/// [`BT709_BETA`] rather than restated so the two cannot disagree.
-const BT709_ALPHA: f64 = 1.0 + 5.5 * BT709_BETA;
 
 /// Adobe RGB (1998) Color Image Encoding §4.3.1.2: the inverse colour component transfer is the
 /// pure power `X^2.19921875`, "obtained from 2 51/256" (hexadecimal `02.33`) — so `563 / 256`,

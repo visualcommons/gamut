@@ -245,7 +245,7 @@ exclude_re = [
     # `x = (x << 1) | u32::from(bit)` and `x = (x << take) | u64::from(f(take)?)`. The shift vacates
     # exactly the bits the right operand occupies -- one bit, or `take` bits against a value `f(take)`
     # bounds below `2^take` -- so the operands are disjoint and `|` == `^` for every input. Provably
-    # equivalent: the same shape as `BoolDecoder::get_literal` and `backend::BitReader::bits` below.
+    # equivalent: the same shape as `BoolDecoder::get_literal` below.
     # Path-anchored because a bare `::f` would also match gamut-jpeg's unrelated `BitReader::fetch`.
     # (`| -> &` in the same lines IS killed by `f_reads_back_what_the_writer_wrote`, which reads
     # fields with bits set, so only the `^` mutant is excluded.)
@@ -335,12 +335,6 @@ exclude_re = [
     # gamut-webp `BoolDecoder::get_literal`: `v = (v << 1) | u32::from(get_flag())` ORs a flag bit (0
     # or 1) into a freshly-vacated low bit, so the operands are disjoint and `|` is identical to `^`.
     'replace \| with \^ in BoolDecoder<.a>::get_literal',
-    # gamut-avif `backend::BitReader::bits` (the sequence-header peek over a backend-supplied AV1
-    # stream): `value = (value << 1) | u32::from(bit)` ORs a 0/1 bit into the low bit the shift just
-    # vacated, so the operands are disjoint and `|` is identical to `^` — the same provably-equivalent
-    # shape as `BoolDecoder::get_literal` above. (The `| -> &`, `<< -> >>`, `% -> +` and `+= -> -=`/`*=`
-    # mutants in the same function ARE killed by `tests/backend.rs`'s hand-built sequence headers.)
-    'replace \| with \^ in BitReader<.a>::bits',
     # gamut-webp `loop_filter::s2u`: `(c(v) + 128) as u8`. `+ 128` and `- 128` differ by 256, which the
     # `as u8` truncation discards, so the result is identical — the `+ -> -` mutation is unobservable.
     'replace \+ with - in s2u',

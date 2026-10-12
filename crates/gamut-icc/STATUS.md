@@ -49,16 +49,14 @@ spec-valid v4 three-component matrix/TRC display profiles (§8.4). All four retu
 colorimetry they resolve is **gamut-color's, and whatever gamut-color can supply is never retyped
 here** — primaries and white point come from `ColourPrimaries::chromaticities` for a CICP code
 point and from `Gamut::chromaticities` for a named space, the RGB→XYZ
-construction and Bradford adaptation from `gamut_color::matrix`, the ST 2084 curve from
-`gamut_color::transfer` — and those constructors are themselves fallible, so an input whose
-colorimetry cannot be resolved is declined rather than given a profile whose colorants are silently
-the PCS axes.
+construction and Bradford adaptation from `gamut_color::matrix`, the ST 2084 curve and H.273
+§8.2's BT.709-family α and β (`BT709_ALPHA` / `BT709_BETA`) from `gamut_color::transfer` — and
+those constructors are themselves fallible, so an input whose colorimetry cannot be resolved is
+declined rather than given a profile whose colorants are silently the PCS axes.
 
-Five published constants gamut-color does *not* supply are written out here, because an ICC tag
+Four published constants gamut-color does *not* supply are written out here, because an ICC tag
 needs them in a form no gamut-color function returns, and each is gated rather than trusted:
-H.273 §8.2's β (`BT709_BETA`, from which α is derived rather than restated), pinned by
-`bt709_curve_inverts_the_h273_transfer` against an independent forward transcription of Table 3 and
-by the lcms2 oracle; the IEC 61966-2-1 `(g, a, b, c, d)` parameter set for §10.18 type 3, pinned by
+the IEC 61966-2-1 `(g, a, b, c, d)` parameter set for §10.18 type 3, pinned by
 `srgb_parametric_curve_matches_gamut_color` against `gamut_color::transfer::srgb_eotf` and by
 `oracle_every_encodable_transfer_matches_its_curve_through_lcms`; Adobe RGB (1998)'s `563 / 256`
 exponent and the ROMM RGB `(g, a, b, c, d)` set, pinned by
@@ -66,7 +64,7 @@ exponent and the ROMM RGB `(g, a, b, c, d)` set, pinned by
 `adobe_rgb_eotf_standard` / `prophoto_rgb_eotf_standard` and by
 `oracle_uncoded_space_curves_match_gamut_color_through_lcms`; and the PCS D50 of §7.2.16, which is an ICC fact rather than
 a CIE one (see "PCS white" below), pinned by `colorants_sum_to_the_declared_media_white_point` and
-the lcms2 colorant oracle. `src/builtin.rs`'s module documentation tabulates the five. Colorimetry is not the only
+the lcms2 colorant oracle. `src/builtin.rs`'s module documentation tabulates the four. Colorimetry is not the only
 reason to decline: `from_cicp` also refuses signalling this profile *shape* cannot carry, which is
 where narrow range lands — see "CICP fields the profile does not build from" below. `builtin`
 yields `Some` for every `BuiltinProfile` in this release and a test pins that.
@@ -108,15 +106,13 @@ Declined: HLG (code 18) and Unspecified (code 2) have neither a §10.18 closed f
 gamut-color EOTF to sample from, and every other H.273 code point is unmodelled here. The transfer
 axis is keyed on the **raw code point**, not on `gamut_color::cicp::TransferCharacteristics`,
 because the set of curves an ICC tag can encode is not the set gamut-color can evaluate: codes 6
-and 15 have no `TransferCharacteristics` variant at all; code 1 has one but no `eotf_for` curve;
-and code 14 has an `eotf_for` curve that is **not this one** — `bt2020_pq_to_sdr`, a PQ EOTF plus
-a tone map to SDR, which at `V = 0.5` is 20.3 % above what Table 3 gives code 14. All four are
-exactly encodable here as the one curve Table 3 defines. That the two crates read code point 14
-differently is a `gamut-color` question, filed as
-[#605](https://github.com/visualcommons/gamut/issues/605) rather than resolved here. Each claim
-about gamut-color above is an assertion in the doctest on `src/builtin.rs`'s module documentation:
-which of the four code points `TransferCharacteristics::from_code_point` models, which of those
-`eotf_for` returns a curve for, and the 20.3 % by which that curve exceeds Table 3's at `V = 0.5`.
+and 15 have no `TransferCharacteristics` variant at all, while codes 1 and 14 do, and `eotf_for`
+maps both to the same Table 3 curve this crate writes (`gamut_color::transfer::bt709_eotf`, whose
+α and β — `BT709_ALPHA` / `BT709_BETA` — the parametric tag borrows rather than restates). All four
+are exactly encodable here as the one curve Table 3 defines. Each claim about gamut-color above is
+an assertion in the doctest on `src/builtin.rs`'s module documentation: which of the four code
+points `TransferCharacteristics::from_code_point` models, and that `eotf_for` evaluates Table 3's
+`0.259719` at `V = 0.5` for both of those.
 
 **A `SourceProfile` bundle's own curve is not always the profile's curve.** `from_source_profile`
 projects a coded bundle onto its two CICP code points and builds from those. The two uncoded

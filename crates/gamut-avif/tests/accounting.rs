@@ -11,26 +11,15 @@ mod common;
 use common::{av01_item, bx, clean_file};
 use gamut_avif::{AvifContainer, SegmentKind};
 
-/// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next
-/// start (contiguous, non-overlapping), and the last ends at `len` — the every-byte invariant.
+/// Asserts the every-byte invariant through the shared predicate,
+/// [`gamut_core::segment::covers`], whose own negative cases are pinned once in `gamut-core`
+/// (#500).
 fn assert_covers(container: &AvifContainer, len: usize) {
     let segs = container.segments();
-    assert!(!segs.is_empty(), "at least one segment");
-    assert_eq!(segs[0].range.start, 0, "coverage starts at 0");
-    for pair in segs.windows(2) {
-        assert_eq!(
-            pair[0].range.end, pair[1].range.start,
-            "segments are contiguous and non-overlapping"
-        );
-    }
-    assert_eq!(
-        segs.last().unwrap().range.end,
-        len,
-        "coverage runs to end of file"
+    assert!(
+        gamut_core::segment::covers(segs, len),
+        "segments must tile 0..{len}: {segs:?}"
     );
-    for s in segs {
-        assert!(s.range.end > s.range.start, "no empty segment");
-    }
 }
 
 /// The top-level box types, in order (the `SegmentKind::Box` segments).
@@ -153,4 +142,90 @@ fn encoder_output_accounts_totally() {
     assert_eq!(box_types(&c), vec![*b"ftyp", *b"meta", *b"mdat"]);
     assert!(c.unknown_meta_boxes().is_empty());
     assert!(c.image().is_av1_still());
+}
+
+/// The `iloc`-resolved payload length of `item_id` in a parsed file.
+fn payload_len(c: &AvifContainer, item_id: u32) -> usize {
+    c.image()
+        .item(item_id)
+        .expect("item present")
+        .as_isobmff_item()
+        .payload
+        .len()
+}
+
+/// The body length of the file's single `mdat` — read off the segment walk, not `iloc`.
+fn mdat_len(c: &AvifContainer) -> usize {
+    let mut mdats = c.boxes().filter(|(ty, _)| ty == b"mdat");
+    let (_, body) = mdats.next().expect("an mdat");
+    assert!(mdats.next().is_none(), "exactly one mdat");
+    body.len()
+}
+
+/// `encode_with_report` reports the colour and alpha codestream sizes a reader of the file finds:
+/// the `iloc` extent lengths of the primary item and of its alpha auxiliary (issue #662).
+///
+/// The source pairs a textured colour image with a constant alpha plane, so the two codestreams
+/// differ in length and a report that swapped them would fail. With no metadata configured the
+/// `mdat` holds exactly those two payloads, which pins the sum against the segment walk as well as
+/// against `iloc`.
+#[test]
+fn encode_with_report_sizes_are_the_colour_and_alpha_iloc_extents() {
+    use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgba8};
+    const W: u32 = 24;
+    const H: u32 = 16;
+    let mut rgba = Vec::with_capacity((W * H * 4) as usize);
+    for y in 0..H {
+        for x in 0..W {
+            rgba.extend_from_slice(&[(x * 11) as u8, (y * 13) as u8, ((x ^ y) * 7) as u8, 255]);
+        }
+    }
+    let image = ImageRef::<Rgba8>::new(
+        &rgba,
+        Dimensions {
+            width: W,
+            height: H,
+        },
+    )
+    .unwrap();
+    let encoder = gamut_avif::AvifEncoder::new();
+    let (bytes, report) = encoder.encode_with_report(image).unwrap();
+    assert_eq!(bytes, encoder.encode_to_vec(image).unwrap());
+
+    let c = AvifContainer::parse(&bytes).unwrap();
+    let primary = c.image().primary_item().id();
+    let alpha = c.image().alpha_auxiliary_of(primary).expect("alpha").id();
+    assert_eq!(report.color_bytes, payload_len(&c, primary));
+    assert_eq!(report.alpha_bytes, payload_len(&c, alpha));
+    assert_ne!(
+        report.color_bytes, report.alpha_bytes,
+        "fixture tells them apart"
+    );
+    assert_eq!(report.color_bytes + report.alpha_bytes, mdat_len(&c));
+}
+
+/// Without an alpha channel there is no alpha auxiliary, and `alpha_bytes` is `0`; the colour
+/// item alone fills the `mdat`.
+#[test]
+fn encode_with_report_alpha_bytes_is_zero_without_alpha() {
+    use gamut_core::{Dimensions, ImageRef, Rgb8};
+    let rgb: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 5) as u8).collect();
+    let image = ImageRef::<Rgb8>::new(
+        &rgb,
+        Dimensions {
+            width: 8,
+            height: 8,
+        },
+    )
+    .unwrap();
+    let (bytes, report) = gamut_avif::AvifEncoder::new()
+        .encode_with_report(image)
+        .unwrap();
+
+    let c = AvifContainer::parse(&bytes).unwrap();
+    let primary = c.image().primary_item().id();
+    assert!(c.image().alpha_auxiliary_of(primary).is_none());
+    assert_eq!(report.alpha_bytes, 0);
+    assert_eq!(report.color_bytes, payload_len(&c, primary));
+    assert_eq!(report.color_bytes, mdat_len(&c));
 }

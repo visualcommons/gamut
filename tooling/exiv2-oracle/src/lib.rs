@@ -4,9 +4,9 @@
 //! gamut-xmp and gamut-exif must produce data the authoritative reference engine reads, and must
 //! read what that engine writes. This crate wraps exiv2's in-memory parsers/serializers behind a
 //! small, safe API: [`validate`], [`roundtrip`], [`get_property`], and [`property_count`] for XMP;
-//! [`exif_count`], [`exif_get`], and [`exif_roundtrip`] for EXIF (a bare TIFF stream, no
-//! `Exif\0\0` marker). All `unsafe` FFI is confined to this crate; inputs are length-delimited byte
-//! slices, so no temporary files are used.
+//! [`exif_count`], [`exif_get`], [`exif_print`], and [`exif_roundtrip`] for EXIF (a bare TIFF
+//! stream, no `Exif\0\0` marker). All `unsafe` FFI is confined to this crate; inputs are
+//! length-delimited byte slices, so no temporary files are used.
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
@@ -40,6 +40,13 @@ unsafe extern "C" {
     fn exiv2_xmp_count(xmp: *const c_char, len: usize, out_count: *mut usize) -> c_int;
     fn exiv2_exif_count(data: *const c_char, len: usize, out_count: *mut usize) -> c_int;
     fn exiv2_exif_get(
+        data: *const c_char,
+        len: usize,
+        key: *const c_char,
+        out_buf: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn exiv2_exif_print(
         data: *const c_char,
         len: usize,
         key: *const c_char,
@@ -172,12 +179,42 @@ pub fn exif_count(data: &[u8]) -> Result<usize, String> {
 /// Returns a message if the key contains a NUL byte, exiv2 cannot decode the stream, or the tag is
 /// absent.
 pub fn exif_get(data: &[u8], key: &str) -> Result<String, String> {
+    exif_read(exiv2_exif_get, data, key)
+}
+
+/// Reads one EXIF tag's **interpreted** value by exiv2 key — exiv2's `Exifdatum::print`, the
+/// human-readable rendering (`"Exif.Image.Orientation"` = 1 reads as `"top, left"`), where
+/// [`exif_get`] returns the raw value (`"1"`).
+///
+/// A value exiv2 has no interpretation for is rendered as its raw value in parentheses (`"(9)"`);
+/// that is exiv2's own convention, passed through unchanged.
+///
+/// # Errors
+///
+/// Returns a message if the key contains a NUL byte, exiv2 cannot decode the stream, or the tag is
+/// absent.
+pub fn exif_print(data: &[u8], key: &str) -> Result<String, String> {
+    exif_read(exiv2_exif_print, data, key)
+}
+
+/// The signature shared by the shim's keyed EXIF readers (`exiv2_exif_get`, `exiv2_exif_print`).
+type ExifReadFn = unsafe extern "C" fn(
+    *const c_char,
+    usize,
+    *const c_char,
+    *mut *mut c_char,
+    *mut usize,
+) -> c_int;
+
+/// Calls one keyed EXIF reader of the shim and takes ownership of the string it returns.
+fn exif_read(read: ExifReadFn, data: &[u8], key: &str) -> Result<String, String> {
     let ckey = CString::new(key).map_err(|e| e.to_string())?;
     let mut buf: *mut c_char = std::ptr::null_mut();
     let mut len: usize = 0;
-    // SAFETY: `data` and `ckey` are valid; `buf`/`len` are written only on success.
+    // SAFETY: `read` is one of the shim's keyed readers; `data` and `ckey` are valid; `buf`/`len`
+    // are written only on success.
     let code = unsafe {
-        exiv2_exif_get(
+        read(
             data.as_ptr().cast(),
             data.len(),
             ckey.as_ptr(),

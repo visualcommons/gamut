@@ -12,6 +12,7 @@
 mod common;
 
 use common::{bx, cat, ftyp, hdlr, iinf_v0, infe_v2, meta, pitm_v0};
+use gamut_core::segment::covers;
 use gamut_isobmff::{Segment, SegmentKind, walk_segments};
 
 /// A minimal well-formed file: `ftyp` + `meta` + `mdat`.
@@ -24,25 +25,14 @@ fn clean_file(payload: &[u8]) -> Vec<u8> {
     cat(&[ftyp(), m, bx(b"mdat", payload)])
 }
 
-/// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next
-/// start (contiguous, non-overlapping), and the last ends at `len` — the every-byte invariant.
+/// Asserts the every-byte invariant through the shared predicate, [`covers`]: non-empty segments,
+/// contiguous and non-overlapping, from 0 to `len`. The predicate's own negative cases (gap,
+/// overlap, empty segment, short/long tail) are pinned once, beside it in `gamut-core` (#500).
 fn assert_covers(segments: &[Segment<'_>], len: usize) {
-    assert!(!segments.is_empty(), "at least one segment");
-    assert_eq!(segments[0].range.start, 0, "coverage starts at 0");
-    for pair in segments.windows(2) {
-        assert_eq!(
-            pair[0].range.end, pair[1].range.start,
-            "segments are contiguous and non-overlapping"
-        );
-    }
-    assert_eq!(
-        segments.last().unwrap().range.end,
-        len,
-        "coverage runs to end of file"
+    assert!(
+        covers(segments, len),
+        "segments must tile 0..{len}: {segments:?}"
     );
-    for s in segments {
-        assert!(s.range.end > s.range.start, "no empty segment");
-    }
 }
 
 /// The top-level box types, in order (the `SegmentKind::Box` segments).

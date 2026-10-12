@@ -7,7 +7,8 @@
 //! * **encoder-exact** — what the encoder actually applied, so a metrics tool
 //!   predicts the same bitstream: Adobe RGB is pure `x^2.2` (not the standard
 //!   `x^2.19921875`), ProPhoto RGB is pure `x^1.8` (no linear toe), and the
-//!   BT.2020 path is PQ EOTF → nits → Reinhard@203 (tone-mapped to SDR).
+//!   BT.2020 PQ path (H.273 code point 16) is PQ EOTF → nits → Reinhard@203
+//!   (tone-mapped to SDR).
 //! * **standard** — the textbook curve, reachable via the `*_standard` helpers.
 //!
 //! Determinism is **Tier-1** (correctness only): these use `std` `f64::powf`, not
@@ -114,6 +115,67 @@ pub fn prophoto_rgb_eotf_standard(x: f64) -> f64 {
     }
 }
 
+// --- BT.709 family (H.273 code points 1, 6, 14, 15) -----------------------
+
+/// β of the BT.709-family transfer: ITU-T H.273 (07/2024) §8.2 defines it, for
+/// `TransferCharacteristics` 1, 6, 14 and 15, as "the positive constant necessary for the curve
+/// segments that meet at the value β to have continuity of both value and slope", and states it
+/// as `0.018053968510807...`. Rec. ITU-R BT.709-6 and BT.2020-2 use the same curve.
+pub const BT709_BETA: f64 = 0.018_053_968_510_807;
+
+/// α of the BT.709-family transfer: ITU-T H.273 (07/2024) §8.2, `α = 1 + 5.5 * β =
+/// 1.099296826809442...`. Derived from [`BT709_BETA`] rather than restated, so the two cannot
+/// disagree.
+pub const BT709_ALPHA: f64 = 1.0 + 5.5 * BT709_BETA;
+
+/// BT.709-family OETF: scene-linear light `Lc` on `[0, 1]` → signal `V`, exactly as ITU-T H.273
+/// Table 3 states it for code points 1, 6, 14 and 15 (Rec. ITU-R BT.709-6, BT.2020-2):
+/// `V = α Lc^0.45 − (α − 1)` for `1 >= Lc >= β`, and `V = 4.500 Lc` for `β > Lc >= 0`.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::bt709_oetf;
+/// assert_eq!(bt709_oetf(0.0), 0.0);
+/// assert!((bt709_oetf(1.0) - 1.0).abs() < 1e-12);
+/// // Below β the curve is the linear toe.
+/// assert_eq!(bt709_oetf(0.01), 4.5 * 0.01);
+/// ```
+#[must_use]
+pub fn bt709_oetf(lc: f64) -> f64 {
+    if lc < BT709_BETA {
+        4.5 * lc
+    } else {
+        BT709_ALPHA * lc.powf(0.45) - (BT709_ALPHA - 1.0)
+    }
+}
+
+/// The exact inverse of [`bt709_oetf`]: signal `V` → scene-linear light `Lc` on `[0, 1]`, for
+/// H.273 code points 1, 6, 14 and 15. `Lc = ((V + α − 1) / α)^(1/0.45)` for `V >= 4.5 β`, and
+/// `Lc = V / 4.5` below it.
+///
+/// Named `_eotf` to pair with [`bt709_oetf`] the way [`srgb_eotf`] pairs with [`srgb_oetf`], but
+/// it is the **inverse OETF** (scene-referred), not the Rec. ITU-R BT.1886 display EOTF that
+/// H.273 §8.2 NOTE 1 suggests for flat-panel displays: H.273 defines these code points by their
+/// opto-electronic function, and this is that function undone.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::{bt709_eotf, bt709_oetf};
+/// // Signal 0.5 is ~0.2597 in scene-linear light.
+/// assert!((bt709_eotf(0.5) - 0.259_719_437).abs() < 1e-9);
+/// assert!((bt709_eotf(bt709_oetf(0.3)) - 0.3).abs() < 1e-12);
+/// ```
+#[must_use]
+pub fn bt709_eotf(v: f64) -> f64 {
+    if v < 4.5 * BT709_BETA {
+        v / 4.5
+    } else {
+        ((v + BT709_ALPHA - 1.0) / BT709_ALPHA).powf(1.0 / 0.45)
+    }
+}
+
 // --- BT.2020 PQ (SMPTE ST 2084 / ITU-R BT.2100) ----------------------------
 
 /// PQ (ST 2084) EOTF: gamma-encoded signal → **absolute luminance in
@@ -177,21 +239,31 @@ pub fn bt2020_pq_to_sdr(x: f64) -> f64 {
 /// The encoder-exact EOTF for a CICP [`TransferCharacteristics`] code point, as
 /// a `fn` mapping signal → scene/display-linear `[0, 1]`.
 ///
-/// `Srgb` returns scene-linear via [`srgb_eotf`]; `Pq` / `Bt2020_10` return the
-/// tone-mapped SDR value via [`bt2020_pq_to_sdr`]; `Linear` returns the identity
-/// via [`linear_eotf`]. Code points without a curve implemented here (`Bt709`,
-/// `Hlg`, `Unspecified`) return `None`. Adobe RGB and ProPhoto have no CICP
-/// transfer code point and are reached via their named functions or
-/// [`crate::profile`].
+/// `Srgb` returns scene-linear via [`srgb_eotf`]; `Bt709` / `Bt2020_10` — which ITU-T H.273
+/// Table 3 gives one curve, "functionally the same" as each other — return scene-linear via
+/// [`bt709_eotf`]; `Pq` returns the tone-mapped SDR value via [`bt2020_pq_to_sdr`]; `Linear`
+/// returns the identity via [`linear_eotf`]. Code points without a curve implemented here
+/// (`Hlg`, `Unspecified`) return `None`. Adobe RGB and ProPhoto have no CICP transfer code point
+/// and are reached via their named functions or [`crate::profile`].
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::cicp::TransferCharacteristics;
+/// use gamut_color::transfer::{bt709_eotf, eotf_for};
+///
+/// // Code point 14 (BT.2020 10-bit) is the BT.709 curve, not PQ.
+/// let f = eotf_for(TransferCharacteristics::Bt2020_10).unwrap();
+/// assert_eq!(f(0.5), bt709_eotf(0.5));
+/// ```
 #[must_use]
 pub fn eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
     match tc {
         TransferCharacteristics::Linear => Some(linear_eotf),
         TransferCharacteristics::Srgb => Some(srgb_eotf),
-        TransferCharacteristics::Pq | TransferCharacteristics::Bt2020_10 => Some(bt2020_pq_to_sdr),
-        TransferCharacteristics::Bt709
-        | TransferCharacteristics::Hlg
-        | TransferCharacteristics::Unspecified => None,
+        TransferCharacteristics::Bt709 | TransferCharacteristics::Bt2020_10 => Some(bt709_eotf),
+        TransferCharacteristics::Pq => Some(bt2020_pq_to_sdr),
+        TransferCharacteristics::Hlg | TransferCharacteristics::Unspecified => None,
     }
 }
 
@@ -200,12 +272,13 @@ pub fn eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
 /// transfer, the direction [`eotf_for`] cannot express.
 ///
 /// Where both return `Some`, they are exact inverses: `oetf_for(tc)(eotf_for(tc)(x)) == x` to
-/// within floating-point error. `Linear` returns the identity via [`linear_oetf`] and `Srgb` the
-/// gamma encode via [`srgb_oetf`].
+/// within floating-point error. `Linear` returns the identity via [`linear_oetf`], `Srgb` the
+/// gamma encode via [`srgb_oetf`], and `Bt709` / `Bt2020_10` the H.273 Table 3 curve via
+/// [`bt709_oetf`].
 ///
-/// `None` for the same code points [`eotf_for`] declines (`Bt709`, `Hlg`, `Unspecified` — no
-/// curve is implemented for them), **and additionally for `Pq` / `Bt2020_10`**: [`eotf_for`] maps
-/// those to [`bt2020_pq_to_sdr`], which tone-maps HDR to SDR and is therefore not invertible.
+/// `None` for the same code points [`eotf_for`] declines (`Hlg`, `Unspecified` — no curve is
+/// implemented for them), **and additionally for `Pq`**: [`eotf_for`] maps it to
+/// [`bt2020_pq_to_sdr`], which tone-maps HDR to SDR and is therefore not invertible.
 /// [`pq_oetf`] is the inverse of the standards-pure [`pq_eotf`] if that is what you want.
 ///
 /// # Examples
@@ -227,10 +300,9 @@ pub fn oetf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
     match tc {
         TransferCharacteristics::Linear => Some(linear_oetf),
         TransferCharacteristics::Srgb => Some(srgb_oetf),
+        TransferCharacteristics::Bt709 | TransferCharacteristics::Bt2020_10 => Some(bt709_oetf),
         // `eotf_for`'s PQ arm is `bt2020_pq_to_sdr`, a tone map, so it has no inverse here.
         TransferCharacteristics::Pq
-        | TransferCharacteristics::Bt2020_10
-        | TransferCharacteristics::Bt709
         | TransferCharacteristics::Hlg
         | TransferCharacteristics::Unspecified => None,
     }
@@ -378,13 +450,83 @@ mod tests {
         assert_eq!(pq_oetf(20_000.0), pq_oetf(PQ_PEAK_NITS));
     }
 
+    /// H.273 Table 3, code points 1, 6, 14 and 15, transcribed **forward** exactly as the spec
+    /// states it. α and β are written out again on purpose: reusing [`BT709_ALPHA`] /
+    /// [`BT709_BETA`] would share any mistyped digit with the code under test.
+    fn h273_bt709_oetf(lc: f64) -> f64 {
+        let (alpha, beta) = (1.099_296_826_809_442, 0.018_053_968_510_807);
+        if lc >= beta {
+            alpha * lc.powf(0.45) - (alpha - 1.0)
+        } else {
+            4.500 * lc
+        }
+    }
+
+    /// Samples on both segments of the BT.709-family curve, either side of β.
+    const BT709_LIGHT_SWEEP: [f64; 9] = [0.0, 0.001, 0.01, 0.018, 0.02, 0.1, 0.5, 0.9, 1.0];
+
+    /// H.273 §8.2 defines α and β as the constants that make the two segments meet with
+    /// continuous value *and* slope; the stated digits of α and β must satisfy that definition.
+    #[test]
+    fn bt709_constants_meet_h273_continuity_definition() {
+        let value_gap =
+            BT709_ALPHA * BT709_BETA.powf(0.45) - (BT709_ALPHA - 1.0) - 4.5 * BT709_BETA;
+        assert!(value_gap.abs() < 1e-14, "value gap {value_gap}");
+        let slope = 0.45 * BT709_ALPHA * BT709_BETA.powf(-0.55);
+        assert!((slope - 4.5).abs() < 1e-12, "slope {slope}");
+        assert!((BT709_ALPHA - 1.099_296_826_809_442).abs() < 1e-14);
+    }
+
+    #[test]
+    fn bt709_oetf_matches_h273_table3() {
+        for &lc in &BT709_LIGHT_SWEEP {
+            let (got, want) = (bt709_oetf(lc), h273_bt709_oetf(lc));
+            assert!(
+                (got - want).abs() < 1e-14,
+                "bt709_oetf({lc}) = {got}, Table 3 {want}"
+            );
+        }
+        // Table 3 puts `Lc == β` on the power segment (`1 >= Lc >= β`). The two segments differ
+        // there only in the last bits, so the exact comparison is what pins the boundary.
+        let power = BT709_ALPHA * BT709_BETA.powf(0.45) - (BT709_ALPHA - 1.0);
+        assert_ne!(power, 4.5 * BT709_BETA);
+        assert_eq!(bt709_oetf(BT709_BETA), power);
+    }
+
+    #[test]
+    fn bt709_eotf_inverts_h273_table3() {
+        for &lc in &BT709_LIGHT_SWEEP {
+            let back = bt709_eotf(h273_bt709_oetf(lc));
+            assert!((back - lc).abs() < 1e-12, "bt709_eotf(oetf({lc})) = {back}");
+        }
+        // Mid-grey anchor, from inverting Table 3 row 14 independently (issue #605).
+        assert!((bt709_eotf(0.5) - 0.259_719_437).abs() < 1e-9);
+        // `V == 4.5 β` is on the power segment: the toe's image is `V < 4.5 β` (it covers
+        // `Lc < β`). As above, the two segments differ there only in the last bits.
+        let knee = 4.5 * BT709_BETA;
+        let power = ((knee + BT709_ALPHA - 1.0) / BT709_ALPHA).powf(1.0 / 0.45);
+        assert_ne!(power, knee / 4.5);
+        assert_eq!(bt709_eotf(knee), power);
+    }
+
     #[test]
     fn eotf_for_dispatch() {
         assert!(eotf_for(TransferCharacteristics::Srgb).is_some());
         assert!(eotf_for(TransferCharacteristics::Pq).is_some());
-        assert!(eotf_for(TransferCharacteristics::Bt2020_10).is_some());
         assert!(eotf_for(TransferCharacteristics::Hlg).is_none());
-        assert!(eotf_for(TransferCharacteristics::Bt709).is_none());
+        assert!(eotf_for(TransferCharacteristics::Unspecified).is_none());
+        // Code points 1 and 14 are one Table 3 curve; each alternative of the or-pattern is
+        // asserted on its own. At 0.5 the BT.709 curve and the PQ tone map differ by ~0.05.
+        for tc in [
+            TransferCharacteristics::Bt709,
+            TransferCharacteristics::Bt2020_10,
+        ] {
+            let f = eotf_for(tc).unwrap();
+            assert_eq!(f(0.5), bt709_eotf(0.5), "{tc:?}");
+        }
+        let f = eotf_for(TransferCharacteristics::Pq).unwrap();
+        assert_eq!(f(0.5), bt2020_pq_to_sdr(0.5));
+        assert!((bt2020_pq_to_sdr(0.5) - bt709_eotf(0.5)).abs() > 0.05);
         // The Srgb dispatch is the sRGB EOTF.
         let f = eotf_for(TransferCharacteristics::Srgb).unwrap();
         assert_eq!(f(0.5), srgb_eotf(0.5));
@@ -398,13 +540,11 @@ mod tests {
 
     #[test]
     fn oetf_for_dispatch() {
-        // Some for exactly the two invertible code points, None for the rest. Spelled out per
+        // Some for exactly the invertible code points, None for the rest. Spelled out per
         // variant rather than as a loop so a mutant collapsing one arm cannot hide.
         assert!(oetf_for(TransferCharacteristics::Linear).is_some());
         assert!(oetf_for(TransferCharacteristics::Srgb).is_some());
         assert!(oetf_for(TransferCharacteristics::Pq).is_none());
-        assert!(oetf_for(TransferCharacteristics::Bt2020_10).is_none());
-        assert!(oetf_for(TransferCharacteristics::Bt709).is_none());
         assert!(oetf_for(TransferCharacteristics::Hlg).is_none());
         assert!(oetf_for(TransferCharacteristics::Unspecified).is_none());
 
@@ -419,6 +559,16 @@ mod tests {
         for &x in &[0.0, 0.25, 0.5, 0.75, 1.0] {
             assert_eq!(f(x), x);
         }
+
+        // Code points 1 and 14 both encode through Table 3's curve, each alternative asserted on
+        // its own.
+        for tc in [
+            TransferCharacteristics::Bt709,
+            TransferCharacteristics::Bt2020_10,
+        ] {
+            let f = oetf_for(tc).unwrap();
+            assert_eq!(f(0.5), bt709_oetf(0.5), "{tc:?}");
+        }
     }
 
     /// Where both dispatches answer, they are exact inverses — the property that makes
@@ -431,6 +581,8 @@ mod tests {
         for tc in [
             TransferCharacteristics::Linear,
             TransferCharacteristics::Srgb,
+            TransferCharacteristics::Bt709,
+            TransferCharacteristics::Bt2020_10,
         ] {
             let eotf = eotf_for(tc).expect("modeled");
             let oetf = oetf_for(tc).expect("modeled");
@@ -481,10 +633,7 @@ mod tests {
             let asymmetric = eotf_for(tc).is_some() && oetf_for(tc).is_none();
             assert_eq!(
                 asymmetric,
-                matches!(
-                    tc,
-                    TransferCharacteristics::Pq | TransferCharacteristics::Bt2020_10
-                ),
+                tc == TransferCharacteristics::Pq,
                 "{tc:?} disagrees with the PQ-only asymmetry"
             );
         }

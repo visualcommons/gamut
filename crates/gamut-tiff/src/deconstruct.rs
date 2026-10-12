@@ -553,9 +553,13 @@ mod tests {
             "one entry per tag is a conforming directory: {report:?}"
         );
 
+        // `gamut-ifd`'s setters keep a tag in one store (the later call wins, #601), so the
+        // duplicate is built the one way still open: a group attached under a free tag and
+        // retagged in place through `sub_ifds_mut`.
         let mut repeated = image_ifd();
         repeated.set(tags::SUB_IFDS, Value::Short(vec![7]));
-        repeated.set_sub_ifd(tags::SUB_IFDS, vec![child]);
+        repeated.set_sub_ifd(u16::MAX, vec![child]);
+        repeated.sub_ifds_mut()[0].tag = tags::SUB_IFDS;
         let duplicated = write_image(
             ByteOrder::LittleEndian,
             Variant::Classic,

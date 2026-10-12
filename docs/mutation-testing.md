@@ -77,8 +77,9 @@ Two memory guards, because one is not enough:
 
 - a systemd scope with `MemoryMax` and `MemorySwapMax=0` around the whole run, which stops it
   taking the machine down (`GAMUT_MUTANTS_NO_CGROUP=1` opts out);
-- a per-process `ulimit -v`, which is what makes a runaway mutant abort itself first, so it is
-  scored `caught` and the run continues instead of the cgroup killing cargo-mutants
+- a per-process `ulimit -v` of a fixed 6 GiB — not derived from the budget, see *Reading the
+  result* — which is what makes a runaway mutant abort itself first, so it is scored `caught`
+  and the run continues instead of the cgroup killing cargo-mutants
   (`GAMUT_MUTANTS_NO_ULIMIT=1` opts out).
 
 Both auto-detect: on a runner with no systemd user manager only the address-space limit applies.
@@ -109,12 +110,28 @@ and the loop that cannot make progress under mutation is usually a loop that sho
 bounded by the data it walks. Rewriting it as one turns an unkillable `TIMEOUT` into an ordinary
 killable mutant, which is how `gamut-ifd`'s ledger walks lost theirs.
 
-**A verdict can depend on the runner, not only on the code.** A mutant that allocates without
-bound is ended by whichever limit it reaches first: under a tight per-process address-space cap
-the scenario aborts and scores `caught`, under a looser one it runs to the test timeout and
-scores `TIMEOUT`. `run.sh` derives that cap as budget ÷ jobs, so the same mutant can score
-differently on CI and locally — issue #613. Until that is pinned, state the budget beside any
-verdict you report for an allocation-heavy mutant.
+**The address-space cap is fixed so a verdict is a property of the code.** A mutant that
+allocates without bound is ended by whichever limit it reaches first: under the per-process
+address-space cap the scenario aborts and scores `caught`, past it the mutant runs to the test
+timeout and scores `TIMEOUT`. `run.sh` used to derive that cap as budget ÷ jobs, so the same
+mutant scored `caught` on an 8 GiB workstation and `TIMEOUT` on the 14 GiB CI runner (issue
+#613). The cap is now a constant **6 GiB** on every machine; the budget still derives every
+parallelism dial, but not this. 6 GiB because:
+
+- it is the smallest address space a full build and test of one package fits in, and the
+  budget's clamp floor, so no accepted budget is smaller than what one process may map and the
+  per-process guard always fires before the cgroup's — the derived job count is 1 or at most
+  budget ÷ 8, so even every scenario at its cap together stays inside the budget;
+- it is ordered against the test timeout (`minimum_test_timeout = 60` in
+  `.cargo/mutants.toml`): a runaway reaches 6 GiB inside 60 s at any sustained rate above
+  about 100 MiB/s, which an allocation loop exceeds by an order of magnitude, so it meets the cap
+  first everywhere. A lower cap widens that margin, which is the reason not to raise it without
+  measuring a package that genuinely needs more.
+
+The ordering is a rate argument, not a guarantee: a mutant that allocates slower than ~100 MiB/s
+still reaches the timeout first, and does so on every machine alike. There is deliberately no
+variable to change the cap — `GAMUT_MUTANTS_NO_ULIMIT=1` removes it, and a verdict taken without
+it is not comparable with CI's.
 
 **What the tool mutates is a short list**, and everything outside it is invisible to the gate.
 Derive the list instead of trusting a written one — the hand-written version this replaces was

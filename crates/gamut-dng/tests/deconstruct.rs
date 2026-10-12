@@ -3,6 +3,7 @@
 
 mod common;
 
+use gamut_core::segment::tiles;
 use gamut_dng::{Anomaly, ByteOrder, DeconstructReport, DngDecoder, DngEncoder, deconstruct};
 
 /// Asserts the structural walk classified the whole file with nothing unrecognised —
@@ -13,6 +14,19 @@ fn assert_clean(r: &DeconstructReport) {
     assert!(
         r.segments.is_fully_classified(),
         "not fully classified: {r:?}"
+    );
+    // The verdict above is built from what is *missing* (gaps, conflicts, out-of-bounds claims);
+    // this reads the segment list itself and checks it tiles the file through the shared
+    // predicate (#500), so the two accounts of the same file must agree.
+    assert!(
+        tiles(
+            r.segments
+                .segments
+                .iter()
+                .map(|s| s.range.start..s.range.end()),
+            r.segments.file_len
+        ),
+        "segments must tile the file: {r:?}"
     );
     assert!(r.unknown_fields.is_empty(), "unknown fields: {r:?}");
     assert!(

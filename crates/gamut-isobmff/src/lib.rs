@@ -11,7 +11,7 @@
 //!
 //! It is image-first: the modelled surface is the HEIF still-image set — `ftyp`, `meta` with
 //! `hdlr`/`pitm`/`iloc`/`iinf`/`iref`/`iprp`/`idat`/`grpl`, the
-//! `ispe`/`pixi`/`colr`/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli` properties, typed item
+//! `ispe`/`pixi`/`colr`/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli`/`mdcv` properties, typed item
 //! references (`auxl`/`cdsc`/`dimg`/`thmb`/`prem`, …) and entity groups — plus opaque
 //! codec-configuration and unrecognised properties carried verbatim, and any top-level box the
 //! model does not otherwise own ([`IsoBmffImage::top_level_boxes`]: a C2PA `uuid`
