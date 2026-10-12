@@ -76,7 +76,7 @@ and leaves each entry **raw** (tag, type code, count, and the value/offset word 
 produce identical results — in fact the slice functions *are* thin wrappers over this engine
 (one parser; the robustness corpus drives both entry points as a regression gate).
 
-```rust,no_run
+```rust
 use gamut_ifd::{IfdReader, StreamSource, tags};
 
 # fn demo() -> Result<(), Box<dyn std::error::Error>> {
