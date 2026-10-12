@@ -12,7 +12,8 @@ use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::c2pa::{self, C2paExclusions};
 use gamut_ifd::tags::STANDARD_POINTER_TAGS;
 use gamut_ifd::{
-    ByteOrder, Ifd, SubtreeScope, TiffFile, Value, Variant, read, read_ifd_at, resolve_subtree,
+    ByteOrder, Ifd, IfdReader, SubtreeScope, TiffFile, Value, Variant, read, read_ifd_at,
+    resolve_subtree,
 };
 use gamut_metadata::exif::Exif;
 
@@ -288,7 +289,9 @@ pub struct DecodedDng {
     /// A directory listed here is listed even when every one of its fields was consumed (its
     /// `tags` are then empty), as [`interior_extra`](Self::interior_extra) does for pages. A
     /// directory the walk did not follow — past the nesting cap, already visited, or unreadable
-    /// — is not walked, so it is in no channel; `deconstruct` diagnoses those.
+    /// — is not walked, so it is in no channel; `deconstruct` diagnoses those. A `SubIFDs` entry
+    /// naming a main-chain page (IFD 0 itself, or a later page) counts as already visited: that
+    /// page is reported once, in its own page channel, never here as well.
     ///
     /// Empty for every file this crate writes, whose `SubIFDs` children all carry images.
     pub sub_ifd_extra: Vec<SubIfdExtra>,
@@ -703,12 +706,30 @@ struct IfdWalk<'a> {
 /// [`DecodedDng::interior_extra`] covers, and the rest are what [`DecodedDng::sub_ifd_extra`]
 /// covers. Lenient by design: an unreadable child is skipped rather than failing the whole
 /// decode, while offset de-duplication and the depth cap terminate hostile pointer cycles.
+///
+/// Every directory is walked once, from where the file first places it: the main-chain page
+/// offsets seed the visited set, so a `SubIFDs` entry naming a page — IFD 0 itself, or any later
+/// page — is skipped like any other already-visited offset rather than re-walked as a child.
+/// Re-walking it would report the page's fields in [`DecodedDng::sub_ifd_extra`] as well as in
+/// its page channel, and a self-referencing entry would duplicate the page in the tree.
 fn walk_ifds(file: &TiffFile, data: &[u8]) -> (Vec<Ifd>, Vec<TreePosition>) {
+    // `file` came from `read` over these same bytes, so the chain re-walk below meets the same
+    // pages without error; its raw directories are only what carries each page's offset, which
+    // `Ifd` does not keep.
+    let visited = IfdReader::open(data)
+        .map(|mut reader| {
+            reader
+                .ifds()
+                .map_while(Result::ok)
+                .map(|raw| raw.offset)
+                .collect()
+        })
+        .unwrap_or_default();
     let mut walk = IfdWalk {
         data,
         order: file.order,
         variant: file.variant,
-        visited: Vec::new(),
+        visited,
         ifds: Vec::new(),
         positions: Vec::new(),
     };
@@ -2288,6 +2309,86 @@ mod tests {
         assert_eq!(decoded.raw_extra, [software("raw")]);
         assert_eq!(decoded.trailing_extra, [software("page")]);
         assert!(decoded.sub_images.is_empty(), "{:?}", decoded.sub_images);
+    }
+
+    /// A two-page DNG whose IFD 0 `SubIFDs` array is `[raw, IFD 0, page 1]`: a 1x1 LinearRaw
+    /// child (its one strip byte is the file's own first byte), then an entry naming IFD 0
+    /// itself and one naming the second main-chain page (issue #814). Every directory carries a
+    /// `Software` (305) field naming it.
+    fn sub_ifds_naming_main_chain_pages() -> Vec<u8> {
+        let with_software = |text: &str| {
+            let mut ifd = Ifd::new();
+            ifd.set(305, Value::Ascii(text.to_owned()));
+            ifd
+        };
+        let mut raw = with_software("raw");
+        raw.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        raw.set(tags::IMAGE_LENGTH, Value::Short(vec![1]));
+        raw.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8]));
+        raw.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![34892]));
+        raw.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        raw.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![1]));
+        let mut ifd0 = with_software("ifd0");
+        ifd0.set(tags::DNG_VERSION, Value::Byte(vec![1, 7, 1, 0]));
+        // Placeholder children, re-pointed at the pages once the layout is known.
+        ifd0.set_sub_ifd(
+            tags::SUB_IFDS,
+            vec![raw, with_software("stale"), with_software("stale")],
+        );
+        let mut bytes = gamut_ifd::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd0, with_software("page")],
+        })
+        .expect("write");
+        let pages: Vec<u32> = IfdReader::open(&bytes[..])
+            .expect("header")
+            .ifds()
+            .map(|raw| u32::try_from(raw.expect("page").offset).expect("classic offset"))
+            .collect();
+        let file = read(&bytes).expect("read");
+        let offsets = file.ifds[0].get_u32_vec(tags::SUB_IFDS).expect("offsets");
+        let array: Vec<u8> = offsets.iter().flat_map(|o| o.to_le_bytes()).collect();
+        let at = bytes
+            .windows(array.len())
+            .position(|w| w == array)
+            .expect("the SubIFDs array is stored out of line");
+        bytes[at + 4..at + 8].copy_from_slice(&pages[0].to_le_bytes());
+        bytes[at + 8..at + 12].copy_from_slice(&pages[1].to_le_bytes());
+        bytes
+    }
+
+    /// A `SubIFDs` entry naming a main-chain page — IFD 0 itself, or a later page — is skipped as
+    /// already visited, so each page is walked once, as a page: the tree holds no duplicate of
+    /// IFD 0 and no child copy of page 1, while the skipped entries keep their array positions.
+    #[test]
+    fn walk_ifds_skips_sub_ifd_entries_naming_a_main_chain_page() {
+        let bytes = sub_ifds_naming_main_chain_pages();
+        let file = read(&bytes).expect("read");
+        let (ifds, positions) = walk_ifds(&file, &bytes);
+        let names: Vec<_> = ifds.iter().map(|i| i.get(305).cloned()).collect();
+        assert_eq!(
+            names,
+            ["ifd0", "raw", "page"].map(|s| Some(Value::Ascii(s.to_owned())))
+        );
+        assert_eq!(positions, [(0, vec![]), (0, vec![0]), (1, vec![])]);
+    }
+
+    /// The page a `SubIFDs` entry names is reported once, in its page channel — never in
+    /// `sub_ifd_extra` as well, which the per-directory promise of the extras forbids.
+    #[test]
+    fn a_sub_ifd_entry_naming_a_page_reports_the_page_once() {
+        let software = |text: &str| RawTag {
+            tag: 305,
+            value: Value::Ascii(text.to_owned()),
+        };
+        let decoded = DngDecoder::new()
+            .decode(&sub_ifds_naming_main_chain_pages())
+            .expect("decode");
+        assert_eq!(decoded.sub_ifd_extra, []);
+        assert_eq!(decoded.ifd0_extra, [software("ifd0")]);
+        assert_eq!(decoded.raw_extra, [software("raw")]);
+        assert_eq!(decoded.trailing_extra, [software("page")]);
     }
 
     /// With several raw-photometry IFDs, the main image (`NewSubFileType` 0) wins even when a
