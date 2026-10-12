@@ -68,7 +68,8 @@ Adobe RGB and ProPhoto RGB have no code point on either CICP axis, so their prof
 encoding's standard tone curve and no `cicpType` tag, and `BuiltinProfile::cicp` returns `None`
 for them.
 `from_cicp` reaches further on the transfer axis — the BT.709 family (H.273 code points 1, 6, 14
-and 15), linear, sRGB and PQ all have an ICC tone-curve encoding — because what an ICC tag can
+and 15), the BT.470-6 display gammas 2.2 and 2.8 (4 and 5), linear, sRGB and PQ all have an ICC
+tone-curve encoding — because what an ICC tag can
 encode is not the same set as what gamut-color can evaluate. It reads the BT.709 family literally,
 as the inverse of H.273 Table 3's opto-electronic function, which is what libjxl, libavif and
 Little-CMS write; `IccProfile::from_cicp_with(cicp, CicpTransferReading::Bt1886Display)` instead
