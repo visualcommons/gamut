@@ -30,7 +30,7 @@
 use gamut_core::Result as CoreResult;
 
 use crate::clean_alpha::clean_rgba;
-use crate::decode::{DIMENSION_LIMIT, PIXEL_LIMIT};
+use crate::decode::{DECODED_ITEM_LIMIT, DERIVED_ITEM_LIMIT, DIMENSION_LIMIT, PIXEL_LIMIT};
 use crate::{Av1Config, Av1StillDecoder, AvifContainer, DecodeLimits, DecodedFrame};
 
 /// A sample type the law reads, with the alpha value that means fully opaque.
@@ -152,41 +152,20 @@ pub fn cleaning_16_bit_rgba_keeps_the_composite(
 /// The largest frame side [`StubDecoder`] returns, in pixels.
 pub const STUB_MAX_SIDE: u8 = 16;
 
-/// The number of `decode_still` calls one [`StubDecoder`] serves before it refuses.
-///
-/// A derivation may reference one item many times, so a few nested `grid`s multiply into an
-/// arbitrarily long decode however small each image is; the budget keeps every run of the law
-/// short. It cannot hide a limit violation: both runs of the law use a fresh stub, and the tighter
-/// run walks the same items in the same order as the looser one until it stops.
-pub const STUB_CALL_BUDGET: u32 = 1024;
-
 /// A stand-in for an AV1 codec: it ignores the coded picture and returns a frame whose size the
 /// payload's last two bytes choose (`1..=STUB_MAX_SIDE` each, width then height), at the `av1C`
 /// chroma format and bit depth, with samples drawn from the payload.
 ///
 /// Small by construction, so a file can make the pipeline ask for a large canvas while every
-/// frame the "codec" returns stays cheap.
-#[derive(Debug, Clone)]
-pub struct StubDecoder {
-    calls_left: u32,
-}
-
-impl Default for StubDecoder {
-    fn default() -> Self {
-        Self {
-            calls_left: STUB_CALL_BUDGET,
-        }
-    }
-}
+/// frame the "codec" returns stays cheap. It serves every call it is given: how many a file can
+/// demand is the pipeline's own bound ([`DecodeLimits::max_decoded_items`] and
+/// [`DecodeLimits::max_derived_items`]), which the law exercises rather than a budget of the
+/// stub's.
+#[derive(Debug, Clone, Default)]
+pub struct StubDecoder;
 
 impl Av1StillDecoder for StubDecoder {
     fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> CoreResult<DecodedFrame> {
-        self.calls_left = self
-            .calls_left
-            .checked_sub(1)
-            .ok_or(gamut_core::Error::Unsupported(
-                "stub decoder: call budget spent",
-            ))?;
         let from_end = |back: usize| {
             payload
                 .len()
@@ -254,7 +233,10 @@ pub(crate) fn runs_agree_within_limits(
             format!("{surface} item {id}: decoded under {limits:?} but refused looser: {error}"),
         )),
         (Err(error), Ok(_))
-            if !matches!(error.static_message(), Some(DIMENSION_LIMIT | PIXEL_LIMIT)) =>
+            if !matches!(
+                error.static_message(),
+                Some(DIMENSION_LIMIT | PIXEL_LIMIT | DECODED_ITEM_LIMIT | DERIVED_ITEM_LIMIT)
+            ) =>
         {
             Err(Violation::new(
                 LAW,
@@ -283,6 +265,10 @@ pub fn decoding_stays_within_limits(
     let limits = DecodeLimits::new(
         limits.max_dimension.min(ceiling.max_dimension),
         limits.max_pixels.min(ceiling.max_pixels),
+    )
+    .with_item_limits(
+        limits.max_decoded_items.min(ceiling.max_decoded_items),
+        limits.max_derived_items.min(ceiling.max_derived_items),
     );
     for item in image.items() {
         let id = item.id();
@@ -323,7 +309,7 @@ mod tests {
 
     use super::{composite_is_unchanged, premultiply, runs_agree_within_limits};
     use crate::DecodeLimits;
-    use crate::decode::{DIMENSION_LIMIT, PIXEL_LIMIT};
+    use crate::decode::{DECODED_ITEM_LIMIT, DERIVED_ITEM_LIMIT, DIMENSION_LIMIT, PIXEL_LIMIT};
 
     const LIMITS: DecodeLimits = DecodeLimits::new(4, 12);
 
@@ -353,7 +339,12 @@ mod tests {
         let ok = || Ok((1, 1, vec![0]));
         let other = Err(Error::InvalidInput("x"));
         assert!(runs_agree_within_limits("t", 1, LIMITS, other, ok()).is_err());
-        for message in [DIMENSION_LIMIT, PIXEL_LIMIT] {
+        for message in [
+            DIMENSION_LIMIT,
+            PIXEL_LIMIT,
+            DECODED_ITEM_LIMIT,
+            DERIVED_ITEM_LIMIT,
+        ] {
             let limit = Err(Error::unsupported("gamut-avif", message));
             assert_eq!(
                 runs_agree_within_limits("t", 1, LIMITS, limit, ok()),
