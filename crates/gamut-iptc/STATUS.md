@@ -81,7 +81,8 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
 
 ## Deferred / out of scope
 
-Intentional, documented skips — none lose data on round-trip:
+Intentional, documented skips — none lose data read from a file on round-trip; the one entry that
+drops a value a caller set says so:
 
 - **A structured field the projection cannot express reads as absent** — a URL held as
   `rdf:resource`, a value carrying a qualifier, a language alternative with entries beside the
@@ -96,6 +97,17 @@ Intentional, documented skips — none lose data on round-trip:
   as nothing. Nothing is lost: the graph keeps the property untouched, and the setter beside the
   accessor does not remove what the accessor did not report. Reading a property and setting it back
   is the identity, pinned by a generated cross of every pair, value shape and qualifier list.
+- **Structure emission is infallible; a non-finite coordinate is not written** (issue #573).
+  Every `to_xmp` returns an `XmpValue` and every structured setter returns nothing, matching the
+  `gamut_exif::GpsInfo` shape. The only modelled value with no form in its declared type is a
+  `NaN`/infinite `RegionBoundary`/`RegionBoundaryPoint` coordinate — not an XMP `Real` — and it is
+  omitted from the emitted structure without a signal; a caller that needs one checks
+  `f64::is_finite` where it sets the value. **This loses the caller's value:** a model → XMP →
+  model round-trip turns `Some(NaN)` into `None` (or into a retained `other` field of the same
+  name, which is written in its place). Nothing read from a file is lost, since such a value
+  never reads as a coordinate in the first place. On read, a coordinate whose text does not parse reads as
+  `None` and is kept verbatim in `other`. A fallible `to_xmp` (breaking all seven, and the four
+  setters with them) and a checked `Finite` coordinate type were both declined.
 - **The remaining eleven IPTC Extension structures** (`Location`, `PersonWDetails`, `CvTerm`,
   `EntityWRole`, `ProductWGtin`, `RegistryEntry`, `EmbdEncRightsExpr`, `LinkedEncRightsExpr`,
   `CopyrightOwner`, `ImageCreator`, `ImageSupplier`): no typed model — issue #538. They pass through
