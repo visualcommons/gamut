@@ -53,8 +53,9 @@ use gamut_core::{Error, Result};
 
 use crate::boxes::BoxReader;
 use crate::model::{
-    ColourInformation, EntityGroup, IsoBmffImage, Item, ItemReference, NclxColr, Property,
-    PropertyKind, TopLevelBox, TopLevelPosition,
+    CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, IsoBmffImage, Item,
+    ItemReference, MasteringDisplay, NclxColr, PixelAspectRatio, Property, PropertyKind,
+    TopLevelBox, TopLevelPosition,
 };
 
 /// Per-item property associations parsed from `ipma`: each entry is `(item_id, associations)`
@@ -748,7 +749,7 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
         }
         b"clap" => {
             let mut r = BoxReader::new(body);
-            Ok(PropertyKind::CleanAperture {
+            Ok(PropertyKind::CleanAperture(CleanAperture {
                 width_n: r.u32()?,
                 width_d: r.u32()?,
                 height_n: r.u32()?,
@@ -757,14 +758,14 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
                 horiz_off_d: r.u32()?,
                 vert_off_n: r.u32()?,
                 vert_off_d: r.u32()?,
-            })
+            }))
         }
         b"pasp" => {
             let mut r = BoxReader::new(body);
-            Ok(PropertyKind::PixelAspectRatio {
+            Ok(PropertyKind::PixelAspectRatio(PixelAspectRatio {
                 h_spacing: r.u32()?,
                 v_spacing: r.u32()?,
-            })
+            }))
         }
         b"auxC" => {
             let mut r = BoxReader::new(body);
@@ -778,10 +779,10 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
         }
         b"clli" => {
             let mut r = BoxReader::new(body);
-            Ok(PropertyKind::ContentLightLevel {
+            Ok(PropertyKind::ContentLightLevel(ContentLightLevel {
                 max_content_light_level: r.u16()?,
                 max_pic_average_light_level: r.u16()?,
-            })
+            }))
         }
         b"mdcv" => {
             // ISO/IEC 14496-12 `MasteringDisplayColourVolumeBox`: a plain Box whose syntax is
@@ -801,12 +802,14 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
             for primary in &mut display_primaries {
                 *primary = [r.u16()?, r.u16()?];
             }
-            Ok(PropertyKind::MasteringDisplayColourVolume {
-                display_primaries,
-                white_point: [r.u16()?, r.u16()?],
-                max_display_mastering_luminance: r.u32()?,
-                min_display_mastering_luminance: r.u32()?,
-            })
+            Ok(PropertyKind::MasteringDisplayColourVolume(
+                MasteringDisplay {
+                    display_primaries,
+                    white_point: [r.u16()?, r.u16()?],
+                    max_display_mastering_luminance: r.u32()?,
+                    min_display_mastering_luminance: r.u32()?,
+                },
+            ))
         }
         // The codec-configuration records this crate's consumers stamp (AV1, HEVC, VVC).
         b"av1C" | b"hvcC" | b"vvcC" => Ok(PropertyKind::CodecConfiguration {
@@ -879,12 +882,12 @@ mod tests {
     fn parse_property_reads_mdcv_fields_in_stored_order() {
         assert_eq!(
             parse_property(*b"mdcv", &MDCV_BODY).unwrap(),
-            PropertyKind::MasteringDisplayColourVolume {
+            PropertyKind::MasteringDisplayColourVolume(MasteringDisplay {
                 display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
                 white_point: [15635, 16450],
                 max_display_mastering_luminance: 10_000_000,
                 min_display_mastering_luminance: 50,
-            }
+            })
         );
     }
 

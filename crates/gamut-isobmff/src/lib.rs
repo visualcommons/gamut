@@ -83,8 +83,9 @@ mod writer;
 pub use boxes::{BoxReader, RawBox};
 pub use grid::ImageGrid;
 pub use model::{
-    ColourInformation, EntityGroup, IsoBmffImage, Item, ItemReference, NclxColr, Property,
-    PropertyKind, TopLevelBox, TopLevelPosition,
+    CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, IsoBmffImage, Item,
+    ItemReference, MasteringDisplay, NclxColr, PixelAspectRatio, Property, PropertyKind,
+    TopLevelBox, TopLevelPosition,
 };
 pub use overlay::ImageOverlay;
 pub use reader::read;

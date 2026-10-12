@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use gamut::isobmff::{
-    self, ColourInformation, EntityGroup, ImageGrid, IsoBmffImage, Item, ItemReference, NclxColr,
-    Property, PropertyKind,
+    self, CleanAperture, ColourInformation, ContentLightLevel, EntityGroup, ImageGrid,
+    IsoBmffImage, Item, ItemReference, MasteringDisplay, NclxColr, PixelAspectRatio, Property,
+    PropertyKind,
 };
 
 use crate::error::CliError;
@@ -288,17 +289,17 @@ fn render_property(p: &Property) -> String {
             "imir  axis={axis} ({})",
             if *axis == 0 { "vertical" } else { "horizontal" },
         ),
-        PropertyKind::CleanAperture {
+        PropertyKind::CleanAperture(CleanAperture {
             width_n,
             width_d,
             height_n,
             height_d,
             ..
-        } => format!("clap  {width_n}/{width_d} x {height_n}/{height_d}"),
-        PropertyKind::PixelAspectRatio {
+        }) => format!("clap  {width_n}/{width_d} x {height_n}/{height_d}"),
+        PropertyKind::PixelAspectRatio(PixelAspectRatio {
             h_spacing,
             v_spacing,
-        } => format!("pasp  {h_spacing}:{v_spacing}"),
+        }) => format!("pasp  {h_spacing}:{v_spacing}"),
         PropertyKind::AuxiliaryType {
             aux_type,
             aux_subtype,
@@ -310,18 +311,18 @@ fn render_property(p: &Property) -> String {
             };
             format!("auxC  {aux_type}{sub}")
         }
-        PropertyKind::ContentLightLevel {
+        PropertyKind::ContentLightLevel(ContentLightLevel {
             max_content_light_level,
             max_pic_average_light_level,
-        } => {
+        }) => {
             format!("clli  MaxCLL={max_content_light_level} MaxPALL={max_pic_average_light_level}")
         }
-        PropertyKind::MasteringDisplayColourVolume {
+        PropertyKind::MasteringDisplayColourVolume(MasteringDisplay {
             display_primaries: [p0, p1, p2],
             white_point: [wx, wy],
             max_display_mastering_luminance,
             min_display_mastering_luminance,
-        } => format!(
+        }) => format!(
             "mdcv  primaries=({},{}) ({},{}) ({},{}) white=({wx},{wy}) \
              luminance={min_display_mastering_luminance}..{max_display_mastering_luminance}",
             p0[0], p0[1], p1[0], p1[1], p2[0], p2[1]
@@ -399,7 +400,7 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
             descriptive(ispe(256, 128)),
             essential(PropertyKind::Rotation(1)),
             essential(PropertyKind::Mirror(0)),
-            essential(PropertyKind::CleanAperture {
+            essential(PropertyKind::CleanAperture(CleanAperture {
                 width_n: 256,
                 width_d: 1,
                 height_n: 128,
@@ -408,11 +409,11 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
                 horiz_off_d: 1,
                 vert_off_n: 0,
                 vert_off_d: 1,
-            }),
-            descriptive(PropertyKind::PixelAspectRatio {
+            })),
+            descriptive(PropertyKind::PixelAspectRatio(PixelAspectRatio {
                 h_spacing: 1,
                 v_spacing: 1,
-            }),
+            })),
         ],
         payload: ImageGrid {
             rows: 1,
@@ -443,12 +444,14 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
                 matrix_coefficients: 6,
                 full_range: true,
             }))),
-            descriptive(PropertyKind::MasteringDisplayColourVolume {
-                display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
-                white_point: [15635, 16450],
-                max_display_mastering_luminance: 10_000_000,
-                min_display_mastering_luminance: 50,
-            }),
+            descriptive(PropertyKind::MasteringDisplayColourVolume(
+                MasteringDisplay {
+                    display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
+                    white_point: [15635, 16450],
+                    max_display_mastering_luminance: 10_000_000,
+                    min_display_mastering_luminance: 50,
+                },
+            )),
             descriptive(PropertyKind::Other {
                 kind: *b"amve",
                 data: vec![0; 8],
@@ -552,10 +555,10 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
             descriptive(PropertyKind::Colour(ColourInformation::RestrictedIcc(
                 vec![0u8; 12],
             ))),
-            descriptive(PropertyKind::ContentLightLevel {
+            descriptive(PropertyKind::ContentLightLevel(ContentLightLevel {
                 max_content_light_level: 1000,
                 max_pic_average_light_level: 400,
-            }),
+            })),
         ],
         payload: vec![0x44, 0x55, 0x66, 0x77],
     };

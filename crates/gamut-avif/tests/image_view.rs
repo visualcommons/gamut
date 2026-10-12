@@ -148,21 +148,21 @@ fn typed_property_accessors() {
             ),
             prop(
                 false,
-                PropertyKind::ContentLightLevel {
+                PropertyKind::ContentLightLevel(ContentLightLevel {
                     max_content_light_level: 1000,
                     max_pic_average_light_level: 400,
-                },
+                }),
             ),
             prop(
                 false,
-                PropertyKind::PixelAspectRatio {
+                PropertyKind::PixelAspectRatio(PixelAspectRatio {
                     h_spacing: 1,
                     v_spacing: 1,
-                },
+                }),
             ),
             prop(
                 false,
-                PropertyKind::CleanAperture {
+                PropertyKind::CleanAperture(CleanAperture {
                     width_n: 90,
                     width_d: 1,
                     height_n: 180,
@@ -171,7 +171,7 @@ fn typed_property_accessors() {
                     horiz_off_d: 1,
                     vert_off_n: 6,
                     vert_off_d: 1,
-                },
+                }),
             ),
         ],
         ..item(1, *b"av01", vec![1, 2, 3, 4])
@@ -235,20 +235,12 @@ fn mastering_display_types_the_mdcv_property() {
             av1c(AV1C_444_8BIT.to_vec()),
             prop(
                 false,
-                PropertyKind::ContentLightLevel {
+                PropertyKind::ContentLightLevel(ContentLightLevel {
                     max_content_light_level: 1000,
                     max_pic_average_light_level: 400,
-                },
+                }),
             ),
-            prop(
-                false,
-                PropertyKind::MasteringDisplayColourVolume {
-                    display_primaries: mdcv.display_primaries,
-                    white_point: mdcv.white_point,
-                    max_display_mastering_luminance: mdcv.max_display_mastering_luminance,
-                    min_display_mastering_luminance: mdcv.min_display_mastering_luminance,
-                },
-            ),
+            prop(false, PropertyKind::MasteringDisplayColourVolume(mdcv)),
         ],
         ..item(1, *b"av01", vec![1, 2, 3, 4])
     };
@@ -267,7 +259,7 @@ fn mastering_display_types_the_mdcv_property() {
 #[test]
 fn transformative_properties_preserve_association_order() {
     // Item 1: irot then clap (out of MIAF order). Item 2: clap, irot, imir (MIAF order).
-    let clap = PropertyKind::CleanAperture {
+    let clap = PropertyKind::CleanAperture(CleanAperture {
         width_n: 1,
         width_d: 1,
         height_n: 1,
@@ -276,7 +268,7 @@ fn transformative_properties_preserve_association_order() {
         horiz_off_d: 1,
         vert_off_n: 0,
         vert_off_d: 1,
-    };
+    });
     let out_of_order = Item {
         properties: vec![
             prop(true, PropertyKind::Rotation(1)),

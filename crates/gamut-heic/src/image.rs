@@ -9,6 +9,9 @@
 //! opaque — parsing them is a later slice (issue #238); this layer stops at the container.
 
 use gamut_core::{Dimensions, Error, Result};
+/// The typed `clap`/`pasp`/`clli` property values are the container crate's own, re-exported so
+/// the accessors here and the [`PropertyKind`] variants share one type (#743).
+pub use gamut_isobmff::{CleanAperture, ContentLightLevel, PixelAspectRatio};
 use gamut_isobmff::{
     ColourInformation, EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, PropertyKind,
 };
@@ -491,25 +494,7 @@ impl<'a> HeifItem<'a> {
     #[must_use]
     pub fn clean_aperture(&self) -> Option<CleanAperture> {
         self.find_property(|kind| match *kind {
-            PropertyKind::CleanAperture {
-                width_n,
-                width_d,
-                height_n,
-                height_d,
-                horiz_off_n,
-                horiz_off_d,
-                vert_off_n,
-                vert_off_d,
-            } => Some(CleanAperture {
-                width_n,
-                width_d,
-                height_n,
-                height_d,
-                horiz_off_n,
-                horiz_off_d,
-                vert_off_n,
-                vert_off_d,
-            }),
+            PropertyKind::CleanAperture(clap) => Some(clap),
             _ => None,
         })
     }
@@ -518,13 +503,7 @@ impl<'a> HeifItem<'a> {
     #[must_use]
     pub fn pixel_aspect_ratio(&self) -> Option<PixelAspectRatio> {
         self.find_property(|kind| match *kind {
-            PropertyKind::PixelAspectRatio {
-                h_spacing,
-                v_spacing,
-            } => Some(PixelAspectRatio {
-                h_spacing,
-                v_spacing,
-            }),
+            PropertyKind::PixelAspectRatio(pasp) => Some(pasp),
             _ => None,
         })
     }
@@ -569,13 +548,7 @@ impl<'a> HeifItem<'a> {
     #[must_use]
     pub fn content_light_level(&self) -> Option<ContentLightLevel> {
         self.find_property(|kind| match *kind {
-            PropertyKind::ContentLightLevel {
-                max_content_light_level,
-                max_pic_average_light_level,
-            } => Some(ContentLightLevel {
-                max_content_light_level,
-                max_pic_average_light_level,
-            }),
+            PropertyKind::ContentLightLevel(clli) => Some(clli),
             _ => None,
         })
     }
@@ -613,25 +586,9 @@ impl<'a> HeifItem<'a> {
             .properties
             .iter()
             .filter_map(|p| match p.kind {
-                PropertyKind::CleanAperture {
-                    width_n,
-                    width_d,
-                    height_n,
-                    height_d,
-                    horiz_off_n,
-                    horiz_off_d,
-                    vert_off_n,
-                    vert_off_d,
-                } => Some(TransformativeProperty::CleanAperture(CleanAperture {
-                    width_n,
-                    width_d,
-                    height_n,
-                    height_d,
-                    horiz_off_n,
-                    horiz_off_d,
-                    vert_off_n,
-                    vert_off_d,
-                })),
+                PropertyKind::CleanAperture(clap) => {
+                    Some(TransformativeProperty::CleanAperture(clap))
+                }
                 PropertyKind::Rotation(turns) => Some(TransformativeProperty::Rotation(turns)),
                 PropertyKind::Mirror(axis) => Some(TransformativeProperty::Mirror(axis)),
                 _ => None,
@@ -760,49 +717,6 @@ pub enum TransformativeProperty {
     Rotation(u8),
     /// `imir` mirror axis (`0` exchanges top and bottom, `1` exchanges left and right).
     Mirror(u8),
-}
-
-/// The `clap` clean-aperture crop as fractional width/height and centre offsets (ISO/IEC 14496-12
-/// §12.1.4). A computed view of [`PropertyKind::CleanAperture`]; the offset numerators are the raw
-/// two's-complement bits, interpreted as signed by consumers (MIAF §7.3.6.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CleanAperture {
-    /// Clean-aperture width numerator.
-    pub width_n: u32,
-    /// Clean-aperture width denominator.
-    pub width_d: u32,
-    /// Clean-aperture height numerator.
-    pub height_n: u32,
-    /// Clean-aperture height denominator.
-    pub height_d: u32,
-    /// Horizontal centre-offset numerator (signed, as raw two's-complement bits).
-    pub horiz_off_n: u32,
-    /// Horizontal centre-offset denominator.
-    pub horiz_off_d: u32,
-    /// Vertical centre-offset numerator (signed, as raw two's-complement bits).
-    pub vert_off_n: u32,
-    /// Vertical centre-offset denominator.
-    pub vert_off_d: u32,
-}
-
-/// The `pasp` pixel aspect ratio `h_spacing : v_spacing` (ISO/IEC 14496-12 §12.1.4). A computed view
-/// of [`PropertyKind::PixelAspectRatio`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PixelAspectRatio {
-    /// Relative horizontal pixel spacing.
-    pub h_spacing: u32,
-    /// Relative vertical pixel spacing.
-    pub v_spacing: u32,
-}
-
-/// The `clli` content light level `MaxCLL`/`MaxPALL`, in cd/m² (ISO/IEC 14496-12; HEVC SEI
-/// semantics). A computed view of [`PropertyKind::ContentLightLevel`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContentLightLevel {
-    /// Maximum content light level (`MaxCLL`).
-    pub max_content_light_level: u16,
-    /// Maximum picture average light level (`MaxPALL`).
-    pub max_pic_average_light_level: u16,
 }
 
 /// Whether `item_type` names a coded (pixel-bearing) image item rather than a derived, metadata, or

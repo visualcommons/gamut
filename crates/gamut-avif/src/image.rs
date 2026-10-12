@@ -12,6 +12,9 @@
 
 use gamut_av1::SequenceHeader;
 use gamut_core::{Dimensions, Error, Result};
+/// The typed `clap`/`pasp`/`clli`/`mdcv` property values are the container crate's own, re-exported
+/// so the accessors here and the [`PropertyKind`] variants share one type (#743).
+pub use gamut_isobmff::{CleanAperture, ContentLightLevel, MasteringDisplay, PixelAspectRatio};
 use gamut_isobmff::{
     ColourInformation, EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, PropertyKind,
 };
@@ -392,25 +395,7 @@ impl<'a> AvifItem<'a> {
     #[must_use]
     pub fn clean_aperture(&self) -> Option<CleanAperture> {
         self.find_property(|kind| match *kind {
-            PropertyKind::CleanAperture {
-                width_n,
-                width_d,
-                height_n,
-                height_d,
-                horiz_off_n,
-                horiz_off_d,
-                vert_off_n,
-                vert_off_d,
-            } => Some(CleanAperture {
-                width_n,
-                width_d,
-                height_n,
-                height_d,
-                horiz_off_n,
-                horiz_off_d,
-                vert_off_n,
-                vert_off_d,
-            }),
+            PropertyKind::CleanAperture(clap) => Some(clap),
             _ => None,
         })
     }
@@ -419,13 +404,7 @@ impl<'a> AvifItem<'a> {
     #[must_use]
     pub fn pixel_aspect_ratio(&self) -> Option<PixelAspectRatio> {
         self.find_property(|kind| match *kind {
-            PropertyKind::PixelAspectRatio {
-                h_spacing,
-                v_spacing,
-            } => Some(PixelAspectRatio {
-                h_spacing,
-                v_spacing,
-            }),
+            PropertyKind::PixelAspectRatio(pasp) => Some(pasp),
             _ => None,
         })
     }
@@ -472,13 +451,7 @@ impl<'a> AvifItem<'a> {
     #[must_use]
     pub fn content_light_level(&self) -> Option<ContentLightLevel> {
         self.find_property(|kind| match *kind {
-            PropertyKind::ContentLightLevel {
-                max_content_light_level,
-                max_pic_average_light_level,
-            } => Some(ContentLightLevel {
-                max_content_light_level,
-                max_pic_average_light_level,
-            }),
+            PropertyKind::ContentLightLevel(clli) => Some(clli),
             _ => None,
         })
     }
@@ -489,17 +462,7 @@ impl<'a> AvifItem<'a> {
     #[must_use]
     pub fn mastering_display(&self) -> Option<MasteringDisplay> {
         self.find_property(|kind| match *kind {
-            PropertyKind::MasteringDisplayColourVolume {
-                display_primaries,
-                white_point,
-                max_display_mastering_luminance,
-                min_display_mastering_luminance,
-            } => Some(MasteringDisplay {
-                display_primaries,
-                white_point,
-                max_display_mastering_luminance,
-                min_display_mastering_luminance,
-            }),
+            PropertyKind::MasteringDisplayColourVolume(mdcv) => Some(mdcv),
             _ => None,
         })
     }
@@ -537,25 +500,9 @@ impl<'a> AvifItem<'a> {
             .properties
             .iter()
             .filter_map(|p| match p.kind {
-                PropertyKind::CleanAperture {
-                    width_n,
-                    width_d,
-                    height_n,
-                    height_d,
-                    horiz_off_n,
-                    horiz_off_d,
-                    vert_off_n,
-                    vert_off_d,
-                } => Some(TransformativeProperty::CleanAperture(CleanAperture {
-                    width_n,
-                    width_d,
-                    height_n,
-                    height_d,
-                    horiz_off_n,
-                    horiz_off_d,
-                    vert_off_n,
-                    vert_off_d,
-                })),
+                PropertyKind::CleanAperture(clap) => {
+                    Some(TransformativeProperty::CleanAperture(clap))
+                }
                 PropertyKind::Rotation(turns) => Some(TransformativeProperty::Rotation(turns)),
                 PropertyKind::Mirror(axis) => Some(TransformativeProperty::Mirror(axis)),
                 _ => None,
@@ -686,72 +633,6 @@ pub enum TransformativeProperty {
     Rotation(u8),
     /// `imir` mirror axis (`0` = top↔bottom, `1` = left↔right; ISO/IEC 23008-12:2022 §6.5.12).
     Mirror(u8),
-}
-
-/// The `clap` clean-aperture crop as fractional width/height and centre offsets (ISO/IEC 14496-12
-/// §12.1.4). A computed view of [`PropertyKind::CleanAperture`]; the offset numerators are the
-/// raw two's-complement bits, interpreted as signed by consumers (MIAF §7.3.6.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CleanAperture {
-    /// Clean-aperture width numerator.
-    pub width_n: u32,
-    /// Clean-aperture width denominator.
-    pub width_d: u32,
-    /// Clean-aperture height numerator.
-    pub height_n: u32,
-    /// Clean-aperture height denominator.
-    pub height_d: u32,
-    /// Horizontal centre-offset numerator (signed, as raw two's-complement bits).
-    pub horiz_off_n: u32,
-    /// Horizontal centre-offset denominator.
-    pub horiz_off_d: u32,
-    /// Vertical centre-offset numerator (signed, as raw two's-complement bits).
-    pub vert_off_n: u32,
-    /// Vertical centre-offset denominator.
-    pub vert_off_d: u32,
-}
-
-/// The `pasp` pixel aspect ratio `h_spacing : v_spacing` (ISO/IEC 14496-12 §12.1.4). A computed
-/// view of [`PropertyKind::PixelAspectRatio`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PixelAspectRatio {
-    /// Relative horizontal pixel spacing.
-    pub h_spacing: u32,
-    /// Relative vertical pixel spacing.
-    pub v_spacing: u32,
-}
-
-/// The `clli` content light level `MaxCLL`/`MaxPALL`, in cd/m² (ISO/IEC 14496-12). A computed
-/// view of [`PropertyKind::ContentLightLevel`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContentLightLevel {
-    /// Maximum content light level (`MaxCLL`).
-    pub max_content_light_level: u16,
-    /// Maximum picture average light level (`MaxPALL`).
-    pub max_pic_average_light_level: u16,
-}
-
-/// The `mdcv` mastering display colour volume — SMPTE ST 2086 metadata describing the display the
-/// content was mastered on (ISO/IEC 14496-12 `MasteringDisplayColourVolumeBox`, field layout per
-/// AV1-ISOBMFF §2.3.4; semantics from the HEVC mastering display colour volume SEI, ISO/IEC
-/// 23008-2 Annex D). A computed view of [`PropertyKind::MasteringDisplayColourVolume`].
-///
-/// Every field is the stored integer code point, not a converted float, so a value read from one
-/// file and written to another is bit-exact. Neither the reader nor the encoder range-checks them:
-/// the box does not, and a reader rejecting out-of-range SEI values would refuse files the world
-/// holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MasteringDisplay {
-    /// The three display primaries as `[x, y]` CIE 1931 chromaticity pairs in units of 0.00002,
-    /// in stored order. The HEVC convention orders them green, blue, red; the box does not
-    /// enforce an order, so they are kept exactly as stored.
-    pub display_primaries: [[u16; 2]; 3],
-    /// The white point as an `[x, y]` CIE 1931 chromaticity pair in units of 0.00002.
-    pub white_point: [u16; 2],
-    /// Nominal maximum display luminance, in units of 0.0001 cd/m².
-    pub max_display_mastering_luminance: u32,
-    /// Nominal minimum display luminance, in units of 0.0001 cd/m².
-    pub min_display_mastering_luminance: u32,
 }
 
 /// Whether `item_type` names a coded (pixel-bearing) image item rather than a derived, metadata,
