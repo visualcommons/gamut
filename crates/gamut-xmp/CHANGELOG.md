@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(xmp)* refuse input holding more than one `<?xpacket?>` packet with the new
+  `XmpError::MultiplePackets` (carrying the offset of the next packet) instead of reading the first
+  and silently dropping the rest; applies to `XmpPacket::scan`, `XmpMeta::from_packet` and
+  `XmpSidecar::read` (#562)
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-xmp-v0.1.1...gamut-xmp-v1.0.0) - 2026-07-18
 
 ### Added

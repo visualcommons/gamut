@@ -45,17 +45,20 @@
 //!   AV1 profile set entirely and exists for the 16-bit still-image pipelines that share these
 //!   types); [`ChromaSubsampling::Cs400`] (monochrome) as an encode path;
 //!   [`MatrixCoefficients::YCgCo`], the one modeled matrix with neither
-//!   direction (it is a lifting transform, not a `Kr`/`Kb` matrix); and the HLG transfer curve
-//!   ([`eotf_for`](transfer::eotf_for) and [`oetf_for`](transfer::oetf_for) both return `None` for
-//!   it). These land with the milestones tracked in `gamut-avif/STATUS.md`.
+//!   direction (it is a lifting transform, not a `Kr`/`Kb` matrix). These land with the
+//!   milestones tracked in `gamut-avif/STATUS.md`.
 //!
 //! `Bt709` and `Bt2020_10` — one curve in ITU-T H.273 Table 3 — dispatch in both directions to
-//! [`bt709_eotf`](transfer::bt709_eotf) / [`bt709_oetf`](transfer::bt709_oetf).
+//! [`bt709_eotf`](transfer::bt709_eotf) / [`bt709_oetf`](transfer::bt709_oetf), and `Hlg` to
+//! [`hlg_inverse_oetf`](transfer::hlg_inverse_oetf) / [`hlg_oetf`](transfer::hlg_oetf) (the
+//! scene-referred Table 3 curve; the display-dependent BT.2100 OOTF is not modelled).
 //! [`oetf_for`](transfer::oetf_for) returns `None` for `Pq`, where
 //! [`eotf_for`](transfer::eotf_for) returns `Some`: that arm is the tone-mapping
 //! [`bt2020_pq_to_sdr`](transfer::bt2020_pq_to_sdr), which is not invertible. The standards-pure
 //! pair [`pq_eotf`](transfer::pq_eotf) / [`pq_oetf`](transfer::pq_oetf) is exact in both
-//! directions. [`SourceTransfer::eotf`](profile::SourceTransfer::eotf) — the dispatch over the
+//! directions, and [`standard_eotf_for`](transfer::standard_eotf_for) /
+//! [`standard_oetf_for`](transfer::standard_oetf_for) are the same dispatch with that pair
+//! (normalized to the 10 000 cd/m² peak) in the PQ arm. [`SourceTransfer::eotf`](profile::SourceTransfer::eotf) — the dispatch over the
 //! gamuts with no CICP transfer code point — likewise has no inverse yet.
 // `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
 // the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.

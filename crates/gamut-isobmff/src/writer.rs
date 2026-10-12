@@ -39,7 +39,9 @@ use crate::model::{
 /// that does not fit the still-image box
 /// versions this crate writes: item ids above `u16::MAX`, `uri ` items, more than 255 properties or
 /// 65 535 reference targets per item, more than 32 767 distinct properties, more than 65 535
-/// items, a `moov`/`trak` top-level box (image sequences), or a payload/box/file at 4 GiB or
+/// items, a `moov`/`trak` top-level box (an image sequence: its chunk offsets address the source
+/// file's `mdat`, which this function lays out afresh, so a verbatim copy would point at the wrong
+/// bytes — [`read`](crate::read) skips one for the same reason), or a payload/box/file at 4 GiB or
 /// beyond.
 #[must_use = "the serialised file is returned, not written anywhere"]
 pub fn write(image: &IsoBmffImage) -> Result<Vec<u8>> {
@@ -132,7 +134,8 @@ fn validate_top_level(top: &TopLevelBox) -> Result<()> {
         b"moov" | b"trak" => {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "ISOBMFF: image sequences (tracks) not supported",
+                "ISOBMFF: image sequences (tracks) not supported: a moov/trak's chunk offsets \
+                 address the source file's mdat, which write lays out afresh",
             ));
         }
         _ => {}

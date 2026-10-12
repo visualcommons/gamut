@@ -14,9 +14,11 @@
 //!
 //! **One packet, not a catenation.** That "catenated by a postprocessor" phrase describes a file
 //! holding *several* `<?xpacket?>` packets end to end — a shape [`XmpSidecar::write`] never
-//! produces (it emits exactly one) and [`XmpSidecar::read`] does not read: it takes the first
-//! packet and silently discards the rest. See [`XmpSidecar::read`] for what that costs the caller,
-//! and issue [#562](https://github.com/visualcommons/gamut/issues/562) for the open decision.
+//! produces (it emits exactly one) and [`XmpSidecar::read`] refuses with
+//! [`XmpError::MultiplePackets`], as the reference engine does, rather than read the first packet
+//! and silently drop the rest. The error carries the offset at which the next packet begins, so a
+//! caller can split the file and read each packet itself (issue
+//! [#562](https://github.com/visualcommons/gamut/issues/562)).
 
 use quick_xml::NsReader;
 use quick_xml::events::Event;
@@ -69,26 +71,24 @@ impl XmpSidecar {
     /// (namespace `adobe:ns:meta/`, Part 1 §7.3.3). Trailing padding inside the packet wrapper is
     /// ignored.
     ///
-    /// # A catenated file loses everything after its first packet
+    /// # A catenated file is refused
     ///
     /// Part 3 asks that external metadata be written "as though it were embedded and then had the
     /// XMP packets extracted **and catenated by a postprocessor**", so a conforming producer may
-    /// hand over a `.xmp` file holding several `<?xpacket?>` packets end to end. This reads the
-    /// first one and **silently discards the rest**: no error, and no way to tell the result from
-    /// a genuine single-packet file. Two [`XmpSidecar::write`] outputs concatenated read back as
-    /// the properties of the first alone. Adobe XMPCore rejects those same bytes.
-    ///
-    /// Read such a file only if you know it holds one packet, or split it on `<?xpacket` yourself
-    /// and read each part. Which of rejecting, merging or keeping this is right is open as issue
-    /// [#562](https://github.com/visualcommons/gamut/issues/562); until it is settled the
-    /// behaviour is documented rather than changed, so it will not shift under a patch release.
+    /// hand over a `.xmp` file holding several `<?xpacket?>` packets end to end. Part 3 does not
+    /// say how a reader reconciles a property two packets both set, so this does not guess: it
+    /// returns [`XmpError::MultiplePackets`] instead of reading the first packet and silently
+    /// discarding the rest. Adobe XMPCore rejects those same bytes. The error's offset is where
+    /// the next packet begins — `bytes[..offset]` reads as the first packet and `bytes[offset..]`
+    /// as the rest — so a caller who knows how its packets combine splits there and merges the
+    /// graphs itself (issue [#562](https://github.com/visualcommons/gamut/issues/562)).
     ///
     /// # Errors
     ///
     /// Returns [`XmpError::MissingXmpMeta`] naming the document element when it is not `x:xmpmeta`
     /// — a bare `rdf:RDF` document is a packet body, valid XMP that [`XmpMeta::from_packet`]
     /// accepts, but not one this crate reads as a sidecar. Otherwise the same errors as
-    /// [`XmpMeta::from_packet`]:
+    /// [`XmpMeta::from_packet`]: [`XmpError::MultiplePackets`] for a catenated file (above),
     /// [`XmpError::Encoding`] for non-UTF-8 input, [`XmpError::Xml`] for malformed XML,
     /// [`XmpError::MissingRdf`] when no `rdf:RDF` is found, and the RDF/XML-for-XMP errors for
     /// constructs XMP does not permit.
@@ -211,6 +211,28 @@ mod tests {
         meta.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
         let parsed = XmpSidecar::read(&XmpSidecar::write(&meta)).unwrap();
         assert_eq!(parsed, meta);
+    }
+
+    #[test]
+    fn read_refuses_two_catenated_sidecars_and_the_offset_splits_them() {
+        // Issue #562: two `write` outputs end to end are refused rather than read as the first.
+        // The offset lands on the second packet's header, past its XML declaration, and splitting
+        // there recovers both graphs whole — the recovery the error's documentation promises.
+        let mut rating = XmpMeta::new();
+        rating.set_text(WellKnownNs::Xmp.uri(), "Rating", "5");
+        let mut tool = XmpMeta::new();
+        tool.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
+        let first = XmpSidecar::write(&rating);
+        let mut file = first.clone();
+        file.extend_from_slice(&XmpSidecar::write(&tool));
+
+        let offset = first.len() + XML_DECLARATION.len();
+        assert_eq!(
+            XmpSidecar::read(&file),
+            Err(XmpError::MultiplePackets(offset))
+        );
+        assert_eq!(XmpSidecar::read(&file[..offset]).unwrap(), rating);
+        assert_eq!(XmpSidecar::read(&file[offset..]).unwrap(), tool);
     }
 
     #[test]

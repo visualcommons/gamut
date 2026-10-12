@@ -5,7 +5,7 @@ mod common;
 
 use common::{av01_item, image, item};
 use gamut_isobmff::{
-    IsoBmffImage, ItemReference, Property, PropertyKind, TopLevelBox, TopLevelPosition, write,
+    IsoBmffImage, ItemReference, Property, PropertyKind, TopLevelBox, TopLevelPosition, read, write,
 };
 
 #[track_caller]
@@ -124,12 +124,25 @@ fn top_level_box_types_the_model_emits_itself_are_rejected() {
             .with_top_level_boxes(vec![TopLevelBox::new(*ty, vec![])]);
         assert_rejected(&img, "owned by the model");
     }
-    // Image sequences are Unsupported on read, so writing one is too.
+    // A track's chunk offsets address the source file's mdat, which write lays out afresh, so a
+    // verbatim copy would point at the wrong bytes: read skips one and write refuses one.
     for ty in [b"moov", b"trak"] {
         let img = image(vec![av01_item(1, vec![1])])
             .with_top_level_boxes(vec![TopLevelBox::new(*ty, vec![])]);
         assert_rejected(&img, "image sequences");
     }
+}
+
+#[test]
+fn still_read_beside_a_track_writes_back_without_it() {
+    // The still `read` takes from a file carrying a sequence track (#646) is a model `write`
+    // accepts: the track was never in the model, so it round-trips as a plain still.
+    let still = write(&image(vec![av01_item(1, vec![0xAB; 8])])).unwrap();
+    let mut with_track = still.clone();
+    with_track.extend_from_slice(&common::bx(b"moov", &[0u8; 16]));
+    let model = read(&with_track).unwrap();
+    assert!(model.top_level_boxes.is_empty());
+    assert_eq!(write(&model).unwrap(), still);
 }
 
 #[test]

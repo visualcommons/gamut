@@ -727,21 +727,22 @@ fn a_store_after_the_files_media_data_is_flagged_by_its_position() {
 }
 
 #[test]
-fn a_top_level_moov_never_reaches_the_c2pa_lens() {
-    // Why the boundary is the first `mdat` alone, though §A.5.3 names `moov` as well: a top-level
-    // movie box is refused by the container before any C2PA scan runs — image sequences are out of
-    // scope — so testing for one would be a branch no parsed file could take.
+fn a_store_after_a_sequence_moov_is_flagged_by_its_position() {
+    // §A.5.3's other boundary: "before any 'moov' box in the file". The container skips a movie
+    // box beside the `meta` still rather than refusing the file, so the C2PA lens sees past it and
+    // must not report a box between the `moov` and the first `mdat` as inside the window.
     let data = cat(&[
         ftyp(b"heic"),
+        minimal_meta(),
         bx(b"moov", &[0xAA; 16]),
         c2pa_box("manifest", Some(0), &store(), &[]),
-        minimal_meta(),
+        bx(b"mdat", &[0xBB; 16]),
     ]);
-    let error = HeifContainer::parse(&data).expect_err("a top-level moov is not a still image");
-    assert!(
-        error.to_string().contains("image sequences"),
-        "the container must refuse the file, not classify its boxes: {error}"
-    );
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let summary = c.c2pa_summary();
+    assert_eq!(summary.stores.len(), 1);
+    assert_eq!(summary.stores[0].position, C2paBoxPosition::AfterMovieBox);
 }
 
 #[test]

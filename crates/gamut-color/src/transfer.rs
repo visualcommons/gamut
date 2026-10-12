@@ -226,12 +226,103 @@ pub fn pq_oetf(nits: f64) -> f64 {
     ((C1 + C2 * y) / (1.0 + C3 * y)).powf(M2)
 }
 
+/// PQ (ST 2084) EOTF **normalized to its peak**: signal on `[0, 1]` → luminance as a fraction of
+/// [`PQ_PEAK_NITS`], on `[0, 1]`. ITU-T H.273 Table 3 states code point 16 over exactly this
+/// normalized `Lo` ("`Lo` equal to 1 for peak white is ordinarily intended to correspond to a
+/// reference output luminance level of 10 000 candelas per square metre"), and it is the form an
+/// ICC profile's tone curve carries for a PQ encoding.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::{pq_eotf, pq_eotf_normalized};
+/// assert_eq!(pq_eotf_normalized(0.0), 0.0);
+/// assert_eq!(pq_eotf_normalized(1.0), 1.0);
+/// assert_eq!(pq_eotf_normalized(0.5), pq_eotf(0.5) / 10_000.0);
+/// ```
+#[must_use]
+pub fn pq_eotf_normalized(x: f64) -> f64 {
+    pq_eotf(x) / PQ_PEAK_NITS
+}
+
+/// The exact inverse of [`pq_eotf_normalized`]: luminance as a fraction of [`PQ_PEAK_NITS`] →
+/// PQ signal on `[0, 1]`. Inputs outside `[0, 1]` saturate, as [`pq_oetf`]'s do.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::{pq_eotf_normalized, pq_oetf_normalized};
+/// let signal = pq_oetf_normalized(0.0203);
+/// assert!((pq_eotf_normalized(signal) - 0.0203).abs() < 1e-12);
+/// ```
+#[must_use]
+pub fn pq_oetf_normalized(y: f64) -> f64 {
+    pq_oetf(y * PQ_PEAK_NITS)
+}
+
 /// BT.2020 **encoder-exact** path: PQ EOTF → nits → Reinhard tone map to
 /// SDR `[0, 1)` relative to the BT.2408 HDR reference white (203 nits; `L / (1 + L)`).
 #[must_use]
 pub fn bt2020_pq_to_sdr(x: f64) -> f64 {
     let l = pq_eotf(x) / HDR_REFERENCE_WHITE_NITS;
     l / (1.0 + l)
+}
+
+// --- HLG (ARIB STD-B67 / ITU-R BT.2100, H.273 code point 18) ---------------
+
+/// `a` of the HLG transfer, as ITU-T H.273 (07/2024) Table 3 states it for code point 18.
+const HLG_A: f64 = 0.178_832_77;
+/// `b` of the HLG transfer, H.273 Table 3 (`1 − 4a`, stated rounded).
+const HLG_B: f64 = 0.284_668_92;
+/// `c` of the HLG transfer, H.273 Table 3 (`0.5 − a·ln(4a)`, stated rounded).
+const HLG_C: f64 = 0.559_910_73;
+
+/// HLG OETF: scene-linear light `Lc` on `[0, 1]` → signal `V`, exactly as ITU-T H.273 Table 3
+/// states it for code point 18 (ARIB STD-B67, Rec. ITU-R BT.2100-2 HLG):
+/// `V = Sqrt(3) · Lc^0.5` for `1/12 >= Lc >= 0`, and `V = a · Ln(12 · Lc − b) + c` for
+/// `1 >= Lc > 1/12`, with `a`, `b`, `c` as the table gives them.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::hlg_oetf;
+/// assert_eq!(hlg_oetf(0.0), 0.0);
+/// // The square-root segment ends at Lc = 1/12, V = 0.5.
+/// assert_eq!(hlg_oetf(1.0 / 12.0), 0.5);
+/// assert!((hlg_oetf(1.0) - 1.0).abs() < 1e-7);
+/// ```
+#[must_use]
+pub fn hlg_oetf(lc: f64) -> f64 {
+    if lc <= 1.0 / 12.0 {
+        (3.0 * lc).sqrt()
+    } else {
+        HLG_A * (12.0 * lc - HLG_B).ln() + HLG_C
+    }
+}
+
+/// The exact inverse of [`hlg_oetf`]: signal `V` → scene-linear light `Lc` on `[0, 1]`, for
+/// H.273 code point 18. `Lc = V² / 3` for `V <= 1/2`, and `Lc = (e^((V − c) / a) + b) / 12`
+/// above it.
+///
+/// This is the **inverse OETF** (scene-referred), the same reading [`bt709_eotf`] gives the
+/// BT.709 family: H.273 defines code point 18 by its opto-electronic function. It is *not* the
+/// Rec. ITU-R BT.2100 HLG EOTF, which further applies the display-dependent OOTF (a system gamma
+/// set by the display's peak luminance) — hence the name, which does not say `eotf`.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::{hlg_inverse_oetf, hlg_oetf};
+/// assert_eq!(hlg_inverse_oetf(0.5), 1.0 / 12.0);
+/// assert!((hlg_inverse_oetf(hlg_oetf(0.6)) - 0.6).abs() < 1e-12);
+/// ```
+#[must_use]
+pub fn hlg_inverse_oetf(v: f64) -> f64 {
+    if v <= 0.5 {
+        v * v / 3.0
+    } else {
+        (((v - HLG_C) / HLG_A).exp() + HLG_B) / 12.0
+    }
 }
 
 // --- CICP dispatch ---------------------------------------------------------
@@ -241,10 +332,13 @@ pub fn bt2020_pq_to_sdr(x: f64) -> f64 {
 ///
 /// `Srgb` returns scene-linear via [`srgb_eotf`]; `Bt709` / `Bt2020_10` — which ITU-T H.273
 /// Table 3 gives one curve, "functionally the same" as each other — return scene-linear via
-/// [`bt709_eotf`]; `Pq` returns the tone-mapped SDR value via [`bt2020_pq_to_sdr`]; `Linear`
-/// returns the identity via [`linear_eotf`]. Code points without a curve implemented here
-/// (`Hlg`, `Unspecified`) return `None`. Adobe RGB and ProPhoto have no CICP transfer code point
-/// and are reached via their named functions or [`crate::profile`].
+/// [`bt709_eotf`]; `Hlg` returns scene-linear via [`hlg_inverse_oetf`]; `Pq` returns the
+/// tone-mapped SDR value via [`bt2020_pq_to_sdr`]; `Linear` returns the identity via
+/// [`linear_eotf`]. `Unspecified` names no curve and returns `None`. Adobe RGB and ProPhoto have
+/// no CICP transfer code point and are reached via their named functions or [`crate::profile`].
+///
+/// The `Pq` arm is the one place this dispatch is not the textbook curve; [`standard_eotf_for`]
+/// is the same dispatch with the standards-pure PQ arm.
 ///
 /// # Examples
 ///
@@ -259,11 +353,8 @@ pub fn bt2020_pq_to_sdr(x: f64) -> f64 {
 #[must_use]
 pub fn eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
     match tc {
-        TransferCharacteristics::Linear => Some(linear_eotf),
-        TransferCharacteristics::Srgb => Some(srgb_eotf),
-        TransferCharacteristics::Bt709 | TransferCharacteristics::Bt2020_10 => Some(bt709_eotf),
         TransferCharacteristics::Pq => Some(bt2020_pq_to_sdr),
-        TransferCharacteristics::Hlg | TransferCharacteristics::Unspecified => None,
+        _ => standard_eotf_for(tc),
     }
 }
 
@@ -274,10 +365,10 @@ pub fn eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
 /// Where both return `Some`, they are exact inverses: `oetf_for(tc)(eotf_for(tc)(x)) == x` to
 /// within floating-point error. `Linear` returns the identity via [`linear_oetf`], `Srgb` the
 /// gamma encode via [`srgb_oetf`], and `Bt709` / `Bt2020_10` the H.273 Table 3 curve via
-/// [`bt709_oetf`].
+/// [`bt709_oetf`], and `Hlg` the H.273 Table 3 curve via [`hlg_oetf`].
 ///
-/// `None` for the same code points [`eotf_for`] declines (`Hlg`, `Unspecified` — no curve is
-/// implemented for them), **and additionally for `Pq`**: [`eotf_for`] maps it to
+/// `None` for the code point [`eotf_for`] declines (`Unspecified`, which names no curve),
+/// **and additionally for `Pq`**: [`eotf_for`] maps it to
 /// [`bt2020_pq_to_sdr`], which tone-maps HDR to SDR and is therefore not invertible.
 /// [`pq_oetf`] is the inverse of the standards-pure [`pq_eotf`] if that is what you want.
 ///
@@ -298,13 +389,72 @@ pub fn eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
 #[must_use]
 pub fn oetf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
     match tc {
+        // `eotf_for`'s PQ arm is `bt2020_pq_to_sdr`, a tone map, so it has no inverse here.
+        TransferCharacteristics::Pq => None,
+        _ => standard_oetf_for(tc),
+    }
+}
+
+/// The **standards-pure** EOTF for a CICP [`TransferCharacteristics`] code point: signal →
+/// linear light on `[0, 1]`, exactly the function ITU-T H.273 Table 3 defines, undone.
+///
+/// It differs from [`eotf_for`] only at `Pq`, where it returns [`pq_eotf_normalized`] (the
+/// ST 2084 EOTF over Table 3's normalized `Lo`, `1.0` = 10 000 cd/m²) instead of the
+/// encoder-exact tone map. Every other arm is shared: `Linear` → [`linear_eotf`], `Srgb` →
+/// [`srgb_eotf`], `Bt709` / `Bt2020_10` → [`bt709_eotf`], `Hlg` → [`hlg_inverse_oetf`];
+/// `Unspecified` → `None`.
+///
+/// This is the curve an ICC profile's tone reproduction curve encodes for the same code point
+/// (ICC.1:2022 §10.3 requires a profile's `cicp` tag to name an encoding equivalent to the
+/// profile's own), so it is what a colour management module evaluates in place of a sampled
+/// curve.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::cicp::TransferCharacteristics;
+/// use gamut_color::transfer::{pq_eotf, standard_eotf_for};
+///
+/// let pq = standard_eotf_for(TransferCharacteristics::Pq).unwrap();
+/// assert_eq!(pq(0.5), pq_eotf(0.5) / 10_000.0);
+/// assert!(standard_eotf_for(TransferCharacteristics::Unspecified).is_none());
+/// ```
+#[must_use]
+pub fn standard_eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
+    match tc {
+        TransferCharacteristics::Linear => Some(linear_eotf),
+        TransferCharacteristics::Srgb => Some(srgb_eotf),
+        TransferCharacteristics::Bt709 | TransferCharacteristics::Bt2020_10 => Some(bt709_eotf),
+        TransferCharacteristics::Pq => Some(pq_eotf_normalized),
+        TransferCharacteristics::Hlg => Some(hlg_inverse_oetf),
+        TransferCharacteristics::Unspecified => None,
+    }
+}
+
+/// The inverse of [`standard_eotf_for`]: linear light on `[0, 1]` → signal, for every code point
+/// it answers. Unlike [`oetf_for`] it has a `Pq` arm, [`pq_oetf_normalized`], because the
+/// standards-pure PQ EOTF is invertible where the encoder-exact tone map is not; so
+/// `standard_oetf_for(tc)` is `Some` exactly when `standard_eotf_for(tc)` is.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::cicp::TransferCharacteristics;
+/// use gamut_color::transfer::{standard_eotf_for, standard_oetf_for};
+///
+/// let tc = TransferCharacteristics::Pq;
+/// let (eotf, oetf) = (standard_eotf_for(tc).unwrap(), standard_oetf_for(tc).unwrap());
+/// assert!((oetf(eotf(0.25)) - 0.25).abs() < 1e-12);
+/// ```
+#[must_use]
+pub fn standard_oetf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
+    match tc {
         TransferCharacteristics::Linear => Some(linear_oetf),
         TransferCharacteristics::Srgb => Some(srgb_oetf),
         TransferCharacteristics::Bt709 | TransferCharacteristics::Bt2020_10 => Some(bt709_oetf),
-        // `eotf_for`'s PQ arm is `bt2020_pq_to_sdr`, a tone map, so it has no inverse here.
-        TransferCharacteristics::Pq
-        | TransferCharacteristics::Hlg
-        | TransferCharacteristics::Unspecified => None,
+        TransferCharacteristics::Pq => Some(pq_oetf_normalized),
+        TransferCharacteristics::Hlg => Some(hlg_oetf),
+        TransferCharacteristics::Unspecified => None,
     }
 }
 
@@ -513,8 +663,10 @@ mod tests {
     fn eotf_for_dispatch() {
         assert!(eotf_for(TransferCharacteristics::Srgb).is_some());
         assert!(eotf_for(TransferCharacteristics::Pq).is_some());
-        assert!(eotf_for(TransferCharacteristics::Hlg).is_none());
         assert!(eotf_for(TransferCharacteristics::Unspecified).is_none());
+        // The Hlg dispatch is the scene-referred inverse OETF.
+        let f = eotf_for(TransferCharacteristics::Hlg).unwrap();
+        assert_eq!(f(0.75), hlg_inverse_oetf(0.75));
         // Code points 1 and 14 are one Table 3 curve; each alternative of the or-pattern is
         // asserted on its own. At 0.5 the BT.709 curve and the PQ tone map differ by ~0.05.
         for tc in [
@@ -545,8 +697,9 @@ mod tests {
         assert!(oetf_for(TransferCharacteristics::Linear).is_some());
         assert!(oetf_for(TransferCharacteristics::Srgb).is_some());
         assert!(oetf_for(TransferCharacteristics::Pq).is_none());
-        assert!(oetf_for(TransferCharacteristics::Hlg).is_none());
         assert!(oetf_for(TransferCharacteristics::Unspecified).is_none());
+        let f = oetf_for(TransferCharacteristics::Hlg).unwrap();
+        assert_eq!(f(0.5), hlg_oetf(0.5));
 
         // The Srgb dispatch is the sRGB OETF, not the EOTF: at 0.5 the two differ by ~0.52, so
         // a mutant returning `srgb_eotf` here is caught.
@@ -583,6 +736,7 @@ mod tests {
             TransferCharacteristics::Srgb,
             TransferCharacteristics::Bt709,
             TransferCharacteristics::Bt2020_10,
+            TransferCharacteristics::Hlg,
         ] {
             let eotf = eotf_for(tc).expect("modeled");
             let oetf = oetf_for(tc).expect("modeled");
@@ -636,6 +790,135 @@ mod tests {
                 tc == TransferCharacteristics::Pq,
                 "{tc:?} disagrees with the PQ-only asymmetry"
             );
+        }
+    }
+
+    /// H.273 Table 3, code point 18, transcribed **forward** exactly as the spec states it, with
+    /// `a`, `b`, `c` written out again so a mistyped digit in the crate's constants cannot hide.
+    fn h273_hlg_oetf(lc: f64) -> f64 {
+        let (a, b, c) = (0.178_832_77, 0.284_668_92, 0.559_910_73);
+        if lc > 1.0 / 12.0 {
+            a * (12.0 * lc - b).ln() + c
+        } else {
+            3.0_f64.sqrt() * lc.powf(0.5)
+        }
+    }
+
+    /// Samples on both HLG segments, either side of `Lc = 1/12`.
+    const HLG_LIGHT_SWEEP: [f64; 9] = [0.0, 0.001, 0.02, 0.08, 0.09, 0.2, 0.5, 0.9, 1.0];
+
+    #[test]
+    fn hlg_oetf_matches_h273_table3() {
+        for &lc in &HLG_LIGHT_SWEEP {
+            let (got, want) = (hlg_oetf(lc), h273_hlg_oetf(lc));
+            assert!(
+                (got - want).abs() < 1e-14,
+                "hlg_oetf({lc}) = {got}, Table 3 {want}"
+            );
+        }
+        // Table 3 puts `Lc == 1/12` on the square-root segment (`1/12 >= Lc`). The rounded
+        // a, b, c make the log segment miss 0.5 there by ~5e-10, so the exact value pins it.
+        assert_eq!(hlg_oetf(1.0 / 12.0), 0.5);
+        assert_ne!(
+            HLG_A * (12.0 * (1.0 / 12.0) - HLG_B).ln() + HLG_C,
+            0.5,
+            "the log segment must not also land on 0.5, or the boundary is unpinned"
+        );
+    }
+
+    #[test]
+    fn hlg_inverse_oetf_inverts_h273_table3() {
+        for &lc in &HLG_LIGHT_SWEEP {
+            let back = hlg_inverse_oetf(h273_hlg_oetf(lc));
+            assert!(
+                (back - lc).abs() < 1e-12,
+                "hlg_inverse_oetf(oetf({lc})) = {back}"
+            );
+        }
+        // `V == 1/2` is on the square-root segment's image (`V² / 3`); the exponential segment
+        // lands ~3e-10 away there.
+        assert_eq!(hlg_inverse_oetf(0.5), 0.25 / 3.0);
+        assert_ne!((((0.5 - HLG_C) / HLG_A).exp() + HLG_B) / 12.0, 0.25 / 3.0);
+    }
+
+    #[test]
+    fn pq_normalized_pair_is_pq_over_its_peak() {
+        for &x in &[0.0, 0.1, 0.5, 0.75, 1.0] {
+            assert_eq!(pq_eotf_normalized(x), pq_eotf(x) / PQ_PEAK_NITS, "at {x}");
+        }
+        for &nits in &PQ_NITS_SWEEP {
+            let y = nits / PQ_PEAK_NITS;
+            assert_eq!(pq_oetf_normalized(y), pq_oetf(nits), "at {nits} nits");
+        }
+    }
+
+    /// The standards-pure dispatch: one arm per answered code point, each asserted on its own
+    /// against the named function (the or-pattern's two alternatives separately).
+    #[test]
+    fn standard_eotf_for_dispatch() {
+        let at = |tc, x| standard_eotf_for(tc).map(|f| f(x));
+        assert_eq!(at(TransferCharacteristics::Linear, 0.3), Some(0.3));
+        assert_eq!(at(TransferCharacteristics::Srgb, 0.5), Some(srgb_eotf(0.5)));
+        assert_eq!(
+            at(TransferCharacteristics::Bt709, 0.5),
+            Some(bt709_eotf(0.5))
+        );
+        assert_eq!(
+            at(TransferCharacteristics::Bt2020_10, 0.5),
+            Some(bt709_eotf(0.5))
+        );
+        assert_eq!(
+            at(TransferCharacteristics::Pq, 0.5),
+            Some(pq_eotf_normalized(0.5))
+        );
+        assert_eq!(
+            at(TransferCharacteristics::Hlg, 0.75),
+            Some(hlg_inverse_oetf(0.75))
+        );
+        assert_eq!(at(TransferCharacteristics::Unspecified, 0.5), None);
+    }
+
+    #[test]
+    fn standard_oetf_for_dispatch() {
+        let at = |tc, x| standard_oetf_for(tc).map(|f| f(x));
+        assert_eq!(at(TransferCharacteristics::Linear, 0.3), Some(0.3));
+        assert_eq!(at(TransferCharacteristics::Srgb, 0.5), Some(srgb_oetf(0.5)));
+        assert_eq!(
+            at(TransferCharacteristics::Bt709, 0.5),
+            Some(bt709_oetf(0.5))
+        );
+        assert_eq!(
+            at(TransferCharacteristics::Bt2020_10, 0.5),
+            Some(bt709_oetf(0.5))
+        );
+        assert_eq!(
+            at(TransferCharacteristics::Pq, 0.25),
+            Some(pq_oetf_normalized(0.25))
+        );
+        assert_eq!(at(TransferCharacteristics::Hlg, 0.5), Some(hlg_oetf(0.5)));
+        assert_eq!(at(TransferCharacteristics::Unspecified, 0.5), None);
+    }
+
+    /// The standards-pure pair is invertible at every code point it answers — PQ included,
+    /// unlike the encoder-exact pair — and answers in both directions or neither.
+    ///
+    /// Checked as `eotf(oetf(y)) == y`, the direction that is a bijection for every curve: ST 2084
+    /// maps the whole signal interval `[0, c1^m2]` (`c1^m2 ≈ 7.3e-7`) to zero light, so the PQ
+    /// encode of black is `c1^m2`, not `0`, and `oetf(eotf(0))` cannot return `0`.
+    #[test]
+    fn standard_eotf_for_inverts_standard_oetf_for() {
+        for code in 0..=u16::from(u8::MAX) {
+            let Some(tc) = TransferCharacteristics::from_code_point(code) else {
+                continue;
+            };
+            let (Some(eotf), Some(oetf)) = (standard_eotf_for(tc), standard_oetf_for(tc)) else {
+                assert!(standard_eotf_for(tc).is_none() && standard_oetf_for(tc).is_none());
+                continue;
+            };
+            for &y in &[0.0, 0.0001, 0.01, 0.03, 0.2, 0.5, 0.8, 1.0] {
+                let back = eotf(oetf(y));
+                assert!((back - y).abs() < 1e-12, "{tc:?}: eotf(oetf({y})) = {back}");
+            }
         }
     }
 }

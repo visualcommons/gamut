@@ -441,6 +441,30 @@ pub unsafe extern "C" fn gamut_avif_encoder_set_premultiplied_alpha(
     }
 }
 
+/// Keeps the alpha auxiliary of an RGBA input whose every alpha sample is fully opaque (255, or
+/// 65535) when `keep` is `true` (`AvifEncoder::with_keep_opaque_alpha`). Without this call, or
+/// with `false`, such an input drops its alpha and encodes as the file
+/// `gamut_avif_encoder_encode_rgb8` / `gamut_avif_encoder_encode_rgb16` writes for its colour.
+/// Set it when a consumer needs the alpha item present regardless of its values. Ignored by
+/// inputs without alpha and by inputs with any non-opaque alpha sample, which always keep it.
+///
+/// Returns `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+///
+/// # Safety
+///
+/// `encoder` is `NULL` or a live encoder handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gamut_avif_encoder_set_keep_opaque_alpha(
+    encoder: *mut GamutAvifEncoder,
+    keep: bool,
+) -> GamutStatus {
+    unsafe {
+        GamutAvifEncoder::configure(encoder, Some(keep), GAMUT_OK, |e, k| {
+            e.with_keep_opaque_alpha(k)
+        })
+    }
+}
+
 /// Records an `irot` display rotation of `quarter_turns_ccw` anti-clockwise quarter turns
 /// (`0..=3`; `0` writes no `irot`), applied by a reader — the stored pixels are unchanged
 /// (`AvifEncoder::with_rotation`).
@@ -704,8 +728,10 @@ pub unsafe extern "C" fn gamut_avif_encoder_encode_rgb8(
 
 /// Encodes interleaved 8-bit RGBA samples (unassociated alpha unless
 /// `gamut_avif_encoder_set_premultiplied_alpha` says otherwise) to an AVIF file with an alpha
-/// auxiliary. `samples_len` counts samples (`width * height * 4`); otherwise as
-/// `gamut_avif_encoder_encode_rgb8`.
+/// auxiliary. An input whose every alpha sample is 255 is fully opaque: its alpha is dropped
+/// and the file is the one `gamut_avif_encoder_encode_rgb8` writes for its colour, with no
+/// alpha auxiliary, unless `gamut_avif_encoder_set_keep_opaque_alpha` keeps it. `samples_len`
+/// counts samples (`width * height * 4`); otherwise as `gamut_avif_encoder_encode_rgb8`.
 ///
 /// # Safety
 ///
@@ -793,8 +819,12 @@ pub unsafe extern "C" fn gamut_avif_encoder_encode_rgb16(
     }
 }
 
-/// Encodes interleaved 16-bit RGBA samples (full 16-bit scale) with an alpha auxiliary.
-/// `samples_len` counts samples (`width * height * 4`); otherwise as
+/// Encodes interleaved 16-bit RGBA samples (full 16-bit scale) with an alpha auxiliary. An
+/// input whose every alpha sample is 65535 is fully opaque: its alpha is dropped and the file is
+/// the one `gamut_avif_encoder_encode_rgb16` writes for its colour, with no alpha auxiliary,
+/// unless `gamut_avif_encoder_set_keep_opaque_alpha` keeps it. Opacity is judged on the input
+/// samples, so an alpha of 65534 keeps the auxiliary even where it truncates to the coded
+/// maximum. `samples_len` counts samples (`width * height * 4`); otherwise as
 /// `gamut_avif_encoder_encode_rgb16`.
 ///
 /// # Safety
@@ -1805,6 +1835,44 @@ mod tests {
     }
 
     #[test]
+    fn keep_opaque_alpha_setter_keeps_an_opaque_inputs_alpha_auxiliary() {
+        // Only a fully opaque input reaches the flag: any other alpha keeps its auxiliary
+        // regardless, which is why `assert_setter`'s varying-alpha ramp cannot test it.
+        let opaque: Vec<u8> = ramp8(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b, _]| [r, g, b, 255])
+            .collect();
+        let has_alpha = |keep: Option<bool>| {
+            let configure = |encoder| {
+                if let Some(keep) = keep {
+                    assert_eq!(
+                        unsafe { gamut_avif_encoder_set_keep_opaque_alpha(encoder, keep) },
+                        GAMUT_OK
+                    );
+                }
+            };
+            let rust = AvifEncoder::lossy(50).with_keep_opaque_alpha(keep.unwrap_or(false));
+            let file = assert_shim::<Rgba8>(
+                new_lossy_50,
+                configure,
+                rust,
+                gamut_avif_encoder_encode_rgba8,
+                &opaque,
+            )
+            .unwrap();
+            let image = c_parse(&file);
+            let alpha = read(image, gamut_avif_image_alpha_codestream).unwrap();
+            unsafe { gamut_avif_image_free(image) };
+            alpha.is_some()
+        };
+        assert!(has_alpha(Some(true)), "the setter keeps the auxiliary");
+        assert!(!has_alpha(None), "by default an opaque alpha is dropped");
+        assert!(!has_alpha(Some(false)), "`false` is the default");
+    }
+
+    #[test]
     fn metadata_setters_forward_their_bytes() {
         let bytes = b"MM\0\x2a\0\0\0\x08\0\0";
         type BytesSetter =
@@ -2115,6 +2183,10 @@ mod tests {
             );
             assert_eq!(
                 gamut_avif_encoder_set_premultiplied_alpha(null, true),
+                GAMUT_STATUS_NULL_ARGUMENT
+            );
+            assert_eq!(
+                gamut_avif_encoder_set_keep_opaque_alpha(null, true),
                 GAMUT_STATUS_NULL_ARGUMENT
             );
             assert_eq!(

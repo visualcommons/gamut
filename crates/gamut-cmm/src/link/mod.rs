@@ -118,11 +118,14 @@ fn check_pcs(profile: &IccProfile) -> Result<()> {
 
 /// The shared tail of [`device_to_pcs`]/[`pcs_to_device`]: LUT tag if any (with the intent
 /// fallback already applied by the caller), else the shaper set, else the appropriate error.
+/// `prefer_cicp` reaches only the shaper set's tone curves (`TransformOptions::
+/// prefer_cicp_transfer`): a LUT tag's curves are not the profile's transfer function.
 fn dispatch(
     profile: &IccProfile,
     intent: RenderingIntent,
     table: &[KnownTag; 4],
     direction: Direction,
+    prefer_cicp: bool,
 ) -> Result<Pipeline> {
     if let Some((tag, data)) = select_lut_tag(profile, table, intent) {
         let pcs = profile.header.pcs;
@@ -134,10 +137,18 @@ fn dispatch(
     }
     check_pcs(profile)?;
     match (profile.header.data_color_space, direction) {
-        (ColorSpace::Rgb, Direction::DeviceToPcs) => shaper::rgb_device_to_pcs(profile),
-        (ColorSpace::Rgb, Direction::PcsToDevice) => shaper::rgb_pcs_to_device(profile),
-        (ColorSpace::Gray, Direction::DeviceToPcs) => shaper::gray_device_to_pcs(profile),
-        (ColorSpace::Gray, Direction::PcsToDevice) => shaper::gray_pcs_to_device(profile),
+        (ColorSpace::Rgb, Direction::DeviceToPcs) => {
+            shaper::rgb_device_to_pcs(profile, prefer_cicp)
+        }
+        (ColorSpace::Rgb, Direction::PcsToDevice) => {
+            shaper::rgb_pcs_to_device(profile, prefer_cicp)
+        }
+        (ColorSpace::Gray, Direction::DeviceToPcs) => {
+            shaper::gray_device_to_pcs(profile, prefer_cicp)
+        }
+        (ColorSpace::Gray, Direction::PcsToDevice) => {
+            shaper::gray_pcs_to_device(profile, prefer_cicp)
+        }
         // No LUT tags and no shaper-capable device space: report the intent's primary tag —
         // the first tag the lcms2 dispatch would have looked for.
         _ => Err(CmmError::MissingTag(table[intent_index(intent)].into())),
@@ -170,7 +181,24 @@ fn dispatch(
 /// [`ToneCurve::new`](crate::ToneCurve::new) or [`ClutTable`](crate::ClutTable) construction
 /// error for malformed curve or CLUT data.
 pub fn device_to_pcs(profile: &IccProfile, intent: RenderingIntent) -> Result<Pipeline> {
-    dispatch(profile, intent, &DEVICE_TO_PCS_16, Direction::DeviceToPcs)
+    hop_device_to_pcs(profile, intent, false)
+}
+
+/// [`device_to_pcs`] with the transform-level `prefer_cicp` choice
+/// ([`TransformOptions::prefer_cicp_transfer`](crate::TransformOptions::prefer_cicp_transfer))
+/// applied to a shaper profile's tone curves — the form a transform's chain hops are built by.
+pub(crate) fn hop_device_to_pcs(
+    profile: &IccProfile,
+    intent: RenderingIntent,
+    prefer_cicp: bool,
+) -> Result<Pipeline> {
+    dispatch(
+        profile,
+        intent,
+        &DEVICE_TO_PCS_16,
+        Direction::DeviceToPcs,
+        prefer_cicp,
+    )
 }
 
 /// Builds the decoded-PCS → device half of a conversion for `profile` at `intent`.
@@ -187,7 +215,23 @@ pub fn device_to_pcs(profile: &IccProfile, intent: RenderingIntent) -> Result<Pi
 /// [`CmmError::SingularMatrix`] if the colorant matrix has no finite inverse and
 /// [`CmmError::NonMonotonicCurve`] if a TRC has no functional inverse.
 pub fn pcs_to_device(profile: &IccProfile, intent: RenderingIntent) -> Result<Pipeline> {
-    dispatch(profile, intent, &PCS_TO_DEVICE_16, Direction::PcsToDevice)
+    hop_pcs_to_device(profile, intent, false)
+}
+
+/// [`pcs_to_device`] with the transform-level `prefer_cicp` choice applied, as
+/// [`hop_device_to_pcs`] is to [`device_to_pcs`].
+pub(crate) fn hop_pcs_to_device(
+    profile: &IccProfile,
+    intent: RenderingIntent,
+    prefer_cicp: bool,
+) -> Result<Pipeline> {
+    dispatch(
+        profile,
+        intent,
+        &PCS_TO_DEVICE_16,
+        Direction::PcsToDevice,
+        prefer_cicp,
+    )
 }
 
 /// Builds `profile`'s whole-transform pipeline devicelink-style — lcms2's

@@ -8,8 +8,8 @@
 //! Requires the `third_party/exiv2` + `third_party/expat` submodules and a C++ toolchain.
 
 use gamut_xmp::{
-    DWC_URI_TRAILING_SLASH, Namespace, WellKnownNs, XmpArray, XmpItem, XmpMeta, XmpProperty,
-    XmpSidecar, XmpValue, XmpWriter,
+    DWC_URI_TRAILING_SLASH, Namespace, WellKnownNs, XmpArray, XmpError, XmpItem, XmpMeta,
+    XmpProperty, XmpSidecar, XmpValue, XmpWriter,
 };
 
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -598,4 +598,25 @@ fn gamut_reads_the_sidecar_xmpcore_writes() {
     let parsed = XmpSidecar::read(&reference).expect("gamut reads XMPCore's sidecar");
     assert_eq!(parsed.get_text(DC, "format"), Some("text/plain"));
     assert_eq!(parsed.get_lang_alt(DC, "title", "x-default"), Some("Hello"));
+}
+
+#[test]
+fn xmpcore_rejects_the_catenated_sidecar_gamut_rejects() {
+    // Issue #562: gamut refuses a sidecar holding two packets end to end rather than reading the
+    // first and dropping the second. This pins that the reference engine draws the same line on
+    // the same bytes, so the rejection is parity, not a gamut-only strictness.
+    let mut file = XmpSidecar::write(&one_text(WellKnownNs::Xmp, "Rating", "5"));
+    file.extend_from_slice(&XmpSidecar::write(&one_text(
+        WellKnownNs::Xmp,
+        "CreatorTool",
+        "gamut",
+    )));
+    assert!(
+        exiv2_oracle::validate(&file).is_err(),
+        "exiv2 (Adobe XMPCore) must reject a catenated two-packet sidecar"
+    );
+    assert!(
+        matches!(XmpSidecar::read(&file), Err(XmpError::MultiplePackets(_))),
+        "gamut must reject the same bytes"
+    );
 }

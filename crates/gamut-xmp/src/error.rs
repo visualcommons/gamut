@@ -54,6 +54,20 @@ pub enum XmpError {
     /// XML text. A bare `rdf:RDF` document is valid XMP for [`crate::XmpMeta::from_packet`].
     #[error("XMP: sidecar document element is <{0}>, not x:xmpmeta")]
     MissingXmpMeta(String),
+
+    /// The bytes hold more than one `<?xpacket?>` packet; the value is the byte offset, in the
+    /// input as passed (a leading byte-order mark included), of the first `<?xpacket` instruction
+    /// after the first packet's trailer.
+    ///
+    /// Raised by [`crate::XmpPacket::scan`], and so by [`crate::XmpMeta::from_packet`] and
+    /// [`crate::XmpSidecar::read`] (issue #562). Adobe XMP Part 3 asks that a sidecar be written as
+    /// packets "extracted and catenated by a postprocessor", but no part of the specification says
+    /// how a reader reconciles a property two packets both set, so this crate refuses the file
+    /// rather than keep one packet and silently drop the rest — the reference engine (Adobe XMPCore)
+    /// rejects the same bytes. A caller who wants the packets one at a time splits at the offset:
+    /// `bytes[..offset]` is the first packet and `bytes[offset..]` the rest.
+    #[error("XMP: more than one <?xpacket?> packet; the next begins at byte {0}")]
+    MultiplePackets(usize),
 }
 
 /// A specialized [`Result`](core::result::Result) for the XMP read path.
@@ -114,6 +128,11 @@ mod tests {
         // fixes it by handing the bytes to `XmpMeta::from_packet` or wrapping them.
         assert!(matches!(
             gamut_core::Error::from(XmpError::MissingXmpMeta("RDF".into())),
+            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
+        ));
+        // A catenation is malformed input the caller can split, not an unimplemented feature.
+        assert!(matches!(
+            gamut_core::Error::from(XmpError::MultiplePackets(42)),
             gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }

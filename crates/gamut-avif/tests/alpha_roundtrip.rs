@@ -14,7 +14,7 @@
 
 use gamut_avif::{AlphaMode, AvifContainer, AvifEncoder, AvifItem, ChromaFormat};
 use gamut_color::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
-use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgba8};
+use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgb16, Rgba8, Rgba16};
 
 const W: u32 = 34;
 const H: u32 = 18;
@@ -183,6 +183,111 @@ fn premultiplication_is_declared_only_when_asked() {
             .image()
             .is_premultiplied(1)
     );
+}
+
+/// [`source_rgba`] with every alpha sample fully opaque. The colour still varies, so an opacity
+/// test that read a colour channel instead of alpha would see non-maximal samples.
+fn opaque_rgba() -> Vec<u8> {
+    let mut px = source_rgba();
+    for alpha in px.iter_mut().skip(3).step_by(4) {
+        *alpha = u8::MAX;
+    }
+    px
+}
+
+/// The 16-bit twin of [`opaque_rgba`], each byte widened by replication.
+fn opaque_rgba16() -> Vec<u16> {
+    opaque_rgba()
+        .iter()
+        .map(|&s| u16::from(s) * 0x101)
+        .collect()
+}
+
+/// Every pixel's first three samples: the colour of an RGBA buffer without its alpha.
+fn colour_of<S: Copy>(rgba: &[S]) -> Vec<S> {
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, _]| [r, g, b])
+        .collect()
+}
+
+/// Whether the file's primary item has an alpha auxiliary, as a reader would find it.
+fn has_alpha_auxiliary(avif: &[u8]) -> bool {
+    let container = AvifContainer::parse(avif).expect("our own reader parses the file");
+    let img = container.image();
+    img.alpha_auxiliary_of(img.primary_item().id()).is_some()
+}
+
+#[test]
+fn an_opaque_rgba8_is_coded_as_its_rgb8() {
+    let px = opaque_rgba();
+    let rgb = colour_of(&px);
+    // Lossy too, so the RGB path's 4:2:0 — which the RGBA path does not honour — is reached; and
+    // a premultiplying mode, which on opaque pixels changes nothing and so declares nothing.
+    for encoder in [
+        AvifEncoder::new(),
+        AvifEncoder::lossy(60),
+        AvifEncoder::new().with_alpha_mode(AlphaMode::PremultiplyOnEncode),
+    ] {
+        let from_rgba = encoder
+            .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+            .expect("encode RGBA");
+        let from_rgb = encoder
+            .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, DIMS).unwrap())
+            .expect("encode RGB");
+        assert_eq!(from_rgba, from_rgb, "{encoder:?}");
+    }
+}
+
+#[test]
+fn an_opaque_rgba16_is_coded_as_its_rgb16() {
+    let px = opaque_rgba16();
+    let rgb = colour_of(&px);
+    let encoder = AvifEncoder::new();
+    let from_rgba = encoder
+        .encode_to_vec(ImageRef::<Rgba16>::new(&px, DIMS).unwrap())
+        .expect("encode RGBA");
+    let from_rgb = encoder
+        .encode_to_vec(ImageRef::<Rgb16>::new(&rgb, DIMS).unwrap())
+        .expect("encode RGB");
+    assert_eq!(from_rgba, from_rgb);
+}
+
+#[test]
+fn one_non_opaque_alpha_sample_keeps_the_alpha_auxiliary() {
+    // The last pixel, so a scan that stopped early would miss it; one code below the maximum, so
+    // the test is opacity and not merely transparency.
+    let mut px = opaque_rgba();
+    let last = px.len() - 1;
+    px[last] = u8::MAX - 1;
+    let avif = AvifEncoder::new()
+        .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+        .expect("encode");
+    assert!(has_alpha_auxiliary(&avif));
+}
+
+#[test]
+fn a_16_bit_alpha_below_full_scale_keeps_the_alpha_auxiliary() {
+    // 65534 truncates to the 12-bit maximum, so the *coded* alpha is opaque — but opacity is
+    // judged on the caller's samples, and the caller's are not all opaque.
+    let mut px = opaque_rgba16();
+    let last = px.len() - 1;
+    px[last] = u16::MAX - 1;
+    let avif = AvifEncoder::new()
+        .encode_to_vec(ImageRef::<Rgba16>::new(&px, DIMS).unwrap())
+        .expect("encode");
+    assert!(has_alpha_auxiliary(&avif));
+}
+
+#[test]
+fn keep_opaque_alpha_keeps_the_alpha_auxiliary_of_an_opaque_rgba8() {
+    let px = opaque_rgba();
+    let avif = AvifEncoder::new()
+        .with_keep_opaque_alpha(true)
+        .encode_to_vec(ImageRef::<Rgba8>::new(&px, DIMS).unwrap())
+        .expect("encode");
+    assert!(has_alpha_auxiliary(&avif));
 }
 
 #[test]

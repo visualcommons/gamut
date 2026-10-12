@@ -98,7 +98,8 @@ impl AvifImage {
     /// or — for the generic structural brand `mif1` — when the primary item carries an `av1C`
     /// AV1 configuration. The image-*sequence* brand (`avis`) is out of scope and is not treated
     /// as a still here, but a valid still-image `meta` is not rejected for carrying one alongside
-    /// `mif1` ([`gamut_isobmff::read`] already rejects track files).
+    /// `mif1` ([`gamut_isobmff::read`] skips a track beside `meta` and refuses a sequence-only
+    /// file).
     #[must_use]
     pub fn is_av1_still(&self) -> bool {
         let has_av1_brand = core::iter::once(&self.inner.major_brand)

@@ -267,23 +267,19 @@ impl ExifReader {
             }
             (None, _) => None,
         };
-        // The JPEGInterchangeFormat offset is structural — the bytes are captured above and the
-        // writer re-synthesises the offset — so drop it from the stored directory (mirroring how the
-        // sub-IFD pointer tags are stripped), leaving a value the model can't carry stale.
+        // The JPEGInterchangeFormat offset is structural — an address into the source blob, not a
+        // property of the thumbnail — so it never enters the model, whatever became of the bytes
+        // (mirroring how the sub-IFD pointer tags are stripped, and `Thumbnail::from_jpeg`, which
+        // never stores one). When bytes were read the writer re-synthesises the offset; when they
+        // were not (OutOfBounds, ThumbnailLengthMissing — both named in the report above) there is
+        // nothing to address, so `to_bytes` emits no pointer rather than one the report already
+        // says leads nowhere (#548). `JPEGInterchangeFormatLength` stays: it addresses nothing on
+        // its own, and the reader ignores it without an offset.
         //
-        // The removal is conditioned on bytes having been read, which is #548: when `jpeg` is
-        // `None` the pointer survives into the model and `to_bytes` re-emits it, so the emitted
-        // blob claims a thumbnail the report says was dropped. #548 names only the OutOfBounds
-        // case; the ThumbnailLengthMissing arm above is a SECOND instance of it. What separates
-        // them is not that a strict parse of the re-emitted blob fails — it fails for BOTH, since
-        // an out-of-bounds offset survives the round trip just as an unsized one does — but that
-        // the OutOfBounds instance is pre-existing (`master` already rejects it strictly) while
-        // this one is created by adding the strict arm. Fixing the condition is a
-        // writer behaviour change and belongs to #548, not here.
+        // Removing unconditionally deletes the former `if jpeg.is_some()` guard and with it that
+        // site's two condition mutants; the tests pinning the drop now kill nothing there.
         let mut ifd = ifd;
-        if jpeg.is_some() {
-            ifd.remove(ptr);
-        }
+        ifd.remove(ptr);
         Ok(Thumbnail::from_parts(ifd, jpeg))
     }
 }
@@ -608,6 +604,133 @@ mod tests {
             DropReason::Unrepresentable,
             "the clean report must blame nothing on the file"
         );
+    }
+
+    /// A marked blob whose 1st IFD carries the given `(tag, LONG)` fields after `Compression`.
+    fn thumbnail_blob(fields: &[(u16, u32)]) -> Vec<u8> {
+        let fields: Vec<(u16, Value)> = fields
+            .iter()
+            .map(|&(tag, value)| (tag, Value::Long(vec![value])))
+            .collect();
+        thumbnail_blob_of(&fields)
+    }
+
+    /// A marked blob whose 1st IFD carries the given `(tag, value)` fields after `Compression`.
+    fn thumbnail_blob_of(fields: &[(u16, Value)]) -> Vec<u8> {
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        let mut thumb = Ifd::new();
+        thumb.set(ExifTag::Compression.tag_id(), Value::Short(vec![6]));
+        for (tag, value) in fields {
+            thumb.set(*tag, value.clone());
+        }
+        let tiff = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image, thumb],
+        })
+        .expect("write");
+        let mut out = MARKER.to_vec();
+        out.extend(tiff);
+        out
+    }
+
+    /// A thumbnail pointer whose bytes were dropped never reaches the model, so `to_bytes` cannot
+    /// re-emit it (#548).
+    ///
+    /// Before the fix the pointer was stripped only when the bytes were read, so an out-of-bounds
+    /// or unsized range survived into the model and the writer wrote it back verbatim: the emitted
+    /// blob claimed a thumbnail the parse's own report said was dropped, and re-parsing it named
+    /// the same drop again. Both drop reasons are swept — the OutOfBounds case the issue reports
+    /// and the ThumbnailLengthMissing case it shares a cause with.
+    #[test]
+    fn a_dropped_thumbnail_range_leaves_no_pointer_to_re_emit() {
+        let ptr = ExifTag::JpegInterchangeFormat.tag_id();
+        let len = ExifTag::JpegInterchangeFormatLength.tag_id();
+        for (fields, reason) in [
+            (vec![(ptr, 0xFFFF), (len, 16)], DropReason::OutOfBounds),
+            (vec![(ptr, 4)], DropReason::ThumbnailLengthMissing),
+        ] {
+            let (exif, report) = ExifReader::new()
+                .parse_with_report(&thumbnail_blob(&fields))
+                .expect("lenient parse");
+            assert_eq!(report.dropped().len(), 1, "{:?}", report.dropped());
+            assert_eq!(report.dropped()[0].reason(), reason);
+            let thumb = exif.thumbnail().expect("the 1st IFD is still a thumbnail");
+            assert_eq!(thumb.ifd().get(ptr), None, "{reason:?}: pointer kept");
+
+            let emitted = exif.to_bytes().expect("write");
+            let (reparsed, report) = ExifReader::new()
+                .strict(true)
+                .parse_with_report(&emitted)
+                .expect("the emitted blob must be strictly valid");
+            assert!(report.is_empty(), "{reason:?}: {:?}", report.dropped());
+            assert_eq!(reparsed.thumbnail(), exif.thumbnail(), "{reason:?}");
+        }
+    }
+
+    /// A `JPEGInterchangeFormat` that `get_u32` cannot read as one offset never reaches the model
+    /// either, and is not reported as a drop (#548, decision 2).
+    ///
+    /// Such a pointer addresses nothing the reader can follow, so no thumbnail bytes were lost and
+    /// the report stays empty; but before the fix it survived into the model (the strip ran only
+    /// when bytes were read) and `to_bytes` wrote back a pointer field no reader can use. Swept
+    /// over the two ways a value fails `as_u32`: a non-integer type, and an integer type with a
+    /// count other than one.
+    #[test]
+    fn an_unreadable_thumbnail_pointer_is_stripped_without_a_drop() {
+        let ptr = ExifTag::JpegInterchangeFormat.tag_id();
+        let len = ExifTag::JpegInterchangeFormatLength.tag_id();
+        for value in [Value::Ascii("x".into()), Value::Long(vec![4, 8])] {
+            let blob = thumbnail_blob_of(&[(ptr, value.clone()), (len, Value::Long(vec![16]))]);
+            let (exif, report) = ExifReader::new()
+                .parse_with_report(&blob)
+                .expect("lenient parse");
+            assert!(report.is_empty(), "{value:?}: {:?}", report.dropped());
+            let thumb = exif.thumbnail().expect("the 1st IFD is still a thumbnail");
+            assert_eq!(thumb.ifd().get(ptr), None, "{value:?}: pointer kept");
+            assert_eq!(thumb.jpeg(), None, "{value:?}");
+
+            let emitted = exif.to_bytes().expect("write");
+            let (reparsed, report) = ExifReader::new()
+                .strict(true)
+                .parse_with_report(&emitted)
+                .expect("the emitted blob must be strictly valid");
+            assert!(report.is_empty(), "{value:?}: {:?}", report.dropped());
+            assert_eq!(reparsed.thumbnail(), exif.thumbnail(), "{value:?}");
+        }
+    }
+
+    /// The writer's output is unchanged wherever no thumbnail bytes were dropped (#548's
+    /// equivalence sweep): a thumbnail with no JPEG tags, with a lone length, and with a range that
+    /// was read all re-serialise to a fixpoint that carries the same thumbnail model, and a read
+    /// range is re-emitted with its bytes and a pointer that reaches them.
+    #[test]
+    fn a_thumbnail_with_nothing_dropped_round_trips_to_a_fixpoint() {
+        let len = ExifTag::JpegInterchangeFormatLength.tag_id();
+        for blob in [
+            thumbnail_blob(&[]),
+            thumbnail_blob(&[(len, 16)]),
+            deep_blob(),
+        ] {
+            let (exif, report) = ExifReader::new().parse_with_report(&blob).expect("parse");
+            assert!(
+                report
+                    .dropped()
+                    .iter()
+                    .all(|d| d.region() != DroppedRegion::ThumbnailJpeg),
+                "{:?}",
+                report.dropped()
+            );
+            let once = exif.to_bytes().expect("write");
+            let reparsed = ExifReader::new().parse(&once).expect("reparse");
+            assert_eq!(reparsed.thumbnail(), exif.thumbnail());
+            assert_eq!(
+                reparsed.to_bytes().expect("rewrite"),
+                once,
+                "not a fixpoint"
+            );
+        }
     }
 
     /// A failing source is propagated, never reported as a malformed file.

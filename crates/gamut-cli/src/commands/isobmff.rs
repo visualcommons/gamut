@@ -55,10 +55,43 @@ fn inspect(input: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
+/// The image-*sequence* brands: AVIF §6.3's `avis`, and ISO/IEC 23008-12's sequence structural
+/// brand `msf1` with its HEVC sequence brands `hevc`/`hevx` and layered-HEVC sequence brands
+/// `hevm`/`hevs` (Annex B; their image-item twins `heim`/`heis` are kept). Each one promises a
+/// track, and the remuxed copy carries none.
+const SEQUENCE_BRANDS: [[u8; 4]; 6] = [*b"avis", *b"msf1", *b"hevc", *b"hevx", *b"hevm", *b"hevs"];
+
+/// Rebrands a model read from a file that may carry an image-sequence track as the still-only file
+/// `write` produces from it.
+///
+/// `read` skips a top-level `moov` beside the `meta` still and `write` never emits one, so the
+/// remuxed copy has no track; leaving `avis`/`msf1` in its `ftyp` would claim one (AVIF §7). The
+/// sequence brands are dropped from the compatible list, and a sequence major brand is replaced by
+/// the first compatible brand left. `avio` is kept: AVIF §6.2 constrains the image items by it too.
+///
+/// # Errors
+///
+/// [`gamut::core::Error::Unsupported`] when the major brand is a sequence brand and no other
+/// compatible brand is left to stand in for it.
+fn drop_sequence_brands(model: &mut IsoBmffImage) -> Result<(), CliError> {
+    model
+        .compatible_brands
+        .retain(|brand| !SEQUENCE_BRANDS.contains(brand));
+    if SEQUENCE_BRANDS.contains(&model.major_brand) {
+        model.major_brand = *model.compatible_brands.first().ok_or(CliError::Codec(
+            gamut::core::Error::Unsupported(
+                "isobmff remux: only image-sequence brands name this file, and the copy has no track",
+            ),
+        ))?;
+    }
+    Ok(())
+}
+
 /// Parses `input`, re-serialises it to `output`, and verifies the read→write round-trip.
 fn remux(input: &Path, output: &Path) -> Result<(), CliError> {
     let data = read_file(input)?;
-    let model = isobmff::read(&data)?;
+    let mut model = isobmff::read(&data)?;
+    drop_sequence_brands(&mut model)?;
     let bytes = isobmff::write(&model)?;
     // Round-trip guard: re-parsing our own output must reproduce the model exactly.
     if isobmff::read(&bytes)? != model {
@@ -550,6 +583,38 @@ mod tests {
         let bytes = isobmff::write(&img).expect("write");
         let back = isobmff::read(&bytes).expect("read");
         assert_eq!(back, img);
+    }
+
+    #[test]
+    fn remux_rebrands_an_avis_model_as_a_still() {
+        // The brand list of a libavif `avis` file: the major brand and two compatible brands
+        // promise a track that the remuxed copy does not carry.
+        let mut model = demo_image().expect("demo image builds");
+        model.major_brand = *b"avis";
+        model.compatible_brands = vec![*b"avif", *b"avis", *b"avio", *b"msf1", *b"miaf"];
+        drop_sequence_brands(&mut model).expect("a still brand is left");
+        assert_eq!(model.major_brand, *b"avif");
+        assert_eq!(model.compatible_brands, [*b"avif", *b"avio", *b"miaf"]);
+    }
+
+    #[test]
+    fn remux_drops_each_heif_sequence_brand() {
+        let mut model = demo_image().expect("demo image builds");
+        model.major_brand = *b"heic";
+        model.compatible_brands = vec![
+            *b"hevc", *b"mif1", *b"hevx", *b"heim", *b"hevm", *b"heis", *b"hevs",
+        ];
+        drop_sequence_brands(&mut model).expect("the major brand is a still brand");
+        assert_eq!(model.major_brand, *b"heic");
+        assert_eq!(model.compatible_brands, [*b"mif1", *b"heim", *b"heis"]);
+    }
+
+    #[test]
+    fn remux_refuses_a_model_named_only_by_sequence_brands() {
+        let mut model = demo_image().expect("demo image builds");
+        model.major_brand = *b"msf1";
+        model.compatible_brands = vec![*b"msf1"];
+        assert!(drop_sequence_brands(&mut model).is_err());
     }
 
     #[test]

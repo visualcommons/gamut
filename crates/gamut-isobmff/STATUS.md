@@ -44,8 +44,9 @@ The read/write spine is exercised end-to-end — without a working codec, since 
 is opaque — by the `gamut isobmff` CLI (`inspect`/`remux`/`build`) and two oracle tests:
 
 - **`inspect`** parses real third-party `.avif`/`.heic` and prints the box structure; across the
-  libavif conformance corpus it reads every still image, including alternate-size boxes, while
-  rejecting out-of-scope image sequences and malformed input with a typed error.
+  libavif conformance corpus it reads every still image, including alternate-size boxes and the
+  `meta` primary still of an `avis` sequence (its `moov` skipped, #646), while rejecting a
+  sequence-only file and malformed input with a typed error.
 - **`remux`** re-serialises a container and re-parses it, verifying `read(&write) == model` on
   foreign files; `gamut-avif/tests/remux_roundtrip.rs` additionally confirms libavif decodes the
   re-muxed container to **pixel-identical** output (the coded payload survives verbatim).
@@ -88,7 +89,9 @@ with `mdat` before `meta`, a box between `mdat` and `meta` is `Trailing` and is 
 after `meta` and `mdat`. `TopLevelPosition` is `#[non_exhaustive]` so a finer
 position can be added later without a major bump. Files this crate writes round-trip
 byte-identically. `write` rejects a top-level box typed `ftyp`/`meta`/`mdat` (the model emits
-those itself), `moov`/`trak` (image sequences, `Unsupported` as on read), one whose `user_type`
+those itself), `moov`/`trak` (image sequences, `Unsupported`: a track's chunk offsets address the
+source file's `mdat`, which `write` lays out afresh, so `read` skips one and `write` refuses one),
+one whose `user_type`
 does not pair with the `uuid` type, one whose complete box (header included) does not fit the
 32-bit size field, or a list that interleaves positions (an `AfterFtyp` box after a `Trailing`
 one) — the file holds the groups in order, so `read` could not give the interleaved order back;
@@ -122,8 +125,10 @@ to exactly one `Segment` — a top-level box, an appended foreign stream from a 
 trailer — and `walk_meta_children` does the same one level down for boxes `read` does not consume.
 It stops on exactly `read`'s rules, so the accounting walk and the semantic parse cannot disagree
 about where the primary stream ends. It is deliberately not folded into `read`, which is strictly
-stricter (it rejects `moov`/`trak` where it meets them); the two are documented together in
-`src/segments.rs`.
+stricter (it requires and parses `meta`, refusing a sequence-only file); the two are documented
+together in `src/segments.rs`. A sequence track's `moov` beside the still is the one top-level box
+`read` neither parses nor retains (#646), so this walk is the only place its bytes are accounted
+for, as a plain `Box` segment.
 
 `BoxReader` and `RawBox` remain re-exported from the crate root so a consumer can account for
 something the shared walk does not model: `RawBox::offset` is the absolute header offset within
@@ -153,8 +158,12 @@ writer's `BoxBuilder` stay crate-private. Additive (semver-minor).
 ## Likely out of scope (rejected with a typed error; revisited only if the charter changes)
 
 - **Image sequences/tracks** — `moov`/`trak`/`mdia`/`stbl`, the `av01`/`hvc1` sample entries, the
-  `avis` brand (gamut-avif M6). The workspace charter forbids inter-frame/sequence coding; `read`
-  rejects a `moov`/`trak` in the *primary* stream as `Unsupported`. (A `moov` inside an appended
+  `avis` brand (gamut-avif M6). The workspace charter forbids inter-frame/sequence coding, so the
+  track is never parsed. Since #646 a top-level `moov`/`trak` beside a `meta` is skipped — the
+  `meta` primary still reads, and `walk_segments` accounts the track as one opaque box — and
+  only a sequence-only file (a track, no `meta`) is `Unsupported` ("sequence-only file … no still
+  item"). The track is not kept in `top_level_boxes`: its `stco`/`co64` chunk offsets address the
+  source `mdat`, so a verbatim copy cannot round-trip through `write`. (A `moov` inside an appended
   motion-photo stream — everything past a second top-level `ftyp` — is never reached, by design.)
 - **Item protection** — `ipro`/`sinf`, `infe` `item_protection_index != 0` (DRM machinery).
 - **External data references** — `dinf`/`dref`, `iloc` `data_reference_index != 0` (payloads in

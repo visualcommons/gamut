@@ -6,6 +6,7 @@ mod common;
 use common::{
     av01_item, bx, cat, empty_iprp, ftyp, full, hdlr, iinf_v0, image, infe_v2, meta, pitm_v0,
 };
+use gamut_core::ErrorKind;
 use gamut_isobmff::read;
 
 /// A valid single-item AVIF-style file (written by this crate) to corrupt in place.
@@ -60,11 +61,6 @@ fn missing_mdat_box_is_tolerated() {
     let p = find(&f, b"mdat");
     f[p..p + 4].copy_from_slice(b"free");
     assert_eq!(read(&f).unwrap().items[0].payload, vec![0xAB; 8]);
-}
-
-#[test]
-fn tracks_are_unsupported() {
-    assert_read_fails(&[0, 0, 0, 8, b'm', b'o', b'o', b'v'], "sequences");
 }
 
 #[test]
@@ -309,11 +305,11 @@ fn second_ftyp() -> Vec<u8> {
 fn appended_motion_photo_stream_is_ignored() {
     // A Samsung-style motion photo: the valid still image, then a *second* ftyp, a foreign moov,
     // and trailing garbage. The primary-stream walk stops at the second ftyp, so the model is
-    // byte-for-byte identical to the bare file — the moov is never seen (and never rejected).
+    // byte-for-byte identical to the bare file — the moov and the garbage are never walked.
     let bare = valid();
     let mut motion = bare.clone();
     motion.extend_from_slice(&second_ftyp());
-    motion.extend_from_slice(&bx(b"moov", &[0u8; 16])); // would be Unsupported if walked
+    motion.extend_from_slice(&bx(b"moov", &[0u8; 16]));
     motion.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // non-box garbage
     assert_eq!(read(&motion).unwrap(), read(&bare).unwrap());
 }
@@ -350,11 +346,42 @@ fn malformed_box_after_meta_without_ftyp_still_errors() {
     );
 }
 
+// ---- sequence tracks beside the still (issue #646) ------------------------------------------
+
+/// The `meta` of a one-item still with no payload (no `iloc`), so boxes can be placed anywhere
+/// around it without shifting an absolute extent offset.
+fn still_meta() -> Vec<u8> {
+    meta(&[
+        hdlr(),
+        pitm_v0(1),
+        iinf_v0(&[infe_v2(1, b"av01")]),
+        empty_iprp(),
+    ])
+}
+
 #[test]
-fn primary_stream_moov_is_still_unsupported() {
-    // A `moov` in the primary stream (no preceding second ftyp) stays rejected — genuine image
-    // sequences are out of scope.
-    assert_read_fails(&cat(&[ftyp(), bx(b"moov", &[0u8; 16])]), "sequences");
+fn track_beside_meta_is_skipped_not_retained() {
+    // An `avis`-shaped file: ftyp, meta, then the sequence track, then mdat. The still reads, and
+    // the track is neither an error nor a retained top-level box. Each alternative of the
+    // `moov | trak` arm is asserted on its own: a dropped alternative would retain that box.
+    for ty in [b"moov", b"trak"] {
+        let f = cat(&[ftyp(), still_meta(), bx(ty, &[0u8; 16]), bx(b"mdat", &[])]);
+        let model = read(&f).unwrap();
+        assert_eq!(model.primary_item_id, 1, "{ty:?}");
+        assert!(model.top_level_boxes.is_empty(), "{ty:?} retained");
+    }
+}
+
+#[test]
+fn track_without_meta_is_a_sequence_only_error() {
+    // A track and no `meta`: a sequence with no still item, refused as Unsupported with a specific
+    // message rather than the generic InvalidInput "missing meta" a file with neither carries.
+    for ty in [b"moov", b"trak"] {
+        let e = read(&cat(&[ftyp(), bx(ty, &[0u8; 16])])).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Unsupported, "{ty:?}");
+        assert!(e.to_string().contains("sequence-only"), "{ty:?}: {e}");
+    }
+    assert_eq!(read(&ftyp()).unwrap_err().kind(), ErrorKind::InvalidInput);
 }
 
 #[test]
