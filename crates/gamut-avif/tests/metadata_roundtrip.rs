@@ -13,9 +13,10 @@
 //! `colour_type` `prof` — ISO/IEC 23008-12; Exif and XMP items and their `cdsc` reference — AVIF
 //! v1.2.0 §9.1.2 and ISO/IEC 23008-12.
 
-use gamut_avif::{AvifContainer, AvifEncoder};
+use gamut_avif::{AvifContainer, AvifEncoder, ContentLightLevel, MasteringDisplay, Rotation};
 use gamut_color::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use gamut_isobmff::PropertyKind;
 
 const W: u32 = 34;
 const H: u32 = 18;
@@ -148,6 +149,72 @@ fn libavif_reads_back_the_exif_and_xmp_items() {
     // the framing: get the prefix wrong and this is off by four bytes.
     assert_eq!(s.exif, exif, "Exif item framing agrees with libavif");
     assert_eq!(s.xmp, xmp, "XMP packet is carried verbatim");
+}
+
+/// `MaxCLL` and `MaxPALL` differ, so a swapped pair cannot pass for the right one.
+const CLLI: ContentLightLevel = ContentLightLevel {
+    max_content_light_level: 1000,
+    max_pic_average_light_level: 400,
+};
+
+/// Every field differs from every other, so a transposed primary pair or swapped luminance bound
+/// cannot reproduce the expected value.
+const MDCV: MasteringDisplay = MasteringDisplay {
+    display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
+    white_point: [15635, 16450],
+    max_display_mastering_luminance: 10_000_000,
+    min_display_mastering_luminance: 50,
+};
+
+/// A PQ-tagged BT.2020 encoder carrying both HDR properties — the configuration they describe.
+fn hdr_encoder() -> AvifEncoder {
+    AvifEncoder::lossless()
+        .with_primaries(ColourPrimaries::Bt2020)
+        .with_transfer(TransferCharacteristics::Pq)
+        .with_content_light_level(CLLI)
+        .with_mastering_display(MDCV)
+}
+
+#[test]
+fn libavif_reads_back_the_content_light_level() {
+    let s = libavif_oracle::introspect(&encode(hdr_encoder())).expect("libavif parses the container");
+    assert_eq!(s.clli, [1000, 400], "libavif reads MaxCLL/MaxPALL as written");
+}
+
+#[test]
+fn libavif_accepts_the_mastering_display_property() {
+    // The pinned libavif skips `mdcv` rather than reading it, so value agreement is not checkable
+    // here (gamut-heic's `oracle_isobmff_mdcv` checks the box layout against libheif). What it can
+    // check is placement: libavif ignores an item citing an *essential* property it does not
+    // support, so a wrongly-essential `mdcv` would leave it with no primary image to parse.
+    let avif = encode(AvifEncoder::new().with_mastering_display(MDCV));
+    let s = libavif_oracle::introspect(&avif).expect("libavif parses the container");
+    assert_eq!((s.width, s.height), (W, H));
+}
+
+#[test]
+fn the_crate_reads_back_the_hdr_properties_as_descriptive() {
+    // A rotation as well, so the order of descriptive before transformative properties is visible.
+    let avif = encode(hdr_encoder().with_rotation(Rotation::Ccw90));
+    let container = AvifContainer::parse(&avif).expect("gamut-avif parses its own output");
+    let primary = container.image().primary_item();
+
+    assert_eq!(primary.content_light_level(), Some(CLLI));
+    assert_eq!(primary.mastering_display(), Some(MDCV));
+
+    let properties = &primary.as_isobmff_item().properties;
+    let position = |want: fn(&PropertyKind) -> bool| {
+        properties
+            .iter()
+            .position(|p| want(&p.kind))
+            .expect("property is associated")
+    };
+    let clli = position(|k| matches!(k, PropertyKind::ContentLightLevel { .. }));
+    let mdcv = position(|k| matches!(k, PropertyKind::MasteringDisplayColourVolume { .. }));
+    let irot = position(|k| matches!(k, PropertyKind::Rotation(_)));
+    assert!(!properties[clli].essential, "clli is descriptive");
+    assert!(!properties[mdcv].essential, "mdcv is descriptive");
+    assert!(clli < irot && mdcv < irot, "descriptive properties precede transformative ones");
 }
 
 #[test]

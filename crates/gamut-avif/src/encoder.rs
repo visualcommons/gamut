@@ -29,7 +29,7 @@ use crate::c2pa::{
 use crate::clean_alpha::clean_rgba;
 use crate::config::{AvifConfig, AvifMode};
 use crate::container::AvifContainer;
-use crate::image::ALPHA_AUX_URN;
+use crate::image::{ALPHA_AUX_URN, ContentLightLevel, MasteringDisplay};
 use crate::transform::{Mirror, Rotation};
 
 /// What the encoder writes into the store slot of the C2PA `uuid` box it emits.
@@ -181,6 +181,11 @@ pub struct AvifEncoder {
     transform: ImageTransform,
     /// An embedded ICC profile, carried verbatim into a `colr` box of type `prof`.
     icc: Option<Vec<u8>>,
+    /// HDR content light level, written as a `clli` property of the primary colour item.
+    content_light_level: Option<ContentLightLevel>,
+    /// HDR mastering display colour volume, written as an `mdcv` property of the primary colour
+    /// item.
+    mastering_display: Option<MasteringDisplay>,
     /// An Exif payload — a bare TIFF stream — carried verbatim into an `Exif` metadata item.
     exif: Option<Vec<u8>>,
     /// An XMP packet, carried verbatim into a `mime` metadata item.
@@ -218,6 +223,8 @@ impl std::fmt::Debug for AvifEncoder {
             // Payload *lengths*, not bytes: a profile is kilobytes of binary and would swamp the
             // output, while its presence and size are what a caller debugging a build wants.
             .field("icc", &self.icc.as_ref().map(Vec::len))
+            .field("content_light_level", &self.content_light_level)
+            .field("mastering_display", &self.mastering_display)
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("c2pa", &self.c2pa)
@@ -259,6 +266,8 @@ impl AvifEncoder {
             config: AvifConfig::default(),
             transform: ImageTransform::default(),
             icc: None,
+            content_light_level: None,
+            mastering_display: None,
             exif: None,
             xmp: None,
             c2pa: None,
@@ -289,6 +298,8 @@ impl AvifEncoder {
             },
             transform: ImageTransform::default(),
             icc: None,
+            content_light_level: None,
+            mastering_display: None,
             exif: None,
             xmp: None,
             c2pa: None,
@@ -367,8 +378,10 @@ impl AvifEncoder {
     /// A tag, not a conversion, exactly as [`with_primaries`](Self::with_primaries) is, and likewise
     /// honoured on the lossless path. Selecting [`TransferCharacteristics::Pq`] or
     /// [`TransferCharacteristics::Hlg`] *labels* samples the caller has already encoded that way; it
-    /// does not by itself produce a complete HDR image, because the HDR metadata properties
-    /// (`mdcv`/`clli`) are still deferred (`STATUS.md`).
+    /// does not by itself describe the HDR content: pair it with
+    /// [`with_content_light_level`](Self::with_content_light_level) and
+    /// [`with_mastering_display`](Self::with_mastering_display) for the `clli`/`mdcv` metadata a
+    /// display tone-maps against.
     ///
     /// # Interaction with the AV1 sRGB shortcut
     ///
@@ -844,6 +857,39 @@ impl AvifEncoder {
         self
     }
 
+    /// Attaches HDR **content light level** information — `MaxCLL`/`MaxPALL` in cd/m² — as a
+    /// `clli` property of the primary colour item (ISO/IEC 14496-12 `ContentLightLevelBox`, listed
+    /// for AVIF in AVIF v1.2.0 §9.1.2; semantics from the HEVC content light level SEI, ISO/IEC
+    /// 23008-2 §D.3.35).
+    ///
+    /// The property is descriptive, so it is marked **non-essential**: a reader that does not
+    /// understand it still decodes the image (MIAF §7.3.6 / ISO/IEC 23008-12 §9.3.1). It is
+    /// written only on the
+    /// colour item, never on the alpha auxiliary. The values are carried verbatim and not checked
+    /// against the transfer function — a `clli` describes the content, and is meaningful with
+    /// [`TransferCharacteristics::Pq`] or [`TransferCharacteristics::Hlg`]
+    /// ([`with_transfer`](Self::with_transfer)). Calling this twice keeps the **last** value.
+    #[must_use]
+    pub fn with_content_light_level(mut self, level: ContentLightLevel) -> Self {
+        self.content_light_level = Some(level);
+        self
+    }
+
+    /// Attaches HDR **mastering display colour volume** metadata — the SMPTE ST 2086 primaries,
+    /// white point and luminance range of the display the content was graded on — as an `mdcv`
+    /// property of the primary colour item (ISO/IEC 14496-12 `MasteringDisplayColourVolumeBox`,
+    /// field layout per AV1-ISOBMFF §2.3.4).
+    ///
+    /// Like [`with_content_light_level`](Self::with_content_light_level), the property is
+    /// **non-essential**, written only on the colour item, and carried verbatim: the fields are
+    /// the stored integer code points [`MasteringDisplay`] documents, not range-checked. Calling
+    /// this twice keeps the **last** value.
+    #[must_use]
+    pub fn with_mastering_display(mut self, display: MasteringDisplay) -> Self {
+        self.mastering_display = Some(display);
+        self
+    }
+
     /// Attaches Exif metadata, describing the primary image.
     ///
     /// `exif` is a **bare TIFF stream** — a byte-order mark, `42`, and the offset of the first IFD
@@ -1154,6 +1200,30 @@ impl AvifEncoder {
             properties.push(Property {
                 essential: false,
                 kind: PropertyKind::Colour(ColourInformation::UnrestrictedIcc(icc.clone())),
+            });
+        }
+        // The HDR properties are descriptive (AVIF v1.2.0 §9.1.2 lists both), so non-essential, and
+        // sit with the other descriptive properties ahead of the transformative ones. Appended after
+        // the `colr`s for the same reason the ICC one is: an encoder without them keeps its
+        // `ipco`/`ipma` indices.
+        if let Some(level) = self.content_light_level {
+            properties.push(Property {
+                essential: false,
+                kind: PropertyKind::ContentLightLevel {
+                    max_content_light_level: level.max_content_light_level,
+                    max_pic_average_light_level: level.max_pic_average_light_level,
+                },
+            });
+        }
+        if let Some(display) = self.mastering_display {
+            properties.push(Property {
+                essential: false,
+                kind: PropertyKind::MasteringDisplayColourVolume {
+                    display_primaries: display.display_primaries,
+                    white_point: display.white_point,
+                    max_display_mastering_luminance: display.max_display_mastering_luminance,
+                    min_display_mastering_luminance: display.min_display_mastering_luminance,
+                },
             });
         }
         // Transformative properties are essential (MIAF §7.3.6.7); applied irot-then-imir.
