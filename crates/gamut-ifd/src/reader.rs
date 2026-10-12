@@ -902,6 +902,14 @@ mod tests {
         (result, root, fetched)
     }
 
+    /// Drift guard: the public `# Errors` docs of `read_tree`/`resolve_subtree` and
+    /// `SkipReason::OverBudget` state the budget as 65,536, and the mutation gate cannot alter a
+    /// `const`, so this is what keeps a change to `MAX_IFDS` from silently falsifying them.
+    #[test]
+    fn max_subifds_is_the_documented_65_536() {
+        assert_eq!(MAX_SUBIFDS, 65_536);
+    }
+
     /// A pointer array exactly as wide as the walk's budget resolves whole: the budget admits
     /// `MAX_SUBIFDS` directories, not one fewer.
     #[test]
