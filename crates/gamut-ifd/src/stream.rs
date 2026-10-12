@@ -17,6 +17,7 @@
 
 use gamut_core::{Error, Result};
 
+use crate::audit::AuditFinding;
 use crate::reader::{ChainGuard, offset_at, read_header, resolve_pointers_with, u16_at};
 use crate::segment::{Claim, SegmentMap, SpanKind};
 use crate::value::UnknownValue;
@@ -303,7 +304,9 @@ impl<S: ReadAt> IfdReader<S> {
 
     /// Decodes every entry of `raw` into an [`Ifd`] — unknown field types are preserved
     /// verbatim as [`Value::Unknown`] and a duplicate tag keeps the last occurrence, the same
-    /// semantics as the eager readers.
+    /// semantics as the eager readers. The earlier occurrences are dropped without a signal here;
+    /// [`decode_ifd_reporting`](Self::decode_ifd_reporting) returns the same directory and names
+    /// them.
     ///
     /// # Errors
     ///
@@ -311,6 +314,26 @@ impl<S: ReadAt> IfdReader<S> {
     /// or [`Error::Io`] if the source fails.
     pub fn decode_ifd(&mut self, raw: &RawIfd) -> Result<Ifd> {
         self.decode_ifd_inner(raw, None)
+    }
+
+    /// [`decode_ifd`](Self::decode_ifd), plus what it discarded: one
+    /// [`AuditFinding::ShadowedEntry`] per entry the decoded [`Ifd`] does not hold because a later
+    /// entry repeats its tag, in on-disk order. A directory with one entry per tag — every
+    /// conforming one (TIFF 6.0 §2) — reports nothing.
+    ///
+    /// The [`Ifd`] is exactly the one `decode_ifd` returns; only the signal is added. It holds one
+    /// value per tag, so writing it back emits the survivor alone and the findings are the only
+    /// record that the shadowed entries existed (see [`AuditFinding::ShadowedEntry`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_ifd`](Self::decode_ifd): a shadowed entry's value is still decoded, so a
+    /// malformed one fails the directory just as it does there.
+    pub fn decode_ifd_reporting(&mut self, raw: &RawIfd) -> Result<(Ifd, Vec<AuditFinding>)> {
+        let ifd = self.decode_ifd_inner(raw, None)?;
+        let mut findings = Vec::new();
+        report_shadowed(raw, 0, &mut findings);
+        Ok((ifd, findings))
     }
 
     /// Eagerly parses the whole top-level chain — [`read`](crate::read)'s streaming equivalent:
@@ -323,7 +346,7 @@ impl<S: ReadAt> IfdReader<S> {
     /// [`with_layout`](Self::with_layout) reader always has), or [`Error::Io`] if the source
     /// fails.
     pub fn read_file(&mut self) -> Result<TiffFile> {
-        self.read_chain(None)
+        self.read_chain(None, None)
     }
 
     /// [`read_tree`](crate::read_tree)'s streaming equivalent: parses the top-level chain, then
@@ -360,7 +383,7 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// Returns [`Error::InvalidInput`] under the same conditions as [`read_file`](Self::read_file).
     pub fn read_file_audited(&mut self, map: &mut SegmentMap) -> Result<TiffFile> {
-        self.read_chain(Some(map))
+        self.read_chain(Some(map), None)
     }
 
     /// Like `read_ifd` + `decode_ifd` with typed byte-range claims into `map`, mirroring
@@ -377,6 +400,23 @@ impl<S: ReadAt> IfdReader<S> {
         Ok((ifd, raw.next))
     }
 
+    /// [`read_ifd_at_audited`](Self::read_ifd_at_audited) for the [`audit`](crate::audit) walk,
+    /// which also records the directory's shadowed entries into `findings` — at `base` plus their
+    /// offset, so a chain read through a [`Rebased`](crate::Rebased) view reports physical
+    /// positions. Nothing is recorded for a directory that fails to decode.
+    pub(crate) fn read_ifd_at_reporting(
+        &mut self,
+        offset: u64,
+        map: &mut SegmentMap,
+        findings: &mut Vec<AuditFinding>,
+        base: u64,
+    ) -> Result<(Ifd, u64)> {
+        let raw = self.read_ifd(offset)?;
+        let ifd = self.decode_ifd_inner(&raw, Some(map))?;
+        report_shadowed(&raw, base, findings);
+        Ok((ifd, raw.next))
+    }
+
     /// The underlying source — how a codec reads its strip/tile/blob bytes (which this crate
     /// never interprets) through the same handle it parses structure with.
     pub fn source_mut(&mut self) -> &mut S {
@@ -389,9 +429,14 @@ impl<S: ReadAt> IfdReader<S> {
         self.source
     }
 
-    /// The eager top-level walk behind [`read_file`](Self::read_file) and its audited variant
-    /// (header, per-directory body, and value-span claims).
-    fn read_chain(&mut self, mut map: Option<&mut SegmentMap>) -> Result<TiffFile> {
+    /// The eager top-level walk behind [`read_file`](Self::read_file), its audited variant
+    /// (header, per-directory body, and value-span claims), and the [`audit`](crate::audit) walk,
+    /// which also asks for each directory's shadowed entries.
+    pub(crate) fn read_chain(
+        &mut self,
+        mut map: Option<&mut SegmentMap>,
+        mut findings: Option<&mut Vec<AuditFinding>>,
+    ) -> Result<TiffFile> {
         if let Some(m) = map.as_deref_mut() {
             m.claim(
                 0,
@@ -407,6 +452,9 @@ impl<S: ReadAt> IfdReader<S> {
             guard.admit(offset)?;
             let raw = self.read_ifd(offset)?;
             let ifd = self.decode_ifd_inner(&raw, map.as_deref_mut())?;
+            if let Some(sink) = findings.as_deref_mut() {
+                report_shadowed(&raw, 0, sink);
+            }
             ifds.push(ifd);
             offset = raw.next;
         }
@@ -525,6 +573,27 @@ impl<S: ReadAt> IfdReader<S> {
             Variant::Big => self.order.u64(entry.word),
         }
     }
+}
+
+/// Appends an [`AuditFinding::ShadowedEntry`] for every entry of `raw` that a later entry repeats
+/// the tag of — the ones [`Ifd::set`]'s last-wins leaves out of the decoded directory — in
+/// on-disk order, with both offsets shifted by `base`.
+///
+/// One backwards pass over a set of the tags already seen, so a hostile 65 535-entry directory
+/// costs a linear scan rather than a quadratic one.
+fn report_shadowed(raw: &RawIfd, base: u64, findings: &mut Vec<AuditFinding>) {
+    let mut later = std::collections::BTreeSet::new();
+    let start = findings.len();
+    for entry in raw.entries.iter().rev() {
+        if !later.insert(entry.tag) {
+            findings.push(AuditFinding::ShadowedEntry {
+                ifd: base + raw.offset,
+                tag: entry.tag,
+                offset: base + entry.offset,
+            });
+        }
+    }
+    findings[start..].reverse();
 }
 
 /// Iterator over a top-level IFD chain, from [`IfdReader::ifds`]. Yields each directory raw;
@@ -748,6 +817,59 @@ mod tests {
         assert_eq!(ifd.get(256), Some(&Value::Short(vec![2])));
         // The slice reader agrees on last-wins.
         assert_eq!(read(data).expect("read").ifds[0].get_u32(256), Some(2));
+    }
+
+    /// `decode_ifd_reporting` returns `decode_ifd`'s directory and names every entry it shadowed,
+    /// in on-disk order: a tag written three times around another tag shadows its first two.
+    #[test]
+    fn decode_ifd_reporting_names_each_shadowed_entry_in_disk_order() {
+        let data: &[u8] = &[
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD @ 8
+            0x04, 0x00, // entry count = 4
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+            0x00, // @10: tag 256 SHORT = 1
+            0x01, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00,
+            0x00, // @22: tag 257 SHORT = 5
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+            0x00, // @34: tag 256 SHORT = 2
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+            0x00, // @46: tag 256 SHORT = 3
+            0x00, 0x00, 0x00, 0x00, // next IFD = 0
+        ];
+        let mut r = IfdReader::open(data).expect("open");
+        let raw = r.read_ifd(8).expect("read_ifd");
+        let (ifd, findings) = r.decode_ifd_reporting(&raw).expect("decode");
+        assert_eq!(ifd, r.decode_ifd(&raw).expect("decode"));
+        assert_eq!(
+            findings,
+            vec![
+                AuditFinding::ShadowedEntry {
+                    ifd: 8,
+                    tag: 256,
+                    offset: 10,
+                },
+                AuditFinding::ShadowedEntry {
+                    ifd: 8,
+                    tag: 256,
+                    offset: 34,
+                },
+            ]
+        );
+    }
+
+    /// One entry per tag — every conforming directory — reports nothing.
+    #[test]
+    fn decode_ifd_reporting_is_silent_on_a_conforming_directory() {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![1]));
+        ifd.set(258, Value::Short(vec![8, 8, 8]));
+        let bytes = classic_le(vec![ifd.clone()]);
+        let mut r = IfdReader::open(&bytes[..]).expect("open");
+        let raw = r.read_ifd(8).expect("read_ifd");
+        assert_eq!(
+            r.decode_ifd_reporting(&raw).expect("decode"),
+            (ifd, Vec::new())
+        );
     }
 
     #[test]
