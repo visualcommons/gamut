@@ -118,7 +118,8 @@ fn validate(image: &IsoBmffImage) -> Result<()> {
 /// The largest header a top-level box carries: the 8-byte size/type plus a `uuid` box's 16-byte
 /// user type. The 4 GiB bound below applies it to every box type, so a non-`uuid` box is refused
 /// 16 bytes early — a deliberate simplification at an edge no still image approaches.
-const TOP_LEVEL_HEADER_MAX: usize = 24;
+/// [`crate::content_provenance_reserved`] refuses by the same bound before it allocates.
+pub(crate) const TOP_LEVEL_HEADER_MAX: usize = 24;
 
 /// A top-level box must be one the model does not already emit, must pair its `user_type` with the
 /// `uuid` type exactly as [`crate::RawBox`] does, and its complete box (header included) must fit
