@@ -63,6 +63,11 @@
 //! ```
 #![forbid(unsafe_code)]
 
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 // Single canonical paths (the gamut-ifd v1 precedent): the implementation modules are private
 // and the public surface is the crate-root re-export list below. `tags` is the one deliberate
 // exception — a namespaced constants module, mirroring `gamut_ifd::tags`.

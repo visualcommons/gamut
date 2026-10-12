@@ -34,6 +34,12 @@
 //! codestream backend plugs into a format crate — for anyone implementing or adapting a backend.
 #![forbid(unsafe_code)]
 
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them. The
+// README's example encodes AVIF, so it compiles only with that feature.
+#[cfg(all(doctest, feature = "avif"))]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 /// The version of this `gamut` library crate, taken from its `Cargo.toml` at compile time.
 ///
 /// Exposed so tooling (e.g. the `gamut` CLI's `-V` output) can report the resolved library

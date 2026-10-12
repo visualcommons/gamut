@@ -76,16 +76,21 @@ and leaves each entry **raw** (tag, type code, count, and the value/offset word 
 produce identical results — in fact the slice functions *are* thin wrappers over this engine
 (one parser; the robustness corpus drives both entry points as a regression gate).
 
-```rust
+```rust,no_run
 use gamut_ifd::{IfdReader, StreamSource, tags};
 
+# fn demo() -> Result<(), Box<dyn std::error::Error>> {
 let file = std::fs::File::open("shot.nef")?; // 300 MB of RAW; only KBs get read
 let mut reader = IfdReader::open(StreamSource::new(file))?;
 let raw = reader.read_ifd(reader.first_ifd_offset())?; // one directory body
 if let Some(entry) = raw.entry(tags::SUB_IFDS) {
     let raw_ifd_offsets = reader.value(entry)?; // this value's bytes only
+#   let _ = raw_ifd_offsets;
 }
 let whole_tree = reader.read_tree(tags::STANDARD_POINTER_TAGS)?; // == read_tree on the full bytes
+# let _ = whole_tree;
+# Ok(())
+# }
 ```
 
 Codecs that append image data after the stream (strips, tiles, an embedded JPEG) build on `write`'s

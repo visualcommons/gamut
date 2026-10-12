@@ -44,6 +44,11 @@
 //! [`quant`] = quantizer tables + dequant (§7.12), `filter` = in-loop filters (§7.14-§7.17).
 #![forbid(unsafe_code)]
 
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 mod cdf;
 #[cfg(feature = "decode")]
 mod decode;

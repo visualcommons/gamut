@@ -74,6 +74,11 @@
 //!   always serializes. The format's `u32` sizes and offsets cap a serialized profile at 4 GiB.
 #![forbid(unsafe_code)]
 
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 mod builtin;
 mod bytes;
 mod cicp;

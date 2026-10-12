@@ -61,6 +61,7 @@ let img = IsoBmffImage::new(
 );
 let bytes = write(&img)?;
 assert_eq!(read(&bytes)?, img);
+# Ok::<(), gamut_core::Error>(())
 ```
 
 A top-level box the model does not otherwise own — the C2PA `ContentProvenanceBox` (a `uuid` box
@@ -73,8 +74,14 @@ file carrying one round-trips byte-identically:
 ```rust
 use gamut_isobmff::TopLevelBox;
 
+# fn demo(img: gamut_isobmff::IsoBmffImage, manifest_store: Vec<u8>) -> gamut_isobmff::IsoBmffImage {
+# const C2PA_UUID: [u8; 16] = [
+#     0xD8, 0xFE, 0xC3, 0xD6, 0x1B, 0x0E, 0x48, 0x3C, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7E, 0xC4, 0x81,
+# ];
 let c2pa = TopLevelBox::uuid(C2PA_UUID, manifest_store);
 let img = img.with_top_level_boxes(vec![c2pa]);
+# img
+# }
 ```
 
 The payload stays opaque here; locating and bounding the manifest store inside it is

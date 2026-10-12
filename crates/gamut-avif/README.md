@@ -34,7 +34,7 @@ writer + AV1 symbol coder), [`gamut-av1`](../gamut-av1) (the AV1 keyframe encode
 
 ## Usage
 
-```rust
+```rust,no_run
 use gamut_avif::AvifEncoder;
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 
