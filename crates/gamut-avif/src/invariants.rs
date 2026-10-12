@@ -274,13 +274,13 @@ pub fn decoding_stays_within_limits(
         let id = item.id();
         let planar = |l| {
             image
-                .decode_item_planar_with_limits(id, &mut StubDecoder::default(), l)
+                .decode_item_planar_with_limits(id, &mut StubDecoder, l)
                 .map(|f| (f.width(), f.height(), [f.y(), f.cb(), f.cr()].concat()))
         };
         runs_agree_within_limits("planar", id, limits, planar(limits), planar(ceiling))?;
         let rgba8 = |l| {
             image
-                .decode_item_rgba8_with_limits(id, &mut StubDecoder::default(), l)
+                .decode_item_rgba8_with_limits(id, &mut StubDecoder, l)
                 .map(|b| {
                     let samples = b.as_samples().iter().map(|&s| u16::from(s)).collect();
                     (b.width(), b.height(), samples)
@@ -289,7 +289,7 @@ pub fn decoding_stays_within_limits(
         runs_agree_within_limits("rgba8", id, limits, rgba8(limits), rgba8(ceiling))?;
         let rgba16 = |l| {
             image
-                .decode_item_rgba16_with_limits(id, &mut StubDecoder::default(), l)
+                .decode_item_rgba16_with_limits(id, &mut StubDecoder, l)
                 .map(|b| (b.width(), b.height(), b.as_samples().to_vec()))
         };
         runs_agree_within_limits("rgba16", id, limits, rgba16(limits), rgba16(ceiling))?;

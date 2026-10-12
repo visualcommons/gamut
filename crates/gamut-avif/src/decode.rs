@@ -1873,7 +1873,7 @@ mod tests {
             let sizes = |bytes: Vec<u8>| {
                 let image = AvifContainer::parse(&bytes).unwrap().image().clone();
                 let rgba = image
-                    .decode_primary_rgba16_with_limits(&mut StubDecoder::default(), CEILING)
+                    .decode_primary_rgba16_with_limits(&mut StubDecoder, CEILING)
                     .unwrap();
                 (rgba.width(), rgba.height())
             };
