@@ -48,6 +48,7 @@ let filmic = Aces.map(2.5);
 let gamma = |x: f32| x.powf(1.0 / 2.2);
 let mut linear = [0.2_f32, 0.8, 3.0];
 gamma.map_slice(&mut linear);
+# Ok::<(), gamut_core::Error>(())
 ```
 
 ## Status

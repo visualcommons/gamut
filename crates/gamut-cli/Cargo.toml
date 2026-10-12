@@ -19,6 +19,10 @@ workspace = true
 [[bin]]
 name = "gamut"
 path = "src/main.rs"
+# The binary shares its name with the `gamut` library, so documenting both writes the same
+# `target/doc/gamut/` and `cargo doc --workspace` reports an output filename collision. The
+# CLI's surface is its `--help`, not rustdoc.
+doc = false
 
 [dependencies]
 # `all` pulls in the format codecs plus the `primitives` re-exports (color/dsp/bitstream).

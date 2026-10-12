@@ -48,17 +48,21 @@ workspace README's "Scope").
 ```rust
 use gamut_heic::HeifContainer;
 
+# fn demo(bytes: &[u8]) -> gamut_core::Result<()> {
 let container = HeifContainer::parse(bytes)?;
 let image = container.image();
 if image.is_hevc_still() {
     let primary = image.primary_item();
     let dims = primary.dimensions();
     let alpha = image.alpha_auxiliary_of(primary.id());
+#   let _ = (dims, alpha);
 }
 // Byte accounting: nothing is dropped.
 if let Some(appended) = container.appended_stream() { /* opaque motion-photo MP4 */ }
 // C2PA provenance: located, never validated.
 if let Some(store) = container.c2pa() { /* store.bytes, store.range, store.purpose */ }
+# Ok(())
+# }
 ```
 
 Reachable through the umbrella crate's `heic` feature.

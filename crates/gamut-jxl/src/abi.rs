@@ -24,12 +24,12 @@
 //! [`EncodeConfig`] carries a codec id and a `0..=100` quality; [`ImageDesc`] carries the pixel
 //! format, dimensions, coded depth, and plane pointers. That covers the raster, the coded bit depth
 //! and the lossless/lossy target, but **not** JPEG XL's [`Effort`](crate::Effort) dial,
-//! [`ModularMode`](crate::ModularMode) coding-tool selection, [`ColorSpec`](crate::ColorSpec)
-//! signalling or [`Orientation`](crate::Orientation) metadata.
+//! [`ModularMode`] coding-tool selection, [`ColorSpec`]
+//! signalling or [`Orientation`] metadata.
 //! Rather than emit a stream that silently ignores a request, [`AbiEncodeBackend::supports`]
 //! **declines** any job whose colour signalling, orientation or coding tool is non-default. Effort
 //! is a pure speed/density free choice with no effect on decoded pixels, so it is simply not
-//! conveyed and an ABI backend picks its own; a pinned [`ModularMode`](crate::ModularMode) is not
+//! conveyed and an ABI backend picks its own; a pinned [`ModularMode`] is not
 //! in that class — it reshapes the codestream — so it is declined rather than dropped.
 
 use gamut_codec_abi::{

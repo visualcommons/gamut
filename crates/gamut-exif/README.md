@@ -34,11 +34,12 @@ if let Some(gps) = exif.gps() {
     println!("{:?}, {:?}", gps.latitude_deg(), gps.longitude_deg());
 }
 let jpeg = exif.thumbnail_bytes();          // the embedded JPEG thumbnail, if any
+# let _ = jpeg;
 
 let mut edited = exif;
 edited.set_tag(ExifTag::Software, Value::Ascii("gamut".into()));
 let out = edited.to_bytes();                // Exif\0\0 + TIFF, ready to re-embed
-# let _ = (jpeg, out);
+# let _ = out;
 # Ok(())
 # }
 ```

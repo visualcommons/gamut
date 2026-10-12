@@ -223,8 +223,15 @@ impl ExifReader {
     /// `Compression` says: Exif 3.0 §4.6.9.2 Table 21 gives the pair's support level *per
     /// thumbnail-format column* (mandatory under **Compressed**, `N` — not allowed to record —
     /// under all three uncompressed ones); that axis is not the two-valued `Compression` tag, which
-    /// this reader does not consult. Whether it should, and whether the length-only case should be
-    /// rejected for symmetry, is issue #574.
+    /// this reader does not consult.
+    ///
+    /// Both halves are decided, not pending (#574). Conditioning the offset rule on `Compression`
+    /// would leave an uncompressed 1st IFD's offset stripped below with no report entry — a
+    /// discard inside the region the report claims completeness over — or would have to keep the
+    /// pointer, which `to_bytes` then re-emits leading nowhere (#548). Rejecting a lone length in
+    /// strict mode would make strictness a Table 21 support-level check, which this reader is not
+    /// anywhere else (it does not reject a `StripOffsets` under **Compressed**, also `N`), and a
+    /// lone length addresses exactly what a **Compressed** 1st IFD with neither tag does: nothing.
     fn read_thumbnail<S: ReadAt>(
         &self,
         ifd: Ifd,

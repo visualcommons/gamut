@@ -1,12 +1,13 @@
 //! VP8L — the WebP lossless still-image bitstream (RFC 9649 §3).
 //!
 //! The lossless format codes 8-bit ARGB pixels with canonical prefix (Huffman) codes over a small
-//! set of reversible transforms ([`transform`], §3.5), LZ77 backward references ([`lz77`], §3.6),
-//! and a color cache ([`color_cache`], §3.6.3), all read/written with an LSB-first bit stream
-//! ([`bit_io`], §3.3). The component breakdown and milestones live in `../STATUS.md` (sections B-F).
+//! set of reversible transforms (`transform`, §3.5), LZ77 backward references (`lz77`, §3.6),
+//! and a color cache (`color_cache`, §3.6.3), all read/written with an LSB-first bit stream
+//! (`bit_io`, §3.3). The component breakdown and milestones live in `../STATUS.md` (sections B-F).
 //!
 //! The full lossless path is implemented: [`decoder::decode`] reads any conformant VP8L stream and
-//! [`encoder::encode`] emits a bit-exact-lossless one. Each module cites the spec section it covers;
+//! the crate-private `encoder::encode` emits a bit-exact-lossless one. Each module cites the spec
+//! section it covers;
 //! the component breakdown is tracked in `../STATUS.md`.
 
 // Most users want [`WebpEncoder`](crate::WebpEncoder)/[`WebpDecoder`](crate::WebpDecoder); [`decoder`]

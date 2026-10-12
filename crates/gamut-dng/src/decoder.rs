@@ -39,7 +39,7 @@ use crate::{bitpack, compression, lossless_jpeg, tags};
 /// [`trailing_extra`](DecodedDng::trailing_extra): a **duplicated tag** keeps only the last
 /// entry, because the eager [`Ifd`] this is built from is last-wins, and a directory reached
 /// only through a `SubIFDs` pointer that is not the raw IFD and carries no image reaches no
-/// channel (issue #667). [`deconstruct`](crate::deconstruct) still accounts for the bytes.
+/// channel (issue #667). [`deconstruct`](crate::deconstruct()) still accounts for the bytes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawTag {
     /// The TIFF/DNG tag number.
@@ -171,7 +171,7 @@ pub struct DecodedDng {
     pub dng_version: [u8; 4],
     /// Embedded metadata (EXIF sub-IFD + XMP/IPTC/ICC blocks), reconstructed from IFD 0.
     ///
-    /// The `ExifIFD` arrives whole, as the shared [`Exif`](gamut_metadata::exif::Exif) model —
+    /// The `ExifIFD` arrives whole, as the shared [`Exif`] model —
     /// every entry of the directory, not a chosen subset — so nothing in it needs a separate
     /// verbatim escape hatch.
     pub metadata: DngMetadata,
@@ -233,7 +233,7 @@ pub struct DecodedDng {
     ///   image data is no sub-image and reaches no channel — issue #667. (Main-chain pages are
     ///   all covered: this field and [`interior_extra`](Self::interior_extra).)
     ///
-    /// [`deconstruct`](crate::deconstruct) accounts for the bytes in both cases.
+    /// [`deconstruct`](crate::deconstruct()) accounts for the bytes in both cases.
     pub trailing_extra: Vec<RawTag>,
     /// Every field of each **interior main-chain page** — a top-level directory that is neither
     /// IFD 0 nor the last of the chain — that is surfaced nowhere else: not the raw IFD and

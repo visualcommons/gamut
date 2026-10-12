@@ -247,7 +247,12 @@ jobs:
       - name: gamut-ffi seam manifest
         run: mise run check-ffi-seams
       - name: Doctests
+        # Includes every crate README's code blocks: each `lib.rs` pulls its README in under
+        # `#[cfg(doctest)]`, so a README example that stops compiling fails here.
         run: mise run test-doc
+      - name: Rustdoc (warnings as errors)
+        # Broken intra-doc links are rustdoc warnings, which nothing else reads (issue #549).
+        run: mise run doc
       - name: sccache stats
         if: always()
         run: sccache --show-stats

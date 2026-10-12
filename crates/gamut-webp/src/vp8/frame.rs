@@ -1200,7 +1200,7 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> Result<(Vec<u8>, FrameBuff
 ///
 /// Returns [`Error::InvalidInput`] when the coded frame outgrows one of the bitstream's own
 /// partition-size fields: the control partition past
-/// [`MAX_FIRST_PARTITION_SIZE`](super::header::MAX_FIRST_PARTITION_SIZE) (19 bits, RFC 6386 §9.1),
+/// `MAX_FIRST_PARTITION_SIZE` (19 bits, RFC 6386 §9.1),
 /// or a non-final token partition past [`MAX_TOKEN_PARTITION_SIZE`] (24 bits, §9.5). Both are
 /// format ceilings a large, highly detailed frame can genuinely reach — the mode records of a
 /// `B_PRED`-heavy frame are what fill the control partition — and neither can be encoded, so the

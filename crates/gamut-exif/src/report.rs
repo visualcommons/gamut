@@ -147,16 +147,17 @@ pub enum DropReason {
     /// **Conformance** is a separate axis, and it is only what shows the unconditional rule names
     /// nothing it should not: the two tags carry the *same* level in every column, so an offset
     /// with no length is non-conformant under all four and there is no conformant 1st IFD this
-    /// rule wrongly names. Whether to condition it on `Compression` anyway is filed as issue #574,
-    /// and it is a cheap option rather than a costly one — not because
-    /// [`Thumbnail::compression`](crate::Thumbnail::compression) exists (that accessor reads a
-    /// *finished* thumbnail, and the arm #574 would condition returns before one is built) but
-    /// because the 1st IFD is already in scope there and `Compression` is the same one-line
-    /// lookup that reads the offset and the length two lines above. Nothing needs plumbing.
+    /// rule wrongly names. It is deliberately **not** conditioned on `Compression` (#574): the
+    /// reader strips the offset from the model whatever became of the bytes, so an offset it
+    /// declined to name under an uncompressed `Compression` would be a discard with no entry —
+    /// exactly what this report promises never happens inside [`DroppedRegion::ThumbnailJpeg`].
     ///
-    /// The mirror case in that issue — a length with no offset — is genuinely
-    /// asymmetric and not merely unreached: an offset with no length *addresses bytes*, so
-    /// something is lost, while a length with no offset addresses nothing, so nothing is.
+    /// The mirror case — a length with no offset — is genuinely asymmetric and not merely
+    /// unreached: an offset with no length *addresses bytes*, so something is lost, while a
+    /// length with no offset addresses nothing, so nothing is. It is therefore neither reported
+    /// nor rejected in strict mode, whatever `Compression` says (#574); under **Compressed** it is
+    /// as non-conformant as a 1st IFD with neither tag, and strictness rejects unreadable regions,
+    /// not Table 21 support levels.
     ThumbnailLengthMissing = 3,
 }
 

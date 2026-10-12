@@ -159,7 +159,8 @@
 //! ([`AvifEncoder::with_chroma`]); a coded depth of 8, 10 or 12 bits
 //! ([`AvifEncoder::with_bit_depth`]); **alpha** as a monochrome auxiliary item with its own
 //! quality and premultiplication mode ([`AvifEncoder::with_alpha_quality`] /
-//! [`AvifEncoder::with_alpha_mode`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
+//! [`AvifEncoder::with_alpha_mode`]); an encode-**speed** preset trading mode-decision search for
+//! time ([`AvifEncoder::with_speed`], `gamut-av1`'s [`Speed`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
 //! [`AvifEncoder::with_mirror`]); the **colour and metadata surface** — CICP primaries and transfer
 //! ([`AvifEncoder::with_primaries`] / [`AvifEncoder::with_transfer`]), an embedded ICC profile
 //! ([`AvifEncoder::with_icc_profile`]), Exif / XMP items
@@ -173,8 +174,7 @@
 //! **Deferred, planned** (tracked row-by-row against the specs in `STATUS.md`, whose disposition
 //! ledger is the authority): the HDR surface beyond CICP tagging (`mdcv`/`clli` and the rest of
 //! the HDR metadata properties), `grid` / `tmap` (gain-map) / `sato` derivations and the remaining
-//! container transforms on the encode side, layered/progressive still images, encoder speed / rate
-//! control, a **built-in AV1 codestream decoder** behind [`Av1StillDecoder`], and the decoder
+//! container transforms on the encode side, layered/progressive still images, rate control, a **built-in AV1 codestream decoder** behind [`Av1StillDecoder`], and the decoder
 //! backend registry / `gamut-codec-abi` adapter around the seam. On the decoder: `gamut-av1`
 //! ships the pure-Rust one (its default `decode` feature), but today it parses only the header
 //! and tile-framing layer and reconstructs no samples, so gamut-avif does not yet register it as
@@ -183,8 +183,15 @@
 //! so no deferred feature reshapes it.
 //!
 //! **Permanently out of scope** (workspace charter — gamut is image-first): image sequences and
-//! tracks (the `avis`/`avio` brands) and AV1 inter-frame coding.
+//! tracks (the `avis`/`avio` brands) and AV1 inter-frame coding. An `avis` file that also carries
+//! a `meta` primary still item is read for that still, which decodes like any other;
+//! [`AvifContainer::has_image_sequence`] reports the track it leaves undecoded.
 #![forbid(unsafe_code)]
+
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 mod av1c;
 pub mod backend;
@@ -210,7 +217,7 @@ pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodedFrame};
 pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder};
-pub use gamut_av1::{ColorConfig, SequenceHeader, Subsampling};
+pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
 pub use gamut_core::Dimensions;
 pub use image::{
     AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, PixelAspectRatio,

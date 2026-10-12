@@ -1,5 +1,7 @@
-//! Color primitives for the gamut codecs: pixel formats, bit depths, chroma subsampling, the
-//! CICP code points carried in nclx / AV1 sequence headers, and planar buffers.
+//! Color primitives for the gamut codecs: coded-plane bit depth and chroma subsampling, the CICP
+//! code points carried in nclx / AV1 sequence headers, and planar buffers. Interleaved pixel
+//! layouts are not modelled here — that is the [`Pixel`](gamut_core::Pixel) vocabulary in
+//! `gamut-core`.
 //!
 //! The M0 AVIF encoder uses only a narrow slice — 8-bit RGB in, mapped to identity (`mc = 0`)
 //! 4:4:4 planes. The enums here intentionally model the wider spec surface (more formats, bit
@@ -63,6 +65,11 @@
 // `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
 // the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
 #![deny(unsafe_code)]
+
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 pub mod cct;
 pub mod cicp;

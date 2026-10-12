@@ -47,6 +47,11 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 extern crate alloc;
 
 pub mod bridge;

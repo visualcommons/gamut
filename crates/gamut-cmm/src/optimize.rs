@@ -62,7 +62,7 @@ use crate::pipeline::{MAX_CHANNELS, Pipeline, Stage};
 ///
 /// The discriminants are permanent and append-only, and the type is a fieldless `#[repr(u32)]`
 /// enum (the workspace C-portability convention, as on
-/// [`ClutInterpolation`](crate::ClutInterpolation)).
+/// [`ClutInterpolation`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u32)]
 pub enum PipelineOptimization {

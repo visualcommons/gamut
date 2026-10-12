@@ -34,7 +34,8 @@
 //! is structural, not a support level: Exif 3.0 §4.6.9.2 Table 21 states the pair's level only *per
 //! thumbnail-format column*, an axis that is not the two-valued `Compression` tag — which this
 //! reader does not consult, though [`Thumbnail::compression`](thumbnail::Thumbnail::compression)
-//! exposes it to callers (issue #574). It refuses no conformant input: the table gives both tags
+//! exposes it to callers; why it stays unconditional is recorded on
+//! [`DropReason::ThumbnailLengthMissing`]. It refuses no conformant input: the table gives both tags
 //! the same level in all four columns — `M` under **Compressed**, `N` (not allowed to record) under
 //! the three uncompressed ones — so an offset with no length is non-conformant under every one of
 //! them.
@@ -77,6 +78,11 @@
 //! # Ok::<(), gamut_exif::ExifError>(())
 //! ```
 #![forbid(unsafe_code)]
+
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 #[cfg(feature = "describe")]
 pub mod describe;

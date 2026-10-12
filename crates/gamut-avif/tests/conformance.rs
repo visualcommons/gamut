@@ -597,25 +597,31 @@ fn non_essential_transforms_diverge_documented() {
 
 // ---- out-of-scope and hostile shapes ---------------------------------------------------------
 
+/// The libavif `avis` fixtures: each carries a `meta` primary still beside its `moov` track.
+const SEQUENCE_FIXTURES: [&str; 6] = [
+    "colors-animated-8bpc.avif",
+    "colors-animated-8bpc-audio.avif",
+    "colors-animated-8bpc-alpha-exif-xmp.avif",
+    "colors-animated-8bpc-depth-exif-xmp.avif",
+    "colors-animated-12bpc-keyframes-0-2-3.avif",
+    "poc_b_506387278.avif",
+];
+
 #[test]
 fn animated_sequence_parses_its_still_and_accounts_the_track() {
     // Every libavif `avis` fixture carries a `meta` primary still beside its `moov` (AVIF v1.2.0
     // §7). Sequence decode stays out of scope, but the still parses (#646): the track is skipped
     // by the model and accounted as one opaque top-level box, so the segments still tile the file.
-    for name in [
-        "colors-animated-8bpc.avif",
-        "colors-animated-8bpc-audio.avif",
-        "colors-animated-8bpc-alpha-exif-xmp.avif",
-        "colors-animated-8bpc-depth-exif-xmp.avif",
-        "colors-animated-12bpc-keyframes-0-2-3.avif",
-        "poc_b_506387278.avif",
-    ] {
+    for name in SEQUENCE_FIXTURES {
         let data = corpus(name);
         let container = AvifContainer::parse(&data).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             container.image().primary_item().kind().is_av1(),
             "{name}: primary still is an av01 item"
         );
+        // `avis` is not a still brand, but each fixture also lists `avif`/`mif1`, so the
+        // still-image predicate keeps its meaning and holds (#652).
+        assert!(container.image().is_av1_still(), "{name}: is an AV1 still");
         assert!(
             gamut_core::segment::covers(container.segments(), data.len()),
             "{name}: segments tile the file"
@@ -628,6 +634,57 @@ fn animated_sequence_parses_its_still_and_accounts_the_track() {
             "{name}: moov accounted as a top-level box"
         );
     }
+}
+
+#[test]
+fn sequence_primary_still_decodes_bit_exact_against_libavif_primary_item() {
+    // #652: the still an `avis` file carries is the image a still-only reader shows. libavif,
+    // pinned to its primary item (`AVIF_DECODER_SOURCE_PRIMARY_ITEM` — its default would decode
+    // the track), is the oracle; the coded planes must agree exactly.
+    for name in SEQUENCE_FIXTURES {
+        let data = corpus(name);
+        let container = AvifContainer::parse(&data).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let frame = container
+            .image()
+            .decode_item_planar(container.image().primary_item().id(), &mut Dav1dDecoder)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let oracle = libavif_oracle::decode_primary_item(&data)
+            .unwrap_or_else(|e| panic!("{name}: libavif: {e}"));
+        assert_eq!(
+            (frame.width(), frame.height(), frame.bit_depth()),
+            (oracle.width, oracle.height, oracle.bit_depth),
+            "{name}: geometry"
+        );
+        assert_eq!(frame.y(), &oracle.planes[0][..], "{name}: Y");
+        assert_eq!(frame.cb(), &oracle.planes[1][..], "{name}: Cb");
+        assert_eq!(frame.cr(), &oracle.planes[2][..], "{name}: Cr");
+    }
+}
+
+#[test]
+fn has_image_sequence_reports_only_a_primary_stream_moov() {
+    // True for every `avis` fixture's top-level `moov` …
+    for name in SEQUENCE_FIXTURES {
+        let data = corpus(name);
+        assert!(
+            AvifContainer::parse(&data).unwrap().has_image_sequence(),
+            "{name}"
+        );
+    }
+    // … false for a plain still …
+    let still = corpus("io/kodim03_yuv420_8bpc.avif");
+    assert!(!AvifContainer::parse(&still).unwrap().has_image_sequence());
+    // … and false when the only `moov` belongs to an appended foreign stream (a motion-photo
+    // MP4 after a second top-level `ftyp`), which is not this file's image.
+    let mut appended = still;
+    for (ty, len) in [(*b"ftyp", 16u32), (*b"moov", 8)] {
+        appended.extend_from_slice(&len.to_be_bytes());
+        appended.extend_from_slice(&ty);
+        appended.resize(appended.len() + len as usize - 8, 0);
+    }
+    let container = AvifContainer::parse(&appended).unwrap();
+    assert!(container.appended_stream().is_some());
+    assert!(!container.has_image_sequence());
 }
 
 #[test]

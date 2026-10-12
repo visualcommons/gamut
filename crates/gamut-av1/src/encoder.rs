@@ -1,11 +1,13 @@
 //! Top-level: turn planar samples — 4:4:4, 4:2:2 or 4:2:0 colour, or a monochrome luma plane —
 //! into the AV1 temporal unit for an AVIF still image.
 
+use std::num::NonZeroUsize;
+
 use gamut_color::cicp::{ColorRange, MatrixCoefficients};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16};
 use gamut_core::{Error, Result};
 
-use crate::headers::{self, Av1Colour, Av1StillConfig};
+use crate::headers::{self, Av1Colour, Av1StillConfig, TileLayout, Tiling};
 use crate::tile::{FrameEncoder, Reconstruction, Search};
 
 /// How much mode-decision search the lossy intra encoder runs: a preset that trades search for
@@ -58,6 +60,76 @@ pub enum Speed {
 impl Speed {
     /// Every preset, slowest first.
     pub const ALL: &'static [Self] = &[Self::Thorough, Self::Balanced, Self::Fast, Self::Fastest];
+}
+
+/// How an intra encode is carried out, beyond what it codes (the quantizer and the colour
+/// signalling, which every entry point takes directly).
+///
+/// Plain data: build it from [`Default`] and the `with_*` setters, or set the public fields of a
+/// default value. The default reproduces the encoder's output from before the options existed —
+/// the full search, the [`Tiling::default`] layout, and one thread.
+///
+/// ```
+/// use std::num::NonZeroUsize;
+/// use gamut_av1::{EncodeOptions, Speed, Tiling};
+///
+/// let options = EncodeOptions::default()
+///     .with_speed(Speed::Fast)
+///     .with_tiling(Tiling::new(2, 1))
+///     .with_threads(NonZeroUsize::new(4).unwrap());
+/// assert_eq!(options.threads.get(), 4);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct EncodeOptions {
+    /// How much mode-decision search to run (see [`Speed`]).
+    pub speed: Speed,
+    /// The tile layout to code the frame in (see [`Tiling`]). It changes the stream: more tiles
+    /// are more parallelism, for the encoder and for a decoder, at some cost in size.
+    pub tiling: Tiling,
+    /// The most threads the encode may use; tiles are coded concurrently, at most one per thread,
+    /// so a layout with one tile uses one thread whatever this says. It does **not** change the
+    /// stream: for a given [`tiling`](Self::tiling) the output is identical at every thread count.
+    ///
+    /// Each thread past the first holds its own copy of the frame-wide encoder state (chiefly the
+    /// lossy reconstruction), so peak memory grows with it. On `wasm32`, which has no threads to
+    /// spawn, the tiles are always coded one after another.
+    ///
+    /// [`std::thread::available_parallelism`] returns this type, so it can be passed straight in.
+    pub threads: NonZeroUsize,
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self {
+            speed: Speed::default(),
+            tiling: Tiling::default(),
+            threads: NonZeroUsize::MIN,
+        }
+    }
+}
+
+impl EncodeOptions {
+    /// These options with the search run at `speed`.
+    #[must_use]
+    pub const fn with_speed(mut self, speed: Speed) -> Self {
+        self.speed = speed;
+        self
+    }
+
+    /// These options with the frame coded in `tiling`.
+    #[must_use]
+    pub const fn with_tiling(mut self, tiling: Tiling) -> Self {
+        self.tiling = tiling;
+        self
+    }
+
+    /// These options with the encode using at most `threads` threads.
+    #[must_use]
+    pub const fn with_threads(mut self, threads: NonZeroUsize) -> Self {
+        self.threads = threads;
+        self
+    }
 }
 
 /// The encoded AV1 temporal unit (sequence-header OBU + frame OBU) for one still image, plus the
@@ -130,7 +202,13 @@ pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> 
 /// Returns [`Error::InvalidInput`] for zero-sized images, or [`Error::Unsupported`] if the
 /// dimensions exceed AV1 level 6.0.
 pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill, ReconImage)> {
-    encode_with(planes, qindex, None, Av1Colour::default(), Speed::default())
+    encode_with(
+        planes,
+        qindex,
+        None,
+        Av1Colour::default(),
+        EncodeOptions::default(),
+    )
 }
 
 /// Like [`encode_still_intra`] but signals `colour` instead of the default identity/full-range
@@ -176,7 +254,29 @@ pub fn encode_still_intra_with_speed(
     colour: Av1Colour,
     speed: Speed,
 ) -> Result<(EncodedStill, ReconImage)> {
-    encode_with(planes, qindex, None, colour, speed)
+    encode_still_intra_with_options(
+        planes,
+        qindex,
+        colour,
+        EncodeOptions::default().with_speed(speed),
+    )
+}
+
+/// Like [`encode_still_intra_with`] but carried out as `options` says: the search
+/// [`Speed`], the [`Tiling`] layout, and the thread cap the tiles are coded under.
+/// [`EncodeOptions::default`] produces exactly the stream [`encode_still_intra_with`] does.
+///
+/// # Errors
+///
+/// As [`encode_still_intra_with`]; the options never make an encode fail. A tiling the frame
+/// cannot take is clamped to the nearest one it can (see [`Tiling`]).
+pub fn encode_still_intra_with_options(
+    planes: &Planar8,
+    qindex: u8,
+    colour: Av1Colour,
+    options: EncodeOptions,
+) -> Result<(EncodedStill, ReconImage)> {
+    encode_with(planes, qindex, None, colour, options)
 }
 
 /// Like [`encode_still_intra`] but codes the frame with horizontal **superres** (§7.16): the source
@@ -193,7 +293,7 @@ pub fn encode_still_intra_superres(
         qindex,
         Some(coded_denom),
         Av1Colour::default(),
-        Speed::default(),
+        EncodeOptions::default(),
     )
 }
 
@@ -402,6 +502,27 @@ pub fn encode_still_intra16_with_speed(
     colour: Av1Colour,
     speed: Speed,
 ) -> Result<(EncodedStill, ReconImage)> {
+    encode_still_intra16_with_options(
+        planes,
+        qindex,
+        colour,
+        EncodeOptions::default().with_speed(speed),
+    )
+}
+
+/// Like [`encode_still_intra16_with`] but carried out as `options` says, as
+/// [`encode_still_intra_with_options`] describes. [`EncodeOptions::default`] produces exactly the
+/// stream [`encode_still_intra16_with`] does.
+///
+/// # Errors
+///
+/// As [`encode_still_intra16_with`]; the options never make an encode fail.
+pub fn encode_still_intra16_with_options(
+    planes: &Planar16,
+    qindex: u8,
+    colour: Av1Colour,
+    options: EncodeOptions,
+) -> Result<(EncodedStill, ReconImage)> {
     let (width, height) = (planes.width(), planes.height());
     let monochrome = check_layout(width, height, planes.subsampling(), colour, qindex)?;
     let config = still_config(
@@ -413,14 +534,18 @@ pub fn encode_still_intra16_with_speed(
         colour,
     )?;
 
-    let mi_cols = 2 * ((width + 7) >> 3);
-    let mi_rows = 2 * ((height + 7) >> 3);
     let seq_payload = headers::sequence_header_payload(&config, width, height, qindex > 0, false);
-    let mut frame_payload =
-        headers::frame_header_payload(width, height, mi_cols, mi_rows, qindex, None, monochrome);
+    let layout = TileLayout::resolve(
+        options.tiling,
+        width as usize,
+        height as usize,
+        config.seq_level_idx_0,
+        None,
+    );
+    let mut frame_payload = headers::frame_header_payload(&layout, qindex, None, monochrome);
     let (tile_bytes, recon) = FrameEncoder::new16(planes, qindex)
-        .with_search(Search::for_speed(speed))
-        .encode();
+        .with_search(Search::for_speed(options.speed))
+        .encode(&layout, options.threads);
     append_tiles(&mut frame_payload, &tile_bytes);
 
     let recon_planes: [Vec<u16>; 3] = if qindex == 0 {
@@ -454,7 +579,7 @@ fn encode_with(
     qindex: u8,
     coded_denom: Option<u8>,
     colour: Av1Colour,
-    speed: Speed,
+    options: EncodeOptions,
 ) -> Result<(EncodedStill, ReconImage)> {
     let width = planes.width();
     let height = planes.height();
@@ -501,23 +626,19 @@ fn encode_with(
         colour,
     )?;
 
-    let mi_cols = 2 * ((coded_w + 7) >> 3);
-    let mi_rows = 2 * ((height + 7) >> 3);
-
     let seq_payload =
         headers::sequence_header_payload(&config, width, height, qindex > 0, coded_denom.is_some());
-    let mut frame_payload = headers::frame_header_payload(
-        coded_w,
-        height,
-        mi_cols,
-        mi_rows,
-        qindex,
+    let layout = TileLayout::resolve(
+        options.tiling,
+        coded_w as usize,
+        height as usize,
+        config.seq_level_idx_0,
         coded_denom,
-        monochrome,
     );
+    let mut frame_payload = headers::frame_header_payload(&layout, qindex, coded_denom, monochrome);
     let (tile_bytes, recon) = FrameEncoder::new(&coded_src, qindex)
-        .with_search(Search::for_speed(speed))
-        .encode();
+        .with_search(Search::for_speed(options.speed))
+        .encode(&layout, options.threads);
     append_tiles(&mut frame_payload, &tile_bytes);
 
     // Crop the reconstruction from the coded grid to the display dimensions. For the lossless path
@@ -932,7 +1053,8 @@ mod tests {
             (3, 48, 48, 16, 0x4d6f_bb67_2399_a35e),
             (4, 64, 48, 90, 0x5fed_6011_e0a0_278c),
             (0, 100, 80, 8, 0x8302_4eaa_7b86_ddc7),
-            (0, 130, 70, 120, 0x3324_a4a0_9acf_6e8f),
+            // One tile: two would leave the second 2 samples wide (Annex A.3, CroppedTileWidth).
+            (0, 130, 70, 120, 0x9282_57df_6360_f971),
             (2, 64, 64, 200, 0x307c_fb34_8720_4baf),
             (3, 96, 96, 60, 0x0540_b9da_a870_9e1a),
             (4, 128, 64, 30, 0x800d_d57f_9bd3_5fae),
@@ -973,6 +1095,171 @@ mod tests {
         let plain = encode_still_intra16_with(&deep, 40, colour).unwrap().0.obus;
         let speed = encode_still_intra16_with_speed(&deep, 40, colour, Speed::Thorough).unwrap();
         assert_eq!(plain, speed.0.obus);
+    }
+
+    #[test]
+    fn the_default_options_are_the_encode_without_options() {
+        // `EncodeOptions::default()` must be the full search on the legacy two-column layout on one
+        // thread, so the option-taking entry points reproduce the pinned streams above.
+        let options = EncodeOptions::default();
+        assert_eq!(options.speed, Speed::Thorough);
+        assert_eq!(options.tiling, Tiling::new(1, 0));
+        assert_eq!(options.threads.get(), 1);
+        let built = EncodeOptions::default()
+            .with_speed(Speed::Fast)
+            .with_tiling(Tiling::new(2, 3))
+            .with_threads(NonZeroUsize::new(5).unwrap());
+        assert_eq!(
+            (built.speed, built.tiling, built.threads.get()),
+            (Speed::Fast, Tiling::new(2, 3), 5)
+        );
+    }
+
+    #[test]
+    fn the_stream_and_reconstruction_do_not_depend_on_the_thread_count() {
+        // Tiles are coded independently, so the threads that code them must not show in the
+        // output: every thread count, including more threads than tiles, gives the one-thread
+        // stream and reconstruction. The reconstruction is what proves the merge — the tiles a
+        // spawned worker codes reach the in-loop filters only through `absorb_tile` — and the
+        // content mixes texture, palette-like steps and stripes so each merged per-MI map
+        // (partition sizes, transform sizes, skip, delta-LF) varies across the frame.
+        let mix = |x: u32, y: u32| -> [u8; 3] {
+            match ((x / 37) % 3, (y / 29) % 2) {
+                (0, _) => [(x * 7 + y) as u8, (x ^ (y * 3)) as u8, (x + y * 5) as u8],
+                (1, 0) => [(((x / 4 + y / 4) % 4) * 60) as u8, 128, 128],
+                (1, _) => {
+                    let v = if ((x * 2 + y) / 5).is_multiple_of(2) {
+                        40
+                    } else {
+                        200
+                    };
+                    [v, v / 2, 255 - v]
+                }
+                _ => [(x * 2 + y) as u8, 90, (220 - y) as u8],
+            }
+        };
+        let rgb = planes(200, 150, mix);
+        let ycc = |ss: ChromaSubsampling| {
+            let raw: Vec<u8> = (0..150u32)
+                .flat_map(|y| (0..200u32).flat_map(move |x| mix(x, y)))
+                .collect();
+            let img = ImageRef::<Rgb8>::new(&raw, Dimensions::new(200, 150).unwrap()).unwrap();
+            let m = RgbToYcbcr::new(MatrixCoefficients::Bt709, ColorRange::Full, BitDepth::Eight)
+                .unwrap();
+            Planar8::from_rgb8_matrix_subsampled(img, m, ss).unwrap()
+        };
+        let bt709 = Av1Colour {
+            matrix: MatrixCoefficients::Bt709,
+            ..Av1Colour::default()
+        };
+        let mono = Planar8::from_planes_subsampled(
+            200,
+            150,
+            ChromaSubsampling::Cs400,
+            [rgb.plane(0).to_vec(), Vec::new(), Vec::new()],
+        )
+        .unwrap();
+        let cases: [(&str, Planar8, u8, Av1Colour, Tiling); 5] = [
+            (
+                "4:4:4 q40",
+                rgb.clone(),
+                40,
+                Av1Colour::default(),
+                Tiling::new(2, 1),
+            ),
+            (
+                "4:4:4 lossless",
+                rgb,
+                0,
+                Av1Colour::default(),
+                Tiling::new(1, 2),
+            ),
+            (
+                "4:2:0 q90",
+                ycc(ChromaSubsampling::Cs420),
+                90,
+                bt709,
+                Tiling::new(2, 2),
+            ),
+            (
+                "4:2:2 q20",
+                ycc(ChromaSubsampling::Cs422),
+                20,
+                bt709,
+                Tiling::new(1, 1),
+            ),
+            (
+                "mono q60",
+                mono,
+                60,
+                Av1Colour::monochrome(),
+                Tiling::new(2, 1),
+            ),
+        ];
+        let threads = |n: usize| NonZeroUsize::new(n).unwrap();
+        for (name, p, q, colour, tiling) in &cases {
+            let at = |n: usize| {
+                let options = EncodeOptions::default()
+                    .with_tiling(*tiling)
+                    .with_threads(threads(n));
+                encode_still_intra_with_options(p, *q, *colour, options).unwrap()
+            };
+            let (one, one_recon) = at(1);
+            for n in [2, 3, 64] {
+                let (many, many_recon) = at(n);
+                assert_eq!(many.obus, one.obus, "{name}: stream at {n} threads");
+                assert_eq!(
+                    many_recon.planes, one_recon.planes,
+                    "{name}: reconstruction at {n} threads"
+                );
+            }
+        }
+
+        // The high-bit-depth entry point threads the same options through.
+        let deep = Planar16::from_planes(
+            200,
+            150,
+            BitDepth::Ten,
+            std::array::from_fn(|i| {
+                planes(200, 150, mix)
+                    .plane(i)
+                    .iter()
+                    .map(|&v| u16::from(v) << 2)
+                    .collect()
+            }),
+        )
+        .unwrap();
+        let at = |n: usize| {
+            let options = EncodeOptions::default()
+                .with_tiling(Tiling::new(2, 1))
+                .with_threads(threads(n));
+            encode_still_intra16_with_options(&deep, 40, Av1Colour::default(), options).unwrap()
+        };
+        let (one, one_recon) = at(1);
+        let (four, four_recon) = at(4);
+        assert_eq!(four.obus, one.obus, "10-bit stream at 4 threads");
+        assert_eq!(four_recon.planes, one_recon.planes, "10-bit reconstruction");
+    }
+
+    #[test]
+    fn the_tiling_reaches_the_stream() {
+        // A layout request is not advisory: on a frame that can take it, a different layout is a
+        // different stream (the oracle tests in `tests/recon.rs` prove each one decodes).
+        let p = planes(200, 150, |x, y| {
+            [(x * 3) as u8, (y * 5) as u8, (x ^ y) as u8]
+        });
+        let at = |tiling: Tiling| {
+            let options = EncodeOptions::default().with_tiling(tiling);
+            encode_still_intra_with_options(&p, 40, Av1Colour::default(), options)
+                .unwrap()
+                .0
+                .obus
+        };
+        let default = at(Tiling::default());
+        assert_eq!(default, encode_still_intra(&p, 40).unwrap().0.obus);
+        assert_ne!(at(Tiling::SINGLE), default);
+        assert_ne!(at(Tiling::new(1, 1)), default);
+        assert_ne!(at(Tiling::new(2, 0)), default);
     }
 
     #[test]

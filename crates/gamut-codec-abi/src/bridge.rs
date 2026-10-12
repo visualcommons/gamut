@@ -4,11 +4,11 @@
 //!
 //! - **C → Rust** ([`ForeignDecoder`] / [`ForeignEncoder`]): wrap a `*const DecoderVTable` /
 //!   `*const EncoderVTable` plus an opaque `ctx`, verify [`abi_version`](crate::ABI_VERSION) at
-//!   construction, implement the [`Decoder`](crate::Decoder) / [`Encoder`](crate::Encoder) twin by
+//!   construction, implement the [`Decoder`] / [`Encoder`] twin by
 //!   calling through the function pointers, and run the vtable's `destroy` on drop.
 //! - **Rust → C** ([`lower_decoder`] / [`lower_encoder`]): take a `Box<dyn Decoder>` /
-//!   `Box<dyn Encoder>`, hand back a [`DecoderVTable`](crate::DecoderVTable) /
-//!   [`EncoderVTable`](crate::EncoderVTable) + `ctx` pointer whose function pointers dispatch into
+//!   `Box<dyn Encoder>`, hand back a [`DecoderVTable`] /
+//!   [`EncoderVTable`] + `ctx` pointer whose function pointers dispatch into
 //!   the box, and whose `destroy` reboxes and drops it.
 //!
 //! Every `unsafe` block below is justified with a `// SAFETY:` comment; the fallible constructors

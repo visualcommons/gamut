@@ -50,20 +50,19 @@ consumers depend on:
 
 ```toml
 [dependencies]
-gamut = { version = "0.1", features = ["avif"] }
+gamut = { version = "0.3", features = ["avif"] }
 ```
 
 ```rust
 use gamut::avif::AvifEncoder;
-use gamut::core::{Dimensions, Encoder};
+use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 
-let (width, height) = (64usize, 64usize);
-let rgb = vec![0u8; width * height * 3]; // 8-bit interleaved RGB
+let dims = Dimensions::new(64, 64)?;
+let rgb = vec![0u8; 64 * 64 * 3]; // 8-bit interleaved RGB
 
 let mut out = Vec::new();
-AvifEncoder::new()
-    .encode_rgb8(&rgb, Dimensions { width: width as u32, height: height as u32 }, &mut out)
-    .expect("encode");
+AvifEncoder::new().encode_image(ImageRef::<Rgb8>::new(&rgb, dims)?, &mut out)?;
+# Ok::<(), gamut::core::Error>(())
 ```
 
 ## Status

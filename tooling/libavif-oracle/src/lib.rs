@@ -72,10 +72,30 @@ impl DecodedImage {
 pub fn decode_avif(avif: &[u8]) -> Result<DecodedImage, String> {
     // SAFETY: the decoder and image handles below are created and destroyed in matched pairs on
     // every return path; pointers passed to libavif stay valid for each call's duration.
-    unsafe { decode_inner(avif) }
+    unsafe { decode_inner(avif, sys::AVIF_DECODER_SOURCE_AUTO) }
 }
 
-unsafe fn decode_inner(avif: &[u8]) -> Result<DecodedImage, String> {
+/// Decodes the **primary still item** of an AVIF file into its YUV planes, like [`decode_avif`]
+/// but with libavif's `requestedSource` pinned to `AVIF_DECODER_SOURCE_PRIMARY_ITEM`.
+///
+/// For a plain still this is the same image [`decode_avif`] returns. For an `avis` image sequence
+/// that also carries a `meta` primary item, libavif's default (`AUTO`, which honours an `avis`
+/// major brand) decodes the track instead;
+/// this entry point is the still a still-only reader shows — the oracle for gamut-avif, which
+/// never decodes the track.
+///
+/// # Errors
+///
+/// As [`decode_avif`].
+pub fn decode_primary_item(avif: &[u8]) -> Result<DecodedImage, String> {
+    // SAFETY: as `decode_avif`.
+    unsafe { decode_inner(avif, sys::AVIF_DECODER_SOURCE_PRIMARY_ITEM) }
+}
+
+unsafe fn decode_inner(
+    avif: &[u8],
+    source: sys::avifDecoderSource,
+) -> Result<DecodedImage, String> {
     unsafe {
         let decoder = sys::avifDecoderCreate();
         if decoder.is_null() {
@@ -86,6 +106,7 @@ unsafe fn decode_inner(avif: &[u8]) -> Result<DecodedImage, String> {
             sys::avifDecoderDestroy(decoder);
             return Err("avifImageCreateEmpty returned null".into());
         }
+        (*decoder).requestedSource = source;
 
         let result = sys::avifDecoderReadMemory(decoder, image, avif.as_ptr(), avif.len());
         let out = if result == sys::AVIF_RESULT_OK {

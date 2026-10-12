@@ -58,6 +58,11 @@
 //! [`JxlColorEncoding`]: types::JxlColorEncoding
 //! [`JxlPixelFormat`]: types::JxlPixelFormat
 
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod decode;
 pub mod encode;
 pub mod types;

@@ -13,7 +13,7 @@
 //! contract: which conversions are refused, what shape the output has, and the two narrowings the
 //! documentation calls exact inverses of their widenings.
 //!
-//! Note that these laws are stated over [`convert_from_raw`], not [`convert`]. The typed door is a
+//! Note that these laws are stated over [`convert_from_raw`], not [`convert`](crate::convert::convert()). The typed door is a
 //! one-line delegation to the raw one, so a law asserting the two agree would be checking the
 //! compiler rather than the engine.
 //!

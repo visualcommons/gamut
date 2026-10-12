@@ -24,7 +24,7 @@ the format crates can read, preserve, and embed accurate color characterization.
 ```rust,no_run
 use gamut_icc::{IccProfile, KnownTag, TagData};
 
-# fn demo(bytes: &[u8]) -> Result<(), gamut_core::Error> {
+# fn demo(bytes: &[u8]) -> Result<(), gamut_icc::IccError> {
 let profile = IccProfile::parse(bytes)?;
 if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint) {
     println!("media white point: {:?}", white[0].to_f64());
@@ -69,7 +69,12 @@ encoding's standard tone curve and no `cicpType` tag, and `BuiltinProfile::cicp`
 for them.
 `from_cicp` reaches further on the transfer axis — the BT.709 family (H.273 code points 1, 6, 14
 and 15), linear, sRGB and PQ all have an ICC tone-curve encoding — because what an ICC tag can
-encode is not the same set as what gamut-color can evaluate. Every constructor returns an `Option`
+encode is not the same set as what gamut-color can evaluate. It reads the BT.709 family literally,
+as the inverse of H.273 Table 3's opto-electronic function, which is what libjxl, libavif and
+Little-CMS write; `IccProfile::from_cicp_with(cicp, CicpTransferReading::Bt1886Display)` instead
+writes the Rec. ITU-R BT.1886 display EOTF that H.273 §8.2 NOTE 1 names for flat panels — a pure
+gamma of 2.4, so mid-grey is `Y` 0.189465 rather than 0.259719 — under the same `cicpType` tag.
+Every other transfer is built identically under either reading. Every constructor returns an `Option`
 and declines signalling it cannot describe — including a narrow-range `VideoFullRangeFlag` under
 RGB matrix coefficients (0, 8, 16, 17), which is a scaling of the RGB samples that a full-scale
 matrix/TRC profile does not perform and that de-matrixing does not remove. Under luma–chroma

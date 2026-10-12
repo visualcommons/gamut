@@ -98,7 +98,7 @@ pub struct TiffMetadata {
     /// The one shape the model can express and the file cannot is a tag holding **both** a field
     /// and a sub-IFD group: two entries under one tag, which TIFF 6.0 §2 does not allow. That is
     /// refused by the encode rather than normalised, because normalising it would mean choosing —
-    /// silently — which of the two the caller meant; see [`TiffMetadata::check`].
+    /// silently — which of the two the caller meant; see `TiffMetadata::check`.
     ///
     /// **Every standard pointer tag inside this directory is resolved.** All four members of
     /// [`gamut_ifd::tags::STANDARD_POINTER_TAGS`] — `SubIFDs` (330), `ExifIFD` (34665), `GPSInfo`

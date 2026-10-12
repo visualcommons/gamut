@@ -46,7 +46,7 @@
 //!   main-chain page that is none of those either. Two documented residues aside — a duplicated
 //!   tag keeps the last entry (the IFD core's model), and an image-less directory reached only
 //!   through `SubIFDs` reaches no typed channel (issue #667) — nothing in a file is silently
-//!   dropped, and [`deconstruct`] accounts for every byte either way.
+//!   dropped, and [`deconstruct()`] accounts for every byte either way.
 //!
 //! An **Apple ProRAW** DNG (1.7, JPEG XL, tiled, LinearRaw, semantic masks, gain map) therefore
 //! decodes fully. Full demosaicing and colour rendering are a raw *processor's* job and stay out
@@ -58,7 +58,7 @@
 //! acceleration — gamut's software implementation is always used. See AGENTS.md's convention on
 //! exposing the codestream and `STATUS.md`.
 //!
-//! For archival use, [`deconstruct`] classifies **every byte** of a DNG into typed segments
+//! For archival use, [`deconstruct()`] classifies **every byte** of a DNG into typed segments
 //! (dual-ledger checked, issue #263), and [`DngRewrite`] is the preserving edit path: the whole
 //! tree opens losslessly, pixel payloads are carried byte-for-byte, and the `MakerNote` byte
 //! range is pinned at its original offset.
@@ -67,6 +67,11 @@
 //! structure is a classic parser-exploit surface, so the decoder is built to resist malformed
 //! IFDs, offset loops, and truncation.
 #![forbid(unsafe_code)]
+
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 pub mod color_profile;
 pub mod decoder;
