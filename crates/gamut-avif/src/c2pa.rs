@@ -496,6 +496,15 @@ pub(crate) fn content_provenance_reserved(purpose: C2paBoxPurpose, len: usize) -
 /// - [`Error::Unsupported`] if the payload exceeds [`MAX_BOX_PAYLOAD_LEN`], so the box would reach
 ///   4 GiB — the same refusal the container writer would make, made here before the slot's zeros
 ///   are allocated rather than after.
+///
+/// The 4 GiB refusal is `Unsupported` and not `InvalidInput` by decision (issue #576), because
+/// the length is not malformed: ISO/IEC 14496-12 lets a box declare `size = 1` and carry a 64-bit
+/// `largesize`, so a `ContentProvenanceBox` this long is well-formed ISOBMFF. `gamut-isobmff`
+/// reads `largesize` but its writer emits only 32-bit sizes, so the ceiling belongs to the writer,
+/// which is the case [`gamut_core::ErrorKind::Unsupported`] names: "the requested ... feature is
+/// unsupported". It also matches the kind `gamut_isobmff::write` gives for the same bound. The
+/// `isize::MAX` refusal above stays `InvalidInput`, because no writer could hold that slot in
+/// memory at all.
 fn reserved_payload_len(purpose: C2paBoxPurpose, len: usize) -> Result<usize> {
     if len < MIN_SLOT_LEN {
         return Err(Error::invalid_input(
@@ -1032,6 +1041,9 @@ mod tests {
         // Every assertion that could pass a length the bound should refuse goes through
         // `reserved_payload_len` *before* the one call that builds a payload, so a mutant that
         // loosens the bound fails fast here instead of zero-filling 4 GiB and timing out.
+        //
+        // The kind is pinned as `Unsupported` on purpose (issue #576): the box is expressible
+        // in ISOBMFF through a 64-bit `largesize`; only the writer cannot emit it.
         //
         // The documented figures first, as literals on both sides, so the docs cannot drift
         // from the constant's arithmetic.
