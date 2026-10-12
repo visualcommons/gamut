@@ -336,15 +336,19 @@ pub fn zlib_identity() -> String {
         .to_string()
 }
 
-/// The resolved path of that libz on its own — the same string [`zlib_identity`] appends, handed
-/// over unformatted so a caller can *test* it rather than print it.
+/// The path of the object that libz resolved in, on its own — the same string [`zlib_identity`]
+/// appends, handed over unformatted so a caller can *test* it rather than print it.
 ///
 /// Returns `None` when the loader reports no path, or reports one that is not UTF-8.
 ///
-/// With zlib linked statically this is the canonical path of the running executable, and a caller
-/// can test exactly that: anything else — a `libz.so` on the platform, or one a dev oracle built
-/// under `target/` that cargo's `LD_LIBRARY_PATH` exposes — means the static link has regressed
-/// and the SDK's inflate is again chosen by the loader rather than pinned by the repository.
+/// The path is `realpath`-resolved where that succeeds, and otherwise the loader's own answer
+/// unresolved. With zlib linked statically the object is the running executable, for which the
+/// loader may report only `argv[0]` — a bare name when launched through `PATH`, or whatever a
+/// launcher rewrote it to — so the answer need not equal [`std::env::current_exe`], canonical or
+/// not. Test it for a shared library's name instead: a `libz.so` on the platform, or one a dev
+/// oracle built under `target/` that cargo's `LD_LIBRARY_PATH` exposes, means the static link has
+/// regressed and the SDK's inflate is again chosen by the loader rather than pinned by the
+/// repository.
 #[must_use]
 pub fn zlib_path() -> Option<PathBuf> {
     // SAFETY: the shim returns either null or a pointer to a NUL-terminated string with static

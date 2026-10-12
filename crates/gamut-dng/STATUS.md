@@ -437,10 +437,13 @@ removed or measured; none is left as an adjective.
   implementation. The harness printed the resolved library above its divan output
   (`zlibVersion()` plus the path `dladdr` reports; the path is what identifies the resolution,
   because two stock builds of one version are indistinguishable by version string) and warned
-  when that path lay inside a build directory. It still prints both; it now **stops** unless the
-  path is its own executable, which is what the static link makes it, because any other answer
-  means a shared libz is being called again. A Deflate figure below travels with the library it
-  was taken against or not at all.
+  when that path lay inside a build directory. It still prints both; it now **stops** when the
+  path names a shared library (`*.so`, `*.so.N`, `*.dylib`, `*.dll`), because that means a shared
+  libz is being called again. It does not demand the path equal its own executable's, which is
+  what the static link makes the object: for the executable the loader may report only an
+  unresolved `argv[0]` (launched through `PATH`, or with `argv[0]` rewritten), so equality would
+  stop a correctly pinned run. A Deflate figure below travels with the library it was taken
+  against or not at all.
 
 **Each pair is one benchmark, not two.** `decode_dng` and `decode_lossless_jpeg` take the
 implementation as a divan *argument* rather than living in a benchmark each. Separate benchmarks

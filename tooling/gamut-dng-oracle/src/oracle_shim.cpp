@@ -104,8 +104,10 @@ dng_error_code copy_short_image(const dng_image *image, uint32_t *out_w, uint32_
 
 namespace {
 
-// The resolved path of the shared object `zlibVersion` came from, or an empty string when the
-// loader cannot report one. Computed once; the storage lives for the process.
+// The path of the object `zlibVersion` came from -- `realpath`-resolved where that succeeds, else
+// the loader's unresolved `dli_fname` (for the executable itself that may be a bare `argv[0]`) --
+// or an empty string when the loader cannot report one. Computed once; the storage lives for the
+// process.
 const std::string &resolved_zlib_path() {
   static const std::string path = [] {
     Dl_info info;
@@ -149,8 +151,9 @@ extern "C" const char *gdng_zlib_identity(void) {
 
 // The resolved path alone, or `nullptr` when the loader cannot report one -- the same string
 // `gdng_zlib_identity` appends, handed over unformatted so a caller can *test* it rather than
-// print it. With the static link this is the running executable; a caller that finds anything
-// else knows a shared libz is being called and the pin no longer holds.
+// print it. With the static link this names the running executable, possibly only as an
+// unresolved `argv[0]`; a caller that finds a shared library's name knows a shared libz is being
+// called and the pin no longer holds.
 //
 // The returned pointer has static storage duration and lives for the process.
 extern "C" const char *gdng_zlib_path(void) {

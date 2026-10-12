@@ -74,8 +74,8 @@
 //!
 //! The fixture table still prints [`gamut_dng_oracle::zlib_identity`] — the version, and the
 //! object the `zlibVersion` symbol resolved in — and refuses to run if
-//! [`gamut_dng_oracle::zlib_path`] names anything but this executable, because that would mean a
-//! shared libz is being called again and the Deflate rows are unpinned.
+//! [`gamut_dng_oracle::zlib_path`] names a shared library, because that would mean a shared libz
+//! is being called again and the Deflate rows are unpinned.
 //!
 //! # The counter rule
 //!
@@ -592,14 +592,20 @@ fn print_fixture_table() {
 }
 
 /// Prints which zlib the reference arm's Deflate decode calls, and refuses to go on if that zlib
-/// is not the one statically linked into this executable.
+/// is a shared library rather than the copy statically linked into this executable.
 ///
 /// The oracle links the stock zlib built from `third_party/zlib` statically (issue #618), so
-/// `zlibVersion` resolves in this executable itself. A path naming anything else — a `libz.so`
-/// the loader found on the platform or, through cargo's `LD_LIBRARY_PATH`, under `target/` —
-/// means the pin has regressed and the `*/deflate` rows would measure whichever library the
-/// launcher happened to supply, which moved the reference arm 1.2–1.3× when it was last allowed
-/// to. Publishing such a ratio is worse than publishing none, so this stops the run.
+/// `zlibVersion` resolves in this executable itself. A shared library — a `libz.so` the loader
+/// found on the platform or, through cargo's `LD_LIBRARY_PATH`, under `target/` — means the pin
+/// has regressed and the `*/deflate` rows would measure whichever library the launcher happened
+/// to supply, which moved the reference arm 1.2–1.3× when it was last allowed to. Publishing such
+/// a ratio is worse than publishing none, so this stops the run.
+///
+/// The test is whether the reported path names a shared object, not whether it equals this
+/// executable's path: for the executable itself the loader may report only `argv[0]`, which the
+/// shim hands over unresolved when `realpath` fails (a bench launched through `PATH`, or with a
+/// rewritten `argv[0]`), so comparing it with `current_exe()` would stop a correctly pinned run.
+/// A shared libz is reported as the file the loader opened, so its library name survives.
 fn print_zlib_identity() {
     println!(
         "\nThe SDK's Deflate arm calls the pinned stock zlib (third_party/zlib, statically \
@@ -607,14 +613,27 @@ fn print_zlib_identity() {
         gamut_dng_oracle::zlib_identity()
     );
     if let Some(path) = gamut_dng_oracle::zlib_path() {
-        let exe = std::env::current_exe().and_then(std::fs::canonicalize);
         assert!(
-            exe.is_ok_and(|exe| exe == path),
-            "the SDK's zlib resolved in {}, not in this executable: the oracle's static zlib link \
-             has regressed to a shared libz, so the */deflate rows would not be reproducible",
+            !names_shared_object(&path),
+            "the SDK's zlib resolved in the shared library {}, not in this executable: the \
+             oracle's static zlib link has regressed to a shared libz, so the */deflate rows \
+             would not be reproducible",
             path.display()
         );
     }
+}
+
+/// Whether `path`'s file name is a shared library's: `*.so` or versioned `*.so.N…` (ELF),
+/// `*.dylib` (Mach-O) or `*.dll` (PE). An executable — the static pin's answer — is none of these.
+fn names_shared_object(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| {
+            name.ends_with(".so")
+                || name.contains(".so.")
+                || name.ends_with(".dylib")
+                || name.ends_with(".dll")
+        })
 }
 
 /// What an operator has to know to read the table above and the divan output below it, printed
