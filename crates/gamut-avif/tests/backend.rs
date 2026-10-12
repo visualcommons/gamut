@@ -181,6 +181,7 @@ fn encode16(encoder: &AvifEncoder) -> Result<Vec<u8>> {
 struct Wide {
     log: Arc<Mutex<Vec<String>>>,
     depth_seen: Arc<Mutex<Option<BitDepth>>>,
+    speed_seen: Arc<Mutex<Option<Speed>>>,
 }
 
 impl Av1StillEncoder for Wide {
@@ -195,6 +196,7 @@ impl Av1StillEncoder for Wide {
     fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
         self.log.lock().unwrap().push("wide:encode16".into());
         *self.depth_seen.lock().unwrap() = Some(req.bit_depth());
+        *self.speed_seen.lock().unwrap() = Some(req.speed());
         assert_eq!(planes.bit_depth(), req.bit_depth());
         Ok(
             gamut_av1::encode_still_intra16_with(planes, req.base_q_idx(), req.colour())
@@ -237,6 +239,7 @@ fn a_backend_that_opts_in_owns_the_high_bit_depth_job() {
     encoder.push_backend(Wide {
         log: Arc::clone(&log),
         depth_seen: Arc::clone(&depth_seen),
+        speed_seen: Arc::new(Mutex::new(None)),
     });
     let out = encode16(&encoder).expect("the backend owns the job");
     assert_eq!(events(&log), ["wide:encode16"]);
@@ -245,6 +248,29 @@ fn a_backend_that_opts_in_owns_the_high_bit_depth_job() {
     // The container re-derives `av1C`/`colr` from the returned stream, so a backend-supplied
     // 12-bit picture is described exactly as the built-in one is.
     assert_eq!(out, encode16(&AvifEncoder::new()).unwrap());
+}
+
+/// The high-bit-depth request carries the encoder's preset to the backend that owns the job, at
+/// both coded depths — the 8-bit path is not the only one a pushed backend sees it on.
+#[test]
+fn a_high_bit_depth_backend_sees_the_chosen_preset() {
+    for depth in [BitDepth::Ten, BitDepth::Twelve] {
+        let speed_seen = Arc::new(Mutex::new(None));
+        let mut encoder = AvifEncoder::new()
+            .with_bit_depth(depth)
+            .with_speed(Speed::Fastest);
+        encoder.push_backend(Wide {
+            log: log(),
+            depth_seen: Arc::new(Mutex::new(None)),
+            speed_seen: Arc::clone(&speed_seen),
+        });
+        encode16(&encoder).unwrap_or_else(|e| panic!("{depth:?}: {e}"));
+        assert_eq!(
+            *speed_seen.lock().unwrap(),
+            Some(Speed::Fastest),
+            "{depth:?}"
+        );
+    }
 }
 
 #[test]
