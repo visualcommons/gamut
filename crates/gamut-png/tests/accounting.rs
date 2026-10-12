@@ -15,27 +15,14 @@ use gamut_png::{
     SegmentKind, SkippedFilterScan, deconstruct, deconstruct_with_limits,
 };
 
-/// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next
-/// start (contiguous, non-overlapping), and the last ends at `len` — the every-byte invariant.
-/// Deliberately re-derived here rather than trusting `is_fully_classified`, which is the thing
-/// under test.
+/// Asserts the every-byte invariant: the segments tile `0..len` exactly. Checked by
+/// [`gamut_core::segment::covers`], whose own negative cases are pinned once in `gamut-core`,
+/// rather than through `is_fully_classified`, which is the thing under test.
 fn assert_covers(segments: &[Segment], len: usize) {
-    assert!(!segments.is_empty(), "at least one segment");
-    assert_eq!(segments[0].range.start, 0, "coverage starts at 0");
-    for pair in segments.windows(2) {
-        assert_eq!(
-            pair[0].range.end, pair[1].range.start,
-            "segments are contiguous and non-overlapping"
-        );
-    }
-    assert_eq!(
-        segments.last().expect("non-empty").range.end,
-        len,
-        "coverage runs to end of file"
+    assert!(
+        gamut_core::segment::covers(segments, len),
+        "segments do not tile 0..{len}: {segments:?}"
     );
-    for s in segments {
-        assert!(s.range.end > s.range.start, "no empty segment: {s:?}");
-    }
 }
 
 /// A deterministic RGB pattern with enough local structure that filters differ between rows.
