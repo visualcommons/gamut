@@ -108,7 +108,7 @@ Add the umbrella `gamut` crate and enable only the formats you need:
 
 ```toml
 [dependencies]
-gamut = { version = "0.1", features = ["avif", "jxl"] }
+gamut = { version = "0.3", features = ["avif", "jxl"] }
 ```
 
 The umbrella has no default features, so a bare dependency compiles only `gamut-core`. The
