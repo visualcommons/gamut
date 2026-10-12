@@ -255,11 +255,15 @@ exclusion ranges. Now:
   following it. This crate writes one main IFD and uses the in-IFD form, which is lawful and is
   what the Adobe SDK reads without surprise. The **decoder** reads both, since it consults the
   last IFD of the chain whatever its shape.
-- **The one directory still not surfaced.** An *interior* main-chain page — neither the first
-  nor the last — that carries no image data is no `SubImage` either, so its fields reach no
-  verbatim channel. That predates #442 and is not what §A.3.6 creates (the store's own placement
-  is the *last* directory, which `trailing_extra` now covers); `deconstruct` still accounts for
-  its bytes. Filed as #525.
+- **Interior main-chain pages.** A main-chain page that is neither the first nor the last and
+  carries no image data is no `SubImage` either. Such pages arrive in
+  `DecodedDng::interior_extra`, one `PageExtra` per page keyed by its chain position (#525), so
+  every main-chain directory now reaches a verbatim channel. It is a separate field rather than
+  a generalised `trailing_extra` on purpose: `trailing_extra` stays the §A.3.6 store-placement
+  channel, and renaming it would be semver-major for no reader's benefit.
+- **The one directory still not surfaced.** A directory reached only through a `SubIFDs`
+  pointer — not a main-chain page — that is not the raw IFD and carries no image data reaches
+  no verbatim channel; `deconstruct` still accounts for its bytes. Filed as #667.
 - **Not done here.** The store is never parsed; a `DngRewrite` of a file carrying one relocates
   it into the value pool like any other value (a rewrite invalidates the binding regardless);
   the behavioural `c2pa-rs` oracle is #447's.
