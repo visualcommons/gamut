@@ -195,7 +195,10 @@ mod transform;
 
 pub use av1c::{Av1Config, ChromaFormat};
 pub use backend::{AV1_CODEC_ID, AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder};
-pub use c2pa::{C2PA_UUID, C2paBoxPurpose, C2paSlot};
+pub use c2pa::{
+    C2PA_NOT_VALIDATED, C2PA_UUID, C2paBoxPosition, C2paBoxPurpose, C2paMerkleBox, C2paSlot,
+    C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason,
+};
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodedFrame};
