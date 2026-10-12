@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(isobmff)* own the C2PA `ContentProvenanceBox` framing shared by gamut-heic and gamut-avif
   (#505): `C2PA_UUID`, `C2paBoxPurpose`, `C2paUnreadReason`, the `C2paUuidBox::classify` lens over a
   top-level `Segment` reporting a box-bounded `C2paSlot` (with `merkle_offset` and the
-  `LBox`-trimmed `store()`), and the `content_provenance_payload` / `content_provenance_reserved`
-  builders.
+  `LBox`-trimmed `store()` and its file range `store_range()`), and the
+  `content_provenance_payload` / `content_provenance_reserved` builders.
 - *(isobmff)* typed `mdcv` mastering-display property (`PropertyKind::MasteringDisplayColourVolume`):
   strict 24-byte read, byte-exact write. A file whose `mdcv` body is not exactly 24 bytes, which
   was previously carried verbatim as `PropertyKind::Other`, is now rejected as invalid input.

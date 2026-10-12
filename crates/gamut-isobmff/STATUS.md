@@ -134,8 +134,12 @@ bytes to read it from is no store (`None`), never an error and never a truncated
 reporting only the trimmed store, because a reservation (`content_provenance_reserved`, all zeros)
 has no `LBox`, so `gamut-avif`'s reserve → report → patch flow would find nothing to patch; and
 reporting only the slot, because that would silently widen `gamut-heic`'s documented
-`C2paManifestStore` contract to include padding. `gamut-heic` reports the store and `gamut-avif`
-the slot, each as before, and they now agree byte for byte because both derive from one parse.
+`C2paManifestStore` contract to include padding. `C2paSlot::store_range` is the store's file range,
+so neither consumer does that arithmetic itself. Both consumers report both regions under the same
+names: each `C2paStoreSummary` carries the store as `range` and the slot as `slot`, and a slot that
+bounds no store is unread (`NoStoreBound`) in both, so the two crates report the same bytes for one
+padded store. Only `gamut-avif`'s slot locator (`c2pa_slot`/`c2pa_slots`) and encoder report name the
+slot alone, because patching a reservation is what they exist for.
 
 **Decision — `update` is probed, by `LBox` validity.** §A.5.3 states the 8-byte merkle offset for
 `manifest` and `original` and is silent for `update`; `c2pa-rs` writes it for all three. So
