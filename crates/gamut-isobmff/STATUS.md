@@ -155,10 +155,15 @@ mis-placed; no known writer emits that layout. A `jumb` `TBox` check would make 
 deferred (it narrows what is reported, on a clause the specification states only for JPEG XL) and
 is tracked by `gamut-heic`'s `STATUS.md` deferred row.
 
-Out of scope here: where a box sits relative to `mdat`/`moov` (each consumer's `C2paBoxPosition`),
-the non-validating report types (`C2paSummary` and kin, still one per consumer), and a range
-newtype that makes "this is not an exclusion range" unrepresentable (a breaking change to both
-consumers' public fields, #780).
+Every range the lens reports (`C2paSlot::range`, `C2paSlot::store_range`) is a `C2paByteRange`
+(#780): a half-open byte range with `start`/`end`/`len`, `bytes_in`/`bytes_in_mut` for extraction
+and patching, a `[start, end)` `Display`, and deliberately no conversion back to a `Range<usize>`
+— the shape a byte-range hash's exclusion list takes, which is not how `c2pa.hash.bmff.v3` binds a
+BMFF asset (C2PA 2.4 §18.6, §A.5.6). `gamut-heic` and `gamut-avif` report their ranges in the same
+type. Changing `C2paSlot::range`'s type was a major bump.
+
+Out of scope here: where a box sits relative to `mdat`/`moov` (each consumer's `C2paBoxPosition`)
+and the non-validating report types (`C2paSummary` and kin, still one per consumer).
 
 **Semver:** adding the field made `IsoBmffImage` `#[non_exhaustive]` (a major bump); construct it
 with `IsoBmffImage::new(..)` plus `with_minor_version`/`with_groups`/`with_top_level_boxes`, so the
