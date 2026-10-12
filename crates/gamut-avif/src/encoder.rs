@@ -14,8 +14,8 @@ use gamut_color::{
 };
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy, convert, premultiply_alpha};
 use gamut_core::{
-    Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, Pixel, Result, Rgb8, Rgb16, Rgba8,
-    Rgba16, Sample,
+    Dimensions, EncodeImage, Error, Gray8, Gray16, ImageBuf, ImageRef, Pixel, Result, Rgb8, Rgb16,
+    Rgba8, Rgba16, Sample,
 };
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind,
@@ -2131,22 +2131,14 @@ impl EncodeImage<Gray8> for AvifEncoder {
 
 /// A [`Gray8`] image widened to `depth` by bit replication, as a single-plane monochrome buffer.
 ///
-/// `gamut-color` has no grey constructor for [`Planar16`], so the image goes through the two
-/// conversions that already own each half rather than a third copy of either: `gamut-core`'s
-/// lossless widening replicates the grey into an [`Rgb16`] image at full 16-bit scale, and
-/// [`Planar16::from_rgb16_identity_view`] narrows it to `depth`, whose `Y = G` plane is the grey.
-/// The two chroma planes it also builds are discarded. That is three times the transient memory a
-/// dedicated grey constructor would need, paid only on this opt-in path.
+/// The image goes through the two conversions that already own each half rather than a third copy
+/// of either: `gamut-core`'s lossless widening replicates the grey into a [`Gray16`] image at full
+/// 16-bit scale, and [`Planar16::from_gray16_view`] narrows it to `depth` as the single luma plane
+/// of a monochrome buffer. The transient cost is one 16-bit copy of the image beside the plane
+/// itself, paid only on this opt-in path.
 fn gray8_widened(image: ImageRef<'_, Gray8>, depth: BitDepth) -> Result<Planar16> {
-    let wide = convert::<Gray8, Rgb16>(image, ConvertPolicy::lossless())?;
-    let gbr = Planar16::from_rgb16_identity_view(wide.as_ref(), depth);
-    Planar16::from_planes_subsampled(
-        image.width(),
-        image.height(),
-        ChromaSubsampling::Cs400,
-        depth,
-        [gbr.plane(0).to_vec(), Vec::new(), Vec::new()],
-    )
+    let wide = convert::<Gray8, Gray16>(image, ConvertPolicy::lossless())?;
+    Ok(Planar16::from_gray16_view(wide.as_ref(), depth))
 }
 
 #[cfg(test)]
