@@ -117,9 +117,9 @@ pub struct AvifConfig {
     /// premultiplies to the same value. `false` (the default) codes the colour as given. Applies
     /// only to [`AvifMode::Lossy`] encodes of inputs with **unassociated** alpha
     /// ([`Rgba8`](gamut_core::Rgba8), [`Rgba16`](gamut_core::Rgba16)): [`AvifMode::Lossless`]
-    /// **ignores** it and stays bit-exact, and so does an encoder with
-    /// [`with_premultiplied_alpha(true)`](crate::AvifEncoder::with_premultiplied_alpha), whose
-    /// colour already *is* the composite. Set it with
+    /// **ignores** it and stays bit-exact, and so does an encoder whose
+    /// [`AlphaMode`](crate::AlphaMode) is not [`Unassociated`](crate::AlphaMode::Unassociated),
+    /// whose colour already *is* — or is made into — the composite. Set it with
     /// [`AvifEncoder::with_clean_alpha`](crate::AvifEncoder::with_clean_alpha).
     pub clean_alpha: bool,
 }

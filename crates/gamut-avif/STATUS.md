@@ -151,7 +151,7 @@ adding it needs no container change.
 | `irot` rotation / `imir` mirror | 23008-12 | ✅ (essential transform properties; `AvifEncoder::with_rotation`/`with_mirror`) | M5 |
 | `auxC` aux-type property + `auxl` item ref (alpha plane) | 23008-12; AVIF §4.1 | ✅ (written for `Rgba8`, essential, hidden item, no `colr`; all read) | M3 |
 | depth auxiliary image item (`urn:…:auxiliary:depth`) | AVIF §4.1 | ☐ | M3 |
-| `prem` premultiplied-alpha association | AVIF §4 | ✅ (`AvifEncoder::with_premultiplied_alpha`) | M3 |
+| `prem` premultiplied-alpha association | AVIF §4 | ✅ (`AvifEncoder::with_alpha_mode`: `AlphaMode::Premultiplied` declares caller-premultiplied colour, `PremultiplyOnEncode` premultiplies unassociated colour first; `with_premultiplied_alpha` is shorthand) | M3 |
 | `iref` (`auxl`/`dimg`/`thmb`/`cdsc`) | 23008-12 | ✅ (`cdsc`/`auxl`/`prem` emitted; all read) | M3/M5 |
 | `grid` derived item + `dimg` refs (tiled mosaic) | 23008-12; MIAF | ☐ | M5 |
 | `tmap` tone-map derived item (gain maps) + `altr` grouping with the base item | AVIF §4.2.2 | ☐ | D |
