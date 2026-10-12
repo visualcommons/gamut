@@ -9,8 +9,8 @@ use common::{
     meta, pitm_v0,
 };
 use gamut_avif::{
-    AvifContainer, CleanAperture, ContentLightLevel, ItemKind, PixelAspectRatio,
-    TransformativeProperty,
+    AvifContainer, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay,
+    PixelAspectRatio, TransformativeProperty,
 };
 use gamut_core::ErrorKind;
 use gamut_isobmff::{ColourInformation, Item, NclxColr, Property, PropertyKind};
@@ -217,6 +217,51 @@ fn typed_property_accessors() {
             vert_off_d: 1,
         })
     );
+}
+
+#[test]
+fn mastering_display_types_the_mdcv_property() {
+    // Every field distinct, so a transposed primary pair or swapped luminance bound cannot
+    // reproduce the expected value. The `clli` ahead of it checks the lens skips other HDR
+    // properties rather than taking the first one.
+    let mdcv = MasteringDisplay {
+        display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]],
+        white_point: [15635, 16450],
+        max_display_mastering_luminance: 10_000_000,
+        min_display_mastering_luminance: 50,
+    };
+    let with_mdcv = Item {
+        properties: vec![
+            av1c(AV1C_444_8BIT.to_vec()),
+            prop(
+                false,
+                PropertyKind::ContentLightLevel {
+                    max_content_light_level: 1000,
+                    max_pic_average_light_level: 400,
+                },
+            ),
+            prop(
+                false,
+                PropertyKind::MasteringDisplayColourVolume {
+                    display_primaries: mdcv.display_primaries,
+                    white_point: mdcv.white_point,
+                    max_display_mastering_luminance: mdcv.max_display_mastering_luminance,
+                    min_display_mastering_luminance: mdcv.min_display_mastering_luminance,
+                },
+            ),
+        ],
+        ..item(1, *b"av01", vec![1, 2, 3, 4])
+    };
+    let without = Item {
+        properties: vec![av1c(AV1C_444_8BIT.to_vec())],
+        ..item(2, *b"av01", vec![5, 6, 7, 8])
+    };
+    let data = clean_file(1, vec![with_mdcv, without]);
+    let c = AvifContainer::parse(&data).unwrap();
+    let img = c.image();
+
+    assert_eq!(img.item(1).unwrap().mastering_display(), Some(mdcv));
+    assert_eq!(img.item(2).unwrap().mastering_display(), None);
 }
 
 #[test]

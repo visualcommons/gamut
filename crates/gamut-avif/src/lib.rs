@@ -220,8 +220,8 @@ pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder};
 pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
 pub use gamut_core::Dimensions;
 pub use image::{
-    AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, PixelAspectRatio,
-    TransformativeProperty,
+    AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay,
+    PixelAspectRatio, TransformativeProperty,
 };
 pub use obu::{Obu, ObuHeader, ObuIter, ObuType, iter_obus};
 pub use transform::{Mirror, Rotation};
