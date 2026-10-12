@@ -1492,9 +1492,9 @@ impl<'a> FrameEncoder<'a> {
     /// Whether a lossy block at MI `(r, c)` can be coded with `skip = 1` (no residual): every plane is
     /// flat over the block and its `DC_PRED` from the reconstruction exactly equals that value, so the
     /// residual is identically zero. For such a block `skip = 1` and `skip = 0` reconstruct to the
-    /// same samples (prediction), so signalling `skip` is a lossless bit saving. The luma mode a flat
-    /// block selects is `DC_PRED` with no CfL / filter-intra, so the predicted samples equal the
-    /// source — the chosen `skip` is therefore bit-exact regardless of the (deterministic) mode.
+    /// same samples (prediction), so signalling `skip` is a lossless bit saving. `encode_block` codes
+    /// such a block with `DC_PRED` luma and chroma, no CfL and no filter-intra, without searching,
+    /// so the predicted samples equal the source by construction.
     fn block_is_skippable(&self, r: usize, c: usize, bw: usize) -> bool {
         // A monochrome frame has only plane 0 to inspect (`NumPlanes == 1`).
         for plane in 0..self.num_planes {
@@ -1908,8 +1908,12 @@ impl<'a> FrameEncoder<'a> {
             .map(|i| self.decided.swap_remove(i));
         let luma = if let Some(d) = decided {
             d.luma
-        } else if palette.is_some() || self.qindex == 0 {
+        } else if skip || self.qindex == 0 {
             // Palette requires YMode == DC_PRED (and no filter-intra); lossless also forces DC_PRED.
+            // A block skipped for being flat and DC-predictable (`block_is_skippable`) takes
+            // DC_PRED by construction: the rate–distortion search trials every mode with its
+            // residual coded, a residual a skip block never codes, so it would rank the modes by
+            // the wrong reconstruction — and only DC_PRED is known to reproduce the source here.
             DC_LUMA
         } else {
             self.select_luma_mode(r, c, bw, bh, luma_tx)
@@ -1958,10 +1962,10 @@ impl<'a> FrameEncoder<'a> {
             bw.max(bh) <= 32
         };
         let is_lossy = self.qindex != 0;
-        let cfl = match (decided, block_has_chroma, palette.is_some()) {
+        let cfl = match (decided, block_has_chroma, skip) {
             (Some(d), ..) => d.cfl,
-            // No chroma of its own (or none in the frame at all), or a palette block — whose
-            // chroma is plain DC_PRED.
+            // No chroma of its own (or none in the frame at all), or a skip block — palette or
+            // flat, whose chroma is plain DC_PRED for the reason its luma is.
             (_, false, _) | (_, _, true) => None,
             _ if is_lossy && cfl_allowed && !is_rect => self.select_cfl(r, c, bw, luma, luma_tx),
             // CfL is square-only here; a rectangular block's chroma is plain DC_PRED.
@@ -5372,6 +5376,36 @@ mod tests {
         );
         let e = FrameEncoder::new(&outside, 40);
         assert!(e.block_is_skippable(0, 0, 8));
+    }
+
+    #[test]
+    fn a_skippable_block_is_coded_with_dc_pred_whatever_the_mode_rates() {
+        // `encode_block` codes a `block_is_skippable` block `skip = 1` with DC_PRED, without the
+        // rate–distortion search: that search trials a residual a skip block never codes. With the
+        // mode CDF adapted towards V_PRED — whose prediction of the frame's first block is the
+        // §7.11.2 `(1 << (BitDepth - 1)) - 1` above row, one off the flat source — a search left to
+        // run picks V_PRED and the skipped block reconstructs as 127 instead of 128. `qindex` 200
+        // makes a bit of rate outweigh that one-step error (at 40 the search keeps DC_PRED anyway).
+        let flat = planes_420_with(16, 16, |_, _, _| 128);
+        let mut e = at_speed(&flat, 200, Speed::Thorough);
+        e.clear_block_decoded(0, 0);
+        assert!(e.block_is_skippable(0, 0, 8));
+        let (amode, lmode) = e.y_mode_ctx(0, 0);
+        for _ in 0..64 {
+            e.sym.encode(
+                usize::from(V_PRED),
+                e.cdfs.intra_frame_y_mode[amode][lmode].slot(),
+            );
+        }
+        e.encode_block(0, 0, 8, 8);
+        assert_eq!(e.mi_ymode[0], DC_PRED);
+        let cw = e.geom[0].coded_w;
+        for y in 0..8 {
+            assert!(
+                e.recon[0][y * cw..y * cw + 8].iter().all(|&v| v == 128),
+                "row {y} reconstructs the source"
+            );
+        }
     }
 
     #[test]
