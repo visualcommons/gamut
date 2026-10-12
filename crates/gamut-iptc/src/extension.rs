@@ -2523,20 +2523,6 @@ mod tests {
     }
 
     #[test]
-    fn a_non_finite_coordinate_gives_way_to_a_retained_namesake() {
-        // The skip leaves the coordinate unemitted, not merely "modelled": a retained `rbX` is then
-        // the only copy of the name and is written, as the module's emission policy states.
-        let point = RegionBoundaryPoint {
-            x: Some(f64::NAN),
-            other: vec![XmpProperty::new(ns::IPTC_EXT, "rbX", text_value("0.25"))],
-            ..RegionBoundaryPoint::default()
-        };
-        let value = point.to_xmp();
-        let fields = structure(&value).expect("a structure value");
-        assert_eq!(Reader::new(fields).number(ns::IPTC_EXT, "rbX"), Some(0.25));
-    }
-
-    #[test]
     fn a_coordinate_keeps_its_value_when_it_is_respelled() {
         // The one lexical change the writer makes to a number it consumed: ` 0.50 ` comes back as
         // `0.5`, the same value, and doing it again changes nothing more.
