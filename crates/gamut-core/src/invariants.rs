@@ -26,6 +26,19 @@ use crate::convert::{
 };
 use crate::{ColorModel, Dimensions, ErrorKind, ImageBuf, Pixel, PixelFormat, Sample};
 
+/// The allocating conversion door a law observes.
+///
+/// Every public law hands it [`convert_from_raw`]; only this module's own falsifier tests hand it
+/// something else — a deliberately broken engine — because the real one honours every law, so
+/// under it the properties only ever reach a law's `Ok` arm. Taking the engine as a parameter is
+/// what lets a test prove each law can still report a violation.
+type Engine<S, Q> = fn(RawImage<'_, S>, ConvertPolicy) -> crate::Result<ImageBuf<Q>>;
+
+/// The in-place conversion door a law observes: [`convert_from_raw_into`] outside the falsifier
+/// tests. Companion to [`Engine`].
+type IntoEngine<S, Q> =
+    fn(RawImage<'_, S>, ConvertPolicy, &mut [<Q as Pixel>::Sample]) -> crate::Result<()>;
+
 /// The largest edge a normalised dimension can take.
 ///
 /// Conversion is uniform in the pixel count — it is a per-pixel loop — so a bounded universe costs
@@ -115,6 +128,25 @@ pub fn acceptance_is_independent_of_the_samples<S: Sample, Q: Pixel>(
     second: &[S],
     policy: ConvertPolicy,
 ) -> Result<(), Violation> {
+    acceptance_is_independent_of_the_samples_under(
+        convert_from_raw::<S, Q>,
+        format,
+        dims,
+        first,
+        second,
+        policy,
+    )
+}
+
+/// [`acceptance_is_independent_of_the_samples`] over an arbitrary [`Engine`].
+fn acceptance_is_independent_of_the_samples_under<S: Sample, Q: Pixel>(
+    engine: Engine<S, Q>,
+    format: PixelFormat,
+    dims: Dimensions,
+    first: &[S],
+    second: &[S],
+    policy: ConvertPolicy,
+) -> Result<(), Violation> {
     const LAW: &str = "acceptance_is_independent_of_the_samples";
 
     let (Ok(a), Ok(b)) = (
@@ -126,8 +158,8 @@ pub fn acceptance_is_independent_of_the_samples<S: Sample, Q: Pixel>(
         return Ok(());
     };
 
-    let first_ok = convert_from_raw::<S, Q>(a, policy).is_ok();
-    let second_ok = convert_from_raw::<S, Q>(b, policy).is_ok();
+    let first_ok = engine(a, policy).is_ok();
+    let second_ok = engine(b, policy).is_ok();
 
     if first_ok == second_ok {
         Ok(())
@@ -158,12 +190,33 @@ pub fn output_shape_matches_the_target_layout<S: Sample, Q: Pixel>(
     samples: &[S],
     policy: ConvertPolicy,
 ) -> Result<(), Violation> {
+    output_shape_matches_the_target_layout_under(
+        convert_from_raw::<S, Q>,
+        format,
+        dims,
+        samples,
+        policy,
+    )
+}
+
+/// [`output_shape_matches_the_target_layout`] over an arbitrary [`Engine`].
+///
+/// Only the dimensions arm is reachable from a broken engine: an [`ImageBuf`] cannot be built
+/// whose sample count disagrees with its own dimensions, so once those match the source's, the
+/// count arm can fire only if `ImageBuf`'s length invariant itself were broken.
+fn output_shape_matches_the_target_layout_under<S: Sample, Q: Pixel>(
+    engine: Engine<S, Q>,
+    format: PixelFormat,
+    dims: Dimensions,
+    samples: &[S],
+    policy: ConvertPolicy,
+) -> Result<(), Violation> {
     const LAW: &str = "output_shape_matches_the_target_layout";
 
     let Ok(src) = RawImage::<S>::new(samples, format, dims) else {
         return Ok(());
     };
-    let Ok(out) = convert_from_raw::<S, Q>(src, policy) else {
+    let Ok(out) = engine(src, policy) else {
         // A refused conversion has no output to check; refusal is another law's business.
         return Ok(());
     };
@@ -212,13 +265,28 @@ pub fn converting_a_layout_to_itself_changes_nothing<P: Pixel>(
     samples: &[P::Sample],
     policy: ConvertPolicy,
 ) -> Result<(), Violation> {
+    converting_a_layout_to_itself_changes_nothing_under::<P>(
+        convert_from_raw::<P::Sample, P>,
+        dims,
+        samples,
+        policy,
+    )
+}
+
+/// [`converting_a_layout_to_itself_changes_nothing`] over an arbitrary [`Engine`].
+fn converting_a_layout_to_itself_changes_nothing_under<P: Pixel>(
+    engine: Engine<P::Sample, P>,
+    dims: Dimensions,
+    samples: &[P::Sample],
+    policy: ConvertPolicy,
+) -> Result<(), Violation> {
     const LAW: &str = "converting_a_layout_to_itself_changes_nothing";
 
     let Ok(src) = RawImage::<P::Sample>::new(samples, P::FORMAT, dims) else {
         return Ok(());
     };
 
-    let out = match convert_from_raw::<P::Sample, P>(src, policy) {
+    let out = match engine(src, policy) {
         Ok(out) => out,
         Err(error) => {
             return Err(Violation::new(
@@ -299,6 +367,25 @@ pub fn the_in_place_door_matches_the_allocating_door<S: Sample, Q: Pixel>(
     samples: &[S],
     policy: ConvertPolicy,
 ) -> Result<(), Violation> {
+    the_in_place_door_matches_the_allocating_door_under(
+        convert_from_raw::<S, Q>,
+        convert_from_raw_into::<S, Q>,
+        format,
+        dims,
+        samples,
+        policy,
+    )
+}
+
+/// [`the_in_place_door_matches_the_allocating_door`] over an arbitrary pair of doors.
+fn the_in_place_door_matches_the_allocating_door_under<S: Sample, Q: Pixel>(
+    allocating: Engine<S, Q>,
+    into: IntoEngine<S, Q>,
+    format: PixelFormat,
+    dims: Dimensions,
+    samples: &[S],
+    policy: ConvertPolicy,
+) -> Result<(), Violation> {
     const LAW: &str = "the_in_place_door_matches_the_allocating_door";
 
     let (Ok(a), Ok(b)) = (
@@ -308,12 +395,12 @@ pub fn the_in_place_door_matches_the_allocating_door<S: Sample, Q: Pixel>(
         return Ok(());
     };
 
-    let allocated = convert_from_raw::<S, Q>(a, policy);
+    let allocated = allocating(a, policy);
     let Some(want) = dims.sample_count(Q::CHANNELS) else {
         return Ok(());
     };
     let mut storage: Vec<Q::Sample> = vec![Q::Sample::default(); want];
-    let in_place = convert_from_raw_into::<S, Q>(b, policy, &mut storage);
+    let in_place = into(b, policy, &mut storage);
 
     match (allocated, in_place) {
         (Ok(out), Ok(())) => {
@@ -650,18 +737,20 @@ mod tests {
 
     use super::{
         MAX_EDGE, NARROW_FORMATS, Violation, WIDE_FORMATS,
-        acceptance_is_independent_of_the_samples, alpha_image,
-        converting_a_layout_to_itself_changes_nothing, normalise_dims,
+        acceptance_is_independent_of_the_samples, acceptance_is_independent_of_the_samples_under,
+        alpha_image, converting_a_layout_to_itself_changes_nothing,
+        converting_a_layout_to_itself_changes_nothing_under, normalise_dims,
         opaque_pixels_are_fixed_points, output_shape_matches_the_target_layout,
-        palette_and_cmyk_convert_only_to_themselves,
+        output_shape_matches_the_target_layout_under, palette_and_cmyk_convert_only_to_themselves,
         premultiply_round_trip_is_bounded_and_idempotent, premultiply_rounds_to_nearest,
         split_pixel, the_in_place_door_matches_the_allocating_door,
+        the_in_place_door_matches_the_allocating_door_under,
         unpremultiply_rounds_to_nearest_or_clamps, widening_to_16_bit_and_back_is_exact,
     };
     use crate::convert::{AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy};
     use crate::{
-        Bilevel, Cmyk8, Dimensions, Gray8, Gray16, GrayAlpha8, GrayAlpha16, Indexed8, Pixel,
-        PixelFormat, Rgb8, Rgb16, Rgba8, Rgba16,
+        Bilevel, Cmyk8, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf,
+        Indexed8, Pixel, PixelFormat, Rgb8, Rgb16, Rgba8, Rgba16,
     };
 
     /// The workspace property-test configuration (`docs/testing.md`).
@@ -1034,6 +1123,173 @@ mod tests {
         assert!(
             crate::convert::convert_from_raw::<u8, Rgb8>(src, ConvertPolicy::permissive()).is_err(),
             "Indexed8 -> Rgb8 must be refused whatever the policy permits"
+        );
+    }
+
+    // ---- the laws' own failure paths --------------------------------------------------------
+    //
+    // The real engine honours every law, so each test below hands a law a deliberately broken
+    // engine through its `_under` seam and asserts the violation is reported, named, and
+    // described. One test per error arm: a law weakened to `Ok(())`, or an arm deleted, fails
+    // exactly one of them.
+
+    /// The 2x2 source every falsifier below converts.
+    fn two_by_two() -> Dimensions {
+        Dimensions::new(2, 2).expect("non-zero")
+    }
+
+    /// The refusal a broken engine returns.
+    fn refusal() -> Error {
+        Error::unsupported("invariants test", "refused by a broken engine")
+    }
+
+    #[test]
+    fn an_engine_that_reads_the_samples_violates_the_acceptance_law() {
+        // Accepts an all-zero image, refuses any other: acceptance decided by the data.
+        let violation = acceptance_is_independent_of_the_samples_under::<u8, Gray8>(
+            |src, _| {
+                if src.as_samples().iter().all(|&s| s == 0) {
+                    ImageBuf::zeroed(src.dimensions())
+                } else {
+                    Err(refusal())
+                }
+            },
+            PixelFormat::Gray8,
+            two_by_two(),
+            &[0, 0, 0, 0],
+            &[0, 0, 0, 1],
+            ConvertPolicy::lossless(),
+        )
+        .expect_err("data-dependent acceptance must violate the law");
+
+        assert_eq!(violation.law(), "acceptance_is_independent_of_the_samples");
+        assert!(
+            violation
+                .detail()
+                .contains("Gray8 -> Gray8: one sample buffer was accepted"),
+            "{violation}"
+        );
+    }
+
+    #[test]
+    fn an_engine_that_resizes_the_image_violates_the_shape_law() {
+        let violation = output_shape_matches_the_target_layout_under::<u8, Gray8>(
+            |_, _| ImageBuf::zeroed(Dimensions::new(1, 1).expect("non-zero")),
+            PixelFormat::Gray8,
+            two_by_two(),
+            &[1, 2, 3, 4],
+            ConvertPolicy::lossless(),
+        )
+        .expect_err("a resized output must violate the law");
+
+        assert_eq!(violation.law(), "output_shape_matches_the_target_layout");
+        assert!(violation.detail().contains("dimensions"), "{violation}");
+    }
+
+    #[test]
+    fn an_engine_that_refuses_the_identity_violates_the_identity_law() {
+        let violation = converting_a_layout_to_itself_changes_nothing_under::<Gray8>(
+            |_, _| Err(refusal()),
+            two_by_two(),
+            &[1, 2, 3, 4],
+            ConvertPolicy::lossless(),
+        )
+        .expect_err("a refused identity must violate the law");
+
+        assert_eq!(
+            violation.law(),
+            "converting_a_layout_to_itself_changes_nothing"
+        );
+        assert!(
+            violation.detail().contains("Gray8 -> itself was refused"),
+            "{violation}"
+        );
+    }
+
+    #[test]
+    fn an_engine_that_alters_the_samples_violates_the_identity_law() {
+        let violation = converting_a_layout_to_itself_changes_nothing_under::<Gray8>(
+            |src, _| ImageBuf::zeroed(src.dimensions()),
+            two_by_two(),
+            &[1, 2, 3, 4],
+            ConvertPolicy::lossless(),
+        )
+        .expect_err("an altered identity must violate the law");
+
+        assert_eq!(
+            violation.law(),
+            "converting_a_layout_to_itself_changes_nothing"
+        );
+        assert!(
+            violation
+                .detail()
+                .contains("Gray8 -> itself altered the samples"),
+            "{violation}"
+        );
+    }
+
+    #[test]
+    fn doors_that_write_different_samples_violate_the_door_law() {
+        let violation = the_in_place_door_matches_the_allocating_door_under::<u8, Gray8>(
+            crate::convert::convert_from_raw::<u8, Gray8>,
+            |_, _, dst| {
+                dst.fill(9);
+                Ok(())
+            },
+            PixelFormat::Gray8,
+            two_by_two(),
+            &[1, 2, 3, 4],
+            ConvertPolicy::lossless(),
+        )
+        .expect_err("diverging samples must violate the law");
+
+        assert_eq!(
+            violation.law(),
+            "the_in_place_door_matches_the_allocating_door"
+        );
+        assert!(
+            violation.detail().contains("wrote different samples"),
+            "{violation}"
+        );
+    }
+
+    #[test]
+    fn an_in_place_door_that_refuses_alone_violates_the_door_law() {
+        let violation = the_in_place_door_matches_the_allocating_door_under::<u8, Gray8>(
+            crate::convert::convert_from_raw::<u8, Gray8>,
+            |_, _, _| Err(refusal()),
+            PixelFormat::Gray8,
+            two_by_two(),
+            &[1, 2, 3, 4],
+            ConvertPolicy::lossless(),
+        )
+        .expect_err("a one-sided refusal must violate the law");
+
+        assert!(
+            violation
+                .detail()
+                .contains("the allocating door accepted, the in-place one refused"),
+            "{violation}"
+        );
+    }
+
+    #[test]
+    fn an_allocating_door_that_refuses_alone_violates_the_door_law() {
+        let violation = the_in_place_door_matches_the_allocating_door_under::<u8, Gray8>(
+            |_, _| Err(refusal()),
+            crate::convert::convert_from_raw_into::<u8, Gray8>,
+            PixelFormat::Gray8,
+            two_by_two(),
+            &[1, 2, 3, 4],
+            ConvertPolicy::lossless(),
+        )
+        .expect_err("a one-sided refusal must violate the law");
+
+        assert!(
+            violation
+                .detail()
+                .contains("the in-place door accepted, the allocating one refused"),
+            "{violation}"
         );
     }
 
