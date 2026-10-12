@@ -84,6 +84,16 @@ pub(crate) const DIMENSION_LIMIT: &str =
 /// [`DecodeLimits::max_pixels`].
 pub(crate) const PIXEL_LIMIT: &str = "AVIF: image pixel count exceeds DecodeLimits::max_pixels";
 
+/// The message of the error [`DecodeLimits`] raises for a coded-item decode past
+/// [`DecodeLimits::max_decoded_items`].
+pub(crate) const DECODED_ITEM_LIMIT: &str =
+    "AVIF: coded-item decodes exceed DecodeLimits::max_decoded_items";
+
+/// The message of the error [`DecodeLimits`] raises for a derived-item evaluation past
+/// [`DecodeLimits::max_derived_items`].
+pub(crate) const DERIVED_ITEM_LIMIT: &str =
+    "AVIF: derived-item evaluations exceed DecodeLimits::max_derived_items";
+
 /// Resource ceilings for the decode pipeline, checked **before** every canvas or plane the
 /// pipeline sizes from the file.
 ///
@@ -111,9 +121,29 @@ pub(crate) const PIXEL_LIMIT: &str = "AVIF: image pixel count exceeds DecodeLimi
 /// Separately from these caps, every full-image buffer the pipeline allocates is reserved
 /// fallibly: an allocation the system refuses is [`Error::Unsupported`] too, never an abort.
 ///
+/// **Work.** The size caps bound each image, not how many a file makes the pipeline produce: a
+/// derivation may name one item many times (a `grid`'s `dimg` list may repeat a tile, and a `grid`
+/// or `iovl` may reference another derived item), so a few nested references multiply into an
+/// exponential number of evaluations from a small file, every one of them within the size caps.
+/// Two counts therefore bound one top-level call (one `decode_item_*`/`decode_primary_*`
+/// invocation, alpha auxiliary included): [`max_decoded_items`](Self::max_decoded_items) caps the
+/// [`Av1StillDecoder::decode_still`] calls and [`max_derived_items`](Self::max_derived_items) the
+/// `grid`/`iden`/`iovl` evaluations. An item is counted each time it is evaluated, not once per
+/// file, so a repeated reference costs what it does. The refusal is raised *before* the call or
+/// evaluation it would exceed, so with the size caps the work of one call is at most
+/// `max_decoded_items + max_derived_items` images, each within the caps above.
+///
 /// The defaults are libavif's (`AVIF_DEFAULT_IMAGE_DIMENSION_LIMIT` and
 /// `AVIF_DEFAULT_IMAGE_SIZE_LIMIT`, the reference decoder this crate is validated against), so a
-/// file libavif decodes under its defaults is not refused here for size. This is a different type
+/// file libavif decodes under its defaults is not refused here for size. The work defaults are
+/// this crate's own, sized so that no file libavif decodes is refused here for its count: libavif
+/// requires a `grid`'s tiles to be coded items and supports no `iovl`, so the most it decodes for
+/// one still is a full `grid` plus a full alpha `grid` — 2 × 256 × 256 coded tiles, the `grid`
+/// payload's 8-bit `rows_minus_one`/`columns_minus_one` (ISO/IEC 23008-12 §6.6.2.3.2) being what
+/// bounds a grid at 256 × 256. The derived default, 1024, is far above the two `grid`s libavif
+/// evaluates; what it stops accepting are files only this crate's wider derivation support reaches,
+/// such as a `grid` of more than 1023 `iden` tiles, which libavif refuses outright. This is a
+/// different type
 /// from `gamut_av1::DecodeLimits`: that one caps a single AV1 frame (and its tile count) inside
 /// the codec, this one caps the container's derived images, which may be larger than any one
 /// frame.
@@ -129,6 +159,12 @@ pub struct DecodeLimits {
     /// The largest accepted pixel count (`width × height`), bounding the allocation independently
     /// of the aspect ratio. Default 16384 × 16384 (268 435 456).
     pub max_pixels: u64,
+    /// The most [`Av1StillDecoder::decode_still`] calls one top-level decode makes. Default
+    /// 131072 (2 × 256 × 256: a full `grid` and a full alpha `grid`).
+    pub max_decoded_items: u32,
+    /// The most derived-item (`grid`/`iden`/`iovl`) evaluations one top-level decode makes.
+    /// Default 1024.
+    pub max_derived_items: u32,
 }
 
 impl Default for DecodeLimits {
@@ -138,12 +174,29 @@ impl Default for DecodeLimits {
 }
 
 impl DecodeLimits {
-    /// Limits capping each dimension at `max_dimension` and the pixel count at `max_pixels`.
+    /// Limits capping each dimension at `max_dimension` and the pixel count at `max_pixels`, with
+    /// the default work caps ([`max_decoded_items`](Self::max_decoded_items) 131072,
+    /// [`max_derived_items`](Self::max_derived_items) 1024); set those with
+    /// [`with_item_limits`](Self::with_item_limits).
     #[must_use]
     pub const fn new(max_dimension: u32, max_pixels: u64) -> Self {
         Self {
             max_dimension,
             max_pixels,
+            max_decoded_items: 2 * 256 * 256,
+            max_derived_items: 1024,
+        }
+    }
+
+    /// These limits with the work caps replaced: at most `max_decoded_items`
+    /// [`Av1StillDecoder::decode_still`] calls and `max_derived_items` derived-item evaluations per
+    /// top-level decode.
+    #[must_use]
+    pub const fn with_item_limits(self, max_decoded_items: u32, max_derived_items: u32) -> Self {
+        Self {
+            max_decoded_items,
+            max_derived_items,
+            ..self
         }
     }
 
@@ -363,8 +416,10 @@ impl AvifImage {
     /// with no colour conversion or transformative properties applied (drive those from the
     /// item's [`AvifItem`](crate::AvifItem) accessors).
     ///
-    /// The item is resolved through its derivation, recursively and depth-limited (a self- or
-    /// mutually-referential `dimg` graph errors rather than recursing forever):
+    /// The item is resolved through its derivation, recursively, depth-limited (a self- or
+    /// mutually-referential `dimg` graph errors rather than recursing forever) and work-limited (a
+    /// repeated reference is evaluated again and counted again, against
+    /// [`DecodeLimits::max_decoded_items`] and [`DecodeLimits::max_derived_items`]):
     ///
     /// - **Coded** (`av01`): the payload is validated against the AVIF still-image constraints
     ///   ([`Av1Config::validate_still_payload`]) and handed to `decoder`.
@@ -388,7 +443,8 @@ impl AvifImage {
     /// violating the still-image constraints, a derivation cycle, or a malformed derivation;
     /// [`Error::Unsupported`] for an `iovl`, a non-AV1 coded item, an item with an unrecognised
     /// essential property, a non-uniform grid, a derivation nested past the internal depth
-    /// limit, an image past the [`DecodeLimits`], or an allocation the system refuses; and
+    /// limit, an image or a count of decodes/derivations past the [`DecodeLimits`], or an
+    /// allocation the system refuses; and
     /// propagates the `decoder`'s errors.
     pub fn decode_item_planar(
         &self,
@@ -409,8 +465,8 @@ impl AvifImage {
         decoder: &mut dyn Av1StillDecoder,
         limits: DecodeLimits,
     ) -> Result<DecodedFrame> {
-        let mut stack = Vec::new();
-        self.decode_planar_inner(id, decoder, &mut stack, limits)
+        let mut walk = Walk::default();
+        self.decode_planar_inner(id, decoder, &mut walk, limits)
     }
 
     /// Decodes an item to a presentation-ready [`ImageBuf<Rgba8>`]: planar decode (or `iovl`
@@ -501,8 +557,8 @@ impl AvifImage {
         decoder: &mut dyn Av1StillDecoder,
         limits: DecodeLimits,
     ) -> Result<ImageBuf<Rgba8>> {
-        let mut stack = Vec::new();
-        let (rgba, dims) = self.decode_rgba_inner::<u8>(id, decoder, &mut stack, limits)?;
+        let mut walk = Walk::default();
+        let (rgba, dims) = self.decode_rgba_inner::<u8>(id, decoder, &mut walk, limits)?;
         ImageBuf::<Rgba8>::new(rgba, dims)
     }
 
@@ -584,8 +640,8 @@ impl AvifImage {
         decoder: &mut dyn Av1StillDecoder,
         limits: DecodeLimits,
     ) -> Result<ImageBuf<Rgba16>> {
-        let mut stack = Vec::new();
-        let (rgba, dims) = self.decode_rgba_inner::<u16>(id, decoder, &mut stack, limits)?;
+        let mut walk = Walk::default();
+        let (rgba, dims) = self.decode_rgba_inner::<u16>(id, decoder, &mut walk, limits)?;
         ImageBuf::<Rgba16>::new(rgba, dims)
     }
 
@@ -623,7 +679,7 @@ impl AvifImage {
         &self,
         id: u32,
         decoder: &mut dyn Av1StillDecoder,
-        stack: &mut Vec<u32>,
+        walk: &mut Walk,
         limits: DecodeLimits,
     ) -> Result<DecodedFrame> {
         let item = self.item(id).ok_or_else(|| {
@@ -635,9 +691,9 @@ impl AvifImage {
                 "AVIF: item has an unrecognised essential property",
             ));
         }
-        enter_derivation(stack, id)?;
-        let out = self.decode_planar_kind(id, item, decoder, stack, limits);
-        stack.pop();
+        enter_derivation(&mut walk.stack, id)?;
+        let out = self.decode_planar_kind(id, item, decoder, walk, limits);
+        walk.stack.pop();
         out
     }
 
@@ -646,7 +702,7 @@ impl AvifImage {
         id: u32,
         item: AvifItem<'_>,
         decoder: &mut dyn Av1StillDecoder,
-        stack: &mut Vec<u32>,
+        walk: &mut Walk,
         limits: DecodeLimits,
     ) -> Result<DecodedFrame> {
         match item.kind() {
@@ -667,6 +723,7 @@ impl AvifImage {
                 if let Some(declared) = item.dimensions() {
                     limits.check(declared.width, declared.height)?;
                 }
+                walk.charge_decode(limits)?;
                 let frame = decoder.decode_still(&config, payload)?;
                 limits.check(frame.width, frame.height)?;
                 Ok(frame)
@@ -682,9 +739,13 @@ impl AvifImage {
                         "AVIF: iden item must reference exactly one source",
                     ));
                 };
-                self.decode_planar_inner(*source, decoder, stack, limits)
+                walk.charge_derivation(limits)?;
+                self.decode_planar_inner(*source, decoder, walk, limits)
             }
-            ItemKind::Grid => self.decode_grid(id, item, decoder, stack, limits),
+            ItemKind::Grid => {
+                walk.charge_derivation(limits)?;
+                self.decode_grid(id, item, decoder, walk, limits)
+            }
             ItemKind::Overlay => Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "AVIF: overlay compositing is not available on the planar surface (use the RGBA path)",
@@ -701,7 +762,7 @@ impl AvifImage {
         id: u32,
         item: AvifItem<'_>,
         decoder: &mut dyn Av1StillDecoder,
-        stack: &mut Vec<u32>,
+        walk: &mut Walk,
         limits: DecodeLimits,
     ) -> Result<DecodedFrame> {
         // `grid` validates the payload and that the tile count equals rows * columns.
@@ -718,7 +779,7 @@ impl AvifImage {
         // outgrow the limits.
         let mut tiles: Vec<DecodedFrame> = Vec::with_capacity(cols * rows);
         for &tile_id in item.derivation_target_ids() {
-            let tile = self.decode_planar_inner(tile_id, decoder, stack, limits)?;
+            let tile = self.decode_planar_inner(tile_id, decoder, walk, limits)?;
             match tiles.first() {
                 None => {
                     check_grid_canvas((cols, rows), (tile.width, tile.height), (ow, oh), limits)?
@@ -789,7 +850,7 @@ impl AvifImage {
         &self,
         id: u32,
         decoder: &mut dyn Av1StillDecoder,
-        stack: &mut Vec<u32>,
+        walk: &mut Walk,
         limits: DecodeLimits,
     ) -> Result<(Vec<T>, Dimensions)> {
         let item = self.item(id).ok_or_else(|| {
@@ -803,18 +864,19 @@ impl AvifImage {
         }
 
         let (rgba, w, h) = if matches!(item.kind(), ItemKind::Overlay) {
-            enter_derivation(stack, id)?;
-            let composited = self.composite_overlay(id, item, decoder, stack, limits);
-            stack.pop();
+            walk.charge_derivation(limits)?;
+            enter_derivation(&mut walk.stack, id)?;
+            let composited = self.composite_overlay(id, item, decoder, walk, limits);
+            walk.stack.pop();
             composited?
         } else {
             // The planar path applies its own cycle/depth guard for `id`, and its own limits: a
             // frame it returns is within them, so the RGBA buffer sized from it is too.
-            let frame = self.decode_planar_inner(id, decoder, stack, limits)?;
+            let frame = self.decode_planar_inner(id, decoder, walk, limits)?;
             let mut rgba = frame_to_rgba(&frame, self.colour_params(&item)?)?;
             let (w, h) = (frame.width, frame.height);
             if let Some(alpha) = self.alpha_auxiliary_of(id) {
-                let alpha_frame = self.decode_planar_inner(alpha.id(), decoder, stack, limits)?;
+                let alpha_frame = self.decode_planar_inner(alpha.id(), decoder, walk, limits)?;
                 apply_alpha(&mut rgba, w as usize, h as usize, &alpha_frame)?;
             }
             (rgba, w, h)
@@ -829,7 +891,7 @@ impl AvifImage {
         id: u32,
         item: AvifItem<'_>,
         decoder: &mut dyn Av1StillDecoder,
-        stack: &mut Vec<u32>,
+        walk: &mut Walk,
         limits: DecodeLimits,
     ) -> Result<(Vec<T>, u32, u32)> {
         // `overlay` validates the payload holds exactly one offset per `dimg` reference.
@@ -861,7 +923,7 @@ impl AvifImage {
             px.copy_from_slice(&fill);
         }
         for (&input_id, &(dx, dy)) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
-            let (src, dims) = self.decode_rgba_inner::<T>(input_id, decoder, stack, limits)?;
+            let (src, dims) = self.decode_rgba_inner::<T>(input_id, decoder, walk, limits)?;
             composite_over(
                 &mut canvas,
                 (ow, oh),
@@ -875,6 +937,42 @@ impl AvifImage {
 }
 
 // ---- derivation recursion guard --------------------------------------------------------------
+
+/// The state of one top-level decode's walk through the derivation graph: the current branch
+/// (for the cycle and depth guard) and the work spent so far against the [`DecodeLimits`] work
+/// caps. One is created per public `decode_*` call and threaded through every recursive step, so
+/// the alpha auxiliary and every repeated reference draw on the same budget.
+#[derive(Debug, Default)]
+struct Walk {
+    /// The items being evaluated on the current branch, outermost first.
+    stack: Vec<u32>,
+    /// [`Av1StillDecoder::decode_still`] calls made so far.
+    decoded: u32,
+    /// Derived-item evaluations started so far.
+    derived: u32,
+}
+
+impl Walk {
+    /// Counts one [`Av1StillDecoder::decode_still`] call, refusing it if `limits` allow no more.
+    fn charge_decode(&mut self, limits: DecodeLimits) -> Result<()> {
+        self.decoded = charge(self.decoded, limits.max_decoded_items, DECODED_ITEM_LIMIT)?;
+        Ok(())
+    }
+
+    /// Counts one derived-item evaluation, refusing it if `limits` allow no more.
+    fn charge_derivation(&mut self, limits: DecodeLimits) -> Result<()> {
+        self.derived = charge(self.derived, limits.max_derived_items, DERIVED_ITEM_LIMIT)?;
+        Ok(())
+    }
+}
+
+/// `spent + 1`, or the work-limit refusal `message` if `spent` has already reached `cap`.
+fn charge(spent: u32, cap: u32, message: &'static str) -> Result<u32> {
+    if spent >= cap {
+        return Err(Error::unsupported(env!("CARGO_PKG_NAME"), message));
+    }
+    Ok(spent + 1)
+}
 
 /// Cycle- and depth-checks a derivation step, then records `id` on the recursion `stack`. The
 /// caller pops `id` when the step completes.
@@ -1503,7 +1601,10 @@ fn composite_over<T: RgbaSample>(
 mod tests {
     use gamut_core::ErrorKind;
 
-    use super::{DIMENSION_LIMIT, DecodeLimits, PIXEL_LIMIT, check_grid_canvas, try_filled};
+    use super::{
+        DECODED_ITEM_LIMIT, DIMENSION_LIMIT, DecodeLimits, PIXEL_LIMIT, charge, check_grid_canvas,
+        try_filled,
+    };
 
     /// The refusal `result` carries, as `(kind, message)`.
     fn refusal(result: gamut_core::Result<()>) -> (ErrorKind, Option<&'static str>) {
@@ -1517,6 +1618,41 @@ mod tests {
         let limits = DecodeLimits::default();
         assert_eq!(limits.max_dimension, 32768);
         assert_eq!(limits.max_pixels, 16384 * 16384);
+    }
+
+    #[test]
+    fn default_work_caps_admit_a_full_grid_and_a_full_alpha_grid() {
+        // A grid's rows/columns are 8-bit minus-one fields: at most 256 x 256 tiles, twice over.
+        let limits = DecodeLimits::default();
+        assert_eq!(limits.max_decoded_items, 2 * 256 * 256);
+        assert_eq!(limits.max_derived_items, 1024);
+    }
+
+    #[test]
+    fn with_item_limits_sets_the_work_caps_and_keeps_the_size_caps() {
+        let limits = DecodeLimits::new(10, 50).with_item_limits(3, 7);
+        assert_eq!(
+            (
+                limits.max_dimension,
+                limits.max_pixels,
+                limits.max_decoded_items,
+                limits.max_derived_items
+            ),
+            (10, 50, 3, 7)
+        );
+    }
+
+    #[test]
+    fn charge_counts_up_to_the_cap_and_refuses_at_it() {
+        assert_eq!(charge(0, 2, DECODED_ITEM_LIMIT).unwrap(), 1);
+        assert_eq!(charge(1, 2, DECODED_ITEM_LIMIT).unwrap(), 2);
+        assert_eq!(
+            refusal(charge(2, 2, DECODED_ITEM_LIMIT).map(drop)),
+            (ErrorKind::Unsupported, Some(DECODED_ITEM_LIMIT))
+        );
+        // A zero cap admits nothing, and a saturated counter cannot wrap past the cap.
+        assert!(charge(0, 0, DECODED_ITEM_LIMIT).is_err());
+        assert!(charge(u32::MAX, u32::MAX, DECODED_ITEM_LIMIT).is_err());
     }
 
     #[test]
@@ -1737,7 +1873,7 @@ mod tests {
             let sizes = |bytes: Vec<u8>| {
                 let image = AvifContainer::parse(&bytes).unwrap().image().clone();
                 let rgba = image
-                    .decode_primary_rgba16_with_limits(&mut StubDecoder::default(), CEILING)
+                    .decode_primary_rgba16_with_limits(&mut StubDecoder, CEILING)
                     .unwrap();
                 (rgba.width(), rgba.height())
             };
