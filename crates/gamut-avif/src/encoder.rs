@@ -2627,4 +2627,55 @@ mod tests {
             assert!(!f.windows(4).any(|w| w == b"irot"), "mirror only ⇒ no irot");
         }
     }
+
+    /// The widened `Gray8` path (`monochrome_still16` over `gray8_widened`) codes its still at the
+    /// encoder's preset: at 10 and 12 bits the primary item is `gamut-av1`'s own output for the
+    /// widened plane at that preset. Reads the private `gray8_widened`, so it lives here.
+    #[test]
+    fn gray8_high_bit_depth_codes_its_still_at_the_chosen_preset() {
+        const W: u32 = 40;
+        const H: u32 = 24;
+        let px: Vec<u8> = (0..H)
+            .flat_map(|y| (0..W).map(move |x| ((x * x + y * 29) & 0xff) as u8))
+            .collect();
+        let image = ImageRef::<Gray8>::new(
+            &px,
+            Dimensions {
+                width: W,
+                height: H,
+            },
+        )
+        .unwrap();
+        for depth in [BitDepth::Ten, BitDepth::Twelve] {
+            let primary_at = |speed| {
+                let enc = AvifEncoder::lossy(50)
+                    .with_bit_depth(depth)
+                    .with_speed(speed);
+                let bytes = enc.encode_to_vec(image).unwrap();
+                let container = AvifContainer::parse(&bytes).expect("parses");
+                container
+                    .image()
+                    .primary_item()
+                    .as_isobmff_item()
+                    .payload
+                    .clone()
+            };
+            let want = encode_still_intra16_with_speed(
+                &gray8_widened(image, depth).unwrap(),
+                127,
+                Av1Colour::monochrome(),
+                Speed::Fastest,
+            )
+            .unwrap()
+            .0
+            .obus;
+            let fastest = primary_at(Speed::Fastest);
+            assert_eq!(fastest, want, "{depth:?}");
+            assert_ne!(
+                fastest,
+                primary_at(Speed::Thorough),
+                "{depth:?}: the fixture separates the presets"
+            );
+        }
+    }
 }
