@@ -281,8 +281,8 @@ run = "cargo test --workspace --all-features --doc"
 # narrowed, a module un-published) with no signal at the point of change. `--all-features` so
 # feature-gated items' docs are checked too. `--no-deps` keeps it to this workspace's own docs.
 #
-# `gamut-png` is excluded only while its source is frozen behind PR #625: its three broken links
-# are tracked in their own issue, which removes this `--exclude` when it lands.
+# `gamut-png` is excluded only until issue #714 repairs its four broken links; that issue removes
+# this `--exclude`.
 [tasks.doc]
 description = "Build the workspace's rustdoc with warnings as errors (broken intra-doc links fail)"
 env = { RUSTDOCFLAGS = "-D warnings" }
