@@ -65,6 +65,9 @@ jobs:
         # README.md. Nothing is built and nothing is fetched. A drift guard that runs nowhere
         # cannot guard against drift, so it runs here beside the other three static checks.
         run: mise run check-readme-crates
+      - name: AGENTS.md dependency edges
+        # Static, like the step above: `cargo metadata --no-deps` plus awk over AGENTS.md.
+        run: mise run check-agents-edges
       - name: Test conventions (docs/testing.md)
         # Static: greps the tree, builds nothing, sub-second. Enforces that every integration-test
         # file names what it pins, that every proptest configuration pins its seed and disables
