@@ -120,10 +120,11 @@ impl ExifReader {
     /// alongside a [`ReadReport`] naming each discarded region, so a caller can tell a blob that
     /// never carried GPS from one whose GPS pointer was dangling.
     ///
-    /// The report covers the regions [`DroppedRegion`](crate::DroppedRegion) enumerates (and,
-    /// under [`recover_entries`](Self::recover_entries), the entries it skipped) and is complete
-    /// over them. Its drop lists are **not** a byte-completeness verdict, and an empty report does
-    /// not mean the parse lost nothing — see the [`report`](crate::report) module.
+    /// The report covers the regions [`DroppedRegion`](crate::DroppedRegion) enumerates and the
+    /// entries the kept directories lost — every one a repeated tag shadowed, and, under
+    /// [`recover_entries`](Self::recover_entries), every one it skipped — and is complete over
+    /// them. Its drop lists are **not** a byte-completeness verdict: an empty report says nothing
+    /// about source bytes no structure claims — see the [`report`](crate::report) module.
     /// [`audit_bytes`](Self::audit_bytes) adds that verdict.
     ///
     /// ```

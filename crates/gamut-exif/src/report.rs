@@ -19,21 +19,26 @@
 //!   [`byte_audit`](ReadReport::byte_audit): `gamut-ifd`'s audit engine classifying every byte of
 //!   the TIFF stream, or naming precisely the ones no structure claims.
 //!
+//! Whatever the options, a **duplicate tag** within a surviving directory is named too: the model
+//! keeps one value per tag — the last occurrence — so every earlier entry for that tag is a
+//! [`DroppedEntry`] whose [`reason`](DroppedEntry::reason) is [`EntryDropReason::Shadowed`]. TIFF
+//! 6.0 §2 gives a directory one entry per tag, so such a file is out of spec, but the signal is a
+//! report entry rather than a [`strict`](crate::ExifReader::strict)-mode rejection.
+//!
 //! # What this report does and does not claim
 //!
 //! It covers exactly the regions [`DroppedRegion`] enumerates — the three pointer-addressed
-//! sub-IFDs, the thumbnail's JPEG bytes, and any top-level directory past the 1st IFD — and, under
-//! `recover_entries`, every entry a surviving directory skipped. Within that set it is complete:
+//! sub-IFDs, the thumbnail's JPEG bytes, and any top-level directory past the 1st IFD — and the
+//! entries of every directory the model keeps: each one a duplicate tag shadowed, and, under
+//! `recover_entries`, each one whose value could not be read. Within that set it is complete:
 //! nothing in it is discarded without an entry.
 //!
 //! The drop lists are **not** a byte-completeness verdict, and [`is_empty`](ReadReport::is_empty)
-//! does not mean "this parse lost nothing". One known loss sits outside them, below this crate in
-//! [`gamut_ifd`]: a **duplicate tag** within one directory keeps the last occurrence and discards
-//! the earlier one. `gamut-ifd` names those as `AuditFinding::ShadowedEntry` (issue #528), but this
-//! report does not surface them yet (issue #719) — and the byte audit cannot stand in for that: a
-//! shadowed entry's record lies inside its directory's body, so its bytes count as claimed. What
-//! the audit adds is every byte the drop lists cannot speak to: a gap between structures, a
-//! trailer, a region no pointer reaches.
+//! does not mean "every source byte reached the model": a gap between structures, a trailer, or a
+//! region no pointer reaches is not a *discard* of anything the parse read, so the drop lists have
+//! nothing to say about it. That is the byte audit's question. The converse holds too — the audit
+//! cannot stand in for the drop lists: a shadowed entry's record lies inside its directory's body,
+//! so its bytes count as claimed, and only [`EntryDropReason::Shadowed`] names it.
 
 use core::fmt;
 
@@ -266,13 +271,56 @@ impl fmt::Display for Dropped {
     }
 }
 
-/// One directory entry a [`recover_entries`](crate::ExifReader::recover_entries) parse skipped
-/// because its value could not be read, while the rest of its directory survived.
+/// Why a single directory entry was discarded while the rest of its directory survived.
 ///
-/// The value was unreadable for a reason in the bytes: its count overflows, its value offset or
-/// span lies outside the TIFF stream, or it does not decode as its declared type (an `ASCII` field
-/// that is not UTF-8). The report names the entry, not the defect; re-reading the entry record at
-/// [`offset`](Self::offset) through [`gamut_ifd::IfdReader::value`] reproduces the exact error.
+/// Fieldless with an explicit `repr` and append-only discriminants; `#[non_exhaustive]` so reasons
+/// can be added post-1.0 without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum EntryDropReason {
+    /// The entry's value could not be read, and a
+    /// [`recover_entries`](crate::ExifReader::recover_entries) parse skipped it: its count
+    /// overflows, its value offset or span lies outside the TIFF stream, or it does not decode as
+    /// its declared type (an `ASCII` field that is not UTF-8). Re-reading the entry record at
+    /// [`DroppedEntry::offset`] through [`gamut_ifd::IfdReader::value`] reproduces the exact error.
+    ///
+    /// Never recorded without that option, whose absence makes such an entry fail its whole
+    /// directory instead.
+    Unreadable = 0,
+    /// A later entry in the same directory repeats this entry's tag. The directory holds one value
+    /// per tag and keeps the **last** occurrence (`gamut-ifd`'s rule; libtiff keeps the first), so
+    /// this one is discarded — one record per shadowed entry, so a tag written three times yields
+    /// two.
+    ///
+    /// Recorded in every mode, [`strict`](crate::ExifReader::strict) included. A duplicate tag
+    /// breaks TIFF 6.0 §2's one-entry-per-tag rule, but every entry of it was read, so strictness —
+    /// which rejects what cannot be read — has no grounds to refuse a file over it. The shadowed
+    /// value was still decoded: a malformed one fails (or, under `recover_entries`, is skipped as
+    /// [`Unreadable`](Self::Unreadable) and then shadows nothing) exactly as any other entry does.
+    ///
+    /// **Round trip.** The [`Exif`](crate::Exif) holds only the survivor, so
+    /// [`to_bytes`](crate::Exif::to_bytes) writes the directory with one entry for the tag; this
+    /// record is the only trace that the others existed.
+    Shadowed = 1,
+}
+
+impl EntryDropReason {
+    /// The clause [`DroppedEntry`]'s `Display` uses for this reason.
+    const fn clause(self) -> &'static str {
+        match self {
+            Self::Unreadable => "its value could not be read",
+            Self::Shadowed => "a later entry repeats its tag",
+        }
+    }
+}
+
+/// One directory entry a parse discarded while the rest of its directory survived, named by the
+/// directory, the tag, the entry record's offset, and [why](EntryDropReason).
+///
+/// The report names the entry, not the defect behind it: for an
+/// [`Unreadable`](EntryDropReason::Unreadable) entry, re-reading the record at
+/// [`offset`](Self::offset) reproduces the exact error.
 ///
 /// `Copy` plain data reachable through accessors, so it is representable across an FFI boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -280,12 +328,19 @@ pub struct DroppedEntry {
     ifd: IfdKind,
     tag: u16,
     offset: u64,
+    reason: EntryDropReason,
 }
 
 impl DroppedEntry {
-    /// Records that `ifd`'s entry for `tag`, whose record sits at `offset`, was skipped.
-    pub(crate) const fn new(ifd: IfdKind, tag: u16, offset: u64) -> Self {
-        Self { ifd, tag, offset }
+    /// Records that `ifd`'s entry for `tag`, whose record sits at `offset`, was discarded for
+    /// `reason`.
+    pub(crate) const fn new(ifd: IfdKind, tag: u16, offset: u64, reason: EntryDropReason) -> Self {
+        Self {
+            ifd,
+            tag,
+            offset,
+            reason,
+        }
     }
 
     /// The directory the entry belonged to — which still parsed, minus this entry.
@@ -294,24 +349,32 @@ impl DroppedEntry {
         self.ifd
     }
 
-    /// The skipped entry's tag. Look it up with
+    /// The discarded entry's tag. Look it up with
     /// [`ExifTag::from_id`](crate::ExifTag::from_id) against [`ifd`](Self::ifd).
     #[must_use]
     pub const fn tag(self) -> u16 {
         self.tag
     }
 
-    /// The offset of the skipped entry's own 12-byte record, relative to the start of the TIFF
+    /// The offset of the discarded entry's own 12-byte record, relative to the start of the TIFF
     /// stream — the frame [`Dropped::offset`] uses, not the frame of the crate's error messages.
+    /// For a [`Shadowed`](EntryDropReason::Shadowed) entry this tells it apart from the survivor
+    /// that shares its tag.
     #[must_use]
     pub const fn offset(self) -> u64 {
         self.offset
     }
+
+    /// Why the entry was discarded.
+    #[must_use]
+    pub const fn reason(self) -> EntryDropReason {
+        self.reason
+    }
 }
 
 impl fmt::Display for DroppedEntry {
-    /// `dropped entry (tag <t>) in <directory> at offset <n>: its value could not be read` — the
-    /// same grammar as [`Dropped`]'s, with the directory the entry was skipped from.
+    /// `dropped entry (tag <t>) in <directory> at offset <n>: <reason>` — the same grammar as
+    /// [`Dropped`]'s, with the directory the entry was discarded from.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ifd = match self.ifd {
             IfdKind::Image => "0th IFD",
@@ -322,15 +385,18 @@ impl fmt::Display for DroppedEntry {
         };
         write!(
             f,
-            "dropped entry (tag {:#06x}) in {ifd} at offset {}: its value could not be read",
-            self.tag, self.offset
+            "dropped entry (tag {:#06x}) in {ifd} at offset {}: {}",
+            self.tag,
+            self.offset,
+            self.reason.clause()
         )
     }
 }
 
-/// What a lenient parse discarded, over the regions [`DroppedRegion`] enumerates and — under
-/// [`recover_entries`](crate::ExifReader::recover_entries) — the entries surviving directories
-/// skipped, plus the opt-in byte-completeness verdict of
+/// What a lenient parse discarded, over the regions [`DroppedRegion`] enumerates and the entries
+/// surviving directories lost — every [shadowed](EntryDropReason::Shadowed) duplicate, and under
+/// [`recover_entries`](crate::ExifReader::recover_entries) every
+/// [unreadable](EntryDropReason::Unreadable) entry — plus the opt-in byte-completeness verdict of
 /// [`audit_bytes`](crate::ExifReader::audit_bytes).
 ///
 /// Obtained from [`ExifReader::parse_with_report`](crate::ExifReader::parse_with_report) or
@@ -341,8 +407,7 @@ impl fmt::Display for DroppedEntry {
 /// grounds to reject it and it is reported in both modes.
 ///
 /// Read the module documentation for what the drop lists deliberately do **not** cover: they are
-/// not a byte-completeness verdict — [`byte_audit`](Self::byte_audit) is — and a shadowed duplicate
-/// tag is not named in them.
+/// not a byte-completeness verdict — [`byte_audit`](Self::byte_audit) is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadReport {
     dropped: Vec<Dropped>,
@@ -363,10 +428,16 @@ impl ReadReport {
         &self.dropped
     }
 
-    /// Every entry a [`recover_entries`](crate::ExifReader::recover_entries) parse skipped, in the
-    /// order the reader met them: the 0th IFD's, the 1st IFD's, then the Exif, GPS and Interop
-    /// sub-IFDs', each in on-disk order. Always empty without that option, whose absence makes an
-    /// unreadable entry fail its whole directory instead.
+    /// Every entry discarded from a directory the model kept, directory by directory in the order
+    /// the reader met them — the 0th IFD, the 1st IFD, then the Exif, GPS and Interop sub-IFDs.
+    /// Within one directory, its [`Unreadable`](EntryDropReason::Unreadable) entries come first,
+    /// then its [`Shadowed`](EntryDropReason::Shadowed) ones, each group in on-disk order.
+    ///
+    /// Unreadable entries appear only under
+    /// [`recover_entries`](crate::ExifReader::recover_entries); shadowed ones in every mode. A
+    /// directory the parse dropped whole contributes none: it is named once, in
+    /// [`dropped`](Self::dropped). Nor does a [`TrailingIfd`](DroppedRegion::TrailingIfd), which is
+    /// discarded whole as well.
     #[must_use]
     pub fn dropped_entries(&self) -> &[DroppedEntry] {
         &self.entries
@@ -375,10 +446,9 @@ impl ReadReport {
     /// Whether anything this report's drop lists cover was discarded — a region of
     /// [`dropped`](Self::dropped) or an entry of [`dropped_entries`](Self::dropped_entries).
     ///
-    /// **Not** a "this parse lost nothing" verdict — see the module documentation. It says nothing
-    /// about a shadowed duplicate tag, and nothing about source bytes no structure claimed: that is
-    /// [`byte_audit`](Self::byte_audit)'s question, and an audit is not a discard, so it never
-    /// makes a report non-empty.
+    /// **Not** a byte-completeness verdict — see the module documentation. Source bytes no
+    /// structure claimed are [`byte_audit`](Self::byte_audit)'s question, and an audit is not a
+    /// discard, so it never makes a report non-empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.dropped.is_empty() && self.entries.is_empty()
@@ -504,19 +574,19 @@ mod tests {
         assert_eq!(report.dropped()[0].reason(), DropReason::Malformed);
     }
 
-    /// A skipped entry alone makes a report non-empty — it is a discard like any region — and is
-    /// listed with the directory, tag and offset it was recorded with.
+    /// A discarded entry alone makes a report non-empty — it is a discard like any region — and is
+    /// listed with the directory, tag, offset and reason it was recorded with.
     #[test]
-    fn a_skipped_entry_alone_makes_a_report_non_empty() {
+    fn a_discarded_entry_alone_makes_a_report_non_empty() {
         let mut report = ReadReport::new();
-        let entry = DroppedEntry::new(IfdKind::Gps, 2, 40);
+        let entry = DroppedEntry::new(IfdKind::Gps, 2, 40, EntryDropReason::Shadowed);
         report.record_entry(entry);
         assert!(!report.is_empty());
         assert_eq!(report.dropped(), &[]);
         assert_eq!(report.dropped_entries(), &[entry]);
         assert_eq!(
-            (entry.ifd(), entry.tag(), entry.offset()),
-            (IfdKind::Gps, 2, 40)
+            (entry.ifd(), entry.tag(), entry.offset(), entry.reason()),
+            (IfdKind::Gps, 2, 40, EntryDropReason::Shadowed)
         );
     }
 
@@ -541,11 +611,21 @@ mod tests {
             (IfdKind::Thumbnail, "1st IFD"),
         ] {
             assert_eq!(
-                DroppedEntry::new(ifd, 0x010F, 22).to_string(),
+                DroppedEntry::new(ifd, 0x010F, 22, EntryDropReason::Unreadable).to_string(),
                 format!(
                     "dropped entry (tag 0x010f) in {name} at offset 22: its value could not be read"
                 )
             );
         }
+    }
+
+    /// Each reason renders as its own clause in the one entry grammar — a shadowed duplicate is
+    /// not described as an unreadable value, which would send a caller after the wrong defect.
+    #[test]
+    fn the_rendered_entry_states_its_reason() {
+        assert_eq!(
+            DroppedEntry::new(IfdKind::Exif, 0x9003, 26, EntryDropReason::Shadowed).to_string(),
+            "dropped entry (tag 0x9003) in Exif IFD at offset 26: a later entry repeats its tag"
+        );
     }
 }
