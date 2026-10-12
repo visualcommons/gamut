@@ -273,18 +273,213 @@ impl<'a> MetadataChunks<'a> {
 /// # Ok::<(), gamut_core::Error>(())
 /// ```
 pub fn c2pa_span(data: &[u8]) -> Result<Option<Range<usize>>> {
-    let mut offset = RIFF_HEADER_LEN;
-    for chunk in RiffReader::new(data)? {
-        let chunk = chunk?;
-        let span = CHUNK_HEADER_LEN + chunk.payload.len();
+    for located in located_chunks(data)? {
+        let (span, chunk) = located?;
         if WebpChunkId::from(chunk.fourcc) == WebpChunkId::C2pa {
-            return Ok(Some(offset..offset + span));
+            return Ok(Some(span));
         }
-        // Skip the pad byte too. The reader framed this payload from a `uint32` size field, so the
-        // cast is exact.
-        offset += span + pad_len(chunk.payload.len() as u32);
     }
     Ok(None)
+}
+
+/// The chunks of the WebP file in `data`, each with the byte range its whole on-disk span occupies
+/// — identifier, size field and payload, without the pad byte — in file order. The one offset walk
+/// behind [`c2pa_span`] and [`c2pa_summary`], so the two cannot disagree about where a chunk sits.
+///
+/// # Errors
+///
+/// As [`RiffReader::new`] up front, and per item as its iterator.
+fn located_chunks(data: &[u8]) -> Result<impl Iterator<Item = Result<(Range<usize>, Chunk<'_>)>>> {
+    let mut offset = RIFF_HEADER_LEN;
+    Ok(RiffReader::new(data)?.map(move |chunk| {
+        let chunk = chunk?;
+        let span = offset..offset + CHUNK_HEADER_LEN + chunk.payload.len();
+        // Skip the pad byte too. The reader framed this payload from a `uint32` size field, so the
+        // cast is exact.
+        offset = span.end + pad_len(chunk.payload.len() as u32);
+        Ok((span, chunk))
+    }))
+}
+
+/// What a report of a located manifest store has to say beside it, because locating one is not
+/// validating it.
+///
+/// C2PA 2.4 §15.12 puts validation on a validator; this crate holds no COSE, X.509, RFC 3161 or
+/// trust-list code and never reports a validity verdict. "C2PA: present" printed beside EXIF and
+/// ICC reads as *verified* to anyone who has seen a Content Credentials badge, so
+/// [`C2paSummary::summary_lines`] carries this text in the line that reports the stores, never as a
+/// footnote. The same sentence `gamut-heic` carries, so every container reports alike.
+pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
+     it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
+
+/// Where a `C2PA` chunk sits among the file's chunks — a **positional fact about bytes**, never a
+/// verdict.
+///
+/// C2PA 2.4 §A.3.7 requires the chunk to "appear as the last sub-chunk of the first RIFF header
+/// chunk". A chunk anywhere else is still reported, with its true range; this says where it is so a
+/// reader deciding what to hand a validator can see it.
+///
+/// Non-exhaustive and with permanent discriminants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum C2paChunkPosition {
+    /// The last chunk of the `RIFF`/`WEBP` form, where §A.3.7 puts it.
+    Last = 0,
+    /// Another chunk follows it.
+    BeforeLaterChunks = 1,
+}
+
+impl C2paChunkPosition {
+    /// The clause a report adds to this chunk's line, or `None` when it sits where §A.3.7 puts it.
+    #[must_use]
+    pub const fn note(self) -> Option<&'static str> {
+        match self {
+            Self::BeforeLaterChunks => {
+                Some("another chunk follows it, where C2PA 2.4 §A.3.7 places it last")
+            }
+            Self::Last => None,
+        }
+    }
+}
+
+/// One `C2PA` chunk's manifest store, reported **without its bytes**: where the store sits, how big
+/// it is, and where its chunk sits among the file's chunks.
+///
+/// The bytes are absent by construction: they are opaque to this crate, and a byte range is what a
+/// caller hands to `c2pa-rs` or to `dd`. Use [`MetadataChunks::c2pa`] when the bytes are wanted.
+///
+/// Non-exhaustive: a later revision may report more without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paStoreSummary {
+    /// The half-open byte range of the store — the chunk's payload, without its 8-byte header or
+    /// the RIFF pad byte. [`c2pa_span`] reports the first chunk's whole span instead, header
+    /// included; the store is `span.start + 8..span.end`.
+    pub range: Range<usize>,
+    /// Where the chunk sits among the file's chunks.
+    pub position: C2paChunkPosition,
+}
+
+impl C2paStoreSummary {
+    /// The store's size in bytes.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.range.len()
+    }
+}
+
+/// A non-validating report of the C2PA manifest stores a WebP file carries: every `C2PA` chunk in
+/// file order, with its store's range, size and position.
+///
+/// Built by [`c2pa_summary`]. The summary carries the facts and renders the lines, so every host
+/// prints the same words and none can drop [`C2PA_NOT_VALIDATED`] while rewording them — the shape
+/// and wording of `gamut-heic`'s summary, repeated for this container (issue #530).
+///
+/// A `C2PA` chunk has no framing of its own beyond the RIFF header — its payload *is* the store
+/// (§A.3.7) — so unlike a BMFF `ContentProvenanceBox` there is no C2PA chunk this reader can find
+/// and fail to read through: a chunk that runs past the data fails the whole RIFF walk instead.
+///
+/// Non-exhaustive: a later revision may report more without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct C2paSummary {
+    /// Every `C2PA` chunk's store, in file order. §A.3.7 admits one per file; a second is listed
+    /// rather than hidden, because [`MetadataChunks::read`] and [`c2pa_span`] take the first and a
+    /// report that showed one would hide the bytes they pass over.
+    pub stores: Vec<C2paStoreSummary>,
+}
+
+impl C2paSummary {
+    /// The whole human-readable report, uncapped: [`summary_lines`](Self::summary_lines) followed
+    /// by every [`detail_lines`](Self::detail_lines) entry. A terminal host should cap the detail
+    /// lines instead, reporting [`detail_line_count`](Self::detail_line_count) beside them.
+    #[must_use]
+    pub fn report_lines(&self) -> Vec<String> {
+        let mut lines = self.summary_lines();
+        lines.extend(self.detail_lines());
+        lines
+    }
+
+    /// The report's head — at most two lines, whatever the file holds: the headline, carrying
+    /// [`C2PA_NOT_VALIDATED`] inline, and — when the file carries more than one `C2PA` chunk — a
+    /// line saying §A.3.7 admits one and which of them this crate's readers take. Not indented.
+    #[must_use]
+    pub fn summary_lines(&self) -> Vec<String> {
+        let count = self.stores.len();
+        let headline = match count {
+            0 => format!("C2PA: no C2PA chunk found — {C2PA_NOT_VALIDATED}"),
+            _ => format!(
+                "C2PA: {count} manifest store{plural} located, NOT VALIDATED — {C2PA_NOT_VALIDATED}",
+                plural = if count == 1 { "" } else { "s" },
+            ),
+        };
+        let mut lines = vec![headline];
+        if count > 1 {
+            lines.push(format!(
+                "C2PA chunks: {count}, where C2PA 2.4 §A.3.7 admits one per file; gamut's readers \
+                 take the first"
+            ));
+        }
+        lines
+    }
+
+    /// One line per `C2PA` chunk, in file order, indented two spaces relative to the headline and
+    /// built on demand: the store's size and half-open range, "located, not validated", and the
+    /// chunk's [`C2paChunkPosition::note`] when it has one.
+    pub fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
+        self.stores.iter().map(|store| {
+            format!(
+                "  C2PA chunk: {size}-byte store at [{start}, {end}) — located, not validated{note}",
+                size = store.size(),
+                start = store.range.start,
+                end = store.range.end,
+                note = store
+                    .position
+                    .note()
+                    .map_or_else(String::new, |note| format!("; {note}")),
+            )
+        })
+    }
+
+    /// How many lines [`detail_lines`](Self::detail_lines) yields, without building any.
+    #[must_use]
+    pub fn detail_line_count(&self) -> usize {
+        self.stores.len()
+    }
+}
+
+/// A non-validating summary of the `C2PA` chunks of the WebP file in `data`: every store's range,
+/// size and position, in file order. See [`C2paSummary`] for what it is for and
+/// [`C2PA_NOT_VALIDATED`] for what has to be said beside it.
+///
+/// Unlike [`c2pa_span`], which stops at the first `C2PA` chunk, this walks every chunk, so it also
+/// fails on a malformed chunk *after* the first store.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if `data` is not a valid RIFF/WebP file, or if a chunk's declared
+/// size runs past the end of the data.
+pub fn c2pa_summary(data: &[u8]) -> Result<C2paSummary> {
+    let mut stores = Vec::new();
+    let mut last_span = None;
+    for located in located_chunks(data)? {
+        let (span, chunk) = located?;
+        if WebpChunkId::from(chunk.fourcc) == WebpChunkId::C2pa {
+            stores.push(C2paStoreSummary {
+                range: span.start + CHUNK_HEADER_LEN..span.end,
+                position: C2paChunkPosition::BeforeLaterChunks,
+            });
+        }
+        last_span = Some(span);
+    }
+    // Only the file's final chunk is last, and a store is last exactly when its chunk is that one.
+    if let (Some(store), Some(last)) = (stores.last_mut(), last_span)
+        && store.range.end == last.end
+    {
+        store.position = C2paChunkPosition::Last;
+    }
+    Ok(C2paSummary { stores })
 }
 
 /// Writes an extended WebP file carrying `metadata`, placing every chunk in the canonical order the
@@ -1673,5 +1868,96 @@ mod tests {
             c2pa_span(&file).unwrap_err().kind(),
             ErrorKind::InvalidInput
         );
+    }
+
+    /// The summary lists every `C2PA` chunk's payload in file order, past the pad bytes of the
+    /// chunks before it, and marks the one the file ends with as last.
+    #[test]
+    fn c2pa_summary_lists_every_store_and_marks_only_the_final_chunk_last() {
+        let file = raw_file(&[
+            (FourCc::VP8L, &[0x2f, 0x00, 0x00]), // odd -> padded
+            (C2PA_FOURCC, b"first"),             // odd -> padded
+            (FourCc::EXIF, b"exif"),
+            (C2PA_FOURCC, b"second"),
+        ]);
+        let summary = c2pa_summary(&file).unwrap();
+        let first = 12 + (8 + 3 + 1) + 8;
+        let second = first + 5 + 1 + (8 + 4) + 8;
+        assert_eq!(
+            summary.stores,
+            vec![
+                C2paStoreSummary {
+                    range: first..first + 5,
+                    position: C2paChunkPosition::BeforeLaterChunks,
+                },
+                C2paStoreSummary {
+                    range: second..second + 6,
+                    position: C2paChunkPosition::Last,
+                },
+            ]
+        );
+        assert_eq!(&file[first..first + 5], b"first");
+        assert_eq!(&file[second..second + 6], b"second");
+        // The store is the span `c2pa_span` reports, less the chunk header.
+        assert_eq!(c2pa_span(&file).unwrap(), Some(first - 8..first + 5));
+
+        assert_eq!(summary.detail_line_count(), 2);
+        assert_eq!(
+            summary.report_lines(),
+            vec![
+                format!("C2PA: 2 manifest stores located, NOT VALIDATED — {C2PA_NOT_VALIDATED}"),
+                "C2PA chunks: 2, where C2PA 2.4 §A.3.7 admits one per file; gamut's readers take \
+                 the first"
+                    .to_owned(),
+                format!(
+                    "  C2PA chunk: 5-byte store at [{first}, {}) — located, not validated; another \
+                     chunk follows it, where C2PA 2.4 §A.3.7 places it last",
+                    first + 5
+                ),
+                format!(
+                    "  C2PA chunk: 6-byte store at [{second}, {}) — located, not validated",
+                    second + 6
+                ),
+            ]
+        );
+    }
+
+    /// One store placed last reports one line and no multiplicity line; none reports absence with
+    /// the disclaimer still inline.
+    #[test]
+    fn c2pa_summary_headlines_one_store_and_none() {
+        let one = raw_file(&[(FourCc::VP8L, &[0x2f]), (C2PA_FOURCC, b"store!")]);
+        let summary = c2pa_summary(&one).unwrap();
+        assert_eq!(summary.stores.len(), 1);
+        assert_eq!(summary.stores[0].size(), 6);
+        assert_eq!(summary.stores[0].position, C2paChunkPosition::Last);
+        assert_eq!(
+            summary.summary_lines(),
+            vec![format!(
+                "C2PA: 1 manifest store located, NOT VALIDATED — {C2PA_NOT_VALIDATED}"
+            )]
+        );
+
+        let none = write_simple_lossless(&[0x2f]).unwrap();
+        let summary = c2pa_summary(&none).unwrap();
+        assert_eq!(summary.detail_line_count(), 0);
+        assert_eq!(
+            summary.report_lines(),
+            vec![format!("C2PA: no C2PA chunk found — {C2PA_NOT_VALIDATED}")]
+        );
+    }
+
+    /// A chunk running past the data fails the walk, even after a store was seen — the summary
+    /// lists every chunk, so it cannot stop at the first store as `c2pa_span` does.
+    #[test]
+    fn c2pa_summary_refuses_a_chunk_that_runs_past_the_data() {
+        let mut file = raw_file(&[(C2PA_FOURCC, b"store!"), (FourCc::EXIF, b"exif")]);
+        let size_field = file.len() - 4 - 4;
+        file[size_field..size_field + 4].copy_from_slice(&64u32.to_le_bytes());
+        assert_eq!(
+            c2pa_summary(&file).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        assert!(c2pa_span(&file).unwrap().is_some());
     }
 }
