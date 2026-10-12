@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::Av1Colour;
-use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
+use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder, Speed};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr,
@@ -1107,6 +1107,8 @@ struct AbiStub {
     seen_config: Option<(u32, u32, Option<u8>)>,
     /// The image descriptor the adapter lowered, captured at `encode` time.
     seen_image: Option<SeenImage>,
+    /// The whole `extra` blob the adapter passed, whatever its length, captured at `encode` time.
+    seen_extra: Option<Vec<u8>>,
 }
 
 impl AbiStub {
@@ -1117,6 +1119,7 @@ impl AbiStub {
             chunks,
             seen_config: None,
             seen_image: None,
+            seen_extra: None,
         }
     }
 
@@ -1145,6 +1148,10 @@ impl Encoder for AbiStub {
         sink: &mut dyn FnMut(&[u8]) -> Status,
     ) -> Status {
         self.seen_config = Some(Self::capture_config(cfg));
+        // SAFETY-equivalent: `extra` is `extra_len` bytes borrowed for the call.
+        self.seen_extra = Some(
+            unsafe { std::slice::from_raw_parts(cfg.extra.cast::<u8>(), cfg.extra_len) }.to_vec(),
+        );
         assert!(image.is_abi_current());
         let first = [0, 1, 2].map(|i| unsafe { *image.planes[i] });
         self.seen_image = Some((
@@ -1248,6 +1255,34 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
             ],
             first,
         ))
+    );
+}
+
+/// The speed preset crosses the C seam as `extra[1]` — the `Speed` discriminant — behind the
+/// `base_q_idx`, and only off the full search: the default encoder lowers the one-byte blob a
+/// pre-speed backend was always handed.
+#[test]
+fn abi_adapter_appends_a_non_default_speed_to_the_extra_blob() {
+    let colour = Av1Colour {
+        matrix: MatrixCoefficients::Bt709,
+        ..Av1Colour::default()
+    };
+    let obus = builtin_obus(127, colour, ChromaSubsampling::Cs420);
+    let extra_for = |encoder: AvifEncoder| {
+        let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(
+            Status::OK,
+            Status::OK,
+            vec![obus.clone()],
+        ))));
+        let mut encoder = encoder;
+        encoder.push_backend(AbiAv1StillEncoder::new(stub.clone()));
+        encode(&encoder).expect("adapter encodes");
+        stub.0.lock().unwrap().seen_extra.clone()
+    };
+    assert_eq!(extra_for(AvifEncoder::lossy(50)), Some(vec![127]));
+    assert_eq!(
+        extra_for(AvifEncoder::lossy(50).with_speed(Speed::Fastest)),
+        Some(vec![127, 3])
     );
 }
 
