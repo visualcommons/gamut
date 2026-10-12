@@ -21,6 +21,8 @@
 #   * a row inside an HTML comment or a fenced code block is not a row. Both render as something
 #     other than a table cell, so a crate documented only there is documented nowhere, and the
 #     membership check must see it as missing rather than as present;
+#   * (outside the section) every `gamut = ...` dependency line in a fenced block names the
+#     umbrella's own release line -- see the Usage-snippet block near the end, issue #559;
 #   * EVERY crate row in the section lives inside ONE rendered table. A table is a header row
 #     immediately followed by a GFM delimiter row of the same width, neither indented four spaces
 #     or more, and it ends at the first line that is not a table row. That is a claim about the
@@ -941,8 +943,76 @@ if [ -n "$extdep_claims" ]; then
     fi
 fi
 
+# The Usage snippet (issue #559). Outside `## Crates`, and the one claim in the README a reader
+# copies verbatim: by the time anyone looked it pinned `gamut = "0.1"` while the umbrella was at
+# 0.3.2, and `^0.1` still resolves, so a new user silently got a crate two breaking releases old.
+#
+# Every `gamut = ...` dependency line inside a fenced code block anywhere in the file is read --
+# the inline-table form and the bare-string form, with its keys in any order -- and its version
+# requirement must name the umbrella's own manifest version to the precision written, exactly as
+# a row's `vN.M` token does: the requirement's components are a prefix of the manifest version,
+# and at least as long as the release line caret compatibility spans (`0.3` for 0.3.2, `1` for
+# 1.4.0, `0.0.7` for 0.0.7). So `0.3` and `0.3.2` pass for 0.3.2; `0.1`, `0.3.0` (an older patch
+# than the tree's) and `0` (all of 0.x) do not. A leading `^` is the same requirement and is
+# accepted; any other operator is refused, because the snippet's job is to name the line to use.
+#
+# The authority is the manifest, not crates.io, for the reason the table's version tokens give:
+# deciding what the index serves needs the network. The consequence is that the release pull
+# request bumping the umbrella's minor (or, after 1.0, major) fails this check until it also
+# moves the snippet -- which is exactly the moment the snippet goes stale.
+#
+# At least one such line must exist. A snippet rewritten into a form this does not read (a
+# `[dependencies.gamut]` table, say) would otherwise pass by saying nothing, and silence is the
+# defect this check is for; extend the reader rather than the exemption.
+usage_lines="$(LC_ALL=C ${CHECK_README_AWK:-awk} '
+    { sub(/\r$/, "") }
+    # A fence opens on three backticks or tildes (up to three spaces in) and closes on the same
+    # character; no interval expressions, so mawk reads it as gawk does.
+    !fence && /^ ? ? ?(```|~~~)/ { t = $0; sub(/^ */, "", t); fence = substr(t, 1, 3); next }
+    fence && index($0, fence) && $0 ~ /^ ? ? ?(```|~~~)/ { fence = ""; next }
+    fence && /^[ \t]*gamut[ \t]*=/ { print NR "\t" $0 }
+' "$readme")"
+umbrella_version="$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "gamut") | .version')"
+if [ -z "$usage_lines" ]; then
+    fail=1
+    echo "check-readme-crates: $readme has no \`gamut = ...\` dependency line in a code block,"
+    echo "  so nothing tells a reader which version of the umbrella to depend on. Write one as"
+    echo "  gamut = { version = \"X.Y\", features = [...] } -- or gamut = \"X.Y\" -- in a fence."
+else
+    # The release line caret compatibility spans: every component up to and including the first
+    # non-zero one (all three if they are all zero).
+    umbrella_line="$(printf '%s\n' "$umbrella_version" | awk -F'[.+-]' '{
+        out = $1; if ($1 != "0") { print out; exit }
+        out = out "." $2; if ($2 != "0") { print out; exit }
+        print out "." $3 }')"
+    usage_errors="$(
+        printf '%s\n' "$usage_lines" | while IFS="$(printf '\t')" read -r lineno text; do
+            req="$(printf '%s\n' "$text" |
+                sed -n -e 's/^[ \t]*gamut[ \t]*=[ \t]*"\([^"]*\)".*/\1/p' \
+                    -e 's/^[ \t]*gamut[ \t]*=[ \t]*{.*[{ ,]version[ \t]*=[ \t]*"\([^"]*\)".*/\1/p')"
+            req="${req#^}"
+            if ! printf '%s\n' "$req" | grep -qE '^[0-9]+(\.[0-9]+){0,2}$'; then
+                echo "  line $lineno: no plain version requirement readable in: $text"
+            elif [ "${req#"$umbrella_line"}" = "$req" ] ||
+                { [ "$req" != "$umbrella_version" ] &&
+                    [ "${umbrella_version#"$req".}" = "$umbrella_version" ]; }; then
+                echo "  line $lineno: requires \"$req\"; the umbrella's manifest is $umbrella_version (want \"$umbrella_line\")"
+            fi
+        done
+        true
+    )"
+    if [ -n "$usage_errors" ]; then
+        fail=1
+        echo "check-readme-crates: \`gamut\` dependency lines in $readme that the umbrella's manifest refutes:"
+        echo "$usage_errors"
+        echo "  A snippet names the umbrella's own Cargo.toml version, to whatever precision it writes,"
+        echo "  and no coarser than the release line caret compatibility spans."
+    fi
+fi
+
 if [ "$fail" -eq 0 ]; then
     echo "README crates table lists every workspace crate ($(echo "$workspace_crates" | wc -l) crates)"
+    echo "README Usage snippet names the umbrella's release line ($umbrella_line, manifest $umbrella_version)"
 fi
 
 exit "$fail"

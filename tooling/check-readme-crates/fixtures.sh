@@ -180,6 +180,25 @@ check "a version token outside a crate row"               1 "no crate to be abou
 check "a phantom crate named in a sub-heading"            1 "do not exist"        awkx '/^Each crate manifest sets/{print "### The `gamut-ifdd` note"; print ""} {print}'
 check "a claim in a sub-heading cargo refutes"            1 "feature claims"      awkx '/^Each crate manifest sets/{print "### The `gamut-png` Cargo feature `nope`"; print ""} {print}'
 
+# ---------------------------------------------------------------------------------------------
+# The Usage snippet (#559): its `gamut` requirement against the umbrella's manifest version. The
+# fixtures derive the expected line from the manifest, so they follow it across releases.
+# ---------------------------------------------------------------------------------------------
+umbrella="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gamut") | .version')"
+line="$(printf '%s\n' "$umbrella" | awk -F'[.+-]' '{ if ($1 != "0") print $1; else if ($2 != "0") print $1 "." $2; else print $1 "." $2 "." $3 }')"
+snippet='/^gamut = { version = "/'
+check "the snippet pinned to a stale line"                1 "umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"0.1\"/"
+check "the snippet pinned coarser than the release line"  1 "umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"0\"/"
+check "the snippet pinned to a patch the tree is not"     1 "umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"$umbrella.9\"/"
+check "the snippet with a non-caret operator"             1 "no plain version requirement" sedx "${snippet}s/version = \"[^\"]*\"/version = \">=$line\"/"
+check "the snippet in bare-string form, stale"            1 "umbrella's manifest refutes" sedx "${snippet}s/.*/gamut = \"0.1\"/"
+check "the snippet with its keys reordered, stale"        1 "umbrella's manifest refutes" sedx "${snippet}s/.*/gamut = { features = [\"avif\"], version = \"0.1\" }/"
+check "the snippet deleted"                               1 "no \`gamut = ...\` dependency line" sedx "${snippet}d"
+check "the snippet moved out of its fence"                1 "no \`gamut = ...\` dependency line" awkx '/^```toml$/{drop = 1; next} drop && /^```$/{drop = 0; next} {print}'
+check "the snippet at the exact manifest version (legal)" 0 "names the umbrella's release line" sedx "${snippet}s/version = \"[^\"]*\"/version = \"$umbrella\"/"
+check "the snippet with a caret operator (legal)"         0 "names the umbrella's release line" sedx "${snippet}s/version = \"[^\"]*\"/version = \"^$line\"/"
+check "the snippet in bare-string form (legal)"           0 "names the umbrella's release line" sedx "${snippet}s/.*/gamut = \"$line\"/"
+
 echo
 echo "check-readme-crates fixtures: $passed passed, $failed failed (awk: ${CHECK_README_AWK:-awk})"
 test "$failed" -eq 0
