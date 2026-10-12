@@ -145,8 +145,12 @@ is reported as a span. Bounding it properly would mean parsing ISOBMFF framing h
 make this oracle depend on exactly the structural understanding it exists to check independently,
 and a second copy of gamut's §A.5.1.2 walk proves nothing about the first. The independence is
 worth more than the extra check, so the limit is accepted rather than closed. It costs nothing on
-today's fixtures, whose stores run to the end of their box; issue #534, which points this crate at
-PNG, TIFF and RIFF, is where a store followed by more container bytes first appears.
+today's fixtures. The unpadded ones' stores run exactly to the end of their box. The
+[padded fixture](#the-padded-fixture-where-the-two-bounds-diverge) is the one store followed by
+more bytes, and those are the `PADDING` zeros the oracle itself wrote *inside* the same box: its
+store stops short of its box rather than overrunning it, so it is no case of this limit either.
+Issue #534, which points this crate at PNG, TIFF and RIFF, is where a store followed by container
+bytes the oracle did not write first appears.
 
 ## Why gamut owns the locate/bound step at all
 
