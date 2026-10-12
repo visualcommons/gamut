@@ -16,7 +16,8 @@ use common::{
     meta, pitm_v0, uuid_box,
 };
 use gamut_heic::{
-    C2paBoxPosition, C2paBoxPurpose, C2paUnreadReason, HeifContainer, UnknownBoxLocation,
+    C2paBoxPosition, C2paBoxPurpose, C2paPresence, C2paUnreadReason, HeifContainer,
+    UnknownBoxLocation,
 };
 
 /// The `meta` box every fixture below closes with: the minimum that `HeifContainer::parse` accepts
@@ -223,7 +224,7 @@ fn the_summary_carries_every_located_store_with_its_range_size_and_purpose() {
 
     let located: Vec<_> = c.c2pa_manifest_stores().collect();
     let summary = c.c2pa_summary();
-    assert!(summary.is_present());
+    assert_eq!(summary.presence(), C2paPresence::StoreLocated);
     assert_eq!(summary.stores.len(), located.len());
     for (reported, found) in summary.stores.iter().zip(&located) {
         assert_eq!(reported.range, found.range);
@@ -293,7 +294,7 @@ fn a_file_with_no_c2pa_box_summarises_as_absent() {
     let c = HeifContainer::parse(&data).unwrap();
 
     let summary = c.c2pa_summary();
-    assert!(!summary.is_present());
+    assert_eq!(summary.presence(), C2paPresence::NoC2paBox);
     assert!(summary.stores.is_empty());
     assert_eq!(summary.report_lines().len(), 1);
 }
