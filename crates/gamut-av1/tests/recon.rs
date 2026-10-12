@@ -842,7 +842,12 @@ fn smooth_modes_match_dav1d() {
     // the SMOOTH blend (§7.11.2.6) reproduces a smooth ramp, while DC leaves the whole gradient as
     // residual and a directional mode can only copy one edge. The SMOOTH predictors live in
     // `predict_nondir`, so dav1d byte-equality exercises that path end-to-end. Mode choice is a
-    // prediction-SAD decision (independent of `qindex`), so any quantizer drives the same modes.
+    // rate–distortion decision, so it moves with `qindex`, and the SMOOTH family is not reached at
+    // every quantizer and geometry: tracing the mode search over these geometries (one superblock,
+    // at the commit that introduced RD mode choice) found SMOOTH-family blocks at every `q` of the
+    // ladder — at 8 only in 31×17, at 40 in 31×17 and 17×31, at 120 also in 40×36 — and none in
+    // 16×16, 32×32 or 24×40. Nothing here re-checks that, so an encoder change can move the
+    // ladder off the SMOOTH predictors while this test stays green.
     let smooth = |x: u32, y: u32| {
         let (x, y) = (x as i32, y as i32);
         let r = (40 + (x * 3 + y * 2) / 2).clamp(0, 255) as u8;
