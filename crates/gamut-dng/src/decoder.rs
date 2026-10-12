@@ -295,7 +295,7 @@ pub struct DecodedDng {
     /// well. That skip is the decoder's alone and is not diagnosed: `deconstruct`'s walk seeds no
     /// page offsets, so it follows such an entry as an ordinary child and raises no
     /// skipped-entry or cycle finding for the entry itself (only the re-walked page's own
-    /// `SubIFDs`, met again one level down, can draw one).
+    /// `SubIFDs`, met again, can draw one).
     ///
     /// Empty for every file this crate writes, whose `SubIFDs` children all carry images.
     pub sub_ifd_extra: Vec<SubIfdExtra>,
@@ -717,7 +717,8 @@ struct IfdWalk<'a> {
 /// Re-walking it would report the page's fields in [`DecodedDng::sub_ifd_extra`] as well as in
 /// its page channel, and a self-referencing entry would duplicate the page in the tree. This
 /// seed is the decoder's alone: `deconstruct`'s audit walk does not share it, so it follows such
-/// an entry as an ordinary child and draws no finding for the entry itself.
+/// an entry as an ordinary child and draws no skipped-entry or cycle finding for the entry
+/// itself.
 fn walk_ifds(file: &TiffFile, data: &[u8]) -> (Vec<Ifd>, Vec<TreePosition>) {
     // `file` came from `read` over these same bytes, so the chain re-walk below meets the same
     // pages without error; its raw directories are only what carries each page's offset, which
