@@ -94,9 +94,12 @@ fn fixture_planes(colour: Av1Colour, chroma: ChromaSubsampling) -> Planar8 {
 /// `gamut-av1` enabled CDF adaptation (`disable_cdf_update = 0`), which shrank these two files
 /// from 4426/1864 bytes to 3407/1557 with an unchanged reconstruction; again when the lossy
 /// encoder moved to BT.709 YCbCr, taking `lossy50` to 1323; and again when the lossy default
-/// became 4:2:0, taking it to 763 — a 42% reduction at the same quality. The lossless golden is
-/// unaffected by both colour changes: lossless stays on the identity matrix at 4:4:4, which AV1
-/// §6.4.2 requires of it.
+/// became 4:2:0, taking it to 763 — a 42% reduction at the same quality; and again when the
+/// mode decisions moved to rate–distortion cost (#698), taking it to 787 — the fixture is
+/// position noise no prediction follows, and the decoded PSNR rose from 12.22 to 12.34 dB. The
+/// lossless golden is unaffected by both colour changes and by the
+/// rate–distortion search: lossless stays on the identity matrix at 4:4:4, which AV1 §6.4.2
+/// requires of it, and has a single fixed coding path.
 #[test]
 fn default_encoder_output_is_byte_identical() {
     for (name, encoder) in [

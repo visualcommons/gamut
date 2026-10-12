@@ -51,8 +51,10 @@
 //!
 //! Every surface decodes under [`DecodeLimits`] — libavif's default dimension and pixel caps,
 //! checked against each `grid`/`iovl` canvas, `ispe` and decoded frame **before** the buffer it
-//! sizes is allocated, with every full-image buffer reserved fallibly — so a hostile file is
-//! refused with a typed error rather than exhausting memory. Each [`AvifImage`] decode entry point
+//! sizes is allocated, with every full-image buffer reserved fallibly — and under per-call caps on
+//! AV1 decodes and derived-item evaluations, so a derivation that references one item many times
+//! cannot multiply into unbounded work. A hostile file is thus refused with a typed error rather
+//! than exhausting memory or time. Each [`AvifImage`] decode entry point
 //! has a `*_with_limits` twin taking caller-chosen limits (the [`AvifContainer`] conveniences
 //! decode under the defaults; reach the twins through [`AvifContainer::image`]).
 //!

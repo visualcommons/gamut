@@ -100,8 +100,10 @@ One file per crate, deliberately, so adding a crate is an additive change — wi
 engine's bytes into an RGBA image; `avif_parse_decode` hands them, unchanged, to
 `AvifContainer::parse` and then decodes every item through a stub AV1 decoder, so it is also the
 crate's parser robustness target (`docs/testing.md`'s "Fuzz entry point" for `gamut-avif`). Its
-limits come from the input's last four bytes, which an AVIF parser keeps as a trailer, so its seeds
-are unmodified AVIF files.
+size limits come from the input's last four bytes, which an AVIF parser keeps as a trailer, so its
+seeds are unmodified AVIF files. The stub serves every decode it is asked for: how many a file can
+demand is bounded by the library's own work caps (#762), held at the target's ceiling, which the
+target therefore searches.
 
 `Drago` is held to monotonicity only where `Drago::is_monotonic` says it claims it (#439); every
 other operator promises it unconditionally, and all of them are driven through the other three

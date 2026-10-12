@@ -6,8 +6,8 @@
 //! behind a solid colour. The grid tests compare against independently-written references.
 
 use gamut_avif::{
-    Av1Config, Av1StillDecoder, AvifContainer, ChromaFormat, DecodeLimits, DecodedFrame, ObuType,
-    Subsampling, iter_obus,
+    Av1Config, Av1StillDecoder, AvifContainer, AvifImage, ChromaFormat, DecodeLimits, DecodedFrame,
+    ObuType, Subsampling, iter_obus,
 };
 use gamut_color::{ColorRange, ycbcr_to_rgb};
 use gamut_core::{Error, ErrorKind, Result};
@@ -2654,4 +2654,172 @@ fn a_decoded_frame_past_the_limits_is_refused() {
         .decode_primary_rgba8_with_limits(&mut Mock::default(), DecodeLimits::new(4, 16))
         .unwrap();
     assert_eq!((rgba.width(), rgba.height()), (4, 4));
+}
+
+// ---- decode work caps (#762) -----------------------------------------------------------------
+
+const DECODED_REFUSAL: (ErrorKind, Option<&str>) = (
+    ErrorKind::Unsupported,
+    Some("AVIF: coded-item decodes exceed DecodeLimits::max_decoded_items"),
+);
+const DERIVED_REFUSAL: (ErrorKind, Option<&str>) = (
+    ErrorKind::Unsupported,
+    Some("AVIF: derived-item evaluations exceed DecodeLimits::max_derived_items"),
+);
+
+/// Limits whose size caps admit every fixture here, with the given work caps.
+fn work_caps(decoded: u32, derived: u32) -> DecodeLimits {
+    DecodeLimits::default().with_item_limits(decoded, derived)
+}
+
+/// A decoder that only counts its calls and returns a 1x1 monochrome frame: the nested-grid
+/// fixture asks for more decodes than [`Mock`] should record.
+#[derive(Default)]
+struct Counting {
+    calls: u32,
+}
+
+impl Av1StillDecoder for Counting {
+    fn decode_still(&mut self, _c: &Av1Config, _p: &[u8]) -> Result<DecodedFrame> {
+        self.calls += 1;
+        DecodedFrame::new(1, 1, 8, ChromaFormat::Monochrome, vec![0], vec![], vec![])
+    }
+}
+
+#[test]
+fn a_nested_grid_of_reused_references_is_refused_at_the_default_decode_cap() {
+    // The issue's amplifier: an outer 255x255 grid whose every tile is one inner 255x255 grid,
+    // whose every tile is one 1x1 coded item, cropped to 1x1 — 65025² leaf decodes from a file of
+    // a few hundred kilobytes, every image within the default size caps. (255x255 rather than
+    // 256x256: an `iref` entry holds at most 65535 references.) The default cap stops it after
+    // exactly 131072 decodes, two full inner grids and part of a third.
+    let refs = |id| vec![id; 255 * 255];
+    let bytes = file(
+        1,
+        vec![
+            grid_item(1, 255, 255, 1, 1, &refs(2)),
+            Item {
+                hidden: true,
+                ..grid_item(2, 255, 255, 1, 1, &refs(3))
+            },
+            Item {
+                hidden: true,
+                ..coded_item(3, 0, 8, 0, 1, 1, vec![])
+            },
+        ],
+    );
+    let image = AvifContainer::parse(&bytes).unwrap().image().clone();
+    let mut decoder = Counting::default();
+    assert_eq!(
+        limit_refusal(image.decode_item_planar(1, &mut decoder)),
+        DECODED_REFUSAL
+    );
+    assert_eq!(decoder.calls, 2 * 256 * 256);
+}
+
+/// A 1x2 grid (id 1) over the given tile ids, with distinct 2x2 tiles 2 and 3.
+fn two_tile_grid(tiles: &[u32]) -> AvifImage {
+    let bytes = file(
+        1,
+        vec![
+            grid_item(1, 1, 2, 4, 2, tiles),
+            mono_tile(2, 10),
+            mono_tile(3, 40),
+        ],
+    );
+    AvifContainer::parse(&bytes).unwrap().image().clone()
+}
+
+#[test]
+fn the_decode_cap_admits_exactly_its_count_of_decoder_calls() {
+    let image = two_tile_grid(&[2, 3]);
+    let frame = image
+        .decode_item_planar_with_limits(1, &mut Mock::default(), work_caps(2, 1))
+        .unwrap();
+    assert_eq!((frame.width(), frame.height()), (4, 2));
+    let mut mock = Mock::default();
+    assert_eq!(
+        limit_refusal(image.decode_item_planar_with_limits(1, &mut mock, work_caps(1, 1))),
+        DECODED_REFUSAL
+    );
+    assert_eq!(mock.calls.len(), 1);
+}
+
+#[test]
+fn a_repeated_tile_reference_is_charged_once_per_use() {
+    // Tiles [2, 2]: one distinct coded item, two decodes.
+    let image = two_tile_grid(&[2, 2]);
+    assert_eq!(
+        limit_refusal(image.decode_item_planar_with_limits(
+            1,
+            &mut Mock::default(),
+            work_caps(1, 1)
+        )),
+        DECODED_REFUSAL
+    );
+}
+
+#[test]
+fn an_alpha_auxiliary_draws_on_its_masters_decode_cap() {
+    let master = coded_item(1, 3, 8, 33, 2, 2, vec![colr(0, true)]);
+    let bytes = file(1, vec![master, alpha_aux(2, 1, 77, 2, 2)]);
+    let image = AvifContainer::parse(&bytes).unwrap().image().clone();
+    let mut mock = Mock::default();
+    assert_eq!(
+        limit_refusal(image.decode_item_rgba8_with_limits(1, &mut mock, work_caps(1, 0))),
+        DECODED_REFUSAL
+    );
+    assert_eq!(mock.calls.len(), 1);
+    assert!(
+        image
+            .decode_item_rgba8_with_limits(1, &mut Mock::default(), work_caps(2, 0))
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_grid_evaluation_is_charged_to_the_derived_cap_before_any_tile_is_decoded() {
+    let image = two_tile_grid(&[2, 3]);
+    assert_eq!(
+        limit_refusal(image.decode_item_planar_with_limits(1, &mut NeverCalled, work_caps(2, 0))),
+        DERIVED_REFUSAL
+    );
+}
+
+#[test]
+fn an_iden_evaluation_is_charged_to_the_derived_cap_before_its_source_is_decoded() {
+    let source = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 30, 4, 2, vec![])
+    };
+    let iden = Item {
+        references: vec![dimg(&[2])],
+        ..base_item(1, *b"iden")
+    };
+    let bytes = file(1, vec![iden, source]);
+    let image = AvifContainer::parse(&bytes).unwrap().image().clone();
+    assert_eq!(
+        limit_refusal(image.decode_item_planar_with_limits(1, &mut NeverCalled, work_caps(1, 0))),
+        DERIVED_REFUSAL
+    );
+    assert!(
+        image
+            .decode_item_planar_with_limits(1, &mut Mock::default(), work_caps(1, 1))
+            .is_ok()
+    );
+}
+
+#[test]
+fn an_overlay_evaluation_is_charged_to_the_derived_cap_before_its_canvas_is_built() {
+    let bytes = overlay_file(4, 3);
+    let image = AvifContainer::parse(&bytes).unwrap().image().clone();
+    assert_eq!(
+        limit_refusal(image.decode_item_rgba16_with_limits(1, &mut NeverCalled, work_caps(1, 0))),
+        DERIVED_REFUSAL
+    );
+    assert!(
+        image
+            .decode_item_rgba16_with_limits(1, &mut Mock::default(), work_caps(1, 1))
+            .is_ok()
+    );
 }

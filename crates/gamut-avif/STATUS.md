@@ -240,8 +240,8 @@ adding it needs no container change.
 | --- | --- | --- | --- |
 | `DC_PRED`, availability-aware (luma + chroma) | §7.11.2.5 | ✅ | M0 |
 | directional V/H/D45/.../D67 + `angle_delta` + edge filter/upsample | §7.11.2.4/.9-.12 | ✅ (lossy luma 4×4; 8×8/16×16/32×32 + `angle_delta`; edge filter/upsample `enable_intra_edge_filter=0`) | M1 |
-| SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ✅ (lossy luma, square 4×4–32×32 + rectangular; SAD-selected) | M1 |
-| PAETH | §7.11.2 | ✅ (lossy luma, square 4×4–32×32 + rectangular; SAD-selected) | M1 |
+| SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ✅ (lossy luma, square 4×4–32×32 + rectangular; chosen by rate–distortion cost) | M1 |
+| PAETH | §7.11.2 | ✅ (lossy luma, square 4×4–32×32 + rectangular; chosen by rate–distortion cost) | M1 |
 | recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4 + 8×8 + 16×16 + 32×32) | M1 |
 | chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ✅ (lossy; the §7.11.5 subsampled box average at every layout) | M1 |
 | palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ✅ (lossy luma 8×8/16×16/32×32; sizes 2..8; color cache + wavefront index map) | M1 |
@@ -257,7 +257,7 @@ adding it needs no container change.
 | identity transform 4/8/16/32 (IDTX / V_ / H_) | §7.13.2.11-.15 | ✅ (IDTX emitted via TX_SET_INTRA_2; V_/H_ axis variants present in dispatch, unused under `reduced_tx_set=1`) | M1 |
 | 2D inverse transform + tx_type sets, `get_tx_set` | §7.13.3,§5.11.47/.48 | ✅ (normative `inverse_transform_2d`; intra `TX_SET_INTRA_2`/`TX_SET_DCTONLY`; inter sets OOS) | M1 |
 | variable tx size / `txfm_split` | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square `tx_depth` 0..2; rectangular `txfm_split` deferred) | M1 |
-| encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + heuristic tx-type/tx-size search; true RD deferred) | M1 |
+| encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + tx-type chosen by rate–distortion cost; tx-size `tx_depth` still a source-texture test, its RD search tracked in #753) | M1 |
 
 ## F. AV1 — quantization (§7.12)
 
@@ -374,7 +374,8 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | `Av1StillDecoder` seam + validating `DecodedFrame` contract | (crate API) | ✅ | S3 |
 | Planar pipeline: coded / `iden` / `grid` assembly (uniform tiles, checked canvas, crop) | 23008-12 §6.6.2.3.2 | ✅ | S3 |
 | Derivation cycle + depth guards | (hardening) | ✅ | S3 |
-| `DecodeLimits` (max dimension 32768, max pixels 16384², libavif's defaults; `*_with_limits` twin per surface): coded `ispe` before the decoder, every decoded frame, `grid` output before its tiles and tiled canvas after the first, `iovl` canvas before allocation → `Unsupported`; every full-image buffer reserved with `try_reserve_exact` → `Unsupported`, never an abort. Law `invariants::decoding_stays_within_limits`, driven by a pinned-seed proptest and the `avif_parse_decode` fuzz target | (hardening) | ✅ (#653; the law sees returned images, not the tiled-canvas cap, which unit tests pin; total decode *work* across reused derivation references is not bounded — the fuzz stub carries a call budget until #762) | — |
+| `DecodeLimits` (max dimension 32768, max pixels 16384², libavif's defaults; `*_with_limits` twin per surface): coded `ispe` before the decoder, every decoded frame, `grid` output before its tiles and tiled canvas after the first, `iovl` canvas before allocation → `Unsupported`; every full-image buffer reserved with `try_reserve_exact` → `Unsupported`, never an abort. Law `invariants::decoding_stays_within_limits`, driven by a pinned-seed proptest and the `avif_parse_decode` fuzz target | (hardening) | ✅ (#653; the law sees returned images, not the tiled-canvas cap, which unit tests pin) | — |
+| `DecodeLimits` work caps: `max_decoded_items` (default 131072 = 2 × 256², a full `grid` plus a full alpha `grid`) counts `decode_still` calls and `max_derived_items` (default 1024) counts `grid`/`iden`/`iovl` evaluations, per top-level call and per evaluation (a reused reference is counted each time), refused before the call → `Unsupported`; `with_item_limits` sets them. The fuzz stub serves every call, so `avif_parse_decode` searches this bound | (hardening) | ✅ (#762; no memoisation — a repeated reference is decoded again; defaults refuse no file libavif decodes, which takes only coded `grid` tiles and no `iovl`; the derived cap refuses e.g. a `grid` of > 1023 `iden` tiles) | — |
 | RGBA path: identity / BT.601 (mc 2/5/6) / BT.709 (1) / BT.2020 NCL (9) / monochrome; missing `colr` → AV1 sequence header `color_config` (grid: first tile) | H.273; AVIF §2.2.1 | ✅ | S3/S6, #651 |
 | Typed AV1 sequence header per item (`AvifImage::av1_sequence_header`, payload then `configOBUs`, via `gamut-av1`'s parser) | AV1 §5.5; AVIF §2.1 | ✅ | #651 |
 | High-bit-depth surface `decode_item_rgba16`/`decode_primary_rgba16` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
