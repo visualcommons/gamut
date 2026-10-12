@@ -120,8 +120,8 @@ impl Av1EncodeRequest {
     }
 
     /// The encode-speed preset the caller chose with
-    /// [`AvifEncoder::with_speed`](crate::AvifEncoder::with_speed) — [`Speed::Thorough`], the full
-    /// search, unless they chose another.
+    /// [`AvifEncoder::with_speed`](crate::AvifEncoder::with_speed) — [`Speed::default`]
+    /// ([`Speed::Balanced`]) unless they chose another.
     ///
     /// Unlike [`colour`](Self::colour) and [`chroma`](Self::chroma) this is a **hint**, not an
     /// obligation: it names how much search time the caller is willing to spend, and a backend
@@ -562,8 +562,10 @@ impl SeqHeaderParams {
 /// is **two bytes** and the second is the [`Speed`] discriminant (`1` = `Balanced`, `2` = `Fast`,
 /// `3` = `Fastest`; permanent values, and a later preset takes the next free one). A full-search
 /// job keeps the one-byte blob, so a backend reads byte 1 only when `extra_len >= 2`, and treats
-/// its absence as `Thorough` — which is also every job a pre-speed backend was ever handed. A
-/// backend maps the preset onto its own effort scale or ignores it; either way the stream it
+/// its absence as `Thorough` — which is also every job a pre-speed backend was ever handed. That
+/// absence rule is a persisted wire convention, not the encoder's default: an
+/// [`AvifEncoder`](crate::AvifEncoder) left at its default preset, [`Speed::Balanced`], therefore
+/// hands a backend the **two-byte** blob `[base_q_idx, 1]`. A backend maps the preset onto its own effort scale or ignores it; either way the stream it
 /// returns is held to the same contract.
 ///
 /// # Bit depth
@@ -620,7 +622,9 @@ impl<E: Encoder + Send> AbiAv1StillEncoder<E> {
 /// The codec-specific `extra` blob [`AbiAv1StillEncoder`] lowers `req` to: the `base_q_idx`,
 /// then — only when the job runs at a preset other than [`Speed::Thorough`] — the [`Speed`]
 /// discriminant. A full-search job therefore lowers to exactly the one-byte blob the adapter
-/// wrote before speed presets existed.
+/// wrote before speed presets existed. The test is against `Thorough`, not against
+/// [`Speed::default`]: what the blob's absence means is fixed on the wire, while the default may
+/// move.
 fn extra_blob(req: &Av1EncodeRequest) -> Vec<u8> {
     let mut blob = vec![req.base_q_idx()];
     if req.speed() != Speed::Thorough {

@@ -104,9 +104,12 @@ fn fixture_planes(colour: Av1Colour, chroma: ChromaSubsampling) -> Planar8 {
 /// position noise no prediction follows, and the decoded PSNR rose from 12.22 to 12.34 dB; and
 /// again when the partitions from 16×16 up, the rectangular halves and the transform depth moved
 /// to rate–distortion cost too (#753), taking it to 703; and again when the in-loop filters were
-/// chosen against the source instead of fixed by `qindex` (#754), taking it to 700. The lossless golden is unaffected by
-/// both colour changes and by the rate–distortion search: lossless stays on the identity matrix at 4:4:4, which AV1 §6.4.2
-/// requires of it, and has a single fixed coding path.
+/// chosen against the source instead of fixed by `qindex` (#754), taking it to 700; and again
+/// when the default speed preset followed `gamut-av1`'s from `Thorough` to `Balanced` (#799),
+/// taking it to 688 — a time control, so the size moved only incidentally. The lossless golden
+/// is unaffected by both colour changes, by the rate–distortion search and by the speed preset:
+/// lossless stays on the identity matrix at 4:4:4, which AV1 §6.4.2 requires of it, and has a
+/// single fixed coding path.
 #[test]
 fn default_encoder_output_is_byte_identical() {
     for (name, encoder) in [
@@ -1168,9 +1171,11 @@ impl AbiStub {
     /// Reads back the `(codec_id, quality, base_q_idx-from-extra)` triple from a lowered config.
     fn capture_config(cfg: &EncodeConfig) -> (u32, u32, Option<u8>) {
         assert!(cfg.is_abi_current(), "struct_size guard filled in");
-        let q_idx = (cfg.extra_len == 1 && !cfg.extra.is_null()).then(|| {
-            // SAFETY-equivalent: the adapter documents `extra` as one byte, the AV1 base_q_idx,
-            // borrowed for the call.
+        // Byte 0 is the `base_q_idx` whatever the blob's length: a non-`Thorough` job (the
+        // default `Balanced` included) appends its speed as byte 1, which `seen_extra` captures.
+        let q_idx = (cfg.extra_len >= 1 && !cfg.extra.is_null()).then(|| {
+            // SAFETY-equivalent: the adapter documents `extra` as at least one byte, the AV1
+            // base_q_idx first, borrowed for the call.
             unsafe { *cfg.extra.cast::<u8>() }
         });
         (cfg.codec_id, cfg.quality, q_idx)
@@ -1301,10 +1306,11 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
 }
 
 /// The speed preset crosses the C seam as `extra[1]` — the `Speed` discriminant — behind the
-/// `base_q_idx`, and only off the full search: the default encoder lowers the one-byte blob a
-/// pre-speed backend was always handed.
+/// `base_q_idx`, and only off the full search: a `Thorough` job lowers the one-byte blob a
+/// pre-speed backend was always handed, so the blob's absence still means `Thorough`. The
+/// encoder's default preset, `Balanced`, is off the full search and so carries an explicit byte.
 #[test]
-fn abi_adapter_appends_a_non_default_speed_to_the_extra_blob() {
+fn abi_adapter_appends_a_non_thorough_speed_to_the_extra_blob() {
     let colour = Av1Colour {
         matrix: MatrixCoefficients::Bt709,
         ..Av1Colour::default()
@@ -1321,7 +1327,11 @@ fn abi_adapter_appends_a_non_default_speed_to_the_extra_blob() {
         encode(&encoder).expect("adapter encodes");
         stub.0.lock().unwrap().seen_extra.clone()
     };
-    assert_eq!(extra_for(AvifEncoder::lossy(50)), Some(vec![127]));
+    assert_eq!(
+        extra_for(AvifEncoder::lossy(50).with_speed(Speed::Thorough)),
+        Some(vec![127])
+    );
+    assert_eq!(extra_for(AvifEncoder::lossy(50)), Some(vec![127, 1]));
     assert_eq!(
         extra_for(AvifEncoder::lossy(50).with_speed(Speed::Fastest)),
         Some(vec![127, 3])

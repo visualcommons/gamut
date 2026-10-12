@@ -451,7 +451,7 @@ impl AvifEncoder {
             c2pa: None,
             alpha_mode: AlphaMode::Unassociated,
             keep_opaque_alpha: false,
-            speed: Speed::Thorough,
+            speed: Speed::default(),
             threads: Some(NonZeroUsize::MIN),
             backends: Vec::new(),
         }
@@ -483,7 +483,7 @@ impl AvifEncoder {
             c2pa: None,
             alpha_mode: AlphaMode::Unassociated,
             keep_opaque_alpha: false,
-            speed: Speed::Thorough,
+            speed: Speed::default(),
             threads: Some(NonZeroUsize::MIN),
             backends: Vec::new(),
         }
@@ -741,8 +741,9 @@ impl AvifEncoder {
     /// the alpha auxiliary alike.
     ///
     /// The preset is `gamut-av1`'s, passed through unchanged; its table on [`Speed`] lists what
-    /// each one prunes. The default, [`Speed::Thorough`], is the full search and codes exactly the
-    /// bytes an encoder without this call always has. Every preset produces a conformant stream,
+    /// each one prunes. The default is `gamut-av1`'s own [`Speed::default`] ([`Speed::Balanced`]),
+    /// so an encoder without this call codes exactly the bytes `with_speed(Speed::default())`
+    /// does; [`Speed::Thorough`] is the full search. Every preset produces a conformant stream,
     /// but the presets are a **time** control, not a size one: the search scores candidates by
     /// prediction error rather than rate, so a faster preset can come out smaller or larger.
     ///
@@ -761,7 +762,7 @@ impl AvifEncoder {
         self
     }
 
-    /// The [`Speed`] preset this encoder codes at — [`Speed::Thorough`] unless
+    /// The [`Speed`] preset this encoder codes at — [`Speed::default`] ([`Speed::Balanced`]) unless
     /// [`with_speed`](Self::with_speed) chose another.
     #[must_use]
     pub fn speed(&self) -> Speed {
