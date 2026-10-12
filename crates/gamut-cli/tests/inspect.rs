@@ -264,6 +264,85 @@ fn json_output_lists_every_png_finding_past_the_text_cap() {
 }
 
 #[test]
+fn json_output_names_trailing_bytes_after_iend_with_their_range() {
+    let mut png = sound_png();
+    let end = png.len();
+    png.extend_from_slice(&[0xAA; 3]);
+    let (out, doc) = run_inspect_json("json-trailing", &png);
+    assert_eq!(out.status.code(), Some(1), "{doc}");
+    assert_eq!(
+        doc["findings"],
+        serde_json::json!([{
+            "kind": "trailing_bytes",
+            "range": { "start": end, "end": end + 3 },
+            "description": format!("3 trailing bytes after IEND at offset {end}"),
+        }])
+    );
+}
+
+#[test]
+fn json_output_names_a_truncated_tail_with_the_walks_range() {
+    // Cut two bytes into the IDAT payload: the walk frames IHDR, then reports the rest as one
+    // truncated segment, and the IEND that never arrived as missing.
+    let mut png = sound_png();
+    png.truncate(8 + 25 + 8 + 2);
+    let report = gamut::png::deconstruct(&png).expect("the walk opens a truncated file");
+    let truncated = report
+        .segments
+        .iter()
+        .find(|seg| matches!(seg.kind, gamut::png::SegmentKind::Truncated))
+        .expect("a truncated segment");
+    let (out, doc) = run_inspect_json("json-truncated", &png);
+    assert_eq!(out.status.code(), Some(1), "{doc}");
+    let findings = doc["findings"].as_array().expect("findings");
+    assert_eq!(findings[0]["kind"], "truncated", "{doc}");
+    assert_eq!(
+        findings[0]["range"],
+        serde_json::json!({ "start": truncated.range.start, "end": truncated.range.end })
+    );
+    assert_eq!(findings[1]["kind"], "missing_iend", "{doc}");
+}
+
+/// A zlib stream (RFC 1950) holding `data` in one stored DEFLATE block (RFC 1951 §3.2.4).
+fn zlib_stored(data: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(data.len()).unwrap();
+    let mut out = vec![0x78, 0x01, 0x01];
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&(!len).to_le_bytes());
+    out.extend_from_slice(data);
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in data {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    out
+}
+
+#[test]
+fn json_output_names_filter_scan_damage_without_a_range() {
+    // A 1x1 greyscale image whose one scanline carries filter code 5, which PNG §9.2 does not
+    // define. Every chunk frames and its CRC holds: the scan is the only thing against the file.
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    push_chunk(&mut png, b"IHDR", &ihdr);
+    push_chunk(&mut png, b"IDAT", &zlib_stored(&[5, 0]));
+    push_chunk(&mut png, b"IEND", &[]);
+    let (out, doc) = run_inspect_json("json-filter-damage", &png);
+    assert_eq!(out.status.code(), Some(1), "{doc}");
+    assert_eq!(
+        doc["findings"],
+        serde_json::json!([{
+            "kind": "filter_scan_damage",
+            "description": "filters not counted — a scanline carries an undefined filter code",
+        }])
+    );
+}
+
+#[test]
 fn json_output_prints_nothing_for_a_file_the_walk_cannot_open() {
     let path = std::env::temp_dir().join(format!(
         "gamut-inspect-json-test-{}-garbage.png",
