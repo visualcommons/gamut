@@ -224,8 +224,12 @@ code**. What differs is only what each container can carry.
   store's size and range: the chunk's payload, without the 8-byte chunk header `c2pa_span` includes.
   A chunk another chunk follows says so (`another chunk follows it, where C2PA 2.4 §A.3.7 places it
   last`), and a file with more than one says that §A.3.7 admits one and gamut's readers take the
-  first. A `C2PA` chunk has no framing of its own to fail, so there is no unread category; a chunk
-  whose size runs past the data fails the whole RIFF walk, which exits `1` with that error. Exit `0`
+  first. A `C2PA` chunk has no framing of its own beyond the RIFF header, so its one unread case is a
+  payload shorter than the 8-byte JUMBF box header every store opens with — the bound the TIFF/DNG
+  (`TooShort`) and HEIC reports apply. Such a chunk is listed as an unread `N-byte payload`, in file
+  order beside the stores, and a file whose every `C2PA` chunk is unread reads `no manifest store
+  could be read, but N C2PA chunks are present — that is NOT absence of provenance`. A chunk whose
+  size runs past the data fails the whole RIFF walk, which exits `1` with that error. Exit `0`
   otherwise.
 - **TIFF / DNG** (`gamut_tiff::c2pa_summary` / `gamut_dng::c2pa_summary`, both `gamut-ifd`'s
   `c2pa::summarize`) — **additive**: the section prints after the byte-accounting report and before
