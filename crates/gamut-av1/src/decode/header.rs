@@ -1054,7 +1054,20 @@ fn get_qindex_ignoring_delta(
 mod tests {
     use super::*;
     use crate::decode::obu::{ObuIter, Subsampling};
+    use crate::filter::{CdefStrengths, FrameFilters};
     use crate::headers::Av1Colour;
+
+    /// The in-loop filters [`parse_encoder_headers`] has the encoder signal: a non-zero value in
+    /// every field, so each reads back as itself rather than as a default.
+    const ENCODER_FILTERS: FrameFilters = FrameFilters {
+        deblock_level: 37,
+        cdef: CdefStrengths {
+            y_pri: 9,
+            y_sec: 2,
+            uv_pri: 14,
+            uv_sec: 1,
+        },
+    };
 
     /// Parses the sequence + frame header out of a temporal unit the encoder produced.
     fn parse_encoder_headers(
@@ -1062,6 +1075,19 @@ mod tests {
         height: u32,
         base_q_idx: u8,
         superres: Option<u8>,
+    ) -> (SequenceHeader, FrameHeader) {
+        parse_encoder_headers_with(width, height, base_q_idx, superres, ENCODER_FILTERS, true)
+    }
+
+    /// The headers the encoder writes for a frame whose in-loop filters are `filters`, with luma
+    /// restoration signalled when `luma_lr`.
+    fn parse_encoder_headers_with(
+        width: u32,
+        height: u32,
+        base_q_idx: u8,
+        superres: Option<u8>,
+        filters: FrameFilters,
+        luma_lr: bool,
     ) -> (SequenceHeader, FrameHeader) {
         let lossy = base_q_idx > 0;
         let cfg = crate::decode::testutil::still_config(width, height, Av1Colour::default());
@@ -1074,8 +1100,9 @@ mod tests {
             cfg.seq_level_idx_0,
             superres,
         );
-        let frame_payload =
-            crate::headers::frame_header_payload(&layout, base_q_idx, superres, false);
+        let frame_payload = crate::headers::frame_header_payload(
+            &layout, base_q_idx, superres, false, filters, luma_lr,
+        );
         let unit = crate::headers::assemble_temporal_unit(&seq_payload, &frame_payload);
         let obus: Vec<_> = ObuIter::new(&unit).collect::<Result<Vec<_>>>().unwrap();
         let seq = SequenceHeader::parse(obus[0].payload).unwrap();
@@ -1119,22 +1146,16 @@ mod tests {
             assert_eq!(fh.delta_q_res, 0);
             assert!(fh.delta_lf_present);
             assert!(!fh.delta_lf_multi);
-            // The encoder derives one deblock level from base_q_idx and repeats it.
-            let expected = crate::filter::deblock_level(q);
-            assert_eq!(fh.loop_filter.level[0], expected);
-            assert_eq!(fh.loop_filter.level[1], expected);
-            if expected != 0 {
-                assert_eq!(fh.loop_filter.level[2], expected);
-                assert_eq!(fh.loop_filter.level[3], expected);
-            }
+            // One deblock level, repeated for both luma passes and both chroma planes.
+            assert_eq!(fh.loop_filter.level, [ENCODER_FILTERS.deblock_level; 4]);
             // CDEF: one strength set, secondary strengths already remapped.
-            let (y_pri, y_sec, uv_pri, uv_sec) = crate::filter::cdef_strengths(q);
+            let cdef = ENCODER_FILTERS.cdef;
             assert_eq!(fh.cdef.bits, 0);
             assert_eq!(fh.cdef.damping, 3);
-            assert_eq!(fh.cdef.y_pri[0], y_pri as u8);
-            assert_eq!(fh.cdef.y_sec[0], y_sec as u8);
-            assert_eq!(fh.cdef.uv_pri[0], uv_pri as u8);
-            assert_eq!(fh.cdef.uv_sec[0], uv_sec as u8);
+            assert_eq!(fh.cdef.y_pri[0], cdef.y_pri);
+            assert_eq!(fh.cdef.y_sec[0], cdef.y_sec);
+            assert_eq!(fh.cdef.uv_pri[0], cdef.uv_pri);
+            assert_eq!(fh.cdef.uv_sec[0], cdef.uv_sec);
             // Loop restoration: Wiener on luma only, unit size 256.
             assert_eq!(
                 fh.lr.frame_restoration_type,
@@ -1148,6 +1169,32 @@ mod tests {
             assert_eq!(fh.lr.loop_restoration_size[0], 256);
             fh.reject_unsupported_tools(&seq).unwrap();
         }
+    }
+
+    #[test]
+    fn the_encoder_signals_its_chosen_filters_and_no_restoration_when_none_helps() {
+        // The opposite corner of every choice `parses_the_encoders_lossy_frame_header` pins: the
+        // loop filter off (so the chroma levels are not coded and read back as 0), the weakest
+        // non-zero CDEF strengths with secondary 4 (coded as 3), and no restored unit — which must
+        // signal RESTORE_NONE and code no `lr_unit_shift`, since the tiles then code no unit.
+        let filters = FrameFilters {
+            deblock_level: 0,
+            cdef: CdefStrengths {
+                y_pri: 1,
+                y_sec: 4,
+                uv_pri: 0,
+                uv_sec: 1,
+            },
+        };
+        let (_, fh) = parse_encoder_headers_with(128, 96, 100, None, filters, false);
+        assert_eq!(fh.loop_filter.level, [0; 4]);
+        assert_eq!(
+            (fh.cdef.y_pri[0], fh.cdef.y_sec[0]),
+            (1, 4),
+            "a stored 4 is coded as 3 and remapped back"
+        );
+        assert_eq!((fh.cdef.uv_pri[0], fh.cdef.uv_sec[0]), (0, 1));
+        assert_eq!(fh.lr, LrParams::disabled());
     }
 
     #[test]
@@ -1834,7 +1881,14 @@ mod tests {
             cfg.seq_level_idx_0,
             None,
         );
-        let frame = crate::headers::frame_header_payload(&layout, 100, None, false);
+        let frame = crate::headers::frame_header_payload(
+            &layout,
+            100,
+            None,
+            false,
+            crate::filter::FrameFilters::default(),
+            true,
+        );
         for cut in 0..frame.len() {
             let mut r = BitReader::new(&frame[..cut]);
             assert!(
