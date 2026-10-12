@@ -147,6 +147,37 @@
 //! reading as an option is tracked at
 //! <https://github.com/visualcommons/gamut/issues/586>.
 //!
+//! # HDR: the PQ profile is peak-referred
+//!
+//! [`BuiltinProfile::Bt2020Pq`] (and [`IccProfile::from_cicp`] for transfer 16) samples the
+//! ST 2084 EOTF divided by its own 10 000 cd/m² peak, so media white *is* that peak. A
+//! diffuse-white signal — BT.2408's 203 cd/m² HDR reference white, `V` ≈ 0.58 — therefore lands
+//! at 203 / 10 000 = 0.0203 of media white, and a CMM converting it to sRGB writes ≈ 0.153 (code
+//! 39 of 255): dark grey where SDR-referred content expects white. lcms2 measures exactly that,
+//! identically under media-relative colorimetric, ICC-absolute colorimetric and perceptual
+//! intents (`oracle_pq_diffuse_white_lands_at_its_share_of_the_peak` and
+//! `oracle_pq_diffuse_white_is_dark_grey_in_lcms_srgb` in `tests/oracle.rs`).
+//!
+//! This is kept as the one behaviour, with no diffuse-white-referred sibling and no parameter
+//! (issue <https://github.com/visualcommons/gamut/issues/557>), because neither normalization
+//! makes a matrix/TRC profile an HDR→SDR renderer:
+//!
+//! * **Embedding beside HDR content for an HDR-aware pipeline**: peak-referred is right. It is
+//!   the only normalization that keeps the whole PQ range inside the `[0, 1]` a `curveType`
+//!   encodes, so no signal value is clipped by the profile itself.
+//! * **Embedding so an SDR CMM produces something viewable**: neither is right. Referring the
+//!   curve to diffuse white puts 203 cd/m² on media white but clips every highlight above it —
+//!   the top ~5.6 stops of the PQ range — with no roll-off, because a matrix/TRC profile has
+//!   nowhere to put a tone curve that is not also the transfer's.
+//!
+//! So for an SDR rendering, do not embed this profile: decode PQ to light, tone-map it with
+//! `gamut-tonemap` (Reinhard, ACES, Hable, Drago — its `ToneCurve` operators), re-encode, and
+//! embed an SDR profile such as [`BuiltinProfile::Srgb`] or [`BuiltinProfile::DisplayP3`].
+//!
+//! [`IccProfile::validate`] reports nothing about this: the profile is conforming, and the
+//! normalization is a statement about which white the caller's content is graded to, which no
+//! profile-level check can see.
+//!
 //! # Rendering intent
 //!
 //! Every profile built here carries `Perceptual` in the header's rendering-intent field (§7.2.15),
@@ -234,6 +265,13 @@ pub enum BuiltinProfile {
     DisplayP3 = 2,
     /// BT.2100 PQ: BT.2020 primaries, D65 white, the SMPTE ST 2084 transfer normalized to its
     /// 10 000 cd/m² peak.
+    ///
+    /// **Peak-referred, by decision**: media white is the 10 000 cd/m² peak, so a diffuse-white
+    /// signal (BT.2408's 203 cd/m²) is 0.0203 of media white and an SDR CMM renders it dark
+    /// grey. That is the profile to embed beside HDR content for an HDR-aware pipeline; for an
+    /// SDR rendering, tone-map the samples with `gamut-tonemap` and embed an SDR profile such as
+    /// [`BuiltinProfile::Srgb`] instead. See the module documentation's *HDR: the PQ profile is
+    /// peak-referred*.
     Bt2020Pq = 3,
     /// Adobe RGB (1998): its own primaries, D65 white, the standard `X^(563/256)` transfer.
     /// ITU-T H.273 has no code point for either axis, so the profile carries no `cicpType` tag.
