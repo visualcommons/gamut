@@ -32,6 +32,7 @@
 //! the pixel parameters (8-bit, 4:4:4) are the v1 surface's fixed contract, stated on
 //! [`Av1StillEncoder::encode_still`] and enforced by the `seq_profile` check.
 
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, SequenceHeader, Speed, Subsampling};
@@ -76,6 +77,9 @@ pub struct Av1EncodeRequest {
     /// The search preset the caller chose with
     /// [`AvifEncoder::with_speed`](crate::AvifEncoder::with_speed).
     speed: Speed,
+    /// The share of [`AvifEncoder::with_threads`](crate::AvifEncoder::with_threads)'s budget this
+    /// encode may use.
+    threads: NonZeroUsize,
 }
 
 impl Av1EncodeRequest {
@@ -88,6 +92,7 @@ impl Av1EncodeRequest {
         chroma: ChromaSubsampling,
         bit_depth: BitDepth,
         speed: Speed,
+        threads: NonZeroUsize,
     ) -> Self {
         Self {
             chroma,
@@ -96,7 +101,22 @@ impl Av1EncodeRequest {
             colour,
             bit_depth,
             speed,
+            threads,
         }
+    }
+
+    /// The most threads this encode may use: the share of
+    /// [`AvifEncoder::with_threads`](crate::AvifEncoder::with_threads)'s budget the colour item
+    /// gets — all of it for an image without alpha, and the larger half when the alpha auxiliary
+    /// is coded beside it on another thread. One unless the caller asked for more.
+    ///
+    /// Like [`speed`](Self::speed) this is a **hint**: a backend may run on fewer threads or ignore
+    /// it. The built-in encoder's output does not depend on it; whether a backend's does is the
+    /// backend's own contract. It does not cross the C seam — [`AbiAv1StillEncoder`]'s `extra`
+    /// blob is unchanged — since a C backend schedules its own threads.
+    #[must_use]
+    pub fn threads(&self) -> NonZeroUsize {
+        self.threads
     }
 
     /// The encode-speed preset the caller chose with
@@ -775,6 +795,7 @@ mod tests {
                 ChromaSubsampling::Cs444,
                 BitDepth::Eight,
                 speed,
+                NonZeroUsize::MIN,
             ))
         };
         assert_eq!(blob(Speed::Thorough), [77]);
