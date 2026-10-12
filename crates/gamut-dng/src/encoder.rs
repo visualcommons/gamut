@@ -294,6 +294,13 @@ impl DngEncoder {
     /// # Errors
     ///
     /// Returns [`Error::Unsupported`] if the raw is not 3-colour (the profile is a `3 × 3` matrix).
+    /// Returns [`Error::InvalidInput`] — before any pixel work — if the
+    /// [`DngMetadata::exif`] sub-IFD, or a directory nested in it, carries a field under a
+    /// standard pointer tag (`SubIFDs`, `ExifIFD`, `GPSInfo`, `InteroperabilityIFD`) whose on-disk
+    /// type is a pointer's own (`LONG`, `IFD`, `LONG8`, `IFD8`, judged by [`Value::type_code`],
+    /// so a `Value::Unknown` at one of those codes counts), or stores one tag twice (a field and
+    /// a sub-IFD group, or two groups): either would be written into a file
+    /// [`DngRewrite::open`](crate::DngRewrite::open) refuses or reads back changed.
     /// Propagates buffer/validation errors.
     pub fn encode(
         &self,
@@ -329,6 +336,7 @@ impl DngEncoder {
         out: &mut Vec<u8>,
     ) -> Result<DngEncodeReport> {
         let store = self.c2pa_store()?;
+        self.metadata.check()?;
         if color_plane_count(raw) != 3 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
