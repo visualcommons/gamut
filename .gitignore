@@ -27,9 +27,44 @@ tooling/*/Cargo.lock
 # record: a saved input is only reproducible while the target's byte-to-input mapping is unchanged,
 # so a crash is minimised and promoted into a NAMED DETERMINISTIC TEST in the crate's own suite
 # instead (see tooling/gamut-fuzz/README.md and docs/testing.md).
-tooling/gamut-fuzz/corpus/
 tooling/gamut-fuzz/artifacts/
 tooling/gamut-fuzz/coverage/
+
+# Everything under `corpus/` is ignored except the curated seed set, which is named file by file
+# below. git cannot re-include a file whose parent directory is excluded, so the ignore covers the
+# directory's *contents* (`corpus/**`) and the per-target directories are re-opened (`!corpus/*/`)
+# without re-including anything inside them. The seeds are then negated one path at a time — never
+# by a wildcard: libFuzzer writes its findings into the same `corpus/<target>/` directory, and any
+# pattern broad enough to cover a future seed would cover those too. Adding a seed is one line here
+# plus a plain `git add` (see "Seeds" in tooling/gamut-fuzz/README.md).
+tooling/gamut-fuzz/corpus/**
+!tooling/gamut-fuzz/corpus/*/
+!tooling/gamut-fuzz/corpus/avif_clean_alpha/16bit-1x3-edge.bin
+!tooling/gamut-fuzz/corpus/avif_clean_alpha/8bit-2x2-edge.bin
+!tooling/gamut-fuzz/corpus/dng_decode/cfa-12bit.dng
+!tooling/gamut-fuzz/corpus/heic_container/appended-stream.heic
+!tooling/gamut-fuzz/corpus/heic_container/heic-single-item.heic
+!tooling/gamut-fuzz/corpus/heic_container/trailer.heic
+!tooling/gamut-fuzz/corpus/heic_hvcc/main-still-vps-sps-pps.bin
+!tooling/gamut-fuzz/corpus/heic_hvcc/truncated-payload-nal.bin
+!tooling/gamut-fuzz/corpus/ifd_read/01-truncated-header.tif
+!tooling/gamut-fuzz/corpus/ifd_read/03-invalid-byte-order.tif
+!tooling/gamut-fuzz/corpus/ifd_read/04-invalid-magic.tif
+!tooling/gamut-fuzz/corpus/ifd_read/05-ifd0-offset-past-eof.tif
+!tooling/gamut-fuzz/corpus/ifd_read/06-truncated-entry-count.tif
+!tooling/gamut-fuzz/corpus/ifd_read/07-truncated-entries.tif
+!tooling/gamut-fuzz/corpus/ifd_read/08-value-offset-past-eof.tif
+!tooling/gamut-fuzz/corpus/ifd_read/09a-circular-ifd-self.tif
+!tooling/gamut-fuzz/corpus/ifd_read/09b-circular-ifd-two-node.tif
+!tooling/gamut-fuzz/corpus/ifd_read/10a-hostile-entry-count.tif
+!tooling/gamut-fuzz/corpus/ifd_read/10b-hostile-entry-count-bigtiff.tif
+!tooling/gamut-fuzz/corpus/ifd_read/11-hostile-value-count.tif
+!tooling/gamut-fuzz/corpus/ifd_read/12-unknown-tag-preserved.tif
+!tooling/gamut-fuzz/corpus/ifd_read/13-unknown-field-type.tif
+!tooling/gamut-fuzz/corpus/ifd_read/padding-unread-claim.tif
+!tooling/gamut-fuzz/corpus/isobmff_boxes/avif-single-item.avif
+!tooling/gamut-fuzz/corpus/tiff_decode/rgb8-lzw.tif
+!tooling/gamut-fuzz/corpus/tiff_decode/rgb8-none.tif
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
