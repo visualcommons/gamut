@@ -1053,7 +1053,8 @@ mod tests {
             (3, 48, 48, 16, 0x4d6f_bb67_2399_a35e),
             (4, 64, 48, 90, 0x5fed_6011_e0a0_278c),
             (0, 100, 80, 8, 0x8302_4eaa_7b86_ddc7),
-            (0, 130, 70, 120, 0x3324_a4a0_9acf_6e8f),
+            // One tile: two would leave the second 2 samples wide (Annex A.3, CroppedTileWidth).
+            (0, 130, 70, 120, 0x9282_57df_6360_f971),
             (2, 64, 64, 200, 0x307c_fb34_8720_4baf),
             (3, 96, 96, 60, 0x0540_b9da_a870_9e1a),
             (4, 128, 64, 30, 0x800d_d57f_9bd3_5fae),
