@@ -1,6 +1,8 @@
 //! End-to-end tests for `gamut convert` to AVIF (issue #663): the input is decoded in its own
 //! layout, so alpha, grey and 16-bit precision reach the encoder, and its ICC profile and Exif are
-//! carried unless `--strip-metadata` is given.
+//! carried unless `--strip-metadata` is given. The `--avif-*` coding flags whose effect is visible
+//! in the container (issue #664: matrix, depth, chroma) are read back here too; the rest are
+//! pinned on the encoder the flags build, in `convert.rs`'s unit tests.
 //!
 //! These drive the built `gamut` binary for the reason `convert_metadata.rs` gives: `gamut-cli` is
 //! outside the mutation globs and the coverage regex, so only an end-to-end run pins the wiring.
@@ -9,8 +11,9 @@
 
 use std::process::Command;
 
-use gamut::avif::AvifContainer;
+use gamut::avif::{Av1Config, AvifContainer};
 use gamut::core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Rgb8, Rgb16, Rgba8};
+use gamut::isobmff::ColourInformation;
 use gamut::png::PngEncoder;
 
 /// A 2×2 image.
@@ -152,6 +155,72 @@ fn png_exif_is_carried_into_the_exif_item() {
     let item = container.image().exif().expect("Exif item");
     let payload = &item.as_isobmff_item().payload;
     assert_eq!(&payload[4..], EXIF);
+}
+
+/// An opaque 8-bit RGB PNG, the input the `--avif-*` coding-flag tests encode.
+fn rgb_png() -> Vec<u8> {
+    let rgb = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+    png::<Rgb8>(PngEncoder::new(), &rgb)
+}
+
+/// The primary item's `av1C` of an AVIF file.
+fn av1_config(avif: &[u8]) -> Av1Config {
+    AvifContainer::parse(avif)
+        .unwrap()
+        .image()
+        .primary_item()
+        .av1_config()
+        .expect("av1C")
+        .unwrap()
+}
+
+/// `--avif-matrix` reaches the file: the `colr nclx` box names the chosen matrix (BT.601 is CICP
+/// code point 6; the lossy default would be BT.709's 1).
+#[test]
+fn avif_matrix_is_written_into_colr() {
+    let avif = convert(
+        "matrix",
+        &rgb_png(),
+        &["--avif-lossy", "--avif-matrix", "bt601"],
+    );
+    let container = AvifContainer::parse(&avif).unwrap();
+    let Some(ColourInformation::Nclx(nclx)) = container.image().primary_item().colour() else {
+        panic!("no colr nclx");
+    };
+    assert_eq!(nclx.matrix_coefficients, 6);
+}
+
+/// `--avif-depth` reaches the file: an 8-bit input codes at 10 bits.
+#[test]
+fn avif_depth_codes_an_eight_bit_input_at_ten_bits() {
+    let config = av1_config(&convert("depth", &rgb_png(), &["--avif-depth", "10"]));
+    assert!(config.high_bitdepth && !config.twelve_bit);
+}
+
+/// `--avif-chroma` reaches the file: lossy 4:4:4 instead of the 4:2:0 default.
+#[test]
+fn avif_chroma_444_codes_full_resolution_chroma() {
+    let config = av1_config(&convert(
+        "chroma",
+        &rgb_png(),
+        &["--avif-lossy", "--avif-chroma", "444"],
+    ));
+    assert_eq!(
+        (config.chroma_subsampling_x, config.chroma_subsampling_y),
+        (0, 0)
+    );
+}
+
+/// An out-of-range speed is refused by the argument parser before anything is encoded — cavif's
+/// parser accepts 11–100 and then panics.
+#[test]
+fn out_of_range_avif_speed_is_a_usage_error() {
+    let run = Command::new(env!("CARGO_BIN_EXE_gamut"))
+        .args(["convert", "in.png", "out.avif", "--avif-speed", "11"])
+        .output()
+        .expect("run gamut convert");
+    // clap's usage-error exit status, not the conversion's failure status 1.
+    assert_eq!(run.status.code(), Some(2));
 }
 
 /// `--strip-metadata` leaves both payloads out.
