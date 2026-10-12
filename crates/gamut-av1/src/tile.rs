@@ -618,6 +618,10 @@ pub(crate) struct FrameEncoder<'a> {
     block_decoded: Vec<u8>,
     /// The candidate sets the lossy mode decisions search (full by default).
     search: Search,
+    /// The mode decisions the blocks of the current 8×8 split decision reached while they were
+    /// trialled ([`FrameEncoder::choose_split`]); the partition it chooses then codes its blocks
+    /// as decided instead of searching them again. Cleared by each such decision before it trials.
+    decided: Vec<Decided>,
 }
 
 /// One tile's MI rectangle: `MiRowStart..MiRowEnd` × `MiColStart..MiColEnd` (§5.11.1), all on
@@ -774,6 +778,7 @@ impl<'a> FrameEncoder<'a> {
             sb_c: 0,
             block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
             search: Search::for_speed(Speed::default()),
+            decided: Vec::new(),
         }
     }
 
@@ -1195,6 +1200,7 @@ impl<'a> FrameEncoder<'a> {
         }
         // `Mi_Width_Log2` of an 8×8 block.
         let bsl = 1;
+        self.decided.clear();
         let none = self.trial_cost(r, c, bw, |e| {
             e.sym.encode(0, e.cdfs.partition(bsl, ctx));
             e.update_partition_ctx(r, c, bsl, 0);
@@ -1262,8 +1268,8 @@ impl<'a> FrameEncoder<'a> {
                         .copied()
                 })
                 .collect(),
-            above_partition: self.above_partition.clone(),
-            left_partition: self.left_partition.clone(),
+            above_partition: self.above_partition[cols.clone()].to_vec(),
+            left_partition: self.left_partition[rows.clone()].to_vec(),
             planes: (0..self.num_planes)
                 .map(|p| self.save_plane(p, r, c, bw, bw))
                 .collect(),
@@ -1295,8 +1301,9 @@ impl<'a> FrameEncoder<'a> {
             let at = (s.r + i) * cols + s.c;
             self.mi_dlf[at..at + row.len()].copy_from_slice(row);
         }
-        self.above_partition = s.above_partition;
-        self.left_partition = s.left_partition;
+        self.above_partition[s.c..s.c + s.above_partition.len()]
+            .copy_from_slice(&s.above_partition);
+        self.left_partition[s.r..s.r + s.left_partition.len()].copy_from_slice(&s.left_partition);
         // Every plane's state was captured before any was coded, so the `BlockDecoded` map and
         // CfL bounds each one also carries are the same pre-trial values.
         for plane in s.planes {
@@ -1890,7 +1897,16 @@ impl<'a> FrameEncoder<'a> {
         } else {
             TxSize::Tx4x4
         };
-        let luma = if palette.is_some() || self.qindex == 0 {
+        // A block the 8×8 split decision has just trialled is coded as the trial decided it,
+        // rather than searched a second time.
+        let decided = self
+            .decided
+            .iter()
+            .position(|d| d.at == (r, c, bw, bh))
+            .map(|i| self.decided.swap_remove(i));
+        let luma = if let Some(d) = decided {
+            d.luma
+        } else if palette.is_some() || self.qindex == 0 {
             // Palette requires YMode == DC_PRED (and no filter-intra); lossless also forces DC_PRED.
             DC_LUMA
         } else {
@@ -1940,14 +1956,22 @@ impl<'a> FrameEncoder<'a> {
             bw.max(bh) <= 32
         };
         let is_lossy = self.qindex != 0;
-        let cfl = match (block_has_chroma, palette.is_some()) {
+        let cfl = match (decided, block_has_chroma, palette.is_some()) {
+            (Some(d), ..) => d.cfl,
             // No chroma of its own (or none in the frame at all), or a palette block — whose
             // chroma is plain DC_PRED.
-            (false, _) | (_, true) => None,
+            (_, false, _) | (_, _, true) => None,
             _ if is_lossy && cfl_allowed && !is_rect => self.select_cfl(r, c, bw, luma, luma_tx),
             // CfL is square-only here; a rectangular block's chroma is plain DC_PRED.
             _ => None,
         };
+        if self.sym.tally.is_some() {
+            self.decided.push(Decided {
+                at: (r, c, bw, bh),
+                luma,
+                cfl,
+            });
+        }
         let ym = usize::from(y_mode);
         // §5.11.7 wraps `uv_mode` (and the `read_cfl_alphas` that follows UV_CFL_PRED) in
         // `if (HasChroma)`. A monochrome frame codes neither, and neither does a subsampled
@@ -2211,9 +2235,10 @@ impl<'a> FrameEncoder<'a> {
         bh: usize,
         ptx: TxSize,
         pred: Pred,
+        coding: Coding,
     ) -> (u64, u32) {
         let saved = self.save_plane(plane, r, c, bw, bh);
-        let measured = self.code_plane(plane, r, c, bw, bh, ptx, pred, false, Coding::Trial);
+        let measured = self.code_plane(plane, r, c, bw, bh, ptx, pred, false, coding);
         self.restore_plane(saved);
         measured
     }
@@ -2233,16 +2258,21 @@ impl<'a> FrameEncoder<'a> {
             let at = y * g.coded_w + x0;
             recon.extend_from_slice(&self.recon[plane][at..at + w]);
         }
+        // The coefficient contexts the block's transforms write: one cell per 4 samples of the
+        // in-plane rectangle (the coded plane is `4 * ctx_cols` samples wide, so these stay in
+        // the arrays).
+        let (cols, rows) = (x0 / 4..(x0 + w) / 4, y0 / 4..(y0 + h) / 4);
         PlaneState {
             plane,
             x0,
             y0,
             w,
+            h,
             recon,
-            above_level: self.above_level[plane].clone(),
-            above_dc: self.above_dc[plane].clone(),
-            left_level: self.left_level[plane].clone(),
-            left_dc: self.left_dc[plane].clone(),
+            above_level: self.above_level[plane][cols.clone()].to_vec(),
+            above_dc: self.above_dc[plane][cols].to_vec(),
+            left_level: self.left_level[plane][rows.clone()].to_vec(),
+            left_dc: self.left_dc[plane][rows].to_vec(),
             block_decoded: self.block_decoded.clone(),
             max_luma: (self.max_luma_w, self.max_luma_h),
         }
@@ -2252,7 +2282,7 @@ impl<'a> FrameEncoder<'a> {
     fn region_sse(&self, s: &PlaneState) -> u64 {
         let stride = self.geom[s.plane].coded_w;
         let mut region = Vec::with_capacity(s.recon.len());
-        for y in s.y0..s.y0 + s.recon.len().checked_div(s.w).unwrap_or(0) {
+        for y in s.y0..s.y0 + s.h {
             let at = y * stride + s.x0;
             region.extend_from_slice(&self.recon[s.plane][at..at + s.w]);
         }
@@ -2265,10 +2295,11 @@ impl<'a> FrameEncoder<'a> {
         if s.w > 0 {
             self.store_recon(p, s.x0, s.y0, s.w, &s.recon);
         }
-        self.above_level[p] = s.above_level;
-        self.above_dc[p] = s.above_dc;
-        self.left_level[p] = s.left_level;
-        self.left_dc[p] = s.left_dc;
+        let (x4, y4) = (s.x0 / 4, s.y0 / 4);
+        self.above_level[p][x4..x4 + s.above_level.len()].copy_from_slice(&s.above_level);
+        self.above_dc[p][x4..x4 + s.above_dc.len()].copy_from_slice(&s.above_dc);
+        self.left_level[p][y4..y4 + s.left_level.len()].copy_from_slice(&s.left_level);
+        self.left_dc[p][y4..y4 + s.left_dc.len()].copy_from_slice(&s.left_dc);
         self.block_decoded = s.block_decoded;
         (self.max_luma_w, self.max_luma_h) = s.max_luma;
     }
@@ -2369,7 +2400,7 @@ impl<'a> FrameEncoder<'a> {
             tx_size,
             intra_dir,
         };
-        let choice = self.select_tx_type(&site, &pred, &res);
+        let choice = self.select_tx_type(&site, &pred, &res, coding != Coding::Screen);
         match coding {
             Coding::Emit => self.code_coeffs(
                 plane,
@@ -2382,7 +2413,7 @@ impl<'a> FrameEncoder<'a> {
                 choice.symbol,
                 intra_dir,
             ),
-            Coding::Trial => {
+            Coding::Trial | Coding::Screen => {
                 self.set_ctx(
                     plane,
                     sx >> 2,
@@ -2508,13 +2539,19 @@ impl<'a> FrameEncoder<'a> {
     /// will, and weighed by [`Self::rd_cost`]. `DCT_DCT` is tried first and wins ties.
     ///
     /// Only a square luma transform up to 16×16 has a choice: the search's prefix of the rest of
-    /// `TX_SET_INTRA_2`. A 32×32 or larger luma block is `TX_SET_DCTONLY` (§5.11.48), and chroma and
-    /// the rectangular transforms are coded `DCT_DCT` here, so they price that one candidate. The
-    /// choice is a quality decision (any valid type round-trips bit-exactly); only the *signaling*
-    /// must be correct.
-    fn select_tx_type(&self, site: &TxSite, pred: &[i32], res: &[i32]) -> TxChoice {
+    /// `TX_SET_INTRA_2`, unless `all_types` is false (a [`Coding::Screen`] trial). A 32×32 or larger
+    /// luma block is `TX_SET_DCTONLY` (§5.11.48), and chroma and the rectangular transforms are
+    /// coded `DCT_DCT` here, so they price that one candidate. The choice is a quality decision
+    /// (any valid type round-trips bit-exactly); only the *signaling* must be correct.
+    fn select_tx_type(
+        &self,
+        site: &TxSite,
+        pred: &[i32],
+        res: &[i32],
+        all_types: bool,
+    ) -> TxChoice {
         let (tw, th) = (site.tx_size.width(), site.tx_size.height());
-        let trials = if site.plane == 0 && tw == th && tw < 32 {
+        let trials = if all_types && site.plane == 0 && tw == th && tw < 32 {
             &TX_TYPE_TRIALS[..self.search.tx_type_trials]
         } else {
             &[]
@@ -3282,12 +3319,18 @@ impl<'a> FrameEncoder<'a> {
     ///
     /// Every candidate of [`Self::luma_candidates`] is trialled: its luma residual is coded
     /// transform by transform (each transform predicted from the reconstruction its predecessors
-    /// left, under its own rate–distortion transform-type choice), and the reconstruction's squared
-    /// error weighed against the coefficient rate plus the mode's signalling rate by
-    /// [`Self::rd_cost`]. No candidate is ranked out by a cheaper proxy first, so a search that
-    /// tries more candidates can only find a cheaper one. Earlier candidates win ties, so the
-    /// cheaper signalling is preferred. The choice is a quality decision; every option
-    /// reconstructs bit-exactly, so only the signaling must be correct.
+    /// left), and the reconstruction's squared error weighed against the coefficient rate plus the
+    /// mode's signalling rate by [`Self::rd_cost`].
+    ///
+    /// Where the transforms have a type to choose and there are more than [`MODE_REFINE`]
+    /// candidates, every candidate is first trialled with `DCT_DCT` alone ([`Coding::Screen`]),
+    /// and only the [`MODE_REFINE`] cheapest are trialled again with the transform-type search
+    /// each would be coded with: that search multiplies a trial's transforms by up to five, and
+    /// a mode's `DCT_DCT` cost already tells the contenders from the rest. Otherwise every
+    /// candidate is trialled once, in full.
+    ///
+    /// Earlier candidates win ties, so the cheaper signalling is preferred. The choice is a quality
+    /// decision; every option reconstructs bit-exactly, so only the signaling must be correct.
     fn select_luma_mode(
         &mut self,
         r: usize,
@@ -3296,21 +3339,62 @@ impl<'a> FrameEncoder<'a> {
         bh: usize,
         luma_tx: TxSize,
     ) -> LumaMode {
-        let mut best: Option<(u64, LumaMode)> = None;
-        for cand in self.luma_candidates(bw, bh) {
-            let pred = Pred {
-                mode: cand.mode,
-                angle_delta: cand.angle_delta,
-                filter_intra: cand.filter_intra,
-                cfl_alpha: None,
-            };
-            let (sse, rate) = self.trial_plane(0, r, c, bw, bh, luma_tx, pred);
-            let cost = self.rd_cost(sse, rate + self.luma_mode_rate(r, c, bw, bh, cand));
-            if best.is_none_or(|(b, _)| cost < b) {
-                best = Some((cost, cand));
+        let candidates = self.luma_candidates(bw, bh);
+        let has_types = self.search.tx_type_trials > 0 && luma_tx.width() < 32;
+        let screen = has_types && candidates.len() > MODE_REFINE;
+        let first = if screen {
+            Coding::Screen
+        } else {
+            Coding::Trial
+        };
+        let mut costs: Vec<(u64, usize)> = (0..candidates.len())
+            .map(|i| {
+                (
+                    self.luma_cost(r, c, bw, bh, luma_tx, candidates[i], first),
+                    i,
+                )
+            })
+            .collect();
+        if screen {
+            costs.sort_unstable();
+            costs.truncate(MODE_REFINE);
+            // Back into signalling order, so a tie still goes to the cheaper-signalled candidate.
+            costs.sort_unstable_by_key(|&(_, i)| i);
+            for (cost, i) in &mut costs {
+                *cost = self.luma_cost(r, c, bw, bh, luma_tx, candidates[*i], Coding::Trial);
             }
         }
-        best.map_or(DC_LUMA, |(_, m)| m)
+        let mut best = (u64::MAX, DC_LUMA);
+        for (cost, i) in costs {
+            if cost < best.0 {
+                best = (cost, candidates[i]);
+            }
+        }
+        best.1
+    }
+
+    /// The rate–distortion cost of coding the lossy `bw × bh` block at MI `(r, c)`'s luma as
+    /// `cand` over `luma_tx` transforms: the trialled (under `coding`) residual's squared error
+    /// and coefficient rate, plus the mode's signalling rate.
+    #[allow(clippy::too_many_arguments)]
+    fn luma_cost(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        bh: usize,
+        luma_tx: TxSize,
+        cand: LumaMode,
+        coding: Coding,
+    ) -> u64 {
+        let pred = Pred {
+            mode: cand.mode,
+            angle_delta: cand.angle_delta,
+            filter_intra: cand.filter_intra,
+            cfl_alpha: None,
+        };
+        let (sse, rate) = self.trial_plane(0, r, c, bw, bh, luma_tx, pred, coding);
+        self.rd_cost(sse, rate + self.luma_mode_rate(r, c, bw, bh, cand))
     }
 
     /// Adds the chroma-from-luma high-frequency term to a chroma DC prediction in place (§7.11.5).
@@ -3407,7 +3491,7 @@ impl<'a> FrameEncoder<'a> {
                     filter_intra: None,
                     cfl_alpha: (alpha != 0).then_some(alpha),
                 };
-                let (sse, rate) = self.trial_plane(plane, r, c, bw, bw, ctx, pred);
+                let (sse, rate) = self.trial_plane(plane, r, c, bw, bw, ctx, pred, Coding::Trial);
                 out.push((alpha, sse, rate));
             }
         }
@@ -3851,22 +3935,37 @@ impl<'a> FrameEncoder<'a> {
 /// One bit of rate, in the fixed-point units every rate estimate is kept in (1/256 bit).
 const RATE_ONE: u32 = 1 << 8;
 
-/// `log2(x)` in [`RATE_ONE`] units, for `x >= 1`: the integer part from the bit length, then
-/// eight fractional bits by repeated squaring of the normalised mantissa. Integer-only, so a rate
-/// estimate — and therefore every decision it ranks — is identical on every target.
+/// `log2(1 + i / 256)` in [`RATE_ONE`] units, truncated, for `i` in `0..256`: the fractional part
+/// of [`log2_rate`], indexed by the eight bits below a value's leading one. Each entry takes the
+/// eight fractional bits one at a time by squaring the mantissa (in Q16): a square at or above 2
+/// means the next bit is set. Integer-only and built at compile time, so a rate estimate — and
+/// therefore every decision it ranks — is identical on every target.
+const LOG2_FRAC: [u16; 256] = {
+    let mut table = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut m = (256 + i as u64) << 8;
+        let mut bit = 8;
+        while bit > 0 {
+            bit -= 1;
+            m = (m * m) >> 16;
+            if m >= 2 << 16 {
+                m >>= 1;
+                table[i] |= 1 << bit;
+            }
+        }
+        i += 1;
+    }
+    table
+};
+
+/// `log2(x)` in [`RATE_ONE`] units, for `x >= 1`: the integer part from the bit length, the
+/// fractional part from [`LOG2_FRAC`] on the next eight bits (truncated below them).
 fn log2_rate(x: u32) -> u32 {
     let int = x.ilog2();
-    // The mantissa `x / 2^int` in Q16, in `[1, 2)`.
-    let mut m = (u64::from(x) << 16) >> int;
-    let mut frac = 0;
-    for bit in (0..8).rev() {
-        m = (m * m) >> 16;
-        if m >= 2 << 16 {
-            m >>= 1;
-            frac |= 1 << bit;
-        }
-    }
-    int * RATE_ONE + frac
+    // The mantissa `x / 2^int` to eight fractional bits, in `[256, 512)`.
+    let mantissa = (u64::from(x) << 8) >> int;
+    int * RATE_ONE + u32::from(LOG2_FRAC[mantissa as usize - 256])
 }
 
 /// The rate of coding `symbol` against the cumulative `cdf` (§8.2.6 orientation: values rise to
@@ -4075,6 +4174,15 @@ struct LumaMode {
     filter_intra: Option<u8>,
 }
 
+/// A block's mode decisions, reached while it was trialled: see [`FrameEncoder::decided`].
+#[derive(Clone, Copy)]
+struct Decided {
+    /// The block: MI `(r, c)` and its width and height in samples.
+    at: (usize, usize, usize, usize),
+    luma: LumaMode,
+    cfl: Option<(i32, i32)>,
+}
+
 /// Plain `DC_PRED` luma: what palette and lossless blocks code.
 const DC_LUMA: LumaMode = LumaMode {
     mode: DC_PRED,
@@ -4090,7 +4198,14 @@ enum Coding {
     Emit,
     /// Code nothing; reconstruct and price only.
     Trial,
+    /// As [`Coding::Trial`], but with every transform `DCT_DCT` rather than searched: the cheap
+    /// first pass of [`FrameEncoder::select_luma_mode`].
+    Screen,
 }
+
+/// How many luma mode candidates, screened by their `DCT_DCT` cost, are trialled again with the
+/// transform-type search (see [`FrameEncoder::select_luma_mode`]).
+const MODE_REFINE: usize = 8;
 
 /// Where a transform block sits, and what its coefficient contexts and transform-type CDF need.
 struct TxSite {
@@ -4113,7 +4228,9 @@ struct PlaneState {
     x0: usize,
     y0: usize,
     w: usize,
+    h: usize,
     recon: Vec<u16>,
+    /// The coefficient contexts over the rectangle's columns (`above_*`) and rows (`left_*`).
     above_level: Vec<u8>,
     above_dc: Vec<u8>,
     left_level: Vec<u8>,
@@ -4620,7 +4737,7 @@ mod tests {
             tx_size: TxSize::Tx4x4,
             intra_dir: usize::from(DC_PRED),
         };
-        e.select_tx_type(&site, &pred, res)
+        e.select_tx_type(&site, &pred, res, true)
     }
 
     #[test]
@@ -4818,23 +4935,28 @@ mod tests {
                 Snapshot::of(&e) == before,
                 "select_luma_mode changed the encoder"
             );
-            let costs: Vec<(LumaMode, u64)> = e
-                .luma_candidates(bw, bh)
-                .into_iter()
-                .map(|m| {
-                    let pred = Pred {
-                        mode: m.mode,
-                        angle_delta: m.angle_delta,
-                        filter_intra: m.filter_intra,
-                        cfl_alpha: None,
-                    };
-                    let (sse, rate) = e.trial_plane(0, r, c, bw, bh, tx, pred);
-                    (m, e.rd_cost(sse, rate + e.luma_mode_rate(r, c, bw, bh, m)))
-                })
+            // The procedure, spelled out: where a transform type is searched and there are more
+            // than `MODE_REFINE` candidates, the `MODE_REFINE` cheapest under `DCT_DCT` alone
+            // (earlier first on a tie) are re-priced in full; the first of least cost wins.
+            let all = e.luma_candidates(bw, bh);
+            let screened = tx.width() < 32 && all.len() > MODE_REFINE;
+            let mut contenders: Vec<usize> = (0..all.len()).collect();
+            if screened {
+                let screen: Vec<u64> = all
+                    .iter()
+                    .map(|&m| e.luma_cost(r, c, bw, bh, tx, m, Coding::Screen))
+                    .collect();
+                contenders.sort_by_key(|&i| (screen[i], i));
+                contenders.truncate(MODE_REFINE);
+                contenders.sort_unstable();
+            }
+            let full: Vec<u64> = contenders
+                .iter()
+                .map(|&i| e.luma_cost(r, c, bw, bh, tx, all[i], Coding::Trial))
                 .collect();
-            let least = costs.iter().map(|c| c.1).min().unwrap();
-            let first = costs.iter().find(|c| c.1 == least).unwrap().0;
-            assert_eq!(chosen, first, "{r},{c} {bw}x{bh}");
+            let least = *full.iter().min().unwrap();
+            let first = contenders[full.iter().position(|&f| f == least).unwrap()];
+            assert_eq!(chosen, all[first], "{r},{c} {bw}x{bh}");
         }
     }
 
@@ -6185,7 +6307,9 @@ mod tests {
             std::array::from_fn(|i| [90, -30, 0, 45][i % 4] + [0, 20, -20, 0][i / 4]),
         ] {
             let pred: Vec<i32> = res.iter().map(|&r| 128 - r).collect();
-            let choice = e.select_tx_type(&site, &pred, &res);
+            let choice = e.select_tx_type(&site, &pred, &res, true);
+            // A screening trial prices `DCT_DCT` alone, whatever the search holds.
+            assert_eq!(e.select_tx_type(&site, &pred, &res, false).symbol, 1);
             let cost_of = |tx: TxType, symbol: usize| {
                 let levels = e.quantize_tx(&res, TxSize::Tx4x4, tx);
                 let (rate, ..) = e.coeff_rate(

@@ -30,13 +30,14 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 /// the transform type, the CfL alphas, and whether an 8×8 block splits into 4×4 leaves — ranks its
 /// candidates by rate–distortion cost: each candidate is trialled, its squared error measured on
 /// the reconstruction a decoder would produce, and weighed against its rate priced from the
-/// adapting CDFs. No candidate is ranked out by a cheaper proxy first, so for each decision a
-/// slower preset can only find a candidate at least as cheap as a faster one does. The decisions
-/// are made block by block, before the in-loop filters, so this is not a guarantee about a whole
-/// image; measured on the fixed corpus in `tests/preset_rd.rs`, [`Thorough`](Self::Thorough) needs
-/// fewer bits than every faster preset for the same PSNR. The partition of 16×16 and larger
-/// blocks, the rectangular partitions, the transform depth and palette are still decided by
-/// texture tests, at every preset.
+/// adapting CDFs. The luma mode is chosen in two passes where its transforms have a type to
+/// search: every candidate is trialled with `DCT_DCT` alone, and the eight cheapest again with
+/// the transform-type search. The decisions are made block by block, before the in-loop filters,
+/// so a slower preset is not guaranteed smaller output on every image; measured on the fixed
+/// corpus in `tests/preset_rd.rs`, [`Thorough`](Self::Thorough) needs fewer bits than every
+/// faster preset for the same PSNR. The partition of 16×16 and larger blocks, the rectangular
+/// partitions, the transform depth and palette are still decided by texture tests, at every
+/// preset.
 ///
 /// The presets prune *search*, so they move only lossy encodes. Lossless coding (`qindex = 0`)
 /// has a single fixed path — `DC_PRED` and the 4×4 Walsh–Hadamard transform — and is identical at
@@ -1057,9 +1058,9 @@ mod tests {
             (2, 32, 32, 40, 0xad7f_19dc_a8cb_bf32),
             (3, 48, 48, 16, 0x1550_7e23_d162_f266),
             (4, 64, 48, 90, 0x5fed_6011_e0a0_278c),
-            (0, 100, 80, 8, 0x5fa2_9264_97b1_f082),
+            (0, 100, 80, 8, 0x9284_36c0_b8d2_8759),
             // One tile: two would leave the second 2 samples wide (Annex A.3, CroppedTileWidth).
-            (0, 130, 70, 120, 0x0a75_cc83_d48e_c3ca),
+            (0, 130, 70, 120, 0x30a2_32cb_6107_fbf8),
             (2, 64, 64, 200, 0x307c_fb34_8720_4baf),
             (3, 96, 96, 60, 0x3d5c_b862_2d85_f93b),
             (4, 128, 64, 30, 0x800d_d57f_9bd3_5fae),
@@ -1311,12 +1312,12 @@ mod tests {
             }
         });
         let cases: &[(Speed, u8, u64)] = &[
-            (Speed::Thorough, 40, 0x6f24_b312_1a98_2017),
-            (Speed::Balanced, 40, 0xaca0_b628_1084_0e5c),
-            (Speed::Fast, 40, 0x8c37_b542_10a5_3344),
+            (Speed::Thorough, 40, 0xcf58_54f5_27e6_5f22),
+            (Speed::Balanced, 40, 0x200f_31c7_392c_f008),
+            (Speed::Fast, 40, 0x81fc_3c50_6d1f_af6b),
             (Speed::Fastest, 40, 0x8c07_5f06_da36_ed6b),
-            (Speed::Balanced, 120, 0xe8c3_621c_b6cc_3fcb),
-            (Speed::Fast, 120, 0xa8f7_72b4_4bb1_1ce0),
+            (Speed::Balanced, 120, 0x15ed_afbe_e48c_f7c0),
+            (Speed::Fast, 120, 0x5b33_df99_1ecd_416d),
             (Speed::Fastest, 120, 0xa961_d343_7869_f44f),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
