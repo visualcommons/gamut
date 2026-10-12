@@ -355,9 +355,11 @@ repo — nothing here sets file modes — so do not work around it by editing bu
 ## Versioning
 
 Each crate is versioned **independently** per SemVer — no shared workspace version, and
-releases don't guarantee cross-crate version consistency. Only `version` is per-crate; all
-other metadata (`edition`, `rust-version`/MSRV, license, repository) is workspace-owned via
-`*.workspace = true`. Version bumps, per-crate changelogs, and crates.io publishing are
+releases don't guarantee cross-crate version consistency. Each crate manifest sets its own
+`name`, `version`, `description` (per-crate for crates.io discoverability, as the root manifest
+notes) and `readme`, plus `links` where it drives a native build (`gamut-jxl-sys`); all other
+metadata (`edition`, `rust-version`/MSRV, `authors`, `license`, `repository`, `homepage`,
+`keywords`, `categories`) is workspace-owned via `*.workspace = true`. Version bumps, per-crate changelogs, and crates.io publishing are
 automated by release-plz from conventional-commit history — write conventional commits
 (enforced by convco via the `commit-msg` hook and CI) and don't hand-edit versions for
 routine changes. `mise run versions` lists every crate's current version; `mise run bump
