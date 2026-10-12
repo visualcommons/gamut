@@ -925,6 +925,9 @@ mod tests {
         let l = layout(Tiling::SINGLE, 34, 135, 16);
         assert_eq!(l.min_rows_log2, 1);
         assert_eq!((l.cols_log2, l.rows_log2), (0, 2));
+        // The bound is inclusive: a 48 × 48 = 2304-superblock tile is exactly MAX_TILE_AREA.
+        let l = layout(Tiling::SINGLE, 48, 48, 16);
+        assert_eq!((l.cols_log2, l.rows_log2), (0, 0));
     }
 
     #[test]
