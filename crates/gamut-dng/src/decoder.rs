@@ -289,9 +289,13 @@ pub struct DecodedDng {
     /// A directory listed here is listed even when every one of its fields was consumed (its
     /// `tags` are then empty), as [`interior_extra`](Self::interior_extra) does for pages. A
     /// directory the walk did not follow — past the nesting cap, already visited, or unreadable
-    /// — is not walked, so it is in no channel; `deconstruct` diagnoses those. A `SubIFDs` entry
-    /// naming a main-chain page (IFD 0 itself, or a later page) counts as already visited: that
-    /// page is reported once, in its own page channel, never here as well.
+    /// — is not walked, so it is in no channel; `deconstruct` diagnoses those. Separately, the
+    /// decoder treats a `SubIFDs` entry naming a main-chain page (IFD 0 itself, or a later page)
+    /// as already visited: that page is reported once, in its own page channel, never here as
+    /// well. That skip is the decoder's alone and is not diagnosed: `deconstruct`'s walk seeds no
+    /// page offsets, so it follows such an entry as an ordinary child and raises no
+    /// skipped-entry or cycle finding for the entry itself (only the re-walked page's own
+    /// `SubIFDs`, met again one level down, can draw one).
     ///
     /// Empty for every file this crate writes, whose `SubIFDs` children all carry images.
     pub sub_ifd_extra: Vec<SubIfdExtra>,
@@ -711,7 +715,9 @@ struct IfdWalk<'a> {
 /// offsets seed the visited set, so a `SubIFDs` entry naming a page — IFD 0 itself, or any later
 /// page — is skipped like any other already-visited offset rather than re-walked as a child.
 /// Re-walking it would report the page's fields in [`DecodedDng::sub_ifd_extra`] as well as in
-/// its page channel, and a self-referencing entry would duplicate the page in the tree.
+/// its page channel, and a self-referencing entry would duplicate the page in the tree. This
+/// seed is the decoder's alone: `deconstruct`'s audit walk does not share it, so it follows such
+/// an entry as an ordinary child and draws no finding for the entry itself.
 fn walk_ifds(file: &TiffFile, data: &[u8]) -> (Vec<Ifd>, Vec<TreePosition>) {
     // `file` came from `read` over these same bytes, so the chain re-walk below meets the same
     // pages without error; its raw directories are only what carries each page's offset, which
