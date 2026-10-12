@@ -73,10 +73,13 @@ API; the naming convention — `photo.xmp` beside `photo.dng`, looked up in the 
 documented, not enforced, and the caller owns the path. One packet, not a catenation: Part 3's
 bullet asks for the file to be written "as though it were embedded and then had the XMP packets
 extracted **and catenated by a postprocessor**", so a conforming producer may emit several
-`<?xpacket?>` packets end to end. `write` emits exactly one; `read` takes the first and silently
-discards the rest, so two `write` outputs concatenated read back as the first alone, with no error
-(Adobe XMPCore rejects those bytes). Whether to reject, merge or keep that is open as issue
-[#562](https://github.com/visualcommons/gamut/issues/562).
+`<?xpacket?>` packets end to end. `write` emits exactly one; `read` refuses such a file with
+`XmpError::MultiplePackets`, as Adobe XMPCore does, rather than read the first packet and silently
+drop the rest — the specification gives no rule for a property two packets both set, so gamut does
+not guess one. The error carries the offset at which the next packet begins, so a caller who knows
+how its packets combine splits there and reads each one (issue
+[#562](https://github.com/visualcommons/gamut/issues/562)). `from_packet` refuses a catenation the
+same way.
 
 ## Scope
 

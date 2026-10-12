@@ -94,17 +94,30 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   sniffer (`isXmpType`) accepts a `.xmp` file starting with `<?xpacket` **or** `<x:xmpmeta` — so a
   file exiv2 reads as a sidecar and gamut rejects is expected; the caller reads those bytes with
   `XmpMeta::from_packet`.
-- **A catenated sidecar is truncated to its first packet (issue #562).** Part 3's bullet asks that
-  external metadata be written "as though it were embedded and then had the XMP packets extracted
-  and catenated by a postprocessor", so a conforming producer may emit a `.xmp` file holding
-  several `<?xpacket?>` packets end to end. `XmpSidecar::read` reads the first and silently
-  discards the rest — `XmpPacket::scan` ends the body at the *next* `<?xpacket` instruction, which
-  in a catenated file is the first packet's own trailer. Two `XmpSidecar::write` outputs
-  concatenated read back as the properties of the first alone, with no error; Adobe XMPCore rejects
-  those same bytes. `XmpSidecar::write` emits exactly one packet, so gamut never produces the
-  shape. The behaviour predates issue #421 and is documented rather than changed: rejecting,
-  merging every packet, or keeping the truncation are three different products (a merge needs a
-  conflict rule Part 3 does not supply), and #562 holds that decision.
+- **A catenated packet is refused, not truncated (issue #562 — option 1 of 3, "reject").** Part 3's
+  bullet asks that external metadata be written "as though it were embedded and then had the XMP
+  packets extracted and catenated by a postprocessor", so a conforming producer may emit a `.xmp`
+  file holding several `<?xpacket?>` packets end to end. `XmpPacket::scan` refuses any input in
+  which another `<?xpacket` instruction follows the first packet's trailer, with
+  `XmpError::MultiplePackets` carrying the byte offset (into the input as passed, a leading BOM
+  included) at which that instruction begins. **Why reject:** *merging* every packet (option 2)
+  needs a rule for a property two packets both set, and no part of the specification supplies one —
+  first-wins, last-wins and error are all inventions; *keeping the truncation* (option 3, the
+  behaviour before #562) read the first packet and silently dropped the rest, so a caller merging a
+  sidecar into an image could lose properties with no signal. Rejecting cannot lose data, matches
+  the reference engine — Adobe XMPCore rejects two `XmpSidecar::write` outputs concatenated
+  (`tests/oracle.rs::xmpcore_rejects_the_catenated_sidecar_gamut_rejects`) — and the offset leaves
+  the merge to the caller who knows its rule: `bytes[..offset]` reads as the first packet and
+  `bytes[offset..]` as the rest. **`XmpMeta::from_packet` gets the same rejection**, because it is
+  `scan` + `parse`: a container (JPEG `APP1`, PNG `iTXt`, WebP `XMP `, an AVIF/HEIF `mime` item)
+  hands over one packet, so a catenation there is malformed input, and refusing it in `scan` keeps
+  one rule for both entry points. **What this stops accepting**, named because it narrows a
+  reader: any input holding a second `<?xpacket` instruction after the first trailer — a catenated
+  sidecar, or an embedded payload with a stray packet appended — which previously parsed as its
+  first packet. Bytes after the trailer that are not an `<?xpacket` instruction (whitespace, NUL
+  padding, an XML declaration) are still ignored. `XmpSidecar::write` emits exactly one packet, so
+  gamut never produces the refused shape. `XmpError` is `#[non_exhaustive]`, so the new variant is
+  additive; the behaviour change is filed as a fix, since the input it now refuses was mis-read.
 
 ## Phases
 

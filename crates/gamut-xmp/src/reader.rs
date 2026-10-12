@@ -33,7 +33,9 @@ impl XmpMeta {
     /// # Errors
     ///
     /// Returns an [`XmpError`] if the bytes are not valid UTF-8 (or begin with a UTF-16/32
-    /// byte-order mark — only UTF-8 packets are supported), the XML is malformed, there is no
+    /// byte-order mark — only UTF-8 packets are supported), the bytes hold more than one
+    /// `<?xpacket?>` packet ([`XmpError::MultiplePackets`]: a container hands over one packet, so a
+    /// catenation is refused rather than read as its first), the XML is malformed, there is no
     /// `rdf:RDF` element, or the RDF/XML uses a construct XMP does not permit.
     pub fn from_packet(bytes: &[u8]) -> Result<XmpMeta> {
         XmpPacket::scan(bytes)?.parse()
