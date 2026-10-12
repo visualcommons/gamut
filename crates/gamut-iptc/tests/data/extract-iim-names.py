@@ -8,7 +8,8 @@ Run from the workspace root, with `pdftotext` (poppler-utils) on PATH:
 
 `pdftotext` is a system package the workspace toolchain does not provision, so the result is
 committed as a derived artefact and `iim.rs` pins `KNOWN_TAGS` against it. Re-run this after
-changing the vendored PDF; never hand-edit the table it produces.
+changing the vendored PDF; never hand-edit the table it produces. `mise run check-iim-names` re-runs
+this and fails if the committed table differs; extended CI runs that task with poppler installed.
 
 IIM 4.2 lays every DataSet out as three columns: the `record:dataset` number at the left margin,
 the DataSet name beside it, and the type/length statement and description to the right.
