@@ -13,20 +13,36 @@ HEVC-based `heic`, VP8-lineage `webp`) cover only the intra-frame still-image su
 inter-frame/motion/sequence coding. Encoder-first; decoders only where the Rust ecosystem
 lacks a strong, feature-complete implementation.
 
-Dependency edges (a crate depends on those to its right):
+Dependency edges (a crate depends on those to its right). Each bullet opens with the crates it
+describes in bold and states their edges in exactly one `←` clause, which lists every normal and
+build dependency `cargo metadata` reports for each of them and nothing else: a workspace crate by
+its name without the `gamut-` prefix (`gamut` for the umbrella), an external crate in backticks,
+and `nothing` for none. A parenthesis after a name that opens with `optional` or `build` marks
+that kind of edge; any other parenthesis is a note. The clause ends at the first `.` or `;`
+outside parentheses and code spans. `mise run check-agents-edges` holds the list to the graph.
 
 - **gamut** — umbrella; optional deps on format crates gated by features (`avif`, `jxl`,
   `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `png`, `jpeg`, `isobmff`, `metadata`,
   `cmm`, `codec-abi`, `all`); `default = []`. `primitives` re-exports shared `color`/`dsp`/`bitstream`;
   `isobmff`/`metadata`/`tonemap`/`codec-abi` re-export their respective primitive crates;
-  `all` includes all of these.
+  `all` includes all of these. ← core, av1 (optional), av2 (optional), avif (optional),
+  bitstream (optional), cmm (optional), codec-abi (optional), color (optional), dng (optional),
+  dsp (optional), exif (optional), heic (optional), icc (optional), ifd (optional), iptc
+  (optional), isobmff (optional), jpeg (optional), jxl (optional), metadata (optional), png
+  (optional), tiff (optional), tonemap (optional), vvc (optional), webp (optional), xmp
+  (optional).
 - **gamut-core** — `EncodeImage`/`DecodeImage` traits, image buffers, `Dimensions`, `Error`, plus the
   format-agnostic `convert` module: the one place any `Pixel` layout converts to another
   (grey↔RGB, alpha add/drop/composite, 8↔16-bit), lossless by default with loss opted into per
   decoder via a `ConvertPolicy`. Format crates decode to what the file carries and delegate the
   layout change there rather than hand-rolling it. No internal deps of its own; each entry below
-  states its own edges, and most — not all — of them include `gamut-core`.
-- **gamut-color** / **gamut-dsp** / **gamut-bitstream** — shared primitives. ← core.
+  states its own edges, and most — not all — of them include `gamut-core`. ← `thiserror`,
+  `serde` (optional, `serde` feature).
+- **gamut-color** — shared primitive: coded-plane formats, CICP code points, planar buffers and
+  `f64` colour science. ← core, `serde` (optional, `serde` feature).
+- **gamut-bitstream** — shared primitive: bit readers/writers and entropy coders. ← core.
+- **gamut-dsp** — shared primitive: per-spec transform kernels and integer arithmetic. ← nothing.
+  Like `gamut-codec-abi` and `gamut-deflate`, it depends on no crate at all.
 - **gamut-tonemap** — scalar tone-mapping curves for HDR→SDR pipelines: the `ToneCurve` trait
   over eight operators (Linear/Clamp/Exposure/Reinhard/ReinhardExtended/ACES/Hable/Drago),
   between `gamut-color`'s transfer functions and the SDR re-encode. ← core.
@@ -36,7 +52,7 @@ Dependency edges (a crate depends on those to its right):
   (C/FFI) or alternate codestream backend plugs into a format crate. `#![no_std]` and
   **dependency-free** (not even on `gamut-core`); `unsafe` confined to its `bridge` module.
   ← nothing.
-- **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core, bitstream.
+- **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core.
 - **gamut-av1** / **gamut-av2** / **gamut-vvc** — codecs. ← core, color, dsp, bitstream.
 - **gamut-jxl** — JPEG XL, uniquely a **wrapper** over the format's reference implementations
   rather than clean-slate (maintainer-approved departure from the pure-Rust rule): encode
@@ -45,65 +61,78 @@ Dependency edges (a crate depends on those to its right):
   the seam is the bare `FF 0A` codestream, `push_backend` tries an alternate implementation
   first (and supplies encode on wasm32), and `encode`/`decode` features mean "include the
   built-in tail", not "enable the direction"; container features (ISOBMFF/Exif/XMP/jbrd)
-  stay pinned to the built-in path by a host-side veto. ← core, codec-abi, gamut-jxl-sys
-  (encode, non-wasm), external `jxl`, metadata (optional, `metadata` feature).
+  stay pinned to the built-in path by a host-side veto. ← core, codec-abi, jxl-sys (optional,
+  `encode` feature; off wasm32 except emscripten), `jxl` (optional, `decode` feature), metadata
+  (optional, `metadata` feature).
 - **gamut-jxl-sys** — declarations-only `-sys` crate statically building/linking
   **libjxl 0.12.0** via BSD-3-Clause `jpegxl-src` (`links = "jxl"`); native backend for
   gamut-jxl's encoder and its libjxl decode-oracle tests. No gamut deps (C/FFI only);
   honors `GAMUT_JXL_SYS_SKIP_NATIVE=1` to skip cmake for check-only (cross/MSRV) jobs.
+  ← `cmake` (build), `jpegxl-src` (build).
 - **gamut-jpeg** — JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec: baseline sequential DCT
   Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF; opt-in jpegli-style XYB colour mode
   with a static vendored ICC profile), sequential/progressive decoder and progressive encoder
-  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, color, dsp,
-  metadata (optional, `metadata` feature).
+  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, codec-abi, color,
+  dsp, metadata (optional, `metadata` feature).
 - **gamut-avif** ← av1, isobmff, core, color, codec-abi (pluggable `Av1StillEncoder`
-  codestream seam; `gamut-av1` is the implicit software tail). **gamut-webp** ← +riff; like
-  gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw `MetadataBlock`-ready
-  payloads, so it does not depend on the metadata facade.
+  codestream seam; `gamut-av1` is the implicit software tail).
+- **gamut-webp** — WebP codec. ← core, codec-abi, color, dsp, riff. Like gamut-png it carries
+  the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw `MetadataBlock`-ready payloads, so it does not
+  depend on the metadata facade.
 - **gamut-heic** — decode-only HEIF/HEIC container: full-fidelity byte-accounting parse
   (every input byte maps to a box, appended motion-photo stream, or explicit trailer), typed
   `hvcC`/NAL layer, pluggable `HevcDecoder` hook for platform HEVC decoders (HEVC bitstream
   decode itself is out of scope here). Differential oracle: libheif+libde265 (+kvazaar
-  fixture generation), dev-only. ← isobmff, core, color, metadata (optional, `metadata`
-  feature).
-- **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png;
-  deliberately encoder-only — workspace decoders inflate via `miniz_oxide`. ← nothing: no dependency
-  at all, not even `gamut-core` (`src/lib.rs:6`).
+  fixture generation), dev-only. ← isobmff, core, codec-abi, color, metadata (optional,
+  `metadata` feature).
+- **gamut-deflate** — pure-Rust DEFLATE/zlib **encoder** (zopfli-class) under gamut-png,
+  gamut-tiff and gamut-dng; deliberately encoder-only — workspace decoders inflate via
+  `miniz_oxide`. ← nothing. No dependency at all, not even `gamut-core` (`src/lib.rs:6`).
 - **gamut-png** — PNG codec (3rd edition, W3C): space-efficient encoder and spec-compliant
   decoder — all colour types/bit depths, Adam7 *decoding*, all filters, decode limits for
   hostile input, ancillary metadata surfaced as raw `MetadataBlock`-ready payloads
   (eXIf/iCCP/XMP/text) plus parsed gAMA/cHRM/sRGB/cICP. APNG out of scope (decodes as the
   default image). Differential oracle both directions: libpng, which also *generates* the
-  decoder's conformance fixtures. ← core, deflate (+ `miniz_oxide` for inflate, and
-  **maintainer-approved `crc32fast`** for the chunk CRC that every encode pays on its critical
+  decoder's conformance fixtures. ← core, codec-abi, deflate, `miniz_oxide` (for inflate),
+  `crc32fast` (**maintainer-approved** for the chunk CRC that every encode pays on its critical
   path — hardware CRC-32 on x86-64/aarch64, table fallback elsewhere including wasm32, and it
   keeps its `unsafe` to itself, so gamut-png stays `#![deny(unsafe_code)]`).
 - **gamut-ifd** — TIFF/IFD container core (byte order, field types, IFD read/write); a
   low-level container primitive (sibling to bitstream), shared by `gamut-tiff` and EXIF
-  metadata. ← core. Optional `bigtiff` feature adds 64-bit BigTIFF. Per-format metadata
-  crates (**gamut-exif** ← ifd; **gamut-icc** ← color; **gamut-xmp**; **gamut-iptc** ← xmp) and the
-  **gamut-metadata** facade (← exif/xmp/icc/iptc) layer on top under the `metadata` feature;
+  metadata. ← core. Optional `bigtiff` feature adds 64-bit BigTIFF. The per-format metadata
+  crates below and the `gamut-metadata` facade layer on top under the `metadata` feature;
   format crates consume the facade for embedded metadata.
+- **gamut-exif** — EXIF over the shared IFD container. ← core, ifd, `thiserror`,
+  `geocoordinates` (optional, `geocoordinates` feature).
+- **gamut-icc** — ICC profiles. ← core, color, `md-5`, `thiserror`.
+- **gamut-xmp** — XMP packets. ← core, `quick-xml`, `thiserror`.
+- **gamut-iptc** — IPTC metadata. ← core, xmp, `thiserror`.
+- **gamut-metadata** — the metadata facade. ← exif, icc, iptc, xmp, `thiserror`.
 - **gamut-cmm** — ICC colour management module (epic #323): the transform engine — a
   validated pipeline/stage model behind the object-safe `Transform` trait — that builds and
   applies colour transforms from the profiles `gamut-icc` parses; f64 Tier-1, behavioural
-  oracle Little-CMS (`references/cmm/`, dev-only `tooling/lcms2-oracle`). ← icc, color, core.
+  oracle Little-CMS (`references/cmm/`, dev-only `tooling/lcms2-oracle`). ← icc, color, core,
+  `thiserror`.
 - **gamut-tiff** — natively still-image TIFF 6.0; its IFD/tag container is the shared
   **gamut-ifd** primitive (with `bigtiff`), not isobmff/riff. Adds pixel modes plus
-  compressions (None/PackBits/LZW/CCITT; JPEG-in-TIFF deferred). ← ifd, core, bitstream.
+  compressions (None/PackBits/LZW/CCITT/Deflate; JPEG-in-TIFF deferred). ← ifd, core,
+  bitstream, deflate (Deflate encode), `miniz_oxide` (Deflate decode).
 - **gamut-dng** — DNG (Adobe Digital Negative) 1.7.1 raw encoder + decoder, a TIFF/EP
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw
-  photometry, uncompressed/Deflate/lossless-JPEG, colour-calibration profile, EXIF/XMP/ICC
-  metadata. Conformance-gated against the headless-built **Adobe DNG SDK**. ← ifd, bitstream,
-  color, metadata, core (MSB-first sub-byte packing reuses `gamut-bitstream`; the DNG §6
-  `AsShotWhiteXY` → camera-neutral conversion reuses `gamut-color`'s chromaticity/3×3/CCT math;
-  `DngMetadata` carries the facade's own models — a DNG `ExifIFD` *is* an EXIF sub-IFD, so it is
-  `gamut-exif`'s `Exif` over the same `gamut-ifd` directory type, with the XMP/IPTC-IIM/ICC
-  payloads handed over verbatim as `MetadataBlock`s; `miniz_oxide` for Deflate).
-- **gamut-cli** (binary `gamut`) / **gamut-wasm** (cdylib) / **gamut-ffi** (cdylib/staticlib).
-  ← gamut. `gamut-cli` is the sandbox exercising implemented features: decodes PNG/JPEG/WebP/JXL
-  input with gamut's own decoders (only PPM uses the third-party `image` crate) and encodes only
-  with gamut crates, and exposes `primitives` re-exports as inspection subcommands.
+  photometry, uncompressed/Deflate/lossless-JPEG/JPEG XL, colour-calibration profile,
+  EXIF/XMP/ICC metadata. Conformance-gated against the headless-built **Adobe DNG SDK**.
+  ← ifd, bitstream, color, metadata, core, deflate (Deflate encode), `miniz_oxide` (Deflate
+  decode), jxl (JPEG XL, `Compression = 52546`). MSB-first sub-byte packing reuses
+  `gamut-bitstream`; the DNG §6 `AsShotWhiteXY` → camera-neutral conversion reuses
+  `gamut-color`'s chromaticity/3×3/CCT math; `DngMetadata` carries the facade's own models — a
+  DNG `ExifIFD` *is* an EXIF sub-IFD, so it is `gamut-exif`'s `Exif` over the same `gamut-ifd`
+  directory type, with the XMP/IPTC-IIM/ICC payloads handed over verbatim as `MetadataBlock`s.
+- **gamut-cli** (binary `gamut`) — the sandbox exercising implemented features: decodes
+  PNG/JPEG/WebP/JXL input with gamut's own decoders (only PPM uses the third-party `image`
+  crate) and encodes only with gamut crates, and exposes `primitives` re-exports as inspection
+  subcommands. ← gamut, `clap`, `image`, `thiserror`, `tracing`, `tracing-subscriber`.
+- **gamut-wasm** (cdylib). ← gamut, `wasm-bindgen`.
+- **gamut-ffi** (cdylib/staticlib). ← gamut, codec-abi, color.
 
 ## Code correctness
 
