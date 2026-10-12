@@ -196,13 +196,18 @@ impl<'a> RawPlanes<'a> {
     }
 
     /// A view over 10- or 12-bit `colour` planes and an optional `alpha` plane at the same depth,
-    /// declared as produced under `matrix` at `range`. The samples are at the coded depth — a
-    /// 10-bit plane holds `0..=1023` — as [`Planar16`] already guarantees.
+    /// declared as produced under `matrix` at `range`. The samples are at the buffer's own
+    /// [`BitDepth`] — a 10-bit plane holds `0..=1023`. [`Planar16`] guarantees only that every
+    /// sample fits the depth it declares, and it admits 8- and 16-bit buffers too; this
+    /// constructor is what refuses an 8-bit one.
     ///
     /// # Errors
     ///
-    /// As [`RawPlanes::eight`], plus [`Error::InvalidInput`] when `alpha`'s depth is not
-    /// `colour`'s. A [`BitDepth::Sixteen`] buffer is accepted here and refused by the encode, as
+    /// As [`RawPlanes::eight`], plus [`Error::InvalidInput`] when `colour` is
+    /// [`BitDepth::Eight`] (8-bit planes take [`RawPlanes::eight`], so a backend's
+    /// [`encode_still16`](crate::Av1StillEncoder::encode_still16) is only ever handed 10 or 12
+    /// bits) or when `alpha`'s depth is not `colour`'s. A [`BitDepth::Sixteen`] buffer is
+    /// accepted here and refused by the encode, as
     /// [`Error::Unsupported`](gamut_core::Error::Unsupported): AV1 codes 8, 10 or 12 bits
     /// (§6.4.1).
     pub fn high(
@@ -212,6 +217,12 @@ impl<'a> RawPlanes<'a> {
         range: ColorRange,
     ) -> Result<Self> {
         let dims = check_colour(colour.width(), colour.height(), colour.subsampling())?;
+        if colour.bit_depth() == BitDepth::Eight {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: 8-bit raw planes take RawPlanes::eight over a Planar8",
+            ));
+        }
         if let Some(alpha) = alpha {
             check_alpha(
                 (colour.width(), colour.height()),
@@ -3291,6 +3302,22 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             gamut_core::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn raw_planes_high_refuses_an_eight_bit_buffer() {
+        // `Planar16` admits an 8-bit buffer; `encode_still16`'s contract is 10 or 12 bits only.
+        let colour16 =
+            Planar16::from_planes(1, 1, BitDepth::Eight, [vec![0], vec![0], vec![0]]).unwrap();
+        assert_eq!(
+            refusal(RawPlanes::high(
+                &colour16,
+                None,
+                MatrixCoefficients::Bt709,
+                ColorRange::Full
+            )),
+            "AVIF: 8-bit raw planes take RawPlanes::eight over a Planar8"
         );
     }
 
