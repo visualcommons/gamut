@@ -628,10 +628,11 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
 
     loop {
         // Find the next marker: skip to the first `FF` at or after `pos`. `position` returns an
-        // offset strictly within `data[pos..]`, so there is no off-by-one bound to mutate.
-        let off = data[pos..]
-            .iter()
-            .position(|&b| b == MARKER)
+        // offset strictly within `data[pos..]`, so there is no off-by-one bound to mutate. A
+        // segment length running past the data leaves `pos` beyond it, which reads as no marker.
+        let off = data
+            .get(pos..)
+            .and_then(|rest| rest.iter().position(|&b| b == MARKER))
             .ok_or_else(|| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOS")
             })?;
@@ -732,8 +733,24 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
                 "DNG: lossless JPEG dimensions overflow",
             )
         })?;
+    // The SOF3 header is a few bytes asking for up to 65535 × 65535 × 4 samples, so the output is
+    // reserved only once the scan is shown able to carry them. Every sample decodes one Huffman
+    // code (T.81 §H.1.2.2 codes each difference by the Annex F DC procedure) and a code is
+    // 1..=16 bits long (the BITS list of §C.2), so a scan of `n` bytes holds at most `8n` samples; the
+    // bytes after the SOS header (stuffing, RSTn and EOI included) only loosen that bound. What it
+    // stops accepting is a scan cut short by more than seven-eighths of its cheapest possible
+    // coding, which the bit reader would otherwise pad out with zero bits into made-up samples.
+    // An SOS length running past the data leaves no scan bytes at all.
+    let scan_data = data.get(pos..).unwrap_or_default();
+    if count.div_ceil(8) > scan_data.len() {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: lossless-JPEG scan holds fewer bits than its frame has samples",
+        )
+        .with_byte_offset(pos as u64));
+    }
     let mut samples = vec![0u16; count];
-    let mut reader = BitReader::new(&data[pos..]);
+    let mut reader = BitReader::new(scan_data);
     let pt = scan.point_transform;
     // Restart-interval state: `origin` is where the current interval began (start of scan, or
     // the MCU after the latest RSTn); `mcus` counts MCUs within the interval; `rst` cycles 0..8.
@@ -1064,6 +1081,66 @@ mod tests {
             decode(&s),
             Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
         ));
+    }
+
+    /// An 8-bit, one-component, `width`×1 stream whose only Huffman code is the 1-bit `0` for
+    /// category 0 — the cheapest coding T.81 admits, one bit per sample — followed by `scan` as
+    /// its entropy-coded data (no EOI, so `scan` is every byte after the SOS header).
+    fn one_bit_per_sample_stream(width: u16, scan: &[u8]) -> Vec<u8> {
+        let mut out = vec![MARKER, SOI, MARKER, SOF3, 0, 11, 8, 0, 1];
+        out.extend_from_slice(&width.to_be_bytes());
+        out.extend_from_slice(&[1, 1, 0x11, 0]);
+        out.extend_from_slice(&[MARKER, DHT, 0, 20, 0x00, 1]);
+        out.extend_from_slice(&[0; 15]);
+        out.push(0); // HUFFVAL: the one code means category 0
+        out.extend_from_slice(&[MARKER, SOS, 0, 8, 1, 1, 0x00, 1, 0, 0]);
+        out.extend_from_slice(scan);
+        out
+    }
+
+    #[test]
+    fn decode_bounds_the_frame_by_one_bit_per_sample_of_scan_data() {
+        // Two scan bytes carry at most 16 one-bit samples. Exactly 16 decode (all at the
+        // 8-bit default prediction, every difference being category 0) …
+        let decoded = decode(&one_bit_per_sample_stream(16, &[0, 0])).expect("16 samples");
+        assert_eq!(decoded.samples, vec![128u16; 16]);
+        // … and a seventeenth is more than the scan can hold, rejected before any reservation.
+        let error = decode(&one_bit_per_sample_stream(17, &[0, 0])).expect_err("17 samples");
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("DNG: lossless-JPEG scan holds fewer bits than its frame has samples")
+        );
+    }
+
+    #[test]
+    fn decode_rejects_an_sos_length_past_the_end_of_the_stream() {
+        // An SOS length running past the data leaves no entropy-coded bytes at all.
+        let mut s = one_bit_per_sample_stream(1, &[0]);
+        let sos_length = s.len() - 9;
+        s[sos_length..sos_length + 2].copy_from_slice(&[0xFF, 0xFF]);
+        let error = decode(&s).expect_err("SOS length past the end");
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn decode_rejects_a_segment_length_past_the_end_of_the_stream() {
+        // An APP0 length of 0xFFFF in a 6-byte stream moves the marker search past the data.
+        let error = decode(&[MARKER, SOI, MARKER, 0xE0, 0xFF, 0xFF]).expect_err("APP0 past end");
+        assert_eq!(
+            error.static_message(),
+            Some("DNG: lossless JPEG missing SOS")
+        );
+        // The same overrun through the SOF3 arm: its 13-byte segment, otherwise well formed,
+        // with the length field (bytes 4..6, after SOI and the marker) raised to 0xFFFF.
+        let mut s = one_bit_per_sample_stream(1, &[0]);
+        s.truncate(15);
+        s[4..6].copy_from_slice(&[0xFF, 0xFF]);
+        let error = decode(&s).expect_err("SOF3 past end");
+        assert_eq!(
+            error.static_message(),
+            Some("DNG: lossless JPEG missing SOS")
+        );
     }
 
     // ------------------------------------------------------------------------------------------
