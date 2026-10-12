@@ -911,6 +911,89 @@ fn json_output_reports_an_avif_slot_at_the_encoders_range() {
 }
 
 #[test]
+fn json_output_lists_an_avifs_unread_and_merkle_boxes_after_its_media_data() {
+    // Appended after the encoder's `mdat`, so no offset the file's `iloc` holds moves: a C2PA box
+    // whose `FullBox` version is not zero (§A.5.1.2), then an auxiliary `merkle` box (§A.5.4.1.4).
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let mut file = gamut::avif::AvifEncoder::new()
+        .encode_to_vec(rgb_image(&rgb))
+        .expect("encode");
+    file.extend_from_slice(&uuid_box(
+        &C2PA_UUID,
+        1,
+        "manifest",
+        &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+    ));
+    file.extend_from_slice(&uuid_box(&C2PA_UUID, 0, "merkle", b"hashes"));
+    let summary = gamut::avif::AvifContainer::parse(&file)
+        .expect("parse")
+        .c2pa_summary();
+    let (out, doc) = run_inspect_json("unread-merkle.avif", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["c2pa"]["stores"], serde_json::json!([]), "{doc}");
+    let unread = &doc["c2pa"]["unread"];
+    assert_eq!(unread.as_array().map(Vec::len), Some(1), "{doc}");
+    assert_eq!(
+        unread[0]["range"],
+        json_range(
+            summary.unread[0].range.start as u64,
+            summary.unread[0].range.end as u64
+        )
+    );
+    assert_eq!(unread[0]["reason"], "not_version_zero");
+    assert_eq!(
+        unread[0]["description"],
+        summary.unread[0].reason.describe()
+    );
+    assert_eq!(unread[0]["position"], "after_media_data");
+    let merkle = &doc["c2pa"]["merkle"];
+    assert_eq!(merkle.as_array().map(Vec::len), Some(1), "{doc}");
+    assert_eq!(
+        merkle[0]["range"],
+        json_range(
+            summary.merkle[0].range.start as u64,
+            summary.merkle[0].range.end as u64
+        )
+    );
+    assert_eq!(merkle[0]["position"], "after_media_data");
+}
+
+#[test]
+fn json_output_lists_a_webp_chunk_too_short_for_a_store_as_unread() {
+    // A `C2PA` chunk whose 4-byte payload cannot hold a JUMBF box header, inserted ahead of the
+    // encoder's own `C2PA` chunk, with the RIFF size patched to cover it.
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let mut file = Vec::new();
+    gamut::webp::WebpEncoder::lossless()
+        .with_c2pa(b"STORE-BYTES-NEVER-PRINTED")
+        .encode_image(rgb_image(&rgb), &mut file)
+        .expect("encode");
+    let at = gamut::webp::c2pa_span(&file)
+        .expect("walk")
+        .expect("a chunk")
+        .start;
+    let short = [&b"C2PA"[..], &4u32.to_le_bytes(), b"abcd"].concat();
+    file.splice(at..at, short);
+    let riff_size = u32::try_from(file.len() - 8).unwrap();
+    file[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    let summary = gamut::webp::c2pa_summary(&file).expect("walk");
+    let (out, doc) = run_inspect_json("short-chunk.webp", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(
+        doc["c2pa"]["unread"],
+        serde_json::json!([{
+            "range": json_range(at as u64 + 8, at as u64 + 12),
+            "position": "before_later_chunks",
+        }])
+    );
+    assert_eq!(summary.unread.len(), 1);
+    assert_eq!(summary.unread[0].range, at + 8..at + 12);
+    assert_eq!(doc["c2pa"]["stores"][0]["position"], "last", "{doc}");
+}
+
+#[test]
 fn json_output_reports_a_webp_store_as_the_chunk_payload() {
     let rgb = [0x40u8; 8 * 8 * 3];
     let mut file = Vec::new();
