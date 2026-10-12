@@ -88,9 +88,13 @@ fn specific_malformed_inputs_error_without_panic() {
         b"II\x2a\x00\x08\x00\x00\x00\xff", // truncated IFD
         // A 1-entry IFD whose ImageWidth claims a huge value, then truncated.
         b"II\x2a\x00\x08\x00\x00\x00\x01\x00\x00\x01\x04\x00\x01\x00\x00\x00\xff\xff\xff\x7f\x00\x00\x00\x00",
+        // #563: a 1x1 page with SamplesPerPixel = 0 and no BitsPerSample — the per-sample depth
+        // list defaulted to empty and was then indexed.
+        b"II\x2a\x00\x08\x00\x00\x00\x04\x00\x00\x01\x03\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x01\x03\x00\x01\x00\x00\x00\x01\x00\x00\x00\x06\x01\x03\x00\x01\x00\x00\x00\x01\x00\x00\x00\x15\x01\x03\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
     ];
     for &c in cases {
         // Must return without panicking (Ok or Err either way).
+        let _ = dec.info(c);
         let _ = dec.decode_page(c, 0);
     }
 }

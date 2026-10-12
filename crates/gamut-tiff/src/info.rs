@@ -66,7 +66,8 @@ pub struct TiffInfo {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if a required tag is missing or the page is zero-sized, or
+/// Returns [`Error::InvalidInput`] if a required tag is missing, the page is zero-sized, or
+/// `SamplesPerPixel` is 0, or
 /// [`Error::Unsupported`] for an on-disk code this crate does not recognise or a layout a single
 /// depth cannot describe.
 pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
@@ -81,6 +82,15 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
 
     let compression = Compression::try_from(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))?;
     let samples_per_pixel = ifd.get_u32(tags::SAMPLES_PER_PIXEL).unwrap_or(1);
+    // TIFF 6.0 defaults SamplesPerPixel (277) to 1 and gives 0 no meaning: a pixel with no
+    // components stores nothing. Refused here because every per-sample tag below would otherwise
+    // be an empty list, and an empty BitsPerSample passes the agreement check vacuously.
+    if samples_per_pixel == 0 {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: SamplesPerPixel is 0",
+        ));
+    }
 
     // BitsPerSample (258) is one value per sample. This crate's sample model gives every component
     // the same depth, so a page whose samples disagree cannot be described — let alone decoded.
@@ -128,4 +138,36 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
         tiled: ifd.get(tags::TILE_WIDTH).is_some(),
         byte_order,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use gamut_core::ErrorKind;
+    use gamut_ifd::Value;
+
+    use super::*;
+
+    /// IFD0 of issue #563's reproducer: a 1x1 BlackIsZero page declaring `SamplesPerPixel = 0`.
+    fn zero_samples_ifd() -> Ifd {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![1]));
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![1]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![0]));
+        ifd
+    }
+
+    #[test]
+    fn page_info_rejects_zero_samples_per_pixel_as_invalid_input() {
+        let err = page_info(&zero_samples_ifd(), ByteOrder::LittleEndian).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn page_info_rejects_zero_samples_per_pixel_with_empty_bits_per_sample() {
+        let mut ifd = zero_samples_ifd();
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![]));
+        let err = page_info(&ifd, ByteOrder::LittleEndian).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
 }
