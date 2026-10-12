@@ -25,7 +25,7 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
 | P7 | §4.6 | MakerNote: opaque passthrough + vendor detection (no per-vendor decode) | ✅ |
 | P8 | — | exiv2 differential gate + golden fixtures | ✅ |
 | P9 | §4.6 | `ReadAt` streaming entry point + lenient-drop report (`ReadReport`, scoped to the regions `DroppedRegion` names) | ✅ |
-| P11 | §4.6 | Read-report depth (issue #521): opt-in per-entry recovery (`ExifReader::recover_entries` → `ReadReport::dropped_entries`, over `gamut_ifd::IfdReader::decode_ifd_lenient`), opt-in byte-completeness verdict (`ExifReader::audit_bytes` → `ReadReport::byte_audit`) | ✅ |
+| P11 | §4.6 | Read-report depth (issue #521): opt-in per-entry recovery (`ExifReader::recover_entries` → `ReadReport::dropped_entries`, over `gamut_ifd::IfdReader::decode_ifd_lenient`), opt-in byte-completeness verdict (`ExifReader::audit_bytes` → `ReadReport::byte_audit`), real-camera-DNG laziness case (`tooling/gamut-dng-real-conformance/tests/exif_laziness.rs`, extended tier) | ✅ |
 | P10 | §4.6 | Full DC-008 tag breadth + per-tag value shape + value descriptions (issue #417) | ✅ |
 
 ## P10 — what the catalogue now covers
