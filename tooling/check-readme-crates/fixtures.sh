@@ -48,7 +48,9 @@ passed=0
 failed=0
 
 # check <name> <expected exit> <expected output fragment, or ""> <transform...>
-# The transform reads the base README on stdin and writes the fixture on stdout.
+# The transform reads the base README on stdin and writes the fixture on stdout. A non-empty
+# `also` names one more file the guard reads for its Usage snippet only (see `umbrella_check`).
+also=""
 check() {
     name="$1"
     want="$2"
@@ -61,7 +63,7 @@ check() {
         return
     }
 
-    out="$("$guard" "$work/README.md" 2>&1)"
+    out="$("$guard" "$work/README.md" ${also:+"$also"} 2>&1)"
     got=$?
 
     if [ "$got" != "$want" ]; then
@@ -189,7 +191,11 @@ line="$(printf '%s\n' "$umbrella" | awk -F'[.+-]' '{ if ($1 != "0") print $1; el
 snippet='/^gamut = { version = "/'
 check "the snippet pinned to a stale line"                1 "umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"0.1\"/"
 check "the snippet pinned coarser than the release line"  1 "umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"0\"/"
-check "the snippet pinned to a patch the tree is not"     1 "umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"$umbrella.9\"/"
+# A patch other than the manifest's on the right release line: below it where one exists (0.3.0
+# against 0.3.2), above it otherwise. Only the patch clause can refuse it.
+stale="$(printf '%s\n' "$umbrella" | awk -F'[.+-]' '{ print $1 "." $2 "." ($3 > 0 ? $3 - 1 : $3 + 1) }')"
+check "the snippet pinned to a patch the tree is not"     1 "the umbrella's manifest is $umbrella" sedx "${snippet}s/version = \"[^\"]*\"/version = \"$stale\"/"
+check "the snippet with a four-component version"         1 "no plain version requirement" sedx "${snippet}s/version = \"[^\"]*\"/version = \"$umbrella.9\"/"
 check "the snippet with a non-caret operator"             1 "no plain version requirement" sedx "${snippet}s/version = \"[^\"]*\"/version = \">=$line\"/"
 check "the snippet in bare-string form, stale"            1 "umbrella's manifest refutes" sedx "${snippet}s/.*/gamut = \"0.1\"/"
 check "the snippet with its keys reordered, stale"        1 "umbrella's manifest refutes" sedx "${snippet}s/.*/gamut = { features = [\"avif\"], version = \"0.1\" }/"
@@ -198,6 +204,27 @@ check "the snippet moved out of its fence"                1 "no \`gamut = ...\` 
 check "the snippet at the exact manifest version (legal)" 0 "names the umbrella's release line" sedx "${snippet}s/version = \"[^\"]*\"/version = \"$umbrella\"/"
 check "the snippet with a caret operator (legal)"         0 "names the umbrella's release line" sedx "${snippet}s/version = \"[^\"]*\"/version = \"^$line\"/"
 check "the snippet in bare-string form (legal)"           0 "names the umbrella's release line" sedx "${snippet}s/.*/gamut = \"$line\"/"
+check "a stale line nested in a four-backtick fence"      1 "umbrella's manifest refutes" awkx '{print} END {print "````markdown"; print "```toml"; print "gamut = \"0.1\""; print "```"; print "````"}'
+
+# The umbrella crate's own README (the crates.io page) carries its own copy of the snippet. These
+# apply the transform to that file and hand it to the guard beside the unchanged base README.
+umbrella_check() {
+    name="$1"
+    want="$2"
+    fragment="$3"
+    shift 3
+    "$@" <crates/gamut/README.md >"$work/umbrella-README.md" || {
+        echo "FAIL  $name -- the fixture transform itself failed"
+        failed=$((failed + 1))
+        return
+    }
+    also="$work/umbrella-README.md"
+    check "$name" "$want" "$fragment" unchanged
+    also=""
+}
+umbrella_check "the umbrella README's snippet as committed"     0 "names the umbrella's release line" unchanged
+umbrella_check "the umbrella README's snippet on a stale line"  1 "umbrella-README.md that the umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"0.1\"/"
+umbrella_check "the umbrella README's snippet deleted"          1 "umbrella-README.md has no \`gamut = ...\` dependency line" sedx "${snippet}d"
 
 echo
 echo "check-readme-crates fixtures: $passed passed, $failed failed (awk: ${CHECK_README_AWK:-awk})"
