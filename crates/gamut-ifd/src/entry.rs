@@ -117,6 +117,16 @@ pub struct SubIfd {
 /// preserve that invariant. A directory may also carry [`sub_ifds`](Self::sub_ifds) — child
 /// directories referenced by a pointer tag rather than the next-IFD chain (e.g. a DNG's raw
 /// sub-IFD or its EXIF sub-IFD); the writer lays those out and synthesises their pointer fields.
+///
+/// # One tag, one store
+///
+/// A tag is held **either** as a field **or** as a sub-IFD group, never both: the writer emits one
+/// entry per field and one per group, so a tag in both stores would reach disk as two entries
+/// under one tag, which TIFF 6.0 §2 does not allow. The setters keep this by construction, and the
+/// **later call wins**: [`set`](Self::set) drops any group under its tag, and
+/// [`set_sub_ifd`](Self::set_sub_ifd) / [`add_sub_ifd`](Self::add_sub_ifd) drop any field under
+/// theirs. The one way past it is editing a group's `tag` through
+/// [`sub_ifds_mut`](Self::sub_ifds_mut), which that method forbids.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Ifd {
     fields: Vec<Field>,
@@ -172,7 +182,13 @@ impl Ifd {
     }
 
     /// Inserts or replaces the value of `tag`, keeping the fields sorted.
+    ///
+    /// Any sub-IFD group under `tag` is dropped, children and all: a tag is a field or a group,
+    /// never both, and the later call wins (see [`Ifd`]'s *One tag, one store*).
     pub fn set(&mut self, tag: u16, value: Value) {
+        if let Ok(i) = self.sub_ifds.binary_search_by_key(&tag, |s| s.tag) {
+            self.sub_ifds.remove(i);
+        }
         match self.fields.binary_search_by_key(&tag, |f| f.tag) {
             Ok(i) => self.fields[i].value = value,
             Err(i) => self.fields.insert(i, Field { tag, value }),
@@ -206,7 +222,9 @@ impl Ifd {
     ///
     /// The groups must stay sorted by ascending pointer tag (the [`sub_ifds`](Self::sub_ifds)
     /// invariant): edit each group's [`ifds`](SubIfd::ifds), not its `tag` — change a group's
-    /// tag by removing and re-attaching it with [`set_sub_ifd`](Self::set_sub_ifd).
+    /// tag by removing and re-attaching it with [`set_sub_ifd`](Self::set_sub_ifd). Editing the
+    /// tag in place also bypasses the one-tag-one-store rule (see [`Ifd`]), which only the setters
+    /// enforce.
     pub fn sub_ifds_mut(&mut self) -> &mut [SubIfd] {
         &mut self.sub_ifds
     }
@@ -215,8 +233,10 @@ impl Ifd {
     /// that tag.
     ///
     /// The pointer field (a `LONG`/`LONG8` array of the children's offsets) is synthesised by the
-    /// writer, so `tag` must **not** also be [`set`](Self::set) as a regular field.
+    /// writer, so any regular field under `tag` is dropped: a tag is a field or a group, never
+    /// both, and the later call wins (see [`Ifd`]'s *One tag, one store*).
     pub fn set_sub_ifd(&mut self, tag: u16, ifds: Vec<Ifd>) {
+        self.remove(tag);
         match self.sub_ifds.binary_search_by_key(&tag, |s| s.tag) {
             Ok(i) => self.sub_ifds[i].ifds = ifds,
             Err(i) => self.sub_ifds.insert(i, SubIfd { tag, ifds }),
@@ -224,7 +244,10 @@ impl Ifd {
     }
 
     /// Appends a single child directory to pointer `tag`, creating the group if it does not exist.
+    ///
+    /// Like [`set_sub_ifd`](Self::set_sub_ifd), this drops any regular field under `tag`.
     pub fn add_sub_ifd(&mut self, tag: u16, ifd: Ifd) {
+        self.remove(tag);
         match self.sub_ifds.binary_search_by_key(&tag, |s| s.tag) {
             Ok(i) => self.sub_ifds[i].ifds.push(ifd),
             Err(i) => self.sub_ifds.insert(
@@ -326,6 +349,67 @@ mod tests {
         assert_eq!(ifd.sub_ifds_mut().len(), 1);
         ifd.sub_ifds_mut()[0].ifds[0].set(256, Value::Short(vec![9]));
         assert_eq!(ifd.sub_ifds()[0].ifds[0].get_u32(256), Some(9));
+    }
+
+    // One tag, one store (issue #601): each setter evicts the other store's entry under its tag
+    // and leaves every other tag alone. 330 is the pointer under test, 256 a bystander in each
+    // store, so an eviction that keyed on the wrong tag (or cleared the store) is seen too.
+
+    /// A directory holding `330` and `256` both as a field and as a group — the shape only
+    /// [`Ifd::sub_ifds_mut`] can reach, built here without the setters under test.
+    fn both_stores() -> Ifd {
+        let group = |tag| SubIfd {
+            tag,
+            ifds: vec![Ifd::new()],
+        };
+        Ifd {
+            fields: vec![
+                Field {
+                    tag: 256,
+                    value: Value::Short(vec![1]),
+                },
+                Field {
+                    tag: 330,
+                    value: Value::Long(vec![8]),
+                },
+            ],
+            sub_ifds: vec![group(256), group(330)],
+        }
+    }
+
+    fn field_tags(ifd: &Ifd) -> Vec<u16> {
+        ifd.fields().iter().map(|f| f.tag).collect()
+    }
+
+    fn group_tags(ifd: &Ifd) -> Vec<u16> {
+        ifd.sub_ifds().iter().map(|s| s.tag).collect()
+    }
+
+    #[test]
+    fn set_drops_the_group_under_its_tag() {
+        let mut ifd = both_stores();
+        ifd.set(330, Value::Long(vec![16]));
+        assert_eq!(group_tags(&ifd), vec![256]);
+        assert_eq!(field_tags(&ifd), vec![256, 330]);
+        assert_eq!(ifd.get_u32(330), Some(16));
+    }
+
+    #[test]
+    fn set_sub_ifd_drops_the_field_under_its_tag() {
+        let mut ifd = both_stores();
+        ifd.set_sub_ifd(330, vec![Ifd::new(), Ifd::new()]);
+        assert_eq!(field_tags(&ifd), vec![256]);
+        assert_eq!(group_tags(&ifd), vec![256, 330]);
+        assert_eq!(ifd.sub_ifds()[1].ifds.len(), 2);
+    }
+
+    #[test]
+    fn add_sub_ifd_drops_the_field_under_its_tag() {
+        let mut ifd = both_stores();
+        ifd.add_sub_ifd(330, Ifd::new());
+        assert_eq!(field_tags(&ifd), vec![256]);
+        assert_eq!(group_tags(&ifd), vec![256, 330]);
+        assert_eq!(ifd.sub_ifds()[1].ifds.len(), 2);
     }
 
     #[test]

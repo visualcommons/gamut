@@ -580,6 +580,22 @@ fn serialize_property(kind: &PropertyKind) -> Vec<u8> {
             bb.u16(*max_pic_average_light_level);
             bb.end_box(start);
         }
+        PropertyKind::MasteringDisplayColourVolume {
+            display_primaries,
+            white_point,
+            max_display_mastering_luminance,
+            min_display_mastering_luminance,
+        } => {
+            // Plain Box (no FullBox header): 3 × [x, y], then the white point, then the two
+            // luminance bounds — 24 bytes, every field big-endian as stored.
+            let start = bb.begin_box(b"mdcv");
+            for value in display_primaries.iter().chain([white_point]).flatten() {
+                bb.u16(*value);
+            }
+            bb.u32(*max_display_mastering_luminance);
+            bb.u32(*min_display_mastering_luminance);
+            bb.end_box(start);
+        }
         PropertyKind::CodecConfiguration { kind, data } | PropertyKind::Other { kind, data } => {
             let start = bb.begin_box(kind);
             bb.bytes(data);
@@ -587,4 +603,31 @@ fn serialize_property(kind: &PropertyKind) -> Vec<u8> {
         }
     }
     bb.into_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_property_writes_mdcv_as_a_24_byte_plain_box() {
+        let bytes = serialize_property(&PropertyKind::MasteringDisplayColourVolume {
+            display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
+            white_point: [15635, 16450],
+            max_display_mastering_luminance: 10_000_000,
+            min_display_mastering_luminance: 50,
+        });
+        assert_eq!(
+            bytes,
+            [
+                0x00, 0x00, 0x00, 0x20, b'm', b'd', b'c', b'v', // size 32, no FullBox header
+                0x21, 0x34, 0x9B, 0xAA, // primary 0: x 8500, y 39850
+                0x19, 0x96, 0x08, 0xFC, // primary 1: x 6550, y 2300
+                0x8A, 0x48, 0x39, 0x08, // primary 2: x 35400, y 14600
+                0x3D, 0x13, 0x40, 0x42, // white point: x 15635, y 16450
+                0x00, 0x98, 0x96, 0x80, // max luminance 10_000_000
+                0x00, 0x00, 0x00, 0x32, // min luminance 50
+            ]
+        );
+    }
 }

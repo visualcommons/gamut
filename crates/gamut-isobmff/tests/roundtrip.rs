@@ -125,6 +125,15 @@ fn hdr_and_aspect_properties() {
         },
     });
     item.properties.push(Property {
+        essential: false,
+        kind: PropertyKind::MasteringDisplayColourVolume {
+            display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
+            white_point: [15635, 16450],
+            max_display_mastering_luminance: 10_000_000,
+            min_display_mastering_luminance: 50,
+        },
+    });
+    item.properties.push(Property {
         essential: true,
         kind: PropertyKind::CleanAperture {
             width_n: 40,

@@ -283,6 +283,16 @@ fn render_property(p: &Property) -> String {
         } => {
             format!("clli  MaxCLL={max_content_light_level} MaxPALL={max_pic_average_light_level}")
         }
+        PropertyKind::MasteringDisplayColourVolume {
+            display_primaries: [p0, p1, p2],
+            white_point: [wx, wy],
+            max_display_mastering_luminance,
+            min_display_mastering_luminance,
+        } => format!(
+            "mdcv  primaries=({},{}) ({},{}) ({},{}) white=({wx},{wy}) \
+             luminance={min_display_mastering_luminance}..{max_display_mastering_luminance}",
+            p0[0], p0[1], p1[0], p1[1], p2[0], p2[1]
+        ),
         PropertyKind::CodecConfiguration { kind, data } => {
             format!("{}  codec config ({} bytes)", fourcc(kind), data.len())
         }
@@ -314,8 +324,8 @@ fn fourcc(code: &[u8; 4]) -> String {
 
 /// Builds a synthetic still-image container that exercises the entire modelled surface: a `grid`
 /// primary over two coded tiles, an alpha auxiliary, a thumbnail, Exif and XMP metadata items, all
-/// three `colr` forms, every transform property, HDR `clli`, an unrecognised property carried
-/// verbatim, every reference type, and an `altr` entity group. Coded payloads are placeholders.
+/// three `colr` forms, every transform property, HDR `clli` and `mdcv`, an unrecognised property
+/// carried verbatim, every reference type, and an `altr` entity group. Coded payloads are placeholders.
 fn demo_image() -> Result<IsoBmffImage, CliError> {
     let av1c = || PropertyKind::CodecConfiguration {
         kind: *b"av1C",
@@ -380,7 +390,8 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
         .to_bytes()?,
     };
 
-    // Tile A: nclx colour, plus an unrecognised `mdcv` property carried verbatim.
+    // Tile A: nclx colour, HDR `mdcv` (BT.2020 primaries, D65, 0.005..1000 cd/m²), plus an
+    // unrecognised `amve` property carried verbatim.
     let tile_a = Item {
         id: 2,
         item_type: *b"av01",
@@ -399,9 +410,15 @@ fn demo_image() -> Result<IsoBmffImage, CliError> {
                 matrix_coefficients: 6,
                 full_range: true,
             }))),
+            descriptive(PropertyKind::MasteringDisplayColourVolume {
+                display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
+                white_point: [15635, 16450],
+                max_display_mastering_luminance: 10_000_000,
+                min_display_mastering_luminance: 50,
+            }),
             descriptive(PropertyKind::Other {
-                kind: *b"mdcv",
-                data: vec![0; 24],
+                kind: *b"amve",
+                data: vec![0; 8],
             }),
         ],
         payload: vec![0xde, 0xad, 0xbe, 0xef],

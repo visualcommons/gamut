@@ -11,11 +11,12 @@
 use std::path::PathBuf;
 
 use gamut_avif::{
-    Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, ChromaFormat, DecodedFrame, Mirror,
-    Rotation,
+    Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, AvifImage, ChromaFormat, DecodedFrame,
+    Mirror, Rotation, Subsampling,
 };
+use gamut_color::{ColorRange, MatrixCoefficients};
 use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
-use gamut_isobmff::ColourInformation;
+use gamut_isobmff::{ColourInformation, PropertyKind};
 
 // ---- the dav1d bridge: an Av1StillDecoder over the raw codestream oracle ---------------------
 
@@ -466,11 +467,11 @@ fn appended_stream_preserves_decode_and_accounts_every_byte() {
     let c_appended = AvifContainer::parse(&appended).unwrap();
     // Every byte accounted: contiguous segments covering 0..len.
     let segs = c_appended.segments();
-    assert_eq!(segs[0].range.start, 0);
-    for pair in segs.windows(2) {
-        assert_eq!(pair[0].range.end, pair[1].range.start);
-    }
-    assert_eq!(segs.last().unwrap().range.end, appended.len());
+    assert!(
+        gamut_core::segment::covers(segs, appended.len()),
+        "segments must tile the file: {:?}",
+        segs.iter().map(|s| s.range.clone()).collect::<Vec<_>>()
+    );
     assert_eq!(
         c_appended.appended_stream().map(<[u8]>::len),
         Some(appended.len() - clean.len())
@@ -623,4 +624,157 @@ fn no_ispe_file_still_parses_and_decodes() {
         (frame.width(), frame.height()),
         (oracle.width, oracle.height)
     );
+}
+
+// ---- t7: the AV1 sequence header, and the colour of a colr-less item (issue #651) ------------
+
+/// `bytes` with every `colr` property removed from every item: per AVIF v1.2.0 §2.2.1 each item's
+/// colour now comes from its AV1 sequence header.
+fn strip_colr(bytes: &[u8]) -> Vec<u8> {
+    let mut model = gamut_isobmff::read(bytes).unwrap();
+    for item in &mut model.items {
+        item.properties
+            .retain(|p| !matches!(p.kind, PropertyKind::Colour(_)));
+    }
+    gamut_isobmff::write(&model).unwrap()
+}
+
+/// The coded item whose sequence header governs the primary's colour: the primary itself, or a
+/// grid primary's first tile (the one libavif harvests CICP from).
+fn colour_source_id(img: &AvifImage) -> u32 {
+    let primary = img.primary_item().id();
+    img.derivation_sources(primary)
+        .first()
+        .map_or(primary, |tile| tile.id())
+}
+
+/// libavif's raw `avifPixelFormat` for a sequence header's chroma layout.
+fn avif_pixel_format(subsampling: Subsampling) -> u32 {
+    match subsampling {
+        Subsampling::Yuv444 => 1,
+        Subsampling::Yuv422 => 2,
+        Subsampling::Yuv420 => 3,
+        Subsampling::Monochrome => 4,
+    }
+}
+
+/// This crate's lossy encodes at both ends of the colour space: the BT.709 full-range default, and
+/// BT.601 at studio range.
+fn self_encoded_lossy() -> [(&'static str, Vec<u8>); 2] {
+    let (w, h) = (24u32, 16u32);
+    let rgb = source_rgb(w, h);
+    [
+        (
+            "lossy BT.709 full",
+            encode(AvifEncoder::lossy(50), &rgb, w, h),
+        ),
+        (
+            "lossy BT.601 limited",
+            encode(
+                AvifEncoder::lossy(50)
+                    .with_matrix(MatrixCoefficients::Bt601)
+                    .with_color_range(ColorRange::Limited),
+                &rgb,
+                w,
+                h,
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn sequence_header_fields_agree_with_libavif() {
+    // With every colr stripped, libavif reports the primary's colour from the AV1 sequence header,
+    // so its depth, pixel format, CICP and range are the header's fields as libavif parsed them —
+    // checked here against the header gamut-av1 parses.
+    let mut files: Vec<(String, Vec<u8>)> = [
+        "io/kodim03_yuv420_8bpc.avif",
+        "io/cosmos1650_yuv444_10bpc_p3pq.avif",
+        "paris_icc_exif_xmp.avif",
+        "sofa_grid1x5_420.avif",
+        "abc_color_irot_alpha_irot.avif",
+        "white_1x1.avif",
+        "extended_pixi.avif",
+        "draw_points_idat.avif",
+        "alpha_noispe.avif",
+    ]
+    .into_iter()
+    .map(|name| (name.to_string(), corpus(name)))
+    .collect();
+    files.extend(
+        self_encoded_lossy()
+            .into_iter()
+            .map(|(label, data)| (label.to_string(), data)),
+    );
+    for (name, data) in files {
+        let data = strip_colr(&data);
+        let oracle = libavif_oracle::introspect(&data)
+            .unwrap_or_else(|e| panic!("{name}: libavif introspect: {e}"));
+        let container = AvifContainer::parse(&data).unwrap();
+        let img = container.image();
+        let colour = img
+            .av1_sequence_header(colour_source_id(img))
+            .unwrap_or_else(|e| panic!("{name}: sequence header: {e:?}"))
+            .color;
+        assert_eq!(colour.bit_depth, u32::from(oracle.depth), "{name}: depth");
+        assert_eq!(
+            avif_pixel_format(colour.subsampling),
+            oracle.yuv_format,
+            "{name}: pixel format"
+        );
+        assert_eq!(
+            (
+                u16::from(colour.color_primaries),
+                u16::from(colour.transfer_characteristics),
+                u16::from(colour.matrix_coefficients),
+            ),
+            (
+                oracle.color_primaries,
+                oracle.transfer_characteristics,
+                oracle.matrix_coefficients,
+            ),
+            "{name}: CICP"
+        );
+        assert_eq!(colour.full_range, oracle.full_range, "{name}: range");
+    }
+}
+
+#[test]
+fn colr_stripped_file_presents_like_the_original_and_like_libavif() {
+    // This crate's encoder stamps the same CICP into colr and the sequence header, so once colr is
+    // stripped the header alone must reproduce the original presentation exactly — the BT.709
+    // full-range default included, which the old BT.601-limited fallback could not. libavif reads
+    // the stripped file the same way, within conversion rounding.
+    let decode = |bytes: &[u8]| {
+        AvifContainer::parse(bytes)
+            .unwrap()
+            .decode_primary_rgba8(&mut Dav1dDecoder)
+            .unwrap()
+            .into_samples()
+    };
+    for (label, data) in self_encoded_lossy() {
+        let stripped = strip_colr(&data);
+        let container = AvifContainer::parse(&stripped).unwrap();
+        assert!(
+            container.image().primary_item().colour().is_none(),
+            "{label}: the stripped file carries no colr"
+        );
+        let ours = decode(&stripped);
+        assert_eq!(ours, decode(&data), "{label}: stripped vs original");
+
+        let (_, _, oracle_stripped) = libavif_oracle::decode_rgba(&stripped)
+            .unwrap_or_else(|e| panic!("{label}: libavif decode_rgba: {e}"));
+        let (_, _, oracle_original) = libavif_oracle::decode_rgba(&data).unwrap();
+        assert_eq!(
+            oracle_stripped, oracle_original,
+            "{label}: libavif reads the stripped fixture as the original"
+        );
+        let diff = rgba_diff(&ours, &oracle_stripped);
+        assert!(
+            diff.max_rgb <= 3 && diff.mean <= 0.5,
+            "{label}: rgb diff too large (max {}, mean {:.3})",
+            diff.max_rgb,
+            diff.mean
+        );
+    }
 }

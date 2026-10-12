@@ -1,4 +1,5 @@
-//! Executable laws for the read ledger, shared by the property tests and the fuzz tier.
+//! Executable laws for the read ledger and the directory model, shared by the property tests and
+//! the fuzz tier.
 //!
 //! Each function takes plain data, checks one law, and returns a [`Violation`] naming what broke
 //! it. No test framework is involved and nothing here panics, so the same body runs under a
@@ -16,8 +17,12 @@
 //! This module is the test oracle, not the system under test, so `.cargo/mutants.toml` excludes
 //! `crates/*/src/invariants.rs` from mutation. Every new `invariants` module inherits that.
 
+use std::collections::BTreeMap;
+
+use crate::entry::Ifd;
 use crate::segment::Range;
 use crate::track::ReadLedger;
+use crate::value::Value;
 
 /// The size of the offset space these laws are checked over.
 ///
@@ -228,6 +233,114 @@ pub fn subtract_is_set_difference(reads: &[Range], claims: &[Range]) -> Result<(
     Ok(())
 }
 
+/// No directory in the tree rooted at `ifd` holds a tag both as a field and as a sub-IFD group.
+///
+/// This is the [`Ifd`] contract (*One tag, one store*): the writer emits one entry per field and
+/// one per group, so a tag in both stores reaches disk as two entries under one tag, which TIFF
+/// 6.0 §2 does not allow. It is the shape a reader misreads, so it is checked over the **fields**
+/// a reader sees as well as the groups a caller built, at every level of the tree.
+///
+/// # Errors
+///
+/// Returns the first [`Violation`] found, naming the tag.
+pub fn one_store_per_tag(ifd: &Ifd) -> Result<(), Violation> {
+    for group in ifd.sub_ifds() {
+        if ifd.get(group.tag).is_some() {
+            return Err(Violation::new(
+                "one_store_per_tag",
+                format!("tag {} is both a field and a sub-IFD group", group.tag),
+            ));
+        }
+        for child in &group.ifds {
+            one_store_per_tag(child)?;
+        }
+    }
+    Ok(())
+}
+
+/// One call on an [`Ifd`]'s setter surface, for [`setters_keep_one_store_per_tag`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edit {
+    /// [`Ifd::set`] with a placeholder `LONG` value.
+    Set(u16),
+    /// [`Ifd::set_sub_ifd`] with one empty child.
+    SetSubIfd(u16),
+    /// [`Ifd::add_sub_ifd`] with one empty child.
+    AddSubIfd(u16),
+    /// [`Ifd::remove`], which removes a field and never a group.
+    Remove(u16),
+}
+
+/// Which of the two stores a model tag lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Store {
+    Field,
+    Group,
+}
+
+/// After any sequence of setter calls, each tag sits in exactly the store its last setter named —
+/// the later call wins — and so no tag is ever in both ([`one_store_per_tag`]).
+///
+/// [`Edit::Remove`] removes a field only, so a group survives it: that is `remove`'s documented
+/// scope, and the model follows it rather than the setters'.
+///
+/// # Errors
+///
+/// Returns the first [`Violation`] found.
+pub fn setters_keep_one_store_per_tag(edits: &[Edit]) -> Result<(), Violation> {
+    let mut ifd = Ifd::new();
+    let mut model: BTreeMap<u16, Store> = BTreeMap::new();
+    for &edit in edits {
+        match edit {
+            Edit::Set(tag) => {
+                ifd.set(tag, Value::Long(vec![u32::from(tag)]));
+                model.insert(tag, Store::Field);
+            }
+            Edit::SetSubIfd(tag) => {
+                ifd.set_sub_ifd(tag, vec![Ifd::new()]);
+                model.insert(tag, Store::Group);
+            }
+            Edit::AddSubIfd(tag) => {
+                ifd.add_sub_ifd(tag, Ifd::new());
+                model.insert(tag, Store::Group);
+            }
+            Edit::Remove(tag) => {
+                ifd.remove(tag);
+                if model.get(&tag) == Some(&Store::Field) {
+                    model.remove(&tag);
+                }
+            }
+        }
+    }
+
+    one_store_per_tag(&ifd).map_err(|v| {
+        Violation::new(
+            "setters_keep_one_store_per_tag",
+            format!("{} after {edits:?}", v.detail()),
+        )
+    })?;
+
+    let tags_in = |store: Store| -> Vec<u16> {
+        model
+            .iter()
+            .filter(|&(_, &s)| s == store)
+            .map(|(&t, _)| t)
+            .collect()
+    };
+    let fields: Vec<u16> = ifd.fields().iter().map(|f| f.tag).collect();
+    let groups: Vec<u16> = ifd.sub_ifds().iter().map(|s| s.tag).collect();
+    if fields != tags_in(Store::Field) || groups != tags_in(Store::Group) {
+        return Err(Violation::new(
+            "setters_keep_one_store_per_tag",
+            format!(
+                "fields {fields:?} and groups {groups:?} differ from the last-call-wins model \
+                 {model:?} after {edits:?}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::collection;
@@ -235,9 +348,11 @@ mod tests {
     use proptest::test_runner::{Config, RngSeed};
 
     use super::{
-        MAX_LEN, Range, UNIVERSE, canonical_form, ledger_is_canonical, normalise,
-        subtract_is_set_difference,
+        Edit, MAX_LEN, Range, UNIVERSE, canonical_form, ledger_is_canonical, normalise,
+        one_store_per_tag, setters_keep_one_store_per_tag, subtract_is_set_difference,
     };
+    use crate::entry::Ifd;
+    use crate::value::Value;
 
     /// The workspace property-test configuration (`docs/testing.md`).
     ///
@@ -301,6 +416,60 @@ mod tests {
             prop_assert_eq!(subtract_is_set_difference(&reads, &claims), Ok(()));
         }
 
+        /// The setters keep every tag in one store, the one its last setter named.
+        #[test]
+        fn setters_keep_one_store_per_tag_for_any_edit_sequence(
+            edits in collection::vec(edit(), 0..24),
+        ) {
+            prop_assert_eq!(setters_keep_one_store_per_tag(&edits), Ok(()));
+        }
+
+    }
+
+    /// One setter call over a four-tag alphabet, so the same tag is revisited — by a different
+    /// setter — often enough that every store-to-store transition is drawn.
+    fn edit() -> impl Strategy<Value = Edit> {
+        (0u8..4, 0u16..4).prop_map(|(kind, i)| {
+            let tag = 330 + i;
+            match kind {
+                0 => Edit::Set(tag),
+                1 => Edit::SetSubIfd(tag),
+                2 => Edit::AddSubIfd(tag),
+                _ => Edit::Remove(tag),
+            }
+        })
+    }
+
+    #[test]
+    fn one_store_per_tag_rejects_a_tag_in_both_stores_at_any_depth() {
+        // Only `sub_ifds_mut` can build this shape: retag a group onto a field's tag.
+        let mut conflicted = Ifd::new();
+        conflicted.set(256, Value::Long(vec![8]));
+        conflicted.set_sub_ifd(330, vec![Ifd::new()]);
+        conflicted.sub_ifds_mut()[0].tag = 256;
+        let err = one_store_per_tag(&conflicted).expect_err("both stores must be rejected");
+        assert_eq!(err.law(), "one_store_per_tag");
+        assert!(err.detail().contains("tag 256"), "{err}");
+
+        // The same conflict one level down is found too.
+        let mut root = Ifd::new();
+        root.set_sub_ifd(34665, vec![conflicted]);
+        assert!(one_store_per_tag(&root).is_err());
+    }
+
+    #[test]
+    fn setters_keep_one_store_per_tag_follows_the_last_call() {
+        // Each transition the property draws, pinned once: field -> group -> field, and a
+        // `remove` that leaves a group alone.
+        for edits in [
+            vec![Edit::Set(330), Edit::SetSubIfd(330)],
+            vec![Edit::SetSubIfd(330), Edit::Set(330)],
+            vec![Edit::Set(330), Edit::AddSubIfd(330), Edit::AddSubIfd(330)],
+            vec![Edit::AddSubIfd(330), Edit::Remove(330)],
+            vec![Edit::Set(330), Edit::Remove(330)],
+        ] {
+            assert_eq!(setters_keep_one_store_per_tag(&edits), Ok(()), "{edits:?}");
+        }
     }
 
     // The laws' own failure paths. A law that cannot report a violation is not a law, and under

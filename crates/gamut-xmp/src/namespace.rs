@@ -103,13 +103,21 @@ pub enum WellKnownNs {
     /// `exifEX` — Exif 2.3+ properties in XMP (`LensModel`, `PhotographicSensitivity`, …), the
     /// XMP counterpart of the tags `gamut-exif` reads.
     ///
-    /// URI `http://cipa.jp/exif/1.0/`, from CIPA DC-010-2012 "Exif metadata for XMP" (referenced,
-    /// not reproduced, by Adobe XMP Part 2 §3.4) and registered under that URI by exiv2
-    /// (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`). The vendored Exif 3.0 text
-    /// (`references/exif/exif-3.0-dc-008-translation-2023.pdf`, Annex J.2–J.3) binds the same
-    /// `exifEX` prefix to `http://cipa.jp/exif/2.32/` in its *annotation* (`exifEX:ExifAN`)
-    /// examples; that URI is not registered here — the reference engine and deployed writers use
-    /// `1.0`, and a second variant can be added without a breaking change if a consumer needs it.
+    /// URI `http://cipa.jp/exif/1.0/`, from CIPA DC-010-2026 "Exif metadata for XMP"
+    /// (`references/exif/exif-xmp-dc-010-2026.pdf`; the mapping Adobe XMP Part 2 §3.4 refers to),
+    /// §5.1 Table 1 / §7.2 Table 6 / §10.1 Table 20: "Exif 2.21 or later", recommended prefix
+    /// `exifEX`. exiv2 binds the same URI (`third_party/exiv2/src/properties.cpp`, `xmpNsInfo`),
+    /// which `tests/oracle.rs` cross-checks.
+    ///
+    /// `http://cipa.jp/exif/2.32/` — used by DC-010-2020 for the Table 13 composite-image
+    /// properties, and still shown in the Exif 3.0 text's annotation examples
+    /// (`references/exif/exif-3.0-dc-008-translation-2023.pdf`, Annex J.2–J.3) — is deliberately
+    /// **not** registered, neither as a variant nor as a [`WellKnownNs::from_uri`] alias: the NOTE
+    /// under DC-010-2026 Table 6 retires it and states that same-named properties in it and in
+    /// `…/exif/1.0/` have no logical connection, so folding it into `exifEX` would merge two
+    /// namespaces the specification keeps apart. A packet that uses it is handled like any
+    /// unregistered namespace: its URI is preserved, and it re-serializes under a synthesized
+    /// `nsN` prefix unless the caller registers one with [`crate::XmpWriter::with_namespace`].
     ExifEx,
     /// `aux` — Exif auxiliary camera/lens properties (`aux:Lens`, `aux:SerialNumber`, …),
     /// ubiquitous in Lightroom and Camera Raw output.
@@ -225,7 +233,7 @@ impl WellKnownNs {
     ///
     /// `dc` is Dublin Core (Part 1 §8.3); the `xmp*` schemas are Part 1 §8.4–8.6; `photoshop`,
     /// `crs` are Part 2 §3.2–3.3. `exif`/`tiff` mirror the EXIF tags into XMP (Part 2 §3.4, defined
-    /// by CIPA DC-010); `Iptc4xmpCore`/`Iptc4xmpExt` are the IPTC Photo Metadata schemas;
+    /// by CIPA DC-010, whose Table 1 binds the same two URIs); `Iptc4xmpCore`/`Iptc4xmpExt` are the IPTC Photo Metadata schemas;
     /// `dcterms` is the DCMI Metadata Terms namespace (`http://purl.org/dc/terms/`). The URIs of
     /// the schemas outside the published XMP Parts are cited on each variant.
     #[must_use]
@@ -318,6 +326,11 @@ impl WellKnownNs {
     /// packet re-serializes under the `dwc` prefix while its properties stay keyed by
     /// [`DWC_URI_TRAILING_SLASH`]: [`XmpMeta::get_text`] with `WellKnownNs::DarwinCore.uri()`
     /// returns `None` for such a graph. Resolve a property by the URI its packet carries.
+    ///
+    /// This is deliberate (issue #547): reading keeps the URI a packet declared, so a graph read
+    /// and written back stays byte-faithful to it, and lookup by [`WellKnownNs::uri`] is what that
+    /// gives up for the alias. An opt-in canonicalizing reader is deferred until a consumer needs
+    /// it.
     ///
     /// [`XmpMeta::get_text`]: crate::XmpMeta::get_text
     #[must_use]

@@ -61,10 +61,12 @@ assert!(IccProfile::from_cicp(Cicp { matrix_coefficients: 0, ..signalled }).is_n
 # Ok::<_, gamut_icc::IccError>(())
 ```
 
-The named spaces are sRGB, linear sRGB, Display P3 and BT.2100 PQ, plus
-`IccProfile::gray_with_gamma` for a monochrome profile. Their primaries and white point are read
-from [`gamut-color`](../gamut-color) rather than restated here, so the two cannot drift; Adobe RGB
-and ProPhoto RGB have no code point on either CICP axis and are declined rather than approximated.
+The named spaces are sRGB, linear sRGB, Display P3, BT.2100 PQ, Adobe RGB (1998) and ProPhoto
+RGB, plus `IccProfile::gray_with_gamma` for a monochrome profile. Their primaries and white point
+are read from [`gamut-color`](../gamut-color) rather than restated here, so the two cannot drift.
+Adobe RGB and ProPhoto RGB have no code point on either CICP axis, so their profiles carry each
+encoding's standard tone curve and no `cicpType` tag, and `BuiltinProfile::cicp` returns `None`
+for them.
 `from_cicp` reaches further on the transfer axis — the BT.709 family (H.273 code points 1, 6, 14
 and 15), linear, sRGB and PQ all have an ICC tone-curve encoding — because what an ICC tag can
 encode is not the same set as what gamut-color can evaluate. Every constructor returns an `Option`

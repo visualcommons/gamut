@@ -6,9 +6,11 @@
 //! Following the unified-model rule, every datum lives once in the underlying [`IsoBmffImage`];
 //! the accessors here are computed lenses over its items, properties, and references (ISO/IEC
 //! 23008-12 as profiled by AVIF v1.2.0, see `references/avif`). The typed AV1 configuration
-//! record (`av1C`) is reached through [`AvifItem::av1_config`]; the coded OBU stream stays opaque
-//! here — the decode pipeline around the crate's pluggable decoder seam drives it.
+//! record (`av1C`) is reached through [`AvifItem::av1_config`] and the AV1 sequence header through
+//! [`AvifImage::av1_sequence_header`]; past that header the coded OBU stream stays opaque here —
+//! the decode pipeline around the crate's pluggable decoder seam drives it.
 
+use gamut_av1::SequenceHeader;
 use gamut_core::{Dimensions, Error, Result};
 use gamut_isobmff::{
     ColourInformation, EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, PropertyKind,
@@ -269,6 +271,34 @@ impl AvifImage {
             &item.as_isobmff_item().payload,
             item.derivation_target_ids().len(),
         )
+    }
+
+    /// Parses the AV1 sequence header (AV1 §5.5) of the coded item `item_id` — its profile,
+    /// still-picture flags, level, maximum frame size, and `color_config` (bit depth, chroma
+    /// subsampling, CICP code points, range) — through `gamut-av1`'s parser, without decoding any
+    /// samples.
+    ///
+    /// Works on any coded item with an `av1C`: pass [`primary_item`](Self::primary_item)'s id for
+    /// the colour image, and [`alpha_auxiliary_of`](Self::alpha_auxiliary_of)'s for its alpha
+    /// plane. The header is the one [`Av1Config::sequence_header`] selects (the payload's, else
+    /// `configOBUs`'). When the item has no `colr`, this header's `color_config` is what the RGBA
+    /// presentation surfaces de-matrix with (see [`decode_item_rgba8`](Self::decode_item_rgba8)).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `item_id` names no item or the item carries no `av1C`,
+    /// and propagates [`AvifItem::av1_config`]'s and [`Av1Config::sequence_header`]'s errors.
+    pub fn av1_sequence_header(&self, item_id: u32) -> Result<SequenceHeader> {
+        let item = self.item(item_id).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: item id names no item")
+        })?;
+        let config = item.av1_config().ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: item has no av1C configuration",
+            )
+        })??;
+        config.sequence_header(&item.inner.payload)
     }
 
     /// Items carrying an outgoing reference of type `ref_type` whose target list contains

@@ -21,7 +21,9 @@ has landed), `D` where a deferred row has no milestone, `OOS` where the disposit
 - **M2** — Pixel formats: 10/12-bit, 4:2:0/4:2:2, monochrome, profiles 0 & 2, `MA1B` baseline
   brand, and chroma resampling. *(The RGB↔YCbCr matrices and limited range landed early, with
   issue #335 — they need no plane-geometry change. Monochrome landed with #396; 4:2:0, profile 0
-  and `MA1B` landed with #390; 4:2:2 with #391. What remains is 10/12-bit.)*
+  and `MA1B` landed with #390; 4:2:2 with #391; 10/12-bit end to end with #398/#399, and 8-bit
+  input coded at 10/12 bits with #659. What remains is subsampled chroma on the `Rgba8`/`Rgba16`
+  paths — see **Deferred** under Scope & dispositions.)*
 - **M3** — Alpha & auxiliary: alpha aux item, `auxC`/`auxl`, premultiplied (`prem`), depth maps.
 - **M4** — Color & metadata: ICC profiles, Exif/XMP items, HDR (PQ/HLG, `mdcv`/`clli`), film grain.
 - **M5** — Container transforms & derivation: `irot`/`imir`/`clap`/`pasp`, `grid`/overlay,
@@ -32,8 +34,8 @@ has landed), `D` where a deferred row has no milestone, `OOS` where the disposit
 **Implemented (v1.0).** Lossless (decoded output bit-exact to the input, at the coded depth) and
 lossy AV1 intra encoding at 8/10/12-bit, from `Rgb8`/`Rgba8`/`Gray8`/`Rgb16`/`Rgba16` — identity
 matrix at 4:4:4 for lossless, **BT.709 YCbCr at 4:2:0 by default** for lossy, with
-BT.601/BT.2020-NCL, studio range and 4:4:4 / 4:2:2 selectable (the `Rgb8` path; `Rgba8` and the
-16-bit paths are 4:4:4 — see the ☐ rows below) — wrapped as a conformant MIAF/AVIF `av01` item
+BT.601/BT.2020-NCL, studio range and 4:4:4 / 4:2:2 selectable (the `Rgb8`/`Rgb16` paths; the
+`Rgba8`/`Rgba16` paths are 4:4:4 — see the ☐ rows below) — wrapped as a conformant MIAF/AVIF `av01` item
 (plus a monochrome alpha auxiliary when the input carries one) — brands `avif`/`mif1`/`miaf` plus
 the profile brand every coded item earns together (`MA1B` when all are AV1 Main, `MA1A` when all
 are High, neither for a mixed or 4:2:2 file), the AVIF §9.1.1 minimum box set, cross-box
@@ -149,7 +151,7 @@ adding it needs no container change.
 | `irot` rotation / `imir` mirror | 23008-12 | ✅ (essential transform properties; `AvifEncoder::with_rotation`/`with_mirror`) | M5 |
 | `auxC` aux-type property + `auxl` item ref (alpha plane) | 23008-12; AVIF §4.1 | ✅ (written for `Rgba8`, essential, hidden item, no `colr`; all read) | M3 |
 | depth auxiliary image item (`urn:…:auxiliary:depth`) | AVIF §4.1 | ☐ | M3 |
-| `prem` premultiplied-alpha association | AVIF §4 | ✅ (`AvifEncoder::with_premultiplied_alpha`) | M3 |
+| `prem` premultiplied-alpha association | AVIF §4 | ✅ (`AvifEncoder::with_alpha_mode`: `AlphaMode::Premultiplied` declares caller-premultiplied colour, `PremultiplyOnEncode` premultiplies unassociated colour first; `with_premultiplied_alpha` is shorthand) | M3 |
 | `iref` (`auxl`/`dimg`/`thmb`/`cdsc`) | 23008-12 | ✅ (`cdsc`/`auxl`/`prem` emitted; all read) | M3/M5 |
 | `grid` derived item + `dimg` refs (tiled mosaic) | 23008-12; MIAF | ☐ | M5 |
 | `tmap` tone-map derived item (gain maps) + `altr` grouping with the base item | AVIF §4.2.2 | ☐ | D |
@@ -327,10 +329,12 @@ copy, which is what a decoder does for an independently decodable tile.
 | `AvifEncoder::{with_matrix, with_color_range}` colour selection | gamut-avif | ✅ (#335) | M2 |
 | `Rgba8` input + alpha-plane extraction; `Gray8` input | gamut-color/avif | ✅ (#397; `Planar8::from_rgba8_*_view`/`from_gray8_view`) | M3 |
 | `Rgb16`/`Rgba16` input → 10/12-bit AVIF (`with_bit_depth`) | gamut-color/avif | ✅ (#399; `Planar16::from_rgb16_*_view`/`from_rgba16_*_view`) | M2 |
+| `Rgb8`/`Rgba8`/`Gray8` input → 10/12-bit AVIF (`with_bit_depth`; widened by bit replication through `gamut_core::convert` before colour conversion, so lossless narrows back exactly; unset keeps 8) | gamut-avif | ✅ (#659; `Gray8` builds a throwaway `Rgb16` for want of a grey `Planar16` constructor) | M3 |
 | Subsampled chroma on the `Rgba8`/`Rgba16` paths (`with_chroma` is honoured for `Rgb8`/`Rgb16`, but an RGBA colour item is always 4:4:4 — neither `Planar8` nor `Planar16` has a 4-stride downsampler) | — | ☐ | M3 |
 | Subsampled chroma at 10/12-bit (`with_chroma` reaches the `Rgb16` path; `Planar16::from_rgb16_matrix_subsampled` shares `Planar8`'s box filter, so the two cannot drift) | — | ✅ (#399) | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ✅ (`Planar16`; 16-bit input narrows to a 10/12-bit coded depth — float HDR ☐) | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
+| separate alpha quality (`AvifEncoder::with_alpha_quality` / `AvifConfig::alpha_quality`; same 0..=100 → `base_q_idx` mapping, `None` follows `quality`, ignored when lossless) | gamut-avif/av1 | ✅ (#656; CLI/wasm/ffi exposure ☐ under the row below) | M3 |
 | AVIF container decode + codestream handoff (`AvifContainer`/`AvifImage`/`Av1StillDecoder`) | gamut-avif §L | ✅ | D |
 | AV1 **encode** backend seam (`Av1StillEncoder`/`Av1EncodeRequest`/`push_backend`/`AbiAv1StillEncoder`) | gamut-avif §M | ✅ | D |
 | AV1 **decode** backend registry (`push_decode_backend`/`AbiAv1StillDecoder` around `Av1StillDecoder`) | gamut-avif §M | ☐ | D |
@@ -361,7 +365,8 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | `Av1StillDecoder` seam + validating `DecodedFrame` contract | (crate API) | ✅ | S3 |
 | Planar pipeline: coded / `iden` / `grid` assembly (uniform tiles, checked canvas, crop) | 23008-12 §6.6.2.3.2 | ✅ | S3 |
 | Derivation cycle + depth guards | (hardening) | ✅ | S3 |
-| RGBA path: identity / BT.601 (mc 2/5/6) / BT.709 (1) / BT.2020 NCL (9) / monochrome; missing-`colr` default | H.273; AVIF §2.2 | ✅ | S3/S6 |
+| RGBA path: identity / BT.601 (mc 2/5/6) / BT.709 (1) / BT.2020 NCL (9) / monochrome; missing `colr` → AV1 sequence header `color_config` (grid: first tile) | H.273; AVIF §2.2.1 | ✅ | S3/S6, #651 |
+| Typed AV1 sequence header per item (`AvifImage::av1_sequence_header`, payload then `configOBUs`, via `gamut-av1`'s parser) | AV1 §5.5; AVIF §2.1 | ✅ | #651 |
 | High-bit-depth surface `decode_item_rgba16`/`decode_primary_rgba16` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
 | Alpha merge (luma-plane, non-mono accepted, bit-depth rescale) | AVIF §4.1 | ✅ | S3 |
 | `clap`/`irot`/`imir` application in `ipma` order (2022 `imir` axis semantics) | 23008-12:2022 §6.5.12; 14496-12 §12.1.4 | ✅ | S3 |

@@ -10,8 +10,10 @@ use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
     Planar16, RgbToYcbcr, TransferCharacteristics,
 };
+use gamut_core::convert::{ConvertPolicy, convert, premultiply_alpha};
 use gamut_core::{
-    Dimensions, EncodeImage, Error, Gray8, ImageRef, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, Pixel, Result, Rgb8, Rgb16, Rgba8,
+    Rgba16,
 };
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind,
@@ -20,9 +22,11 @@ use gamut_isobmff::{
 
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
 use crate::c2pa::{
-    C2PA_UUID, C2paBoxPurpose, content_provenance_payload, content_provenance_reserved, slots,
+    C2PA_UUID, C2paBoxPurpose, content_provenance_payload, content_provenance_reserved,
 };
+use crate::clean_alpha::clean_rgba;
 use crate::config::{AvifConfig, AvifMode};
+use crate::container::AvifContainer;
 use crate::image::ALPHA_AUX_URN;
 use crate::transform::{Mirror, Rotation};
 
@@ -47,7 +51,8 @@ impl std::fmt::Debug for SlotSource {
 }
 
 /// What [`AvifEncoder::encode_with_report`] found out about the file it just produced, beyond the
-/// bytes: where the container placed the things a caller has to come back to.
+/// bytes: how the file splits between the coded images and the container around them, and where
+/// the container placed the things a caller has to come back to.
 ///
 /// Non-exhaustive: a later minor release may report more placements. Construct nothing here — the
 /// encoder fills it in, and the type deliberately implements no [`Default`], so the only way to
@@ -65,6 +70,60 @@ pub struct AvifEncodeReport {
     /// hard binding excludes by box path, not byte offset (C2PA 2.4 §18.6, §A.5.6); see
     /// [`C2paSlot`](crate::C2paSlot).
     pub c2pa: Option<Range<usize>>,
+    /// The length in bytes of the **colour** image's AV1 codestream — the primary item's payload,
+    /// which is the sum of its `iloc` extent lengths (ISO/IEC 14496-12 §8.11.3).
+    pub color_bytes: usize,
+    /// The length in bytes of the **alpha** auxiliary item's AV1 codestream (its `iloc` extent
+    /// lengths, as for [`color_bytes`](Self::color_bytes)), or `0` when the file carries no alpha
+    /// auxiliary — every input without an alpha channel.
+    ///
+    /// What is left of the file, `file.len() - color_bytes - alpha_bytes`, is the container and
+    /// whatever metadata (ICC, Exif, XMP, C2PA) it carries.
+    pub alpha_bytes: usize,
+}
+
+/// How the colour of an RGBA input relates to its alpha, and so what an RGBA encode codes and
+/// declares. Select it with [`AvifEncoder::with_alpha_mode`].
+///
+/// A file whose colour item carries a `prem` item reference to its alpha auxiliary declares the
+/// colour **premultiplied** — associated with alpha (ISO/IEC 23008-12 §6); without
+/// one the colour is unassociated. A reader un-premultiplies the first before compositing, so
+/// declaring the wrong one darkens or halos the displayed edges.
+///
+/// | Mode | Input colour | Coded colour | `prem` written |
+/// | --- | --- | --- | --- |
+/// | [`Unassociated`](Self::Unassociated) | unassociated | as given | no |
+/// | [`Premultiplied`](Self::Premultiplied) | already premultiplied | as given | yes |
+/// | [`PremultiplyOnEncode`](Self::PremultiplyOnEncode) | unassociated | premultiplied by the encoder | yes |
+///
+/// Every mode is ignored by an input without an alpha channel: with no alpha auxiliary there is
+/// no alpha to associate with and nothing for `prem` to target.
+///
+/// `#[non_exhaustive]`, `#[repr(u8)]` with permanent, append-only discriminants: plain
+/// configuration data that must stay mechanically portable to C (see the workspace charter).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum AlphaMode {
+    /// The colour is **unassociated** (straight) and is coded as given, with no `prem` — the
+    /// default, and the interpretation [`Rgba8`]'s
+    /// [`ColorModel::Rgba`](gamut_core::ColorModel::Rgba) already documents.
+    #[default]
+    Unassociated = 0,
+    /// The caller's colour is **already premultiplied** by its alpha. It is coded as given and the
+    /// file declares it with `prem`: a declaration, not a conversion — the encoder multiplies
+    /// nothing and divides nothing.
+    Premultiplied = 1,
+    /// The caller's colour is **unassociated**; the encoder premultiplies it — with
+    /// [`gamut_core::convert::premultiply_alpha`], `round(colour * alpha / max)` at the input's
+    /// own sample scale — before coding, and declares the result with `prem`.
+    ///
+    /// Opaque pixels code exactly as given and alpha is never touched. Every other pixel keeps
+    /// only `alpha + 1` colour levels, so a reader that un-premultiplies recovers the source only
+    /// to within rounding — `⌊(a + max) / 2a⌋` code values at alpha `a`, and no colour at all
+    /// under a fully transparent pixel. That makes this mode **lossy in the colour channels even
+    /// under [`AvifMode::Lossless`]**, which then codes the *premultiplied* colour bit-exactly.
+    PremultiplyOnEncode = 2,
 }
 
 /// The encoder's display-orientation transforms, applied by a reader at display time (the stored
@@ -95,11 +154,15 @@ struct ImageTransform {
 /// | [`Rgb16`] | one 4:4:4 colour item at [`AvifEncoder::with_bit_depth`]'s depth |
 /// | [`Rgba16`] | that, plus a monochrome alpha auxiliary at the same depth |
 ///
+/// The 8-bit inputs code at 8 bits unless [`AvifEncoder::with_bit_depth`] asks for 10 or 12, in
+/// which case they are widened by bit replication first; the 16-bit inputs code at 12 unless it
+/// asks for 10.
+///
 /// Alpha is coded as its own AV1 still: AVIF v1.2.0 §4.1 makes `mono_chrome = 1` and full range a
 /// *shall* for an AV1 auxiliary image item, and the auxiliary is linked to the colour item by an
 /// `auxl` reference and typed by an essential `auxC` property.
-/// [`AvifEncoder::with_premultiplied_alpha`] declares that the colour values are already
-/// multiplied by it.
+/// [`AvifEncoder::with_alpha_mode`] selects whether the colour is unassociated, already
+/// premultiplied by alpha, or premultiplied by the encoder (see [`AlphaMode`]).
 ///
 /// The AV1 codestream comes from `gamut-av1` by default; [`AvifEncoder::push_backend`] registers
 /// alternate [`Av1StillEncoder`] backends ahead of it (see [`crate::backend`] for the fallback
@@ -119,9 +182,10 @@ pub struct AvifEncoder {
     /// The C2PA manifest-store slot — reserved zeros or a caller-computed store — written into a
     /// top-level `uuid` `ContentProvenanceBox` after `ftyp`.
     c2pa: Option<SlotSource>,
-    /// Whether the colour values are premultiplied by alpha, emitted as a `prem` item reference.
-    /// Meaningless without an alpha channel, so it reaches the file only for an RGBA encode.
-    premultiplied: bool,
+    /// How an RGBA input's colour relates to its alpha: whether it is premultiplied before coding
+    /// and whether a `prem` item reference declares it. Meaningless without an alpha channel, so
+    /// it reaches the file only for an RGBA encode.
+    alpha_mode: AlphaMode,
     /// Pluggable AV1 still-encode backends, tried in push order before the `gamut-av1` tail.
     /// Shared (not copied) by [`Clone`] — see [`AvifEncoder::push_backend`].
     backends: Vec<BackendSlot>,
@@ -141,7 +205,7 @@ impl std::fmt::Debug for AvifEncoder {
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("c2pa", &self.c2pa)
-            .field("premultiplied", &self.premultiplied)
+            .field("alpha_mode", &self.alpha_mode)
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -179,7 +243,7 @@ impl AvifEncoder {
             exif: None,
             xmp: None,
             c2pa: None,
-            premultiplied: false,
+            alpha_mode: AlphaMode::Unassociated,
             backends: Vec::new(),
         }
     }
@@ -206,7 +270,7 @@ impl AvifEncoder {
             exif: None,
             xmp: None,
             c2pa: None,
-            premultiplied: false,
+            alpha_mode: AlphaMode::Unassociated,
             backends: Vec::new(),
         }
     }
@@ -305,10 +369,33 @@ impl AvifEncoder {
         self
     }
 
-    /// Selects the depth **16-bit inputs** are coded at: [`BitDepth::Ten`] or
-    /// [`BitDepth::Twelve`] (the default). Any other depth is rejected at encode time.
+    /// Selects the depth the samples are coded at: [`BitDepth::Ten`] or [`BitDepth::Twelve`] for
+    /// any input, or [`BitDepth::Eight`] for an 8-bit one.
     ///
-    /// # What happens to the low bits
+    /// Without this call each input codes at its own default — **8** for [`Rgb8`], [`Rgba8`] and
+    /// [`Gray8`], **12** for [`Rgb16`] and [`Rgba16`] — so an encoder that never sets it writes
+    /// exactly the bytes it wrote before 8-bit inputs honoured it. A depth AV1 cannot code
+    /// ([`BitDepth::Sixteen`], §6.4.1), and [`BitDepth::Eight`] for a 16-bit input, are rejected
+    /// at encode time.
+    ///
+    /// # Widening an 8-bit input
+    ///
+    /// An 8-bit input coded at 10 or 12 bits is widened by **bit replication** — the byte is
+    /// repeated into the low bits, `(x << 2) | (x >> 6)` at 10 bits — *before* colour conversion,
+    /// so the matrix and the chroma averaging run at the coded precision. Replication maps `0` to
+    /// `0` and `255` to the coded maximum, and the input byte is the top 8 bits of every coded
+    /// sample, so:
+    ///
+    /// > A lossless encode of an 8-bit input at 10 or 12 bits is exact: narrowing the decoded
+    /// > samples back to 8 bits (`sample >> (depth - 8)`) reproduces the input.
+    ///
+    /// The wider depth adds no information the caller did not have. What it buys on the lossy path
+    /// is precision *inside the codec*: the YCbCr conversion and the quantizer round at 10 or 12
+    /// bits rather than 8, which is what can reduce banding in smooth gradients. The
+    /// widened copy of the image is held for the duration of the encode — two bytes per sample,
+    /// on top of the planes every encode builds.
+    ///
+    /// # Narrowing a 16-bit input
     ///
     /// [`Rgb16`] and [`Rgba16`] carry samples on `gamut-core`'s canonical **full 16-bit scale**,
     /// while AV1 codes 8, 10 or 12. The encoder narrows by **truncation** — `sample >> (16 -
@@ -323,30 +410,122 @@ impl AvifEncoder {
     /// A caller who wants a different tradeoff — dithering, or a rounded narrowing — applies it
     /// before handing the image over.
     ///
-    /// **Ignored by the 8-bit inputs.** [`Rgb8`], [`Rgba8`] and [`Gray8`] always code 8-bit:
-    /// widening them would claim precision the caller never had.
+    /// Either way the alpha auxiliary of an RGBA input codes at the colour item's depth, as AVIF
+    /// v1.2.0 §4.1 requires.
     #[must_use]
     pub fn with_bit_depth(mut self, bit_depth: BitDepth) -> Self {
-        self.config.bit_depth = bit_depth;
+        self.config.bit_depth = Some(bit_depth);
         self
     }
 
-    /// Declares that the colour values of an RGBA input are **premultiplied** by their alpha —
-    /// i.e. already multiplied through, so a fully transparent pixel carries zeroed colour.
+    /// Codes the **alpha auxiliary item** at its own lossy `quality` (`0..=100`, higher = larger
+    /// output, closer to the source; values above `100` are clamped), independent of the colour
+    /// item's.
+    ///
+    /// The value goes through exactly the mapping [`AvifEncoder::lossy`]'s `quality` does, so
+    /// `lossy(q).with_alpha_quality(q)` codes the same bytes as `lossy(q)`. Without this call
+    /// alpha follows the colour quality (see [`AvifConfig::alpha_quality`]). Opacity edges are
+    /// often more visible than colour error, so a caller trading colour bits for size may want
+    /// alpha finer than colour; a mask that is already blocky can go coarser.
+    ///
+    /// **Ignored by [`AvifMode::Lossless`]**, which codes alpha bit-exactly at `base_q_idx 0`
+    /// whatever is set here, exactly as it ignores the colour `quality` — and by every input
+    /// without an alpha channel, which has no auxiliary item to code.
+    #[must_use]
+    pub fn with_alpha_quality(mut self, quality: u8) -> Self {
+        self.config.alpha_quality = Some(quality);
+        self
+    }
+
+    /// Selects how an RGBA input's colour relates to its alpha — unassociated, already
+    /// premultiplied, or to be premultiplied by the encoder — and so whether the file declares
+    /// premultiplied colour with a `prem` item reference from the colour item to its alpha
+    /// auxiliary (ISO/IEC 23008-12 §6). See [`AlphaMode`] for each mode's contract; the default is
+    /// [`AlphaMode::Unassociated`].
+    ///
+    /// [`AlphaMode::PremultiplyOnEncode`] is the one that converts samples, and it is lossy in the
+    /// colour channels even on the lossless path. Ignored by every input without an alpha channel.
+    #[must_use]
+    pub fn with_alpha_mode(mut self, mode: AlphaMode) -> Self {
+        self.alpha_mode = mode;
+        self
+    }
+
+    /// Declares whether the colour values of an RGBA input are **already premultiplied** by their
+    /// alpha — shorthand for [`with_alpha_mode`](Self::with_alpha_mode) with
+    /// [`AlphaMode::Premultiplied`] (`true`) or [`AlphaMode::Unassociated`] (`false`).
     ///
     /// This is a **declaration, not a conversion**: the encoder multiplies nothing and divides
-    /// nothing. It records the caller's assertion as a `prem` item reference from the colour item
-    /// to its alpha auxiliary (ISO/IEC 23008-12 §6), which is what tells a reader whether to
-    /// un-premultiply before compositing. Getting it wrong darkens or halos the edges of the
-    /// displayed image, so the default is `false` — unassociated alpha, the interpretation
-    /// [`Rgba8`]'s [`ColorModel::Rgba`](gamut_core::ColorModel::Rgba) already documents.
+    /// nothing, it only records the caller's assertion as a `prem` item reference. A caller
+    /// holding unassociated colour that wants the file stored premultiplied asks for
+    /// [`AlphaMode::PremultiplyOnEncode`] instead. Getting the declaration wrong darkens or halos
+    /// the edges of the displayed image, so the default is `false`.
     ///
     /// Ignored by every input without an alpha channel: with no alpha auxiliary there is nothing
     /// for the reference to target.
     #[must_use]
-    pub fn with_premultiplied_alpha(mut self, premultiplied: bool) -> Self {
-        self.premultiplied = premultiplied;
+    pub fn with_premultiplied_alpha(self, premultiplied: bool) -> Self {
+        self.with_alpha_mode(if premultiplied {
+            AlphaMode::Premultiplied
+        } else {
+            AlphaMode::Unassociated
+        })
+    }
+
+    /// Cleans the colour hidden under transparent pixels before a **lossy** encode: each
+    /// non-opaque pixel's colour is replaced by a blurred bleed of the visible edge around it, so
+    /// the coder spends no bits on colour nobody sees and the visible edge does not ring against
+    /// it.
+    ///
+    /// What a reader displays does not change: alpha and opaque pixels are untouched, a fully
+    /// transparent pixel's colour is invisible, and a semi-transparent pixel's colour moves only
+    /// within the range that premultiplies to the same value. Only the decoded *unassociated*
+    /// colour under transparency differs from the source, which is why it is opt-in (see
+    /// [`AvifConfig::clean_alpha`]).
+    ///
+    /// **Ignored by [`AvifMode::Lossless`]**, which stays bit-exact; by every
+    /// [`AlphaMode`] but [`AlphaMode::Unassociated`] — premultiplied colour is the composite
+    /// itself, and premultiplying already zeroes the colour under a fully transparent pixel; and by
+    /// every input without an alpha channel.
+    #[must_use]
+    pub fn with_clean_alpha(mut self, clean: bool) -> Self {
+        self.config.clean_alpha = clean;
         self
+    }
+
+    /// Whether an RGBA encode cleans the colour under its transparent pixels: asked for, lossy,
+    /// and unassociated (see [`AvifEncoder::with_clean_alpha`]).
+    fn cleans_alpha(&self) -> bool {
+        self.config.clean_alpha
+            && self.config.mode == AvifMode::Lossy
+            && self.alpha_mode == AlphaMode::Unassociated
+    }
+
+    /// Whether the file declares its colour premultiplied with a `prem` item reference: every
+    /// [`AlphaMode`] but [`AlphaMode::Unassociated`].
+    fn declares_premultiplied(&self) -> bool {
+        self.alpha_mode != AlphaMode::Unassociated
+    }
+
+    /// The RGBA samples an encode codes in place of `image`, or `None` to code `image` as given:
+    /// the premultiplied image under [`AlphaMode::PremultiplyOnEncode`], the cleaned one when
+    /// [`cleans_alpha`](Self::cleans_alpha) applies. The two never both apply, since cleaning
+    /// requires unassociated colour.
+    fn coded_rgba<P>(&self, image: ImageRef<'_, P>) -> Result<Option<ImageBuf<P>>>
+    where
+        P: Pixel,
+        P::Sample: crate::clean_alpha::Sample,
+    {
+        if self.alpha_mode == AlphaMode::PremultiplyOnEncode {
+            let mut premultiplied = ImageBuf::new(image.as_samples().to_vec(), image.dimensions())?;
+            premultiply_alpha(&mut premultiplied);
+            Ok(Some(premultiplied))
+        } else if self.cleans_alpha() {
+            let cleaned = clean_rgba(image.as_samples(), image.width() as usize);
+            ImageBuf::new(cleaned, image.dimensions()).map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
     /// The colour signalling and plane layout this encoder's configuration selects.
@@ -398,17 +577,36 @@ impl AvifEncoder {
         }
     }
 
-    /// The depth a 16-bit input is coded at, rejecting one AV1 cannot express.
+    /// The depth a 16-bit input is coded at — 12 when unset — rejecting one AV1 cannot express.
     ///
     /// §6.4.1 defines 8, 10 and 12. [`BitDepth::Sixteen`] is a `gamut-color` depth for the
     /// interleaved 16-bit pipelines, and [`BitDepth::Eight`] would silently discard the input's
-    /// whole point, so both are refused rather than quietly reinterpreted.
+    /// whole point, so both are refused rather than quietly reinterpreted. Twelve is the default
+    /// because narrowing 16 bits to 12 discards the least, and 12-bit is a depth every AVIF reader
+    /// that handles high bit depth decodes.
     fn coded_bit_depth(&self) -> Result<BitDepth> {
-        match self.config.bit_depth {
-            BitDepth::Ten | BitDepth::Twelve => Ok(self.config.bit_depth),
+        match self.config.bit_depth.unwrap_or(BitDepth::Twelve) {
+            depth @ (BitDepth::Ten | BitDepth::Twelve) => Ok(depth),
             _ => Err(gamut_core::Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "AVIF: a 16-bit input codes at 10 or 12 bits (AV1 \u{a7}6.4.1); \
+                 select one with AvifEncoder::with_bit_depth",
+            )),
+        }
+    }
+
+    /// The depth an 8-bit input is **widened** to, or `None` to code it at 8 bits — the default,
+    /// and what an explicit [`BitDepth::Eight`] asks for.
+    ///
+    /// [`BitDepth::Sixteen`] is refused rather than clamped: AV1 codes no 16-bit samples
+    /// (§6.4.1), and quietly coding 12 would hand back a depth the caller did not ask for.
+    fn widened_bit_depth(&self) -> Result<Option<BitDepth>> {
+        match self.config.bit_depth {
+            None | Some(BitDepth::Eight) => Ok(None),
+            Some(depth @ (BitDepth::Ten | BitDepth::Twelve)) => Ok(Some(depth)),
+            Some(_) => Err(gamut_core::Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: an 8-bit input codes at 8, 10 or 12 bits (AV1 \u{a7}6.4.1); \
                  select one with AvifEncoder::with_bit_depth",
             )),
         }
@@ -420,6 +618,18 @@ impl AvifEncoder {
         match self.config.mode {
             AvifMode::Lossless => 0,
             AvifMode::Lossy => quality_to_quant(self.config.quality),
+        }
+    }
+
+    /// The AV1 `base_q_idx` the **alpha auxiliary** codes at: `0` on the lossless path, otherwise
+    /// the quality mapping applied to [`AvifConfig::alpha_quality`], or to the colour quality when
+    /// that is unset.
+    fn alpha_base_q_idx(&self) -> u8 {
+        match self.config.mode {
+            AvifMode::Lossless => 0,
+            AvifMode::Lossy => {
+                quality_to_quant(self.config.alpha_quality.unwrap_or(self.config.quality))
+            }
         }
     }
 
@@ -575,23 +785,28 @@ impl AvifEncoder {
         self
     }
 
-    /// Encodes `image` as [`EncodeImage::encode_to_vec`] would, and additionally reports where the
+    /// Encodes `image` as [`EncodeImage::encode_to_vec`] would, and additionally reports how the
+    /// file splits between the colour codestream, the alpha codestream and the container
+    /// ([`AvifEncodeReport::color_bytes`], [`AvifEncodeReport::alpha_bytes`]), and where the
     /// container placed what a caller has to come back to — today the C2PA manifest-store slot
     /// ([`AvifEncodeReport::c2pa`]).
     ///
     /// The bytes are exactly the bytes `encode_to_vec` produces: this is the same encode with a
     /// report alongside, not a different code path, so the object-safe `EncodeImage` entry point
-    /// stays what it is. The range is found by running the crate's own locator over the finished
-    /// file — the same one [`AvifContainer::c2pa_slot`](crate::AvifContainer::c2pa_slot) uses — so what the
-    /// encoder reports is, by construction, what a reader of the file finds.
+    /// stays what it is. Every figure is found by parsing the finished file with
+    /// [`AvifContainer::parse`] — the sizes from the colour and alpha items' `iloc` extents, the
+    /// range from [`AvifContainer::c2pa_slot`] — so what the encoder reports is, by construction,
+    /// what a reader of the file finds. That parse is the price of the report over a plain
+    /// `encode_to_vec`: one container walk of the output, small beside the AV1 encode.
     ///
     /// # Errors
     ///
     /// As [`EncodeImage::encode_image`] — which includes [`Error::InvalidInput`] for a
     /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) length that cannot be framed — and
-    /// additionally [`Error::InvalidInput`] if a C2PA slot was configured but cannot be located in
-    /// the file just written, which would mean the writer and the locator disagree about the box
-    /// framing and is never expected.
+    /// additionally an error if the file just written does not parse with
+    /// [`AvifContainer::parse`], or [`Error::InvalidInput`] if a C2PA slot was configured but
+    /// cannot be located in it. Either would mean the writer and the reader disagree about the
+    /// container, and is never expected.
     pub fn encode_with_report<P: Pixel>(
         &self,
         image: ImageRef<'_, P>,
@@ -600,11 +815,11 @@ impl AvifEncoder {
         Self: EncodeImage<P>,
     {
         let bytes = self.encode_to_vec(image)?;
+        let container = AvifContainer::parse(&bytes)?;
         let c2pa = match self.c2pa {
             None => None,
             Some(_) => {
-                let (segments, _) = gamut_isobmff::walk_segments(&bytes)?;
-                let store = slots(&segments).next().ok_or_else(|| {
+                let store = container.c2pa_slot().ok_or_else(|| {
                     Error::invalid_input(
                         env!("CARGO_PKG_NAME"),
                         "AVIF: the C2PA box this encoder wrote cannot be located in its own output",
@@ -613,7 +828,22 @@ impl AvifEncoder {
                 Some(store.range)
             }
         };
-        Ok((bytes, AvifEncodeReport { c2pa }))
+        // The item payloads are what `iloc` resolves — the concatenation of each item's extents —
+        // so their lengths are the extent-length sums a reader of this file finds.
+        let image = container.image();
+        let primary = image.primary_item();
+        let color_bytes = primary.as_isobmff_item().payload.len();
+        let alpha_bytes = image
+            .alpha_auxiliary_of(primary.id())
+            .map_or(0, |alpha| alpha.as_isobmff_item().payload.len());
+        Ok((
+            bytes,
+            AvifEncodeReport {
+                c2pa,
+                color_bytes,
+                alpha_bytes,
+            },
+        ))
     }
 
     /// Records an `irot` display [`Rotation`] applied by a reader (the stored pixels are unchanged,
@@ -764,7 +994,7 @@ impl AvifEncoder {
             items.push(alpha_item(id, alpha, dims));
             // `prem` runs colour image → alpha auxiliary, so the reference lives on the *colour*
             // item — the opposite direction to the `auxl` the auxiliary owns.
-            if self.premultiplied {
+            if self.declares_premultiplied() {
                 items[0].references.push(ItemReference {
                     reference_type: *b"prem",
                     to_item_ids: vec![id],
@@ -1107,7 +1337,15 @@ impl EncodeImage<Rgb8> for AvifEncoder {
     /// Maps the RGB image to AV1 planes — identity GBR at 4:4:4, or YCbCr through the configured
     /// matrix at [`with_chroma`](AvifEncoder::with_chroma)'s sampling — and wraps the temporal unit
     /// in an AVIF file.
+    ///
+    /// At a [`with_bit_depth`](AvifEncoder::with_bit_depth) of 10 or 12 the image is first widened
+    /// to [`Rgb16`] and coded exactly as [`EncodeImage<Rgb16>`] codes it, which narrows back to the
+    /// coded depth: `x * 257 >> (16 - depth)` is the bit replication of `x` to that depth.
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.widened_bit_depth()?.is_some() {
+            let wide = convert::<Rgb8, Rgb16>(image, ConvertPolicy::lossless())?;
+            return EncodeImage::<Rgb16>::encode_image(self, wide.as_ref(), out);
+        }
         let dims = image.dimensions();
         let colour = self.colour();
         let planes = match colour.matrix {
@@ -1142,8 +1380,10 @@ impl EncodeImage<Rgba8> for AvifEncoder {
     /// as [`EncodeImage<Rgb8>`] would, the alpha as a monochrome auxiliary — and wraps both in one
     /// AVIF file.
     ///
-    /// Alpha is coded at the same `base_q_idx` as the colour, so a lossless encode round-trips
-    /// alpha bit-exactly and a lossy one quantizes it alongside the colour. It carries no `colr`
+    /// Alpha is coded at the colour's `base_q_idx` unless
+    /// [`with_alpha_quality`](AvifEncoder::with_alpha_quality) gives it its own, so a lossless
+    /// encode round-trips alpha bit-exactly and a lossy one quantizes it at the alpha quality
+    /// (defaulting to the colour quality). It carries no `colr`
     /// and goes through no matrix: opacity is not colour (AVIF v1.2.0 §4.1).
     ///
     /// # Chroma
@@ -1154,7 +1394,17 @@ impl EncodeImage<Rgba8> for AvifEncoder {
     /// not yet expose; the request describes the buffer truthfully rather than the configuration,
     /// so nothing mis-signals — an RGBA encode is simply larger than the same image without alpha.
     /// Tracked in `STATUS.md`.
+    ///
+    /// At a [`with_bit_depth`](AvifEncoder::with_bit_depth) of 10 or 12 the image — alpha
+    /// included — is widened to [`Rgba16`] and coded exactly as [`EncodeImage<Rgba16>`] codes it,
+    /// so the alpha auxiliary keeps the colour item's depth (AVIF v1.2.0 §4.1).
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.widened_bit_depth()?.is_some() {
+            let wide = convert::<Rgba8, Rgba16>(image, ConvertPolicy::lossless())?;
+            return EncodeImage::<Rgba16>::encode_image(self, wide.as_ref(), out);
+        }
+        let coded = self.coded_rgba(image)?;
+        let image = coded.as_ref().map_or(image, ImageBuf::as_ref);
         let dims = image.dimensions();
         let colour = self.colour();
         let planes = match colour.matrix {
@@ -1164,11 +1414,16 @@ impl EncodeImage<Rgba8> for AvifEncoder {
                 Planar8::from_rgba8_matrix_view(image, m)
             }
         };
-        let base_q_idx = self.base_q_idx();
-        let still = self.colour_still(&planes, dims, base_q_idx, colour, planes.subsampling())?;
+        let still = self.colour_still(
+            &planes,
+            dims,
+            self.base_q_idx(),
+            colour,
+            planes.subsampling(),
+        )?;
         let alpha = monochrome_still(
             &Planar8::from_rgba8_alpha_view(image),
-            base_q_idx,
+            self.alpha_base_q_idx(),
             self.monochrome_colour(),
         )?;
         self.emit(&still, dims, Some(&alpha), out)
@@ -1206,6 +1461,8 @@ impl EncodeImage<Rgba16> for AvifEncoder {
     /// configured coding depth — AVIF v1.2.0 §4.1 requires the auxiliary to match the master's
     /// depth.
     fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
+        let coded = self.coded_rgba(image)?;
+        let image = coded.as_ref().map_or(image, ImageBuf::as_ref);
         let dims = image.dimensions();
         let depth = self.coded_bit_depth()?;
         let colour = self.colour();
@@ -1216,11 +1473,10 @@ impl EncodeImage<Rgba16> for AvifEncoder {
                 Planar16::from_rgba16_matrix_view(image, m)
             }
         };
-        let base_q_idx = self.base_q_idx();
-        let still = self.colour_still16(&planes, dims, base_q_idx, colour)?;
+        let still = self.colour_still16(&planes, dims, self.base_q_idx(), colour)?;
         let alpha = monochrome_still16(
             &Planar16::from_rgba16_alpha_view(image, depth),
-            base_q_idx,
+            self.alpha_base_q_idx(),
             self.monochrome_colour(),
         )?;
         self.emit(&still, dims, Some(&alpha), out)
@@ -1234,15 +1490,45 @@ impl EncodeImage<Gray8> for AvifEncoder {
     /// Replicating the samples into three equal planes would code two constant chroma planes and
     /// then claim three channels for an image that has one. The matrix and range knobs do not
     /// apply (see [`AvifEncoder::with_matrix`]); the primaries and transfer tags do.
+    ///
+    /// At a [`with_bit_depth`](AvifEncoder::with_bit_depth) of 10 or 12 the samples are widened by
+    /// bit replication and coded as a monochrome item at that depth.
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
-        let still = monochrome_still(
-            &Planar8::from_gray8_view(image),
-            self.base_q_idx(),
-            self.monochrome_colour(),
-        )?;
+        let still = match self.widened_bit_depth()? {
+            None => monochrome_still(
+                &Planar8::from_gray8_view(image),
+                self.base_q_idx(),
+                self.monochrome_colour(),
+            )?,
+            Some(depth) => monochrome_still16(
+                &gray8_widened(image, depth)?,
+                self.base_q_idx(),
+                self.monochrome_colour(),
+            )?,
+        };
         self.emit(&still, dims, None, out)
     }
+}
+
+/// A [`Gray8`] image widened to `depth` by bit replication, as a single-plane monochrome buffer.
+///
+/// `gamut-color` has no grey constructor for [`Planar16`], so the image goes through the two
+/// conversions that already own each half rather than a third copy of either: `gamut-core`'s
+/// lossless widening replicates the grey into an [`Rgb16`] image at full 16-bit scale, and
+/// [`Planar16::from_rgb16_identity_view`] narrows it to `depth`, whose `Y = G` plane is the grey.
+/// The two chroma planes it also builds are discarded. That is three times the transient memory a
+/// dedicated grey constructor would need, paid only on this opt-in path.
+fn gray8_widened(image: ImageRef<'_, Gray8>, depth: BitDepth) -> Result<Planar16> {
+    let wide = convert::<Gray8, Rgb16>(image, ConvertPolicy::lossless())?;
+    let gbr = Planar16::from_rgb16_identity_view(wide.as_ref(), depth);
+    Planar16::from_planes_subsampled(
+        image.width(),
+        image.height(),
+        ChromaSubsampling::Cs400,
+        depth,
+        [gbr.plane(0).to_vec(), Vec::new(), Vec::new()],
+    )
 }
 
 #[cfg(test)]
@@ -1473,6 +1759,250 @@ mod tests {
         let lossy = AvifEncoder::lossy(80).config();
         assert_eq!(lossy.mode, AvifMode::Lossy);
         assert_eq!(lossy.quality, 80);
+    }
+
+    #[test]
+    fn alpha_base_q_idx_follows_alpha_quality_then_colour_quality() {
+        // Unset: alpha codes at the colour item's quantizer, so the pre-knob bytes hold.
+        let follows = AvifEncoder::lossy(50);
+        assert_eq!(follows.config().alpha_quality, None);
+        assert_eq!(follows.alpha_base_q_idx(), 127);
+        assert_eq!(follows.alpha_base_q_idx(), follows.base_q_idx());
+        // Set: its own value through the same mapping, leaving the colour quantizer alone.
+        let own = AvifEncoder::lossy(50).with_alpha_quality(90);
+        assert_eq!(own.config().alpha_quality, Some(90));
+        assert_eq!(own.alpha_base_q_idx(), 25);
+        assert_eq!(own.base_q_idx(), 127);
+        // The clamp is the colour quality's: above 100 behaves as 100.
+        assert_eq!(
+            AvifEncoder::lossy(50)
+                .with_alpha_quality(200)
+                .alpha_base_q_idx(),
+            1
+        );
+        // Lossless ignores it and codes alpha on the lossless path.
+        assert_eq!(
+            AvifEncoder::lossless()
+                .with_alpha_quality(10)
+                .alpha_base_q_idx(),
+            0
+        );
+    }
+
+    #[test]
+    fn cleans_alpha_only_when_asked_lossy_and_unassociated() {
+        assert!(!AvifEncoder::lossy(50).cleans_alpha(), "opt-in");
+        assert!(AvifEncoder::lossy(50).with_clean_alpha(true).cleans_alpha());
+        assert!(
+            !AvifEncoder::lossy(50)
+                .with_clean_alpha(true)
+                .with_clean_alpha(false)
+                .cleans_alpha(),
+            "the last call wins"
+        );
+        assert!(
+            !AvifEncoder::lossless()
+                .with_clean_alpha(true)
+                .cleans_alpha(),
+            "lossless stays bit-exact"
+        );
+        assert!(
+            !AvifEncoder::lossy(50)
+                .with_clean_alpha(true)
+                .with_premultiplied_alpha(true)
+                .cleans_alpha(),
+            "premultiplied colour is the composite itself"
+        );
+        assert!(
+            !AvifEncoder::lossy(50)
+                .with_clean_alpha(true)
+                .with_alpha_mode(AlphaMode::PremultiplyOnEncode)
+                .cleans_alpha(),
+            "premultiplying already zeroes the hidden colour"
+        );
+    }
+
+    #[test]
+    fn alpha_mode_discriminants_are_the_frozen_c_abi_values() {
+        // Plain configuration data bound for the C boundary: append-only discriminants.
+        assert_eq!(AlphaMode::Unassociated as u8, 0);
+        assert_eq!(AlphaMode::Premultiplied as u8, 1);
+        assert_eq!(AlphaMode::PremultiplyOnEncode as u8, 2);
+        assert_eq!(AlphaMode::default(), AlphaMode::Unassociated);
+    }
+
+    #[test]
+    fn prem_is_declared_by_every_alpha_mode_but_unassociated() {
+        let declares = |mode| {
+            AvifEncoder::new()
+                .with_alpha_mode(mode)
+                .declares_premultiplied()
+        };
+        assert!(!AvifEncoder::new().declares_premultiplied(), "the default");
+        assert!(!declares(AlphaMode::Unassociated));
+        assert!(declares(AlphaMode::Premultiplied));
+        assert!(declares(AlphaMode::PremultiplyOnEncode));
+    }
+
+    #[test]
+    fn with_premultiplied_alpha_selects_the_declaring_modes() {
+        let mode = |premultiplied| {
+            AvifEncoder::new()
+                .with_alpha_mode(AlphaMode::PremultiplyOnEncode)
+                .with_premultiplied_alpha(premultiplied)
+                .alpha_mode
+        };
+        assert_eq!(mode(true), AlphaMode::Premultiplied);
+        assert_eq!(mode(false), AlphaMode::Unassociated);
+    }
+
+    #[test]
+    fn rgba8_encode_codes_the_premultiplied_colour_on_premultiply_on_encode() {
+        let px = banded_rgba8();
+        let mut premultiplied = ImageBuf::<Rgba8>::new(px.clone(), BANDED).unwrap();
+        premultiply_alpha(&mut premultiplied);
+        assert_ne!(
+            premultiplied.as_samples(),
+            &px[..],
+            "the fixture is not opaque"
+        );
+        let encode = |enc: AvifEncoder, px: &[u8]| {
+            enc.with_clean_alpha(true)
+                .encode_to_vec(ImageRef::<Rgba8>::new(px, BANDED).unwrap())
+                .unwrap()
+        };
+        // Coded as a caller handing over the premultiplied image would have it coded — on both
+        // paths, and with cleaning (asked for here) not applied on top.
+        for enc in [AvifEncoder::lossless(), AvifEncoder::lossy(50)] {
+            assert_eq!(
+                encode(
+                    enc.clone().with_alpha_mode(AlphaMode::PremultiplyOnEncode),
+                    &px
+                ),
+                encode(
+                    enc.with_alpha_mode(AlphaMode::Premultiplied),
+                    premultiplied.as_samples()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn rgba16_encode_codes_the_premultiplied_colour_on_premultiply_on_encode() {
+        let px: Vec<u16> = banded_rgba8()
+            .into_iter()
+            .map(|s| u16::from(s) * 257)
+            .collect();
+        let mut premultiplied = ImageBuf::<Rgba16>::new(px.clone(), BANDED).unwrap();
+        premultiply_alpha(&mut premultiplied);
+        assert_ne!(premultiplied.as_samples(), &px[..]);
+        let encode = |enc: AvifEncoder, px: &[u16]| {
+            enc.encode_to_vec(ImageRef::<Rgba16>::new(px, BANDED).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            encode(
+                AvifEncoder::lossless().with_alpha_mode(AlphaMode::PremultiplyOnEncode),
+                &px
+            ),
+            encode(
+                AvifEncoder::lossless().with_alpha_mode(AlphaMode::Premultiplied),
+                premultiplied.as_samples()
+            )
+        );
+    }
+
+    #[test]
+    fn widened_rgba8_encode_premultiplies_after_widening_on_premultiply_on_encode() {
+        let px = banded_rgba8();
+        let narrow = ImageRef::<Rgba8>::new(&px, BANDED).unwrap();
+        // Widen first, then premultiply at 16-bit precision (decision 5 of #710) ...
+        let mut wide = convert::<Rgba8, Rgba16>(narrow, ConvertPolicy::lossless()).unwrap();
+        premultiply_alpha(&mut wide);
+        // ... which differs from premultiplying at 8 bits and widening the result, so the
+        // comparison below pins the order and not just that premultiplication happened.
+        let mut narrow_first = ImageBuf::<Rgba8>::new(px.clone(), BANDED).unwrap();
+        premultiply_alpha(&mut narrow_first);
+        let narrow_first =
+            convert::<Rgba8, Rgba16>(narrow_first.as_ref(), ConvertPolicy::lossless()).unwrap();
+        assert_ne!(wide.as_samples(), narrow_first.as_samples());
+        for depth in [BitDepth::Ten, BitDepth::Twelve] {
+            let enc = AvifEncoder::lossless().with_bit_depth(depth);
+            assert_eq!(
+                enc.clone()
+                    .with_alpha_mode(AlphaMode::PremultiplyOnEncode)
+                    .encode_to_vec(narrow)
+                    .unwrap(),
+                enc.with_alpha_mode(AlphaMode::Premultiplied)
+                    .encode_to_vec(wide.as_ref())
+                    .unwrap(),
+                "{depth:?}"
+            );
+        }
+    }
+
+    /// An 8×8 RGBA image: an opaque, semi-transparent and transparent band, with noisy colour
+    /// everywhere — including under the transparency, where cleaning has something to remove.
+    fn banded_rgba8() -> Vec<u8> {
+        let mut px = Vec::with_capacity(8 * 8 * 4);
+        for y in 0u32..8 {
+            for x in 0u32..8 {
+                let alpha = [255, 255, 128, 40, 0, 0, 0, 0][x as usize];
+                px.extend_from_slice(&[
+                    (x * 37 + y * 101) as u8,
+                    (x * y * 53 + 7) as u8,
+                    (x ^ y).wrapping_mul(29) as u8,
+                    alpha,
+                ]);
+            }
+        }
+        px
+    }
+
+    const BANDED: Dimensions = Dimensions {
+        width: 8,
+        height: 8,
+    };
+
+    #[test]
+    fn rgba8_encode_codes_the_cleaned_colour_when_cleaning_applies() {
+        let px = banded_rgba8();
+        let cleaned = clean_rgba(&px, 8);
+        assert_ne!(
+            cleaned, px,
+            "the fixture hides colour for cleaning to change"
+        );
+        let encode = |enc: AvifEncoder, px: &[u8]| {
+            enc.encode_to_vec(ImageRef::<Rgba8>::new(px, BANDED).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            encode(AvifEncoder::lossy(50).with_clean_alpha(true), &px),
+            encode(AvifEncoder::lossy(50), &cleaned)
+        );
+        // Not applying is coding the source as given.
+        assert_eq!(
+            encode(AvifEncoder::lossless().with_clean_alpha(true), &px),
+            encode(AvifEncoder::lossless(), &px)
+        );
+    }
+
+    #[test]
+    fn rgba16_encode_codes_the_cleaned_colour_when_cleaning_applies() {
+        let px: Vec<u16> = banded_rgba8()
+            .into_iter()
+            .map(|s| u16::from(s) * 257)
+            .collect();
+        let cleaned = clean_rgba(&px, 8);
+        assert_ne!(cleaned, px);
+        let encode = |enc: AvifEncoder, px: &[u16]| {
+            enc.encode_to_vec(ImageRef::<Rgba16>::new(px, BANDED).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            encode(AvifEncoder::lossy(50).with_clean_alpha(true), &px),
+            encode(AvifEncoder::lossy(50), &cleaned)
+        );
     }
 
     #[test]

@@ -260,6 +260,34 @@ fn decoder_surfaces_the_embedded_icc_profile() {
 }
 
 #[test]
+fn info_reports_whether_pixels_decode_into_the_embedded_profile() {
+    // Lossless keeps the original colour space; lossy codes XYB, which decodes to sRGB rather
+    // than into the embedded ICC profile.
+    let icc = srgb_icc();
+    let lossless = encode_rgb8(ColorSpec::Icc(icc.clone()));
+    assert!(
+        JxlDecoder::new()
+            .info(&lossless)
+            .unwrap()
+            .uses_original_profile
+    );
+
+    let samples = gen_u8(24, 17, 3);
+    let image = ImageRef::<Rgb8>::new(&samples, Dimensions::new(24, 17).unwrap()).unwrap();
+    let mut lossy = Vec::new();
+    JxlEncoder::lossy(Distance::new(1.0).unwrap())
+        .with_color(ColorSpec::Icc(icc))
+        .encode_image(image, &mut lossy)
+        .expect("lossy ICC encode failed");
+    assert!(
+        !JxlDecoder::new()
+            .info(&lossy)
+            .unwrap()
+            .uses_original_profile
+    );
+}
+
+#[test]
 fn decoder_reports_no_embedded_icc_for_structured_encodings() {
     // Structured encodings (sRGB, PQ, ...) carry no profile bytes: `None`, not a synthesized ICC.
     for color in [ColorSpec::Srgb, ColorSpec::Pq] {

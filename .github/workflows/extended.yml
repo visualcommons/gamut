@@ -122,6 +122,7 @@ jobs:
           - ifd_read_ledger
           - core_convert
           - tonemap_curves
+          - avif_clean_alpha
           # The parser entry points (#264): the untrusted-input surface `docs/testing.md`'s
           # per-crate table names, one target per entry point rather than per crate, because
           # gamut-heic's container walk and its `hvcC`/NAL layer are two independent surfaces.

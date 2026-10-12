@@ -757,6 +757,31 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
                 max_pic_average_light_level: r.u16()?,
             })
         }
+        b"mdcv" => {
+            // ISO/IEC 14496-12 `MasteringDisplayColourVolumeBox`: a plain Box whose syntax is
+            // fixed at 3 × (u16 x, u16 y) + (u16, u16) white point + 2 × u32 luminance = 24
+            // bytes, with no version field to extend it. Any other length is malformed. Until
+            // this arm existed every `mdcv` was carried verbatim as `Other`, so this stops
+            // accepting a file whose `mdcv` body is not exactly 24 bytes (truncated, or padded
+            // with trailing bytes) — such a box has no conformant reading.
+            if body.len() != 24 {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "ISOBMFF: mdcv body is not 24 bytes",
+                ));
+            }
+            let mut r = BoxReader::new(body);
+            let mut display_primaries = [[0u16; 2]; 3];
+            for primary in &mut display_primaries {
+                *primary = [r.u16()?, r.u16()?];
+            }
+            Ok(PropertyKind::MasteringDisplayColourVolume {
+                display_primaries,
+                white_point: [r.u16()?, r.u16()?],
+                max_display_mastering_luminance: r.u32()?,
+                min_display_mastering_luminance: r.u32()?,
+            })
+        }
         // The codec-configuration records this crate's consumers stamp (AV1, HEVC, VVC).
         b"av1C" | b"hvcC" | b"vvcC" => Ok(PropertyKind::CodecConfiguration {
             kind: ty,
@@ -805,4 +830,50 @@ fn parse_ipma(body: &[u8]) -> Result<ItemAssociations> {
         out.push((item_id, row));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A hand-authored 24-byte `mdcv` body (ISO/IEC 14496-12 syntax): BT.2020 primaries G, B, R
+    /// and the D65 white point in 0.00002 units, then 1000 cd/m² and 0.005 cd/m² in 0.0001 units.
+    /// Every field is distinct, so a reader that swaps x/y or reorders fields reads a different
+    /// value.
+    const MDCV_BODY: [u8; 24] = [
+        0x21, 0x34, 0x9B, 0xAA, // G: x 8500, y 39850
+        0x19, 0x96, 0x08, 0xFC, // B: x 6550, y 2300
+        0x8A, 0x48, 0x39, 0x08, // R: x 35400, y 14600
+        0x3D, 0x13, 0x40, 0x42, // white point: x 15635, y 16450
+        0x00, 0x98, 0x96, 0x80, // max luminance 10_000_000
+        0x00, 0x00, 0x00, 0x32, // min luminance 50
+    ];
+
+    #[test]
+    fn parse_property_reads_mdcv_fields_in_stored_order() {
+        assert_eq!(
+            parse_property(*b"mdcv", &MDCV_BODY).unwrap(),
+            PropertyKind::MasteringDisplayColourVolume {
+                display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
+                white_point: [15635, 16450],
+                max_display_mastering_luminance: 10_000_000,
+                min_display_mastering_luminance: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_property_rejects_mdcv_not_exactly_24_bytes() {
+        // One byte short and one byte over: the length is fixed by the box syntax. The message
+        // pins the length check itself, not a later field read running out of bytes.
+        let mut long = MDCV_BODY.to_vec();
+        long.push(0);
+        for body in [&MDCV_BODY[..23], &long[..]] {
+            let err = parse_property(*b"mdcv", body).unwrap_err();
+            assert!(
+                err.to_string().contains("mdcv body is not 24 bytes"),
+                "{err}"
+            );
+        }
+    }
 }

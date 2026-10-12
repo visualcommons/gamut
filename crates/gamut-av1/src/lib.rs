@@ -34,6 +34,12 @@
 //! High (1) for 4:4:4, and Professional (2) for 4:2:2 — or for **any** layout at 12 bits, the only
 //! profile that codes `twelve_bit`.
 //!
+//! **Encode speed** is a [`Speed`] preset ([`encode_still_intra_with_speed`],
+//! [`encode_still_intra16_with_speed`]): each step prunes the lossy mode-decision search — the
+//! angle refinement, filter-intra, the CfL alpha ladder, the transform-type set, rectangular and
+//! sub-8×8 partitions, palette — to save encode time. The default, [`Speed::Thorough`],
+//! is the full search, and every entry point without a `speed` argument uses it.
+//!
 //! The remaining surface (quantizer matrices and the AVIF-level
 //! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
@@ -62,7 +68,8 @@ pub use decode::{
     Subsampling, TileInfo, TxMode,
 };
 pub use encoder::{
-    EncodedStill, ReconImage, encode_still_intra, encode_still_intra_superres,
-    encode_still_intra_with, encode_still_intra16_with, encode_still_lossless_identity,
+    EncodedStill, ReconImage, Speed, encode_still_intra, encode_still_intra_superres,
+    encode_still_intra_with, encode_still_intra_with_speed, encode_still_intra16_with,
+    encode_still_intra16_with_speed, encode_still_lossless_identity,
 };
 pub use headers::{Av1Colour, Av1StillConfig};

@@ -52,8 +52,10 @@ std::fs::write("out.avif", &avif).unwrap();
 `AvifEncoder` implements [`gamut_core::EncodeImage`] for `Rgb8`, `Rgba8`, `Gray8`, `Rgb16` and
 `Rgba16`, so the input is a typed [`gamut_core::ImageRef`] and handing it an unsupported pixel
 layout is a compile error. `Rgba8`/`Rgba16` split into a 4:4:4 colour item plus a monochrome **alpha
-auxiliary item** (`auxC`/`auxl`, with `prem` when `with_premultiplied_alpha(true)` declares the
-colour premultiplied); `Gray8` is a single monochrome item rather than R=G=B replication. A file
+auxiliary item** (`auxC`/`auxl`, with `prem` when `with_alpha_mode` declares the colour
+premultiplied — `AlphaMode::Premultiplied` for colour the caller already premultiplied,
+`AlphaMode::PremultiplyOnEncode` to have the encoder premultiply unassociated colour first, which is
+lossy in the colour channels even on the lossless path); `Gray8` is a single monochrome item rather than R=G=B replication. A file
 carrying a monochrome item signals only the general AVIF brands — the Advanced Profile brand `MA1A`
 requires every image item to be AV1 High Profile (AVIF v1.2.0 §8.3).
 
@@ -62,7 +64,10 @@ The 16-bit inputs carry samples on `gamut-core`'s full 16-bit scale, while AV1 c
 **truncation**, so a lossless encode is bit-exact *at the coded depth*, not to the 16-bit input.
 `with_chroma` reaches the `Rgb16` path too, so a high-bit-depth item can be 4:2:2 or 4:2:0 — the
 chroma is averaged *after* narrowing, with the same box filter the 8-bit path uses. As on that path
-the identity matrix stays 4:4:4 (AV1 §6.4.2), and `AvifEncoder::lossy` defaults to 4:2:0:
+the identity matrix stays 4:4:4 (AV1 §6.4.2), and `AvifEncoder::lossy` defaults to 4:2:0.
+The 8-bit inputs code at 8 bits unless `with_bit_depth` asks for 10 or 12; they are then widened
+by bit replication before colour conversion, which lowers banding on the lossy path and stays
+exact on the lossless one (narrowing the decoded samples back to 8 bits gives the input):
 
 ```rust,ignore
 let avif = AvifEncoder::new()

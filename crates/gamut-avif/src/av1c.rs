@@ -1,12 +1,14 @@
 //! The typed `av1C` AV1CodecConfigurationRecord ([`Av1Config`]) and the config-driven bridges to a
 //! downstream AV1 decoder: [`Av1Config::full_stream`] (item payload → self-contained temporal
-//! unit) and [`Av1Config::validate_still_payload`] (the AVIF still-image constraints).
+//! unit), [`Av1Config::validate_still_payload`] (the AVIF still-image constraints), and
+//! [`Av1Config::sequence_header`] (the governing AV1 sequence header, parsed by `gamut-av1`).
 //!
 //! Layout is AV1-ISOBMFF v1.3.0 §2.3.3 exactly (vendored at `references/av1/av1-isobmff`); the
 //! payload constraints are AV1-ISOBMFF §2.4 (the sync-sample rules an AV1 image item inherits) and
 //! AVIF v1.2.0 §2.1 (`references/avif`). All `reserved` fields are **ignored** on read; they are
 //! masked away and never validated.
 
+use gamut_av1::SequenceHeader;
 use gamut_color::ChromaSubsampling;
 use gamut_core::{Error, Result};
 
@@ -218,6 +220,34 @@ impl Av1Config {
         }
     }
 
+    /// Parses the AV1 sequence header (AV1 §5.5) that governs an `av01` item `payload` under this
+    /// record, through `gamut-av1`'s [`SequenceHeader::parse`] — the one §5.5 parser in the
+    /// workspace, so the container and the codec never disagree about a field.
+    ///
+    /// The header is taken from the **payload** when it carries one (AVIF v1.2.0 §2.1 requires
+    /// exactly one there), and otherwise from [`config_obus`](Self::config_obus), the only other
+    /// place AV1-ISOBMFF §2.3.3 lets it live. The payload wins because it is what a decoder reads
+    /// last before the frame; §2.3.4 requires the two to match, and that cross-check is not made
+    /// here. Only the first sequence header OBU of each source is read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if neither the payload nor `configOBUs` carries a sequence
+    /// header OBU, propagates the OBU-split errors of [`crate::iter_obus`] for either source, and
+    /// propagates [`SequenceHeader::parse`]'s errors for a malformed header.
+    pub fn sequence_header(&self, payload: &[u8]) -> Result<SequenceHeader> {
+        let obu = match first_sequence_header(payload)? {
+            Some(obu) => obu,
+            None => first_sequence_header(&self.config_obus)?.ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: neither the item payload nor av1C configOBUs carries a sequence header",
+                )
+            })?,
+        };
+        SequenceHeader::parse(obu)
+    }
+
     /// Converts an `av01` item `payload` to a self-contained low-overhead temporal unit, appending
     /// to `out`: a temporal-delimiter OBU, then the record's [`config_obus`](Self::config_obus),
     /// then every payload OBU — the stream shape a Section-5 AV1 decoder (dav1d, a hardware block)
@@ -368,6 +398,18 @@ impl Av1Config {
         }
         Ok(())
     }
+}
+
+/// The payload of the first sequence header OBU in a low-overhead OBU `stream`, or `None` when it
+/// has none. Stops at the first sequence header, so a split error *after* it is not reported.
+pub(crate) fn first_sequence_header(stream: &[u8]) -> Result<Option<&[u8]>> {
+    for obu in iter_obus(stream) {
+        let obu = obu?;
+        if obu.header.obu_type == ObuType::SequenceHeader {
+            return Ok(Some(obu.payload));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

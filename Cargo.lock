@@ -608,6 +608,7 @@ dependencies = [
  "gamut-core",
  "gamut-isobmff",
  "libavif-oracle",
+ "proptest",
 ]
 
 [[package]]
@@ -729,6 +730,7 @@ version = "0.1.3"
 dependencies = [
  "gamut",
  "gamut-codec-abi",
+ "gamut-color",
 ]
 
 [[package]]

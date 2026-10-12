@@ -109,7 +109,7 @@ bounds-checks every read).
 ## Status
 
 Models the HEIF still-image box set: `ftyp`, `meta` (`hdlr`/`pitm`/`iloc`/`iinf`/`iref`/`iprp`/
-`idat`/`grpl`), the `ispe`/`pixi`/`colr` (`nclx` + ICC)/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli`
+`idat`/`grpl`), the `ispe`/`pixi`/`colr` (`nclx` + ICC)/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli`/`mdcv`
 properties, opaque codec configuration, `mdat`, and every other top-level box of the primary
 stream (`uuid`/`free`/vendor) as a positioned `TopLevelBox`. Unrecognised property boxes
 round-trip verbatim. The `grid` and `iovl` derived-image payloads are typed by the opt-in

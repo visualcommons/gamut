@@ -92,6 +92,7 @@ over normalised inputs, per the section above.
 | `ifd_read_ledger` | `gamut-ifd` | `ledger_is_canonical`, `subtract_is_set_difference` |
 | `core_convert` | `gamut-core` | `acceptance_is_independent_of_the_samples`, `output_shape_matches_the_target_layout`, `palette_and_cmyk_convert_only_to_themselves`, `the_in_place_door_matches_the_allocating_door`, `converting_a_layout_to_itself_changes_nothing` |
 | `tonemap_curves` | `gamut-tonemap` | `output_is_non_negative_and_never_nan`, `map_slice_is_elementwise_map`, `map_slice_is_order_independent`, `monotonic_non_decreasing` |
+| `avif_clean_alpha` | `gamut-avif` | `cleaning_8_bit_rgba_keeps_the_composite`, `cleaning_16_bit_rgba_keeps_the_composite` |
 
 One file per crate, deliberately, so adding a crate is an additive change.
 
@@ -321,9 +322,13 @@ carries no file**, because `"II" LE16(42)` *is* `"II" 2A 00` byte for byte and i
 four bytes as case 1; and cases 9 and 10 carry two files each, `a` and `b`, for the two variants
 their rows name.
 
-Each of the other five directories starts from one or two small well-formed files, written by this
+Five of the other six directories start from one or two small well-formed files, written by this
 workspace's own encoders, so a decoder target begins from something that reaches its pixel path
-instead of spending its budget rediscovering a header.
+instead of spending its budget rediscovering a header. The sixth, `corpus/avif_clean_alpha/`, feeds
+a law target that parses nothing, so its two seeds are hand-built raw bytes in the driver's own
+input shape — a width selector byte, then RGBA samples — that put opaque, fully transparent and
+semi-transparent pixels side by side: `8bit-2x2-edge.bin` aimed at the 8-bit law, and
+`16bit-1x3-edge.bin` at the 16-bit one (its samples read as little-endian `u16` pairs).
 
 Beyond those, **a seed is added whenever a listed check turns out to have no witness in the
 corpus** — that is what the injection audit above is for, and a check whose only witness has to be

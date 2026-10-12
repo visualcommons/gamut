@@ -42,12 +42,12 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   reference for all twelve is exiv2's own registry (`third_party/exiv2/src/properties.cpp`,
   `xmpNsInfo`), and `tests/oracle.rs` reads a documented property of each back from XMPCore by its
   `Xmp.<prefix>.<name>` key, which fails for a wrong URI *or* a wrong prefix. The registry stays a
-  registry: nothing about a value is interpreted. Two divergences are recorded rather than hidden:
-  `exifEX` is `http://cipa.jp/exif/1.0/` (the URI exiv2 and XMPCore bind) although the vendored Exif
-  3.0 text's annotation examples (Annex J.2–J.3) bind the prefix to `…/exif/2.32/` — CIPA DC-010
-  itself is not vendored, so this one entry rests on the oracle rather than on a specification under
-  `references/`, tracked in issue #516; and
-  exiv2 appends `/` to a URI ending in neither `/` nor `#` when registering it with XMPCore
+  registry: nothing about a value is interpreted. `exifEX` is the exception to the oracle-only
+  sourcing: its URI `http://cipa.jp/exif/1.0/` is cited from the vendored CIPA DC-010-2026
+  (`references/exif/exif-xmp-dc-010-2026.pdf`, Tables 1/6/20), which also retires
+  `…/exif/2.32/` — the URI the Exif 3.0 text's annotation examples (Annex J.2–J.3) still show — so
+  that URI is deliberately not registered (issue #516). One divergence is recorded rather than
+  hidden: exiv2 appends `/` to a URI ending in neither `/` nor `#` when registering it with XMPCore
   (`XmpProperties::registerNs`), so the engine re-serializes `dwc` as `…/index.htm/` while gamut
   writes the `…/index.htm` exiv2 documents — pinned in `tests/oracle.rs` as an oracle
   normalization. Because that normalization is what exiv2 *emits*, `WellKnownNs::from_uri` also
@@ -58,8 +58,18 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   canonicalize, so such a graph keeps the slashed URI its packet declared and a caller must look the
   property up under `DWC_URI_TRAILING_SLASH` — `get_text(WellKnownNs::DarwinCore.uri(), …)` returns
   `None` for it. `from_uri(u).map(uri) == Some(u)` therefore holds for every registry entry and not
-  for the alias, pinned as such in `namespace.rs`. Canonicalizing on read — which would trade byte
-  fidelity for that symmetry — is filed as issue #547 for when a consumer needs it.
+  for the alias, pinned as such in `namespace.rs`.
+- **Decided: reading does not canonicalize a well-known namespace URI (issue #547).** Of the two
+  properties a `dwc` packet written by exiv2/XMPCore cannot have at once, **byte fidelity is
+  kept** — the graph is a faithful record of the namespace URI the packet declared, and writing it
+  back emits that same `…/index.htm/` — and **lookup by `WellKnownNs::DarwinCore.uri()` is given
+  up** for such a graph: a caller resolves its properties by `DWC_URI_TRAILING_SLASH`, the URI the
+  packet carries. Rewriting the declared URI to `uri()` on read would close that asymmetry at the
+  cost of changing bytes exiv2 wrote for the one schema affected, and no consumer needs it. Pinned
+  against the oracle by `tests/oracle.rs::an_xmpcore_written_dwc_graph_keeps_the_slashed_uri_it_declared`.
+  **Deferred:** an opt-in canonicalization knob (a `ConvertPolicy`-style setting on the reader,
+  never a silent rewrite) is the shape a consumer that needs `uri()` lookup would add; it is not
+  planned until one asks.
 - **Sidecars require `x:xmpmeta` (issue #421).** `XmpSidecar::read` accepts everything
   `XmpMeta::from_packet` does — XML declaration, BOM, wrapper or bare — but rejects a document
   whose element is not `x:xmpmeta` with `XmpError::MissingXmpMeta` naming the element found. **This

@@ -12,7 +12,7 @@
 //! and the checked-out submodules (`git submodule update --init --recursive` plus `mise run
 //! fetch-av1-oracles`).
 
-use gamut_avif::{AvifContainer, AvifEncoder, AvifItem, ChromaFormat};
+use gamut_avif::{AlphaMode, AvifContainer, AvifEncoder, AvifItem, ChromaFormat};
 use gamut_color::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgba8};
 
@@ -262,6 +262,52 @@ fn lossless_rgba_round_trips_through_libavif() {
 }
 
 #[test]
+fn premultiply_on_encode_round_trips_through_libavif_within_rounding() {
+    // The caller's colour is unassociated; the encoder premultiplies it and declares `prem`.
+    // libavif must see the declaration and un-premultiply on its own, giving back the source:
+    // alpha exactly (premultiplying never touches it), opaque pixels exactly, and every other
+    // colour within the rounding premultiplication costs — round-to-nearest both ways leaves at
+    // most ⌊(a + 255) / 2a⌋ code values at alpha `a`. A fully transparent pixel keeps no colour.
+    let avif = encode_rgba(&AvifEncoder::new().with_alpha_mode(AlphaMode::PremultiplyOnEncode));
+    assert!(
+        libavif_oracle::introspect(&avif)
+            .expect("libavif parses")
+            .premultiplied_alpha
+    );
+
+    let (w, h, rgba) = libavif_oracle::decode_rgba(&avif).expect("libavif decodes");
+    assert_eq!((w, h), (W, H));
+    let source = source_rgba();
+    let mut opaque = 0;
+    for (i, (got, want)) in rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(source.as_chunks::<4>().0)
+        .enumerate()
+    {
+        let a = want[3];
+        assert_eq!(got[3], a, "alpha of pixel {i}");
+        let bound = match a {
+            0 => continue,
+            255 => {
+                opaque += 1;
+                0
+            }
+            a => (u16::from(a) + 255) / (2 * u16::from(a)),
+        };
+        for c in 0..3 {
+            let err = u16::from(got[c]).abs_diff(u16::from(want[c]));
+            assert!(
+                err <= bound,
+                "pixel {i} channel {c} at alpha {a}: {got:?} vs {want:?}"
+            );
+        }
+    }
+    assert!(opaque > 0, "the source has opaque pixels to hold exact");
+}
+
+#[test]
 fn lossless_grayscale_round_trips_through_libavif() {
     let avif = encode_gray(&AvifEncoder::new());
     let decoded = libavif_oracle::decode_avif(&avif).expect("libavif decodes");
@@ -333,6 +379,133 @@ fn lossy_alpha_is_the_av1_reconstruction_of_the_alpha_plane() {
     assert!(merged.iter().any(|&a| a < 200) && merged.iter().any(|&a| a > 200));
 }
 
+/// The colour and alpha items' coded AV1 payloads, in that order.
+fn item_payloads(avif: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let container = AvifContainer::parse(avif).expect("parses");
+    let img = container.image();
+    let colour = img.primary_item();
+    let alpha = img
+        .alpha_auxiliary_of(colour.id())
+        .expect("alpha auxiliary");
+    (
+        colour.as_isobmff_item().payload.clone(),
+        alpha.as_isobmff_item().payload.clone(),
+    )
+}
+
+/// The built-in encoder's monochrome stream for the source's alpha plane at `base_q_idx` — what
+/// the alpha item must carry, byte for byte, when it is coded at that index.
+fn alpha_stream_at(base_q_idx: u8) -> Vec<u8> {
+    let px = source_rgba();
+    let planes =
+        gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, DIMS).unwrap());
+    gamut_av1::encode_still_intra_with(&planes, base_q_idx, gamut_av1::Av1Colour::monochrome())
+        .expect("the alpha plane encodes")
+        .0
+        .obus
+}
+
+#[test]
+fn alpha_quality_sets_the_alpha_items_coded_base_q_idx() {
+    // The coded index is pinned by the stream itself: the alpha item's payload is exactly the
+    // built-in encoder's stream at the alpha quality's `base_q_idx` — `gamut-av1`'s own decoder
+    // does not parse monochrome streams yet, so the header field is not read directly — and the
+    // colour item is exactly what the colour quality codes without the knob.
+    for (colour_q, alpha_q) in [(30u8, 90u8), (90, 30), (50, 0), (0, 100)] {
+        let (colour, alpha) = item_payloads(&encode_rgba(
+            &AvifEncoder::lossy(colour_q).with_alpha_quality(alpha_q),
+        ));
+        let (plain_colour, plain_alpha) =
+            item_payloads(&encode_rgba(&AvifEncoder::lossy(colour_q)));
+        let label = format!("lossy({colour_q}).with_alpha_quality({alpha_q})");
+        assert_eq!(alpha, alpha_stream_at(quality_to_quant(alpha_q)), "{label}");
+        assert_ne!(alpha, plain_alpha, "{label}: the alpha quantizer moved");
+        assert_eq!(colour, plain_colour, "{label}: colour untouched");
+    }
+    // Unset, alpha follows the colour quality — and setting it to that same quality changes no
+    // byte, so the knob is inert until it differs.
+    let follows = encode_rgba(&AvifEncoder::lossy(40));
+    assert_eq!(
+        item_payloads(&follows).1,
+        alpha_stream_at(quality_to_quant(40))
+    );
+    assert_eq!(
+        encode_rgba(&AvifEncoder::lossy(40).with_alpha_quality(40)),
+        follows
+    );
+    // Lossless ignores it: alpha stays on the lossless path (`base_q_idx` 0), byte-for-byte.
+    let lossless = encode_rgba(&AvifEncoder::lossless());
+    assert_eq!(item_payloads(&lossless).1, alpha_stream_at(0));
+    assert_eq!(
+        encode_rgba(&AvifEncoder::lossless().with_alpha_quality(10)),
+        lossless
+    );
+}
+
+#[test]
+fn a_finer_alpha_quality_decodes_closer_to_the_source_through_libavif() {
+    // Coarse colour, fine alpha. libavif's merged alpha must be the AV1 reconstruction at the
+    // *alpha* quantizer (a conformant decoder is obliged to reproduce it exactly), and its error
+    // against the source must sit inside the bound that quantizer earns — well below what the
+    // same plane costs when it follows the coarse colour quality.
+    const COLOUR_Q: u8 = 10;
+    const ALPHA_Q: u8 = 95;
+    let px = source_rgba();
+    let alpha_planes =
+        gamut_color::Planar8::from_rgba8_alpha_view(ImageRef::<Rgba8>::new(&px, DIMS).unwrap());
+    let source_alpha: Vec<u16> = px
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| u16::from(p[3]))
+        .collect();
+    let decoded_alpha = |avif: &[u8]| -> Vec<u16> {
+        let (_, _, rgba) = libavif_oracle::decode_rgba(avif).expect("libavif decodes");
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| u16::from(p[3]))
+            .collect()
+    };
+    let max_error = |alpha: &[u16]| -> u16 {
+        alpha
+            .iter()
+            .zip(&source_alpha)
+            .map(|(&a, &s)| a.abs_diff(s))
+            .max()
+            .unwrap_or(0)
+    };
+
+    let fine = decoded_alpha(&encode_rgba(
+        &AvifEncoder::lossy(COLOUR_Q).with_alpha_quality(ALPHA_Q),
+    ));
+    let (_, recon) = gamut_av1::encode_still_intra_with(
+        &alpha_planes,
+        quality_to_quant(ALPHA_Q),
+        gamut_av1::Av1Colour::monochrome(),
+    )
+    .expect("the alpha plane encodes");
+    assert_eq!(fine, recon.planes[0]);
+
+    let coarse = decoded_alpha(&encode_rgba(&AvifEncoder::lossy(COLOUR_Q)));
+    let (fine_err, coarse_err) = (max_error(&fine), max_error(&coarse));
+    assert!(
+        fine_err <= FINE_ALPHA_MAX_ERROR,
+        "alpha at quality {ALPHA_Q}: max error {fine_err}"
+    );
+    assert!(
+        fine_err < coarse_err,
+        "alpha at quality {ALPHA_Q} ({fine_err}) vs following colour quality {COLOUR_Q} ({coarse_err})"
+    );
+}
+
+/// The largest per-sample alpha error libavif's decode may show at alpha quality 95
+/// (`base_q_idx` 12) on [`source_rgba`]. Measured, not derived: the source's alpha wraps from 255
+/// to 0 along its diagonal, and those hard edges are where the residual concentrates (44 at the
+/// time of writing; the same plane following colour quality 10 shows 171). A drift guard on
+/// fidelity — the exact match against the encoder's reconstruction is the correctness check.
+const FINE_ALPHA_MAX_ERROR: u16 = 48;
+
 /// Mirrors `gamut-avif`'s documented quality→`base_q_idx` mapping, as `decode_roundtrip.rs` does:
 /// the test needs the exact index the encoder selected in order to reproduce its reconstruction.
 fn quality_to_quant(quality: u8) -> u8 {
@@ -364,4 +537,70 @@ fn odd_and_tiny_sizes_round_trip_with_alpha() {
         assert_eq!((dw, dh), (w, h));
         assert_eq!(rgba, px, "{w}x{h}");
     }
+}
+
+/// A transparent-edge fixture: a smooth opaque gradient on the left, a soft three-pixel alpha
+/// edge, and a fully transparent right half hiding high-frequency noise — the case clean alpha
+/// exists for.
+fn transparent_edge_rgba() -> Vec<u8> {
+    const SIDE: u32 = 64;
+    let mut px = Vec::with_capacity((SIDE * SIDE * 4) as usize);
+    let mut noise = 0x1234_5678u32;
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            noise ^= noise << 13;
+            noise ^= noise >> 17;
+            noise ^= noise << 5;
+            let alpha = match x {
+                0..30 => 255,
+                30 => 170,
+                31 => 85,
+                32 => 20,
+                _ => 0,
+            };
+            let [r, g, b, _] = noise.to_le_bytes();
+            let (r, g, b) = if alpha == 0 {
+                (r, g, b)
+            } else {
+                ((x * 4) as u8, (y * 4) as u8, 128)
+            };
+            px.extend_from_slice(&[r, g, b, alpha]);
+        }
+    }
+    px
+}
+
+#[test]
+fn clean_alpha_shrinks_a_lossy_transparent_edge_and_libavif_decodes_it() {
+    const SIDE: u32 = 64;
+    let dims = Dimensions {
+        width: SIDE,
+        height: SIDE,
+    };
+    let px = transparent_edge_rgba();
+    let encode = |enc: AvifEncoder| {
+        enc.encode_to_vec(ImageRef::<Rgba8>::new(&px, dims).expect("buffer matches dimensions"))
+            .expect("encode")
+    };
+    let dirty = encode(AvifEncoder::lossy(60));
+    let clean = encode(AvifEncoder::lossy(60).with_clean_alpha(true));
+
+    // Reported, not just asserted: the size the hidden noise was costing.
+    eprintln!(
+        "transparent-edge 64x64 lossy(60): dirty {} B, clean {} B",
+        dirty.len(),
+        clean.len()
+    );
+    assert!(
+        clean.len() < dirty.len(),
+        "clean {} B is not smaller than dirty {} B",
+        clean.len(),
+        dirty.len()
+    );
+    // Cleaning touches colour only: the alpha item is the same stream either way.
+    assert_eq!(item_payloads(&clean).1, item_payloads(&dirty).1);
+
+    let (w, h, _) = libavif_oracle::decode_rgba(&clean).expect("libavif decodes");
+    assert_eq!((w, h), (SIDE, SIDE));
+    assert!(libavif_oracle::introspect(&clean).unwrap().alpha_present);
 }
