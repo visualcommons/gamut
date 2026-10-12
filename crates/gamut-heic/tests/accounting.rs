@@ -79,7 +79,7 @@ fn c2pa_bearing_file_accounts_for_every_byte() {
     assert_eq!(found.bytes, store.as_slice());
     // Strictly inside the box segment: the framing before it and the padding after it are still
     // claimed by that segment, so no byte is orphaned or double-counted.
-    assert!(uuid_segment.range.start < found.range.start);
-    assert!(found.range.end < uuid_segment.range.end);
-    assert_eq!(&data[found.range.clone()], store.as_slice());
+    assert!(uuid_segment.range.start < found.range.start());
+    assert!(found.range.end() < uuid_segment.range.end);
+    assert_eq!(found.range.bytes_in(&data), Some(store.as_slice()));
 }

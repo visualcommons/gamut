@@ -16,9 +16,21 @@ use common::{
     meta, pitm_v0, uuid_box,
 };
 use gamut_heic::{
-    C2paBoxPosition, C2paBoxPurpose, C2paPresence, C2paUnreadReason, HeifContainer,
+    C2paBoxPosition, C2paBoxPurpose, C2paByteRange, C2paPresence, C2paUnreadReason, HeifContainer,
     UnknownBoxLocation,
 };
+
+/// `[start, end)`, which the caller states with `start <= end`.
+fn range(start: usize, end: usize) -> C2paByteRange {
+    C2paByteRange::new(start, end).expect("start <= end")
+}
+
+/// The bytes `range` covers in `data`, which must hold them.
+fn at(data: &[u8], range: C2paByteRange) -> &[u8] {
+    range
+        .bytes_in(data)
+        .expect("the range lies inside the file")
+}
 
 /// The `meta` box every fixture below closes with: the minimum that `HeifContainer::parse` accepts
 /// (a `pict` handler, a primary item, and that item's `infe`).
@@ -58,15 +70,15 @@ fn manifest_store_range_excludes_every_byte_of_framing() {
     assert_eq!(start, 61);
 
     let found = c.c2pa().expect("manifest store located");
-    assert_eq!(found.range, 61..90);
+    assert_eq!(found.range, range(61, 90));
     assert_eq!(found.bytes, store.as_slice());
     assert_eq!(found.purpose, C2paBoxPurpose::Manifest);
     // The range is an index into the file, not just a length: the bytes it names *are* the store.
-    assert_eq!(&data[found.range.clone()], store.as_slice());
+    assert_eq!(at(&data, found.range), store.as_slice());
     // The byte immediately before the store is the last byte of the merkle offset, and the byte
     // immediately after is the first padding byte — the range is tight on both ends.
-    assert_eq!(data[found.range.start - 1], 0x00);
-    assert_eq!(data[found.range.end], 0xEE);
+    assert_eq!(data[found.range.start() - 1], 0x00);
+    assert_eq!(data[found.range.end()], 0xEE);
 }
 
 #[test]
@@ -81,7 +93,7 @@ fn non_zero_merkle_offset_is_still_excluded_from_the_range() {
     let c = HeifContainer::parse(&data).unwrap();
 
     let found = c.c2pa().expect("manifest store located");
-    assert_eq!(found.range, 61..90);
+    assert_eq!(found.range, range(61, 90));
     assert_eq!(found.bytes, store.as_slice());
     // The eight merkle-offset bytes sit immediately before the store, outside the range.
     assert_eq!(&data[53..61], &0x0102_0304_0506_0708_u64.to_be_bytes());
@@ -97,7 +109,7 @@ fn original_purpose_carries_the_merkle_offset_too() {
     assert_eq!(found.purpose, C2paBoxPurpose::Original);
     // "original" is the same length as "manifest", so an identical start proves the 8-byte merkle
     // offset was skipped here as well (§A.5.3: "the 'uuid' box of type manifest or original").
-    assert_eq!(found.range, 61..90);
+    assert_eq!(found.range, range(61, 90));
     assert_eq!(found.bytes, store.as_slice());
 }
 
@@ -128,9 +140,9 @@ fn update_with_the_c2pa_rs_merkle_offset_is_located() {
     assert_eq!(found.purpose, C2paBoxPurpose::Update);
     // 16 (ftyp) + 8 (header) + 16 (user type) + 4 (version+flags) + 7 ("update\0") = 51 for `data`,
     // then 8 for the merkle offset = 59.
-    assert_eq!(found.range, 59..88);
+    assert_eq!(found.range, range(59, 88));
     assert_eq!(found.bytes, store.as_slice());
-    assert_eq!(&data[found.range.clone()], store.as_slice());
+    assert_eq!(at(&data, found.range), store.as_slice());
     // The eight bytes before the store are the zero-filled offset, outside the range.
     assert_eq!(&data[51..59], &[0u8; 8]);
 }
@@ -149,9 +161,9 @@ fn update_without_a_merkle_offset_is_located_by_the_fallback_probe() {
 
     let found = c.c2pa().expect("update store located at the start of data");
     assert_eq!(found.purpose, C2paBoxPurpose::Update);
-    assert_eq!(found.range, 51..80);
+    assert_eq!(found.range, range(51, 80));
     assert_eq!(found.bytes, store.as_slice());
-    assert_eq!(&data[found.range.clone()], store.as_slice());
+    assert_eq!(at(&data, found.range), store.as_slice());
 }
 
 #[test]
@@ -171,7 +183,7 @@ fn update_probes_the_merkle_offset_before_the_bare_store() {
     let found = c
         .c2pa()
         .expect("update store located past the merkle offset");
-    assert_eq!(found.range, 59..88);
+    assert_eq!(found.range, range(59, 88));
     assert_eq!(found.bytes, store.as_slice());
     // The decoy bound the reversed order would have produced.
     assert_ne!(found.bytes, &data[51..83]);
@@ -207,8 +219,8 @@ fn mid_update_file_reports_both_stores_in_file_order() {
     assert_eq!(all[1].purpose, C2paBoxPurpose::Update);
     assert_eq!(all[1].bytes, update.as_slice());
     // File order, and the second range starts after the first ends.
-    assert!(all[0].range.end < all[1].range.start);
-    assert_eq!(&data[all[1].range.clone()], update.as_slice());
+    assert!(all[0].range.end() < all[1].range.start());
+    assert_eq!(at(&data, all[1].range), update.as_slice());
     assert_eq!(c.c2pa().expect("first store"), all[0]);
 }
 
@@ -312,9 +324,9 @@ fn largesize_header_shifts_the_range_by_its_extra_eight_bytes() {
     let c = HeifContainer::parse(&data).unwrap();
 
     let found = c.c2pa().expect("manifest store located");
-    assert_eq!(found.range, 69..98);
+    assert_eq!(found.range, range(69, 98));
     assert_eq!(found.bytes, store().as_slice());
-    assert_eq!(&data[found.range.clone()], store().as_slice());
+    assert_eq!(at(&data, found.range), store().as_slice());
 }
 
 #[test]
@@ -326,14 +338,14 @@ fn store_is_trimmed_to_its_lbox_not_to_the_box_length() {
     let c = HeifContainer::parse(&data).unwrap();
 
     let found = c.c2pa().expect("manifest store located");
-    assert_eq!(found.range, 61..73);
+    assert_eq!(found.range, range(61, 73));
     assert_eq!(found.bytes, store.as_slice());
     // The padded slot is reported beside it, under its own name, by the accessor and the summary
     // alike — the two ranges `gamut-avif` reports for the same box (#505).
-    assert_eq!(found.slot, 61..173);
+    assert_eq!(found.slot, range(61, 173));
     let summary = c.c2pa_summary();
-    assert_eq!(summary.stores[0].range, 61..73);
-    assert_eq!(summary.stores[0].slot, 61..173);
+    assert_eq!(summary.stores[0].range, range(61, 73));
+    assert_eq!(summary.stores[0].slot, range(61, 173));
 }
 
 #[test]
@@ -345,7 +357,7 @@ fn minimum_lbox_of_exactly_the_jumbf_header_is_accepted() {
     let c = HeifContainer::parse(&data).unwrap();
 
     let found = c.c2pa().expect("manifest store located");
-    assert_eq!(found.range, 61..69);
+    assert_eq!(found.range, range(61, 69));
     assert_eq!(found.bytes, store.as_slice());
 }
 
@@ -545,7 +557,7 @@ fn lbox_exactly_filling_the_remaining_data_is_reported() {
 
     let found = c.c2pa().expect("manifest store located");
     assert_eq!(found.bytes, store.as_slice());
-    assert_eq!(found.range, 61..61 + store.len());
+    assert_eq!(found.range, range(61, 61 + store.len()));
 }
 
 #[test]
@@ -581,7 +593,7 @@ fn a_merkle_box_is_listed_as_auxiliary_not_as_unread() {
     assert_eq!(summary.merkle.len(), 1);
     assert_eq!(
         summary.merkle[0].range,
-        AFTER_FTYP..AFTER_FTYP + inner.len()
+        range(AFTER_FTYP, AFTER_FTYP + inner.len())
     );
     assert_eq!(summary.merkle[0].position, C2paBoxPosition::BeforeMediaData);
 }
@@ -637,9 +649,9 @@ fn an_unread_boxs_range_covers_the_whole_uuid_box() {
     let summary = c.c2pa_summary();
     assert_eq!(
         summary.unread[0].range,
-        AFTER_FTYP..AFTER_FTYP + inner.len()
+        range(AFTER_FTYP, AFTER_FTYP + inner.len())
     );
-    assert_eq!(&data[summary.unread[0].range.clone()], inner.as_slice());
+    assert_eq!(at(&data, summary.unread[0].range), inner.as_slice());
 }
 
 #[test]
