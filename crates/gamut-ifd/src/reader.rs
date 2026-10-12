@@ -65,6 +65,51 @@ impl ChainGuard {
     }
 }
 
+/// The most sub-IFDs one walk parses, counted across every pointer array and every level of it:
+/// a budget over the whole walk, not a per-array or per-level cap.
+///
+/// No specification supplies this number. TIFF 6.0 (and TIFF Technical Note 1, which defines
+/// `SubIFDs`) leave a pointer array's count to the file; DNG 1.7.1 ("SubIFD Trees") uses
+/// `SubIFDs` for a raw image and its previews, a handful of children; EXIF 3.0 §4.6.3 fixes the
+/// `ExifIFD`, `GPSInfo` and `Interoperability` pointers at `Count = 1`. So no conformant file
+/// sits near the bound, and the bound is a **cost** bound instead: a pointer array is the one
+/// place where a few bytes buy a whole directory parse, and distinct offsets may overlap, so a
+/// pointer array can name about one directory per two bytes of a zero run — millions in a
+/// 20 MB file. The value is [`MAX_IFDS`], so a sub-IFD walk can spend no more directory parses
+/// than the top-level chain guard already admits.
+///
+/// What it stops accepting: a file whose followed pointers reach more than 65,536 distinct
+/// sub-IFDs in one walk. [`read_tree`] shares one walk across every page, so that includes a
+/// many-page pyramidal TIFF whose `SubIFDs` reduced-resolution levels total more than 65,536;
+/// [`resolve_subtree`] budgets each call separately.
+pub(crate) const MAX_SUBIFDS: usize = MAX_IFDS;
+
+/// Why [`admit_subifd`] refused a sub-IFD target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubIfdRefusal {
+    /// The walk already visited this offset: a cycle, or two pointers naming one directory.
+    Revisited,
+    /// The walk already parsed [`MAX_SUBIFDS`] sub-IFDs.
+    OverBudget,
+}
+
+/// Admits `offset` as the next sub-IFD a walk parses, recording it in `visited` — the one guard
+/// both the strict walk ([`resolve_pointers_with`]) and the audit's lenient walk run, so the
+/// budget and the revisit rule cannot drift between them. `visited` holds exactly the targets
+/// already admitted, so its length is the count the budget is spent against.
+pub(crate) fn admit_subifd(
+    visited: &mut BTreeSet<u64>,
+    offset: u64,
+) -> std::result::Result<(), SubIfdRefusal> {
+    if visited.len() >= MAX_SUBIFDS {
+        Err(SubIfdRefusal::OverBudget)
+    } else if visited.insert(offset) {
+        Ok(())
+    } else {
+        Err(SubIfdRefusal::Revisited)
+    }
+}
+
 /// Reads a 16-bit value at `pos` in `order`, bounds-checked.
 pub(crate) fn u16_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u16> {
     let b = pos
@@ -312,7 +357,9 @@ pub(crate) fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
 ///
 /// Returns [`Error::InvalidInput`] under the same conditions as [`read`], or if the pointer graph
 /// is not a tree: a repeated or self-referential child offset, or nesting deeper than 16 levels
-/// ([`SubtreeScope::MAX_DEPTH`] below each page).
+/// ([`SubtreeScope::MAX_DEPTH`] below each page); or if the pointers reach more than 65,536
+/// sub-IFDs in all, counted across every page (the walk's directory budget, which bounds what a
+/// hostile pointer array can make the read parse).
 pub fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
     crate::IfdReader::open(data)?.read_tree(pointer_tags)
 }
@@ -362,9 +409,10 @@ pub fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] if two pointers in the subtree name one directory (including a
-/// cycle back to a visited one), or a directory sits deeper than
-/// [`max_depth`](SubtreeScope::max_depth); and propagates any error `fetch` returns for a
-/// pointer target unchanged. On error `ifd` may be partially resolved.
+/// cycle back to a visited one), a directory sits deeper than
+/// [`max_depth`](SubtreeScope::max_depth), or the subtree holds more than 65,536 sub-IFDs (the
+/// budget each call walks under, the same one [`read_tree`] applies); and propagates any error
+/// `fetch` returns for a pointer target unchanged. On error `ifd` may be partially resolved.
 pub fn resolve_subtree(
     ifd: &mut Ifd,
     scope: SubtreeScope<'_>,
@@ -387,8 +435,8 @@ pub fn resolve_subtree(
 /// in a number a hostile file chooses. Measured in release on hand-built files whose single
 /// `ExifIFD` array names N distinct empty directories (in `gamut-tiff`, before this walk was
 /// hoisted here), a scanned list took 0.24 s at 0.6 MB and 4.2 s at 2.3 MB; a set answered the
-/// same files in 5 ms and 27 ms. What still has no bound is the *breadth* of one pointer array;
-/// that is issue #579.
+/// same files in 5 ms and 27 ms. The set removes the quadratic term; the linear one — how many
+/// directories the walk parses at all — is bounded by [`MAX_SUBIFDS`] through [`admit_subifd`].
 pub(crate) fn resolve_pointers_with(
     fetch: &mut dyn FnMut(u64) -> Result<Ifd>,
     ifd: &mut Ifd,
@@ -408,12 +456,13 @@ pub(crate) fn resolve_pointers_with(
         };
         let mut children = Vec::with_capacity(offsets.len());
         for off in offsets {
-            if !visited.insert(off) {
-                return Err(Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "TIFF: sub-IFD pointer loop",
-                ));
-            }
+            admit_subifd(visited, off).map_err(|refusal| {
+                let message = match refusal {
+                    SubIfdRefusal::Revisited => "TIFF: sub-IFD pointer loop",
+                    SubIfdRefusal::OverBudget => "TIFF: sub-IFD budget exceeded",
+                };
+                Error::invalid_input(env!("CARGO_PKG_NAME"), message)
+            })?;
             let mut child = fetch(off)?;
             resolve_pointers_with(fetch, &mut child, scope, visited, depth + 1)?;
             children.push(child);
@@ -835,6 +884,42 @@ mod tests {
         .expect_err("one directory claimed twice");
         assert!(err.to_string().contains("sub-IFD pointer loop"), "{err}");
         assert_eq!(fetched, [26], "the repeat is refused before it is fetched");
+    }
+
+    /// Resolves a root whose single tag-330 array names `width` distinct directories through a
+    /// fetch that stands in for a file, returning the walk's result and how many it fetched.
+    fn resolve_wide_array(width: usize) -> (Result<()>, Ifd, usize) {
+        let offsets = (0..width)
+            .map(|i| u32::try_from(i).expect("fits") * 2)
+            .collect();
+        let mut root = Ifd::new();
+        root.set(330, Value::Long(offsets));
+        let mut fetched = 0;
+        let result = resolve_subtree(&mut root, SubtreeScope::new(&[330], &[]), |_| {
+            fetched += 1;
+            Ok(Ifd::new())
+        });
+        (result, root, fetched)
+    }
+
+    /// A pointer array exactly as wide as the walk's budget resolves whole: the budget admits
+    /// `MAX_SUBIFDS` directories, not one fewer.
+    #[test]
+    fn resolve_subtree_admits_a_pointer_array_exactly_the_budget_wide() {
+        let (result, root, fetched) = resolve_wide_array(MAX_SUBIFDS);
+        result.expect("the budget is inclusive");
+        assert_eq!(fetched, MAX_SUBIFDS);
+        assert_eq!(root.sub_ifds()[0].ifds.len(), MAX_SUBIFDS);
+    }
+
+    /// Adversarial: one directory past the budget is refused before it is fetched, so a hostile
+    /// pointer array buys at most `MAX_SUBIFDS` directory parses however wide it is.
+    #[test]
+    fn resolve_subtree_refuses_a_pointer_array_one_past_the_budget() {
+        let (result, _, fetched) = resolve_wide_array(MAX_SUBIFDS + 1);
+        let err = result.expect_err("over budget");
+        assert!(err.to_string().contains("sub-IFD budget exceeded"), "{err}");
+        assert_eq!(fetched, MAX_SUBIFDS, "the refused target is never parsed");
     }
 
     #[test]
