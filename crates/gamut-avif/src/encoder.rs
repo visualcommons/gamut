@@ -14,8 +14,8 @@ use gamut_color::{
 };
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy, convert, premultiply_alpha};
 use gamut_core::{
-    Dimensions, EncodeImage, Error, Gray8, Gray16, ImageBuf, ImageRef, Pixel, Result, Rgb8, Rgb16,
-    Rgba8, Rgba16, Sample,
+    Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, Pixel, Result, Rgb8, Rgb16, Rgba8,
+    Rgba16, Sample,
 };
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind,
@@ -2118,7 +2118,7 @@ impl EncodeImage<Gray8> for AvifEncoder {
                 options,
             )?,
             Some(depth) => monochrome_still16(
-                &gray8_widened(image, depth)?,
+                &Planar16::from_gray8_view(image, depth),
                 self.base_q_idx(),
                 self.monochrome_colour(),
                 options,
@@ -2126,18 +2126,6 @@ impl EncodeImage<Gray8> for AvifEncoder {
         };
         self.emit(&still, dims, None, out)
     }
-}
-
-/// A [`Gray8`] image widened to `depth` by bit replication, as a single-plane monochrome buffer.
-///
-/// The image goes through the two conversions that already own each half rather than a third copy
-/// of either: `gamut-core`'s lossless widening replicates the grey into a [`Gray16`] image at full
-/// 16-bit scale, and [`Planar16::from_gray16_view`] narrows it to `depth` as the single luma plane
-/// of a monochrome buffer. The transient cost is one 16-bit copy of the image beside the plane
-/// itself, paid only on this opt-in path.
-fn gray8_widened(image: ImageRef<'_, Gray8>, depth: BitDepth) -> Result<Planar16> {
-    let wide = convert::<Gray8, Gray16>(image, ConvertPolicy::lossless())?;
-    Ok(Planar16::from_gray16_view(wide.as_ref(), depth))
 }
 
 #[cfg(test)]
@@ -3106,9 +3094,9 @@ mod tests {
         }
     }
 
-    /// The widened `Gray8` path (`monochrome_still16` over `gray8_widened`) codes its still at the
-    /// encoder's preset: at 10 and 12 bits the primary item is `gamut-av1`'s own output for the
-    /// widened plane at that preset. Reads the private `gray8_widened`, so it lives here.
+    /// The widened `Gray8` path (`monochrome_still16` over [`Planar16::from_gray8_view`]) codes its
+    /// still at the encoder's preset: at 10 and 12 bits the primary item is `gamut-av1`'s own output
+    /// for the widened plane at that preset.
     #[test]
     fn gray8_high_bit_depth_codes_its_still_at_the_chosen_preset() {
         const W: u32 = 40;
@@ -3139,7 +3127,7 @@ mod tests {
                     .clone()
             };
             let want = gamut_av1::encode_still_intra16_with_speed(
-                &gray8_widened(image, depth).unwrap(),
+                &Planar16::from_gray8_view(image, depth),
                 127,
                 Av1Colour::monochrome(),
                 Speed::Fastest,
