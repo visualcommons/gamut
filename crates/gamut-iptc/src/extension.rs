@@ -92,6 +92,32 @@
 //! modelled value stays the authority when there is one, and the retained field is written when it
 //! is the only copy.
 //!
+//! # The retention slot
+//!
+//! Every type here keeps what its typed read did not consume in one public field,
+//! `other: Vec<XmpProperty>`, and that is the whole of its retention API. It is plain data like
+//! every field beside it: a caller reads it, edits it or builds it from [`Default`] and assigns it,
+//! exactly as it treats [`XmpMeta::properties`] one level up, and every structure added to this
+//! module carries the same field on the same terms.
+//!
+//! `to_xmp` writes whatever the slot holds, in its order, after the modelled fields, and refuses
+//! nothing in it. The one field it leaves out is a namesake of a modelled field that was emitted,
+//! by the rule above, because writing both would produce a structure that does not read back.
+//! Everything else in the slot — a name the model owns whose modelled field is absent, a name no
+//! schema defines, two fields of one name — is written as it stands, because each of those is a
+//! shape a graph read from a file can hold, and the slot exists to give such a shape back.
+//!
+//! Whether a field's namespace and name can be serialized at all is not decided here: it is the
+//! same question for a field in this slot as for a top-level property in [`XmpMeta::properties`],
+//! and it belongs to the XMP writer that answers it for both.
+//!
+//! Accessors were declined. A borrowed `other()`/`other_mut()` pair adds nothing over the field
+//! while the element is [`XmpProperty`], itself plain public data; a checked `push_other` that
+//! refused a model-owned name would refuse the very fields a read retains — a coordinate that is
+//! not a number keeps its model-owned name in the slot — and one that refused an unusable name
+//! would be a second copy of a check the XMP writer owns. An opaque element type would hide the
+//! value tree a caller needs in order to read a vendor extension at all.
+//!
 //! # A value the projection cannot express
 //!
 //! Emission is **infallible**, for the whole module: every `to_xmp` returns an [`XmpValue`], and
@@ -617,8 +643,9 @@ pub struct CreatorContactInfo {
     pub phone: Option<String>,
     /// Work web URL(s) (`Iptc4xmpCore:CiUrlWork`).
     pub web_url: Option<String>,
-    /// Every other field the structure carries, verbatim, so a read-modify-write does not drop a
-    /// vendor extension (see the [module docs](self)).
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
     pub other: Vec<XmpProperty>,
 }
 
@@ -713,8 +740,9 @@ pub struct ArtworkOrObject {
     pub source_inventory_url: Option<String>,
     /// Style periods (`Iptc4xmpExt:AOStylePeriod`).
     pub style_periods: Vec<String>,
-    /// Every other field the structure carries, verbatim, so a read-modify-write does not drop a
-    /// vendor extension (see the [module docs](self)).
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
     pub other: Vec<XmpProperty>,
 }
 
@@ -894,8 +922,9 @@ pub struct Licensor {
     pub email: Option<String>,
     /// Web URL (`plus:LicensorURL`).
     pub web_url: Option<String>,
-    /// Every other field the structure carries, verbatim, so a read-modify-write does not drop a
-    /// vendor extension (see the [module docs](self)).
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
     pub other: Vec<XmpProperty>,
 }
 
@@ -1000,8 +1029,9 @@ pub struct Entity {
     pub identifiers: Vec<String>,
     /// Full name, `x-default` alternative (`Iptc4xmpExt:Name`).
     pub name: Option<String>,
-    /// Every field the typed read took nothing from, verbatim, so a read-modify-write does not drop
-    /// a vendor extension (see the [module docs](self)).
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
     pub other: Vec<XmpProperty>,
 }
 
@@ -1043,8 +1073,9 @@ pub struct RegionBoundaryPoint {
     pub x: Option<f64>,
     /// Y-axis coordinate (`Iptc4xmpExt:rbY`).
     pub y: Option<f64>,
-    /// Every field the typed read took nothing from, verbatim — including a coordinate whose text
-    /// is not a number (see the [module docs](self)).
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)) — including a coordinate whose text is not
+    /// an XMP `Real`, which keeps its model-owned name here.
     pub other: Vec<XmpProperty>,
 }
 
@@ -1105,8 +1136,9 @@ pub struct RegionBoundary {
     pub radius: Option<f64>,
     /// Polygon vertices, in order (`Iptc4xmpExt:rbVertices`).
     pub vertices: Vec<RegionBoundaryPoint>,
-    /// Every field the typed read took nothing from, verbatim, so a read-modify-write does not drop
-    /// a vendor extension (see the [module docs](self)).
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
     pub other: Vec<XmpProperty>,
 }
 
@@ -1193,8 +1225,9 @@ pub struct ImageRegion {
     pub content_types: Vec<Entity>,
     /// The role the region plays in the image (`Iptc4xmpExt:rRole`).
     pub roles: Vec<Entity>,
-    /// Every other property the region carries, verbatim (the standard's
-    /// "other metadata property"), so a read-modify-write does not drop it.
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)) — including the standard's "other metadata
+    /// property", so a read-modify-write does not drop it.
     pub other: Vec<XmpProperty>,
 }
 
