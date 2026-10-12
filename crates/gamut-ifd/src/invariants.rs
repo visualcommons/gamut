@@ -200,6 +200,19 @@ pub fn ledger_is_canonical(reads: &[Range]) -> Result<(), Violation> {
 ///
 /// Returns the first [`Violation`] found.
 pub fn subtract_is_set_difference(reads: &[Range], claims: &[Range]) -> Result<(), Violation> {
+    subtract_is_set_difference_under(ReadLedger::subtract, reads, claims)
+}
+
+/// [`subtract_is_set_difference`] over an arbitrary subtraction.
+///
+/// The public law hands it [`ReadLedger::subtract`]; only this module's falsifier test hands it a
+/// deliberately broken one, because the real subtraction honours the law and the property would
+/// otherwise only ever reach the `Ok` arm.
+fn subtract_is_set_difference_under(
+    subtract: fn(&ReadLedger, &[Range]) -> Vec<Range>,
+    reads: &[Range],
+    claims: &[Range],
+) -> Result<(), Violation> {
     let mut ledger = ReadLedger::new();
     let mut read_bytes = vec![false; UNIVERSE as usize];
     for &r in reads {
@@ -212,7 +225,7 @@ pub fn subtract_is_set_difference(reads: &[Range], claims: &[Range]) -> Result<(
         mark(&mut claimed, c);
     }
 
-    let out = ledger.subtract(claims);
+    let out = subtract(&ledger, claims);
     canonical_form(&out, "subtract_is_set_difference")?;
 
     let got = to_set(&out);
@@ -350,6 +363,7 @@ mod tests {
     use super::{
         Edit, MAX_LEN, Range, UNIVERSE, canonical_form, ledger_is_canonical, normalise,
         one_store_per_tag, setters_keep_one_store_per_tag, subtract_is_set_difference,
+        subtract_is_set_difference_under,
     };
     use crate::entry::Ifd;
     use crate::value::Value;
@@ -499,6 +513,26 @@ mod tests {
     fn canonical_form_rejects_descending_ranges() {
         let bad = [Range { start: 8, len: 2 }, Range { start: 0, len: 2 }];
         assert!(canonical_form(&bad, "law").is_err());
+    }
+
+    #[test]
+    fn a_subtraction_that_ignores_the_claims_violates_the_set_difference_law() {
+        // Returns the recorded spans untouched: canonical by construction, so `canonical_form`
+        // passes and only the law's own byte-by-byte comparison can catch it.
+        let violation = subtract_is_set_difference_under(
+            |ledger, _| ledger.spans().to_vec(),
+            &[Range { start: 0, len: 8 }],
+            &[Range { start: 2, len: 2 }],
+        )
+        .expect_err("ignoring the claims must violate the law");
+
+        assert_eq!(violation.law(), "subtract_is_set_difference");
+        assert!(
+            violation
+                .detail()
+                .starts_with("byte 2: subtract says true, the set difference says false"),
+            "{violation}"
+        );
     }
 
     #[test]
