@@ -99,17 +99,21 @@ fn rgba8_stills(speed: Speed) -> [(EncodedStill, ReconImage); 2] {
 }
 
 #[test]
-fn speed_defaults_to_the_full_search_and_reports_the_chosen_preset() {
-    assert_eq!(AvifEncoder::lossy(50).speed(), Speed::Thorough);
+fn speed_defaults_to_the_codec_default_and_reports_the_chosen_preset() {
+    // The default has one owner, `gamut-av1`: both constructors take `Speed::default()`, which is
+    // the middle preset.
+    assert_eq!(AvifEncoder::lossy(50).speed(), Speed::default());
+    assert_eq!(AvifEncoder::lossless().speed(), Speed::default());
+    assert_eq!(Speed::default(), Speed::Balanced);
     for &speed in Speed::ALL {
         assert_eq!(AvifEncoder::lossy(50).with_speed(speed).speed(), speed);
     }
 }
 
 #[test]
-fn the_full_search_preset_codes_the_bytes_of_an_encoder_without_one() {
+fn the_default_preset_codes_the_bytes_of_an_encoder_without_one() {
     assert_eq!(
-        encode_rgba8(&AvifEncoder::lossy(50).with_speed(Speed::Thorough)),
+        encode_rgba8(&AvifEncoder::lossy(50).with_speed(Speed::default())),
         encode_rgba8(&AvifEncoder::lossy(50))
     );
 }
