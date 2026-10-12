@@ -90,7 +90,7 @@ pub(crate) const PIXEL_LIMIT: &str = "AVIF: image pixel count exceeds DecodeLimi
 /// Every buffer the decode surfaces allocate is sized by numbers in the file: a `grid` or `iovl`
 /// declares its output canvas, an `ispe` declares a coded item's size, and an
 /// [`Av1StillDecoder`] returns a frame whose size the codestream chose. A hostile file can
-/// therefore ask for a 65535 × 65535 overlay — 17 GiB of 8-bit RGBA — with a few dozen bytes. These
+/// therefore ask for a 65535 × 65535 overlay — 16 GiB of 8-bit RGBA — with a few dozen bytes. These
 /// caps are checked against the declared size before the buffer exists, so such a file is refused
 /// with a typed error rather than serviced.
 ///
