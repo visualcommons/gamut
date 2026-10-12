@@ -1202,6 +1202,8 @@ mod tests {
         // OBU stream for a spread of content patterns, sizes and quantizers; any change to a
         // (deterministic) encoder decision moves a checksum. The recon oracle proves these same streams
         // decode correctly, so the pair certifies "deterministic AND correct", not just "deterministic".
+        // It encodes through `encode_still_intra`, so it pins the default preset (`Speed::Balanced`);
+        // `each_speed_preset_has_a_stable_bitstream` pins every preset by name.
         fn fnv1a(bytes: &[u8]) -> u64 {
             bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
                 (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
@@ -1228,9 +1230,9 @@ mod tests {
             (2, 32, 32, 40, 0x10a2_0b1d_ba5c_a801),
             (3, 48, 48, 16, 0xe5ac_76e3_1e8d_712f),
             (4, 64, 48, 90, 0x0eee_fbff_4f10_49cc),
-            (0, 100, 80, 8, 0x59a1_174d_9091_7ded),
+            (0, 100, 80, 8, 0x5952_adcb_1226_3495),
             // One tile: two would leave the second 2 samples wide (Annex A.3, CroppedTileWidth).
-            (0, 130, 70, 120, 0xbce7_12fd_a6eb_a30e),
+            (0, 130, 70, 120, 0x979c_33da_1a4f_e1ce),
             (2, 64, 64, 200, 0x8a4f_5af4_2cbd_8e85),
             (3, 96, 96, 60, 0x0702_5bf1_df0a_c11b),
             (4, 128, 64, 30, 0x5042_d972_2087_5abb),
