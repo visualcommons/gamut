@@ -140,14 +140,15 @@ impl DngMetadata {
             && self.c2pa.is_none()
     }
 
-    /// Refuses an EXIF sub-IFD this crate would write into a file its own
-    /// [`DngRewrite::open`](crate::DngRewrite::open) then rejects, or reads back as something
-    /// other than what was written.
+    /// Refuses two shapes of EXIF sub-IFD this crate would otherwise write into a file its own
+    /// [`DngRewrite::open`](crate::DngRewrite::open) then rejects or reads back changed: a
+    /// pointer-typed field under a standard pointer tag, and a tag stored twice.
     ///
     /// The Exif sub-IFD is the one directory a caller supplies, so it is the only one checked:
     /// the blocks [`apply`](Self::apply) writes into IFD 0 sit under `XMP`, `IPTC_NAA` and
     /// `ICC_PROFILE`, none of which any reader treats as a pointer, and the rest of the file is
-    /// the encoder's own. [`check_exif_subtree`] states the two refusals.
+    /// the encoder's own. [`check_exif_subtree`] states the two refusals, and what it does **not**
+    /// refuse.
     ///
     /// # Errors
     ///
@@ -224,8 +225,8 @@ const TAG_STORED_TWICE_REFUSAL: &str = "DNG: an Exif sub-IFD may not store one t
      field and a sub-IFD group, or two sub-IFD groups), which would be written as two entries \
      under that tag (TIFF 6.0 §2 allows one) and read back as only one of them";
 
-/// The writer's side of what [`DngRewrite::open`](crate::DngRewrite::open) reads: refuses an Exif
-/// subtree this crate could not hand back unchanged.
+/// The writer's side of what [`DngRewrite::open`](crate::DngRewrite::open) reads: refuses two
+/// shapes of Exif subtree this crate could not hand back unchanged.
 ///
 /// Two refusals, distinct because they are two different mistakes:
 ///
@@ -239,6 +240,12 @@ const TAG_STORED_TWICE_REFUSAL: &str = "DNG: an Exif sub-IFD may not store one t
 ///
 /// Both apply at every level, because the reader resolves the flat tag list at every node: a
 /// group's children are checked as the Exif directory is.
+///
+/// Not every subtree the reader would reject or change is refused: a sub-IFD group under a tag
+/// outside [`EXIF_SUBTREE_POINTER_TAGS`] (read back as a plain `LONG` field, not a group) and
+/// nesting deeper than the reader walks ([`gamut_ifd::SubtreeScope::MAX_DEPTH`]) both pass this
+/// check. `gamut-tiff`'s check refuses those two as well; they are not adopted here because what a
+/// group under an Exif tag reads back as depends on the decoder resolving Exif pointers at all.
 ///
 /// # Errors
 ///
