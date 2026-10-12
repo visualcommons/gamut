@@ -961,4 +961,78 @@ mod tests {
             CmmError::NonMonotonicCurve
         ));
     }
+
+    /// Each modelled H.273 code point builds the `gamut-color` curve for it, forward, and
+    /// its exact inverse once inverted.
+    #[test]
+    fn cicp_transfer_builds_the_code_points_closed_form() {
+        use gamut_color::transfer::{
+            bt709_eotf, bt709_oetf, hlg_inverse_oetf, hlg_oetf, pq_eotf_normalized,
+            pq_oetf_normalized, srgb_eotf, srgb_oetf,
+        };
+        let cases: [(u8, fn(f64) -> f64, fn(f64) -> f64); 5] = [
+            (1, bt709_eotf, bt709_oetf),
+            (13, srgb_eotf, srgb_oetf),
+            (14, bt709_eotf, bt709_oetf),
+            (16, pq_eotf_normalized, pq_oetf_normalized),
+            (18, hlg_inverse_oetf, hlg_oetf),
+        ];
+        for (code_point, forward, inverse) in cases {
+            let curve = ToneCurve::cicp_transfer(code_point).expect("modelled code point");
+            let inverted = curve.inverse().expect("a transfer function inverts");
+            for x in [0.1, 0.5, 0.9] {
+                assert_eq!(curve.eval(x), forward(x), "code point {code_point} at {x}");
+                assert_eq!(inverted.eval(x), inverse(x), "code point {code_point} at {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn cicp_linear_transfer_is_the_structural_identity() {
+        let linear = ToneCurve::cicp_transfer(8).expect("code point 8 is modelled");
+        assert!(linear.is_identity());
+    }
+
+    #[test]
+    fn cicp_transfer_declines_what_gamut_color_does_not_evaluate() {
+        // 2 is Unspecified (modelled, no curve); 4 is a Table 3 curve with no variant; 200 is
+        // reserved.
+        for code_point in [2, 4, 200] {
+            assert!(
+                ToneCurve::cicp_transfer(code_point).is_none(),
+                "code point {code_point}"
+            );
+        }
+    }
+
+    fn table(table: Vec<f64>) -> ToneCurve {
+        ToneCurve {
+            repr: Repr::Table { table },
+        }
+    }
+
+    /// The agreement bound is inclusive: a curve exactly [`CICP_AGREEMENT`] away agrees, the
+    /// next representable distance does not. The ramps differ by `(1 − x) · d`, so the largest
+    /// gap is `d` itself, at `x = 0`, computed without rounding.
+    #[test]
+    fn agreement_bound_is_inclusive() {
+        let ramp = table(vec![0.0, 1.0]);
+        let at_bound = table(vec![CICP_AGREEMENT, 1.0]);
+        assert!(at_bound.agrees_with(&ramp));
+        assert!(ramp.agrees_with(&at_bound), "the test is symmetric");
+        let past = table(vec![CICP_AGREEMENT.next_up(), 1.0]);
+        assert!(!past.agrees_with(&ramp));
+    }
+
+    /// The probe grid reaches `x = 1`: a gap that grows linearly to just past the bound at the
+    /// top end, and is inside it everywhere short of the last probe, still disagrees.
+    #[test]
+    fn agreement_probes_the_top_endpoint() {
+        let ramp = table(vec![0.0, 1.0]);
+        let gap = CICP_AGREEMENT * (1.0 + 1e-6);
+        let sagging = table(vec![0.0, 1.0 - gap]);
+        let second_last = (MONOTONICITY_PROBES - 2) as f64 / (MONOTONICITY_PROBES - 1) as f64;
+        assert!(second_last * gap <= CICP_AGREEMENT, "only x = 1 is past the bound");
+        assert!(!sagging.agrees_with(&ramp));
+    }
 }

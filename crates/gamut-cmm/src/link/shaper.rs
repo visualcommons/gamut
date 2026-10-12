@@ -506,4 +506,119 @@ mod tests {
         assert_eq!(dst[..3], [0.0; 3]);
         assert_eq!(dst[3..], D50_XYZ);
     }
+
+    /// The BT.2100 PQ built-in: a 1024-entry sampled TRC per channel and a `cicp` tag naming
+    /// transfer code point 16.
+    fn pq_builtin() -> IccProfile {
+        IccProfile::builtin(gamut_icc::BuiltinProfile::Bt2020Pq).unwrap()
+    }
+
+    /// `profile` with its `cicp` tag's transfer byte set to `transfer`, or the tag removed for
+    /// `None`.
+    fn with_cicp_transfer(mut profile: IccProfile, transfer: Option<u8>) -> IccProfile {
+        let sig = Signature::from(KnownTag::Cicp);
+        profile.tags.retain(|(tag, _)| *tag != sig);
+        if let Some(transfer_characteristics) = transfer {
+            let cicp = gamut_icc::Cicp {
+                colour_primaries: 9,
+                transfer_characteristics,
+                matrix_coefficients: 0,
+                video_full_range_flag: 1,
+            };
+            profile.tags.push((sig, TagData::Cicp(cicp)));
+        }
+        profile
+    }
+
+    /// Where a curve read from the PQ built-in's `rTRC` sends linear black on the way back to
+    /// the device: the sampled table's leading run quantizes to zero, so its numeric reversal
+    /// lands at the run's far edge (≈ 0.0547), while the closed-form ST 2084 inverse lands at
+    /// `c1^m2` (≈ 7.3e-7) — 4.5 decades apart, so either answer identifies the curve.
+    fn black_encode(profile: &IccProfile, prefer_cicp: bool) -> f64 {
+        let curve = read_trc(profile, KnownTag::RedTrc, prefer_cicp).unwrap();
+        curve.inverse().unwrap().eval(0.0)
+    }
+
+    const TABLE_BLACK: f64 = 0.054_7;
+
+    #[test]
+    fn prefer_cicp_reads_the_tagged_transfer_in_closed_form() {
+        use gamut_color::transfer::{pq_eotf_normalized, pq_oetf_normalized};
+        let pq = pq_builtin();
+        let curve = read_trc(&pq, KnownTag::RedTrc, true).unwrap();
+        assert_eq!(curve.eval(0.5), pq_eotf_normalized(0.5));
+        assert_eq!(black_encode(&pq, true), pq_oetf_normalized(0.0));
+    }
+
+    #[test]
+    fn without_prefer_cicp_the_trc_tag_is_read() {
+        assert!((black_encode(&pq_builtin(), false) - TABLE_BLACK).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_cicp_tag_contradicting_the_trc_is_not_preferred() {
+        // Code point 13 (sRGB) on a PQ curve: §10.3 violated, so the TRC stands.
+        let mislabelled = with_cicp_transfer(pq_builtin(), Some(13));
+        assert!((black_encode(&mislabelled, true) - TABLE_BLACK).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_profile_without_an_evaluable_cicp_transfer_keeps_its_trc() {
+        // No tag at all, and a tag naming a Table 3 curve gamut-color does not evaluate (4).
+        for transfer in [None, Some(4)] {
+            let profile = with_cicp_transfer(pq_builtin(), transfer);
+            assert!(
+                (black_encode(&profile, true) - TABLE_BLACK).abs() < 1e-4,
+                "cicp transfer {transfer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefer_cicp_still_requires_the_trc_tag() {
+        // The closed form never stands in for a tag that is not there.
+        let mut pq = pq_builtin();
+        pq.tags.retain(|(tag, _)| *tag != Signature(*b"rTRC"));
+        let err = read_trc(&pq, KnownTag::RedTrc, true).unwrap_err();
+        assert!(matches!(err, CmmError::MissingTag(sig) if sig == Signature(*b"rTRC")));
+    }
+
+    #[test]
+    fn shaper_builders_carry_prefer_cicp_to_every_curve() {
+        use gamut_color::transfer::{pq_eotf_normalized, pq_oetf_normalized};
+        let closed_black = pq_oetf_normalized(0.0);
+        let pq = pq_builtin();
+        let mut rgb = [0.0; 3];
+        rgb_pcs_to_device(&pq, true)
+            .unwrap()
+            .eval(&[0.0; 3], &mut rgb)
+            .unwrap();
+        assert_eq!(rgb, [closed_black; 3]);
+        let forward = rgb_device_to_pcs(&pq, true).unwrap();
+        let Stage::Curves(trcs) = &forward.stages()[0] else {
+            panic!("stage 0 must be the TRCs");
+        };
+        for trc in trcs {
+            assert_eq!(trc.eval(0.5), pq_eotf_normalized(0.5));
+        }
+
+        let pq_trc = pq.get(KnownTag::RedTrc).unwrap().clone();
+        let gray = {
+            let mut gray = gray_profile(ColorSpace::Xyz, pq_trc);
+            gray.tags.extend(with_cicp_transfer(pq_builtin(), Some(16)).tags.pop());
+            gray
+        };
+        let mut k = [0.0; 1];
+        gray_pcs_to_device(&gray, true)
+            .unwrap()
+            .eval(&[0.0; 3], &mut k)
+            .unwrap();
+        assert_eq!(k, [closed_black]);
+        let mut xyz = [0.0; 3];
+        gray_device_to_pcs(&gray, true)
+            .unwrap()
+            .eval(&[0.5], &mut xyz)
+            .unwrap();
+        assert_eq!(xyz[1], pq_eotf_normalized(0.5) * D50_XYZ[1]);
+    }
 }
