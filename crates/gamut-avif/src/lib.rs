@@ -9,7 +9,10 @@
 //! planes — identity GBR at 4:4:4, or YCbCr through a CICP matrix at the configured chroma
 //! sampling, for colour; monochrome for alpha and grayscale — [`gamut_av1`] encodes each AV1
 //! temporal unit, and [`gamut_isobmff`] writes the container. An alpha channel becomes its own
-//! monochrome **auxiliary image item** (AVIF v1.2.0 §4.1), not a fourth plane.
+//! monochrome **auxiliary image item** (AVIF v1.2.0 §4.1), not a fourth plane — unless every
+//! alpha sample is fully opaque, in which case the input is coded as the RGB image it is
+//! indistinguishable from, with no auxiliary at all
+//! ([`AvifEncoder::with_keep_opaque_alpha`] keeps it).
 //!
 //! # The decode surface (issue #250)
 //!

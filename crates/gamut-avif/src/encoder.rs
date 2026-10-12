@@ -10,10 +10,10 @@ use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
     Planar16, RgbToYcbcr, TransferCharacteristics,
 };
-use gamut_core::convert::{ConvertPolicy, convert, premultiply_alpha};
+use gamut_core::convert::{AlphaPolicy, ConvertPolicy, convert, premultiply_alpha};
 use gamut_core::{
     Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, Pixel, Result, Rgb8, Rgb16, Rgba8,
-    Rgba16,
+    Rgba16, Sample,
 };
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind,
@@ -158,6 +158,10 @@ struct ImageTransform {
 /// which case they are widened by bit replication first; the 16-bit inputs code at 12 unless it
 /// asks for 10.
 ///
+/// An RGBA input whose alpha is fully opaque everywhere carries no information an RGB input
+/// would not, so by default it is coded as one: no alpha auxiliary, byte-identical to the RGB
+/// encode of its colour. [`AvifEncoder::with_keep_opaque_alpha`] keeps the auxiliary instead.
+///
 /// Alpha is coded as its own AV1 still: AVIF v1.2.0 §4.1 makes `mono_chrome = 1` and full range a
 /// *shall* for an AV1 auxiliary image item, and the auxiliary is linked to the colour item by an
 /// `auxl` reference and typed by an essential `auxC` property.
@@ -186,6 +190,10 @@ pub struct AvifEncoder {
     /// and whether a `prem` item reference declares it. Meaningless without an alpha channel, so
     /// it reaches the file only for an RGBA encode.
     alpha_mode: AlphaMode,
+    /// Whether an RGBA input whose every alpha sample is fully opaque still gets its alpha
+    /// auxiliary item. `false` (the default) codes such an input as the RGB input it is
+    /// indistinguishable from — see [`AvifEncoder::with_keep_opaque_alpha`].
+    keep_opaque_alpha: bool,
     /// Pluggable AV1 still-encode backends, tried in push order before the `gamut-av1` tail.
     /// Shared (not copied) by [`Clone`] — see [`AvifEncoder::push_backend`].
     backends: Vec<BackendSlot>,
@@ -206,6 +214,7 @@ impl std::fmt::Debug for AvifEncoder {
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("c2pa", &self.c2pa)
             .field("alpha_mode", &self.alpha_mode)
+            .field("keep_opaque_alpha", &self.keep_opaque_alpha)
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -244,6 +253,7 @@ impl AvifEncoder {
             xmp: None,
             c2pa: None,
             alpha_mode: AlphaMode::Unassociated,
+            keep_opaque_alpha: false,
             backends: Vec::new(),
         }
     }
@@ -271,6 +281,7 @@ impl AvifEncoder {
             xmp: None,
             c2pa: None,
             alpha_mode: AlphaMode::Unassociated,
+            keep_opaque_alpha: false,
             backends: Vec::new(),
         }
     }
@@ -491,6 +502,55 @@ impl AvifEncoder {
     pub fn with_clean_alpha(mut self, clean: bool) -> Self {
         self.config.clean_alpha = clean;
         self
+    }
+
+    /// Keeps the **alpha auxiliary item** of an RGBA input whose every alpha sample is fully
+    /// opaque, instead of coding it as the RGB image it is indistinguishable from.
+    ///
+    /// By default (`false`) an [`Rgba8`] or [`Rgba16`] input whose alpha is the sample type's
+    /// maximum everywhere — 255, or 65535 — is encoded exactly as the same pixels without their
+    /// alpha channel would be through [`EncodeImage<Rgb8>`] or [`EncodeImage<Rgb16>`]: one colour
+    /// item, no alpha auxiliary, no `auxl` or `prem` reference, and so byte for byte the file that
+    /// encode writes. A reader displays the same picture either way — an image with no alpha
+    /// auxiliary is opaque — while the file saves the auxiliary item, its properties and its
+    /// monochrome codestream. That includes [`with_chroma`](Self::with_chroma), which the RGB path
+    /// honours and the RGBA path does not yet.
+    ///
+    /// Opacity is judged on the **input** samples, before any narrowing to the coded depth: a
+    /// 16-bit alpha of 65534 keeps the auxiliary even where it would truncate to the coded maximum,
+    /// so an alpha channel the caller can tell apart from opaque is never dropped. One
+    /// non-opaque sample anywhere keeps it, and so does every [`AlphaMode`] — premultiplying an
+    /// opaque pixel changes nothing, so there is nothing for `prem` to declare.
+    ///
+    /// Set `true` when a consumer needs the alpha item present regardless — one that branches on
+    /// it, or a pipeline comparing file structure across inputs. The check reads every alpha
+    /// sample once; dropping the channel copies the colour samples once.
+    #[must_use]
+    pub fn with_keep_opaque_alpha(mut self, keep: bool) -> Self {
+        self.keep_opaque_alpha = keep;
+        self
+    }
+
+    /// The colour samples an RGBA `image` codes as instead, when its alpha is to be dropped: every
+    /// alpha sample is the sample type's maximum and
+    /// [`with_keep_opaque_alpha`](Self::with_keep_opaque_alpha) is unset. `None` codes `image`
+    /// with its alpha auxiliary.
+    fn opaque_colour<P: Pixel, Q: Pixel>(
+        &self,
+        image: ImageRef<'_, P>,
+    ) -> Result<Option<ImageBuf<Q>>> {
+        let opaque = image
+            .as_samples()
+            .chunks_exact(P::CHANNELS)
+            .all(|pixel| pixel[P::CHANNELS - 1] == P::Sample::MAX_VALUE);
+        if self.keep_opaque_alpha || !opaque {
+            return Ok(None);
+        }
+        convert(
+            image,
+            ConvertPolicy::lossless().with_alpha(AlphaPolicy::Drop),
+        )
+        .map(Some)
     }
 
     /// Whether an RGBA encode cleans the colour under its transparent pixels: asked for, lossy,
@@ -1398,7 +1458,14 @@ impl EncodeImage<Rgba8> for AvifEncoder {
     /// At a [`with_bit_depth`](AvifEncoder::with_bit_depth) of 10 or 12 the image — alpha
     /// included — is widened to [`Rgba16`] and coded exactly as [`EncodeImage<Rgba16>`] codes it,
     /// so the alpha auxiliary keeps the colour item's depth (AVIF v1.2.0 §4.1).
+    ///
+    /// An image whose every alpha sample is 255 is coded as [`EncodeImage<Rgb8>`] codes its colour,
+    /// with no alpha auxiliary, unless
+    /// [`with_keep_opaque_alpha`](AvifEncoder::with_keep_opaque_alpha) asks to keep it.
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
+        if let Some(rgb) = self.opaque_colour::<Rgba8, Rgb8>(image)? {
+            return EncodeImage::<Rgb8>::encode_image(self, rgb.as_ref(), out);
+        }
         if self.widened_bit_depth()?.is_some() {
             let wide = convert::<Rgba8, Rgba16>(image, ConvertPolicy::lossless())?;
             return EncodeImage::<Rgba16>::encode_image(self, wide.as_ref(), out);
@@ -1460,7 +1527,14 @@ impl EncodeImage<Rgba16> for AvifEncoder {
     /// [`EncodeImage<Rgb16>`] plus the alpha auxiliary item of [`EncodeImage<Rgba8>`], both at the
     /// configured coding depth — AVIF v1.2.0 §4.1 requires the auxiliary to match the master's
     /// depth.
+    ///
+    /// An image whose every alpha sample is 65535 is coded as [`EncodeImage<Rgb16>`] codes its
+    /// colour, with no alpha auxiliary, unless
+    /// [`with_keep_opaque_alpha`](AvifEncoder::with_keep_opaque_alpha) asks to keep it.
     fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
+        if let Some(rgb) = self.opaque_colour::<Rgba16, Rgb16>(image)? {
+            return EncodeImage::<Rgb16>::encode_image(self, rgb.as_ref(), out);
+        }
         let coded = self.coded_rgba(image)?;
         let image = coded.as_ref().map_or(image, ImageBuf::as_ref);
         let dims = image.dimensions();
