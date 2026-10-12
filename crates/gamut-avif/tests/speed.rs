@@ -46,7 +46,12 @@ fn source_rgba16() -> Vec<u16> {
 
 /// The 8-bit source's green channel as a greyscale image.
 fn source_gray8() -> Vec<u8> {
-    source_rgba8().chunks_exact(4).map(|px| px[1]).collect()
+    source_rgba8()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|px| px[1])
+        .collect()
 }
 
 /// The lossy default colour signalling: BT.709 matrix, full range.
@@ -206,7 +211,12 @@ fn libavif_reconstructs_every_preset_to_the_av1_reconstruction() {
 
         let (_, _, rgba) = libavif_oracle::decode_rgba(&avif)
             .unwrap_or_else(|e| panic!("libavif RGBA decode failed at {speed:?}: {e}"));
-        let merged: Vec<u16> = rgba.chunks_exact(4).map(|px| u16::from(px[3])).collect();
+        let merged: Vec<u16> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| u16::from(px[3]))
+            .collect();
         assert_eq!(merged, alpha.planes[0], "alpha at {speed:?}");
     }
 }

@@ -549,8 +549,9 @@ impl AvifEncoder {
     /// prediction error rather than rate, so a faster preset can come out smaller or larger.
     ///
     /// Only lossy coding is searched. [`AvifMode::Lossless`] has one fixed coding path and
-    /// produces the same bytes at every speed, as does every container field — `av1C`, `colr`,
-    /// `pixi` and the rest describe the stream, which no preset changes.
+    /// produces the same bytes at every speed. Nor does any preset move a container field:
+    /// `av1C`, `colr`, `pixi` and the rest mirror the sequence header, which is the same at every
+    /// speed — only the coded tile data differs.
     ///
     /// A [pushed backend](Self::push_backend) receives the preset as
     /// [`Av1EncodeRequest::speed`] — through [`AbiAv1StillEncoder`](crate::AbiAv1StillEncoder),
