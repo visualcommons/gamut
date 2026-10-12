@@ -18,14 +18,12 @@ use gamut_core::{
     Rgba8, Rgba16, Sample,
 };
 use gamut_isobmff::{
-    ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind,
-    TopLevelBox, write,
+    C2PA_UUID, C2paBoxPurpose, ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr,
+    Property, PropertyKind, TopLevelBox, content_provenance_payload, content_provenance_reserved,
+    write,
 };
 
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
-use crate::c2pa::{
-    C2PA_UUID, C2paBoxPurpose, content_provenance_payload, content_provenance_reserved,
-};
 use crate::clean_alpha::clean_rgba;
 use crate::config::{AvifConfig, AvifMode};
 use crate::container::AvifContainer;

@@ -156,7 +156,9 @@
 //! range ([`AvifEncodeReport::c2pa`]), which an external signer patches in place; nothing after
 //! the slot moves. [`AvifEncoder::with_c2pa`] writes a store already computed over this exact
 //! output. On read, [`AvifContainer::c2pa_slot`] / [`AvifContainer::c2pa_slots`] report each
-//! located [`C2paSlot`] — slot bytes, file range and [`C2paBoxPurpose`]. The store is
+//! located [`C2paSlot`] — slot bytes, file range and [`C2paBoxPurpose`], with
+//! [`C2paSlot::store`] trimming the slot to the store's own JUMBF length. The framing is
+//! `gamut-isobmff`'s, the same lens `gamut-heic` reads through. The store is
 //! opaque throughout: nothing here validates it, and the range is for patching and byte
 //! accounting, not a hash exclusion range (BMFF assets bind by box path, §18.6).
 //!
@@ -228,8 +230,8 @@ mod transform;
 pub use av1c::{Av1Config, ChromaFormat};
 pub use backend::{AV1_CODEC_ID, AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder};
 pub use c2pa::{
-    C2PA_NOT_VALIDATED, C2PA_UUID, C2paBoxPosition, C2paBoxPurpose, C2paMerkleBox, C2paSlot,
-    C2paStoreSummary, C2paSummary, C2paUnreadBox, C2paUnreadReason,
+    C2PA_NOT_VALIDATED, C2paBoxPosition, C2paMerkleBox, C2paStoreSummary, C2paSummary,
+    C2paUnreadBox,
 };
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
@@ -237,6 +239,8 @@ pub use decode::{Av1StillDecoder, DecodeLimits, DecodedFrame};
 pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder, RawPlanes};
 pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
 pub use gamut_core::Dimensions;
+// The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-heic` (#505).
+pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paSlot, C2paUnreadReason};
 pub use image::{
     AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay,
     PixelAspectRatio, TransformativeProperty,
