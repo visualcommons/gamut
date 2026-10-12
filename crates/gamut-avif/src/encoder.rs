@@ -128,6 +128,181 @@ pub enum AlphaMode {
     PremultiplyOnEncode = 2,
 }
 
+/// Caller-supplied planes for [`AvifEncoder::encode_raw_planes`]: samples already in the coded
+/// colour space, at the coded depth and chroma sampling, with the CICP matrix and signal range
+/// they were produced under — what a transcoder or a video-frame grab already holds.
+///
+/// A view, not a copy: it borrows a [`Planar8`] or [`Planar16`] (whose constructors have already
+/// checked each plane's length against its [`ChromaSubsampling`]) and an optional monochrome
+/// alpha plane. Construct it with [`RawPlanes::eight`] or [`RawPlanes::high`]; each refuses a set
+/// of planes that could not be coded as one AVIF image, so a view that exists is one the encoder
+/// can take.
+///
+/// The planes follow `gamut-color`'s conventions: `Y, Cb, Cr` under a luma–chroma matrix, and
+/// **`Y = G, U = B, V = R`** under [`MatrixCoefficients::Identity`], which AV1 §6.4.2 allows only
+/// at 4:4:4.
+#[derive(Debug, Clone, Copy)]
+pub struct RawPlanes<'a> {
+    /// The colour planes and the alpha plane beside them, at one sample width.
+    samples: RawSamples<'a>,
+    /// The colour planes' luma size, checked non-zero at construction.
+    dims: Dimensions,
+    /// The CICP matrix the colour planes were produced under.
+    matrix: MatrixCoefficients,
+    /// The signal range the colour samples occupy.
+    range: ColorRange,
+}
+
+/// The two sample widths a [`RawPlanes`] can carry. Colour and alpha share one width, because the
+/// alpha auxiliary codes at the colour item's depth (AVIF v1.2.0 §4.1).
+#[derive(Debug, Clone, Copy)]
+enum RawSamples<'a> {
+    /// 8-bit colour and alpha.
+    Eight(&'a Planar8, Option<&'a Planar8>),
+    /// 10- or 12-bit colour and alpha.
+    High(&'a Planar16, Option<&'a Planar16>),
+}
+
+impl<'a> RawPlanes<'a> {
+    /// A view over 8-bit `colour` planes and an optional 8-bit `alpha` plane, declared as produced
+    /// under `matrix` at `range`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when the planes cannot form one AVIF image: `colour` is zero-sized
+    /// or [`ChromaSubsampling::Cs400`] (a single plane is not YCbCr — encode it as
+    /// [`Gray8`](gamut_core::Gray8)), or `alpha` is not a [`ChromaSubsampling::Cs400`] plane of
+    /// `colour`'s width and height.
+    pub fn eight(
+        colour: &'a Planar8,
+        alpha: Option<&'a Planar8>,
+        matrix: MatrixCoefficients,
+        range: ColorRange,
+    ) -> Result<Self> {
+        let dims = check_colour(colour.width(), colour.height(), colour.subsampling())?;
+        if let Some(alpha) = alpha {
+            check_alpha(
+                (colour.width(), colour.height()),
+                (alpha.width(), alpha.height()),
+                alpha.subsampling(),
+            )?;
+        }
+        Ok(Self {
+            samples: RawSamples::Eight(colour, alpha),
+            dims,
+            matrix,
+            range,
+        })
+    }
+
+    /// A view over 10- or 12-bit `colour` planes and an optional `alpha` plane at the same depth,
+    /// declared as produced under `matrix` at `range`. The samples are at the buffer's own
+    /// [`BitDepth`] — a 10-bit plane holds `0..=1023`. [`Planar16`] guarantees only that every
+    /// sample fits the depth it declares, and it admits 8- and 16-bit buffers too; this
+    /// constructor is what refuses an 8-bit one.
+    ///
+    /// # Errors
+    ///
+    /// As [`RawPlanes::eight`], plus [`Error::InvalidInput`] when `colour` is
+    /// [`BitDepth::Eight`] (8-bit planes take [`RawPlanes::eight`], so a backend's
+    /// [`encode_still16`](crate::Av1StillEncoder::encode_still16) is only ever handed 10 or 12
+    /// bits) or when `alpha`'s depth is not `colour`'s. A [`BitDepth::Sixteen`] buffer is
+    /// accepted here and refused by the encode, as
+    /// [`Error::Unsupported`](gamut_core::Error::Unsupported): AV1 codes 8, 10 or 12 bits
+    /// (§6.4.1).
+    pub fn high(
+        colour: &'a Planar16,
+        alpha: Option<&'a Planar16>,
+        matrix: MatrixCoefficients,
+        range: ColorRange,
+    ) -> Result<Self> {
+        let dims = check_colour(colour.width(), colour.height(), colour.subsampling())?;
+        if colour.bit_depth() == BitDepth::Eight {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: 8-bit raw planes take RawPlanes::eight over a Planar8",
+            ));
+        }
+        if let Some(alpha) = alpha {
+            check_alpha(
+                (colour.width(), colour.height()),
+                (alpha.width(), alpha.height()),
+                alpha.subsampling(),
+            )?;
+            if alpha.bit_depth() != colour.bit_depth() {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: the alpha plane's bit depth differs from the colour planes' \
+                     (AVIF v1.2.0 \u{a7}4.1)",
+                ));
+            }
+        }
+        Ok(Self {
+            samples: RawSamples::High(colour, alpha),
+            dims,
+            matrix,
+            range,
+        })
+    }
+
+    /// The CICP matrix the planes were declared under — what `colr` and the AV1 sequence header
+    /// will say.
+    #[must_use]
+    pub fn matrix(&self) -> MatrixCoefficients {
+        self.matrix
+    }
+
+    /// The signal range the planes were declared at.
+    #[must_use]
+    pub fn range(&self) -> ColorRange {
+        self.range
+    }
+
+    /// Whether the view carries an alpha plane.
+    #[must_use]
+    pub fn has_alpha(&self) -> bool {
+        match self.samples {
+            RawSamples::Eight(_, alpha) => alpha.is_some(),
+            RawSamples::High(_, alpha) => alpha.is_some(),
+        }
+    }
+}
+
+/// The size of colour planes that can be a YCbCr AVIF item, refusing zero-sized ones and a single
+/// plane.
+fn check_colour(width: u32, height: u32, subsampling: ChromaSubsampling) -> Result<Dimensions> {
+    let dims = Dimensions::new(width, height)?;
+    if subsampling == ChromaSubsampling::Cs400 {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: raw colour planes need chroma; a single plane codes as Gray8",
+        ));
+    }
+    Ok(dims)
+}
+
+/// Refuses an alpha plane that is not one monochrome plane the size of `colour` (AVIF v1.2.0
+/// §4.1: an alpha auxiliary is monochrome, and the same size as its master).
+fn check_alpha(
+    colour: (u32, u32),
+    alpha: (u32, u32),
+    subsampling: ChromaSubsampling,
+) -> Result<()> {
+    if alpha != colour {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: the alpha plane's dimensions differ from the colour planes'",
+        ));
+    }
+    if subsampling != ChromaSubsampling::Cs400 {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: the alpha plane must be a single Cs400 plane",
+        ));
+    }
+    Ok(())
+}
+
 /// The encoder's display-orientation transforms, applied by a reader at display time (the stored
 /// pixels are unchanged). Maps to the `irot`/`imir` item properties.
 #[derive(Debug, Clone, Copy, Default)]
@@ -155,6 +330,9 @@ struct ImageTransform {
 /// | [`Gray8`] | one **monochrome** item — not R=G=B replication |
 /// | [`Rgb16`] | one 4:4:4 colour item at [`AvifEncoder::with_bit_depth`]'s depth |
 /// | [`Rgba16`] | that, plus a monochrome alpha auxiliary at the same depth |
+///
+/// Planes already in the coded colour space bypass the table:
+/// [`AvifEncoder::encode_raw_planes`] codes a [`RawPlanes`] view as given.
 ///
 /// The 8-bit inputs code at 8 bits unless [`AvifEncoder::with_bit_depth`] asks for 10 or 12, in
 /// which case they are widened by bit replication first; the 16-bit inputs code at 12 unless it
@@ -1084,6 +1262,95 @@ impl AvifEncoder {
                 alpha_bytes,
             },
         ))
+    }
+
+    /// Encodes caller-supplied planes **as given** — no colour conversion, no resampling, no
+    /// narrowing — and appends the AVIF file to `out`, returning the number of bytes written.
+    ///
+    /// The planes' declaration replaces the encoder's sample-shaping knobs: the coded matrix and
+    /// range are [`RawPlanes::matrix`] / [`RawPlanes::range`], the chroma sampling and depth are
+    /// the buffer's own, and [`with_matrix`](Self::with_matrix),
+    /// [`with_color_range`](Self::with_color_range), [`with_chroma`](Self::with_chroma) and
+    /// [`with_bit_depth`](Self::with_bit_depth) are ignored. `colr nclx`, `av1C`, `pixi` and the
+    /// AV1 sequence header all follow from that declaration plus the
+    /// [`with_primaries`](Self::with_primaries) / [`with_transfer`](Self::with_transfer) tags, so
+    /// they agree by construction. Everything else applies as it does to an
+    /// [`EncodeImage`] input: the quality (and so the mode), alpha quality, speed, threads,
+    /// backends, orientation, HDR and metadata payloads.
+    ///
+    /// [`AvifMode::Lossless`] codes the planes bit-exactly, whatever the matrix — no conversion
+    /// stands between the caller's samples and the codec — but `gamut-av1` codes lossless only at
+    /// 4:4:4, so lossless subsampled planes are refused.
+    ///
+    /// An alpha plane is always coded as the monochrome alpha auxiliary, opaque or not
+    /// ([`with_keep_opaque_alpha`](Self::with_keep_opaque_alpha) does not apply: the caller chose
+    /// to hand it over). [`AlphaMode::Premultiplied`] declares it with `prem`;
+    /// [`with_clean_alpha`](Self::with_clean_alpha) does not apply, since it rewrites colour.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Unsupported`](gamut_core::Error::Unsupported) for
+    ///   [`AlphaMode::PremultiplyOnEncode`] with an alpha plane (the encoder converts no sample
+    ///   here), lossless at a subsampled chroma, or a [`BitDepth::Sixteen`] buffer;
+    /// - [`Error::InvalidInput`] for [`MatrixCoefficients::Identity`] at a subsampled chroma
+    ///   (AV1 §6.4.2), or limited range under the BT.709 / sRGB / identity triple, which AV1
+    ///   §5.5.2 can only signal as full range;
+    /// - any error the AV1 encode, a pushed backend or the container writer returns.
+    pub fn encode_raw_planes(&self, planes: RawPlanes<'_>, out: &mut Vec<u8>) -> Result<usize> {
+        if planes.has_alpha() && self.alpha_mode == AlphaMode::PremultiplyOnEncode {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: raw planes are coded as given, so AlphaMode::PremultiplyOnEncode cannot \
+                 apply; premultiply them first and declare AlphaMode::Premultiplied",
+            ));
+        }
+        let colour = Av1Colour {
+            primaries: self.config.primaries,
+            transfer: self.config.transfer,
+            matrix: planes.matrix,
+            range: planes.range,
+        };
+        let q = self.base_q_idx();
+        let (alpha_q, alpha_colour) = (self.alpha_base_q_idx(), self.monochrome_colour());
+        let dims = planes.dims;
+        let (still, alpha) = match planes.samples {
+            RawSamples::Eight(p, alpha) => {
+                let colour_still = |t| self.colour_still(p, dims, q, colour, p.subsampling(), t);
+                match alpha {
+                    None => (colour_still(self.thread_budget())?, None),
+                    Some(a) => {
+                        let (s, a) = self.colour_and_alpha(colour_still, |t| {
+                            monochrome_still(a, alpha_q, alpha_colour, self.av1_options(t))
+                        })?;
+                        (s, Some(a))
+                    }
+                }
+            }
+            RawSamples::High(p, alpha) => {
+                let colour_still = |t| self.colour_still16(p, dims, q, colour, t);
+                match alpha {
+                    None => (colour_still(self.thread_budget())?, None),
+                    Some(a) => {
+                        let (s, a) = self.colour_and_alpha(colour_still, |t| {
+                            monochrome_still16(a, alpha_q, alpha_colour, self.av1_options(t))
+                        })?;
+                        (s, Some(a))
+                    }
+                }
+            }
+        };
+        self.emit(&still, dims, alpha.as_ref(), out)
+    }
+
+    /// [`encode_raw_planes`](Self::encode_raw_planes) into a fresh buffer.
+    ///
+    /// # Errors
+    ///
+    /// As [`encode_raw_planes`](Self::encode_raw_planes).
+    pub fn encode_raw_planes_to_vec(&self, planes: RawPlanes<'_>) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.encode_raw_planes(planes, &mut out)?;
+        Ok(out)
     }
 
     /// Records an `irot` display [`Rotation`] applied by a reader (the stored pixels are unchanged,
@@ -2935,6 +3202,156 @@ mod tests {
         assert_eq!(
             payload.downcast_ref::<&str>(),
             Some(&"alpha thread panicked")
+        );
+    }
+
+    /// 4:2:0 8-bit colour planes of `w`×`h`.
+    fn colour8(w: u32, h: u32) -> Planar8 {
+        let (cw, ch) = ChromaSubsampling::Cs420.chroma_dimensions(w, h);
+        let n = (cw * ch) as usize;
+        Planar8::from_planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs420,
+            [vec![0; (w * h) as usize], vec![0; n], vec![0; n]],
+        )
+        .unwrap()
+    }
+
+    /// A single-plane (`Cs400`) 8-bit buffer of `w`×`h`.
+    fn mono8(w: u32, h: u32) -> Planar8 {
+        Planar8::from_planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs400,
+            [vec![0; (w * h) as usize], vec![], vec![]],
+        )
+        .unwrap()
+    }
+
+    /// A single-plane (`Cs400`) high-bit-depth buffer of `w`×`h` at `depth`.
+    fn mono16(w: u32, h: u32, depth: BitDepth) -> Planar16 {
+        Planar16::from_planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs400,
+            depth,
+            [vec![0; (w * h) as usize], vec![], vec![]],
+        )
+        .unwrap()
+    }
+
+    /// The message a refused [`RawPlanes`] construction carries — distinct per check, so each
+    /// assertion names the one check that fired.
+    fn refusal(result: Result<RawPlanes<'_>>) -> &'static str {
+        result.unwrap_err().static_message().unwrap()
+    }
+
+    #[test]
+    fn raw_planes_report_their_declaration_and_alpha() {
+        let colour = colour8(4, 2);
+        let alpha = mono8(4, 2);
+        let raw = RawPlanes::eight(
+            &colour,
+            Some(&alpha),
+            MatrixCoefficients::Bt601,
+            ColorRange::Limited,
+        )
+        .unwrap();
+        assert_eq!(raw.matrix(), MatrixCoefficients::Bt601);
+        assert_eq!(raw.range(), ColorRange::Limited);
+        assert!(raw.has_alpha());
+        let colour16 =
+            Planar16::from_planes(1, 1, BitDepth::Ten, [vec![0], vec![0], vec![0]]).unwrap();
+        let alpha16 = mono16(1, 1, BitDepth::Ten);
+        let bt709 = MatrixCoefficients::Bt709;
+        let full = ColorRange::Full;
+        assert!(
+            !RawPlanes::eight(&colour, None, bt709, full)
+                .unwrap()
+                .has_alpha()
+        );
+        assert!(
+            !RawPlanes::high(&colour16, None, bt709, full)
+                .unwrap()
+                .has_alpha()
+        );
+        assert!(
+            RawPlanes::high(&colour16, Some(&alpha16), bt709, full)
+                .unwrap()
+                .has_alpha()
+        );
+    }
+
+    #[test]
+    fn raw_planes_refuse_a_single_colour_plane_and_an_empty_image() {
+        let (bt709, full) = (MatrixCoefficients::Bt709, ColorRange::Full);
+        assert_eq!(
+            refusal(RawPlanes::eight(&mono8(2, 2), None, bt709, full)),
+            "AVIF: raw colour planes need chroma; a single plane codes as Gray8"
+        );
+        let mono = mono16(2, 2, BitDepth::Ten);
+        assert_eq!(
+            refusal(RawPlanes::high(&mono, None, bt709, full)),
+            "AVIF: raw colour planes need chroma; a single plane codes as Gray8"
+        );
+        // `Planar8` admits a 0×n buffer; `Dimensions::new` is what refuses it.
+        let empty = Planar8::from_planes(0, 2, [vec![], vec![], vec![]]).unwrap();
+        assert_eq!(
+            RawPlanes::eight(&empty, None, bt709, full)
+                .unwrap_err()
+                .kind(),
+            gamut_core::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn raw_planes_high_refuses_an_eight_bit_buffer() {
+        // `Planar16` admits an 8-bit buffer; `encode_still16`'s contract is 10 or 12 bits only.
+        let colour16 =
+            Planar16::from_planes(1, 1, BitDepth::Eight, [vec![0], vec![0], vec![0]]).unwrap();
+        assert_eq!(
+            refusal(RawPlanes::high(
+                &colour16,
+                None,
+                MatrixCoefficients::Bt709,
+                ColorRange::Full
+            )),
+            "AVIF: 8-bit raw planes take RawPlanes::eight over a Planar8"
+        );
+    }
+
+    #[test]
+    fn raw_planes_refuse_an_alpha_plane_of_another_size_shape_or_depth() {
+        let (bt709, full) = (MatrixCoefficients::Bt709, ColorRange::Full);
+        let colour = colour8(4, 2);
+        const SIZE: &str = "AVIF: the alpha plane's dimensions differ from the colour planes'";
+        // Each axis on its own, so neither half of the size comparison can go unchecked.
+        for alpha in [mono8(3, 2), mono8(4, 3)] {
+            assert_eq!(
+                refusal(RawPlanes::eight(&colour, Some(&alpha), bt709, full)),
+                SIZE
+            );
+        }
+        // Right size, but three planes: an alpha auxiliary is monochrome (AVIF v1.2.0 §4.1).
+        let three = colour8(4, 2);
+        assert_eq!(
+            refusal(RawPlanes::eight(&colour, Some(&three), bt709, full)),
+            "AVIF: the alpha plane must be a single Cs400 plane"
+        );
+
+        let colour16 =
+            Planar16::from_planes(1, 1, BitDepth::Ten, [vec![0], vec![0], vec![0]]).unwrap();
+        let wide = mono16(2, 1, BitDepth::Ten);
+        assert_eq!(
+            refusal(RawPlanes::high(&colour16, Some(&wide), bt709, full)),
+            SIZE
+        );
+        let deeper = mono16(1, 1, BitDepth::Twelve);
+        assert_eq!(
+            refusal(RawPlanes::high(&colour16, Some(&deeper), bt709, full)),
+            "AVIF: the alpha plane's bit depth differs from the colour planes' \
+             (AVIF v1.2.0 \u{a7}4.1)"
         );
     }
 }

@@ -14,6 +14,12 @@
 //! indistinguishable from, with no auxiliary at all
 //! ([`AvifEncoder::with_keep_opaque_alpha`] keeps it).
 //!
+//! A caller already holding YCbCr planes skips the colour conversion entirely:
+//! [`AvifEncoder::encode_raw_planes`] codes a [`RawPlanes`] view — borrowed
+//! [`Planar8`](gamut_color::Planar8) or 10/12-bit [`Planar16`](gamut_color::Planar16) planes, an
+//! optional alpha plane, and the CICP matrix and range they were produced under — as given, and
+//! writes `colr nclx` from that declaration.
+//!
 //! # The decode surface (issue #250)
 //!
 //! The read side mirrors the surface [`gamut-heic`](https://docs.rs/gamut-heic) established for
@@ -151,7 +157,7 @@
 //!
 //! gamut is image-first, so only the still-image (intra) subset of AV1 is in scope — no sequences or
 //! animation. **Supported:** 8- and 16-bit RGB and RGBA input and 8-bit grayscale (the five
-//! layouts above); **lossless** (the default, decoded output bit-exact to the input at the coded depth)
+//! layouts above), and caller-supplied 8/10/12-bit YCbCr or GBR planes ([`RawPlanes`]); **lossless** (the default, decoded output bit-exact to the input at the coded depth)
 //! and **lossy** ([`AvifEncoder::lossy`], `quality` `0..=100`) AV1 intra coding — lossless at
 //! 4:4:4 through the identity matrix, lossy through **BT.709 YCbCr** by default, with BT.601 /
 //! BT.2020-NCL and studio range selectable ([`AvifEncoder::with_matrix`] /
@@ -221,7 +227,7 @@ pub use c2pa::{
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodedFrame};
-pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder};
+pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder, RawPlanes};
 pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
 pub use gamut_core::Dimensions;
 pub use image::{

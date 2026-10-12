@@ -75,6 +75,30 @@ let avif = AvifEncoder::new()
     .encode_to_vec(ImageRef::<Rgb16>::new(&rgb16, dims)?)?;
 ```
 
+A caller that already holds YCbCr planes — a transcoder, a video-frame grab — hands them over
+without a colour round trip (issue #660): `RawPlanes::eight` / `RawPlanes::high` borrow a
+`gamut_color::Planar8` or 10/12-bit `Planar16` (plus an optional same-depth `Cs400` alpha plane)
+with the CICP matrix and range they were produced under, and `encode_raw_planes_to_vec` codes them
+as given, writing `colr nclx` from that declaration. Lossless is bit-exact to the planes at 4:4:4;
+an alpha plane of another size or depth is refused with a typed `InvalidInput`:
+
+```rust
+use gamut_avif::{AvifEncoder, RawPlanes};
+use gamut_color::{ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8};
+
+// 2×2 BT.709 studio-range YCbCr at 4:2:0: four luma samples, one Cb and one Cr.
+let planes = Planar8::from_planes_subsampled(
+    2,
+    2,
+    ChromaSubsampling::Cs420,
+    [vec![16, 64, 128, 235], vec![128], vec![128]],
+)?;
+let raw = RawPlanes::eight(&planes, None, MatrixCoefficients::Bt709, ColorRange::Limited)?;
+let avif = AvifEncoder::lossy(80).encode_raw_planes_to_vec(raw)?;
+assert_eq!(&avif[4..8], b"ftyp");
+# Ok::<(), gamut_core::Error>(())
+```
+
 Decoding (issue #250): `AvifContainer::parse` gives a byte-accounting view plus the role-typed
 `AvifImage` lens (primary item, alpha/depth auxiliaries, thumbnails, Exif/XMP, grid/overlay,
 typed `av1C` and OBU layers); `decode_item_planar` hands each coded item's `Av1Config` + OBU
