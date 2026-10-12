@@ -157,7 +157,8 @@ pub fn bt709_oetf(lc: f64) -> f64 {
 /// Named `_eotf` to pair with [`bt709_oetf`] the way [`srgb_eotf`] pairs with [`srgb_oetf`], but
 /// it is the **inverse OETF** (scene-referred), not the Rec. ITU-R BT.1886 display EOTF that
 /// H.273 §8.2 NOTE 1 suggests for flat-panel displays: H.273 defines these code points by their
-/// opto-electronic function, and this is that function undone.
+/// opto-electronic function, and this is that function undone. That display reading is
+/// [`bt1886_eotf`].
 ///
 /// # Examples
 ///
@@ -174,6 +175,38 @@ pub fn bt709_eotf(v: f64) -> f64 {
     } else {
         ((v + BT709_ALPHA - 1.0) / BT709_ALPHA).powf(1.0 / 0.45)
     }
+}
+
+/// γ of the Rec. ITU-R BT.1886 reference EOTF: Annex 1 fixes the exponent of
+/// `L = a (max[(V + b), 0])^γ` at `γ = 2.40`.
+pub const BT1886_GAMMA: f64 = 2.4;
+
+/// Rec. ITU-R BT.1886 reference EOTF with reference black at zero: signal `V` → display light
+/// `L` on `[0, 1]`, `L = max(V, 0)^2.4`.
+///
+/// BT.1886 Annex 1 states `L = a (max[(V + b), 0])^γ` with `a = (Lw^(1/γ) − Lb^(1/γ))^γ` and
+/// `b = Lb^(1/γ) / (Lw^(1/γ) − Lb^(1/γ))`. Normalized to white `Lw = 1` and black `Lb = 0`,
+/// `a = 1` and `b = 0`, which leaves the pure power of [`BT1886_GAMMA`]; signal below black is
+/// clamped by the `max` the formula itself carries.
+///
+/// This is the **display-referred** reading of H.273 code points 1, 6, 14 and 15 that H.273
+/// (07/2024) §8.2 NOTE 1 names for flat-panel displays, and the alternative to [`bt709_eotf`],
+/// which undoes the opto-electronic function those code points are defined by. The two are far
+/// apart: at mid-grey this is `0.189465`, against `bt709_eotf`'s `0.259719`. [`eotf_for`] keeps
+/// returning `bt709_eotf` for those code points; a caller who wants this reading asks for it.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::{bt709_eotf, bt1886_eotf};
+/// assert_eq!(bt1886_eotf(0.0), 0.0);
+/// assert_eq!(bt1886_eotf(1.0), 1.0);
+/// assert!((bt1886_eotf(0.5) - 0.189_465).abs() < 1e-6);
+/// assert!(bt1886_eotf(0.5) < bt709_eotf(0.5));
+/// ```
+#[must_use]
+pub fn bt1886_eotf(v: f64) -> f64 {
+    v.max(0.0).powf(BT1886_GAMMA)
 }
 
 // --- BT.2020 PQ (SMPTE ST 2084 / ITU-R BT.2100) ----------------------------
@@ -657,6 +690,35 @@ mod tests {
         let power = ((knee + BT709_ALPHA - 1.0) / BT709_ALPHA).powf(1.0 / 0.45);
         assert_ne!(power, knee / 4.5);
         assert_eq!(bt709_eotf(knee), power);
+    }
+
+    /// Rec. ITU-R BT.1886 Annex 1, `L = a (max[(V + b), 0])^γ`, transcribed with its `a` and `b`
+    /// left in and evaluated at reference white `Lw = 1` and black `Lb = 0`. `γ = 2.40` is
+    /// written out again rather than read from [`BT1886_GAMMA`], so a mistyped constant cannot
+    /// agree with the test.
+    fn annex1_bt1886_eotf(v: f64) -> f64 {
+        let (gamma, white, black) = (2.40_f64, 1.0_f64, 0.0_f64);
+        let span = white.powf(1.0 / gamma) - black.powf(1.0 / gamma);
+        let a = span.powf(gamma);
+        let b = black.powf(1.0 / gamma) / span;
+        a * (v + b).max(0.0).powf(gamma)
+    }
+
+    /// `bt1886_eotf` is Annex 1's EOTF at zero black, across the signal range and below black,
+    /// where the formula's own `max` clamps to zero rather than leaving `powf` a negative base.
+    /// The mid-grey figure is the one the doc quotes against `bt709_eotf`'s.
+    #[test]
+    fn bt1886_eotf_matches_annex1_at_zero_black() {
+        for step in 0..=20 {
+            let v = f64::from(step) / 20.0;
+            let (got, want) = (bt1886_eotf(v), annex1_bt1886_eotf(v));
+            assert!(
+                (got - want).abs() < 1e-15,
+                "bt1886_eotf({v}) = {got}, Annex 1 {want}"
+            );
+        }
+        assert_eq!(bt1886_eotf(-0.1), 0.0);
+        assert!((bt1886_eotf(0.5) - 0.189_465).abs() < 5e-7);
     }
 
     #[test]

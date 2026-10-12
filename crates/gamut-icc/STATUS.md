@@ -97,7 +97,8 @@ gives the transfer a closed form ICC also defines, and a sampled `curveType` (§
 | Transfer (H.273) | ICC encoding | Deciding clause |
 | ---------------- | ------------ | --------------- |
 | Linear (code 8) | `parametricCurveType` type 0, `g = 1` | §10.18 type 0 is `Y = X^g` exactly |
-| BT.709 family (codes 1, 6, 14, 15) | `parametricCurveType` type 3, `(g, a, b, c, d)` | Table 3 gives all four one curve — "functionally the same as the values 1, 6 and 15" — with α = 1 + 5.5β and β = 0.018053968510807…; its inverse is §10.18 type 3 exactly |
+| BT.709 family (codes 1, 6, 14, 15) — the default, literal reading | `parametricCurveType` type 3, `(g, a, b, c, d)` | Table 3 gives all four one curve — "functionally the same as the values 1, 6 and 15" — with α = 1 + 5.5β and β = 0.018053968510807…; its inverse is §10.18 type 3 exactly |
+| BT.709 family under `CicpTransferReading::Bt1886Display` (`from_cicp_with`, issue #586) | `parametricCurveType` type 0, `g = 2.4` | H.273 §8.2 NOTE 1 names the Rec. ITU-R BT.1886 EOTF for flat-panel displays; at reference black zero BT.1886 Annex 1's `a (max[(V + b), 0])^γ` is `V^2.4`, §10.18 type 0 exactly |
 | sRGB / IEC 61966-2-1 (code 13) | `parametricCurveType` type 3, `(g, a, b, c, d)` | §10.18 type 3 is the spec's own piecewise form |
 | Grey gamma (`gray_with_gamma`) | `parametricCurveType` type 0 | §10.18 type 0; `s15Fixed16` beats `curveType`'s single `u8Fixed8` entry |
 | PQ / ST 2084 (code 16) | `curveType`, 1024 `uInt16` samples | §10.18 defines no closed form for PQ; 1024 points keep interpolation error under one `uInt16` quantum — measured 0.986, guarded at 1 |
@@ -113,6 +114,17 @@ are exactly encodable here as the one curve Table 3 defines. Each claim about ga
 an assertion in the doctest on `src/builtin.rs`'s module documentation: which of the four code
 points `TransferCharacteristics::from_code_point` models, and that `eotf_for` evaluates Table 3's
 `0.259719` at `V = 0.5` for both of those.
+
+**Two readings of the BT.709 family.** `from_cicp` reads codes 1, 6, 14 and 15 literally — the
+inverse of Table 3's opto-electronic function, as libjxl, libavif and Little-CMS do — and stays
+that way. `from_cicp_with(cicp, CicpTransferReading::Bt1886Display)` writes the BT.1886 display
+EOTF instead: `gamut_color::transfer::bt1886_eotf`, whose exponent `BT1886_GAMMA` the tag borrows.
+At `V = 0.5` the tags evaluate to `Y` 0.259721 (literal) and 0.189465 (BT.1886); the literal
+closed form is 0.259719. The `cicpType` tag records the same code point under both, since the
+signalling is unchanged; the `profileDescriptionTag` gains ` (BT.1886 display EOTF)` where the
+reading changed the curve; and every other transfer code point builds the same profile under
+either reading (`the_reading_reaches_only_the_bt709_family`). `from_source_profile` stays on the
+literal reading: no `SourceProfile` bundle projects onto those four code points.
 
 **A `SourceProfile` bundle's own curve is not always the profile's curve.** `from_source_profile`
 projects a coded bundle onto its two CICP code points and builds from those. The two uncoded
@@ -234,6 +246,7 @@ serialized, compared against something this crate did not compute:
 | All three TRCs evaluate to gamut-color's standard curve (two `uInt16` quanta) | Adobe RGB and ProPhoto RGB, through the ROMM toe | `oracle_uncoded_space_curves_match_gamut_color_through_lcms` |
 | `mediaWhitePointTag` equals the D50 lcms2 writes itself | every `BuiltinProfile` and the grey constructor | `oracle_media_white_point_matches_lcms` |
 | All three TRCs evaluate to the transfer's own curve (two `uInt16` quanta) | `from_cicp` for **every** encodable transfer — 1, 6, 8, 13, 14, 15, 16 — against H.273 Table 3, the identity, lcms2's own sRGB and `gamut-color`'s `pq_eotf` | `oracle_every_encodable_transfer_matches_its_curve_through_lcms` |
+| All three TRCs evaluate to BT.1886 Annex 1's `V^2.4` (two `uInt16` quanta) | `from_cicp_with` under `CicpTransferReading::Bt1886Display`, for codes 1, 6, 14 and 15 | `oracle_bt1886_reading_matches_its_curve_through_lcms` |
 | The `cicpType` tag equals the one lcms2's own `cicp` synthesiser writes | every buildable (primaries, transfer) pair, built from an `nclx`-style matrix 9 | `oracle_cicp_tag_matches_the_lcms_synthesiser` |
 | The grey gamma lcms2 estimates is the one asked for | `gray_with_gamma` at 1.0, 1.8, 2.2 | `oracle_gray_gamma_matches_lcms` |
 | A transform through our sRGB into lcms2's own sRGB is the identity to one 8-bit code | sRGB | `oracle_transform_through_our_srgb_is_the_identity` |

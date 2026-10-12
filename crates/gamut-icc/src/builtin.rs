@@ -119,33 +119,41 @@
 //! # Which reading of transfer 1, 6, 14 and 15
 //!
 //! H.273 Table 3 defines those four code points as an **opto-electronic** function, and an ICC
-//! tone curve encodes signal → light, so this module writes its exact inverse:
-//! `Lc = ((V + α − 1) / α)^(1/0.45)` above the knee. That is the literal reading, and it is what
-//! the reference implementations write, so a profile built here agrees with them.
+//! tone curve encodes signal → light, so by default this module writes its exact inverse:
+//! `Lc = ((V + α − 1) / α)^(1/0.45)` above the knee. That is the literal reading,
+//! [`CicpTransferReading::InverseOetf`], and it is what the reference implementations (libjxl,
+//! libavif, Little-CMS) write, so a profile built by [`IccProfile::from_cicp`] agrees with them.
 //!
 //! It is not the only sanctioned reading. H.273 §8.2 NOTE 1 observes that for these code points
 //! "a suggested corresponding reference electro-optical transfer characteristic function for flat
 //! panel displays used in HDTV studio production has been specified in Rec. ITU-R BT.1886-0" —
 //! which, at reference black zero, is a pure gamma of 2.4. Since every profile built here is a
-//! *display*-class profile, that reading has a real claim, and the two are far apart.
+//! *display*-class profile, that reading has a real claim, so it is offered as an opt-in:
+//! [`IccProfile::from_cicp_with`] with [`CicpTransferReading::Bt1886Display`] writes
+//! `gamut_color::transfer::bt1886_eotf` as a `parametricCurveType` function type 0 with
+//! `g = 2.4` ([`gamut_color::transfer::BT1886_GAMMA`], borrowed rather than restated). The
+//! `cicpType` tag is the same under both readings: the signalling did not change, only the curve
+//! derived from it. Every other transfer code point has one curve, which both readings write.
 //!
-//! At mid-grey `V = 0.5` the PCS `Y` is as follows. The two rows this module writes are quoted as
-//! the **tag evaluates**, with `(g, a, b, c, d)` already rounded to `s15Fixed16` — not as the
-//! closed form before rounding, which is a different number in the sixth decimal. The BT.1886 row
-//! is the closed form, because no tag here holds it.
+//! The two are far apart. At mid-grey `V = 0.5` the PCS `Y` is as follows, quoted as the **tag
+//! evaluates**, with the parameters already rounded to `s15Fixed16` — not as the closed form
+//! before rounding, which for the inverse OETF is a different number in the sixth decimal
+//! (0.259719). `bt1886_reading_is_what_the_docs_quote` asserts all three rows.
 //!
 //! | reading | `Y` at `V = 0.5` |
 //! | --- | --- |
-//! | inverse OETF — the `parametricCurveType` this module writes | 0.259721 |
-//! | BT.1886 EOTF, `V^2.4` — closed form; not written here | 0.189465 |
+//! | inverse OETF — [`CicpTransferReading::InverseOetf`], the default | 0.259721 |
+//! | BT.1886 EOTF, `V^2.4` — [`CicpTransferReading::Bt1886Display`] | 0.189465 |
 //! | the sRGB code point (13) as this module writes it, for scale | 0.214045 |
 //!
 //! The literal reading is 1.371× the BT.1886 one — 0.0703 in absolute `Y`. Note the third row:
-//! two code points this module *does* encode, 1 and 13, already differ by 0.0457 at mid-grey
-//! (21 % of the sRGB value), so a caller that treats "BT.709 primaries" and "sRGB" as
-//! interchangeable will see that much of a shift from the transfer alone. Offering the BT.1886
-//! reading as an option is tracked at
-//! <https://github.com/visualcommons/gamut/issues/586>.
+//! two code points this module encodes under either reading, 1 and 13, already differ by 0.0457
+//! at mid-grey under the literal one (21 % of the sRGB value), so a caller that treats "BT.709
+//! primaries" and "sRGB" as interchangeable will see that much of a shift from the transfer alone.
+//!
+//! [`IccProfile::from_source_profile`] stays on the literal reading. No `SourceProfile` bundle
+//! `gamut-color` defines projects onto transfer 1, 6, 14 or 15 today, and one that did would be
+//! read the way `gamut-color`'s own `eotf_for` reads those code points — as the inverse OETF.
 //!
 //! # HDR: the PQ profile is peak-referred
 //!
@@ -208,7 +216,7 @@
 use gamut_color::cicp::{ColourPrimaries, TransferCharacteristics};
 use gamut_color::linalg::mat_mul3;
 use gamut_color::matrix::{bradford_adapt, rgb_to_xyz_matrix};
-use gamut_color::transfer::{BT709_ALPHA, BT709_BETA, pq_eotf};
+use gamut_color::transfer::{BT709_ALPHA, BT709_BETA, BT1886_GAMMA, pq_eotf};
 use gamut_color::{Gamut, SourceProfile};
 
 use crate::cicp::Cicp;
@@ -407,6 +415,47 @@ impl BuiltinProfile {
     }
 }
 
+/// Which of ITU-T H.273's two sanctioned readings [`IccProfile::from_cicp_with`] gives the
+/// BT.709-family transfer code points 1, 6, 14 and 15.
+///
+/// H.273 Table 3 defines those code points by an **opto-electronic** function, and §8.2 NOTE 1
+/// adds that Rec. ITU-R BT.1886 specifies "a suggested corresponding reference electro-optical
+/// transfer characteristic function for flat panel displays". The two readings write different
+/// tone curves — at mid-grey `V = 0.5` the PCS `Y` is 0.259719 under the first and 0.189465 under
+/// the second — and the same `cicpType` tag, because the signalling is the same either way. Every
+/// other transfer code point has one curve and is built identically under both readings.
+///
+/// `#[non_exhaustive]` with explicit, permanently assigned discriminants, so the value crosses a
+/// C boundary as a plain byte and a variant is appended rather than renumbered.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_icc::{Cicp, CicpTransferReading, IccProfile};
+///
+/// let bt709 = Cicp { colour_primaries: 1, transfer_characteristics: 1,
+///                    matrix_coefficients: 0, video_full_range_flag: 1 };
+/// let display = IccProfile::from_cicp_with(bt709, CicpTransferReading::Bt1886Display);
+/// assert!(display.is_some());
+/// assert_ne!(display, IccProfile::from_cicp(bt709));
+/// assert_eq!(CicpTransferReading::default(), CicpTransferReading::InverseOetf);
+/// ```
+#[non_exhaustive]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CicpTransferReading {
+    /// The literal reading, and the default: the exact inverse of H.273 Table 3's
+    /// opto-electronic function, `Lc = ((V + α − 1) / α)^(1/0.45)` above the knee and `V / 4.5`
+    /// below it — what [`IccProfile::from_cicp`] writes, and what libjxl, libavif and Little-CMS
+    /// write for the same code points.
+    #[default]
+    InverseOetf = 0,
+    /// The display reading H.273 §8.2 NOTE 1 names: the Rec. ITU-R BT.1886 reference EOTF at
+    /// reference black zero, a pure gamma of 2.4 (`gamut_color::transfer::bt1886_eotf`), written
+    /// as a `parametricCurveType` function type 0.
+    Bt1886Display = 1,
+}
+
 /// The one `VideoFullRangeFlag` a profile built here can describe (ITU-T H.273 signals full range
 /// as `1`).
 ///
@@ -518,9 +567,10 @@ enum Trc {
     /// remark says ("functionally the same as the values 1, 6 and 15"). Also a
     /// `parametricCurveType` function type 3.
     ///
-    /// This is the *inverse of Table 3's opto-electronic function*, the literal reading; H.273
-    /// §8.2 NOTE 1 sanctions a second one for display profiles, which the module docs quantify
-    /// against this one.
+    /// This is the *inverse of Table 3's opto-electronic function*, the literal reading
+    /// ([`CicpTransferReading::InverseOetf`]); H.273 §8.2 NOTE 1 sanctions a second one for
+    /// display profiles, [`CicpTransferReading::Bt1886Display`], which is `Gamma(2.4)` and which
+    /// the module docs quantify against this one.
     Bt709,
     /// ROMM RGB (ISO 22028-2), the ProPhoto transfer: `Y = X^1.8` above `X = 1/32`, and the
     /// linear toe `Y = X / 16` below it. A `parametricCurveType` function type 3, exactly.
@@ -531,22 +581,25 @@ enum Trc {
 }
 
 impl Trc {
-    /// The curve for an ITU-T H.273 `TransferCharacteristics` code point, or `None` for a code
-    /// point this module cannot encode as an ICC tone curve.
+    /// The curve for an ITU-T H.273 `TransferCharacteristics` code point under `reading`, or
+    /// `None` for a code point this module cannot encode as an ICC tone curve.
     ///
     /// Keyed on the raw code point, not on [`TransferCharacteristics`]: the encodable set and the
     /// set `gamut-color` models are different sets (see the module docs). Code points 1, 6, 14
     /// and 15 are one curve — H.273 Table 3 gives them identical segments and one pair of α/β
-    /// constants — so all four map to [`Trc::Bt709`].
+    /// constants — so all four map to one curve per reading: [`Trc::Bt709`] under
+    /// [`CicpTransferReading::InverseOetf`], and the BT.1886 pure gamma under
+    /// [`CicpTransferReading::Bt1886Display`]. `reading` changes nothing else.
     ///
     /// Everything else is declined, including HLG (18) and Unspecified (2), which have no
     /// `parametricCurveType` form and no `gamut-color` EOTF to sample.
-    fn for_code_point(transfer: u8) -> Option<Self> {
-        match transfer {
-            1 | 6 | 14 | 15 => Some(Trc::Bt709),
-            8 => Some(Trc::Gamma(1.0)),
-            13 => Some(Trc::Srgb),
-            16 => Some(Trc::Pq),
+    fn for_code_point(transfer: u8, reading: CicpTransferReading) -> Option<Self> {
+        match (transfer, reading) {
+            (1 | 6 | 14 | 15, CicpTransferReading::InverseOetf) => Some(Trc::Bt709),
+            (1 | 6 | 14 | 15, CicpTransferReading::Bt1886Display) => Some(Trc::Gamma(BT1886_GAMMA)),
+            (8, _) => Some(Trc::Gamma(1.0)),
+            (13, _) => Some(Trc::Srgb),
+            (16, _) => Some(Trc::Pq),
             _ => None,
         }
     }
@@ -876,22 +929,76 @@ impl IccProfile {
     /// // "Unspecified" primaries name no chromaticities, so no profile can be built.
     /// assert!(IccProfile::from_cicp(Cicp { colour_primaries: 2, ..signalled }).is_none());
     /// ```
+    ///
+    /// The BT.709-family transfers 1, 6, 14 and 15 are read literally, as the inverse of H.273
+    /// Table 3's opto-electronic function; [`from_cicp_with`](IccProfile::from_cicp_with) offers
+    /// the BT.1886 display reading instead. This is that function with
+    /// [`CicpTransferReading::InverseOetf`].
     #[must_use]
     pub fn from_cicp(cicp: Cicp) -> Option<Self> {
+        Self::from_cicp_with(cicp, CicpTransferReading::InverseOetf)
+    }
+
+    /// [`from_cicp`](IccProfile::from_cicp), with the reading of the BT.709-family transfer code
+    /// points 1, 6, 14 and 15 chosen by the caller.
+    ///
+    /// Under [`CicpTransferReading::Bt1886Display`] those four code points get the Rec. ITU-R
+    /// BT.1886 reference EOTF at reference black zero — `Y = X^2.4`, a `parametricCurveType`
+    /// function type 0 — which H.273 §8.2 NOTE 1 names for flat-panel displays, rather than the
+    /// inverse OETF. Everything else is as `from_cicp` documents it, including every refusal:
+    ///
+    /// * The `cicpType` tag records the **same** code point under both readings — the signalling
+    ///   is unchanged; only the tone curve derived from it is.
+    /// * The `profileDescriptionTag` names the reading when it changed the curve, as
+    ///   `CICP 1/1 (BT.1886 display EOTF)`, so the two profiles for one triple are told apart by
+    ///   a reader that only shows the description.
+    /// * Every other transfer code point has one curve and builds the same profile under either
+    ///   reading.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_icc::{Cicp, CicpTransferReading, IccProfile, KnownTag, TagData};
+    ///
+    /// let bt709 = Cicp { colour_primaries: 1, transfer_characteristics: 1,
+    ///                    matrix_coefficients: 0, video_full_range_flag: 1 };
+    /// let display = IccProfile::from_cicp_with(bt709, CicpTransferReading::Bt1886Display)
+    ///     .expect("BT.709 is buildable");
+    /// let Some(TagData::ParametricCurve(trc)) = display.get(KnownTag::RedTrc) else {
+    ///     panic!("a parametric tone curve");
+    /// };
+    /// assert!((trc.eval(0.5) - 0.189_465).abs() < 1e-6);
+    ///
+    /// // The signalling recorded is the caller's, whichever reading built the curve.
+    /// let literal = IccProfile::from_cicp(bt709).expect("BT.709 is buildable");
+    /// assert_eq!(display.get(KnownTag::Cicp), literal.get(KnownTag::Cicp));
+    ///
+    /// // sRGB has one curve, so the reading does not reach it.
+    /// let srgb = Cicp { transfer_characteristics: 13, ..bt709 };
+    /// assert_eq!(
+    ///     IccProfile::from_cicp_with(srgb, CicpTransferReading::Bt1886Display),
+    ///     IccProfile::from_cicp(srgb),
+    /// );
+    /// ```
+    #[must_use]
+    pub fn from_cicp_with(cicp: Cicp, reading: CicpTransferReading) -> Option<Self> {
         if !rgb_is_full_range(cicp) {
             return None;
         }
         let primaries = ColourPrimaries::from_code_point(u16::from(cicp.colour_primaries))?;
         let chromaticities = primaries.chromaticities()?;
-        let trc = Trc::for_code_point(cicp.transfer_characteristics)?;
-        let named = BuiltinProfile::for_axes(primaries, cicp.transfer_characteristics);
-        let description = match named {
+        let transfer = cicp.transfer_characteristics;
+        let trc = Trc::for_code_point(transfer, reading)?;
+        let named = BuiltinProfile::for_axes(primaries, transfer);
+        let mut description = match named {
             Some(space) => space.parts().description.to_owned(),
-            None => format!(
-                "CICP {}/{}",
-                cicp.colour_primaries, cicp.transfer_characteristics
-            ),
+            None => format!("CICP {}/{transfer}", cicp.colour_primaries),
         };
+        // Compared against the literal reading's curve rather than keyed on `reading`, so the
+        // qualifier is written exactly where the reading changed the profile and nowhere else.
+        if Some(trc) != Trc::for_code_point(transfer, CicpTransferReading::InverseOetf) {
+            description.push_str(" (BT.1886 display EOTF)");
+        }
         rgb_matrix_trc(
             chromaticities,
             trc,
@@ -968,7 +1075,9 @@ impl IccProfile {
 #[cfg(test)]
 mod tests {
     use gamut_color::SourceTransfer;
-    use gamut_color::transfer::{adobe_rgb_eotf_standard, prophoto_rgb_eotf_standard, srgb_eotf};
+    use gamut_color::transfer::{
+        adobe_rgb_eotf_standard, bt1886_eotf, prophoto_rgb_eotf_standard, srgb_eotf,
+    };
     use lcms2_oracle::tag;
 
     use super::*;
@@ -1070,23 +1179,136 @@ mod tests {
     /// its own remark calls 14 "functionally the same as the values 1, 6 and 15" — so all four
     /// build one curve. Each is asserted separately: the code maps them in a single or-pattern,
     /// whose alternatives no mutation of the match itself would exercise.
+    ///
+    /// The same holds under each reading, so it is asserted under each: the BT.1886 reading's
+    /// or-pattern is a second one, with alternatives of its own.
     #[test]
     fn every_bt709_family_code_point_builds_the_same_curve() {
-        let want = Trc::Bt709.tag();
-        for code in [1_u8, 6, 14, 15] {
-            let profile = IccProfile::from_cicp(Cicp {
-                colour_primaries: 1,
-                transfer_characteristics: code,
-                matrix_coefficients: 0,
-                video_full_range_flag: 1,
-            })
-            .unwrap_or_else(|| panic!("H.273 transfer {code} is encodable"));
-            assert_eq!(
-                profile.get(KnownTag::RedTrc),
-                Some(&want),
-                "transfer {code}"
+        for (reading, want) in [
+            (CicpTransferReading::InverseOetf, Trc::Bt709.tag()),
+            (
+                CicpTransferReading::Bt1886Display,
+                Trc::Gamma(BT1886_GAMMA).tag(),
+            ),
+        ] {
+            for code in [1_u8, 6, 14, 15] {
+                let profile = IccProfile::from_cicp_with(
+                    Cicp {
+                        colour_primaries: 1,
+                        transfer_characteristics: code,
+                        matrix_coefficients: 0,
+                        video_full_range_flag: 1,
+                    },
+                    reading,
+                )
+                .unwrap_or_else(|| panic!("H.273 transfer {code} is encodable"));
+                assert_eq!(
+                    profile.get(KnownTag::RedTrc),
+                    Some(&want),
+                    "transfer {code}, {reading:?}"
+                );
+            }
+        }
+    }
+
+    /// The tone curve written for the BT.1886 reading reproduces `gamut-color`'s own
+    /// `bt1886_eotf`, so the exponent it borrows ([`BT1886_GAMMA`]) is checked against the
+    /// function that owns the curve rather than trusted. The tolerance is the `s15Fixed16`
+    /// rounding of `g = 2.4` — at most `6.1e-6 × max |X^g ln X|`, under 1e-6 — with headroom.
+    #[test]
+    fn bt1886_curve_matches_gamut_color() {
+        let TagData::ParametricCurve(curve) = Trc::Gamma(BT1886_GAMMA).tag() else {
+            panic!("the BT.1886 reading is encoded as a parametricCurveType");
+        };
+        assert_eq!(curve.function_type, 0, "a pure gamma is §10.18 type 0");
+        for step in 0..=1000 {
+            let signal = f64::from(step) / 1000.0;
+            let (got, want) = (curve.eval(signal), bt1886_eotf(signal));
+            assert!(
+                (got - want).abs() < 2.0e-6,
+                "BT.1886 TRC at V = {signal}: {got} vs {want}"
             );
         }
+    }
+
+    /// The reading reaches exactly the BT.709 family. For every transfer byte, either both
+    /// readings build the same profile, or the code point is one of 1, 6, 14 and 15 and the
+    /// profiles differ in the tone curves and the description — and *not* in the `cicpType` tag,
+    /// which records the caller's signalling under both. The family is restated here rather than
+    /// read back from [`Trc::for_code_point`], so a code point wrongly brought under the reading,
+    /// or wrongly left out of it, fails.
+    #[test]
+    fn the_reading_reaches_only_the_bt709_family() {
+        const BT709_FAMILY: [u8; 4] = [1, 6, 14, 15];
+        let rgb = |transfer| Cicp {
+            colour_primaries: 1,
+            transfer_characteristics: transfer,
+            matrix_coefficients: 0,
+            video_full_range_flag: 1,
+        };
+        for transfer in 0..=u8::MAX {
+            let literal = IccProfile::from_cicp(rgb(transfer));
+            let display =
+                IccProfile::from_cicp_with(rgb(transfer), CicpTransferReading::Bt1886Display);
+            assert_eq!(
+                IccProfile::from_cicp_with(rgb(transfer), CicpTransferReading::InverseOetf),
+                literal,
+                "transfer {transfer}: from_cicp is the literal reading"
+            );
+            if !BT709_FAMILY.contains(&transfer) {
+                assert_eq!(display, literal, "transfer {transfer}");
+                continue;
+            }
+            let (literal, display) = (literal.expect("buildable"), display.expect("buildable"));
+            assert_eq!(
+                display.get(KnownTag::Cicp),
+                Some(&TagData::Cicp(rgb(transfer))),
+                "transfer {transfer}: the tag records the signalling"
+            );
+            assert_eq!(display.get(KnownTag::Cicp), literal.get(KnownTag::Cicp));
+            assert_ne!(display.get(KnownTag::RedTrc), literal.get(KnownTag::RedTrc));
+            assert_eq!(
+                display.get(KnownTag::ProfileDescription),
+                Some(&mluc(&format!("CICP 1/{transfer} (BT.1886 display EOTF)"))),
+                "transfer {transfer}"
+            );
+            assert_eq!(
+                literal.get(KnownTag::ProfileDescription),
+                Some(&mluc(&format!("CICP 1/{transfer}"))),
+                "transfer {transfer}"
+            );
+            assert_eq!(display.validate(), vec![], "transfer {transfer}: §8");
+        }
+    }
+
+    /// The mid-grey figures the module docs' *Which reading* table quotes, measured through the
+    /// `rTRC` each profile carries: 0.259721 for the literal reading of transfer 1, 0.189465 for
+    /// the BT.1886 reading of it, 0.214045 for sRGB (13), and the 1.371× / 0.0703 / 0.0457 the
+    /// prose derives from them. Each bound is half the last digit written.
+    #[test]
+    fn bt1886_reading_is_what_the_docs_quote() {
+        let mid_grey = |transfer, reading| {
+            let profile = IccProfile::from_cicp_with(
+                Cicp {
+                    colour_primaries: 1,
+                    transfer_characteristics: transfer,
+                    matrix_coefficients: 0,
+                    video_full_range_flag: 1,
+                },
+                reading,
+            )
+            .expect("buildable");
+            red_trc(&profile)(0.5)
+        };
+        let literal = mid_grey(1, CicpTransferReading::InverseOetf);
+        let display = mid_grey(1, CicpTransferReading::Bt1886Display);
+        let srgb = mid_grey(13, CicpTransferReading::InverseOetf);
+        assert!((literal - 0.259_721).abs() < 5.0e-7, "literal: {literal}");
+        assert!((display - 0.189_465).abs() < 5.0e-7, "BT.1886: {display}");
+        assert!((srgb - 0.214_045).abs() < 5.0e-7, "sRGB: {srgb}");
+        assert!((literal / display - 1.371).abs() < 5.0e-4);
+        assert!((literal - display - 0.0703).abs() < 5.0e-5);
+        assert!((literal - srgb - 0.0457).abs() < 5.0e-5);
     }
 
     /// The sampled PQ curve reproduces `gamut-color`'s `pq_eotf` normalized to its peak, to within
@@ -1145,17 +1367,30 @@ mod tests {
 
     /// The curve each space names is the one its own transfer code point maps to. `parts` states
     /// the curve directly so that `builtin` needs no fallback, and this is what stops the two
-    /// halves of that statement drifting apart.
+    /// halves of that statement drifting apart. No built-in space's transfer is in the BT.709
+    /// family, so the curve is the same under either reading.
     #[test]
     fn each_coded_space_names_the_curve_for_its_own_transfer() {
         for space in BuiltinProfile::ALL {
             let Space { axes, trc, .. } = space.parts();
             if let Some((_, transfer)) = axes {
                 let code = cicp_byte(transfer.code_point());
-                assert_eq!(Trc::for_code_point(code), Some(trc), "{space:?}");
+                for reading in READINGS {
+                    assert_eq!(
+                        Trc::for_code_point(code, reading),
+                        Some(trc),
+                        "{space:?}, {reading:?}"
+                    );
+                }
             }
         }
     }
+
+    /// Every [`CicpTransferReading`], for the sweeps that must hold under each.
+    const READINGS: [CicpTransferReading; 2] = [
+        CicpTransferReading::InverseOetf,
+        CicpTransferReading::Bt1886Display,
+    ];
 
     /// Exactly Adobe RGB and ProPhoto RGB have no CICP axes, and their profiles accordingly carry
     /// no `cicpType` tag — §9.2.17 requires the tag to be equivalent to the encoding, which
@@ -1260,11 +1495,13 @@ mod tests {
             if ENCODABLE.contains(&code) {
                 continue;
             }
-            assert_eq!(
-                Trc::for_code_point(code),
-                None,
-                "transfer code point {code}"
-            );
+            for reading in READINGS {
+                assert_eq!(
+                    Trc::for_code_point(code, reading),
+                    None,
+                    "transfer code point {code}, {reading:?}"
+                );
+            }
         }
     }
 
@@ -1849,6 +2086,49 @@ mod tests {
                     ),
                     _ => (light_or_signal, pq_eotf(light_or_signal) / peak),
                 };
+                for (channel, sig) in [
+                    ("r", tag::RED_TRC),
+                    ("g", tag::GREEN_TRC),
+                    ("b", tag::BLUE_TRC),
+                ] {
+                    let got = f64::from(
+                        ours.eval_tone_curve(sig, signal as f32)
+                            .expect("TRC present"),
+                    );
+                    assert!(
+                        (got - want).abs() < 2.0 / 65535.0,
+                        "transfer {code} {channel}TRC at V = {signal}: {got} vs {want}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// lcms2 evaluates the three TRCs of the profile built under the BT.1886 reading, for each of
+    /// the four BT.709-family code points, to Rec. ITU-R BT.1886 Annex 1's EOTF at reference
+    /// black zero — `V^2.4`, written out here as the spec states it rather than read back from
+    /// `gamut-color` or from the tag. It is what says the tag this reading *writes* (function
+    /// type 0, its one `s15Fixed16` parameter) is the display curve for an independent CMM.
+    ///
+    /// Same two-`uInt16`-quanta tolerance as the literal reading's oracle; the `s15Fixed16`
+    /// rounding of `g` is under 1e-6 of it.
+    #[test]
+    fn oracle_bt1886_reading_matches_its_curve_through_lcms() {
+        for code in [1_u8, 6, 14, 15] {
+            let profile = IccProfile::from_cicp_with(
+                Cicp {
+                    colour_primaries: 1,
+                    transfer_characteristics: code,
+                    matrix_coefficients: 0,
+                    video_full_range_flag: 1,
+                },
+                CicpTransferReading::Bt1886Display,
+            )
+            .expect("an encodable transfer");
+            let ours = opened_by_lcms(&profile);
+            for step in 0..=64 {
+                let signal = f64::from(step) / 64.0;
+                let want = signal.powf(2.40);
                 for (channel, sig) in [
                     ("r", tag::RED_TRC),
                     ("g", tag::GREEN_TRC),
