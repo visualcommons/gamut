@@ -391,9 +391,13 @@ box, so they include any unused padding §A.5.3 permits after the store, and a r
 slot reads back as zeros. The bound is deliberate — an `LBox` trim cannot locate a reservation,
 which has no `LBox` — and since #505 it is decided once, in `gamut-isobmff`'s lens, for both
 crates: the slot is the located unit, and `C2paSlot::store` is the same slot trimmed to the store's
-own JUMBF `LBox`, which is exactly what `gamut-heic`'s `C2paManifestStore` reports. The two crates
-therefore agree byte for byte on the store and differ only in which region each one's report
-names. (2) *`update` framing is probed, not stated.* §A.5.3 gives the merkle offset only for
+own JUMBF `LBox` (`C2paSlot::store_range` gives its file range), which is exactly what
+`gamut-heic`'s `C2paManifestStore` reports. The **report** names both regions as `gamut-heic`'s does
+and under the same names: `C2paSummary`'s `C2paStoreSummary::range` is the trimmed store and its
+`slot` field the padded slot, and a slot that bounds no store (an unfilled reservation) is listed
+as unread with `C2paUnreadReason::NoStoreBound` — so the two crates report the same bytes for one
+padded store (#505). The slot locator `c2pa_slot`/`c2pa_slots` and the encoder report stay
+slot-bounded, because patching a reservation is what they are for. (2) *`update` framing is probed, not stated.* §A.5.3 gives the merkle offset only for
 `manifest`/`original`; for `update` the shared lens probes the store's `LBox` — after the offset
 unless only the start of `data` bounds a store — so a prefix-less `update` store is located at its
 true start (`C2paSlot::merkle_offset` is then `None`) rather than reported 8 bytes short. A `data`

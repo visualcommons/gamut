@@ -18,9 +18,11 @@
 //! one lens `gamut-heic` reads through too (#505). [`C2PA_UUID`](crate::C2PA_UUID),
 //! [`C2paBoxPurpose`], [`C2paSlot`]
 //! and [`C2paUnreadReason`] are that crate's types, re-exported. The slot this crate reserves,
-//! fills and reports is everything after the merkle offset, padding included;
-//! [`C2paSlot::store`] trims it to the store's own JUMBF `LBox`, which is what `gamut-heic`
-//! reports.
+//! fills and locates ([`AvifContainer::c2pa_slots`]) is everything after the merkle offset,
+//! padding included; [`C2paSlot::store`] / [`C2paSlot::store_range`] trim it to the store's own
+//! JUMBF `LBox`. The non-validating report ([`AvifContainer::c2pa_summary`]) carries both regions
+//! as `gamut-heic`'s does, under the same names — `range` the store, `slot` the slot — so the two
+//! crates report the same bytes for one store (#505).
 //!
 //! # Placement
 //!
@@ -190,27 +192,38 @@ impl C2paBoxPosition {
     }
 }
 
-/// One located manifest-store slot, reported **without its bytes**: where it sits, how big it is,
-/// and what the `uuid` box that carried it said it was for.
+/// One located manifest store, reported **without its bytes**: where the store sits, where the slot
+/// carrying it sits, how big the store is, and what the `uuid` box that carried it said it was for.
+///
+/// The same two ranges under the same two names as `gamut-heic`'s `C2paStoreSummary` (#505):
+/// [`range`](Self::range) is the store trimmed to its own JUMBF `LBox`
+/// ([`C2paSlot::store_range`]), and [`slot`](Self::slot) the box-bounded slot it sits at the front
+/// of ([`C2paSlot::range`]). A slot that bounds no store — an unfilled reservation, or bytes whose
+/// `LBox` is below the JUMBF header or overruns the slot — is not a store and is listed in
+/// [`C2paSummary::unread`] as [`C2paUnreadReason::NoStoreBound`] instead; the encoder's reserve →
+/// patch flow reads slots, not this summary, through [`AvifContainer::c2pa_slot`].
 ///
 /// The bytes are absent by construction: they are opaque to this crate, and a byte range is what a
-/// caller hands to `c2pa-rs` or to `dd`. Use [`C2paSlot::slot_bytes`] when the bytes are wanted.
+/// caller hands to `c2pa-rs` or to `dd`. Use [`C2paSlot::store`] when the bytes are wanted.
 ///
 /// Non-exhaustive: a later revision may report more of the box without a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct C2paStoreSummary {
-    /// The half-open byte range of the slot — the same range [`C2paSlot::range`] reports: the
-    /// store and any padding after it, box-bounded, and *not* a BMFF exclusion range.
+    /// The half-open byte range of the store, trimmed to its JUMBF `LBox` — the range
+    /// [`C2paSlot::store_range`] reports, and *not* a BMFF exclusion range.
     pub range: Range<usize>,
-    /// The `box_purpose` of the `uuid` box that carried the slot.
+    /// The `box_purpose` of the `uuid` box that carried the store.
     pub purpose: C2paBoxPurpose,
-    /// Where the `uuid` box that carried the slot sits relative to the file's media data.
+    /// Where the `uuid` box that carried the store sits relative to the file's media data.
     pub position: C2paBoxPosition,
+    /// The half-open byte range of the slot the store sits at the front of — the store and any
+    /// §A.5.3 padding after it, box-bounded: the range [`C2paSlot::range`] reports.
+    pub slot: Range<usize>,
 }
 
 impl C2paStoreSummary {
-    /// The slot's size in bytes.
+    /// The store's size in bytes.
     #[must_use]
     pub fn size(&self) -> usize {
         self.range.len()
@@ -246,8 +259,9 @@ pub struct C2paMerkleBox {
 }
 
 /// A non-validating report of the C2PA framing an AVIF file carries in its top-level boxes:
-/// every manifest-store slot with its range, size and `box_purpose`, every C2PA box that yielded no
-/// slot with the reason, every auxiliary `merkle` box, and a count of `uuid` boxes of other types.
+/// every manifest store with its range, slot, size and `box_purpose`, every C2PA box that yielded
+/// no store with the reason, every auxiliary `merkle` box, and a count of `uuid` boxes of other
+/// types.
 ///
 /// Built by [`AvifContainer::c2pa_summary`]. The summary carries the facts and renders the lines,
 /// so every host prints the same words and none can drop [`C2PA_NOT_VALIDATED`] while rewording
@@ -257,10 +271,12 @@ pub struct C2paMerkleBox {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct C2paSummary {
-    /// Every located slot, in file order. A file mid-update legitimately carries two — `original`
+    /// Every located store, in file order. A file mid-update legitimately carries two — `original`
     /// and `update` (§A.5.3) — and both are listed: which is *active* is a validator's judgement.
     pub stores: Vec<C2paStoreSummary>,
-    /// Every top-level C2PA box that yielded no slot, in file order, with the reason. Non-empty
+    /// Every top-level C2PA box that yielded no store, in file order, with the reason — including
+    /// a slot that bounds none ([`C2paUnreadReason::NoStoreBound`]), such as an unfilled
+    /// reservation. Non-empty
     /// beside an empty [`stores`](Self::stores) is the case a report must not collapse into "none
     /// found".
     pub unread: Vec<C2paUnreadBox>,
@@ -286,7 +302,7 @@ impl C2paSummary {
     }
 
     /// The report's head — **at most three lines, whatever the file holds**: the headline, which
-    /// names every non-empty slot category and carries [`C2PA_NOT_VALIDATED`] inline; the count of
+    /// names every non-empty store category and carries [`C2PA_NOT_VALIDATED`] inline; the count of
     /// auxiliary `merkle` boxes when there are any; and the count of `uuid` boxes of another
     /// extended type when there are any. Not indented.
     #[must_use]
@@ -333,7 +349,7 @@ impl C2paSummary {
     }
 
     /// The report's first line: what the scan found, with [`C2PA_NOT_VALIDATED`] inline. Four
-    /// outcomes, because a file carrying C2PA boxes none of which yielded a slot is neither
+    /// outcomes, because a file carrying C2PA boxes none of which yielded a store is neither
     /// "located" nor "none found".
     fn headline(&self) -> String {
         let located = located_clause(self.stores.len());
@@ -356,7 +372,7 @@ impl C2paSummary {
     }
 }
 
-/// The headline's clause for `count` located slots, or `None` when there are none.
+/// The headline's clause for `count` located stores, or `None` when there are none.
 fn located_clause(count: usize) -> Option<String> {
     (count > 0).then(|| {
         format!(
@@ -366,7 +382,7 @@ fn located_clause(count: usize) -> Option<String> {
     })
 }
 
-/// The headline's clause for `count` C2PA boxes that yielded no slot, or `None` when there are
+/// The headline's clause for `count` C2PA boxes that yielded no store, or `None` when there are
 /// none.
 fn unread_clause(count: usize) -> Option<String> {
     (count > 0).then(|| {
@@ -379,7 +395,7 @@ fn unread_clause(count: usize) -> Option<String> {
 
 /// One entry of [`C2paSummary::detail_lines`]'s list, borrowed from the summary.
 enum DetailEntry<'a> {
-    /// A slot [`C2paSummary::stores`] holds.
+    /// A store [`C2paSummary::stores`] holds.
     Store(&'a C2paStoreSummary),
     /// A C2PA box [`C2paSummary::unread`] holds.
     Unread(&'a C2paUnreadBox),
@@ -401,8 +417,8 @@ impl DetailEntry<'_> {
     fn line(&self) -> String {
         match self {
             Self::Store(store) => format!(
-                "  box_purpose \"{purpose}\": {size}-byte slot (store plus any padding) at \
-                 [{start}, {end}) — located, not validated{note}",
+                "  box_purpose \"{purpose}\": {size} bytes at [{start}, {end}) — located, not \
+                 validated{note}",
                 purpose = store.purpose.as_str(),
                 size = store.size(),
                 start = store.range.start,
@@ -440,13 +456,19 @@ fn summary(segments: &[Segment<'_>]) -> C2paSummary {
     let mut summary = C2paSummary::default();
     for (range, position, classified) in top_level_uuid_boxes(segments) {
         match classified {
-            C2paUuidBox::Slot(slot) => {
-                summary.stores.push(C2paStoreSummary {
-                    range: slot.range,
+            C2paUuidBox::Slot(slot) => match slot.store_range() {
+                Some(store) => summary.stores.push(C2paStoreSummary {
+                    range: store,
                     purpose: slot.purpose,
                     position,
-                });
-            }
+                    slot: slot.range,
+                }),
+                None => summary.unread.push(C2paUnreadBox {
+                    range,
+                    reason: C2paUnreadReason::NoStoreBound,
+                    position,
+                }),
+            },
             C2paUuidBox::Merkle => {
                 summary.merkle.push(C2paMerkleBox { range, position });
             }
@@ -463,11 +485,12 @@ fn summary(segments: &[Segment<'_>]) -> C2paSummary {
 
 impl AvifContainer<'_> {
     /// A non-validating summary of the file's top-level C2PA boxes, in file order: every
-    /// manifest-store slot, every C2PA box that yielded none with the reason, every auxiliary
-    /// `merkle` box, and a count of `uuid` boxes of other extended types.
+    /// manifest store (with the slot it sits in), every C2PA box that yielded none with the reason,
+    /// every auxiliary `merkle` box, and a count of `uuid` boxes of other extended types.
     ///
-    /// The same scan as [`c2pa_slots`](Self::c2pa_slots), reported without the slots' bytes, and
-    /// strictly the fuller view: a C2PA box that iterator drops is listed here. See
+    /// The same scan as [`c2pa_slots`](Self::c2pa_slots), reported without the bytes, and
+    /// strictly the fuller view: a C2PA box that iterator drops is listed here, and a slot it
+    /// yields that bounds no store is listed as unread. See
     /// [`C2paSummary`] for what it is for and [`C2PA_NOT_VALIDATED`] for what is said beside it.
     #[must_use]
     pub fn c2pa_summary(&self) -> C2paSummary {
@@ -567,43 +590,69 @@ mod tests {
 
     #[test]
     fn the_summary_lists_every_top_level_c2pa_box_in_file_order_with_its_position() {
-        let manifest = body(C2PA_UUID, [0; 4], b"original", &data(0, &[7, 7]));
+        // A JUMBF store `LBox`-bounded at 8 + `interior.len()`.
+        let jumbf = |interior: &[u8]| {
+            let mut s = u32::try_from(8 + interior.len())
+                .expect("small")
+                .to_be_bytes()
+                .to_vec();
+            s.extend_from_slice(b"jumb");
+            s.extend_from_slice(interior);
+            s
+        };
+        // A 10-byte store and 3 bytes of §A.5.3 padding: the store and the slot differ.
+        let mut padded = jumbf(b"ab");
+        padded.extend_from_slice(&[0xEE; 3]);
+        let manifest = body(C2PA_UUID, [0; 4], b"original", &data(0, &padded));
         let foreign = body([0xAA; 16], [0; 4], b"manifest", &data(0, &[9]));
         let bad_version = body(C2PA_UUID, [1, 0, 0, 0], b"manifest", &data(0, &[9]));
         let merkle = body(C2PA_UUID, [0; 4], b"merkle", &[0; 4]);
-        let update = body(C2PA_UUID, [0; 4], b"update", &data(0, &[8, 8, 8]));
+        // An unfilled reservation: a slot, but no store in it.
+        let reserved = body(C2PA_UUID, [0; 4], b"manifest", &data(0, &[0; 4]));
+        let update = body(C2PA_UUID, [0; 4], b"update", &data(0, &jumbf(b"xyz")));
         let segments = vec![
             boxed(0, b"ftyp", &[0; 12]),
             boxed(20, b"uuid", &manifest),
             boxed(100, b"uuid", &foreign),
             boxed(200, b"uuid", &bad_version),
             boxed(300, b"uuid", &merkle),
+            boxed(350, b"uuid", &reserved),
             boxed(400, b"mdat", &[0; 4]),
             boxed(500, b"uuid", &update),
         ];
         let summary = summary(&segments);
+        // `range` is the store and `slot` the slot it sits in — `gamut-heic`'s two ranges (#505).
         assert_eq!(
             summary.stores,
             vec![
                 C2paStoreSummary {
-                    range: 65..67,
+                    range: 65..75,
                     purpose: C2paBoxPurpose::Original,
                     position: C2paBoxPosition::BeforeMediaData,
+                    slot: 65..78,
                 },
                 C2paStoreSummary {
-                    range: 543..546,
+                    range: 543..554,
                     purpose: C2paBoxPurpose::Update,
                     position: C2paBoxPosition::AfterMediaData,
+                    slot: 543..554,
                 },
             ]
         );
         assert_eq!(
             summary.unread,
-            vec![C2paUnreadBox {
-                range: 200..200 + 8 + bad_version.len(),
-                reason: C2paUnreadReason::NotVersionZero,
-                position: C2paBoxPosition::BeforeMediaData,
-            }]
+            vec![
+                C2paUnreadBox {
+                    range: 200..200 + 8 + bad_version.len(),
+                    reason: C2paUnreadReason::NotVersionZero,
+                    position: C2paBoxPosition::BeforeMediaData,
+                },
+                C2paUnreadBox {
+                    range: 350..350 + 8 + reserved.len(),
+                    reason: C2paUnreadReason::NoStoreBound,
+                    position: C2paBoxPosition::BeforeMediaData,
+                },
+            ]
         );
         assert_eq!(
             summary.merkle,
@@ -613,17 +662,16 @@ mod tests {
             }]
         );
         assert_eq!(summary.other_uuid_boxes, 1);
-        // The slot view over the same scan sees exactly the two slots.
-        assert_eq!(slots(&segments).count(), 2);
+        // The slot view over the same scan sees all three slots, the reservation included.
+        assert_eq!(slots(&segments).count(), 3);
 
         // The detail lines interleave the three kinds in file order, and the count agrees.
         let details: Vec<String> = summary.detail_lines().collect();
-        assert_eq!(summary.detail_line_count(), 4);
+        assert_eq!(summary.detail_line_count(), 5);
         assert_eq!(
             details,
             vec![
-                "  box_purpose \"original\": 2-byte slot (store plus any padding) at [65, 67) — \
-                 located, not validated"
+                "  box_purpose \"original\": 10 bytes at [65, 75) — located, not validated"
                     .to_owned(),
                 format!(
                     "  unread C2PA box at [200, {}): {}",
@@ -635,22 +683,27 @@ mod tests {
                      not a manifest store",
                     308 + merkle.len()
                 ),
-                "  box_purpose \"update\": 3-byte slot (store plus any padding) at [543, 546) — \
-                 located, not validated; its box begins after the first mdat box"
+                format!(
+                    "  unread C2PA box at [350, {}): {}",
+                    358 + reserved.len(),
+                    C2paUnreadReason::NoStoreBound.describe()
+                ),
+                "  box_purpose \"update\": 11 bytes at [543, 554) — located, not validated; its \
+                 box begins after the first mdat box"
                     .to_owned(),
             ]
         );
         let lines = summary.report_lines();
         assert_eq!(
             lines.len(),
-            3 + 4,
+            3 + 5,
             "headline, merkle count, other count, details"
         );
         assert_eq!(lines[3..], details[..]);
         assert_eq!(
             lines[0],
             format!(
-                "C2PA: 2 manifest stores located, NOT VALIDATED, and 1 C2PA box is present from \
+                "C2PA: 2 manifest stores located, NOT VALIDATED, and 2 C2PA boxes are present from \
                  which no store could be read — a box gamut could not read through is NOT absence \
                  of provenance — {C2PA_NOT_VALIDATED}"
             )
@@ -673,6 +726,7 @@ mod tests {
             range: start..start + 9,
             purpose: C2paBoxPurpose::Manifest,
             position: C2paBoxPosition::BeforeMediaData,
+            slot: start..start + 9,
         };
         let unread = |start| C2paUnreadBox {
             range: start..start + 30,
@@ -732,26 +786,45 @@ mod tests {
 
     #[test]
     fn a_container_summary_reports_the_slot_the_encoder_wrote() {
-        // End to end through the real container: the summary's range is the encoder's reported
-        // range, and the slot's bytes appear nowhere in the report.
+        // End to end through the real container: the summary's slot is the encoder's reported
+        // range, its range the store trimmed out of it, and an unfilled reservation is no store.
         let rgb = [0x40u8; 8 * 8 * 3];
-        let image = gamut_core::ImageRef::<gamut_core::Rgb8>::new(
-            &rgb,
-            gamut_core::Dimensions {
-                width: 8,
-                height: 8,
-            },
-        )
-        .expect("buffer matches dimensions");
+        let image = || {
+            gamut_core::ImageRef::<gamut_core::Rgb8>::new(
+                &rgb,
+                gamut_core::Dimensions {
+                    width: 8,
+                    height: 8,
+                },
+            )
+            .expect("buffer matches dimensions")
+        };
+        // A 12-byte JUMBF store followed by 4 bytes of padding, signed in place.
+        let mut padded = 12u32.to_be_bytes().to_vec();
+        padded.extend_from_slice(b"jumbabcd");
+        padded.extend_from_slice(&[0xEE; 4]);
+        let (file, report) = crate::AvifEncoder::new()
+            .with_c2pa(&padded)
+            .encode_with_report(image())
+            .expect("encode");
+        let slot = report.c2pa.expect("a slot was written");
+        let summary = AvifContainer::parse(&file).expect("parse").c2pa_summary();
+        assert_eq!(summary.stores.len(), 1);
+        assert_eq!(summary.stores[0].slot, slot);
+        assert_eq!(summary.stores[0].range, slot.start..slot.start + 12);
+        assert!(summary.unread.is_empty() && summary.merkle.is_empty());
+
         let (file, report) = crate::AvifEncoder::new()
             .with_c2pa_reserved(64)
-            .encode_with_report(image)
+            .encode_with_report(image())
             .expect("encode");
-        let container = AvifContainer::parse(&file).expect("parse");
-        let summary = container.c2pa_summary();
-        assert_eq!(summary.stores.len(), 1);
-        assert_eq!(Some(summary.stores[0].range.clone()), report.c2pa);
-        assert_eq!(summary.stores[0].size(), 64);
-        assert!(summary.unread.is_empty() && summary.merkle.is_empty());
+        let summary = AvifContainer::parse(&file).expect("parse").c2pa_summary();
+        assert!(summary.stores.is_empty());
+        assert_eq!(summary.unread.len(), 1);
+        assert_eq!(summary.unread[0].reason, C2paUnreadReason::NoStoreBound);
+        // The unread entry names the whole box, which holds the reserved slot.
+        let slot = report.c2pa.expect("a slot was reserved");
+        assert!(summary.unread[0].range.start < slot.start);
+        assert_eq!(summary.unread[0].range.end, slot.end);
     }
 }
