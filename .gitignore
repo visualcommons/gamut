@@ -41,6 +41,8 @@ tooling/gamut-fuzz/corpus/**
 !tooling/gamut-fuzz/corpus/*/
 !tooling/gamut-fuzz/corpus/avif_clean_alpha/16bit-1x3-edge.bin
 !tooling/gamut-fuzz/corpus/avif_clean_alpha/8bit-2x2-edge.bin
+!tooling/gamut-fuzz/corpus/avif_parse_decode/grid-2x2-limits-6.avif
+!tooling/gamut-fuzz/corpus/avif_parse_decode/overlay-two-inputs-limits-100px.avif
 !tooling/gamut-fuzz/corpus/dng_decode/cfa-12bit.dng
 !tooling/gamut-fuzz/corpus/heic_container/appended-stream.heic
 !tooling/gamut-fuzz/corpus/heic_container/heic-single-item.heic
