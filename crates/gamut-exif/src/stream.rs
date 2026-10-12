@@ -608,12 +608,21 @@ mod tests {
 
     /// A marked blob whose 1st IFD carries the given `(tag, LONG)` fields after `Compression`.
     fn thumbnail_blob(fields: &[(u16, u32)]) -> Vec<u8> {
+        let fields: Vec<(u16, Value)> = fields
+            .iter()
+            .map(|&(tag, value)| (tag, Value::Long(vec![value])))
+            .collect();
+        thumbnail_blob_of(&fields)
+    }
+
+    /// A marked blob whose 1st IFD carries the given `(tag, value)` fields after `Compression`.
+    fn thumbnail_blob_of(fields: &[(u16, Value)]) -> Vec<u8> {
         let mut image = Ifd::new();
         image.set(0x010F, Value::Ascii("Canon".into()));
         let mut thumb = Ifd::new();
         thumb.set(ExifTag::Compression.tag_id(), Value::Short(vec![6]));
-        for &(tag, value) in fields {
-            thumb.set(tag, Value::Long(vec![value]));
+        for (tag, value) in fields {
+            thumb.set(*tag, value.clone());
         }
         let tiff = write(&TiffFile {
             order: ByteOrder::LittleEndian,
@@ -657,6 +666,38 @@ mod tests {
                 .expect("the emitted blob must be strictly valid");
             assert!(report.is_empty(), "{reason:?}: {:?}", report.dropped());
             assert_eq!(reparsed.thumbnail(), exif.thumbnail(), "{reason:?}");
+        }
+    }
+
+    /// A `JPEGInterchangeFormat` that `get_u32` cannot read as one offset never reaches the model
+    /// either, and is not reported as a drop (#548, decision 2).
+    ///
+    /// Such a pointer addresses nothing the reader can follow, so no thumbnail bytes were lost and
+    /// the report stays empty; but before the fix it survived into the model (the strip ran only
+    /// when bytes were read) and `to_bytes` wrote back a pointer field no reader can use. Swept
+    /// over the two ways a value fails `as_u32`: a non-integer type, and an integer type with a
+    /// count other than one.
+    #[test]
+    fn an_unreadable_thumbnail_pointer_is_stripped_without_a_drop() {
+        let ptr = ExifTag::JpegInterchangeFormat.tag_id();
+        let len = ExifTag::JpegInterchangeFormatLength.tag_id();
+        for value in [Value::Ascii("x".into()), Value::Long(vec![4, 8])] {
+            let blob = thumbnail_blob_of(&[(ptr, value.clone()), (len, Value::Long(vec![16]))]);
+            let (exif, report) = ExifReader::new()
+                .parse_with_report(&blob)
+                .expect("lenient parse");
+            assert!(report.is_empty(), "{value:?}: {:?}", report.dropped());
+            let thumb = exif.thumbnail().expect("the 1st IFD is still a thumbnail");
+            assert_eq!(thumb.ifd().get(ptr), None, "{value:?}: pointer kept");
+            assert_eq!(thumb.jpeg(), None, "{value:?}");
+
+            let emitted = exif.to_bytes().expect("write");
+            let (reparsed, report) = ExifReader::new()
+                .strict(true)
+                .parse_with_report(&emitted)
+                .expect("the emitted blob must be strictly valid");
+            assert!(report.is_empty(), "{value:?}: {:?}", report.dropped());
+            assert_eq!(reparsed.thumbnail(), exif.thumbnail(), "{value:?}");
         }
     }
 
