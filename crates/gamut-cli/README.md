@@ -75,6 +75,12 @@ gamut convert output.jxl roundtrip.png
 gamut av1 encode input.ppm output.obu
 dav1d -i output.obu -o roundtrip.y4m      # external check
 
+# Account for every byte of a TIFF/DNG/PNG (exit 1 when it is not fully accounted for), and report
+# the C2PA manifest store a HEIC/AVIF/WebP/TIFF/DNG carries -- located, never validated.
+gamut inspect scan.tif
+# The same facts as one JSON document, every list uncapped; the exit code is unchanged.
+gamut inspect --output json photo.heic | jq .c2pa.stores
+
 # Inspect the gamut-color CICP / pixel-format tables.
 gamut color list
 
@@ -109,6 +115,10 @@ The sandbox exposes:
   - **JPEG** (`.jpg`/`.jpeg`) — JPEG-1, baseline sequential or progressive (`--jpeg-progressive`),
     always lossy at `--quality`; colour is YCbCr with `--jpeg-subsampling` (444/422/420, default
     420) and optional `--jpeg-restart-interval` restart markers. No alpha (JPEG has none).
+- `inspect` — strict deconstruct of a TIFF, DNG or PNG (every byte classified, unknowns and
+  anomalies flagged, PNG's compression figures), and the C2PA provenance report — located, never
+  validated — for HEIC, AVIF, WebP, TIFF and DNG. `--output json` renders the same facts as one
+  JSON document with no list truncated. Exit codes: `docs/inspect-exit-codes.md`.
 - `av1 encode` — raw AV1 OBU still images from 8-bit RGB input.
 - `color list`, `dsp wht`, `bitstream leb128` — inspection of the shared primitives.
 

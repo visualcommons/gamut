@@ -626,6 +626,7 @@ dependencies = [
  "clap",
  "gamut",
  "image",
+ "serde_json",
  "thiserror",
  "tracing",
  "tracing-subscriber",

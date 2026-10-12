@@ -759,3 +759,322 @@ fn a_dng_reports_its_reserved_store_beside_the_accounting() {
         "{stdout}"
     );
 }
+
+// `--output json` (#596): the same facts as data. Each test reads the document back as JSON and
+// compares it with what the format crate itself reports for the file, so what is pinned is that the
+// command carries the crate's summary through whole, not what the summary says.
+
+/// Runs `gamut inspect --output json [--format <f>] <file>` and parses stdout as one JSON document.
+fn run_inspect_json(name: &str, bytes: &[u8], force: Option<&str>) -> (Output, serde_json::Value) {
+    let path =
+        std::env::temp_dir().join(format!("gamut-inspect-json-{}-{name}", std::process::id()));
+    std::fs::write(&path, bytes).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gamut"));
+    command.arg("inspect").arg("--output").arg("json");
+    if let Some(format) = force {
+        command.arg("--format").arg(format);
+    }
+    let output = command.arg(&path).output().expect("run gamut inspect");
+    let _ = std::fs::remove_file(&path);
+    let doc = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not one JSON document ({e}): {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    (output, doc)
+}
+
+/// A JSON `{"start", "end"}` range object for a half-open range.
+fn json_range(start: u64, end: u64) -> serde_json::Value {
+    serde_json::json!({ "start": start, "end": end })
+}
+
+#[test]
+fn json_output_lists_every_heic_c2pa_box_past_the_text_cap() {
+    // The cap is a terminal-presentation decision: the document carries every box the crate
+    // reports, in file order, with the unread box the text report hides behind its tail.
+    let mut boxes: Vec<Vec<u8>> = (0..=MAX_LIST)
+        .map(|_| {
+            uuid_box(
+                &C2PA_UUID,
+                0,
+                "manifest",
+                &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+            )
+        })
+        .collect();
+    boxes.push(uuid_box(
+        &C2PA_UUID,
+        1,
+        "manifest",
+        &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+    ));
+    let mut foreign = C2PA_UUID;
+    foreign[0] ^= 0xFF;
+    boxes.push(uuid_box(&foreign, 0, "manifest", &jumbf_store(b"opaque")));
+    let file = splice_after_ftyp(&heic_file(), &boxes);
+    let summary = gamut::heic::HeifContainer::parse(&file)
+        .expect("parse")
+        .c2pa_summary();
+    let (out, doc) = run_inspect_json("uncapped.heic", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["format"], "heic");
+    assert_eq!(doc["format_source"], "detected");
+    let stores = doc["c2pa"]["stores"].as_array().expect("stores");
+    assert_eq!(stores.len(), MAX_LIST + 1, "{doc}");
+    for (json, store) in stores.iter().zip(&summary.stores) {
+        assert_eq!(json["purpose"], "manifest");
+        assert_eq!(json["extent"], "store");
+        assert_eq!(json["size"], store.size());
+        assert_eq!(
+            json["range"],
+            json_range(store.range.start as u64, store.range.end as u64)
+        );
+        assert_eq!(json["position"], "before_media_data");
+    }
+    let unread = &doc["c2pa"]["unread"];
+    assert_eq!(unread.as_array().map(Vec::len), Some(1), "{doc}");
+    assert_eq!(unread[0]["reason"], "not_version_zero");
+    assert_eq!(
+        unread[0]["range"],
+        json_range(
+            summary.unread[0].range.start as u64,
+            summary.unread[0].range.end as u64
+        )
+    );
+    assert_eq!(doc["c2pa"]["merkle"], serde_json::json!([]));
+    assert_eq!(doc["c2pa"]["other_uuid_boxes"], 1);
+}
+
+#[test]
+fn json_output_carries_the_non_validation_statement_and_never_the_store_bytes() {
+    let file = splice_after_ftyp(
+        &heic_file(),
+        &[uuid_box(
+            &C2PA_UUID,
+            0,
+            "manifest",
+            &[
+                &0u64.to_be_bytes()[..],
+                &jumbf_store(b"STORE-BYTES-NEVER-PRINTED"),
+            ]
+            .concat(),
+        )],
+    );
+    let (out, doc) = run_inspect_json("disclaimed.heic", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(
+        doc["c2pa"]["not_validated"],
+        gamut::heic::C2PA_NOT_VALIDATED
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("STORE-BYTES"),
+        "{doc}"
+    );
+}
+
+#[test]
+fn json_output_says_a_forced_format_was_asserted() {
+    let (out, doc) = run_inspect_json("forced-json.heic", &heic_file(), Some("heic"));
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["format_source"], "asserted");
+}
+
+#[test]
+fn json_output_reports_an_avif_slot_at_the_encoders_range() {
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let store = b"STORE-BYTES-NEVER-PRINTED";
+    let (file, report) = gamut::avif::AvifEncoder::new()
+        .with_c2pa(store)
+        .encode_with_report(rgb_image(&rgb))
+        .expect("encode");
+    let range = report.c2pa.expect("a slot was written");
+    let (out, doc) = run_inspect_json("signed-json.avif", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["format"], "avif");
+    let stores = &doc["c2pa"]["stores"];
+    assert_eq!(stores.as_array().map(Vec::len), Some(1), "{doc}");
+    assert_eq!(stores[0]["extent"], "slot");
+    assert_eq!(stores[0]["size"], store.len());
+    assert_eq!(
+        stores[0]["range"],
+        json_range(range.start as u64, range.end as u64)
+    );
+    assert_eq!(
+        doc["c2pa"]["not_validated"],
+        gamut::avif::C2PA_NOT_VALIDATED
+    );
+}
+
+#[test]
+fn json_output_lists_an_avifs_unread_and_merkle_boxes_after_its_media_data() {
+    // Appended after the encoder's `mdat`, so no offset the file's `iloc` holds moves: a C2PA box
+    // whose `FullBox` version is not zero (§A.5.1.2), then an auxiliary `merkle` box (§A.5.4.1.4).
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let mut file = gamut::avif::AvifEncoder::new()
+        .encode_to_vec(rgb_image(&rgb))
+        .expect("encode");
+    file.extend_from_slice(&uuid_box(
+        &C2PA_UUID,
+        1,
+        "manifest",
+        &[&0u64.to_be_bytes()[..], &jumbf_store(b"opaque")].concat(),
+    ));
+    file.extend_from_slice(&uuid_box(&C2PA_UUID, 0, "merkle", b"hashes"));
+    let summary = gamut::avif::AvifContainer::parse(&file)
+        .expect("parse")
+        .c2pa_summary();
+    let (out, doc) = run_inspect_json("unread-merkle.avif", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["c2pa"]["stores"], serde_json::json!([]), "{doc}");
+    let unread = &doc["c2pa"]["unread"];
+    assert_eq!(unread.as_array().map(Vec::len), Some(1), "{doc}");
+    assert_eq!(
+        unread[0]["range"],
+        json_range(
+            summary.unread[0].range.start as u64,
+            summary.unread[0].range.end as u64
+        )
+    );
+    assert_eq!(unread[0]["reason"], "not_version_zero");
+    assert_eq!(
+        unread[0]["description"],
+        summary.unread[0].reason.describe()
+    );
+    assert_eq!(unread[0]["position"], "after_media_data");
+    let merkle = &doc["c2pa"]["merkle"];
+    assert_eq!(merkle.as_array().map(Vec::len), Some(1), "{doc}");
+    assert_eq!(
+        merkle[0]["range"],
+        json_range(
+            summary.merkle[0].range.start as u64,
+            summary.merkle[0].range.end as u64
+        )
+    );
+    assert_eq!(merkle[0]["position"], "after_media_data");
+}
+
+#[test]
+fn json_output_lists_a_webp_chunk_too_short_for_a_store_as_unread() {
+    // A `C2PA` chunk whose 4-byte payload cannot hold a JUMBF box header, inserted ahead of the
+    // encoder's own `C2PA` chunk, with the RIFF size patched to cover it.
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let mut file = Vec::new();
+    gamut::webp::WebpEncoder::lossless()
+        .with_c2pa(b"STORE-BYTES-NEVER-PRINTED")
+        .encode_image(rgb_image(&rgb), &mut file)
+        .expect("encode");
+    let at = gamut::webp::c2pa_span(&file)
+        .expect("walk")
+        .expect("a chunk")
+        .start;
+    let short = [&b"C2PA"[..], &4u32.to_le_bytes(), b"abcd"].concat();
+    file.splice(at..at, short);
+    let riff_size = u32::try_from(file.len() - 8).unwrap();
+    file[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    let summary = gamut::webp::c2pa_summary(&file).expect("walk");
+    let (out, doc) = run_inspect_json("short-chunk.webp", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(
+        doc["c2pa"]["unread"],
+        serde_json::json!([{
+            "range": json_range(at as u64 + 8, at as u64 + 12),
+            "position": "before_later_chunks",
+        }])
+    );
+    assert_eq!(summary.unread.len(), 1);
+    assert_eq!(summary.unread[0].range, at + 8..at + 12);
+    assert_eq!(doc["c2pa"]["stores"][0]["position"], "last", "{doc}");
+}
+
+#[test]
+fn json_output_reports_a_webp_store_as_the_chunk_payload() {
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let mut file = Vec::new();
+    gamut::webp::WebpEncoder::lossless()
+        .with_c2pa(b"STORE-BYTES-NEVER-PRINTED")
+        .encode_image(rgb_image(&rgb), &mut file)
+        .expect("encode");
+    let span = gamut::webp::c2pa_span(&file)
+        .expect("walk")
+        .expect("a chunk");
+    let (out, doc) = run_inspect_json("signed-json.webp", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["format"], "webp");
+    let stores = &doc["c2pa"]["stores"];
+    assert_eq!(stores.as_array().map(Vec::len), Some(1), "{doc}");
+    assert_eq!(
+        stores[0]["range"],
+        json_range(span.start as u64 + 8, span.end as u64)
+    );
+    assert_eq!(stores[0]["position"], "last");
+    assert_eq!(doc["c2pa"]["unread"], serde_json::json!([]));
+    assert_eq!(
+        doc["c2pa"]["not_validated"],
+        gamut::webp::C2PA_NOT_VALIDATED
+    );
+}
+
+#[test]
+fn json_output_reports_a_tiff_store_beside_its_accounting() {
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let mut file = Vec::new();
+    let report = gamut::tiff::TiffEncoder::new()
+        .with_metadata(
+            gamut::tiff::TiffMetadata::new().with_c2pa(b"STORE-BYTES-NEVER-PRINTED".to_vec()),
+        )
+        .encode_with_report(rgb_image(&rgb), &mut file)
+        .expect("encode");
+    let exclusions = report.c2pa.expect("a store was written");
+    let (store, count) = (exclusions.store(), exclusions.count_field());
+    let (out, doc) = run_inspect_json("signed-json.tif", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["format"], "tiff");
+    assert_eq!(doc["fully_accounted"], true);
+    assert_eq!(doc["fully_classified"], true);
+    assert_eq!(doc["accounting"]["file_len"], file.len());
+    assert_eq!(doc["accounting"]["unclassified_bytes"], 0);
+    let json = &doc["c2pa"]["store"];
+    assert_eq!(json["size"], 25);
+    assert_eq!(json["range"], json_range(store.start, store.end()));
+    assert_eq!(json["count_field"], json_range(count.start, count.end()));
+    assert_eq!(json["ifd"], 0);
+    assert_eq!(
+        doc["c2pa"]["not_validated"],
+        gamut::tiff::C2PA_NOT_VALIDATED
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("STORE-BYTES"),
+        "{doc}"
+    );
+}
+
+#[test]
+fn json_output_lists_a_mistyped_tiff_store_entry_as_unread_with_its_reason() {
+    let mut ifd = gamut::tiff::Ifd::new();
+    ifd.set(256, gamut::tiff::Value::Short(vec![1]));
+    ifd.set(52545, gamut::tiff::Value::Byte(vec![0x10; 12]));
+    let file = gamut::tiff::write(&gamut::tiff::TiffFile {
+        order: gamut::tiff::ByteOrder::LittleEndian,
+        variant: gamut::tiff::Variant::Classic,
+        ifds: vec![ifd],
+    })
+    .expect("write");
+    let (_, doc) = run_inspect_json("mistyped-json.tif", &file, Some("tiff"));
+
+    assert_eq!(doc["c2pa"]["store"], serde_json::Value::Null, "{doc}");
+    let unread = &doc["c2pa"]["unread"];
+    assert_eq!(unread.as_array().map(Vec::len), Some(1), "{doc}");
+    // Entry 1 of the directory at 8, after tag 256's: 8 + 2 + 12.
+    assert_eq!(unread[0]["entry"], json_range(22, 34));
+    assert_eq!(unread[0]["ifd"], 0);
+    assert_eq!(unread[0]["reason"], "not_undefined");
+}

@@ -50,6 +50,17 @@
 //! declined would echo the caller's assertion back as a finding. A WebP needs no such label: the
 //! RIFF walk itself refuses a file without the `RIFF` magic and the `WEBP` form.
 //!
+//! # `--output json`
+//!
+//! The same facts as one JSON document (issue #596), for a caller that would otherwise match on
+//! the text report's wording. Each arm builds its facts once and renders them either way — a TIFF
+//! or DNG [`Summary`] entry carries its text line and its JSON object side by side, and a PNG
+//! finding is rendered from one [`PngFinding`] — so the two outputs cannot list different things.
+//! Nothing is capped in JSON: the twenty-entry cut is a terminal-presentation decision. Each `c2pa`
+//! object carries its crate's `C2PA_NOT_VALIDATED` and never a store's bytes, and the exit code is
+//! the text report's. The writer is [`Json`], hand-written because the command only ever emits
+//! JSON and the workspace keeps `serde_json` dev-only.
+//!
 //! The contract itself — the gate per format, the two exit codes, the budgets, and every reason
 //! the PNG filter scan declines — is recorded in `docs/inspect-exit-codes.md`, which is normative
 //! for it. What follows is why the code is shaped that way.
@@ -119,6 +130,22 @@ pub(crate) struct InspectArgs {
     /// Force the container format instead of auto-detecting it.
     #[arg(long, value_enum)]
     format: Option<Format>,
+    /// How to render the report on stdout. `json` is one JSON document holding the same facts as
+    /// the text report, with no list truncated; the exit code is the same either way.
+    #[arg(long, value_enum, default_value_t = Output::Text)]
+    output: Output,
+}
+
+/// How `gamut inspect` renders its report.
+///
+/// A rendering, never a verdict: the exit code and the stderr message are the same for both (see
+/// `docs/inspect-exit-codes.md`).
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum Output {
+    /// The human-readable report, with every input-sized list capped at [`MAX_LIST`] entries.
+    Text,
+    /// One JSON document (RFC 8259) on stdout: the same facts, every list uncapped.
+    Json,
 }
 
 /// The container format to deconstruct as.
@@ -139,13 +166,22 @@ pub(crate) enum Format {
 }
 
 /// A format-agnostic view of a deconstruct report, for printing.
+///
+/// Every listed entry carries both renderings, built from the same fields in the same place, so
+/// the text report and the JSON document cannot list different things.
 struct Summary {
     segments: SegmentReport,
-    unknown_fields: Vec<String>,
-    unknown_tags: Vec<String>,
-    anomalies: Vec<String>,
+    unknown_fields: Vec<Listed>,
+    unknown_tags: Vec<Listed>,
+    anomalies: Vec<Listed>,
     fully_classified: bool,
     fully_accounted: bool,
+}
+
+/// One entry of a [`Summary`] list: its text-report line and its JSON object.
+struct Listed {
+    line: String,
+    json: Json,
 }
 
 /// Runs the `inspect` command: deconstruct the file, print the report, and exit non-zero if it is
@@ -165,22 +201,27 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
         Some(_) => Route::Forced,
         None => Route::Sniffed,
     };
+    let to = Target {
+        path: &args.input,
+        route,
+        output: args.output,
+    };
     match format {
-        Format::Png => return inspect_png(&args.input, &data),
+        Format::Png => return inspect_png(to, &data),
         // An `ftyp` box sniffs as HEIC, which is a route to the ISOBMFF arms and not yet a verdict:
         // `inspect_isobmff` confirms which still image the file is (see the module docs).
         Format::Heic if matches!(route, Route::Sniffed) => {
-            return inspect_isobmff(&args.input, &data);
+            return inspect_isobmff(to, &data);
         }
         Format::Heic => {
             let container = gamut::heic::HeifContainer::parse(&data)?;
-            return report_heic(&args.input, &container, route);
+            return report_heic(to, &container);
         }
         Format::Avif => {
             let container = gamut::avif::AvifContainer::parse(&data)?;
-            return report_avif(&args.input, &container, route);
+            return report_avif(to, &container);
         }
-        Format::Webp => return inspect_webp(&args.input, &data),
+        Format::Webp => return inspect_webp(to, &data),
         Format::Tiff | Format::Dng => {}
     }
 
@@ -202,13 +243,24 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
         }
     };
 
-    print_summary(&args.input, format, &summary);
-    // Additive: the section prints beside the byte accounting and never moves the verdict below.
-    print_c2pa(
-        c2pa.summary_lines(),
-        c2pa.detail_lines(),
-        c2pa.detail_line_count(),
-    );
+    match args.output {
+        Output::Text => {
+            print_summary(&args.input, format, &summary);
+            // Additive: the section prints beside the byte accounting and never moves the verdict
+            // below.
+            print_c2pa(
+                c2pa.summary_lines(),
+                c2pa.detail_lines(),
+                c2pa.detail_line_count(),
+            );
+        }
+        Output::Json => {
+            let mut doc = document_head(to, format);
+            doc.extend(summary_json(&summary));
+            doc.push(("c2pa", ifd_c2pa_json(&c2pa)));
+            print_json(&Json::Object(doc));
+        }
+    }
 
     if summary.fully_accounted {
         Ok(())
@@ -266,22 +318,12 @@ fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
     let unknown_fields = report
         .unknown_fields
         .iter()
-        .map(|u| {
-            format!(
-                "page {} tag {:#06x} type {} (count {})",
-                u.page, u.tag, u.type_code, u.count
-            )
-        })
+        .map(|u| unknown_field(u.page, u.tag, u.type_code, u.count))
         .collect();
     let unknown_tags = report
         .unknown_tags
         .iter()
-        .map(|u| {
-            format!(
-                "page {} tag {:#06x} (type {}, count {})",
-                u.page, u.tag, u.field_type, u.count
-            )
-        })
+        .map(|u| unknown_tag(u.page, u.tag, u.field_type, u.count))
         .collect();
     let anomalies = report
         .anomalies
@@ -293,24 +335,31 @@ fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
                 code,
                 detail,
                 ..
-            } => {
-                format!("[error] page {page}: {detail} (tag {tag:#06x}, code {code})")
-            }
+            } => anomaly_unknown_code(*page, *tag, *code, detail),
             Anomaly::UnparsableTag {
                 page, tag, detail, ..
-            } => {
-                format!("[error] page {page}: {detail} (tag {tag:#06x})")
-            }
+            } => anomaly_unparsable_tag(*page, *tag, detail),
             Anomaly::Structure {
                 page,
                 detail,
                 severity,
                 ..
-            } => {
-                format!("[{}] page {page}: {detail}", severity_label_tiff(*severity))
-            }
+            } => anomaly_structure(*page, detail, severity_level_tiff(*severity)),
+            Anomaly::DuplicateTag {
+                ifd,
+                tag,
+                entries,
+                severity,
+                ..
+            } => anomaly_duplicate_tag(
+                format!("{a:?}"),
+                *ifd,
+                *tag,
+                *entries,
+                severity_level_tiff(*severity),
+            ),
             // `Anomaly` is non-exhaustive; render future categories generically.
-            other => format!("[error] {other:?}"),
+            other => anomaly_other(format!("{other:?}")),
         })
         .collect();
     Summary {
@@ -331,22 +380,12 @@ fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
     let unknown_fields = report
         .unknown_fields
         .iter()
-        .map(|u| {
-            format!(
-                "page {} tag {:#06x} type {} (count {})",
-                u.page, u.tag, u.type_code, u.count
-            )
-        })
+        .map(|u| unknown_field(u.page, u.tag, u.type_code, u.count))
         .collect();
     let unknown_tags = report
         .unknown_tags
         .iter()
-        .map(|u| {
-            format!(
-                "page {} tag {:#06x} (type {}, count {})",
-                u.page, u.tag, u.field_type, u.count
-            )
-        })
+        .map(|u| unknown_tag(u.page, u.tag, u.field_type, u.count))
         .collect();
     let anomalies = report
         .anomalies
@@ -358,24 +397,31 @@ fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
                 code,
                 detail,
                 ..
-            } => {
-                format!("[error] page {page}: {detail} (tag {tag:#06x}, code {code})")
-            }
+            } => anomaly_unknown_code(*page, *tag, *code, detail),
             Anomaly::UnparsableTag {
                 page, tag, detail, ..
-            } => {
-                format!("[error] page {page}: {detail} (tag {tag:#06x})")
-            }
+            } => anomaly_unparsable_tag(*page, *tag, detail),
             Anomaly::Structure {
                 page,
                 detail,
                 severity,
                 ..
-            } => {
-                format!("[{}] page {page}: {detail}", severity_label_dng(*severity))
-            }
+            } => anomaly_structure(*page, detail, severity_level_dng(*severity)),
+            Anomaly::DuplicateTag {
+                ifd,
+                tag,
+                entries,
+                severity,
+                ..
+            } => anomaly_duplicate_tag(
+                format!("{a:?}"),
+                *ifd,
+                *tag,
+                *entries,
+                severity_level_dng(*severity),
+            ),
             // `Anomaly` is non-exhaustive; render future categories generically.
-            other => format!("[error] {other:?}"),
+            other => anomaly_other(format!("{other:?}")),
         })
         .collect();
     Summary {
@@ -388,23 +434,157 @@ fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
     }
 }
 
-/// Renders a TIFF anomaly severity.
-fn severity_label_tiff(severity: gamut::tiff::Severity) -> &'static str {
-    match severity {
-        gamut::tiff::Severity::Warning => "warning",
-        gamut::tiff::Severity::Error => "error",
-        // `Severity` is non-exhaustive; treat future levels as errors (the conservative label).
-        _ => "error",
+/// An anomaly severity as this command knows it. `Other` is a level the format crate added after
+/// this command was written (`Severity` is non-exhaustive), or the unknown severity of an anomaly
+/// category this command does not know yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Level {
+    Warning,
+    Error,
+    Other,
+}
+
+impl Level {
+    /// The text report's bracketed label. An unknown level prints as `error`, the conservative
+    /// label, exactly as the text report always has.
+    fn text(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error | Self::Other => "error",
+        }
+    }
+
+    /// The JSON `severity` identifier. An unknown level is `"other"`, as every unknown enumerated
+    /// value in the document is, so the document never names an unknown level as a known one.
+    fn json(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Other => "other",
+        }
     }
 }
 
-/// Renders a DNG anomaly severity.
-fn severity_label_dng(severity: gamut::dng::Severity) -> &'static str {
+/// Classifies a TIFF anomaly severity.
+fn severity_level_tiff(severity: gamut::tiff::Severity) -> Level {
     match severity {
-        gamut::dng::Severity::Warning => "warning",
-        gamut::dng::Severity::Error => "error",
-        // `Severity` is non-exhaustive; treat future levels as errors (the conservative label).
-        _ => "error",
+        gamut::tiff::Severity::Warning => Level::Warning,
+        gamut::tiff::Severity::Error => Level::Error,
+        // `Severity` is non-exhaustive.
+        _ => Level::Other,
+    }
+}
+
+/// Classifies a DNG anomaly severity.
+fn severity_level_dng(severity: gamut::dng::Severity) -> Level {
+    match severity {
+        gamut::dng::Severity::Warning => Level::Warning,
+        gamut::dng::Severity::Error => Level::Error,
+        // `Severity` is non-exhaustive.
+        _ => Level::Other,
+    }
+}
+
+/// An unknown field type, shared by TIFF and DNG, whose reports carry the same four facts.
+fn unknown_field(page: usize, tag: u16, type_code: u16, count: u64) -> Listed {
+    Listed {
+        line: format!("page {page} tag {tag:#06x} type {type_code} (count {count})"),
+        json: Json::Object(vec![
+            ("page", Json::from(page)),
+            ("tag", Json::from(tag)),
+            ("type_code", Json::from(type_code)),
+            ("count", Json::from(count)),
+        ]),
+    }
+}
+
+/// An unknown tag, shared by TIFF and DNG.
+fn unknown_tag(page: usize, tag: u16, field_type: u16, count: u64) -> Listed {
+    Listed {
+        line: format!("page {page} tag {tag:#06x} (type {field_type}, count {count})"),
+        json: Json::Object(vec![
+            ("page", Json::from(page)),
+            ("tag", Json::from(tag)),
+            ("field_type", Json::from(field_type)),
+            ("count", Json::from(count)),
+        ]),
+    }
+}
+
+/// An `Anomaly::UnknownCode`, shared by TIFF and DNG.
+fn anomaly_unknown_code(page: usize, tag: u16, code: u32, detail: &str) -> Listed {
+    Listed {
+        line: format!("[error] page {page}: {detail} (tag {tag:#06x}, code {code})"),
+        json: Json::Object(vec![
+            ("kind", Json::from("unknown_code")),
+            ("severity", Json::from("error")),
+            ("page", Json::from(page)),
+            ("tag", Json::from(tag)),
+            ("code", Json::from(code)),
+            ("detail", Json::from(detail)),
+        ]),
+    }
+}
+
+/// An `Anomaly::UnparsableTag`, shared by TIFF and DNG.
+fn anomaly_unparsable_tag(page: usize, tag: u16, detail: &str) -> Listed {
+    Listed {
+        line: format!("[error] page {page}: {detail} (tag {tag:#06x})"),
+        json: Json::Object(vec![
+            ("kind", Json::from("unparsable_tag")),
+            ("severity", Json::from("error")),
+            ("page", Json::from(page)),
+            ("tag", Json::from(tag)),
+            ("detail", Json::from(detail)),
+        ]),
+    }
+}
+
+/// An `Anomaly::Structure`, shared by TIFF and DNG.
+fn anomaly_structure(page: usize, detail: &str, severity: Level) -> Listed {
+    Listed {
+        line: format!("[{}] page {page}: {detail}", severity.text()),
+        json: Json::Object(vec![
+            ("kind", Json::from("structure")),
+            ("severity", Json::from(severity.json())),
+            ("page", Json::from(page)),
+            ("detail", Json::from(detail)),
+        ]),
+    }
+}
+
+/// An `Anomaly::DuplicateTag`, shared by TIFF and DNG. Its text line is the generic rendering it
+/// has always had (`debug` is the anomaly's `Debug` form); the JSON object names its fields.
+fn anomaly_duplicate_tag(
+    debug: String,
+    ifd: u64,
+    tag: u16,
+    entries: usize,
+    severity: Level,
+) -> Listed {
+    Listed {
+        line: format!("[error] {debug}"),
+        json: Json::Object(vec![
+            ("kind", Json::from("duplicate_tag")),
+            ("severity", Json::from(severity.json())),
+            ("ifd_offset", Json::from(ifd)),
+            ("tag", Json::from(tag)),
+            ("entries", Json::from(entries)),
+        ]),
+    }
+}
+
+/// An anomaly of a category this command does not know yet (`Anomaly` is non-exhaustive),
+/// rendered from its `Debug` form. Its severity is unknown too: the text label is the
+/// conservative `error` it always was, the JSON identifier is `"other"`.
+fn anomaly_other(debug: String) -> Listed {
+    Listed {
+        line: format!("[{}] {debug}", Level::Other.text()),
+        json: Json::Object(vec![
+            ("kind", Json::from("other")),
+            ("severity", Json::from(Level::Other.json())),
+            ("detail", Json::from(debug)),
+        ]),
     }
 }
 
@@ -478,6 +658,63 @@ fn print_summary(path: &std::path::Path, format: Format, s: &Summary) {
     println!("  fully accounted:  {}", yes_no(s.fully_accounted));
 }
 
+/// The JSON members of a TIFF/DNG report: the facts [`print_summary`] prints, every list uncapped.
+fn summary_json(s: &Summary) -> Vec<(&'static str, Json)> {
+    let seg = &s.segments;
+    let ranges = |ranges: &mut dyn Iterator<Item = gamut::ifd::Range>| {
+        Json::Array(ranges.map(|r| span(r.start, r.end())).collect())
+    };
+    let accounting = Json::Object(vec![
+        ("file_len", Json::from(seg.file_len)),
+        (
+            "classified_bytes",
+            Json::from(seg.file_len - seg.unclassified_bytes()),
+        ),
+        ("unclassified_bytes", Json::from(seg.unclassified_bytes())),
+        ("segment_count", Json::from(seg.segments.len())),
+        (
+            "unclassified",
+            ranges(&mut seg.unclassified.iter().copied()),
+        ),
+        (
+            "conflicts",
+            Json::Array(
+                seg.conflicts
+                    .iter()
+                    .map(|c| {
+                        Json::Object(vec![
+                            ("a", span(c.a.range.start, c.a.range.end())),
+                            ("b", span(c.b.range.start, c.b.range.end())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("shared_values", Json::from(seg.shared.len())),
+        (
+            "out_of_bounds",
+            ranges(&mut seg.out_of_bounds.iter().map(|o| o.range)),
+        ),
+        (
+            "unclaimed_reads",
+            ranges(&mut seg.unclaimed_reads.iter().copied()),
+        ),
+        (
+            "unread_claims",
+            ranges(&mut seg.unread_claims.iter().map(|c| c.range)),
+        ),
+    ]);
+    let listed = |list: &[Listed]| Json::Array(list.iter().map(|l| l.json.clone()).collect());
+    vec![
+        ("accounting", accounting),
+        ("unknown_field_types", listed(&s.unknown_fields)),
+        ("unknown_tags", listed(&s.unknown_tags)),
+        ("anomalies", listed(&s.anomalies)),
+        ("fully_classified", Json::Bool(s.fully_classified)),
+        ("fully_accounted", Json::Bool(s.fully_accounted)),
+    ]
+}
+
 /// Prints a `(start, len)` range list under `label`, truncating past [`MAX_LIST`].
 fn print_ranges(label: &str, ranges: &[(u64, u64)]) {
     if ranges.is_empty() {
@@ -492,9 +729,14 @@ fn print_ranges(label: &str, ranges: &[(u64, u64)]) {
     }
 }
 
-/// Prints a pre-formatted line list under `label`, truncating past [`MAX_LIST`].
-fn print_lines(label: &str, lines: &[String]) {
-    print_lines_of(label, lines, lines.len());
+/// Prints the text lines of a [`Listed`] list under `label`, truncating past [`MAX_LIST`].
+fn print_lines(label: &str, listed: &[Listed]) {
+    let lines: Vec<String> = listed
+        .iter()
+        .take(MAX_LIST)
+        .map(|l| l.line.clone())
+        .collect();
+    print_lines_of(label, &lines, listed.len());
 }
 
 /// [`print_lines`], where `lines` may already be truncated and `total` is how many there really
@@ -518,22 +760,19 @@ fn print_lines_of(label: &str, lines: &[String], total: usize) {
 
 /// How many of a `total`-entry list this print left unshown, given the `lines` it was handed.
 ///
-/// Counted from what is actually **printed** — at most [`MAX_LIST`] of them — because the two
-/// callers hide entries in different places. [`print_lines`] passes the whole list and its own
-/// length, so the `MAX_LIST` cut in the loop is the only thing that hides anything; the PNG
-/// caller passes a list already cut to `MAX_LIST` beside the true total, so what it hides are the
-/// lines it never built. A notice derived from `total > lines.len()` alone sees only the second
-/// and is dead for the first — which is how a TIFF with fifty unknown tags came to print twenty
-/// of them and no indication that thirty were missing.
+/// Counted from what is actually **printed** — at most [`MAX_LIST`] of them — because a caller
+/// may hand over either the whole list, so that the `MAX_LIST` cut in the loop is the only thing
+/// that hides anything, or a list already cut to `MAX_LIST` beside the true total, so that what it
+/// hides are the lines it never built. A notice derived from `total > lines.len()` alone sees only
+/// the second and is dead for the first — which is how a TIFF with fifty unknown tags came to
+/// print twenty of them and no indication that thirty were missing.
 fn hidden_entries(total: usize, lines: usize) -> usize {
     total.saturating_sub(lines.min(MAX_LIST))
 }
 
 /// Deconstructs a PNG and prints where its bytes went, exiting non-zero when the file is not a
 /// complete, undamaged datastream.
-fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
-    use gamut::png::{FilterScan, FilterType, SegmentKind};
-
+fn inspect_png(to: Target<'_>, data: &[u8]) -> Result<(), CliError> {
     // Inspection budgets differently from decoding. `gamut::png::deconstruct`'s default matches
     // the *decoder*'s, which guards a decode against hostile input; but a file this command
     // declines to inflate is a file it cannot verify, and at the decoder's 64 MiB that is every
@@ -541,6 +780,242 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
     // ceiling is raised to a gigabyte: past any real image, short of unbounded.
     let limits = gamut::png::DeconstructLimits::default().with_max_image_bytes(1 << 30);
     let report = gamut::png::deconstruct_with_limits(data, limits)?;
+    let path = to.path;
+
+    match to.output {
+        Output::Text => print_png(path, &report),
+        Output::Json => {
+            let mut doc = document_head(to, Format::Png);
+            doc.extend(png_json(&report));
+            print_json(&Json::Object(doc));
+        }
+    }
+
+    // The gate is `is_verified`, not `is_intact`. `is_intact` is "nothing is known against this
+    // file", which a file whose IDAT was never inflated satisfies without anything having been
+    // read — and a corrupt zlib payload under a valid CRC is exactly the damage only the scan
+    // sees. An archival gate that passed such a file would be reporting the reader's budget as a
+    // property of the file.
+    if report.is_verified() {
+        Ok(())
+    } else if report.is_intact() {
+        Err(CliError::NotFullyAccounted(format!(
+            "{}: not verified — {}",
+            path.display(),
+            report
+                .filters
+                .skipped()
+                .map_or("the filter scan did not run", filter_skip_label)
+        )))
+    } else {
+        Err(CliError::NotFullyAccounted(format!(
+            "{}: not a complete, undamaged PNG datastream — {} finding(s)",
+            path.display(),
+            png_findings(&report).count(),
+        )))
+    }
+}
+
+/// One thing a PNG walk holds against the file — the entries of the report's `findings` list.
+///
+/// Kept as a reference into the report rather than as rendered text, because the chunk count is
+/// chosen by the input: the text report renders only the [`MAX_LIST`] entries it prints, while the
+/// count and the JSON document see every one.
+#[derive(Clone, Copy)]
+enum PngFinding<'a> {
+    /// A segment that is damage in itself: a chunk whose CRC does not match, a truncated tail, or
+    /// trailing bytes after IEND.
+    Segment(&'a gamut::png::Segment),
+    /// The datastream has no IEND chunk.
+    NoIend,
+    /// The filter scan declined for a reason that is damage.
+    Scan(gamut::png::SkippedFilterScan),
+}
+
+/// Every finding against a PNG, in report order: the damaged segments in file order, then a
+/// missing IEND, then a filter-scan skip that is damage.
+///
+/// `is_intact` also requires IEND, and a datastream can lack it with every segment sound: one that
+/// ends cleanly at a chunk boundary. It is listed whenever IEND is absent — a truncated file lacks
+/// it too, and says so twice rather than having one conjunct of the verdict go unlisted — so a file
+/// that is not intact always names at least one finding. A skip the file itself caused is damage;
+/// an over-budget skip is not — nothing is known to be wrong with the file — but it is still a
+/// reason this command cannot vouch for it, which is a separate question the verdict keeps
+/// separate.
+fn png_findings(report: &gamut::png::PngReport) -> impl Iterator<Item = PngFinding<'_>> {
+    use gamut::png::SegmentKind;
+    let damaged = report
+        .segments
+        .iter()
+        .filter(|seg| {
+            matches!(
+                seg.kind,
+                SegmentKind::Chunk { crc_ok: false, .. }
+                    | SegmentKind::Truncated
+                    | SegmentKind::Trailer
+            )
+        })
+        .map(PngFinding::Segment);
+    let no_iend = report
+        .chunk(b"IEND")
+        .is_none()
+        .then_some(PngFinding::NoIend);
+    let scan = report
+        .filters
+        .skipped()
+        .filter(|reason| reason.is_damage())
+        .map(PngFinding::Scan);
+    damaged.chain(no_iend).chain(scan)
+}
+
+/// Renders one [`PngFinding`] as its text line and its JSON object.
+fn png_finding(finding: PngFinding<'_>) -> Listed {
+    use gamut::png::SegmentKind;
+    let (kind, line, range) = match finding {
+        PngFinding::Segment(seg) => {
+            let range = Some(span(seg.range.start, seg.range.end));
+            match seg.kind {
+                SegmentKind::Chunk { chunk_type, .. } => (
+                    "crc_mismatch",
+                    format!(
+                        "CRC mismatch in {} at offset {}",
+                        String::from_utf8_lossy(&chunk_type),
+                        seg.range.start
+                    ),
+                    range,
+                ),
+                SegmentKind::Truncated => (
+                    "truncated",
+                    format!(
+                        "truncated from offset {} ({} bytes)",
+                        seg.range.start,
+                        seg.range.len()
+                    ),
+                    range,
+                ),
+                _ => (
+                    "trailing_bytes",
+                    format!(
+                        "{} trailing bytes after IEND at offset {}",
+                        seg.range.len(),
+                        seg.range.start
+                    ),
+                    range,
+                ),
+            }
+        }
+        PngFinding::NoIend => (
+            "missing_iend",
+            "no IEND chunk: the datastream ends without its terminator".to_owned(),
+            None,
+        ),
+        PngFinding::Scan(reason) => (
+            "filter_scan_damage",
+            format!("filters not counted — {}", filter_skip_label(reason)),
+            None,
+        ),
+    };
+    let mut json = vec![("kind", Json::from(kind))];
+    if let Some(range) = range {
+        json.push(("range", range));
+    }
+    json.push(("description", Json::from(line.as_str())));
+    Listed {
+        line,
+        json: Json::Object(json),
+    }
+}
+
+/// The JSON members of a PNG report: the facts [`print_png`] prints, every list uncapped.
+fn png_json(report: &gamut::png::PngReport) -> Vec<(&'static str, Json)> {
+    use gamut::png::FilterScan;
+    let header = report.header;
+    let image = Json::Object(vec![
+        ("width", Json::from(header.width)),
+        ("height", Json::from(header.height)),
+        ("color_type", Json::from(header.color_type.code())),
+        ("bit_depth", Json::from(header.bit_depth)),
+        ("interlaced", Json::Bool(header.interlaced)),
+    ]);
+    let chunks = report
+        .chunks
+        .iter()
+        .map(|stats| {
+            Json::Object(vec![
+                (
+                    "type",
+                    Json::from(String::from_utf8_lossy(&stats.chunk_type).as_ref()),
+                ),
+                ("count", Json::from(stats.count)),
+                ("payload_bytes", Json::from(stats.payload_bytes)),
+                ("framing_bytes", Json::from(stats.framing_bytes())),
+                ("ancillary", Json::Bool(stats.is_ancillary())),
+            ])
+        })
+        .collect();
+    let filters = match report.filters {
+        FilterScan::Counted(h) => {
+            use gamut::png::FilterType;
+            Json::Object(vec![
+                ("counted", Json::Bool(true)),
+                ("none", Json::from(h.count(FilterType::None))),
+                ("sub", Json::from(h.count(FilterType::Sub))),
+                ("up", Json::from(h.count(FilterType::Up))),
+                ("average", Json::from(h.count(FilterType::Average))),
+                ("paeth", Json::from(h.count(FilterType::Paeth))),
+                ("scanlines", Json::from(h.total())),
+            ])
+        }
+        FilterScan::Skipped(reason) => Json::Object(vec![
+            ("counted", Json::Bool(false)),
+            ("reason", Json::from(filter_skip_key(reason))),
+            ("damage", Json::Bool(reason.is_damage())),
+            ("description", Json::from(filter_skip_label(reason))),
+        ]),
+    };
+    let passes = report
+        .passes
+        .iter()
+        .map(|pass| {
+            Json::Object(vec![
+                ("index", Json::from(pass.index)),
+                ("width", Json::from(pass.width)),
+                ("height", Json::from(pass.height)),
+                ("row_bytes", Json::from(pass.row_bytes)),
+                ("filtered_len", Json::from(pass.filtered_len)),
+            ])
+        })
+        .collect();
+    vec![
+        ("image", image),
+        ("file_len", Json::from(report.file_len)),
+        ("bits_per_pixel", Json::Float(report.bits_per_pixel())),
+        (
+            "idat",
+            Json::Object(vec![
+                ("compressed", Json::from(report.idat_compressed)),
+                ("filtered", Json::from(report.filtered_len)),
+                ("ratio", Json::Float(report.idat_ratio())),
+            ]),
+        ),
+        ("overhead_bytes", Json::from(report.overhead_bytes())),
+        ("framing_bytes", Json::from(report.framing_bytes())),
+        ("chunks", Json::Array(chunks)),
+        ("filters", filters),
+        ("passes", Json::Array(passes)),
+        (
+            "findings",
+            Json::Array(png_findings(report).map(|f| png_finding(f).json).collect()),
+        ),
+        ("fully_classified", Json::Bool(report.is_fully_classified())),
+        ("intact", Json::Bool(report.is_intact())),
+        ("verified", Json::Bool(report.is_verified())),
+    ]
+}
+
+/// Prints a PNG's text report: where its bytes went, and what is held against it.
+fn print_png(path: &std::path::Path, report: &gamut::png::PngReport) {
+    use gamut::png::{FilterScan, FilterType};
     let header = report.header;
 
     println!("{}: PNG", path.display());
@@ -628,94 +1103,15 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
     // One damaged chunk yields one `String`, and the chunk count is chosen by the input, so the
     // list is built under the same bound it is printed under: the total is counted separately and
     // only the lines that will be shown are ever materialized.
-    let is_damaged_segment = |seg: &gamut::png::Segment| {
-        matches!(
-            seg.kind,
-            SegmentKind::Chunk { crc_ok: false, .. }
-                | SegmentKind::Truncated
-                | SegmentKind::Trailer
-        )
-    };
-    let mut findings = report
-        .segments
-        .iter()
-        .filter(|seg| is_damaged_segment(seg))
-        .count();
-    let mut damaged: Vec<String> = report
-        .segments
-        .iter()
-        .filter(|seg| is_damaged_segment(seg))
+    let shown: Vec<String> = png_findings(report)
         .take(MAX_LIST)
-        .map(|seg| match seg.kind {
-            SegmentKind::Chunk { chunk_type, .. } => format!(
-                "CRC mismatch in {} at offset {}",
-                String::from_utf8_lossy(&chunk_type),
-                seg.range.start
-            ),
-            SegmentKind::Truncated => format!(
-                "truncated from offset {} ({} bytes)",
-                seg.range.start,
-                seg.range.len()
-            ),
-            _ => format!(
-                "{} trailing bytes after IEND at offset {}",
-                seg.range.len(),
-                seg.range.start
-            ),
-        })
+        .map(|f| png_finding(f).line)
         .collect();
-    // `is_intact` also requires IEND, and a datastream can lack it with every segment sound: one
-    // that ends cleanly at a chunk boundary. Counted whenever IEND is absent — a truncated file
-    // lacks it too, and says so twice rather than having one conjunct of the verdict go unlisted —
-    // so a file that is not intact always names at least one finding.
-    if report.chunk(b"IEND").is_none() {
-        findings += 1;
-        if damaged.len() < MAX_LIST {
-            damaged.push("no IEND chunk: the datastream ends without its terminator".to_owned());
-        }
-    }
-    // A skip the file itself caused is damage. An over-budget skip is not — nothing is known to be
-    // wrong with the file — but it is still a reason this command cannot vouch for it, which is a
-    // separate question the verdict below keeps separate.
-    if let FilterScan::Skipped(reason) = report.filters
-        && reason.is_damage()
-    {
-        findings += 1;
-        if damaged.len() < MAX_LIST {
-            damaged.push(format!(
-                "filters not counted — {}",
-                filter_skip_label(reason)
-            ));
-        }
-    }
-    print_lines_of("findings", &damaged, findings);
+    print_lines_of("findings", &shown, png_findings(report).count());
 
     println!("  classified:    {}", yes_no(report.is_fully_classified()));
     println!("  intact:        {}", yes_no(report.is_intact()));
     println!("  verified:      {}", yes_no(report.is_verified()));
-
-    // The gate is `is_verified`, not `is_intact`. `is_intact` is "nothing is known against this
-    // file", which a file whose IDAT was never inflated satisfies without anything having been
-    // read — and a corrupt zlib payload under a valid CRC is exactly the damage only the scan
-    // sees. An archival gate that passed such a file would be reporting the reader's budget as a
-    // property of the file.
-    if report.is_verified() {
-        Ok(())
-    } else if report.is_intact() {
-        Err(CliError::NotFullyAccounted(format!(
-            "{}: not verified — {}",
-            path.display(),
-            report
-                .filters
-                .skipped()
-                .map_or("the filter scan did not run", filter_skip_label)
-        )))
-    } else {
-        Err(CliError::NotFullyAccounted(format!(
-            "{}: not a complete, undamaged PNG datastream — {findings} finding(s)",
-            path.display(),
-        )))
-    }
 }
 
 /// Renders why a PNG's scanline filters were not counted.
@@ -735,6 +1131,21 @@ fn filter_skip_label(reason: gamut::png::SkippedFilterScan) -> &'static str {
     }
 }
 
+/// The JSON key for why a PNG's scanline filters were not counted: [`filter_skip_label`]'s
+/// reasons, as identifiers a consumer can match on.
+fn filter_skip_key(reason: gamut::png::SkippedFilterScan) -> &'static str {
+    use gamut::png::SkippedFilterScan as Reason;
+    match reason {
+        Reason::OverBudget => "over_budget",
+        Reason::ImplausibleInflation => "implausible_inflation",
+        Reason::CorruptStream => "corrupt_stream",
+        Reason::LengthMismatch => "length_mismatch",
+        Reason::UndefinedFilterCode => "undefined_filter_code",
+        // Non-exhaustive, as above; the object's `damage` member still says how it counts.
+        _ => "other",
+    }
+}
+
 /// How a provenance-only arm (HEIC, AVIF) was reached, which decides whether the container was
 /// confirmed and what the report's label may claim.
 #[derive(Clone, Copy)]
@@ -747,6 +1158,15 @@ enum Route {
     /// `--format` exists to override detection, so it overrides the confirmation too — and the
     /// label says so, rather than reporting the caller's assertion back as this command's.
     Forced,
+}
+
+/// What a report is about and how it is rendered: the file, how its format was reached, and the
+/// output the caller asked for.
+#[derive(Clone, Copy)]
+struct Target<'a> {
+    path: &'a std::path::Path,
+    route: Route,
+    output: Output,
 }
 
 /// The label a provenance report opens with: the format's name, and — on the forced route — that
@@ -772,20 +1192,20 @@ fn route_label(name: &str, route: Route) -> String {
 /// an AVIF is parsed only once the HEIC confirmation declines. A file neither crate confirms keeps
 /// the HEIC arm's outcome: its parse error (a top-level `moov`, say), or the unsupported-brand
 /// message when it parsed.
-fn inspect_isobmff(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
+fn inspect_isobmff(to: Target<'_>, data: &[u8]) -> Result<(), CliError> {
     let heic = gamut::heic::HeifContainer::parse(data);
     if let Ok(container) = &heic
         && container.image().is_hevc_still()
     {
-        return report_heic(path, container, Route::Sniffed);
+        return report_heic(to, container);
     }
     if let Ok(container) = gamut::avif::AvifContainer::parse(data)
         && container.image().is_av1_still()
     {
-        return report_avif(path, &container, Route::Sniffed);
+        return report_avif(to, &container);
     }
     Err(CliError::UnsupportedContainer {
-        path: path.to_path_buf(),
+        path: to.path.to_path_buf(),
         brand: brand_label(heic?.image().major_brand()),
     })
 }
@@ -797,35 +1217,41 @@ fn inspect_isobmff(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> 
 /// file with a manifest store, a file without one, and a file whose C2PA box could not be read
 /// through all exit `0`, each saying which it is. The exit code says whether the *inspection*
 /// succeeded, not what it found.
-fn report_heic(
-    path: &std::path::Path,
-    container: &gamut::heic::HeifContainer<'_>,
-    route: Route,
-) -> Result<(), CliError> {
-    println!("{}: {}", path.display(), route_label("HEIF/HEIC", route));
+fn report_heic(to: Target<'_>, container: &gamut::heic::HeifContainer<'_>) -> Result<(), CliError> {
     let summary = container.c2pa_summary();
-    print_c2pa(
-        summary.summary_lines(),
-        summary.detail_lines(),
-        summary.detail_line_count(),
-    );
+    match to.output {
+        Output::Text => {
+            println!(
+                "{}: {}",
+                to.path.display(),
+                route_label("HEIF/HEIC", to.route)
+            );
+            print_c2pa(
+                summary.summary_lines(),
+                summary.detail_lines(),
+                summary.detail_line_count(),
+            );
+        }
+        Output::Json => print_provenance_json(to, Format::Heic, heic_c2pa_json(&summary)),
+    }
     Ok(())
 }
 
 /// Reports what an AVIF file says about its own provenance, and nothing else — the HEIC report's
 /// contract, over `gamut-avif`'s summary. Exit `0` whatever it finds.
-fn report_avif(
-    path: &std::path::Path,
-    container: &gamut::avif::AvifContainer<'_>,
-    route: Route,
-) -> Result<(), CliError> {
-    println!("{}: {}", path.display(), route_label("AVIF", route));
+fn report_avif(to: Target<'_>, container: &gamut::avif::AvifContainer<'_>) -> Result<(), CliError> {
     let summary = container.c2pa_summary();
-    print_c2pa(
-        summary.summary_lines(),
-        summary.detail_lines(),
-        summary.detail_line_count(),
-    );
+    match to.output {
+        Output::Text => {
+            println!("{}: {}", to.path.display(), route_label("AVIF", to.route));
+            print_c2pa(
+                summary.summary_lines(),
+                summary.detail_lines(),
+                summary.detail_line_count(),
+            );
+        }
+        Output::Json => print_provenance_json(to, Format::Avif, avif_c2pa_json(&summary)),
+    }
     Ok(())
 }
 
@@ -835,14 +1261,19 @@ fn report_avif(
 ///
 /// There is no forced-route label: the RIFF walk itself requires the `RIFF` magic and the `WEBP`
 /// form, so `--format webp` cannot make this arm report on a file that is not a WebP.
-fn inspect_webp(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
+fn inspect_webp(to: Target<'_>, data: &[u8]) -> Result<(), CliError> {
     let summary = gamut::webp::c2pa_summary(data)?;
-    println!("{}: WebP", path.display());
-    print_c2pa(
-        summary.summary_lines(),
-        summary.detail_lines(),
-        summary.detail_line_count(),
-    );
+    match to.output {
+        Output::Text => {
+            println!("{}: WebP", to.path.display());
+            print_c2pa(
+                summary.summary_lines(),
+                summary.detail_lines(),
+                summary.detail_line_count(),
+            );
+        }
+        Output::Json => print_provenance_json(to, Format::Webp, webp_c2pa_json(&summary)),
+    }
     Ok(())
 }
 
@@ -868,6 +1299,423 @@ fn print_c2pa(head: Vec<String>, details: impl Iterator<Item = String>, total: u
     let hidden = hidden_entries(total, shown.len());
     if hidden > 0 {
         println!("    … and {hidden} more");
+    }
+}
+
+/// The members every JSON document opens with: the file, the format it was read as, and whether
+/// that format was detected or asserted by `--format` (the JSON form of [`route_label`], stated for
+/// every format because `--format` skips the sniff for every format).
+fn document_head(to: Target<'_>, format: Format) -> Vec<(&'static str, Json)> {
+    vec![
+        ("path", Json::from(to.path.display().to_string())),
+        ("format", Json::from(format_key(format))),
+        (
+            "format_source",
+            Json::from(match to.route {
+                Route::Sniffed => "detected",
+                Route::Forced => "asserted",
+            }),
+        ),
+    ]
+}
+
+/// Prints the JSON document of a provenance-only arm (HEIC, AVIF, WebP): the head and the C2PA
+/// object, and nothing else, because those arms report nothing else.
+fn print_provenance_json(to: Target<'_>, format: Format, c2pa: Json) {
+    let mut doc = document_head(to, format);
+    doc.push(("c2pa", c2pa));
+    print_json(&Json::Object(doc));
+}
+
+/// A HEIC `C2paSummary` as data — every list uncapped, the store bytes never included.
+///
+/// `not_validated` carries `gamut-heic`'s own disclaimer for the same reason the text report's
+/// headline does: "a store is present" reads as *verified* to a program's author as much as to a
+/// terminal's reader.
+fn heic_c2pa_json(summary: &gamut::heic::C2paSummary) -> Json {
+    use gamut::heic::{C2paBoxPosition as Position, C2paUnreadReason as Reason};
+    let position = |p: Position| match p {
+        Position::BeforeMediaData => "before_media_data",
+        Position::AfterMediaData => "after_media_data",
+        Position::AfterMovieBox => "after_movie_box",
+        _ => "other",
+    };
+    let reason = |r: Reason| match r {
+        Reason::Truncated => "truncated",
+        Reason::NotVersionZero => "not_version_zero",
+        Reason::UnknownPurpose => "unknown_purpose",
+        Reason::NoStoreBound => "no_store_bound",
+        _ => "other",
+    };
+    Json::Object(vec![
+        ("not_validated", Json::from(gamut::heic::C2PA_NOT_VALIDATED)),
+        (
+            "stores",
+            Json::Array(
+                summary
+                    .stores
+                    .iter()
+                    .map(|s| {
+                        Json::Object(vec![
+                            ("purpose", Json::from(s.purpose.as_str())),
+                            ("extent", Json::from("store")),
+                            ("size", Json::from(s.size())),
+                            ("range", span(s.range.start, s.range.end)),
+                            ("position", Json::from(position(s.position))),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "unread",
+            Json::Array(
+                summary
+                    .unread
+                    .iter()
+                    .map(|u| {
+                        Json::Object(vec![
+                            ("range", span(u.range.start, u.range.end)),
+                            ("reason", Json::from(reason(u.reason))),
+                            ("description", Json::from(u.reason.describe())),
+                            ("position", Json::from(position(u.position))),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "merkle",
+            Json::Array(
+                summary
+                    .merkle
+                    .iter()
+                    .map(|m| {
+                        Json::Object(vec![
+                            ("range", span(m.range.start, m.range.end)),
+                            ("position", Json::from(position(m.position))),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("other_uuid_boxes", Json::from(summary.other_uuid_boxes)),
+    ])
+}
+
+/// An AVIF `C2paSummary` as data — [`heic_c2pa_json`]'s shape over `gamut-avif`'s summary.
+///
+/// A store's `extent` is `"slot"`: `gamut-avif` reports the box-bounded slot after the merkle
+/// offset, the store *plus any padding*, where `gamut-heic` trims to the store's JUMBF `LBox`
+/// (issue #505), so the two sizes are not the same measurement.
+fn avif_c2pa_json(summary: &gamut::avif::C2paSummary) -> Json {
+    use gamut::avif::{C2paBoxPosition as Position, C2paUnreadReason as Reason};
+    let position = |p: Position| match p {
+        Position::BeforeMediaData => "before_media_data",
+        Position::AfterMediaData => "after_media_data",
+        _ => "other",
+    };
+    let reason = |r: Reason| match r {
+        Reason::Truncated => "truncated",
+        Reason::NotVersionZero => "not_version_zero",
+        Reason::UnknownPurpose => "unknown_purpose",
+        _ => "other",
+    };
+    Json::Object(vec![
+        ("not_validated", Json::from(gamut::avif::C2PA_NOT_VALIDATED)),
+        (
+            "stores",
+            Json::Array(
+                summary
+                    .stores
+                    .iter()
+                    .map(|s| {
+                        Json::Object(vec![
+                            ("purpose", Json::from(s.purpose.as_str())),
+                            ("extent", Json::from("slot")),
+                            ("size", Json::from(s.size())),
+                            ("range", span(s.range.start, s.range.end)),
+                            ("position", Json::from(position(s.position))),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "unread",
+            Json::Array(
+                summary
+                    .unread
+                    .iter()
+                    .map(|u| {
+                        Json::Object(vec![
+                            ("range", span(u.range.start, u.range.end)),
+                            ("reason", Json::from(reason(u.reason))),
+                            ("description", Json::from(u.reason.describe())),
+                            ("position", Json::from(position(u.position))),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "merkle",
+            Json::Array(
+                summary
+                    .merkle
+                    .iter()
+                    .map(|m| {
+                        Json::Object(vec![
+                            ("range", span(m.range.start, m.range.end)),
+                            ("position", Json::from(position(m.position))),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("other_uuid_boxes", Json::from(summary.other_uuid_boxes)),
+    ])
+}
+
+/// A WebP `C2paSummary` as data. A `C2PA` chunk has one unread case — a payload shorter than the
+/// JUMBF box header — so an unread entry carries its range and position and no reason.
+fn webp_c2pa_json(summary: &gamut::webp::C2paSummary) -> Json {
+    use gamut::webp::C2paChunkPosition as Position;
+    let position = |p: Position| match p {
+        Position::Last => "last",
+        Position::BeforeLaterChunks => "before_later_chunks",
+        _ => "other",
+    };
+    Json::Object(vec![
+        ("not_validated", Json::from(gamut::webp::C2PA_NOT_VALIDATED)),
+        (
+            "stores",
+            Json::Array(
+                summary
+                    .stores
+                    .iter()
+                    .map(|s| {
+                        Json::Object(vec![
+                            ("size", Json::from(s.size())),
+                            ("range", span(s.range.start, s.range.end)),
+                            ("position", Json::from(position(s.position))),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "unread",
+            Json::Array(
+                summary
+                    .unread
+                    .iter()
+                    .map(|u| {
+                        Json::Object(vec![
+                            ("range", span(u.range.start, u.range.end)),
+                            ("position", Json::from(position(u.position))),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+/// A TIFF/DNG `C2paSummary` (`gamut-ifd`'s, shared by both) as data: the one store §A.3.6 admits,
+/// with its two §18.5.5 exclusion ranges, and every other tag-52545 entry as unread.
+fn ifd_c2pa_json(summary: &gamut::tiff::C2paSummary) -> Json {
+    use gamut::tiff::C2paUnreadReason as Reason;
+    let reason = |r: Reason| match r {
+        Reason::NotInLastIfd => "not_in_last_ifd",
+        Reason::NotUndefined => "not_undefined",
+        Reason::Duplicate => "duplicate",
+        Reason::TooShort => "too_short",
+        Reason::OutsideFile => "outside_file",
+        Reason::OverlapsCountField => "overlaps_count_field",
+        _ => "other",
+    };
+    let store = summary.store.map_or(Json::Null, |s| {
+        let store = s.exclusions.store();
+        let count = s.exclusions.count_field();
+        Json::Object(vec![
+            ("size", Json::from(s.size())),
+            ("range", span(store.start, store.end())),
+            ("count_field", span(count.start, count.end())),
+            ("ifd", Json::from(s.ifd)),
+        ])
+    });
+    Json::Object(vec![
+        ("not_validated", Json::from(gamut::tiff::C2PA_NOT_VALIDATED)),
+        ("store", store),
+        (
+            "unread",
+            Json::Array(
+                summary
+                    .unread
+                    .iter()
+                    .map(|u| {
+                        Json::Object(vec![
+                            ("entry", span(u.entry.start, u.entry.end())),
+                            ("ifd", Json::from(u.ifd)),
+                            ("reason", Json::from(reason(u.reason))),
+                            ("description", Json::from(u.reason.describe())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+/// A half-open byte range `[start, end)` as a JSON object.
+fn span(start: impl Into<Json>, end: impl Into<Json>) -> Json {
+    Json::Object(vec![("start", start.into()), ("end", end.into())])
+}
+
+/// Writes `doc` to stdout as one line of JSON.
+fn print_json(doc: &Json) {
+    let mut out = String::new();
+    doc.write(&mut out);
+    println!("{out}");
+}
+
+/// A JSON value (RFC 8259), built by this command and written by [`Json::write`].
+///
+/// Hand-written rather than `serde_json`: the command emits a handful of shapes and never parses
+/// JSON, and the workspace keeps `serde_json` a dev-only dependency. Object members keep the order
+/// they are built in.
+#[derive(Clone, Debug, PartialEq)]
+enum Json {
+    /// `null`.
+    Null,
+    /// `true` or `false`.
+    Bool(bool),
+    /// A non-negative integer. Every count, size and offset this command reports is one.
+    UInt(u64),
+    /// A ratio. Written as `null` when it is not finite, since JSON has no NaN or infinity.
+    Float(f64),
+    /// A string, escaped on write.
+    Str(String),
+    /// An array.
+    Array(Vec<Json>),
+    /// An object, its members in insertion order.
+    Object(Vec<(&'static str, Json)>),
+}
+
+impl Json {
+    /// Appends the compact JSON text of `self` to `out`.
+    fn write(&self, out: &mut String) {
+        use std::fmt::Write as _;
+        match self {
+            Self::Null => out.push_str("null"),
+            Self::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            // `fmt::Write` for `String` cannot fail.
+            Self::UInt(n) => {
+                let _ = write!(out, "{n}");
+            }
+            // `f64`'s `Display` never uses an exponent and always yields a JSON number for a
+            // finite value (`2`, `0.5`, `-0`).
+            Self::Float(x) if x.is_finite() => {
+                let _ = write!(out, "{x}");
+            }
+            Self::Float(_) => out.push_str("null"),
+            Self::Str(s) => write_json_string(s, out),
+            Self::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    item.write(out);
+                }
+                out.push(']');
+            }
+            Self::Object(members) => {
+                out.push('{');
+                for (i, (key, value)) in members.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write_json_string(key, out);
+                    out.push(':');
+                    value.write(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+}
+
+/// Appends `s` as a JSON string literal: RFC 8259 §7 requires `"`, `\` and every control
+/// character below U+0020 to be escaped. Everything else is written as itself — the text is
+/// already UTF-8, so no other escape is needed, and a file-chosen byte (a chunk type, a path)
+/// cannot leave the literal.
+fn write_json_string(s: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+impl From<bool> for Json {
+    fn from(b: bool) -> Self {
+        Self::Bool(b)
+    }
+}
+
+impl From<&str> for Json {
+    fn from(s: &str) -> Self {
+        Self::Str(s.to_owned())
+    }
+}
+
+impl From<String> for Json {
+    fn from(s: String) -> Self {
+        Self::Str(s)
+    }
+}
+
+impl From<u8> for Json {
+    fn from(n: u8) -> Self {
+        Self::UInt(n.into())
+    }
+}
+
+impl From<u16> for Json {
+    fn from(n: u16) -> Self {
+        Self::UInt(n.into())
+    }
+}
+
+impl From<u32> for Json {
+    fn from(n: u32) -> Self {
+        Self::UInt(n.into())
+    }
+}
+
+impl From<u64> for Json {
+    fn from(n: u64) -> Self {
+        Self::UInt(n)
+    }
+}
+
+impl From<usize> for Json {
+    fn from(n: usize) -> Self {
+        // `usize` is at most 64 bits on every target Rust supports.
+        Self::UInt(n as u64)
     }
 }
 
@@ -900,6 +1748,18 @@ fn format_name(format: Format) -> &'static str {
     }
 }
 
+/// The JSON `format` member of a format: the value `--format` takes for it.
+fn format_key(format: Format) -> &'static str {
+    match format {
+        Format::Tiff => "tiff",
+        Format::Dng => "dng",
+        Format::Png => "png",
+        Format::Heic => "heic",
+        Format::Avif => "avif",
+        Format::Webp => "webp",
+    }
+}
+
 /// `yes`/`no` for a boolean verdict.
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
@@ -907,7 +1767,52 @@ fn yes_no(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_LIST, brand_label, hidden_entries};
+    use super::{Json, Level, MAX_LIST, anomaly_other, brand_label, hidden_entries};
+
+    /// The compact text of `value`.
+    fn json_text(value: &Json) -> String {
+        let mut out = String::new();
+        value.write(&mut out);
+        out
+    }
+
+    #[test]
+    fn a_json_string_escapes_what_rfc_8259_requires_and_nothing_else() {
+        // A path or a chunk type is chosen by the input, so a quote, a backslash or a control
+        // character in it must stay inside the literal; anything else is UTF-8 and passes through.
+        assert_eq!(
+            json_text(&Json::from("a\"b\\c\nd\re\tf\u{0}g\u{1f}h é…")),
+            "\"a\\\"b\\\\c\\nd\\re\\tf\\u0000g\\u001fh é…\""
+        );
+        // U+007F is not a control character RFC 8259 asks to escape.
+        assert_eq!(json_text(&Json::from("\u{7f}")), "\"\u{7f}\"");
+    }
+
+    #[test]
+    fn a_json_document_is_written_compactly_in_member_order() {
+        let doc = Json::Object(vec![
+            ("z", Json::Array(vec![Json::from(1u8), Json::Null])),
+            ("a", Json::Bool(false)),
+            ("m", Json::Object(vec![])),
+            ("e", Json::Array(vec![])),
+            ("t", Json::Bool(true)),
+            ("big", Json::from(u64::MAX)),
+        ]);
+        assert_eq!(
+            json_text(&doc),
+            "{\"z\":[1,null],\"a\":false,\"m\":{},\"e\":[],\"t\":true,\"big\":18446744073709551615}"
+        );
+    }
+
+    #[test]
+    fn a_json_float_is_a_number_when_finite_and_null_otherwise() {
+        // JSON has no NaN or infinity; a ratio over an empty stream must not break the document.
+        assert_eq!(json_text(&Json::Float(0.5)), "0.5");
+        assert_eq!(json_text(&Json::Float(2.0)), "2");
+        assert_eq!(json_text(&Json::Float(f64::NAN)), "null");
+        assert_eq!(json_text(&Json::Float(f64::INFINITY)), "null");
+        assert_eq!(json_text(&Json::Float(f64::NEG_INFINITY)), "null");
+    }
 
     #[test]
     fn a_brand_label_escapes_every_byte_that_is_not_printable_ascii() {
@@ -934,5 +1839,24 @@ mod tests {
         // A list that fits hides nothing, from either caller.
         assert_eq!(hidden_entries(MAX_LIST, MAX_LIST), 0);
         assert_eq!(hidden_entries(3, 3), 0);
+    }
+
+    #[test]
+    fn an_unknown_severity_is_other_in_json_and_error_in_text() {
+        // docs/inspect-exit-codes.md: every unknown enumerated value, `severity` included, is
+        // `"other"` in the document; the text report keeps its conservative `[error]` label.
+        assert_eq!(Level::Other.json(), "other");
+        assert_eq!(Level::Other.text(), "error");
+        let other = anomaly_other("Future".to_owned());
+        assert_eq!(other.line, "[error] Future");
+        assert_eq!(
+            json_text(&other.json),
+            "{\"kind\":\"other\",\"severity\":\"other\",\"detail\":\"Future\"}"
+        );
+        // The two known levels keep one word in both renderings.
+        for (level, word) in [(Level::Warning, "warning"), (Level::Error, "error")] {
+            assert_eq!(level.json(), word);
+            assert_eq!(level.text(), word);
+        }
     }
 }

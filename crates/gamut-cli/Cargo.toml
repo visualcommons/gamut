@@ -33,3 +33,8 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 # Decode-only: read PNG/JPEG/PPM inputs. Encoding stays entirely in the gamut crates.
 image.workspace = true
+
+[dev-dependencies]
+# Parses `gamut inspect --output json` in the binary tests, so they check the document as JSON
+# rather than as text. Test-only: the command writes its JSON by hand and never depends on it.
+serde_json.workspace = true
