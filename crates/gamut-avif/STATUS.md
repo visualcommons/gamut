@@ -255,7 +255,7 @@ adding it needs no container change.
 | identity transform 4/8/16/32 (IDTX / V_ / H_) | §7.13.2.11-.15 | ✅ (IDTX emitted via TX_SET_INTRA_2; V_/H_ axis variants present in dispatch, unused under `reduced_tx_set=1`) | M1 |
 | 2D inverse transform + tx_type sets, `get_tx_set` | §7.13.3,§5.11.47/.48 | ✅ (normative `inverse_transform_2d`; intra `TX_SET_INTRA_2`/`TX_SET_DCTONLY`; inter sets OOS) | M1 |
 | variable tx size / `txfm_split` | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square `tx_depth` 0..2; rectangular `txfm_split` deferred) | M1 |
-| encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + tx-type chosen by rate–distortion cost; tx-size `tx_depth` still a source-texture test, its RD search tracked in #753) | M1 |
+| encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + tx-type, and tx-size `tx_depth` jointly with the luma mode, chosen by rate–distortion cost) | M1 |
 
 ## F. AV1 — quantization (§7.12)
 
