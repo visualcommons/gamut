@@ -40,20 +40,22 @@ fuzz_target!(|data: &[u8]| {
     // Trailing samples that do not fill a row are dropped rather than rejected, so every input
     // with at least one row exercises the law.
     let rgba8 = &samples[..samples.len() / row * row];
-    if !rgba8.is_empty() {
-        if let Err(violation) = cleaning_8_bit_rgba_keeps_the_composite(width, rgba8) {
-            panic!("8-bit: {violation}");
-        }
+    if !rgba8.is_empty()
+        && let Err(violation) = cleaning_8_bit_rgba_keeps_the_composite(width, rgba8)
+    {
+        panic!("8-bit: {violation}");
     }
 
     let rgba16: Vec<u16> = samples
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| u16::from_le_bytes(pair))
         .collect();
     let rgba16 = &rgba16[..rgba16.len() / row * row];
-    if !rgba16.is_empty() {
-        if let Err(violation) = cleaning_16_bit_rgba_keeps_the_composite(width, rgba16) {
-            panic!("16-bit: {violation}");
-        }
+    if !rgba16.is_empty()
+        && let Err(violation) = cleaning_16_bit_rgba_keeps_the_composite(width, rgba16)
+    {
+        panic!("16-bit: {violation}");
     }
 });
