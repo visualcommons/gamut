@@ -119,6 +119,33 @@
 //! would be a second copy of a check the XMP writer owns. An opaque element type would hide the
 //! value tree a caller needs in order to read a vendor extension at all.
 //!
+//! # The typed view stays plain data
+//!
+//! The model does not widen to report a field it cannot write back, and that holds for every type
+//! here and every structure added later. A text field is `Option<String>`, a language alternative
+//! is its `x-default` text, and a list is `Vec<String>` written as the one container kind the
+//! standard gives it. So the shapes a real file most often carries outside that read as absent: a
+//! URL held as `rdf:resource` (`Iptc4xmpCore:CiUrlWork`, `Iptc4xmpExt:AOSourceInvURL`,
+//! `plus:LicensorURL`, an item of `xmp:Identifier`), a value carrying a qualifier such as
+//! `xml:lang`, a language alternative holding a language beside `x-default`, and an `rdf:Seq`
+//! where the model writes an `rdf:Bag` or the reverse. Each one is in the type's `other` list,
+//! as the graph held it, so a caller that wants it looks there by namespace and name; an
+//! `rdf:resource` is an [`XmpValue::Uri`].
+//!
+//! Three widenings were weighed and declined:
+//!
+//! - **Remembering the value kind** — a URL type that knows it was an `rdf:resource` — would break
+//!   three public fields, and `Entity::identifiers` would need a per-item type because the kind is
+//!   per item.
+//! - **Carrying the whole language alternative** — a list of (tag, text) pairs — would change the
+//!   ergonomics of every descriptive field for the minority of files that hold a translation.
+//! - **Carrying qualifiers** would still leave the general case open, because a qualifier can hang
+//!   off any value, including an array item or a field of a nested structure.
+//!
+//! Each would turn plain data into a model of RDF, which the graph in [`PhotoMetadata::xmp`]
+//! already is. Every type here is `#[non_exhaustive]`, so a later widening can add a field beside
+//! the plain one without breaking a caller.
+//!
 //! # A value the projection cannot express
 //!
 //! Emission is **infallible**, for the whole module: every `to_xmp` returns an [`XmpValue`], and
@@ -642,7 +669,8 @@ pub struct CreatorContactInfo {
     pub email: Option<String>,
     /// Work phone number(s) (`Iptc4xmpCore:CiTelWork`).
     pub phone: Option<String>,
-    /// Work web URL(s) (`Iptc4xmpCore:CiUrlWork`).
+    /// Work web URL(s) (`Iptc4xmpCore:CiUrlWork`). A URL held as `rdf:resource` reads as `None`
+    /// and stays in [`other`](Self::other) (see [the typed view](self#the-typed-view-stays-plain-data)).
     pub web_url: Option<String>,
     /// Every field the typed read did not consume, verbatim, written back after the modelled fields
     /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
@@ -737,7 +765,9 @@ pub struct ArtworkOrObject {
     pub source: Option<String>,
     /// The source's inventory number (`Iptc4xmpExt:AOSourceInvNo`).
     pub source_inventory_number: Option<String>,
-    /// URL of the source's inventory record (`Iptc4xmpExt:AOSourceInvURL`).
+    /// URL of the source's inventory record (`Iptc4xmpExt:AOSourceInvURL`). A URL held as
+    /// `rdf:resource` reads as `None` and stays in [`other`](Self::other) (see
+    /// [the typed view](self#the-typed-view-stays-plain-data)).
     pub source_inventory_url: Option<String>,
     /// Style periods (`Iptc4xmpExt:AOStylePeriod`).
     pub style_periods: Vec<String>,
@@ -921,7 +951,8 @@ pub struct Licensor {
     pub telephone2: Option<String>,
     /// Email address (`plus:LicensorEmail`).
     pub email: Option<String>,
-    /// Web URL (`plus:LicensorURL`).
+    /// Web URL (`plus:LicensorURL`). A URL held as `rdf:resource` reads as `None` and stays in
+    /// [`other`](Self::other) (see [the typed view](self#the-typed-view-stays-plain-data)).
     pub web_url: Option<String>,
     /// Every field the typed read did not consume, verbatim, written back after the modelled fields
     /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
@@ -1026,7 +1057,9 @@ impl Licensor {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Entity {
-    /// Globally unique identifiers of the entity or concept (`xmp:Identifier`).
+    /// Globally unique identifiers of the entity or concept (`xmp:Identifier`). A list holding
+    /// any item as `rdf:resource` reads as empty and stays in [`other`](Self::other) whole (see
+    /// [the typed view](self#the-typed-view-stays-plain-data)).
     pub identifiers: Vec<String>,
     /// Full name, `x-default` alternative (`Iptc4xmpExt:Name`).
     pub name: Option<String>,
@@ -2669,6 +2702,65 @@ mod tests {
         let art = ArtworkOrObject::from_xmp(&value).unwrap();
         assert_eq!(art.title, None);
         assert_eq!(art.to_xmp(), value);
+    }
+
+    #[test]
+    fn a_field_the_typed_view_cannot_express_is_reached_through_other() {
+        // Issue #609's decision, pinned on the public fields it names: the typed view stays plain
+        // data, so each of these reads as absent and the caller finds the field, as the graph held
+        // it, in `other`. A widening that reported any of them would fail here first.
+        let url = |namespace, name| {
+            XmpProperty::new(
+                namespace,
+                name,
+                XmpValue::Uri("https://example.org/".to_owned()),
+            )
+        };
+        let unread = |field: &XmpProperty| (structured(vec![field.clone()]), vec![field.clone()]);
+
+        let field = url(ns::IPTC_CORE, "CiUrlWork");
+        let (value, other) = unread(&field);
+        let contact = CreatorContactInfo::from_xmp(&value).unwrap();
+        assert_eq!((contact.web_url, contact.other), (None, other));
+
+        let field = qualified(
+            XmpProperty::new(ns::IPTC_CORE, "CiAdrCity", text_value("Paris")),
+            "fr",
+        );
+        let (value, other) = unread(&field);
+        let contact = CreatorContactInfo::from_xmp(&value).unwrap();
+        assert_eq!((contact.city, contact.other), (None, other));
+
+        let field = url(ns::IPTC_EXT, "AOSourceInvURL");
+        let (value, other) = unread(&field);
+        let art = ArtworkOrObject::from_xmp(&value).unwrap();
+        assert_eq!((art.source_inventory_url, art.other), (None, other));
+
+        let field = XmpProperty::new(
+            ns::IPTC_EXT,
+            "AOStylePeriod",
+            XmpValue::Array(XmpArray::Seq(vec![XmpItem::simple("Baroque")])),
+        );
+        let (value, other) = unread(&field);
+        let art = ArtworkOrObject::from_xmp(&value).unwrap();
+        assert_eq!((art.style_periods, art.other), (Vec::new(), other));
+
+        let field = url(ns::PLUS, "LicensorURL");
+        let (value, other) = unread(&field);
+        let licensor = Licensor::from_xmp(&value).unwrap();
+        assert_eq!((licensor.web_url, licensor.other), (None, other));
+
+        let field = XmpProperty::new(
+            ns::XMP,
+            "Identifier",
+            XmpValue::Array(XmpArray::Bag(vec![
+                XmpItem::simple("urn:example:1"),
+                XmpItem::new(XmpValue::Uri("https://example.org/".to_owned())),
+            ])),
+        );
+        let (value, other) = unread(&field);
+        let entity = Entity::from_xmp(&value).unwrap();
+        assert_eq!((entity.identifiers, entity.other), (Vec::new(), other));
     }
 
     #[test]
