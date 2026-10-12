@@ -91,8 +91,7 @@ is **#577**. See the C2PA note under section L for the five recorded limits.
 path end to end with #398/#399, and subsampled chroma on the `Rgb16` path with #399 — what remains
 of the pixel-format surface is subsampled chroma on the `Rgba8`/`Rgba16` paths, which need a
 4-stride downsampler; depth auxiliary items; the HDR
-surface beyond CICP *tagging* (`mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain — selecting a
-PQ/HLG transfer labels samples but does not by itself make a conformant HDR image); container
+surface beyond CICP tagging and `mdcv`/`clli` (`cclv`/`amve`/`reve`/`ndwt`, film grain); container
 derivations
 (`grid`, thumbnails, `idat`, `iloc` v1/v2 emission, `pasp`/`clap`); layered/progressive still
 images (`a1op`/`a1lx`/`lsel`, multi-operating-point sequence header); `tmap` tone-map (gain-map)
@@ -318,9 +317,9 @@ copy, which is what a decoder does for an independently decodable tile.
 | RGB↔YCbCr at 4:4:4 (`gamut_color::RgbToYcbcr` / `YcbcrMatrix`) | (gamut-color) | ✅ | M2 |
 | chroma down/up-sample (4:2:0 / 4:2:2 plane geometry + box downsample) | (gamut-av1) | ✅ | M2 |
 | transfer sRGB/BT.709 (tagged only in M0) | CICP H.273 | ✅ (tag) | M0 |
-| transfer PQ (SMPTE ST 2084) / HLG (BT.2100) | CICP H.273 | ✅ (tag only, `AvifEncoder::with_transfer`; no HDR pipeline — see `mdcv`/`clli` below) | M4 |
+| transfer PQ (SMPTE ST 2084) / HLG (BT.2100) | CICP H.273 | ✅ (tag only, `AvifEncoder::with_transfer`; no HDR sample pipeline — the `mdcv`/`clli` metadata is below) | M4 |
 | primaries variants; embedded ICC profile | CICP; 23008-12 | ✅ (`AvifEncoder::with_primaries`; ICC via `with_icc_profile`) | M4 |
-| HDR mastering display (`mdcv`) + content light level (`clli`) | §5.8.3/.4 | ☐ | M4 |
+| HDR mastering display (`mdcv`) + content light level (`clli`) | §5.8.3/.4; AVIF §9.1.2 | ✅ (#650: `AvifEncoder::with_content_light_level` / `with_mastering_display` write non-essential properties of the primary colour item; read via `AvifItem::content_light_level` / `mastering_display`. `clli` verified against libavif; the pinned libavif skips `mdcv`, so its layout is verified against libheif in `gamut-heic`. No `OBU_METADATA` is written, so AVIF §2.1's OBU/property agreement holds trivially) | M4 |
 
 ## K. Cross-crate API, I/O & tooling
 

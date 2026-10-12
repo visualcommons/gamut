@@ -9,8 +9,8 @@ use common::{
     meta, pitm_v0,
 };
 use gamut_avif::{
-    AvifContainer, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay,
-    PixelAspectRatio, TransformativeProperty,
+    AvifContainer, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay, PixelAspectRatio,
+    TransformativeProperty,
 };
 use gamut_core::ErrorKind;
 use gamut_isobmff::{ColourInformation, Item, NclxColr, Property, PropertyKind};

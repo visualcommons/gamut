@@ -162,7 +162,9 @@
 //! [`AvifEncoder::with_alpha_mode`]); an encode-**speed** preset trading mode-decision search for
 //! time ([`AvifEncoder::with_speed`], `gamut-av1`'s [`Speed`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
 //! [`AvifEncoder::with_mirror`]); the **colour and metadata surface** — CICP primaries and transfer
-//! ([`AvifEncoder::with_primaries`] / [`AvifEncoder::with_transfer`]), an embedded ICC profile
+//! ([`AvifEncoder::with_primaries`] / [`AvifEncoder::with_transfer`]), HDR `clli` / `mdcv`
+//! metadata ([`AvifEncoder::with_content_light_level`] /
+//! [`AvifEncoder::with_mastering_display`]), an embedded ICC profile
 //! ([`AvifEncoder::with_icc_profile`]), Exif / XMP items
 //! ([`AvifEncoder::with_exif`] / [`AvifEncoder::with_xmp`]), and a reserved or written C2PA
 //! manifest store (above); and the **container decode surface** above (full read of items,
@@ -172,8 +174,8 @@
 //! reference codec — and `dav1d` via [`gamut_av1`].
 //!
 //! **Deferred, planned** (tracked row-by-row against the specs in `STATUS.md`, whose disposition
-//! ledger is the authority): the HDR surface beyond CICP tagging (`mdcv`/`clli` and the rest of
-//! the HDR metadata properties), `grid` / `tmap` (gain-map) / `sato` derivations and the remaining
+//! ledger is the authority): the HDR surface beyond CICP tagging and `clli`/`mdcv` (the
+//! `cclv`/`amve`/`reve`/`ndwt` properties and film grain), `grid` / `tmap` (gain-map) / `sato` derivations and the remaining
 //! container transforms on the encode side, layered/progressive still images, rate control, a **built-in AV1 codestream decoder** behind [`Av1StillDecoder`], and the decoder
 //! backend registry / `gamut-codec-abi` adapter around the seam. On the decoder: `gamut-av1`
 //! ships the pure-Rust one (its default `decode` feature), but today it parses only the header

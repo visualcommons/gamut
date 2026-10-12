@@ -92,8 +92,8 @@ pub struct AvifConfig {
     ///
     /// A pure tag like `primaries`: the encoder applies **no** transfer function, so selecting e.g.
     /// [`TransferCharacteristics::Pq`] *labels* samples the caller has already encoded that way. It
-    /// does not convert them, and it does not by itself make a conformant HDR image — the HDR
-    /// metadata properties (`mdcv`/`clli`) are still deferred (`STATUS.md`). Defaults to
+    /// does not convert them, and the HDR metadata (`clli`/`mdcv`) is set separately, on the
+    /// encoder (`AvifEncoder::with_content_light_level` / `with_mastering_display`). Defaults to
     /// [`TransferCharacteristics::Srgb`].
     pub transfer: TransferCharacteristics,
     /// The depth the samples are coded at, or `None` for the input's own default: **8** for an

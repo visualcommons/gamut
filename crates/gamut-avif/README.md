@@ -139,8 +139,8 @@ libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
 specs: **deferred, planned** features (10/12-bit, the HDR
-metadata properties beyond CICP tagging, gain maps, layered/progressive images, the pure-Rust AV1
-codestream decoder, the decoder backend registry, …) all land semver-minor on the frozen v1
+metadata properties beyond CICP tagging and `clli`/`mdcv`, gain maps, layered/progressive images,
+the pure-Rust AV1 codestream decoder, the decoder backend registry, …) all land semver-minor on the frozen v1
 surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per
 the image-first workspace charter.
 

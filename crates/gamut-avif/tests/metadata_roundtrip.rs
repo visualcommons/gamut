@@ -177,8 +177,13 @@ fn hdr_encoder() -> AvifEncoder {
 
 #[test]
 fn libavif_reads_back_the_content_light_level() {
-    let s = libavif_oracle::introspect(&encode(hdr_encoder())).expect("libavif parses the container");
-    assert_eq!(s.clli, [1000, 400], "libavif reads MaxCLL/MaxPALL as written");
+    let s =
+        libavif_oracle::introspect(&encode(hdr_encoder())).expect("libavif parses the container");
+    assert_eq!(
+        s.clli,
+        [1000, 400],
+        "libavif reads MaxCLL/MaxPALL as written"
+    );
 }
 
 #[test]
@@ -214,7 +219,10 @@ fn the_crate_reads_back_the_hdr_properties_as_descriptive() {
     let irot = position(|k| matches!(k, PropertyKind::Rotation(_)));
     assert!(!properties[clli].essential, "clli is descriptive");
     assert!(!properties[mdcv].essential, "mdcv is descriptive");
-    assert!(clli < irot && mdcv < irot, "descriptive properties precede transformative ones");
+    assert!(
+        clli < irot && mdcv < irot,
+        "descriptive properties precede transformative ones"
+    );
 }
 
 #[test]
