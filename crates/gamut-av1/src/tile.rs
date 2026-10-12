@@ -1213,7 +1213,8 @@ impl<'a> FrameEncoder<'a> {
                 e.encode_partition(r + dr, c + dc, 4);
             }
         });
-        split < none
+        // `min_by_key` keeps its first argument on equal costs: a tie stays PARTITION_NONE.
+        std::cmp::min_by_key((none, false), (split, true), |c| c.0).1
     }
 
     /// The rate–distortion cost of coding the `bw × bw` region at MI `(r, c)` as `code` does,
@@ -2583,15 +2584,14 @@ impl<'a> FrameEncoder<'a> {
             };
             (self.rd_cost(sse, rate), choice)
         };
-        // DCT_DCT (symbol 1) first, so it wins ties; the rest of TX_SET_INTRA_2 follows.
-        let mut best = price(TxType::DctDct, 1);
-        for &(tx, symbol) in trials {
-            let candidate = price(tx, symbol);
-            if candidate.0 < best.0 {
-                best = candidate;
-            }
-        }
-        best.1
+        // DCT_DCT (symbol 1) first, so it wins ties (`min_by_key` keeps its first argument on
+        // equal keys); the rest of TX_SET_INTRA_2 follows in trial order.
+        trials
+            .iter()
+            .fold(price(TxType::DctDct, 1), |best, &(tx, symbol)| {
+                std::cmp::min_by_key(best, price(tx, symbol), |c| c.0)
+            })
+            .1
     }
 
     /// DC intra prediction value for a 4×4 at coded position `(sx, sy)` (§7.11.2.5). In the lossless
@@ -3332,8 +3332,9 @@ impl<'a> FrameEncoder<'a> {
     /// the answer, and so could not be tested; that costs the `Fastest` search and 32×32/64×64
     /// blocks up to eight repeated trials each.
     ///
-    /// Earlier candidates win ties, so the cheaper signalling is preferred. The choice is a quality
-    /// decision; every option reconstructs bit-exactly, so only the signaling must be correct.
+    /// A tie goes to the cheaper `DCT_DCT` cost, then to the earlier candidate (the cheaper
+    /// signalling). The choice is a quality decision; every option reconstructs bit-exactly, so
+    /// only the signaling must be correct.
     fn select_luma_mode(
         &mut self,
         r: usize,
@@ -3351,18 +3352,16 @@ impl<'a> FrameEncoder<'a> {
             .collect();
         costs.sort_unstable();
         costs.truncate(MODE_REFINE);
-        // Back into signalling order, so a tie still goes to the cheaper-signalled candidate.
-        costs.sort_unstable_by_key(|&(_, i)| i);
-        for (cost, i) in &mut costs {
-            *cost = self.luma_cost(r, c, bw, bh, luma_tx, candidates[*i], Coding::Trial);
-        }
-        let mut best = (u64::MAX, DC_LUMA);
-        for (cost, i) in costs {
-            if cost < best.0 {
-                best = (cost, candidates[i]);
-            }
-        }
-        best.1
+        // `min_by_key` keeps the first of equal costs, and the list is in screening order: a tie
+        // in full cost goes to the cheaper `DCT_DCT` cost, then to the earlier candidate.
+        costs
+            .into_iter()
+            .map(|(_, i)| {
+                let full = self.luma_cost(r, c, bw, bh, luma_tx, candidates[i], Coding::Trial);
+                (full, i)
+            })
+            .min_by_key(|&(full, _)| full)
+            .map_or(DC_LUMA, |(_, i)| candidates[i])
     }
 
     /// The rate–distortion cost of coding the lossy `bw × bh` block at MI `(r, c)`'s luma as
@@ -3497,20 +3496,21 @@ impl<'a> FrameEncoder<'a> {
         let cfl_rate = symbol_rate(uv, usize::from(UV_CFL_PRED));
         let [u, v] = &trials;
         let (u0, v0) = (u[0], v[0]);
-        let mut best = (self.rd_cost(u0.1 + v0.1, u0.2 + v0.2 + dc_rate), None);
-        for &(au, su, ru) in u {
-            for &(av, sv, rv) in v {
-                if au == 0 && av == 0 {
-                    continue;
-                }
+        let plain_dc = (self.rd_cost(u0.1 + v0.1, u0.2 + v0.2 + dc_rate), None);
+        // Every pair but `(0, 0)` — index 0 of each list is `alpha = 0` — is a CfL candidate:
+        // those with a nonzero U alpha, then those with U at 0 and a nonzero V alpha.
+        let pairs = (1..u.len())
+            .flat_map(|i| (0..v.len()).map(move |j| (i, j)))
+            .chain((1..v.len()).map(|j| (0, j)));
+        pairs
+            .fold(plain_dc, |best, (i, j)| {
+                let ((au, su, ru), (av, sv, rv)) = (u[i], v[j]);
                 let rate = ru + rv + cfl_rate + self.cfl_alphas_rate(au, av);
-                let cost = self.rd_cost(su + sv, rate);
-                if cost < best.0 {
-                    best = (cost, Some((au, av)));
-                }
-            }
-        }
-        best.1
+                // `min_by_key` keeps its first argument on equal costs: earlier candidates, and
+                // plain `DC_PRED` before them all, win ties.
+                std::cmp::min_by_key(best, (self.rd_cost(su + sv, rate), Some((au, av))), |c| c.0)
+            })
+            .1
     }
 
     /// The rate of `read_cfl_alphas` (§5.11.45) for `(au, av)` against the CDFs as they stand,
@@ -4942,7 +4942,8 @@ mod tests {
                 "select_luma_mode changed the encoder"
             );
             // The procedure, spelled out: the `MODE_REFINE` cheapest under `DCT_DCT` alone
-            // (earlier first on a tie) are re-priced in full; the first of least cost wins.
+            // (earlier first on a tie), in that order, are re-priced in full; the first of least
+            // cost wins.
             let all = e.luma_candidates(bw, bh);
             let screen: Vec<u64> = all
                 .iter()
@@ -4951,7 +4952,6 @@ mod tests {
             let mut contenders: Vec<usize> = (0..all.len()).collect();
             contenders.sort_by_key(|&i| (screen[i], i));
             contenders.truncate(MODE_REFINE);
-            contenders.sort_unstable();
             let full: Vec<u64> = contenders
                 .iter()
                 .map(|&i| e.luma_cost(r, c, bw, bh, tx, all[i], Coding::Trial))
