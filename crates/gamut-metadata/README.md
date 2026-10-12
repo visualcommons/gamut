@@ -289,14 +289,16 @@ setter — plus `with_encoded_metadata(&EncodedMetadata)` for a caller who chose
 policies. A carrier the container cannot write is a typed `Unsupported` error there, never a silent
 drop, and a manifest store is never copied forward.
 
-**Precedence, as it behaves today.** A carrier absent from the model leaves whatever the caller set
-earlier untouched; a carrier *present* in the model overwrites it, because the routing is the raw
-setter. That is unremarkable for a container box, and consequential for ICC in JPEG XL, where the
-profile is not a box but the codestream's colour encoding: `JxlEncoder::with_metadata` routes a
-present profile to `with_color(ColorSpec::Icc(…))`, replacing a `ColorSpec` the caller chose before
-the call. Order the two accordingly. Whether last-write-wins is the right rule for a colour
-encoding — as against refusing the conflict — is an open question, filed as #626 rather than
-decided here.
+**Precedence.** A carrier absent from the model leaves whatever the caller set earlier untouched;
+a carrier *present* in the model overwrites it, because the routing is the raw setter. That is
+unremarkable for a container box, where only an earlier payload is replaced. It is not for a
+format whose colour encoding and ICC carrier are the same thing — JPEG XL, where the profile is not
+a box but the codestream's colour encoding — so there the rule is **refuse the conflict** (#626):
+`JxlEncoder::with_metadata` returns `InvalidInput` when the model carries a profile and the caller
+already chose a different `ColorSpec` explicitly through `with_color`, rather than silently
+discarding that choice. Absent an explicit choice the profile is applied; calling `with_color`
+*after* `with_metadata` is the deliberate override. A later format whose ICC carrier is its colour
+encoding follows the same rule.
 
 Wired today: `gamut-dng` (its `DngMetadata` holds the facade's `Exif` by value), `gamut-jpeg`,
 `gamut-jxl` and `gamut-heic` (decode-only). The remaining format crates hand their payloads over as

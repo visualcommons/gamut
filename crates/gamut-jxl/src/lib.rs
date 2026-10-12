@@ -101,8 +101,9 @@
 //! [`JxlMetadata::blocks`] hands the located payloads over as `MetadataBlock`s and
 //! [`JxlMetadata::metadata`] parses them into a unified `Metadata`, while
 //! [`JxlEncoder::with_metadata`] / [`JxlEncoder::with_encoded_metadata`] embed one, routing EXIF
-//! and XMP to the container boxes and the ICC profile to [`ColorSpec::Icc`]. The dependency
-//! direction stays `gamut-jxl → gamut-metadata`.
+//! and XMP to the container boxes and the ICC profile to [`ColorSpec::Icc`] — refusing, rather
+//! than silently replacing, a different [`ColorSpec`] the caller chose explicitly through
+//! [`JxlEncoder::with_color`]. The dependency direction stays `gamut-jxl → gamut-metadata`.
 //!
 //! ## Deferred: container ownership
 //!
