@@ -14,6 +14,8 @@
 //! unreadable, exactly as [`gamut_ifd::read`] would; everything else is reported for the caller
 //! to judge.
 
+use std::collections::BTreeMap;
+
 use gamut_core::{Error, Result};
 use gamut_ifd::{
     AuditFinding, Auditor, ByteOrder, Claim, DataLabel, Ifd, SegmentReport, SkipReason, SpanKind,
@@ -113,6 +115,28 @@ pub enum Anomaly {
         /// A human-readable description (wording not contractual).
         detail: &'static str,
         /// How serious the condition is.
+        severity: Severity,
+    },
+    /// A directory carrying more than one entry under the same tag.
+    ///
+    /// TIFF 6.0 §2 — which DNG 1.7.1 builds on — gives a directory one entry per tag. A repeated
+    /// tag is a directory no reader resolves without choosing, and readers choose differently:
+    /// the parse keeps the **last** occurrence, libtiff the first. Which entry survives is a
+    /// property of the reader, not of the file.
+    ///
+    /// Named by **offset** rather than by page, because the directory may be a metadata sub-IFD
+    /// or an embedded camera-profile directory rather than a page: the offset is the identity
+    /// [`SpanKind::IfdBody`] already uses.
+    #[non_exhaustive]
+    DuplicateTag {
+        /// The file offset of the directory holding the repeated tag.
+        ifd: u64,
+        /// The repeated tag.
+        tag: u16,
+        /// How many entries that directory carries under it.
+        entries: usize,
+        /// How serious the condition is — always [`Severity::Error`]: a field the writer set is
+        /// lost by at least one reader.
         severity: Severity,
     },
 }
@@ -375,7 +399,12 @@ impl Findings {
     }
 
     /// Maps the audit walk's lenient findings onto this crate's anomaly taxonomy.
+    ///
+    /// A directory's [`AuditFinding::ShadowedEntry`] findings — one per entry its parsed [`Ifd`]
+    /// lost to a later entry under the same tag — fold into one [`Anomaly::DuplicateTag`] per
+    /// `(directory, tag)`, counting the survivor too, in directory-offset then tag order.
     fn map_audit_findings(&mut self, findings: &[AuditFinding]) {
+        let mut shadowed: BTreeMap<(u64, u16), usize> = BTreeMap::new();
         for finding in findings {
             match *finding {
                 AuditFinding::SkippedSubIfd { page, reason, .. } => {
@@ -396,9 +425,20 @@ impl Findings {
                         severity: Severity::Warning,
                     });
                 }
+                AuditFinding::ShadowedEntry { ifd, tag, .. } => {
+                    *shadowed.entry((ifd, tag)).or_default() += 1;
+                }
                 // The finding taxonomy may grow; unrecognised findings are not anomalies.
                 _ => {}
             }
+        }
+        for ((ifd, tag), lost) in shadowed {
+            self.anomalies.push(Anomaly::DuplicateTag {
+                ifd,
+                tag,
+                entries: lost + 1,
+                severity: Severity::Error,
+            });
         }
     }
 }
@@ -447,5 +487,39 @@ impl DngDecoder {
         let report = deconstruct(data)?;
         let decoded = self.decode(data)?;
         Ok((decoded, report))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory that repeats a tag is graded: the audit's shadowed-entry finding folds into one
+    /// `DuplicateTag` naming the directory by offset and counting both entries.
+    #[test]
+    fn flags_a_directory_that_repeats_a_tag() {
+        let data: &[u8] = &[
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD0 @ 8
+            0x02, 0x00, // 2 entries
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // 256 = 1
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // 256 = 2
+            0x00, 0x00, 0x00, 0x00, // next = 0
+        ];
+        let report = deconstruct(data).expect("deconstruct");
+        let duplicates: Vec<_> = report
+            .anomalies
+            .iter()
+            .filter(|a| matches!(a, Anomaly::DuplicateTag { .. }))
+            .collect();
+        assert_eq!(
+            duplicates,
+            [&Anomaly::DuplicateTag {
+                ifd: 8,
+                tag: 256,
+                entries: 2,
+                severity: Severity::Error,
+            }],
+            "{report:?}"
+        );
     }
 }
