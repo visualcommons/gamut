@@ -58,11 +58,11 @@ pub(crate) struct ConvertArgs {
     /// formats.
     #[arg(long)]
     avif_lossy: bool,
-    /// AVIF encoder speed, 0 (the full search, the default) to 3 (the fastest): `gamut-av1`'s
-    /// presets thorough, balanced, fast and fastest. A time control, not a size one — a faster
-    /// preset can come out smaller or larger. Only lossy AVIF is searched; lossless codes the same
-    /// bytes at every speed. Ignored for other output formats.
-    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=3))]
+    /// AVIF encoder speed, 0 (the full search) to 3 (the fastest): `gamut-av1`'s presets
+    /// thorough, balanced (1, the default), fast and fastest. A time control, not a size one — a
+    /// faster preset can come out smaller or larger. Only lossy AVIF is searched; lossless codes
+    /// the same bytes at every speed. Ignored for other output formats.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(0..=3))]
     avif_speed: u8,
     /// Most threads one AVIF encode may use; `0` means every available core. The output is the
     /// same at every count. Several inputs already convert in parallel, one per core, so each of
@@ -1099,6 +1099,8 @@ mod tests {
         assert_eq!(encoder.threads(), default.threads());
         let lossy = avif_with(&["--avif-lossy", "--quality", "40"]);
         assert_eq!(lossy.config(), AvifEncoder::lossy(40).config());
+        // Speed only moves lossy output, so that is where the flag's default must agree.
+        assert_eq!(lossy.speed(), AvifEncoder::lossy(40).speed());
     }
 
     #[test]

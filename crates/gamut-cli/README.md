@@ -102,7 +102,7 @@ The sandbox exposes:
   in parallel, one worker per core, into an output directory), with `-` for standard input/output,
   `-f`/`--overwrite`, `-q`/`--quiet`, and exit status 1 when any input fails:
   - **AVIF** — lossless (default) or lossy intra via `--avif-lossy --quality` (`--qindex` is a
-    deprecated alias), keeping the input's alpha, grey and 16-bit depth; `--avif-speed` (0–3),
+    deprecated alias), keeping the input's alpha, grey and 16-bit depth; `--avif-speed` (0–3, default 1),
     `--avif-threads` (`0` = every core), `--avif-alpha-quality` (0–100), `--avif-clean-alpha`,
     `--avif-matrix` (identity/bt601/bt709/bt2020), `--avif-depth` (8/10/12) and `--avif-chroma`
     (444/422/420) tune the encode; the summary line splits the file into colour, alpha and
