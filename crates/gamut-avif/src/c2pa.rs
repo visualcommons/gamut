@@ -289,7 +289,7 @@ impl<'a> AvifContainer<'a> {
     /// describe it as one: the minimum bounds the reservation path alone.
     /// [`with_c2pa`](crate::AvifEncoder::with_c2pa) carries a caller-supplied slice verbatim, so
     /// this crate does write files whose slot is shorter than a JUMBF box header, and this locator
-    /// reports them. Whether that builder should apply the minimum too is issue #577.
+    /// reports them. That builder applies no minimum by decision (issue #577); its docs say why.
     pub fn c2pa_slots(&self) -> impl Iterator<Item = C2paSlot<'a>> + '_ {
         slots(self.segments())
     }

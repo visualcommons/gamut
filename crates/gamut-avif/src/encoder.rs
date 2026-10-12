@@ -1189,7 +1189,14 @@ impl AvifEncoder {
     /// shorter than a JUMBF box header is written, and located again by
     /// [`AvifContainer::c2pa_slot`](crate::AvifContainer::c2pa_slot), rather than refused. Only
     /// the *length* is unchecked here in a way the reservation path is not; the content is
-    /// unchecked on both. Whether the minimum should apply here too is issue #577.
+    /// unchecked on both.
+    ///
+    /// That asymmetry is decided, not pending (issue #577). A length floor would be the only
+    /// content judgement the C2PA surface makes, on a crate that parses nothing inside a store and
+    /// in a workspace that validates no other caller-supplied metadata payload (`with_exif`,
+    /// `with_xmp`, the PNG/WebP raw chunk carriers). The reservation's floor exists because a bare
+    /// integer carries no other evidence of intent; a slice is bytes the caller already holds, and
+    /// judging whether they are a manifest store is the signer's job, not the container's.
     ///
     /// The container's own bound still applies: a `store` large enough to push the
     /// `ContentProvenanceBox` to or past 4 GiB is refused at encode time by
