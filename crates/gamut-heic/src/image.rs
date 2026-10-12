@@ -99,7 +99,8 @@ impl HeifImage {
     /// (`references/heif` §7), or — for the generic structural brand `mif1` — when the primary item
     /// carries an `hvcC` HEVC configuration. Image-*sequence* brands (`msf1`/`hevc`/`hevx`) are out
     /// of scope and are not treated as stills here, but a valid still-image `meta` is not rejected
-    /// for carrying one alongside `mif1` ([`gamut_isobmff::read`] already rejects track files).
+    /// for carrying one alongside `mif1` ([`gamut_isobmff::read`] skips a track beside `meta` and
+    /// refuses a sequence-only file).
     #[must_use]
     pub fn is_hevc_still(&self) -> bool {
         let has_hevc_brand = core::iter::once(&self.inner.major_brand)

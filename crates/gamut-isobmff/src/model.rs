@@ -46,7 +46,8 @@ pub struct IsoBmffImage {
     /// list round-trips as an absent `grpl` box.
     pub groups: Vec<EntityGroup>,
     /// Top-level boxes the model does not otherwise own — anything but `ftyp`, `meta` and `mdat`
-    /// (and an appended motion-photo stream, which [`crate::read`] stops at) — in file order, each
+    /// (and a sequence track's `moov`/`trak`, which [`crate::read`] skips, and an appended
+    /// motion-photo stream, which it stops at) — in file order, each
     /// carrying the [`TopLevelPosition`] it is written at. File order means grouped by position:
     /// every [`AfterFtyp`](TopLevelPosition::AfterFtyp) box precedes every
     /// [`Trailing`](TopLevelPosition::Trailing) one, which is how [`crate::read`] fills the list and
@@ -150,7 +151,8 @@ impl IsoBmffImage {
 /// The `uuid` split follows [`crate::RawBox`]: `user_type` is `Some` exactly when `ty` is `uuid`,
 /// and `payload` is the body *after* the user type. [`crate::write`] rejects a box that breaks
 /// that pairing, and a box typed `ftyp`/`meta`/`mdat` (the writer emits those from the model) or
-/// `moov`/`trak` (image sequences, which [`crate::read`] rejects).
+/// `moov`/`trak` (an image sequence's track, whose chunk offsets address the source file's `mdat`
+/// and so cannot be carried verbatim; [`crate::read`] skips one rather than retaining it here).
 ///
 /// The C2PA `ContentProvenanceBox` (C2PA 2.4 §A.5.1) is a `uuid` box with user type
 /// `D8FEC3D6-1B0E-483C-9297-5828877EC481`; its payload — the `FullBox` version/flags, the

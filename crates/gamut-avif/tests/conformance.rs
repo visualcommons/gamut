@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, AvifImage, ChromaFormat, DecodedFrame,
-    Mirror, Rotation, Subsampling,
+    Mirror, Rotation, SegmentKind, Subsampling,
 };
 use gamut_color::{ColorRange, MatrixCoefficients};
 use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
@@ -598,14 +598,36 @@ fn non_essential_transforms_diverge_documented() {
 // ---- out-of-scope and hostile shapes ---------------------------------------------------------
 
 #[test]
-fn animated_sequence_is_rejected_gracefully() {
-    // `avis` image sequences are track-based and permanently out of scope; the parse must fail
-    // with a typed error, not a panic or a silent partial view.
-    let data = corpus("colors-animated-8bpc.avif");
-    assert!(matches!(
-        AvifContainer::parse(&data),
-        Err(error) if matches!(error.kind(), ErrorKind::Unsupported | ErrorKind::InvalidInput)
-    ));
+fn animated_sequence_parses_its_still_and_accounts_the_track() {
+    // Every libavif `avis` fixture carries a `meta` primary still beside its `moov` (AVIF v1.2.0
+    // §7). Sequence decode stays out of scope, but the still parses (#646): the track is skipped
+    // by the model and accounted as one opaque top-level box, so the segments still tile the file.
+    for name in [
+        "colors-animated-8bpc.avif",
+        "colors-animated-8bpc-audio.avif",
+        "colors-animated-8bpc-alpha-exif-xmp.avif",
+        "colors-animated-8bpc-depth-exif-xmp.avif",
+        "colors-animated-12bpc-keyframes-0-2-3.avif",
+        "poc_b_506387278.avif",
+    ] {
+        let data = corpus(name);
+        let container = AvifContainer::parse(&data).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            container.image().primary_item().kind().is_av1(),
+            "{name}: primary still is an av01 item"
+        );
+        assert!(
+            gamut_core::segment::covers(container.segments(), data.len()),
+            "{name}: segments tile the file"
+        );
+        assert!(
+            container
+                .segments()
+                .iter()
+                .any(|s| matches!(s.kind, SegmentKind::Box { ty, .. } if ty == *b"moov")),
+            "{name}: moov accounted as a top-level box"
+        );
+    }
 }
 
 #[test]

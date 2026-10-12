@@ -20,7 +20,8 @@
 //! smallest box versions (`iloc` v0, single extent into `mdat`); the reader additionally accepts
 //! the foreign-encoder repertoire (`iloc` v1/v2, `idat` placement, multi-extent payloads, 32-bit
 //! item ids, 16-bit `ipma` indices). Image sequences/tracks and item protection are out of scope —
-//! see this crate's `STATUS.md` for the deferred/out-of-scope ledger. Box byte layouts follow
+//! [`read`] skips a sequence's `moov` so the `meta` primary still beside it reads, and refuses a
+//! sequence-only file — see this crate's `STATUS.md` for the deferred/out-of-scope ledger. Box byte layouts follow
 //! ISO/IEC 14496-12 (ISOBMFF) and ISO/IEC 23008-12 (HEIF); see `references/isobmff`.
 //!
 //! [`read`] models only the *primary* still-image stream. It is tolerant of real-world "motion

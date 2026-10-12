@@ -26,16 +26,16 @@
 //! Since #443 [`read`] also *retains* every top-level box other than `ftyp`/`meta`/`mdat` in
 //! [`IsoBmffImage::top_level_boxes`](crate::IsoBmffImage::top_level_boxes); this walk still
 //! reports each as a [`SegmentKind::Box`] with its range, because accounting is about *where* the
-//! bytes are and the model is about *what* they carry.
+//! bytes are and the model is about *what* they carry. A sequence track's `moov` (or a stray
+//! top-level `trak`) is the one box [`read`] neither parses nor retains (#646): its chunk offsets
+//! address this file's `mdat`, so it cannot round-trip through the model. This walk is therefore
+//! the only place its bytes are accounted for, as a plain [`SegmentKind::Box`].
 //!
-//! They are deliberately **not** one function. [`read`] is strictly stricter: it rejects
-//! `moov`/`trak` in the primary stream with [`Error::Unsupported`](gamut_core::Error::Unsupported)
-//! at the point it meets them. Routing it through this walk would change which error a file
-//! carrying *both* an out-of-scope box and a malformed early box reports -- the walk reaches the
-//! malformed box and returns `InvalidInput`, where `read` today returns `Unsupported` for whatever
-//! it met first. That is a decode-only path fed untrusted input, so the error kind is part of its
-//! contract and not worth churning to remove a third copy of a loop. Callers wanting both get
-//! both: parse with [`read`], account with [`walk_segments`].
+//! They are deliberately **not** one function. [`read`] is strictly stricter: it requires a
+//! `meta` and parses it, and a file carrying a track but no `meta` is a sequence with no still
+//! item, which it refuses as [`Error::Unsupported`](gamut_core::Error::Unsupported) where this walk
+//! accounts it without complaint. Callers wanting both get both: parse with [`read`], account with
+//! [`walk_segments`].
 
 use gamut_core::Result;
 

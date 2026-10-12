@@ -113,7 +113,9 @@ every default lossy stream. The lossless default is untouched by either and stay
 
 **Permanently out of scope (workspace charter: image-first, no inter-frame/motion/sequence
 coding).** Image sequences and tracks — the `avis` and `avio` brands (AVIF §3, §6.3),
-`moov`/`trak`/`mdia`/`stbl` and `av01` sample entries — and the AV1 inter-coding machinery
+`moov`/`trak`/`mdia`/`stbl` and `av01` sample entries (the `meta` primary still such a file
+carries beside its track parses since #646; the track itself is skipped, never read) — and the
+AV1 inter-coding machinery
 (section I below; INTRA_ONLY/INTER/SWITCH frame types, global motion, inter/MV entropy contexts,
 and the timing_info/decoder_model sequence-header fields that only sequences use). Also
 `dinf`/`dref` external data references (a still image is self-contained), mirroring the finalized
@@ -354,6 +356,7 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | Component | Spec | Status | Slice |
 | --- | --- | --- | --- |
 | Byte-exact segment accounting (every byte a box / appended stream / trailer) | 14496-12 | ✅ | S1 |
+| `avis` file: `meta` primary still parses, `moov` skipped and accounted as one opaque box; sequence-only file is `Unsupported` | AVIF §6.3, §7 | ✅ | #646 |
 | `meta`/`iprp` unknown-box surfacing (shadow walk) | 14496-12 | ✅ | S1 |
 | Role-typed view: primary validation, brands (`avif`/`avio` still; `avis` OOS), item kinds | AVIF §8.3; 23008-12 | ✅ | S1 |
 | Relationship lenses: thumbnails, aux (alpha/depth URNs), `prem`, `cdsc` Exif/XMP, `dimg` | AVIF §4; 23008-12 §6 | ✅ | S1 |

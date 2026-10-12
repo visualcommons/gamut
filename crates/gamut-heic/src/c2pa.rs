@@ -292,7 +292,7 @@ impl<'a> HeifContainer<'a> {
     /// looked at.
     ///
     /// The position is taken from the walk itself rather than by comparing offsets: the boundary is
-    /// simply whether a media-data box has already been passed when this box is reached.
+    /// simply whether an `mdat` or a `moov` box has already been passed when this box is reached.
     fn top_level_uuid_boxes(
         &self,
     ) -> impl Iterator<Item = (Range<usize>, C2paBoxPosition, TopLevelUuidBox<'a>)> + '_ {
@@ -300,8 +300,8 @@ impl<'a> HeifContainer<'a> {
             .iter()
             .scan(C2paBoxPosition::BeforeMediaData, |position, segment| {
                 let entry = match segment.kind {
-                    SegmentKind::Box { ty, .. } if &ty == b"mdat" => {
-                        *position = C2paBoxPosition::AfterMediaData;
+                    SegmentKind::Box { ty, .. } if &ty == b"mdat" || &ty == b"moov" => {
+                        *position = position.passing(ty);
                         None
                     }
                     SegmentKind::Box { ty, body } if &ty == b"uuid" => {
@@ -525,10 +525,12 @@ impl C2paUnreadReason {
 /// stating for the same reason a byte range is: it is where an *appended* box lands, and a reader
 /// deciding what to hand a validator cannot see it from a range alone.
 ///
-/// The boundary this crate can observe is the first `mdat` alone. §A.5.3's other one, `moov`, is a
-/// movie box, and [`HeifContainer::parse`] refuses a file carrying a top-level one before any of
-/// this runs — image sequences and tracks are out of the workspace's scope — so a `moov` test here
-/// would be a branch no parsed file could take.
+/// Both of §A.5.3's boundaries are observed. [`HeifContainer::parse`] skips a top-level `moov` that
+/// sits beside the `meta` still (an image sequence's track: the workspace reads the still and never
+/// the track), so a parsed file can hold one, and the box is then reported past whichever boundary
+/// the walk crossed **first** — [`AfterMediaData`](Self::AfterMediaData) or
+/// [`AfterMovieBox`](Self::AfterMovieBox). Once either is crossed the box is outside the window, and
+/// the first boundary is the one that put it there.
 ///
 /// Stating it is not judging it, and deliberately so. §A.5.3 separately requires the `update` box
 /// of a mid-update file to "exist as the last box of the file", which on a file with media data
@@ -542,14 +544,26 @@ impl C2paUnreadReason {
 #[non_exhaustive]
 #[repr(u8)]
 pub enum C2paBoxPosition {
-    /// The box was reached before any `mdat` box — the window §A.5.3 places a manifest-store box
-    /// in. A file with no `mdat` at all reports this too.
+    /// The box was reached before any `mdat` or `moov` box — the window §A.5.3 places a
+    /// manifest-store box in. A file with neither reports this too.
     BeforeMediaData = 0,
-    /// An `mdat` box was already passed when this box was reached.
+    /// An `mdat` box was already passed when this box was reached, and no `moov` before it.
     AfterMediaData = 1,
+    /// A `moov` box was already passed when this box was reached, and no `mdat` before it.
+    AfterMovieBox = 2,
 }
 
 impl C2paBoxPosition {
+    /// The position after the walk passes a top-level box of type `ty`: the first `mdat` or
+    /// `moov` closes the §A.5.3 window and names the position, and nothing reopens or renames it.
+    const fn passing(self, ty: [u8; 4]) -> Self {
+        match (self, &ty) {
+            (Self::BeforeMediaData, b"mdat") => Self::AfterMediaData,
+            (Self::BeforeMediaData, b"moov") => Self::AfterMovieBox,
+            (crossed, _) => crossed,
+        }
+    }
+
     /// The clause a report adds to this box's line, or `None` when the box sits where §A.5.3 puts
     /// one and its position adds nothing to what the range already says.
     ///
@@ -559,6 +573,7 @@ impl C2paBoxPosition {
     pub const fn note(self) -> Option<&'static str> {
         match self {
             Self::AfterMediaData => Some("its box begins after the first mdat box"),
+            Self::AfterMovieBox => Some("its box begins after a moov box"),
             Self::BeforeMediaData => None,
         }
     }
@@ -1375,6 +1390,27 @@ mod tests {
         // The clause is a flag, not a field: stating a position for every box would bury the one
         // that is worth reading.
         assert_eq!(C2paBoxPosition::BeforeMediaData.note(), None);
+    }
+
+    #[test]
+    fn a_box_past_a_moov_says_which_boundary_it_crossed() {
+        let mut past_moov = summary(&[(61, 90, C2paBoxPurpose::Manifest)]);
+        past_moov.stores[0].position = C2paBoxPosition::AfterMovieBox;
+        assert_eq!(
+            past_moov.report_lines()[1],
+            "  box_purpose \"manifest\": 29 bytes at [61, 90) — located, not validated; its box \
+             begins after a moov box"
+        );
+    }
+
+    #[test]
+    fn the_first_boundary_crossed_names_the_position_and_nothing_renames_it() {
+        use C2paBoxPosition::{AfterMediaData, AfterMovieBox, BeforeMediaData};
+        assert_eq!(BeforeMediaData.passing(*b"mdat"), AfterMediaData);
+        assert_eq!(BeforeMediaData.passing(*b"moov"), AfterMovieBox);
+        assert_eq!(BeforeMediaData.passing(*b"free"), BeforeMediaData);
+        assert_eq!(AfterMediaData.passing(*b"moov"), AfterMediaData);
+        assert_eq!(AfterMovieBox.passing(*b"mdat"), AfterMovieBox);
     }
 
     #[test]

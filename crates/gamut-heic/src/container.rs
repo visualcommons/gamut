@@ -60,12 +60,14 @@ impl<'a> HeifContainer<'a> {
     /// # Errors
     ///
     /// Propagates every [`gamut_isobmff::read`] error (a missing/truncated required box, an
-    /// out-of-scope feature such as an image sequence, …) and returns
+    /// out-of-scope feature such as a sequence-only file, …) and returns
     /// [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if the
     /// primary item is missing or hidden. A malformed top-level box *before* both `ftyp` and `meta`
-    /// are seen is a parse error; after that it is retained as a [`SegmentKind::Trailer`].
+    /// are seen is a parse error; after that it is retained as a [`SegmentKind::Trailer`]. A
+    /// `moov`/`trak` beside the `meta` still is not an error: it is skipped, and its bytes are one
+    /// opaque [`segments`](Self::segments) entry.
     pub fn parse(data: &'a [u8]) -> Result<Self> {
-        // Semantic parse first: it enforces the stricter rules (rejecting out-of-scope `moov`/`trak`,
+        // Semantic parse first: it enforces the stricter rules (refusing a sequence-only file,
         // missing required boxes, …). Because it succeeds only once `ftyp`+`meta` are seen and uses
         // the identical `BoxReader` walk, the byte-accounting walk below cannot then disagree.
         let image = HeifImage::new(read(data)?)?;
