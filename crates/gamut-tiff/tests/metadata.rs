@@ -441,6 +441,12 @@ fn a_broken_exif_pointer_is_still_an_error() {
     // pointer whose failure the caller must hear about. The *message* is the claim, not merely
     // `is_err`: the file also carries a dangling offset the reader must not have followed for any
     // other reason, so a refusal naming something else would mean the wrong pointer failed.
+    //
+    // The file is single-page, so the refusal also withholds its XMP — and would withhold a C2PA
+    // store, IFD 0 being the last IFD too — while the same pointer on page 1 of a two-page file
+    // fails nothing (`a_broken_pointer_on_a_page_the_metadata_discards_does_not_fail_the_read`).
+    // That asymmetry is the documented contract of `TiffDecoder::metadata`, kept on purpose
+    // (#581): the alternatives need a partial-result shape or a read-order-dependent error.
     let bytes = file_with_extra_ifd0_field(tags::EXIF_IFD, Value::Long(vec![0xFFFF_FF00]));
     let err = TiffDecoder::new()
         .metadata(&bytes)

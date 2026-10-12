@@ -238,6 +238,21 @@ impl TiffDecoder {
     /// answer can walk the re-exported [`read`](crate::read) / [`gamut_ifd::read_tree`] spine
     /// itself and decide per pointer. (`gamut-dng` degrades instead of failing, because there the
     /// metadata is incidental to a raw *image* decode that must still succeed.)
+    ///
+    /// **The refusal is whole, and it is keyed to the directory, not to the page count.** When a
+    /// followed pointer fails, no field is returned — not the XMP, IPTC, ICC or C2PA blocks either,
+    /// even though none of them came from that pointer and all of them are readable. What can
+    /// fail the call is IFD 0's `ExifIFD` (or a pointer inside the directory it names), in a file
+    /// of any length; a pointer on a later page cannot. The two meet unevenly at one shape: a
+    /// **single-page** file's only page is both IFD 0 and the last IFD the C2PA store is taken
+    /// from, so a dangling `ExifIFD` there costs the caller the store too, while the same dangling
+    /// pointer on page 1 of a two-page file costs nothing. That is accepted rather than patched:
+    /// returning the blocks beside an `Exif` failure needs a partial-result shape this type does
+    /// not have, and collecting the blocks before resolving would make success depend on read
+    /// order. A caller that needs the store from such a file has it without this method:
+    /// [`c2pa_exclusions`](crate::c2pa_exclusions) follows no pointer, and its
+    /// [`store`](gamut_ifd::c2pa::C2paExclusions::store) range locates the store's bytes in the
+    /// file.
     pub fn metadata(&self, data: &[u8]) -> Result<TiffMetadata> {
         metadata::read_metadata(data)
     }
