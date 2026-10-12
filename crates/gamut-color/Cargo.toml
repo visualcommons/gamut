@@ -18,6 +18,9 @@ workspace = true
 [features]
 default = []
 serde = ["dep:serde", "gamut-core/serde"]
+# Exposes the `invariants` module to the out-of-tree fuzz driver. `doc(hidden)`, no SemVer
+# guarantee, and never enabled by the `gamut` umbrella; the crate's own tests get it via `cfg(test)`.
+test-support = []
 
 [dependencies]
 gamut-core.workspace = true
@@ -25,6 +28,7 @@ serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 divan.workspace = true
+proptest.workspace = true
 serde_json.workspace = true
 # Differential oracle: a vendored, statically-linked Little-CMS (lcms2). Dev-only and excluded
 # from the workspace, so a plain `cargo build` of this crate never needs a C toolchain; the

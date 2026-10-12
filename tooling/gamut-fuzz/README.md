@@ -95,6 +95,7 @@ over normalised inputs, per the section above.
 | `tonemap_curves` | `gamut-tonemap` | `output_is_non_negative_and_never_nan`, `map_slice_is_elementwise_map`, `map_slice_is_order_independent`, `monotonic_non_decreasing` |
 | `avif_clean_alpha` | `gamut-avif` | `cleaning_8_bit_rgba_keeps_the_composite`, `cleaning_16_bit_rgba_keeps_the_composite` |
 | `avif_parse_decode` | `gamut-avif` | `decoding_stays_within_limits` |
+| `color_gray8_view` | `gamut-color` | `gray8_view_is_lossless_widening_then_gray16_view` |
 
 One file per crate, deliberately, so adding a crate is an additive change — with two exceptions,
 both because a crate's laws need different inputs. `gamut-ifd` has two: `ifd_read_ledger` reads

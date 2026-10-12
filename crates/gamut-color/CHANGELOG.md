@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(gamut-color)* `Planar16::from_gray8_view`: a `Gray8` image as a monochrome (`Cs400`) plane
+  widened by bit replication to any `BitDepth`, equal sample for sample to the lossless
+  `Gray8 -> Gray16` conversion followed by `Planar16::from_gray16_view`, without the transient
+  16-bit copy.
+
 ## [2.0.0](https://github.com/justin13888/gamut/compare/gamut-color-v1.1.0...gamut-color-v2.0.0) - 2026-07-20
 
 ### Added

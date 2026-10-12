@@ -7,7 +7,7 @@
 //! an 8-bit buffer cannot need: the [`BitDepth`] its samples are coded at. `u16` is storage, `10`
 //! or `12` is meaning, and every sample is validated against it at construction.
 
-use gamut_core::{Dimensions, Error, Gray16, ImageRef, Result, Rgb16, Rgba16};
+use gamut_core::{Dimensions, Error, Gray8, Gray16, ImageRef, Result, Rgb16, Rgba16};
 
 use crate::format::{BitDepth, ChromaSubsampling};
 use crate::planar::downsample_box;
@@ -393,6 +393,51 @@ impl Planar16 {
         }
     }
 
+    /// Wraps an 8-bit grayscale image as **monochrome** planes ([`ChromaSubsampling::Cs400`]) at
+    /// `bit_depth`: one luma plane of each sample widened by bit replication, and no chroma.
+    ///
+    /// Defined as [`from_gray16_view`](Self::from_gray16_view) applied to the image's lossless
+    /// widening to [`Gray16`] (`gamut_core::convert` under `ConvertPolicy::lossless()`, which maps
+    /// `v` to `v * 257`, the byte replicated into both halves), and equal to it for every sample
+    /// and every [`BitDepth`]. It is computed per sample, so it builds no transient 16-bit copy of
+    /// the image. Replication is what makes the widening exact at both ends: `0` stays `0`, `255`
+    /// becomes the depth's white level ([`BitDepth::max_value`]), and [`BitDepth::Eight`] returns
+    /// the source samples unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_color::{BitDepth, ChromaSubsampling, Planar16};
+    /// use gamut_core::{Dimensions, Gray8, ImageRef};
+    ///
+    /// let grey = [0xFFu8, 0x80, 0x00];
+    /// let img = ImageRef::<Gray8>::new(&grey, Dimensions::new(3, 1)?)?;
+    /// let p = Planar16::from_gray8_view(img, BitDepth::Ten);
+    /// assert_eq!(p.subsampling(), ChromaSubsampling::Cs400);
+    /// // 0x80 replicates to 0x8080, whose top 10 bits are 0x202; no chroma planes.
+    /// assert_eq!(p.plane(0), &[0x3FF, 0x202, 0x000]);
+    /// assert!(p.plane(1).is_empty() && p.plane(2).is_empty());
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    #[must_use]
+    pub fn from_gray8_view(img: ImageRef<'_, Gray8>, bit_depth: BitDepth) -> Self {
+        let shift = narrowing_shift(bit_depth);
+        Self {
+            width: img.width(),
+            height: img.height(),
+            subsampling: ChromaSubsampling::Cs400,
+            bit_depth,
+            planes: [
+                img.as_samples()
+                    .iter()
+                    .map(|&s| (u16::from(s) * 257) >> shift)
+                    .collect(),
+                Vec::new(),
+                Vec::new(),
+            ],
+        }
+    }
+
     /// Image width in samples.
     #[must_use]
     pub fn width(&self) -> u32 {
@@ -669,6 +714,36 @@ mod tests {
         // A pure prefix: the 12-bit plane's top 10 bits are the 10-bit plane.
         let prefix: Vec<u16> = twelve.plane(0).iter().map(|&s| s >> 2).collect();
         assert_eq!(prefix, ten.plane(0));
+    }
+
+    #[test]
+    fn gray8_view_is_a_monochrome_plane_of_each_sample_replicated_then_narrowed() {
+        // Black, white, the midpoint, and two values whose replicated low byte is not all zero
+        // or all one — 0x01 widens to 0x0101 and 0x5A to 0x5A5A.
+        let grey: Vec<u8> = vec![0x00, 0xFF, 0x80, 0x5A, 0x01, 0x7F];
+        let img = ImageRef::<Gray8>::new(&grey, Dimensions::new(3, 2).unwrap()).unwrap();
+
+        let ten = Planar16::from_gray8_view(img, BitDepth::Ten);
+        assert_eq!((ten.width(), ten.height()), (3, 2));
+        assert_eq!(ten.bit_depth(), BitDepth::Ten);
+        assert_eq!(ten.subsampling(), ChromaSubsampling::Cs400);
+        // 0xFF reaches the 10-bit white level 0x3FF, not 0x3FC as a bare `<< 2` would.
+        assert_eq!(ten.plane(0), &[0x000, 0x3FF, 0x202, 0x169, 0x004, 0x1FD]);
+        assert!(ten.plane(1).is_empty() && ten.plane(2).is_empty());
+        assert_eq!(ten.plane_dimensions(1), (0, 0));
+
+        let twelve = Planar16::from_gray8_view(img, BitDepth::Twelve);
+        assert_eq!(twelve.bit_depth(), BitDepth::Twelve);
+        assert_eq!(twelve.plane(0), &[0x000, 0xFFF, 0x808, 0x5A5, 0x010, 0x7F7]);
+
+        // Eight is the identity, Sixteen the full replication.
+        let eight = Planar16::from_gray8_view(img, BitDepth::Eight);
+        assert_eq!(eight.plane(0), &[0x00, 0xFF, 0x80, 0x5A, 0x01, 0x7F]);
+        let sixteen = Planar16::from_gray8_view(img, BitDepth::Sixteen);
+        assert_eq!(
+            sixteen.plane(0),
+            &[0x0000, 0xFFFF, 0x8080, 0x5A5A, 0x0101, 0x7F7F]
+        );
     }
 
     #[test]
