@@ -147,11 +147,16 @@
 //! # Supported / deferred
 //!
 //! gamut is image-first, so only the still-image (intra) subset of AV1 is in scope — no sequences or
-//! animation. **Supported:** 8-bit RGB input; **lossless** (the default, decoded output bit-exact to
-//! the input) and **lossy** ([`AvifEncoder::lossy`], `quality` `0..=100`) AV1 intra coding at
-//! 4:4:4 — lossless through the identity matrix, lossy through **BT.709 YCbCr** by default, with
-//! BT.601 / BT.2020-NCL and studio range selectable ([`AvifEncoder::with_matrix`] /
-//! [`AvifEncoder::with_color_range`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
+//! animation. **Supported:** 8- and 16-bit RGB and RGBA input and 8-bit grayscale (the five
+//! layouts above); **lossless** (the default, decoded output bit-exact to the input at the coded depth)
+//! and **lossy** ([`AvifEncoder::lossy`], `quality` `0..=100`) AV1 intra coding — lossless at
+//! 4:4:4 through the identity matrix, lossy through **BT.709 YCbCr** by default, with BT.601 /
+//! BT.2020-NCL and studio range selectable ([`AvifEncoder::with_matrix`] /
+//! [`AvifEncoder::with_color_range`]) at 4:2:0 (the lossy default), 4:2:2 or 4:4:4
+//! ([`AvifEncoder::with_chroma`]); a coded depth of 8, 10 or 12 bits
+//! ([`AvifEncoder::with_bit_depth`]); **alpha** as a monochrome auxiliary item with its own
+//! quality and premultiplication mode ([`AvifEncoder::with_alpha_quality`] /
+//! [`AvifEncoder::with_alpha_mode`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
 //! [`AvifEncoder::with_mirror`]); the **colour and metadata surface** — CICP primaries and transfer
 //! ([`AvifEncoder::with_primaries`] / [`AvifEncoder::with_transfer`]), an embedded ICC profile
 //! ([`AvifEncoder::with_icc_profile`]), Exif / XMP items
@@ -163,14 +168,16 @@
 //! reference codec — and `dav1d` via [`gamut_av1`].
 //!
 //! **Deferred, planned** (tracked row-by-row against the specs in `STATUS.md`, whose disposition
-//! ledger is the authority): alpha / RGBA *encoding*, 10/12-bit and 4:2:0/4:2:2 chroma
-//! subsampling, the HDR surface beyond CICP tagging (`mdcv`/`clli` and the rest of the HDR
-//! metadata properties),
-//! `grid` / `tmap` (gain-map) / `sato` derivations and the remaining container transforms on the
-//! encode side, layered/progressive still images, encoder speed / rate control, the pure-Rust AV1
-//! codestream **decoder** (which will make [`Av1StillDecoder`] optional), and the decoder backend
-//! registry / `gamut-codec-abi` adapter around the seam. All of these land semver-minor — the v1
-//! surface is designed so no deferred feature reshapes it.
+//! ledger is the authority): the HDR surface beyond CICP tagging (`mdcv`/`clli` and the rest of
+//! the HDR metadata properties), `grid` / `tmap` (gain-map) / `sato` derivations and the remaining
+//! container transforms on the encode side, layered/progressive still images, encoder speed / rate
+//! control, a **built-in AV1 codestream decoder** behind [`Av1StillDecoder`], and the decoder
+//! backend registry / `gamut-codec-abi` adapter around the seam. On the decoder: `gamut-av1`
+//! ships the pure-Rust one (its default `decode` feature), but today it parses only the header
+//! and tile-framing layer and reconstructs no samples, so gamut-avif does not yet register it as
+//! the implicit tail behind [`Av1StillDecoder`] — until it does, the caller supplies that decoder
+//! (which will then become optional). All of these land semver-minor — the v1 surface is designed
+//! so no deferred feature reshapes it.
 //!
 //! **Permanently out of scope** (workspace charter — gamut is image-first): image sequences and
 //! tracks (the `avis`/`avio` brands) and AV1 inter-frame coding.
