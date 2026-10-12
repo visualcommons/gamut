@@ -65,6 +65,8 @@ let blocks = meta.encode()?;                       // no block corresponds to th
 let strict = MetadataEmbedder::new()
     .extension_policy(ExtensionPolicy::Reject)
     .embed(&meta);                                  // Err(MetadataError::UnembeddableExtension { .. })
+# assert!(blocks.exif.is_none() && strict.is_err());
+# Ok::<(), gamut_metadata::MetadataError>(())
 ```
 
 Not yet supported, and deferred deliberately: a `MetadataBlock` variant for container-located blocks
@@ -94,6 +96,7 @@ signing work, outside this crate. Hence the asymmetry, which is deliberate and n
 ```rust
 use gamut_metadata::{C2paPolicy, Metadata, MetadataBlock, MetadataEmbedder};
 
+# fn demo(manifest_store: &[u8]) -> gamut_metadata::Result<()> {
 // A container located a manifest store; extraction carries the bytes through untouched.
 let meta = Metadata::from_blocks(&[MetadataBlock::C2pa(manifest_store)])?;
 assert_eq!(meta.c2pa.as_deref(), Some(manifest_store));
@@ -103,6 +106,9 @@ assert_eq!(blocks.c2pa, None);                      // dropped by default...
 let strict = MetadataEmbedder::new()
     .c2pa_policy(C2paPolicy::Reject)
     .embed(&meta);                                  // Err(MetadataError::UnembeddableC2pa { .. })
+# let _ = strict;
+# Ok(())
+# }
 ```
 
 There is deliberately **no `Preserve` policy** — copy-forward is the failure mode `C2paPolicy` exists
@@ -143,6 +149,7 @@ validity verdict and does not choose between the two sources.
 ```rust
 use gamut_metadata::{Metadata, MetadataBlock, ProvenanceState};
 
+# fn demo(xmp_payload: &[u8]) -> gamut_metadata::Result<()> {
 let meta = Metadata::from_blocks(&[MetadataBlock::Xmp(xmp_payload)])?;
 match meta.provenance() {
     ProvenanceState::Remote(url) => println!("external manifest at {url}"), // not fetched
@@ -150,6 +157,8 @@ match meta.provenance() {
     ProvenanceState::EmbeddedAndRemote(url) => println!("embedded; the XMP also names {url}"),
     _ => println!("no provenance in the file"),
 }
+# Ok(())
+# }
 ```
 
 Two things this deliberately does **not** do. **gamut never resolves the URL** — fetching it and
@@ -163,8 +172,15 @@ consult it before this lens.
 ## Usage
 
 ```rust
-use gamut_metadata::{ConflictPolicy, Metadata, MetadataBlock, MetadataExtractor};
+use gamut_metadata::{ConflictPolicy, MetadataBlock, MetadataExtractor};
 
+# fn demo(
+#     exif_payload: &[u8],
+#     xmp_payload: &[u8],
+#     icc_payload: &[u8],
+#     iptc_iim_payload: &[u8],
+#     manifest_store: &[u8],
+# ) -> gamut_metadata::Result<()> {
 // A container crate has already located the metadata payloads in a file.
 let meta = MetadataExtractor::new()
     .policy(ConflictPolicy::XmpWins)
@@ -184,6 +200,9 @@ if let Some(iptc) = meta.iptc() {
 // Serialize back to per-carrier blocks for a container to embed.
 let blocks = meta.encode()?;
 // blocks.exif / blocks.xmp / blocks.icc are Some(Vec<u8>) when their field was present.
+# let _ = blocks;
+# Ok(())
+# }
 ```
 
 The umbrella [`gamut`](../gamut) crate re-exports this crate as `gamut::metadata` behind its
@@ -196,10 +215,13 @@ C2PA manifest store was one — is an additive change rather than a breaking one
 become a constructor call:
 
 ```rust
-// 1.x
-let meta = Metadata { exif, xmp, icc };
+# use gamut_metadata::{Metadata, exif::Exif, icc::IccProfile, xmp::XmpMeta};
+# fn demo(exif: Option<Exif>, xmp: Option<XmpMeta>, icc: Option<IccProfile>) -> Metadata {
+// 1.x: let meta = Metadata { exif, xmp, icc };
 // 2.x
 let meta = Metadata::from_carriers(exif, xmp, icc);
+# meta
+# }
 ```
 
 Use `Metadata::default()` plus field assignment when you also need `extensions`, and add a wildcard

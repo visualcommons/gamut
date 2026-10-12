@@ -33,7 +33,7 @@ coder).
 
 ## Usage
 
-```rust
+```rust,no_run
 use gamut_av1::encode_still_lossless_identity;
 use gamut_color::Planar8;
 

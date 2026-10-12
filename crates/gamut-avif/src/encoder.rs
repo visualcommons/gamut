@@ -4,7 +4,8 @@ use core::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{
-    Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with, encode_still_intra16_with,
+    Av1Colour, Av1StillConfig, EncodedStill, Speed, encode_still_intra_with_speed,
+    encode_still_intra16_with_speed,
 };
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
@@ -194,6 +195,9 @@ pub struct AvifEncoder {
     /// auxiliary item. `false` (the default) codes such an input as the RGB input it is
     /// indistinguishable from — see [`AvifEncoder::with_keep_opaque_alpha`].
     keep_opaque_alpha: bool,
+    /// The `gamut-av1` mode-decision search preset every AV1 still of the file is coded at —
+    /// colour and alpha alike. See [`AvifEncoder::with_speed`].
+    speed: Speed,
     /// Pluggable AV1 still-encode backends, tried in push order before the `gamut-av1` tail.
     /// Shared (not copied) by [`Clone`] — see [`AvifEncoder::push_backend`].
     backends: Vec<BackendSlot>,
@@ -215,6 +219,7 @@ impl std::fmt::Debug for AvifEncoder {
             .field("c2pa", &self.c2pa)
             .field("alpha_mode", &self.alpha_mode)
             .field("keep_opaque_alpha", &self.keep_opaque_alpha)
+            .field("speed", &self.speed)
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -254,6 +259,7 @@ impl AvifEncoder {
             c2pa: None,
             alpha_mode: AlphaMode::Unassociated,
             keep_opaque_alpha: false,
+            speed: Speed::Thorough,
             backends: Vec::new(),
         }
     }
@@ -282,6 +288,7 @@ impl AvifEncoder {
             c2pa: None,
             alpha_mode: AlphaMode::Unassociated,
             keep_opaque_alpha: false,
+            speed: Speed::Thorough,
             backends: Vec::new(),
         }
     }
@@ -529,6 +536,38 @@ impl AvifEncoder {
     pub fn with_keep_opaque_alpha(mut self, keep: bool) -> Self {
         self.keep_opaque_alpha = keep;
         self
+    }
+
+    /// Selects how much mode-decision search the AV1 encode runs: a [`Speed`] preset trading
+    /// search for encode time, applied to **every** AV1 still of the file — the colour item and
+    /// the alpha auxiliary alike.
+    ///
+    /// The preset is `gamut-av1`'s, passed through unchanged; its table on [`Speed`] lists what
+    /// each one prunes. The default, [`Speed::Thorough`], is the full search and codes exactly the
+    /// bytes an encoder without this call always has. Every preset produces a conformant stream,
+    /// but the presets are a **time** control, not a size one: the search scores candidates by
+    /// prediction error rather than rate, so a faster preset can come out smaller or larger.
+    ///
+    /// Only lossy coding is searched. [`AvifMode::Lossless`] has one fixed coding path and
+    /// produces the same bytes at every speed. Nor does any preset move a container field:
+    /// `av1C`, `colr`, `pixi` and the rest mirror the sequence header, which is the same at every
+    /// speed — only the coded tile data differs.
+    ///
+    /// A [pushed backend](Self::push_backend) receives the preset as
+    /// [`Av1EncodeRequest::speed`] — through [`AbiAv1StillEncoder`](crate::AbiAv1StillEncoder),
+    /// as the second byte of the `extra` blob (see there) — and is free to map it onto its own
+    /// effort scale or to ignore it.
+    #[must_use]
+    pub fn with_speed(mut self, speed: Speed) -> Self {
+        self.speed = speed;
+        self
+    }
+
+    /// The [`Speed`] preset this encoder codes at — [`Speed::Thorough`] unless
+    /// [`with_speed`](Self::with_speed) chose another.
+    #[must_use]
+    pub fn speed(&self) -> Speed {
+        self.speed
     }
 
     /// The colour samples an RGBA `image` codes as instead, when its alpha is to be dropped: every
@@ -1113,13 +1152,20 @@ impl AvifEncoder {
         colour: Av1Colour,
         chroma: ChromaSubsampling,
     ) -> Result<EncodedStill> {
-        let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, BitDepth::Eight);
+        let request = Av1EncodeRequest::new(
+            dims,
+            base_q_idx,
+            colour,
+            chroma,
+            BitDepth::Eight,
+            self.speed,
+        );
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::Eight(planes))?
         {
             Some(obus) => {
                 crate::backend::still_from_backend_obus(obus, dims, colour, chroma, BitDepth::Eight)
             }
-            None => Ok(encode_still_intra_with(planes, base_q_idx, colour)?.0),
+            None => Ok(encode_still_intra_with_speed(planes, base_q_idx, colour, self.speed)?.0),
         }
     }
 
@@ -1139,12 +1185,13 @@ impl AvifEncoder {
         // downsampler, so either can carry 4:4:4 planes while `with_chroma` says otherwise. The
         // request must describe the planes it actually carries.
         let chroma = planes.subsampling();
-        let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, bit_depth);
+        let request =
+            Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, bit_depth, self.speed);
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::High(planes))? {
             Some(obus) => {
                 crate::backend::still_from_backend_obus(obus, dims, colour, chroma, bit_depth)
             }
-            None => Ok(encode_still_intra16_with(planes, base_q_idx, colour)?.0),
+            None => Ok(encode_still_intra16_with_speed(planes, base_q_idx, colour, self.speed)?.0),
         }
     }
 
@@ -1171,8 +1218,13 @@ impl AvifEncoder {
 /// anything else — so a backend registered against that contract has no way to decline a
 /// monochrome job, and would be given single-plane input it never agreed to encode. Widening the
 /// request is the additive change that opens this path to backends (`STATUS.md`).
-fn monochrome_still(planes: &Planar8, base_q_idx: u8, colour: Av1Colour) -> Result<EncodedStill> {
-    Ok(encode_still_intra_with(planes, base_q_idx, colour)?.0)
+fn monochrome_still(
+    planes: &Planar8,
+    base_q_idx: u8,
+    colour: Av1Colour,
+    speed: Speed,
+) -> Result<EncodedStill> {
+    Ok(encode_still_intra_with_speed(planes, base_q_idx, colour, speed)?.0)
 }
 
 /// The high-bit-depth [`monochrome_still`]; the registry is skipped for the same reason.
@@ -1180,8 +1232,9 @@ fn monochrome_still16(
     planes: &Planar16,
     base_q_idx: u8,
     colour: Av1Colour,
+    speed: Speed,
 ) -> Result<EncodedStill> {
-    Ok(encode_still_intra16_with(planes, base_q_idx, colour)?.0)
+    Ok(encode_still_intra16_with_speed(planes, base_q_idx, colour, speed)?.0)
 }
 
 /// The `pixi` bits-per-channel list for a coded item: one entry per coded plane, each carrying the
@@ -1492,6 +1545,7 @@ impl EncodeImage<Rgba8> for AvifEncoder {
             &Planar8::from_rgba8_alpha_view(image),
             self.alpha_base_q_idx(),
             self.monochrome_colour(),
+            self.speed,
         )?;
         self.emit(&still, dims, Some(&alpha), out)
     }
@@ -1552,6 +1606,7 @@ impl EncodeImage<Rgba16> for AvifEncoder {
             &Planar16::from_rgba16_alpha_view(image, depth),
             self.alpha_base_q_idx(),
             self.monochrome_colour(),
+            self.speed,
         )?;
         self.emit(&still, dims, Some(&alpha), out)
     }
@@ -1574,11 +1629,13 @@ impl EncodeImage<Gray8> for AvifEncoder {
                 &Planar8::from_gray8_view(image),
                 self.base_q_idx(),
                 self.monochrome_colour(),
+                self.speed,
             )?,
             Some(depth) => monochrome_still16(
                 &gray8_widened(image, depth)?,
                 self.base_q_idx(),
                 self.monochrome_colour(),
+                self.speed,
             )?,
         };
         self.emit(&still, dims, None, out)
@@ -2568,6 +2625,57 @@ mod tests {
                 .expect("imir present");
             assert_eq!(f[p + 4] & 0x01, axis, "{mirror:?} ⇒ imir axis = {axis}");
             assert!(!f.windows(4).any(|w| w == b"irot"), "mirror only ⇒ no irot");
+        }
+    }
+
+    /// The widened `Gray8` path (`monochrome_still16` over `gray8_widened`) codes its still at the
+    /// encoder's preset: at 10 and 12 bits the primary item is `gamut-av1`'s own output for the
+    /// widened plane at that preset. Reads the private `gray8_widened`, so it lives here.
+    #[test]
+    fn gray8_high_bit_depth_codes_its_still_at_the_chosen_preset() {
+        const W: u32 = 40;
+        const H: u32 = 24;
+        let px: Vec<u8> = (0..H)
+            .flat_map(|y| (0..W).map(move |x| ((x * x + y * 29) & 0xff) as u8))
+            .collect();
+        let image = ImageRef::<Gray8>::new(
+            &px,
+            Dimensions {
+                width: W,
+                height: H,
+            },
+        )
+        .unwrap();
+        for depth in [BitDepth::Ten, BitDepth::Twelve] {
+            let primary_at = |speed| {
+                let enc = AvifEncoder::lossy(50)
+                    .with_bit_depth(depth)
+                    .with_speed(speed);
+                let bytes = enc.encode_to_vec(image).unwrap();
+                let container = AvifContainer::parse(&bytes).expect("parses");
+                container
+                    .image()
+                    .primary_item()
+                    .as_isobmff_item()
+                    .payload
+                    .clone()
+            };
+            let want = encode_still_intra16_with_speed(
+                &gray8_widened(image, depth).unwrap(),
+                127,
+                Av1Colour::monochrome(),
+                Speed::Fastest,
+            )
+            .unwrap()
+            .0
+            .obus;
+            let fastest = primary_at(Speed::Fastest);
+            assert_eq!(fastest, want, "{depth:?}");
+            assert_ne!(
+                fastest,
+                primary_at(Speed::Thorough),
+                "{depth:?}: the fixture separates the presets"
+            );
         }
     }
 }

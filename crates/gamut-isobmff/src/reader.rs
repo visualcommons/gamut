@@ -75,7 +75,7 @@ type ItemAssociations = Vec<(u32, Vec<(u16, bool)>)>;
 /// accounts its bytes.
 ///
 /// The top-level walk models only the primary still-image stream and tolerates an appended foreign
-/// "motion photo" stream — see the [module docs](self#motion-photo-tolerance): it stops at a second
+/// "motion photo" stream: it stops at a second
 /// top-level `ftyp` (the first wins) and at a malformed trailing box once `ftyp`+`meta` are seen.
 ///
 /// # Errors

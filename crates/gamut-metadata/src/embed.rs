@@ -183,18 +183,18 @@ impl MetadataEmbedder {
     ///
     /// # Errors
     ///
-    /// Returns a [`MetadataError`](crate::MetadataError) naming the carrier whose serialization
-    /// failed — [`MetadataError::Exif`](crate::MetadataError::Exif) for an EXIF model not
+    /// Returns a [`MetadataError`] naming the carrier whose serialization
+    /// failed — [`MetadataError::Exif`] for an EXIF model not
     /// representable in classic-TIFF widths,
-    /// [`MetadataError::Icc`](crate::MetadataError::Icc) for an ICC profile that violates
-    /// an invariant, or [`MetadataError::Iptc`](crate::MetadataError::Iptc) when
+    /// [`MetadataError::Icc`] for an ICC profile that violates
+    /// an invariant, or [`MetadataError::Iptc`] when
     /// [`emit_iptc_iim`](Self::emit_iptc_iim) is set and an IPTC value cannot be expressed in the
     /// chosen IIM charset.
     ///
-    /// Also returns [`MetadataError::UnembeddableExtension`](crate::MetadataError::UnembeddableExtension),
+    /// Also returns [`MetadataError::UnembeddableExtension`],
     /// naming the first extension, when [`extension_policy`](Self::extension_policy) is
     /// [`ExtensionPolicy::Reject`] and the model carries one, or
-    /// [`MetadataError::UnembeddableC2pa`](crate::MetadataError::UnembeddableC2pa) when
+    /// [`MetadataError::UnembeddableC2pa`] when
     /// [`c2pa_policy`](Self::c2pa_policy) is [`C2paPolicy::Reject`] and the model carries a
     /// manifest store. When both apply, the extension error is reported.
     pub fn embed(&self, meta: &Metadata) -> Result<EncodedMetadata> {

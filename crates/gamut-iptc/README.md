@@ -48,7 +48,7 @@ let irb = PhotoshopIrb::with_iptc(block.encode()?).encode()?;          // 8BIM 0
 let read = IptcReader::new().read_irb(&irb)?.expect("0x0404 present");
 let charset = IimCharset::detect(&read)?;                              // 1:90, default Latin-1
 assert_eq!(charset.decode(&read.datasets[1].data)?, "sky");
-# Ok::<(), gamut_core::Error>(())
+# Ok::<(), gamut_iptc::IptcError>(())
 ```
 
 `IimTagInfo::lookup(record, dataset)` resolves a dataset's name and wire constraints;
@@ -71,7 +71,7 @@ assert_eq!(merged.city(), Some("Lyon"));
 
 // ...and back: PhotoMetadata -> 8BIM resource stream (None if there is nothing to embed).
 let irb = IptcWriter::new().write_irb(&merged)?.expect("City is present");
-# Ok::<(), gamut_core::Error>(())
+# Ok::<(), gamut_iptc::IptcError>(())
 ```
 
 ## Scope

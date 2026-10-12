@@ -275,6 +275,19 @@ run = "cargo check --locked --manifest-path tooling/c2pa-oracle/Cargo.toml --all
 description = "Run doctests only (the slice `coverage` cannot instrument on stable)"
 run = "cargo test --workspace --all-features --doc"
 
+# Rustdoc with warnings as errors (issue #549). A broken intra-doc link — `broken_intra_doc_links`,
+# `private_intra_doc_links`, `redundant_explicit_links` — is a warning by default, and nothing read
+# the log it went to; links broke as a side effect of unrelated, correct refactors (an import
+# narrowed, a module un-published) with no signal at the point of change. `--all-features` so
+# feature-gated items' docs are checked too. `--no-deps` keeps it to this workspace's own docs.
+#
+# `gamut-png` is excluded only until issue #714 repairs its four broken links; that issue removes
+# this `--exclude`.
+[tasks.doc]
+description = "Build the workspace's rustdoc with warnings as errors (broken intra-doc links fail)"
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --workspace --all-features --no-deps --exclude gamut-png"
+
 # Divan; issue #149. Like `test`, this builds the codec crates' cross-check-oracle
 # dev-dependencies, so it needs the submodules (including `fetch-av1-oracles`) + C toolchain.
 # To pass Divan flags (e.g. `--sample-count 50`) target one harness directly, since the

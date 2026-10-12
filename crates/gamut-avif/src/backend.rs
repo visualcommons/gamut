@@ -34,7 +34,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, SequenceHeader, Subsampling};
+use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, SequenceHeader, Speed, Subsampling};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
@@ -73,6 +73,9 @@ pub struct Av1EncodeRequest {
     chroma: ChromaSubsampling,
     /// The depth the samples are coded at: 8, 10 or 12 bits.
     bit_depth: BitDepth,
+    /// The search preset the caller chose with
+    /// [`AvifEncoder::with_speed`](crate::AvifEncoder::with_speed).
+    speed: Speed,
 }
 
 impl Av1EncodeRequest {
@@ -84,6 +87,7 @@ impl Av1EncodeRequest {
         colour: Av1Colour,
         chroma: ChromaSubsampling,
         bit_depth: BitDepth,
+        speed: Speed,
     ) -> Self {
         Self {
             chroma,
@@ -91,7 +95,21 @@ impl Av1EncodeRequest {
             base_q_idx,
             colour,
             bit_depth,
+            speed,
         }
+    }
+
+    /// The encode-speed preset the caller chose with
+    /// [`AvifEncoder::with_speed`](crate::AvifEncoder::with_speed) — [`Speed::Thorough`], the full
+    /// search, unless they chose another.
+    ///
+    /// Unlike [`colour`](Self::colour) and [`chroma`](Self::chroma) this is a **hint**, not an
+    /// obligation: it names how much search time the caller is willing to spend, and a backend
+    /// maps it onto its own effort scale or ignores it. Nothing in the returned stream is checked
+    /// against it.
+    #[must_use]
+    pub fn speed(&self) -> Speed {
+        self.speed
     }
 
     /// The display dimensions of the image to encode.
@@ -131,7 +149,7 @@ impl Av1EncodeRequest {
     ///
     /// This is **both** an input and an obligation. It says what the `planes` handed to
     /// [`Av1StillEncoder::encode_still`] contain — GBR for
-    /// [`MatrixCoefficients::Identity`](gamut_color::MatrixCoefficients::Identity), `Y/Cb/Cr`
+    /// [`MatrixCoefficients::Identity`], `Y/Cb/Cr`
     /// otherwise — and the returned stream's `color_config()` must declare exactly it, because the
     /// container mirrors these values into `colr` and they must agree with the payload
     /// (AV1-ISOBMFF v1.3.0 §2.3.4). A mismatch is rejected.
@@ -514,8 +532,19 @@ impl SeqHeaderParams {
 /// mapping is frozen and one-way: synthesizing a `0..=100` value back out of the derived
 /// `base_q_idx` would invent a second, contradictory mapping. The adapter therefore leaves
 /// `quality` at `0` and passes the authoritative quantizer out-of-band, as the codec-specific
-/// [`EncodeConfig::extra`] blob: **one byte**, the AV1 `base_q_idx`. A backend registered for
-/// [`AV1_CODEC_ID`] must read `extra`, and must not read `quality`.
+/// [`EncodeConfig::extra`] blob, whose first byte is the AV1 `base_q_idx`. A backend registered
+/// for [`AV1_CODEC_ID`] must read `extra`, and must not read `quality`.
+///
+/// # The speed preset
+///
+/// [`EncodeConfig`] has no effort field, but the `extra` blob is length-carrying, so the preset
+/// travels there: when [`Av1EncodeRequest::speed`] is anything but [`Speed::Thorough`], `extra`
+/// is **two bytes** and the second is the [`Speed`] discriminant (`1` = `Balanced`, `2` = `Fast`,
+/// `3` = `Fastest`; permanent values, and a later preset takes the next free one). A full-search
+/// job keeps the one-byte blob, so a backend reads byte 1 only when `extra_len >= 2`, and treats
+/// its absence as `Thorough` — which is also every job a pre-speed backend was ever handed. A
+/// backend maps the preset onto its own effort scale or ignores it; either way the stream it
+/// returns is held to the same contract.
 ///
 /// # Bit depth
 ///
@@ -559,13 +588,25 @@ impl<E: Encoder + Send> AbiAv1StillEncoder<E> {
     }
 
     /// The [`EncodeConfig`] for a job: [`AV1_CODEC_ID`], `quality = 0`, and `extra` pointing at
-    /// `q_idx` (the request's `base_q_idx`, borrowed for the duration of the call).
-    fn config(q_idx: &u8) -> EncodeConfig {
+    /// `extra` (the job's [`extra_blob`], borrowed for the duration of the call).
+    fn config(extra: &[u8]) -> EncodeConfig {
         let mut cfg = EncodeConfig::new(AV1_CODEC_ID, 0);
-        cfg.extra = std::ptr::from_ref(q_idx).cast();
-        cfg.extra_len = 1;
+        cfg.extra = extra.as_ptr().cast();
+        cfg.extra_len = extra.len();
         cfg
     }
+}
+
+/// The codec-specific `extra` blob [`AbiAv1StillEncoder`] lowers `req` to: the `base_q_idx`,
+/// then — only when the job runs at a preset other than [`Speed::Thorough`] — the [`Speed`]
+/// discriminant. A full-search job therefore lowers to exactly the one-byte blob the adapter
+/// wrote before speed presets existed.
+fn extra_blob(req: &Av1EncodeRequest) -> Vec<u8> {
+    let mut blob = vec![req.base_q_idx()];
+    if req.speed() != Speed::Thorough {
+        blob.push(req.speed() as u8);
+    }
+    blob
 }
 
 impl<E: Encoder + Send> std::fmt::Debug for AbiAv1StillEncoder<E> {
@@ -576,13 +617,13 @@ impl<E: Encoder + Send> std::fmt::Debug for AbiAv1StillEncoder<E> {
 
 impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
     fn supports(&mut self, req: &Av1EncodeRequest) -> bool {
-        let q_idx = req.base_q_idx();
-        self.inner.supports(&Self::config(&q_idx))
+        let extra = extra_blob(req);
+        self.inner.supports(&Self::config(&extra))
     }
 
     fn encode_still(&mut self, req: &Av1EncodeRequest, planes: &Planar8) -> Result<Vec<u8>> {
-        let q_idx = req.base_q_idx();
-        let cfg = Self::config(&q_idx);
+        let extra = extra_blob(req);
+        let cfg = Self::config(&extra);
         // Per plane, not one luma stride for all three: `Planar8` carries its chroma geometry, and
         // `ImageDesc` has a stride slot per plane precisely so a subsampled buffer is expressible.
         // At 4:4:4 — everything this crate encodes today — all three are the luma width.
@@ -624,8 +665,8 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
     }
 
     fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
-        let q_idx = req.base_q_idx();
-        let cfg = Self::config(&q_idx);
+        let extra = extra_blob(req);
+        let cfg = Self::config(&extra);
         // Bytes, not samples: `ImageDesc::strides` is a byte stride, and a `u16` row is twice as
         // wide as its sample count. Deriving it from the sample count instead would hand the
         // backend every other row.
@@ -720,6 +761,27 @@ mod tests {
     /// `dimension_bits` mistake cannot hide behind a zero-width field.
     const W: u32 = 34;
     const H: u32 = 18;
+
+    #[test]
+    fn extra_blob_appends_the_speed_discriminant_only_off_the_full_search() {
+        let blob = |speed| {
+            extra_blob(&Av1EncodeRequest::new(
+                Dimensions {
+                    width: W,
+                    height: H,
+                },
+                77,
+                Av1Colour::default(),
+                ChromaSubsampling::Cs444,
+                BitDepth::Eight,
+                speed,
+            ))
+        };
+        assert_eq!(blob(Speed::Thorough), [77]);
+        assert_eq!(blob(Speed::Balanced), [77, 1]);
+        assert_eq!(blob(Speed::Fast), [77, 2]);
+        assert_eq!(blob(Speed::Fastest), [77, 3]);
+    }
 
     /// An MSB-first bit writer. The byte vector *is* the payload — a partial final byte is already
     /// zero-padded, which is what `trailing_bits` requires.

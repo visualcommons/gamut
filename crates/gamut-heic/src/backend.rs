@@ -86,7 +86,7 @@ pub const NO_BACKEND: &str =
 /// registry is threaded through the decode calls as an argument rather than stored behind a shared
 /// handle, so no interior mutability (`Arc`/`Mutex`) is involved.
 ///
-/// See the [module docs](self) for the fallback contract.
+/// See the [`HevcDecoder`] docs for the fallback contract.
 #[derive(Default)]
 pub struct HevcDecoders {
     backends: Vec<Box<dyn HevcDecoder + Send>>,

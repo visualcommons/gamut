@@ -126,7 +126,7 @@
 //! puts an array of structures, an array member that is not a structure, an `rdf:li` or a property
 //! carrying a qualifier, an array or structure holding nothing at all, and two top-level properties
 //! of one name all read as absent and survive a read-modify-write untouched. Two of one name are
-//! refused for the reason [`Reader::read`] refuses two fields of one name: only one of them could
+//! refused for the reason the field reader refuses two fields of one name: only one of them could
 //! be written back.
 //!
 //! An array setter writes the RDF container kind the property it replaces already carries — an

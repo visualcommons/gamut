@@ -39,7 +39,7 @@ use crate::{bitpack, compression, lossless_jpeg, tags};
 /// [`trailing_extra`](DecodedDng::trailing_extra): a **duplicated tag** keeps only the last
 /// entry, because the eager [`Ifd`] this is built from is last-wins, and an **interior**
 /// main-chain page carrying no image data reaches no channel at all (issue #525).
-/// [`deconstruct`](crate::deconstruct) still accounts for the bytes in both cases.
+/// [`deconstruct`](crate::deconstruct()) still accounts for the bytes in both cases.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawTag {
     /// The TIFF/DNG tag number.
@@ -157,7 +157,7 @@ pub struct DecodedDng {
     pub dng_version: [u8; 4],
     /// Embedded metadata (EXIF sub-IFD + XMP/IPTC/ICC blocks), reconstructed from IFD 0.
     ///
-    /// The `ExifIFD` arrives whole, as the shared [`Exif`](gamut_metadata::exif::Exif) model —
+    /// The `ExifIFD` arrives whole, as the shared [`Exif`] model —
     /// every entry of the directory, not a chosen subset — so nothing in it needs a separate
     /// verbatim escape hatch.
     pub metadata: DngMetadata,
@@ -214,7 +214,7 @@ pub struct DecodedDng {
     ///   no channel at all — issue #525. That gap predates this field and is not what §A.3.6
     ///   creates.
     ///
-    /// [`deconstruct`](crate::deconstruct) accounts for the bytes in both cases.
+    /// [`deconstruct`](crate::deconstruct()) accounts for the bytes in both cases.
     pub trailing_extra: Vec<RawTag>,
     /// Where the C2PA manifest store in [`metadata.c2pa`](DngMetadata::c2pa) sits in the file:
     /// the two ranges a `c2pa.hash.data` binding excludes (C2PA 2.4 §18.5.5), located by

@@ -8,7 +8,7 @@
 //! payload to an HEVC decoder. **JPEG-1 has no such split to invert.** Its marker segments and its
 //! entropy-coded data interleave in one byte stream (T.81 §B.1.1.5 — entropy-coded segments are
 //! delimited by markers, with `0xFF00` byte stuffing inside them), and the Huffman/bit layer
-//! ([`crate::huffman`], [`crate::bitwriter`]) is intrinsic to the frame structure it codes: a scan
+//! (the crate-private `huffman` and `bitwriter` modules) is intrinsic to the frame structure it codes: a scan
 //! cannot be lifted out of its SOF/DHT/DQT context and still mean anything.
 //!
 //! So the seam is defined at the **whole SOI..EOI interchange stream** — the unit every real JPEG

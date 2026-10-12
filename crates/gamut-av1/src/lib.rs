@@ -60,12 +60,17 @@
 //! The remaining surface (quantizer matrices and the AVIF-level
 //! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
-//! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
+//! Modules mirror the spec: `headers` = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), [`transform`] = forward/inverse 2-D
 //! transforms (§7.13), `cdf` = default CDF + scan + context tables and the adapting per-tile CDF
 //! context (§9.2/§9.4/§8.2.6/§8.3.2),
 //! [`quant`] = quantizer tables + dequant (§7.12), `filter` = in-loop filters (§7.14-§7.17).
 #![forbid(unsafe_code)]
+
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 mod cdf;
 #[cfg(feature = "decode")]
