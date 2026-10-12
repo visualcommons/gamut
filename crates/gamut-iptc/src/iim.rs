@@ -604,7 +604,7 @@ mod tests {
     fn tag_table_names_match_the_standards_own_dataset_names() {
         // Drift guard on the one column no round trip and no oracle can see. exiv2 titles 29 of
         // the 71 datasets it shares with gamut more briefly than IIM 4.2 names them, so comparing
-        // names against exiv2 could only ever pin those 28 to a second hand transcription of the
+        // names against exiv2 could only ever pin those 29 to a second hand transcription of the
         // same page. These names come from the standard's own name column instead, so a name
         // mistyped in `KNOWN_TAGS` fails here. A name mistyped *identically* in `KNOWN_TAGS` and in
         // the committed `tests/data/iim-4.2-dataset-names.tsv` passes: this guard reads the
