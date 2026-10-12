@@ -29,7 +29,7 @@ use c2pa_oracle::{
     read_with_external_store, reserve_then_fill_padded,
 };
 use common::{PADDING, plain_avif, reserve_avif};
-use gamut_avif::AvifContainer;
+use gamut_avif::{AvifContainer, C2paByteRange};
 use gamut_heic::HeifContainer;
 
 /// The fixture both locators are pointed at: a gamut-encoded AVIF that c2pa-rs then signed and
@@ -53,6 +53,12 @@ fn store_span(filled: &Filled) -> std::ops::Range<usize> {
     jumbf_superbox_span(&filled.asset).expect("the padded asset carries a JUMBF superbox")
 }
 
+/// A range gamut reports, spelled out as the plain range the oracle derives from c2pa-rs's
+/// output — gamut's `C2paByteRange` deliberately has no conversion to one (#780).
+fn plain(range: C2paByteRange) -> std::ops::Range<usize> {
+    range.start()..range.end()
+}
+
 #[test]
 fn gamut_avif_bounds_the_store_c2pa_rs_embedded_by_the_box_that_carries_it() {
     let asset = signed_avif();
@@ -70,12 +76,13 @@ fn gamut_avif_bounds_the_store_c2pa_rs_embedded_by_the_box_that_carries_it() {
     // padding inside its range is shown on a padded fixture, by
     // `gamut_avif_bounds_a_padded_slot_by_its_box_padding_included`.
     assert_eq!(
-        slot.range.start, expected.start,
+        slot.range.start(),
+        expected.start,
         "gamut-avif's reported range must begin at the store c2pa-rs embedded, not before or \
          after it"
     );
     assert!(
-        slot.range.end >= expected.end,
+        slot.range.end() >= expected.end,
         "gamut-avif's reported range must hold the whole store, not a fragment of it: reported \
          {:?}, store at {expected:?}",
         slot.range
@@ -102,7 +109,8 @@ fn c2pa_rs_leaves_no_padding_between_the_store_and_the_end_of_its_box() {
     // the box larger than the store, so this is evidence, not a rule — and when it stops holding,
     // this is the test that says so.
     assert_eq!(
-        slot.range, expected,
+        plain(slot.range),
+        expected,
         "c2pa-rs sizes the ContentProvenanceBox to the store exactly; a difference here is the \
          reference implementation having started to pad, not gamut-avif mis-locating"
     );
@@ -117,7 +125,8 @@ fn gamut_heic_reports_the_exact_span_c2pa_rs_embedded() {
     let store = container.c2pa().expect("gamut-heic locates the store");
 
     assert_eq!(
-        store.range, expected,
+        plain(store.range),
+        expected,
         "gamut-heic bounds the store by its `LBox`; against a store c2pa-rs really wrote, that \
          bound must land on the store exactly (crates/gamut-heic/STATUS.md's deferred row)"
     );
@@ -135,7 +144,10 @@ fn c2pa_rs_validates_the_store_read_out_of_gamut_avifs_reported_range() {
         .c2pa_slot()
         .expect("gamut-avif locates the slot")
         .range;
-    let located = asset[range].to_vec();
+    let located = range
+        .bytes_in(&asset)
+        .expect("the slot lies inside the asset")
+        .to_vec();
 
     // The sharpest form of the claim, and it is `range` that is exercised: the bytes are cut out
     // of the asset *at the range gamut reported*, not taken from the `slot_bytes` the same call
@@ -189,7 +201,8 @@ fn gamut_avif_bounds_a_padded_slot_by_its_box_padding_included() {
     // `C2paSlot::slot_bytes`: "the store, then any padding". Against a real padded file that is
     // the whole reserved slot, not the store alone.
     assert_eq!(
-        slot.range, filled.slot,
+        plain(slot.range),
+        filled.slot,
         "gamut-avif must report the box-bounded slot — store plus padding — on a padded file"
     );
 }
@@ -201,7 +214,7 @@ fn gamut_heic_bounds_a_padded_slot_by_the_stores_lbox_alone() {
     let store = container.c2pa().expect("gamut-heic locates the store");
 
     assert_eq!(
-        (store.range.clone(), store.bytes),
+        (plain(store.range), store.bytes),
         (store_span(&filled), filled.store.as_slice()),
         "gamut-heic must trim to the store's own `LBox` and leave the padding out"
     );
@@ -226,8 +239,8 @@ fn on_a_padded_slot_the_two_locators_start_together_and_gamut_avif_ends_after_ga
     // that the divergence is *this* shape — same start, box end strictly past the `LBox` end by
     // exactly the padding — rather than any other way two ranges can differ.
     assert_eq!(
-        (avif.start, avif.end - heic.end),
-        (heic.start, PADDING),
+        (avif.start(), avif.end() - heic.end()),
+        (heic.start(), PADDING),
         "gamut-avif's range must start where gamut-heic's does and run on by the padding"
     );
 }
