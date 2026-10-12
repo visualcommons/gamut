@@ -72,8 +72,8 @@ impl Speed {
 /// signalling, which every entry point takes directly).
 ///
 /// Plain data: build it from [`Default`] and the `with_*` setters, or set the public fields of a
-/// default value. The default reproduces the encoder's output from before the options existed —
-/// the full search, the [`Tiling::default`] layout, and one thread.
+/// default value. The default is what every entry point without an `options` argument encodes
+/// with: the full search ([`Speed::Thorough`]), the [`Tiling::default`] layout, and one thread.
 ///
 /// ```
 /// use std::num::NonZeroUsize;

@@ -237,8 +237,8 @@ adding it needs no container change.
 | --- | --- | --- | --- |
 | `DC_PRED`, availability-aware (luma + chroma) | §7.11.2.5 | ✅ | M0 |
 | directional V/H/D45/.../D67 + `angle_delta` + edge filter/upsample | §7.11.2.4/.9-.12 | ✅ (lossy luma 4×4; 8×8/16×16/32×32 + `angle_delta`; edge filter/upsample `enable_intra_edge_filter=0`) | M1 |
-| SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ✅ (lossy luma, square 4×4–32×32 + rectangular; SAD-selected) | M1 |
-| PAETH | §7.11.2 | ✅ (lossy luma, square 4×4–32×32 + rectangular; SAD-selected) | M1 |
+| SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ✅ (lossy luma, square 4×4–32×32 + rectangular; chosen by rate–distortion cost) | M1 |
+| PAETH | §7.11.2 | ✅ (lossy luma, square 4×4–32×32 + rectangular; chosen by rate–distortion cost) | M1 |
 | recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4 + 8×8 + 16×16 + 32×32) | M1 |
 | chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ✅ (lossy; the §7.11.5 subsampled box average at every layout) | M1 |
 | palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ✅ (lossy luma 8×8/16×16/32×32; sizes 2..8; color cache + wavefront index map) | M1 |
@@ -254,7 +254,7 @@ adding it needs no container change.
 | identity transform 4/8/16/32 (IDTX / V_ / H_) | §7.13.2.11-.15 | ✅ (IDTX emitted via TX_SET_INTRA_2; V_/H_ axis variants present in dispatch, unused under `reduced_tx_set=1`) | M1 |
 | 2D inverse transform + tx_type sets, `get_tx_set` | §7.13.3,§5.11.47/.48 | ✅ (normative `inverse_transform_2d`; intra `TX_SET_INTRA_2`/`TX_SET_DCTONLY`; inter sets OOS) | M1 |
 | variable tx size / `txfm_split` | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square `tx_depth` 0..2; rectangular `txfm_split` deferred) | M1 |
-| encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + heuristic tx-type/tx-size search; true RD deferred) | M1 |
+| encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + tx-type chosen by rate–distortion cost; tx-size `tx_depth` still a source-texture test, its RD search tracked in #753) | M1 |
 
 ## F. AV1 — quantization (§7.12)
 
