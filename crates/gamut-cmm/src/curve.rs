@@ -970,7 +970,8 @@ mod tests {
             bt709_eotf, bt709_oetf, hlg_inverse_oetf, hlg_oetf, pq_eotf_normalized,
             pq_oetf_normalized, srgb_eotf, srgb_oetf,
         };
-        let cases: [(u8, fn(f64) -> f64, fn(f64) -> f64); 5] = [
+        type Transfer = fn(f64) -> f64;
+        let cases: [(u8, Transfer, Transfer); 5] = [
             (1, bt709_eotf, bt709_oetf),
             (13, srgb_eotf, srgb_oetf),
             (14, bt709_eotf, bt709_oetf),

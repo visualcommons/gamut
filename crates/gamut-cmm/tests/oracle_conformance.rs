@@ -1241,7 +1241,7 @@ fn cicp_pairs(pairs: &[(&str, &str)], prefer_cicp_transfer: bool) -> (Worst, Wor
                     lcms_intent,
                     bpc_flag | FLAGS_NOWHITEONWHITEFIXUP,
                 );
-                for device in sweep(3, 60, 0x0CC1_C9 ^ u64::from(lcms_intent)) {
+                for device in sweep(3, 60, 0x000C_C1C9 ^ u64::from(lcms_intent)) {
                     let got = eval_ours(&ours, &device);
                     let want = clamp01(lcms_tight.apply_f64(&device, 1, 3));
                     tight.feed(lens_delta_e(&lens, &got, &want, 1.0), &cell);
