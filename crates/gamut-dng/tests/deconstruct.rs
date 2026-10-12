@@ -597,3 +597,51 @@ fn malformed_color_matrix_is_flagged() {
         "{report:?}"
     );
 }
+
+/// Issue #610: an Exif directory carrying `InteroperabilityIFD` (40965) both as a field and as a
+/// group is written as two entries under that tag, and the judge must grade the file a
+/// `DuplicateTag` rather than clean — the parsed tree has already collapsed the pair to one entry,
+/// so only the raw entry records can see it.
+///
+/// The encoder refuses this shape, so the file is built through the preserving rewrite, whose
+/// tree is the caller's to edit: a group is attached under a free tag and moved onto the field's
+/// tag in place, the one route the `Ifd` setters leave.
+#[test]
+fn an_exif_tag_written_twice_is_graded_a_duplicate() {
+    use gamut_dng::{DngRewrite, Severity, Value};
+    use gamut_ifd::Ifd;
+    use gamut_ifd::tags::{EXIF_IFD, INTEROPERABILITY_IFD};
+
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(
+            &common::sample_raw(16, 12, 16),
+            &common::sample_profile(),
+            &mut dng,
+        )
+        .expect("encode");
+    let mut rewrite = DngRewrite::open(&dng).expect("open");
+    let mut interop = Ifd::new();
+    interop.set(1, Value::Ascii("R98".into()));
+    let mut exif = Ifd::new();
+    exif.set(INTEROPERABILITY_IFD, Value::Short(vec![1]));
+    exif.set_sub_ifd(u16::MAX, vec![interop]);
+    exif.sub_ifds_mut()[0].tag = INTEROPERABILITY_IFD;
+    rewrite.file_mut().ifds[0].set_sub_ifd(EXIF_IFD, vec![exif]);
+    let doubled = rewrite.write().expect("write").bytes;
+
+    let report = deconstruct(&doubled).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::DuplicateTag {
+                tag: INTEROPERABILITY_IFD,
+                entries: 2,
+                severity: Severity::Error,
+                ..
+            }
+        )),
+        "{report:?}"
+    );
+    assert!(!report.is_fully_accounted(), "{report:?}");
+}

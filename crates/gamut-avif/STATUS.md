@@ -257,7 +257,7 @@ adding it needs no container change.
 | identity transform 4/8/16/32 (IDTX / V_ / H_) | §7.13.2.11-.15 | ✅ (IDTX emitted via TX_SET_INTRA_2; V_/H_ axis variants present in dispatch, unused under `reduced_tx_set=1`) | M1 |
 | 2D inverse transform + tx_type sets, `get_tx_set` | §7.13.3,§5.11.47/.48 | ✅ (normative `inverse_transform_2d`; intra `TX_SET_INTRA_2`/`TX_SET_DCTONLY`; inter sets OOS) | M1 |
 | variable tx size / `txfm_split` | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square `tx_depth` 0..2; rectangular `txfm_split` deferred) | M1 |
-| encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + tx-type chosen by rate–distortion cost; tx-size `tx_depth` still a source-texture test, its RD search tracked in #753) | M1 |
+| encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + tx-type, and tx-size `tx_depth` jointly with the luma mode, chosen by rate–distortion cost) | M1 |
 
 ## F. AV1 — quantization (§7.12)
 
@@ -297,9 +297,9 @@ copy, which is what a decoder does for an independently decodable tile.
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4/8×8/16×16, narrow + wide + widest) | M1 |
-| CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy; `Cdef_Uv_Dir` incl. the non-identity 4:2:2 row) | M1 |
-| loop restoration: Wiener (luma) + stripe boundaries + per-SB unit signaling | §5.9.20,§7.17 | ✅ (Wiener luma; self-guided/chroma deferred) | M1 |
+| deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4/8×8/16×16, narrow + wide + widest; one frame level, chosen against the source, 0 = off) | M1 |
+| CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy; `Cdef_Uv_Dir` incl. the non-identity 4:2:2 row; one strength set per frame, `cdef_bits = 0`, luma and chroma pairs chosen against the source; per-superblock `cdef_idx` deferred) | M1 |
+| loop restoration: Wiener (luma) + stripe boundaries + per-SB unit signaling | §5.9.20,§7.17 | ✅ (Wiener luma with the default taps, on or off per 256×256 unit by distortion, `RESTORE_NONE` when no unit gains; fitted taps, self-guided and chroma deferred) | M1 |
 | superres horizontal upscaling (8-tap polyphase, LR after upscale) | §5.9.8,§7.16 | ✅ (opt-in via `encode_still_intra_superres`) | M1 |
 | film grain synthesis | §5.9.30,§7.18.3 | ☐ | M4 |
 

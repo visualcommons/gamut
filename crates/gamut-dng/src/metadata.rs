@@ -14,6 +14,7 @@
 //! [`gamut_ifd::c2pa`]'s, and the encoder applies them — see
 //! [`DngEncoder::encode_with_report`](crate::DngEncoder::encode_with_report).
 
+use gamut_core::{Error, Result};
 use gamut_ifd::{Ifd, Value};
 use gamut_metadata::MetadataBlock;
 use gamut_metadata::exif::Exif;
@@ -139,6 +140,25 @@ impl DngMetadata {
             && self.c2pa.is_none()
     }
 
+    /// Refuses two shapes of EXIF sub-IFD this crate would otherwise write into a file its own
+    /// [`DngRewrite::open`](crate::DngRewrite::open) then rejects or reads back changed: a
+    /// pointer-typed field under a standard pointer tag, and a tag stored twice.
+    ///
+    /// The Exif sub-IFD is the one directory a caller supplies, so it is the only one checked:
+    /// the blocks [`apply`](Self::apply) writes into IFD 0 sit under `XMP`, `IPTC_NAA` and
+    /// `ICC_PROFILE`, none of which any reader treats as a pointer, and the rest of the file is
+    /// the encoder's own. [`check_exif_subtree`] states the two refusals, and what it does **not**
+    /// refuse.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the Exif sub-IFD, or any directory nested in it,
+    /// carries a pointer-typed field under a standard pointer tag, or stores one tag twice (a
+    /// field and a sub-IFD group, or two groups).
+    pub(crate) fn check(&self) -> Result<()> {
+        self.exif_ifd().map_or(Ok(()), check_exif_subtree)
+    }
+
     /// Writes the XMP / IPTC / ICC blocks into `ifd0` and returns the EXIF sub-IFD, if any.
     ///
     /// The C2PA store is deliberately **not** written here: its value must land at the end of
@@ -165,9 +185,103 @@ impl DngMetadata {
     }
 }
 
+/// The pointer tags [`DngRewrite::open`](crate::DngRewrite::open) resolves inside the Exif
+/// subtree: every standard one, because it hands [`gamut_ifd::read_tree`] the flat
+/// [`STANDARD_POINTER_TAGS`](gamut_ifd::tags::STANDARD_POINTER_TAGS) list, which that reader
+/// resolves **at every node** — the Exif directory and anything nested in it included.
+const EXIF_SUBTREE_POINTER_TAGS: &[u16] = gamut_ifd::tags::STANDARD_POINTER_TAGS;
+
+/// The on-disk field-type codes that make a directory entry a sub-IFD pointer to the reader:
+/// `LONG` (4), the typed `IFD` (13) of TIFF Technical Note 1, and BigTIFF's `LONG8` (16) /
+/// `IFD8` (18) — the set [`gamut_ifd::read_tree`] follows.
+///
+/// Stated as **codes** rather than as [`Value`] variants, because the check answers about a
+/// value a *caller* built, which nothing has written yet: [`gamut_ifd::UnknownValue`] carries an
+/// arbitrary type code beside its value word, [`gamut_ifd::write`] emits that code verbatim, and
+/// the reader classifies the entry by it. A `Value::Unknown` at 4, 13, 16 or 18 is therefore a
+/// plain field to a variant-shaped predicate and a **pointer** to the reader. The code is the one
+/// discriminator that survives the write/read boundary ([`Value::type_code`], total over every
+/// variant), so the writer asks about the code.
+const POINTER_TYPE_CODES: &[u16] = &[4, 13, 16, 18];
+
+/// The refusal earned by a field under a tag in [`EXIF_SUBTREE_POINTER_TAGS`] whose on-disk type
+/// code is in [`POINTER_TYPE_CODES`]. Named so its prose enumeration of the tag set, which is a
+/// sibling crate's constant, is pinned in one assertion rather than drifting.
+const POINTER_FIELD_REFUSAL: &str = "DNG: an Exif sub-IFD may not carry a plain field under a \
+     standard pointer tag (SubIFDs, ExifIFD, GPSInfo, InteroperabilityIFD) with a pointer's own \
+     type (LONG, IFD, LONG8 or IFD8), which the reader would follow as a file offset";
+
+/// The refusal earned by a tag the directory stores **twice**: a plain field and a sub-IFD group,
+/// or two sub-IFD groups.
+///
+/// [`Ifd`] holds fields and groups in two lists. Its setters keep a tag in one of them, but
+/// [`Ifd::sub_ifds_mut`] hands out each group's `tag` to edit in place, so one tag can still sit in
+/// both lists, or head two groups. The writer then emits **two entries under that tag**, which
+/// TIFF 6.0 §2 — on which DNG 1.7.1 builds — does not allow, and every reader keeps exactly one
+/// of them: [`gamut_ifd`] the last, libtiff the first (`tif_dirread.c`, "Mark duplicates of any
+/// tag to be ignored"). Which entry survives is a property of the reader, and what the caller set
+/// is lost to at least one of them.
+const TAG_STORED_TWICE_REFUSAL: &str = "DNG: an Exif sub-IFD may not store one tag twice (a plain \
+     field and a sub-IFD group, or two sub-IFD groups), which would be written as two entries \
+     under that tag (TIFF 6.0 §2 allows one) and read back as only one of them";
+
+/// The writer's side of what [`DngRewrite::open`](crate::DngRewrite::open) reads: refuses two
+/// shapes of Exif subtree this crate could not hand back unchanged.
+///
+/// Two refusals, distinct because they are two different mistakes:
+///
+/// * a **field** under a tag in [`EXIF_SUBTREE_POINTER_TAGS`] whose on-disk type code is in
+///   [`POINTER_TYPE_CODES`] — the reader follows it as an offset into a file it never came from,
+///   so the open fails (`sub-IFD pointer loop`, `value offset out of bounds`) or parses a
+///   directory nobody wrote. Every other type is left in place by the reader, so a `SHORT` under
+///   `InteroperabilityIFD` is left alone here too;
+/// * a **tag stored twice** — a group under a tag that also carries a field or heads an earlier
+///   group ([`TAG_STORED_TWICE_REFUSAL`]).
+///
+/// Both apply at every level, because the reader resolves the flat tag list at every node: a
+/// group's children are checked as the Exif directory is.
+///
+/// Not every subtree the reader would reject or change is refused: a sub-IFD group under a tag
+/// outside [`EXIF_SUBTREE_POINTER_TAGS`] (read back as a plain `LONG` field, not a group) and
+/// nesting deeper than the reader walks ([`gamut_ifd::SubtreeScope::MAX_DEPTH`]) both pass this
+/// check. `gamut-tiff`'s check refuses those two as well; they are not adopted here, and neither
+/// is a shape a decode → encode round trip produces: [`DngDecoder`](crate::DngDecoder) resolves
+/// only the standard pointer tags, and only one level below the Exif directory.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for either refusal, at the first offender.
+fn check_exif_subtree(ifd: &Ifd) -> Result<()> {
+    for &tag in EXIF_SUBTREE_POINTER_TAGS {
+        if ifd
+            .get(tag)
+            .is_some_and(|value| POINTER_TYPE_CODES.contains(&value.type_code()))
+        {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                POINTER_FIELD_REFUSAL,
+            ));
+        }
+    }
+    let groups = ifd.sub_ifds();
+    for (i, group) in groups.iter().enumerate() {
+        if ifd.get(group.tag).is_some() || groups[..i].iter().any(|g| g.tag == group.tag) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                TAG_STORED_TWICE_REFUSAL,
+            ));
+        }
+        for child in &group.ifds {
+            check_exif_subtree(child)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use gamut_ifd::ByteOrder;
+    use gamut_ifd::tags::INTEROPERABILITY_IFD;
+    use gamut_ifd::{ByteOrder, Variant};
     use gamut_metadata::exif::ExifTag;
 
     use super::*;
@@ -314,5 +428,166 @@ mod tests {
                 MetadataBlock::C2pa(b"\0\0\0\x14jumbc2pa"),
             ]
         );
+    }
+
+    /// An Exif sub-IFD carrying one ordinary field, so [`DngMetadata::check`] has a directory to
+    /// judge, plus whatever a test adds.
+    fn exif_dir() -> Ifd {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::ISO_SPEED_RATINGS, Value::Short(vec![100]));
+        ifd
+    }
+
+    /// The metadata carrying `exif` as its Exif sub-IFD.
+    fn carrying(exif: Ifd) -> DngMetadata {
+        let mut model = Exif::new(ByteOrder::LittleEndian);
+        model.set_exif_ifd(exif);
+        DngMetadata {
+            exif: Some(model),
+            ..Default::default()
+        }
+    }
+
+    /// The message [`DngMetadata::check`] refused `meta` with.
+    fn refusal(meta: &DngMetadata) -> String {
+        meta.check().expect_err("must be refused").to_string()
+    }
+
+    /// `ifd` with a group under `tag` whose one child is `child`, attached through the setter.
+    fn with_group(mut ifd: Ifd, tag: u16, child: Ifd) -> Ifd {
+        ifd.set_sub_ifd(tag, vec![child]);
+        ifd
+    }
+
+    /// `ifd` with its group at `index` moved under `tag` in place — the one route
+    /// [`Ifd::sub_ifds_mut`] leaves to a tag stored twice, since the setters forbid it.
+    fn retagged(mut ifd: Ifd, index: usize, tag: u16) -> Ifd {
+        ifd.sub_ifds_mut()[index].tag = tag;
+        ifd
+    }
+
+    /// Every value whose on-disk type code makes the reader follow it as a pointer: the four
+    /// natural variants and [`Value::Unknown`] at each of the four codes, at the width each code
+    /// fits.
+    fn pointer_typed_values() -> Vec<Value> {
+        let unknown = |code: u16, variant: Variant| {
+            Value::Unknown(
+                gamut_ifd::UnknownValue::new(
+                    code,
+                    1,
+                    &vec![8u8; variant.offset_size()],
+                    ByteOrder::LittleEndian,
+                    variant,
+                )
+                .expect("a word of the variant's width"),
+            )
+        };
+        vec![
+            Value::Long(vec![8]),
+            Value::Ifd(vec![8]),
+            Value::Long8(vec![8]),
+            Value::Ifd8(vec![8]),
+            unknown(4, Variant::Classic),
+            unknown(13, Variant::Classic),
+            unknown(16, Variant::Big),
+            unknown(18, Variant::Big),
+        ]
+    }
+
+    #[test]
+    fn check_refuses_a_pointer_typed_field_under_every_standard_pointer_tag() {
+        // The reader resolves the flat standard list at every node, so each of the four tags is a
+        // pointer inside the Exif directory, and the type is judged by on-disk code: the
+        // `Unknown` forms are the ones a variant-shaped check would let through.
+        for &tag in EXIF_SUBTREE_POINTER_TAGS {
+            for value in pointer_typed_values() {
+                let mut exif = exif_dir();
+                exif.set(tag, value.clone());
+                assert!(
+                    refusal(&carrying(exif)).contains(POINTER_FIELD_REFUSAL),
+                    "{tag} = {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn check_accepts_a_field_of_any_other_type_under_a_pointer_tag() {
+        // The reader leaves every non-pointer type in place as a field, so the writer must too:
+        // a `SHORT` under `InteroperabilityIFD`, and an unknown-typed entry at a code adjacent to
+        // the pointer codes.
+        for &tag in EXIF_SUBTREE_POINTER_TAGS {
+            for value in [
+                Value::Short(vec![8]),
+                Value::Unknown(
+                    gamut_ifd::UnknownValue::new(
+                        3,
+                        1,
+                        &[8, 0, 0, 0],
+                        ByteOrder::LittleEndian,
+                        Variant::Classic,
+                    )
+                    .expect("a classic word"),
+                ),
+            ] {
+                let mut exif = exif_dir();
+                exif.set(tag, value.clone());
+                assert!(carrying(exif).check().is_ok(), "{tag} = {value:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn check_accepts_a_pointer_group_with_no_field_beside_it() {
+        let exif = with_group(exif_dir(), INTEROPERABILITY_IFD, exif_dir());
+        assert!(carrying(exif).check().is_ok());
+    }
+
+    #[test]
+    fn check_refuses_a_group_under_a_tag_that_also_carries_a_field() {
+        // The issue #610 shape: `InteroperabilityIFD` as a `SHORT` field *and* as a group. The
+        // field is not pointer-typed, so only the stored-twice clause can refuse it.
+        let mut exif = with_group(exif_dir(), u16::MAX, exif_dir());
+        exif.set(INTEROPERABILITY_IFD, Value::Short(vec![1]));
+        let exif = retagged(exif, 0, INTEROPERABILITY_IFD);
+        assert!(refusal(&carrying(exif)).contains(TAG_STORED_TWICE_REFUSAL));
+    }
+
+    #[test]
+    fn check_refuses_two_groups_under_one_tag() {
+        let exif = with_group(exif_dir(), tags::GPS_INFO, exif_dir());
+        let exif = with_group(exif, INTEROPERABILITY_IFD, exif_dir());
+        let exif = retagged(exif, 1, tags::GPS_INFO);
+        assert!(refusal(&carrying(exif)).contains(TAG_STORED_TWICE_REFUSAL));
+    }
+
+    #[test]
+    fn check_judges_every_directory_nested_in_the_exif_directory() {
+        // The reader resolves pointers at every node, so a child two levels down is read exactly
+        // as the Exif directory is: each clause must reach it.
+        let mut pointer_field = exif_dir();
+        pointer_field.set(tags::GPS_INFO, Value::Long(vec![8]));
+        let mut stored_twice = with_group(exif_dir(), u16::MAX, exif_dir());
+        stored_twice.set(tags::GPS_INFO, Value::Short(vec![1]));
+        let stored_twice = retagged(stored_twice, 0, tags::GPS_INFO);
+        for (leaf, message) in [
+            (pointer_field, POINTER_FIELD_REFUSAL),
+            (stored_twice, TAG_STORED_TWICE_REFUSAL),
+        ] {
+            let middle = with_group(exif_dir(), tags::GPS_INFO, leaf);
+            let exif = with_group(exif_dir(), INTEROPERABILITY_IFD, middle);
+            assert!(refusal(&carrying(exif)).contains(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn the_refused_pointer_tags_are_the_four_the_messages_name() {
+        // The set is a sibling crate's constant while the refusal and the encoder's documentation
+        // enumerate its four members; a fifth added upstream must not widen this crate's contract
+        // without someone deciding it.
+        assert_eq!(EXIF_SUBTREE_POINTER_TAGS, [330, 34665, 34853, 40965]);
+        for name in ["SubIFDs", "ExifIFD", "GPSInfo", "InteroperabilityIFD"] {
+            assert!(POINTER_FIELD_REFUSAL.contains(name), "{name}");
+        }
     }
 }

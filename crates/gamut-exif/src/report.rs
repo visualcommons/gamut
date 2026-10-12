@@ -10,32 +10,42 @@
 //! region: **where** it was (a [`DroppedRegion`] and the tag that addressed it), **what offset**
 //! addressed it, and **why** it went ([`DropReason`]).
 //!
+//! Two opt-in options on the reader deepen it:
+//!
+//! * [`recover_entries`](crate::ExifReader::recover_entries) makes the granularity the **entry**:
+//!   a directory with one unreadable entry survives minus that entry, named by a
+//!   [`DroppedEntry`] in [`dropped_entries`](ReadReport::dropped_entries), instead of failing whole;
+//! * [`audit_bytes`](crate::ExifReader::audit_bytes) adds a **byte-completeness verdict**,
+//!   [`byte_audit`](ReadReport::byte_audit): `gamut-ifd`'s audit engine classifying every byte of
+//!   the TIFF stream, or naming precisely the ones no structure claims.
+//!
+//! Whatever the options, a **duplicate tag** within a surviving directory is named too: the model
+//! keeps one value per tag — the last occurrence — so every earlier entry for that tag is a
+//! [`DroppedEntry`] whose [`reason`](DroppedEntry::reason) is [`EntryDropReason::Shadowed`]. TIFF
+//! 6.0 §2 gives a directory one entry per tag, so such a file is out of spec, but the signal is a
+//! report entry rather than a [`strict`](crate::ExifReader::strict)-mode rejection.
+//!
 //! # What this report does and does not claim
 //!
 //! It covers exactly the regions [`DroppedRegion`] enumerates — the three pointer-addressed
-//! sub-IFDs, the thumbnail's JPEG bytes, and any top-level directory past the 1st IFD. Within that
-//! set it is complete: nothing in it is discarded without an entry.
+//! sub-IFDs, the thumbnail's JPEG bytes, and any top-level directory past the 1st IFD — and the
+//! entries of every directory the model keeps: each one a duplicate tag shadowed, and, under
+//! `recover_entries`, each one whose value could not be read. Within that set it is complete:
+//! nothing in it is discarded without an entry.
 //!
-//! It is **not** a byte-completeness verdict over the blob, and
-//! [`is_empty`](ReadReport::is_empty) does not mean "this parse lost nothing". Two known losses sit
-//! outside it, both below this crate in [`gamut_ifd`]:
-//!
-//! * a **duplicate tag** within one directory keeps the last occurrence and discards the earlier
-//!   one. This crate *could* detect that a directory lost an entry — `RawIfd::entries` is public
-//!   and in on-disk order, so comparing its length against the decoded `Ifd::fields()` finds it in
-//!   three lines — but it could not say what was lost without re-decoding the shadowed entry
-//!   itself. The signal belongs at the layer that does the discarding, which three crates share
-//!   (issue #528);
-//! * a single unparseable **entry** fails its whole directory rather than being skipped, so the
-//!   report's granularity is the directory, never the individual tag (issue #521).
-//!
-//! Bytes that no parsed structure ever claimed are likewise not reported; that verdict would need
-//! `gamut-ifd`'s audit engine and is tracked in #521.
+//! The drop lists are **not** a byte-completeness verdict, and [`is_empty`](ReadReport::is_empty)
+//! does not mean "every source byte reached the model": a gap between structures, a trailer, or a
+//! region no pointer reaches is not a *discard* of anything the parse read, so the drop lists have
+//! nothing to say about it. That is the byte audit's question. The converse holds too — the audit
+//! cannot stand in for the drop lists: a shadowed entry's record lies inside its directory's body,
+//! so its bytes count as claimed, and only [`EntryDropReason::Shadowed`] names it.
 
 use core::fmt;
 
+use gamut_ifd::SegmentReport;
+
 use crate::exif::{EXIF_IFD_POINTER, GPS_IFD_POINTER, INTEROP_IFD_POINTER};
-use crate::tag::ExifTag;
+use crate::tag::{ExifTag, IfdKind};
 
 /// A region of an EXIF blob that a lenient parse can discard.
 ///
@@ -261,7 +271,133 @@ impl fmt::Display for Dropped {
     }
 }
 
-/// What a lenient parse discarded, over the regions [`DroppedRegion`] enumerates.
+/// Why a single directory entry was discarded while the rest of its directory survived.
+///
+/// Fieldless with an explicit `repr` and append-only discriminants; `#[non_exhaustive]` so reasons
+/// can be added post-1.0 without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum EntryDropReason {
+    /// The entry's value could not be read, and a
+    /// [`recover_entries`](crate::ExifReader::recover_entries) parse skipped it: its count
+    /// overflows, its value offset or span lies outside the TIFF stream, or it does not decode as
+    /// its declared type (an `ASCII` field that is not UTF-8). Re-reading the entry record at
+    /// [`DroppedEntry::offset`] through [`gamut_ifd::IfdReader::value`] reproduces the exact error.
+    ///
+    /// Never recorded without that option, whose absence makes such an entry fail its whole
+    /// directory instead.
+    Unreadable = 0,
+    /// A later entry in the same directory repeats this entry's tag. The directory holds one value
+    /// per tag and keeps the **last** occurrence (`gamut-ifd`'s rule; libtiff keeps the first), so
+    /// this one is discarded — one record per shadowed entry, so a tag written three times yields
+    /// two.
+    ///
+    /// Recorded in every mode, [`strict`](crate::ExifReader::strict) included. A duplicate tag
+    /// breaks TIFF 6.0 §2's one-entry-per-tag rule, but every entry of it was read, so strictness —
+    /// which rejects what cannot be read — has no grounds to refuse a file over it. The shadowed
+    /// value was still decoded: a malformed one fails (or, under `recover_entries`, is skipped as
+    /// [`Unreadable`](Self::Unreadable) and then shadows nothing) exactly as any other entry does.
+    ///
+    /// **Round trip.** The [`Exif`](crate::Exif) holds only the survivor, so
+    /// [`to_bytes`](crate::Exif::to_bytes) writes the directory with one entry for the tag; this
+    /// record is the only trace that the others existed.
+    Shadowed = 1,
+}
+
+impl EntryDropReason {
+    /// The clause [`DroppedEntry`]'s `Display` uses for this reason.
+    const fn clause(self) -> &'static str {
+        match self {
+            Self::Unreadable => "its value could not be read",
+            Self::Shadowed => "a later entry repeats its tag",
+        }
+    }
+}
+
+/// One directory entry a parse discarded while the rest of its directory survived, named by the
+/// directory, the tag, the entry record's offset, and [why](EntryDropReason).
+///
+/// The report names the entry, not the defect behind it: for an
+/// [`Unreadable`](EntryDropReason::Unreadable) entry, re-reading the record at
+/// [`offset`](Self::offset) reproduces the exact error.
+///
+/// `Copy` plain data reachable through accessors, so it is representable across an FFI boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DroppedEntry {
+    ifd: IfdKind,
+    tag: u16,
+    offset: u64,
+    reason: EntryDropReason,
+}
+
+impl DroppedEntry {
+    /// Records that `ifd`'s entry for `tag`, whose record sits at `offset`, was discarded for
+    /// `reason`.
+    pub(crate) const fn new(ifd: IfdKind, tag: u16, offset: u64, reason: EntryDropReason) -> Self {
+        Self {
+            ifd,
+            tag,
+            offset,
+            reason,
+        }
+    }
+
+    /// The directory the entry belonged to — which still parsed, minus this entry.
+    #[must_use]
+    pub const fn ifd(self) -> IfdKind {
+        self.ifd
+    }
+
+    /// The discarded entry's tag. Look it up with
+    /// [`ExifTag::from_id`](crate::ExifTag::from_id) against [`ifd`](Self::ifd).
+    #[must_use]
+    pub const fn tag(self) -> u16 {
+        self.tag
+    }
+
+    /// The offset of the discarded entry's own 12-byte record, relative to the start of the TIFF
+    /// stream — the frame [`Dropped::offset`] uses, not the frame of the crate's error messages.
+    /// For a [`Shadowed`](EntryDropReason::Shadowed) entry this tells it apart from the survivor
+    /// that shares its tag.
+    #[must_use]
+    pub const fn offset(self) -> u64 {
+        self.offset
+    }
+
+    /// Why the entry was discarded.
+    #[must_use]
+    pub const fn reason(self) -> EntryDropReason {
+        self.reason
+    }
+}
+
+impl fmt::Display for DroppedEntry {
+    /// `dropped entry (tag <t>) in <directory> at offset <n>: <reason>` — the same grammar as
+    /// [`Dropped`]'s, with the directory the entry was discarded from.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ifd = match self.ifd {
+            IfdKind::Image => "0th IFD",
+            IfdKind::Exif => "Exif IFD",
+            IfdKind::Gps => "GPS IFD",
+            IfdKind::Interop => "Interop IFD",
+            IfdKind::Thumbnail => "1st IFD",
+        };
+        write!(
+            f,
+            "dropped entry (tag {:#06x}) in {ifd} at offset {}: {}",
+            self.tag,
+            self.offset,
+            self.reason.clause()
+        )
+    }
+}
+
+/// What a lenient parse discarded, over the regions [`DroppedRegion`] enumerates and the entries
+/// surviving directories lost — every [shadowed](EntryDropReason::Shadowed) duplicate, and under
+/// [`recover_entries`](crate::ExifReader::recover_entries) every
+/// [unreadable](EntryDropReason::Unreadable) entry — plus the opt-in byte-completeness verdict of
+/// [`audit_bytes`](crate::ExifReader::audit_bytes).
 ///
 /// Obtained from [`ExifReader::parse_with_report`](crate::ExifReader::parse_with_report) or
 /// [`ExifReader::parse_from_with_report`](crate::ExifReader::parse_from_with_report). In
@@ -270,11 +406,13 @@ impl fmt::Display for Dropped {
 /// [`DroppedRegion::TrailingIfd`] is well-formed and merely unrepresentable, so strictness has no
 /// grounds to reject it and it is reported in both modes.
 ///
-/// Read the module documentation for what this report deliberately does **not** cover: it is not a
-/// byte-completeness verdict, and losses inside a single directory belong to [`gamut_ifd`].
+/// Read the module documentation for what the drop lists deliberately do **not** cover: they are
+/// not a byte-completeness verdict — [`byte_audit`](Self::byte_audit) is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadReport {
     dropped: Vec<Dropped>,
+    entries: Vec<DroppedEntry>,
+    byte_audit: Option<SegmentReport>,
 }
 
 impl ReadReport {
@@ -290,19 +428,65 @@ impl ReadReport {
         &self.dropped
     }
 
-    /// Whether any of the regions this report covers was discarded.
+    /// Every entry discarded from a directory the model kept, directory by directory in the order
+    /// the reader met them — the 0th IFD, the 1st IFD, then the Exif, GPS and Interop sub-IFDs.
+    /// Within one directory, its [`Unreadable`](EntryDropReason::Unreadable) entries come first,
+    /// then its [`Shadowed`](EntryDropReason::Shadowed) ones, each group in on-disk order.
     ///
-    /// **Not** a "this parse lost nothing" verdict — see the module documentation. An empty report
-    /// means no sub-IFD, thumbnail range or trailing directory was dropped; it says nothing about
-    /// a shadowed duplicate tag (#528) or about source bytes no structure claimed (#521).
+    /// Unreadable entries appear only under
+    /// [`recover_entries`](crate::ExifReader::recover_entries); shadowed ones in every mode. A
+    /// directory the parse dropped whole contributes none: it is named once, in
+    /// [`dropped`](Self::dropped). Nor does a [`TrailingIfd`](DroppedRegion::TrailingIfd), which is
+    /// discarded whole as well.
+    #[must_use]
+    pub fn dropped_entries(&self) -> &[DroppedEntry] {
+        &self.entries
+    }
+
+    /// Whether anything this report's drop lists cover was discarded — a region of
+    /// [`dropped`](Self::dropped) or an entry of [`dropped_entries`](Self::dropped_entries).
+    ///
+    /// **Not** a byte-completeness verdict — see the module documentation. Source bytes no
+    /// structure claimed are [`byte_audit`](Self::byte_audit)'s question, and an audit is not a
+    /// discard, so it never makes a report non-empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.dropped.is_empty()
+        self.dropped.is_empty() && self.entries.is_empty()
+    }
+
+    /// The byte-completeness verdict over the TIFF stream, when
+    /// [`audit_bytes`](crate::ExifReader::audit_bytes) asked for one.
+    ///
+    /// [`SegmentReport::is_fully_classified`] answers "is every byte accounted for"; its
+    /// [`unclaimed_spans`](SegmentReport::unclaimed_spans) name the ones no parsed structure
+    /// claims. Offsets are relative to the start of the TIFF stream, like [`Dropped::offset`], so an
+    /// `Exif\0\0` marker is outside the audited range.
+    ///
+    /// The verdict is `gamut-ifd`'s [`audit`](gamut_ifd::audit) walk of the stream, following the
+    /// Exif, GPS and Interop pointers and the thumbnail's JPEG range: a second, structural reading
+    /// of the same bytes, deliberately not this crate's parse. So it classifies a sub-IFD the parse
+    /// dropped as unclassified bytes, and — the one case it cannot answer — it is `None` when the
+    /// top-level chain has an entry no strict decode can read, which only a
+    /// [`recover_entries`](crate::ExifReader::recover_entries) parse survives. `None` also when no
+    /// audit was asked for.
+    #[must_use]
+    pub fn byte_audit(&self) -> Option<&SegmentReport> {
+        self.byte_audit.as_ref()
     }
 
     /// Appends a discarded region.
     pub(crate) fn record(&mut self, dropped: Dropped) {
         self.dropped.push(dropped);
+    }
+
+    /// Appends a skipped entry.
+    pub(crate) fn record_entry(&mut self, entry: DroppedEntry) {
+        self.entries.push(entry);
+    }
+
+    /// Stores the byte-completeness verdict.
+    pub(crate) fn set_byte_audit(&mut self, audit: Option<SegmentReport>) {
+        self.byte_audit = audit;
     }
 }
 
@@ -388,5 +572,60 @@ mod tests {
         assert_eq!(report.dropped()[0].region(), DroppedRegion::ExifIfd);
         assert_eq!(report.dropped()[0].offset(), 7);
         assert_eq!(report.dropped()[0].reason(), DropReason::Malformed);
+    }
+
+    /// A discarded entry alone makes a report non-empty — it is a discard like any region — and is
+    /// listed with the directory, tag, offset and reason it was recorded with.
+    #[test]
+    fn a_discarded_entry_alone_makes_a_report_non_empty() {
+        let mut report = ReadReport::new();
+        let entry = DroppedEntry::new(IfdKind::Gps, 2, 40, EntryDropReason::Shadowed);
+        report.record_entry(entry);
+        assert!(!report.is_empty());
+        assert_eq!(report.dropped(), &[]);
+        assert_eq!(report.dropped_entries(), &[entry]);
+        assert_eq!(
+            (entry.ifd(), entry.tag(), entry.offset(), entry.reason()),
+            (IfdKind::Gps, 2, 40, EntryDropReason::Shadowed)
+        );
+    }
+
+    /// A byte audit is a verdict, not a discard: storing one leaves the report empty.
+    #[test]
+    fn a_byte_audit_alone_leaves_a_report_empty() {
+        let mut report = ReadReport::new();
+        report.set_byte_audit(Some(gamut_ifd::SegmentMap::new(0).finish(None)));
+        assert!(report.is_empty());
+        assert!(report.byte_audit().is_some());
+    }
+
+    /// Each directory renders under its own name, in [`Dropped`]'s grammar — the strings are part
+    /// of the contract, and the 0th/1st IFDs are named as the spec names them.
+    #[test]
+    fn the_rendered_entry_names_its_directory_tag_and_offset() {
+        for (ifd, name) in [
+            (IfdKind::Image, "0th IFD"),
+            (IfdKind::Exif, "Exif IFD"),
+            (IfdKind::Gps, "GPS IFD"),
+            (IfdKind::Interop, "Interop IFD"),
+            (IfdKind::Thumbnail, "1st IFD"),
+        ] {
+            assert_eq!(
+                DroppedEntry::new(ifd, 0x010F, 22, EntryDropReason::Unreadable).to_string(),
+                format!(
+                    "dropped entry (tag 0x010f) in {name} at offset 22: its value could not be read"
+                )
+            );
+        }
+    }
+
+    /// Each reason renders as its own clause in the one entry grammar — a shadowed duplicate is
+    /// not described as an unreadable value, which would send a caller after the wrong defect.
+    #[test]
+    fn the_rendered_entry_states_its_reason() {
+        assert_eq!(
+            DroppedEntry::new(IfdKind::Exif, 0x9003, 26, EntryDropReason::Shadowed).to_string(),
+            "dropped entry (tag 0x9003) in Exif IFD at offset 26: a later entry repeats its tag"
+        );
     }
 }

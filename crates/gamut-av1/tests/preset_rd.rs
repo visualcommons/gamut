@@ -17,8 +17,12 @@ use gamut_color::Planar8;
 /// Side of the square corpus images.
 const SIDE: u32 = 128;
 
-/// The quantizer ladder each curve is sampled at.
-const LADDER: [u8; 4] = [40, 80, 120, 160];
+/// The quantizer ladder each curve is sampled at, up to the top of the range.
+///
+/// The rungs above 160 sample the coarsest steps (issue #755), where the full search once lost
+/// to `Fast`; [`the_full_search_is_not_below_any_pruned_preset_at_the_coarsest_rung`] is what
+/// holds that point, because the BD-rate assertion alone cannot.
+const LADDER: [u8; 6] = [40, 80, 120, 160, 200, 240];
 
 /// Builds identity planes (Y=G, U=B, V=R) from an RGB generator.
 fn planes(f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {
@@ -130,6 +134,53 @@ fn bd_rate(anchor: &[(f64, f64)], test: &[(f64, f64)]) -> f64 {
     ((diff / (STEPS + 1) as f64).exp() - 1.0) * 100.0
 }
 
+/// PSNR at `bytes` on the curve through `points`, piecewise-linear in `log(rate)` and extended
+/// past either end along its outermost segment.
+fn psnr_at(points: &[(f64, f64)], bytes: f64) -> f64 {
+    let mut points = points.to_vec();
+    points.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let seg = points
+        .windows(2)
+        .find(|w| bytes <= w[1].1)
+        .unwrap_or(&points[points.len() - 2..]);
+    let (r0, p0) = (seg[0].1.ln(), seg[0].0);
+    let (r1, p1) = (seg[1].1.ln(), seg[1].0);
+    p0 + (p1 - p0) * (bytes.ln() - r0) / (r1 - r0)
+}
+
+#[test]
+fn the_full_search_is_not_below_any_pruned_preset_at_the_coarsest_rung() {
+    // Issue #755: with partitions forced by a texture test, the photo was coded in 4×4
+    // transforms throughout, and at `qindex` 240 the full search took `IDTX` on 296 of them,
+    // leaving 447 B / 28.94 dB against `Fast`'s 470 B / 30.55 dB. The BD-rate assertion did not
+    // see it (Thorough −9.46% against Fast): it averages only over the PSNR range both curves
+    // share, and Thorough's sunken point lay below Fast's lowest PSNR. So the coarsest rung is
+    // held on its own, as the issue's done criterion states it: at a pruned preset's byte count,
+    // the full search's curve reaches at least that preset's PSNR.
+    let src = photo();
+    let rung = LADDER.len() - 1;
+    let thorough = curve(&src, Speed::Thorough);
+    let mut below = Vec::new();
+    for &speed in &Speed::ALL[1..] {
+        let (psnr, bytes) = curve(&src, speed)[rung];
+        let reached = psnr_at(&thorough, bytes);
+        eprintln!(
+            "photo q{} {speed:?} {bytes} B {psnr:.2} dB; Thorough at {bytes} B: {reached:.2} dB",
+            LADDER[rung]
+        );
+        if reached < psnr {
+            below.push(format!(
+                "{speed:?}: {reached:.2} dB < {psnr:.2} dB at {bytes} B"
+            ));
+        }
+    }
+    assert!(
+        below.is_empty(),
+        "the full search falls below a pruned preset at q{}: {below:?}",
+        LADDER[rung]
+    );
+}
+
 #[test]
 fn the_full_search_needs_no_more_bits_than_any_pruned_preset() {
     // Every curve is measured and reported before anything is asserted, so one run shows the
@@ -159,4 +210,30 @@ fn the_full_search_needs_no_more_bits_than_any_pruned_preset() {
         losses.is_empty(),
         "the full search needs more bits than a pruned preset at equal PSNR: {losses:?}"
     );
+}
+
+#[test]
+fn screen_quality_keeps_rising_as_the_quantizer_falls() {
+    // Issue #754: with in-loop filters fixed by `qindex`, the screen image's thin lines were
+    // smeared to about 31.5 dB at every rung, so bytes spent below `qindex` ~120 bought nothing.
+    // Filters chosen against the source switch off where they hurt, so every halving of the
+    // quantizer step must buy a clear gain at every preset — well past that ceiling.
+    let src = screen();
+    let mut flat = Vec::new();
+    for &speed in Speed::ALL {
+        let points = curve(&src, speed);
+        for (rung, pair) in LADDER.windows(2).zip(points.windows(2)) {
+            let gain = pair[0].0 - pair[1].0;
+            if gain < 3.0 {
+                flat.push(format!(
+                    "{speed:?} q{}→q{}: {gain:+.2} dB",
+                    rung[1], rung[0]
+                ));
+            }
+        }
+        if points[0].0 < 45.0 {
+            flat.push(format!("{speed:?} q{}: {:.2} dB", LADDER[0], points[0].0));
+        }
+    }
+    assert!(flat.is_empty(), "screen quality flattens: {flat:?}");
 }

@@ -41,33 +41,37 @@
 //! [`pcs_d50_chromaticity`]), 2.5e-4 from the identity at its largest element.
 //! **Transfers** of a CICP triple are keyed on the raw ITU-T H.273 code point, because the set of
 //! curves an ICC tag can *encode* is not the set `gamut-color` can *evaluate*: H.273 Table 3's
-//! code points 1, 6, 14 and 15 are one curve with a closed form ICC.1:2022 §10.18 defines exactly, so this
-//! module encodes all four, while `gamut_color::cicp::TransferCharacteristics` models only two of
-//! them (1 and 14). `gamut_color::transfer::eotf_for` maps both of those to the same Table 3
-//! curve this module writes.
+//! code points 4 and 5 are pure gammas ICC.1:2022 §10.18 encodes exactly, yet
+//! `gamut_color::cicp::TransferCharacteristics` models neither. Code points 1, 6, 14 and 15 are
+//! one curve with a closed form §10.18 defines exactly, so this module encodes all four, and
+//! `TransferCharacteristics` models all four too; `gamut_color::transfer::eotf_for` maps each
+//! to the same Table 3 curve this module writes.
 //!
 //! ```
 //! use gamut_color::cicp::TransferCharacteristics as Tc;
 //! use gamut_color::transfer::eotf_for;
 //! use gamut_icc::{Cicp, IccProfile};
 //!
-//! // Two of the four BT.709-family code points have a `TransferCharacteristics` variant …
+//! // Each of the four BT.709-family code points has a `TransferCharacteristics` variant …
 //! assert_eq!(Tc::from_code_point(1), Some(Tc::Bt709));
+//! assert_eq!(Tc::from_code_point(6), Some(Tc::Bt601));
 //! assert_eq!(Tc::from_code_point(14), Some(Tc::Bt2020_10));
-//! assert_eq!(Tc::from_code_point(6), None);
-//! assert_eq!(Tc::from_code_point(15), None);
-//! // … and both evaluate Table 3's curve: V = 0.5 is 0.259719 in light, the value this module
+//! assert_eq!(Tc::from_code_point(15), Some(Tc::Bt2020_12));
+//! // … and each evaluates Table 3's curve: V = 0.5 is 0.259719 in light, the value this module
 //! // writes for the same code points (pinned by `bt709_curve_inverts_the_h273_transfer`).
-//! for tc in [Tc::Bt709, Tc::Bt2020_10] {
+//! for tc in [Tc::Bt709, Tc::Bt601, Tc::Bt2020_10, Tc::Bt2020_12] {
 //!     let light = eotf_for(tc).expect("BT.709-family code point has an EOTF")(0.5);
 //!     assert!((light - 0.259_719).abs() < 1e-6);
 //! }
+//! // The display gammas 2.2 and 2.8 have no variant …
+//! assert_eq!(Tc::from_code_point(4), None);
+//! assert_eq!(Tc::from_code_point(5), None);
 //!
-//! // All four are encodable here regardless; that they encode one curve is pinned by
-//! // `every_bt709_family_code_point_builds_the_same_curve`.
+//! // … yet are encodable here, as are all four BT.709-family code points; that the latter
+//! // encode one curve is pinned by `every_bt709_family_code_point_builds_the_same_curve`.
 //! let axes = Cicp { colour_primaries: 1, transfer_characteristics: 1,
 //!                   matrix_coefficients: 0, video_full_range_flag: 1 };
-//! for code in [1, 6, 14, 15] {
+//! for code in [1, 4, 5, 6, 14, 15] {
 //!     assert!(IccProfile::from_cicp(Cicp { transfer_characteristics: code, ..axes }).is_some());
 //! }
 //! ```

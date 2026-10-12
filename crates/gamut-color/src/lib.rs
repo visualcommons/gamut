@@ -50,7 +50,7 @@
 //!   direction (it is a lifting transform, not a `Kr`/`Kb` matrix). These land with the
 //!   milestones tracked in `gamut-avif/STATUS.md`.
 //!
-//! `Bt709` and `Bt2020_10` — one curve in ITU-T H.273 Table 3 — dispatch in both directions to
+//! `Bt709`, `Bt601`, `Bt2020_10` and `Bt2020_12` — one curve in ITU-T H.273 Table 3 — dispatch in both directions to
 //! [`bt709_eotf`](transfer::bt709_eotf) / [`bt709_oetf`](transfer::bt709_oetf), and `Hlg` to
 //! [`hlg_inverse_oetf`](transfer::hlg_inverse_oetf) / [`hlg_oetf`](transfer::hlg_oetf) (the
 //! scene-referred Table 3 curve; the display-dependent BT.2100 OOTF is not modelled).
@@ -75,6 +75,12 @@ pub mod cct;
 pub mod cicp;
 pub mod format;
 pub mod gamut_map;
+// Executable laws for this crate's constructors, shared by its property tests and the
+// out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
+// A plain comment, not `///`, so rustdoc resolves the module's own `//!` links in its scope.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod invariants;
 pub mod lab;
 pub mod linalg;
 pub mod matrix;

@@ -7,6 +7,8 @@ use gamut_color::cicp::{ColorRange, MatrixCoefficients};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16};
 use gamut_core::{Error, Result};
 
+use crate::filter::{FrameFilters, LrUnits};
+use crate::geom::PlaneGeom;
 use crate::headers::{self, Av1Colour, Av1StillConfig, TileLayout, Tiling};
 use crate::tile::{FrameEncoder, Reconstruction, Search};
 
@@ -24,25 +26,32 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 /// | [`Thorough`](Self::Thorough) | nothing: every directional mode at `AngleDeltaY ∈ [-3, 3]`, five filter-intra modes, CfL `\|alpha\|` 1..=16, all five `TX_SET_INTRA_2` types, rectangular partitions, 4×4 leaves, palette | — |
 /// | [`Balanced`](Self::Balanced) | directional modes are tried at `AngleDeltaY = 0` only | 48 of the 56 directional trials per ≥8×8 block |
 /// | [`Fast`](Self::Fast) | filter-intra is not tried; CfL tries `\|alpha\|` ∈ {1, 2, 4, 8, 16} only; the transform type is `DCT_DCT` or `ADST_ADST` | 5 filter-intra trials per block up to 32×32, 22 of 32 CfL trials per chroma plane, 3 of 4 extra transform-type trials per luma transform |
-/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional trial, the CfL trials and palette scan, the last extra transform-type trial, and the 8×8 split trials with the 4×4 mode searches they bring |
+/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional trial, the CfL trials and palette scan, the last extra transform-type trial, the `PARTITION_HORZ`/`PARTITION_VERT` rate–distortion trials of every 16×16 and 32×32 region, and the 8×8 split trials with the 4×4 mode searches they bring |
 ///
-/// **How candidates are weighed.** Every decision the presets prune — the luma mode, filter-intra,
-/// the transform type, the CfL alphas, and whether an 8×8 block splits into 4×4 leaves — ranks its
-/// candidates by rate–distortion cost: each candidate is trialled, its squared error measured on
-/// the reconstruction a decoder would produce, and weighed against its rate priced from the
-/// adapting CDFs. The luma mode is chosen in two passes where its transforms have a type to
-/// search: every candidate is trialled with `DCT_DCT` alone, and the eight cheapest again with
-/// the transform-type search. The decisions are made block by block, before the in-loop filters,
-/// so a slower preset is not guaranteed smaller output on every image; measured on the fixed
-/// corpus in `tests/preset_rd.rs`, [`Thorough`](Self::Thorough) needs fewer bits than every
-/// faster preset for the same PSNR. The partition of 16×16 and larger blocks, the rectangular
-/// partitions, the transform depth and palette are still decided by texture tests, at every
-/// preset.
+/// **How candidates are weighed.** Every decision the presets prune — the partition of each 8×8 to
+/// 64×64 region (whole, two rectangular halves, or four quadrants), the luma mode, filter-intra,
+/// the transform type and the CfL alphas — and the transform depth, which every preset searches
+/// in full, ranks its candidates by rate–distortion cost: each candidate is trialled, its squared
+/// error measured on the reconstruction a decoder would produce, and weighed against its rate
+/// priced from the adapting CDFs. The partition search is bottom-up: a region's four-quadrant alternative codes each
+/// quadrant as the same search chooses for it, and every decision a trial reaches is kept and
+/// reused rather than searched again, so the search costs time linear in its depth. The luma mode
+/// and transform depth are chosen together in two passes: every pairing is trialled with
+/// `DCT_DCT` alone, and the eight cheapest again with the transform-type search. The decisions
+/// are made block by block, before the in-loop filters, so a slower preset is not guaranteed
+/// smaller output on every image; measured on the fixed corpus in `tests/preset_rd.rs`,
+/// [`Thorough`](Self::Thorough) needs fewer bits than every faster preset for the same PSNR.
+/// Palette is still decided by a colour count, at every preset that tries it.
 ///
 /// The presets prune *search*, so they move only lossy encodes. Lossless coding (`qindex = 0`)
 /// has a single fixed path — `DC_PRED` and the 4×4 Walsh–Hadamard transform — and is identical at
-/// every speed. The in-loop filters are not searched either: CDEF strengths and the Wiener taps
-/// are fixed functions of `qindex`, so they too are the same at every speed.
+/// every speed. The in-loop filters are decided the same way at every speed: once the blocks are
+/// coded, the deblocking level, the CDEF strengths and, per 256×256 restoration unit, whether the
+/// default Wiener filter is applied are each chosen by the distortion they leave against the
+/// source, in the decoder's filter order, with "off" always a candidate — so the output is never
+/// further from the source than the reconstruction before the filters. A frame in which a
+/// restoration unit is restored has its tiles coded a second time to signal the units, replaying
+/// every block decision of the first pass rather than searching again.
 ///
 /// The discriminants are permanent identifiers for C callers, not an ordering promise: a preset
 /// added later is appended with the next free value wherever it falls on the speed axis.
@@ -548,22 +557,35 @@ pub fn encode_still_intra16_with_options(
         config.seq_level_idx_0,
         None,
     );
-    let mut frame_payload = headers::frame_header_payload(&layout, qindex, None, monochrome);
-    let (tile_bytes, recon) = FrameEncoder::new16(planes, qindex)
-        .with_search(Search::for_speed(options.speed))
-        .encode(&layout, options.threads);
-    append_tiles(&mut frame_payload, &tile_bytes);
-
-    let recon_planes: [Vec<u16>; 3] = if qindex == 0 {
+    let encoder =
+        || FrameEncoder::new16(planes, qindex).with_search(Search::for_speed(options.speed));
+    let frame = if qindex == 0 {
         // Lossless: the reconstruction *is* the source. Each plane crops at its own extent, so a
         // monochrome buffer's empty chroma planes stay empty.
-        std::array::from_fn(|i| {
+        CodedFrame::lossless(encoder().encode(&layout, options.threads), |i| {
             let (pw, ph) = planes.plane_dimensions(i);
             crop(planes.plane(i), pw, pw, ph)
         })
     } else {
-        restored_recon(&recon)
+        CodedFrame::lossy(
+            encoder,
+            &layout,
+            options.threads,
+            planes.plane(0),
+            None,
+            (width as usize, height as usize),
+        )
     };
+    let mut frame_payload = headers::frame_header_payload(
+        &layout,
+        qindex,
+        None,
+        monochrome,
+        frame.filters,
+        frame.lr.any(),
+    );
+    append_tiles(&mut frame_payload, &frame.tile_bytes);
+    let recon_planes = frame.planes;
 
     Ok((
         EncodedStill {
@@ -641,77 +663,52 @@ fn encode_with(
         config.seq_level_idx_0,
         coded_denom,
     );
-    let mut frame_payload = headers::frame_header_payload(&layout, qindex, coded_denom, monochrome);
-    let (tile_bytes, recon) = FrameEncoder::new(&coded_src, qindex)
-        .with_search(Search::for_speed(options.speed))
-        .encode(&layout, options.threads);
-    append_tiles(&mut frame_payload, &tile_bytes);
-
-    // Crop the reconstruction from the coded grid to the display dimensions. For the lossless path
-    // the reconstruction equals the source. With superres the coded grid is the downscaled width, so
-    // each plane is cropped to `coded_w` and then upscaled horizontally to the display `width`.
-    let (uw, uh) = (width as usize, height as usize);
-    let recon_planes: [Vec<u16>; 3] = if qindex == 0 {
+    let encoder =
+        || FrameEncoder::new(&coded_src, qindex).with_search(Search::for_speed(options.speed));
+    let frame = if qindex == 0 {
         // Lossless: the reconstruction equals the 8-bit source; widen it into the u16 recon buffer.
         // Each plane crops at its **own** extent — the source carries no coded padding, so the
         // stride is the plane width. A monochrome buffer's chroma planes are empty and stay empty;
         // cropping them at the luma extent would index past the end of a zero-length slice.
-        std::array::from_fn(|i| {
+        CodedFrame::lossless(encoder().encode(&layout, options.threads), |i| {
             let (pw, ph) = planes.plane_dimensions(i);
             crop(planes.plane(i), pw, pw, ph)
                 .into_iter()
                 .map(u16::from)
                 .collect()
         })
-    } else if coded_denom.is_some() {
-        // §7.4 order: superres upscale (downscaled → display width) happens **before** loop
-        // restoration, which then runs on the upscaled luma. The deblocked-luma boundary is upscaled
-        // too (only read by multi-stripe frames).
-        // Per-plane source stride. The downscaled/upscaled widths stay luma-derived: §7.16 scales
-        // them per plane by `Round2(w, subX)`, which only matters once a subsampled source can
-        // reach here — `encode_with` rejects one today, and superres x subsampling is its own
-        // slice.
-        let mut up: [Vec<u16>; 3] = std::array::from_fn(|i| {
-            crate::filter::superres_upscale_plane(
-                &recon.planes[i],
-                recon.geom[i].coded_w,
-                coded_w as usize,
-                uw,
-                uh,
-                recon.bit_depth,
-            )
-        });
-        let deblock_up = crate::filter::superres_upscale_plane(
-            &recon.deblocked_luma,
-            recon.geom[0].coded_w,
-            coded_w as usize,
-            uw,
-            uh,
-            recon.bit_depth,
-        );
-        crate::filter::loop_restore_wiener_luma(
-            &mut up[0],
-            &deblock_up,
-            uw,
-            uw,
-            uh,
-            crate::filter::WIENER_DEFAULT,
-            crate::filter::WIENER_DEFAULT,
-            recon.bit_depth,
-        );
-        up
     } else {
-        restored_recon(&recon)
+        // With superres the coded grid is the downscaled width; the reconstruction is upscaled
+        // back to the display `width`, and loop restoration is decided on the upscaled frame
+        // against the full-width source.
+        CodedFrame::lossy(
+            encoder,
+            &layout,
+            options.threads,
+            planes.plane(0),
+            coded_denom.map(|cd| (usize::from(cd) + 9, coded_w as usize)),
+            (width as usize, height as usize),
+        )
     };
+    let mut frame_payload = headers::frame_header_payload(
+        &layout,
+        qindex,
+        coded_denom,
+        monochrome,
+        frame.filters,
+        frame.lr.any(),
+    );
+    append_tiles(&mut frame_payload, &frame.tile_bytes);
 
     let still = EncodedStill {
         obus: headers::assemble_temporal_unit(&seq_payload, &frame_payload),
         config,
     };
+    let recon_planes = frame.planes;
     let recon = ReconImage {
         width,
         height,
-        bit_depth: BitDepth::from_bits(recon.bit_depth).ok_or_else(|| {
+        bit_depth: BitDepth::from_bits(frame.bit_depth).ok_or_else(|| {
             Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "AV1: unsupported reconstruction bit depth",
@@ -723,24 +720,123 @@ fn encode_with(
     Ok((still, recon))
 }
 
-/// The lossy reconstruction of a frame coded **without** superres: loop restoration on the luma
-/// (§7.17), then each plane cropped from its own coded stride to its own visible extent.
-fn restored_recon(recon: &Reconstruction) -> [Vec<u16>; 3] {
-    let mut planes = recon.planes.clone();
-    crate::filter::loop_restore_wiener_luma(
-        &mut planes[0],
-        &recon.deblocked_luma,
-        recon.geom[0].coded_w,
-        recon.geom[0].w,
-        recon.geom[0].h,
-        crate::filter::WIENER_DEFAULT,
-        crate::filter::WIENER_DEFAULT,
-        recon.bit_depth,
-    );
-    std::array::from_fn(|i| {
-        let g = recon.geom[i];
-        crop(&planes[i], g.w as u32, g.coded_w as u32, g.h as u32)
-    })
+/// A coded frame: its tiles' bytes, the in-loop filters its header signals, and the samples a
+/// decoder reconstructs from it, each plane at its own visible extent.
+struct CodedFrame {
+    tile_bytes: Vec<Vec<u8>>,
+    filters: FrameFilters,
+    /// The luma restoration units; none is restored on the lossless path.
+    lr: LrUnits,
+    planes: [Vec<u16>; 3],
+    bit_depth: u32,
+}
+
+impl CodedFrame {
+    /// A lossless frame `coded` by [`FrameEncoder::encode`]: no in-loop filter, and the
+    /// reconstruction is the source, plane `i` of which `source(i)` crops.
+    fn lossless(
+        coded: (Vec<Vec<u8>>, Reconstruction),
+        source: impl FnMut(usize) -> Vec<u16>,
+    ) -> Self {
+        Self {
+            tile_bytes: coded.0,
+            filters: FrameFilters::default(),
+            lr: LrUnits {
+                cols: 0,
+                rows: 0,
+                wiener: Vec::new(),
+            },
+            planes: std::array::from_fn(source),
+            bit_depth: coded.1.bit_depth,
+        }
+    }
+
+    /// Codes a lossy frame with the encoders `encoder` makes, and decides its luma restoration
+    /// units against `source_luma`, the display-sized luma.
+    ///
+    /// The first pass codes the tiles with no restoration and filters them (§7.4: deblocking,
+    /// CDEF, both chosen against the source by [`FrameEncoder::encode`]; then, with `superres` —
+    /// `(SuperresDenom, FrameWidth)` — the upscale to the display `width × height`). Each
+    /// restoration unit is then decided by [`crate::filter::choose_lr_units`] on the result. Only
+    /// if some unit is restored are the tiles coded again, to signal the units
+    /// ([`FrameEncoder::recoding`]); the reconstruction is the first pass's either way.
+    fn lossy<'a, S: Copy + Into<i64>>(
+        encoder: impl Fn() -> FrameEncoder<'a>,
+        layout: &TileLayout,
+        threads: NonZeroUsize,
+        source_luma: &[S],
+        superres: Option<(usize, usize)>,
+        (width, height): (usize, usize),
+    ) -> Self {
+        let (mut tile_bytes, first) = encoder().encode(layout, threads);
+        let bit_depth = first.bit_depth;
+        // The planes loop restoration reads, and their stride: §7.4 upscales both the CDEF output
+        // and the deblocked luma (which only multi-stripe frames read) before restoring. The
+        // upscaled widths stay luma-derived: §7.16 scales them per plane by `Round2(w, subX)`,
+        // which only matters once a subsampled source can reach superres — `encode_with` rejects
+        // one today.
+        let (mut planes, deblocked, stride) = match superres {
+            Some((_, frame_w)) => {
+                let up = |plane: &[u16], g: PlaneGeom| {
+                    crate::filter::superres_upscale_plane(
+                        plane, g.coded_w, frame_w, width, height, bit_depth,
+                    )
+                };
+                (
+                    std::array::from_fn(|i| up(&first.planes[i], first.geom[i])),
+                    up(&first.deblocked_luma, first.geom[0]),
+                    width,
+                )
+            }
+            None => (
+                first.planes.clone(),
+                first.deblocked_luma.clone(),
+                first.geom[0].coded_w,
+            ),
+        };
+        let mut restored = planes[0].clone();
+        crate::filter::loop_restore_wiener_luma(
+            &mut restored,
+            &deblocked,
+            stride,
+            width,
+            height,
+            crate::filter::WIENER_DEFAULT,
+            crate::filter::WIENER_DEFAULT,
+            bit_depth,
+        );
+        let lr = crate::filter::choose_lr_units(
+            source_luma,
+            &planes[0],
+            &restored,
+            stride,
+            width,
+            height,
+        );
+        if lr.any() {
+            crate::filter::apply_lr_units(&lr, &mut planes[0], &restored, stride, width, height);
+            let denom = superres.map(|(denom, _)| denom);
+            tile_bytes = encoder()
+                .recoding(&first, lr.clone(), denom)
+                .encode(layout, threads)
+                .0;
+        }
+        // Without superres each plane is cropped from its own coded stride to its own visible
+        // extent; the upscaled planes are already display-sized.
+        if superres.is_none() {
+            planes = std::array::from_fn(|i| {
+                let g = first.geom[i];
+                crop(&planes[i], g.w as u32, g.coded_w as u32, g.h as u32)
+            });
+        }
+        Self {
+            tile_bytes,
+            filters: first.filters,
+            lr,
+            planes,
+            bit_depth,
+        }
+    }
 }
 
 /// Crops a `src_stride`-wide plane to `width × height`, row-major.
@@ -796,8 +892,8 @@ mod tests {
 
     #[test]
     fn a_vertical_edge_at_four_two_two_does_not_reach_an_invalid_chroma_block() {
-        // A strong vertical edge is what makes `decide_rect` prefer PARTITION_VERT, producing a
-        // taller-than-wide half whose 4:2:2 chroma residual is `BLOCK_INVALID` (§5.11.38). The
+        // A strong vertical edge is what would make the partition search weigh PARTITION_VERT,
+        // producing a taller-than-wide half whose 4:2:2 chroma residual is `BLOCK_INVALID` (§5.11.38). The
         // partition search must never emit one, so this encodes rather than hitting the residual
         // loop's unreachable-by-contract arm.
         let mut rgb = vec![0u8; 32 * 32 * 3];
@@ -975,6 +1071,65 @@ mod tests {
         Planar8::from_rgb8_identity(&rgb, w, h).unwrap()
     }
 
+    /// `p` coded at `qindex` with the full search and no superres, as `encode_with` codes it.
+    fn coded_frame(p: &Planar8, qindex: u8) -> CodedFrame {
+        let (w, h) = (p.width() as usize, p.height() as usize);
+        let config = still_config(
+            p.width(),
+            p.height(),
+            false,
+            BitDepth::Eight,
+            p.subsampling(),
+            Av1Colour::default(),
+        )
+        .unwrap();
+        let layout = TileLayout::resolve(Tiling::default(), w, h, config.seq_level_idx_0, None);
+        CodedFrame::lossy(
+            || FrameEncoder::new(p, qindex),
+            &layout,
+            NonZeroUsize::MIN,
+            p.plane(0),
+            None,
+            (w, h),
+        )
+    }
+
+    /// A smooth, low-frequency field, whose quantization artefacts the in-loop filters remove.
+    fn smooth_field(x: u32, y: u32) -> [u8; 3] {
+        let (fx, fy) = (f64::from(x), f64::from(y));
+        let g = 128.0 + 60.0 * (fx / 23.0).sin() * (fy / 31.0).cos();
+        [(g * 0.9) as u8, g as u8, (255.0 - g) as u8]
+    }
+
+    #[test]
+    fn restoration_units_are_decided_one_by_one() {
+        // 640 columns make three 256-wide units, the last absorbing the remainder. On this field
+        // the Wiener filter brings the left unit closer to the source and the other two further
+        // from it, so only the left one is restored — and the frame, having one, is coded twice.
+        // `recon.rs` decodes the same frame with both oracles.
+        let frame = coded_frame(&planes(640, 64, smooth_field), 110);
+        assert_eq!(
+            frame.lr,
+            LrUnits {
+                cols: 3,
+                rows: 1,
+                wiener: vec![true, false, false],
+            }
+        );
+    }
+
+    #[test]
+    fn no_unit_is_restored_where_restoration_does_not_help() {
+        // Light noise over a ramp at a fine quantizer: the reconstruction is already close, and
+        // the low-pass Wiener filter only blurs the noise away from the source.
+        let noisy = planes(64, 40, |x, y| {
+            let v = (100 + x / 2 + (x * 7 + y * 13) % 9) as u8;
+            [v, v, v]
+        });
+        let frame = coded_frame(&noisy, 16);
+        assert_eq!(frame.lr.wiener, [false]);
+    }
+
     /// Parses the low-overhead OBU stream into `(obu_type, payload_len)` pairs, asserting it tiles
     /// the buffer exactly.
     fn parse_obus(d: &[u8]) -> Vec<(u8, usize)> {
@@ -1024,9 +1179,10 @@ mod tests {
 
     #[test]
     fn encoded_bitstream_is_stable() {
-        // The encoder's structural choices — block partition (should_split/decide_rect), palette
+        // The encoder's structural choices — block partition (choose_partition), palette
         // (decide_palette/palette_cache/signal_palette_colors), per-superblock delta-q/lf
-        // (signal_delta_q/lf), skip (block_is_skippable), tx selection (select_tx_*), loop-restoration
+        // (signal_delta_q/lf), skip (block_is_skippable), tx depth and type (select_luma_mode,
+        // select_tx_type), loop-restoration
         // signalling (write_lr) — change the OBU bitstream but reconstruct bit-exactly, so the dav1d
         // recon oracle in recon_dav1d.rs cannot see them. This snapshot pins an FNV-1a checksum of the
         // OBU stream for a spread of content patterns, sizes and quantizers; any change to a
@@ -1054,16 +1210,16 @@ mod tests {
         };
         let cases: &[(u8, u32, u32, u8, u64)] = &[
             (0, 40, 24, 0, 0x5728_aabc_5720_858a),
-            (1, 64, 64, 1, 0x177b_df34_05e6_6663),
-            (2, 32, 32, 40, 0xad7f_19dc_a8cb_bf32),
-            (3, 48, 48, 16, 0x1550_7e23_d162_f266),
-            (4, 64, 48, 90, 0x5fed_6011_e0a0_278c),
-            (0, 100, 80, 8, 0x9284_36c0_b8d2_8759),
+            (1, 64, 64, 1, 0x221e_d8d7_91ab_47f9),
+            (2, 32, 32, 40, 0x10a2_0b1d_ba5c_a801),
+            (3, 48, 48, 16, 0xe5ac_76e3_1e8d_712f),
+            (4, 64, 48, 90, 0x0eee_fbff_4f10_49cc),
+            (0, 100, 80, 8, 0x59a1_174d_9091_7ded),
             // One tile: two would leave the second 2 samples wide (Annex A.3, CroppedTileWidth).
-            (0, 130, 70, 120, 0x30a2_32cb_6107_fbf8),
-            (2, 64, 64, 200, 0x307c_fb34_8720_4baf),
-            (3, 96, 96, 60, 0x3d5c_b862_2d85_f93b),
-            (4, 128, 64, 30, 0x800d_d57f_9bd3_5fae),
+            (0, 130, 70, 120, 0xbce7_12fd_a6eb_a30e),
+            (2, 64, 64, 200, 0x8a4f_5af4_2cbd_8e85),
+            (3, 96, 96, 60, 0x0702_5bf1_df0a_c11b),
+            (4, 128, 64, 30, 0x5042_d972_2087_5abb),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
         let got: Vec<(u8, u32, u32, u8, u64)> = cases
@@ -1312,13 +1468,13 @@ mod tests {
             }
         });
         let cases: &[(Speed, u8, u64)] = &[
-            (Speed::Thorough, 40, 0xcf58_54f5_27e6_5f22),
-            (Speed::Balanced, 40, 0x200f_31c7_392c_f008),
-            (Speed::Fast, 40, 0x81fc_3c50_6d1f_af6b),
-            (Speed::Fastest, 40, 0x8c07_5f06_da36_ed6b),
-            (Speed::Balanced, 120, 0x15ed_afbe_e48c_f7c0),
-            (Speed::Fast, 120, 0x5b33_df99_1ecd_416d),
-            (Speed::Fastest, 120, 0xa961_d343_7869_f44f),
+            (Speed::Thorough, 40, 0x884e_d6af_33aa_29a6),
+            (Speed::Balanced, 40, 0x291c_4e41_4169_bd71),
+            (Speed::Fast, 40, 0x44ab_1240_3334_5b54),
+            (Speed::Fastest, 40, 0xc45e_7fa1_6c03_aa2b),
+            (Speed::Balanced, 120, 0x366c_a306_88b3_ca63),
+            (Speed::Fast, 120, 0x6ab7_d124_35a0_ffaa),
+            (Speed::Fastest, 120, 0xd042_e96d_52a5_c768),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
         let got: Vec<(Speed, u8, u64)> = cases

@@ -655,6 +655,7 @@ dependencies = [
  "divan",
  "gamut-core",
  "lcms2-oracle",
+ "proptest",
  "serde",
  "serde_json",
 ]

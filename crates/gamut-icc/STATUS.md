@@ -110,14 +110,15 @@ gamut-color EOTF to sample from, and every other H.273 code point is unmodelled 
 but it needs its own α/β and toe constants, which nothing here or in gamut-color yet supplies or
 gates, and it is far rarer than codes 4 and 5. The transfer
 axis is keyed on the **raw code point**, not on `gamut_color::cicp::TransferCharacteristics`,
-because the set of curves an ICC tag can encode is not the set gamut-color can evaluate: codes 6
-and 15 have no `TransferCharacteristics` variant at all, while codes 1 and 14 do, and `eotf_for`
-maps both to the same Table 3 curve this crate writes (`gamut_color::transfer::bt709_eotf`, whose
-α and β — `BT709_ALPHA` / `BT709_BETA` — the parametric tag borrows rather than restates). All four
-are exactly encodable here as the one curve Table 3 defines. Each claim about gamut-color above is
-an assertion in the doctest on `src/builtin.rs`'s module documentation: which of the four code
-points `TransferCharacteristics::from_code_point` models, and that `eotf_for` evaluates Table 3's
-`0.259719` at `V = 0.5` for both of those.
+because the set of curves an ICC tag can encode is not the set gamut-color can evaluate: codes 4
+and 5 have no `TransferCharacteristics` variant at all, while all four BT.709-family codes (1, 6,
+14, 15) do since #675, and `eotf_for` maps each to the same Table 3 curve this crate writes
+(`gamut_color::transfer::bt709_eotf`, whose α and β — `BT709_ALPHA` / `BT709_BETA` — the
+parametric tag borrows rather than restates). All four are exactly encodable here as the one curve
+Table 3 defines. Each claim about gamut-color above is an assertion in the doctest on
+`src/builtin.rs`'s module documentation: which of the code points
+`TransferCharacteristics::from_code_point` models, and that `eotf_for` evaluates Table 3's
+`0.259719` at `V = 0.5` for each of the four.
 
 **Two readings of the BT.709 family.** `from_cicp` reads codes 1, 6, 14 and 15 literally — the
 inverse of Table 3's opto-electronic function, as libjxl, libavif and Little-CMS do — and stays

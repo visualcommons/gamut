@@ -111,6 +111,39 @@ fn control_characters_survive_roundtrip() {
 }
 
 #[test]
+fn unwritable_local_names_leave_a_parseable_packet() {
+    // A node whose local name is not an XML NCName is dropped by the writer, at every depth the
+    // name appears (property, structure field, qualifier), so the packet stays well-formed and
+    // parses back to the graph without those nodes.
+    for bad in ["", "has space", "1digit", "a:b"] {
+        let mut meta = rich_meta();
+        meta.properties
+            .push(XmpProperty::new(DC, bad, simple("dropped")));
+        meta.set(XmpProperty::new(
+            XMP,
+            "Thumbnail",
+            XmpValue::Structured(vec![
+                XmpProperty::new(XMP, "w", simple("9")),
+                XmpProperty::new(XMP, bad, simple("dropped")),
+                XmpProperty::new(XMP, "h", simple("6")),
+            ]),
+        ));
+        meta.set(XmpProperty {
+            namespace: DC.into(),
+            name: "rights".into(),
+            value: simple("(c) Example"),
+            qualifiers: vec![
+                XmpProperty::new(XMP, "owner", simple("Example Corp")),
+                XmpProperty::new(XMP, bad, simple("dropped")),
+            ],
+        });
+        let parsed = XmpMeta::from_packet(&meta.to_packet())
+            .unwrap_or_else(|e| panic!("name {bad:?} broke the packet: {e}"));
+        assert_eq!(parsed, rich_meta(), "name {bad:?}");
+    }
+}
+
+#[test]
 fn registered_prefix_is_not_semantic() {
     // A prefix registered on the writer changes only the serialization cosmetics: parsing the
     // output yields exactly the same graph as parsing the default (synthesized-prefix) output.

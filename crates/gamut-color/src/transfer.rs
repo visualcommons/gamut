@@ -363,8 +363,9 @@ pub fn hlg_inverse_oetf(v: f64) -> f64 {
 /// The encoder-exact EOTF for a CICP [`TransferCharacteristics`] code point, as
 /// a `fn` mapping signal → scene/display-linear `[0, 1]`.
 ///
-/// `Srgb` returns scene-linear via [`srgb_eotf`]; `Bt709` / `Bt2020_10` — which ITU-T H.273
-/// Table 3 gives one curve, "functionally the same" as each other — return scene-linear via
+/// `Srgb` returns scene-linear via [`srgb_eotf`]; `Bt709` / `Bt601` / `Bt2020_10` / `Bt2020_12`
+/// (code points 1, 6, 14 and 15) — which ITU-T H.273 Table 3 gives one curve, "functionally the
+/// same" as each other — return scene-linear via
 /// [`bt709_eotf`]; `Hlg` returns scene-linear via [`hlg_inverse_oetf`]; `Pq` returns the
 /// tone-mapped SDR value via [`bt2020_pq_to_sdr`]; `Linear` returns the identity via
 /// [`linear_eotf`]. `Unspecified` names no curve and returns `None`. Adobe RGB and ProPhoto have
@@ -397,7 +398,8 @@ pub fn eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
 ///
 /// Where both return `Some`, they are exact inverses: `oetf_for(tc)(eotf_for(tc)(x)) == x` to
 /// within floating-point error. `Linear` returns the identity via [`linear_oetf`], `Srgb` the
-/// gamma encode via [`srgb_oetf`], and `Bt709` / `Bt2020_10` the H.273 Table 3 curve via
+/// gamma encode via [`srgb_oetf`], and `Bt709` / `Bt601` / `Bt2020_10` / `Bt2020_12` the H.273
+/// Table 3 curve via
 /// [`bt709_oetf`], and `Hlg` the H.273 Table 3 curve via [`hlg_oetf`].
 ///
 /// `None` for the code point [`eotf_for`] declines (`Unspecified`, which names no curve),
@@ -434,7 +436,7 @@ pub fn oetf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
 /// It differs from [`eotf_for`] only at `Pq`, where it returns [`pq_eotf_normalized`] (the
 /// ST 2084 EOTF over Table 3's normalized `Lo`, `1.0` = 10 000 cd/m²) instead of the
 /// encoder-exact tone map. Every other arm is shared: `Linear` → [`linear_eotf`], `Srgb` →
-/// [`srgb_eotf`], `Bt709` / `Bt2020_10` → [`bt709_eotf`], `Hlg` → [`hlg_inverse_oetf`];
+/// [`srgb_eotf`], `Bt709` / `Bt601` / `Bt2020_10` / `Bt2020_12` → [`bt709_eotf`], `Hlg` → [`hlg_inverse_oetf`];
 /// `Unspecified` → `None`.
 ///
 /// This is the curve an ICC profile's tone reproduction curve encodes for the same code point
@@ -457,7 +459,10 @@ pub fn standard_eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> 
     match tc {
         TransferCharacteristics::Linear => Some(linear_eotf),
         TransferCharacteristics::Srgb => Some(srgb_eotf),
-        TransferCharacteristics::Bt709 | TransferCharacteristics::Bt2020_10 => Some(bt709_eotf),
+        TransferCharacteristics::Bt709
+        | TransferCharacteristics::Bt601
+        | TransferCharacteristics::Bt2020_10
+        | TransferCharacteristics::Bt2020_12 => Some(bt709_eotf),
         TransferCharacteristics::Pq => Some(pq_eotf_normalized),
         TransferCharacteristics::Hlg => Some(hlg_inverse_oetf),
         TransferCharacteristics::Unspecified => None,
@@ -484,7 +489,10 @@ pub fn standard_oetf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> 
     match tc {
         TransferCharacteristics::Linear => Some(linear_oetf),
         TransferCharacteristics::Srgb => Some(srgb_oetf),
-        TransferCharacteristics::Bt709 | TransferCharacteristics::Bt2020_10 => Some(bt709_oetf),
+        TransferCharacteristics::Bt709
+        | TransferCharacteristics::Bt601
+        | TransferCharacteristics::Bt2020_10
+        | TransferCharacteristics::Bt2020_12 => Some(bt709_oetf),
         TransferCharacteristics::Pq => Some(pq_oetf_normalized),
         TransferCharacteristics::Hlg => Some(hlg_oetf),
         TransferCharacteristics::Unspecified => None,
@@ -729,11 +737,13 @@ mod tests {
         // The Hlg dispatch is the scene-referred inverse OETF.
         let f = eotf_for(TransferCharacteristics::Hlg).unwrap();
         assert_eq!(f(0.75), hlg_inverse_oetf(0.75));
-        // Code points 1 and 14 are one Table 3 curve; each alternative of the or-pattern is
-        // asserted on its own. At 0.5 the BT.709 curve and the PQ tone map differ by ~0.05.
+        // Code points 1, 6, 14 and 15 are one Table 3 curve; each alternative of the or-pattern
+        // is asserted on its own. At 0.5 the BT.709 curve and the PQ tone map differ by ~0.05.
         for tc in [
             TransferCharacteristics::Bt709,
+            TransferCharacteristics::Bt601,
             TransferCharacteristics::Bt2020_10,
+            TransferCharacteristics::Bt2020_12,
         ] {
             let f = eotf_for(tc).unwrap();
             assert_eq!(f(0.5), bt709_eotf(0.5), "{tc:?}");
@@ -775,11 +785,13 @@ mod tests {
             assert_eq!(f(x), x);
         }
 
-        // Code points 1 and 14 both encode through Table 3's curve, each alternative asserted on
-        // its own.
+        // Code points 1, 6, 14 and 15 all encode through Table 3's curve, each alternative
+        // asserted on its own.
         for tc in [
             TransferCharacteristics::Bt709,
+            TransferCharacteristics::Bt601,
             TransferCharacteristics::Bt2020_10,
+            TransferCharacteristics::Bt2020_12,
         ] {
             let f = oetf_for(tc).unwrap();
             assert_eq!(f(0.5), bt709_oetf(0.5), "{tc:?}");
@@ -915,20 +927,20 @@ mod tests {
     }
 
     /// The standards-pure dispatch: one arm per answered code point, each asserted on its own
-    /// against the named function (the or-pattern's two alternatives separately).
+    /// against the named function (each of the or-pattern's four alternatives separately).
     #[test]
     fn standard_eotf_for_dispatch() {
         let at = |tc, x| standard_eotf_for(tc).map(|f| f(x));
         assert_eq!(at(TransferCharacteristics::Linear, 0.3), Some(0.3));
         assert_eq!(at(TransferCharacteristics::Srgb, 0.5), Some(srgb_eotf(0.5)));
-        assert_eq!(
-            at(TransferCharacteristics::Bt709, 0.5),
-            Some(bt709_eotf(0.5))
-        );
-        assert_eq!(
-            at(TransferCharacteristics::Bt2020_10, 0.5),
-            Some(bt709_eotf(0.5))
-        );
+        for tc in [
+            TransferCharacteristics::Bt709,
+            TransferCharacteristics::Bt601,
+            TransferCharacteristics::Bt2020_10,
+            TransferCharacteristics::Bt2020_12,
+        ] {
+            assert_eq!(at(tc, 0.5), Some(bt709_eotf(0.5)), "{tc:?}");
+        }
         assert_eq!(
             at(TransferCharacteristics::Pq, 0.5),
             Some(pq_eotf_normalized(0.5))
@@ -945,14 +957,14 @@ mod tests {
         let at = |tc, x| standard_oetf_for(tc).map(|f| f(x));
         assert_eq!(at(TransferCharacteristics::Linear, 0.3), Some(0.3));
         assert_eq!(at(TransferCharacteristics::Srgb, 0.5), Some(srgb_oetf(0.5)));
-        assert_eq!(
-            at(TransferCharacteristics::Bt709, 0.5),
-            Some(bt709_oetf(0.5))
-        );
-        assert_eq!(
-            at(TransferCharacteristics::Bt2020_10, 0.5),
-            Some(bt709_oetf(0.5))
-        );
+        for tc in [
+            TransferCharacteristics::Bt709,
+            TransferCharacteristics::Bt601,
+            TransferCharacteristics::Bt2020_10,
+            TransferCharacteristics::Bt2020_12,
+        ] {
+            assert_eq!(at(tc, 0.5), Some(bt709_oetf(0.5)), "{tc:?}");
+        }
         assert_eq!(
             at(TransferCharacteristics::Pq, 0.25),
             Some(pq_oetf_normalized(0.25))

@@ -75,6 +75,36 @@ fn check(planes: &Planar8, qindex: u8) {
     check_with(encode_still_intra(planes, qindex).unwrap(), qindex);
 }
 
+/// The in-loop filters a stream signals, as gamut's own header parser reads them back: the
+/// encoder chooses each against the source, so a filter's oracle case proves its math only where
+/// the encoder actually chose to run it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Filters {
+    /// `loop_filter_level[0]`.
+    deblock: u8,
+    /// `cdef_{y,uv}_{pri,sec}_strength[0]`, secondary strengths remapped.
+    cdef: [u8; 4],
+    /// Whether luma loop restoration is `RESTORE_WIENER`.
+    wiener: bool,
+}
+
+/// [`check`], returning the in-loop filters the stream signals. 8-bit 4:4:4 only: that is the
+/// header parser's scope.
+fn check_filters(planes: &Planar8, qindex: u8) -> Filters {
+    let encoded = encode_still_intra(planes, qindex).unwrap();
+    let frame = gamut_av1::Av1Decoder::new()
+        .inspect(&encoded.0.obus)
+        .unwrap()
+        .frame;
+    check_with(encoded, qindex);
+    let c = &frame.cdef;
+    Filters {
+        deblock: frame.loop_filter.level[0],
+        cdef: [c.y_pri[0], c.y_sec[0], c.uv_pri[0], c.uv_sec[0]],
+        wiener: frame.lr.frame_restoration_type[0] == gamut_av1::RestorationType::Wiener,
+    }
+}
+
 /// The body of [`check`], over an already-encoded still, so colour-parameterized cases share it.
 fn check_with(encoded: (gamut_av1::EncodedStill, gamut_av1::ReconImage), qindex: u8) {
     let (still, recon) = encoded;
@@ -270,7 +300,9 @@ fn deblock_matches_dav1d() {
     // boundaries carry exactly the small discontinuities the deblocking loop filter (§7.14) smooths.
     // The encoder applies the filter to its reconstruction and dav1d applies it on decode, so the
     // byte-for-byte match validates the narrow-filter math, masks, and the vertical-then-horizontal
-    // pass ordering across the full quantizer (and hence loop-filter-level) range.
+    // pass ordering. The level is chosen against the source, and on these tiles — whose 4-sample
+    // steps are real edges — the encoder mostly declines to deblock; the smooth field, whose block
+    // edges are quantization artefacts, is deblocked at levels from low to high.
     let tiles = |x: u32, y: u32| {
         let step = ((x / 4 + y / 4) % 6) as u8; // changes every 4 px ⇒ on the block grid
         let v = 60u8.wrapping_add(step.wrapping_mul(18));
@@ -280,11 +312,26 @@ fn deblock_matches_dav1d() {
             200u8.wrapping_sub(step.wrapping_mul(12)),
         ]
     };
-    for &q in &[16u8, 48, 110, 200] {
-        for &(w, h) in &[(8, 8), (16, 16), (35, 23), (64, 40)] {
-            check(&planes(w, h, tiles), q);
+    let mut levels = Vec::new();
+    for content in [&tiles as &dyn Fn(u32, u32) -> [u8; 3], &smooth_field] {
+        for &q in &[16u8, 48, 110, 200, 255] {
+            for &(w, h) in &[(8, 8), (16, 16), (35, 23), (64, 40)] {
+                levels.push(check_filters(&planes(w, h, content), q).deblock);
+            }
         }
     }
+    assert!(
+        levels.iter().any(|&l| (1..16).contains(&l)) && levels.iter().any(|&l| l >= 32),
+        "the cases must deblock at both low and high levels: {levels:?}"
+    );
+}
+
+/// A smooth, low-frequency field: its block edges after quantization are artefacts the in-loop
+/// filters remove, so the encoder chooses to run them.
+fn smooth_field(x: u32, y: u32) -> [u8; 3] {
+    let (fx, fy) = (f64::from(x), f64::from(y));
+    let g = 128.0 + 60.0 * (fx / 23.0).sin() * (fy / 31.0).cos();
+    [(g * 0.9) as u8, g as u8, (255.0 - g) as u8]
 }
 
 #[test]
@@ -321,7 +368,8 @@ fn cdef_matches_dav1d() {
     // distinct per-8×8 directions and non-trivial variance, so the primary+secondary deringing filter
     // (§7.15.3) actually fires. The encoder runs deblock → CDEF on its reconstruction and dav1d does
     // the same on decode, so byte-equality validates the direction search, constrain, taps, and the
-    // out-of-frame sample availability — at quantizers spanning the signaled CDEF strength range.
+    // out-of-frame sample availability. The strengths are chosen against the source; across these
+    // cases every one of the four — luma and chroma, primary and secondary — is non-zero somewhere.
     let edged = |x: u32, y: u32| {
         let d = ((x + y) % 16) as u8; // 45° structure on the 8×8 CDEF grid
         let r = if d < 8 { 40 } else { 210 };
@@ -333,10 +381,17 @@ fn cdef_matches_dav1d() {
         };
         [r, g, b]
     };
-    for &q in &[32u8, 80, 128, 220] {
+    let mut strengths = Vec::new();
+    for &q in &[32u8, 80, 128, 220, 255] {
         for &(w, h) in &[(8, 8), (16, 16), (35, 23), (64, 40)] {
-            check(&planes(w, h, edged), q);
+            strengths.push(check_filters(&planes(w, h, edged), q).cdef);
         }
+    }
+    for (i, name) in ["y_pri", "y_sec", "uv_pri", "uv_sec"].iter().enumerate() {
+        assert!(
+            strengths.iter().any(|s| s[i] > 0),
+            "no case runs CDEF with a non-zero {name}: {strengths:?}"
+        );
     }
 }
 
@@ -570,11 +625,18 @@ fn delta_lf_match_dav1d() {
         let band = if (y / 4).is_multiple_of(2) { 60 } else { 200 } as u8;
         [bar, ramp, band]
     };
+    let mut levels = Vec::new();
     for &q in &[24u8, 64, 128, 220] {
         for &(w, h) in &[(96u32, 96u32), (160, 96), (128, 128)] {
-            check(&planes(w, h, edged), q);
+            levels.push(check_filters(&planes(w, h, edged), q).deblock);
         }
     }
+    // A frame level of 0 switches the loop filter off whatever DeltaLF says (§7.4), so the
+    // accumulation is only under test where the encoder chose to deblock.
+    assert!(
+        levels.iter().any(|&l| l > 0),
+        "no case deblocks: {levels:?}"
+    );
 }
 
 #[test]
@@ -785,22 +847,61 @@ fn every_tile_layout_matches_both_decoders() {
 
 #[test]
 fn loop_restoration_matches_dav1d() {
-    // Luma Wiener loop restoration (§7.17) is applied to every lossy frame. Tall frames span several
-    // 64-row restoration stripes (56 + 64 + …); each stripe's top/bottom boundary rows come from the
-    // deblocked (pre-CDEF) reconstruction. Heights 70/130/200 exercise 2/3/4 stripes, and the wide
-    // cases also cross a tile-column boundary — dav1d byte-equality proves the stripe-boundary
-    // sourcing, the per-superblock unit signaling (restore_wiener + subexp coefficients), and the
-    // filter math end-to-end.
+    // Luma Wiener loop restoration (§7.17), on the frames whose restoration units the encoder
+    // finds it improves. Tall frames span several 64-row restoration stripes (56 + 64 + …); each
+    // stripe's top/bottom boundary rows come from the deblocked (pre-CDEF) reconstruction. Heights
+    // 70/130/200 exercise 2/3/4 stripes, and the wide cases also cross a tile-column boundary —
+    // dav1d byte-equality proves the stripe-boundary sourcing, the per-superblock unit signaling
+    // (use_wiener + subexp coefficients), and the filter math end-to-end. Frames where no unit
+    // is restored prove the other half: RESTORE_NONE, with no unit coded in the tiles.
     let texture = |x: u32, y: u32| {
         let r = (x.wrapping_mul(5).wrapping_add(y.wrapping_mul(3)) % 256) as u8;
         let g = ((x.wrapping_add(y).wrapping_mul(2)) % 256) as u8;
         let b = (64 + ((x.wrapping_mul(7) ^ y) % 128)) as u8;
         [r, g, b]
     };
-    for &q in &[8u8, 40, 120, 200] {
-        for &(w, h) in &[(48, 130), (100, 200), (24, 60)] {
-            check(&planes(w, h, texture), q);
+    let mut restored = Vec::new();
+    for content in [&texture as &dyn Fn(u32, u32) -> [u8; 3], &smooth_field] {
+        for &q in &[8u8, 40, 120, 200] {
+            for &(w, h) in &[(48, 130), (100, 200), (24, 60)] {
+                restored.push(check_filters(&planes(w, h, content), q).wiener);
+            }
         }
+    }
+    assert!(
+        restored.contains(&true) && restored.contains(&false),
+        "the cases must both restore and not: {restored:?}"
+    );
+}
+
+#[test]
+fn restoration_units_decided_one_by_one_match_both_decoders() {
+    // A frame three restoration units wide (640 / 256, the last absorbing the remainder) whose
+    // units the encoder decides differently — the smooth field's left unit is restored and the
+    // others are not (pinned by the encoder's own unit test) — so each unit's `use_wiener` is
+    // coded at its own superblock and applied to its own samples, and both decoders must agree.
+    let (still, recon) = encode_still_intra(&planes(640, 64, smooth_field), 110).unwrap();
+    let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
+    assert_eq!(
+        header.frame.lr.frame_restoration_type[0],
+        gamut_av1::RestorationType::Wiener
+    );
+    check_with((still, recon), 110);
+    // With superres the units are counted on the upscaled frame — three here, where the coded
+    // width alone would count two — and a superblock's columns are scaled up onto that grid
+    // (§5.11.57): 640 upscaled from 427 (SuperresDenom 12) and from 320 (SuperresDenom 16). Both
+    // decoders read the unit signalling at the scaled positions.
+    for denom in [3u8, 7] {
+        let (still, recon) =
+            gamut_av1::encode_still_intra_superres(&planes(640, 64, smooth_field), 200, denom)
+                .unwrap();
+        let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
+        assert_eq!(
+            header.frame.lr.frame_restoration_type[0],
+            gamut_av1::RestorationType::Wiener,
+            "denom {denom}"
+        );
+        check_with((still, recon), 200);
     }
 }
 

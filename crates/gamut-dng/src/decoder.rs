@@ -6,10 +6,14 @@
 //! rendering are out of scope — the decoder returns the sensor samples, not a viewable image.
 
 use std::cell::RefCell;
+use std::slice;
 
 use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::c2pa::{self, C2paExclusions};
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_ifd_at};
+use gamut_ifd::tags::STANDARD_POINTER_TAGS;
+use gamut_ifd::{
+    ByteOrder, Ifd, SubtreeScope, TiffFile, Value, Variant, read, read_ifd_at, resolve_subtree,
+};
 use gamut_metadata::exif::Exif;
 
 use crate::color_profile::{ColorProfileInfo, NoiseProfile, TagSource};
@@ -33,13 +37,13 @@ use crate::{bitpack, compression, lossless_jpeg, tags};
 /// features without a typed surface yet — so such fields are not silently dropped (issue #109's
 /// decode contract). The value is `gamut-ifd`'s typed enum, not opaque bytes.
 ///
-/// The contract holds over five channels — [`DecodedDng::ifd0_extra`],
-/// [`DecodedDng::raw_extra`], [`SubImage::extra_tags`], [`DecodedDng::trailing_extra`] and
-/// [`DecodedDng::interior_extra`] — with two residues they do not reach, documented on
+/// The contract holds over six channels — [`DecodedDng::ifd0_extra`],
+/// [`DecodedDng::raw_extra`], [`SubImage::extra_tags`], [`DecodedDng::trailing_extra`],
+/// [`DecodedDng::interior_extra`] and [`DecodedDng::sub_ifd_extra`] — which together reach every
+/// directory the decoder walks, with one residue, documented on
 /// [`trailing_extra`](DecodedDng::trailing_extra): a **duplicated tag** keeps only the last
-/// entry, because the eager [`Ifd`] this is built from is last-wins, and a directory reached
-/// only through a `SubIFDs` pointer that is not the raw IFD and carries no image reaches no
-/// channel (issue #667). [`deconstruct`](crate::deconstruct()) still accounts for the bytes.
+/// entry, because the eager [`Ifd`] this is built from is last-wins.
+/// [`deconstruct`](crate::deconstruct()) still accounts for the bytes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawTag {
     /// The TIFF/DNG tag number.
@@ -59,6 +63,32 @@ pub struct PageExtra {
     /// next-IFD pointer names is page 1, and so on).
     pub page: usize,
     /// Every field of that page the pipeline did not consume, in tag order, values verbatim.
+    pub tags: Vec<RawTag>,
+}
+
+/// The unmodelled fields of one image-less directory reached through `SubIFDs` (330), as
+/// reported by [`DecodedDng::sub_ifd_extra`].
+///
+/// The directory is identified by its position in the IFD tree: the main-chain
+/// [`page`](Self::page) whose `SubIFDs` tree it hangs from, then the [`path`](Self::path) of
+/// `SubIFDs` array positions leading down to it.
+///
+/// `#[non_exhaustive]`: the decoder builds these; a caller reads the fields.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubIfdExtra {
+    /// The 0-based main-chain page the directory descends from, numbered as
+    /// [`PageExtra::page`] is (IFD 0 is page 0).
+    pub page: usize,
+    /// The 0-based position of the directory in each successive `SubIFDs` array, outermost
+    /// first: `[1]` is the second entry of the page's own `SubIFDs`, `[1, 0]` the first entry
+    /// of *that* directory's `SubIFDs`. Never empty — a directory with an empty path is a
+    /// main-chain page, which [`PageExtra`] and the other channels cover. Positions count every
+    /// array entry, including one the walk skipped (an offset already visited or unreadable),
+    /// so a path always indexes the array as the file stores it.
+    pub path: Vec<usize>,
+    /// Every field of that directory the pipeline did not consume, in tag order, values
+    /// verbatim.
     pub tags: Vec<RawTag>,
 }
 
@@ -173,7 +203,9 @@ pub struct DecodedDng {
     ///
     /// The `ExifIFD` arrives whole, as the shared [`Exif`] model —
     /// every entry of the directory, not a chosen subset — so nothing in it needs a separate
-    /// verbatim escape hatch.
+    /// verbatim escape hatch. Its standard pointer fields (a camera's `InteroperabilityIFD`)
+    /// arrive resolved, as sub-IFD groups [`DngEncoder`](crate::DngEncoder) writes back; one whose
+    /// target cannot be read is dropped rather than handed back as a stale file offset.
     pub metadata: DngMetadata,
     /// The raw IFD's `ProfileGainTableMap` (52525), if present.
     pub gain_table_map: Option<ProfileGainTableMap>,
@@ -193,16 +225,16 @@ pub struct DecodedDng {
     /// Every IFD 0 field the pipeline does not model, verbatim — proprietary maker tags
     /// included — in tag order.
     ///
-    /// This is one of five verbatim channels that together carry the unmodelled fields of every
-    /// directory the decode surfaces: this one, [`raw_extra`](Self::raw_extra),
+    /// This is one of six verbatim channels that together carry the unmodelled fields of every
+    /// directory the decoder walks: this one, [`raw_extra`](Self::raw_extra),
     /// [`SubImage::extra_tags`] per image directory,
     /// [`trailing_extra`](Self::trailing_extra) for the last main-chain directory when it is
-    /// none of those, and [`interior_extra`](Self::interior_extra) for every earlier main-chain
-    /// page that is none of those either — so every main-chain directory reaches one of them.
-    /// Nothing those five reach is silently dropped; the residues they do not reach (a
-    /// duplicated tag keeps its last entry; an image-less directory reached only through
-    /// `SubIFDs`, issue #667) are documented on [`trailing_extra`](Self::trailing_extra) and in
-    /// `STATUS.md`. `deconstruct` remains the byte-accounting *diagnostic* view of the same
+    /// none of those, [`interior_extra`](Self::interior_extra) for every earlier main-chain
+    /// page that is none of those either, and [`sub_ifd_extra`](Self::sub_ifd_extra) for every
+    /// directory reached through `SubIFDs` that is none of those — so every walked directory
+    /// reaches exactly one of them. Nothing is silently dropped; the one residue (a duplicated
+    /// tag keeps its last entry) is documented on [`trailing_extra`](Self::trailing_extra) and
+    /// in `STATUS.md`. `deconstruct` remains the byte-accounting *diagnostic* view of the same
     /// principle.
     pub ifd0_extra: Vec<RawTag>,
     /// Every unmodelled field of the raw IFD, verbatim. Empty when the raw image lives in IFD 0
@@ -222,18 +254,16 @@ pub struct DecodedDng {
     /// pages *before* this one that are surfaced nowhere else arrive in
     /// [`interior_extra`](Self::interior_extra) instead.
     ///
-    /// # The two residues of the "nothing is dropped" contract
+    /// # The residue of the "nothing is dropped" contract
     ///
-    /// - **A duplicated tag keeps the last entry.** Every typed channel is built on the eager
-    ///   [`Ifd`], which is last-wins, so where a directory carries two entries under one tag
-    ///   only the second's value arrives. Such a file is malformed for a manifest store
-    ///   (§A.3.6 allows one per asset).
-    /// - **An image-less `SubIFDs` child is not covered.** A directory reached only through a
-    ///   `SubIFDs` pointer — not a main-chain page — that is not the raw IFD and carries no
-    ///   image data is no sub-image and reaches no channel — issue #667. (Main-chain pages are
-    ///   all covered: this field and [`interior_extra`](Self::interior_extra).)
+    /// **A duplicated tag keeps the last entry.** Every typed channel is built on the eager
+    /// [`Ifd`], which is last-wins, so where a directory carries two entries under one tag only
+    /// the second's value arrives. Such a file is malformed for a manifest store (§A.3.6 allows
+    /// one per asset). [`deconstruct`](crate::deconstruct()) accounts for the bytes.
     ///
-    /// [`deconstruct`](crate::deconstruct()) accounts for the bytes in both cases.
+    /// Every walked directory reaches a channel: main-chain pages this field and
+    /// [`interior_extra`](Self::interior_extra), image-less `SubIFDs` children
+    /// [`sub_ifd_extra`](Self::sub_ifd_extra).
     pub trailing_extra: Vec<RawTag>,
     /// Every field of each **interior main-chain page** — a top-level directory that is neither
     /// IFD 0 nor the last of the chain — that is surfaced nowhere else: not the raw IFD and
@@ -248,6 +278,20 @@ pub struct DecodedDng {
     ///
     /// Empty for every file this crate writes, which has one main-chain directory.
     pub interior_extra: Vec<PageExtra>,
+    /// Every field of each directory reached through a `SubIFDs` (330) pointer — at any depth,
+    /// below any main-chain page — that is surfaced nowhere else: not the raw IFD and carrying
+    /// no image of its own (no strip or tile offsets, missing or zero dimensions, or chunks too
+    /// malformed to carry), so it becomes no [`SubImage`]. One [`SubIfdExtra`] per such
+    /// directory, in walk order (each page, then its `SubIFDs` tree depth-first), keyed by its
+    /// position in the IFD tree so a caller can tell which directory each field came from.
+    ///
+    /// A directory listed here is listed even when every one of its fields was consumed (its
+    /// `tags` are then empty), as [`interior_extra`](Self::interior_extra) does for pages. A
+    /// directory the walk did not follow — past the nesting cap, already visited, or unreadable
+    /// — is not walked, so it is in no channel; `deconstruct` diagnoses those.
+    ///
+    /// Empty for every file this crate writes, whose `SubIFDs` children all carry images.
+    pub sub_ifd_extra: Vec<SubIfdExtra>,
     /// Where the C2PA manifest store in [`metadata.c2pa`](DngMetadata::c2pa) sits in the file:
     /// the two ranges a `c2pa.hash.data` binding excludes (C2PA 2.4 §18.5.5), located by
     /// [`gamut_ifd::c2pa::locate`] in the last IFD of the main chain (§A.3.6). `Some` exactly
@@ -360,7 +404,14 @@ impl DngDecoder {
         let order = file.order;
         let variant = file.variant;
 
-        let (ifds, mains) = walk_ifds(&file, data);
+        let (ifds, positions) = walk_ifds(&file, data);
+        // The main-chain pages are the walked directories with an empty `SubIFDs` path.
+        let mains: Vec<usize> = positions
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, path))| path.is_empty())
+            .map(|(i, _)| i)
+            .collect();
         // `read` guarantees a non-empty chain, so the fallback (IFD 0, no earlier pages) is
         // only the shape that guarantee already gives a one-page file.
         let (&last_main, earlier_mains) = mains.split_last().unwrap_or((&0, &[]));
@@ -469,6 +520,19 @@ impl DngDecoder {
                 tags: tracked[i].remaining(),
             })
             .collect();
+        // Every directory below a page, reached through `SubIFDs`, that the channels above did
+        // not reach — one with no image of its own that is not the raw IFD (issue #667).
+        // Reported per directory, keyed by its tree position.
+        let sub_ifd_extra = positions
+            .iter()
+            .enumerate()
+            .filter(|(i, (_, path))| !path.is_empty() && !surfaced.contains(i))
+            .map(|(i, (page, path))| SubIfdExtra {
+                page: *page,
+                path: path.clone(),
+                tags: tracked[i].remaining(),
+            })
+            .collect();
 
         Ok(DecodedDng {
             raw,
@@ -487,6 +551,7 @@ impl DngDecoder {
             raw_extra,
             trailing_extra,
             interior_extra,
+            sub_ifd_extra,
             c2pa_exclusions,
         })
     }
@@ -496,7 +561,10 @@ impl DngDecoder {
 /// and the C2PA manifest store from `store_ifd`, the last IFD of the main chain.
 ///
 /// The `ExifIFD` is handed over whole, as the shared [`Exif`] model's Exif sub-IFD: every entry
-/// the directory holds survives, so no field of it is "unmodelled" and none is dropped. The DNG's
+/// the directory holds survives, so no field of it is "unmodelled". The one exception is a
+/// standard pointer field (`InteroperabilityIFD` in a camera file): it arrives as the sub-IFD
+/// group it points at, or — when its target cannot be read — not at all, never as a raw offset
+/// into this file ([`resolve_exif_pointers`]). The DNG's
 /// own IFD 0 is *not* copied into the model's 0th IFD — [`DecodedDng`] already carries those
 /// fields, typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
 ///
@@ -529,7 +597,10 @@ fn decode_metadata(
     let exif = ifd0
         .get_u32(tags::EXIF_IFD)
         .and_then(|offset| read_ifd_at(data, u64::from(offset), order, variant).ok())
-        .map(|exif_ifd| {
+        .map(|mut exif_ifd| {
+            resolve_exif_pointers(&mut exif_ifd, |offset| {
+                read_ifd_at(data, offset, order, variant)
+            });
             let mut exif = Exif::new(order);
             exif.set_exif_ifd(exif_ifd);
             exif
@@ -540,6 +611,53 @@ fn decode_metadata(
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
         icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
         c2pa,
+    }
+}
+
+/// The deepest level below the Exif directory [`resolve_exif_pointers`] follows: **one**, the
+/// `InteroperabilityIFD` EXIF 2.3 §4.6.3 puts inside it. Nothing conformant nests a directory
+/// below that, so a pointer found there is out of spec — the same bound `gamut-tiff`'s metadata
+/// read applies (two levels below IFD 0, which is one below `ExifIFD`).
+const MAX_EXIF_POINTER_DEPTH: usize = 1;
+
+/// Replaces each standard pointer field of the Exif directory (`SubIFDs`, `ExifIFD`, `GPSInfo`,
+/// `InteroperabilityIFD` — [`STANDARD_POINTER_TAGS`]) with a sub-IFD group holding the
+/// directories it points at, which `fetch` parses by offset.
+///
+/// A pointer left as a field is a raw absolute offset into *this* file: it means nothing in a
+/// directory handed to a caller, and [`DngEncoder`](crate::DngEncoder) refuses to write one, so a
+/// decode → encode round trip of a camera DNG's metadata would fail on it. A group is what the
+/// encoder writes back, re-pointed at the copy it lays out, and what
+/// [`DngRewrite::open`](crate::DngRewrite::open) reads back. The tags followed are the ones that
+/// reader resolves at every node; inside each followed directory the same four are followed,
+/// [`MAX_EXIF_POINTER_DEPTH`] deep.
+///
+/// **An unreadable target is dropped, not fatal.** Each tag resolves on its own: when its walk
+/// fails — a target outside the file or not a directory, a cycle, or a pointer nested deeper than
+/// the bound — that one field is removed and the rest of the Exif directory is kept. That is the
+/// same leniency this decoder already applies to an unreadable `ExifIFD` itself and to an
+/// unreadable `SubIFDs` child ([`walk_ifds`]): metadata never fails a raw decode. Keeping the
+/// field instead would hand back the offset the encoder refuses, and failing would lose every
+/// other Exif entry over one broken pointer. A field under one of these tags whose type is not an
+/// offset (e.g. a `SHORT`) is not a pointer and stays as it is.
+fn resolve_exif_pointers(exif: &mut Ifd, mut fetch: impl FnMut(u64) -> Result<Ifd>) {
+    for tag in STANDARD_POINTER_TAGS {
+        let Some(value) = exif.get(*tag) else {
+            continue;
+        };
+        // Resolved in a one-field holder standing in for the Exif directory (depth 0), so a
+        // failure leaves the real directory untouched apart from the removal below.
+        let mut holder = Ifd::new();
+        holder.set(*tag, value.clone());
+        let scope = SubtreeScope::new(slice::from_ref(tag), STANDARD_POINTER_TAGS)
+            .with_max_depth(MAX_EXIF_POINTER_DEPTH);
+        if resolve_subtree(&mut holder, scope, &mut fetch).is_err() {
+            exif.remove(*tag);
+            continue;
+        }
+        for group in holder.sub_ifds() {
+            exif.set_sub_ifd(group.tag, group.ifds.clone());
+        }
     }
 }
 
@@ -562,45 +680,52 @@ fn is_raw_ifd(ifd: &Ifd) -> bool {
 /// graphs; legitimate DNG trees (IFD 0 → raw / enhanced / mask sub-IFDs) are two levels.
 const MAX_SUBIFD_DEPTH: usize = 8;
 
-/// Collects every IFD in the file — the top-level chain plus, recursively, every `SubIFDs`
-/// child — in encounter order, plus the index into that list of **every main-chain directory**,
-/// in chain order. The last of those is where C2PA 2.4 §A.3.6 places the manifest store; the
-/// ones before it are the pages [`DecodedDng::interior_extra`] covers. Lenient by design: an
-/// unreadable child is skipped rather than failing the whole decode, while offset
-/// de-duplication and the depth cap terminate hostile pointer cycles.
-fn walk_ifds(file: &TiffFile, data: &[u8]) -> (Vec<Ifd>, Vec<usize>) {
-    let mut out = Vec::new();
-    let mut visited: Vec<u64> = Vec::new();
-    let mut mains = Vec::new();
-    for ifd in &file.ifds {
-        // Each main-chain directory is pushed before its descendants, so its index is the
-        // length so far.
-        mains.push(out.len());
-        collect_sub_ifds(
-            ifd,
-            data,
-            file.order,
-            file.variant,
-            &mut visited,
-            1,
-            &mut out,
-        );
-    }
-    (out, mains)
-}
+/// Where a walked directory sits in the IFD tree: the main-chain page it is or descends from,
+/// then its position in each successive `SubIFDs` array below that page — empty for the page
+/// itself. The public form is [`SubIfdExtra`]'s `page` and `path`.
+type TreePosition = (usize, Vec<usize>);
 
-/// Pushes `ifd` and recurses into its `SubIFDs` children (see [`walk_ifds`]).
-fn collect_sub_ifds(
-    ifd: &Ifd,
-    data: &[u8],
+/// The state one [`walk_ifds`] threads through its recursion: the file being read and every
+/// directory collected so far, with its [`TreePosition`] at the same index.
+struct IfdWalk<'a> {
+    data: &'a [u8],
     order: ByteOrder,
     variant: Variant,
-    visited: &mut Vec<u64>,
-    depth: usize,
-    out: &mut Vec<Ifd>,
-) {
-    out.push(ifd.clone());
-    if depth >= MAX_SUBIFD_DEPTH {
+    visited: Vec<u64>,
+    ifds: Vec<Ifd>,
+    positions: Vec<TreePosition>,
+}
+
+/// Collects every IFD in the file — the top-level chain plus, recursively, every `SubIFDs`
+/// child — in encounter order, plus each one's [`TreePosition`] at the same index. The
+/// main-chain directories are the ones with an empty path; the last of them is where C2PA 2.4
+/// §A.3.6 places the manifest store, the ones before it are the pages
+/// [`DecodedDng::interior_extra`] covers, and the rest are what [`DecodedDng::sub_ifd_extra`]
+/// covers. Lenient by design: an unreadable child is skipped rather than failing the whole
+/// decode, while offset de-duplication and the depth cap terminate hostile pointer cycles.
+fn walk_ifds(file: &TiffFile, data: &[u8]) -> (Vec<Ifd>, Vec<TreePosition>) {
+    let mut walk = IfdWalk {
+        data,
+        order: file.order,
+        variant: file.variant,
+        visited: Vec::new(),
+        ifds: Vec::new(),
+        positions: Vec::new(),
+    };
+    for (page, ifd) in file.ifds.iter().enumerate() {
+        collect_sub_ifds(ifd, (page, Vec::new()), &mut walk);
+    }
+    (walk.ifds, walk.positions)
+}
+
+/// Pushes `ifd` at `position` and recurses into its `SubIFDs` children (see [`walk_ifds`]).
+///
+/// The nesting depth is the path's length plus one (a page is depth 1), so the cap reads the
+/// position rather than a counter threaded beside it.
+fn collect_sub_ifds(ifd: &Ifd, position: TreePosition, walk: &mut IfdWalk) {
+    walk.ifds.push(ifd.clone());
+    walk.positions.push(position.clone());
+    if position.1.len() + 1 >= MAX_SUBIFD_DEPTH {
         return;
     }
     // Offsets are read at full width: a BigTIFF writes `SubIFDs` as `LONG8`, whose values only
@@ -608,13 +733,16 @@ fn collect_sub_ifds(
     let Some(offsets) = ifd.get_u64_vec(tags::SUB_IFDS) else {
         return;
     };
-    for offset in offsets {
-        if visited.contains(&offset) {
+    // Every array entry is numbered, followed or not, so a path indexes the array as stored.
+    for (index, offset) in offsets.into_iter().enumerate() {
+        if walk.visited.contains(&offset) {
             continue;
         }
-        visited.push(offset);
-        if let Ok(sub) = read_ifd_at(data, offset, order, variant) {
-            collect_sub_ifds(&sub, data, order, variant, visited, depth + 1, out);
+        walk.visited.push(offset);
+        if let Ok(sub) = read_ifd_at(walk.data, offset, walk.order, walk.variant) {
+            let mut child = position.clone();
+            child.1.push(index);
+            collect_sub_ifds(&sub, child, walk);
         }
     }
 }
@@ -1212,13 +1340,18 @@ fn decode_image_data(
     };
     let grid = chunk_grid(ifd, width, height)?;
     let chunks = grid_chunks(ifd, data, &grid)?;
+    // The output buffer is never reserved from the declared geometry. `ImageWidth`/`ImageLength`
+    // are two tag values a few-hundred-byte file can set to 60000 each (#564), so the buffer
+    // grows only by samples a chunk has already decoded from bytes the file actually holds. That
+    // bounds every allocation here by the data rather than by the tags, without a fixed size cap
+    // that would refuse a genuine large raw; growth is amortised by `Vec`'s doubling.
     let samples = match grid {
         // Each strip is an independent sample stream of full-width rows; strips concatenate as
         // row bands. Decoding works strip by strip — concatenating packed bytes first would
         // misalign any sub-byte strip whose packed length is not what whole-image geometry
         // predicts (rows are byte-aligned *per strip*).
         ChunkGrid::Strips { rows_per_strip } => {
-            let mut samples = Vec::with_capacity(expected);
+            let mut samples = Vec::new();
             let mut remaining_rows = height;
             for chunk in &chunks {
                 let rows = rows_per_strip.min(remaining_rows);
@@ -1239,7 +1372,8 @@ fn decode_image_data(
             }
             samples
         }
-        // Tiles decode at full tile size, then blit into place with edge cropping.
+        // Tiles decode at full tile size, one row of tiles at a time; that band's image rows are
+        // then appended left to right, cropping the edge tiles' padding.
         ChunkGrid::Tiles {
             tile_width,
             tile_height,
@@ -1255,21 +1389,26 @@ fn decode_image_data(
                     "DNG: tile count must cover the image grid",
                 ));
             }
-            let mut samples = vec![0u16; expected];
-            for (i, chunk) in chunks.iter().enumerate() {
-                let tile = decode_chunk_samples(layout, chunk, tile_width, tile_height)?;
-                let x0 = (i % across) * tile_width;
-                let y0 = (i / across) * tile_height;
-                let copy_cols = tile_width.min(width - x0);
-                for r in 0..tile_height {
-                    let y = y0 + r;
-                    if y >= height {
-                        break;
+            let mut samples = Vec::new();
+            // The bands are walked over the chunks the file holds, not counted over `0..down`: a
+            // zero `ImageWidth` reaches here (the raw path checks `Dimensions` afterwards) with
+            // `across == 0` and no chunks, while `ImageLength = u32::MAX` over `TileLength = 1`
+            // still declares ~4.29e9 bands, so a counted loop would make that many empty passes.
+            // `max(1)` only keeps `chunks` (which rejects 0) callable on that empty slice. This
+            // replaces index arithmetic (`band * across` slicing) and its operator mutants: the
+            // tile-count check above is what pins one band to `across` chunks.
+            for (band, band_chunks) in chunks.chunks(across.max(1)).enumerate() {
+                let tiles = band_chunks
+                    .iter()
+                    .map(|chunk| decode_chunk_samples(layout, chunk, tile_width, tile_height))
+                    .collect::<Result<Vec<_>>>()?;
+                let band_rows = tile_height.min(height - band * tile_height);
+                for r in 0..band_rows {
+                    for (i, tile) in tiles.iter().enumerate() {
+                        let copy_cols = tile_width.min(width - i * tile_width);
+                        let src = r * tile_width * spp;
+                        samples.extend_from_slice(&tile[src..src + copy_cols * spp]);
                     }
-                    let src = r * tile_width * spp;
-                    let dst = (y * width + x0) * spp;
-                    samples[dst..dst + copy_cols * spp]
-                        .copy_from_slice(&tile[src..src + copy_cols * spp]);
                 }
             }
             samples
@@ -1386,13 +1525,19 @@ fn decode_chunk_samples(
                     Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow")
                 })?;
             let bytes = compression::decompress(compression, chunk, max_out)?;
-            let mut got = bitpack::unpack(&bytes, bits, cols * spp, rows, order);
-            if got.len() < want {
+            // Short data is refused *before* unpacking, because the unpacker reserves the
+            // geometry's full `cols * rows * spp` samples: checked afterwards, a chunk whose tags
+            // claim 60000 x 60000 pixels over a few hundred bytes would already have asked the
+            // allocator for gigabytes (#564). The bytes in hand are what bound the allocation.
+            // Every byte width unpacks at least `want` samples from `max_out` bytes, so this is
+            // the same acceptance set as comparing the unpacked count against `want`.
+            if bytes.len() < max_out {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
                     "DNG: raw image data is truncated",
                 ));
             }
+            let mut got = bitpack::unpack(&bytes, bits, cols * spp, rows, order);
             got.truncate(want); // tolerate chunk padding, per TIFF practice
             // The predictor is undone per chunk, after unpacking and (inside `bitpack`) after the
             // byte-order swap — the SDK's ordering.
@@ -1646,6 +1791,81 @@ fn illuminant(ifd: &TrackedIfd, tag: u16) -> Option<CalibrationIlluminant> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory carrying one `SHORT` field, `marker`, to recognise it by.
+    fn marked(marker: u16) -> Ifd {
+        let mut ifd = Ifd::new();
+        ifd.set(1, Value::Short(vec![marker]));
+        ifd
+    }
+
+    /// Runs [`resolve_exif_pointers`] over `exif` against a file holding exactly `directories`,
+    /// each at its offset; any other offset is unreadable.
+    fn resolved(mut exif: Ifd, directories: &[(u64, Ifd)]) -> Ifd {
+        resolve_exif_pointers(&mut exif, |offset| {
+            directories
+                .iter()
+                .find(|(at, _)| *at == offset)
+                .map(|(_, ifd)| ifd.clone())
+                .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "unreadable"))
+        });
+        exif
+    }
+
+    #[test]
+    fn resolve_exif_pointers_turns_each_standard_pointer_into_its_group() {
+        for &tag in STANDARD_POINTER_TAGS {
+            let mut exif = marked(7);
+            exif.set(tag, Value::Long(vec![100]));
+            let got = resolved(exif, &[(100, marked(9))]);
+            let mut want = marked(7);
+            want.set_sub_ifd(tag, vec![marked(9)]);
+            assert_eq!(got, want, "tag {tag}");
+        }
+    }
+
+    #[test]
+    fn resolve_exif_pointers_drops_a_pointer_whose_target_is_unreadable() {
+        // Interop resolves while GPSInfo's target is missing: only the broken field goes, and
+        // every other entry, the resolved group included, is kept.
+        let mut exif = marked(7);
+        exif.set(
+            gamut_ifd::tags::INTEROPERABILITY_IFD,
+            Value::Long(vec![100]),
+        );
+        exif.set(tags::GPS_INFO, Value::Long(vec![0xFFFF_FFF0]));
+        let got = resolved(exif, &[(100, marked(9))]);
+        let mut want = marked(7);
+        want.set_sub_ifd(gamut_ifd::tags::INTEROPERABILITY_IFD, vec![marked(9)]);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn resolve_exif_pointers_leaves_a_non_offset_value_under_a_pointer_tag() {
+        let mut exif = marked(7);
+        exif.set(
+            gamut_ifd::tags::INTEROPERABILITY_IFD,
+            Value::Short(vec![100]),
+        );
+        assert_eq!(resolved(exif.clone(), &[(100, marked(9))]), exif);
+    }
+
+    #[test]
+    fn resolve_exif_pointers_drops_a_pointer_nested_below_the_interop_directory() {
+        // A pointer inside the Interop directory is one level past EXIF 2.3 §4.6.3, so the
+        // InteroperabilityIFD it hangs from is dropped whole rather than handed back half-resolved.
+        let mut interop = marked(9);
+        interop.set(tags::GPS_INFO, Value::Long(vec![200]));
+        let mut exif = marked(7);
+        exif.set(
+            gamut_ifd::tags::INTEROPERABILITY_IFD,
+            Value::Long(vec![100]),
+        );
+        assert_eq!(
+            resolved(exif, &[(100, interop), (200, marked(11))]),
+            marked(7)
+        );
+    }
 
     /// All three types `BlackLevel` allows, and nothing else.
     ///
@@ -1937,20 +2157,24 @@ mod tests {
         assert_eq!(walk_ifds(&file, &bytes).0.len(), MAX_SUBIFD_DEPTH);
     }
 
-    /// The main-chain indices name every top-level directory, in chain order, and nothing else:
-    /// sub-IFDs of an earlier page are pushed before a later page, and the later page's own
-    /// sub-IFDs after it, so neither the last index nor any earlier one is the last directory
-    /// collected.
+    /// Every walked directory carries its tree position: the page it is or descends from, and
+    /// its `SubIFDs` array position at each level below — empty for the pages themselves.
+    /// Sub-IFDs of an earlier page are pushed before a later page and the later page's own
+    /// sub-IFDs after it, so a page's index is never the last directory collected, and a
+    /// grandchild's path extends its parent's rather than restarting.
     #[test]
-    fn walk_ifds_indexes_every_main_chain_directory() {
-        let mut child = Ifd::new();
-        child.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
-        let mut page0 = Ifd::new();
-        page0.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
-        page0.set_sub_ifd(tags::SUB_IFDS, vec![child.clone()]);
-        let mut page1 = Ifd::new();
-        page1.set(tags::IMAGE_WIDTH, Value::Short(vec![3]));
-        page1.set_sub_ifd(tags::SUB_IFDS, vec![child]);
+    fn walk_ifds_positions_every_directory_in_the_tree() {
+        let width = |w: u16| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![w]));
+            ifd
+        };
+        let mut page0 = width(1);
+        page0.set_sub_ifd(tags::SUB_IFDS, vec![width(2)]);
+        let mut nested = width(4);
+        nested.set_sub_ifd(tags::SUB_IFDS, vec![width(5)]);
+        let mut page1 = width(3);
+        page1.set_sub_ifd(tags::SUB_IFDS, vec![width(6), nested]);
         let bytes = gamut_ifd::write(&TiffFile {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
@@ -1958,14 +2182,112 @@ mod tests {
         })
         .expect("write");
         let file = read(&bytes).expect("read");
-        let (ifds, mains) = walk_ifds(&file, &bytes);
-        // page0, its child, page1, its child.
-        assert_eq!(ifds.len(), 4);
-        assert_eq!(mains, [0, 2]);
+        let (ifds, positions) = walk_ifds(&file, &bytes);
+        let widths: Vec<_> = ifds.iter().map(|i| i.get_u32(tags::IMAGE_WIDTH)).collect();
+        assert_eq!(widths, [1, 2, 3, 6, 4, 5].map(Some));
         assert_eq!(
-            ifds[mains[1]].get(tags::IMAGE_WIDTH),
-            Some(&Value::Short(vec![3]))
+            positions,
+            [
+                (0, vec![]),
+                (0, vec![0]),
+                (1, vec![]),
+                (1, vec![0]),
+                (1, vec![1]),
+                (1, vec![1, 0]),
+            ]
         );
+    }
+
+    /// A `SubIFDs` entry the walk does not follow — here a second pointer to an already-visited
+    /// directory — still takes its array position, so the entry after it keeps the index the
+    /// file stores it at rather than shifting down into the skipped slot.
+    #[test]
+    fn walk_ifds_numbers_skipped_sub_ifd_entries() {
+        let width = |w: u16| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![w]));
+            ifd
+        };
+        let mut page = width(1);
+        page.set_sub_ifd(tags::SUB_IFDS, vec![width(2), width(3), width(4)]);
+        let mut bytes = gamut_ifd::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![page],
+        })
+        .expect("write");
+        // Point the second entry at the first child, so the walk skips it as visited.
+        let file = read(&bytes).expect("read");
+        let offsets = file.ifds[0].get_u32_vec(tags::SUB_IFDS).expect("offsets");
+        let array: Vec<u8> = offsets.iter().flat_map(|o| o.to_le_bytes()).collect();
+        let at = bytes
+            .windows(array.len())
+            .position(|w| w == array)
+            .expect("the SubIFDs array is stored out of line")
+            + 4;
+        bytes[at..at + 4].copy_from_slice(&offsets[0].to_le_bytes());
+        let file = read(&bytes).expect("read");
+        let (ifds, positions) = walk_ifds(&file, &bytes);
+        let widths: Vec<_> = ifds.iter().map(|i| i.get_u32(tags::IMAGE_WIDTH)).collect();
+        assert_eq!(widths, [1, 2, 4].map(Some));
+        assert_eq!(positions, [(0, vec![]), (0, vec![0]), (0, vec![2])]);
+    }
+
+    /// An image-less directory reached through `SubIFDs` reaches `sub_ifd_extra`, keyed by its
+    /// tree position (issue #667) — and only such a directory: the raw `SubIFDs` child stays in
+    /// `raw_extra`, and an image-less main-chain page stays in `trailing_extra`, so no field is
+    /// reported twice and no page is mistaken for a sub-IFD.
+    #[test]
+    fn an_image_less_sub_ifd_is_surfaced_per_directory() {
+        let software = |text: &str| RawTag {
+            tag: 305,
+            value: Value::Ascii(text.to_owned()),
+        };
+        let with_software = |text: &str| {
+            let mut ifd = Ifd::new();
+            ifd.set(305, Value::Ascii(text.to_owned()));
+            ifd
+        };
+        // A 1x1 8-bit LinearRaw whose one strip byte is the file's own first byte, so the
+        // fixture needs no offset fix-up after writing.
+        let mut raw = with_software("raw");
+        raw.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        raw.set(tags::IMAGE_LENGTH, Value::Short(vec![1]));
+        raw.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8]));
+        raw.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![34892]));
+        raw.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        raw.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![1]));
+        let mut empty = with_software("child");
+        empty.set_sub_ifd(tags::SUB_IFDS, vec![with_software("grandchild")]);
+        let mut ifd0 = Ifd::new();
+        ifd0.set(tags::DNG_VERSION, Value::Byte(vec![1, 7, 1, 0]));
+        ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw, empty]);
+        let bytes = gamut_ifd::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd0, with_software("page")],
+        })
+        .expect("write");
+
+        let decoded = DngDecoder::new().decode(&bytes).expect("decode");
+        assert_eq!(
+            decoded.sub_ifd_extra,
+            [
+                SubIfdExtra {
+                    page: 0,
+                    path: vec![1],
+                    tags: vec![software("child")],
+                },
+                SubIfdExtra {
+                    page: 0,
+                    path: vec![1, 0],
+                    tags: vec![software("grandchild")],
+                },
+            ]
+        );
+        assert_eq!(decoded.raw_extra, [software("raw")]);
+        assert_eq!(decoded.trailing_extra, [software("page")]);
+        assert!(decoded.sub_images.is_empty(), "{:?}", decoded.sub_images);
     }
 
     /// With several raw-photometry IFDs, the main image (`NewSubFileType` 0) wins even when a

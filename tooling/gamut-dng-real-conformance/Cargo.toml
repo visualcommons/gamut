@@ -32,5 +32,8 @@ gamut-core = { path = "../../crates/gamut-core" }
 # The container primitive, for `SpanKind` — the corpus checks name the kind of each unaccounted
 # byte run (issue #350: a vendor preamble must keep its offset, not just its bytes).
 gamut-ifd = { path = "../../crates/gamut-ifd", features = ["bigtiff"] }
+# The EXIF reader, for the real-camera half of its laziness contract (issue #521): a DNG is a TIFF
+# stream from byte 0, so `ExifReader::parse_from` reads one through a file-backed source.
+gamut-exif = { path = "../../crates/gamut-exif" }
 # Authoritative differential oracle: the headless-built Adobe DNG SDK 1.7.1.
 gamut-dng-oracle = { path = "../gamut-dng-oracle" }

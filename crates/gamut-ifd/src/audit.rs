@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 
 use gamut_core::{ErrorKind, Result};
 
-use crate::reader::pointer_offsets;
+use crate::reader::{SubIfdRefusal, admit_subifd, pointer_offsets};
 use crate::segment::{Claim, DataLabel, SegmentMap, SegmentReport, SpanKind};
 use crate::source::ReadAt;
 use crate::stream::IfdReader;
@@ -98,6 +98,10 @@ pub enum SkipReason {
     Cycle,
     /// The target lies beyond the nesting depth guard.
     TooDeep,
+    /// The walk had already parsed its whole sub-IFD budget — 65,536 directories across every
+    /// page, the bound [`read_tree`](crate::read_tree) also refuses past — so this target and
+    /// every later one is skipped rather than parsed.
+    OverBudget,
 }
 
 /// A lenient observation the audit walk made about the *file* (as opposed to the byte-level
@@ -151,6 +155,29 @@ pub enum AuditFinding {
         /// The repeated tag.
         tag: u16,
         /// The offset of the shadowed entry's own record within that directory
+        /// ([`RawEntry::offset`](crate::RawEntry::offset)).
+        offset: u64,
+    },
+    /// A directory entry whose value could not be read — its count overflows, its value offset
+    /// or span lies outside the source, or its bytes do not decode as its field type (a non-UTF-8
+    /// `ASCII` string) — so a recovering decode skipped it and kept the rest of the directory.
+    ///
+    /// Emitted only by [`IfdReader::decode_ifd_lenient`](crate::IfdReader::decode_ifd_lenient);
+    /// every other decode fails the whole directory on such an entry, and the [`audit`] walk
+    /// never records one. The finding names the entry and not the precise defect: calling
+    /// [`IfdReader::value`](crate::IfdReader::value) on the same [`RawEntry`](crate::RawEntry)
+    /// reproduces the exact error.
+    ///
+    /// **Round trip.** The decoded [`Ifd`] simply lacks the field, so writing it back emits the
+    /// directory without it: `write` never re-emits a value nobody could read, and this finding is
+    /// the only record that the entry existed.
+    UnreadableEntry {
+        /// The offset of the directory carrying the entry — the identity
+        /// [`SpanKind::IfdBody`] uses.
+        ifd: u64,
+        /// The entry's tag.
+        tag: u16,
+        /// The offset of the entry's own record within that directory
         /// ([`RawEntry::offset`](crate::RawEntry::offset)).
         offset: u64,
     },
@@ -384,14 +411,16 @@ fn shadowing_directories(findings: &[AuditFinding]) -> BTreeSet<u64> {
 }
 
 /// Follows `ifd`'s pointer tags leniently: each parseable target becomes a sub-IFD child
-/// (its extents declared, its own pointers followed recursively); an unparseable, cyclic, or
-/// too-deep target becomes a [`AuditFinding::SkippedSubIfd`]; a non-zero next-IFD link on a
+/// (its extents declared, its own pointers followed recursively); an unparseable, cyclic,
+/// too-deep, or over-budget target becomes a [`AuditFinding::SkippedSubIfd`]; a non-zero next-IFD link on a
 /// target is followed as [`AuditFinding::ChainedSubIfd`]. A target's
 /// [`AuditFinding::ShadowedEntry`] findings are recorded unless `reported` says the directory's
 /// were recorded already, so each directory reports its shadowed entries once.
 ///
 /// `visited` is a set for the reason `resolve_pointers_with` gives: a pointer array's breadth is
-/// chosen by the file, so a linear membership scan would make the audit quadratic in it.
+/// chosen by the file, so a linear membership scan would make the audit quadratic in it. It is
+/// admitted through the same `admit_subifd` the strict walk uses, so the audit spends the same
+/// whole-walk directory budget and records a target past it as [`SkipReason::OverBudget`].
 #[expect(
     clippy::too_many_arguments,
     reason = "internal recursive walk threading its full context"
@@ -417,10 +446,12 @@ fn follow_subifds<S: ReadAt>(
             while offset != 0 {
                 let refusal = if depth + 1 > MAX_SUBIFD_DEPTH {
                     Some(SkipReason::TooDeep)
-                } else if !visited.insert(offset) {
-                    Some(SkipReason::Cycle)
                 } else {
-                    None
+                    match admit_subifd(visited, offset) {
+                        Ok(()) => None,
+                        Err(SubIfdRefusal::Revisited) => Some(SkipReason::Cycle),
+                        Err(SubIfdRefusal::OverBudget) => Some(SkipReason::OverBudget),
+                    }
                 };
                 if let Some(reason) = refusal {
                     findings.push(AuditFinding::SkippedSubIfd {
@@ -620,6 +651,41 @@ mod tests {
         // The child itself was parsed and accounted before the cycle was refused.
         assert_eq!(out.file.ifds[0].sub_ifds().len(), 1);
         assert!(out.report.is_fully_classified(), "report: {:?}", out.report);
+    }
+
+    /// Adversarial: a `SubIFDs` array one directory wider than the walk's budget. The audit
+    /// parses the budget's worth and records the one target past it as an over-budget finding
+    /// rather than failing.
+    #[test]
+    fn subifd_past_the_budget_is_an_over_budget_finding() {
+        let width = crate::reader::MAX_SUBIFDS + 1;
+        let count = u32::try_from(width).expect("fits");
+        // Header, then IFD0 @ 8 holding one entry: SubIFDs (330), LONG × `width`, array @ 26.
+        let mut data = vec![b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00];
+        data.extend_from_slice(&[0x4a, 0x01, 0x04, 0x00]);
+        data.extend_from_slice(&count.to_le_bytes());
+        data.extend_from_slice(&26u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+        // The array, then `width` empty six-byte directories (count 0, next 0) laid end to end.
+        let first = 26 + 4 * count;
+        for i in 0..count {
+            data.extend_from_slice(&(first + 6 * i).to_le_bytes());
+        }
+        data.resize(data.len() + 6 * width, 0);
+        let out = audit(&data[..], &StandardAuditSpec).expect("audit");
+        assert_eq!(
+            out.findings,
+            vec![AuditFinding::SkippedSubIfd {
+                page: 0,
+                tag: tags::SUB_IFDS,
+                offset: u64::from(first + 6 * (count - 1)),
+                reason: SkipReason::OverBudget,
+            }]
+        );
+        assert_eq!(
+            out.file.ifds[0].sub_ifds()[0].ifds.len(),
+            crate::reader::MAX_SUBIFDS
+        );
     }
 
     /// A sub-IFD carrying an out-of-spec next-IFD chain link: the chained directory is

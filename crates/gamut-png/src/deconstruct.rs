@@ -13,8 +13,8 @@
 //! It holds by construction, and [`PngReport::is_fully_classified`] re-derives it from the list
 //! rather than storing a flag, so a walk bug makes the predicate false instead of silently
 //! agreeing with itself. This mirrors [`gamut_isobmff::segments`]'s guarantee for ISOBMFF; PNG's
-//! chunk stream needs its own walk (there are no boxes and no `meta` level), but the shape and
-//! the names are deliberately the same.
+//! chunk stream needs its own walk (there are no boxes and no `meta` level), but the segment
+//! shape and the tiling predicate are the shared [`gamut_core::segment`] ones.
 //!
 //! # What is an error and what is a finding
 //!
@@ -24,7 +24,6 @@
 //! a truncated tail are all *reported*, never errors. Only a file with no header to report on —
 //! bad signature, no first chunk, a first chunk that is not IHDR, or an unparsable IHDR — fails.
 
-use core::ops::Range;
 use std::collections::HashMap;
 
 use gamut_core::{Error, Result};
@@ -39,13 +38,11 @@ use crate::{adam7, ihdr, inflate};
 const FRAMING: usize = 12;
 
 /// One contiguous run of the input file, tagged by what it holds ([`SegmentKind`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Segment {
-    /// The half-open byte range this segment occupies within the input (`start..end`).
-    pub range: Range<usize>,
-    /// What the bytes in [`range`](Self::range) are.
-    pub kind: SegmentKind,
-}
+///
+/// The shared [`gamut_core::segment::Segment`] over this format's kind, so a
+/// [`PngReport::segments`] list is checked by the one tiling predicate,
+/// [`gamut_core::segment::covers`], rather than a copy of it here (#670).
+pub type Segment = gamut_core::segment::Segment<SegmentKind>;
 
 /// What a [`Segment`] holds.
 ///
@@ -289,17 +286,11 @@ pub struct PngReport {
 impl PngReport {
     /// **The headline law.** Whether the segments tile the input exactly: the first starts at 0,
     /// each ends where the next starts, none is empty, and the last ends at `file_len`.
-    /// Re-derived from [`segments`](Self::segments) rather than stored.
+    /// Re-derived from [`segments`](Self::segments) rather than stored, by
+    /// [`gamut_core::segment::covers`].
     #[must_use]
     pub fn is_fully_classified(&self) -> bool {
-        let mut expected = 0usize;
-        for segment in &self.segments {
-            if segment.range.start != expected || segment.range.end <= segment.range.start {
-                return false;
-            }
-            expected = segment.range.end;
-        }
-        expected == self.file_len
+        gamut_core::segment::covers(&self.segments, self.file_len)
     }
 
     /// Whether every byte of this file belongs to a complete, undamaged PNG datastream: fully
@@ -935,9 +926,9 @@ mod tests {
     use crate::ColorType;
 
     /// A report with the given segment ranges and file length. Built by hand because
-    /// [`deconstruct`] cannot produce a malformed tiling: it is correct by construction, so every
+    /// [`deconstruct`] cannot produce a malformed tiling: it is correct by construction, so the
     /// negative case for [`PngReport::is_fully_classified`] has to be assembled here. That is also
-    /// why these live inline — the predicate is only falsifiable from inside the crate.
+    /// why it lives inline — the predicate is only falsifiable from inside the crate.
     fn report_with(ranges: &[(usize, usize)], file_len: usize) -> PngReport {
         PngReport {
             file_len,
@@ -964,30 +955,12 @@ mod tests {
     }
 
     #[test]
-    fn contiguous_segments_covering_the_file_are_fully_classified() {
-        assert!(report_with(&[(0, 8), (8, 20), (20, 33)], 33).is_fully_classified());
-    }
-
-    #[test]
-    fn a_gap_between_segments_is_not_fully_classified() {
-        // Every segment is non-empty and the last still reaches `file_len`, so only the
-        // start-chaining half of the predicate can reject this.
+    fn a_report_that_does_not_tile_is_not_fully_classified() {
+        // The tiling law itself (gap, overlap, empty segment, start and tail) is pinned once in
+        // `gamut_core::segment`; this only shows the report asks it. Every positive case comes
+        // from `deconstruct` in `tests/accounting.rs`, so a constant `false` dies there and a
+        // constant `true` dies here.
         assert!(!report_with(&[(0, 8), (9, 33)], 33).is_fully_classified());
-    }
-
-    #[test]
-    fn an_empty_segment_is_not_fully_classified() {
-        // The mirror case: the chain is unbroken, so only the non-empty half can reject it.
-        assert!(!report_with(&[(0, 8), (8, 8), (8, 33)], 33).is_fully_classified());
-    }
-
-    #[test]
-    fn segments_must_start_at_zero_and_reach_the_end() {
-        assert!(!report_with(&[(4, 33)], 33).is_fully_classified());
-        assert!(!report_with(&[(0, 20)], 33).is_fully_classified());
-        assert!(!report_with(&[], 33).is_fully_classified());
-        // ...and a zero-length file with no segments is vacuously covered.
-        assert!(report_with(&[], 0).is_fully_classified());
     }
 
     /// A header for the budget boundary, built directly: `ihdr::parse` would only add a byte
@@ -1074,11 +1047,6 @@ mod tests {
         assert_eq!(SkippedFilterScan::LengthMismatch as u8, 2);
         assert_eq!(SkippedFilterScan::UndefinedFilterCode as u8, 3);
         assert_eq!(SkippedFilterScan::ImplausibleInflation as u8, 4);
-    }
-
-    #[test]
-    fn an_overlap_is_not_fully_classified() {
-        assert!(!report_with(&[(0, 20), (10, 33)], 33).is_fully_classified());
     }
 
     /// A PNG whose IHDR declares `width`×`height` RGBA8 over a zlib stream of `stream_len` zero

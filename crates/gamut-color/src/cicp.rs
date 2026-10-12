@@ -169,12 +169,19 @@ pub enum TransferCharacteristics {
     Bt709 = 1,
     /// Unspecified. (Code point 2.)
     Unspecified = 2,
+    /// BT.601 / SMPTE 170M. (Code point 6.) ITU-T H.273 Table 3 gives it the same curve as
+    /// [`Bt709`](Self::Bt709), [`Bt2020_10`](Self::Bt2020_10) and [`Bt2020_12`](Self::Bt2020_12);
+    /// kept distinct so a `colr` box read as 6 is written back as 6.
+    Bt601 = 6,
     /// Linear — the identity transfer, `V = Lc`. (Code point 8.)
     Linear = 8,
     /// sRGB / IEC 61966-2-1. (Code point 13.)
     Srgb = 13,
     /// BT.2020 10-bit. (Code point 14.)
     Bt2020_10 = 14,
+    /// BT.2020 12-bit. (Code point 15.) ITU-T H.273 Table 3: "functionally the same as the
+    /// values 1, 6 and 14".
+    Bt2020_12 = 15,
     /// SMPTE ST 2084 (PQ). (Code point 16.)
     Pq = 16,
     /// ARIB STD-B67 (HLG). (Code point 18.)
@@ -196,9 +203,11 @@ impl TransferCharacteristics {
         match code_point {
             1 => Some(TransferCharacteristics::Bt709),
             2 => Some(TransferCharacteristics::Unspecified),
+            6 => Some(TransferCharacteristics::Bt601),
             8 => Some(TransferCharacteristics::Linear),
             13 => Some(TransferCharacteristics::Srgb),
             14 => Some(TransferCharacteristics::Bt2020_10),
+            15 => Some(TransferCharacteristics::Bt2020_12),
             16 => Some(TransferCharacteristics::Pq),
             18 => Some(TransferCharacteristics::Hlg),
             _ => None,
@@ -294,9 +303,11 @@ mod tests {
         for tc in [
             Tc::Bt709,
             Tc::Unspecified,
+            Tc::Bt601,
             Tc::Linear,
             Tc::Srgb,
             Tc::Bt2020_10,
+            Tc::Bt2020_12,
             Tc::Pq,
             Tc::Hlg,
         ] {

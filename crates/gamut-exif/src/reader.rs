@@ -23,6 +23,8 @@ use crate::report::ReadReport;
 pub struct ExifReader {
     pub(crate) require_marker: bool,
     pub(crate) strict: bool,
+    pub(crate) recover_entries: bool,
+    pub(crate) audit_bytes: bool,
 }
 
 impl ExifReader {
@@ -48,6 +50,43 @@ impl ExifReader {
     #[must_use]
     pub fn strict(mut self, yes: bool) -> Self {
         self.strict = yes;
+        self
+    }
+
+    /// Recovers per **entry** rather than per directory: an entry whose value cannot be read (its
+    /// count overflows, its value lies outside the stream, or an `ASCII` value is not UTF-8) is
+    /// skipped, and the directory it sat in — the 0th or 1st IFD, or an Exif/GPS/Interop sub-IFD —
+    /// survives without it. Each skip is named in
+    /// [`ReadReport::dropped_entries`](crate::ReadReport::dropped_entries).
+    ///
+    /// Off by default, so an unreadable entry fails its whole directory: a sub-IFD is dropped as
+    /// [`DropReason::Malformed`](crate::DropReason::Malformed), and the 0th or 1st IFD fails the
+    /// parse. A directory whose *body* cannot be read (a bad entry count, a body past the end of
+    /// the stream) is still dropped or fatal as before — recovery is per entry, never per byte.
+    ///
+    /// Ignored in [`strict`](Self::strict) mode, which rejects what it would recover.
+    ///
+    /// **Round trip.** The [`Exif`] simply lacks each skipped field, so
+    /// [`to_bytes`](Exif::to_bytes) writes a well-formed blob without it; the report is the only
+    /// record that the entry existed.
+    #[must_use]
+    pub fn recover_entries(mut self, yes: bool) -> Self {
+        self.recover_entries = yes;
+        self
+    }
+
+    /// Adds a byte-completeness verdict to the report:
+    /// [`ReadReport::byte_audit`](crate::ReadReport::byte_audit) classifies every byte of the TIFF
+    /// stream or names the ones no parsed structure claims.
+    ///
+    /// Off by default, because it costs a second, whole-structure walk of the source after the
+    /// parse — every directory and value, not just the ones the [`Exif`] model needs — which is
+    /// the read the streaming entry points otherwise avoid. It applies only to the `*_with_report`
+    /// entry points; [`parse`](Self::parse) and [`parse_from`](Self::parse_from) have no report to
+    /// put it in and never pay for it.
+    #[must_use]
+    pub fn audit_bytes(mut self, yes: bool) -> Self {
+        self.audit_bytes = yes;
         self
     }
 
@@ -81,10 +120,12 @@ impl ExifReader {
     /// alongside a [`ReadReport`] naming each discarded region, so a caller can tell a blob that
     /// never carried GPS from one whose GPS pointer was dangling.
     ///
-    /// The report covers the regions [`DroppedRegion`](crate::DroppedRegion) enumerates and is
-    /// complete over them. It is **not** a byte-completeness verdict, and an empty report does not
-    /// mean the parse lost nothing — see the [`report`](crate::report) module for the two known
-    /// losses below this crate.
+    /// The report covers the regions [`DroppedRegion`](crate::DroppedRegion) enumerates and the
+    /// entries the kept directories lost — every one a repeated tag shadowed, and, under
+    /// [`recover_entries`](Self::recover_entries), every one it skipped — and is complete over
+    /// them. Its drop lists are **not** a byte-completeness verdict: an empty report says nothing
+    /// about source bytes no structure claims — see the [`report`](crate::report) module.
+    /// [`audit_bytes`](Self::audit_bytes) adds that verdict.
     ///
     /// ```
     /// # use gamut_exif::{ByteOrder, Exif, ExifReader};

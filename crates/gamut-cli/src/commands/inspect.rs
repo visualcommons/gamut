@@ -1,5 +1,6 @@
 //! `gamut inspect` — strict "deconstruct" of a TIFF, DNG or PNG (issues #197/#263/#224), and the
-//! C2PA provenance report for a HEIC (issue #448), an AVIF, a WebP, a TIFF and a DNG (issue #530).
+//! C2PA provenance report for a HEIC (issue #448), an AVIF, a WebP, a TIFF and a DNG (issue #530),
+//! and a PNG (issue #727).
 //!
 //! Walks the entire container, classifies every byte into typed segments, and flags anything
 //! unrecognised (unknown tags, unknown field types, out-of-spec codes, unclassified bytes).
@@ -9,21 +10,20 @@
 //! # The C2PA section, and the formats with no gate
 //!
 //! Every format whose crate can locate a C2PA manifest store answers one more question: **does
-//! this file carry a C2PA manifest store, and where?** For TIFF and DNG the section prints beside
-//! the byte accounting and is additive — it never moves the verdict. HEIC, AVIF and WebP get the
-//! section and nothing else: they are not deconstructed, so they have nothing to hold against the
-//! file and report no verdict; each exits `0` whenever its crate could parse the container,
+//! this file carry a C2PA manifest store, and where?** For TIFF, DNG and PNG the section prints
+//! beside the byte accounting and is additive — it never moves the verdict. HEIC, AVIF and WebP get
+//! the section and nothing else: they are not deconstructed, so they have nothing to hold against
+//! the file and report no verdict; each exits `0` whenever its crate could parse the container,
 //! whether a store was found or not. Presence and absence are both ordinary outcomes of an ordinary
-//! file, and neither is an accounting anomaly. (PNG's locator is not wired in yet — issue #727;
-//! see `docs/inspect-exit-codes.md`.)
+//! file, and neither is an accounting anomaly.
 //!
 //! The reporting itself lives in the format crates, not here, because that is where the facts and
 //! the words about them belong: each crate's `C2paSummary` — [`gamut::heic::C2paSummary`],
-//! [`gamut::avif::C2paSummary`], [`gamut::webp::C2paSummary`], and the TIFF/DNG one
-//! [`gamut::tiff::C2paSummary`] shares from `gamut-ifd` — holds the reportable facts and renders the
-//! lines, disclaimer included, since a report that let a reader infer a validity verdict would be a
-//! defect. This command prefixes its own indent to them and caps the detail list. One rendering per
-//! crate, pinned there. gamut locates a store and never validates one (C2PA 2.4 §15.12).
+//! [`gamut::avif::C2paSummary`], [`gamut::webp::C2paSummary`], [`gamut::png::C2paSummary`], and
+//! the TIFF/DNG one [`gamut::tiff::C2paSummary`] shares from `gamut-ifd` — holds the reportable
+//! facts and renders the lines, disclaimer included, since a report that let a reader infer a
+//! validity verdict would be a defect. This command prefixes its own indent to them and caps the
+//! detail list. One rendering per crate, pinned there. gamut locates a store and never validates one (C2PA 2.4 §15.12).
 //!
 //! `gamut-cli` being outside the coverage gate is **not** a reason to move logic out of it, and
 //! nothing here rests on that: coverage exclusion is not test exclusion. This file's own logic is
@@ -155,7 +155,7 @@ pub(crate) enum Format {
     Tiff,
     /// DNG (Adobe Digital Negative; gamut-dng), with its C2PA provenance report.
     Dng,
-    /// PNG (gamut-png).
+    /// PNG (gamut-png), with its C2PA provenance report.
     Png,
     /// HEIF/HEIC (gamut-heic) — the C2PA provenance report only; see the module docs.
     Heic,
@@ -770,8 +770,8 @@ fn hidden_entries(total: usize, lines: usize) -> usize {
     total.saturating_sub(lines.min(MAX_LIST))
 }
 
-/// Deconstructs a PNG and prints where its bytes went, exiting non-zero when the file is not a
-/// complete, undamaged datastream.
+/// Deconstructs a PNG and prints where its bytes went, then its C2PA section, exiting non-zero when
+/// the file is not a complete, undamaged datastream. The C2PA section never moves that verdict.
 fn inspect_png(to: Target<'_>, data: &[u8]) -> Result<(), CliError> {
     // Inspection budgets differently from decoding. `gamut::png::deconstruct`'s default matches
     // the *decoder*'s, which guards a decode against hostile input; but a file this command
@@ -780,13 +780,26 @@ fn inspect_png(to: Target<'_>, data: &[u8]) -> Result<(), CliError> {
     // ceiling is raised to a gigabyte: past any real image, short of unbounded.
     let limits = gamut::png::DeconstructLimits::default().with_max_image_bytes(1 << 30);
     let report = gamut::png::deconstruct_with_limits(data, limits)?;
+    // Read before anything is printed, like the TIFF/DNG section. It cannot fail once the
+    // deconstruct has succeeded: the only error is a missing signature, which that already refused.
+    let c2pa = gamut::png::c2pa_summary(data)?;
     let path = to.path;
 
     match to.output {
-        Output::Text => print_png(path, &report),
+        Output::Text => {
+            print_png(path, &report);
+            // Additive: the section prints beside the byte accounting and never moves the verdict
+            // below.
+            print_c2pa(
+                c2pa.summary_lines(),
+                c2pa.detail_lines(),
+                c2pa.detail_line_count(),
+            );
+        }
         Output::Json => {
             let mut doc = document_head(to, Format::Png);
             doc.extend(png_json(&report));
+            doc.push(("c2pa", png_c2pa_json(&c2pa)));
             print_json(&Json::Object(doc));
         }
     }
@@ -1517,6 +1530,48 @@ fn webp_c2pa_json(summary: &gamut::webp::C2paSummary) -> Json {
                         Json::Object(vec![
                             ("range", span(u.range.start, u.range.end)),
                             ("position", Json::from(position(u.position))),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+/// A PNG `C2paSummary` as data: the one store §A.3.2 admits — its payload `range` and the whole
+/// `chunk` a `c2pa.hash.data` assertion excludes — and every other `caBX` chunk as unread with its
+/// reason.
+fn png_c2pa_json(summary: &gamut::png::C2paSummary) -> Json {
+    use gamut::png::C2paUnreadReason as Reason;
+    let reason = |r: Reason| match r {
+        Reason::CrcMismatch => "crc_mismatch",
+        Reason::AfterIdat => "after_idat",
+        Reason::AfterIend => "after_iend",
+        Reason::Duplicate => "duplicate",
+        _ => "other",
+    };
+    let store = summary.store.as_ref().map_or(Json::Null, |s| {
+        Json::Object(vec![
+            ("size", Json::from(s.payload.len())),
+            ("range", span(s.payload.start, s.payload.end)),
+            ("chunk", span(s.chunk.start, s.chunk.end)),
+        ])
+    });
+    Json::Object(vec![
+        ("not_validated", Json::from(gamut::png::C2PA_NOT_VALIDATED)),
+        ("store", store),
+        (
+            "unread",
+            Json::Array(
+                summary
+                    .unread
+                    .iter()
+                    .map(|u| {
+                        Json::Object(vec![
+                            ("size", Json::from(u.span.payload.len())),
+                            ("chunk", span(u.span.chunk.start, u.span.chunk.end)),
+                            ("reason", Json::from(reason(u.reason))),
+                            ("description", Json::from(u.reason.describe())),
                         ])
                     })
                     .collect(),

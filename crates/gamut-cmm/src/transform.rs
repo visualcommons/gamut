@@ -82,7 +82,7 @@ pub struct TransformOptions {
     ///
     /// A curve is replaced only when all three hold: the profile carries a `cicp` tag;
     /// `gamut-color` evaluates its `TransferCharacteristics` code point
-    /// ([`gamut_color::transfer::standard_eotf_for`] — today 1, 8, 13, 14, 16 and 18); and the
+    /// ([`gamut_color::transfer::standard_eotf_for`] — today 1, 6, 8, 13, 14, 15, 16 and 18); and the
     /// tag's curve agrees with the closed form to within `2⁻⁸` at every probe of a
     /// 4096-point grid. The last condition is §10.3's own requirement that the tag name an
     /// encoding *equivalent* to the profile's, checked rather than assumed: a profile whose

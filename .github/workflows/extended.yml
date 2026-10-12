@@ -120,9 +120,11 @@ jobs:
         # the job's wall time growing with every crate that gains laws or a parser entry point.
         target:
           - ifd_read_ledger
+          - ifd_one_store
           - core_convert
           - tonemap_curves
           - avif_clean_alpha
+          - color_gray8_view
           - avif_parse_decode
           # The parser entry points (#264): the untrusted-input surface `docs/testing.md`'s
           # per-crate table names, one target per entry point rather than per crate, because
