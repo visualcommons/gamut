@@ -1212,13 +1212,18 @@ fn decode_image_data(
     };
     let grid = chunk_grid(ifd, width, height)?;
     let chunks = grid_chunks(ifd, data, &grid)?;
+    // The output buffer is never reserved from the declared geometry. `ImageWidth`/`ImageLength`
+    // are two tag values a few-hundred-byte file can set to 60000 each (#564), so the buffer
+    // grows only by samples a chunk has already decoded from bytes the file actually holds. That
+    // bounds every allocation here by the data rather than by the tags, without a fixed size cap
+    // that would refuse a genuine large raw; growth is amortised by `Vec`'s doubling.
     let samples = match grid {
         // Each strip is an independent sample stream of full-width rows; strips concatenate as
         // row bands. Decoding works strip by strip — concatenating packed bytes first would
         // misalign any sub-byte strip whose packed length is not what whole-image geometry
         // predicts (rows are byte-aligned *per strip*).
         ChunkGrid::Strips { rows_per_strip } => {
-            let mut samples = Vec::with_capacity(expected);
+            let mut samples = Vec::new();
             let mut remaining_rows = height;
             for chunk in &chunks {
                 let rows = rows_per_strip.min(remaining_rows);
@@ -1239,7 +1244,8 @@ fn decode_image_data(
             }
             samples
         }
-        // Tiles decode at full tile size, then blit into place with edge cropping.
+        // Tiles decode at full tile size, one row of tiles at a time; that band's image rows are
+        // then appended left to right, cropping the edge tiles' padding.
         ChunkGrid::Tiles {
             tile_width,
             tile_height,
@@ -1255,21 +1261,26 @@ fn decode_image_data(
                     "DNG: tile count must cover the image grid",
                 ));
             }
-            let mut samples = vec![0u16; expected];
-            for (i, chunk) in chunks.iter().enumerate() {
-                let tile = decode_chunk_samples(layout, chunk, tile_width, tile_height)?;
-                let x0 = (i % across) * tile_width;
-                let y0 = (i / across) * tile_height;
-                let copy_cols = tile_width.min(width - x0);
-                for r in 0..tile_height {
-                    let y = y0 + r;
-                    if y >= height {
-                        break;
+            let mut samples = Vec::new();
+            // The bands are walked over the chunks the file holds, not counted over `0..down`: a
+            // zero `ImageWidth` reaches here (the raw path checks `Dimensions` afterwards) with
+            // `across == 0` and no chunks, while `ImageLength = u32::MAX` over `TileLength = 1`
+            // still declares ~4.29e9 bands, so a counted loop would make that many empty passes.
+            // `max(1)` only keeps `chunks` (which rejects 0) callable on that empty slice. This
+            // replaces index arithmetic (`band * across` slicing) and its operator mutants: the
+            // tile-count check above is what pins one band to `across` chunks.
+            for (band, band_chunks) in chunks.chunks(across.max(1)).enumerate() {
+                let tiles = band_chunks
+                    .iter()
+                    .map(|chunk| decode_chunk_samples(layout, chunk, tile_width, tile_height))
+                    .collect::<Result<Vec<_>>>()?;
+                let band_rows = tile_height.min(height - band * tile_height);
+                for r in 0..band_rows {
+                    for (i, tile) in tiles.iter().enumerate() {
+                        let copy_cols = tile_width.min(width - i * tile_width);
+                        let src = r * tile_width * spp;
+                        samples.extend_from_slice(&tile[src..src + copy_cols * spp]);
                     }
-                    let src = r * tile_width * spp;
-                    let dst = (y * width + x0) * spp;
-                    samples[dst..dst + copy_cols * spp]
-                        .copy_from_slice(&tile[src..src + copy_cols * spp]);
                 }
             }
             samples
@@ -1386,13 +1397,19 @@ fn decode_chunk_samples(
                     Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow")
                 })?;
             let bytes = compression::decompress(compression, chunk, max_out)?;
-            let mut got = bitpack::unpack(&bytes, bits, cols * spp, rows, order);
-            if got.len() < want {
+            // Short data is refused *before* unpacking, because the unpacker reserves the
+            // geometry's full `cols * rows * spp` samples: checked afterwards, a chunk whose tags
+            // claim 60000 x 60000 pixels over a few hundred bytes would already have asked the
+            // allocator for gigabytes (#564). The bytes in hand are what bound the allocation.
+            // Every byte width unpacks at least `want` samples from `max_out` bytes, so this is
+            // the same acceptance set as comparing the unpacked count against `want`.
+            if bytes.len() < max_out {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
                     "DNG: raw image data is truncated",
                 ));
             }
+            let mut got = bitpack::unpack(&bytes, bits, cols * spp, rows, order);
             got.truncate(want); // tolerate chunk padding, per TIFF practice
             // The predictor is undone per chunk, after unpacking and (inside `bitpack`) after the
             // byte-order swap — the SDK's ordering.
