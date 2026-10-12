@@ -858,6 +858,34 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_input_goes_into_an_existing_directory_named_for_the_format() {
+        // The temporary directory always exists, so one input with it as the output is placed
+        // inside it rather than written over it as a file.
+        let dir = std::env::temp_dir();
+        let dir_str = dir.to_str().unwrap();
+        let plan = plan_of(&["a/in.png", "-o", dir_str]).unwrap();
+        assert_eq!(
+            plan.jobs,
+            [Job {
+                input: PathBuf::from("a/in.png"),
+                output: dir.join("in.avif"),
+                format: OutputFormat::Avif,
+            }]
+        );
+        assert_eq!(plan.directory, Some(dir));
+    }
+
+    #[test]
+    fn standard_input_cannot_be_written_into_a_directory() {
+        // `-` has no file name to give its output there.
+        let dir = std::env::temp_dir();
+        assert!(matches!(
+            plan_of(&["-", "-o", dir.to_str().unwrap()]),
+            Err(CliError::Usage(_))
+        ));
+    }
+
+    #[test]
     fn an_output_over_its_own_input_is_refused() {
         assert!(matches!(
             plan_of(&["in.png", "--format", "png"]),

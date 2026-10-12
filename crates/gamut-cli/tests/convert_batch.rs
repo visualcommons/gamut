@@ -119,6 +119,49 @@ fn standard_input_converts_to_standard_output() {
 }
 
 #[test]
+fn the_summary_goes_to_stderr_when_stdout_carries_the_image() {
+    // The PNG decoder ignores bytes after IEND, so decoding stdout alone cannot see a summary
+    // line appended to the image: stdout must end at IEND's CRC, and the line must be on stderr.
+    let run = convert(
+        &[
+            Path::new("-"),
+            Path::new("-o"),
+            Path::new("-"),
+            Path::new("--format"),
+            Path::new("png"),
+        ],
+        &png(),
+    );
+
+    assert!(run.status.success(), "{}", streams(&run));
+    let iend = run
+        .stdout
+        .windows(4)
+        .rposition(|w| w == b"IEND")
+        .unwrap_or_else(|| panic!("no IEND on stdout; {}", streams(&run)));
+    assert_eq!(run.stdout.len(), iend + 8, "{}", streams(&run));
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("wrote <stdout>"), "{}", streams(&run));
+}
+
+#[test]
+fn a_lone_input_goes_into_an_existing_directory() {
+    let scratch = Scratch::new("lone-dir");
+    std::fs::write(scratch.path("in.png"), png()).unwrap();
+    let out = scratch.path("out");
+    std::fs::create_dir(&out).unwrap();
+
+    let run = convert(&[&scratch.path("in.png"), &out], b"");
+
+    assert!(run.status.success(), "{}", streams(&run));
+    let avif = std::fs::read(out.join("in.avif")).unwrap();
+    assert!(
+        AvifContainer::parse(&avif).is_ok(),
+        "in.avif is not an AVIF"
+    );
+}
+
+#[test]
 fn an_existing_output_is_kept_and_fails_the_run_without_overwrite() {
     let scratch = Scratch::new("keep");
     std::fs::write(scratch.path("in.png"), png()).unwrap();
