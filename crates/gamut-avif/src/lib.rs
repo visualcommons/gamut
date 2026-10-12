@@ -49,6 +49,12 @@
 //! pipeline is validated differentially
 //! against **libavif + dav1d** (`tests/conformance.rs`).
 //!
+//! Every surface decodes under [`DecodeLimits`] — libavif's default dimension and pixel caps,
+//! checked against each `grid`/`iovl` canvas, `ispe` and decoded frame **before** the buffer it
+//! sizes is allocated, with every full-image buffer reserved fallibly — so a hostile file is
+//! refused with a typed error rather than exhausting memory. Each surface has a `*_with_limits`
+//! twin taking caller-chosen limits.
+//!
 //! # Examples
 //!
 //! Parse an AVIF file and decode it through a caller-supplied [`Av1StillDecoder`]. The stub here
@@ -226,7 +232,7 @@ pub use c2pa::{
 };
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
-pub use decode::{Av1StillDecoder, DecodedFrame};
+pub use decode::{Av1StillDecoder, DecodeLimits, DecodedFrame};
 pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder, RawPlanes};
 pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
 pub use gamut_core::Dimensions;

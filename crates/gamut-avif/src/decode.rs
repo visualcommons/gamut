@@ -75,6 +75,104 @@ use crate::image::{AvifImage, AvifItem, CleanAperture, ItemKind, TransformativeP
 /// stack.
 const MAX_DERIVATION_DEPTH: usize = 8;
 
+/// The message of the error [`DecodeLimits`] raises for a dimension past
+/// [`DecodeLimits::max_dimension`].
+pub(crate) const DIMENSION_LIMIT: &str =
+    "AVIF: image dimension exceeds DecodeLimits::max_dimension";
+
+/// The message of the error [`DecodeLimits`] raises for a sample count past
+/// [`DecodeLimits::max_pixels`].
+pub(crate) const PIXEL_LIMIT: &str = "AVIF: image pixel count exceeds DecodeLimits::max_pixels";
+
+/// Resource ceilings for the decode pipeline, checked **before** every canvas or plane the
+/// pipeline sizes from the file.
+///
+/// Every buffer the decode surfaces allocate is sized by numbers in the file: a `grid` or `iovl`
+/// declares its output canvas, an `ispe` declares a coded item's size, and an
+/// [`Av1StillDecoder`] returns a frame whose size the codestream chose. A hostile file can
+/// therefore ask for a 65535 × 65535 overlay — 17 GiB of 8-bit RGBA — with a few dozen bytes. These
+/// caps are checked against the declared size before the buffer exists, so such a file is refused
+/// with a typed error rather than serviced.
+///
+/// What is checked, on all three surfaces (planar, RGBA8, RGBA16):
+///
+/// - a coded item's `ispe`, before the [`Av1StillDecoder`] is invoked, and the frame the decoder
+///   returns, before anything is derived from it;
+/// - a `grid`'s output size, before any tile is decoded, and its tiled canvas
+///   (`columns·tile_width × rows·tile_height` — the samples the tiles hold before the crop) once
+///   the first tile fixes the tile size;
+/// - an `iovl`'s output canvas, before it is allocated.
+///
+/// The caps apply to the image *as decoded*, before `clap`/`irot`/`imir`; none of those can grow
+/// either measure (a rotation swaps the axes and both caps are axis-symmetric). Each refusal is
+/// [`Error::Unsupported`] — the file may be well-formed, it is this decoder's budget that declines
+/// it, as in `gamut-png` — with a message naming the field that refused it.
+///
+/// Separately from these caps, every full-image buffer the pipeline allocates is reserved
+/// fallibly: an allocation the system refuses is [`Error::Unsupported`] too, never an abort.
+///
+/// The defaults are libavif's (`AVIF_DEFAULT_IMAGE_DIMENSION_LIMIT` and
+/// `AVIF_DEFAULT_IMAGE_SIZE_LIMIT`, the reference decoder this crate is validated against), so a
+/// file libavif decodes under its defaults is not refused here for size. This is a different type
+/// from `gamut_av1::DecodeLimits`: that one caps a single AV1 frame (and its tile count) inside
+/// the codec, this one caps the container's derived images, which may be larger than any one
+/// frame.
+///
+/// Construct with [`DecodeLimits::new`] or start from [`DecodeLimits::default`] and assign a
+/// field; the struct is `#[non_exhaustive]` so a further cap can be added without a breaking
+/// change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DecodeLimits {
+    /// The largest accepted width **or** height, in pixels. Default 32768.
+    pub max_dimension: u32,
+    /// The largest accepted pixel count (`width × height`), bounding the allocation independently
+    /// of the aspect ratio. Default 16384 × 16384 (268 435 456).
+    pub max_pixels: u64,
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self::new(32768, 16384 * 16384)
+    }
+}
+
+impl DecodeLimits {
+    /// Limits capping each dimension at `max_dimension` and the pixel count at `max_pixels`.
+    #[must_use]
+    pub const fn new(max_dimension: u32, max_pixels: u64) -> Self {
+        Self {
+            max_dimension,
+            max_pixels,
+        }
+    }
+
+    /// Refuses a `width × height` image past either cap.
+    fn check(self, width: u32, height: u32) -> Result<()> {
+        if width.max(height) > self.max_dimension {
+            return Err(Error::unsupported(env!("CARGO_PKG_NAME"), DIMENSION_LIMIT));
+        }
+        if u64::from(width) * u64::from(height) > self.max_pixels {
+            return Err(Error::unsupported(env!("CARGO_PKG_NAME"), PIXEL_LIMIT));
+        }
+        Ok(())
+    }
+}
+
+/// A `len`-element buffer of `fill`, reserved fallibly: a request the allocator refuses (or one
+/// past `isize::MAX` bytes) is [`Error::Unsupported`] rather than an abort.
+fn try_filled<T: Clone>(len: usize, fill: T) -> Result<Vec<T>> {
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(len).map_err(|_| {
+        Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: out of memory allocating a decode buffer",
+        )
+    })?;
+    buffer.resize(len, fill);
+    Ok(buffer)
+}
+
 /// A pluggable AV1 still-picture decoder: the seam issue #250 exposes so a user can hook in a
 /// platform AV1 decoder (dav1d, VideoToolbox, VAAPI, MediaCodec, a hardware block …) and decode
 /// compliant AVIF images end to end through this crate.
@@ -281,20 +379,38 @@ impl AvifImage {
     /// Transformative properties (`clap`/`irot`/`imir`) are **not** applied here — read them via
     /// [`AvifItem::transformative_properties`](crate::AvifItem::transformative_properties).
     ///
+    /// Decodes under [`DecodeLimits::default`]; [`decode_item_planar_with_limits`](Self::decode_item_planar_with_limits)
+    /// takes caller-chosen limits.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] for a missing item, a malformed `av1C`, a payload
     /// violating the still-image constraints, a derivation cycle, or a malformed derivation;
     /// [`Error::Unsupported`] for an `iovl`, a non-AV1 coded item, an item with an unrecognised
-    /// essential property, a non-uniform grid, or a derivation nested past the internal depth
-    /// limit; and propagates the `decoder`'s errors.
+    /// essential property, a non-uniform grid, a derivation nested past the internal depth
+    /// limit, an image past the [`DecodeLimits`], or an allocation the system refuses; and
+    /// propagates the `decoder`'s errors.
     pub fn decode_item_planar(
         &self,
         id: u32,
         decoder: &mut dyn Av1StillDecoder,
     ) -> Result<DecodedFrame> {
+        self.decode_item_planar_with_limits(id, decoder, DecodeLimits::default())
+    }
+
+    /// [`decode_item_planar`](Self::decode_item_planar) under caller-chosen [`DecodeLimits`].
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_planar`](Self::decode_item_planar), with `limits` as the budget.
+    pub fn decode_item_planar_with_limits(
+        &self,
+        id: u32,
+        decoder: &mut dyn Av1StillDecoder,
+        limits: DecodeLimits,
+    ) -> Result<DecodedFrame> {
         let mut stack = Vec::new();
-        self.decode_planar_inner(id, decoder, &mut stack)
+        self.decode_planar_inner(id, decoder, &mut stack, limits)
     }
 
     /// Decodes an item to a presentation-ready [`ImageBuf<Rgba8>`]: planar decode (or `iovl`
@@ -357,6 +473,10 @@ impl AvifImage {
     /// anti-clockwise, `imir` mirrors top↔bottom (axis 0) or left↔right (axis 1) per ISO/IEC
     /// 23008-12:2022 §6.5.12.
     ///
+    /// **Limits.** Decodes under [`DecodeLimits::default`], checked before every canvas and plane
+    /// (see [`DecodeLimits`]); [`decode_item_rgba8_with_limits`](Self::decode_item_rgba8_with_limits)
+    /// takes caller-chosen limits.
+    ///
     /// # Errors
     ///
     /// As [`decode_item_planar`](Self::decode_item_planar), plus [`Error::Unsupported`] for an
@@ -367,8 +487,22 @@ impl AvifImage {
         id: u32,
         decoder: &mut dyn Av1StillDecoder,
     ) -> Result<ImageBuf<Rgba8>> {
+        self.decode_item_rgba8_with_limits(id, decoder, DecodeLimits::default())
+    }
+
+    /// [`decode_item_rgba8`](Self::decode_item_rgba8) under caller-chosen [`DecodeLimits`].
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba8`](Self::decode_item_rgba8), with `limits` as the budget.
+    pub fn decode_item_rgba8_with_limits(
+        &self,
+        id: u32,
+        decoder: &mut dyn Av1StillDecoder,
+        limits: DecodeLimits,
+    ) -> Result<ImageBuf<Rgba8>> {
         let mut stack = Vec::new();
-        let (rgba, dims) = self.decode_rgba_inner::<u8>(id, decoder, &mut stack)?;
+        let (rgba, dims) = self.decode_rgba_inner::<u8>(id, decoder, &mut stack, limits)?;
         ImageBuf::<Rgba8>::new(rgba, dims)
     }
 
@@ -383,7 +517,20 @@ impl AvifImage {
         &self,
         decoder: &mut dyn Av1StillDecoder,
     ) -> Result<ImageBuf<Rgba8>> {
-        self.decode_item_rgba8(self.as_isobmff().primary_item_id, decoder)
+        self.decode_primary_rgba8_with_limits(decoder, DecodeLimits::default())
+    }
+
+    /// [`decode_primary_rgba8`](Self::decode_primary_rgba8) under caller-chosen [`DecodeLimits`].
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba8`](Self::decode_item_rgba8), with `limits` as the budget.
+    pub fn decode_primary_rgba8_with_limits(
+        &self,
+        decoder: &mut dyn Av1StillDecoder,
+        limits: DecodeLimits,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.decode_item_rgba8_with_limits(self.as_isobmff().primary_item_id, decoder, limits)
     }
 
     /// Decodes an item to a presentation-ready **high-bit-depth** [`ImageBuf<Rgba16>`]: the same
@@ -410,6 +557,10 @@ impl AvifImage {
     /// resolved from the AV1 sequence header. Beyond 8 bits every matrix — BT.601 included — goes
     /// through the H.273-derived [`YcbcrMatrix`].
     ///
+    /// **Limits.** As [`decode_item_rgba8`](Self::decode_item_rgba8):
+    /// [`DecodeLimits::default`], or caller-chosen through
+    /// [`decode_item_rgba16_with_limits`](Self::decode_item_rgba16_with_limits).
+    ///
     /// # Errors
     ///
     /// As [`decode_item_rgba8`](Self::decode_item_rgba8), except that a `bit_depth > 8` frame is no
@@ -419,8 +570,22 @@ impl AvifImage {
         id: u32,
         decoder: &mut dyn Av1StillDecoder,
     ) -> Result<ImageBuf<Rgba16>> {
+        self.decode_item_rgba16_with_limits(id, decoder, DecodeLimits::default())
+    }
+
+    /// [`decode_item_rgba16`](Self::decode_item_rgba16) under caller-chosen [`DecodeLimits`].
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba16`](Self::decode_item_rgba16), with `limits` as the budget.
+    pub fn decode_item_rgba16_with_limits(
+        &self,
+        id: u32,
+        decoder: &mut dyn Av1StillDecoder,
+        limits: DecodeLimits,
+    ) -> Result<ImageBuf<Rgba16>> {
         let mut stack = Vec::new();
-        let (rgba, dims) = self.decode_rgba_inner::<u16>(id, decoder, &mut stack)?;
+        let (rgba, dims) = self.decode_rgba_inner::<u16>(id, decoder, &mut stack, limits)?;
         ImageBuf::<Rgba16>::new(rgba, dims)
     }
 
@@ -435,7 +600,21 @@ impl AvifImage {
         &self,
         decoder: &mut dyn Av1StillDecoder,
     ) -> Result<ImageBuf<Rgba16>> {
-        self.decode_item_rgba16(self.as_isobmff().primary_item_id, decoder)
+        self.decode_primary_rgba16_with_limits(decoder, DecodeLimits::default())
+    }
+
+    /// [`decode_primary_rgba16`](Self::decode_primary_rgba16) under caller-chosen
+    /// [`DecodeLimits`].
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba16`](Self::decode_item_rgba16), with `limits` as the budget.
+    pub fn decode_primary_rgba16_with_limits(
+        &self,
+        decoder: &mut dyn Av1StillDecoder,
+        limits: DecodeLimits,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.decode_item_rgba16_with_limits(self.as_isobmff().primary_item_id, decoder, limits)
     }
 
     // ---- planar pipeline ---------------------------------------------------------------------
@@ -445,6 +624,7 @@ impl AvifImage {
         id: u32,
         decoder: &mut dyn Av1StillDecoder,
         stack: &mut Vec<u32>,
+        limits: DecodeLimits,
     ) -> Result<DecodedFrame> {
         let item = self.item(id).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: item id names no item")
@@ -456,7 +636,7 @@ impl AvifImage {
             ));
         }
         enter_derivation(stack, id)?;
-        let out = self.decode_planar_kind(id, item, decoder, stack);
+        let out = self.decode_planar_kind(id, item, decoder, stack, limits);
         stack.pop();
         out
     }
@@ -467,6 +647,7 @@ impl AvifImage {
         item: AvifItem<'_>,
         decoder: &mut dyn Av1StillDecoder,
         stack: &mut Vec<u32>,
+        limits: DecodeLimits,
     ) -> Result<DecodedFrame> {
         match item.kind() {
             ItemKind::CodedImage { .. } if item.kind().is_av1() => {
@@ -480,7 +661,15 @@ impl AvifImage {
                 // The pipeline enforces the still-image constraints before the codec hook sees
                 // the payload (a non-conforming stream never reaches `decode_still`).
                 config.validate_still_payload(payload)?;
-                decoder.decode_still(&config, payload)
+                // The declared size is refused before the decoder is asked to allocate it, and
+                // the delivered one before anything is derived from it: a decoder need not honour
+                // `ispe` (or the file need not carry one), so the second check is not redundant.
+                if let Some(declared) = item.dimensions() {
+                    limits.check(declared.width, declared.height)?;
+                }
+                let frame = decoder.decode_still(&config, payload)?;
+                limits.check(frame.width, frame.height)?;
+                Ok(frame)
             }
             ItemKind::CodedImage { .. } => Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -493,9 +682,9 @@ impl AvifImage {
                         "AVIF: iden item must reference exactly one source",
                     ));
                 };
-                self.decode_planar_inner(*source, decoder, stack)
+                self.decode_planar_inner(*source, decoder, stack, limits)
             }
-            ItemKind::Grid => self.decode_grid(id, item, decoder, stack),
+            ItemKind::Grid => self.decode_grid(id, item, decoder, stack, limits),
             ItemKind::Overlay => Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "AVIF: overlay compositing is not available on the planar surface (use the RGBA path)",
@@ -513,43 +702,45 @@ impl AvifImage {
         item: AvifItem<'_>,
         decoder: &mut dyn Av1StillDecoder,
         stack: &mut Vec<u32>,
+        limits: DecodeLimits,
     ) -> Result<DecodedFrame> {
         // `grid` validates the payload and that the tile count equals rows * columns.
         let grid = self.grid(id)?;
         let cols = usize::from(grid.columns);
         let rows = usize::from(grid.rows);
-        let mut tiles = Vec::with_capacity(cols * rows);
-        for &tile_id in item.derivation_target_ids() {
-            tiles.push(self.decode_planar_inner(tile_id, decoder, stack)?);
-        }
+        let (ow, oh) = (grid.output_width, grid.output_height);
+        // The declared output is refused before a single tile is decoded.
+        limits.check(ow, oh)?;
 
-        // A grid always has >= 1 tile (rows, columns are >= 1). Every tile must be uniform.
+        // A grid always has >= 1 tile (rows, columns are >= 1), and the first fixes the tile
+        // size, so the canvas the tiles fill is checked before a second tile is decoded and every
+        // later tile is held to the first's shape as it arrives: the tiles held at once never
+        // outgrow the limits.
+        let mut tiles: Vec<DecodedFrame> = Vec::with_capacity(cols * rows);
+        for &tile_id in item.derivation_target_ids() {
+            let tile = self.decode_planar_inner(tile_id, decoder, stack, limits)?;
+            match tiles.first() {
+                None => {
+                    check_grid_canvas((cols, rows), (tile.width, tile.height), (ow, oh), limits)?
+                }
+                Some(first)
+                    if tile.chroma != first.chroma
+                        || tile.bit_depth != first.bit_depth
+                        || tile.width != first.width
+                        || tile.height != first.height =>
+                {
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        "AVIF: grid tiles are not uniform in dimensions, chroma, or bit depth",
+                    ));
+                }
+                Some(_) => {}
+            }
+            tiles.push(tile);
+        }
         let first = &tiles[0];
         let (chroma, bit_depth, tw, th) =
             (first.chroma, first.bit_depth, first.width, first.height);
-        if tiles.iter().any(|t| {
-            t.chroma != chroma || t.bit_depth != bit_depth || t.width != tw || t.height != th
-        }) {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "AVIF: grid tiles are not uniform in dimensions, chroma, or bit depth",
-            ));
-        }
-
-        // Canvas = columns·tile_w × rows·tile_h, checked; the output must fit within it.
-        let canvas_w = (cols as u32).checked_mul(tw).ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: grid canvas width overflow")
-        })?;
-        let canvas_h = (rows as u32).checked_mul(th).ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: grid canvas height overflow")
-        })?;
-        let (ow, oh) = (grid.output_width, grid.output_height);
-        if ow == 0 || oh == 0 || ow > canvas_w || oh > canvas_h {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "AVIF: grid output dimensions exceed the tiled canvas",
-            ));
-        }
 
         let y = assemble_plane(
             &tiles,
@@ -559,7 +750,7 @@ impl AvifImage {
             th as usize,
             ow as usize,
             oh as usize,
-        );
+        )?;
         let (cb, cr) = if chroma == ChromaFormat::Monochrome {
             (Vec::new(), Vec::new())
         } else {
@@ -573,7 +764,7 @@ impl AvifImage {
                 tch as usize,
                 ocw as usize,
                 och as usize,
-            );
+            )?;
             let cr = assemble_plane(
                 &tiles,
                 DecodedFrame::cr,
@@ -582,7 +773,7 @@ impl AvifImage {
                 tch as usize,
                 ocw as usize,
                 och as usize,
-            );
+            )?;
             (cb, cr)
         };
         DecodedFrame::new(ow, oh, bit_depth, chroma, y, cb, cr)
@@ -599,6 +790,7 @@ impl AvifImage {
         id: u32,
         decoder: &mut dyn Av1StillDecoder,
         stack: &mut Vec<u32>,
+        limits: DecodeLimits,
     ) -> Result<(Vec<T>, Dimensions)> {
         let item = self.item(id).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: item id names no item")
@@ -612,16 +804,17 @@ impl AvifImage {
 
         let (rgba, w, h) = if matches!(item.kind(), ItemKind::Overlay) {
             enter_derivation(stack, id)?;
-            let composited = self.composite_overlay(id, item, decoder, stack);
+            let composited = self.composite_overlay(id, item, decoder, stack, limits);
             stack.pop();
             composited?
         } else {
-            // The planar path applies its own cycle/depth guard for `id`.
-            let frame = self.decode_planar_inner(id, decoder, stack)?;
+            // The planar path applies its own cycle/depth guard for `id`, and its own limits: a
+            // frame it returns is within them, so the RGBA buffer sized from it is too.
+            let frame = self.decode_planar_inner(id, decoder, stack, limits)?;
             let mut rgba = frame_to_rgba(&frame, self.colour_params(&item)?)?;
             let (w, h) = (frame.width, frame.height);
             if let Some(alpha) = self.alpha_auxiliary_of(id) {
-                let alpha_frame = self.decode_planar_inner(alpha.id(), decoder, stack)?;
+                let alpha_frame = self.decode_planar_inner(alpha.id(), decoder, stack, limits)?;
                 apply_alpha(&mut rgba, w as usize, h as usize, &alpha_frame)?;
             }
             (rgba, w, h)
@@ -637,10 +830,13 @@ impl AvifImage {
         item: AvifItem<'_>,
         decoder: &mut dyn Av1StillDecoder,
         stack: &mut Vec<u32>,
+        limits: DecodeLimits,
     ) -> Result<(Vec<T>, u32, u32)> {
         // `overlay` validates the payload holds exactly one offset per `dimg` reference.
         let overlay = self.overlay(id)?;
         let (ow, oh) = (overlay.output_width, overlay.output_height);
+        // The declared canvas is refused before it is allocated (or any input decoded).
+        limits.check(ow, oh)?;
         let len = (ow as usize)
             .checked_mul(oh as usize)
             .and_then(|p| p.checked_mul(4))
@@ -660,12 +856,12 @@ impl AvifImage {
             T::from_canvas_fill(overlay.canvas_fill_value[2]),
             T::from_canvas_fill(overlay.canvas_fill_value[3]),
         ];
-        let mut canvas = vec![T::default(); len];
+        let mut canvas = try_filled(len, T::default())?;
         for px in canvas.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&fill);
         }
         for (&input_id, &(dx, dy)) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
-            let (src, dims) = self.decode_rgba_inner::<T>(input_id, decoder, stack)?;
+            let (src, dims) = self.decode_rgba_inner::<T>(input_id, decoder, stack, limits)?;
             composite_over(
                 &mut canvas,
                 (ow, oh),
@@ -701,6 +897,35 @@ fn enter_derivation(stack: &mut Vec<u32>, id: u32) -> Result<()> {
 
 // ---- grid plane assembly ---------------------------------------------------------------------
 
+/// Checks a grid's tiled canvas — `columns·tile_w × rows·tile_h`, the samples its tiles hold
+/// before the crop — once the first tile has fixed `tile_w × tile_h`: the arithmetic is checked,
+/// the declared output must be non-empty and fit within the canvas (ISO/IEC 23008-12
+/// §6.6.2.3.2), and the canvas itself must be within `limits`.
+///
+/// Holding the canvas, not only the output, to the limits is what bounds the memory the decoded
+/// tiles occupy together. It refuses a grid whose tiles overhang its output by enough to cross a
+/// limit the output itself respects; raise the limits to accept one.
+fn check_grid_canvas(
+    (cols, rows): (usize, usize),
+    (tw, th): (u32, u32),
+    (ow, oh): (u32, u32),
+    limits: DecodeLimits,
+) -> Result<()> {
+    let canvas_w = (cols as u32).checked_mul(tw).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: grid canvas width overflow")
+    })?;
+    let canvas_h = (rows as u32).checked_mul(th).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: grid canvas height overflow")
+    })?;
+    if ow == 0 || oh == 0 || ow > canvas_w || oh > canvas_h {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: grid output dimensions exceed the tiled canvas",
+        ));
+    }
+    limits.check(canvas_w, canvas_h)
+}
+
 /// Assembles one plane of a grid directly into its cropped output: for each output sample it
 /// reads the covering tile's plane, so the tile canvas (`columns·tile_pw × rows·tile_ph`) is
 /// sampled and cropped to `out_pw × out_ph` in a single pass. `out_pw <= columns·tile_pw` and
@@ -713,8 +938,8 @@ fn assemble_plane(
     tile_ph: usize,
     out_pw: usize,
     out_ph: usize,
-) -> Vec<u16> {
-    let mut out = vec![0u16; out_pw * out_ph];
+) -> Result<Vec<u16>> {
+    let mut out = try_filled(out_pw * out_ph, 0u16)?;
     for oy in 0..out_ph {
         let (tile_row, in_y) = (oy / tile_ph, oy % tile_ph);
         for ox in 0..out_pw {
@@ -723,7 +948,7 @@ fn assemble_plane(
             out[oy * out_pw + ox] = plane(tile)[in_y * tile_pw + in_x];
         }
     }
-    out
+    Ok(out)
 }
 
 // ---- presentation sample width ---------------------------------------------------------------
@@ -937,7 +1162,7 @@ fn frame_to_rgba<T: RgbaSample>(
                 "AVIF: image is too large to present",
             )
         })?;
-    let mut out = vec![T::default(); len];
+    let mut out = try_filled(len, T::default())?;
 
     if frame.chroma == ChromaFormat::Monochrome {
         for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -1064,14 +1289,14 @@ fn apply_transforms<T: Copy + Default>(
                 // field with `& 0x03` — so each unit is exactly one 90° anti-clockwise rotation
                 // and no modulo normalisation is needed here.
                 for _ in 0..turns {
-                    let rotated = rotate90_ccw(&cur, cw, ch);
+                    let rotated = rotate90_ccw(&cur, cw, ch)?;
                     cur = rotated.0;
                     cw = rotated.1;
                     ch = rotated.2;
                 }
             }
             TransformativeProperty::Mirror(axis) => {
-                cur = mirror(&cur, cw, ch, axis);
+                cur = mirror(&cur, cw, ch, axis)?;
             }
             TransformativeProperty::CleanAperture(clap) => {
                 let cropped = crop_clap(&cur, cw, ch, &clap)?;
@@ -1086,10 +1311,10 @@ fn apply_transforms<T: Copy + Default>(
 
 /// Rotates an interleaved RGBA buffer 90° anti-clockwise: output `(ox, oy)` reads input
 /// `(w - 1 - oy, ox)`, giving output dimensions `(h, w)`.
-fn rotate90_ccw<T: Copy + Default>(src: &[T], w: u32, h: u32) -> (Vec<T>, u32, u32) {
+fn rotate90_ccw<T: Copy + Default>(src: &[T], w: u32, h: u32) -> Result<(Vec<T>, u32, u32)> {
     let (wu, hu) = (w as usize, h as usize);
     let (nw, nh) = (hu, wu);
-    let mut out = vec![T::default(); nw * nh * 4];
+    let mut out = try_filled(nw * nh * 4, T::default())?;
     for oy in 0..nh {
         for ox in 0..nw {
             let (sx, sy) = (wu - 1 - oy, ox);
@@ -1098,16 +1323,16 @@ fn rotate90_ccw<T: Copy + Default>(src: &[T], w: u32, h: u32) -> (Vec<T>, u32, u
             out[oi..oi + 4].copy_from_slice(&src[si..si + 4]);
         }
     }
-    (out, h, w)
+    Ok((out, h, w))
 }
 
 /// Mirrors an interleaved RGBA buffer per the `imir` axis semantics of ISO/IEC 23008-12:2022
 /// §6.5.12: `axis = 0` exchanges the top and bottom parts, `axis = 1` exchanges the left and
 /// right parts (the reading libheif and libavif implement). Dimensions are unchanged; any other
 /// `axis` value is treated as axis 0 (the `imir` field is a single bit).
-fn mirror<T: Copy + Default>(src: &[T], w: u32, h: u32, axis: u8) -> Vec<T> {
+fn mirror<T: Copy + Default>(src: &[T], w: u32, h: u32, axis: u8) -> Result<Vec<T>> {
     let (wu, hu) = (w as usize, h as usize);
-    let mut out = vec![T::default(); wu * hu * 4];
+    let mut out = try_filled(wu * hu * 4, T::default())?;
     for y in 0..hu {
         for x in 0..wu {
             let (sx, sy) = if axis == 1 {
@@ -1120,7 +1345,7 @@ fn mirror<T: Copy + Default>(src: &[T], w: u32, h: u32, axis: u8) -> Vec<T> {
             out[oi..oi + 4].copy_from_slice(&src[si..si + 4]);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Crops an interleaved RGBA buffer to its `clap` clean aperture (ISO/IEC 14496-12 §12.1.4).
@@ -1187,7 +1412,7 @@ fn crop_clap<T: Copy + Default>(
 
     let (wu, left, top) = (w as usize, left as usize, top as usize);
     let (cw, chh) = (crop_w as usize, crop_h as usize);
-    let mut out = vec![T::default(); cw * chh * 4];
+    let mut out = try_filled(cw * chh * 4, T::default())?;
     for y in 0..chh {
         for x in 0..cw {
             let si = ((top + y) * wu + (left + x)) * 4;
@@ -1271,5 +1496,89 @@ fn composite_over<T: RgbaSample>(
             }
             canvas[di + 3] = T::narrow(out_a as u32);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gamut_core::ErrorKind;
+
+    use super::{DIMENSION_LIMIT, DecodeLimits, PIXEL_LIMIT, check_grid_canvas, try_filled};
+
+    /// The refusal `result` carries, as `(kind, message)`.
+    fn refusal(result: gamut_core::Result<()>) -> (ErrorKind, Option<&'static str>) {
+        let error = result.unwrap_err();
+        (error.kind(), error.static_message())
+    }
+
+    #[test]
+    fn default_limits_are_libavifs_dimension_and_size_limits() {
+        // AVIF_DEFAULT_IMAGE_DIMENSION_LIMIT and AVIF_DEFAULT_IMAGE_SIZE_LIMIT (libavif avif.h).
+        let limits = DecodeLimits::default();
+        assert_eq!(limits.max_dimension, 32768);
+        assert_eq!(limits.max_pixels, 16384 * 16384);
+    }
+
+    #[test]
+    fn check_accepts_an_image_exactly_at_both_caps() {
+        let limits = DecodeLimits::new(10, 50);
+        assert!(limits.check(10, 5).is_ok());
+        assert!(limits.check(5, 10).is_ok());
+    }
+
+    #[test]
+    fn check_refuses_a_width_or_a_height_one_past_the_dimension_cap() {
+        let limits = DecodeLimits::new(10, 1000);
+        let past = (ErrorKind::Unsupported, Some(DIMENSION_LIMIT));
+        assert_eq!(refusal(limits.check(11, 1)), past);
+        assert_eq!(refusal(limits.check(1, 11)), past);
+    }
+
+    #[test]
+    fn check_refuses_a_pixel_count_past_the_cap_with_both_dimensions_inside() {
+        // 8 x 7 = 56 > 50, while each side is within 10, and 8 + 7 and 8 / 7 are not past 50.
+        let limits = DecodeLimits::new(10, 50);
+        assert_eq!(
+            refusal(limits.check(8, 7)),
+            (ErrorKind::Unsupported, Some(PIXEL_LIMIT))
+        );
+    }
+
+    #[test]
+    fn check_counts_pixels_without_overflowing_u32() {
+        // 65536 x 65536 = 2^32: a u32 product would wrap to 0 and pass.
+        let limits = DecodeLimits::new(u32::MAX, u64::from(u32::MAX));
+        assert_eq!(
+            refusal(limits.check(65536, 65536)),
+            (ErrorKind::Unsupported, Some(PIXEL_LIMIT))
+        );
+    }
+
+    #[test]
+    fn grid_canvas_past_the_limits_is_refused_though_the_output_is_inside_them() {
+        // Two 6x1 tiles make a 12x1 canvas cropped to 7x1: the output respects a 10-pixel
+        // dimension cap, the canvas the tiles fill does not.
+        assert_eq!(
+            refusal(check_grid_canvas(
+                (2, 1),
+                (6, 1),
+                (7, 1),
+                DecodeLimits::new(10, 100)
+            )),
+            (ErrorKind::Unsupported, Some(DIMENSION_LIMIT))
+        );
+        assert!(check_grid_canvas((2, 1), (5, 1), (7, 1), DecodeLimits::new(10, 100)).is_ok());
+    }
+
+    #[test]
+    fn try_filled_returns_the_requested_buffer() {
+        assert_eq!(try_filled(3, 7u16).unwrap(), vec![7, 7, 7]);
+    }
+
+    #[test]
+    fn try_filled_refuses_an_impossible_allocation_instead_of_aborting() {
+        // usize::MAX u64s is past isize::MAX bytes, so the reservation fails without allocating.
+        let error = try_filled(usize::MAX, 0u64).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 }
