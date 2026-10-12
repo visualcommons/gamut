@@ -970,6 +970,31 @@ fn json_output_lists_an_avifs_unread_and_merkle_boxes_after_its_media_data() {
 }
 
 #[test]
+fn json_output_lists_an_unfilled_reserved_avif_slot_as_bounding_no_store() {
+    // `with_c2pa_reserved` writes a zero-filled slot: a zero `LBox` bounds no JUMBF store, so the
+    // box is unread with `no_store_bound` rather than reported as a store.
+    let rgb = [0x40u8; 8 * 8 * 3];
+    let file = gamut::avif::AvifEncoder::new()
+        .with_c2pa_reserved(64)
+        .encode_to_vec(rgb_image(&rgb))
+        .expect("encode");
+    let summary = gamut::avif::AvifContainer::parse(&file)
+        .expect("parse")
+        .c2pa_summary();
+    let (out, doc) = run_inspect_json("reserved.avif", &file, None);
+
+    assert!(out.status.success(), "{doc}");
+    assert_eq!(doc["c2pa"]["stores"], serde_json::json!([]), "{doc}");
+    let unread = &doc["c2pa"]["unread"];
+    assert_eq!(unread.as_array().map(Vec::len), Some(1), "{doc}");
+    assert_eq!(unread[0]["reason"], "no_store_bound");
+    assert_eq!(
+        unread[0]["description"],
+        summary.unread[0].reason.describe()
+    );
+}
+
+#[test]
 fn json_output_lists_a_webp_chunk_too_short_for_a_store_as_unread() {
     // A `C2PA` chunk whose 4-byte payload cannot hold a JUMBF box header, inserted ahead of the
     // encoder's own `C2PA` chunk, with the RIFF size patched to cover it.
