@@ -40,6 +40,13 @@
 //! sub-8×8 partitions, palette — to save encode time. The default, [`Speed::Thorough`],
 //! is the full search, and every entry point without a `speed` argument uses it.
 //!
+//! **Tiling and threads** are [`EncodeOptions`] too ([`encode_still_intra_with_options`],
+//! [`encode_still_intra16_with_options`]): a [`Tiling`] picks the uniform tile layout (log2 tile
+//! columns and rows, clamped to what §5.9.15 and the level allow), and `threads` caps how many
+//! tiles are coded concurrently, on `std::thread::scope` threads (one after another on `wasm32`).
+//! Tiles are independent in intra coding, so the stream depends on the layout only, never on the
+//! thread count. The default is the two-column layout the encoder has always used, on one thread.
+//!
 //! The remaining surface (quantizer matrices and the AVIF-level
 //! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
@@ -68,8 +75,9 @@ pub use decode::{
     Subsampling, TileInfo, TxMode,
 };
 pub use encoder::{
-    EncodedStill, ReconImage, Speed, encode_still_intra, encode_still_intra_superres,
-    encode_still_intra_with, encode_still_intra_with_speed, encode_still_intra16_with,
+    EncodeOptions, EncodedStill, ReconImage, Speed, encode_still_intra,
+    encode_still_intra_superres, encode_still_intra_with, encode_still_intra_with_options,
+    encode_still_intra_with_speed, encode_still_intra16_with, encode_still_intra16_with_options,
     encode_still_intra16_with_speed, encode_still_lossless_identity,
 };
-pub use headers::{Av1Colour, Av1StillConfig};
+pub use headers::{Av1Colour, Av1StillConfig, Tiling};

@@ -182,18 +182,220 @@ pub fn pick_level(width: u32, height: u32) -> Result<u8> {
     ))
 }
 
+/// `MaxTiles` and `MaxTileCols` (Annex A.3, the level table) for `seq_level_idx`.
+///
+/// Every level of one major version shares the pair, and `seq_level_idx` numbers the minor levels
+/// consecutively within a major (`2.0..=2.3` is `0..=3`, `3.x` is `4..=7`, …), so the major is
+/// `seq_level_idx >> 2`. Levels past 6.x are not defined; [`pick_level`] never returns one, and
+/// they take the 6.x pair.
+fn level_tile_limits(seq_level_idx: u8) -> (usize, usize) {
+    match seq_level_idx >> 2 {
+        0 => (8, 4),
+        1 => (16, 6),
+        2 => (32, 8),
+        3 => (64, 8),
+        _ => (128, 16),
+    }
+}
+
+/// The uniform tile layout an encode asks for (AV1 §5.9.15 with `uniform_tile_spacing_flag = 1`):
+/// `1 << cols_log2` tile columns by `1 << rows_log2` tile rows of 64×64 superblocks.
+///
+/// Tiles are what makes an AV1 frame parallel: each one is entropy-coded and predicted without
+/// reference to any other, so the encoder can code them concurrently (see
+/// [`EncodeOptions::threads`](crate::EncodeOptions::threads)) and a decoder can decode them
+/// concurrently. What they cost is compression: every tile starts from the default probabilities
+/// and treats its edges as frame edges, so more tiles mean a larger file. The output for a given
+/// layout does not depend on how many threads encoded it.
+///
+/// The request is a **ceiling and a floor the frame then clamps**, not a guarantee. For each frame
+/// the encoder takes the nearest layout that is legal:
+///
+/// - **§5.9.15 bounds.** At most one tile column per superblock column and one tile row per
+///   superblock row (and at most 64 of each); and at least as many as keep every tile within
+///   `MAX_TILE_WIDTH` (4096 luma samples) and `MAX_TILE_AREA` (4096 × 2304).
+/// - **The level's limits** (Annex A.3): no more than `MaxTileCols` columns and `MaxTiles` tiles at
+///   the level the frame size selects.
+/// - **Superres** (Annex A.3): a tile that is not the rightmost is at least 128 coded samples wide,
+///   and every tile's upscaled width stays within 4096.
+///
+/// Uniform spacing rounds the tile size up, so the coded column count is `ceil(sbCols /
+/// ceil(sbCols >> cols_log2))` and may be fewer than `1 << cols_log2`; rows likewise.
+///
+/// [`Default`] is `cols_log2 = 1, rows_log2 = 0`: two tile columns once the frame is at least two
+/// superblocks (65 luma samples) wide, else one tile — the layout the encoder always used before the
+/// option existed, so the default reproduces its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Tiling {
+    /// `TileColsLog2` requested: `1 << cols_log2` tile columns.
+    pub cols_log2: u8,
+    /// `TileRowsLog2` requested: `1 << rows_log2` tile rows.
+    pub rows_log2: u8,
+}
+
+impl Tiling {
+    /// One tile for the whole frame, wherever the frame is small enough for §5.9.15 to allow it.
+    pub const SINGLE: Self = Self::new(0, 0);
+
+    /// A request for `1 << cols_log2` tile columns by `1 << rows_log2` tile rows.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_av1::Tiling;
+    /// let four_by_two = Tiling::new(2, 1);
+    /// assert_eq!((four_by_two.cols_log2, four_by_two.rows_log2), (2, 1));
+    /// ```
+    #[must_use]
+    pub const fn new(cols_log2: u8, rows_log2: u8) -> Self {
+        Self {
+            cols_log2,
+            rows_log2,
+        }
+    }
+}
+
+impl Default for Tiling {
+    fn default() -> Self {
+        Self::new(1, 0)
+    }
+}
+
+/// `MAX_TILE_WIDTH >> sbSize` (§5.9.15) for 64×64 superblocks: 4096 luma samples.
+const MAX_TILE_WIDTH_SB: usize = 4096 >> 6;
+/// `MAX_TILE_AREA >> (2 * sbSize)` (§5.9.15) for 64×64 superblocks: 4096 × 2304 luma samples.
+const MAX_TILE_AREA_SB: usize = (4096 * 2304) >> 12;
+/// `MAX_TILE_COLS` and `MAX_TILE_ROWS` (§3).
+const MAX_TILE_COLS_ROWS: usize = 64;
+/// MI units per 64×64 superblock (`sbShift`, §5.9.15).
+const SB_MI: usize = 16;
+
+/// The tile layout one frame is coded with: [`Tiling`] resolved against the frame's superblock
+/// grid, its level and superres, carrying the §5.9.15 bounds the `tile_info()` writer codes the
+/// layout against and the `MiColStarts`/`MiRowStarts` the tile encoder walks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TileLayout {
+    /// `TileColsLog2`.
+    pub cols_log2: usize,
+    /// `TileRowsLog2`.
+    pub rows_log2: usize,
+    /// `minLog2TileCols`: where the `increment_tile_cols_log2` loop starts.
+    min_cols_log2: usize,
+    /// `maxLog2TileCols`: where it stops without a terminating zero.
+    max_cols_log2: usize,
+    /// `minLog2TileRows` for this `TileColsLog2`.
+    min_rows_log2: usize,
+    /// `maxLog2TileRows`.
+    max_rows_log2: usize,
+    /// `MiColStarts[0..=TileCols]`.
+    pub col_starts: Vec<usize>,
+    /// `MiRowStarts[0..=TileRows]`.
+    pub row_starts: Vec<usize>,
+}
+
+/// `MiColStarts`/`MiRowStarts` (§5.9.15, uniform spacing) for `sb` superblocks split at `log2`,
+/// ending at `mi` (the frame's `MiCols`/`MiRows`).
+fn uniform_starts(sb: usize, log2: usize, mi: usize) -> Vec<usize> {
+    let size_sb = sb.div_ceil(1 << log2);
+    let mut starts: Vec<usize> = (0..sb).step_by(size_sb).map(|s| s * SB_MI).collect();
+    starts.push(mi);
+    starts
+}
+
+impl TileLayout {
+    /// Resolves `request` for a frame of `mi_cols × mi_rows` at `seq_level_idx`, coded with
+    /// superres `coded_denom` when present. The [`Tiling`] documentation states the rules; the §5.9.15
+    /// syntax bounds are applied last, so they win over a level limit (a combination no defined
+    /// level produces).
+    pub(crate) fn resolve(
+        request: Tiling,
+        mi_cols: usize,
+        mi_rows: usize,
+        seq_level_idx: u8,
+        superres_coded_denom: Option<u8>,
+    ) -> Self {
+        let sb_cols = mi_cols.div_ceil(SB_MI);
+        let sb_rows = mi_rows.div_ceil(SB_MI);
+        let width_sb = |cols_log2: usize| sb_cols.div_ceil(1 << cols_log2);
+        let height_sb = |rows_log2: usize| sb_rows.div_ceil(1 << rows_log2);
+        let count = |sb: usize, size: usize| sb.div_ceil(size);
+        let (max_tiles, max_tile_cols) = level_tile_limits(seq_level_idx);
+
+        let min_cols_log2 = tile_log2(MAX_TILE_WIDTH_SB, sb_cols);
+        let max_cols_log2 = tile_log2(1, sb_cols.min(MAX_TILE_COLS_ROWS));
+        let max_rows_log2 = tile_log2(1, sb_rows.min(MAX_TILE_COLS_ROWS));
+        let min_log2_tiles = min_cols_log2.max(tile_log2(MAX_TILE_AREA_SB, sb_rows * sb_cols));
+
+        // Each search below walks a range of candidate log2 values and takes the first that fits,
+        // so its length is fixed by the range rather than by a counter a mutant could stall. Every
+        // range ends at a value that always fits (one column, one row, or the syntax maximum), so
+        // the fallback is that value.
+        let requested_cols = usize::from(request.cols_log2).min(max_cols_log2);
+        let mut cols = (0..=requested_cols)
+            .rev()
+            .find(|&c| count(sb_cols, width_sb(c)) <= max_tile_cols)
+            .unwrap_or(0);
+        // The fewest columns this frame may take: the syntax's own minimum, raised under superres
+        // so that no tile's upscaled width, `TileWidth * SuperresDenom / 8`, passes 4096. The
+        // header still codes the loop from the syntax minimum; this one only bounds the choice.
+        let mut fewest_cols_log2 = min_cols_log2;
+        if let Some(cd) = superres_coded_denom {
+            // A non-rightmost tile is at least 128 coded samples, two superblocks, wide.
+            cols = (0..=cols).rev().find(|&c| width_sb(c) >= 2).unwrap_or(0);
+            let widest_sb = (MAX_TILE_WIDTH_SB * 8) / (usize::from(cd) + 9);
+            fewest_cols_log2 = fewest_cols_log2.max(tile_log2(widest_sb, sb_cols));
+        }
+        let cols = cols.max(fewest_cols_log2);
+
+        let min_rows_log2 = min_log2_tiles.saturating_sub(cols);
+        let tile_cols = count(sb_cols, width_sb(cols));
+        let requested_rows = usize::from(request.rows_log2).min(max_rows_log2);
+        let rows = (0..=requested_rows)
+            .rev()
+            .find(|&r| tile_cols * count(sb_rows, height_sb(r)) <= max_tiles)
+            .unwrap_or(0);
+        // Uniform spacing rounds each tile up, so a layout at the syntax minimum can still hold a
+        // tile over `MAX_TILE_AREA`; take more rows until none does.
+        // §5.9.15 lets `minLog2TileRows` exceed `maxLog2TileRows` (the climb is then empty), so
+        // the floor is kept even past the maximum.
+        let floor = rows.max(min_rows_log2);
+        let rows = (floor..=max_rows_log2)
+            .find(|&r| width_sb(cols) * height_sb(r) <= MAX_TILE_AREA_SB)
+            .unwrap_or(max_rows_log2.max(floor));
+
+        Self {
+            cols_log2: cols,
+            rows_log2: rows,
+            min_cols_log2,
+            max_cols_log2,
+            min_rows_log2,
+            max_rows_log2,
+            col_starts: uniform_starts(sb_cols, cols, mi_cols),
+            row_starts: uniform_starts(sb_rows, rows, mi_rows),
+        }
+    }
+
+    /// `NumTiles = TileCols * TileRows`.
+    pub(crate) fn num_tiles(&self) -> usize {
+        (self.col_starts.len() - 1) * (self.row_starts.len() - 1)
+    }
+}
+
 /// Number of bits needed to hold `value - 1` (the `frame_width/height_bits` field), minimum 1.
 fn dimension_bits(value: u32) -> u32 {
     (32 - value.saturating_sub(1).leading_zeros()).max(1)
 }
 
 /// `tile_log2(blkSize, target)` (AV1 §5.9.16): smallest `k` with `blkSize << k >= target`.
-fn tile_log2(blk_size: u32, target: u32) -> u32 {
-    let mut k = 0;
-    while (blk_size << k) < target {
-        k += 1;
-    }
-    k
+///
+/// `blkSize << k >= target` is `1 << k >= ceil(target / blkSize)`, so `k` is the exponent of the
+/// next power of two at or above that quotient — computed directly rather than by the spec's
+/// counting loop, which a mutated shift or comparison would turn into one that never ends.
+fn tile_log2(blk_size: usize, target: usize) -> usize {
+    target
+        .div_ceil(blk_size)
+        .next_power_of_two()
+        .trailing_zeros() as usize
 }
 
 /// Appends an OBU (header byte, `obu_has_size_field = 1`, LEB128 size, payload) to `out`.
@@ -301,6 +503,35 @@ pub(crate) fn sequence_header_payload(
     w.into_bytes()
 }
 
+/// Writes `tile_info()` (§5.9.15) for `layout` under `uniform_tile_spacing_flag = 1`.
+///
+/// Each log2 is coded as a unary climb from its minimum: one `1` per increment, then a terminating
+/// `0` unless the climb reached the maximum, where the decoder stops reading on its own. The loops
+/// run over the counts they code rather than testing a flag inside a `while`, so no comparison here
+/// can be mutated into a loop that never ends.
+fn write_tile_info(w: &mut BitWriter, layout: &TileLayout) {
+    w.put_bit(1); // uniform_tile_spacing_flag
+    for _ in layout.min_cols_log2..layout.cols_log2 {
+        w.put_bit(1); // increment_tile_cols_log2
+    }
+    if layout.cols_log2 < layout.max_cols_log2 {
+        w.put_bit(0); // increment_tile_cols_log2: stop
+    }
+    for _ in layout.min_rows_log2..layout.rows_log2 {
+        w.put_bit(1); // increment_tile_rows_log2
+    }
+    if layout.rows_log2 < layout.max_rows_log2 {
+        w.put_bit(0); // increment_tile_rows_log2: stop
+    }
+    let tile_bits = (layout.cols_log2 + layout.rows_log2) as u32;
+    if tile_bits > 0 {
+        // context_update_tile_id (tile 0: frame-end CDF update is off, so any tile would do), then
+        // tile_size_bytes_minus_1.
+        w.put_bits(0, tile_bits);
+        w.put_bits(TILE_SIZE_BYTES as u32 - 1, 2);
+    }
+}
+
 /// Builds the uncompressed frame header for the intra keyframe (AV1 §5.9.2), byte-aligned
 /// (`byte_alignment`, no trailing one — the tile data follows in the same `OBU_FRAME`).
 ///
@@ -312,10 +543,7 @@ pub(crate) fn sequence_header_payload(
 /// The returned bytes precede the tile (symbol-coded) data; together they form the frame OBU
 /// payload (AV1 §5.10).
 pub(crate) fn frame_header_payload(
-    width: u32,
-    height: u32,
-    mi_cols: u32,
-    mi_rows: u32,
+    layout: &TileLayout,
     base_q_idx: u8,
     superres_coded_denom: Option<u8>,
     monochrome: bool,
@@ -353,35 +581,8 @@ pub(crate) fn frame_header_payload(
     // 1, so no bit is coded even now that `disable_cdf_update` is 0, and `frame_end_update_cdf`
     // (§7.7) is never invoked. A still image has no later frame to load a saved context anyway.
 
-    // tile_info() (§5.9.15): uniform spacing, two tile columns when the frame is ≥ 2 superblocks
-    // wide (else one). `tile_cols_log2` mirrors the split `FrameEncoder::encode` applies.
-    let _ = (width, height);
-    let sb_cols = (mi_cols + 15) >> 4;
-    let sb_rows = (mi_rows + 15) >> 4;
-    let max_log2_tile_cols = tile_log2(1, sb_cols.min(64));
-    let max_log2_tile_rows = tile_log2(1, sb_rows.min(64));
-    let tile_cols_log2 = u32::from(sb_cols >= 2);
-    w.put_bit(1); // uniform_tile_spacing_flag
-    // increment_tile_cols_log2 loop (min log2 is 0 at these sizes): 1 to grow TileColsLog2, 0 to stop.
-    let mut t = 0;
-    while t < max_log2_tile_cols {
-        let inc = t < tile_cols_log2;
-        w.put_bit(u8::from(inc));
-        if inc {
-            t += 1;
-        } else {
-            break;
-        }
-    }
-    if max_log2_tile_rows > 0 {
-        w.put_bit(0); // increment_tile_rows_log2 = 0 (one tile row)
-    }
-    if tile_cols_log2 > 0 {
-        // context_update_tile_id is `TileRowsLog2 + TileColsLog2` bits (tile 0); then
-        // tile_size_bytes_minus_1 (2 bits).
-        w.put_bits(0, tile_cols_log2);
-        w.put_bits(TILE_SIZE_BYTES as u32 - 1, 2);
-    }
+    // tile_info() (§5.9.15): uniform spacing at the layout `FrameEncoder::encode` codes the tiles in.
+    write_tile_info(&mut w, layout);
 
     // quantization_params().
     w.put_bits(u32::from(base_q_idx), 8); // base_q_idx
@@ -476,7 +677,7 @@ pub(crate) fn frame_header_payload(
     w.byte_align(); // byte_alignment after frame_header_obu (§5.10)
     // tile_group_obu prefix (§5.11.1): for more than one tile, tile_start_and_end_present_flag = 0,
     // then re-align so the tile_size fields / tile data begin on a byte boundary.
-    if tile_cols_log2 > 0 {
+    if layout.num_tiles() > 1 {
         w.put_bit(0); // tile_start_and_end_present_flag
         w.byte_align();
     }
@@ -609,6 +810,195 @@ mod tests {
         assert_eq!(dimension_bits(17), 5); // 16 -> 5 bits
         assert_eq!(dimension_bits(256), 8); // 255 -> 8 bits
         assert_eq!(dimension_bits(257), 9); // 256 -> 9 bits
+    }
+
+    /// `TileLayout::resolve` over a frame of `sb_cols × sb_rows` whole superblocks.
+    fn layout(req: Tiling, sb_cols: usize, sb_rows: usize, level: u8) -> TileLayout {
+        TileLayout::resolve(req, sb_cols * SB_MI, sb_rows * SB_MI, level, None)
+    }
+
+    #[test]
+    fn tile_log2_is_the_smallest_covering_exponent() {
+        // §5.9.16: the smallest `k` with `blk << k >= target`, at, just past and just short of
+        // each power-of-two boundary.
+        for (blk, target, want) in [
+            (1, 1, 0),
+            (1, 2, 1),
+            (1, 3, 2),
+            (1, 4, 2),
+            (1, 5, 3),
+            (64, 64, 0),
+            (64, 65, 1),
+            (64, 256, 2),
+            (2304, 4590, 1),
+            (2304, 4609, 2),
+        ] {
+            assert_eq!(tile_log2(blk, target), want, "tile_log2({blk}, {target})");
+        }
+    }
+
+    #[test]
+    fn level_tile_limits_follow_the_annex_a_table() {
+        // One assertion per major level, at both ends of its minor range.
+        for (idx, want) in [
+            (0, (8, 4)),
+            (3, (8, 4)),
+            (4, (16, 6)),
+            (7, (16, 6)),
+            (8, (32, 8)),
+            (11, (32, 8)),
+            (12, (64, 8)),
+            (15, (64, 8)),
+            (16, (128, 16)),
+            (19, (128, 16)),
+        ] {
+            assert_eq!(level_tile_limits(idx), want, "seq_level_idx {idx}");
+        }
+    }
+
+    #[test]
+    fn the_default_tiling_is_the_legacy_two_column_layout() {
+        // Before the option existed the encoder coded two tile columns once the frame was two
+        // superblocks wide, one tile otherwise, and always one tile row.
+        let one = layout(Tiling::default(), 1, 3, 0);
+        assert_eq!((one.cols_log2, one.rows_log2), (0, 0));
+        assert_eq!(one.col_starts, vec![0, 16]);
+        let two = layout(Tiling::default(), 2, 3, 0);
+        assert_eq!((two.cols_log2, two.rows_log2), (1, 0));
+        assert_eq!(two.col_starts, vec![0, 16, 32]);
+        assert_eq!(two.row_starts, vec![0, 48]);
+        // An odd superblock count rounds the first tile up: 3 → 2 + 1.
+        assert_eq!(
+            layout(Tiling::default(), 3, 1, 0).col_starts,
+            vec![0, 32, 48]
+        );
+        assert_eq!(Tiling::default(), Tiling::new(1, 0));
+        assert_eq!(Tiling::SINGLE, Tiling::new(0, 0));
+    }
+
+    #[test]
+    fn uniform_spacing_can_code_fewer_tiles_than_requested() {
+        // §5.9.15: 5 superblock rows at log2 2 are `ceil(5 / 4) = 2` rows high, which is 3 tile
+        // rows, not 4. The frame edge ends the last one wherever it falls.
+        let l = TileLayout::resolve(Tiling::new(0, 2), 16, 5 * 16 - 2, 4, None);
+        assert_eq!(l.rows_log2, 2);
+        assert_eq!(l.row_starts, vec![0, 32, 64, 78]);
+        assert_eq!(l.num_tiles(), 3);
+    }
+
+    #[test]
+    fn a_request_past_the_frame_is_clamped_to_one_tile_per_superblock() {
+        // `maxLog2TileCols = tile_log2(1, sbCols)`: 3 superblocks allow log2 2 at most.
+        let l = layout(Tiling::new(6, 6), 3, 2, 4);
+        assert_eq!((l.cols_log2, l.rows_log2), (2, 1));
+        assert_eq!(l.col_starts, vec![0, 16, 32, 48]);
+        assert_eq!(l.num_tiles(), 6);
+    }
+
+    #[test]
+    fn a_frame_wider_than_max_tile_width_takes_at_least_two_columns() {
+        // 65 superblocks are 4160 samples, past MAX_TILE_WIDTH: `minLog2TileCols = 1` even when
+        // one tile is asked for.
+        let l = layout(Tiling::SINGLE, 65, 1, 16);
+        assert_eq!(l.cols_log2, 1);
+        assert_eq!(l.min_cols_log2, 1);
+        assert_eq!(l.col_starts, vec![0, 33 * 16, 65 * 16]);
+    }
+
+    #[test]
+    fn the_level_caps_tile_columns_and_tiles() {
+        // Level 2.0: MaxTileCols 4, MaxTiles 8. 30 superblocks asked for 64 columns take 4
+        // (log2 2, 8 superblocks each); 18 rows asked for 64 then fit 8 / 4 = 2 tile rows.
+        let l = layout(Tiling::new(6, 6), 30, 18, 0);
+        assert_eq!((l.cols_log2, l.rows_log2), (2, 1));
+        assert_eq!(l.num_tiles(), 8);
+        // Level 4.0 allows 8 columns and 32 tiles on the same grid.
+        let l = layout(Tiling::new(6, 6), 30, 18, 8);
+        assert_eq!((l.cols_log2, l.rows_log2), (3, 2));
+        assert_eq!(l.num_tiles(), 32);
+    }
+
+    #[test]
+    fn a_tile_rounded_past_max_tile_area_takes_another_row() {
+        // 34 × 135 superblocks (2176 × 8640) need `minLog2Tiles = 1`, but one row split leaves a
+        // 34 × 68 = 2312-superblock tile, over MAX_TILE_AREA's 2304; the next row split fits.
+        let l = layout(Tiling::SINGLE, 34, 135, 16);
+        assert_eq!(l.min_rows_log2, 1);
+        assert_eq!((l.cols_log2, l.rows_log2), (0, 2));
+    }
+
+    #[test]
+    fn the_tile_count_beyond_one_tile_row_is_capped_by_max_tiles() {
+        // Level 2.0 (MaxTiles 8) with two columns: 4 rows fit, 8 do not.
+        let l = layout(Tiling::new(1, 3), 2, 18, 0);
+        assert_eq!((l.cols_log2, l.rows_log2), (1, 2));
+    }
+
+    #[test]
+    fn superres_keeps_every_non_rightmost_tile_two_superblocks_wide() {
+        // Annex A.3: under superres a tile that is not the rightmost is at least 128 samples wide.
+        // Two superblocks would split into two 64-wide tiles, so they stay one tile; three split
+        // 2 + 1, which is legal since only the rightmost is narrow.
+        let at = |sb_cols: usize| {
+            TileLayout::resolve(Tiling::default(), sb_cols * SB_MI, SB_MI, 0, Some(0)).cols_log2
+        };
+        assert_eq!(at(2), 0);
+        assert_eq!(at(3), 1);
+        // The same three superblocks at log2 2 would be 1-wide tiles; the request drops to 1.
+        let l = TileLayout::resolve(Tiling::new(2, 0), 3 * SB_MI, SB_MI, 0, Some(0));
+        assert_eq!(l.cols_log2, 1);
+    }
+
+    #[test]
+    fn superres_bounds_each_tile_s_upscaled_width() {
+        // At SuperresDenom 16 (coded_denom 7) a coded 64-sample superblock upscales to 128, so a
+        // tile holds at most 4096 / 128 = 32 superblocks: 100 of them need four columns.
+        let l = TileLayout::resolve(Tiling::SINGLE, 100 * SB_MI, SB_MI, 16, Some(7));
+        assert_eq!(l.cols_log2, 2);
+        // The syntax minimum is still what the header codes the climb from.
+        assert_eq!(l.min_cols_log2, 1);
+        // At denom 9 a tile holds 56 superblocks, so two columns of 50 suffice.
+        let l = TileLayout::resolve(Tiling::SINGLE, 100 * SB_MI, SB_MI, 16, Some(0));
+        assert_eq!(l.cols_log2, 1);
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn tile_info_parses_back_to_the_layout_it_was_written_for() {
+        // The decoder's `tile_info()` reader derives TileColsLog2/TileRowsLog2 and the tile starts
+        // from the coded climb; it must land on the layout the writer was given, including the
+        // climbs that start above zero (wide and tall frames) and the ones that reach the maximum
+        // and so code no terminating zero.
+        use gamut_bitstream::BitReader;
+
+        use crate::decode::{FrameHeader, SequenceHeader};
+        for (w, h, req) in [
+            (64, 64, Tiling::default()),
+            (200, 130, Tiling::new(2, 1)),
+            (130, 130, Tiling::new(6, 6)),
+            (4160, 64, Tiling::SINGLE),
+            (2176, 8640, Tiling::SINGLE),
+            (1920, 1080, Tiling::new(3, 2)),
+        ] {
+            let cfg = crate::decode::testutil::still_config(w, h, Av1Colour::default());
+            let seq = SequenceHeader::parse(&sequence_header_payload(&cfg, w, h, true, false))
+                .expect("sequence header parses");
+            let mi_cols = 2 * ((w as usize + 7) >> 3);
+            let mi_rows = 2 * ((h as usize + 7) >> 3);
+            let l = TileLayout::resolve(req, mi_cols, mi_rows, cfg.seq_level_idx_0, None);
+            let frame = frame_header_payload(&l, 100, None, false);
+            let fh = FrameHeader::parse(&mut BitReader::new(&frame), &seq).expect("parses");
+            let t = &fh.tile_info;
+            assert_eq!(
+                (t.tile_cols_log2 as usize, t.tile_rows_log2 as usize),
+                (l.cols_log2, l.rows_log2),
+                "{w}x{h}"
+            );
+            let starts = |v: &[u32]| v.iter().map(|&s| s as usize).collect::<Vec<_>>();
+            assert_eq!(starts(&t.mi_col_starts), l.col_starts, "{w}x{h}");
+            assert_eq!(starts(&t.mi_row_starts), l.row_starts, "{w}x{h}");
+            assert_eq!(t.tile_size_bytes, TILE_SIZE_BYTES, "{w}x{h}");
+        }
     }
 
     #[test]

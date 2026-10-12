@@ -1069,9 +1069,15 @@ mod tests {
             crate::headers::sequence_header_payload(&cfg, width, height, lossy, superres.is_some());
         let mi_cols = 2 * ((width + 7) >> 3);
         let mi_rows = 2 * ((height + 7) >> 3);
-        let frame_payload = crate::headers::frame_header_payload(
-            width, height, mi_cols, mi_rows, base_q_idx, superres, false,
+        let layout = crate::headers::TileLayout::resolve(
+            crate::headers::Tiling::default(),
+            mi_cols as usize,
+            mi_rows as usize,
+            cfg.seq_level_idx_0,
+            superres,
         );
+        let frame_payload =
+            crate::headers::frame_header_payload(&layout, base_q_idx, superres, false);
         let unit = crate::headers::assemble_temporal_unit(&seq_payload, &frame_payload);
         let obus: Vec<_> = ObuIter::new(&unit).collect::<Result<Vec<_>>>().unwrap();
         let seq = SequenceHeader::parse(obus[0].payload).unwrap();
@@ -1823,7 +1829,14 @@ mod tests {
         let cfg = crate::decode::testutil::still_config(64, 64, Av1Colour::default());
         let seq_payload = crate::headers::sequence_header_payload(&cfg, 64, 64, true, false);
         let seq = SequenceHeader::parse(&seq_payload).unwrap();
-        let frame = crate::headers::frame_header_payload(64, 64, 16, 16, 100, None, false);
+        let layout = crate::headers::TileLayout::resolve(
+            crate::headers::Tiling::default(),
+            16,
+            16,
+            cfg.seq_level_idx_0,
+            None,
+        );
+        let frame = crate::headers::frame_header_payload(&layout, 100, None, false);
         for cut in 0..frame.len() {
             let mut r = BitReader::new(&frame[..cut]);
             assert!(

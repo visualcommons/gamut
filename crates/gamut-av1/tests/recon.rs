@@ -15,9 +15,12 @@
 //! decoder binary. Building these tests therefore needs cmake/meson/ninja/nasm and the checked-out
 //! submodules (`git submodule update --init --recursive`).
 
+use std::num::NonZeroUsize;
+
 use gamut_av1::{
-    Av1Colour, Speed, encode_still_intra, encode_still_intra_superres, encode_still_intra_with,
-    encode_still_intra_with_speed, encode_still_intra16_with, encode_still_intra16_with_speed,
+    Av1Colour, EncodeOptions, Speed, Tiling, encode_still_intra, encode_still_intra_superres,
+    encode_still_intra_with, encode_still_intra_with_options, encode_still_intra_with_speed,
+    encode_still_intra16_with, encode_still_intra16_with_options, encode_still_intra16_with_speed,
 };
 use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16, RgbToYcbcr};
@@ -710,6 +713,80 @@ fn multi_tile_matches_dav1d() {
         for &(w, h) in &[(72, 16), (100, 70), (130, 96)] {
             check(&planes(w, h, directional), q);
         }
+    }
+}
+
+#[test]
+fn every_tile_layout_matches_both_decoders() {
+    // Configurable tiling (#648): tile *rows* as well as columns, layouts the frame clamps, and
+    // tiles coded on several threads. A tile row's top edge is an above edge the decoder treats as
+    // unavailable (`AvailU`, §7.3.1) and resets the above contexts at (`clear_above_context`), so a
+    // block there must predict and code its contexts as if at the frame top. Directional content
+    // makes the mode search read those edges; libaom and dav1d reproducing the reconstruction
+    // byte-for-byte proves the availability, the per-tile resets, the `tile_info()` climb and the
+    // tile-group framing. Each layout is coded on three threads, so the reconstruction compared is
+    // also the one merged from worker threads.
+    let directional = |x: u32, y: u32| {
+        let vert = if (x / 2).is_multiple_of(2) { 210 } else { 30 } as u8;
+        let horiz = if (y / 3).is_multiple_of(2) { 200 } else { 40 } as u8;
+        let diag = (((x + 2 * y) * 12) % 256) as u8;
+        [vert, horiz, diag]
+    };
+    let three = NonZeroUsize::new(3).unwrap();
+    let tilings = [
+        Tiling::SINGLE,
+        Tiling::new(0, 1),
+        Tiling::new(1, 1),
+        Tiling::new(2, 2),
+        Tiling::new(6, 6),
+    ];
+    for tiling in tilings {
+        let options = EncodeOptions::default()
+            .with_tiling(tiling)
+            .with_threads(three);
+        for &q in &[0u8, 20, 90, 200] {
+            for &(w, h) in &[(200, 150), (130, 200), (64, 129)] {
+                let p = planes(w, h, directional);
+                check_with(
+                    encode_still_intra_with_options(&p, q, Av1Colour::default(), options).unwrap(),
+                    q,
+                );
+            }
+        }
+        // 4:2:0, 4:2:2 and monochrome carry the tile edges into subsampled and absent chroma.
+        let colour = colour_for(MatrixCoefficients::Bt709, ColorRange::Full);
+        for ss in [ChromaSubsampling::Cs420, ChromaSubsampling::Cs422] {
+            let p = planes_subsampled(
+                200,
+                150,
+                ss,
+                MatrixCoefficients::Bt709,
+                ColorRange::Full,
+                directional,
+            );
+            check_with(
+                encode_still_intra_with_options(&p, 60, colour, options).unwrap(),
+                60,
+            );
+        }
+        let mono = planes_subsampled(
+            200,
+            150,
+            ChromaSubsampling::Cs400,
+            MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            directional,
+        );
+        check_with(
+            encode_still_intra_with_options(&mono, 60, Av1Colour::monochrome(), options).unwrap(),
+            60,
+        );
+        // The high-bit-depth entry point takes the same layout.
+        let deep = planes16(200, 150, BitDepth::Ten, texture16(BitDepth::Ten));
+        check_with(
+            encode_still_intra16_with_options(&deep, 40, Av1Colour::default(), options).unwrap(),
+            40,
+        );
     }
 }
 

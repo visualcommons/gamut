@@ -27,6 +27,8 @@
 //! How many of those candidates the lossy path actually tries is a [`Search`], resolved from the
 //! caller's `Speed` preset; the full search is the default.
 
+use std::num::NonZeroUsize;
+
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::{ChromaSubsampling, Planar8, Planar16, clip_pixel};
 use gamut_dsp::math::{round2, round2_signed};
@@ -34,6 +36,7 @@ use gamut_dsp::math::{round2, round2_signed};
 use crate::cdf;
 use crate::encoder::Speed;
 use crate::geom::{PlaneGeom, has_chroma, plane_residual_size};
+use crate::headers::TileLayout;
 use crate::quant::{ac_q, dc_q, dequant, quantize};
 use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
 
@@ -497,7 +500,13 @@ pub(crate) struct Reconstruction {
     pub deblocked_luma: Vec<u16>,
 }
 
-/// Encoder for the single tile that spans the whole frame.
+/// The all-intra frame encoder: codes each tile of a [`TileLayout`] and keeps the frame-wide
+/// reconstruction and per-MI maps the in-loop filters read afterwards.
+///
+/// `Clone` is what the tile-parallel path is built on: a worker thread gets a copy of the encoder
+/// before any tile is coded, codes its share of the tiles in it, and the tiles' rectangles are
+/// merged back with [`FrameEncoder::absorb_tile`].
+#[derive(Clone)]
 pub(crate) struct FrameEncoder<'a> {
     planes: PlaneSource<'a>,
     /// AV1's `NumPlanes` (§5.5.2): 1 for a monochrome frame, 3 otherwise. Every chroma syntax
@@ -521,9 +530,13 @@ pub(crate) struct FrameEncoder<'a> {
     mi_rows: usize,
     /// MI boundaries of the tile currently being encoded (`0`/`mi_cols`/`mi_rows` for a single tile).
     /// A tile decodes independently, so neighbour availability (prediction samples and symbol
-    /// contexts) stops at the tile edge even when it is not the frame edge.
+    /// contexts) stops at the tile edge even when it is not the frame edge: `tile_c0` bounds every
+    /// left neighbour (`AvailL`) and `tile_r0` every above one (`AvailU`, §7.3.1 `is_inside`).
     tile_c0: usize,
     tile_x0: usize,
+    tile_r0: usize,
+    /// `tile_r0` in luma samples, the row counterpart of `tile_x0`.
+    tile_y0: usize,
     /// Exclusive right/bottom MI boundary of the current tile (`MiColEnd`/`MiRowEnd`).
     tile_c1: usize,
     tile_r1: usize,
@@ -599,6 +612,16 @@ pub(crate) struct FrameEncoder<'a> {
     block_decoded: Vec<u8>,
     /// The candidate sets the lossy mode decisions search (full by default).
     search: Search,
+}
+
+/// One tile's MI rectangle: `MiRowStart..MiRowEnd` × `MiColStart..MiColEnd` (§5.11.1), all on
+/// superblock boundaries except where the frame itself ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TileRect {
+    r0: usize,
+    r1: usize,
+    c0: usize,
+    c1: usize,
 }
 
 /// Row stride of [`FrameEncoder::block_decoded`]: a 64×64 superblock is 16 MI wide, plus the `-1`
@@ -707,6 +730,8 @@ impl<'a> FrameEncoder<'a> {
             mi_rows,
             tile_c0: 0,
             tile_x0: 0,
+            tile_r0: 0,
+            tile_y0: 0,
             tile_c1: mi_cols,
             tile_r1: mi_rows,
             qindex,
@@ -775,8 +800,6 @@ impl<'a> FrameEncoder<'a> {
         self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] != 0
     }
 
-    /// Encodes the tile and returns the symbol-coded bytes (`decode_tile`, §5.11.2) plus the
-    /// reconstruction (lossy path).
     /// Signals the loop-restoration units (§5.11.57 `read_lr`) whose top-left falls in the superblock
     /// at MI `(r, c)`. Luma uses `RESTORE_WIENER` with the default reference filter — every coded
     /// coefficient delta is zero — and chroma is `RESTORE_NONE`. The unit grid is 256×256
@@ -807,54 +830,169 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    pub(crate) fn encode(mut self) -> (Vec<Vec<u8>>, Reconstruction) {
+    /// Codes `tile` (`decode_tile`, §5.11.2) and returns its symbol-coded bytes.
+    ///
+    /// Everything `decode_tile` resets is reset here, so the bytes are a function of the tile's
+    /// rectangle and the source alone — whatever this encoder coded before. A fresh range coder;
+    /// the CDFs back to the frame defaults (`init_non_coeff_cdfs`/`init_coeff_cdfs`, each tile
+    /// adapting from its own copy); `CurrentQIndex` and `DeltaLF` back to the frame values;
+    /// `clear_above_context`; and, per superblock row, `clear_left_context`. Neighbour availability
+    /// stops at the tile's edges through `tile_c0`/`tile_r0`.
+    fn encode_tile(&mut self, tile: TileRect) -> Vec<u8> {
         const SB4: usize = 16; // 64×64 superblock in MI units
-        let sb_cols = self.mi_cols.div_ceil(SB4);
-        // Uniform tile spacing (§5.9.15): split a multi-superblock-wide frame into two tile columns
-        // so the multi-tile framing is exercised. Each tile decodes independently — its symbol
-        // contexts and `CurrentQIndex`/`DeltaLF` accumulators reset, and neighbour availability stops
-        // at the tile edge (handled by `tile_c0`/`tile_x0`).
-        let tile_cols = if sb_cols >= 2 { 2 } else { 1 };
-        let size_sb = sb_cols.div_ceil(tile_cols);
-        let mut tile_bytes: Vec<Vec<u8>> = Vec::with_capacity(tile_cols);
-        for t in 0..tile_cols {
-            let c_start = (t * size_sb * SB4).min(self.mi_cols);
-            let c_end = ((t + 1) * size_sb * SB4).min(self.mi_cols);
-            self.tile_c0 = c_start;
-            self.tile_x0 = c_start * 4;
-            self.tile_c1 = c_end;
-            // Per-tile reset: a fresh range coder, the CDFs back to the frame defaults
-            // (`init_non_coeff_cdfs`/`init_coeff_cdfs` — each tile adapts from its own copy), and
-            // the delta accumulators back to frame defaults.
-            self.cdfs = cdf::CdfContext::new(self.qctx);
-            self.set_quant(i32::from(self.qindex));
-            self.current_dlf = 0;
-            // Stepping by whole superblocks over an exclusive range, rather than a hand-rolled
-            // `while r < self.mi_rows { ... r += SB4 }`: the comparison in that form is mutable to
-            // `<=` without any test noticing, because the extra iteration lands entirely outside
-            // the frame and `encode_partition` emits nothing for it.
-            for r in (0..self.mi_rows).step_by(SB4) {
-                for plane in 0..self.num_planes {
-                    self.left_level[plane].iter_mut().for_each(|v| *v = 0);
-                    self.left_dc[plane].iter_mut().for_each(|v| *v = 0);
+        self.tile_c0 = tile.c0;
+        self.tile_x0 = tile.c0 * 4;
+        self.tile_c1 = tile.c1;
+        self.tile_r0 = tile.r0;
+        self.tile_y0 = tile.r0 * 4;
+        self.tile_r1 = tile.r1;
+        self.cdfs = cdf::CdfContext::new(self.qctx);
+        self.set_quant(i32::from(self.qindex));
+        self.current_dlf = 0;
+        for plane in 0..self.num_planes {
+            self.above_level[plane].fill(0);
+            self.above_dc[plane].fill(0);
+        }
+        // Stepping by whole superblocks over an exclusive range, rather than a hand-rolled
+        // `while r < r1 { ... r += SB4 }`: the comparison in that form is mutable to `<=` without
+        // any test noticing, because the extra iteration lands entirely outside the frame and
+        // `encode_partition` emits nothing for it.
+        for r in (tile.r0..tile.r1).step_by(SB4) {
+            for plane in 0..self.num_planes {
+                self.left_level[plane].fill(0);
+                self.left_dc[plane].fill(0);
+            }
+            for c in (tile.c0..tile.c1).step_by(SB4) {
+                self.sb_r = r;
+                self.sb_c = c;
+                // ReadDeltas is armed per superblock (§7.18); the first block then signals delta_q.
+                self.read_deltas = self.delta_q_present;
+                self.clear_block_decoded(r, c);
+                if self.qindex > 0 {
+                    self.write_lr(r, c);
                 }
-                let mut c = c_start;
-                while c < c_end {
-                    self.sb_r = r;
-                    self.sb_c = c;
-                    // ReadDeltas is armed per superblock (§7.18); the first block then signals delta_q.
-                    self.read_deltas = self.delta_q_present;
-                    self.clear_block_decoded(r, c);
-                    if self.qindex > 0 {
-                        self.write_lr(r, c);
+                self.encode_partition(r, c, 64);
+            }
+        }
+        std::mem::replace(&mut self.sym, SymbolEncoder::new()).finish()
+    }
+
+    /// Copies `tile`'s rectangle of what the in-loop filters read after the tiles are coded — the
+    /// reconstruction and the per-MI maps `filter::deblock` and `filter::cdef` take — from `from`,
+    /// an encoder that coded that tile, into `self`.
+    ///
+    /// Tiles never read outside their own rectangle, so the merged state is what coding the tiles
+    /// one after another in `self` would have left, as far as anything after the tiles can see.
+    /// The other per-MI maps (`mi_ymode`, `mi_segid`, `mi_psize`, `mi_pcolors`) are contexts read
+    /// only while coding the tile that wrote them, so they are deliberately not merged.
+    fn absorb_tile(&mut self, from: &Self, tile: TileRect) {
+        let cols = self.mi_cols;
+        for r in tile.r0..tile.r1 {
+            let row = r * cols + tile.c0..r * cols + tile.c1;
+            for (dst, src) in [
+                (&mut self.mi_bsl, &from.mi_bsl),
+                (&mut self.mi_bsl_h, &from.mi_bsl_h),
+                (&mut self.mi_skip, &from.mi_skip),
+                (&mut self.tx_log2, &from.tx_log2),
+                (&mut self.tx_log2_h, &from.tx_log2_h),
+            ] {
+                dst[row.clone()].copy_from_slice(&src[row.clone()]);
+            }
+            self.mi_dlf[row.clone()].copy_from_slice(&from.mi_dlf[row]);
+        }
+        // The reconstruction exists on the lossy path only (it *is* the source when lossless), and
+        // a monochrome frame's chroma planes are empty; both cases copy nothing.
+        for (plane, g) in self.geom.iter().enumerate() {
+            if self.recon[plane].is_empty() {
+                continue;
+            }
+            let (x0, x1) = ((tile.c0 * 4) >> g.ss_x, (tile.c1 * 4) >> g.ss_x);
+            for y in (tile.r0 * 4) >> g.ss_y..(tile.r1 * 4) >> g.ss_y {
+                let row = y * g.coded_w + x0..y * g.coded_w + x1;
+                self.recon[plane][row.clone()].copy_from_slice(&from.recon[plane][row]);
+            }
+        }
+    }
+
+    /// Codes every tile in `tiles` (raster order) and returns their bytes in that order, on up to
+    /// `threads` threads. The bytes and the merged state do not depend on `threads`.
+    ///
+    /// Worker `w` of `min(threads, tiles)` codes tiles `w, w + workers, …`: worker 0 on this thread
+    /// in `self`, every other one on a scoped thread in a clone of `self` taken before any tile is
+    /// coded, whose rectangles are then merged back. One worker is therefore exactly the sequential
+    /// encode, with no clone and no thread. A worker that cannot be spawned has its share coded
+    /// here instead, so running out of threads costs time, never the encode. A panic on a worker is
+    /// a bug, and is re-raised here rather than turned into an error.
+    ///
+    /// `wasm32` has no threads to spawn, so one worker codes every tile there whatever `threads`
+    /// says.
+    ///
+    /// Memory: each spawned worker holds its own copy of the frame-wide state, chiefly the
+    /// reconstruction (three `u16` planes on the coded grid on the lossy path) — so peak memory
+    /// grows by about that much per extra thread.
+    fn encode_tiles(&mut self, tiles: &[TileRect], threads: NonZeroUsize) -> Vec<Vec<u8>> {
+        let workers = if cfg!(target_arch = "wasm32") {
+            1
+        } else {
+            threads.get().min(tiles.len())
+        };
+        let share = |w: usize| tiles.iter().copied().enumerate().skip(w).step_by(workers);
+        let mut bytes = vec![Vec::new(); tiles.len()];
+        std::thread::scope(|scope| {
+            let spawned: Vec<_> = (1..workers)
+                .map(|w| {
+                    let mut enc = self.clone();
+                    let handle = std::thread::Builder::new().spawn_scoped(scope, move || {
+                        let coded: Vec<(usize, Vec<u8>)> =
+                            share(w).map(|(i, t)| (i, enc.encode_tile(t))).collect();
+                        (enc, coded)
+                    });
+                    (w, handle)
+                })
+                .collect();
+            for (i, t) in share(0) {
+                bytes[i] = self.encode_tile(t);
+            }
+            for (w, handle) in spawned {
+                let Ok(handle) = handle else {
+                    for (i, t) in share(w) {
+                        bytes[i] = self.encode_tile(t);
                     }
-                    self.encode_partition(r, c, 64);
-                    c += SB4;
+                    continue;
+                };
+                let (enc, coded) = handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                for (i, b) in coded {
+                    self.absorb_tile(&enc, tiles[i]);
+                    bytes[i] = b;
                 }
             }
-            let sym = std::mem::replace(&mut self.sym, SymbolEncoder::new());
-            tile_bytes.push(sym.finish());
-        }
+        });
+        bytes
+    }
+
+    /// Codes the frame in `layout`'s tiles on up to `threads` threads, then runs the in-loop filters
+    /// over the merged reconstruction. Returns each tile's bytes (raster order) and the
+    /// reconstruction (lossy path).
+    pub(crate) fn encode(
+        mut self,
+        layout: &TileLayout,
+        threads: NonZeroUsize,
+    ) -> (Vec<Vec<u8>>, Reconstruction) {
+        let tiles: Vec<TileRect> = layout
+            .row_starts
+            .windows(2)
+            .flat_map(|rows| {
+                layout.col_starts.windows(2).map(move |cols| TileRect {
+                    r0: rows[0],
+                    r1: rows[1],
+                    c0: cols[0],
+                    c1: cols[1],
+                })
+            })
+            .collect();
+        let tile_bytes = self.encode_tiles(&tiles, threads);
         // Deblocking loop filter (§7.14): a post-process on the final reconstruction (intra
         // prediction during encoding read the pre-filter samples, so this does not affect any
         // prediction). The lossless path is `CodedLossless`, where the filter is disabled.
@@ -1002,7 +1140,12 @@ impl<'a> FrameEncoder<'a> {
     fn partition_ctx(&self, r: usize, c: usize, bsl: usize) -> usize {
         // §8.3.2: `above`/`left` are bit `4 - bl == bsl - 1` of the neighbour partition context.
         let bit = bsl - 1;
-        let above = (self.above_partition[c] >> bit) & 1;
+        // A tile's top edge has no above neighbour (above_partition holds the tile row above's value).
+        let above = if r > self.tile_r0 {
+            (self.above_partition[c] >> bit) & 1
+        } else {
+            0
+        };
         // A tile's left edge has no left neighbour (left_partition holds the adjacent tile's value).
         let left = if c > self.tile_c0 {
             (self.left_partition[r] >> bit) & 1
@@ -1077,12 +1220,12 @@ impl<'a> FrameEncoder<'a> {
     /// relative to the prediction, under `Default_Segment_Id_Cdf[ctx]`. Returns the chosen id.
     fn signal_segment_id(&mut self, r: usize, c: usize, skip: bool) -> usize {
         let cols = self.mi_cols;
-        let prev_ul = if r > 0 && c > self.tile_c0 {
+        let prev_ul = if r > self.tile_r0 && c > self.tile_c0 {
             i32::from(self.mi_segid[(r - 1) * cols + (c - 1)])
         } else {
             -1
         };
-        let prev_u = if r > 0 {
+        let prev_u = if r > self.tile_r0 {
             i32::from(self.mi_segid[(r - 1) * cols + c])
         } else {
             -1
@@ -1168,7 +1311,7 @@ impl<'a> FrameEncoder<'a> {
 
     /// Context for the `skip` flag (§8.3.2): `aboveSkip + leftSkip` from the per-MI `mi_skip` map.
     fn skip_ctx(&self, r: usize, c: usize) -> usize {
-        let above = r > 0 && self.mi_skip[(r - 1) * self.mi_cols + c] != 0;
+        let above = r > self.tile_r0 && self.mi_skip[(r - 1) * self.mi_cols + c] != 0;
         let left = c > self.tile_c0 && self.mi_skip[r * self.mi_cols + (c - 1)] != 0;
         usize::from(above) + usize::from(left)
     }
@@ -1483,7 +1626,7 @@ impl<'a> FrameEncoder<'a> {
     /// Context for the `tx_depth` CDF (§8.3.2): `(aboveTxW ≥ bw) + (leftTxH ≥ bw)`, where the
     /// neighbour transform width/height come from the per-MI `tx_log2` map (0 when unavailable).
     fn tx_depth_ctx(&self, r: usize, c: usize, bw: usize, bh: usize) -> usize {
-        let above_w = if r > 0 {
+        let above_w = if r > self.tile_r0 {
             1usize << self.tx_log2[(r - 1) * self.mi_cols + c]
         } else {
             0
@@ -1583,7 +1726,7 @@ impl<'a> FrameEncoder<'a> {
             let (m, fi) = self.select_luma_mode(c * 4, r * 4);
             (m, 0, fi)
         };
-        let amode = cdf::INTRA_MODE_CONTEXT[if r > 0 {
+        let amode = cdf::INTRA_MODE_CONTEXT[if r > self.tile_r0 {
             usize::from(self.mi_ymode[(r - 1) * self.mi_cols + c])
         } else {
             usize::from(DC_PRED)
@@ -1683,7 +1826,7 @@ impl<'a> FrameEncoder<'a> {
         if self.qindex > 0 && (8..=64).contains(&bw) {
             if y_mode == DC_PRED {
                 let bctx = bw.trailing_zeros() as usize + bh.trailing_zeros() as usize - 6; // Mi_W_Log2 + Mi_H_Log2 - 2
-                let above = r > 0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
+                let above = r > self.tile_r0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
                 let left = c > self.tile_c0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
                 let pctx = usize::from(above) + usize::from(left);
                 cdf::encode(
@@ -2123,6 +2266,12 @@ impl<'a> FrameEncoder<'a> {
         self.tile_x0 >> self.geom[plane].ss_x
     }
 
+    /// The tile's top edge in `plane`'s own sample coordinates: [`Self::tile_left`] for rows.
+    /// Tile rows also start on superblock boundaries, so the shift is exact here too.
+    fn tile_top(&self, plane: usize) -> usize {
+        self.tile_y0 >> self.geom[plane].ss_y
+    }
+
     /// The plane-local base position and residual extent of the block at MI `(r, c)` — the pair a
     /// per-plane loop needs in order to read `plane`'s own samples rather than the luma ones.
     /// `None` is §5.11.38's `BLOCK_INVALID`.
@@ -2150,7 +2299,7 @@ impl<'a> FrameEncoder<'a> {
                 self.sample(plane, x, y)
             }
         };
-        let have_above = sy > 0;
+        let have_above = sy > self.tile_top(plane);
         let have_left = sx > self.tile_left(plane);
         // §7.11.2.5 DC: average the `w` above + `h` left samples (a plain integer divide, since for a
         // rectangular block `w + h` is not a power of two; for square blocks this is the usual shift).
@@ -2194,7 +2343,7 @@ impl<'a> FrameEncoder<'a> {
         let nb = |x: usize, y: usize| -> i32 {
             i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
         };
-        let have_above = sy > 0;
+        let have_above = sy > self.tile_top(plane);
         let have_left = sx > self.tile_left(plane);
 
         // Above-right / below-left availability (§5.11.34) for the directional zone-1/3 angles.
@@ -2474,7 +2623,7 @@ impl<'a> FrameEncoder<'a> {
         let nb = |x: usize, y: usize| -> i32 {
             i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
         };
-        let have_above = sy > 0;
+        let have_above = sy > self.tile_top(plane);
         let have_left = sx > self.tile_left(plane);
         let step = (n / 4) as isize;
         let (by, bx) = (
@@ -2603,7 +2752,7 @@ impl<'a> FrameEncoder<'a> {
         let nb = |x: usize, y: usize| -> i32 {
             i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
         };
-        let have_above = sy > 0;
+        let have_above = sy > self.tile_top(plane);
         let have_left = sx > self.tile_left(plane);
         let (max_x, max_y) = (self.geom[plane].coded_w - 1, self.geom[plane].coded_h - 1);
 
