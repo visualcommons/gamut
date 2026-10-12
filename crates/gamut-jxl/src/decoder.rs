@@ -36,7 +36,8 @@ fn wrong_backend_layout() -> Error {
 }
 
 /// Embedded metadata located in a JPEG XL stream by [`JxlDecoder::metadata`]: the container's
-/// `Exif` / `xml ` boxes and the codestream's ICC profile.
+/// `Exif` / `xml ` boxes and the codestream's ICC profile. [`JxlDecoder::metadata_boxes`] fills
+/// only the two box fields, leaving `icc` unconsulted.
 ///
 /// Each payload is stored in the form the dedicated metadata crates parse (and the
 /// `gamut-metadata` facade's `MetadataBlock` borrows) directly; with the `metadata` feature,
@@ -54,7 +55,8 @@ pub struct JxlMetadata {
     /// The XMP packet: the `xml ` box payload, verbatim.
     pub xmp: Option<Vec<u8>>,
     /// The ICC profile embedded in the codestream's colour encoding — exactly what
-    /// [`JxlDecoder::embedded_icc_profile`] reports — or `None` for a structured encoding.
+    /// [`JxlDecoder::embedded_icc_profile`] reports — or `None` for a structured encoding, or
+    /// because the codestream was not consulted ([`JxlDecoder::metadata_boxes`]).
     pub icc: Option<Vec<u8>>,
 }
 
@@ -406,8 +408,35 @@ impl JxlDecoder {
     /// the colour metadata, or has a malformed box sequence (a truncated header, a box overrunning
     /// the stream, an `Exif` payload shorter than its offset field or with the offset past its
     /// end); [`Error::Unsupported`] for a `brob`-wrapped `Exif` / `xml ` box.
+    ///
+    /// The call is strict: a codestream fault fails it even when the boxes were located, so a
+    /// caller recovering what a damaged file still carries reads
+    /// [`metadata_boxes`](Self::metadata_boxes) instead.
     #[cfg(feature = "decode")]
     pub fn metadata(&self, data: &[u8]) -> Result<JxlMetadata> {
+        let mut metadata = self.metadata_boxes(data)?;
+        metadata.icc = crate::jxlrs::embedded_icc_profile(data)?;
+        Ok(metadata)
+    }
+
+    /// Reads only the container's `Exif` and `xml ` boxes, never parsing the codestream: the
+    /// box-level half of [`metadata`](Self::metadata), with the same box walk and the same
+    /// refusals, and [`JxlMetadata::icc`] always `None` (not consulted, rather than "a structured
+    /// colour encoding"). A bare codestream has no boxes, so it yields an empty [`JxlMetadata`].
+    ///
+    /// This is the reader for a file whose codestream is damaged, truncated, or uses a feature the
+    /// built-in decoder refuses: the boxes it carries are still returned. To add the ICC profile
+    /// where the codestream allows, assign
+    /// [`embedded_icc_profile`](Self::embedded_icc_profile)'s answer to the `icc` field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the data carries neither signature or has a malformed
+    /// box sequence (a truncated header, a box overrunning the stream, an `Exif` payload shorter
+    /// than its offset field or with the offset past its end); [`Error::Unsupported`] for a
+    /// `brob`-wrapped `Exif` / `xml ` box.
+    #[cfg(feature = "decode")]
+    pub fn metadata_boxes(&self, data: &[u8]) -> Result<JxlMetadata> {
         let (exif, xmp) = match JxlFraming::detect(data) {
             JxlFraming::IsoBmff => container_metadata_boxes(data)?,
             JxlFraming::Codestream => (None, None),
@@ -418,8 +447,11 @@ impl JxlDecoder {
                 ));
             }
         };
-        let icc = crate::jxlrs::embedded_icc_profile(data)?;
-        Ok(JxlMetadata { exif, xmp, icc })
+        Ok(JxlMetadata {
+            exif,
+            xmp,
+            icc: None,
+        })
     }
 
     /// The stream's dimensions when the built-in header parser can determine them, else `None`.
@@ -1207,6 +1239,31 @@ mod box_tests {
         }
         // An offset landing exactly at the end is an empty (not out-of-range) stream.
         assert_eq!(exif_box_tiff_stream(b"\0\0\0\x02ab").unwrap(), b"");
+    }
+
+    #[test]
+    fn metadata_boxes_survive_a_codestream_the_decoder_refuses() {
+        // A `jxlc` box whose payload is not a codestream: the strict call fails on it, the
+        // box-only reader still returns both located boxes.
+        let data = container(&[
+            bx(b"ftyp", b"jxl "),
+            bx(b"Exif", &exif_payload(0, 0)),
+            bx(b"xml ", b"<x/>"),
+            bx(b"jxlc", b"\xFF\x0Agarbage"),
+        ]);
+        let dec = JxlDecoder::new();
+        assert!(dec.metadata(&data).is_err());
+        let boxes = dec.metadata_boxes(&data).unwrap();
+        assert_eq!(boxes.exif.as_deref(), Some(TIFF));
+        assert_eq!(boxes.xmp.as_deref(), Some(&b"<x/>"[..]));
+        assert_eq!(boxes.icc, None);
+    }
+
+    #[test]
+    fn metadata_boxes_of_a_bare_codestream_is_empty_without_parsing_it() {
+        // Truncated straight after the signature: only the framing is read.
+        let boxes = JxlDecoder::new().metadata_boxes(b"\xFF\x0A").unwrap();
+        assert_eq!(boxes, JxlMetadata::default());
     }
 
     #[test]

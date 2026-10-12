@@ -87,7 +87,8 @@
 //! - `decode` (default) includes the jxl-rs decode tail, and additionally provides the header-only
 //!   accessors ([`JxlDecoder::info`], [`JxlDecoder::embedded_icc_profile`], [`JxlInfo`]), the
 //!   metadata read-back ([`JxlDecoder::metadata`] → [`JxlMetadata`]: the container's `Exif` /
-//!   `xml ` boxes, located by this crate's own box walk, plus the codestream ICC profile) and the
+//!   `xml ` boxes, located by this crate's own box walk, plus the codestream ICC profile; or
+//!   [`JxlDecoder::metadata_boxes`] for the boxes alone, which survives a damaged codestream) and the
 //!   best-effort [`DecodePartialImage`] surface, all of which are always answered by the built-in
 //!   parser. Without it, [`JxlDecoder`] decodes through a pushed backend, or returns
 //!   [`Error::Unsupported`](gamut_core::Error::Unsupported).
