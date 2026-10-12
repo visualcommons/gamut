@@ -6,10 +6,14 @@
 //! rendering are out of scope — the decoder returns the sensor samples, not a viewable image.
 
 use std::cell::RefCell;
+use std::slice;
 
 use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::c2pa::{self, C2paExclusions};
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_ifd_at};
+use gamut_ifd::tags::STANDARD_POINTER_TAGS;
+use gamut_ifd::{
+    ByteOrder, Ifd, SubtreeScope, TiffFile, Value, Variant, read, read_ifd_at, resolve_subtree,
+};
 use gamut_metadata::exif::Exif;
 
 use crate::color_profile::{ColorProfileInfo, NoiseProfile, TagSource};
@@ -199,7 +203,9 @@ pub struct DecodedDng {
     ///
     /// The `ExifIFD` arrives whole, as the shared [`Exif`] model —
     /// every entry of the directory, not a chosen subset — so nothing in it needs a separate
-    /// verbatim escape hatch.
+    /// verbatim escape hatch. Its standard pointer fields (a camera's `InteroperabilityIFD`)
+    /// arrive resolved, as sub-IFD groups [`DngEncoder`](crate::DngEncoder) writes back; one whose
+    /// target cannot be read is dropped rather than handed back as a stale file offset.
     pub metadata: DngMetadata,
     /// The raw IFD's `ProfileGainTableMap` (52525), if present.
     pub gain_table_map: Option<ProfileGainTableMap>,
@@ -555,7 +561,10 @@ impl DngDecoder {
 /// and the C2PA manifest store from `store_ifd`, the last IFD of the main chain.
 ///
 /// The `ExifIFD` is handed over whole, as the shared [`Exif`] model's Exif sub-IFD: every entry
-/// the directory holds survives, so no field of it is "unmodelled" and none is dropped. The DNG's
+/// the directory holds survives, so no field of it is "unmodelled". The one exception is a
+/// standard pointer field (`InteroperabilityIFD` in a camera file): it arrives as the sub-IFD
+/// group it points at, or — when its target cannot be read — not at all, never as a raw offset
+/// into this file ([`resolve_exif_pointers`]). The DNG's
 /// own IFD 0 is *not* copied into the model's 0th IFD — [`DecodedDng`] already carries those
 /// fields, typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
 ///
@@ -588,7 +597,10 @@ fn decode_metadata(
     let exif = ifd0
         .get_u32(tags::EXIF_IFD)
         .and_then(|offset| read_ifd_at(data, u64::from(offset), order, variant).ok())
-        .map(|exif_ifd| {
+        .map(|mut exif_ifd| {
+            resolve_exif_pointers(&mut exif_ifd, |offset| {
+                read_ifd_at(data, offset, order, variant)
+            });
             let mut exif = Exif::new(order);
             exif.set_exif_ifd(exif_ifd);
             exif
@@ -599,6 +611,53 @@ fn decode_metadata(
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
         icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
         c2pa,
+    }
+}
+
+/// The deepest level below the Exif directory [`resolve_exif_pointers`] follows: **one**, the
+/// `InteroperabilityIFD` EXIF 2.3 §4.6.3 puts inside it. Nothing conformant nests a directory
+/// below that, so a pointer found there is out of spec — the same bound `gamut-tiff`'s metadata
+/// read applies (two levels below IFD 0, which is one below `ExifIFD`).
+const MAX_EXIF_POINTER_DEPTH: usize = 1;
+
+/// Replaces each standard pointer field of the Exif directory (`SubIFDs`, `ExifIFD`, `GPSInfo`,
+/// `InteroperabilityIFD` — [`STANDARD_POINTER_TAGS`]) with a sub-IFD group holding the
+/// directories it points at, which `fetch` parses by offset.
+///
+/// A pointer left as a field is a raw absolute offset into *this* file: it means nothing in a
+/// directory handed to a caller, and [`DngEncoder`](crate::DngEncoder) refuses to write one, so a
+/// decode → encode round trip of a camera DNG's metadata would fail on it. A group is what the
+/// encoder writes back, re-pointed at the copy it lays out, and what
+/// [`DngRewrite::open`](crate::DngRewrite::open) reads back. The tags followed are the ones that
+/// reader resolves at every node; inside each followed directory the same four are followed,
+/// [`MAX_EXIF_POINTER_DEPTH`] deep.
+///
+/// **An unreadable target is dropped, not fatal.** Each tag resolves on its own: when its walk
+/// fails — a target outside the file or not a directory, a cycle, or a pointer nested deeper than
+/// the bound — that one field is removed and the rest of the Exif directory is kept. That is the
+/// same leniency this decoder already applies to an unreadable `ExifIFD` itself and to an
+/// unreadable `SubIFDs` child ([`walk_ifds`]): metadata never fails a raw decode. Keeping the
+/// field instead would hand back the offset the encoder refuses, and failing would lose every
+/// other Exif entry over one broken pointer. A field under one of these tags whose type is not an
+/// offset (e.g. a `SHORT`) is not a pointer and stays as it is.
+fn resolve_exif_pointers(exif: &mut Ifd, mut fetch: impl FnMut(u64) -> Result<Ifd>) {
+    for tag in STANDARD_POINTER_TAGS {
+        let Some(value) = exif.get(*tag) else {
+            continue;
+        };
+        // Resolved in a one-field holder standing in for the Exif directory (depth 0), so a
+        // failure leaves the real directory untouched apart from the removal below.
+        let mut holder = Ifd::new();
+        holder.set(*tag, value.clone());
+        let scope = SubtreeScope::new(slice::from_ref(tag), STANDARD_POINTER_TAGS)
+            .with_max_depth(MAX_EXIF_POINTER_DEPTH);
+        if resolve_subtree(&mut holder, scope, &mut fetch).is_err() {
+            exif.remove(*tag);
+            continue;
+        }
+        for group in holder.sub_ifds() {
+            exif.set_sub_ifd(group.tag, group.ifds.clone());
+        }
     }
 }
 
@@ -1732,6 +1791,81 @@ fn illuminant(ifd: &TrackedIfd, tag: u16) -> Option<CalibrationIlluminant> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory carrying one `SHORT` field, `marker`, to recognise it by.
+    fn marked(marker: u16) -> Ifd {
+        let mut ifd = Ifd::new();
+        ifd.set(1, Value::Short(vec![marker]));
+        ifd
+    }
+
+    /// Runs [`resolve_exif_pointers`] over `exif` against a file holding exactly `directories`,
+    /// each at its offset; any other offset is unreadable.
+    fn resolved(mut exif: Ifd, directories: &[(u64, Ifd)]) -> Ifd {
+        resolve_exif_pointers(&mut exif, |offset| {
+            directories
+                .iter()
+                .find(|(at, _)| *at == offset)
+                .map(|(_, ifd)| ifd.clone())
+                .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "unreadable"))
+        });
+        exif
+    }
+
+    #[test]
+    fn resolve_exif_pointers_turns_each_standard_pointer_into_its_group() {
+        for &tag in STANDARD_POINTER_TAGS {
+            let mut exif = marked(7);
+            exif.set(tag, Value::Long(vec![100]));
+            let got = resolved(exif, &[(100, marked(9))]);
+            let mut want = marked(7);
+            want.set_sub_ifd(tag, vec![marked(9)]);
+            assert_eq!(got, want, "tag {tag}");
+        }
+    }
+
+    #[test]
+    fn resolve_exif_pointers_drops_a_pointer_whose_target_is_unreadable() {
+        // Interop resolves while GPSInfo's target is missing: only the broken field goes, and
+        // every other entry, the resolved group included, is kept.
+        let mut exif = marked(7);
+        exif.set(
+            gamut_ifd::tags::INTEROPERABILITY_IFD,
+            Value::Long(vec![100]),
+        );
+        exif.set(tags::GPS_INFO, Value::Long(vec![0xFFFF_FFF0]));
+        let got = resolved(exif, &[(100, marked(9))]);
+        let mut want = marked(7);
+        want.set_sub_ifd(gamut_ifd::tags::INTEROPERABILITY_IFD, vec![marked(9)]);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn resolve_exif_pointers_leaves_a_non_offset_value_under_a_pointer_tag() {
+        let mut exif = marked(7);
+        exif.set(
+            gamut_ifd::tags::INTEROPERABILITY_IFD,
+            Value::Short(vec![100]),
+        );
+        assert_eq!(resolved(exif.clone(), &[(100, marked(9))]), exif);
+    }
+
+    #[test]
+    fn resolve_exif_pointers_drops_a_pointer_nested_below_the_interop_directory() {
+        // A pointer inside the Interop directory is one level past EXIF 2.3 §4.6.3, so the
+        // InteroperabilityIFD it hangs from is dropped whole rather than handed back half-resolved.
+        let mut interop = marked(9);
+        interop.set(tags::GPS_INFO, Value::Long(vec![200]));
+        let mut exif = marked(7);
+        exif.set(
+            gamut_ifd::tags::INTEROPERABILITY_IFD,
+            Value::Long(vec![100]),
+        );
+        assert_eq!(
+            resolved(exif, &[(100, interop), (200, marked(11))]),
+            marked(7)
+        );
+    }
 
     /// All three types `BlackLevel` allows, and nothing else.
     ///

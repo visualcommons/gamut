@@ -592,6 +592,53 @@ fn metadata_embeds_and_roundtrips() {
     assert_eq!(decoded.raw, raw);
 }
 
+/// Issue #764: an Exif directory's `InteroperabilityIFD` decodes as the group the encoder writes
+/// back, not as a raw offset the encoder refuses, so decode → re-encode of the metadata succeeds
+/// and reproduces the directory.
+#[test]
+fn exif_interoperability_ifd_survives_decode_then_reencode() {
+    use gamut_dng::{DngMetadata, Exif, ExifTag, Value};
+    use gamut_ifd::Ifd;
+    use gamut_ifd::tags::INTEROPERABILITY_IFD;
+
+    let raw = common::sample_raw(32, 24, 16);
+    let mut interop = Ifd::new();
+    interop.set(1, Value::Ascii("R98".to_owned())); // InteroperabilityIndex
+    let mut exif = Exif::new(ByteOrder::LittleEndian);
+    exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+    exif.exif_ifd_mut()
+        .set_sub_ifd(INTEROPERABILITY_IFD, vec![interop.clone()]);
+    let meta = DngMetadata {
+        exif: Some(exif),
+        ..DngMetadata::default()
+    };
+    let encode = |meta: DngMetadata| {
+        let mut dng = Vec::new();
+        DngEncoder::new()
+            .with_metadata(meta)
+            .encode(&raw, &common::sample_profile(), &mut dng)
+            .expect("encode");
+        dng
+    };
+    let decoded = DngDecoder::new().decode(&encode(meta)).expect("decode");
+    let exif_dir = |meta: &DngMetadata| {
+        meta.exif
+            .as_ref()
+            .and_then(Exif::exif_ifd)
+            .expect("EXIF sub-IFD")
+            .clone()
+    };
+    let first = exif_dir(&decoded.metadata);
+    assert_eq!(first.get(INTEROPERABILITY_IFD), None);
+    assert_eq!(first.sub_ifds().len(), 1);
+    assert_eq!(first.sub_ifds()[0].ifds, [interop]);
+
+    let again = DngDecoder::new()
+        .decode(&encode(decoded.metadata))
+        .expect("decode the re-encoded file");
+    assert_eq!(exif_dir(&again.metadata), first);
+}
+
 #[test]
 fn level_family_roundtrips_and_validates() {
     use gamut_dng::RawLevels;
