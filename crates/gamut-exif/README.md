@@ -56,10 +56,16 @@ points:
   the `Exif`, naming each region the lenient reader discarded — a malformed Exif/GPS/Interop
   sub-IFD, an unusable thumbnail range, or a top-level directory past the 1st IFD — with the tag
   that addressed it, the offset it carried, and a typed reason. `parse` stays silent, as before.
-  The report is complete over those regions but is **not** a byte-completeness verdict: an empty
-  report does not mean the parse lost nothing (see the deferred items below). A `strict` report is
-  not always empty either: strictness rejects *malformed* regions, and a trailing directory is
-  well-formed and merely unrepresentable, so it is reported in both modes.
+  The report is complete over those regions but its drop lists are **not** a byte-completeness
+  verdict: an empty report does not mean the parse lost nothing (see the deferred items below). A
+  `strict` report is not always empty either: strictness rejects *malformed* regions, and a
+  trailing directory is well-formed and merely unrepresentable, so it is reported in both modes.
+- **`recover_entries(true)`** makes the lenient reader recover per *entry*: a directory with one
+  unreadable entry (a value outside the stream, an `ASCII` value that is not UTF-8) survives minus
+  that entry, which `ReadReport::dropped_entries` names, instead of failing whole. Off by default.
+- **`audit_bytes(true)`** adds `ReadReport::byte_audit`, `gamut-ifd`'s byte-completeness verdict
+  over the TIFF stream: every byte classified, or the unclaimed ones named by offset. Off by
+  default — it is a second, whole-structure walk of the source.
 
 ```rust
 # use gamut_exif::ExifReader;
@@ -166,17 +172,12 @@ are `#[non_exhaustive]`):
   vendored specification and guarded structurally, but nothing recomputes them from the spec, so a
   *corrected-but-different* value would compile and pass (issue #544).
 - **Uncompressed strip-based thumbnails** are read but not re-embedded (JPEG thumbnails are).
-- **Per-tag error recovery inside one directory.** A single unparseable entry fails its whole
-  directory in `gamut-ifd`, so the report's granularity is the sub-IFD, not the individual tag
-  (issue #521).
 - **A signal for a shadowed duplicate tag.** Two entries for one tag decode to the last, and the
   earlier one is discarded a layer below this crate. `gamut-exif` could *detect* the loss (compare
   `RawIfd::entries` against the decoded `Ifd::fields()`), but not describe it without re-decoding
   the shadowed entry, so the signal belongs where the discarding happens — a layer three crates
-  share (issue #528).
-- **A byte-completeness verdict** over the whole blob (which source bytes no parsed structure
-  claims). `gamut-ifd`'s audit engine has the machinery; `ReadReport` today reports only what was
-  dropped, not what was never reached (issue #521).
+  share (issue #528). `gamut-ifd` now emits it (`AuditFinding::ShadowedEntry`), but `ReadReport`
+  does not surface it yet (issue #719).
 
 ## Status
 

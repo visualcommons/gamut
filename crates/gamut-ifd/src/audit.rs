@@ -154,6 +154,29 @@ pub enum AuditFinding {
         /// ([`RawEntry::offset`](crate::RawEntry::offset)).
         offset: u64,
     },
+    /// A directory entry whose value could not be read — its count overflows, its value offset
+    /// or span lies outside the source, or its bytes do not decode as its field type (a non-UTF-8
+    /// `ASCII` string) — so a recovering decode skipped it and kept the rest of the directory.
+    ///
+    /// Emitted only by [`IfdReader::decode_ifd_lenient`](crate::IfdReader::decode_ifd_lenient);
+    /// every other decode fails the whole directory on such an entry, and the [`audit`] walk
+    /// never records one. The finding names the entry and not the precise defect: calling
+    /// [`IfdReader::value`](crate::IfdReader::value) on the same [`RawEntry`](crate::RawEntry)
+    /// reproduces the exact error.
+    ///
+    /// **Round trip.** The decoded [`Ifd`] simply lacks the field, so writing it back emits the
+    /// directory without it: `write` never re-emits a value nobody could read, and this finding is
+    /// the only record that the entry existed.
+    UnreadableEntry {
+        /// The offset of the directory carrying the entry — the identity
+        /// [`SpanKind::IfdBody`] uses.
+        ifd: u64,
+        /// The entry's tag.
+        tag: u16,
+        /// The offset of the entry's own record within that directory
+        /// ([`RawEntry::offset`](crate::RawEntry::offset)).
+        offset: u64,
+    },
 }
 
 /// A completed structural audit: the parsed tree, the byte-level report, and the walk's

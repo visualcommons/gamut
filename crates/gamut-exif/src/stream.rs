@@ -13,13 +13,15 @@
 //! keeps a runtime dependency out of a crate that has none.
 
 use gamut_core::ErrorKind;
-use gamut_ifd::{Ifd, IfdReader, RawIfd, ReadAt, tags as ifd_tags};
+use gamut_ifd::{
+    AuditFinding, AuditSpec, Ifd, IfdReader, RawIfd, ReadAt, SegmentReport, tags as ifd_tags,
+};
 
 use crate::error::{ExifError, Result};
 use crate::exif::{EXIF_IFD_POINTER, Exif, MARKER};
 use crate::reader::ExifReader;
-use crate::report::{DropReason, Dropped, DroppedRegion, ReadReport};
-use crate::tag::ExifTag;
+use crate::report::{DropReason, Dropped, DroppedEntry, DroppedRegion, ReadReport};
+use crate::tag::{ExifTag, IfdKind};
 use crate::thumbnail::Thumbnail;
 
 impl ExifReader {
@@ -76,10 +78,34 @@ impl ExifReader {
     /// # Errors
     ///
     /// As [`parse_from`](Self::parse_from).
-    pub fn parse_from_with_report<S: ReadAt>(&self, source: S) -> Result<(Exif, ReadReport)> {
+    pub fn parse_from_with_report<S: ReadAt>(&self, mut source: S) -> Result<(Exif, ReadReport)> {
         let mut report = ReadReport::new();
-        let exif = self.parse_source(source, &mut report)?;
+        let exif = self.parse_source(&mut source, &mut report)?;
+        if self.audit_bytes {
+            report.set_byte_audit(self.byte_audit(&mut source)?);
+        }
         Ok((exif, report))
+    }
+
+    /// The byte-completeness verdict over the TIFF stream in `source`: `gamut-ifd`'s audit walk,
+    /// following the three EXIF pointer tags. `None` when the walk cannot read the top-level chain
+    /// strictly — after a successful parse, only an unreadable entry anywhere in that chain under
+    /// [`recover_entries`](Self::recover_entries) does that: one it skipped in the 0th or 1st IFD,
+    /// or one in a trailing (3rd or later) directory, which the recovering parse reads but never
+    /// decodes and so names no skip for. A transport failure propagates.
+    fn byte_audit<S: ReadAt>(&self, mut source: S) -> Result<Option<SegmentReport>> {
+        let base = self.tiff_base(&mut source)?;
+        match gamut_ifd::audit(source.rebased(base), &ExifAuditSpec) {
+            Ok(audit) => Ok(Some(audit.report)),
+            Err(e) if e.kind() == ErrorKind::InvalidInput => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Whether an unreadable entry is skipped rather than failing its directory: asked for, and
+    /// not overruled by [`strict`](Self::strict).
+    fn recovers(&self) -> bool {
+        self.recover_entries && !self.strict
     }
 
     /// The crate's one parse engine: marker handling, the top-level chain, the thumbnail, and the
@@ -95,9 +121,14 @@ impl ExifReader {
         let mut reader = IfdReader::open(source.rebased(base))?;
         let order = reader.order();
 
-        let file = reader.read_file()?;
-        let has_trailing = file.ifds.len() > 2;
-        let mut ifds = file.ifds.into_iter();
+        let (pages, trailing) = if self.recovers() {
+            let (pages, trailing) = top_level_recovering(&mut reader, report)?;
+            (pages, Some(trailing))
+        } else {
+            (reader.read_file()?.ifds, None)
+        };
+        let has_trailing = pages.len() > 2;
+        let mut ifds = pages.into_iter();
         let mut image = ifds.next().ok_or(ExifError::Truncated)?;
         // The next-IFD chain's second entry is the thumbnail directory (1st IFD), if any.
         let thumbnail = match ifds.next() {
@@ -106,13 +137,26 @@ impl ExifReader {
         };
         // EXIF defines exactly two top-level directories, so anything further down the chain has
         // nowhere to go in the model. Name it rather than letting the iterator drop it silently.
-        record_trailing_ifds(&mut reader, has_trailing, report)?;
+        match trailing {
+            Some(offsets) => record_trailing(offsets, report),
+            None => record_trailing_ifds(&mut reader, has_trailing, report)?,
+        }
 
         // The Exif sub-IFD's own offset, captured before `follow` strips the pointer: the
         // maker-note pin needs the note value's absolute source position.
         let exif_ifd_at = image.get_u32(EXIF_IFD_POINTER).map(u64::from);
-        let exif = self.follow(&mut image, &mut reader, DroppedRegion::ExifIfd, report)?;
-        let gps = self.follow(&mut image, &mut reader, DroppedRegion::GpsIfd, report)?;
+        let exif = self.follow(
+            &mut image,
+            &mut reader,
+            (DroppedRegion::ExifIfd, IfdKind::Exif),
+            report,
+        )?;
+        let gps = self.follow(
+            &mut image,
+            &mut reader,
+            (DroppedRegion::GpsIfd, IfdKind::Gps),
+            report,
+        )?;
         let maker_note_at = match (&exif, exif_ifd_at) {
             (Some(_), Some(at)) => maker_note_offset(&mut reader, at)?,
             _ => None,
@@ -121,8 +165,12 @@ impl ExifReader {
         // The Interoperability directory is reached from *inside* the Exif sub-IFD, not the 0th IFD.
         let (exif, interop) = match exif {
             Some(mut e) => {
-                let interop =
-                    self.follow(&mut e, &mut reader, DroppedRegion::InteropIfd, report)?;
+                let interop = self.follow(
+                    &mut e,
+                    &mut reader,
+                    (DroppedRegion::InteropIfd, IfdKind::Interop),
+                    report,
+                )?;
                 (Some(e), interop)
             }
             None => (None, None),
@@ -176,11 +224,14 @@ impl ExifReader {
     /// propagated unchanged in both modes. Leniency exists to tolerate corrupt files, and
     /// reporting a structurally perfect directory as malformed because a disk read failed would be
     /// a lie about the file.
+    ///
+    /// `kind` names the directory for the entries a [`recover_entries`](Self::recover_entries)
+    /// decode skips in it; they are recorded only for a directory that survives.
     fn follow<S: ReadAt>(
         &self,
         parent: &mut Ifd,
         reader: &mut IfdReader<S>,
-        region: DroppedRegion,
+        (region, kind): (DroppedRegion, IfdKind),
         report: &mut ReadReport,
     ) -> Result<Option<Ifd>> {
         // A region no tag addresses has, by definition, no pointer to follow — so `Ok(None)` is
@@ -194,6 +245,10 @@ impl ExifReader {
         };
         let offset = u64::from(offset);
         let followed = match reader.read_ifd(offset) {
+            Ok(raw) if self.recovers() => reader.decode_ifd_lenient(&raw).map(|(ifd, findings)| {
+                record_unreadable(&findings, kind, report);
+                ifd
+            }),
             Ok(raw) => reader.decode_ifd(&raw),
             Err(e) => Err(e),
         };
@@ -315,6 +370,12 @@ fn record_trailing_ifds<S: ReadAt>(
     for raw in reader.ifds().skip(2) {
         offsets.push(raw?.offset);
     }
+    record_trailing(offsets, report);
+    Ok(())
+}
+
+/// Records each of `offsets` as a [`DroppedRegion::TrailingIfd`], in chain order.
+fn record_trailing(offsets: Vec<u64>, report: &mut ReadReport) {
     for offset in offsets {
         report.record(Dropped::new(
             DroppedRegion::TrailingIfd,
@@ -322,7 +383,61 @@ fn record_trailing_ifds<S: ReadAt>(
             DropReason::Unrepresentable,
         ));
     }
-    Ok(())
+}
+
+/// The top-level chain under [`ExifReader::recover_entries`]: the 0th and 1st IFDs decoded
+/// leniently, each skipped entry recorded against its directory, plus the offsets of every
+/// trailing directory for [`record_trailing`].
+///
+/// The chain is walked once, through [`IfdReader::ifds`] — the same loop and runaway guards as
+/// [`IfdReader::read_file`], whose directory-body failures stay fatal here as they are there.
+/// Trailing directories are read (their bodies are how the chain continues) but never decoded:
+/// the model discards them whole, so a value of theirs has nothing to recover into.
+fn top_level_recovering<S: ReadAt>(
+    reader: &mut IfdReader<S>,
+    report: &mut ReadReport,
+) -> Result<(Vec<Ifd>, Vec<u64>)> {
+    let raws = reader.ifds().collect::<gamut_core::Result<Vec<RawIfd>>>()?;
+    if raws.is_empty() {
+        // A chain with no directory at all: `read_file` owns that error, so both modes return
+        // the identical one.
+        reader.read_file()?;
+    }
+    let mut pages = Vec::with_capacity(2);
+    for (raw, kind) in raws.iter().zip([IfdKind::Image, IfdKind::Thumbnail]) {
+        let (ifd, findings) = reader.decode_ifd_lenient(raw)?;
+        record_unreadable(&findings, kind, report);
+        pages.push(ifd);
+    }
+    let trailing = raws.iter().skip(2).map(|raw| raw.offset).collect();
+    Ok((pages, trailing))
+}
+
+/// Records every [`AuditFinding::UnreadableEntry`] in `findings` as a [`DroppedEntry`] of `kind`,
+/// in order. Shadowed-entry findings are not surfaced by this report (see the
+/// [`report`](crate::report) module).
+fn record_unreadable(findings: &[AuditFinding], kind: IfdKind, report: &mut ReadReport) {
+    for finding in findings {
+        if let AuditFinding::UnreadableEntry { tag, offset, .. } = *finding {
+            report.record_entry(DroppedEntry::new(kind, tag, offset));
+        }
+    }
+}
+
+/// The [`AuditSpec`] of an EXIF stream: the Exif, GPS and Interoperability pointers — not the
+/// `SubIFDs` of [`gamut_ifd::tags::STANDARD_POINTER_TAGS`], which no EXIF directory defines and
+/// this crate never follows — and the standard data extents, which cover the thumbnail's
+/// `JPEGInterchangeFormat` range.
+struct ExifAuditSpec;
+
+impl AuditSpec for ExifAuditSpec {
+    fn pointer_tags(&self) -> &[u16] {
+        &[
+            ifd_tags::EXIF_IFD,
+            ifd_tags::GPS_INFO,
+            ifd_tags::INTEROPERABILITY_IFD,
+        ]
+    }
 }
 
 /// Why an address that failed to parse failed: past the end of the stream, or inside it but
@@ -757,19 +872,38 @@ mod tests {
     /// missing something with nothing in the report at all. Equality against the clean report
     /// rather than emptiness is what lets `deep_blob` be swept at all: its trailing directory is a
     /// legitimate drop that a clean parse reports too.
+    ///
+    /// Swept twice: with the default reader, and with one that recovers entries and audits bytes,
+    /// whose lenient decodes and second walk must keep a transport failure's kind just the same.
     #[test]
     fn a_failing_source_is_propagated_not_reported_as_a_malformed_file() {
-        for (name, data) in [("healthy", healthy_blob()), ("deep", deep_blob())] {
-            let (clean, clean_report) = ExifReader::new()
-                .parse_from_with_report(&data[..])
-                .expect("clean parse");
+        let readers = [
+            ("default", ExifReader::new()),
+            (
+                "recovering+audit",
+                ExifReader::new().recover_entries(true).audit_bytes(true),
+            ),
+        ];
+        for (mode, reader) in readers {
+            for (blob, data) in [("healthy", healthy_blob()), ("deep", deep_blob())] {
+                let name = format!("{mode}/{blob}");
+                sweep_transport_failures(&name, &reader, &data);
+            }
+        }
+    }
+
+    /// Fails `data`'s source after every read budget up to well past a whole parse, and holds each
+    /// outcome to the law above.
+    fn sweep_transport_failures(name: &str, reader: &ExifReader, data: &[u8]) {
+        {
+            let (clean, clean_report) = reader.parse_from_with_report(data).expect("clean parse");
             let (mut failures, mut successes) = (0, 0);
-            for budget in 0..40 {
+            for budget in 0..200 {
                 let source = FailingAfter {
-                    inner: &data[..],
+                    inner: data,
                     budget,
                 };
-                match ExifReader::new().parse_from_with_report(source) {
+                match reader.parse_from_with_report(source) {
                     Ok((exif, report)) => {
                         successes += 1;
                         assert_eq!(
@@ -836,6 +970,277 @@ mod tests {
             ),
             other => panic!("transport failure became {other:?}"),
         }
+    }
+
+    /// The `ASCII` text a poisoned entry carries before [`poisoned_blob`] breaks its UTF-8.
+    const POISON: &[u8] = b"POISONED-VALUE";
+
+    /// One directory of a blob with every directory present, the entry each test poisons there,
+    /// and a field that must survive beside it.
+    const POISON_SITES: [(IfdKind, u16, u16); 5] = [
+        (IfdKind::Image, 0x0110, 0x010F),     // Model, beside Make
+        (IfdKind::Thumbnail, 0x010E, 0x0103), // ImageDescription, beside Compression
+        (IfdKind::Exif, 0xA434, 0x829D),      // LensModel, beside FNumber
+        (IfdKind::Gps, 0x0012, 0x0000),       // GPSMapDatum, beside GPSVersionID
+        (IfdKind::Interop, 0x1000, 0x0001),   // RelatedImageFileFormat, beside the index
+    ];
+
+    /// A marked blob with all five directories, where `kind`'s directory also carries `tag` as an
+    /// out-of-line `ASCII` value whose first byte is then overwritten with `0xFF` — no longer
+    /// UTF-8, so that one entry is unreadable while its directory's body is intact.
+    fn poisoned_blob(kind: IfdKind, tag: u16) -> Vec<u8> {
+        let poison = Value::Ascii(String::from_utf8(POISON.to_vec()).expect("ascii"));
+        let mut dirs: [Ifd; 5] = Default::default();
+        let [image, thumb, exif, gps, interop] = &mut dirs;
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        thumb.set(0x0103, Value::Short(vec![6]));
+        exif.set(0x829D, Value::Rational(vec![(28, 10)]));
+        gps.set(0x0000, Value::Byte(vec![2, 3, 0, 0]));
+        interop.set(0x0001, Value::Ascii("R98".into()));
+        let at = POISON_SITES
+            .iter()
+            .position(|&(k, _, _)| k == kind)
+            .expect("a poison site");
+        dirs[at].set(tag, poison);
+        let [mut image, thumb, mut exif, gps, interop] = dirs;
+        exif.set_sub_ifd(INTEROP_IFD_POINTER, vec![interop]);
+        image.set_sub_ifd(EXIF_IFD_POINTER, vec![exif]);
+        image.set_sub_ifd(GPS_IFD_POINTER, vec![gps]);
+        let mut tiff = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image, thumb],
+        })
+        .expect("write");
+        let hits: Vec<usize> = tiff
+            .windows(POISON.len())
+            .enumerate()
+            .filter(|(_, w)| *w == POISON)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hits.len(), 1, "exactly one value carries the poison");
+        tiff[hits[0]] = 0xFF;
+        let mut out = MARKER.to_vec();
+        out.extend(tiff);
+        out
+    }
+
+    /// Without recovery a poisoned entry costs its whole directory — the 0th or 1st IFD fails the
+    /// parse, a sub-IFD is dropped as `Malformed` — which is the baseline the recovering tests
+    /// below improve on, and proof that each fixture really is unreadable.
+    #[test]
+    fn without_recovery_a_poisoned_entry_costs_its_whole_directory() {
+        for (kind, tag, _) in POISON_SITES {
+            let data = poisoned_blob(kind, tag);
+            let parsed = ExifReader::new().parse_with_report(&data);
+            match kind {
+                IfdKind::Image | IfdKind::Thumbnail => {
+                    assert!(parsed.is_err(), "{kind:?}: a top-level directory is fatal");
+                }
+                _ => {
+                    let (_, report) = parsed.expect("a sub-IFD is dropped, not fatal");
+                    assert_eq!(report.dropped().len(), 1, "{kind:?}: {report:?}");
+                    assert_eq!(report.dropped()[0].reason(), DropReason::Malformed);
+                    assert_eq!(report.dropped_entries(), &[]);
+                }
+            }
+        }
+    }
+
+    /// With recovery the directory survives minus the poisoned entry, the field beside it is
+    /// kept, no region is dropped, and the skip is named by directory, tag and the offset of the
+    /// entry's own record in the TIFF stream.
+    #[test]
+    fn recovery_keeps_the_directory_and_names_the_skipped_entry() {
+        for (kind, tag, kept) in POISON_SITES {
+            let data = poisoned_blob(kind, tag);
+            let (exif, report) = ExifReader::new()
+                .recover_entries(true)
+                .parse_with_report(&data)
+                .unwrap_or_else(|e| panic!("{kind:?}: recovery must not fail: {e}"));
+            assert!(exif.get(kind, kept).is_some(), "{kind:?}: neighbour lost");
+            assert_eq!(exif.get(kind, tag), None, "{kind:?}: poisoned field kept");
+            assert_eq!(report.dropped(), &[], "{kind:?}: a region was dropped");
+            let [entry] = report.dropped_entries() else {
+                panic!("{kind:?}: one skipped entry, got {report:?}");
+            };
+            assert_eq!((entry.ifd(), entry.tag()), (kind, tag));
+            let record = MARKER.len() + usize::try_from(entry.offset()).expect("small");
+            assert_eq!(
+                data[record..record + 2],
+                tag.to_le_bytes(),
+                "{kind:?}: the offset names the entry's record in the TIFF frame"
+            );
+        }
+    }
+
+    /// The recovered model writes back as a well-formed blob that parses cleanly without
+    /// recovery: the skipped field is simply absent, never re-emitted half-read.
+    #[test]
+    fn a_recovered_parse_round_trips_without_the_skipped_entry() {
+        for (kind, tag, kept) in POISON_SITES {
+            let data = poisoned_blob(kind, tag);
+            let recovered = ExifReader::new()
+                .recover_entries(true)
+                .parse(&data)
+                .expect("recover");
+            let bytes = recovered.to_bytes().expect("to_bytes");
+            let (again, report) = ExifReader::new()
+                .parse_with_report(&bytes)
+                .expect("the rewrite parses without recovery");
+            assert!(report.is_empty(), "{kind:?}: {report:?}");
+            assert_eq!(again.get(kind, kept), recovered.get(kind, kept));
+            assert_eq!(again.get(kind, tag), None);
+        }
+    }
+
+    /// Strictness overrules recovery: it rejects exactly what recovery would skip.
+    #[test]
+    fn strict_mode_ignores_recovery() {
+        let reader = ExifReader::new().strict(true).recover_entries(true);
+        let image = poisoned_blob(IfdKind::Image, 0x0110);
+        assert!(matches!(reader.parse(&image), Err(ExifError::Ifd(_))));
+        let exif = poisoned_blob(IfdKind::Exif, 0xA434);
+        assert!(matches!(
+            reader.parse(&exif),
+            Err(ExifError::InvalidIfd("Exif"))
+        ));
+    }
+
+    /// On blobs with nothing to recover, recovery changes nothing — including the trailing
+    /// directory `deep_blob` carries, which the recovering walk names from its own single pass.
+    #[test]
+    fn recovery_on_a_readable_blob_reports_exactly_what_the_default_reader_does() {
+        for data in [healthy_blob(), deep_blob()] {
+            let plain = ExifReader::new().parse_with_report(&data).expect("plain");
+            let recovering = ExifReader::new()
+                .recover_entries(true)
+                .parse_with_report(&data)
+                .expect("recovering");
+            assert_eq!(recovering, plain);
+        }
+    }
+
+    /// A chain with no directory at all fails identically with and without recovery: the
+    /// recovering walk defers that error to `read_file` rather than inventing its own.
+    #[test]
+    fn an_empty_chain_fails_identically_with_and_without_recovery() {
+        let mut data = MARKER.to_vec();
+        data.extend_from_slice(b"II\x2a\x00\x00\x00\x00\x00"); // first IFD offset = 0
+        let plain = ExifReader::new().parse(&data).expect_err("no IFD");
+        let recovering = ExifReader::new()
+            .recover_entries(true)
+            .parse(&data)
+            .expect_err("no IFD");
+        assert_eq!(recovering.to_string(), plain.to_string());
+    }
+
+    /// No audit is run, or reported, unless asked for.
+    #[test]
+    fn a_report_carries_no_byte_audit_unless_asked() {
+        let (_, report) = ExifReader::new()
+            .parse_with_report(&healthy_blob())
+            .expect("parse");
+        assert_eq!(report.byte_audit(), None);
+    }
+
+    /// A blob `write` produced accounts for every byte of its TIFF stream — header, directories,
+    /// values, the MakerNote and the thumbnail's JPEG range — and leaves nothing unnamed.
+    #[test]
+    fn a_written_blob_audits_as_fully_classified() {
+        for data in [healthy_blob(), deep_blob()] {
+            let (_, report) = ExifReader::new()
+                .audit_bytes(true)
+                .parse_with_report(&data)
+                .expect("parse");
+            let audit = report.byte_audit().expect("asked for");
+            assert!(audit.is_fully_classified(), "{audit:?}");
+            assert_eq!(audit.unclaimed_spans(), Vec::new(), "{audit:?}");
+        }
+    }
+
+    /// Bytes no structure claims are named, at their offset in the TIFF stream (the marker is
+    /// outside the audited frame) — the verdict the drop lists cannot give.
+    #[test]
+    fn appended_bytes_are_named_by_the_byte_audit() {
+        let mut data = healthy_blob();
+        let tiff_len = (data.len() - MARKER.len()) as u64;
+        data.extend_from_slice(&[0xAB; 16]);
+        let (_, report) = ExifReader::new()
+            .audit_bytes(true)
+            .parse_with_report(&data)
+            .expect("parse");
+        assert!(report.is_empty(), "nothing was *dropped*: {report:?}");
+        let spans = report.byte_audit().expect("asked for").unclaimed_spans();
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!((spans[0].range.start, spans[0].range.len), (tiff_len, 16));
+    }
+
+    /// The audit is a second, strict walk: a sub-IFD recovery kept still fails it, so its bytes
+    /// stay unclassified; a top-level entry recovery skipped leaves the walk nothing to stand on,
+    /// so there is no verdict — but the parse itself still succeeds.
+    #[test]
+    fn a_recovered_parse_is_audited_by_the_strict_walk() {
+        let reader = ExifReader::new().recover_entries(true).audit_bytes(true);
+        let (_, report) = reader
+            .parse_with_report(&poisoned_blob(IfdKind::Exif, 0xA434))
+            .expect("parse");
+        let audit = report.byte_audit().expect("the top-level chain reads");
+        assert!(!audit.is_fully_classified(), "{audit:?}");
+
+        let (exif, report) = reader
+            .parse_with_report(&poisoned_blob(IfdKind::Image, 0x0110))
+            .expect("parse");
+        assert_eq!(exif.make(), Some("Canon"));
+        assert_eq!(report.byte_audit(), None);
+    }
+
+    /// An unreadable entry in a trailing (3rd) directory also leaves the strict audit walk nothing
+    /// to stand on, yet the recovering parse names no skip for it: that directory is read but never
+    /// decoded, and is dropped whole as a `TrailingIfd` region. The audit's `None` is therefore not
+    /// evidence of a skipped 0th/1st-IFD entry.
+    #[test]
+    fn an_unreadable_trailing_directory_entry_costs_the_audit_but_names_no_skip() {
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        let mut thumb = Ifd::new();
+        thumb.set(0x0103, Value::Short(vec![6]));
+        let mut trailing = Ifd::new();
+        trailing.set(
+            0x0131,
+            Value::Ascii(String::from_utf8(POISON.to_vec()).expect("ascii")),
+        );
+        let mut tiff = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image, thumb, trailing],
+        })
+        .expect("write");
+        let hits: Vec<usize> = tiff
+            .windows(POISON.len())
+            .enumerate()
+            .filter(|(_, w)| *w == POISON)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hits.len(), 1, "exactly one value carries the poison");
+        tiff[hits[0]] = 0xFF;
+        let mut data = MARKER.to_vec();
+        data.extend(tiff);
+
+        assert!(
+            ExifReader::new().parse(&data).is_err(),
+            "without recovery the trailing entry is fatal, so the fixture really is unreadable"
+        );
+        let (exif, report) = ExifReader::new()
+            .recover_entries(true)
+            .audit_bytes(true)
+            .parse_with_report(&data)
+            .expect("parse");
+        assert_eq!(exif.make(), Some("Canon"));
+        assert_eq!(report.dropped_entries(), &[], "no skip is named");
+        assert_eq!(report.dropped().len(), 1, "{report:?}");
+        assert_eq!(report.dropped()[0].region(), DroppedRegion::TrailingIfd);
+        assert_eq!(report.byte_audit(), None);
     }
 
     /// `address_reason` splits the two defects the report distinguishes, and the boundary is the

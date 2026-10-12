@@ -15,7 +15,9 @@
 //! `tests/robustness.rs` still drives both entry points over the hostile corpus as a
 //! regression gate on the wrappers.
 
-use gamut_core::{Error, Result};
+use std::collections::BTreeSet;
+
+use gamut_core::{Error, ErrorKind, Result};
 
 use crate::audit::AuditFinding;
 use crate::reader::{ChainGuard, offset_at, read_header, resolve_pointers_with, u16_at};
@@ -312,7 +314,7 @@ impl<S: ReadAt> IfdReader<S> {
     /// Returns [`Error::InvalidInput`] if a value is truncated or its offset is out of bounds,
     /// or [`Error::Io`] if the source fails.
     pub fn decode_ifd(&mut self, raw: &RawIfd) -> Result<Ifd> {
-        self.decode_ifd_inner(raw, None)
+        self.decode_ifd_inner(raw, None, None)
     }
 
     /// [`decode_ifd`](Self::decode_ifd), plus what it discarded: one
@@ -329,9 +331,50 @@ impl<S: ReadAt> IfdReader<S> {
     /// As [`decode_ifd`](Self::decode_ifd): a shadowed entry's value is still decoded, so a
     /// malformed one fails the directory just as it does there.
     pub fn decode_ifd_reporting(&mut self, raw: &RawIfd) -> Result<(Ifd, Vec<AuditFinding>)> {
-        let ifd = self.decode_ifd_inner(raw, None)?;
+        let ifd = self.decode_ifd_inner(raw, None, None)?;
         let mut findings = Vec::new();
-        report_shadowed(raw, 0, &mut findings);
+        report_shadowed(raw.offset, raw.entries.iter(), 0, &mut findings);
+        Ok((ifd, findings))
+    }
+
+    /// [`decode_ifd_reporting`](Self::decode_ifd_reporting) that **recovers** instead of failing:
+    /// an entry whose value cannot be read is skipped and named by an
+    /// [`AuditFinding::UnreadableEntry`], and the rest of the directory is still returned.
+    ///
+    /// Recovery is opted into per call, not per reader. Every other entry point —
+    /// [`decode_ifd`](Self::decode_ifd), [`read_file`](Self::read_file), the slice readers and the
+    /// [`audit`](crate::audit) walk — keeps failing the directory on such an entry, so a codec that
+    /// relies on that keeps it without saying so, and only a caller that asks receives a partial
+    /// directory.
+    ///
+    /// The result is exactly `decode_ifd_reporting` over `raw` with the unreadable entries removed:
+    /// the findings are one [`UnreadableEntry`](AuditFinding::UnreadableEntry) per skipped entry in
+    /// on-disk order, then that call's [`ShadowedEntry`](AuditFinding::ShadowedEntry) findings.
+    /// So a skipped entry shadows nothing — a duplicate tag keeps its last *readable* occurrence —
+    /// and on any directory `decode_ifd_reporting` accepts, the two return the same value.
+    ///
+    /// **Round trip.** The returned [`Ifd`] lacks every skipped field, so writing it back emits a
+    /// well-formed directory without them; the findings are the only record that they existed.
+    ///
+    /// # Errors
+    ///
+    /// Only a failure the bytes do not explain: an [`Error::Io`]-kind error from the source is
+    /// propagated unchanged, because skipping an entry over a transport failure would report a
+    /// readable file as damaged. An [`Error::InvalidInput`]-kind failure is always recovered.
+    pub fn decode_ifd_lenient(&mut self, raw: &RawIfd) -> Result<(Ifd, Vec<AuditFinding>)> {
+        let mut skipped = Vec::new();
+        let ifd = self.decode_ifd_inner(raw, None, Some(&mut skipped))?;
+        let mut findings: Vec<AuditFinding> = skipped
+            .iter()
+            .map(|entry| AuditFinding::UnreadableEntry {
+                ifd: raw.offset,
+                tag: entry.tag,
+                offset: entry.offset,
+            })
+            .collect();
+        let gone: BTreeSet<u64> = skipped.iter().map(|entry| entry.offset).collect();
+        let kept = raw.entries.iter().filter(|e| !gone.contains(&e.offset));
+        report_shadowed(raw.offset, kept, 0, &mut findings);
         Ok((ifd, findings))
     }
 
@@ -359,7 +402,7 @@ impl<S: ReadAt> IfdReader<S> {
     pub fn read_tree(&mut self, pointer_tags: &[u16]) -> Result<TiffFile> {
         let mut file = self.read_file()?;
         // One visited set across every page, so two pages claiming one directory fail too.
-        let mut visited = std::collections::BTreeSet::new();
+        let mut visited = BTreeSet::new();
         let scope = crate::SubtreeScope::new(pointer_tags, pointer_tags);
         let mut fetch = |off: u64| {
             let raw = self.read_ifd(off)?;
@@ -395,7 +438,7 @@ impl<S: ReadAt> IfdReader<S> {
     /// truncated, or [`Error::Io`] if the source fails.
     pub fn read_ifd_at_audited(&mut self, offset: u64, map: &mut SegmentMap) -> Result<(Ifd, u64)> {
         let raw = self.read_ifd(offset)?;
-        let ifd = self.decode_ifd_inner(&raw, Some(map))?;
+        let ifd = self.decode_ifd_inner(&raw, Some(map), None)?;
         Ok((ifd, raw.next))
     }
 
@@ -411,8 +454,8 @@ impl<S: ReadAt> IfdReader<S> {
         base: u64,
     ) -> Result<(Ifd, u64)> {
         let raw = self.read_ifd(offset)?;
-        let ifd = self.decode_ifd_inner(&raw, Some(map))?;
-        report_shadowed(&raw, base, findings);
+        let ifd = self.decode_ifd_inner(&raw, Some(map), None)?;
+        report_shadowed(raw.offset, raw.entries.iter(), base, findings);
         Ok((ifd, raw.next))
     }
 
@@ -450,9 +493,9 @@ impl<S: ReadAt> IfdReader<S> {
         while offset != 0 {
             guard.admit(offset)?;
             let raw = self.read_ifd(offset)?;
-            let ifd = self.decode_ifd_inner(&raw, map.as_deref_mut())?;
+            let ifd = self.decode_ifd_inner(&raw, map.as_deref_mut(), None)?;
             if let Some(sink) = findings.as_deref_mut() {
-                report_shadowed(&raw, 0, sink);
+                report_shadowed(raw.offset, raw.entries.iter(), 0, sink);
             }
             ifds.push(ifd);
             offset = raw.next;
@@ -474,7 +517,17 @@ impl<S: ReadAt> IfdReader<S> {
     /// verbatim (their record sits inside the body claim; their unsizable payload deliberately
     /// stays unclaimed), last duplicate wins, out-of-line spans claimed only after a successful
     /// decode.
-    fn decode_ifd_inner(&mut self, raw: &RawIfd, mut map: Option<&mut SegmentMap>) -> Result<Ifd> {
+    ///
+    /// With a `skipped` sink the decode recovers: an entry whose value fails with an
+    /// [`ErrorKind::InvalidInput`] error is pushed there and left out of the [`Ifd`] instead of
+    /// failing the directory. Any other error kind — a transport failure — still propagates.
+    /// (An unknown-type entry cannot fail: its word is always the variant's offset width.)
+    fn decode_ifd_inner<'r>(
+        &mut self,
+        raw: &'r RawIfd,
+        mut map: Option<&mut SegmentMap>,
+        mut skipped: Option<&mut Vec<&'r RawEntry>>,
+    ) -> Result<Ifd> {
         if let Some(m) = map.as_deref_mut() {
             // The directory body — count field, entry records (inline values included), and the
             // next-IFD pointer — is one contiguous span, exactly as `read_ifd` fetched it.
@@ -494,8 +547,13 @@ impl<S: ReadAt> IfdReader<S> {
                 ifd.set(entry.tag, Value::Unknown(self.unknown_value(entry)?));
                 continue;
             };
-            let value = self.fetch_value(entry, ty, raw.offset, map.as_deref_mut())?;
-            ifd.set(entry.tag, value);
+            match self.fetch_value(entry, ty, raw.offset, map.as_deref_mut()) {
+                Ok(value) => ifd.set(entry.tag, value),
+                Err(e) => match skipped.as_deref_mut() {
+                    Some(sink) if e.kind() == ErrorKind::InvalidInput => sink.push(entry),
+                    _ => return Err(e),
+                },
+            }
         }
         Ok(ifd)
     }
@@ -574,19 +632,27 @@ impl<S: ReadAt> IfdReader<S> {
     }
 }
 
-/// Appends an [`AuditFinding::ShadowedEntry`] for every entry of `raw` that a later entry repeats
-/// the tag of — the ones [`Ifd::set`]'s last-wins leaves out of the decoded directory — in
-/// on-disk order, with both offsets shifted by `base`.
+/// Appends an [`AuditFinding::ShadowedEntry`] for every one of `entries` (directory `ifd`'s, in
+/// on-disk order) that a later one repeats the tag of — the ones [`Ifd::set`]'s last-wins leaves
+/// out of the decoded directory — in on-disk order, with both offsets shifted by `base`.
+///
+/// `entries` is every entry the decode kept: all of them, except under
+/// [`IfdReader::decode_ifd_lenient`], whose skipped entries were never set and so shadow nothing.
 ///
 /// One backwards pass over a set of the tags already seen, so a hostile 65 535-entry directory
 /// costs a linear scan rather than a quadratic one.
-fn report_shadowed(raw: &RawIfd, base: u64, findings: &mut Vec<AuditFinding>) {
-    let mut later = std::collections::BTreeSet::new();
+fn report_shadowed<'r>(
+    ifd: u64,
+    entries: impl DoubleEndedIterator<Item = &'r RawEntry>,
+    base: u64,
+    findings: &mut Vec<AuditFinding>,
+) {
+    let mut later = BTreeSet::new();
     let start = findings.len();
-    for entry in raw.entries.iter().rev() {
+    for entry in entries.rev() {
         if !later.insert(entry.tag) {
             findings.push(AuditFinding::ShadowedEntry {
-                ifd: base + raw.offset,
+                ifd: base + ifd,
                 tag: entry.tag,
                 offset: base + entry.offset,
             });
@@ -869,6 +935,151 @@ mod tests {
             r.decode_ifd_reporting(&raw).expect("decode"),
             (ifd, Vec::new())
         );
+    }
+
+    /// A directory at 8 of `entries` 12-byte classic little-endian records, then `next = 0` and
+    /// nothing else — so any out-of-line offset past the body lies outside the source.
+    fn le_directory(entries: &[[u8; 12]]) -> Vec<u8> {
+        let mut data = vec![b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00];
+        data.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for entry in entries {
+            data.extend_from_slice(entry);
+        }
+        data.extend_from_slice(&[0, 0, 0, 0]);
+        data
+    }
+
+    /// A classic little-endian entry record: `tag`, `type_code`, `count`, then the value word.
+    fn le_entry(tag: u16, type_code: u16, count: u32, word: [u8; 4]) -> [u8; 12] {
+        let mut record = [0u8; 12];
+        record[..2].copy_from_slice(&tag.to_le_bytes());
+        record[2..4].copy_from_slice(&type_code.to_le_bytes());
+        record[4..8].copy_from_slice(&count.to_le_bytes());
+        record[8..].copy_from_slice(&word);
+        record
+    }
+
+    /// `SHORT[3]` (6 bytes, out of line) at offset `0xFFFF`, far past any test source's end.
+    fn dangling_short(tag: u16) -> [u8; 12] {
+        le_entry(tag, 3, 3, [0xff, 0xff, 0, 0])
+    }
+
+    /// An inline `SHORT` with value `v`.
+    fn short(tag: u16, v: u16) -> [u8; 12] {
+        let [lo, hi] = v.to_le_bytes();
+        le_entry(tag, 3, 1, [lo, hi, 0, 0])
+    }
+
+    /// One unreadable entry costs exactly itself: `decode_ifd` fails the directory, the lenient
+    /// decode keeps the readable entries on either side and names the skipped one by directory,
+    /// tag and record offset.
+    #[test]
+    fn decode_ifd_lenient_skips_an_unreadable_entry_and_keeps_the_rest() {
+        let data = le_directory(&[short(256, 1), dangling_short(258), short(259, 5)]);
+        let mut r = IfdReader::open(&data[..]).expect("open");
+        let raw = r.read_ifd(8).expect("read_ifd");
+        assert!(r.decode_ifd(&raw).is_err(), "the strict decode fails");
+
+        let mut want = Ifd::new();
+        want.set(256, Value::Short(vec![1]));
+        want.set(259, Value::Short(vec![5]));
+        assert_eq!(
+            r.decode_ifd_lenient(&raw).expect("lenient"),
+            (
+                want,
+                vec![AuditFinding::UnreadableEntry {
+                    ifd: 8,
+                    tag: 258,
+                    offset: 22,
+                }]
+            )
+        );
+    }
+
+    /// A skipped entry was never set, so it shadows nothing: a tag whose *last* occurrence is
+    /// unreadable keeps its last readable one, and only the readable occurrences before that are
+    /// shadowed. Unreadable findings come first, then shadowed ones, each in on-disk order.
+    #[test]
+    fn decode_ifd_lenient_keeps_the_last_readable_duplicate() {
+        let data = le_directory(&[
+            short(256, 1),
+            short(256, 2),
+            dangling_short(256),
+            dangling_short(257),
+        ]);
+        let mut r = IfdReader::open(&data[..]).expect("open");
+        let raw = r.read_ifd(8).expect("read_ifd");
+        let (ifd, findings) = r.decode_ifd_lenient(&raw).expect("lenient");
+        assert_eq!(ifd.get(256), Some(&Value::Short(vec![2])));
+        assert_eq!(ifd.get(257), None);
+        assert_eq!(
+            findings,
+            vec![
+                AuditFinding::UnreadableEntry {
+                    ifd: 8,
+                    tag: 256,
+                    offset: 34,
+                },
+                AuditFinding::UnreadableEntry {
+                    ifd: 8,
+                    tag: 257,
+                    offset: 46,
+                },
+                AuditFinding::ShadowedEntry {
+                    ifd: 8,
+                    tag: 256,
+                    offset: 10,
+                },
+            ]
+        );
+    }
+
+    /// On a directory every entry of which reads, the lenient decode is `decode_ifd_reporting`:
+    /// same directory, same shadowed findings, nothing else.
+    #[test]
+    fn decode_ifd_lenient_agrees_with_reporting_on_a_readable_directory() {
+        let data = le_directory(&[short(256, 1), short(258, 8), short(256, 2)]);
+        let mut r = IfdReader::open(&data[..]).expect("open");
+        let raw = r.read_ifd(8).expect("read_ifd");
+        let lenient = r.decode_ifd_lenient(&raw).expect("lenient");
+        assert_eq!(lenient, r.decode_ifd_reporting(&raw).expect("reporting"));
+        assert_eq!(lenient.1.len(), 1, "the first 256 is shadowed");
+    }
+
+    /// A transport failure is not a damaged entry: the lenient decode propagates it unchanged
+    /// instead of reporting a readable value as unreadable.
+    #[test]
+    fn decode_ifd_lenient_propagates_a_transport_failure() {
+        struct FailsAt<'a> {
+            bytes: &'a [u8],
+            offset: u64,
+        }
+        impl ReadAt for FailsAt<'_> {
+            fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+                if offset == self.offset {
+                    return Err(Error::Io(std::io::Error::other("injected")));
+                }
+                self.bytes.read_exact_at(offset, buf)
+            }
+            fn len(&mut self) -> Result<u64> {
+                Ok(self.bytes.len() as u64)
+            }
+        }
+
+        let mut ifd = Ifd::new();
+        ifd.set(258, Value::Short(vec![8, 8, 8])); // out of line
+        let bytes = classic_le(vec![ifd]);
+        let mut r = IfdReader::open(&bytes[..]).expect("open");
+        let raw = r.read_ifd(8).expect("read_ifd");
+        let voff = r.value_offset(&raw.entries[0]).expect("out of line");
+
+        let mut failing = IfdReader::open(FailsAt {
+            bytes: &bytes,
+            offset: voff,
+        })
+        .expect("open");
+        let error = failing.decode_ifd_lenient(&raw).expect_err("transport");
+        assert_eq!(error.kind(), ErrorKind::Io);
     }
 
     #[test]
