@@ -1,7 +1,17 @@
-//! AV1 image encoder. AVIF relies on AV1 intra-frame coding, so this crate is available
-//! standalone as well as through [`gamut-avif`](https://crates.io/crates/gamut-avif).
+//! AV1 still-image (intra-frame) encoder and decoder. AVIF relies on AV1 intra-frame coding, so
+//! this crate is available standalone as well as through
+//! [`gamut-avif`](https://crates.io/crates/gamut-avif).
 //!
-//! M0 implemented the minimal path: a **lossless** all-intra keyframe — `seq_profile = 1`
+//! **Decoding** is behind the default-on `decode` feature (`default-features = false` leaves the
+//! encoder-only crate). Today `Av1Decoder` reads the **framing and header layer** of a still —
+//! the OBU walk (§5.3), the sequence header (§5.5), the uncompressed frame header (§5.9) and
+//! tile-group framing (§5.11.1) — through `Av1Decoder::inspect`; sample decoding (tile body,
+//! reconstruction, in-loop filters) is not implemented yet. It accepts `seq_profile = 1` (8-bit
+//! 4:4:4) intra key frames only; the pixel-format matrix (10/12-bit, 4:2:0/4:2:2, monochrome),
+//! intra block copy and film grain are refused with a typed error, each a ☐ row in
+//! `gamut-avif/STATUS.md`.
+//!
+//! **Encoding**: M0 implemented the minimal path: a **lossless** all-intra keyframe — `seq_profile = 1`
 //! (8-bit 4:4:4), identity matrix coefficients, full range, single tile, 64×64 superblocks,
 //! `DC_PRED`, and the forced `TX_4X4` Walsh–Hadamard transform. The crate now also encodes
 //! **lossy** all-intra keyframes: a wide intra mode set (the eight directional modes with
