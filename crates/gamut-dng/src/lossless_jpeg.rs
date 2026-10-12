@@ -628,10 +628,11 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
 
     loop {
         // Find the next marker: skip to the first `FF` at or after `pos`. `position` returns an
-        // offset strictly within `data[pos..]`, so there is no off-by-one bound to mutate.
-        let off = data[pos..]
-            .iter()
-            .position(|&b| b == MARKER)
+        // offset strictly within `data[pos..]`, so there is no off-by-one bound to mutate. A
+        // segment length running past the data leaves `pos` beyond it, which reads as no marker.
+        let off = data
+            .get(pos..)
+            .and_then(|rest| rest.iter().position(|&b| b == MARKER))
             .ok_or_else(|| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOS")
             })?;
@@ -1120,6 +1121,26 @@ mod tests {
         s[sos_length..sos_length + 2].copy_from_slice(&[0xFF, 0xFF]);
         let error = decode(&s).expect_err("SOS length past the end");
         assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn decode_rejects_a_segment_length_past_the_end_of_the_stream() {
+        // An APP0 length of 0xFFFF in a 6-byte stream moves the marker search past the data.
+        let error = decode(&[MARKER, SOI, MARKER, 0xE0, 0xFF, 0xFF]).expect_err("APP0 past end");
+        assert_eq!(
+            error.static_message(),
+            Some("DNG: lossless JPEG missing SOS")
+        );
+        // The same overrun through the SOF3 arm: its 13-byte segment, otherwise well formed,
+        // with the length field (bytes 4..6, after SOI and the marker) raised to 0xFFFF.
+        let mut s = one_bit_per_sample_stream(1, &[0]);
+        s.truncate(15);
+        s[4..6].copy_from_slice(&[0xFF, 0xFF]);
+        let error = decode(&s).expect_err("SOF3 past end");
+        assert_eq!(
+            error.static_message(),
+            Some("DNG: lossless JPEG missing SOS")
+        );
     }
 
     // ------------------------------------------------------------------------------------------
