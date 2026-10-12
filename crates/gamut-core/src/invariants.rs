@@ -1196,7 +1196,10 @@ mod tests {
         )
         .expect_err("a refused identity must violate the law");
 
-        assert_eq!(violation.law(), "converting_a_layout_to_itself_changes_nothing");
+        assert_eq!(
+            violation.law(),
+            "converting_a_layout_to_itself_changes_nothing"
+        );
         assert!(
             violation.detail().contains("Gray8 -> itself was refused"),
             "{violation}"
@@ -1213,7 +1216,10 @@ mod tests {
         )
         .expect_err("an altered identity must violate the law");
 
-        assert_eq!(violation.law(), "converting_a_layout_to_itself_changes_nothing");
+        assert_eq!(
+            violation.law(),
+            "converting_a_layout_to_itself_changes_nothing"
+        );
         assert!(
             violation
                 .detail()
@@ -1237,7 +1243,10 @@ mod tests {
         )
         .expect_err("diverging samples must violate the law");
 
-        assert_eq!(violation.law(), "the_in_place_door_matches_the_allocating_door");
+        assert_eq!(
+            violation.law(),
+            "the_in_place_door_matches_the_allocating_door"
+        );
         assert!(
             violation.detail().contains("wrote different samples"),
             "{violation}"
