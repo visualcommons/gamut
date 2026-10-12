@@ -38,10 +38,16 @@ impl XmpPacket {
     /// records whether the packet is writable and how much trailing padding it carries. If there is
     /// no wrapper the whole input is taken as the body (`writable = false`, `padding = 0`).
     ///
+    /// The input is **one** packet. Anything after the first packet's trailer is ignored, except
+    /// another `<?xpacket` instruction: bytes that hold several packets end to end are refused,
+    /// never read as their first packet with the rest silently dropped (issue #562).
+    ///
     /// # Errors
     ///
     /// Returns [`XmpError::Encoding`] if the bytes begin with a UTF-16/UTF-32 byte-order mark or are
-    /// not valid UTF-8 — only UTF-8 packets are supported (Part 1 §7.1).
+    /// not valid UTF-8 — only UTF-8 packets are supported (Part 1 §7.1) — and
+    /// [`XmpError::MultiplePackets`], carrying the offset at which the next one begins, if a
+    /// `<?xpacket` instruction follows the first packet's trailer.
     pub fn scan(bytes: &[u8]) -> Result<XmpPacket> {
         let split = split_packet(bytes)?;
         let body = core::str::from_utf8(split.inner)
@@ -72,9 +78,12 @@ struct SplitPacket<'a> {
 /// # Errors
 ///
 /// Returns [`XmpError::Encoding`] for a UTF-16/UTF-32 byte-order mark (Part 1 §7.1: only UTF-8 is
-/// implemented).
-fn split_packet(bytes: &[u8]) -> Result<SplitPacket<'_>> {
-    let bytes = strip_bom(bytes)?;
+/// implemented), and [`XmpError::MultiplePackets`] when another `<?xpacket` instruction follows
+/// the trailer.
+fn split_packet(input: &[u8]) -> Result<SplitPacket<'_>> {
+    let bytes = strip_bom(input)?;
+    // Offsets below are into `bytes`; the error reports one into the caller's `input`.
+    let bom_len = input.len() - bytes.len();
 
     let Some(header) = find(bytes, b"<?xpacket") else {
         // Bare RDF/XML (no wrapper) — e.g. some WebP/AVIF payloads.
@@ -98,6 +107,12 @@ fn split_packet(bytes: &[u8]) -> Result<SplitPacket<'_>> {
         Some(rel) => {
             let trailer = body_start + rel;
             let trailer_end = find(&bytes[trailer..], b"?>").map_or(bytes.len(), |e| trailer + e);
+            // A second packet after this one's trailer is a catenation (Part 3, "External storage
+            // of metadata"). Reading only the first would drop the rest without a signal, and
+            // merging needs a conflict rule no part of the specification supplies — so refuse.
+            if let Some(next) = find(&bytes[trailer_end..], b"<?xpacket") {
+                return Err(XmpError::MultiplePackets(bom_len + trailer_end + next));
+            }
             let pi = &bytes[trailer..trailer_end];
             let writable = find(pi, b"end=\"w\"").is_some() || find(pi, b"end='w'").is_some();
             (trailer, writable)
@@ -240,6 +255,28 @@ mod tests {
         // instruction (here in a nonstandard extra attribute) must not flip it.
         let s = "<?xpacket begin=\"\" id=\"x\"?><rdf:RDF/><?xpacket end=\"r\" note=\"w\"?>";
         assert!(!XmpPacket::scan(s.as_bytes()).unwrap().writable);
+    }
+
+    #[test]
+    fn a_second_packet_after_the_trailer_is_refused_at_its_offset() {
+        // Issue #562: two packets end to end are refused, not read as the first. The offset is
+        // where the second `<?xpacket` begins — past the separator, not at the trailer's end.
+        let catenated = format!("{WRAPPED}\n{WRAPPED}");
+        assert_eq!(
+            XmpPacket::scan(catenated.as_bytes()),
+            Err(XmpError::MultiplePackets(WRAPPED.len() + 1))
+        );
+    }
+
+    #[test]
+    fn multiple_packets_offset_counts_a_stripped_bom() {
+        // The offset indexes the caller's input, so the three BOM bytes `scan` strips are counted.
+        let mut bytes = UTF8_BOM.to_vec();
+        bytes.extend_from_slice(format!("{WRAPPED}{WRAPPED}").as_bytes());
+        assert_eq!(
+            XmpPacket::scan(&bytes),
+            Err(XmpError::MultiplePackets(UTF8_BOM.len() + WRAPPED.len()))
+        );
     }
 
     #[test]
