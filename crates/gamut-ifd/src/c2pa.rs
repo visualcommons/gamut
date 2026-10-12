@@ -254,41 +254,337 @@ pub fn locate<S: ReadAt>(src: S) -> Result<Option<C2paExclusions>> {
     let Some(entry) = store_entry(&last) else {
         return Ok(None);
     };
-    // A value too short to hold a JUMBF box header is not a manifest store
-    // (`references/c2pa/README.md`), so it is absence here rather than a range a signer could
-    // hash — and the encoder's own refusal of such a store stays reachable only for stores a
-    // caller supplies, never for one this reader handed back.
-    if entry.count < MIN_STORE_LEN as u64 {
-        return Ok(None);
-    }
-    let variant = reader.variant();
-    let count_field = count_field(entry, variant);
-    // Out of line at the offset the entry declares; inline, the value word follows the count.
-    let start = reader.value_offset(entry).unwrap_or(count_field.end());
-    let end = start.checked_add(entry.count).ok_or_else(|| {
-        Error::invalid_input(
+    match read_store(&mut reader, entry)? {
+        Ok(exclusions) => Ok(Some(exclusions)),
+        // A value too short to hold a JUMBF box header is not a manifest store
+        // (`references/c2pa/README.md`), so it is absence here rather than a range a signer could
+        // hash — and the encoder's own refusal of such a store stays reachable only for stores a
+        // caller supplies, never for one this reader handed back.
+        Err(C2paUnreadReason::TooShort) => Ok(None),
+        // The entry's offset word is the file's to choose, so a hostile one can point the store
+        // back over its own count field. Such a pair is no exclusion set (§18.5.5 hashes around
+        // two disjoint ranges), and the type promises it never holds one: the same refusal a
+        // host's hand-built set gets from `C2paExclusions::new`, raised as an error like an
+        // out-of-file extent.
+        Err(C2paUnreadReason::OverlapsCountField) => Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "TIFF: C2PA manifest store extent overflows",
-        )
-    })?;
-    if end > reader.source_mut().len()? {
-        return Err(Error::invalid_input(
+            "TIFF: the C2PA exclusion ranges overlap",
+        )),
+        // `OutsideFile` — the only other reason `read_store` returns.
+        Err(_) => Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "TIFF: C2PA manifest store lies outside the file",
-        ));
+        )),
     }
-    // The entry's offset word is the file's to choose, so a hostile one can point the store
-    // back over its own count field. Such a pair is no exclusion set (§18.5.5 hashes around two
-    // disjoint ranges), and the type promises it never holds one: the same validation a host's
-    // hand-built set passes through, raised as an error like an out-of-file extent.
-    C2paExclusions::new(
+}
+
+/// Reads the store a single, `UNDEFINED`-typed tag-52545 `entry` declares, or the reason it declares
+/// none: shorter than a JUMBF box header ([`C2paUnreadReason::TooShort`]), an extent that overflows
+/// or runs past the source ([`C2paUnreadReason::OutsideFile`]), or a value placed over the entry's
+/// own count field ([`C2paUnreadReason::OverlapsCountField`]).
+///
+/// The one reading behind [`locate`] and [`summarize`], so the store one reports is the store the
+/// other reports. The outer `Result` is the source's own I/O failure.
+fn read_store<S: ReadAt>(
+    reader: &mut IfdReader<S>,
+    entry: &RawEntry,
+) -> Result<core::result::Result<C2paExclusions, C2paUnreadReason>> {
+    if entry.count < MIN_STORE_LEN as u64 {
+        return Ok(Err(C2paUnreadReason::TooShort));
+    }
+    let count_field = count_field(entry, reader.variant());
+    // Out of line at the offset the entry declares; inline, the value word follows the count.
+    let start = reader.value_offset(entry).unwrap_or(count_field.end());
+    let source_len = reader.source_mut().len()?;
+    if start
+        .checked_add(entry.count)
+        .is_none_or(|end| end > source_len)
+    {
+        return Ok(Err(C2paUnreadReason::OutsideFile));
+    }
+    // Both ranges are non-empty here (the count is at least `MIN_STORE_LEN`, the count field is
+    // an offset word), so overlap is the only refusal `new` can make.
+    Ok(C2paExclusions::new(
         Range {
             start,
             len: entry.count,
         },
         count_field,
     )
-    .map(Some)
+    .map_err(|_| C2paUnreadReason::OverlapsCountField))
+}
+
+/// What a report of a located manifest store has to say beside it, because locating one is not
+/// validating it.
+///
+/// C2PA 2.4 §15.12 puts validation on a validator; this crate holds no COSE, X.509, RFC 3161 or
+/// trust-list code and never reports a validity verdict. "C2PA: present" printed beside EXIF and
+/// ICC reads as *verified* to anyone who has seen a Content Credentials badge, so
+/// [`C2paSummary::summary_lines`] carries this text in the line that reports the store, never as a
+/// footnote. The same sentence `gamut-heic` carries, so every container reports alike.
+pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and never validates it: \
+     it checks no signature, no hash binding and no trust list. Validate with c2pa-rs.";
+
+/// Why a tag-52545 ([`C2PA_MANIFEST_STORE`]) entry of the main IFD chain yielded no manifest store.
+///
+/// The entry *is* there, so the file carries C2PA framing; only a store could not be read from it.
+/// [`locate`] reports most of these as absence, which is right for a signer that wants ranges to
+/// hash around — and wrong for a report, which would then let a reader infer *no provenance* from an
+/// entry gamut merely could not read. [`summarize`] lists them instead.
+///
+/// Non-exhaustive and with permanent discriminants: a later revision may distinguish a further
+/// reason without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum C2paUnreadReason {
+    /// The entry sits in a directory before the last of the main chain; §A.3.6 puts the asset's one
+    /// store in the last.
+    NotInLastIfd = 0,
+    /// The entry's field type is not `UNDEFINED` (7), which §A.3.6 fixes it at.
+    NotUndefined = 1,
+    /// The last directory carries several tag-52545 entries, so it names no single store (§A.3.6:
+    /// "only one C2PA Manifest Store for the entire asset").
+    Duplicate = 2,
+    /// The value is shorter than [`MIN_STORE_LEN`], the JUMBF box header a manifest store opens
+    /// with.
+    TooShort = 3,
+    /// The value's declared extent overflows or runs past the end of the file.
+    OutsideFile = 4,
+    /// The value's declared offset places it over the entry's own `count` field.
+    OverlapsCountField = 5,
+}
+
+impl C2paUnreadReason {
+    /// A one-clause explanation, for the line [`C2paSummary::detail_lines`] renders.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::NotInLastIfd => {
+                "it sits before the last IFD of the main chain, where C2PA 2.4 §A.3.6 puts the store"
+            }
+            Self::NotUndefined => {
+                "its field type is not UNDEFINED (7), which C2PA 2.4 §A.3.6 fixes it at"
+            }
+            Self::Duplicate => {
+                "it is one of several in the last IFD, where C2PA 2.4 §A.3.6 admits one store"
+            }
+            Self::TooShort => {
+                "its value is shorter than the 8-byte JUMBF box header a store opens with"
+            }
+            Self::OutsideFile => "its value's declared extent runs past the end of the file",
+            Self::OverlapsCountField => "its value's declared offset overlaps its own count field",
+        }
+    }
+}
+
+/// The located manifest store, reported **without its bytes**: its two §18.5.5 exclusion ranges
+/// and the directory that carries its entry.
+///
+/// Non-exhaustive: a later revision may report more without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paStoreSummary {
+    /// The store's range and its entry's `count` field — exactly what [`locate`] returns.
+    pub exclusions: C2paExclusions,
+    /// The zero-based index, in the main IFD chain, of the directory carrying the entry: always the
+    /// last one (§A.3.6).
+    pub ifd: usize,
+}
+
+impl C2paStoreSummary {
+    /// The store's size in bytes.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.exclusions.store().len
+    }
+}
+
+/// A tag-52545 entry of the main IFD chain that yielded no store: where its entry record sits, in
+/// which directory, and why. Reported without any value bytes.
+///
+/// Non-exhaustive: a later revision may report more without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paUnreadEntry {
+    /// The 12-byte (classic) or 20-byte (BigTIFF) entry record.
+    pub entry: Range,
+    /// The zero-based index, in the main IFD chain, of the directory carrying it.
+    pub ifd: usize,
+    /// Why no store was read from it.
+    pub reason: C2paUnreadReason,
+}
+
+/// A non-validating report of the C2PA manifest store a TIFF-based file carries in its main IFD
+/// chain: the store [`locate`] finds, if any, and every other tag-52545 entry with the reason it
+/// yielded none.
+///
+/// Built by [`summarize`]. The summary carries the facts and renders the lines, so every host
+/// prints the same words and none can drop [`C2PA_NOT_VALIDATED`] while rewording them — the shape
+/// and wording of `gamut-heic`'s summary, repeated for TIFF-based containers (issue #530), with one
+/// store rather than a list because §A.3.6 admits one per asset.
+///
+/// Non-exhaustive: a later revision may report more without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct C2paSummary {
+    /// The located store — `Some` exactly when [`locate`] returns one.
+    pub store: Option<C2paStoreSummary>,
+    /// Every tag-52545 entry of the main chain that yielded no store, in chain order.
+    pub unread: Vec<C2paUnreadEntry>,
+}
+
+impl C2paSummary {
+    /// The whole human-readable report, uncapped: [`summary_lines`](Self::summary_lines) followed
+    /// by every [`detail_lines`](Self::detail_lines) entry. A terminal host should cap the detail
+    /// lines instead, reporting [`detail_line_count`](Self::detail_line_count) beside them.
+    #[must_use]
+    pub fn report_lines(&self) -> Vec<String> {
+        let mut lines = self.summary_lines();
+        lines.extend(self.detail_lines());
+        lines
+    }
+
+    /// The report's head: one headline, not indented, carrying [`C2PA_NOT_VALIDATED`] inline. Four
+    /// outcomes, because a file carrying tag-52545 entries none of which yielded a store is neither
+    /// "located" nor "none found".
+    #[must_use]
+    pub fn summary_lines(&self) -> Vec<String> {
+        let unread = self.unread.len();
+        let present = format!(
+            "{unread} C2PA manifest-store {noun} present",
+            noun = if unread == 1 {
+                "entry is"
+            } else {
+                "entries are"
+            }
+        );
+        let headline = match (self.store.is_some(), unread) {
+            (false, 0) => {
+                format!(
+                    "C2PA: no manifest store found in the main IFD chain — {C2PA_NOT_VALIDATED}"
+                )
+            }
+            (false, _) => format!(
+                "C2PA: no manifest store could be read, but {present} — that is NOT absence of \
+                 provenance — {C2PA_NOT_VALIDATED}"
+            ),
+            (true, 0) => {
+                format!("C2PA: 1 manifest store located, NOT VALIDATED — {C2PA_NOT_VALIDATED}")
+            }
+            (true, _) => format!(
+                "C2PA: 1 manifest store located, NOT VALIDATED, and {present} from which no store \
+                 could be read — {C2PA_NOT_VALIDATED}"
+            ),
+        };
+        vec![headline]
+    }
+
+    /// One line per tag-52545 entry — the unread ones in chain order, then the located store, which
+    /// sits in the last directory — indented two spaces relative to the headline and built on
+    /// demand.
+    pub fn detail_lines(&self) -> impl Iterator<Item = String> + '_ {
+        let unread = self.unread.iter().map(|unread| {
+            format!(
+                "  unread tag 52545 entry in IFD {ifd} at [{start}, {end}): {reason}",
+                ifd = unread.ifd,
+                start = unread.entry.start,
+                end = unread.entry.end(),
+                reason = unread.reason.describe(),
+            )
+        });
+        let store = self.store.iter().map(|store| {
+            let (bytes, count) = (store.exclusions.store(), store.exclusions.count_field());
+            format!(
+                "  tag 52545 in IFD {ifd}: {size}-byte store at [{start}, {end}) — located, not \
+                 validated; its count field at [{count_start}, {count_end})",
+                ifd = store.ifd,
+                size = store.size(),
+                start = bytes.start,
+                end = bytes.end(),
+                count_start = count.start,
+                count_end = count.end(),
+            )
+        });
+        unread.chain(store)
+    }
+
+    /// How many lines [`detail_lines`](Self::detail_lines) yields, without building any.
+    #[must_use]
+    pub fn detail_line_count(&self) -> usize {
+        self.unread.len() + usize::from(self.store.is_some())
+    }
+}
+
+/// A non-validating summary of the C2PA manifest store of a TIFF-based file: the store [`locate`]
+/// finds, and every tag-52545 entry of the main IFD chain that yields none, with the reason.
+///
+/// Where [`locate`] answers a signer — absence, or ranges to hash around — this answers a reader:
+/// an entry that is present but unreadable, misplaced in an earlier directory, or duplicated is
+/// listed rather than reported as absence. See [`C2paSummary`] for what it is for, and
+/// [`C2PA_NOT_VALIDATED`] for what has to be said beside it.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the container is unreadable (bad header, looping or runaway
+/// chain, no IFD), or [`Error::Io`] if the source fails. Unlike [`locate`], a store whose extent
+/// lies outside the file or overlaps its count field is not an error here: it is listed in
+/// [`C2paSummary::unread`].
+pub fn summarize<S: ReadAt>(src: S) -> Result<C2paSummary> {
+    let mut reader = IfdReader::open(src)?;
+    let chain = reader.ifds().collect::<Result<Vec<RawIfd>>>()?;
+    let Some((last, earlier)) = chain.split_last() else {
+        return Err(Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: no IFD"));
+    };
+    let entry_len = reader.variant().entry_size() as u64;
+    let unread = |ifd: usize, entry: &RawEntry, reason| C2paUnreadEntry {
+        entry: Range {
+            start: entry.offset,
+            len: entry_len,
+        },
+        ifd,
+        reason,
+    };
+    let tagged = |ifd: &RawIfd| -> Vec<RawEntry> {
+        ifd.entries
+            .iter()
+            .filter(|entry| entry.tag == C2PA_MANIFEST_STORE)
+            .cloned()
+            .collect()
+    };
+
+    let mut summary = C2paSummary::default();
+    for (index, ifd) in earlier.iter().enumerate() {
+        for entry in tagged(ifd) {
+            summary
+                .unread
+                .push(unread(index, &entry, C2paUnreadReason::NotInLastIfd));
+        }
+    }
+    let last_index = earlier.len();
+    match tagged(last).as_slice() {
+        [] => {}
+        [entry] if entry.field_type() != Some(FieldType::Undefined) => {
+            summary
+                .unread
+                .push(unread(last_index, entry, C2paUnreadReason::NotUndefined));
+        }
+        [entry] => match read_store(&mut reader, entry)? {
+            Ok(exclusions) => {
+                summary.store = Some(C2paStoreSummary {
+                    exclusions,
+                    ifd: last_index,
+                });
+            }
+            Err(reason) => summary.unread.push(unread(last_index, entry, reason)),
+        },
+        several => summary.unread.extend(
+            several
+                .iter()
+                .map(|entry| unread(last_index, entry, C2paUnreadReason::Duplicate)),
+        ),
+    }
+    Ok(summary)
 }
 
 /// Appends `store` at the (word-aligned) end of `file` and points the reserved entry at it,
@@ -670,10 +966,10 @@ mod tests {
     /// §A.3.6 admits one store per asset, so a directory carrying two tag-52545 entries names
     /// none: reporting the first would describe different bytes than the eager `Ifd` — which
     /// keeps the *last* duplicate — hands back under the same name.
-    #[test]
-    fn locate_reports_absence_for_a_duplicated_entry() {
-        // `Ifd::set` de-duplicates, so the duplicate is built at the byte level: two entries
-        // with the same tag, pointing at different bytes.
+    /// A classic little-endian file whose one directory carries two well-formed tag-52545 entries
+    /// at 10 and 22, pointing at [`store`] and at its complement. `Ifd::set` de-duplicates, so the
+    /// duplicate is built at the byte level.
+    fn duplicated_entry_file() -> Vec<u8> {
         let le = ByteOrder::LittleEndian;
         let first = store();
         let second: Vec<u8> = first.iter().map(|b| !b).collect();
@@ -691,6 +987,15 @@ mod tests {
         bytes.extend_from_slice(&le.pack_u32(0)); // next IFD
         bytes.extend_from_slice(&first);
         bytes.extend_from_slice(&second);
+        bytes
+    }
+
+    #[test]
+    fn locate_reports_absence_for_a_duplicated_entry() {
+        let first = store();
+        let second: Vec<u8> = first.iter().map(|b| !b).collect();
+        let values_at = 8 + 2 + 2 * 12 + 4;
+        let bytes = duplicated_entry_file();
 
         // Both entries are individually well-formed and in bounds...
         assert_eq!(bytes.len(), values_at + first.len() + second.len());
@@ -1092,5 +1397,224 @@ mod tests {
             );
             assert_eq!(locate(&bytes[..]).expect("locate"), Some(excl));
         }
+    }
+
+    /// A one-directory classic little-endian file whose sole entry is tag 52545 with `value`:
+    /// the entry record is at 10..22, its count field at 14..18 and its offset word at 18..22.
+    fn sole_entry_file(value: Value) -> Vec<u8> {
+        let mut ifd = Ifd::new();
+        ifd.set(C2PA_MANIFEST_STORE, value);
+        write(&file(ByteOrder::LittleEndian, Variant::Classic, vec![ifd])).expect("write")
+    }
+
+    /// The reason the summary gives for the sole unread entry of `bytes`.
+    fn sole_unread(bytes: &[u8]) -> C2paUnreadEntry {
+        let summary = summarize(bytes).expect("summarize");
+        assert_eq!(summary.store, None);
+        assert_eq!(summary.unread.len(), 1, "{:?}", summary.unread);
+        summary.unread[0]
+    }
+
+    /// The located store is exactly `locate`'s, reported with the directory carrying it.
+    #[test]
+    fn summarize_reports_the_store_locate_finds() {
+        let mut last = Ifd::new();
+        last.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
+        let bytes = write(&file(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![sample_ifd(), last],
+        ))
+        .expect("write");
+        let exclusions = locate(&bytes[..]).expect("locate").expect("a store");
+        let summary = summarize(&bytes[..]).expect("summarize");
+        assert_eq!(summary.store, Some(C2paStoreSummary { exclusions, ifd: 1 }));
+        assert!(summary.unread.is_empty());
+        assert_eq!(summary.detail_line_count(), 1);
+        let (bytes_at, count) = (exclusions.store(), exclusions.count_field());
+        assert_eq!(
+            summary.report_lines(),
+            vec![
+                format!("C2PA: 1 manifest store located, NOT VALIDATED — {C2PA_NOT_VALIDATED}"),
+                format!(
+                    "  tag 52545 in IFD 1: 32-byte store at [{}, {}) — located, not validated; its \
+                     count field at [{}, {})",
+                    bytes_at.start,
+                    bytes_at.end(),
+                    count.start,
+                    count.end()
+                ),
+            ]
+        );
+    }
+
+    /// Every way a tag-52545 entry can yield no store is listed with its own reason, where
+    /// `locate` reports most of them as absence.
+    #[test]
+    fn summarize_lists_each_unreadable_entry_with_its_reason() {
+        let entry = Range { start: 10, len: 12 };
+        let unread = |reason| C2paUnreadEntry {
+            entry,
+            ifd: 0,
+            reason,
+        };
+        assert_eq!(
+            sole_unread(&sole_entry_file(Value::Byte(store()))),
+            unread(C2paUnreadReason::NotUndefined)
+        );
+        assert_eq!(
+            sole_unread(&sole_entry_file(Value::Undefined(
+                store()[..MIN_STORE_LEN - 1].to_vec()
+            ))),
+            unread(C2paUnreadReason::TooShort)
+        );
+        let mut outside = sole_entry_file(Value::Undefined(store()));
+        outside[18..22].copy_from_slice(&ByteOrder::LittleEndian.pack_u32(100_000));
+        assert_eq!(sole_unread(&outside), unread(C2paUnreadReason::OutsideFile));
+        let mut overflow = sole_entry_file(Value::Undefined(store()));
+        overflow[18..22].copy_from_slice(&ByteOrder::LittleEndian.pack_u32(u32::MAX));
+        assert_eq!(
+            sole_unread(&overflow),
+            unread(C2paUnreadReason::OutsideFile)
+        );
+        let mut overlap = sole_entry_file(Value::Undefined(store()));
+        overlap[18..22].copy_from_slice(&ByteOrder::LittleEndian.pack_u32(8));
+        assert_eq!(
+            sole_unread(&overlap),
+            unread(C2paUnreadReason::OverlapsCountField)
+        );
+
+        let duplicated = summarize(&duplicated_entry_file()[..]).expect("summarize");
+        assert_eq!(duplicated.store, None);
+        assert_eq!(
+            duplicated.unread,
+            vec![
+                unread(C2paUnreadReason::Duplicate),
+                C2paUnreadEntry {
+                    entry: Range { start: 22, len: 12 },
+                    ..unread(C2paUnreadReason::Duplicate)
+                },
+            ]
+        );
+    }
+
+    /// An entry in an earlier directory is misplaced and listed as such — beside a store in the
+    /// last directory, which is still located.
+    #[test]
+    fn summarize_lists_an_entry_before_the_last_directory_beside_the_store() {
+        let mut first = sample_ifd();
+        first.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
+        let mut last = Ifd::new();
+        last.set(C2PA_MANIFEST_STORE, Value::Undefined(store()));
+        let bytes = write(&file(
+            ByteOrder::BigEndian,
+            Variant::Classic,
+            vec![first, last],
+        ))
+        .expect("write");
+        let summary = summarize(&bytes[..]).expect("summarize");
+        assert_eq!(summary.store.map(|store| store.ifd), Some(1));
+        assert_eq!(summary.unread.len(), 1);
+        let misplaced = summary.unread[0];
+        assert_eq!(misplaced.ifd, 0);
+        assert_eq!(misplaced.reason, C2paUnreadReason::NotInLastIfd);
+        // The entry record is the third of IFD 0 (tags 256, 258, 52545): body 8 + 2 + 2 * 12.
+        assert_eq!(misplaced.entry, Range { start: 34, len: 12 });
+        assert_eq!(summary.detail_line_count(), 2);
+        let lines = summary.report_lines();
+        assert_eq!(
+            lines[0],
+            format!(
+                "C2PA: 1 manifest store located, NOT VALIDATED, and 1 C2PA manifest-store entry is \
+                 present from which no store could be read — {C2PA_NOT_VALIDATED}"
+            )
+        );
+        assert_eq!(
+            lines[1],
+            format!(
+                "  unread tag 52545 entry in IFD 0 at [34, 46): {}",
+                C2paUnreadReason::NotInLastIfd.describe()
+            )
+        );
+        assert!(lines[2].starts_with("  tag 52545 in IFD 1: 32-byte store at ["));
+    }
+
+    /// No entry is absence; entries none of which yielded a store are not.
+    #[test]
+    fn summarize_keeps_absence_apart_from_unreadable_entries() {
+        let plain = write(&file(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            vec![sample_ifd()],
+        ))
+        .expect("write");
+        let none = summarize(&plain[..]).expect("summarize");
+        assert_eq!(none, C2paSummary::default());
+        assert_eq!(
+            none.report_lines(),
+            vec![format!(
+                "C2PA: no manifest store found in the main IFD chain — {C2PA_NOT_VALIDATED}"
+            )]
+        );
+
+        let duplicated = summarize(&duplicated_entry_file()[..]).expect("summarize");
+        assert_eq!(
+            duplicated.summary_lines(),
+            vec![format!(
+                "C2PA: no manifest store could be read, but 2 C2PA manifest-store entries are \
+                 present — that is NOT absence of provenance — {C2PA_NOT_VALIDATED}"
+            )]
+        );
+        let one = summarize(&sole_entry_file(Value::Byte(store()))[..]).expect("summarize");
+        assert_eq!(
+            one.report_lines(),
+            vec![
+                format!(
+                    "C2PA: no manifest store could be read, but 1 C2PA manifest-store entry is \
+                     present — that is NOT absence of provenance — {C2PA_NOT_VALIDATED}"
+                ),
+                format!(
+                    "  unread tag 52545 entry in IFD 0 at [10, 22): {}",
+                    C2paUnreadReason::NotUndefined.describe()
+                ),
+            ]
+        );
+    }
+
+    /// A container with no directory is the same error `locate` gives, not an empty summary.
+    #[test]
+    fn summarize_rejects_an_empty_chain() {
+        let error = summarize(&b"II\x2a\x00\x00\x00\x00\x00"[..]).expect_err("no IFD");
+        assert_eq!(error.static_message(), Some("TIFF: no IFD"));
+    }
+
+    /// Each reason renders its own clause.
+    #[test]
+    fn every_unread_reason_has_its_own_words() {
+        let reasons = [
+            C2paUnreadReason::NotInLastIfd,
+            C2paUnreadReason::NotUndefined,
+            C2paUnreadReason::Duplicate,
+            C2paUnreadReason::TooShort,
+            C2paUnreadReason::OutsideFile,
+            C2paUnreadReason::OverlapsCountField,
+        ];
+        for (i, a) in reasons.iter().enumerate() {
+            assert!(!a.describe().is_empty());
+            for b in &reasons[i + 1..] {
+                assert_ne!(a.describe(), b.describe(), "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    /// A BigTIFF entry record is 20 bytes, and the summary's range says so.
+    #[cfg(feature = "bigtiff")]
+    #[test]
+    fn summarize_sizes_a_bigtiff_entry_record() {
+        let mut ifd = Ifd::new();
+        ifd.set(C2PA_MANIFEST_STORE, Value::Byte(store()));
+        let bytes = write(&file(ByteOrder::LittleEndian, Variant::Big, vec![ifd])).expect("write");
+        let unread = sole_unread(&bytes);
+        assert_eq!(unread.entry, Range { start: 24, len: 20 });
     }
 }
