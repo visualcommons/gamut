@@ -106,7 +106,7 @@ exactly, and a second test proves each is a naming difference rather than a miss
 
 ### Where exiv2 and CIPA DC-008 disagree on a value
 
-`tests/describe_oracle.rs` (issue #533) checks the `describe` tables against exiv2's interpreted
+`tests/oracle_describe.rs` (issue #533) checks the `describe` tables against exiv2's interpreted
 rendering, `Exifdatum::print` through `exiv2_oracle::exif_print`. For each of the 39 described tags
 it writes every value the tag's field can hold — each 7-bit character, byte or `SHORT` — and
 records which codes exiv2 interprets and how it words them. DC-008 wins wherever the two differ, as
