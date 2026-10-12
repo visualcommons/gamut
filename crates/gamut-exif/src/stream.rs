@@ -672,9 +672,7 @@ mod tests {
             thumbnail_blob(&[(len, 16)]),
             deep_blob(),
         ] {
-            let (exif, report) = ExifReader::new()
-                .parse_with_report(&blob)
-                .expect("parse");
+            let (exif, report) = ExifReader::new().parse_with_report(&blob).expect("parse");
             assert!(
                 report
                     .dropped()
@@ -686,7 +684,11 @@ mod tests {
             let once = exif.to_bytes().expect("write");
             let reparsed = ExifReader::new().parse(&once).expect("reparse");
             assert_eq!(reparsed.thumbnail(), exif.thumbnail());
-            assert_eq!(reparsed.to_bytes().expect("rewrite"), once, "not a fixpoint");
+            assert_eq!(
+                reparsed.to_bytes().expect("rewrite"),
+                once,
+                "not a fixpoint"
+            );
         }
     }
 
