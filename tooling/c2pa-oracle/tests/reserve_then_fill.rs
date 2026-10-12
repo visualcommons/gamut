@@ -10,8 +10,10 @@
 mod common;
 
 use c2pa::ValidationState;
-use c2pa_oracle::{AVIF_MIME, declared_store_len, read, reserve_then_fill};
-use common::reserve_avif;
+use c2pa_oracle::{
+    AVIF_MIME, declared_store_len, read, reserve_then_fill, reserve_then_fill_padded,
+};
+use common::{PADDING, reserve_avif};
 
 #[test]
 fn a_reserved_but_unfilled_slot_never_validates() {
@@ -77,9 +79,9 @@ fn a_slot_that_is_not_the_signed_stores_length_is_refused_rather_than_patched() 
     // own `LBox` bound, and every "the range is identical" claim downstream would be measured
     // against a store the oracle had quietly mis-sized.
     //
-    // A slot *larger* than the store is also the one configuration nothing here signs
-    // successfully — the case where a box-bounded and an `LBox`-bounded locator legitimately
-    // diverge. Making the oracle pad rather than refuse is issue #598.
+    // A slot that is *meant* to be larger than the store is `reserve_then_fill_padded`'s job, and
+    // the padded tests below sign one successfully; here no padding was asked for, so the extra
+    // byte is a mis-sized slot, not padding.
     let error = reserve_then_fill(AVIF_MIME, |len| reserve_avif(len + 1))
         .expect_err("a slot one byte too long is not a slot the signed store fits");
 
@@ -103,5 +105,90 @@ fn the_store_declares_its_own_length_as_the_whole_slot() {
         declared_store_len(&filled.store).expect("the store declares its own length"),
         filled.slot.len(),
         "the store's own `LBox` must account for the whole reserved slot"
+    );
+}
+
+#[test]
+fn a_store_zero_padded_into_a_slot_longer_than_it_still_validates() {
+    let filled = reserve_then_fill_padded(AVIF_MIME, PADDING, reserve_avif)
+        .expect("reserve a padded slot, sign and patch");
+
+    // A signer that reserves generously, before it knows its final certificate chain, leaves
+    // zeros between the end of the store and the end of the `ContentProvenanceBox`. c2pa-rs
+    // reading that file `Valid` is what says the padding is in-spec carriage, not corruption — and
+    // so what makes `gamut-avif` reporting it inside the slot correct rather than a mis-bound.
+    assert_eq!(
+        read(AVIF_MIME, &filled.asset).expect("the padded asset carries a store"),
+        ValidationState::Valid,
+        "c2pa-rs must accept a store followed by zero padding inside its box"
+    );
+}
+
+#[test]
+fn a_padded_slot_holds_the_store_its_lbox_declares_then_only_zeros() {
+    // The reserve closure fills its slot with 0xAA rather than the encoder's zeros, so a padding
+    // that came back zero was written by the oracle, not inherited from `with_c2pa_reserved`.
+    let filled = reserve_then_fill_padded(AVIF_MIME, PADDING, |len| {
+        let (mut asset, slot) = reserve_avif(len)?;
+        asset[slot.clone()].fill(0xAA);
+        Ok((asset, slot))
+    })
+    .expect("reserve a padded slot, sign and patch");
+
+    let slot = &filled.asset[filled.slot.clone()];
+    let (store, padding) = slot.split_at(filled.store.len());
+    assert_eq!(
+        (
+            declared_store_len(store).expect("the store declares its own length"),
+            padding.len(),
+        ),
+        (filled.store.len(), PADDING),
+        "the store's own `LBox` must stop where the padding begins, and the padding must be \
+         exactly what was asked for"
+    );
+    assert!(
+        padding.iter().all(|byte| *byte == 0),
+        "the bytes after the store must be zeros, whatever the slot held before"
+    );
+}
+
+#[test]
+fn a_padded_slot_that_is_not_store_plus_padding_long_is_refused() {
+    let error = reserve_then_fill_padded(AVIF_MIME, PADDING, |len| reserve_avif(len + 1))
+        .expect_err("a slot one byte longer than store plus padding is mis-sized");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("signed store is")
+            && message.contains(&format!("padding asked for: {PADDING}")),
+        "the refusal must name the padding as well as both lengths; got {error}"
+    );
+}
+
+#[test]
+fn a_padding_that_overflows_the_length_to_reserve_is_refused_before_reserving() {
+    let mut reserved = false;
+    let error = reserve_then_fill_padded(AVIF_MIME, usize::MAX, |len| {
+        reserved = true;
+        reserve_avif(len)
+    })
+    .expect_err("no store length plus usize::MAX fits in a usize");
+
+    assert!(
+        !reserved && error.to_string().contains("overflows usize"),
+        "an unrepresentable length must be refused before the host is asked to reserve it; got \
+         {error}"
+    );
+}
+
+#[test]
+fn a_slot_shorter_than_the_padding_is_refused_rather_than_underflowing() {
+    // `slot.len() - padding` would panic here; the guard must turn it into the same refusal.
+    let error = reserve_then_fill_padded(AVIF_MIME, PADDING, |_| reserve_avif(PADDING - 1))
+        .expect_err("a slot shorter than the padding alone cannot hold a store");
+
+    assert!(
+        error.to_string().contains("the reserved slot is"),
+        "a too-short slot must be refused by the length guard; got {error}"
     );
 }

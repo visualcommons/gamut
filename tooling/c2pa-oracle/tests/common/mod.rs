@@ -13,6 +13,11 @@ pub const W: u32 = 34;
 /// Fixture height, chosen with [`W`] for the same reason.
 pub const H: u32 = 18;
 
+/// How many zero bytes a padded fixture reserves after the signed store
+/// (`c2pa_oracle::reserve_then_fill_padded`). Not a multiple of 4 or 8, so a locator that rounds a
+/// bound to a word cannot land on it by luck.
+pub const PADDING: usize = 37;
+
 /// The fixture's dimensions.
 pub fn dims() -> Dimensions {
     Dimensions {

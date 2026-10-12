@@ -354,9 +354,10 @@ pub fn declared_store_len(store: &[u8]) -> Result<usize> {
 pub struct Filled {
     /// The asset with the signed store patched into its reserved slot.
     pub asset: Vec<u8>,
-    /// The byte range the caller reserved, and where the store was written.
+    /// The byte range the caller reserved. The store was written at its start; under
+    /// [`reserve_then_fill_padded`] the rest of it is zeros.
     pub slot: Range<usize>,
-    /// The signed store, exactly as patched in.
+    /// The signed store, exactly as patched in — never including any padding after it.
     pub store: Vec<u8>,
     /// The store length `Builder::placeholder` asked the caller to reserve, before signing.
     ///
@@ -391,27 +392,68 @@ pub struct Filled {
 /// box carries no store, and whatever `reserve` returns.
 pub fn reserve_then_fill(
     format: &str,
+    reserve: impl FnMut(usize) -> Result<(Vec<u8>, Range<usize>)>,
+) -> Result<Filled> {
+    reserve_then_fill_padded(format, 0, reserve)
+}
+
+/// [`reserve_then_fill`] for a signer that reserves **generously**: the slot is `padding` bytes
+/// longer than the store `Builder::placeholder` pins, and the remainder after the signed store is
+/// zero-filled.
+///
+/// This is the one shape in which gamut's two locators legitimately diverge, and nothing else in
+/// this crate produces it — c2pa-rs's own embedder sizes the box to the store exactly. The store's
+/// JUMBF `LBox` still declares the store alone, so a reader bounding by that `LBox`
+/// (`gamut-heic`) reports `slot.start..slot.start + store.len()`, while a reader bounding by the
+/// enclosing `ContentProvenanceBox` (`gamut-avif`) reports the whole `slot`, padding included.
+///
+/// `reserve` is handed `placeholder store length + padding`, and must return a slot of exactly that
+/// length; `padding == 0` is [`reserve_then_fill`]. The padding is written as zeros explicitly
+/// rather than inherited from whatever the encoder left in the slot, so the claim "zero-padded" is
+/// this function's, not the encoder's.
+///
+/// The hard binding is unaffected for the same reason it is in [`reserve_then_fill`]: the BMFF
+/// binding excludes the `ContentProvenanceBox` by box path, so neither the store nor the padding
+/// after it is digested — only the box's size is, and it does not change.
+///
+/// # Errors
+///
+/// As [`reserve_then_fill`]; [`OracleError::Asset`] if the slot `reserve` returned is not exactly
+/// `padding` bytes longer than the signed store, naming both lengths and the padding asked for.
+/// That includes a `padding` large enough to overflow the requested length.
+pub fn reserve_then_fill_padded(
+    format: &str,
+    padding: usize,
     mut reserve: impl FnMut(usize) -> Result<(Vec<u8>, Range<usize>)>,
 ) -> Result<Filled> {
     let mut builder = manifest_builder()?;
     let placeholder = split_composed_box(builder.placeholder(format)?)?;
     let placeholder_store_len = placeholder.store().len();
 
-    let (mut asset, slot) = reserve(placeholder_store_len)?;
+    let reserved_len = placeholder_store_len.checked_add(padding).ok_or_else(|| {
+        OracleError::Asset(format!(
+            "a {placeholder_store_len}-byte store plus {padding} bytes of padding overflows usize"
+        ))
+    })?;
+    let (mut asset, slot) = reserve(reserved_len)?;
 
     builder.update_hash_from_stream(format, &mut Cursor::new(asset.clone()))?;
     let store = split_composed_box(builder.sign_embeddable(format)?)?
         .store()
         .to_vec();
 
-    if store.len() != slot.len() {
+    // `slot.len() - padding` cannot underflow-panic: a slot shorter than `padding` is caught by
+    // `checked_sub` and reported through the same refusal as any other mismatch.
+    if slot.len().checked_sub(padding) != Some(store.len()) {
         return Err(OracleError::Asset(format!(
-            "signed store is {} bytes but the reserved slot is {}",
+            "signed store is {} bytes but the reserved slot is {} (padding asked for: {padding})",
             store.len(),
             slot.len()
         )));
     }
-    asset[slot.clone()].copy_from_slice(&store);
+    let (store_bytes, padding_bytes) = asset[slot.clone()].split_at_mut(store.len());
+    store_bytes.copy_from_slice(&store);
+    padding_bytes.fill(0);
 
     Ok(Filled {
         asset,
@@ -509,12 +551,14 @@ mod tests {
     //! covers the row the widening was made for. Hence the list. It claims to be complete over
     //! four named functions and nothing wider.
     //!
-    //! Two discriminating branches in this file sit outside it, named here so their absence is a
-    //! decision and not an oversight:
+    //! Two kinds of discriminating branch in this file sit outside it, named here so their absence
+    //! is a decision and not an oversight:
     //!
-    //! * [`reserve_then_fill`]'s `store.len() != slot.len()` guard. It discriminates exactly as a
-    //!   row does; what separates it is *reach*, not subject — pinning it needs c2pa-rs and a
-    //!   gamut encoder in scope, so its test lives in `tests/reserve_then_fill.rs`. A row could
+    //! * [`reserve_then_fill_padded`]'s two refusals — the `checked_add` of store length and
+    //!   padding, and the `slot.len() - padding != store.len()` guard (which [`reserve_then_fill`]
+    //!   reaches with `padding == 0`). They discriminate exactly as a row does; what separates
+    //!   them is *reach*, not subject — pinning them needs c2pa-rs and a gamut encoder in scope,
+    //!   so their tests live in `tests/reserve_then_fill.rs`. A row could
     //!   not point there anyway: [`every_test_the_enumeration_names_exists_in_this_file`] resolves
     //!   every name a row links against *this* file's definitions.
     //! * `Display for OracleError`'s match over the variants. It chooses the *wording* for an

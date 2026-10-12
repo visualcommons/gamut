@@ -37,8 +37,8 @@ in both directions.
 
 | direction | test file | what it pins |
 | --- | --- | --- |
-| gamut reserves → an external signer completes → c2pa-rs validates | `tests/reserve_then_fill.rs` | a store signed over the reserved file validates once patched into the range `encode_with_report` gave, and exactly fills it |
-| c2pa-rs embeds → gamut locates the identical byte range | `tests/locate_embedded.rs` | `gamut-avif` and `gamut-heic` report the *same span* as the store's own JUMBF header, and c2pa-rs re-validates the bytes gamut extracted |
+| gamut reserves → an external signer completes → c2pa-rs validates | `tests/reserve_then_fill.rs` | a store signed over the reserved file validates once patched into the range `encode_with_report` gave, and exactly fills it; a store zero-padded into a larger slot still validates |
+| c2pa-rs embeds → gamut locates the identical byte range | `tests/locate_embedded.rs` | `gamut-avif` and `gamut-heic` report the *same span* as the store's own JUMBF header, and c2pa-rs re-validates the bytes gamut extracted; on a padded slot the two diverge as documented — see below |
 | the box itself | `tests/box_framing.rs` | `gamut-avif`'s `ContentProvenanceBox` is byte-identical to c2pa-rs's for the same store |
 | a derivative carries no parent store | `tests/no_copy_forward.rs` | the parent's located store, carried through `gamut-metadata`'s `C2paPolicy` and into a re-encode, reads back as **unsigned** (`JumbfNotFound`) |
 | the build stays crypto-free where it must | `tests/build_configuration.rs` | the `c2pa` dependency never regains its default `openssl` feature, in the manifest and in the resolved graph |
@@ -91,6 +91,34 @@ it. `c2pa_rs_leaves_no_padding_between_the_store_and_the_end_of_its_box` asserts
 own, and is named for c2pa-rs because c2pa-rs is what it measures. A future release that started
 padding would fail that one test, and the diagnosis would be in its name rather than in a locator
 test wrongly accusing gamut of mis-bounding.
+
+### The padded fixture: where the two bounds diverge
+
+The containment claim above was written padding-tolerant on the strength of an argument. A fixture
+now stands behind it. `reserve_then_fill_padded` reserves a slot `PADDING` bytes longer than the
+store `Builder::placeholder` pins, signs, writes the store at the slot's start and zero-fills the
+rest — what a signer that reserves before it knows its final certificate chain produces.
+`reserve_then_fill` is that function with no padding, and still refuses any slot that is not
+exactly the store's length.
+
+On that file (`tests/reserve_then_fill.rs`, `tests/locate_embedded.rs`):
+
+- **c2pa-rs reads the padded asset `Valid`.** Zero padding inside the `ContentProvenanceBox` is
+  in-spec carriage, not corruption: the BMFF hard binding excludes the box by path, so neither the
+  store nor its padding is digested.
+- **The locators diverge exactly as documented.** `gamut-avif` reports the whole slot, store plus
+  padding; `gamut-heic` reports the store's `LBox` span alone; the two ranges start at the same byte
+  and `gamut-avif`'s ends `PADDING` bytes later.
+- **`read_with_external_store` accepts both.** The `LBox`-bounded bytes validate, as they must. The
+  box-bounded bytes validate too — the second observation about the reference implementation this
+  fixture records: c2pa-rs reads the outer superbox by its own `LBox` and ignores the zeros after
+  it. So `gamut-avif`'s untrimmed `slot_bytes` can be handed to c2pa-rs as they are; a release that
+  stopped tolerating trailing bytes would fail
+  `c2pa_rs_ignores_the_zero_padding_after_the_store_in_box_bounded_bytes`, and a caller would then
+  trim to the `LBox`, which is `gamut-heic`'s bound.
+
+Whether gamut should reserve padded slots on its own account is a separate question this fixture
+does not answer; it covers a configuration a signer produces.
 
 ## What this oracle does not check
 
