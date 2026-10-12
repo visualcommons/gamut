@@ -6,7 +6,59 @@ use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16};
 use gamut_core::{Error, Result};
 
 use crate::headers::{self, Av1Colour, Av1StillConfig};
-use crate::tile::{FrameEncoder, Reconstruction};
+use crate::tile::{FrameEncoder, Reconstruction, Search};
+
+/// How much mode-decision search the lossy intra encoder runs: a preset that trades search for
+/// encode time.
+///
+/// Every preset produces a conformant stream that a decoder reconstructs bit-exactly to the
+/// encoder's own [`ReconImage`]; they differ only in which candidates the encoder *tries* before
+/// it commits to one. Each step down the list prunes search the step above it runs, so a faster
+/// preset never considers a candidate a slower one skips. The default, [`Speed::Thorough`], is the
+/// full search, and is what every entry point without a `speed` argument uses.
+///
+/// | Preset | Pruned relative to the one above | Search time saved |
+/// |---|---|---|
+/// | [`Thorough`](Self::Thorough) | nothing: every directional mode at `AngleDeltaY ∈ [-3, 3]`, five filter-intra modes, CfL `\|alpha\|` 1..=16, all five `TX_SET_INTRA_2` types, rectangular partitions, 4×4 leaves, palette | — |
+/// | [`Balanced`](Self::Balanced) | directional modes are tried at `AngleDeltaY = 0` only | 48 of the 56 directional predictions per ≥8×8 block |
+/// | [`Fast`](Self::Fast) | filter-intra is not tried; CfL tries `\|alpha\|` ∈ {1, 2, 4, 8, 16} only; the transform type is `DCT_DCT` or `ADST_ADST` | 5 filter-intra predictions per block, 22 of 32 CfL trials per chroma plane, 3 of 4 extra forward transforms per luma transform |
+/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional prediction, the CfL and palette scans, the last extra transform, and the 4×4 mode searches the floor removes |
+///
+/// **What the time buys is not guaranteed to be smaller files.** The mode decisions score each
+/// candidate by its prediction error (or a coefficient-count proxy) against the source, not by
+/// rate and distortion together, so a candidate the full search prefers can cost more bits — or
+/// reconstruct worse — than one a pruned search settles for. Measured on synthetic content the
+/// pruned presets were often both smaller and no worse in PSNR at the same `qindex`; treat the
+/// presets as a time control, and compare sizes on your own content.
+///
+/// The presets prune *search*, so they move only lossy encodes. Lossless coding (`qindex = 0`)
+/// has a single fixed path — `DC_PRED` and the 4×4 Walsh–Hadamard transform — and is identical at
+/// every speed. The in-loop filters are not searched either: CDEF strengths and the Wiener taps
+/// are fixed functions of `qindex`, so they too are the same at every speed.
+///
+/// The discriminants are permanent identifiers for C callers, not an ordering promise: a preset
+/// added later is appended with the next free value wherever it falls on the speed axis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum Speed {
+    /// The full search; reproduces the encoder's output from before speed presets existed.
+    #[default]
+    Thorough = 0,
+    /// Directional modes without the fine angle refinement.
+    Balanced = 1,
+    /// Additionally drops filter-intra, thins the CfL alpha ladder, and narrows the transform-type
+    /// search to two types.
+    Fast = 2,
+    /// The minimum search: non-directional luma modes, `DC_PRED` chroma, `DCT_DCT`, square
+    /// partitions no smaller than 8×8 by choice, and no palette.
+    Fastest = 3,
+}
+
+impl Speed {
+    /// Every preset, slowest first.
+    pub const ALL: &'static [Self] = &[Self::Thorough, Self::Balanced, Self::Fast, Self::Fastest];
+}
 
 /// The encoded AV1 temporal unit (sequence-header OBU + frame OBU) for one still image, plus the
 /// configuration values `gamut-avif` must mirror into the `av1C` and `colr` boxes.
@@ -78,7 +130,7 @@ pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> 
 /// Returns [`Error::InvalidInput`] for zero-sized images, or [`Error::Unsupported`] if the
 /// dimensions exceed AV1 level 6.0.
 pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill, ReconImage)> {
-    encode_with(planes, qindex, None, Av1Colour::default())
+    encode_with(planes, qindex, None, Av1Colour::default(), Speed::default())
 }
 
 /// Like [`encode_still_intra`] but signals `colour` instead of the default identity/full-range
@@ -100,12 +152,31 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
 /// As [`encode_still_intra`], and [`Error::InvalidInput`] if monochrome planes are paired with
 /// [`MatrixCoefficients::Identity`] — AV1 §6.4.2 permits that matrix only at subsampling 0/0, and
 /// §5.5.2 infers 1/1 for a monochrome stream.
+///
+/// This runs the full search ([`Speed::Thorough`]); [`encode_still_intra_with_speed`] chooses a
+/// faster preset.
 pub fn encode_still_intra_with(
     planes: &Planar8,
     qindex: u8,
     colour: Av1Colour,
 ) -> Result<(EncodedStill, ReconImage)> {
-    encode_with(planes, qindex, None, colour)
+    encode_still_intra_with_speed(planes, qindex, colour, Speed::default())
+}
+
+/// Like [`encode_still_intra_with`] but runs the mode-decision search at `speed`, pruning it for
+/// encode time as the [`Speed`] table describes. [`Speed::Thorough`] produces exactly the
+/// stream [`encode_still_intra_with`] does.
+///
+/// # Errors
+///
+/// As [`encode_still_intra_with`]; the speed never makes an encode fail.
+pub fn encode_still_intra_with_speed(
+    planes: &Planar8,
+    qindex: u8,
+    colour: Av1Colour,
+    speed: Speed,
+) -> Result<(EncodedStill, ReconImage)> {
+    encode_with(planes, qindex, None, colour, speed)
 }
 
 /// Like [`encode_still_intra`] but codes the frame with horizontal **superres** (§7.16): the source
@@ -117,7 +188,13 @@ pub fn encode_still_intra_superres(
     qindex: u8,
     coded_denom: u8,
 ) -> Result<(EncodedStill, ReconImage)> {
-    encode_with(planes, qindex, Some(coded_denom), Av1Colour::default())
+    encode_with(
+        planes,
+        qindex,
+        Some(coded_denom),
+        Av1Colour::default(),
+        Speed::default(),
+    )
 }
 
 /// Validates the source layout and dimensions shared by every entry point, returning whether the
@@ -301,10 +378,29 @@ fn append_tiles(frame_payload: &mut Vec<u8>, tile_bytes: &[Vec<u8>]) {
 ///
 /// Superres has no high-bit-depth entry point: [`encode_still_intra_superres`] takes a
 /// [`Planar8`], and its source downscale is written for 8-bit samples.
+///
+/// This runs the full search ([`Speed::Thorough`]); [`encode_still_intra16_with_speed`] chooses a
+/// faster preset.
 pub fn encode_still_intra16_with(
     planes: &Planar16,
     qindex: u8,
     colour: Av1Colour,
+) -> Result<(EncodedStill, ReconImage)> {
+    encode_still_intra16_with_speed(planes, qindex, colour, Speed::default())
+}
+
+/// Like [`encode_still_intra16_with`] but runs the mode-decision search at `speed`, as the
+/// [`Speed`] table describes. [`Speed::Thorough`] produces exactly the stream
+/// [`encode_still_intra16_with`] does.
+///
+/// # Errors
+///
+/// As [`encode_still_intra16_with`]; the speed never makes an encode fail.
+pub fn encode_still_intra16_with_speed(
+    planes: &Planar16,
+    qindex: u8,
+    colour: Av1Colour,
+    speed: Speed,
 ) -> Result<(EncodedStill, ReconImage)> {
     let (width, height) = (planes.width(), planes.height());
     let monochrome = check_layout(width, height, planes.subsampling(), colour, qindex)?;
@@ -322,7 +418,9 @@ pub fn encode_still_intra16_with(
     let seq_payload = headers::sequence_header_payload(&config, width, height, qindex > 0, false);
     let mut frame_payload =
         headers::frame_header_payload(width, height, mi_cols, mi_rows, qindex, None, monochrome);
-    let (tile_bytes, recon) = FrameEncoder::new16(planes, qindex).encode();
+    let (tile_bytes, recon) = FrameEncoder::new16(planes, qindex)
+        .with_search(Search::for_speed(speed))
+        .encode();
     append_tiles(&mut frame_payload, &tile_bytes);
 
     let recon_planes: [Vec<u16>; 3] = if qindex == 0 {
@@ -356,6 +454,7 @@ fn encode_with(
     qindex: u8,
     coded_denom: Option<u8>,
     colour: Av1Colour,
+    speed: Speed,
 ) -> Result<(EncodedStill, ReconImage)> {
     let width = planes.width();
     let height = planes.height();
@@ -416,7 +515,9 @@ fn encode_with(
         coded_denom,
         monochrome,
     );
-    let (tile_bytes, recon) = FrameEncoder::new(&coded_src, qindex).encode();
+    let (tile_bytes, recon) = FrameEncoder::new(&coded_src, qindex)
+        .with_search(Search::for_speed(speed))
+        .encode();
     append_tiles(&mut frame_payload, &tile_bytes);
 
     // Crop the reconstruction from the coded grid to the display dimensions. For the lossless path
@@ -845,6 +946,96 @@ mod tests {
                 "bitstream changed for pat{id} {w}x{h} q{q}"
             );
         }
+    }
+
+    #[test]
+    fn the_default_speed_is_the_thorough_search_the_speedless_entry_points_run() {
+        // `encode_still_intra_with` and `encode_still_intra16_with` must stay the encode they were
+        // before presets existed, which `encoded_bitstream_is_stable` pins. They reach it through
+        // `Speed::default()`, so the default must be the full search, and the explicit-speed entry
+        // points at that preset must be the same encode byte for byte.
+        assert_eq!(Speed::default(), Speed::Thorough);
+        let p = planes(64, 48, |x, y| {
+            [(x * 7 + y) as u8, (x ^ (y * 3)) as u8, (x + y * 5) as u8]
+        });
+        let colour = Av1Colour::default();
+        let plain = encode_still_intra_with(&p, 40, colour).unwrap().0.obus;
+        let speed = encode_still_intra_with_speed(&p, 40, colour, Speed::Thorough).unwrap();
+        assert_eq!(plain, speed.0.obus);
+
+        let deep = Planar16::from_planes(
+            64,
+            48,
+            BitDepth::Ten,
+            std::array::from_fn(|i| p.plane(i).iter().map(|&v| u16::from(v) << 2).collect()),
+        )
+        .unwrap();
+        let plain = encode_still_intra16_with(&deep, 40, colour).unwrap().0.obus;
+        let speed = encode_still_intra16_with_speed(&deep, 40, colour, Speed::Thorough).unwrap();
+        assert_eq!(plain, speed.0.obus);
+    }
+
+    #[test]
+    fn lossless_coding_is_the_same_at_every_speed() {
+        // The presets prune the lossy mode decisions only; lossless has one fixed path (DC_PRED,
+        // the 4×4 WHT, PARTITION_NONE), so there is nothing for a faster preset to skip.
+        let p = planes(72, 40, |x, y| [(x * 3) as u8, (y * 5) as u8, (x ^ y) as u8]);
+        let reference = encode_still_intra(&p, 0).unwrap().0.obus;
+        for &speed in Speed::ALL {
+            let (still, _) =
+                encode_still_intra_with_speed(&p, 0, Av1Colour::default(), speed).unwrap();
+            assert_eq!(still.obus, reference, "{speed:?}");
+        }
+    }
+
+    #[test]
+    fn each_speed_preset_has_a_stable_bitstream() {
+        // The speed analogue of `encoded_bitstream_is_stable`: which candidates each preset tries
+        // is a structural choice the recon oracle cannot see (every choice decodes bit-exactly),
+        // so the coded stream is pinned per preset. The content mixes texture, a few flat-chroma
+        // luma colours, diagonal stripes and a chroma-tracking ramp, so every pruned tool has a
+        // block that would pick it under the full search: every preset's pin differs from the one
+        // before it, so each step's pruning is visible on this content.
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+        }
+        let mix = planes(96, 64, |x, y| match (x < 48, y < 32) {
+            (true, true) => [(x * 7 + y) as u8, (x ^ (y * 3)) as u8, (x + y * 5) as u8],
+            (false, true) => [(((x / 4 + y / 4) % 4) * 60) as u8, 128, 128],
+            (true, false) => {
+                let v = if ((x * 2 + y) / 5).is_multiple_of(2) {
+                    40
+                } else {
+                    200
+                };
+                [v, v / 2, 255 - v]
+            }
+            (false, false) => {
+                let v = (x * 2 + y) as u8;
+                [v, v / 2 + 40, 220 - v / 3]
+            }
+        });
+        let cases: &[(Speed, u8, u64)] = &[
+            (Speed::Thorough, 40, 0x8c8a_ad7a_49f7_978e),
+            (Speed::Balanced, 40, 0x7497_c64b_461f_d0c1),
+            (Speed::Fast, 40, 0x79cf_ce91_a105_bb72),
+            (Speed::Fastest, 40, 0x5a5d_4d4d_261d_708b),
+            (Speed::Balanced, 120, 0x53ee_4d23_8903_096b),
+            (Speed::Fast, 120, 0x11b1_d0cb_9079_b3ad),
+            (Speed::Fastest, 120, 0x486f_194f_784f_efb1),
+        ];
+        // Every case is encoded before any is compared, so one run reports every pin that moved.
+        let got: Vec<(Speed, u8, u64)> = cases
+            .iter()
+            .map(|&(speed, q, _)| {
+                let (still, _) =
+                    encode_still_intra_with_speed(&mix, q, Av1Colour::default(), speed).unwrap();
+                (speed, q, fnv1a(&still.obus))
+            })
+            .collect();
+        assert_eq!(got, cases, "a preset's bitstream changed");
     }
 
     #[test]

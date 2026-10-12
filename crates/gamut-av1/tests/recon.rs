@@ -16,8 +16,8 @@
 //! submodules (`git submodule update --init --recursive`).
 
 use gamut_av1::{
-    Av1Colour, encode_still_intra, encode_still_intra_superres, encode_still_intra_with,
-    encode_still_intra16_with,
+    Av1Colour, Speed, encode_still_intra, encode_still_intra_superres, encode_still_intra_with,
+    encode_still_intra_with_speed, encode_still_intra16_with, encode_still_intra16_with_speed,
 };
 use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16, RgbToYcbcr};
@@ -1445,4 +1445,75 @@ fn sixteen_bit_samples_are_rejected() {
         err.static_message(),
         Some("AV1: only 8-, 10- and 12-bit samples are coded (§6.4.1)")
     );
+}
+
+/// Four content quadrants, one per tool the speed presets prune: texture (partitioning and the
+/// transform-type search), a few flat-chroma luma colours (palette), diagonal stripes (directional
+/// modes and their angle refinement), and a smooth ramp whose chroma tracks its luma (CfL and
+/// filter-intra).
+fn speed_mix(w: u32, h: u32) -> impl Fn(u32, u32) -> [u8; 3] {
+    move |x: u32, y: u32| match (x < w / 2, y < h / 2) {
+        (true, true) => textured(x, y),
+        (false, true) => [(((x / 4 + y / 4) % 4) * 60) as u8, 128, 128],
+        (true, false) => {
+            let v = if ((x * 2 + y) / 5).is_multiple_of(2) {
+                40
+            } else {
+                200
+            };
+            [v, v / 2, 255 - v]
+        }
+        (false, false) => {
+            let v = (x * 2 + y) as u8;
+            [v, v / 2 + 40, 220 - v / 3]
+        }
+    }
+}
+
+#[test]
+fn every_speed_preset_matches_both_decoders() {
+    // A preset narrows only which candidates the mode decisions *try*; signalling and
+    // reconstruction of whatever is chosen are shared. So every preset must still decode
+    // bit-exactly — and because each prunes a different set, each reaches a different mix of
+    // modes, partitions and transforms, which is exactly what the reconstruction must follow.
+    let ycc = colour_for(MatrixCoefficients::Bt709, ColorRange::Full);
+    for &speed in Speed::ALL {
+        for &q in &[8u8, 60, 160] {
+            for &(w, h) in &[(64, 64), (100, 70), (160, 96)] {
+                let mix = speed_mix(w, h);
+                let rgb = planes(w, h, &mix);
+                check_with(
+                    encode_still_intra_with_speed(&rgb, q, Av1Colour::default(), speed).unwrap(),
+                    q,
+                );
+                for ss in [ChromaSubsampling::Cs420, ChromaSubsampling::Cs422] {
+                    let src = planes_subsampled(
+                        w,
+                        h,
+                        ss,
+                        MatrixCoefficients::Bt709,
+                        ColorRange::Full,
+                        &mix,
+                    );
+                    check_with(
+                        encode_still_intra_with_speed(&src, q, ycc, speed).unwrap(),
+                        q,
+                    );
+                }
+                let mono = mono_planes(w, h, |x, y| mix(x, y)[0]);
+                check_with(
+                    encode_still_intra_with_speed(&mono, q, Av1Colour::monochrome(), speed)
+                        .unwrap(),
+                    q,
+                );
+                let deep = planes16(w, h, BitDepth::Ten, |x, y| {
+                    mix(x, y).map(|v| u16::from(v) << 2)
+                });
+                check_with(
+                    encode_still_intra16_with_speed(&deep, q, ycc, speed).unwrap(),
+                    q,
+                );
+            }
+        }
+    }
 }

@@ -49,10 +49,11 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
   `Real` value or one a double would round). Only two differences remain, both idempotent: a
   structure's fields come back in the model's order, and a number or an `x-default` tag may be
   re-spelled — a number only to the same decimal value, compared as decimals rather than doubles.
-- **IIM tag table.** `iim::IimTagInfo` now names every dataset IPTC-IIM 4.2 states an octet maximum
-  for that `max_octets` can hold: 14 Envelope + 56 Application datasets (chapters 5 and 6 bar
-  `2:202`), plus `7:10` Size Mode, the one dataset outside those chapters whose length the spec
-  fixes ("one octet"). The table is descriptive — no `FIELD_MAP` row references a dataset outside
+- **IIM tag table.** `iim::IimTagInfo` names every dataset IPTC-IIM 4.2 defines: 14 Envelope + 57
+  Application datasets (chapters 5 and 6), plus the four Pre-ObjectData (record 7), one ObjectData
+  (`8:10`) and one Post-ObjectData (`9:10`) Descriptor datasets. `max_octets` is an `Option<u32>`:
+  `None` exactly where the spec states no maximum (`7:20`, `7:90`, `7:95`, `8:10`, `9:10`), and
+  `2:202`'s 256000 octets fit. The table is descriptive — no `FIELD_MAP` row references a dataset outside
   the PMD-mapped subset — so reading, merging and writing are byte-for-byte unchanged by it.
 - **Authority.** The PMD tech reference maps only the ~20 IIM-mapped rows and the `ipmd_struct`
   field sets, both of which `tests/techreference.rs` re-derives at test time. The rest of the
@@ -99,10 +100,6 @@ Intentional, documented skips — none lose data on round-trip:
   `EntityWRole`, `ProductWGtin`, `RegistryEntry`, `EmbdEncRightsExpr`, `LinkedEncRightsExpr`,
   `CopyrightOwner`, `ImageCreator`, `ImageSupplier`): no typed model — issue #538. They pass through
   `PhotoMetadata::xmp` as raw `gamut-xmp` values untouched.
-- **IIM datasets with no octet maximum `max_octets` can state** (`2:202`, and records 7–9 apart from
-  `7:10`): not in the tag table, because `IimTagInfo::max_octets` is a `u16` and can only state a
-  determinate maximum — issue #539, whose remainder is six datasets, `7:10` having since been named.
-  They still round-trip byte-exact, as every unmodeled dataset in any record does.
 - **Exotic ISO 2022 character sets**: dataset 1:90 designations other than the spec default
   (decoded as Latin-1, the exiv2/ExifTool de-facto reading of ISO 646 IRV) and UTF-8 (`ESC % G`)
   are reported as `Error::Unsupported`, never mis-decoded.

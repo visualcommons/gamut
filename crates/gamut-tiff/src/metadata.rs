@@ -41,11 +41,11 @@
 //! ([`TiffEncoder::with_c2pa_reserved`](crate::TiffEncoder::with_c2pa_reserved)) and exposes the
 //! read-side locator as [`c2pa_exclusions`].
 
-use std::collections::BTreeSet;
-
 use gamut_core::{Error, Result};
 use gamut_ifd::c2pa::{self, C2paExclusions};
-use gamut_ifd::{ByteOrder, Ifd, Value, Variant, read, read_header, read_ifd_at};
+use gamut_ifd::{
+    ByteOrder, Ifd, SubtreeScope, Value, read, read_header, read_ifd_at, resolve_subtree,
+};
 
 use crate::tags;
 
@@ -300,11 +300,12 @@ impl TiffMetadata {
 /// whose target this reader throws away must not be able to fail the whole call.
 ///
 /// The same rule scopes *where* the walk runs, not only what it follows: it is applied to
-/// **IFD 0's subtree and nowhere else** ([`resolve_pointers`]). Every page after IFD 0 feeds one
-/// field of [`TiffMetadata`] — the C2PA manifest store, whose entry holds the store's bytes
-/// directly rather than a pointer — so a *pointer* on such a page is a thrown-away target too,
-/// and one on page 1 of a two-page document used to fail the whole call. [`gamut_ifd::read_tree`]
-/// cannot be scoped either way: it resolves the flat list it is given at every node of every page.
+/// **IFD 0's subtree and nowhere else** ([`gamut_ifd::resolve_subtree`] over IFD 0). Every page
+/// after IFD 0 feeds one field of [`TiffMetadata`] — the C2PA manifest store, whose entry holds
+/// the store's bytes directly rather than a pointer — so a *pointer* on such a page is a
+/// thrown-away target too, and one on page 1 of a two-page document used to fail the whole call.
+/// [`gamut_ifd::read_tree`] cannot be scoped either way: it resolves the flat list it is given at
+/// every node of every page.
 const IFD0_POINTER_TAGS: &[u16] = &[tags::EXIF_IFD];
 
 /// The pointer tags [`read_metadata`] resolves **inside the Exif subtree** — every standard one.
@@ -329,25 +330,22 @@ const IFD0_POINTER_TAGS: &[u16] = &[tags::EXIF_IFD];
 /// [`TiffMetadata::exif`] for why that is undecidable here and what it costs a caller.
 const EXIF_SUBTREE_POINTER_TAGS: &[u16] = gamut_ifd::tags::STANDARD_POINTER_TAGS;
 
-/// The pointer tags [`resolve_pointers`] follows at `depth`: [`IFD0_POINTER_TAGS`] at the page
-/// itself, [`EXIF_SUBTREE_POINTER_TAGS`] at every level below it.
+/// The walk [`read_metadata`] runs over IFD 0: [`IFD0_POINTER_TAGS`] at the page itself,
+/// [`EXIF_SUBTREE_POINTER_TAGS`] at every level below it, at most [`MAX_POINTER_DEPTH`] deep.
 ///
-/// A per-node list rather than [`gamut_ifd::read_tree`]'s one flat list, because the two levels
+/// A per-level list rather than [`gamut_ifd::read_tree`]'s one flat list, because the two levels
 /// answer opposite questions: at IFD 0 a followed pointer can only add a failure mode, and below
-/// it an *un*followed pointer becomes a stale offset in a directory the caller is handed. Depth 0
-/// is the only level whose directory is a page, and the walk never leaves IFD 0's subtree, so
-/// "not depth 0" is exactly "inside the Exif subtree".
-fn pointer_tags(depth: usize) -> &'static [u16] {
-    if depth == 0 {
-        IFD0_POINTER_TAGS
-    } else {
-        EXIF_SUBTREE_POINTER_TAGS
-    }
+/// it an *un*followed pointer becomes a stale offset in a directory the caller is handed. The
+/// root is the only level whose directory is a page, and the walk never leaves IFD 0's subtree,
+/// so "below the root" is exactly "inside the Exif subtree".
+fn metadata_scope() -> SubtreeScope<'static> {
+    SubtreeScope::new(IFD0_POINTER_TAGS, EXIF_SUBTREE_POINTER_TAGS)
+        .with_max_depth(MAX_POINTER_DEPTH)
 }
 
-/// An upper bound on the sub-IFD nesting [`resolve_pointers`] follows, bounding a hostile pointer
-/// graph: a directory a hundred levels down is still a directory, and a file of a few kilobytes
-/// holds enough of them to exhaust the stack.
+/// An upper bound on the sub-IFD nesting [`metadata_scope`] lets the walk follow, bounding a
+/// hostile pointer graph: a directory a hundred levels down is still a directory, and a file of a
+/// few kilobytes holds enough of them to exhaust the stack.
 ///
 /// It is **two**, not [`gamut_ifd::read_tree`]'s sixteen, because the walk starts at a page and
 /// the deepest tree the tags it follows can legitimately reach is IFD 0 → `ExifIFD` → one
@@ -359,9 +357,9 @@ const MAX_POINTER_DEPTH: usize = 2;
 /// The on-disk field-type codes that make a directory entry a sub-IFD pointer: `LONG` (4),
 /// the typed `IFD` (13) of TIFF Technical Note 1, and BigTIFF's `LONG8` (16) / `IFD8` (18).
 ///
-/// The same set [`pointer_offsets`] accepts, stated as **codes** rather than as [`Value`]
-/// variants, and that difference is the whole of this constant's reason to exist.
-/// `pointer_offsets` answers about a value the *reader* parsed, where the variant and the on-disk
+/// The same set [`gamut_ifd::resolve_subtree`] follows, stated as **codes** rather than as
+/// [`Value`] variants, and that difference is the whole of this constant's reason to exist.
+/// The resolver answers about a value the *reader* parsed, where the variant and the on-disk
 /// code agree by construction. [`check_exif_subtree`] answers about a value a *caller* built,
 /// which nothing has written yet — and there the two can disagree: [`gamut_ifd::UnknownValue`]
 /// carries an arbitrary type code beside its value word (its constructor validates only the
@@ -372,7 +370,7 @@ const MAX_POINTER_DEPTH: usize = 2;
 /// The discriminator that survives the write/read boundary is the code, so the writer asks about
 /// the code.
 ///
-/// The membership is pinned against `pointer_offsets` over the whole code space by
+/// The membership is pinned against the resolver over the whole code space by
 /// `the_pointer_type_codes_are_exactly_the_codes_the_resolver_follows`. The sibling half — a
 /// `gamut-ifd` constructor that accepts a *known* code into `Unknown` at all — is issue #608 and
 /// is not fixable from this crate.
@@ -419,7 +417,8 @@ const FIELD_BESIDE_GROUP_REFUSAL: &str = "TIFF: an Exif sub-IFD may not carry bo
 /// The writer's side of what the reader delivers: refuses an Exif subtree this crate could not
 /// hand back unchanged, `depth` further levels being all that is left below `ifd`.
 ///
-/// **This inspects what [`resolve_pointers`] inspects, and that symmetry is the whole design.**
+/// **This inspects what the [`metadata_scope`] walk inspects, and that symmetry is the whole
+/// design.**
 /// The reader decides "pointer" from a directory's *fields* — `ifd.get(tag)` under a tag in
 /// [`EXIF_SUBTREE_POINTER_TAGS`] whose entry carries one of [`POINTER_TYPE_CODES`] — while a
 /// caller builds one from [`sub_ifds`](Ifd::sub_ifds) *groups*. Checking only the groups left the
@@ -497,90 +496,6 @@ fn check_exif_subtree(ifd: &Ifd, depth: usize) -> Result<()> {
     Ok(())
 }
 
-/// The file offsets a sub-IFD pointer value carries: a `LONG` array (TIFF 6.0 §2), the typed
-/// `IFD` (13) form of TIFF Technical Note 1, or BigTIFF's 64-bit `LONG8`/`IFD8` forms. Any other
-/// type is not a pointer, and its field is left in place — the rule
-/// [`gamut_ifd::read_tree`] applies, restated here so the two walks cannot disagree about what a
-/// pointer is.
-///
-/// The source guards its 64-bit arm with `#[cfg(feature = "bigtiff")]` and this restatement does
-/// not, because it cannot: `bigtiff` is `gamut-ifd`'s feature, enabled unconditionally by this
-/// crate's dependency on it and not re-exported, so the same attribute here would name a feature
-/// `gamut-tiff` does not have. `unexpected_cfgs` rejects it under the workspace's `-D warnings`,
-/// and were it accepted the arm would vanish and every BigTIFF's `ExifIFD` would read back as a
-/// plain integer. The arm is therefore always live here, which is what a codec that always writes
-/// and reads BigTIFF needs.
-fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
-    match value {
-        Value::Long(v) | Value::Ifd(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
-        Value::Long8(v) | Value::Ifd8(v) => Some(v.clone()),
-        _ => None,
-    }
-}
-
-/// Resolves [`pointer_tags`]`(depth)` over `ifd` and, recursively, over the children it reaches,
-/// replacing each pointer field with a [`sub_ifds`](Ifd::sub_ifds) group — what
-/// [`gamut_ifd::read_tree`] does for a whole file, applied to **one** directory's subtree with a
-/// **per-level** tag list.
-///
-/// The scoping is the whole reason this exists, and it has two axes. `read_tree` resolves the flat
-/// list it is handed at every node of every page, so a pointer on a page [`read_metadata`] discards
-/// can fail a call whose answer that page never contributed to — hence one page. And it cannot
-/// vary the list by level, so a list wide enough to keep the Exif directory pointer-free would
-/// make an unrelated `SubIFDs` offset on the page itself able to fail the call — hence
-/// [`pointer_tags`]. Following a pointer by hand is [`gamut_ifd::read_ifd_at`]'s documented
-/// purpose. `visited` spans the walk and `depth` bounds it, so a cycle or two pointers claiming one
-/// directory fail here rather than loop — the guards are restated because they guard *this* walk.
-///
-/// `visited` is a **set**, not a list, and that is a hardening decision rather than a style one:
-/// nothing bounds how many offsets one pointer array holds, so a linear membership scan makes the
-/// walk quadratic in a number a hostile file chooses. Measured in release on hand-built files
-/// whose single `ExifIFD` array names N distinct empty directories, a scanned list took 0.24 s at
-/// 0.6 MB and 4.2 s at 2.3 MB — clean quadratic growth, every call returning `Ok`. A set answers
-/// the same files in 5 ms and 27 ms. What still has no bound is the *breadth* of one pointer
-/// array; that is issue #579.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidInput`](gamut_core::Error::InvalidInput) if a pointer target is
-/// unreadable, if two pointers name one directory, or if the tree nests deeper than
-/// [`MAX_POINTER_DEPTH`].
-fn resolve_pointers(
-    data: &[u8],
-    order: ByteOrder,
-    variant: Variant,
-    ifd: &mut Ifd,
-    visited: &mut BTreeSet<u64>,
-    depth: usize,
-) -> Result<()> {
-    if depth > MAX_POINTER_DEPTH {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: sub-IFD tree too deep",
-        ));
-    }
-    for &tag in pointer_tags(depth) {
-        let Some(offsets) = ifd.get(tag).and_then(pointer_offsets) else {
-            continue;
-        };
-        let mut children = Vec::with_capacity(offsets.len());
-        for offset in offsets {
-            if !visited.insert(offset) {
-                return Err(Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "TIFF: sub-IFD pointer loop",
-                ));
-            }
-            let mut child = read_ifd_at(data, offset, order, variant)?;
-            resolve_pointers(data, order, variant, &mut child, visited, depth + 1)?;
-            children.push(child);
-        }
-        ifd.remove(tag);
-        ifd.set_sub_ifd(tag, children);
-    }
-    Ok(())
-}
-
 /// A raw `BYTE`/`UNDEFINED` payload, copied out of a directory entry.
 fn bytes_value(value: Option<&Value>) -> Option<Vec<u8>> {
     value.and_then(Value::as_bytes).map(<[u8]>::to_vec)
@@ -632,8 +547,11 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
     let Some(ifd0) = ifds.first_mut() else {
         return Ok(TiffMetadata::new());
     };
-    // IFD 0's subtree and no other page's, with a per-level tag list — see [`pointer_tags`].
-    resolve_pointers(data, order, variant, ifd0, &mut BTreeSet::new(), 0)?;
+    // IFD 0's subtree and no other page's, with a per-level tag list — see [`metadata_scope`].
+    // Following a pointer by hand is `read_ifd_at`'s documented purpose.
+    resolve_subtree(ifd0, metadata_scope(), |offset| {
+        read_ifd_at(data, offset, order, variant)
+    })?;
     let exif = ifd0
         .sub_ifds()
         .iter()
@@ -991,7 +909,7 @@ mod tests {
 
     #[test]
     fn the_writer_refuses_an_exif_pointer_tag_carried_as_a_pointer_typed_field() {
-        // `check` inspected only `sub_ifds()` while `resolve_pointers` inspects `get(tag)`, so the
+        // `check` inspected only `sub_ifds()` while the reader's walk inspects `get(tag)`, so the
         // one shape the reader misreads was the one shape the writer never looked at: a standard
         // pointer tag carried as a plain `LONG`. All four encoded cleanly and then failed this
         // crate's own `read_metadata` — `read out of bounds` for a large integer, `sub-IFD pointer
@@ -1023,17 +941,25 @@ mod tests {
 
     #[test]
     fn the_pointer_type_codes_are_exactly_the_codes_the_resolver_follows() {
-        // `POINTER_TYPE_CODES` restates, as on-disk codes, the set `pointer_offsets` restates as
-        // `Value` variants — and the writer now asks the code while the reader still asks the
-        // variant, so the two must not drift. Derived by sweeping the whole `u16` code space
-        // through `FieldType::from_code` and asking `pointer_offsets` about a value of each type,
-        // never by repeating the four numbers: a hand list short by one is the defect this
-        // constant exists to close.
+        // `POINTER_TYPE_CODES` restates, as on-disk codes, the set the resolver follows as
+        // `Value` variants — and the writer asks the code while the reader asks the variant, so
+        // the two must not drift. Derived by sweeping the whole `u16` code space through
+        // `FieldType::from_code` and asking the walk `read_metadata` runs whether it follows a
+        // value of each type under `ExifIFD`, never by repeating the four numbers: a hand list
+        // short by one is the defect this constant exists to close.
         let derived: Vec<u16> = every_type_code()
             .into_iter()
             .filter(|&code| {
                 let ty = gamut_ifd::FieldType::from_code(code).expect("a swept code");
-                pointer_offsets(&canonical_value(ty)).is_some()
+                let mut ifd0 = Ifd::new();
+                ifd0.set(tags::EXIF_IFD, canonical_value(ty));
+                let mut followed = false;
+                resolve_subtree(&mut ifd0, metadata_scope(), |_| {
+                    followed = true;
+                    Ok(Ifd::new())
+                })
+                .expect("an empty child directory resolves");
+                followed
             })
             .collect();
         assert_eq!(
@@ -1137,7 +1063,7 @@ mod tests {
     fn a_value_no_reader_would_follow_survives_under_a_pointer_tag() {
         // The refusal above is shaped by the value's *type*, not by its tag, and that is the whole
         // difference between bounding the writer by what the reader misreads and banning four tags
-        // outright. `pointer_offsets` accepts only LONG/IFD/LONG8/IFD8, so a `SHORT` under
+        // outright. The resolver follows only LONG/IFD/LONG8/IFD8, so a `SHORT` under
         // `SubIFDs` is left in place by the reader — and must therefore be written and handed back
         // unchanged rather than refused.
         for tag in EXIF_SUBTREE_POINTER_TAGS {
@@ -1240,7 +1166,7 @@ mod tests {
         // would let a later narrowing of the alias shrink the sweep silently — the same
         // hand-maintained-set failure one indirection further out.
         //
-        // `resolve_pointers` is driven directly, at the depth `read_metadata` calls it with,
+        // The walk is driven directly, with the scope `read_metadata` runs it with,
         // because IFD 0 is the one directory the seam never hands back; the public observation
         // that also sees this is `a_broken_pointer_the_metadata_does_not_use_does_not_hide_the_blocks`,
         // which fails on a dangling target rather than on a resolved one.
@@ -1264,14 +1190,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("tag {tag}: a written pointer"));
             assert!(offset > 0, "tag {tag}: the pointer must name a directory");
 
-            resolve_pointers(
-                &bytes,
-                ByteOrder::LittleEndian,
-                Variant::Classic,
-                &mut ifd0,
-                &mut BTreeSet::new(),
-                0,
-            )
+            resolve_subtree(&mut ifd0, metadata_scope(), |offset| {
+                read_ifd_at(&bytes, offset, ByteOrder::LittleEndian, Variant::Classic)
+            })
             .unwrap_or_else(|e| panic!("tag {tag}: resolving IFD 0: {e}"));
             assert_eq!(
                 ifd0.get_u32(tag),

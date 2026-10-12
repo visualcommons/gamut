@@ -22,7 +22,7 @@ use serde_json::Value;
 /// Where the vendored references disagree, the crate follows `iim-4.2.pdf`. Each row pins BOTH
 /// values — `((record, dataset), crate max_octets, JSON IIMmaxbytes, why)` — so the exception
 /// self-invalidates if either source or the crate changes.
-const LIMIT_EXCEPTIONS: &[((u8, u8), u16, u64, &str)] = &[(
+const LIMIT_EXCEPTIONS: &[((u8, u8), u32, u64, &str)] = &[(
     (2, 4),
     68,
     64,
@@ -155,12 +155,16 @@ fn tag_table_octet_limits_match_techreference() {
             LIMIT_EXCEPTIONS.iter().find(|(k, ..)| *k == key)
         {
             // Pin both sides so the exception self-invalidates when either source moves.
-            assert_eq!(info.max_octets, crate_max, "{record}:{dataset}: {why}");
+            assert_eq!(
+                info.max_octets,
+                Some(crate_max),
+                "{record}:{dataset}: {why}"
+            );
             assert_eq!(json_max, exc_json_max, "{record}:{dataset}: {why}");
         } else {
             assert_eq!(
-                u64::from(info.max_octets),
-                json_max,
+                info.max_octets.map(u64::from),
+                Some(json_max),
                 "{record}:{dataset} octet limit drifted from the tech reference"
             );
         }

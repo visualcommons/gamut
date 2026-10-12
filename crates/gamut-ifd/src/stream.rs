@@ -336,13 +336,15 @@ impl<S: ReadAt> IfdReader<S> {
     /// [`read_tree`](crate::read_tree), or [`Error::Io`] if the source fails.
     pub fn read_tree(&mut self, pointer_tags: &[u16]) -> Result<TiffFile> {
         let mut file = self.read_file()?;
-        let mut visited: Vec<u64> = Vec::new();
+        // One visited set across every page, so two pages claiming one directory fail too.
+        let mut visited = std::collections::BTreeSet::new();
+        let scope = crate::SubtreeScope::new(pointer_tags, pointer_tags);
         let mut fetch = |off: u64| {
             let raw = self.read_ifd(off)?;
             self.decode_ifd(&raw)
         };
         for ifd in &mut file.ifds {
-            resolve_pointers_with(&mut fetch, ifd, pointer_tags, &mut visited, 1)?;
+            resolve_pointers_with(&mut fetch, ifd, scope, &mut visited, 0)?;
         }
         Ok(file)
     }
