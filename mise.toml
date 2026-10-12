@@ -266,6 +266,37 @@ run = "cargo test --locked --manifest-path tooling/c2pa-oracle/Cargo.toml"
 description = "Compile the C2PA differential oracle (no signing, no corpus)"
 run = "cargo check --locked --manifest-path tooling/c2pa-oracle/Cargo.toml --all-targets"
 
+# Re-derive gamut-iptc's IIM 4.2 DataSet-name table from the vendored standard (issue #623). The
+# inline drift guard in `crates/gamut-iptc/src/iim.rs` compares `KNOWN_TAGS` against the committed
+# `iim-4.2-dataset-names.tsv`, so a name mistyped identically in both passes it; this task closes
+# that by regenerating the `.tsv` from `references/iptc/iim-4.2.pdf` and failing on any difference
+# (which also catches a stale artefact after the PDF is replaced).
+#
+# `pdftotext` (poppler-utils) is a system package this file deliberately does not provision: it
+# would add a system dependency to the toolchain for one table in one crate. So where it is absent
+# the task prints why it proved nothing and exits 0, and a contributor is never blocked. Extended
+# CI's `iim-names` job installs poppler-utils first, so there the check always runs. The poppler
+# version is printed with the result because the extraction is positional: a poppler release that
+# moves words would show up here as a diff, and the version is what to pin if it ever does.
+[tasks.check-iim-names]
+description = "Re-derive gamut-iptc's IIM 4.2 DataSet-name table from the vendored PDF and fail if the committed .tsv differs (skips, saying so, without pdftotext)"
+run = '''
+if ! command -v pdftotext >/dev/null 2>&1; then
+  echo "::notice::check-iim-names skipped: pdftotext (poppler-utils) is not on PATH, so the committed iim-4.2-dataset-names.tsv was NOT re-derived from references/iptc/iim-4.2.pdf"
+  exit 0
+fi
+echo "check-iim-names: $(pdftotext -v 2>&1 | head -n 1)"
+committed=crates/gamut-iptc/tests/data/iim-4.2-dataset-names.tsv
+derived=$(mktemp)
+trap 'rm -f "$derived"' EXIT
+python3 -I crates/gamut-iptc/tests/data/extract-iim-names.py references/iptc/iim-4.2.pdf > "$derived"
+if ! diff -u "$committed" "$derived"; then
+  echo "::error::$committed differs from what extract-iim-names.py derives from references/iptc/iim-4.2.pdf (diff above: - committed, + derived). Regenerate it with the script; never hand-edit it."
+  exit 1
+fi
+echo "check-iim-names: $committed matches the table derived from references/iptc/iim-4.2.pdf"
+'''
+
 # Doctests only. On stable, `cargo llvm-cov` cannot instrument doctests (that needs nightly), so
 # the coverage gate — which CI uses as its green-test gate — silently skips them. This task is the
 # missing slice: CI's lint lane runs it, reusing the `--all-targets --all-features` build it just

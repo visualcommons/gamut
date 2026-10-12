@@ -294,6 +294,88 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+  # gamut-iptc's IIM 4.2 DataSet-name table, re-derived from the standard (issue #623). The inline
+  # drift guard compares `KNOWN_TAGS` against a committed `.tsv` that `extract-iim-names.py` derives
+  # from `references/iptc/iim-4.2.pdf` with `pdftotext`; this job re-runs that derivation and fails
+  # on any difference. `mise.toml` deliberately does not provision poppler, and the `mise run
+  # check-iim-names` task skips with a notice where it is absent, so this job installs it from apt:
+  # here the check must run, never skip. No Rust, no submodules: the PDF is committed in-tree.
+  iim-names:
+    name: IIM 4.2 DataSet names match the standard
+    runs-on: ubuntu-latest
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: false
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install poppler-utils (pdftotext)
+        # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
+        # Chrome/Microsoft source on the runner image makes `apt-get update` exit 100, so drop
+        # the entries this project does not consume, then update and install unmasked. Full
+        # rationale, and why classification is per source entry, is in ci.yml.
+        run: |
+          # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          prune='
+          function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
+          function flush(  i) {
+            if (n == 0) return
+            if (uri == "" || ok(uri)) { for (i = 0; i < n; i++) print s[i]; if (uri != "") keep++ } else drop++
+            n = 0; uri = ""
+          }
+          /^[ \t]*(deb|deb-src)[ \t]/ { flush(); if (ok($0)) { print; keep++ } else drop++; next }
+          /^[ \t]*$/ { flush(); print; next }
+          /^[ \t]*URIs:/ { uri = $0 }
+          { s[n++] = $0 }
+          END { flush(); exit (keep > 0 ? 0 : 10) }'
+          work=$(mktemp -d)
+          ubuntu=0
+          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+            [ -f "$f" ] || continue
+            out="$work/$(echo "$f" | tr / _)"
+            rc=0
+            sudo awk "$prune" "$f" > "$out" || rc=$?
+            case "$rc" in
+              0) ubuntu=$((ubuntu + 1)) ;;
+              10) ;;
+              *) echo "::error::could not read or classify $f (awk exit $rc); not guessing at it"
+                 exit 1 ;;
+            esac
+            echo "$rc" > "$out.rc"
+          done
+          if [ "$ubuntu" -eq 0 ]; then
+            # Classification recognised nothing as Ubuntu's -- a re-hosted archive, a renamed mirrorlist.
+            # Prune nothing and carry on: that is exactly how this step behaved before the guard existed,
+            # whereas failing here would turn one runner-image change into a total outage across every
+            # job. A genuinely unreachable archive, or a missing package, still fails loudly at the
+            # unmasked `update`/`install` below.
+            echo "::warning::no Ubuntu apt source recognised; standing down and leaving sources as they are"
+          else
+            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              [ -f "$f" ] || continue
+              out="$work/$(echo "$f" | tr / _)"
+              if [ "$(cat "$out.rc")" = 10 ]; then
+                echo "removing third-party source $f"
+                sudo rm -f "$f"
+              elif sudo cmp -s "$out" "$f"; then
+                echo "keeping $f"
+              else
+                echo "dropping third-party entries from $f"
+                sudo rm -f "$f"
+                sudo cp "$out" "$f"
+              fi
+            done
+          fi
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
+      - uses: jdx/mise-action@v4
+        with:
+          # Only put `mise` on PATH: the task needs pdftotext and python3, neither a [tools] entry.
+          install: false
+      - name: Re-derive the IIM 4.2 DataSet-name table
+        # The task logs the poppler version beside its verdict: the extraction is positional, so a
+        # poppler release that moves words would surface here as a diff, and that version is what
+        # to pin if it ever does.
+        run: mise run check-iim-names
+
   real-dng:
     name: Real camera DNG conformance
     runs-on: ubuntu-latest
