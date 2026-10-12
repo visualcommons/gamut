@@ -53,6 +53,20 @@ gamut convert input.png output.jpg --quality 90 --jpeg-subsampling 444
 gamut convert input.png output.jpg --jpeg-restart-interval 8
 gamut convert input.png output.jpg --jpeg-progressive
 
+# Batch: many inputs, converted in parallel into a directory (created if missing) as
+# <name>.<format>; the format is --format, or AVIF. Without -o, the last of several paths is the
+# output, as with cp. A lone input with no output is written beside itself (photo.png -> photo.avif).
+gamut convert *.png -o out/
+gamut convert a.png b.jpg out/ --format webp
+gamut convert photo.png
+
+# `-` is standard input or output; the summary line then goes to stderr.
+cat photo.png | gamut convert - -o - --format webp > photo.webp
+
+# Existing outputs are left alone and counted as failures unless -f/--overwrite is given; any
+# failed input makes the exit status 1 after the rest finish. -q drops the summary lines.
+gamut convert *.png -o out/ -f -q
+
 # Read WebP or JPEG XL back and transcode it — decoded by gamut's own decoders, no third-party lib.
 gamut convert output.webp roundtrip.avif
 gamut convert output.jxl roundtrip.png
@@ -78,8 +92,11 @@ gamut -vv convert input.jpg output.avif
 
 The sandbox exposes:
 
-- `convert` — decode PNG/JPEG/PPM/WebP/JXL and encode to a gamut codec:
-  - **AVIF** — lossless (default) or lossy intra via `--qindex` (8-bit RGB).
+- `convert` — decode PNG/JPEG/PPM/WebP/JXL and encode to a gamut codec, one input or many (run
+  in parallel, one worker per core, into an output directory), with `-` for standard input/output,
+  `-f`/`--overwrite`, `-q`/`--quiet`, and exit status 1 when any input fails:
+  - **AVIF** — lossless (default) or lossy intra via `--qindex`, keeping the input's alpha, grey
+    and 16-bit depth; the summary line splits the file into colour, alpha and container bytes.
   - **WebP** — lossless VP8L (default) or lossy VP8 via `--lossy --quality`, with transparency
     preserved; emits a simple file when fully opaque and an extended (`VP8X`/`ALPH`) file otherwise.
   - **JPEG XL** — lossless (default) or lossy via `--jxl-distance`, with `--jxl-effort` (1–10) and

@@ -155,16 +155,9 @@ macro_rules! decode_as {
 /// cannot be read is simply absent rather than failing the conversion. An ICC profile is returned
 /// only when it describes the decoded pixels: not for an XYB-coded JPEG XL (decoded to sRGB), and
 /// not for a grey image widened to an RGB(A) layout.
-pub(crate) fn decode_native(path: &Path) -> Result<(NativeImage, InputMetadata), CliError> {
-    let bytes = std::fs::read(path).map_err(|source| CliError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    decode_native_bytes(path, &bytes)
-}
-
-/// The filesystem-free core of [`decode_native`]; `path` only labels errors.
-fn decode_native_bytes(
+///
+/// `bytes` is the file already read (see [`read_input`]); `path` only labels errors.
+pub(crate) fn decode_native(
     path: &Path,
     bytes: &[u8],
 ) -> Result<(NativeImage, InputMetadata), CliError> {
@@ -304,30 +297,38 @@ macro_rules! decode_with {
 /// pixel, matching the gamut encoders' input contract. The format is detected from the file
 /// contents, so the extension need not be accurate.
 pub(crate) fn decode_rgb8(path: &Path) -> Result<(Vec<u8>, Dimensions), CliError> {
-    decode(path, false)
-}
-
-/// Decodes a supported image file (PNG, JPEG, PPM/P6, WebP, or JPEG XL) into interleaved 8-bit RGBA,
-/// keeping the alpha channel (fully opaque when the source has none). Returns `width * height * 4`
-/// bytes, row-major. The format is detected from the file contents.
-pub(crate) fn decode_rgba8(path: &Path) -> Result<(Vec<u8>, Dimensions), CliError> {
-    decode(path, true)
-}
-
-/// Reads `path` and decodes it to interleaved RGB (`want_alpha == false`) or RGBA
-/// (`want_alpha == true`).
-fn decode(path: &Path, want_alpha: bool) -> Result<(Vec<u8>, Dimensions), CliError> {
     let bytes = std::fs::read(path).map_err(|source| CliError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    decode_bytes(path, &bytes, want_alpha)
+    decode_bytes(path, &bytes, false)
 }
 
+/// Reads an input file, or all of standard input when `path` is [`STDIO`] (`-`).
+pub(crate) fn read_input(path: &Path) -> Result<Vec<u8>, CliError> {
+    let io_error = |source| CliError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    if path == Path::new(STDIO) {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut bytes).map_err(io_error)?;
+        Ok(bytes)
+    } else {
+        std::fs::read(path).map_err(io_error)
+    }
+}
+
+/// The path that names standard input (as an input) or standard output (as an output).
+pub(crate) const STDIO: &str = "-";
+
+/// Decodes an already-read image (PNG, JPEG, PPM/P6, WebP, or JPEG XL) to interleaved RGB
+/// (`want_alpha == false`) or RGBA (`want_alpha == true`, fully opaque when the source has none).
+///
 /// Format-dispatching core: routes every format gamut can decode to gamut's own decoder, and the
-/// remainder (PPM) to the `image` crate. Split out from [`decode`] so it is unit-testable without
-/// touching the filesystem; `path` is used only to label errors.
-fn decode_bytes(
+/// remainder (PPM) to the `image` crate. The format is detected from the contents, never from
+/// `path`, which only labels errors.
+pub(crate) fn decode_bytes(
     path: &Path,
     bytes: &[u8],
     want_alpha: bool,
@@ -627,9 +628,9 @@ mod tests {
         }
     }
 
-    /// The layout `decode_native_bytes` chose for `bytes`.
+    /// The layout `decode_native` chose for `bytes`.
     fn native_layout(bytes: &[u8]) -> Layout {
-        match decode_native_bytes(Path::new("mem"), bytes).unwrap().0 {
+        match decode_native(Path::new("mem"), bytes).unwrap().0 {
             NativeImage::Gray8(_) => Layout::Gray8,
             NativeImage::Rgb8(_) => Layout::Rgb8,
             NativeImage::Rgba8(_) => Layout::Rgba8,
@@ -731,9 +732,9 @@ mod tests {
         assert_eq!(native_layout(&png), Layout::Rgb16);
     }
 
-    /// The ICC profile `decode_native_bytes` read for `bytes`.
+    /// The ICC profile `decode_native` read for `bytes`.
     fn native_icc(bytes: &[u8]) -> Option<Vec<u8>> {
-        decode_native_bytes(Path::new("mem"), bytes).unwrap().1.icc
+        decode_native(Path::new("mem"), bytes).unwrap().1.icc
     }
 
     #[test]
