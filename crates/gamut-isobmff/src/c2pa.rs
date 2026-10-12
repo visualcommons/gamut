@@ -301,10 +301,19 @@ impl<'a> C2paSlot<'a> {
     /// or one overrunning the slot (*refuse rather than guess*, `references/c2pa/README.md`).
     ///
     /// The store begins where the slot does, so its file range is
-    /// `range.start..range.start + store.len()`.
+    /// `range.start..range.start + store.len()` — what [`store_range`](Self::store_range) reports.
     #[must_use]
     pub fn store(&self) -> Option<&'a [u8]> {
         lbox_bounded(self.slot_bytes)
+    }
+
+    /// The half-open byte range [`store`](Self::store) occupies within the file, or `None` exactly
+    /// when that is `None`. The one place a consumer turns the trimmed store into a file range, so every
+    /// crate reporting "the store" reports the same bytes (#505).
+    #[must_use]
+    pub fn store_range(&self) -> Option<Range<usize>> {
+        let len = self.store()?.len();
+        Some(self.range.start..self.range.start + len)
     }
 }
 
@@ -869,6 +878,22 @@ mod tests {
         ] {
             assert_eq!(slot(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_store_range_starts_at_the_slot_and_spans_only_the_store() {
+        // A padded store 1000 bytes into the file: the slot runs to the end of the box, the store
+        // range stops at the `LBox`. 1000 + 8 + 16 + 4 + 9 (`manifest\0`) + 8.
+        let s = store(b"abc");
+        let mut padded = s.clone();
+        padded.extend_from_slice(&[0xEE; 5]);
+        let b = body(C2PA_UUID, [0; 4], b"manifest", &data(0, &padded));
+        let found = slot_at(1000, &b).expect("slot");
+        assert_eq!(found.range, 1045..1045 + padded.len());
+        assert_eq!(found.store_range(), Some(1045..1045 + s.len()));
+        // No store, no store range — whatever the slot's length.
+        let b = body(C2PA_UUID, [0; 4], b"manifest", &data(0, &[0; 64]));
+        assert_eq!(slot_at(1000, &b).expect("slot").store_range(), None);
     }
 
     #[test]
