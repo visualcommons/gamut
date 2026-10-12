@@ -107,9 +107,10 @@ impl GamutCheck {
     ///
     /// # Options
     ///
-    /// Only [`intent`](TransformOptions::intent) and
-    /// [`optimization`](TransformOptions::optimization) are consumed — the latter applied to
-    /// all three sub-pipelines.
+    /// Only [`intent`](TransformOptions::intent),
+    /// [`optimization`](TransformOptions::optimization) and
+    /// [`prefer_cicp_transfer`](TransformOptions::prefer_cicp_transfer) are consumed — the
+    /// latter two applied to all three sub-pipelines.
     /// [`black_point_compensation`](TransformOptions::black_point_compensation) is
     /// **ignored**: lcms2's gamut sampler compensates on none of its three legs
     /// (`cmsgmt.c`'s `BPCList` is all-false), and a compensated round trip would not be the
@@ -127,11 +128,12 @@ impl GamutCheck {
         let intent = options.intent;
         let relative = RenderingIntent::MediaRelativeColorimetric;
         let optimization = options.optimization;
-        let input = link_chain(&[src, &lab], &[intent, intent], &[false, false])?
+        let cicp = options.prefer_cicp_transfer;
+        let input = link_chain(&[src, &lab], &[intent, intent], &[false, false], cicp)?
             .optimized(optimization)?;
-        let forward = link_chain(&[&lab, proof], &[relative, relative], &[false, false])?
+        let forward = link_chain(&[&lab, proof], &[relative, relative], &[false, false], cicp)?
             .optimized(optimization)?;
-        let reverse = link_chain(&[proof, &lab], &[relative, relative], &[false, false])?
+        let reverse = link_chain(&[proof, &lab], &[relative, relative], &[false, false], cicp)?
             .optimized(optimization)?;
         let threshold = if bpc::is_matrix_shaper(proof) {
             SHAPER_THRESHOLD

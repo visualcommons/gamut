@@ -108,6 +108,7 @@ fn bench_gamut(bencher: Bencher, scenario: &Scenario, level: PipelineOptimizatio
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: level,
+            prefer_cicp_transfer: false,
         },
     )
     .expect("the benchmark profiles link");
@@ -235,6 +236,7 @@ fn build_shaper_pair(bencher: Bencher, level: PipelineOptimization) {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: level,
+                prefer_cicp_transfer: false,
             },
         )
         .expect("the benchmark profiles link")

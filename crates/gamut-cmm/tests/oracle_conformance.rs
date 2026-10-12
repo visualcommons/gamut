@@ -309,6 +309,7 @@ fn conformance_pairs_battery() {
                         intent: our_intent,
                         black_point_compensation: bpc,
                         optimization: PipelineOptimization::None,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap();
@@ -498,6 +499,7 @@ fn optimized_transforms_stay_inside_the_precision_budget() {
                         intent: our_intent,
                         black_point_compensation: false,
                         optimization,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap()
@@ -685,6 +687,7 @@ fn multiprofile_chain_matches_lcms2() {
                         intent: our_intent,
                         black_point_compensation: bpc,
                         optimization: PipelineOptimization::None,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap();
@@ -715,6 +718,7 @@ fn multiprofile_chain_matches_lcms2() {
                         intent: our_intent,
                         black_point_compensation: bpc,
                         optimization: PipelineOptimization::None,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap();
@@ -955,6 +959,7 @@ fn proofing_matches_lcms2() {
                         proofing_intent: our_proof_intent,
                         black_point_compensation: bpc,
                         optimization: PipelineOptimization::None,
+                        prefer_cicp_transfer: false,
                     },
                 )
                 .unwrap();
@@ -1003,6 +1008,7 @@ fn proofing_matches_lcms2() {
             proofing_intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         },
     )
     .unwrap();
@@ -1013,6 +1019,7 @@ fn proofing_matches_lcms2() {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         },
     )
     .unwrap();

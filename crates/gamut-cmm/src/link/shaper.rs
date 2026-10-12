@@ -33,7 +33,14 @@ fn read_colorant(profile: &IccProfile, tag: KnownTag) -> Result<[f64; 3]> {
 }
 
 /// Reads one TRC tag (`curveType` or `parametricCurveType`) as a [`ToneCurve`].
-fn read_trc(profile: &IccProfile, tag: KnownTag) -> Result<ToneCurve> {
+///
+/// With `prefer_cicp` (`TransformOptions::prefer_cicp_transfer`), the transfer function the
+/// profile's `cicp` tag names stands in for the tag's curve — evaluated in closed form — when
+/// `gamut-color` evaluates that code point **and** the two curves agree
+/// ([`ToneCurve::agrees_with`]). The tag is still read and validated first, so the option
+/// never turns a malformed profile into a buildable one; and a profile whose `cicp` tag names
+/// a different curve than its TRC (a §10.3 violation) keeps rendering through its TRC.
+fn read_trc(profile: &IccProfile, tag: KnownTag, prefer_cicp: bool) -> Result<ToneCurve> {
     let sig = Signature::from(tag);
     let curve = match profile.get(tag) {
         None => return Err(CmmError::MissingTag(sig)),
@@ -41,7 +48,15 @@ fn read_trc(profile: &IccProfile, tag: KnownTag) -> Result<ToneCurve> {
         Some(TagData::ParametricCurve(curve)) => CurveOrParametric::Parametric(curve.clone()),
         Some(_) => return Err(CmmError::BadTagType(sig)),
     };
-    ToneCurve::new(&curve)
+    let curve = ToneCurve::new(&curve)?;
+    if prefer_cicp
+        && let Some(TagData::Cicp(cicp)) = profile.get(KnownTag::Cicp)
+        && let Some(closed) = ToneCurve::cicp_transfer(cicp.transfer_characteristics)
+        && closed.agrees_with(&curve)
+    {
+        return Ok(closed);
+    }
+    Ok(curve)
 }
 
 /// Assembles the linear-RGB → PCSXYZ colorant matrix: **one column per primary** (`m[i][j]` is
@@ -57,11 +72,11 @@ fn colorant_matrix(profile: &IccProfile) -> Result<[[f64; 3]; 3]> {
 }
 
 /// Reads the three RGB TRC tags, in channel order.
-fn rgb_trcs(profile: &IccProfile) -> Result<Vec<ToneCurve>> {
+fn rgb_trcs(profile: &IccProfile, prefer_cicp: bool) -> Result<Vec<ToneCurve>> {
     Ok(vec![
-        read_trc(profile, KnownTag::RedTrc)?,
-        read_trc(profile, KnownTag::GreenTrc)?,
-        read_trc(profile, KnownTag::BlueTrc)?,
+        read_trc(profile, KnownTag::RedTrc, prefer_cicp)?,
+        read_trc(profile, KnownTag::GreenTrc, prefer_cicp)?,
+        read_trc(profile, KnownTag::BlueTrc, prefer_cicp)?,
     ])
 }
 
@@ -85,9 +100,9 @@ fn invert_colorants(m: &[[f64; 3]; 3]) -> Result<[[f64; 3]; 3]> {
 /// plus a trailing [`Stage::XyzToLab`] when the PCS is Lab (lcms2 appends
 /// `_cmsStageAllocXYZ2Lab` there — the colorant matrix always lands in XYZ, so a Lab PCS
 /// needs the colorimetric bridge to end at the profile's decoded PCS).
-pub(super) fn rgb_device_to_pcs(profile: &IccProfile) -> Result<Pipeline> {
+pub(super) fn rgb_device_to_pcs(profile: &IccProfile, prefer_cicp: bool) -> Result<Pipeline> {
     let m = colorant_matrix(profile)?;
-    let trcs = rgb_trcs(profile)?;
+    let trcs = rgb_trcs(profile, prefer_cicp)?;
     let mut stages = vec![
         Stage::Curves(trcs),
         Stage::Matrix {
@@ -105,9 +120,9 @@ pub(super) fn rgb_device_to_pcs(profile: &IccProfile) -> Result<Pipeline> {
 /// `BuildRGBOutputMatrixShaper` without `OutpAdj`; the TRC inverses are analytic where the
 /// parameterization permits, sharper than lcms2's 4096-entry reversal tables), with a
 /// leading [`Stage::LabToXyz`] when the PCS is Lab (lcms2 prepends `_cmsStageAllocLab2XYZ`).
-pub(super) fn rgb_pcs_to_device(profile: &IccProfile) -> Result<Pipeline> {
+pub(super) fn rgb_pcs_to_device(profile: &IccProfile, prefer_cicp: bool) -> Result<Pipeline> {
     let inverse = invert_colorants(&colorant_matrix(profile)?)?;
-    let inverted = rgb_trcs(profile)?
+    let inverted = rgb_trcs(profile, prefer_cicp)?
         .iter()
         .map(ToneCurve::inverse)
         .collect::<Result<Vec<_>>>()?;
@@ -134,8 +149,8 @@ pub(super) fn rgb_pcs_to_device(profile: &IccProfile) -> Result<Pipeline> {
 /// Lab PCS: `out = [100 · kTRC(g), 0, 0]` — decoded `L*` carries the curve, `a* = b* = 0`
 /// (lcms2 builds `{1,1,1}` replication into encoded Lab with constant-0.5 `a`/`b` curves;
 /// decoded, that is exactly this matrix).
-pub(super) fn gray_device_to_pcs(profile: &IccProfile) -> Result<Pipeline> {
-    let ktrc = read_trc(profile, KnownTag::GrayTrc)?;
+pub(super) fn gray_device_to_pcs(profile: &IccProfile, prefer_cicp: bool) -> Result<Pipeline> {
+    let ktrc = read_trc(profile, KnownTag::GrayTrc, prefer_cicp)?;
     let column: [f64; 3] = if profile.header.pcs == ColorSpace::Lab {
         [100.0, 0.0, 0.0]
     } else {
@@ -163,8 +178,8 @@ pub(super) fn gray_device_to_pcs(profile: &IccProfile) -> Result<Pipeline> {
 ///
 /// Lab PCS: pick `L* / 100` (a 1×3 `[1/100, 0, 0]` matrix — lcms2's `PickLstarMatrix` with
 /// the decoded-Lab scaling folded in), then `Curves([kTRC⁻¹])`.
-pub(super) fn gray_pcs_to_device(profile: &IccProfile) -> Result<Pipeline> {
-    let inverse = read_trc(profile, KnownTag::GrayTrc)?.inverse()?;
+pub(super) fn gray_pcs_to_device(profile: &IccProfile, prefer_cicp: bool) -> Result<Pipeline> {
+    let inverse = read_trc(profile, KnownTag::GrayTrc, prefer_cicp)?.inverse()?;
     let row: [f64; 3] = if profile.header.pcs == ColorSpace::Lab {
         [1.0 / 100.0, 0.0, 0.0]
     } else {
@@ -241,7 +256,7 @@ mod tests {
         // The assembled matrix must place colorant j in column j — a transposed assembly
         // cannot pass this exact per-entry pin (the columns are pairwise distinct).
         let profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
-        let pipeline = rgb_device_to_pcs(&profile).unwrap();
+        let pipeline = rgb_device_to_pcs(&profile, false).unwrap();
         let Stage::Matrix { m, offset } = &pipeline.stages()[1] else {
             panic!("stage 1 must be the colorant matrix");
         };
@@ -261,7 +276,7 @@ mod tests {
     #[test]
     fn rgb_forward_applies_trc_before_matrix() {
         let profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
-        let pipeline = rgb_device_to_pcs(&profile).unwrap();
+        let pipeline = rgb_device_to_pcs(&profile, false).unwrap();
         let mut out = [0.0; 3];
         pipeline.eval(&[0.5, 0.0, 0.0], &mut out).unwrap();
         let lin = 0.5_f64.powf(2.199_218_75);
@@ -278,8 +293,8 @@ mod tests {
     #[test]
     fn rgb_round_trip_through_both_directions_is_tight() {
         let profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
-        let forward = rgb_device_to_pcs(&profile).unwrap();
-        let reverse = rgb_pcs_to_device(&profile).unwrap();
+        let forward = rgb_device_to_pcs(&profile, false).unwrap();
+        let reverse = rgb_pcs_to_device(&profile, false).unwrap();
         let round_trip = forward.compose(reverse).unwrap();
         for rgb in [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.25, 0.5, 0.75]] {
             let mut out = [0.0; 3];
@@ -304,10 +319,10 @@ mod tests {
             [gamma_tag(), gamma_tag(), gamma_tag()],
         );
         assert!(
-            rgb_device_to_pcs(&profile).is_ok(),
+            rgb_device_to_pcs(&profile, false).is_ok(),
             "forward needs no inverse"
         );
-        let err = rgb_pcs_to_device(&profile).unwrap_err();
+        let err = rgb_pcs_to_device(&profile, false).unwrap_err();
         assert_eq!(
             err.to_string(),
             "cmm: colorant matrix is singular; no PCS-to-device transform exists"
@@ -331,13 +346,13 @@ mod tests {
         // Missing bTRC.
         let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
         profile.tags.retain(|(sig, _)| sig.0 != *b"bTRC");
-        let err = rgb_device_to_pcs(&profile).unwrap_err();
+        let err = rgb_device_to_pcs(&profile, false).unwrap_err();
         assert_eq!(err.to_string(), "cmm: profile is missing required tag bTRC");
 
         // Colorant tag holding a curve.
         let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
         profile.tags[0].1 = gamma_tag();
-        let err = rgb_device_to_pcs(&profile).unwrap_err();
+        let err = rgb_device_to_pcs(&profile, false).unwrap_err();
         assert_eq!(
             err.to_string(),
             "cmm: tag rXYZ holds an unusable element type"
@@ -346,7 +361,7 @@ mod tests {
         // Colorant tag with an empty XYZType.
         let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
         profile.tags[1].1 = TagData::Xyz(Vec::new());
-        let err = rgb_device_to_pcs(&profile).unwrap_err();
+        let err = rgb_device_to_pcs(&profile, false).unwrap_err();
         assert_eq!(
             err.to_string(),
             "cmm: tag gXYZ holds an unusable element type"
@@ -360,7 +375,7 @@ mod tests {
             [gamma_tag(), gamma_tag(), xyz_tag(B_COL)],
         );
         profile.tags[3].1 = xyz_tag(R_COL);
-        let err = rgb_device_to_pcs(&profile).unwrap_err();
+        let err = rgb_device_to_pcs(&profile, false).unwrap_err();
         assert_eq!(
             err.to_string(),
             "cmm: tag rTRC holds an unusable element type"
@@ -371,7 +386,10 @@ mod tests {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
             tags: Vec::new(),
         };
-        for result in [gray_device_to_pcs(&profile), gray_pcs_to_device(&profile)] {
+        for result in [
+            gray_device_to_pcs(&profile, false),
+            gray_pcs_to_device(&profile, false),
+        ] {
             assert_eq!(
                 result.unwrap_err().to_string(),
                 "cmm: profile is missing required tag kTRC"
@@ -384,7 +402,7 @@ mod tests {
         use gamut_color::lab::xyz_to_lab;
         let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
         profile.header.pcs = ColorSpace::Lab;
-        let forward = rgb_device_to_pcs(&profile).unwrap();
+        let forward = rgb_device_to_pcs(&profile, false).unwrap();
         // Stage shape: Curves → Matrix → XyzToLab (lcms2's BuildRGBInputMatrixShaper order,
         // with the Lab bridge LAST — after the colorant matrix).
         assert_eq!(forward.stages().len(), 3);
@@ -402,7 +420,7 @@ mod tests {
     fn lab_pcs_rgb_shaper_prepends_lab_to_xyz_in_reverse() {
         let mut profile = rgb_profile(R_COL, G_COL, B_COL, [gamma_tag(), gamma_tag(), gamma_tag()]);
         profile.header.pcs = ColorSpace::Lab;
-        let reverse = rgb_pcs_to_device(&profile).unwrap();
+        let reverse = rgb_pcs_to_device(&profile, false).unwrap();
         // Stage shape: LabToXyz → Matrix(inverse) → Curves(inverses) — the bridge FIRST
         // (lcms2's BuildRGBOutputMatrixShaper order).
         assert_eq!(reverse.stages().len(), 3);
@@ -410,7 +428,7 @@ mod tests {
         assert!(matches!(reverse.stages()[1], Stage::Matrix { .. }));
         assert!(matches!(reverse.stages()[2], Stage::Curves(_)));
         // Round trip through both Lab-PCS directions returns the device values.
-        let forward = rgb_device_to_pcs(&profile).unwrap();
+        let forward = rgb_device_to_pcs(&profile, false).unwrap();
         let round_trip = forward.compose(reverse).unwrap();
         for rgb in [[0.25, 0.5, 0.75], [1.0, 1.0, 1.0], [0.1, 0.9, 0.4]] {
             let mut out = [0.0; 3];
@@ -427,7 +445,7 @@ mod tests {
     #[test]
     fn gray_xyz_pcs_scales_the_d50_white() {
         let profile = gray_profile(ColorSpace::Xyz, gamma_tag());
-        let forward = gray_device_to_pcs(&profile).unwrap();
+        let forward = gray_device_to_pcs(&profile, false).unwrap();
         assert_eq!(forward.input_channels(), 1);
         assert_eq!(forward.output_channels(), 3);
         let mut out = [0.0; 3];
@@ -450,7 +468,7 @@ mod tests {
     #[test]
     fn gray_xyz_reverse_picks_y_and_inverts_the_curve() {
         let profile = gray_profile(ColorSpace::Xyz, gamma_tag());
-        let reverse = gray_pcs_to_device(&profile).unwrap();
+        let reverse = gray_pcs_to_device(&profile, false).unwrap();
         assert_eq!(reverse.input_channels(), 3);
         assert_eq!(reverse.output_channels(), 1);
         let mut out = [0.0; 1];
@@ -463,7 +481,7 @@ mod tests {
     #[test]
     fn gray_lab_pcs_carries_the_curve_in_lstar() {
         let profile = gray_profile(ColorSpace::Lab, gamma_tag());
-        let forward = gray_device_to_pcs(&profile).unwrap();
+        let forward = gray_device_to_pcs(&profile, false).unwrap();
         let mut out = [0.0; 3];
         forward.eval(&[0.5], &mut out).unwrap();
         let lin = 0.5_f64.powf(2.199_218_75);
@@ -471,7 +489,7 @@ mod tests {
         assert_eq!(out[1], 0.0, "a* must be exactly 0");
         assert_eq!(out[2], 0.0, "b* must be exactly 0");
         // The reverse picks L*/100 (a*/b* ignored) and inverts the curve.
-        let reverse = gray_pcs_to_device(&profile).unwrap();
+        let reverse = gray_pcs_to_device(&profile, false).unwrap();
         let mut g = [0.0; 1];
         reverse.eval(&[100.0 * lin, 25.0, -30.0], &mut g).unwrap();
         assert!((g[0] - 0.5).abs() < 1e-12, "gray = {}", g[0]);
@@ -481,7 +499,7 @@ mod tests {
     fn shaper_pipelines_run_through_the_transform_trait() {
         // The public consumption route: interleaved buffers through `Transform::transform`.
         let profile = gray_profile(ColorSpace::Xyz, gamma_tag());
-        let forward = gray_device_to_pcs(&profile).unwrap();
+        let forward = gray_device_to_pcs(&profile, false).unwrap();
         let src = [0.0, 1.0];
         let mut dst = [0.0; 6];
         forward.transform(&src, &mut dst).unwrap();

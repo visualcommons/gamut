@@ -76,6 +76,31 @@ pub struct TransformOptions {
     /// exactly as this crate's conformance gate pins it; the other levels trade a stated
     /// precision budget for pixel-buffer throughput.
     pub optimization: PipelineOptimization,
+    /// Evaluate a matrix/TRC profile's tone curves in **closed form** from the transfer
+    /// characteristics its `cicp` tag (ICC.1:2022 §10.3) names, instead of from its
+    /// `rTRC`/`gTRC`/`bTRC`/`kTRC` tags. Default **off**.
+    ///
+    /// A curve is replaced only when all three hold: the profile carries a `cicp` tag;
+    /// `gamut-color` evaluates its `TransferCharacteristics` code point
+    /// ([`gamut_color::transfer::standard_eotf_for`] — today 1, 8, 13, 14, 16 and 18); and the
+    /// tag's curve agrees with the closed form to within `2⁻⁸` at every probe of a
+    /// 4096-point grid. The last condition is §10.3's own requirement that the tag name an
+    /// encoding *equivalent* to the profile's, checked rather than assumed: a profile whose
+    /// `cicp` tag contradicts its TRC renders through the TRC either way. LUT-based profiles
+    /// are untouched — their curves are not the profile's transfer function.
+    ///
+    /// What it buys is precision in the **PCS → device** direction of a sampled curve, whose
+    /// inverse otherwise comes from lcms2's numeric table reversal. Measured on the BT.2100 PQ
+    /// built-in profile (`gamut_icc::BuiltinProfile::Bt2020Pq`, a 1024-entry `curveType`):
+    /// the reversed table misses ST 2084's inverse by up to `5.5e-2` of signal — at black,
+    /// where the table's quantized-to-zero leading run maps linear `0` to signal `≈ 0.055` —
+    /// and the closed form is exact; device → PCS gains only the table's `1.5e-5`. It does
+    /// **not** buy speed: per sample, the closed-form ST 2084 pair is ~3.5× *slower* than the
+    /// sampled curve and its reversal, and on parametric sRGB/BT.709 curves the two are
+    /// within ~1.1× forward (the closed inverse is ~1.7× faster than the analytic parametric
+    /// one). Hence the default: off keeps every transform lcms2-identical in construction —
+    /// the oracle reads the TRC tags — and spends nothing a caller did not ask for.
+    pub prefer_cicp_transfer: bool,
 }
 
 impl Default for TransformOptions {
@@ -84,6 +109,7 @@ impl Default for TransformOptions {
             intent: RenderingIntent::Perceptual,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         }
     }
 }
@@ -199,7 +225,12 @@ impl IccTransform {
         // and proofing transforms alike (crate::chain, lcms2's DefaultICCintents).
         let intents = [options.intent; 2];
         let bpc_flags = [options.black_point_compensation; 2];
-        let pipeline = chain::link_chain(&[src, dst], &intents, &bpc_flags)?;
+        let pipeline = chain::link_chain(
+            &[src, dst],
+            &intents,
+            &bpc_flags,
+            options.prefer_cicp_transfer,
+        )?;
         Self::from_pipeline(pipeline, options.optimization)
     }
 
@@ -381,6 +412,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::IccAbsoluteColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -391,6 +423,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -413,6 +446,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::IccAbsoluteColorimetric,
                 black_point_compensation: true, // must be ignored under absolute
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -437,6 +471,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -461,6 +496,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -477,6 +513,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::IccAbsoluteColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -500,6 +537,7 @@ mod icc_transform_tests {
             intent: RenderingIntent::IccAbsoluteColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         };
         let xyz_to_lab = IccTransform::between(&src, &dst, options).unwrap();
         assert_eq!(
@@ -524,6 +562,7 @@ mod icc_transform_tests {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         };
         let xyz_to_lab = IccTransform::between(&src, &dst, rel).unwrap();
         assert_eq!(
@@ -550,6 +589,7 @@ mod icc_transform_tests {
                     intent,
                     black_point_compensation: false,
                     optimization: PipelineOptimization::None,
+                    prefer_cicp_transfer: false,
                 },
             )
             .unwrap();
@@ -562,6 +602,7 @@ mod icc_transform_tests {
                     intent,
                     black_point_compensation: true,
                     optimization: PipelineOptimization::None,
+                    prefer_cicp_transfer: false,
                 },
             )
             .unwrap();
@@ -578,6 +619,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -592,6 +634,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::Perceptual,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -604,6 +647,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::Perceptual,
                 black_point_compensation: true,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -619,6 +663,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::Perceptual,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -638,6 +683,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: true,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -648,6 +694,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -670,6 +717,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: true,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -680,6 +728,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();
@@ -741,6 +790,7 @@ mod icc_transform_tests {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap();

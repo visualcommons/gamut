@@ -7,6 +7,8 @@
 //! reversal otherwise). [`Stage::Curves`](crate::Stage::Curves) applies one [`ToneCurve`] per
 //! channel inside a [`Pipeline`](crate::Pipeline).
 
+use gamut_color::cicp::TransferCharacteristics;
+use gamut_color::transfer::{standard_eotf_for, standard_oetf_for};
 use gamut_icc::{Curve, CurveOrParametric};
 
 use crate::error::{CmmError, Result};
@@ -61,7 +63,28 @@ enum Repr {
         /// The uniformly spaced sample table (≥ 2 entries), values in `[0, 1]`.
         table: Vec<f64>,
     },
+    /// A transfer function evaluated in closed form — an ITU-T H.273 code point's curve from
+    /// `gamut-color`, built by [`ToneCurve::cicp_transfer`]. Carries its own inverse, so
+    /// inverting it is a swap: exact in both directions, with no table in either.
+    Closed {
+        /// The curve this representation evaluates.
+        forward: fn(f64) -> f64,
+        /// Its exact inverse.
+        inverse: fn(f64) -> f64,
+    },
 }
+
+/// The largest absolute difference, anywhere on [`ToneCurve::agrees_with`]'s probe grid, at
+/// which a profile's tone curve still counts as an encoding of the transfer function its `cicp`
+/// tag names.
+///
+/// `2⁻⁸` sits between the two populations it separates. Below it: every *encoding* of a named
+/// curve — measured, the BT.2100 PQ built-in's 1024-entry `curveType` misses ST 2084 by 1.5e-5,
+/// the `parametricCurveType` encodings of sRGB and BT.709 by 4.2e-6 and 1.3e-6, and even a
+/// 16-entry sampled sRGB table by 1.7e-3. Above it: a *different* curve — the nearest
+/// confusions are pure gamma 2.2 and Adobe RGB's `x^(563/256)` labelled as sRGB, 8.5e-3 and
+/// 8.6e-3 away.
+const CICP_AGREEMENT: f64 = 1.0 / 256.0;
 
 /// A one-dimensional tone curve: a monotonicity-aware, invertible view of a parsed ICC curve.
 ///
@@ -128,6 +151,7 @@ impl ToneCurve {
                 params,
             } => eval_inverse_parametric(*function_type, params, x),
             Repr::SampledInverse { table } | Repr::Table { table } => interpolate(table, x),
+            Repr::Closed { forward, .. } => forward(x),
         };
         y.clamp(0.0, 1.0)
     }
@@ -161,10 +185,7 @@ impl ToneCurve {
             Repr::SampledInverse { table } | Repr::Table { table } => {
                 samples_monotonic(table.iter().copied())
             }
-            _ => samples_monotonic(
-                (0..MONOTONICITY_PROBES)
-                    .map(|i| self.eval(i as f64 / (MONOTONICITY_PROBES - 1) as f64)),
-            ),
+            _ => samples_monotonic(probes().map(|x| self.eval(x))),
         }
     }
 
@@ -239,8 +260,41 @@ impl ToneCurve {
             Repr::InverseParametric { .. } | Repr::SampledInverse { .. } | Repr::Table { .. } => {
                 numeric_inverse_repr(self)
             }
+            Repr::Closed { forward, inverse } => Repr::Closed {
+                forward: *inverse,
+                inverse: *forward,
+            },
         };
         Ok(ToneCurve { repr })
+    }
+
+    /// The transfer function ITU-T H.273 assigns to `TransferCharacteristics` code point
+    /// `code_point`, evaluated in closed form — the curve a profile's `cicp` tag (ICC.1:2022
+    /// §10.3) names for its own encoding. `None` where `gamut-color` evaluates no curve for the
+    /// code point ([`gamut_color::transfer::standard_eotf_for`] declines it).
+    ///
+    /// Linear (code point 8) is returned as the structural identity rather than as a closed
+    /// form of `x ↦ x`: the two evaluate identically, and only the structural one is elided
+    /// by [`crate::optimize`] ([`is_identity`](Self::is_identity)).
+    pub(crate) fn cicp_transfer(code_point: u8) -> Option<ToneCurve> {
+        let tc = TransferCharacteristics::from_code_point(u16::from(code_point))?;
+        if tc == TransferCharacteristics::Linear {
+            return Some(ToneCurve {
+                repr: Repr::Icc(CurveOrParametric::Curve(Curve::Identity)),
+            });
+        }
+        let (forward, inverse) = (standard_eotf_for(tc)?, standard_oetf_for(tc)?);
+        Some(ToneCurve {
+            repr: Repr::Closed { forward, inverse },
+        })
+    }
+
+    /// Whether `self` and `other` evaluate within [`CICP_AGREEMENT`] of each other at every
+    /// point of the probe grid [`is_monotonic`](Self::is_monotonic) samples — the test of
+    /// ICC.1:2022 §10.3's requirement that a `cicp` tag name an encoding *equivalent* to the
+    /// profile's own, applied before the tag's closed form may stand in for the profile's curve.
+    pub(crate) fn agrees_with(&self, other: &ToneCurve) -> bool {
+        probes().all(|x| (self.eval(x) - other.eval(x)).abs() <= CICP_AGREEMENT)
     }
 
     /// Whether this curve is the ICC identity element (`curveType` with zero entries — the
@@ -397,6 +451,12 @@ fn eval_inverse_parametric(function_type: u16, params: &[f64; 7], y: f64) -> f64
         // Unreachable: `parametric_inverse_repr` only builds this repr for types 1–4.
         _ => y,
     }
+}
+
+/// The [`MONOTONICITY_PROBES`] evenly spaced points of `[0, 1]`, both ends included — the grid
+/// [`ToneCurve::is_monotonic`] and [`ToneCurve::agrees_with`] judge a curve on.
+fn probes() -> impl Iterator<Item = f64> {
+    (0..MONOTONICITY_PROBES).map(|i| i as f64 / (MONOTONICITY_PROBES - 1) as f64)
 }
 
 /// Linearly interpolates a uniformly spaced `f64` table (≥ 2 entries) at `x ∈ [0, 1]`.

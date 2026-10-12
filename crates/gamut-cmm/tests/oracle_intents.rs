@@ -155,6 +155,7 @@ fn absolute_on_a_non_d50_white_matches_lcms2() {
             intent: RenderingIntent::IccAbsoluteColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         },
     )
     .unwrap();
@@ -192,6 +193,7 @@ fn absolute_on_a_non_d50_white_matches_lcms2() {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         },
     )
     .unwrap();
@@ -225,6 +227,7 @@ fn absolute_between_d50_wtpt_profiles_is_exactly_relative() {
             intent: RenderingIntent::IccAbsoluteColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         },
     )
     .unwrap();
@@ -235,6 +238,7 @@ fn absolute_between_d50_wtpt_profiles_is_exactly_relative() {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
             optimization: PipelineOptimization::None,
+            prefer_cicp_transfer: false,
         },
     )
     .unwrap();
@@ -450,6 +454,7 @@ fn bpc_on_a_v2_pair_matches_lcms2_and_differs_from_no_bpc() {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: bpc_on,
                 optimization: PipelineOptimization::None,
+                prefer_cicp_transfer: false,
             },
         )
         .unwrap()
