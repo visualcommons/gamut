@@ -261,9 +261,14 @@ exclusion ranges. Now:
   every main-chain directory now reaches a verbatim channel. It is a separate field rather than
   a generalised `trailing_extra` on purpose: `trailing_extra` stays the §A.3.6 store-placement
   channel, and renaming it would be semver-major for no reader's benefit.
-- **The one directory still not surfaced.** A directory reached only through a `SubIFDs`
-  pointer — not a main-chain page — that is not the raw IFD and carries no image data reaches
-  no verbatim channel; `deconstruct` still accounts for its bytes. Filed as #667.
+- **Image-less `SubIFDs` children.** A directory reached only through a `SubIFDs` pointer —
+  not a main-chain page — that is not the raw IFD and carries no image data arrives in
+  `DecodedDng::sub_ifd_extra`, one `SubIfdExtra` per directory keyed by its tree position: the
+  main-chain `page` it descends from and the `path` of `SubIFDs` array positions down to it
+  (#667). Every walked directory now reaches exactly one verbatim channel. It is a sibling of
+  `interior_extra` rather than a generalisation of it: `PageExtra` is shipped, and giving it a
+  path would be semver-major. A directory the walk does not follow (past the nesting cap,
+  already visited, unreadable) is in no channel; `deconstruct` diagnoses it.
 - **Not done here.** The store is never parsed; a `DngRewrite` of a file carrying one relocates
   it into the value pool like any other value (a rewrite invalidates the binding regardless);
   the behavioural `c2pa-rs` oracle is #447's.
