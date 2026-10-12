@@ -1,9 +1,9 @@
 //! `gamut` — a command-line sandbox over the gamut image codecs and their shared primitives.
 //!
-//! It decodes input — PNG/JPEG/PPM via the third-party [`image`] crate, and WebP via gamut's own
-//! decoder — and encodes exclusively with the gamut crates, and surfaces the shared `color` /
-//! `dsp` / `bitstream` primitives as inspection subcommands so the latest workspace features are
-//! exercisable without writing throwaway Rust. See the crate README for the full command reference.
+//! It decodes input — PNG/JPEG/JXL/WebP with gamut's own decoders, and only PPM via the
+//! third-party [`image`] crate — and encodes exclusively with the gamut crates, and surfaces the
+//! shared `color` / `dsp` / `bitstream` primitives as inspection subcommands so the latest
+//! workspace features are exercisable without writing throwaway Rust. See the crate README for the full command reference.
 #![forbid(unsafe_code)]
 
 mod commands;
