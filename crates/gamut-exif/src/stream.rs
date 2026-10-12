@@ -89,8 +89,10 @@ impl ExifReader {
 
     /// The byte-completeness verdict over the TIFF stream in `source`: `gamut-ifd`'s audit walk,
     /// following the three EXIF pointer tags. `None` when the walk cannot read the top-level chain
-    /// strictly — after a successful parse, only an entry [`recover_entries`](Self::recover_entries)
-    /// skipped in the 0th or 1st IFD does that. A transport failure propagates.
+    /// strictly — after a successful parse, only an unreadable entry anywhere in that chain under
+    /// [`recover_entries`](Self::recover_entries) does that: one it skipped in the 0th or 1st IFD,
+    /// or one in a trailing (3rd or later) directory, which the recovering parse reads but never
+    /// decodes and so names no skip for. A transport failure propagates.
     fn byte_audit<S: ReadAt>(&self, mut source: S) -> Result<Option<SegmentReport>> {
         let base = self.tiff_base(&mut source)?;
         match gamut_ifd::audit(source.rebased(base), &ExifAuditSpec) {
@@ -1190,6 +1192,54 @@ mod tests {
             .parse_with_report(&poisoned_blob(IfdKind::Image, 0x0110))
             .expect("parse");
         assert_eq!(exif.make(), Some("Canon"));
+        assert_eq!(report.byte_audit(), None);
+    }
+
+    /// An unreadable entry in a trailing (3rd) directory also leaves the strict audit walk nothing
+    /// to stand on, yet the recovering parse names no skip for it: that directory is read but never
+    /// decoded, and is dropped whole as a `TrailingIfd` region. The audit's `None` is therefore not
+    /// evidence of a skipped 0th/1st-IFD entry.
+    #[test]
+    fn an_unreadable_trailing_directory_entry_costs_the_audit_but_names_no_skip() {
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        let mut thumb = Ifd::new();
+        thumb.set(0x0103, Value::Short(vec![6]));
+        let mut trailing = Ifd::new();
+        trailing.set(
+            0x0131,
+            Value::Ascii(String::from_utf8(POISON.to_vec()).expect("ascii")),
+        );
+        let mut tiff = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image, thumb, trailing],
+        })
+        .expect("write");
+        let hits: Vec<usize> = tiff
+            .windows(POISON.len())
+            .enumerate()
+            .filter(|(_, w)| *w == POISON)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(hits.len(), 1, "exactly one value carries the poison");
+        tiff[hits[0]] = 0xFF;
+        let mut data = MARKER.to_vec();
+        data.extend(tiff);
+
+        assert!(
+            ExifReader::new().parse(&data).is_err(),
+            "without recovery the trailing entry is fatal, so the fixture really is unreadable"
+        );
+        let (exif, report) = ExifReader::new()
+            .recover_entries(true)
+            .audit_bytes(true)
+            .parse_with_report(&data)
+            .expect("parse");
+        assert_eq!(exif.make(), Some("Canon"));
+        assert_eq!(report.dropped_entries(), &[], "no skip is named");
+        assert_eq!(report.dropped().len(), 1, "{report:?}");
+        assert_eq!(report.dropped()[0].region(), DroppedRegion::TrailingIfd);
         assert_eq!(report.byte_audit(), None);
     }
 
