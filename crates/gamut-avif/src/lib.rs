@@ -183,7 +183,9 @@
 //! so no deferred feature reshapes it.
 //!
 //! **Permanently out of scope** (workspace charter — gamut is image-first): image sequences and
-//! tracks (the `avis`/`avio` brands) and AV1 inter-frame coding.
+//! tracks (the `avis`/`avio` brands) and AV1 inter-frame coding. An `avis` file that also carries
+//! a `meta` primary still item is read for that still, which decodes like any other;
+//! [`AvifContainer::has_image_sequence`] reports the track it leaves undecoded.
 #![forbid(unsafe_code)]
 
 mod av1c;
