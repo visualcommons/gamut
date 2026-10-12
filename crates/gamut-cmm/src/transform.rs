@@ -376,6 +376,7 @@ mod icc_transform_tests {
         let options = TransformOptions::default();
         assert_eq!(options.intent, RenderingIntent::Perceptual);
         assert!(!options.black_point_compensation);
+        assert!(!options.prefer_cicp_transfer);
     }
 
     #[test]
@@ -805,6 +806,35 @@ mod icc_transform_tests {
         dynamic.transform(&src_pixels, &mut out).unwrap();
         for (got, want) in out.iter().zip(src_pixels) {
             assert!((got - want).abs() < 1e-9, "{out:?}");
+        }
+    }
+
+    /// Where an sRGB → BT.2100 PQ transform (built-ins, both carrying `cicp` tags) sends
+    /// device black, by the option. Media-relative, so no BPC moves black.
+    fn srgb_black_into_pq(prefer_cicp_transfer: bool) -> [f64; 3] {
+        let src = IccProfile::builtin(gamut_icc::BuiltinProfile::Srgb).unwrap();
+        let dst = IccProfile::builtin(gamut_icc::BuiltinProfile::Bt2020Pq).unwrap();
+        let transform = IccTransform::between(
+            &src,
+            &dst,
+            TransformOptions {
+                intent: RenderingIntent::MediaRelativeColorimetric,
+                prefer_cicp_transfer,
+                ..TransformOptions::default()
+            },
+        )
+        .unwrap();
+        eval(&transform, [0.0; 3])
+    }
+
+    #[test]
+    fn between_honours_prefer_cicp_transfer() {
+        // Off, the PQ TRC's sampled reversal lifts black to ≈ 0.0547 of signal; on, ST 2084's
+        // closed-form inverse puts it at c1^m2.
+        let closed = gamut_color::transfer::pq_oetf_normalized(0.0);
+        assert_eq!(srgb_black_into_pq(true), [closed; 3]);
+        for channel in srgb_black_into_pq(false) {
+            assert!((channel - 0.0547).abs() < 1e-4, "{channel}");
         }
     }
 }

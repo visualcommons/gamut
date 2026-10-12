@@ -781,4 +781,55 @@ mod tests {
                 .is_empty()
         );
     }
+
+    /// The sRGB and BT.2100 PQ built-ins, both carrying `cicp` tags.
+    fn srgb_and_pq() -> (IccProfile, IccProfile) {
+        (
+            IccProfile::builtin(gamut_icc::BuiltinProfile::Srgb).unwrap(),
+            IccProfile::builtin(gamut_icc::BuiltinProfile::Bt2020Pq).unwrap(),
+        )
+    }
+
+    /// Where device black lands in the PQ destination, given the option: the closed-form
+    /// ST 2084 inverse puts it at `c1^m2`, the PQ TRC's sampled reversal at ≈ 0.0547.
+    fn assert_pq_black(out: [f64; 3], prefer_cicp: bool) {
+        let want = if prefer_cicp {
+            gamut_color::transfer::pq_oetf_normalized(0.0)
+        } else {
+            0.0547
+        };
+        for channel in out {
+            assert!((channel - want).abs() < 1e-4, "{out:?}, want {want}");
+        }
+    }
+
+    #[test]
+    fn chain_honours_prefer_cicp_transfer() {
+        let (srgb, pq) = srgb_and_pq();
+        for prefer_cicp_transfer in [false, true] {
+            let options = TransformOptions {
+                intent: RenderingIntent::MediaRelativeColorimetric,
+                prefer_cicp_transfer,
+                ..TransformOptions::default()
+            };
+            let chained = IccTransform::chain(&[&srgb, &pq], options).unwrap();
+            assert_pq_black(eval3(&chained, &[0.0; 3]), prefer_cicp_transfer);
+        }
+    }
+
+    #[test]
+    fn proofing_honours_prefer_cicp_transfer() {
+        let (srgb, pq) = srgb_and_pq();
+        for prefer_cicp_transfer in [false, true] {
+            let options = ProofingOptions {
+                intent: RenderingIntent::MediaRelativeColorimetric,
+                proofing_intent: RenderingIntent::MediaRelativeColorimetric,
+                black_point_compensation: false,
+                optimization: PipelineOptimization::None,
+                prefer_cicp_transfer,
+            };
+            let proofed = IccTransform::proofing(&srgb, &pq, &srgb, options).unwrap();
+            assert_pq_black(eval3(&proofed, &[0.0; 3]), prefer_cicp_transfer);
+        }
+    }
 }
