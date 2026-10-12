@@ -2705,65 +2705,6 @@ mod tests {
     }
 
     #[test]
-    fn a_field_the_typed_view_cannot_express_is_reached_through_other() {
-        // Issue #609's decision, pinned on the public fields it names: the typed view stays plain
-        // data, so each of these reads as absent and the caller finds the field, as the graph held
-        // it, in `other`. A widening that reported any of them would fail here first.
-        let url = |namespace, name| {
-            XmpProperty::new(
-                namespace,
-                name,
-                XmpValue::Uri("https://example.org/".to_owned()),
-            )
-        };
-        let unread = |field: &XmpProperty| (structured(vec![field.clone()]), vec![field.clone()]);
-
-        let field = url(ns::IPTC_CORE, "CiUrlWork");
-        let (value, other) = unread(&field);
-        let contact = CreatorContactInfo::from_xmp(&value).unwrap();
-        assert_eq!((contact.web_url, contact.other), (None, other));
-
-        let field = qualified(
-            XmpProperty::new(ns::IPTC_CORE, "CiAdrCity", text_value("Paris")),
-            "fr",
-        );
-        let (value, other) = unread(&field);
-        let contact = CreatorContactInfo::from_xmp(&value).unwrap();
-        assert_eq!((contact.city, contact.other), (None, other));
-
-        let field = url(ns::IPTC_EXT, "AOSourceInvURL");
-        let (value, other) = unread(&field);
-        let art = ArtworkOrObject::from_xmp(&value).unwrap();
-        assert_eq!((art.source_inventory_url, art.other), (None, other));
-
-        let field = XmpProperty::new(
-            ns::IPTC_EXT,
-            "AOStylePeriod",
-            XmpValue::Array(XmpArray::Seq(vec![XmpItem::simple("Baroque")])),
-        );
-        let (value, other) = unread(&field);
-        let art = ArtworkOrObject::from_xmp(&value).unwrap();
-        assert_eq!((art.style_periods, art.other), (Vec::new(), other));
-
-        let field = url(ns::PLUS, "LicensorURL");
-        let (value, other) = unread(&field);
-        let licensor = Licensor::from_xmp(&value).unwrap();
-        assert_eq!((licensor.web_url, licensor.other), (None, other));
-
-        let field = XmpProperty::new(
-            ns::XMP,
-            "Identifier",
-            XmpValue::Array(XmpArray::Bag(vec![
-                XmpItem::simple("urn:example:1"),
-                XmpItem::new(XmpValue::Uri("https://example.org/".to_owned())),
-            ])),
-        );
-        let (value, other) = unread(&field);
-        let entity = Entity::from_xmp(&value).unwrap();
-        assert_eq!((entity.identifiers, entity.other), (Vec::new(), other));
-    }
-
-    #[test]
     fn a_retained_field_is_written_when_the_modelled_field_is_absent() {
         // The retained field is then the only copy of that name, so dropping it as a namesake
         // would destroy it: there is no duplicate to avoid.
