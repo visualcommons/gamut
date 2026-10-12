@@ -145,6 +145,8 @@ pub enum AlphaMode {
 pub struct RawPlanes<'a> {
     /// The colour planes and the alpha plane beside them, at one sample width.
     samples: RawSamples<'a>,
+    /// The colour planes' luma size, checked non-zero at construction.
+    dims: Dimensions,
     /// The CICP matrix the colour planes were produced under.
     matrix: MatrixCoefficients,
     /// The signal range the colour samples occupy.
@@ -177,7 +179,7 @@ impl<'a> RawPlanes<'a> {
         matrix: MatrixCoefficients,
         range: ColorRange,
     ) -> Result<Self> {
-        check_colour(colour.width(), colour.height(), colour.subsampling())?;
+        let dims = check_colour(colour.width(), colour.height(), colour.subsampling())?;
         if let Some(alpha) = alpha {
             check_alpha(
                 (colour.width(), colour.height()),
@@ -187,6 +189,7 @@ impl<'a> RawPlanes<'a> {
         }
         Ok(Self {
             samples: RawSamples::Eight(colour, alpha),
+            dims,
             matrix,
             range,
         })
@@ -208,7 +211,7 @@ impl<'a> RawPlanes<'a> {
         matrix: MatrixCoefficients,
         range: ColorRange,
     ) -> Result<Self> {
-        check_colour(colour.width(), colour.height(), colour.subsampling())?;
+        let dims = check_colour(colour.width(), colour.height(), colour.subsampling())?;
         if let Some(alpha) = alpha {
             check_alpha(
                 (colour.width(), colour.height()),
@@ -225,6 +228,7 @@ impl<'a> RawPlanes<'a> {
         }
         Ok(Self {
             samples: RawSamples::High(colour, alpha),
+            dims,
             matrix,
             range,
         })
@@ -253,16 +257,17 @@ impl<'a> RawPlanes<'a> {
     }
 }
 
-/// Refuses colour planes that cannot be a YCbCr AVIF item: zero-sized, or a single plane.
-fn check_colour(width: u32, height: u32, subsampling: ChromaSubsampling) -> Result<()> {
-    Dimensions::new(width, height)?;
+/// The size of colour planes that can be a YCbCr AVIF item, refusing zero-sized ones and a single
+/// plane.
+fn check_colour(width: u32, height: u32, subsampling: ChromaSubsampling) -> Result<Dimensions> {
+    let dims = Dimensions::new(width, height)?;
     if subsampling == ChromaSubsampling::Cs400 {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "AVIF: raw colour planes need chroma; a single plane codes as Gray8",
         ));
     }
-    Ok(())
+    Ok(dims)
 }
 
 /// Refuses an alpha plane that is not one monochrome plane the size of `colour` (AVIF v1.2.0
@@ -314,6 +319,9 @@ struct ImageTransform {
 /// | [`Gray8`] | one **monochrome** item — not R=G=B replication |
 /// | [`Rgb16`] | one 4:4:4 colour item at [`AvifEncoder::with_bit_depth`]'s depth |
 /// | [`Rgba16`] | that, plus a monochrome alpha auxiliary at the same depth |
+///
+/// Planes already in the coded colour space bypass the table:
+/// [`AvifEncoder::encode_raw_planes`] codes a [`RawPlanes`] view as given.
 ///
 /// The 8-bit inputs code at 8 bits unless [`AvifEncoder::with_bit_depth`] asks for 10 or 12, in
 /// which case they are widened by bit replication first; the 16-bit inputs code at 12 unless it
@@ -1293,11 +1301,11 @@ impl AvifEncoder {
         };
         let q = self.base_q_idx();
         let (alpha_q, alpha_colour) = (self.alpha_base_q_idx(), self.monochrome_colour());
-        let (still, alpha, dims) = match planes.samples {
+        let dims = planes.dims;
+        let (still, alpha) = match planes.samples {
             RawSamples::Eight(p, alpha) => {
-                let dims = Dimensions::new(p.width(), p.height())?;
                 let colour_still = |t| self.colour_still(p, dims, q, colour, p.subsampling(), t);
-                let (still, alpha) = match alpha {
+                match alpha {
                     None => (colour_still(self.thread_budget())?, None),
                     Some(a) => {
                         let (s, a) = self.colour_and_alpha(colour_still, |t| {
@@ -1305,13 +1313,11 @@ impl AvifEncoder {
                         })?;
                         (s, Some(a))
                     }
-                };
-                (still, alpha, dims)
+                }
             }
             RawSamples::High(p, alpha) => {
-                let dims = Dimensions::new(p.width(), p.height())?;
                 let colour_still = |t| self.colour_still16(p, dims, q, colour, t);
-                let (still, alpha) = match alpha {
+                match alpha {
                     None => (colour_still(self.thread_budget())?, None),
                     Some(a) => {
                         let (s, a) = self.colour_and_alpha(colour_still, |t| {
@@ -1319,8 +1325,7 @@ impl AvifEncoder {
                         })?;
                         (s, Some(a))
                     }
-                };
-                (still, alpha, dims)
+                }
             }
         };
         self.emit(&still, dims, alpha.as_ref(), out)
