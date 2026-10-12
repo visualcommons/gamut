@@ -1166,7 +1166,7 @@ impl PngEncoder {
     /// the file names is dropped, a second entry holding the same RGB *and* alpha as an earlier one
     /// is merged into it, the trailing opaque `tRNS` bytes §11.3.1.1 lets a chunk omit are omitted,
     /// the index bit depth is derived from what survives, and the image's indices are renumbered to
-    /// match ([`PngPalette::cleaned`]). The colour every pixel resolves to is unchanged, which is
+    /// match (`PngPalette::cleaned`). The colour every pixel resolves to is unchanged, which is
     /// why this reports nothing: a merged entry did not fail to come along, it arrived under
     /// another index. Surviving entries keep the order you gave them.
     ///

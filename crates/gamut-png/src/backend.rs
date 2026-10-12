@@ -37,7 +37,8 @@
 //! 1. Backends are tried in **push order**.
 //! 2. [`supports`](IdatInflater::supports) returning `false` is the *only* signal that falls
 //!    through to the next backend. A backend that declines late does so by returning
-//!    [`Error::Unsupported`] — the C-ABI adapters map [`Status::UNSUPPORTED`] onto exactly that.
+//!    [`Error::Unsupported`] — the C-ABI adapters map
+//!    [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) onto exactly that.
 //! 3. A backend that **accepts** and then **fails** propagates its error to the caller. The host
 //!    does not retry a later backend or the built-in tail, because a partially-produced result must
 //!    never be silently masked.
