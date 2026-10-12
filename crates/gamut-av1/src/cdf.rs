@@ -4917,6 +4917,13 @@ pub struct CdfSlot<'a> {
     count: &'a mut u16,
 }
 
+impl CdfSlot<'_> {
+    /// The current (already adapted) probabilities, for pricing a symbol without coding it.
+    pub fn probs(&self) -> &[u16] {
+        self.cdf
+    }
+}
+
 /// Codes `symbol` against `slot`, then applies the §8.2.6 adaptation in place.
 ///
 /// This is the adapting counterpart of [`gamut_bitstream::SymbolEncoder::encode_symbol`]; a
