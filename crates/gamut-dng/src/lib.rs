@@ -115,7 +115,13 @@ pub use gamut_core::{Dimensions, Error, Result};
 // reading `DngEncodeReport`/`DecodedDng`, or checking the tag and the minimum store length this
 // crate's own docs name, needs no direct `gamut-ifd` dependency (the re-export closure of
 // `STATUS.md`'s freeze decisions).
-pub use gamut_ifd::c2pa::{C2PA_MANIFEST_STORE, C2paExclusions, MIN_STORE_LEN};
+// The non-validating report a host prints — `c2pa_summary`, the store `DecodedDng::c2pa_exclusions`
+// names plus every tag-52545 entry that yields none, with the reason — is the same module's, so it
+// is stated once for TIFF and DNG alike (issue #530).
+pub use gamut_ifd::c2pa::{
+    C2PA_MANIFEST_STORE, C2PA_NOT_VALIDATED, C2paExclusions, C2paStoreSummary, C2paSummary,
+    C2paUnreadEntry, C2paUnreadReason, MIN_STORE_LEN, summarize as c2pa_summary,
+};
 // `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum;
 // `Segment`/`SpanKind`/`Range` are part of the preservation surface, naming the byte runs a
 // real camera file carries that its own structures do not account for (`Range` is also what

@@ -139,3 +139,11 @@ pub fn metadata(data: &[u8]) -> Result<WebpMetadata> {
 pub fn c2pa_span(data: &[u8]) -> Result<Option<Range<usize>>> {
     gamut_riff::c2pa_span(data)
 }
+
+// The non-validating C2PA report is `gamut-riff`'s — the chunk walk that locates the store is
+// there, so the facts and the words about them are stated once, beside it (issue #530) — and
+// re-exported here so `gamut inspect` and other hosts need no direct `gamut-riff` dependency.
+pub use gamut_riff::{
+    C2PA_NOT_VALIDATED, C2paChunkPosition, C2paStoreSummary, C2paSummary, C2paUnreadChunk,
+    c2pa_summary,
+};

@@ -53,8 +53,9 @@ pub use chunk::Chunk;
 pub use fourcc::FourCc;
 pub use reader::RiffReader;
 pub use webp::{
-    C2PA_FOURCC, MAX_CANVAS_DIMENSION, MetadataChunks, VP8X_PAYLOAD_LEN, Vp8xHeader, WebpChunkId,
-    WebpLayout, c2pa_span, write_extended, write_extended_preserving, write_extended_with_metadata,
-    write_simple_lossless, write_simple_lossy,
+    C2PA_FOURCC, C2PA_NOT_VALIDATED, C2paChunkPosition, C2paStoreSummary, C2paSummary,
+    C2paUnreadChunk, MAX_CANVAS_DIMENSION, MetadataChunks, VP8X_PAYLOAD_LEN, Vp8xHeader,
+    WebpChunkId, WebpLayout, c2pa_span, c2pa_summary, write_extended, write_extended_preserving,
+    write_extended_with_metadata, write_simple_lossless, write_simple_lossy,
 };
 pub use writer::RiffWriter;

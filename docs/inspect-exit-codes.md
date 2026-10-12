@@ -7,7 +7,8 @@ about the verdict the command turns those findings into.
 
 Source: `crates/gamut-cli/src/commands/inspect.rs`, `crates/gamut-cli/src/main.rs`,
 `crates/gamut-png/src/deconstruct.rs`, `crates/gamut-tiff/src/deconstruct.rs`,
-`crates/gamut-dng/src/deconstruct.rs`, `crates/gamut-heic/src/c2pa.rs`.
+`crates/gamut-dng/src/deconstruct.rs`, `crates/gamut-heic/src/c2pa.rs`, `crates/gamut-avif/src/c2pa.rs`,
+`crates/gamut-riff/src/webp.rs`, `crates/gamut-ifd/src/c2pa.rs`.
 
 ## There are two exit codes
 
@@ -17,7 +18,7 @@ nothing else; the distinctions below are carried by the stderr message, not by t
 
 | Exit | Meaning |
 | --- | --- |
-| `0` | The file passed its format's gate, or its format has no gate (HEIC). The report is on stdout. |
+| `0` | The file passed its format's gate, or its format has no gate (HEIC, AVIF, WebP). The report is on stdout. |
 | `1` | Either the file failed its gate (a report is still printed to stdout first, and the summary goes to stderr), or the walk could not run at all — the file was unreadable, the container could not be opened, or it was not a container this command reads. |
 
 A gate failure and an unreadable file are **not** distinguished by exit code. A caller that needs
@@ -27,41 +28,45 @@ else — including `<path>: unsupported container brand '…' — …` — is th
 
 ## The gate, per format
 
-The format is sniffed unless `--format` forces it: a PNG signature, else an `ftyp` box (an ISOBMFF
-file) routes to the HEIC arm, else a readable TIFF whose IFD 0 carries `DNGVersion` (50706) is a
-DNG, else TIFF.
+The format is sniffed unless `--format` forces it: a PNG signature, else a `RIFF` header with the
+`WEBP` form is a WebP, else an `ftyp` box (an ISOBMFF file) routes to the HEIC and AVIF arms, else
+a readable TIFF whose IFD 0 carries `DNGVersion` (50706) is a DNG, else TIFF.
 
-The `ftyp` test is a **route, not a verdict**. It says the file is ISOBMFF, not that it is the HEVC
-still image the HEIC arm reports on, so that arm parses the container and then *confirms* it with
-`gamut-heic`'s own `HeifImage::is_hevc_still` (`references/heif` §7) before printing anything; a
-file that fails the confirmation exits `1` with `<path>: unsupported container brand '<brand>' — …`
-and prints no report. The confirmation runs only once the parse has succeeded, so an ISOBMFF file
-`gamut-heic` refuses outright never reaches it: one with a top-level `moov` — an MP4, a CR3, a HEIF
-image sequence — exits `1` with the parse error (`error: …`), not the unsupported-brand message.
-No brand list lives in the command. One would have to be exhaustive over the
-still-image brands — `mif2`, `avci` and `avcs` beside `heic`/`heix`/`heim`/`heis`/`mif1` — and would
-still be wrong about `mif1`, which is the generic MIAF structural brand an AVIF may carry as its
-*major* brand, not merely among its compatible ones. `gamut-heic` settles that case on the primary
-item carrying an `hvcC`.
+The `ftyp` test is a **route, not a verdict**. It says the file is ISOBMFF, not which still image it
+is, so the command parses the container and *confirms* it before printing anything: first with
+`gamut-heic`'s own `HeifImage::is_hevc_still`, which sends it to the HEIC arm, and — when that
+declines — with `gamut-avif`'s own `AvifImage::is_av1_still`, which sends it to the AVIF arm
+(`references/heif` §7 for both). A file neither confirms exits `1` with `<path>: unsupported
+container brand '<brand>' — …` and prints no report. The HEIC confirmation runs only once
+`gamut-heic`'s parse has succeeded, and a file neither crate confirms keeps that parse's outcome,
+so an ISOBMFF file `gamut-heic` refuses outright — one with a top-level `moov`: an MP4, a CR3, a
+HEIF image sequence — exits `1` with the parse error (`error: …`), not the unsupported-brand
+message. No brand list lives in the command. One would have to be exhaustive over the still-image
+brands — `mif2`, `avci` and `avcs` beside `heic`/`heix`/`heim`/`heis`/`mif1`, and `avif`/`avio` —
+and would still be wrong about `mif1`, which is the generic MIAF structural brand either format may
+carry as its *major* brand, not merely among its compatible ones. The format crates settle that
+case on the primary item carrying an `hvcC` (HEIC) or an `av1C` (AVIF).
 
-`--format heic` skips the sniff **and** the confirmation: a forced format is the caller's own
-assertion about the file, and overriding detection is what `--format` is for. `gamut inspect
---format heic some.avif` therefore prints a full HEIC C2PA section at exit `0`.
+`--format heic` and `--format avif` skip the sniff **and** the confirmation: a forced format is the
+caller's own assertion about the file, and overriding detection is what `--format` is for. `gamut
+inspect --format heic some.avif` therefore prints a full HEIC C2PA section at exit `0`.
 
 The report's opening label says which of the two happened. A detected container is
-`<path>: HEIF/HEIC`; a forced one is `<path>: HEIF/HEIC (asserted by --format, not detected)`. On
-the forced path the command tested nothing about the container, so the plain label would be this
-command vouching for a file it never examined — echoing the caller's own assertion back as a
-finding.
+`<path>: HEIF/HEIC` or `<path>: AVIF`; a forced one is `<path>: HEIF/HEIC (asserted by --format, not
+detected)`, and likewise for AVIF. On the forced path the command tested nothing about the
+container, so the plain label would be this command vouching for a file it never examined — echoing
+the caller's own assertion back as a finding. WebP has no such label: its RIFF walk itself refuses
+a file without the `RIFF` magic and the `WEBP` form, so `--format webp` on anything else exits `1`
+with that error and no report.
 
 - **TIFF / DNG** — `DeconstructReport::is_fully_accounted()`: every byte classified into exactly
   one typed segment, **and** no unknown field type, no unknown tag, no anomaly. Identical in both
-  crates.
+  crates. The C2PA section prints beside it and never moves it (see below).
 - **PNG** — `PngReport::is_verified()`: `is_intact()` **and** `FilterScan::is_counted()`, i.e.
   every byte classified, every chunk CRC valid, IEND present, no trailing bytes after it, no
   truncated tail, nothing the filter scan found damaging — *and the filter scan actually ran*.
-- **HEIC** — **no gate**; see the section below. Exit `0` whenever `HeifContainer::parse` succeeds
-  and the container is the one this arm reads.
+- **HEIC / AVIF / WebP** — **no gate**; see the section below. Exit `0` whenever the format crate's
+  parse succeeds and the container is the one the arm reads.
 
 PNG's `is_fully_classified()` is printed but is **not** the gate: it is true by construction for
 every file `deconstruct` accepts (a truncated tail and a trailer each get a segment of their own),
@@ -83,7 +88,7 @@ file:
 | **both**: some boxes yielded stores and others did not | `0` | the headline names **both** counts, and the per-box lines follow in file order |
 | no C2PA box is present | `0` | that none was found in the top-level boxes of the primary stream |
 | a top-level `uuid` box carries some other extended type | `0` | a count of them, beside whichever of the four rows above applies |
-| the container is not the HEVC still image this arm reads (e.g. an AVIF) | `1` | nothing; `unsupported container brand …` on stderr |
+| the container is neither the HEVC still image this arm reads nor an AV1 one the AVIF arm reads | `1` | nothing; `unsupported container brand …` on stderr |
 | the container cannot be parsed (including any file with a top-level `moov`) | `1` | nothing; `error: …` on stderr |
 
 **The exit code says whether the inspection succeeded, not what it found.** Presence never changes
@@ -199,8 +204,51 @@ and `gamut-cli`'s `tests/inspect_c2pa.rs` pins that this command carries it to t
 unabridged. The store's bytes are never printed at any verbosity: they are opaque to gamut,
 routinely hundreds of kilobytes, and a byte range is what a caller hands to `c2pa-rs`.
 
-The other containers gamut can locate a store in gain the same section as each one's locator slice
-lands; only HEIC's is on `master` today.
+## The same section for AVIF, WebP, TIFF and DNG
+
+Each of these renders its own crate's `C2paSummary` through the same head-then-capped-detail
+printing as HEIC, with the same rules: the headline carries the non-validation disclaimer inline,
+names every non-empty category, and is never truncated; the detail lines are capped at twenty in
+file order; a store's bytes are never printed; and **reporting a store never changes the exit
+code**. What differs is only what each container can carry.
+
+- **AVIF** (`AvifContainer::c2pa_summary()`, `gamut-avif`) — the HEIC table above row for row, over
+  the same top-level `ContentProvenanceBox` (§A.5.1, §A.5.3): stores, boxes no store could be read
+  from (a non-zero `FullBox` version, an undefined `box_purpose`, or a box that ends before its
+  framing), auxiliary `merkle` boxes, the count of `uuid` boxes of another extended type, and the
+  past-`mdat` position note. One difference is stated on the line itself: AVIF reports the
+  box-bounded **slot** after the merkle offset — the store *plus any padding* — not a store trimmed
+  to its JUMBF `LBox` as HEIC does, so a store line reads `N-byte slot (store plus any padding) at
+  [a, b)`. Unifying the two lenses is issue #505. Exit `0` whatever it finds.
+- **WebP** (`gamut_webp::c2pa_summary`, `gamut-riff`) — one line per `C2PA` chunk (§A.3.7) with its
+  store's size and range: the chunk's payload, without the 8-byte chunk header `c2pa_span` includes.
+  A chunk another chunk follows says so (`another chunk follows it, where C2PA 2.4 §A.3.7 places it
+  last`), and a file with more than one says that §A.3.7 admits one and gamut's readers take the
+  first. A `C2PA` chunk has no framing of its own beyond the RIFF header, so its one unread case is a
+  payload shorter than the 8-byte JUMBF box header every store opens with — the bound the TIFF/DNG
+  (`TooShort`) and HEIC reports apply. Such a chunk is listed as an unread `N-byte payload`, in file
+  order beside the stores, and a file whose every `C2PA` chunk is unread reads `no manifest store
+  could be read, but N C2PA chunks are present — that is NOT absence of provenance`. A chunk whose
+  size runs past the data fails the whole RIFF walk, which exits `1` with that error. Exit `0`
+  otherwise.
+- **TIFF / DNG** (`gamut_tiff::c2pa_summary` / `gamut_dng::c2pa_summary`, both `gamut-ifd`'s
+  `c2pa::summarize`) — **additive**: the section prints after the byte-accounting report and before
+  the verdict, which it never moves; a TIFF exits exactly as it would without the store. The store
+  (§A.3.6: at most one, in the last IFD of the main chain) is reported with its size, its range and
+  its entry's `count` field — the two §18.5.5 exclusion ranges. Every other tag-52545 entry of the
+  main chain is listed as unread with its reason — it sits in an earlier IFD, its type is not
+  `UNDEFINED`, it is one of several, its value is shorter than a JUMBF box header, or its declared
+  extent runs past the file or over its own count field — where `c2pa_exclusions` reports most of
+  those as absence. The headline then reads `no manifest store could be read, but N C2PA
+  manifest-store entries are present — that is NOT absence of provenance`.
+
+The binary-level claims for these arms are pinned in `crates/gamut-cli/tests/inspect_c2pa.rs` beside
+HEIC's; the wording and the categories are each format crate's own contract, pinned there inside the
+mutation gate.
+
+**PNG has no C2PA section yet.** `gamut-png` locates a `caBX` store, but wiring it into this command
+is a separate slice (issue #727), held back while `gamut-png` is being reworked elsewhere; until it
+lands, a PNG's report says nothing about C2PA either way, and that silence is not absence.
 
 ## PNG alone has a third outcome
 

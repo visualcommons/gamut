@@ -133,4 +133,7 @@ pub use config::{Effort, NearLossless, WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
 pub use encoder::{WebpEncodeReport, WebpEncoder};
 pub use gamut_core::Dimensions;
-pub use metadata::{WebpMetadata, c2pa_span, metadata};
+pub use metadata::{
+    C2PA_NOT_VALIDATED, C2paChunkPosition, C2paStoreSummary, C2paSummary, C2paUnreadChunk,
+    WebpMetadata, c2pa_span, c2pa_summary, metadata,
+};
