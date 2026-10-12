@@ -1861,7 +1861,11 @@ mod tests {
         let px = banded_rgba8();
         let mut premultiplied = ImageBuf::<Rgba8>::new(px.clone(), BANDED).unwrap();
         premultiply_alpha(&mut premultiplied);
-        assert_ne!(premultiplied.as_samples(), &px[..], "the fixture is not opaque");
+        assert_ne!(
+            premultiplied.as_samples(),
+            &px[..],
+            "the fixture is not opaque"
+        );
         let encode = |enc: AvifEncoder, px: &[u8]| {
             enc.with_clean_alpha(true)
                 .encode_to_vec(ImageRef::<Rgba8>::new(px, BANDED).unwrap())
@@ -1871,7 +1875,10 @@ mod tests {
         // paths, and with cleaning (asked for here) not applied on top.
         for enc in [AvifEncoder::lossless(), AvifEncoder::lossy(50)] {
             assert_eq!(
-                encode(enc.clone().with_alpha_mode(AlphaMode::PremultiplyOnEncode), &px),
+                encode(
+                    enc.clone().with_alpha_mode(AlphaMode::PremultiplyOnEncode),
+                    &px
+                ),
                 encode(
                     enc.with_alpha_mode(AlphaMode::Premultiplied),
                     premultiplied.as_samples()

@@ -269,7 +269,11 @@ fn premultiply_on_encode_round_trips_through_libavif_within_rounding() {
     // colour within the rounding premultiplication costs — round-to-nearest both ways leaves at
     // most ⌊(a + 255) / 2a⌋ code values at alpha `a`. A fully transparent pixel keeps no colour.
     let avif = encode_rgba(&AvifEncoder::new().with_alpha_mode(AlphaMode::PremultiplyOnEncode));
-    assert!(libavif_oracle::introspect(&avif).expect("libavif parses").premultiplied_alpha);
+    assert!(
+        libavif_oracle::introspect(&avif)
+            .expect("libavif parses")
+            .premultiplied_alpha
+    );
 
     let (w, h, rgba) = libavif_oracle::decode_rgba(&avif).expect("libavif decodes");
     assert_eq!((w, h), (W, H));
@@ -294,7 +298,10 @@ fn premultiply_on_encode_round_trips_through_libavif_within_rounding() {
         };
         for c in 0..3 {
             let err = u16::from(got[c]).abs_diff(u16::from(want[c]));
-            assert!(err <= bound, "pixel {i} channel {c} at alpha {a}: {got:?} vs {want:?}");
+            assert!(
+                err <= bound,
+                "pixel {i} channel {c} at alpha {a}: {got:?} vs {want:?}"
+            );
         }
     }
     assert!(opaque > 0, "the source has opaque pixels to hold exact");
