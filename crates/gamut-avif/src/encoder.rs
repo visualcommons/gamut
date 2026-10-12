@@ -2843,4 +2843,28 @@ mod tests {
         assert_eq!(split(4), (2, Some(2)));
         assert_eq!(split(7), (4, Some(3)));
     }
+
+    /// With a budget of two the alpha still is coded on its own scoped thread; a panic there
+    /// reaches the caller with its own payload, as it would had the alpha been coded inline,
+    /// rather than being swallowed or replaced by the join's error.
+    #[test]
+    fn colour_and_alpha_resumes_an_alpha_thread_panic_on_the_caller() {
+        let encoder = AvifEncoder::lossless().with_threads(NonZeroUsize::new(2));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            encoder.colour_and_alpha(
+                |_| {
+                    Err(gamut_core::Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        "colour stand-in",
+                    ))
+                },
+                |_| -> Result<EncodedStill> { panic!("alpha thread panicked") },
+            )
+        }));
+        let payload = caught.expect_err("the alpha thread's panic reaches the caller");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"alpha thread panicked")
+        );
+    }
 }
