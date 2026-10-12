@@ -244,8 +244,9 @@ const TAG_STORED_TWICE_REFUSAL: &str = "DNG: an Exif sub-IFD may not store one t
 /// Not every subtree the reader would reject or change is refused: a sub-IFD group under a tag
 /// outside [`EXIF_SUBTREE_POINTER_TAGS`] (read back as a plain `LONG` field, not a group) and
 /// nesting deeper than the reader walks ([`gamut_ifd::SubtreeScope::MAX_DEPTH`]) both pass this
-/// check. `gamut-tiff`'s check refuses those two as well; they are not adopted here because what a
-/// group under an Exif tag reads back as depends on the decoder resolving Exif pointers at all.
+/// check. `gamut-tiff`'s check refuses those two as well; they are not adopted here, and neither
+/// is a shape a decode → encode round trip produces: [`DngDecoder`](crate::DngDecoder) resolves
+/// only the standard pointer tags, and only one level below the Exif directory.
 ///
 /// # Errors
 ///
