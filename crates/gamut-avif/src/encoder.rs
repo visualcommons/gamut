@@ -1,7 +1,6 @@
 //! The AVIF still-image encoder: RGB → identity planes → AV1 temporal unit → ISOBMFF container.
 
 use core::num::NonZeroUsize;
-use core::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{
@@ -18,9 +17,9 @@ use gamut_core::{
     Rgba16, Sample,
 };
 use gamut_isobmff::{
-    C2PA_UUID, C2paBoxPurpose, ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr,
-    Property, PropertyKind, TopLevelBox, content_provenance_payload, content_provenance_reserved,
-    write,
+    C2PA_UUID, C2paBoxPurpose, C2paByteRange, ColourInformation, IsoBmffImage, Item, ItemReference,
+    NclxColr, Property, PropertyKind, TopLevelBox, content_provenance_payload,
+    content_provenance_reserved, write,
 };
 
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
@@ -68,8 +67,9 @@ pub struct AvifEncodeReport {
     /// moves when it is overwritten with a payload of the same length, so the offset reported here
     /// is the offset the signer patches at. It is **not** a hash exclusion range — a BMFF asset's
     /// hard binding excludes by box path, not byte offset (C2PA 2.4 §18.6, §A.5.6); see
-    /// [`C2paSlot`](crate::C2paSlot).
-    pub c2pa: Option<Range<usize>>,
+    /// [`C2paSlot`](crate::C2paSlot) — which is why it is a [`C2paByteRange`] rather than the
+    /// `Range<usize>` a byte-range hasher's exclusion list takes.
+    pub c2pa: Option<C2paByteRange>,
     /// The length in bytes of the **colour** image's AV1 codestream — the primary item's payload,
     /// which is the sum of its `iloc` extent lengths (ISO/IEC 14496-12 §8.11.3).
     pub color_bytes: usize,

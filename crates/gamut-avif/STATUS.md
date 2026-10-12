@@ -408,12 +408,13 @@ path (§18.6, §A.5.6); the range is for patching and byte accounting, and no ty
 "exclusion". (4) *The encoder writes `manifest` only.* The read side reports all three purposes;
 producing an `original`/`update` pair is a manifest-update operation on an existing file, outside
 #444. The reserve → sign → validate direction against `c2pa-rs` is #447's. (5) *The range is a
-bare `Range<usize>`.* Limit (3) is documented at every site but not enforced by a type, so nothing
-stops a caller feeding the reported range to a hash as an exclusion range. A newtype that makes
-that unrepresentable is still deferred: #505 moved the lens without it, because a range newtype
-changes the public field types of both crates' C2PA structs (a breaking change neither issue
-scoped), and it is tracked as **#780** so it lands in `gamut-heic` and `gamut-avif` together
-under one name.
+`C2paByteRange`, not a `Range<usize>` (#780).* Limit (3) is enforced by a type: every C2PA range
+this crate reports — `C2paSlot::range`, `C2paSlot::store_range`, `C2paStoreSummary::range`/`slot`,
+`C2paUnreadBox::range`, `C2paMerkleBox::range` and `AvifEncodeReport::c2pa` — is
+`gamut-isobmff`'s `C2paByteRange`, shared with `gamut-heic` under the same name. It offers its
+bounds (`start`/`end`/`len`), the bytes it covers (`bytes_in`, and `bytes_in_mut` for the signer's
+patch) and a `[start, end)` rendering, and **no** conversion back to a `Range` or to any exclusion
+set, so feeding it to a byte-range hash takes a caller spelling the range out by hand.
 
 **Deferred (additive) for the decode surface:** the backend registry + `gamut-codec-abi` adapter
 around `Av1StillDecoder` — section M reserves its name and shape; the typed trait itself already

@@ -76,15 +76,15 @@ fn two_equal_length_stores_give_files_that_differ_exactly_in_the_reported_slot()
         .encode_with_report(image(&rgb))
         .expect("encode b");
 
-    let range = report_a.c2pa.clone().expect("a slot was written");
-    assert_eq!(report_b.c2pa, Some(range.clone()), "same offset for both");
+    let range = report_a.c2pa.expect("a slot was written");
+    assert_eq!(report_b.c2pa, Some(range), "same offset for both");
     assert_eq!(range.len(), LEN);
     assert_eq!(file_a.len(), file_b.len());
-    assert_eq!(&file_a[range.clone()], &a[..], "a's slot holds a");
-    assert_eq!(&file_b[range.clone()], &b[..], "b's slot holds b");
+    assert_eq!(range.bytes_in(&file_a), Some(&a[..]), "a's slot holds a");
+    assert_eq!(range.bytes_in(&file_b), Some(&b[..]), "b's slot holds b");
     // Outside the slot the files are byte-identical: nothing moved, nothing else changed.
-    assert_eq!(file_a[..range.start], file_b[..range.start]);
-    assert_eq!(file_a[range.end..], file_b[range.end..]);
+    assert_eq!(file_a[..range.start()], file_b[..range.start()]);
+    assert_eq!(file_a[range.end()..], file_b[range.end()..]);
 }
 
 #[test]
@@ -100,13 +100,20 @@ fn patching_a_reserved_slot_at_the_reported_range_reproduces_the_written_store_f
     let range = report.c2pa.expect("a slot was reserved");
     assert_eq!(range.len(), LEN);
     assert!(
-        reserved[range.clone()].iter().all(|&b| b == 0),
+        range
+            .bytes_in(&reserved)
+            .expect("inside the file")
+            .iter()
+            .all(|&b| b == 0),
         "the reserved slot is zero bytes"
     );
 
     // The signer's move: overwrite the slot in place. The result must be the file the encoder
     // would have written for that store — the two paths agree on every byte.
-    reserved[range].copy_from_slice(&store);
+    range
+        .bytes_in_mut(&mut reserved)
+        .expect("inside the file")
+        .copy_from_slice(&store);
     let direct = AvifEncoder::new()
         .with_c2pa(&store)
         .encode_to_vec(image(&rgb))
@@ -156,7 +163,7 @@ fn the_crate_locates_the_slot_it_reserved_at_the_reported_range() {
         "an unfilled slot is zeros"
     );
     assert_eq!(store.purpose, C2paBoxPurpose::Manifest);
-    assert_eq!(&bytes[store.range], store.slot_bytes);
+    assert_eq!(store.range.bytes_in(&bytes), Some(store.slot_bytes));
     assert_eq!(container.c2pa_slots().count(), 1);
 
     // A file with no box locates nothing.
@@ -187,7 +194,7 @@ fn with_c2pa_writes_and_locates_a_store_shorter_than_a_jumbf_box_header() {
             .encode_with_report(image(&rgb))
             .unwrap_or_else(|err| panic!("a {len}-byte store is written: {err}"));
         let range = report.c2pa.expect("a slot was written");
-        assert_eq!(&bytes[range.clone()], &store[..], "{len}");
+        assert_eq!(range.bytes_in(&bytes), Some(&store[..]), "{len}");
         let container = AvifContainer::parse(&bytes).expect("gamut-avif parses its own output");
         let slot = container.c2pa_slot().expect("the short slot is located");
         assert_eq!(slot.range, range, "{len}");
@@ -233,12 +240,12 @@ fn a_file_mid_update_reports_its_original_and_update_stores_in_file_order() {
     assert_eq!(stores.len(), 2);
     assert_eq!(stores[0].purpose, C2paBoxPurpose::Original);
     assert_eq!(stores[0].slot_bytes, &original[..]);
-    assert_eq!(&bytes[stores[0].range.clone()], &original[..]);
+    assert_eq!(stores[0].range.bytes_in(&bytes), Some(&original[..]));
     assert_eq!(stores[1].purpose, C2paBoxPurpose::Update);
     assert_eq!(stores[1].slot_bytes, &update[..]);
-    assert_eq!(&bytes[stores[1].range.clone()], &update[..]);
+    assert_eq!(stores[1].range.bytes_in(&bytes), Some(&update[..]));
     // The update box is the file's last box, so its slot runs to end of file.
-    assert_eq!(stores[1].range.end, bytes.len());
+    assert_eq!(stores[1].range.end(), bytes.len());
     // `c2pa()` is "the first one", never a judgement about which is active.
     assert_eq!(
         container.c2pa_slot().map(|s| s.purpose),
