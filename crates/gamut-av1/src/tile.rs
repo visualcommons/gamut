@@ -5198,7 +5198,7 @@ mod tests {
         e.sym.tally = Some(0);
         let trialled = e.choose_partition(2, 4, 8, 0);
         assert_eq!(
-            e.decided_partitions.iter().map(|d| (d.at, d.bp)).last(),
+            e.decided_partitions.last().map(|d| (d.at, d.bp)),
             Some(((2, 4, 8), trialled))
         );
         e.sym.tally = None;
