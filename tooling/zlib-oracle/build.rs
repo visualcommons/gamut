@@ -52,6 +52,19 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", path_str(&build));
     println!("cargo:rustc-link-lib=static=z");
 
+    // ---- Publish the headers of exactly this build to dependents (`DEP_Z_INCLUDE`, via
+    // `links = "z"`), so a C/C++ consumer that links this archive also compiles against it rather
+    // than against whatever `<zlib.h>` the system ships. Two directories, in search order: the
+    // build tree (CMake-generated `zconf.h`) and the private source copy (`zlib.h`), joined with
+    // the platform's path-list separator — split them with `std::env::split_paths`. ------------
+    let include = std::env::join_paths([&build, &src]).expect("include dirs contain no separator");
+    println!(
+        "cargo:include={}",
+        include
+            .to_str()
+            .unwrap_or_else(|| panic!("non-UTF-8 include path: {include:?}"))
+    );
+
     // ---- Bindings. zlib.h lives in the source tree; the generated `zconf.h` in the build tree. --
     let bindings = bindgen::Builder::default()
         .header(path_str(&manifest_dir.join("wrapper.h")))

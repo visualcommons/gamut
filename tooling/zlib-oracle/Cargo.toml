@@ -3,7 +3,9 @@
 # `dev-dependency`). It statically links zlib (built from the `third_party/zlib`
 # submodule) and exposes a reference inflater + compressor for gamut-deflate's
 # differential cross-checks. gamut ships no decoder, so this canonical inflater is
-# how the pure-Rust DEFLATE/zlib *encoder* is proven correct.
+# how the pure-Rust DEFLATE/zlib *encoder* is proven correct. It is also the pinned
+# zlib `gamut-dng-oracle` links the Adobe DNG SDK against: `build.rs` publishes this
+# build's headers as `DEP_Z_INCLUDE` for that purpose.
 [package]
 name = "zlib-oracle"
 version = "0.0.0"

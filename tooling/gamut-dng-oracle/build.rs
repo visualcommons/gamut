@@ -21,11 +21,19 @@
 //!   stubs in `src/jxl_stub.cpp` — that mode compiles but must never run JXL-touching tests
 //!   (nothing links in check-only environments anyway).
 //!
-//! Only the system `zlib` (`-lz`) is genuinely required, since the SDK includes `zlib.h`
-//! unconditionally for its Deflate and big-table paths.
+//! **zlib** is genuinely required, since the SDK includes `zlib.h` unconditionally for its Deflate
+//! and big-table paths. It is the static stock zlib the `zlib-oracle` dependency builds from the
+//! `third_party/zlib` submodule: the SDK compiles against that build's headers
+//! (`DEP_Z_INCLUDE`, published by zlib-oracle's `links = "z"` metadata) and links its archive.
+//! It used to be the system libz (`-lz`), dynamically, which left the one measured path here not
+//! built from committed source — the loader picked the library, and cargo's `LD_LIBRARY_PATH`
+//! made the pick depend on the launcher (issue #618). One pinned link serves the conformance tests
+//! and the benchmark alike; Cargo unifies a package's dev-dependencies across its tests and
+//! benches, so they could not link different oracles anyway.
 //!
 //! Everything lands under `OUT_DIR`, so `cargo clean` fully resets the build. CI needs the ZIP
-//! (committed under `references/dng/`) and a C++ toolchain + zlib headers; nothing else.
+//! (committed under `references/dng/`), the `third_party/zlib` submodule and a C++ toolchain
+//! with cmake; nothing else.
 
 use std::collections::HashSet;
 use std::fs;
@@ -98,6 +106,11 @@ fn main() {
         }
     }
     build.include(&jxl_shim);
+    // The pinned zlib's own headers, ahead of any system `<zlib.h>` (see the module docs).
+    let zlib_include = env("DEP_Z_INCLUDE");
+    for dir in std::env::split_paths(&zlib_include) {
+        build.include(dir);
+    }
     // Headless Linux, little-endian. XMP is *enabled* (so `dng_metadata`/`dng_xmp` stay complete
     // and the SDK source compiles cleanly) but its toolkit bridge is the no-op
     // `src/dng_xmp_sdk_stub.cpp`; the XMP files/doc-ops layers are off (nothing references them).
@@ -154,8 +167,9 @@ fn main() {
     // cmake/ninja oracles together; there is deliberately no dial here.
     build.compile("dng_oracle");
 
-    // The SDK includes <zlib.h> unconditionally (Deflate + big-table compression); link system z.
-    println!("cargo:rustc-link-lib=dylib=z");
+    // The SDK includes <zlib.h> unconditionally (Deflate + big-table compression). Nothing is
+    // linked for it here: `zlib-oracle` emits the static `libz.a`, and `src/lib.rs` names that
+    // crate so rustc links it after this archive.
 
     // The Adobe sample DNGs shipped in the SDK ZIP, for decode-conformance tests.
     println!(

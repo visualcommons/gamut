@@ -55,32 +55,27 @@
 //! supports is "the codestream comparison is fair to within the bound", not "the export path
 //! costs the SDK X".
 //!
-//! **On the two `*/deflate` rows neither arm's inflate is gamut-authored, and only one of them is
-//! pinned.** `gamut-deflate` is deliberately encoder-only, so this crate inflates with
-//! `miniz_oxide`; the reference arm calls the system libz, which the oracle links dynamically
-//! because the SDK includes `<zlib.h>` unconditionally. A Deflate row is therefore `miniz_oxide`
-//! against whatever libz the loader resolved — not gamut's own codec against the SDK's, which is
-//! how the wording here used to read.
+//! **On the two `*/deflate` rows neither arm's inflate is gamut-authored, and both are pinned.**
+//! `gamut-deflate` is deliberately encoder-only, so this crate inflates with `miniz_oxide`; the
+//! reference arm calls zlib, because the SDK includes `<zlib.h>` unconditionally. A Deflate row is
+//! therefore `miniz_oxide` against stock zlib — not gamut's own codec against the SDK's, which is
+//! how the wording here once read.
 //!
 //! The distinction that decides whether such a row is reproducible is **pinning**, not
-//! authorship: `miniz_oxide` is pinned by `Cargo.lock` to one version and one checksum, so every
-//! run of this harness anywhere inflates with the same code, while the system libz is pinned by
-//! nothing. Not by a version: the loader chooses between a copy a dev oracle built under
-//! `target/` and whatever the platform installed, and `zlibVersion()` separates those two only
-//! when the platform's build renamed itself. A box shipping stock zlib 1.3.1 gives two
-//! resolutions that answer identically, so the identification rests on the path instead.
-//! And not even by the machine: cargo puts every build script's native search
-//! path on `LD_LIBRARY_PATH`, and `gamut-dng`'s own dev-dependency `libtiff-oracle` builds a
-//! `libz.so` under `target/`, so `cargo bench` and the same binary launched directly can resolve
-//! different implementations. Stock zlib and a zlib-ng-class fork differ by more than the margin
-//! that decides which side of 1.0 those rows fall on. Every other row runs only code this
-//! repository builds or pins.
+//! authorship. `miniz_oxide` is pinned by `Cargo.lock` to one version and one checksum. The
+//! oracle's zlib is the stock build `zlib-oracle` makes from the `third_party/zlib` submodule,
+//! linked **statically** into this executable, so the submodule commit pins it. It used to be the
+//! system libz, linked dynamically, and that was pinned by nothing: the loader chose between a
+//! copy a dev oracle built under `target/` and whatever the platform installed, cargo's
+//! `LD_LIBRARY_PATH` made the choice depend on the launcher, and stock zlib and a zlib-ng-class
+//! fork differ by more than the margin that decides which side of 1.0 those rows fall on (issue
+//! #618 measured the reference arm moving 1.2–1.3×). Every row now runs only code this repository
+//! builds or pins, whether the bench is launched through `cargo` or run directly.
 //!
-//! The fixture table prints [`gamut_dng_oracle::zlib_identity`] for exactly this reason, and
-//! warns when [`gamut_dng_oracle::zlib_path`] falls inside a build directory, because a
-//! resolution that came from the build graph is one nobody else reproduces. A Deflate ratio is
-//! not a fact about two inflate implementations unless the library it was taken against travels
-//! with it.
+//! The fixture table still prints [`gamut_dng_oracle::zlib_identity`] — the version, and the
+//! object the `zlibVersion` symbol resolved in — and refuses to run if
+//! [`gamut_dng_oracle::zlib_path`] names a shared library, because that would mean a shared libz
+//! is being called again and the Deflate rows are unpinned.
 //!
 //! # The counter rule
 //!
@@ -596,44 +591,49 @@ fn print_fixture_table() {
     print!("{FIXTURE_TABLE_EPILOGUE}");
 }
 
-/// Prints which libz the reference arm's Deflate decode actually called, and flags the case where
-/// the loader resolved it out of a build directory.
+/// Prints which zlib the reference arm's Deflate decode calls, and refuses to go on if that zlib
+/// is a shared library rather than the copy statically linked into this executable.
 ///
-/// Printing the library is what makes a Deflate ratio interpretable; flagging a build-tree
-/// resolution is what makes it *reproducible*. `cargo` puts every build script's native search
-/// path on `LD_LIBRARY_PATH`, and this crate's own dev-dependency `libtiff-oracle` builds a
-/// `libz.so` under `target/`, so a run launched through `cargo bench` can measure a different
-/// inflate implementation from the one the same binary measures when run directly — a difference
-/// large enough to move a Deflate row across 1.0. That resolution belongs to whoever's build
-/// graph produced it and to nobody else, so it is called out rather than merely recorded.
+/// The oracle links the stock zlib built from `third_party/zlib` statically (issue #618), so
+/// `zlibVersion` resolves in this executable itself. A shared library — a `libz.so` the loader
+/// found on the platform or, through cargo's `LD_LIBRARY_PATH`, under `target/` — means the pin
+/// has regressed and the `*/deflate` rows would measure whichever library the launcher happened
+/// to supply, which moved the reference arm 1.2–1.3× when it was last allowed to. Publishing such
+/// a ratio is worse than publishing none, so this stops the run.
+///
+/// The test is whether the reported path names a shared object, not whether it equals this
+/// executable's path: for the executable itself the loader may report only `argv[0]`, which the
+/// shim hands over unresolved when `realpath` fails (a bench launched through `PATH`, or with a
+/// rewritten `argv[0]`), so comparing it with `current_exe()` would stop a correctly pinned run.
+/// A shared libz is reported as the file the loader opened, so its library name survives.
 fn print_zlib_identity() {
     println!(
-        "\nThe SDK's Deflate arm calls the system zlib: {}.",
+        "\nThe SDK's Deflate arm calls the pinned stock zlib (third_party/zlib, statically \
+         linked): {}.",
         gamut_dng_oracle::zlib_identity()
     );
-    if gamut_dng_oracle::zlib_path().is_some_and(|path| is_build_tree(&path)) {
-        print!("{BUILD_TREE_ZLIB_WARNING}");
+    if let Some(path) = gamut_dng_oracle::zlib_path() {
+        assert!(
+            !names_shared_object(&path),
+            "the SDK's zlib resolved in the shared library {}, not in this executable: the \
+             oracle's static zlib link has regressed to a shared libz, so the */deflate rows \
+             would not be reproducible",
+            path.display()
+        );
     }
 }
 
-/// Printed when the loader resolved libz out of a build directory: the `*/deflate` rows still
-/// measured something, but not something a reader elsewhere can reproduce.
-const BUILD_TREE_ZLIB_WARNING: &str = "\
-WARNING: that libz came out of a build directory, not the platform. `cargo` exports every build
-script's native search path on the runner's library path, and this crate dev-depends on
-`libtiff-oracle`, which builds a `libz.so` of its own — so the `*/deflate` rows below were taken
-against a library that belongs to this build graph and to no one else's. Run the bench binary
-under `target/release/deps/` directly to measure against the platform's libz instead, and say
-which of the two any published Deflate figure came from.
-";
-
-/// Whether `path` lies inside a Cargo build directory, i.e. has a `target` component.
-///
-/// Deliberately a path test and not a comparison against this build's own `target/`: the loader
-/// may resolve a `libz.so` any build script in the graph produced, and every one of those is
-/// equally unreproducible for a reader elsewhere.
-fn is_build_tree(path: &std::path::Path) -> bool {
-    path.components().any(|c| c.as_os_str() == "target")
+/// Whether `path`'s file name is a shared library's: `*.so` or versioned `*.so.N…` (ELF),
+/// `*.dylib` (Mach-O) or `*.dll` (PE). An executable — the static pin's answer — is none of these.
+fn names_shared_object(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| {
+            name.ends_with(".so")
+                || name.contains(".so.")
+                || name.ends_with(".dylib")
+                || name.ends_with(".dll")
+        })
 }
 
 /// What an operator has to know to read the table above and the divan output below it, printed
@@ -656,16 +656,13 @@ the compressed rows as: gamut's figure includes preview and metadata work the SD
 by an amount this harness does not measure.
 
 On the `*/deflate` rows neither arm's inflate is gamut's own: `gamut-deflate` is encoder-only, so
-this crate inflates with miniz_oxide, and the SDK calls the system libz, which the oracle links
-dynamically because it includes <zlib.h> unconditionally. Read those rows as miniz_oxide against
-that libz. What separates them is that miniz_oxide is pinned by Cargo.lock -- one version, one
-checksum, the same code everywhere -- and the system libz is pinned by nothing: not by a version
-(two stock builds of one zlib version answer zlibVersion() identically, so the path printed above,
-not the version, is what says which one was loaded), and not by the machine, since cargo puts
-every build script's native search path on LD_LIBRARY_PATH. The resolved library is printed above,
-with a warning when it came out of a build directory; publish it with any Deflate figure, and do
-not compare a Deflate ratio against one taken on a different libz. Every other row runs only code
-this repository builds or pins.
+this crate inflates with miniz_oxide, and the SDK calls zlib because it includes <zlib.h>
+unconditionally. Read those rows as miniz_oxide against stock zlib. Both are pinned: miniz_oxide
+by Cargo.lock, and zlib by the third_party/zlib submodule commit, built by zlib-oracle and linked
+statically into this executable -- so the run launched through cargo and the same binary run
+directly measure the same library, on any machine. The zlib printed above is that build; do not
+compare a Deflate ratio against one taken before the pin (issue #618), when the SDK called
+whichever shared libz the loader found. Every row runs only code this repository builds or pins.
 
 `decode_lossless_jpeg` needs no correction: same stream in, same samples out, one counter for all
 three arms. The gap between its `adobe-sdk` and `adobe-sdk-no-export` arms bounds the FFI export

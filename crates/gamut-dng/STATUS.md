@@ -12,7 +12,8 @@ the `SubIFDs` tag (330), at the full-resolution raw image in a **sub-IFD**, with
 sub-IFD **tree layout** — recursive two-pass absolute-offset assignment with pointer-tag patching.
 
 **Oracle:** the authoritative **Adobe DNG SDK 1.7.1** (`references/dng/`), built headless via the
-`cc` crate into the dev-only `tooling/gamut-dng-oracle` (XMP stubbed; system zlib; **real libjxl
+`cc` crate into the dev-only `tooling/gamut-dng-oracle` (XMP stubbed; stock zlib from `third_party/zlib`, statically linked via `zlib-oracle` —
+see "The reference implementation's zlib" below; **real libjxl
 0.12.0** statically linked via `gamut-jxl-sys`, so the SDK genuinely decodes JPEG XL DNGs),
 exposing `extern "C"` validate / read-stage-1 / read-stage-2 / digest entry points around
 `dng_validate`'s call sequence, plus the SDK ZIP's 14 official `sample_files/*.dng` as
@@ -411,14 +412,17 @@ removed or measured; none is left as an adjective.
   fairness claim needs only that the export path cannot account for a 30×-plus ratio — not a
   figure for what the export path costs. Earlier revisions of this section quoted 0.3–1.9 % as
   though it were the cost; it was two samples of a quantity at the noise floor.
-- **On the Deflate rows neither arm's inflate is gamut-authored, and only one of the two is
-  pinned.** `gamut-deflate` is deliberately encoder-only, so this crate inflates with
-  `miniz_oxide`; the oracle's `build.rs` links the system libz dynamically (`-lz`), because the
+- **On the Deflate rows neither arm's inflate is gamut-authored, and both are now pinned.**
+  `gamut-deflate` is deliberately encoder-only, so this crate inflates with `miniz_oxide`, and the
   SDK includes `<zlib.h>` unconditionally. A `*/deflate` row is therefore **`miniz_oxide` against
-  whatever libz the loader resolved** — not gamut's own codec against the SDK's. The distinction
-  that decides whether the row is reproducible is **pinning**, not authorship: `miniz_oxide` is
-  pinned by `Cargo.lock` to one version and one checksum, so every run of this harness anywhere
-  inflates with the same code, while the system libz is pinned by nothing. Not by a version: the
+  stock zlib** — not gamut's own codec against the SDK's. The distinction that decides whether the
+  row is reproducible is **pinning**, not authorship: `miniz_oxide` is pinned by `Cargo.lock`, and
+  since #618 the oracle's zlib is pinned by the `third_party/zlib` submodule commit (see "The
+  reference implementation's zlib" below). The rest of this bullet records the state the
+  measurements below were taken in, which is why the pin was taken.
+
+  Until #618 the oracle's `build.rs` linked the **system** libz dynamically (`-lz`), and that was
+  pinned by nothing. Not by a version: the
   loader chooses between a copy a dev oracle built under `target/` and whatever the platform
   installed, and `zlibVersion()` separates those two only when the platform's build renamed itself.
   This box's did — it answers `"1.3.1.zlib-ng"` where the build-tree copy answers `"1.3.1"` — but a
@@ -430,15 +434,16 @@ removed or measured; none is left as an adjective.
   gamut-dng` on its own is enough), while running the same binary directly resolves the platform's.
   Measured here, that choice moves the reference arm by 1.2–1.3× and moves gamut's arm not at all —
   enough to reverse which side of 1.0 a Deflate row falls on, with no defect in either
-  implementation. The harness therefore prints the resolved library above its divan output
+  implementation. The harness printed the resolved library above its divan output
   (`zlibVersion()` plus the path `dladdr` reports; the path is what identifies the resolution,
-  because two stock builds of one version are indistinguishable by version string) and **warns
-  when that path lies inside a build directory**, because a resolution
-  that came from the build graph rather than from the platform is one nobody else reproduces. A
-  Deflate figure below travels with the library it was taken against or not at all. Pinning that
-  library for the benchmark while keeping `-lz` for conformance is filed as **#618** and not taken
-  here: it is a build-system change to a crate every `gamut-dng` test links, and it belongs to its
-  own change rather than to the one that added the benchmark.
+  because two stock builds of one version are indistinguishable by version string) and warned
+  when that path lay inside a build directory. It still prints both; it now **stops** when the
+  path names a shared library (`*.so`, `*.so.N`, `*.dylib`, `*.dll`), because that means a shared
+  libz is being called again. It does not demand the path equal its own executable's, which is
+  what the static link makes the object: for the executable the loader may report only an
+  unresolved `argv[0]` (launched through `PATH`, or with `argv[0]` rewritten), so equality would
+  stop a correctly pinned run. A Deflate figure below travels with the library it was taken
+  against or not at all.
 
 **Each pair is one benchmark, not two.** `decode_dng` and `decode_lossless_jpeg` take the
 implementation as a divan *argument* rather than living in a benchmark each. Separate benchmarks
@@ -509,7 +514,23 @@ under zlib-ng 2.3.3, at every load from 15 to 38 and in both arm orders. The iso
 that the *gamut* arm does not move between the two — its `cfa/deflate` median is 1.04–1.05 ms under
 either library — while the reference arm moves from 0.83 ms to 0.97–1.11 ms. Neither measurement was
 wrong; the harness failed to say which inflate implementation it had measured, so two correct runs
-looked like a contradiction. It now prints it.
+looked like a contradiction. It now prints it, and since #618 there is only one library it can
+print: the stock zlib 1.3.1 column is the configuration the harness now always measures.
+
+**The reference implementation's zlib (#618).** The oracle links one zlib for every use — the
+conformance tests and the benchmark alike — and it is the stock zlib `tooling/zlib-oracle` builds
+from the `third_party/zlib` submodule, compiled against that build's own headers and linked
+statically, so `cargo test`, `cargo bench` and a bench binary launched directly all call the same
+code on every machine. Pinning the benchmark alone while the conformance tests kept `-lz` was the
+other option and is not taken: Cargo unifies a package's dev-dependencies across its tests and
+benches, so the two cannot link different builds of one oracle without a second oracle crate
+(which `links = "dng_oracle"` forbids in one graph) or a build-time switch both targets share.
+This is a change to what the conformance oracle *is*, recorded as one: the SDK's Deflate and
+big-table reads no longer exercise the platform's libz (on the measuring box, zlib-ng 2.3.3 in
+compatibility mode) but stock zlib 1.3.1. Its verdicts cannot move on a conformant file: zlib
+inflate is a function of the stream (RFC 1950/1951), so every conformant inflater returns the
+same bytes and the same Adler-32 verdict. What it stops covering is the SDK running on a
+platform's zlib fork, which no gamut claim rests on.
 
 **What the harness found.** Two defects, both filed rather than fixed here — a benchmark that
 measures the codec is not the place to change it:
