@@ -251,6 +251,31 @@ fn metadata_payloads_agree_with_libavif() {
     assert_eq!(xmp_payload, &oracle.xmp, "XMP packet verbatim");
 }
 
+#[test]
+fn content_light_level_agrees_with_libavif() {
+    // libavif-written HDR files carrying a `clli` box. (None in the corpus carries `mdcv`: the
+    // pinned libavif never writes one, and it skips the box on read, so it cannot vouch for it.)
+    for name in ["colors_hdr_rec2020.avif", "seine_hdr_rec2020.avif"] {
+        let data = corpus(name);
+        let oracle = libavif_oracle::introspect(&data).unwrap();
+        let container = AvifContainer::parse(&data).unwrap();
+        let clli = container
+            .image()
+            .primary_item()
+            .content_light_level()
+            .unwrap_or_else(|| panic!("{name}: clli present"));
+        assert_ne!(oracle.clli, [0, 0], "{name}: libavif reports a clli");
+        assert_eq!(
+            [
+                clli.max_content_light_level,
+                clli.max_pic_average_light_level
+            ],
+            oracle.clli,
+            "{name}: clli"
+        );
+    }
+}
+
 // ---- t2: presentation pixels vs libavif ------------------------------------------------------
 
 #[test]
