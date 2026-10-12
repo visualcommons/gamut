@@ -253,7 +253,7 @@ bodies.
 | gamut-isobmff | ISO/IEC 14496-12 + 23008-12; libavif/dav1d via gamut-avif | exact-byte + law | `read` ☑ |
 | gamut-riff | libwebp demux | differential + law | `RiffReader` ☐ |
 | gamut-webp | libwebp (both directions) | differential + size/effort contract | `WebpDecoder` ☐ |
-| gamut-avif | libavif; dav1d | differential + law | `decode` ☐ |
+| gamut-avif | libavif; dav1d | differential + law | `decode` ☑ |
 | gamut-heic | libheif + libde265 | differential + law | container `parse`, NAL `parse` ☑ |
 | gamut-av1 | libaom (definitive); dav1d | differential | — |
 | gamut-jxl | libjxl (the `jxl` crate is the decoder under test, not an authority) | differential | `decode` ☐ |

@@ -93,8 +93,15 @@ over normalised inputs, per the section above.
 | `core_convert` | `gamut-core` | `acceptance_is_independent_of_the_samples`, `output_shape_matches_the_target_layout`, `palette_and_cmyk_convert_only_to_themselves`, `the_in_place_door_matches_the_allocating_door`, `converting_a_layout_to_itself_changes_nothing` |
 | `tonemap_curves` | `gamut-tonemap` | `output_is_non_negative_and_never_nan`, `map_slice_is_elementwise_map`, `map_slice_is_order_independent`, `monotonic_non_decreasing` |
 | `avif_clean_alpha` | `gamut-avif` | `cleaning_8_bit_rgba_keeps_the_composite`, `cleaning_16_bit_rgba_keeps_the_composite` |
+| `avif_parse_decode` | `gamut-avif` | `decoding_stays_within_limits` |
 
-One file per crate, deliberately, so adding a crate is an additive change.
+One file per crate, deliberately, so adding a crate is an additive change — with one exception:
+`gamut-avif` has two, because its two laws need different inputs. `avif_clean_alpha` normalises the
+engine's bytes into an RGBA image; `avif_parse_decode` hands them, unchanged, to
+`AvifContainer::parse` and then decodes every item through a stub AV1 decoder, so it is also the
+crate's parser robustness target (`docs/testing.md`'s "Fuzz entry point" for `gamut-avif`). Its
+limits come from the input's last four bytes, which an AVIF parser keeps as a trailer, so its seeds
+are unmodified AVIF files.
 
 `Drago` is held to monotonicity only where `Drago::is_monotonic` says it claims it (#439); every
 other operator promises it unconditionally, and all of them are driven through the other three
@@ -324,9 +331,15 @@ carries no file**, because `"II" LE16(42)` *is* `"II" 2A 00` byte for byte and i
 four bytes as case 1; and cases 9 and 10 carry two files each, `a` and `b`, for the two variants
 their rows name.
 
-Five of the other six directories start from one or two small well-formed files, written by this
+Six of the other seven directories start from one or two small well-formed files, written by this
 workspace's own encoders, so a decoder target begins from something that reaches its pixel path
-instead of spending its budget rediscovering a header. The sixth, `corpus/avif_clean_alpha/`, feeds
+instead of spending its budget rediscovering a header. `corpus/avif_parse_decode/`'s two were
+written by `gamut-isobmff`'s writer in the shape its property generates — a 2 × 2 `grid` cropped to
+7 × 9 whose last tile declares an `ispe`, and a two-input `iovl` with an input off each canvas edge,
+over coded items whose payloads pass the still-image checks — then given a four-byte limits trailer
+(`grid-2x2-limits-6`: a 6-pixel side, which refuses the grid; `overlay-two-inputs-limits-100px`: a
+100-pixel budget, which refuses the 12 × 10 canvas), since the AVIF seed `isobmff_boxes` uses does
+not pass those checks and never reaches the decoder. The seventh, `corpus/avif_clean_alpha/`, feeds
 a law target that parses nothing, so its two seeds are hand-built raw bytes in the driver's own
 input shape — a width selector byte, then RGBA samples — that put opaque, fully transparent and
 semi-transparent pixels side by side: `8bit-2x2-edge.bin` aimed at the 8-bit law, and

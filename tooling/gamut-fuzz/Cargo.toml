@@ -76,6 +76,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "avif_parse_decode"
+path = "fuzz_targets/avif_parse_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ifd_read"
 path = "fuzz_targets/ifd_read.rs"
 test = false
