@@ -165,11 +165,12 @@ is kept and no reason is offered, because the specification has no notion of an 
 type.
 
 Every `uuid` box also carries a `C2paBoxPosition`: whether the walk had already passed an `mdat`
-when it reached the box. §A.5.3 places a manifest-store box "before the first 'mdat' box in the file
-and before any 'moov' box in the file", and an appended box is the adversarial shape — but the fact
-is positional, never a verdict, since §A.5.3 equally requires the `update` box of a mid-update file
-to be the file's last box. The `moov` half of the boundary is unreachable here: `HeifContainer::parse`
-refuses a top-level movie box outright.
+or a `moov` when it reached the box, and which of the two it crossed first. §A.5.3 places a
+manifest-store box "before the first 'mdat' box in the file and before any 'moov' box in the file",
+and an appended box is the adversarial shape — but the fact is positional, never a verdict, since
+§A.5.3 equally requires the `update` box of a mid-update file to be the file's last box. The `moov`
+half is reachable because `HeifContainer::parse` skips a sequence's movie box beside the `meta`
+still (#646) and refuses only a sequence-only file.
 
 Rendering is split so a host can cap without rewording: `summary_lines` is the headline plus the
 `uuid`-box count (at most two lines, whatever the file holds), `detail_lines` is one lazy line per
@@ -183,7 +184,8 @@ same twenty entries as every other list it prints.
 
 **Permanently out of scope** (workspace charter: image-first, no inter-frame/motion/sequence
 coding). Image sequences and tracks — the `msf1`/`hevc`/`hevx` brands, `moov`/`trak`/`mdia`/`stbl`
-and `hvc1` sample entries — and all HEVC inter-coding; L-HEVC multi-layer *decode* (layered brands
+and `hvc1` sample entries (the `meta` primary still such a file carries beside its track parses
+since #646; the track itself is skipped, never read) — and all HEVC inter-coding; L-HEVC multi-layer *decode* (layered brands
 `heim`/`heis` are read as their single base layer); protected/`uri ` items; external data
 references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finalized
 [`gamut-isobmff` ledger](../gamut-isobmff/STATUS.md).
@@ -203,7 +205,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Reporting shape for a located store: presence, half-open range, size and `box_purpose` per store with the bytes absent by construction, rendered with the non-validation disclaimer inline (`c2pa_summary`, `C2paSummary::report_lines`, `C2PA_NOT_VALIDATED`) | C2PA 2.4 §15.12, §A.5.3 | ✅ | S7 (#448) |
 | A C2PA box that yields no store is reported as such, with the reason, and never as absence (`C2paSummary::unread`, `C2paUnreadBox`, `C2paUnreadReason`); a `uuid` box whose extended type is not `C2PA_UUID` is never one of these | C2PA 2.4 §A.5.1.1, §A.5.1.2, §A.5.3 | ✅ | S7 (#448) |
 | A top-level `uuid` box of another extended type is counted as a byte fact (`C2paSummary::other_uuid_boxes`), so a one-byte near miss no longer renders identically to no box at all | C2PA 2.4 §A.5.1.1 | ✅ | S7 (#448) |
-| Each box's position relative to the first `mdat` reported as a positional fact, never a verdict (`C2paBoxPosition`) | C2PA 2.4 §A.5.3 | ✅ | S7 (#448) |
+| Each box's position relative to the first `mdat` or `moov` reported as a positional fact, never a verdict (`C2paBoxPosition`) | C2PA 2.4 §A.5.3 | ✅ | S7 (#448) |
 | Rendering split for a host that caps a terminal report (`summary_lines`, `detail_lines`, `detail_line_count`) while every word stays pinned in this crate | — | ✅ | S7 (#448) |
 | Store bounding is `LBox`-only and content-dependent (`LBox` validity alone cannot separate a store bound from a plausible interior length). Two routes close it: assert the `jumb` `TBox` — traceable to §A.3.9/§15.12.3.2 but only as a JPEG XL aside, so it is a maintainer call because it narrows what is reported — or confirm the store by §11.1.4.2's JUMBF type UUID, which needs 19566-5's Description Box layout. A `c2pa-rs` oracle fixture would settle either empirically | C2PA 2.4 §A.3.9, §11.1.4.2, §A.5.3; ISO/IEC 19566-5 (not vendored) | ☐ | #239 oracle |
 | C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` (the store lives in a top-level `uuid` box outside the item model `HeifImage::blocks` reads; a caller appends `MetadataBlock::C2pa(HeifContainer::c2pa().bytes)` itself) | C2PA 2.4 §A.5 | ☐ | later |
