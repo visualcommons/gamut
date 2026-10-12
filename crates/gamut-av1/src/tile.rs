@@ -1350,8 +1350,9 @@ impl<'a> FrameEncoder<'a> {
     /// a single `PARTITION_NONE` block. A textured region (large luma range over the source) splits so
     /// each sub-block can pick its own mode and transform; a smooth region stays whole, where one
     /// prediction and a single larger transform code it more compactly. This is a quality decision —
-    /// either choice reconstructs bit-exactly — so the threshold is a deterministic placeholder
-    /// (rate-distortion partition search is deferred).
+    /// either choice reconstructs bit-exactly — so the threshold is a deterministic placeholder for
+    /// 16×16 and larger; [`Self::choose_split`] decides an 8×8 block by rate–distortion trial
+    /// instead, and extending that trial upward is #753.
     fn should_split(&self, r: usize, c: usize, bw: usize) -> bool {
         let n4 = bw / 4;
         // A 64×64 block that extends past the frame edge is split: the encoder only codes a
@@ -3322,12 +3323,14 @@ impl<'a> FrameEncoder<'a> {
     /// left), and the reconstruction's squared error weighed against the coefficient rate plus the
     /// mode's signalling rate by [`Self::rd_cost`].
     ///
-    /// Where the transforms have a type to choose and there are more than [`MODE_REFINE`]
-    /// candidates, every candidate is first trialled with `DCT_DCT` alone ([`Coding::Screen`]),
-    /// and only the [`MODE_REFINE`] cheapest are trialled again with the transform-type search
-    /// each would be coded with: that search multiplies a trial's transforms by up to five, and
-    /// a mode's `DCT_DCT` cost already tells the contenders from the rest. Otherwise every
-    /// candidate is trialled once, in full.
+    /// Every candidate is first trialled with `DCT_DCT` alone ([`Coding::Screen`]), and only the
+    /// [`MODE_REFINE`] cheapest are trialled again with the transform-type search each would be
+    /// coded with: that search multiplies a trial's transforms by up to five, and a mode's
+    /// `DCT_DCT` cost already tells the contenders from the rest. Both passes run even where they
+    /// must agree — a list of at most [`MODE_REFINE`] candidates, or transforms with no type to
+    /// choose — because a guard skipping the second pass there could only save time, never change
+    /// the answer, and so could not be tested; that costs the `Fastest` search and 32×32/64×64
+    /// blocks up to eight repeated trials each.
     ///
     /// Earlier candidates win ties, so the cheaper signalling is preferred. The choice is a quality
     /// decision; every option reconstructs bit-exactly, so only the signaling must be correct.
@@ -3340,29 +3343,18 @@ impl<'a> FrameEncoder<'a> {
         luma_tx: TxSize,
     ) -> LumaMode {
         let candidates = self.luma_candidates(bw, bh);
-        let has_types = self.search.tx_type_trials > 0 && luma_tx.width() < 32;
-        let screen = has_types && candidates.len() > MODE_REFINE;
-        let first = if screen {
-            Coding::Screen
-        } else {
-            Coding::Trial
-        };
         let mut costs: Vec<(u64, usize)> = (0..candidates.len())
             .map(|i| {
-                (
-                    self.luma_cost(r, c, bw, bh, luma_tx, candidates[i], first),
-                    i,
-                )
+                let screen = self.luma_cost(r, c, bw, bh, luma_tx, candidates[i], Coding::Screen);
+                (screen, i)
             })
             .collect();
-        if screen {
-            costs.sort_unstable();
-            costs.truncate(MODE_REFINE);
-            // Back into signalling order, so a tie still goes to the cheaper-signalled candidate.
-            costs.sort_unstable_by_key(|&(_, i)| i);
-            for (cost, i) in &mut costs {
-                *cost = self.luma_cost(r, c, bw, bh, luma_tx, candidates[*i], Coding::Trial);
-            }
+        costs.sort_unstable();
+        costs.truncate(MODE_REFINE);
+        // Back into signalling order, so a tie still goes to the cheaper-signalled candidate.
+        costs.sort_unstable_by_key(|&(_, i)| i);
+        for (cost, i) in &mut costs {
+            *cost = self.luma_cost(r, c, bw, bh, luma_tx, candidates[*i], Coding::Trial);
         }
         let mut best = (u64::MAX, DC_LUMA);
         for (cost, i) in costs {
@@ -4750,6 +4742,20 @@ mod tests {
         assert_eq!(pick_tx(48, Speed::Thorough, &impulse).symbol, 0);
         assert!([1, 2].contains(&pick_tx(48, Speed::Fast, &impulse).symbol));
         assert_eq!(pick_tx(48, Speed::Fastest, &impulse).symbol, 1);
+        // A screening trial prices DCT_DCT alone even under the full search.
+        let p = grey4x4();
+        let e = at_speed(&p, 48, Speed::Thorough);
+        let pred: Vec<i32> = impulse.iter().map(|&r| 128 - r).collect();
+        let site = TxSite {
+            plane: 0,
+            sx: 0,
+            sy: 0,
+            block_w: 4,
+            block_h: 4,
+            tx_size: TxSize::Tx4x4,
+            intra_dir: usize::from(DC_PRED),
+        };
+        assert_eq!(e.select_tx_type(&site, &pred, &impulse, false).symbol, 1);
     }
 
     #[test]
@@ -4935,21 +4941,17 @@ mod tests {
                 Snapshot::of(&e) == before,
                 "select_luma_mode changed the encoder"
             );
-            // The procedure, spelled out: where a transform type is searched and there are more
-            // than `MODE_REFINE` candidates, the `MODE_REFINE` cheapest under `DCT_DCT` alone
+            // The procedure, spelled out: the `MODE_REFINE` cheapest under `DCT_DCT` alone
             // (earlier first on a tie) are re-priced in full; the first of least cost wins.
             let all = e.luma_candidates(bw, bh);
-            let screened = tx.width() < 32 && all.len() > MODE_REFINE;
+            let screen: Vec<u64> = all
+                .iter()
+                .map(|&m| e.luma_cost(r, c, bw, bh, tx, m, Coding::Screen))
+                .collect();
             let mut contenders: Vec<usize> = (0..all.len()).collect();
-            if screened {
-                let screen: Vec<u64> = all
-                    .iter()
-                    .map(|&m| e.luma_cost(r, c, bw, bh, tx, m, Coding::Screen))
-                    .collect();
-                contenders.sort_by_key(|&i| (screen[i], i));
-                contenders.truncate(MODE_REFINE);
-                contenders.sort_unstable();
-            }
+            contenders.sort_by_key(|&i| (screen[i], i));
+            contenders.truncate(MODE_REFINE);
+            contenders.sort_unstable();
             let full: Vec<u64> = contenders
                 .iter()
                 .map(|&i| e.luma_cost(r, c, bw, bh, tx, all[i], Coding::Trial))
@@ -6308,8 +6310,6 @@ mod tests {
         ] {
             let pred: Vec<i32> = res.iter().map(|&r| 128 - r).collect();
             let choice = e.select_tx_type(&site, &pred, &res, true);
-            // A screening trial prices `DCT_DCT` alone, whatever the search holds.
-            assert_eq!(e.select_tx_type(&site, &pred, &res, false).symbol, 1);
             let cost_of = |tx: TxType, symbol: usize| {
                 let levels = e.quantize_tx(&res, TxSize::Tx4x4, tx);
                 let (rate, ..) = e.coeff_rate(
