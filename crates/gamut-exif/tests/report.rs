@@ -301,70 +301,87 @@ fn a_truncated_blob_never_drops_a_sub_ifd_without_naming_it() {
 /// reader's catch-all `None` arm: no bytes, no error, no report entry, inside the very region this
 /// report claims completeness over. The rule is structural, not a support level: Exif 3.0 §4.6.9.2
 /// Table 21 states the pair's level per thumbnail-format column, an axis that is not the two-valued
-/// `Compression` tag — which this reader does not consult at all: `Thumbnail::compression` exposes
-/// it, but nothing in the parse branches on it (issue #574) — so the fixture's `Compression` value
-/// is scene-setting, not the trigger.
+/// `Compression` tag — which this reader deliberately does not consult (#574): the offset is
+/// stripped from the model whatever `Compression` says, so naming it only under **Compressed**
+/// would leave the uncompressed case a silent discard. Hence the sweep over `Compression` = 6, 1
+/// and absent: it is the trigger in none of them.
 #[test]
 fn a_thumbnail_offset_without_a_length_is_named() {
-    let mut thumb = Ifd::new();
-    thumb.set(0x0103, Value::Short(vec![6])); // Compression = JPEG
-    thumb.set(THUMB_OFFSET, Value::Long(vec![4])); // ...in bounds, so not OutOfBounds
-    // ...and deliberately no THUMB_LENGTH.
+    for compression in [Some(6), Some(1), None] {
+        let mut thumb = Ifd::new();
+        if let Some(c) = compression {
+            thumb.set(0x0103, Value::Short(vec![c])); // Compression
+        }
+        thumb.set(THUMB_OFFSET, Value::Long(vec![4])); // ...in bounds, so not OutOfBounds
+        // ...and deliberately no THUMB_LENGTH.
 
-    let (exif, report) = ExifReader::new()
-        .parse_with_report(&tiff(vec![image_ifd(), thumb]))
-        .expect("lenient parse");
+        let (exif, report) = ExifReader::new()
+            .parse_with_report(&tiff(vec![image_ifd(), thumb]))
+            .expect("lenient parse");
 
-    assert_eq!(
-        exif.thumbnail().and_then(|t| t.jpeg()),
-        None,
-        "there is no length, so there are no bytes"
-    );
-    assert_eq!(report.dropped().len(), 1, "{:?}", report.dropped());
-    let dropped = report.dropped()[0];
-    assert_eq!(dropped.region(), DroppedRegion::ThumbnailJpeg);
-    assert_eq!(dropped.tag(), Some(THUMB_OFFSET));
-    assert_eq!(dropped.offset(), 4, "named at the offset the tag carried");
-    assert_eq!(
-        dropped.reason(),
-        DropReason::ThumbnailLengthMissing,
-        "not OutOfBounds — the address is inside the blob; the length is what is missing"
-    );
+        assert_eq!(
+            exif.thumbnail().and_then(|t| t.jpeg()),
+            None,
+            "Compression {compression:?}: there is no length, so there are no bytes"
+        );
+        assert_eq!(
+            report.dropped().len(),
+            1,
+            "Compression {compression:?}: {:?}",
+            report.dropped()
+        );
+        let dropped = report.dropped()[0];
+        assert_eq!(dropped.region(), DroppedRegion::ThumbnailJpeg);
+        assert_eq!(dropped.tag(), Some(THUMB_OFFSET));
+        assert_eq!(dropped.offset(), 4, "named at the offset the tag carried");
+        assert_eq!(
+            dropped.reason(),
+            DropReason::ThumbnailLengthMissing,
+            "not OutOfBounds — the address is inside the blob; the length is what is missing"
+        );
+    }
 }
 
-/// A thumbnail with neither JPEG tag is an uncompressed thumbnail, not a loss, and reports nothing.
+/// A thumbnail with no JPEG offset addresses no JPEG bytes, so it is not a loss and reports nothing.
 ///
 /// The other direction of the pair: a `JPEGInterchangeFormatLength` on its own addresses no bytes
 /// at all, so there is nothing to name. Without this, reporting the incomplete pair could be
 /// "fixed" by reporting every thumbnail that has no JPEG, which would make the signal noise.
 ///
-/// This pins the *reporting* contract only. Whether a length-only 1st IFD should nonetheless be
-/// *rejected* in strict mode is open, and filed as issue #574: it is equally non-conformant (Exif
-/// 3.0 §4.6.9.2 Table 21 gives both tags one level per thumbnail-format column — `M` under
-/// **Compressed**, `N` under the three uncompressed ones — and that axis is not the two-valued
-/// `Compression` tag), but it is not equally a *loss*, which is what this report names. An offset
-/// with no length addresses bytes; a length with no offset addresses nothing. Both fixtures here
-/// are uncompressed, where the table forbids either tag.
+/// Nor is a length-only 1st IFD *rejected* in strict mode, under any `Compression` (#574). It is
+/// non-conformant (Exif 3.0 §4.6.9.2 Table 21 gives both tags one level per thumbnail-format
+/// column — `M` under **Compressed**, `N` under the three uncompressed ones), but it is not a
+/// *loss*, which is what this report names and what strictness refuses: under **Compressed** it
+/// addresses exactly what a 1st IFD with neither tag does — nothing — and strictness is not a
+/// Table 21 support-level check. Swept over uncompressed (where the table forbids either tag) and
+/// compressed (where it mandates both), each parsed leniently and strictly.
 #[test]
 fn a_thumbnail_with_no_jpeg_range_reports_nothing() {
-    for extra in [None, Some((THUMB_LENGTH, 16))] {
-        let mut thumb = Ifd::new();
-        thumb.set(0x0103, Value::Short(vec![1])); // Compression = uncompressed
-        if let Some((tag, value)) = extra {
-            thumb.set(tag, Value::Long(vec![value]));
+    for compression in [1, 6] {
+        for extra in [None, Some((THUMB_LENGTH, 16))] {
+            let mut thumb = Ifd::new();
+            thumb.set(0x0103, Value::Short(vec![compression])); // Compression
+            if let Some((tag, value)) = extra {
+                thumb.set(tag, Value::Long(vec![value]));
+            }
+            let blob = tiff(vec![image_ifd(), thumb]);
+            for strict in [false, true] {
+                let (exif, report) = ExifReader::new()
+                    .strict(strict)
+                    .parse_with_report(&blob)
+                    .expect("no range was addressed, so there is nothing to reject");
+                assert!(
+                    exif.thumbnail().is_some(),
+                    "the 1st IFD is still a thumbnail"
+                );
+                assert!(
+                    report.is_empty(),
+                    "Compression {compression}, {extra:?}, strict {strict}: nothing was \
+                     addressed, so nothing was dropped: {:?}",
+                    report.dropped()
+                );
+            }
         }
-        let (exif, report) = ExifReader::new()
-            .parse_with_report(&tiff(vec![image_ifd(), thumb]))
-            .expect("lenient parse");
-        assert!(
-            exif.thumbnail().is_some(),
-            "the 1st IFD is still a thumbnail"
-        );
-        assert!(
-            report.is_empty(),
-            "nothing was addressed, so nothing was dropped: {:?}",
-            report.dropped()
-        );
     }
 }
 

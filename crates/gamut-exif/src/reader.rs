@@ -285,35 +285,43 @@ mod tests {
     /// message is pinned because it must state that structural fact and *not* claim a missing
     /// mandatory tag: Exif 3.0 §4.6.9.2 Table 21 makes the pair mandatory only under
     /// `Compression = Compressed`, and forbids recording either tag under the uncompressed
-    /// columns (issue #574). The lenient half of the contract is the report, pinned in
-    /// `tests/report.rs`.
+    /// columns. The lenient half of the contract is the report, pinned in `tests/report.rs`.
+    ///
+    /// Swept over `Compression` = 6, 1 and absent because the rule is deliberately unconditional
+    /// on it (#574): no mutant reads `Compression` here, so this is the guard against an edit that
+    /// starts to.
     #[test]
     fn a_thumbnail_offset_without_a_length_is_rejected_strictly() {
-        let mut image = Ifd::new();
-        image.set(0x010F, Value::Ascii("Canon".into()));
-        let mut thumb = Ifd::new();
-        thumb.set(ExifTag::Compression.tag_id(), Value::Short(vec![6]));
-        thumb.set(
-            ExifTag::JpegInterchangeFormat.tag_id(),
-            Value::Long(vec![4]),
-        );
-        // ...and deliberately no JpegInterchangeFormatLength.
-        let bytes = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![image, thumb],
-        })
-        .expect("write");
+        for compression in [Some(6), Some(1), None] {
+            let mut image = Ifd::new();
+            image.set(0x010F, Value::Ascii("Canon".into()));
+            let mut thumb = Ifd::new();
+            if let Some(c) = compression {
+                thumb.set(ExifTag::Compression.tag_id(), Value::Short(vec![c]));
+            }
+            thumb.set(
+                ExifTag::JpegInterchangeFormat.tag_id(),
+                Value::Long(vec![4]),
+            );
+            // ...and deliberately no JpegInterchangeFormatLength.
+            let bytes = write(&TiffFile {
+                order: ByteOrder::LittleEndian,
+                variant: Variant::Classic,
+                ifds: vec![image, thumb],
+            })
+            .expect("write");
 
-        let err = ExifReader::new()
-            .strict(true)
-            .parse(&bytes)
-            .expect_err("strict must reject half a thumbnail pair");
-        assert_eq!(
-            err.to_string(),
-            "invalid thumbnail: JPEGInterchangeFormat offset with no length to size it",
-            "the message must name the unreadable range, not a missing mandatory tag"
-        );
+            let err = ExifReader::new()
+                .strict(true)
+                .parse(&bytes)
+                .expect_err("strict must reject half a thumbnail pair");
+            assert_eq!(
+                err.to_string(),
+                "invalid thumbnail: JPEGInterchangeFormat offset with no length to size it",
+                "Compression {compression:?}: the message must name the unreadable range, not a \
+                 missing mandatory tag"
+            );
+        }
     }
 
     #[test]
