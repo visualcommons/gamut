@@ -358,22 +358,15 @@ const MAX_POINTER_DEPTH: usize = 2;
 /// the typed `IFD` (13) of TIFF Technical Note 1, and BigTIFF's `LONG8` (16) / `IFD8` (18).
 ///
 /// The same set [`gamut_ifd::resolve_subtree`] follows, stated as **codes** rather than as
-/// [`Value`] variants, and that difference is the whole of this constant's reason to exist.
-/// The resolver answers about a value the *reader* parsed, where the variant and the on-disk
-/// code agree by construction. [`check_exif_subtree`] answers about a value a *caller* built,
-/// which nothing has written yet — and there the two can disagree: [`gamut_ifd::UnknownValue`]
-/// carries an arbitrary type code beside its value word (its constructor validates only the
-/// word's width), [`gamut_ifd::write`] emits that code verbatim, and the reader classifies the
-/// entry by it. A `Value::Unknown` built at 4, 13, 16 or 18 is therefore a plain field to a
-/// variant-shaped predicate and a **pointer** to the reader: it encoded cleanly and then failed
-/// this crate's own [`read_metadata`] with `read out of bounds` or `value offset out of bounds`.
-/// The discriminator that survives the write/read boundary is the code, so the writer asks about
-/// the code.
+/// [`Value`] variants, because the reader classifies an entry by the code it parses and the code
+/// is the discriminator that survives the write/read boundary ([`Value::type_code`], total over
+/// every variant). A `Value::Unknown` once carried an arbitrary code beside its word, so one built
+/// at 4, 13, 16 or 18 was a plain field to a variant-shaped predicate and a **pointer** to the
+/// reader; [`gamut_ifd::UnknownValue::new`] now refuses every recognised code, so variant and code
+/// agree for every value a caller can build, and asking the code stays correct either way.
 ///
 /// The membership is pinned against the resolver over the whole code space by
-/// `the_pointer_type_codes_are_exactly_the_codes_the_resolver_follows`. The sibling half — a
-/// `gamut-ifd` constructor that accepts a *known* code into `Unknown` at all — is issue #608 and
-/// is not fixable from this crate.
+/// `the_pointer_type_codes_are_exactly_the_codes_the_resolver_follows`.
 const POINTER_TYPE_CODES: &[u16] = &[4, 13, 16, 18];
 
 /// Whether the reader would follow `value` as a sub-IFD pointer once it has been written out and
@@ -711,24 +704,14 @@ mod tests {
             .collect()
     }
 
-    /// One `Value` per **well-formed** directory entry representable in a file of `variant`: the
-    /// natural variant of every recognised type code, the [`Value::Unknown`] form carrying that
-    /// same code with an opaque value word, and the `Unknown` form at a few codes no field type
+    /// One `Value` per directory entry representable in a file of `variant`: the natural variant
+    /// of every recognised type code, and the [`Value::Unknown`] form at a few codes no field type
     /// claims.
     ///
     /// Derived from [`every_type_code`], so a type added upstream enters this sweep without an
-    /// edit here; the `Unknown` arm exists because it is the one shape whose in-memory variant and
-    /// on-disk code disagree, which is the whole subject of the sweep.
-    ///
-    /// **Well-formed** excludes one thing, and only for the `Unknown` arm: a single value of a
-    /// recognised type wider than the variant's value word would be written *out of line*, and the
-    /// word an `UnknownValue` carries is then a raw file offset a test cannot know. Such an entry
-    /// is unreadable whatever tag it sits under — `Rational` under `Classic` fails
-    /// `read_metadata` with `value offset out of bounds` — so it is a malformed entry rather than a
-    /// misclassified pointer, and this crate cannot refuse it without refusing every vendor entry
-    /// of an unrecognised type read out of a real file. That gap is issue #608, on the constructor
-    /// that admits it. All four pointer codes are still swept: 4 and 13 fit both variants' words,
-    /// 16 and 18 fit BigTIFF's.
+    /// edit here. `Unknown` appears only at unclaimed codes because
+    /// [`gamut_ifd::UnknownValue::new`] refuses a recognised one (#608): that is what keeps a
+    /// value's in-memory variant and its on-disk code in agreement, the subject of this sweep.
     fn every_representable_value(variant: Variant) -> Vec<(String, Value)> {
         let word = vec![8u8; variant.offset_size()];
         let unknown = |code: u16| {
@@ -741,9 +724,6 @@ mod tests {
         for code in every_type_code() {
             let ty = gamut_ifd::FieldType::from_code(code).expect("a swept code");
             values.push((format!("{ty:?}({code})"), canonical_value(ty)));
-            if ty.size() <= variant.offset_size() {
-                values.push((format!("Unknown({code})"), unknown(code)));
-            }
         }
         // Controls: codes no field type claims, so the entry is unsizable and stays `Unknown` on
         // the way back — the word is never followed.
@@ -1034,15 +1014,16 @@ mod tests {
     fn every_value_the_writer_accepts_under_a_pointer_tag_reads_back_as_a_field() {
         // The regression this crate kept reopening, stated at the boundary it kept breaking at.
         // `check` was shaped by the `Value` variant while the reader classifies by the on-disk
-        // type code, and `Value::Unknown` is the one shape where those disagree: built at code 4,
-        // 13, 16 or 18 it is a plain field to a variant-shaped predicate and a pointer to the
+        // type code, and `Value::Unknown` was the one shape where those disagreed: built at code 4,
+        // 13, 16 or 18 it was a plain field to a variant-shaped predicate and a pointer to the
         // reader, so it encoded cleanly and then failed `read_metadata` — or, in BigTIFF at the
-        // top level, came back as a *group* where a field was written.
+        // top level, came back as a *group* where a field was written. `gamut-ifd` now refuses
+        // that `Unknown` at construction (#608).
         //
-        // The sweep is derived, not listed: every representable entry type (natural and `Unknown`
-        // at every code) x the four pointer tags x classic and BigTIFF x on the Exif directory
-        // itself and one level below it. Only accepted sets are exercised; that the refused ones
-        // are exactly the pointer-coded ones is
+        // The sweep is derived, not listed: every representable entry type (every recognised
+        // code, and `Unknown` at unclaimed codes) x the four pointer tags x classic and BigTIFF x
+        // on the Exif directory itself and one level below it. Only accepted sets are exercised;
+        // that the refused ones are exactly the pointer-coded ones is
         // `the_pointer_type_codes_are_exactly_the_codes_the_resolver_follows`.
         for variant in [Variant::Classic, Variant::Big] {
             for (name, value) in every_representable_value(variant) {

@@ -128,10 +128,11 @@ this crate's own reader with `read out of bounds` or `sub-IFD pointer loop`. A f
 the four tags whose **on-disk type code** is a pointer's own (`LONG` 4, `IFD` 13, `LONG8` 16,
 `IFD8` 18) is therefore refused; any other type under those tags is not a pointer to either side
 and round-trips unchanged. The discriminator is the *code*, not the in-memory `Value` variant,
-because the two disagree for exactly one shape: `Value::Unknown` carries an arbitrary code beside
-its value word, the writer emits the code verbatim, and the reader classifies by it — so an
-`Unknown` built at 4, 13, 16 or 18 was a plain field to a variant-shaped check and a pointer to
-the reader. *Pair*: a tag given both a field and a group is two entries under one tag, which
+because the reader classifies by the code. The two once disagreed for exactly one shape:
+`Value::Unknown` carried an arbitrary code beside its value word, so an `Unknown` built at 4, 13,
+16 or 18 was a plain field to a variant-shaped check and a pointer to the reader. `gamut-ifd`
+now refuses a recognised code in `UnknownValue::new` (#608), so variant and code agree for every
+value a caller can build. *Pair*: a tag given both a field and a group is two entries under one tag, which
 TIFF 6.0 §2 does not allow and which readers resolve in opposite directions — this crate keeps the
 last occurrence, libtiff ignores everything after the first — so it is refused too. All four are
 `Error::InvalidInput` from `with_metadata`'s encode before any pixel work, on **every** public

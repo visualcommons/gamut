@@ -298,7 +298,7 @@ impl DngEncoder {
     /// [`DngMetadata::exif`] sub-IFD, or a directory nested in it, carries a field under a
     /// standard pointer tag (`SubIFDs`, `ExifIFD`, `GPSInfo`, `InteroperabilityIFD`) whose on-disk
     /// type is a pointer's own (`LONG`, `IFD`, `LONG8`, `IFD8`, judged by [`Value::type_code`],
-    /// so a `Value::Unknown` at one of those codes counts), or stores one tag twice (a field and
+    /// the code the reader classifies by), or stores one tag twice (a field and
     /// a sub-IFD group, or two groups): either would be written into a file
     /// [`DngRewrite::open`](crate::DngRewrite::open) refuses or reads back changed.
     /// Propagates buffer/validation errors.
