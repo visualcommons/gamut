@@ -81,16 +81,16 @@ type ItemAssociations = Vec<(u32, Vec<(u16, bool)>)>;
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] if a box is truncated or overruns, a required box (`ftyp`,
-/// `meta` in a file without a track, `hdlr`, `pitm`, `iinf`) is missing, an `iloc` extent overflows or points outside its
-/// source, the items' extents sum to more than the file size, an `ipma` property index is out of
-/// range, an `iref` names an unknown `from_item`, or a string is not UTF-8. A malformed top-level
+/// `meta` in a file without a track, `hdlr`, `pitm`, `iinf`) is missing, an `iloc` extent
+/// overflows or points outside its source, the items' extents sum to more than the file size, an
+/// `ipma` property index is out of range, an `iref` names an unknown `from_item`, or a string is
+/// not UTF-8. A malformed top-level
 /// box is only an error *before* both `ftyp` and `meta` have been parsed; after that it is treated
 /// as the start of an appended vendor trailer and stops the walk cleanly.
 /// Returns [`Error::Unsupported`] for structurally valid but out-of-scope features: a
 /// sequence-only file (a top-level `moov`/`trak` and no `meta`, so no still item — a `moov` beside
 /// a `meta` is skipped), a non-`pict` handler, protected items, `uri ` items, external data
-/// references, `iloc` `construction_method` 2, and box versions beyond those
-/// listed above.
+/// references, `iloc` `construction_method` 2, and box versions beyond those listed above.
 pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
     let mut top = BoxReader::new(data);
     let mut ftyp = None;
