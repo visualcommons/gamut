@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::Av1Colour;
-use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
+use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder, Speed};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr,
@@ -181,6 +181,7 @@ fn encode16(encoder: &AvifEncoder) -> Result<Vec<u8>> {
 struct Wide {
     log: Arc<Mutex<Vec<String>>>,
     depth_seen: Arc<Mutex<Option<BitDepth>>>,
+    speed_seen: Arc<Mutex<Option<Speed>>>,
 }
 
 impl Av1StillEncoder for Wide {
@@ -195,6 +196,7 @@ impl Av1StillEncoder for Wide {
     fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
         self.log.lock().unwrap().push("wide:encode16".into());
         *self.depth_seen.lock().unwrap() = Some(req.bit_depth());
+        *self.speed_seen.lock().unwrap() = Some(req.speed());
         assert_eq!(planes.bit_depth(), req.bit_depth());
         Ok(
             gamut_av1::encode_still_intra16_with(planes, req.base_q_idx(), req.colour())
@@ -237,6 +239,7 @@ fn a_backend_that_opts_in_owns_the_high_bit_depth_job() {
     encoder.push_backend(Wide {
         log: Arc::clone(&log),
         depth_seen: Arc::clone(&depth_seen),
+        speed_seen: Arc::new(Mutex::new(None)),
     });
     let out = encode16(&encoder).expect("the backend owns the job");
     assert_eq!(events(&log), ["wide:encode16"]);
@@ -245,6 +248,29 @@ fn a_backend_that_opts_in_owns_the_high_bit_depth_job() {
     // The container re-derives `av1C`/`colr` from the returned stream, so a backend-supplied
     // 12-bit picture is described exactly as the built-in one is.
     assert_eq!(out, encode16(&AvifEncoder::new()).unwrap());
+}
+
+/// The high-bit-depth request carries the encoder's preset to the backend that owns the job, at
+/// both coded depths — the 8-bit path is not the only one a pushed backend sees it on.
+#[test]
+fn a_high_bit_depth_backend_sees_the_chosen_preset() {
+    for depth in [BitDepth::Ten, BitDepth::Twelve] {
+        let speed_seen = Arc::new(Mutex::new(None));
+        let mut encoder = AvifEncoder::new()
+            .with_bit_depth(depth)
+            .with_speed(Speed::Fastest);
+        encoder.push_backend(Wide {
+            log: log(),
+            depth_seen: Arc::new(Mutex::new(None)),
+            speed_seen: Arc::clone(&speed_seen),
+        });
+        encode16(&encoder).unwrap_or_else(|e| panic!("{depth:?}: {e}"));
+        assert_eq!(
+            *speed_seen.lock().unwrap(),
+            Some(Speed::Fastest),
+            "{depth:?}"
+        );
+    }
 }
 
 #[test]
@@ -1107,6 +1133,8 @@ struct AbiStub {
     seen_config: Option<(u32, u32, Option<u8>)>,
     /// The image descriptor the adapter lowered, captured at `encode` time.
     seen_image: Option<SeenImage>,
+    /// The whole `extra` blob the adapter passed, whatever its length, captured at `encode` time.
+    seen_extra: Option<Vec<u8>>,
 }
 
 impl AbiStub {
@@ -1117,6 +1145,7 @@ impl AbiStub {
             chunks,
             seen_config: None,
             seen_image: None,
+            seen_extra: None,
         }
     }
 
@@ -1145,6 +1174,10 @@ impl Encoder for AbiStub {
         sink: &mut dyn FnMut(&[u8]) -> Status,
     ) -> Status {
         self.seen_config = Some(Self::capture_config(cfg));
+        // SAFETY-equivalent: `extra` is `extra_len` bytes borrowed for the call.
+        self.seen_extra = Some(
+            unsafe { std::slice::from_raw_parts(cfg.extra.cast::<u8>(), cfg.extra_len) }.to_vec(),
+        );
         assert!(image.is_abi_current());
         let first = [0, 1, 2].map(|i| unsafe { *image.planes[i] });
         self.seen_image = Some((
@@ -1248,6 +1281,34 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
             ],
             first,
         ))
+    );
+}
+
+/// The speed preset crosses the C seam as `extra[1]` — the `Speed` discriminant — behind the
+/// `base_q_idx`, and only off the full search: the default encoder lowers the one-byte blob a
+/// pre-speed backend was always handed.
+#[test]
+fn abi_adapter_appends_a_non_default_speed_to_the_extra_blob() {
+    let colour = Av1Colour {
+        matrix: MatrixCoefficients::Bt709,
+        ..Av1Colour::default()
+    };
+    let obus = builtin_obus(127, colour, ChromaSubsampling::Cs420);
+    let extra_for = |encoder: AvifEncoder| {
+        let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(
+            Status::OK,
+            Status::OK,
+            vec![obus.clone()],
+        ))));
+        let mut encoder = encoder;
+        encoder.push_backend(AbiAv1StillEncoder::new(stub.clone()));
+        encode(&encoder).expect("adapter encodes");
+        stub.0.lock().unwrap().seen_extra.clone()
+    };
+    assert_eq!(extra_for(AvifEncoder::lossy(50)), Some(vec![127]));
+    assert_eq!(
+        extra_for(AvifEncoder::lossy(50).with_speed(Speed::Fastest)),
+        Some(vec![127, 3])
     );
 }
 
