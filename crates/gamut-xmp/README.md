@@ -153,8 +153,10 @@ changed — every existing variant, URI, prefix and method keeps its meaning.
   additionally maps the slashed form to the `dwc` **prefix** on read (`DWC_URI_TRAILING_SLASH`), so
   a packet the engine wrote re-serializes under `dwc` rather than a synthesized prefix. It does not
   rewrite the URI — the graph keeps the slashed URI its packet declared — so a caller resolving such
-  a property by URI passes `DWC_URI_TRAILING_SLASH`, not `WellKnownNs::DarwinCore.uri()`
-  (issue #547).
+  a property by URI passes `DWC_URI_TRAILING_SLASH`, not `WellKnownNs::DarwinCore.uri()`. That is
+  a recorded decision (issue #547, `STATUS.md`): byte fidelity of the declared URI is kept and
+  lookup by `uri()` is given up for such a graph; an opt-in canonicalizing reader is deferred until
+  a consumer needs it.
 - **Mutation-clean** — `cargo mutants` passes with zero gamut-xmp exclusions in
   `.cargo/mutants.toml`.
 - **No benches, intentionally** — the crate has no performance contract; packets are a few KB.

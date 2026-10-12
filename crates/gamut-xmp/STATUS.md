@@ -58,8 +58,18 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   canonicalize, so such a graph keeps the slashed URI its packet declared and a caller must look the
   property up under `DWC_URI_TRAILING_SLASH` — `get_text(WellKnownNs::DarwinCore.uri(), …)` returns
   `None` for it. `from_uri(u).map(uri) == Some(u)` therefore holds for every registry entry and not
-  for the alias, pinned as such in `namespace.rs`. Canonicalizing on read — which would trade byte
-  fidelity for that symmetry — is filed as issue #547 for when a consumer needs it.
+  for the alias, pinned as such in `namespace.rs`.
+- **Decided: reading does not canonicalize a well-known namespace URI (issue #547).** Of the two
+  properties a `dwc` packet written by exiv2/XMPCore cannot have at once, **byte fidelity is
+  kept** — the graph is a faithful record of the namespace URI the packet declared, and writing it
+  back emits that same `…/index.htm/` — and **lookup by `WellKnownNs::DarwinCore.uri()` is given
+  up** for such a graph: a caller resolves its properties by `DWC_URI_TRAILING_SLASH`, the URI the
+  packet carries. Rewriting the declared URI to `uri()` on read would close that asymmetry at the
+  cost of changing bytes exiv2 wrote for the one schema affected, and no consumer needs it. Pinned
+  against the oracle by `tests/oracle.rs::an_xmpcore_written_dwc_graph_keeps_the_slashed_uri_it_declared`.
+  **Deferred:** an opt-in canonicalization knob (a `ConvertPolicy`-style setting on the reader,
+  never a silent rewrite) is the shape a consumer that needs `uri()` lookup would add; it is not
+  planned until one asks.
 - **Sidecars require `x:xmpmeta` (issue #421).** `XmpSidecar::read` accepts everything
   `XmpMeta::from_packet` does — XML declaration, BOM, wrapper or bare — but rejects a document
   whose element is not `x:xmpmeta` with `XmpError::MissingXmpMeta` naming the element found. **This

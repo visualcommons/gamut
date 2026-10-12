@@ -327,6 +327,11 @@ impl WellKnownNs {
     /// [`DWC_URI_TRAILING_SLASH`]: [`XmpMeta::get_text`] with `WellKnownNs::DarwinCore.uri()`
     /// returns `None` for such a graph. Resolve a property by the URI its packet carries.
     ///
+    /// This is deliberate (issue #547): reading keeps the URI a packet declared, so a graph read
+    /// and written back stays byte-faithful to it, and lookup by [`WellKnownNs::uri`] is what that
+    /// gives up for the alias. An opt-in canonicalizing reader is deferred until a consumer needs
+    /// it.
+    ///
     /// [`XmpMeta::get_text`]: crate::XmpMeta::get_text
     #[must_use]
     pub fn from_uri(uri: &str) -> Option<WellKnownNs> {

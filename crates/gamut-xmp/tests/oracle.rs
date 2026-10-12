@@ -8,8 +8,8 @@
 //! Requires the `third_party/exiv2` + `third_party/expat` submodules and a C++ toolchain.
 
 use gamut_xmp::{
-    Namespace, WellKnownNs, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpSidecar, XmpValue,
-    XmpWriter,
+    DWC_URI_TRAILING_SLASH, Namespace, WellKnownNs, XmpArray, XmpItem, XmpMeta, XmpProperty,
+    XmpSidecar, XmpValue, XmpWriter,
 };
 
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -525,6 +525,43 @@ fn darwin_core_record_field_reads_back_under_the_dwc_key() {
     );
     assert_eq!(xmpcore_output_uri(dwc), "http://rs.tdwg.org/dwc/index.htm/");
     struct_field_survives_xmpcore(dwc, "Record", "institutionID", "GAMUT");
+}
+
+#[test]
+fn an_xmpcore_written_dwc_graph_keeps_the_slashed_uri_it_declared() {
+    // Issue #547's recorded decision: reading does not canonicalize a well-known namespace URI.
+    // A graph parsed from the packet XMPCore writes for Darwin Core carries the slashed URI that
+    // packet declared — the property is found under `DWC_URI_TRAILING_SLASH` and *not* under
+    // `WellKnownNs::DarwinCore.uri()` — and writing it back keeps that URI while the read alias
+    // restores the `dwc` prefix. Byte fidelity is the property kept; URI lookup by `uri()` is
+    // the one given up.
+    let meta = one_text(WellKnownNs::DarwinCore, "institutionCode", "GAMUT");
+    let written =
+        exiv2_oracle::roundtrip(&packet_xmpcore_accepts(&meta)).expect("exiv2 round-trip");
+    assert!(
+        std::str::from_utf8(&written)
+            .unwrap()
+            .contains("\"http://rs.tdwg.org/dwc/index.htm/\""),
+        "the fixture must be the slashed form XMPCore writes"
+    );
+
+    let parsed = XmpMeta::from_packet(&written).expect("gamut parses exiv2's output");
+    assert_eq!(
+        parsed.get_text(DWC_URI_TRAILING_SLASH, "institutionCode"),
+        Some("GAMUT"),
+        "the graph keys the property by the URI the packet declared"
+    );
+    assert_eq!(
+        parsed.get_text(WellKnownNs::DarwinCore.uri(), "institutionCode"),
+        None,
+        "reading does not rewrite the declared URI to the registered one"
+    );
+    assert!(
+        std::str::from_utf8(&parsed.to_packet())
+            .unwrap()
+            .contains("xmlns:dwc=\"http://rs.tdwg.org/dwc/index.htm/\""),
+        "re-serialization keeps the declared URI under the `dwc` prefix the alias resolves"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------
