@@ -95,8 +95,12 @@ The sandbox exposes:
 - `convert` — decode PNG/JPEG/PPM/WebP/JXL and encode to a gamut codec, one input or many (run
   in parallel, one worker per core, into an output directory), with `-` for standard input/output,
   `-f`/`--overwrite`, `-q`/`--quiet`, and exit status 1 when any input fails:
-  - **AVIF** — lossless (default) or lossy intra via `--qindex`, keeping the input's alpha, grey
-    and 16-bit depth; the summary line splits the file into colour, alpha and container bytes.
+  - **AVIF** — lossless (default) or lossy intra via `--avif-lossy --quality` (`--qindex` is a
+    deprecated alias), keeping the input's alpha, grey and 16-bit depth; `--avif-speed` (0–3),
+    `--avif-threads` (`0` = every core), `--avif-alpha-quality` (0–100), `--avif-clean-alpha`,
+    `--avif-matrix` (identity/bt601/bt709/bt2020), `--avif-depth` (8/10/12) and `--avif-chroma`
+    (444/422/420) tune the encode; the summary line splits the file into colour, alpha and
+    container bytes.
   - **WebP** — lossless VP8L (default) or lossy VP8 via `--lossy --quality`, with transparency
     preserved; emits a simple file when fully opaque and an extended (`VP8X`/`ALPH`) file otherwise.
   - **JPEG XL** — lossless (default) or lossy via `--jxl-distance`, with `--jxl-effort` (1–10) and

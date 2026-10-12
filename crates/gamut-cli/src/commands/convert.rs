@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::{Args, ValueEnum};
-use gamut::avif::{AvifEncodeReport, AvifEncoder};
+use gamut::avif::{AvifEncodeReport, AvifEncoder, Speed as AvifSpeed};
+use gamut::color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
 use gamut::core::{EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut::jpeg::{ChromaSubsampling as JpegChroma, JpegEncoder};
 use gamut::jxl::{
@@ -45,13 +46,55 @@ pub(crate) struct ConvertArgs {
     /// Do not print the per-file summary lines. Errors are still reported on stderr.
     #[arg(short, long)]
     quiet: bool,
-    /// AVIF mode selector: `0` keeps the lossless default; any nonzero value selects lossy AVIF at
-    /// `--quality` (the encoder now takes a `0..=100` quality rather than a raw `base_q_idx`).
+    /// Deprecated: use `--avif-lossy`. Any nonzero value selects lossy AVIF at `--quality`, exactly
+    /// as `--avif-lossy` does, and prints a deprecation warning; `0` changes nothing.
     #[arg(long, default_value_t = 0)]
     qindex: u8,
-    /// Encode lossy (WebP VP8 intra) instead of lossless. For AVIF, select lossy with `--qindex`.
+    /// Encode lossy (WebP VP8 intra) instead of lossless. For AVIF, select lossy with
+    /// `--avif-lossy`.
     #[arg(long)]
     lossy: bool,
+    /// Encode lossy AVIF at `--quality` instead of the lossless default. Ignored for other output
+    /// formats.
+    #[arg(long)]
+    avif_lossy: bool,
+    /// AVIF encoder speed, 0 (the full search, the default) to 3 (the fastest): `gamut-av1`'s
+    /// presets thorough, balanced, fast and fastest. A time control, not a size one — a faster
+    /// preset can come out smaller or larger. Only lossy AVIF is searched; lossless codes the same
+    /// bytes at every speed. Ignored for other output formats.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=3))]
+    avif_speed: u8,
+    /// Most threads one AVIF encode may use; `0` means every available core. The output is the
+    /// same at every count. Several inputs already convert in parallel, one per core, so each of
+    /// them multiplies this. Ignored for other output formats.
+    #[arg(long, default_value_t = 1)]
+    avif_threads: usize,
+    /// Lossy quality of the AVIF alpha channel, 0–100, independent of the colour's `--quality`
+    /// (which it follows when omitted). Ignored by lossless AVIF, by input without alpha, and for
+    /// other output formats.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    avif_alpha_quality: Option<u8>,
+    /// Replace the colour hidden under transparent pixels with a bleed of the visible edge before
+    /// a lossy AVIF encode, so no bits are spent on colour nobody sees. The displayed image does
+    /// not change. Ignored by lossless AVIF, by input without alpha, and for other output formats.
+    #[arg(long)]
+    avif_clean_alpha: bool,
+    /// AVIF colour matrix for lossy encoding: `identity` (RGB planes, forces 4:4:4), `bt601`,
+    /// `bt709` (the default) or `bt2020`. Lossless AVIF always uses `identity`. Ignored for other
+    /// output formats.
+    #[arg(long = "avif-matrix", value_enum)]
+    avif_matrix: Option<AvifMatrix>,
+    /// AVIF coded bit depth: `8`, `10` or `12`. Defaults to the input's own — 8 for an 8-bit
+    /// input, 12 for a 16-bit one; `8` is refused for a 16-bit input. An 8-bit input coded at 10
+    /// or 12 bits stays exact under lossless and rounds less under lossy. Ignored for other output
+    /// formats.
+    #[arg(long = "avif-depth", value_enum)]
+    avif_depth: Option<AvifDepth>,
+    /// AVIF chroma subsampling for lossy colour: `444` (none), `422`, or `420` (the default).
+    /// Lossless AVIF and the `identity` matrix always keep 4:4:4, and input with alpha is coded
+    /// 4:4:4 whatever is set here. Ignored for other output formats.
+    #[arg(long = "avif-chroma", value_enum)]
+    avif_chroma: Option<AvifChroma>,
     /// Lossy quality, 0–100 (higher is better but larger). Used with WebP `--lossy`, lossy AVIF,
     /// and JPEG (which is always lossy).
     #[arg(long, default_value_t = 75)]
@@ -129,8 +172,8 @@ pub(crate) struct ConvertArgs {
 /// Output container/codec for `gamut convert`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum OutputFormat {
-    /// AVIF — lossless or lossy intra via `--qindex`; keeps the input's alpha and grey, and codes
-    /// a 16-bit input at 12 bits.
+    /// AVIF — lossless or lossy intra via `--avif-lossy`; keeps the input's alpha and grey, and
+    /// codes a 16-bit input at 12 bits.
     Avif,
     /// WebP — lossless (VP8L) or lossy (VP8, with `--lossy`); transparency is preserved.
     Webp,
@@ -157,6 +200,81 @@ pub(crate) enum JpegSubsampling {
     /// 4:2:0 — halve chroma both horizontally and vertically.
     #[value(name = "420")]
     S420,
+}
+
+/// CICP matrix for lossy AVIF output — the four [`MatrixCoefficients`] the AVIF encoder codes.
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum AvifMatrix {
+    /// Identity: the R'G'B' samples as GBR planes, no luma–chroma decorrelation; forces 4:4:4.
+    Identity,
+    /// BT.601 YCbCr.
+    Bt601,
+    /// BT.709 YCbCr; the lossy default.
+    Bt709,
+    /// BT.2020 non-constant-luminance YCbCr.
+    Bt2020,
+}
+
+impl AvifMatrix {
+    /// Maps the CLI choice onto the codec's [`MatrixCoefficients`].
+    fn to_codec(self) -> MatrixCoefficients {
+        match self {
+            AvifMatrix::Identity => MatrixCoefficients::Identity,
+            AvifMatrix::Bt601 => MatrixCoefficients::Bt601,
+            AvifMatrix::Bt709 => MatrixCoefficients::Bt709,
+            AvifMatrix::Bt2020 => MatrixCoefficients::Bt2020Ncl,
+        }
+    }
+}
+
+/// Coded bit depth for AVIF output — the three depths AV1 codes (§6.4.1).
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum AvifDepth {
+    /// 8 bits; 8-bit input only.
+    #[value(name = "8")]
+    D8,
+    /// 10 bits.
+    #[value(name = "10")]
+    D10,
+    /// 12 bits.
+    #[value(name = "12")]
+    D12,
+}
+
+impl AvifDepth {
+    /// Maps the CLI choice onto the codec's [`BitDepth`].
+    fn to_codec(self) -> BitDepth {
+        match self {
+            AvifDepth::D8 => BitDepth::Eight,
+            AvifDepth::D10 => BitDepth::Ten,
+            AvifDepth::D12 => BitDepth::Twelve,
+        }
+    }
+}
+
+/// Chroma subsampling for lossy AVIF output.
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum AvifChroma {
+    /// 4:4:4 — full-resolution chroma (AV1 Profile 1).
+    #[value(name = "444")]
+    S444,
+    /// 4:2:2 — chroma halved horizontally (AV1 Profile 2).
+    #[value(name = "422")]
+    S422,
+    /// 4:2:0 — chroma halved both ways (AV1 Main profile); the lossy default.
+    #[value(name = "420")]
+    S420,
+}
+
+impl AvifChroma {
+    /// Maps the CLI choice onto the codec's [`ChromaSubsampling`].
+    fn to_codec(self) -> ChromaSubsampling {
+        match self {
+            AvifChroma::S444 => ChromaSubsampling::Cs444,
+            AvifChroma::S422 => ChromaSubsampling::Cs422,
+            AvifChroma::S420 => ChromaSubsampling::Cs420,
+        }
+    }
 }
 
 /// Coding-tool selection for JPEG XL output.
@@ -277,6 +395,9 @@ struct Encoded {
 /// available core; each failure is reported on stderr as it happens, and the command then fails
 /// with [`CliError::BatchFailed`] when any did.
 pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
+    if args.qindex != 0 {
+        tracing::warn!("--qindex is deprecated; use --avif-lossy");
+    }
     let plan = plan(args)?;
     if let Some(directory) = &plan.directory {
         std::fs::create_dir_all(directory).map_err(|source| CliError::Io {
@@ -527,13 +648,7 @@ fn encode(
                 bytes = image.byte_len(),
                 "decoded input"
             );
-            // `AvifEncoder` migrated from a raw `base_q_idx` to a lossless()/lossy(quality) model;
-            // qindex 0 keeps the lossless default, any nonzero value selects lossy at --quality.
-            let mut encoder = if args.qindex == 0 {
-                AvifEncoder::lossless()
-            } else {
-                AvifEncoder::lossy(args.quality)
-            };
+            let mut encoder = avif_encoder(args);
             if !args.strip_metadata {
                 encoder = with_avif_metadata(encoder, metadata);
             }
@@ -720,6 +835,47 @@ fn png_metadata(bytes: &[u8]) -> Option<gamut::png::PngMetadata> {
     gamut::png::metadata(bytes).ok()
 }
 
+/// The AVIF encoder the `--avif-*` flags (and the deprecated `--qindex`) describe, before the
+/// input's metadata is attached.
+///
+/// A flag left unset leaves the encoder's own default in place rather than restating it, so the
+/// codec stays the one place a default is decided: the matrix and chroma defaults differ between
+/// lossless and lossy, and the depth default between 8- and 16-bit input.
+fn avif_encoder(args: &ConvertArgs) -> AvifEncoder {
+    // `AvifEncoder` migrated from a raw `base_q_idx` to a lossless()/lossy(quality) model, so
+    // `--qindex` survives only as a deprecated spelling of `--avif-lossy`.
+    let mut encoder = if args.avif_lossy || args.qindex != 0 {
+        AvifEncoder::lossy(args.quality)
+    } else {
+        AvifEncoder::lossless()
+    };
+    // The clap `0..=3` range is `Speed::ALL`'s index range, slowest first —
+    // `the_avif_speed_flag_offers_exactly_the_codec_presets` pins that they agree — so the
+    // fallback is unreachable; it exists because this is a CLI and a panic is not an error report.
+    let speed = AvifSpeed::ALL
+        .get(usize::from(args.avif_speed))
+        .copied()
+        .unwrap_or_default();
+    // `0` is "every core", which the encoder spells `None`, exactly what `NonZeroUsize::new` gives.
+    encoder = encoder
+        .with_speed(speed)
+        .with_threads(NonZeroUsize::new(args.avif_threads))
+        .with_clean_alpha(args.avif_clean_alpha);
+    if let Some(quality) = args.avif_alpha_quality {
+        encoder = encoder.with_alpha_quality(quality);
+    }
+    if let Some(matrix) = args.avif_matrix {
+        encoder = encoder.with_matrix(matrix.to_codec());
+    }
+    if let Some(depth) = args.avif_depth {
+        encoder = encoder.with_bit_depth(depth.to_codec());
+    }
+    if let Some(chroma) = args.avif_chroma {
+        encoder = encoder.with_chroma(chroma.to_codec());
+    }
+    encoder
+}
+
 /// Carries the input's ICC profile and Exif into an AVIF encode, both verbatim.
 ///
 /// The encoder does not validate the Exif stream, and libavif rejects a whole file whose Exif item
@@ -764,11 +920,16 @@ fn format_of(output: &Path) -> Result<OutputFormat, CliError> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
 
     use clap::{Parser, ValueEnum};
+    use gamut::avif::AvifMode;
 
-    use super::{ConvertArgs, Job, OutputFormat, Plan, PngCodecPreset, PngPreset, plan};
+    use super::{
+        AvifEncoder, AvifSpeed, BitDepth, ChromaSubsampling, ConvertArgs, Job, MatrixCoefficients,
+        OutputFormat, Plan, PngCodecPreset, PngPreset, avif_encoder, plan,
+    };
     use crate::error::CliError;
 
     /// `convert`'s arguments as clap parses them from `argv` (without the subcommand name).
@@ -785,6 +946,21 @@ mod tests {
                 .unwrap()
                 .args,
         )
+    }
+
+    /// `convert in.png out.avif <flags>` parsed, or clap's refusal.
+    fn parse_avif(flags: &[&str]) -> Result<ConvertArgs, clap::Error> {
+        Cli::try_parse_from(
+            ["convert", "in.png", "out.avif"]
+                .into_iter()
+                .chain(flags.iter().copied()),
+        )
+        .map(|cli| cli.args)
+    }
+
+    /// The AVIF encoder `convert in.png out.avif <flags>` builds.
+    fn avif_with(flags: &[&str]) -> AvifEncoder {
+        avif_encoder(&parse_avif(flags).unwrap())
     }
 
     /// A job converting `input` to `output` as `format`.
@@ -911,5 +1087,117 @@ mod tests {
             from_flag == from_codec,
             "--png-preset offers levels {from_flag:?} against the codec ladder {from_codec:?}"
         );
+    }
+
+    #[test]
+    fn unset_avif_flags_leave_the_encoder_defaults() {
+        // Each `--avif-*` flag only overrides; without them the encoder is the codec's own.
+        let encoder = avif_with(&[]);
+        let default = AvifEncoder::lossless();
+        assert_eq!(encoder.config(), default.config());
+        assert_eq!(encoder.speed(), default.speed());
+        assert_eq!(encoder.threads(), default.threads());
+        let lossy = avif_with(&["--avif-lossy", "--quality", "40"]);
+        assert_eq!(lossy.config(), AvifEncoder::lossy(40).config());
+    }
+
+    #[test]
+    fn avif_lossy_selects_lossy_mode() {
+        assert_eq!(avif_with(&["--avif-lossy"]).config().mode, AvifMode::Lossy);
+    }
+
+    #[test]
+    fn deprecated_qindex_selects_lossy_mode() {
+        assert_eq!(avif_with(&["--qindex", "1"]).config().mode, AvifMode::Lossy);
+    }
+
+    #[test]
+    fn the_avif_speed_flag_offers_exactly_the_codec_presets() {
+        // `0..=3` is written into the flag's parser and `Speed::ALL` is the codec's own list, so
+        // a preset added to `gamut-av1` fails here instead of being unreachable from the CLI.
+        for (level, preset) in AvifSpeed::ALL.iter().enumerate() {
+            let level = level.to_string();
+            assert_eq!(avif_with(&["--avif-speed", &level]).speed(), *preset);
+        }
+        let past_the_end = AvifSpeed::ALL.len().to_string();
+        assert!(parse_avif(&["--avif-speed", &past_the_end]).is_err());
+    }
+
+    #[test]
+    fn avif_threads_caps_the_encoder() {
+        assert_eq!(
+            avif_with(&["--avif-threads", "3"]).threads(),
+            NonZeroUsize::new(3)
+        );
+    }
+
+    #[test]
+    fn avif_threads_zero_is_every_core() {
+        assert_eq!(avif_with(&["--avif-threads", "0"]).threads(), None);
+    }
+
+    #[test]
+    fn avif_alpha_quality_reaches_the_encoder() {
+        let encoder = avif_with(&["--avif-lossy", "--avif-alpha-quality", "100"]);
+        assert_eq!(encoder.config().alpha_quality, Some(100));
+    }
+
+    #[test]
+    fn avif_alpha_quality_above_100_is_refused() {
+        assert!(parse_avif(&["--avif-alpha-quality", "101"]).is_err());
+    }
+
+    #[test]
+    fn avif_clean_alpha_reaches_the_encoder() {
+        assert!(avif_with(&["--avif-clean-alpha"]).config().clean_alpha);
+    }
+
+    #[test]
+    fn avif_matrix_maps_each_value() {
+        for (flag, matrix) in [
+            ("identity", MatrixCoefficients::Identity),
+            ("bt601", MatrixCoefficients::Bt601),
+            ("bt709", MatrixCoefficients::Bt709),
+            ("bt2020", MatrixCoefficients::Bt2020Ncl),
+        ] {
+            assert_eq!(
+                avif_with(&["--avif-matrix", flag]).config().matrix,
+                matrix,
+                "--avif-matrix {flag}"
+            );
+        }
+        assert!(parse_avif(&["--avif-matrix", "ycgco"]).is_err());
+    }
+
+    #[test]
+    fn avif_depth_maps_each_value() {
+        for (flag, depth) in [
+            ("8", BitDepth::Eight),
+            ("10", BitDepth::Ten),
+            ("12", BitDepth::Twelve),
+        ] {
+            assert_eq!(
+                avif_with(&["--avif-depth", flag]).config().bit_depth,
+                Some(depth),
+                "--avif-depth {flag}"
+            );
+        }
+        assert!(parse_avif(&["--avif-depth", "16"]).is_err());
+    }
+
+    #[test]
+    fn avif_chroma_maps_each_value() {
+        for (flag, chroma) in [
+            ("444", ChromaSubsampling::Cs444),
+            ("422", ChromaSubsampling::Cs422),
+            ("420", ChromaSubsampling::Cs420),
+        ] {
+            assert_eq!(
+                avif_with(&["--avif-chroma", flag]).config().chroma,
+                chroma,
+                "--avif-chroma {flag}"
+            );
+        }
+        assert!(parse_avif(&["--avif-chroma", "400"]).is_err());
     }
 }
