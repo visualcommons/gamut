@@ -34,7 +34,7 @@ pub mod ns {
     pub const PLUS: &str = "http://ns.useplus.org/ldf/xmp/1.0/";
     /// XMP basic — `xmp:`.
     ///
-    /// Not an IPTC namespace, and deliberately absent from [`IPTC_NAMESPACES`]; it appears only
+    /// Not an IPTC namespace, and deliberately absent from [`IPTC_NAMESPACES`](super::IPTC_NAMESPACES); it appears only
     /// *inside* IPTC Extension structures, as the `xmp:Identifier` field of an
     /// [`Entity`](crate::extension::Entity).
     pub const XMP: &str = WellKnownNs::Xmp.uri();

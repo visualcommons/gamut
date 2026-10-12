@@ -347,7 +347,7 @@ pub const PROFILE_GAIN_TABLE_MAP2: u16 = 52544;
 /// ([`DngMetadata::c2pa`](crate::DngMetadata::c2pa)), so a file carrying it is *recognised*
 /// rather than flagged as private by [`is_known_tag`]. The number itself is
 /// [`gamut_ifd::c2pa::C2PA_MANIFEST_STORE`] — the clause is stated once, in the crate shared by
-/// every TIFF-based codec — and is aliased here only so [`KNOWN_TAGS`] can name it.
+/// every TIFF-based codec — and is aliased here only so the crate-private `KNOWN_TAGS` list can name it.
 pub const C2PA_MANIFEST_STORE: u16 = gamut_ifd::c2pa::C2PA_MANIFEST_STORE;
 /// `ColumnInterleaveFactor` (52547, 0xCD43) — column interleaving of the stored image data
 /// (DNG 1.7.1).

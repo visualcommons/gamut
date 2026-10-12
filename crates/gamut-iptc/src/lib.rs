@@ -80,6 +80,11 @@
 //! a name. See `STATUS.md` for the full deferral list.
 #![forbid(unsafe_code)]
 
+// Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 pub mod charset;
 pub mod extension;
 pub mod iim;

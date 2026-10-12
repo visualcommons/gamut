@@ -149,7 +149,7 @@ impl Av1EncodeRequest {
     ///
     /// This is **both** an input and an obligation. It says what the `planes` handed to
     /// [`Av1StillEncoder::encode_still`] contain — GBR for
-    /// [`MatrixCoefficients::Identity`](gamut_color::MatrixCoefficients::Identity), `Y/Cb/Cr`
+    /// [`MatrixCoefficients::Identity`], `Y/Cb/Cr`
     /// otherwise — and the returned stream's `color_config()` must declare exactly it, because the
     /// container mirrors these values into `colr` and they must agree with the payload
     /// (AV1-ISOBMFF v1.3.0 §2.3.4). A mismatch is rejected.
