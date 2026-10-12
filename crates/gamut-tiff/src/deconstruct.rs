@@ -370,6 +370,7 @@ impl Findings {
                         detail: match reason {
                             SkipReason::Cycle => "TIFF: sub-IFD offset revisited (possible cycle)",
                             SkipReason::TooDeep => "TIFF: sub-IFD nesting too deep",
+                            SkipReason::OverBudget => "TIFF: sub-IFD budget exhausted",
                             _ => "TIFF: sub-IFD could not be parsed",
                         },
                         severity: Severity::Error,
@@ -723,6 +724,33 @@ mod tests {
                     if detail.contains("too deep")
             )),
             "{report:?}"
+        );
+    }
+
+    /// A sub-IFD target the audit skipped because the walk had spent its directory budget is
+    /// reported as budget exhaustion, not as a target that could not be parsed: it was never
+    /// attempted.
+    ///
+    /// Driven through `map_audit_findings` directly rather than a file, because reaching the
+    /// budget end to end takes 65,536 parsed sub-IFDs, and `gamut-ifd`'s own audit test already
+    /// pins that the walk emits `SkipReason::OverBudget` there; what this crate owns is only the
+    /// mapping. Deleting the `OverBudget` arm falls through to "could not be parsed".
+    #[test]
+    fn map_audit_findings_reports_an_over_budget_sub_ifd_as_budget_exhausted() {
+        let mut findings = Findings::default();
+        findings.map_audit_findings(&[AuditFinding::SkippedSubIfd {
+            page: 0,
+            tag: tags::SUB_IFDS,
+            offset: 26,
+            reason: SkipReason::OverBudget,
+        }]);
+        assert_eq!(
+            findings.anomalies,
+            [Anomaly::Structure {
+                page: 0,
+                detail: "TIFF: sub-IFD budget exhausted",
+                severity: Severity::Error,
+            }]
         );
     }
 
