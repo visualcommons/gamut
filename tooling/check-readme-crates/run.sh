@@ -91,14 +91,12 @@
 # What is deliberately NOT checked, and why. These are limitations, not oversights, and this
 # comment is the one place they are written down:
 #   * The *wording* of the Purpose and Status cells, beyond the claim forms. They are
-#     prose a human maintains, and their authority is **the crate's own source** -- the code that
-#     ships. No single file outranks it: `STATUS.md` can list a shipped module as deferred (issue
-#     #545) and a module doc can defer a capability the crate's own `EncodeImage` impls already
-#     provide (issue #560) -- which is why the `gamut-avif` row states 8/10/12-bit encode against
-#     a doc comment that still calls 10/12-bit deferred. `lib.rs`, `Cargo.toml` and `STATUS.md`
-#     are where to look first, in that order, but each is a summary and a row must be true of the
-#     crate, not faithful to a file. A text gate over the cells would fossilise a particular
-#     phrasing, and a generated table would move prose a human writes into a generator.
+#     prose a human maintains, and what a cell may claim is settled by the repository-wide
+#     authority order in AGENTS.md ("Authority for a documented claim"): a row must be true of the
+#     crate, not faithful to a file -- which is why the `gamut-avif` row states 8/10/12-bit encode
+#     against a doc comment that still calls 10/12-bit deferred (issue #560). A text gate over the
+#     cells would fossilise a particular phrasing, and a generated table would move prose a human
+#     writes into a generator.
 #   * The header row's own text. Its *presence* directly above the delimiter and its *column
 #     count* are asserted; what the three column headings are called is prose like any other cell.
 #   * Anything that needs the network. Whether crates.io serves the version a manifest declares
@@ -712,10 +710,8 @@ if [ -n "$missing" ]; then
     echo "  narrow, so legal Markdown it does not recognise (a missing leading or trailing pipe,"
     echo "  a linked or annotated crate cell, prose after the code span) is reported here as a"
     echo "  missing crate. Check the row's shape before adding one."
-    echo "  Its authority is the crate's own source -- the"
-    echo "  code that ships. Read lib.rs, then Cargo.toml, then STATUS.md, but trust none of them"
-    echo "  over the crate: each is a summary and any of them can be stale, so the row must be"
-    echo "  true of the crate rather than faithful to a file."
+    echo "  A row must be true of the crate rather than faithful to a file: what it may claim is"
+    echo "  settled by the authority order in AGENTS.md, \"Authority for a documented claim\"."
 fi
 
 phantom="$(compare -13)"

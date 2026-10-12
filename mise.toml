@@ -381,9 +381,8 @@ run = "./tooling/check-tests/run.sh"
 #
 # It gates nothing else about the prose, so a green run means "every crate has a well-formed row
 # inside a real table, and the claims cargo can settle are settled", not "the table is true". A
-# row's prose answers to the crate's own source -- the code that ships. lib.rs, then Cargo.toml,
-# then STATUS.md is where to look, but each is a summary and any of them can be stale (issues
-# #545, #560), so a row must be true of the crate rather than faithful to a file. What the guard
+# row's prose answers to the authority order AGENTS.md states once ("Authority for a documented
+# claim"), so a row must be true of the crate rather than faithful to a file. What the guard
 # deliberately does not check is written down once, in the script header.
 [tasks.check-readme-crates]
 description = "Verify the README crates table covers every workspace crate, lists no phantom or duplicate rows, renders as one table under a header and delimiter row of matching width, gives each crate a three-cell row whose Purpose and Status render as something, and agrees with cargo metadata wherever the section makes a claim in one of the forms the guard checks; and that the Usage snippet's gamut version requirement names the umbrella's own release line"
