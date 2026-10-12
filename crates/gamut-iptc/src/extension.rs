@@ -109,7 +109,8 @@
 //!
 //! Whether a field's namespace and name can be serialized at all is not decided here: it is the
 //! same question for a field in this slot as for a top-level property in [`XmpMeta::properties`],
-//! and it belongs to the XMP writer that answers it for both.
+//! and it belongs to the XMP writer that answers it for both. That writer does not check a local
+//! name yet (issue #732), so an empty or non-XML name in either place serializes as it stands.
 //!
 //! Accessors were declined. A borrowed `other()`/`other_mut()` pair adds nothing over the field
 //! while the element is [`XmpProperty`], itself plain public data; a checked `push_other` that
