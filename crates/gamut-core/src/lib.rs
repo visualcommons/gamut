@@ -59,8 +59,10 @@
 pub mod convert;
 
 mod image;
-/// Executable laws for the conversion engine, shared by this crate's property tests and the
-/// out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
+// Executable laws for the conversion engine, shared by this crate's property tests and the
+// out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
+// A plain comment, not `///`: outer docs here would make rustdoc resolve the module's own `//!`
+// intra-doc links from the crate root, where its items are not in scope.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod invariants;

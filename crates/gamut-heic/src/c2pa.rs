@@ -451,7 +451,7 @@ pub const C2PA_NOT_VALIDATED: &str = "gamut locates a C2PA manifest store and ne
 impl C2paBoxPurpose {
     /// The `box_purpose` string this purpose is written as in the file (C2PA 2.4 §A.5.3).
     ///
-    /// The exact inverse of the parse: [`from_bytes`](Self::from_bytes) maps these bytes back to
+    /// The exact inverse of the parse: `from_bytes` maps these bytes back to
     /// this variant.
     #[must_use]
     pub const fn as_str(self) -> &'static str {

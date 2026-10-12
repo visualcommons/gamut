@@ -155,6 +155,9 @@ pub struct Audit {
 /// Returns [`Error::InvalidInput`] only when the container is unreadable (bad header,
 /// unreadable top-level chain) — the same conditions as [`read`](crate::read) — or
 /// [`Error::Io`] on a transport failure. File defects inside sub-IFDs are findings, not errors.
+///
+/// [`Error::InvalidInput`]: gamut_core::Error::InvalidInput
+/// [`Error::Io`]: gamut_core::Error::Io
 pub fn audit<S: ReadAt>(source: S, spec: &dyn AuditSpec) -> Result<Audit> {
     let mut auditor = Auditor::new(source)?;
     let file = auditor.walk(spec)?;
@@ -187,6 +190,8 @@ impl<S: ReadAt> Auditor<S> {
     /// # Errors
     ///
     /// Returns [`Error::Io`] if the source's length cannot be determined.
+    ///
+    /// [`Error::Io`]: gamut_core::Error::Io
     pub fn new(source: S) -> Result<Self> {
         let mut tracked = Tracked::new(source);
         let file_len = tracked.len()?;
@@ -204,6 +209,8 @@ impl<S: ReadAt> Auditor<S> {
     ///
     /// Returns [`Error::InvalidInput`] when the container is unreadable, like
     /// [`read`](crate::read); sub-IFD defects become findings.
+    ///
+    /// [`Error::InvalidInput`]: gamut_core::Error::InvalidInput
     pub fn walk(&mut self, spec: &dyn AuditSpec) -> Result<TiffFile> {
         let mut reader = IfdReader::open(&mut self.tracked)?;
         let mut file = reader.read_file_audited(&mut self.map)?;
@@ -231,6 +238,9 @@ impl<S: ReadAt> Auditor<S> {
     ///
     /// Returns [`Error::InvalidInput`] if the range lies outside the source, or [`Error::Io`]
     /// on a transport failure.
+    ///
+    /// [`Error::InvalidInput`]: gamut_core::Error::InvalidInput
+    /// [`Error::Io`]: gamut_core::Error::Io
     pub fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
         self.tracked.read_exact_at(offset, buf)
     }
@@ -255,6 +265,8 @@ impl<S: ReadAt> Auditor<S> {
     ///
     /// Returns [`Error::InvalidInput`] if the embedded chain is unreadable, loops, or runs away
     /// — the caller decides whether that is a finding or an error.
+    ///
+    /// [`Error::InvalidInput`]: gamut_core::Error::InvalidInput
     pub fn walk_embedded(
         &mut self,
         base: u64,
@@ -296,6 +308,8 @@ impl<S: ReadAt> Auditor<S> {
     /// # Errors
     ///
     /// Returns [`Error::Io`] if the source fails while padding candidates are inspected.
+    ///
+    /// [`Error::Io`]: gamut_core::Error::Io
     pub fn finish(mut self) -> Result<(SegmentReport, Vec<AuditFinding>)> {
         let mut report = self.map.finish(Some(self.tracked.ledger()));
         report.classify_padding(&mut self.tracked)?;

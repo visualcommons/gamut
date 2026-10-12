@@ -31,7 +31,7 @@
 //!
 //! 1. [`supports`](JxlCodestreamEncoder::supports) returning `false` — the backend declines before
 //!    doing any work;
-//! 2. `Err(`[`Error::Unsupported`](gamut_core::Error::Unsupported)`)` from
+//! 2. `Err(`[`Error::Unsupported`]`)` from
 //!    [`encode`](JxlCodestreamEncoder::encode) / [`decode`](JxlCodestreamDecoder::decode) — a *late*
 //!    decline, the typed mirror of the C [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED)
 //!    code the [`crate::abi`] adapters translate.

@@ -80,8 +80,7 @@ pub struct RawEntry {
     /// The declared value count (untrusted until sized against the source by
     /// [`IfdReader::value`]).
     pub count: u64,
-    /// The absolute offset of this entry record (diagnostics parity with
-    /// [`UnknownField::entry_offset`]).
+    /// The absolute offset of this entry record, for diagnostics.
     pub offset: u64,
     /// The raw value/offset field in the file's byte order; classic TIFF fills `word[..4]`.
     word: [u8; 8],

@@ -45,7 +45,7 @@
 //!   directory of the main chain when it is none of those. Two documented residues aside — a
 //!   duplicated tag keeps the last entry (the IFD core's model), and an *interior* main-chain
 //!   page carrying no image reaches no typed channel (issue #525) — nothing in a file is
-//!   silently dropped, and [`deconstruct`] accounts for every byte either way.
+//!   silently dropped, and [`deconstruct()`] accounts for every byte either way.
 //!
 //! An **Apple ProRAW** DNG (1.7, JPEG XL, tiled, LinearRaw, semantic masks, gain map) therefore
 //! decodes fully. Full demosaicing and colour rendering are a raw *processor's* job and stay out
@@ -57,7 +57,7 @@
 //! acceleration — gamut's software implementation is always used. See AGENTS.md's convention on
 //! exposing the codestream and `STATUS.md`.
 //!
-//! For archival use, [`deconstruct`] classifies **every byte** of a DNG into typed segments
+//! For archival use, [`deconstruct()`] classifies **every byte** of a DNG into typed segments
 //! (dual-ledger checked, issue #263), and [`DngRewrite`] is the preserving edit path: the whole
 //! tree opens losslessly, pixel payloads are carried byte-for-byte, and the `MakerNote` byte
 //! range is pinned at its original offset.

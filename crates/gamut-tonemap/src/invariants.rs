@@ -158,7 +158,7 @@ fn curve_output_scale(curve: &dyn ToneCurve, xs: &[f32]) -> f32 {
 /// is order `1`. A purely relative tolerance collapses to about `1e-15` in that region and reports
 /// that noise as a violation, which says nothing about the curve's shape. The tolerance is
 /// therefore the larger of four ULPs of the local value and eight ULPs of the curve's output
-/// scale — see [`curve_output_scale`], and note that the scale is *not* taken from the samples
+/// scale — see `curve_output_scale`, and note that the scale is *not* taken from the samples
 /// alone, because a sample set drawn entirely from the cancellation region would then measure the
 /// noise against itself.
 ///

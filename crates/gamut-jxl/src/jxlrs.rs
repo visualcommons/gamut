@@ -107,7 +107,7 @@ fn output_layout(format: PixelFormat) -> Result<(JxlDataFormat, bool, usize, boo
     ))
 }
 
-/// Basic properties of a JPEG XL stream, read from its headers by [`JxlDecoder::info`] without
+/// Basic properties of a JPEG XL stream, read from its headers by [`JxlDecoder::info`](crate::JxlDecoder::info) without
 /// decoding pixels.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

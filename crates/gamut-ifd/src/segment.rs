@@ -445,8 +445,9 @@ impl SegmentReport {
     /// [`SpanKind::Preamble`], one reaching the end of the file becomes [`SpanKind::Trailer`],
     /// and any other interior gap becomes [`SpanKind::Interstitial`].
     ///
-    /// This is deliberately a separate, explicit pass — like [`classify_padding`](Self::
-    /// classify_padding) — so that "every byte is accounted for" is never reached by accident.
+    /// This is deliberately a separate, explicit pass — like
+    /// [`classify_padding`](Self::classify_padding) — so that "every byte is accounted for" is
+    /// never reached by accident.
     /// Run it *after* `classify_padding`, so all-zero word padding keeps its more specific kind.
     ///
     /// The bytes are not discarded: each becomes a typed [`Segment`] whose range still addresses
