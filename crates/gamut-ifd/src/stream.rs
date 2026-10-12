@@ -392,8 +392,8 @@ impl<S: ReadAt> IfdReader<S> {
     }
 
     /// [`read_tree`](crate::read_tree)'s streaming equivalent: parses the top-level chain, then
-    /// follows the named sub-IFD pointer tags with the same depth and cycle guards, reading
-    /// only directory bodies and the values they reference.
+    /// follows the named sub-IFD pointer tags with the same depth, cycle and budget guards,
+    /// reading only directory bodies and the values they reference.
     ///
     /// # Errors
     ///
