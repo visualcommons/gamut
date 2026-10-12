@@ -82,17 +82,22 @@ pub struct C2paManifestStore<'a> {
     pub range: Range<usize>,
     /// The `box_purpose` of the `uuid` box that carried this store.
     pub purpose: C2paBoxPurpose,
+    /// The half-open byte range of the whole **slot** the store sits at the front of: everything
+    /// after the merkle offset to the end of the `uuid` box, so the store plus any §A.5.3 padding.
+    /// It is [`gamut_isobmff::C2paSlot::range`], the range `gamut-avif`'s `c2pa_slot` reports, so
+    /// both crates name both regions alike (#505). Starts where [`range`](Self::range) does.
+    pub slot: Range<usize>,
 }
 
 impl<'a> C2paManifestStore<'a> {
     /// The store at the front of a slot the shared lens located, trimmed to its own JUMBF `LBox`,
     /// or `None` when the slot holds no valid bound ([`C2paUnreadReason::NoStoreBound`]).
     fn from_slot(slot: &C2paSlot<'a>) -> Option<Self> {
-        let bytes = slot.store()?;
         Some(Self {
-            bytes,
-            range: slot.range.start..slot.range.start + bytes.len(),
+            bytes: slot.store()?,
+            range: slot.store_range()?,
             purpose: slot.purpose,
+            slot: slot.range.clone(),
         })
     }
 }
@@ -315,6 +320,10 @@ pub struct C2paStoreSummary {
     pub purpose: C2paBoxPurpose,
     /// Where the `uuid` box that carried the store sits relative to the file's media data.
     pub position: C2paBoxPosition,
+    /// The half-open byte range of the slot the store sits at the front of — the store plus any
+    /// §A.5.3 padding, as [`C2paManifestStore::slot`] reports it. `gamut-avif`'s summary carries
+    /// the same two ranges under the same two names (#505).
+    pub slot: Range<usize>,
 }
 
 impl C2paStoreSummary {
@@ -703,6 +712,7 @@ impl HeifContainer<'_> {
                         range: store.range,
                         purpose: store.purpose,
                         position,
+                        slot: store.slot,
                     }),
                     None => unread.push(C2paUnreadBox {
                         range,
@@ -747,6 +757,7 @@ mod tests {
                     range: start..end,
                     purpose,
                     position: C2paBoxPosition::BeforeMediaData,
+                    slot: start..end,
                 })
                 .collect(),
             unread: Vec::new(),
@@ -856,6 +867,9 @@ mod tests {
         assert_eq!(store.bytes, &slot_bytes[..12]);
         assert_eq!(store.range, slot.range.start..slot.range.start + 12);
         assert_eq!(store.purpose, C2paBoxPurpose::Original);
+        // The slot is the lens's, padding included: 12 + 5 bytes.
+        assert_eq!(store.slot, slot.range);
+        assert_eq!(store.slot.len(), 17);
         // The same slot zeroed is a reservation: no store, which the summary calls NoStoreBound.
         let mut zeroed = body.clone();
         let len = zeroed.len();
@@ -983,6 +997,7 @@ mod tests {
                 range: 61..90,
                 purpose: C2paBoxPurpose::Manifest,
                 position: C2paBoxPosition::BeforeMediaData,
+                slot: 61..90,
             }],
             unread: vec![C2paUnreadBox {
                 range: 90..150,
