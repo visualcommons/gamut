@@ -476,7 +476,7 @@ lcms2's reference answer there and what it diverges from is lcms2's grid. The sh
 | White-point ("scum dot") fixup on a resampled CLUT | lcms2's `PatchLUT` snaps the input white node onto the output white in a precalculated table (`cmsFLAGS_NOWHITEONWHITEFIXUP` disables it, as the conformance gate does). An lcms2 aesthetic with no ICC.1 basis; the resampling pass does not replicate it. | ✗ out of scope |
 | Public per-hop intent/BPC arrays | The chain internals already take them (proofing uses them); the public `chain` API stays single-intent until a consumer needs lcms2's `cmsCreateExtendedTransform` shape. | ☐ deferred |
 | Named-colour profiles | No continuous pixel transform; rejected with a typed error everywhere. | ✗ out of scope |
-| `prefer_cicp_transfer` for H.273 transfer code points 6 and 15 | Same curve as 1 and 14, but `gamut-color`'s `TransferCharacteristics` has no variant for them, so `standard_eotf_for` cannot be asked; reaches the option with no change here once it does. | ☐ deferred |
+| `prefer_cicp_transfer` for H.273 transfer code points 6 and 15 | Same curve as 1 and 14, but `gamut-color`'s `TransferCharacteristics` has no variant for them, so `standard_eotf_for` cannot be asked; reaches the option with no change here once it does (#675). | ☐ deferred |
 | Public `prefer_cicp` on `link::device_to_pcs`/`pcs_to_device` | The per-profile builders stay TRC-only (and so does black-point *detection*, which runs through them); the option lives on the transform constructors. | ☐ deferred |
 | K-preserving intents (`INTENT_PRESERVE_K_*`) | lcms2 extensions beyond the four ICC intents (`cmscnvrt.c` dispatch table); no ICC.1 basis. | ☐ unplanned |
 
