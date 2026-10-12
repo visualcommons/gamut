@@ -542,7 +542,9 @@ mod tests {
         ] {
             assert_eq!(
                 DroppedEntry::new(ifd, 0x010F, 22).to_string(),
-                format!("dropped entry (tag 0x010f) in {name} at offset 22: its value could not be read")
+                format!(
+                    "dropped entry (tag 0x010f) in {name} at offset 22: its value could not be read"
+                )
             );
         }
     }

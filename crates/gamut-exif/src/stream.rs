@@ -143,8 +143,18 @@ impl ExifReader {
         // The Exif sub-IFD's own offset, captured before `follow` strips the pointer: the
         // maker-note pin needs the note value's absolute source position.
         let exif_ifd_at = image.get_u32(EXIF_IFD_POINTER).map(u64::from);
-        let exif = self.follow(&mut image, &mut reader, (DroppedRegion::ExifIfd, IfdKind::Exif), report)?;
-        let gps = self.follow(&mut image, &mut reader, (DroppedRegion::GpsIfd, IfdKind::Gps), report)?;
+        let exif = self.follow(
+            &mut image,
+            &mut reader,
+            (DroppedRegion::ExifIfd, IfdKind::Exif),
+            report,
+        )?;
+        let gps = self.follow(
+            &mut image,
+            &mut reader,
+            (DroppedRegion::GpsIfd, IfdKind::Gps),
+            report,
+        )?;
         let maker_note_at = match (&exif, exif_ifd_at) {
             (Some(_), Some(at)) => maker_note_offset(&mut reader, at)?,
             _ => None,
@@ -153,8 +163,12 @@ impl ExifReader {
         // The Interoperability directory is reached from *inside* the Exif sub-IFD, not the 0th IFD.
         let (exif, interop) = match exif {
             Some(mut e) => {
-                let interop =
-                    self.follow(&mut e, &mut reader, (DroppedRegion::InteropIfd, IfdKind::Interop), report)?;
+                let interop = self.follow(
+                    &mut e,
+                    &mut reader,
+                    (DroppedRegion::InteropIfd, IfdKind::Interop),
+                    report,
+                )?;
                 (Some(e), interop)
             }
             None => (None, None),
@@ -229,12 +243,10 @@ impl ExifReader {
         };
         let offset = u64::from(offset);
         let followed = match reader.read_ifd(offset) {
-            Ok(raw) if self.recovers() => {
-                reader.decode_ifd_lenient(&raw).map(|(ifd, findings)| {
-                    record_unreadable(&findings, kind, report);
-                    ifd
-                })
-            }
+            Ok(raw) if self.recovers() => reader.decode_ifd_lenient(&raw).map(|(ifd, findings)| {
+                record_unreadable(&findings, kind, report);
+                ifd
+            }),
             Ok(raw) => reader.decode_ifd(&raw),
             Err(e) => Err(e),
         };
@@ -882,9 +894,7 @@ mod tests {
     /// outcome to the law above.
     fn sweep_transport_failures(name: &str, reader: &ExifReader, data: &[u8]) {
         {
-            let (clean, clean_report) = reader
-                .parse_from_with_report(data)
-                .expect("clean parse");
+            let (clean, clean_report) = reader.parse_from_with_report(data).expect("clean parse");
             let (mut failures, mut successes) = (0, 0);
             for budget in 0..200 {
                 let source = FailingAfter {
@@ -1100,9 +1110,7 @@ mod tests {
     #[test]
     fn recovery_on_a_readable_blob_reports_exactly_what_the_default_reader_does() {
         for data in [healthy_blob(), deep_blob()] {
-            let plain = ExifReader::new()
-                .parse_with_report(&data)
-                .expect("plain");
+            let plain = ExifReader::new().parse_with_report(&data).expect("plain");
             let recovering = ExifReader::new()
                 .recover_entries(true)
                 .parse_with_report(&data)
