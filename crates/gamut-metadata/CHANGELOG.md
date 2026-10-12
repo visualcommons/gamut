@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-metadata-v1.0.0...gamut-metadata-v2.0.0) - 2026-10-12
+
+### Added
+
+- *(metadata)* add the per-format capability query
+- *(metadata)* report provenance from the store and dcterms:provenance
+- *(metadata)* add the C2PA manifest store as a fourth carrier
+- *(metadata)* [**breaking**] carry downstream typed models in a namespaced extension table
+
+### Fixed
+
+- *(jxl)* refuse a metadata ICC profile that conflicts with an explicit ColorSpec ([#751](https://github.com/visualcommons/gamut/pull/751))
+- *(metadata)* trim dcterms:provenance and treat whitespace-only as absent
+
+### Other
+
+- gate rustdoc warnings and compile README code blocks as doctests ([#713](https://github.com/visualcommons/gamut/pull/713))
+- Merge remote-tracking branch 'origin/feat/449-xmp-dcterms-provenance' into feat/420-metadata-facade-wiring
+- *(metadata)* call dcterms:provenance a URI reference, not a URL
+- Merge remote-tracking branch 'origin/feat/449-xmp-dcterms-provenance' into feat/420-metadata-facade-wiring
+- *(metadata)* say provenance URL is trimmed and whitespace-only is absent
+- *(metadata)* record the embedding precedence a present carrier has
+- *(metadata)* make the capability ALL constants slices
+- *(metadata)* correct two overclaims about the capability table
+- *(metadata)* drop the repr and Default from ProvenanceState
+- *(metadata)* pin that remove_extension matches on namespace AND key
+- *(metadata)* pin each extension-removal claim separately
+- *(metadata)* cite the clause that defines the C2PA manifest store
+- *(metadata)* state what the C2PA carrier actually guarantees
+- *(metadata)* explain the C2PA carrier and the keystone carve-out
+- *(metadata)* cover the C2PA carrier and its no-copy-forward policy
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-metadata-v0.1.1...gamut-metadata-v1.0.0) - 2026-07-18
 
 ### Added
