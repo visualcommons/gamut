@@ -1,24 +1,37 @@
-//! Executable laws for this crate's sample transforms, shared by the property tests and the fuzz
-//! tier.
+//! Executable laws for this crate's sample transforms and decode budget, shared by the property
+//! tests and the fuzz tier.
 //!
 //! Each function takes plain data, checks one law, and returns a [`Violation`] naming what broke
 //! it. Nothing here panics on a well-formed input, so the same body runs under a pinned-seed
 //! `proptest` in the per-PR gate and under a corpus-guided driver in extended CI
 //! (`docs/testing.md`).
 //!
-//! The law here is the clean-alpha contract (issue #657): cleaning the colour under transparent
-//! pixels must leave the **premultiplied composite** of every pixel unchanged — alpha identical,
-//! opaque colour identical, and every colour channel premultiplying to the value it did before.
+//! **Clean alpha** (issue #657): cleaning the colour under transparent pixels must leave the
+//! **premultiplied composite** of every pixel unchanged — alpha identical, opaque colour
+//! identical, and every colour channel premultiplying to the value it did before.
 //! [`premultiply`] is written here, from the definition `round(c·a / MAX)`, rather than borrowed
 //! from the cleaner, so a defect in the cleaner's own interval arithmetic cannot cancel against
 //! the oracle. For the same reason the law reads samples through its own [`Scale`], not the
 //! cleaner's `Sample` trait: a defect in how the cleaner widens a sample would otherwise blind
 //! the oracle to it too.
 //!
+//! **Decode limits** (issue #653): [`decoding_stays_within_limits`] decodes every item of a file
+//! on all three surfaces twice — under the limits being tested and under a looser ceiling — with
+//! [`StubDecoder`] standing in for the AV1 codec. Every image the tighter run returns is within
+//! its limits and identical to the looser run's, and every refusal the tighter limits add is a
+//! limit refusal. Since each full-image buffer the pipeline allocates is sized like an image it
+//! checked, the first clause is the observable face of "decode never allocates past limits ×
+//! channels"; the ceiling is what keeps the law's own runs, and the fuzz tier's, from exhausting
+//! memory on a hostile file.
+//!
 //! This module is the test oracle, not the system under test, so `.cargo/mutants.toml` excludes
 //! `crates/*/src/invariants.rs` from mutation.
 
+use gamut_core::Result as CoreResult;
+
 use crate::clean_alpha::clean_rgba;
+use crate::decode::{DIMENSION_LIMIT, PIXEL_LIMIT};
+use crate::{Av1Config, Av1StillDecoder, AvifContainer, DecodeLimits, DecodedFrame};
 
 /// A sample type the law reads, with the alpha value that means fully opaque.
 pub(crate) trait Scale: Copy + Into<u32> {
@@ -136,6 +149,168 @@ pub fn cleaning_16_bit_rgba_keeps_the_composite(
     composite_is_unchanged(rgba, &clean_rgba(rgba, width))
 }
 
+/// The largest frame side [`StubDecoder`] returns, in pixels.
+pub const STUB_MAX_SIDE: u8 = 16;
+
+/// The number of `decode_still` calls one [`StubDecoder`] serves before it refuses.
+///
+/// A derivation may reference one item many times, so a few nested `grid`s multiply into an
+/// arbitrarily long decode however small each image is; the budget keeps every run of the law
+/// short. It cannot hide a limit violation: both runs of the law use a fresh stub, and the tighter
+/// run walks the same items in the same order as the looser one until it stops.
+pub const STUB_CALL_BUDGET: u32 = 1024;
+
+/// A stand-in for an AV1 codec: it ignores the coded picture and returns a frame whose size the
+/// payload's last two bytes choose (`1..=STUB_MAX_SIDE` each, width then height), at the `av1C`
+/// chroma format and bit depth, with samples drawn from the payload.
+///
+/// Small by construction, so a file can make the pipeline ask for a large canvas while every
+/// frame the "codec" returns stays cheap.
+#[derive(Debug, Clone)]
+pub struct StubDecoder {
+    calls_left: u32,
+}
+
+impl Default for StubDecoder {
+    fn default() -> Self {
+        Self {
+            calls_left: STUB_CALL_BUDGET,
+        }
+    }
+}
+
+impl Av1StillDecoder for StubDecoder {
+    fn decode_still(&mut self, config: &Av1Config, payload: &[u8]) -> CoreResult<DecodedFrame> {
+        self.calls_left = self
+            .calls_left
+            .checked_sub(1)
+            .ok_or(gamut_core::Error::Unsupported(
+                "stub decoder: call budget spent",
+            ))?;
+        let from_end = |back: usize| {
+            payload
+                .len()
+                .checked_sub(back)
+                .map_or(0, |i| u32::from(payload[i]))
+        };
+        let side = u32::from(STUB_MAX_SIDE);
+        let (width, height) = (1 + from_end(2) % side, 1 + from_end(1) % side);
+        let chroma = config.chroma_format();
+        let sample = |i: usize| {
+            payload
+                .get(i % payload.len().max(1))
+                .map_or(0, |&b| u16::from(b))
+        };
+        let luma = (width * height) as usize;
+        let (cw, ch) = chroma.chroma_dimensions(width, height);
+        let chroma_len = if chroma == crate::ChromaFormat::Monochrome {
+            0
+        } else {
+            (cw * ch) as usize
+        };
+        DecodedFrame::new(
+            width,
+            height,
+            config.bit_depth(),
+            chroma,
+            (0..luma).map(sample).collect(),
+            (0..chroma_len).map(|i| sample(i + 1)).collect(),
+            (0..chroma_len).map(|i| sample(i + 2)).collect(),
+        )
+    }
+}
+
+/// One surface's output reduced to what the law compares: dimensions and samples.
+type Decoded = (u32, u32, Vec<u16>);
+
+/// Checks one surface's two runs of item `id` against the law; `limits` are the tighter run's.
+pub(crate) fn runs_agree_within_limits(
+    surface: &str,
+    id: u32,
+    limits: DecodeLimits,
+    tight: CoreResult<Decoded>,
+    loose: CoreResult<Decoded>,
+) -> Result<(), Violation> {
+    const LAW: &str = "decoding_stays_within_limits";
+    match (tight, loose) {
+        (Ok(tight), Ok(loose)) => {
+            let (w, h, _) = tight;
+            if w.max(h) > limits.max_dimension || u64::from(w) * u64::from(h) > limits.max_pixels {
+                return Err(Violation::new(
+                    LAW,
+                    format!("{surface} item {id}: {w}x{h} returned under {limits:?}"),
+                ));
+            }
+            if tight != loose {
+                return Err(Violation::new(
+                    LAW,
+                    format!("{surface} item {id}: the limits changed the decoded image"),
+                ));
+            }
+            Ok(())
+        }
+        (Ok(_), Err(error)) => Err(Violation::new(
+            LAW,
+            format!("{surface} item {id}: decoded under {limits:?} but refused looser: {error}"),
+        )),
+        (Err(error), Ok(_))
+            if !matches!(error.static_message(), Some(DIMENSION_LIMIT | PIXEL_LIMIT)) =>
+        {
+            Err(Violation::new(
+                LAW,
+                format!("{surface} item {id}: tighter limits raised a non-limit error: {error}"),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The law: decoding any item of `file` on any surface under `limits` either refuses or returns
+/// an image within `limits` — the very image a decode under `ceiling` returns — and any refusal
+/// `limits` add over `ceiling` is a limit refusal. See [the module docs](self).
+///
+/// `limits` are clamped into `ceiling` field by field, so a driver may pass any pair. A file that
+/// does not parse satisfies the law vacuously; parsing is the robustness targets' subject.
+pub fn decoding_stays_within_limits(
+    file: &[u8],
+    limits: DecodeLimits,
+    ceiling: DecodeLimits,
+) -> Result<(), Violation> {
+    let Ok(container) = AvifContainer::parse(file) else {
+        return Ok(());
+    };
+    let image = container.image();
+    let limits = DecodeLimits::new(
+        limits.max_dimension.min(ceiling.max_dimension),
+        limits.max_pixels.min(ceiling.max_pixels),
+    );
+    for item in image.items() {
+        let id = item.id();
+        let planar = |l| {
+            image
+                .decode_item_planar_with_limits(id, &mut StubDecoder::default(), l)
+                .map(|f| (f.width(), f.height(), [f.y(), f.cb(), f.cr()].concat()))
+        };
+        runs_agree_within_limits("planar", id, limits, planar(limits), planar(ceiling))?;
+        let rgba8 = |l| {
+            image
+                .decode_item_rgba8_with_limits(id, &mut StubDecoder::default(), l)
+                .map(|b| {
+                    let samples = b.as_samples().iter().map(|&s| u16::from(s)).collect();
+                    (b.width(), b.height(), samples)
+                })
+        };
+        runs_agree_within_limits("rgba8", id, limits, rgba8(limits), rgba8(ceiling))?;
+        let rgba16 = |l| {
+            image
+                .decode_item_rgba16_with_limits(id, &mut StubDecoder::default(), l)
+                .map(|b| (b.width(), b.height(), b.as_samples().to_vec()))
+        };
+        runs_agree_within_limits("rgba16", id, limits, rgba16(limits), rgba16(ceiling))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // ---- the law's own failure paths -------------------------------------------------------
@@ -144,7 +319,53 @@ mod tests {
     // that a law which can no longer *fail* is caught: a law stuck at `Ok(())` would make every
     // property over it vacuous while still passing.
 
-    use super::{composite_is_unchanged, premultiply};
+    use gamut_core::Error;
+
+    use super::{composite_is_unchanged, premultiply, runs_agree_within_limits};
+    use crate::DecodeLimits;
+    use crate::decode::{DIMENSION_LIMIT, PIXEL_LIMIT};
+
+    const LIMITS: DecodeLimits = DecodeLimits::new(4, 12);
+
+    #[test]
+    fn an_image_past_the_limits_violates_the_decode_law() {
+        let wide = || Ok((5, 1, vec![0; 5]));
+        assert!(runs_agree_within_limits("t", 1, LIMITS, wide(), wide()).is_err());
+        let large = || Ok((4, 4, vec![0; 16]));
+        assert!(runs_agree_within_limits("t", 1, LIMITS, large(), large()).is_err());
+    }
+
+    #[test]
+    fn a_changed_image_violates_the_decode_law() {
+        let v = runs_agree_within_limits("t", 1, LIMITS, Ok((1, 1, vec![0])), Ok((1, 1, vec![1])))
+            .unwrap_err();
+        assert!(v.detail().contains("changed"), "{v}");
+    }
+
+    #[test]
+    fn success_only_under_the_tighter_limits_violates_the_decode_law() {
+        let refused = Err(Error::InvalidInput("x"));
+        assert!(runs_agree_within_limits("t", 1, LIMITS, Ok((1, 1, vec![0])), refused).is_err());
+    }
+
+    #[test]
+    fn only_a_limit_refusal_may_be_added_by_the_tighter_limits() {
+        let ok = || Ok((1, 1, vec![0]));
+        let other = Err(Error::InvalidInput("x"));
+        assert!(runs_agree_within_limits("t", 1, LIMITS, other, ok()).is_err());
+        for message in [DIMENSION_LIMIT, PIXEL_LIMIT] {
+            let limit = Err(Error::unsupported("gamut-avif", message));
+            assert_eq!(
+                runs_agree_within_limits("t", 1, LIMITS, limit, ok()),
+                Ok(())
+            );
+        }
+        let both = || Err(Error::InvalidInput("x"));
+        assert_eq!(
+            runs_agree_within_limits("t", 1, LIMITS, both(), both()),
+            Ok(())
+        );
+    }
 
     #[test]
     fn premultiply_rounds_half_up_on_the_samples_scale() {

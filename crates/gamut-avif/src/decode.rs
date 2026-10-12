@@ -1581,4 +1581,208 @@ mod tests {
         let error = try_filled(usize::MAX, 0u64).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
+
+    /// The pinned-seed driver of `invariants::decoding_stays_within_limits` over generated
+    /// coded, `grid` and `iovl` files; the fuzz tier's `avif_parse_decode` drives the same law
+    /// over arbitrary bytes.
+    mod limits_law {
+        use gamut_isobmff::{
+            ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, Property, PropertyKind,
+            write,
+        };
+        use proptest::collection;
+        use proptest::prelude::{Strategy, prop_assert_eq, prop_oneof, proptest};
+        use proptest::test_runner::{Config, RngSeed};
+
+        use crate::DecodeLimits;
+        use crate::invariants::decoding_stays_within_limits;
+
+        /// Monochrome 8-bit `av1C`, matching [`SEQUENCE_HEADER`].
+        const AV1C: [u8; 4] = [0x81, 0x00, 0x1C, 0x00];
+        /// A reduced-still-picture sequence header OBU: 8-bit monochrome, no colour description.
+        const SEQUENCE_HEADER: [u8; 6] = [0x0A, 0x04, 0x18, 0x00, 0x30, 0x11];
+        /// The looser run's limits: well past anything generated here.
+        const CEILING: DecodeLimits = DecodeLimits::new(1024, 1 << 20);
+
+        /// The workspace property-test configuration (`docs/testing.md`): pinned seed, bounded
+        /// shrinking, no failure persistence.
+        fn config() -> Config {
+            Config {
+                cases: 512,
+                max_shrink_iters: 2048,
+                max_shrink_time: 10_000,
+                rng_seed: RngSeed::Fixed(0x6761_6D75_745F_6C69),
+                failure_persistence: None,
+                ..Config::default()
+            }
+        }
+
+        fn item(id: u32, item_type: [u8; 4], hidden: bool) -> Item {
+            Item {
+                id,
+                item_type,
+                name: String::new(),
+                content_type: None,
+                content_encoding: None,
+                hidden,
+                references: vec![],
+                properties: vec![],
+                payload: vec![],
+            }
+        }
+
+        /// A coded item the stub decodes to `(1 + w % 16) × (1 + h % 16)`, optionally declaring
+        /// `ispe`.
+        fn coded(id: u32, (w, h): (u8, u8), ispe: Option<(u32, u32)>, hidden: bool) -> Item {
+            let mut properties = vec![Property {
+                essential: true,
+                kind: PropertyKind::CodecConfiguration {
+                    kind: *b"av1C",
+                    data: AV1C.to_vec(),
+                },
+            }];
+            if let Some((width, height)) = ispe {
+                properties.push(Property {
+                    essential: false,
+                    kind: PropertyKind::ImageSpatialExtents { width, height },
+                });
+            }
+            let mut payload = SEQUENCE_HEADER.to_vec();
+            payload.extend_from_slice(&[0x32, 0x03, 0xAA, w, h]);
+            Item {
+                properties,
+                payload,
+                ..item(id, *b"av01", hidden)
+            }
+        }
+
+        fn derived(id: u32, item_type: [u8; 4], payload: Vec<u8>, sources: &[u32]) -> Item {
+            Item {
+                references: vec![ItemReference {
+                    reference_type: *b"dimg",
+                    to_item_ids: sources.to_vec(),
+                }],
+                payload,
+                ..item(id, item_type, false)
+            }
+        }
+
+        fn file(items: Vec<Item>) -> Vec<u8> {
+            write(&IsoBmffImage::new(
+                *b"avif",
+                vec![*b"avif", *b"mif1", *b"miaf"],
+                1,
+                items,
+            ))
+            .expect("the generated model is writable")
+        }
+
+        fn frame_bytes() -> impl Strategy<Value = (u8, u8)> {
+            (0u8..=255, 0u8..=255)
+        }
+
+        fn coded_file() -> impl Strategy<Value = Vec<u8>> {
+            let ispe = proptest::option::of((1u32..=48, 1u32..=48));
+            (frame_bytes(), ispe).prop_map(|(frame, ispe)| file(vec![coded(1, frame, ispe, false)]))
+        }
+
+        fn grid_file() -> impl Strategy<Value = Vec<u8>> {
+            (1u16..=3, 1u16..=3, frame_bytes(), 1u32..=48, 1u32..=48).prop_map(
+                |(rows, columns, frame, ow, oh)| {
+                    let tiles: Vec<u32> = (2..2 + u32::from(rows * columns)).collect();
+                    let payload = ImageGrid {
+                        rows,
+                        columns,
+                        output_width: ow,
+                        output_height: oh,
+                    }
+                    .to_bytes()
+                    .expect("a generated grid is encodable");
+                    let mut items = vec![derived(1, *b"grid", payload, &tiles)];
+                    items.extend(tiles.iter().map(|&id| coded(id, frame, None, true)));
+                    file(items)
+                },
+            )
+        }
+
+        fn overlay_file() -> impl Strategy<Value = Vec<u8>> {
+            let input = (frame_bytes(), -8i32..=40, -8i32..=40);
+            (1u32..=48, 1u32..=48, collection::vec(input, 1..=3)).prop_map(|(ow, oh, inputs)| {
+                let ids: Vec<u32> = (2..2 + inputs.len() as u32).collect();
+                let payload = ImageOverlay {
+                    canvas_fill_value: [1000, 2000, 3000, 65535],
+                    output_width: ow,
+                    output_height: oh,
+                    offsets: inputs.iter().map(|&(_, dx, dy)| (dx, dy)).collect(),
+                }
+                .to_bytes()
+                .expect("a generated overlay is encodable");
+                let mut items = vec![derived(1, *b"iovl", payload, &ids)];
+                items.extend(
+                    ids.iter()
+                        .zip(&inputs)
+                        .map(|(&id, &(frame, _, _))| coded(id, frame, None, true)),
+                );
+                file(items)
+            })
+        }
+
+        /// The property is vacuous if the generated files never decode: pin that one of each
+        /// shape does, at the size the stub and the derivation give it.
+        #[test]
+        fn the_generated_files_decode() {
+            use crate::AvifContainer;
+            use crate::invariants::StubDecoder;
+
+            let sizes = |bytes: Vec<u8>| {
+                let image = AvifContainer::parse(&bytes).unwrap().image().clone();
+                let rgba = image
+                    .decode_primary_rgba16_with_limits(&mut StubDecoder::default(), CEILING)
+                    .unwrap();
+                (rgba.width(), rgba.height())
+            };
+            assert_eq!(sizes(file(vec![coded(1, (3, 4), None, false)])), (4, 5));
+            let grid = ImageGrid {
+                rows: 1,
+                columns: 2,
+                output_width: 7,
+                output_height: 5,
+            };
+            assert_eq!(
+                sizes(file(vec![
+                    derived(1, *b"grid", grid.to_bytes().unwrap(), &[2, 3]),
+                    coded(2, (3, 4), None, true),
+                    coded(3, (3, 4), None, true),
+                ])),
+                (7, 5)
+            );
+            let overlay = ImageOverlay {
+                canvas_fill_value: [0; 4],
+                output_width: 9,
+                output_height: 2,
+                offsets: vec![(0, 0)],
+            };
+            assert_eq!(
+                sizes(file(vec![
+                    derived(1, *b"iovl", overlay.to_bytes().unwrap(), &[2]),
+                    coded(2, (3, 4), None, true),
+                ])),
+                (9, 2)
+            );
+        }
+
+        proptest! {
+            #![proptest_config(config())]
+
+            #[test]
+            fn decoding_never_returns_an_image_past_its_limits(
+                bytes in prop_oneof![coded_file(), grid_file(), overlay_file()],
+                max_dimension in 1u32..=40,
+                max_pixels in 1u64..=1600,
+            ) {
+                let limits = DecodeLimits::new(max_dimension, max_pixels);
+                prop_assert_eq!(decoding_stays_within_limits(&bytes, limits, CEILING), Ok(()));
+            }
+        }
+    }
 }
