@@ -706,6 +706,7 @@ dependencies = [
  "gamut-jxl-sys",
  "tempfile",
  "zip",
+ "zlib-oracle",
 ]
 
 [[package]]

@@ -4,7 +4,8 @@
 # `extern "C"` shim, so gamut-dng's conformance tests can validate their output against the
 # authoritative reference implementation.
 #
-# XMP is disabled (no Linux XMP toolkit ships), zlib is linked from the system, and the libjxl C
+# XMP is disabled (no Linux XMP toolkit ships), zlib is the static stock build `zlib-oracle` makes
+# from the `third_party/zlib` submodule (pinned, not the system libz: see issue #618), and the libjxl C
 # API — which DNG 1.7.1 wires in unconditionally — is satisfied by the **real libjxl 0.12.0**
 # that `gamut-jxl-sys` statically builds (its `links = "jxl"` guarantees one copy per binary even
 # when a test also links gamut-jxl's encoder), making the oracle genuinely JXL-capable. Under
@@ -29,6 +30,11 @@ tempfile = "3"
 # Provides the statically built libjxl the SDK's JPEG XL reader calls, plus (via `links = "jxl"`
 # metadata) the matching header path for `build.rs`. Never used from Rust.
 gamut-jxl-sys = { path = "../../crates/gamut-jxl-sys" }
+# The zlib the SDK's Deflate reader calls: a static stock zlib built from the `third_party/zlib`
+# submodule, plus (via `links = "z"` metadata) the matching header path for `build.rs`. Linked
+# statically rather than resolved by the loader, so the same commit runs the same inflate on every
+# machine and under every launcher (issue #618). Never called from Rust.
+zlib-oracle = { path = "../zlib-oracle" }
 
 [build-dependencies]
 cc = "1"

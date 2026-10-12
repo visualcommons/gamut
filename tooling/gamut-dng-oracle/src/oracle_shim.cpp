@@ -125,20 +125,13 @@ const std::string &resolved_zlib_path() {
 // followed, where the loader can tell us, by the resolved path of the shared object the symbol
 // came from.
 //
-// The path is the part that matters. `zlibVersion()` reports the string the loaded build carries,
-// so it separates the two candidates -- the copy a build script left at
-// `<target>/release/build/*/out/zlib-prefix/lib/libz.so.1.3.1` and whatever the platform installed
-// -- only when the platform's build renamed itself. On a box shipping stock zlib 1.3.1 both answer
-// "1.3.1" and the version says nothing; `dladdr` plus `realpath` names each one exactly either
-// way. The identification cannot rest on a fork choosing to rename itself.
-//
-// This matters to a *measurement*, not to correctness. `build.rs` links the system libz
-// dynamically (`-lz`), so the SDK's Deflate decode is a measured code path this oracle neither
-// builds nor pins: which libz the dynamic linker resolves is a property of the machine, and of
-// the launcher, since cargo puts every build script's native search path on `LD_LIBRARY_PATH`.
-// Inflate implementations differ by well over the margin that separates "gamut is faster" from
-// "the SDK is faster" on a Deflate row, so a Deflate throughput ratio is not interpretable
-// without this string beside it.
+// zlib is the stock build `zlib-oracle` makes from `third_party/zlib`, linked statically (issue
+// #618), so that object is the executable the oracle is linked into. The path is kept as the
+// check that the pin holds: before it, `build.rs` linked the system libz dynamically (`-lz`) and
+// the loader -- steered by cargo's `LD_LIBRARY_PATH` -- chose between a libz.so a build script
+// left under `target/` and the platform's, which moved the SDK's Deflate arm 1.2-1.3x. Two stock
+// builds of one version answer `zlibVersion()` identically, so only `dladdr` plus `realpath` can
+// tell a regression to a shared libz apart from the pinned copy.
 //
 // The returned pointer has static storage duration and lives for the process.
 extern "C" const char *gdng_zlib_identity(void) {
@@ -156,9 +149,8 @@ extern "C" const char *gdng_zlib_identity(void) {
 
 // The resolved path alone, or `nullptr` when the loader cannot report one -- the same string
 // `gdng_zlib_identity` appends, handed over unformatted so a caller can *test* it rather than
-// print it. A caller that finds this path inside a Cargo build directory knows the loader
-// resolved libz from the build graph rather than from the platform, which is a resolution nobody
-// else reproduces.
+// print it. With the static link this is the running executable; a caller that finds anything
+// else knows a shared libz is being called and the pin no longer holds.
 //
 // The returned pointer has static storage duration and lives for the process.
 extern "C" const char *gdng_zlib_path(void) {

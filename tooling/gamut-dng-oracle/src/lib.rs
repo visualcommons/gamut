@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 // the real libjxl the SDK's JPEG XL reader calls, and publishes the matching header path to
 // build.rs (`links = "jxl"`).
 use gamut_jxl_sys as _;
+// Never called from Rust either, and required for the same reason: it statically builds the
+// stock zlib the SDK's Deflate reader calls and publishes its headers (`links = "z"`). Naming it
+// is what makes rustc link its `libz.a` after this crate's archive (issue #618).
+use zlib_oracle as _;
 
 unsafe extern "C" {
     /// Returns `0` if the Adobe DNG SDK validates the DNG at `path`, else its error code.
@@ -305,21 +309,16 @@ pub fn read_linear_dng(bytes: &[u8]) -> Result<AdobeRaw, String> {
 }
 
 /// Identifies the zlib the SDK's Deflate reader calls: its `zlibVersion()` string and, where the
-/// loader can report it, the resolved path of the shared object the symbol came from — e.g.
-/// `"1.3.1 from /usr/lib64/libz.so.1.3.1"`.
+/// loader can report it, the resolved path of the object the symbol came from — e.g.
+/// `"1.3.1 from /…/target/release/deps/codec-…"`.
 ///
-/// The path is the discriminating part: `zlibVersion()` reports the string the loaded build
-/// carries, so it separates the copy a build script left under `target/` from the platform's only
-/// when the platform's build renamed itself. Two stock builds of one version — which is what a box
-/// shipping stock zlib gives — carry the same string, and the path still tells them apart.
-///
-/// `build.rs` links the system libz dynamically (`-lz`) because the SDK includes `<zlib.h>`
-/// unconditionally. That makes the SDK's Deflate decode the one measured path in this oracle that
-/// is **not** built from source committed to this repository: which libz the dynamic linker
-/// resolves is a property of the machine, and inflate implementations differ by far more than the
-/// margin that decides whether gamut or the reference implementation is faster on a Deflate row.
-/// `cargo bench -p gamut-dng --bench codec` prints this next to its fixture table so a Deflate
-/// ratio is never published without the library it is a ratio against.
+/// The SDK links the stock zlib `zlib-oracle` builds from `third_party/zlib` **statically**
+/// (issue #618), so the path is the executable this oracle is linked into. It once was the system
+/// libz, linked dynamically, and then the path was what identified which of several libz copies
+/// the loader had picked — the version cannot, since two stock builds of one version carry the
+/// same string. It is kept so a caller can confirm the pin still holds: a path naming a shared
+/// object means a shared libz is being called again. `cargo bench -p gamut-dng --bench codec`
+/// prints this next to its fixture table and stops if the path is not its own executable.
 ///
 /// Falls back to `"unknown"` if libz returns no string, which it is not documented to do.
 #[must_use]
@@ -342,14 +341,10 @@ pub fn zlib_identity() -> String {
 ///
 /// Returns `None` when the loader reports no path, or reports one that is not UTF-8.
 ///
-/// A caller that finds this path inside a Cargo build directory has learned something the version
-/// string cannot tell it: the loader resolved libz from the build graph rather than from the
-/// platform. `cargo` puts every build script's native search path on `LD_LIBRARY_PATH`, and
-/// `gamut-dng`'s own dev-dependency `libtiff-oracle` builds a `libz.so` under `target/`, so a
-/// benchmark launched through `cargo` can measure a different inflate implementation from the one
-/// the same binary measures when run directly. That resolution is not reproducible for anyone
-/// else, which is why `cargo bench -p gamut-dng --bench codec` flags it rather than only printing
-/// it.
+/// With zlib linked statically this is the canonical path of the running executable, and a caller
+/// can test exactly that: anything else — a `libz.so` on the platform, or one a dev oracle built
+/// under `target/` that cargo's `LD_LIBRARY_PATH` exposes — means the static link has regressed
+/// and the SDK's inflate is again chosen by the loader rather than pinned by the repository.
 #[must_use]
 pub fn zlib_path() -> Option<PathBuf> {
     // SAFETY: the shim returns either null or a pointer to a NUL-terminated string with static
