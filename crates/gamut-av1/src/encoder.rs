@@ -24,20 +24,22 @@ use crate::tile::{FrameEncoder, Reconstruction, Search};
 /// | [`Thorough`](Self::Thorough) | nothing: every directional mode at `AngleDeltaY ∈ [-3, 3]`, five filter-intra modes, CfL `\|alpha\|` 1..=16, all five `TX_SET_INTRA_2` types, rectangular partitions, 4×4 leaves, palette | — |
 /// | [`Balanced`](Self::Balanced) | directional modes are tried at `AngleDeltaY = 0` only | 48 of the 56 directional trials per ≥8×8 block |
 /// | [`Fast`](Self::Fast) | filter-intra is not tried; CfL tries `\|alpha\|` ∈ {1, 2, 4, 8, 16} only; the transform type is `DCT_DCT` or `ADST_ADST` | 5 filter-intra trials per block up to 32×32, 22 of 32 CfL trials per chroma plane, 3 of 4 extra transform-type trials per luma transform |
-/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional trial, the CfL trials and palette scan, the last extra transform-type trial, and the 8×8 split trials with the 4×4 mode searches they bring |
+/// | [`Fastest`](Self::Fastest) | only the non-directional luma modes (`DC`, `SMOOTH*`, `PAETH`); no CfL (chroma is `DC_PRED`); `DCT_DCT` only; no rectangular partitions; blocks are not split below 8×8 by choice; no palette | every directional trial, the CfL trials and palette scan, the last extra transform-type trial, the `PARTITION_HORZ`/`PARTITION_VERT` rate–distortion trials of every 16×16 and 32×32 region, and the 8×8 split trials with the 4×4 mode searches they bring |
 ///
-/// **How candidates are weighed.** Every decision the presets prune — the luma mode, filter-intra,
-/// the transform type, the CfL alphas, and whether an 8×8 block splits into 4×4 leaves — ranks its
-/// candidates by rate–distortion cost: each candidate is trialled, its squared error measured on
-/// the reconstruction a decoder would produce, and weighed against its rate priced from the
-/// adapting CDFs. The luma mode is chosen in two passes where its transforms have a type to
-/// search: every candidate is trialled with `DCT_DCT` alone, and the eight cheapest again with
-/// the transform-type search. The decisions are made block by block, before the in-loop filters,
-/// so a slower preset is not guaranteed smaller output on every image; measured on the fixed
-/// corpus in `tests/preset_rd.rs`, [`Thorough`](Self::Thorough) needs fewer bits than every
-/// faster preset for the same PSNR. The partition of 16×16 and larger blocks, the rectangular
-/// partitions, the transform depth and palette are still decided by texture tests, at every
-/// preset.
+/// **How candidates are weighed.** Every decision the presets prune — the partition of each 8×8 to
+/// 64×64 region (whole, two rectangular halves, or four quadrants), the luma mode, filter-intra,
+/// the transform type and the CfL alphas — and the transform depth, which every preset searches
+/// in full, ranks its candidates by rate–distortion cost: each candidate is trialled, its squared
+/// error measured on the reconstruction a decoder would produce, and weighed against its rate
+/// priced from the adapting CDFs. The partition search is bottom-up: a region's four-quadrant alternative codes each
+/// quadrant as the same search chooses for it, and every decision a trial reaches is kept and
+/// reused rather than searched again, so the search costs time linear in its depth. The luma mode
+/// and transform depth are chosen together in two passes: every pairing is trialled with
+/// `DCT_DCT` alone, and the eight cheapest again with the transform-type search. The decisions
+/// are made block by block, before the in-loop filters, so a slower preset is not guaranteed
+/// smaller output on every image; measured on the fixed corpus in `tests/preset_rd.rs`,
+/// [`Thorough`](Self::Thorough) needs fewer bits than every faster preset for the same PSNR.
+/// Palette is still decided by a colour count, at every preset that tries it.
 ///
 /// The presets prune *search*, so they move only lossy encodes. Lossless coding (`qindex = 0`)
 /// has a single fixed path — `DC_PRED` and the 4×4 Walsh–Hadamard transform — and is identical at
@@ -796,8 +798,8 @@ mod tests {
 
     #[test]
     fn a_vertical_edge_at_four_two_two_does_not_reach_an_invalid_chroma_block() {
-        // A strong vertical edge is what makes `decide_rect` prefer PARTITION_VERT, producing a
-        // taller-than-wide half whose 4:2:2 chroma residual is `BLOCK_INVALID` (§5.11.38). The
+        // A strong vertical edge is what would make the partition search weigh PARTITION_VERT,
+        // producing a taller-than-wide half whose 4:2:2 chroma residual is `BLOCK_INVALID` (§5.11.38). The
         // partition search must never emit one, so this encodes rather than hitting the residual
         // loop's unreachable-by-contract arm.
         let mut rgb = vec![0u8; 32 * 32 * 3];
@@ -1024,9 +1026,10 @@ mod tests {
 
     #[test]
     fn encoded_bitstream_is_stable() {
-        // The encoder's structural choices — block partition (should_split/decide_rect), palette
+        // The encoder's structural choices — block partition (choose_partition), palette
         // (decide_palette/palette_cache/signal_palette_colors), per-superblock delta-q/lf
-        // (signal_delta_q/lf), skip (block_is_skippable), tx selection (select_tx_*), loop-restoration
+        // (signal_delta_q/lf), skip (block_is_skippable), tx depth and type (select_luma_mode,
+        // select_tx_type), loop-restoration
         // signalling (write_lr) — change the OBU bitstream but reconstruct bit-exactly, so the dav1d
         // recon oracle in recon_dav1d.rs cannot see them. This snapshot pins an FNV-1a checksum of the
         // OBU stream for a spread of content patterns, sizes and quantizers; any change to a
@@ -1055,15 +1058,15 @@ mod tests {
         let cases: &[(u8, u32, u32, u8, u64)] = &[
             (0, 40, 24, 0, 0x5728_aabc_5720_858a),
             (1, 64, 64, 1, 0x177b_df34_05e6_6663),
-            (2, 32, 32, 40, 0xad7f_19dc_a8cb_bf32),
-            (3, 48, 48, 16, 0x1550_7e23_d162_f266),
-            (4, 64, 48, 90, 0x5fed_6011_e0a0_278c),
-            (0, 100, 80, 8, 0x9284_36c0_b8d2_8759),
+            (2, 32, 32, 40, 0xc274_64d7_2c3c_17a7),
+            (3, 48, 48, 16, 0x05a9_a0f4_9825_4fd7),
+            (4, 64, 48, 90, 0x6a3d_7c53_9fde_c263),
+            (0, 100, 80, 8, 0x85cc_4a58_f410_a9e8),
             // One tile: two would leave the second 2 samples wide (Annex A.3, CroppedTileWidth).
-            (0, 130, 70, 120, 0x30a2_32cb_6107_fbf8),
-            (2, 64, 64, 200, 0x307c_fb34_8720_4baf),
-            (3, 96, 96, 60, 0x3d5c_b862_2d85_f93b),
-            (4, 128, 64, 30, 0x800d_d57f_9bd3_5fae),
+            (0, 130, 70, 120, 0x2c83_14d6_a217_8bcb),
+            (2, 64, 64, 200, 0x7317_8bcd_7b76_db08),
+            (3, 96, 96, 60, 0x8f44_bc9d_9a46_5972),
+            (4, 128, 64, 30, 0x7179_6b66_66ad_4090),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
         let got: Vec<(u8, u32, u32, u8, u64)> = cases
@@ -1312,13 +1315,13 @@ mod tests {
             }
         });
         let cases: &[(Speed, u8, u64)] = &[
-            (Speed::Thorough, 40, 0xcf58_54f5_27e6_5f22),
-            (Speed::Balanced, 40, 0x200f_31c7_392c_f008),
-            (Speed::Fast, 40, 0x81fc_3c50_6d1f_af6b),
-            (Speed::Fastest, 40, 0x8c07_5f06_da36_ed6b),
-            (Speed::Balanced, 120, 0x15ed_afbe_e48c_f7c0),
-            (Speed::Fast, 120, 0x5b33_df99_1ecd_416d),
-            (Speed::Fastest, 120, 0xa961_d343_7869_f44f),
+            (Speed::Thorough, 40, 0xf468_76de_a589_5037),
+            (Speed::Balanced, 40, 0x45d9_333a_db4b_e75d),
+            (Speed::Fast, 40, 0xede8_6f1b_f4bb_5625),
+            (Speed::Fastest, 40, 0x95ae_1f61_6b8f_5322),
+            (Speed::Balanced, 120, 0x0f4c_06b6_956d_f91b),
+            (Speed::Fast, 120, 0x3877_1664_19fc_796e),
+            (Speed::Fastest, 120, 0x5ea2_f78d_e356_635a),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
         let got: Vec<(Speed, u8, u64)> = cases

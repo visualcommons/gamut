@@ -25,8 +25,9 @@
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
 //!
 //! How many of those candidates the lossy path actually tries is a [`Search`], resolved from the
-//! caller's `Speed` preset; the full search is the default. The luma mode (with filter-intra), the
-//! transform type, the CfL alphas and the 8×8 split are each decided by rate–distortion cost:
+//! caller's `Speed` preset; the full search is the default. The partition (bottom-up, 8×8 to
+//! 64×64), the luma mode (with filter-intra) jointly with the transform depth, the transform type
+//! and the CfL alphas are each decided by rate–distortion cost:
 //! every candidate is *trialled* — reconstructed exactly as it would be coded, its symbols priced
 //! from the adapting CDFs instead of coded ([`Coding::Trial`], [`Coder`]'s tally) — and the trial is
 //! undone, so the encoder state the chosen candidate is then coded from is the one it was priced
@@ -146,7 +147,7 @@ pub(crate) struct Search {
     cfl_magnitudes: Option<&'static [i32]>,
     /// How many of [`TX_TYPE_TRIALS`] a square luma transform tries after `DCT_DCT`.
     tx_type_trials: usize,
-    /// The square sizes `decide_rect` may code as two rectangular halves.
+    /// The square sizes the partition search offers `PARTITION_HORZ`/`PARTITION_VERT` at.
     rect_sizes: &'static [usize],
     /// The smallest square block side the partition search may *choose* to split: 8 lets it reach
     /// 4×4 leaves, 16 stops it at 8×8. A split the frame edge forces is taken whatever this says.
@@ -618,10 +619,14 @@ pub(crate) struct FrameEncoder<'a> {
     block_decoded: Vec<u8>,
     /// The candidate sets the lossy mode decisions search (full by default).
     search: Search,
-    /// The mode decisions the blocks of the current 8×8 split decision reached while they were
-    /// trialled ([`FrameEncoder::choose_split`]); the partition it chooses then codes its blocks
-    /// as decided instead of searching them again. Cleared by each such decision before it trials.
+    /// The mode decisions blocks reached while they were trialled by the partition search
+    /// ([`FrameEncoder::choose_partition`]); a block coded again — by an enclosing trial, or for
+    /// real — is coded as decided instead of searched again. Emptied at each superblock: an entry
+    /// a losing alternative left is never looked up again, since no other alternative codes a
+    /// block at the same position and size.
     decided: Vec<Decided>,
+    /// The partitions the search chose for the regions it trialled, reused the same way.
+    decided_partitions: Vec<DecidedPartition>,
 }
 
 /// One tile's MI rectangle: `MiRowStart..MiRowEnd` × `MiColStart..MiColEnd` (§5.11.1), all on
@@ -779,6 +784,7 @@ impl<'a> FrameEncoder<'a> {
             block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
             search: Search::for_speed(Speed::default()),
             decided: Vec::new(),
+            decided_partitions: Vec::new(),
         }
     }
 
@@ -881,6 +887,8 @@ impl<'a> FrameEncoder<'a> {
                 // ReadDeltas is armed per superblock (§7.18); the first block then signals delta_q.
                 self.read_deltas = self.delta_q_present;
                 self.clear_block_decoded(r, c);
+                self.decided.clear();
+                self.decided_partitions.clear();
                 if self.qindex > 0 {
                     self.write_lr(r, c);
                 }
@@ -1072,9 +1080,8 @@ impl<'a> FrameEncoder<'a> {
             usize::MAX
         } else if has_rows && has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
-            if self.qindex == 0 {
-                self.sym.encode(0, self.cdfs.partition(bsl, ctx)); // PARTITION_NONE
-                0
+            let bp = if self.qindex == 0 {
+                0 // PARTITION_NONE
             } else if block_exceeds_frame(r, c, num4x4, self.mi_rows, self.mi_cols) {
                 // The block extends past the frame edge (only its top/left half is in-frame, which is
                 // why `has_rows && has_cols` still hold). AV1 permits a frame-spanning PARTITION_NONE
@@ -1082,24 +1089,14 @@ impl<'a> FrameEncoder<'a> {
                 // block-size transform would write out of bounds. Force PARTITION_SPLIT — always a
                 // legal choice in this branch — so the recursion descends until every coded transform
                 // fits (a 4×4 leaf always fits); the out-of-frame leaves are skipped in `residual`.
-                self.sym.encode(3, self.cdfs.partition(bsl, ctx)); // PARTITION_SPLIT
-                3
-            } else if let Some(d) = self.decide_rect(r, c, bw) {
-                // PARTITION_HORZ (1) / PARTITION_VERT (2): two rectangular halves, each its own mode
-                // and one matching rectangular transform.
-                self.sym.encode(d, self.cdfs.partition(bsl, ctx));
-                d
-            } else if (8..=64).contains(&bw) && !self.choose_split(r, c, bw, ctx) {
-                // Lossy: an 8×8…64×64 region coded as a single PARTITION_NONE block + one
-                // TX_8X8…TX_64X64 when it is smooth enough; otherwise split for per-block
-                // mode/transform adaptation (each SPLIT halves, recursing down to 4×4 as needed,
-                // or until the block is smaller than the search's `split_from`).
-                self.sym.encode(0, self.cdfs.partition(bsl, ctx)); // PARTITION_NONE
-                0
+                3 // PARTITION_SPLIT
             } else {
-                self.sym.encode(3, self.cdfs.partition(bsl, ctx)); // PARTITION_SPLIT
-                3
-            }
+                // Lossy and on-screen: PARTITION_NONE, HORZ, VERT or SPLIT, by rate–distortion
+                // trial among those the search offers.
+                self.choose_partition(r, c, bw, ctx)
+            };
+            self.sym.encode(bp, self.cdfs.partition(bsl, ctx));
+            bp
         } else if has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
             let cdf2 = split_or_horz_cdf(self.cdfs.partition_probs(bsl, ctx));
@@ -1113,6 +1110,16 @@ impl<'a> FrameEncoder<'a> {
         } else {
             3 // forced PARTITION_SPLIT, no symbol
         };
+        self.code_partition(r, c, bw, bp);
+    }
+
+    /// Codes the `bw × bw` region at MI `(r, c)` as partition `bp` (0 NONE, 1 HORZ, 2 VERT,
+    /// 3 SPLIT, `usize::MAX` for a sub-8×8 block, which decodes no partition), once its partition
+    /// symbol, if any, is coded: the partition context update, then the blocks, or the four
+    /// quadrants recursively.
+    fn code_partition(&mut self, r: usize, c: usize, bw: usize, bp: usize) {
+        let half = bw / 8;
+        let bsl = (bw / 4).trailing_zeros() as usize; // Mi_Width_Log2
 
         // AbovePartitionContext/LeftPartitionContext update (§5.11.4): a terminal partition (NONE/
         // HORZ/VERT) writes its level's context; PARTITION_SPLIT writes only at 8×8 (its 4×4 children
@@ -1183,38 +1190,78 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    /// Decides whether the fully on-screen lossy `bw × bw` region at MI `(r, c)`, whose partition
-    /// symbol is coded under context `ctx`, is coded `PARTITION_SPLIT` rather than
-    /// `PARTITION_NONE`. Never below the search's `split_from`. An 8×8 region — whose children
-    /// are 4×4 leaves, so both alternatives are a few blocks to code — is decided by
-    /// rate–distortion cost: each alternative is trialled whole, partition symbol, mode info,
-    /// every plane's residual, and the cheaper taken (`PARTITION_NONE` on a tie). A larger region
-    /// is decided by [`Self::should_split`]'s texture test, since trialling it would mean
-    /// trialling every partition beneath it.
-    fn choose_split(&mut self, r: usize, c: usize, bw: usize, ctx: usize) -> bool {
-        if bw < self.search.split_from {
-            return false;
+    /// Decides the partition of the fully on-screen lossy `bw × bw` region at MI `(r, c)`
+    /// (8×8..64×64), whose partition symbol is coded under context `ctx`: 0 `PARTITION_NONE`,
+    /// 1 `PARTITION_HORZ`, 2 `PARTITION_VERT` or 3 `PARTITION_SPLIT`.
+    ///
+    /// The search is bottom-up by rate–distortion cost: each partition [`Self::partitions_offered`]
+    /// names is trialled whole — partition symbol, mode info, every plane's residual — and the
+    /// cheapest taken, the earliest offered on a tie (so `PARTITION_NONE` before the others). A
+    /// `PARTITION_SPLIT` trial codes each quadrant as this same decision chooses for it, so the
+    /// quadrants are decided first, inside the trial. Every decision a trial reaches — a
+    /// sub-region's partition here ([`FrameEncoder::decided_partitions`]), a block's modes in
+    /// [`Self::encode_block`] ([`FrameEncoder::decided`]) — is kept, and taken as reached when the
+    /// region is coded again, by an enclosing trial or for real: each region is trialled once per
+    /// alternative rather than once per enclosing level, so the search costs time linear in its
+    /// depth, not exponential.
+    ///
+    /// A decision is reused against the CDFs it was priced from, not the ones the stream has
+    /// adapted to by the time the region is coded for real; that is the cost of not deciding it
+    /// twice.
+    fn choose_partition(&mut self, r: usize, c: usize, bw: usize, ctx: usize) -> usize {
+        let at = (r, c, bw);
+        let bp = match self.decided_partitions.iter().position(|d| d.at == at) {
+            Some(i) => self.decided_partitions.swap_remove(i).bp,
+            None => self.trial_partitions(r, c, bw, ctx),
+        };
+        if self.sym.tally.is_some() {
+            self.decided_partitions.push(DecidedPartition { at, bp });
         }
-        if bw != 8 {
-            return self.should_split(r, c, bw);
-        }
-        // `Mi_Width_Log2` of an 8×8 block.
-        let bsl = 1;
-        self.decided.clear();
-        let none = self.trial_cost(r, c, bw, |e| {
-            e.sym.encode(0, e.cdfs.partition(bsl, ctx));
-            e.update_partition_ctx(r, c, bsl, 0);
-            e.encode_block(r, c, bw, bw);
-        });
-        let split = self.trial_cost(r, c, bw, |e| {
-            e.sym.encode(3, e.cdfs.partition(bsl, ctx));
-            e.update_partition_ctx(r, c, bsl, 3);
-            for (dr, dc) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                e.encode_partition(r + dr, c + dc, 4);
+        bp
+    }
+
+    /// The partitions the search offers the fully on-screen lossy `bw × bw` region at MI `(r, c)`,
+    /// in the order they win ties: `PARTITION_NONE`, then `PARTITION_HORZ` and `PARTITION_VERT`
+    /// where the search codes rectangular halves at this size and the halves are codable
+    /// (§6.10.4: under 4:2:2 no taller-than-wide block is), then `PARTITION_SPLIT` from the
+    /// search's `split_from` up.
+    fn partitions_offered(&self, bw: usize) -> Vec<usize> {
+        let mut offered = vec![0];
+        if self.search.rect_sizes.contains(&bw) {
+            let hp = bw / 2;
+            if self.rect_partition_is_codable(bw, hp) {
+                offered.push(1);
             }
-        });
-        // `min_by_key` keeps its first argument on equal costs: a tie stays PARTITION_NONE.
-        std::cmp::min_by_key((none, false), (split, true), |c| c.0).1
+            if self.rect_partition_is_codable(hp, bw) {
+                offered.push(2);
+            }
+        }
+        if bw >= self.search.split_from {
+            offered.push(3);
+        }
+        offered
+    }
+
+    /// Trials every partition [`Self::partitions_offered`] names for the region at MI `(r, c)`
+    /// and returns the cheapest; a region offered only one is coded that way untrialled.
+    fn trial_partitions(&mut self, r: usize, c: usize, bw: usize, ctx: usize) -> usize {
+        let offered = self.partitions_offered(bw);
+        if let [only] = offered[..] {
+            return only;
+        }
+        let bsl = (bw / 4).trailing_zeros() as usize;
+        // `min_by_key` keeps the first of equal costs: a tie goes to the earlier offer.
+        offered
+            .into_iter()
+            .map(|bp| {
+                let cost = self.trial_cost(r, c, bw, |e| {
+                    e.sym.encode(bp, e.cdfs.partition(bsl, ctx));
+                    e.code_partition(r, c, bw, bp);
+                });
+                (cost, bp)
+            })
+            .min_by_key(|&(cost, _)| cost)
+            .map_or(0, |(_, bp)| bp)
     }
 
     /// The rate–distortion cost of coding the `bw × bw` region at MI `(r, c)` as `code` does,
@@ -1345,29 +1392,6 @@ impl<'a> FrameEncoder<'a> {
             &mut self.tx_log2,
             &mut self.tx_log2_h,
         ]
-    }
-
-    /// Decides whether the lossy `bw × bw` region at MI `(r, c)` should split rather than be coded as
-    /// a single `PARTITION_NONE` block. A textured region (large luma range over the source) splits so
-    /// each sub-block can pick its own mode and transform; a smooth region stays whole, where one
-    /// prediction and a single larger transform code it more compactly. This is a quality decision —
-    /// either choice reconstructs bit-exactly — so the threshold is a deterministic placeholder for
-    /// 16×16 and larger; [`Self::choose_split`] decides an 8×8 block by rate–distortion trial
-    /// instead, and extending that trial upward is #753.
-    fn should_split(&self, r: usize, c: usize, bw: usize) -> bool {
-        let n4 = bw / 4;
-        // A 64×64 block that extends past the frame edge is split: the encoder only codes a
-        // `PARTITION_NONE` 64×64 block when the whole superblock is on-screen (a partial 64×64 block
-        // is valid but adds no value, and the smaller sub-blocks crop cleanly).
-        if bw == 64 && (r + n4 > self.mi_rows || c + n4 > self.mi_cols) {
-            return true;
-        }
-        // A palette-able block (few luma colors + flat chroma) is kept whole so it can use palette
-        // mode, even though its luma range is large — splitting it would forfeit the palette coding.
-        if self.decide_palette(r, c, bw).is_some() {
-            return false;
-        }
-        self.luma_range(c * 4, r * 4, bw, bw) > 32
     }
 
     /// Updates the active dequantizers to `CurrentQIndex` — used when a `delta_q` changes it. Only the
@@ -1526,8 +1550,7 @@ impl<'a> FrameEncoder<'a> {
     /// and the per-pixel index map. This is a quality decision; any choice reconstructs
     /// bit-exactly, so only the signaling has to be correct.
     fn decide_palette(&self, r: usize, c: usize, bw: usize) -> Option<PaletteBlock> {
-        // A pruned search does not look for a palette at all — which also stops `should_split`
-        // keeping a palette-able region whole for one.
+        // A pruned search does not look for a palette at all.
         if !self.search.palette {
             return None;
         }
@@ -1740,62 +1763,6 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    /// Source-luma range (max − min) over the `bw × bw` block at coded `(sx, sy)`. Used by the
-    /// partition and transform-depth heuristics.
-    fn luma_range(&self, sx: usize, sy: usize, w: usize, h: usize) -> i32 {
-        let mut lo = i32::MAX;
-        let mut hi = i32::MIN;
-        for i in 0..h {
-            for j in 0..w {
-                let v = self.sample(0, sx + j, sy + i);
-                lo = lo.min(v);
-                hi = hi.max(v);
-            }
-        }
-        hi - lo
-    }
-
-    /// Decides whether to code a square `bw × bw` region (16×16 or 32×32, fully on-screen) as two
-    /// rectangular halves: `Some(1)` PARTITION_HORZ (top/bottom `bw × bw/2`) or `Some(2)` PARTITION_VERT
-    /// (left/right `bw/2 × bw`). Chosen when the whole block is textured (would otherwise split) but a
-    /// single horizontal or vertical edge makes both halves smooth — so each half gets one mode/
-    /// transform. A quality decision (every choice reconstructs bit-exactly); the threshold is a
-    /// deterministic placeholder. `None` falls through to the NONE/SPLIT decision.
-    fn decide_rect(&self, r: usize, c: usize, bw: usize) -> Option<usize> {
-        // 16 and 32 under the full search, none under a pruned one. A list rather than the two
-        // `bw != 16 && bw != 32` comparisons it replaced, which also retires that `&&`'s mutant.
-        if !self.search.rect_sizes.contains(&bw) {
-            return None;
-        }
-        let n4 = bw / 4;
-        if r + n4 > self.mi_rows || c + n4 > self.mi_cols {
-            return None; // a partial block crops cleanly as smaller squares
-        }
-        let (sx, sy, hp) = (c * 4, r * 4, bw / 2);
-        if self.luma_range(sx, sy, bw, bw) <= 32 {
-            return None; // smooth enough to keep whole (PARTITION_NONE)
-        }
-        let horz_ok =
-            self.luma_range(sx, sy, bw, hp) <= 32 && self.luma_range(sx, sy + hp, bw, hp) <= 32;
-        let vert_ok =
-            self.luma_range(sx, sy, hp, bw) <= 32 && self.luma_range(sx + hp, sy, hp, bw) <= 32;
-        // §6.10.4: a partition whose chroma residual would be `BLOCK_INVALID` is not conformant.
-        // Under 4:2:2 that rules out every taller-than-wide block — halving an 8x16 block's width
-        // implies a 4x16 chroma block, an aspect ratio AV1 does not code — so `PARTITION_VERT` is
-        // unavailable at every size. Derived from the table rather than special-cased, so a future
-        // layout with different invalid shapes needs no change here. This costs the 4:2:2 encoder
-        // half its rectangular partition set, which is a real (documented) rate cost.
-        let horz_ok = horz_ok && self.rect_partition_is_codable(bw, hp);
-        let vert_ok = vert_ok && self.rect_partition_is_codable(hp, bw);
-        if horz_ok {
-            Some(1)
-        } else if vert_ok {
-            Some(2)
-        } else {
-            None
-        }
-    }
-
     /// Context for the `tx_depth` CDF (§8.3.2): `(aboveTxW ≥ bw) + (leftTxH ≥ bw)`, where the
     /// neighbour transform width/height come from the per-MI `tx_log2` map (0 when unavailable).
     fn tx_depth_ctx(&self, r: usize, c: usize, bw: usize, bh: usize) -> usize {
@@ -1810,22 +1777,6 @@ impl<'a> FrameEncoder<'a> {
             0
         };
         usize::from(above_w >= bw) + usize::from(left_h >= bh)
-    }
-
-    /// Picks the luma `tx_depth` (0..=`max_depth`, itself ≤ `MAX_TX_DEPTH = 2`) for a lossy ≥8×8
-    /// block: smoother blocks keep one block-size transform, more textured ones split the transform
-    /// (one prediction mode, several sub-transforms). This is a quality decision — every depth
-    /// reconstructs bit-exactly — so the range thresholds are a deterministic placeholder.
-    fn select_tx_depth(&self, sx: usize, sy: usize, bw: usize, max_depth: usize) -> usize {
-        let range = self.luma_range(sx, sy, bw, bw);
-        let depth = if range > 24 {
-            2
-        } else if range > 12 {
-            1
-        } else {
-            0
-        };
-        depth.min(max_depth)
     }
 
     fn encode_block(&mut self, r: usize, c: usize, bw: usize, bh: usize) {
@@ -1883,41 +1834,57 @@ impl<'a> FrameEncoder<'a> {
         if self.qindex > 0 {
             self.apply_seg_quant(segid);
         }
-        // The luma transform size is decided before the mode, so each mode candidate is priced
-        // over the transforms it will actually be coded with; it is signalled after the mode info.
-        // A rectangular block codes one transform that fills it (tx_depth = 0).
-        let tx_depth = if lossy_large && !is_rect {
-            let max_depth = if bw == 8 { 1 } else { 2 };
-            self.select_tx_depth(c * 4, r * 4, bw, max_depth)
-        } else {
-            0
-        };
-        let luma_tx = if is_rect {
-            max_tx_size_rect(bw, bh)
+        // The luma transforms the block may be coded with, each with the rate of signalling it:
+        // a square lossy ≥8×8 block chooses its `tx_depth` (0..=`Max_Tx_Depth`, one prediction
+        // over `bw >> tx_depth` square transforms), jointly with its mode; a rectangular block
+        // codes one transform that fills it (tx_depth = 0), a 4×4 or lossless block 4×4s.
+        let tx_ctx = self.tx_depth_ctx(r, c, bw, bh);
+        let tx_options: Vec<(TxSize, u32)> = if is_rect {
+            vec![(max_tx_size_rect(bw, bh), 0)]
         } else if lossy_large {
-            square_tx(bw >> tx_depth)
+            let max_depth = if bw == 8 { 1 } else { 2 };
+            (0..=max_depth)
+                .map(|depth| {
+                    let rate =
+                        symbol_rate(tx_depth_slot(&mut self.cdfs, bw, tx_ctx).probs(), depth);
+                    (square_tx(bw >> depth), rate)
+                })
+                .collect()
         } else {
-            TxSize::Tx4x4
+            vec![(TxSize::Tx4x4, 0)]
         };
-        // A block the 8×8 split decision has just trialled is coded as the trial decided it,
-        // rather than searched a second time.
-        let decided = self
-            .decided
-            .iter()
-            .position(|d| d.at == (r, c, bw, bh))
-            .map(|i| self.decided.swap_remove(i));
-        let luma = if let Some(d) = decided {
-            d.luma
+        // A block the partition search has trialled is coded as the trial decided it, rather
+        // than searched a second time. A skip block has nothing to decide, and is never recorded:
+        // whether a block is skipped, and whether it is a palette block, reads the
+        // reconstruction its neighbours left, which a block coded again after its trial need not
+        // find the same. So a block the trial coded as skipped is searched afresh if it now has
+        // a residual, and one now skipped ignores what its trial decided — coding it as decided
+        // would code a palette, whose `has_palette_y` only a `DC_PRED` block signals, under any
+        // mode the trial chose.
+        let decided = if skip {
+            None
+        } else {
+            self.decided
+                .iter()
+                .position(|d| d.at == (r, c, bw, bh))
+                .map(|i| self.decided.swap_remove(i))
+        };
+        let (luma, tx_depth) = if let Some(d) = decided {
+            (d.luma, d.tx_depth)
         } else if skip || self.qindex == 0 {
             // Palette requires YMode == DC_PRED (and no filter-intra); lossless also forces DC_PRED.
             // A block skipped for being flat and DC-predictable (`block_is_skippable`) takes
             // DC_PRED by construction: the rate–distortion search trials every mode with its
             // residual coded, a residual a skip block never codes, so it would rank the modes by
             // the wrong reconstruction — and only DC_PRED is known to reproduce the source here.
-            DC_LUMA
+            // With no residual there is nothing for a deeper transform to code either, so a
+            // skip block keeps one block-size transform (`tx_depth = 0`), which also leaves the
+            // deblocking filter no inner transform edge to cross.
+            (DC_LUMA, 0)
         } else {
-            self.select_luma_mode(r, c, bw, bh, luma_tx)
+            self.select_luma_mode(r, c, bw, bh, &tx_options)
         };
+        let luma_tx = tx_options[tx_depth].0;
         let LumaMode {
             mode: y_mode,
             angle_delta,
@@ -1950,7 +1917,7 @@ impl<'a> FrameEncoder<'a> {
         let block_has_chroma = has_chroma(r, c, bw, bh, self.subsampling);
         // §6.10.4 is a bitstream-conformance requirement the *partition search* has to respect, so
         // assert it at the point a block is committed rather than discovering it in the residual
-        // loop. `decide_rect` is the only thing that can produce a shape that violates it.
+        // loop. `partitions_offered` is the only thing that can produce a shape that violates it.
         debug_assert!(
             !block_has_chroma || self.rect_partition_is_codable(bw, bh),
             "{bw}x{bh} has no codable chroma residual under {:?}",
@@ -1971,10 +1938,11 @@ impl<'a> FrameEncoder<'a> {
             // CfL is square-only here; a rectangular block's chroma is plain DC_PRED.
             _ => None,
         };
-        if self.sym.tally.is_some() {
+        if self.sym.tally.is_some() && !skip {
             self.decided.push(Decided {
                 at: (r, c, bw, bh),
                 luma,
+                tx_depth,
                 cfl,
             });
         }
@@ -2056,26 +2024,12 @@ impl<'a> FrameEncoder<'a> {
         // `tx_depth`, choosing a luma transform `bw >> tx_depth` (square, ≥ 4×4). Chroma never signals
         // — for 4:4:4 it always uses the block-size transform (`Max_Tx_Size_Rect`). The CDF is keyed by
         // block size (`Max_Tx_Depth`); the context is `(aboveTxW ≥ bw) + (leftTxH ≥ bw)`.
-        if is_rect {
-            // One rectangular transform fills the block (tx_depth = 0). The CDF is keyed by the
-            // bounding square (`txSzSqrUp = Max(bw, bh)`); the context is `(aboveTxW ≥ bw) +
-            // (leftTxH ≥ bh)`, exactly as for a square block of that size.
-            let ctx = self.tx_depth_ctx(r, c, bw, bh);
-            let slot = if bw.max(bh) == 16 {
-                self.cdfs.tx_size_16x16[ctx].slot()
-            } else {
-                self.cdfs.tx_size_32x32[ctx].slot()
-            };
-            self.sym.encode(0, slot);
-        } else if lossy_large {
-            let ctx = self.tx_depth_ctx(r, c, bw, bw);
-            let slot = match bw {
-                8 => self.cdfs.tx_size_8x8[ctx].slot(),
-                16 => self.cdfs.tx_size_16x16[ctx].slot(),
-                32 => self.cdfs.tx_size_32x32[ctx].slot(),
-                _ => self.cdfs.tx_size_64x64[ctx].slot(),
-            };
-            self.sym.encode(tx_depth, slot);
+        // A rectangular block's one transform (tx_depth = 0) is coded under the CDF of its
+        // bounding square (`txSzSqrUp = Max(bw, bh)`); the context is `(aboveTxW ≥ bw) +
+        // (leftTxH ≥ bh)`, exactly as for a square block of that size.
+        if lossy_large {
+            self.sym
+                .encode(tx_depth, tx_depth_slot(&mut self.cdfs, bw.max(bh), tx_ctx));
         }
 
         // Per-MI bookkeeping: block size, luma mode (for neighbour contexts), and the luma
@@ -3319,53 +3273,58 @@ impl<'a> FrameEncoder<'a> {
         rate
     }
 
-    /// Picks the luma prediction for the lossy `bw × bh` block at MI `(r, c)`, whose luma is coded
-    /// with `luma_tx` transforms, by rate–distortion cost.
+    /// Picks the luma prediction for the lossy `bw × bh` block at MI `(r, c)`, and which of
+    /// `txs` — the transforms its luma may be coded with, each with the rate of signalling it —
+    /// codes it, by rate–distortion cost. Returns the mode and the index into `txs`, which for a
+    /// square ≥8×8 block is its `tx_depth`.
     ///
-    /// Every candidate of [`Self::luma_candidates`] is trialled: its luma residual is coded
-    /// transform by transform (each transform predicted from the reconstruction its predecessors
-    /// left), and the reconstruction's squared error weighed against the coefficient rate plus the
-    /// mode's signalling rate by [`Self::rd_cost`].
+    /// Every pairing of a [`Self::luma_candidates`] mode with a transform is trialled: its luma
+    /// residual is coded transform by transform (each transform predicted from the reconstruction
+    /// its predecessors left), and the reconstruction's squared error weighed against the
+    /// coefficient rate plus the mode's and the transform's signalling rate by [`Self::rd_cost`].
     ///
-    /// Every candidate is first trialled with `DCT_DCT` alone ([`Coding::Screen`]), and only the
+    /// Every pairing is first trialled with `DCT_DCT` alone ([`Coding::Screen`]), and only the
     /// [`MODE_REFINE`] cheapest are trialled again with the transform-type search each would be
-    /// coded with: that search multiplies a trial's transforms by up to five, and a mode's
-    /// `DCT_DCT` cost already tells the contenders from the rest. Both passes run even where they
-    /// must agree — a list of at most [`MODE_REFINE`] candidates, or transforms with no type to
-    /// choose — because a guard skipping the second pass there could only save time, never change
-    /// the answer, and so could not be tested; that costs the `Fastest` search and 32×32/64×64
-    /// blocks up to eight repeated trials each.
+    /// coded with: that search multiplies a trial's transforms by up to five, and a pairing's
+    /// `DCT_DCT` cost already tells the contenders from the rest — so choosing the transform depth
+    /// as well multiplies only the screening pass, not the refining one. Both passes run even
+    /// where they must agree — a list of at most [`MODE_REFINE`] pairings, or transforms with no
+    /// type to choose — because a guard skipping the second pass there could only save time,
+    /// never change the answer, and so could not be tested; that costs the `Fastest` search and
+    /// 32×32/64×64 transforms up to eight repeated trials each.
     ///
-    /// A tie goes to the cheaper `DCT_DCT` cost, then to the earlier candidate (the cheaper
-    /// signalling). The choice is a quality decision; every option reconstructs bit-exactly, so
-    /// only the signaling must be correct.
+    /// A tie goes to the cheaper `DCT_DCT` cost, then to the earlier pairing: the cheaper mode
+    /// signalling, then the shallower transform split. The choice is a quality decision; every
+    /// option reconstructs bit-exactly, so only the signaling must be correct.
     fn select_luma_mode(
         &mut self,
         r: usize,
         c: usize,
         bw: usize,
         bh: usize,
-        luma_tx: TxSize,
-    ) -> LumaMode {
+        txs: &[(TxSize, u32)],
+    ) -> (LumaMode, usize) {
         let candidates = self.luma_candidates(bw, bh);
-        let mut costs: Vec<(u64, usize)> = (0..candidates.len())
-            .map(|i| {
-                let screen = self.luma_cost(r, c, bw, bh, luma_tx, candidates[i], Coding::Screen);
-                (screen, i)
-            })
+        let pairs: Vec<(LumaMode, usize)> = candidates
+            .iter()
+            .flat_map(|&cand| (0..txs.len()).map(move |t| (cand, t)))
+            .collect();
+        let cost = |e: &mut Self, (cand, t): (LumaMode, usize), coding| {
+            let (tx, tx_rate) = txs[t];
+            e.luma_cost(r, c, bw, bh, tx, cand, coding) + e.rd_cost(0, tx_rate)
+        };
+        let mut costs: Vec<(u64, usize)> = (0..pairs.len())
+            .map(|i| (cost(self, pairs[i], Coding::Screen), i))
             .collect();
         costs.sort_unstable();
         costs.truncate(MODE_REFINE);
         // `min_by_key` keeps the first of equal costs, and the list is in screening order: a tie
-        // in full cost goes to the cheaper `DCT_DCT` cost, then to the earlier candidate.
+        // in full cost goes to the cheaper `DCT_DCT` cost, then to the earlier pairing.
         costs
             .into_iter()
-            .map(|(_, i)| {
-                let full = self.luma_cost(r, c, bw, bh, luma_tx, candidates[i], Coding::Trial);
-                (full, i)
-            })
+            .map(|(_, i)| (cost(self, pairs[i], Coding::Trial), i))
             .min_by_key(|&(full, _)| full)
-            .map_or(DC_LUMA, |(_, i)| candidates[i])
+            .map_or((DC_LUMA, 0), |(_, i)| pairs[i])
     }
 
     /// The rate–distortion cost of coding the lossy `bw × bh` block at MI `(r, c)`'s luma as
@@ -4176,7 +4135,18 @@ struct Decided {
     /// The block: MI `(r, c)` and its width and height in samples.
     at: (usize, usize, usize, usize),
     luma: LumaMode,
+    /// The luma `tx_depth` (0 for a block that signals none).
+    tx_depth: usize,
     cfl: Option<(i32, i32)>,
+}
+
+/// A region's partition, reached while it was trialled: see [`FrameEncoder::decided_partitions`].
+#[derive(Clone, Copy)]
+struct DecidedPartition {
+    /// The region: MI `(r, c)` and its side in samples.
+    at: (usize, usize, usize),
+    /// 0 `PARTITION_NONE`, 1 `PARTITION_HORZ`, 2 `PARTITION_VERT` or 3 `PARTITION_SPLIT`.
+    bp: usize,
 }
 
 /// Plain `DC_PRED` luma: what palette and lossless blocks code.
@@ -4270,6 +4240,18 @@ struct TxChoice {
     /// The `culLevel`/`dcCategory` the block leaves in the neighbour contexts.
     cul: u8,
     dc: u8,
+}
+
+/// The `tx_depth` CDF of a square lossy `bw × bw` block (`Max_Tx_Depth` keys it by size) under
+/// context `ctx` — also the CDF a rectangular block whose longer side is `bw` codes its
+/// `tx_depth = 0` under.
+fn tx_depth_slot(cdfs: &mut cdf::CdfContext, bw: usize, ctx: usize) -> cdf::CdfSlot<'_> {
+    match bw {
+        8 => cdfs.tx_size_8x8[ctx].slot(),
+        16 => cdfs.tx_size_16x16[ctx].slot(),
+        32 => cdfs.tx_size_32x32[ctx].slot(),
+        _ => cdfs.tx_size_64x64[ctx].slot(),
+    }
 }
 
 /// Derives the 2-symbol `split_or_horz` CDF from the partition CDF (§8.2.6): the vertical-ish
@@ -4459,7 +4441,7 @@ mod tests {
         // halves at 16 and 32 — against each layout the encoder codes.
         //
         // 4:2:2 is the constraint that bites: it rules out every taller-than-wide shape, which is
-        // why `decide_rect` must not offer PARTITION_VERT there.
+        // why `partitions_offered` must not offer PARTITION_VERT there.
         let squares = [(4, 4), (8, 8), (16, 16), (32, 32), (64, 64)];
         let horz = [(16, 8), (32, 16)];
         let vert = [(8, 16), (16, 32)];
@@ -4487,94 +4469,34 @@ mod tests {
     }
 
     #[test]
-    fn the_partition_search_offers_no_vertical_split_at_four_two_two() {
-        // Content shaped so a vertical split is the attractive one: two flat halves side by side
-        // with a hard edge between them. At 4:4:4 and 4:2:0 `decide_rect` may take it; at 4:2:2 it
-        // must not, because the resulting 8x16 block has no codable chroma residual.
-        for ss in [
-            ChromaSubsampling::Cs444,
-            ChromaSubsampling::Cs420,
-            ChromaSubsampling::Cs422,
-        ] {
-            let planes = planes_split_halves(ss);
-            let e = FrameEncoder::new(&planes, 40);
-            for (r, c) in [(0usize, 0usize), (0, 4), (4, 0), (4, 4)] {
-                if let Some(kind) = e.decide_rect(r, c, 16) {
-                    let (bw, bh) = if kind == 1 { (16, 8) } else { (8, 16) };
-                    assert!(
-                        plane_residual_size(bw, bh, 1, ss).is_some(),
-                        "{ss:?}: decide_rect offered an uncodable {bw}x{bh}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// A 32x32 image split into a dark left half and a bright right half, in `ss`.
-    fn planes_split_halves(ss: ChromaSubsampling) -> Planar8 {
-        let mut rgb = vec![0u8; 32 * 32 * 3];
-        for y in 0..32usize {
-            for x in 0..32usize {
-                let v = if x < 16 { 20u8 } else { 200 };
-                rgb[(y * 32 + x) * 3..(y * 32 + x) * 3 + 3].copy_from_slice(&[v, v, v]);
-            }
-        }
-        let img = gamut_core::ImageRef::<gamut_core::Rgb8>::new(
-            &rgb,
-            gamut_core::Dimensions::new(32, 32).unwrap(),
-        )
-        .unwrap();
-        let m = gamut_color::RgbToYcbcr::new(
-            gamut_color::cicp::MatrixCoefficients::Bt709,
-            gamut_color::cicp::ColorRange::Full,
-            gamut_color::BitDepth::Eight,
-        )
-        .unwrap();
-        Planar8::from_rgb8_matrix_subsampled(img, m, ss).unwrap()
-    }
-
-    #[test]
-    fn a_vertical_split_needs_both_halves_smooth_and_a_textured_whole() {
-        // `decide_rect` reaches its `vert_ok` answer only where PARTITION_HORZ is already refused,
-        // so the vertical edge test is observable in exactly one situation: a block whose whole
-        // extent and both horizontal halves are textured while its left and right halves are each
-        // flat. It also has to be a layout where the taller-than-wide half is codable at all —
-        // §6.10.4 rules PARTITION_VERT out entirely at 4:2:2, which is why every layout tested
-        // here is 4:4:4 or 4:2:0.
-        //
-        // Both answers reconstruct bit-exactly, so the dav1d/libaom recon oracles cannot see this
-        // decision: only a direct test separates the real edge test from one that measures the
-        // left half twice, that accepts a single smooth half, or that has either comparison
-        // inverted.
+    fn partitions_offered_follow_the_search_and_the_layout() {
+        // The full search offers the rectangular halves at 16 and 32 only, and SPLIT down to 8;
+        // `Fastest` offers no rectangle and stops choosing SPLIT below 16. §6.10.4: at 4:2:2 the
+        // taller-than-wide half of PARTITION_VERT has no codable chroma residual, so it is never
+        // offered there, while 4:4:4 and 4:2:0 code it.
+        let offered = |ss, speed, bw| {
+            let p = flat_chroma_luma(16, ss, |_, _| 128);
+            at_speed(&p, 40, speed).partitions_offered(bw)
+        };
         for ss in [ChromaSubsampling::Cs444, ChromaSubsampling::Cs420] {
-            for bw in [16usize, 32] {
-                let hp = bw / 2;
-
-                // A hard edge on the block's midline. Whole block and both horizontal halves span
-                // it (range 180 > 32, so no PARTITION_NONE and no PARTITION_HORZ); each vertical
-                // half is constant (range 0), so PARTITION_VERT is the answer.
-                let edge = flat_chroma_luma(bw, ss, |x, _| if x < hp { 20 } else { 200 });
-                assert_eq!(
-                    FrameEncoder::new(&edge, 40).decide_rect(0, 0, bw),
-                    Some(2),
-                    "{ss:?} {bw}x{bw}: a midline edge with two flat halves is PARTITION_VERT"
-                );
-
-                // The same flat left half, but a right half textured by alternating rows. The
-                // whole block (range 100) and both horizontal halves still exceed the threshold,
-                // so PARTITION_NONE and PARTITION_HORZ stay refused — and PARTITION_VERT must be
-                // refused too, because only the left half is smooth.
-                let one_half = flat_chroma_luma(bw, ss, |x, y| match (x < hp, y % 2) {
-                    (true, _) | (false, 0) => 20,
-                    (false, _) => 120,
-                });
-                assert_eq!(
-                    FrameEncoder::new(&one_half, 40).decide_rect(0, 0, bw),
-                    None,
-                    "{ss:?} {bw}x{bw}: one smooth half is not a vertical edge"
-                );
-            }
+            assert_eq!(offered(ss, Speed::Thorough, 8), [0, 3], "{ss:?} 8x8");
+            assert_eq!(
+                offered(ss, Speed::Thorough, 16),
+                [0, 1, 2, 3],
+                "{ss:?} 16x16"
+            );
+            assert_eq!(offered(ss, Speed::Fast, 32), [0, 1, 2, 3], "{ss:?} 32x32");
+            assert_eq!(offered(ss, Speed::Thorough, 64), [0, 3], "{ss:?} 64x64");
+            assert_eq!(offered(ss, Speed::Fastest, 8), [0], "{ss:?} Fastest 8x8");
+            assert_eq!(
+                offered(ss, Speed::Fastest, 16),
+                [0, 3],
+                "{ss:?} Fastest 16x16"
+            );
         }
+        let cs422 = ChromaSubsampling::Cs422;
+        assert_eq!(offered(cs422, Speed::Thorough, 16), [0, 1, 3]);
+        assert_eq!(offered(cs422, Speed::Thorough, 32), [0, 1, 3]);
     }
 
     /// An `n x n` frame in `ss` whose luma is `luma(x, y)` and whose chroma planes are flat.
@@ -4785,27 +4707,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn decide_rect_is_skipped_by_the_fastest_preset() {
-        // A midline edge between two flat halves is PARTITION_VERT under the full search
-        // (`a_vertical_split_needs_both_halves_smooth_and_a_textured_whole`).
-        let edge = flat_chroma_luma(
-            16,
-            ChromaSubsampling::Cs444,
-            |x, _| {
-                if x < 8 { 20 } else { 200 }
-            },
-        );
-        assert_eq!(
-            at_speed(&edge, 40, Speed::Fast).decide_rect(0, 0, 16),
-            Some(2)
-        );
-        assert_eq!(
-            at_speed(&edge, 40, Speed::Fastest).decide_rect(0, 0, 16),
-            None
-        );
-    }
-
     /// A 64x64 identity frame of high-contrast texture: every 8x8 is textured enough to split.
     fn busy64() -> Planar8 {
         let mut rgb = vec![0u8; 64 * 64 * 3];
@@ -4860,12 +4761,12 @@ mod tests {
         let mut four = Vec::new();
         for r in (2..N / 4 - 2).step_by(2) {
             for c in (2..N / 4 - 2).step_by(2) {
-                nxn.push(e.select_luma_mode(r, c, 8, 8, TxSize::Tx8x8));
+                nxn.push(e.select_luma_mode(r, c, 8, 8, &[(TxSize::Tx8x8, 0)]).0);
             }
         }
         for r in 1..N / 4 - 1 {
             for c in 1..N / 4 - 1 {
-                four.push(e.select_luma_mode(r, c, 4, 4, TxSize::Tx4x4));
+                four.push(e.select_luma_mode(r, c, 4, 4, &[(TxSize::Tx4x4, 0)]).0);
             }
         }
         (nxn, four)
@@ -4933,36 +4834,45 @@ mod tests {
             }
         }
         e.block_decoded.iter_mut().for_each(|b| *b = 1);
-        for (r, c, bw, bh, tx) in [
-            (2, 2, 8, 8, TxSize::Tx8x8),
-            (2, 2, 8, 8, TxSize::Tx4x4),
-            (3, 5, 4, 4, TxSize::Tx4x4),
-            (2, 2, 16, 8, TxSize::Tx16x8),
+        // The 8x8 block's two transform depths carry different signalling rates, so the rate
+        // each pairing adds is part of what is compared.
+        let depths = [(TxSize::Tx8x8, 2 * RATE_ONE), (TxSize::Tx4x4, 5 * RATE_ONE)];
+        for (r, c, bw, bh, txs) in [
+            (2, 2, 8, 8, &depths[..]),
+            (2, 2, 8, 8, &depths[1..]),
+            (3, 5, 4, 4, &[(TxSize::Tx4x4, 0)][..]),
+            (2, 2, 16, 8, &[(TxSize::Tx16x8, 0)][..]),
         ] {
             let before = Snapshot::of(&e);
-            let chosen = e.select_luma_mode(r, c, bw, bh, tx);
+            let chosen = e.select_luma_mode(r, c, bw, bh, txs);
             assert!(
                 Snapshot::of(&e) == before,
                 "select_luma_mode changed the encoder"
             );
-            // The procedure, spelled out: the `MODE_REFINE` cheapest under `DCT_DCT` alone
-            // (earlier first on a tie), in that order, are re-priced in full; the first of least
-            // cost wins.
-            let all = e.luma_candidates(bw, bh);
-            let screen: Vec<u64> = all
-                .iter()
-                .map(|&m| e.luma_cost(r, c, bw, bh, tx, m, Coding::Screen))
+            // The procedure, spelled out: every (mode, transform) pairing, mode-major, is priced
+            // under `DCT_DCT` alone plus the transform's signalling rate; the `MODE_REFINE`
+            // cheapest (earlier first on a tie), in that order, are re-priced in full; the first
+            // of least cost wins.
+            let pairs: Vec<(LumaMode, usize)> = e
+                .luma_candidates(bw, bh)
+                .into_iter()
+                .flat_map(|m| (0..txs.len()).map(move |t| (m, t)))
                 .collect();
-            let mut contenders: Vec<usize> = (0..all.len()).collect();
+            let mut price = |(m, t): (LumaMode, usize), coding| {
+                let (tx, rate) = txs[t];
+                e.luma_cost(r, c, bw, bh, tx, m, coding) + e.rd_cost(0, rate)
+            };
+            let screen: Vec<u64> = pairs.iter().map(|&p| price(p, Coding::Screen)).collect();
+            let mut contenders: Vec<usize> = (0..pairs.len()).collect();
             contenders.sort_by_key(|&i| (screen[i], i));
             contenders.truncate(MODE_REFINE);
             let full: Vec<u64> = contenders
                 .iter()
-                .map(|&i| e.luma_cost(r, c, bw, bh, tx, all[i], Coding::Trial))
+                .map(|&i| price(pairs[i], Coding::Trial))
                 .collect();
             let least = *full.iter().min().unwrap();
             let first = contenders[full.iter().position(|&f| f == least).unwrap()];
-            assert_eq!(chosen, all[first], "{r},{c} {bw}x{bh}");
+            assert_eq!(chosen, pairs[first], "{r},{c} {bw}x{bh}");
         }
     }
 
@@ -5185,57 +5095,172 @@ mod tests {
         flat_chroma_luma(16, ChromaSubsampling::Cs444, luma)
     }
 
-    #[test]
-    fn an_eight_by_eight_split_is_decided_by_trialling_both_partitions() {
-        // `choose_split` at 8x8 must answer exactly "the four 4x4 leaves cost less than one 8x8
-        // block", each priced whole — partition symbol, mode info, every plane — and leave the
-        // encoder untouched. High-contrast texture and a gentle ramp land on either side of it.
-        let ramp = luma16(|x, y| (100 + x + y) as u8);
-        let busy = busy64();
-        let mut seen = [false; 2];
-        let at = [(0, 0), (2, 4), (6, 2), (4, 8), (10, 6)];
-        for (planes, at) in std::iter::once((&ramp, (0, 0))).chain(at.map(|a| (&busy, a))) {
-            let (r, c) = at;
-            let mut e = at_speed(planes, 40, Speed::Thorough);
-            e.clear_block_decoded(0, 0);
-            // Every neighbour reconstructed as the source, as a decoder would have it at a high
-            // enough quality.
-            for (plane, g) in e.geom.iter().enumerate() {
-                for y in 0..g.coded_h {
-                    for x in 0..g.coded_w {
-                        e.recon[plane][y * g.coded_w + x] = e.sample(plane, x, y) as u16;
-                    }
+    /// `planes`' encoder at `qindex` under the full search, at the start of its first superblock,
+    /// with every sample reconstructed as the source — as a decoder would have the neighbours at
+    /// a high enough quality.
+    fn primed(planes: &Planar8, qindex: u8) -> FrameEncoder<'_> {
+        let mut e = at_speed(planes, qindex, Speed::Thorough);
+        e.clear_block_decoded(0, 0);
+        for (plane, g) in e.geom.iter().enumerate() {
+            for y in 0..g.coded_h {
+                for x in 0..g.coded_w {
+                    e.recon[plane][y * g.coded_w + x] = e.sample(plane, x, y) as u16;
                 }
             }
-            let ctx = e.partition_ctx(r, c, 1);
-            let none = e.trial_cost(r, c, 8, |e| {
-                e.sym.encode(0, e.cdfs.partition(1, ctx));
-                e.update_partition_ctx(r, c, 1, 0);
-                e.encode_block(r, c, 8, 8);
-            });
-            let split = e.trial_cost(r, c, 8, |e| {
-                e.sym.encode(3, e.cdfs.partition(1, ctx));
-                e.update_partition_ctx(r, c, 1, 3);
-                for (dr, dc) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                    e.encode_partition(r + dr, c + dc, 4);
-                }
-            });
+        }
+        e
+    }
+
+    #[test]
+    fn a_partition_is_the_cheapest_offered_alternative_trialled_whole() {
+        // `choose_partition` must answer exactly the first of least cost among the partitions
+        // `partitions_offered` names, each priced whole — partition symbol, the blocks' mode
+        // info, every plane's residual, and for SPLIT the quadrants as they decide themselves —
+        // and leave the encoder untouched. A gentle ramp and a hard edge stay whole, and
+        // high-contrast texture splits.
+        let ramp = luma16(|x, y| (100 + x + y) as u8);
+        let edge = flat_chroma_luma(32, ChromaSubsampling::Cs444, |x, _| {
+            if x % 16 < 8 { 30 } else { 210 }
+        });
+        let busy = busy64();
+        let mut seen = [false; 4];
+        let cases = [
+            (&ramp, 0, 0, 8),
+            (&ramp, 0, 0, 16),
+            (&edge, 0, 0, 16),
+            (&edge, 0, 0, 32),
+            (&busy, 2, 4, 8),
+            (&busy, 6, 2, 8),
+            (&busy, 4, 8, 16),
+            (&busy, 8, 0, 32),
+        ];
+        for (planes, r, c, bw) in cases {
+            let mut e = primed(planes, 40);
+            let bsl = (bw / 4usize).trailing_zeros() as usize;
+            let ctx = e.partition_ctx(r, c, bsl);
+            // Each alternative trialled on its own copy, so no decision one trial reaches is
+            // reused by the next.
+            let costs: Vec<(u64, usize)> = e
+                .partitions_offered(bw)
+                .into_iter()
+                .map(|bp| {
+                    let mut alone = e.clone();
+                    let cost = alone.trial_cost(r, c, bw, |e| {
+                        e.sym.encode(bp, e.cdfs.partition(bsl, ctx));
+                        e.code_partition(r, c, bw, bp);
+                    });
+                    (cost, bp)
+                })
+                .collect();
+            let least = costs.iter().map(|&(cost, _)| cost).min().unwrap();
+            let first = costs.iter().find(|&&(cost, _)| cost == least).unwrap().1;
             let before = Snapshot::of(&e);
-            let chosen = e.choose_split(r, c, 8, ctx);
-            assert_eq!(chosen, split < none, "{at:?}: none {none}, split {split}");
+            let chosen = e.choose_partition(r, c, bw, ctx);
+            assert_eq!(chosen, first, "({r}, {c}) {bw}x{bw}: {costs:?}");
             assert!(
                 Snapshot::of(&e) == before,
-                "choose_split changed the encoder"
+                "choose_partition changed the encoder"
             );
-            seen[usize::from(chosen)] = true;
+            seen[chosen] = true;
         }
-        assert_eq!(seen, [true, true], "the cases reach both answers");
-        // A search that never splits an 8x8 block does not trial one, and a larger block keeps
-        // the texture test.
+        // A rectangular half codes only the SMOOTH family and PAETH, never palette or a split
+        // transform, so on content this small a square alternative always beats it: none of
+        // these cases picks one, though each prices both.
+        assert_eq!(
+            seen,
+            [true, false, false, true],
+            "the cases reach NONE and SPLIT"
+        );
+        // A region offered only PARTITION_NONE is coded that way untrialled.
         let mut fastest = at_speed(&busy, 40, Speed::Fastest);
-        assert!(!fastest.choose_split(0, 0, 8, 0));
-        let mut e = at_speed(&busy, 40, Speed::Thorough);
-        assert_eq!(e.choose_split(0, 0, 16, 0), e.should_split(0, 0, 16));
+        assert_eq!(fastest.choose_partition(0, 0, 8, 0), 0);
+    }
+
+    #[test]
+    fn a_decided_partition_is_reused_and_kept_only_while_trialling() {
+        // A region the search has already decided is coded as decided, whatever a fresh trial
+        // would say; an enclosing trial keeps the decision for the pass that codes it next, and
+        // that pass — the real one — consumes it.
+        let busy = busy64();
+        let mut e = primed(&busy, 40);
+        // PARTITION_HORZ, which a fresh 8x8 search is never offered.
+        e.decided_partitions.push(DecidedPartition {
+            at: (2, 4, 8),
+            bp: 1,
+        });
+        e.sym.tally = Some(0);
+        assert_eq!(e.choose_partition(2, 4, 8, 0), 1, "taken while trialling");
+        assert_eq!(e.decided_partitions.len(), 1, "kept while trialling");
+        e.sym.tally = None;
+        assert_eq!(e.choose_partition(2, 4, 8, 0), 1, "taken for real");
+        assert!(e.decided_partitions.is_empty(), "consumed for real");
+        // A trialled decision is recorded, a real one is not.
+        e.sym.tally = Some(0);
+        let trialled = e.choose_partition(2, 4, 8, 0);
+        assert_eq!(
+            e.decided_partitions.last().map(|d| (d.at, d.bp)),
+            Some(((2, 4, 8), trialled))
+        );
+        e.sym.tally = None;
+        e.decided_partitions.clear();
+        e.choose_partition(6, 2, 8, 0);
+        assert!(e.decided_partitions.is_empty(), "nothing recorded for real");
+    }
+
+    #[test]
+    fn a_decided_block_is_coded_at_its_decided_transform_depth() {
+        // A block the search has trialled is coded with the mode and `tx_depth` the trial
+        // reached, which the per-MI transform map then carries.
+        let busy = busy64();
+        for (tx_depth, txl) in [(0, 4), (1, 3), (2, 2)] {
+            let mut e = primed(&busy, 40);
+            e.decided.push(Decided {
+                at: (0, 0, 16, 16),
+                luma: LumaMode {
+                    mode: PAETH_PRED,
+                    ..DC_LUMA
+                },
+                tx_depth,
+                cfl: None,
+            });
+            e.encode_block(0, 0, 16, 16);
+            assert_eq!(e.tx_log2[0], txl, "tx_depth {tx_depth}");
+            assert_eq!(e.mi_ymode[0], PAETH_PRED);
+            assert!(e.decided.is_empty(), "consumed for real");
+        }
+    }
+
+    #[test]
+    fn a_skip_block_neither_records_nor_takes_a_decision() {
+        // Mid-grey everywhere is flat and DC-predictable at the frame origin, so the block is
+        // skipped: coded `DC_PRED` whatever a trial of it once decided, and recorded by no trial.
+        let grey = luma16(|_, _| 128);
+        let mut e = primed(&grey, 40);
+        let planted = Decided {
+            at: (0, 0, 16, 16),
+            luma: LumaMode {
+                mode: PAETH_PRED,
+                ..DC_LUMA
+            },
+            tx_depth: 2,
+            cfl: None,
+        };
+        e.decided.push(planted);
+        e.encode_block(0, 0, 16, 16);
+        assert_eq!(e.mi_skip[0], 1, "the fixture is a skip block");
+        assert_eq!(
+            (e.mi_ymode[0], e.tx_log2[0]),
+            (DC_PRED, 4),
+            "not as decided"
+        );
+        assert_eq!(e.decided.len(), 1, "left for no one");
+        let mut e = primed(&grey, 40);
+        e.sym.tally = Some(0);
+        e.encode_block(0, 0, 16, 16);
+        assert!(
+            e.decided.is_empty(),
+            "a trialled skip block records nothing"
+        );
     }
 
     #[test]
