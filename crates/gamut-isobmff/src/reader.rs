@@ -2,8 +2,8 @@
 //!
 //! The structure is offset-driven (a parser-exploit surface), so every read is bounds-checked via
 //! [`BoxReader`], counts are never trusted for allocation, the total resolved payload is capped at
-//! the input size (a file cannot expand), and out-of-scope features (tracks, external data
-//! references, `construction_method` 2, protected or `uri ` items) are rejected with a typed
+//! the input size (a file cannot expand), and out-of-scope features (a sequence-only file, external
+//! data references, `construction_method` 2, protected or `uri ` items) are rejected with a typed
 //! error rather than mis-parsed. Unlike [`crate::write`] — which always normalises to the smallest
 //! box versions — the reader also accepts what foreign encoders emit: `iloc` v0–v2 with
 //! `mdat`/`idat` placement, multi-extent payloads (concatenated), `pitm` v0/v1, `infe` v2/v3,
@@ -16,8 +16,23 @@
 //! a `free`/`skip`, a vendor box — with its [`TopLevelPosition`] taken from where it was found:
 //! [`Trailing`](TopLevelPosition::Trailing) once `mdat` has been seen, otherwise
 //! [`AfterFtyp`](TopLevelPosition::AfterFtyp). A `uuid` box *inside* `meta` is not a top-level
-//! box and is never promoted to one; [`crate::walk_meta_children`] surfaces it. `moov`/`trak`
-//! remain [`Error::Unsupported`].
+//! box and is never promoted to one; [`crate::walk_meta_children`] surfaces it.
+//!
+//! # Sequence tracks beside the still
+//!
+//! An AVIF image sequence (`avis`, AVIF v1.2.0 §6.3) or a HEIF image sequence carries a `moov`
+//! movie box and, as a MIAF file (AVIF §7), usually a `meta` primary still alongside it — every
+//! `avis` fixture in libavif's conformance corpus does.
+//! The model is image-first and never parses sample tables, so a top-level `moov` (or a stray
+//! top-level `trak`) is skipped: it is neither parsed nor retained in
+//! [`IsoBmffImage::top_level_boxes`], and the `meta` still is read as usual. It is not retained
+//! because it cannot round-trip: a track's chunk offsets (`stco`/`co64`) address the source file's
+//! `mdat`, which [`crate::write`] lays out afresh, so a verbatim copy would point at the wrong bytes
+//! — the writer refuses one for the same reason. Its bytes are still accounted for:
+//! [`crate::walk_segments`] reports it as a [`SegmentKind::Box`](crate::SegmentKind::Box). A file
+//! carrying a track but no `meta` is a sequence with no still item and is
+//! [`Error::Unsupported`]. The `ftyp` brands are reported as the file states them, sequence brands
+//! (`avis`, `msf1`) included; a consumer that re-writes the model as a still drops those itself.
 //!
 //! # Motion-photo tolerance
 //!
@@ -53,7 +68,11 @@ type ItemAssociations = Vec<(u32, Vec<(u16, bool)>)>;
 /// file. `read(&`[`write`](crate::write)`(&img)?) == img` holds for anything `write` accepts.
 /// Top-level boxes the model does not otherwise own are retained in
 /// [`IsoBmffImage::top_level_boxes`] in file order — every `AfterFtyp` box before every
-/// `Trailing` one, the grouping `write` requires (see [`IsoBmffImage::top_level_boxes`]).
+/// `Trailing` one, the grouping `write` requires (see [`IsoBmffImage::top_level_boxes`]) — except
+/// a sequence track (`moov`, or a stray top-level `trak`), which is skipped so the `meta` still
+/// beside it reads: its chunk offsets address this file's `mdat`, which [`write`](crate::write)
+/// lays out afresh, so it cannot round-trip. [`walk_segments`](crate::walk_segments) still
+/// accounts its bytes.
 ///
 /// The top-level walk models only the primary still-image stream and tolerates an appended foreign
 /// "motion photo" stream — see the [module docs](self#motion-photo-tolerance): it stops at a second
@@ -62,20 +81,22 @@ type ItemAssociations = Vec<(u32, Vec<(u16, bool)>)>;
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] if a box is truncated or overruns, a required box (`ftyp`,
-/// `meta`, `hdlr`, `pitm`, `iinf`) is missing, an `iloc` extent overflows or points outside its
+/// `meta` in a file without a track, `hdlr`, `pitm`, `iinf`) is missing, an `iloc` extent overflows or points outside its
 /// source, the items' extents sum to more than the file size, an `ipma` property index is out of
 /// range, an `iref` names an unknown `from_item`, or a string is not UTF-8. A malformed top-level
 /// box is only an error *before* both `ftyp` and `meta` have been parsed; after that it is treated
 /// as the start of an appended vendor trailer and stops the walk cleanly.
-/// Returns [`Error::Unsupported`] for structurally valid but out-of-scope features: image
-/// sequences (`moov`/`trak`) in the primary stream, a non-`pict` handler, protected items, `uri `
-/// items, external data references, `iloc` `construction_method` 2, and box versions beyond those
+/// Returns [`Error::Unsupported`] for structurally valid but out-of-scope features: a
+/// sequence-only file (a top-level `moov`/`trak` and no `meta`, so no still item — a `moov` beside
+/// a `meta` is skipped), a non-`pict` handler, protected items, `uri ` items, external data
+/// references, `iloc` `construction_method` 2, and box versions beyond those
 /// listed above.
 pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
     let mut top = BoxReader::new(data);
     let mut ftyp = None;
     let mut meta_body = None;
     let mut seen_mdat = false;
+    let mut seen_track = false;
     let mut top_level_boxes = Vec::new();
     loop {
         let b = match top.next_box() {
@@ -102,12 +123,9 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
                 ftyp = Some(parse_ftyp(b.body)?);
             }
             b"meta" => meta_body = Some(b.body),
-            b"moov" | b"trak" => {
-                return Err(Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "ISOBMFF: image sequences (tracks) not supported",
-                ));
-            }
+            // A sequence track: skipped, neither parsed nor retained (it cannot round-trip — see
+            // the module docs). `walk_segments` accounts its bytes.
+            b"moov" | b"trak" => seen_track = true,
             // mdat is offset-addressed through iloc; its bytes are reached from the items.
             b"mdat" => seen_mdat = true,
             // Every other top-level box is retained verbatim, positioned by where it was found.
@@ -126,8 +144,16 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
 
     let (major_brand, minor_version, compatible_brands) =
         ftyp.ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: missing ftyp"))?;
-    let meta_body = meta_body
-        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: missing meta"))?;
+    let meta_body = meta_body.ok_or_else(|| {
+        if seen_track {
+            Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: sequence-only file (moov/trak without meta), no still item",
+            )
+        } else {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: missing meta")
+        }
+    })?;
     let meta = parse_meta(meta_body)?;
 
     // Index iloc/ipma/iref by item id up front (first iloc/ipma entry wins; references keep file
