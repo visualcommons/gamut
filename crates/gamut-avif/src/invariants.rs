@@ -15,9 +15,9 @@
 //! cleaner's `Sample` trait: a defect in how the cleaner widens a sample would otherwise blind
 //! the oracle to it too.
 //!
-//! **Decode limits** (issue #653): [`decoding_stays_within_limits`] decodes every item of a file
+//! **Decode limits** (issue #653): `decoding_stays_within_limits` decodes every item of a file
 //! on all three surfaces twice — under the limits being tested and under a looser ceiling — with
-//! [`StubDecoder`] standing in for the AV1 codec. Every image the tighter run returns is within
+//! `StubDecoder` standing in for the AV1 codec. Every image the tighter run returns is within
 //! its limits and identical to the looser run's, and every refusal the tighter limits add is a
 //! limit refusal. Since each full-image buffer the pipeline allocates is sized like an image it
 //! checked, the first clause is the observable face of "decode never allocates past limits ×
