@@ -971,10 +971,12 @@ mod tests {
             pq_oetf_normalized, srgb_eotf, srgb_oetf,
         };
         type Transfer = fn(f64) -> f64;
-        let cases: [(u8, Transfer, Transfer); 5] = [
+        let cases: [(u8, Transfer, Transfer); 7] = [
             (1, bt709_eotf, bt709_oetf),
+            (6, bt709_eotf, bt709_oetf),
             (13, srgb_eotf, srgb_oetf),
             (14, bt709_eotf, bt709_oetf),
+            (15, bt709_eotf, bt709_oetf),
             (16, pq_eotf_normalized, pq_oetf_normalized),
             (18, hlg_inverse_oetf, hlg_oetf),
         ];

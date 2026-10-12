@@ -378,10 +378,10 @@ analogy was deliberately not followed.
 
 - **Closed forms come from `gamut-color`.** `standard_eotf_for`/`standard_oetf_for` — the
   standards-pure dispatch whose PQ arm is ST 2084 normalized to its 10 000 cd/m² peak, not
-  `eotf_for`'s encoder-exact SDR tone map — reach code points 1, 8, 13, 14, 16 and 18 (HLG,
-  scene-referred, added with this work). Code point 8 builds the structural identity so the
-  optimizer still elides it. Code points 6 and 15 (the same curve as 1 and 14 in H.273 Table
-  3) have no `TransferCharacteristics` variant yet, so a profile signalling them keeps its TRC.
+  `eotf_for`'s encoder-exact SDR tone map — reach code points 1, 6, 8, 13, 14, 15, 16 and 18
+  (HLG, scene-referred, added with this work; 6 and 15, the same curve as 1 and 14 in H.273
+  Table 3, since #675). Code point 8 builds the structural identity so the optimizer still
+  elides it.
 - **Equivalence is checked, not assumed.** §10.3 says the tag's encoding *shall* be equivalent
   to the profile's; a profile in the wild may violate it. The closed form replaces a curve
   only if the two agree within `2⁻⁸` at every point of the 4096-point grid `is_monotonic`
@@ -476,7 +476,6 @@ lcms2's reference answer there and what it diverges from is lcms2's grid. The sh
 | White-point ("scum dot") fixup on a resampled CLUT | lcms2's `PatchLUT` snaps the input white node onto the output white in a precalculated table (`cmsFLAGS_NOWHITEONWHITEFIXUP` disables it, as the conformance gate does). An lcms2 aesthetic with no ICC.1 basis; the resampling pass does not replicate it. | ✗ out of scope |
 | Public per-hop intent/BPC arrays | The chain internals already take them (proofing uses them); the public `chain` API stays single-intent until a consumer needs lcms2's `cmsCreateExtendedTransform` shape. | ☐ deferred |
 | Named-colour profiles | No continuous pixel transform; rejected with a typed error everywhere. | ✗ out of scope |
-| `prefer_cicp_transfer` for H.273 transfer code points 6 and 15 | Same curve as 1 and 14, but `gamut-color`'s `TransferCharacteristics` has no variant for them, so `standard_eotf_for` cannot be asked; reaches the option with no change here once it does (#675). | ☐ deferred |
 | Public `prefer_cicp` on `link::device_to_pcs`/`pcs_to_device` | The per-profile builders stay TRC-only (and so does black-point *detection*, which runs through them); the option lives on the transform constructors. | ☐ deferred |
 | K-preserving intents (`INTENT_PRESERVE_K_*`) | lcms2 extensions beyond the four ICC intents (`cmscnvrt.c` dispatch table); no ICC.1 basis. | ☐ unplanned |
 
