@@ -12,6 +12,8 @@ use gamut_bitstream::{BitWriter, write_leb128};
 use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Error, Result};
 
+use crate::filter::FrameFilters;
+
 /// `OBU_SEQUENCE_HEADER`.
 const OBU_SEQUENCE_HEADER: u8 = 1;
 /// `OBU_FRAME` (frame header + tile group in one OBU).
@@ -566,9 +568,11 @@ fn write_tile_info(w: &mut BitWriter, layout: &TileLayout) {
 /// (`byte_alignment`, no trailing one — the tile data follows in the same `OBU_FRAME`).
 ///
 /// `base_q_idx == 0` selects the lossless path (`CodedLossless`, forced `TX_4X4` WHT, in-loop
-/// filters/`tx_mode` emit nothing). `base_q_idx > 0` selects the lossy path: `TX_MODE_SELECT`
-/// (per-block `tx_depth`), in-loop filters present but disabled (all levels 0). All quantizer
-/// deltas are 0 and `using_qmatrix = 0`.
+/// filters/`tx_mode` emit nothing, so `filters` and `luma_lr` are ignored). `base_q_idx > 0`
+/// selects the lossy path: `TX_MODE_SELECT` (per-block `tx_depth`), the deblocking level and CDEF
+/// strengths `filters` carries, and luma loop restoration `RESTORE_WIENER` when `luma_lr` (some
+/// unit is restored) or `RESTORE_NONE` otherwise. All quantizer deltas are 0 and
+/// `using_qmatrix = 0`.
 ///
 /// The returned bytes precede the tile (symbol-coded) data; together they form the frame OBU
 /// payload (AV1 §5.10).
@@ -577,6 +581,8 @@ pub(crate) fn frame_header_payload(
     base_q_idx: u8,
     superres_coded_denom: Option<u8>,
     monochrome: bool,
+    filters: FrameFilters,
+    luma_lr: bool,
 ) -> Vec<u8> {
     let lossless = base_q_idx == 0;
     let mut w = BitWriter::new();
@@ -661,8 +667,8 @@ pub(crate) fn frame_header_payload(
         // follow.
         w.put_bit(0); // delta_lf_multi = 0
         // loop_filter_params(): a single deblock level (the same for both luma passes and both
-        // chroma planes), scaled from base_q_idx. level 0 ⇒ deblock disabled and level[2]/[3] omitted.
-        let lf = u32::from(crate::filter::deblock_level(base_q_idx));
+        // chroma planes). level 0 ⇒ deblock disabled and level[2]/[3] omitted.
+        let lf = u32::from(filters.deblock_level);
         w.put_bits(lf, 6); // loop_filter_level[0]
         w.put_bits(lf, 6); // loop_filter_level[1]
         // §5.9.11 gates the chroma levels on `NumPlanes > 1` as well as on a non-zero luma level.
@@ -675,28 +681,31 @@ pub(crate) fn frame_header_payload(
         // cdef_params(): enable_cdef = 1 ⇒ CdefDamping = 3, cdef_bits = 0 (one strength set applied
         // everywhere; cdef_idx is then L(0) = 0 bits in the tile). The secondary strength is signaled
         // pre-mapping (the decoder maps 3 → 4), so a stored 4 is emitted as 3.
-        let (y_pri, y_sec, uv_pri, uv_sec) = crate::filter::cdef_strengths(base_q_idx);
-        let sec_code = |s: i32| -> u32 { if s == 4 { 3 } else { s as u32 } };
+        let cdef = filters.cdef;
+        let sec_code = |s: u8| -> u32 { if s == 4 { 3 } else { u32::from(s) } };
         w.put_bits(0, 2); // cdef_damping_minus_3 (CdefDamping = 3)
         w.put_bits(0, 2); // cdef_bits = 0
-        w.put_bits(y_pri as u32, 4); // cdef_y_pri_strength[0]
-        w.put_bits(sec_code(y_sec), 2); // cdef_y_sec_strength[0]
+        w.put_bits(u32::from(cdef.y_pri), 4); // cdef_y_pri_strength[0]
+        w.put_bits(sec_code(cdef.y_sec), 2); // cdef_y_sec_strength[0]
         if !monochrome {
-            w.put_bits(uv_pri as u32, 4); // cdef_uv_pri_strength[0]
-            w.put_bits(sec_code(uv_sec), 2); // cdef_uv_sec_strength[0]
+            w.put_bits(u32::from(cdef.uv_pri), 4); // cdef_uv_pri_strength[0]
+            w.put_bits(sec_code(cdef.uv_sec), 2); // cdef_uv_sec_strength[0]
         }
-        // lr_params() (§5.9.20): luma RESTORE_WIENER, chroma RESTORE_NONE. `lr_type` is 2 bits per
-        // plane (`Remap_Lr_Type`: 0=NONE, 2=WIENER); only luma uses restoration.
-        // §5.9.20 loops `i < NumPlanes`, so a monochrome frame codes one `lr_type`, not three.
-        w.put_bits(2, 2); // FrameRestorationType[0] = RESTORE_WIENER
+        // lr_params() (§5.9.20): luma RESTORE_WIENER when some unit is restored, else
+        // RESTORE_NONE; chroma RESTORE_NONE. `lr_type` is 2 bits per plane (`Remap_Lr_Type`:
+        // 0=NONE, 2=WIENER). §5.9.20 loops `i < NumPlanes`, so a monochrome frame codes one
+        // `lr_type`, not three.
+        w.put_bits(if luma_lr { 2 } else { 0 }, 2); // FrameRestorationType[0]
         if !monochrome {
             w.put_bits(0, 2); // FrameRestorationType[1] = RESTORE_NONE
             w.put_bits(0, 2); // FrameRestorationType[2] = RESTORE_NONE
         }
         // usesLr ⇒ lr_unit_shift. Not a 128×128 superblock ⇒ f(1) then (if set) lr_unit_extra f(1).
         // shift = 2 ⇒ LoopRestorationSize = 256. usesChromaLr = 0 ⇒ no lr_uv_shift.
-        w.put_bit(1); // lr_unit_shift bit 0
-        w.put_bit(1); // lr_unit_extra ⇒ lr_unit_shift = 2
+        if luma_lr {
+            w.put_bit(1); // lr_unit_shift bit 0
+            w.put_bit(1); // lr_unit_extra ⇒ lr_unit_shift = 2
+        }
         w.put_bit(1); // read_tx_mode: tx_mode_select = 1 ⇒ TX_MODE_SELECT (per-block tx_depth)
         // frame_reference_mode / skip_mode_params (intra) ⇒ no bits. allow_warped_motion = 0.
     }
@@ -1046,7 +1055,7 @@ mod tests {
             let seq = SequenceHeader::parse(&sequence_header_payload(&cfg, w, h, true, false))
                 .expect("sequence header parses");
             let l = TileLayout::resolve(req, w as usize, h as usize, cfg.seq_level_idx_0, None);
-            let frame = frame_header_payload(&l, 100, None, false);
+            let frame = frame_header_payload(&l, 100, None, false, FrameFilters::default(), true);
             let fh = FrameHeader::parse(&mut BitReader::new(&frame), &seq).expect("parses");
             let t = &fh.tile_info;
             assert_eq!(

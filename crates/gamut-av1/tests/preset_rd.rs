@@ -160,3 +160,29 @@ fn the_full_search_needs_no_more_bits_than_any_pruned_preset() {
         "the full search needs more bits than a pruned preset at equal PSNR: {losses:?}"
     );
 }
+
+#[test]
+fn screen_quality_keeps_rising_as_the_quantizer_falls() {
+    // Issue #754: with in-loop filters fixed by `qindex`, the screen image's thin lines were
+    // smeared to about 31.5 dB at every rung, so bytes spent below `qindex` ~120 bought nothing.
+    // Filters chosen against the source switch off where they hurt, so every halving of the
+    // quantizer step must buy a clear gain at every preset — well past that ceiling.
+    let src = screen();
+    let mut flat = Vec::new();
+    for &speed in Speed::ALL {
+        let points = curve(&src, speed);
+        for (rung, pair) in LADDER.windows(2).zip(points.windows(2)) {
+            let gain = pair[0].0 - pair[1].0;
+            if gain < 3.0 {
+                flat.push(format!(
+                    "{speed:?} q{}→q{}: {gain:+.2} dB",
+                    rung[1], rung[0]
+                ));
+            }
+        }
+        if points[0].0 < 45.0 {
+            flat.push(format!("{speed:?} q{}: {:.2} dB", LADDER[0], points[0].0));
+        }
+    }
+    assert!(flat.is_empty(), "screen quality flattens: {flat:?}");
+}

@@ -19,7 +19,18 @@
 //!   **reconstruction buffer** that the encoder maintains exactly as the decoder would (predict →
 //!   transform → quantize → dequantize → inverse-transform → add → store), so the encoder's
 //!   reconstruction is bit-exact with a conformant decoder's output; the in-loop filters
-//!   (deblocking, CDEF, loop restoration, superres) are applied afterward in `filter`.
+//!   (deblocking, CDEF, loop restoration, superres) are applied afterward in `filter`, with the
+//!   deblocking level and CDEF strengths chosen against the source ([`FrameEncoder::encode`]).
+//!
+//! Loop restoration is signalled per unit *inside* the tiles, at the first superblock of each
+//! unit, but can only be decided once the whole frame is reconstructed and filtered. So a frame
+//! is coded with no restoration first; when the encoder then finds a unit the Wiener filter
+//! improves, the tiles are coded a second time with the restoration units signalled
+//! ([`FrameEncoder::recoding`]). The second pass replays every partition and mode decision the
+//! first one coded, superblock by superblock, rather than searching again: nothing it decides
+//! reads the restoration symbols, so the replayed blocks reconstruct exactly as the first pass's
+//! did. The record costs one small entry per coded block and per decided partition, held for the
+//! whole frame; the second pass costs the coding without the search.
 //!
 //! The frame is coded on the MI-unit grid (`mi_cols*4 × mi_rows*4`, dimensions rounded up to a
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
@@ -34,6 +45,7 @@
 //! from.
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::{ChromaSubsampling, Planar8, Planar16, clip_pixel};
@@ -41,6 +53,7 @@ use gamut_dsp::math::{round2, round2_signed};
 
 use crate::cdf;
 use crate::encoder::Speed;
+use crate::filter::{CdefBlocks, CdefStrengths, FrameFilters, LrUnits};
 use crate::geom::{PlaneGeom, has_chroma, plane_residual_size};
 use crate::headers::TileLayout;
 use crate::quant::{ac_q, dc_q, dequant, quantize};
@@ -486,13 +499,22 @@ struct Pred {
 /// has one. Extracted from `write_lr` so the rounding is directly testable: gamut's unit grid is
 /// 256 samples and every fixture is smaller than that, so in place this arithmetic is pinned at
 /// exactly one point (`1`) and any mutation of it survives.
-fn lr_unit_count(size: usize, unit: usize) -> usize {
+pub(crate) fn lr_unit_count(size: usize, unit: usize) -> usize {
     ((size + unit / 2) / unit).max(1)
+}
+
+/// The partition and mode decisions one superblock was coded with, in the order its blocks were
+/// coded: what [`FrameEncoder::recoding`] replays instead of searching again.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SbDecisions {
+    partitions: Vec<DecidedPartition>,
+    blocks: Vec<Decided>,
 }
 
 /// The reconstructed (decoded) planes on the coded MI grid, used as prediction neighbours in the
 /// lossy path and exported for the bit-exact decoder cross-check.
 pub(crate) struct Reconstruction {
+    /// After deblocking and CDEF (lossy path), before loop restoration.
     pub planes: [Vec<u16>; 3],
     /// Sample geometry of each plane; `planes[i]` is `geom[i].len()` samples strided by
     /// `geom[i].coded_w`.
@@ -504,6 +526,12 @@ pub(crate) struct Reconstruction {
     /// deblock → CDEF → superres → loop restoration), so both the CDEF luma (`planes[0]`) and this
     /// are upscaled first when superres is active. Empty on the lossless path.
     pub deblocked_luma: Vec<u16>,
+    /// The deblocking level and CDEF strengths `planes` was filtered with, for the frame header
+    /// to signal. All off on the lossless path, whose header signals no filter.
+    pub filters: FrameFilters,
+    /// Every superblock's coded decisions, raster order over the frame's superblock grid, for a
+    /// second pass to replay.
+    pub decisions: Arc<Vec<SbDecisions>>,
 }
 
 /// The all-intra frame encoder: codes each tile of a [`TileLayout`] and keeps the frame-wide
@@ -627,6 +655,21 @@ pub(crate) struct FrameEncoder<'a> {
     decided: Vec<Decided>,
     /// The partitions the search chose for the regions it trialled, reused the same way.
     decided_partitions: Vec<DecidedPartition>,
+    /// The decisions the current superblock has been coded with so far (not trialled).
+    sb_decisions: SbDecisions,
+    /// Every coded superblock's [`SbDecisions`], raster order over the superblock grid.
+    record: Vec<SbDecisions>,
+    /// A first pass's [`Self::record`], replayed instead of searched ([`Self::recoding`]).
+    replay: Option<Arc<Vec<SbDecisions>>>,
+    /// The deblocking level and CDEF strengths to apply, or `None` to choose them against the
+    /// source after the tiles are coded.
+    filters: Option<FrameFilters>,
+    /// The luma restoration units to signal, or `None` for `FrameRestorationType[0] =
+    /// RESTORE_NONE`, which codes none.
+    lr: Option<LrUnits>,
+    /// `SuperresDenom` (§5.9.8), or `SUPERRES_NUM` (8) without superres: the scale §5.11.57 maps
+    /// a superblock's columns onto the upscaled restoration-unit grid by.
+    lr_denom: usize,
 }
 
 /// One tile's MI rectangle: `MiRowStart..MiRowEnd` × `MiColStart..MiColEnd` (§5.11.1), all on
@@ -638,6 +681,10 @@ struct TileRect {
     c0: usize,
     c1: usize,
 }
+
+/// `SUPERRES_NUM` (§3): the numerator of every superres scale, so `SuperresDenom / SUPERRES_NUM`
+/// is the upscale factor and a denominator of `SUPERRES_NUM` is no upscale.
+const SUPERRES_NUM: usize = 8;
 
 /// Row stride of [`FrameEncoder::block_decoded`]: a 64×64 superblock is 16 MI wide, plus the `-1`
 /// guard row/column and the `+16` below/right edge ⇒ indices `-1..=16` → 18 entries.
@@ -785,6 +832,12 @@ impl<'a> FrameEncoder<'a> {
             search: Search::for_speed(Speed::default()),
             decided: Vec::new(),
             decided_partitions: Vec::new(),
+            sb_decisions: SbDecisions::default(),
+            record: vec![SbDecisions::default(); mi_cols.div_ceil(16) * mi_rows.div_ceil(16)],
+            replay: None,
+            filters: None,
+            lr: None,
+            lr_denom: SUPERRES_NUM,
         }
     }
 
@@ -792,6 +845,32 @@ impl<'a> FrameEncoder<'a> {
     pub(crate) fn with_search(mut self, search: Search) -> Self {
         self.search = search;
         self
+    }
+
+    /// Makes this encoder the second pass of a frame `first` coded: the tiles are coded again
+    /// with the luma restoration units `lr` signalled (`superres_denom` is `SuperresDenom`, or
+    /// `None` without superres), every superblock coded with the decisions `first` recorded for
+    /// it rather than searched, and the in-loop filters `first` chose applied unchanged.
+    ///
+    /// Nothing the first pass decided reads a restoration symbol — `use_wiener` has a CDF of its
+    /// own and the Wiener taps are coded as raw bits — so this pass's reconstruction is the first
+    /// pass's, and only the stream differs.
+    pub(crate) fn recoding(
+        mut self,
+        first: &Reconstruction,
+        lr: LrUnits,
+        superres_denom: Option<usize>,
+    ) -> Self {
+        self.replay = Some(Arc::clone(&first.decisions));
+        self.filters = Some(first.filters);
+        self.lr = Some(lr);
+        self.lr_denom = superres_denom.unwrap_or(SUPERRES_NUM);
+        self
+    }
+
+    /// The index of the superblock at MI `(r, c)` in [`Self::record`].
+    fn sb_index(&self, r: usize, c: usize) -> usize {
+        (r / 16) * self.mi_cols.div_ceil(16) + c / 16
     }
 
     /// `clear_block_decoded_flags` (§5.11.3) for the luma plane of the superblock at MI `(r, c)`:
@@ -818,25 +897,38 @@ impl<'a> FrameEncoder<'a> {
     }
 
     /// Signals the loop-restoration units (§5.11.57 `read_lr`) whose top-left falls in the superblock
-    /// at MI `(r, c)`. Luma uses `RESTORE_WIENER` with the default reference filter — every coded
-    /// coefficient delta is zero — and chroma is `RESTORE_NONE`. The unit grid is 256×256
-    /// (`lr_unit_shift = 2`); the same filter is later applied by [`crate::filter::loop_restore_wiener_luma`].
+    /// at MI `(r, c)`, as [`Self::lr`] decided them: `use_wiener`, and for a restored unit the
+    /// default reference filter — every coded coefficient delta is zero. Chroma is `RESTORE_NONE`,
+    /// and with no [`Self::lr`] so is luma, and nothing is coded. The unit grid is 256×256
+    /// (`lr_unit_shift = 2`) on the upscaled frame; the filter is applied by
+    /// [`crate::filter::loop_restore_wiener_luma`].
     fn write_lr(&mut self, r: usize, c: usize) {
-        const UNIT: usize = 256;
+        const UNIT: usize = crate::filter::LR_UNIT;
+        // A 64×64 superblock: `Num_4x4_Blocks_Wide/High[sbSize]`.
+        const SB4: usize = 16;
         // (offset, num_syms, k) for the three Wiener half-taps (§5.11.58 read_lr_unit).
         const TAPS: [(i32, i32, u32); 3] = [(5, 16, 1), (23, 32, 2), (17, 64, 3)];
+        let Some(lr) = &self.lr else {
+            return;
+        };
         // Luma geometry deliberately: loop restoration signals `RESTORE_NONE` for both chroma
-        // planes, so the unit grid is defined on luma alone (§5.11.57).
-        let unit_cols = lr_unit_count(self.geom[0].w, UNIT);
-        let unit_rows = lr_unit_count(self.geom[0].h, UNIT);
+        // planes, so the unit grid is defined on luma alone (§5.11.57). The columns are counted
+        // over `UpscaledWidth`, so with superres a superblock's MI columns are scaled up by
+        // `SuperresDenom / SUPERRES_NUM` onto it.
         let row_start = (r * 4).div_ceil(UNIT);
-        let row_end = unit_rows.min(((r + 16) * 4).div_ceil(UNIT));
-        let col_start = (c * 4).div_ceil(UNIT);
-        let col_end = unit_cols.min(((c + 16) * 4).div_ceil(UNIT));
-        for _ in row_start..row_end {
-            for _ in col_start..col_end {
-                // restore_wiener = 1 (use Wiener), then vertical then horizontal half-taps.
-                self.sym.encode(1, self.cdfs.restore_wiener.slot());
+        let row_end = lr.rows.min(((r + SB4) * 4).div_ceil(UNIT));
+        let (numerator, denominator) = (4 * self.lr_denom, UNIT * SUPERRES_NUM);
+        let col_start = (c * numerator).div_ceil(denominator);
+        let col_end = lr.cols.min(((c + SB4) * numerator).div_ceil(denominator));
+        let units: Vec<bool> = (row_start..row_end)
+            .flat_map(|row| (col_start..col_end).map(move |col| row * lr.cols + col))
+            .map(|unit| lr.wiener[unit])
+            .collect();
+        for wiener in units {
+            // use_wiener, then (if set) the vertical then horizontal half-taps.
+            self.sym
+                .encode(usize::from(wiener), self.cdfs.restore_wiener.slot());
+            if wiener {
                 for _pass in 0..2 {
                     for (j, &(off, num_syms, k)) in TAPS.iter().enumerate() {
                         let v = crate::filter::WIENER_DEFAULT[j] + off;
@@ -887,20 +979,27 @@ impl<'a> FrameEncoder<'a> {
                 // ReadDeltas is armed per superblock (§7.18); the first block then signals delta_q.
                 self.read_deltas = self.delta_q_present;
                 self.clear_block_decoded(r, c);
-                self.decided.clear();
-                self.decided_partitions.clear();
+                let sb = self.sb_index(r, c);
+                // A second pass starts each superblock from what the first one coded there, so
+                // every decision is found as already reached rather than searched.
+                let replayed = self.replay.as_ref().map(|replay| replay[sb].clone());
+                let replayed = replayed.unwrap_or_default();
+                self.decided = replayed.blocks;
+                self.decided_partitions = replayed.partitions;
                 if self.qindex > 0 {
                     self.write_lr(r, c);
                 }
                 self.encode_partition(r, c, 64);
+                self.record[sb] = std::mem::take(&mut self.sb_decisions);
             }
         }
         std::mem::take(&mut self.sym.range).finish()
     }
 
     /// Copies `tile`'s rectangle of what the in-loop filters read after the tiles are coded — the
-    /// reconstruction and the per-MI maps `filter::deblock` and `filter::cdef` take — from `from`,
-    /// an encoder that coded that tile, into `self`.
+    /// reconstruction, the per-MI maps `filter::deblock` and `filter::cdef` take, and the tile's
+    /// superblocks' recorded decisions — from `from`, an encoder that coded that tile, into
+    /// `self`.
     ///
     /// Tiles never read outside their own rectangle, so the merged state is what coding the tiles
     /// one after another in `self` would have left, as far as anything after the tiles can see.
@@ -920,6 +1019,12 @@ impl<'a> FrameEncoder<'a> {
                 dst[row.clone()].copy_from_slice(&src[row.clone()]);
             }
             self.mi_dlf[row.clone()].copy_from_slice(&from.mi_dlf[row]);
+        }
+        for r in (tile.r0..tile.r1).step_by(16) {
+            for c in (tile.c0..tile.c1).step_by(16) {
+                let sb = self.sb_index(r, c);
+                self.record[sb].clone_from(&from.record[sb]);
+            }
         }
         // The reconstruction exists on the lossy path only (it *is* the source when lossless), and
         // a monochrome frame's chroma planes are empty; both cases copy nothing.
@@ -1017,43 +1122,120 @@ impl<'a> FrameEncoder<'a> {
         // Deblocking loop filter (§7.14): a post-process on the final reconstruction (intra
         // prediction during encoding read the pre-filter samples, so this does not affect any
         // prediction). The lossless path is `CodedLossless`, where the filter is disabled.
-        let mut planes = self.recon;
+        let mut planes = std::mem::take(&mut self.recon);
         let mut deblocked_luma = Vec::new();
+        let mut filters = FrameFilters::default();
         if self.qindex > 0 {
-            crate::filter::deblock(
-                &mut planes,
-                &self.geom,
-                self.subsampling,
-                self.mi_cols,
-                &self.tx_log2,
-                &self.tx_log2_h,
-                &self.mi_bsl,
-                &self.mi_bsl_h,
-                &self.mi_dlf,
-                self.qindex,
-                self.bit_depth,
-            );
+            filters = self.filters.unwrap_or_else(|| self.choose_filters(&planes));
+            self.deblock(&mut planes, filters.deblock_level);
             // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15). The
             // deblocked luma is retained for the loop-restoration stripe boundaries (§7.17); loop
             // restoration itself is applied by the caller after the optional superres upscale.
             deblocked_luma = planes[0].clone();
-            planes = crate::filter::cdef(
-                &planes,
-                &self.geom,
-                &self.mi_skip,
-                self.mi_cols,
-                self.qindex,
-                self.num_planes,
-                self.bit_depth,
-            );
+            planes = self.cdef(&planes, &self.cdef_blocks(&planes), filters.cdef);
         }
         let recon = Reconstruction {
             planes,
             geom: self.geom,
             bit_depth: self.bit_depth,
             deblocked_luma,
+            filters,
+            decisions: Arc::new(self.record),
         };
         (tile_bytes, recon)
+    }
+
+    /// Chooses the deblocking level and then the CDEF strengths by the distortion each leaves
+    /// against the source, on the coded tiles' unfiltered reconstruction `planes`, as
+    /// [`crate::filter::choose_deblock_level`] and [`crate::filter::choose_cdef`] search them.
+    fn choose_filters(&self, planes: &[Vec<u16>; 3]) -> FrameFilters {
+        let deblock_level = crate::filter::choose_deblock_level(|level| {
+            let mut deblocked = planes.clone();
+            self.deblock(&mut deblocked, level);
+            self.frame_sse(&deblocked, 0..self.num_planes)
+        });
+        let mut deblocked = planes.clone();
+        self.deblock(&mut deblocked, deblock_level);
+        let blocks = self.cdef_blocks(&deblocked);
+        let cdef = crate::filter::choose_cdef(|pri, sec| {
+            let strengths = CdefStrengths {
+                y_pri: pri,
+                y_sec: sec,
+                uv_pri: pri,
+                uv_sec: sec,
+            };
+            let out = self.cdef(&deblocked, &blocks, strengths);
+            (
+                self.frame_sse(&out, 0..1),
+                self.frame_sse(&out, 1..self.num_planes),
+            )
+        });
+        FrameFilters {
+            deblock_level,
+            cdef,
+        }
+    }
+
+    /// Deblocks `planes` in place at frame `level`, over this frame's transform and block maps.
+    fn deblock(&self, planes: &mut [Vec<u16>; 3], level: u8) {
+        crate::filter::deblock(
+            planes,
+            &self.geom,
+            self.subsampling,
+            self.mi_cols,
+            &self.tx_log2,
+            &self.tx_log2_h,
+            &self.mi_bsl,
+            &self.mi_bsl_h,
+            &self.mi_dlf,
+            level,
+            self.bit_depth,
+        );
+    }
+
+    /// The CDEF direction search over the deblocked `planes`.
+    fn cdef_blocks(&self, planes: &[Vec<u16>; 3]) -> CdefBlocks {
+        CdefBlocks::analyse(
+            &planes[0],
+            &self.geom,
+            &self.mi_skip,
+            self.mi_cols,
+            self.bit_depth,
+        )
+    }
+
+    /// `planes` filtered by CDEF at `strengths`.
+    fn cdef(
+        &self,
+        planes: &[Vec<u16>; 3],
+        blocks: &CdefBlocks,
+        strengths: CdefStrengths,
+    ) -> [Vec<u16>; 3] {
+        crate::filter::cdef(
+            planes,
+            &self.geom,
+            blocks,
+            strengths,
+            self.num_planes,
+            self.bit_depth,
+        )
+    }
+
+    /// The squared error against the source of the visible samples of `planes` in `range`, each
+    /// plane on its coded stride.
+    fn frame_sse(&self, planes: &[Vec<u16>; 3], range: std::ops::Range<usize>) -> u64 {
+        let mut sse = 0u64;
+        for plane in range {
+            let g = self.geom[plane];
+            for y in 0..g.h {
+                for x in 0..g.w {
+                    let d = i64::from(planes[plane][y * g.coded_w + x])
+                        - i64::from(self.planes.at(plane, y * g.w + x));
+                    sse += (d * d) as u64;
+                }
+            }
+        }
+        sse
     }
 
     /// Padded (edge-replicated) source sample of `plane` at coded-grid position `(x, y)`.
@@ -1214,8 +1396,11 @@ impl<'a> FrameEncoder<'a> {
             Some(i) => self.decided_partitions.swap_remove(i).bp,
             None => self.trial_partitions(r, c, bw, ctx),
         };
+        let decided = DecidedPartition { at, bp };
         if self.sym.tally.is_some() {
-            self.decided_partitions.push(DecidedPartition { at, bp });
+            self.decided_partitions.push(decided);
+        } else {
+            self.sb_decisions.partitions.push(decided);
         }
         bp
     }
@@ -1489,15 +1674,12 @@ impl<'a> FrameEncoder<'a> {
     /// and updates `CurrentDeltaLF = Clip3(-MAX_LOOP_FILTER, MAX_LOOP_FILTER, CurrentDeltaLF + delta)`.
     /// The delta is a non-negative `{0, 1}` placeholder (so the per-superblock loop-filter level only
     /// rises above the frame level — `loop_filter_level + DeltaLF` stays positive and the p-side-level
-    /// fallback for a zero level is never needed). When the frame level is 0 the delta is forced to 0
-    /// (the deblock stays disabled). Magnitude ≤ 2 ⇒ the `DELTA_LF_SMALL` escape is never coded.
+    /// fallback for a zero level is never needed). It does not depend on the frame level, which is
+    /// chosen only after the tiles are coded: at level 0 §7.4 does not invoke the loop filter at
+    /// all, so the delta is inert there. Magnitude ≤ 2 ⇒ the `DELTA_LF_SMALL` escape is never
+    /// coded.
     fn signal_delta_lf(&mut self) {
-        let lf = i32::from(crate::filter::deblock_level(self.qindex));
-        let delta: i32 = if lf == 0 {
-            0
-        } else {
-            (self.sb_r / 16 + self.sb_c / 16) as i32 % 2
-        };
+        let delta = (self.sb_r / 16 + self.sb_c / 16) as i32 % 2;
         let abs = delta.unsigned_abs() as usize;
         self.sym.encode(abs, self.cdfs.delta_lf.slot());
         if abs > 0 {
@@ -1938,13 +2120,18 @@ impl<'a> FrameEncoder<'a> {
             // CfL is square-only here; a rectangular block's chroma is plain DC_PRED.
             _ => None,
         };
-        if self.sym.tally.is_some() && !skip {
-            self.decided.push(Decided {
+        if !skip {
+            let decided = Decided {
                 at: (r, c, bw, bh),
                 luma,
                 tx_depth,
                 cfl,
-            });
+            };
+            if self.sym.tally.is_some() {
+                self.decided.push(decided);
+            } else {
+                self.sb_decisions.blocks.push(decided);
+            }
         }
         let ym = usize::from(y_mode);
         // §5.11.7 wraps `uv_mode` (and the `read_cfl_alphas` that follows UV_CFL_PRED) in
@@ -4130,7 +4317,7 @@ struct LumaMode {
 }
 
 /// A block's mode decisions, reached while it was trialled: see [`FrameEncoder::decided`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Decided {
     /// The block: MI `(r, c)` and its width and height in samples.
     at: (usize, usize, usize, usize),
@@ -4141,7 +4328,7 @@ struct Decided {
 }
 
 /// A region's partition, reached while it was trialled: see [`FrameEncoder::decided_partitions`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DecidedPartition {
     /// The region: MI `(r, c)` and its side in samples.
     at: (usize, usize, usize),
@@ -6614,5 +6801,159 @@ mod tests {
         let d45 = e.predict_4x4(0, 4, 4, D45_PRED);
         assert_eq!(&d45[0..4], &[20, 30, 40, 50]);
         assert_eq!(d45[15], 80);
+    }
+
+    /// A smooth `side`×`side` field: its quantization artefacts are what the in-loop filters
+    /// remove.
+    fn smooth(side: u32) -> Planar8 {
+        let wave = |x: u32, y: u32| {
+            let g = 128.0 + 60.0 * (f64::from(x) / 23.0).sin() * (f64::from(y) / 31.0).cos();
+            g as u8
+        };
+        planes_with(side, side, wave, |x, y| 255 - wave(x, y))
+    }
+
+    /// [`smooth`] at one superblock.
+    fn smooth_64() -> Planar8 {
+        smooth(64)
+    }
+
+    /// `p` coded at `qindex` in one tile, as a frame's first pass codes it.
+    fn first_pass(p: &Planar8, qindex: u8) -> (Vec<Vec<u8>>, Reconstruction) {
+        let (w, h) = (p.width() as usize, p.height() as usize);
+        let layout = TileLayout::resolve(crate::headers::Tiling::SINGLE, w, h, 0, None);
+        FrameEncoder::new(p, qindex).encode(&layout, NonZeroUsize::MIN)
+    }
+
+    /// The partition the record `decisions` holds for the 64×64 superblock root at MI `(r, c)`.
+    fn root_partition(decisions: &SbDecisions, r: usize, c: usize) -> Option<usize> {
+        decisions
+            .partitions
+            .iter()
+            .find(|d| d.at == (r, c, 64))
+            .map(|d| d.bp)
+    }
+
+    #[test]
+    fn each_superblock_is_recorded_at_its_own_raster_index() {
+        // A 128×128 frame is a 2×2 superblock grid; superblock `i` is at MI (16 * (i / 2),
+        // 16 * (i % 2)), and its record holds that root's partition and no other root's.
+        let (_, first) = first_pass(&smooth(128), 110);
+        assert_eq!(first.decisions.len(), 4);
+        for (i, decisions) in first.decisions.iter().enumerate() {
+            let (r, c) = (16 * (i / 2), 16 * (i % 2));
+            assert!(root_partition(decisions, r, c).is_some(), "superblock {i}");
+            assert!(!decisions.blocks.is_empty(), "superblock {i}");
+            for d in &decisions.blocks {
+                let (br, bc) = (d.at.0, d.at.1);
+                assert!(
+                    (r..r + 16).contains(&br) && (c..c + 16).contains(&bc),
+                    "{:?}",
+                    d.at
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_tile_coded_on_another_thread_brings_its_record_back() {
+        // Two tile columns on two threads: the right tile is coded in a clone, and its
+        // superblocks' records must be merged back exactly as coding both tiles here records them.
+        let p = smooth(128);
+        let layout = TileLayout::resolve(crate::headers::Tiling::new(1, 0), 128, 128, 0, None);
+        assert_eq!(layout.num_tiles(), 2);
+        let record = |threads: usize| {
+            let threads = NonZeroUsize::new(threads).unwrap();
+            FrameEncoder::new(&p, 110)
+                .encode(&layout, threads)
+                .1
+                .decisions
+        };
+        let (one, two) = (record(1), record(2));
+        assert!(one.iter().all(|d| !d.blocks.is_empty()));
+        assert_eq!(one, two);
+    }
+
+    #[test]
+    fn the_chosen_filters_bring_the_frame_closer_to_the_source() {
+        // On a smooth field at a coarse quantizer every stage has artefacts to remove, so the
+        // choice is not "off", and what it chose leaves less error than the reconstruction the
+        // filters started from.
+        let p = smooth_64();
+        let mut e = FrameEncoder::new(&p, 200);
+        let whole = TileRect {
+            r0: 0,
+            r1: e.mi_rows,
+            c0: 0,
+            c1: e.mi_cols,
+        };
+        e.encode_tiles(&[whole], NonZeroUsize::MIN);
+        let raw = e.recon.clone();
+        let chosen = e.choose_filters(&raw);
+        assert_ne!(chosen.deblock_level, 0);
+        assert_ne!(chosen.cdef, CdefStrengths::default());
+        let mut filtered = raw.clone();
+        e.deblock(&mut filtered, chosen.deblock_level);
+        let deblocked = e.frame_sse(&filtered, 0..3);
+        assert!(deblocked < e.frame_sse(&raw, 0..3));
+        let filtered = e.cdef(&filtered, &e.cdef_blocks(&filtered), chosen.cdef);
+        assert!(e.frame_sse(&filtered, 0..1) < e.frame_sse(&raw, 0..1));
+        assert!(e.frame_sse(&filtered, 0..3) < deblocked);
+    }
+
+    #[test]
+    fn recoding_reconstructs_the_first_pass_and_codes_the_restoration_units() {
+        // The second pass replays the first and applies its filters unchanged, so everything the
+        // in-loop filters and loop restoration read is identical; only the stream gains the unit's
+        // `use_wiener` and taps.
+        let p = smooth_64();
+        let (bytes, first) = first_pass(&p, 110);
+        let layout = TileLayout::resolve(crate::headers::Tiling::SINGLE, 64, 64, 0, None);
+        let lr = LrUnits {
+            cols: 1,
+            rows: 1,
+            wiener: vec![true],
+        };
+        let (recoded, second) = FrameEncoder::new(&p, 110)
+            .recoding(&first, lr, None)
+            .encode(&layout, NonZeroUsize::MIN);
+        assert!(second.planes == first.planes, "the reconstruction moved");
+        assert_eq!(second.deblocked_luma, first.deblocked_luma);
+        assert_eq!(second.filters, first.filters);
+        assert_ne!(recoded, bytes);
+    }
+
+    #[test]
+    fn recoding_codes_each_superblock_as_the_first_pass_recorded_it() {
+        // Doctor the first pass's record so one superblock root takes a partition its own search
+        // did not: a second pass that searched instead of replaying would choose the original
+        // again. The doctored root is the last of a 2×2 grid, so the replay must also find each
+        // superblock's record at its own index.
+        let p = smooth(128);
+        let (_, first) = first_pass(&p, 110);
+        let mut record = (*first.decisions).clone();
+        let root = record[3]
+            .partitions
+            .iter_mut()
+            .find(|d| d.at == (16, 16, 64))
+            .expect("the root partition is recorded");
+        let doctored = if root.bp == 3 { 0 } else { 3 };
+        root.bp = doctored;
+        let first = Reconstruction {
+            decisions: Arc::new(record),
+            ..first
+        };
+        let layout = TileLayout::resolve(crate::headers::Tiling::SINGLE, 128, 128, 0, None);
+        let lr = LrUnits {
+            cols: 1,
+            rows: 1,
+            wiener: vec![false],
+        };
+        let (_, second) = FrameEncoder::new(&p, 110)
+            .recoding(&first, lr, None)
+            .encode(&layout, NonZeroUsize::MIN);
+        assert_eq!(root_partition(&second.decisions[3], 16, 16), Some(doctored));
+        // The undoctored superblocks replay as recorded.
+        assert_eq!(second.decisions[..3], first.decisions[..3]);
     }
 }
