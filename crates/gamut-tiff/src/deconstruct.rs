@@ -16,8 +16,7 @@ use std::collections::BTreeMap;
 
 use gamut_core::{ImageBuf, Result, Rgb8};
 use gamut_ifd::{
-    AuditFinding, Ifd, IfdReader, SegmentReport, SkipReason, SpanKind, StandardAuditSpec, Value,
-    audit as ifd_audit,
+    AuditFinding, Ifd, SegmentReport, SkipReason, StandardAuditSpec, Value, audit as ifd_audit,
 };
 
 use crate::compression::Compression;
@@ -200,7 +199,6 @@ pub fn deconstruct(data: &[u8]) -> Result<DeconstructReport> {
         findings.check_image_ifd(ifd, page);
     }
     findings.map_audit_findings(&audit.findings);
-    findings.check_duplicate_tags(data, &audit.report);
     Ok(DeconstructReport {
         segments: audit.report,
         unknown_fields: findings.unknown_fields,
@@ -351,67 +349,19 @@ impl Findings {
         }
     }
 
-    /// Flags every directory that carries two entries under one tag.
-    ///
-    /// This re-reads the **raw** entry records rather than consulting the parsed tree, and that is
-    /// the whole point: [`Ifd`] is a directory model, so by the time the tree exists a duplicated
-    /// tag has already collapsed to its last occurrence and the defect is invisible there. It was
-    /// invisible here too, and that is why a round trip through this crate could not see a writer
-    /// that emitted a field and a sub-IFD group under one tag — the report graded such a file
-    /// clean.
-    ///
-    /// The directories to re-read are the ones the audit says it walked
-    /// ([`SpanKind::IfdBody`](gamut_ifd::SpanKind::IfdBody)), so this is a second pass over bytes
-    /// already claimed rather than a second walk of the pointer graph.
-    ///
-    /// Two skips are therefore silent in this loop, and the contract is that neither one costs a
-    /// finding:
-    ///
-    /// * a directory the audit **did** claim as an `IfdBody` span re-parses here by construction —
-    ///   the span exists only because [`IfdReader`] already read a directory at that offset during
-    ///   the audit, so the `continue` is unreachable rather than lenient;
-    /// * a directory the audit could **not** parse is claimed as no span at all, so this pass never
-    ///   reaches it. It arrives instead as
-    ///   [`AuditFinding::SkippedSubIfd`](gamut_ifd::AuditFinding::SkippedSubIfd), which
-    ///   `map_audit_findings` turns into an [`Anomaly::Structure`] of [`Severity::Error`]. So no
-    ///   file is graded [`is_fully_accounted`](DeconstructReport::is_fully_accounted) on the
-    ///   strength of a directory nobody read — which is what a caller may rely on, and what
-    ///   `an_unparsable_sub_ifd_is_reported_rather_than_silently_skipped` fails for when it stops
-    ///   being true.
-    ///
-    /// Reporting it there rather than here is deliberate: the audit's finding names the pointer tag
-    /// and the offset that failed, which is strictly more than this pass could say about a
-    /// directory it never parsed.
-    fn check_duplicate_tags(&mut self, data: &[u8], report: &SegmentReport) {
-        let Ok(mut reader) = IfdReader::open(data) else {
-            return;
-        };
-        for segment in &report.segments {
-            let SpanKind::IfdBody { ifd } = segment.kind else {
-                continue;
-            };
-            let Ok(raw) = reader.read_ifd(ifd) else {
-                continue;
-            };
-            let mut counts: BTreeMap<u16, usize> = BTreeMap::new();
-            for entry in &raw.entries {
-                *counts.entry(entry.tag).or_default() += 1;
-            }
-            for (tag, entries) in counts {
-                if entries > 1 {
-                    self.anomalies.push(Anomaly::DuplicateTag {
-                        ifd,
-                        tag,
-                        entries,
-                        severity: Severity::Error,
-                    });
-                }
-            }
-        }
-    }
-
     /// Maps the audit walk's lenient findings onto this crate's anomaly taxonomy.
+    ///
+    /// A directory's [`AuditFinding::ShadowedEntry`] findings — one per entry its parsed [`Ifd`]
+    /// lost to a later entry under the same tag — fold into one [`Anomaly::DuplicateTag`] per
+    /// `(directory, tag)`, counting the survivor too, in directory-offset then tag order. The
+    /// audit reports them for every directory it decoded; one it could **not** parse is claimed as
+    /// no span at all and arrives instead as
+    /// [`AuditFinding::SkippedSubIfd`](gamut_ifd::AuditFinding::SkippedSubIfd), an
+    /// [`Anomaly::Structure`] of [`Severity::Error`] — so no file is graded
+    /// [`is_fully_accounted`](DeconstructReport::is_fully_accounted) on the strength of a
+    /// directory nobody read.
     fn map_audit_findings(&mut self, findings: &[AuditFinding]) {
+        let mut shadowed: BTreeMap<(u64, u16), usize> = BTreeMap::new();
         for finding in findings {
             match *finding {
                 AuditFinding::SkippedSubIfd { page, reason, .. } => {
@@ -432,9 +382,20 @@ impl Findings {
                         severity: Severity::Warning,
                     });
                 }
+                AuditFinding::ShadowedEntry { ifd, tag, .. } => {
+                    *shadowed.entry((ifd, tag)).or_default() += 1;
+                }
                 // The finding taxonomy may grow; unrecognised findings are not anomalies.
                 _ => {}
             }
+        }
+        for ((ifd, tag), lost) in shadowed {
+            self.anomalies.push(Anomaly::DuplicateTag {
+                ifd,
+                tag,
+                entries: lost + 1,
+                severity: Severity::Error,
+            });
         }
     }
 }
@@ -766,13 +727,12 @@ mod tests {
     }
 
     /// A sub-IFD the audit could not parse is reported by the audit, not lost to the
-    /// duplicate-tag pass that never sees it.
+    /// duplicate-tag findings, which only a decoded directory produces.
     #[test]
     fn an_unparsable_sub_ifd_is_reported_rather_than_silently_skipped() {
-        // `check_duplicate_tags` iterates the `IfdBody` spans and skips anything it cannot re-read,
-        // and its contract is that the skip costs no finding: a directory the audit could not parse
-        // is claimed as no span at all, so it arrives as `AuditFinding::SkippedSubIfd` instead.
-        // Nothing held that. The cycle and depth guards have their own reasons (`SkipReason::Cycle`
+        // Duplicate tags arrive as `AuditFinding::ShadowedEntry`, which the audit records only for
+        // a directory it decoded: a directory it could not parse yields none, and arrives as
+        // `AuditFinding::SkippedSubIfd` instead. The cycle and depth guards have their own reasons (`SkipReason::Cycle`
         // and `TooDeep`); this is the plain unreadable target, the reason a truncated or hostile
         // file gives, and the file must not be graded fully accounted on the strength of a
         // directory nobody read.

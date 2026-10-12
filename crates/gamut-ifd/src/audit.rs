@@ -14,6 +14,8 @@
 //! Codecs supply tag knowledge through [`AuditSpec`]; the [`StandardAuditSpec`] covers the
 //! structural tags every TIFF-family file shares (strips, tiles, free ranges, embedded JPEG).
 
+use std::collections::BTreeSet;
+
 use gamut_core::{ErrorKind, Result};
 
 use crate::reader::pointer_offsets;
@@ -127,6 +129,31 @@ pub enum AuditFinding {
         /// The directory whose next-IFD link was non-zero.
         offset: u64,
     },
+    /// A directory carried more than one entry under `tag`, and this entry is one the decoded
+    /// [`Ifd`] does **not** hold: a duplicate tag keeps its *last* occurrence (see
+    /// [`IfdReader::decode_ifd`]), so every earlier one is shadowed — one finding per shadowed
+    /// entry, so a tag written three times yields two.
+    ///
+    /// TIFF 6.0 §2 gives a directory one entry per tag, so the file is out of spec, and which
+    /// entry survives is a property of the reader rather than of the file (libtiff keeps the
+    /// first). Only the *field* is lost: an out-of-line value the shadowed entry pointed at was
+    /// still read and claimed as a [`SpanKind::Value`] of its directory, so its bytes stay
+    /// classified.
+    ///
+    /// **Round trip.** The [`Ifd`] holds one value per tag by construction, so writing it back
+    /// emits only the survivor: `write(read(x))` drops every shadowed entry, and this finding is
+    /// the only record that it existed. Nothing re-emits a duplicate — the writer cannot.
+    ShadowedEntry {
+        /// The offset of the directory carrying the duplicate — the identity
+        /// [`SpanKind::IfdBody`] uses, so a finding in a metadata sub-IFD several levels below a
+        /// page is named exactly.
+        ifd: u64,
+        /// The repeated tag.
+        tag: u16,
+        /// The offset of the shadowed entry's own record within that directory
+        /// ([`RawEntry::offset`](crate::RawEntry::offset)).
+        offset: u64,
+    },
 }
 
 /// A completed structural audit: the parsed tree, the byte-level report, and the walk's
@@ -203,7 +230,8 @@ impl<S: ReadAt> Auditor<S> {
     }
 
     /// Walks the main structure — header, top-level chain, the spec's sub-IFD graph, and its
-    /// declared data extents — returning the resolved tree.
+    /// declared data extents — returning the resolved tree. Every directory it decodes reports
+    /// its shadowed duplicate-tag entries as [`AuditFinding::ShadowedEntry`].
     ///
     /// # Errors
     ///
@@ -213,7 +241,11 @@ impl<S: ReadAt> Auditor<S> {
     /// [`Error::InvalidInput`]: gamut_core::Error::InvalidInput
     pub fn walk(&mut self, spec: &dyn AuditSpec) -> Result<TiffFile> {
         let mut reader = IfdReader::open(&mut self.tracked)?;
-        let mut file = reader.read_file_audited(&mut self.map)?;
+        let mut file = reader.read_chain(Some(&mut self.map), Some(&mut self.findings))?;
+        // A pointer tag may name a top-level directory, which the walk then decodes a second
+        // time as a sub-IFD (`visited` holds only sub-IFD targets). The directory's shadowed
+        // entries were already recorded by the chain read, so that second decode records none.
+        let reported = shadowing_directories(&self.findings);
         let mut visited: Vec<u64> = Vec::new();
         for (page, ifd) in file.ifds.iter_mut().enumerate() {
             declare_extents(spec, ifd, &mut self.map);
@@ -223,6 +255,7 @@ impl<S: ReadAt> Auditor<S> {
                 spec,
                 ifd,
                 &mut visited,
+                &reported,
                 page,
                 1,
                 &mut self.findings,
@@ -259,7 +292,9 @@ impl<S: ReadAt> Auditor<S> {
     /// Walks a **bare directory chain embedded at `base`** — a stream whose internal offsets
     /// are relative to its own start (a DNG camera profile after its 8-byte header, a vendor
     /// maker-note mini-IFD) — claiming every directory body and value at its physical position.
-    /// `first_ifd` is the chain's first directory offset *within* the stream.
+    /// `first_ifd` is the chain's first directory offset *within* the stream. The chain's
+    /// [`AuditFinding::ShadowedEntry`] findings are recorded at physical positions too, and — like
+    /// its claims — only when the whole chain parses.
     ///
     /// # Errors
     ///
@@ -280,14 +315,20 @@ impl<S: ReadAt> Auditor<S> {
         let mut reader = IfdReader::with_layout(&mut view, order, variant);
         let mut guard = crate::reader::ChainGuard::new();
         let mut ifds = Vec::new();
+        let mut shadowed = Vec::new();
         let mut offset = first_ifd;
         while offset != 0 {
             guard.admit(offset)?;
-            let (ifd, next) = reader.read_ifd_at_audited(offset, &mut sub)?;
+            let (ifd, next) =
+                reader.read_ifd_at_reporting(offset, &mut sub, &mut shadowed, base)?;
             ifds.push(ifd);
             offset = next;
         }
+        // Like the claims, the chain's findings land only once the whole chain parsed — and they
+        // were recorded at physical offsets, since a stream-relative offset names nothing in the
+        // file being audited.
         self.map.merge_shifted(sub, base);
+        self.findings.append(&mut shadowed);
         Ok(ifds)
     }
 
@@ -331,10 +372,23 @@ fn declare_extents(spec: &dyn AuditSpec, ifd: &Ifd, map: &mut SegmentMap) {
     });
 }
 
+/// The directories `findings` already holds [`AuditFinding::ShadowedEntry`] findings for.
+fn shadowing_directories(findings: &[AuditFinding]) -> BTreeSet<u64> {
+    findings
+        .iter()
+        .filter_map(|finding| match finding {
+            AuditFinding::ShadowedEntry { ifd, .. } => Some(*ifd),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Follows `ifd`'s pointer tags leniently: each parseable target becomes a sub-IFD child
 /// (its extents declared, its own pointers followed recursively); an unparseable, cyclic, or
 /// too-deep target becomes a [`AuditFinding::SkippedSubIfd`]; a non-zero next-IFD link on a
-/// target is followed as [`AuditFinding::ChainedSubIfd`].
+/// target is followed as [`AuditFinding::ChainedSubIfd`]. A target's
+/// [`AuditFinding::ShadowedEntry`] findings are recorded unless `reported` says the directory's
+/// were recorded already, so each directory reports its shadowed entries once.
 #[expect(
     clippy::too_many_arguments,
     reason = "internal recursive walk threading its full context"
@@ -345,6 +399,7 @@ fn follow_subifds<S: ReadAt>(
     spec: &dyn AuditSpec,
     ifd: &mut Ifd,
     visited: &mut Vec<u64>,
+    reported: &BTreeSet<u64>,
     page: usize,
     depth: usize,
     findings: &mut Vec<AuditFinding>,
@@ -374,20 +429,25 @@ fn follow_subifds<S: ReadAt>(
                     break;
                 }
                 visited.push(offset);
-                let (mut child, next) = match reader.read_ifd_at_audited(offset, map) {
-                    Ok(parsed) => parsed,
-                    // Transport failures abort the audit; file defects are findings.
-                    Err(error) if error.kind() == ErrorKind::Io => return Err(error),
-                    Err(_) => {
-                        findings.push(AuditFinding::SkippedSubIfd {
-                            page,
-                            tag,
-                            offset,
-                            reason: SkipReason::Unparseable,
-                        });
-                        break;
-                    }
-                };
+                let mut shadowed = Vec::new();
+                let (mut child, next) =
+                    match reader.read_ifd_at_reporting(offset, map, &mut shadowed, 0) {
+                        Ok(parsed) => parsed,
+                        // Transport failures abort the audit; file defects are findings.
+                        Err(error) if error.kind() == ErrorKind::Io => return Err(error),
+                        Err(_) => {
+                            findings.push(AuditFinding::SkippedSubIfd {
+                                page,
+                                tag,
+                                offset,
+                                reason: SkipReason::Unparseable,
+                            });
+                            break;
+                        }
+                    };
+                if !reported.contains(&offset) {
+                    findings.append(&mut shadowed);
+                }
                 declare_extents(spec, &child, map);
                 follow_subifds(
                     reader,
@@ -395,6 +455,7 @@ fn follow_subifds<S: ReadAt>(
                     spec,
                     &mut child,
                     visited,
+                    reported,
                     page,
                     depth + 1,
                     findings,
@@ -590,6 +651,109 @@ mod tests {
         assert_eq!(group.ifds[0].get_u32(256), Some(1));
         assert_eq!(group.ifds[1].get_u32(256), Some(2));
         assert!(out.report.is_fully_classified(), "report: {:?}", out.report);
+    }
+
+    /// A directory with two entries under one tag, as a bare classic stream: header, then the
+    /// directory @ 8 with entry records @ 10 (`256 = 1`, shadowed) and @ 22 (`256 = 2`).
+    const SHADOWING_STREAM: &[u8] = &[
+        b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD0 @ 8
+        0x02, 0x00, // 2 entries
+        0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // 256 = 1
+        0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // 256 = 2
+        0x00, 0x00, 0x00, 0x00, // next = 0
+    ];
+
+    /// A top-level directory's shadowed duplicate is a finding; the bytes stay classified.
+    #[test]
+    fn shadowed_top_level_entry_is_a_finding() {
+        let out = audit(SHADOWING_STREAM, &StandardAuditSpec).expect("audit");
+        assert_eq!(
+            out.findings,
+            vec![AuditFinding::ShadowedEntry {
+                ifd: 8,
+                tag: 256,
+                offset: 10,
+            }]
+        );
+        assert_eq!(
+            out.file.ifds[0].get_u32(256),
+            Some(2),
+            "last occurrence wins"
+        );
+        assert!(out.report.is_fully_classified(), "report: {:?}", out.report);
+    }
+
+    /// A followed sub-IFD's shadowed duplicate is named by the sub-IFD's own offset.
+    #[test]
+    fn shadowed_subifd_entry_is_a_finding() {
+        let data: &[u8] = &[
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD0 @ 8
+            0x01, 0x00, // IFD0: 1 entry
+            0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00,
+            0x00, // 330 -> 26
+            0x00, 0x00, 0x00, 0x00, // next = 0
+            0x02, 0x00, // child @ 26: 2 entries
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // @28
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // @40
+            0x00, 0x00, 0x00, 0x00, // next = 0
+        ];
+        let out = audit(data, &StandardAuditSpec).expect("audit");
+        assert_eq!(
+            out.findings,
+            vec![AuditFinding::ShadowedEntry {
+                ifd: 26,
+                tag: 256,
+                offset: 28,
+            }]
+        );
+        assert!(out.report.is_fully_classified(), "report: {:?}", out.report);
+    }
+
+    /// A pointer tag naming a top-level directory decodes it a second time as a sub-IFD; its
+    /// shadowed duplicate is still reported once, not once per decode.
+    #[test]
+    fn shadowed_entry_of_a_top_level_directory_reached_as_a_subifd_is_reported_once() {
+        let data: &[u8] = &[
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD0 @ 8
+            0x01, 0x00, // IFD0: 1 entry
+            0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00,
+            0x00, // 330 -> 26
+            0x1a, 0x00, 0x00, 0x00, // next = 26: IFD1 is also top-level
+            0x02, 0x00, // IFD1 @ 26: 2 entries
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // @28
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // @40
+            0x00, 0x00, 0x00, 0x00, // next = 0
+        ];
+        let out = audit(data, &StandardAuditSpec).expect("audit");
+        assert_eq!(
+            out.findings,
+            vec![AuditFinding::ShadowedEntry {
+                ifd: 26,
+                tag: 256,
+                offset: 28,
+            }]
+        );
+    }
+
+    /// An embedded chain's shadowed duplicate is reported at its **physical** offsets.
+    #[test]
+    fn walk_embedded_reports_shadowed_entries_at_physical_offsets() {
+        let base = 1000u64;
+        let mut outer = vec![0u8; base as usize];
+        outer.extend_from_slice(SHADOWING_STREAM);
+        let mut auditor = Auditor::new(&outer[..]).expect("new");
+        auditor
+            .walk_embedded(base, 8, ByteOrder::LittleEndian, Variant::Classic)
+            .expect("walk_embedded");
+        let (_, findings) = auditor.finish().expect("finish");
+        assert_eq!(
+            findings,
+            vec![AuditFinding::ShadowedEntry {
+                ifd: base + 8,
+                tag: 256,
+                offset: base + 10,
+            }]
+        );
     }
 
     /// Nesting past the depth guard terminates with skip findings, not a stack overflow.
