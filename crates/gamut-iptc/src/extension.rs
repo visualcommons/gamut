@@ -92,6 +92,30 @@
 //! modelled value stays the authority when there is one, and the retained field is written when it
 //! is the only copy.
 //!
+//! # A value the projection cannot express
+//!
+//! Emission is **infallible**, for the whole module: every `to_xmp` returns an [`XmpValue`], and
+//! every [`PhotoMetadata`] setter returns nothing. The one modelled value that has no form in the
+//! type its property declares is a non-finite coordinate — `NaN` or an infinity in a
+//! [`RegionBoundary`] or [`RegionBoundaryPoint`] field — because those are not values of the XMP
+//! `Real` type (Part 1 §8.2.1); every other modelled field is text, a language alternative or a
+//! list of either, and has a form for every value a caller can hold. A non-finite coordinate is
+//! **not written**: the structure is emitted without that field, its other fields are written as
+//! usual, and a retained field of the same name in `other` is written in its place (see above).
+//! A graph that says nothing about a coordinate is preferred to one that states a number no reader
+//! can take back as one. The caller is not told; a caller that needs to know checks
+//! [`f64::is_finite`] on the coordinates it sets, which is where the value is decided.
+//!
+//! The read side follows the same rule: a coordinate whose text does not parse as an XMP `Real`
+//! reads as `None` — no error, no invented number — and is kept verbatim in `other`, so it is
+//! neither reported nor lost.
+//!
+//! The alternatives were weighed and declined. Returning `Result` from `to_xmp` would break all
+//! seven public `to_xmp` methods and either make the four setters fallible or have them swallow
+//! the error, to report a value that can arise only from a caller's own arithmetic; and a checked
+//! `Finite` coordinate type would turn plain-data fields into a validated API. Both would also
+//! depart from the [`gamut_exif::GpsInfo`](https://docs.rs/gamut-exif) shape this module mirrors.
+//!
 //! # The same rule at both levels
 //!
 //! [`PhotoMetadata`]'s four accessor pairs for these properties apply that gate to the property
@@ -1043,6 +1067,9 @@ impl RegionBoundaryPoint {
 
     /// Writes the structure as an XMP value, omitting absent fields and appending
     /// [`other`](Self::other) verbatim.
+    ///
+    /// A coordinate that is `NaN` or infinite has no XMP `Real` form and is omitted like an absent
+    /// one; nothing reports the omission (see the [module docs](self)).
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
@@ -1116,7 +1143,9 @@ impl RegionBoundary {
     /// [`other`](Self::other) verbatim.
     ///
     /// The vertices are written as an ordered `Seq`, because a polygon's edges follow the vertex
-    /// sequence.
+    /// sequence. A coordinate, extent or radius that is `NaN` or infinite has no XMP `Real` form
+    /// and is omitted like an absent one; nothing reports the omission (see the
+    /// [module docs](self)).
     #[must_use]
     pub fn to_xmp(&self) -> XmpValue {
         let mut f = Vec::new();
@@ -2491,6 +2520,20 @@ mod tests {
             assert_eq!(point.x, None, "{stated} was reported as a coordinate");
             assert_eq!(point.to_xmp(), input, "{stated} was destroyed");
         }
+    }
+
+    #[test]
+    fn a_non_finite_coordinate_gives_way_to_a_retained_namesake() {
+        // The skip leaves the coordinate unemitted, not merely "modelled": a retained `rbX` is then
+        // the only copy of the name and is written, as the module's emission policy states.
+        let point = RegionBoundaryPoint {
+            x: Some(f64::NAN),
+            other: vec![XmpProperty::new(ns::IPTC_EXT, "rbX", text_value("0.25"))],
+            ..RegionBoundaryPoint::default()
+        };
+        let value = point.to_xmp();
+        let fields = structure(&value).expect("a structure value");
+        assert_eq!(Reader::new(fields).number(ns::IPTC_EXT, "rbX"), Some(0.25));
     }
 
     #[test]
