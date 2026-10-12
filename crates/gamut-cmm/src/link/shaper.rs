@@ -605,7 +605,8 @@ mod tests {
         let pq_trc = pq.get(KnownTag::RedTrc).unwrap().clone();
         let gray = {
             let mut gray = gray_profile(ColorSpace::Xyz, pq_trc);
-            gray.tags.extend(with_cicp_transfer(pq_builtin(), Some(16)).tags.pop());
+            gray.tags
+                .extend(with_cicp_transfer(pq_builtin(), Some(16)).tags.pop());
             gray
         };
         let mut k = [0.0; 1];

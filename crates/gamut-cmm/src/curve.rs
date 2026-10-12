@@ -982,7 +982,11 @@ mod tests {
             let inverted = curve.inverse().expect("a transfer function inverts");
             for x in [0.1, 0.5, 0.9] {
                 assert_eq!(curve.eval(x), forward(x), "code point {code_point} at {x}");
-                assert_eq!(inverted.eval(x), inverse(x), "code point {code_point} at {x}");
+                assert_eq!(
+                    inverted.eval(x),
+                    inverse(x),
+                    "code point {code_point} at {x}"
+                );
             }
         }
     }
@@ -1032,7 +1036,10 @@ mod tests {
         let gap = CICP_AGREEMENT * (1.0 + 1e-6);
         let sagging = table(vec![0.0, 1.0 - gap]);
         let second_last = (MONOTONICITY_PROBES - 2) as f64 / (MONOTONICITY_PROBES - 1) as f64;
-        assert!(second_last * gap <= CICP_AGREEMENT, "only x = 1 is past the bound");
+        assert!(
+            second_last * gap <= CICP_AGREEMENT,
+            "only x = 1 is past the bound"
+        );
         assert!(!sagging.agrees_with(&ramp));
     }
 }
