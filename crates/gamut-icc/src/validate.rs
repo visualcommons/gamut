@@ -1,24 +1,31 @@
-//! Profile-class conformance checking against the required tags of ICC.1:2022 §8.
+//! Profile conformance checking against the required tags of ICC.1:2022 §8 and the header-keyed
+//! `MatrixCoefficients` clause of §10.3.
 //!
-//! [`IccProfile::validate`] reports the §8 required-tag requirements a profile does *not* meet for
-//! its device class. It is a structural check of tag *presence* only — it does not evaluate tag
-//! contents, and it deliberately omits the `chromaticAdaptationTag` requirement (§8.2), which is
-//! conditional on measurement data not recoverable from the profile alone.
+//! [`IccProfile::validate`] reports the requirements a profile does *not* meet. For the §8
+//! required-tag sets it is a structural check of tag *presence* only, and it deliberately omits
+//! the `chromaticAdaptationTag` requirement (§8.2), which is conditional on measurement data not
+//! recoverable from the profile alone. The one tag *content* it evaluates is the §10.3 clause
+//! tying a `cicpType` tag's `MatrixCoefficients` to the header's data colour space.
 
 use crate::header::{ColorSpace, DeviceClass};
 use crate::primitives::Signature;
 use crate::profile::IccProfile;
+use crate::tag_types::TagData;
+use crate::tags::KnownTag;
 
-/// A single ICC.1:2022 §8 required-tag requirement a profile does not satisfy.
+/// A single ICC.1:2022 requirement a profile does not satisfy: a §8 required tag that is absent,
+/// or the §10.3 `MatrixCoefficients` clause on a `cicpType` tag that is present.
 ///
 /// An empty [`Vec<Conformance>`] from [`IccProfile::validate`] means the profile carries every tag
-/// its device class requires.
+/// its device class requires and its `cicp` tag, if any, agrees with its data colour space.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conformance {
-    /// A human-readable description of the unmet requirement (with its §8 subsection).
+    /// A human-readable description of the unmet requirement (with its §8 or §10.3 subsection).
+    /// For §10.3 it names the header's data colour space and the offending `MatrixCoefficients`.
     pub requirement: String,
     /// The tag signatures whose absence caused it. For an alternative-model requirement these are
-    /// the tags missing from the nearest-to-complete model.
+    /// the tags missing from the nearest-to-complete model. Empty for the §10.3 requirement, which
+    /// concerns the contents of a tag that *is* present rather than the absence of one.
     pub missing: Vec<Signature>,
 }
 
@@ -58,12 +65,19 @@ const OUTPUT_MODELS: &[Model] = &[
 ];
 
 impl IccProfile {
-    /// Reports the ICC.1:2022 §8 required-tag requirements this profile does not meet for its
-    /// device class. An empty result means it carries every required tag.
+    /// Reports the ICC.1:2022 requirements this profile does not meet: the §8 required tags of its
+    /// device class, then the §10.3 `MatrixCoefficients` clause on its `cicp` tag. An empty result
+    /// means it carries every required tag and any `cicp` tag agrees with the header.
     ///
-    /// This checks tag *presence* only (not contents), and omits the conditional
+    /// The §8 checks are of tag *presence* only, and omit the conditional
     /// `chromaticAdaptationTag` requirement. Profiles routinely carry additional optional tags;
     /// those are never reported.
+    ///
+    /// §10.3 is reported with the same weight as a missing required tag, because ICC states both
+    /// of its directions as *shall*: a `cicp` tag in an RGB or XYZ profile whose
+    /// `MatrixCoefficients` is non-zero (an `nclx` box copied verbatim produces one), or one in a
+    /// YCbCr profile whose `MatrixCoefficients` is zero. Nothing refuses such a profile — it
+    /// parses, round-trips and transforms as before; `validate` only names the clause it breaks.
     #[must_use]
     pub fn validate(&self) -> Vec<Conformance> {
         let mut issues = Vec::new();
@@ -108,7 +122,33 @@ impl IccProfile {
             ),
         }
 
+        self.require_cicp_matrix_coefficients(&mut issues);
         issues
+    }
+
+    /// §10.3 — "When the data colour space in the profile header is RGB or XYZ, MatrixCoefficients
+    /// shall be 0 (zero). When the data colour space in the profile header is YCbCr,
+    /// MatrixCoefficients shall be non-zero." Every other data colour space is unconstrained by
+    /// this clause (§9.2.17 forbids the tag there outright, a separate requirement not checked
+    /// here). A `cicp` tag that did not decode as a `cicpType` has no field to read.
+    fn require_cicp_matrix_coefficients(&self, issues: &mut Vec<Conformance>) {
+        let Some(TagData::Cicp(cicp)) = self.get(KnownTag::Cicp) else {
+            return;
+        };
+        let matrix = cicp.matrix_coefficients;
+        let space = self.header.data_color_space;
+        let shall = match space {
+            ColorSpace::Rgb | ColorSpace::Xyz if matrix != 0 => "shall be 0 (zero)",
+            ColorSpace::YCbCr if matrix == 0 => "shall be non-zero",
+            _ => return,
+        };
+        issues.push(Conformance {
+            requirement: format!(
+                "§10.3 cicpType with a '{}' data colour space: MatrixCoefficients {shall} (is {matrix})",
+                Signature::from(space)
+            ),
+            missing: Vec::new(),
+        });
     }
 
     /// Whether a tag with the given four-byte signature is present.
@@ -213,8 +253,8 @@ impl IccProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cicp::Cicp;
     use crate::header::ProfileHeader;
-    use crate::tag_types::TagData;
 
     /// A header for `class`/`data` space with otherwise-neutral fields.
     fn header(class: DeviceClass, data: ColorSpace, pcs: ColorSpace) -> ProfileHeader {
@@ -387,5 +427,73 @@ mod tests {
             &with_tags,
         );
         assert!(with.validate().is_empty());
+    }
+
+    /// A §8-complete matrix Display profile with a `data` colour space, carrying a decoded `cicp`
+    /// tag whose only non-default field is `MatrixCoefficients`.
+    fn with_cicp(data: ColorSpace, matrix_coefficients: u8) -> IccProfile {
+        let mut p = profile(
+            DeviceClass::Display,
+            data,
+            ColorSpace::Xyz,
+            &[
+                b"desc", b"cprt", b"wtpt", b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC", b"bTRC",
+            ],
+        );
+        p.tags.push((
+            KnownTag::Cicp.into(),
+            TagData::Cicp(Cicp {
+                colour_primaries: 9,
+                transfer_characteristics: 16,
+                matrix_coefficients,
+                video_full_range_flag: 1,
+            }),
+        ));
+        p
+    }
+
+    /// The §10.3 finding for `space`, as `validate` words it.
+    fn matrix_finding(space: &str, shall: &str, is: u8) -> Conformance {
+        Conformance {
+            requirement: format!(
+                "§10.3 cicpType with a '{space}' data colour space: MatrixCoefficients {shall} (is {is})"
+            ),
+            missing: vec![],
+        }
+    }
+
+    #[test]
+    fn rgb_cicp_matrix_coefficients_shall_be_zero() {
+        assert_eq!(with_cicp(ColorSpace::Rgb, 0).validate(), vec![]);
+        assert_eq!(
+            with_cicp(ColorSpace::Rgb, 6).validate(),
+            vec![matrix_finding("RGB ", "shall be 0 (zero)", 6)]
+        );
+    }
+
+    #[test]
+    fn xyz_cicp_matrix_coefficients_shall_be_zero() {
+        assert_eq!(with_cicp(ColorSpace::Xyz, 0).validate(), vec![]);
+        assert_eq!(
+            with_cicp(ColorSpace::Xyz, 1).validate(),
+            vec![matrix_finding("XYZ ", "shall be 0 (zero)", 1)]
+        );
+    }
+
+    #[test]
+    fn ycbcr_cicp_matrix_coefficients_shall_be_non_zero() {
+        assert_eq!(with_cicp(ColorSpace::YCbCr, 1).validate(), vec![]);
+        assert_eq!(
+            with_cicp(ColorSpace::YCbCr, 0).validate(),
+            vec![matrix_finding("YCbr", "shall be non-zero", 0)]
+        );
+    }
+
+    /// §10.3 keys the clause on RGB, XYZ and YCbCr only; under any other data colour space neither
+    /// value of `MatrixCoefficients` is a §10.3 finding.
+    #[test]
+    fn other_space_cicp_matrix_coefficients_are_unconstrained() {
+        assert_eq!(with_cicp(ColorSpace::Gray, 0).validate(), vec![]);
+        assert_eq!(with_cicp(ColorSpace::Gray, 6).validate(), vec![]);
     }
 }
