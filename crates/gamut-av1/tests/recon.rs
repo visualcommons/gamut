@@ -769,14 +769,7 @@ fn every_tile_layout_matches_both_decoders() {
                 60,
             );
         }
-        let mono = planes_subsampled(
-            200,
-            150,
-            ChromaSubsampling::Cs400,
-            MatrixCoefficients::Bt709,
-            ColorRange::Full,
-            directional,
-        );
+        let mono = mono_planes(200, 150, |x, y| directional(x, y)[0] ^ directional(x, y)[2]);
         check_with(
             encode_still_intra_with_options(&mono, 60, Av1Colour::monochrome(), options).unwrap(),
             60,

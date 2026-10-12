@@ -1156,6 +1156,13 @@ mod tests {
             matrix: MatrixCoefficients::Bt709,
             ..Av1Colour::default()
         };
+        let mono = Planar8::from_planes_subsampled(
+            200,
+            150,
+            ChromaSubsampling::Cs400,
+            [rgb.plane(0).to_vec(), Vec::new(), Vec::new()],
+        )
+        .unwrap();
         let cases: [(&str, Planar8, u8, Av1Colour, Tiling); 5] = [
             (
                 "4:4:4 q40",
@@ -1187,7 +1194,7 @@ mod tests {
             ),
             (
                 "mono q60",
-                ycc(ChromaSubsampling::Cs400),
+                mono,
                 60,
                 Av1Colour::monochrome(),
                 Tiling::new(2, 1),

@@ -997,7 +997,10 @@ mod tests {
             let starts = |v: &[u32]| v.iter().map(|&s| s as usize).collect::<Vec<_>>();
             assert_eq!(starts(&t.mi_col_starts), l.col_starts, "{w}x{h}");
             assert_eq!(starts(&t.mi_row_starts), l.row_starts, "{w}x{h}");
-            assert_eq!(t.tile_size_bytes, TILE_SIZE_BYTES, "{w}x{h}");
+            // `tile_size_bytes_minus_1` is coded only when there is more than one tile.
+            if l.num_tiles() > 1 {
+                assert_eq!(t.tile_size_bytes, TILE_SIZE_BYTES, "{w}x{h}");
+            }
         }
     }
 
