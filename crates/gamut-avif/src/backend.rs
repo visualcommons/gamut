@@ -565,8 +565,8 @@ impl SeqHeaderParams {
 /// its absence as `Thorough` — which is also every job a pre-speed backend was ever handed. That
 /// absence rule is a persisted wire convention, not the encoder's default: an
 /// [`AvifEncoder`](crate::AvifEncoder) left at its default preset, [`Speed::Balanced`], therefore
-/// hands a backend the **two-byte** blob `[base_q_idx, 1]`. A backend maps the preset onto its own effort scale or ignores it; either way the stream it
-/// returns is held to the same contract.
+/// hands a backend the **two-byte** blob `[base_q_idx, 1]`. A backend maps the preset onto its
+/// own effort scale or ignores it; either way the stream it returns is held to the same contract.
 ///
 /// # Bit depth
 ///
