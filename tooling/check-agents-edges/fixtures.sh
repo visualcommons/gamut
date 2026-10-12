@@ -70,6 +70,8 @@ check "base passes" 0 "agree with cargo metadata" unchanged
 check "CRLF line endings are read" 0 "" sedx 's/$/\r/'
 check "a note parenthesis is not an edge kind" 0 "" \
     sedx 's/^- \*\*gamut-bitstream\*\* — \(.*\) ← core\./- **gamut-bitstream** — \1 ← core (the AV1 coder, §8.2; see lib.rs)./'
+check "a clause ends at a semicolon" 0 "" \
+    sedx 's/^- \*\*gamut-bitstream\*\* — \(.*\) ← core\./- **gamut-bitstream** — \1 ← core; the AV1 coder reads it./'
 
 # Edges.
 check "a missing edge is reported" 1 \
@@ -103,6 +105,8 @@ check "an unrecognised item is rejected" 1 "unrecognised edge item" \
     sedx 's/^- \*\*gamut-ffi\*\* (cdylib\/staticlib)\. ← gamut, codec-abi, color\./- **gamut-ffi** (cdylib\/staticlib). ← gamut, codec-abi, Color Science./'
 check "a prefixed workspace name is rejected" 1 "without its \`gamut-\` prefix" \
     sedx 's/← gamut, codec-abi, color\./← gamut, gamut-codec-abi, color./'
+check "punctuation inside a code span does not end the item" 1 "unrecognised edge item \`\`clap.rs, v4\`\`" \
+    sedx 's/← gamut, `clap`, /← gamut, `clap.rs, v4`, /'
 
 # Membership.
 check "a member without a bullet is reported" 1 "gamut-wasm is a workspace member with no bullet" \
