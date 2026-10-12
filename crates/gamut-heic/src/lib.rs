@@ -186,7 +186,7 @@ pub use c2pa::{
 pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{DecodedFrame, HevcDecoder};
 // The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-avif` (#505).
-pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paUnreadReason};
+pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paByteRange, C2paUnreadReason};
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `HeifImage::metadata` / `HeifImage::blocks` without a direct dependency.
 #[cfg(feature = "metadata")]

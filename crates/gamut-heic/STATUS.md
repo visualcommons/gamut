@@ -129,7 +129,11 @@ present. A mid-update file carrying both an `original` and an `update` store rep
 order, with their purposes: choosing the *active* manifest is a validator's judgement and this crate
 reaches no verdict. The reported range is for observability and byte accounting only — it is **not**
 a BMFF exclusion range, since `c2pa.hash.bmff.v3` excludes by box path, not by byte offset (§18.6,
-§A.5.6). Nothing inside the store is parsed, no hash is computed and no signature is checked.
+§A.5.6). A type enforces it (#780): every C2PA range this crate reports (`C2paManifestStore`'s,
+`C2paStoreSummary`'s, `C2paUnreadBox`'s and `C2paMerkleBox`'s `range`, and the `slot` fields) is
+`gamut-isobmff`'s `C2paByteRange`, re-exported here and shared with `gamut-avif` — bounds, the
+bytes it covers and a `[start, end)` rendering, but no conversion back to a `Range<usize>`.
+Nothing inside the store is parsed, no hash is computed and no signature is checked.
 
 **Shared framing (issue #505).** The framing above is no longer this crate's own parse: the user
 type, `box_purpose`, merkle offset, `LBox` bound and `update` probe live in `gamut-isobmff`'s

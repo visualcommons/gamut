@@ -84,7 +84,7 @@ fn main() -> Result<()> {
         let range = report
             .c2pa
             .ok_or_else(|| OracleError::Asset("no c2pa range reported".into()))?;
-        Ok((bytes, range))
+        Ok((bytes, range.start()..range.end()))
     })?;
     println!(
         "direction 1: asset {} bytes, slot {:?}, store {} bytes (placeholder asked {}), LBox {:?}",

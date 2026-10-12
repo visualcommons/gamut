@@ -242,7 +242,7 @@ pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder, RawPlanes};
 pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
 pub use gamut_core::Dimensions;
 // The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-heic` (#505).
-pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paSlot, C2paUnreadReason};
+pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paByteRange, C2paSlot, C2paUnreadReason};
 pub use image::{
     AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay,
     PixelAspectRatio, TransformativeProperty,

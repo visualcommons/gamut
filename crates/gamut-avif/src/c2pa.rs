@@ -40,12 +40,11 @@
 //! extraction and byte accounting. A BMFF asset's hard binding is `c2pa.hash.bmff.v3`, which
 //! excludes content by **box path**, not by byte offset (§18.6, §A.5.6). Hashing "everything but
 //! this range" is therefore not how a BMFF manifest is bound, and no type here is named
-//! "exclusion" so that no caller is invited to try.
-
-use core::ops::Range;
+//! "exclusion" so that no caller is invited to try. Every one is a [`C2paByteRange`], which has
+//! no conversion back to the `Range<usize>` a byte-range hasher's exclusion list takes (#780).
 
 use gamut_isobmff::{
-    C2paBoxPurpose, C2paSlot, C2paUnreadReason, C2paUuidBox, Segment, SegmentKind,
+    C2paBoxPurpose, C2paByteRange, C2paSlot, C2paUnreadReason, C2paUuidBox, Segment, SegmentKind,
 };
 
 use crate::container::AvifContainer;
@@ -134,7 +133,7 @@ pub(crate) fn slots<'a, 's>(
 /// already been passed when this box is reached.
 fn top_level_uuid_boxes<'a, 's>(
     segments: &'s [Segment<'a>],
-) -> impl Iterator<Item = (Range<usize>, C2paBoxPosition, C2paUuidBox<'a>)> + 's {
+) -> impl Iterator<Item = (C2paByteRange, C2paBoxPosition, C2paUuidBox<'a>)> + 's {
     let mut position = C2paBoxPosition::BeforeMediaData;
     segments
         .iter()
@@ -143,9 +142,11 @@ fn top_level_uuid_boxes<'a, 's>(
                 position = C2paBoxPosition::AfterMediaData;
                 None
             }
-            // `classify` is `None` for every segment that is not a top-level `uuid` box.
+            // `classify` is `None` for every segment that is not a top-level `uuid` box. The walk
+            // never yields a segment ending before it starts, so the range is always placed.
             _ => C2paUuidBox::classify(segment)
-                .map(|classified| (segment.range.clone(), position, classified)),
+                .zip(C2paByteRange::new(segment.range.start, segment.range.end))
+                .map(|(classified, range)| (range, position, classified)),
         })
 }
 
@@ -212,14 +213,14 @@ impl C2paBoxPosition {
 pub struct C2paStoreSummary {
     /// The half-open byte range of the store, trimmed to its JUMBF `LBox` — the range
     /// [`C2paSlot::store_range`] reports, and *not* a BMFF exclusion range.
-    pub range: Range<usize>,
+    pub range: C2paByteRange,
     /// The `box_purpose` of the `uuid` box that carried the store.
     pub purpose: C2paBoxPurpose,
     /// Where the `uuid` box that carried the store sits relative to the file's media data.
     pub position: C2paBoxPosition,
     /// The half-open byte range of the slot the store sits at the front of — the store and any
     /// §A.5.3 padding after it, box-bounded: the range [`C2paSlot::range`] reports.
-    pub slot: Range<usize>,
+    pub slot: C2paByteRange,
 }
 
 impl C2paStoreSummary {
@@ -238,7 +239,7 @@ impl C2paStoreSummary {
 #[non_exhaustive]
 pub struct C2paUnreadBox {
     /// The half-open byte range of the whole `uuid` box, header included.
-    pub range: Range<usize>,
+    pub range: C2paByteRange,
     /// Why no slot was read from it.
     pub reason: C2paUnreadReason,
     /// Where the box sits relative to the file's media data.
@@ -253,7 +254,7 @@ pub struct C2paUnreadBox {
 #[non_exhaustive]
 pub struct C2paMerkleBox {
     /// The half-open byte range of the whole `uuid` box.
-    pub range: Range<usize>,
+    pub range: C2paByteRange,
     /// Where the box sits relative to the file's media data.
     pub position: C2paBoxPosition,
 }
@@ -407,9 +408,9 @@ impl DetailEntry<'_> {
     /// Where this entry's bytes begin in the file: the key the list is ordered by.
     fn start(&self) -> usize {
         match self {
-            Self::Store(store) => store.range.start,
-            Self::Unread(unread) => unread.range.start,
-            Self::Merkle(merkle) => merkle.range.start,
+            Self::Store(store) => store.range.start(),
+            Self::Unread(unread) => unread.range.start(),
+            Self::Merkle(merkle) => merkle.range.start(),
         }
     }
 
@@ -417,26 +418,23 @@ impl DetailEntry<'_> {
     fn line(&self) -> String {
         match self {
             Self::Store(store) => format!(
-                "  box_purpose \"{purpose}\": {size} bytes at [{start}, {end}) — located, not \
+                "  box_purpose \"{purpose}\": {size} bytes at {range} — located, not \
                  validated{note}",
                 purpose = store.purpose.as_str(),
                 size = store.size(),
-                start = store.range.start,
-                end = store.range.end,
+                range = store.range,
                 note = position_note(store.position),
             ),
             Self::Unread(unread) => format!(
-                "  unread C2PA box at [{start}, {end}): {reason}{note}",
-                start = unread.range.start,
-                end = unread.range.end,
+                "  unread C2PA box at {range}: {reason}{note}",
+                range = unread.range,
                 reason = unread.reason.describe(),
                 note = position_note(unread.position),
             ),
             Self::Merkle(merkle) => format!(
-                "  auxiliary merkle box at [{start}, {end}): Merkle-tree hashes (C2PA 2.4 \
+                "  auxiliary merkle box at {range}: Merkle-tree hashes (C2PA 2.4 \
                  §A.5.4.1.4), not a manifest store{note}",
-                start = merkle.range.start,
-                end = merkle.range.end,
+                range = merkle.range,
                 note = position_note(merkle.position),
             ),
         }
@@ -503,6 +501,11 @@ mod tests {
     use gamut_isobmff::C2PA_UUID;
 
     use super::*;
+
+    /// `[start, end)`, which the caller states with `start <= end`.
+    fn range(start: usize, end: usize) -> C2paByteRange {
+        C2paByteRange::new(start, end).expect("start <= end")
+    }
 
     /// A body per §A.5.1.2: user type, version/flags, `purpose` NUL-terminated, then `data`.
     fn body(user_type: [u8; 16], version_flags: [u8; 4], purpose: &[u8], data: &[u8]) -> Vec<u8> {
@@ -573,11 +576,11 @@ mod tests {
         assert_eq!(stores[0].purpose, C2paBoxPurpose::Original);
         assert_eq!(stores[0].slot_bytes, &[7, 7]);
         // 20 + 8 (box header) + 16 + 4 + 9 (`original\0`) + 8.
-        assert_eq!(stores[0].range, 65..67);
+        assert_eq!(stores[0].range, range(65, 67));
         assert_eq!(stores[1].purpose, C2paBoxPurpose::Update);
         assert_eq!(stores[1].slot_bytes, &[8, 8, 8]);
         // 300 + 8 + 16 + 4 + 7 (`update\0`) + 8.
-        assert_eq!(stores[1].range, 343..346);
+        assert_eq!(stores[1].range, range(343, 346));
     }
 
     /// A top-level box segment at `start` whose header is 8 bytes.
@@ -626,16 +629,16 @@ mod tests {
             summary.stores,
             vec![
                 C2paStoreSummary {
-                    range: 65..75,
+                    range: range(65, 75),
                     purpose: C2paBoxPurpose::Original,
                     position: C2paBoxPosition::BeforeMediaData,
-                    slot: 65..78,
+                    slot: range(65, 78),
                 },
                 C2paStoreSummary {
-                    range: 543..554,
+                    range: range(543, 554),
                     purpose: C2paBoxPurpose::Update,
                     position: C2paBoxPosition::AfterMediaData,
-                    slot: 543..554,
+                    slot: range(543, 554),
                 },
             ]
         );
@@ -643,12 +646,12 @@ mod tests {
             summary.unread,
             vec![
                 C2paUnreadBox {
-                    range: 200..200 + 8 + bad_version.len(),
+                    range: range(200, 200 + 8 + bad_version.len()),
                     reason: C2paUnreadReason::NotVersionZero,
                     position: C2paBoxPosition::BeforeMediaData,
                 },
                 C2paUnreadBox {
-                    range: 350..350 + 8 + reserved.len(),
+                    range: range(350, 350 + 8 + reserved.len()),
                     reason: C2paUnreadReason::NoStoreBound,
                     position: C2paBoxPosition::BeforeMediaData,
                 },
@@ -657,7 +660,7 @@ mod tests {
         assert_eq!(
             summary.merkle,
             vec![C2paMerkleBox {
-                range: 300..300 + 8 + merkle.len(),
+                range: range(300, 300 + 8 + merkle.len()),
                 position: C2paBoxPosition::BeforeMediaData,
             }]
         );
@@ -723,13 +726,13 @@ mod tests {
     #[test]
     fn the_headline_keeps_the_four_outcomes_apart_and_carries_the_disclaimer() {
         let store = |start| C2paStoreSummary {
-            range: start..start + 9,
+            range: range(start, start + 9),
             purpose: C2paBoxPurpose::Manifest,
             position: C2paBoxPosition::BeforeMediaData,
-            slot: start..start + 9,
+            slot: range(start, start + 9),
         };
         let unread = |start| C2paUnreadBox {
-            range: start..start + 30,
+            range: range(start, start + 30),
             reason: C2paUnreadReason::UnknownPurpose,
             position: C2paBoxPosition::BeforeMediaData,
         };
@@ -811,7 +814,10 @@ mod tests {
         let summary = AvifContainer::parse(&file).expect("parse").c2pa_summary();
         assert_eq!(summary.stores.len(), 1);
         assert_eq!(summary.stores[0].slot, slot);
-        assert_eq!(summary.stores[0].range, slot.start..slot.start + 12);
+        assert_eq!(
+            summary.stores[0].range,
+            range(slot.start(), slot.start() + 12)
+        );
         assert!(summary.unread.is_empty() && summary.merkle.is_empty());
 
         let (file, report) = crate::AvifEncoder::new()
@@ -824,7 +830,7 @@ mod tests {
         assert_eq!(summary.unread[0].reason, C2paUnreadReason::NoStoreBound);
         // The unread entry names the whole box, which holds the reserved slot.
         let slot = report.c2pa.expect("a slot was reserved");
-        assert!(summary.unread[0].range.start < slot.start);
-        assert_eq!(summary.unread[0].range.end, slot.end);
+        assert!(summary.unread[0].range.start() < slot.start());
+        assert_eq!(summary.unread[0].range.end(), slot.end());
     }
 }

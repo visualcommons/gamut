@@ -63,7 +63,10 @@ fn store_of(parent: &[u8]) -> Vec<u8> {
     let slot = container
         .c2pa_slot()
         .expect("gamut-avif locates the parent's store");
-    parent[slot.range].to_vec()
+    slot.range
+        .bytes_in(parent)
+        .expect("the slot lies inside the parent")
+        .to_vec()
 }
 
 /// Re-encodes the fixture, writing whatever C2PA block `embedder` returned for a model carrying

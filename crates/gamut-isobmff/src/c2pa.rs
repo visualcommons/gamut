@@ -42,9 +42,11 @@
 //!
 //! Every range here is for patching, extraction and byte accounting. A BMFF asset's hard binding
 //! is `c2pa.hash.bmff.v3`, which excludes content by **box path**, not by byte offset (§18.6,
-//! §A.5.6), so hashing "everything but this range" is not how a BMFF manifest is bound.
+//! §A.5.6), so hashing "everything but this range" is not how a BMFF manifest is bound. Every
+//! range is therefore a [`C2paByteRange`] rather than a bare `Range<usize>`, the type a hash's
+//! exclusion list takes (#780).
 
-use core::ops::Range;
+use core::fmt;
 
 use gamut_core::{Error, Result};
 
@@ -56,6 +58,99 @@ use crate::writer::TOP_LEVEL_HEADER_MAX;
 pub const C2PA_UUID: [u8; 16] = [
     0xD8, 0xFE, 0xC3, 0xD6, 0x1B, 0x0E, 0x48, 0x3C, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7E, 0xC4, 0x81,
 ];
+
+/// Where a C2PA region sits in a file: a half-open byte range `[start, end)` reported for
+/// **patching, extraction and byte accounting**, and deliberately not a `Range<usize>`.
+///
+/// A BMFF asset's hard binding is `c2pa.hash.bmff.v3`, which excludes content by **box path**,
+/// not by byte offset (C2PA 2.4 §18.6, §A.5.6). Hashing "every byte but this range" is therefore
+/// not how a BMFF manifest is bound, and a bare `Range<usize>` is exactly the shape a byte-range
+/// hasher's exclusion list takes. This type reads as a position and nothing else: it offers
+/// [`start`](Self::start), [`end`](Self::end) and [`len`](Self::len), extracts or patches its bytes
+/// in a file ([`bytes_in`](Self::bytes_in), [`bytes_in_mut`](Self::bytes_in_mut)), renders as
+/// `[start, end)`, and has **no conversion back to
+/// a `Range`** or to any exclusion set, so feeding it to a hash takes a caller spelling the range
+/// out by hand.
+///
+/// Every C2PA range `gamut-isobmff` reports ([`C2paSlot::range`], [`C2paSlot::store_range`]) is
+/// one, and so is every range `gamut-heic` and `gamut-avif` report, so the three crates name one
+/// type (#780).
+///
+/// ```
+/// use gamut_isobmff::C2paByteRange;
+///
+/// let range = C2paByteRange::new(1037, 1042).expect("start <= end");
+/// assert_eq!((range.start(), range.end(), range.len()), (1037, 1042, 5));
+/// assert_eq!(range.to_string(), "[1037, 1042)");
+/// // An end before the start places nothing.
+/// assert_eq!(C2paByteRange::new(5, 4), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct C2paByteRange {
+    /// The first byte's file offset. Never above `end`.
+    start: usize,
+    /// The file offset one past the last byte.
+    end: usize,
+}
+
+impl C2paByteRange {
+    /// The half-open range `[start, end)`, or `None` when `end` is before `start`. An empty range
+    /// (`start == end`) is a range: an empty slot sits somewhere.
+    #[must_use]
+    pub const fn new(start: usize, end: usize) -> Option<Self> {
+        if end < start {
+            None
+        } else {
+            Some(Self { start, end })
+        }
+    }
+
+    /// The file offset of the range's first byte.
+    #[must_use]
+    pub const fn start(self) -> usize {
+        self.start
+    }
+
+    /// The file offset one past the range's last byte.
+    #[must_use]
+    pub const fn end(self) -> usize {
+        self.end
+    }
+
+    /// The number of bytes the range spans: `end - start`.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.end - self.start
+    }
+
+    /// Whether the range spans no bytes.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// The bytes this range covers in `file` — the extraction a report's range exists for — or
+    /// `None` when `file` is too short to hold them (the range came from a different file).
+    #[must_use]
+    pub fn bytes_in(self, file: &[u8]) -> Option<&[u8]> {
+        file.get(self.start..self.end)
+    }
+
+    /// The bytes this range covers in `file`, mutably — the patch a signer makes when it writes a
+    /// finished store over a reserved slot of the same length — or `None` when `file` is too short
+    /// to hold them.
+    #[must_use]
+    pub fn bytes_in_mut(self, file: &mut [u8]) -> Option<&mut [u8]> {
+        file.get_mut(self.start..self.end)
+    }
+}
+
+impl fmt::Display for C2paByteRange {
+    /// The half-open interval notation every C2PA report line uses: `[start, end)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}, {})", self.start, self.end)
+    }
+}
 
 /// The `FullBox` version (1 byte) and flags (3 bytes) that follow the user type: both zero
 /// (§A.5.1.2, `version = 0, 0`).
@@ -285,7 +380,7 @@ pub struct C2paSlot<'a> {
     pub slot_bytes: &'a [u8],
     /// The half-open byte range [`slot_bytes`](Self::slot_bytes) occupies within the file, so
     /// `range.len() == slot_bytes.len()`.
-    pub range: Range<usize>,
+    pub range: C2paByteRange,
     /// The `box_purpose` of the `uuid` box that carries this slot.
     pub purpose: C2paBoxPurpose,
     /// The big-endian absolute file offset of the first `merkle` box that opens `data` (§A.5.3;
@@ -301,7 +396,8 @@ impl<'a> C2paSlot<'a> {
     /// or one overrunning the slot (*refuse rather than guess*, `references/c2pa/README.md`).
     ///
     /// The store begins where the slot does, so its file range is
-    /// `range.start..range.start + store.len()` — what [`store_range`](Self::store_range) reports.
+    /// `[range.start(), range.start() + store.len())` — what [`store_range`](Self::store_range)
+    /// reports.
     #[must_use]
     pub fn store(&self) -> Option<&'a [u8]> {
         lbox_bounded(self.slot_bytes)
@@ -311,9 +407,13 @@ impl<'a> C2paSlot<'a> {
     /// when that is `None`. The one place a consumer turns the trimmed store into a file range, so every
     /// crate reporting "the store" reports the same bytes (#505).
     #[must_use]
-    pub fn store_range(&self) -> Option<Range<usize>> {
+    pub fn store_range(&self) -> Option<C2paByteRange> {
         let len = self.store()?.len();
-        Some(self.range.start..self.range.start + len)
+        // The store is a prefix of the slot, so its end never passes the slot's.
+        Some(C2paByteRange {
+            start: self.range.start,
+            end: self.range.start + len,
+        })
     }
 }
 
@@ -374,7 +474,10 @@ impl<'a> C2paUuidBox<'a> {
         // The slot is the body's tail, and the body fits below `body_end`, so this cannot wrap.
         Some(Self::Slot(C2paSlot {
             slot_bytes,
-            range: body_end - slot_bytes.len()..body_end,
+            range: C2paByteRange {
+                start: body_end - slot_bytes.len(),
+                end: body_end,
+            },
             purpose,
             merkle_offset,
         }))
@@ -509,6 +612,57 @@ mod tests {
         C2paBoxPurpose::Original,
         C2paBoxPurpose::Update,
     ];
+
+    /// `[start, end)`, which the caller states with `start <= end`.
+    fn range(start: usize, end: usize) -> C2paByteRange {
+        C2paByteRange::new(start, end).expect("start <= end")
+    }
+
+    #[test]
+    fn a_byte_range_refuses_only_an_end_before_its_start() {
+        assert_eq!(C2paByteRange::new(5, 4), None);
+        assert_eq!(
+            C2paByteRange::new(4, 4),
+            Some(C2paByteRange { start: 4, end: 4 })
+        );
+        assert_eq!(
+            C2paByteRange::new(4, 9),
+            Some(C2paByteRange { start: 4, end: 9 })
+        );
+    }
+
+    #[test]
+    fn a_byte_range_reports_its_bounds_and_length() {
+        // A non-zero start, so a length read as the end offset is visible.
+        let r = range(1037, 1042);
+        assert_eq!((r.start(), r.end(), r.len()), (1037, 1042, 5));
+        assert!(!r.is_empty());
+        assert!(range(537, 537).is_empty());
+    }
+
+    #[test]
+    fn a_byte_range_extracts_exactly_its_bytes_or_nothing() {
+        let file = [0, 1, 2, 3, 4, 5];
+        assert_eq!(range(2, 5).bytes_in(&file), Some(&file[2..5]));
+        assert_eq!(range(6, 6).bytes_in(&file), Some(&[] as &[u8]));
+        assert_eq!(range(4, 7).bytes_in(&file), None);
+    }
+
+    #[test]
+    fn a_byte_range_patches_exactly_its_bytes_or_nothing() {
+        let mut file = [0u8; 6];
+        range(2, 5)
+            .bytes_in_mut(&mut file)
+            .expect("inside the file")
+            .copy_from_slice(&[7, 8, 9]);
+        assert_eq!(file, [0, 0, 7, 8, 9, 0]);
+        assert_eq!(range(4, 7).bytes_in_mut(&mut file), None);
+    }
+
+    #[test]
+    fn a_byte_range_renders_as_a_half_open_interval() {
+        assert_eq!(range(61, 90).to_string(), "[61, 90)");
+    }
 
     /// A body per §A.5.1.2: user type, version/flags, `purpose` NUL-terminated, then `data`.
     fn body(user_type: [u8; 16], version_flags: [u8; 4], purpose: &[u8], data: &[u8]) -> Vec<u8> {
@@ -678,7 +832,7 @@ mod tests {
             assert_eq!(found.slot_bytes, &slot[..], "{purpose:?}");
             assert_eq!(found.purpose, purpose);
             assert_eq!(found.merkle_offset, Some(0));
-            assert_eq!(found.range, 48 + b.len() - slot.len()..48 + b.len());
+            assert_eq!(found.range, range(48 + b.len() - slot.len(), 48 + b.len()));
         }
     }
 
@@ -693,7 +847,7 @@ mod tests {
         assert_eq!(found.purpose, C2paBoxPurpose::Manifest);
         assert_eq!(found.merkle_offset, Some(0x0102_0304));
         // 992 + 8 (header) + 16 (user type) + 4 (version/flags) + 9 (`manifest\0`) + 8 (offset).
-        assert_eq!(found.range, 1037..1042);
+        assert_eq!(found.range, range(1037, 1042));
     }
 
     #[test]
@@ -785,7 +939,7 @@ mod tests {
         }
         let empty = slot_at(492, &full).expect("empty slot");
         assert_eq!(empty.slot_bytes, &[] as &[u8]);
-        assert_eq!(empty.range, 537..537);
+        assert_eq!(empty.range, range(537, 537));
     }
 
     #[test]
@@ -815,7 +969,7 @@ mod tests {
         assert_eq!(found.slot_bytes, &s[..]);
         assert_eq!(found.merkle_offset, None);
         // 8 + 16 + 4 + 7 (`update\0`) + 0.
-        assert_eq!(found.range.start, 35);
+        assert_eq!(found.range.start(), 35);
         assert_eq!(found.store(), Some(&s[..]));
         // Neither offset bounds a store: the reference layout stands, and there is no store.
         let neither = body(
@@ -889,8 +1043,8 @@ mod tests {
         padded.extend_from_slice(&[0xEE; 5]);
         let b = body(C2PA_UUID, [0; 4], b"manifest", &data(0, &padded));
         let found = slot_at(1000, &b).expect("slot");
-        assert_eq!(found.range, 1045..1045 + padded.len());
-        assert_eq!(found.store_range(), Some(1045..1045 + s.len()));
+        assert_eq!(found.range, range(1045, 1045 + padded.len()));
+        assert_eq!(found.store_range(), Some(range(1045, 1045 + s.len())));
         // No store, no store range — whatever the slot's length.
         let b = body(C2PA_UUID, [0; 4], b"manifest", &data(0, &[0; 64]));
         assert_eq!(slot_at(1000, &b).expect("slot").store_range(), None);

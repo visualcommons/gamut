@@ -86,8 +86,8 @@ mod writer;
 
 pub use boxes::{BoxReader, RawBox};
 pub use c2pa::{
-    C2PA_UUID, C2paBoxPurpose, C2paSlot, C2paUnreadReason, C2paUuidBox, content_provenance_payload,
-    content_provenance_reserved,
+    C2PA_UUID, C2paBoxPurpose, C2paByteRange, C2paSlot, C2paUnreadReason, C2paUuidBox,
+    content_provenance_payload, content_provenance_reserved,
 };
 pub use grid::ImageGrid;
 pub use model::{
