@@ -174,6 +174,29 @@ pub enum MetadataNotice {
     /// document at all, so a packet that reaches this notice is not merely unwritable — it is
     /// already not well-formed XML, whatever produced it.
     TextStringNull = 8,
+    /// An ICC profile left behind because its **profile name** holds a character Latin-1 cannot
+    /// encode. §11.3.2.3 gives the name the keyword's rule — "Profile names shall contain only
+    /// printable Latin-1 characters and spaces" — so there are no bytes that would read back as
+    /// the name given.
+    IccpNameNotLatin1 = 9,
+    /// An ICC profile left behind because its profile name is empty or longer than the 79 bytes
+    /// §11.3.2.3 allows ("Profile name — 1-79 bytes"). A reader — this crate's own included —
+    /// refuses an `iCCP` whose name field is outside that range, so the profile would be lost on
+    /// the next read.
+    IccpNameLength = 10,
+    /// An ICC profile left behind because its profile name holds a null character. The name
+    /// ends at its null separator (§11.3.2.3), so the byte after an embedded one would be read as
+    /// the compression method, and a reader refuses the chunk.
+    IccpNameNull = 11,
+    /// An ICC profile **written**, whose profile name leaves the repertoire §11.3.2.3 allows
+    /// ("only code points 0x20-7E and 0xA1-FF are allowed"). Written exactly as it arrived, as
+    /// [`TextKeywordRepertoire`](Self::TextKeywordRepertoire) is, and non-conforming per §15.3.1
+    /// for the same reason.
+    IccpNameRepertoire = 12,
+    /// An ICC profile **written**, whose profile name has a leading, trailing or consecutive
+    /// space, which §11.3.2.3 says "are not permitted". Written as it arrived, as
+    /// [`TextKeywordSpacing`](Self::TextKeywordSpacing) is.
+    IccpNameSpacing = 13,
 }
 
 impl MetadataNotice {
@@ -216,6 +239,25 @@ impl MetadataNotice {
                 "text annotation or XMP packet: its text string contains a null character, \
                  which no text chunk may hold (§11.3.3.2, §11.3.3.4)"
             }
+            Self::IccpNameNotLatin1 => {
+                "ICC profile: its profile name is not Latin-1, which iCCP requires (§11.3.2.3)"
+            }
+            Self::IccpNameLength => {
+                "ICC profile: its profile name is not 1 to 79 bytes, the length iCCP fixes \
+                 (§11.3.2.3)"
+            }
+            Self::IccpNameNull => {
+                "ICC profile: its profile name contains a null character, which ends the name \
+                 field (§11.3.2.3)"
+            }
+            Self::IccpNameRepertoire => {
+                "ICC profile: written, but its profile name leaves the code points 0x20-0x7E and \
+                 0xA1-0xFF §11.3.2.3 allows, so the datastream is non-conforming per §15.3.1"
+            }
+            Self::IccpNameSpacing => {
+                "ICC profile: written, but its profile name has a leading, trailing or \
+                 consecutive space, which §11.3.2.3 does not permit"
+            }
         }
     }
 
@@ -229,7 +271,11 @@ impl MetadataNotice {
     pub fn carried(self) -> bool {
         matches!(
             self,
-            Self::TextKeywordRepertoire | Self::TextKeywordSpacing | Self::ItxtLanguageTag
+            Self::TextKeywordRepertoire
+                | Self::TextKeywordSpacing
+                | Self::ItxtLanguageTag
+                | Self::IccpNameRepertoire
+                | Self::IccpNameSpacing
         )
     }
 }
@@ -844,9 +890,17 @@ impl PngEncoder {
     /// and 4. Under [`with_auto_reduce`](Self::with_auto_reduce) the reduction keeps to the
     /// family the profile's header names; otherwise the colour type is the pixels' own, and
     /// matching the profile to them is the caller's.
+    ///
+    /// `name` is held to §11.3.2.3's rule, which is the text keyword's: 1–79 printable Latin-1
+    /// characters, no leading, trailing or consecutive space. A name that cannot be stored so
+    /// this crate's reader accepts it — outside Latin-1, empty or over 79 bytes, or holding a null
+    /// — drops the profile (it does not constrain auto-reduce either); one that only breaks the
+    /// repertoire or spacing rule is written verbatim. Either way
+    /// [`metadata_notices`](Self::metadata_notices) names it, and the encode proceeds. Setting a
+    /// profile again replaces both the profile and its notice.
     #[must_use]
     pub fn with_icc_profile(mut self, name: &str, profile: &[u8]) -> Self {
-        self.ancillary.iccp = Some((name.to_string(), profile.to_vec()));
+        self.ancillary.set_icc_profile(name, profile);
         self
     }
 
@@ -903,6 +957,11 @@ impl PngEncoder {
     /// [`Error::InvalidInput`] naming the annotation: those fields end at their first null, so
     /// the chunk would be read back as a *different* annotation, which no notice can undo.
     ///
+    /// The ICC profile's name answers to the same rule (§11.3.2.3); see
+    /// [`with_icc_profile`](Self::with_icc_profile). A name read out of a file is already Latin-1,
+    /// 1–79 bytes and null-free, so a carried profile is always written, with a notice if its
+    /// name breaks the repertoire or spacing rule.
+    ///
     /// One further limit is the read side's, not this method's: `pHYs`, `tIME`, `sBIT` and `bKGD`
     /// are not part of [`PngMetadata`], so they cannot be carried here (set them with their own
     /// builder methods).
@@ -955,10 +1014,13 @@ impl PngEncoder {
     /// The payload-level notices describe the last [`with_metadata`](Self::with_metadata) /
     /// [`with_metadata_from`](Self::with_metadata_from) call and are reset by each; the
     /// per-annotation notices belong to the annotations still accumulated, so they follow the
-    /// same replace-not-append rule a carry gives the text list.
+    /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
+    /// (§11.3.2.3) sits between the two and belongs to the profile last set, by
+    /// [`with_icc_profile`](Self::with_icc_profile) or a carry.
     #[must_use]
     pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
         let mut notices = self.carry_notices.clone();
+        notices.extend(self.ancillary.iccp_notice());
         notices.extend(self.ancillary.text_notices());
         notices
     }

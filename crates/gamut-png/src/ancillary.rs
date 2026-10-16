@@ -244,30 +244,97 @@ enum Keyword {
     Refuse,
 }
 
-/// Resolves `keyword` against §11.3.3.1.
+/// What the rule §11.3.3.1 gives a text keyword and §11.3.2.3 gives an `iCCP` profile name — word
+/// for word the same rule — says about one name, before either field decides what to do with it.
+///
+/// §11.3.2.3: "Profile name — 1-79 bytes (character string) … Profile names shall contain only
+/// printable Latin-1 characters and spaces (only code points 0x20-7E and 0xA1-FF are allowed).
+/// Leading, trailing, and consecutive spaces are not permitted." Same repertoire, same length,
+/// same spacing as the keyword; and both fields end at their null separator.
+enum Name {
+    /// The name holds a null, the separator that ends it.
+    Null,
+    /// A character Latin-1 cannot encode.
+    NotLatin1,
+    /// Empty, or longer than 79 Latin-1 bytes.
+    Length,
+    /// Storable: these Latin-1 bytes, with the advisory rule they break, if any.
+    Write(Vec<u8>, Option<Shape>),
+}
+
+/// Which advisory shape rule a storable [`Name`] breaks.
+enum Shape {
+    /// A character outside "code points 0x20-7E and 0xA1-FF".
+    Repertoire,
+    /// A leading, trailing or consecutive space.
+    Spacing,
+}
+
+/// Resolves `name` against the rule §11.3.3.1 and §11.3.2.3 share.
 ///
 /// Latin-1 representability is settled before the length so that the bound counts *stored*
 /// bytes: every character that passes is one Latin-1 byte, which a UTF-8 `str::len` is not.
-fn keyword_verdict(keyword: &str) -> Keyword {
-    if keyword.contains('\0') {
-        return Keyword::Refuse;
+fn name_verdict(name: &str) -> Name {
+    if name.contains('\0') {
+        return Name::Null;
     }
-    let Some(bytes) = keyword
-        .chars()
-        .map(latin1_byte)
-        .collect::<Option<Vec<u8>>>()
-    else {
-        return Keyword::Drop(MetadataNotice::TextKeywordNotLatin1);
+    let Some(bytes) = name.chars().map(latin1_byte).collect::<Option<Vec<u8>>>() else {
+        return Name::NotLatin1;
     };
     if bytes.is_empty() || bytes.len() > 79 {
-        return Keyword::Drop(MetadataNotice::TextKeywordLength);
+        return Name::Length;
     }
-    if !keyword.chars().all(printable_latin1) {
-        return Keyword::Write(bytes, Some(MetadataNotice::TextKeywordRepertoire));
+    if !name.chars().all(printable_latin1) {
+        return Name::Write(bytes, Some(Shape::Repertoire));
     }
-    let spacing = keyword.starts_with(' ') || keyword.ends_with(' ') || keyword.contains("  ");
-    Keyword::Write(bytes, spacing.then_some(MetadataNotice::TextKeywordSpacing))
+    let spacing = name.starts_with(' ') || name.ends_with(' ') || name.contains("  ");
+    Name::Write(bytes, spacing.then_some(Shape::Spacing))
 }
+
+/// Resolves `keyword` against §11.3.3.1.
+fn keyword_verdict(keyword: &str) -> Keyword {
+    match name_verdict(keyword) {
+        Name::Null => Keyword::Refuse,
+        Name::NotLatin1 => Keyword::Drop(MetadataNotice::TextKeywordNotLatin1),
+        Name::Length => Keyword::Drop(MetadataNotice::TextKeywordLength),
+        Name::Write(bytes, shape) => Keyword::Write(
+            bytes,
+            shape.map(|shape| match shape {
+                Shape::Repertoire => MetadataNotice::TextKeywordRepertoire,
+                Shape::Spacing => MetadataNotice::TextKeywordSpacing,
+            }),
+        ),
+    }
+}
+
+/// Resolves an `iCCP` profile name against §11.3.2.3: the Latin-1 bytes to write with the notice
+/// they carry, or the notice that explains why the chunk is not written.
+///
+/// The outcomes follow [`Keyword`]'s consequence rule, with one difference. A name outside Latin-1
+/// or outside 1–79 bytes is one this crate's reader refuses (`split_keyword`), so writing it would
+/// lose the profile between a write and a read with nothing said: **dropped**, and reported. A null
+/// is dropped too rather than refusing the encode as a keyword's does: the name ends at it, so
+/// the byte after it is read as the compression method and the reader refuses the chunk — the
+/// profile is lost, not re-read as a different one, which is the same consequence as the two
+/// above. A repertoire or spacing deviation round-trips through this crate's reader byte for byte,
+/// so it is **written verbatim** and the non-conformance (§15.3.1) is reported.
+fn profile_name_verdict(name: &str) -> core::result::Result<IccpName, MetadataNotice> {
+    match name_verdict(name) {
+        Name::Null => Err(MetadataNotice::IccpNameNull),
+        Name::NotLatin1 => Err(MetadataNotice::IccpNameNotLatin1),
+        Name::Length => Err(MetadataNotice::IccpNameLength),
+        Name::Write(bytes, shape) => Ok((
+            bytes,
+            shape.map(|shape| match shape {
+                Shape::Repertoire => MetadataNotice::IccpNameRepertoire,
+                Shape::Spacing => MetadataNotice::IccpNameSpacing,
+            }),
+        )),
+    }
+}
+
+/// A writable `iCCP` profile name: its Latin-1 bytes, and the advisory notice it carries.
+type IccpName = (Vec<u8>, Option<MetadataNotice>);
 
 /// The Latin-1 bytes of a `tEXt`/`zTXt` text string, or `None` when a character has no Latin-1
 /// encoding at all — the signal to promote the annotation to `iTXt`.
@@ -318,8 +385,14 @@ pub(crate) struct Ancillary {
     pub phys: Option<(u32, u32, u8)>,
     /// tIME: year, month, day, hour, minute, second.
     pub time: Option<[u8; 7]>,
-    /// iCCP: (profile name, raw ICC profile bytes); compressed at emit time.
-    pub iccp: Option<(String, Vec<u8>)>,
+    /// iCCP: (profile name as its Latin-1 bytes, raw ICC profile bytes); compressed at emit
+    /// time. Set through [`Self::set_icc_profile`], which leaves it empty for a name §11.3.2.3
+    /// gives no chunk to.
+    pub iccp: Option<(Vec<u8>, Vec<u8>)>,
+    /// What §11.3.2.3 says about the profile name last given to [`Self::set_icc_profile`]: why
+    /// the profile was dropped, or the deviation it was written with. A single-value slot like
+    /// [`iccp`](Self::iccp) itself, so setting a profile again replaces it.
+    iccp_notice: Option<MetadataNotice>,
     /// eXIf: raw EXIF/TIFF bytes (the chunk payload starts with the TIFF byte-order marker).
     pub exif: Option<Vec<u8>>,
     /// caBX: the C2PA manifest store, raw and uncompressed (C2PA 2.4 §A.3.2) — or a run of zero
@@ -345,6 +418,23 @@ impl Ancillary {
     pub(crate) fn set_time(&mut self, year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8) {
         let [yh, yl] = year.to_be_bytes();
         self.time = Some([yh, yl, month, day, hour, min, sec]);
+    }
+
+    /// Sets the `iCCP` profile, routing its name through [`profile_name_verdict`]: a name no
+    /// chunk this crate's reader accepts can hold leaves the slot empty, and either way the
+    /// verdict's notice replaces the previous profile's.
+    pub(crate) fn set_icc_profile(&mut self, name: &str, profile: &[u8]) {
+        let (iccp, notice) = match profile_name_verdict(name) {
+            Ok((bytes, notice)) => (Some((bytes, profile.to_vec())), notice),
+            Err(notice) => (None, Some(notice)),
+        };
+        self.iccp = iccp;
+        self.iccp_notice = notice;
+    }
+
+    /// What §11.3.2.3 says about the profile name in the `iCCP` slot, if anything.
+    pub(crate) fn iccp_notice(&self) -> Option<MetadataNotice> {
+        self.iccp_notice
     }
 
     pub(crate) fn add_text_latin1(&mut self, keyword: &str, text: &str) {
@@ -609,13 +699,9 @@ impl Ancillary {
             chunk::write_chunk(out, *b"gAMA", &gamma.to_be_bytes());
         }
         if let Some((name, profile)) = &self.iccp {
-            // §11.3.2.3 gives the profile name the keyword's printable Latin-1 repertoire, and
-            // the reader decodes it byte n → U+00nn, so a carried name goes back as the bytes it
-            // came out as. UTF-8 would turn every name byte ≥ 0x80 into two, and push a 79-byte
-            // name holding one past the 79 bytes the reader accepts, losing the profile. A name a
-            // caller supplies outside Latin-1 has no correct bytes at all; it keeps the UTF-8 it
-            // was written as before this conversion existed (#619 owns validating the name).
-            let mut data = text_bytes(name).unwrap_or_else(|| name.as_bytes().to_vec());
+            // The name is already its Latin-1 bytes, 1–79 of them and null-free:
+            // `set_icc_profile` let nothing else into the slot (§11.3.2.3).
+            let mut data = name.clone();
             data.push(0); // null separator
             data.push(0); // compression method: 0 = zlib/deflate
             DeflateEncoder::new()
@@ -1117,26 +1203,95 @@ mod tests {
         assert_eq!(find_chunk(&none, b"caBX"), None);
     }
 
-    /// §11.3.2.3 gives the profile name printable Latin-1, and the reader decodes it one byte per
-    /// character, so a name written as UTF-8 comes back as a different name — and a 79-byte one
-    /// holding a character above U+007F comes back not at all. Kills the Latin-1 conversion of
-    /// the name in [`Ancillary::write_pre_plte`].
-    #[test]
-    fn an_iccp_profile_name_is_written_as_latin1() {
-        let a = Ancillary {
-            iccp: Some(("café".to_string(), b"profile".to_vec())),
-            ..Default::default()
-        };
+    /// The `iCCP` payload [`Ancillary::set_icc_profile`] leads to, if any.
+    fn iccp_chunk(name: &str) -> (Option<Vec<u8>>, Option<MetadataNotice>) {
+        let mut a = Ancillary::default();
+        a.set_icc_profile(name, b"profile");
         let mut pre = vec![0u8; 8];
         a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_EFFORT, RGB8);
-        let iccp = find_chunk(&pre, b"iCCP").unwrap();
-        assert_eq!(&iccp[..5], b"caf\xE9\0");
+        (find_chunk(&pre, b"iCCP"), a.iccp_notice())
+    }
+
+    /// The bytes an `iCCP` payload opens with for `name`: its Latin-1 bytes, the null separator,
+    /// and compression method 0.
+    fn iccp_head(name: &[u8]) -> Vec<u8> {
+        let mut head = name.to_vec();
+        head.extend_from_slice(b"\0\0");
+        head
+    }
+
+    /// §11.3.2.3 gives the profile name printable Latin-1, and the reader decodes it one byte per
+    /// character, so a name written as UTF-8 comes back as a different name — and a 79-byte one
+    /// holding a character above U+007F comes back not at all. Kills the Latin-1 conversion in
+    /// [`Ancillary::set_icc_profile`] and the `Ok` arm of [`profile_name_verdict`].
+    #[test]
+    fn an_iccp_profile_name_is_written_as_latin1() {
+        let (chunk, notice) = iccp_chunk("café");
+        assert_eq!(notice, None);
+        assert!(chunk.unwrap().starts_with(&iccp_head(b"caf\xE9")));
+    }
+
+    /// §11.3.2.3: "Profile name — 1-79 bytes", in Latin-1, ended by its null separator. A name
+    /// outside that leaves this crate's reader refusing the chunk, so the profile is dropped here
+    /// and reported instead of being lost on the next read.
+    ///
+    /// Kills each `Err` arm of [`profile_name_verdict`] and the `Err` arm of
+    /// [`Ancillary::set_icc_profile`] that keeps the slot empty.
+    #[test]
+    fn an_iccp_profile_name_no_reader_accepts_drops_the_profile_with_a_notice() {
+        for (name, expected) in [
+            ("œrofile", MetadataNotice::IccpNameNotLatin1),
+            ("", MetadataNotice::IccpNameLength),
+            (&"p".repeat(80), MetadataNotice::IccpNameLength),
+            ("pro\0file", MetadataNotice::IccpNameNull),
+        ] {
+            let (chunk, notice) = iccp_chunk(name);
+            assert_eq!(notice, Some(expected), "name {name:?}");
+            assert_eq!(chunk, None, "name {name:?}");
+        }
+        let (chunk, notice) = iccp_chunk(&"p".repeat(79));
+        assert_eq!(notice, None, "79 bytes is inside");
+        assert!(chunk.is_some());
+    }
+
+    /// §11.3.2.3's repertoire ("only code points 0x20-7E and 0xA1-FF are allowed") and spacing
+    /// ("Leading, trailing, and consecutive spaces are not permitted") are names this crate's
+    /// reader returns unchanged, so the profile is written with its name verbatim and the
+    /// deviation reported, as a keyword's is.
+    ///
+    /// Kills the two arms of [`profile_name_verdict`]'s shape mapping.
+    #[test]
+    fn an_iccp_profile_name_off_the_repertoire_or_spacing_is_written_with_a_notice() {
+        for (name, expected) in [
+            ("pro\u{A0}file", MetadataNotice::IccpNameRepertoire),
+            (" profile", MetadataNotice::IccpNameSpacing),
+        ] {
+            let (chunk, notice) = iccp_chunk(name);
+            assert_eq!(notice, Some(expected), "name {name:?}");
+            let bytes: Vec<u8> = name.chars().map(|c| c as u8).collect();
+            assert!(chunk.unwrap().starts_with(&iccp_head(&bytes)), "name {name:?}");
+        }
+    }
+
+    /// The notice belongs to the profile last set: a valid name set after a dropped one clears
+    /// it, and an invalid one set after a valid profile empties the slot. Kills a setter that
+    /// keeps either half of the previous profile's state.
+    #[test]
+    fn setting_an_iccp_profile_again_replaces_its_notice_and_slot() {
+        let mut a = Ancillary::default();
+        a.set_icc_profile("", b"profile");
+        a.set_icc_profile("p", b"profile");
+        assert_eq!(a.iccp_notice(), None);
+        assert!(a.iccp.is_some());
+        a.set_icc_profile("", b"profile");
+        assert_eq!(a.iccp_notice(), Some(MetadataNotice::IccpNameLength));
+        assert_eq!(a.iccp, None);
     }
 
     #[test]
     fn iccp_and_exif_framing() {
         let a = Ancillary {
-            iccp: Some(("p".to_string(), b"the quick brown fox".to_vec())),
+            iccp: Some((b"p".to_vec(), b"the quick brown fox".to_vec())),
             exif: Some(vec![0x49, 0x49, 0x2A, 0x00]),
             ..Default::default()
         };
@@ -1549,7 +1704,7 @@ mod tests {
     fn a_profile_and_a_rendering_intent_are_both_written() {
         let mut a = Ancillary::default();
         a.set_srgb(SrgbIntent::Perceptual);
-        a.iccp = Some(("prof".to_string(), vec![0u8; 4]));
+        a.iccp = Some((b"prof".to_vec(), vec![0u8; 4]));
         assert!(a.validate().is_ok(), "the pair is legal");
 
         let mut out = vec![0u8; 8];
