@@ -1269,7 +1269,10 @@ mod tests {
             let (chunk, notice) = iccp_chunk(name);
             assert_eq!(notice, Some(expected), "name {name:?}");
             let bytes: Vec<u8> = name.chars().map(|c| c as u8).collect();
-            assert!(chunk.unwrap().starts_with(&iccp_head(&bytes)), "name {name:?}");
+            assert!(
+                chunk.unwrap().starts_with(&iccp_head(&bytes)),
+                "name {name:?}"
+            );
         }
     }
 
