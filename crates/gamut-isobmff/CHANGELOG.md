@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-isobmff-v2.0.1...gamut-isobmff-v3.0.0) - 2026-10-12
+
+### Added
+
+- *(gamut-isobmff, gamut-heic, gamut-avif)* [**breaking**] C2PA ranges are a C2paByteRange ([#812](https://github.com/visualcommons/gamut/pull/812))
+- *(isobmff)* skip a sequence moov beside meta instead of refusing the file ([#712](https://github.com/visualcommons/gamut/pull/712))
+- *(isobmff)* typed mdcv mastering-display property ([#688](https://github.com/visualcommons/gamut/pull/688))
+- *(core)* shared Segment<K> and covers byte-tiling primitive ([#691](https://github.com/visualcommons/gamut/pull/691))
+- *(isobmff)* [**breaking**] model and write top-level boxes
+- *(isobmff)* add an IsoBmffImage constructor and builders
+- *(core)* add structured error diagnostics
+- *(gamut-isobmff)* parse large and uuid boxes
+
+### Fixed
+
+- *(isobmff)* refuse interleaved top-level positions and add push_top_level_box
+- *(isobmff)* bound a top-level box's complete size, not just its payload
+
+### Other
+
+- *(isobmff)* share the C2PA uuid lens between gamut-heic and gamut-avif ([#781](https://github.com/visualcommons/gamut/pull/781))
+- *(isobmff)* [**breaking**] own the clap, pasp, clli and mdcv value structs ([#771](https://github.com/visualcommons/gamut/pull/771))
+- gate rustdoc warnings and compile README code blocks as doctests ([#713](https://github.com/visualcommons/gamut/pull/713))
+- *(isobmff)* list every move the top-level box round-trip makes
+- *(isobmff)* link read's top-level-box note to the public field
+- *(isobmff)* reach push_top_level_box's last-AfterFtyp arm, order only
+- *(isobmff)* round-trip a non-zero ftyp minor version through the builder
+- *(isobmff)* make TopLevelBox and TopLevelPosition non-exhaustive
+- *(isobmff)* satisfy clippy::redundant_guards in the accounting test
+- *(isobmff)* share the segment walk with avif and heic
+- *(isobmff)* separate the largesize body from the cursor advance
+
 ### Added
 
 - *(isobmff)* own the C2PA `ContentProvenanceBox` framing shared by gamut-heic and gamut-avif

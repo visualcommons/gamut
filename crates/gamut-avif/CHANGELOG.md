@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-avif-v1.1.0...gamut-avif-v2.0.0) - 2026-10-12
+
+### Added
+
+- *(gamut-isobmff, gamut-heic, gamut-avif)* [**breaking**] C2PA ranges are a C2paByteRange ([#812](https://github.com/visualcommons/gamut/pull/812))
+- *(gamut-avif, gamut-cli)* [**breaking**] follow gamut-av1's Balanced default speed ([#810](https://github.com/visualcommons/gamut/pull/810))
+- *(gamut-av1)* [**breaking**] default Speed to Balanced and record the loop-filter search cost ([#807](https://github.com/visualcommons/gamut/pull/807))
+- *(avif)* cap coded decodes and derived evaluations per decode call ([#777](https://github.com/visualcommons/gamut/pull/777))
+- *(avif)* decode resource limits, fallible allocation and an AVIF parse+decode fuzz target ([#752](https://github.com/visualcommons/gamut/pull/752))
+- *(avif)* encode caller-supplied YCbCr planes (raw-plane input) ([#748](https://github.com/visualcommons/gamut/pull/748))
+- *(cli)* [**breaking**] report the C2PA manifest store in gamut inspect for AVIF, WebP, TIFF and DNG ([#718](https://github.com/visualcommons/gamut/pull/718))
+- *(avif)* write clli/mdcv HDR metadata; typed mastering_display reader ([#741](https://github.com/visualcommons/gamut/pull/741))
+- *(avif)* AvifEncoder::with_threads parallel colour/alpha and tile encode ([#735](https://github.com/visualcommons/gamut/pull/735))
+- *(avif)* report an avis file's image sequence beside its primary still ([#734](https://github.com/visualcommons/gamut/pull/734))
+- *(avif)* AvifEncoder::with_speed encode-speed presets ([#731](https://github.com/visualcommons/gamut/pull/731))
+- *(isobmff)* skip a sequence moov beside meta instead of refusing the file ([#712](https://github.com/visualcommons/gamut/pull/712))
+- *(avif)* drop an all-opaque alpha plane on RGBA encode ([#720](https://github.com/visualcommons/gamut/pull/720))
+- *(avif)* AlphaMode with premultiply-on-encode for unassociated RGBA ([#710](https://github.com/visualcommons/gamut/pull/710))
+- *(avif)* opt-in clean colour under transparent pixels for lossy encodes ([#702](https://github.com/visualcommons/gamut/pull/702))
+- *(core)* shared Segment<K> and covers byte-tiling primitive ([#691](https://github.com/visualcommons/gamut/pull/691))
+- *(avif)* report colour and alpha codestream sizes from encode_with_report ([#694](https://github.com/visualcommons/gamut/pull/694))
+- *(avif)* typed AV1 sequence header per item, colour from it when colr is absent ([#679](https://github.com/visualcommons/gamut/pull/679))
+- *(avif)* [**breaking**] code 8-bit input at 10 or 12 bits on request ([#684](https://github.com/visualcommons/gamut/pull/684))
+- *(avif)* add AvifEncoder::with_alpha_quality for a separate alpha quantizer ([#672](https://github.com/visualcommons/gamut/pull/672))
+- *(avif)* reserve, write and locate a C2PA manifest store
+- *(avif)* lower high-bit-depth jobs across the codec-abi seam
+- *(avif)* [**breaking**] honour with_chroma on the 16-bit input path
+- *(avif)* encode Rgb16 and Rgba16 as 10- or 12-bit AVIF
+- *(avif)* carry the coded bit depth across the AV1 encode seam
+- *(avif)* encode Rgba8 with an alpha auxiliary item and Gray8 as monochrome
+- *(avif)* complete the 4:2:2 coding path
+- *(avif)* [**breaking**] default lossy output to 4:2:0 and expose the chroma format
+- *(av1)* parse OBUs and the AV1 sequence and frame headers
+- *(avif)* select CICP colour and write ICC, Exif and XMP
+- *(av1)* adapt CDFs while coding tiles
+- *(gamut-avif)* add the high-bit-depth RGBA16 presentation surface
+- *(avif)* code the lossy path in YCbCr
+- *(core)* add structured error diagnostics
+- *(gamut-isobmff)* parse large and uuid boxes
+
+### Fixed
+
+- *(avif)* refuse a 4 GiB C2PA reservation before zero-filling it
+- *(avif)* refuse a C2PA reservation that cannot be framed
+- *(avif)* probe both update-store prefixes, as gamut-heic does
+- *(avif)* send the backend the chroma the planes actually carry
+- *(avif)* refuse a subsampled backend stream instead of stamping it 4:4:4
+
+### Other
+
+- *(gamut-avif)* rustfmt the C2PA slot-range assertion in tests/c2pa.rs ([#819](https://github.com/visualcommons/gamut/pull/819))
+- *(gamut-avif)* resolve the invariants module's intra-doc links ([#813](https://github.com/visualcommons/gamut/pull/813))
+- *(isobmff)* share the C2PA uuid lens between gamut-heic and gamut-avif ([#781](https://github.com/visualcommons/gamut/pull/781))
+- *(gamut-avif)* widen Gray8 through Planar16::from_gray8_view ([#808](https://github.com/visualcommons/gamut/pull/808))
+- *(av1)* choose the in-loop filters against the source ([#793](https://github.com/visualcommons/gamut/pull/793))
+- *(av1)* decide partitions and transform depth by rate-distortion trial ([#783](https://github.com/visualcommons/gamut/pull/783))
+- *(av1)* rank intra mode decisions by rate-distortion cost ([#763](https://github.com/visualcommons/gamut/pull/763))
+- *(isobmff)* [**breaking**] own the clap, pasp, clli and mdcv value structs ([#771](https://github.com/visualcommons/gamut/pull/771))
+- *(avif)* record that with_c2pa applies no slot minimum and pin it ([#769](https://github.com/visualcommons/gamut/pull/769))
+- *(avif)* widen Gray8 through Gray16 and Planar16::from_gray16_view ([#766](https://github.com/visualcommons/gamut/pull/766))
+- *(gamut-avif)* record why the 4 GiB C2PA reservation refusal is Unsupported ([#756](https://github.com/visualcommons/gamut/pull/756))
+- gate rustdoc warnings and compile README code blocks as doctests ([#713](https://github.com/visualcommons/gamut/pull/713))
+- *(av1,avif)* state the AV1 decoder and the shipped AVIF encode surface ([#717](https://github.com/visualcommons/gamut/pull/717))
+- fix STATUS.md drift in gamut-dsp and gamut-avif ([#703](https://github.com/visualcommons/gamut/pull/703))
+- *(avif)* read backend sequence headers through gamut-av1's parser ([#693](https://github.com/visualcommons/gamut/pull/693))
+- *(avif)* refuse loosened 4 GiB bounds before the one allocating call
+- *(avif)* reflow the 64-bit ceiling qualification
+- *(avif)* qualify the 4 GiB C2PA ceiling claims as 64-bit only
+- *(avif)* pin the reserved-slot minimum with literal lengths
+- *(avif)* say with_c2pa applies no minimum to a supplied store
+- *(avif)* state the container writer's 4 GiB C2PA refusal
+- *(avif)* ask for the store's room instead of adding it in
+- *(avif)* say the encoder writes only box_purpose manifest
+- *(avif)* share the dav1d bridge through tests/common
+- *(avif)* write the reserved C2PA slot's zeros once
+- *(avif)* name the C2PA read type for the slot it reports
+- *(avif)* key the C2PA locator fixture on the box type, not the body
+- *(avif)* record the C2PA carriage in STATUS and README
+- *(avif)* append the C2PA uuid box with push_top_level_box
+- *(avif)* keep the C2PA remux oracle test to one failure reason
+- *(avif)* libavif decodes an AVIF carrying a C2PA uuid box unchanged
+- *(avif)* build IsoBmffImage through its constructor
+- *(avif)* close the crate's first mutation survey
+- *(isobmff)* drop imports the moved tests no longer use
+- *(isobmff)* share the segment walk with avif and heic
+- *(avif)* separate grid cropping from tile placement
+- *(avif)* pin the sequence-header chroma derivation directly
+- merge feat/398-av1-high-bitdepth into feat/399-avif-16bit-inputs
+- merge feat/397-avif-alpha-aux into feat/398-av1-high-bitdepth
+- merge origin/master into feat/397-avif-alpha-aux
+- Merge pull request #403 from visualcommons/feat/391-avif-422-profile2
+- Merge pull request #402 from visualcommons/feat/390-avif-420-profile0
+- *(avif)* pin each branch of the backend subsampling derivation
+- Merge branch 'feat/390-avif-420-profile0' into feat/391-avif-422-profile2
+- *(avif)* say precisely when with_chroma is ignored
+- Merge branch 'feat/390-avif-420-profile0' into feat/391-avif-422-profile2
+- Merge remote-tracking branch 'origin/master' into feat/390-avif-420-profile0
+- *(color)* take the coded depth from the matrix, not beside it
+- Merge remote-tracking branch 'origin/master' into feat/259-avif-decoder
+- *(avif)* record the 10/12-bit input surface
+- *(avif)* check the 10/12-bit inputs against libavif and dav1d
+- *(av1)* record the high-bit-depth sample path
+- *(avif)* kill the mutants the alpha slice pulled into the diff
+- *(avif)* record the alpha and grayscale inputs in the status ledger
+- *(avif)* check the alpha and grayscale surface against libavif
+- merge feat/390-avif-420-profile0 into feat/391-avif-422-profile2
+- close the remaining chroma mutation gaps
+- *(av1)* record monochrome encoding in the README and status ledger
+- merge feat/390-avif-420-profile0 into feat/391-avif-422-profile2
+- merge origin/master into feat/390-avif-420-profile0
+- cover the chroma derivations directly, not through an encode
+- *(avif)* use as_chunks in the metadata round-trip test
+- *(avif)* record the colour and metadata rows as implemented
+- Merge pull request #394 from visualcommons/feat/389-av1-per-plane-geometry
+- derive chroma plane sizes from one shared rule
+- mark the aom/dav1d submodules `update = none`
+- adopt as_chunks for constant-size slice chunking
+- Merge branch 'master' into feat/335-avif-ycbcr-matrix
+- Merge pull request #360 from visualcommons/feat/303-high-bit-depth-presentation
+- pin the blend rounding and the high-bit-depth paths mutation testing missed
+- *(avif)* close the mutation gaps in the colour seam
+- record the high-bit-depth presentation surface in STATUS and READMEs
+- *(av1)* record CDF adaptation in STATUS and README
+- *(avif)* record the YCbCr matrix surface
+
 ## [1.1.0](https://github.com/justin13888/gamut/compare/gamut-avif-v1.0.0...gamut-avif-v1.1.0) - 2026-07-20
 
 ### Added

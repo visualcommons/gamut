@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-iptc-v1.0.0...gamut-iptc-v2.0.0) - 2026-10-12
+
+### Added
+
+- *(iptc)* [**breaking**] name the IIM datasets with no spec-stated octet maximum ([#697](https://github.com/visualcommons/gamut/pull/697))
+- *(iptc)* read a bare structure where a sequence is expected
+- *(iptc)* name the one-octet 7:10 Size Mode dataset
+- *(iptc)* model the four most-used IPTC structured properties
+- *(iptc)* name every length-determinate IIM 4.2 dataset
+
+### Fixed
+
+- *(iptc)* replace every top-level copy of a property a typed setter writes
+- *(iptc)* consume a coordinate only when its decimal value is re-emitted unchanged
+- *(iptc)* keep a top-level property the setter cannot reproduce
+- *(iptc)* keep every array member and the container kind on the way out
+- *(iptc)* decide retention by what the writer can reproduce
+- *(iptc)* read a language alternative by its x-default tag
+- *(iptc)* retain an extension field the typed read cannot consume
+- *(iptc)* drop an array member that carries no field at all
+- *(iptc)* never write a value the declared type has no room for
+- *(iptc)* keep the fields the extension structures do not model
+
+### Other
+
+- *(iptc)* re-derive the IIM 4.2 DataSet-name table from the standard ([#776](https://github.com/visualcommons/gamut/pull/776))
+- *(iptc)* keep the extension typed view plain data and record why ([#749](https://github.com/visualcommons/gamut/pull/749))
+- *(iptc)* keep the extension structures' retained fields a public slot and record why ([#736](https://github.com/visualcommons/gamut/pull/736))
+- gate rustdoc warnings and compile README code blocks as doctests ([#713](https://github.com/visualcommons/gamut/pull/713))
+- *(iptc)* keep extension structure emission infallible and record why ([#729](https://github.com/visualcommons/gamut/pull/729))
+- *(iptc)* wrap the round's doc comments to the line width
+- *(iptc)* format the projection read
+- *(iptc)* state the dataset-name guard's identical-typo residual in its comment
+- *(iptc)* say that a setter handed values replaces the property outright
+- *(iptc)* say what the name guard does not catch
+- *(iptc)* cross every accessor pair with every shape a graph can carry
+- *(iptc)* state each clause of the reproduction relation on its own
+- *(iptc)* name the two shapes the fidelity list left out
+- *(iptc)* list the reads the projection gives up as a deferral
+- *(iptc)* record what the reproduction check costs
+- *(iptc)* state the reproduction relation on its own
+- *(iptc)* state the fidelity rule the code now follows
+- *(iptc)* pin the dataset names to the standard's own name column
+- *(iptc)* state what the guard compares and what retention covers
+- *(iptc)* compare dataset names against exiv2's table too
+- *(iptc)* pin the IIM tag table to exiv2's own dataset table
+- *(iptc)* read an Entity back from a structure value
+- *(iptc)* record the delivered breadth and the two remaining deferrals
+- *(iptc)* derive the structured-property field sets from the tech reference
+- *(iptc)* name the differential file for the convention its siblings use
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-iptc-v0.1.1...gamut-iptc-v1.0.0) - 2026-07-18
 
 ### Added

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-xmp-v1.0.0...gamut-xmp-v2.0.0) - 2026-10-12
+
+### Added
+
+- *(xmp)* accept on read the Darwin Core URI XMPCore emits
+- *(xmp)* give a sidecar's missing wrapper its own error
+- *(xmp)* read and write XMP sidecar files
+- *(xmp)* register the twelve schemas exiv2 documents
+- *(xmp)* [**breaking**] register the dcterms namespace and open WellKnownNs
+- *(core)* add structured error diagnostics
+
+### Fixed
+
+- *(gamut-xmp)* drop nodes whose local name is not an XML NCName on write ([#785](https://github.com/visualcommons/gamut/pull/785))
+- *(xmp)* refuse a catenated multi-packet input instead of truncating it ([#725](https://github.com/visualcommons/gamut/pull/725))
+
+### Other
+
+- gate rustdoc warnings and compile README code blocks as doctests ([#713](https://github.com/visualcommons/gamut/pull/713))
+- *(gamut-xmp)* record that reading keeps the Darwin Core URI a packet declared ([#706](https://github.com/visualcommons/gamut/pull/706))
+- *(xmp)* vendor CIPA DC-010-2026 and cite the exifEX URI from it ([#689](https://github.com/visualcommons/gamut/pull/689))
+- *(xmp)* attribute the Darwin Core trailing slash to exiv2, not XMPCore
+- Merge remote-tracking branch 'origin/feat/449-xmp-dcterms-provenance' into feat/421-xmp-schemas-sidecars
+- *(metadata)* call dcterms:provenance a URI reference, not a URL
+- *(xmp)* narrow the registry claim to the issue #421 set of exiv2 schemas
+- *(xmp)* record that a catenated sidecar keeps only its first packet
+- *(xmp)* close from_uri over the alias family exiv2 generates
+- *(xmp)* warn on the Darwin Core variant that XMPCore spells its URI differently
+- *(xmp)* state where the sidecar rule and the dwc alias diverge
+- *(xmp)* check end of input before matching sidecar prolog events
+- *(xmp)* separate the set/get round trip from the replacement rule
+
 ### Fixed
 
 - *(xmp)* refuse input holding more than one `<?xpacket?>` packet with the new

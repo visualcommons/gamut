@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-core-v2.0.1...gamut-core-v3.0.0) - 2026-10-12
+
+### Added
+
+- *(core)* shared Segment<K> and covers byte-tiling primitive ([#691](https://github.com/visualcommons/gamut/pull/691))
+- *(gamut-core)* premultiply and unpremultiply alpha in convert ([#680](https://github.com/visualcommons/gamut/pull/680))
+- *(core)* add format-agnostic pixel conversion
+- *(core)* add full-range sample widening and narrowing
+- *(core)* add fixed-point luma weights to luminance
+- *(core)* add structured error diagnostics
+- add optional serde support to public enums
+
+### Fixed
+
+- *(gamut-core)* [**breaking**] make PixelFormat::ALL a slice ([#669](https://github.com/visualcommons/gamut/pull/669))
+
+### Other
+
+- give every fuzz-tier law its own failure-path test ([#745](https://github.com/visualcommons/gamut/pull/745))
+- gate rustdoc warnings and compile README code blocks as doctests ([#713](https://github.com/visualcommons/gamut/pull/713))
+- *(core)* drop the redundant must_use on ImageView::rows
+- *(fuzz)* apply nightly rustfmt to the new targets
+- *(fuzz)* drive the gamut-core and gamut-tonemap laws under libFuzzer
+- *(core)* state the conversion engine's contract as executable laws
+- close the mutation-testing gaps in the conversion paths
+- *(core)* drive convert through the public API
+
 ## [2.0.1](https://github.com/justin13888/gamut/compare/gamut-core-v2.0.0...gamut-core-v2.0.1) - 2026-07-20
 
 ### Other
