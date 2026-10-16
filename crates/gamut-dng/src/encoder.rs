@@ -369,9 +369,10 @@ impl DngEncoder {
             raw.dimensions().height as usize,
         );
         let spp = usize::from(raw.samples_per_pixel());
+        let period = horizontal_cfa_period(raw);
 
         let raw_data = match self.tiling {
-            None => vec![self.encode_chunk(raw.samples(), width, height, spp, bits)?],
+            None => vec![self.encode_chunk(raw.samples(), width, height, spp, period, bits)?],
             Some((tile_width, tile_height)) => {
                 if tile_width == 0
                     || tile_height == 0
@@ -386,7 +387,7 @@ impl DngEncoder {
                 let (tw, th) = (tile_width as usize, tile_height as usize);
                 tile_samples(raw.samples(), width, height, spp, tw, th)
                     .iter()
-                    .map(|tile| self.encode_chunk(tile, tw, th, spp, bits))
+                    .map(|tile| self.encode_chunk(tile, tw, th, spp, period, bits))
                     .collect::<Result<Vec<_>>>()?
             }
         };
@@ -674,17 +675,22 @@ impl DngEncoder {
     /// Encodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each.
     /// Lossless JPEG and JPEG XL code samples directly; the byte-oriented schemes pack then
     /// compress. Rows are byte-aligned per chunk (each chunk is an independent sample stream),
-    /// which is exactly how the decoder consumes them.
+    /// which is exactly how the decoder consumes them. `period` is the mosaic's horizontal
+    /// repeat ([`horizontal_cfa_period`]), which only lossless JPEG's frame geometry reads.
     fn encode_chunk(
         &self,
         samples: &[u16],
         cols: usize,
         rows: usize,
         spp: usize,
+        period: usize,
         bits: u16,
     ) -> Result<Vec<u8>> {
         match self.compression {
-            Compression::LosslessJpeg => lossless_jpeg::encode(samples, cols, rows, spp, bits),
+            Compression::LosslessJpeg => {
+                let (width, components) = lossless_jpeg_geometry(cols, spp, period);
+                lossless_jpeg::encode(samples, width, rows, components, bits)
+            }
             Compression::JpegXl => {
                 #[cfg(all(
                     feature = "jxl-encode",
@@ -716,6 +722,40 @@ impl DngEncoder {
                 compression::compress(self.compression, &packed)
             }
         }
+    }
+}
+
+/// The mosaic's horizontal repeat — `CFARepeatPatternDim`'s column count for a CFA image, `1`
+/// for `LinearRaw` (each pixel already carries every plane).
+fn horizontal_cfa_period(raw: &RawImage) -> usize {
+    match raw.photometry() {
+        RawPhotometry::Cfa { repeat, .. } => usize::from(repeat.1),
+        RawPhotometry::LinearRaw { .. } => 1,
+    }
+}
+
+/// The lossless-JPEG frame geometry `(width, components)` for a `cols`-wide chunk of `spp`
+/// samples per pixel whose colours repeat every `period` columns.
+///
+/// A full-width single-component frame makes predictor 1 difference each photosite against its
+/// horizontal neighbour, a *different* colour filter — on a strongly tinted mosaic that costs
+/// more bits than the raw sample it replaces (#584). Declaring the same row as `period`
+/// interleaved components at `cols / period` wide puts every sample `period` columns behind its
+/// predictor, which is the same colour, with **no sample reordering**: an interleaved scan already reads a
+/// row `c0, c1, …, c0, c1, …`. DNG 1.7.1.0 p. 20 sanctions exactly this ("the internal
+/// width/length/components in the JPEG stream are not required to match the strip or tile's
+/// … Only the total sample counts need to match. It is common for CFA images to be encoded with
+/// a different width, length or component count to allow the JPEG compression predictors to
+/// work across like colors"). For `LinearRaw` the period is `1` and the geometry is the chunk's
+/// own. A chunk the split does not fit — more than four components (T.81 B.2.3 caps a scan at
+/// four; an X-Trans `6`-column repeat lands here), or a width the period does not divide — keeps
+/// that unreshaped geometry, which is always valid, rather than mis-shaping the frame.
+fn lossless_jpeg_geometry(cols: usize, spp: usize, period: usize) -> (usize, usize) {
+    let components = spp * period;
+    if components <= 4 && cols.is_multiple_of(period) {
+        (cols / period, components)
+    } else {
+        (cols, spp)
     }
 }
 
@@ -1276,6 +1316,47 @@ mod tests {
         let planar: Vec<u16> = (1..=8).collect(); // 2x2 image, 2 planes
         let tiles = tile_samples(&planar, 2, 2, 2, 2, 2);
         assert_eq!(tiles, vec![(1..=8).collect::<Vec<u16>>()]);
+    }
+
+    /// Each row is one decision of the geometry rule (#584): the like-colour reshape, the
+    /// four-component T.81 ceiling on both sides, a width the period does not divide, and the
+    /// `LinearRaw` identity.
+    #[test]
+    fn lossless_jpeg_geometry_reshapes_only_when_the_period_fits() {
+        // Bayer: half width, two components.
+        assert_eq!(lossless_jpeg_geometry(512, 1, 2), (256, 2));
+        // A 4-column repeat is the most a scan can interleave...
+        assert_eq!(lossless_jpeg_geometry(16, 1, 4), (4, 4));
+        // ...and X-Trans's 6 is over it: unreshaped.
+        assert_eq!(lossless_jpeg_geometry(12, 1, 6), (12, 1));
+        // A width the period does not divide keeps the chunk's own geometry.
+        assert_eq!(lossless_jpeg_geometry(33, 1, 2), (33, 1));
+        // LinearRaw: period 1, the planes are already the components.
+        assert_eq!(lossless_jpeg_geometry(48, 3, 1), (48, 3));
+    }
+
+    /// End to end: a Bayer CFA strip is written as a two-component half-width SOF3 frame whose
+    /// interleaved samples *are* the mosaic in raster order — the reshape reorders nothing.
+    #[test]
+    fn cfa_lossless_jpeg_strip_declares_like_colour_components() {
+        let raw = sample_raw(8, 6, 16);
+        let mut out = Vec::new();
+        DngEncoder::new()
+            .with_compression(Compression::LosslessJpeg)
+            .encode(&raw, &sample_profile(), &mut out)
+            .expect("encode");
+        let file = gamut_ifd::read(&out).expect("parse DNG");
+        let raw_off = file.ifds[0]
+            .get_u32(tags::SUB_IFDS)
+            .expect("SubIFDs pointer");
+        let raw_ifd = read_ifd_at(&out, raw_off.into(), file.order, Variant::Classic).expect("raw");
+        let off = raw_ifd.get_u32_vec(tags::STRIP_OFFSETS).expect("offsets")[0] as usize;
+        let len = raw_ifd
+            .get_u32_vec(tags::STRIP_BYTE_COUNTS)
+            .expect("counts")[0] as usize;
+        let frame = lossless_jpeg::decode(&out[off..off + len]).expect("SOF3 strip");
+        assert_eq!((frame.width, frame.height, frame.components), (4, 6, 2));
+        assert_eq!(frame.samples, raw.samples());
     }
 
     #[test]
