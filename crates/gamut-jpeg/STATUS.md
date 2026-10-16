@@ -56,7 +56,8 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   (`Metadata::from_blocks`); `JpegEncoder::with_metadata(&Metadata)` (default `MetadataEmbedder`)
   and `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies), routing each carrier to
   the raw setter above. IPTC-IIM and C2PA blocks are typed `Unsupported` on the encoder (no APP13 /
-  APP11 carriage — see below), and a C2PA store is never copied forward (facade policy).
+  APP11 carriage — both under *Deferred / out of scope* below), and a C2PA store is never copied
+  forward (facade policy).
 - Pluggable codestream backends (P8, issue #277): the `backend` module's `JpegStreamDecoder` /
   `JpegStreamEncoder` traits, `JpegDecoder::push_backend` / `JpegEncoder::push_backend`, and the
   `gamut-codec-abi` adapters in both directions.
@@ -118,6 +119,23 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **APP13 IPTC-IIM (Photoshop 3.0 PSIR).** The legacy IPTC carrier; modern IPTC rides inside XMP
   (which `gamut-metadata` models as the single home). `JpegMetadata` is `#[non_exhaustive]` so the
   carrier can be added without a breaking change.
+- **APP11 C2PA manifest-store carriage (C2PA 2.4 §A.3.1; epic #239, decided in #441).** Deferred
+  for want of a normative source, in both directions: the encoder rejects a C2PA block as
+  `Unsupported`, and the reader does not locate APP11, so `JpegMetadata` never yields a
+  `MetadataBlock::C2pa`. §A.3.1 places the store in APP11 marker segments "as defined in JPEG XT,
+  ISO/IEC 18477-3" and has multiple segments "constructed as per the JPEG 1 standard and ISO
+  19566-5:2023, D.2". The vendored C2PA text fixes the `FFEB` marker, the `Lp` length inside the
+  exclusion range (§18.5.3) and sequential, contiguous segments — but not the field layout inside
+  each segment (`CI` / `En` / `Z` / `LBox` / `TBox`), which lives only in ISO/IEC 19566-5 Annex
+  D.2, a paywalled document not vendored under `references/` (see `references/c2pa/README.md`,
+  *Not vendored — paywalled*). The `c2pa-rs` reference implementation is **not** a substitute: it
+  writes the box instance number `En = 0x0211` with the comment "can be any unique ID", a private
+  convention that appears nowhere in the C2PA text, and segmenting against it would bake that
+  constant in as though it were spec, against the workspace's *specification as source of truth*
+  rule. Un-descoping requires acquiring 19566-5 and transcribing D.2 into `references/c2pa/`; the
+  segmentation, APP11 classification (non-C2PA APP11 such as JPEG 360 must stay untouched,
+  §15.12.1.2) and exclusion-range scope are recorded in #441. The other carriages under #239 are
+  unaffected: PNG, DNG/TIFF and RIFF/WebP need nothing from 19566-5.
 - **XYB-tuned quantization tables.** The XYB mode quantizes X/Y with Annex K.1 and the stored
   B−Y with K.2 — an honest placeholder (those tables are YCbCr-tuned). jpegli's
   `kBaseQuantMatrixXYB` needs a quality→distance mapping and a vendored citation; additive later
