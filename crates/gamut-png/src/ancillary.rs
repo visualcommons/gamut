@@ -1259,7 +1259,8 @@ mod tests {
     /// reader returns unchanged, so the profile is written with its name verbatim and the
     /// deviation reported, as a keyword's is.
     ///
-    /// Kills the two arms of [`profile_name_verdict`]'s shape mapping.
+    /// Kills the two arms of [`profile_name_verdict`]'s shape mapping, and asserts each of the
+    /// two alternatives [`MetadataNotice::carried`] gained for them separately.
     #[test]
     fn an_iccp_profile_name_off_the_repertoire_or_spacing_is_written_with_a_notice() {
         for (name, expected) in [
@@ -1268,6 +1269,7 @@ mod tests {
         ] {
             let (chunk, notice) = iccp_chunk(name);
             assert_eq!(notice, Some(expected), "name {name:?}");
+            assert!(expected.carried(), "{expected:?} reports a written profile");
             let bytes: Vec<u8> = name.chars().map(|c| c as u8).collect();
             assert!(
                 chunk.unwrap().starts_with(&iccp_head(&bytes)),
