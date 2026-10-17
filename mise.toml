@@ -22,6 +22,8 @@ jq                            = "1.8.1"
 "cargo:cargo-mutants"         = "27.1.0"
 "cargo:cargo-fuzz"            = "0.13.1"
 "cargo:cbindgen"              = "0.29.4"  # gamut-ffi C header generation (gen-ffi-header / check-ffi-header)
+actionlint                    = "1.7.12"  # GitHub Actions workflow linter (lint-workflows)
+shellcheck                    = "0.11.0"  # actionlint runs it over every `run:` block when it is on PATH
 
 # Native build deps for the cross-check tests (build vendored dav1d/libavif from third_party/)
 cmake                         = "4.3.3"
@@ -432,6 +434,19 @@ run = "./tooling/check-readme-crates/fixtures.sh"
 [tasks.check-agents-edges]
 description = "Verify AGENTS.md's dependency-edge list names every workspace crate once and states exactly the normal, optional and build dependencies cargo metadata reports for each"
 run = "./tooling/check-agents-edges/run.sh"
+
+# Nothing else looks at `.github/workflows/`: a syntax error, an undefined `${{ }}` reference or a
+# quoting bug in a `run:` script otherwise surfaces only as a red run (#517 took out every job at
+# once). actionlint checks the workflow schema and expressions, and runs shellcheck over each
+# `run:` block — which is why shellcheck is a pinned tool above rather than whatever the PATH holds:
+# actionlint silently skips that half when shellcheck is absent, so the task refuses to run
+# without it. Static, sub-second, builds nothing; CI runs it in the Format & Metadata job.
+[tasks.lint-workflows]
+description = "Lint the GitHub Actions workflows with actionlint (schema, expressions, and shellcheck over every run: block)"
+run = """
+command -v shellcheck >/dev/null || { echo "shellcheck not found: run 'mise install' (actionlint skips run: blocks without it)"; exit 1; }
+actionlint -color
+"""
 
 # The guard's own regression battery: single-edit fixtures over the repository AGENTS.md, each
 # asserting the exit code and the message the guard owes it. For whoever changes the guard.
