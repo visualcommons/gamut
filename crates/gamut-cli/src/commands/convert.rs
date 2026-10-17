@@ -19,7 +19,7 @@ use gamut::jxl::{
 use gamut::metadata::EncodedMetadata;
 use gamut::metadata::capability::{Carrier, Direction, Format as MetadataFormat, supports};
 use gamut::png::{PngEncoder, PngMetadata, Preset as PngCodecPreset};
-use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
+use gamut::tiff::{Compression as TiffCompression, IFD0_EXIF_TAGS, TiffEncoder};
 use gamut::webp::{Effort as WebpEffort, NearLossless as WebpNearLossless, WebpEncoder};
 
 use crate::error::CliError;
@@ -772,18 +772,9 @@ fn encode(
             } else {
                 TiffCompression::None
             };
+            // The Exif `Orientation` is carried as a tag of the TIFF's own IFD 0, so a TIFF output
+            // needs no orientation handling of its own.
             let carried = carry_into(Some(Samples::Colour), dims);
-            if carried
-                .orientation
-                .is_some_and(|orientation| orientation != 1)
-            {
-                // `carry` has already named the Orientation among the 0th-IFD fields left behind;
-                // this says what that costs.
-                tracing::warn!(
-                    "input metadata not carried — the Exif Orientation, so a reader shows the TIFF \
-                     output's stored pixels unrotated"
-                );
-            }
             let bare = TiffEncoder::new().with_compression(compression);
             let mut blocks = EncodedMetadata::default();
             blocks.exif = carried.exif;
@@ -1188,7 +1179,7 @@ fn carry(
         return carried;
     }
     if format == OutputFormat::Tiff {
-        exif = exif_ifd_only(&exif);
+        exif = tiff_carried(&exif);
     }
     // `ExifWriter` re-embeds a thumbnail's JPEG bytes and its uncompressed strips, but a thumbnail
     // whose image bytes did not read holds neither. The reader has already removed its
@@ -1218,49 +1209,40 @@ fn carry(
     carried
 }
 
-/// The part of `exif` a TIFF output holds — its Exif and Interoperability sub-IFDs — reporting the
-/// rest as left behind.
+/// The part of `exif` a TIFF output holds — everything but the thumbnail and the 0th-IFD fields
+/// the TIFF encoder writes itself — reporting the rest as left behind.
 ///
-/// A TIFF has no Exif 0th IFD of its own: that directory's tags (`Make`, `Model`, `Orientation`,
-/// …) are TIFF 6.0 baseline tags of the page's own IFD 0, which also holds the `GPSInfo` pointer,
-/// and a thumbnail would be a page of its own. `gamut-tiff` writes IFD 0 itself and carries only
-/// the `ExifIFD` directory (`TiffMetadata::exif`), refusing an Exif model that holds anything else
-/// rather than dropping it — so the drop happens here, where it is reported.
-fn exif_ifd_only(exif: &Exif) -> Exif {
-    let page: Vec<String> = exif
-        .image()
-        .fields()
-        .iter()
-        .map(|field| {
-            ExifTag::from_id(IfdKind::Image, field.tag)
-                .map_or_else(|| format!("tag {}", field.tag), |tag| tag.name().to_owned())
-        })
-        .collect();
-    if !page.is_empty() {
-        tracing::warn!(
-            "input metadata not carried — the Exif 0th-IFD field(s) {}, which a TIFF holds in the \
-             page's own IFD 0, where the TIFF encoder writes none from the input",
-            page.join(", ")
-        );
+/// A TIFF has no Exif 0th IFD of its own: that directory's tags are TIFF 6.0 tags of the page's
+/// own IFD 0. `gamut-tiff` carries the descriptive ones (`Make`, `Model`, `Orientation`, …,
+/// `gamut::tiff::IFD0_EXIF_TAGS`) into it beside the `GPSInfo` and `ExifIFD` sub-IFDs, but writes
+/// the layout ones (`XResolution`, `YCbCrPositioning`, …) from the pixels it lays out, and a
+/// thumbnail would be a page of its own. It refuses an Exif model holding either rather than
+/// dropping it — so the drop happens here, where it is reported.
+fn tiff_carried(exif: &Exif) -> Exif {
+    let mut kept = exif.clone();
+    let mut left = Vec::new();
+    for field in exif.image().fields() {
+        if !IFD0_EXIF_TAGS.contains(&field.tag) {
+            kept.image_mut().remove(field.tag);
+            left.push(
+                ExifTag::from_id(IfdKind::Image, field.tag)
+                    .map_or_else(|| format!("tag {}", field.tag), |tag| tag.name().to_owned()),
+            );
+        }
     }
-    if exif.gps_ifd().is_some() {
+    if !left.is_empty() {
         tracing::warn!(
-            "input metadata not carried — the Exif GPS sub-IFD, which a TIFF points to from the \
-             page's own IFD 0, where the TIFF encoder writes none from the input"
+            "input metadata not carried — the Exif 0th-IFD field(s) {}, which a TIFF's IFD 0 \
+             holds as the TIFF encoder's own",
+            left.join(", ")
         );
     }
     if exif.thumbnail().is_some() {
+        kept.clear_thumbnail();
         tracing::warn!(
             "input metadata not carried — the Exif thumbnail, which a TIFF would hold as a page \
              of its own"
         );
-    }
-    let mut kept = Exif::new(exif.byte_order());
-    if let Some(directory) = exif.exif_ifd() {
-        kept.set_exif_ifd(directory.clone());
-    }
-    if let Some(interop) = exif.interop_ifd() {
-        kept.set_interop_ifd(interop.clone());
     }
     kept
 }

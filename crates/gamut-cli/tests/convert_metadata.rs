@@ -402,34 +402,50 @@ fn a_tiff_output_carries_xmp_icc_and_the_exif_sub_ifd() {
     );
 }
 
-/// A TIFF's 0th-IFD tags are the page's own, which the TIFF encoder writes itself, so the Exif's
-/// `Make` and `Orientation` are named as left behind — and what losing the Orientation costs.
+/// A TIFF's 0th-IFD tags are the page's own, so the Exif's `Make` and `Orientation` arrive as tags
+/// of the TIFF's IFD 0 (issue #876) — the Orientation telling a reader how to display the stored
+/// pixels — while `YCbCrPositioning`, which IFD 0 holds as the TIFF encoder's own, is named as
+/// left behind.
 #[test]
-fn a_tiff_output_reports_the_exif_0th_ifd_it_leaves_behind() {
-    let exif = exif_with(&[(ExifTag::Orientation, Value::Short(vec![6]))]);
+fn a_tiff_output_carries_the_exif_0th_ifd_into_its_own_ifd_0() {
+    let exif = exif_with(&[
+        (ExifTag::Orientation, Value::Short(vec![6])),
+        (ExifTag::YCbCrPositioning, Value::Short(vec![1])),
+    ]);
 
     let (tiff, stderr) = convert_to("tiff-0th", &jpeg_with(&exif), "tiff", &[]);
 
     assert!(
-        stderr.contains("Exif 0th-IFD field(s) Make, Orientation"),
-        "stderr did not name the 0th-IFD fields: {stderr}"
+        stderr.contains("Exif 0th-IFD field(s) YCbCrPositioning,"),
+        "stderr did not name the 0th-IFD field left behind: {stderr}"
     );
     assert!(
-        stderr.contains("shows the TIFF output's stored pixels unrotated"),
-        "stderr did not report the orientation: {stderr}"
+        !stderr.contains("Make") && !stderr.contains("Orientation"),
+        "stderr reported a carried field as left behind: {stderr}"
     );
+    let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
+    let page = meta.ifd0.expect("the 0th-IFD fields");
+    assert_eq!(
+        page.get(ExifTag::Make.tag_id()),
+        Some(&Value::Ascii("gamut".into()))
+    );
+    assert_eq!(
+        page.get(ExifTag::Orientation.tag_id()),
+        Some(&Value::Short(vec![6]))
+    );
+    assert_eq!(page.get(ExifTag::YCbCrPositioning.tag_id()), None);
     // The fixture's Exif holds nothing below its 0th IFD, so no `ExifIFD` is written, and the
     // other carriers still are.
-    let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
     assert!(meta.exif.is_none());
     assert_eq!(meta.xmp.as_deref(), Some(XMP));
 }
 
-/// The GPS sub-IFD and the thumbnail live off a TIFF's own IFD 0, so a TIFF output names both as
-/// left behind — and the Exif sub-IFD, with the Interoperability sub-IFD below it, is still
-/// written, as are XMP and ICC: the encoder took the reduced model rather than refusing it.
+/// The GPS sub-IFD hangs off a TIFF's own IFD 0 and arrives there (issue #876); the thumbnail
+/// would be a page of its own, so a TIFF output names it as left behind — and the Exif sub-IFD,
+/// with the Interoperability sub-IFD below it, is still written, as are XMP and ICC: the encoder
+/// took the reduced model rather than refusing it.
 #[test]
-fn a_tiff_output_reports_the_gps_and_thumbnail_and_keeps_the_interop_ifd() {
+fn a_tiff_output_carries_the_gps_and_interop_ifds_and_reports_the_thumbnail() {
     let mut exif = Exif::new(ByteOrder::LittleEndian);
     exif.set_tag(ExifTag::ExposureTime, Value::Rational(vec![(1, 250)]));
     exif.set_tag(ExifTag::GpsLatitudeRef, Value::Ascii("N".into()));
@@ -447,14 +463,20 @@ fn a_tiff_output_reports_the_gps_and_thumbnail_and_keeps_the_interop_ifd() {
     let (tiff, stderr) = convert_to("tiff-gps-thumb", &jpeg_with(&exif), "tiff", &[]);
 
     assert!(
-        stderr.contains("the Exif GPS sub-IFD"),
-        "stderr did not report the GPS sub-IFD: {stderr}"
+        !stderr.contains("GPS"),
+        "stderr reported the carried GPS sub-IFD as left behind: {stderr}"
     );
     assert!(
         stderr.contains("the Exif thumbnail, which a TIFF would hold as a page of its own"),
         "stderr did not report the thumbnail: {stderr}"
     );
     let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
+    assert_eq!(
+        meta.gps
+            .expect("the GPS sub-IFD")
+            .get(ExifTag::GpsLatitudeRef.tag_id()),
+        Some(&Value::Ascii("N".into()))
+    );
     assert_eq!(meta.xmp.as_deref(), Some(XMP));
     assert_eq!(meta.icc, Some(rgb_icc()));
     let directory = meta.exif.expect("an ExifIFD");
