@@ -257,27 +257,26 @@ impl DecTable {
     /// `HUFFVAL` is out of table.
     ///
     /// The code is grown with `+` rather than `|`: the shift just vacated the low bit and the addend
-    /// is a single bit, so the addition fills exactly that vacant bit.
+    /// is a single bit, so the addition fills exactly that vacant bit. The walk is a `for` over the
+    /// sixteen lengths, so it ends after at most sixteen steps however its arithmetic is perturbed.
     pub(crate) fn walk(&self, bits: u32) -> (u32, Result<u8>) {
-        let mut length = 1usize;
-        let mut code = (bits >> 15) as i32;
-        while code > self.maxcode(length) {
-            if length == 16 {
-                return (
-                    16,
-                    Err(Error::invalid_input(
-                        env!("CARGO_PKG_NAME"),
-                        "JPEG: undecodable Huffman code",
-                    )),
-                );
-            }
-            length += 1;
+        let mut code = 0i32;
+        for length in 1..=16usize {
             code = (code << 1) + ((bits >> (16 - length)) & 1) as i32;
+            if code <= self.maxcode(length) {
+                let symbol = self.value_at(length, code).ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: Huffman value out of table")
+                });
+                return (length as u32, symbol);
+            }
         }
-        let symbol = self.value_at(length, code).ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: Huffman value out of table")
-        });
-        (length as u32, symbol)
+        (
+            16,
+            Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: undecodable Huffman code",
+            )),
+        )
     }
 
     /// `MAXCODE[length]`, or `-1` if no code has that length.
