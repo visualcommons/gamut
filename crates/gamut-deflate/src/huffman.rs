@@ -70,11 +70,11 @@ impl CanonicalCode {
     }
 
     /// Emits the code for `sym` (nothing if `sym` is unused, i.e. has length 0).
+    ///
+    /// An unused symbol needs no guard of its own: [`BitWriter::write_bits`] writes nothing for a
+    /// zero width. A `len > 0` guard here was an unkillable `>=` twin of that contract (#493).
     pub(crate) fn emit(&self, w: &mut BitWriter, sym: usize) {
-        let len = self.lengths[sym];
-        if len > 0 {
-            w.write_bits(u32::from(self.codes[sym]), u32::from(len));
-        }
+        w.write_bits(u32::from(self.codes[sym]), u32::from(self.lengths[sym]));
     }
 }
 
@@ -112,19 +112,13 @@ fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
 /// length is bounded by raising the counts toward a common floor and rebuilding until the tree fits
 /// (libwebp's approach) — a valid code within ~1% of the entropy-optimal length-limited code; a
 /// package-merge limiter would close that last fraction of a percent but is not required.
+///
+/// An empty or single-symbol histogram needs no case of its own: [`huffman_pass`] already returns
+/// all zeros for the first and a lone length 1 for the second, both within any `max_len >= 1`. The
+/// duplicate early returns that used to stand here were where the survivor of #493 lived — their
+/// `histogram[i] > 0` search could be weakened to `>=` because every caller that reaches a single
+/// symbol either forces a second one first (`ensure_two`) or reads the result only as a cost.
 fn build_lengths(histogram: &[u32], max_len: u8) -> Vec<u8> {
-    let n = histogram.len();
-    let used = histogram.iter().filter(|&&h| h > 0).count();
-    if used == 0 {
-        return vec![0u8; n];
-    }
-    if used == 1 {
-        let mut lengths = vec![0u8; n];
-        if let Some(sym) = (0..n).find(|&i| histogram[i] > 0) {
-            lengths[sym] = 1;
-        }
-        return lengths;
-    }
     let mut count_min = 1u32;
     loop {
         let depths = huffman_pass(histogram, count_min);

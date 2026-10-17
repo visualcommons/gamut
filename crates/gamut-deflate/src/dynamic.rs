@@ -108,11 +108,17 @@ fn build(tokens: &[Token]) -> Built {
     }
     let cl = CanonicalCode::from_histogram(&cl_hist, 7);
 
-    // HCLEN: code-length code lengths in CL_ORDER, with trailing zeros trimmed (minimum of 4).
-    let mut hclen = NUM_CL;
-    while hclen > 4 && cl.lengths()[CL_ORDER[hclen - 1]] == 0 {
-        hclen -= 1;
-    }
+    // HCLEN: code-length code lengths in CL_ORDER, through the last nonzero one (minimum of 4).
+    //
+    // Found by search rather than by trimming down from `NUM_CL`: the trim loop's `hclen > 4`
+    // bound had an unkillable `>=` twin (#493). The lit/len code always has a used symbol, the RLE
+    // writes each nonzero run's length literally once, and lengths 1..=15 sit at `CL_ORDER[4..]` —
+    // so the trim never reached 4. Its `-= 1` mutated to `/= 1` could only hang.
+    let hclen = CL_ORDER
+        .iter()
+        .rposition(|&sym| cl.lengths()[sym] != 0)
+        .map_or(0, |last| last + 1)
+        .max(4);
 
     Built {
         litlen,
@@ -197,13 +203,14 @@ fn recurse(tokens: &[Token], start: usize, end: usize, points: &mut Vec<usize>, 
     let whole = cost(&tokens[start..end]);
     let stride = ((end - start) / SPLIT_CANDIDATES).max(MIN_SPLIT_TOKENS);
     let mut best: Option<(u64, usize)> = None;
-    let mut j = start + stride;
-    while j < end {
+    // A range, not a `while j < end` cursor: that bound's `<=` twin added a candidate at `j ==
+    // end` whose second half is empty, so it costs the whole segment plus an empty block's header
+    // and can never beat not splitting — unkillable (#493).
+    for j in (start + stride..end).step_by(stride) {
         let combined = cost(&tokens[start..j]) + cost(&tokens[j..end]);
         if best.is_none_or(|(b, _)| combined < b) {
             best = Some((combined, j));
         }
-        j += stride;
     }
     if let Some((combined, j)) = best
         && combined < whole
@@ -231,28 +238,29 @@ fn ensure_two(hist: &mut [u32]) {
 
 /// Number of leading code lengths to emit: the index past the last nonzero length, but at least
 /// `min` (RFC 1951 requires HLIT+257 and HDIST+1 entries, covering every used symbol).
+///
+/// A search, not a trim loop counting down, for the same reason as `build`'s HCLEN: a bounded
+/// search has no `-=` for a mutant to turn into a hang (#493).
 fn trimmed_len(lengths: &[u8], min: usize) -> usize {
-    let mut n = lengths.len();
-    while n > min && lengths[n - 1] == 0 {
-        n -= 1;
-    }
-    n
+    lengths
+        .iter()
+        .rposition(|&l| l != 0)
+        .map_or(0, |last| last + 1)
+        .max(min)
 }
 
 /// Run-length-codes a code-length sequence into code-length-alphabet symbols (RFC 1951 §3.2.7):
 /// 16 = repeat the previous length 3–6 times, 17 = repeat zero 3–10 times, 18 = repeat zero 11–138
 /// times. Code 16 only ever repeats within a run of one value, so "previous length" is unambiguous.
+///
+/// The runs come from `chunk_by`, not from a hand-written cursor: the cursor's `j = i + 1` start
+/// had an unkillable `i * 1` twin (the scan re-tests `lengths[i]` and lands in the same place) and
+/// its `j += 1` a `*=` twin that hung (#493). Iterating the slice's own runs leaves neither.
 fn rle(lengths: &[u8]) -> Vec<ClItem> {
     let mut items = Vec::new();
-    let n = lengths.len();
-    let mut i = 0;
-    while i < n {
-        let value = lengths[i];
-        let mut j = i + 1;
-        while j < n && lengths[j] == value {
-            j += 1;
-        }
-        let mut run = j - i;
+    for run in lengths.chunk_by(|a, b| a == b) {
+        let value = run[0];
+        let mut run = run.len();
         if value == 0 {
             while run >= 11 {
                 let count = run.min(138);
@@ -300,7 +308,6 @@ fn rle(lengths: &[u8]) -> Vec<ClItem> {
                 extra_val: 0,
             }));
         }
-        i = j;
     }
     items
 }
