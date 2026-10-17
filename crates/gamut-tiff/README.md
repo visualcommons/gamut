@@ -68,7 +68,12 @@ compression schemes land additively on this frozen surface (see Status).
   (+ horizontal differencing on strips or tiles), plus the bilevel CCITT schemes Modified Huffman
   (Group 3 1-D) and Group 4 (T.6).
 - **Metadata** — `TiffEncoder::with_tiff_metadata` / `TiffDecoder::metadata` carry an Exif sub-IFD
-  (`ExifIFD`, 34665, as a `gamut_ifd::Ifd`) plus opaque XMP (700), IPTC-IIM (33723), ICC (34675)
+  (`ExifIFD`, 34665, as a `gamut_ifd::Ifd`), a GPS sub-IFD (`GPSInfo`, 34853) and the Exif
+  0th-IFD fields a TIFF holds in its own IFD 0 (`TiffMetadata::ifd0`, limited to the descriptive
+  EXIF 2.32 §4.6.4 Table 4 tags of `IFD0_EXIF_TAGS` — `ImageDescription`, `Make`, `Model`,
+  `Orientation`, `Software`, `DateTime`, `Artist`, `WhitePoint`, `PrimaryChromaticities`,
+  `Copyright`; the encode refuses any other tag there, because the rest of IFD 0 is the
+  encoder's), plus opaque XMP (700), IPTC-IIM (33723), ICC (34675)
   and C2PA (52545) payloads — the raw blocks the workspace's metadata facade consumes. Byte
   payloads are verbatim; the Exif directory's *entries* are carried unchanged but its ordering is
   normalised (ascending tag, duplicate tags collapsed, a child's next-IFD pointer ignored), and a
@@ -77,12 +82,13 @@ compression schemes land additively on this frozen surface (see Status).
   blocks live in **IFD 0 only**, so a reader decoding page 3 of a multi-page document alone must
   look at IFD 0 for them.
   Which pointers are resolved depends on the level, because the two levels answer opposite
-  questions. **Inside the returned Exif directory all four standard pointer tags** — `SubIFDs`
-  (330), `ExifIFD` (34665), `GPSInfo` (34853), `InteroperabilityIFD` (40965) — come back as child
-  directories rather than as stale offsets, since anything left unresolved there is handed to the
-  caller as an absolute offset into the source file. **At IFD 0 only `ExifIFD` is followed**,
-  since no other target feeds the seam and a broken one would otherwise hide the blocks. The price
-  is stated: inside the Exif directory an unreadable target under any of the four fails the read.
+  questions. **Inside the returned Exif and GPS directories all four standard pointer tags** —
+  `SubIFDs` (330), `ExifIFD` (34665), `GPSInfo` (34853), `InteroperabilityIFD` (40965) — come back
+  as child directories rather than as stale offsets, since anything left unresolved there is
+  handed to the caller as an absolute offset into the source file. **At IFD 0 only `ExifIFD` and
+  `GPSInfo` are followed**, since no other target feeds the seam and a broken one would otherwise
+  hide the blocks. The price is stated: an unreadable `ExifIFD` or `GPSInfo` target, or one under
+  any of the four inside those directories, fails the read.
   A *vendor-private* tag whose value happens to be an offset is not a pointer to anything this
   crate can see, so it is carried through and re-encoded verbatim, still holding the source file's
   offset — a round trip through such a field is **not** proof the result is pointer-safe.
@@ -116,9 +122,9 @@ smaller items (CCITT Group 3 2-D, planar config, IEEE-float and 32-bit samples, 
 halftone hints). The metadata payloads are carried as raw bytes rather than parsed here; the
 optional `metadata` feature wires them to the typed [`gamut-metadata`](../gamut-metadata) facade
 (`TiffMetadata` implements `TypedMetadata`, and `TiffEncoder::with_metadata` /
-`with_encoded_metadata` embed a facade `Metadata`). The typed EXIF path maps only the `ExifIFD`
-(the model's Exif and Interoperability sub-IFDs); a model holding 0th-IFD fields, a GPS sub-IFD or
-a thumbnail is refused until this crate gains carriers for them (#876).
+`with_encoded_metadata` embed a facade `Metadata`). The typed EXIF path maps the model's 0th-IFD
+fields, Exif, Interoperability and GPS sub-IFDs; a model holding a thumbnail (which a TIFF would
+hold as a page of its own) or a 0th-IFD field outside `IFD0_EXIF_TAGS` is refused.
 **Permanently out of scope:** old-style JPEG (§22, `Compression = 6`), deprecated and
 unimplementable-as-specified per TIFF Technical Note 2.
 
