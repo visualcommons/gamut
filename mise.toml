@@ -346,6 +346,16 @@ run = "cargo bench --workspace"
 description = "Run every bench once to prove it still executes (no timings; issue #437)"
 run = "cargo bench --workspace --benches -- --test"
 
+# Measured experiments (the protocol on #514/#480/#612): each lives in `experiments/<issue>/`, whose
+# `run.sh` regenerates that directory's `raw/*.csv` (one row per input x variant x sample) and
+# `run.json` (git SHA, rustc, lockfile hashes, corpus SHA-256s, CPU, load average) from scratch.
+# `RESULTS.md` beside them states the claim, the verdict and the table, and is read from that data.
+# Like `bench`, the measurement arms link the crate's oracle dev-dependencies, so they need the
+# submodules and a C toolchain.
+[tasks.experiment]
+description = "Regenerate one experiment's raw data and provenance, e.g. `mise run experiment 514`"
+run = "./experiments/{{arg(name='issue')}}/run.sh"
+
 # Bindings/binary crates (cli, wasm, ffi), the declarations-only `gamut-jxl-sys` FFI crate, and the
 # dev-only `tooling/` oracles are excluded — their entry points are not meaningfully unit-testable
 # (jxl-sys has no function bodies at all) and would otherwise skew the gate.
