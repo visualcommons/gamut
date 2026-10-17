@@ -54,7 +54,10 @@ const IDAT_MAX: usize = 1 << 16;
 /// everywhere costs a full filter pass and a full DEFLATE for nothing. It stays available as a
 /// caller-selectable strategy — the corpus is eight images, not a proof — but it does not earn a
 /// slot here. See `STATUS.md`'s heuristic table.
-const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 7] = [
+///
+/// [`FilterStrategy::MinTrialDeflate`] is last, so it changes a file only where it is strictly
+/// smaller than all seven before it (`experiments/480/`).
+const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
     FilterStrategy::None,
     FilterStrategy::Fixed(FilterType::Sub),
     FilterStrategy::Fixed(FilterType::Up),
@@ -62,6 +65,7 @@ const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 7] = [
     FilterStrategy::Fixed(FilterType::Paeth),
     FilterStrategy::MinSumAbs,
     FilterStrategy::MinBigrams,
+    FilterStrategy::MinTrialDeflate,
 ];
 
 /// What [`PngEncoder::encode_with_report`] found in the bytes it wrote.

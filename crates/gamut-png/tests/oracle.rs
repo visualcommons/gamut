@@ -887,6 +887,7 @@ fn every_filter_strategy_survives_the_libpng_round_trip() {
         FilterStrategy::MinSumAbs,
         FilterStrategy::MinEntropy,
         FilterStrategy::MinBigrams,
+        FilterStrategy::MinTrialDeflate,
         FilterStrategy::BruteForce,
     ] {
         let mut png = Vec::new();

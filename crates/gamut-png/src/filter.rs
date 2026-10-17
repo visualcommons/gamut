@@ -5,6 +5,8 @@
 //! the data far more compressible. Filters operate on raw bytes with a stride of `bpp` (bytes per
 //! pixel, ≥1); they reference the *unfiltered* bytes of the current and previous rows.
 
+use gamut_deflate::{DeflateEncoder, Level};
+
 /// A PNG scanline filter type (the leading byte of each filtered scanline).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -54,8 +56,17 @@ pub enum FilterStrategy {
     /// A cheaper proxy for the same idea one order up: LZ77 matches runs, not single bytes, so
     /// counting distinct adjacent pairs approximates how much of the row it can back-reference.
     MinBigrams,
+    /// Per scanline, DEFLATE each filter's residuals after the sixteen rows already emitted, at
+    /// [`Level::Default`], and keep the filter whose trial stream is shortest.
+    ///
+    /// The other per-scanline heuristics *estimate* what DEFLATE will make of a row; this one asks
+    /// it. oxipng ships the same idea as its `Brute` filter. It costs five DEFLATE calls over at
+    /// most seventeen rows per scanline, which makes it the slowest per-scanline strategy.
+    /// Integer-only and deterministic, so it is in the `BruteForce` set. Measured in
+    /// `experiments/480/`, it is the unique winner on two rows of the corpus there.
+    MinTrialDeflate,
     /// Encode the whole image under several filter strategies, DEFLATE each, and keep the smallest.
-    /// Pairs with [`Level::Best`](gamut_deflate::Level::Best) for maximum compression; slowest.
+    /// Pairs with [`Level::Best`] for maximum compression; slowest.
     BruteForce,
 }
 
@@ -196,8 +207,16 @@ fn sum_abs(filtered: &[u8]) -> u64 {
         .sum()
 }
 
-/// How a candidate row is judged. Lower is better for all three, so they are interchangeable in
-/// [`choose_by`].
+/// Rows of already-chosen output each [`FilterStrategy::MinTrialDeflate`] trial is compressed
+/// after, so a candidate is judged by what it adds to a stream that already holds its context.
+///
+/// Chosen by `experiments/480/`, which swept 2, 4, 8, 16 and 32 rows at `Level::Fast` and
+/// `Level::Default`. Sixteen at `Default` is within 0.4% of the best bytes it found (thirty-two)
+/// on both rows the strategy wins, at about half the trial cost.
+const TRIAL_CONTEXT_ROWS: usize = 16;
+
+/// How a candidate row is judged. Lower is better for every variant, so they are interchangeable
+/// in [`choose_by`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Score {
     /// Sum of absolute residuals, bytes read as signed magnitudes (libpng's heuristic).
@@ -206,6 +225,8 @@ enum Score {
     Entropy,
     /// Count of distinct adjacent byte pairs.
     Bigrams,
+    /// Length of the DEFLATE stream for the context rows followed by the filtered row.
+    Trial,
 }
 
 /// Scratch a scorer needs, allocated once per image rather than per scanline.
@@ -223,6 +244,10 @@ struct Scratch {
     /// The indices of the `bigrams` words this scorer set, so the reset touches only them. Holds
     /// each dirtied word exactly once — a word is pushed when it goes from all-zero to non-zero.
     dirty: Vec<usize>,
+    /// The context plus the candidate row, compressed by [`Score::Trial`].
+    trial: Vec<u8>,
+    /// Where [`Score::Trial`]'s DEFLATE stream lands; only its length is read.
+    deflated: Vec<u8>,
 }
 
 impl Scratch {
@@ -231,12 +256,15 @@ impl Scratch {
             histogram: [0; 256],
             bigrams: vec![0; 1 << 10],
             dirty: Vec::new(),
+            trial: Vec::new(),
+            deflated: Vec::new(),
         }
     }
 }
 
 /// Scores a filtered row; lower is better in every variant, so candidates compare directly.
-fn score(kind: Score, filtered: &[u8], scratch: &mut Scratch) -> u64 {
+/// `context` is the output already emitted before this row, read only by [`Score::Trial`].
+fn score(kind: Score, filtered: &[u8], context: &[u8], scratch: &mut Scratch) -> u64 {
     match kind {
         Score::SumAbs => sum_abs(filtered),
         Score::Entropy => {
@@ -293,6 +321,17 @@ fn score(kind: Score, filtered: &[u8], scratch: &mut Scratch) -> u64 {
             scratch.dirty.clear();
             distinct
         }
+        Score::Trial => {
+            scratch.trial.clear();
+            // The candidate's own filter-type byte is left out: it is one byte of five possible
+            // values in every candidate alike, and the residuals are what the trial compares.
+            scratch.trial.extend_from_slice(context);
+            scratch.trial.extend_from_slice(filtered);
+            scratch.deflated.clear();
+            DeflateEncoder::new()
+                .with_level(Level::Default)
+                .compress(&scratch.trial, &mut scratch.deflated) as u64
+        }
     }
 }
 
@@ -318,13 +357,22 @@ pub fn filter_image(
         FilterStrategy::MinSumAbs | FilterStrategy::BruteForce => Some(Score::SumAbs),
         FilterStrategy::MinEntropy => Some(Score::Entropy),
         FilterStrategy::MinBigrams => Some(Score::Bigrams),
+        FilterStrategy::MinTrialDeflate => Some(Score::Trial),
         FilterStrategy::None | FilterStrategy::Fixed(_) => None,
     };
     for y in 0..height {
         let cur = &samples[y * row_bytes..(y + 1) * row_bytes];
         match adaptive {
             Some(kind) => {
-                let filter = choose_by(kind, cur, prev, bpp, &mut scratch, &mut chosen, &mut aux);
+                // The last `TRIAL_CONTEXT_ROWS` rows already emitted, each filter byte included.
+                let context = &out[y.saturating_sub(TRIAL_CONTEXT_ROWS) * (row_bytes + 1)..];
+                let candidate = Candidate {
+                    cur,
+                    prev,
+                    context,
+                    bpp,
+                };
+                let filter = choose_by(kind, candidate, &mut scratch, &mut chosen, &mut aux);
                 out.push(filter as u8);
                 out.extend_from_slice(&chosen);
             }
@@ -343,6 +391,16 @@ pub fn filter_image(
     out
 }
 
+/// The row [`choose_by`] filters: its unfiltered bytes, the unfiltered row above, the output
+/// already emitted before it (read by [`Score::Trial`]), and the filter stride.
+#[derive(Clone, Copy)]
+struct Candidate<'a> {
+    cur: &'a [u8],
+    prev: &'a [u8],
+    context: &'a [u8],
+    bpp: usize,
+}
+
 /// Tries all five filters and keeps the one `kind` ranks lowest, leaving its bytes in
 /// `best_bytes`.
 ///
@@ -355,9 +413,12 @@ pub fn filter_image(
 /// Keeping them costs one `memcpy` per improvement, against a full filter pass per scanline.
 fn choose_by(
     kind: Score,
-    cur: &[u8],
-    prev: &[u8],
-    bpp: usize,
+    Candidate {
+        cur,
+        prev,
+        context,
+        bpp,
+    }: Candidate<'_>,
     scratch: &mut Vec<u8>,
     best_bytes: &mut Vec<u8>,
     aux: &mut Scratch,
@@ -377,7 +438,7 @@ fn choose_by(
         FilterType::Paeth,
     ] {
         filter_row(filter, cur, prev, bpp, scratch);
-        let candidate = score(kind, scratch, aux);
+        let candidate = score(kind, scratch, context, aux);
         if best_score.is_none_or(|best| candidate < best) {
             best_score = Some(candidate);
             best = filter;
@@ -391,6 +452,11 @@ fn choose_by(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`score`] with no emitted context, which only [`Score::Trial`] reads.
+    fn row_score(kind: Score, filtered: &[u8], aux: &mut Scratch) -> u64 {
+        score(kind, filtered, &[], aux)
+    }
 
     /// Reconstructs a scanline from its filtered form via the production [`unfilter_row`].
     fn reconstruct(filter: FilterType, filt: &[u8], prev: &[u8], bpp: usize) -> Vec<u8> {
@@ -487,15 +553,18 @@ mod tests {
 
         // Sum-of-absolutes: the varied row is far "smaller" and wins.
         assert!(
-            score(Score::SumAbs, &varied, &mut aux) < score(Score::SumAbs, &repetitive, &mut aux)
+            row_score(Score::SumAbs, &varied, &mut aux)
+                < row_score(Score::SumAbs, &repetitive, &mut aux)
         );
         // Entropy and bigrams: the repetitive row has two symbols and one alternating pair, and
         // wins by a mile.
         assert!(
-            score(Score::Entropy, &repetitive, &mut aux) < score(Score::Entropy, &varied, &mut aux)
+            row_score(Score::Entropy, &repetitive, &mut aux)
+                < row_score(Score::Entropy, &varied, &mut aux)
         );
         assert!(
-            score(Score::Bigrams, &repetitive, &mut aux) < score(Score::Bigrams, &varied, &mut aux)
+            row_score(Score::Bigrams, &repetitive, &mut aux)
+                < row_score(Score::Bigrams, &varied, &mut aux)
         );
     }
 
@@ -503,18 +572,18 @@ mod tests {
     fn the_bigram_score_counts_distinct_adjacent_pairs() {
         let mut aux = Scratch::new();
         // (1,2), (2,1), (1,2), (2,1) -> two distinct pairs, however long the run.
-        assert_eq!(score(Score::Bigrams, &[1, 2, 1, 2, 1], &mut aux), 2);
+        assert_eq!(row_score(Score::Bigrams, &[1, 2, 1, 2, 1], &mut aux), 2);
         // A constant row has exactly one.
-        assert_eq!(score(Score::Bigrams, &[7, 7, 7, 7], &mut aux), 1);
+        assert_eq!(row_score(Score::Bigrams, &[7, 7, 7, 7], &mut aux), 1);
         // Every pair distinct.
-        assert_eq!(score(Score::Bigrams, &[1, 2, 3, 4], &mut aux), 3);
+        assert_eq!(row_score(Score::Bigrams, &[1, 2, 3, 4], &mut aux), 3);
         // Fewer than two bytes has no pairs at all.
-        assert_eq!(score(Score::Bigrams, &[9], &mut aux), 0);
-        assert_eq!(score(Score::Bigrams, &[], &mut aux), 0);
+        assert_eq!(row_score(Score::Bigrams, &[9], &mut aux), 0);
+        assert_eq!(row_score(Score::Bigrams, &[], &mut aux), 0);
         // Distinct *pairs*, not distinct second bytes: (1,3), (3,2), (2,3) is three pairs over two
         // distinct second bytes, so an index that dropped the high byte would report two. Every
         // vector above happens to have as many pairs as second bytes, so none of them can tell.
-        assert_eq!(score(Score::Bigrams, &[1, 3, 2, 3], &mut aux), 3);
+        assert_eq!(row_score(Score::Bigrams, &[1, 3, 2, 3], &mut aux), 3);
     }
 
     #[test]
@@ -522,13 +591,13 @@ mod tests {
         // The histogram and bigram set are allocated once per image, so a stale one would silently
         // score the wrong thing on every row after the first.
         let mut aux = Scratch::new();
-        let first = score(Score::Bigrams, &[1, 2, 3, 4], &mut aux);
-        let second = score(Score::Bigrams, &[7, 7, 7, 7], &mut aux);
+        let first = row_score(Score::Bigrams, &[1, 2, 3, 4], &mut aux);
+        let second = row_score(Score::Bigrams, &[7, 7, 7, 7], &mut aux);
         assert_eq!(first, 3);
         assert_eq!(second, 1, "the previous row's pairs must not carry over");
 
-        let a = score(Score::Entropy, &[0, 0, 0, 0], &mut aux);
-        let b = score(Score::Entropy, &[0, 1, 2, 3], &mut aux);
+        let a = row_score(Score::Entropy, &[0, 0, 0, 0], &mut aux);
+        let b = row_score(Score::Entropy, &[0, 1, 2, 3], &mut aux);
         assert!(a < b, "a constant row must stay the lower-entropy one");
     }
 
@@ -573,8 +642,8 @@ mod tests {
         let mut concentrated = vec![0u8; 14];
         concentrated.extend_from_slice(&[1, 2]);
 
-        let balanced = score(Score::Entropy, &balanced, &mut aux);
-        let concentrated = score(Score::Entropy, &concentrated, &mut aux);
+        let balanced = row_score(Score::Entropy, &balanced, &mut aux);
+        let concentrated = row_score(Score::Entropy, &concentrated, &mut aux);
         assert!(
             concentrated < balanced,
             "concentrated {concentrated} should score below balanced {balanced}"
@@ -587,8 +656,8 @@ mod tests {
         // bits, which both floor to 8. Only multiplying by 256 before the cast keeps them apart,
         // so this is the assertion that a `+ 256.0` or `/ 256.0` scale cannot satisfy.
         let mut aux = Scratch::new();
-        let even = score(Score::Entropy, &[0, 0, 0, 0, 1, 1, 1, 1], &mut aux);
-        let skewed = score(Score::Entropy, &[0, 0, 0, 0, 0, 0, 1, 2], &mut aux);
+        let even = row_score(Score::Entropy, &[0, 0, 0, 0, 1, 1, 1, 1], &mut aux);
+        let skewed = row_score(Score::Entropy, &[0, 0, 0, 0, 0, 0, 1, 2], &mut aux);
         assert!(even < skewed, "{even} < {skewed}");
     }
 
@@ -598,15 +667,128 @@ mod tests {
         // scores far below None.
         let row: Vec<u8> = (0..30u8).map(|i| i.wrapping_mul(3)).collect();
         let prev = vec![0u8; row.len()];
+        let candidate = Candidate {
+            cur: &row,
+            prev: &prev,
+            context: &[],
+            bpp: 1,
+        };
         let chosen = choose_by(
             Score::SumAbs,
-            &row,
-            &prev,
-            1,
+            candidate,
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Scratch::new(),
         );
         assert_eq!(chosen, FilterType::Sub);
+    }
+
+    /// Deterministic samples with structure for every filter to find: a sheared ramp, a row-local
+    /// repeat and a little xorshift noise, so no single filter wins every row.
+    fn textured(row_bytes: usize, height: usize) -> Vec<u8> {
+        let mut state = 0x9E37_79B9u32;
+        let mut out = Vec::with_capacity(row_bytes * height);
+        for y in 0..height {
+            for x in 0..row_bytes {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                let ramp = (x * 7 + y * 3) as u8;
+                let repeat = [0u8, 40, 80, 40][(x / 3 + y) % 4];
+                let noise = if y % 3 == 0 { (state & 7) as u8 } else { 0 };
+                out.push(ramp.wrapping_add(repeat).wrapping_add(noise));
+            }
+        }
+        out
+    }
+
+    /// [`FilterStrategy::MinTrialDeflate`] spelled out row by row: each scanline takes the first
+    /// filter whose residuals, DEFLATEd at `Level::Default` after the last **sixteen** emitted rows
+    /// (filter bytes included), make the shortest stream.
+    fn trial_reference(samples: &[u8], row_bytes: usize, bpp: usize) -> Vec<u8> {
+        let zero = vec![0u8; row_bytes];
+        let mut emitted: Vec<Vec<u8>> = Vec::new();
+        for (y, cur) in samples.chunks(row_bytes).enumerate() {
+            let prev = if y == 0 {
+                &zero[..]
+            } else {
+                &samples[(y - 1) * row_bytes..y * row_bytes]
+            };
+            let context = emitted[emitted.len().saturating_sub(16)..].concat();
+            let mut best: Option<(usize, Vec<u8>)> = None;
+            for filter in [
+                FilterType::None,
+                FilterType::Sub,
+                FilterType::Up,
+                FilterType::Average,
+                FilterType::Paeth,
+            ] {
+                let mut row = Vec::new();
+                filter_row(filter, cur, prev, bpp, &mut row);
+                let mut trial = context.clone();
+                trial.extend_from_slice(&row);
+                let len = DeflateEncoder::new()
+                    .with_level(Level::Default)
+                    .compress(&trial, &mut Vec::new());
+                if best.as_ref().is_none_or(|(b, _)| len < *b) {
+                    best = Some((len, [&[filter as u8][..], &row].concat()));
+                }
+            }
+            emitted.push(best.expect("five candidates").1);
+        }
+        emitted.concat()
+    }
+
+    #[test]
+    fn min_trial_deflate_matches_its_row_by_row_definition() {
+        // Several strides and widths, down to one byte per row, so the context window's byte
+        // offset is checked where a row is a small part of it and where it is most of it.
+        for (row_bytes, bpp) in [(1, 1), (2, 1), (6, 3), (15, 3), (48, 4), (96, 3)] {
+            let samples = textured(row_bytes, 24);
+            assert_eq!(
+                filter_image(FilterStrategy::MinTrialDeflate, &samples, row_bytes, bpp),
+                trial_reference(&samples, row_bytes, bpp),
+                "row_bytes {row_bytes}, bpp {bpp}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_trial_context_is_exactly_the_last_sixteen_rows() {
+        // Eight rows of noise reappear exactly seventeen rows later. A copy's candidates reproduce
+        // the original's emitted residuals byte for byte, so a context that reaches back even
+        // part of one row too far -- or the whole stream -- finds a long match the true window
+        // cannot see, and the copy's choices change. The shorter fixtures above barely notice a
+        // window that is too long, because their rows repeat every few rows anyway.
+        let (row_bytes, bpp, start) = (48, 3, 40);
+        let mut samples = textured(row_bytes, start + 25);
+        let mut state = 0x2545_F491u32;
+        for byte in &mut samples[start * row_bytes..(start + 8) * row_bytes] {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        samples.copy_within(
+            start * row_bytes..(start + 8) * row_bytes,
+            (start + 17) * row_bytes,
+        );
+        assert_eq!(
+            filter_image(FilterStrategy::MinTrialDeflate, &samples, row_bytes, bpp),
+            trial_reference(&samples, row_bytes, bpp)
+        );
+    }
+
+    #[test]
+    fn the_trial_score_compresses_the_row_after_its_context() {
+        // The score is the stream for context-then-row, so a row scored after a copy of itself
+        // costs what the doubled row costs alone -- and less than twice the row alone.
+        let row: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37)).collect();
+        let mut aux = Scratch::new();
+        let alone = row_score(Score::Trial, &row, &mut aux);
+        let after = score(Score::Trial, &row, &row, &mut aux);
+        let doubled = row_score(Score::Trial, &[&row[..], &row].concat(), &mut aux);
+        assert_eq!(after, doubled);
+        assert!(after < 2 * alone, "{after} vs {alone}");
     }
 }
