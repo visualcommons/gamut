@@ -288,11 +288,16 @@ fn build_image(exif: &Exif) -> Ifd {
 
 /// Serialises the TIFF stream, chaining the thumbnail as the 1st IFD.
 ///
-/// A JPEG thumbnail is re-embedded with a deterministic double-write: lay out the directories with a
-/// placeholder `JPEGInterchangeFormat` offset to learn where the bytes will land, patch the offset
-/// (an inline `LONG`, so the layout and total length are unchanged), then append the JPEG. An
-/// uncompressed strip thumbnail's directory is preserved but its pixel bytes are **not** re-embedded
-/// (a documented v1 limitation).
+/// The thumbnail's image bytes — a JPEG's one range, an uncompressed thumbnail's strips, or both
+/// if the model holds both — are re-embedded with a deterministic double-write. Pass 1 lays out
+/// the directories with every addressing offset (`JPEGInterchangeFormat`, `StripOffsets`) set to
+/// a placeholder `LONG` array of its final count, to learn where the directories end. Pass 2
+/// patches the real offsets in: the same type and count means the same value sizes, so the layout
+/// and total length are unchanged and the offsets computed from pass 1 still hold. The runs are
+/// then appended in that order, each starting on a word boundary.
+///
+/// A thumbnail that addresses no bytes still takes both passes, which then coincide: an
+/// early return for it would be decided by a condition whose mutant writes the same bytes.
 fn write_with_thumbnail(
     order: ByteOrder,
     image: Ifd,
@@ -302,34 +307,55 @@ fn write_with_thumbnail(
     let Some(thumb) = thumbnail else {
         return write_tree(order, vec![image], pin);
     };
-    let Some(jpeg) = thumb.jpeg() else {
-        return write_tree(order, vec![image, thumb.ifd().clone()], pin);
-    };
 
     let mut thumb_ifd = thumb.ifd().clone();
-    thumb_ifd.set(
-        ExifTag::JpegInterchangeFormatLength.tag_id(),
-        Value::Long(vec![jpeg.len() as u32]),
-    );
-    thumb_ifd.set(
-        ExifTag::JpegInterchangeFormat.tag_id(),
-        Value::Long(vec![0]),
-    );
+    // Each payload the 1st IFD addresses: the tag that holds its offsets, and its byte runs.
+    let mut payloads: Vec<(u16, Vec<&[u8]>)> = Vec::new();
+    if let Some(jpeg) = thumb.jpeg() {
+        thumb_ifd.set(
+            ExifTag::JpegInterchangeFormatLength.tag_id(),
+            Value::Long(vec![jpeg.len() as u32]),
+        );
+        payloads.push((ExifTag::JpegInterchangeFormat.tag_id(), vec![jpeg]));
+    }
+    if let Some(strips) = thumb.strips() {
+        let counts: Vec<u32> = strips.iter().map(|s| s.len() as u32).collect();
+        // Kept as the source wrote it (a SHORT array round-trips as SHORT) while it still sizes
+        // the strips; rewritten as LONG once an edit has made it disagree with them.
+        if thumb_ifd.get_u32_vec(ifd_tags::STRIP_BYTE_COUNTS) != Some(counts.clone()) {
+            thumb_ifd.set(ifd_tags::STRIP_BYTE_COUNTS, Value::Long(counts));
+        }
+        payloads.push((
+            ifd_tags::STRIP_OFFSETS,
+            strips.iter().map(Vec::as_slice).collect(),
+        ));
+    }
+    for (tag, runs) in &payloads {
+        thumb_ifd.set(*tag, Value::Long(vec![0; runs.len()]));
+    }
 
-    // Pass 1: lay out the directories to learn where the JPEG will start (word-aligned).
+    // Pass 1: lay out the directories to learn where the first run will start.
     let planned = write_tree(order, vec![image.clone(), thumb_ifd.clone()], pin)?;
-    let jpeg_offset = align_word(planned.len() as u64) as usize;
+    let mut end = planned.len() as u64;
+    for (tag, runs) in &payloads {
+        let offsets = runs
+            .iter()
+            .map(|run| {
+                let start = align_word(end);
+                end = start + run.len() as u64;
+                start as u32
+            })
+            .collect();
+        thumb_ifd.set(*tag, Value::Long(offsets));
+    }
 
-    // Pass 2: patch the now-known offset. Changing an inline LONG moves nothing, so the byte length
-    // is identical to pass 1 and `jpeg_offset` still points just past the directories.
-    thumb_ifd.set(
-        ExifTag::JpegInterchangeFormat.tag_id(),
-        Value::Long(vec![jpeg_offset as u32]),
-    );
+    // Pass 2: the patched offsets move nothing, so the runs land where pass 1 placed them.
     let mut bytes = write_tree(order, vec![image, thumb_ifd], pin)?;
-    debug_assert_eq!(jpeg_offset, align_word(bytes.len() as u64) as usize);
-    bytes.resize(jpeg_offset, 0);
-    bytes.extend_from_slice(jpeg);
+    debug_assert_eq!(bytes.len(), planned.len());
+    for run in payloads.iter().flat_map(|(_, runs)| runs) {
+        bytes.resize(align_word(bytes.len() as u64) as usize, 0);
+        bytes.extend_from_slice(run);
+    }
     Ok(bytes)
 }
 
@@ -361,7 +387,7 @@ fn tiff_file(order: ByteOrder, ifds: Vec<Ifd>) -> TiffFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExifTag, IfdKind, Value};
+    use crate::{ExifReader, ExifTag, IfdKind, Value};
 
     /// A model with tags spread across the 0th IFD, Exif, GPS and Interop sub-IFDs, plus a
     /// thumbnail directory — so the round-trip exercises the whole pointer tree.
@@ -481,6 +507,81 @@ mod tests {
             assert_eq!(parsed.make(), exif.make());
             assert_eq!(parsed.f_number(), exif.f_number());
         }
+    }
+
+    /// `sample` with an uncompressed thumbnail holding `strips`, sized by a SHORT
+    /// `StripByteCounts` (and no `StripOffsets`, which the model never stores), plus `jpeg` if any.
+    fn with_strip_thumbnail(order: ByteOrder, strips: &[Vec<u8>], jpeg: Option<Vec<u8>>) -> Exif {
+        let mut ifd = Ifd::new();
+        ifd.set(ExifTag::Compression.tag_id(), Value::Short(vec![1]));
+        ifd.set(
+            ifd_tags::STRIP_BYTE_COUNTS,
+            Value::Short(strips.iter().map(|s| s.len() as u16).collect()),
+        );
+        if let Some(jpeg) = &jpeg {
+            ifd.set(
+                ExifTag::JpegInterchangeFormatLength.tag_id(),
+                Value::Long(vec![jpeg.len() as u32]),
+            );
+        }
+        let base = sample(order);
+        Exif::from_parts(
+            order,
+            base.image().clone(),
+            base.exif_ifd().cloned(),
+            base.gps_ifd().cloned(),
+            base.interop_ifd().cloned(),
+            Some(Thumbnail::from_parts(ifd, jpeg, Some(strips.to_vec()))),
+            None,
+        )
+    }
+
+    /// Issue #856's acceptance: an uncompressed strip thumbnail survives parse → write → parse
+    /// with its bytes, and the model is a fixpoint (the SHORT `StripByteCounts` stays SHORT).
+    ///
+    /// Odd-length strips make every run after the first start past a padding byte, so an offset
+    /// computed from the unpadded end misaddresses it; the second case puts a JPEG before the
+    /// strips, so the strips' offsets must start past the JPEG run rather than the directories.
+    #[test]
+    fn re_embeds_strip_thumbnail_bytes_round_trip() {
+        let strips = vec![vec![1u8, 2, 3], vec![4, 5, 6, 7, 8], vec![9]];
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            for jpeg in [None, Some(vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0xD9])] {
+                let exif = with_strip_thumbnail(order, &strips, jpeg.clone());
+                let parsed = ExifReader::new()
+                    .strict(true)
+                    .parse(&exif.to_bytes().expect("write"))
+                    .expect("round-trip parse");
+                let thumb = parsed.thumbnail().expect("thumbnail");
+                assert_eq!(
+                    thumb.strips(),
+                    Some(strips.as_slice()),
+                    "{order:?} {jpeg:?}"
+                );
+                assert_eq!(thumb.jpeg(), jpeg.as_deref(), "{order:?}");
+                assert_eq!(parsed, exif, "{order:?} {jpeg:?}: model fixpoint");
+            }
+        }
+    }
+
+    /// A `StripByteCounts` an edit has put out of step with the strips is rewritten from them: the
+    /// strips are the authority, and a count that disagrees would misaddress them on the next read.
+    #[test]
+    fn strip_byte_counts_are_rewritten_from_the_strips() {
+        let strips = vec![vec![1u8, 2, 3], vec![4, 5]];
+        let mut exif = with_strip_thumbnail(ByteOrder::LittleEndian, &strips, None);
+        exif.set(
+            IfdKind::Thumbnail,
+            ifd_tags::STRIP_BYTE_COUNTS,
+            Value::Short(vec![9, 9]),
+        );
+        let parsed = Exif::parse(&exif.to_bytes().expect("write")).expect("parse");
+        let thumb = parsed.thumbnail().expect("thumbnail");
+        assert_eq!(thumb.strips(), Some(strips.as_slice()));
+        assert_eq!(
+            thumb.ifd().get(ifd_tags::STRIP_BYTE_COUNTS),
+            Some(&Value::Long(vec![3, 2]))
+        );
     }
 
     #[test]
