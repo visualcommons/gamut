@@ -42,3 +42,13 @@ metadata = ["dep:gamut-metadata"]
 # canonical reference codec that proves the encoder's output decodes to the same pixels and the
 # decoder reproduces what libjpeg-turbo decodes.
 libjpeg-oracle = { path = "../../tooling/libjpeg-oracle" }
+# Benchmark harness (issue #149) for `benches/decode.rs`.
+divan.workspace = true
+# The pure-Rust decoder issue #305 measures decode throughput against (bench + experiment arm only;
+# libjpeg-turbo above stays the output oracle). Default features keep its x86/NEON SIMD paths on,
+# which is the configuration a downstream user of it actually runs.
+zune-jpeg = "0.5.15"
+
+[[bench]]
+name = "decode"
+harness = false
