@@ -19,17 +19,30 @@
 //!   visible part is posterised photo content over a translucent ring. Each at two sides.
 //!
 //! Columns: `group,input,layout,width,height,cleanup,variant,sample,bytes,crc32,encode_ns,
-//! colour_type`. `bytes` and `crc32` identify the finished file; `encode_ns` is one wall-clock
-//! `encode_image` call; `colour_type` is the file's IHDR colour type (3 = indexed), so a row the
-//! variant cannot reach is recognisable.
+//! colour_type,indexed_bytes`. `bytes` and `crc32` identify the finished file; `encode_ns` is one
+//! wall-clock `encode_image` call; `colour_type` is the file's IHDR colour type (3 = indexed).
+//!
+//! `indexed_bytes` is the ordering's own signal, which the finished file hides whenever the indexed
+//! candidate loses `write_reduced_or_native`'s race: the size of the indexed candidate alone, at
+//! the same settings, whatever wins. It takes the palette and indices `analyze8`/`analyze16` built
+//! -- in whichever order this build's `ordered_palette` gave them -- and encodes them through
+//! `encode_indexed8`, the caller-palette path, whose cleaning drops and merges nothing here (every
+//! entry is named and distinct) and keeps the order. It is empty where the analysis offers no
+//! palette, and on the `+clean` rows, whose analysis runs on cleaned samples this arm cannot see.
+//!
+//! `first_seen_bytes` is the same candidate with its palette renumbered by first appearance in
+//! raster order, which is what a caller-supplied palette built by scanning the image looks like and
+//! what `encode_indexed8` keeps today. It is identical across builds, and it is the reference for
+//! the caller-palette half of the issue: what reordering a caller's palette could buy over leaving
+//! it alone.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Rgb8, Rgb16, Rgba8};
-use gamut_png::stages::Crc32;
-use gamut_png::{FilterStrategy, Level, PngEncoder};
+use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Indexed8, Pixel, Rgb8, Rgb16, Rgba8};
+use gamut_png::stages::{self, Crc32, Reduced, Reductions};
+use gamut_png::{FilterStrategy, Level, PngEncoder, PngPalette};
 
 #[path = "../tests/common/corpus.rs"]
 mod corpus;
@@ -300,19 +313,24 @@ where
     out
 }
 
+/// The corpus's big-endian 16-bit bytes as samples.
+fn widen16(samples: &[u8]) -> Vec<u16> {
+    samples
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&p| u16::from_be_bytes(p))
+        .collect()
+}
+
 /// Encodes once, returning the file and the nanoseconds the `encode_image` call took.
 fn encode(input: &Input) -> (Vec<u8>, u128) {
     let enc = encoder(input.cleanup);
     let dims = Dimensions::new(input.side, input.side).expect("valid dimensions");
     let s = &input.samples;
     // The 16-bit widening happens before the clock starts, so every row times the encode alone.
-    let wide: Vec<u16> = match input.layout {
-        Layout::Rgb16 => s
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&p| u16::from_be_bytes(p))
-            .collect(),
+    let wide = match input.layout {
+        Layout::Rgb16 => widen16(s),
         _ => Vec::new(),
     };
     let start = Instant::now();
@@ -323,6 +341,64 @@ fn encode(input: &Input) -> (Vec<u8>, u128) {
         Layout::Rgb16 => encode_as::<Rgb16>(&enc, &wide, dims),
     };
     (out, start.elapsed().as_nanos())
+}
+
+/// The size of the indexed candidate alone in this build's order and in first-seen order, or
+/// `None` where the analysis offers no palette (see the module doc's `indexed_bytes`).
+fn indexed_candidate(input: &Input) -> Option<(usize, usize)> {
+    let reductions = match input.layout {
+        Layout::Rgb16 => stages::analyze16(&widen16(&input.samples), 3),
+        Layout::Gray8 => stages::analyze8(&input.samples, 1),
+        Layout::Rgb8 => stages::analyze8(&input.samples, 3),
+        Layout::Rgba8 => stages::analyze8(&input.samples, 4),
+    };
+    let Reductions::Chunked {
+        chunked:
+            Reduced::Indexed {
+                indices,
+                plte,
+                trns,
+                ..
+            },
+        ..
+    } = reductions
+    else {
+        return None;
+    };
+    let rgb: Vec<[u8; 3]> = plte.as_chunks::<3>().0.to_vec();
+    let alpha = trns.unwrap_or_default();
+    let ordered = indexed_size(input.side, &indices, &rgb, &alpha);
+
+    // The same palette renumbered by first appearance in raster order: the order a caller that
+    // builds its palette while scanning would hand `encode_indexed8`, and the order the
+    // caller-palette path keeps today.
+    let mut renumber = [None::<u8>; 256];
+    let mut first_rgb = Vec::with_capacity(rgb.len());
+    let mut first_alpha = Vec::with_capacity(rgb.len());
+    let first_indices: Vec<u8> = indices
+        .iter()
+        .map(|&i| {
+            *renumber[usize::from(i)].get_or_insert_with(|| {
+                first_rgb.push(rgb[usize::from(i)]);
+                first_alpha.push(alpha.get(usize::from(i)).copied().unwrap_or(255));
+                (first_rgb.len() - 1) as u8
+            })
+        })
+        .collect();
+    let first_seen = indexed_size(input.side, &first_indices, &first_rgb, &first_alpha);
+    Some((ordered, first_seen))
+}
+
+/// One `encode_indexed8` at the experiment's settings, returning the file's length.
+fn indexed_size(side: u32, indices: &[u8], rgb: &[[u8; 3]], alpha: &[u8]) -> usize {
+    let palette = PngPalette::with_transparency(rgb, alpha).expect("analysis palette is valid");
+    let dims = Dimensions::new(side, side).expect("valid dimensions");
+    let image = ImageRef::<Indexed8>::new(indices, dims).expect("one index per pixel");
+    let mut out = Vec::new();
+    encoder(false)
+        .encode_indexed8(image, &palette, &mut out)
+        .expect("indexed encode");
+    out.len()
 }
 
 fn main() {
@@ -342,13 +418,21 @@ fn main() {
     let variant = variant.expect("--variant is required");
 
     let mut csv = String::from(
-        "group,input,layout,width,height,cleanup,variant,sample,bytes,crc32,encode_ns,colour_type\n",
+        "group,input,layout,width,height,cleanup,variant,sample,bytes,crc32,encode_ns,colour_type,indexed_bytes,first_seen_bytes\n",
     );
     for input in inputs() {
         if let Some(dir) = &corpus_dir {
             let file = dir.join(format!("{}.raw", input.name.replace([' ', '+', '@'], "_")));
             std::fs::write(&file, &input.samples).expect("write corpus file");
         }
+        let (indexed, first_seen) = if input.cleanup {
+            (String::new(), String::new())
+        } else {
+            indexed_candidate(&input).map_or_else(
+                || (String::new(), String::new()),
+                |(o, f)| (o.to_string(), f.to_string()),
+            )
+        };
         // One untimed warm-up encode, so sample 0 does not pay for cold caches.
         let _ = encode(&input);
         for sample in 0..samples {
@@ -359,7 +443,7 @@ fn main() {
             let colour_type = file[25];
             writeln!(
                 csv,
-                "{},{},{},{},{},{},{},{},{},{:08x},{},{}",
+                "{},{},{},{},{},{},{},{},{},{:08x},{},{},{},{}",
                 input.group,
                 input.name,
                 input.layout.name(),
@@ -372,6 +456,8 @@ fn main() {
                 crc.finish(),
                 ns,
                 colour_type,
+                indexed,
+                first_seen,
             )
             .expect("write to String");
         }

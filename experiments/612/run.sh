@@ -103,13 +103,14 @@ cat >"$exp/run.json" <<EOF
 }
 EOF
 
-# Per-input summary on stdout: bytes for each variant, the per-image race (smaller of baseline and
-# mzeng-trns), the colour type, and median encode time.
+# Per-input summary on stdout: finished-file bytes for each variant, the per-image race (smaller
+# of baseline and mzeng-trns), the colour type, the indexed candidate alone in each order
+# (first-seen is build-independent), and median encode time.
 awk -F, '
   FNR == 1 { next }
   {
     key = $2; v = $7
-    bytes[key, v] = $9; ct[key, v] = $12
+    bytes[key, v] = $9; ct[key, v] = $12; idx[key, v] = $13; first[key] = $14
     n[key, v]++; t[key, v, n[key, v]] = $11
     if (!(key in seen)) { seen[key] = 1; order[++rows] = key }
   }
@@ -119,14 +120,14 @@ awk -F, '
     for (i = 1; i <= m; i++) for (j = i + 1; j <= m; j++) if (a[j] < a[i]) { tmp = a[i]; a[i] = a[j]; a[j] = tmp }
     return a[int((m + 1) / 2)]
   }
-  function pct(a, b) { return b == 0 ? 0 : 100 * (a - b) / b }
   END {
-    printf "%-26s %3s %8s %8s %8s %8s %8s %8s %10s %10s %10s\n", "input", "ct", "base_B", "mzeng_B", "d%", "trns_B", "d%", "race_B", "base_ms", "mzeng_ms", "trns_ms"
+    printf "%-24s %2s %7s %7s %7s %7s | %7s %7s %7s %7s | %9s %9s %9s\n", "input", "ct", "base_B", "mzeng_B", "trns_B", "race_B", "idx_lum", "idx_mz", "idx_mzt", "idx_1st", "base_ms", "mzeng_ms", "trns_ms"
     for (r = 1; r <= rows; r++) {
       k = order[r]
       b = bytes[k, "baseline"]; z = bytes[k, "mzeng"]; zt = bytes[k, "mzeng-trns"]
       race = b < zt ? b : zt
-      printf "%-26s %3s %8d %8d %+8.2f %8d %+8.2f %8d %10.1f %10.1f %10.1f\n", k, ct[k, "baseline"], b, z, pct(z, b), zt, pct(zt, b), race,
+      printf "%-24s %2s %7d %7d %7d %7d | %7s %7s %7s %7s | %9.1f %9.1f %9.1f\n", k, ct[k, "baseline"], b, z, zt, race,
+        idx[k, "baseline"], idx[k, "mzeng"], idx[k, "mzeng-trns"], first[k],
         median(k, "baseline") / 1e6, median(k, "mzeng") / 1e6, median(k, "mzeng-trns") / 1e6
     }
   }
