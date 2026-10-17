@@ -189,6 +189,158 @@ pub fn idct8x8(block: &mut [i32; 64]) {
     }
 }
 
+/// Fractional bits of the fixed-point rotation constants (libjpeg's `CONST_BITS`).
+const CONST_BITS: u32 = 13;
+
+/// Extra fractional bits the column pass keeps for the row pass (libjpeg's 8-bit `PASS1_BITS`).
+const PASS1_BITS: u32 = 2;
+
+/// The LL&M rotation constants scaled by `2^CONST_BITS` and rounded, as `jidctint.c` tabulates
+/// them (`FIX_0_298631336` …): each name is the real value it approximates.
+const FIX_0_298631336: i64 = 2446;
+const FIX_0_390180644: i64 = 3196;
+const FIX_0_541196100: i64 = 4433;
+const FIX_0_765366865: i64 = 6270;
+const FIX_0_899976223: i64 = 7373;
+const FIX_1_175875602: i64 = 9633;
+const FIX_1_501321110: i64 = 12299;
+const FIX_1_847759065: i64 = 15137;
+const FIX_1_961570560: i64 = 16069;
+const FIX_2_053119869: i64 = 16819;
+const FIX_2_562915447: i64 = 20995;
+const FIX_3_072711026: i64 = 25172;
+
+/// `DESCALE(x, n)`: divides by `2^n`, rounding half up, and narrows to `i32`.
+///
+/// The narrowing wraps exactly as `jidctint.c`'s `(int)` cast does on an LP64 target; it can only
+/// matter for coefficients no conformant 8-bit stream produces.
+fn descale(x: i64, n: u32) -> i32 {
+    ((x + (1 << (n - 1))) >> n) as i32
+}
+
+/// One 8-point Loeffler–Ligtenberg–Moschytz inverse DCT as `jidctint.c` evaluates it: the even
+/// part (inputs 0, 2, 4, 6) and the odd part (inputs 1, 3, 5, 7), returning the eight outputs
+/// before the pass's [`descale`]. Both passes of [`idct8x8_int`] run exactly this body; they differ
+/// only in the shift applied afterwards.
+fn llm_1d(s: [i64; 8]) -> [i64; 8] {
+    // Even part: the rotator is √2·c6.
+    let z1 = (s[2] + s[6]) * FIX_0_541196100;
+    let tmp2 = z1 - s[6] * FIX_1_847759065;
+    let tmp3 = z1 + s[2] * FIX_0_765366865;
+    let tmp0 = (s[0] + s[4]) << CONST_BITS;
+    let tmp1 = (s[0] - s[4]) << CONST_BITS;
+    let (tmp10, tmp13) = (tmp0 + tmp3, tmp0 - tmp3);
+    let (tmp11, tmp12) = (tmp1 + tmp2, tmp1 - tmp2);
+
+    // Odd part (LL&M figure 8): i0..i3 are the inputs 7, 5, 3, 1.
+    let (i0, i1, i2, i3) = (s[7], s[5], s[3], s[1]);
+    let z5 = (i0 + i2 + i1 + i3) * FIX_1_175875602;
+    let z1 = -(i0 + i3) * FIX_0_899976223;
+    let z2 = -(i1 + i2) * FIX_2_562915447;
+    let z3 = z5 - (i0 + i2) * FIX_1_961570560;
+    let z4 = z5 - (i1 + i3) * FIX_0_390180644;
+    let o0 = i0 * FIX_0_298631336 + z1 + z3;
+    let o1 = i1 * FIX_2_053119869 + z2 + z4;
+    let o2 = i2 * FIX_3_072711026 + z2 + z3;
+    let o3 = i3 * FIX_1_501321110 + z1 + z4;
+
+    [
+        tmp10 + o3,
+        tmp11 + o2,
+        tmp12 + o1,
+        tmp13 + o0,
+        tmp13 - o0,
+        tmp12 - o1,
+        tmp11 - o2,
+        tmp10 - o3,
+    ]
+}
+
+/// In-place 2-D **inverse** DCT of an 8×8 block in 13-bit fixed point — the decoder's fast
+/// kernel, bit-exact with libjpeg-turbo's accurate integer IDCT (`jpeg_idct_islow`, `jidctint.c`,
+/// the Loeffler–Ligtenberg–Moschytz factorisation).
+///
+/// `block` holds the 64 dequantized coefficients in raster (row-major) order, as for
+/// [`idct8x8`]; on return it holds the level-shifted reconstruction in raster order, likewise
+/// neither clamped nor shifted back by `2^(P-1)` (§A.3.1 is the decoder's job). Unlike
+/// [`idct8x8`] the samples are not the ideal §A.3.3 values rounded once: they are the
+/// fixed-point approximation, which meets the IEEE 1180-1990 accuracy bounds (peak error 1,
+/// per-sample mean square error ≤ 0.06) that the T.83 compliance tests build on. [`idct8x8`]
+/// stays the reference this kernel is measured against.
+///
+/// # Bit exactness
+/// For every block whose samples land in libjpeg's range-limit window (any block a conformant
+/// 8-bit stream decodes to), the output plus 128, clamped to `0..=255`, is exactly the sample
+/// `jpeg_idct_islow` writes. Outside that window libjpeg's masked range-limit table and a plain
+/// clamp diverge; and coefficients beyond the 8-bit domain wrap in the column-pass narrowing as
+/// libjpeg's `(int)` casts do. No input panics: the arithmetic is `i64` throughout.
+///
+/// # Sparsity
+/// A column whose seven AC coefficients are zero, and a row of the intermediate whose AC terms
+/// are zero, take `jidctint.c`'s shortcut, which gives the same value as the full butterfly.
+/// A caller that already knows a block is DC-only (a decoder that saw an end-of-block straight
+/// after the DC) can skip the kernel altogether with [`idct8x8_int_dc`].
+///
+/// # Examples
+/// ```
+/// use gamut_dsp::jpeg::{idct8x8_int, idct8x8_int_dc};
+///
+/// // A pure DC coefficient reconstructs to a flat block, and the DC shortcut agrees.
+/// let mut block = [0i32; 64];
+/// block[0] = 80;
+/// idct8x8_int(&mut block);
+/// assert!(block.iter().all(|&s| s == 10));
+/// assert_eq!(idct8x8_int_dc(80), 10);
+/// ```
+pub fn idct8x8_int(block: &mut [i32; 64]) {
+    let mut ws = [0i32; 64];
+
+    // Pass 1: columns, keeping PASS1_BITS extra fractional bits.
+    for u in 0..8 {
+        if (1..8).all(|v| block[v * 8 + u] == 0) {
+            let dc = block[u].wrapping_shl(PASS1_BITS);
+            for v in 0..8 {
+                ws[v * 8 + u] = dc;
+            }
+            continue;
+        }
+        let out = llm_1d(core::array::from_fn(|v| i64::from(block[v * 8 + u])));
+        for (v, &value) in out.iter().enumerate() {
+            ws[v * 8 + u] = descale(value, CONST_BITS - PASS1_BITS);
+        }
+    }
+
+    // Pass 2: rows, removing the PASS1_BITS scaling and the factor of 8 the two passes carry.
+    for (row, out_row) in ws.chunks_exact(8).zip(block.chunks_exact_mut(8)) {
+        if row[1..].iter().all(|&c| c == 0) {
+            out_row.fill(descale(i64::from(row[0]), PASS1_BITS + 3));
+            continue;
+        }
+        let out = llm_1d(core::array::from_fn(|x| i64::from(row[x])));
+        for (sample, &value) in out_row.iter_mut().zip(out.iter()) {
+            *sample = descale(value, CONST_BITS + PASS1_BITS + 3);
+        }
+    }
+}
+
+/// The value every sample of [`idct8x8_int`] takes for a block whose only nonzero coefficient is
+/// the dequantized DC term `dc`: the sparsity hint, for a caller that knows the 63 AC terms are
+/// zero and need not build the block at all.
+///
+/// Level-shifted and unclamped like [`idct8x8_int`]'s output, and equal to it for every `dc`.
+///
+/// # Examples
+/// ```
+/// use gamut_dsp::jpeg::idct8x8_int_dc;
+///
+/// assert_eq!(idct8x8_int_dc(-1024), -128);
+/// assert_eq!(idct8x8_int_dc(12), 2); // 1.5 rounds half up
+/// ```
+#[must_use]
+pub fn idct8x8_int_dc(dc: i32) -> i32 {
+    descale(i64::from(dc.wrapping_shl(PASS1_BITS)), PASS1_BITS + 3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +586,209 @@ mod tests {
                     r - o
                 );
             }
+        }
+    }
+
+    /// The pseudo-random generator IEEE Std 1180-1990 prescribes for its accuracy test
+    /// (`ieeerand`, seeded with 1): uniform integers in `[-low, high]`. Only the low 31 bits of
+    /// the state are ever read, so a 32-bit wrapping state reproduces the standard's sequence on
+    /// any word size.
+    struct Ieee1180Rand(u32);
+
+    impl Ieee1180Rand {
+        fn next(&mut self, low: i32, high: i32) -> i32 {
+            self.0 = self.0.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let unit = f64::from(self.0 & 0x7fff_fffe) / f64::from(0x7fff_ffff_u32);
+            (unit * f64::from(low + high + 1)) as i32 - low
+        }
+    }
+
+    /// The per-position and overall error statistics of one IEEE 1180 run, as the standard's
+    /// five bounds read them.
+    struct Ieee1180Stats {
+        peak: i32,
+        worst_position_mse: f64,
+        overall_mse: f64,
+        worst_position_mean: f64,
+        overall_mean: f64,
+    }
+
+    /// One IEEE 1180-1990 run: `blocks` random blocks of samples in `[-low, high]` (negated when
+    /// `negate`), forward-transformed by the ideal DCT and rounded, the coefficients clipped to
+    /// `[-2048, 2047]`; then the reference ([`idct8x8`]) and the kernel under test
+    /// ([`idct8x8_int`]) each reconstruct them, both clipped to `[-256, 255]`.
+    fn ieee1180_run(low: i32, high: i32, negate: bool, blocks: usize) -> Ieee1180Stats {
+        let mut rng = Ieee1180Rand(1);
+        let mut sum = [0i64; 64];
+        let mut sum_sq = [0i64; 64];
+        let mut peak = 0;
+        for _ in 0..blocks {
+            let mut coeffs = [0i32; 64];
+            for s in &mut coeffs {
+                let v = rng.next(low, high);
+                *s = if negate { -v } else { v };
+            }
+            fdct8x8(&mut coeffs);
+            for c in &mut coeffs {
+                *c = (*c).clamp(-2048, 2047);
+            }
+            let mut reference = coeffs;
+            idct8x8(&mut reference);
+            let mut test = coeffs;
+            idct8x8_int(&mut test);
+            for i in 0..64 {
+                let err = test[i].clamp(-256, 255) - reference[i].clamp(-256, 255);
+                peak = peak.max(err.abs());
+                sum[i] += i64::from(err);
+                sum_sq[i] += i64::from(err * err);
+            }
+        }
+        let n = blocks as f64;
+        let per = |acc: &[i64; 64]| acc.map(|a| a as f64 / n);
+        let (mean, mse) = (per(&sum), per(&sum_sq));
+        Ieee1180Stats {
+            peak,
+            worst_position_mse: mse.iter().copied().fold(0.0, f64::max),
+            overall_mse: mse.iter().sum::<f64>() / 64.0,
+            worst_position_mean: mean.iter().map(|m| m.abs()).fold(0.0, f64::max),
+            overall_mean: (mean.iter().sum::<f64>() / 64.0).abs(),
+        }
+    }
+
+    /// The IEEE 1180-1990 inverse-DCT accuracy test, in full: the three input ranges
+    /// `(L, H) = (256, 255), (5, 5), (300, 300)`, each with 10 000 blocks and again sign-negated,
+    /// against the standard's five bounds — peak error ≤ 1, per-position mean square error ≤ 0.06,
+    /// overall mean square error ≤ 0.02, per-position mean error ≤ 0.015, overall mean error
+    /// ≤ 0.0015. A wrong rotation constant, a lost rounding term or a biased descale fails one of
+    /// them; the zero-in/zero-out clause is [`int_zero_block_is_zero`].
+    ///
+    /// Measured worst case over the six runs: peak 1, position MSE 0.0165, overall MSE 0.0139,
+    /// position mean 0.0027, overall mean 0.000127 — inside every bound with margin, so the
+    /// bounds are asserted as the standard states them.
+    #[test]
+    fn int_meets_ieee_1180_accuracy() {
+        for (low, high) in [(256, 255), (5, 5), (300, 300)] {
+            for negate in [false, true] {
+                let s = ieee1180_run(low, high, negate, 10_000);
+                let ctx = format!("L={low} H={high} negated={negate}");
+                assert!(s.peak <= 1, "{ctx}: peak error {}", s.peak);
+                assert!(
+                    s.worst_position_mse <= 0.06,
+                    "{ctx}: position mse {}",
+                    s.worst_position_mse
+                );
+                assert!(
+                    s.overall_mse <= 0.02,
+                    "{ctx}: overall mse {}",
+                    s.overall_mse
+                );
+                assert!(
+                    s.worst_position_mean <= 0.015,
+                    "{ctx}: position mean {}",
+                    s.worst_position_mean
+                );
+                assert!(
+                    s.overall_mean <= 0.0015,
+                    "{ctx}: overall mean {}",
+                    s.overall_mean
+                );
+            }
+        }
+    }
+
+    /// IEEE 1180's last clause: an all-zero coefficient block reconstructs to all zeros.
+    #[test]
+    fn int_zero_block_is_zero() {
+        let mut block = [0i32; 64];
+        idct8x8_int(&mut block);
+        assert_eq!(block, [0i32; 64]);
+    }
+
+    /// Every single-coefficient block — each of the 64 positions at both signs and three
+    /// magnitudes — lands within one code of the rounded ideal value. A lone AC term is exactly
+    /// the input that must *not* take a column or row shortcut, so a shortcut test that looked at
+    /// the wrong coefficient (or accepted a nonzero one) flattens that block and fails here, as
+    /// does a butterfly that misroutes one input.
+    #[test]
+    fn int_impulses_are_within_one_code_of_the_ideal() {
+        for pos in 0..64 {
+            for amplitude in [-1023, -100, -7, 7, 100, 1023] {
+                let mut coeffs = [0i32; 64];
+                coeffs[pos] = amplitude;
+                let mut ideal = coeffs;
+                idct8x8(&mut ideal);
+                let mut got = coeffs;
+                idct8x8_int(&mut got);
+                for (i, (&g, &r)) in got.iter().zip(ideal.iter()).enumerate() {
+                    assert!(
+                        (g - r).abs() <= 1,
+                        "impulse {amplitude} at {pos}: sample {i} got {g}, ideal {r}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Blocks dense in AC energy — every coefficient nonzero, so no column or row may shortcut —
+    /// stay within one code of the rounded ideal value: the case where a shortcut test that
+    /// fired on nonzero terms would discard the whole AC content.
+    #[test]
+    fn int_dense_blocks_are_within_one_code_of_the_ideal() {
+        let mut rng = Lcg::new(0x5eed_1180_0000_0001);
+        for _ in 0..500 {
+            let mut coeffs = [0i32; 64];
+            for c in &mut coeffs {
+                let magnitude = 1 + rng.level_shifted_sample(6).abs();
+                *c = if rng.next() >> 63 == 0 {
+                    magnitude
+                } else {
+                    -magnitude
+                };
+            }
+            let mut ideal = coeffs;
+            idct8x8(&mut ideal);
+            let mut got = coeffs;
+            idct8x8_int(&mut got);
+            for (i, (&g, &r)) in got.iter().zip(ideal.iter()).enumerate() {
+                assert!((g - r).abs() <= 1, "sample {i} got {g}, ideal {r}");
+            }
+        }
+    }
+
+    /// The DC-only shortcut gives exactly what the kernel gives for the same DC-only block, over
+    /// the whole 8-bit dequantized DC domain and at the `i32` extremes (where both narrow the
+    /// same way).
+    #[test]
+    fn int_dc_shortcut_equals_the_kernel() {
+        let extremes = [i32::MIN, i32::MIN + 1, i32::MAX - 1, i32::MAX];
+        for dc in (-2048..=2047).chain(extremes) {
+            let mut block = [0i32; 64];
+            block[0] = dc;
+            idct8x8_int(&mut block);
+            let flat = idct8x8_int_dc(dc);
+            assert!(
+                block.iter().all(|&s| s == flat),
+                "dc {dc}: {block:?} vs {flat}"
+            );
+        }
+    }
+
+    /// The DC-only value is `dc / 8` rounded half up — `jidctint.c`'s
+    /// `DESCALE(dc << PASS1_BITS, PASS1_BITS + 3)` — pinned at the rounding boundaries.
+    #[test]
+    fn int_dc_rounds_half_up() {
+        for (dc, expected) in [
+            (0, 0),
+            (3, 0),
+            (4, 1),
+            (11, 1),
+            (12, 2),
+            (-4, 0),
+            (-5, -1),
+            (-12, -1),
+            (-13, -2),
+        ] {
+            assert_eq!(idct8x8_int_dc(dc), expected, "dc {dc}");
         }
     }
 }

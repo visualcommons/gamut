@@ -25,6 +25,7 @@ future `jxl`/`av2` module can never collide with an existing name.
 | `av1::inverse_identity` / `av1::forward_identity` | same shape, `n ∈ 2..=5`; pure per-element √2-step scaling | frozen |
 | `av1::forward_wht4x4` / `av1::inverse_wht4x4` | complete 2-D 4×4 lossless block pair over by-value `[i32; 16]`; exact algebraic round-trip | frozen |
 | `jpeg::fdct8x8` / `jpeg::idct8x8` | in-place 2-D 8×8 kernels over a raster-order `&mut [i32; 64]`; separable `f64` evaluation of the T.81 §A.3.3 ideal equations, rounded once | frozen, signature *and* output (see the decision below); fast fixed-point kernels are additive new functions |
+| `jpeg::idct8x8_int` / `jpeg::idct8x8_int_dc` | the fast inverse beside the pair (issue #896): in-place 13-bit fixed-point LL&M over the same `&mut [i32; 64]`, bit-exact with libjpeg-turbo's `jpeg_idct_islow`, column/row zero shortcuts; `_dc` is the DC-only sparsity hint (`i32 → i32`, the value of every sample) | additive; output frozen as libjpeg's `jidctint.c` arithmetic |
 | `math::round2` `math::round2_signed` `math::clip3` `math::round_div_nearest` | scalar integer ops: AV1 §4.7 rounding/clamp plus the AV1+VP8 forward-quantize rounding | frozen; new fns are additive |
 
 Adding modules or functions stays backward-compatible; removing or reshaping any of the above
@@ -78,9 +79,9 @@ would not.
   consumes it; what is deferred is `gamut-tiff`'s JPEG-in-TIFF compression, a consumer outside
   this crate. `gamut-tiff` does not declare a dsp edge today; it adds one, or reaches the kernels
   through `gamut-jpeg`, when that compression lands.
-- **Fast fixed-point `jpeg` DCT kernels** — the shipped pair favours a legible spec-faithful
-  reference (issue #28 scope note); faster kernels land as new functions beside the pair, which
-  keeps its exact output (see the settled decision above).
+- **Fast fixed-point `jpeg` forward DCT** — the inverse landed as `idct8x8_int` (issue #896)
+  beside the reference pair, which keeps its exact output (see the settled decision above); a
+  fast forward kernel for the encoder is not planned yet, and would land the same way.
 - **`jxl` / `av2` modules** — kernels for the JPEG XL and AV2 codecs as those stub crates grow
   real surfaces (`av2` may re-export `av1` kernels where AVM inherits them).
 - **`forward_adst` const basis tables** — replace the per-call impulse-response derivation with
@@ -96,7 +97,10 @@ transcription is pinned against DCT-III / DST-VII / DST-IV directly), exact gold
 oracle), adversarial clamp-saturation probes proving the `r` range is wired through the
 butterflies, ±2¹⁹/±4095 headroom probes under debug overflow checks; the `jpeg` pair is pinned
 inline against a direct evaluation of the §A.3.3 double sum, plus DC, orientation and round-trip
-probes — plus `tests/surface.rs`, which drives the 12 `av1`/`math` public functions through their
+probes; `idct8x8_int` is held to the full IEEE 1180-1990 accuracy procedure against `idct8x8`
+(three input ranges × 10 000 blocks × both signs, all five bounds; T.83 is not vendored), plus
+impulse, dense-block and DC-shortcut equality probes, and its bit-exactness with libjpeg-turbo
+lands through `gamut-jpeg`'s oracle gate, which asserts exact equality on gray — plus `tests/surface.rs`, which drives the 12 `av1`/`math` public functions through their
 `gamut_dsp::module::item` paths only (the two `jpeg` functions are not yet in it), and the
 compiled crate-root doctest.
 Bit-exactness of the inverse kernels against dav1d/libaom lands transitively through the 2-D
