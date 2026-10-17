@@ -80,6 +80,13 @@ const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 7] = [
 /// thread creation as unsupported, so every trial falls back in order. A panic in a trial is
 /// re-raised on the caller, as it would have been without the threads.
 ///
+/// **The speed is paid for in memory.** Run one after another, the trials held one candidate's
+/// filtered image and optimal-parse buffers at a time; run together, all seven are alive at once,
+/// and nothing here caps how many. Measured on a square RGB photograph at [`Level::Best`] with
+/// the [`Preset::Smallest`] span, a `BruteForce` encode's peak resident set is **2.4x to 3.4x**
+/// what the serial loop's was — `STATUS.md` carries the table. That is the trade the maintainer's
+/// decision on #624 accepted; a caller encoding near its memory limit should budget for it.
+///
 /// No dependency is added for this (a maintainer decision on #624): `std::thread::scope` borrows
 /// the image without copying it, and one encode's seven trials are too few and too coarse for a
 /// work-stealing pool to schedule any better.
@@ -393,6 +400,11 @@ pub enum Preset {
     /// step from `Small` costs **6.26x** and buys 3.6%, and on four of the nine rows it buys three
     /// bytes or fewer. Intended for write-once assets where size dominates, and worth measuring on
     /// your own material rather than assuming — see `STATUS.md`.
+    ///
+    /// Also the most memory-hungry rung: the filter search's seven candidates run concurrently,
+    /// each with its own 8 MiB-span parse, so a 2048x2048 RGB photograph peaks near 680 MiB
+    /// resident where the same search run serially peaked near 210 MiB (both at refinement budget
+    /// 1; `STATUS.md` has the table).
     Smallest = 3,
 }
 
@@ -420,6 +432,15 @@ struct PresetKnobs {
 /// bound in the image, which is not something to ship behind a rung named for size. Measured peak
 /// resident set for one encode of a 4096x4096 RGB photograph at [`Level::Best`]: **701.8 MiB**
 /// unbounded against **219.0 MiB** at this span and **177.9 MiB** at the 1 MiB default.
+///
+/// Those are **one** stream's figures, and the rung does not parse one stream at a time. Its
+/// [`FilterStrategy::BruteForce`] runs seven candidates concurrently (#624), each with its own
+/// filtered image and its own span-length buffers, so the rung's own peak is several times a
+/// single encode's. Measured for a whole `BruteForce` encode at this span, refinement budget 1,
+/// concurrent against the serial search it replaced: **261.8 against 77.3 MiB** at 1024x1024,
+/// **678.6 against 210.9 MiB** at 2048x2048, and **1266.1 against 517.3 MiB** at 4096x4096.
+/// The span still bounds each candidate, and the candidate count is fixed at seven, so the
+/// rung's working set stays bounded in the span — by up to seven candidates' worth of it.
 ///
 /// Eight and not more, measured rather than picked: a wider span only helps an image whose
 /// *filtered* stream exceeds it, and the help saturates fast. At 8 MiB the span is the whole

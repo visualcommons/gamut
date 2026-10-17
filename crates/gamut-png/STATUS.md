@@ -403,7 +403,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. A tie keeps the **plain** encoding: cleaning buys its rewritten samples with a size win, and where there is no win there is nothing to buy them with. |
 | 6 | Metadata hygiene | **preserve, never strip** — the encoder emits exactly what the caller set, and `gamut convert` carries a PNG input's metadata into a PNG output unless `--strip-metadata` asks otherwise (see [Metadata preservation](#metadata-preservation-issue-483)). Preserving costs bytes, and that is the trade this axis takes: a smaller file that silently lost a colour profile is not a better one. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
-| 8 | Effort / speed / determinism | **partial** — output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). The five size/time knobs now compose into a four-rung `Preset` dial (see [The effort ladder](#the-effort-ladder-issue-484)), and `gamut-deflate`'s `with_optimal_parse_limit` is reachable from `PngEncoder` at last, so PNG callers are no longer stuck at 1 MiB spans. `BruteForce`'s seven candidates now run concurrently on `std::thread::scope` threads, with no new dependency, and serially where the platform cannot create threads (`wasm32`). They are joined in candidate order, so a tie still goes to the earlier strategy and the output stays byte-reproducible (see [The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)). [#484], [#624] |
+| 8 | Effort / speed / determinism | **done** — output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). The five size/time knobs now compose into a four-rung `Preset` dial (see [The effort ladder](#the-effort-ladder-issue-484)), and `gamut-deflate`'s `with_optimal_parse_limit` is reachable from `PngEncoder` at last, so PNG callers are no longer stuck at 1 MiB spans. `BruteForce`'s seven candidates now run concurrently on `std::thread::scope` threads, with no new dependency, and serially where the platform cannot create threads (`wasm32`). They are joined in candidate order, so a tie still goes to the earlier strategy and the output stays byte-reproducible (see [The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)). Parallelism was the axis's last named gap. It is paid for in memory, 2.4–3.4x the serial peak with no cap, which is a stated cost rather than an open item; a caller-facing concurrency cap is not planned. [#484], [#624] |
 | 9 | Correctness / robustness | **covered** — 16-bit, odd dimensions, 1×1, CRC policy, malformed input. |
 
 ### The cost model, and why it is a race
@@ -619,6 +619,28 @@ The ceiling is not 7x. The wall time is now the slowest single candidate rather 
 fewer than seven free cores gets proportionally less. The effort-ladder tables above were measured
 before this change and are left as they were taken.
 
+**What it costs is memory.** Serially, one candidate's filtered image and optimal-parse buffers
+(12 bytes per byte of span, see [below](#the-optimal-parse-span-measured-where-it-is-live)) were
+alive at a time. Concurrently, all seven are, and nothing caps how many: `available_parallelism` is
+not consulted, because the output must not depend on the machine. Peak resident set for one
+`BruteForce` encode per process (`/usr/bin/time -v`, release build, `photo_rgb` at the given side,
+`Level::Best`, the `Preset::Smallest` 8 MiB span, refinement budget 1, auto-reduce off). `serial`
+encodes the seven candidates one after another through the public API, as the bench's `serial` arm
+does; the two arms emit the same bytes at every size:
+
+| image | serial | concurrent | ratio |
+| --- | ---: | ---: | ---: |
+| 1024x1024 | 77.3 MiB | 261.8 MiB | 3.4x |
+| 2048x2048 | 210.9 MiB | 678.6 MiB | 3.2x |
+| 4096x4096 | 517.3 MiB | 1266.1 MiB | 2.4x |
+
+A second run of each 1024 and 2048 cell landed within 1% of the first. The ratio is measured, not
+derived: it is well short of seven, and why was not investigated. This is the trade the
+maintainer's decision on #624 accepted for a 5.4x faster rung. It stays bounded in the span, since
+each candidate is, and the candidate count is fixed at seven. A caller that must stay near the
+serial figure can pick one strategy instead of `BruteForce`; there is no knob that keeps the search
+and runs it serially, and none is planned.
+
 ### The optimal-parse span, measured where it is live
 
 Every number in the section above is 64x64, and at 64x64 this knob does nothing: the whole corpus
@@ -689,6 +711,12 @@ more refinement passes to converge, so time is data-dependent rather than flat; 
 `PngEncoder::with_optimal_parse_limit` says all of this at the setter;
 `DeflateEncoder::with_optimal_parse_limit`, where the allocation actually happens, still names only
 time, which is [#631].
+
+These are single-stream figures: one filter strategy, one DEFLATE. `Preset::Smallest` runs
+`BruteForce`, whose seven candidates now parse concurrently, so the rung's own peak is several
+times the 8 MiB column;
+[The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)
+measures it.
 
 **So `Preset::Smallest` takes a finite 8 MiB span and not an unbounded one.** At 8 MiB the span is
 the whole stream — byte-identical to no bound — for any image up to about 1670x1670 RGB or
