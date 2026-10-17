@@ -21,7 +21,7 @@
 use std::num::NonZeroU16;
 
 use gamut_core::{Error, Result};
-use gamut_dsp::jpeg::idct8x8;
+use gamut_dsp::jpeg::{idct8x8_int, idct8x8_int_dc};
 
 use crate::huffman::{DecTable, LOOKAHEAD};
 use crate::syntax::{Frame, ScanHeader, Tables};
@@ -406,7 +406,9 @@ impl Ctx<'_> {
         };
         self.pred = self.pred.wrapping_add(diff);
         zz[0] = self.pred.wrapping_mul(i32::from(self.quant[0]));
-        // AC: run/size symbols in zig-zag order (§F.2.2.2).
+        // AC: run/size symbols in zig-zag order (§F.2.2.2). `last` is the zig-zag index of the last
+        // coded AC coefficient, `0` while none has been: the IDCT's sparsity hint.
+        let mut last = 0usize;
         let mut k = 1usize;
         while k < 64 {
             let rs = decode_symbol(self.ac, r)?;
@@ -429,12 +431,29 @@ impl Ctx<'_> {
             let coeff = extend(r.read_bits(u32::from(size))?, size);
             let natural = ZIGZAG[k];
             zz[natural] = coeff.wrapping_mul(i32::from(self.quant[natural]));
+            last = k;
             k += 1;
         }
-        // Inverse DCT, level shift and clamp (§A.3.1).
-        write_block(&mut zz, &mut self.plane, bx, by);
+        // Inverse DCT, level shift and clamp (§A.3.1). A block that coded no AC coefficient is
+        // flat, and its one value comes from the kernel's DC shortcut without a transform.
+        if last == 0 {
+            write_flat(idct8x8_int_dc(zz[0]), &mut self.plane, bx, by);
+        } else {
+            write_block(&mut zz, &mut self.plane, bx, by);
+        }
         Ok(())
     }
+}
+
+/// Level-shifts (+128) and clamps one reconstructed sample to `0..=255` (§A.3.1). The saturating
+/// add keeps the shift in range for any `i32` the kernel can return.
+///
+/// Written as shift-then-clamp, not `(s.clamp(-128, 127) + 128) as u8`: in that form the cast
+/// wraps `s - 128` onto the same byte as `s + 128`, so the `+`→`-` mutant had an equivalent twin
+/// no input could kill (#896's mutation survey). This form leaves no operator to mutate here; the
+/// function stays covered by its whole-body mutants.
+fn level_shift(s: i32) -> u8 {
+    s.saturating_add(128).clamp(0, 255) as u8
 }
 
 /// Inverse-transforms a dequantized natural-order block `zz`, level-shifts (+128) and clamps each
@@ -442,14 +461,26 @@ impl Ctx<'_> {
 /// (§A.3.1). The single reconstruction tail shared by the sequential ([`Ctx::decode_block`]) and
 /// progressive ([`ProgComp::into_plane`]) paths, so both produce byte-identical samples.
 fn write_block(zz: &mut [i32; 64], plane: &mut Plane, bx: usize, by: usize) {
-    idct8x8(zz);
+    idct8x8_int(zz);
     plane.ensure_rows((by + 1) * 8);
     let stride = plane.stride;
     for (row, samples) in zz.as_chunks::<8>().0.iter().enumerate() {
         let dst = (by * 8 + row) * stride + bx * 8;
         for (out, &s) in plane.data[dst..dst + 8].iter_mut().zip(samples) {
-            *out = (s + 128).clamp(0, 255) as u8;
+            *out = level_shift(s);
         }
+    }
+}
+
+/// Writes the flat 8×8 block whose every level-shifted sample is `s` into `plane` at block
+/// position `(bx, by)` — what [`write_block`] writes for a DC-only block, without the transform.
+fn write_flat(s: i32, plane: &mut Plane, bx: usize, by: usize) {
+    plane.ensure_rows((by + 1) * 8);
+    let stride = plane.stride;
+    let value = level_shift(s);
+    for row in 0..8 {
+        let dst = (by * 8 + row) * stride + bx * 8;
+        plane.data[dst..dst + 8].fill(value);
     }
 }
 
