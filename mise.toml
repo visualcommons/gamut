@@ -60,7 +60,7 @@ depends_post = ["fmt-tooling-check"]
 # `cargo fmt --all` formats workspace *members*, and `members = ["crates/*"]` — so no crate under
 # `tooling/` has ever been fmt-gated. This is wider than the compile gap `check-dng-real` closes:
 # that one is unique to `gamut-dng-real-conformance`, the only excluded crate nothing depends on,
-# whereas rustfmt is blind to all fifteen — a path dev-dependency edge makes a crate reachable to
+# whereas rustfmt is blind to all of them — a path dev-dependency edge makes a crate reachable to
 # `clippy --workspace --all-targets`, but does nothing for `fmt --all`. Hung off `fmt`/`fmt-check`
 # rather than exposed as a separate gate so the hooks (hk.pkl) and CI inherit it with no second
 # call site to keep in sync. rustfmt compiles nothing, so iterating the manifests costs seconds.
@@ -69,11 +69,13 @@ depends_post = ["fmt-tooling-check"]
 #
 # Deliberately *not* `--all` on each manifest: that flag means "all packages, and also their local
 # path-based dependencies", so `gamut-dng-real-conformance` alone drags the whole `crates/` tree
-# back in — 483 of the 518 files such a loop reaches, every one already covered by the `fmt --all`
-# above — and reports one drifting file once per dependent crate that can see it, up to 18 times
-# for a single file. Iterating the manifests bare visits each crate's own targets (lib, examples,
-# tests) exactly once: the same `tooling/` coverage — set-identical, all 35 files across all 15
-# crates — for 35 file-visits instead of 1131.
+# back in — 555 of the 616 files such a loop reaches, every one already covered by the `fmt --all`
+# above — and reports one drifting file once per visit, up to 48 times for a single file.
+# Iterating the manifests bare visits each crate's own targets (lib, examples, tests) once: the
+# same `tooling/` coverage — set-identical to `git ls-files 'tooling/**/*.rs'`, all 61 files
+# across the 17 `tooling/*/Cargo.toml` crates — for 65 file-visits instead of 2681 (a shared
+# `tests/common/mod.rs` is visited once per test target that declares it). Figures as of #847;
+# re-derive by collecting rustfmt's `--verbose` "Formatting" lines from both loops.
 [tasks.fmt-tooling]
 description = "Format the workspace-excluded tooling crates (`fmt --all` stops at the workspace boundary)"
 depends = ["ensure-nightly-rustfmt"]
@@ -245,7 +247,8 @@ run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml
 # earlier. With it, a lockfile that is missing or out of date fails the task instead of being
 # regenerated.
 #
-# That lockfile also records the 15 `gamut-*` crates this one reaches by path (it is workspace-
+# That lockfile also records every `gamut-*` crate this one reaches by path — 22 as of #847,
+# counted by `grep -c '^name = "gamut-' tooling/c2pa-oracle/Cargo.lock` (it is workspace-
 # `exclude`d, so the root lockfile does not stand in for it). A release-plz version bump or a
 # dependency change in any of them therefore fails both tasks with "cannot update the lock file …
 # --locked was passed" even though nothing here changed. Refresh with
@@ -262,7 +265,7 @@ run = "cargo test --locked --manifest-path tooling/c2pa-oracle/Cargo.toml"
 #
 # Wired like the DNG pair (issue #541): `check-c2pa` runs in ci.yml's per-PR `lint` job beside
 # `check-dng-real`, and `test-c2pa` in extended.yml's `c2pa` job on master. Because both pass
-# `--locked`, a release-plz bump of any of the 15 path-reached gamut crates fails the lint step
+# `--locked`, a release-plz bump of any of the path-reached gamut crates fails the lint step
 # until the lockfile refresh above is committed.
 [tasks.check-c2pa]
 description = "Compile the C2PA differential oracle (no signing, no corpus)"
