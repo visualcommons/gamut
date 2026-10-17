@@ -269,25 +269,30 @@ fn choose_bigent(fixed: &[Vec<u8>], row_bytes: usize) -> Vec<u8> {
     })
 }
 
-/// Rows of prior context a [`choose_trial`] candidate is compressed after.
-const TRIAL_CONTEXT_ROWS: usize = 4;
-
-fn choose_trial(fixed: &[Vec<u8>], row_bytes: usize) -> Vec<u8> {
+/// Per-line trial deflate: each candidate row is compressed at `level` after the previous
+/// `context_rows` chosen rows, and the smallest wins.
+fn choose_trial(fixed: &[Vec<u8>], row_bytes: usize, level: Level, context_rows: usize) -> Vec<u8> {
     let stride = row_bytes + 1;
-    let codec = deflater(Level::Default);
+    let codec = deflater(level);
     let mut buf = Vec::new();
     let mut sink = Vec::new();
     splice(fixed, row_bytes, |rows, so_far| {
-        let context = &so_far[so_far.len().saturating_sub(TRIAL_CONTEXT_ROWS * stride)..];
+        let context = &so_far[so_far.len().saturating_sub(context_rows * stride)..];
         first_min(std::array::from_fn(|f| {
             buf.clear();
             buf.extend_from_slice(context);
-            buf.extend_from_slice(rows[f]);
+            buf.extend_from_slice(&rows[f][1..]);
             sink.clear();
             codec.compress(&buf, &mut sink) as u64
         }))
     })
 }
+
+/// The `(level, context rows)` the crate's `MinTrialDeflate` ships with.
+const SHIPPED_TRIAL: (Level, usize) = (Level::Default, 4);
+
+/// The context depths swept, each at `Level::Fast` and `Level::Default`.
+const TRIAL_SWEEP: [usize; 5] = [2, 4, 8, 16, 32];
 
 /// One CSV row's measured payload.
 struct Measured {
@@ -333,7 +338,7 @@ where
 }
 
 /// The shipped `BruteForce` end to end, returning the IDAT length and the encode's nanoseconds.
-fn brute7(input: &Input) -> (usize, u128) {
+fn bruteforce(input: &Input) -> (usize, u128) {
     let enc = PngEncoder::new()
         .with_compression(Level::Best)
         .with_filter(FilterStrategy::BruteForce)
@@ -362,8 +367,8 @@ fn brute7(input: &Input) -> (usize, u128) {
     (idat, ns)
 }
 
-/// The seven `BRUTE_FORCE_STRATEGIES` in the encoder's preference order.
-fn brute_candidates(input: &Input) -> [Vec<u8>; 7] {
+/// The eight shipped `BRUTE_FORCE_STRATEGIES` in the encoder's preference order.
+fn brute_candidates(input: &Input) -> [Vec<u8>; 8] {
     let f = |s| stages::filter_image(s, &input.samples, input.row_bytes(), input.layout.bpp());
     [
         f(FilterStrategy::None),
@@ -373,6 +378,7 @@ fn brute_candidates(input: &Input) -> [Vec<u8>; 7] {
         f(FilterStrategy::Fixed(FilterType::Paeth)),
         f(FilterStrategy::MinSumAbs),
         f(FilterStrategy::MinBigrams),
+        f(FilterStrategy::MinTrialDeflate),
     ]
 }
 
@@ -428,12 +434,19 @@ fn main() {
             input.name
         );
         let shipped = |s| stages::filter_image(s, &input.samples, rb, bpp);
+        assert_eq!(
+            choose_trial(&fixed, rb, SHIPPED_TRIAL.0, SHIPPED_TRIAL.1),
+            shipped(FilterStrategy::MinTrialDeflate),
+            "{}: the arm's trial at the shipped settings does not reproduce MinTrialDeflate",
+            input.name
+        );
 
         // One untimed warm-up pass, so sample 0 does not pay for cold caches.
-        let _ = brute7(&input);
+        let _ = bruteforce(&input);
         for sample in 0..samples {
             let mut rows = Vec::new();
-            // The seven brute-force candidates, in preference order, with their DEFLATE time.
+            // The eight shipped brute-force candidates, in preference order, with their DEFLATE
+            // time. The first seven are the set before this experiment (`brute7`).
             let mut brute = Vec::new();
             for (i, &(f, name)) in FILTERS.iter().enumerate() {
                 let strategy = if i == 0 {
@@ -448,6 +461,7 @@ fn main() {
             for (name, strategy) in [
                 ("minsumabs", FilterStrategy::MinSumAbs),
                 ("bigrams", FilterStrategy::MinBigrams),
+                ("mintrialdeflate", FilterStrategy::MinTrialDeflate),
             ] {
                 let (m, _, deflate_ns) = candidate(name, || shipped(strategy));
                 brute.push((m.idat_bytes, m.time_ns, deflate_ns));
@@ -455,17 +469,34 @@ fn main() {
             }
             rows.push(candidate("entropy", || shipped(FilterStrategy::MinEntropy)).0);
             rows.push(candidate("bigent", || choose_bigent(&fixed_images(&input), rb)).0);
-            rows.push(candidate("trial4", || choose_trial(&fixed_images(&input), rb)).0);
+            for (level, level_name) in [(Level::Fast, "fast"), (Level::Default, "default")] {
+                for context_rows in TRIAL_SWEEP {
+                    let name = format!("trial{context_rows}-{level_name}");
+                    rows.push(
+                        candidate(&name, || {
+                            choose_trial(&fixed_images(&input), rb, level, context_rows)
+                        })
+                        .0,
+                    );
+                }
+            }
 
-            let (brute_bytes, brute_ns) = brute7(&input);
+            rows.push(Measured {
+                variant: "brute7".to_owned(),
+                idat_bytes: brute[..7].iter().map(|b| b.0).min().unwrap_or_default(),
+                crc32: String::new(),
+                time_ns: brute[..7].iter().map(|b| b.1).sum(),
+                timing: "sum",
+            });
+            let (brute_bytes, brute_ns) = bruteforce(&input);
             let smallest = brute.iter().map(|b| b.0).min().unwrap_or_default();
             assert_eq!(
                 smallest, brute_bytes,
-                "{}: the seven reconstructed candidates do not reproduce BruteForce",
+                "{}: the eight reconstructed candidates do not reproduce BruteForce",
                 input.name
             );
             rows.push(Measured {
-                variant: "brute7".to_owned(),
+                variant: "bruteforce".to_owned(),
                 idat_bytes: brute_bytes,
                 crc32: String::new(),
                 time_ns: brute_ns,
