@@ -1198,7 +1198,8 @@ mod tests {
     #[test]
     fn exact_8x8_gray_block() {
         // A single 8×8 gray block with hand-chosen quantized coefficients decoded to exact pixels,
-        // computed independently: dequantize (coeff · Q, natural order) → idct8x8_int → +128 → clamp.
+        // computed independently: dequantize (coeff · Q, natural order) → integer IDCT → +128 →
+        // clamp.
         let quant = quant::LUMINANCE; // a non-trivial Annex K table exercises the AC dequant multiply
         let mut coeffs = [0i32; 64];
         coeffs[0] = 5; // DC

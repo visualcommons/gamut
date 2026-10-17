@@ -445,10 +445,15 @@ impl Ctx<'_> {
     }
 }
 
-/// Level-shifts (+128) and clamps one reconstructed sample to `0..=255` (§A.3.1). Clamping first
-/// keeps the shift in range for any `i32` the kernel can return.
+/// Level-shifts (+128) and clamps one reconstructed sample to `0..=255` (§A.3.1). The saturating
+/// add keeps the shift in range for any `i32` the kernel can return.
+///
+/// Written as shift-then-clamp, not `(s.clamp(-128, 127) + 128) as u8`: in that form the cast
+/// wraps `s - 128` onto the same byte as `s + 128`, so the `+`→`-` mutant had an equivalent twin
+/// no input could kill (#896's mutation survey). This form leaves no operator to mutate here; the
+/// function stays covered by its whole-body mutants.
 fn level_shift(s: i32) -> u8 {
-    (s.clamp(-128, 127) + 128) as u8
+    s.saturating_add(128).clamp(0, 255) as u8
 }
 
 /// Inverse-transforms a dequantized natural-order block `zz`, level-shifts (+128) and clamps each
