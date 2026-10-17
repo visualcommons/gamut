@@ -341,7 +341,10 @@ const BRUTE_FORCE_CANDIDATES: [FilterStrategy; 7] = [
 /// DEFLATE streams. `brute_force` is the encoder's own race, which now runs them concurrently.
 /// The ratio of the two is the win, and it is bounded by the slowest single candidate and by the
 /// cores available, not by seven.
-#[divan::bench(args = ["serial", "brute_force"])]
+///
+/// Seconds per iteration at this level and size, so the sample count is pinned low: divan's
+/// default of 100 would spend most of an hour here.
+#[divan::bench(args = ["serial", "brute_force"], sample_count = 5, sample_size = 1)]
 fn brute_force_trials(bencher: Bencher, mode: &str) {
     let case = case_named("photo_rgb8");
     bencher
