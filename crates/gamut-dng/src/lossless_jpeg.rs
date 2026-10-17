@@ -1888,6 +1888,29 @@ mod tests {
             }
         }
 
+        /// A flat chunk at the default prediction `2^(P-1)` has every difference in category 0,
+        /// so the fitted table is the degenerate one-code `BITS = 1 0 …` table
+        /// (`encode_codes_a_single_category_in_one_bit` pins its bytes). The pseudo-random
+        /// `test_samples` above never produce it; this puts that table in front of the SDK.
+        #[test]
+        fn sdk_matches_our_single_category_encoder_output() {
+            for &(w, h, c, precision) in &[
+                (3usize, 3usize, 1usize, 12u16),
+                (17, 9, 1, 12),
+                (8, 8, 3, 16),
+                (5, 4, 2, 8),
+            ] {
+                let samples = vec![1u16 << (precision - 1); w * h * c];
+                let stream = encode(&samples, w, h, c, precision).expect("encode");
+                assert_eq!(
+                    stream[2 + 13 + 5..2 + 13 + 21],
+                    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    "{w}x{h}x{c}@{precision}: one-code BITS",
+                );
+                assert_sdk_agrees(&stream, &samples, "single-category encoder output");
+            }
+        }
+
         /// The oracle's non-exporting entry point (`decode_lossless_jpeg_extent`) reaches the
         /// same decode as the exporting one: same stream in, same sample count out. The codec
         /// benchmark times the pair against each other to price the FFI export path, and that
