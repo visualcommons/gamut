@@ -25,6 +25,20 @@ local check_tests = new Step {
     glob = List("crates/*/tests/*.rs", "crates/*/src/**/*.rs")
     check = "mise run check-tests"
 }
+local check_citations = new Step {
+    // Static and sub-second (issue #606): reads the committed references/*/clauses.tsv indexes and
+    // the cited crates' text, builds nothing. Checked, never fixed: a wrong clause number needs a
+    // human to say which clause was meant.
+    glob = List(
+        "crates/gamut-icc/**",
+        "crates/gamut-cmm/**",
+        "crates/gamut-png/**",
+        "references/icc/clauses.tsv",
+        "references/png/clauses.tsv",
+        "tooling/check-citations/**"
+    )
+    check = "mise run check-citations"
+}
 local clippy = new Step {
     glob = List("**/*.rs")
     // Fast, default-feature clippy — does not build the C-oracle dev-deps. CI runs
@@ -63,6 +77,7 @@ hooks {
             ["fmt"] = fmt
             ["clippy"] = clippy
             ["check-tests"] = check_tests
+            ["check-citations"] = check_citations
         }
     }
 }

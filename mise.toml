@@ -525,6 +525,13 @@ exit "$fail"
 description = "Verify every § citation in gamut-icc, gamut-cmm and gamut-png names a clause the vendored specification's headings give, and the clause a cited tag, type or chunk name heads"
 run = "./tooling/check-citations/run.sh"
 
+# The guard's own regression battery: a few lines of crate prose per fixture, each asserting the
+# exit code and the message the guard owes it. For whoever changes the guard; not in CI.
+# `CHECK_CITATIONS_AWK` selects the interpreter, e.g. `CHECK_CITATIONS_AWK='gawk --posix'`.
+[tasks.check-citations-fixtures]
+description = "Run the § citation guard against its own fixture battery"
+run = "./tooling/check-citations/fixtures.sh"
+
 [tasks.check-release-deps]
 description = "Reject publishable dev-only workspace edges that release-plz cannot order"
 run = '''cargo metadata --no-deps --format-version 1 | jq -r -e '
