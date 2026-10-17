@@ -442,10 +442,10 @@ fn write_block(zz: &mut [i32; 64], plane: &mut Plane, bx: usize, by: usize) {
     idct8x8(zz);
     plane.ensure_rows((by + 1) * 8);
     let stride = plane.stride;
-    for row in 0..8 {
+    for (row, samples) in zz.as_chunks::<8>().0.iter().enumerate() {
         let dst = (by * 8 + row) * stride + bx * 8;
-        for col in 0..8 {
-            plane.data[dst + col] = (zz[row * 8 + col] + 128).clamp(0, 255) as u8;
+        for (out, &s) in plane.data[dst..dst + 8].iter_mut().zip(samples) {
+            *out = (s + 128).clamp(0, 255) as u8;
         }
     }
 }
