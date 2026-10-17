@@ -18,6 +18,13 @@
 //!    at exactly that range straight back to [`read_with_external_store`], which is c2pa-rs
 //!    re-validating gamut's own bounds.
 //!
+//! Direction 1 has two drivers because the hard binding comes in two kinds. A BMFF asset (AVIF,
+//! HEIC) is bound by `c2pa.hash.bmff.v3`, which excludes the store's box *by path*, so
+//! [`reserve_then_fill`] lets c2pa-rs work the exclusion out. PNG, RIFF/WebP, TIFF and DNG are
+//! bound by `c2pa.hash.data`, which excludes *byte ranges*, so [`reserve_then_fill_data_hashed`]
+//! signs around the ranges the gamut crate reported — which puts that report under test too — and
+//! [`data_hash_exclusions`] reads back the ranges c2pa-rs chose when it embedded a store itself.
+//!
 //! # Why there is no "parse but do not judge" mode
 //!
 //! See `README.md`. In short: [`ValidationState::Invalid`] is also what c2pa-rs reports when
@@ -226,6 +233,12 @@ impl ComposedBox {
 ///
 /// The returned offset is therefore an *independent* claim about where the store begins, which is
 /// what makes "gamut reports the same range" a differential rather than a tautology.
+///
+/// That argument covers a composed box. Handed a **whole file** whose store follows the image data
+/// — TIFF, DNG and WebP put it last — the search also passes over coded pixels, where a `jumb` can
+/// occur by chance. A decoy found that way cannot make a differential pass: the span it yields
+/// disagrees with the gamut locator and the bytes at it do not validate, so it shows up as a
+/// failing test, never as a passing one.
 ///
 /// A `jumb` in the first four bytes cannot be a superbox type — there would be no room for the
 /// `LBox` in front of it — so the search **continues past** one rather than giving up on it. That
@@ -712,8 +725,8 @@ mod tests {
     //!   placeholder's length, and [`data_hash_exclusions`]'s walk of c2pa-rs's detailed report.
     //!   Both are reached only through c2pa-rs signing or reading a real asset, so — like the
     //!   padded driver's below — what keeps them out is reach: the refusal is pinned in
-    //!   `tests/png.rs`, and the walk's accepting side in every exclusion comparison of the
-    //!   per-container test files, `tests/png.rs` first. Its refusing sides — no
+    //!   `tests/png.rs`, and the walk's accepting side in every exclusion comparison of
+    //!   `tests/png.rs`, `tests/riff_webp.rs` and `tests/dng_tiff.rs`. Its refusing sides — no
     //!   active manifest, no `c2pa.hash.data`, a non-integer bound — are not pinned: every asset
     //!   those files hand it carries a data hash c2pa-rs wrote itself.
     //! * [`reserve_then_fill_padded`]'s two refusals — the `checked_add` of store length and
