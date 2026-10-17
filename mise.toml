@@ -235,10 +235,14 @@ run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml
 
 # The C2PA differential oracle (issue #447 under the #239 epic). Like the tier above it is
 # workspace-excluded *and* nothing depends on it, so no per-PR gate reaches it; unlike that tier it
-# needs no corpus and no native toolchain — `c2pa-rs` is a pure-Rust crate built
+# needs no corpus. `c2pa-rs` itself is a pure-Rust crate built
 # `--no-default-features --features rust_native_crypto`, which is what keeps its vendored OpenSSL
-# out of this repository entirely. It is still kept off `mise run test` because a shipped crate
-# must never gain an edge to it, and the excluded manifest is what enforces that.
+# out of this repository entirely. The task still needs a native toolchain, for one test: the
+# end-to-end `gamut inspect` check in `tooling/c2pa-oracle/tests/inspect_report.rs` builds
+# `gamut-cli`, whose umbrella `all` feature takes `gamut-jxl`'s statically built libjxl encoder, so
+# it needs CMake and a C++ compiler (both preinstalled on `ubuntu-latest`). Setting `GAMUT_BIN` to
+# an already built `gamut` binary skips that build. It is still kept off `mise run test` because a
+# shipped crate must never gain an edge to it, and the excluded manifest is what enforces that.
 #
 # `--locked` is what makes the committed `tooling/c2pa-oracle/Cargo.lock` load-bearing. Without it
 # cargo silently re-resolves the 307 transitive packages under the pinned `c2pa` (the figure is
