@@ -3473,6 +3473,28 @@ mod typed {
         }
 
         #[test]
+        fn exiv2_reads_what_with_metadata_embeds() {
+            // Container-level differential: exiv2's own BMFF reader finds the `Exif` item behind
+            // its `exif_tiff_header_offset`, the XMP `mime` item and the `colr` `prof` profile.
+            // One direction only: exiv2 0.28 writes no BMFF file, so there is nothing of its to
+            // read back.
+            let typed = typed();
+            let file = encode(&AvifEncoder::lossless().with_metadata(&typed).unwrap());
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&file, "Exif.Image.Make").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_xmp_get(&file, "Xmp.xmp.CreatorTool").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_icc(&file).unwrap(),
+                typed.encode().unwrap().icc
+            );
+        }
+
+        #[test]
         fn a_manifest_store_is_never_copied_forward() {
             let mut typed = typed();
             typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());

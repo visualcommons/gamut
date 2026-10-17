@@ -1447,6 +1447,59 @@ mod typed {
         }
 
         #[test]
+        fn exiv2_reads_what_with_typed_metadata_embeds() {
+            // Container-level differential: exiv2's own TIFF reader finds the `ExifIFD`, the XMP
+            // (700) and the `ICCProfile` (34675) tags this encoder writes into IFD 0.
+            let typed = typed(ByteOrder::BigEndian);
+            let tiff = encode(
+                &TiffEncoder::new()
+                    .with_byte_order(ByteOrder::BigEndian)
+                    .with_typed_metadata(&typed)
+                    .unwrap(),
+            );
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&tiff, "Exif.Photo.ISOSpeedRatings").unwrap(),
+                "400"
+            );
+            assert_eq!(
+                exiv2_oracle::image_xmp_get(&tiff, "Xmp.xmp.CreatorTool").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_icc(&tiff).unwrap(),
+                typed.encode().unwrap().icc
+            );
+        }
+
+        #[test]
+        fn the_typed_reader_reads_what_exiv2_embeds() {
+            // The other direction: exiv2 adds an `ExifIFD` and an XMP tag to a file this crate
+            // encoded bare, and the typed reader finds both values.
+            let bare = encode(&TiffEncoder::new());
+            let tiff = exiv2_oracle::image_set(
+                &bare,
+                Some(("Exif.Photo.ISOSpeedRatings", "400")),
+                Some(("Xmp.xmp.CreatorTool", "exiv2")),
+            )
+            .unwrap();
+            let read = TiffDecoder::new()
+                .metadata(&tiff)
+                .unwrap()
+                .metadata()
+                .unwrap();
+            assert_eq!(
+                read.exif.unwrap().get_tag(ExifTag::PhotographicSensitivity),
+                Some(&Value::Short(vec![400]))
+            );
+            assert_eq!(
+                read.xmp
+                    .unwrap()
+                    .get_text(WellKnownNs::Xmp.uri(), "CreatorTool"),
+                Some("exiv2")
+            );
+        }
+
+        #[test]
         fn a_manifest_store_is_never_copied_forward() {
             let mut typed = typed(ByteOrder::LittleEndian);
             typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());

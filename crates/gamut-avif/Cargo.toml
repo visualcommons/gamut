@@ -44,6 +44,11 @@ libavif-oracle = { path = "../../tooling/libavif-oracle" }
 # dav1d directly (raw OBU stream in, planes out) implements the conformance suite's
 # Av1StillDecoder bridge — the exact seam a platform decoder plugs into.
 dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
+# exiv2 as the container-level metadata oracle (FFI to a vendored, statically-linked exiv2 with
+# its BMFF reader, built from the `third_party/exiv2` + `third_party/expat` submodules): it reads
+# what the `metadata` feature embeds. Dev-only, excluded from the workspace; see
+# tooling/exiv2-oracle.
+exiv2-oracle = { path = "../../tooling/exiv2-oracle" }
 divan.workspace = true
 proptest.workspace = true
 

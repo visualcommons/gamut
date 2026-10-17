@@ -55,6 +55,11 @@ gamut-metadata = { workspace = true, optional = true }
 # directions: it decodes the gamut encoder's output, and it generates the fixture corpus (and the
 # reference pixels) the gamut decoder is differentially checked against.
 libpng-oracle = { path = "../../tooling/libpng-oracle" }
+# exiv2 as the container-level metadata oracle (FFI to a vendored, statically-linked exiv2 built
+# from the `third_party/exiv2` + `third_party/expat` submodules): it reads what the `metadata`
+# feature embeds and writes what its reader is checked against. Dev-only, excluded from the
+# workspace; see tooling/exiv2-oracle.
+exiv2-oracle = { path = "../../tooling/exiv2-oracle" }
 # Benchmark harness (issue #149) plus this crate's own `test-support` feature, which the bench
 # target needs to reach the pipeline stages. A self dev-dependency is the standard way to enable an
 # own feature for tests and benches only; `mise run check-release-deps` skips self-edges.

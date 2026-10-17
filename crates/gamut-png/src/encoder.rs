@@ -2898,6 +2898,50 @@ mod typed {
         }
 
         #[test]
+        fn exiv2_reads_what_with_typed_metadata_embeds() {
+            // Container-level differential: exiv2's own PNG reader finds the `eXIf`, the XMP
+            // `iTXt` and the `iCCP` this encoder writes, not only this crate's reader.
+            let typed = typed();
+            let png = encode(&PngEncoder::new().with_typed_metadata(&typed).unwrap());
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&png, "Exif.Image.Make").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_xmp_get(&png, "Xmp.xmp.CreatorTool").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_icc(&png).unwrap(),
+                typed.encode().unwrap().icc
+            );
+        }
+
+        #[test]
+        fn the_typed_reader_reads_what_exiv2_embeds() {
+            // The other direction: exiv2 writes an `eXIf` and an XMP `iTXt` into a file this
+            // crate encoded bare, and the typed reader finds both values.
+            let bare = encode(&PngEncoder::new());
+            let png = exiv2_oracle::image_set(
+                &bare,
+                Some(("Exif.Photo.ISOSpeedRatings", "400")),
+                Some(("Xmp.xmp.CreatorTool", "exiv2")),
+            )
+            .unwrap();
+            let read = crate::metadata(&png).unwrap().metadata().unwrap();
+            assert_eq!(
+                read.exif.unwrap().get_tag(ExifTag::PhotographicSensitivity),
+                Some(&Value::Short(vec![400]))
+            );
+            assert_eq!(
+                read.xmp
+                    .unwrap()
+                    .get_text(WellKnownNs::Xmp.uri(), "CreatorTool"),
+                Some("exiv2")
+            );
+        }
+
+        #[test]
         fn a_manifest_store_is_never_copied_forward() {
             let mut typed = typed();
             typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());

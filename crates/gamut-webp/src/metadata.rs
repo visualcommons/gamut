@@ -362,6 +362,50 @@ mod typed {
         }
 
         #[test]
+        fn exiv2_reads_what_with_metadata_embeds() {
+            // Container-level differential: exiv2's own WebP reader finds each carrier where
+            // RFC 9649 §2.7 puts it, not only this crate's reader.
+            let typed = typed();
+            let file = encode(&WebpEncoder::lossless().with_metadata(&typed).unwrap());
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&file, "Exif.Image.Make").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_xmp_get(&file, "Xmp.xmp.CreatorTool").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_icc(&file).unwrap(),
+                typed.encode().unwrap().icc
+            );
+        }
+
+        #[test]
+        fn the_typed_reader_reads_what_exiv2_embeds() {
+            // The other direction: exiv2 writes an `EXIF` and an `XMP ` chunk into a file this
+            // crate encoded bare, and the typed reader finds both values.
+            let bare = encode(&WebpEncoder::lossless());
+            let file = exiv2_oracle::image_set(
+                &bare,
+                Some(("Exif.Photo.ISOSpeedRatings", "400")),
+                Some(("Xmp.xmp.CreatorTool", "exiv2")),
+            )
+            .unwrap();
+            let read = crate::metadata(&file).unwrap().metadata().unwrap();
+            assert_eq!(
+                read.exif.unwrap().get_tag(ExifTag::PhotographicSensitivity),
+                Some(&Value::Short(vec![400]))
+            );
+            assert_eq!(
+                read.xmp
+                    .unwrap()
+                    .get_text(WellKnownNs::Xmp.uri(), "CreatorTool"),
+                Some("exiv2")
+            );
+        }
+
+        #[test]
         fn a_manifest_store_is_never_copied_forward() {
             let mut typed = typed();
             typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());
