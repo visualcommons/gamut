@@ -126,6 +126,15 @@ exclude_re = [
     # `a_constructed_palette_is_never_empty`, which also asserts the constructor's refusal --
     # the invariant this argument rests on.
     'replace PngPalette::is_empty -> bool with false',
+    # gamut-metadata capability::typed_wiring -- equivalent because every format is wired (#510).
+    # The table's cell is `true` for each of the eight `Format` variants, and its `match` names
+    # all eight with no wildcard, so the constant `true` agrees with the body on every value a
+    # caller can pass: no input distinguishes it. It stops being equivalent the moment a variant
+    # is appended with a `false` cell, at which point this entry must go.
+    #
+    # The *other* direction is NOT excluded: `with false` is killed by
+    # `typed_wiring_names_every_format`.
+    'replace typed_wiring -> bool with true',
     # gamut-ifd track::subtract — disabling the merge guard is equivalent by construction: the
     # skip loop discards every claim with `end() <= pos`, and the covered arm advances `pos` to
     # `r.end().min(end)`, strictly greater than `pos`, so an unmerged sorted-but-overlapping list

@@ -239,21 +239,20 @@ cited on every cell:
 | Format | EXIF | XMP | ICC | IPTC-IIM | C2PA | typed wiring |
 | --- | --- | --- | --- | --- | --- | --- |
 | JPEG | r/w | r/w | r/w | — | — | ✅ (`metadata` feature) |
-| PNG | r/w | r/w | r/w | — | — | — |
-| WebP | r/w | r/w | r/w | — | — | — |
-| AVIF | r/w | r/w | r/w | — | — | — |
+| PNG | r/w | r/w | r/w | — | r | ✅ (`metadata` feature) |
+| WebP | r/w | r/w | r/w | — | r | ✅ (`metadata` feature) |
+| AVIF | r/w | r/w | r/w | — | r | ✅ (`metadata` feature) |
 | HEIC | r | r | r | — | r | ✅ (`metadata` feature) |
 | JPEG XL | r/w | r/w | r/w | — | — | ✅ (`metadata` feature) |
-| TIFF | — | — | — | — | — | — |
-| DNG | r/w | r/w | r/w | r/w | — | ✅ |
+| TIFF | r | r | r | r | r | ✅ (`metadata` feature) |
+| DNG | r/w | r/w | r/w | r/w | r | ✅ |
 
 ```rust
 use gamut_metadata::capability::{Carrier, Direction, Format, supports, typed_wiring};
 
 assert!(supports(Format::Jpeg, Carrier::Exif, Direction::Write));
 assert!(!supports(Format::Heic, Carrier::Exif, Direction::Write)); // decode-only crate
-assert!(typed_wiring(Format::Jpeg));   // `blocks()` / `metadata()` / `with_metadata` exist there
-assert!(!typed_wiring(Format::Png));   // raw bytes handed to `Metadata::from_blocks` by hand
+assert!(typed_wiring(Format::Png));    // `blocks()` / `metadata()` / an encoder builder exist there
 ```
 
 `supports` describes the crate's **raw** surface — its byte-level `metadata()` / `with_*` API;
@@ -304,9 +303,11 @@ discarding that choice. Absent an explicit choice the profile is applied; callin
 *after* `with_metadata` is the deliberate override. A later format whose ICC carrier is its colour
 encoding follows the same rule.
 
-Wired today: `gamut-dng` (its `DngMetadata` holds the facade's `Exif` by value), `gamut-jpeg`,
-`gamut-jxl` and `gamut-heic` (decode-only). The remaining format crates hand their payloads over as
-raw bytes — see the capability table above.
+Wired today: every format crate — `gamut-dng` (its `DngMetadata` holds the facade's `Exif` by
+value), and behind a `metadata` feature `gamut-jpeg`, `gamut-png`, `gamut-webp`, `gamut-avif`,
+`gamut-heic` (decode-only), `gamut-jxl` and `gamut-tiff`. `gamut-png` and `gamut-tiff` spell the
+encoder builder `with_typed_metadata`, because each already had a `with_metadata` carrying its
+own whole metadata type.
 
 ## License
 
