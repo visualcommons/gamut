@@ -963,42 +963,43 @@ exclude_re = [
     # terminate and ARE caught) in the survey. These are the byte/bit cursor's own accounting; the
     # correct advance is exercised end-to-end by the decode battery.
     #
-    # BitReader::fetch — the destuffing byte cursor. `self.pos += 1` (97, 108) mutated to `*= 1`
+    # BitReader::fetch — the destuffing byte cursor. `self.pos += 1` (138, 149) mutated to `*= 1`
     # leaves `pos` pinned (pos ≥ 1 is invariant once decoding), so `end_marker`/`take_restart`'s
-    # `loop { fetch }` re-reads the same byte forever; `-=` (97, 103, 108) walks `pos` backwards and
-    # never reaches the terminating marker/EOF. (`103 *=` scales `pos += 2` forward, so it DOES reach
-    # EOF and is caught — deliberately not excluded here.)
-    "scan\\.rs:108:26: replace \\+= with (\\*|-)= in BitReader",
-    "scan\\.rs:114:30: replace \\+= with -= in BitReader",
-    "scan\\.rs:119:30: replace \\+= with (\\*|-)= in BitReader",
-    # BitReader::ensure — `self.bit_count += 8` in the *marker-padding* arm (134) mutated to `*= 8`
-    # keeps the count at 0 (0·8 = 0) while `fetch` returns `Marker` without advancing, so
-    # `while bit_count < n` spins forever. (The data arm at 130 advances `pos` to EOF and terminates,
-    # and `134 -=` underflows into an error — both caught, both left in the survey.)
-    "scan\\.rs:145:36: replace \\+= with \\*= in BitReader",
-    # BitReader::read_bits — `self.bit_count -= n` mutated to `+= n` makes the buffered-bit count
-    # grow without bound so `ensure` never refills and the reader never advances to a marker: the
-    # decode does not terminate. (`read_bit`'s own `-= 1` at 157 is a distinct, caught mutant.)
-    "replace -= with \\+= in BitReader<'a>::read_bits",
+    # `loop { fetch }` re-reads the same byte forever; `-=` (138, 144, 149) walks `pos` backwards and
+    # never reaches the terminating marker/EOF. (`144 *=` scales `pos += 2` forward, so it DOES reach
+    # EOF and is caught — deliberately not excluded here.) `BitReader::fill`, the other caller, runs
+    # a byte count fixed before its loop, so these mutants cannot hang it.
+    "scan\\.rs:138:26: replace \\+= with (\\*|-)= in BitReader",
+    "scan\\.rs:144:30: replace \\+= with -= in BitReader",
+    "scan\\.rs:149:30: replace \\+= with (\\*|-)= in BitReader",
     # decode_symbol / decode_block stubbed to a constant consume no entropy bits; for a Y=0 (DNL)
     # frame the row count is unknown and the MCU loop runs until `at_data_end` — which never fires
     # because nothing is ever consumed — so the loop never terminates. (For a Y-known frame the same
     # stub yields wrong pixels and is caught, but the Y=0 tests hang first, forcing a TIMEOUT.)
+    # `DecTable::walk` reports how many bits `decode_symbol` consumes for a code the lookahead
+    # table does not resolve (issue #305); stubbed to `(0, Ok(0))` it consumes none and yields DC
+    # category 0 / AC EOB, the same hang once a Y=0 frame's trailing ones reach it. (Its
+    # `(0, Ok(1))` / `(1, …)` siblings read a bit or consume one, so they terminate and are caught.)
+    # All signature-anchored, so every operator mutant in these functions stays in the survey.
+    # `BitReader::consume` stubbed the same way is *not* here: its decode loop also re-reads the
+    # same symbols without end, but grows the sample plane fast enough to hit the runner's 6 GiB
+    # address-space cap inside the test timeout, so it scores `caught` (#305's survey).
     'replace decode_symbol -> Result<u8> with Ok\(0\)',
     "replace Ctx<'_>::decode_block -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
+    'replace DecTable::walk -> \(u32, Result<u8>\) with \(0, Ok\(0\)\)',
     # syntax::Reader::u8 — the segment cursor. `self.pos += 1` mutated to `*= 1` pins `pos`, so the
     # `while r.remaining() > 0` table loops in parse_dqt/parse_dht never make progress and never
     # terminate. (The `-=` sibling walks `pos` backwards into an out-of-range read that errors, and is
     # caught — only the non-terminating `*=` is excluded.)
     "replace \\+= with \\*= in Reader<'a>::u8",
     # gamut-jpeg progressive AC refinement (decode_ac_refine) — the coefficient cursor `k += 1` in the
-    # do-while advance loop (893) and the EOB-run correction-bit tail loop (917). Mutated to `*= 1` it
+    # do-while advance loop (1008) and the EOB-run correction-bit tail loop (1033). Mutated to `*= 1` it
     # pins `k` (k ≥ Ss ≥ 1, so k·1 = k) and the `while k <= se` loop spins forever — non-terminating,
     # reportable only as a TIMEOUT, never a catchable behavioural escape. Line/col-anchored so each
     # matches exactly its hang mutant; the `-=` siblings walk `k` backwards into a usize underflow that
     # panics and ARE caught. Same shape as the sequential BitReader/Reader hang exclusions above.
-    "scan\\.rs:893:19: replace \\+= with \\*= in decode_ac_refine",
-    "scan\\.rs:917:15: replace \\+= with \\*= in decode_ac_refine",
+    "scan\\.rs:1008:19: replace \\+= with \\*= in decode_ac_refine",
+    "scan\\.rs:1033:15: replace \\+= with \\*= in decode_ac_refine",
     # gamut-jpeg `build_optimal_table` (Annex K.2 length limiting) — the borrow-length search
     # `let mut j = i - 2; while bits[j] == 0 { j -= 1; }` walks down to the longest shorter length that
     # still has a code. Mutating the `j -= 1` step turns this terminating descent into a non-terminating

@@ -18,6 +18,8 @@
 //! (at EOI) is each component dequantized (§A.3.4), inverse-transformed (§A.3.3) and level-shifted
 //! (§A.3.1) — once — through the same [`write_block`] tail the sequential path uses.
 
+use std::num::NonZeroU16;
+
 use gamut_core::{Error, Result};
 use gamut_dsp::jpeg::idct8x8;
 
@@ -358,11 +360,12 @@ fn extend(v: u32, t: u8) -> i32 {
 fn decode_symbol(table: &DecTable, r: &mut BitReader) -> Result<u8> {
     r.fill();
     let bits = r.peek(16);
-    let entry = table.lookup(bits >> (16 - LOOKAHEAD));
-    let (length, symbol) = if entry == 0 {
-        table.walk(bits)
-    } else {
-        (u32::from(entry >> 8), Ok((entry & 0xFF) as u8))
+    // A miss is told apart by `NonZeroU16`, not by comparing the entry with zero: inverting that
+    // comparison would send misses to a zero-length "hit" that consumes nothing, which a Y=0 frame
+    // can only report as a hang, never as a failure.
+    let (length, symbol) = match NonZeroU16::new(table.lookup(bits >> (16 - LOOKAHEAD))) {
+        Some(entry) => (u32::from(entry.get() >> 8), Ok((entry.get() & 0xFF) as u8)),
+        None => table.walk(bits),
     };
     r.consume(length)?;
     symbol
