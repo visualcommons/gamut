@@ -107,7 +107,7 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
 - **gamut-icc** — ICC profiles. ← core, color, `md-5`, `thiserror`.
 - **gamut-xmp** — XMP packets. ← core, `quick-xml`, `thiserror`.
 - **gamut-iptc** — IPTC metadata. ← core, xmp, `thiserror`.
-- **gamut-metadata** — the metadata facade. ← exif, icc, iptc, xmp, `thiserror`.
+- **gamut-metadata** — the metadata facade. ← core, exif, icc, iptc, xmp, `thiserror`.
 - **gamut-cmm** — ICC colour management module (epic #323): the transform engine — a
   validated pipeline/stage model behind the object-safe `Transform` trait — that builds and
   applies colour transforms from the profiles `gamut-icc` parses; f64 Tier-1, behavioural

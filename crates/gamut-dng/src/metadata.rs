@@ -16,8 +16,8 @@
 
 use gamut_core::{Error, Result};
 use gamut_ifd::{Ifd, Value};
-use gamut_metadata::MetadataBlock;
 use gamut_metadata::exif::Exif;
+use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
 
 use crate::tags;
 
@@ -86,27 +86,32 @@ pub struct DngMetadata {
     pub c2pa: Option<Vec<u8>>,
 }
 
-impl DngMetadata {
-    /// The byte-carried blocks — XMP, IPTC-IIM, ICC and the C2PA store — as [`MetadataBlock`]s,
-    /// ready for
-    /// [`gamut_metadata::Metadata::from_blocks`] or a
-    /// [`MetadataExtractor`](gamut_metadata::MetadataExtractor) with a chosen
-    /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy).
+/// The facade's [`TypedMetadata`] over the five carriers. Unlike a container whose carriers are
+/// all bytes, [`exif`](DngMetadata::exif) is already the facade's typed model, so
+/// [`blocks`](TypedMetadata::blocks) hands over only the four byte carriers and
+/// [`metadata`](TypedMetadata::metadata) assigns the EXIF model straight onto
+/// [`Metadata::exif`] rather than re-serialising it to bytes and parsing it back.
+///
+/// ```
+/// use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, TypedMetadata, Value};
+///
+/// let mut exif = Exif::new(ByteOrder::LittleEndian);
+/// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+/// let meta = DngMetadata { exif: Some(exif.clone()), ..Default::default() };
+///
+/// assert!(meta.blocks()?.is_empty()); // EXIF is a model here, not a byte block...
+/// assert_eq!(meta.metadata()?.exif, Some(exif)); // ...and reaches the unified model as one.
+/// # Ok::<(), gamut_metadata::MetadataError>(())
+/// ```
+impl TypedMetadata for DngMetadata {
+    /// The byte-carried blocks — XMP, IPTC-IIM, ICC and the C2PA store — as [`MetadataBlock`]s.
+    /// [`exif`](DngMetadata::exif) is deliberately absent; see the impl's docs.
     ///
-    /// [`exif`](Self::exif) is deliberately absent: it is already the facade's typed model, so it
-    /// is assigned straight onto [`Metadata::exif`](gamut_metadata::Metadata::exif) rather than
-    /// re-serialised to bytes and parsed back.
+    /// # Errors
     ///
-    /// ```
-    /// # use gamut_dng::DngMetadata;
-    /// # fn demo(meta: &DngMetadata) -> Result<(), gamut_metadata::MetadataError> {
-    /// let mut unified = gamut_metadata::Metadata::from_blocks(&meta.blocks())?;
-    /// unified.exif = meta.exif.clone();
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[must_use]
-    pub fn blocks(&self) -> Vec<MetadataBlock<'_>> {
+    /// Never: every carrier is already held as bytes. The signature is the trait's, shared with
+    /// containers that resolve payloads lazily.
+    fn blocks(&self) -> gamut_metadata::Result<Vec<MetadataBlock<'_>>> {
         let mut blocks = Vec::new();
         if let Some(xmp) = &self.xmp {
             blocks.push(MetadataBlock::Xmp(xmp));
@@ -120,9 +125,26 @@ impl DngMetadata {
         if let Some(c2pa) = &self.c2pa {
             blocks.push(MetadataBlock::C2pa(c2pa));
         }
-        blocks
+        Ok(blocks)
     }
 
+    /// The unified model: [`Metadata::from_blocks`] over [`blocks`](TypedMetadata::blocks) (the
+    /// IPTC-IIM block reconciled into the XMP graph under the default
+    /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy)), with [`exif`](DngMetadata::exif)
+    /// assigned onto [`Metadata::exif`].
+    ///
+    /// # Errors
+    ///
+    /// The [`MetadataError`](gamut_metadata::MetadataError) naming the byte carrier whose parse
+    /// failed.
+    fn metadata(&self) -> gamut_metadata::Result<Metadata> {
+        let mut unified = Metadata::from_blocks(&self.blocks()?)?;
+        unified.exif.clone_from(&self.exif);
+        Ok(unified)
+    }
+}
+
+impl DngMetadata {
     /// The EXIF sub-IFD to write, or `None` when there is no EXIF content worth a directory.
     fn exif_ifd(&self) -> Option<&Ifd> {
         self.exif
@@ -300,7 +322,7 @@ mod tests {
         assert!(meta.is_empty());
         assert!(meta.apply(&mut ifd).is_none());
         assert!(ifd.fields().is_empty());
-        assert!(meta.blocks().is_empty());
+        assert!(meta.blocks().unwrap().is_empty());
     }
 
     #[test]
@@ -420,7 +442,7 @@ mod tests {
             c2pa: Some(b"\0\0\0\x14jumbc2pa".to_vec()),
         };
         assert_eq!(
-            meta.blocks(),
+            meta.blocks().unwrap(),
             vec![
                 MetadataBlock::Xmp(b"<x:xmpmeta/>"),
                 MetadataBlock::IptcIim(&[0x1c, 0x02, 0x05]),
@@ -428,6 +450,21 @@ mod tests {
                 MetadataBlock::C2pa(b"\0\0\0\x14jumbc2pa"),
             ]
         );
+    }
+
+    #[test]
+    fn metadata_assigns_the_exif_model_beside_the_parsed_byte_carriers() {
+        // The EXIF model is assigned, not re-parsed; the C2PA store is the byte carrier whose
+        // extraction is the identity, so the whole unified model is predictable.
+        let exif = exif_with(ExifTag::PhotographicSensitivity, Value::Short(vec![100]));
+        let meta = DngMetadata {
+            exif: Some(exif.clone()),
+            c2pa: Some(b"\0\0\0\x14jumbc2pa".to_vec()),
+            ..Default::default()
+        };
+        let unified = meta.metadata().unwrap();
+        assert_eq!(unified.exif, Some(exif));
+        assert_eq!(unified.c2pa.as_deref(), Some(&b"\0\0\0\x14jumbc2pa"[..]));
     }
 
     /// An Exif sub-IFD carrying one ordinary field, so [`DngMetadata::check`] has a directory to

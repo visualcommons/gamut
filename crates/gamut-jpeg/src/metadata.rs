@@ -12,21 +12,49 @@
 //! stripped, and the ICC block is the profile **reassembled** from its APP2 chunks.
 
 use gamut_core::{Error, Result};
-use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataEmbedder};
+use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataEmbedder, TypedMetadata};
 
 use crate::{JpegEncoder, JpegMetadata};
 
-impl JpegMetadata {
-    /// The located payloads as [`MetadataBlock`]s, ready for [`Metadata::from_blocks`] or a
-    /// [`MetadataExtractor`](gamut_metadata::MetadataExtractor) with a chosen
-    /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy): the EXIF TIFF stream, the XMP packet
-    /// and the reassembled ICC profile, each present only when the stream carried it.
+/// The facade's [`TypedMetadata`] over the located APP-segment payloads; [`metadata`]
+/// (`TypedMetadata::metadata`) is the trait's default, [`Metadata::from_blocks`] over
+/// [`blocks`](TypedMetadata::blocks).
+///
+/// ```
+/// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
+/// use gamut_jpeg::{JpegEncoder, TypedMetadata};
+/// use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+/// use gamut_metadata::Metadata;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut exif = Exif::new(ByteOrder::LittleEndian);
+/// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+/// let typed = Metadata::from_carriers(Some(exif), None, None);
+///
+/// let pixels = vec![0u8; 64];
+/// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
+/// let jpeg = JpegEncoder::new().with_metadata(&typed)?.encode_to_vec(image)?;
+///
+/// let read = gamut_jpeg::metadata(&jpeg)?.metadata()?;
+/// assert_eq!(read, typed);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// [`metadata`]: TypedMetadata::metadata
+impl TypedMetadata for JpegMetadata {
+    /// The located payloads as [`MetadataBlock`]s: the EXIF TIFF stream, the XMP packet and the
+    /// reassembled ICC profile, each present only when the stream carried it.
     ///
     /// JPEG's legacy IPTC-IIM carrier (APP13) and the C2PA APP11 carriage are not located by this
     /// crate (see `STATUS.md`), so no [`MetadataBlock::IptcIim`] / [`MetadataBlock::C2pa`] is ever
     /// produced here.
-    #[must_use]
-    pub fn blocks(&self) -> Vec<MetadataBlock<'_>> {
+    ///
+    /// # Errors
+    ///
+    /// Never: every payload was already located as bytes when [`crate::metadata`] built this
+    /// value. The signature is the trait's, shared with containers that resolve payloads lazily.
+    fn blocks(&self) -> gamut_metadata::Result<Vec<MetadataBlock<'_>>> {
         let mut blocks = Vec::new();
         if let Some(exif) = &self.exif {
             blocks.push(MetadataBlock::Exif(exif));
@@ -37,41 +65,7 @@ impl JpegMetadata {
         if let Some(icc) = &self.icc {
             blocks.push(MetadataBlock::Icc(icc));
         }
-        blocks
-    }
-
-    /// Parses the located payloads into the unified [`Metadata`] model —
-    /// [`Metadata::from_blocks`] over [`blocks`](Self::blocks).
-    ///
-    /// # Errors
-    ///
-    /// Returns the facade's [`MetadataError`](gamut_metadata::MetadataError) naming the carrier
-    /// whose parse failed.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
-    /// use gamut_jpeg::JpegEncoder;
-    /// use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
-    /// use gamut_metadata::Metadata;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut exif = Exif::new(ByteOrder::LittleEndian);
-    /// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
-    /// let typed = Metadata::from_carriers(Some(exif), None, None);
-    ///
-    /// let pixels = vec![0u8; 64];
-    /// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
-    /// let jpeg = JpegEncoder::new().with_metadata(&typed)?.encode_to_vec(image)?;
-    ///
-    /// let read = gamut_jpeg::metadata(&jpeg)?.metadata()?;
-    /// assert_eq!(read, typed);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn metadata(&self) -> gamut_metadata::Result<Metadata> {
-        Metadata::from_blocks(&self.blocks())
+        Ok(blocks)
     }
 }
 
@@ -191,14 +185,14 @@ mod tests {
             icc: Some(vec![7u8; 4]),
         };
         assert_eq!(
-            meta.blocks(),
+            meta.blocks().unwrap(),
             vec![
                 MetadataBlock::Exif(b"II*\0"),
                 MetadataBlock::Xmp(b"<x:xmpmeta/>"),
                 MetadataBlock::Icc(&[7u8; 4]),
             ]
         );
-        assert!(JpegMetadata::default().blocks().is_empty());
+        assert!(JpegMetadata::default().blocks().unwrap().is_empty());
     }
 
     #[test]

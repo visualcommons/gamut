@@ -67,12 +67,13 @@ fn the_metadata_feature_reaches_each_format_crates_accessors() {
     type_resolves::<gamut::jxl::Metadata>();
     type_resolves::<gamut::heic::Metadata>();
 
-    // The accessors the forward exists to deliver. Each is `#[cfg(feature = "metadata")]` inside
-    // its own crate, so the path resolves only if the umbrella's forward switched that crate's
-    // `metadata` feature on. A rename here is a signal to update the pin, not a false alarm.
-    resolves(gamut::jpeg::JpegMetadata::blocks);
-    resolves(gamut::jxl::JxlMetadata::blocks);
-    resolves(gamut::heic::HeifImage::blocks);
+    // The accessors the forward exists to deliver: each crate's `TypedMetadata` impl, which is
+    // `#[cfg(feature = "metadata")]` inside its own crate along with the trait's re-export, so the
+    // path resolves only if the umbrella's forward switched that crate's `metadata` feature on. A
+    // rename here is a signal to update the pin, not a false alarm.
+    resolves(<gamut::jpeg::JpegMetadata as gamut::jpeg::TypedMetadata>::blocks);
+    resolves(<gamut::jxl::JxlMetadata as gamut::jxl::TypedMetadata>::blocks);
+    resolves(<gamut::heic::HeifImage as gamut::heic::TypedMetadata>::blocks);
 }
 
 /// The entry list of the umbrella's own `metadata` feature, sliced out of `manifest`.

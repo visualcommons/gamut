@@ -46,6 +46,16 @@ pub enum MetadataError {
         /// The size in bytes of the manifest store that was refused.
         len: usize,
     },
+    /// The format crate could not **locate** a carrier's payload in its container — before any
+    /// carrier parser ran — and reports why in its own [`gamut_core::Error`], carried unchanged so
+    /// its [`kind`](gamut_core::Error::kind) and message stay inspectable.
+    ///
+    /// Returned through [`TypedMetadata::blocks`](crate::TypedMetadata::blocks) by a container
+    /// whose payloads are resolved lazily (an ISOBMFF item whose `exif_tiff_header_offset` runs
+    /// past its payload, an XMP item under a content coding the crate does not decode); a crate
+    /// whose payloads are already bytes never returns it.
+    #[error("container: {0}")]
+    Container(#[from] gamut_core::Error),
 }
 
 /// A [`Result`](core::result::Result) whose error is [`MetadataError`].
@@ -96,5 +106,17 @@ mod tests {
         let iptc: MetadataError = IptcError::Malformed("bad").into();
         assert!(matches!(iptc, MetadataError::Iptc(_)));
         assert!(iptc.to_string().starts_with("IPTC:"));
+    }
+
+    #[test]
+    fn a_container_error_keeps_the_format_crates_kind_and_message() {
+        let err: MetadataError =
+            gamut_core::Error::unsupported("gamut-heic", "HEIF: content-encoded XMP").into();
+        let MetadataError::Container(inner) = &err else {
+            panic!("expected Container, got {err:?}");
+        };
+        assert_eq!(inner.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(inner.static_message(), Some("HEIF: content-encoded XMP"));
+        assert!(err.to_string().starts_with("container: "), "{err}");
     }
 }

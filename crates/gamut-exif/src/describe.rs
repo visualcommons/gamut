@@ -7,7 +7,7 @@
 //! the specification fixes. [`describe`] maps `(tag, code)` to the text CIPA DC-008 gives for it,
 //! and [`described_values`] gives the whole domain the spec defines for a tag — which is also what
 //! makes a code *reserved*: a code outside that set has no defined meaning and [`describe`] returns
-//! `None`.
+//! `None`. [`default_value`] names the code in that domain the spec gives as the tag's default.
 //!
 //! ```
 //! use gamut_exif::{ExifTag, describe::{describe, described_values}};
@@ -317,6 +317,61 @@ pub fn describe(tag: ExifTag, code: u32) -> Option<&'static str> {
         .iter()
         .find(|&&(c, _)| c == code)
         .map(|&(_, text)| text)
+}
+
+/// The code CIPA DC-008 names as `tag`'s default, or `None` where it names none.
+///
+/// The specification prints a `Default =` line under every tag. This answers it for the tags
+/// [`described_values`] enumerates, and only where that line is a single code of the tag's own
+/// domain — so a menu built from [`described_values`] can pre-select it, and a writer knows which
+/// value its absence implies. Keys are those of [`describe`]: a character-coded GPS tag's default
+/// is its letter's byte, so `GPSSpeedRef`'s is `u32::from(b'K')`.
+///
+/// `None` covers three cases: a tag whose line reads `None` (`ColorSpace`, `GPSLatitudeRef`, …);
+/// a tag with no enumerated domain, even where the spec prints a default for it (`XResolution`'s
+/// `72`, `ExifVersion`'s `"0300"`); and `ComponentsConfiguration`, whose line — `4 5 6 0 (if RGB
+/// uncompressed)` — is four codes under a condition rather than one code.
+///
+/// ```
+/// use gamut_exif::{ExifTag, describe::{default_value, describe}};
+///
+/// assert_eq!(default_value(ExifTag::Orientation), Some(1));
+/// assert_eq!(default_value(ExifTag::ColorSpace), None);
+/// let unit = default_value(ExifTag::ResolutionUnit).unwrap();
+/// assert_eq!(describe(ExifTag::ResolutionUnit, unit), Some("inches"));
+/// ```
+#[must_use]
+pub fn default_value(tag: ExifTag) -> Option<u32> {
+    // Each code is the `Default =` line of the tag's own section, CIPA DC-008 §4.6.5–§4.6.7; the
+    // 2.32 and 3.0 editions print the same code for every tag below. Tags sharing a default share
+    // an arm, so no two arms return the same value.
+    match tag {
+        // §4.6.6.7.3, §4.6.6.7.19, §4.6.6.7.20, §4.6.6.7.35, §4.6.6.7.40, §4.6.6.7.42–44,
+        // §4.6.6.7.47, §4.6.7.1.6.
+        ExifTag::ExposureProgram
+        | ExifTag::MeteringMode
+        | ExifTag::LightSource
+        | ExifTag::CustomRendered
+        | ExifTag::SceneCaptureType
+        | ExifTag::Contrast
+        | ExifTag::Saturation
+        | ExifTag::Sharpness
+        | ExifTag::CompositeImage
+        | ExifTag::GpsAltitudeRef => Some(0),
+        // §4.6.5.1.6, §4.6.5.1.13, §4.6.6.7.33.
+        ExifTag::Orientation | ExifTag::YCbCrPositioning | ExifTag::SceneType => Some(1),
+        // §4.6.5.1.11 and §4.6.6.7.28 ("2 (inch)").
+        ExifTag::ResolutionUnit | ExifTag::FocalPlaneResolutionUnit => Some(2),
+        // §4.6.6.7.32.
+        ExifTag::FileSource => Some(3),
+        // §4.6.7.1.13 and §4.6.7.1.26.
+        ExifTag::GpsSpeedRef | ExifTag::GpsDestDistanceRef => Some(u32::from(b'K')),
+        // §4.6.7.1.15, §4.6.7.1.17 and §4.6.7.1.24.
+        ExifTag::GpsTrackRef | ExifTag::GpsImgDirectionRef | ExifTag::GpsDestBearingRef => {
+            Some(u32::from(b'T'))
+        }
+        _ => None,
+    }
 }
 
 /// The code a character-coded value carries — its letter, widened to the `u32` [`describe`] keys
@@ -640,6 +695,61 @@ mod tests {
                 "GPSDifferential",
             ]
         );
+    }
+
+    /// Drift guard over the `Default =` lines this module transcribes: every enumerated tag whose
+    /// line is a single code, with that code, and no other tag. The enumerated tags absent here
+    /// print `None`, except `ComponentsConfiguration`, whose `4 5 6 0 (if RGB uncompressed)` is
+    /// not a single code (see `default_value`). A transcription that loses, invents or moves a
+    /// default changes this list.
+    #[test]
+    fn exactly_the_tags_dc008_gives_a_default_code_have_one() {
+        let defaults: Vec<(&str, u32)> = ExifTag::ALL
+            .iter()
+            .filter_map(|&t| default_value(t).map(|code| (t.name(), code)))
+            .collect();
+        let k = u32::from(b'K');
+        let t = u32::from(b'T');
+        assert_eq!(
+            defaults,
+            [
+                ("Orientation", 1),
+                ("ResolutionUnit", 2),
+                ("YCbCrPositioning", 1),
+                ("ExposureProgram", 0),
+                ("MeteringMode", 0),
+                ("LightSource", 0),
+                ("FocalPlaneResolutionUnit", 2),
+                ("FileSource", 3),
+                ("SceneType", 1),
+                ("CustomRendered", 0),
+                ("SceneCaptureType", 0),
+                ("Contrast", 0),
+                ("Saturation", 0),
+                ("Sharpness", 0),
+                ("CompositeImage", 0),
+                ("GPSAltitudeRef", 0),
+                ("GPSSpeedRef", k),
+                ("GPSTrackRef", t),
+                ("GPSImgDirectionRef", t),
+                ("GPSDestBearingRef", t),
+                ("GPSDestDistanceRef", k),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_default_is_a_code_its_tag_defines() {
+        // A default outside the published domain would pre-select a reserved code.
+        for &tag in ExifTag::ALL {
+            if let Some(code) = default_value(tag) {
+                assert!(
+                    describe(tag, code).is_some(),
+                    "{} defaults to {code}, which it does not define",
+                    tag.name()
+                );
+            }
+        }
     }
 
     #[test]

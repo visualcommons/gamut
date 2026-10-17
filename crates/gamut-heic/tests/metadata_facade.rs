@@ -1,4 +1,4 @@
-//! The `metadata` feature over a HEIF fixture: `HeifImage::blocks` / `metadata` hand the Exif
+//! The `metadata` feature over a HEIF fixture: `HeifImage`'s `TypedMetadata` impl hands the Exif
 //! item (offset applied), the XMP `mime` item and the `colr` ICC profile to the facade, and the
 //! typed model equals the one the payloads were built from. Decode-only (the crate has no
 //! encoder), so the fixture is authored through `gamut_isobmff::write`.
@@ -8,11 +8,21 @@ mod common;
 
 use common::{clean_file, hvc1_item, iref, item};
 use gamut_core::ErrorKind;
-use gamut_heic::{HeifContainer, Metadata, MetadataBlock};
+use gamut_heic::{HeifContainer, Metadata, MetadataBlock, TypedMetadata};
 use gamut_isobmff::{ColourInformation, Item, Property, PropertyKind};
+use gamut_metadata::MetadataError;
 use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
 use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
+
+/// The format crate's own error behind a [`MetadataError::Container`], which is how both accessors
+/// report a payload they cannot locate.
+fn container_error(err: MetadataError) -> gamut_core::Error {
+    match err {
+        MetadataError::Container(inner) => inner,
+        other => panic!("expected a container error, got {other:?}"),
+    }
+}
 
 /// The three carrier payloads as the leaf crates serialize them: an `Exif\0\0`-prefixed EXIF
 /// blob, an XMP packet and an ICC profile.
@@ -113,6 +123,7 @@ fn a_malformed_exif_item_is_invalid_input_from_both_accessors() {
         container.image().blocks().unwrap_err(),
         container.image().metadata().unwrap_err(),
     ] {
+        let err = container_error(err);
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert_eq!(
             err.static_message(),
@@ -138,6 +149,7 @@ fn a_content_encoded_xmp_item_is_unsupported_from_both_accessors() {
         container.image().blocks().unwrap_err(),
         container.image().metadata().unwrap_err(),
     ] {
+        let err = container_error(err);
         assert_eq!(err.kind(), ErrorKind::Unsupported);
         assert_eq!(
             err.static_message(),
@@ -147,7 +159,7 @@ fn a_content_encoded_xmp_item_is_unsupported_from_both_accessors() {
 }
 
 #[test]
-fn an_unparsable_payload_is_invalid_input_with_the_facade_detail() {
+fn an_unparsable_payload_is_the_facade_error_naming_the_carrier() {
     let (exif, xmp, _) = payloads();
     let tiff = exif.strip_prefix(b"Exif\0\0").unwrap();
     // A `prof` colr whose bytes are not an ICC profile: located fine, refused by the facade.
@@ -158,11 +170,7 @@ fn an_unparsable_payload_is_invalid_input_with_the_facade_detail() {
     );
     let container = HeifContainer::parse(&data).unwrap();
     assert_eq!(container.image().blocks().unwrap().len(), 3);
+    // Located fine, so not a container error: the facade's own, naming the carrier.
     let err = container.image().metadata().unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::InvalidInput);
-    assert_eq!(
-        err.static_message(),
-        Some("HEIF: embedded metadata does not parse")
-    );
-    assert!(err.detail().is_some_and(|d| d.starts_with("ICC:")), "{err}");
+    assert!(matches!(err, MetadataError::Icc(_)), "{err:?}");
 }
