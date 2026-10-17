@@ -21,6 +21,13 @@
 //! [`set_tag_checked`](crate::set_tag_checked) on the write path only: the reader stays lenient and
 //! accepts whatever a real-world file carries.
 //!
+//! # Tags beyond CIPA DC-008
+//!
+//! The 0th IFD shares its number space with TIFF 6.0 and DNG, whose tags DC-008 does not
+//! profile. Those are not catalogued here: their identity and value shape live once, in the
+//! shared [`gamut_ifd::tags`] registry that gamut-tiff and gamut-dng read too, and
+//! [`IfdKind::registry_spec`] looks a 0th- or 1st-IFD tag up there.
+//!
 //! # The three pointer tags are deliberately absent
 //!
 //! DC-008 gives `Exif IFD Pointer` (34665), `GPS Info IFD Pointer` (34853) and
@@ -59,54 +66,34 @@ pub enum IfdKind {
     Thumbnail,
 }
 
-/// How many components CIPA DC-008 requires a tag's value to have — the `Count` column of the
-/// table that defines the tag.
+/// How many components a specification requires a tag's value to have — for an [`ExifTag`], the
+/// `Count` column of the CIPA DC-008 table that defines it (the `*S` strip counts of
+/// `StripOffsets`/`StripByteCounts` in Table 6 depend on the image geometry, so they are
+/// [`TagCount::Any`]).
 ///
-/// For the string types (`ASCII` and the Exif 3.0 `UTF8`) a count is a **byte** count *including*
-/// the terminating NUL, matching [`gamut_ifd::Value::count`]: `DateTime`'s count of 20 is the 19
-/// characters of `YYYY:MM:DD HH:MM:SS` plus the NUL.
-///
-/// Ask [`TagCount::allows`] rather than matching the variants — it is the whole of the behaviour
-/// and stays correct as variants are added.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum TagCount {
-    /// Exactly this many components.
-    Exact(u32),
-    /// Any component count: the spec's `Any`, and the image-geometry-dependent `*S` strip counts
-    /// of `StripOffsets`/`StripByteCounts` (Table 6), which no fixed number can express.
-    Any,
-    /// One of a fixed set of counts, in ascending order — `SubjectArea`'s "2 or 3 or 4".
-    OneOf(&'static [u32]),
-}
+/// The type is the shared registry's, [`gamut_ifd::tags::TagCount`], re-exported so an
+/// [`ExifTag`] and a [`gamut_ifd::tags::TagSpec`] answer the same question with the same type.
+pub use gamut_ifd::tags::TagCount;
 
-impl TagCount {
-    /// Whether `count` components satisfy this requirement.
+impl IfdKind {
+    /// The shared [`gamut_ifd::tags`] registry row for tag `id` in this directory — TIFF 6.0's,
+    /// else DNG 1.7.1.0's — or `None`.
+    ///
+    /// This is how a 0th- or 1st-IFD tag CIPA DC-008 does not define (`DocumentName`,
+    /// `PageNumber`, `TileWidth`, `DNGVersion`, `ColorMatrix1`, …) gets its specification's name,
+    /// field types and count: ask [`ExifTag::from_id`] first, then this. Where both answer — the
+    /// TIFF baseline tags DC-008 Table 6 profiles — the [`ExifTag`] is the Exif profile's reading
+    /// and the row is TIFF 6.0's own; the two can differ (DC-008 fixes `BitsPerSample` at 3).
+    ///
+    /// The Exif, GPS and Interoperability sub-IFDs number their tags in a space of their own,
+    /// which the registry does not cover, so a lookup there is always `None`.
     #[must_use]
-    pub fn allows(self, count: u64) -> bool {
+    pub fn registry_spec(self, id: u16) -> Option<&'static gamut_ifd::tags::TagSpec> {
         match self {
-            TagCount::Any => true,
-            TagCount::Exact(n) => count == u64::from(n),
-            TagCount::OneOf(ns) => ns.iter().any(|&n| count == u64::from(n)),
-        }
-    }
-}
-
-/// Spells the requirement the way CIPA DC-008's `Count` column does: `20`, `Any`, `2 or 3 or 4`.
-impl core::fmt::Display for TagCount {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            TagCount::Any => f.write_str("Any"),
-            TagCount::Exact(n) => write!(f, "{n}"),
-            TagCount::OneOf(ns) => {
-                for (i, n) in ns.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(" or ")?;
-                    }
-                    write!(f, "{n}")?;
-                }
-                Ok(())
-            }
+            IfdKind::Image | IfdKind::Thumbnail => gamut_ifd::tags::TIFF6
+                .find(id)
+                .or_else(|| gamut_ifd::tags::DNG.find(id)),
+            _ => None,
         }
     }
 }
@@ -566,31 +553,30 @@ mod tests {
     }
 
     #[test]
-    fn count_allows_matches_the_requirement() {
-        assert!(TagCount::Any.allows(0));
-        assert!(TagCount::Any.allows(u64::MAX));
-
-        assert!(TagCount::Exact(3).allows(3));
-        assert!(!TagCount::Exact(3).allows(2));
-        assert!(!TagCount::Exact(3).allows(4));
-
-        let one_of = TagCount::OneOf(&[2, 3, 4]);
-        assert!(!one_of.allows(1));
-        assert!(one_of.allows(2));
-        assert!(one_of.allows(4));
-        assert!(!one_of.allows(5));
-        // An empty set admits nothing, so `allows` cannot be short-circuiting to true.
-        assert!(!TagCount::OneOf(&[]).allows(0));
+    fn registry_spec_names_a_tiff6_tag_dc008_does_not_define() {
+        assert_eq!(ExifTag::from_id(IfdKind::Image, 0x010D), None);
+        let spec = IfdKind::Image.registry_spec(0x010D);
+        assert_eq!(spec.map(|s| s.name), Some("DocumentName"));
+        // The 1st IFD shares the 0th IFD's number space.
+        assert_eq!(IfdKind::Thumbnail.registry_spec(0x010D), spec);
     }
 
     #[test]
-    fn count_displays_as_the_spec_writes_it() {
-        // The `Count` column's three spellings, which the write-side error message quotes.
-        assert_eq!(TagCount::Exact(20).to_string(), "20");
-        assert_eq!(TagCount::Any.to_string(), "Any");
-        assert_eq!(TagCount::OneOf(&[2, 3, 4]).to_string(), "2 or 3 or 4");
-        assert_eq!(TagCount::OneOf(&[2]).to_string(), "2");
-        assert_eq!(TagCount::OneOf(&[]).to_string(), "");
+    fn registry_spec_falls_back_to_dng() {
+        assert_eq!(
+            IfdKind::Image.registry_spec(0xC612).map(|s| s.name),
+            Some("DNGVersion")
+        );
+    }
+
+    #[test]
+    fn registry_spec_is_none_outside_the_0th_and_1st_ifd() {
+        // 0x0100 is ImageWidth in the 0th IFD, but nothing the registry covers in a sub-IFD.
+        assert!(IfdKind::Image.registry_spec(0x0100).is_some());
+        for ifd in [IfdKind::Exif, IfdKind::Gps, IfdKind::Interop] {
+            assert_eq!(ifd.registry_spec(0x0100), None, "{ifd:?}");
+        }
+        assert_eq!(IfdKind::Image.registry_spec(0x9999), None);
     }
 
     #[test]
