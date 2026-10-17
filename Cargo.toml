@@ -47,6 +47,10 @@ exclude = [
     # oracles' cmake/meson builds are hermetic to exactly what they configure. Excluded for the
     # same reason: a plain `cargo build` of the shipped crates must never compile it.
     "tooling/build-env",
+    # Dev-only generator of the committed `references/*/clauses.tsv` clause indexes (issue #606).
+    # Nothing depends on it, and the citation lint reads only the TSVs, so no gate builds it but
+    # `mise run check-spec-clauses`; it commits its own lockfile (see .gitignore).
+    "tooling/spec-clauses",
 ]
 
 [workspace.package]
