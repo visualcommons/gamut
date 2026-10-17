@@ -17,6 +17,7 @@ use common::gen_u8;
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
 use gamut_jxl::{
     ColorSpec, Container, EncodedMetadata, JxlDecoder, JxlEncoder, Metadata, MetadataBlock,
+    TypedMetadata,
 };
 use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
 use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
@@ -60,7 +61,7 @@ fn typed_metadata_round_trips_through_the_container() {
     let jxl = encode(container_encoder().with_metadata(&typed).unwrap());
     let read = JxlDecoder::new().metadata(&jxl).unwrap();
     assert!(read.exif.is_some() && read.xmp.is_some() && read.icc.is_some());
-    assert_eq!(read.blocks().len(), 3);
+    assert_eq!(read.blocks().unwrap().len(), 3);
     assert_eq!(read.metadata().unwrap(), typed);
 }
 

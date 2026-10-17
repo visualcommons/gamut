@@ -51,11 +51,13 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   feed `gamut-metadata`'s `MetadataBlock` directly (the default dependency edge stays jpeg ← core,
   color, dsp).
 - Typed metadata (P14, issue #420) behind the opt-in **`metadata`** feature (a normal, optional
-  dependency on `gamut-metadata`): `JpegMetadata::blocks` (EXIF = the TIFF stream, `Exif\0\0`
-  stripped; XMP = the `xpacket`; ICC = the reassembled profile) and `JpegMetadata::metadata`
-  (`Metadata::from_blocks`); `JpegEncoder::with_metadata(&Metadata)` (default `MetadataEmbedder`)
-  and `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies), routing each carrier to
-  the raw setter above. IPTC-IIM and C2PA blocks are typed `Unsupported` on the encoder (no APP13 /
+  dependency on `gamut-metadata`): `JpegMetadata` implements the facade's `TypedMetadata` trait
+  (#628) — `blocks` (EXIF = the TIFF stream, `Exif\0\0` stripped; XMP = the `xpacket`; ICC = the
+  reassembled profile; never `Err`, but fallible by the trait's shared signature) and `metadata`
+  (`Metadata::from_blocks`), both returning `gamut_metadata::MetadataError`;
+  `JpegEncoder::with_metadata(&Metadata)` (default `MetadataEmbedder`) and
+  `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies), routing each carrier to the
+  raw setter above. IPTC-IIM and C2PA blocks are typed `Unsupported` on the encoder (no APP13 /
   APP11 carriage — both under *Deferred / out of scope* below), and a C2PA store is never copied
   forward (facade policy).
 - Pluggable codestream backends (P8, issue #277): the `backend` module's `JpegStreamDecoder` /

@@ -51,8 +51,8 @@
 //! `MetadataBlock` borrows.
 //!
 //! With the optional **`metadata`** Cargo feature the same payloads are wired to the facade's typed
-//! models: [`JpegMetadata::blocks`] hands them over as `MetadataBlock`s and
-//! [`JpegMetadata::metadata`] parses them into a unified `Metadata`, while
+//! models through the facade's `TypedMetadata` trait: [`JpegMetadata::blocks`] hands them over as
+//! `MetadataBlock`s and [`JpegMetadata::metadata`] parses them into a unified `Metadata`, while
 //! [`JpegEncoder::with_metadata`] / [`JpegEncoder::with_encoded_metadata`] embed one, routing each
 //! carrier to the raw setter above. The feature is off by default so a plain JPEG consumer never
 //! builds the metadata crates; the dependency direction stays `gamut-jpeg → gamut-metadata`.
@@ -131,8 +131,9 @@ pub use backend::{
 pub use decoder::{JpegDecoder, JpegInfo, JpegMetadata, JpegProcess, info, metadata};
 pub use encoder::{ChromaSubsampling, JpegColorMode, JpegEncoder, RdOptimization, XYB_ICC_PROFILE};
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
-// `JpegMetadata::metadata` / `JpegEncoder::with_metadata` without a direct dependency.
+// `JpegMetadata::metadata` / `JpegEncoder::with_metadata` without a direct dependency, and the
+// trait those accessors are methods of.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock};
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
 pub use marker::DensityUnit;
 pub use quant::{CHROMINANCE, LUMINANCE, QuantTables};

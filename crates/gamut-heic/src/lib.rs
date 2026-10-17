@@ -91,10 +91,12 @@
 //! image, [`HeifItem::exif_tiff_stream`] applies the Exif item's `exif_tiff_header_offset` to
 //! yield the TIFF stream `gamut-exif` parses, and [`HeifItem::icc_profile`] yields the `colr` ICC
 //! bytes `gamut-icc` parses. With the optional **`metadata`** Cargo feature (off by default) the
-//! same payloads are wired to the `gamut-metadata` facade's typed models: [`HeifImage::blocks`]
-//! hands them over as `MetadataBlock`s and [`HeifImage::metadata`] parses them into a unified
-//! `Metadata`. A C2PA manifest store lives outside the item model, in a top-level `uuid` box;
-//! [`HeifContainer::c2pa`] locates it. The dependency direction stays
+//! same payloads are wired to the `gamut-metadata` facade's typed models through its
+//! `TypedMetadata` trait: [`HeifImage::blocks`] hands them over as `MetadataBlock`s and
+//! [`HeifImage::metadata`] parses them into a unified `Metadata`, both reporting the facade's
+//! `MetadataError` (a payload that cannot be located is `MetadataError::Container`, carrying this
+//! crate's [`Error`](gamut_core::Error)). A C2PA manifest store lives outside the item model, in a
+//! top-level `uuid` box; [`HeifContainer::c2pa`] locates it. The dependency direction stays
 //! `gamut-heic → gamut-metadata`.
 //!
 //! # Deferred to later slices
@@ -188,9 +190,10 @@ pub use decode::{DecodedFrame, HevcDecoder};
 // The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-avif` (#505).
 pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paByteRange, C2paUnreadReason};
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
-// `HeifImage::metadata` / `HeifImage::blocks` without a direct dependency.
+// `HeifImage::metadata` / `HeifImage::blocks` without a direct dependency, and the trait those
+// accessors are methods of.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{Metadata, MetadataBlock};
+pub use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
 pub use hvcc::{ChromaFormat, HevcConfig, NalArray};
 pub use image::{
     CleanAperture, ContentLightLevel, HeifImage, HeifItem, ItemKind, PixelAspectRatio,

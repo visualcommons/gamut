@@ -8,7 +8,7 @@ mod common;
 
 use gamut_dng::{
     ByteOrder, C2PA_MANIFEST_STORE, DngDecoder, DngEncodeReport, DngEncoder, DngMetadata,
-    MIN_STORE_LEN, Range, RawTag, Value,
+    MIN_STORE_LEN, Range, RawTag, TypedMetadata, Value,
 };
 use gamut_ifd::{align_word, read_header};
 
@@ -81,7 +81,7 @@ fn store_is_written_last_verbatim_and_both_ranges_are_reported() {
         assert_eq!(decoded.metadata.c2pa, Some(bytes.clone()), "{order:?}");
         assert_eq!(decoded.c2pa_exclusions, Some(excl), "{order:?}");
         assert_eq!(
-            decoded.metadata.blocks(),
+            decoded.metadata.blocks().expect("blocks"),
             vec![gamut_dng::MetadataBlock::C2pa(&bytes)]
         );
         assert!(

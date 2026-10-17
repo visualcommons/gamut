@@ -290,16 +290,21 @@ impl HeifImage {
     }
 }
 
+/// The facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over the primary item's
+/// located payloads; [`metadata`](gamut_metadata::TypedMetadata::metadata) is the trait's default,
+/// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
+/// [`blocks`](gamut_metadata::TypedMetadata::blocks), so a payload that is located but does not
+/// parse is the facade's [`MetadataError`](gamut_metadata::MetadataError) naming the carrier.
+///
+/// HEIF is the wired format whose payloads are resolved lazily — an item is an extent and an
+/// offset, not bytes — so here, unlike JPEG, JPEG XL or DNG, `blocks` can fail.
 #[cfg(feature = "metadata")]
-impl HeifImage {
+impl gamut_metadata::TypedMetadata for HeifImage {
     /// The primary item's located metadata payloads as
-    /// [`MetadataBlock`](gamut_metadata::MetadataBlock)s, ready for
-    /// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) or a
-    /// [`MetadataExtractor`](gamut_metadata::MetadataExtractor) with a chosen
-    /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy): the Exif item's TIFF stream
-    /// ([`HeifItem::exif_tiff_stream`]), the XMP `mime` item's packet ([`xmp`](Self::xmp)) and the
-    /// primary item's `colr` ICC profile ([`HeifItem::icc_profile`]), each present only when the
-    /// file carries it.
+    /// [`MetadataBlock`](gamut_metadata::MetadataBlock)s: the Exif item's TIFF stream
+    /// ([`HeifItem::exif_tiff_stream`]), the XMP `mime` item's packet ([`xmp`](HeifImage::xmp))
+    /// and the primary item's `colr` ICC profile ([`HeifItem::icc_profile`]), each present only
+    /// when the file carries it.
     ///
     /// HEIF has no IPTC-IIM item type, so no `IptcIim` block is produced. A C2PA manifest store
     /// lives in a top-level `uuid` box outside the item model, so it is not produced here either:
@@ -308,16 +313,16 @@ impl HeifImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the Exif item's payload is malformed — shorter than its
-    /// 4-byte `exif_tiff_header_offset`, or with the offset past the payload's end — and
-    /// [`Error::Unsupported`] if the XMP `mime` item declares a `content_encoding` (the `infe`
-    /// field of ISO/IEC 14496-12 §8.11.6, an HTTP content-coding such as `deflate`): its payload is
-    /// then not the raw packet `references/heif` §9 describes, and this crate does not decode
-    /// content codings. Any declared
-    /// coding is refused, `identity` included, which RFC 9110 §8.4.1 reserves for
-    /// `Accept-Encoding` and does not allow as a `Content-Encoding` value; the coded item stays
-    /// reachable through [`xmp`](Self::xmp).
-    pub fn blocks(&self) -> Result<Vec<gamut_metadata::MetadataBlock<'_>>> {
+    /// Returns [`MetadataError::Container`](gamut_metadata::MetadataError::Container) carrying
+    /// this crate's [`Error::InvalidInput`] if the Exif item's payload is malformed — shorter than
+    /// its 4-byte `exif_tiff_header_offset`, or with the offset past the payload's end — and
+    /// carrying [`Error::Unsupported`] if the XMP `mime` item declares a `content_encoding` (the
+    /// `infe` field of ISO/IEC 14496-12 §8.11.6, an HTTP content-coding such as `deflate`): its
+    /// payload is then not the raw packet `references/heif` §9 describes, and this crate does not
+    /// decode content codings. Any declared coding is refused, `identity` included, which RFC 9110
+    /// §8.4.1 reserves for `Accept-Encoding` and does not allow as a `Content-Encoding` value; the
+    /// coded item stays reachable through [`xmp`](HeifImage::xmp).
+    fn blocks(&self) -> gamut_metadata::Result<Vec<gamut_metadata::MetadataBlock<'_>>> {
         use gamut_metadata::MetadataBlock;
         let mut blocks = Vec::new();
         if let Some(exif) = self.exif() {
@@ -329,7 +334,8 @@ impl HeifImage {
                 return Err(Error::unsupported(
                     env!("CARGO_PKG_NAME"),
                     "HEIF: content-encoded XMP item is not supported",
-                ));
+                )
+                .into());
             }
             blocks.push(MetadataBlock::Xmp(&item.payload));
         }
@@ -337,28 +343,6 @@ impl HeifImage {
             blocks.push(MetadataBlock::Icc(icc));
         }
         Ok(blocks)
-    }
-
-    /// Parses the primary item's located metadata into the unified
-    /// [`Metadata`](gamut_metadata::Metadata) model —
-    /// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
-    /// [`blocks`](Self::blocks).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] and [`Error::Unsupported`] as [`blocks`](Self::blocks) does
-    /// (a content-encoded XMP item is refused before the facade sees it), or
-    /// [`Error::InvalidInput`] when a located payload
-    /// does not parse — the facade's [`MetadataError`](gamut_metadata::MetadataError) message,
-    /// naming the carrier, is carried as [`Error::detail`].
-    pub fn metadata(&self) -> Result<gamut_metadata::Metadata> {
-        gamut_metadata::Metadata::from_blocks(&self.blocks()?).map_err(|e| {
-            Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "HEIF: embedded metadata does not parse",
-            )
-            .with_detail(e.to_string())
-        })
     }
 }
 

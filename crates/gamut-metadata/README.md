@@ -280,10 +280,14 @@ image-first workspace and stays with issue #216.
 
 The dependency direction is `format → gamut-metadata → per-format crates`, settled here. A format
 crate wires the facade in behind an optional `metadata` Cargo feature (a normal, not dev,
-dependency — release ordering follows it): its decoded metadata type gains `blocks()` (the located
-payloads as `MetadataBlock`s, e.g. a JPEG's EXIF with the `Exif\0\0` signature already stripped,
-an ISOBMFF `Exif` item with its `exif_tiff_header_offset` already applied) and `metadata()`
-(`Metadata::from_blocks` over them), and its encoder gains `with_metadata(&Metadata)` — embedding
+dependency — release ordering follows it): its decoded metadata type implements the object-safe
+`TypedMetadata` trait — `blocks()` (the located payloads as `MetadataBlock`s, e.g. a JPEG's EXIF
+with the `Exif\0\0` signature already stripped, an ISOBMFF `Exif` item with its
+`exif_tiff_header_offset` already applied) and `metadata()` (by default `Metadata::from_blocks`
+over them). Both are fallible and both return `MetadataError` in every crate, so one function
+written over `&dyn TypedMetadata` serves every wired format; a payload the container cannot
+locate (HEIC's lazily resolved items) is `MetadataError::Container`, carrying the format crate's
+own `gamut_core::Error`. Its encoder gains `with_metadata(&Metadata)` — embedding
 through `MetadataEmbedder::new()` and routing each `EncodedMetadata` field to the crate's raw
 setter — plus `with_encoded_metadata(&EncodedMetadata)` for a caller who chose the embedder's
 policies. A carrier the container cannot write is a typed `Unsupported` error there, never a silent

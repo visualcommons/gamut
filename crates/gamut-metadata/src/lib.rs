@@ -162,7 +162,9 @@
 //! say whether gamut's crate for a format can locate or write a given carrier at all, before a
 //! caller pulls that crate in. [`capability::supports`] answers per (format × carrier × direction),
 //! and [`capability::typed_wiring`] says whether the format crate also exposes these typed models
-//! directly (behind its `metadata` feature) rather than as raw bytes:
+//! directly (behind its `metadata` feature) rather than as raw bytes. A wired crate does so through
+//! one shape, the object-safe [`TypedMetadata`] trait on its decoded-metadata type, so a caller can
+//! write one function over every wired format:
 //!
 //! ```
 //! use gamut_metadata::capability::{Carrier, Direction, Format, supports, typed_wiring};
@@ -207,6 +209,7 @@ pub mod extract;
 pub mod metadata;
 pub mod provenance;
 pub mod source;
+pub mod typed;
 
 // Re-export the per-format crates so consumers reach everything through one entry point.
 pub use embed::{C2paPolicy, EncodedMetadata, ExtensionPolicy, MetadataEmbedder};
@@ -223,3 +226,4 @@ pub use gamut_xmp as xmp;
 pub use metadata::Metadata;
 pub use provenance::ProvenanceState;
 pub use source::MetadataBlock;
+pub use typed::TypedMetadata;
