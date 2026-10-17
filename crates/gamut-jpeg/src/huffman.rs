@@ -1,5 +1,6 @@
-//! Huffman code tables: the T.81 Annex K.3–K.6 typical tables, canonical code generation
-//! (Annex C / K.2), the encode-side symbol→code lookup, and DHT emission (§B.2.4.2).
+//! Huffman code tables: the T.81 Annex K.3–K.6 typical tables, the encode-side symbol→code lookup
+//! over `gamut-bitstream`'s canonical codes (Annex C), the decode-side lookup, and DHT emission
+//! (§B.2.4.2).
 //!
 //! A JPEG Huffman table is specified on the wire by two lists (§B.2.4.2, Annex C):
 //! - **BITS** — `BITS[i]` (for code length `i` in `1..=16`) is the number of codes of that length;
@@ -13,11 +14,17 @@
 //! The four constant tables are the Annex K "typical" tables, transcribed verbatim — what a baseline
 //! encoder writes by default. Because they are fixed, [`STD_LUMA_DC`] etc. carry their own
 //! BITS/HUFFVAL and the derived codes are checked against Annex C in the tests. Both encoders can
-//! instead fit a table to the image: [`build_optimal_table`] runs the §K.2 construction over measured
-//! symbol frequencies and [`emit_dht_dynamic`] writes the result — mandatory for progressive (the
-//! typical AC tables cannot code an `EOBn` symbol) and opt-in for baseline via
-//! [`JpegEncoder::with_optimized_tables`](crate::JpegEncoder::with_optimized_tables).
+//! instead fit a table to the image: [`gamut_bitstream::build_optimal_table`] runs the §K.2
+//! construction over measured symbol frequencies and [`emit_dht_dynamic`] writes the result —
+//! mandatory for progressive (the typical AC tables cannot code an `EOBn` symbol) and opt-in for
+//! baseline via [`JpegEncoder::with_optimized_tables`](crate::JpegEncoder::with_optimized_tables).
+//!
+//! The §K.2 construction and the §C.2 assignment are shared with lossless JPEG, so
+//! `gamut-bitstream` owns both ([`gamut_bitstream::build_optimal_table`],
+//! [`gamut_bitstream::CanonicalCodes`]); this module keeps what is JPEG's own: the Annex K tables,
+//! DHT emission, and the decode-side lookup.
 
+use gamut_bitstream::CanonicalCodes;
 use gamut_core::{Error, Result};
 
 use crate::marker::{self, code};
@@ -82,13 +89,10 @@ pub const STD_CHROMA_AC: TableSpec = TableSpec {
 };
 
 /// An encode-side Huffman table: the `(code, length)` for every symbol value `0..=255`, derived
-/// from a [`TableSpec`] by the canonical §C.2 procedure. `length[s] == 0` marks a symbol not in the
-/// table.
+/// by the canonical §C.2 procedure, which [`CanonicalCodes`] owns; this type adds only the
+/// construction from a [`TableSpec`].
 #[derive(Debug, Clone)]
-pub struct EncTable {
-    codes: [u16; 256],
-    lengths: [u8; 256],
-}
+pub struct EncTable(CanonicalCodes);
 
 impl EncTable {
     /// Builds the canonical codes for `spec` (T.81 §C.2, Figures C.1–C.3): symbols are assigned
@@ -100,28 +104,11 @@ impl EncTable {
     }
 
     /// Builds the canonical codes from a raw `(BITS, HUFFVAL)` pair (§C.2), the general form of
-    /// [`Self::from_spec`] that also serves the optimized per-scan tables of [`build_optimal_table`].
+    /// [`Self::from_spec`] that also serves the optimized per-scan tables of
+    /// [`gamut_bitstream::build_optimal_table`].
     #[must_use]
     pub fn from_bits_values(bits: &[u8; 16], values: &[u8]) -> Self {
-        let mut codes = [0u16; 256];
-        let mut lengths = [0u8; 256];
-        let mut code: u16 = 0;
-        let mut k = 0usize; // index into HUFFVAL
-        for (length_index, &count) in bits.iter().enumerate() {
-            let length = (length_index + 1) as u8;
-            for _ in 0..count {
-                // `values` always has exactly `sum(bits)` entries (both `from_spec`'s static tables
-                // and `build_optimal_table`'s output guarantee it), so this index is in bounds.
-                let symbol = values[k] as usize;
-                codes[symbol] = code;
-                lengths[symbol] = length;
-                code += 1;
-                k += 1;
-            }
-            // Advance to the next code length: append a 0 bit (double the value).
-            code <<= 1;
-        }
-        Self { codes, lengths }
+        Self(CanonicalCodes::from_bits_values(bits, values))
     }
 
     /// The `(code, length)` a JPEG encoder emits for `symbol`, or `None` if `symbol` is not in the
@@ -129,12 +116,7 @@ impl EncTable {
     /// tables).
     #[must_use]
     pub fn lookup(&self, symbol: u8) -> Option<(u16, u8)> {
-        let length = self.lengths[symbol as usize];
-        if length == 0 {
-            None
-        } else {
-            Some((self.codes[symbol as usize], length))
-        }
+        self.0.lookup(symbol)
     }
 }
 
@@ -154,7 +136,19 @@ pub struct DecTable {
     valptr: [usize; 17],
     /// `HUFFVAL`: the symbol values ordered by increasing code length.
     values: Vec<u8>,
+    /// The Figure F.16 outcome for every [`LOOKAHEAD`]-bit prefix, precomputed: `(length << 8) +
+    /// value` when the procedure stops at a `length ≤ LOOKAHEAD` code that maps to `value`, and `0`
+    /// otherwise (a longer code, or one the procedure rejects). The decoder's fast path; anything
+    /// it marks `0` goes through the procedure itself, so the table changes speed, never outcome.
+    /// §F.2.2.3 presents Figure F.16 as one implementation of `DECODE` among "many other[s]
+    /// possible"; this is the usual one.
+    lookup: Box<[u16; 1 << LOOKAHEAD]>,
 }
+
+/// Bits of lookahead [`DecTable::lookup`] resolves in one probe. Nine covers every DC code and the
+/// common AC codes of the Annex K tables (libjpeg-turbo's `HUFF_LOOKAHEAD` is eight; zune-jpeg's
+/// is nine) while keeping the table at 1 KiB.
+pub(crate) const LOOKAHEAD: u32 = 9;
 
 impl DecTable {
     /// Builds the decode tables from a wire `(bits, values)` pair (§B.2.4.2), rejecting a code space
@@ -202,12 +196,69 @@ impl DecTable {
             }
             code <<= 1;
         }
+        // The lookahead table, by the same canonical assignment: the code of length `l` claims the
+        // `2^(LOOKAHEAD − l)` prefixes it heads. The code space is not overfull (checked above), so
+        // the codes of length `≤ LOOKAHEAD` are distinct prefixes and their spans neither overlap
+        // nor leave the table; an incomplete table leaves the unclaimed prefixes at `0`.
+        let mut lookup = Box::new([0u16; 1 << LOOKAHEAD]);
+        let mut code = 0usize;
+        let mut symbols = values.iter();
+        for length in 1..=LOOKAHEAD {
+            let span = 1usize << (LOOKAHEAD - length);
+            for _ in 0..bits[length as usize - 1] {
+                let entry = (length as u16) * 256 + u16::from(*symbols.next().unwrap_or(&0));
+                lookup
+                    .iter_mut()
+                    .skip(code * span)
+                    .take(span)
+                    .for_each(|e| *e = entry);
+                code += 1;
+            }
+            code *= 2;
+        }
         Ok(Self {
             mincode,
             maxcode,
             valptr,
             values: values.to_vec(),
+            lookup,
         })
+    }
+
+    /// The [`Self::lookup`] entry for a [`LOOKAHEAD`]-bit prefix: `(length << 8) + value`, or `0`
+    /// where the prefix does not resolve to a code of at most that length.
+    #[must_use]
+    pub(crate) fn lookup(&self, prefix: u32) -> u16 {
+        self.lookup[prefix as usize]
+    }
+
+    /// `DECODE` (Figure F.16) over the MSB-first 16-bit window `bits`: grows the code a bit at a
+    /// time until it is at most `MAXCODE` for its length, and returns how many bits the procedure
+    /// read with its outcome -- the symbol, or the error a corrupt code earns. A code that matches
+    /// no length up to 16 is undecodable (all 16 bits read); one whose `VALPTR` offset falls outside
+    /// `HUFFVAL` is out of table.
+    ///
+    /// The code is grown with `+` rather than `|`: the shift just vacated the low bit and the addend
+    /// is a single bit, so the addition fills exactly that vacant bit. The walk is a `for` over the
+    /// sixteen lengths, so it ends after at most sixteen steps however its arithmetic is perturbed.
+    pub(crate) fn walk(&self, bits: u32) -> (u32, Result<u8>) {
+        let mut code = 0i32;
+        for length in 1..=16usize {
+            code = (code << 1) + ((bits >> (16 - length)) & 1) as i32;
+            if code <= self.maxcode(length) {
+                let symbol = self.value_at(length, code).ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: Huffman value out of table")
+                });
+                return (length as u32, symbol);
+            }
+        }
+        (
+            16,
+            Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: undecodable Huffman code",
+            )),
+        )
     }
 
     /// `MAXCODE[length]`, or `-1` if no code has that length.
@@ -243,7 +294,7 @@ pub fn emit_dht(out: &mut Vec<u8>, tables: &[(u8, u8, &TableSpec)]) {
 
 /// Appends a DHT marker segment (§B.2.4.2) carrying dynamically-built `(class, id, BITS, HUFFVAL)`
 /// tables — the owned counterpart of [`emit_dht`], used by the progressive encoder for its optimized
-/// per-scan tables ([`build_optimal_table`]). `class` is 0 for DC / 1 for AC; `id` is the destination.
+/// per-scan tables ([`gamut_bitstream::build_optimal_table`]). `class` is 0 for DC / 1 for AC; `id` is the destination.
 pub fn emit_dht_dynamic(out: &mut Vec<u8>, tables: &[(u8, u8, &[u8; 16], &[u8])]) {
     let len = 2 + tables
         .iter()
@@ -255,148 +306,6 @@ pub fn emit_dht_dynamic(out: &mut Vec<u8>, tables: &[(u8, u8, &[u8; 16], &[u8])]
         out.extend_from_slice(bits);
         out.extend_from_slice(values);
     }
-}
-
-/// Builds an optimized Huffman table (T.81 Annex K.2, Figures K.1–K.3) from per-symbol frequency
-/// counts, returning the `(BITS, HUFFVAL)` wire pair (§B.2.4.2).
-///
-/// `freq[s]` is how many times symbol `s` (`0..=255`) is emitted in the scan. The procedure is the
-/// reference one (mirrored from libjpeg's `jpeg_gen_optimal_table`, which cites this clause):
-///
-/// 1. A **reserved pseudo-symbol** (value 256, frequency 1) is added to the alphabet. Because it is
-///    placed last in the longest code-length category and then removed, no *real* symbol is ever
-///    assigned the all-ones code of its length — the code word T.81 reserves (§K.2, Figure K.1).
-/// 2. Huffman's algorithm assigns each symbol an initial code length by repeatedly merging the two
-///    least-frequent subtrees (ties broken toward the larger symbol number, matching the reference).
-/// 3. The **16-bit length-limiting** adjustment (Figure K.3) redistributes any code longer than 16
-///    bits into the ≤ 16-bit budget, pairing symbols off the longest length two at a time.
-/// 4. The pseudo-symbol's count is removed from the largest length, and the symbols are listed in
-///    HUFFVAL ordered by their (pre-adjustment) code length.
-///
-/// The returned `BITS` has `sum(BITS)` equal to the number of distinct symbols with non-zero
-/// frequency, and no code of any length is all-ones. An all-zero `freq` yields an empty table.
-#[must_use]
-pub fn build_optimal_table(freq: &[u32; 256]) -> ([u8; 16], Vec<u8>) {
-    // Sentinels chosen so a merged frequency (≤ total coefficients coded ≪ 2^62) is always < LIVE_MAX
-    // and a merged-away node (REMOVED) is always > LIVE_MAX, so neither is ever picked as a minimum.
-    const LIVE_MAX: u64 = 1u64 << 62;
-    const REMOVED: u64 = 1u64 << 63;
-    // Longest code length the tree can produce for a 257-symbol alphabet is < 257 bits; sizing every
-    // length-indexed array to 259 keeps the whole procedure panic-free for any frequency multiset.
-    const N: usize = 259;
-
-    // Group the non-zero frequencies (plus the reserved pseudo-symbol 256) together, remembering each
-    // one's original symbol value. Ties later resolve toward the larger symbol number (as libjpeg's
-    // grouped scan does), which the ordering of this pass preserves.
-    let mut gfreq = [0u64; 257];
-    let mut nz_index = [0usize; 257];
-    let mut num_nz = 0usize;
-    for (s, &f) in freq.iter().enumerate() {
-        if f != 0 {
-            nz_index[num_nz] = s;
-            gfreq[num_nz] = u64::from(f);
-            num_nz += 1;
-        }
-    }
-    // The reserved pseudo-symbol is added last so it lands in the longest-code category.
-    nz_index[num_nz] = 256;
-    gfreq[num_nz] = 1;
-    num_nz += 1;
-
-    let mut codesize = [0i32; 257];
-    let mut others = [-1i32; 257];
-
-    // Huffman's algorithm: repeatedly merge the two least-frequent subtrees.
-    loop {
-        // The two smallest-frequency live nodes (`None` = not yet found). Ties resolve toward the
-        // larger index, matching the reference: an equal frequency updates `c1` (and pushes the old
-        // `c1` to `c2`), so a later node wins.
-        let (mut c1, mut c2): (Option<usize>, Option<usize>) = (None, None);
-        let (mut v, mut v2) = (LIVE_MAX, LIVE_MAX);
-        for (i, &f) in gfreq.iter().take(num_nz).enumerate() {
-            if f <= v2 {
-                if f <= v {
-                    c2 = c1;
-                    v2 = v;
-                    v = f;
-                    c1 = Some(i);
-                } else {
-                    v2 = f;
-                    c2 = Some(i);
-                }
-            }
-        }
-        let (Some(c1), Some(c2)) = (c1, c2) else {
-            break; // only one live node remains — everything is merged into one tree
-        };
-        gfreq[c1] += gfreq[c2];
-        gfreq[c2] = REMOVED;
-        // Increment the code length of every symbol in c1's branch, then chain c2 onto its end.
-        let mut a = c1;
-        codesize[a] += 1;
-        while others[a] >= 0 {
-            a = others[a] as usize;
-            codesize[a] += 1;
-        }
-        others[a] = c2 as i32;
-        // Increment the code length of every symbol in c2's branch.
-        let mut b = c2;
-        codesize[b] += 1;
-        while others[b] >= 0 {
-            b = others[b] as usize;
-            codesize[b] += 1;
-        }
-    }
-
-    // Count symbols of each code length, then the running count of shorter symbols (bit_pos), from the
-    // *pre-adjustment* lengths — the HUFFVAL ordering below indexes by these original lengths (§K.2).
-    let mut bits = [0i32; N];
-    for &cl in codesize.iter().take(num_nz) {
-        bits[cl as usize] += 1;
-    }
-    let mut bit_pos = [0i32; N];
-    let mut p = 0i32;
-    for i in 1..N {
-        bit_pos[i] = p;
-        p += bits[i];
-    }
-
-    // 16-bit length limiting (Figure K.3): pull symbol pairs off any length > 16 down into shorter
-    // categories until nothing exceeds 16 bits.
-    for i in (17..N).rev() {
-        while bits[i] > 0 {
-            let mut j = i - 2; // find the longest shorter length with a code to lend (skip i−1)
-            while bits[j] == 0 {
-                j -= 1;
-            }
-            bits[i] -= 2; // remove two symbols from length i
-            bits[i - 1] += 1; // one moves up a level (its own prefix)
-            bits[j + 1] += 2; // two new symbols one level below the borrowed prefix
-            bits[j] -= 1; // the borrowed code becomes a prefix
-        }
-    }
-
-    // Remove the reserved pseudo-symbol from the largest code length still in use (§K.2): it took the
-    // all-ones code of that length, so dropping it leaves no real symbol with the reserved code word.
-    if let Some(i) = (1..=16usize).rev().find(|&i| bits[i] > 0) {
-        bits[i] -= 1;
-    }
-
-    // Emit BITS (lengths 1..=16) and HUFFVAL (every real symbol, ordered by its original code length;
-    // the pseudo-symbol is the last grouped entry and is skipped).
-    let mut out_bits = [0u8; 16];
-    for (dst, &b) in out_bits.iter_mut().zip(bits[1..=16].iter()) {
-        *dst = b as u8;
-    }
-    let mut values = vec![0u8; num_nz.saturating_sub(1)];
-    for i in 0..num_nz.saturating_sub(1) {
-        let slot = bit_pos[codesize[i] as usize];
-        if let Some(cell) = values.get_mut(slot as usize) {
-            *cell = nz_index[i] as u8;
-        }
-        bit_pos[codesize[i] as usize] += 1;
-    }
-    (out_bits, values)
 }
 
 #[cfg(test)]
@@ -534,6 +443,48 @@ mod tests {
     }
 
     #[test]
+    fn dectable_lookup_agrees_with_the_walk_on_every_window() {
+        // `DecTable::from_bits`'s lookahead table is the Figure F.16 walk, tabulated: for every
+        // 16-bit window, a non-zero entry for its 9-bit prefix is exactly the walk's (length,
+        // symbol), and a zero entry is exactly a window the walk resolves to a longer code or
+        // rejects. Over the four Annex K tables plus one with a code of every length 1..=16 (so
+        // every span size, both sides of the lookahead boundary, and an unassigned window).
+        let every_length = ([1u8; 16], (1..=16).collect::<Vec<u8>>());
+        let tables = [&STD_LUMA_DC, &STD_CHROMA_DC, &STD_LUMA_AC, &STD_CHROMA_AC]
+            .map(|s| (s.bits, s.values.to_vec()))
+            .into_iter()
+            .chain([every_length]);
+        for (bits, values) in tables {
+            let dec = DecTable::from_bits(&bits, &values).unwrap();
+            for window in 0..=u16::MAX {
+                let window = u32::from(window);
+                let entry = dec.lookup(window >> (16 - LOOKAHEAD));
+                match dec.walk(window) {
+                    (length, Ok(symbol)) if length <= LOOKAHEAD => {
+                        assert_eq!(entry, (length as u16) * 256 + u16::from(symbol));
+                    }
+                    _ => assert_eq!(entry, 0, "window {window:#06x}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dectable_walk_reports_the_bits_it_read() {
+        // `DecTable::walk` on the every-length table: a length-12 code (eleven ones, a zero) reads
+        // 12 bits, and sixteen ones -- the one unassigned window -- read all 16 and are rejected.
+        let dec = DecTable::from_bits(&[1u8; 16], &(1..=16).collect::<Vec<u8>>()).unwrap();
+        let (length, symbol) = dec.walk(0b1111_1111_1110_0101);
+        assert_eq!((length, symbol.unwrap()), (12, 12));
+        let (length, symbol) = dec.walk(0xFFFF);
+        assert_eq!(length, 16);
+        assert_eq!(
+            symbol.unwrap_err().static_message(),
+            Some("JPEG: undecodable Huffman code")
+        );
+    }
+
+    #[test]
     fn dectable_inverts_the_canonical_encoder() {
         // For every standard table, DECODE of each symbol's canonical (code,length) bit sequence
         // recovers that symbol — DecTable is the exact inverse of EncTable's §C.2 assignment.
@@ -548,130 +499,16 @@ mod tests {
         }
     }
 
-    /// Every symbol with a non-zero frequency must have a code, and no code may be all-ones at its
-    /// length (the T.81 §K.2 reservation) — the two invariants every optimized table must satisfy.
-    fn assert_optimal_invariants(freq: &[u32; 256], bits: &[u8; 16], values: &[u8]) {
-        let total: usize = bits.iter().map(|&b| usize::from(b)).sum();
-        assert_eq!(total, values.len(), "sum(BITS) != len(HUFFVAL)");
-        let nz = freq.iter().filter(|&&f| f != 0).count();
-        assert_eq!(total, nz, "one code per distinct symbol");
-        let t = EncTable::from_bits_values(bits, values);
-        for (s, &f) in freq.iter().enumerate() {
-            if f != 0 {
-                assert!(t.lookup(s as u8).is_some(), "symbol {s:#x} has no code");
-            }
-        }
-        // No emitted code is all-ones at its own length (the reserved code word).
-        for (s, &f) in freq.iter().enumerate() {
-            if f != 0 {
-                let (code, len) = t.lookup(s as u8).unwrap();
-                let all_ones = ((1u32 << len) - 1) as u16; // u32 avoids overflow at len == 16
-                assert_ne!(
-                    code, all_ones,
-                    "symbol {s:#x} got the reserved all-ones code"
-                );
-            }
-        }
-    }
-
     #[test]
-    fn optimal_single_symbol_gets_a_one_bit_code() {
-        // One symbol + the reserved pseudo-symbol → two length-1 codes, one removed with the pseudo:
-        // the lone real symbol gets the single-bit code 0 (the all-ones "1" is reserved).
-        let mut freq = [0u32; 256];
-        freq[5] = 10;
-        let (bits, values) = build_optimal_table(&freq);
-        assert_eq!(bits[0], 1);
-        assert_eq!(bits[1..], [0u8; 15]);
-        assert_eq!(values, vec![5]);
-        assert_eq!(
-            EncTable::from_bits_values(&bits, &values).lookup(5),
-            Some((0, 1))
-        );
-        assert_optimal_invariants(&freq, &bits, &values);
-    }
-
-    #[test]
-    fn optimal_two_equal_symbols_hand_derivation() {
-        // Two equal-frequency symbols {1, 2} plus the pseudo-symbol (all frequency 1). Hand-tracing
-        // the K.2 merge (ties toward the larger symbol number) pairs the pseudo with symbol 2 first,
-        // giving BITS = [1,1,0,…] and HUFFVAL = [1, 2]: symbol 1 → code 0 (len 1), symbol 2 → code
-        // 0b10 (len 2). This pins the tie-break direction and the pseudo-symbol removal.
-        let mut freq = [0u32; 256];
-        freq[1] = 1;
-        freq[2] = 1;
-        let (bits, values) = build_optimal_table(&freq);
-        assert_eq!(&bits[..2], &[1, 1]);
-        assert_eq!(&bits[2..], &[0u8; 14]);
-        assert_eq!(values, vec![1, 2]);
-        let t = EncTable::from_bits_values(&bits, &values);
-        assert_eq!(t.lookup(1), Some((0, 1)));
-        assert_eq!(t.lookup(2), Some((0b10, 2)));
-        assert_optimal_invariants(&freq, &bits, &values);
-    }
-
-    #[test]
-    fn optimal_skewed_frequencies_force_16_bit_limiting() {
-        // Frequencies doubling per symbol (`2^i`) each exceed the sum of all smaller ones, so
-        // Huffman's pure algorithm builds a fully degenerate chain whose deepest code is ~20 bits —
-        // well past JPEG's 16-bit limit — driving the Figure K.3 length-limiting adjustment. The
-        // result must still be valid: every length ≤ 16, one code per symbol, no all-ones code.
-        let mut freq = [0u32; 256];
-        for (i, slot) in freq.iter_mut().take(20).enumerate() {
-            *slot = 1u32 << i;
-        }
-        let (bits, values) = build_optimal_table(&freq);
-        // Exact golden (a regression pin over the whole reduction): the degenerate chain of 20 symbols
-        // + the reserved pseudo-symbol reduces to one code at each length 1..=13 and the seven deepest
-        // pushed to length 16, with the symbols ordered least-frequent (deepest) last. Any mutation of
-        // the Figure K.3 redistribution changes these bytes.
-        assert_eq!(bits, [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 7]);
-        assert_eq!(
-            values,
-            vec![
-                19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0
-            ]
-        );
-        // Length-16 codes exist (a 20-symbol *balanced* tree, max depth ~5, never needs them): a
-        // witness that the >16 reduction ran. And the table is still a valid, never-overfull prefix.
-        assert!(bits[15] > 0);
-        assert_optimal_invariants(&freq, &bits, &values);
-        assert!(DecTable::from_bits(&bits, &values).is_ok());
-    }
-
-    #[test]
-    fn optimal_single_eob_symbol_scan() {
-        // The empty-band edge: a scan whose only emitted symbol is EOB0 (0x00). One real symbol → a
-        // one-code table, exactly as the single-symbol case, proving the builder handles a minimal
-        // AC scan.
-        let mut freq = [0u32; 256];
-        freq[0x00] = 7;
-        let (bits, values) = build_optimal_table(&freq);
-        assert_eq!(values, vec![0x00]);
-        assert_eq!(bits[0], 1);
-        assert_optimal_invariants(&freq, &bits, &values);
-    }
-
-    #[test]
-    fn optimal_empty_frequency_is_an_empty_table() {
-        // No symbols at all (a degenerate input) yields an all-zero BITS and no HUFFVAL — never a
-        // panic. (The encoder never calls the builder with an empty multiset, but the primitive is
-        // total.)
-        let (bits, values) = build_optimal_table(&[0u32; 256]);
-        assert_eq!(bits, [0u8; 16]);
-        assert!(values.is_empty());
-    }
-
-    #[test]
-    fn optimal_many_symbols_round_trip_through_dectable() {
-        // A broad multiset (all 162 valid AC symbols with varied counts) builds a table that a
-        // DecTable inverts exactly — the strongest correctness check that BITS/HUFFVAL are coherent.
+    fn dectable_inverts_an_optimal_table() {
+        // A broad multiset (all 162 valid AC symbols with varied counts) builds a table, through
+        // gamut-bitstream's §K.2 builder, that a DecTable inverts exactly: the decode side accepts
+        // what the optimized-table encoders write.
         let mut freq = [0u32; 256];
         for (i, sym) in STD_LUMA_AC.values.iter().enumerate() {
             freq[usize::from(*sym)] = (i as u32 % 13) + 1;
         }
-        let (bits, values) = build_optimal_table(&freq);
-        assert_optimal_invariants(&freq, &bits, &values);
+        let (bits, values) = gamut_bitstream::build_optimal_table(&freq);
         let enc = EncTable::from_bits_values(&bits, &values);
         let dec = DecTable::from_bits(&bits, &values).unwrap();
         for &sym in &values {

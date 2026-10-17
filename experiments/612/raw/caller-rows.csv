@@ -1,0 +1,23 @@
+group,input,layout,width,height,cleanup,variant,sample,bytes,crc32,encode_ns,colour_type,indexed_bytes,first_seen_bytes,reordered_bytes
+size_contract,gradient_rgb8,rgb8,128,128,false,caller-rows,0,492,38e92bab,3667690580,2,,,
+size_contract,photo_rgb8,rgb8,128,128,false,caller-rows,0,5594,fedc692a,3887681120,2,,,
+size_contract,noise_rgb8,rgb8,128,128,false,caller-rows,0,49348,ebbc1d6e,191200492,2,,,
+size_contract,grey_as_rgb8,rgb8,128,128,false,caller-rows,0,146,4e3a9aee,269601848,0,,,
+size_contract,flat_rgba8,rgba8,128,128,false,caller-rows,0,96,90493caf,2453271159,3,96,96,96
+size_contract,sprite_rgba8,rgba8,128,128,false,caller-rows,0,1646,6c50fee2,4771929480,6,,,
+size_contract,sprite_rgba8 +clean,rgba8,128,128,true,caller-rows,0,1104,7ceaba5a,8862330479,3,,,
+size_contract,palette64_rgba8,rgba8,128,128,false,caller-rows,0,364,6eda2b81,3119770935,6,475,450,425
+size_contract,palette64_rgba8 +clean,rgba8,128,128,true,caller-rows,0,364,6eda2b81,4483924468,6,,,
+size_contract,opaque256_rgba8,rgba8,128,128,false,caller-rows,0,317,d440ee53,3941000874,2,1132,945,945
+size_contract,demotable_rgb16,rgb16,64,64,false,caller-rows,0,171,86f8d657,888614338,2,367,317,317
+size_contract,tiny_rgb8,rgb8,16,16,false,caller-rows,0,119,a0601968,4633368,2,,,
+reach,photo332_rgb8@128,rgb8,128,128,false,caller-rows,0,3926,c0f7fa9f,7442835193,2,6815,7953,6670
+reach,photo222_rgb8@128,rgb8,128,128,false,caller-rows,0,3111,d3414a8c,5858397417,2,3837,3913,3718
+reach,gradient332_rgb8@128,rgb8,128,128,false,caller-rows,0,757,56921b1f,4865334281,2,1708,1863,1856
+reach,levels16_gray8@128,gray8,128,128,false,caller-rows,0,363,65b72129,887326818,0,456,456,456
+reach,photo_sprite_rgba8@128,rgba8,128,128,false,caller-rows,0,2927,47d57ee6,7182365453,6,4035,4330,3923
+reach,photo332_rgb8@256,rgb8,256,256,false,caller-rows,0,13038,02cf8dcf,27546876821,2,19818,21475,19190
+reach,photo222_rgb8@256,rgb8,256,256,false,caller-rows,0,9922,f845a6ce,40863383337,2,12135,12134,12138
+reach,gradient332_rgb8@256,rgb8,256,256,false,caller-rows,0,2020,b6b27f1f,46991531942,2,5712,4917,5233
+reach,levels16_gray8@256,gray8,256,256,false,caller-rows,0,639,c2effd1b,13252077055,3,639,639,639
+reach,photo_sprite_rgba8@256,rgba8,256,256,false,caller-rows,0,8847,39f41686,37350340782,6,,,

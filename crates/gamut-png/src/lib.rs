@@ -122,4 +122,4 @@ pub use gamut_deflate::Level;
 // `PngMetadata::metadata` / `PngEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
 pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
-pub use palette::PngPalette;
+pub use palette::{PaletteOrder, PngPalette};

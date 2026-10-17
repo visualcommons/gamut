@@ -16,13 +16,15 @@ and table machinery.
 software** (`references/jpeg`, ISO/IEC 10918-7) for spec-exact behaviour. The gate runs both
 directions in `tests/oracle.rs`: **encode** (gamut encodes → libjpeg-turbo decodes → matches source
 within tolerance) and **decode** (libjpeg-turbo encodes → gamut decodes → matches libjpeg-turbo's
-own decode of the same stream, gray/4:4:4 within **3 codes** of IDCT rounding, subsampled bounded by
+own decode of the same stream, gray/4:4:4 **byte-identical** (asserted as exact equality since
+issue #896: the decoder's IDCT is `gamut_dsp::jpeg::idct8x8_int`, libjpeg-turbo's accurate integer
+IDCT bit for bit, where the `f64` reference kernel left up to 3 codes of rounding), subsampled bounded by
 the documented replication-vs-fancy upsampling divergence). The decode gate runs the **sequential**
 battery and, from P4, the **progressive** one (libjpeg-turbo's standard 10-scan `jpeg_simple_progression`
 script across gray/colour × 4:4:4/4:2:2/4:2:0 × q{40,75,95} × restart{0,2} × optimize{off,on}); the
-progressive parity numbers are **identical** to the sequential ones (gray/4:4:4 max-diff **3**,
+progressive parity numbers are **identical** to the sequential ones (gray/4:4:4 max-diff **0**,
 subsampled PSNR **22.9 dB**), confirming the progressive coefficients match exactly — only the shared
-IDCT/upsampling remains as a source of divergence. From P5 the **encode** gate adds a **progressive
+upsampling remains as a source of divergence. From P5 the **encode** gate adds a **progressive
 exactness** direction (`tests/oracle.rs`): gamut's SOF2 stream and its baseline stream of the same
 image carry the same quantized coefficients, so libjpeg-turbo's decode of each must be **byte-for-byte
 identical** — asserted as exact equality (not a tolerance) across the dims × mode × q{40,75,95} ×
@@ -32,7 +34,8 @@ micro-goldens hand-derived from T.81 Annex F/K and a structural stream walker; t
 adds hand-built minimal streams (DC-then-AC, a successive-approximation pair, an EOBRUN-spanning case,
 a DC refinement) checked against sequential twins, plus a scan-ordering validation corpus; the
 progressive encoder adds direct §G.1.2 entropy-model unit tests (ZRL boundary, point transform, DC
-refinement bit, AC-refinement sign/EOB fold), an exact Annex K.2 optimal-table golden, and a
+refinement bit, AC-refinement sign/EOB fold), an exact Annex K.2 optimal-table golden (since #888
+in `gamut-bitstream`, which owns the builder), and a
 progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run presence).
 
 ## Scope ledger
