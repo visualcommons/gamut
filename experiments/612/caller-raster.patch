@@ -1,0 +1,22 @@
+diff --git a/crates/gamut-png/src/palette.rs b/crates/gamut-png/src/palette.rs
+index d514745e..6263dc3b 100644
+--- a/crates/gamut-png/src/palette.rs
++++ b/crates/gamut-png/src/palette.rs
+@@ -321,13 +321,10 @@ fn co_occurrence(indices: &[u8], width: usize, n: usize) -> Vec<u64> {
+         weight[a * n + b] += 1;
+         weight[b * n + a] += 1;
+     };
+-    for row in indices.chunks_exact(width) {
+-        for pair in row.windows(2) {
+-            count(pair[0], pair[1]);
+-        }
+-    }
+-    for (&above, &below) in indices.iter().zip(&indices[width..]) {
+-        count(above, below);
++    // Experiment #887 variant: raster-consecutive pixels, the adjacency #612 measured.
++    let _ = width;
++    for pair in indices.windows(2) {
++        count(pair[0], pair[1]);
+     }
+     weight
+ }

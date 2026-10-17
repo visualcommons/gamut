@@ -1,0 +1,15 @@
+diff --git a/crates/gamut-png/src/palette.rs b/crates/gamut-png/src/palette.rs
+index d514745e..ba6742f6 100644
+--- a/crates/gamut-png/src/palette.rs
++++ b/crates/gamut-png/src/palette.rs
+@@ -326,9 +326,7 @@ fn co_occurrence(indices: &[u8], width: usize, n: usize) -> Vec<u64> {
+             count(pair[0], pair[1]);
+         }
+     }
+-    for (&above, &below) in indices.iter().zip(&indices[width..]) {
+-        count(above, below);
+-    }
++    // Experiment #887 variant: horizontal neighbours only, no vertical pairs and no row wrap.
+     weight
+ }
+ 

@@ -3,15 +3,19 @@
 # the shipped order (transparent entries first, then Rec. 601 luma).
 #
 # Regenerates everything under experiments/612/ except RESULTS.md (which reads it):
-#   raw/baseline.csv, raw/mzeng.csv, raw/mzeng-trns.csv
+#   raw/baseline.csv, raw/<variant>.csv for each variant below
 #                     -- one row per input x variant x sample, from
 #                        crates/gamut-png/examples/experiment_612.rs
 #   run.json          -- provenance: git SHA, rustc, lockfile hashes, patch hashes, corpus
 #                        SHA-256s, CPU, load average at start and end
 #
 # The baseline is the tree as checked out. Each variant is the same tree with <variant>.patch
-# applied to crates/gamut-png/src/reduce.rs for the duration of one build, and reverted on any
-# exit. The script refuses to run if that file already carries uncommitted changes, so it never
+# applied for the duration of one build, and reverted on any exit:
+#   mzeng, mzeng-trns         -- crates/gamut-png/src/reduce.rs: the derived palette's order (#612)
+#   caller-raster, caller-rows -- crates/gamut-png/src/palette.rs: the adjacency the opt-in
+#                                caller-palette reorder counts (#887); the baseline counts
+#                                horizontal and vertical neighbours
+# The script refuses to run if either file already carries uncommitted changes, so it never
 # measures, or reverts over, anything but its own patch.
 #
 # EXPERIMENT_SAMPLES (default 3) sets the timed encodes per input; each input also gets one
@@ -23,14 +27,16 @@ cd "$root"
 exp=experiments/612
 raw=$exp/raw
 work=target/experiments/612
-site=crates/gamut-png/src/reduce.rs
+sites=(crates/gamut-png/src/reduce.rs crates/gamut-png/src/palette.rs)
 samples=${EXPERIMENT_SAMPLES:-3}
-variants=(mzeng mzeng-trns)
+variants=(mzeng mzeng-trns caller-raster caller-rows)
 
-git diff --quiet HEAD -- "$site" || {
-  echo "refusing: $site has uncommitted changes; commit or set them aside first" >&2
-  exit 1
-}
+for site in "${sites[@]}"; do
+  git diff --quiet HEAD -- "$site" || {
+    echo "refusing: $site has uncommitted changes; commit or set them aside first" >&2
+    exit 1
+  }
+done
 for v in "${variants[@]}"; do git apply --check "$exp/$v.patch"; done
 
 mkdir -p "$work/corpus"
@@ -83,9 +89,12 @@ cat >"$exp/run.json" <<EOF
   "issue": 612,
   "git_sha": "$head_start",
   "git_dirty": $dirty_start,
+  "follow_up_issue": 887,
   "variant_patch_sha256": {
     "mzeng": "$(sha "$exp/mzeng.patch")",
-    "mzeng-trns": "$(sha "$exp/mzeng-trns.patch")"
+    "mzeng-trns": "$(sha "$exp/mzeng-trns.patch")",
+    "caller-raster": "$(sha "$exp/caller-raster.patch")",
+    "caller-rows": "$(sha "$exp/caller-rows.patch")"
   },
   "rustc": $(json_str "$(rustc -vV | tr '\n' ';')"),
   "mise_lock_sha256": $mise_lock,
@@ -132,3 +141,27 @@ awk -F, '
     }
   }
 ' "$raw/baseline.csv" "$raw/mzeng.csv" "$raw/mzeng-trns.csv"
+
+# The caller-palette opt-in (#887): the first-seen palette written as given, then reordered under
+# each adjacency rule, with the percentage change against first-seen. Totals over the rows that
+# offer a palette close the table.
+echo
+awk -F, '
+  FNR == 1 { next }
+  $8 == 0 && $14 != "" {
+    key = $2; v = $7
+    first[key] = $14; reo[key, v] = $15
+    if (!(key in seen)) { seen[key] = 1; order[++rows] = key }
+  }
+  function pct(a, b) { return (a - b) * 100 / b }
+  END {
+    printf "%-24s %8s | %8s %7s | %8s %7s | %8s %7s\n", "input", "first", "2d", "%", "raster", "%", "rows", "%"
+    for (r = 1; r <= rows; r++) {
+      k = order[r]; f = first[k]
+      a = reo[k, "baseline"]; b = reo[k, "caller-raster"]; c = reo[k, "caller-rows"]
+      tf += f; ta += a; tb += b; tc += c
+      printf "%-24s %8d | %8d %+6.1f%% | %8d %+6.1f%% | %8d %+6.1f%%\n", k, f, a, pct(a, f), b, pct(b, f), c, pct(c, f)
+    }
+    printf "%-24s %8d | %8d %+6.1f%% | %8d %+6.1f%% | %8d %+6.1f%%\n", "total", tf, ta, pct(ta, tf), tb, pct(tb, tf), tc, pct(tc, tf)
+  }
+' "$raw/baseline.csv" "$raw/caller-raster.csv" "$raw/caller-rows.csv"
