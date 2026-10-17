@@ -18,7 +18,7 @@ use gamut_core::{
     Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Indexed8, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
-use crate::ancillary::{PhysicalUnit, SrgbIntent, sbit_for};
+use crate::ancillary::{PhysicalUnit, SrgbIntent, sbit_for, time_in_range};
 use crate::chunk::CABX;
 use crate::color::ColorType;
 use crate::decoder::{TransparencyKey, depth_mask};
@@ -611,17 +611,13 @@ fn parse_phys(data: &[u8]) -> Option<PhysicalDimensions> {
 
 /// tIME (§11.3.5.1, Table 26): a two-byte year, then month, day, hour, minute and second, each
 /// within the range Table 26 gives it. A field outside its range is a malformed payload (§13.1),
-/// as libpng's `png_set_tIME` ("Ignoring invalid time value") also treats it.
+/// as libpng's `png_set_tIME` ("Ignoring invalid time value") also treats it. The range check is
+/// [`time_in_range`], the rule the writer's `with_time` applies too.
 fn parse_time(data: &[u8]) -> Option<ModificationTime> {
     let [y1, y0, month, day, hour, minute, second] = *data else {
         return None;
     };
-    let in_range = (1..=12).contains(&month)
-        && (1..=31).contains(&day)
-        && hour <= 23
-        && minute <= 59
-        && second <= 60;
-    in_range.then_some(ModificationTime {
+    time_in_range(month, day, hour, minute, second).then_some(ModificationTime {
         year: u16::from_be_bytes([y1, y0]),
         month,
         day,
@@ -843,7 +839,7 @@ mod tests {
     /// Table 26's layout and every field's range, at both ends: in range is read, one past it is
     /// a malformed payload.
     ///
-    /// Kills each bound of [`parse_time`]'s range check, one field at a time.
+    /// Kills each bound of [`time_in_range`], one field at a time.
     #[test]
     fn time_is_read_within_table_26s_ranges() {
         let read = |payload: [u8; 7]| collect(&[(*b"tIME", &payload)], 0).modification_time;

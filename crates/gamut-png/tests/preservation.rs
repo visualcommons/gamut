@@ -347,6 +347,22 @@ fn a_profile_name_no_reader_accepts_is_left_behind_with_a_notice() {
     }
 }
 
+/// The writer's half of §11.3.5.1's Table 26: a `with_time` the reader would skip as malformed is
+/// not written, and `metadata_notices` names it, so the encoder never emits a `tIME` its own
+/// reader drops.
+///
+/// Kills the time notice's path into [`PngEncoder::metadata_notices`].
+#[test]
+fn an_out_of_range_time_is_left_behind_with_a_notice() {
+    let encoder = PngEncoder::new().with_time(2026, 6, 15, 24, 0, 0);
+    assert_eq!(encoder.metadata_notices(), [MetadataNotice::TimeOutOfRange]);
+    assert_eq!(
+        chunk_payload(&re_encoded_bytes(|_| encoder.clone()), b"tIME"),
+        None,
+        "no tIME chunk is written"
+    );
+}
+
 /// §11.3.2.6: "RGB is currently the only supported color model in PNG, and as such Matrix
 /// Coefficients shall be set to 0." A source chunk that says otherwise is not a conforming cICP,
 /// so it is dropped rather than reproduced — while a conforming one is carried, which matters

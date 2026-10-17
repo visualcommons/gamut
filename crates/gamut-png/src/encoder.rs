@@ -202,6 +202,13 @@ pub enum MetadataNotice {
     /// space, which §11.3.2.3 says "are not permitted". Written as it arrived, as
     /// [`TextKeywordSpacing`](Self::TextKeywordSpacing) is.
     IccpNameSpacing = 13,
+    /// A modification time (`tIME`) left behind because a field lies outside the range
+    /// §11.3.5.1's Table 26 gives it: month 1–12, day 1–31, hour 0–23, minute 0–59, second 0–60.
+    /// A reader — this crate's own included, and libpng's `png_set_tIME` — skips such a chunk as
+    /// malformed, so writing it would lose the time on the next read with nothing said. Raised by
+    /// [`with_time`](PngEncoder::with_time); a carry never raises it, because the reader never
+    /// yields such a time.
+    TimeOutOfRange = 14,
 }
 
 impl MetadataNotice {
@@ -262,6 +269,10 @@ impl MetadataNotice {
             Self::IccpNameSpacing => {
                 "ICC profile: written, but its profile name has a leading, trailing or \
                  consecutive space, which §11.3.2.3 does not permit"
+            }
+            Self::TimeOutOfRange => {
+                "modification time: a field is outside the range tIME gives it (§11.3.5.1, \
+                 Table 26)"
             }
         }
     }
@@ -827,6 +838,13 @@ impl PngEncoder {
     }
 
     /// Records the last-modification time (tIME chunk), in UTC.
+    ///
+    /// Each field must lie within the range §11.3.5.1's Table 26 gives it — month 1–12, day 1–31,
+    /// hour 0–23, minute 0–59, second 0–60 (a leap second); the year is any value. A time outside
+    /// those ranges is one this crate's reader skips as malformed, so it is **not written**: the
+    /// chunk is omitted and [`MetadataNotice::TimeOutOfRange`] is reported through
+    /// [`metadata_notices`](Self::metadata_notices). The day is not checked against the month.
+    /// Calling this again replaces both the time and its notice.
     #[must_use]
     pub fn with_time(
         mut self,
@@ -1039,11 +1057,13 @@ impl PngEncoder {
     /// per-annotation notices belong to the annotations still accumulated, so they follow the
     /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
     /// (§11.3.2.3) sits between the two and belongs to the profile last set, by
-    /// [`with_icc_profile`](Self::with_icc_profile) or a carry.
+    /// [`with_icc_profile`](Self::with_icc_profile) or a carry; the modification time's
+    /// (§11.3.5.1) follows it and belongs to the time last given to [`with_time`](Self::with_time).
     #[must_use]
     pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
         let mut notices = self.carry_notices.clone();
         notices.extend(self.ancillary.iccp_notice());
+        notices.extend(self.ancillary.time_notice());
         notices.extend(self.ancillary.text_notices());
         notices
     }

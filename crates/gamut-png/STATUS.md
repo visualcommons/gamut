@@ -300,6 +300,9 @@ for byte, `sBIT`/`bKGD` through their setters' conversion to the header actually
 background in the decoded pixels' units (sub-byte grey scaled by §13.12's factor). A `tIME` field
 outside Table 26's range, a `pHYs` unit Table 24 does not define, and an `sBIT`/`bKGD` whose length
 does not match the colour type (or an `sBIT` entry outside `1..=depth`) are skipped as malformed.
+The writer applies the same Table 26 rule (`ancillary::time_in_range`, shared by both sides):
+`with_time` given a field outside it writes no `tIME` and reports `TimeOutOfRange`, so the encoder
+never emits a `tIME` its own reader skips.
 
 **Not done.** An `sBIT`/`bKGD` the written header cannot carry is omitted without a
 `MetadataNotice`, as for the setters: the omission is decided at encode time. A palette-index

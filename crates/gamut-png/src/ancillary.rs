@@ -346,6 +346,19 @@ fn profile_name_verdict(name: &str) -> core::result::Result<IccpName, MetadataNo
 /// A writable `iCCP` profile name: its Latin-1 bytes, and the advisory notice it carries.
 type IccpName = (Vec<u8>, Option<MetadataNotice>);
 
+/// Whether a `tIME`'s month, day, hour, minute and second each lie within the range §11.3.5.1's
+/// Table 26 gives it (1–12, 1–31, 0–23, 0–59, 0–60; the year is any two-byte value). The one rule
+/// both directions apply: the reader skips a chunk outside it as malformed (§13.1), and the writer
+/// drops one with [`MetadataNotice::TimeOutOfRange`], so it never writes a `tIME` its own reader
+/// would skip.
+pub(crate) fn time_in_range(month: u8, day: u8, hour: u8, minute: u8, second: u8) -> bool {
+    (1..=12).contains(&month)
+        && (1..=31).contains(&day)
+        && hour <= 23
+        && minute <= 59
+        && second <= 60
+}
+
 /// The Latin-1 bytes of a `tEXt`/`zTXt` text string, or `None` when a character has no Latin-1
 /// encoding at all — the signal to promote the annotation to `iTXt`.
 ///
@@ -393,8 +406,12 @@ pub(crate) struct Ancillary {
     pub bkgd: Option<Vec<u8>>,
     /// pHYs: (pixels-per-unit X, Y, unit code).
     pub phys: Option<(u32, u32, u8)>,
-    /// tIME: year, month, day, hour, minute, second.
+    /// tIME: year, month, day, hour, minute, second. Set through [`Self::set_time`], which
+    /// leaves it empty for a time outside Table 26's ranges.
     pub time: Option<[u8; 7]>,
+    /// Why the time last given to [`Self::set_time`] was dropped, if it was. A single-value slot
+    /// like [`time`](Self::time) itself, so setting a time again replaces it.
+    time_notice: Option<MetadataNotice>,
     /// iCCP: (profile name as its Latin-1 bytes, raw ICC profile bytes); compressed at emit
     /// time. Set through [`Self::set_icc_profile`], which leaves it empty for a name §11.3.2.3
     /// gives no chunk to.
@@ -425,9 +442,19 @@ impl Ancillary {
         self.phys = Some((x, y, unit.code()));
     }
 
+    /// Sets the `tIME` time, or — for a field outside its Table 26 range, which this crate's
+    /// reader skips as malformed — leaves the slot empty and records
+    /// [`MetadataNotice::TimeOutOfRange`] in its place.
     pub(crate) fn set_time(&mut self, year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8) {
         let [yh, yl] = year.to_be_bytes();
-        self.time = Some([yh, yl, month, day, hour, min, sec]);
+        let in_range = time_in_range(month, day, hour, min, sec);
+        self.time = in_range.then_some([yh, yl, month, day, hour, min, sec]);
+        self.time_notice = (!in_range).then_some(MetadataNotice::TimeOutOfRange);
+    }
+
+    /// Why the time last set was dropped, if it was.
+    pub(crate) fn time_notice(&self) -> Option<MetadataNotice> {
+        self.time_notice
     }
 
     /// Sets the `iCCP` profile, routing its name through [`profile_name_verdict`]: a name no
@@ -1175,6 +1202,31 @@ mod tests {
             vec![7, 234, 6, 13, 1, 2, 3]
         ); // 2026 = 0x07EA
         assert_eq!(find_chunk(&out, b"tEXt").unwrap(), b"Title\0hi".to_vec());
+    }
+
+    /// A time outside Table 26's ranges — one this crate's reader skips — is not written, and
+    /// says why; setting an in-range time afterwards writes it and clears the notice. The bounds
+    /// themselves are [`time_in_range`]'s, pinned field by field on the read side.
+    ///
+    /// Kills `set_time` writing the slot or the notice regardless of the range check.
+    #[test]
+    fn an_out_of_range_time_is_dropped_with_a_notice() {
+        let mut a = Ancillary::default();
+        a.set_time(2026, 13, 1, 0, 0, 0);
+        assert_eq!(a.time, None, "month 13 is not written");
+        assert_eq!(a.time_notice(), Some(MetadataNotice::TimeOutOfRange));
+        let mut out = vec![0u8; 8];
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT, RGB8);
+        assert_eq!(find_chunk(&out, b"tIME"), None);
+        assert!(!MetadataNotice::TimeOutOfRange.carried());
+
+        a.set_time(2026, 12, 31, 23, 59, 60);
+        assert_eq!(a.time, Some([7, 234, 12, 31, 23, 59, 60]));
+        assert_eq!(
+            a.time_notice(),
+            None,
+            "the in-range time replaces the notice"
+        );
     }
 
     /// The manifest store is the last chunk the pre-IDAT pass writes, after every text entry
