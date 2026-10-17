@@ -6,6 +6,8 @@
 #   raw/before.csv, raw/head.csv
 #                -- one row per input x decoder x sample, from
 #                   crates/gamut-jpeg/examples/experiment_305.rs (columns in its module doc)
+#   raw/profile-head.txt
+#                -- flat `perf` symbol profile of the head build (where `perf` is usable)
 #   run.json     -- provenance: git SHA, the pre-optimisation SHA, rustc, lockfile hashes, corpus
 #                   SHA-256s, CPU, load average at start and end
 #
@@ -69,6 +71,20 @@ else
 fi
 measure head
 
+# Where the head build's time goes: a flat `perf` profile of three samples per input x decoder,
+# from a build with line tables added (debug info only; the optimisation level is unchanged).
+# Optional -- skipped, and recorded as skipped, where `perf` is absent or not permitted.
+profile=skipped
+if command -v perf >/dev/null &&
+  CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build --release --quiet -p gamut-jpeg \
+    --example experiment_305 &&
+  perf record -q -o "$work/perf.data" -- target/release/examples/experiment_305 \
+    --variant head --samples 3 --width "$width" --height "$height" >/dev/null 2>&1; then
+  perf report -i "$work/perf.data" --no-children --sort symbol --stdio 2>/dev/null |
+    awk '/^#/ { next } /%/ && n < 40 { print; n++ }' >"$work/profile-head.txt"
+  profile=recorded
+fi
+
 load_end=$(cut -d' ' -f1-3 /proc/loadavg)
 # The SHA names what was built, so a commit landing mid-run would make it name something else.
 [ "$(git rev-parse HEAD)" = "$head_start" ] || {
@@ -77,6 +93,8 @@ load_end=$(cut -d' ' -f1-3 /proc/loadavg)
 }
 mkdir -p "$raw"
 cp "$work/before.csv" "$work/head.csv" "$raw/"
+rm -f "$raw/profile-head.txt"
+[ "$profile" = recorded ] && cp "$work/profile-head.txt" "$raw/"
 
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
@@ -106,6 +124,7 @@ cat >"$exp/run.json" <<EOF
   "height": $height,
   "samples_per_input_and_decoder": $samples,
   "warmup_decodes_per_input_and_decoder": 1,
+  "profile_head": "$profile",
   "seeds": "none: the corpus is a deterministic generator (fixed LCG seed) in crates/gamut-jpeg/benches/common/corpus.rs, encoded by libjpeg-turbo at q90",
   "corpus_sha256": {$corpus_json
   },
