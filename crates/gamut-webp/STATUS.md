@@ -48,7 +48,10 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
   `with_c2pa_reserved` embed or reserve it, `encode_with_report` and `gamut_webp::c2pa_span` report
   the byte range a `c2pa.hash.data` assertion excludes, and `WebpMetadata::c2pa` reads it back.
   gamut carries the store and never parses, hashes, signs or validates it; the behavioural `c2pa-rs`
-  oracle is issue #447.
+  oracle is issue #447. Typed metadata (issue #510), behind the optional `metadata` feature:
+  `WebpMetadata` implements `gamut_metadata::TypedMetadata`, and `WebpEncoder::with_metadata` /
+  `with_encoded_metadata` embed a facade `Metadata`, refusing IPTC-IIM and a C2PA store as
+  `Unsupported`; exiv2 is the container-level oracle in both directions.
 - **M5** — Animation: `ANIM` / `ANMF` — **out of scope** (decision 2026-06-09). Multi-frame
   sequences fall outside the image-first charter and the single-image `gamut_core` traits; WebP
   animation needs no codec work (each frame is an independent keyframe) but does need a non-trait
