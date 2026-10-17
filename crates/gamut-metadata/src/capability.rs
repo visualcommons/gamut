@@ -218,12 +218,12 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
 
         // gamut-tiff STATUS.md "Additions since the freeze (#446)": `TiffDecoder::metadata` locates
         // the `ExifIFD`, XMP (700), IPTC-IIM (33723), ICC (34675) and C2PA (52545) payloads, and
-        // `TiffEncoder::with_tiff_metadata` writes the first four. The write cells stay `false` until
-        // `gamut-cli`'s TIFF output writes what this table grants it: that command reads these
-        // cells to decide what to carry, and flipping them first would make it drop the carried
-        // blocks without the warning it gives today (#870). The C2PA store is written
-        // only as a signing workflow (see `Carrier::C2pa`), so every carrier reads alike.
-        (Format::Tiff, _) => read,
+        // `TiffEncoder::with_tiff_metadata` writes the first four (the Exif as the `ExifIFD`
+        // directory alone: the facade path refuses an Exif model holding 0th-IFD fields, a GPS
+        // sub-IFD or a thumbnail, which a `TiffMetadata` has no carrier for).
+        (Format::Tiff, Carrier::Exif | Carrier::Xmp | Carrier::Icc | Carrier::IptcIim) => true,
+        // The C2PA store is written only as a signing workflow (see `Carrier::C2pa`).
+        (Format::Tiff, Carrier::C2pa) => read,
 
         // gamut-dng STATUS.md P16: EXIF sub-IFD + XMP (700) / IPTC-IIM (33723) / ICC (34675),
         // embedded and decoded (`DngMetadata`, `DngMetadata::blocks`).
@@ -321,9 +321,13 @@ mod tests {
         (Format::Jxl, Carrier::Icc, Direction::Read),
         (Format::Jxl, Carrier::Icc, Direction::Write),
         (Format::Tiff, Carrier::Exif, Direction::Read),
+        (Format::Tiff, Carrier::Exif, Direction::Write),
         (Format::Tiff, Carrier::Xmp, Direction::Read),
+        (Format::Tiff, Carrier::Xmp, Direction::Write),
         (Format::Tiff, Carrier::Icc, Direction::Read),
+        (Format::Tiff, Carrier::Icc, Direction::Write),
         (Format::Tiff, Carrier::IptcIim, Direction::Read),
+        (Format::Tiff, Carrier::IptcIim, Direction::Write),
         (Format::Tiff, Carrier::C2pa, Direction::Read),
         (Format::Dng, Carrier::Exif, Direction::Read),
         (Format::Dng, Carrier::Exif, Direction::Write),

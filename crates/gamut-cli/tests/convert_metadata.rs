@@ -18,6 +18,7 @@ use gamut::icc::{BuiltinProfile, IccProfile};
 use gamut::jpeg::JpegEncoder;
 use gamut::jxl::{Container, Distance, JxlDecoder, JxlEncoder, Orientation};
 use gamut::png::{PngEncoder, PngMetadata, SrgbIntent};
+use gamut::tiff::TiffDecoder;
 use gamut::webp::WebpEncoder;
 
 /// A bare TIFF stream, as `gamut-exif` writes it, holding `Make` plus whatever `tags` sets.
@@ -374,18 +375,53 @@ fn color_space_turns_uncalibrated_when_the_profile_is_left_behind() {
     );
 }
 
-/// `gamut-metadata`'s capability table gives TIFF no writable carrier, so every block is reported
-/// as left behind rather than dropped in silence.
+/// A TIFF output carries the XMP (700) and ICC profile (34675) verbatim and the Exif as its
+/// `ExifIFD` sub-IFD, rewritten like every other output's (issue #851).
 #[test]
-fn a_tiff_output_reports_every_block_it_cannot_hold() {
-    let (_, stderr) = convert_to("tiff", &jpeg_with(&exif_with(&[])), "tiff", &[]);
+fn a_tiff_output_carries_xmp_icc_and_the_exif_sub_ifd() {
+    let exif = exif_with(&[
+        (ExifTag::ExposureTime, Value::Rational(vec![(1, 250)])),
+        (ExifTag::PixelXDimension, Value::Long(vec![4000])),
+    ]);
 
-    for what in ["ICC profile", "XMP packet", "Exif payload"] {
-        assert!(
-            stderr.contains(&format!("TIFF output cannot hold the {what}")),
-            "stderr did not report the {what}: {stderr}"
-        );
-    }
+    let (tiff, _) = convert_to("tiff", &jpeg_with(&exif), "tiff", &[]);
+
+    let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
+    assert_eq!(meta.icc, Some(rgb_icc()));
+    let directory = meta.exif.expect("an ExifIFD");
+    assert_eq!(
+        directory.get(ExifTag::ExposureTime.tag_id()),
+        Some(&Value::Rational(vec![(1, 250)]))
+    );
+    assert_eq!(
+        directory.get(ExifTag::PixelXDimension.tag_id()),
+        Some(&Value::Long(vec![8])),
+        "rewritten to the output's size"
+    );
+}
+
+/// A TIFF's 0th-IFD tags are the page's own, which the TIFF encoder writes itself, so the Exif's
+/// `Make` and `Orientation` are named as left behind — and what losing the Orientation costs.
+#[test]
+fn a_tiff_output_reports_the_exif_0th_ifd_it_leaves_behind() {
+    let exif = exif_with(&[(ExifTag::Orientation, Value::Short(vec![6]))]);
+
+    let (tiff, stderr) = convert_to("tiff-0th", &jpeg_with(&exif), "tiff", &[]);
+
+    assert!(
+        stderr.contains("Exif 0th-IFD field(s) Make, Orientation"),
+        "stderr did not name the 0th-IFD fields: {stderr}"
+    );
+    assert!(
+        stderr.contains("shows the TIFF output's stored pixels unrotated"),
+        "stderr did not report the orientation: {stderr}"
+    );
+    // The fixture's Exif holds nothing below its 0th IFD, so no `ExifIFD` is written, and the
+    // other carriers still are.
+    let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
+    assert!(meta.exif.is_none());
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
 }
 
 /// A C2PA manifest store is never carried, between formats as within one.

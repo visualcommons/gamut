@@ -9,13 +9,14 @@ use clap::{Args, ValueEnum};
 use gamut::avif::{AvifEncodeReport, AvifEncoder, Speed as AvifSpeed};
 use gamut::color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
 use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
-use gamut::exif::{Exif, ExifTag, ExifWriter, Value as ExifValue};
+use gamut::exif::{Exif, ExifTag, ExifWriter, IfdKind, Value as ExifValue};
 use gamut::icc::{ColorSpace as IccColorSpace, ProfileHeader};
 use gamut::jpeg::{ChromaSubsampling as JpegChroma, JpegEncoder};
 use gamut::jxl::{
     ColorSpec as JxlColorSpec, Container as JxlContainer, Distance as JxlDistance,
     Effort as JxlEffort, JxlEncoder, ModularMode as JxlModularMode, Orientation as JxlOrientation,
 };
+use gamut::metadata::EncodedMetadata;
 use gamut::metadata::capability::{Carrier, Direction, Format as MetadataFormat, supports};
 use gamut::png::{PngEncoder, PngMetadata, Preset as PngCodecPreset};
 use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
@@ -771,13 +772,41 @@ fn encode(
             } else {
                 TiffCompression::None
             };
-            // `gamut-metadata`'s capability table gives TIFF no writable carrier, so this only
-            // reports what is left behind.
-            let _ = carry_into(Some(Samples::Colour), dims);
+            let carried = carry_into(Some(Samples::Colour), dims);
+            if carried
+                .orientation
+                .is_some_and(|orientation| orientation != 1)
+            {
+                // `carry` has already named the Orientation among the 0th-IFD fields left behind;
+                // this says what that costs.
+                tracing::warn!(
+                    "input metadata not carried — the Exif Orientation, so a reader shows the TIFF \
+                     output's stored pixels unrotated"
+                );
+            }
+            let bare = TiffEncoder::new().with_compression(compression);
+            let mut blocks = EncodedMetadata::default();
+            blocks.exif = carried.exif;
+            blocks.xmp = carried.xmp;
+            blocks.icc = carried.icc;
+            blocks.iptc_iim = carried.iptc_iim;
+            let attached = blocks != EncodedMetadata::default();
             let image = ImageRef::<Rgb8>::new(&rgb, dims)?;
-            TiffEncoder::new()
-                .with_compression(compression)
-                .encode_image(image, &mut out)?;
+            // The encoder checks the Exif directory it is handed, at the builder and again at the
+            // encode. Metadata failing must not fail a conversion whose pixels are fine, as on the
+            // JPEG path: say so, and encode without it.
+            let encoded = bare
+                .clone()
+                .with_encoded_metadata(&blocks)
+                .and_then(|encoder| encoder.encode_image(image, &mut out));
+            if let Err(err) = encoded {
+                if !attached {
+                    return Err(err.into());
+                }
+                tracing::warn!("input metadata not carried — the TIFF encoder refused it: {err}");
+                out.clear();
+                bare.encode_image(image, &mut out)?;
+            }
             (rgb.len(), dims)
         }
         OutputFormat::Png => {
@@ -1037,6 +1066,8 @@ struct Carried {
     xmp: Option<Vec<u8>>,
     /// The ICC profile, verbatim.
     icc: Option<Vec<u8>>,
+    /// The legacy IPTC-IIM dataset stream, verbatim.
+    iptc_iim: Option<Vec<u8>>,
     /// The Exif orientation (1–8) the output's stored pixels need for display, after the rewrite.
     /// Read even where the output cannot hold the Exif itself, for a format that signals
     /// orientation in its own header (JPEG XL).
@@ -1079,11 +1110,15 @@ fn carry(
              of the file it was made for (C2PA 2.4 §9.1)"
         );
     }
-    if meta.iptc_iim.is_some() {
-        // No output this command writes takes the legacy block (the capability table gives it to
-        // DNG alone), and IPTC Core already travels inside the XMP packet.
-        not_held("IPTC-IIM block");
-    }
+    let iptc_iim = match &meta.iptc_iim {
+        // IPTC Core also travels inside the XMP packet, so the legacy block is the duplicate a
+        // format without a slot for it loses.
+        Some(_) if !holds(Carrier::IptcIim) => {
+            not_held("IPTC-IIM block");
+            None
+        }
+        iim => iim.clone(),
+    };
     if meta.unknown > 0 {
         tracing::warn!(
             "input metadata not carried — {} metadata block(s) of a kind this command does not know",
@@ -1129,6 +1164,7 @@ fn carry(
         exif: None,
         xmp,
         icc,
+        iptc_iim,
         orientation: None,
     };
 
@@ -1150,6 +1186,9 @@ fn carry(
     if !holds(Carrier::Exif) {
         not_held("Exif payload");
         return carried;
+    }
+    if format == OutputFormat::Tiff {
+        exif = exif_ifd_only(&exif);
     }
     // `ExifWriter` re-embeds a thumbnail's JPEG bytes and its uncompressed strips, but a thumbnail
     // whose image bytes did not read holds neither. The reader has already removed its
@@ -1177,6 +1216,53 @@ fn carry(
         }
     }
     carried
+}
+
+/// The part of `exif` a TIFF output holds — its Exif and Interoperability sub-IFDs — reporting the
+/// rest as left behind.
+///
+/// A TIFF has no Exif 0th IFD of its own: that directory's tags (`Make`, `Model`, `Orientation`,
+/// …) are TIFF 6.0 baseline tags of the page's own IFD 0, which also holds the `GPSInfo` pointer,
+/// and a thumbnail would be a page of its own. `gamut-tiff` writes IFD 0 itself and carries only
+/// the `ExifIFD` directory (`TiffMetadata::exif`), refusing an Exif model that holds anything else
+/// rather than dropping it — so the drop happens here, where it is reported.
+fn exif_ifd_only(exif: &Exif) -> Exif {
+    let page: Vec<String> = exif
+        .image()
+        .fields()
+        .iter()
+        .map(|field| {
+            ExifTag::from_id(IfdKind::Image, field.tag)
+                .map_or_else(|| format!("tag {}", field.tag), |tag| tag.name().to_owned())
+        })
+        .collect();
+    if !page.is_empty() {
+        tracing::warn!(
+            "input metadata not carried — the Exif 0th-IFD field(s) {}, which a TIFF holds in the \
+             page's own IFD 0, where the TIFF encoder writes none from the input",
+            page.join(", ")
+        );
+    }
+    if exif.gps_ifd().is_some() {
+        tracing::warn!(
+            "input metadata not carried — the Exif GPS sub-IFD, which a TIFF points to from the \
+             page's own IFD 0, where the TIFF encoder writes none from the input"
+        );
+    }
+    if exif.thumbnail().is_some() {
+        tracing::warn!(
+            "input metadata not carried — the Exif thumbnail, which a TIFF would hold as a page \
+             of its own"
+        );
+    }
+    let mut kept = Exif::new(exif.byte_order());
+    if let Some(directory) = exif.exif_ifd() {
+        kept.set_exif_ifd(directory.clone());
+    }
+    if let Some(interop) = exif.interop_ifd() {
+        kept.set_interop_ifd(interop.clone());
+    }
+    kept
 }
 
 /// Rewrites the Exif claims a conversion can make false, each only where the input makes it — a
@@ -1279,8 +1365,9 @@ mod tests {
     use gamut::avif::AvifMode;
 
     use super::{
-        AvifEncoder, AvifSpeed, BitDepth, ChromaSubsampling, ConvertArgs, Job, MatrixCoefficients,
-        OutputFormat, Plan, PngCodecPreset, avif_encoder, plan, png_preset,
+        AvifEncoder, AvifSpeed, BitDepth, ChromaSubsampling, ConvertArgs, Dimensions,
+        InputMetadata, Job, MatrixCoefficients, OutputFormat, Plan, PngCodecPreset, Samples,
+        avif_encoder, carry, plan, png_preset,
     };
     use crate::error::CliError;
 
@@ -1586,5 +1673,20 @@ mod tests {
             );
         }
         assert!(parse_avif(&["--avif-chroma", "400"]).is_err());
+    }
+
+    /// No input this command reads yields an IPTC-IIM block today, so the routing is pinned here:
+    /// a TIFF output, whose `IPTC/NAA` tag holds it, keeps the block, and one without a slot for
+    /// it does not.
+    #[test]
+    fn the_iptc_iim_block_is_carried_only_where_the_output_holds_it() {
+        let meta = InputMetadata {
+            iptc_iim: Some(b"iim".to_vec()),
+            ..InputMetadata::default()
+        };
+        let dims = Dimensions::new(1, 1).unwrap();
+        let into = |format| carry(&meta, format, Some(Samples::Colour), dims).iptc_iim;
+        assert_eq!(into(OutputFormat::Tiff).as_deref(), Some(&b"iim"[..]));
+        assert_eq!(into(OutputFormat::Webp), None);
     }
 }
