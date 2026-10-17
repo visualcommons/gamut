@@ -195,7 +195,7 @@ pub(crate) fn read_metadata(bytes: &[u8]) -> InputMetadata {
             .map(|m| {
                 let mut meta = InputMetadata::from_fields(
                     m.exif.as_deref(),
-                    m.xmp.as_deref(),
+                    m.xmp(),
                     m.icc_profile.as_ref().map(|icc| icc.profile.as_slice()),
                     m.c2pa.as_deref(),
                 );

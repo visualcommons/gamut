@@ -43,7 +43,7 @@ fn png(xmp: Option<&str>) -> Vec<u8> {
 fn gamut_provenance(asset: &[u8]) -> ProvenanceState {
     let located = gamut_png::metadata(asset).expect("gamut-png reads the PNG");
     let blocks: Vec<MetadataBlock<'_>> = [
-        located.xmp.as_deref().map(MetadataBlock::Xmp),
+        located.xmp().map(MetadataBlock::Xmp),
         located.c2pa.as_deref().map(MetadataBlock::C2pa),
     ]
     .into_iter()

@@ -508,10 +508,10 @@ fn metadata_payloads_survive_byte_identical() {
         Some(exif.as_slice()),
         "eXIf verbatim"
     );
-    let profile = decoded.icc_profile.expect("iCCP surfaced");
+    let profile = decoded.icc_profile.as_ref().expect("iCCP surfaced");
     assert_eq!(profile.name, "test profile");
     assert_eq!(profile.profile, icc, "ICC bytes after inflation");
-    assert_eq!(decoded.xmp.as_deref(), Some(xmp.as_bytes()), "XMP packet");
+    assert_eq!(decoded.xmp(), Some(xmp.as_bytes()), "XMP packet");
     assert_eq!(decoded.gamma, Some(45455));
     let chrm = decoded.chromaticities.expect("cHRM surfaced");
     assert_eq!(chrm.white, (31270, 32900));
@@ -528,7 +528,7 @@ fn metadata_payloads_survive_byte_identical() {
         ),
         (9, 16, 0, true)
     );
-    assert_eq!(decoded.texts.len(), 3, "XMP is not repeated in texts");
+    assert_eq!(decoded.texts.len(), 4, "the XMP packet is one of the texts");
     assert_eq!(decoded.texts[0].keyword, "Title");
     assert_eq!(decoded.texts[0].text, "conformance");
     assert_eq!(

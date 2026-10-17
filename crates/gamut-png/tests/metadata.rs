@@ -65,7 +65,7 @@ fn every_carrier_round_trips_byte_exact() {
     let profile = meta.icc_profile.as_ref().expect("iCCP present");
     assert_eq!(profile.name, "Tiny");
     assert_eq!(profile.profile, icc);
-    assert_eq!(meta.xmp.as_deref(), Some(xmp.as_bytes()));
+    assert_eq!(meta.xmp(), Some(xmp.as_bytes()));
     assert_eq!(meta.c2pa.as_deref(), Some(&c2pa[..]));
     assert_eq!(meta.gamma, Some(45_455));
     assert_eq!(meta.srgb, Some(SrgbIntent::RelativeColorimetric));
@@ -83,10 +83,13 @@ fn every_carrier_round_trips_byte_exact() {
     assert_eq!(chrm.white, (31_270, 32_900));
     assert_eq!(chrm.red, (64_000, 33_000));
 
-    // All three text flavours arrive, and the XMP packet is not repeated among them.
+    // All three text flavours arrive, the XMP packet among them in the order it was set.
     let keywords: Vec<&str> = meta.texts.iter().map(|t| t.keyword.as_str()).collect();
-    assert_eq!(keywords, ["Author", "Comment", "Title"]);
-    assert_eq!(meta.texts[1].text, "compressed comment");
+    assert_eq!(
+        keywords,
+        ["XML:com.adobe.xmp", "Author", "Comment", "Title"]
+    );
+    assert_eq!(meta.texts[2].text, "compressed comment");
 }
 
 /// The anti-drift assertion: both walks hand their CRC-valid ancillary chunks to the same
@@ -128,7 +131,7 @@ fn metadata_agrees_with_decode_field_for_field() {
 
     assert_eq!(meta.exif, decoded.exif);
     assert_eq!(meta.icc_profile, decoded.icc_profile);
-    assert_eq!(meta.xmp, decoded.xmp);
+    assert_eq!(meta.xmp(), decoded.xmp());
     assert_eq!(meta.c2pa, decoded.c2pa);
     assert_eq!(meta.c2pa_ignored, decoded.c2pa_ignored);
     assert_eq!(meta.texts, decoded.texts);
@@ -142,7 +145,7 @@ fn metadata_agrees_with_decode_field_for_field() {
     assert_eq!(meta.modification_time, decoded.modification_time);
     // A `None` on both sides would pass every comparison above, so pin that the file really did
     // carry each field.
-    assert!(meta.exif.is_some() && meta.icc_profile.is_some() && meta.xmp.is_some());
+    assert!(meta.exif.is_some() && meta.icc_profile.is_some() && meta.xmp().is_some());
     assert!(meta.c2pa.is_some() && !meta.texts.is_empty());
     assert!(meta.gamma.is_some() && meta.chromaticities.is_some());
     assert!(meta.srgb.is_some() && meta.cicp.is_some());

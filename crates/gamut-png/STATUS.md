@@ -168,9 +168,19 @@ an annotation and whether its text was compressed, and a carry puts it back in t
 Without it a `zTXt` is indistinguishable from a `tEXt` once decoded, and a compressed 40-byte
 payload comes back out as 1 600 uncompressed bytes — no words lost, but not preservation either.
 
-The **XMP packet leaves the read side through its own field**, not through `texts`, so the framing
-that field does not hold travels beside it in `XmpFraming`: §11.3.3.4's compression flag, language
-tag and translated keyword. §11.3.3.1 Table 21 recommends the null framing for XMP compliance
+The **XMP packet is an ordinary entry of `texts`** (#600): the `iTXt` under the keyword §11.3.3.1
+Table 21 reserves, so its §11.3.3.4 compression flag, language tag and translated keyword ride in
+`TextChunk` like any annotation's, and a carry writes it back in its file position. `xmp()` on
+`PngMetadata` and `DecodedPng` is a `#[must_use]` accessor that scans `texts` for the first such
+`iTXt` (a `tEXt`/`zTXt` under the keyword is not the packet; Table 21 names `iTXt`) — the
+`MetadataBlock::Xmp`-ready read path. This retired the `xmp` / `xmp_framing` field pair and the
+`XmpFraming` type, a breaking change: the pair had to agree with nothing in the type system to say
+so. A packet whose text is not UTF-8 is now skipped by the reader as a malformed `iTXt` (§11.3.3.4
+makes the field UTF-8; §13.1), as any other `iTXt` was — the raw-bytes field used to surface it.
+That is what the reader stops accepting, and the `XmpNotUtf8` notice (discriminant 7, retired, not
+reused) went with it, since no path into the encoder can carry such bytes any more. A source with
+two packets is carried with both; `xmp()` reports the first before and after. §11.3.3.1 Table 21
+recommends the null framing for XMP compliance
 ("with Compression Flag set to 0, and both Language Tag and Translated Keyword set to the null
 string") — recommends, not requires, and a provenance packet is exactly the payload a writer
 compresses. The measured cost of getting this wrong, on the fixture in `tests/preservation.rs`:
@@ -178,13 +188,11 @@ the source `iTXt` payload is 354 bytes, the carry that keeps the flag writes 352
 carry with the flag cleared writes **3 734** — a factor of 10.6 against the 352 it should have
 been. The language tag and translated keyword were a second, separate loss of the same defect,
 pinned by a test of their own. `with_xmp` — which has no source file to take framing from — takes
-Table 21's recommended framing. The packet is a **single-value payload** like `iCCP` or `eXIf`: setting it
-again replaces it, because a second `iTXt` under the reserved keyword is one this crate's own
-reader discards.
-
-Consolidating the packet into `texts` would retire `XmpFraming` and put the packet back in its
-file position rather than first among the annotations; it reshapes a public type, so it is
-[#600](https://github.com/visualcommons/gamut/issues/600), not this work.
+Table 21's recommended framing. On the write side the packet is a **single-value payload** like
+`iCCP` or `eXIf`: `with_xmp` replaces every packet already accumulated, and a carry that writes a
+packet replaces one set directly — decided on the chunk written, so a `tEXt` under the keyword
+whose text has no Latin-1 encoding, promoted to `iTXt`, counts — because a second `iTXt` under the reserved keyword is one
+this crate's own reader passes over.
 
 **Two payloads cannot be carried, and neither is dropped in silence.** `metadata_notices()` names
 them and `gamut convert` prints them:
@@ -247,7 +255,6 @@ the wording:
 | Keyword outside Latin-1, or outside 1–79 bytes | §11.3.3.1 | annotation **dropped**, `TextKeywordNotLatin1` / `TextKeywordLength` — no chunk can hold it, and this crate's own reader drops one that tries |
 | Keyword outside `0x20`–`0x7E` / `0xA1`–`0xFF`, or with a leading, trailing or consecutive space | §11.3.3.1 | **written verbatim**, `TextKeywordRepertoire` / `TextKeywordSpacing` — the datastream is then non-conforming per §15.3.1 |
 | `iTXt` language tag outside ASCII letters, digits and `-` | §11.3.3.4 | tag **dropped**, annotation written, `ItxtLanguageTag` |
-| XMP packet that is not UTF-8 | §11.3.3.4 | packet **dropped**, `XmpNotUtf8` |
 | `iCCP` profile name outside Latin-1, outside 1–79 bytes, or holding a null | §11.3.2.3 | profile **dropped**, `IccpNameNotLatin1` / `IccpNameLength` / `IccpNameNull` — this crate's reader refuses such a chunk, so writing it lost the profile on the next read with nothing said (#619); a null is a drop, not a refusal, because the byte after it is read as the compression method and the chunk is refused rather than re-read as another profile |
 | `iCCP` profile name outside `0x20`–`0x7E` / `0xA1`–`0xFF`, or with a leading, trailing or consecutive space | §11.3.2.3 | **written verbatim**, `IccpNameRepertoire` / `IccpNameSpacing` — the keyword's rule word for word, so the keyword's outcome |
 
@@ -308,10 +315,7 @@ never emits a `tIME` its own reader skips.
 **Not done.** An `sBIT`/`bKGD` the written header cannot carry is omitted without a
 `MetadataNotice`, as for the setters: the omission is decided at encode time. A palette-index
 background is carried only onto `encode_indexed8` with the source's palette. The `iTXt` language tag is checked for
-its character set, not for full BCP 47 well-formedness (subtag order, registry membership). The XMP
-packet rides in its own field beside `XmpFraming` rather than in `texts`, so a carry emits it
-**first** among the annotations regardless of where it sat in the source, and the two fields can be
-set inconsistently by a caller building a `PngMetadata` by hand — #600. `sPLT` and `hIST` are
+its character set, not for full BCP 47 well-formedness (subtag order, registry membership). `sPLT` and `hIST` are
 surfaced by neither read walk, so they are not carried either. `gamut convert` carries metadata
 only PNG→PNG; mapping a JPEG/WebP/JXL input's metadata into PNG chunks is a cross-format job of its
 own. The libpng oracle reads no chunk back and drops warnings, so preservation is pinned against

@@ -840,7 +840,7 @@ fn encode(
                     texts = png.texts.len(),
                     exif = carried.exif.is_some(),
                     icc = png.icc_profile.is_some(),
-                    xmp = png.xmp.is_some(),
+                    xmp = png.xmp().is_some(),
                     "carrying input metadata"
                 );
                 let mut png: PngMetadata = png.clone();
