@@ -3,8 +3,12 @@
 //!
 //! Example and drift-guard level, over gamut's own read→write seam. The source files are built
 //! chunk by chunk from `common` so a fixture can carry exactly the combination each claim is
-//! about, without the encoder's own choices standing in the way. That a re-encode's output is a
-//! file the *reference* reader accepts is `tests/oracle.rs`'s job, not this file's.
+//! about, without the encoder's own choices standing in the way.
+//!
+//! gamut reading its own output back is a round trip, which cannot see a defect symmetric across
+//! this crate's reader and writer — so the claims that matter most are also asserted through the
+//! *reference* reader: `libpng_oracle::decode` reports which chunk carried each payload and what
+//! bytes libpng read out of it (issue #572).
 
 mod common;
 
@@ -13,6 +17,7 @@ use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
 use gamut_png::{
     Background, MetadataNotice, PngDecoder, PngEncoder, PngImage, PngMetadata, SrgbIntent,
 };
+use libpng_oracle::{OracleText, OracleTextKind};
 
 /// The `cHRM` payload for the sRGB primaries, in the ×100 000 units §11.3.2.1 stores.
 const CHRM: [u32; 8] = [
@@ -25,7 +30,7 @@ const CHRM: [u32; 8] = [
 /// rebuilding the pile.
 fn source(extra: &[Vec<u8>]) -> Vec<u8> {
     let mut iccp = b"Tiny\0\0".to_vec();
-    iccp.extend_from_slice(&zlib(&tiny_icc_profile()));
+    iccp.extend_from_slice(&zlib(&icc_profile()));
     let mut chrm = Vec::new();
     for coord in CHRM {
         chrm.extend_from_slice(&coord.to_be_bytes());
@@ -45,6 +50,17 @@ fn source(extra: &[Vec<u8>]) -> Vec<u8> {
     chunks.push(chunk(b"IDAT", &zlib(&[0u8; 20])));
     chunks.push(chunk(b"IEND", &[]));
     png_from_chunks(&chunks)
+}
+
+/// [`tiny_icc_profile`] grown by 128 bytes that do not deflate away, so the reference reader sees
+/// it: libpng 1.6.43 drops an `iCCP` chunk shorter than 92 bytes as "too short"
+/// (`libpng_oracle::DecodedImage::iccp`), which the tiny profile's chunk is.
+fn icc_profile() -> Vec<u8> {
+    let mut icc = tiny_icc_profile();
+    icc.extend((0u32..128).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
+    let size = icc.len() as u32;
+    icc[0..4].copy_from_slice(&size.to_be_bytes());
+    icc
 }
 
 /// The `iTXt` payload for a **compressed** XMP packet carrying both §11.3.3.4 fields.
@@ -145,6 +161,85 @@ fn every_carried_chunk_survives_a_re_encode() {
         .map(|t| (t.keyword.as_str(), t.text.as_str()))
         .collect();
     assert_eq!(texts, [("Author", "café"), ("Note", "gämut")]);
+}
+
+/// The headline claim again, read by **libpng** rather than by this crate: every payload the source
+/// carried is in the re-encode, in the chunk the source carried it in, with the bytes it held —
+/// the Latin-1 `é` in a `tEXt`, the `iTXt` language tag, translated keyword and compression flag,
+/// the `cICP` libpng keeps as an unknown chunk — and the C2PA store is not.
+///
+/// Kills a defect symmetric across this crate's reader and writer, which the round trip above
+/// agrees with by construction.
+#[test]
+fn the_reference_reader_sees_every_carried_chunk() {
+    let meta = gamut_png::metadata(&source(&[chunk(b"cICP", &[9, 16, 0, 1])])).unwrap();
+    let dec = libpng_oracle::decode(&re_encoded_bytes(|e| e.with_metadata(&meta)));
+
+    assert_eq!(dec.warnings, 0, "libpng dropped nothing");
+    assert_eq!(dec.exif, Some(tiny_exif()));
+    assert_eq!(dec.iccp, Some(("Tiny".to_string(), icc_profile())));
+    assert_eq!(dec.gamma, Some(45_455));
+    assert_eq!(dec.chromaticities, Some(CHRM));
+    assert_eq!(dec.srgb, None);
+    assert_eq!(
+        dec.unknown_chunks,
+        [(*b"cICP", vec![9, 16, 0, 1])],
+        "cICP carried, caBX not"
+    );
+
+    let mut texts = dec.texts;
+    texts.sort_by(|a, b| a.keyword.cmp(&b.keyword));
+    let text = |keyword: &str, text: &str, kind| OracleText {
+        keyword: keyword.into(),
+        text: text.into(),
+        kind,
+    };
+    let itxt = |language: &str, translated: &str, compressed| OracleTextKind::ITxt {
+        language: language.into(),
+        translated: translated.into(),
+        compressed,
+    };
+    let packet = String::from_utf8(xmp_packet()).unwrap();
+    assert_eq!(
+        texts,
+        [
+            text("Author", "caf\u{e9}", OracleTextKind::Text),
+            text("Note", "g\u{e4}mut", itxt("de", "Notiz", false)),
+            text("XML:com.adobe.xmp", &packet, itxt("en", "Metadata", true)),
+        ]
+    );
+}
+
+/// A `zTXt` reaches the reference reader as a `zTXt`, holding the text it held.
+///
+/// Kills the `CompressedText` routing in `with_metadata_view` together with any defect in the
+/// encoder's `zTXt` framing that this crate's reader would mirror.
+#[test]
+fn the_reference_reader_sees_a_carried_ztxt_as_ztxt() {
+    let mut ztxt = b"Comment\0\0".to_vec();
+    ztxt.extend_from_slice(&zlib(b"na\xEFve"));
+    let meta = gamut_png::metadata(&minimal_source(&[chunk(b"zTXt", &ztxt)])).unwrap();
+    let dec = libpng_oracle::decode(&re_encoded_bytes(|e| e.with_metadata(&meta)));
+
+    assert_eq!(
+        dec.texts,
+        [OracleText {
+            keyword: "Comment".into(),
+            text: "na\u{ef}ve".into(),
+            kind: OracleTextKind::ZTxt,
+        }]
+    );
+}
+
+/// A carried `sRGB` reaches the reference reader with its rendering intent. Alone, because libpng
+/// keeps only the first of `sRGB` and `iCCP` (`png_handle_sRGB`/`png_handle_iCCP`, "too many
+/// profiles"), so the pair [`a_profile_and_a_rendering_intent_are_both_carried`] pins cannot be
+/// read back through it.
+#[test]
+fn the_reference_reader_sees_a_carried_rendering_intent() {
+    let meta = gamut_png::metadata(&minimal_source(&[chunk(b"sRGB", &[1])])).unwrap();
+    let dec = libpng_oracle::decode(&re_encoded_bytes(|e| e.with_metadata(&meta)));
+    assert_eq!((dec.srgb, dec.warnings), (Some(1), 0));
 }
 
 /// The four chunks #569 put on the read surface come back out byte for byte when the written
