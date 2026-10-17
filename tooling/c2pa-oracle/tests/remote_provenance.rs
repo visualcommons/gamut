@@ -13,9 +13,12 @@
 //! feature and the network a fetch needs. What a fetch would return is checked instead — the store
 //! c2pa-rs signed for that URL validates against the asset carrying the reference.
 
+mod common;
+
 use c2pa::ValidationState;
 use c2pa_oracle::{PNG_MIME, embed, embed_remote, read_with_external_store, remote_manifest_url};
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use common::{dims, source_rgb};
+use gamut_core::{EncodeImage, ImageRef, Rgb8};
 use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
 use gamut_metadata::{Metadata, MetadataBlock, ProvenanceState};
 use gamut_png::PngEncoder;
@@ -23,16 +26,11 @@ use gamut_png::PngEncoder;
 /// The external manifest's URL. Never fetched by either side.
 const URL: &str = "https://manifests.example.com/c2pa-oracle/846.c2pa";
 
-/// A small structured RGB fixture.
-fn source_rgb() -> Vec<u8> {
-    (0u32..34 * 18 * 3).map(|i| (i * 7 % 251) as u8).collect()
-}
-
-/// The fixture as gamut-png encodes it, with `xmp` as its XMP packet when given.
+/// The shared fixture (`tests/common/mod.rs`) as gamut-png encodes it, with `xmp` as its XMP
+/// packet when given.
 fn png(xmp: Option<&str>) -> Vec<u8> {
     let rgb = source_rgb();
-    let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(34, 18).expect("non-zero"))
-        .expect("buffer matches dimensions");
+    let image = ImageRef::<Rgb8>::new(&rgb, dims()).expect("buffer matches dimensions");
     let encoder = match xmp {
         Some(xmp) => PngEncoder::new().with_xmp(xmp),
         None => PngEncoder::new(),
