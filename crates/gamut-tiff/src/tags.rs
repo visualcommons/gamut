@@ -2,7 +2,9 @@
 //!
 //! Values are from the TIFF 6.0 specification, §8 (Baseline Field Reference Guide) and the
 //! Part 2 extension sections. Only the tags the encoder/decoder act on are named here; unknown
-//! tags are still parsed structurally by the reader.
+//! tags are still parsed structurally by the reader. The full TIFF 6.0 set — every tag's name,
+//! field types and count — is the shared [`gamut_ifd::tags::TIFF6`] registry, which
+//! [`is_known_tag`] reads.
 
 /// `NewSubfileType` (254) — a bit field describing the kind of data in this subfile.
 pub const NEW_SUBFILE_TYPE: u16 = 254;
@@ -93,100 +95,44 @@ pub const INTEROPERABILITY_IFD: u16 = gamut_ifd::tags::INTEROPERABILITY_IFD;
 /// the payload is carried verbatim ([`TiffMetadata::c2pa`](crate::TiffMetadata::c2pa)).
 pub const C2PA_MANIFEST_STORE: u16 = gamut_ifd::c2pa::C2PA_MANIFEST_STORE;
 
-/// Whether `tag` is one this crate recognises as part of TIFF 6.0 — the baseline reference (§8)
-/// plus the Part 2 still-image extension tags — as opposed to a private or unknown tag a strict
-/// deconstruct should flag.
+/// Whether `tag` is one this crate recognises — every tag TIFF 6.0 defines, read from the shared
+/// [`gamut_ifd::tags::TIFF6`] registry, plus the pointer and metadata tags this crate reads and
+/// writes and the few later TIFF extension tags listed below — as opposed to a private or unknown
+/// tag a strict deconstruct should flag.
 ///
 /// Recognition is *structural*: a recognised tag is a standard one, not necessarily one the
 /// encoder/decoder act on (e.g. `Orientation`, `Software`, `DateTime`). Tags inside an Exif/GPS
-/// sub-IFD belong to a different namespace and are not judged here.
+/// sub-IFD belong to a different namespace and are not judged here. A number TIFF 6.0 leaves
+/// unassigned is not recognised, even inside one of its runs: 516, between `JPEGRestartInterval`
+/// and `JPEGLosslessPredictors`, is flagged.
 #[must_use]
 pub fn is_known_tag(tag: u16) -> bool {
-    matches!(
-        tag,
-        // Named structural / codec / pointer tags above.
-        NEW_SUBFILE_TYPE
-            | IMAGE_WIDTH
-            | IMAGE_LENGTH
-            | BITS_PER_SAMPLE
-            | COMPRESSION
-            | PHOTOMETRIC_INTERPRETATION
-            | FILL_ORDER
-            | STRIP_OFFSETS
-            | SAMPLES_PER_PIXEL
-            | ROWS_PER_STRIP
-            | STRIP_BYTE_COUNTS
-            | X_RESOLUTION
-            | Y_RESOLUTION
-            | PLANAR_CONFIGURATION
-            | RESOLUTION_UNIT
-            | PREDICTOR
-            | EXTRA_SAMPLES
-            | SAMPLE_FORMAT
-            | COLOR_MAP
-            | TILE_WIDTH
-            | TILE_LENGTH
-            | TILE_OFFSETS
-            | TILE_BYTE_COUNTS
-            | PAGE_NUMBER
-            | SUB_IFDS
-            | XMP
-            | COPYRIGHT
-            | IMAGE_DESCRIPTION
-            | MAKE
-            | MODEL
-            | ORIENTATION
-            | SOFTWARE
-            | DATE_TIME
-            | ARTIST
-            | WHITE_POINT
-            | PRIMARY_CHROMATICITIES
-            | IPTC_NAA
-            | EXIF_IFD
-            | ICC_PROFILE
-            | GPS_INFO
-            | INTEROPERABILITY_IFD
-            | C2PA_MANIFEST_STORE
-            // Other TIFF 6.0 baseline (§8) and Part 2 still-image extension tags a valid file may
-            // carry but the codec does not act on. Kept as numeric literals — no codec constant
-            // is needed for tags the pixel path never reads.
-            | 255 // SubfileType
-            | 263 // Threshholding
-            | 264 // CellWidth
-            | 265 // CellLength
-            | 269 // DocumentName
-            | 280 // MinSampleValue
-            | 281 // MaxSampleValue
-            | 285 // PageName
-            | 286 // XPosition
-            | 287 // YPosition
-            | 288 // FreeOffsets
-            | 289 // FreeByteCounts
-            | 290 // GrayResponseUnit
-            | 291 // GrayResponseCurve
-            | 292 // T4Options
-            | 293 // T6Options
-            | 301 // TransferFunction
-            | 316 // HostComputer
-            | 321 // HalftoneHints
-            | 326 // BadFaxLines
-            | 327 // CleanFaxData
-            | 328 // ConsecutiveBadFaxLines
-            | 332 // InkSet
-            | 333 // InkNames
-            | 334 // NumberOfInks
-            | 336 // DotRange
-            | 337 // TargetPrinter
-            | 340..=342 // SMinSampleValue / SMaxSampleValue / TransferRange
-            | 343 // ClipPath
-            | 344 // XClipPathUnits
-            | 345 // YClipPathUnits
-            | 346 // Indexed
-            | 347 // JPEGTables
-            | 351 // OPIProxy
-            | 512..=521 // JPEG-in-TIFF (JPEGProc … JPEGACTables)
-            | 529..=532 // YCbCrCoefficients / Subsampling / Positioning / ReferenceBlackWhite
-    )
+    gamut_ifd::tags::TIFF6.find(tag).is_some()
+        || matches!(
+            tag,
+            // Pointer and metadata tags from specifications the registry does not carry, each
+            // read or written by this crate.
+            SUB_IFDS
+                | XMP
+                | IPTC_NAA
+                | EXIF_IFD
+                | ICC_PROFILE
+                | GPS_INFO
+                | INTEROPERABILITY_IFD
+                | C2PA_MANIFEST_STORE
+                // Later TIFF extension tags a valid file may carry but the codec does not act on.
+                // Their specifications (TIFF-F, the Adobe technical notes) are not vendored, so
+                // they stay out of the registry and are recognised here by number only.
+                | 326 // BadFaxLines
+                | 327 // CleanFaxData
+                | 328 // ConsecutiveBadFaxLines
+                | 343 // ClipPath
+                | 344 // XClipPathUnits
+                | 345 // YClipPathUnits
+                | 346 // Indexed
+                | 347 // JPEGTables
+                | 351 // OPIProxy
+        )
 }
 
 #[cfg(test)]
@@ -246,10 +192,38 @@ mod tests {
     }
 
     #[test]
+    fn every_tiff6_registry_tag_is_known() {
+        for spec in gamut_ifd::tags::TIFF6.specs() {
+            assert!(is_known_tag(spec.id), "{} should be known", spec.name);
+        }
+    }
+
+    #[test]
+    fn each_later_extension_tag_is_known() {
+        // One assertion per alternative: the gate deletes whole match arms, never one
+        // alternative of an or-pattern, so only these can tell a dropped number.
+        for tag in [326, 327, 328, 343, 344, 345, 346, 347, 351] {
+            assert!(is_known_tag(tag), "tag {tag} should be known");
+        }
+    }
+
+    #[test]
     fn private_tags_are_unknown() {
         // A private/maker tag and an arbitrary gap value are flagged.
         assert!(!is_known_tag(0x9999));
         assert!(!is_known_tag(50341)); // PrintImageMatching (proprietary)
         assert!(!is_known_tag(700 + 1));
+    }
+
+    #[test]
+    fn an_unassigned_number_inside_a_tiff6_run_is_unknown() {
+        // 516 lies inside the 512..=521 JPEG run but TIFF 6.0 Section 22 assigns it nothing.
+        assert!(!is_known_tag(516));
+    }
+
+    #[test]
+    fn a_dng_tag_is_not_a_tiff_tag() {
+        // The registry's DNG block answers for gamut-dng, not for a plain TIFF.
+        assert!(!is_known_tag(50706)); // DNGVersion
     }
 }

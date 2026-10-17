@@ -16,6 +16,9 @@
 //! [`read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
 //! well-known structural ones live in [`tags`]); [`resolve_subtree`] runs the same guarded walk
 //! over **one** directory a caller already holds, scoped per level by a [`SubtreeScope`]. The
+//! same [`tags`] module holds the shared tag registry — each tag TIFF 6.0 and DNG 1.7.1.0 define,
+//! with its name, permitted field types and component count — that gamut-tiff, gamut-dng and
+//! gamut-exif read rather than each keeping a copy. The
 //! one cross-format payload a TIFF-based file carries by tag — the C2PA manifest store — has its
 //! placement rule and exclusion ranges stated once, in [`c2pa`], for every TIFF-based codec to
 //! share. For strict archival decoding, [`audit`] classifies **every byte** of a stream into typed

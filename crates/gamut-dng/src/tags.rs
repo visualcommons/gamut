@@ -4,7 +4,9 @@
 //! `dng_tag_codes.h` (the `tc*` enum). They fall into three groups: the baseline TIFF 6.0 / TIFF-EP
 //! tags DNG inherits, the DNG-private tags (`0xC612`–`0xC7B5`), and the DNG 1.6/1.7 additions
 //! (`0xCD2D`–`0xCD4D`). Only the tags the encoder/decoder act on are named; an unknown tag is still
-//! parsed structurally by [`gamut_ifd`].
+//! parsed structurally by [`gamut_ifd`]. Every tag DNG itself defines — its name, field types and
+//! count — is the shared [`gamut_ifd::tags::DNG`] registry, which [`is_known_tag`] reads and the
+//! constants below are held to.
 //!
 //! Hex appears in each doc comment because Adobe and most DNG tooling refer to these tags by hex.
 
@@ -382,11 +384,14 @@ pub const YCBCR_POSITIONING: u16 = 531;
 /// (TIFF 6.0 §21).
 pub const REFERENCE_BLACK_WHITE: u16 = 532;
 
-/// Every tag this crate names — the source of truth for [`is_known_tag`].
+/// Every tag this crate names that DNG itself does not define — the baseline TIFF 6.0 / TIFF-EP
+/// tags, the EXIF tags, and the C2PA store. With the shared [`gamut_ifd::tags::DNG`] registry,
+/// which holds every DNG-defined tag, it is the source of truth for [`is_known_tag`].
 ///
-/// Keep this in sync when adding a `pub const` above; [`tests::every_named_tag_is_known`] iterates
-/// it but cannot, by itself, prove a newly-added constant was included (Rust has no const
-/// reflection), so adding a tag here is part of adding the constant.
+/// Keep this in sync when adding a non-DNG `pub const` above; [`tests::every_named_tag_is_known`]
+/// iterates it but cannot, by itself, prove a newly-added constant was included (Rust has no const
+/// reflection), so adding a tag here is part of adding the constant. A DNG-defined constant is
+/// held to the registry by [`tests::every_dng_constant_is_the_registry_row_of_its_name`] instead.
 const KNOWN_TAGS: &[u16] = &[
     // Baseline TIFF 6.0 / TIFF-EP.
     NEW_SUBFILE_TYPE,
@@ -438,128 +443,8 @@ const KNOWN_TAGS: &[u16] = &[
     EXIF_VERSION,
     DATE_TIME_ORIGINAL,
     FOCAL_LENGTH,
-    // DNG-private tags.
-    DNG_VERSION,
-    DNG_BACKWARD_VERSION,
-    UNIQUE_CAMERA_MODEL,
-    LOCALIZED_CAMERA_MODEL,
-    CFA_PLANE_COLOR,
-    CFA_LAYOUT,
-    LINEARIZATION_TABLE,
-    BLACK_LEVEL_REPEAT_DIM,
-    BLACK_LEVEL,
-    BLACK_LEVEL_DELTA_H,
-    BLACK_LEVEL_DELTA_V,
-    WHITE_LEVEL,
-    DEFAULT_SCALE,
-    DEFAULT_CROP_ORIGIN,
-    DEFAULT_CROP_SIZE,
-    COLOR_MATRIX1,
-    COLOR_MATRIX2,
-    CAMERA_CALIBRATION1,
-    CAMERA_CALIBRATION2,
-    REDUCTION_MATRIX1,
-    REDUCTION_MATRIX2,
-    ANALOG_BALANCE,
-    AS_SHOT_NEUTRAL,
-    AS_SHOT_WHITE_XY,
-    BASELINE_EXPOSURE,
-    BASELINE_NOISE,
-    BASELINE_SHARPNESS,
-    BAYER_GREEN_SPLIT,
-    LINEAR_RESPONSE_LIMIT,
-    CAMERA_SERIAL_NUMBER,
-    LENS_INFO,
-    CHROMA_BLUR_RADIUS,
-    ANTI_ALIAS_STRENGTH,
-    SHADOW_SCALE,
-    DNG_PRIVATE_DATA,
-    MAKER_NOTE_SAFETY,
-    CALIBRATION_ILLUMINANT1,
-    CALIBRATION_ILLUMINANT2,
-    BEST_QUALITY_SCALE,
-    RAW_DATA_UNIQUE_ID,
-    ORIGINAL_RAW_FILE_NAME,
-    ORIGINAL_RAW_FILE_DATA,
-    ACTIVE_AREA,
-    MASKED_AREAS,
-    AS_SHOT_ICC_PROFILE,
-    AS_SHOT_PRE_PROFILE_MATRIX,
-    CURRENT_ICC_PROFILE,
-    CURRENT_PRE_PROFILE_MATRIX,
-    COLORIMETRIC_REFERENCE,
-    CAMERA_CALIBRATION_SIGNATURE,
-    PROFILE_CALIBRATION_SIGNATURE,
-    EXTRA_CAMERA_PROFILES,
-    AS_SHOT_PROFILE_NAME,
-    NOISE_REDUCTION_APPLIED,
-    PROFILE_NAME,
-    PROFILE_HUE_SAT_MAP_DIMS,
-    PROFILE_HUE_SAT_MAP_DATA1,
-    PROFILE_HUE_SAT_MAP_DATA2,
-    PROFILE_TONE_CURVE,
-    PROFILE_EMBED_POLICY,
-    PROFILE_COPYRIGHT,
-    FORWARD_MATRIX1,
-    FORWARD_MATRIX2,
-    PREVIEW_APPLICATION_NAME,
-    PREVIEW_APPLICATION_VERSION,
-    PREVIEW_SETTINGS_NAME,
-    PREVIEW_SETTINGS_DIGEST,
-    PREVIEW_COLOR_SPACE,
-    PREVIEW_DATE_TIME,
-    RAW_IMAGE_DIGEST,
-    ORIGINAL_RAW_FILE_DIGEST,
-    SUB_TILE_BLOCK_SIZE,
-    ROW_INTERLEAVE_FACTOR,
-    PROFILE_LOOK_TABLE_DIMS,
-    PROFILE_LOOK_TABLE_DATA,
-    OPCODE_LIST1,
-    OPCODE_LIST2,
-    OPCODE_LIST3,
-    NOISE_PROFILE,
-    ORIGINAL_DEFAULT_FINAL_SIZE,
-    ORIGINAL_BEST_QUALITY_FINAL_SIZE,
-    ORIGINAL_DEFAULT_CROP_SIZE,
-    PROFILE_HUE_SAT_MAP_ENCODING,
-    PROFILE_LOOK_TABLE_ENCODING,
-    BASELINE_EXPOSURE_OFFSET,
-    DEFAULT_BLACK_RENDER,
-    NEW_RAW_IMAGE_DIGEST,
-    RAW_TO_PREVIEW_GAIN,
-    DEFAULT_USER_CROP,
-    // Depth-map tags.
-    DEPTH_FORMAT,
-    DEPTH_NEAR,
-    DEPTH_FAR,
-    DEPTH_UNITS,
-    DEPTH_MEASURE_TYPE,
-    ENHANCE_PARAMS,
-    // DNG 1.6 / 1.7 additions.
-    PROFILE_GAIN_TABLE_MAP,
-    SEMANTIC_NAME,
-    SEMANTIC_INSTANCE_ID,
-    CALIBRATION_ILLUMINANT3,
-    CAMERA_CALIBRATION3,
-    COLOR_MATRIX3,
-    FORWARD_MATRIX3,
-    ILLUMINANT_DATA1,
-    ILLUMINANT_DATA2,
-    ILLUMINANT_DATA3,
-    MASK_SUB_AREA,
-    PROFILE_HUE_SAT_MAP_DATA3,
-    REDUCTION_MATRIX3,
-    RGB_TABLES,
-    PROFILE_GAIN_TABLE_MAP2,
+    // Not a DNG tag (C2PA 2.4), but one this crate writes and reads.
     C2PA_MANIFEST_STORE,
-    COLUMN_INTERLEAVE_FACTOR,
-    IMAGE_SEQUENCE_INFO,
-    IMAGE_STATS,
-    PROFILE_DYNAMIC_RANGE,
-    PROFILE_GROUP_NAME,
-    JXL_DISTANCE,
-    JXL_EFFORT,
-    JXL_DECODE_SPEED,
 ];
 
 /// The 3×3 colour-calibration matrix tags whose value must be exactly nine `(S)RATIONAL`s — used by
@@ -577,8 +462,9 @@ pub const MATRIX_3X3_TAGS: &[u16] = &[
 ];
 
 /// Whether `tag` is one this crate recognises as part of DNG 1.7.1 — the baseline TIFF/EP tags, the
-/// EXIF tags it reads, and the DNG-private / depth / 1.6-1.7 tags — as opposed to a private or
-/// unknown tag a strict deconstruct should flag.
+/// EXIF tags it reads, and every tag DNG 1.7.1.0 itself defines (read from the shared
+/// [`gamut_ifd::tags::DNG`] registry) — as opposed to a private or unknown tag a strict
+/// deconstruct should flag.
 ///
 /// A handful of common baseline TIFF tags a DNG may carry but the codec does not name
 /// (`HostComputer`, `Min`/`MaxSampleValue`) are also accepted so a valid file is not flagged for
@@ -596,7 +482,8 @@ pub const MATRIX_3X3_TAGS: &[u16] = &[
 /// because this crate writes and reads one.
 #[must_use]
 pub fn is_known_tag(tag: u16) -> bool {
-    KNOWN_TAGS.contains(&tag)
+    gamut_ifd::tags::DNG.find(tag).is_some()
+        || KNOWN_TAGS.contains(&tag)
         || matches!(
             tag,
             280 // MinSampleValue
@@ -621,6 +508,165 @@ mod tests {
         // The C2PA store is a tag this crate writes, so a file carrying one is not "private":
         // `is_fully_accounted` must stay true for a DNG this encoder produced.
         assert!(is_known_tag(gamut_ifd::c2pa::C2PA_MANIFEST_STORE));
+    }
+
+    #[test]
+    fn every_dng_registry_tag_is_known() {
+        for spec in gamut_ifd::tags::DNG.specs() {
+            assert!(is_known_tag(spec.id), "{} should be known", spec.name);
+        }
+    }
+
+    #[test]
+    fn each_unnamed_baseline_tag_is_known() {
+        // One assertion per alternative of the or-pattern: the gate deletes whole match arms only.
+        for tag in [280, 281, 316, 320] {
+            assert!(is_known_tag(tag), "tag {tag} should be known");
+        }
+    }
+
+    #[test]
+    fn every_dng_constant_is_the_registry_row_of_its_name() {
+        // The constants are this crate's names for the registry's rows: each must be the number
+        // DNG 1.7.1.0 gives the tag it is named for, and together they must cover the block.
+        let named = [
+            (DNG_VERSION, "DNGVersion"),
+            (DNG_BACKWARD_VERSION, "DNGBackwardVersion"),
+            (UNIQUE_CAMERA_MODEL, "UniqueCameraModel"),
+            (LOCALIZED_CAMERA_MODEL, "LocalizedCameraModel"),
+            (CFA_PLANE_COLOR, "CFAPlaneColor"),
+            (CFA_LAYOUT, "CFALayout"),
+            (LINEARIZATION_TABLE, "LinearizationTable"),
+            (BLACK_LEVEL_REPEAT_DIM, "BlackLevelRepeatDim"),
+            (BLACK_LEVEL, "BlackLevel"),
+            (BLACK_LEVEL_DELTA_H, "BlackLevelDeltaH"),
+            (BLACK_LEVEL_DELTA_V, "BlackLevelDeltaV"),
+            (WHITE_LEVEL, "WhiteLevel"),
+            (DEFAULT_SCALE, "DefaultScale"),
+            (DEFAULT_CROP_ORIGIN, "DefaultCropOrigin"),
+            (DEFAULT_CROP_SIZE, "DefaultCropSize"),
+            (COLOR_MATRIX1, "ColorMatrix1"),
+            (COLOR_MATRIX2, "ColorMatrix2"),
+            (CAMERA_CALIBRATION1, "CameraCalibration1"),
+            (CAMERA_CALIBRATION2, "CameraCalibration2"),
+            (REDUCTION_MATRIX1, "ReductionMatrix1"),
+            (REDUCTION_MATRIX2, "ReductionMatrix2"),
+            (ANALOG_BALANCE, "AnalogBalance"),
+            (AS_SHOT_NEUTRAL, "AsShotNeutral"),
+            (AS_SHOT_WHITE_XY, "AsShotWhiteXY"),
+            (BASELINE_EXPOSURE, "BaselineExposure"),
+            (BASELINE_NOISE, "BaselineNoise"),
+            (BASELINE_SHARPNESS, "BaselineSharpness"),
+            (BAYER_GREEN_SPLIT, "BayerGreenSplit"),
+            (LINEAR_RESPONSE_LIMIT, "LinearResponseLimit"),
+            (CAMERA_SERIAL_NUMBER, "CameraSerialNumber"),
+            (LENS_INFO, "LensInfo"),
+            (CHROMA_BLUR_RADIUS, "ChromaBlurRadius"),
+            (ANTI_ALIAS_STRENGTH, "AntiAliasStrength"),
+            (SHADOW_SCALE, "ShadowScale"),
+            (DNG_PRIVATE_DATA, "DNGPrivateData"),
+            (MAKER_NOTE_SAFETY, "MakerNoteSafety"),
+            (CALIBRATION_ILLUMINANT1, "CalibrationIlluminant1"),
+            (CALIBRATION_ILLUMINANT2, "CalibrationIlluminant2"),
+            (BEST_QUALITY_SCALE, "BestQualityScale"),
+            (RAW_DATA_UNIQUE_ID, "RawDataUniqueID"),
+            (ORIGINAL_RAW_FILE_NAME, "OriginalRawFileName"),
+            (ORIGINAL_RAW_FILE_DATA, "OriginalRawFileData"),
+            (ACTIVE_AREA, "ActiveArea"),
+            (MASKED_AREAS, "MaskedAreas"),
+            (AS_SHOT_ICC_PROFILE, "AsShotICCProfile"),
+            (AS_SHOT_PRE_PROFILE_MATRIX, "AsShotPreProfileMatrix"),
+            (CURRENT_ICC_PROFILE, "CurrentICCProfile"),
+            (CURRENT_PRE_PROFILE_MATRIX, "CurrentPreProfileMatrix"),
+            (COLORIMETRIC_REFERENCE, "ColorimetricReference"),
+            (CAMERA_CALIBRATION_SIGNATURE, "CameraCalibrationSignature"),
+            (PROFILE_CALIBRATION_SIGNATURE, "ProfileCalibrationSignature"),
+            (EXTRA_CAMERA_PROFILES, "ExtraCameraProfiles"),
+            (AS_SHOT_PROFILE_NAME, "AsShotProfileName"),
+            (NOISE_REDUCTION_APPLIED, "NoiseReductionApplied"),
+            (PROFILE_NAME, "ProfileName"),
+            (PROFILE_HUE_SAT_MAP_DIMS, "ProfileHueSatMapDims"),
+            (PROFILE_HUE_SAT_MAP_DATA1, "ProfileHueSatMapData1"),
+            (PROFILE_HUE_SAT_MAP_DATA2, "ProfileHueSatMapData2"),
+            (PROFILE_TONE_CURVE, "ProfileToneCurve"),
+            (PROFILE_EMBED_POLICY, "ProfileEmbedPolicy"),
+            (PROFILE_COPYRIGHT, "ProfileCopyright"),
+            (FORWARD_MATRIX1, "ForwardMatrix1"),
+            (FORWARD_MATRIX2, "ForwardMatrix2"),
+            (PREVIEW_APPLICATION_NAME, "PreviewApplicationName"),
+            (PREVIEW_APPLICATION_VERSION, "PreviewApplicationVersion"),
+            (PREVIEW_SETTINGS_NAME, "PreviewSettingsName"),
+            (PREVIEW_SETTINGS_DIGEST, "PreviewSettingsDigest"),
+            (PREVIEW_COLOR_SPACE, "PreviewColorSpace"),
+            (PREVIEW_DATE_TIME, "PreviewDateTime"),
+            (RAW_IMAGE_DIGEST, "RawImageDigest"),
+            (ORIGINAL_RAW_FILE_DIGEST, "OriginalRawFileDigest"),
+            (SUB_TILE_BLOCK_SIZE, "SubTileBlockSize"),
+            (ROW_INTERLEAVE_FACTOR, "RowInterleaveFactor"),
+            (PROFILE_LOOK_TABLE_DIMS, "ProfileLookTableDims"),
+            (PROFILE_LOOK_TABLE_DATA, "ProfileLookTableData"),
+            (OPCODE_LIST1, "OpcodeList1"),
+            (OPCODE_LIST2, "OpcodeList2"),
+            (OPCODE_LIST3, "OpcodeList3"),
+            (NOISE_PROFILE, "NoiseProfile"),
+            (ORIGINAL_DEFAULT_FINAL_SIZE, "OriginalDefaultFinalSize"),
+            (
+                ORIGINAL_BEST_QUALITY_FINAL_SIZE,
+                "OriginalBestQualityFinalSize",
+            ),
+            (ORIGINAL_DEFAULT_CROP_SIZE, "OriginalDefaultCropSize"),
+            (PROFILE_HUE_SAT_MAP_ENCODING, "ProfileHueSatMapEncoding"),
+            (PROFILE_LOOK_TABLE_ENCODING, "ProfileLookTableEncoding"),
+            (BASELINE_EXPOSURE_OFFSET, "BaselineExposureOffset"),
+            (DEFAULT_BLACK_RENDER, "DefaultBlackRender"),
+            (NEW_RAW_IMAGE_DIGEST, "NewRawImageDigest"),
+            (RAW_TO_PREVIEW_GAIN, "RawToPreviewGain"),
+            (DEFAULT_USER_CROP, "DefaultUserCrop"),
+            (DEPTH_FORMAT, "DepthFormat"),
+            (DEPTH_NEAR, "DepthNear"),
+            (DEPTH_FAR, "DepthFar"),
+            (DEPTH_UNITS, "DepthUnits"),
+            (DEPTH_MEASURE_TYPE, "DepthMeasureType"),
+            (ENHANCE_PARAMS, "EnhanceParams"),
+            (PROFILE_GAIN_TABLE_MAP, "ProfileGainTableMap"),
+            (SEMANTIC_NAME, "SemanticName"),
+            (SEMANTIC_INSTANCE_ID, "SemanticInstanceID"),
+            (CALIBRATION_ILLUMINANT3, "CalibrationIlluminant3"),
+            (CAMERA_CALIBRATION3, "CameraCalibration3"),
+            (COLOR_MATRIX3, "ColorMatrix3"),
+            (FORWARD_MATRIX3, "ForwardMatrix3"),
+            (ILLUMINANT_DATA1, "IlluminantData1"),
+            (ILLUMINANT_DATA2, "IlluminantData2"),
+            (ILLUMINANT_DATA3, "IlluminantData3"),
+            (MASK_SUB_AREA, "MaskSubArea"),
+            (PROFILE_HUE_SAT_MAP_DATA3, "ProfileHueSatMapData3"),
+            (REDUCTION_MATRIX3, "ReductionMatrix3"),
+            (RGB_TABLES, "RGBTables"),
+            (PROFILE_GAIN_TABLE_MAP2, "ProfileGainTableMap2"),
+            (COLUMN_INTERLEAVE_FACTOR, "ColumnInterleaveFactor"),
+            (IMAGE_SEQUENCE_INFO, "ImageSequenceInfo"),
+            (IMAGE_STATS, "ImageStats"),
+            (PROFILE_DYNAMIC_RANGE, "ProfileDynamicRange"),
+            (PROFILE_GROUP_NAME, "ProfileGroupName"),
+            (JXL_DISTANCE, "JXLDistance"),
+            (JXL_EFFORT, "JXLEffort"),
+            (JXL_DECODE_SPEED, "JXLDecodeSpeed"),
+        ];
+        for (id, name) in named {
+            assert_eq!(
+                gamut_ifd::tags::DNG.find(id).map(|s| s.name),
+                Some(name),
+                "{name} ({id})"
+            );
+        }
+        assert_eq!(named.len(), gamut_ifd::tags::DNG.specs().len());
+    }
+
+    #[test]
+    fn a_tiff6_tag_dng_does_not_name_stays_unknown() {
+        // The DNG recognition set is the DNG registry plus this crate's own list, not every TIFF
+        // 6.0 tag: `DocumentName` is still flagged in a DNG.
+        assert!(!is_known_tag(269));
     }
 
     #[test]
