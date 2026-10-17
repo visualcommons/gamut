@@ -605,7 +605,23 @@ impl Ancillary {
 
     /// Ends the carry started by [`begin_carry`](Self::begin_carry), so later direct setters push
     /// entries a subsequent carry will not remove.
+    ///
+    /// A carry that brought an XMP packet displaces any packet set directly before it, so the
+    /// encoder writes the packet it was last handed, as [`add_xmp`](Self::add_xmp) does the
+    /// other way round; a carry that brought none leaves a directly-set packet alone. Whether
+    /// the carry brought one is decided on the **written** entries ([`TextEntry::is_xmp_packet`]),
+    /// not on the source's chunk kinds: a carried `tEXt` under the reserved keyword whose text
+    /// has no Latin-1 encoding is promoted to `iTXt` and becomes a packet a reader takes, so it
+    /// must displace like any other, or the file would hold two.
     pub(crate) fn end_carry(&mut self) {
+        if self
+            .texts
+            .iter()
+            .any(|entry| entry.carried && entry.is_xmp_packet())
+        {
+            self.texts
+                .retain(|entry| entry.carried || !entry.is_xmp_packet());
+        }
         self.carrying = false;
     }
 
@@ -2097,6 +2113,43 @@ mod tests {
             find_chunk(&post_plte(&a), b"iTXt"),
             Some(b"Author\0\0\0de\0Autor\0g\xC3\xA4mut".to_vec())
         );
+    }
+
+    /// A carry displaces a directly-set XMP packet when what it **wrote** is a packet: here a
+    /// `tEXt` request under the reserved keyword whose text has no Latin-1 encoding, promoted to
+    /// `iTXt`. Deciding on the source's kind instead leaves two packets. A carry that wrote no
+    /// packet keeps the direct one, and an ordinary direct annotation survives either way.
+    ///
+    /// Kills [`Ancillary::end_carry`]'s displacement: the guard (each operand of its `&&`) and
+    /// the `retain` (each operand of its `||`).
+    #[test]
+    fn a_carry_displaces_a_direct_packet_only_when_it_writes_one() {
+        let packets = |a: &Ancillary| -> Vec<(Vec<u8>, bool)> {
+            a.texts
+                .iter()
+                .filter(|e| e.is_xmp_packet())
+                .map(|e| (e.text.clone(), e.carried))
+                .collect()
+        };
+
+        let mut a = Ancillary::default();
+        a.add_text_latin1("Before", "kept");
+        a.add_xmp("direct");
+        a.begin_carry();
+        a.add_text_latin1(XMP_KEYWORD, "promoted \u{2192}");
+        a.end_carry();
+        assert_eq!(
+            packets(&a),
+            [("promoted \u{2192}".as_bytes().to_vec(), true)]
+        );
+        assert!(a.texts.iter().any(|e| e.keyword == b"Before"));
+
+        let mut b = Ancillary::default();
+        b.add_xmp("direct");
+        b.begin_carry();
+        b.add_text_latin1(XMP_KEYWORD, "latin-1 stays tEXt");
+        b.end_carry();
+        assert_eq!(packets(&b), [(b"direct".to_vec(), false)]);
     }
 
     /// A carry replaces what an earlier carry contributed instead of appending a second copy, so

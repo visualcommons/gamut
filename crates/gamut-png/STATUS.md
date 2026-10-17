@@ -189,8 +189,9 @@ carry with the flag cleared writes **3 734** — a factor of 10.6 against the 35
 been. The language tag and translated keyword were a second, separate loss of the same defect,
 pinned by a test of their own. `with_xmp` — which has no source file to take framing from — takes
 Table 21's recommended framing. On the write side the packet is a **single-value payload** like
-`iCCP` or `eXIf`: `with_xmp` replaces every packet already accumulated, and a carry whose source
-holds a packet replaces one set directly, because a second `iTXt` under the reserved keyword is one
+`iCCP` or `eXIf`: `with_xmp` replaces every packet already accumulated, and a carry that writes a
+packet replaces one set directly — decided on the chunk written, so a `tEXt` under the keyword
+whose text has no Latin-1 encoding, promoted to `iTXt`, counts — because a second `iTXt` under the reserved keyword is one
 this crate's own reader passes over.
 
 **Two payloads cannot be carried, and neither is dropped in silence.** `metadata_notices()` names

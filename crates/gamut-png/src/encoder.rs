@@ -1150,9 +1150,7 @@ impl PngEncoder {
         // file position and with its own chunk's framing. A packet set directly with `with_xmp`
         // is displaced by a carried one, as one carry's packet is by the next: the encoder
         // writes the packet it was last handed, and a source that holds none leaves it alone.
-        if meta.texts.iter().any(TextChunk::is_xmp_packet) {
-            self.ancillary.drop_xmp();
-        }
+        // `end_carry` decides that on the entries as written, so a promoted packet counts too.
         for text in meta.texts {
             let (language, translated) = (
                 text.language.as_deref().unwrap_or_default(),

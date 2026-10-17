@@ -688,8 +688,8 @@ fn carrying_an_xmp_packet_replaces_one_already_set() {
 /// The other half: a carry whose source holds no packet has none to replace a directly-set one
 /// with, so the packet the caller set survives it.
 ///
-/// Kills the guard on `drop_xmp` in `with_metadata_view`, without which every carry would discard
-/// a packet set beforehand.
+/// Kills the guard on `Ancillary::end_carry`'s displacement, without which every carry would
+/// discard a packet set beforehand.
 #[test]
 fn carrying_a_source_without_a_packet_keeps_one_already_set() {
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"tEXt", b"Author\0me")])).unwrap();
