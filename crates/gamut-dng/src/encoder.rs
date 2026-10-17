@@ -1359,6 +1359,32 @@ mod tests {
         assert_eq!(frame.samples, raw.samples());
     }
 
+    /// The reshape moves the T.81 65535-sample-line ceiling from the strip's width to its
+    /// *frame* width: an untiled Bayer strip is now writable up to `2 × 65535` photosites wide
+    /// (the TIFF `ImageWidth` is a LONG, and DNG 1.7.1.0 p. 20 lets the JPEG geometry differ
+    /// from the strip's), and our own decoder reads it back exactly. One past that, the frame
+    /// would be 65536 wide and the encoder still refuses it rather than writing an invalid SOF3.
+    #[test]
+    fn cfa_lossless_jpeg_width_ceiling_is_twice_the_frame_limit() {
+        let encode = |w: u32| {
+            let mut out = Vec::new();
+            DngEncoder::new()
+                .with_compression(Compression::LosslessJpeg)
+                .encode(&sample_raw(w, 2, 16), &sample_profile(), &mut out)
+                .map(|_| out)
+        };
+        let widest = 2 * 65535;
+        let out = encode(widest).expect("a 131070-wide Bayer strip fits a 65535-wide frame");
+        let decoded = crate::DngDecoder::new().decode(&out).expect("decode");
+        assert_eq!(decoded.raw.samples(), sample_raw(widest, 2, 16).samples());
+        let err = encode(widest + 2).expect_err("a 65536-wide frame is not encodable");
+        assert!(
+            err.to_string()
+                .contains("lossless-JPEG dimensions must be 1..=65535"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn encode_rejects_bad_tile_dimensions() {
         let raw = sample_raw(32, 32, 16);
