@@ -16,13 +16,14 @@ mise run check-c2pa   # compile only, in seconds, without signing anything
 cargo run --manifest-path tooling/c2pa-oracle/Cargo.toml --example probe
 ```
 
-**Nothing in CI runs either of those two tasks.** No workflow under `.github/` names this crate,
-and being workspace-`exclude`d with no dependents it is invisible to `cargo clippy --workspace` and
-`cargo test --workspace` as well. Its entire automated reach today is `fmt-tooling-check`, which
-`mise run fmt-check` hangs off — formatting, and nothing else. Wiring `check-c2pa` into the per-PR
-lint lane and `test-c2pa` into extended, mirroring `check-dng-real`/`test-dng-real`, is
-[issue #541](https://github.com/visualcommons/gamut/issues/541); until it lands, run them by hand
-after touching `gamut-avif` or `gamut-heic`.
+Being workspace-`exclude`d with no dependents, this crate is invisible to
+`cargo clippy --workspace` and `cargo test --workspace`, so CI calls the two tasks by name,
+mirroring `check-dng-real`/`test-dng-real`
+([issue #541](https://github.com/visualcommons/gamut/issues/541)): `check-c2pa` runs on every pull
+request in `ci.yml`'s `lint` job, and `test-c2pa` runs post-merge on master in `extended.yml`'s
+`c2pa` job. A pull request that touches `gamut-avif` or `gamut-heic` is therefore compile-checked
+against this crate, but its differentials run only after merge: run `mise run test-c2pa` by hand
+before merging such a change.
 
 `examples/probe.rs` asserts nothing. It prints what c2pa-rs actually does with a gamut-written
 AVIF — the composed box's framing bytes, both directions' offsets and lengths, what each locator
@@ -300,9 +301,9 @@ for a version bump the diff is that one `version =` line. A bare `cargo update` 
 `cargo generate-lockfile` re-resolves the whole graph instead, which is exactly what the committed
 file exists to prevent.
 
-Nothing refreshes it automatically — no release workflow touches this crate — and until #541 wires
-the two tasks into CI nothing notices a stale one either, so the first person to run `test-c2pa`
-after a release is the one who meets this.
+Nothing refreshes it automatically — no release workflow touches this crate — but since #541 the
+per-PR `lint` job runs `check-c2pa`, so a stale lockfile fails CI on the first pull request (the
+release-plz one included, when its checks run) after the change that staled it.
 
 ## The signing identity
 

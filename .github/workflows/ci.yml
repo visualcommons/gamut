@@ -243,6 +243,14 @@ jobs:
       # corpus, so this job does not grow the ~178 MiB fetch that `test-dng-real` requires.
       - name: Real-DNG conformance tier compiles
         run: mise run check-dng-real
+      # Same hole again (issue #541): `tooling/c2pa-oracle` is workspace-excluded and nothing
+      # depends on it, so a gamut-avif, gamut-heic or gamut-metadata API change breaks it with
+      # every other gate green. Pure Rust (c2pa-rs without OpenSSL): no corpus, no submodule, no C
+      # toolchain. `--locked` also fails this step when a path-reached gamut crate's version or
+      # dependency list moves without the oracle's lockfile being refreshed; the fix is the
+      # one-line `cargo update --workspace` in `tooling/c2pa-oracle/README.md`.
+      - name: C2PA oracle compiles
+        run: mise run check-c2pa
       # Same hole, same shape: `tooling/gamut-fuzz` is workspace-excluded and nothing depends on
       # it, so no gate on the pull-request path compiles its targets at all -- an API change in
       # gamut-ifd, gamut-tiff, gamut-dng, gamut-isobmff or gamut-heic breaks them unnoticed until

@@ -260,10 +260,10 @@ run = "cargo test --locked --manifest-path tooling/c2pa-oracle/Cargo.toml"
 # break this crate while every per-PR gate stays green, and `check` catches that in seconds without
 # signing anything.
 #
-# Unlike `check-dng-real`, **neither of these two tasks is called by any workflow in `.github/`.**
-# The crate's whole automated reach today is `fmt-tooling-check`, which `fmt-check` hangs off, so a
-# compile break or a differential regression is caught only when someone runs these by hand.
-# Wiring them up — `check-c2pa` in the per-PR lint lane, `test-c2pa` in extended — is issue #541.
+# Wired like the DNG pair (issue #541): `check-c2pa` runs in ci.yml's per-PR `lint` job beside
+# `check-dng-real`, and `test-c2pa` in extended.yml's `c2pa` job on master. Because both pass
+# `--locked`, a release-plz bump of any of the 15 path-reached gamut crates fails the lint step
+# until the lockfile refresh above is committed.
 [tasks.check-c2pa]
 description = "Compile the C2PA differential oracle (no signing, no corpus)"
 run = "cargo check --locked --manifest-path tooling/c2pa-oracle/Cargo.toml --all-targets"
