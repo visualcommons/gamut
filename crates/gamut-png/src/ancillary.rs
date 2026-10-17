@@ -7,7 +7,7 @@
 //! emitted **last** of everything before `IDAT`, so that its offset depends only on the chunks
 //! that precede it and every byte after it is `IDAT` or `IEND` — which is what lets a reserved
 //! store be filled in place ([`crate::fill_c2pa`]) without moving a byte outside the chunk.
-//! §A.3.2 asks only that it precede `IDAT`.
+//! C2PA §A.3.2 asks only that it precede `IDAT`.
 //!
 //! "Last" is this writer's guarantee about the files it produces, **not** a property that
 //! survives other tools. PNG §14.3.2 is explicit that an unsafe-to-copy chunk's ordering

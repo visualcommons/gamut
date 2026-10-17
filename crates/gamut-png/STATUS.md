@@ -71,9 +71,9 @@ unsafe-to-copy chunk, which is the container enforcing the same no-copy-forward 
 over, so one copied forward into a rewritten file is invalid by construction.
 
 **What counts as the store.** One rule, in every reader: the **first CRC-valid `caBX` before the
-first `IDAT`**. First, because a file carries exactly one store (§A.3.2) — PNG has no multi-chunk
+first `IDAT`**. First, because a file carries exactly one store (C2PA §A.3.2) — PNG has no multi-chunk
 store, unlike JPEG's APP11 run. CRC-valid, because §13.1 makes a mismatch skippable and the decode
-skips it. Before `IDAT`, because §A.3.2 puts it there and calls data after it bad-form: a `caBX`
+skips it. Before `IDAT`, because C2PA §A.3.2 puts it there and calls data after it bad-form: a `caBX`
 appended to a finished file is not that file's provenance, and accepting one would let an appender
 give a store to a file that carries none.
 
@@ -94,7 +94,7 @@ metadata walk reaches; that shape is visible in `deconstruct`'s report, as a tra
 **Encode.** `with_c2pa(store)` embeds a store computed for this file; `with_c2pa_reserved(len)`
 writes `len` zero bytes in its place. Either is emitted as the **last** chunk before the first
 `IDAT` — after `PLTE`/`tRNS` and every other ancillary chunk — so the chunk's offset depends only
-on what precedes it and every later byte is `IDAT`/`IEND`. §A.3.2 asks only that it precede
+on what precedes it and every later byte is `IDAT`/`IEND`. C2PA §A.3.2 asks only that it precede
 `IDAT`; last-before-`IDAT` is what makes the reserve-then-fill flow a no-move: encode with the
 reservation, hash with the chunk's span excluded, then write the finished store into that span
 with `fill_c2pa` (below), which rewrites only the payload and the chunk CRC. Encoding again with
@@ -110,7 +110,7 @@ accepts.
 
 **Exclusion span, and filling it.** `encode_with_report` (for the file just written) and
 `PngReport::c2pa` (for any file, including an indexed encode) name the chunk's **whole** span —
-length, type, payload and CRC — as `C2paSpan`, with the payload bracketed inside it. §18.5.4 says
+length, type, payload and CRC — as `C2paSpan`, with the payload bracketed inside it. C2PA §18.5.4 says
 the length and type go inside the exclusion; the CRC must too, since it changes with the payload,
 and a `c2pa.hash.data` computed over any of them breaks on the store's first write. The span is
 derived from the same chunk walk the byte accounting uses, so it is always one of the report's

@@ -34,7 +34,7 @@
 //! store computed for this file and [`PngEncoder::with_c2pa_reserved`] reserves its place, as the
 //! last chunk before `IDAT`; [`PngEncoder::encode_with_report`] and [`PngReport::c2pa`] name the
 //! chunk's **whole** span — length, type, payload and CRC — which is what a `c2pa.hash.data`
-//! assertion excludes (§18.5.4). [`fill_c2pa`] then writes the finished store into that span in
+//! assertion excludes (C2PA §18.5.4). [`fill_c2pa`] then writes the finished store into that span in
 //! place, rewriting only the payload and the chunk CRC, so the file the signer hashed is the file
 //! it signed. For a reader rather than a signer, [`c2pa_summary`] reports the same store beside
 //! every other `caBX` chunk the file carries — each with the reason it is not the store — and
