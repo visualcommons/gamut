@@ -1,5 +1,5 @@
 //! Entropy-scan decoding (T.81 Annex F §F.2 and Annex G §G.2): the byte-destuffing bit reader
-//! (§F.2.2.5), the canonical `DECODE`/`RECEIVE`/`EXTEND` procedures (Figures F.16, F.12), the
+//! (§F.2.2.5), the canonical `DECODE`/`RECEIVE`/`EXTEND` procedures (Figures F.16, F.17, F.12), the
 //! sequential MCU walk that reconstructs each component's sample plane (§A.2), and the progressive
 //! DCT decoder (§G.2) that accumulates DCT coefficients across scans. Restart processing follows
 //! §E.2.5.
@@ -215,7 +215,7 @@ impl<'a> BitReader<'a> {
         Ok(())
     }
 
-    /// Reads `n` (`0..=16`) bits MSB-first (`RECEIVE`, Figure F.12).
+    /// Reads `n` (`0..=16`) bits MSB-first (`RECEIVE`, Figure F.17).
     fn read_bits(&mut self, n: u32) -> Result<u32> {
         if n == 0 {
             return Ok(0);
