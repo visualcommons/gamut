@@ -214,3 +214,17 @@ Round-robin sharding rather than contiguous slices, because mutants from one fil
 slice and a file with slow tests would then load a single shard while the others idle. Sharding
 also exists because the runners are preemptible: a single 80-minute pass was being killed partway
 through, and four twenty-minute shards finish inside the window.
+
+## Survey record
+
+Whole-crate surveys taken with `mise run mutants-crate <crate>` (cargo-mutants 27.1.0, all
+features, AV1 oracles fetched), one crate at a time. Each row is the state at the commit named,
+*after* any survivor it found was resolved: a test that kills it, a rewrite that removes it, or an
+argued entry in `.cargo/mutants.toml`. A row is evidence about that commit, not a standing claim —
+re-survey before relying on it.
+
+| Crate | Mutants | Caught | Unviable | Missed | Timeout | Wall | Base | Resolution |
+| ----- | ------: | -----: | -------: | -----: | ------: | ---: | ---- | ---------- |
+| gamut-riff | 165 | 157 | 8 | 0 | 0 | — | #575 | nothing to do |
+| gamut-ifd | 652 | 587 | 57 | 0 | 8 | — | #575 | 7 loops bounded by their data, 1 excluded |
+| gamut-heic | 848 | 732 | 116 | 0 | 0 | 28 min | `ef6c2e12` | nothing to do |
