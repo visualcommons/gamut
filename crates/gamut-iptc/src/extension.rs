@@ -4628,12 +4628,7 @@ mod tests {
         pm.set_image_creators(&[image_creator("Creator")]);
         pm.set_image_suppliers(&[image_supplier("Supplier")]);
         pm.set_locations_created(&[location()]);
-        let kind =
-            |pm: &PhotoMetadata, ns: &str, name: &str| match &pm.xmp.get(ns, name).unwrap().value {
-                XmpValue::Array(XmpArray::Seq(_)) => "Seq",
-                XmpValue::Array(XmpArray::Bag(_)) => "Bag",
-                _ => "other",
-            };
+        let kind = container_kind;
         assert_eq!(kind(&pm, ns::PLUS, "CopyrightOwner"), "Seq");
         assert_eq!(kind(&pm, ns::PLUS, "ImageCreator"), "Seq");
         assert_eq!(kind(&pm, ns::PLUS, "ImageSupplier"), "Seq");
@@ -4649,6 +4644,52 @@ mod tests {
         ));
         pm.set_copyright_owners(&[copyright_owner("Another")]);
         assert_eq!(kind(&pm, ns::PLUS, "CopyrightOwner"), "Bag");
+    }
+
+    /// The container kind of the top-level property `ns`/`name`: `"Seq"`, `"Bag"` or `"other"`.
+    fn container_kind(pm: &PhotoMetadata, ns: &str, name: &str) -> &'static str {
+        match &pm.xmp.get(ns, name).unwrap().value {
+            XmpValue::Array(XmpArray::Seq(_)) => "Seq",
+            XmpValue::Array(XmpArray::Bag(_)) => "Bag",
+            _ => "other",
+        }
+    }
+
+    #[test]
+    fn a_new_extension_list_is_the_bag_the_standard_specifies() {
+        // Every structured `Iptc4xmpExt` list this module added is a Bag in the standard's XMP
+        // Specs rows. The `standard` field of each projection is a literal the mutation gate
+        // cannot alter, so each one is asserted here, written fresh into an empty graph.
+        let ext = ns::IPTC_EXT;
+        let fresh = |set: &dyn Fn(&mut PhotoMetadata), name: &str| {
+            let mut pm = PhotoMetadata::new();
+            set(&mut pm);
+            assert_eq!(container_kind(&pm, ext, name), "Bag", "{name}");
+        };
+        fresh(&|pm| pm.set_locations_shown(&[location()]), "LocationShown");
+        fresh(
+            &|pm| pm.set_persons_shown(&[person()]),
+            "PersonInImageWDetails",
+        );
+        fresh(
+            &|pm| pm.set_about_cv_terms(&[cv_term("outdoors")]),
+            "AboutCvTerm",
+        );
+        fresh(&|pm| pm.set_genres(&[cv_term("portrait")]), "Genre");
+        fresh(&|pm| pm.set_contributors(&[contributor()]), "Contributor");
+        fresh(&|pm| pm.set_products_shown(&[product()]), "ProductInImage");
+        fresh(
+            &|pm| pm.set_registry_entries(&[registry_entry()]),
+            "RegistryId",
+        );
+        fresh(
+            &|pm| pm.set_embedded_rights_expressions(&[embedded_rights()]),
+            "EmbdEncRightsExpr",
+        );
+        fresh(
+            &|pm| pm.set_linked_rights_expressions(&[linked_rights()]),
+            "LinkedEncRightsExpr",
+        );
     }
 
     /// Every shape a top-level property's *value* can arrive in: the canonical form the model
