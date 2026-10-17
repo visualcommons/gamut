@@ -83,14 +83,15 @@ The v1 contract, stated precisely:
   [`gamut-xmp`](../gamut-xmp)'s job, and the JPEG `APP13`/TIFF tag plumbing is the container's
   (issue #34).
 - **Typed accessors cover every scalar/list IPTC Core property**, plus the structured
-  `Iptc4xmpCore:CreatorContactInfo` and the most-used IPTC **Extension** structures — image
-  regions, artwork/object and licensors (`extension`). Reading one and writing it back changes
-  nothing: a field enters the typed value only when what the writer would emit reproduces the field
-  that was read — value, container kind and qualifiers — and every other field is kept in the
-  type's `other` list and re-emitted verbatim. The property itself enters the typed view on the same
-  terms, so a shape the setter could not write back reads as absent and is left where it lies. The remaining Extension structures (locations, persons,
-  controlled-vocabulary terms, …) have no typed model — they still round-trip losslessly as raw
-  properties in `PhotoMetadata::xmp`, reachable via `get_field`/`set_field` where mapped.
+  `Iptc4xmpCore:CreatorContactInfo` and every IPTC **Extension** structure — image regions,
+  artwork/object, licensors, locations created/shown, persons shown, controlled-vocabulary terms
+  (about-terms and genres), contributors, products, registry entries, embedded and linked rights
+  expressions, and the PLUS copyright owners, image creators and image suppliers (`extension`).
+  Reading one and writing it back changes nothing: a field enters the typed value only when what
+  the writer would emit reproduces the field that was read — value, container kind and qualifiers
+  — and every other field is kept in the type's `other` list and re-emitted verbatim. The property
+  itself enters the typed view on the same terms, so a shape the setter could not write back reads
+  as absent and is left where it lies, still in `PhotoMetadata::xmp`.
 - **Strict write, honest read.** Writing never silently truncates or drops: unencodable text,
   overlong values (octet limits are enforced on write only; overlong wire values are preserved on
   read), and an IIM-inexpressible `photoshop:DateCreated` are hard errors. Reading never guesses: a

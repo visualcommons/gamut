@@ -72,9 +72,11 @@
 //! #34). Exotic ISO 2022 character sets beyond Latin-1 and UTF-8 are reported as
 //! [`crate::IptcError::Unsupported`] rather than mis-decoded (see [`charset`]). The typed
 //! accessors cover every scalar/list IPTC **Core** property, plus the structured
-//! `Iptc4xmpCore:CreatorContactInfo` and the most-used IPTC **Extension** structures — image
-//! regions, artwork/object and licensors (see [`extension`]); the remaining Extension structures
-//! pass through [`PhotoMetadata::xmp`] as raw values. Scalar-shaped IIM datasets that repeat on the
+//! `Iptc4xmpCore:CreatorContactInfo` and every IPTC **Extension** structure — image regions,
+//! artwork/object, licensors, locations, persons, controlled-vocabulary terms, contributors,
+//! products, registry entries, rights expressions and the PLUS copyright-owner/creator/supplier
+//! lists (see [`extension`]); anything those typed views cannot express is left verbatim in
+//! [`PhotoMetadata::xmp`]. Scalar-shaped IIM datasets that repeat on the
 //! wire (`2:04`, `2:85`) reconcile their first value only; the IIM tag table names every dataset
 //! IIM 4.2 defines — records 1, 2, 7, 8 and 9 — and everything else round-trips byte-exact without
 //! a name. See `STATUS.md` for the full deferral list.
@@ -101,8 +103,9 @@ mod reconcile;
 pub use charset::IimCharset;
 pub use error::{IptcError, Result};
 pub use extension::{
-    ArtworkOrObject, CreatorContactInfo, Entity, ImageRegion, Licensor, RegionBoundary,
-    RegionBoundaryPoint,
+    ArtworkOrObject, CopyrightOwner, CreatorContactInfo, CvTerm, EmbeddedRightsExpression, Entity,
+    EntityWithRole, ImageCreator, ImageRegion, ImageSupplier, Licensor, LinkedRightsExpression,
+    Location, Person, Product, RegionBoundary, RegionBoundaryPoint, RegistryEntry,
 };
 /// The XMP value model this crate's API speaks ([`XmpMeta`](gamut_xmp::XmpMeta),
 /// [`XmpProperty`](gamut_xmp::XmpProperty), …).

@@ -10,21 +10,36 @@
 //!
 //! # Which structures are modelled
 //!
-//! The four the IPTC Photo Metadata Standard 2025.1 puts to most use in practice:
+//! Every structure the IPTC Photo Metadata Standard 2025.1 defines (its technical reference's
+//! `ipmd_struct`, apart from the `AltLang` language alternative, which is a field shape rather than
+//! a structure), each on every top-level property that uses it:
 //!
-//! | Type | XMP property | Serialization |
-//! | ---- | ------------ | ------------- |
-//! | [`CreatorContactInfo`] | `Iptc4xmpCore:CreatorContactInfo` | a single structure |
-//! | [`ImageRegion`] | `Iptc4xmpExt:ImageRegion` | `Bag` of structures |
-//! | [`ArtworkOrObject`] | `Iptc4xmpExt:ArtworkOrObject` | `Bag` of structures |
-//! | [`Licensor`] | `plus:Licensor` | `Bag` of structures |
+//! | Type | IPTC structure | XMP property | Serialization |
+//! | ---- | -------------- | ------------ | ------------- |
+//! | [`CreatorContactInfo`] | `CreatorContactInfo` | `Iptc4xmpCore:CreatorContactInfo` | a single structure |
+//! | [`ImageRegion`] | `ImageRegion` | `Iptc4xmpExt:ImageRegion` | `Bag` of structures |
+//! | [`ArtworkOrObject`] | `ArtworkOrObject` | `Iptc4xmpExt:ArtworkOrObject` | `Bag` of structures |
+//! | [`Licensor`] | `Licensor` | `plus:Licensor` | `Bag` of structures |
+//! | [`Location`] | `Location` | `Iptc4xmpExt:LocationCreated`, `Iptc4xmpExt:LocationShown` | `Bag` of structures |
+//! | [`Person`] | `PersonWDetails` | `Iptc4xmpExt:PersonInImageWDetails` | `Bag` of structures |
+//! | [`CvTerm`] | `CvTerm` | `Iptc4xmpExt:AboutCvTerm`, `Iptc4xmpExt:Genre` | `Bag` of structures |
+//! | [`EntityWithRole`] | `EntityWRole` | `Iptc4xmpExt:Contributor` | `Bag` of structures |
+//! | [`Product`] | `ProductWGtin` | `Iptc4xmpExt:ProductInImage` | `Bag` of structures |
+//! | [`RegistryEntry`] | `RegistryEntry` | `Iptc4xmpExt:RegistryId` | `Bag` of structures |
+//! | [`EmbeddedRightsExpression`] | `EmbdEncRightsExpr` | `Iptc4xmpExt:EmbdEncRightsExpr` | `Bag` of structures |
+//! | [`LinkedRightsExpression`] | `LinkedEncRightsExpr` | `Iptc4xmpExt:LinkedEncRightsExpr` | `Bag` of structures |
+//! | [`CopyrightOwner`] | `CopyrightOwner` | `plus:CopyrightOwner` | `Seq` of structures |
+//! | [`ImageCreator`] | `ImageCreator` | `plus:ImageCreator` | `Seq` of structures |
+//! | [`ImageSupplier`] | `ImageSupplier` | `plus:ImageSupplier` | `Seq` of structures |
 //!
 //! [`RegionBoundary`], [`RegionBoundaryPoint`] and [`Entity`] are the nested structures
-//! [`ImageRegion`] is built from, and retain what they do not model on the same terms. The
-//! remaining Extension structures (`Location`, `PersonWDetails`, `CvTerm`, `EmbdEncRightsExpr`,
-//! `ProductWGtin`, `RegistryEntry`, `CopyrightOwner`, `ImageCreator`, `ImageSupplier`,
-//! `LinkedEncRightsExpr`, `EntityWRole`) have no typed model yet and pass through
-//! [`PhotoMetadata::xmp`] untouched, exactly as all of them did before.
+//! [`ImageRegion`] is built from, and [`CvTerm`] is also the structure a [`Person`]'s
+//! characteristics are built from; each retains what it does not model on the same terms.
+//!
+//! A Rust type is named for what it holds rather than after the reference's abbreviation where
+//! that abbreviation names a variant (`PersonWDetails` is a [`Person`], `ProductWGtin` a
+//! [`Product`], `EntityWRole` an [`EntityWithRole`]) or an encoding detail (`EmbdEncRightsExpr` is
+//! an [`EmbeddedRightsExpression`], `LinkedEncRightsExpr` a [`LinkedRightsExpression`]).
 //!
 //! # These properties never conflict
 //!
@@ -165,14 +180,14 @@
 //! neither reported nor lost.
 //!
 //! The alternatives were weighed and declined. Returning `Result` from `to_xmp` would break all
-//! seven public `to_xmp` methods and either make the four setters fallible or have them swallow
+//! public `to_xmp` methods and either make the structured setters fallible or have them swallow
 //! the error, to report a value that can arise only from a caller's own arithmetic; and a checked
 //! `Finite` coordinate type would turn plain-data fields into a validated API. Both would also
 //! depart from the [`gamut_exif::GpsInfo`](https://docs.rs/gamut-exif) shape this module mirrors.
 //!
 //! # The same rule at both levels
 //!
-//! [`PhotoMetadata`]'s four accessor pairs for these properties apply that gate to the property
+//! [`PhotoMetadata`]'s accessor pairs for these properties apply that gate to the property
 //! itself, not only to the fields inside it. Inside a structure the retention list is the type's
 //! `other` field; at the top level it is the graph — a property the read does not consume is left
 //! exactly where it lies, and the setter beside it does not remove it. So a read that reports
@@ -185,7 +200,9 @@
 //!
 //! An array setter writes the RDF container kind the property it replaces already carries — an
 //! `rdf:Bag`, an `rdf:Seq` whose order the caller may be relying on, or an `rdf:Alt` — and the
-//! `rdf:Bag` the standard specifies when it replaces nothing. It writes every value the caller
+//! kind the standard specifies when it replaces nothing: an `rdf:Seq` for `plus:CopyrightOwner`,
+//! `plus:ImageCreator` and `plus:ImageSupplier`, an `rdf:Bag` for every other array (see the table
+//! above). It writes every value the caller
 //! passes, including one carrying no field at all. Handed nothing to write, it removes the
 //! property — but only when the read reported one, because a caller cannot have meant to clear a
 //! property it was never shown.
@@ -1334,6 +1351,748 @@ impl ImageRegion {
     }
 }
 
+// --- Location ---------------------------------------------------------------------------------
+
+/// A location (the IPTC Extension `Location` structure, IPTC Extension 1.8 §12.10), as used by
+/// `Iptc4xmpExt:LocationCreated` and `Iptc4xmpExt:LocationShown`.
+///
+/// This is the structured successor of the Core's flat `photoshop:City`/`photoshop:State`/
+/// `photoshop:Country` and `Iptc4xmpCore:Location`/`Iptc4xmpCore:CountryCode` scalars
+/// ([`PhotoMetadata::city`] and its siblings). The two surfaces are independent properties: gamut
+/// does not copy one into the other, and neither participates in the other's reconciliation.
+///
+/// The four GPS fields are the EXIF-in-XMP properties `exif:GPSLatitude`, `exif:GPSLongitude`,
+/// `exif:GPSAltitude` and `exif:GPSAltitudeRef`. Their XMP types are the EXIF `GPSCoordinate`
+/// (`"48,51.4N"`), `Rational` (`"35/1"`) and `Integer` (`"0"`/`"1"`) text forms, not decimal
+/// numbers, so they are modelled as the text they carry — which also keeps them lossless.
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Location {
+    /// Globally unique identifiers of the location (`Iptc4xmpExt:LocationId`).
+    pub identifiers: Vec<String>,
+    /// Full name, `x-default` alternative (`Iptc4xmpExt:LocationName`).
+    pub name: Option<String>,
+    /// Sublocation within the city (`Iptc4xmpExt:Sublocation`).
+    pub sublocation: Option<String>,
+    /// City (`Iptc4xmpExt:City`).
+    pub city: Option<String>,
+    /// Province or state (`Iptc4xmpExt:ProvinceState`).
+    pub province_state: Option<String>,
+    /// Country name (`Iptc4xmpExt:CountryName`).
+    pub country_name: Option<String>,
+    /// ISO 3166 country code (`Iptc4xmpExt:CountryCode`).
+    pub country_code: Option<String>,
+    /// World region (`Iptc4xmpExt:WorldRegion`).
+    pub world_region: Option<String>,
+    /// Latitude, as an EXIF `GPSCoordinate` text (`exif:GPSLatitude`).
+    pub gps_latitude: Option<String>,
+    /// Longitude, as an EXIF `GPSCoordinate` text (`exif:GPSLongitude`).
+    pub gps_longitude: Option<String>,
+    /// Altitude, as an EXIF `Rational` text (`exif:GPSAltitude`).
+    pub gps_altitude: Option<String>,
+    /// Altitude reference — `0` above, `1` below sea level (`exif:GPSAltitudeRef`).
+    pub gps_altitude_ref: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl Location {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            identifiers: r.list(ns::IPTC_EXT, "LocationId", false),
+            name: r.lang_alt(ns::IPTC_EXT, "LocationName"),
+            sublocation: r.text(ns::IPTC_EXT, "Sublocation"),
+            city: r.text(ns::IPTC_EXT, "City"),
+            province_state: r.text(ns::IPTC_EXT, "ProvinceState"),
+            country_name: r.text(ns::IPTC_EXT, "CountryName"),
+            country_code: r.text(ns::IPTC_EXT, "CountryCode"),
+            world_region: r.text(ns::IPTC_EXT, "WorldRegion"),
+            gps_latitude: r.text(ns::EXIF, "GPSLatitude"),
+            gps_longitude: r.text(ns::EXIF, "GPSLongitude"),
+            gps_altitude: r.text(ns::EXIF, "GPSAltitude"),
+            gps_altitude_ref: r.text(ns::EXIF, "GPSAltitudeRef"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim. `LocationId` is an unordered `Bag`.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_list(&mut f, ns::IPTC_EXT, "LocationId", false, &self.identifiers);
+        put_lang_alt(&mut f, ns::IPTC_EXT, "LocationName", self.name.as_ref());
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "Sublocation",
+            self.sublocation.as_ref(),
+        );
+        put_text(&mut f, ns::IPTC_EXT, "City", self.city.as_ref());
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "ProvinceState",
+            self.province_state.as_ref(),
+        );
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "CountryName",
+            self.country_name.as_ref(),
+        );
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "CountryCode",
+            self.country_code.as_ref(),
+        );
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "WorldRegion",
+            self.world_region.as_ref(),
+        );
+        put_text(&mut f, ns::EXIF, "GPSLatitude", self.gps_latitude.as_ref());
+        put_text(
+            &mut f,
+            ns::EXIF,
+            "GPSLongitude",
+            self.gps_longitude.as_ref(),
+        );
+        put_text(&mut f, ns::EXIF, "GPSAltitude", self.gps_altitude.as_ref());
+        put_text(
+            &mut f,
+            ns::EXIF,
+            "GPSAltitudeRef",
+            self.gps_altitude_ref.as_ref(),
+        );
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+// --- Controlled-vocabulary term ---------------------------------------------------------------
+
+/// A term from a controlled vocabulary (the IPTC Extension `CvTerm` structure, IPTC Extension 1.8
+/// §12.2), as used by `Iptc4xmpExt:AboutCvTerm`, `Iptc4xmpExt:Genre` and a [`Person`]'s
+/// characteristics.
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CvTerm {
+    /// Identifier of the controlled vocabulary the term is from (`Iptc4xmpExt:CvId`).
+    pub vocabulary_identifier: Option<String>,
+    /// Identifier of the term (`Iptc4xmpExt:CvTermId`).
+    pub identifier: Option<String>,
+    /// Name of the term, `x-default` alternative (`Iptc4xmpExt:CvTermName`).
+    pub name: Option<String>,
+    /// Refinement of what the term is about (`Iptc4xmpExt:CvTermRefinedAbout`).
+    pub refined_about: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl CvTerm {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            vocabulary_identifier: r.text(ns::IPTC_EXT, "CvId"),
+            identifier: r.text(ns::IPTC_EXT, "CvTermId"),
+            name: r.lang_alt(ns::IPTC_EXT, "CvTermName"),
+            refined_about: r.text(ns::IPTC_EXT, "CvTermRefinedAbout"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "CvId",
+            self.vocabulary_identifier.as_ref(),
+        );
+        put_text(&mut f, ns::IPTC_EXT, "CvTermId", self.identifier.as_ref());
+        put_lang_alt(&mut f, ns::IPTC_EXT, "CvTermName", self.name.as_ref());
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "CvTermRefinedAbout",
+            self.refined_about.as_ref(),
+        );
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+// --- Person shown in the image ----------------------------------------------------------------
+
+/// A person shown in the image, with details (the IPTC Extension `PersonWDetails` structure, IPTC
+/// Extension 1.8 §12.11), as used by `Iptc4xmpExt:PersonInImageWDetails`.
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Person {
+    /// Globally unique identifiers of the person (`Iptc4xmpExt:PersonId`).
+    pub identifiers: Vec<String>,
+    /// Name, `x-default` alternative (`Iptc4xmpExt:PersonName`).
+    pub name: Option<String>,
+    /// Characteristics of the person, as controlled-vocabulary terms
+    /// (`Iptc4xmpExt:PersonCharacteristic`).
+    pub characteristics: Vec<CvTerm>,
+    /// Description, `x-default` alternative (`Iptc4xmpExt:PersonDescription`).
+    pub description: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl Person {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            identifiers: r.list(ns::IPTC_EXT, "PersonId", false),
+            name: r.lang_alt(ns::IPTC_EXT, "PersonName"),
+            characteristics: r.nested_array(
+                ns::IPTC_EXT,
+                "PersonCharacteristic",
+                false,
+                CvTerm::from_fields,
+                CvTerm::to_xmp,
+            ),
+            description: r.lang_alt(ns::IPTC_EXT, "PersonDescription"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim. `PersonId` and `PersonCharacteristic` are unordered
+    /// `Bag`s.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_list(&mut f, ns::IPTC_EXT, "PersonId", false, &self.identifiers);
+        put_lang_alt(&mut f, ns::IPTC_EXT, "PersonName", self.name.as_ref());
+        put_nested_array(
+            &mut f,
+            ns::IPTC_EXT,
+            "PersonCharacteristic",
+            false,
+            self.characteristics.iter().map(CvTerm::to_xmp).collect(),
+        );
+        put_lang_alt(
+            &mut f,
+            ns::IPTC_EXT,
+            "PersonDescription",
+            self.description.as_ref(),
+        );
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+// --- Entity with role -------------------------------------------------------------------------
+
+/// An entity or concept with the roles it plays (the IPTC Extension `EntityWRole` structure, IPTC
+/// Extension 1.8 §12.5), as used by `Iptc4xmpExt:Contributor`.
+///
+/// It is [`Entity`] plus a role list; the shared fields carry the same names.
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EntityWithRole {
+    /// Globally unique identifiers of the entity or concept (`xmp:Identifier`).
+    pub identifiers: Vec<String>,
+    /// Full name, `x-default` alternative (`Iptc4xmpExt:Name`).
+    pub name: Option<String>,
+    /// Identifiers of the roles the entity plays (`Iptc4xmpExt:Role`).
+    pub roles: Vec<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl EntityWithRole {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            identifiers: r.list(ns::XMP, "Identifier", false),
+            name: r.lang_alt(ns::IPTC_EXT, "Name"),
+            roles: r.list(ns::IPTC_EXT, "Role", false),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim. `xmp:Identifier` and `Role` are unordered `Bag`s.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_list(&mut f, ns::XMP, "Identifier", false, &self.identifiers);
+        put_lang_alt(&mut f, ns::IPTC_EXT, "Name", self.name.as_ref());
+        put_list(&mut f, ns::IPTC_EXT, "Role", false, &self.roles);
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+// --- Product shown in the image ---------------------------------------------------------------
+
+/// A product shown in the image (the IPTC Extension `ProductWGtin` structure, IPTC Extension 1.8
+/// §12.12), as used by `Iptc4xmpExt:ProductInImage`.
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Product {
+    /// Globally unique identifiers of the product (`Iptc4xmpExt:ProductId`).
+    pub identifiers: Vec<String>,
+    /// Name, `x-default` alternative (`Iptc4xmpExt:ProductName`).
+    pub name: Option<String>,
+    /// GS1 Global Trade Item Number (`Iptc4xmpExt:ProductGTIN`).
+    pub gtin: Option<String>,
+    /// Description, `x-default` alternative (`Iptc4xmpExt:ProductDescription`).
+    pub description: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl Product {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            identifiers: r.list(ns::IPTC_EXT, "ProductId", false),
+            name: r.lang_alt(ns::IPTC_EXT, "ProductName"),
+            gtin: r.text(ns::IPTC_EXT, "ProductGTIN"),
+            description: r.lang_alt(ns::IPTC_EXT, "ProductDescription"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim. `ProductId` is an unordered `Bag`.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_list(&mut f, ns::IPTC_EXT, "ProductId", false, &self.identifiers);
+        put_lang_alt(&mut f, ns::IPTC_EXT, "ProductName", self.name.as_ref());
+        put_text(&mut f, ns::IPTC_EXT, "ProductGTIN", self.gtin.as_ref());
+        put_lang_alt(
+            &mut f,
+            ns::IPTC_EXT,
+            "ProductDescription",
+            self.description.as_ref(),
+        );
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+// --- Registry entry ---------------------------------------------------------------------------
+
+/// An entry of the image in a registry (the IPTC Extension `RegistryEntry` structure, IPTC
+/// Extension 1.8 §11.21), as used by `Iptc4xmpExt:RegistryId`.
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RegistryEntry {
+    /// Identifier of the image within the registry (`Iptc4xmpExt:RegItemId`).
+    pub item_identifier: Option<String>,
+    /// Identifier of the registry (`Iptc4xmpExt:RegOrgId`).
+    pub organisation_identifier: Option<String>,
+    /// Role of the entry (`Iptc4xmpExt:RegEntryRole`).
+    pub role: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl RegistryEntry {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            item_identifier: r.text(ns::IPTC_EXT, "RegItemId"),
+            organisation_identifier: r.text(ns::IPTC_EXT, "RegOrgId"),
+            role: r.text(ns::IPTC_EXT, "RegEntryRole"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "RegItemId",
+            self.item_identifier.as_ref(),
+        );
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "RegOrgId",
+            self.organisation_identifier.as_ref(),
+        );
+        put_text(&mut f, ns::IPTC_EXT, "RegEntryRole", self.role.as_ref());
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+// --- Rights expressions -----------------------------------------------------------------------
+
+/// A rights expression embedded in the metadata (the IPTC Extension `EmbdEncRightsExpr`
+/// structure, IPTC Extension 1.8 §12.3), as used by `Iptc4xmpExt:EmbdEncRightsExpr`.
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EmbeddedRightsExpression {
+    /// The encoded rights expression itself (`Iptc4xmpExt:EncRightsExpr`).
+    pub expression: Option<String>,
+    /// IANA media type of the expression's encoding (`Iptc4xmpExt:RightsExprEncType`).
+    pub encoding_type: Option<String>,
+    /// Identifier of the rights expression language (`Iptc4xmpExt:RightsExprLangId`).
+    pub language_identifier: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl EmbeddedRightsExpression {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            expression: r.text(ns::IPTC_EXT, "EncRightsExpr"),
+            encoding_type: r.text(ns::IPTC_EXT, "RightsExprEncType"),
+            language_identifier: r.text(ns::IPTC_EXT, "RightsExprLangId"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "EncRightsExpr",
+            self.expression.as_ref(),
+        );
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "RightsExprEncType",
+            self.encoding_type.as_ref(),
+        );
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "RightsExprLangId",
+            self.language_identifier.as_ref(),
+        );
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+/// A rights expression the metadata links to (the IPTC Extension `LinkedEncRightsExpr`
+/// structure, IPTC Extension 1.8 §12.9), as used by `Iptc4xmpExt:LinkedEncRightsExpr`.
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LinkedRightsExpression {
+    /// URL of the rights expression (`Iptc4xmpExt:LinkedRightsExpr`). A URL held as
+    /// `rdf:resource` reads as `None` and stays in [`other`](Self::other) (see
+    /// [the typed view](self#the-typed-view-stays-plain-data)).
+    pub url: Option<String>,
+    /// IANA media type of the expression's encoding (`Iptc4xmpExt:RightsExprEncType`).
+    pub encoding_type: Option<String>,
+    /// Identifier of the rights expression language (`Iptc4xmpExt:RightsExprLangId`).
+    pub language_identifier: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl LinkedRightsExpression {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            url: r.text(ns::IPTC_EXT, "LinkedRightsExpr"),
+            encoding_type: r.text(ns::IPTC_EXT, "RightsExprEncType"),
+            language_identifier: r.text(ns::IPTC_EXT, "RightsExprLangId"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_text(&mut f, ns::IPTC_EXT, "LinkedRightsExpr", self.url.as_ref());
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "RightsExprEncType",
+            self.encoding_type.as_ref(),
+        );
+        put_text(
+            &mut f,
+            ns::IPTC_EXT,
+            "RightsExprLangId",
+            self.language_identifier.as_ref(),
+        );
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+// --- PLUS parties: copyright owner, image creator, image supplier -----------------------------
+
+/// A copyright owner of the image (`plus:CopyrightOwner`, a PLUS 1.2 structure embedded in the
+/// IPTC Extension schema, IPTC Extension 1.8 §11.9).
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CopyrightOwner {
+    /// Copyright owner identifier (`plus:CopyrightOwnerID`).
+    pub identifier: Option<String>,
+    /// Copyright owner name (`plus:CopyrightOwnerName`).
+    pub name: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl CopyrightOwner {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            identifier: r.text(ns::PLUS, "CopyrightOwnerID"),
+            name: r.text(ns::PLUS, "CopyrightOwnerName"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_text(
+            &mut f,
+            ns::PLUS,
+            "CopyrightOwnerID",
+            self.identifier.as_ref(),
+        );
+        put_text(&mut f, ns::PLUS, "CopyrightOwnerName", self.name.as_ref());
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+/// A creator of the image (`plus:ImageCreator`, a PLUS 1.2 structure embedded in the IPTC
+/// Extension schema, IPTC Extension 1.8 §11.18).
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ImageCreator {
+    /// Image creator identifier (`plus:ImageCreatorID`).
+    pub identifier: Option<String>,
+    /// Image creator name (`plus:ImageCreatorName`).
+    pub name: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl ImageCreator {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            identifier: r.text(ns::PLUS, "ImageCreatorID"),
+            name: r.text(ns::PLUS, "ImageCreatorName"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_text(&mut f, ns::PLUS, "ImageCreatorID", self.identifier.as_ref());
+        put_text(&mut f, ns::PLUS, "ImageCreatorName", self.name.as_ref());
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
+/// A supplier of the image (`plus:ImageSupplier`, a PLUS 1.2 structure embedded in the IPTC
+/// Extension schema, IPTC Extension 1.8 §11.22).
+///
+/// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ImageSupplier {
+    /// Image supplier identifier (`plus:ImageSupplierID`).
+    pub identifier: Option<String>,
+    /// Image supplier name (`plus:ImageSupplierName`).
+    pub name: Option<String>,
+    /// Every field the typed read did not consume, verbatim, written back after the modelled fields
+    /// (the [retention slot](self#the-retention-slot)), so a read-modify-write does not drop a
+    /// vendor extension.
+    pub other: Vec<XmpProperty>,
+}
+
+impl ImageSupplier {
+    /// Reads the structure from an XMP value, or `None` if the value is not a structure.
+    #[must_use]
+    pub fn from_xmp(value: &XmpValue) -> Option<Self> {
+        structure(value).map(Self::from_fields)
+    }
+
+    /// Reads the structure from an already-unwrapped field list.
+    fn from_fields(f: &[XmpProperty]) -> Self {
+        let mut r = Reader::new(f);
+        Self {
+            identifier: r.text(ns::PLUS, "ImageSupplierID"),
+            name: r.text(ns::PLUS, "ImageSupplierName"),
+            other: r.other(),
+        }
+    }
+
+    /// Writes the structure as an XMP value, omitting absent fields and appending
+    /// [`other`](Self::other) verbatim.
+    #[must_use]
+    pub fn to_xmp(&self) -> XmpValue {
+        let mut f = Vec::new();
+        put_text(
+            &mut f,
+            ns::PLUS,
+            "ImageSupplierID",
+            self.identifier.as_ref(),
+        );
+        put_text(&mut f, ns::PLUS, "ImageSupplierName", self.name.as_ref());
+        put_other(&mut f, &self.other);
+        XmpValue::Structured(f)
+    }
+}
+
 // --- The accessors on the unified view ---------------------------------------------------------
 
 /// The RDF container an array setter puts its items in (XMP Part 1 §6.3.4).
@@ -1341,12 +2100,14 @@ type Container = fn(Vec<XmpItem>) -> XmpArray;
 
 /// The container kind a property's value is already held in — what an array setter keeps, so that
 /// one legal container kind is never rewritten to another. A property that is not an array, or no
-/// property at all, gives the `rdf:Bag` the standard specifies for these properties.
-fn container_of(value: Option<&XmpValue>) -> Container {
+/// property at all, gives `standard`: the kind the standard specifies for that property — an
+/// `rdf:Seq` for the three ordered PLUS party lists, an `rdf:Bag` for every other one.
+fn container_of(value: Option<&XmpValue>, standard: Container) -> Container {
     match value {
+        Some(XmpValue::Array(XmpArray::Bag(_))) => XmpArray::Bag,
         Some(XmpValue::Array(XmpArray::Seq(_))) => XmpArray::Seq,
         Some(XmpValue::Array(XmpArray::Alt(_))) => XmpArray::Alt,
-        _ => XmpArray::Bag,
+        _ => standard,
     }
 }
 
@@ -1371,6 +2132,9 @@ struct Projection<R, W: ?Sized> {
     /// The value the setter emits for a typed value, in the container kind the property already
     /// carries, or `None` when there is nothing to write.
     emit: fn(&W, Container) -> Option<XmpValue>,
+    /// The container kind the standard specifies for the property (IPTC Photo Metadata 2025.1, its
+    /// *XMP Specs* row), written when the property it replaces carries none.
+    standard: Container,
 }
 
 impl<R: Borrow<W>, W: ?Sized> Projection<R, W> {
@@ -1392,7 +2156,10 @@ impl<R: Borrow<W>, W: ?Sized> Projection<R, W> {
         let emitted = XmpProperty::new(
             self.ns,
             self.name,
-            (self.emit)(value.borrow(), container_of(Some(&property.value)))?,
+            (self.emit)(
+                value.borrow(),
+                container_of(Some(&property.value), self.standard),
+            )?,
         );
         reproduces(property, &emitted).then_some(value)
     }
@@ -1409,7 +2176,10 @@ impl<R: Borrow<W>, W: ?Sized> Projection<R, W> {
     /// property the typed view does not report is one the caller was never shown, so the pair does
     /// not destroy it.
     fn write(&self, xmp: &mut XmpMeta, value: &W) {
-        let container = container_of(xmp.get(self.ns, self.name).map(|property| &property.value));
+        let container = container_of(
+            xmp.get(self.ns, self.name).map(|property| &property.value),
+            self.standard,
+        );
         match (self.emit)(value, container) {
             Some(value) => self.replace(xmp, XmpProperty::new(self.ns, self.name, value)),
             None if self.read(xmp).is_some() => drop(xmp.remove(self.ns, self.name)),
@@ -1471,6 +2241,7 @@ const CONTACT_INFO: Projection<CreatorContactInfo, CreatorContactInfo> = Project
         let value = info.to_xmp();
         (!structure(&value).is_some_and(<[XmpProperty]>::is_empty)).then_some(value)
     },
+    standard: XmpArray::Bag,
 };
 
 /// The `Iptc4xmpExt:ImageRegion` projection.
@@ -1479,6 +2250,7 @@ const IMAGE_REGIONS: Projection<Vec<ImageRegion>, [ImageRegion]> = Projection {
     name: "ImageRegion",
     parse: |value| parse_structures(value, ImageRegion::from_fields),
     emit: |values, container| emit_structures(values, container, ImageRegion::to_xmp),
+    standard: XmpArray::Bag,
 };
 
 /// The `Iptc4xmpExt:ArtworkOrObject` projection.
@@ -1487,6 +2259,7 @@ const ARTWORK_OR_OBJECTS: Projection<Vec<ArtworkOrObject>, [ArtworkOrObject]> = 
     name: "ArtworkOrObject",
     parse: |value| parse_structures(value, ArtworkOrObject::from_fields),
     emit: |values, container| emit_structures(values, container, ArtworkOrObject::to_xmp),
+    standard: XmpArray::Bag,
 };
 
 /// The `plus:Licensor` projection.
@@ -1495,6 +2268,130 @@ const LICENSORS: Projection<Vec<Licensor>, [Licensor]> = Projection {
     name: "Licensor",
     parse: |value| parse_structures(value, Licensor::from_fields),
     emit: |values, container| emit_structures(values, container, Licensor::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:LocationCreated` projection.
+const LOCATIONS_CREATED: Projection<Vec<Location>, [Location]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "LocationCreated",
+    parse: |value| parse_structures(value, Location::from_fields),
+    emit: |values, container| emit_structures(values, container, Location::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:LocationShown` projection.
+const LOCATIONS_SHOWN: Projection<Vec<Location>, [Location]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "LocationShown",
+    parse: |value| parse_structures(value, Location::from_fields),
+    emit: |values, container| emit_structures(values, container, Location::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:PersonInImageWDetails` projection.
+const PERSONS_SHOWN: Projection<Vec<Person>, [Person]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "PersonInImageWDetails",
+    parse: |value| parse_structures(value, Person::from_fields),
+    emit: |values, container| emit_structures(values, container, Person::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:AboutCvTerm` projection.
+const ABOUT_CV_TERMS: Projection<Vec<CvTerm>, [CvTerm]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "AboutCvTerm",
+    parse: |value| parse_structures(value, CvTerm::from_fields),
+    emit: |values, container| emit_structures(values, container, CvTerm::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:Genre` projection.
+const GENRES: Projection<Vec<CvTerm>, [CvTerm]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "Genre",
+    parse: |value| parse_structures(value, CvTerm::from_fields),
+    emit: |values, container| emit_structures(values, container, CvTerm::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:Contributor` projection.
+const CONTRIBUTORS: Projection<Vec<EntityWithRole>, [EntityWithRole]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "Contributor",
+    parse: |value| parse_structures(value, EntityWithRole::from_fields),
+    emit: |values, container| emit_structures(values, container, EntityWithRole::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:ProductInImage` projection.
+const PRODUCTS_SHOWN: Projection<Vec<Product>, [Product]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "ProductInImage",
+    parse: |value| parse_structures(value, Product::from_fields),
+    emit: |values, container| emit_structures(values, container, Product::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:RegistryId` projection.
+const REGISTRY_ENTRIES: Projection<Vec<RegistryEntry>, [RegistryEntry]> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "RegistryId",
+    parse: |value| parse_structures(value, RegistryEntry::from_fields),
+    emit: |values, container| emit_structures(values, container, RegistryEntry::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:EmbdEncRightsExpr` projection.
+const EMBEDDED_RIGHTS_EXPRESSIONS: Projection<
+    Vec<EmbeddedRightsExpression>,
+    [EmbeddedRightsExpression],
+> = Projection {
+    ns: ns::IPTC_EXT,
+    name: "EmbdEncRightsExpr",
+    parse: |value| parse_structures(value, EmbeddedRightsExpression::from_fields),
+    emit: |values, container| emit_structures(values, container, EmbeddedRightsExpression::to_xmp),
+    standard: XmpArray::Bag,
+};
+
+/// The `Iptc4xmpExt:LinkedEncRightsExpr` projection.
+const LINKED_RIGHTS_EXPRESSIONS: Projection<Vec<LinkedRightsExpression>, [LinkedRightsExpression]> =
+    Projection {
+        ns: ns::IPTC_EXT,
+        name: "LinkedEncRightsExpr",
+        parse: |value| parse_structures(value, LinkedRightsExpression::from_fields),
+        emit: |values, container| {
+            emit_structures(values, container, LinkedRightsExpression::to_xmp)
+        },
+        standard: XmpArray::Bag,
+    };
+
+/// The `plus:CopyrightOwner` projection: an ordered `rdf:Seq`.
+const COPYRIGHT_OWNERS: Projection<Vec<CopyrightOwner>, [CopyrightOwner]> = Projection {
+    ns: ns::PLUS,
+    name: "CopyrightOwner",
+    parse: |value| parse_structures(value, CopyrightOwner::from_fields),
+    emit: |values, container| emit_structures(values, container, CopyrightOwner::to_xmp),
+    standard: XmpArray::Seq,
+};
+
+/// The `plus:ImageCreator` projection: an ordered `rdf:Seq`.
+const IMAGE_CREATORS: Projection<Vec<ImageCreator>, [ImageCreator]> = Projection {
+    ns: ns::PLUS,
+    name: "ImageCreator",
+    parse: |value| parse_structures(value, ImageCreator::from_fields),
+    emit: |values, container| emit_structures(values, container, ImageCreator::to_xmp),
+    standard: XmpArray::Seq,
+};
+
+/// The `plus:ImageSupplier` projection: an ordered `rdf:Seq`.
+const IMAGE_SUPPLIERS: Projection<Vec<ImageSupplier>, [ImageSupplier]> = Projection {
+    ns: ns::PLUS,
+    name: "ImageSupplier",
+    parse: |value| parse_structures(value, ImageSupplier::from_fields),
+    emit: |values, container| emit_structures(values, container, ImageSupplier::to_xmp),
+    standard: XmpArray::Seq,
 };
 
 impl PhotoMetadata {
@@ -1551,6 +2448,191 @@ impl PhotoMetadata {
     /// kind, and an empty slice removes a property this pair reported.
     pub fn set_licensors(&mut self, licensors: &[Licensor]) {
         LICENSORS.write(&mut self.xmp, licensors);
+    }
+
+    /// The locations the image was created at (`Iptc4xmpExt:LocationCreated`), on the same terms
+    /// as [`image_regions`](Self::image_regions).
+    ///
+    /// The standard caps the property at one location while its XMP form is a `Bag`; gamut reads
+    /// every location the array holds.
+    #[must_use]
+    pub fn locations_created(&self) -> Vec<Location> {
+        LOCATIONS_CREATED.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the locations the image was created at (`Iptc4xmpExt:LocationCreated`); an existing
+    /// array keeps its container kind, and an empty slice removes a property this pair reported.
+    pub fn set_locations_created(&mut self, locations: &[Location]) {
+        LOCATIONS_CREATED.write(&mut self.xmp, locations);
+    }
+
+    /// The locations shown in the image (`Iptc4xmpExt:LocationShown`), on the same terms as
+    /// [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn locations_shown(&self) -> Vec<Location> {
+        LOCATIONS_SHOWN.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the locations shown in the image (`Iptc4xmpExt:LocationShown`); an existing array
+    /// keeps its container kind, and an empty slice removes a property this pair reported.
+    pub fn set_locations_shown(&mut self, locations: &[Location]) {
+        LOCATIONS_SHOWN.write(&mut self.xmp, locations);
+    }
+
+    /// The persons shown in the image, with details (`Iptc4xmpExt:PersonInImageWDetails`), on the
+    /// same terms as [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn persons_shown(&self) -> Vec<Person> {
+        PERSONS_SHOWN.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the persons shown in the image (`Iptc4xmpExt:PersonInImageWDetails`); an existing
+    /// array keeps its container kind, and an empty slice removes a property this pair reported.
+    pub fn set_persons_shown(&mut self, persons: &[Person]) {
+        PERSONS_SHOWN.write(&mut self.xmp, persons);
+    }
+
+    /// The controlled-vocabulary terms the image is about (`Iptc4xmpExt:AboutCvTerm`), on the same
+    /// terms as [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn about_cv_terms(&self) -> Vec<CvTerm> {
+        ABOUT_CV_TERMS.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the controlled-vocabulary terms the image is about (`Iptc4xmpExt:AboutCvTerm`); an
+    /// existing array keeps its container kind, and an empty slice removes a property this pair
+    /// reported.
+    pub fn set_about_cv_terms(&mut self, terms: &[CvTerm]) {
+        ABOUT_CV_TERMS.write(&mut self.xmp, terms);
+    }
+
+    /// The genres of the image, as controlled-vocabulary terms (`Iptc4xmpExt:Genre`), on the same
+    /// terms as [`image_regions`](Self::image_regions).
+    ///
+    /// Distinct from the Core's flat [`intellectual_genre`](Self::intellectual_genre)
+    /// (`Iptc4xmpCore:IntellectualGenre`); gamut does not copy one into the other.
+    #[must_use]
+    pub fn genres(&self) -> Vec<CvTerm> {
+        GENRES.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the genres of the image (`Iptc4xmpExt:Genre`); an existing array keeps its container
+    /// kind, and an empty slice removes a property this pair reported.
+    pub fn set_genres(&mut self, genres: &[CvTerm]) {
+        GENRES.write(&mut self.xmp, genres);
+    }
+
+    /// The contributors to the image, with their roles (`Iptc4xmpExt:Contributor`), on the same
+    /// terms as [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn contributors(&self) -> Vec<EntityWithRole> {
+        CONTRIBUTORS.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the contributors to the image (`Iptc4xmpExt:Contributor`); an existing array keeps its
+    /// container kind, and an empty slice removes a property this pair reported.
+    pub fn set_contributors(&mut self, contributors: &[EntityWithRole]) {
+        CONTRIBUTORS.write(&mut self.xmp, contributors);
+    }
+
+    /// The products shown in the image (`Iptc4xmpExt:ProductInImage`), on the same terms as
+    /// [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn products_shown(&self) -> Vec<Product> {
+        PRODUCTS_SHOWN.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the products shown in the image (`Iptc4xmpExt:ProductInImage`); an existing array
+    /// keeps its container kind, and an empty slice removes a property this pair reported.
+    pub fn set_products_shown(&mut self, products: &[Product]) {
+        PRODUCTS_SHOWN.write(&mut self.xmp, products);
+    }
+
+    /// The image's registry entries (`Iptc4xmpExt:RegistryId`), on the same terms as
+    /// [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn registry_entries(&self) -> Vec<RegistryEntry> {
+        REGISTRY_ENTRIES.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the image's registry entries (`Iptc4xmpExt:RegistryId`); an existing array keeps its
+    /// container kind, and an empty slice removes a property this pair reported.
+    pub fn set_registry_entries(&mut self, entries: &[RegistryEntry]) {
+        REGISTRY_ENTRIES.write(&mut self.xmp, entries);
+    }
+
+    /// The rights expressions embedded in the metadata (`Iptc4xmpExt:EmbdEncRightsExpr`), on the
+    /// same terms as [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn embedded_rights_expressions(&self) -> Vec<EmbeddedRightsExpression> {
+        EMBEDDED_RIGHTS_EXPRESSIONS
+            .read(&self.xmp)
+            .unwrap_or_default()
+    }
+
+    /// Sets the rights expressions embedded in the metadata (`Iptc4xmpExt:EmbdEncRightsExpr`); an
+    /// existing array keeps its container kind, and an empty slice removes a property this pair
+    /// reported.
+    pub fn set_embedded_rights_expressions(&mut self, expressions: &[EmbeddedRightsExpression]) {
+        EMBEDDED_RIGHTS_EXPRESSIONS.write(&mut self.xmp, expressions);
+    }
+
+    /// The rights expressions the metadata links to (`Iptc4xmpExt:LinkedEncRightsExpr`), on the
+    /// same terms as [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn linked_rights_expressions(&self) -> Vec<LinkedRightsExpression> {
+        LINKED_RIGHTS_EXPRESSIONS
+            .read(&self.xmp)
+            .unwrap_or_default()
+    }
+
+    /// Sets the rights expressions the metadata links to (`Iptc4xmpExt:LinkedEncRightsExpr`); an
+    /// existing array keeps its container kind, and an empty slice removes a property this pair
+    /// reported.
+    pub fn set_linked_rights_expressions(&mut self, expressions: &[LinkedRightsExpression]) {
+        LINKED_RIGHTS_EXPRESSIONS.write(&mut self.xmp, expressions);
+    }
+
+    /// The copyright owners of the image (`plus:CopyrightOwner`), in order, on the same terms as
+    /// [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn copyright_owners(&self) -> Vec<CopyrightOwner> {
+        COPYRIGHT_OWNERS.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the copyright owners of the image (`plus:CopyrightOwner`); an existing array keeps its
+    /// container kind, a new one is the `rdf:Seq` the standard specifies, and an empty slice
+    /// removes a property this pair reported.
+    pub fn set_copyright_owners(&mut self, owners: &[CopyrightOwner]) {
+        COPYRIGHT_OWNERS.write(&mut self.xmp, owners);
+    }
+
+    /// The creators of the image (`plus:ImageCreator`), in order, on the same terms as
+    /// [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn image_creators(&self) -> Vec<ImageCreator> {
+        IMAGE_CREATORS.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the creators of the image (`plus:ImageCreator`); an existing array keeps its container
+    /// kind, a new one is the `rdf:Seq` the standard specifies, and an empty slice removes a
+    /// property this pair reported.
+    pub fn set_image_creators(&mut self, creators: &[ImageCreator]) {
+        IMAGE_CREATORS.write(&mut self.xmp, creators);
+    }
+
+    /// The suppliers of the image (`plus:ImageSupplier`), in order, on the same terms as
+    /// [`image_regions`](Self::image_regions).
+    #[must_use]
+    pub fn image_suppliers(&self) -> Vec<ImageSupplier> {
+        IMAGE_SUPPLIERS.read(&self.xmp).unwrap_or_default()
+    }
+
+    /// Sets the suppliers of the image (`plus:ImageSupplier`); an existing array keeps its
+    /// container kind, a new one is the `rdf:Seq` the standard specifies, and an empty slice
+    /// removes a property this pair reported.
+    pub fn set_image_suppliers(&mut self, suppliers: &[ImageSupplier]) {
+        IMAGE_SUPPLIERS.write(&mut self.xmp, suppliers);
     }
 }
 
@@ -1616,6 +2698,310 @@ mod tests {
         assert_eq!(RegionBoundary::from_xmp(&text), None);
         assert_eq!(RegionBoundaryPoint::from_xmp(&text), None);
         assert_eq!(Entity::from_xmp(&text), None);
+        assert_eq!(Location::from_xmp(&text), None);
+        assert_eq!(CvTerm::from_xmp(&text), None);
+        assert_eq!(Person::from_xmp(&text), None);
+        assert_eq!(EntityWithRole::from_xmp(&text), None);
+        assert_eq!(Product::from_xmp(&text), None);
+        assert_eq!(RegistryEntry::from_xmp(&text), None);
+        assert_eq!(EmbeddedRightsExpression::from_xmp(&text), None);
+        assert_eq!(LinkedRightsExpression::from_xmp(&text), None);
+        assert_eq!(CopyrightOwner::from_xmp(&text), None);
+        assert_eq!(ImageCreator::from_xmp(&text), None);
+        assert_eq!(ImageSupplier::from_xmp(&text), None);
+    }
+
+    /// A [`Location`] whose twelve values are all distinct, so a field read from the wrong property
+    /// is visible.
+    fn location() -> Location {
+        Location {
+            identifiers: vec!["https://example.org/loc/1".to_owned(), "urn:loc".to_owned()],
+            name: Some("Place Bellecour".to_owned()),
+            sublocation: Some("Presqu'île".to_owned()),
+            city: Some("Lyon".to_owned()),
+            province_state: Some("Rhône".to_owned()),
+            country_name: Some("France".to_owned()),
+            country_code: Some("FRA".to_owned()),
+            world_region: Some("Europe".to_owned()),
+            gps_latitude: Some("45,45.47N".to_owned()),
+            gps_longitude: Some("4,49.92E".to_owned()),
+            gps_altitude: Some("170/1".to_owned()),
+            gps_altitude_ref: Some("0".to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// A [`CvTerm`] with every field set to a distinct value.
+    fn cv_term(name: &str) -> CvTerm {
+        CvTerm {
+            vocabulary_identifier: Some("http://cv.iptc.org/newscodes/scene/".to_owned()),
+            identifier: Some("http://cv.iptc.org/newscodes/scene/011900".to_owned()),
+            name: Some(name.to_owned()),
+            refined_about: Some("http://cv.iptc.org/newscodes/rbac/visual".to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// A [`Person`] with every field set, including two characteristics.
+    fn person() -> Person {
+        Person {
+            identifiers: vec!["urn:person".to_owned()],
+            name: Some("Ada Lovelace".to_owned()),
+            characteristics: vec![cv_term("adult"), cv_term("smiling")],
+            description: Some("Seated, left of frame".to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// An [`EntityWithRole`] with every field set.
+    fn contributor() -> EntityWithRole {
+        EntityWithRole {
+            identifiers: vec!["urn:contributor".to_owned()],
+            name: Some("Studio gamut".to_owned()),
+            roles: vec![
+                "http://cv.iptc.org/newscodes/contrrole/retoucher".to_owned(),
+                "http://cv.iptc.org/newscodes/contrrole/editor".to_owned(),
+            ],
+            other: Vec::new(),
+        }
+    }
+
+    /// A [`Product`] with every field set.
+    fn product() -> Product {
+        Product {
+            identifiers: vec!["urn:product".to_owned()],
+            name: Some("Teapot".to_owned()),
+            gtin: Some("4006381333931".to_owned()),
+            description: Some("White porcelain".to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// A [`RegistryEntry`] with every field set.
+    fn registry_entry() -> RegistryEntry {
+        RegistryEntry {
+            item_identifier: Some("item-42".to_owned()),
+            organisation_identifier: Some("https://registry.example.org/".to_owned()),
+            role: Some("http://cv.iptc.org/newscodes/imageregistryrole/canonicalLink".to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// An [`EmbeddedRightsExpression`] with every field set.
+    fn embedded_rights() -> EmbeddedRightsExpression {
+        EmbeddedRightsExpression {
+            expression: Some("<o:Policy/>".to_owned()),
+            encoding_type: Some("application/xml".to_owned()),
+            language_identifier: Some("http://www.w3.org/ns/odrl/2/".to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// A [`LinkedRightsExpression`] with every field set.
+    fn linked_rights() -> LinkedRightsExpression {
+        LinkedRightsExpression {
+            url: Some("https://example.org/policy.xml".to_owned()),
+            encoding_type: Some("application/xml".to_owned()),
+            language_identifier: Some("http://www.w3.org/ns/odrl/2/".to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// A [`CopyrightOwner`] with both fields set.
+    fn copyright_owner(name: &str) -> CopyrightOwner {
+        CopyrightOwner {
+            identifier: Some(format!("urn:owner:{name}")),
+            name: Some(name.to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// An [`ImageCreator`] with both fields set.
+    fn image_creator(name: &str) -> ImageCreator {
+        ImageCreator {
+            identifier: Some(format!("urn:creator:{name}")),
+            name: Some(name.to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// An [`ImageSupplier`] with both fields set.
+    fn image_supplier(name: &str) -> ImageSupplier {
+        ImageSupplier {
+            identifier: Some(format!("urn:supplier:{name}")),
+            name: Some(name.to_owned()),
+            other: Vec::new(),
+        }
+    }
+
+    /// Each of the eleven structures added for issue #538 with every field set, its `to_xmp` →
+    /// `from_xmp` round trip, and the number of fields it writes.
+    #[test]
+    fn every_added_structure_round_trips_every_field() {
+        fn trip<T: PartialEq + std::fmt::Debug>(
+            label: &str,
+            value: &T,
+            to_xmp: fn(&T) -> XmpValue,
+            from_xmp: fn(&XmpValue) -> Option<T>,
+            fields: usize,
+        ) {
+            let written = to_xmp(value);
+            assert_eq!(from_xmp(&written).as_ref(), Some(value), "{label}");
+            assert_eq!(structure(&written).unwrap().len(), fields, "{label}");
+        }
+        trip(
+            "Location",
+            &location(),
+            Location::to_xmp,
+            Location::from_xmp,
+            12,
+        );
+        trip(
+            "CvTerm",
+            &cv_term("outdoors"),
+            CvTerm::to_xmp,
+            CvTerm::from_xmp,
+            4,
+        );
+        trip("Person", &person(), Person::to_xmp, Person::from_xmp, 4);
+        trip(
+            "EntityWithRole",
+            &contributor(),
+            EntityWithRole::to_xmp,
+            EntityWithRole::from_xmp,
+            3,
+        );
+        trip("Product", &product(), Product::to_xmp, Product::from_xmp, 4);
+        trip(
+            "RegistryEntry",
+            &registry_entry(),
+            RegistryEntry::to_xmp,
+            RegistryEntry::from_xmp,
+            3,
+        );
+        trip(
+            "EmbeddedRightsExpression",
+            &embedded_rights(),
+            EmbeddedRightsExpression::to_xmp,
+            EmbeddedRightsExpression::from_xmp,
+            3,
+        );
+        trip(
+            "LinkedRightsExpression",
+            &linked_rights(),
+            LinkedRightsExpression::to_xmp,
+            LinkedRightsExpression::from_xmp,
+            3,
+        );
+        trip(
+            "CopyrightOwner",
+            &copyright_owner("Owner"),
+            CopyrightOwner::to_xmp,
+            CopyrightOwner::from_xmp,
+            2,
+        );
+        trip(
+            "ImageCreator",
+            &image_creator("Creator"),
+            ImageCreator::to_xmp,
+            ImageCreator::from_xmp,
+            2,
+        );
+        trip(
+            "ImageSupplier",
+            &image_supplier("Supplier"),
+            ImageSupplier::to_xmp,
+            ImageSupplier::from_xmp,
+            2,
+        );
+    }
+
+    #[test]
+    fn a_location_writes_its_gps_fields_in_the_exif_namespace_as_text() {
+        // The reference puts the four GPS fields under `exif:`, and their XMP types are EXIF text
+        // forms (GPSCoordinate, Rational, Integer) — so they are written exactly as held.
+        let value = location().to_xmp();
+        let fields = structure(&value).unwrap();
+        for (name, text) in [
+            ("GPSLatitude", "45,45.47N"),
+            ("GPSLongitude", "4,49.92E"),
+            ("GPSAltitude", "170/1"),
+            ("GPSAltitudeRef", "0"),
+        ] {
+            assert_eq!(
+                field(fields, ns::EXIF, name).map(|p| &p.value),
+                Some(&text_value(text)),
+                "exif:{name}"
+            );
+        }
+        // Every other field is IPTC Extension.
+        assert_eq!(
+            fields
+                .iter()
+                .filter(|p| p.namespace == ns::IPTC_EXT)
+                .count(),
+            8
+        );
+    }
+
+    #[test]
+    fn the_added_lists_and_language_alternatives_use_the_standards_container_kinds() {
+        // Every multi-valued field the eleven structures define is a `Bag` in the standard's XMP
+        // Specs rows, and every `AltLang` field a language alternative.
+        let bags: [(&str, XmpValue, &str, &str); 6] = [
+            ("Location", location().to_xmp(), ns::IPTC_EXT, "LocationId"),
+            ("Person", person().to_xmp(), ns::IPTC_EXT, "PersonId"),
+            (
+                "Person",
+                person().to_xmp(),
+                ns::IPTC_EXT,
+                "PersonCharacteristic",
+            ),
+            (
+                "EntityWithRole",
+                contributor().to_xmp(),
+                ns::XMP,
+                "Identifier",
+            ),
+            (
+                "EntityWithRole",
+                contributor().to_xmp(),
+                ns::IPTC_EXT,
+                "Role",
+            ),
+            ("Product", product().to_xmp(), ns::IPTC_EXT, "ProductId"),
+        ];
+        for (label, value, namespace, name) in &bags {
+            assert!(
+                matches!(
+                    field(structure(value).unwrap(), namespace, name)
+                        .unwrap()
+                        .value,
+                    XmpValue::Array(XmpArray::Bag(_))
+                ),
+                "{label}: {name} must be a Bag"
+            );
+        }
+        let alternatives: [(&str, XmpValue, &str); 7] = [
+            ("Location", location().to_xmp(), "LocationName"),
+            ("CvTerm", cv_term("outdoors").to_xmp(), "CvTermName"),
+            ("Person", person().to_xmp(), "PersonName"),
+            ("Person", person().to_xmp(), "PersonDescription"),
+            ("EntityWithRole", contributor().to_xmp(), "Name"),
+            ("Product", product().to_xmp(), "ProductName"),
+            ("Product", product().to_xmp(), "ProductDescription"),
+        ];
+        for (label, value, name) in &alternatives {
+            assert!(
+                matches!(
+                    field(structure(value).unwrap(), ns::IPTC_EXT, name)
+                        .unwrap()
+                        .value,
+                    XmpValue::Array(XmpArray::Alt(_))
+                ),
+                "{label}: {name} must be a language alternative"
+            );
+        }
     }
 
     #[test]
@@ -1939,7 +3325,42 @@ mod tests {
             radius: Some(0.5),
             ..RegionBoundary::default()
         };
-        let trips: [Trip; 7] = [
+        let trips: [Trip; 18] = [
+            ("Location", location().to_xmp(), |v| {
+                Some(Location::from_xmp(v)?.to_xmp())
+            }),
+            ("CvTerm", cv_term("outdoors").to_xmp(), |v| {
+                Some(CvTerm::from_xmp(v)?.to_xmp())
+            }),
+            ("Person", person().to_xmp(), |v| {
+                Some(Person::from_xmp(v)?.to_xmp())
+            }),
+            ("EntityWithRole", contributor().to_xmp(), |v| {
+                Some(EntityWithRole::from_xmp(v)?.to_xmp())
+            }),
+            ("Product", product().to_xmp(), |v| {
+                Some(Product::from_xmp(v)?.to_xmp())
+            }),
+            ("RegistryEntry", registry_entry().to_xmp(), |v| {
+                Some(RegistryEntry::from_xmp(v)?.to_xmp())
+            }),
+            (
+                "EmbeddedRightsExpression",
+                embedded_rights().to_xmp(),
+                |v| Some(EmbeddedRightsExpression::from_xmp(v)?.to_xmp()),
+            ),
+            ("LinkedRightsExpression", linked_rights().to_xmp(), |v| {
+                Some(LinkedRightsExpression::from_xmp(v)?.to_xmp())
+            }),
+            ("CopyrightOwner", copyright_owner("Owner").to_xmp(), |v| {
+                Some(CopyrightOwner::from_xmp(v)?.to_xmp())
+            }),
+            ("ImageCreator", image_creator("Creator").to_xmp(), |v| {
+                Some(ImageCreator::from_xmp(v)?.to_xmp())
+            }),
+            ("ImageSupplier", image_supplier("Supplier").to_xmp(), |v| {
+                Some(ImageSupplier::from_xmp(v)?.to_xmp())
+            }),
             ("CreatorContactInfo", contact().to_xmp(), |v| {
                 Some(CreatorContactInfo::from_xmp(v)?.to_xmp())
             }),
@@ -2779,7 +4200,7 @@ mod tests {
 
     #[test]
     fn an_empty_contact_block_removes_the_property() {
-        // All four setters agree: nothing to say removes the property, rather than leaving behind
+        // Every setter agrees: nothing to say removes the property, rather than leaving behind
         // an empty structure a reader would report as "present but blank".
         let mut pm = PhotoMetadata::new();
         pm.set_creator_contact_info(&contact());
@@ -2923,7 +4344,7 @@ mod tests {
         trip: fn(&mut PhotoMetadata),
     }
 
-    /// The four accessor pairs [`PhotoMetadata`] exposes for a structured IPTC property.
+    /// Every accessor pair [`PhotoMetadata`] exposes for a structured IPTC property.
     fn top_properties() -> Vec<TopProperty> {
         vec![
             TopProperty {
@@ -2975,7 +4396,300 @@ mod tests {
                 },
                 trip: |pm| pm.set_licensors(&pm.licensors()),
             },
+            TopProperty {
+                label: "locations_created",
+                ns: ns::IPTC_EXT,
+                name: "LocationCreated",
+                member: || location().to_xmp(),
+                trip: |pm| pm.set_locations_created(&pm.locations_created()),
+            },
+            TopProperty {
+                label: "locations_shown",
+                ns: ns::IPTC_EXT,
+                name: "LocationShown",
+                member: || location().to_xmp(),
+                trip: |pm| pm.set_locations_shown(&pm.locations_shown()),
+            },
+            TopProperty {
+                label: "persons_shown",
+                ns: ns::IPTC_EXT,
+                name: "PersonInImageWDetails",
+                member: || person().to_xmp(),
+                trip: |pm| pm.set_persons_shown(&pm.persons_shown()),
+            },
+            TopProperty {
+                label: "about_cv_terms",
+                ns: ns::IPTC_EXT,
+                name: "AboutCvTerm",
+                member: || cv_term("outdoors").to_xmp(),
+                trip: |pm| pm.set_about_cv_terms(&pm.about_cv_terms()),
+            },
+            TopProperty {
+                label: "genres",
+                ns: ns::IPTC_EXT,
+                name: "Genre",
+                member: || cv_term("portrait").to_xmp(),
+                trip: |pm| pm.set_genres(&pm.genres()),
+            },
+            TopProperty {
+                label: "contributors",
+                ns: ns::IPTC_EXT,
+                name: "Contributor",
+                member: || contributor().to_xmp(),
+                trip: |pm| pm.set_contributors(&pm.contributors()),
+            },
+            TopProperty {
+                label: "products_shown",
+                ns: ns::IPTC_EXT,
+                name: "ProductInImage",
+                member: || product().to_xmp(),
+                trip: |pm| pm.set_products_shown(&pm.products_shown()),
+            },
+            TopProperty {
+                label: "registry_entries",
+                ns: ns::IPTC_EXT,
+                name: "RegistryId",
+                member: || registry_entry().to_xmp(),
+                trip: |pm| pm.set_registry_entries(&pm.registry_entries()),
+            },
+            TopProperty {
+                label: "embedded_rights_expressions",
+                ns: ns::IPTC_EXT,
+                name: "EmbdEncRightsExpr",
+                member: || embedded_rights().to_xmp(),
+                trip: |pm| pm.set_embedded_rights_expressions(&pm.embedded_rights_expressions()),
+            },
+            TopProperty {
+                label: "linked_rights_expressions",
+                ns: ns::IPTC_EXT,
+                name: "LinkedEncRightsExpr",
+                member: || linked_rights().to_xmp(),
+                trip: |pm| pm.set_linked_rights_expressions(&pm.linked_rights_expressions()),
+            },
+            TopProperty {
+                label: "copyright_owners",
+                ns: ns::PLUS,
+                name: "CopyrightOwner",
+                member: || copyright_owner("Owner").to_xmp(),
+                trip: |pm| pm.set_copyright_owners(&pm.copyright_owners()),
+            },
+            TopProperty {
+                label: "image_creators",
+                ns: ns::PLUS,
+                name: "ImageCreator",
+                member: || image_creator("Creator").to_xmp(),
+                trip: |pm| pm.set_image_creators(&pm.image_creators()),
+            },
+            TopProperty {
+                label: "image_suppliers",
+                ns: ns::PLUS,
+                name: "ImageSupplier",
+                member: || image_supplier("Supplier").to_xmp(),
+                trip: |pm| pm.set_image_suppliers(&pm.image_suppliers()),
+            },
         ]
+    }
+
+    #[test]
+    fn every_added_setter_writes_what_its_accessor_reads_back() {
+        // The read-modify-write sweep below starts from a graph that already holds the property,
+        // so a setter that wrote nothing would pass it. Each pair is checked here from an empty
+        // graph instead: one value in, the same value read back, under the one property named.
+        fn pair<T: Clone + PartialEq + std::fmt::Debug>(
+            label: &str,
+            values: &[T],
+            set: fn(&mut PhotoMetadata, &[T]),
+            get: fn(&PhotoMetadata) -> Vec<T>,
+            ns: &str,
+            name: &str,
+        ) {
+            let mut pm = PhotoMetadata::new();
+            set(&mut pm, values);
+            assert_eq!(get(&pm), values, "{label}");
+            assert_eq!(pm.xmp.properties.len(), 1, "{label}");
+            assert!(pm.xmp.get(ns, name).is_some(), "{label}: {name}");
+        }
+        let ext = ns::IPTC_EXT;
+        let locations = [location(), Location::default()];
+        pair(
+            "locations_created",
+            &locations,
+            PhotoMetadata::set_locations_created,
+            PhotoMetadata::locations_created,
+            ext,
+            "LocationCreated",
+        );
+        pair(
+            "locations_shown",
+            &locations,
+            PhotoMetadata::set_locations_shown,
+            PhotoMetadata::locations_shown,
+            ext,
+            "LocationShown",
+        );
+        pair(
+            "persons_shown",
+            &[person()],
+            PhotoMetadata::set_persons_shown,
+            PhotoMetadata::persons_shown,
+            ext,
+            "PersonInImageWDetails",
+        );
+        pair(
+            "about_cv_terms",
+            &[cv_term("outdoors")],
+            PhotoMetadata::set_about_cv_terms,
+            PhotoMetadata::about_cv_terms,
+            ext,
+            "AboutCvTerm",
+        );
+        pair(
+            "genres",
+            &[cv_term("portrait")],
+            PhotoMetadata::set_genres,
+            PhotoMetadata::genres,
+            ext,
+            "Genre",
+        );
+        pair(
+            "contributors",
+            &[contributor()],
+            PhotoMetadata::set_contributors,
+            PhotoMetadata::contributors,
+            ext,
+            "Contributor",
+        );
+        pair(
+            "products_shown",
+            &[product()],
+            PhotoMetadata::set_products_shown,
+            PhotoMetadata::products_shown,
+            ext,
+            "ProductInImage",
+        );
+        pair(
+            "registry_entries",
+            &[registry_entry()],
+            PhotoMetadata::set_registry_entries,
+            PhotoMetadata::registry_entries,
+            ext,
+            "RegistryId",
+        );
+        pair(
+            "embedded_rights_expressions",
+            &[embedded_rights()],
+            PhotoMetadata::set_embedded_rights_expressions,
+            PhotoMetadata::embedded_rights_expressions,
+            ext,
+            "EmbdEncRightsExpr",
+        );
+        pair(
+            "linked_rights_expressions",
+            &[linked_rights()],
+            PhotoMetadata::set_linked_rights_expressions,
+            PhotoMetadata::linked_rights_expressions,
+            ext,
+            "LinkedEncRightsExpr",
+        );
+        pair(
+            "copyright_owners",
+            &[copyright_owner("First"), copyright_owner("Second")],
+            PhotoMetadata::set_copyright_owners,
+            PhotoMetadata::copyright_owners,
+            ns::PLUS,
+            "CopyrightOwner",
+        );
+        pair(
+            "image_creators",
+            &[image_creator("First"), image_creator("Second")],
+            PhotoMetadata::set_image_creators,
+            PhotoMetadata::image_creators,
+            ns::PLUS,
+            "ImageCreator",
+        );
+        pair(
+            "image_suppliers",
+            &[image_supplier("First"), image_supplier("Second")],
+            PhotoMetadata::set_image_suppliers,
+            PhotoMetadata::image_suppliers,
+            ns::PLUS,
+            "ImageSupplier",
+        );
+    }
+
+    #[test]
+    fn a_new_plus_party_list_is_the_seq_the_standard_specifies() {
+        // `plus:CopyrightOwner`, `plus:ImageCreator` and `plus:ImageSupplier` are ordered lists in
+        // the standard's XMP Specs rows; every other structured array is a Bag. A property that
+        // already exists keeps its own kind — including a Bag under a Seq-standard property, which
+        // is what makes `container_of`'s Bag arm distinct from its default.
+        let mut pm = PhotoMetadata::new();
+        pm.set_copyright_owners(&[copyright_owner("Owner")]);
+        pm.set_image_creators(&[image_creator("Creator")]);
+        pm.set_image_suppliers(&[image_supplier("Supplier")]);
+        pm.set_locations_created(&[location()]);
+        let kind = container_kind;
+        assert_eq!(kind(&pm, ns::PLUS, "CopyrightOwner"), "Seq");
+        assert_eq!(kind(&pm, ns::PLUS, "ImageCreator"), "Seq");
+        assert_eq!(kind(&pm, ns::PLUS, "ImageSupplier"), "Seq");
+        assert_eq!(kind(&pm, ns::IPTC_EXT, "LocationCreated"), "Bag");
+
+        let mut pm = PhotoMetadata::new();
+        pm.xmp.set(XmpProperty::new(
+            ns::PLUS,
+            "CopyrightOwner",
+            XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(
+                copyright_owner("Owner").to_xmp(),
+            )])),
+        ));
+        pm.set_copyright_owners(&[copyright_owner("Another")]);
+        assert_eq!(kind(&pm, ns::PLUS, "CopyrightOwner"), "Bag");
+    }
+
+    /// The container kind of the top-level property `ns`/`name`: `"Seq"`, `"Bag"` or `"other"`.
+    fn container_kind(pm: &PhotoMetadata, ns: &str, name: &str) -> &'static str {
+        match &pm.xmp.get(ns, name).unwrap().value {
+            XmpValue::Array(XmpArray::Seq(_)) => "Seq",
+            XmpValue::Array(XmpArray::Bag(_)) => "Bag",
+            _ => "other",
+        }
+    }
+
+    #[test]
+    fn a_new_extension_list_is_the_bag_the_standard_specifies() {
+        // Every structured `Iptc4xmpExt` list this module added is a Bag in the standard's XMP
+        // Specs rows. The `standard` field of each projection is a literal the mutation gate
+        // cannot alter, so each one is asserted here, written fresh into an empty graph.
+        let ext = ns::IPTC_EXT;
+        let fresh = |set: &dyn Fn(&mut PhotoMetadata), name: &str| {
+            let mut pm = PhotoMetadata::new();
+            set(&mut pm);
+            assert_eq!(container_kind(&pm, ext, name), "Bag", "{name}");
+        };
+        fresh(&|pm| pm.set_locations_shown(&[location()]), "LocationShown");
+        fresh(
+            &|pm| pm.set_persons_shown(&[person()]),
+            "PersonInImageWDetails",
+        );
+        fresh(
+            &|pm| pm.set_about_cv_terms(&[cv_term("outdoors")]),
+            "AboutCvTerm",
+        );
+        fresh(&|pm| pm.set_genres(&[cv_term("portrait")]), "Genre");
+        fresh(&|pm| pm.set_contributors(&[contributor()]), "Contributor");
+        fresh(&|pm| pm.set_products_shown(&[product()]), "ProductInImage");
+        fresh(
+            &|pm| pm.set_registry_entries(&[registry_entry()]),
+            "RegistryId",
+        );
+        fresh(
+            &|pm| pm.set_embedded_rights_expressions(&[embedded_rights()]),
+            "EmbdEncRightsExpr",
+        );
+        fresh(
+            &|pm| pm.set_linked_rights_expressions(&[linked_rights()]),
+            "LinkedEncRightsExpr",
+        );
     }
 
     /// Every shape a top-level property's *value* can arrive in: the canonical form the model
@@ -3091,8 +4805,8 @@ mod tests {
                 }
             }
         }
-        // The cross is what makes this a sweep rather than a spot check: 4 pairs x 15 value
+        // The cross is what makes this a sweep rather than a spot check: 17 pairs x 15 value
         // shapes x 4 qualifier lists.
-        assert_eq!(crossed, 240);
+        assert_eq!(crossed, 1020);
     }
 }
