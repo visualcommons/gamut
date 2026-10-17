@@ -867,6 +867,18 @@ exclude_re = [
     # it cannot also cover the observable `>` in the deferral probe, which the lazy-parse tests
     # kill.
     'replace > with >= in nonempty_match',
+    # gamut-deflate `Matcher::walk` (lz77.rs) — the improvement test `len > best_len` relaxed to
+    # `>=`. Equivalent, because the prune in front of it already rules out `len == best_len`: a
+    # candidate is measured only when `data[c + best_len] == data[pos + best_len]`, and
+    # `common_prefix_len` returns exactly `best_len` only when the bytes at index `best_len` differ
+    # (`best_len < max_len` holds throughout, so that index is inside both windows). So `len` is
+    # either below `best_len` or above it, and `>` and `>=` admit the same candidates on every
+    # input (#493). The site is not restructured: removing the comparison means removing the
+    # prune, which spares a `common_prefix_len` call for most candidates on the hot path (the chain
+    # walk runs up to 1024 candidates per position at `Level::Best`), and every other spelling of "strictly longer" has the same
+    # twin. Line/column-anchored: the prune's own `==` and the `len >= max_len` break in the same
+    # function are killable and stay in the survey.
+    'lz77\.rs:155:24: replace > with >= in Matcher::walk$',
     # -----------------------------------------------------------------------------------------
     # GROUP 2 — NON-TERMINATING: detected, but reportable only as a TIMEOUT.
     #
