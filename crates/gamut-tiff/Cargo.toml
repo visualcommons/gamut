@@ -25,6 +25,17 @@ miniz_oxide = "0.8"
 # The IFD container core (byte order, field types, IFD chain, two-pass offset writer). `bigtiff`
 # enables the 64-bit BigTIFF variant the codec writes/reads.
 gamut-ifd = { workspace = true, features = ["bigtiff"] }
+# Typed metadata (issue #510): the unified `Metadata` model over the `ExifIFD` directory and the
+# XMP / IPTC-IIM / ICC / C2PA payloads `TiffMetadata` carries. Optional and off by default, and a
+# *normal* dependency (never dev-only), so release ordering follows it
+# (`mise run check-release-deps`).
+gamut-metadata = { workspace = true, optional = true }
+
+[features]
+default = []
+# Typed metadata wiring: `TiffMetadata`'s `TypedMetadata` impl (`blocks` / `metadata`) and
+# `TiffEncoder::with_typed_metadata` / `with_encoded_metadata` over the `gamut-metadata` facade.
+metadata = ["dep:gamut-metadata"]
 
 [dev-dependencies]
 # Differential cross-check oracle: a vendored, statically-linked libtiff (built from the

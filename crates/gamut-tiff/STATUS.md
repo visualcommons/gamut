@@ -184,9 +184,10 @@ oracle the way every codec above did:
   4-bit grayscale; 16-bit palette (`ColorMap` indices stay 8-bit); `Cmyk16`/`GrayAlpha16`
   presentation (no such `gamut-core` pixel type — a 16-bit CMYK page decodes through `Cmyk8` by
   narrowing, or `Rgb16` with the fourth sample dropped); halftone hints (§17); document-storage
-  metadata tags (§12 beyond `PageNumber`); **typed metadata** — the seam above carries raw
-  payloads only, and wiring them to the `gamut-metadata` facade's models is deliberately left out
-  (adding that dependency edge is the metadata epic's job, not this crate's).
+  metadata tags (§12 beyond `PageNumber`); typed EXIF beyond the `ExifIFD` — the facade model's
+  0th-IFD fields (`Make`, `Model`, …), GPS sub-IFD and thumbnail have no `TiffMetadata` carrier,
+  so the `metadata` feature's `with_typed_metadata` refuses a model holding them rather than drop
+  them.
 
 **Additivity guarantee:** each deferred row lands semver-minor — a new variant on a
 `#[non_exhaustive]` enum (`Compression`, `PhotometricInterpretation`, `Predictor`), a new builder
@@ -240,6 +241,15 @@ The API was frozen after a full-surface review; the additions and breaks:
   and writes it; and a directory carrying two entries under one tag is now reported as an
   `Anomaly::DuplicateTag` of `Severity::Error`, so a file that repeats a tag — previously graded
   clean — is no longer `is_fully_accounted`.
+- **Additions since the freeze (#510) — typed metadata.** An optional `metadata` Cargo feature
+  (off by default; a normal `gamut-metadata` edge) implements the facade's `TypedMetadata` on
+  `TiffMetadata` — the XMP / IPTC-IIM / ICC / C2PA byte blocks, with the `ExifIFD` assigned as
+  the EXIF model's Exif sub-IFD (its `InteroperabilityIFD` group lifted into the model's own
+  Interoperability sub-IFD) — and adds `TiffEncoder::{with_typed_metadata,
+  with_encoded_metadata}`. `TiffMetadata` gains `exif_byte_order`, read-side provenance the
+  encoder ignores (a field on a `#[non_exhaustive]` struct, so semver-minor). A C2PA store in
+  the blocks is a typed `Unsupported`, as is an EXIF model holding a 0th-IFD field, GPS sub-IFD
+  or thumbnail. Typed round trip in both byte orders: `encoder::typed::tests`.
 - **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
   on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
   diagnostics whose wording is not contractual.

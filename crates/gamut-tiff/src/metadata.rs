@@ -145,6 +145,16 @@ pub struct TiffMetadata {
     /// invalid by construction. The bytes are written exactly as given: the TIFF header's
     /// `ByteOrder` does not govern them (§A.3.6).
     pub c2pa: Option<Vec<u8>>,
+    /// The byte order of the file [`exif`](Self::exif) was read from: `Some` exactly when
+    /// [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) returned an Exif directory, and
+    /// `None` on a value built by hand.
+    ///
+    /// **Read-side provenance only.** An `ExifIFD` has no byte order of its own — it is written in
+    /// the file's, which [`TiffEncoder::with_byte_order`](crate::TiffEncoder::with_byte_order)
+    /// chooses — so the encoder ignores this field. It exists so the typed EXIF model the
+    /// `metadata` feature builds from [`exif`](Self::exif) states the order the directory was
+    /// actually stored in.
+    pub exif_byte_order: Option<ByteOrder>,
 }
 
 impl TiffMetadata {
@@ -592,6 +602,7 @@ pub(crate) fn read_metadata(data: &[u8]) -> Result<TiffMetadata> {
         _ => None,
     };
     Ok(TiffMetadata {
+        exif_byte_order: exif.as_ref().map(|_| order),
         exif,
         xmp,
         iptc,
@@ -1433,5 +1444,264 @@ mod tests {
             iptc_value(Some(&Value::Short(vec![1])), ByteOrder::LittleEndian),
             None
         );
+    }
+}
+
+/// The `metadata` feature: the facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over
+/// [`TiffMetadata`], and the two conversions between a TIFF's `ExifIFD` directory and the
+/// facade's [`Exif`](gamut_metadata::exif::Exif) model that it and
+/// [`TiffEncoder::with_encoded_metadata`](crate::TiffEncoder::with_encoded_metadata) share.
+///
+/// # What of the EXIF model a TIFF holds
+///
+/// [`TiffMetadata::exif`] is the `ExifIFD` sub-IFD and nothing else: a TIFF's IFD 0 *is* the
+/// image's own directory, which the encoder builds, and the reader follows no `GPSInfo` pointer
+/// from it. So the EXIF model's **Exif sub-IFD and its Interoperability sub-IFD** cross the
+/// container — the reader resolves `InteroperabilityIFD` as a group inside `ExifIFD`, which the
+/// model holds as its own directory — while its **0th-IFD fields, GPS sub-IFD and thumbnail**
+/// have no carrier here. Reading never produces them; writing a model that holds any of them is a
+/// typed [`Error::Unsupported`](gamut_core::Error::Unsupported) rather than a silent drop.
+#[cfg(feature = "metadata")]
+pub(crate) mod typed {
+    use gamut_core::{Error, Result};
+    use gamut_ifd::{ByteOrder, Ifd};
+    use gamut_metadata::exif::Exif;
+    use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
+
+    use super::TiffMetadata;
+    use crate::tags;
+
+    /// The refusal for an EXIF model holding a directory this container has no slot for.
+    pub(crate) const EXIF_OUTSIDE_EXIF_IFD: &str = "TIFF: EXIF 0th-IFD fields, a GPS sub-IFD and \
+         a thumbnail have no TiffMetadata carrier (only the Exif sub-IFD is written)";
+
+    /// The facade model of a TIFF's `ExifIFD` directory: the directory as the model's Exif
+    /// sub-IFD, a single `InteroperabilityIFD` group lifted out of it into the model's own
+    /// Interoperability sub-IFD, in `order`.
+    fn exif_model(ifd: &Ifd, order: ByteOrder) -> Exif {
+        let mut exif = Exif::new(order);
+        let mut directory = Ifd::new();
+        for field in ifd.fields() {
+            directory.set(field.tag, field.value.clone());
+        }
+        for group in ifd.sub_ifds() {
+            match (group.tag, group.ifds.as_slice()) {
+                (tags::INTEROPERABILITY_IFD, [interop]) => exif.set_interop_ifd(interop.clone()),
+                _ => directory.set_sub_ifd(group.tag, group.ifds.clone()),
+            }
+        }
+        exif.set_exif_ifd(directory);
+        exif
+    }
+
+    /// The `ExifIFD` directory a TIFF writes for `exif`: the model's Exif sub-IFD with its
+    /// Interoperability sub-IFD attached as an `InteroperabilityIFD` group, or `None` when the
+    /// model holds neither.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] when the model holds a 0th-IFD field, a GPS sub-IFD or a
+    /// thumbnail — directories a `TiffMetadata` has no carrier for (see the module docs).
+    pub(crate) fn exif_ifd(exif: &Exif) -> Result<Option<Ifd>> {
+        let image = exif.image();
+        if !image.fields().is_empty()
+            || !image.sub_ifds().is_empty()
+            || exif.gps_ifd().is_some()
+            || exif.thumbnail().is_some()
+        {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                EXIF_OUTSIDE_EXIF_IFD,
+            ));
+        }
+        let mut directory = match (exif.exif_ifd(), exif.interop_ifd()) {
+            (None, None) => return Ok(None),
+            (directory, _) => directory.cloned().unwrap_or_default(),
+        };
+        if let Some(interop) = exif.interop_ifd() {
+            directory.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
+        }
+        Ok(Some(directory))
+    }
+
+    /// The facade's [`TypedMetadata`] over the five carriers. Like `gamut-dng`'s, the EXIF carrier
+    /// is a parsed directory rather than bytes, so [`blocks`](TypedMetadata::blocks) hands over
+    /// only the four byte carriers and [`metadata`](TypedMetadata::metadata) assigns the EXIF
+    /// model straight onto [`Metadata::exif`].
+    ///
+    /// ```
+    /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
+    /// use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+    /// use gamut_tiff::{Metadata, TiffEncoder, TypedMetadata};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut exif = Exif::new(ByteOrder::LittleEndian);
+    /// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+    /// let typed = Metadata::from_carriers(Some(exif), None, None);
+    ///
+    /// let pixels = vec![0u8; 64];
+    /// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
+    /// let tiff = TiffEncoder::new()
+    ///     .with_typed_metadata(&typed)?
+    ///     .encode_to_vec(image)?;
+    ///
+    /// let read = gamut_tiff::TiffDecoder::new().metadata(&tiff)?;
+    /// assert_eq!(read.metadata()?, typed);
+    /// # Ok(())
+    /// # }
+    /// ```
+    impl TypedMetadata for TiffMetadata {
+        /// The byte-carried blocks — XMP, IPTC-IIM, ICC and the C2PA store — as
+        /// [`MetadataBlock`]s, each present only when the file carried it.
+        /// [`exif`](TiffMetadata::exif) is deliberately absent; see the impl's docs.
+        ///
+        /// # Errors
+        ///
+        /// Never: every carrier is already held as bytes. The signature is the trait's, shared
+        /// with containers that resolve payloads lazily.
+        fn blocks(&self) -> gamut_metadata::Result<Vec<MetadataBlock<'_>>> {
+            let mut blocks = Vec::new();
+            blocks.extend(self.xmp.as_deref().map(MetadataBlock::Xmp));
+            blocks.extend(self.iptc.as_deref().map(MetadataBlock::IptcIim));
+            blocks.extend(self.icc.as_deref().map(MetadataBlock::Icc));
+            blocks.extend(self.c2pa.as_deref().map(MetadataBlock::C2pa));
+            Ok(blocks)
+        }
+
+        /// The unified model: [`Metadata::from_blocks`] over [`blocks`](TypedMetadata::blocks)
+        /// (the IPTC-IIM block reconciled into the XMP graph under the default
+        /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy)), with
+        /// [`exif`](TiffMetadata::exif) assigned onto [`Metadata::exif`] as a model whose Exif
+        /// sub-IFD is that directory, in [`exif_byte_order`](TiffMetadata::exif_byte_order) — or
+        /// little-endian, [`TiffEncoder`](crate::TiffEncoder)'s default, on a value built by hand.
+        ///
+        /// # Errors
+        ///
+        /// The [`MetadataError`](gamut_metadata::MetadataError) naming the byte carrier whose
+        /// parse failed.
+        fn metadata(&self) -> gamut_metadata::Result<Metadata> {
+            let mut unified = Metadata::from_blocks(&self.blocks()?)?;
+            unified.exif = self.exif.as_ref().map(|ifd| {
+                exif_model(ifd, self.exif_byte_order.unwrap_or(ByteOrder::LittleEndian))
+            });
+            Ok(unified)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use gamut_ifd::Value;
+        use gamut_metadata::exif::{ExifTag, Value as ExifValue};
+
+        use super::*;
+
+        /// An `ExifIFD` as the reader returns one: an `ExposureTime` field and an
+        /// `InteroperabilityIFD` group.
+        fn directory() -> (Ifd, Ifd) {
+            let mut interop = Ifd::new();
+            interop.set(1, Value::Ascii("R98".into()));
+            let mut ifd = Ifd::new();
+            ifd.set(33434, Value::Rational(vec![(1, 60)]));
+            ifd.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop.clone()]);
+            (ifd, interop)
+        }
+
+        #[test]
+        fn blocks_hand_over_the_byte_carriers_only() {
+            let meta = TiffMetadata::new()
+                .with_exif(directory().0)
+                .with_xmp(b"<x:xmpmeta/>".to_vec())
+                .with_iptc(vec![0x1c, 0x02, 0x05])
+                .with_icc(vec![7; 4])
+                .with_c2pa(b"jumb".to_vec());
+            assert_eq!(
+                meta.blocks().unwrap(),
+                vec![
+                    MetadataBlock::Xmp(b"<x:xmpmeta/>"),
+                    MetadataBlock::IptcIim(&[0x1c, 0x02, 0x05]),
+                    MetadataBlock::Icc(&[7; 4]),
+                    MetadataBlock::C2pa(b"jumb"),
+                ]
+            );
+        }
+
+        #[test]
+        fn the_exif_model_lifts_the_interoperability_group_out_of_the_directory() {
+            let (ifd, interop) = directory();
+            let exif = exif_model(&ifd, ByteOrder::BigEndian);
+            assert_eq!(exif.byte_order(), ByteOrder::BigEndian);
+            assert_eq!(exif.interop_ifd(), Some(&interop));
+            let exif_ifd = exif.exif_ifd().unwrap();
+            assert_eq!(exif_ifd.get(33434), Some(&Value::Rational(vec![(1, 60)])));
+            assert!(exif_ifd.sub_ifds().is_empty());
+            assert!(exif.image().fields().is_empty());
+        }
+
+        #[test]
+        fn a_group_that_is_not_one_interoperability_directory_stays_in_the_directory() {
+            // Two Interoperability directories have no single slot in the model, and a `GPSInfo`
+            // group under `ExifIFD` is not the model's GPS sub-IFD: both stay where they were.
+            let mut ifd = Ifd::new();
+            ifd.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![Ifd::new(), Ifd::new()]);
+            ifd.set_sub_ifd(tags::GPS_INFO, vec![Ifd::new()]);
+            let exif = exif_model(&ifd, ByteOrder::LittleEndian);
+            assert_eq!(exif.interop_ifd(), None);
+            assert_eq!(exif.gps_ifd(), None);
+            assert_eq!(exif.exif_ifd().unwrap().sub_ifds(), ifd.sub_ifds());
+        }
+
+        #[test]
+        fn exif_ifd_is_the_inverse_of_the_model() {
+            let (ifd, _) = directory();
+            let exif = exif_model(&ifd, ByteOrder::LittleEndian);
+            assert_eq!(exif_ifd(&exif).unwrap(), Some(ifd));
+
+            // An Interoperability sub-IFD alone still makes a directory to carry it.
+            let mut interop_only = Exif::new(ByteOrder::LittleEndian);
+            interop_only.set_interop_ifd(directory().1);
+            let written = exif_ifd(&interop_only).unwrap().unwrap();
+            assert!(written.fields().is_empty());
+            assert_eq!(written.sub_ifds().len(), 1);
+
+            assert_eq!(exif_ifd(&Exif::new(ByteOrder::LittleEndian)).unwrap(), None);
+        }
+
+        #[test]
+        fn each_directory_without_a_carrier_is_refused() {
+            let mut in_ifd0 = Exif::new(ByteOrder::LittleEndian);
+            in_ifd0.set_tag(ExifTag::Make, ExifValue::Ascii("gamut".into()));
+            let mut group_in_ifd0 = Exif::new(ByteOrder::LittleEndian);
+            group_in_ifd0.image_mut().set_sub_ifd(330, vec![Ifd::new()]);
+            let mut gps = Exif::new(ByteOrder::LittleEndian);
+            gps.set_gps_ifd(Ifd::new());
+            let mut thumbnail = Exif::new(ByteOrder::LittleEndian);
+            thumbnail.set_thumbnail(vec![0xff, 0xd8, 0xff, 0xd9]);
+            for exif in [in_ifd0, group_in_ifd0, gps, thumbnail] {
+                let err = exif_ifd(&exif).unwrap_err();
+                assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+                assert_eq!(err.static_message(), Some(EXIF_OUTSIDE_EXIF_IFD));
+            }
+        }
+
+        #[test]
+        fn metadata_assigns_the_exif_model_in_the_recorded_byte_order() {
+            let (ifd, _) = directory();
+            let mut meta = TiffMetadata::new()
+                .with_exif(ifd.clone())
+                .with_c2pa(b"jumb".to_vec());
+            meta.exif_byte_order = Some(ByteOrder::BigEndian);
+            let unified = meta.metadata().unwrap();
+            assert_eq!(unified.exif, Some(exif_model(&ifd, ByteOrder::BigEndian)));
+            // The byte carriers still go through `from_blocks` beside the assigned model.
+            assert_eq!(unified.c2pa.as_deref(), Some(&b"jumb"[..]));
+
+            // Built by hand: the encoder's default order.
+            meta.exif_byte_order = None;
+            assert_eq!(
+                meta.metadata().unwrap().exif.unwrap().byte_order(),
+                ByteOrder::LittleEndian
+            );
+            assert_eq!(TiffMetadata::new().metadata().unwrap(), Metadata::default());
+        }
     }
 }

@@ -940,6 +940,7 @@ dependencies = [
  "gamut-core",
  "gamut-deflate",
  "gamut-ifd",
+ "gamut-metadata",
  "libtiff-oracle",
  "miniz_oxide 0.8.9",
 ]
