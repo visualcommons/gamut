@@ -63,6 +63,20 @@ pub struct DecodedImage {
     /// Raw sample rows, tightly packed (`rowbytes * height`). Sub-byte depths are unpacked to one
     /// byte per sample (values unscaled); 16-bit samples are big-endian, as in the file.
     pub pixels: Vec<u8>,
+    /// The `bKGD` libpng **accepted**, re-serialised in the chunk's own byte layout for the file's
+    /// colour type (PNG §11.3.4.1): one palette index, one big-endian 16-bit grey sample, or three
+    /// big-endian 16-bit RGB samples. `None` when the file carries none *or* libpng dropped it
+    /// (wrong length for the colour type, index past the palette, value past the bit depth) —
+    /// [`warnings`](Self::warnings) tells the two apart.
+    pub bkgd: Option<Vec<u8>>,
+    /// The `sBIT` libpng **accepted**, re-serialised in the chunk's own byte layout for the file's
+    /// colour type (PNG §11.3.2.4): `[grey]`, `[grey, alpha]`, `[r, g, b]` (truecolour and
+    /// indexed), or `[r, g, b, alpha]`. `None` when absent or dropped, as for [`bkgd`](Self::bkgd).
+    pub sbit: Option<Vec<u8>>,
+    /// How many warnings libpng raised while reading the file. Under `png_set_benign_errors` an
+    /// ancillary chunk libpng rejects and drops is reported here rather than aborting, so a
+    /// non-zero count is how a test observes that libpng discarded something the file carried.
+    pub warnings: usize,
 }
 
 /// Cursor over the in-memory PNG, handed to libpng's read callback via its IO pointer.
@@ -94,7 +108,56 @@ unsafe extern "C" fn error_callback(_png: sys::png_structp, msg: sys::png_const_
     std::process::abort();
 }
 
-unsafe extern "C" fn warn_callback(_png: sys::png_structp, _msg: sys::png_const_charp) {}
+/// Counts each warning into the `usize` the read struct's error pointer names; a struct created
+/// with a null error pointer (the encoder's) discards them.
+unsafe extern "C" fn warn_callback(png: sys::png_structp, _msg: sys::png_const_charp) {
+    unsafe {
+        let count = sys::png_get_error_ptr(png).cast::<usize>();
+        if !count.is_null() {
+            *count += 1;
+        }
+    }
+}
+
+/// The accepted `bKGD` in its chunk layout for `color_type` (see [`DecodedImage::bkgd`]).
+unsafe fn read_bkgd(
+    png: sys::png_structp,
+    info: sys::png_infop,
+    color_type: u8,
+) -> Option<Vec<u8>> {
+    let mut background: sys::png_color_16p = std::ptr::null_mut();
+    if unsafe { sys::png_get_bKGD(png, info, &raw mut background) } == 0 || background.is_null() {
+        return None;
+    }
+    let background = unsafe { *background };
+    Some(match color_type {
+        COLOR_PALETTE => vec![background.index],
+        COLOR_GRAY | COLOR_GRAY_ALPHA => background.gray.to_be_bytes().to_vec(),
+        _ => [background.red, background.green, background.blue]
+            .iter()
+            .flat_map(|sample| sample.to_be_bytes())
+            .collect(),
+    })
+}
+
+/// The accepted `sBIT` in its chunk layout for `color_type` (see [`DecodedImage::sbit`]).
+unsafe fn read_sbit(
+    png: sys::png_structp,
+    info: sys::png_infop,
+    color_type: u8,
+) -> Option<Vec<u8>> {
+    let mut bits: sys::png_color_8p = std::ptr::null_mut();
+    if unsafe { sys::png_get_sBIT(png, info, &raw mut bits) } == 0 || bits.is_null() {
+        return None;
+    }
+    let bits = unsafe { *bits };
+    Some(match color_type {
+        COLOR_GRAY => vec![bits.gray],
+        COLOR_GRAY_ALPHA => vec![bits.gray, bits.alpha],
+        COLOR_RGB | COLOR_PALETTE => vec![bits.red, bits.green, bits.blue],
+        _ => vec![bits.red, bits.green, bits.blue, bits.alpha],
+    })
+}
 
 /// Decodes a PNG byte stream with libpng into raw samples (no colour transforms).
 ///
@@ -102,11 +165,13 @@ unsafe extern "C" fn warn_callback(_png: sys::png_structp, _msg: sys::png_const_
 /// always the encoder's own output, so a failure is a genuine bug to surface loudly.
 #[must_use]
 pub fn decode(bytes: &[u8]) -> DecodedImage {
+    // Outlives the read struct, whose error pointer names it for `warn_callback`.
+    let mut warnings = 0usize;
     unsafe {
         let version = sys::PNG_LIBPNG_VER_STRING.as_ptr() as *const c_char;
         let png = sys::png_create_read_struct(
             version,
-            std::ptr::null_mut(),
+            (&raw mut warnings).cast::<c_void>(),
             Some(error_callback),
             Some(warn_callback),
         );
@@ -132,6 +197,9 @@ pub fn decode(bytes: &[u8]) -> DecodedImage {
         let bit_depth = sys::png_get_bit_depth(png, info) as u8;
         let color_type = sys::png_get_color_type(png, info) as u8;
         let interlace = sys::png_get_interlace_type(png, info) != 0;
+        // Both chunks precede IDAT (§5.6), so png_read_info has already accepted or dropped them.
+        let bkgd = read_bkgd(png, info, color_type);
+        let sbit = read_sbit(png, info, color_type);
 
         // Unpack 1/2/4-bit samples to one byte each (values left unscaled); leave 16-bit big-endian.
         if bit_depth < 8 {
@@ -159,6 +227,9 @@ pub fn decode(bytes: &[u8]) -> DecodedImage {
             interlace,
             rowbytes,
             pixels,
+            bkgd,
+            sbit,
+            warnings,
         }
     }
 }
@@ -573,5 +644,99 @@ mod tests {
         let ihdr_end = 8 + 12 + 13; // signature + framed 13-byte IHDR
         assert_eq!(&png[ihdr_end + 4..ihdr_end + 8], b"cICP");
         assert_eq!(&png[ihdr_end + 8..ihdr_end + 12], &cicp);
+    }
+
+    /// CRC-32 (ISO 3309, as PNG §5.3 uses it) over `bytes`, bitwise.
+    fn crc32(bytes: &[u8]) -> u32 {
+        !bytes.iter().fold(!0u32, |crc, &byte| {
+            (0..8).fold(crc ^ u32::from(byte), |c, _| {
+                if c & 1 == 1 {
+                    (c >> 1) ^ 0xEDB8_8320
+                } else {
+                    c >> 1
+                }
+            })
+        })
+    }
+
+    /// A 2x2 image of `color_type` (8-bit; a two-entry palette for indexed) with the given
+    /// ancillary chunks framed right after IHDR — where `bKGD`/`sBIT` may sit for every colour
+    /// type except indexed, whose `bKGD` must follow PLTE, so callers pass PLTE first there.
+    fn with_chunks(color_type: u8, chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let palette = [[0u8, 0, 0], [255, 255, 255]];
+        let samples = vec![0u8; 4 * channels(color_type)];
+        let bare = encode(
+            &samples,
+            2,
+            2,
+            color_type,
+            8,
+            &EncodeOpts {
+                palette: (color_type == COLOR_PALETTE).then_some(&palette[..]),
+                ..EncodeOpts::default()
+            },
+        );
+        let ihdr_end = 8 + 12 + 13;
+        let mut png = bare[..ihdr_end].to_vec();
+        for (ty, data) in chunks {
+            png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let start = png.len();
+            png.extend_from_slice(*ty);
+            png.extend_from_slice(data);
+            let crc = crc32(&png[start..]);
+            png.extend_from_slice(&crc.to_be_bytes());
+        }
+        // An indexed bare file already carries its PLTE; skip it when the caller framed one.
+        let mut rest = &bare[ihdr_end..];
+        if chunks.iter().any(|(ty, _)| *ty == b"PLTE") {
+            let len = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+            assert_eq!(&rest[4..8], b"PLTE");
+            rest = &rest[12 + len..];
+        }
+        png.extend_from_slice(rest);
+        png
+    }
+
+    #[test]
+    fn accepted_bkgd_and_sbit_come_back_in_chunk_layout_per_colour_type() {
+        let plte: &[u8] = &[0, 0, 0, 255, 255, 255];
+        let cases: [(u8, &[u8], &[u8]); 5] = [
+            (COLOR_GRAY, &[0, 77], &[5]),
+            (COLOR_GRAY_ALPHA, &[0, 78], &[5, 3]),
+            (COLOR_RGB, &[0, 1, 0, 2, 0, 3], &[5, 6, 7]),
+            (COLOR_RGBA, &[0, 4, 0, 5, 0, 6], &[5, 6, 7, 3]),
+            (COLOR_PALETTE, &[1], &[4, 5, 6]),
+        ];
+        for (color_type, bkgd, sbit) in cases {
+            let mut chunks: Vec<(&[u8; 4], &[u8])> = vec![(b"sBIT", sbit)];
+            if color_type == COLOR_PALETTE {
+                chunks.push((b"PLTE", plte));
+            }
+            chunks.push((b"bKGD", bkgd));
+            let dec = decode(&with_chunks(color_type, &chunks));
+            assert_eq!(dec.bkgd.as_deref(), Some(bkgd), "colour type {color_type}");
+            assert_eq!(dec.sbit.as_deref(), Some(sbit), "colour type {color_type}");
+            assert_eq!(dec.warnings, 0, "colour type {color_type}");
+        }
+    }
+
+    #[test]
+    fn absent_chunks_read_as_none_without_a_warning() {
+        let dec = decode(&with_chunks(COLOR_RGB, &[]));
+        assert_eq!((dec.bkgd, dec.sbit, dec.warnings), (None, None, 0));
+    }
+
+    #[test]
+    fn a_bkgd_of_the_wrong_length_is_dropped_with_a_warning() {
+        // One byte is a palette index; under truecolour libpng rejects it (`png_handle_bKGD`).
+        let dec = decode(&with_chunks(COLOR_RGB, &[(b"bKGD", &[1])]));
+        assert_eq!((dec.bkgd, dec.warnings), (None, 1));
+    }
+
+    #[test]
+    fn an_sbit_past_the_bit_depth_is_dropped_with_a_warning() {
+        // 9 significant bits in an 8-bit channel (`png_handle_sBIT`).
+        let dec = decode(&with_chunks(COLOR_GRAY, &[(b"sBIT", &[9])]));
+        assert_eq!((dec.sbit, dec.warnings), (None, 1));
     }
 }

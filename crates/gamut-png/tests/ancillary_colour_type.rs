@@ -12,11 +12,13 @@
 //! of that palette entry, a grey RGB triple collapses to one grey sample — and omits the chunk
 //! otherwise.
 //!
-//! **Technique: exact-byte over the emitted chunk stream, against libpng's own acceptance rules,
-//! plus a libpng decode of every file.** The vendored oracle exposes neither `bKGD`/`sBIT` nor a
-//! warning count (its warning callback discards benign errors), so libpng's acceptance of the
-//! *chunk* is not observable through it today; the assertion is on the payload libpng's rules
-//! accept for the written IHDR, and the decode proves the file around it is sound.
+//! **Technique: differential against libpng, plus exact-byte over the emitted chunk stream.**
+//! Every file is decoded by the libpng oracle, which reports the `bKGD`/`sBIT` it *accepted*
+//! (re-serialised in the chunk's own layout) and how many warnings it raised: under
+//! `png_set_benign_errors` a chunk libpng rejects is dropped with a warning, so
+//! [`libpng_accepts`] asserting both that libpng kept byte for byte what the encoder wrote and that
+//! it warned about nothing is the differential claim. The exact-byte assertion in each test then
+//! pins *which* conversion the encoder chose, which libpng's acceptance alone cannot say.
 
 mod common;
 
@@ -58,10 +60,30 @@ fn encode_rgb(encoder: &PngEncoder, side: u32, samples: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The colour type libpng reads from the file — the one the race chose. Reading it through the
-/// oracle also proves the file around the chunk under test is one libpng decodes.
+/// Decodes `png` with libpng and asserts libpng accepted the ancillary chunks as written: the
+/// `bKGD` and `sBIT` it kept are exactly the payloads in the file (both absent when the file
+/// carries none), and it raised no warning — a dropped chunk is a benign error, so it would show
+/// as one.
+fn libpng_accepts(png: &[u8]) -> libpng_oracle::DecodedImage {
+    let decoded = libpng_oracle::decode(png);
+    assert_eq!(
+        decoded.bkgd,
+        read_chunk(png, b"bKGD"),
+        "libpng kept the bKGD the encoder wrote"
+    );
+    assert_eq!(
+        decoded.sbit,
+        read_chunk(png, b"sBIT"),
+        "libpng kept the sBIT the encoder wrote"
+    );
+    assert_eq!(decoded.warnings, 0, "libpng dropped nothing it read");
+    decoded
+}
+
+/// The colour type libpng reads from the file — the one the race chose — after
+/// [`libpng_accepts`] has held the file's `bKGD`/`sBIT` to libpng's acceptance.
 fn written_colour_type(png: &[u8]) -> u8 {
-    libpng_oracle::decode(png).color_type
+    libpng_accepts(png).color_type
 }
 
 /// Two opaque, non-grey colours in a checkerboard: a one-bit palette wins by a mile.
@@ -370,7 +392,7 @@ fn a_background_follows_a_16_to_8_demotion() {
         .encode_image(image, &mut png)
         .expect("encode");
 
-    let decoded = libpng_oracle::decode(&png);
+    let decoded = libpng_accepts(&png);
     assert_eq!(
         (decoded.color_type, decoded.bit_depth),
         (COLOR_RGB, 8),
@@ -398,7 +420,7 @@ fn a_background_follows_sub_byte_grey_packing() {
     };
 
     let png = encode(170);
-    let decoded = libpng_oracle::decode(&png);
+    let decoded = libpng_accepts(&png);
     assert_eq!(
         (decoded.color_type, decoded.bit_depth),
         (COLOR_GRAY, 2),
@@ -406,5 +428,7 @@ fn a_background_follows_sub_byte_grey_packing() {
     );
     assert_eq!(read_chunk(&png, b"bKGD"), Some(vec![0, 2]));
     // An 8-bit 3 is near black; written verbatim it would be depth 2's white. No code holds it.
-    assert_eq!(read_chunk(&encode(3), b"bKGD"), None);
+    let dropped = encode(3);
+    assert_eq!(read_chunk(&dropped, b"bKGD"), None);
+    libpng_accepts(&dropped);
 }
