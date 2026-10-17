@@ -19,8 +19,9 @@
 //!   visible part is posterised photo content over a translucent ring. Each at two sides.
 //!
 //! Columns: `group,input,layout,width,height,cleanup,variant,sample,bytes,crc32,encode_ns,
-//! colour_type,indexed_bytes`. `bytes` and `crc32` identify the finished file; `encode_ns` is one
-//! wall-clock `encode_image` call; `colour_type` is the file's IHDR colour type (3 = indexed).
+//! colour_type,indexed_bytes,first_seen_bytes`. `bytes` and `crc32` identify the finished file;
+//! `encode_ns` is one wall-clock `encode_image` call; `colour_type` is the file's IHDR colour type
+//! (3 = indexed).
 //!
 //! `indexed_bytes` is the ordering's own signal, which the finished file hides whenever the indexed
 //! candidate loses `write_reduced_or_native`'s race: the size of the indexed candidate alone, at
