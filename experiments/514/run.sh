@@ -31,15 +31,17 @@ git diff --quiet HEAD -- "$site" || {
 }
 git apply --check "$patch"
 
-mkdir -p "$raw" "$work/corpus"
-rm -f "$work"/corpus/*.raw
+mkdir -p "$work/corpus"
+rm -f "$work"/corpus/*.raw "$work"/*.csv
 load_start=$(cut -d' ' -f1-3 /proc/loadavg)
 head_start=$(git rev-parse HEAD)
 dirty_start=$(git diff --quiet HEAD && echo false || echo true)
 
+# Each run writes under target/ first: a failed build, a failed encode or a moved HEAD then
+# leaves the committed raw/*.csv untouched, and raw/ changes only alongside run.json.
 measure() {
   cargo run --release --quiet -p gamut-png --example experiment_514 -- \
-    --variant "$1" --samples "$samples" --corpus-dir "$work/corpus" >"$raw/$1.csv"
+    --variant "$1" --samples "$samples" --corpus-dir "$work/corpus" >"$work/$1.csv"
 }
 
 measure baseline
@@ -55,6 +57,8 @@ load_end=$(cut -d' ' -f1-3 /proc/loadavg)
   echo "refusing to record: HEAD moved from $head_start during the run; re-run" >&2
   exit 1
 }
+mkdir -p "$raw"
+cp "$work/baseline.csv" "$work/variant.csv" "$raw/"
 
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
