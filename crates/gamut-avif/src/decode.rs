@@ -1170,15 +1170,20 @@ impl AvifImage {
     /// it is coded; for a `grid`, its **first** tile (the one libavif harvests an absent `colr`
     /// from); for an `iden`, its sole source — followed down to a coded item.
     ///
-    /// Carries no cycle or depth guard of its own because it is only reached after
-    /// [`decode_planar_inner`](Self::decode_planar_inner) has walked these same `dimg` edges under
-    /// both, so the walk is known to be finite.
-    fn sample_sequence_header(&self, id: u32) -> Result<SequenceHeader> {
-        if let Some(item) = self.item(id)
-            && let (ItemKind::Grid | ItemKind::Identity, [first, ..]) =
-                (item.kind(), item.derivation_target_ids())
-        {
-            return self.sample_sequence_header(*first);
+    /// It is only reached after [`decode_planar_inner`](Self::decode_planar_inner) has walked these
+    /// same `dimg` edges under its cycle and depth guard, so the chain it follows is at most
+    /// [`MAX_DERIVATION_DEPTH`] items long and the hop bound below is never what stops it. The
+    /// bound is there so termination does not rest on that argument alone: an unbounded walk here
+    /// spins forever if a lookup ever resolves a tile back to its grid (#890).
+    fn sample_sequence_header(&self, mut id: u32) -> Result<SequenceHeader> {
+        for _ in 0..MAX_DERIVATION_DEPTH {
+            match self
+                .item(id)
+                .map(|item| (item.kind(), item.derivation_target_ids()))
+            {
+                Some((ItemKind::Grid | ItemKind::Identity, [first, ..])) => id = *first,
+                _ => break,
+            }
         }
         self.av1_sequence_header(id)
     }
