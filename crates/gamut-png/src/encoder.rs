@@ -37,7 +37,7 @@ use crate::decoded::{
     PngMetadata, TextChunk, TextChunkKind,
 };
 use crate::filter::{self, FilterStrategy, FilterType};
-use crate::palette::PngPalette;
+use crate::palette::{PaletteOrder, PngPalette};
 use crate::reduce::{self, Family, Reduced, Reductions};
 use crate::{ihdr, pack};
 
@@ -478,6 +478,7 @@ pub struct PngEncoder {
     ancillary: Ancillary,
     auto_reduce: bool,
     clean_transparent: bool,
+    palette_order: PaletteOrder,
     backends: Registry<dyn IdatDeflater + Send>,
     /// What the last metadata carry could not take *as a whole payload*, in the order it was
     /// found. Reset by each [`Self::with_metadata`] / [`Self::with_metadata_from`] call, so it
@@ -505,6 +506,7 @@ impl PngEncoder {
             ancillary: Ancillary::default(),
             auto_reduce: false,
             clean_transparent: false,
+            palette_order: PaletteOrder::AsSupplied,
             backends: Registry::default(),
             carry_notices: Vec::new(),
         }
@@ -686,6 +688,23 @@ impl PngEncoder {
     #[must_use]
     pub fn with_auto_reduce(mut self, enabled: bool) -> Self {
         self.auto_reduce = enabled;
+        self
+    }
+
+    /// Sets the order [`encode_indexed8`](Self::encode_indexed8) writes a caller-supplied
+    /// palette in: [`PaletteOrder::AsSupplied`] (the default) or [`PaletteOrder::ModifiedZeng`].
+    ///
+    /// Lossless in what a decoder renders, and applied after the palette is cleaned: the entries
+    /// that survive are renumbered, and every pixel index and the `bKGD` index are rewritten to
+    /// follow them. The palette's length, and so the index bit depth, does not change.
+    ///
+    /// Not part of any [`Preset`] rung, and not applied to the palette
+    /// [`with_auto_reduce`](Self::with_auto_reduce) derives, which has its own fixed order. A rung
+    /// is a dial for effort, and this changes which number names which colour in a palette you
+    /// chose — see [`PaletteOrder`] for when that matters.
+    #[must_use]
+    pub fn with_palette_order(mut self, order: PaletteOrder) -> Self {
+        self.palette_order = order;
         self
     }
 
@@ -1289,7 +1308,9 @@ impl PngEncoder {
     /// the index bit depth is derived from what survives, and the image's indices are renumbered to
     /// match (`PngPalette::cleaned`). The colour every pixel resolves to is unchanged, which is
     /// why this reports nothing: a merged entry did not fail to come along, it arrived under
-    /// another index. Surviving entries keep the order you gave them.
+    /// another index. Surviving entries keep the order you gave them unless
+    /// [`with_palette_order`](Self::with_palette_order) asks for another, in which case they are
+    /// renumbered after cleaning and the indices follow.
     ///
     /// "Nothing in the file names it" includes the `bKGD` background, in **whichever** of its three
     /// forms you set it — [`with_background_index`](Self::with_background_index),
@@ -1348,8 +1369,21 @@ impl PngEncoder {
         if let Some(index) = background {
             used[usize::from(index)] = true;
         }
-        let (palette, remap) = palette.cleaned(&used);
-        let indices: Vec<u8> = indices.iter().map(|&i| remap[usize::from(i)]).collect();
+        let (palette, mut remap) = palette.cleaned(&used);
+        let mut indices: Vec<u8> = indices.iter().map(|&i| remap[usize::from(i)]).collect();
+        let dims = image.dimensions();
+        // A reorder is a second renumbering on top of the cleaning one, composed into `remap`
+        // so the background below follows both.
+        let palette = match self.palette_order {
+            PaletteOrder::AsSupplied => palette,
+            PaletteOrder::ModifiedZeng => {
+                let (reordered, order) = palette.modified_zeng(&indices, dims.width as usize);
+                for index in indices.iter_mut().chain(remap.iter_mut()) {
+                    *index = order[usize::from(*index)];
+                }
+                reordered
+            }
+        };
         // The background still names the colour the caller chose, so the chunk is rewritten as
         // that entry's index in the *cleaned* palette, whichever form it arrived in. Pinning the
         // index is also what stops a colour-form background being resolved a second time against
@@ -1370,7 +1404,6 @@ impl PngEncoder {
             None => self,
         };
 
-        let dims = image.dimensions();
         // Use the smallest bit depth that holds every index — a free, lossless space win.
         let depth = reduce::index_bit_depth(palette.len());
         let packed;
@@ -2274,6 +2307,48 @@ mod tests {
             find_chunk(&png, b"bKGD"),
             Some(vec![1]),
             "and the index moved with it"
+        );
+    }
+
+    /// [`PaletteOrder::ModifiedZeng`] writes the cleaned palette in its reordered sequence, and
+    /// the pixels and the `bKGD` index follow both renumberings — cleaning's, then the reorder's.
+    ///
+    /// Entry 5 is dropped (nothing names it) and entry 0 is named by the background alone. Zeng
+    /// over the pixels seeds with 1–3, appends 4 and then 2, and the unattached 0 goes last, so
+    /// the background moves from slot 0 to slot 4. The decoded pixels match the caller's order.
+    #[test]
+    fn a_reordered_palette_carries_its_pixels_and_background_along() {
+        use gamut_core::{DecodeImage, ImageBuf, Rgba8};
+
+        let entries: Vec<[u8; 3]> = (0..6).map(|i| [i * 10, i * 10, i * 10]).collect();
+        let palette = PngPalette::new(&entries).unwrap();
+        let indices = [1u8, 3, 1, 3, 1, 3, 4, 3, 4, 2];
+        let encode = |order| {
+            let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(10, 1).unwrap()).unwrap();
+            let mut png = Vec::new();
+            PngEncoder::new()
+                .with_background_index(0)
+                .with_palette_order(order)
+                .encode_indexed8(img, &palette, &mut png)
+                .unwrap();
+            png
+        };
+        let reordered = encode(PaletteOrder::ModifiedZeng);
+        let supplied = encode(PaletteOrder::AsSupplied);
+
+        assert_eq!(
+            find_chunk(&reordered, b"PLTE"),
+            Some(vec![
+                10, 10, 10, 30, 30, 30, 40, 40, 40, 20, 20, 20, 0, 0, 0
+            ])
+        );
+        assert_eq!(find_chunk(&reordered, b"bKGD"), Some(vec![4]));
+        let decode =
+            |png: &[u8]| -> ImageBuf<Rgba8> { crate::PngDecoder::new().decode_image(png).unwrap() };
+        assert_eq!(
+            decode(&reordered).as_samples(),
+            decode(&supplied).as_samples(),
+            "every pixel still resolves to the colour the caller gave it"
         );
     }
 
