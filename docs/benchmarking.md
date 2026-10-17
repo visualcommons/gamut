@@ -13,7 +13,7 @@ Nor for the prose a crate uses to describe its own performance, which is that cr
 
 One file per crate under `crates/<crate>/benches/`, named for the thing measured (`codec.rs`,
 `compression.rs`, `encode.rs`, `pipeline.rs`), declared with `harness = false` and
-`divan.workspace = true` in `[dev-dependencies]`. Sixteen crates ship one.
+`divan.workspace = true` in `[dev-dependencies]`. Seventeen crates ship one.
 
 ```toml
 [dev-dependencies]

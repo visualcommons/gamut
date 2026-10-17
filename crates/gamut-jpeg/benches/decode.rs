@@ -16,6 +16,13 @@
 //! Counters report bytes of decoded RGB8 per second, comparable with the other codec suites.
 //! Decoding to `Rgb8` includes gamut's upsampling and colour conversion, as zune-jpeg's RGB output
 //! includes its own: the bench measures what a caller asking for pixels pays.
+//!
+//! Intentionally tight: this measures **decoding** of 8-bit three-component streams at q90, along
+//! the one axis that changes which decoder paths run -- the stream shape (baseline 4:2:0, 4:2:2,
+//! 4:4:4, progressive 4:2:0). There is no encode axis (the streams are libjpeg-turbo's, so neither
+//! decoder is flattered by its own encoder's choices), no quality axis (quality moves the
+//! coefficient count, which the 4:4:4 row already stresses hardest), and no grayscale or CMYK axis
+//! (they run the same entropy decoder and IDCT, and only a cheaper or costlier final copy).
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
