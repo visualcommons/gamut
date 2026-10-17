@@ -169,6 +169,10 @@ single-byte-overwrite sweeps already in `gamut-ifd/tests/robustness.rs`. Fuzzing
 lives where the DNG sample corpus lives: an excluded `tooling/` crate, a corpus behind a fetch
 task, and an `extended.yml` job. **A crash it finds is minimised and promoted into a named
 deterministic case in that crate's `tests/robustness.rs`**, which is where the regression value is.
+That job persists each target's search corpus between runs in an `actions/cache` entry, minimised
+by `cargo fuzz cmin` before it is saved and kept in an ignored `state/<target>/` directory apart
+from the tracked seeds (#603; `tooling/gamut-fuzz/README.md`, "The search corpus"). The cache is a
+search aid like the corpus it holds, never the regression record.
 
 What the per-PR path *does* carry is the **compile** half, for the reason the excluded real-DNG
 tier already carries it: nothing else builds an excluded crate, so an API change in a driven crate

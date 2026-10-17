@@ -282,20 +282,52 @@ It is **kept**, and here is why, so the next target added does not reopen it:
 - The cost is queue time, not budget — Actions minutes are free for public repositories — and the
   job is post-merge with `fail-fast: false`, so it blocks no pull request. The matrix grows the
   number of *parallel* runners, not the job's wall time.
-- Frequency is the wrong dial, because **nothing accumulates between runs**. Each run starts from
-  the committed seeds and discards what the engine finds, so a run's yield is ten minutes of cold
-  search whatever the cadence: running less often searches strictly less, and running more often
-  re-derives the same shallow space. What would change the tier's yield is persisting the corpus,
-  filed as [#603](https://github.com/visualcommons/gamut/issues/603) — and the cadence and the
-  `-max_total_time` budget are both worth re-opening *after* that lands, not before.
+- Frequency was the wrong dial while **nothing accumulated between runs**: each run started from
+  the committed seeds and discarded what the engine found, so a run's yield was ten minutes of cold
+  search whatever the cadence. The corpus now persists (see "The search corpus" below,
+  [#603](https://github.com/visualcommons/gamut/issues/603)), which is what makes the cadence and
+  the `-max_total_time` budget worth re-opening; that re-opening is #594's, and until it lands the
+  trigger and budget above are unchanged.
 - Changing the trigger would also move #593's premise (whether a per-push aggregate is red), which
   is a decision about the workflow's shape rather than about this tier.
 
 The **size** of the matrix is a separate question with the same answer. Nine rows is nine targets,
-and dropping one to buy back queue time would trade coverage for a cost that #603 already owns —
-persisting the corpus is what changes this tier's yield per minute, and until it lands, a shorter
-matrix is simply less search. A target is removed when its checks stop having reach, which is what
-the injection audit decides, and never to make a job finish sooner.
+and dropping one to buy back queue time would trade coverage for a cost that #603's persisted corpus
+and #594's cadence already own — a shorter matrix is simply less search. A target is removed when
+its checks stop having reach, which is what the injection audit decides, and never to make a job
+finish sooner.
+
+### The search corpus
+
+Each Extended row resumes from the corpus the previous run left
+([#603](https://github.com/visualcommons/gamut/issues/603)), so search deepens across runs instead
+of restarting from the seeds. The engine's search state lives in `state/<target>/`, a directory of
+its own that the root `.gitignore` ignores whole; the curated seeds stay in `corpus/<target>/`
+(see "Seeds" below). Keeping them apart is the point: the seeds are tracked and reviewed, the
+search state is neither, and a shared directory is how one leaks into the other. Per row the job
+
+1. restores `state/<target>/` from an `actions/cache` entry keyed `fuzz-corpus-<target>-<run>`,
+   taking the newest one for that target by prefix — a miss is the old cold start, not a failure;
+2. fuzzes with `state/<target>/` as libFuzzer's **first** corpus directory, the only one it writes,
+   and `corpus/<target>/` as a read-only second;
+3. minimises `state/<target>/` in place with `cargo fuzz cmin`, so the stored corpus is bounded by
+   the coverage the target can reach rather than growing with every run;
+4. saves it under this run's own key — cache keys are immutable — even when the fuzz step failed,
+   because a crash goes to `artifacts/` and leaves the inputs found before it just as valid.
+
+The same layout works locally, and `mise run fuzz cmin` is the step CI runs:
+
+```bash
+mkdir -p tooling/gamut-fuzz/state/heic_hvcc
+mise run fuzz heic_hvcc tooling/gamut-fuzz/state/heic_hvcc tooling/gamut-fuzz/corpus/heic_hvcc -- -max_total_time=60
+mise run fuzz cmin heic_hvcc tooling/gamut-fuzz/state/heic_hvcc
+```
+
+The cache is a search aid with the same standing as the corpus it holds: never the regression
+record, and disposable. Entries unused for seven days are evicted, and so are the oldest once the
+repository passes its 10 GB cache limit; either only costs the next run its head start. A change to
+a target's byte-to-input mapping makes the stored inputs less useful but not wrong, so nothing
+invalidates the cache by hand — `cmin` drops what no longer adds coverage.
 
 ## Keeping the three lists in step
 
@@ -323,8 +355,10 @@ re-includes each seed **by its full path**, one negation per file — so the ign
 the list of what is tracked here. `cargo fuzz` uses the directory as its corpus with no extra
 wiring, so `mise run fuzz <target>` picks them up.
 
-Running a target writes its new findings into the same directory — a few minutes of `heic_hvcc`
-adds a couple of hundred files — and those stay ignored, which is the point. That is also why the
+Running a target with no corpus arguments writes its new findings into the same directory — a few
+minutes of `heic_hvcc` adds a couple of hundred files — and those stay ignored, which is the point
+(the Extended job instead passes `state/<target>/` first, so its findings never land here; see "The
+search corpus" above). That is also why the
 negations name files rather than patterns: libFuzzer names its findings by content hash, and a
 wildcard broad enough to cover the next seed would sooner or later cover them too. To add a seed,
 append its `!tooling/gamut-fuzz/corpus/<target>/<file>` line to `.gitignore` and `git add` it by

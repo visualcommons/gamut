@@ -29,6 +29,11 @@ tooling/*/Cargo.lock
 # instead (see tooling/gamut-fuzz/README.md and docs/testing.md).
 tooling/gamut-fuzz/artifacts/
 tooling/gamut-fuzz/coverage/
+# The persisted search corpus (#603): what the engine finds, kept apart from the curated seeds
+# below so neither the Extended job's per-target cache nor a contributor's checkout can mix the
+# two. The workflow passes `state/<target>/` as libFuzzer's first (written) corpus directory and
+# `corpus/<target>/` as a read-only second one, and caches only the former.
+tooling/gamut-fuzz/state/
 
 # Everything under `corpus/` is ignored except the curated seed set, which is named file by file
 # below. git cannot re-include a file whose parent directory is excluded, so the ignore covers the
