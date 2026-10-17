@@ -104,17 +104,20 @@ fuzz_target!(|data: &[u8]| {
         Operator::Drago(d) => {
             let world_max = d.world_max();
             sample_bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| {
-                    let fraction = f64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                        / f64::from(u32::MAX);
+                    let fraction = f64::from(u32::from_le_bytes(*c)) / f64::from(u32::MAX);
                     (fraction as f32) * world_max
                 })
                 .collect()
         }
         _ => sample_bytes
-            .chunks_exact(4)
-            .map(|c| normalise_input(u32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| normalise_input(u32::from_le_bytes(*c)))
             .collect(),
     };
     if xs.is_empty() {
@@ -148,9 +151,7 @@ fuzz_target!(|data: &[u8]| {
         Operator::Drago(d) => d.is_monotonic(),
         _ => true,
     };
-    if claims_monotonic {
-        if let Err(violation) = monotonic_non_decreasing(curve, &xs) {
-            panic!("{violation}");
-        }
+    if claims_monotonic && let Err(violation) = monotonic_non_decreasing(curve, &xs) {
+        panic!("{violation}");
     }
 });

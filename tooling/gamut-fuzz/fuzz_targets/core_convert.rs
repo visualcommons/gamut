@@ -54,7 +54,7 @@ fn policy(b: &[u8]) -> ConvertPolicy {
         1 => AlphaPolicy::Drop,
         _ => AlphaPolicy::CompositeOver,
     };
-    let depth = if b[1] % 2 == 0 {
+    let depth = if b[1].is_multiple_of(2) {
         DepthPolicy::Reject
     } else {
         DepthPolicy::Rescale

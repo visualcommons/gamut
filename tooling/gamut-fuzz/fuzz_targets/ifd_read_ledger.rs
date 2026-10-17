@@ -34,7 +34,7 @@ const MAX_LEN: u64 = 256;
 /// Normalising here rather than inside the laws is the same rule the property follows and for the
 /// same reason: a law that normalised its own inputs would feed the identical value to the model
 /// and to the code under test, so a defect in the normaliser would cancel on both sides.
-fn take_range(bytes: &[u8]) -> Range {
+fn take_range(bytes: &[u8; 4]) -> Range {
     let start = u64::from(u16::from_le_bytes([bytes[0], bytes[1]])) % UNIVERSE;
     // Zero length is reachable and deliberately so: a zero-length *claim* covers nothing and must
     // therefore split nothing, and that is the input class separating a claim filter that drops
@@ -50,7 +50,7 @@ fn parse(data: &[u8]) -> (Vec<Range>, Vec<Range>) {
     let Some((&split, rest)) = data.split_first() else {
         return (Vec::new(), Vec::new());
     };
-    let ranges: Vec<Range> = rest.chunks_exact(4).map(take_range).collect();
+    let ranges: Vec<Range> = rest.as_chunks::<4>().0.iter().map(take_range).collect();
     if ranges.is_empty() {
         return (Vec::new(), Vec::new());
     }
