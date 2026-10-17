@@ -64,6 +64,43 @@ const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 7] = [
     FilterStrategy::MinBigrams,
 ];
 
+/// Runs `trial` once per [`BRUTE_FORCE_STRATEGIES`] candidate, concurrently, and returns the
+/// results **in candidate order** (issue #624).
+///
+/// The seven trials share nothing but borrowed input, so each of the last six runs on a scoped
+/// thread while the calling thread takes the first. Results are joined in the order the
+/// candidates are listed, never in completion order, so the caller's `min_by_key` sees exactly
+/// the sequence a serial loop would produce and a tie still resolves to the earlier strategy:
+/// output stays byte-reproducible however the threads are scheduled. Where an error is returned,
+/// it is the first one in candidate order — the same error the serial loop stopped at — though
+/// the later trials have run by then rather than being skipped.
+///
+/// A thread the platform cannot create is not an error: that candidate runs on the calling
+/// thread instead. This is also how `wasm32` runs serially without a `cfg` — its `std` reports
+/// thread creation as unsupported, so every trial falls back in order. A panic in a trial is
+/// re-raised on the caller, as it would have been without the threads.
+///
+/// No dependency is added for this (a maintainer decision on #624): `std::thread::scope` borrows
+/// the image without copying it, and one encode's seven trials are too few and too coarse for a
+/// work-stealing pool to schedule any better.
+fn run_trials(trial: &(impl Fn(FilterStrategy) -> Result<Vec<u8>> + Sync)) -> Result<Vec<Vec<u8>>> {
+    let [first, rest @ ..] = BRUTE_FORCE_STRATEGIES;
+    std::thread::scope(|scope| {
+        let spawned = rest.map(|strategy| {
+            let handle = std::thread::Builder::new().spawn_scoped(scope, move || trial(strategy));
+            (strategy, handle)
+        });
+        core::iter::once(trial(first))
+            .chain(spawned.into_iter().map(|(strategy, handle)| match handle {
+                Ok(handle) => handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(_) => trial(strategy),
+            }))
+            .collect()
+    })
+}
+
 /// What [`PngEncoder::encode_with_report`] found in the bytes it wrote.
 ///
 /// Non-exhaustive: a later revision may report a further region without a breaking change.
@@ -1669,11 +1706,10 @@ impl PngEncoder {
         };
         if matches!(self.filter, FilterStrategy::BruteForce) {
             // `min_by_key` keeps the *first* minimum, so a tie resolves to the earlier (more
-            // preferred) strategy — the behaviour the golden outputs are pinned to.
-            let candidates = BRUTE_FORCE_STRATEGIES
-                .into_iter()
-                .map(compress)
-                .collect::<Result<Vec<_>>>()?;
+            // preferred) strategy — the behaviour the golden outputs are pinned to. The trials run
+            // concurrently, but `run_trials` hands them back in candidate order, so which thread
+            // finished first never reaches the reduction.
+            let candidates = run_trials(&compress)?;
             Ok(candidates
                 .into_iter()
                 .min_by_key(Vec::len)
