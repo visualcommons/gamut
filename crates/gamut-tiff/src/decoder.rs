@@ -188,7 +188,8 @@ impl TiffDecoder {
 
     /// Reads the metadata a TIFF carries, without decoding pixels.
     ///
-    /// IFD 0 supplies the XMP, IPTC-IIM and ICC payloads and the `ExifIFD` sub-IFD; the last IFD
+    /// IFD 0 supplies the XMP, IPTC-IIM and ICC payloads, the Exif 0th-IFD fields under
+    /// [`IFD0_EXIF_TAGS`](crate::IFD0_EXIF_TAGS), and the `ExifIFD` and `GPSInfo` sub-IFDs; the last IFD
     /// of the main chain supplies the C2PA manifest store (C2PA 2.4 §A.3.6). Every byte-carried
     /// payload comes back **verbatim** — this crate parses none of them — so a block written by
     /// [`TiffEncoder::with_tiff_metadata`](crate::TiffEncoder::with_tiff_metadata) reads back identical.
@@ -219,17 +220,18 @@ impl TiffDecoder {
     /// — two levels under IFD 0, the deepest tree those two tags legitimately reach (EXIF 2.3
     /// §4.6.3), and the same bound
     /// [`TiffEncoder::with_tiff_metadata`](crate::TiffEncoder::with_tiff_metadata) writes within. It is also
-    /// returned for an IFD-0 `ExifIFD` entry naming **two or more** directories: EXIF 2.32
-    /// §4.6.3 A fixes its count at 1, [`TiffMetadata::exif`] holds one, and keeping only the first
-    /// would drop the rest silently. [`deconstruct`](crate::deconstruct) still walks such a file.
+    /// returned for an IFD-0 `ExifIFD` or `GPSInfo` entry naming **two or more** directories:
+    /// EXIF 2.32 §4.6.3 A fixes each count at 1, [`TiffMetadata::exif`] and
+    /// [`TiffMetadata::gps`] hold one each, and keeping only the first would drop the rest
+    /// silently. [`deconstruct`](crate::deconstruct) still walks such a file.
     ///
     /// Which pointers are followed depends on the **level**, so which ones can fail this call does
-    /// too. At **IFD 0** only `ExifIFD` (34665) is followed: a `SubIFDs` (330), `GPSInfo` (34853)
-    /// or `InteroperabilityIFD` (40965) field on the page itself is left as the integer it was
-    /// read as, so however broken it is it cannot fail this call. **Inside the returned Exif
-    /// directory all four** are followed, because that directory is handed back and an unresolved
-    /// pointer in it would be a raw offset into the source file — so there, unlike at IFD 0, an
-    /// unreadable target under any of the four *does* fail the call. And only IFD 0's subtree is
+    /// too. At **IFD 0** only `ExifIFD` (34665) and `GPSInfo` (34853) are followed: a `SubIFDs`
+    /// (330) or `InteroperabilityIFD` (40965) field on the page itself is left as the integer it
+    /// was read as, so however broken it is it cannot fail this call. **Inside the returned Exif
+    /// and GPS directories all four** are followed, because those directories are handed back and
+    /// an unresolved pointer in them would be a raw offset into the source file — so there, unlike
+    /// at IFD 0, an unreadable target under any of the four *does* fail the call. And only IFD 0's subtree is
     /// walked at all: a pointer on any later page of a multi-page document is never resolved, not
     /// even one naming a directory IFD 0's own subtree also names.
     ///
@@ -245,7 +247,8 @@ impl TiffDecoder {
     /// **The refusal is whole, and it is keyed to the directory, not to the page count.** When a
     /// followed pointer fails, no field is returned — not the XMP, IPTC, ICC or C2PA blocks either,
     /// even though none of them came from that pointer and all of them are readable. What can
-    /// fail the call is IFD 0's `ExifIFD` (or a pointer inside the directory it names), in a file
+    /// fail the call is IFD 0's `ExifIFD` or `GPSInfo` (or a pointer inside the directory either
+    /// names), in a file
     /// of any length; a pointer on a later page cannot. The two meet unevenly at one shape: a
     /// **single-page** file's only page is both IFD 0 and the last IFD the C2PA store is taken
     /// from, so a dangling `ExifIFD` there costs the caller the store too, while the same dangling

@@ -25,12 +25,29 @@ fn exif() -> Ifd {
     ifd
 }
 
+/// Exif 0th-IFD fields: a `Make` and an `Orientation`, both page tags of IFD 0 itself.
+fn ifd0() -> Ifd {
+    let mut ifd = Ifd::new();
+    ifd.set(tags::MAKE, Value::Ascii("gamut".into()));
+    ifd.set(tags::ORIENTATION, Value::Short(vec![6]));
+    ifd
+}
+
+/// A GPS sub-IFD with one recognisable field (`GPSLatitudeRef`, 1).
+fn gps() -> Ifd {
+    let mut ifd = Ifd::new();
+    ifd.set(1, Value::Ascii("N".into()));
+    ifd
+}
+
 fn metadata() -> TiffMetadata {
     TiffMetadata::new()
         .with_xmp(XMP.to_vec())
         .with_iptc(IPTC.to_vec())
         .with_icc(ICC.to_vec())
         .with_exif(exif())
+        .with_ifd0(ifd0())
+        .with_gps(gps())
 }
 
 fn rgb(w: u32, h: u32) -> Vec<u8> {
@@ -56,9 +73,13 @@ fn assert_carries_every_block(ifd: &Ifd) {
         ifd.get(tags::ICC_PROFILE),
         Some(&Value::Undefined(ICC.to_vec()))
     );
-    // The Exif sub-IFD is written as a pointer field, so a plain `read` sees the offset rather
-    // than the directory; that it is present at all is this assertion's claim.
+    for field in ifd0().fields() {
+        assert_eq!(ifd.get(field.tag), Some(&field.value), "tag {}", field.tag);
+    }
+    // The Exif and GPS sub-IFDs are written as pointer fields, so a plain `read` sees the offsets
+    // rather than the directories; that they are present at all is this assertion's claim.
     assert!(ifd.get(tags::EXIF_IFD).is_some());
+    assert!(ifd.get(tags::GPS_INFO).is_some());
 }
 
 #[test]
@@ -100,7 +121,15 @@ fn a_multipage_document_carries_the_metadata_on_page_0_only() {
     let file = read(&bytes).expect("read");
     assert_eq!(file.ifds.len(), 2);
     assert_carries_every_block(&file.ifds[0]);
-    for tag in [tags::XMP, tags::IPTC_NAA, tags::ICC_PROFILE, tags::EXIF_IFD] {
+    for tag in [
+        tags::XMP,
+        tags::IPTC_NAA,
+        tags::ICC_PROFILE,
+        tags::EXIF_IFD,
+        tags::GPS_INFO,
+        tags::MAKE,
+        tags::ORIENTATION,
+    ] {
         assert_eq!(file.ifds[1].get(tag), None, "tag {tag} on page 1");
     }
 }
@@ -117,6 +146,24 @@ fn the_decoder_returns_every_block_verbatim() {
     assert_eq!(read_back.iptc.as_deref(), Some(IPTC));
     assert_eq!(read_back.icc.as_deref(), Some(ICC));
     assert_eq!(read_back.exif, Some(exif()));
+    assert_eq!(read_back.ifd0, Some(ifd0()));
+    assert_eq!(read_back.gps, Some(gps()));
+}
+
+#[test]
+fn ifd0_fields_the_encoder_writes_itself_are_refused_before_any_pixel_work() {
+    // `ImageWidth` among the 0th-IFD fields would overwrite the page's own: refused, and the
+    // output buffer is left untouched.
+    let mut layout = ifd0();
+    layout.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+    let pixels = rgb(8, 4);
+    let mut out = Vec::new();
+    let err = TiffEncoder::new()
+        .with_tiff_metadata(TiffMetadata::new().with_ifd0(layout))
+        .encode_image(image(&pixels, 8, 4), &mut out)
+        .expect_err("ImageWidth is the encoder's");
+    assert!(err.to_string().contains("IFD0_EXIF_TAGS"), "{err}");
+    assert!(out.is_empty(), "a refused encode writes nothing");
 }
 
 #[test]
@@ -417,21 +464,32 @@ fn multipage(pages: &[Ifd]) -> Vec<u8> {
 
 #[test]
 fn a_broken_pointer_the_metadata_does_not_use_does_not_hide_the_blocks() {
-    // `TiffMetadata` has five fields, and an IFD-0 `SubIFDs` (330) or `GPSInfo` (34853) group
-    // feeds none of them — a thumbnail directory and a GPS directory are not XMP, IPTC, ICC, C2PA
-    // or the Exif sub-IFD. So following them can only add failure modes: a dangling one would make
-    // every block unreachable because of a pointer nobody asked for. The pixels of these files
-    // decode fine, which is exactly what makes losing the metadata indefensible.
-    for tag in [tags::SUB_IFDS, tags::GPS_INFO] {
-        let dangling = Value::Long(vec![0xFFFF_FF00]);
-        let bytes = file_with_extra_ifd0_field(tag, dangling);
-        let meta = TiffDecoder::new()
-            .metadata(&bytes)
-            .unwrap_or_else(|e| panic!("tag {tag}: metadata must survive a dangling pointer: {e}"));
-        assert_eq!(meta.xmp.as_deref(), Some(XMP), "tag {tag}");
-        // The same property keeps a multi-page file whose pages share one thumbnail directory
-        // readable: an offset that is never followed cannot trip the cross-chain loop guard.
-    }
+    // An IFD-0 `SubIFDs` (330) group feeds no field of `TiffMetadata` — a thumbnail directory is
+    // not XMP, IPTC, ICC, C2PA, the Exif 0th-IFD fields or the Exif or GPS sub-IFD. So following
+    // it can only add failure modes: a dangling one would make every block unreachable because of
+    // a pointer nobody asked for. The pixels of this file decode fine, which is exactly what makes
+    // losing the metadata indefensible. (`GPSInfo` was on this side until `TiffMetadata::gps` gave
+    // its target a field; `a_broken_gps_pointer_is_an_error` is its side now.)
+    let dangling = Value::Long(vec![0xFFFF_FF00]);
+    let bytes = file_with_extra_ifd0_field(tags::SUB_IFDS, dangling);
+    let meta = TiffDecoder::new()
+        .metadata(&bytes)
+        .unwrap_or_else(|e| panic!("metadata must survive a dangling SubIFDs pointer: {e}"));
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
+    // The same property keeps a multi-page file whose pages share one thumbnail directory
+    // readable: an offset that is never followed cannot trip the cross-chain loop guard.
+}
+
+#[test]
+fn a_broken_gps_pointer_is_an_error() {
+    // The GPS directory is returned (`TiffMetadata::gps`), so a dangling `GPSInfo` fails the read
+    // as a dangling `ExifIFD` does, rather than reporting `gps: None` for a directory the file
+    // declares. What this stopped accepting is exactly such a file.
+    let bytes = file_with_extra_ifd0_field(tags::GPS_INFO, Value::Long(vec![0xFFFF_FF00]));
+    let err = TiffDecoder::new()
+        .metadata(&bytes)
+        .expect_err("a dangling GPSInfo is the caller's business");
+    assert!(err.to_string().contains("read out of bounds"), "{err}");
 }
 
 #[test]

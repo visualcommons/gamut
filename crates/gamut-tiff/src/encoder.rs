@@ -130,20 +130,22 @@ impl TiffEncoder {
         self
     }
 
-    /// Returns a copy of this encoder that embeds `metadata` — an Exif sub-IFD plus opaque
-    /// XMP / IPTC-IIM / ICC blocks, and a caller-computed C2PA manifest store (see
-    /// [`TiffMetadata::c2pa`]).
+    /// Returns a copy of this encoder that embeds `metadata` — Exif 0th-IFD fields, Exif and GPS
+    /// sub-IFDs, opaque XMP / IPTC-IIM / ICC blocks, and a caller-computed C2PA manifest store
+    /// (see [`TiffMetadata::c2pa`]).
     ///
-    /// The blocks and the Exif sub-IFD go in **IFD 0**; the C2PA store's entry goes in the last
-    /// IFD of the main chain and its bytes at the end of the file, as C2PA 2.4 §A.3.6 requires.
-    /// For a single-image encode those are the same directory; for
+    /// The blocks, the 0th-IFD fields and the two sub-IFDs go in **IFD 0**; the C2PA store's
+    /// entry goes in the last IFD of the main chain and its bytes at the end of the file, as
+    /// C2PA 2.4 §A.3.6 requires. For a single-image encode those are the same directory; for
     /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) they are the first and last page.
     ///
     /// **What this encoder writes, [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) reads
-    /// back.** What could break the agreement is the caller's own Exif directory, which is the one
-    /// directory here this crate did not build, and four shapes of it are refused — each a typed
-    /// [`Error::InvalidInput`] raised before any pixel work, with its own message, rather than a
-    /// well-formed file this crate's own reader then rejects:
+    /// back.** What could break the agreement is the caller's own directories, which this crate
+    /// did not build. The 0th-IFD fields ([`TiffMetadata::ifd0`]) are refused when they hold a
+    /// tag outside [`IFD0_EXIF_TAGS`](crate::IFD0_EXIF_TAGS) — the rest of IFD 0 is this
+    /// encoder's — or a sub-IFD group. For the Exif and GPS sub-IFDs four shapes are refused —
+    /// each a typed [`Error::InvalidInput`] raised before any pixel work, with its own message,
+    /// rather than a well-formed file this crate's own reader then rejects:
     ///
     /// * a **field** under one of the four standard pointer tags — `SubIFDs` (330), `ExifIFD`
     ///   (34665), `GPSInfo` (34853), `InteroperabilityIFD` (40965) — whose **on-disk type code**
@@ -312,11 +314,13 @@ impl TiffEncoder {
     /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) alike — and each is an
     /// [`Error::InvalidInput`]. These are raised **before any pixel work**:
     ///
-    /// * the Exif sub-IFD supplied through [`with_tiff_metadata`](Self::with_tiff_metadata) is one this
-    ///   crate's reader could not hand back — a pointer-typed field under a pointer tag, a
-    ///   directory hung off a tag the reader does not resolve, a field and a directory under one
-    ///   tag, or nesting deeper than the reader walks (the shapes
+    /// * the Exif or GPS sub-IFD supplied through [`with_tiff_metadata`](Self::with_tiff_metadata)
+    ///   is one this crate's reader could not hand back — a pointer-typed field under a pointer
+    ///   tag, a directory hung off a tag the reader does not resolve, a field and a directory
+    ///   under one tag, or nesting deeper than the reader walks (the shapes
     ///   [`with_tiff_metadata`](Self::with_tiff_metadata) lists);
+    /// * the Exif 0th-IFD fields hold a tag outside [`IFD0_EXIF_TAGS`](crate::IFD0_EXIF_TAGS) or
+    ///   a sub-IFD group;
     /// * both a manifest store and a reservation
     ///   ([`with_c2pa_reserved`](Self::with_c2pa_reserved)) were configured;
     /// * the store or reservation is shorter than [`gamut_ifd::c2pa::MIN_STORE_LEN`] (8 bytes),
@@ -1294,7 +1298,7 @@ mod typed {
     use gamut_metadata::{EncodedMetadata, Metadata, MetadataEmbedder};
 
     use super::TiffEncoder;
-    use crate::metadata::typed::exif_ifd;
+    use crate::metadata::typed::exif_carriers;
 
     impl TiffEncoder {
         /// Embeds a unified [`Metadata`] model: serializes it with the default
@@ -1332,11 +1336,13 @@ mod typed {
         ///
         /// XMP, ICC and — unlike every other wired container — a legacy IPTC-IIM stream go in
         /// verbatim as the `XMP` (700), `ICCProfile` (34675) and `IPTC/NAA` (33723) tags. EXIF is
-        /// parsed, because a TIFF stores its `ExifIFD` as a directory rather than as bytes: the
-        /// model's Exif sub-IFD, with its Interoperability sub-IFD, becomes
-        /// [`TiffMetadata::exif`](crate::TiffMetadata::exif). Its byte order does not travel —
-        /// the file's is [`with_byte_order`](Self::with_byte_order)'s. Fields that are `None`
-        /// leave any earlier setting untouched.
+        /// parsed, because a TIFF stores it as directories rather than as bytes: the model's
+        /// 0th-IFD fields become [`TiffMetadata::ifd0`](crate::TiffMetadata::ifd0), written into
+        /// the page's own IFD 0; its Exif sub-IFD, with its Interoperability sub-IFD, becomes
+        /// [`TiffMetadata::exif`](crate::TiffMetadata::exif); and its GPS sub-IFD becomes
+        /// [`TiffMetadata::gps`](crate::TiffMetadata::gps). An EXIF block replaces all three. Its
+        /// byte order does not travel — the file's is [`with_byte_order`](Self::with_byte_order)'s.
+        /// Fields that are `None` leave any earlier setting untouched.
         ///
         /// # Errors
         ///
@@ -1344,7 +1350,9 @@ mod typed {
         /// never embedded from metadata blocks, since it is signed over the bytes of the one file
         /// it was made for; reserve one for this output with
         /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) — and when the EXIF model holds a
-        /// 0th-IFD field, a GPS sub-IFD or a thumbnail, which a TIFF's IFD 0 does not carry here.
+        /// thumbnail, which a TIFF would hold as a page of its own, or a 0th-IFD field under a tag
+        /// outside [`IFD0_EXIF_TAGS`](crate::IFD0_EXIF_TAGS), which IFD 0 holds as the encoder's
+        /// own (`XResolution`, `YCbCrPositioning`, …).
         /// Returns [`Error::InvalidInput`] when the EXIF block does not parse (the parser's
         /// message is carried as [`Error::detail`]). Nothing is applied when an error is
         /// returned.
@@ -1364,12 +1372,14 @@ mod typed {
                         )
                         .with_detail(e.to_string())
                     })?;
-                    Some(exif_ifd(&model)?)
+                    Some(exif_carriers(&model)?)
                 }
                 None => None,
             };
-            if let Some(directory) = exif {
-                self.metadata.exif = directory;
+            if let Some(carriers) = exif {
+                self.metadata.ifd0 = carriers.ifd0;
+                self.metadata.exif = carriers.exif;
+                self.metadata.gps = carriers.gps;
             }
             if let Some(xmp) = &encoded.xmp {
                 self.metadata.xmp = Some(xmp.clone());
@@ -1397,14 +1407,18 @@ mod typed {
 
         use super::*;
         use crate::TiffDecoder;
-        use crate::metadata::typed::EXIF_OUTSIDE_EXIF_IFD;
+        use crate::metadata::IFD0_FIELD_REFUSAL;
 
-        /// A typed model with EXIF (an Exif sub-IFD field only — what a TIFF carries), XMP and ICC
-        /// populated, normalised through one embed → extract pass so it is an *extracted* model
-        /// (the ICC header's `size` is stamped by the serializer).
+        /// A typed model with EXIF (a 0th-IFD `Make` and `Orientation`, an Exif sub-IFD field and
+        /// a GPS sub-IFD field — one in each directory a TIFF carries), XMP and ICC populated,
+        /// normalised through one embed → extract pass so it is an *extracted* model (the ICC
+        /// header's `size` is stamped by the serializer).
         fn typed(order: ByteOrder) -> Metadata {
             let mut exif = Exif::new(order);
+            exif.set_tag(ExifTag::Make, Value::Ascii("gamut".into()));
+            exif.set_tag(ExifTag::Orientation, Value::Short(vec![6]));
             exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+            exif.set_tag(ExifTag::GpsLatitudeRef, Value::Ascii("N".into()));
             let mut xmp = XmpMeta::new();
             xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
             let icc = IccProfile {
@@ -1461,6 +1475,19 @@ mod typed {
             assert_eq!(
                 exiv2_oracle::image_exif_get(&tiff, "Exif.Photo.ISOSpeedRatings").unwrap(),
                 "400"
+            );
+            // The 0th-IFD fields are the page's own tags, and the GPS sub-IFD hangs off it.
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&tiff, "Exif.Image.Make").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&tiff, "Exif.Image.Orientation").unwrap(),
+                "6"
+            );
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&tiff, "Exif.GPSInfo.GPSLatitudeRef").unwrap(),
+                "N"
             );
             assert_eq!(
                 exiv2_oracle::image_xmp_get(&tiff, "Xmp.xmp.CreatorTool").unwrap(),
@@ -1524,6 +1551,15 @@ mod typed {
             assert_eq!(read.iptc, encoded.iptc_iim);
             let exif = read.exif.unwrap();
             assert_eq!(exif.get(0x8827), Some(&gamut_ifd::Value::Short(vec![400])));
+            let page = read.ifd0.unwrap();
+            assert_eq!(
+                page.get(crate::tags::MAKE),
+                Some(&gamut_ifd::Value::Ascii("gamut".into()))
+            );
+            assert_eq!(
+                read.gps.unwrap().get(1),
+                Some(&gamut_ifd::Value::Ascii("N".into()))
+            );
 
             let mut only_icc = EncodedMetadata::default();
             only_icc.icc = encoded.icc.clone();
@@ -1552,13 +1588,15 @@ mod typed {
                 Some("TIFF: a C2PA manifest store is not embedded from metadata blocks")
             );
 
-            // A camera's EXIF keeps `Make` in the 0th IFD, which has no carrier here.
+            // A camera's EXIF keeps `YCbCrPositioning` in the 0th IFD, which in a TIFF describes a
+            // YCbCr coding this encoder never writes.
             let mut camera = Exif::new(ByteOrder::LittleEndian);
             camera.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
+            camera.set_tag(ExifTag::YCbCrPositioning, Value::Short(vec![1]));
             let model = Metadata::from_carriers(Some(camera), None, None);
             let err = TiffEncoder::new().with_metadata(&model).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::Unsupported);
-            assert_eq!(err.static_message(), Some(EXIF_OUTSIDE_EXIF_IFD));
+            assert_eq!(err.static_message(), Some(IFD0_FIELD_REFUSAL));
 
             let mut garbage = EncodedMetadata::default();
             garbage.exif = Some(b"not a tiff stream".to_vec());
