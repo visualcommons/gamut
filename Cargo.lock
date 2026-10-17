@@ -916,6 +916,7 @@ dependencies = [
  "gamut-codec-abi",
  "gamut-core",
  "gamut-deflate",
+ "gamut-metadata",
  "gamut-png",
  "libpng-oracle",
  "miniz_oxide 0.8.9",

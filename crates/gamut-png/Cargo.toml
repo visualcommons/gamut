@@ -22,6 +22,10 @@ workspace = true
 # surface and `mise run check-ffi-features` are unaffected. The module is re-exports only, so it
 # adds no coverage regions and no mutants.
 test-support = []
+# Typed metadata wiring: `PngMetadata` / `DecodedPng`'s `TypedMetadata` impls (`blocks` /
+# `metadata`) and `PngEncoder::with_typed_metadata` / `with_encoded_metadata` over the
+# `gamut-metadata` facade.
+metadata = ["dep:gamut-metadata"]
 
 [dependencies]
 gamut-core.workspace = true
@@ -39,6 +43,11 @@ miniz_oxide = "0.8"
 # including wasm32. MIT/Apache-2.0, pure Rust, and it keeps its `unsafe` to itself -- gamut-png
 # stays 100% safe Rust. Replaces a hand-written byte-at-a-time table loop; see `src/crc32.rs`.
 crc32fast = "1.5"
+# Typed metadata (issue #510): the unified `Metadata` model over the `eXIf` / XMP `iTXt` / `iCCP`
+# / `caBX` payloads this crate locates and writes. Optional and off by default — a plain PNG
+# consumer pays for none of the four metadata crates — and a *normal* dependency (never
+# dev-only), so release ordering follows it (`mise run check-release-deps`).
+gamut-metadata = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Differential cross-check oracle: a vendored, statically-linked libpng (built from the

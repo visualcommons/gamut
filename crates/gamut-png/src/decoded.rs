@@ -698,6 +698,156 @@ fn parse_itxt(data: &[u8], budget: &mut usize) -> Option<ITxt> {
     }))
 }
 
+/// The `metadata` feature: the facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over the
+/// four carriers both read surfaces locate as bytes — [`PngMetadata`] (from
+/// [`metadata`](crate::metadata)) and [`DecodedPng`] (from a full decode).
+#[cfg(feature = "metadata")]
+mod typed {
+    use gamut_metadata::{MetadataBlock, TypedMetadata};
+
+    use super::{DecodedPng, IccProfile, PngMetadata};
+
+    /// The carriers as [`MetadataBlock`]s, in a fixed order: the `eXIf` TIFF stream, the XMP
+    /// packet, the inflated `iCCP` profile and the `caBX` manifest store, each present only when
+    /// the file carried it.
+    fn blocks<'a>(
+        exif: Option<&'a [u8]>,
+        xmp: Option<&'a [u8]>,
+        icc: Option<&'a IccProfile>,
+        c2pa: Option<&'a [u8]>,
+    ) -> Vec<MetadataBlock<'a>> {
+        let mut blocks = Vec::new();
+        blocks.extend(exif.map(MetadataBlock::Exif));
+        blocks.extend(xmp.map(MetadataBlock::Xmp));
+        blocks.extend(icc.map(|icc| MetadataBlock::Icc(&icc.profile)));
+        blocks.extend(c2pa.map(MetadataBlock::C2pa));
+        blocks
+    }
+
+    /// The facade's [`TypedMetadata`] over the located payloads; `metadata` is the trait's
+    /// default, `Metadata::from_blocks` over [`blocks`](TypedMetadata::blocks).
+    ///
+    /// ```
+    /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
+    /// use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+    /// use gamut_png::{Metadata, PngEncoder, TypedMetadata};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut exif = Exif::new(ByteOrder::LittleEndian);
+    /// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+    /// let typed = Metadata::from_carriers(Some(exif), None, None);
+    ///
+    /// let pixels = vec![0u8; 64];
+    /// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
+    /// let png = PngEncoder::new()
+    ///     .with_typed_metadata(&typed)?
+    ///     .encode_to_vec(image)?;
+    ///
+    /// assert_eq!(gamut_png::metadata(&png)?.metadata()?, typed);
+    /// # Ok(())
+    /// # }
+    /// ```
+    impl TypedMetadata for PngMetadata {
+        /// The located payloads as [`MetadataBlock`]s: the `eXIf` TIFF stream, the XMP packet
+        /// (decompressed if its `iTXt` was), the `iCCP` profile (inflated; its name is not a
+        /// carrier and stays in [`icc_profile`](PngMetadata::icc_profile)) and the `caBX`
+        /// manifest store, each present only when the file carried it. PNG has no IPTC-IIM
+        /// chunk, so no [`MetadataBlock::IptcIim`] is ever produced; the text annotations and
+        /// colour chunks are PNG's own and are not facade carriers.
+        ///
+        /// # Errors
+        ///
+        /// Never: every payload was already located, and inflated, when this value was built.
+        /// The signature is the trait's, shared with containers that resolve payloads lazily.
+        fn blocks(&self) -> gamut_metadata::Result<Vec<MetadataBlock<'_>>> {
+            Ok(blocks(
+                self.exif.as_deref(),
+                self.xmp.as_deref(),
+                self.icc_profile.as_ref(),
+                self.c2pa.as_deref(),
+            ))
+        }
+    }
+
+    /// The same carriers as [`PngMetadata`]'s impl, read off a full decode.
+    impl TypedMetadata for DecodedPng {
+        /// As [`PngMetadata`]'s [`blocks`](TypedMetadata::blocks): the `eXIf`, XMP, `iCCP` and
+        /// `caBX` payloads.
+        ///
+        /// # Errors
+        ///
+        /// Never; see [`PngMetadata`]'s impl.
+        fn blocks(&self) -> gamut_metadata::Result<Vec<MetadataBlock<'_>>> {
+            Ok(blocks(
+                self.exif.as_deref(),
+                self.xmp.as_deref(),
+                self.icc_profile.as_ref(),
+                self.c2pa.as_deref(),
+            ))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use gamut_core::EncodeImage;
+
+        use super::*;
+
+        fn icc() -> IccProfile {
+            IccProfile {
+                name: "ICC profile".to_owned(),
+                profile: vec![7u8; 4],
+            }
+        }
+
+        #[test]
+        fn png_metadata_blocks_expose_each_located_payload_in_facade_form() {
+            let meta = PngMetadata {
+                exif: Some(b"II*\0".to_vec()),
+                xmp: Some(b"<x:xmpmeta/>".to_vec()),
+                icc_profile: Some(icc()),
+                c2pa: Some(b"jumb".to_vec()),
+                ..PngMetadata::default()
+            };
+            assert_eq!(
+                meta.blocks().unwrap(),
+                vec![
+                    MetadataBlock::Exif(b"II*\0"),
+                    MetadataBlock::Xmp(b"<x:xmpmeta/>"),
+                    MetadataBlock::Icc(&[7u8; 4]),
+                    MetadataBlock::C2pa(b"jumb"),
+                ]
+            );
+            assert!(PngMetadata::default().blocks().unwrap().is_empty());
+        }
+
+        #[test]
+        fn decoded_png_blocks_read_the_decode_s_own_fields() {
+            // Distinct payloads from the `PngMetadata` test, so an impl reading the wrong value
+            // could not pass both.
+            let png = crate::PngEncoder::new()
+                .with_exif(b"MM\0*\0\0\0\x08")
+                .with_icc_profile("p", &[9u8; 4])
+                .encode_to_vec(
+                    gamut_core::ImageRef::<gamut_core::Gray8>::new(
+                        &[0u8],
+                        gamut_core::Dimensions::new(1, 1).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let decoded = crate::PngDecoder::new().decode(&png).unwrap();
+            assert_eq!(
+                decoded.blocks().unwrap(),
+                vec![
+                    MetadataBlock::Exif(b"MM\0*\0\0\0\x08"),
+                    MetadataBlock::Icc(&[9u8; 4]),
+                ]
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gamut_deflate::DeflateEncoder;
