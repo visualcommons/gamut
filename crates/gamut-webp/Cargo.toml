@@ -21,6 +21,17 @@ gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-dsp.workspace = true
 gamut-riff.workspace = true
+# Typed metadata (issue #510): the unified `Metadata` model over the raw `EXIF` / `XMP ` / `ICCP` /
+# `C2PA` chunks this crate locates and writes. Optional and off by default — a plain WebP consumer
+# pays for none of the four metadata crates — and a *normal* dependency (never dev-only), so
+# release ordering follows it (`mise run check-release-deps`).
+gamut-metadata = { workspace = true, optional = true }
+
+[features]
+default = []
+# Typed metadata wiring: `WebpMetadata::blocks` / `WebpMetadata::metadata` (the facade's
+# `TypedMetadata` trait) and `WebpEncoder::with_metadata` / `with_encoded_metadata`.
+metadata = ["dep:gamut-metadata"]
 
 [dev-dependencies]
 # libwebp as the differential-test oracle (FFI). Dev-only: the shipped library is C-free.

@@ -978,6 +978,7 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
+ "gamut-metadata",
  "gamut-riff",
  "libwebp-sys2 0.2.0",
 ]
