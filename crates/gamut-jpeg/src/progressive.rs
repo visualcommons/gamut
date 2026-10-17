@@ -26,9 +26,11 @@
 //! The scan order is libjpeg's `jpeg_simple_progression` (transcribed from `jcparam.c`), SemVer-frozen
 //! here: a 6-scan grayscale layout and the 10-scan YCbCr layout (see [`scan_script`]).
 
+use gamut_bitstream::build_optimal_table;
+
 use crate::bitwriter::BitWriter;
 use crate::encoder::{Plane, additional_bits, magnitude_category, quantize_block_rd};
-use crate::huffman::{EncTable, build_optimal_table, emit_dht_dynamic};
+use crate::huffman::{EncTable, emit_dht_dynamic};
 use crate::marker;
 use crate::rd::RdCtx;
 use crate::zigzag::ZIGZAG;

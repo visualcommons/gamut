@@ -32,7 +32,8 @@ micro-goldens hand-derived from T.81 Annex F/K and a structural stream walker; t
 adds hand-built minimal streams (DC-then-AC, a successive-approximation pair, an EOBRUN-spanning case,
 a DC refinement) checked against sequential twins, plus a scan-ordering validation corpus; the
 progressive encoder adds direct §G.1.2 entropy-model unit tests (ZRL boundary, point transform, DC
-refinement bit, AC-refinement sign/EOB fold), an exact Annex K.2 optimal-table golden, and a
+refinement bit, AC-refinement sign/EOB fold), an exact Annex K.2 optimal-table golden (since #888
+in `gamut-bitstream`, which owns the builder), and a
 progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run presence).
 
 ## Scope ledger
