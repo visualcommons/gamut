@@ -344,8 +344,10 @@ impl Document {
                     lx.skip_ws();
                     if b[lx.pos..].starts_with(b"stream") {
                         let data = stream_data(b, lx.pos + 6, &d);
-                        i = i.max(lx.pos);
-                        Obj::Stream(d, data.to_vec())
+                        // Resume the scan past the data, so binary bytes that happen to spell
+                        // `N G obj` are never read as an object header.
+                        i = i.max(data.end);
+                        Obj::Stream(d, b[data].to_vec())
                     } else {
                         Obj::Dict(d)
                     }
@@ -483,9 +485,9 @@ fn header_number(b: &[u8], obj_off: usize) -> Option<u32> {
     (p == 0 || is_ws(b[p - 1]) || is_delim(b[p - 1])).then_some(nums[0])
 }
 
-/// The raw bytes of a stream whose `stream` keyword ends at `after_kw`: `/Length` when it is a
-/// direct integer that lands on `endstream`, otherwise up to the next `endstream`.
-fn stream_data<'a>(b: &'a [u8], after_kw: usize, d: &Dict) -> &'a [u8] {
+/// The byte range of a stream's raw data, whose `stream` keyword ends at `after_kw`: `/Length` when
+/// it is a direct integer that lands on `endstream`, otherwise up to the next `endstream`.
+fn stream_data(b: &[u8], after_kw: usize, d: &Dict) -> std::ops::Range<usize> {
     let mut start = after_kw;
     if b.get(start) == Some(&b'\r') {
         start += 1;
@@ -498,12 +500,11 @@ fn stream_data<'a>(b: &'a [u8], after_kw: usize, d: &Dict) -> &'a [u8] {
         if let Some(tail) = b.get(end..) {
             let ws = tail.iter().take_while(|&&c| is_ws(c)).count();
             if tail[ws..].starts_with(b"endstream") {
-                return &b[start..end];
+                return start..end;
             }
         }
     }
-    let end = find(b, b"endstream", start).unwrap_or(b.len());
-    &b[start..end]
+    start..find(b, b"endstream", start).unwrap_or(b.len())
 }
 
 fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
