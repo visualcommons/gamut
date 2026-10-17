@@ -171,9 +171,11 @@ are `#[non_exhaustive]`):
   the difference is entirely tags CIPA DC-008 does not define (TIFF/EP, DNG, and other lineages),
   which would have to be transcribed from *their* specifications, not copied out of an oracle.
   Unknown tags still round-trip losslessly via the raw `Ifd`.
-- **A re-derivation of the per-tag `Type`/`Count` columns.** They are transcribed by hand from the
-  vendored specification and guarded structurally, but nothing recomputes them from the spec, so a
-  *corrected-but-different* value would compile and pass (issue #544).
+- **A derivation of the per-tag `Type`/`Count` columns from the PDF itself.** Since issue #544 they
+  are checked against a second, independent transcription of the DC-008 tables
+  (`tests/fixtures/dc008_tag_columns.txt`, compared by `tests/tag_spec_columns.rs`), so a
+  *corrected-but-different* value in either copy fails a test; but nothing re-reads the vendored
+  PDF, so an error made identically in both transcriptions would still pass.
 - **Uncompressed strip-based thumbnails** are read but not re-embedded (JPEG thumbnails are).
 
 ## Status

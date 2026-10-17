@@ -149,11 +149,14 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
   specifications and transcribing from those, not copying a table out of the oracle, so they are a
   separate deliverable. Unknown and MakerNote tags still round-trip losslessly because the raw
   `gamut_ifd::Ifd` is retained.
-- **A re-derivation of the `Type`/`Count` columns.** They were transcribed by hand from the
-  vendored specification and cross-checked once against the per-tag prose blocks, but nothing in
-  the repository recomputes them, and mutation testing cannot see a wrong constant in a macro
-  invocation. A *missing* row is caught by the structural guards; a *corrected-but-different* value
-  is caught by nothing (issue #544).
+- **A derivation of the `Type`/`Count` columns from the PDF itself.** Since issue #544 the
+  catalogue's `Hex`/`Type`/`Count` columns are checked in both directions against
+  `tests/fixtures/dc008_tag_columns.txt`, a second, independent transcription of DC-008 Tables 6,
+  8, 9, 14 and 16 in the spec's own layout (`tests/tag_spec_columns.rs`), with the one table/prose
+  contradiction (`GainControl`: Table 9 `RATIONAL`, §4.6.6.7.41 `SHORT`) held in a `DEPARTURES`
+  list that fails once it stops being live. A *corrected-but-different* value in either copy is
+  therefore a test failure. What remains is that the fixture is itself a hand transcription:
+  nothing re-reads the vendored PDF, so an error made identically in both copies would still pass.
 - **Uncompressed strip-based thumbnails** are read (as their directory) but not re-embedded; JPEG
   thumbnails round-trip fully.
 - **An async entry point.** Declined rather than deferred: `parse_from` is synchronous over
