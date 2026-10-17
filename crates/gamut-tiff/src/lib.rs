@@ -39,13 +39,14 @@
 //! directions against libtiff; the deferred colour modes and compression schemes (YCbCr,
 //! CIE L\*a\*b\*, JPEG-in-TIFF, …) land additively — see `STATUS.md` for the scope ledger.
 //!
-//! Embedded metadata — an `ExifIFD` sub-IFD plus XMP / IPTC-IIM / ICC / C2PA payloads — is
+//! Embedded metadata — Exif (the 0th-IFD fields of [`IFD0_EXIF_TAGS`] in IFD 0 itself, plus the
+//! `ExifIFD` and `GPSInfo` sub-IFDs) plus XMP / IPTC-IIM / ICC / C2PA payloads — is
 //! [`TiffMetadata`], written by [`TiffEncoder::with_tiff_metadata`] and read by
 //! [`TiffDecoder::metadata`]. With the optional **`metadata`** Cargo feature it is also wired to
 //! the `gamut-metadata` facade's typed models: [`TiffMetadata`] implements the facade's
 //! `TypedMetadata` trait, and `TiffEncoder::with_metadata` / `with_encoded_metadata` embed a
-//! unified `Metadata` (the EXIF model's Exif and Interoperability sub-IFDs; its 0th-IFD fields,
-//! GPS sub-IFD and thumbnail have no carrier here and are refused).
+//! unified `Metadata` (the whole EXIF model but its thumbnail, which has no carrier here and is
+//! refused, as is a 0th-IFD field IFD 0 holds as the encoder's own).
 //!
 //! TIFF codestreams are permanently backend-less: unlike the other format crates, this crate
 //! adds **no** pluggable codestream backend (the IoC seam of #241), because TIFF's compression
@@ -121,6 +122,6 @@ pub use gamut_ifd::{
 pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
 pub use ifd::{PhotometricInterpretation, Predictor, SampleFormat};
 pub use info::TiffInfo;
-pub use metadata::{TiffMetadata, c2pa_exclusions, c2pa_summary};
+pub use metadata::{IFD0_EXIF_TAGS, TiffMetadata, c2pa_exclusions, c2pa_summary};
 pub use palette::Palette8;
 pub use writer::{write_image, write_image_tiled, write_multipage};

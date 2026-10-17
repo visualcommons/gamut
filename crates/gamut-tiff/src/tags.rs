@@ -58,6 +58,24 @@ pub const SUB_IFDS: u16 = gamut_ifd::tags::SUB_IFDS;
 pub const XMP: u16 = 700;
 /// `Copyright` (33432) — the copyright notice.
 pub const COPYRIGHT: u16 = 33432;
+/// `ImageDescription` (270) — a title or description of the image.
+pub const IMAGE_DESCRIPTION: u16 = 270;
+/// `Make` (271) — the manufacturer of the input equipment.
+pub const MAKE: u16 = 271;
+/// `Model` (272) — the model name of the input equipment.
+pub const MODEL: u16 = 272;
+/// `Orientation` (274) — the orientation of the stored image relative to its display (1–8).
+pub const ORIENTATION: u16 = 274;
+/// `Software` (305) — the software that created the image.
+pub const SOFTWARE: u16 = 305;
+/// `DateTime` (306) — the date and time the image was created or last changed.
+pub const DATE_TIME: u16 = 306;
+/// `Artist` (315) — the person who created the image.
+pub const ARTIST: u16 = 315;
+/// `WhitePoint` (318) — the chromaticity of the image's white point.
+pub const WHITE_POINT: u16 = 318;
+/// `PrimaryChromaticities` (319) — the chromaticities of the image's primaries.
+pub const PRIMARY_CHROMATICITIES: u16 = 319;
 /// `IPTC` (33723) — an IPTC/NAA metadata block.
 pub const IPTC_NAA: u16 = 33723;
 /// `ExifIFD` (34665) — the offset of the Exif private sub-IFD.
@@ -114,6 +132,15 @@ pub fn is_known_tag(tag: u16) -> bool {
             | SUB_IFDS
             | XMP
             | COPYRIGHT
+            | IMAGE_DESCRIPTION
+            | MAKE
+            | MODEL
+            | ORIENTATION
+            | SOFTWARE
+            | DATE_TIME
+            | ARTIST
+            | WHITE_POINT
+            | PRIMARY_CHROMATICITIES
             | IPTC_NAA
             | EXIF_IFD
             | ICC_PROFILE
@@ -128,10 +155,6 @@ pub fn is_known_tag(tag: u16) -> bool {
             | 264 // CellWidth
             | 265 // CellLength
             | 269 // DocumentName
-            | 270 // ImageDescription
-            | 271 // Make
-            | 272 // Model
-            | 274 // Orientation
             | 280 // MinSampleValue
             | 281 // MaxSampleValue
             | 285 // PageName
@@ -144,12 +167,7 @@ pub fn is_known_tag(tag: u16) -> bool {
             | 292 // T4Options
             | 293 // T6Options
             | 301 // TransferFunction
-            | 305 // Software
-            | 306 // DateTime
-            | 315 // Artist
             | 316 // HostComputer
-            | 318 // WhitePoint
-            | 319 // PrimaryChromaticities
             | 321 // HalftoneHints
             | 326 // BadFaxLines
             | 327 // CleanFaxData
@@ -207,6 +225,15 @@ mod tests {
             SUB_IFDS,
             XMP,
             COPYRIGHT,
+            IMAGE_DESCRIPTION,
+            MAKE,
+            MODEL,
+            ORIENTATION,
+            SOFTWARE,
+            DATE_TIME,
+            ARTIST,
+            WHITE_POINT,
+            PRIMARY_CHROMATICITIES,
             IPTC_NAA,
             EXIF_IFD,
             ICC_PROFILE,
