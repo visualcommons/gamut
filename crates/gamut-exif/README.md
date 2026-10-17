@@ -158,9 +158,9 @@ specification puts it in — the Exif and GPS pointers from the 0th IFD, the Int
 from the Exif sub-IFD — so a name for them would only invite a write that is silently discarded.
 (One written into some other directory is not one the writer looks for: it survives as an ordinary
 field that no accessor reads.) The crate also gives full read/write
-round-trips over `gamut-ifd`, the typed [`GpsInfo`] projection, and JPEG thumbnails. Intentionally
-deferred (and designed to be added without breaking the 1.0 API — the catalogue and vendor enums
-are `#[non_exhaustive]`):
+round-trips over `gamut-ifd`, the typed [`GpsInfo`] projection, and both JPEG and uncompressed
+strip thumbnails. Intentionally deferred (and designed to be added without breaking the 1.0 API —
+the catalogue and vendor enums are `#[non_exhaustive]`):
 
 - **Per-vendor MakerNote decoding.** The `MakerNote` block is preserved verbatim and its vendor
   detected ([`MakerNoteVendor`]), but not decoded. Since issue #263 a parsed model records the
@@ -176,7 +176,6 @@ are `#[non_exhaustive]`):
   (`tests/fixtures/dc008_tag_columns.txt`, compared by `tests/tag_spec_columns.rs`), so a
   *corrected-but-different* value in either copy fails a test; but nothing re-reads the vendored
   PDF, so an error made identically in both transcriptions would still pass.
-- **Uncompressed strip-based thumbnails** are read but not re-embedded (JPEG thumbnails are).
 
 ## Status
 

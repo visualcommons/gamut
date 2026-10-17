@@ -390,8 +390,52 @@ impl ExifReader {
         // site's two condition mutants; the tests pinning the drop now kill nothing there.
         let mut ifd = ifd;
         ifd.remove(ptr);
-        Ok(Thumbnail::from_parts(ifd, jpeg))
+        // `StripOffsets` is structural in the same way, but only once its strips are in hand: the
+        // writer re-synthesises it from them. Strips that did not read leave the directory exactly
+        // as the source had it — the behaviour before strips were extracted at all.
+        let strips = read_strips(reader, &ifd)?;
+        if strips.is_some() {
+            ifd.remove(ifd_tags::STRIP_OFFSETS);
+        }
+        Ok(Thumbnail::from_parts(ifd, jpeg, strips))
     }
+}
+
+/// Fetches every strip of the 1st IFD's `StripOffsets` / `StripByteCounts` arrays (Exif 3.0
+/// §4.6.9.2 Table 21, the uncompressed thumbnail columns), or `None` when the pair does not
+/// describe a readable set of strips.
+///
+/// Read whatever `Compression` says, for the reason `read_thumbnail` gives for the JPEG pair: the
+/// rule is structural, not a Table 21 support-level check. `None` covers a missing or non-integer
+/// half of the pair, arrays of unequal or zero length, and any range not wholly inside the stream.
+/// Like `read_range`, the bound comes before any allocation: the strips' *total* length must fit
+/// in the stream, since each strip alone fitting would still let `n` overlapping strips allocate
+/// `n` times the stream. A conformant thumbnail's strips are disjoint ranges of the blob, so no
+/// conformant input exceeds that total; what it stops accepting is a 1st IFD whose strips overlap
+/// by more than the stream's own length, whose directory is then kept as the source had it.
+///
+/// No drop is reported for an unreadable set: `DroppedRegion` names the JPEG range only, and the
+/// directory keeps its `StripOffsets`, so nothing the source held is discarded from the model.
+fn read_strips<S: ReadAt>(reader: &mut IfdReader<S>, ifd: &Ifd) -> Result<Option<Vec<Vec<u8>>>> {
+    let (Some(offsets), Some(counts)) = (
+        ifd.get_u32_vec(ifd_tags::STRIP_OFFSETS),
+        ifd.get_u32_vec(ifd_tags::STRIP_BYTE_COUNTS),
+    ) else {
+        return Ok(None);
+    };
+    if offsets.is_empty() || offsets.len() != counts.len() {
+        return Ok(None);
+    }
+    let total: u64 = counts.iter().map(|&c| u64::from(c)).sum();
+    if total > reader.source_mut().len()? {
+        return Ok(None);
+    }
+    let strips = offsets
+        .into_iter()
+        .zip(counts)
+        .map(|(offset, length)| read_range(reader, offset, length))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(strips.into_iter().collect())
 }
 
 /// Records each of `offsets` — the top-level directories past the 1st IFD, which parse cleanly but
@@ -781,6 +825,125 @@ mod tests {
         let mut out = MARKER.to_vec();
         out.extend(tiff);
         out
+    }
+
+    /// `build(len)` where `len` is the TIFF-stream length `build` itself produces: the length
+    /// depends only on each field's type and count, never on its values, so an offset or byte
+    /// count can name the stream's own end.
+    fn sized(build: impl Fn(u32) -> Vec<u8>) -> Vec<u8> {
+        let len = (build(0).len() - MARKER.len()) as u32;
+        build(len)
+    }
+
+    /// A marked blob whose uncompressed 1st IFD addresses `strips`, appended contiguously past the
+    /// directories, through `StripOffsets` and a SHORT `StripByteCounts`.
+    fn strip_blob(strips: &[&[u8]]) -> Vec<u8> {
+        let counts = Value::Short(strips.iter().map(|s| s.len() as u16).collect());
+        let mut blob = sized(|base| {
+            let mut at = base;
+            let offsets = strips
+                .iter()
+                .map(|s| {
+                    let o = at;
+                    at += s.len() as u32;
+                    o
+                })
+                .collect();
+            thumbnail_blob_of(&[
+                (ExifTag::Compression.tag_id(), Value::Short(vec![1])),
+                (ifd_tags::STRIP_OFFSETS, Value::Long(offsets)),
+                (ifd_tags::STRIP_BYTE_COUNTS, counts.clone()),
+            ])
+        });
+        for strip in strips {
+            blob.extend_from_slice(strip);
+        }
+        blob
+    }
+
+    /// An uncompressed thumbnail's strips are read in `StripOffsets` order, and the offsets leave
+    /// the model as the JPEG pointer does: the writer re-synthesises them. `StripByteCounts`
+    /// stays, as `JPEGInterchangeFormatLength` does.
+    #[test]
+    fn strip_thumbnail_bytes_are_read_and_their_offsets_leave_the_model() {
+        let strips: [&[u8]; 2] = [b"abc", b"defgh"];
+        let exif = ExifReader::new()
+            .strict(true)
+            .parse(&strip_blob(&strips))
+            .expect("parse");
+        let thumb = exif.thumbnail().expect("thumbnail");
+        assert_eq!(
+            thumb.strips(),
+            Some(&[b"abc".to_vec(), b"defgh".to_vec()][..])
+        );
+        assert_eq!(thumb.ifd().get(ifd_tags::STRIP_OFFSETS), None);
+        assert_eq!(
+            thumb.ifd().get(ifd_tags::STRIP_BYTE_COUNTS),
+            Some(&Value::Short(vec![3, 5]))
+        );
+    }
+
+    /// Every way the pair can fail to describe readable strips yields no strips and leaves the
+    /// directory as the source had it — `StripOffsets` included — with nothing reported.
+    ///
+    /// The overlap case is the allocation bound: two strips each wholly inside the stream, whose
+    /// total is twice its length.
+    #[test]
+    fn unreadable_strips_leave_the_directory_as_the_source_had_it() {
+        let so = ifd_tags::STRIP_OFFSETS;
+        let sbc = ifd_tags::STRIP_BYTE_COUNTS;
+        /// `StripByteCounts`, if any, given the stream's own length.
+        type Counts = fn(u32) -> Option<Value>;
+        // (case, StripOffsets, StripByteCounts)
+        let cases: [(&str, Value, Counts); 5] = [
+            ("out of bounds", Value::Long(vec![0xFFFF]), |_| {
+                Some(Value::Long(vec![4]))
+            }),
+            ("no byte counts", Value::Long(vec![8]), |_| None),
+            ("unequal lengths", Value::Long(vec![8, 8]), |_| {
+                Some(Value::Long(vec![1]))
+            }),
+            ("empty arrays", Value::Long(vec![]), |_| {
+                Some(Value::Long(vec![]))
+            }),
+            (
+                "overlap past the stream's length",
+                Value::Long(vec![0, 0]),
+                |len| Some(Value::Long(vec![len, len])),
+            ),
+        ];
+        for (name, offsets, counts) in cases {
+            let blob = sized(|len| {
+                let mut fields = vec![(so, offsets.clone())];
+                fields.extend(counts(len).map(|c| (sbc, c)));
+                thumbnail_blob_of(&fields)
+            });
+            let (exif, report) = ExifReader::new()
+                .strict(true)
+                .parse_with_report(&blob)
+                .expect("strict parse");
+            assert!(report.is_empty(), "{name}: {:?}", report.dropped());
+            let thumb = exif.thumbnail().expect("thumbnail");
+            assert_eq!(thumb.strips(), None, "{name}");
+            assert_eq!(thumb.ifd().get(so), Some(&offsets), "{name}");
+        }
+    }
+
+    /// A strip set whose total is exactly the stream's length is inside the bound: one strip
+    /// spanning the whole TIFF stream, header included.
+    #[test]
+    fn strips_totalling_the_stream_length_are_read() {
+        let blob = sized(|len| {
+            thumbnail_blob_of(&[
+                (ifd_tags::STRIP_OFFSETS, Value::Long(vec![0])),
+                (ifd_tags::STRIP_BYTE_COUNTS, Value::Long(vec![len])),
+            ])
+        });
+        let exif = Exif::parse(&blob).expect("parse");
+        assert_eq!(
+            exif.thumbnail().and_then(Thumbnail::strips),
+            Some(&[blob[MARKER.len()..].to_vec()][..])
+        );
     }
 
     /// A thumbnail pointer whose bytes were dropped never reaches the model, so `to_bytes` cannot
