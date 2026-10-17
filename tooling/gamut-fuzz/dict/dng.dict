@@ -194,12 +194,6 @@ makernote_apple="Apple iOS\x00\x00\x01MM"
 makernote_leica_m10="LEICA\x00\x02\x00"
 makernote_leica_m_monochrom="LEICA0\x03\x00"
 dng_private_data_adobe="Adobe\x00MakN"
-# Not in the sample files: the headers other vendors' MakerNotes open with.
-makernote_nikon="Nikon\x00\x02"
-makernote_olympus="OLYMPUS\x00II"
-makernote_olymp="OLYMP\x00"
-makernote_fujifilm="FUJIFILM"
-makernote_panasonic="Panasonic\x00\x00\x00"
-makernote_sony="SONY DSC \x00\x00\x00"
-makernote_pentax="PENTAX \x00"
-makernote_pentax_aoc="AOC\x00"
+# Other vendors' MakerNote headers (Nikon, Olympus, Fujifilm, Panasonic, Sony, Pentax) are left
+# out: no sample file carries one, and no fuzzed parser reads a MakerNote's bytes — `gamut-exif`
+# keeps the block opaque and detects its vendor from `Make` — so they would steer nothing.
