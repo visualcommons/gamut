@@ -109,7 +109,8 @@ assert_eq!(
 
 Enable the optional `describe` feature (also included by `full`) for the enumerated tags' meanings
 in the specification's own wording — `describe(ExifTag::ResolutionUnit, 2)` is `Some("inches")`,
-`described_values` gives a tag's whole defined domain, and `flash` decomposes the `Flash` bitfield.
+`described_values` gives a tag's whole defined domain, `default_value` the code in it the spec
+names as the default (`Some(2)` for `ResolutionUnit`), and `flash` decomposes the `Flash` bitfield.
 It is off by default: a display table is several kilobytes of static strings that a consumer which
 only writes or round-trips metadata never reads. Only a crate that depends on `gamut-exif`
 directly can turn it on — neither the `gamut-metadata` facade nor the `gamut` umbrella forwards it
