@@ -46,8 +46,7 @@ fn main() {
 fn gamut(jpeg: &[u8]) -> Vec<u8> {
     DecodeImage::<Rgb8>::decode_image(&JpegDecoder::new(), jpeg)
         .expect("gamut decode")
-        .as_samples()
-        .to_vec()
+        .into_samples()
 }
 
 fn zune(jpeg: &[u8]) -> Vec<u8> {

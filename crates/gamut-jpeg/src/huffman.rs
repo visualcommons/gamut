@@ -158,6 +158,8 @@ pub struct DecTable {
     /// value` when the procedure stops at a `length ≤ LOOKAHEAD` code that maps to `value`, and `0`
     /// otherwise (a longer code, or one the procedure rejects). The decoder's fast path; anything
     /// it marks `0` goes through the procedure itself, so the table changes speed, never outcome.
+    /// §F.2.2.3 presents Figure F.16 as one implementation of `DECODE` among "many other[s]
+    /// possible"; this is the usual one.
     lookup: Box<[u16; 1 << LOOKAHEAD]>,
 }
 

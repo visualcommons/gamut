@@ -13,6 +13,9 @@
 //! - `gamut` -- `JpegDecoder::decode_image` to `Rgb8`, the build under test.
 //! - `zune-jpeg` -- the pure-Rust reference the issue measures the gap against, to RGB.
 //! - `libjpeg-turbo` -- the crate's oracle, to RGB: the output reference, and a second yardstick.
+//!   Its time includes one copy the binding makes out of the C allocation (`tooling/libjpeg-oracle`
+//!   `take_owned`). gamut's includes the copy its own presentation makes through
+//!   `gamut_core::convert`, which a caller pays too; the arm itself copies nothing.
 //!
 //! Columns: `input,width,height,jpeg_bytes,variant,decoder,sample,decode_ns,output_fnv64,
 //! max_abs_diff_vs_libjpeg,mean_abs_diff_vs_libjpeg`. `decode_ns` is one wall-clock decode;
@@ -48,8 +51,7 @@ fn decode(decoder: &str, jpeg: &[u8]) -> Vec<u8> {
     match decoder {
         "gamut" => DecodeImage::<Rgb8>::decode_image(&JpegDecoder::new(), jpeg)
             .expect("gamut decode")
-            .as_samples()
-            .to_vec(),
+            .into_samples(),
         "zune-jpeg" => zune_jpeg::JpegDecoder::new(ZCursor::new(jpeg))
             .decode()
             .expect("zune-jpeg decode"),
