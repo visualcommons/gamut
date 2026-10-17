@@ -23,7 +23,20 @@ if [ "$#" -eq 0 ]; then
 	echo "A crash is minimised (cargo +nightly fuzz tmin --fuzz-dir $FUZZ_DIR <target> <input>)"
 	echo "and then promoted into a NAMED DETERMINISTIC TEST in the crate's own suite."
 	echo "The corpus is a search aid, not the regression record."
+	echo
+	echo "  mise run fuzz cmin <target> <corpus-dir>              # minimise a corpus in place"
 	exit 0
+fi
+
+# `mise run fuzz cmin <target> <dir>` minimises a corpus directory in place (#603): the Extended job
+# runs it on the persisted search corpus before caching it, so the cache holds the inputs that add
+# coverage rather than everything the engine ever wrote. A subcommand of this runner rather than a
+# bare `cargo fuzz cmin` in the workflow so it carries the same host-triple pin as `run` below and a
+# contributor reproduces exactly what CI does. No target is named `cmin`; `check-targets.sh` keeps
+# the target set to the files under `fuzz_targets/`.
+if [ "$1" = "cmin" ]; then
+	shift
+	exec cargo +nightly fuzz cmin --fuzz-dir "$FUZZ_DIR" --target "$target" "$@"
 fi
 
 # ── Reconstructing the `--` cargo-fuzz needs ────────────────────────────────────────────────

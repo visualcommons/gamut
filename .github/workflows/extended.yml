@@ -166,6 +166,20 @@ jobs:
         # the ordering ci.yml's lint job documents for cbindgen. `MISE_TASK_RUN_AUTO_INSTALL` is
         # false for this job, so `mise run fuzz` below will not silently reinstall it either.
         run: mise install cargo:cargo-fuzz
+      - name: Restore the ${{ matrix.target }} search corpus
+        # The engine's search state persists between runs (#603), so a run resumes where the last
+        # one stopped instead of re-deriving it from the seeds. It lives in `state/<target>/`, NOT
+        # in `corpus/<target>/`: the seeds there are tracked and curated, the search state is
+        # ignored (.gitignore) and cache-only, and keeping them in separate directories is what
+        # stops either the cache or a checkout from blurring the two. Cache keys are immutable, so
+        # every run saves under its own id and restores the newest entry for its target by prefix.
+        # A miss (first run, or the entry evicted after seven days unused or under the repository's
+        # 10 GB cap) is the old cold start, not a failure.
+        uses: actions/cache/restore@v4
+        with:
+          path: tooling/gamut-fuzz/state/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: Fuzz ${{ matrix.target }}
         # Time-bounded so the job terminates: this tier is unbounded by nature, which is exactly
         # why it is here and not in the per-PR `coverage` gate (see docs/testing.md). Ten minutes
@@ -180,12 +194,32 @@ jobs:
         # per-row status rather than this workflow's aggregate until both close. Restoring the
         # aggregate's meaning is #593.
         #
-        # CADENCE (#594), decided: this job stays on the workflow's own trigger. Nothing
-        # accumulates between runs -- each starts from the committed seeds and discards what the
-        # engine finds -- so a run is ten minutes of cold search whatever the cadence, and running
-        # less often just searches less. Persisting the corpus (#603) is the change that makes
-        # frequency and this time budget worth tuning; the README states the full argument.
-        run: mise run fuzz ${{ matrix.target }} -- -max_total_time=600
+        # CORPUS (#603): libFuzzer writes new inputs into the FIRST corpus directory only, so the
+        # restored `state/<target>/` comes first and takes every finding, and the seed directory
+        # follows as read-only input. Both are created up front: a target with no committed seeds
+        # has no `corpus/<target>/` in a checkout (git tracks no empty directory), and libFuzzer
+        # exits on a corpus directory that does not exist.
+        #
+        # CADENCE (#594): this job still runs on the workflow's own trigger at 600 s. Now that the
+        # corpus accumulates, the cadence and this budget are worth re-tuning; that is #594's
+        # decision, not this step's. The README states the argument.
+        run: |
+          mkdir -p tooling/gamut-fuzz/state/${{ matrix.target }} tooling/gamut-fuzz/corpus/${{ matrix.target }}
+          mise run fuzz ${{ matrix.target }} tooling/gamut-fuzz/state/${{ matrix.target }} tooling/gamut-fuzz/corpus/${{ matrix.target }} -- -max_total_time=600
+      - name: Minimise the ${{ matrix.target }} search corpus
+        # `cargo fuzz cmin` keeps only the inputs that add coverage, so the cached corpus is
+        # bounded by what the target can reach rather than growing with every run. It runs and the
+        # corpus is saved even when the fuzz step failed: a crash leaves the inputs found before it
+        # just as valid, and the crashing input itself goes to `artifacts/`, never the corpus. Not
+        # on a cancelled run, whose corpus may be half-written.
+        if: ${{ !cancelled() }}
+        run: mise run fuzz cmin ${{ matrix.target }} tooling/gamut-fuzz/state/${{ matrix.target }}
+      - name: Save the ${{ matrix.target }} search corpus
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: tooling/gamut-fuzz/state/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload any crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4
