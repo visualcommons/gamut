@@ -3378,21 +3378,29 @@ mod typed {
         ///
         /// EXIF goes to [`with_exif`](Self::with_exif) with the facade's `Exif\0\0` signature
         /// stripped (the setter takes the bare TIFF stream and adds HEIF's own
-        /// `exif_tiff_header_offset`), XMP to [`with_xmp`](Self::with_xmp), ICC to
-        /// [`with_icc_profile`](Self::with_icc_profile), and a C2PA store — which
-        /// [`MetadataEmbedder::embed`] never fills, so only a caller that produced one for this
-        /// file assigns it — to [`with_c2pa`](Self::with_c2pa). Fields that are `None` leave any
-        /// earlier raw setting untouched.
+        /// `exif_tiff_header_offset`), XMP to [`with_xmp`](Self::with_xmp) and ICC to
+        /// [`with_icc_profile`](Self::with_icc_profile). Fields that are `None` leave any earlier
+        /// raw setting untouched.
         ///
         /// # Errors
         ///
-        /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream: HEIF
-        /// defines no IPTC-IIM item type. Nothing is applied when an error is returned.
+        /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (HEIF
+        /// defines no IPTC-IIM item type) or a C2PA manifest store. A store is never embedded from
+        /// metadata blocks: it is signed over the bytes of the one file it was made for, so a
+        /// store computed for this output goes through [`with_c2pa`](Self::with_c2pa) /
+        /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) instead. Nothing is applied when an
+        /// error is returned.
         pub fn with_encoded_metadata(mut self, encoded: &EncodedMetadata) -> Result<Self> {
             if encoded.iptc_iim.is_some() {
                 return Err(Error::unsupported(
                     env!("CARGO_PKG_NAME"),
                     "AVIF: IPTC-IIM has no item type",
+                ));
+            }
+            if encoded.c2pa.is_some() {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: a C2PA manifest store is not embedded from metadata blocks",
                 ));
             }
             if let Some(exif) = &encoded.exif {
@@ -3403,9 +3411,6 @@ mod typed {
             }
             if let Some(icc) = &encoded.icc {
                 self = self.with_icc_profile(icc);
-            }
-            if let Some(c2pa) = &encoded.c2pa {
-                self = self.with_c2pa(c2pa);
             }
             Ok(self)
         }
@@ -3482,8 +3487,7 @@ mod typed {
         fn encoded_blocks_route_to_the_raw_setters() {
             // Each present field lands in its item / property / box — the EXIF one without the
             // facade's signature — and an absent one leaves an earlier setting.
-            let mut encoded = typed().encode().unwrap();
-            encoded.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
+            let encoded = typed().encode().unwrap();
             let file = encode(
                 &AvifEncoder::lossless()
                     .with_encoded_metadata(&encoded)
@@ -3503,10 +3507,6 @@ mod typed {
                 encoded.xmp.as_deref()
             );
             assert_eq!(image.primary_item().icc_profile(), encoded.icc.as_deref());
-            assert_eq!(
-                container.c2pa_slot().and_then(|slot| slot.store()),
-                encoded.c2pa.as_deref()
-            );
 
             let mut only_icc = EncodedMetadata::default();
             only_icc.icc = encoded.icc.clone();
@@ -3544,7 +3544,7 @@ mod typed {
         }
 
         #[test]
-        fn iptc_iim_is_a_typed_unsupported_error() {
+        fn unembeddable_carriers_are_typed_unsupported_errors() {
             let mut iim = EncodedMetadata::default();
             iim.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
             let err = AvifEncoder::lossless()
@@ -3554,6 +3554,17 @@ mod typed {
             assert_eq!(
                 err.static_message(),
                 Some("AVIF: IPTC-IIM has no item type")
+            );
+
+            let mut c2pa = EncodedMetadata::default();
+            c2pa.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
+            let err = AvifEncoder::lossless()
+                .with_encoded_metadata(&c2pa)
+                .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                err.static_message(),
+                Some("AVIF: a C2PA manifest store is not embedded from metadata blocks")
             );
         }
 
