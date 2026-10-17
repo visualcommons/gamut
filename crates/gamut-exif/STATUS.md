@@ -27,6 +27,7 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
 | P9 | §4.6 | `ReadAt` streaming entry point + lenient-drop report (`ReadReport`, scoped to the regions `DroppedRegion` names) | ✅ |
 | P11 | §4.6 | Read-report depth (issue #521): opt-in per-entry recovery (`ExifReader::recover_entries` → `ReadReport::dropped_entries`, over `gamut_ifd::IfdReader::decode_ifd_lenient`), opt-in byte-completeness verdict (`ExifReader::audit_bytes` → `ReadReport::byte_audit`), real-camera-DNG laziness case (`tooling/gamut-dng-real-conformance/tests/exif_laziness.rs`, extended tier) | ✅ |
 | P12 | §4.6 | Shadowed duplicate tags (issue #719): every directory the model keeps is decoded through `gamut_ifd::IfdReader::decode_ifd_reporting` (or `decode_ifd_lenient` under recovery), and each entry a repeated tag shadowed is a `ReadReport::dropped_entries` record with `EntryDropReason::Shadowed`, in every mode | ✅ |
+| P13 | §4.6.5.2, §4.6.9.2 | Unreadable strip thumbnails (issue #868): an integer `StripOffsets` naming strips that cannot be read is a `DroppedRegion::ThumbnailStrips` drop (`DropReason::StripsUnsized` / `OutOfBounds` / `StripsOverlap`) and a strict-mode `ExifError::BadThumbnail`, and `StripOffsets` leaves the model whenever its strips do not, so the writer never re-emits offsets addressing nothing | ✅ |
 | P10 | §4.6 | Full DC-008 tag breadth + per-tag value shape + value descriptions (issue #417) | ✅ |
 
 ## P10 — what the catalogue now covers

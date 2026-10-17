@@ -54,8 +54,8 @@ points:
   async caller drives the source itself, which keeps a runtime dependency out of the crate.
 - **`parse_with_report`** (and its `parse_from_with_report` twin) returns a `ReadReport` alongside
   the `Exif`, naming each region the lenient reader discarded — a malformed Exif/GPS/Interop
-  sub-IFD, an unusable thumbnail range, or a top-level directory past the 1st IFD — with the tag
-  that addressed it, the offset it carried, and a typed reason. `parse` stays silent, as before.
+  sub-IFD, an unusable thumbnail range or strip set, or a top-level directory past the 1st IFD —
+  with the tag that addressed it, the offset it carried, and a typed reason. `parse` stays silent, as before.
   It also names, in `ReadReport::dropped_entries`, every entry a repeated tag shadowed in a
   directory the model keeps (the last occurrence wins). The report is complete over those regions
   and entries, but its drop lists are **not** a byte-completeness verdict: bytes no structure
@@ -122,6 +122,16 @@ drops altitude. Malformed references, rationals, DMS components, and out-of-rang
 the typed [`GpsConversionError`].
 
 ## Compatibility
+
+**One read verdict changed after 2.0.0.** A 1st IFD whose integer `StripOffsets` names strips that
+cannot be read — `StripByteCounts` absent, not an integer array or of a different length; a strip
+outside the blob; or strips overlapping past the blob's length — used to parse as a thumbnail with
+no strips, its `StripOffsets` kept and re-emitted by the writer addressing nothing. It is now a
+**loss**, named in the report as a `DroppedRegion::ThumbnailStrips` drop
+(`DropReason::StripsUnsized`, `OutOfBounds` or `StripsOverlap`), its `StripOffsets` removed from
+the model, and **rejected by `strict`** with `ExifError::BadThumbnail`. As with the JPEG pair below, it refuses no conformant
+input: Exif 3.0 §4.6.5.2.1/§4.6.5.2.3 give both tags the same count and Table 21 the same support
+level in every column, and a conformant thumbnail's strips are disjoint ranges of the blob.
 
 **One read verdict changed after 1.0.0.** A 1st IFD carrying `JPEGInterchangeFormat` with no
 `JPEGInterchangeFormatLength` used to parse as a thumbnail that simply had no bytes; it is a
