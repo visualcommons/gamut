@@ -58,6 +58,8 @@ gamut-dng-oracle = { path = "../../tooling/gamut-dng-oracle" }
 libtiff-oracle = { path = "../../tooling/libtiff-oracle" }
 # Self-dependency enabling `jxl-encode` for the test suite, so the JPEG XL encode ⇄ decode ⇄
 # Adobe-oracle round-trips always run (the oracle already builds libjxl, so this adds no cost).
+# Dev-dependencies reach the benches too, so `benches/codec.rs`'s `jxl-encode`-gated JPEG XL
+# cells run under a plain `cargo bench`.
 gamut-dng = { path = ".", features = ["jxl-encode"] }
 divan.workspace = true
 

@@ -520,7 +520,7 @@ impl FileCase {
             .map_err(|e| format!("{label}: SDK decode: {e}"))?;
         Ok(FileCase {
             label,
-            gamut_raw_bytes: gamut.raw.samples().len() * size_of::<u16>(),
+            gamut_raw_bytes: size_of_val(gamut.raw.samples()),
             sdk_raw_bytes: sdk.samples * size_of::<u16>(),
             bytes,
         })
@@ -627,9 +627,7 @@ fn file_jobs() -> Vec<FileJob> {
     FILE_CASES
         .cases
         .iter()
-        .flat_map(|case| {
-            [DngImpl::Gamut, DngImpl::AdobeSdk].map(|imp| FileJob { case, imp })
-        })
+        .flat_map(|case| [DngImpl::Gamut, DngImpl::AdobeSdk].map(|imp| FileJob { case, imp }))
         .collect()
 }
 
