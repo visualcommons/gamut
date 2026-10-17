@@ -1152,9 +1152,12 @@ fn carry(
         return carried;
     }
     // `ExifWriter` re-embeds a thumbnail's JPEG bytes and its uncompressed strips, but a thumbnail
-    // whose image bytes did not read holds neither, and its directory would come out with
-    // `JPEGInterchangeFormat`/`StripOffsets` addressing nothing. Such a thumbnail is dropped
-    // rather than written dangling.
+    // whose image bytes did not read holds neither. The reader has already removed its
+    // `JPEGInterchangeFormat`/`StripOffsets` (#548, #868), so nothing would dangle; the 1st IFD
+    // would instead come out as a thumbnail with no image — its sizing tags
+    // (`JPEGInterchangeFormatLength`, `StripByteCounts`) measuring bytes that are not there, and
+    // the offset tag Exif 3.0 §4.6.9.2 Table 21 marks `M` in its format's column missing. Such a
+    // thumbnail is dropped rather than written imageless.
     if exif
         .thumbnail()
         .is_some_and(|thumb| thumb.jpeg().is_none() && thumb.strips().is_none())
