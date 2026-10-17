@@ -12,8 +12,8 @@
 //!   ([`Direction::Write`]) the carrier as a raw payload? This is the crate's own surface
 //!   (`metadata()` / `with_exif`-style setters).
 //! - [`typed_wiring`] — does the format crate also expose the facade's typed models directly
-//!   (`blocks()` / `metadata()` accessors and a `with_metadata` encoder builder), behind that
-//!   crate's optional `metadata` Cargo feature where it has one?
+//!   (a [`TypedMetadata`](crate::TypedMetadata) impl and a `with_metadata` encoder builder),
+//!   behind that crate's optional `metadata` Cargo feature where it has one?
 //!
 //! Both answer for the surface a crate **defines**, not for what a particular build compiled: a
 //! `const fn` sees neither the Cargo features another crate was built with nor the target. Each
@@ -218,8 +218,9 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
     }
 }
 
-/// Whether the crate for `format` exposes the facade's typed models directly — `blocks()` /
-/// `metadata()` accessors on its decoded metadata and a `with_metadata` builder on its encoder.
+/// Whether the crate for `format` exposes the facade's typed models directly — a
+/// [`TypedMetadata`](crate::TypedMetadata) impl on its decoded metadata and a `with_metadata`
+/// builder on its encoder.
 ///
 /// `false` means the crate still hands its payloads over as raw bytes that a caller feeds to
 /// [`Metadata::from_blocks`](crate::Metadata::from_blocks) by hand.
@@ -235,8 +236,8 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
 #[must_use]
 pub const fn typed_wiring(format: Format) -> bool {
     match format {
-        // gamut-dng STATUS.md P16 (#353): `DngMetadata::exif` is the facade's `Exif`, `blocks()`
-        // hands over the byte carriers. gamut-jpeg / gamut-jxl / gamut-heic: the `metadata`
+        // gamut-dng STATUS.md P16 (#353): `DngMetadata::exif` is the facade's `Exif`, its
+        // `TypedMetadata` impl hands over the byte carriers. gamut-jpeg / gamut-jxl / gamut-heic: the `metadata`
         // feature (issue #420).
         Format::Dng | Format::Jpeg | Format::Jxl | Format::Heic => true,
         // Raw payloads only, tracked by the #420 remainder.
