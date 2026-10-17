@@ -204,11 +204,16 @@ run = "./tooling/gamut-fuzz/run.sh"
 # is workspace-excluded *and* nothing depends on it, so `clippy --workspace --all-targets` and
 # `test --workspace` never build it, and an API change in gamut-ifd, gamut-tiff, gamut-dng,
 # gamut-isobmff or gamut-heic can break every target while all four required checks stay green.
-# Build-only: no nightly, no sanitizer, no engine, so it stays bounded and reproducible and does
+# Clippy only: no nightly, no sanitizer, no engine, so it stays bounded and reproducible and does
 # not put a coverage-guided run on the pull-request path (docs/testing.md).
+#
+# Clippy rather than `cargo check` (#615): it subsumes the compile this task exists for -- an API
+# break in a driven crate still fails it -- and adds the workspace's own `-D warnings` oracle, so
+# the tier is no longer the one place CI compiles code without linting it. Same step, stricter
+# oracle; `check-dng-real` below makes the same switch.
 [tasks.check-fuzz]
-description = "Compile the fuzz tier's targets (no nightly, no engine)"
-run = "cargo check --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets"
+description = "Compile and lint the fuzz tier's targets with Clippy (no nightly, no engine)"
+run = "cargo clippy --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets -- -D warnings"
 
 # The drift guard for the three hand-maintained lists that describe the same target set: the files
 # under `fuzz_targets/`, the `[[bin]]` entries, and `extended.yml`'s fuzz matrix. Missing from the
@@ -227,11 +232,13 @@ run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
 # path — so `clippy --workspace --all-targets` and `test --workspace` never build it, and a
 # gamut-dng API change can break it while every per-PR gate stays green (#353 removed
 # `DecodedDng::exif_extra` and only master's extended run noticed, at compile time, before a
-# single sample was decoded). `check` needs no corpus, which is what makes this cheap enough for
-# the lint job; the corpus-backed assertions stay in `test-dng-real`.
+# single sample was decoded). Clippy needs no corpus, which is what makes this cheap enough for
+# the lint job; the corpus-backed assertions stay in `test-dng-real`. It runs Clippy under
+# `-D warnings` rather than `cargo check` for the reason `check-fuzz` above does (#615): the same
+# compile, plus the lint oracle every workspace crate already answers to.
 [tasks.check-dng-real]
-description = "Compile the real-camera DNG conformance tier (no corpus needed)"
-run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml --all-targets"
+description = "Compile and lint the real-camera DNG conformance tier with Clippy (no corpus needed)"
+run = "cargo clippy --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml --all-targets -- -D warnings"
 
 # The C2PA differential oracle (issue #447 under the #239 epic). Like the tier above it is
 # workspace-excluded *and* nothing depends on it, so no per-PR gate reaches it; unlike that tier it
