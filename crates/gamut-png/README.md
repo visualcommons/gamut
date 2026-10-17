@@ -67,7 +67,9 @@ and belongs in a shared gamut-core facility.
 ## Status
 
 Built incrementally; each phase is conformance-checked against libpng (see [STATUS.md](STATUS.md)).
-Encoder scope: all five colour types, bit depths 1/2/4/8/16, palette, the five scanline filters,
+Encoder scope: all five colour types, bit depths 1/2/4/8/16, palette (a caller-supplied one
+cleaned losslessly, and optionally reordered by modified-Zeng adjacency with
+`PngEncoder::with_palette_order`), the five scanline filters,
 lossless reductions over every input layout (palette, grey, alpha drop, sub-byte grey packing,
 16→8 demotion), the standard colour/text ancillary chunks, and embedded metadata
 (eXIf/iCCP/iTXt, and the C2PA manifest store with a reserve-then-fill slot). Encoding effort is
