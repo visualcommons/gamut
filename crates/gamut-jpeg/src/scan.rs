@@ -85,9 +85,10 @@ enum Fetch {
 /// are satisfied with `1`-padding so the final valid symbols still decode; the byte cursor stays
 /// parked on the marker.
 ///
-/// The buffer is 64 bits wide and [`Self::fill`] tops it up a whole byte at a time to more than 56
+/// The buffer is 64 bits wide and [`Self::fill`] tops it up four bytes at a time to more than 32
 /// bits, so a read is a shift and a mask rather than a byte fetch per request, and a Huffman code
-/// can be resolved from a single 16-bit [`Self::peek`] (issue #305). Prefetching runs ahead of what
+/// and the magnitude bits after it can be resolved from a single 32-bit [`Self::peek`] (issues
+/// #305, #897). Prefetching runs ahead of what
 /// the decoder has consumed, and is invisible to every caller: whatever it appends past the
 /// entropy data -- `1`-padding at a marker, zero bytes at the end of a truncated stream -- is
 /// counted in [`Self::pad_bits`], and [`Self::consume`] is where reaching into it is judged, so a
@@ -157,10 +158,11 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Tops the buffer up with as many whole bytes as its 64 bits have room for: entropy data while
-    /// there is some, then `1`-padding past a marker or zero bytes past the end of a truncated
-    /// stream, both counted in [`Self::pad_bits`]. Afterwards at least 57 bits are buffered, so any
-    /// read of up to 32 bits can be [`Self::peek`]ed.
+    /// Tops the buffer up once 32 or fewer bits are left in it, four whole bytes at a time (eight
+    /// when it is empty): entropy data while there is some, then `1`-padding past a marker or zero
+    /// bytes past the end of a truncated stream, both counted in [`Self::pad_bits`]. Afterwards at
+    /// least 33 bits are buffered, so any read of up to 32 bits can be [`Self::peek`]ed, and a
+    /// buffer holding more than 32 is left alone -- most calls, one per coefficient, do nothing.
     ///
     /// When the next `room` bytes are all in the input and none of them is `0xFF`, they are plain
     /// entropy data -- no stuffing to undo, no marker to stop at -- and are loaded as one big-endian
@@ -168,8 +170,10 @@ impl<'a> BitReader<'a> {
     /// bytes go through [`Self::fetch`] one at a time. Both paths append the same bytes; the first
     /// only skips the per-byte classification.
     ///
-    /// The byte count is computed before the loop rather than re-tested against the buffered count
-    /// on each pass, so the loop is bounded by its own arithmetic whatever the body does.
+    /// The byte count is arithmetic in the buffered count -- `(64 − bit_count) / 32` words -- rather
+    /// than a threshold comparison, whose off-by-one mutant would only refill one call early and
+    /// so could not be told from the original. It is computed before the loop rather than
+    /// re-tested on each pass, so the loop is bounded by its own arithmetic whatever the body does.
     ///
     /// Each byte is composed with `+` rather than `|`: the shift just vacated 8 low zero bits and
     /// the addend is `< 256`, so the addition fills exactly those vacant bits (the same convention
@@ -177,7 +181,10 @@ impl<'a> BitReader<'a> {
     /// The word path shifts in two halves of `4 · room` because a single shift by `8 · room` is out
     /// of range for a `u64` when the buffer is empty (`room = 8`).
     fn fill(&mut self) {
-        let room = (64 - self.bit_count) / 8;
+        let room = (64 - self.bit_count) / 32 * 4;
+        if room == 0 {
+            return;
+        }
         let end = self.pos + room as usize;
         if let Some(bytes) = self.data.get(self.pos..end)
             && !bytes.contains(&0xFF)
@@ -207,7 +214,7 @@ impl<'a> BitReader<'a> {
     }
 
     /// The next `n` (`1..=32`) buffered bits, MSB-first, without consuming them. Valid after
-    /// [`Self::fill`], which leaves more than 32 bits buffered.
+    /// [`Self::fill`], which leaves at least 33 bits buffered.
     fn peek(&self, n: u32) -> u32 {
         ((self.bit_buf >> (self.bit_count - n)) & ((1u64 << n) - 1)) as u32
     }
