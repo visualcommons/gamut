@@ -10,6 +10,7 @@ use exiv2_oracle::{exif_count, exif_get, exif_roundtrip};
 use gamut_exif::{
     ByteOrder, Exif, ExifTag, ExifWriter, FieldType, IfdKind, Rational, TagCount, Value,
 };
+use gamut_ifd::tags::{self, TagBlock, TagSpec};
 
 /// A representative model spanning the 0th IFD and the Exif sub-IFD.
 fn sample() -> Exif {
@@ -80,16 +81,16 @@ fn exiv2_group(ifd: IfdKind) -> &'static str {
     }
 }
 
-/// A value satisfying the tag's CIPA DC-008 field type and component count, so exiv2 is asked
-/// about a tag written the way the spec says to write it.
-fn conforming_value(tag: ExifTag) -> Value {
-    let n = match tag.component_count() {
+/// A value satisfying a field-type list and component count, so exiv2 is asked about a tag
+/// written the way its specification says to write it.
+fn conforming(field_types: &[FieldType], count: TagCount) -> Value {
+    let n = match count {
         TagCount::Exact(n) => n as usize,
         TagCount::OneOf(ns) => ns.first().map_or(1, |&n| n as usize),
-        // `Any`, including the tags DC-008 does not define at all.
+        // `Any`, including the tags the specification does not constrain at all.
         _ => 2,
     };
-    match tag.field_types().first() {
+    match field_types.first() {
         // A string's component count includes the terminating NUL, so n - 1 characters.
         Some(FieldType::Ascii) => Value::Ascii("A".repeat(n.saturating_sub(1))),
         Some(FieldType::Utf8) => Value::Utf8("A".repeat(n.saturating_sub(1))),
@@ -98,9 +99,16 @@ fn conforming_value(tag: ExifTag) -> Value {
         Some(FieldType::Rational) => Value::Rational(vec![(1, 1); n]),
         Some(FieldType::SRational) => Value::SRational(vec![(1, 1); n]),
         Some(FieldType::Undefined) => Value::Undefined(vec![1; n]),
-        // `Byte`, and the tags with no DC-008 type at all.
+        Some(FieldType::Float) => Value::Float(vec![1.0; n]),
+        Some(FieldType::Double) => Value::Double(vec![1.0; n]),
+        // `Byte`, and the tags with no type at all.
         _ => Value::Byte(vec![1; n]),
     }
+}
+
+/// A value satisfying the tag's CIPA DC-008 field type and component count.
+fn conforming_value(tag: ExifTag) -> Value {
+    conforming(tag.field_types(), tag.component_count())
 }
 
 /// One stream per directory holding every tag gamut catalogues there, written conformantly.
@@ -184,6 +192,113 @@ fn each_divergent_tag_is_the_same_tag_under_exiv2s_own_name() {
         assert!(
             exif_get(bytes, &format!("{group}.{theirs}")).is_ok(),
             "exiv2 does not know {theirs} either, so the recorded spelling is wrong"
+        );
+    }
+}
+
+/// The 0th-IFD stream holding every row of a registry block that CIPA DC-008 does not already
+/// catalogue — the rows #532 added — written conformantly to the row's own specification.
+fn stream_of_registry_rows(block: TagBlock) -> (Vec<&'static TagSpec>, Vec<u8>) {
+    let rows: Vec<&'static TagSpec> = block
+        .specs()
+        .iter()
+        .filter(|spec| ExifTag::from_id(IfdKind::Image, spec.id).is_none())
+        .collect();
+    let mut exif = Exif::new(ByteOrder::LittleEndian);
+    for spec in &rows {
+        exif.image_mut()
+            .set(spec.id, conforming(spec.field_types, spec.count));
+    }
+    let bytes = ExifWriter::new()
+        .marker(false)
+        .write(&exif)
+        .expect("gamut writes every registry row");
+    (rows, bytes)
+}
+
+/// Registry rows exiv2 knows under a different name than the specification gives them, with
+/// exiv2's own spelling. The vendored specification wins, as for [`NAME_DIVERGENCES`].
+const REGISTRY_NAME_DIVERGENCES: &[(&str, &str)] = &[
+    // 0x0107: TIFF 6.0 spells it with a doubled "h" in Section 8 and Appendix A alike; exiv2
+    // corrects the spelling.
+    ("Threshholding", "Thresholding"),
+];
+
+/// Registry rows exiv2 0.28 has no `Exif.Image` entry for at all, under any name, so it keys them
+/// by number. All four are TIFF 6.0 Section 8 baseline fields. Recorded so an exiv2 that learns
+/// one shows up as a change here.
+const REGISTRY_ROWS_EXIV2_LACKS: &[&str] = &[
+    "MinSampleValue",
+    "MaxSampleValue",
+    "FreeOffsets",
+    "FreeByteCounts",
+];
+
+#[test]
+fn exiv2_knows_every_registry_row_by_the_name_its_specification_gives_it() {
+    // The registry's names are asserted against the reference implementation, block by block,
+    // for every row DC-008 does not already cover (those are held by the catalogue test above).
+    let mut unknown_to_exiv2 = Vec::new();
+    for block in [tags::TIFF6, tags::DNG] {
+        let (rows, bytes) = stream_of_registry_rows(block);
+        assert!(
+            exif_count(&bytes).expect("exiv2 decodes the stream") >= rows.len(),
+            "exiv2 read fewer tags than gamut wrote from {}",
+            block.specification()
+        );
+        for spec in rows {
+            if exif_get(&bytes, &format!("Exif.Image.{}", spec.name)).is_err() {
+                unknown_to_exiv2.push(spec.name);
+            }
+        }
+    }
+
+    let expected: Vec<&str> = REGISTRY_NAME_DIVERGENCES
+        .iter()
+        .map(|&(ours, _)| ours)
+        .chain(REGISTRY_ROWS_EXIV2_LACKS.iter().copied())
+        .collect();
+    let mut sorted = unknown_to_exiv2.clone();
+    sorted.sort_unstable();
+    let mut expected_sorted = expected;
+    expected_sorted.sort_unstable();
+    assert_eq!(
+        sorted, expected_sorted,
+        "the set of registry names exiv2 does not share changed"
+    );
+}
+
+#[test]
+fn each_divergent_registry_row_is_the_same_tag_under_exiv2s_own_name() {
+    let (_, tiff) = stream_of_registry_rows(tags::TIFF6);
+    let (_, dng) = stream_of_registry_rows(tags::DNG);
+    for &(ours, theirs) in REGISTRY_NAME_DIVERGENCES {
+        let bytes = if tags::TIFF6.specs().iter().any(|s| s.name == ours) {
+            &tiff
+        } else {
+            &dng
+        };
+        assert!(
+            exif_get(bytes, &format!("Exif.Image.{theirs}")).is_ok(),
+            "exiv2 does not know {theirs} either, so the recorded spelling is wrong"
+        );
+    }
+    // A row exiv2 lacks must still be one it read: it keys an unnamed tag by its number.
+    for &name in REGISTRY_ROWS_EXIV2_LACKS {
+        let spec = tags::TIFF6
+            .specs()
+            .iter()
+            .chain(tags::DNG.specs())
+            .find(|s| s.name == name)
+            .expect("a recorded row is a registry row");
+        let bytes = if tags::TIFF6.find(spec.id).is_some() {
+            &tiff
+        } else {
+            &dng
+        };
+        assert!(
+            exif_get(bytes, &format!("Exif.Image.0x{:04x}", spec.id)).is_ok(),
+            "exiv2 did not read {name} back even by number"
         );
     }
 }
