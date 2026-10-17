@@ -481,3 +481,31 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats
+
+  # The C2PA differential oracle (issues #447, #541): gamut-avif/gamut-heic manifest-store
+  # carriage cross-checked against c2pa-rs in both directions. The per-PR lint lane only compiles
+  # it (`check-c2pa`); this runs the assertions. A job of its own rather than a step in `real-dng`
+  # because it shares nothing with that one: c2pa-rs is built without OpenSSL, signing uses an
+  # in-memory `EphemeralSigner`, and the fixtures are encoded on the fly, so there is no
+  # submodule, no corpus, no network and no C oracle to build, and a DNG failure must not hide it.
+  c2pa:
+    name: C2PA differential oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v4
+        with:
+          # Only put `mise` on PATH: the task needs rustup + cargo and none of the [tools] entries.
+          install: false
+      - name: Clear pre-installed Rust toolchain
+        # Same rustup `bin/cargo-fmt` reinstall-conflict guard as ci.yml's check job.
+        run: rustup toolchain uninstall stable || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The crate is workspace-excluded, so it builds into its own target dir, not the root one.
+          workspaces: tooling/c2pa-oracle -> target
+      - name: Cross-check C2PA carriage against c2pa-rs
+        env:
+          MISE_TASK_RUN_AUTO_INSTALL: false
+        run: mise run test-c2pa
