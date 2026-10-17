@@ -101,8 +101,9 @@ mod reconcile;
 pub use charset::IimCharset;
 pub use error::{IptcError, Result};
 pub use extension::{
-    ArtworkOrObject, CreatorContactInfo, Entity, ImageRegion, Licensor, RegionBoundary,
-    RegionBoundaryPoint,
+    ArtworkOrObject, CopyrightOwner, CreatorContactInfo, CvTerm, EmbeddedRightsExpression, Entity,
+    EntityWithRole, ImageCreator, ImageRegion, ImageSupplier, Licensor, LinkedRightsExpression,
+    Location, Person, Product, RegionBoundary, RegionBoundaryPoint, RegistryEntry,
 };
 /// The XMP value model this crate's API speaks ([`XmpMeta`](gamut_xmp::XmpMeta),
 /// [`XmpProperty`](gamut_xmp::XmpProperty), …).

@@ -38,6 +38,12 @@ pub mod ns {
     /// *inside* IPTC Extension structures, as the `xmp:Identifier` field of an
     /// [`Entity`](crate::extension::Entity).
     pub const XMP: &str = WellKnownNs::Xmp.uri();
+    /// EXIF tags mirrored into XMP — `exif:`.
+    ///
+    /// Not an IPTC namespace, and deliberately absent from [`IPTC_NAMESPACES`](super::IPTC_NAMESPACES); it appears only
+    /// *inside* IPTC Extension structures, as the four `exif:GPS*` fields of a
+    /// [`Location`](crate::extension::Location).
+    pub const EXIF: &str = WellKnownNs::Exif.uri();
 }
 
 /// The namespaces gamut treats as IPTC-relevant when extracting [`crate::PhotoMetadata`] from a full
