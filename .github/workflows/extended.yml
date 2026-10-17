@@ -219,6 +219,8 @@ jobs:
         # rationale, and why classification is per source entry, is in ci.yml.
         run: |
           # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          # SC2016: `$0` is awk's, not the shell's; the program is single-quoted so it stays literal.
+          # shellcheck disable=SC2016
           prune='
           function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
           function flush(  i) {
@@ -237,6 +239,8 @@ jobs:
             [ -f "$f" ] || continue
             out="$work/$(echo "$f" | tr / _)"
             rc=0
+            # SC2024: only the read of "$f" needs root; "$out" is our own mktemp file.
+            # shellcheck disable=SC2024
             sudo awk "$prune" "$f" > "$out" || rc=$?
             case "$rc" in
               0) ubuntu=$((ubuntu + 1)) ;;
@@ -316,6 +320,8 @@ jobs:
         # rationale, and why classification is per source entry, is in ci.yml.
         run: |
           # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          # SC2016: `$0` is awk's, not the shell's; the program is single-quoted so it stays literal.
+          # shellcheck disable=SC2016
           prune='
           function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
           function flush(  i) {
@@ -334,6 +340,8 @@ jobs:
             [ -f "$f" ] || continue
             out="$work/$(echo "$f" | tr / _)"
             rc=0
+            # SC2024: only the read of "$f" needs root; "$out" is our own mktemp file.
+            # shellcheck disable=SC2024
             sudo awk "$prune" "$f" > "$out" || rc=$?
             case "$rc" in
               0) ubuntu=$((ubuntu + 1)) ;;
@@ -401,6 +409,8 @@ jobs:
         # rationale, and why classification is per source entry, is in ci.yml.
         run: |
           # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          # SC2016: `$0` is awk's, not the shell's; the program is single-quoted so it stays literal.
+          # shellcheck disable=SC2016
           prune='
           function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
           function flush(  i) {
@@ -419,6 +429,8 @@ jobs:
             [ -f "$f" ] || continue
             out="$work/$(echo "$f" | tr / _)"
             rc=0
+            # SC2024: only the read of "$f" needs root; "$out" is our own mktemp file.
+            # shellcheck disable=SC2024
             sudo awk "$prune" "$f" > "$out" || rc=$?
             case "$rc" in
               0) ubuntu=$((ubuntu + 1)) ;;

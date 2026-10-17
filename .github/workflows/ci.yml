@@ -44,9 +44,9 @@ jobs:
           fetch-depth: 0 # convco walks base..head, so it needs full history
       - uses: jdx/mise-action@v4
         with:
-          # convco for the commit check, jq for the feature-table check. No cmake/ninja/meson:
-          # nothing here builds native code.
-          install_args: cargo:convco jq
+          # convco for the commit check, jq for the feature-table check, actionlint + shellcheck
+          # for the workflow lint. No cmake/ninja/meson: nothing here builds native code.
+          install_args: cargo:convco jq actionlint shellcheck
       - name: Clear pre-installed Rust toolchain
         # Same rustup `bin/cargo-fmt` reinstall-conflict guard as the heavy jobs below.
         run: rustup toolchain uninstall stable || true
@@ -56,6 +56,11 @@ jobs:
       - name: Format check
         # Self-installs the nightly rustfmt it needs (rustfmt.toml's import options are nightly-only).
         run: mise run fmt-check
+      - name: Workflow lint
+        # Static: actionlint over .github/workflows/, with shellcheck over every `run:` block.
+        # Builds nothing and needs no apt deps, so a broken workflow script fails here in seconds
+        # instead of as a red heavy job.
+        run: mise run lint-workflows
       - name: gamut-ffi feature sync
         run: mise run check-ffi-features
       - name: Release dependency graph
@@ -140,6 +145,8 @@ jobs:
         # third-party and deleted. Nothing is modified until every file has been classified.
         run: |
           # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          # SC2016: `$0` is awk's, not the shell's; the program is single-quoted so it stays literal.
+          # shellcheck disable=SC2016
           prune='
           function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
           function flush(  i) {
@@ -158,6 +165,8 @@ jobs:
             [ -f "$f" ] || continue
             out="$work/$(echo "$f" | tr / _)"
             rc=0
+            # SC2024: only the read of "$f" needs root; "$out" is our own mktemp file.
+            # shellcheck disable=SC2024
             sudo awk "$prune" "$f" > "$out" || rc=$?
             case "$rc" in
               0) ubuntu=$((ubuntu + 1)) ;;
@@ -283,6 +292,8 @@ jobs:
         # rationale, and why classification is per source entry, is in ci.yml.
         run: |
           # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
+          # SC2016: `$0` is awk's, not the shell's; the program is single-quoted so it stays literal.
+          # shellcheck disable=SC2016
           prune='
           function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
           function flush(  i) {
@@ -301,6 +312,8 @@ jobs:
             [ -f "$f" ] || continue
             out="$work/$(echo "$f" | tr / _)"
             rc=0
+            # SC2024: only the read of "$f" needs root; "$out" is our own mktemp file.
+            # shellcheck disable=SC2024
             sudo awk "$prune" "$f" > "$out" || rc=$?
             case "$rc" in
               0) ubuntu=$((ubuntu + 1)) ;;
