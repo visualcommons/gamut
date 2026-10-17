@@ -1371,13 +1371,12 @@ impl PngEncoder {
         }
         let (palette, mut remap) = palette.cleaned(&used);
         let mut indices: Vec<u8> = indices.iter().map(|&i| remap[usize::from(i)]).collect();
-        let dims = image.dimensions();
         // A reorder is a second renumbering on top of the cleaning one, composed into `remap`
         // so the background below follows both.
         let palette = match self.palette_order {
             PaletteOrder::AsSupplied => palette,
             PaletteOrder::ModifiedZeng => {
-                let (reordered, order) = palette.modified_zeng(&indices, dims.width as usize);
+                let (reordered, order) = palette.modified_zeng(&indices);
                 for index in indices.iter_mut().chain(remap.iter_mut()) {
                     *index = order[usize::from(*index)];
                 }
@@ -1404,6 +1403,7 @@ impl PngEncoder {
             None => self,
         };
 
+        let dims = image.dimensions();
         // Use the smallest bit depth that holds every index — a free, lossless space win.
         let depth = reduce::index_bit_depth(palette.len());
         let packed;
@@ -2315,26 +2315,21 @@ mod tests {
     ///
     /// Entry 5 is dropped (nothing names it) and entry 0 is named by the background alone. Zeng
     /// over the pixels seeds with 1–3, appends 4 and then 2, and the unattached 0 goes last, so
-    /// the background moves from slot 0 to slot 4. The decoded pixels match the caller's order.
+    /// the background moves from slot 0 to slot 4. libpng resolves every pixel to the colour the
+    /// caller gave it — libpng rather than our own decoder, which would read the file through the
+    /// palette the encoder wrote, so a wrong palette and a matching wrong index map would agree.
     #[test]
     fn a_reordered_palette_carries_its_pixels_and_background_along() {
-        use gamut_core::{DecodeImage, ImageBuf, Rgba8};
-
         let entries: Vec<[u8; 3]> = (0..6).map(|i| [i * 10, i * 10, i * 10]).collect();
         let palette = PngPalette::new(&entries).unwrap();
         let indices = [1u8, 3, 1, 3, 1, 3, 4, 3, 4, 2];
-        let encode = |order| {
-            let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(10, 1).unwrap()).unwrap();
-            let mut png = Vec::new();
-            PngEncoder::new()
-                .with_background_index(0)
-                .with_palette_order(order)
-                .encode_indexed8(img, &palette, &mut png)
-                .unwrap();
-            png
-        };
-        let reordered = encode(PaletteOrder::ModifiedZeng);
-        let supplied = encode(PaletteOrder::AsSupplied);
+        let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(10, 1).unwrap()).unwrap();
+        let mut reordered = Vec::new();
+        PngEncoder::new()
+            .with_background_index(0)
+            .with_palette_order(PaletteOrder::ModifiedZeng)
+            .encode_indexed8(img, &palette, &mut reordered)
+            .unwrap();
 
         assert_eq!(
             find_chunk(&reordered, b"PLTE"),
@@ -2343,11 +2338,16 @@ mod tests {
             ])
         );
         assert_eq!(find_chunk(&reordered, b"bKGD"), Some(vec![4]));
-        let decode =
-            |png: &[u8]| -> ImageBuf<Rgba8> { crate::PngDecoder::new().decode_image(png).unwrap() };
+        let (_, _, rgba) = libpng_oracle::decode_rgba8(&reordered);
+        let expected: Vec<u8> = indices
+            .iter()
+            .flat_map(|&i| {
+                let [r, g, b] = entries[usize::from(i)];
+                [r, g, b, 255]
+            })
+            .collect();
         assert_eq!(
-            decode(&reordered).as_samples(),
-            decode(&supplied).as_samples(),
+            rgba, expected,
             "every pixel still resolves to the colour the caller gave it"
         );
     }
