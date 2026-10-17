@@ -575,7 +575,8 @@ fn be_bytes(samples: impl Iterator<Item = u16>) -> Vec<u8> {
 ///    raster-scan discovery order gives — which is what `Sub` and `Paeth` are good at.
 ///
 /// Rec. 601 luma, integer, because this only has to *order* entries and never round-trips through
-/// a pixel. The full modified-Zeng ordering oxipng uses is a further step (#482).
+/// a pixel. Modified-Zeng ordering was measured against this and declined: it never improved a
+/// finished file and regressed one gated row (#612, `experiments/612/RESULTS.md`).
 fn ordered_palette(palette: &[[u8; 4]]) -> Vec<[u8; 4]> {
     let mut out = palette.to_vec();
     out.sort_by_key(|c| {

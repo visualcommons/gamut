@@ -1,0 +1,67 @@
+group,input,layout,width,height,cleanup,variant,sample,bytes,crc32,encode_ns,colour_type,indexed_bytes,first_seen_bytes
+size_contract,gradient_rgb8,rgb8,128,128,false,baseline,0,577,4d64ea82,3355570625,2,,
+size_contract,gradient_rgb8,rgb8,128,128,false,baseline,1,577,4d64ea82,3956315681,2,,
+size_contract,gradient_rgb8,rgb8,128,128,false,baseline,2,577,4d64ea82,4313923298,2,,
+size_contract,photo_rgb8,rgb8,128,128,false,baseline,0,5594,fedc692a,4440790449,2,,
+size_contract,photo_rgb8,rgb8,128,128,false,baseline,1,5594,fedc692a,4327334848,2,,
+size_contract,photo_rgb8,rgb8,128,128,false,baseline,2,5594,fedc692a,3789310303,2,,
+size_contract,noise_rgb8,rgb8,128,128,false,baseline,0,49348,ebbc1d6e,86073233,2,,
+size_contract,noise_rgb8,rgb8,128,128,false,baseline,1,49348,ebbc1d6e,129950297,2,,
+size_contract,noise_rgb8,rgb8,128,128,false,baseline,2,49348,ebbc1d6e,69030526,2,,
+size_contract,grey_as_rgb8,rgb8,128,128,false,baseline,0,146,4e3a9aee,315086442,0,,
+size_contract,grey_as_rgb8,rgb8,128,128,false,baseline,1,146,4e3a9aee,301616582,0,,
+size_contract,grey_as_rgb8,rgb8,128,128,false,baseline,2,146,4e3a9aee,282129367,0,,
+size_contract,flat_rgba8,rgba8,128,128,false,baseline,0,96,90493caf,2750809761,3,96,96
+size_contract,flat_rgba8,rgba8,128,128,false,baseline,1,96,90493caf,2861986604,3,96,96
+size_contract,flat_rgba8,rgba8,128,128,false,baseline,2,96,90493caf,3186134908,3,96,96
+size_contract,sprite_rgba8,rgba8,128,128,false,baseline,0,1651,a44e49c4,4751440826,6,,
+size_contract,sprite_rgba8,rgba8,128,128,false,baseline,1,1651,a44e49c4,4401276160,6,,
+size_contract,sprite_rgba8,rgba8,128,128,false,baseline,2,1651,a44e49c4,4751228174,6,,
+size_contract,sprite_rgba8 +clean,rgba8,128,128,true,baseline,0,1148,717ec7c4,10072957609,3,,
+size_contract,sprite_rgba8 +clean,rgba8,128,128,true,baseline,1,1148,717ec7c4,10298304550,3,,
+size_contract,sprite_rgba8 +clean,rgba8,128,128,true,baseline,2,1148,717ec7c4,10586734173,3,,
+size_contract,palette64_rgba8,rgba8,128,128,false,baseline,0,364,6eda2b81,2588200180,6,475,450
+size_contract,palette64_rgba8,rgba8,128,128,false,baseline,1,364,6eda2b81,2787201032,6,475,450
+size_contract,palette64_rgba8,rgba8,128,128,false,baseline,2,364,6eda2b81,3133401850,6,475,450
+size_contract,palette64_rgba8 +clean,rgba8,128,128,true,baseline,0,364,6eda2b81,6194782316,6,,
+size_contract,palette64_rgba8 +clean,rgba8,128,128,true,baseline,1,364,6eda2b81,6091084408,6,,
+size_contract,palette64_rgba8 +clean,rgba8,128,128,true,baseline,2,364,6eda2b81,5425520282,6,,
+size_contract,opaque256_rgba8,rgba8,128,128,false,baseline,0,317,d440ee53,4832751210,2,1132,945
+size_contract,opaque256_rgba8,rgba8,128,128,false,baseline,1,317,d440ee53,4557339907,2,1132,945
+size_contract,opaque256_rgba8,rgba8,128,128,false,baseline,2,317,d440ee53,4668528889,2,1132,945
+size_contract,demotable_rgb16,rgb16,64,64,false,baseline,0,171,86f8d657,1313543695,2,367,317
+size_contract,demotable_rgb16,rgb16,64,64,false,baseline,1,171,86f8d657,1161649084,2,367,317
+size_contract,demotable_rgb16,rgb16,64,64,false,baseline,2,171,86f8d657,920957194,2,367,317
+size_contract,tiny_rgb8,rgb8,16,16,false,baseline,0,119,a0601968,14074249,2,,
+size_contract,tiny_rgb8,rgb8,16,16,false,baseline,1,119,a0601968,12507790,2,,
+size_contract,tiny_rgb8,rgb8,16,16,false,baseline,2,119,a0601968,8096033,2,,
+reach,photo332_rgb8@128,rgb8,128,128,false,baseline,0,3926,c0f7fa9f,5884852450,2,6815,7953
+reach,photo332_rgb8@128,rgb8,128,128,false,baseline,1,3926,c0f7fa9f,5775465287,2,6815,7953
+reach,photo332_rgb8@128,rgb8,128,128,false,baseline,2,3926,c0f7fa9f,5807554251,2,6815,7953
+reach,photo222_rgb8@128,rgb8,128,128,false,baseline,0,3111,d3414a8c,7253724291,2,3837,3913
+reach,photo222_rgb8@128,rgb8,128,128,false,baseline,1,3111,d3414a8c,7062060142,2,3837,3913
+reach,photo222_rgb8@128,rgb8,128,128,false,baseline,2,3111,d3414a8c,7101385591,2,3837,3913
+reach,gradient332_rgb8@128,rgb8,128,128,false,baseline,0,757,56921b1f,6614855595,2,1708,1863
+reach,gradient332_rgb8@128,rgb8,128,128,false,baseline,1,757,56921b1f,6670042701,2,1708,1863
+reach,gradient332_rgb8@128,rgb8,128,128,false,baseline,2,757,56921b1f,7264425353,2,1708,1863
+reach,levels16_gray8@128,gray8,128,128,false,baseline,0,363,65b72129,1245873908,0,456,456
+reach,levels16_gray8@128,gray8,128,128,false,baseline,1,363,65b72129,1183095107,0,456,456
+reach,levels16_gray8@128,gray8,128,128,false,baseline,2,363,65b72129,913099750,0,456,456
+reach,photo_sprite_rgba8@128,rgba8,128,128,false,baseline,0,2927,47d57ee6,8427973435,6,4035,4330
+reach,photo_sprite_rgba8@128,rgba8,128,128,false,baseline,1,2927,47d57ee6,8633792303,6,4035,4330
+reach,photo_sprite_rgba8@128,rgba8,128,128,false,baseline,2,2927,47d57ee6,7311258596,6,4035,4330
+reach,photo332_rgb8@256,rgb8,256,256,false,baseline,0,13038,02cf8dcf,28123596689,2,19818,21475
+reach,photo332_rgb8@256,rgb8,256,256,false,baseline,1,13038,02cf8dcf,29046450659,2,19818,21475
+reach,photo332_rgb8@256,rgb8,256,256,false,baseline,2,13038,02cf8dcf,28373812829,2,19818,21475
+reach,photo222_rgb8@256,rgb8,256,256,false,baseline,0,9970,09b1b1e0,30532962557,2,12135,12134
+reach,photo222_rgb8@256,rgb8,256,256,false,baseline,1,9970,09b1b1e0,31802881706,2,12135,12134
+reach,photo222_rgb8@256,rgb8,256,256,false,baseline,2,9970,09b1b1e0,31386984434,2,12135,12134
+reach,gradient332_rgb8@256,rgb8,256,256,false,baseline,0,2020,b6b27f1f,22068655520,2,5712,4917
+reach,gradient332_rgb8@256,rgb8,256,256,false,baseline,1,2020,b6b27f1f,23033011180,2,5712,4917
+reach,gradient332_rgb8@256,rgb8,256,256,false,baseline,2,2020,b6b27f1f,21906999174,2,5712,4917
+reach,levels16_gray8@256,gray8,256,256,false,baseline,0,639,c2effd1b,6078151308,3,639,639
+reach,levels16_gray8@256,gray8,256,256,false,baseline,1,639,c2effd1b,7279763680,3,639,639
+reach,levels16_gray8@256,gray8,256,256,false,baseline,2,639,c2effd1b,7282416929,3,639,639
+reach,photo_sprite_rgba8@256,rgba8,256,256,false,baseline,0,8847,39f41686,33214718072,6,,
+reach,photo_sprite_rgba8@256,rgba8,256,256,false,baseline,1,8847,39f41686,31311609633,6,,
+reach,photo_sprite_rgba8@256,rgba8,256,256,false,baseline,2,8847,39f41686,30875711637,6,,
