@@ -867,25 +867,6 @@ fn encode(
             {
                 encoder = encoder.with_orientation(orientation);
             }
-            if let Some(icc) = carried.icc {
-                encoder = encoder.with_color(JxlColorSpec::Icc(icc));
-            }
-            if args.jxl_container {
-                if let Some(exif) = &carried.exif {
-                    encoder = encoder.with_exif(exif);
-                }
-                if let Some(xmp) = carried.xmp.as_deref().and_then(utf8_xmp) {
-                    encoder = encoder.with_xmp(xmp);
-                }
-            } else if carried.exif.is_some() || carried.xmp.is_some() {
-                // Exif and XMP are container boxes, which a bare codestream has nowhere to put
-                // (`JxlEncoder::with_exif` refuses the pair). The framing is the caller's choice,
-                // so it is not changed behind their back.
-                tracing::warn!(
-                    "input metadata not carried — a bare JPEG XL codestream holds no Exif or XMP; \
-                     pass --jxl-container to carry them"
-                );
-            }
             // The clap `1..=10` range guarantees `from_level` returns `Some`; fall back to the
             // default effort (Squirrel/7) rather than unwrap so the path stays panic-free.
             let effort = JxlEffort::from_level(args.jxl_effort).unwrap_or_default();
@@ -896,11 +877,48 @@ fn encode(
             };
             // `Auto` leaves the coding tool to libjxl; forcing VarDCT on the lossless default is a
             // contradiction the codec reports as `InvalidInput` through `CliError::Codec`.
-            encoder
+            encoder = encoder
                 .with_effort(effort)
                 .with_modular(args.jxl_modular.to_codec())
-                .with_container(container)
-                .encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
+                .with_container(container);
+            let bare = encoder.clone();
+            let mut attached = false;
+            if let Some(icc) = carried.icc {
+                encoder = encoder.with_color(JxlColorSpec::Icc(icc));
+                attached = true;
+            }
+            if args.jxl_container {
+                if let Some(exif) = &carried.exif {
+                    encoder = encoder.with_exif(exif);
+                    attached = true;
+                }
+                if let Some(xmp) = carried.xmp.as_deref().and_then(utf8_xmp) {
+                    encoder = encoder.with_xmp(xmp);
+                    attached = true;
+                }
+            } else if carried.exif.is_some() || carried.xmp.is_some() {
+                // Exif and XMP are container boxes, which a bare codestream has nowhere to put
+                // (`JxlEncoder::with_exif` refuses the pair). The framing is the caller's choice,
+                // so it is not changed behind their back.
+                tracing::warn!(
+                    "input metadata not carried — a bare JPEG XL codestream holds no Exif or XMP; \
+                     pass --jxl-container to carry them"
+                );
+            }
+            // libjxl refuses an ICC profile it cannot use even where its header parses here.
+            // Metadata failing must not fail a conversion whose pixels are fine, as on the JPEG
+            // path: say so, and encode without it (the orientation, a header field, stays).
+            let image = ImageRef::<Rgba8>::new(&rgba, dims)?;
+            if let Err(err) = encoder.encode_image(image, &mut out) {
+                if !attached {
+                    return Err(err.into());
+                }
+                tracing::warn!(
+                    "input metadata not carried — the JPEG XL encoder refused it: {err}"
+                );
+                out.clear();
+                bare.encode_image(image, &mut out)?;
+            }
             (rgba.len(), dims)
         }
         OutputFormat::Jpeg => {
@@ -1132,6 +1150,17 @@ fn carry(
     if !holds(Carrier::Exif) {
         not_held("Exif payload");
         return carried;
+    }
+    // `ExifWriter` keeps a thumbnail's directory but re-embeds only JPEG thumbnail bytes, so an
+    // uncompressed-strip thumbnail (or one whose bytes did not read) would come out with
+    // `StripOffsets` addressing nothing. A thumbnail with no image is dropped rather than written
+    // dangling.
+    if exif.thumbnail().is_some_and(|thumb| thumb.jpeg().is_none()) {
+        exif.clear_thumbnail();
+        tracing::warn!(
+            "input metadata not carried — the Exif thumbnail, whose image bytes (uncompressed \
+             strips) gamut-exif does not re-embed"
+        );
     }
     match ExifWriter::new().marker(false).write(&exif) {
         Ok(bytes) => carried.exif = Some(bytes),

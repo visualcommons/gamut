@@ -16,7 +16,7 @@ use gamut::core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, R
 use gamut::exif::{ByteOrder, Exif, ExifTag, ExifWriter, Value};
 use gamut::icc::{BuiltinProfile, IccProfile};
 use gamut::jpeg::JpegEncoder;
-use gamut::jxl::{Container, JxlDecoder, JxlEncoder, Orientation};
+use gamut::jxl::{Container, Distance, JxlDecoder, JxlEncoder, Orientation};
 use gamut::png::{PngEncoder, PngMetadata, SrgbIntent};
 use gamut::webp::WebpEncoder;
 
@@ -434,4 +434,152 @@ fn strip_metadata_drops_it_between_formats() {
 
     let meta = gamut::webp::metadata(&webp).unwrap();
     assert_eq!((meta.exif, meta.xmp, meta.icc), (None, None, None));
+}
+
+/// A JPEG output attaches what it carries: the Exif in APP1, the XMP in its own APP1 and the ICC
+/// profile in APP2. The input is a WebP, so nothing reaches the output by a JPEG→JPEG shortcut.
+#[test]
+fn a_jpeg_output_carries_exif_xmp_and_icc() {
+    let rgba = vec![200u8; 8 * 8 * 4];
+    let mut webp = Vec::new();
+    WebpEncoder::lossless()
+        .with_exif(&exif_with(&[]))
+        .with_xmp(XMP)
+        .with_icc_profile(&rgb_icc())
+        .encode_image(
+            ImageRef::<Rgba8>::new(&rgba, Dimensions::new(8, 8).unwrap()).unwrap(),
+            &mut webp,
+        )
+        .unwrap();
+
+    let (jpeg, _) = convert_to("webp-jpeg", &webp, "jpg", &[]);
+
+    let meta = gamut::jpeg::metadata(&jpeg).expect("read back");
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
+    assert_eq!(meta.icc, Some(rgb_icc()));
+    assert_eq!(parse_exif(meta.exif.as_deref()).make(), Some("gamut"));
+}
+
+/// The ICC profile lives in the JPEG XL codestream itself, so it is carried in the default bare
+/// framing, where the Exif and XMP are not.
+#[test]
+fn the_icc_profile_reaches_a_jxl_codestream() {
+    let (jxl, _) = convert_to("jpeg-jxl-icc", &jpeg_with(&exif_with(&[])), "jxl", &[]);
+
+    assert_eq!(
+        JxlDecoder::new().embedded_icc_profile(&jxl).unwrap(),
+        Some(rgb_icc())
+    );
+}
+
+/// A profile whose header parses but which libjxl refuses fails only the metadata, not the
+/// conversion: the image is encoded without it and the refusal is reported, as on the JPEG path.
+#[test]
+fn a_profile_libjxl_refuses_does_not_fail_the_conversion() {
+    let mut icc = vec![0u8; 132];
+    icc[..4].copy_from_slice(&132u32.to_be_bytes());
+    icc[12..16].copy_from_slice(b"mntr");
+    icc[16..20].copy_from_slice(b"RGB ");
+    icc[20..24].copy_from_slice(b"XYZ ");
+    icc[36..40].copy_from_slice(b"acsp");
+    let rgba = vec![255u8; 4 * 4];
+    let png = PngEncoder::new()
+        .with_icc_profile("header-only", &icc)
+        .encode_to_vec(ImageRef::<Rgba8>::new(&rgba, Dimensions::new(2, 2).unwrap()).unwrap())
+        .unwrap();
+
+    let (jxl, stderr) = convert_to("bad-icc-jxl", &png, "jxl", &[]);
+
+    assert_eq!(JxlDecoder::new().embedded_icc_profile(&jxl).unwrap(), None);
+    assert!(
+        stderr.contains("the JPEG XL encoder refused it"),
+        "stderr did not report the refusal: {stderr}"
+    );
+}
+
+/// An XYB JPEG XL decodes into sRGB rather than into its embedded profile, so the Exif's
+/// `ColorSpace` claim becomes 1 (sRGB) whatever the input said.
+#[test]
+fn color_space_becomes_srgb_after_an_xyb_jxl_input() {
+    let rgb: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 5) as u8).collect();
+    let mut jxl = Vec::new();
+    JxlEncoder::lossy(Distance::new(1.0).unwrap())
+        .with_container(Container::IsoBmff)
+        .with_exif(&exif_with(&[(
+            ExifTag::ColorSpace,
+            Value::Short(vec![0xFFFF]),
+        )]))
+        .encode_image(
+            ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap(),
+            &mut jxl,
+        )
+        .unwrap();
+
+    let (meta, _) = convert("xyb-colorspace", &jxl, &[]);
+
+    assert_eq!(
+        parse_exif(meta.exif.as_deref()).get_tag(ExifTag::ColorSpace),
+        Some(&Value::Short(vec![1]))
+    );
+}
+
+/// A PNG output from a non-PNG input attaches the ICC profile as `iCCP` and the XMP as `iTXt`
+/// through the encoder's per-carrier setters, not a PNG input's whole chunk set.
+#[test]
+fn a_png_output_from_another_format_carries_icc_and_xmp() {
+    let (meta, _) = convert("jpeg-png-icc-xmp", &jpeg_with(&exif_with(&[])), &[]);
+
+    assert_eq!(meta.icc_profile.map(|p| p.profile), Some(rgb_icc()));
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
+}
+
+/// A bare little-endian TIFF stream whose 1st IFD is an uncompressed one-strip thumbnail.
+fn exif_with_strip_thumbnail() -> Vec<u8> {
+    let entry = |tag: u16, kind: u16, value: u32| {
+        let mut e = Vec::new();
+        e.extend_from_slice(&tag.to_le_bytes());
+        e.extend_from_slice(&kind.to_le_bytes());
+        e.extend_from_slice(&1u32.to_le_bytes());
+        e.extend_from_slice(&value.to_le_bytes());
+        e
+    };
+    const SHORT: u16 = 3;
+    const LONG: u16 = 4;
+    // Header (8) + 0th IFD of one entry (18) = 26; + 1st IFD of three entries (42) = 68.
+    let mut tiff = b"II\x2A\x00\x08\x00\x00\x00".to_vec();
+    tiff.extend_from_slice(&1u16.to_le_bytes());
+    tiff.extend(entry(0x0112, SHORT, 1)); // Orientation
+    tiff.extend_from_slice(&26u32.to_le_bytes());
+    tiff.extend_from_slice(&3u16.to_le_bytes());
+    tiff.extend(entry(0x0103, SHORT, 1)); // Compression = uncompressed
+    tiff.extend(entry(0x0111, LONG, 68)); // StripOffsets
+    tiff.extend(entry(0x0117, LONG, 3)); // StripByteCounts
+    tiff.extend_from_slice(&0u32.to_le_bytes());
+    tiff.extend_from_slice(&[1, 2, 3]);
+    tiff
+}
+
+/// `gamut-exif` re-embeds only a JPEG thumbnail's bytes, so a strip thumbnail would be written as
+/// a directory whose `StripOffsets` address nothing; it is dropped instead, and said to be.
+#[test]
+fn a_strip_thumbnail_is_dropped_rather_than_written_dangling() {
+    let rgba = vec![255u8; 4 * 4];
+    let png = PngEncoder::new()
+        .with_exif(&exif_with_strip_thumbnail())
+        .encode_to_vec(ImageRef::<Rgba8>::new(&rgba, Dimensions::new(2, 2).unwrap()).unwrap())
+        .unwrap();
+
+    let (meta, stderr) = convert("strip-thumbnail", &png, &[]);
+
+    let exif = parse_exif(meta.exif.as_deref());
+    assert_eq!(
+        exif.orientation(),
+        Some(1),
+        "the rest of the Exif is carried"
+    );
+    assert!(exif.thumbnail().is_none(), "the thumbnail is not written");
+    assert!(
+        stderr.contains("Exif thumbnail"),
+        "stderr did not report the thumbnail: {stderr}"
+    );
 }

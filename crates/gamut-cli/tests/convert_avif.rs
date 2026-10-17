@@ -12,7 +12,9 @@
 use std::process::Command;
 
 use gamut::avif::{Av1Config, AvifContainer};
-use gamut::core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Rgb8, Rgb16, Rgba8};
+use gamut::core::{
+    Dimensions, EncodeImage, Gray8, GrayAlpha8, ImageRef, Pixel, Rgb8, Rgb16, Rgba8,
+};
 use gamut::isobmff::ColourInformation;
 use gamut::png::PngEncoder;
 
@@ -173,6 +175,60 @@ fn png_exif_is_carried_into_the_exif_item() {
     let item = container.image().exif().expect("Exif item");
     let payload = &item.as_isobmff_item().payload;
     assert_eq!(&payload[4..], exif().as_slice());
+}
+
+/// The input's XMP packet lands byte-equal as the output's XMP (`mime`) item.
+#[test]
+fn png_xmp_is_carried_into_the_xmp_item() {
+    const XMP: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>";
+    let rgb = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+    let avif = convert(
+        "xmp",
+        &png::<Rgb8>(PngEncoder::new().with_xmp(XMP), &rgb),
+        &[],
+    );
+    let container = AvifContainer::parse(&avif).unwrap();
+    let item = container.image().xmp().expect("XMP item");
+    assert_eq!(item.as_isobmff_item().payload, XMP.as_bytes());
+}
+
+/// A grey profile's bytes.
+fn grey_icc() -> Vec<u8> {
+    gamut::icc::IccProfile::gray_with_gamma(2.2)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+}
+
+/// A grey PNG codes one monochrome plane, which a `GRAY` profile describes (ICC.1:2022 §7.2.6),
+/// so the profile is carried.
+#[test]
+fn a_grey_profile_is_carried_onto_monochrome_samples() {
+    let grey = [0, 85, 170, 255];
+    let input = png::<Gray8>(
+        PngEncoder::new().with_icc_profile("grey", &grey_icc()),
+        &grey,
+    );
+    let avif = convert("grey-icc", &input, &[]);
+    let container = AvifContainer::parse(&avif).unwrap();
+    assert_eq!(
+        container.image().primary_item().icc_profile(),
+        Some(grey_icc().as_slice())
+    );
+}
+
+/// Grey with alpha has no monochrome layout here and codes as RGBA, which a `GRAY` profile
+/// cannot describe, so the profile is left behind.
+#[test]
+fn a_grey_profile_is_not_carried_onto_grey_with_alpha() {
+    let grey_alpha = [0, 0, 85, 85, 170, 170, 255, 255];
+    let input = png::<GrayAlpha8>(
+        PngEncoder::new().with_icc_profile("grey", &grey_icc()),
+        &grey_alpha,
+    );
+    let avif = convert("grey-alpha-icc", &input, &[]);
+    let container = AvifContainer::parse(&avif).unwrap();
+    assert_eq!(container.image().primary_item().icc_profile(), None);
 }
 
 /// An opaque 8-bit RGB PNG, the input the `--avif-*` coding-flag tests encode.
