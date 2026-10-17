@@ -18,12 +18,12 @@
 //! (at EOI) is each component dequantized (§A.3.4), inverse-transformed (§A.3.3) and level-shifted
 //! (§A.3.1) — once — through the same [`write_block`] tail the sequential path uses.
 
-use std::num::NonZeroU16;
+use std::num::{NonZeroI32, NonZeroU16};
 
 use gamut_core::{Error, Result};
 use gamut_dsp::jpeg::{idct8x8_int, idct8x8_int_dc};
 
-use crate::huffman::{DecTable, LOOKAHEAD};
+use crate::huffman::{DecTable, LOOKAHEAD, extend};
 use crate::syntax::{Frame, ScanHeader, Tables};
 use crate::zigzag::ZIGZAG;
 
@@ -160,7 +160,13 @@ impl<'a> BitReader<'a> {
     /// Tops the buffer up with as many whole bytes as its 64 bits have room for: entropy data while
     /// there is some, then `1`-padding past a marker or zero bytes past the end of a truncated
     /// stream, both counted in [`Self::pad_bits`]. Afterwards at least 57 bits are buffered, so any
-    /// read of up to 16 bits can be [`Self::peek`]ed.
+    /// read of up to 32 bits can be [`Self::peek`]ed.
+    ///
+    /// When the next `room` bytes are all in the input and none of them is `0xFF`, they are plain
+    /// entropy data -- no stuffing to undo, no marker to stop at -- and are loaded as one big-endian
+    /// word (zune-jpeg's `BitStream::refill` does the same four bytes at a time). Otherwise the
+    /// bytes go through [`Self::fetch`] one at a time. Both paths append the same bytes; the first
+    /// only skips the per-byte classification.
     ///
     /// The byte count is computed before the loop rather than re-tested against the buffered count
     /// on each pass, so the loop is bounded by its own arithmetic whatever the body does.
@@ -168,8 +174,21 @@ impl<'a> BitReader<'a> {
     /// Each byte is composed with `+` rather than `|`: the shift just vacated 8 low zero bits and
     /// the addend is `< 256`, so the addition fills exactly those vacant bits (the same convention
     /// as `bitwriter`/`pack_nibbles`, where `|` and `^` would be equivalent on disjoint operands).
+    /// The word path shifts in two halves of `4 · room` because a single shift by `8 · room` is out
+    /// of range for a `u64` when the buffer is empty (`room = 8`).
     fn fill(&mut self) {
         let room = (64 - self.bit_count) / 8;
+        let end = self.pos + room as usize;
+        if let Some(bytes) = self.data.get(self.pos..end)
+            && !bytes.contains(&0xFF)
+        {
+            let mut word = [0u8; 8];
+            word[8 - bytes.len()..].copy_from_slice(bytes);
+            self.bit_buf = (self.bit_buf << (4 * room) << (4 * room)) + u64::from_be_bytes(word);
+            self.pos = end;
+            self.bit_count += room * 8;
+            return;
+        }
         for _ in 0..room {
             let byte = match self.fetch() {
                 Fetch::Data(b) => b,
@@ -187,8 +206,8 @@ impl<'a> BitReader<'a> {
         self.bit_count += room * 8;
     }
 
-    /// The next `n` (`1..=16`) buffered bits, MSB-first, without consuming them. Valid after
-    /// [`Self::fill`], which leaves more than 16 bits buffered.
+    /// The next `n` (`1..=32`) buffered bits, MSB-first, without consuming them. Valid after
+    /// [`Self::fill`], which leaves more than 32 bits buffered.
     fn peek(&self, n: u32) -> u32 {
         ((self.bit_buf >> (self.bit_count - n)) & ((1u64 << n) - 1)) as u32
     }
@@ -339,17 +358,6 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// `EXTEND` (Figure F.12): sign-extends the `t`-bit magnitude `v` to a signed value. `t ≥ 1`.
-fn extend(v: u32, t: u8) -> i32 {
-    let t = u32::from(t);
-    let v = v as i32;
-    if v < (1 << (t - 1)) {
-        v - (1 << t) + 1
-    } else {
-        v
-    }
-}
-
 /// `DECODE` (Figure F.16): resolves the canonical code at the head of the bit stream, returning its
 /// symbol.
 ///
@@ -359,16 +367,58 @@ fn extend(v: u32, t: u8) -> i32 {
 /// [`BitReader::consume`], as reading those bits one at a time would.
 fn decode_symbol(table: &DecTable, r: &mut BitReader) -> Result<u8> {
     r.fill();
-    let bits = r.peek(16);
+    let (length, symbol) = resolve(table, r.peek(16));
+    r.consume(length)?;
+    symbol
+}
+
+/// The Figure F.16 outcome for the code at the head of the MSB-first 16-bit window `bits`: how
+/// many bits the code takes, and its symbol or the error a corrupt code earns. One probe of
+/// [`DecTable::lookup`] for codes of up to [`LOOKAHEAD`] bits, [`DecTable::walk`] otherwise.
+fn resolve(table: &DecTable, bits: u32) -> (u32, Result<u8>) {
     // A miss is told apart by `NonZeroU16`, not by comparing the entry with zero: inverting that
     // comparison would send misses to a zero-length "hit" that consumes nothing, which a Y=0 frame
     // can only report as a hang, never as a failure.
-    let (length, symbol) = match NonZeroU16::new(table.lookup(bits >> (16 - LOOKAHEAD))) {
+    match NonZeroU16::new(table.lookup(bits >> (16 - LOOKAHEAD))) {
         Some(entry) => (u32::from(entry.get() >> 8), Ok((entry.get() & 0xFF) as u8)),
         None => table.walk(bits),
-    };
+    }
+}
+
+/// `DECODE` (Figure F.16) of a run/size or DC-category symbol, together with the `EXTEND`ed value
+/// (Figure F.12) of the magnitude bits that follow its code -- from one [`BitReader::fill`] and one
+/// 32-bit [`BitReader::peek`] -- returning `(symbol, value)`.
+///
+/// It consumes only the code, exactly as [`decode_symbol`] does: the caller validates the symbol
+/// against its context (a DC category above 11, an AC run past the band) and then consumes the
+/// `symbol & 0x0F` magnitude bits with [`BitReader::consume`]. A corrupt or truncated stream
+/// therefore fails at the same read, with the same error, as `DECODE` followed by `RECEIVE`.
+/// `value` is `0` when that size is `0`, and is meaningful only once those bits have been consumed.
+///
+/// One probe of [`DecTable::fused`] resolves a code and magnitude that together fit in
+/// [`LOOKAHEAD`] bits; otherwise the code resolves as in [`decode_symbol`] and its magnitude is
+/// sliced from the same window. A code is at most 16 bits and a size at most 15, so the 32-bit
+/// window always holds both.
+fn decode_coded(table: &DecTable, r: &mut BitReader) -> Result<(u8, i32)> {
+    r.fill();
+    let window = r.peek(32);
+    // A miss is told apart by `NonZeroI32` for the reason `resolve` gives.
+    if let Some(entry) = NonZeroI32::new(table.fused(window >> (32 - LOOKAHEAD))) {
+        let entry = entry.get();
+        r.consume((entry & 0xFF) as u32)?;
+        return Ok((((entry >> 8) & 0xFF) as u8, entry >> 16));
+    }
+    let (length, symbol) = resolve(table, window >> 16);
     r.consume(length)?;
-    symbol
+    let symbol = symbol?;
+    let size = symbol & 0x0F;
+    let value = if size == 0 {
+        0
+    } else {
+        let magnitude = (window << length) >> (32 - u32::from(size));
+        extend(magnitude, size)
+    };
+    Ok((symbol, value))
 }
 
 /// Per-scan-component decode context: the tables it uses, its sampling, and its running DC predictor
@@ -392,18 +442,14 @@ impl Ctx<'_> {
     fn decode_block(&mut self, r: &mut BitReader, bx: usize, by: usize) -> Result<()> {
         let mut zz = [0i32; 64];
         // DC: differential against the running predictor (§F.2.2.1).
-        let t = decode_symbol(self.dc, r)?;
+        let (t, diff) = decode_coded(self.dc, r)?;
         if t > 11 {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: DC magnitude category > 11",
             ));
         }
-        let diff = if t == 0 {
-            0
-        } else {
-            extend(r.read_bits(u32::from(t))?, t)
-        };
+        r.consume(u32::from(t))?;
         self.pred = self.pred.wrapping_add(diff);
         zz[0] = self.pred.wrapping_mul(i32::from(self.quant[0]));
         // AC: run/size symbols in zig-zag order (§F.2.2.2). `last` is the zig-zag index of the last
@@ -411,7 +457,7 @@ impl Ctx<'_> {
         let mut last = 0usize;
         let mut k = 1usize;
         while k < 64 {
-            let rs = decode_symbol(self.ac, r)?;
+            let (rs, coeff) = decode_coded(self.ac, r)?;
             let run = usize::from(rs >> 4);
             let size = rs & 0x0F;
             if size == 0 {
@@ -428,7 +474,7 @@ impl Ctx<'_> {
                     "JPEG: AC coefficient index past 63",
                 ));
             }
-            let coeff = extend(r.read_bits(u32::from(size))?, size);
+            r.consume(u32::from(size))?;
             let natural = ZIGZAG[k];
             zz[natural] = coeff.wrapping_mul(i32::from(self.quant[natural]));
             last = k;
@@ -868,18 +914,14 @@ pub fn decode_progressive_scan(
                             // the entropy stream and DC predictor in sync) but not stored (§A.2.2).
                             let real = bcol < c.bw && brow < c.bh;
                             if ah == 0 {
-                                let t = decode_symbol(sc.dc.unwrap(), &mut reader)?;
+                                let (t, diff) = decode_coded(sc.dc.unwrap(), &mut reader)?;
                                 if t > 11 {
                                     return Err(Error::invalid_input(
                                         env!("CARGO_PKG_NAME"),
                                         "JPEG: DC magnitude category > 11",
                                     ));
                                 }
-                                let diff = if t == 0 {
-                                    0
-                                } else {
-                                    extend(reader.read_bits(u32::from(t))?, t)
-                                };
+                                reader.consume(u32::from(t))?;
                                 preds[si] = preds[si].wrapping_add(diff);
                                 if real {
                                     // First pass: scale by the point transform 2^Al (§A.4, §G.1.2.1).
@@ -949,7 +991,7 @@ fn decode_ac_first(
     }
     let mut k = ss;
     while k <= se {
-        let rs = decode_symbol(ac, r)?;
+        let (rs, coeff) = decode_coded(ac, r)?;
         let run = usize::from(rs >> 4);
         let size = rs & 0x0F;
         if size == 0 {
@@ -972,7 +1014,7 @@ fn decode_ac_first(
                     "JPEG: progressive AC run past band end",
                 ));
             }
-            let coeff = extend(r.read_bits(u32::from(size))?, size);
+            r.consume(u32::from(size))?;
             block[ZIGZAG[k]] = coeff << al;
             k += 1;
         }
@@ -1083,18 +1125,6 @@ fn refine(coeff: i32, p1: i32, m1: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extend_matches_figure_f12() {
-        // t=1: v=0 → −1, v=1 → 1.
-        assert_eq!(extend(0, 1), -1);
-        assert_eq!(extend(1, 1), 1);
-        // t=3: v in 0..3 map to −7..−4, v in 4..7 map to 4..7.
-        assert_eq!(extend(0, 3), -7);
-        assert_eq!(extend(3, 3), -4);
-        assert_eq!(extend(4, 3), 4);
-        assert_eq!(extend(7, 3), 7);
-    }
 
     /// The bits of `bytes`, MSB-first: the reference the buffered reader must reproduce.
     fn bit(bytes: &[u8], i: usize) -> u32 {
@@ -1216,5 +1246,114 @@ mod tests {
             decode_symbol(&table, &mut r).unwrap_err().static_message(),
             Some("JPEG: undecodable Huffman code")
         );
+    }
+
+    /// `BitReader::fill` on a stream whose stuffed `0xFF 0x00` pairs recur at an interval the
+    /// refills do not divide: each refill's span sometimes holds one (the byte-at-a-time path) and
+    /// sometimes not (the one-word path), and every read still returns the destuffed stream's bits.
+    #[test]
+    fn bit_reader_word_and_byte_refills_read_the_same_stream() {
+        let data: Vec<u8> = (0..96u32)
+            .map(|i| {
+                if i % 11 == 5 {
+                    0xFF
+                } else {
+                    (i * 37 + 11) as u8 & 0xFE
+                }
+            })
+            .collect();
+        let mut bytes = Vec::new();
+        for &b in &data {
+            bytes.push(b);
+            if b == 0xFF {
+                bytes.push(0x00);
+            }
+        }
+        let mut r = BitReader::new(&bytes, 0);
+        let mut at = 0usize;
+        for n in (1..=16u32).cycle().take(80) {
+            let want = (0..n as usize).fold(0, |v, k| v * 2 + bit(&data, at + k));
+            assert_eq!(r.read_bits(n).unwrap(), want, "{n} bits at bit {at}");
+            at += n as usize;
+        }
+    }
+
+    /// Packs MSB-first `bits` (each `0` or `1`) into bytes, `1`-pads the last byte, byte-stuffs
+    /// (§F.1.2.3) and appends EOI: a scan's entropy data as an encoder writes it.
+    fn entropy_bytes(bits: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for chunk in bits.chunks(8) {
+            let byte = (0..8).fold(0u8, |v, i| v * 2 + chunk.get(i).copied().unwrap_or(1));
+            out.push(byte);
+            if byte == 0xFF {
+                out.push(0x00);
+            }
+        }
+        out.extend([0xFF, 0xD9]);
+        out
+    }
+
+    /// `decode_coded` against `DECODE`, `RECEIVE` and `EXTEND` done separately (`decode_symbol`,
+    /// `read_bits`, `extend`): every symbol of the Annex K DC and AC tables, each followed by its
+    /// smallest, a middle and its largest magnitude, decodes to the same symbol and value and
+    /// leaves the reader at the same bit. Short codes with short magnitudes resolve through the
+    /// fused table, longer ones through the lookahead table or the walk, so all three paths run.
+    #[test]
+    fn decode_coded_matches_decode_then_receive_and_extend() {
+        use crate::huffman::{EncTable, STD_CHROMA_AC, STD_LUMA_AC, STD_LUMA_DC};
+        for spec in [&STD_LUMA_DC, &STD_LUMA_AC, &STD_CHROMA_AC] {
+            let enc = EncTable::from_spec(spec);
+            let dec = DecTable::from_bits(&spec.bits, spec.values).unwrap();
+            let mut bits = Vec::new();
+            let mut want = Vec::new();
+            for &symbol in spec.values {
+                let size = u32::from(symbol & 0x0F);
+                let (code, length) = enc.lookup(symbol).unwrap();
+                for magnitude in [0, (1u32 << size) / 3, (1u32 << size) - 1] {
+                    bits.extend((0..length).rev().map(|i| (code >> i) as u8 & 1));
+                    bits.extend((0..size).rev().map(|i| (magnitude >> i) as u8 & 1));
+                    want.push(symbol);
+                }
+            }
+            let bytes = entropy_bytes(&bits);
+            let (mut fused, mut split) = (BitReader::new(&bytes, 0), BitReader::new(&bytes, 0));
+            for &symbol in &want {
+                let size = symbol & 0x0F;
+                let (got, value) = decode_coded(&dec, &mut fused).unwrap();
+                fused.consume(u32::from(size)).unwrap();
+                assert_eq!(decode_symbol(&dec, &mut split).unwrap(), symbol);
+                let expected = match size {
+                    0 => 0,
+                    _ => extend(split.read_bits(u32::from(size)).unwrap(), size),
+                };
+                assert_eq!((got, value), (symbol, expected), "symbol {symbol:#04x}");
+            }
+            assert_eq!(fused.read_bits(16).unwrap(), split.read_bits(16).unwrap());
+        }
+    }
+
+    /// `decode_coded` consumes only the code: a stream that ends inside the magnitude bits decodes
+    /// the symbol, and the truncation surfaces at the caller's `consume` of the magnitude -- where
+    /// `RECEIVE` after `DECODE` reports it. Luma AC `0x01` is `00` and one magnitude bit; the byte
+    /// holds two such codes with their magnitudes (`+1`, `−1`) and then a third code alone.
+    #[test]
+    fn decode_coded_leaves_a_truncated_magnitude_to_the_caller() {
+        let dec = DecTable::from_bits(
+            &crate::huffman::STD_LUMA_AC.bits,
+            crate::huffman::STD_LUMA_AC.values,
+        )
+        .unwrap();
+        let mut r = BitReader::new(&[0b0010_0000], 0);
+        for value in [1, -1] {
+            assert_eq!(decode_coded(&dec, &mut r).unwrap(), (0x01, value));
+            r.consume(1).unwrap();
+        }
+        assert_eq!(decode_coded(&dec, &mut r).unwrap().0, 0x01);
+        let err = r.consume(1).unwrap_err();
+        assert_eq!(
+            err.static_message(),
+            Some("JPEG: truncated entropy-coded data")
+        );
+        assert_eq!(err.byte_offset(), Some(1));
     }
 }
