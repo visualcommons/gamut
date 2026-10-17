@@ -236,11 +236,12 @@ pub fn decode(bytes: &[u8]) -> DecodedImage {
 
 /// How a [`TextChunk`] is stored in the file.
 pub enum TextKind<'a> {
-    /// Latin-1 `tEXt`.
+    /// Latin-1 `tEXt`: [`encode`] transcodes [`TextChunk::text`] to ISO 8859-1 (PNG §11.3.3.2).
     Text,
-    /// zlib-compressed Latin-1 `zTXt`.
+    /// zlib-compressed Latin-1 `zTXt`: transcoded like [`TextKind::Text`] (PNG §11.3.3.3).
     ZTxt,
-    /// UTF-8 `iTXt` with a language tag and translated keyword (either may be empty).
+    /// UTF-8 `iTXt` with a language tag and translated keyword (either may be empty); the text
+    /// and translated keyword are written as UTF-8 unchanged (PNG §11.3.3.4).
     ITxt {
         /// RFC 3066 language tag (may be empty).
         language: &'a str,
@@ -252,10 +253,15 @@ pub enum TextKind<'a> {
 }
 
 /// One text chunk for [`EncodeOpts::text`].
+///
+/// Fields are Rust (UTF-8) strings; [`encode`] writes each in the character set its chunk
+/// carries, and panics on a character that set cannot represent rather than writing its UTF-8
+/// bytes, which a conforming reader would render as different Latin-1 characters.
 pub struct TextChunk<'a> {
-    /// The registered or ad-hoc keyword (Latin-1, 1–79 bytes).
+    /// The registered or ad-hoc keyword (1–79 Latin-1 characters in every text chunk kind,
+    /// PNG §11.3.3.1); transcoded to ISO 8859-1.
     pub keyword: &'a str,
-    /// The text payload.
+    /// The text payload: transcoded to ISO 8859-1 for `tEXt`/`zTXt`, UTF-8 for `iTXt`.
     pub text: &'a str,
     /// The chunk flavour to write.
     pub kind: TextKind<'a>,
@@ -306,6 +312,49 @@ fn channels(color_type: u8) -> usize {
     }
 }
 
+/// Transcodes `s` to ISO 8859-1, one byte per `char` (U+0000–U+00FF map to themselves).
+///
+/// Panics, naming `what`, on a character Latin-1 cannot represent: writing its UTF-8 bytes
+/// instead would yield a chunk a conforming reader decodes to different text.
+fn latin1(s: &str, what: &str) -> Vec<u8> {
+    s.chars()
+        .map(|c| {
+            u8::try_from(c).unwrap_or_else(|_| {
+                panic!(
+                    "libpng-oracle: {what} {s:?} holds {c:?} (U+{:04X}), outside Latin-1",
+                    u32::from(c)
+                )
+            })
+        })
+        .collect()
+}
+
+/// A [`TextChunk`]'s strings as NUL-terminated bytes in the character sets its chunk carries:
+/// keyword, text, language tag, translated keyword.
+fn text_strings(
+    t: &TextChunk,
+) -> (
+    std::ffi::CString,
+    std::ffi::CString,
+    std::ffi::CString,
+    std::ffi::CString,
+) {
+    let (text, language, translated) = match t.kind {
+        TextKind::Text | TextKind::ZTxt => (latin1(t.text, "tEXt/zTXt text"), "", ""),
+        TextKind::ITxt {
+            language,
+            translated,
+            ..
+        } => (t.text.as_bytes().to_vec(), language, translated),
+    };
+    (
+        std::ffi::CString::new(latin1(t.keyword, "keyword")).expect("keyword without NUL"),
+        std::ffi::CString::new(text).expect("text without NUL"),
+        std::ffi::CString::new(language).expect("language without NUL"),
+        std::ffi::CString::new(translated).expect("translated without NUL"),
+    )
+}
+
 unsafe extern "C" fn write_callback(png: sys::png_structp, data: sys::png_bytep, count: usize) {
     unsafe {
         let out = &mut *(sys::png_get_io_ptr(png) as *mut Vec<u8>);
@@ -346,6 +395,9 @@ pub fn encode(
             "palette images need EncodeOpts::palette"
         );
     }
+    // Transcoded before libpng is touched, so an unrepresentable character panics cleanly. The
+    // CStrings live until after png_set_text, which copies everything into `info`.
+    let text_owned: Vec<_> = opts.text.iter().map(text_strings).collect();
 
     unsafe {
         let version = sys::PNG_LIBPNG_VER_STRING.as_ptr() as *const c_char;
@@ -452,44 +504,23 @@ pub fn encode(
             );
         }
         if !opts.text.is_empty() {
-            // CStrings live until after png_set_text (which copies everything into `info`).
-            let owned: Vec<_> = opts
-                .text
-                .iter()
-                .map(|t| {
-                    let (language, translated) = match t.kind {
-                        TextKind::ITxt {
-                            language,
-                            translated,
-                            ..
-                        } => (language, translated),
-                        _ => ("", ""),
-                    };
-                    (
-                        std::ffi::CString::new(t.keyword).expect("keyword without NUL"),
-                        std::ffi::CString::new(t.text).expect("text without NUL"),
-                        std::ffi::CString::new(language).expect("language without NUL"),
-                        std::ffi::CString::new(translated).expect("translated without NUL"),
-                    )
-                })
-                .collect();
             let texts: Vec<sys::png_text> = opts
                 .text
                 .iter()
-                .zip(&owned)
+                .zip(&text_owned)
                 .map(|(t, (key, text, lang, lang_key))| {
                     let (compression, text_length, itxt_length, lang_ptr, lang_key_ptr) =
                         match t.kind {
                             TextKind::Text => (
                                 sys::PNG_TEXT_COMPRESSION_NONE,
-                                t.text.len(),
+                                text.as_bytes().len(),
                                 0,
                                 std::ptr::null_mut(),
                                 std::ptr::null_mut(),
                             ),
                             TextKind::ZTxt => (
                                 sys::PNG_TEXT_COMPRESSION_zTXt as i32,
-                                t.text.len(),
+                                text.as_bytes().len(),
                                 0,
                                 std::ptr::null_mut(),
                                 std::ptr::null_mut(),
@@ -501,7 +532,7 @@ pub fn encode(
                                     sys::PNG_ITXT_COMPRESSION_NONE as i32
                                 },
                                 0,
-                                t.text.len(),
+                                text.as_bytes().len(),
                                 lang.as_ptr().cast_mut(),
                                 lang_key.as_ptr().cast_mut(),
                             ),
@@ -644,6 +675,96 @@ mod tests {
         let ihdr_end = 8 + 12 + 13; // signature + framed 13-byte IHDR
         assert_eq!(&png[ihdr_end + 4..ihdr_end + 8], b"cICP");
         assert_eq!(&png[ihdr_end + 8..ihdr_end + 12], &cicp);
+    }
+
+    /// The payload of the first `ty` chunk in `png`.
+    fn chunk_payload<'p>(png: &'p [u8], ty: &[u8; 4]) -> &'p [u8] {
+        let mut rest = &png[8..];
+        loop {
+            let len = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+            if &rest[4..8] == ty {
+                return &rest[8..8 + len];
+            }
+            assert_ne!(&rest[4..8], b"IEND", "no {ty:?} chunk");
+            rest = &rest[12 + len..];
+        }
+    }
+
+    /// A 1x1 greyscale PNG carrying `text`.
+    fn with_text(text: &[TextChunk]) -> Vec<u8> {
+        encode(
+            &[0],
+            1,
+            1,
+            COLOR_GRAY,
+            8,
+            &EncodeOpts {
+                text,
+                ..EncodeOpts::default()
+            },
+        )
+    }
+
+    #[test]
+    fn text_keyword_and_payload_are_written_as_latin1() {
+        let png = with_text(&[TextChunk {
+            keyword: "Café",
+            text: "naïve ÿ",
+            kind: TextKind::Text,
+        }]);
+        assert_eq!(chunk_payload(&png, b"tEXt"), b"Caf\xE9\0na\xEFve \xFF");
+    }
+
+    #[test]
+    fn ztxt_keyword_is_written_as_latin1() {
+        let png = with_text(&[TextChunk {
+            keyword: "Café",
+            text: "é",
+            kind: TextKind::ZTxt,
+        }]);
+        // Keyword, NUL separator, compression method 0, then the zlib stream.
+        assert_eq!(&chunk_payload(&png, b"zTXt")[..6], b"Caf\xE9\0\0");
+    }
+
+    #[test]
+    fn itxt_keeps_utf8_text_but_latin1_keyword() {
+        let png = with_text(&[TextChunk {
+            keyword: "Café",
+            text: "é€",
+            kind: TextKind::ITxt {
+                language: "fr",
+                translated: "Café",
+                compressed: false,
+            },
+        }]);
+        assert_eq!(
+            chunk_payload(&png, b"iTXt"),
+            b"Caf\xE9\0\0\0fr\0Caf\xC3\xA9\0\xC3\xA9\xE2\x82\xAC"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "'€' (U+20AC), outside Latin-1")]
+    fn a_text_character_outside_latin1_panics() {
+        let _ = with_text(&[TextChunk {
+            keyword: "Title",
+            text: "5 €",
+            kind: TextKind::ZTxt,
+        }]);
+    }
+
+    #[test]
+    #[should_panic(expected = "keyword \"Tıtle\" holds 'ı' (U+0131), outside Latin-1")]
+    fn a_keyword_character_outside_latin1_panics_for_itxt_too() {
+        let _ = with_text(&[TextChunk {
+            keyword: "Tıtle",
+            text: "fine",
+            kind: TextKind::ITxt {
+                language: "",
+                translated: "",
+                compressed: false,
+            },
+        }]);
     }
 
     /// CRC-32 (ISO 3309, as PNG §5.3 uses it) over `bytes`, bitwise.
