@@ -88,11 +88,12 @@ profiles `gamut-icc` parses — conformance-gated against Little-CMS, though sti
 on throughput — and is the one crate here not yet on crates.io.
 
 The long-term goal is de-facto, fully-featured implementations — for EXIF, exiftool-class tag
-coverage — and today's crates do not reach it yet. The largest gap is reach rather than depth:
-the `gamut-metadata` facade is consumed by `gamut-dng` and the umbrella only, so every other
-format crate still carries EXIF/XMP/ICC as raw byte blocks instead of calling the typed path.
-Behind that sit per-vendor MakerNote payloads, which round-trip verbatim but are not decoded, and
-tag breadth beyond the standard dictionary. Issue #416 tracks the whole gap, measured.
+coverage — and today's crates do not reach it yet. The `gamut-metadata` facade now reaches every
+container format: `gamut-dng` depends on it outright, and `gamut-jpeg`, `gamut-jxl`, `gamut-heic`,
+`gamut-png`, `gamut-webp`, `gamut-avif` and `gamut-tiff` wire it behind an optional `metadata`
+feature (a `TypedMetadata` impl and a `with_metadata` encoder builder where the crate encodes).
+The remaining gap is depth: per-vendor MakerNote payloads, which round-trip verbatim but are not
+decoded, and tag breadth beyond the standard dictionary. Issue #416 tracks the whole gap, measured.
 
 **gamut is image-first.** Even where a format's codec (AV1, AV2, VVC, HEVC) is fundamentally a
 video codec, gamut implements only the intra-frame, still-image subset those formats use — no

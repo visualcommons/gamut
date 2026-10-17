@@ -218,7 +218,7 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
 
         // gamut-tiff STATUS.md "Additions since the freeze (#446)": `TiffDecoder::metadata` locates
         // the `ExifIFD`, XMP (700), IPTC-IIM (33723), ICC (34675) and C2PA (52545) payloads, and
-        // `TiffEncoder::with_metadata` writes the first four. The write cells stay `false` until
+        // `TiffEncoder::with_tiff_metadata` writes the first four. The write cells stay `false` until
         // `gamut-cli`'s TIFF output writes what this table grants it: that command reads these
         // cells to decide what to carry, and flipping them first would make it drop the carried
         // blocks without the warning it gives today (#870). The C2PA store is written
@@ -243,10 +243,10 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
 /// crate is wired today, so the answer is `true` throughout; a format appended to the
 /// `#[non_exhaustive]` [`Format`] starts `false` until its crate is wired.
 ///
-/// Two crates spell the encoder builder `with_typed_metadata` rather than `with_metadata`:
-/// `gamut-png` and `gamut-tiff` already had a `with_metadata` carrying their own whole metadata
-/// type (`PngMetadata`, `TiffMetadata`), so the facade model takes the other name there.
-/// `gamut-heic` is decode-only and has no encoder builder at all.
+/// Every encoding crate spells the builder `with_metadata`. In `gamut-png` and `gamut-tiff` the
+/// builder carrying the crate's own whole metadata type is named apart from it
+/// (`with_png_metadata`, `with_tiff_metadata`). `gamut-heic` is decode-only and has no encoder
+/// builder at all.
 ///
 /// # How a `true` cell is switched on
 ///

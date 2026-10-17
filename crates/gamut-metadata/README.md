@@ -305,9 +305,9 @@ encoding follows the same rule.
 
 Wired today: every format crate — `gamut-dng` (its `DngMetadata` holds the facade's `Exif` by
 value), and behind a `metadata` feature `gamut-jpeg`, `gamut-png`, `gamut-webp`, `gamut-avif`,
-`gamut-heic` (decode-only), `gamut-jxl` and `gamut-tiff`. `gamut-png` and `gamut-tiff` spell the
-encoder builder `with_typed_metadata`, because each already had a `with_metadata` carrying its
-own whole metadata type.
+`gamut-heic` (decode-only), `gamut-jxl` and `gamut-tiff`. Every encoding crate spells the builder
+`with_metadata`; `gamut-png` and `gamut-tiff` name the builder carrying their own whole metadata
+type apart from it (`with_png_metadata`, `with_tiff_metadata`).
 
 ## License
 
