@@ -579,6 +579,24 @@ mod tests {
     }
 
     #[test]
+    fn stream_data_spelling_an_object_header_is_not_scanned() {
+        // The stream's bytes spell object 1 again; read as a header they would replace the
+        // catalog with an empty dict.
+        let data = b"1 0 obj <<>> endobj";
+        let mut pdf = b"%PDF-1.5\n1 0 obj <</Type/Catalog>> endobj\n".to_vec();
+        pdf.extend_from_slice(format!("2 0 obj <</Length {}>>stream\n", data.len()).as_bytes());
+        pdf.extend_from_slice(data);
+        pdf.extend_from_slice(b"\nendstream endobj\n");
+        let doc = Document::parse(&pdf).unwrap();
+        assert_eq!(doc.objects.len(), 2);
+        assert!(doc.catalog().is_some());
+        assert_eq!(
+            doc.objects[&2],
+            Obj::Stream(vec![(b"Length".to_vec(), Obj::Num(19.0))], data.to_vec())
+        );
+    }
+
+    #[test]
     fn header_number_needs_two_integers() {
         assert_eq!(header_number(b"\n17 0 obj", 6), Some(17));
         assert_eq!(header_number(b"\n0 obj", 3), None);
