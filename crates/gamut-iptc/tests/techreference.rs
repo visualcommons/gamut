@@ -11,8 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gamut_iptc::extension::{
-    ArtworkOrObject, CreatorContactInfo, Entity, ImageRegion, Licensor, RegionBoundary,
-    RegionBoundaryPoint,
+    ArtworkOrObject, CopyrightOwner, CreatorContactInfo, CvTerm, EmbeddedRightsExpression, Entity,
+    EntityWithRole, ImageCreator, ImageRegion, ImageSupplier, Licensor, LinkedRightsExpression,
+    Location, Person, Product, RegionBoundary, RegionBoundaryPoint, RegistryEntry,
 };
 use gamut_iptc::schema::{FIELD_MAP, XmpShape, ns};
 use gamut_iptc::xmp::{XmpProperty, XmpValue};
@@ -66,6 +67,7 @@ fn ns_prefix(uri: &str) -> &'static str {
         _ if uri == ns::IPTC_EXT => "Iptc4xmpExt",
         _ if uri == ns::PLUS => "plus",
         _ if uri == ns::XMP => "xmp",
+        _ if uri == ns::EXIF => "exif",
         _ => panic!("gamut references a namespace outside the IPTC set: {uri}"),
     }
 }
@@ -307,12 +309,120 @@ fn full_region() -> ImageRegion {
     it
 }
 
+/// A [`Location`] with every field set.
+fn full_location() -> Location {
+    let mut it = Location::default();
+    it.identifiers = vec!["https://example.org/loc/1".to_owned()];
+    it.name = Some("Place Bellecour".to_owned());
+    it.sublocation = Some("Presqu'île".to_owned());
+    it.city = Some("Lyon".to_owned());
+    it.province_state = Some("Rhône".to_owned());
+    it.country_name = Some("France".to_owned());
+    it.country_code = Some("FRA".to_owned());
+    it.world_region = Some("Europe".to_owned());
+    it.gps_latitude = Some("45,45.47N".to_owned());
+    it.gps_longitude = Some("4,49.92E".to_owned());
+    it.gps_altitude = Some("170/1".to_owned());
+    it.gps_altitude_ref = Some("0".to_owned());
+    it
+}
+
+/// A [`CvTerm`] with every field set.
+fn full_cv_term() -> CvTerm {
+    let mut it = CvTerm::default();
+    it.vocabulary_identifier = Some("http://cv.iptc.org/newscodes/scene/".to_owned());
+    it.identifier = Some("http://cv.iptc.org/newscodes/scene/011900".to_owned());
+    it.name = Some("outdoors".to_owned());
+    it.refined_about = Some("http://cv.iptc.org/newscodes/rbac/visual".to_owned());
+    it
+}
+
+/// A [`Person`] with every field set.
+fn full_person() -> Person {
+    let mut it = Person::default();
+    it.identifiers = vec!["urn:person".to_owned()];
+    it.name = Some("Ada Lovelace".to_owned());
+    it.characteristics = vec![full_cv_term()];
+    it.description = Some("Seated, left of frame".to_owned());
+    it
+}
+
+/// An [`EntityWithRole`] with every field set.
+fn full_contributor() -> EntityWithRole {
+    let mut it = EntityWithRole::default();
+    it.identifiers = vec!["urn:contributor".to_owned()];
+    it.name = Some("Studio gamut".to_owned());
+    it.roles = vec!["http://cv.iptc.org/newscodes/contrrole/retoucher".to_owned()];
+    it
+}
+
+/// A [`Product`] with every field set.
+fn full_product() -> Product {
+    let mut it = Product::default();
+    it.identifiers = vec!["urn:product".to_owned()];
+    it.name = Some("Teapot".to_owned());
+    it.gtin = Some("4006381333931".to_owned());
+    it.description = Some("White porcelain".to_owned());
+    it
+}
+
+/// A [`RegistryEntry`] with every field set.
+fn full_registry_entry() -> RegistryEntry {
+    let mut it = RegistryEntry::default();
+    it.item_identifier = Some("item-42".to_owned());
+    it.organisation_identifier = Some("https://registry.example.org/".to_owned());
+    it.role = Some("http://cv.iptc.org/newscodes/imageregistryrole/canonicalLink".to_owned());
+    it
+}
+
+/// An [`EmbeddedRightsExpression`] with every field set.
+fn full_embedded_rights() -> EmbeddedRightsExpression {
+    let mut it = EmbeddedRightsExpression::default();
+    it.expression = Some("<o:Policy/>".to_owned());
+    it.encoding_type = Some("application/xml".to_owned());
+    it.language_identifier = Some("http://www.w3.org/ns/odrl/2/".to_owned());
+    it
+}
+
+/// A [`LinkedRightsExpression`] with every field set.
+fn full_linked_rights() -> LinkedRightsExpression {
+    let mut it = LinkedRightsExpression::default();
+    it.url = Some("https://example.org/policy.xml".to_owned());
+    it.encoding_type = Some("application/xml".to_owned());
+    it.language_identifier = Some("http://www.w3.org/ns/odrl/2/".to_owned());
+    it
+}
+
+/// A [`CopyrightOwner`] with both fields set.
+fn full_copyright_owner() -> CopyrightOwner {
+    let mut it = CopyrightOwner::default();
+    it.identifier = Some("urn:owner".to_owned());
+    it.name = Some("Owner".to_owned());
+    it
+}
+
+/// An [`ImageCreator`] with both fields set.
+fn full_image_creator() -> ImageCreator {
+    let mut it = ImageCreator::default();
+    it.identifier = Some("urn:creator".to_owned());
+    it.name = Some("Creator".to_owned());
+    it
+}
+
+/// An [`ImageSupplier`] with both fields set.
+fn full_image_supplier() -> ImageSupplier {
+    let mut it = ImageSupplier::default();
+    it.identifier = Some("urn:supplier".to_owned());
+    it.name = Some("Supplier".to_owned());
+    it
+}
+
 /// Each typed structure must emit exactly the fields the reference's `ipmd_struct` entry defines —
 /// no invented field, none missed, and none under a mistyped namespace prefix.
 #[test]
 fn extension_structures_match_techreference_field_sets() {
     let doc = techreference();
-    let cases: [(&str, XmpValue); 7] = [
+    let cases: [(&str, XmpValue); 18] = [
         ("CreatorContactInfo", full_contact().to_xmp()),
         ("ArtworkOrObject", full_artwork().to_xmp()),
         ("Licensor", full_licensor().to_xmp()),
@@ -320,15 +430,87 @@ fn extension_structures_match_techreference_field_sets() {
         ("RegionBoundaryPoint", full_point().to_xmp()),
         ("RegionBoundary", full_boundary().to_xmp()),
         ("ImageRegion", full_region().to_xmp()),
+        ("Location", full_location().to_xmp()),
+        ("CvTerm", full_cv_term().to_xmp()),
+        ("PersonWDetails", full_person().to_xmp()),
+        ("EntityWRole", full_contributor().to_xmp()),
+        ("ProductWGtin", full_product().to_xmp()),
+        ("RegistryEntry", full_registry_entry().to_xmp()),
+        ("EmbdEncRightsExpr", full_embedded_rights().to_xmp()),
+        ("LinkedEncRightsExpr", full_linked_rights().to_xmp()),
+        ("CopyrightOwner", full_copyright_owner().to_xmp()),
+        ("ImageCreator", full_image_creator().to_xmp()),
+        ("ImageSupplier", full_image_supplier().to_xmp()),
     ];
-    for (structure, value) in cases {
+    for (structure, value) in &cases {
         assert_eq!(
-            emitted_field_ids(&value),
+            emitted_field_ids(value),
             struct_field_ids(&doc, structure),
             "{structure} fields drifted from the tech reference"
         );
     }
+
+    // Every structure the reference defines is modelled, except the `AltLang` language
+    // alternative, which gamut models as a field shape (a `String` read from `x-default`).
+    let modelled: BTreeSet<&str> = cases.iter().map(|&(name, _)| name).collect();
+    let defined: BTreeSet<&str> = doc["ipmd_struct"]
+        .as_object()
+        .expect("ipmd_struct is an object")
+        .keys()
+        .map(String::as_str)
+        .filter(|&name| name != "AltLang")
+        .collect();
+    assert_eq!(
+        modelled, defined,
+        "a reference structure has no typed model"
+    );
 }
+
+/// Every top-level property gamut gives a structured accessor pair, as
+/// `(reference key, XMPid, structure name)`.
+const STRUCTURED_TOP: &[(&str, &str, &str)] = &[
+    (
+        "creatorContactInfo",
+        "Iptc4xmpCore:CreatorContactInfo",
+        "CreatorContactInfo",
+    ),
+    ("imageRegion", "Iptc4xmpExt:ImageRegion", "ImageRegion"),
+    (
+        "artworkOrObjects",
+        "Iptc4xmpExt:ArtworkOrObject",
+        "ArtworkOrObject",
+    ),
+    ("licensors", "plus:Licensor", "Licensor"),
+    ("locationCreated", "Iptc4xmpExt:LocationCreated", "Location"),
+    ("locationsShown", "Iptc4xmpExt:LocationShown", "Location"),
+    (
+        "personsShown",
+        "Iptc4xmpExt:PersonInImageWDetails",
+        "PersonWDetails",
+    ),
+    ("aboutCvTerms", "Iptc4xmpExt:AboutCvTerm", "CvTerm"),
+    ("genres", "Iptc4xmpExt:Genre", "CvTerm"),
+    ("contributors", "Iptc4xmpExt:Contributor", "EntityWRole"),
+    (
+        "productsShown",
+        "Iptc4xmpExt:ProductInImage",
+        "ProductWGtin",
+    ),
+    ("registryEntries", "Iptc4xmpExt:RegistryId", "RegistryEntry"),
+    (
+        "embdEncRightsExprs",
+        "Iptc4xmpExt:EmbdEncRightsExpr",
+        "EmbdEncRightsExpr",
+    ),
+    (
+        "linkedEncRightsExprs",
+        "Iptc4xmpExt:LinkedEncRightsExpr",
+        "LinkedEncRightsExpr",
+    ),
+    ("copyrightOwners", "plus:CopyrightOwner", "CopyrightOwner"),
+    ("imageCreators", "plus:ImageCreator", "ImageCreator"),
+    ("suppliers", "plus:ImageSupplier", "ImageSupplier"),
+];
 
 /// The typed structures must sit on the `ipmd_top` properties the reference names, with the
 /// structure type it names — a projection hung on the wrong property would still round-trip.
@@ -336,22 +518,8 @@ fn extension_structures_match_techreference_field_sets() {
 fn extension_accessors_target_the_techreference_top_properties() {
     let doc = techreference();
     let top = doc["ipmd_top"].as_object().expect("ipmd_top is an object");
-    // (reference key, expected XMPid, expected structure name)
-    let expected = [
-        (
-            "creatorContactInfo",
-            "Iptc4xmpCore:CreatorContactInfo",
-            "CreatorContactInfo",
-        ),
-        ("imageRegion", "Iptc4xmpExt:ImageRegion", "ImageRegion"),
-        (
-            "artworkOrObjects",
-            "Iptc4xmpExt:ArtworkOrObject",
-            "ArtworkOrObject",
-        ),
-        ("licensors", "plus:Licensor", "Licensor"),
-    ];
-    for (key, xmp_id, structure) in expected {
+    let expected = STRUCTURED_TOP;
+    for &(key, xmp_id, structure) in expected {
         let entry = &top[key];
         assert_eq!(entry["XMPid"].as_str(), Some(xmp_id), "{key} XMPid");
         assert_eq!(
@@ -361,12 +529,41 @@ fn extension_accessors_target_the_techreference_top_properties() {
         );
     }
 
-    // The accessors write those exact properties: four values in, four properties out.
+    // Every top-level property the reference types with a structure is in that list, apart from
+    // the `AltLang` ones, which are language-alternative fields rather than structures.
+    let structured: BTreeSet<&str> = top
+        .values()
+        .filter(|entry| {
+            entry["datatype"].as_str() == Some("struct")
+                && entry["dataformat"].as_str() != Some("AltLang")
+        })
+        .map(|entry| entry["XMPid"].as_str().expect("XMPid is a string"))
+        .collect();
+    let listed: BTreeSet<&str> = expected.iter().map(|&(_, id, _)| id).collect();
+    assert_eq!(
+        structured, listed,
+        "a structured top-level property has no accessor"
+    );
+
+    // The accessors write those exact properties: one value per pair in, one property each out.
     let mut pm = PhotoMetadata::new();
     pm.set_creator_contact_info(&full_contact());
     pm.set_image_regions(&[full_region()]);
     pm.set_artwork_or_objects(&[full_artwork()]);
     pm.set_licensors(&[full_licensor()]);
+    pm.set_locations_created(&[full_location()]);
+    pm.set_locations_shown(&[full_location()]);
+    pm.set_persons_shown(&[full_person()]);
+    pm.set_about_cv_terms(&[full_cv_term()]);
+    pm.set_genres(&[full_cv_term()]);
+    pm.set_contributors(&[full_contributor()]);
+    pm.set_products_shown(&[full_product()]);
+    pm.set_registry_entries(&[full_registry_entry()]);
+    pm.set_embedded_rights_expressions(&[full_embedded_rights()]);
+    pm.set_linked_rights_expressions(&[full_linked_rights()]);
+    pm.set_copyright_owners(&[full_copyright_owner()]);
+    pm.set_image_creators(&[full_image_creator()]);
+    pm.set_image_suppliers(&[full_image_supplier()]);
     let written: BTreeSet<String> = pm
         .xmp
         .properties
@@ -384,27 +581,18 @@ fn extension_accessors_target_the_techreference_top_properties() {
 fn modelled_structured_properties_carry_no_iim_counterpart() {
     let doc = techreference();
     let top = doc["ipmd_top"].as_object().expect("ipmd_top is an object");
-    for key in [
-        "creatorContactInfo",
-        "imageRegion",
-        "artworkOrObjects",
-        "licensors",
-    ] {
+    for &(key, xmp_id, _) in STRUCTURED_TOP {
         assert!(
             top[key].get("IIMid").is_none(),
             "{key} has an IIM counterpart, so it can conflict and needs a reconciliation rule"
         );
-    }
-    // ...and none of them is in the IIM<->XMP map, whose rows are exactly the IIMid-bearing ones.
-    for name in [
-        "CreatorContactInfo",
-        "ImageRegion",
-        "ArtworkOrObject",
-        "Licensor",
-    ] {
+        // ...and none of them is in the IIM<->XMP map, whose rows are exactly the IIMid-bearing
+        // ones.
         assert!(
-            !FIELD_MAP.iter().any(|row| row.xmp.name == name),
-            "{name} is reconciled but has no IIM dataset"
+            !FIELD_MAP
+                .iter()
+                .any(|row| format!("{}:{}", ns_prefix(row.xmp.ns), row.xmp.name) == xmp_id),
+            "{xmp_id} is reconciled but has no IIM dataset"
         );
     }
 }
