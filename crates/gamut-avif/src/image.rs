@@ -358,7 +358,8 @@ impl AvifImage {
 impl gamut_metadata::TypedMetadata for AvifImage {
     /// The primary item's located payloads as
     /// [`MetadataBlock`](gamut_metadata::MetadataBlock)s: the `Exif` item's TIFF stream (its
-    /// `exif_tiff_header_offset` applied, [`AvifItem::exif_tiff_stream`]), the XMP `mime` item's
+    /// `exif_tiff_header_offset` applied by the shared
+    /// [`gamut_isobmff::Item::exif_tiff_stream`] lens), the XMP `mime` item's
     /// packet and the primary item's ICC `colr` profile, each present only when the file carries
     /// it.
     ///
@@ -379,7 +380,9 @@ impl gamut_metadata::TypedMetadata for AvifImage {
         use gamut_metadata::MetadataBlock;
         let mut blocks = Vec::new();
         if let Some(exif) = self.exif() {
-            blocks.push(MetadataBlock::Exif(exif.exif_tiff_stream()?));
+            blocks.push(MetadataBlock::Exif(
+                exif.as_isobmff_item().exif_tiff_stream()?,
+            ));
         }
         if let Some(xmp) = self.xmp() {
             let item = xmp.as_isobmff_item();
@@ -418,41 +421,6 @@ impl<'a> AvifItem<'a> {
     #[must_use]
     pub fn id(&self) -> u32 {
         self.inner.id
-    }
-
-    /// For an `Exif` item, the TIFF stream (starting `II`/`MM`) behind the payload's 4-byte
-    /// big-endian `exif_tiff_header_offset` — the `ExifDataBlock` of ISO/IEC 23008-12 §A.2.1,
-    /// whose offset counts bytes from the end of the field to the TIFF header. This is the form
-    /// `gamut-exif` parses and [`AvifEncoder::with_exif`](crate::AvifEncoder::with_exif) takes;
-    /// the raw payload, offset included, stays available through
-    /// [`as_isobmff_item`](Self::as_isobmff_item).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if the item is not an `Exif` item, if the payload is shorter
-    /// than the offset field, or if the offset points past the payload's end.
-    pub fn exif_tiff_stream(&self) -> Result<&'a [u8]> {
-        if !matches!(self.kind(), ItemKind::Exif) {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "AVIF: item is not an Exif item",
-            ));
-        }
-        let [o0, o1, o2, o3, rest @ ..] = self.inner.payload.as_slice() else {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "AVIF: Exif item payload is shorter than its tiff-header offset field",
-            ));
-        };
-        usize::try_from(u32::from_be_bytes([*o0, *o1, *o2, *o3]))
-            .ok()
-            .and_then(|offset| rest.get(offset..))
-            .ok_or_else(|| {
-                Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "AVIF: Exif item tiff-header offset out of range",
-                )
-            })
     }
 
     /// The item's semantic kind, derived from its `item_type`.
@@ -752,7 +720,10 @@ fn is_coded_image_type(item_type: &[u8; 4]) -> bool {
     matches!(item_type, b"av01" | b"hvc1" | b"hev1" | b"vvc1" | b"vvi1")
 }
 
-#[cfg(test)]
+/// The facade's `TypedMetadata` over [`AvifImage`]. They build `AvifImage::new`, which is
+/// `pub(crate)`, so they live here; the `Exif` item's offset arithmetic is
+/// `gamut_isobmff::Item::exif_tiff_stream`'s and is tested there.
+#[cfg(all(test, feature = "metadata"))]
 mod tests {
     use gamut_isobmff::ItemReference;
 
@@ -776,46 +747,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn exif_tiff_stream_applies_the_header_offset() {
-        // A non-zero offset: two bytes of padding sit between the field and the TIFF header, so
-        // a lens that ignored the offset would return them.
-        let exif = item(2, *b"Exif", b"\0\0\0\x02xxII*\0");
-        assert_eq!(
-            AvifItem { inner: &exif }.exif_tiff_stream().unwrap(),
-            b"II*\0"
-        );
-    }
-
-    #[test]
-    fn exif_tiff_stream_refuses_each_malformed_shape() {
-        for (item_type, payload, message) in [
-            (
-                *b"mime",
-                &b"\0\0\0\0II*\0"[..],
-                "AVIF: item is not an Exif item",
-            ),
-            (
-                *b"Exif",
-                &b"\0\0\0"[..],
-                "AVIF: Exif item payload is shorter than its tiff-header offset field",
-            ),
-            (
-                *b"Exif",
-                &b"\0\0\0\x05II*\0"[..],
-                "AVIF: Exif item tiff-header offset out of range",
-            ),
-        ] {
-            let it = item(2, item_type, payload);
-            let err = AvifItem { inner: &it }.exif_tiff_stream().unwrap_err();
-            assert_eq!(err.static_message(), Some(message));
-        }
-        // The offset may name the payload's very end: an empty stream, not an error.
-        let at_end = item(2, *b"Exif", b"\0\0\0\x04II*\0");
-        assert_eq!(AvifItem { inner: &at_end }.exif_tiff_stream().unwrap(), b"");
-    }
-
-    #[cfg(feature = "metadata")]
     mod typed {
         use gamut_metadata::{MetadataBlock, MetadataError, TypedMetadata};
 
@@ -854,7 +785,7 @@ mod tests {
             };
             assert_eq!(
                 inner.static_message(),
-                Some("AVIF: Exif item tiff-header offset out of range")
+                Some("ISOBMFF: Exif item tiff-header offset out of range")
             );
         }
 

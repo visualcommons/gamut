@@ -52,7 +52,8 @@ and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color
 
 **Typed metadata (issue #510).** Behind the optional `metadata` feature, `AvifImage` implements
 `gamut_metadata::TypedMetadata` over the primary item's `Exif` item (through
-`AvifItem::exif_tiff_stream`, which applies the `exif_tiff_header_offset`), XMP `mime` item and
+`gamut_isobmff::Item::exif_tiff_stream`, the lens `gamut-heic` shares, which applies the
+`exif_tiff_header_offset`), XMP `mime` item and
 `colr` ICC profile, and `AvifEncoder::with_metadata` / `with_encoded_metadata` embed a facade
 `Metadata`, refusing IPTC-IIM and a C2PA store as `Unsupported`. exiv2's BMFF reader is the
 container-level oracle for what is embedded; exiv2 writes no BMFF, so the reverse direction has

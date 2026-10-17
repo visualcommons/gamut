@@ -3518,7 +3518,12 @@ mod typed {
             let container = AvifContainer::parse(&file).unwrap();
             let image = container.image();
             assert_eq!(
-                image.exif().unwrap().exif_tiff_stream().ok(),
+                image
+                    .exif()
+                    .unwrap()
+                    .as_isobmff_item()
+                    .exif_tiff_stream()
+                    .ok(),
                 encoded
                     .exif
                     .as_deref()
@@ -3560,7 +3565,13 @@ mod typed {
             );
             let container = AvifContainer::parse(&file).unwrap();
             assert_eq!(
-                container.image().exif().unwrap().exif_tiff_stream().ok(),
+                container
+                    .image()
+                    .exif()
+                    .unwrap()
+                    .as_isobmff_item()
+                    .exif_tiff_stream()
+                    .ok(),
                 bare.exif.as_deref()
             );
         }
