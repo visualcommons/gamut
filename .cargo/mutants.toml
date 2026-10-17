@@ -96,7 +96,7 @@ profile = "mutants"
 #
 # One entry per *claim*, not per generated mutant. An entry may match several mutants only when they
 # are the same statement (or the same operator class at one site) and one argument covers all of
-# them — `decode_image_data`'s three `i += 1`, `build_optimal_table`'s `-= -> +=`/`/=` — and its
+# them — `decode_image_data`'s three `i += 1` — and its
 # comment says so. It must never reach a mutant nobody argued for, which is what the anchor is for,
 # and the two anchors trade against each other:
 #
@@ -1002,17 +1002,6 @@ exclude_re = [
     # panics and ARE caught. Same shape as the sequential BitReader/Reader hang exclusions above.
     "scan\\.rs:1008:19: replace \\+= with \\*= in decode_ac_refine",
     "scan\\.rs:1033:15: replace \\+= with \\*= in decode_ac_refine",
-    # gamut-jpeg `build_optimal_table` (Annex K.2 length limiting) — the borrow-length search
-    # `let mut j = i - 2; while bits[j] == 0 { j -= 1; }` walks down to the longest shorter length that
-    # still has a code. Mutating the `j -= 1` step turns this terminating descent into a non-terminating
-    # loop: `-= -> /=` pins `j` (`j / 1 == j`) so `while bits[j] == 0` spins forever once it enters, and
-    # `-= -> +=` walks `j` upward into the length whose redistribution nets zero change to `bits[i]`, so
-    # the enclosing `while bits[i] > 0` never makes progress. Neither can be observed as a decoded
-    # result (execution never returns) — cargo-mutants can only ever report a TIMEOUT, never a catchable
-    # behavioural escape. Line/column-anchored so each matches EXACTLY its hang mutant; the redistribution
-    # arithmetic (`bits[i] -= 2`, `bits[i-1] += 1`, …) and the `i - 2` start ARE caught by the exact-BITS
-    # golden in `optimal_skewed_frequencies_force_16_bit_limiting`. Same shape as the scan.rs cursor hangs.
-    'huffman\.rs:365:19: replace -= with (\+|/)= in build_optimal_table',
     # gamut-jpeg `rd` (issue #333) — the module's non-terminating mutants, line/column anchored so
     # each matches EXACTLY its mutant and leaves every sibling in the survey. The same module's
     # provably-equivalent mutants make the other claim and sit in GROUP 1.

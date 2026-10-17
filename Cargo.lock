@@ -870,6 +870,7 @@ name = "gamut-jpeg"
 version = "0.1.1"
 dependencies = [
  "divan",
+ "gamut-bitstream",
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
