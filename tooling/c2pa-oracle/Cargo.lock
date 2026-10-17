@@ -1046,6 +1046,7 @@ dependencies = [
 name = "gamut-metadata"
 version = "2.0.0"
 dependencies = [
+ "gamut-core",
  "gamut-exif",
  "gamut-icc",
  "gamut-iptc",
