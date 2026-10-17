@@ -31,11 +31,11 @@ fn changing_elements(row: &[u8], width: usize) -> Vec<usize> {
 }
 
 /// `a1`/`a2`: the next two changing elements on the coding line strictly to the right of `a0`.
+///
+/// `cod` is ascending, so the first element right of `a0` is a partition point: a bounded search
+/// rather than a hand-stepped cursor, which hung under the `+= -> *=` mutation (#585).
 fn coding_changes(cod: &[usize], a0: i32, width: usize) -> (usize, usize) {
-    let mut k = 0;
-    while k < cod.len() && (cod[k] as i32) <= a0 {
-        k += 1;
-    }
+    let k = cod.partition_point(|&c| c as i32 <= a0);
     let a1 = cod.get(k).copied().unwrap_or(width);
     let a2 = cod.get(k + 1).copied().unwrap_or(width);
     (a1, a2)
@@ -45,10 +45,8 @@ fn coding_changes(cod: &[usize], a0: i32, width: usize) -> (usize, usize) {
 /// colour opposite `a0`, and the one after it.
 fn reference_changes(refr: &[usize], a0: i32, a0_color: u8, width: usize) -> (usize, usize) {
     let opposite = 1 - a0_color;
-    let mut k = 0;
-    while k < refr.len() && (refr[k] as i32) <= a0 {
-        k += 1;
-    }
+    // Ascending, so a partition point; see `coding_changes`.
+    let mut k = refr.partition_point(|&c| c as i32 <= a0);
     // The colour to the right of `refr[k]` is black when `k` is even. Skip one if it doesn't match.
     if refr.get(k).is_none() {
         return (width, width);
@@ -76,10 +74,19 @@ fn put_vertical(out: &mut BitWriter, d: i32) {
 }
 
 /// Two-dimensionally encodes one coding row against `refr` into `out`.
+///
+/// Every mode moves `a0` strictly right onto a changing element of one of the two lines or onto
+/// `width` (pass mode to `b2`, vertical to `a1`, horizontal to `a2`), so a row takes at most
+/// `cod.len() + refr.len() + 1` steps. The loop is bounded by that count rather than only by
+/// `a0 < width`, so a mutant that stalls `a0` — a constant `coding_changes`/`reference_changes`,
+/// or a relaxed bound — runs out of steps and emits a wrong row instead of hanging (#585).
 fn encode_row(out: &mut BitWriter, cod: &[usize], refr: &[usize], width: usize) -> Result<()> {
     let mut a0: i32 = -1;
     let mut a0_color = 0u8;
-    while a0 < width as i32 {
+    for _ in 0..=cod.len() + refr.len() {
+        if a0 >= width as i32 {
+            break;
+        }
         let (a1, a2) = coding_changes(cod, a0, width);
         let (b1, b2) = reference_changes(refr, a0, a0_color, width);
         if b2 < a1 {

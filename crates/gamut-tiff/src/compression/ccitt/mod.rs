@@ -81,11 +81,17 @@ fn encode_run(out: &mut BitWriter, length: usize, white: bool) -> Result<()> {
         out.put_bits(v, u32::from(l));
         Ok(())
     };
-    let mut r = length;
-    while r >= 64 {
-        let m = ((r / 64) * 64).min(2560);
-        put(out, m as u16)?;
-        r -= m;
+    // Runs longer than the largest make-up code repeat it, then one make-up code
+    // takes the remaining multiple of 64 and a terminating code the rest. Computed rather than
+    // looped on `r`: the former `while r >= 64 { r -= m }` never terminated when a mutation made
+    // `m` zero (#585).
+    for _ in 0..length / 2560 {
+        put(out, 2560)?;
+    }
+    let mut r = length % 2560;
+    if r >= 64 {
+        put(out, (r / 64 * 64) as u16)?;
+        r %= 64;
     }
     put(out, r as u16)
 }
@@ -94,24 +100,25 @@ fn encode_run(out: &mut BitWriter, length: usize, white: bool) -> Result<()> {
 ///
 /// Following the CCITT convention (and libtiff), a `0` bit is a white pixel; the image's
 /// photometric interpretation is applied separately when the bits become samples.
+///
+/// One pass over the `width` pixels, closing the current run at each colour change: the walk is
+/// bounded by the pixels it reads, where the former nested `while x < width { … x += 1 }` hung
+/// under its `<`/`+=` mutations (#585). `width` is never zero (an image edge is non-zero), so the
+/// final run is always a real one.
 fn encode_row(out: &mut BitWriter, row: &[u8], width: usize) -> Result<()> {
     let white_bit = 0u8;
-    let mut expect_white = true;
-    let mut x = 0;
-    while x < width {
-        let is_white = bit_at(row, x) == white_bit;
-        let start = x;
-        while x < width && (bit_at(row, x) == white_bit) == is_white {
-            x += 1;
+    // A row starts with a white run; a row that starts black opens with a zero-length one.
+    let mut white = true;
+    let mut run = 0;
+    for x in 0..width {
+        if (bit_at(row, x) == white_bit) != white {
+            encode_run(out, run, white)?;
+            white = !white;
+            run = 0;
         }
-        // A row must start with a white run; insert a zero-length one if it starts black.
-        if is_white != expect_white {
-            encode_run(out, 0, expect_white)?;
-            expect_white = !expect_white;
-        }
-        encode_run(out, x - start, is_white)?;
-        expect_white = !expect_white;
+        run += 1;
     }
+    encode_run(out, run, white)?;
     out.byte_align();
     Ok(())
 }
