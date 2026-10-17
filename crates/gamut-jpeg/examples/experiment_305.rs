@@ -4,8 +4,9 @@
 //! Not a test and not a benchmark: it asserts nothing. It prints one CSV row per input x decoder x
 //! sample for whichever build of the crate it was compiled against. `experiments/305/run.sh`
 //! (`mise run experiment 305`) compiles it twice -- once with `crates/gamut-jpeg/src` as it stood
-//! before the optimisation (`before`), once at `HEAD` (`head`) -- labelling each run with
-//! `--variant`. The verdict and the table live in `experiments/305/RESULTS.md`.
+//! before the optimisation (`before`), once at `HEAD` (`head`) -- and runs the two binaries in
+//! alternating rounds (`--first-sample`, `--header`), labelling each with `--variant`. The verdict
+//! and the table live in `experiments/305/RESULTS.md`.
 //!
 //! Three decoders read every stream, timed round-robin within each sample so that drift in the
 //! machine's state lands on all three alike:
@@ -74,6 +75,11 @@ fn timed(decoder: &str, jpeg: &[u8]) -> (u128, Vec<u8>) {
 struct Args {
     variant: String,
     samples: usize,
+    /// Index of this run's first sample, so a driver that splits the samples into rounds keeps one
+    /// numbering per variant.
+    first_sample: usize,
+    /// Whether to print the CSV header (the first round only).
+    header: bool,
     width: u32,
     height: u32,
     corpus_dir: Option<PathBuf>,
@@ -83,6 +89,8 @@ fn args() -> Args {
     let mut a = Args {
         variant: "head".to_owned(),
         samples: 100,
+        first_sample: 0,
+        header: true,
         width: 6000,
         height: 4000,
         corpus_dir: None,
@@ -93,6 +101,8 @@ fn args() -> Args {
         match flag.as_str() {
             "--variant" => a.variant = value,
             "--samples" => a.samples = value.parse().expect("--samples"),
+            "--first-sample" => a.first_sample = value.parse().expect("--first-sample"),
+            "--header" => a.header = value.parse().expect("--header true|false"),
             "--width" => a.width = value.parse().expect("--width"),
             "--height" => a.height = value.parse().expect("--height"),
             "--corpus-dir" => a.corpus_dir = Some(PathBuf::from(value)),
@@ -105,10 +115,12 @@ fn args() -> Args {
 fn main() {
     let a = args();
     let streams = corpus::streams(a.width, a.height);
-    println!(
-        "input,width,height,jpeg_bytes,variant,decoder,sample,decode_ns,output_fnv64,\
-         max_abs_diff_vs_libjpeg,mean_abs_diff_vs_libjpeg"
-    );
+    if a.header {
+        println!(
+            "input,width,height,jpeg_bytes,variant,decoder,sample,decode_ns,output_fnv64,\
+             max_abs_diff_vs_libjpeg,mean_abs_diff_vs_libjpeg"
+        );
+    }
     for s in &streams {
         if let Some(dir) = &a.corpus_dir {
             std::fs::write(dir.join(format!("{}.jpg", s.name)), &s.jpeg).expect("write corpus");
@@ -123,7 +135,7 @@ fn main() {
                 (fnv64(&out), max, mean)
             })
             .collect();
-        for sample in 0..a.samples {
+        for sample in a.first_sample..a.first_sample + a.samples {
             for (d, &(fnv, max, mean)) in DECODERS.iter().zip(&facts) {
                 let (ns, out) = timed(d, &s.jpeg);
                 drop(out);

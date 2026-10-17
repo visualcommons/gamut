@@ -16,13 +16,18 @@
 # one build -- the diff is taken by git at run time and reverted on any exit, so every other file
 # (the arm, the corpus, the dependencies) is the one `head` uses and the two variants differ in the
 # decoder alone. The script refuses to run if that directory carries uncommitted changes, so it
-# never measures, or reverts over, anything but its own swap. Both variants run in one session, and
-# both measure zune-jpeg and libjpeg-turbo too, so every ratio is taken against a reference timed
-# minutes earlier on the same machine.
+# never measures, or reverts over, anything but its own swap.
 #
-# EXPERIMENT_SAMPLES (default 100) sets the timed decodes per input x decoder; each also gets one
-# untimed warm-up decode. EXPERIMENT_WIDTH x EXPERIMENT_HEIGHT (default 6000 x 4000, 24 MP: the
-# small end of the issue's 24-45 MP camera range) sets the image size.
+# Both binaries are built first and then run in alternating rounds (before, head, before, head, ...),
+# each round taking SAMPLES / ROUNDS samples per input x decoder, and every round also times
+# zune-jpeg and libjpeg-turbo. A change in the machine's load during the session therefore lands on
+# both variants alike, and every ratio is taken against a reference timed seconds earlier in the
+# same process.
+#
+# EXPERIMENT_SAMPLES (default 100) sets the timed decodes per input x decoder x variant;
+# EXPERIMENT_ROUNDS (default 10, must divide it) the number of alternations. Each round also gets
+# one untimed warm-up decode per input x decoder. EXPERIMENT_WIDTH x EXPERIMENT_HEIGHT (default
+# 6000 x 4000, 24 MP: the small end of the issue's 24-45 MP camera range) sets the image size.
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
@@ -33,8 +38,14 @@ work=target/experiments/305
 site=crates/gamut-jpeg/src
 before_sha=63e0762aeb97c7eb8e25d0281d17735cfbccdcf8
 samples=${EXPERIMENT_SAMPLES:-100}
+rounds=${EXPERIMENT_ROUNDS:-10}
 width=${EXPERIMENT_WIDTH:-6000}
 height=${EXPERIMENT_HEIGHT:-4000}
+[ $((samples % rounds)) -eq 0 ] || {
+  echo "refusing: EXPERIMENT_ROUNDS ($rounds) must divide EXPERIMENT_SAMPLES ($samples)" >&2
+  exit 1
+}
+per_round=$((samples / rounds))
 
 git diff --quiet HEAD -- "$site" || {
   echo "refusing: $site has uncommitted changes; commit or set them aside first" >&2
@@ -46,7 +57,7 @@ git cat-file -e "$before_sha^{commit}" || {
 }
 
 mkdir -p "$work/corpus"
-rm -f "$work"/corpus/*.jpg "$work"/*.csv "$work"/before.patch
+rm -f "$work"/corpus/*.jpg "$work"/*.csv "$work"/before.patch "$work"/arm-*
 git diff --binary HEAD "$before_sha" -- "$site" >"$work/before.patch"
 load_start=$(cut -d' ' -f1-3 /proc/loadavg)
 head_start=$(git rev-parse HEAD)
@@ -54,22 +65,29 @@ dirty_start=$(git diff --quiet HEAD && echo false || echo true)
 
 # Each run writes under target/ first: a failed build, a failed decode or a moved HEAD then leaves
 # the committed raw/*.csv untouched, and raw/ changes only alongside run.json.
-measure() {
-  cargo run --release --quiet -p gamut-jpeg --example experiment_305 -- \
-    --variant "$1" --samples "$samples" --width "$width" --height "$height" \
-    --corpus-dir "$work/corpus" >"$work/$1.csv"
+build_arm() {
+  cargo build --release --quiet -p gamut-jpeg --example experiment_305
+  cp target/release/examples/experiment_305 "$work/arm-$1"
 }
 
 if [ -s "$work/before.patch" ]; then
   git apply "$work/before.patch"
   trap 'git apply -R "$work/before.patch"' EXIT
-  measure before
+  build_arm before
   git apply -R "$work/before.patch"
   trap - EXIT
 else
-  measure before
+  build_arm before
 fi
-measure head
+build_arm head
+
+for ((r = 0; r < rounds; r++)); do
+  for v in before head; do
+    "$work/arm-$v" --variant "$v" --samples "$per_round" --first-sample $((r * per_round)) \
+      --header "$([ "$r" -eq 0 ] && echo true || echo false)" \
+      --width "$width" --height "$height" --corpus-dir "$work/corpus" >>"$work/$v.csv"
+  done
+done
 
 # Where the head build's time goes: a flat `perf` profile of three samples per input x decoder,
 # from a build with line tables added (debug info only; the optimisation level is unchanged).
@@ -122,8 +140,9 @@ cat >"$exp/run.json" <<EOF
   "rust_toolchain_toml_sha256": "$(sha rust-toolchain.toml)",
   "width": $width,
   "height": $height,
-  "samples_per_input_and_decoder": $samples,
-  "warmup_decodes_per_input_and_decoder": 1,
+  "samples_per_input_decoder_and_variant": $samples,
+  "rounds": $rounds,
+  "warmup_decodes_per_input_decoder_and_round": 1,
   "profile_head": "$profile",
   "seeds": "none: the corpus is a deterministic generator (fixed LCG seed) in crates/gamut-jpeg/benches/common/corpus.rs, encoded by libjpeg-turbo at q90",
   "corpus_sha256": {$corpus_json
