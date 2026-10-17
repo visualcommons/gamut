@@ -311,7 +311,12 @@ pub fn idct8x8_int(block: &mut [i32; 64]) {
     }
 
     // Pass 2: rows, removing the PASS1_BITS scaling and the factor of 8 the two passes carry.
-    for (row, out_row) in ws.chunks_exact(8).zip(block.chunks_exact_mut(8)) {
+    for (row, out_row) in ws
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(block.as_chunks_mut::<8>().0)
+    {
         if row[1..].iter().all(|&c| c == 0) {
             out_row.fill(descale(i64::from(row[0]), PASS1_BITS + 3));
             continue;
