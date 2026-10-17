@@ -1,15 +1,52 @@
+diff --git a/crates/gamut-png/src/encoder.rs b/crates/gamut-png/src/encoder.rs
+index f860f578..6ed4682c 100644
+--- a/crates/gamut-png/src/encoder.rs
++++ b/crates/gamut-png/src/encoder.rs
+@@ -1376,7 +1376,8 @@ impl PngEncoder {
+         let palette = match self.palette_order {
+             PaletteOrder::AsSupplied => palette,
+             PaletteOrder::ModifiedZeng => {
+-                let (reordered, order) = palette.modified_zeng(&indices);
++                let width = image.dimensions().width as usize;
++                let (reordered, order) = palette.modified_zeng(&indices, width);
+                 for index in indices.iter_mut().chain(remap.iter_mut()) {
+                     *index = order[usize::from(*index)];
+                 }
 diff --git a/crates/gamut-png/src/palette.rs b/crates/gamut-png/src/palette.rs
-index d514745e..ba6742f6 100644
+index b3457b46..f3736dc3 100644
 --- a/crates/gamut-png/src/palette.rs
 +++ b/crates/gamut-png/src/palette.rs
-@@ -326,9 +326,7 @@ fn co_occurrence(indices: &[u8], width: usize, n: usize) -> Vec<u64> {
-             count(pair[0], pair[1]);
-         }
+@@ -227,9 +227,9 @@ impl PngPalette {
+     /// [`crate::PngEncoder::encode_indexed8`] has already rewritten. Cost: one pass over the image
+     /// and an `n × n` weight table for an `n`-entry palette, then `O(n²)` placement work, so at
+     /// most 256 × 256 whatever the picture's size.
+-    pub(crate) fn modified_zeng(&self, indices: &[u8]) -> (Self, [u8; 256]) {
++    pub(crate) fn modified_zeng(&self, indices: &[u8], width: usize) -> (Self, [u8; 256]) {
+         let n = self.rgb.len();
+-        let weight = co_occurrence(indices, n);
++        let weight = co_occurrence(indices, width, n);
+ 
+         // The heaviest pair seeds the list; a palette with fewer than two entries is its own order.
+         let mut list = std::collections::VecDeque::with_capacity(n);
+@@ -364,12 +364,18 @@ const DISTANCE_WEIGHT: [u32; 255] = [
+ /// Both halves of the table are written for every pair, unconditionally. A pixel beside its own
+ /// colour adds to the diagonal, which [`PngPalette::modified_zeng`] never reads: a candidate is
+ /// never on the list it is weighed against.
+-fn co_occurrence(indices: &[u8], n: usize) -> Vec<u64> {
++fn co_occurrence(indices: &[u8], width: usize, n: usize) -> Vec<u64> {
+     let mut weight = vec![0u64; n * n];
+-    for pair in indices.windows(2) {
+-        let (a, b) = (usize::from(pair[0]), usize::from(pair[1]));
++    let mut count = |a: u8, b: u8| {
++        let (a, b) = (usize::from(a), usize::from(b));
+         weight[a * n + b] += 1;
+         weight[b * n + a] += 1;
++    };
++    // Experiment #887 variant: horizontal neighbours within a row, no row wrap.
++    for row in indices.chunks_exact(width) {
++        for pair in row.windows(2) {
++            count(pair[0], pair[1]);
++        }
      }
--    for (&above, &below) in indices.iter().zip(&indices[width..]) {
--        count(above, below);
--    }
-+    // Experiment #887 variant: horizontal neighbours only, no vertical pairs and no row wrap.
      weight
  }
- 

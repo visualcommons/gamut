@@ -4,9 +4,9 @@
 //!
 //! Not a test and not a benchmark: it asserts nothing. It prints one CSV row per input x sample
 //! for whichever build of the crate it was compiled against. `experiments/612/run.sh`
-//! (`mise run experiment 612`) compiles it three times -- once at `HEAD` (`baseline`), and once
-//! with each of `experiments/612/mzeng.patch` and `experiments/612/mzeng-trns.patch` applied --
-//! labelling each run with `--variant`. The verdict and the table live in
+//! (`mise run experiment 612`) compiles it five times -- once at `HEAD` (`baseline`), and once
+//! with each of `experiments/612/mzeng.patch`, `mzeng-trns.patch`, `caller-2d.patch` and
+//! `caller-rows.patch` applied -- labelling each run with `--variant`. The verdict and the table live in
 //! `experiments/612/RESULTS.md`.
 //!
 //! Two groups of inputs:
@@ -40,10 +40,10 @@
 //! `reordered_bytes` (#887) is that first-seen candidate encoded again with
 //! `with_palette_order(PaletteOrder::ModifiedZeng)`: the opt-in a caller turns on, measured on the
 //! palette such a caller would hand over. Its adjacency is whatever this build's
-//! `PngPalette::modified_zeng` counts -- horizontal and vertical neighbours as shipped, raster-
-//! consecutive pixels under `experiments/612/caller-raster.patch` -- so the `baseline` and
-//! `caller-raster` runs compare the two. `reordered_bytes - first_seen_bytes` is what the opt-in
-//! buys.
+//! `PngPalette::modified_zeng` counts: consecutive pixels in raster order as shipped, horizontal
+//! plus vertical neighbours under `experiments/612/caller-2d.patch`, horizontal neighbours alone
+//! under `caller-rows.patch`. So the `baseline`, `caller-2d` and `caller-rows` runs compare the
+//! three. `reordered_bytes - first_seen_bytes` is what the opt-in buys.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;

@@ -11,12 +11,14 @@
 #
 # The baseline is the tree as checked out. Each variant is the same tree with <variant>.patch
 # applied for the duration of one build, and reverted on any exit:
-#   mzeng, mzeng-trns         -- crates/gamut-png/src/reduce.rs: the derived palette's order (#612)
-#   caller-raster, caller-rows -- crates/gamut-png/src/palette.rs: the adjacency the opt-in
-#                                caller-palette reorder counts (#887); the baseline counts
-#                                horizontal and vertical neighbours
-# The script refuses to run if either file already carries uncommitted changes, so it never
-# measures, or reverts over, anything but its own patch.
+#   mzeng, mzeng-trns     -- crates/gamut-png/src/reduce.rs: the derived palette's order (#612)
+#   caller-2d, caller-rows -- crates/gamut-png/src/{palette,encoder}.rs: the adjacency the opt-in
+#                            caller-palette reorder counts (#887). The baseline, as shipped,
+#                            counts consecutive pixels in raster order; caller-2d counts
+#                            horizontal neighbours within a row plus vertical neighbours, and
+#                            caller-rows the horizontal ones alone.
+# The script refuses to run if any of those files already carries uncommitted changes, so it
+# never measures, or reverts over, anything but its own patch.
 #
 # EXPERIMENT_SAMPLES (default 3) sets the timed encodes per input; each input also gets one
 # untimed warm-up encode. Byte counts are deterministic, so only encode_ns varies by sample.
@@ -27,9 +29,9 @@ cd "$root"
 exp=experiments/612
 raw=$exp/raw
 work=target/experiments/612
-sites=(crates/gamut-png/src/reduce.rs crates/gamut-png/src/palette.rs)
+sites=(crates/gamut-png/src/reduce.rs crates/gamut-png/src/palette.rs crates/gamut-png/src/encoder.rs)
 samples=${EXPERIMENT_SAMPLES:-3}
-variants=(mzeng mzeng-trns caller-raster caller-rows)
+variants=(mzeng mzeng-trns caller-2d caller-rows)
 
 for site in "${sites[@]}"; do
   git diff --quiet HEAD -- "$site" || {
@@ -93,7 +95,7 @@ cat >"$exp/run.json" <<EOF
   "variant_patch_sha256": {
     "mzeng": "$(sha "$exp/mzeng.patch")",
     "mzeng-trns": "$(sha "$exp/mzeng-trns.patch")",
-    "caller-raster": "$(sha "$exp/caller-raster.patch")",
+    "caller-2d": "$(sha "$exp/caller-2d.patch")",
     "caller-rows": "$(sha "$exp/caller-rows.patch")"
   },
   "rustc": $(json_str "$(rustc -vV | tr '\n' ';')"),
@@ -155,13 +157,13 @@ awk -F, '
   }
   function pct(a, b) { return (a - b) * 100 / b }
   END {
-    printf "%-24s %8s | %8s %7s | %8s %7s | %8s %7s\n", "input", "first", "2d", "%", "raster", "%", "rows", "%"
+    printf "%-24s %8s | %8s %7s | %8s %7s | %8s %7s\n", "input", "first", "raster", "%", "2d", "%", "rows", "%"
     for (r = 1; r <= rows; r++) {
       k = order[r]; f = first[k]
-      a = reo[k, "baseline"]; b = reo[k, "caller-raster"]; c = reo[k, "caller-rows"]
+      a = reo[k, "baseline"]; b = reo[k, "caller-2d"]; c = reo[k, "caller-rows"]
       tf += f; ta += a; tb += b; tc += c
       printf "%-24s %8d | %8d %+6.1f%% | %8d %+6.1f%% | %8d %+6.1f%%\n", k, f, a, pct(a, f), b, pct(b, f), c, pct(c, f)
     }
     printf "%-24s %8d | %8d %+6.1f%% | %8d %+6.1f%% | %8d %+6.1f%%\n", "total", tf, ta, pct(ta, tf), tb, pct(tb, tf), tc, pct(tc, tf)
   }
-' "$raw/baseline.csv" "$raw/caller-raster.csv" "$raw/caller-rows.csv"
+' "$raw/baseline.csv" "$raw/caller-2d.csv" "$raw/caller-rows.csv"
