@@ -324,6 +324,18 @@ mod tests {
     }
 
     #[test]
+    fn optimal_single_symbol_zero_gets_a_one_bit_code() {
+        // The empty-band edge of a JPEG AC scan: its only emitted symbol is EOB0 (0x00). Symbol 0
+        // is also the value an unwritten HUFFVAL slot holds, so this pins that the symbol is placed.
+        let mut freq = [0u32; 256];
+        freq[0x00] = 7;
+        let (bits, values) = build_optimal_table(&freq);
+        assert_eq!(values, vec![0x00]);
+        assert_eq!(bits[0], 1);
+        assert_optimal_invariants(&freq, &bits, &values);
+    }
+
+    #[test]
     fn optimal_two_equal_symbols_hand_derivation() {
         // Two equal-frequency symbols {1, 2} plus the pseudo-symbol (all frequency 1). Hand-tracing
         // the K.2 merge (ties toward the larger symbol number) pairs the pseudo with symbol 2 first,
