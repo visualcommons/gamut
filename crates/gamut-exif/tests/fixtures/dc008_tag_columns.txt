@@ -1,0 +1,191 @@
+# The Field Name, Tag ID (Hex), Type and Count columns of the five CIPA DC-008 tables that define
+# a tag, transcribed as the specification prints them from
+# references/exif/exif-3.0-dc-008-translation-2023.pdf (Exif 3.0, CIPA DC-008-Translation-2023-E):
+# Table 6 (p. 41), Table 8 (pp. 54-55), Table 9 (pp. 56-57), Table 14 (pp. 90-91), Table 16 (p. 100).
+#
+# This file is a transcription of the specification, not of `ExifTag`: it keeps the tables' own
+# order, section headings and spellings (`SHORT or LONG`, `ASCII or UTF-8`, `3 * 256`, `*S`,
+# `2 or 3 or 4`), and it keeps the specification's errors. Where the catalogue deliberately departs
+# from a table (GainControl, Table 9 RATIONAL vs §4.6.6.7.41 SHORT), the row here still says what
+# the table says, and tests/tag_spec_columns.rs lists the departure and the clause behind it.
+#
+# Layout: `[Table N ...]` opens a table, `## ...` is a section heading (as in the table), `#` is a
+# comment, and every other non-blank line is one row: `Field Name | Hex | Type | Count`.
+
+[Table 6 TIFF Rev. 6.0 Attribute Information Used in Exif]
+## A. Tags relating to image data structure
+ImageWidth                  | 100  | SHORT or LONG  | 1
+ImageLength                 | 101  | SHORT or LONG  | 1
+BitsPerSample               | 102  | SHORT          | 3
+Compression                 | 103  | SHORT          | 1
+PhotometricInterpretation   | 106  | SHORT          | 1
+Orientation                 | 112  | SHORT          | 1
+SamplesPerPixel             | 115  | SHORT          | 1
+XResolution                 | 11A  | RATIONAL       | 1
+YResolution                 | 11B  | RATIONAL       | 1
+PlanarConfiguration         | 11C  | SHORT          | 1
+ResolutionUnit              | 128  | SHORT          | 1
+YCbCrSubSampling            | 212  | SHORT          | 2
+YCbCrPositioning            | 213  | SHORT          | 1
+## B. Tags relating to recording offset
+StripOffsets                | 111  | SHORT or LONG  | *S
+RowsPerStrip                | 116  | SHORT or LONG  | 1
+StripByteCounts             | 117  | SHORT or LONG  | *S
+JPEGInterchangeFormat       | 201  | LONG           | 1
+JPEGInterchangeFormatLength | 202  | LONG           | 1
+## C. Tags relating to image data characteristics
+TransferFunction            | 12D  | SHORT          | 3 * 256
+WhitePoint                  | 13E  | RATIONAL       | 2
+PrimaryChromaticities       | 13F  | RATIONAL       | 6
+YCbCrCoefficients           | 211  | RATIONAL       | 3
+ReferenceBlackWhite         | 214  | RATIONAL       | 6
+## D. Other tags
+ImageDescription            | 10E  | ASCII or UTF-8 | Any
+Make                        | 10F  | ASCII or UTF-8 | Any
+Model                       | 110  | ASCII or UTF-8 | Any
+Software                    | 131  | ASCII or UTF-8 | Any
+DateTime                    | 132  | ASCII          | 20
+Artist                      | 13B  | ASCII or UTF-8 | Any
+Copyright                   | 8298 | ASCII or UTF-8 | Any
+
+[Table 8 Exif IFD Attribute Information (1)]
+## A. Tags Relating to Version
+ExifVersion                 | 9000 | UNDEFINED      | 4
+FlashpixVersion             | A000 | UNDEFINED      | 4
+## B. Tag Relating to Image Data Characteristics
+ColorSpace                  | A001 | SHORT          | 1
+Gamma                       | A500 | RATIONAL       | 1
+## C. Tags Relating to Image Configuration
+ComponentsConfiguration     | 9101 | UNDEFINED      | 4
+CompressedBitsPerPixel      | 9102 | RATIONAL       | 1
+PixelXDimension             | A002 | SHORT or LONG  | 1
+PixelYDimension             | A003 | SHORT or LONG  | 1
+## D. Tags Relating to User Information
+MakerNote                   | 927C | UNDEFINED      | Any
+UserComment                 | 9286 | UNDEFINED      | Any
+## E. Tag Relating to Related File Information
+RelatedSoundFile            | A004 | ASCII          | 13
+## F. Tags Relating to Date and Time
+DateTimeOriginal            | 9003 | ASCII          | 20
+DateTimeDigitized           | 9004 | ASCII          | 20
+OffsetTime                  | 9010 | ASCII          | 7
+OffsetTimeOriginal          | 9011 | ASCII          | 7
+OffsetTimeDigitized         | 9012 | ASCII          | 7
+SubSecTime                  | 9290 | ASCII          | Any
+SubSecTimeOriginal          | 9291 | ASCII          | Any
+SubSecTimeDigitized         | 9292 | ASCII          | Any
+## G. Tags Relating to Picture-Taking Conditions
+# "See Table 9"
+## H. Tags Relating to shooting situation
+Temperature                 | 9400 | SRATIONAL      | 1
+Humidity                    | 9401 | RATIONAL       | 1
+Pressure                    | 9402 | RATIONAL       | 1
+WaterDepth                  | 9403 | SRATIONAL      | 1
+Acceleration                | 9404 | RATIONAL       | 1
+CameraElevationAngle        | 9405 | SRATIONAL      | 1
+## I. Other Tags
+ImageUniqueID               | A420 | ASCII          | 33
+CameraOwnerName             | A430 | ASCII or UTF-8 | Any
+BodySerialNumber            | A431 | ASCII          | Any
+LensSpecification           | A432 | RATIONAL       | 4
+LensMake                    | A433 | ASCII or UTF-8 | Any
+LensModel                   | A434 | ASCII or UTF-8 | Any
+LensSerialNumber            | A435 | ASCII          | Any
+ImageTitle                  | A436 | ASCII or UTF-8 | Any
+Photographer                | A437 | ASCII or UTF-8 | Any
+ImageEditor                 | A438 | ASCII or UTF-8 | Any
+CameraFirmware              | A439 | ASCII or UTF-8 | Any
+RAWDevelopingSoftware       | A43A | ASCII or UTF-8 | Any
+ImageEditingSoftware        | A43B | ASCII or UTF-8 | Any
+MetadataEditingSoftware     | A43C | ASCII or UTF-8 | Any
+
+[Table 9 Exif IFD Attribute Information (2)]
+## G. Tags Relating to Picture-Taking Conditions
+ExposureTime                | 829A | RATIONAL       | 1
+FNumber                     | 829D | RATIONAL       | 1
+ExposureProgram             | 8822 | SHORT          | 1
+SpectralSensitivity         | 8824 | ASCII          | Any
+PhotographicSensitivity     | 8827 | SHORT          | Any
+OECF                        | 8828 | UNDEFINED      | Any
+SensitivityType             | 8830 | SHORT          | 1
+StandardOutputSensitivity   | 8831 | LONG           | 1
+RecommendedExposureIndex    | 8832 | LONG           | 1
+ISOSpeed                    | 8833 | LONG           | 1
+ISOSpeedLatitudeyyy         | 8834 | LONG           | 1
+ISOSpeedLatitudezzz         | 8835 | LONG           | 1
+ShutterSpeedValue           | 9201 | SRATIONAL      | 1
+ApertureValue               | 9202 | RATIONAL       | 1
+BrightnessValue             | 9203 | SRATIONAL      | 1
+ExposureBiasValue           | 9204 | SRATIONAL      | 1
+MaxApertureValue            | 9205 | RATIONAL       | 1
+SubjectDistance             | 9206 | RATIONAL       | 1
+MeteringMode                | 9207 | SHORT          | 1
+LightSource                 | 9208 | SHORT          | 1
+Flash                       | 9209 | SHORT          | 1
+FocalLength                 | 920A | RATIONAL       | 1
+SubjectArea                 | 9214 | SHORT          | 2 or 3 or 4
+FlashEnergy                 | A20B | RATIONAL       | 1
+SpatialFrequencyResponse    | A20C | UNDEFINED      | Any
+FocalPlaneXResolution       | A20E | RATIONAL       | 1
+FocalPlaneYResolution       | A20F | RATIONAL       | 1
+FocalPlaneResolutionUnit    | A210 | SHORT          | 1
+SubjectLocation             | A214 | SHORT          | 2
+ExposureIndex               | A215 | RATIONAL       | 1
+SensingMethod               | A217 | SHORT          | 1
+FileSource                  | A300 | UNDEFINED      | 1
+SceneType                   | A301 | UNDEFINED      | 1
+CFAPattern                  | A302 | UNDEFINED      | Any
+CustomRendered              | A401 | SHORT          | 1
+ExposureMode                | A402 | SHORT          | 1
+WhiteBalance                | A403 | SHORT          | 1
+DigitalZoomRatio            | A404 | RATIONAL       | 1
+FocalLengthIn35mmFilm       | A405 | SHORT          | 1
+SceneCaptureType            | A406 | SHORT          | 1
+GainControl                 | A407 | RATIONAL       | 1
+Contrast                    | A408 | SHORT          | 1
+Saturation                  | A409 | SHORT          | 1
+Sharpness                   | A40A | SHORT          | 1
+DeviceSettingDescription    | A40B | UNDEFINED      | Any
+SubjectDistanceRange        | A40C | SHORT          | 1
+CompositeImage              | A460 | SHORT          | 1
+SourceImageNumberOfCompositeImage   | A461 | SHORT     | 2
+SourceExposureTimesOfCompositeImage | A462 | UNDEFINED | Any
+
+[Table 14 GPS Attribute Information]
+## A. Tags Relating to GPS
+GPSVersionID                | 0    | BYTE           | 4
+GPSLatitudeRef              | 1    | ASCII          | 2
+GPSLatitude                 | 2    | RATIONAL       | 3
+GPSLongitudeRef             | 3    | ASCII          | 2
+GPSLongitude                | 4    | RATIONAL       | 3
+GPSAltitudeRef              | 5    | BYTE           | 1
+GPSAltitude                 | 6    | RATIONAL       | 1
+GPSTimeStamp                | 7    | RATIONAL       | 3
+GPSSatellites               | 8    | ASCII          | Any
+GPSStatus                   | 9    | ASCII          | 2
+GPSMeasureMode              | A    | ASCII          | 2
+GPSDOP                      | B    | RATIONAL       | 1
+GPSSpeedRef                 | C    | ASCII          | 2
+GPSSpeed                    | D    | RATIONAL       | 1
+GPSTrackRef                 | E    | ASCII          | 2
+GPSTrack                    | F    | RATIONAL       | 1
+GPSImgDirectionRef          | 10   | ASCII          | 2
+GPSImgDirection             | 11   | RATIONAL       | 1
+GPSMapDatum                 | 12   | ASCII          | Any
+GPSDestLatitudeRef          | 13   | ASCII          | 2
+GPSDestLatitude             | 14   | RATIONAL       | 3
+GPSDestLongitudeRef         | 15   | ASCII          | 2
+GPSDestLongitude            | 16   | RATIONAL       | 3
+GPSDestBearingRef           | 17   | ASCII          | 2
+GPSDestBearing              | 18   | RATIONAL       | 1
+GPSDestDistanceRef          | 19   | ASCII          | 2
+GPSDestDistance             | 1A   | RATIONAL       | 1
+GPSProcessingMethod         | 1B   | UNDEFINED      | Any
+GPSAreaInformation          | 1C   | UNDEFINED      | Any
+GPSDateStamp                | 1D   | ASCII          | 11
+GPSDifferential             | 1E   | SHORT          | 1
+GPSHPositioningError        | 1F   | RATIONAL       | 1
+
+[Table 16 Interoperability IFD Attribute Information]
+## A. Attached Information Related to Interoperability
+InteroperabilityIndex       | 1    | ASCII          | Any
