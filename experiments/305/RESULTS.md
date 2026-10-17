@@ -83,6 +83,13 @@ How to read it:
 - **The IDCT (#896, `gamut-dsp`).** `idct8x8` evaluates the §A.3.3 ideal IDCT in `f64` and rebuilds its cosine table (64 `cos()` calls) on every block; its module doc says it targets clarity over speed. That dominates what is left. Its fix belongs to the crate that owns the kernel, so this change does not work around it in the decoder. A decoder-side DC-only shortcut (a flat block of `round(S00/8)`) would be such a workaround: a second copy of the kernel's arithmetic that #896's fix would not reach. #896 asks for the sparsity hint to cross the kernel's API instead.
 - **The entropy decoder and presentation (#897, `gamut-jpeg`, blocked by #896).** This covers adopting the new kernel and a fused AC run/size + magnitude fast path. It also covers re-running this experiment. zune-jpeg's `ac_lookup` and four-byte refill are the reference points.
 
+## Scope of #305 and the harness choice
+
+The [delivery record on #305](https://github.com/visualcommons/gamut/issues/305#issuecomment-6236460699) records two departures from the issue's original decision:
+
+- **Scope.** #305 is reduced to the bench, this experiment record and this first pass. The residual gap is not part of it: it is filed as #896 (the `gamut-dsp` IDCT) and #897 (the `gamut-jpeg` follow-up, blocked by #896).
+- **Harness.** The issue's decision named criterion with at least 100 samples. The bench (`crates/gamut-jpeg/benches/decode.rs`) uses divan instead, following the workspace's single-harness convention (#149, `docs/benchmarking.md`). It keeps the 100 samples per stream shape (`sample_count = 100`). This experiment's own numbers come from its arm (`examples/experiment_305.rs`), which also takes 100 samples per input x decoder x variant.
+
 ## Reproducing
 
 `mise run experiment 305` regenerates `raw/before.csv`, `raw/head.csv`, `raw/profile-head.txt` and `run.json`. It needs the `third_party/libjpeg-turbo` submodule and a C toolchain for the oracle. Its stdout prints the first table's medians and ratios. The paired table is the per-sample gamut / zune-jpeg ratio over the same rows (rows with equal `input` and `sample` in one CSV). `EXPERIMENT_SAMPLES`, `EXPERIMENT_ROUNDS`, `EXPERIMENT_WIDTH` and `EXPERIMENT_HEIGHT` override the defaults (100, 10, 6000, 4000).
