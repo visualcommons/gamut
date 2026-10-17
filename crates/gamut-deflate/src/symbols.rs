@@ -39,10 +39,7 @@ pub(crate) const MAX_DISTANCE: usize = 32768;
 /// `extra_bits` raw LSB-first bits.
 pub(crate) fn length_code(length: u16) -> (u16, u32, u32) {
     debug_assert!((MIN_MATCH as u16..=MAX_MATCH as u16).contains(&length));
-    let mut idx = 0;
-    while idx + 1 < LENGTH_BASE.len() && LENGTH_BASE[idx + 1] <= length {
-        idx += 1;
-    }
+    let idx = last_base_at_or_below(&LENGTH_BASE, length);
     (
         257 + idx as u16,
         u32::from(LENGTH_EXTRA[idx]),
@@ -56,15 +53,22 @@ pub(crate) fn length_code(length: u16) -> (u16, u32, u32) {
 /// `extra_bits` raw LSB-first bits.
 pub(crate) fn distance_code(distance: u16) -> (u16, u32, u32) {
     debug_assert!((1..=MAX_DISTANCE as u32).contains(&u32::from(distance)));
-    let mut idx = 0;
-    while idx + 1 < DIST_BASE.len() && DIST_BASE[idx + 1] <= distance {
-        idx += 1;
-    }
+    let idx = last_base_at_or_below(&DIST_BASE, distance);
     (
         idx as u16,
         u32::from(DIST_EXTRA[idx]),
         u32::from(distance - DIST_BASE[idx]),
     )
+}
+
+/// Index of the last entry of the ascending `bases` that is `<= value`.
+///
+/// `value` must be at least `bases[0]`, which both callers' domains guarantee (`LENGTH_BASE[0]` is
+/// `MIN_MATCH`, `DIST_BASE[0]` is 1). A binary search with no cursor: the linear
+/// `while … { idx += 1 }` scan it replaced stalled forever under an `idx *= 1` mutant, scorable only
+/// as a TIMEOUT (#850).
+fn last_base_at_or_below(bases: &[u16], value: u16) -> usize {
+    bases.partition_point(|&base| base <= value) - 1
 }
 
 #[cfg(test)]
