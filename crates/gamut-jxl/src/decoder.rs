@@ -40,8 +40,10 @@ fn wrong_backend_layout() -> Error {
 /// only the two box fields, leaving `icc` unconsulted.
 ///
 /// Each payload is stored in the form the dedicated metadata crates parse (and the
-/// `gamut-metadata` facade's `MetadataBlock` borrows) directly; with the `metadata` feature,
-/// [`JxlMetadata::blocks`] / [`JxlMetadata::metadata`] do that hand-over. Marked
+/// `gamut-metadata` facade's `MetadataBlock` borrows) directly; with the `metadata` feature, its
+/// [`TypedMetadata`](gamut_metadata::TypedMetadata) impl
+/// ([`blocks`](gamut_metadata::TypedMetadata::blocks) /
+/// [`metadata`](gamut_metadata::TypedMetadata::metadata)) does that hand-over. Marked
 /// `#[non_exhaustive]` so a later carrier (the `jumb` C2PA box) can be added without a breaking
 /// change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -207,18 +209,24 @@ fn exif_box_tiff_stream(payload: &[u8]) -> Result<&[u8]> {
         })
 }
 
+/// The facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over the located payloads;
+/// [`metadata`](gamut_metadata::TypedMetadata::metadata) is the trait's default,
+/// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
+/// [`blocks`](gamut_metadata::TypedMetadata::blocks).
 #[cfg(feature = "metadata")]
-impl JxlMetadata {
-    /// The located payloads as [`MetadataBlock`](gamut_metadata::MetadataBlock)s, ready for
-    /// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) or a
-    /// [`MetadataExtractor`](gamut_metadata::MetadataExtractor) with a chosen
-    /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy): the EXIF TIFF stream, the XMP packet
-    /// and the codestream ICC profile, each present only when the stream carried it.
+impl gamut_metadata::TypedMetadata for JxlMetadata {
+    /// The located payloads as [`MetadataBlock`](gamut_metadata::MetadataBlock)s: the EXIF TIFF
+    /// stream, the XMP packet and the codestream ICC profile, each present only when the stream
+    /// carried it.
     ///
     /// JPEG XL has no IPTC-IIM carrier, and the `jumb` (C2PA) box is not located by this crate
     /// (see `STATUS.md`), so no `IptcIim` / `C2pa` block is ever produced here.
-    #[must_use]
-    pub fn blocks(&self) -> Vec<gamut_metadata::MetadataBlock<'_>> {
+    ///
+    /// # Errors
+    ///
+    /// Never: every payload was already located as bytes when [`JxlDecoder::metadata`] built this
+    /// value. The signature is the trait's, shared with containers that resolve payloads lazily.
+    fn blocks(&self) -> gamut_metadata::Result<Vec<gamut_metadata::MetadataBlock<'_>>> {
         use gamut_metadata::MetadataBlock;
         let mut blocks = Vec::new();
         if let Some(exif) = &self.exif {
@@ -230,20 +238,7 @@ impl JxlMetadata {
         if let Some(icc) = &self.icc {
             blocks.push(MetadataBlock::Icc(icc));
         }
-        blocks
-    }
-
-    /// Parses the located payloads into the unified
-    /// [`Metadata`](gamut_metadata::Metadata) model —
-    /// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
-    /// [`blocks`](Self::blocks).
-    ///
-    /// # Errors
-    ///
-    /// Returns the facade's [`MetadataError`](gamut_metadata::MetadataError) naming the carrier
-    /// whose parse failed.
-    pub fn metadata(&self) -> gamut_metadata::Result<gamut_metadata::Metadata> {
-        gamut_metadata::Metadata::from_blocks(&self.blocks())
+        Ok(blocks)
     }
 }
 

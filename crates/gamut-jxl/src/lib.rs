@@ -98,8 +98,8 @@
 //!
 //! ## The `metadata` feature
 //!
-//! Off by default. It adds the `gamut-metadata` facade's typed models over the raw surface above:
-//! [`JxlMetadata::blocks`] hands the located payloads over as `MetadataBlock`s and
+//! Off by default. It adds the `gamut-metadata` facade's typed models over the raw surface above,
+//! through the facade's `TypedMetadata` trait: [`JxlMetadata::blocks`] hands the located payloads over as `MetadataBlock`s and
 //! [`JxlMetadata::metadata`] parses them into a unified `Metadata`, while
 //! [`JxlEncoder::with_metadata`] / [`JxlEncoder::with_encoded_metadata`] embed one, routing EXIF
 //! and XMP to the container boxes and the ICC profile to [`ColorSpec::Icc`] — refusing, rather
@@ -174,6 +174,7 @@ pub use decoder::{DecodePartialImage, JxlInfo, JxlPartialReport, JxlRender};
 pub use decoder::{JxlDecoder, JxlMetadata};
 pub use encoder::JxlEncoder;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
-// `JxlMetadata::metadata` / `JxlEncoder::with_metadata` without a direct dependency.
+// `JxlMetadata::metadata` / `JxlEncoder::with_metadata` without a direct dependency, and the
+// trait those accessors are methods of.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock};
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
