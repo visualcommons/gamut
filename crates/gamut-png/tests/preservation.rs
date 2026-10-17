@@ -197,6 +197,53 @@ fn a_latin1_profile_name_of_the_full_length_is_carried_byte_for_byte() {
     assert_eq!(re.icc_profile, meta.icc_profile);
 }
 
+/// §11.3.2.3 says of the profile name what §11.3.3.1 says of a keyword: "Leading, trailing, and
+/// consecutive spaces are not permitted". This crate's reader returns such a name unchanged, so
+/// a carry writes it back verbatim — the profile is the payload whose loss changes what a viewer
+/// paints — and names the deviation, as it does a keyword's.
+///
+/// Kills the `iCCP` notice's path into [`PngEncoder::metadata_notices`], and a carry that drops
+/// the profile instead of writing it.
+#[test]
+fn a_profile_name_the_reader_accepts_survives_the_re_encode_with_a_notice() {
+    let mut iccp = b" Tiny\0\0".to_vec();
+    iccp.extend_from_slice(&zlib(&tiny_icc_profile()));
+    let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iCCP", &iccp)])).unwrap();
+    assert!(meta.icc_profile.is_some(), "the reader accepts the name");
+
+    let encoder = PngEncoder::new().with_metadata(&meta);
+    assert_eq!(
+        encoder.metadata_notices(),
+        [MetadataNotice::IccpNameSpacing]
+    );
+    assert!(MetadataNotice::IccpNameSpacing.carried());
+    let re = re_encoded(|_| encoder.clone());
+    assert_eq!(re.icc_profile, meta.icc_profile, "came back whole");
+}
+
+/// The other half: a profile name this crate's reader refuses — the issue's three silent losses
+/// (#619), an empty name, an 80-byte one and one holding a null — plus one outside Latin-1 that
+/// read back as mojibake. Each now leaves the profile behind *with* a notice, and the encode
+/// proceeds. Driven through the setter, because the reader will not produce such a name.
+#[test]
+fn a_profile_name_no_reader_accepts_is_left_behind_with_a_notice() {
+    for (name, notice) in [
+        ("", MetadataNotice::IccpNameLength),
+        (&"p".repeat(80), MetadataNotice::IccpNameLength),
+        ("pro\0file", MetadataNotice::IccpNameNull),
+        ("\u{153}rofile", MetadataNotice::IccpNameNotLatin1),
+    ] {
+        let encoder = PngEncoder::new().with_icc_profile(name, &tiny_icc_profile());
+        assert_eq!(encoder.metadata_notices(), [notice], "name {name:?}");
+        assert!(!notice.carried(), "name {name:?}");
+        assert_eq!(
+            re_encoded(|_| encoder.clone()).icc_profile,
+            None,
+            "name {name:?} was not written"
+        );
+    }
+}
+
 /// §11.3.2.6: "RGB is currently the only supported color model in PNG, and as such Matrix
 /// Coefficients shall be set to 0." A source chunk that says otherwise is not a conforming cICP,
 /// so it is dropped rather than reproduced — while a conforming one is carried, which matters
