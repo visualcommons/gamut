@@ -57,18 +57,16 @@ pub enum FilterStrategy {
     /// counting distinct adjacent pairs approximates how much of the row it can back-reference.
     MinBigrams,
     /// Per scanline, DEFLATE each filter's residuals after the sixteen rows already emitted, at
-    /// [`Level::Default`](gamut_deflate::Level::Default), and keep the filter whose trial stream
-    /// is shortest.
+    /// [`Level::Default`], and keep the filter whose trial stream is shortest.
     ///
     /// The other per-scanline heuristics *estimate* what DEFLATE will make of a row; this one asks
     /// it. oxipng ships the same idea as its `Brute` filter. It costs five DEFLATE calls over at
-    /// most seventeen rows per scanline, which makes it the slowest per-scanline strategy, though
-    /// still cheaper than one whole-image [`Level::Best`](gamut_deflate::Level::Best) pass.
+    /// most seventeen rows per scanline, which makes it the slowest per-scanline strategy.
     /// Integer-only and deterministic, so it is in the `BruteForce` set. Measured in
     /// `experiments/480/`, it is the unique winner on two rows of the corpus there.
     MinTrialDeflate,
     /// Encode the whole image under several filter strategies, DEFLATE each, and keep the smallest.
-    /// Pairs with [`Level::Best`](gamut_deflate::Level::Best) for maximum compression; slowest.
+    /// Pairs with [`Level::Best`] for maximum compression; slowest.
     BruteForce,
 }
 
@@ -455,7 +453,7 @@ fn choose_by(
 mod tests {
     use super::*;
 
-    /// [`score`] for the scorers that read neither the filter byte nor the context.
+    /// [`score`] with no emitted context, which only [`Score::Trial`] reads.
     fn row_score(kind: Score, filtered: &[u8], aux: &mut Scratch) -> u64 {
         score(kind, filtered, &[], aux)
     }
