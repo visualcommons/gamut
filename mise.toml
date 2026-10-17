@@ -60,7 +60,7 @@ depends_post = ["fmt-tooling-check"]
 # `cargo fmt --all` formats workspace *members*, and `members = ["crates/*"]` — so no crate under
 # `tooling/` has ever been fmt-gated. This is wider than the compile gap `check-dng-real` closes:
 # that one is unique to `gamut-dng-real-conformance`, the only excluded crate nothing depends on,
-# whereas rustfmt is blind to all fifteen — a path dev-dependency edge makes a crate reachable to
+# whereas rustfmt is blind to all of them — a path dev-dependency edge makes a crate reachable to
 # `clippy --workspace --all-targets`, but does nothing for `fmt --all`. Hung off `fmt`/`fmt-check`
 # rather than exposed as a separate gate so the hooks (hk.pkl) and CI inherit it with no second
 # call site to keep in sync. rustfmt compiles nothing, so iterating the manifests costs seconds.
