@@ -2,6 +2,45 @@
 
 use gamut_core::{Error, Result};
 
+/// The order [`PngEncoder::encode_indexed8`](crate::PngEncoder::encode_indexed8) writes a
+/// caller-supplied palette in, set with
+/// [`PngEncoder::with_palette_order`](crate::PngEncoder::with_palette_order).
+///
+/// Either way the pixels a decoder resolves are the ones supplied: reordering renumbers the
+/// entries and rewrites every index (and the `bKGD` index) to match, so only which number names
+/// which colour changes. That is also why it is opt-in. A caller whose indices *mean* something
+/// beyond their colour — a palette-cycling animation, a sprite sheet's shared team-colour slots,
+/// a format that round-trips index values — needs them kept.
+///
+/// The palette an encoder derives itself under
+/// [`with_auto_reduce`](crate::PngEncoder::with_auto_reduce) is not affected: it is always ordered
+/// transparent entries first, then by luma, which measured smaller once raced against the other
+/// candidates (#612, `experiments/612/`).
+///
+/// The discriminants are a permanent, append-only part of the contract: they are what a numeric
+/// FFI knob carries. Non-exhaustive, so a later ordering is not a breaking change — match with a
+/// wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum PaletteOrder {
+    /// The default: surviving entries keep the order supplied (after
+    /// [cleaning](crate::PngEncoder::encode_indexed8) drops and merges redundant ones).
+    #[default]
+    AsSupplied = 0,
+    /// Modified-Zeng ordering (Zeng, Li and Lei, ICIP 2000, as modified by Pinho and Neves, IEEE
+    /// TIP 13(11), 2004): entries whose colours follow each other along the scanlines are placed
+    /// beside each other in the palette, so neighbouring pixels carry numerically close indices
+    /// that the scanline filters turn into small residuals. Non-opaque entries then move to the
+    /// front, in that order, so the `tRNS` chunk stays as short as the palette allows.
+    ///
+    /// A heuristic, not a guarantee. On palettes built by scanning the picture it measured
+    /// between −15.9% and +4.5% per image against keeping the scan order, and −6.8% in total
+    /// (`crates/gamut-png/STATUS.md`, axis 4). It loses on some images, so measure it on your
+    /// own material.
+    ModifiedZeng = 1,
+}
+
 /// A PNG palette: 1–256 RGB entries, with optional per-entry alpha (written as a tRNS chunk).
 ///
 /// Entries without an alpha value are fully opaque. Indexed images reference entries by index.
@@ -161,6 +200,112 @@ impl PngPalette {
         (cleaned, remap)
     }
 
+    /// The palette renumbered by modified-Zeng ordering of `indices`, an image over it in raster
+    /// order, plus the old-index → new-index map that rewrites the image onto it. Backs
+    /// [`PaletteOrder::ModifiedZeng`].
+    ///
+    /// Zeng, Li and Lei (ICIP 2000), as modified by Pinho and Neves (IEEE TIP 13(11), 2004). Two
+    /// entries are *adjacent* once for every pair of consecutive pixels in raster order that name
+    /// them ([`co_occurrence`]), which gives a symmetric co-occurrence weight `w(a, b)`. The list
+    /// starts as the heaviest pair. Each step then takes the unplaced entry with the largest
+    /// unweighted adjacency to the whole list and puts it at whichever end its adjacency, weighted
+    /// by `log2(1 + 1/d)` for an entry `d` places from that end (1-based, in the fixed point of
+    /// [`DISTANCE_WEIGHT`]), is larger. Entries that sit beside each other in the picture end up
+    /// beside each other in the palette, so the index differences the scanline filters hand
+    /// DEFLATE are small.
+    ///
+    /// Then one stable partition moves every non-opaque entry to the front, in Zeng order. That is
+    /// rule 1 of the derived palette's order (`reduce::ordered_palette`), and it is what keeps the
+    /// trailing-opaque `tRNS` trim cutting as far as §11.3.1.1 allows: a reordered palette never
+    /// writes a longer `tRNS` than its entries need.
+    ///
+    /// Ties fall to the lower index: of two equally heavy pairs, the first; of two equally adjacent
+    /// candidates, the lower; of two equally weighted ends, the back. The result is a
+    /// permutation — same entries, same alphas, same length, so the same index bit depth.
+    ///
+    /// `indices` are indices into `self`, every one in range — the cleaned image
+    /// [`crate::PngEncoder::encode_indexed8`] has already rewritten. Cost: one pass over the image
+    /// and an `n × n` weight table for an `n`-entry palette, then `O(n²)` placement work, so at
+    /// most 256 × 256 whatever the picture's size.
+    pub(crate) fn modified_zeng(&self, indices: &[u8]) -> (Self, [u8; 256]) {
+        let n = self.rgb.len();
+        let weight = co_occurrence(indices, n);
+
+        // The heaviest pair seeds the list; a palette with fewer than two entries is its own order.
+        let mut list = std::collections::VecDeque::with_capacity(n);
+        let mut seed = None;
+        for a in 0..n {
+            for b in a + 1..n {
+                // Read once, so the weight compared and the weight kept cannot disagree. Read
+                // twice, a mutation of the second read went unseen: it changes only the bar later
+                // pairs are compared against.
+                let pair = weight[a * n + b];
+                if seed.is_none_or(|(_, _, heaviest)| pair > heaviest) {
+                    seed = Some((a, b, pair));
+                }
+            }
+        }
+        let Some((a, b, _)) = seed else {
+            return (self.clone(), [0; 256]);
+        };
+        // `adjacency[c]`: candidate `c`'s summed weight to every entry placed so far.
+        let mut placed = vec![false; n];
+        let mut adjacency = vec![0u64; n];
+        let place = |entry: usize, placed: &mut [bool], adjacency: &mut [u64]| {
+            placed[entry] = true;
+            for (candidate, sum) in adjacency.iter_mut().enumerate() {
+                *sum += weight[candidate * n + entry];
+            }
+        };
+        list.extend([a, b]);
+        place(a, &mut placed, &mut adjacency);
+        place(b, &mut placed, &mut adjacency);
+        // One entry per step, counted rather than run until none is left: the count is what bounds
+        // the loop, so no mutation of the candidate filter can turn it into one that never ends.
+        for _ in 2..n {
+            let Some(next) = (0..n)
+                .filter(|&c| !placed[c])
+                .max_by_key(|&c| (adjacency[c], std::cmp::Reverse(c)))
+            else {
+                break;
+            };
+            // Each end weighs the list walked from that end, so an entry's distance is its
+            // position in the walk. Written as `DISTANCE_WEIGHT[len - 1 - k]`, the back end's
+            // `len - 1` had a twin, `len / 1`, that shifts every back distance by one and that no
+            // small list could tell apart. The walk has no index arithmetic left to mutate, so
+            // this site now yields fewer mutants than it did, not stronger tests.
+            let weigh = |from_end: &mut dyn Iterator<Item = &usize>| -> u128 {
+                from_end
+                    .zip(DISTANCE_WEIGHT)
+                    .map(|(&entry, d)| u128::from(weight[next * n + entry]) * u128::from(d))
+                    .sum()
+            };
+            let front = weigh(&mut list.iter());
+            let back = weigh(&mut list.iter().rev());
+            if front > back {
+                list.push_front(next);
+            } else {
+                list.push_back(next);
+            }
+            place(next, &mut placed, &mut adjacency);
+        }
+
+        let alpha_of = |i: usize| self.alpha.get(i).copied().unwrap_or(OPAQUE);
+        let mut order: Vec<usize> = list.into();
+        order.sort_by_key(|&i| alpha_of(i) == OPAQUE);
+        let mut remap = [0u8; 256];
+        for (new, &old) in order.iter().enumerate() {
+            remap[old] = new as u8;
+        }
+        let mut alpha: Vec<u8> = order.iter().map(|&i| alpha_of(i)).collect();
+        trim_trailing_opaque(&mut alpha);
+        let reordered = Self {
+            rgb: order.iter().map(|&i| self.rgb[i]).collect(),
+            alpha,
+        };
+        (reordered, remap)
+    }
+
     /// The PLTE chunk payload: RGB triples, flattened.
     pub(crate) fn plte(&self) -> Vec<u8> {
         self.rgb.iter().flatten().copied().collect()
@@ -174,6 +319,69 @@ impl PngPalette {
             Some(&self.alpha)
         }
     }
+}
+
+/// Pinho and Neves's distance weight `log2(1 + 1/d)` for `d = i + 1`, in fixed point:
+/// `round(2^24 · log2(1 + 1/d))`, one entry for each distance a list of at most 255 placed
+/// entries can hold.
+///
+/// A table rather than `f64::log2`, because the encoder's output is byte-reproducible and the
+/// standard library documents that function's precision as platform- and even call-dependent: a
+/// one-ulp difference near a tie between the two ends would put an entry at the other end and
+/// change the file. Integer sums of these weights compare the same everywhere. 2^24 keeps the
+/// smallest weight (`d = 255`) near 95 000, so rounding moves only a comparison that was within
+/// 2^-24 of a tie in the real numbers. `the_distance_weights_are_log2_of_one_plus_one_over_d`
+/// checks every entry against the formula.
+#[rustfmt::skip]
+const DISTANCE_WEIGHT: [u32; 255] = [
+    16777216, 9814042, 6963174, 5401057, 4412985, 3731126, 3232048, 2850868, 2550189, 2306926,
+    2106059, 1937386, 1793739, 1669931, 1562117, 1467383, 1383485, 1308665, 1241524, 1180937,
+    1125989, 1075929, 1030130, 988072, 949314, 913482, 880257, 849365, 820567, 793658, 768458,
+    744810, 722573, 701626, 681859, 663176, 645489, 628721, 612803, 597670, 583267, 569542,
+    556448, 543942, 531986, 520545, 509585, 499078, 488995, 479311, 470003, 461050, 452432,
+    444130, 436127, 428408, 420957, 413761, 406806, 400082, 393576, 387279, 381180, 375270,
+    369540, 363983, 358590, 353355, 348271, 343331, 338529, 333859, 329317, 324896, 320593,
+    316402, 312319, 308341, 304462, 300680, 296990, 293390, 289877, 286446, 283096, 279823,
+    276625, 273499, 270443, 267455, 264532, 261672, 258873, 256134, 253452, 250825, 248252,
+    245732, 243262, 240842, 238469, 236142, 233861, 231623, 229427, 227273, 225159, 223084,
+    221046, 219046, 217081, 215152, 213256, 211394, 209563, 207764, 205996, 204258, 202549,
+    200868, 199214, 197588, 195988, 194414, 192865, 191340, 189839, 188362, 186908, 185475,
+    184065, 182676, 181307, 179959, 178631, 177322, 176033, 174762, 173509, 172274, 171057,
+    169856, 168673, 167505, 166354, 165218, 164098, 162993, 161903, 160827, 159766, 158718,
+    157684, 156663, 155656, 154661, 153679, 152710, 151752, 150807, 149873, 148951, 148040,
+    147140, 146251, 145372, 144504, 143647, 142799, 141962, 141134, 140316, 139507, 138708,
+    137917, 137136, 136363, 135599, 134844, 134097, 133358, 132627, 131904, 131190, 130482,
+    129783, 129090, 128406, 127728, 127058, 126394, 125737, 125088, 124445, 123808, 123178,
+    122554, 121937, 121326, 120720, 120121, 119528, 118941, 118359, 117783, 117213, 116648,
+    116089, 115534, 114986, 114442, 113903, 113370, 112841, 112318, 111799, 111285, 110776,
+    110271, 109771, 109275, 108784, 108297, 107815, 107337, 106863, 106393, 105928, 105466,
+    105008, 104555, 104105, 103659, 103217, 102779, 102344, 101913, 101486, 101062, 100642,
+    100225, 99812, 99402, 98996, 98592, 98192, 97796, 97402, 97012, 96625, 96240, 95859, 95481,
+    95106, 94734,
+];
+
+/// The symmetric co-occurrence table of an `n`-entry palette's indices, row-major:
+/// `weight[a * n + b]` counts the pairs of consecutive pixels in raster order that name `a` and
+/// `b`.
+///
+/// Raster order, so the pairs are the horizontal neighbours plus one pair per row boundary (a
+/// row's last pixel and the next row's first), and vertical neighbours are not counted. That is
+/// the rule measured smallest: over the 13 palette inputs of `experiments/612/` (#887) it took
+/// the first-seen palettes 6.8% smaller in total, against 6.5% for horizontal neighbours alone
+/// and 6.0% for horizontal plus vertical. The scanline filters predict along a row before they
+/// predict across one, and DEFLATE matches along the stream.
+///
+/// Both halves of the table are written for every pair, unconditionally. A pixel beside its own
+/// colour adds to the diagonal, which [`PngPalette::modified_zeng`] never reads: a candidate is
+/// never on the list it is weighed against.
+fn co_occurrence(indices: &[u8], n: usize) -> Vec<u64> {
+    let mut weight = vec![0u64; n * n];
+    for pair in indices.windows(2) {
+        let (a, b) = (usize::from(pair[0]), usize::from(pair[1]));
+        weight[a * n + b] += 1;
+        weight[b * n + a] += 1;
+    }
+    weight
 }
 
 /// The alpha a palette entry has when `tRNS` does not carry one for it (§11.3.1.1).
@@ -364,6 +572,162 @@ mod tests {
         // Nothing transparent survives: no chunk at all.
         let (opaque, _) = palette.cleaned(&used_by(&[1, 2]));
         assert_eq!(opaque.trns(), None);
+    }
+
+    /// `n` opaque grey entries, entry `i` holding `[i, i, i]`, so a reordered palette's `rgb`
+    /// reads back as the old index each new slot holds.
+    fn greys(n: u8) -> PngPalette {
+        let entries: Vec<[u8; 3]> = (0..n).map(|i| [i, i, i]).collect();
+        PngPalette::new(&entries).unwrap()
+    }
+
+    /// The old index in each new slot of a reordered [`greys`] palette.
+    fn order_of(palette: &PngPalette) -> Vec<u8> {
+        (0..palette.len()).map(|i| palette.rgb[i][0]).collect()
+    }
+
+    /// [`co_occurrence`] counts consecutive pixels in raster order, and only those.
+    ///
+    /// The stream `0 1 2 3` has three consecutive pairs, 0–1, 1–2 and 2–3, each written into both
+    /// halves of the table. 0–2, 0–3 and 1–3 are not consecutive.
+    #[test]
+    fn co_occurrence_counts_consecutive_pixels_only() {
+        let weight = co_occurrence(&[0, 1, 2, 3], 4);
+        let w = |a: usize, b: usize| weight[a * 4 + b];
+        for (a, b) in [(0, 1), (1, 2), (2, 3)] {
+            assert_eq!(
+                (w(a, b), w(b, a)),
+                (1, 1),
+                "{a}-{b} consecutive, both halves"
+            );
+        }
+        for (a, b) in [(0, 2), (0, 3), (1, 3)] {
+            assert_eq!((w(a, b), w(b, a)), (0, 0), "{a}-{b} not consecutive");
+        }
+    }
+
+    /// [`co_occurrence`] counts a repeated pair once per occurrence.
+    #[test]
+    fn co_occurrence_counts_every_occurrence() {
+        let weight = co_occurrence(&[0, 1, 0, 1], 2);
+        assert_eq!(weight[1], 3);
+        assert_eq!(weight[2], 3);
+    }
+
+    /// [`PngPalette::modified_zeng`] seeds with the heaviest pair and then grows by adjacency,
+    /// each entry going to the end it neighbours.
+    ///
+    /// One row, so only horizontal pairs: 0–2 five times, 2–3 three times, 3–1 once. The seed is
+    /// `[0, 2]`; 3 neighbours 2, at the back, so it is appended; 1 neighbours 3, now at the back.
+    #[test]
+    fn modified_zeng_seeds_with_the_heaviest_pair_and_grows_by_adjacency() {
+        let indices = [0, 2, 0, 2, 0, 2, 3, 2, 3, 1];
+        let (reordered, remap) = greys(4).modified_zeng(&indices);
+        assert_eq!(order_of(&reordered), vec![0, 2, 3, 1]);
+        assert_eq!(&remap[..4], &[0, 3, 1, 2], "old index -> new slot");
+    }
+
+    /// An entry that neighbours the *front* of the list is prepended.
+    ///
+    /// 0–1 is the seed (four times); 2 neighbours only 0, which is at the front, and 3 neighbours
+    /// only 1, at the back.
+    #[test]
+    fn modified_zeng_puts_an_entry_at_the_end_it_neighbours() {
+        let indices = [2, 0, 1, 0, 1, 0, 1, 3];
+        let (reordered, _) = greys(4).modified_zeng(&indices);
+        assert_eq!(order_of(&reordered), vec![2, 0, 1, 3]);
+    }
+
+    /// The end is chosen by distance-weighted adjacency: an entry linked equally to two list
+    /// members goes to the end the nearer of them sits at.
+    ///
+    /// Pairs: 0–1 twice (the seed), then 1–2, 2–3, 1–4 and 3–4 once each. The list grows
+    /// `[0, 1]` → `[0, 1, 2]` → `[0, 1, 2, 3]`, and 4 links once to 1 (second from the front) and
+    /// once to 3 (at the back). Front: `log2(1 + 1/2) + log2(1 + 1/4) ≈ 0.907`; back:
+    /// `log2(1 + 1/3) + log2(1 + 1/1) ≈ 1.415`. The back wins.
+    #[test]
+    fn modified_zeng_weighs_ends_by_distance() {
+        let indices = [2, 1, 1, 0, 1, 4, 3, 2];
+        let (reordered, _) = greys(5).modified_zeng(&indices);
+        assert_eq!(order_of(&reordered), vec![0, 1, 2, 3, 4]);
+    }
+
+    /// The front end can win on an entry that does not sit at the front.
+    ///
+    /// Pairs: 0–1 six times (the seed), 1–2 and 2–3 three times each, and 4–1 once. The list grows
+    /// `[0, 1, 2, 3]`, and 4 links only to 1: two places from the front, three from the back, so
+    /// `log2(1 + 1/2)` beats `log2(1 + 1/3)` and 4 is prepended beside 0, which it never touches.
+    #[test]
+    fn modified_zeng_weighs_an_inner_entry_by_its_distance_from_each_end() {
+        let indices = [4, 1, 0, 1, 0, 1, 0, 1, 2, 1, 2, 3, 2, 3];
+        let (reordered, _) = greys(5).modified_zeng(&indices);
+        assert_eq!(order_of(&reordered), vec![4, 0, 1, 2, 3]);
+    }
+
+    /// Every [`DISTANCE_WEIGHT`] entry is `log2(1 + 1/d)` in 2^24 fixed point, to the nearest
+    /// integer, for `d` one more than its index — and the table covers distances 1 to 255.
+    ///
+    /// A drift guard for a table written out as literals: an `f64` evaluated here may differ
+    /// from the table by the rounding of the last step, never by more than one unit.
+    #[test]
+    fn the_distance_weights_are_log2_of_one_plus_one_over_d() {
+        for (i, &weight) in DISTANCE_WEIGHT.iter().enumerate() {
+            let d = (i + 1) as f64;
+            let exact = (1.0 + 1.0 / d).log2() * f64::from(1u32 << 24);
+            assert!(
+                (f64::from(weight) - exact).abs() <= 1.0,
+                "d = {d}: {weight} against {exact}"
+            );
+        }
+        assert_eq!(DISTANCE_WEIGHT.len(), 255);
+    }
+
+    /// Ties fall to the lower index: with no neighbour pairs at all the seed is `[0, 1]`, and every
+    /// later entry, equally unattached, is appended at the back in index order.
+    #[test]
+    fn modified_zeng_breaks_ties_towards_the_lower_index_and_the_back() {
+        let (reordered, remap) = greys(4).modified_zeng(&[2]);
+        assert_eq!(order_of(&reordered), vec![0, 1, 2, 3]);
+        assert_eq!(&remap[..4], &[0, 1, 2, 3]);
+    }
+
+    /// Non-opaque entries move to the front, keeping their Zeng order among themselves, and the
+    /// `tRNS` payload is trimmed to them.
+    ///
+    /// Zeng alone orders the row below `[0, 1, 2, 3]`; entries 1 and 3 are translucent.
+    #[test]
+    fn modified_zeng_puts_transparent_entries_first() {
+        let palette = PngPalette::with_transparency(
+            &[[0, 0, 0], [1, 1, 1], [2, 2, 2], [3, 3, 3]],
+            &[OPAQUE, 40, OPAQUE, 0],
+        )
+        .unwrap();
+        let indices = [0, 1, 0, 1, 2, 1, 2, 3];
+        let (reordered, remap) = palette.modified_zeng(&indices);
+        assert_eq!(order_of(&reordered), vec![1, 3, 0, 2]);
+        assert_eq!(reordered.trns(), Some(&[40u8, 0][..]));
+        assert_eq!(&remap[..4], &[2, 0, 3, 1]);
+    }
+
+    /// A one-entry palette is its own order.
+    #[test]
+    fn modified_zeng_leaves_a_single_entry_alone() {
+        let palette = PngPalette::with_transparency(&[[5, 6, 7]], &[9]).unwrap();
+        let (reordered, remap) = palette.modified_zeng(&[0, 0]);
+        assert_eq!(reordered.plte(), vec![5, 6, 7]);
+        assert_eq!(reordered.trns(), Some(&[9u8][..]));
+        assert_eq!(remap[0], 0);
+    }
+
+    /// A two-entry palette still gets the transparent-first partition: the seed pair is `[0, 1]`
+    /// and the translucent entry 1 then moves ahead of the opaque 0.
+    #[test]
+    fn modified_zeng_partitions_a_two_entry_palette() {
+        let palette = PngPalette::with_transparency(&[[0, 0, 0], [1, 1, 1]], &[OPAQUE, 0]).unwrap();
+        let (reordered, remap) = palette.modified_zeng(&[0, 1]);
+        assert_eq!(reordered.plte(), vec![1, 1, 1, 0, 0, 0]);
+        assert_eq!(reordered.trns(), Some(&[0u8][..]));
+        assert_eq!(&remap[..2], &[1, 0]);
     }
 
     #[test]

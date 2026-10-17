@@ -1,67 +1,23 @@
-group,input,layout,width,height,cleanup,variant,sample,bytes,crc32,encode_ns,colour_type,indexed_bytes,first_seen_bytes
-size_contract,gradient_rgb8,rgb8,128,128,false,mzeng-trns,0,577,4d64ea82,2781083683,2,,
-size_contract,gradient_rgb8,rgb8,128,128,false,mzeng-trns,1,577,4d64ea82,3303934864,2,,
-size_contract,gradient_rgb8,rgb8,128,128,false,mzeng-trns,2,577,4d64ea82,3056892736,2,,
-size_contract,photo_rgb8,rgb8,128,128,false,mzeng-trns,0,5594,fedc692a,3728703916,2,,
-size_contract,photo_rgb8,rgb8,128,128,false,mzeng-trns,1,5594,fedc692a,3076276311,2,,
-size_contract,photo_rgb8,rgb8,128,128,false,mzeng-trns,2,5594,fedc692a,3080570927,2,,
-size_contract,noise_rgb8,rgb8,128,128,false,mzeng-trns,0,49348,ebbc1d6e,60335681,2,,
-size_contract,noise_rgb8,rgb8,128,128,false,mzeng-trns,1,49348,ebbc1d6e,61785809,2,,
-size_contract,noise_rgb8,rgb8,128,128,false,mzeng-trns,2,49348,ebbc1d6e,60876730,2,,
-size_contract,grey_as_rgb8,rgb8,128,128,false,mzeng-trns,0,146,4e3a9aee,259595508,0,,
-size_contract,grey_as_rgb8,rgb8,128,128,false,mzeng-trns,1,146,4e3a9aee,491287907,0,,
-size_contract,grey_as_rgb8,rgb8,128,128,false,mzeng-trns,2,146,4e3a9aee,1517153238,0,,
-size_contract,flat_rgba8,rgba8,128,128,false,mzeng-trns,0,96,90493caf,2651010649,3,96,96
-size_contract,flat_rgba8,rgba8,128,128,false,mzeng-trns,1,96,90493caf,2514619851,3,96,96
-size_contract,flat_rgba8,rgba8,128,128,false,mzeng-trns,2,96,90493caf,2759227690,3,96,96
-size_contract,sprite_rgba8,rgba8,128,128,false,mzeng-trns,0,1651,a44e49c4,4175771771,6,,
-size_contract,sprite_rgba8,rgba8,128,128,false,mzeng-trns,1,1651,a44e49c4,4242142005,6,,
-size_contract,sprite_rgba8,rgba8,128,128,false,mzeng-trns,2,1651,a44e49c4,4365093936,6,,
-size_contract,sprite_rgba8 +clean,rgba8,128,128,true,mzeng-trns,0,1166,8934d728,9088278247,6,,
-size_contract,sprite_rgba8 +clean,rgba8,128,128,true,mzeng-trns,1,1166,8934d728,8284447626,6,,
-size_contract,sprite_rgba8 +clean,rgba8,128,128,true,mzeng-trns,2,1166,8934d728,9146799389,6,,
-size_contract,palette64_rgba8,rgba8,128,128,false,mzeng-trns,0,364,6eda2b81,2564509900,6,425,450
-size_contract,palette64_rgba8,rgba8,128,128,false,mzeng-trns,1,364,6eda2b81,2650825829,6,425,450
-size_contract,palette64_rgba8,rgba8,128,128,false,mzeng-trns,2,364,6eda2b81,4400104507,6,425,450
-size_contract,palette64_rgba8 +clean,rgba8,128,128,true,mzeng-trns,0,364,6eda2b81,6647715636,6,,
-size_contract,palette64_rgba8 +clean,rgba8,128,128,true,mzeng-trns,1,364,6eda2b81,5691201619,6,,
-size_contract,palette64_rgba8 +clean,rgba8,128,128,true,mzeng-trns,2,364,6eda2b81,4583545956,6,,
-size_contract,opaque256_rgba8,rgba8,128,128,false,mzeng-trns,0,317,d440ee53,4803292626,2,945,945
-size_contract,opaque256_rgba8,rgba8,128,128,false,mzeng-trns,1,317,d440ee53,5004685412,2,945,945
-size_contract,opaque256_rgba8,rgba8,128,128,false,mzeng-trns,2,317,d440ee53,5880083174,2,945,945
-size_contract,demotable_rgb16,rgb16,64,64,false,mzeng-trns,0,171,86f8d657,1430502609,2,317,317
-size_contract,demotable_rgb16,rgb16,64,64,false,mzeng-trns,1,171,86f8d657,1198086938,2,317,317
-size_contract,demotable_rgb16,rgb16,64,64,false,mzeng-trns,2,171,86f8d657,1019974805,2,317,317
-size_contract,tiny_rgb8,rgb8,16,16,false,mzeng-trns,0,119,a0601968,5154475,2,,
-size_contract,tiny_rgb8,rgb8,16,16,false,mzeng-trns,1,119,a0601968,5064376,2,,
-size_contract,tiny_rgb8,rgb8,16,16,false,mzeng-trns,2,119,a0601968,5275666,2,,
-reach,photo332_rgb8@128,rgb8,128,128,false,mzeng-trns,0,3926,c0f7fa9f,5856344674,2,6686,7953
-reach,photo332_rgb8@128,rgb8,128,128,false,mzeng-trns,1,3926,c0f7fa9f,5974550778,2,6686,7953
-reach,photo332_rgb8@128,rgb8,128,128,false,mzeng-trns,2,3926,c0f7fa9f,6451338566,2,6686,7953
-reach,photo222_rgb8@128,rgb8,128,128,false,mzeng-trns,0,3111,d3414a8c,7203111751,2,3710,3913
-reach,photo222_rgb8@128,rgb8,128,128,false,mzeng-trns,1,3111,d3414a8c,6842787776,2,3710,3913
-reach,photo222_rgb8@128,rgb8,128,128,false,mzeng-trns,2,3111,d3414a8c,6309502763,2,3710,3913
-reach,gradient332_rgb8@128,rgb8,128,128,false,mzeng-trns,0,757,56921b1f,6282506775,2,1900,1863
-reach,gradient332_rgb8@128,rgb8,128,128,false,mzeng-trns,1,757,56921b1f,5592178431,2,1900,1863
-reach,gradient332_rgb8@128,rgb8,128,128,false,mzeng-trns,2,757,56921b1f,6486081438,2,1900,1863
-reach,levels16_gray8@128,gray8,128,128,false,mzeng-trns,0,363,65b72129,1245001760,0,456,456
-reach,levels16_gray8@128,gray8,128,128,false,mzeng-trns,1,363,65b72129,1124872159,0,456,456
-reach,levels16_gray8@128,gray8,128,128,false,mzeng-trns,2,363,65b72129,900685352,0,456,456
-reach,photo_sprite_rgba8@128,rgba8,128,128,false,mzeng-trns,0,2927,47d57ee6,8121289580,6,3923,4330
-reach,photo_sprite_rgba8@128,rgba8,128,128,false,mzeng-trns,1,2927,47d57ee6,8438463959,6,3923,4330
-reach,photo_sprite_rgba8@128,rgba8,128,128,false,mzeng-trns,2,2927,47d57ee6,7048833987,6,3923,4330
-reach,photo332_rgb8@256,rgb8,256,256,false,mzeng-trns,0,13038,02cf8dcf,21972070966,2,19095,21475
-reach,photo332_rgb8@256,rgb8,256,256,false,mzeng-trns,1,13038,02cf8dcf,27071111341,2,19095,21475
-reach,photo332_rgb8@256,rgb8,256,256,false,mzeng-trns,2,13038,02cf8dcf,24069436608,2,19095,21475
-reach,photo222_rgb8@256,rgb8,256,256,false,mzeng-trns,0,9970,09b1b1e0,25029769222,2,12138,12134
-reach,photo222_rgb8@256,rgb8,256,256,false,mzeng-trns,1,9970,09b1b1e0,22868196914,2,12138,12134
-reach,photo222_rgb8@256,rgb8,256,256,false,mzeng-trns,2,9970,09b1b1e0,23971011025,2,12138,12134
-reach,gradient332_rgb8@256,rgb8,256,256,false,mzeng-trns,0,2020,b6b27f1f,21200970740,2,5140,4917
-reach,gradient332_rgb8@256,rgb8,256,256,false,mzeng-trns,1,2020,b6b27f1f,20550116955,2,5140,4917
-reach,gradient332_rgb8@256,rgb8,256,256,false,mzeng-trns,2,2020,b6b27f1f,21133176666,2,5140,4917
-reach,levels16_gray8@256,gray8,256,256,false,mzeng-trns,0,639,c2effd1b,7095913728,3,639,639
-reach,levels16_gray8@256,gray8,256,256,false,mzeng-trns,1,639,c2effd1b,7160915734,3,639,639
-reach,levels16_gray8@256,gray8,256,256,false,mzeng-trns,2,639,c2effd1b,6421098348,3,639,639
-reach,photo_sprite_rgba8@256,rgba8,256,256,false,mzeng-trns,0,8847,39f41686,30053688547,6,,
-reach,photo_sprite_rgba8@256,rgba8,256,256,false,mzeng-trns,1,8847,39f41686,32598232983,6,,
-reach,photo_sprite_rgba8@256,rgba8,256,256,false,mzeng-trns,2,8847,39f41686,23538177959,6,,
+group,input,layout,width,height,cleanup,variant,sample,bytes,crc32,encode_ns,colour_type,indexed_bytes,first_seen_bytes,reordered_bytes
+size_contract,gradient_rgb8,rgb8,128,128,false,mzeng-trns,0,492,38e92bab,3275685137,2,,,
+size_contract,photo_rgb8,rgb8,128,128,false,mzeng-trns,0,5594,fedc692a,3385151797,2,,,
+size_contract,noise_rgb8,rgb8,128,128,false,mzeng-trns,0,49348,ebbc1d6e,183189572,2,,,
+size_contract,grey_as_rgb8,rgb8,128,128,false,mzeng-trns,0,146,4e3a9aee,275021808,0,,,
+size_contract,flat_rgba8,rgba8,128,128,false,mzeng-trns,0,96,90493caf,4717670633,3,96,96,96
+size_contract,sprite_rgba8,rgba8,128,128,false,mzeng-trns,0,1646,6c50fee2,5494826636,6,,,
+size_contract,sprite_rgba8 +clean,rgba8,128,128,true,mzeng-trns,0,1118,5afd3bac,10469747413,6,,,
+size_contract,palette64_rgba8,rgba8,128,128,false,mzeng-trns,0,364,6eda2b81,2799824424,6,425,450,425
+size_contract,palette64_rgba8 +clean,rgba8,128,128,true,mzeng-trns,0,364,6eda2b81,7114926166,6,,,
+size_contract,opaque256_rgba8,rgba8,128,128,false,mzeng-trns,0,317,d440ee53,6967558991,2,945,945,945
+size_contract,demotable_rgb16,rgb16,64,64,false,mzeng-trns,0,171,86f8d657,1207976902,2,317,317,317
+size_contract,tiny_rgb8,rgb8,16,16,false,mzeng-trns,0,119,a0601968,6865637,2,,,
+reach,photo332_rgb8@128,rgb8,128,128,false,mzeng-trns,0,3926,c0f7fa9f,7971763038,2,6686,7953,6686
+reach,photo222_rgb8@128,rgb8,128,128,false,mzeng-trns,0,3111,d3414a8c,7641838740,2,3710,3913,3710
+reach,gradient332_rgb8@128,rgb8,128,128,false,mzeng-trns,0,757,56921b1f,7393343612,2,1900,1863,1900
+reach,levels16_gray8@128,gray8,128,128,false,mzeng-trns,0,363,65b72129,1080474010,0,456,456,456
+reach,photo_sprite_rgba8@128,rgba8,128,128,false,mzeng-trns,0,2927,47d57ee6,9251169125,6,3923,4330,3923
+reach,photo332_rgb8@256,rgb8,256,256,false,mzeng-trns,0,13038,02cf8dcf,32831770004,2,19095,21475,19095
+reach,photo222_rgb8@256,rgb8,256,256,false,mzeng-trns,0,9922,f845a6ce,32982084729,2,12138,12134,12138
+reach,gradient332_rgb8@256,rgb8,256,256,false,mzeng-trns,0,2020,b6b27f1f,21977606873,2,5140,4917,5140
+reach,levels16_gray8@256,gray8,256,256,false,mzeng-trns,0,639,c2effd1b,8752133309,3,639,639,639
+reach,photo_sprite_rgba8@256,rgba8,256,256,false,mzeng-trns,0,8847,39f41686,30282043958,6,,,

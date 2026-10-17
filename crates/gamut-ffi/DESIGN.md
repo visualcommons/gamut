@@ -216,6 +216,23 @@ void gamut_avif_image_free(GamutAvifImage *image);
   borrowed `const char*` message nor the thread-local last-error string promised under Errors is
   reachable from C yet; both arrive with the rest of the consumer boundary (issue #242).
 
+## PNG encoder setters (issue #887)
+
+```c
+gamut_status_t gamut_png_encoder_set_palette_order(GamutPngEncoder *encoder, uint8_t order);
+```
+
+- The PNG encoder handle's first config setter, mapping `PngEncoder::with_palette_order` under
+  the AVIF slice's setter conventions: `order` is one of the `GAMUT_PNG_PALETTE_ORDER_*`
+  constants, const-locked to `PaletteOrder`'s permanent `repr(u8)` discriminants; any other
+  value is `GAMUT_STATUS_INVALID_INPUT` and leaves the encoder unchanged; a null handle is
+  `GAMUT_STATUS_NULL_ARGUMENT` before either.
+- It acts on `encode_indexed8`, which has no C entry point yet: the PNG encode entry points, and
+  the indexed one with its palette argument, arrive with the rest of the consumer boundary
+  (issue #242). The setter lands now so the option is plain data on the C side from the start,
+  and its test drives the handle's encoder through the Rust call it configures.
+- The PNG encoder's other `with_*` builders join as setters with that consumer slice.
+
 ## Drift locking
 
 The FFI surface must never constrain the idiomatic Rust API, but any drift between the two must
@@ -257,8 +274,8 @@ matrix:
 
 ## First-pass scope
 
-Shipped: the provider boundary above (issue #280), and AVIF encode, config setters and container
-parse (issue #666). Next: the core `EncodeImage`/`DecodeImage` trait pair and the builder
+Shipped: the provider boundary above (issue #280), AVIF encode, config setters and container
+parse (issue #666), and the PNG encoder's palette-order setter (issue #887). Next: the core `EncodeImage`/`DecodeImage` trait pair and the builder
 configs of the other format crates (issue #242). Excluded initially
 (revisited per crate as conversion proceeds): rich ad-hoc surfaces
 (`DecodedPng`/`PngImage`, jpeg `info()`/`metadata()`, HEIC item/metadata detail), the tiff/ifd
