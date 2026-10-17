@@ -16,6 +16,9 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+# Only for `MetadataError::Container`: a format crate's locate failure (its `gamut_core::Error`)
+# surfaced through `TypedMetadata::blocks` with its kind and message intact.
+gamut-core.workspace = true
 gamut-exif.workspace = true
 gamut-xmp.workspace = true
 gamut-icc.workspace = true
