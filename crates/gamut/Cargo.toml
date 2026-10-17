@@ -97,6 +97,9 @@ metadata = [
     "gamut-jxl?/metadata",
     "gamut-heic?/metadata",
 ]
+# `metadata` plus gamut-exif's `describe` module (the enumerated tags' meanings), forwarded through
+# the gamut-metadata facade rather than straight to gamut-exif.
+exif-describe = ["metadata", "gamut-metadata/exif-describe"]
 # The ICC colour management module (transform engine) over gamut-icc profiles.
 cmm = ["dep:gamut-cmm"]
 all = [
@@ -113,6 +116,7 @@ all = [
     "jpeg",
     "isobmff",
     "metadata",
+    "exif-describe",
     "cmm",
     "primitives",
     "tonemap",

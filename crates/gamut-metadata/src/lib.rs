@@ -194,6 +194,14 @@
 //! assert!(blocks.xmp.is_some());
 //! # Ok::<(), gamut_metadata::MetadataError>(())
 //! ```
+//!
+//! # Features
+//!
+//! - `exif-describe` (default **off**) forwards `gamut-exif`'s `describe` feature, so
+//!   `exif::describe` — what CIPA DC-008's enumerated values *mean*, in the specification's own
+//!   wording, plus `exif::describe::flash` for the `Flash` bitfield — is reachable through this
+//!   facade. The module is the leaf crate's own, reached through the [`exif`] re-export; nothing is
+//!   duplicated here. (It is not linked: it does not exist when the feature is off.)
 #![forbid(unsafe_code)]
 
 // Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.

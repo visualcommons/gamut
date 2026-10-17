@@ -60,9 +60,8 @@
 //! enumerated tags' values *mean*, in the specification's own wording, plus `describe::flash` for
 //! the `Flash` bitfield. It is a few kilobytes of static strings a consumer that only writes or
 //! round-trips metadata never reads, which is why it is opt-in. (Those names are not linked here:
-//! the module does not exist when the feature is off.) Only a crate that depends on `gamut-exif`
-//! directly can turn it on: neither the `gamut-metadata` facade nor the `gamut` umbrella forwards
-//! it yet.
+//! the module does not exist when the feature is off.) A consumer of the `gamut-metadata` facade
+//! or the `gamut` umbrella turns it on through their `exif-describe` feature, which forwards it.
 //!
 //! ```
 //! use gamut_exif::{ByteOrder, Exif, ExifTag, Value};

@@ -54,6 +54,8 @@ isobmff = ["gamut/isobmff"]
 primitives = ["gamut/primitives"]
 tonemap = ["gamut/tonemap"]
 metadata = ["gamut/metadata"]
+# Mirror only: no C surface reads it yet, so it adds no exported symbol (issue #543).
+exif-describe = ["gamut/exif-describe"]
 cmm = ["gamut/cmm"]
 codec-abi = ["gamut/codec-abi"]
 all = [
@@ -70,6 +72,7 @@ all = [
     "jpeg",
     "isobmff",
     "metadata",
+    "exif-describe",
     "cmm",
     "primitives",
     "tonemap",

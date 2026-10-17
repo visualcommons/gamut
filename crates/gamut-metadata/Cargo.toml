@@ -24,3 +24,9 @@ gamut-xmp.workspace = true
 gamut-icc.workspace = true
 gamut-iptc.workspace = true
 thiserror.workspace = true
+
+[features]
+default = []
+# Forward gamut-exif's `describe` (the enumerated tags' meanings, in CIPA DC-008's wording), so a
+# consumer of this facade — or of the `gamut` umbrella — can reach `exif::describe` (issue #543).
+exif-describe = ["gamut-exif/describe"]
