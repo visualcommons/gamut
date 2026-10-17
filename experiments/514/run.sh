@@ -34,6 +34,8 @@ git apply --check "$patch"
 mkdir -p "$raw" "$work/corpus"
 rm -f "$work"/corpus/*.raw
 load_start=$(cut -d' ' -f1-3 /proc/loadavg)
+head_start=$(git rev-parse HEAD)
+dirty_start=$(git diff --quiet HEAD && echo false || echo true)
 
 measure() {
   cargo run --release --quiet -p gamut-png --example experiment_514 -- \
@@ -48,6 +50,11 @@ git apply -R "$patch"
 trap - EXIT
 
 load_end=$(cut -d' ' -f1-3 /proc/loadavg)
+# The SHA names what was built, so a commit landing mid-run would make it name something else.
+[ "$(git rev-parse HEAD)" = "$head_start" ] || {
+  echo "refusing to record: HEAD moved from $head_start during the run; re-run" >&2
+  exit 1
+}
 
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
@@ -65,8 +72,8 @@ mise_lock=null
 cat >"$exp/run.json" <<EOF
 {
   "issue": 514,
-  "git_sha": "$(git rev-parse HEAD)",
-  "git_dirty": $(git diff --quiet HEAD && echo false || echo true),
+  "git_sha": "$head_start",
+  "git_dirty": $dirty_start,
   "variant_patch_sha256": "$(sha "$patch")",
   "rustc": $(json_str "$(rustc -vV | tr '\n' ';')"),
   "mise_lock_sha256": $mise_lock,
