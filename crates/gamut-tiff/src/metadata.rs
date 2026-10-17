@@ -2,7 +2,7 @@
 //!
 //! TIFF stores metadata the way it stores everything else — as IFD entries — so the seam is thin
 //! by construction: [`TiffMetadata`] is a plain struct of optional payloads that
-//! [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) writes into IFD 0 and
+//! [`TiffEncoder::with_tiff_metadata`](crate::TiffEncoder::with_tiff_metadata) writes into IFD 0 and
 //! [`TiffDecoder::metadata`](crate::TiffDecoder::metadata) reads back.
 //!
 //! Everything except EXIF is a **single opaque payload** in the file — XMP (700), IPTC-IIM
@@ -1145,7 +1145,7 @@ mod tests {
     fn the_exif_subtree_pointer_tags_are_the_four_this_crate_documents() {
         // The set is a sibling crate's constant, `gamut_ifd::tags::STANDARD_POINTER_TAGS`, while
         // this crate's public contract enumerates its four members one by one — in
-        // `TiffMetadata::exif`, `TiffEncoder::with_metadata`, `TiffDecoder::metadata`, README.md,
+        // `TiffMetadata::exif`, `TiffEncoder::with_tiff_metadata`, `TiffDecoder::metadata`, README.md,
         // STATUS.md, and both refusal messages. A fifth member added upstream would widen every
         // one of those silently, and a public contract must not widen without someone deciding it.
         // So the enumeration is pinned once, here, against the literal numbers the prose gives and
@@ -1542,7 +1542,7 @@ pub(crate) mod typed {
     /// let pixels = vec![0u8; 64];
     /// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
     /// let tiff = TiffEncoder::new()
-    ///     .with_typed_metadata(&typed)?
+    ///     .with_metadata(&typed)?
     ///     .encode_to_vec(image)?;
     ///
     /// let read = gamut_tiff::TiffDecoder::new().metadata(&tiff)?;

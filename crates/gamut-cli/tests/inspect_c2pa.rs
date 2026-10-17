@@ -639,7 +639,7 @@ fn a_tiff_reports_its_store_beside_the_accounting_without_moving_the_verdict() {
     let encode = |metadata: gamut::tiff::TiffMetadata| {
         let mut file = Vec::new();
         let report = gamut::tiff::TiffEncoder::new()
-            .with_metadata(metadata)
+            .with_tiff_metadata(metadata)
             .encode_with_report(rgb_image(&rgb), &mut file)
             .expect("encode");
         (file, report)
@@ -1156,7 +1156,7 @@ fn json_output_reports_a_tiff_store_beside_its_accounting() {
     let rgb = [0x40u8; 8 * 8 * 3];
     let mut file = Vec::new();
     let report = gamut::tiff::TiffEncoder::new()
-        .with_metadata(
+        .with_tiff_metadata(
             gamut::tiff::TiffMetadata::new().with_c2pa(b"STORE-BYTES-NEVER-PRINTED".to_vec()),
         )
         .encode_with_report(rgb_image(&rgb), &mut file)

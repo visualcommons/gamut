@@ -191,7 +191,7 @@ impl TiffDecoder {
     /// IFD 0 supplies the XMP, IPTC-IIM and ICC payloads and the `ExifIFD` sub-IFD; the last IFD
     /// of the main chain supplies the C2PA manifest store (C2PA 2.4 §A.3.6). Every byte-carried
     /// payload comes back **verbatim** — this crate parses none of them — so a block written by
-    /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) reads back identical.
+    /// [`TiffEncoder::with_tiff_metadata`](crate::TiffEncoder::with_tiff_metadata) reads back identical.
     /// The Exif directory is a directory model rather than a byte range, so what it promises is
     /// narrower and is stated on [`TiffMetadata::exif`](crate::TiffMetadata::exif); the shapes it
     /// could not promise for are refused by the encode rather than written.
@@ -203,7 +203,7 @@ impl TiffDecoder {
     ///
     /// let dims = Dimensions { width: 2, height: 1 };
     /// let tiff = TiffEncoder::new()
-    ///     .with_metadata(TiffMetadata::new().with_xmp(b"<x:xmpmeta/>".to_vec()))
+    ///     .with_tiff_metadata(TiffMetadata::new().with_xmp(b"<x:xmpmeta/>".to_vec()))
     ///     .encode_to_vec(ImageRef::<Gray8>::new(&[7, 9], dims)?)?;
     ///
     /// let meta = TiffDecoder::new().metadata(&tiff)?;
@@ -218,7 +218,7 @@ impl TiffDecoder {
     /// pointers naming one directory, or nesting below the `ExifIFD` → `InteroperabilityIFD` pair
     /// — two levels under IFD 0, the deepest tree those two tags legitimately reach (EXIF 2.3
     /// §4.6.3), and the same bound
-    /// [`TiffEncoder::with_metadata`](crate::TiffEncoder::with_metadata) writes within. It is also
+    /// [`TiffEncoder::with_tiff_metadata`](crate::TiffEncoder::with_tiff_metadata) writes within. It is also
     /// returned for an IFD-0 `ExifIFD` entry naming **two or more** directories: EXIF 2.32
     /// §4.6.3 A fixes its count at 1, [`TiffMetadata::exif`] holds one, and keeping only the first
     /// would drop the rest silently. [`deconstruct`](crate::deconstruct) still walks such a file.

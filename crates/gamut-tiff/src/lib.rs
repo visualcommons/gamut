@@ -40,10 +40,10 @@
 //! CIE L\*a\*b\*, JPEG-in-TIFF, …) land additively — see `STATUS.md` for the scope ledger.
 //!
 //! Embedded metadata — an `ExifIFD` sub-IFD plus XMP / IPTC-IIM / ICC / C2PA payloads — is
-//! [`TiffMetadata`], written by [`TiffEncoder::with_metadata`] and read by
+//! [`TiffMetadata`], written by [`TiffEncoder::with_tiff_metadata`] and read by
 //! [`TiffDecoder::metadata`]. With the optional **`metadata`** Cargo feature it is also wired to
 //! the `gamut-metadata` facade's typed models: [`TiffMetadata`] implements the facade's
-//! `TypedMetadata` trait, and `TiffEncoder::with_typed_metadata` / `with_encoded_metadata` embed a
+//! `TypedMetadata` trait, and `TiffEncoder::with_metadata` / `with_encoded_metadata` embed a
 //! unified `Metadata` (the EXIF model's Exif and Interoperability sub-IFDs; its 0th-IFD fields,
 //! GPS sub-IFD and thumbnail have no carrier here and are refused).
 //!
@@ -116,7 +116,7 @@ pub use gamut_ifd::{
     SharedSpan, SpanKind, SubIfd, TiffFile, UnknownValue, Value, Variant, read, write,
 };
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
-// `TiffMetadata::metadata` / `TiffEncoder::with_typed_metadata` without a direct dependency.
+// `TiffMetadata::metadata` / `TiffEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
 pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
 pub use ifd::{PhotometricInterpretation, Predictor, SampleFormat};

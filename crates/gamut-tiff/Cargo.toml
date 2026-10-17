@@ -34,7 +34,7 @@ gamut-metadata = { workspace = true, optional = true }
 [features]
 default = []
 # Typed metadata wiring: `TiffMetadata`'s `TypedMetadata` impl (`blocks` / `metadata`) and
-# `TiffEncoder::with_typed_metadata` / `with_encoded_metadata` over the `gamut-metadata` facade.
+# `TiffEncoder::with_metadata` /`with_encoded_metadata` over the `gamut-metadata` facade.
 metadata = ["dep:gamut-metadata"]
 
 [dev-dependencies]

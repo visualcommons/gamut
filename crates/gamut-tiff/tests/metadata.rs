@@ -1,4 +1,4 @@
-//! The metadata seam end to end: what `TiffEncoder::with_metadata` puts in a file, on every
+//! The metadata seam end to end: what `TiffEncoder::with_tiff_metadata` puts in a file, on every
 //! layout the encoder writes, and what `TiffDecoder::metadata` gets back out of it.
 //!
 //! Each test pins one encode path's use of the seam, so a path that stopped embedding metadata
@@ -65,7 +65,7 @@ fn assert_carries_every_block(ifd: &Ifd) {
 fn the_strip_path_embeds_the_metadata_in_ifd_0() {
     let pixels = rgb(8, 4);
     let bytes = TiffEncoder::new()
-        .with_metadata(metadata())
+        .with_tiff_metadata(metadata())
         .encode_to_vec(image(&pixels, 8, 4))
         .expect("encode");
     assert_carries_every_block(&read(&bytes).expect("read").ifds[0]);
@@ -78,7 +78,7 @@ fn the_tile_path_embeds_the_metadata_in_ifd_0() {
     let pixels = rgb(32, 32);
     let bytes = TiffEncoder::new()
         .with_tiling(16, 16)
-        .with_metadata(metadata())
+        .with_tiff_metadata(metadata())
         .encode_to_vec(image(&pixels, 32, 32))
         .expect("encode");
     let file = read(&bytes).expect("read");
@@ -94,7 +94,7 @@ fn a_multipage_document_carries_the_metadata_on_page_0_only() {
     let page = image(&pixels, 4, 4);
     let mut bytes = Vec::new();
     TiffEncoder::new()
-        .with_metadata(metadata())
+        .with_tiff_metadata(metadata())
         .encode_pages_rgb8(&[page, page], &mut bytes)
         .expect("encode");
     let file = read(&bytes).expect("read");
@@ -109,7 +109,7 @@ fn a_multipage_document_carries_the_metadata_on_page_0_only() {
 fn the_decoder_returns_every_block_verbatim() {
     let pixels = rgb(8, 4);
     let bytes = TiffEncoder::new()
-        .with_metadata(metadata())
+        .with_tiff_metadata(metadata())
         .encode_to_vec(image(&pixels, 8, 4))
         .expect("encode");
     let read_back = TiffDecoder::new().metadata(&bytes).expect("metadata");
@@ -135,7 +135,7 @@ fn a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file() {
 
     let pixels = rgb(8, 4);
     let first = TiffEncoder::new()
-        .with_metadata(TiffMetadata::new().with_exif(exif))
+        .with_tiff_metadata(TiffMetadata::new().with_exif(exif))
         .encode_to_vec(image(&pixels, 8, 4))
         .expect("encode");
 
@@ -159,7 +159,7 @@ fn a_decoded_exif_sub_ifd_re_encodes_into_a_fully_classified_file() {
     );
 
     let second = TiffEncoder::new()
-        .with_metadata(decoded)
+        .with_tiff_metadata(decoded)
         .encode_to_vec(image(&pixels, 8, 4))
         .expect("re-encode");
     let report = deconstruct(&second).expect("deconstruct");
@@ -205,7 +205,7 @@ fn every_standard_pointer_inside_the_exif_directory_survives_a_round_trip() {
 
         let pixels = rgb(8, 4);
         let first = TiffEncoder::new()
-            .with_metadata(TiffMetadata::new().with_exif(exif))
+            .with_tiff_metadata(TiffMetadata::new().with_exif(exif))
             .encode_to_vec(image(&pixels, 8, 4))
             .unwrap_or_else(|e| panic!("tag {tag}: encode: {e}"));
         let decoded = TiffDecoder::new()
@@ -222,7 +222,7 @@ fn every_standard_pointer_inside_the_exif_directory_survives_a_round_trip() {
         );
 
         let second = TiffEncoder::new()
-            .with_metadata(decoded)
+            .with_tiff_metadata(decoded)
             .encode_to_vec(image(&pixels, 8, 4))
             .unwrap_or_else(|e| panic!("tag {tag}: re-encode: {e}"));
         let report = deconstruct(&second).expect("deconstruct");
@@ -266,7 +266,7 @@ fn every_public_encode_surface_refuses_an_exif_tree_its_own_decoder_could_not_re
     inner.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![interop]);
     let mut deeper = exif();
     deeper.set_sub_ifd(tags::INTEROPERABILITY_IFD, vec![inner]);
-    let enc = TiffEncoder::new().with_metadata(TiffMetadata::new().with_exif(deeper));
+    let enc = TiffEncoder::new().with_tiff_metadata(TiffMetadata::new().with_exif(deeper));
 
     let dims = Dimensions {
         width: 2,
