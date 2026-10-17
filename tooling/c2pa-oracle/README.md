@@ -367,9 +367,13 @@ for a version bump the diff is that one `version =` line. A bare `cargo update` 
 `cargo generate-lockfile` re-resolves the whole graph instead, which is exactly what the committed
 file exists to prevent.
 
-Nothing refreshes it automatically — no release workflow touches this crate — but since #541 the
-per-PR `lint` job runs `check-c2pa`, so a stale lockfile fails CI on the first pull request (the
-release-plz one included, when its checks run) after the change that staled it.
+Since #541 the per-PR `lint` job runs `check-c2pa`, so a stale lockfile fails CI on the first pull
+request after the change that staled it. For release-plz version bumps the release workflow does
+the refresh itself (#839): after release-plz opens or updates the release PR, the `release-pr` job
+in `.github/workflows/release.yml` runs the same `cargo update --workspace` on that PR's branch and
+pushes the result as a `github-actions[bot]` commit, so the bump and this file move together. Any
+other change that moves a path crate's entry — a dependency added to or removed from one of them —
+still refreshes it by hand, in the pull request that makes the change.
 
 ## The signing identity
 
