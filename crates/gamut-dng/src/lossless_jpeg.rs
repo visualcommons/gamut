@@ -55,27 +55,23 @@ const BITS: [u8; 16] = [0, 0, 0, 15, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const HUFFVAL: [u8; 17] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
 /// Canonical Huffman codes per symbol: `(code, length)` keyed by symbol value.
+///
+/// JPEG Annex C's generate_size_table and generate_code_table in one pass: codes ascend within a
+/// length, and each step to the next length shifts the running code left by one. Both loops walk
+/// their data — the sixteen `BITS` counts and the `HUFFVAL` symbols — rather than an index the
+/// loop body advances itself, so no arithmetic in the body can keep them from ending (#891).
+/// Leading empty lengths only shift a running code of zero, so starting at length 1 matches
+/// Annex C's start at the shortest used length.
 fn canonical_codes(bits: &[u8; 16], huffval: &[u8]) -> Vec<(u16, u8)> {
-    // Code lengths in HUFFVAL order (JPEG Annex C: generate_size_table).
-    let mut sizes = Vec::new();
-    for (len_minus_1, &count) in bits.iter().enumerate() {
-        for _ in 0..count {
-            sizes.push((len_minus_1 + 1) as u8);
-        }
-    }
-    // Codes (generate_code_table): ascending within each length.
     let mut table = vec![(0u16, 0u8); 256];
     let mut code: u16 = 0;
-    let mut k = 0;
-    let mut length = sizes.first().copied().unwrap_or(0);
-    while k < sizes.len() {
-        while k < sizes.len() && sizes[k] == length {
-            table[huffval[k] as usize] = (code, length);
+    let mut symbols = huffval.iter();
+    for (length, &count) in (1u8..).zip(bits) {
+        for &symbol in symbols.by_ref().take(usize::from(count)) {
+            table[usize::from(symbol)] = (code, length);
             code += 1;
-            k += 1;
         }
         code <<= 1;
-        length += 1;
     }
     table
 }
@@ -584,19 +580,25 @@ fn parse_sof3(data: &[u8], pos: usize) -> Result<Frame> {
 }
 
 /// Parses a DHT segment (possibly holding several tables) into the four destinations.
+///
+/// The loop walks the segment's own bytes: each table splits its `Tc/Th` byte, sixteen `BITS`
+/// and `HUFFVAL` symbols off the front of what is left, and the loop ends when nothing is. Every
+/// pass therefore consumes at least one byte whatever the length arithmetic says (#891). A table
+/// that runs past the segment's declared end is truncated, the same rejection a table running
+/// past the data is.
 fn parse_dht(
     data: &[u8],
     pos: usize,
     len: usize,
     tables: &mut [Option<HuffmanTable>; 4],
 ) -> Result<()> {
+    let truncated = || Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT");
     let end = pos
         .checked_add(len)
         .filter(|e| *e <= data.len())
-        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT"))?;
-    let mut at = pos + 2;
-    while at < end {
-        let tc_th = data[at];
+        .ok_or_else(truncated)?;
+    let mut rest = data.get(pos + 2..end).ok_or_else(truncated)?;
+    while let Some((&tc_th, tail)) = rest.split_first() {
         let (class, dest) = (tc_th >> 4, usize::from(tc_th & 0x0F));
         if class != 0 {
             return Err(Error::invalid_input(
@@ -610,13 +612,9 @@ fn parse_dht(
                 "DNG: Huffman table destination must be 0..=3",
             ));
         }
-        let bits: [u8; 16] = data
-            .get(at + 1..at + 17)
-            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT"))?
-            .try_into()
-            .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT"))?;
+        let (bits, tail) = tail.split_first_chunk::<16>().ok_or_else(truncated)?;
         let nvals: usize = bits.iter().map(|&b| usize::from(b)).sum();
-        let huffval = data.get(at + 17..at + 17 + nvals).ok_or_else(|| {
+        let (huffval, tail) = tail.split_at_checked(nvals).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT values")
         })?;
         if huffval.iter().any(|&v| v > 16) {
@@ -625,14 +623,8 @@ fn parse_dht(
                 "DNG: lossless-JPEG Huffman symbols are magnitude categories 0..=16",
             ));
         }
-        tables[dest] = Some(HuffmanTable::new(&bits, huffval));
-        at += 17 + nvals;
-    }
-    if at != end {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "DNG: DHT length mismatch",
-        ));
+        tables[dest] = Some(HuffmanTable::new(bits, huffval));
+        rest = tail;
     }
     Ok(())
 }
@@ -719,26 +711,34 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
     let mut frame: Option<Frame> = None;
     let mut tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
     let mut restart_interval = 0usize;
-    let scan;
+    let mut scan = None;
 
-    loop {
+    // Every pass consumes at least the `FF` and the marker code, so `data.len()` passes are never
+    // what stops a stream: a header walk ends at SOS, at an error, or when the data runs out of
+    // markers. The bound is there so that no arithmetic on `pos` — a segment length subtracted,
+    // an offset multiplied — can turn the walk into a cycle (#891).
+    for _ in 0..data.len() {
         // Find the next marker: skip to the first `FF` at or after `pos`. `position` returns an
         // offset strictly within `data[pos..]`, so there is no off-by-one bound to mutate. A
         // segment length running past the data leaves `pos` beyond it, which reads as no marker.
-        let off = data
+        let Some(off) = data
             .get(pos..)
             .and_then(|rest| rest.iter().position(|&b| b == MARKER))
+        else {
+            break;
+        };
+        // Any run of `FF` fill bytes may precede the marker code (T.81 B.1.1.2); the code is the
+        // first byte after the run.
+        let (fill, &marker) = data
+            .get(pos + off..)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .find(|&(_, &b)| b != MARKER)
             .ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOS")
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated lossless JPEG")
             })?;
-        pos += off;
-        while data.get(pos) == Some(&MARKER) {
-            pos += 1;
-        }
-        let marker = *data.get(pos).ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated lossless JPEG")
-        })?;
-        pos += 1;
+        pos += off + fill + 1;
         match marker {
             SOF3 => {
                 if frame.is_some() {
@@ -780,7 +780,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
                     Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: SOS before SOF3")
                 })?;
                 let len = be16(data, pos)?;
-                scan = parse_sos(data, pos, f)?;
+                scan = Some(parse_sos(data, pos, f)?);
                 pos += len; // entropy data follows
                 break;
             }
@@ -798,6 +798,9 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
         }
     }
 
+    let scan = scan.ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOS")
+    })?;
     let frame = frame.ok_or_else(|| {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOF3")
     })?;
