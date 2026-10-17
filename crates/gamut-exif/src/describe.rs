@@ -26,7 +26,21 @@
 //!   `GPSImgDirectionRef`, `GPSDestLatitudeRef`, `GPSDestLongitudeRef`, `GPSDestBearingRef`,
 //!   `GPSDestDistanceRef`) — are keyed by the character's byte, so
 //!   `describe(ExifTag::GpsStatus, u32::from(b'A'))`. Each is stored as a two-byte ASCII value,
-//!   the letter and its terminating NUL; the code is the letter.
+//!   the letter and its terminating NUL; the code is the letter, and [`reference_code`] takes it
+//!   out of the stored bytes:
+//!
+//!   ```
+//!   use gamut_exif::{ExifTag, Value, describe::{describe, reference_code}};
+//!
+//!   // A parsed `Value::Ascii` holds the letter without its NUL; the raw field holds both.
+//!   let stored = Value::Ascii("N".into());
+//!   let code = stored.as_str().and_then(|s| reference_code(s.as_bytes()));
+//!   assert_eq!(code, reference_code(b"N\0"));
+//!   assert_eq!(describe(ExifTag::GpsLatitudeRef, code.unwrap()), Some("North latitude"));
+//!   ```
+//!
+//!   Keying on the second byte (the NUL), or on both bytes taken together, would instead ask
+//!   about a code no table holds and get `None` — indistinguishable from a reserved code.
 //! * `ComponentsConfiguration` holds **four** codes, one per channel; describe each on its own.
 //!
 //! `Flash` is a bitfield rather than an enumeration, so it is not in these tables: use [`flash`].
@@ -305,6 +319,38 @@ pub fn describe(tag: ExifTag, code: u32) -> Option<&'static str> {
         .map(|&(_, text)| text)
 }
 
+/// The code a character-coded value carries — its letter, widened to the `u32` [`describe`] keys
+/// on — or `None` if `stored` is not one ASCII character (the "letter", which for
+/// `GPSMeasureMode` is a digit).
+///
+/// `stored` is the value's bytes: the on-disk field `[letter, NUL]` that CIPA DC-008 §4.6.7.1
+/// mandates (count 2), or the letter alone, which is what a parsed
+/// [`Value::Ascii`](crate::Value::Ascii) holds — the reader drops the terminator — and what
+/// out-of-spec files that omit the NUL store. Both give the same code. Anything else is `None`:
+/// empty input, a NUL or non-ASCII byte where the letter belongs, a second byte that is not the
+/// terminator, or more than two bytes.
+///
+/// It is tag-agnostic: it reads the shape of the value, not which tag it came from, so any
+/// one-character ASCII value yields its code, and whether that code means anything for the tag is
+/// [`describe`]'s answer.
+///
+/// ```
+/// use gamut_exif::{ExifTag, describe::{describe, reference_code}};
+///
+/// assert_eq!(reference_code(b"K\0"), Some(u32::from(b'K')));
+/// assert_eq!(reference_code(b"K"), Some(u32::from(b'K'))); // no terminator: still a letter
+/// assert_eq!(reference_code(b"KM"), None);
+/// let code = reference_code(b"K\0").unwrap();
+/// assert_eq!(describe(ExifTag::GpsSpeedRef, code), Some("Kilometers per hour"));
+/// ```
+#[must_use]
+pub fn reference_code(stored: &[u8]) -> Option<u32> {
+    match stored {
+        [letter @ 1..=0x7F] | [letter @ 1..=0x7F, 0] => Some(u32::from(*letter)),
+        _ => None,
+    }
+}
+
 /// The `Flash` tag's five bit fields, decoded (CIPA DC-008 §4.6.6.7.21, Figure 17).
 ///
 /// `Flash` is a bitfield, not an enumeration, so [`describe`] does not cover it: a single string
@@ -465,6 +511,31 @@ mod tests {
         // A letter one group defines and another does not stays reserved.
         assert_eq!(describe(ExifTag::GpsLatitudeRef, u32::from(b'K')), None);
         assert_eq!(describe(ExifTag::GpsSpeedRef, u32::from(b'T')), None);
+    }
+
+    /// Each alternative of the or-pattern on its own, at both ends of the letter range: the gate
+    /// deletes only whole arms, and does not mutate a pattern's range literals.
+    #[test]
+    fn reference_code_reads_the_letter_with_or_without_its_terminator() {
+        assert_eq!(reference_code(b"N\0"), Some(u32::from(b'N')));
+        assert_eq!(reference_code(b"N"), Some(u32::from(b'N')));
+        for letter in [0x01u8, 0x7F] {
+            assert_eq!(reference_code(&[letter]), Some(u32::from(letter)));
+            assert_eq!(reference_code(&[letter, 0]), Some(u32::from(letter)));
+        }
+    }
+
+    #[test]
+    fn reference_code_rejects_what_is_not_one_ascii_letter() {
+        assert_eq!(reference_code(b""), None);
+        // A NUL or a non-ASCII byte where the letter belongs, terminated or not.
+        for bad in [0x00u8, 0x80, 0xFF] {
+            assert_eq!(reference_code(&[bad]), None, "{bad:#04x}");
+            assert_eq!(reference_code(&[bad, 0]), None, "{bad:#04x} NUL");
+        }
+        // A second byte that is not the terminator, and a value longer than letter + NUL.
+        assert_eq!(reference_code(b"NS"), None);
+        assert_eq!(reference_code(b"N\0\0"), None);
     }
 
     #[test]
