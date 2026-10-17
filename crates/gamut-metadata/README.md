@@ -244,7 +244,7 @@ cited on every cell:
 | AVIF | r/w | r/w | r/w | — | r | ✅ (`metadata` feature) |
 | HEIC | r | r | r | — | r | ✅ (`metadata` feature) |
 | JPEG XL | r/w | r/w | r/w | — | — | ✅ (`metadata` feature) |
-| TIFF | r | r | r | r | r | ✅ (`metadata` feature) |
+| TIFF | r/w | r/w | r/w | r/w | r | ✅ (`metadata` feature) |
 | DNG | r/w | r/w | r/w | r/w | r | ✅ |
 
 ```rust
