@@ -2,8 +2,13 @@
 //!
 //! `cargo bench -p gamut-dng --bench codec` first prints a fixture table — the byte volumes each
 //! measured region moves — then runs divan throughput benchmarks over the codec matrix the crate
-//! ships: **uncompressed**, **Deflate** and **lossless JPEG**, each for **CFA** and **LinearRaw**
-//! photometry. Every counter is a *pixel volume* in bytes — the raw sample volume (`samples × 2`),
+//! ships: **uncompressed**, **Deflate**, **lossless JPEG** and — behind the `jxl-encode` feature,
+//! which this crate's own dev-dependency turns on for every bench build — **JPEG XL**, each for
+//! **CFA** and **LinearRaw** photometry. Beside that synthetic matrix, `decode_dng_file` decodes
+//! DNGs that *cameras and Adobe* wrote, which no synthetic fixture stands in for (issue #556):
+//! Adobe's `01_jxl_linear_raw_integer.dng`, the JPEG XL sample the oracle extracts, and — only when
+//! `mise run fetch-dng-samples` has checked the real-camera corpus out — that corpus's largest
+//! frames. Every counter is a *pixel volume* in bytes — the raw sample volume (`samples × 2`),
 //! plus the IFD-0 preview on the gamut benchmarks that handle it and where charging for it is a
 //! measurement rather than a bound. See the counter rule below, and the fixture table's epilogue,
 //! which names the rows where the preview correction is applied and the rows where it is not.
@@ -19,7 +24,8 @@
 //! **Outside**, for every benchmark: synthesising the sensor samples, building the [`RawImage`]
 //! and [`CameraProfile`], and encoding the DNG (or the bare lossless-JPEG stream) that the decode
 //! benchmarks read. Those are fixtures; timing them would measure this file rather than the codec.
-//! No benchmark here touches the filesystem.
+//! No timed region touches the filesystem: `decode_dng_file` reads its files once, before divan
+//! starts, and times only the decode of the bytes already in memory.
 //!
 //! # Is the gamut-versus-SDK comparison fair?
 //!
@@ -86,7 +92,9 @@
 //!   no reference arm and so is not a comparison at all; and
 //! - for gamut's whole-file DNG decode, the raw sample volume plus the preview the decoder
 //!   materialises — **but only on the rows where charging preview bytes at the raw path's
-//!   per-byte rate is a measurement rather than a bound.**
+//!   per-byte rate is a measurement rather than a bound.** `decode_dng_file`, over files gamut
+//!   did not write, never applies it: a real file's preview may be compressed or missing, so
+//!   each arm there is charged its own raw volume and nothing else.
 //!
 //! That proviso is the whole of the rule. On the **uncompressed** rows both paths do the same
 //! kind of work per byte — unpack a stored integer and store it — so the correction is a
@@ -128,6 +136,9 @@
 //!
 //! The epilogue printed under the fixture table repeats this, because that is where an operator
 //! reads it rather than here.
+
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
@@ -267,7 +278,8 @@ impl Case {
     ///
     /// It is exactly when the raw path is uncompressed: then both the raw samples and the
     /// (always uncompressed) preview are unpacked and stored, at comparable cost per byte. Under
-    /// Deflate or lossless JPEG a raw byte carries Huffman/LZ77 work the preview byte does not,
+    /// Deflate, lossless JPEG or JPEG XL a raw byte carries entropy-decode work the preview byte
+    /// does not,
     /// so the same arithmetic would over-credit gamut and the correction is suppressed.
     fn preview_correction_is_measured(self) -> bool {
         matches!(self.compression, Compression::Uncompressed)
@@ -280,6 +292,7 @@ impl std::fmt::Display for Case {
             Compression::Uncompressed => "uncompressed".to_string(),
             Compression::Deflate => "deflate".to_string(),
             Compression::LosslessJpeg => "lossless-jpeg".to_string(),
+            Compression::JpegXl => "jpeg-xl".to_string(),
             other => format!("{other:?}"),
         };
         // `pad`, not `write!`: `write!` writes through to the buffer and ignores the formatter's
@@ -291,10 +304,16 @@ impl std::fmt::Display for Case {
 /// The two photometries, as a benchmark argument list.
 const PHOTOMETRIES: [Photometry; 2] = [Photometry::Cfa, Photometry::LinearRaw];
 
-/// The codec matrix: every compression this crate encodes without an optional feature, crossed
-/// with both photometries. JPEG XL is absent deliberately — encoding it needs the `jxl-encode`
-/// feature (and a C++ toolchain), so a default `cargo bench` could not produce its fixture.
-const CASES: [Case; 6] = [
+/// The codec matrix: every compression this crate encodes, crossed with both photometries.
+///
+/// The JPEG XL cells are gated on the `jxl-encode` feature, because encoding their fixture needs
+/// the libjxl backend that feature builds (cmake + a C++ toolchain). In practice that gate is open
+/// for every bench build: `Cargo.toml` dev-depends on this crate *with* `jxl-encode`, and the
+/// Adobe oracle this file links already builds libjxl, so the cells cost no extra toolchain. The
+/// gate keeps the file compiling should that self-dependency ever go, rather than turning a
+/// missing feature into a fixture panic. JPEG XL *decode* of a file no gamut encoder wrote is
+/// measured separately, by [`decode_dng_file`] over Adobe's own sample.
+const CASES: &[Case] = &[
     Case {
         photometry: Photometry::Cfa,
         compression: Compression::Uncompressed,
@@ -307,6 +326,11 @@ const CASES: [Case; 6] = [
         photometry: Photometry::Cfa,
         compression: Compression::LosslessJpeg,
     },
+    #[cfg(feature = "jxl-encode")]
+    Case {
+        photometry: Photometry::Cfa,
+        compression: Compression::JpegXl,
+    },
     Case {
         photometry: Photometry::LinearRaw,
         compression: Compression::Uncompressed,
@@ -318,6 +342,11 @@ const CASES: [Case; 6] = [
     Case {
         photometry: Photometry::LinearRaw,
         compression: Compression::LosslessJpeg,
+    },
+    #[cfg(feature = "jxl-encode")]
+    Case {
+        photometry: Photometry::LinearRaw,
+        compression: Compression::JpegXl,
     },
 ];
 
@@ -442,6 +471,164 @@ const fn jpeg_jobs() -> [JpegJob; PHOTOMETRIES.len() * 3] {
         photometry += 1;
     }
     jobs
+}
+
+/// Adobe's own JPEG XL sample: a `LinearRaw` JXL raw written by Adobe's pipeline rather than by
+/// gamut's encoder, which the oracle's build extracts from the committed SDK ZIP. Decoding it
+/// needs no encoder at all, so this row stands whatever the `jxl-encode` gate says.
+const ADOBE_JXL_SAMPLE: &str = "01_jxl_linear_raw_integer.dng";
+
+/// How many real-camera frames `decode_dng_file` measures when the corpus is checked out: the
+/// largest files both implementations decode. Large is the point — cache behaviour and strip/tile
+/// geometry at a full sensor frame are what the synthetic 512×384 fixture cannot show — and three
+/// keeps an opt-in run to minutes rather than the whole ~178 MiB corpus.
+const REAL_CAMERA_COUNT: usize = 3;
+
+/// Samples divan takes per `decode_dng_file` arm. A real frame decodes in a large fraction of a
+/// second, so divan's default of 100 would spend minutes per arm for no gain in resolution.
+const FILE_SAMPLE_COUNT: u32 = 20;
+
+/// Where the real-camera corpus is checked out: the `gamut-dng-samples` submodule, the same
+/// location `tooling/gamut-dng-real-conformance` reads.
+fn real_camera_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/gamut-dng-samples")
+}
+
+/// A DNG read from disk, already accepted by both implementations, with the raw volume each one
+/// reported. Everything here is computed once, before divan starts.
+struct FileCase {
+    /// Where it came from: `adobe/<name>` or `camera/<path in the corpus>`.
+    label: String,
+    /// The file's bytes, which every timed region decodes from memory.
+    bytes: Vec<u8>,
+    /// Raw sample volume gamut's decoder produced, in bytes (`samples × 2`).
+    gamut_raw_bytes: usize,
+    /// Raw sample volume the SDK's stage-1 read produced, in bytes (`samples × 2`).
+    sdk_raw_bytes: usize,
+}
+
+impl FileCase {
+    /// Reads `path` and decodes it once with each implementation, outside any timed region.
+    /// Returns why not when the file cannot be read or either implementation refuses it, so the
+    /// fixture table can name a skipped row instead of dropping it silently.
+    fn load(label: String, path: &Path) -> Result<FileCase, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{label}: {e}"))?;
+        let gamut = DngDecoder::new()
+            .decode(&bytes)
+            .map_err(|e| format!("{label}: gamut decode: {e}"))?;
+        let sdk = gamut_dng_oracle::decode_dng_in_memory(&bytes)
+            .map_err(|e| format!("{label}: SDK decode: {e}"))?;
+        Ok(FileCase {
+            label,
+            gamut_raw_bytes: size_of_val(gamut.raw.samples()),
+            sdk_raw_bytes: sdk.samples * size_of::<u16>(),
+            bytes,
+        })
+    }
+}
+
+/// The file-backed fixtures, and a line per file or source that yields no row.
+struct FileCases {
+    /// Every file both implementations decode, Adobe's sample first.
+    cases: Vec<FileCase>,
+    /// Why each absent row is absent, printed under the fixture table.
+    skipped: Vec<String>,
+}
+
+/// Loaded on first use — which [`print_fixture_table`] makes happen before divan starts, so no
+/// file is read while divan is timing anything.
+static FILE_CASES: LazyLock<FileCases> = LazyLock::new(load_file_cases);
+
+/// Loads Adobe's JPEG XL sample and, where the corpus is checked out, its [`REAL_CAMERA_COUNT`]
+/// largest frames that both implementations decode.
+///
+/// An absent corpus is a skip, not a failure: the corpus is an opt-in ~178 MiB submodule, and a
+/// default `cargo bench` must stay runnable without it. The skip is printed, not silent.
+fn load_file_cases() -> FileCases {
+    let mut cases = Vec::new();
+    let mut skipped = Vec::new();
+
+    let adobe = gamut_dng_oracle::sample_files_dir().join(ADOBE_JXL_SAMPLE);
+    match FileCase::load(format!("adobe/{ADOBE_JXL_SAMPLE}"), &adobe) {
+        Ok(case) => cases.push(case),
+        Err(why) => skipped.push(why),
+    }
+
+    let corpus = real_camera_dir();
+    if !corpus.join("MANIFEST.toml").is_file() {
+        skipped.push(format!(
+            "camera/*: real-camera corpus not checked out at {} (mise run fetch-dng-samples)",
+            corpus.display()
+        ));
+        return FileCases { cases, skipped };
+    }
+    let mut files: Vec<(u64, PathBuf)> = dng_files_under(&corpus)
+        .into_iter()
+        .filter_map(|path| Some((std::fs::metadata(&path).ok()?.len(), path)))
+        .collect();
+    // Largest first; the path breaks ties so the selection is the same on every machine.
+    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let mut taken = 0;
+    for (_, path) in files {
+        if taken == REAL_CAMERA_COUNT {
+            break;
+        }
+        let relative = path.strip_prefix(&corpus).unwrap_or(&path);
+        match FileCase::load(format!("camera/{}", relative.display()), &path) {
+            Ok(case) => {
+                cases.push(case);
+                taken += 1;
+            }
+            Err(why) => skipped.push(why),
+        }
+    }
+    FileCases { cases, skipped }
+}
+
+/// Every `*.dng` (any case) under `root`, recursively. Unreadable directories are passed over: a
+/// file this cannot list is a file the bench does not measure, never a reason to stop it.
+fn dng_files_under(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.filter_map(|entry| entry.ok().map(|entry| entry.path())) {
+            if path.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("dng"))
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// One `decode_dng_file` measurement: a file-backed fixture decoded by one implementation.
+#[derive(Clone, Copy)]
+struct FileJob {
+    case: &'static FileCase,
+    imp: DngImpl,
+}
+
+impl std::fmt::Display for FileJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(&format!("{} {}", self.case.label, self.imp))
+    }
+}
+
+/// Every loaded file, each decoded by both implementations, adjacent by construction and by name
+/// sort — the same pairing [`DNG_JOBS`] makes. Empty rows are simply absent.
+fn file_jobs() -> Vec<FileJob> {
+    FILE_CASES
+        .cases
+        .iter()
+        .flat_map(|case| [DngImpl::Gamut, DngImpl::AdobeSdk].map(|imp| FileJob { case, imp }))
+        .collect()
 }
 
 /// A sensor-like frame: a smooth illumination falloff, a per-CFA-channel gain, and deterministic
@@ -587,8 +774,32 @@ fn print_fixture_table() {
             decode_volume as f64 / raw as f64,
         );
     }
+    print_file_table();
     print_zlib_identity();
     print!("{FIXTURE_TABLE_EPILOGUE}");
+}
+
+/// Prints the file-backed fixtures `decode_dng_file` reads — each implementation's own raw
+/// volume, which is its counter — and names every row that is absent and why. Forcing
+/// [`FILE_CASES`] here is also what reads every file before divan starts timing.
+fn print_file_table() {
+    println!(
+        "\nDNG files decoded from disk (bytes; read before timing starts):\n\n\
+         {:<48} {:>12} {:>12} {:>12}",
+        "file", "file size", "gamut raw", "SDK raw"
+    );
+    for case in &FILE_CASES.cases {
+        println!(
+            "{:<48} {:>12} {:>12} {:>12}",
+            case.label,
+            case.bytes.len(),
+            case.gamut_raw_bytes,
+            case.sdk_raw_bytes
+        );
+    }
+    for why in &FILE_CASES.skipped {
+        println!("skipped: {why}");
+    }
 }
 
 /// Prints which zlib the reference arm's Deflate decode calls, and refuses to go on if that zlib
@@ -664,6 +875,13 @@ directly measure the same library, on any machine. The zlib printed above is tha
 compare a Deflate ratio against one taken before the pin (issue #618), when the SDK called
 whichever shared libz the loader found. Every row runs only code this repository builds or pins.
 
+`decode_dng_file` decodes files no gamut encoder wrote: Adobe's JPEG XL sample, and the largest
+real-camera frames when the corpus is checked out. Its counters are each implementation's own raw
+volume from the table above, and no preview correction is applied on any of its rows: a file's
+preview may be JPEG-compressed or absent, so charging it at the raw path's rate is not a
+measurement. Read those rows like the SUPPRESSED ones: gamut's figure includes preview and
+metadata work the SDK arm does not do.
+
 `decode_lossless_jpeg` needs no correction: same stream in, same samples out, one counter for all
 three arms. The gap between its `adobe-sdk` and `adobe-sdk-no-export` arms bounds the FFI export
 path — a magnitude, not a signed cost; it sits at the measurement floor.
@@ -731,6 +949,38 @@ fn decode_dng(bencher: Bencher, job: DngJob) {
                     // own teardown already ran — inside the call, and so inside this timed region.
                     black_box(
                         gamut_dng_oracle::decode_dng_in_memory(black_box(&bytes))
+                            .expect("SDK decode"),
+                    );
+                });
+        }
+    }
+}
+
+/// Whole-file decode of DNGs gamut did not write, both implementations, interleaved: Adobe's
+/// JPEG XL sample and, when the real-camera corpus is checked out, its largest frames.
+///
+/// Timed: exactly what [`decode_dng`] times, for each arm. Not timed: reading the file, and the
+/// one decode per implementation that selected it and measured its raw volume — all of which
+/// happened before divan started. With the corpus absent this benchmark has only Adobe's sample.
+#[divan::bench(args = file_jobs(), sample_count = FILE_SAMPLE_COUNT)]
+fn decode_dng_file(bencher: Bencher, job: FileJob) {
+    let bytes = job.case.bytes.as_slice();
+    match job.imp {
+        DngImpl::Gamut => {
+            let decoder = DngDecoder::new();
+            bencher
+                .counter(BytesCount::new(job.case.gamut_raw_bytes))
+                .bench_local(|| {
+                    drop(black_box(decoder.decode(black_box(bytes)).expect("decode")));
+                });
+        }
+        DngImpl::AdobeSdk => {
+            bencher
+                .counter(BytesCount::new(job.case.sdk_raw_bytes))
+                .bench_local(|| {
+                    // `DecodedExtent` is `Copy`; the SDK's teardown already ran inside the call.
+                    black_box(
+                        gamut_dng_oracle::decode_dng_in_memory(black_box(bytes))
                             .expect("SDK decode"),
                     );
                 });
