@@ -540,6 +540,10 @@ jobs:
   # because it shares nothing with that one: c2pa-rs is built without OpenSSL, signing uses an
   # in-memory `EphemeralSigner`, and the fixtures are encoded on the fly, so there is no
   # submodule, no corpus, no network and no C oracle to build, and a DNG failure must not hide it.
+  # The job is not pure Rust, though: the end-to-end `gamut inspect` test builds `gamut-cli`, whose
+  # umbrella `all` feature statically builds libjxl's encoder through `gamut-jxl-sys`, so it uses
+  # the CMake and C++ compiler `ubuntu-latest` ships. Setting `GAMUT_BIN` to an already built
+  # `gamut` binary skips that build.
   c2pa:
     name: C2PA differential oracle
     if: github.event_name != 'schedule'
