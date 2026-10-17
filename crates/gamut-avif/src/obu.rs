@@ -186,7 +186,10 @@ pub struct Obu<'a> {
 /// OBU).
 #[derive(Debug)]
 pub struct ObuIter<'a> {
-    data: &'a [u8],
+    /// The payload not yet split. Each OBU is cut off its front, so iteration ends because this
+    /// runs out, never on the arithmetic of `pos` (#890).
+    rest: &'a [u8],
+    /// `rest`'s offset into the payload; it only places errors.
     pos: usize,
     done: bool,
 }
@@ -195,12 +198,12 @@ impl<'a> Iterator for ObuIter<'a> {
     type Item = Result<Obu<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done || self.pos == self.data.len() {
+        if self.done || self.rest.is_empty() {
             return None;
         }
         // Any error below fuses the iterator: it is reported once, then `done` stops iteration.
         self.done = true;
-        let rest = &self.data[self.pos..];
+        let rest = self.rest;
         let (header, header_len) = match parse_header(rest) {
             Ok(parsed) => parsed,
             Err(e) => return Some(Err(e.with_byte_offset(self.pos as u64))),
@@ -229,11 +232,13 @@ impl<'a> Iterator for ObuIter<'a> {
         };
         // The read succeeded: clear the fuse and advance past this OBU.
         self.done = false;
+        let (raw, tail) = rest.split_at(end);
+        self.rest = tail;
         self.pos += end;
         Some(Ok(Obu {
             header,
-            raw: &rest[..end],
-            payload: &rest[payload_start..end],
+            raw,
+            payload: &raw[payload_start..],
         }))
     }
 }
@@ -257,7 +262,7 @@ impl<'a> Iterator for ObuIter<'a> {
 #[must_use]
 pub fn iter_obus(payload: &[u8]) -> ObuIter<'_> {
     ObuIter {
-        data: payload,
+        rest: payload,
         pos: 0,
         done: false,
     }
