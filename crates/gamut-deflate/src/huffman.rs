@@ -118,16 +118,22 @@ fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
 /// duplicate early returns that used to stand here were where the survivor of #493 lived — their
 /// `histogram[i] > 0` search could be weakened to `>=` because every caller that reaches a single
 /// symbol either forces a second one first (`ensure_two`) or reads the result only as a cost.
+///
+/// The floor sequence is `1, 2, 4, …, 2^31` and then `u32::MAX`, so at most 33 passes run: the
+/// iteration is bounded by its own arithmetic rather than by whether a pass fits. That last pass
+/// floors every present symbol to the same weight, so its tree is balanced, of depth
+/// `ceil(log2(n))` for `n` present symbols — within `max_len` for every caller (at most 286
+/// literal/length symbols against 15 bits, 30 distance symbols against 15, 19 code-length symbols
+/// against 7). It is therefore taken unconditionally rather than tested. (This replaced an
+/// unbounded `loop` doubling a saturating floor, whose inverted fit test never returned and could
+/// be scored only as a TIMEOUT, #850; the rewrite removes that mutant and the `unwrap_or(0)` of the
+/// old `max()`, and adds the `1 << k` floor's shift as a site of its own.)
 fn build_lengths(histogram: &[u32], max_len: u8) -> Vec<u8> {
-    let mut count_min = 1u32;
-    loop {
-        let depths = huffman_pass(histogram, count_min);
-        let max_depth = depths.iter().copied().max().unwrap_or(0);
-        if max_depth <= u32::from(max_len) {
-            return depths.iter().map(|&d| d as u8).collect();
-        }
-        count_min = count_min.saturating_mul(2);
-    }
+    let depths = (0..32)
+        .map(|k| huffman_pass(histogram, 1 << k))
+        .find(|depths| depths.iter().all(|&d| d <= u32::from(max_len)))
+        .unwrap_or_else(|| huffman_pass(histogram, u32::MAX));
+    depths.iter().map(|&d| d as u8).collect()
 }
 
 /// One Huffman construction pass; returns per-symbol depths with each present symbol's weight floored
@@ -245,6 +251,28 @@ mod tests {
             .map(|&l| 1u64 << (15 - l))
             .sum();
         assert_eq!(kraft, 1u64 << 15);
+    }
+
+    #[test]
+    fn build_lengths_flattens_no_further_than_the_limit() {
+        // The same Fibonacci histogram: the first floor whose tree fits still reaches the 15-bit
+        // limit. The flat fallback (every weight `u32::MAX`) would give 64 symbols length 6, so a
+        // floor sequence or fit test that skips straight to it is told apart here.
+        let mut hist = vec![0u32; 64];
+        let (mut a, mut b) = (1u32, 1u32);
+        for h in hist.iter_mut() {
+            *h = a;
+            let next = a.saturating_add(b);
+            a = b;
+            b = next;
+        }
+        assert_eq!(build_lengths(&hist, 15).iter().max(), Some(&15));
+    }
+
+    #[test]
+    fn build_lengths_keeps_a_fitting_tree_unflattened() {
+        // Natural Huffman depths 3,3,2,1 already fit; the floor-1 pass must be returned as is.
+        assert_eq!(build_lengths(&[1, 2, 4, 8], 15), vec![3, 3, 2, 1]);
     }
 
     #[test]
