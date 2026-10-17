@@ -20,40 +20,47 @@
 //! (`time_ns` = filter selection + DEFLATE):
 //!
 //! - `none`, `sub`, `up`, `average`, `paeth` -- `FilterStrategy::None` / `Fixed(_)`.
-//! - `minsumabs`, `bigrams`, `entropy` -- the shipped per-scanline heuristics, via
-//!   `stages::filter_image`.
+//! - `minsumabs`, `bigrams`, `entropy`, `mintrialdeflate` -- the shipped per-scanline heuristics,
+//!   via `stages::filter_image`.
 //! - `bigent` -- oxipng's BigEnt: per scanline, the filter whose residual *bigrams* have the lowest
 //!   Shannon entropy, `sum c*log2(n/c)` over the histogram of adjacent byte pairs.
-//! - `trial4` -- oxipng's `Brute`: per scanline, the filter whose row, appended to the previous
-//!   four chosen rows, DEFLATEs smallest at `Level::Default` (lazy matching, smallest of
-//!   stored/fixed/dynamic block). `Level::Fast` is fixed-Huffman only and blind to the symbol
-//!   statistics the trial exists to measure, so it is not the trial codec.
+//! - `trial{2,4,8,16,32}-{fast,default}` -- per-line trial deflate (oxipng's `Brute`): per
+//!   scanline, the filter whose residuals, appended to the previous `K` emitted rows, DEFLATE
+//!   shortest at that level. The sweep that chose the shipped `MinTrialDeflate` settings
+//!   ([`SHIPPED_TRIAL`]).
 //!
 //! Whole-image strategies:
 //!
-//! - `brute7` -- the shipped `FilterStrategy::BruteForce`, end to end through `PngEncoder`
-//!   (`auto_reduce` off), `idat_bytes` read back with `deconstruct`.
-//! - `twotier-{fast,default}-top{1,2}` -- the same seven candidates DEFLATEd at the cheap tier;
+//! - `brute7` -- the `BruteForce` set before this experiment (`None`, the four `Fixed`,
+//!   `MinSumAbs`, `MinBigrams`): the smallest of those seven candidate rows, and the sum of their
+//!   times (`timing` = `sum`).
+//! - `bruteforce` -- the shipped `FilterStrategy::BruteForce` (those seven plus
+//!   `MinTrialDeflate`), end to end through `PngEncoder` (`auto_reduce` off), `idat_bytes` read
+//!   back with `deconstruct`.
+//! - `twotier-{fast,default}-top{1,2}` -- the shipped eight candidates DEFLATEd at the cheap tier;
 //!   the `k` smallest there (ties to the earlier candidate) are re-encoded at `Level::Best` and
 //!   the smallest of those kept. `time_ns` covers all of it.
-//! - `atomicmin-model` -- **modelled, not measured** (`timing` = `model`). The bytes are `brute7`'s
-//!   by construction: pruning only abandons a trial that would lose. The time is this sample's
-//!   seven candidate times, less what a trial that ends above the best-so-far `B` could have saved
-//!   by bailing the moment its output passed `B`, assuming output grows linearly with input:
-//!   `deflate_ns * (1 - B/S)`. `gamut-deflate` builds a whole DEFLATE body before it returns any
-//!   of it, so nothing can bail today; this is the ceiling an upstream budget hook would buy.
+//! - `atomicmin-model` -- **modelled, not measured** (`timing` = `model`). The bytes are
+//!   `bruteforce`'s by construction: pruning only abandons a trial that would lose. The time is
+//!   this sample's eight candidate times, less what a trial that ends above the best-so-far `B`
+//!   could have saved by bailing the moment its output passed `B`, assuming output grows linearly
+//!   with input: `deflate_ns * (1 - B/S)`. `gamut-deflate` builds a whole DEFLATE body before it
+//!   returns any of it, so nothing can bail today; this is the ceiling an upstream budget hook
+//!   would buy.
 //!
 //! ## Cross-checks
 //!
-//! `bigent` and `trial4` choose per row among the five `Fixed` images: a filter reads only the
-//! *unfiltered* current and previous rows, so row `y` of `Fixed(f)` is exactly the bytes filter `f`
-//! gives row `y` inside any per-scanline strategy. The arm proves that splice by choosing with its
-//! own sum-of-absolutes scorer and requiring the result to equal `stages::filter_image(MinSumAbs)`
-//! byte for byte. It proves the brute-force reconstruction by requiring the smallest of the seven
-//! candidate streams to equal `brute7`'s IDAT length.
+//! `bigent` and the trial sweep choose per row among the five `Fixed` images: a filter reads only
+//! the *unfiltered* current and previous rows, so row `y` of `Fixed(f)` is exactly the bytes filter
+//! `f` gives row `y` inside any per-scanline strategy. The arm proves that splice by choosing with
+//! its own sum-of-absolutes scorer and requiring the result to equal
+//! `stages::filter_image(MinSumAbs)` byte for byte, and its trial at [`SHIPPED_TRIAL`] to equal
+//! `stages::filter_image(MinTrialDeflate)`. It proves the brute-force reconstruction by requiring
+//! the smallest of the eight candidate streams to equal `bruteforce`'s IDAT length.
 //!
 //! Columns: `input,layout,width,height,variant,sample,idat_bytes,crc32,time_ns,timing`. `crc32`
-//! identifies the zlib stream (empty where the arm never holds it: `brute7`, the model row).
+//! identifies the zlib stream (empty where the arm never holds it: `brute7`, `bruteforce`, the
+//! model row).
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -289,7 +296,7 @@ fn choose_trial(fixed: &[Vec<u8>], row_bytes: usize, level: Level, context_rows:
 }
 
 /// The `(level, context rows)` the crate's `MinTrialDeflate` ships with.
-const SHIPPED_TRIAL: (Level, usize) = (Level::Default, 4);
+const SHIPPED_TRIAL: (Level, usize) = (Level::Default, 16);
 
 /// The context depths swept, each at `Level::Fast` and `Level::Default`.
 const TRIAL_SWEEP: [usize; 5] = [2, 4, 8, 16, 32];

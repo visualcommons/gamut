@@ -56,15 +56,16 @@ pub enum FilterStrategy {
     /// A cheaper proxy for the same idea one order up: LZ77 matches runs, not single bytes, so
     /// counting distinct adjacent pairs approximates how much of the row it can back-reference.
     MinBigrams,
-    /// Per scanline, DEFLATE each filter's row after the previous four chosen rows at [`Level::Default`](gamut_deflate::Level::Default), and keep the filter whose trial
-    /// stream is shortest.
+    /// Per scanline, DEFLATE each filter's residuals after the sixteen rows already emitted, at
+    /// [`Level::Default`](gamut_deflate::Level::Default), and keep the filter whose trial stream
+    /// is shortest.
     ///
     /// The other per-scanline heuristics *estimate* what DEFLATE will make of a row; this one asks
-    /// it. oxipng ships the same idea as its `Brute` filter. It costs five small DEFLATE calls per
-    /// scanline, so it is the slowest per-scanline strategy -- but each call sees only a few rows,
-    /// so it stays well under one whole-image [`Level::Best`](gamut_deflate::Level::Best) pass.
-    /// Integer-only and deterministic, so it is in the `BruteForce` set: measured in
-    /// `experiments/480/`, it is the unique winner there on two rows of the corpus.
+    /// it. oxipng ships the same idea as its `Brute` filter. It costs five DEFLATE calls over at
+    /// most seventeen rows per scanline, which makes it the slowest per-scanline strategy, though
+    /// still cheaper than one whole-image [`Level::Best`](gamut_deflate::Level::Best) pass.
+    /// Integer-only and deterministic, so it is in the `BruteForce` set. Measured in
+    /// `experiments/480/`, it is the unique winner on two rows of the corpus there.
     MinTrialDeflate,
     /// Encode the whole image under several filter strategies, DEFLATE each, and keep the smallest.
     /// Pairs with [`Level::Best`](gamut_deflate::Level::Best) for maximum compression; slowest.
@@ -211,8 +212,10 @@ fn sum_abs(filtered: &[u8]) -> u64 {
 /// Rows of already-chosen output each [`FilterStrategy::MinTrialDeflate`] trial is compressed
 /// after, so a candidate is judged by what it adds to a stream that already holds its context.
 ///
-/// Measured in `experiments/480/` against 2, 8 and 16 rows.
-const TRIAL_CONTEXT_ROWS: usize = 4;
+/// Chosen by `experiments/480/`, which swept 2, 4, 8, 16 and 32 rows at `Level::Fast` and
+/// `Level::Default`. Sixteen at `Default` is within 0.4% of the best bytes it found (thirty-two)
+/// on both rows the strategy wins, at about half the trial cost.
+const TRIAL_CONTEXT_ROWS: usize = 16;
 
 /// How a candidate row is judged. Lower is better for every variant, so they are interchangeable
 /// in [`choose_by`].
@@ -702,7 +705,7 @@ mod tests {
     }
 
     /// [`FilterStrategy::MinTrialDeflate`] spelled out row by row: each scanline takes the first
-    /// filter whose residuals, DEFLATEd at `Level::Default` after the last **four** emitted rows
+    /// filter whose residuals, DEFLATEd at `Level::Default` after the last **sixteen** emitted rows
     /// (filter bytes included), make the shortest stream.
     fn trial_reference(samples: &[u8], row_bytes: usize, bpp: usize) -> Vec<u8> {
         let zero = vec![0u8; row_bytes];
@@ -713,7 +716,7 @@ mod tests {
             } else {
                 &samples[(y - 1) * row_bytes..y * row_bytes]
             };
-            let context = emitted[emitted.len().saturating_sub(4)..].concat();
+            let context = emitted[emitted.len().saturating_sub(16)..].concat();
             let mut best: Option<(usize, Vec<u8>)> = None;
             for filter in [
                 FilterType::None,
@@ -743,7 +746,7 @@ mod tests {
         // Several strides and widths, down to one byte per row, so the context window's byte
         // offset is checked where a row is a small part of it and where it is most of it.
         for (row_bytes, bpp) in [(1, 1), (2, 1), (6, 3), (15, 3), (48, 4), (96, 3)] {
-            let samples = textured(row_bytes, 12);
+            let samples = textured(row_bytes, 24);
             assert_eq!(
                 filter_image(FilterStrategy::MinTrialDeflate, &samples, row_bytes, bpp),
                 trial_reference(&samples, row_bytes, bpp),
