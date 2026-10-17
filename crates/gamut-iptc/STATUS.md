@@ -135,6 +135,11 @@ drops a value a caller set says so:
 - **Location's cardinality is not enforced**: the standard caps `LocationCreated` at one location
   while its XMP form is a `Bag`, and gamut reads and writes every location the array holds, as it
   does for the three-licensor cap.
+- **The PLUS party caps are not enforced** (issue #836): the standard caps `plus:CopyrightOwner`
+  and `plus:ImageCreator` at three entries and `plus:ImageSupplier` at one (IPTC Photo Metadata
+  2025.1, Cardinality 0..3 / 0..3 / 0..1), while each is an XMP `Seq`. gamut reads every entry the
+  array holds and writes every entry a setter is given, as it does for the Licensor and
+  `LocationCreated` caps.
 - **Exotic ISO 2022 character sets**: dataset 1:90 designations other than the spec default
   (decoded as Latin-1, the exiv2/ExifTool de-facto reading of ISO 646 IRV) and UTF-8 (`ESC % G`)
   are reported as `Error::Unsupported`, never mis-decoded.

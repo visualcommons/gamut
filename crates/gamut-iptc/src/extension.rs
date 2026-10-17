@@ -1945,6 +1945,10 @@ impl LinkedRightsExpression {
 /// A copyright owner of the image (`plus:CopyrightOwner`, a PLUS 1.2 structure embedded in the
 /// IPTC Extension schema, IPTC Extension 1.8 §11.9).
 ///
+/// The standard caps the property at three copyright owners; gamut does not enforce that on read
+/// or write — an over-long array reads as the owners it holds, and
+/// [`set_copyright_owners`](PhotoMetadata::set_copyright_owners) writes every owner it is given.
+///
 /// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
 /// [module docs](self)).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1997,6 +2001,10 @@ impl CopyrightOwner {
 /// A creator of the image (`plus:ImageCreator`, a PLUS 1.2 structure embedded in the IPTC
 /// Extension schema, IPTC Extension 1.8 §11.18).
 ///
+/// The standard caps the property at three image creators; gamut does not enforce that on read or
+/// write — an over-long array reads as the creators it holds, and
+/// [`set_image_creators`](PhotoMetadata::set_image_creators) writes every creator it is given.
+///
 /// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
 /// [module docs](self)).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2043,6 +2051,10 @@ impl ImageCreator {
 
 /// A supplier of the image (`plus:ImageSupplier`, a PLUS 1.2 structure embedded in the IPTC
 /// Extension schema, IPTC Extension 1.8 §11.22).
+///
+/// The standard caps the property at one image supplier while its XMP form is a `Seq`; gamut does
+/// not enforce that on read or write — an over-long array reads as the suppliers it holds, and
+/// [`set_image_suppliers`](PhotoMetadata::set_image_suppliers) writes every supplier it is given.
 ///
 /// This property is XMP-only and never participates in IIM↔XMP reconciliation (see the
 /// [module docs](self)).
