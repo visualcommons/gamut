@@ -587,10 +587,11 @@ fn a_strip_thumbnail_is_carried_with_its_bytes() {
     );
 }
 
-/// A thumbnail whose strips do not read holds no image bytes, so it would be written as a
-/// directory whose `StripOffsets` address nothing; it is dropped instead, and said to be.
+/// A thumbnail whose strips do not read holds no image bytes: the reader has already removed its
+/// `StripOffsets`, so it would be written as a thumbnail with no image, its `StripByteCounts`
+/// measuring bytes that are not there; it is dropped instead, and said to be.
 #[test]
-fn an_unreadable_strip_thumbnail_is_dropped_rather_than_written_dangling() {
+fn an_unreadable_strip_thumbnail_is_dropped_rather_than_written_imageless() {
     let (exif, stderr) = convert_strip_thumbnail("unreadable-strip-thumbnail", 4096);
 
     assert_eq!(
