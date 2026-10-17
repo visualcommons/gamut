@@ -574,6 +574,14 @@ impl PngEncoder {
     /// original drive the **same** backend instances (they are held behind `Arc<Mutex<…>>`, since
     /// encoding takes `&self`). Push a fresh backend instance if you need independent state.
     ///
+    /// # Concurrent calls under [`FilterStrategy::BruteForce`]
+    ///
+    /// The brute-force search runs its seven candidate streams on scoped threads (issue #624),
+    /// so a backend is offered them from several threads, one at a time through its mutex, in no
+    /// fixed order *across* candidates. Push order still decides who sees each stream first. If
+    /// one candidate fails, the encode returns the first failure in candidate order, but the other
+    /// candidates have already been offered to the backend by then.
+    ///
     /// Takes `&mut self` and returns `&mut Self` — unlike the `with_*` builder setters — because a
     /// registry accumulates rather than replaces.
     pub fn push_backend(&mut self, backend: impl IdatDeflater + 'static) -> &mut Self {
