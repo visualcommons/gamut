@@ -74,8 +74,8 @@ on a hand-written golden bitstream.
 - **Typed metadata** (issue #420) behind the opt-in **`metadata`** feature (a normal, optional
   dependency on `gamut-metadata`): `JxlMetadata` implements the facade's `TypedMetadata` trait
   (#628) — `blocks` / `metadata` (the facade's `MetadataBlock`s / `Metadata`, both returning
-  `gamut_metadata::MetadataError`; `blocks` never fails here), `JxlEncoder::with_metadata(&Metadata)` (default
-  `MetadataEmbedder`) and `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies),
+  `gamut_metadata::MetadataError`; `blocks` never fails here),
+  `JxlEncoder::with_metadata(&Metadata)` (default `MetadataEmbedder`) and `with_encoded_metadata(&EncodedMetadata)` (caller-chosen policies),
   routing EXIF (`Exif\0\0` stripped) and XMP to the boxes and the ICC profile to `ColorSpec::Icc`.
   IPTC-IIM and C2PA blocks are typed `Unsupported`; a C2PA store is never copied forward (facade
   policy). **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no

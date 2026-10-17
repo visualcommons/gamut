@@ -237,8 +237,8 @@ pub const fn supports(format: Format, carrier: Carrier, direction: Direction) ->
 pub const fn typed_wiring(format: Format) -> bool {
     match format {
         // gamut-dng STATUS.md P16 (#353): `DngMetadata::exif` is the facade's `Exif`, its
-        // `TypedMetadata` impl hands over the byte carriers. gamut-jpeg / gamut-jxl / gamut-heic: the `metadata`
-        // feature (issue #420).
+        // `TypedMetadata` impl hands over the byte carriers. gamut-jpeg / gamut-jxl / gamut-heic:
+        // the `metadata` feature (issue #420).
         Format::Dng | Format::Jpeg | Format::Jxl | Format::Heic => true,
         // Raw payloads only, tracked by the #420 remainder.
         Format::Png | Format::WebP | Format::Avif | Format::Tiff => false,
