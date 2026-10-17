@@ -65,9 +65,10 @@ impl CanonicalCodes {
 /// the per-symbol frequency counts `freq`, returning the `(BITS, HUFFVAL)` pair (§B.2.4.2).
 ///
 /// `freq[s]` is how many times symbol `s` is coded; the alphabet is `0..N`, at most 256 symbols
-/// (a larger `N` fails to compile, since HUFFVAL holds `u8`s). The procedure is the reference one
-/// (libjpeg's `jpeg_gen_optimal_table` mirrors the same clause), so the output is byte-identical to
-/// what a libjpeg-family encoder writes for the same counts:
+/// (a larger `N` fails to compile, since HUFFVAL holds `u8`s). The procedure mirrors the reference
+/// one, as libjpeg's `jpeg_gen_optimal_table` does for the same clause. The tests pin it with
+/// derivations from T.81 Annexes C and K and exact-byte regression goldens, not against
+/// libjpeg's table bytes:
 ///
 /// 1. A **reserved pseudo-symbol** (frequency 1) is added after every real symbol. It lands last in
 ///    the longest code length and is then removed, so no real symbol is assigned the all-ones code

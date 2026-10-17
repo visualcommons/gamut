@@ -248,7 +248,7 @@ bodies.
 | gamut-core | *none* — no oracle exists | **property** (`convert`, `image` stride math) | — |
 | gamut-ifd | *none in-crate* — libtiff/exiv2 reach it via the consuming codecs (STATUS.md P7) | **property** + exact-byte | `IfdReader`, `read` ☑ laws; ☑ driver |
 | gamut-tonemap | *none* | **property** (monotonicity, endpoints, no NaN) | — |
-| gamut-bitstream | *none* — self-inverse | property + exact-byte | — |
+| gamut-bitstream | *none* — self-inverse (bit I/O); T.81 Annex C/K.2 derivations (Huffman table builder) | property + exact-byte | — |
 | gamut-dsp | AV1 §7.13 / T.81 §A.3 transform definitions | example + in-test reference transform | — |
 | gamut-codec-abi | *none* | exact-byte + compile-time assertion | — |
 | gamut-color | Little-CMS | differential | — |
@@ -275,8 +275,10 @@ Eight crates hold no oracle dev-dependency of their own: `gamut-core`, `gamut-if
 `gamut-tonemap`, `gamut-bitstream`, `gamut-dsp`, `gamut-codec-abi`, `gamut-isobmff` and
 `gamut-metadata`. Most have something else standing in — `gamut-isobmff` has specification vectors,
 exact-byte assertions and libavif's reach through `gamut-avif`; `gamut-ifd` is covered through
-`gamut-tiff`'s libtiff and `gamut-exif`'s exiv2; `gamut-bitstream` and `gamut-dsp` check against a
-self-inverse or a reference transform; `gamut-codec-abi` pins its ABI at compile time.
+`gamut-tiff`'s libtiff and `gamut-exif`'s exiv2; `gamut-dsp` checks against a reference
+transform; `gamut-bitstream` checks its bit I/O against a self-inverse and its T.81 Annex K.2
+Huffman table builder against hand derivations from Annexes C and K plus exact-byte regression
+goldens (no libjpeg table-byte differential); `gamut-codec-abi` pins its ABI at compile time.
 
 **Where a property is the primary signal rather than a supplement: `gamut-core`, `gamut-ifd` and
 `gamut-tonemap`** — real algorithmic content, no reference implementation to defer to, and no
