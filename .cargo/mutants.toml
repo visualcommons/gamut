@@ -107,7 +107,7 @@ profile = "mutants"
 #   * the function signature survives movement but covers every mutant the signature admits, so it
 #     can also cover one nobody argued for. Use it when the name is unique workspace-wide and the
 #     claim is about a whole-body replacement, where naming the return type is itself the anchor
-#     (`reference_changes -> (usize, usize)`), leaving every operator mutation inside the function
+#     (`BitReader<'_>::read -> Option<u32>`), leaving every operator mutation inside the function
 #     in the survey.
 #
 # Keep this list short and justified; a gap is *not* an excuse for an entry.
@@ -1027,23 +1027,21 @@ exclude_re = [
     # same node forever — non-terminating, TIMEOUT-only. (`> -> <` truncates real chains and IS
     # caught by the trellis round-trip tests.)
     'rd\.rs:273:19: replace > with (>=|==) in trellis_quantize',
-    # gamut-tiff CCITT G4 `reference_changes` and LZW `BitReader::read`, stubbed to a constant.
-    # Both are cursor-advance functions whose callers loop until the cursor passes a bound, so a
-    # constant return removes the only thing that ends the loop -- non-terminating, and reportable
-    # only as a TIMEOUT (exit 3, gate-failing), never as a catchable behavioural escape. Same shape
-    # and justification as the gamut-jpeg entropy-reader hangs above.
+    # gamut-tiff LZW `BitReader::read`, stubbed to a constant. It is a cursor-advance function
+    # whose caller loops until the cursor passes a bound, so a constant return removes the only
+    # thing that ends the loop -- non-terminating, and reportable only as a TIMEOUT (exit 3,
+    # gate-failing), never as a catchable behavioural escape. Same shape and justification as the
+    # gamut-jpeg entropy-reader hangs above: `Some(0)`/`Some(1)` is a code that is never EOI, so
+    # `decode`'s loop never reaches its terminating code and the string table grows without bound.
     #
-    # `reference_changes` returns b1/b2, the changing elements strictly right of a0. Every one of
-    # the four constants puts b2 at or behind a0, so `encode_row` takes pass mode, assigns
-    # `a0 = b2`, and finds the same b2 on the next pass, forever. `BitReader::read` stubbed to
-    # `Some(0)`/`Some(1)` returns a code that is never EOI, so `decode`'s loop never reaches its
-    # terminating code and the string table grows without bound.
+    # (Its former sibling, CCITT G4 `reference_changes` stubbed to a constant, is no longer here:
+    # #585 bounded G4 `encode_row` by the changing elements it walks, so a stalled `a0` now runs
+    # out of steps and emits a wrong row that the round-trip tests reject.)
     #
     # Anchored on the function signature rather than on line:col, unlike the jpeg entries above: a
     # line-anchored regex silently stops matching when code above it moves, which turns a suppressed
-    # timeout back into a red gate at an unrelated moment. Both names are unique workspace-wide, and
-    # the anchors name the return type, so only the whole-body replacements match -- every operator
-    # mutation inside either function stays in the survey, and this branch kills several of them.
-    'replace reference_changes -> \(usize, usize\) with \((0|1), (0|1)\)',
+    # timeout back into a red gate at an unrelated moment. The name is unique workspace-wide, and
+    # the anchor names the return type, so only the whole-body replacements match -- every operator
+    # mutation inside the function stays in the survey.
     "replace BitReader<'_>::read -> Option<u32> with Some\\((0|1)\\)",
 ]

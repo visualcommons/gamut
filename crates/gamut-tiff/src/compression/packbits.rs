@@ -8,13 +8,13 @@
 use gamut_core::{Error, Result};
 
 /// Returns the length (capped at 128) of the run of bytes equal to `data[i]` starting at `i`.
+///
+/// Counted over the slice rather than by a hand-advanced cursor, so the walk is bounded by the
+/// data it reads: the former `while … { len += 1 }` turned into a non-terminating loop under the
+/// `+= -> *=` mutation (#585). The rewrite also retires that loop's operator mutants.
 fn run_length(data: &[u8], i: usize) -> usize {
     let b = data[i];
-    let mut len = 1;
-    while i + len < data.len() && data[i + len] == b && len < 128 {
-        len += 1;
-    }
-    len
+    data[i..].iter().take(128).take_while(|&&x| x == b).count()
 }
 
 /// PackBits-encodes one row, appending to `out`. Runs never cross the row boundary (§9).
@@ -28,11 +28,14 @@ pub fn encode_row(row: &[u8], out: &mut Vec<u8>) {
             out.push(row[i]);
             i += run;
         } else {
-            // Literal run: bytes up to the next run of ≥2, capped at 128.
+            // Literal run: bytes up to the next run of ≥2, capped at 128. Counted over the
+            // positions it may cover rather than by stepping `i` in a loop, which hung under the
+            // `+= -> *=` mutation (#585).
             let start = i;
-            while i < row.len() && i - start < 128 && run_length(row, i) < 2 {
-                i += 1;
-            }
+            let limit = row.len().min(start + 128);
+            i += (start..limit)
+                .take_while(|&j| run_length(row, j) < 2)
+                .count();
             out.push((i - start - 1) as u8);
             out.extend_from_slice(&row[start..i]);
         }
