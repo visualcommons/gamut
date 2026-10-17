@@ -533,8 +533,10 @@ fn a_png_output_from_another_format_carries_icc_and_xmp() {
     assert_eq!(meta.xmp.as_deref(), Some(XMP));
 }
 
-/// A bare little-endian TIFF stream whose 1st IFD is an uncompressed one-strip thumbnail.
-fn exif_with_strip_thumbnail() -> Vec<u8> {
+/// A bare little-endian TIFF stream whose 1st IFD is an uncompressed one-strip thumbnail, its
+/// three strip bytes `[1, 2, 3]` stored at offset 68 and addressed by a `StripOffsets` of
+/// `strip_offset` — 68 to read them, past the end of the stream for a strip that does not read.
+fn exif_with_strip_thumbnail(strip_offset: u32) -> Vec<u8> {
     let entry = |tag: u16, kind: u16, value: u32| {
         let mut e = Vec::new();
         e.extend_from_slice(&tag.to_le_bytes());
@@ -552,26 +554,45 @@ fn exif_with_strip_thumbnail() -> Vec<u8> {
     tiff.extend_from_slice(&26u32.to_le_bytes());
     tiff.extend_from_slice(&3u16.to_le_bytes());
     tiff.extend(entry(0x0103, SHORT, 1)); // Compression = uncompressed
-    tiff.extend(entry(0x0111, LONG, 68)); // StripOffsets
+    tiff.extend(entry(0x0111, LONG, strip_offset)); // StripOffsets
     tiff.extend(entry(0x0117, LONG, 3)); // StripByteCounts
     tiff.extend_from_slice(&0u32.to_le_bytes());
     tiff.extend_from_slice(&[1, 2, 3]);
     tiff
 }
 
-/// `gamut-exif` re-embeds only a JPEG thumbnail's bytes, so a strip thumbnail would be written as
-/// a directory whose `StripOffsets` address nothing; it is dropped instead, and said to be.
-#[test]
-fn a_strip_thumbnail_is_dropped_rather_than_written_dangling() {
+/// Converts a 2×2 PNG carrying [`exif_with_strip_thumbnail`]`(strip_offset)` to PNG, returning the
+/// output's parsed Exif and what the command said on stderr.
+fn convert_strip_thumbnail(name: &str, strip_offset: u32) -> (Exif, String) {
     let rgba = vec![255u8; 4 * 4];
     let png = PngEncoder::new()
-        .with_exif(&exif_with_strip_thumbnail())
+        .with_exif(&exif_with_strip_thumbnail(strip_offset))
         .encode_to_vec(ImageRef::<Rgba8>::new(&rgba, Dimensions::new(2, 2).unwrap()).unwrap())
         .unwrap();
+    let (meta, stderr) = convert(name, &png, &[]);
+    (parse_exif(meta.exif.as_deref()), stderr)
+}
 
-    let (meta, stderr) = convert("strip-thumbnail", &png, &[]);
+/// `gamut-exif` re-embeds an uncompressed thumbnail's strips, so a strip thumbnail is carried with
+/// its bytes rather than dropped.
+#[test]
+fn a_strip_thumbnail_is_carried_with_its_bytes() {
+    let (exif, stderr) = convert_strip_thumbnail("strip-thumbnail", 68);
 
-    let exif = parse_exif(meta.exif.as_deref());
+    let thumb = exif.thumbnail().expect("the thumbnail is written");
+    assert_eq!(thumb.strips(), Some([vec![1u8, 2, 3]].as_slice()));
+    assert!(
+        !stderr.contains("Exif thumbnail"),
+        "stderr reported a carried thumbnail as dropped: {stderr}"
+    );
+}
+
+/// A thumbnail whose strips do not read holds no image bytes, so it would be written as a
+/// directory whose `StripOffsets` address nothing; it is dropped instead, and said to be.
+#[test]
+fn an_unreadable_strip_thumbnail_is_dropped_rather_than_written_dangling() {
+    let (exif, stderr) = convert_strip_thumbnail("unreadable-strip-thumbnail", 4096);
+
     assert_eq!(
         exif.orientation(),
         Some(1),
