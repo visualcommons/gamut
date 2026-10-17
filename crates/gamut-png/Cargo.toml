@@ -22,6 +22,10 @@ workspace = true
 # surface and `mise run check-ffi-features` are unaffected. The module is re-exports only, so it
 # adds no coverage regions and no mutants.
 test-support = []
+# Typed metadata wiring: `PngMetadata` / `DecodedPng`'s `TypedMetadata` impls (`blocks` /
+# `metadata`) and `PngEncoder::with_metadata` / `with_encoded_metadata` over the
+# `gamut-metadata` facade.
+metadata = ["dep:gamut-metadata"]
 
 [dependencies]
 gamut-core.workspace = true
@@ -39,6 +43,11 @@ miniz_oxide = "0.8"
 # including wasm32. MIT/Apache-2.0, pure Rust, and it keeps its `unsafe` to itself -- gamut-png
 # stays 100% safe Rust. Replaces a hand-written byte-at-a-time table loop; see `src/crc32.rs`.
 crc32fast = "1.5"
+# Typed metadata (issue #510): the unified `Metadata` model over the `eXIf` / XMP `iTXt` / `iCCP`
+# / `caBX` payloads this crate locates and writes. Optional and off by default — a plain PNG
+# consumer pays for none of the four metadata crates — and a *normal* dependency (never
+# dev-only), so release ordering follows it (`mise run check-release-deps`).
+gamut-metadata = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Differential cross-check oracle: a vendored, statically-linked libpng (built from the
@@ -46,6 +55,11 @@ crc32fast = "1.5"
 # directions: it decodes the gamut encoder's output, and it generates the fixture corpus (and the
 # reference pixels) the gamut decoder is differentially checked against.
 libpng-oracle = { path = "../../tooling/libpng-oracle" }
+# exiv2 as the container-level metadata oracle (FFI to a vendored, statically-linked exiv2 built
+# from the `third_party/exiv2` + `third_party/expat` submodules): it reads what the `metadata`
+# feature embeds and writes what its reader is checked against. Dev-only, excluded from the
+# workspace; see tooling/exiv2-oracle.
+exiv2-oracle = { path = "../../tooling/exiv2-oracle" }
 # Benchmark harness (issue #149) plus this crate's own `test-support` feature, which the bench
 # target needs to reach the pipeline stages. A self dev-dependency is the standard way to enable an
 # own feature for tests and benches only; `mise run check-release-deps` skips self-edges.

@@ -106,7 +106,7 @@ struct MetadataView<'a> {
     c2pa: bool,
 }
 
-/// Something [`PngEncoder::with_metadata`] could not do faithfully with a payload it was given.
+/// Something [`PngEncoder::with_png_metadata`] could not do faithfully with a payload it was given.
 ///
 /// Preservation exists to stop metadata disappearing quietly, so anything a carry cannot take —
 /// and anything it takes only by writing bytes the specification does not endorse — is named
@@ -999,7 +999,7 @@ impl PngEncoder {
     /// entry of the source's palette, so it is carried only by
     /// [`encode_indexed8`](Self::encode_indexed8) with that palette.
     #[must_use]
-    pub fn with_metadata(self, metadata: &PngMetadata) -> Self {
+    pub fn with_png_metadata(self, metadata: &PngMetadata) -> Self {
         self.with_metadata_view(MetadataView {
             exif: metadata.exif.as_deref(),
             icc_profile: metadata.icc_profile.as_ref(),
@@ -1019,9 +1019,9 @@ impl PngEncoder {
     }
 
     /// Carries the metadata of a decoded file into this encoder: the [`DecodedPng`] twin of
-    /// [`with_metadata`](Self::with_metadata), which documents exactly what is and is not carried.
+    /// [`with_png_metadata`](Self::with_png_metadata), which documents exactly what is and is not carried.
     ///
-    /// Use this when you already decoded the pixels; use `with_metadata` when
+    /// Use this when you already decoded the pixels; use `with_png_metadata` when
     /// [`metadata`](crate::metadata) read the file without them.
     #[must_use]
     pub fn with_metadata_from(self, decoded: &DecodedPng) -> Self {
@@ -1052,7 +1052,7 @@ impl PngEncoder {
     /// explanation is a choice the spec forces. Use
     /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
     ///
-    /// The payload-level notices describe the last [`with_metadata`](Self::with_metadata) /
+    /// The payload-level notices describe the last [`with_png_metadata`](Self::with_png_metadata) /
     /// [`with_metadata_from`](Self::with_metadata_from) call and are reset by each; the
     /// per-annotation notices belong to the annotations still accumulated, so they follow the
     /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
@@ -1068,7 +1068,7 @@ impl PngEncoder {
         notices
     }
 
-    /// The one implementation behind [`with_metadata`](Self::with_metadata) and
+    /// The one implementation behind [`with_png_metadata`](Self::with_png_metadata) and
     /// [`with_metadata_from`](Self::with_metadata_from).
     fn with_metadata_view(mut self, meta: MetadataView<'_>) -> Self {
         self.carry_notices.clear();
@@ -2740,5 +2740,316 @@ mod tests {
             reduced_color_type::<Rgba8>(&greys, Some(&icc_profile(b"GRAY"))),
             ColorType::Grayscale.code()
         );
+    }
+}
+
+/// The `metadata` feature: the encoder half of the typed [`gamut_metadata`] wiring (the reader
+/// half is the `TypedMetadata` impl on [`PngMetadata`] and [`DecodedPng`]). A facade `Metadata` is
+/// serialized and each carrier routed to this encoder's raw setters.
+#[cfg(feature = "metadata")]
+mod typed {
+    use gamut_core::{Error, Result};
+    use gamut_metadata::{EncodedMetadata, Metadata, MetadataEmbedder};
+
+    use super::PngEncoder;
+
+    /// The `iCCP` profile name written for a profile that arrives as a facade block, which
+    /// carries no name of its own: 1–79 printable Latin-1 characters with no leading, trailing or
+    /// consecutive space, as §11.3.2.3 requires.
+    pub(super) const TYPED_ICC_PROFILE_NAME: &str = "ICC profile";
+
+    impl PngEncoder {
+        /// Embeds a unified [`Metadata`] model: serializes it with the default
+        /// [`MetadataEmbedder`] and routes each carrier to the matching raw setter
+        /// ([`with_exif`](Self::with_exif), [`with_xmp`](Self::with_xmp),
+        /// [`with_icc_profile`](Self::with_icc_profile)). Returns the updated encoder for
+        /// chaining.
+        ///
+        /// This is the facade builder every wired format crate spells `with_metadata`. Its
+        /// chunk-for-chunk sibling is [`with_png_metadata`](Self::with_png_metadata), which
+        /// carries a [`PngMetadata`](crate::PngMetadata) — every PNG chunk the read side
+        /// surfaces — whereas this method takes the facade's container-agnostic model, which
+        /// holds only the EXIF, XMP and ICC carriers.
+        ///
+        /// The default embedder emits no legacy IPTC-IIM block (IPTC lives inside the XMP packet)
+        /// and **drops** a C2PA manifest store — a store is signed over the file it came from and
+        /// can never be copied into a re-encoded one; see [`gamut_metadata::C2paPolicy`]. A caller
+        /// that must be told about either configures the embedder itself and calls
+        /// [`with_encoded_metadata`](Self::with_encoded_metadata). Carriers absent from the model
+        /// leave any earlier raw setting untouched.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message
+        /// is carried as [`Error::detail`]), and whatever
+        /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
+        pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
+            let encoded = MetadataEmbedder::new().embed(meta).map_err(|e| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: metadata does not serialize")
+                    .with_detail(e.to_string())
+            })?;
+            self.with_encoded_metadata(&encoded)
+        }
+
+        /// Embeds already-serialized facade blocks — the output of a [`MetadataEmbedder`]
+        /// configured by the caller — routing each present carrier to the matching raw setter.
+        /// Returns the updated encoder for chaining.
+        ///
+        /// EXIF goes to [`with_exif`](Self::with_exif) with the facade's `Exif\0\0` signature
+        /// stripped (an `eXIf` chunk holds the bare TIFF stream, §11.3.4.5), XMP to
+        /// [`with_xmp`](Self::with_xmp) and ICC to [`with_icc_profile`](Self::with_icc_profile)
+        /// under the name `"ICC profile"`, since a facade block carries no profile name. Fields
+        /// that are `None` leave any earlier raw setting untouched.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (PNG
+        /// defines no IPTC-IIM chunk) or a C2PA manifest store. A store is never embedded from
+        /// metadata blocks: it is signed over the bytes of the one file it was made for, so a
+        /// store computed for this output goes through [`with_c2pa`](Self::with_c2pa) /
+        /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) instead. Returns
+        /// [`Error::InvalidInput`] when the XMP packet is not UTF-8, which an `iTXt` text field
+        /// must be (§11.3.3.4). Nothing is applied when an error is returned.
+        pub fn with_encoded_metadata(mut self, encoded: &EncodedMetadata) -> Result<Self> {
+            if encoded.iptc_iim.is_some() {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "PNG: IPTC-IIM has no chunk",
+                ));
+            }
+            if encoded.c2pa.is_some() {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "PNG: a C2PA manifest store is not embedded from metadata blocks",
+                ));
+            }
+            let xmp = encoded
+                .xmp
+                .as_deref()
+                .map(core::str::from_utf8)
+                .transpose()
+                .map_err(|_| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: XMP packet is not UTF-8")
+                })?;
+            if let Some(exif) = &encoded.exif {
+                self = self.with_exif(exif.strip_prefix(b"Exif\0\0").unwrap_or(exif));
+            }
+            if let Some(xmp) = xmp {
+                self = self.with_xmp(xmp);
+            }
+            if let Some(icc) = &encoded.icc {
+                self = self.with_icc_profile(TYPED_ICC_PROFILE_NAME, icc);
+            }
+            Ok(self)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef};
+        use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+        use gamut_metadata::icc::{
+            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Signature, TagData,
+        };
+        use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
+        use gamut_metadata::{MetadataBlock, TypedMetadata};
+
+        use super::*;
+
+        /// A typed model with the three facade-writable carriers populated, normalised through one
+        /// embed → extract pass so it is an *extracted* model (the ICC header's `size` is stamped
+        /// by the serializer). The profile is a greyscale one, matching the image `encode` writes
+        /// (§11.3.2.3).
+        fn typed() -> Metadata {
+            let mut exif = Exif::new(ByteOrder::BigEndian);
+            exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
+            let mut xmp = XmpMeta::new();
+            xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
+            let icc = IccProfile {
+                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
+                tags: Vec::new(),
+            };
+            let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
+                .encode()
+                .unwrap();
+            Metadata::from_blocks(&[
+                MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
+                MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
+                MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
+            ])
+            .unwrap()
+        }
+
+        /// Encodes an 8×8 grayscale image with `encoder`.
+        fn encode(encoder: &PngEncoder) -> Vec<u8> {
+            let pixels = vec![128u8; 64];
+            let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+            encoder.encode_to_vec(image).unwrap()
+        }
+
+        #[test]
+        fn typed_metadata_round_trips_through_the_datastream() {
+            // The facade's keystone equality, extended through the `eXIf` / `iTXt` / `iCCP`
+            // chunks.
+            let typed = typed();
+            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
+            let read = crate::metadata(&png).unwrap();
+            assert!(read.exif.is_some() && read.xmp.is_some() && read.icc_profile.is_some());
+            assert_eq!(read.metadata().unwrap(), typed);
+        }
+
+        #[test]
+        fn exiv2_reads_what_with_metadata_embeds() {
+            // Container-level differential: exiv2's own PNG reader finds the `eXIf`, the XMP
+            // `iTXt` and the `iCCP` this encoder writes, not only this crate's reader.
+            let typed = typed();
+            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&png, "Exif.Image.Make").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_xmp_get(&png, "Xmp.xmp.CreatorTool").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_icc(&png).unwrap(),
+                typed.encode().unwrap().icc
+            );
+        }
+
+        #[test]
+        fn the_typed_reader_reads_what_exiv2_embeds() {
+            // The other direction: exiv2 writes an `eXIf` and an XMP `iTXt` into a file this
+            // crate encoded bare, and the typed reader finds both values.
+            let bare = encode(&PngEncoder::new());
+            let png = exiv2_oracle::image_set(
+                &bare,
+                Some(("Exif.Photo.ISOSpeedRatings", "400")),
+                Some(("Xmp.xmp.CreatorTool", "exiv2")),
+            )
+            .unwrap();
+            let read = crate::metadata(&png).unwrap().metadata().unwrap();
+            assert_eq!(
+                read.exif.unwrap().get_tag(ExifTag::PhotographicSensitivity),
+                Some(&Value::Short(vec![400]))
+            );
+            assert_eq!(
+                read.xmp
+                    .unwrap()
+                    .get_text(WellKnownNs::Xmp.uri(), "CreatorTool"),
+                Some("exiv2")
+            );
+        }
+
+        #[test]
+        fn a_manifest_store_is_never_copied_forward() {
+            let mut typed = typed();
+            typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());
+            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
+            let read = crate::metadata(&png).unwrap().metadata().unwrap();
+            assert_eq!(read.c2pa, None);
+            typed.c2pa = None;
+            assert_eq!(read, typed);
+        }
+
+        #[test]
+        fn encoded_blocks_route_to_the_raw_setters() {
+            // Each present field lands in its chunk — the EXIF one without the facade's
+            // signature, the profile under the fixed name — and an absent one leaves an earlier
+            // setting.
+            let encoded = typed().encode().unwrap();
+            let png = encode(&PngEncoder::new().with_encoded_metadata(&encoded).unwrap());
+            let read = crate::metadata(&png).unwrap();
+            assert_eq!(
+                read.exif.as_deref(),
+                encoded
+                    .exif
+                    .as_deref()
+                    .and_then(|e| e.strip_prefix(b"Exif\0\0"))
+            );
+            assert_eq!(read.xmp, encoded.xmp);
+            let icc = read.icc_profile.unwrap();
+            assert_eq!(icc.name, TYPED_ICC_PROFILE_NAME);
+            assert_eq!(Some(icc.profile), encoded.icc);
+
+            let mut only_icc = EncodedMetadata::default();
+            only_icc.icc = encoded.icc.clone();
+            let png = encode(
+                &PngEncoder::new()
+                    .with_xmp("<x:xmpmeta/>")
+                    .with_encoded_metadata(&only_icc)
+                    .unwrap(),
+            );
+            let read = crate::metadata(&png).unwrap();
+            assert_eq!(read.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
+            assert_eq!(read.icc_profile.map(|icc| icc.profile), encoded.icc);
+            assert_eq!(read.exif, None);
+        }
+
+        #[test]
+        fn the_typed_profile_name_draws_no_notice() {
+            // The fixed name must itself satisfy §11.3.2.3, or every typed ICC embed would be
+            // reported as bent.
+            let mut only_icc = EncodedMetadata::default();
+            only_icc.icc = typed().encode().unwrap().icc;
+            let encoder = PngEncoder::new().with_encoded_metadata(&only_icc).unwrap();
+            assert!(encoder.metadata_notices().is_empty());
+        }
+
+        #[test]
+        fn a_bare_exif_stream_is_written_unchanged() {
+            // `strip_prefix` must not eat a stream that never carried the signature.
+            let mut bare = EncodedMetadata::default();
+            bare.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
+            let png = encode(&PngEncoder::new().with_encoded_metadata(&bare).unwrap());
+            assert_eq!(crate::metadata(&png).unwrap().exif, bare.exif);
+        }
+
+        #[test]
+        fn unembeddable_carriers_are_typed_errors() {
+            let mut iim = EncodedMetadata::default();
+            iim.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
+            let err = PngEncoder::new().with_encoded_metadata(&iim).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(err.static_message(), Some("PNG: IPTC-IIM has no chunk"));
+
+            let mut c2pa = EncodedMetadata::default();
+            c2pa.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
+            let err = PngEncoder::new().with_encoded_metadata(&c2pa).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                err.static_message(),
+                Some("PNG: a C2PA manifest store is not embedded from metadata blocks")
+            );
+
+            let mut latin1 = EncodedMetadata::default();
+            latin1.xmp = Some(vec![0xff, 0xfe]);
+            latin1.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
+            let err = PngEncoder::new()
+                .with_encoded_metadata(&latin1)
+                .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert_eq!(err.static_message(), Some("PNG: XMP packet is not UTF-8"));
+        }
+
+        #[test]
+        fn a_model_that_does_not_serialize_is_invalid_input_with_the_facade_detail() {
+            // An ICC model with a duplicate tag signature is rejected by `gamut-icc`'s writer
+            // (ICC.1:2022 §7.3).
+            let duplicate = (Signature(*b"wtpt"), TagData::Xyz(Vec::new()));
+            let bad_icc = IccProfile {
+                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
+                tags: vec![duplicate.clone(), duplicate],
+            };
+            let model = Metadata::from_carriers(None, None, Some(bad_icc));
+            let err = PngEncoder::new().with_metadata(&model).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert_eq!(
+                err.static_message(),
+                Some("PNG: metadata does not serialize")
+            );
+            assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+        }
     }
 }

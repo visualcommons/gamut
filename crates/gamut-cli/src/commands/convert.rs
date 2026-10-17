@@ -818,7 +818,7 @@ fn encode(
                 png.exif = carried.exif.take();
                 // `carry` has already reported the store, which is never carried.
                 png.c2pa = None;
-                encoder = encoder.with_metadata(&png);
+                encoder = encoder.with_png_metadata(&png);
             } else {
                 if let Some(exif) = &carried.exif {
                     encoder = encoder.with_exif(exif);

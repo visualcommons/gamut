@@ -46,7 +46,7 @@ fn valid_metadata_tiff() -> Vec<u8> {
     let mut exif = Ifd::new();
     exif.set(33434, Value::Rational(vec![(1, 250)]));
     TiffEncoder::new()
-        .with_metadata(
+        .with_tiff_metadata(
             TiffMetadata::new()
                 .with_exif(exif)
                 .with_xmp(b"<x:xmpmeta><rdf:RDF/></x:xmpmeta>".to_vec())

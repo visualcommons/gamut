@@ -595,7 +595,7 @@ impl Ancillary {
 
     /// Starts carrying a read file's metadata, discarding whatever a previous carry contributed.
     ///
-    /// This is what makes [`PngEncoder::with_metadata`](crate::PngEncoder::with_metadata)
+    /// This is what makes [`PngEncoder::with_png_metadata`](crate::PngEncoder::with_png_metadata)
     /// idempotent for text. The single-value slots — `gamma`, `iccp`, `srgb`, … — are idempotent
     /// already because a second write overwrites the first; the text list is the one place where
     /// "set it again" would otherwise mean "append it again", duplicating every annotation.
@@ -2104,7 +2104,7 @@ mod tests {
     }
 
     /// A carry replaces what an earlier carry contributed instead of appending a second copy, so
-    /// `with_metadata` is idempotent for text the way the single-value colour slots already are.
+    /// `with_png_metadata` is idempotent for text the way the single-value colour slots already are.
     ///
     /// Kills the `retain` in [`Ancillary::begin_carry`] (two copies of every annotation) and the
     /// `carried` flag's `end_carry` reset (a carry that also eats the caller's own annotations).

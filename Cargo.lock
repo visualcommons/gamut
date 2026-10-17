@@ -669,11 +669,13 @@ version = "2.0.0"
 dependencies = [
  "dav1d-oracle",
  "divan",
+ "exiv2-oracle",
  "gamut-av1",
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
  "gamut-isobmff",
+ "gamut-metadata",
  "libavif-oracle",
  "proptest",
 ]
@@ -912,9 +914,11 @@ version = "0.2.0"
 dependencies = [
  "crc32fast",
  "divan",
+ "exiv2-oracle",
  "gamut-codec-abi",
  "gamut-core",
  "gamut-deflate",
+ "gamut-metadata",
  "gamut-png",
  "libpng-oracle",
  "miniz_oxide 0.8.9",
@@ -934,10 +938,12 @@ name = "gamut-tiff"
 version = "2.0.0"
 dependencies = [
  "divan",
+ "exiv2-oracle",
  "gamut-bitstream",
  "gamut-core",
  "gamut-deflate",
  "gamut-ifd",
+ "gamut-metadata",
  "libtiff-oracle",
  "miniz_oxide 0.8.9",
 ]
@@ -974,10 +980,12 @@ name = "gamut-webp"
 version = "0.4.0"
 dependencies = [
  "divan",
+ "exiv2-oracle",
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
+ "gamut-metadata",
  "gamut-riff",
  "libwebp-sys2 0.2.0",
 ]

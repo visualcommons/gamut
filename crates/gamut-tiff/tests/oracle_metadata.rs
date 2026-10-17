@@ -33,7 +33,7 @@ fn libtiff_decodes_a_gamut_rgb_image_carrying_metadata() {
     for &(w, h) in SIZES {
         let src = rgb_pattern(w, h);
         let tiff = TiffEncoder::new()
-            .with_metadata(metadata())
+            .with_tiff_metadata(metadata())
             .encode_to_vec(
                 ImageRef::<Rgb8>::new(
                     &src,
@@ -59,7 +59,7 @@ fn libtiff_decodes_a_gamut_image_carrying_a_c2pa_manifest_store() {
     for &(w, h) in SIZES {
         let src = rgb_pattern(w, h);
         let tiff = TiffEncoder::new()
-            .with_metadata(metadata().with_c2pa(store.clone()))
+            .with_tiff_metadata(metadata().with_c2pa(store.clone()))
             .encode_to_vec(
                 ImageRef::<Rgb8>::new(
                     &src,

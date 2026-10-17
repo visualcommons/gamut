@@ -169,6 +169,15 @@ and the non-validating report types (`C2paSummary` and kin, still one per consum
 with `IsoBmffImage::new(..)` plus `with_minor_version`/`with_groups`/`with_top_level_boxes`, so the
 next field is a minor release.
 
+## `Exif` item framing (#872)
+
+`Item::exif_tiff_stream` applies the 4-byte big-endian `exif_tiff_header_offset` of an `Exif`
+item's `ExifDataBlock` (ISO/IEC 23008-12 §A.2.1) and returns the TIFF stream behind it, refusing a
+non-`Exif` item, a payload shorter than the field and an offset past the payload's end as
+`InvalidInput`. `gamut-heic` (`HeifItem::exif_tiff_stream`, which delegates) and `gamut-avif` (its
+`TypedMetadata` impl) both read their `Exif` items through it, for the same reason as the C2PA
+framing above: the framing is HEIF's, not either codec's. Additive (semver-minor).
+
 ## Exported walk primitives
 
 Byte accounting itself is `walk_segments`/`walk_meta_children` (issue #436): every input byte maps

@@ -127,7 +127,7 @@ fn a_malformed_exif_item_is_invalid_input_from_both_accessors() {
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
         assert_eq!(
             err.static_message(),
-            Some("HEIF: Exif item payload is shorter than its tiff-header offset field")
+            Some("ISOBMFF: Exif item payload is shorter than its tiff-header offset field")
         );
     }
 }

@@ -162,7 +162,7 @@ impl TiffEncoder {
     /// * a directory nested **below** the `ExifIFD` → `InteroperabilityIFD` pair (EXIF 2.3
     ///   §4.6.3), which is as deep as the reader walks.
     #[must_use]
-    pub fn with_metadata(mut self, metadata: TiffMetadata) -> Self {
+    pub fn with_tiff_metadata(mut self, metadata: TiffMetadata) -> Self {
         self.metadata = metadata;
         self
     }
@@ -183,7 +183,7 @@ impl TiffEncoder {
     /// panicking. In a **classic** TIFF it must further be countable by the 32-bit `LONG` the
     /// entry's `count` field is — 4 GiB — since a longer store could not be described whatever
     /// else held it; BigTIFF's count is 64-bit and has no such bound. A reservation cannot be
-    /// combined with a store supplied through [`with_metadata`](Self::with_metadata). Each of
+    /// combined with a store supplied through [`with_tiff_metadata`](Self::with_tiff_metadata). Each of
     /// those is a typed error raised before any pixel work, not after the image has been
     /// compressed. What the length alone cannot settle stays with
     /// [`gamut_ifd::c2pa::append_store`]: a store whose *offset* would pass classic TIFF's 4 GiB
@@ -312,11 +312,11 @@ impl TiffEncoder {
     /// [`encode_pages_rgb8`](Self::encode_pages_rgb8) alike — and each is an
     /// [`Error::InvalidInput`]. These are raised **before any pixel work**:
     ///
-    /// * the Exif sub-IFD supplied through [`with_metadata`](Self::with_metadata) is one this
+    /// * the Exif sub-IFD supplied through [`with_tiff_metadata`](Self::with_tiff_metadata) is one this
     ///   crate's reader could not hand back — a pointer-typed field under a pointer tag, a
     ///   directory hung off a tag the reader does not resolve, a field and a directory under one
     ///   tag, or nesting deeper than the reader walks (the shapes
-    ///   [`with_metadata`](Self::with_metadata) lists);
+    ///   [`with_tiff_metadata`](Self::with_tiff_metadata) lists);
     /// * both a manifest store and a reservation
     ///   ([`with_c2pa_reserved`](Self::with_c2pa_reserved)) were configured;
     /// * the store or reservation is shorter than [`gamut_ifd::c2pa::MIN_STORE_LEN`] (8 bytes),
@@ -1000,7 +1000,7 @@ mod tests {
         // supplying both says two different things about the same bytes, so it is refused rather
         // than silently resolved one way.
         let err = TiffEncoder::new()
-            .with_metadata(TiffMetadata::new().with_c2pa(vec![0; 16]))
+            .with_tiff_metadata(TiffMetadata::new().with_c2pa(vec![0; 16]))
             .with_c2pa_reserved(16)
             .c2pa_store()
             .expect_err("contradictory configuration");
@@ -1035,7 +1035,7 @@ mod tests {
             assert!(
                 TiffEncoder::new()
                     .with_big_tiff(big_tiff)
-                    .with_metadata(TiffMetadata::new().with_c2pa(vec![0; minimum - 1]))
+                    .with_tiff_metadata(TiffMetadata::new().with_c2pa(vec![0; minimum - 1]))
                     .c2pa_store()
                     .is_err(),
                 "big_tiff={big_tiff}"
@@ -1112,7 +1112,7 @@ mod tests {
         let supplied = b"\0\0\0\x14jumbc2pa".to_vec();
         assert_eq!(
             TiffEncoder::new()
-                .with_metadata(TiffMetadata::new().with_c2pa(supplied.clone()))
+                .with_tiff_metadata(TiffMetadata::new().with_c2pa(supplied.clone()))
                 .c2pa_store()
                 .expect("a store")
                 .as_deref(),
@@ -1160,7 +1160,7 @@ mod tests {
         };
         let palette = Palette8::from_rgb_triples(&[0u8; 768]).expect("palette");
         let bad = TiffEncoder::new()
-            .with_metadata(TiffMetadata::new().with_c2pa(vec![0; 4]))
+            .with_tiff_metadata(TiffMetadata::new().with_c2pa(vec![0; 4]))
             .with_c2pa_reserved(4)
             .with_tiling(17, 17);
         let mut out = Vec::new();
@@ -1281,5 +1281,315 @@ mod tests {
         assert_eq!(variant, Variant::Big);
         assert_eq!(out[2], 0x2b);
         assert!(first >= 16);
+    }
+}
+
+/// The `metadata` feature: the encoder half of the typed [`gamut_metadata`] wiring (the reader
+/// half is the `TypedMetadata` impl on [`TiffMetadata`]). A facade `Metadata` is serialized and
+/// each carrier routed into the encoder's [`TiffMetadata`].
+#[cfg(feature = "metadata")]
+mod typed {
+    use gamut_core::{Error, Result};
+    use gamut_metadata::exif::Exif;
+    use gamut_metadata::{EncodedMetadata, Metadata, MetadataEmbedder};
+
+    use super::TiffEncoder;
+    use crate::metadata::typed::exif_ifd;
+
+    impl TiffEncoder {
+        /// Embeds a unified [`Metadata`] model: serializes it with the default
+        /// [`MetadataEmbedder`] and routes each carrier into this encoder's
+        /// [`TiffMetadata`](crate::TiffMetadata) — see
+        /// [`with_encoded_metadata`](Self::with_encoded_metadata). Returns the updated encoder for
+        /// chaining.
+        ///
+        /// This is the facade builder every wired format crate spells `with_metadata`. Its
+        /// whole-struct sibling is [`with_tiff_metadata`](Self::with_tiff_metadata), which takes a
+        /// whole [`TiffMetadata`](crate::TiffMetadata) and replaces the encoder's; this method
+        /// takes the facade's container-agnostic model and sets only the carriers it holds.
+        ///
+        /// The default embedder emits no legacy IPTC-IIM block (IPTC lives inside the XMP packet)
+        /// and **drops** a C2PA manifest store — a store is signed over the file it came from and
+        /// can never be copied into a re-encoded one; see [`gamut_metadata::C2paPolicy`]. Carriers
+        /// absent from the model leave any earlier setting untouched.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message
+        /// is carried as [`Error::detail`]), and whatever
+        /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
+        pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
+            let encoded = MetadataEmbedder::new().embed(meta).map_err(|e| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: metadata does not serialize")
+                    .with_detail(e.to_string())
+            })?;
+            self.with_encoded_metadata(&encoded)
+        }
+
+        /// Embeds already-serialized facade blocks — the output of a [`MetadataEmbedder`]
+        /// configured by the caller — routing each present carrier into this encoder's
+        /// [`TiffMetadata`](crate::TiffMetadata). Returns the updated encoder for chaining.
+        ///
+        /// XMP, ICC and — unlike every other wired container — a legacy IPTC-IIM stream go in
+        /// verbatim as the `XMP` (700), `ICCProfile` (34675) and `IPTC/NAA` (33723) tags. EXIF is
+        /// parsed, because a TIFF stores its `ExifIFD` as a directory rather than as bytes: the
+        /// model's Exif sub-IFD, with its Interoperability sub-IFD, becomes
+        /// [`TiffMetadata::exif`](crate::TiffMetadata::exif). Its byte order does not travel —
+        /// the file's is [`with_byte_order`](Self::with_byte_order)'s. Fields that are `None`
+        /// leave any earlier setting untouched.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::Unsupported`] when the blocks carry a C2PA manifest store — a store is
+        /// never embedded from metadata blocks, since it is signed over the bytes of the one file
+        /// it was made for; reserve one for this output with
+        /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) — and when the EXIF model holds a
+        /// 0th-IFD field, a GPS sub-IFD or a thumbnail, which a TIFF's IFD 0 does not carry here.
+        /// Returns [`Error::InvalidInput`] when the EXIF block does not parse (the parser's
+        /// message is carried as [`Error::detail`]). Nothing is applied when an error is
+        /// returned.
+        pub fn with_encoded_metadata(mut self, encoded: &EncodedMetadata) -> Result<Self> {
+            if encoded.c2pa.is_some() {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: a C2PA manifest store is not embedded from metadata blocks",
+                ));
+            }
+            let exif = match &encoded.exif {
+                Some(bytes) => {
+                    let model = Exif::parse(bytes).map_err(|e| {
+                        Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "TIFF: EXIF block does not parse",
+                        )
+                        .with_detail(e.to_string())
+                    })?;
+                    Some(exif_ifd(&model)?)
+                }
+                None => None,
+            };
+            if let Some(directory) = exif {
+                self.metadata.exif = directory;
+            }
+            if let Some(xmp) = &encoded.xmp {
+                self.metadata.xmp = Some(xmp.clone());
+            }
+            if let Some(iim) = &encoded.iptc_iim {
+                self.metadata.iptc = Some(iim.clone());
+            }
+            if let Some(icc) = &encoded.icc {
+                self.metadata.icc = Some(icc.clone());
+            }
+            Ok(self)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef};
+        use gamut_ifd::ByteOrder;
+        use gamut_metadata::exif::{ExifTag, Value};
+        use gamut_metadata::icc::{
+            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Signature, TagData,
+        };
+        use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
+        use gamut_metadata::{MetadataBlock, TypedMetadata};
+
+        use super::*;
+        use crate::TiffDecoder;
+        use crate::metadata::typed::EXIF_OUTSIDE_EXIF_IFD;
+
+        /// A typed model with EXIF (an Exif sub-IFD field only — what a TIFF carries), XMP and ICC
+        /// populated, normalised through one embed → extract pass so it is an *extracted* model
+        /// (the ICC header's `size` is stamped by the serializer).
+        fn typed(order: ByteOrder) -> Metadata {
+            let mut exif = Exif::new(order);
+            exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+            let mut xmp = XmpMeta::new();
+            xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
+            let icc = IccProfile {
+                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
+                tags: Vec::new(),
+            };
+            let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
+                .encode()
+                .unwrap();
+            Metadata::from_blocks(&[
+                MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
+                MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
+                MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
+            ])
+            .unwrap()
+        }
+
+        /// Encodes an 8×8 grayscale image with `encoder`.
+        fn encode(encoder: &TiffEncoder) -> Vec<u8> {
+            let pixels = vec![128u8; 64];
+            let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+            encoder.encode_to_vec(image).unwrap()
+        }
+
+        #[test]
+        fn typed_metadata_round_trips_through_the_container_in_either_byte_order() {
+            // The facade's keystone equality, extended through IFD 0 — and the EXIF model's byte
+            // order is the file's, so each order is written by an encoder set to it.
+            for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+                let typed = typed(order);
+                let tiff = encode(
+                    &TiffEncoder::new()
+                        .with_byte_order(order)
+                        .with_metadata(&typed)
+                        .unwrap(),
+                );
+                let read = TiffDecoder::new().metadata(&tiff).unwrap();
+                assert_eq!(read.exif_byte_order, Some(order));
+                assert_eq!(read.metadata().unwrap(), typed, "{order:?}");
+            }
+        }
+
+        #[test]
+        fn exiv2_reads_what_with_metadata_embeds() {
+            // Container-level differential: exiv2's own TIFF reader finds the `ExifIFD`, the XMP
+            // (700) and the `ICCProfile` (34675) tags this encoder writes into IFD 0.
+            let typed = typed(ByteOrder::BigEndian);
+            let tiff = encode(
+                &TiffEncoder::new()
+                    .with_byte_order(ByteOrder::BigEndian)
+                    .with_metadata(&typed)
+                    .unwrap(),
+            );
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&tiff, "Exif.Photo.ISOSpeedRatings").unwrap(),
+                "400"
+            );
+            assert_eq!(
+                exiv2_oracle::image_xmp_get(&tiff, "Xmp.xmp.CreatorTool").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_icc(&tiff).unwrap(),
+                typed.encode().unwrap().icc
+            );
+        }
+
+        #[test]
+        fn the_typed_reader_reads_what_exiv2_embeds() {
+            // The other direction: exiv2 adds an `ExifIFD` and an XMP tag to a file this crate
+            // encoded bare, and the typed reader finds both values.
+            let bare = encode(&TiffEncoder::new());
+            let tiff = exiv2_oracle::image_set(
+                &bare,
+                Some(("Exif.Photo.ISOSpeedRatings", "400")),
+                Some(("Xmp.xmp.CreatorTool", "exiv2")),
+            )
+            .unwrap();
+            let read = TiffDecoder::new()
+                .metadata(&tiff)
+                .unwrap()
+                .metadata()
+                .unwrap();
+            assert_eq!(
+                read.exif.unwrap().get_tag(ExifTag::PhotographicSensitivity),
+                Some(&Value::Short(vec![400]))
+            );
+            assert_eq!(
+                read.xmp
+                    .unwrap()
+                    .get_text(WellKnownNs::Xmp.uri(), "CreatorTool"),
+                Some("exiv2")
+            );
+        }
+
+        #[test]
+        fn a_manifest_store_is_never_copied_forward() {
+            let mut typed = typed(ByteOrder::LittleEndian);
+            typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());
+            let tiff = encode(&TiffEncoder::new().with_metadata(&typed).unwrap());
+            let read = TiffDecoder::new().metadata(&tiff).unwrap();
+            assert_eq!(read.c2pa, None);
+            typed.c2pa = None;
+            assert_eq!(read.metadata().unwrap(), typed);
+        }
+
+        #[test]
+        fn encoded_blocks_route_into_the_tiff_metadata() {
+            // Each present field lands in its tag — IPTC-IIM included — and an absent one leaves
+            // an earlier setting.
+            let mut encoded = typed(ByteOrder::LittleEndian).encode().unwrap();
+            encoded.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
+            let tiff = encode(&TiffEncoder::new().with_encoded_metadata(&encoded).unwrap());
+            let read = TiffDecoder::new().metadata(&tiff).unwrap();
+            assert_eq!(read.xmp, encoded.xmp);
+            assert_eq!(read.icc, encoded.icc);
+            assert_eq!(read.iptc, encoded.iptc_iim);
+            let exif = read.exif.unwrap();
+            assert_eq!(exif.get(0x8827), Some(&gamut_ifd::Value::Short(vec![400])));
+
+            let mut only_icc = EncodedMetadata::default();
+            only_icc.icc = encoded.icc.clone();
+            let tiff = encode(
+                &TiffEncoder::new()
+                    .with_tiff_metadata(
+                        crate::TiffMetadata::new().with_xmp(b"<x:xmpmeta/>".to_vec()),
+                    )
+                    .with_encoded_metadata(&only_icc)
+                    .unwrap(),
+            );
+            let read = TiffDecoder::new().metadata(&tiff).unwrap();
+            assert_eq!(read.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
+            assert_eq!(read.icc, encoded.icc);
+            assert_eq!(read.exif, None);
+        }
+
+        #[test]
+        fn unembeddable_blocks_are_typed_errors() {
+            let mut c2pa = EncodedMetadata::default();
+            c2pa.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
+            let err = TiffEncoder::new().with_encoded_metadata(&c2pa).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                err.static_message(),
+                Some("TIFF: a C2PA manifest store is not embedded from metadata blocks")
+            );
+
+            // A camera's EXIF keeps `Make` in the 0th IFD, which has no carrier here.
+            let mut camera = Exif::new(ByteOrder::LittleEndian);
+            camera.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
+            let model = Metadata::from_carriers(Some(camera), None, None);
+            let err = TiffEncoder::new().with_metadata(&model).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(err.static_message(), Some(EXIF_OUTSIDE_EXIF_IFD));
+
+            let mut garbage = EncodedMetadata::default();
+            garbage.exif = Some(b"not a tiff stream".to_vec());
+            let err = TiffEncoder::new()
+                .with_encoded_metadata(&garbage)
+                .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert_eq!(
+                err.static_message(),
+                Some("TIFF: EXIF block does not parse")
+            );
+            assert!(err.detail().is_some());
+        }
+
+        #[test]
+        fn a_model_that_does_not_serialize_is_invalid_input_with_the_facade_detail() {
+            // An ICC model with a duplicate tag signature is rejected by `gamut-icc`'s writer
+            // (ICC.1:2022 §7.3).
+            let duplicate = (Signature(*b"wtpt"), TagData::Xyz(Vec::new()));
+            let bad_icc = IccProfile {
+                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
+                tags: vec![duplicate.clone(), duplicate],
+            };
+            let model = Metadata::from_carriers(None, None, Some(bad_icc));
+            let err = TiffEncoder::new().with_metadata(&model).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert_eq!(
+                err.static_message(),
+                Some("TIFF: metadata does not serialize")
+            );
+            assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+        }
     }
 }

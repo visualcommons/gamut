@@ -50,6 +50,15 @@ AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `d
 doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
+**Typed metadata (issue #510).** Behind the optional `metadata` feature, `AvifImage` implements
+`gamut_metadata::TypedMetadata` over the primary item's `Exif` item (through
+`gamut_isobmff::Item::exif_tiff_stream`, the lens `gamut-heic` shares, which applies the
+`exif_tiff_header_offset`), XMP `mime` item and
+`colr` ICC profile, and `AvifEncoder::with_metadata` / `with_encoded_metadata` embed a facade
+`Metadata`, refusing IPTC-IIM and a C2PA store as `Unsupported`. exiv2's BMFF reader is the
+container-level oracle for what is embedded; exiv2 writes no BMFF, so the reverse direction has
+no oracle. The offset lens duplicates `gamut-heic`'s and is to move into `gamut-isobmff` (#872).
+
 **C2PA carriage (issue #444, epic #239).** The encoder reserves or writes a C2PA manifest store
 as a top-level `uuid` `ContentProvenanceBox` (C2PA 2.4 §A.5.1) placed after `ftyp` and before
 `meta` (§A.5.3, via `IsoBmffImage::push_top_level_box`): `AvifEncoder::with_c2pa_reserved(len)`

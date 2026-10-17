@@ -19,6 +19,9 @@ workspace = true
 # Exposes the `invariants` module to the out-of-tree fuzz driver. `doc(hidden)`, no SemVer
 # guarantee, and never enabled by the `gamut` umbrella; the crate's own tests get it via `cfg(test)`.
 test-support = []
+# Typed metadata wiring: `AvifImage`'s `TypedMetadata` impl (`blocks` / `metadata`) and
+# `AvifEncoder::with_metadata` / `with_encoded_metadata` over the `gamut-metadata` facade.
+metadata = ["dep:gamut-metadata"]
 
 [dependencies]
 gamut-core.workspace = true
@@ -26,6 +29,10 @@ gamut-color.workspace = true
 gamut-av1.workspace = true
 gamut-codec-abi.workspace = true
 gamut-isobmff.workspace = true
+# Typed metadata (issue #510): the unified `Metadata` model over the `Exif` / XMP items and `colr`
+# ICC profile this crate locates and writes. Optional and off by default, and a *normal*
+# dependency (never dev-only), so release ordering follows it (`mise run check-release-deps`).
+gamut-metadata = { workspace = true, optional = true }
 
 [dev-dependencies]
 # libavif as the end-to-end container oracle (FFI to a vendored, statically-linked
@@ -37,6 +44,11 @@ libavif-oracle = { path = "../../tooling/libavif-oracle" }
 # dav1d directly (raw OBU stream in, planes out) implements the conformance suite's
 # Av1StillDecoder bridge — the exact seam a platform decoder plugs into.
 dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
+# exiv2 as the container-level metadata oracle (FFI to a vendored, statically-linked exiv2 with
+# its BMFF reader, built from the `third_party/exiv2` + `third_party/expat` submodules): it reads
+# what the `metadata` feature embeds. Dev-only, excluded from the workspace; see
+# tooling/exiv2-oracle.
+exiv2-oracle = { path = "../../tooling/exiv2-oracle" }
 divan.workspace = true
 proptest.workspace = true
 

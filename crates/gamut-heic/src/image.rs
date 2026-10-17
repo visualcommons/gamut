@@ -367,32 +367,16 @@ impl<'a> HeifItem<'a> {
     /// §9). This is the form `gamut-exif` parses; the raw payload, offset included, stays
     /// available through [`as_isobmff_item`](Self::as_isobmff_item).
     ///
+    /// The framing is HEIF's rather than HEVC's, so the arithmetic lives once in
+    /// [`gamut_isobmff::Item::exif_tiff_stream`], which this delegates to and `gamut-avif` shares.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the item is not an `Exif` item, if the payload is shorter
-    /// than the offset field, or if the offset points past the payload's end.
+    /// Returns [`Error::InvalidInput`] (raised by `gamut-isobmff`) if the item is not an `Exif`
+    /// item, if the payload is shorter than the offset field, or if the offset points past the
+    /// payload's end.
     pub fn exif_tiff_stream(&self) -> Result<&'a [u8]> {
-        if !matches!(self.kind(), ItemKind::Exif) {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "HEIF: item is not an Exif item",
-            ));
-        }
-        let [o0, o1, o2, o3, rest @ ..] = self.inner.payload.as_slice() else {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "HEIF: Exif item payload is shorter than its tiff-header offset field",
-            ));
-        };
-        usize::try_from(u32::from_be_bytes([*o0, *o1, *o2, *o3]))
-            .ok()
-            .and_then(|offset| rest.get(offset..))
-            .ok_or_else(|| {
-                Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "HEIF: Exif item tiff-header offset out of range",
-                )
-            })
+        self.inner.exif_tiff_stream()
     }
 
     /// The ICC profile carried by the item's first `colr` property of ICC type (`rICC` or `prof`),
@@ -719,12 +703,11 @@ fn is_depth_urn(aux_type: &str) -> bool {
     DEPTH_AUX_URNS.contains(&aux_type)
 }
 
-/// Unit tests for the two metadata lenses on [`HeifItem`]: the `exif_tiff_header_offset`
-/// arithmetic of `exif_tiff_stream` and the property search of `icc_profile`. They read
+/// Unit tests for the two metadata lenses on [`HeifItem`]: the delegation of `exif_tiff_stream`
+/// to the `gamut-isobmff` lens and the property search of `icc_profile`. They read
 /// `HeifImage::new`, which is `pub(crate)`, so they live here.
 #[cfg(test)]
 mod tests {
-    use gamut_core::ErrorKind;
     use gamut_isobmff::{IsoBmffImage, NclxColr, Property};
 
     use super::*;
@@ -764,45 +747,12 @@ mod tests {
     }
 
     #[test]
-    fn exif_tiff_stream_skips_the_offset_field_and_the_offset() {
-        // Offset 0 (the usual case) and a non-zero offset skipping filler bytes.
-        for (payload, expected) in [
-            (b"\0\0\0\0II*\0".to_vec(), &b"II*\0"[..]),
-            (b"\0\0\0\x02\xEE\xEEMM\0*".to_vec(), &b"MM\0*"[..]),
-            // An offset landing exactly at the end is an empty stream, not an error.
-            (b"\0\0\0\x01\xEE".to_vec(), &b""[..]),
-        ] {
-            let image = image_of(item(*b"Exif", payload.clone(), vec![]));
-            assert_eq!(
-                image.primary_item().exif_tiff_stream().unwrap(),
-                expected,
-                "{payload:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn exif_tiff_stream_refuses_the_named_faults() {
-        let cases: [(Item, &str); 3] = [
-            (
-                item(*b"mime", b"\0\0\0\0<x/>".to_vec(), vec![]),
-                "HEIF: item is not an Exif item",
-            ),
-            (
-                item(*b"Exif", b"\0\0\0".to_vec(), vec![]),
-                "HEIF: Exif item payload is shorter than its tiff-header offset field",
-            ),
-            (
-                item(*b"Exif", b"\0\0\0\x05II*\0".to_vec(), vec![]),
-                "HEIF: Exif item tiff-header offset out of range",
-            ),
-        ];
-        for (item, message) in cases {
-            let image = image_of(item);
-            let err = image.primary_item().exif_tiff_stream().unwrap_err();
-            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{message}");
-            assert_eq!(err.static_message(), Some(message));
-        }
+    fn exif_tiff_stream_delegates_to_the_isobmff_lens() {
+        // The arithmetic and its refusals are `gamut_isobmff::Item::exif_tiff_stream`'s and are
+        // tested there; this pins only that the HEIF lens returns what it returns. A non-zero
+        // offset, so the raw payload and the stream differ.
+        let image = image_of(item(*b"Exif", b"\0\0\0\x02\xEE\xEEMM\0*".to_vec(), vec![]));
+        assert_eq!(image.primary_item().exif_tiff_stream().unwrap(), b"MM\0*");
     }
 
     #[test]

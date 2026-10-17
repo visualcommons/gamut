@@ -18,6 +18,12 @@
 //! and `gamut_webp::metadata`, and what a colour-space probe should call.
 //! [`PngDecoder::metadata`] is the same walk with a configurable inflation budget.
 //!
+//! With the optional **`metadata`** Cargo feature the EXIF/XMP/ICC/C2PA payloads are wired to the
+//! `gamut-metadata` facade's typed models through its `TypedMetadata` trait, implemented by
+//! [`PngMetadata`] and [`DecodedPng`] (`blocks` / `metadata`); `PngEncoder::with_metadata` /
+//! `PngEncoder::with_encoded_metadata` embed a unified `Metadata`, routing each carrier to the raw
+//! setters. The chunk-for-chunk carry of a [`PngMetadata`] is [`PngEncoder::with_png_metadata`].
+//!
 //! # C2PA manifest store
 //!
 //! A C2PA manifest store travels in the `caBX` chunk (C2PA 2.4 §A.3.2: ancillary, private,
@@ -112,4 +118,8 @@ pub use encoder::{MetadataNotice, PngEncodeReport, PngEncoder, Preset};
 pub use filter::{FilterStrategy, FilterType};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
 pub use gamut_deflate::Level;
+// The facade types named in the `metadata`-feature signatures, so a caller can spell
+// `PngMetadata::metadata` / `PngEncoder::with_metadata` without a direct dependency.
+#[cfg(feature = "metadata")]
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
 pub use palette::PngPalette;
