@@ -252,8 +252,15 @@ mod tests {
         let encoder = DeflateEncoder::new().with_level(Level::Fast);
         let tokens = lz77::parse(&data, encoder.max_chain(), false);
         let stored = block::stored(&data);
-        assert_eq!(block::fixed(&tokens).len(), stored.len(), "fixture must tie");
-        assert!(dynamic::body(&tokens).len() > stored.len(), "dynamic must not win");
+        assert_eq!(
+            block::fixed(&tokens).len(),
+            stored.len(),
+            "fixture must tie"
+        );
+        assert!(
+            dynamic::body(&tokens).len() > stored.len(),
+            "dynamic must not win"
+        );
         assert_eq!(encoder.deflate_body(&data), stored);
     }
 
@@ -265,8 +272,15 @@ mod tests {
         let encoder = DeflateEncoder::new().with_level(Level::Default);
         let tokens = lz77::parse(data, encoder.max_chain(), true);
         let fixed = block::fixed(&tokens);
-        assert_eq!(dynamic::body(&tokens).len(), fixed.len(), "fixture must tie");
-        assert!(fixed.len() < block::stored(data).len(), "fixed must beat stored");
+        assert_eq!(
+            dynamic::body(&tokens).len(),
+            fixed.len(),
+            "fixture must tie"
+        );
+        assert!(
+            fixed.len() < block::stored(data).len(),
+            "fixed must beat stored"
+        );
         assert_eq!(encoder.deflate_body(data), fixed);
     }
 }

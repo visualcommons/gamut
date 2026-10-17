@@ -411,7 +411,10 @@ mod tests {
         let mut with_matches = region(300, 40, 20);
         with_matches.extend([
             Token::Match { len: 3, dist: 1 },
-            Token::Match { len: 258, dist: 32768 },
+            Token::Match {
+                len: 258,
+                dist: 32768,
+            },
             Token::Match { len: 17, dist: 300 },
             Token::Literal(255),
         ]);
