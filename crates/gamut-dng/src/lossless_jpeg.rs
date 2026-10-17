@@ -208,7 +208,7 @@ pub fn encode(
             "DNG: lossless-JPEG sample count must be width * height * components",
         ));
     }
-    let diffs = differences(samples, width, components, precision);
+    let diffs = differences(samples, width, height, components, precision);
     let (bits, huffval) = build_optimal_table(&category_histogram(&diffs));
     let codes = CanonicalCodes::from_bits_values(&bits, &huffval);
     let mut out = Vec::new();
@@ -270,14 +270,24 @@ pub fn encode(
 ///
 /// The encoder needs the errors twice — once to count the table's histogram, once to code them —
 /// so they are computed once here rather than predicted twice.
-fn differences(samples: &[u16], width: usize, components: usize, precision: u16) -> Vec<i16> {
+fn differences(
+    samples: &[u16],
+    width: usize,
+    height: usize,
+    components: usize,
+    precision: u16,
+) -> Vec<i16> {
     let mut diffs = Vec::with_capacity(samples.len());
-    for (i, &sample) in samples.iter().enumerate() {
-        let pixel = i / components;
-        let (x, y, c) = (pixel % width, pixel / width, i % components);
-        let prediction = predict(samples, width, components, x, y, c, precision, 0, 1, (0, 0));
-        // `reduce` lands in `[-32768, 32767]`, so the cast is exact.
-        diffs.push(reduce(i32::from(sample) - prediction) as i16);
+    for y in 0..height {
+        for x in 0..width {
+            for c in 0..components {
+                let actual = i32::from(samples[(y * width + x) * components + c]);
+                let prediction =
+                    predict(samples, width, components, x, y, c, precision, 0, 1, (0, 0));
+                // `reduce` lands in `[-32768, 32767]`, so the cast is exact.
+                diffs.push(reduce(actual - prediction) as i16);
+            }
+        }
     }
     diffs
 }
@@ -983,7 +993,7 @@ mod tests {
     #[test]
     fn encode_writes_the_table_fitted_to_its_own_categories() {
         let row = [128u16, 129, 129, 127];
-        assert_eq!(differences(&row, 4, 1, 8), [0, 1, 0, -2]);
+        assert_eq!(differences(&row, 4, 1, 1, 8), [0, 1, 0, -2]);
         let mut expected_histogram = [0u32; 17];
         expected_histogram[..3].copy_from_slice(&[2, 1, 1]);
         assert_eq!(category_histogram(&[0, 1, 0, -2]), expected_histogram);
@@ -1009,7 +1019,7 @@ mod tests {
         // 2x2, two components, 16-bit. Row 0: (10, 500) (13, 400); row 1: (7, 65535) (9, 0).
         let samples = [10u16, 500, 13, 400, 7, 65535, 9, 0];
         assert_eq!(
-            differences(&samples, 2, 2, 16),
+            differences(&samples, 2, 2, 2, 16),
             // The first pixel predicts 2^15, the next its left neighbour, and row 1 starts from
             // above: 10 - 32768, 500 - 32768, 3, -100, -3, (65535 - 500) - 65536, 2, 1 - 0.
             [-32758, -32268, 3, -100, -3, -501, 2, 1],
