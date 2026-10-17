@@ -1172,6 +1172,35 @@ mod tests {
     }
 
     #[test]
+    fn a_text_chunk_after_idat_is_read_by_png_read_end() {
+        // PNG §5.6 places no ordering constraint on tEXt, so one framed just before IEND is
+        // conformant; only `png_read_end(png, info)` stores it where `read_texts` looks.
+        let bare = encode(&[0], 1, 1, COLOR_GRAY, 8, &EncodeOpts::default());
+        let iend = bare.len() - 12;
+        assert_eq!(&bare[iend + 4..iend + 8], b"IEND");
+        let data = b"Comment\0late";
+        let mut png = bare[..iend].to_vec();
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(b"tEXt");
+        png.extend_from_slice(data);
+        let crc = crc32(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+        png.extend_from_slice(&bare[iend..]);
+
+        let dec = decode(&png);
+        assert_eq!(
+            dec.texts,
+            [OracleText {
+                keyword: "Comment".into(),
+                text: "late".into(),
+                kind: OracleTextKind::Text,
+            }]
+        );
+        assert_eq!(dec.warnings, 0);
+    }
+
+    #[test]
     fn an_sbit_past_the_bit_depth_is_dropped_with_a_warning() {
         // 9 significant bits in an 8-bit channel (`png_handle_sBIT`).
         let dec = decode(&with_chunks(COLOR_GRAY, &[(b"sBIT", &[9])]));
