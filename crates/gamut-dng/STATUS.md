@@ -547,6 +547,22 @@ measures the codec is not the place to change it:
   the whole 256-entry code table once per candidate bit length, so a symbol costs ~1000 comparisons
   where the reference implementation spends one table probe.
 
+  **Fixed by #583.** Each DHT table is now built once into T.81 §F.2.2.3 decoding form
+  (`MINCODE`/`MAXCODE`/`VALPTR`, as the SDK's `FixHuffTbl` does) fronted by an eight-bit lookup,
+  and the bit reader refills a 64-bit accumulator a byte at a time, so a symbol is one probe and a
+  mantissa one shift. Re-measured on the post-#584 stream with the same command, one run in each
+  arm order on the same loaded box (load 23–28), old and new back to back — fastest-sample gamut ÷
+  SDK:
+
+  | `decode_lossless_jpeg` case | before, reference first / gamut first | after |
+  | --------------------------- | ------------------------------------- | ----------- |
+  | `cfa`                       | 46.5 / 46.4                           | 1.73 / 1.58 |
+  | `linear-raw`                | 27.8 / 47.4                           | 1.80 / 1.68 |
+
+  gamut's own fastest sample went from 51.7 ms to 1.91 ms (`cfa`) and from 133.4 ms to 5.18 ms
+  (`linear-raw`); the SDK arm did not move. The tables above predate the fix and stay as the record
+  #583 was filed against; the `decode_dng` lossless-JPEG rows were not re-measured.
+
   The whole-file rows are published above in full rather than filtered to the ones that agree. Two
   of them are not close to parity: `cfa/uncompressed` at 2.1–2.5× and `linear-raw/uncompressed` at
   1.7–1.8×. Those are the rows the preview correction applies to, and corrected they read 1.2–1.4×

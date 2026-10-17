@@ -299,12 +299,24 @@ pub fn encode(
     Ok(out)
 }
 
-/// MSB-first bit reader that unstuffs `FF 00` and treats other markers as end-of-stream.
+/// MSB-first bit reader over a 64-bit accumulator that unstuffs `FF 00` and treats any other
+/// marker as end-of-stream.
+///
+/// The accumulator is refilled a whole byte at a time, as many bytes as fit, so a Huffman probe
+/// or a `receive(n)` is one shift rather than one call per bit. Read-ahead stops at a marker: the
+/// reader never moves `pos` past one, and from there (or from the end of the data) it feeds fill
+/// bytes — the marker's own `FF` bits, or zeros past the end — exactly as a one-byte reader would.
 struct BitReader<'a> {
     data: &'a [u8],
+    /// The next byte of `data` a refill loads.
     pos: usize,
-    acc: u32,
+    /// Buffered bits, left-aligned: bit 63 is the next bit to read; the low `64 - nbits` are zero.
+    acc: u64,
+    /// How many bits `acc` buffers.
     nbits: u32,
+    /// How many of the buffered bits — always the leading ones — came from `data` rather than from
+    /// fill. A restart marker is where it belongs only when no whole data byte is left buffered.
+    data_bits: u32,
 }
 
 impl<'a> BitReader<'a> {
@@ -314,46 +326,68 @@ impl<'a> BitReader<'a> {
             pos: 0,
             acc: 0,
             nbits: 0,
+            data_bits: 0,
         }
     }
 
-    fn next_bit(&mut self) -> u32 {
-        if self.nbits == 0 {
-            let byte = self.data.get(self.pos).copied().unwrap_or(0);
-            self.pos += 1;
-            if byte == MARKER {
-                // FF 00 is a stuffed FF; any other follower is a marker (end of scan) — feed zeros.
-                if self.data.get(self.pos) == Some(&0x00) {
-                    self.pos += 1;
-                } else {
-                    self.pos -= 1; // leave the marker in place
-                }
-            }
-            self.acc = u32::from(byte);
-            self.nbits = 8;
+    /// Tops the accumulator up with every whole byte that fits, so at least 57 bits are buffered.
+    fn refill(&mut self) {
+        for _ in 0..(64 - self.nbits) / 8 {
+            // (value, bytes consumed from `data`, data bits it adds)
+            let (value, advance, bits) =
+                match (self.data.get(self.pos), self.data.get(self.pos + 1)) {
+                    // FF 00 is a stuffed FF data byte.
+                    (Some(&MARKER), Some(&0x00)) => (MARKER, 2, 8),
+                    // FF and any other follower (or none) is a marker: hold it and feed its FFs.
+                    (Some(&MARKER), _) => (MARKER, 0, 0),
+                    (Some(&byte), _) => (byte, 1, 8),
+                    // Past the end of the data: feed zeros.
+                    (None, _) => (0, 0, 0),
+                };
+            self.pos += advance;
+            self.acc += u64::from(value) << (56 - self.nbits);
+            self.nbits += 8;
+            self.data_bits += bits;
         }
-        self.nbits -= 1;
-        (self.acc >> self.nbits) & 1
     }
 
+    /// The next 16 bits, without consuming them. The caller has refilled.
+    fn peek16(&self) -> u32 {
+        (self.acc >> 48) as u32
+    }
+
+    /// Drops `count` bits from the front of the accumulator.
+    fn consume(&mut self, count: u32) {
+        self.acc <<= count;
+        self.nbits -= count;
+        self.data_bits = self.data_bits.saturating_sub(count);
+    }
+
+    /// Reads `count` (`1..=16`) bits as an unsigned value.
     fn receive(&mut self, count: u8) -> u32 {
-        let mut v = 0u32;
-        for _ in 0..count {
-            // + (not |): v<<1 has a clear low bit, so | would be an equivalent (unkillable) mutant.
-            v = (v << 1) + self.next_bit();
-        }
-        v
+        self.refill();
+        let value = (self.acc >> (64 - u32::from(count))) as u32;
+        self.consume(u32::from(count));
+        value
     }
 
     /// Consumes an `RSTn` marker at a restart boundary: discards any pending padding bits (the
     /// entropy stream is byte-aligned before a restart marker) and requires the next two bytes to
     /// be `FF` + `expected` (T.81 §E.1.4/§H.2.2 — the modulo-8 sequence number must match).
+    ///
+    /// Fewer than eight buffered data bits are the current byte's padding, and `pos` is then the
+    /// byte after it; eight or more mean a whole entropy-coded byte the interval left unread, so
+    /// the marker is not where the restart interval says it is.
     fn sync_restart(&mut self, expected: u8) -> Result<()> {
-        self.nbits = 0; // byte-align: drop the pad bits of the current byte
-        if self.data.get(self.pos) == Some(&MARKER)
+        if self.data_bits < 8
+            && self.data.get(self.pos) == Some(&MARKER)
             && self.data.get(self.pos + 1) == Some(&expected)
         {
             self.pos += 2;
+            // Byte-align: drop the padding (and any fill read ahead from the marker).
+            self.acc = 0;
+            self.nbits = 0;
+            self.data_bits = 0;
             Ok(())
         } else {
             Err(Error::invalid_input(
@@ -365,16 +399,77 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// Decodes one Huffman symbol (the magnitude category) using a canonical table.
-fn decode_symbol(reader: &mut BitReader, codes: &[(u16, u8)]) -> Result<u8> {
-    let mut code: u16 = 0;
-    for len in 1..=16u8 {
-        // + (not |): code<<1 has a clear low bit, so | would be an equivalent (unkillable) mutant.
-        code = (code << 1) + reader.next_bit() as u16;
-        for (sym, &(c, l)) in codes.iter().enumerate() {
-            if l == len && c == code {
-                return Ok(sym as u8);
+/// A Huffman table in decoding form (T.81 Annex C code generation, then §F.2.2.3's
+/// `MINCODE`/`MAXCODE`/`VALPTR`), fronted by a direct lookup over the first eight bits.
+///
+/// Code values are generated in `u32`, so an over-subscribed `BITS` list (Kraft sum above one)
+/// cannot wrap: its excess codes are simply values no `len`-bit read can equal, and stay
+/// unreachable. `HUFFVAL` is used positionally, as §F.2.2.3 does, so a symbol listed twice
+/// decodes from either of its codes.
+struct HuffmanTable {
+    /// `(length, symbol)` for every code of length `1..=8`, indexed by the next eight bits; a
+    /// length of 0 marks a prefix no such code matches.
+    lookup: [(u8, u8); 256],
+    /// Per code length `9..=16` (indexed by length): the first code value of that length.
+    first: [u32; 17],
+    /// Per code length: one past the last code value of that length (`first` when it has none).
+    end: [u32; 17],
+    /// Per code length: the `huffval` index of the length's first code.
+    valptr: [usize; 17],
+    /// The symbols in code order.
+    huffval: Vec<u8>,
+}
+
+impl HuffmanTable {
+    /// Builds the decoding form of a DHT table; `huffval.len()` is the sum of `bits`.
+    fn new(bits: &[u8; 16], huffval: &[u8]) -> Self {
+        let mut table = Self {
+            lookup: [(0, 0); 256],
+            first: [0; 17],
+            end: [0; 17],
+            valptr: [0; 17],
+            huffval: huffval.to_vec(),
+        };
+        let mut code = 0u32;
+        let mut k = 0usize;
+        for (len, &count) in (1..=16usize).zip(bits) {
+            table.first[len] = code;
+            table.valptr[len] = k;
+            for &symbol in &huffval[k..k + usize::from(count)] {
+                // A code of at most eight bits owns every lookup slot it prefixes. A code value
+                // that does not fit its length (over-subscription) is unreachable and owns none.
+                if len <= 8 && code < 1 << len {
+                    let shift = 8 - len;
+                    table.lookup[(code << shift) as usize..((code + 1) << shift) as usize]
+                        .fill((len as u8, symbol));
+                }
+                code += 1;
             }
+            k += usize::from(count);
+            table.end[len] = code;
+            code <<= 1;
+        }
+        table
+    }
+}
+
+/// Decodes one Huffman symbol (the magnitude category): one lookup for codes of up to eight bits,
+/// otherwise T.81 Figure F.16's per-length `MAXCODE` comparison over lengths `9..=16`.
+fn decode_symbol(reader: &mut BitReader, table: &HuffmanTable) -> Result<u8> {
+    reader.refill();
+    let bits = reader.peek16();
+    let (len, symbol) = table.lookup[(bits >> 8) as usize];
+    if len != 0 {
+        reader.consume(u32::from(len));
+        return Ok(symbol);
+    }
+    // No code of eight bits or fewer prefixes the stream, so (Figure F.16's invariant) the code
+    // read so far is at least `first[len]` at every longer length: only `end` needs comparing.
+    for len in 9..=16usize {
+        let code = bits >> (16 - len);
+        if code < table.end[len] {
+            reader.consume(len as u32);
+            return Ok(table.huffval[table.valptr[len] + (code - table.first[len]) as usize]);
         }
     }
     Err(Error::invalid_input(
@@ -493,7 +588,7 @@ fn parse_dht(
     data: &[u8],
     pos: usize,
     len: usize,
-    tables: &mut [Option<Vec<(u16, u8)>>; 4],
+    tables: &mut [Option<HuffmanTable>; 4],
 ) -> Result<()> {
     let end = pos
         .checked_add(len)
@@ -530,7 +625,7 @@ fn parse_dht(
                 "DNG: lossless-JPEG Huffman symbols are magnitude categories 0..=16",
             ));
         }
-        tables[dest] = Some(canonical_codes(&bits, huffval));
+        tables[dest] = Some(HuffmanTable::new(&bits, huffval));
         at += 17 + nvals;
     }
     if at != end {
@@ -622,7 +717,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
     }
     let mut pos = 2;
     let mut frame: Option<Frame> = None;
-    let mut tables: [Option<Vec<(u16, u8)>>; 4] = [None, None, None, None];
+    let mut tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
     let mut restart_interval = 0usize;
     let scan;
 
@@ -714,9 +809,9 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
         ));
     }
     // One resolved table reference per component (missing destinations are an error up front).
-    let mut codes: Vec<&[(u16, u8)]> = Vec::with_capacity(components);
+    let mut codes: Vec<&HuffmanTable> = Vec::with_capacity(components);
     for &id in &scan.table_ids {
-        codes.push(tables[id].as_deref().ok_or_else(|| {
+        codes.push(tables[id].as_ref().ok_or_else(|| {
             Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "DNG: scan references an undefined Huffman table",
@@ -940,20 +1035,36 @@ mod tests {
     #[test]
     fn bit_reader_holds_position_at_a_real_marker() {
         // `FF` followed by a non-`00` byte is a real marker (end of scan): the reader must leave
-        // it in place and feed `1`-bits forever (kills `pos -= 1` -> `+= 1` / `/= 1`, which would
-        // advance past the marker and start reading the following bytes).
-        let mut reader = BitReader::new(&[0xFF, 0xD9]);
-        for _ in 0..24 {
-            assert_eq!(reader.next_bit(), 1);
+        // it in place and feed `1`-bits forever, across several refills, never advancing into the
+        // bytes after it.
+        let mut reader = BitReader::new(&[0xFF, 0xD9, 0x00]);
+        for _ in 0..12 {
+            assert_eq!(reader.receive(16), 0xFFFF);
         }
-        // A stuffed `FF 00` decodes to the data bits of `FF` then continues to the next byte.
-        let mut reader = BitReader::new(&[0xFF, 0x00, 0x00]);
-        for _ in 0..8 {
-            assert_eq!(reader.next_bit(), 1); // the FF
+        assert_eq!((reader.pos, reader.data_bits), (0, 0));
+        // A stuffed `FF 00` decodes to the data bits of `FF` then continues to the next byte; past
+        // the end of the data the reader feeds zeros.
+        let mut reader = BitReader::new(&[0xFF, 0x00, 0x5A, 0xC3]);
+        assert_eq!(reader.receive(4), 0xF);
+        assert_eq!(reader.receive(8), 0xF5); // straddles the stuffed FF and the 5A
+        assert_eq!(reader.receive(12), 0xAC3);
+        assert_eq!(reader.receive(16), 0);
+        assert_eq!(reader.pos, 4);
+    }
+
+    #[test]
+    fn bit_reader_reads_whole_values_across_refills() {
+        // Twenty bytes read back as ten big-endian 16-bit values: more than one accumulator's
+        // worth, so every refill has to append below what is still buffered.
+        let data: Vec<u8> = (1..=20).map(|b| b * 11).collect();
+        let mut reader = BitReader::new(&data);
+        for pair in data.chunks(2) {
+            assert_eq!(
+                reader.receive(16),
+                u32::from(pair[0]) * 256 + u32::from(pair[1])
+            );
         }
-        for _ in 0..8 {
-            assert_eq!(reader.next_bit(), 0); // the following 0x00
-        }
+        assert_eq!(reader.receive(1), 0);
     }
 
     /// Builds a valid 1x1x1 stream, then lets the caller mutate it.
@@ -996,7 +1107,7 @@ mod tests {
     fn dht_destination_boundary_is_exact() {
         let mut segment = vec![0, 19, 3];
         segment.extend_from_slice(&[0; 16]);
-        let mut tables: [Option<Vec<(u16, u8)>>; 4] = std::array::from_fn(|_| None);
+        let mut tables: [Option<HuffmanTable>; 4] = std::array::from_fn(|_| None);
         parse_dht(&segment, 0, segment.len(), &mut tables).expect("destination 3");
         assert!(tables[3].is_some());
 
@@ -1087,15 +1198,100 @@ mod tests {
     /// category 0 — the cheapest coding T.81 admits, one bit per sample — followed by `scan` as
     /// its entropy-coded data (no EOI, so `scan` is every byte after the SOS header).
     fn one_bit_per_sample_stream(width: u16, scan: &[u8]) -> Vec<u8> {
+        let mut bits = [0; 16];
+        bits[0] = 1;
+        // HUFFVAL: the one code means category 0.
+        hand_table_stream(width, &bits, &[0], scan)
+    }
+
+    /// An 8-bit, one-component, predictor-1, `width`×1 stream over one hand-written Huffman
+    /// table (`bits`/`huffval`, written verbatim — nothing checks them), followed by `scan` as its
+    /// entropy-coded data (no EOI, so `scan` is every byte after the SOS header).
+    fn hand_table_stream(width: u16, bits: &[u8; 16], huffval: &[u8], scan: &[u8]) -> Vec<u8> {
         let mut out = vec![MARKER, SOI, MARKER, SOF3, 0, 11, 8, 0, 1];
         out.extend_from_slice(&width.to_be_bytes());
         out.extend_from_slice(&[1, 1, 0x11, 0]);
-        out.extend_from_slice(&[MARKER, DHT, 0, 20, 0x00, 1]);
-        out.extend_from_slice(&[0; 15]);
-        out.push(0); // HUFFVAL: the one code means category 0
+        out.extend_from_slice(&[MARKER, DHT]);
+        out.extend_from_slice(&((19 + huffval.len()) as u16).to_be_bytes());
+        out.push(0x00); // Tc = 0, Th = 0
+        out.extend_from_slice(bits);
+        out.extend_from_slice(huffval);
         out.extend_from_slice(&[MARKER, SOS, 0, 8, 1, 1, 0x00, 1, 0, 0]);
         out.extend_from_slice(scan);
         out
+    }
+
+    #[test]
+    fn a_symbol_listed_twice_decodes_from_either_code() {
+        // Two 1-bit codes, `0` and `1`, both meaning category 0 (§F.2.2.3 reads HUFFVAL by
+        // position, as the Adobe SDK does): `01` + `111111` padding is two samples at the 8-bit
+        // default prediction.
+        let mut bits = [0; 16];
+        bits[0] = 2;
+        let decoded =
+            decode(&hand_table_stream(2, &bits, &[0, 0], &[0b0111_1111])).expect("decode");
+        assert_eq!(decoded.samples, vec![128, 128]);
+    }
+
+    #[test]
+    fn an_over_subscribed_table_decodes_its_reachable_codes() {
+        // Three 1-bit codes (Kraft sum 3/2): `0` is category 0, `1` is category 1, and the third
+        // code value, 2, fits no 1-bit read — it is unreachable, and must not reach the lookup.
+        // `1` `1` (category 1, +1) then `0` (category 0) + `11111` padding: 129, 129.
+        let mut bits = [0; 16];
+        bits[0] = 3;
+        let stream = hand_table_stream(2, &bits, &[0, 1, 2], &[0b1101_1111]);
+        assert_eq!(decode(&stream).expect("decode").samples, vec![129, 129]);
+    }
+
+    /// A table reaching every code length: one code of each length 1..=14 (category `k < 14` is
+    /// `k` one-bits and a zero), none of length 15, and categories 14..=16 as the 16-bit codes
+    /// `FFFC`..=`FFFE`. Kraft sum `1 - 2^-16`: the all-ones code stays unassigned, as T.81 Annex C
+    /// requires. So the eight-bit lookup, every longer length, and an empty length are all used.
+    const BITS_EVERY_LENGTH: [u8; 16] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 3];
+
+    /// Successive differences hitting every category 0..=16 once, as one 16-bit row predicted
+    /// from the left (the first from the default 2^15).
+    fn every_category_row() -> Vec<u16> {
+        let mut diffs = vec![0i32];
+        diffs.extend((0..15).map(|k| if k % 2 == 0 { 1 << k } else { -(1 << k) }));
+        diffs.push(-32768);
+        let mut previous = 32768i32;
+        diffs
+            .iter()
+            .map(|d| {
+                previous = (previous + d).rem_euclid(65536);
+                previous as u16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn decodes_codes_of_every_length() {
+        let row = every_category_row();
+        let mut builder = StreamBuilder::simple(16, 1, 1);
+        builder.bits = BITS_EVERY_LENGTH;
+        let decoded = decode(&builder.build(&row, row.len(), 1)).expect("decode");
+        assert_eq!(decoded.samples, row);
+    }
+
+    #[test]
+    fn rejects_a_code_no_table_entry_matches() {
+        // The crate's own table is complete at length 5; a table that stops after the fifteen
+        // 4-bit codes leaves `1111x` unassigned, and sixteen one-bits match nothing.
+        let mut bits = [0; 16];
+        bits[3] = 15;
+        let error = decode(&hand_table_stream(
+            1,
+            &bits,
+            &HUFFVAL[..15],
+            &[0xFF, 0x00, 0xFF, 0x00],
+        ))
+        .expect_err("unassigned code");
+        assert_eq!(
+            error.static_message(),
+            Some("DNG: invalid lossless-JPEG Huffman code")
+        );
     }
 
     #[test]
@@ -1207,12 +1403,14 @@ mod tests {
 
     /// Builds a complete SOF3 stream with the given scan shape. `tables` lists the DHT
     /// destinations to define (all in one segment), each as `(dest, huffval)` over the shared
-    /// `BITS` lengths; `table_ids` gives each component's `Td`.
+    /// `bits` lengths (the module's `BITS` unless overridden); `table_ids` gives each component's
+    /// `Td`.
     struct StreamBuilder {
         precision: u16,
         predictor: u8,
         pt: u16,
         restart_interval: usize,
+        bits: [u8; 16],
         tables: Vec<(u8, Vec<u8>)>,
         table_ids: Vec<u8>,
     }
@@ -1224,6 +1422,7 @@ mod tests {
                 predictor,
                 pt: 0,
                 restart_interval: 0,
+                bits: BITS,
                 tables: vec![(0, HUFFVAL.to_vec())],
                 table_ids: vec![0; components],
             }
@@ -1254,7 +1453,7 @@ mod tests {
             out.extend_from_slice(&(dht_len as u16).to_be_bytes());
             for (dest, huffval) in &self.tables {
                 out.push(*dest); // Tc=0 | Th
-                out.extend_from_slice(&BITS);
+                out.extend_from_slice(&self.bits);
                 out.extend_from_slice(huffval);
             }
 
@@ -1280,7 +1479,7 @@ mod tests {
                 .iter()
                 .map(|td| {
                     let huffval = &self.tables.iter().find(|(d, _)| d == td).expect("table").1;
-                    canonical_codes(&BITS, huffval)
+                    canonical_codes(&self.bits, huffval)
                 })
                 .collect();
             let mut bits = TestBits::new();
@@ -1424,6 +1623,48 @@ mod tests {
         assert_eq!(decoded.samples, vec![100, 101, 50]);
     }
 
+    /// The hand-computed restart stream above with its first interval's entropy bytes replaced.
+    fn restart_stream_with_first_interval(interval: &[u8]) -> Vec<u8> {
+        #[rustfmt::skip]
+        let mut stream = vec![
+            0xFF, 0xD8, // SOI
+            0xFF, 0xC3, 0x00, 0x0B, 8, 0x00, 0x01, 0x00, 0x03, 1, 0x01, 0x11, 0x00, // SOF3 3x1
+            0xFF, 0xC4, 0x00, 0x24, 0x00, // DHT, Tc/Th = 0
+            0, 0, 0, 15, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // BITS
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, // HUFFVAL
+            0xFF, 0xDD, 0x00, 0x04, 0x00, 0x02, // DRI, Ri = 2
+            0xFF, 0xDA, 0x00, 0x08, 1, 0x01, 0x00, 1, 0, 0x00, // SOS, Ss=1, Al=0
+        ];
+        stream.extend_from_slice(interval);
+        // RST0, then MCU 2 as above (50 after the reset), then EOI.
+        stream.extend_from_slice(&[0xFF, 0xD0, 0b0111_0110, 0b0011_1111, 0xFF, 0xD9]);
+        stream
+    }
+
+    /// A whole entropy-coded byte the restart interval leaves unread means the `RSTn` marker is not
+    /// where the interval ends, whether the interval's last byte was padded or ended exactly on
+    /// a byte boundary — read-ahead past that byte must not make the marker look in place.
+    #[test]
+    fn an_unread_byte_before_a_restart_marker_is_rejected() {
+        // 14 bits + '11' padding, as above.
+        let padded = [0b0101_0001, 0b1000_1111];
+        // MCU 1 as 105 instead: 105 - 100 = 5 -> ssss 3 (code 0011), mantissa 101 — 16 bits.
+        let aligned = [0b0101_0001, 0b1001_1101];
+        for (interval, second) in [(padded, 101), (aligned, 105)] {
+            let stream = restart_stream_with_first_interval(&interval);
+            let decoded = decode(&stream).expect("control stream decodes");
+            assert_eq!(decoded.samples, vec![100, second, 50]);
+            let mut extra = interval.to_vec();
+            extra.push(0x00);
+            let error = decode(&restart_stream_with_first_interval(&extra))
+                .expect_err("unread byte before RST0");
+            assert_eq!(
+                error.static_message(),
+                Some("DNG: lossless JPEG missing or out-of-sequence restart marker")
+            );
+        }
+    }
+
     /// The restart marker's modulo-8 sequence number is verified: RST1 where RST0 is due must
     /// fail rather than resynchronize silently.
     #[test]
@@ -1545,7 +1786,9 @@ mod tests {
     /// predictor bug on our side cannot cancel out.
     mod sdk_differential {
         use super::super::*;
-        use super::{HUFFVAL_REV, StreamBuilder, test_samples};
+        use super::{
+            BITS_EVERY_LENGTH, HUFFVAL_REV, StreamBuilder, every_category_row, test_samples,
+        };
 
         fn assert_sdk_agrees(stream: &[u8], expected: &[u16], what: &str) {
             let ours = decode(stream).unwrap_or_else(|e| panic!("{what}: gamut decode: {e:?}"));
@@ -1638,6 +1881,17 @@ mod tests {
             builder.table_ids = vec![0, 1];
             let stream = builder.build(&samples, 6, 4);
             assert_sdk_agrees(&stream, &samples, "per-component tables");
+        }
+
+        /// Codes of every length 1..=16, so the SDK's own lookup-plus-`MAXCODE` decoder checks
+        /// both halves of ours: the eight-bit lookup and the longer-code comparison.
+        #[test]
+        fn sdk_matches_codes_of_every_length() {
+            let row = every_category_row();
+            let mut builder = StreamBuilder::simple(16, 1, 1);
+            builder.bits = BITS_EVERY_LENGTH;
+            let stream = builder.build(&row, row.len(), 1);
+            assert_sdk_agrees(&stream, &row, "codes of every length");
         }
 
         /// End to end: a DNG whose raw strip is a *predictor-4* SOF3 stream — a shape gamut's
