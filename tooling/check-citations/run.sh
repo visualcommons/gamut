@@ -23,13 +23,21 @@
 #      line after only comment markup, the last word of the line before (a wrapped
 #      `(ICC.1:2022` / `§7.2.6`) -- names it when it is a designator: `ICC.1:2022` or `ICC.1` ->
 #      ICC.1:2022, any `ICC.1:2001...` -> ICC.1:2001-04, `PNG` -> PNG Third Edition. Any other
-#      designator -- a word holding a digit (`H.273`, `RFC 1951`, `C2PA 2.4`), closing a
-#      parenthesis (`H.273 (07/2024)`), or a foreign standard's name (`C2PA`, `ISO`, `TIFF`, ...)
-#      -- names a specification with no index here: the citation is counted as foreign, unchecked;
+#      designator -- a designator-shaped number (`H.273`, `RFC 1951`, `C2PA 2.4`, `10918-1`), a
+#      word closing a parenthesis (`H.273 (07/2024)`), or a foreign standard's name (`C2PA`,
+#      `ISO`, `TIFF`, ...) -- names a specification with no index here: the citation is counted as
+#      foreign, unchecked. A word that merely holds a digit is prose, not a designator: a byte
+#      range (`0xA1-0xFF §11.3.3.1`) or a sentence end (`UTF-8.* §11.3.3.2`) leaves the citation
+#      to the rules below;
 #   3. a foreign standard these crates cite by section (`C2PA`, `Adobe RGB`, `H.273`, `RFC`) named
-#      anywhere earlier on the line makes it foreign too (`Adobe RGB (1998) Color Image Encoding
-#      §4.3.1.2`). Only those four: a format named in prose (`an XMP packet ... §11.3.3.4`) is a
-#      subject, not a citation's source, and must not switch a check off;
+#      earlier on the line -- after the line's previous citation, if it has one -- makes it
+#      foreign too (`Adobe RGB (1998) Color Image Encoding §4.3.1.2`). Not for a citation that
+#      opens its own parenthesis (`the four H.273 code points (§10.3)`): a designator for it would
+#      sit inside the parenthesis, so the standard before it is the sentence's subject. Only those
+#      four: a format named in prose (`an XMP packet ... §11.3.3.4`) is a subject, not a
+#      citation's source, and must not switch a check off. The rule still over-reaches where one
+#      of the four is a subject outside a parenthesis (`a C2PA store the §5.3 length field`
+#      counts as foreign);
 #   4. otherwise it means the crate's own specification (the CRATES table).
 #
 # WHAT IS CHECKED, for every citation that resolves to an indexed specification:
@@ -150,8 +158,12 @@ function designator(w) {
     if (w ~ /^ICC\.1:2001/) return "icc.1-2001-04"
     if (w == "ICC.1" || w ~ /^ICC\.1:2022/) return "icc.1-2022-05"
     if (w == "PNG") return "png-3"
+    # Closing emphasis or code markup does not hide a sentence end (`*... UTF-8.* §11.3.3.2`).
+    sub(/[`*_]+$/, "", w)
     if (w ~ /[.,;:]$/) return ""
-    if (w ~ /[0-9]/ || w ~ /\)$/) return "FOREIGN"
+    # Only a designator-shaped number: `H.273`, `BT.1886`, `2.4`, `1951`, `10918-1`, `15948:2004`.
+    # A byte range (`0xA1-0xFF`) or any other digit-bearing word is prose.
+    if (w ~ /^([A-Za-z]+[.-]?)?[0-9]+([.:\/-][0-9]+)*$/ || w ~ /\)$/) return "FOREIGN"
     if (w ~ /^(C2PA|RFC|ISO|IEC|ITU|ITU-T|TIFF|EXIF|Exif|JFIF|DNG|XMP|IPTC|CIPA|BCP|JPEG|HEIF|ISOBMFF|CIE)$/) return "FOREIGN"
     return ""
 }
@@ -179,7 +191,7 @@ function flush_group(file, lineno) {
     }
     g_name = ""
 }
-function check_line(file, lineno, line, prev, dspec,    rest, off, s, num, after, pre, gap, spec, w, q, name, raw, t, nend) {
+function check_line(file, lineno, line, prev, dspec,    rest, off, s, num, after, pre, gap, spec, w, q, name, raw, t, nend, nend_prev, scope) {
     off = 0
     nend = 0
     spec = ""
@@ -195,6 +207,7 @@ function check_line(file, lineno, line, prev, dspec,    rest, off, s, num, after
         if (after ~ /[A-Za-z0-9]/) continue
         pre = substr(line, 1, s - 1)
         gap = (nend > 0) ? substr(line, nend + 1, s - nend - 1) : "x"
+        nend_prev = nend
         nend = off
         name = ""
         if (gap !~ /^([ ,;\/-]|\342\200\223|\342\200\224)*((and|or|to|through)[ ]+)?$/) {
@@ -213,7 +226,12 @@ function check_line(file, lineno, line, prev, dspec,    rest, off, s, num, after
                     sub(/[^ \t(]+$/, "", t)
                 }
             }
-            if (q == "" && pre ~ /(C2PA|Adobe RGB|H\.273|RFC [0-9])/) q = "FOREIGN"
+            # Rule 3 reads only the prose since the previous citation on the line, and not at all
+            # for a citation that opens its own parenthesis: a designator for `(§N` would sit
+            # inside it, so a standard named before the parenthesis is the subject of the sentence
+            # (`the four H.273 code points (§10.3)`).
+            scope = (nend_prev > 0) ? substr(pre, nend_prev + 1) : pre
+            if (q == "" && t !~ /\( ?$/ && scope ~ /(C2PA|Adobe RGB|H\.273|RFC [0-9])/) q = "FOREIGN"
             spec = (q != "") ? q : dspec
             if (t ~ /[^ (] ?\( ?$/) {
                 sub(/ ?\( ?$/, "", t)

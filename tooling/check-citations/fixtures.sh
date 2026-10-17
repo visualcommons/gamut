@@ -99,6 +99,15 @@ check "a closing-parenthesis designator is foreign" $ICC 0 "1 into a specificati
     '/// ITU-T H.273 (07/2024) §8.99'
 check "a section-cited standard earlier on the line is foreign" $ICC 0 "1 into a specification" \
     '/// Adobe RGB (1998) Color Image Encoding §4.3.1.2: the inverse'
+check "a byte range before a citation is not a designator" $PNG 1 \
+    "no clause heading numbered 11.3.3.99 in $PNG" '/// bytes 0xA1-0xFF §11.3.3.99 recommends'
+check "a sentence ending in a digit word is not a designator" $PNG 1 \
+    "no clause heading numbered 11.3.3.99 in $PNG" '- *`tEXt` carried UTF-8.* §11.3.3.99 reads'
+check "a standard named before a parenthesised citation is its subject" $ICC 1 \
+    "no clause heading numbered 10.99 in $ICC" '/// the four H.273 code points (§10.99).'
+check "a standard cited before an earlier citation does not reach past it" $ICC 1 \
+    "no clause heading numbered 10.99 in $ICC" \
+    '//! (Adobe RGB (1998) §4.3.1.2) | is a *function*; §10.99 type 0 needs'
 check "a format named in prose does not switch the check off" $PNG 1 \
     "no clause heading numbered 11.9" '/// An XMP packet; §11.9 gives it'
 check "a list inherits its first designator" $PNG 0 "2 into a specification" \
