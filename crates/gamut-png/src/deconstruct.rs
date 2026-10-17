@@ -403,7 +403,7 @@ impl PngReport {
     /// span [`fill_c2pa`](crate::fill_c2pa) fills.
     ///
     /// The rule is [`crate::PngDecoder::decode`]'s: the *first* chunk, since a PNG carries exactly
-    /// one store (§A.3.2); *CRC-valid*, since §13.1 makes a mismatch skippable; *before `IDAT`*,
+    /// one store (C2PA §A.3.2); *CRC-valid*, since §13.1 makes a mismatch skippable; *before `IDAT`*,
     /// since data after it is bad-form and an appended chunk must not become the file's store.
     ///
     /// # This is carriage, not the decoded payload

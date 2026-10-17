@@ -79,7 +79,7 @@ fn everything_else() -> PngEncoder {
         .with_xmp("<x:xmpmeta/>")
 }
 
-/// §A.3.2 asks that `caBX` precede `IDAT`; the encoder puts it *immediately* before the first
+/// C2PA §A.3.2 asks that `caBX` precede `IDAT`; the encoder puts it *immediately* before the first
 /// `IDAT`, after every other ancillary chunk — colour, metadata, text, `PLTE` and `tRNS` — so
 /// that nothing whose size could shift the store follows it. Exactly one store, whatever else
 /// is set and whichever candidate the auto-reduce race keeps.
@@ -192,7 +192,7 @@ fn an_oversized_reservation_fails_the_encode_without_allocating_it() {
 /// **only** bytes inside the chunk's span — the payload and its CRC — and not the length, the
 /// type, or any byte before or after the chunk. Two different equal-length stores likewise
 /// differ only there. This is what makes a hash computed over the reserved file, with the span
-/// excluded (§18.5.4), still hold over the filled one.
+/// excluded (C2PA §18.5.4), still hold over the filled one.
 #[test]
 fn filling_a_reservation_changes_only_the_chunk_span() {
     let (pixels, dims) = rgb_source();
@@ -366,7 +366,7 @@ fn the_first_store_wins_and_a_second_is_counted_not_merged() {
     assert_eq!(report.chunk(b"caBX").expect("stats").count, 2);
 }
 
-/// A `caBX` positioned **after** `IDAT` is never the store: §A.3.2 puts the store before `IDAT`
+/// A `caBX` positioned **after** `IDAT` is never the store: C2PA §A.3.2 puts the store before `IDAT`
 /// and calls data after it bad-form, so accepting one would let anybody append a store to a
 /// finished file and have it read back as that file's provenance. It is ignored as the store but
 /// not hidden — the decode counts it, and the byte accounting still shows the chunk.

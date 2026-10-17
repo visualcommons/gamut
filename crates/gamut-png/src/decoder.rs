@@ -330,7 +330,7 @@ impl PngDecoder {
                     // not a copy of its payload.
                     if want_metadata && chunk.crc_ok {
                         // The one chunk type whose *position* decides whether it is metadata at
-                        // all: a manifest store precedes IDAT (§A.3.2), so one after IDAT is
+                        // all: a manifest store precedes IDAT (C2PA §A.3.2), so one after IDAT is
                         // counted as ignored rather than offered as the store.
                         if chunk.chunk_type == CABX && seen_idat {
                             c2pa_after_idat += 1;
@@ -573,7 +573,7 @@ type MetadataWalk<'a> = (Vec<([u8; 4], &'a [u8])>, usize, Ihdr);
 ///
 /// Returns a [`MetadataWalk`]: the chunks together with the number of CRC-valid `caBX` chunks
 /// seen *after* `IDAT`,
-/// which are never the store (§A.3.2) and so are counted rather than returned — the same split
+/// which are never the store (C2PA §A.3.2) and so are counted rather than returned — the same split
 /// [`PngDecoder::parse_stream`] makes, so the two entry points agree on what the store is —
 /// and the parsed IHDR.
 fn walk_metadata_chunks(data: &[u8]) -> Result<MetadataWalk<'_>> {
@@ -631,7 +631,7 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<MetadataWalk<'_>> {
             _ if chunk.is_ancillary() => {
                 // §13.1: a CRC mismatch skips the chunk rather than failing the image.
                 if chunk.crc_ok {
-                    // A store precedes IDAT (§A.3.2); one after it is counted, not offered.
+                    // A store precedes IDAT (C2PA §A.3.2); one after it is counted, not offered.
                     if chunk.chunk_type == CABX && seen_idat {
                         c2pa_after_idat += 1;
                     } else {

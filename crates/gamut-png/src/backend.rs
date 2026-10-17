@@ -91,7 +91,7 @@ use crate::color::ColorType;
 ///
 /// Every field describes the image the stream belongs to, so a backend can decide whether it wants
 /// the job (say, a hardware queue that is only worth its setup cost above some size) without
-/// re-parsing the PNG. The values come from IHDR (§11.2.2) on decode and from the encoder's chosen
+/// re-parsing the PNG. The values come from IHDR (§11.2.1) on decode and from the encoder's chosen
 /// output encoding on encode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdatInfo {

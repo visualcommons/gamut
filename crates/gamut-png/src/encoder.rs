@@ -1221,7 +1221,7 @@ impl PngEncoder {
     ///    names the chunk's span (for an indexed image, `deconstruct(&png)?.c2pa()` names the same
     ///    span — see [`encode_indexed8`](Self::encode_indexed8));
     /// 2. hash the output with that **whole** span excluded — length, type, payload and CRC
-    ///    (§18.5.4) — and have the signer build the store against it;
+    ///    (C2PA §18.5.4) — and have the signer build the store against it;
     /// 3. write the finished store into the span with [`fill_c2pa`](crate::fill_c2pa). Only the
     ///    payload and the chunk CRC change, so every other byte — and every offset — is the one
     ///    the signer hashed.

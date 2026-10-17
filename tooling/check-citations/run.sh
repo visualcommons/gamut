@@ -84,26 +84,9 @@ crates/gamut-png png-3
 "
 INDEXES="$root/references/icc/clauses.tsv $root/references/png/clauses.tsv"
 
-# Every pair here is open work for issue #879, which qualifies or corrects each citation and empties
-# this list. Until then the guard reports nothing it already knows and everything new. One is a
-# wrong citation (`IHDR (§11.2.2)`: §11.2.2 is PLTE); the rest are C2PA 2.4 clauses cited inside
-# gamut-png with no designator on the citing line, which therefore reads as a PNG clause that does
-# not exist.
-KNOWN="
-crates/gamut-png/src/backend.rs	11.2.2
-crates/gamut-png/STATUS.md	A.3.2
-crates/gamut-png/STATUS.md	18.5.4
-crates/gamut-png/src/ancillary.rs	A.3.2
-crates/gamut-png/src/chunk.rs	18.5
-crates/gamut-png/src/chunk.rs	A.3.2
-crates/gamut-png/src/chunk.rs	A.3.6
-crates/gamut-png/src/decoder.rs	A.3.2
-crates/gamut-png/src/deconstruct.rs	A.3.2
-crates/gamut-png/src/encoder.rs	18.5.4
-crates/gamut-png/src/lib.rs	18.5.4
-crates/gamut-png/tests/c2pa.rs	A.3.2
-crates/gamut-png/tests/c2pa.rs	18.5.4
-"
+# Empty since issue #879 corrected or qualified every finding the guard landed with. A new entry
+# needs an open issue that fixes it, named here, so the list cannot become a standing exemption.
+KNOWN=""
 
 for t in $INDEXES; do
     test -f "$t" || {
