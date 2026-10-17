@@ -1151,15 +1151,18 @@ fn carry(
         not_held("Exif payload");
         return carried;
     }
-    // `ExifWriter` keeps a thumbnail's directory but re-embeds only JPEG thumbnail bytes, so an
-    // uncompressed-strip thumbnail (or one whose bytes did not read) would come out with
-    // `StripOffsets` addressing nothing. A thumbnail with no image is dropped rather than written
-    // dangling.
-    if exif.thumbnail().is_some_and(|thumb| thumb.jpeg().is_none()) {
+    // `ExifWriter` re-embeds a thumbnail's JPEG bytes and its uncompressed strips, but a thumbnail
+    // whose image bytes did not read holds neither, and its directory would come out with
+    // `JPEGInterchangeFormat`/`StripOffsets` addressing nothing. Such a thumbnail is dropped
+    // rather than written dangling.
+    if exif
+        .thumbnail()
+        .is_some_and(|thumb| thumb.jpeg().is_none() && thumb.strips().is_none())
+    {
         exif.clear_thumbnail();
         tracing::warn!(
-            "input metadata not carried — the Exif thumbnail, whose image bytes (uncompressed \
-             strips) gamut-exif does not re-embed"
+            "input metadata not carried — the Exif thumbnail, whose image bytes (neither a JPEG \
+             nor uncompressed strips) did not read from the input"
         );
     }
     match ExifWriter::new().marker(false).write(&exif) {
