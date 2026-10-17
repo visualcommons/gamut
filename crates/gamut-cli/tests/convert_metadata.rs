@@ -15,9 +15,11 @@ use std::process::Command;
 use gamut::core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgba8};
 use gamut::exif::{ByteOrder, Exif, ExifTag, ExifWriter, Value};
 use gamut::icc::{BuiltinProfile, IccProfile};
+use gamut::ifd::tags::INTEROPERABILITY_IFD;
 use gamut::jpeg::JpegEncoder;
 use gamut::jxl::{Container, Distance, JxlDecoder, JxlEncoder, Orientation};
 use gamut::png::{PngEncoder, PngMetadata, SrgbIntent};
+use gamut::tiff::TiffDecoder;
 use gamut::webp::WebpEncoder;
 
 /// A bare TIFF stream, as `gamut-exif` writes it, holding `Make` plus whatever `tags` sets.
@@ -374,18 +376,102 @@ fn color_space_turns_uncalibrated_when_the_profile_is_left_behind() {
     );
 }
 
-/// `gamut-metadata`'s capability table gives TIFF no writable carrier, so every block is reported
-/// as left behind rather than dropped in silence.
+/// A TIFF output carries the XMP (700) and ICC profile (34675) verbatim and the Exif as its
+/// `ExifIFD` sub-IFD, rewritten like every other output's (issue #851).
 #[test]
-fn a_tiff_output_reports_every_block_it_cannot_hold() {
-    let (_, stderr) = convert_to("tiff", &jpeg_with(&exif_with(&[])), "tiff", &[]);
+fn a_tiff_output_carries_xmp_icc_and_the_exif_sub_ifd() {
+    let exif = exif_with(&[
+        (ExifTag::ExposureTime, Value::Rational(vec![(1, 250)])),
+        (ExifTag::PixelXDimension, Value::Long(vec![4000])),
+    ]);
 
-    for what in ["ICC profile", "XMP packet", "Exif payload"] {
-        assert!(
-            stderr.contains(&format!("TIFF output cannot hold the {what}")),
-            "stderr did not report the {what}: {stderr}"
-        );
-    }
+    let (tiff, _) = convert_to("tiff", &jpeg_with(&exif), "tiff", &[]);
+
+    let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
+    assert_eq!(meta.icc, Some(rgb_icc()));
+    let directory = meta.exif.expect("an ExifIFD");
+    assert_eq!(
+        directory.get(ExifTag::ExposureTime.tag_id()),
+        Some(&Value::Rational(vec![(1, 250)]))
+    );
+    assert_eq!(
+        directory.get(ExifTag::PixelXDimension.tag_id()),
+        Some(&Value::Long(vec![8])),
+        "rewritten to the output's size"
+    );
+}
+
+/// A TIFF's 0th-IFD tags are the page's own, which the TIFF encoder writes itself, so the Exif's
+/// `Make` and `Orientation` are named as left behind — and what losing the Orientation costs.
+#[test]
+fn a_tiff_output_reports_the_exif_0th_ifd_it_leaves_behind() {
+    let exif = exif_with(&[(ExifTag::Orientation, Value::Short(vec![6]))]);
+
+    let (tiff, stderr) = convert_to("tiff-0th", &jpeg_with(&exif), "tiff", &[]);
+
+    assert!(
+        stderr.contains("Exif 0th-IFD field(s) Make, Orientation"),
+        "stderr did not name the 0th-IFD fields: {stderr}"
+    );
+    assert!(
+        stderr.contains("shows the TIFF output's stored pixels unrotated"),
+        "stderr did not report the orientation: {stderr}"
+    );
+    // The fixture's Exif holds nothing below its 0th IFD, so no `ExifIFD` is written, and the
+    // other carriers still are.
+    let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
+    assert!(meta.exif.is_none());
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
+}
+
+/// The GPS sub-IFD and the thumbnail live off a TIFF's own IFD 0, so a TIFF output names both as
+/// left behind — and the Exif sub-IFD, with the Interoperability sub-IFD below it, is still
+/// written, as are XMP and ICC: the encoder took the reduced model rather than refusing it.
+#[test]
+fn a_tiff_output_reports_the_gps_and_thumbnail_and_keeps_the_interop_ifd() {
+    let mut exif = Exif::new(ByteOrder::LittleEndian);
+    exif.set_tag(ExifTag::ExposureTime, Value::Rational(vec![(1, 250)]));
+    exif.set_tag(ExifTag::GpsLatitudeRef, Value::Ascii("N".into()));
+    exif.set_tag(ExifTag::InteroperabilityIndex, Value::Ascii("R98".into()));
+    let mut thumbnail = Vec::new();
+    JpegEncoder::new()
+        .encode_image(
+            ImageRef::<Gray8>::new(&[128; 64], Dimensions::new(8, 8).unwrap()).unwrap(),
+            &mut thumbnail,
+        )
+        .unwrap();
+    exif.set_thumbnail(thumbnail);
+    let exif = ExifWriter::new().marker(false).write(&exif).unwrap();
+
+    let (tiff, stderr) = convert_to("tiff-gps-thumb", &jpeg_with(&exif), "tiff", &[]);
+
+    assert!(
+        stderr.contains("the Exif GPS sub-IFD"),
+        "stderr did not report the GPS sub-IFD: {stderr}"
+    );
+    assert!(
+        stderr.contains("the Exif thumbnail, which a TIFF would hold as a page of its own"),
+        "stderr did not report the thumbnail: {stderr}"
+    );
+    let meta = TiffDecoder::new().metadata(&tiff).expect("read back");
+    assert_eq!(meta.xmp.as_deref(), Some(XMP));
+    assert_eq!(meta.icc, Some(rgb_icc()));
+    let directory = meta.exif.expect("an ExifIFD");
+    assert_eq!(
+        directory.get(ExifTag::ExposureTime.tag_id()),
+        Some(&Value::Rational(vec![(1, 250)]))
+    );
+    let interop = directory
+        .sub_ifds()
+        .iter()
+        .find(|group| group.tag == INTEROPERABILITY_IFD)
+        .and_then(|group| group.ifds.first())
+        .expect("the Interoperability sub-IFD is kept");
+    assert_eq!(
+        interop.get(ExifTag::InteroperabilityIndex.tag_id()),
+        Some(&Value::Ascii("R98".into()))
+    );
 }
 
 /// A C2PA manifest store is never carried, between formats as within one.

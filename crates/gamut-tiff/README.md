@@ -118,7 +118,7 @@ optional `metadata` feature wires them to the typed [`gamut-metadata`](../gamut-
 (`TiffMetadata` implements `TypedMetadata`, and `TiffEncoder::with_metadata` /
 `with_encoded_metadata` embed a facade `Metadata`). The typed EXIF path maps only the `ExifIFD`
 (the model's Exif and Interoperability sub-IFDs); a model holding 0th-IFD fields, a GPS sub-IFD or
-a thumbnail is refused until this crate gains carriers for them (#870).
+a thumbnail is refused until this crate gains carriers for them (#876).
 **Permanently out of scope:** old-style JPEG (§22, `Compression = 6`), deprecated and
 unimplementable-as-specified per TIFF Technical Note 2.
 
