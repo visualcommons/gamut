@@ -454,7 +454,7 @@ fn ancillary_chunks_are_accepted_by_libpng() {
 /// file at all. §5.6 Table 5 and §11.3.2.5 say only that `sRGB` "should not" appear beside
 /// `iCCP` — lowercase, and §15 gives the BCP 14 keywords force "when, and only when, they appear
 /// in all capitals" — while §4.3 Table 1 presupposes the pair and ranks it. libpng reads the
-/// datastream and returns the same pixels, so `PngEncoder::with_metadata` carrying both loses a
+/// datastream and returns the same pixels, so `PngEncoder::with_png_metadata` carrying both loses a
 /// caller nothing.
 ///
 /// Note the oracle's own limit: `libpng_oracle::decode` sets `png_set_benign_errors` and drops

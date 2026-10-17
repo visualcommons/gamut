@@ -740,7 +740,7 @@ mod typed {
     /// let pixels = vec![0u8; 64];
     /// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
     /// let png = PngEncoder::new()
-    ///     .with_typed_metadata(&typed)?
+    ///     .with_metadata(&typed)?
     ///     .encode_to_vec(image)?;
     ///
     /// assert_eq!(gamut_png::metadata(&png)?.metadata()?, typed);

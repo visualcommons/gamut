@@ -23,7 +23,7 @@ workspace = true
 # adds no coverage regions and no mutants.
 test-support = []
 # Typed metadata wiring: `PngMetadata` / `DecodedPng`'s `TypedMetadata` impls (`blocks` /
-# `metadata`) and `PngEncoder::with_typed_metadata` / `with_encoded_metadata` over the
+# `metadata`) and `PngEncoder::with_metadata` / `with_encoded_metadata` over the
 # `gamut-metadata` facade.
 metadata = ["dep:gamut-metadata"]
 

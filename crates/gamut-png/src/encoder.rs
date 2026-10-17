@@ -106,7 +106,7 @@ struct MetadataView<'a> {
     c2pa: bool,
 }
 
-/// Something [`PngEncoder::with_metadata`] could not do faithfully with a payload it was given.
+/// Something [`PngEncoder::with_png_metadata`] could not do faithfully with a payload it was given.
 ///
 /// Preservation exists to stop metadata disappearing quietly, so anything a carry cannot take —
 /// and anything it takes only by writing bytes the specification does not endorse — is named
@@ -999,7 +999,7 @@ impl PngEncoder {
     /// entry of the source's palette, so it is carried only by
     /// [`encode_indexed8`](Self::encode_indexed8) with that palette.
     #[must_use]
-    pub fn with_metadata(self, metadata: &PngMetadata) -> Self {
+    pub fn with_png_metadata(self, metadata: &PngMetadata) -> Self {
         self.with_metadata_view(MetadataView {
             exif: metadata.exif.as_deref(),
             icc_profile: metadata.icc_profile.as_ref(),
@@ -1019,9 +1019,9 @@ impl PngEncoder {
     }
 
     /// Carries the metadata of a decoded file into this encoder: the [`DecodedPng`] twin of
-    /// [`with_metadata`](Self::with_metadata), which documents exactly what is and is not carried.
+    /// [`with_png_metadata`](Self::with_png_metadata), which documents exactly what is and is not carried.
     ///
-    /// Use this when you already decoded the pixels; use `with_metadata` when
+    /// Use this when you already decoded the pixels; use `with_png_metadata` when
     /// [`metadata`](crate::metadata) read the file without them.
     #[must_use]
     pub fn with_metadata_from(self, decoded: &DecodedPng) -> Self {
@@ -1052,7 +1052,7 @@ impl PngEncoder {
     /// explanation is a choice the spec forces. Use
     /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
     ///
-    /// The payload-level notices describe the last [`with_metadata`](Self::with_metadata) /
+    /// The payload-level notices describe the last [`with_png_metadata`](Self::with_png_metadata) /
     /// [`with_metadata_from`](Self::with_metadata_from) call and are reset by each; the
     /// per-annotation notices belong to the annotations still accumulated, so they follow the
     /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
@@ -1068,7 +1068,7 @@ impl PngEncoder {
         notices
     }
 
-    /// The one implementation behind [`with_metadata`](Self::with_metadata) and
+    /// The one implementation behind [`with_png_metadata`](Self::with_png_metadata) and
     /// [`with_metadata_from`](Self::with_metadata_from).
     fn with_metadata_view(mut self, meta: MetadataView<'_>) -> Self {
         self.carry_notices.clear();
@@ -2765,10 +2765,11 @@ mod typed {
         /// [`with_icc_profile`](Self::with_icc_profile)). Returns the updated encoder for
         /// chaining.
         ///
-        /// Named apart from [`with_metadata`](Self::with_metadata), which carries a
-        /// [`PngMetadata`](crate::PngMetadata) — every PNG chunk the read side surfaces — chunk
-        /// for chunk; this method takes the facade's container-agnostic model, which holds only
-        /// the EXIF, XMP and ICC carriers.
+        /// This is the facade builder every wired format crate spells `with_metadata`. Its
+        /// chunk-for-chunk sibling is [`with_png_metadata`](Self::with_png_metadata), which
+        /// carries a [`PngMetadata`](crate::PngMetadata) — every PNG chunk the read side
+        /// surfaces — whereas this method takes the facade's container-agnostic model, which
+        /// holds only the EXIF, XMP and ICC carriers.
         ///
         /// The default embedder emits no legacy IPTC-IIM block (IPTC lives inside the XMP packet)
         /// and **drops** a C2PA manifest store — a store is signed over the file it came from and
@@ -2782,7 +2783,7 @@ mod typed {
         /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message
         /// is carried as [`Error::detail`]), and whatever
         /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
-        pub fn with_typed_metadata(self, meta: &Metadata) -> Result<Self> {
+        pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
             let encoded = MetadataEmbedder::new().embed(meta).map_err(|e| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: metadata does not serialize")
                     .with_detail(e.to_string())
@@ -2891,18 +2892,18 @@ mod typed {
             // The facade's keystone equality, extended through the `eXIf` / `iTXt` / `iCCP`
             // chunks.
             let typed = typed();
-            let png = encode(&PngEncoder::new().with_typed_metadata(&typed).unwrap());
+            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
             let read = crate::metadata(&png).unwrap();
             assert!(read.exif.is_some() && read.xmp.is_some() && read.icc_profile.is_some());
             assert_eq!(read.metadata().unwrap(), typed);
         }
 
         #[test]
-        fn exiv2_reads_what_with_typed_metadata_embeds() {
+        fn exiv2_reads_what_with_metadata_embeds() {
             // Container-level differential: exiv2's own PNG reader finds the `eXIf`, the XMP
             // `iTXt` and the `iCCP` this encoder writes, not only this crate's reader.
             let typed = typed();
-            let png = encode(&PngEncoder::new().with_typed_metadata(&typed).unwrap());
+            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
             assert_eq!(
                 exiv2_oracle::image_exif_get(&png, "Exif.Image.Make").unwrap(),
                 "gamut"
@@ -2945,7 +2946,7 @@ mod typed {
         fn a_manifest_store_is_never_copied_forward() {
             let mut typed = typed();
             typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());
-            let png = encode(&PngEncoder::new().with_typed_metadata(&typed).unwrap());
+            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
             let read = crate::metadata(&png).unwrap().metadata().unwrap();
             assert_eq!(read.c2pa, None);
             typed.c2pa = None;
@@ -3042,7 +3043,7 @@ mod typed {
                 tags: vec![duplicate.clone(), duplicate],
             };
             let model = Metadata::from_carriers(None, None, Some(bad_icc));
-            let err = PngEncoder::new().with_typed_metadata(&model).unwrap_err();
+            let err = PngEncoder::new().with_metadata(&model).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::InvalidInput);
             assert_eq!(
                 err.static_message(),

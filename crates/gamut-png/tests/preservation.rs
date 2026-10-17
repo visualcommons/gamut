@@ -1,4 +1,4 @@
-//! `PngEncoder::with_metadata` / `with_metadata_from` (issue #483): what a re-encode carries
+//! `PngEncoder::with_png_metadata` / `with_metadata_from` (issue #483): what a re-encode carries
 //! forward from the file it rewrites, and what it deliberately does not.
 //!
 //! Example and drift-guard level, over gamut's own read→write seam. The source files are built
@@ -142,7 +142,7 @@ fn chunk_payload(png: &[u8], ty: &[u8; 4]) -> Option<Vec<u8>> {
 #[test]
 fn every_carried_chunk_survives_a_re_encode() {
     let meta = gamut_png::metadata(&source(&[])).unwrap();
-    let re = re_encoded(|e| e.with_metadata(&meta));
+    let re = re_encoded(|e| e.with_png_metadata(&meta));
 
     assert_eq!(re.exif, meta.exif);
     assert_eq!(re.icc_profile, meta.icc_profile);
@@ -173,7 +173,7 @@ fn every_carried_chunk_survives_a_re_encode() {
 #[test]
 fn the_reference_reader_sees_every_carried_chunk() {
     let meta = gamut_png::metadata(&source(&[chunk(b"cICP", &[9, 16, 0, 1])])).unwrap();
-    let dec = libpng_oracle::decode(&re_encoded_bytes(|e| e.with_metadata(&meta)));
+    let dec = libpng_oracle::decode(&re_encoded_bytes(|e| e.with_png_metadata(&meta)));
 
     assert_eq!(dec.warnings, 0, "libpng dropped nothing");
     assert_eq!(dec.exif, Some(tiny_exif()));
@@ -219,7 +219,7 @@ fn the_reference_reader_sees_a_carried_ztxt_as_ztxt() {
     let mut ztxt = b"Comment\0\0".to_vec();
     ztxt.extend_from_slice(&zlib(b"na\xEFve"));
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"zTXt", &ztxt)])).unwrap();
-    let dec = libpng_oracle::decode(&re_encoded_bytes(|e| e.with_metadata(&meta)));
+    let dec = libpng_oracle::decode(&re_encoded_bytes(|e| e.with_png_metadata(&meta)));
 
     assert_eq!(
         dec.texts,
@@ -238,7 +238,7 @@ fn the_reference_reader_sees_a_carried_ztxt_as_ztxt() {
 #[test]
 fn the_reference_reader_sees_a_carried_rendering_intent() {
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"sRGB", &[1])])).unwrap();
-    let dec = libpng_oracle::decode(&re_encoded_bytes(|e| e.with_metadata(&meta)));
+    let dec = libpng_oracle::decode(&re_encoded_bytes(|e| e.with_png_metadata(&meta)));
     assert_eq!((dec.srgb, dec.warnings), (Some(1), 0));
 }
 
@@ -257,7 +257,7 @@ fn significant_bits_background_dimensions_and_time_survive_a_re_encode() {
     ];
     let extra: Vec<Vec<u8>> = carried.iter().map(|(ty, data)| chunk(ty, data)).collect();
     let meta = gamut_png::metadata(&minimal_source(&extra)).unwrap();
-    let png = re_encoded_bytes(|e| e.with_metadata(&meta));
+    let png = re_encoded_bytes(|e| e.with_png_metadata(&meta));
 
     for (ty, data) in carried {
         assert_eq!(
@@ -348,7 +348,7 @@ fn a_palette_index_background_is_carried_onto_the_same_palette() {
 #[test]
 fn an_itxt_keeps_its_language_and_translated_keyword() {
     let meta = gamut_png::metadata(&source(&[])).unwrap();
-    let re = re_encoded(|e| e.with_metadata(&meta));
+    let re = re_encoded(|e| e.with_png_metadata(&meta));
 
     let note = re.texts.iter().find(|t| t.keyword == "Note").expect("Note");
     assert_eq!(note.language.as_deref(), Some("de"));
@@ -369,7 +369,7 @@ fn a_profile_and_a_rendering_intent_are_both_carried() {
     assert_eq!(meta.srgb, Some(SrgbIntent::RelativeColorimetric));
     assert!(meta.icc_profile.is_some(), "the source carries both");
 
-    let re = re_encoded(|e| e.with_metadata(&meta));
+    let re = re_encoded(|e| e.with_png_metadata(&meta));
     assert_eq!(re.icc_profile, meta.icc_profile);
     assert_eq!(re.srgb, meta.srgb);
 }
@@ -388,7 +388,7 @@ fn a_latin1_profile_name_of_the_full_length_is_carried_byte_for_byte() {
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iCCP", &iccp)])).unwrap();
     assert!(meta.icc_profile.is_some(), "the source carries the profile");
 
-    let out = re_encoded_bytes(|e| e.with_metadata(&meta));
+    let out = re_encoded_bytes(|e| e.with_png_metadata(&meta));
     let payload = chunk_payload(&out, b"iCCP").expect("the profile is written");
     assert_eq!(&payload[..80], [name.as_slice(), b"\0"].concat());
     let re = gamut_png::metadata(&out).expect("read back");
@@ -409,7 +409,7 @@ fn a_profile_name_the_reader_accepts_survives_the_re_encode_with_a_notice() {
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iCCP", &iccp)])).unwrap();
     assert!(meta.icc_profile.is_some(), "the reader accepts the name");
 
-    let encoder = PngEncoder::new().with_metadata(&meta);
+    let encoder = PngEncoder::new().with_png_metadata(&meta);
     assert_eq!(
         encoder.metadata_notices(),
         [MetadataNotice::IccpNameSpacing]
@@ -465,7 +465,7 @@ fn an_out_of_range_time_is_left_behind_with_a_notice() {
 #[test]
 fn a_cicp_is_carried_only_when_its_matrix_coefficients_are_zero() {
     let conforming = gamut_png::metadata(&source(&[chunk(b"cICP", &[9, 16, 0, 1])])).unwrap();
-    let carried = re_encoded(|e| e.with_metadata(&conforming))
+    let carried = re_encoded(|e| e.with_png_metadata(&conforming))
         .cicp
         .expect("cICP carried");
     assert_eq!(
@@ -480,7 +480,7 @@ fn a_cicp_is_carried_only_when_its_matrix_coefficients_are_zero() {
 
     let non_rgb = gamut_png::metadata(&source(&[chunk(b"cICP", &[9, 16, 1, 1])])).unwrap();
     assert!(non_rgb.cicp.is_some(), "the source carries it");
-    let encoder = PngEncoder::new().with_metadata(&non_rgb);
+    let encoder = PngEncoder::new().with_png_metadata(&non_rgb);
     assert!(re_encoded(|_| encoder.clone()).cicp.is_none());
     // Dropped, but not in silence: the caller can say so.
     assert!(
@@ -501,7 +501,7 @@ fn the_c2pa_manifest_store_is_never_carried_forward() {
     let meta = gamut_png::metadata(&source(&[])).unwrap();
     assert!(meta.c2pa.is_some(), "the source carries a store");
 
-    let encoder = PngEncoder::new().with_metadata(&meta);
+    let encoder = PngEncoder::new().with_png_metadata(&meta);
     assert!(re_encoded(|_| encoder.clone()).c2pa.is_none());
     assert_eq!(
         encoder.metadata_notices(),
@@ -513,7 +513,7 @@ fn the_c2pa_manifest_store_is_never_carried_forward() {
 /// and not the other is a bug this catches — the same anti-drift shape `tests/metadata.rs` uses
 /// for the two *read* walks.
 #[test]
-fn with_metadata_from_agrees_with_with_metadata() {
+fn with_metadata_from_agrees_with_with_png_metadata() {
     let png = source(&[
         chunk(b"cICP", &[9, 16, 0, 1]),
         chunk(b"sBIT", &[5, 6, 5]),
@@ -525,7 +525,7 @@ fn with_metadata_from_agrees_with_with_metadata() {
     let meta = gamut_png::metadata(&png).unwrap();
 
     let from_decoded = re_encoded(|e| e.with_metadata_from(&decoded));
-    let from_metadata = re_encoded(|e| e.with_metadata(&meta));
+    let from_metadata = re_encoded(|e| e.with_png_metadata(&meta));
     assert_eq!(from_decoded, from_metadata);
     // A pair of empty results would satisfy the comparison above.
     assert!(from_decoded.icc_profile.is_some() && from_decoded.cicp.is_some());
@@ -548,7 +548,7 @@ fn a_compressed_annotation_goes_back_into_a_compressed_chunk() {
     ztxt.extend_from_slice(&zlib(body.as_bytes()));
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"zTXt", &ztxt)])).unwrap();
 
-    let out = re_encoded_bytes(|e| e.with_metadata(&meta));
+    let out = re_encoded_bytes(|e| e.with_png_metadata(&meta));
     let carried = chunk_payload(&out, b"zTXt").expect("carried as zTXt");
     assert!(
         chunk_payload(&out, b"tEXt").is_none(),
@@ -574,7 +574,7 @@ fn a_compressed_itxt_goes_back_into_a_compressed_itxt() {
     itxt.extend_from_slice(&zlib(body.as_bytes()));
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iTXt", &itxt)])).unwrap();
 
-    let out = re_encoded_bytes(|e| e.with_metadata(&meta));
+    let out = re_encoded_bytes(|e| e.with_png_metadata(&meta));
     let note = chunk_payload(&out, b"iTXt").expect("the Note annotation");
     // keyword, NUL, compression flag 1, method 0, language, NUL, translated keyword, NUL.
     assert!(note.starts_with(b"Note\0\x01\0de\0Notiz\0"), "{note:?}");
@@ -597,7 +597,7 @@ fn a_compressed_xmp_packet_goes_back_into_a_compressed_itxt() {
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iTXt", &compressed_xmp())])).unwrap();
     assert_eq!(meta.xmp, Some(xmp_packet()));
 
-    let out = re_encoded_bytes(|e| e.with_metadata(&meta));
+    let out = re_encoded_bytes(|e| e.with_png_metadata(&meta));
     let carried = chunk_payload(&out, b"iTXt").expect("the packet");
     // keyword, NUL, then §11.3.3.4's compression flag.
     assert_eq!(carried[18], 1, "the flag is set: {carried:?}");
@@ -606,7 +606,7 @@ fn a_compressed_xmp_packet_goes_back_into_a_compressed_itxt() {
     // flag prevents rather than a threshold that happens to hold for this packet.
     let mut flat = meta.clone();
     flat.xmp_framing.as_mut().expect("framed").compressed = false;
-    let flat_out = re_encoded_bytes(|e| e.with_metadata(&flat));
+    let flat_out = re_encoded_bytes(|e| e.with_png_metadata(&flat));
     let inflated = chunk_payload(&flat_out, b"iTXt").expect("the packet");
     assert!(
         carried.len() * 2 < inflated.len(),
@@ -630,7 +630,7 @@ fn an_xmp_packet_keeps_its_language_and_translated_keyword() {
     assert_eq!(framing.translated_keyword.as_deref(), Some("Metadata"));
     assert!(framing.compressed);
 
-    let re = re_encoded(|e| e.with_metadata(&meta));
+    let re = re_encoded(|e| e.with_png_metadata(&meta));
     assert_eq!(re.xmp_framing, Some(framing));
 }
 
@@ -644,7 +644,7 @@ fn carrying_an_xmp_packet_replaces_one_already_set() {
     let meta = gamut_png::metadata(&source(&[])).unwrap();
     let out = re_encoded_bytes(|e| {
         e.with_xmp("<x:xmpmeta id='set directly'/>")
-            .with_metadata(&meta)
+            .with_png_metadata(&meta)
     });
 
     let mut packets = 0;
@@ -688,7 +688,7 @@ fn a_keyword_the_reader_accepts_survives_the_re_encode_with_a_notice() {
         let meta = gamut_png::metadata(&png).unwrap();
         assert_eq!(meta.texts.len(), 1, "the reader accepts {keyword:?}");
 
-        let encoder = PngEncoder::new().with_metadata(&meta);
+        let encoder = PngEncoder::new().with_png_metadata(&meta);
         assert_eq!(encoder.metadata_notices(), [notice], "keyword {keyword:?}");
         let re = re_encoded(|_| encoder.clone());
         assert_eq!(re.texts, meta.texts, "keyword {keyword:?} came back whole");
@@ -731,8 +731,8 @@ fn a_keyword_no_chunk_can_hold_is_left_behind_with_a_notice() {
 fn carrying_the_same_metadata_twice_carries_it_once() {
     let meta = gamut_png::metadata(&source(&[])).unwrap();
 
-    let once = re_encoded(|e| e.with_metadata(&meta));
-    let twice = re_encoded(|e| e.with_metadata(&meta).with_metadata(&meta));
+    let once = re_encoded(|e| e.with_png_metadata(&meta));
+    let twice = re_encoded(|e| e.with_png_metadata(&meta).with_png_metadata(&meta));
     assert_eq!(once, twice);
     assert_eq!(once.texts.len(), 2, "the fixture carries two annotations");
 }
@@ -749,7 +749,7 @@ fn a_non_utf8_xmp_packet_is_reported_and_the_re_encode_proceeds() {
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iTXt", &itxt)])).unwrap();
     assert!(meta.xmp.is_some(), "the read side surfaces the raw packet");
 
-    let encoder = PngEncoder::new().with_metadata(&meta);
+    let encoder = PngEncoder::new().with_png_metadata(&meta);
     assert_eq!(encoder.metadata_notices(), [MetadataNotice::XmpNotUtf8]);
     assert!(
         !MetadataNotice::XmpNotUtf8.carried(),
@@ -775,7 +775,7 @@ fn a_null_in_a_carried_text_string_is_dropped_with_a_notice() {
         "the reader hands the null back"
     );
 
-    let encoder = PngEncoder::new().with_metadata(&meta);
+    let encoder = PngEncoder::new().with_png_metadata(&meta);
     assert_eq!(
         encoder.metadata_notices(),
         [MetadataNotice::TextStringNull],
