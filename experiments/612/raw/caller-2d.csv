@@ -1,0 +1,23 @@
+group,input,layout,width,height,cleanup,variant,sample,bytes,crc32,encode_ns,colour_type,indexed_bytes,first_seen_bytes,reordered_bytes
+size_contract,gradient_rgb8,rgb8,128,128,false,caller-2d,0,492,38e92bab,2696651642,2,,,
+size_contract,photo_rgb8,rgb8,128,128,false,caller-2d,0,5594,fedc692a,2765159496,2,,,
+size_contract,noise_rgb8,rgb8,128,128,false,caller-2d,0,49348,ebbc1d6e,115508847,2,,,
+size_contract,grey_as_rgb8,rgb8,128,128,false,caller-2d,0,146,4e3a9aee,258803764,0,,,
+size_contract,flat_rgba8,rgba8,128,128,false,caller-2d,0,96,90493caf,2092854706,3,96,96,96
+size_contract,sprite_rgba8,rgba8,128,128,false,caller-2d,0,1646,6c50fee2,5124147193,6,,,
+size_contract,sprite_rgba8 +clean,rgba8,128,128,true,caller-2d,0,1104,7ceaba5a,7726586070,3,,,
+size_contract,palette64_rgba8,rgba8,128,128,false,caller-2d,0,364,6eda2b81,2429958850,6,475,450,437
+size_contract,palette64_rgba8 +clean,rgba8,128,128,true,caller-2d,0,364,6eda2b81,4643217611,6,,,
+size_contract,opaque256_rgba8,rgba8,128,128,false,caller-2d,0,317,d440ee53,3682055276,2,1132,945,960
+size_contract,demotable_rgb16,rgb16,64,64,false,caller-2d,0,171,86f8d657,992927462,2,367,317,335
+size_contract,tiny_rgb8,rgb8,16,16,false,caller-2d,0,119,a0601968,6826177,2,,,
+reach,photo332_rgb8@128,rgb8,128,128,false,caller-2d,0,3926,c0f7fa9f,5831483461,2,6815,7953,6796
+reach,photo222_rgb8@128,rgb8,128,128,false,caller-2d,0,3111,d3414a8c,7054103448,2,3837,3913,3769
+reach,gradient332_rgb8@128,rgb8,128,128,false,caller-2d,0,757,56921b1f,5402883350,2,1708,1863,1879
+reach,levels16_gray8@128,gray8,128,128,false,caller-2d,0,363,65b72129,1339974036,0,456,456,456
+reach,photo_sprite_rgba8@128,rgba8,128,128,false,caller-2d,0,2927,47d57ee6,6074449961,6,4035,4330,3981
+reach,photo332_rgb8@256,rgb8,256,256,false,caller-2d,0,13038,02cf8dcf,26934377918,2,19818,21475,19366
+reach,photo222_rgb8@256,rgb8,256,256,false,caller-2d,0,9922,f845a6ce,33972646791,2,12135,12134,12143
+reach,gradient332_rgb8@256,rgb8,256,256,false,caller-2d,0,2020,b6b27f1f,20453707327,2,5712,4917,5034
+reach,levels16_gray8@256,gray8,256,256,false,caller-2d,0,639,c2effd1b,6275643727,3,639,639,639
+reach,photo_sprite_rgba8@256,rgba8,256,256,false,caller-2d,0,8847,39f41686,30521491469,6,,,

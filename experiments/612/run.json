@@ -1,16 +1,19 @@
 {
   "issue": 612,
-  "git_sha": "18599c068c1b2af37cf3363531953dc74d0040b4",
+  "git_sha": "b85b47ae021a50ec9c4717f94c7f366a1f991132",
   "git_dirty": false,
+  "follow_up_issue": 887,
   "variant_patch_sha256": {
     "mzeng": "192230a031acfc77909ef2b759e70f768871ffdcf4881d799b4d49276f799a30",
-    "mzeng-trns": "ffd678b5dce9c82c4912019b7a88272c810e3d96cf66e8c9acb5e1d49398a53e"
+    "mzeng-trns": "ffd678b5dce9c82c4912019b7a88272c810e3d96cf66e8c9acb5e1d49398a53e",
+    "caller-2d": "f42d684b086e3a05677307391c65646bed7cc550fcd81f757f7debf73ffb27b4",
+    "caller-rows": "9f75d12a43031874de81cc6dc8a0e84d92f233fcd156cce23be0fd685bb9b13e"
   },
   "rustc": "rustc 1.99.0 (b940084d7 2026-09-28);binary: rustc;commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4;commit-date: 2026-09-28;host: x86_64-unknown-linux-gnu;release: 1.99.0;LLVM version: 23.1.1;",
   "mise_lock_sha256": null,
-  "cargo_lock_sha256": "5a50ba85e0aab1ab5eff4e1527301213a0cff775ec85c03ed818b08316439166",
+  "cargo_lock_sha256": "6328053372c66b7b67dea0f71ada545583a29a443e9559be3a03b91112a8a12c",
   "rust_toolchain_toml_sha256": "e7613d421d2367015f232d2a0f8fe9684daf707a56308b046b92405ce2ccab09",
-  "samples_per_input": 3,
+  "samples_per_input": 1,
   "warmup_encodes_per_input": 1,
   "seeds": "none: every input is a deterministic generator in crates/gamut-png/tests/common/corpus.rs or examples/experiment_612.rs",
   "corpus_sha256": {
@@ -39,6 +42,6 @@
   },
   "cpu_model": "AMD Ryzen 7 7800X3D 8-Core Processor",
   "cpu_cores": 16,
-  "load_average_start": "40.19 29.80 24.42",
-  "load_average_end": "27.92 27.75 27.73"
+  "load_average_start": "49.48 48.03 44.87",
+  "load_average_end": "46.74 40.76 36.33"
 }
