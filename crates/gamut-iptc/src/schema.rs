@@ -259,13 +259,16 @@ mod tests {
         assert_eq!(ns::IPTC_EXT, "http://iptc.org/std/Iptc4xmpExt/2008-02-29/");
         assert_eq!(ns::PLUS, "http://ns.useplus.org/ldf/xmp/1.0/");
         assert_eq!(ns::XMP, "http://ns.adobe.com/xap/1.0/");
+        assert_eq!(ns::EXIF, "http://ns.adobe.com/exif/1.0/");
     }
 
     #[test]
     fn iptc_namespaces_carries_plus_but_not_xmp_basic() {
         // The IPTC Extension defines properties in the PLUS namespace, so a graph filtered by
-        // IPTC_NAMESPACES must keep them; xmp: is general-purpose and must not be swept in.
+        // IPTC_NAMESPACES must keep them; xmp: and exif: are general-purpose and must not be
+        // swept in — they appear only inside IPTC structures.
         assert!(IPTC_NAMESPACES.contains(&ns::PLUS));
         assert!(!IPTC_NAMESPACES.contains(&ns::XMP));
+        assert!(!IPTC_NAMESPACES.contains(&ns::EXIF));
     }
 }

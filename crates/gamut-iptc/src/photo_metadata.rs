@@ -8,9 +8,11 @@ use crate::schema::{IPTC_NAMESPACES, XmpField, XmpShape, ns};
 ///
 /// These properties are defined *as* XMP (in the `dc:`/`photoshop:`/`Iptc4xmpCore:` namespaces), so
 /// the model is carried as [`gamut_xmp`] properties rather than a parallel type hierarchy. Typed
-/// accessors cover every scalar/list Core field; the structured `Iptc4xmpCore:CreatorContactInfo`
-/// and the Extension structures remain accessible (and round-trip losslessly) through
-/// [`PhotoMetadata::xmp`], and every IIM-mapped field also through
+/// accessors cover every scalar/list Core field, and the structured `Iptc4xmpCore:CreatorContactInfo`
+/// and every IPTC Extension structure have typed accessor pairs defined in
+/// [`crate::extension`] (such as [`PhotoMetadata::locations_created`]). Everything stays
+/// accessible (and round-trips losslessly) through [`PhotoMetadata::xmp`], and every IIM-mapped
+/// field also through
 /// [`PhotoMetadata::get_field`]/[`set_field`](PhotoMetadata::set_field) with
 /// [`crate::schema::FIELD_MAP`].
 ///
@@ -291,7 +293,10 @@ impl PhotoMetadata {
     /// The sublocation within a city (`Iptc4xmpCore:Location`).
     ///
     /// Named `sublocation` after the IIM dataset (2:92 Sub-location) to avoid confusion with the
-    /// IPTC Extension's structured location properties.
+    /// IPTC Extension's structured location properties
+    /// ([`locations_created`](Self::locations_created),
+    /// [`locations_shown`](Self::locations_shown)), whose
+    /// [`Location::sublocation`](crate::Location::sublocation) is an independent property.
     #[must_use]
     pub fn sublocation(&self) -> Option<&str> {
         self.simple(ns::IPTC_CORE, "Location")

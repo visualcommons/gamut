@@ -31,6 +31,24 @@ schema/tag tables are additionally pinned to the IPTC machine-readable tech refe
 | P6 | — | IIM/IRB writer round-trip + exiv2 differential gate (`tooling/gamut-iptc-oracle`) | ✅ |
 | v1 | issue #182 | API finalization (two entry points, published field map, complete Core accessors), strict-write/honest-read error contract, tech-reference drift guard, divan benches, docs | ✅ |
 | P7 | issue #422 | Breadth: the complete IIM 4.2 record-1/record-2 tag table, and typed models for the four most-used structured properties (`extension`) | ✅ |
+| P8 | issue #538 | The eleven remaining IPTC Extension structures, so every `ipmd_struct` entry has a typed model and every structured `ipmd_top` property an accessor pair | ✅ |
+
+## Completeness (issue #538)
+
+- **Every Extension structure.** `extension` adds `Location` (on `Iptc4xmpExt:LocationCreated`
+  and `LocationShown`), `Person` (`PersonWDetails`, on `PersonInImageWDetails`), `CvTerm` (on
+  `AboutCvTerm`, `Genre` and a person's characteristics), `EntityWithRole` (`EntityWRole`, on
+  `Contributor`), `Product` (`ProductWGtin`, on `ProductInImage`), `RegistryEntry` (on
+  `RegistryId`), `EmbeddedRightsExpression` and `LinkedRightsExpression` (`EmbdEncRightsExpr`,
+  `LinkedEncRightsExpr`), and the PLUS `CopyrightOwner`, `ImageCreator` and `ImageSupplier`, on the
+  retention and reproduction rules below. `tests/techreference.rs` now fails if the reference
+  defines a structure (other than `AltLang`) or a structured top-level property gamut does not model.
+- **Container kinds from the standard.** The three PLUS party lists are `rdf:Seq` in the standard's
+  XMP Specs rows; every other structured array is an `rdf:Bag`. A setter writes that kind for a new
+  property and keeps the kind an existing one carries.
+- **Oracle.** The Extension leg is XMP, so, like the four structures before it, it is gated by
+  `gamut-xmp`'s XMPCore oracle and by the tech-reference drift guard, not by
+  `tooling/gamut-iptc-oracle` (whose exiv2 build has the XMP toolkit disabled).
 
 ## Breadth (issue #422)
 
@@ -91,7 +109,8 @@ drops a value a caller set says so:
   well (issue #609): the typed view stays plain data, and the module docs' *The typed view stays
   plain data* records why. Every type is `#[non_exhaustive]`, so a later widening can be additive.
 - **A whole structured property the projection cannot express reads as absent, on the same terms.**
-  `creator_contact_info`, `image_regions`, `artwork_or_objects` and `licensors` report a value only
+  Every structured accessor (`creator_contact_info`, `image_regions`, `locations_created`, …)
+  reports a value only
   when writing it back would give the property back — so a bare structure written where the standard
   puts an array, an array member that is not a structure, a qualifier on the property or on an
   `rdf:li`, an array or structure holding nothing, and two top-level properties of one name all read
@@ -107,12 +126,15 @@ drops a value a caller set says so:
   model round-trip turns `Some(NaN)` into `None` (or into a retained `other` field of the same
   name, which is written in its place). Nothing read from a file is lost, since such a value
   never reads as a coordinate in the first place. On read, a coordinate whose text does not parse reads as
-  `None` and is kept verbatim in `other`. A fallible `to_xmp` (breaking all seven, and the four
-  setters with them) and a checked `Finite` coordinate type were both declined.
-- **The remaining eleven IPTC Extension structures** (`Location`, `PersonWDetails`, `CvTerm`,
-  `EntityWRole`, `ProductWGtin`, `RegistryEntry`, `EmbdEncRightsExpr`, `LinkedEncRightsExpr`,
-  `CopyrightOwner`, `ImageCreator`, `ImageSupplier`): no typed model — issue #538. They pass through
-  `PhotoMetadata::xmp` as raw `gamut-xmp` values untouched.
+  `None` and is kept verbatim in `other`. A fallible `to_xmp` (breaking every one, and the
+  structured setters with them) and a checked `Finite` coordinate type were both declined.
+- **A `Location`'s GPS fields stay text** (issue #538). `exif:GPSLatitude`/`GPSLongitude` are
+  EXIF `GPSCoordinate` strings, `exif:GPSAltitude` a `Rational` and `exif:GPSAltitudeRef` an
+  `Integer` in XMP, so the typed view carries the text the graph holds rather than a parsed number;
+  converting them to degrees or metres is left to the caller.
+- **Location's cardinality is not enforced**: the standard caps `LocationCreated` at one location
+  while its XMP form is a `Bag`, and gamut reads and writes every location the array holds, as it
+  does for the three-licensor cap.
 - **Exotic ISO 2022 character sets**: dataset 1:90 designations other than the spec default
   (decoded as Latin-1, the exiv2/ExifTool de-facto reading of ISO 646 IRV) and UTF-8 (`ESC % G`)
   are reported as `Error::Unsupported`, never mis-decoded.
