@@ -64,8 +64,9 @@ same rule `docs/testing.md` applies to a shrunk `proptest` counterexample, and t
 - **This crate is workspace-excluded**, so `cargo test --workspace --all-features` never builds it.
   Nothing on the pull-request path would otherwise compile these targets at all, and an API change
   in a driven crate would break them unnoticed until the next Extended run. CI's lint job therefore
-  runs `mise run check-fuzz` — build-only, no nightly, no sanitizer, no engine — exactly as it
-  already does for the excluded real-DNG conformance tier with `mise run check-dng-real`.
+  runs `mise run check-fuzz` — Clippy under the workspace's `-D warnings`, which compiles every
+  target and lints it too (#615); no nightly, no sanitizer, no engine — exactly as it already does
+  for the excluded real-DNG conformance tier with `mise run check-dng-real`.
 - **The dependency graph is shared across every target.** A feature turned on for one target's
   crate is on for all of them, because Cargo resolves features once per crate for the whole
   package: `bigtiff` was added to `gamut-ifd` for the `ifd_read` driver, and the pre-existing
@@ -340,7 +341,7 @@ check-fuzz-matrix`; run the same thing locally:
 
 ```bash
 mise run check-fuzz-matrix   # the three lists describe the same target set
-mise run check-fuzz          # every target still compiles against the crates it drives
+mise run check-fuzz          # every target still compiles against the crates it drives, Clippy-clean
 ```
 
 Both are tasks rather than bare commands so a contributor runs *what CI runs*: a step whose command

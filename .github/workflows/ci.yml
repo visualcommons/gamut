@@ -239,9 +239,10 @@ jobs:
       # workspace and nothing depends on it, so no workspace command compiles it, and a gamut-dng
       # API change breaks it unnoticed until the extended run on master. Its expensive half — the
       # Adobe DNG SDK — is already built by this job for gamut-dng's own dev-dependency on
-      # `gamut-dng-oracle`, so what is added here is the tier's own Rust targets. `check` needs no
-      # corpus, so this job does not grow the ~178 MiB fetch that `test-dng-real` requires.
-      - name: Real-DNG conformance tier compiles
+      # `gamut-dng-oracle`, so what is added here is the tier's own Rust targets. Clippy needs no
+      # corpus, so this job does not grow the ~178 MiB fetch that `test-dng-real` requires, and it
+      # holds the tier to the same `-D warnings` as the workspace (#615).
+      - name: Real-DNG conformance tier compiles and lints
         run: mise run check-dng-real
       # Same hole again (issue #541): `tooling/c2pa-oracle` is workspace-excluded and nothing
       # depends on it, so a gamut-avif, gamut-heic or gamut-metadata API change breaks it with
@@ -257,8 +258,9 @@ jobs:
       # the next Extended run on master. This is build-only: no nightly, no sanitizer, no engine,
       # so it stays bounded and reproducible and does not put a coverage-guided run on the PR path
       # (docs/testing.md, "Why fuzzing is not in the per-PR gate"). The driven crates are already
-      # built by the Clippy step above, so the marginal cost is the targets themselves.
-      - name: Fuzz tier compiles
+      # built by the Clippy step above, so the marginal cost is the targets themselves. It is Clippy
+      # under `-D warnings`, not `cargo check` (#615), so the targets are linted as well as compiled.
+      - name: Fuzz tier compiles and lints
         run: mise run check-fuzz
       - name: gamut-ffi feature sync
         run: mise run check-ffi-features

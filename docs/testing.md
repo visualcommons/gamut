@@ -180,7 +180,8 @@ the job is an exploration run rather than a regression gate: it runs **nightly**
 What the per-PR path *does* carry is the **compile** half, for the reason the excluded real-DNG
 tier already carries it: nothing else builds an excluded crate, so an API change in a driven crate
 breaks its targets unnoticed until the next run on master. CI's lint job runs `mise run
-check-fuzz` — no nightly, no sanitizer, no engine, nothing unbounded — and its `Format & Metadata`
+check-fuzz` — Clippy under `-D warnings` over every target, so the tier is linted as well as
+compiled (#615); no nightly, no sanitizer, no engine, nothing unbounded — and its `Format & Metadata`
 job runs `mise run check-fuzz-matrix`, which reconciles the three hand-maintained lists that
 describe the target set (the files, the `[[bin]]` entries, the `extended.yml` matrix), because a
 target missing from the third is one that never runs and nothing reports it. Both are mise tasks
