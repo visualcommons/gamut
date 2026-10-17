@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/visualcommons/gamut/compare/gamut-bitstream-v0.2.4...gamut-bitstream-v0.2.5) - 2026-10-17
+
+### Other
+
+- *(gamut-bitstream)* own the T.81 Annex K.2 Huffman table builder shared with gamut-jpeg ([#899](https://github.com/visualcommons/gamut/pull/899))
+
 ## [0.2.4](https://github.com/visualcommons/gamut/compare/gamut-bitstream-v0.2.3...gamut-bitstream-v0.2.4) - 2026-10-12
 
 ### Added
