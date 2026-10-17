@@ -211,8 +211,12 @@ by side and ranks none of them; resolving a profile against an intent is `gamut-
 printable Latin-1 repertoire and the reader decodes it one byte per character, so the writer
 encodes it as Latin-1 too. Written as UTF-8, every name byte ≥ 0x80 became two: the name came
 back garbled, and a 79-byte name holding one grew past the 79 bytes the reader accepts, losing
-the profile itself on read-back. Validating a name a caller supplies by hand — empty, over-long,
-null-bearing or outside Latin-1 — is [#619](https://github.com/visualcommons/gamut/issues/619).
+the profile itself on read-back. A name a caller supplies by hand is checked against the same
+clause ([#619](https://github.com/visualcommons/gamut/issues/619)): one that is empty, over-long,
+null-bearing or outside Latin-1 drops the profile with an `IccpNameLength` / `IccpNameNull` /
+`IccpNameNotLatin1` notice and the encode proceeds, while a repertoire or spacing deviation is
+written verbatim with `IccpNameRepertoire` / `IccpNameSpacing` — the two `iCCP` profile name rows
+of the outcome table below.
 
 **Auto-reduce keeps to the profile's colour family.** §11.3.2.3: "The color space of the ICC
 profile shall be an RGB color space for color images (color types 2, 3, and 6), or a greyscale
