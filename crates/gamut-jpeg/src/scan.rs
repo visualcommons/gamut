@@ -1061,4 +1061,126 @@ mod tests {
         assert_eq!(extend(4, 3), 4);
         assert_eq!(extend(7, 3), 7);
     }
+
+    /// The bits of `bytes`, MSB-first: the reference the buffered reader must reproduce.
+    fn bit(bytes: &[u8], i: usize) -> u32 {
+        u32::from(bytes[i / 8] >> (7 - i % 8) & 1)
+    }
+
+    /// `BitReader::fill`/`peek`/`read_bits`: reads of every width from 1 to 16 bits, in a sequence
+    /// that crosses each refill at a different offset, return exactly the stream's bits. A refill
+    /// that took one byte too many would shift the oldest buffered bit out of the 64-bit word; one
+    /// that took too few, or miscounted, would misalign every later read.
+    #[test]
+    fn bit_reader_reads_match_the_stream_across_refills() {
+        let bytes: Vec<u8> = (0..64u32).map(|i| (i * 37 + 11) as u8 & 0xFE).collect();
+        let mut r = BitReader::new(&bytes, 0);
+        let mut at = 0usize;
+        for n in (1..=16u32).cycle().take(40) {
+            let want = (0..n as usize).fold(0, |v, k| v * 2 + bit(&bytes, at + k));
+            assert_eq!(r.read_bits(n).unwrap(), want, "{n} bits at bit {at}");
+            at += n as usize;
+        }
+        // `read_bit` takes the next single bit, and zero-width reads take nothing.
+        assert_eq!(r.read_bits(0).unwrap(), 0);
+        assert_eq!(r.read_bit().unwrap() as u32, bit(&bytes, at));
+    }
+
+    /// `BitReader::consume`: a stream that ends without a marker supplies exactly its own bits. The
+    /// read that ends on the last one succeeds; the next fails as truncated, at the stream's end.
+    #[test]
+    fn bit_reader_truncation_fails_at_the_first_missing_bit() {
+        let mut r = BitReader::new(&[0xAB, 0xCD], 0);
+        assert_eq!(r.read_bits(12).unwrap(), 0xABC);
+        assert_eq!(r.read_bits(4).unwrap(), 0xD);
+        let err = r.read_bit().unwrap_err();
+        assert_eq!(
+            err.static_message(),
+            Some("JPEG: truncated entropy-coded data")
+        );
+        assert_eq!(err.byte_offset(), Some(2));
+    }
+
+    /// `BitReader::consume` at a marker: reads past the data return `1`-padding instead of failing,
+    /// and from then on `at_data_end` reports the end whatever follows.
+    #[test]
+    fn bit_reader_pads_with_ones_past_a_marker() {
+        let mut r = BitReader::new(&[0x12, 0xFF, 0xD0], 0);
+        assert_eq!(r.read_bits(8).unwrap(), 0x12);
+        // Exactly at the data's end, before a restart marker: not the end of the scan.
+        assert!(!r.at_data_end());
+        assert_eq!(r.read_bits(5).unwrap(), 0x1F);
+        assert!(r.at_data_end(), "an overread is the end, even before RSTm");
+    }
+
+    /// `BitReader::at_data_end` reads only the pending *data* bits: prefetched marker padding is
+    /// not pending, a pending partial byte must be all ones, a whole pending byte means data
+    /// remains, and the marker that follows must end the scan (not be a restart).
+    #[test]
+    fn bit_reader_at_data_end_reads_only_pending_data_bits() {
+        let end_after = |bytes: &[u8], n: u32| {
+            let mut r = BitReader::new(bytes, 0);
+            r.read_bits(n).unwrap();
+            r.at_data_end()
+        };
+        // Four pending bits, all ones, then EOI.
+        assert!(end_after(&[0xAF, 0xFF, 0xD9], 4));
+        // Four pending bits, not all ones.
+        assert!(!end_after(&[0xA7, 0xFF, 0xD9], 4));
+        // A whole pending byte of ones (a stuffed 0xFF) is data, not padding.
+        assert!(!end_after(&[0x00, 0xFF, 0x00, 0xFF, 0xD9], 8));
+        // All-ones partial byte, but the marker is a restart: more MCUs follow.
+        assert!(!end_after(&[0xAF, 0xFF, 0xD3], 4));
+        // Nothing read yet: a data byte is next.
+        assert!(!BitReader::new(&[0x00, 0xFF, 0xD9], 0).at_data_end());
+    }
+
+    /// `decode_symbol`: codes resolved by the lookahead table and codes longer than it decode alike,
+    /// and each consumes exactly its own length. The table has one code of every length 1..=16
+    /// except the all-ones code of length 16, so the stream walks both paths in turn.
+    #[test]
+    fn decode_symbol_consumes_exactly_each_codes_length() {
+        let bits = [1u8; 16];
+        let values: Vec<u8> = (1..=16).collect();
+        let table = DecTable::from_bits(&bits, &values).unwrap();
+        // Code of length l is l−1 ones then a zero; length 16 is fifteen ones then a zero.
+        let mut stream = Vec::new();
+        for l in [1usize, 9, 10, 3, 16, 12, 2] {
+            stream.extend(std::iter::repeat_n(1u8, l - 1));
+            stream.push(0);
+        }
+        stream.extend([0, 1, 0, 1]); // trailing raw bits, read after the last code
+        let mut packed = vec![0u8; stream.len().div_ceil(8)];
+        for (i, &b) in stream.iter().enumerate() {
+            packed[i / 8] += b << (7 - i % 8);
+        }
+        // Byte-stuff (§F.1.2.3): the long runs of ones form whole 0xFF bytes.
+        let mut bytes = Vec::new();
+        for b in packed {
+            bytes.push(b);
+            if b == 0xFF {
+                bytes.push(0x00);
+            }
+        }
+        bytes.extend([0xFF, 0xD9]);
+        let mut r = BitReader::new(&bytes, 0);
+        for l in [1u8, 9, 10, 3, 16, 12, 2] {
+            assert_eq!(decode_symbol(&table, &mut r).unwrap(), l);
+        }
+        assert_eq!(r.read_bits(4).unwrap(), 0b0101);
+    }
+
+    /// `decode_symbol` on a code the table cannot resolve: sixteen ones match no code of this
+    /// table (its all-ones length-16 slot is unassigned), the Figure F.16 undecodable case.
+    #[test]
+    fn decode_symbol_rejects_an_unassigned_code() {
+        let bits = [1u8; 16];
+        let values: Vec<u8> = (1..=16).collect();
+        let table = DecTable::from_bits(&bits, &values).unwrap();
+        let mut r = BitReader::new(&[0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00], 0);
+        assert_eq!(
+            decode_symbol(&table, &mut r).unwrap_err().static_message(),
+            Some("JPEG: undecodable Huffman code")
+        );
+    }
 }

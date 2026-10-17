@@ -602,6 +602,48 @@ mod tests {
     }
 
     #[test]
+    fn dectable_lookup_agrees_with_the_walk_on_every_window() {
+        // `DecTable::from_bits`'s lookahead table is the Figure F.16 walk, tabulated: for every
+        // 16-bit window, a non-zero entry for its 9-bit prefix is exactly the walk's (length,
+        // symbol), and a zero entry is exactly a window the walk resolves to a longer code or
+        // rejects. Over the four Annex K tables plus one with a code of every length 1..=16 (so
+        // every span size, both sides of the lookahead boundary, and an unassigned window).
+        let every_length = ([1u8; 16], (1..=16).collect::<Vec<u8>>());
+        let tables = [&STD_LUMA_DC, &STD_CHROMA_DC, &STD_LUMA_AC, &STD_CHROMA_AC]
+            .map(|s| (s.bits, s.values.to_vec()))
+            .into_iter()
+            .chain([every_length]);
+        for (bits, values) in tables {
+            let dec = DecTable::from_bits(&bits, &values).unwrap();
+            for window in 0..=u16::MAX {
+                let window = u32::from(window);
+                let entry = dec.lookup(window >> (16 - LOOKAHEAD));
+                match dec.walk(window) {
+                    (length, Ok(symbol)) if length <= LOOKAHEAD => {
+                        assert_eq!(entry, (length as u16) * 256 + u16::from(symbol));
+                    }
+                    _ => assert_eq!(entry, 0, "window {window:#06x}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dectable_walk_reports_the_bits_it_read() {
+        // `DecTable::walk` on the every-length table: a length-12 code (eleven ones, a zero) reads
+        // 12 bits, and sixteen ones -- the one unassigned window -- read all 16 and are rejected.
+        let dec = DecTable::from_bits(&[1u8; 16], &(1..=16).collect::<Vec<u8>>()).unwrap();
+        let (length, symbol) = dec.walk(0b1111_1111_1110_0101);
+        assert_eq!((length, symbol.unwrap()), (12, 12));
+        let (length, symbol) = dec.walk(0xFFFF);
+        assert_eq!(length, 16);
+        assert_eq!(
+            symbol.unwrap_err().static_message(),
+            Some("JPEG: undecodable Huffman code")
+        );
+    }
+
+    #[test]
     fn dectable_inverts_the_canonical_encoder() {
         // For every standard table, DECODE of each symbol's canonical (code,length) bit sequence
         // recovers that symbol — DecTable is the exact inverse of EncTable's §C.2 assignment.
