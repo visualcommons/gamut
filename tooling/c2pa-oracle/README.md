@@ -378,14 +378,18 @@ between two answers about a buffer" would exclude the `is_jumbf_not_found` row, 
 between two answers about an *error*. The two discriminating branches deliberately left out, and
 why, are named in that same doc comment.
 
-Three tests in that module parse the table out of the doc comment and fail on a blank cell, or on a
-name nothing in the file defines — rustdoc never compiles a `cfg(test)` module and never resolves
-these links, so a renamed test would otherwise leave a stale row behind a green suite. That is the
-whole of what they enforce. They read **rows → tests**: a branch added to one of those four
-functions *without* a row leaves all of them green, as does a test added without one, so the
-table's completeness is held by review and not by the suite. The per-function branch-count guard
-that would close that direction is
-[issue #616](https://github.com/visualcommons/gamut/issues/616).
+Four tests in that module hold the table to the code. Three parse it out of the doc comment and fail
+on a blank cell, or on a name nothing in the file defines — rustdoc never compiles a `cfg(test)`
+module and never resolves these links, so a renamed test would otherwise leave a stale row behind a
+green suite. Those three read **rows → tests**. The fourth reads **code → rows**: it cuts each of
+the four functions out of the file's own source, counts its discriminating branches — `match`
+arms, `matches!`, `if`, and the `ok_or`/`filter`/`skip` forms the functions chain — and fails,
+naming the function, when that count differs from the rows the table gives it. So adding a branch
+to one of the four *without* a row fails the suite (measured: an extra refusing arm in
+`declared_store_len` turns it red), and so does deleting a branch whose row stays. The counter is
+syntactic, not a parser, and its vocabulary is written down beside it: a branch written in a form
+outside that vocabulary counts as nothing until its token is added. What none of the four checks
+is the other direction for *tests*: a test added without a row stays green.
 
 Every one of those tests asserts **which** refusal fired — the message where the variant carries
 one, the variant itself where it does not — never merely that an error occurred. Several branches

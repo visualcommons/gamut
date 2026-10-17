@@ -593,6 +593,16 @@ mod tests {
     //! [`every_test_file_the_enumeration_names_exists`] does the same for the `tests/` files the
     //! prose points at.
     //!
+    //! Those three read **rows → tests**. The fourth reads the other way, **code → rows**:
+    //! [`every_discriminating_branch_in_the_named_functions_has_a_row`] cuts each function a row
+    //! names out of this file's source, counts its discriminating branches with
+    //! [`discriminating_branches`], and fails, naming the function, when the count differs from
+    //! the rows the table gives it. So adding a branch to one of the four without a row goes red,
+    //! and so does deleting one while its row stays. The counter is syntactic, not a parser: its
+    //! vocabulary — `match` arms, `matches!`, `if`, and the `ok_or`/`filter`/`skip` forms these
+    //! functions chain — is stated on [`discriminating_branches`], and a construct outside it
+    //! counts as nothing, so a branch written in a new form needs its token added there too.
+    //!
     //! Two things about the table read as gaps and are not. Two rows share a "not taken" column —
     //! [`a_span_ending_exactly_at_the_end_of_the_buffer_is_a_span`] is the nearest non-refused
     //! input for both of [`jumbf_superbox_span`]'s refusals, and splitting it would only give the
@@ -605,22 +615,23 @@ mod tests {
     //! whose resulting length is then too short. Adjacent branches on the same input share a
     //! boundary; that is what makes it a boundary.
     //!
-    //! Four of this module's tests are in no row, and the count is derived rather than
-    //! remembered: `grep -c '^    #\[test\]$' src/lib.rs` gives 24 tests, and
+    //! Five of this module's tests are in no row, and the count is derived rather than
+    //! remembered: `grep -c '^    #\[test\]$' src/lib.rs` gives 25 tests, and
     //! `grep -c '^    //! | \[' src/lib.rs` gives the table's 12 rows, which name 20 distinct
-    //! tests between their two columns. The four are
+    //! tests between their two columns. The five are
     //! [`a_span_is_still_found_when_a_decoy_jumb_precedes_the_superbox`], which pins the
     //! *composition* of the search and the length reading rather than a branch of either, and the
-    //! three checks whose subject is this doc comment rather than a buffer —
+    //! four checks whose subject is this doc comment rather than a buffer —
     //! [`the_enumeration_is_a_table_with_no_blank_cell`],
-    //! [`every_test_the_enumeration_names_exists_in_this_file`] and
-    //! [`every_test_file_the_enumeration_names_exists`].
+    //! [`every_test_the_enumeration_names_exists_in_this_file`],
+    //! [`every_test_file_the_enumeration_names_exists`] and
+    //! [`every_discriminating_branch_in_the_named_functions_has_a_row`].
     //!
-    //! Nothing checks that count, and the reason is worth stating: those three run rows → tests
-    //! and never tests → rows. They catch a row naming a test that is gone; they cannot catch a
-    //! test that is here and in no row — nor this sentence going stale — because in that
-    //! direction they ask nothing. That asymmetry is why the number above carries the command
-    //! that re-derives it.
+    //! Nothing checks that count, and the reason is worth stating: the four checks hold rows
+    //! against tests and branches against rows, but none runs tests → rows. A test that is here
+    //! and in no row — or this sentence going stale — is invisible to all of them, because in
+    //! that direction they ask nothing. That asymmetry is why the number above carries the
+    //! command that re-derives it.
     //!
     //! [`is_jumbf_not_found`]'s taken side is also observed end to end, on an error c2pa-rs itself
     //! raised, in `tests/no_copy_forward.rs`. The row points at the inline test rather than that
@@ -1092,5 +1103,142 @@ mod tests {
             "the enumeration points at `tests/` files for the two claims outside this layer; \
              finding none means this test read the wrong lines and was checking nothing"
         );
+    }
+
+    /// `line` with its string literals emptied and its `//` comment dropped, so neither prose nor a
+    /// refusal message can contribute a token to [`discriminating_branches`].
+    fn code_of(line: &str) -> String {
+        let mut code = String::with_capacity(line.len());
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if in_string {
+                match (escaped, c) {
+                    (false, '\\') => escaped = true,
+                    (false, '"') => {
+                        in_string = false;
+                        code.push('"');
+                    }
+                    _ => escaped = false,
+                }
+            } else if c == '"' {
+                in_string = true;
+                code.push('"');
+            } else if c == '/' && chars.peek() == Some(&'/') {
+                break;
+            } else {
+                code.push(c);
+            }
+        }
+        code
+    }
+
+    /// The body of the top-level `pub fn name` in this file — from the `{` that opens it to the
+    /// `}` that closes it — with string literals and comments stripped by [`code_of`].
+    fn function_body(name: &str) -> String {
+        let signature = format!("pub fn {name}(");
+        let code: String = SOURCE
+            .lines()
+            .skip_while(|line| !line.starts_with(&signature))
+            .map(|line| code_of(line) + "\n")
+            .collect();
+        assert!(
+            !code.is_empty(),
+            "the enumeration names `{name}`, and this file defines no `pub fn` by that name"
+        );
+
+        let open = code
+            .find('{')
+            .unwrap_or_else(|| panic!("`{name}` has no body"));
+        let mut depth = 0usize;
+        for (at, c) in code.char_indices().skip(open) {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return code[open..=at].to_owned();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("`{name}`'s body never closes")
+    }
+
+    /// How many discriminating branches `body` holds, by the syntactic reading the enumeration's
+    /// rows take of the four functions it names:
+    ///
+    /// * a `match` with *n* arms is *n − 1* branches — every arm but the one the input falls to
+    ///   when it matches none of the others — so it counts each `=>` and subtracts one per `match`;
+    /// * `matches!` is one two-way branch;
+    /// * `if` is one, whether it opens an `if`, an `else if` or an `if let`;
+    /// * an `Option` chain contributes one branch for its terminal `ok_or`/`ok_or_else` — the
+    ///   chain's first way to come up empty — and one more for each `filter` or `skip` narrowing
+    ///   it, each of which is a further way to come up empty. Hence `jumbf_superbox_span`'s
+    ///   `checked_add(..).filter(..).ok_or(..)` is two branches, its two rows, and
+    ///   `find_jumbf_superbox`'s `skip(..).find(..).ok_or(..)` is two, its two rows.
+    ///
+    /// Deliberately *not* counted: `?`, which propagates a branch some other function took (that
+    /// function's rows hold it); `checked_add`, `get` and `find`, the base sources an `ok_or`
+    /// already stands for; and `and_then(|field| field.try_into().ok())`, which converts a slice
+    /// the `get` before it has already sized, so it cannot come up empty on its own. A form outside
+    /// this vocabulary — `let … else`, `&&`/`||`, `unwrap_or` — is not used by these functions;
+    /// one that starts to be needs its token added here, or the count runs short of the rows.
+    fn discriminating_branches(body: &str) -> usize {
+        let words: Vec<&str> = body
+            .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '!'))
+            .filter(|word| !word.is_empty())
+            .collect();
+        let count = |word: &str| words.iter().filter(|w| **w == word).count();
+
+        let arms = body.matches("=>").count();
+        let matches = count("match");
+        assert!(
+            arms >= matches,
+            "every `match` has at least one arm, so {arms} `=>` cannot serve {matches} matches"
+        );
+
+        arms - matches
+            + count("matches!")
+            + count("if")
+            + count("ok_or")
+            + count("ok_or_else")
+            + count("filter")
+            + count("skip")
+    }
+
+    #[test]
+    fn every_discriminating_branch_in_the_named_functions_has_a_row() {
+        let mut rows_per_function: Vec<(&str, usize)> = Vec::new();
+        for row in enumeration_rows().iter().skip(2) {
+            let function = intra_doc_links(row[0])
+                .first()
+                .copied()
+                .unwrap_or_else(|| panic!("a row names no function: {row:?}"));
+            match rows_per_function
+                .iter_mut()
+                .find(|(name, _)| *name == function)
+            {
+                Some((_, rows)) => *rows += 1,
+                None => rows_per_function.push((function, 1)),
+            }
+        }
+        assert_eq!(
+            rows_per_function.len(),
+            4,
+            "the enumeration covers exactly four named functions: {rows_per_function:?}"
+        );
+
+        for (function, rows) in rows_per_function {
+            let branches = discriminating_branches(&function_body(function));
+            assert_eq!(
+                branches, rows,
+                "`{function}` holds {branches} discriminating branches and the enumeration gives \
+                 it {rows} rows; a branch added without a row (or a row left behind a deleted \
+                 branch) is the finding"
+            );
+        }
     }
 }
