@@ -1,0 +1,199 @@
+# libFuzzer dictionary for `dng_decode` (issue #567). It carries only what is DNG-specific:
+# `run.sh` appends it to `ifd.dict`, which holds the TIFF/IFD headers, field types, pointer tags
+# and layout tags a DNG is built from, because libFuzzer accepts a single `-dict` file.
+#
+# Distilled from the real-camera DNGs in the `gamut-dng-samples` submodule (Apple iPhone 12 Pro,
+# Leica M10 and M Monochrom, Canon 5D Mark III through Adobe DNG Converter; `mise run
+# fetch-dng-samples`) by walking every IFD, sub-IFD and Exif IFD, and from the tags gamut-dng's
+# decode path reads. Each token is a construct those files carry and a byte-level mutator is slow
+# to rediscover: tag IDs, the compression and photometric codes that pick a decode path, the
+# DNGVersion octets, the opcode IDs of an opcode list, the codestream markers a tile starts with,
+# and the MakerNote magics a camera writes. The files themselves are not vendored (hundreds of
+# megabytes; see "Dictionaries" in the README).
+
+# ── DNG tags the decode path reads ────────────────────────────────────────────────────────────
+# Every DNG-range tag (50706 and up) `crates/gamut-dng/src` reads through `tags::` while
+# decoding: 64 tags, 38 of them present in the sample files. Both byte orders, as in ifd.dict.
+dng_version_le="\x12\xC6"
+dng_version_be="\xC6\x12"
+dng_backward_version_le="\x13\xC6"
+dng_backward_version_be="\xC6\x13"
+unique_camera_model_le="\x14\xC6"
+unique_camera_model_be="\xC6\x14"
+cfa_plane_color_le="\x16\xC6"
+cfa_plane_color_be="\xC6\x16"
+cfa_layout_le="\x17\xC6"
+cfa_layout_be="\xC6\x17"
+linearization_table_le="\x18\xC6"
+linearization_table_be="\xC6\x18"
+black_level_repeat_dim_le="\x19\xC6"
+black_level_repeat_dim_be="\xC6\x19"
+black_level_le="\x1A\xC6"
+black_level_be="\xC6\x1A"
+black_level_delta_h_le="\x1B\xC6"
+black_level_delta_h_be="\xC6\x1B"
+black_level_delta_v_le="\x1C\xC6"
+black_level_delta_v_be="\xC6\x1C"
+white_level_le="\x1D\xC6"
+white_level_be="\xC6\x1D"
+default_crop_origin_le="\x1F\xC6"
+default_crop_origin_be="\xC6\x1F"
+default_crop_size_le="\x20\xC6"
+default_crop_size_be="\xC6\x20"
+color_matrix1_le="\x21\xC6"
+color_matrix1_be="\xC6\x21"
+color_matrix2_le="\x22\xC6"
+color_matrix2_be="\xC6\x22"
+camera_calibration1_le="\x23\xC6"
+camera_calibration1_be="\xC6\x23"
+camera_calibration2_le="\x24\xC6"
+camera_calibration2_be="\xC6\x24"
+reduction_matrix1_le="\x25\xC6"
+reduction_matrix1_be="\xC6\x25"
+reduction_matrix2_le="\x26\xC6"
+reduction_matrix2_be="\xC6\x26"
+analog_balance_le="\x27\xC6"
+analog_balance_be="\xC6\x27"
+as_shot_neutral_le="\x28\xC6"
+as_shot_neutral_be="\xC6\x28"
+as_shot_white_xy_le="\x29\xC6"
+as_shot_white_xy_be="\xC6\x29"
+baseline_exposure_le="\x2A\xC6"
+baseline_exposure_be="\xC6\x2A"
+baseline_sharpness_le="\x2C\xC6"
+baseline_sharpness_be="\xC6\x2C"
+calibration_illuminant1_le="\x5A\xC6"
+calibration_illuminant1_be="\xC6\x5A"
+calibration_illuminant2_le="\x5B\xC6"
+calibration_illuminant2_be="\xC6\x5B"
+active_area_le="\x8D\xC6"
+active_area_be="\xC6\x8D"
+masked_areas_le="\x8E\xC6"
+masked_areas_be="\xC6\x8E"
+profile_name_le="\xF8\xC6"
+profile_name_be="\xC6\xF8"
+profile_hue_sat_map_dims_le="\xF9\xC6"
+profile_hue_sat_map_dims_be="\xC6\xF9"
+profile_hue_sat_map_data1_le="\xFA\xC6"
+profile_hue_sat_map_data1_be="\xC6\xFA"
+profile_hue_sat_map_data2_le="\xFB\xC6"
+profile_hue_sat_map_data2_be="\xC6\xFB"
+profile_tone_curve_le="\xFC\xC6"
+profile_tone_curve_be="\xC6\xFC"
+profile_embed_policy_le="\xFD\xC6"
+profile_embed_policy_be="\xC6\xFD"
+forward_matrix1_le="\x14\xC7"
+forward_matrix1_be="\xC7\x14"
+forward_matrix2_le="\x15\xC7"
+forward_matrix2_be="\xC7\x15"
+row_interleave_factor_le="\x1F\xC7"
+row_interleave_factor_be="\xC7\x1F"
+profile_look_table_dims_le="\x25\xC7"
+profile_look_table_dims_be="\xC7\x25"
+profile_look_table_data_le="\x26\xC7"
+profile_look_table_data_be="\xC7\x26"
+opcode_list1_le="\x40\xC7"
+opcode_list1_be="\xC7\x40"
+opcode_list2_le="\x41\xC7"
+opcode_list2_be="\xC7\x41"
+opcode_list3_le="\x4E\xC7"
+opcode_list3_be="\xC7\x4E"
+noise_profile_le="\x61\xC7"
+noise_profile_be="\xC7\x61"
+profile_hue_sat_map_encoding_le="\xA3\xC7"
+profile_hue_sat_map_encoding_be="\xC7\xA3"
+profile_look_table_encoding_le="\xA4\xC7"
+profile_look_table_encoding_be="\xC7\xA4"
+baseline_exposure_offset_le="\xA5\xC7"
+baseline_exposure_offset_be="\xC7\xA5"
+new_raw_image_digest_le="\xA7\xC7"
+new_raw_image_digest_be="\xC7\xA7"
+depth_format_le="\xE9\xC7"
+depth_format_be="\xC7\xE9"
+depth_near_le="\xEA\xC7"
+depth_near_be="\xC7\xEA"
+depth_far_le="\xEB\xC7"
+depth_far_be="\xC7\xEB"
+depth_units_le="\xEC\xC7"
+depth_units_be="\xC7\xEC"
+depth_measure_type_le="\xED\xC7"
+depth_measure_type_be="\xC7\xED"
+profile_gain_table_map_le="\x2D\xCD"
+profile_gain_table_map_be="\xCD\x2D"
+semantic_name_le="\x2E\xCD"
+semantic_name_be="\xCD\x2E"
+semantic_instance_id_le="\x30\xCD"
+semantic_instance_id_be="\xCD\x30"
+calibration_illuminant3_le="\x31\xCD"
+calibration_illuminant3_be="\xCD\x31"
+camera_calibration3_le="\x32\xCD"
+camera_calibration3_be="\xCD\x32"
+color_matrix3_le="\x33\xCD"
+color_matrix3_be="\xCD\x33"
+forward_matrix3_le="\x34\xCD"
+forward_matrix3_be="\xCD\x34"
+mask_sub_area_le="\x38\xCD"
+mask_sub_area_be="\xCD\x38"
+profile_hue_sat_map_data3_le="\x39\xCD"
+profile_hue_sat_map_data3_be="\xCD\x39"
+reduction_matrix3_le="\x3A\xCD"
+reduction_matrix3_be="\xCD\x3A"
+profile_gain_table_map2_le="\x40\xCD"
+profile_gain_table_map2_be="\xCD\x40"
+column_interleave_factor_le="\x43\xCD"
+column_interleave_factor_be="\xCD\x43"
+
+# ── Codes that pick a decode path (SHORT values of Compression / PhotometricInterpretation) ────
+# Compression 7 (lossless JPEG) and 8 (Deflate) are small integers the mutator finds unaided;
+# 34892 (lossy JPEG, also PhotometricInterpretation LinearRaw), 52546 (JPEG XL) and
+# PhotometricInterpretation 32803 (CFA) are not.
+code_34892_le="\x4C\x88"
+code_34892_be="\x88\x4C"
+compression_jpeg_xl_le="\x42\xCD"
+compression_jpeg_xl_be="\xCD\x42"
+photometric_cfa_le="\x23\x80"
+photometric_cfa_be="\x80\x23"
+
+# ── DNGVersion / DNGBackwardVersion octets (BYTE[4], order-independent) ───────────────────────
+# 1.0.0.0 and 1.4.0.0 are what the sample files carry; 1.7.1.0 is the version gamut-dng targets.
+dng_version_1_0="\x01\x00\x00\x00"
+dng_version_1_4="\x01\x04\x00\x00"
+dng_version_1_7_1="\x01\x07\x01\x00"
+
+# ── Opcode IDs (DNG 1.7.1 Chapter 7; `gamut_dng::opcode_id`) ─────────────────────────────────
+# Opcode lists are big-endian regardless of the file's byte order, so each ID appears once. The
+# Canon 5D Mark III files carry MapPolynomial (8) in OpcodeList2; the rest are the standard set.
+opcode_warp_rectilinear="\x00\x00\x00\x01"
+opcode_warp_fisheye="\x00\x00\x00\x02"
+opcode_fix_vignette_radial="\x00\x00\x00\x03"
+opcode_fix_bad_pixels_constant="\x00\x00\x00\x04"
+opcode_fix_bad_pixels_list="\x00\x00\x00\x05"
+opcode_trim_bounds="\x00\x00\x00\x06"
+opcode_map_table="\x00\x00\x00\x07"
+opcode_map_polynomial="\x00\x00\x00\x08"
+opcode_gain_map="\x00\x00\x00\x09"
+opcode_delta_per_row="\x00\x00\x00\x0A"
+opcode_delta_per_column="\x00\x00\x00\x0B"
+opcode_scale_per_row="\x00\x00\x00\x0C"
+opcode_scale_per_column="\x00\x00\x00\x0D"
+opcode_warp_rectilinear_2="\x00\x00\x00\x0E"
+
+# ── Codestream markers a compressed tile starts with ──────────────────────────────────────────
+# JPEG SOI, the lossless (SOF3) and baseline (SOF0) frame markers, DHT; the bare JPEG XL
+# codestream signature.
+jpeg_soi="\xFF\xD8"
+jpeg_sof3="\xFF\xC3"
+jpeg_sof0="\xFF\xC0"
+jpeg_dht="\xFF\xC4"
+jxl_codestream="\xFF\x0A"
+
+# ── MakerNote and DNGPrivateData magics ───────────────────────────────────────────────────────
+# From the sample files: the MakerNote headers the Apple and Leica bodies write, and the
+# DNGPrivateData prefix Adobe DNG Converter wraps a converted camera's MakerNote in.
+makernote_apple="Apple iOS\x00\x00\x01MM"
+makernote_leica_m10="LEICA\x00\x02\x00"
+makernote_leica_m_monochrom="LEICA0\x03\x00"
+dng_private_data_adobe="Adobe\x00MakN"
+# Other vendors' MakerNote headers (Nikon, Olympus, Fujifilm, Panasonic, Sony, Pentax) are left
+# out: no sample file carries one, and no fuzzed parser reads a MakerNote's bytes — `gamut-exif`
+# keeps the block opaque and detects its vendor from `Make` — so they would steer nothing.

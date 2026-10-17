@@ -5,8 +5,8 @@ Part of the **image metadata primitives** campaign (GitHub issue #34). Implement
 TIFF/IFD core. Released as **v1** (issue #194).
 
 **Keystone (done):** the **writer round-trip** — re-emitting a valid `Exif\0\0` + TIFF blob through
-`gamut-ifd`'s offset-patching writer with the Exif/GPS/Interop sub-IFD pointers, JPEG thumbnail, and
-source byte order intact. `parse → to_bytes → parse` is value-level identical in both byte orders.
+`gamut-ifd`'s offset-patching writer with the Exif/GPS/Interop sub-IFD pointers, JPEG or
+uncompressed strip thumbnail, and source byte order intact. `parse → to_bytes → parse` is value-level identical in both byte orders.
 
 **Oracle:** differential vs **exiv2** (`tooling/exiv2-oracle`, dev-only FFI over
 `Exiv2::ExifParser::decode/encode`) for read/round-trip parity, plus committed **byte-level golden
@@ -157,8 +157,6 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
   list that fails once it stops being live. A *corrected-but-different* value in either copy is
   therefore a test failure. What remains is that the fixture is itself a hand transcription:
   nothing re-reads the vendored PDF, so an error made identically in both copies would still pass.
-- **Uncompressed strip-based thumbnails** are read (as their directory) but not re-embedded; JPEG
-  thumbnails round-trip fully.
 - **An async entry point.** Declined rather than deferred: `parse_from` is synchronous over
   `gamut_ifd::ReadAt`, and an async caller drives that source itself. A `tokio` feature would put a
   runtime dependency in a crate that has none and constrain the public shape against the

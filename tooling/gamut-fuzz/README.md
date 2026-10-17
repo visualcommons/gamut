@@ -402,4 +402,38 @@ each names the check it feeds:
 `corpus/tiff_decode/` carries two — `rgb8-none.tif` and `rgb8-lzw.tif` — because an uncompressed
 strip and an LZW strip enter the decoder through different code, and seeding only one leaves the
 other to be rediscovered. Real-camera corpora are deliberately not vendored: they run to hundreds
-of megabytes and live in `justin13888/rawshift-test-fixtures` releases.
+of megabytes and live in `justin13888/rawshift-test-fixtures` releases. What they would teach the
+engine is carried by a dictionary instead (next section).
+
+## Dictionaries
+
+`dict/` holds libFuzzer `-dict` files for the TIFF/IFD parser targets
+([#567](https://github.com/visualcommons/gamut/issues/567)). The decoder targets start from seeds
+this workspace's own encoders wrote, which reach the pixel path but nothing camera-specific —
+maker notes, sub-IFD trees several levels deep, opcode lists. A dictionary hands the mutator the
+tokens those constructs are made of, so it splices a whole tag ID or magic in one step instead of
+assembling it a byte at a time.
+
+| file | applied to | holds |
+|---|---|---|
+| `dict/ifd.dict` | `ifd_read`, `tiff_decode`, `dng_decode` | TIFF and BigTIFF headers, the IFD/LONG8/SLONG8/IFD8 field types, the pointer tags, the layout tags `gamut-tiff` reads, the embedded-metadata tags |
+| `dict/dng.dict` | `dng_decode` | every DNG-range tag gamut-dng's decode path reads, the Compression/PhotometricInterpretation codes that pick a decode path, DNGVersion octets, the opcode IDs, JPEG/JPEG XL codestream markers, MakerNote and DNGPrivateData magics |
+
+Each multi-byte tag token appears in both byte orders, since the real-camera files use both.
+Opcode IDs appear once, big-endian: an opcode list is big-endian whatever the file's byte order.
+`dng.dict` was distilled from the real-camera DNGs in the `gamut-dng-samples` submodule (`mise run
+fetch-dng-samples`) by walking every IFD, sub-IFD and Exif IFD in them. Its header says which
+tokens came from those files and which came from gamut-dng's tag table or the DNG specification.
+
+`run.sh` applies them, so `mise run fuzz <target>` locally and the Extended job search with the
+same dictionary. libFuzzer reads a single `-dict` file, so for `dng_decode` the runner writes
+`ifd.dict` followed by `dng.dict` to `state/dng_decode.dict` (ignored, like all of `state/`). The
+runner keys on the first argument, so name the target first, as every example here does. An
+explicit `-dict=<file>` argument replaces the committed dictionary for that run. The law targets
+take none: their input is a structured encoding, not a file format, so no token in it has a fixed
+spelling.
+
+A real-camera **seed corpus** was considered and not taken. Vendoring one makes every clone pay
+for hundreds of megabytes, and a third fetch task on the `fetch-av1-oracles`/`fetch-dng-samples`
+pattern would leave the Extended job choosing between fetching it every night and seeding without
+it. A multi-megabyte seed also lowers the executions per second each row's hour buys. The dictionary carries the camera-specific tokens for a few kilobytes.

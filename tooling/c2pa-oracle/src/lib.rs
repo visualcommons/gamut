@@ -642,6 +642,61 @@ pub fn embed(format: &str, asset: &[u8]) -> Result<Vec<u8>> {
     Ok(dest.into_inner())
 }
 
+/// What [`embed_remote`] produces: an asset that references its manifest store by URL, and the
+/// store that URL would serve.
+#[derive(Debug)]
+pub struct RemoteSigned {
+    /// The asset as c2pa-rs wrote it: no embedded store, and a `dcterms:provenance` URL in its XMP.
+    pub asset: Vec<u8>,
+    /// The manifest store c2pa-rs signed for that asset — the bytes the URL is meant to serve.
+    pub store: Vec<u8>,
+}
+
+/// The remote counterpart of [`embed`] (issue #846): lets c2pa-rs sign a store for `asset` that is
+/// **not** embedded, and write `url` into the asset's XMP as the `dcterms:provenance` reference
+/// C2PA 2.4 §11.5 reserves for an external manifest.
+///
+/// c2pa-rs writes the reference itself (`Builder::set_remote_url` with `set_no_embed(true)`), so
+/// the XMP a gamut reader is pointed at is the reference implementation's, not gamut's.
+///
+/// # Errors
+///
+/// [`OracleError::C2pa`] if the manifest cannot be built or signed, or c2pa-rs cannot write a
+/// remote reference into `format`.
+pub fn embed_remote(format: &str, asset: &[u8], url: &str) -> Result<RemoteSigned> {
+    let mut builder = manifest_builder()?;
+    builder.set_remote_url(url).set_no_embed(true);
+    let mut source = Cursor::new(asset.to_vec());
+    let mut dest = Cursor::new(Vec::new());
+    let store = builder.save_to_stream(format, &mut source, &mut dest)?;
+    Ok(RemoteSigned {
+        asset: dest.into_inner(),
+        store,
+    })
+}
+
+/// The external-manifest URL c2pa-rs reports for `asset`, or `None` when it reports none.
+///
+/// c2pa-rs reaches `Reader::remote_url` only after it has *fetched* the remote store, which needs
+/// its `fetch_remote_manifests` feature and a network this crate deliberately builds without (see
+/// `Cargo.toml`). Without it, c2pa 0.90.21 reports the same URL — the `dcterms:provenance` value
+/// its own XMP reader extracted — as `Error::RemoteManifestUrl` instead (`src/store.rs:3540-3563`).
+/// Both outcomes are read here: the error carries the URL a fetch would have used, and a
+/// successful read reports `Reader::remote_url`, which is `None` for an embedded store.
+///
+/// # Errors
+///
+/// [`OracleError::C2pa`] for any other refusal — notably [`c2pa::Error::JumbfNotFound`] when the
+/// asset carries neither an embedded store nor a remote reference.
+pub fn remote_manifest_url(format: &str, asset: &[u8]) -> Result<Option<String>> {
+    match Reader::from_context(signing_context()?).with_stream(format, Cursor::new(asset.to_vec()))
+    {
+        Ok(reader) => Ok(reader.remote_url().map(str::to_owned)),
+        Err(c2pa::Error::RemoteManifestUrl(url)) => Ok(Some(url)),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// c2pa-rs's verdict on an asset that carries its own store.
 ///
 /// # Errors
@@ -717,8 +772,16 @@ mod tests {
     //! covers the row the widening was made for. Hence the list. It claims to be complete over
     //! four named functions and nothing wider.
     //!
-    //! Three kinds of discriminating branch in this file sit outside it, named here so their
+    //! Four kinds of discriminating branch in this file sit outside it, named here so their
     //! absence is a decision and not an oversight:
+    //!
+    //! * [`remote_manifest_url`]'s match over c2pa-rs's reading of an asset (issue #846): a URL
+    //!   carried by `RemoteManifestUrl`, a successful read's `remote_url`, or any other refusal
+    //!   passed through. Its outcomes are c2pa-rs's own, reached only by handing it a real asset,
+    //!   so they are pinned in `tests/remote_provenance.rs` — the error arm by both remote
+    //!   references there, the read arm by the embedded store that reports no URL. The
+    //!   pass-through arm is not pinned: every asset that file hands it carries a store or a
+    //!   reference.
     //!
     //! * The data-hashed driver and its reader (issue #534):
     //!   `reserve_then_fill_data_hashed`'s refusal of a signed store that is not the

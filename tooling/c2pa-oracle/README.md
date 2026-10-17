@@ -49,6 +49,8 @@ in both directions.
 | PNG `caBX` (§A.3.2), both directions | `tests/png.rs` | a store signed around the chunk span `PngEncoder::encode_with_report` gave validates once `fill_c2pa` writes it, and signing around the payload alone does not; `gamut-png` locates c2pa-rs's store at its JUMBF span, and the chunk span is the exclusion c2pa-rs wrote |
 | RIFF/WebP `C2PA` chunk (§A.3.7), both directions | `tests/riff_webp.rs` | a store signed around the span `WebpEncoder::encode_with_report` gave validates once a same-length re-encode carries it; `gamut-webp` locates c2pa-rs's store at its JUMBF span, and c2pa-rs's exclusion is the header-inclusive span `gamut-riff` reports — see below |
 | TIFF and DNG tag 52545 (§A.3.6), both directions | `tests/dng_tiff.rs` | a store signed around the two ranges each encoder reports validates once copied in; each locator finds c2pa-rs's store at its JUMBF span, and c2pa-rs's two exclusions are exactly the store and `count`-field ranges gamut locates (§18.5.5) |
+| `gamut inspect`'s C2PA report, on a file c2pa-rs embedded into | `tests/inspect_report.rs` | each container's `c2pa_summary` (PNG, WebP, TIFF, DNG, AVIF, HEIC) reports the store at the span its own JUMBF header declares, and the data-hashed ones report exactly the exclusions c2pa-rs wrote; the built `gamut inspect --output json` prints the same size, offsets and PNG chunk — see below |
+| remote provenance (§11.5), both directions | `tests/remote_provenance.rs` | a PNG carrying no store and a `dcterms:provenance` URL — written by c2pa-rs, or by gamut — is `ProvenanceState::Remote` at that URL to `Metadata::provenance` and remote at the same URL to c2pa-rs; the store signed for the URL binds to the asset; an embedded store is remote to neither — see below |
 
 The four rows above are the `c2pa.hash.data` containers. Their direction-1 driver,
 `reserve_then_fill_data_hashed`, differs from the BMFF one in the one way the binding forces: a
@@ -60,8 +62,26 @@ CRC. c2pa-rs is asked to compose its store as a bare `application/c2pa` store, b
 crate writes its own framing and c2pa-rs's RIFF handler has no composer at all.
 
 JPEG (§A.3.1, APP11) is not covered: issue #441 descoped JPEG C2PA carriage, so there is no gamut
-surface to cross-check. `gamut inspect`'s C2PA report (#448) and remote provenance (#449) are not
-covered here either; checking them against c2pa-rs is issue #846.
+surface to cross-check.
+
+## The inspect report and remote provenance (#846)
+
+`gamut inspect` computes nothing of its own about a store: it prints each format crate's
+`c2pa_summary`. `tests/inspect_report.rs` therefore holds every summary to c2pa-rs directly, and
+runs the command once, on a PNG, to show the numbers survive the trip to stdout. `gamut-cli` is a
+binary crate with no library to link and a dev-dependency cannot name a binary, so that test runs
+the `gamut` executable by path: the one `GAMUT_BIN` names, or one it builds from this checkout with
+`cargo build --locked -p gamut-cli` into its own `CARGO_TARGET_TMPDIR`. That build is the one thing
+in this crate that is not pure Rust — `gamut-cli` takes the umbrella's `all` feature and with it
+`gamut-jxl`'s statically built libjxl encoder — so it needs the CMake and C++ toolchain the
+workspace build already needs; every other test here still needs none.
+
+`Reader::remote_url` reports a URL only once c2pa-rs has *fetched* the store from it, which takes its
+`fetch_remote_manifests` feature and a network; this crate has neither. Without them c2pa 0.90.21
+reports the same URL — the `dcterms:provenance` value its own XMP reader found — as
+`Error::RemoteManifestUrl` (`src/store.rs:3540-3563`), and `remote_manifest_url` in `src/lib.rs`
+reads that. What a fetch would return is checked in its place: the store c2pa-rs signed for the URL
+validates against the asset carrying the reference.
 
 ## The `update`-purpose finding
 

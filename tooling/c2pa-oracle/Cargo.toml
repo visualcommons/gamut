@@ -57,9 +57,10 @@ serde_json = "1"
 gamut-avif = { path = "../../crates/gamut-avif" }
 gamut-heic = { path = "../../crates/gamut-heic" }
 gamut-core = { path = "../../crates/gamut-core" }
-# The metadata facade, for `tests/no_copy_forward.rs` only: its `C2paPolicy` is the mechanism that
-# refuses to carry a parent's manifest store into a derivative, and the test drives it rather than
-# asserting a re-encode happens not to emit one.
+# The metadata facade, for two tests. `tests/no_copy_forward.rs`: its `C2paPolicy` is the mechanism
+# that refuses to carry a parent's manifest store into a derivative, and the test drives it rather
+# than asserting a re-encode happens not to emit one. `tests/remote_provenance.rs` (issue #846):
+# `Metadata::provenance` is the gamut side of the remote-provenance differential.
 gamut-metadata = { path = "../../crates/gamut-metadata" }
 # The non-BMFF containers (issue #534). Each carries its store in its own framing — a PNG `caBX`
 # chunk, a RIFF `C2PA` chunk, a TIFF/DNG tag-52545 value — and binds it with `c2pa.hash.data`,
