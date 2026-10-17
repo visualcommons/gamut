@@ -204,7 +204,7 @@ run = "./tooling/gamut-fuzz/run.sh"
 # is workspace-excluded *and* nothing depends on it, so `clippy --workspace --all-targets` and
 # `test --workspace` never build it, and an API change in gamut-ifd, gamut-tiff, gamut-dng,
 # gamut-isobmff or gamut-heic can break every target while all four required checks stay green.
-# Build-only: no nightly, no sanitizer, no engine, so it stays bounded and reproducible and does
+# Clippy only: no nightly, no sanitizer, no engine, so it stays bounded and reproducible and does
 # not put a coverage-guided run on the pull-request path (docs/testing.md).
 #
 # Clippy rather than `cargo check` (#615): it subsumes the compile this task exists for -- an API
@@ -232,7 +232,7 @@ run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
 # path — so `clippy --workspace --all-targets` and `test --workspace` never build it, and a
 # gamut-dng API change can break it while every per-PR gate stays green (#353 removed
 # `DecodedDng::exif_extra` and only master's extended run noticed, at compile time, before a
-# single sample was decoded). `check` needs no corpus, which is what makes this cheap enough for
+# single sample was decoded). Clippy needs no corpus, which is what makes this cheap enough for
 # the lint job; the corpus-backed assertions stay in `test-dng-real`. It runs Clippy under
 # `-D warnings` rather than `cargo check` for the reason `check-fuzz` above does (#615): the same
 # compile, plus the lint oracle every workspace crate already answers to.
