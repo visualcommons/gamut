@@ -754,6 +754,32 @@ mod tests {
     }
 
     #[test]
+    fn the_trial_context_is_exactly_the_last_sixteen_rows() {
+        // Eight rows of noise reappear exactly seventeen rows later. A copy's candidates reproduce
+        // the original's emitted residuals byte for byte, so a context that reaches back even
+        // part of one row too far -- or the whole stream -- finds a long match the true window
+        // cannot see, and the copy's choices change. The shorter fixtures above barely notice a
+        // window that is too long, because their rows repeat every few rows anyway.
+        let (row_bytes, bpp, start) = (48, 3, 40);
+        let mut samples = textured(row_bytes, start + 25);
+        let mut state = 0x2545_F491u32;
+        for byte in &mut samples[start * row_bytes..(start + 8) * row_bytes] {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        samples.copy_within(
+            start * row_bytes..(start + 8) * row_bytes,
+            (start + 17) * row_bytes,
+        );
+        assert_eq!(
+            filter_image(FilterStrategy::MinTrialDeflate, &samples, row_bytes, bpp),
+            trial_reference(&samples, row_bytes, bpp)
+        );
+    }
+
+    #[test]
     fn the_trial_score_compresses_the_row_after_its_context() {
         // The score is the stream for context-then-row, so a row scored after a copy of itself
         // costs what the doubled row costs alone -- and less than twice the row alone.
