@@ -479,6 +479,52 @@ actionlint -color
 description = "Run the AGENTS.md dependency-edge guard against its own fixture battery"
 run = "./tooling/check-agents-edges/fixtures.sh"
 
+# A `§X.Y` citation was only ever compared with the clause it names by a human reading a diff, and
+# three wrong ones reached review in two crates (#604, PR #542 twice) — the last beside a hand
+# audit's false claim that every other citation checked out. Issue #606 settles the shape: a
+# pinned, hermetic Rust extractor (`tooling/spec-clauses`, its own lockfile, no PDF tool on PATH)
+# generates a `clauses.tsv` committed beside each vendored specification, and the lint reads only
+# those TSVs, so the gate itself builds nothing. Clause numbers are the *headings'*: where a
+# specification's cross-references number a clause differently, the heading wins.
+#
+# `gen-spec-clauses` rewrites the indexes; `check-spec-clauses` regenerates them into target/ and
+# fails on any difference from the committed ones, which is what holds a hand edit of a TSV (or an
+# extractor change) to the specification. Each writes to a scratch file first, so a failed
+# extraction never truncates a committed index.
+[tasks.gen-spec-clauses]
+description = "Regenerate references/{icc,png}/clauses.tsv from the vendored specifications"
+run = """
+set -euo pipefail
+cargo build --locked --release --quiet --manifest-path tooling/spec-clauses/Cargo.toml
+bin=tooling/spec-clauses/target/release/spec-clauses
+"$bin" references/icc/icc.1-2022-05.pdf references/icc/icc.1-2001-04.pdf > references/icc/clauses.tsv.new
+"$bin" references/png/png-3.html > references/png/clauses.tsv.new
+mv references/icc/clauses.tsv.new references/icc/clauses.tsv
+mv references/png/clauses.tsv.new references/png/clauses.tsv
+"""
+
+[tasks.check-spec-clauses]
+description = "Verify the committed clauses.tsv indexes are exactly what tooling/spec-clauses extracts from the vendored specifications"
+run = """
+set -euo pipefail
+cargo build --locked --release --quiet --manifest-path tooling/spec-clauses/Cargo.toml
+bin=tooling/spec-clauses/target/release/spec-clauses
+mkdir -p target/spec-clauses
+"$bin" references/icc/icc.1-2022-05.pdf references/icc/icc.1-2001-04.pdf > target/spec-clauses/icc.tsv
+"$bin" references/png/png-3.html > target/spec-clauses/png.tsv
+fail=0
+diff -u references/icc/clauses.tsv target/spec-clauses/icc.tsv || fail=1
+diff -u references/png/clauses.tsv target/spec-clauses/png.tsv || fail=1
+[ "$fail" = 0 ] || echo "check-spec-clauses: a committed index differs from the extraction; run 'mise run gen-spec-clauses'"
+exit "$fail"
+"""
+
+# The lint itself: static, sub-second, reads only the committed TSVs and the crates' text. What it
+# checks and deliberately does not is written once, in the script header.
+[tasks.check-citations]
+description = "Verify every § citation in gamut-icc, gamut-cmm and gamut-png names a clause the vendored specification's headings give, and the clause a cited tag, type or chunk name heads"
+run = "./tooling/check-citations/run.sh"
+
 [tasks.check-release-deps]
 description = "Reject publishable dev-only workspace edges that release-plz cannot order"
 run = '''cargo metadata --no-deps --format-version 1 | jq -r -e '

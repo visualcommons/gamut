@@ -1,0 +1,172 @@
+spec	clause	title
+png-3	1	Introduction
+png-3	2	Scope
+png-3	3	Terms, definitions, and abbreviated terms
+png-3	4	Concepts
+png-3	4.1	Static and Animated images
+png-3	4.2	Images
+png-3	4.3	Color spaces
+png-3	4.4	Reference image to PNG image transformation
+png-3	4.4.1	Alpha separation
+png-3	4.4.2	Indexing
+png-3	4.4.3	RGB merging
+png-3	4.4.4	Alpha compaction
+png-3	4.4.5	Sample depth scaling
+png-3	4.5	PNG image
+png-3	4.6	Encoding the PNG image
+png-3	4.6.1	Pass extraction
+png-3	4.6.2	Scanline serialization
+png-3	4.6.3	Filtering
+png-3	4.6.4	Compression
+png-3	4.6.5	Chunking
+png-3	4.7	Additional information
+png-3	4.8	PNG datastream
+png-3	4.8.1	Chunks
+png-3	4.8.2	Chunk types
+png-3	4.9	APNG: frame-based animation
+png-3	4.9.1	Structure
+png-3	4.9.2	Sequence numbers
+png-3	4.9.3	Output buffer
+png-3	4.9.4	Canvas
+png-3	4.10	Error handling
+png-3	4.11	Extensions
+png-3	5	Datastream structure
+png-3	5.1	PNG datastream
+png-3	5.2	PNG signature
+png-3	5.3	Chunk layout
+png-3	5.4	Chunk naming conventions
+png-3	5.5	CRC algorithm
+png-3	5.6	Chunk ordering
+png-3	5.7	Defining chunks
+png-3	5.7.1	General
+png-3	5.7.2	Defining public chunks
+png-3	5.7.3	Defining private chunks
+png-3	5.8	Private field values
+png-3	6	Reference image to PNG image transformation
+png-3	6.1	Color types and values
+png-3	6.2	Alpha representation
+png-3	7	Encoding the PNG image as a PNG datastream
+png-3	7.1	Integers and byte order
+png-3	7.2	Scanlines
+png-3	7.3	Filtering
+png-3	8	Interlacing and pass extraction
+png-3	8.1	Interlace methods
+png-3	9	Filtering
+png-3	9.1	Filter methods and filter types
+png-3	9.2	Filter types for filter method 0
+png-3	9.3	Filter type 3: Average
+png-3	9.4	Filter type 4: Paeth
+png-3	10	Compression
+png-3	10.1	Compression method 0
+png-3	10.2	Compression of the sequence of filtered scanlines
+png-3	10.3	Other uses of compression
+png-3	11	Chunk specifications
+png-3	11.1	General
+png-3	11.2	Critical chunks
+png-3	11.2.1	IHDR Image header
+png-3	11.2.2	PLTE Palette
+png-3	11.2.3	IDAT Image data
+png-3	11.2.4	IEND Image trailer
+png-3	11.3	Ancillary chunks
+png-3	11.3.1	Transparency information
+png-3	11.3.1.1	tRNS Transparency
+png-3	11.3.2	Color space information
+png-3	11.3.2.1	cHRM Primary chromaticities and white point
+png-3	11.3.2.2	gAMA Image gamma
+png-3	11.3.2.3	iCCP Embedded ICC profile
+png-3	11.3.2.4	sBIT Significant bits
+png-3	11.3.2.5	sRGB Standard RGB color space
+png-3	11.3.2.6	cICP Coding-independent code points for video signal type identification
+png-3	11.3.2.7	mDCV Mastering Display Color Volume
+png-3	11.3.2.8	cLLI Content Light Level Information
+png-3	11.3.3	Textual information
+png-3	11.3.3.1	Keywords and text strings
+png-3	11.3.3.2	tEXt Textual data
+png-3	11.3.3.3	zTXt Compressed textual data
+png-3	11.3.3.4	iTXt International textual data
+png-3	11.3.4	Miscellaneous information
+png-3	11.3.4.1	bKGD Background color
+png-3	11.3.4.2	hIST Image histogram
+png-3	11.3.4.3	pHYs Physical pixel dimensions
+png-3	11.3.4.4	sPLT Suggested palette
+png-3	11.3.4.5	eXIf Exchangeable Image File (Exif) Profile
+png-3	11.3.4.5.1	eXIf General Recommendations
+png-3	11.3.4.5.2	eXIf Recommendations for Decoders
+png-3	11.3.4.5.3	eXIf Recommendations for Encoders
+png-3	11.3.5	Time stamp information
+png-3	11.3.5.1	tIME Image last-modification time
+png-3	11.3.6	Animation information
+png-3	11.3.6.1	acTL Animation Control Chunk
+png-3	11.3.6.2	fcTL Frame Control Chunk
+png-3	11.3.6.3	fdAT Frame Data Chunk
+png-3	12	PNG Encoders
+png-3	12.1	Encoder gamma handling
+png-3	12.2	Encoder color handling
+png-3	12.3	Alpha channel creation
+png-3	12.4	Sample depth scaling
+png-3	12.5	Suggested palettes
+png-3	12.6	Interlacing
+png-3	12.7	Filter selection
+png-3	12.8	Compression
+png-3	12.9	Text chunk processing
+png-3	12.10	Chunking
+png-3	12.10.1	Use of private chunks
+png-3	12.10.2	Use of non-reserved field values
+png-3	12.10.3	Ancillary chunks
+png-3	13	PNG decoders and viewers
+png-3	13.1	Error handling
+png-3	13.2	Error checking
+png-3	13.3	Security considerations
+png-3	13.4	Privacy considerations
+png-3	13.5	Chunking
+png-3	13.6	Pixel dimensions
+png-3	13.7	Text chunk processing
+png-3	13.8	Decompression
+png-3	13.9	Filtering
+png-3	13.10	Interlacing and progressive display
+png-3	13.11	Truecolor image handling
+png-3	13.12	Sample depth rescaling
+png-3	13.13	Decoder gamma handling
+png-3	13.14	Decoder color handling
+png-3	13.15	Background color
+png-3	13.16	Alpha channel processing
+png-3	13.17	Histogram and suggested palette usage
+png-3	14	Editors
+png-3	14.1	Additional chunk types
+png-3	14.2	Behavior of PNG editors
+png-3	14.3	Ordering of chunks
+png-3	14.3.1	Ordering of critical chunks
+png-3	14.3.2	Ordering of ancillary chunks
+png-3	15	Conformance
+png-3	15.1	Conformance
+png-3	15.2	Introduction
+png-3	15.2.1	Objectives
+png-3	15.2.2	Scope
+png-3	15.3	Conformance conditions
+png-3	15.3.1	Conformance of PNG datastreams
+png-3	15.3.2	Conformance of PNG encoders
+png-3	15.3.3	Conformance of PNG decoders
+png-3	15.3.4	Conformance of PNG editors
+png-3	A	Internet Media Types
+png-3	A.1	image/png
+png-3	A.2	image/apng
+png-3	B	Guidelines for private chunk types
+png-3	C	Gamma and chromaticity
+png-3	D	Sample CRC implementation
+png-3	E	Online resources
+png-3	E.1	ICC profile specifications
+png-3	E.2	PNG web site
+png-3	E.3	Sample implementation and test images
+png-3	F	Changes
+png-3	F.1	Changes since the Proposed Recommendation of 15 May 2025
+png-3	F.2	Changes since the Candidate Recommendation Snapshot of 13 March 2025
+png-3	F.3	Changes since the Candidate Recommendation Draft of 21 January 2025 (Third Edition)
+png-3	F.4	Changes since the Candidate Recommendation Draft of 18 July 2024 (Third Edition)
+png-3	F.5	Changes since the Candidate Recommendation Snapshot of 21 September 2023 (Third Edition)
+png-3	F.6	Changes since the Working Draft of 20 July 2023 (Third Edition)
+png-3	F.7	Changes since the First Public Working Draft of 25 October 2022 (Third Edition)
+png-3	F.8	Changes since the W3C Recommendation of 10 November 2003 (PNG Second Edition)
+png-3	F.9	Changes between First and Second Editions
+png-3	G	References
+png-3	G.1	Normative references
+png-3	G.2	Informative references
