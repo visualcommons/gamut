@@ -33,7 +33,8 @@ use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
 use crate::decoded::{
-    Chromaticities, Cicp, DecodedPng, IccProfile, PngMetadata, TextChunk, TextChunkKind, XmpFraming,
+    Background, Chromaticities, Cicp, DecodedPng, IccProfile, ModificationTime, PhysicalDimensions,
+    PngMetadata, TextChunk, TextChunkKind, XmpFraming,
 };
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::PngPalette;
@@ -96,6 +97,10 @@ struct MetadataView<'a> {
     chromaticities: Option<Chromaticities>,
     srgb: Option<SrgbIntent>,
     cicp: Option<Cicp>,
+    significant_bits: Option<&'a [u8]>,
+    background: Option<Background>,
+    physical_dimensions: Option<PhysicalDimensions>,
+    modification_time: Option<ModificationTime>,
     /// Whether the source carried a C2PA manifest store. Only the presence is needed: a store is
     /// never carried, but a caller has to be told it was left behind.
     c2pa: bool,
@@ -197,6 +202,13 @@ pub enum MetadataNotice {
     /// space, which §11.3.2.3 says "are not permitted". Written as it arrived, as
     /// [`TextKeywordSpacing`](Self::TextKeywordSpacing) is.
     IccpNameSpacing = 13,
+    /// A modification time (`tIME`) left behind because a field lies outside the range
+    /// §11.3.5.1's Table 26 gives it: month 1–12, day 1–31, hour 0–23, minute 0–59, second 0–60.
+    /// A reader — this crate's own included, and libpng's `png_set_tIME` — skips such a chunk as
+    /// malformed, so writing it would lose the time on the next read with nothing said. Raised by
+    /// [`with_time`](PngEncoder::with_time); a carry never raises it, because the reader never
+    /// yields such a time.
+    TimeOutOfRange = 14,
 }
 
 impl MetadataNotice {
@@ -257,6 +269,10 @@ impl MetadataNotice {
             Self::IccpNameSpacing => {
                 "ICC profile: written, but its profile name has a leading, trailing or \
                  consecutive space, which §11.3.2.3 does not permit"
+            }
+            Self::TimeOutOfRange => {
+                "modification time: a field is outside the range tIME gives it (§11.3.5.1, \
+                 Table 26)"
             }
         }
     }
@@ -822,6 +838,13 @@ impl PngEncoder {
     }
 
     /// Records the last-modification time (tIME chunk), in UTC.
+    ///
+    /// Each field must lie within the range §11.3.5.1's Table 26 gives it — month 1–12, day 1–31,
+    /// hour 0–23, minute 0–59, second 0–60 (a leap second); the year is any value. A time outside
+    /// those ranges is one this crate's reader skips as malformed, so it is **not written**: the
+    /// chunk is omitted and [`MetadataNotice::TimeOutOfRange`] is reported through
+    /// [`metadata_notices`](Self::metadata_notices). The day is not checked against the month.
+    /// Calling this again replaces both the time and its notice.
     #[must_use]
     pub fn with_time(
         mut self,
@@ -917,8 +940,9 @@ impl PngEncoder {
     }
 
     /// Carries every metadata chunk a [`PngMetadata`] holds into this encoder, so that
-    /// re-encoding a file keeps its EXIF, ICC profile, XMP packet, text annotations and colour
-    /// chunks instead of dropping them.
+    /// re-encoding a file keeps its EXIF, ICC profile, XMP packet, text annotations, colour
+    /// chunks, significant bits, background, physical dimensions and modification time instead of
+    /// dropping them.
     ///
     /// This is the write-side counterpart of [`metadata`](crate::metadata): read a file's
     /// metadata without touching its pixels, then hand it to the encoder that rewrites them.
@@ -962,9 +986,18 @@ impl PngEncoder {
     /// 1–79 bytes and null-free, so a carried profile is always written, with a notice if its
     /// name breaks the repertoire or spacing rule.
     ///
-    /// One further limit is the read side's, not this method's: `pHYs`, `tIME`, `sBIT` and `bKGD`
-    /// are not part of [`PngMetadata`], so they cannot be carried here (set them with their own
-    /// builder methods).
+    /// `pHYs` and `tIME` are carried byte for byte. `tIME` is the time of the last image
+    /// modification (§11.3.5.1), so a re-encode that changes the pixels should stamp its own:
+    /// call [`with_time`](Self::with_time) after this method, which replaces the carried one.
+    ///
+    /// `sBIT` and `bKGD` are shaped by the colour type, so they go through the same conversion
+    /// as their setters ([`with_significant_bits`](Self::with_significant_bits),
+    /// [`with_background_gray`](Self::with_background_gray) and its siblings): emitted for the
+    /// colour type and depth actually written, and omitted, without a notice, where that header
+    /// cannot carry them — the omission is decided at encode time, after the notices are read.
+    /// A palette-index background ([`Background::Index`](crate::Background::Index)) names an
+    /// entry of the source's palette, so it is carried only by
+    /// [`encode_indexed8`](Self::encode_indexed8) with that palette.
     #[must_use]
     pub fn with_metadata(self, metadata: &PngMetadata) -> Self {
         self.with_metadata_view(MetadataView {
@@ -977,6 +1010,10 @@ impl PngEncoder {
             chromaticities: metadata.chromaticities,
             srgb: metadata.srgb,
             cicp: metadata.cicp,
+            significant_bits: metadata.significant_bits.as_deref(),
+            background: metadata.background,
+            physical_dimensions: metadata.physical_dimensions,
+            modification_time: metadata.modification_time,
             c2pa: metadata.c2pa.is_some(),
         })
     }
@@ -998,6 +1035,10 @@ impl PngEncoder {
             chromaticities: decoded.chromaticities,
             srgb: decoded.srgb,
             cicp: decoded.cicp,
+            significant_bits: decoded.significant_bits.as_deref(),
+            background: decoded.background,
+            physical_dimensions: decoded.physical_dimensions,
+            modification_time: decoded.modification_time,
             c2pa: decoded.c2pa.is_some(),
         })
     }
@@ -1016,11 +1057,13 @@ impl PngEncoder {
     /// per-annotation notices belong to the annotations still accumulated, so they follow the
     /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
     /// (§11.3.2.3) sits between the two and belongs to the profile last set, by
-    /// [`with_icc_profile`](Self::with_icc_profile) or a carry.
+    /// [`with_icc_profile`](Self::with_icc_profile) or a carry; the modification time's
+    /// (§11.3.5.1) follows it and belongs to the time last given to [`with_time`](Self::with_time).
     #[must_use]
     pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
         let mut notices = self.carry_notices.clone();
         notices.extend(self.ancillary.iccp_notice());
+        notices.extend(self.ancillary.time_notice());
         notices.extend(self.ancillary.text_notices());
         notices
     }
@@ -1079,6 +1122,34 @@ impl PngEncoder {
                 chrm.blue.0,
                 chrm.blue.1,
             ]);
+        }
+        // Through the same setters a caller uses, so each is emitted for the header actually
+        // written exactly as a caller-set one is (`ancillary::sbit_for` / `bkgd_for`). The read
+        // side surfaces the background in the decoded pixels' units, which are the units the
+        // `with_background_*` setters take.
+        if let Some(bits) = meta.significant_bits {
+            self = self.with_significant_bits(bits);
+        }
+        match meta.background {
+            Some(Background::Gray(gray)) => self = self.with_background_gray(gray),
+            Some(Background::Rgb(red, green, blue)) => {
+                self = self.with_background_rgb(red, green, blue);
+            }
+            Some(Background::Index(index)) => self = self.with_background_index(index),
+            None => {}
+        }
+        if let Some(phys) = meta.physical_dimensions {
+            self = self.with_physical_dimensions(phys.x_ppu, phys.y_ppu, phys.unit);
+        }
+        if let Some(time) = meta.modification_time {
+            self = self.with_time(
+                time.year,
+                time.month,
+                time.day,
+                time.hour,
+                time.minute,
+                time.second,
+            );
         }
         // Handed over as bytes, because that is what the chunk held, and with the framing its
         // chunk gave it — above all §11.3.3.4's compression flag, without which a packet stored

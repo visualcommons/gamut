@@ -11,7 +11,7 @@ use common::{
     chunk, ihdr_payload, minimal_png, png_from_chunks, tiny_exif, tiny_icc_profile, zlib,
 };
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
-use gamut_png::{PngDecoder, PngEncoder, PngMetadata, SrgbIntent};
+use gamut_png::{PhysicalUnit, PngDecoder, PngEncoder, PngMetadata, SrgbIntent};
 
 /// A 2×2 RGB8 source for the encoder-driven tests.
 fn source() -> Vec<u8> {
@@ -115,6 +115,12 @@ fn metadata_agrees_with_decode_field_for_field() {
             // other.
             .with_srgb(SrgbIntent::Perceptual)
             .with_cicp(1, 13, true)
+            // The two chunks shaped by the IHDR, which each walk has to read against its own
+            // copy of the header, and the two that are not.
+            .with_significant_bits(&[5, 6, 5])
+            .with_background_rgb(0, 20, 40)
+            .with_physical_dimensions(3_780, 3_780, PhysicalUnit::Meter)
+            .with_time(2026, 10, 16, 12, 34, 56)
     });
 
     let meta = gamut_png::metadata(&png).unwrap();
@@ -130,12 +136,18 @@ fn metadata_agrees_with_decode_field_for_field() {
     assert_eq!(meta.chromaticities, decoded.chromaticities);
     assert_eq!(meta.srgb, decoded.srgb);
     assert_eq!(meta.cicp, decoded.cicp);
+    assert_eq!(meta.significant_bits, decoded.significant_bits);
+    assert_eq!(meta.background, decoded.background);
+    assert_eq!(meta.physical_dimensions, decoded.physical_dimensions);
+    assert_eq!(meta.modification_time, decoded.modification_time);
     // A `None` on both sides would pass every comparison above, so pin that the file really did
     // carry each field.
     assert!(meta.exif.is_some() && meta.icc_profile.is_some() && meta.xmp.is_some());
     assert!(meta.c2pa.is_some() && !meta.texts.is_empty());
     assert!(meta.gamma.is_some() && meta.chromaticities.is_some());
     assert!(meta.srgb.is_some() && meta.cicp.is_some());
+    assert!(meta.significant_bits.is_some() && meta.background.is_some());
+    assert!(meta.physical_dimensions.is_some() && meta.modification_time.is_some());
 }
 
 /// The probe case from #379: cICP is uncompressed, so a colour-space probe costs a chunk walk and

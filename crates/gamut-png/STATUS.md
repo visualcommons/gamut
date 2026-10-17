@@ -295,8 +295,18 @@ share it.
 highest-precedence colour chunk of any file that carries one. It takes no matrix argument: PNG
 fixes that byte at 0.
 
-**Not done.** `pHYs`, `tIME`, `sBIT` and `bKGD` are not part of `PngMetadata`/`DecodedPng`, so they
-cannot be carried (set them with their own builder methods). The `iTXt` language tag is checked for
+`pHYs`, `tIME`, `sBIT` and `bKGD` are on both read surfaces and carried (#569): `pHYs`/`tIME` byte
+for byte, `sBIT`/`bKGD` through their setters' conversion to the header actually written, the
+background in the decoded pixels' units (sub-byte grey scaled by §13.12's factor). A `tIME` field
+outside Table 26's range, a `pHYs` unit Table 24 does not define, and an `sBIT`/`bKGD` whose length
+does not match the colour type (or an `sBIT` entry outside `1..=depth`) are skipped as malformed.
+The writer applies the same Table 26 rule (`ancillary::time_in_range`, shared by both sides):
+`with_time` given a field outside it writes no `tIME` and reports `TimeOutOfRange`, so the encoder
+never emits a `tIME` its own reader skips.
+
+**Not done.** An `sBIT`/`bKGD` the written header cannot carry is omitted without a
+`MetadataNotice`, as for the setters: the omission is decided at encode time. A palette-index
+background is carried only onto `encode_indexed8` with the source's palette. The `iTXt` language tag is checked for
 its character set, not for full BCP 47 well-formedness (subtag order, registry membership). The XMP
 packet rides in its own field beside `XmpFraming` rather than in `texts`, so a carry emits it
 **first** among the annotations regardless of where it sat in the source, and the two fields can be

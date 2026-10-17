@@ -5,7 +5,9 @@
 //! packet, the C2PA manifest store — precisely so callers can hand them to
 //! `gamut_metadata::MetadataBlock` (`Exif`/`Icc`/`Xmp`/`C2pa`) without gamut-png depending on
 //! the metadata stack. Fixed-layout colour-space chunks (`gAMA`/`cHRM`/`sRGB`/`cICP`) are
-//! additionally parsed into values, in the same ×100 000 fixed-point units the encoder accepts.
+//! additionally parsed into values, in the same ×100 000 fixed-point units the encoder accepts,
+//! and so are `sBIT`/`bKGD`/`pHYs`/`tIME`, in the units the encoder's setters for them take.
+//! `sBIT` and `bKGD` are shaped by the colour type, so they are read against the IHDR.
 //! Ancillary payloads are attacker territory: a malformed payload skips that chunk (§13.1)
 //! rather than failing the image, and compressed payloads (iCCP/zTXt/iTXt) inflate under one
 //! cumulative byte budget so a metadata zlib bomb cannot exhaust memory. The manifest store
@@ -16,11 +18,13 @@ use gamut_core::{
     Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Indexed8, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
-use crate::ancillary::SrgbIntent;
+use crate::ancillary::{PhysicalUnit, SrgbIntent, sbit_for, time_in_range};
 use crate::chunk::CABX;
 use crate::color::ColorType;
-use crate::decoder::TransparencyKey;
+use crate::decoder::{TransparencyKey, depth_mask};
+use crate::ihdr::Ihdr;
 use crate::inflate;
+use crate::pack::gray8_scale;
 use crate::palette::PngPalette;
 
 /// The parsed image header (IHDR, §11.2.1), reported as stored in the file.
@@ -101,6 +105,61 @@ pub struct Cicp {
     pub matrix_coefficients: u8,
     /// Whether the samples use the full value range.
     pub full_range: bool,
+}
+
+/// The intended pixel size or aspect ratio (pHYs, §11.3.4.3, Table 23) — the field a viewer
+/// scales by, so a re-encode that dropped it would change the printed size of the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PhysicalDimensions {
+    /// Pixels per unit, X axis.
+    pub x_ppu: u32,
+    /// Pixels per unit, Y axis.
+    pub y_ppu: u32,
+    /// The unit (Table 24): metres, or unknown — an aspect ratio only.
+    pub unit: PhysicalUnit,
+}
+
+/// The time of the last image modification (tIME, §11.3.5.1, Table 26), which §11.3.5.1 says
+/// "should be" UTC. Each field is within the range Table 26 gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModificationTime {
+    /// The complete year ("1995, not 95").
+    pub year: u16,
+    /// Month, 1–12.
+    pub month: u8,
+    /// Day, 1–31.
+    pub day: u8,
+    /// Hour, 0–23.
+    pub hour: u8,
+    /// Minute, 0–59.
+    pub minute: u8,
+    /// Second, 0–60 (60 allows for a leap second).
+    pub second: u8,
+}
+
+/// A default background colour (bKGD, §11.3.4.1, Table 22), in the form the file's colour type
+/// gives it.
+///
+/// Samples are in the units of the **decoded pixels** ([`PngImage`]), so a caller can composite
+/// the image against it directly: the stored value for every depth of 8 or more — the bits above
+/// the depth masked to 0, as §11.3.4.1 tells a decoder to — and, for sub-byte greyscale, which
+/// [`PngImage::Gray8`] presents scaled to 8 bits (§13.12), the background scaled by exactly the same
+/// factor. Those are also the units the encoder's `with_background_*` setters take, so a re-encode
+/// of the decoded pixels carries it unchanged.
+///
+/// Closed: Table 22 defines exactly these three forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Background {
+    /// A grey level (colour types 0 and 4).
+    Gray(u16),
+    /// An RGB colour (colour types 2 and 6).
+    Rgb(u16, u16, u16),
+    /// A palette index (colour type 3). Not checked against the palette: the pixel-free
+    /// [`metadata`](crate::metadata) walk never reads `PLTE`, and the two read surfaces agree
+    /// field for field.
+    Index(u8),
 }
 
 /// Which of §11.3.3's three chunks carried an annotation, and whether its text was compressed.
@@ -228,6 +287,15 @@ pub struct DecodedPng {
     pub srgb: Option<SrgbIntent>,
     /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
+    /// sBIT: the original number of significant bits per channel (§11.3.2.4, Table 14), one
+    /// entry per channel in the order Table 14 lists them — three for a palette image.
+    pub significant_bits: Option<Vec<u8>>,
+    /// bKGD: the default background colour (§11.3.4.1), in the decoded pixels' units.
+    pub background: Option<Background>,
+    /// pHYs: the intended pixel size or aspect ratio (§11.3.4.3).
+    pub physical_dimensions: Option<PhysicalDimensions>,
+    /// tIME: the time of the last image modification (§11.3.5.1).
+    pub modification_time: Option<ModificationTime>,
 }
 
 /// The ancillary metadata a PNG carries, read without decoding any pixels by
@@ -241,8 +309,9 @@ pub struct DecodedPng {
 ///
 /// Unlike `gamut_jpeg::JpegMetadata` and `gamut_webp::WebpMetadata`, which carry only
 /// EXIF/XMP/ICC, this also surfaces PNG's parsed colour chunks — `cICP`, `sRGB`, `gAMA`, `cHRM` —
-/// because those are uncompressed and answer "what colour space is this?" on their own, and the
-/// C2PA manifest store (`caBX`), raw.
+/// because those are uncompressed and answer "what colour space is this?" on their own, the
+/// C2PA manifest store (`caBX`), raw, and the remaining fixed-layout chunks a re-encode has to
+/// carry — `sBIT`, `bKGD`, `pHYs` and `tIME`.
 ///
 /// Marked `#[non_exhaustive]` so further ancillary chunks can be added without a breaking change.
 ///
@@ -307,6 +376,16 @@ pub struct PngMetadata {
     pub srgb: Option<SrgbIntent>,
     /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
+    /// sBIT: the original number of significant bits per channel (§11.3.2.4, Table 14), one
+    /// entry per channel in the order Table 14 lists them — three for a palette image.
+    pub significant_bits: Option<Vec<u8>>,
+    /// bKGD: the default background colour (§11.3.4.1), in the units
+    /// [`DecodedPng::image`] presents its samples in — see [`Background`].
+    pub background: Option<Background>,
+    /// pHYs: the intended pixel size or aspect ratio (§11.3.4.3).
+    pub physical_dimensions: Option<PhysicalDimensions>,
+    /// tIME: the time of the last image modification (§11.3.5.1).
+    pub modification_time: Option<ModificationTime>,
 }
 
 /// Parses the metadata-bearing ancillary chunks collected from the stream (in file order).
@@ -320,7 +399,10 @@ pub struct PngMetadata {
 /// `caBX` after `IDAT` before it gets here and counts it into
 /// [`PngMetadata::c2pa_ignored`](PngMetadata::c2pa_ignored) itself, so this function never has to
 /// know where in the file a chunk sat.
-pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata {
+///
+/// `header` is the file's IHDR, which `sBIT` and `bKGD` are shaped by: a payload whose length does
+/// not match its colour type, or whose values the bit depth cannot hold, is malformed.
+pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize, header: &Ihdr) -> PngMetadata {
     let mut meta = PngMetadata::default();
     let mut budget = budget;
     // Whether a `caBX` has been seen at all, admitted or not: the first is the store (or is
@@ -371,6 +453,18 @@ pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata
                         full_range: full_range == 1,
                     });
                 }
+            }
+            b"sBIT" if meta.significant_bits.is_none() => {
+                meta.significant_bits = parse_sbit(data, header);
+            }
+            b"bKGD" if meta.background.is_none() => {
+                meta.background = parse_bkgd(data, header);
+            }
+            b"pHYs" if meta.physical_dimensions.is_none() => {
+                meta.physical_dimensions = parse_phys(data);
+            }
+            b"tIME" if meta.modification_time.is_none() => {
+                meta.modification_time = parse_time(data);
             }
             b"tEXt" => {
                 if let Some(text) = parse_text(data) {
@@ -463,6 +557,76 @@ fn parse_chrm(data: &[u8]) -> Option<Chromaticities> {
     })
 }
 
+/// sBIT (§11.3.2.4, Table 14): one entry per channel — three for a palette image, whose entries
+/// are RGB — each "greater than zero and less than or equal to the sample depth (which is 8 for
+/// indexed-color images, and the bit depth given in IHDR for other color types)".
+///
+/// The length is checked here, against the colour type the file declares; the range is
+/// [`sbit_for`]'s, the rule the encoder writes by, so the two sides cannot disagree on it. The
+/// length check comes first because `sbit_for` *converts* across colour types — it would read a
+/// three-entry payload whose entries agree as a greyscale one — and a reader must not.
+fn parse_sbit(data: &[u8], header: &Ihdr) -> Option<Vec<u8>> {
+    let entries = match header.color {
+        ColorType::Indexed => 3,
+        color => color.channels(),
+    };
+    if data.len() != entries {
+        return None;
+    }
+    sbit_for(data, header.color, header.bit_depth)
+}
+
+/// bKGD (§11.3.4.1, Table 22): a palette index, a grey level or an RGB triple, by colour type,
+/// each sample two bytes "regardless of the image bit depth". Below 16 bits "decoders must mask the
+/// other bits to 0 before the value is used", so the mask is applied rather than the chunk
+/// refused; sub-byte grey is then scaled to the 8 bits [`PngImage::Gray8`] presents (§13.12), so
+/// the background is in the decoded pixels' units.
+fn parse_bkgd(data: &[u8], header: &Ihdr) -> Option<Background> {
+    let sample = |hi: u8, lo: u8| u16::from_be_bytes([hi, lo]) & depth_mask(header.bit_depth);
+    match (header.color, data) {
+        (ColorType::Indexed, &[index]) => Some(Background::Index(index)),
+        (ColorType::Grayscale | ColorType::GrayscaleAlpha, &[hi, lo]) => Some(Background::Gray(
+            // The factor is 1 at every depth of 8 or more, so this is the identity there.
+            sample(hi, lo) * u16::from(gray8_scale(header.bit_depth)),
+        )),
+        (ColorType::Truecolor | ColorType::TruecolorAlpha, &[r1, r0, g1, g0, b1, b0]) => Some(
+            Background::Rgb(sample(r1, r0), sample(g1, g0), sample(b1, b0)),
+        ),
+        _ => None,
+    }
+}
+
+/// pHYs (§11.3.4.3, Table 23): X and Y pixels per unit, big-endian, then the unit specifier,
+/// which Table 24 defines only as 0 (unknown) or 1 (metre).
+fn parse_phys(data: &[u8]) -> Option<PhysicalDimensions> {
+    let [x3, x2, x1, x0, y3, y2, y1, y0, unit] = *data else {
+        return None;
+    };
+    Some(PhysicalDimensions {
+        x_ppu: u32::from_be_bytes([x3, x2, x1, x0]),
+        y_ppu: u32::from_be_bytes([y3, y2, y1, y0]),
+        unit: PhysicalUnit::from_code(unit)?,
+    })
+}
+
+/// tIME (§11.3.5.1, Table 26): a two-byte year, then month, day, hour, minute and second, each
+/// within the range Table 26 gives it. A field outside its range is a malformed payload (§13.1),
+/// as libpng's `png_set_tIME` ("Ignoring invalid time value") also treats it. The range check is
+/// [`time_in_range`], the rule the writer's `with_time` applies too.
+fn parse_time(data: &[u8]) -> Option<ModificationTime> {
+    let [y1, y0, month, day, hour, minute, second] = *data else {
+        return None;
+    };
+    time_in_range(month, day, hour, minute, second).then_some(ModificationTime {
+        year: u16::from_be_bytes([y1, y0]),
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    })
+}
+
 /// tEXt (§11.3.3.2): keyword, NUL, Latin-1 text.
 fn parse_text(data: &[u8]) -> Option<TextChunk> {
     let (keyword, text) = split_keyword(data)?;
@@ -544,6 +708,196 @@ mod tests {
         let mut out = Vec::new();
         DeflateEncoder::new().zlib_compress(payload, &mut out);
         out
+    }
+
+    /// An IHDR of `color` at `bit_depth`, for the chunks shaped by it.
+    fn header(color: ColorType, bit_depth: u8) -> Ihdr {
+        Ihdr {
+            width: 1,
+            height: 1,
+            bit_depth,
+            color,
+            interlaced: false,
+        }
+    }
+
+    /// [`super::collect`] under an 8-bit truecolour header, for every chunk the header does not
+    /// shape.
+    fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata {
+        super::collect(chunks, budget, &header(ColorType::Truecolor, 8))
+    }
+
+    /// Table 14's length per colour type, and §11.3.2.4's range — "greater than zero and less than
+    /// or equal to the sample depth (which is 8 for indexed-color images, and the bit depth given
+    /// in IHDR for other color types)" — at both ends.
+    ///
+    /// Kills [`parse_sbit`]'s length check and its `Indexed` arm. The three-agreeing-entries case
+    /// under greyscale is the one [`sbit_for`] alone would accept, by converting it.
+    #[test]
+    fn sbit_is_read_against_the_colour_type_and_depth() {
+        let cases: [(ColorType, u8, &[u8], bool); 12] = [
+            (ColorType::Grayscale, 2, &[2], true),
+            (ColorType::Grayscale, 2, &[3], false),
+            (ColorType::Grayscale, 2, &[0], false),
+            (ColorType::Grayscale, 8, &[2, 2, 2], false),
+            (ColorType::GrayscaleAlpha, 8, &[8, 1], true),
+            (ColorType::GrayscaleAlpha, 8, &[8], false),
+            (ColorType::Truecolor, 8, &[5, 6, 5], true),
+            (ColorType::TruecolorAlpha, 16, &[16, 16, 16, 16], true),
+            (ColorType::TruecolorAlpha, 16, &[16, 16, 16], false),
+            // A palette's entries are 8-bit whatever the index depth.
+            (ColorType::Indexed, 4, &[8, 8, 8], true),
+            (ColorType::Indexed, 4, &[9, 8, 8], false),
+            (ColorType::Indexed, 8, &[8], false),
+        ];
+        for (color, depth, payload, ok) in cases {
+            let meta = super::collect(&[(*b"sBIT", payload)], 0, &header(color, depth));
+            let expected = ok.then(|| payload.to_vec());
+            assert_eq!(
+                meta.significant_bits, expected,
+                "{color:?} at {depth} bits: {payload:?}"
+            );
+        }
+    }
+
+    /// Table 22's form per colour type, each sample masked to the depth (§11.3.4.1: "decoders
+    /// must mask the other bits to 0") and sub-byte grey scaled to the 8 bits the decoded pixels
+    /// are presented at (§13.12). Every byte is distinct, so an index slip changes a sample.
+    ///
+    /// Kills each arm of [`parse_bkgd`], the mask and the scale.
+    #[test]
+    fn bkgd_is_read_in_the_decoded_pixels_units() {
+        let cases: [(ColorType, u8, &[u8], Option<Background>); 9] = [
+            (ColorType::Indexed, 4, &[7], Some(Background::Index(7))),
+            (ColorType::Indexed, 8, &[0, 7], None),
+            // 0xFF02 masked to two bits is 2, which §13.12 presents as 2 × 85.
+            (
+                ColorType::Grayscale,
+                2,
+                &[0xFF, 0x02],
+                Some(Background::Gray(170)),
+            ),
+            (
+                ColorType::Grayscale,
+                16,
+                &[0x12, 0x34],
+                Some(Background::Gray(0x1234)),
+            ),
+            (
+                ColorType::GrayscaleAlpha,
+                8,
+                &[0x01, 0x80],
+                Some(Background::Gray(0x80)),
+            ),
+            (ColorType::Grayscale, 8, &[1, 2, 3, 4, 5, 6], None),
+            (
+                ColorType::Truecolor,
+                8,
+                &[1, 2, 3, 4, 5, 6],
+                Some(Background::Rgb(2, 4, 6)),
+            ),
+            (
+                ColorType::TruecolorAlpha,
+                16,
+                &[1, 2, 3, 4, 5, 6],
+                Some(Background::Rgb(0x0102, 0x0304, 0x0506)),
+            ),
+            (ColorType::Truecolor, 8, &[0, 2], None),
+        ];
+        for (color, depth, payload, expected) in cases {
+            let meta = super::collect(&[(*b"bKGD", payload)], 0, &header(color, depth));
+            assert_eq!(
+                meta.background, expected,
+                "{color:?} at {depth} bits: {payload:?}"
+            );
+        }
+    }
+
+    /// Table 23's layout, every byte distinct, and Table 24's two unit specifiers; a third is a
+    /// value the table does not define, and a payload of the wrong length is malformed.
+    ///
+    /// Kills [`parse_phys`]'s field mapping and [`PhysicalUnit::from_code`].
+    #[test]
+    fn phys_is_read_field_for_field() {
+        let mut payload = vec![1, 2, 3, 4, 5, 6, 7, 8, 0];
+        let read = |payload: &[u8]| collect(&[(*b"pHYs", payload)], 0).physical_dimensions;
+        assert_eq!(
+            read(&payload),
+            Some(PhysicalDimensions {
+                x_ppu: 0x0102_0304,
+                y_ppu: 0x0506_0708,
+                unit: PhysicalUnit::Unknown,
+            })
+        );
+        payload[8] = 1;
+        assert_eq!(read(&payload).map(|p| p.unit), Some(PhysicalUnit::Meter));
+        payload[8] = 2;
+        assert_eq!(read(&payload), None, "unit 2 is undefined");
+        assert_eq!(read(&payload[..8]), None, "eight bytes is not a pHYs");
+    }
+
+    /// Table 26's layout and every field's range, at both ends: in range is read, one past it is
+    /// a malformed payload.
+    ///
+    /// Kills each bound of [`time_in_range`], one field at a time.
+    #[test]
+    fn time_is_read_within_table_26s_ranges() {
+        let read = |payload: [u8; 7]| collect(&[(*b"tIME", &payload)], 0).modification_time;
+        let [y1, y0] = 2026u16.to_be_bytes();
+        assert_eq!(
+            read([y1, y0, 1, 1, 0, 0, 0]),
+            Some(ModificationTime {
+                year: 2026,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0,
+            })
+        );
+        let latest = read([y1, y0, 12, 31, 23, 59, 60]).expect("the latest of every field");
+        assert_eq!(
+            (
+                latest.month,
+                latest.day,
+                latest.hour,
+                latest.minute,
+                latest.second
+            ),
+            (12, 31, 23, 59, 60)
+        );
+        for (field, value) in [(2, 0), (2, 13), (3, 0), (3, 32), (4, 24), (5, 60), (6, 61)] {
+            let mut payload = [y1, y0, 6, 15, 12, 30, 30];
+            payload[field] = value;
+            assert_eq!(read(payload), None, "byte {field} = {value}");
+        }
+        assert_eq!(collect(&[(*b"tIME", &[0; 6])], 0).modification_time, None);
+    }
+
+    /// Each of the four is a once-only chunk, like the colour chunks: the first is kept.
+    ///
+    /// Kills the `is_none` guard on each of their arms in [`collect`].
+    #[test]
+    fn once_only_shaped_chunks_keep_the_first() {
+        let phys = |x: u8| [0, 0, 0, x, 0, 0, 0, x, 1];
+        let time = |second: u8| [7, 234, 1, 1, 0, 0, second];
+        let meta = collect(
+            &[
+                (*b"sBIT", &[5, 6, 5]),
+                (*b"sBIT", &[8, 8, 8]),
+                (*b"bKGD", &[0, 1, 0, 2, 0, 3]),
+                (*b"bKGD", &[0, 4, 0, 5, 0, 6]),
+                (*b"pHYs", &phys(1)),
+                (*b"pHYs", &phys(2)),
+                (*b"tIME", &time(1)),
+                (*b"tIME", &time(2)),
+            ],
+            0,
+        );
+        assert_eq!(meta.significant_bits.as_deref(), Some(&[5, 6, 5][..]));
+        assert_eq!(meta.background, Some(Background::Rgb(1, 2, 3)));
+        assert_eq!(meta.physical_dimensions.map(|p| p.x_ppu), Some(1));
+        assert_eq!(meta.modification_time.map(|t| t.second), Some(1));
     }
 
     #[test]
