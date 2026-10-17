@@ -10,7 +10,9 @@ mod common;
 
 use common::{chunk, ihdr_payload, png_from_chunks, tiny_exif, tiny_icc_profile, zlib};
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
-use gamut_png::{MetadataNotice, PngDecoder, PngEncoder, PngMetadata, SrgbIntent};
+use gamut_png::{
+    Background, MetadataNotice, PngDecoder, PngEncoder, PngImage, PngMetadata, SrgbIntent,
+};
 
 /// The `cHRM` payload for the sRGB primaries, in the ×100 000 units §11.3.2.1 stores.
 const CHRM: [u32; 8] = [
@@ -143,6 +145,107 @@ fn every_carried_chunk_survives_a_re_encode() {
         .map(|t| (t.keyword.as_str(), t.text.as_str()))
         .collect();
     assert_eq!(texts, [("Author", "café"), ("Note", "gämut")]);
+}
+
+/// The four chunks #569 put on the read surface come back out byte for byte when the written
+/// header is the source's: `pHYs` (which a viewer scales by, so dropping it changes the printed
+/// size), `tIME`, and the colour-type-shaped `sBIT` and `bKGD`.
+///
+/// Kills the `sBIT`, `Rgb`-background, `pHYs` and `tIME` carries in `with_metadata_view`.
+#[test]
+fn significant_bits_background_dimensions_and_time_survive_a_re_encode() {
+    let carried: [(&[u8; 4], &[u8]); 4] = [
+        (b"sBIT", &[5, 6, 5]),
+        (b"bKGD", &[0, 10, 0, 20, 0, 30]),
+        (b"pHYs", &[0, 0, 0x0E, 0xC4, 0, 0, 0x0B, 0x13, 1]),
+        (b"tIME", &[0x07, 0xEA, 10, 16, 12, 34, 56]),
+    ];
+    let extra: Vec<Vec<u8>> = carried.iter().map(|(ty, data)| chunk(ty, data)).collect();
+    let meta = gamut_png::metadata(&minimal_source(&extra)).unwrap();
+    let png = re_encoded_bytes(|e| e.with_metadata(&meta));
+
+    for (ty, data) in carried {
+        assert_eq!(
+            chunk_payload(&png, ty).as_deref(),
+            Some(data),
+            "{}",
+            String::from_utf8_lossy(ty)
+        );
+    }
+}
+
+/// A sub-byte greyscale background is surfaced in the units of the decoded pixels — §13.12 scales
+/// a two-bit sample to eight bits by 85 — so carrying it over the decoded pixels names the same
+/// grey, and auto-reduce, packing the pixels back to two bits, maps the background back with
+/// them.
+///
+/// Kills the `Gray`-background carry in `with_metadata_view`, and pins the read side's units
+/// against the encoder's: a background surfaced unscaled would be written as the darker grey 2/255.
+#[test]
+fn a_sub_byte_grey_background_names_the_same_grey_after_a_re_encode() {
+    // 2×2 two-bit grey, every pixel level 2, background level 2.
+    let png = png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(2, 2, 2, 0, 0)),
+        chunk(b"bKGD", &[0, 2]),
+        chunk(b"IDAT", &zlib(&[0, 0b1010_0000, 0, 0b1010_0000])),
+        chunk(b"IEND", &[]),
+    ]);
+    let decoded = PngDecoder::new().decode(&png).unwrap();
+    let PngImage::Gray8(pixels) = &decoded.image else {
+        panic!("two-bit grey decodes to Gray8");
+    };
+    assert_eq!(pixels.as_samples(), [170; 4]);
+    assert_eq!(decoded.background, Some(Background::Gray(170)));
+
+    let encode = |reduce: bool| {
+        PngEncoder::new()
+            .with_auto_reduce(reduce)
+            .with_metadata_from(&decoded)
+            .encode_to_vec(pixels.as_ref())
+            .expect("re-encode")
+    };
+    let eight_bit = encode(false);
+    assert_eq!(chunk_payload(&eight_bit, b"bKGD"), Some(vec![0, 170]));
+    let reduced = encode(true);
+    assert_eq!(
+        chunk_payload(&reduced, b"IHDR").map(|ihdr| ihdr[8]),
+        Some(2),
+        "auto-reduce packs the pixels back to two bits"
+    );
+    assert_eq!(chunk_payload(&reduced, b"bKGD"), Some(vec![0, 2]));
+}
+
+/// A palette-index background names an entry of the source's palette, so it is carried onto an
+/// `encode_indexed8` of the decoded indices and that palette — and still names the same colour
+/// there, whatever index the cleaned palette gives it.
+///
+/// Kills the `Index`-background carry in `with_metadata_view`.
+#[test]
+fn a_palette_index_background_is_carried_onto_the_same_palette() {
+    let png = png_from_chunks(&[
+        chunk(b"IHDR", &ihdr_payload(2, 1, 8, 3, 0)),
+        chunk(b"PLTE", &[10, 20, 30, 40, 50, 60]),
+        chunk(b"bKGD", &[1]),
+        chunk(b"IDAT", &zlib(&[0, 0, 1])),
+        chunk(b"IEND", &[]),
+    ]);
+    let decoded = PngDecoder::new().decode(&png).unwrap();
+    let PngImage::Indexed8(indices) = &decoded.image else {
+        panic!("a palette image decodes to Indexed8");
+    };
+    let palette = decoded.palette.as_ref().expect("palette");
+    let mut out = Vec::new();
+    PngEncoder::new()
+        .with_metadata_from(&decoded)
+        .encode_indexed8(indices.as_ref(), palette, &mut out)
+        .expect("re-encode");
+
+    let re = PngDecoder::new().decode(&out).unwrap();
+    let Some(Background::Index(index)) = re.background else {
+        panic!("background carried as an index, got {:?}", re.background);
+    };
+    let re_palette = re.palette.as_ref().expect("palette");
+    assert_eq!(re_palette.rgb(index), Some([40, 50, 60]));
 }
 
 /// §11.3.3.4's language tag and translated keyword are what make an `iTXt` international; a
@@ -300,7 +403,13 @@ fn the_c2pa_manifest_store_is_never_carried_forward() {
 /// for the two *read* walks.
 #[test]
 fn with_metadata_from_agrees_with_with_metadata() {
-    let png = source(&[chunk(b"cICP", &[9, 16, 0, 1])]);
+    let png = source(&[
+        chunk(b"cICP", &[9, 16, 0, 1]),
+        chunk(b"sBIT", &[5, 6, 5]),
+        chunk(b"bKGD", &[0, 10, 0, 20, 0, 30]),
+        chunk(b"pHYs", &[0, 0, 0x0E, 0xC4, 0, 0, 0x0E, 0xC4, 1]),
+        chunk(b"tIME", &[0x07, 0xEA, 10, 16, 12, 34, 56]),
+    ]);
     let decoded = PngDecoder::new().decode(&png).unwrap();
     let meta = gamut_png::metadata(&png).unwrap();
 
@@ -310,6 +419,8 @@ fn with_metadata_from_agrees_with_with_metadata() {
     // A pair of empty results would satisfy the comparison above.
     assert!(from_decoded.icc_profile.is_some() && from_decoded.cicp.is_some());
     assert!(!from_decoded.texts.is_empty() && from_decoded.exif.is_some());
+    assert!(from_decoded.significant_bits.is_some() && from_decoded.background.is_some());
+    assert!(from_decoded.physical_dimensions.is_some() && from_decoded.modification_time.is_some());
 }
 
 /// §11.3.3.3 makes a `zTXt` "semantically equivalent" to a `tEXt`, so a decode that keeps only the
