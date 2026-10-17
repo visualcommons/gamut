@@ -48,12 +48,12 @@ impl Matcher {
         }
     }
 
-    /// Hashes the 3 bytes at `pos` (caller guarantees `pos + 3 <= data.len()`).
-    fn hash(data: &[u8], pos: usize) -> usize {
+    /// Hashes the 3-byte sequence `[b0, b1, b2]` that starts a candidate match.
+    fn hash([b0, b1, b2]: [u8; MIN_MATCH]) -> usize {
         // The three bytes are a big-endian `u32`, so they are read as one. Spelling it
         // `b0 << 16 | b1 << 8 | b2` puts each byte in its own lane, and disjoint lanes are where
         // `|` and `^` agree -- two unkillable mutants for no gain (#110).
-        let key = u32::from_be_bytes([0, data[pos], data[pos + 1], data[pos + 2]]);
+        let key = u32::from_be_bytes([0, b0, b1, b2]);
         // The shift already leaves exactly `HASH_BITS` bits, so the former `& (HASH_SIZE - 1)` was
         // a no-op -- and a no-op mask is unkillable by construction.
         (key.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize
@@ -69,11 +69,17 @@ impl Matcher {
     }
 
     /// Records `pos` as a future match candidate.
+    ///
+    /// A position with fewer than `MIN_MATCH` bytes left is not recorded: there is no key to hash.
+    /// The slice pattern decides that, rather than a `pos + MIN_MATCH > data.len()` guard, because
+    /// the guard had an unkillable `>=` twin (#493): the last position it would additionally drop,
+    /// `data.len() - MIN_MATCH`, can only be referenced by a later position with a full key of its
+    /// own, and there is none.
     fn insert(&mut self, data: &[u8], pos: usize) {
-        if pos + MIN_MATCH > data.len() {
+        let Some(&[b0, b1, b2]) = data.get(pos..pos + MIN_MATCH) else {
             return;
-        }
-        let h = Self::hash(data, pos);
+        };
+        let h = Self::hash([b0, b1, b2]);
         self.prev[pos & WMASK] = self.head[h];
         self.head[h] = pos as i32;
     }
@@ -132,7 +138,7 @@ impl Matcher {
         let lowest = pos.saturating_sub(WINDOW); // candidates must be >= this for dist <= window
         let mut best_len = MIN_MATCH - 1; // a real match must strictly exceed this
         let mut best_dist = 0usize;
-        let mut cand = self.head[Self::hash(data, pos)];
+        let mut cand = self.head[Self::hash([data[pos], data[pos + 1], data[pos + 2]])];
         let mut chain = 0usize;
         while cand >= 0 {
             let c = cand as usize;
