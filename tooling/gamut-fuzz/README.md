@@ -255,45 +255,46 @@ An **allocation** defect needs the engine's malloc hook to be visible at all: an
 nothing and `-malloc_limit_mb` (which libFuzzer defaults to `-rss_limit_mb`, 2048) is the oracle.
 That is how `dng_decode` reports a 780-byte file asking for a 34 GB allocation.
 
-### Two of these rows are red on purpose
+### The first two defects it found
 
-`Fuzz tiff_decode` and `Fuzz dng_decode` **fail today**, on the first defects this tier found:
+`Fuzz tiff_decode` and `Fuzz dng_decode` failed on the first defects this tier found:
 [#563](https://github.com/visualcommons/gamut/issues/563) (a panic on `SamplesPerPixel = 0`) and
 [#564](https://github.com/visualcommons/gamut/issues/564) (a raw buffer sized from declared
-geometry). They are filed rather than fixed, because narrowing a target so its row goes green is
-weakening a check to make a report green — the opposite of what the tier is for.
+geometry). They were filed and fixed in the crates rather than worked around in the targets,
+because narrowing a target so its row goes green is weakening a check to make a report green — the
+opposite of what the tier is for. A row that goes red is read the same way: per row, since the job
+is `fail-fast: false` and one target's crash says nothing about another's.
 
-What that costs, stated plainly so nobody has to rediscover it: **Extended runs on every push to
-the default branch, so its aggregate status stays red until both are fixed.** The blast radius is
-bounded — Extended is post-merge and manual-dispatch only, and the fuzz job is `fail-fast: false`,
-so no pull request is blocked and no other row is cancelled — but a human scanning one red tick
-per push learns nothing from it. Read the per-row status, not the aggregate, until #563 and #564
-close; both rows go green with no change here. Whether these two rows should instead live in a
-separate, expected-to-fail lane so the aggregate keeps its meaning is
-[#593](https://github.com/visualcommons/gamut/issues/593) — a workflow-topology question, not a
-fuzzing one.
+### The cadence
 
-### The cadence, answered
+The fuzz job runs **nightly**, on `extended.yml`'s `schedule:` trigger, at `-max_total_time=3600`
+per target, and on manual dispatch; it does **not** run per push
+([#594](https://github.com/visualcommons/gamut/issues/594)). Every other Extended job keeps the
+opposite cadence — per push to the default branch, skipped on the schedule — because rebuilding an
+unchanged tree finds nothing new, whereas a fuzzer searching an unchanged tree for longer does.
 
-Nine parallel ten-minute runners on every push to the default branch, growing by one runner per
-target, was inherited from the workflow's trigger rather than chosen ([#594](https://github.com/visualcommons/gamut/issues/594)).
-It is **kept**, and here is why, so the next target added does not reopen it:
+- **Exploration, not regression.** A per-push run and a scheduled run are different jobs: the
+  first catches a defect the push introduced, the second searches deeper for one that was already
+  there. This tier is the second. Its regression value lives in the named deterministic tests a
+  crash is promoted into, which run on every pull request; the price of dropping the per-push run
+  is that a defect a push introduces into a target's reach is found up to a day later.
+- **The persisted corpus is what makes depth pay.** Before
+  [#603](https://github.com/visualcommons/gamut/issues/603) each run started from the committed
+  seeds, so frequency was the only dial and every run was the same shallow search. Now each night
+  resumes from the minimised corpus the last one left (see "The search corpus" below), so an hour
+  a night accumulates into one long search instead of many repeated short ones. A nightly run also
+  touches every cache entry daily, well inside the seven-day eviction window.
+- **Cost scales with the matrix, once a day.** One runner per target per night, rather than per
+  push, so adding a row adds an hour of runner time a day however busy the default branch is.
 
-- The cost is queue time, not budget — Actions minutes are free for public repositories — and the
-  job is post-merge with `fail-fast: false`, so it blocks no pull request. The matrix grows the
-  number of *parallel* runners, not the job's wall time.
-- Frequency was the wrong dial while **nothing accumulated between runs**: each run started from
-  the committed seeds and discarded what the engine found, so a run's yield was ten minutes of cold
-  search whatever the cadence. The corpus now persists (see "The search corpus" below,
-  [#603](https://github.com/visualcommons/gamut/issues/603)), which is what makes the cadence and
-  the `-max_total_time` budget worth re-opening; that re-opening is #594's, and until it lands the
-  trigger and budget above are unchanged.
-- Changing the trigger would also move #593's premise (whether a per-push aggregate is red), which
-  is a decision about the workflow's shape rather than about this tier.
+A per-push smoke run alongside the nightly one was considered and not taken: it would need a second
+matrix that `check-targets.sh` reconciles against the first, for a regression signal the promoted
+tests already give. When the matrix's cost or its search depth needs tuning, the dial is the
+`-max_total_time` budget, not the trigger.
 
-The **size** of the matrix is a separate question with the same answer. Nine rows is nine targets,
-and dropping one to buy back queue time would trade coverage for a cost that #603's persisted corpus
-and #594's cadence already own — a shorter matrix is simply less search. A target is removed when
+The **size** of the matrix is a separate question with the same answer. Each row is one target,
+and dropping one to buy back runner time would trade coverage for a cost the nightly cadence and
+the persisted corpus already bound — a shorter matrix is simply less search. A target is removed when
 its checks stop having reach, which is what the injection audit decides, and never to make a job
 finish sooner.
 

@@ -5,14 +5,24 @@ name: Extended
 # across several targets/toolchains. They run post-merge on master and can be started by hand on
 # any branch (Actions → Extended → Run workflow), so contributors gate locally with
 # `mise run check-cross <triple>` / `mise run check-msrv` before merging.
+#
+# Two cadences share this workflow (#594). Every job except `fuzz` runs per push to master and is
+# skipped on the nightly schedule, because rebuilding an unchanged tree finds nothing new. `fuzz`
+# is the reverse: it is an exploration job, not a regression gate, so it runs nightly at a deep
+# budget over its cached corpus and is skipped per push. Manual dispatch runs every job.
 on:
   push:
     branches: [master]
+  schedule:
+    # Nightly, off the top of the hour that every scheduled workflow on GitHub crowds onto.
+    # Scheduled runs use the default branch, so the corpus cache they save is the one they restore.
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 jobs:
   cross:
     name: Cross-compile (${{ matrix.target }})
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -53,6 +63,7 @@ jobs:
 
   msrv:
     name: MSRV
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -77,6 +88,7 @@ jobs:
   # emscripten target; wasm32-unknown-unknown stays decode-only (no C/C++ toolchain targets it).
   wasm-encoder:
     name: JXL encoder on wasm32-unknown-emscripten
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -110,6 +122,8 @@ jobs:
   # lane rather than part of the coverage gate. Gate locally with `mise run test-dng-real`.
   fuzz:
     name: Fuzz ${{ matrix.target }}
+    # Nightly and manual only (#594): see the CADENCE note on the fuzz step below.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     strategy:
       # One target's crash says nothing about another's, so a failure must not cancel the rest.
@@ -182,17 +196,12 @@ jobs:
           restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: Fuzz ${{ matrix.target }}
         # Time-bounded so the job terminates: this tier is unbounded by nature, which is exactly
-        # why it is here and not in the per-PR `coverage` gate (see docs/testing.md). Ten minutes
-        # buys roughly 5-6 million executions at the throughput measured locally (~9k/s).
+        # why it is here and not in the per-PR `coverage` gate (see docs/testing.md). An hour buys
+        # roughly 30 million executions at the throughput measured locally (~9k/s).
         #
         # A crash found here is minimised and promoted into a NAMED DETERMINISTIC TEST in the
         # crate's own suite -- the corpus is a search aid, not the regression record -- so a
         # failure of this job is a signal to go and write that test, not to re-run until green.
-        #
-        # EXPECTED RED: `tiff_decode` and `dng_decode` fail today on filed, accepted defects
-        # (#563, #564). They are deliberately not narrowed to make these rows green; read the
-        # per-row status rather than this workflow's aggregate until both close. Restoring the
-        # aggregate's meaning is #593.
         #
         # CORPUS (#603): libFuzzer writes new inputs into the FIRST corpus directory only, so the
         # restored `state/<target>/` comes first and takes every finding, and the seed directory
@@ -200,12 +209,14 @@ jobs:
         # has no `corpus/<target>/` in a checkout (git tracks no empty directory), and libFuzzer
         # exits on a corpus directory that does not exist.
         #
-        # CADENCE (#594): this job still runs on the workflow's own trigger at 600 s. Now that the
-        # corpus accumulates, the cadence and this budget are worth re-tuning; that is #594's
-        # decision, not this step's. The README states the argument.
+        # CADENCE (#594): nightly on the workflow's `schedule:` trigger (and on manual dispatch),
+        # never per push, at 3600 s per target. With the corpus persisted, one deep run a night
+        # resumes where the last stopped, which searches further for less compute than a shallow
+        # run per push; the price is that a defect a push introduces is found up to a day later.
+        # The README ("The cadence") states the argument.
         run: |
           mkdir -p tooling/gamut-fuzz/state/${{ matrix.target }} tooling/gamut-fuzz/corpus/${{ matrix.target }}
-          mise run fuzz ${{ matrix.target }} tooling/gamut-fuzz/state/${{ matrix.target }} tooling/gamut-fuzz/corpus/${{ matrix.target }} -- -max_total_time=600
+          mise run fuzz ${{ matrix.target }} tooling/gamut-fuzz/state/${{ matrix.target }} tooling/gamut-fuzz/corpus/${{ matrix.target }} -- -max_total_time=3600
       - name: Minimise the ${{ matrix.target }} search corpus
         # `cargo fuzz cmin` keeps only the inputs that add coverage, so the cached corpus is
         # bounded by what the target can reach rather than growing with every run. It runs and the
@@ -230,6 +241,7 @@ jobs:
 
   benches:
     name: Benches still run
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       MISE_TASK_RUN_AUTO_INSTALL: false
@@ -342,6 +354,7 @@ jobs:
   # here the check must run, never skip. No Rust, no submodules: the PDF is committed in-tree.
   iim-names:
     name: IIM 4.2 DataSet names match the standard
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       MISE_TASK_RUN_AUTO_INSTALL: false
@@ -422,6 +435,7 @@ jobs:
 
   real-dng:
     name: Real camera DNG conformance
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     env:
       MISE_TASK_RUN_AUTO_INSTALL: false
@@ -524,6 +538,7 @@ jobs:
   # submodule, no corpus, no network and no C oracle to build, and a DNG failure must not hide it.
   c2pa:
     name: C2PA differential oracle
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

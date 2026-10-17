@@ -172,7 +172,10 @@ deterministic case in that crate's `tests/robustness.rs`**, which is where the r
 That job persists each target's search corpus between runs in an `actions/cache` entry, minimised
 by `cargo fuzz cmin` before it is saved and kept in an ignored `state/<target>/` directory apart
 from the tracked seeds (#603; `tooling/gamut-fuzz/README.md`, "The search corpus"). The cache is a
-search aid like the corpus it holds, never the regression record.
+search aid like the corpus it holds, never the regression record. Because that corpus accumulates,
+the job is an exploration run rather than a regression gate: it runs **nightly** on `extended.yml`'s
+`schedule:` trigger at an hour per target, and on manual dispatch, but not per push (#594;
+`tooling/gamut-fuzz/README.md`, "The cadence").
 
 What the per-PR path *does* carry is the **compile** half, for the reason the excluded real-DNG
 tier already carries it: nothing else builds an excluded crate, so an API change in a driven crate
