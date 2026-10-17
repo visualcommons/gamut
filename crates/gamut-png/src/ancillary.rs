@@ -160,9 +160,6 @@ struct TextEntry {
     /// Whether this entry came from [`Ancillary::begin_carry`] rather than a direct setter, so a
     /// second carry can replace exactly what the first contributed.
     carried: bool,
-    /// Whether this entry is the XMP packet (§11.3.3.1 Table 21's reserved keyword). A file
-    /// carries one packet, so setting it again replaces this entry rather than adding a second.
-    xmp: bool,
     /// Whether the entry is written at all. A cleared flag keeps the entry in the list purely to
     /// carry its [`notices`](Self::notices) — a payload dropped in silence is the defect this
     /// module exists to remove.
@@ -185,6 +182,20 @@ struct TextEntry {
     /// setters sit behind `#[must_use]` builder methods that have no error channel;
     /// [`Ancillary::validate`] reports it at the encode chokepoint.
     fault: Option<TextFault>,
+}
+
+impl TextEntry {
+    /// Whether a reader will take this entry as the XMP packet: an `iTXt` under the keyword
+    /// §11.3.3.1 Table 21 reserves for one — the writer's half of
+    /// [`TextChunk::is_xmp_packet`](crate::TextChunk), decided on the kind actually written, so
+    /// a Latin-1 request promoted to `iTXt` counts too.
+    fn is_xmp_packet(&self) -> bool {
+        self.keyword == XMP_KEYWORD.as_bytes()
+            && matches!(
+                self.kind,
+                TextKind::International | TextKind::InternationalCompressed
+            )
+    }
 }
 
 /// Why one accumulated text annotation cannot be written, and which annotation it was.
@@ -540,39 +551,27 @@ impl Ancillary {
         entry
     }
 
-    /// Adds an XMP packet as the `iTXt` §11.3.3.1 Table 21 reserves for it, framed the way the
-    /// file that carried it framed it (§11.3.3.4's compression flag, language tag and translated
-    /// keyword).
+    /// Sets the XMP packet: the `iTXt` §11.3.3.1 Table 21 reserves for it, in the framing Table
+    /// 21 recommends — "Compression Flag set to 0, and both Language Tag and Translated Keyword
+    /// set to the null string". A packet carried out of a file keeps its own framing because it
+    /// arrives as an ordinary annotation through
+    /// [`add_text_international_tagged`](Self::add_text_international_tagged); this is the
+    /// entry point with no framing to keep.
     ///
-    /// Replaces any packet already accumulated rather than adding a second: a PNG carries one
-    /// XMP packet, so this is a single-value payload like `iCCP` or `eXIf`, and two `iTXt` chunks
-    /// under the same reserved keyword would leave a reader to pick — this crate's own reader
-    /// keeps the first and discards the rest.
-    ///
-    /// Takes bytes rather than a `&str` because that is what the read side surfaces: a file's
-    /// packet is whatever bytes its chunk held. §11.3.3.4 gives the `iTXt` text field UTF-8 and
-    /// no alternative, so bytes that are not UTF-8 have no chunk to go in — and are reported
-    /// rather than discarded, because a caller that handed this encoder a packet is entitled to
-    /// learn it did not come out the other side.
-    pub(crate) fn add_xmp(
-        &mut self,
-        packet: &[u8],
-        language: &str,
-        translated: &str,
-        compressed: bool,
-    ) {
-        self.texts.retain(|entry| !entry.xmp);
-        let mut entry = match str::from_utf8(packet) {
-            Ok(text) => self.itxt_entry(XMP_KEYWORD, language, translated, text, compressed),
-            Err(_) => {
-                let mut entry = self.text_entry(XMP_KEYWORD, "", TextKind::International);
-                entry.emit = false;
-                entry.notices.push(MetadataNotice::XmpNotUtf8);
-                entry
-            }
-        };
-        entry.xmp = true;
+    /// Replaces every packet already accumulated ([`drop_xmp`](Self::drop_xmp)) rather than
+    /// adding a second: the caller is naming *the* packet, and two `iTXt` chunks under the
+    /// reserved keyword leave a reader to pick — this crate's own reader takes the first, so the
+    /// packet set *last* would be the one ignored.
+    pub(crate) fn add_xmp(&mut self, packet: &str) {
+        self.drop_xmp();
+        let entry = self.itxt_entry(XMP_KEYWORD, "", "", packet, false);
         self.texts.push(entry);
+    }
+
+    /// Removes every accumulated entry a reader would take as the XMP packet
+    /// ([`TextEntry::is_xmp_packet`]), so a new one replaces rather than joins it.
+    pub(crate) fn drop_xmp(&mut self) {
+        self.texts.retain(|entry| !entry.is_xmp_packet());
     }
 
     /// Every §11.3.3 deviation the accumulated annotations carry, in insertion order.
@@ -663,7 +662,6 @@ impl Ancillary {
             translated: Vec::new(),
             kind,
             carried: self.carrying,
-            xmp: false,
             emit,
             notices,
             fault: keyword_nul.then(|| TextFault {
@@ -676,16 +674,14 @@ impl Ancillary {
     /// Refuses an accumulation the spec forbids, before any byte is emitted.
     ///
     /// **Only a null in a keyword of an annotation that is written gets here.** An entry that is
-    /// not emitted anyway — dropped for a null in its text string, a keyword outside Latin-1, a
-    /// non-UTF-8 XMP packet — writes no chunk for the null to re-frame, so its fault refuses
-    /// nothing; the notice that explains the drop is what the caller hears. A null in a text
-    /// chunk's keyword or in an `iTXt`
-    /// translated keyword (§11.3.3.2, §11.3.3.4) sits in a field a null separator *ends*, so a
-    /// chunk carrying one re-parses as a *different* annotation: the file would mean something
-    /// other than what the caller supplied, and no notice can undo that. Everything else §11.3.3
-    /// asks of a text chunk — the keyword's repertoire, length and spacing, a null in the
-    /// length-delimited text string, the `iTXt` language tag's shape, an
-    /// XMP packet that is not UTF-8 — is reported through
+    /// not emitted anyway — dropped for a null in its text string or a keyword outside Latin-1 —
+    /// writes no chunk for the null to re-frame, so its fault refuses nothing; the notice that
+    /// explains the drop is what the caller hears. A null in a text chunk's keyword or in an
+    /// `iTXt` translated keyword (§11.3.3.2, §11.3.3.4) sits in a field a null separator *ends*,
+    /// so a chunk carrying one re-parses as a *different* annotation: the file would mean
+    /// something other than what the caller supplied, and no notice can undo that. Everything
+    /// else §11.3.3 asks of a text chunk — the keyword's repertoire, length and spacing, a null in
+    /// the length-delimited text string, the `iTXt` language tag's shape — is reported through
     /// [`PngEncoder::metadata_notices`](crate::PngEncoder::metadata_notices) and the encode
     /// proceeds. Refusing those would fail a conversion over a file whose pixels are fine, and
     /// leave the caller no way out but to discard all of its metadata, colour profile included.
@@ -2027,26 +2023,26 @@ mod tests {
         );
     }
 
-    /// §11.3.3.4 gives the `iTXt` text field UTF-8 and no alternative, so a packet that is not
-    /// UTF-8 has no chunk to go in. It is reported rather than quietly discarded: the read side
-    /// surfaces a packet as raw bytes, and a caller that handed those bytes back is entitled to
-    /// learn they did not come out the other side. It does not refuse, because the rest of the
-    /// file — pixels, colour profile — is fine.
+    /// Setting the packet replaces only what a reader would take as one: an `iTXt` under the
+    /// reserved keyword, compressed or not. A `tEXt` that borrows the keyword is not a packet
+    /// (Table 21 names `iTXt`), and neither is an `iTXt` under another keyword, so both survive.
     ///
-    /// Kills the `Err` arm of [`Ancillary::add_xmp`] — with it gone the packet vanishes silently
-    /// — and its `emit` flag, without which the packet's *keyword* is written with no packet.
+    /// Kills [`TextEntry::is_xmp_packet`]: each operand of its `&&` and each alternative of its
+    /// kind pattern.
     #[test]
-    fn a_non_utf8_xmp_packet_is_reported_not_written() {
+    fn setting_the_packet_replaces_only_itxt_under_the_reserved_keyword() {
         let mut a = Ancillary::default();
-        a.add_xmp(b"<x:xmpmeta \xFF\xFE/>", "", "", false);
-        assert_eq!(notices(&a), [MetadataNotice::XmpNotUtf8]);
-        assert!(a.validate().is_ok(), "reported, not refused");
-        assert_eq!(find_chunk(&post_plte(&a), b"iTXt"), None);
-
-        let mut valid = Ancillary::default();
-        valid.add_xmp(b"<x:xmpmeta/>", "", "", false);
-        assert!(notices(&valid).is_empty(), "a UTF-8 packet is carried");
-        assert!(find_chunk(&post_plte(&valid), b"iTXt").is_some());
+        a.add_text_latin1(XMP_KEYWORD, "latin");
+        a.add_text_international_tagged("Other", "", "", "other", false);
+        a.add_text_international_tagged(XMP_KEYWORD, "", "", "plain", false);
+        a.add_text_international_tagged(XMP_KEYWORD, "", "", "squeezed", true);
+        a.add_xmp("<x:xmpmeta/>");
+        let texts: Vec<&[u8]> = a.texts.iter().map(|entry| &entry.text[..]).collect();
+        assert_eq!(
+            texts,
+            [&b"latin"[..], b"other", b"<x:xmpmeta/>"],
+            "both packets replaced; the tEXt and the other iTXt kept"
+        );
     }
 
     /// A PNG carries one XMP packet, and §11.3.3.1 Table 21 reserves one keyword for it, so the
@@ -2059,8 +2055,8 @@ mod tests {
     #[test]
     fn setting_an_xmp_packet_twice_writes_one_chunk() {
         let mut a = Ancillary::default();
-        a.add_xmp(b"<x:xmpmeta id='first'/>", "", "", false);
-        a.add_xmp(b"<x:xmpmeta id='second'/>", "", "", false);
+        a.add_xmp("<x:xmpmeta id='first'/>");
+        a.add_xmp("<x:xmpmeta id='second'/>");
         let out = post_plte(&a);
         assert_eq!(
             find_chunk(&out, b"iTXt"),

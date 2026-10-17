@@ -107,7 +107,7 @@ pub use chunk::{
 pub use color::ColorType;
 pub use decoded::{
     Background, Chromaticities, Cicp, DecodedPng, IccProfile, ModificationTime, PhysicalDimensions,
-    PngHeader, PngImage, PngMetadata, TextChunk, TextChunkKind, XmpFraming,
+    PngHeader, PngImage, PngMetadata, TextChunk, TextChunkKind,
 };
 pub use decoder::{PngDecoder, TransparencyKey, metadata};
 pub use deconstruct::{

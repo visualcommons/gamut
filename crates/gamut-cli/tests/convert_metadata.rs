@@ -529,8 +529,11 @@ fn color_space_becomes_srgb_after_an_xyb_jxl_input() {
 fn a_png_output_from_another_format_carries_icc_and_xmp() {
     let (meta, _) = convert("jpeg-png-icc-xmp", &jpeg_with(&exif_with(&[])), &[]);
 
-    assert_eq!(meta.icc_profile.map(|p| p.profile), Some(rgb_icc()));
-    assert_eq!(meta.xmp.as_deref(), Some(XMP));
+    assert_eq!(
+        meta.icc_profile.as_ref().map(|p| &p.profile),
+        Some(&rgb_icc())
+    );
+    assert_eq!(meta.xmp(), Some(XMP));
 }
 
 /// A bare little-endian TIFF stream whose 1st IFD is an uncompressed one-strip thumbnail, its

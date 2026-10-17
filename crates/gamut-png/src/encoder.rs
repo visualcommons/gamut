@@ -34,7 +34,7 @@ use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
 use crate::decoded::{
     Background, Chromaticities, Cicp, DecodedPng, IccProfile, ModificationTime, PhysicalDimensions,
-    PngMetadata, TextChunk, TextChunkKind, XmpFraming,
+    PngMetadata, TextChunk, TextChunkKind,
 };
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::PngPalette;
@@ -88,10 +88,7 @@ pub struct PngEncodeReport {
 struct MetadataView<'a> {
     exif: Option<&'a [u8]>,
     icc_profile: Option<&'a IccProfile>,
-    xmp: Option<&'a [u8]>,
-    /// How the source framed its XMP packet (§11.3.3.4): compression flag, language tag,
-    /// translated keyword. Carried beside the packet because the packet has its own field.
-    xmp_framing: Option<&'a XmpFraming>,
+    /// The text annotations, the XMP packet among them.
     texts: &'a [TextChunk],
     gamma: Option<u32>,
     chromaticities: Option<Chromaticities>,
@@ -161,9 +158,9 @@ pub enum MetadataNotice {
     /// Written as UTF-8 into a field a reader takes as Latin-1 the tag would not survive the
     /// trip; an empty tag is §11.3.3.4's own way of saying the language is unspecified.
     ItxtLanguageTag = 6,
-    /// An XMP packet left behind because it is not UTF-8. §11.3.3.4 gives the `iTXt` text field
-    /// UTF-8 and no alternative, so there is no chunk to frame it in.
-    XmpNotUtf8 = 7,
+    // 7 is retired, never to be reused: it was `XmpNotUtf8`, a packet handed over as bytes that
+    // were not UTF-8. The packet is now an ordinary `TextChunk` (issue #600), whose text is a
+    // `String`, so no path into the encoder can carry such bytes any more.
     /// A text payload left behind because its **text string** holds a null character, which
     /// §11.3.3.2 ("Neither the keyword nor the text string may contain a null character") and
     /// §11.3.3.4 ("neither shall contain a zero byte") both forbid.
@@ -243,9 +240,6 @@ impl MetadataNotice {
             Self::ItxtLanguageTag => {
                 "text annotation: written without its language tag, which was not the BCP 47 \
                  shape §11.3.3.4 requires"
-            }
-            Self::XmpNotUtf8 => {
-                "XMP packet: not UTF-8, and an iTXt text string must be (§11.3.3.4)"
             }
             Self::TextStringNull => {
                 "text annotation or XMP packet: its text string contains a null character, \
@@ -929,13 +923,17 @@ impl PngEncoder {
 
     /// Embeds an XMP packet (an iTXt chunk with the standard `XML:com.adobe.xmp` keyword). `xmp` is
     /// the XMP/RDF document — for example the bytes produced by `gamut-xmp`.
+    ///
+    /// A PNG carries one packet, so this replaces any packet already set — by an earlier call or
+    /// carried in by [`with_png_metadata`](Self::with_png_metadata) — rather than adding a
+    /// second; it reads back through [`PngMetadata::xmp`].
     #[must_use]
     pub fn with_xmp(mut self, xmp: &str) -> Self {
         // §11.3.3.1 Table 21: "The use of iTXt, with Compression Flag set to 0, and both Language
         // Tag and Translated Keyword set to the null string, are recommended for XMP compliance."
         // A packet read out of a file that framed it otherwise keeps its framing; this entry
         // point has no framing to keep, so it takes the recommended one.
-        self.ancillary.add_xmp(xmp.as_bytes(), "", "", false);
+        self.ancillary.add_xmp(xmp);
         self
     }
 
@@ -962,9 +960,10 @@ impl PngEncoder {
     /// to honour depends on whether the reader has a colour-management module, which an encoder
     /// cannot know. Resolving a profile against an intent belongs to `gamut-cmm`. Each text annotation goes back into
     /// the chunk it came out of, compressed if it was compressed
-    /// ([`TextChunkKind`](crate::TextChunkKind)); so does the XMP packet, whose own framing —
-    /// compression flag, language tag, translated keyword — rides in
-    /// [`XmpFraming`](crate::XmpFraming).
+    /// ([`TextChunkKind`](crate::TextChunkKind)) and in its place among the others. The XMP
+    /// packet is one of those annotations, so it keeps its compression flag, language tag,
+    /// translated keyword and position the same way, and replaces a packet set earlier with
+    /// [`with_xmp`](Self::with_xmp).
     ///
     /// Two payloads cannot be carried at all, and neither is dropped in silence — read them back
     /// with [`metadata_notices`](Self::metadata_notices):
@@ -972,10 +971,10 @@ impl PngEncoder {
     /// - a **`cICP` whose matrix coefficients are not 0**, which §11.3.2.6 does not allow in PNG;
     /// - the **C2PA manifest store**, signed over the bytes of the file it was made for.
     ///
-    /// A text annotation whose keyword or XMP packet §11.3.3 does not endorse is reported through
-    /// the same channel rather than failing the carry: a keyword outside §11.3.3.1's repertoire
-    /// or spacing rules is written as it arrived, while a keyword no chunk can hold, a text
-    /// string holding a null and an XMP packet that is not UTF-8 are left behind, and
+    /// A text annotation (the XMP packet included) that §11.3.3 does not endorse is reported
+    /// through the same channel rather than failing the carry: a keyword outside §11.3.3.1's
+    /// repertoire or spacing rules is written as it arrived, while a keyword no chunk can hold
+    /// and a text string holding a null are left behind, and
     /// [`MetadataNotice::carried`](MetadataNotice::carried) says which happened. **Only a null in
     /// a keyword** — or in an `iTXt` translated keyword — fails the encode with
     /// [`Error::InvalidInput`] naming the annotation: those fields end at their first null, so
@@ -1003,8 +1002,6 @@ impl PngEncoder {
         self.with_metadata_view(MetadataView {
             exif: metadata.exif.as_deref(),
             icc_profile: metadata.icc_profile.as_ref(),
-            xmp: metadata.xmp.as_deref(),
-            xmp_framing: metadata.xmp_framing.as_ref(),
             texts: &metadata.texts,
             gamma: metadata.gamma,
             chromaticities: metadata.chromaticities,
@@ -1028,8 +1025,6 @@ impl PngEncoder {
         self.with_metadata_view(MetadataView {
             exif: decoded.exif.as_deref(),
             icc_profile: decoded.icc_profile.as_ref(),
-            xmp: decoded.xmp.as_deref(),
-            xmp_framing: decoded.xmp_framing.as_ref(),
             texts: &decoded.texts,
             gamma: decoded.gamma,
             chromaticities: decoded.chromaticities,
@@ -1151,21 +1146,12 @@ impl PngEncoder {
                 time.second,
             );
         }
-        // Handed over as bytes, because that is what the chunk held, and with the framing its
-        // chunk gave it — above all §11.3.3.4's compression flag, without which a packet stored
-        // as 71 compressed bytes is rewritten as the 4 045 it inflates to. §11.3.3.4 requires
-        // UTF-8, so a packet that is not is reported by `metadata_notices` — never a silent drop.
-        if let Some(xmp) = meta.xmp {
-            let (language, translated, compressed) =
-                meta.xmp_framing.map_or(("", "", false), |f| {
-                    (
-                        f.language.as_deref().unwrap_or_default(),
-                        f.translated_keyword.as_deref().unwrap_or_default(),
-                        f.compressed,
-                    )
-                });
-            self.ancillary
-                .add_xmp(xmp, language, translated, compressed);
+        // The XMP packet is an ordinary annotation and goes back through the loop below, in its
+        // file position and with its own chunk's framing. A packet set directly with `with_xmp`
+        // is displaced by a carried one, as one carry's packet is by the next: the encoder
+        // writes the packet it was last handed, and a source that holds none leaves it alone.
+        if meta.texts.iter().any(TextChunk::is_xmp_packet) {
+            self.ancillary.drop_xmp();
         }
         for text in meta.texts {
             let (language, translated) = (
@@ -2894,7 +2880,7 @@ mod typed {
             let typed = typed();
             let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
             let read = crate::metadata(&png).unwrap();
-            assert!(read.exif.is_some() && read.xmp.is_some() && read.icc_profile.is_some());
+            assert!(read.exif.is_some() && read.xmp().is_some() && read.icc_profile.is_some());
             assert_eq!(read.metadata().unwrap(), typed);
         }
 
@@ -2968,7 +2954,7 @@ mod typed {
                     .as_deref()
                     .and_then(|e| e.strip_prefix(b"Exif\0\0"))
             );
-            assert_eq!(read.xmp, encoded.xmp);
+            assert_eq!(read.xmp(), encoded.xmp.as_deref());
             let icc = read.icc_profile.unwrap();
             assert_eq!(icc.name, TYPED_ICC_PROFILE_NAME);
             assert_eq!(Some(icc.profile), encoded.icc);
@@ -2982,7 +2968,7 @@ mod typed {
                     .unwrap(),
             );
             let read = crate::metadata(&png).unwrap();
-            assert_eq!(read.xmp.as_deref(), Some(&b"<x:xmpmeta/>"[..]));
+            assert_eq!(read.xmp(), Some(&b"<x:xmpmeta/>"[..]));
             assert_eq!(read.icc_profile.map(|icc| icc.profile), encoded.icc);
             assert_eq!(read.exif, None);
         }

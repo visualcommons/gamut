@@ -16,6 +16,7 @@ use common::{chunk, ihdr_payload, png_from_chunks, tiny_exif, tiny_icc_profile, 
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
 use gamut_png::{
     Background, MetadataNotice, PngDecoder, PngEncoder, PngImage, PngMetadata, SrgbIntent,
+    TextChunkKind,
 };
 use libpng_oracle::{OracleText, OracleTextKind};
 
@@ -146,21 +147,29 @@ fn every_carried_chunk_survives_a_re_encode() {
 
     assert_eq!(re.exif, meta.exif);
     assert_eq!(re.icc_profile, meta.icc_profile);
-    assert_eq!(re.xmp, meta.xmp);
-    assert_eq!(re.xmp_framing, meta.xmp_framing);
     assert_eq!(re.gamma, Some(45_455));
     let chrm = re.chromaticities.expect("cHRM carried");
     assert_eq!(
         (chrm.white, chrm.blue),
         ((CHRM[0], CHRM[1]), (CHRM[6], CHRM[7]))
     );
-    // Both text annotations, in file order, with the Latin-1 `é` intact.
+    // Every text annotation, in file order, with the Latin-1 `é` intact — the XMP packet last
+    // among them, where the source put it, with its compression flag and both §11.3.3.4 tags.
     let texts: Vec<(&str, &str)> = re
         .texts
         .iter()
         .map(|t| (t.keyword.as_str(), t.text.as_str()))
         .collect();
-    assert_eq!(texts, [("Author", "café"), ("Note", "gämut")]);
+    let packet = String::from_utf8(xmp_packet()).unwrap();
+    assert_eq!(
+        texts,
+        [
+            ("Author", "café"),
+            ("Note", "gämut"),
+            ("XML:com.adobe.xmp", packet.as_str())
+        ]
+    );
+    assert_eq!(re.texts, meta.texts);
 }
 
 /// The headline claim again, read by **libpng** rather than by this crate: every payload the source
@@ -585,17 +594,17 @@ fn a_compressed_itxt_goes_back_into_a_compressed_itxt() {
     );
 }
 
-/// The same claim for the XMP packet, which is where it was untrue: the packet leaves the read
-/// side through its own field, so the `iTXt` framing that field does *not* hold — §11.3.3.4's
-/// compression flag above all — has to travel beside it or be invented at the writer.
+/// The same claim for the XMP packet, which is where it was once untrue: the packet used to leave
+/// the read side through a field of its own, and the `iTXt` framing that field did not hold —
+/// §11.3.3.4's compression flag above all — had to travel beside it. It is now an ordinary entry
+/// of `texts` and keeps its flag the way every annotation does; this pins that it still does.
 ///
 /// A provenance packet is exactly the payload a writer compresses, and rewriting one
-/// uncompressed inflates it by a factor a user notices. Kills a mutant that ignores
-/// [`XmpFraming::compressed`](gamut_png::XmpFraming::compressed).
+/// uncompressed inflates it by a factor a user notices.
 #[test]
 fn a_compressed_xmp_packet_goes_back_into_a_compressed_itxt() {
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iTXt", &compressed_xmp())])).unwrap();
-    assert_eq!(meta.xmp, Some(xmp_packet()));
+    assert_eq!(meta.xmp(), Some(&xmp_packet()[..]));
 
     let out = re_encoded_bytes(|e| e.with_png_metadata(&meta));
     let carried = chunk_payload(&out, b"iTXt").expect("the packet");
@@ -605,7 +614,7 @@ fn a_compressed_xmp_packet_goes_back_into_a_compressed_itxt() {
     // Measured against the same carry with the flag cleared, so the claim is the inflation the
     // flag prevents rather than a threshold that happens to hold for this packet.
     let mut flat = meta.clone();
-    flat.xmp_framing.as_mut().expect("framed").compressed = false;
+    flat.texts[0].kind = TextChunkKind::International;
     let flat_out = re_encoded_bytes(|e| e.with_png_metadata(&flat));
     let inflated = chunk_payload(&flat_out, b"iTXt").expect("the packet");
     assert!(
@@ -625,13 +634,34 @@ fn a_compressed_xmp_packet_goes_back_into_a_compressed_itxt() {
 #[test]
 fn an_xmp_packet_keeps_its_language_and_translated_keyword() {
     let meta = gamut_png::metadata(&source(&[])).unwrap();
-    let framing = meta.xmp_framing.clone().expect("the source frames it");
-    assert_eq!(framing.language.as_deref(), Some("en"));
-    assert_eq!(framing.translated_keyword.as_deref(), Some("Metadata"));
-    assert!(framing.compressed);
+    let packet = |meta: &PngMetadata| {
+        meta.texts
+            .iter()
+            .find(|text| text.keyword == "XML:com.adobe.xmp")
+            .cloned()
+            .expect("the source carries a packet")
+    };
+    let framed = packet(&meta);
+    assert_eq!(framed.language.as_deref(), Some("en"));
+    assert_eq!(framed.translated_keyword.as_deref(), Some("Metadata"));
+    assert_eq!(framed.kind, TextChunkKind::CompressedInternational);
 
     let re = re_encoded(|e| e.with_png_metadata(&meta));
-    assert_eq!(re.xmp_framing, Some(framing));
+    assert_eq!(packet(&re), framed);
+}
+
+/// The XMP `iTXt` chunks in `png`, counted by walking the chunk stream.
+fn xmp_chunks(png: &[u8]) -> usize {
+    let mut packets = 0;
+    let mut i = 8;
+    while i + 12 <= png.len() {
+        let len = u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]) as usize;
+        if &png[i + 4..i + 8] == b"iTXt" && png[i + 8..].starts_with(b"XML:com.adobe.xmp\0") {
+            packets += 1;
+        }
+        i += 12 + len;
+    }
+    packets
 }
 
 /// A PNG carries one XMP packet, so the encoder's packet is a single-value payload like `eXIf` or
@@ -647,20 +677,51 @@ fn carrying_an_xmp_packet_replaces_one_already_set() {
             .with_png_metadata(&meta)
     });
 
-    let mut packets = 0;
-    let mut i = 8;
-    while i + 12 <= out.len() {
-        let len = u32::from_be_bytes([out[i], out[i + 1], out[i + 2], out[i + 3]]) as usize;
-        if &out[i + 4..i + 8] == b"iTXt" && out[i + 8..].starts_with(b"XML:com.adobe.xmp\0") {
-            packets += 1;
-        }
-        i += 12 + len;
-    }
-    assert_eq!(packets, 1, "one keyword, one chunk");
+    assert_eq!(xmp_chunks(&out), 1, "one keyword, one chunk");
     assert_eq!(
-        gamut_png::metadata(&out).unwrap().xmp,
-        meta.xmp,
+        gamut_png::metadata(&out).unwrap().xmp(),
+        meta.xmp(),
         "and it is the carried packet, not the one it replaced"
+    );
+}
+
+/// The other half: a carry whose source holds no packet has none to replace a directly-set one
+/// with, so the packet the caller set survives it.
+///
+/// Kills the guard on `drop_xmp` in `with_metadata_view`, without which every carry would discard
+/// a packet set beforehand.
+#[test]
+fn carrying_a_source_without_a_packet_keeps_one_already_set() {
+    let meta = gamut_png::metadata(&minimal_source(&[chunk(b"tEXt", b"Author\0me")])).unwrap();
+    let re = re_encoded(|e| {
+        e.with_xmp("<x:xmpmeta id='set directly'/>")
+            .with_png_metadata(&meta)
+    });
+    assert_eq!(re.xmp(), Some(&b"<x:xmpmeta id='set directly'/>"[..]));
+}
+
+/// A source that holds two packets is written back with two: the carry copies the text list as
+/// it stands and does not decide, on the source's behalf, which packet was meant. This crate's
+/// reader takes the first, so the packet [`PngMetadata::xmp`] reports before and after the carry
+/// is the same one.
+#[test]
+fn a_source_with_two_packets_is_carried_with_both() {
+    let meta = gamut_png::metadata(&minimal_source(&[
+        chunk(
+            b"iTXt",
+            b"XML:com.adobe.xmp\0\0\0\0\0<x:xmpmeta id='first'/>",
+        ),
+        chunk(
+            b"iTXt",
+            b"XML:com.adobe.xmp\0\0\0\0\0<x:xmpmeta id='second'/>",
+        ),
+    ]))
+    .unwrap();
+    let out = re_encoded_bytes(|e| e.with_png_metadata(&meta));
+    assert_eq!(xmp_chunks(&out), 2);
+    assert_eq!(
+        gamut_png::metadata(&out).unwrap().xmp(),
+        Some(&b"<x:xmpmeta id='first'/>"[..])
     );
 }
 
@@ -734,28 +795,11 @@ fn carrying_the_same_metadata_twice_carries_it_once() {
     let once = re_encoded(|e| e.with_png_metadata(&meta));
     let twice = re_encoded(|e| e.with_png_metadata(&meta).with_png_metadata(&meta));
     assert_eq!(once, twice);
-    assert_eq!(once.texts.len(), 2, "the fixture carries two annotations");
-}
-
-/// §11.3.3.4 gives the `iTXt` text field UTF-8 and no alternative, so a packet that is not UTF-8
-/// has no chunk this encoder can frame. The read side hands it over as raw bytes regardless — it
-/// reports what the file held — so the write side is where it has to be said out loud. It is
-/// **reported, not refused**: the pixels of such a file are fine, and failing the whole encode
-/// would leave a caller no way to convert it but to discard its ICC profile too.
-#[test]
-fn a_non_utf8_xmp_packet_is_reported_and_the_re_encode_proceeds() {
-    let mut itxt = b"XML:com.adobe.xmp\0\0\0\0\0".to_vec();
-    itxt.extend_from_slice(b"<x:xmpmeta \xFF\xFE/>");
-    let meta = gamut_png::metadata(&minimal_source(&[chunk(b"iTXt", &itxt)])).unwrap();
-    assert!(meta.xmp.is_some(), "the read side surfaces the raw packet");
-
-    let encoder = PngEncoder::new().with_png_metadata(&meta);
-    assert_eq!(encoder.metadata_notices(), [MetadataNotice::XmpNotUtf8]);
-    assert!(
-        !MetadataNotice::XmpNotUtf8.carried(),
-        "the packet is left behind, not written"
+    assert_eq!(
+        once.texts.len(),
+        3,
+        "the fixture carries two annotations and the XMP packet"
     );
-    assert!(re_encoded(|_| encoder.clone()).xmp.is_none());
 }
 
 /// A null in a text *string* is a shape this crate's own reader hands back: §11.3.3.2 makes the
@@ -854,7 +898,6 @@ fn a_notice_says_whether_the_payload_reached_the_output() {
         MetadataNotice::C2paManifestStore,
         MetadataNotice::TextKeywordNotLatin1,
         MetadataNotice::TextKeywordLength,
-        MetadataNotice::XmpNotUtf8,
         MetadataNotice::TextStringNull,
     ] {
         assert!(!lost.carried(), "{lost:?}");
