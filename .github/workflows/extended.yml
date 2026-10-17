@@ -214,6 +214,10 @@ jobs:
         # resumes where the last stopped, which searches further for less compute than a shallow
         # run per push; the price is that a defect a push introduces is found up to a day later.
         # The README ("The cadence") states the argument.
+        #
+        # DICTIONARIES (#567): `ifd_read`, `tiff_decode` and `dng_decode` search with the committed
+        # libFuzzer dictionaries under tooling/gamut-fuzz/dict/. `mise run fuzz` adds the `-dict=`
+        # itself, so this step and a local run search identically; README "Dictionaries".
         run: |
           mkdir -p tooling/gamut-fuzz/state/${{ matrix.target }} tooling/gamut-fuzz/corpus/${{ matrix.target }}
           mise run fuzz ${{ matrix.target }} tooling/gamut-fuzz/state/${{ matrix.target }} tooling/gamut-fuzz/corpus/${{ matrix.target }} -- -max_total_time=3600
