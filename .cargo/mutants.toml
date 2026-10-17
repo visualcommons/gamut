@@ -980,13 +980,15 @@ exclude_re = [
     # table does not resolve (issue #305); stubbed to `(0, Ok(0))` it consumes none and yields DC
     # category 0 / AC EOB, the same hang once a Y=0 frame's trailing ones reach it. (Its
     # `(0, Ok(1))` / `(1, …)` siblings read a bit or consume one, so they terminate and are caught.)
+    # `BitReader::consume` is where every read — `decode_symbol`, `read_bits`, `read_bit` — advances
+    # the cursor, so its `Ok(())` stub is that hang too. Its runaway Y=0 loop also grows the sample
+    # plane, so whether it reaches the 6 GiB address-space cap before the 60 s test timeout depends
+    # on the machine's load: #305's two surveys scored the same mutant `caught` and then `TIMEOUT`.
     # All signature-anchored, so every operator mutant in these functions stays in the survey.
-    # `BitReader::consume` stubbed the same way is *not* here: its decode loop also re-reads the
-    # same symbols without end, but grows the sample plane fast enough to hit the runner's 6 GiB
-    # address-space cap inside the test timeout, so it scores `caught` (#305's survey).
     'replace decode_symbol -> Result<u8> with Ok\(0\)',
     "replace Ctx<'_>::decode_block -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
     'replace DecTable::walk -> \(u32, Result<u8>\) with \(0, Ok\(0\)\)',
+    "replace BitReader<'a>::consume -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
     # syntax::Reader::u8 — the segment cursor. `self.pos += 1` mutated to `*= 1` pins `pos`, so the
     # `while r.remaining() > 0` table loops in parse_dqt/parse_dht never make progress and never
     # terminate. (The `-=` sibling walks `pos` backwards into an out-of-range read that errors, and is
