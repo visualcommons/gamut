@@ -226,6 +226,32 @@ fn one_failing_input_exits_1_and_the_others_are_still_written() {
 }
 
 #[test]
+fn png_effort_and_refinement_passes_reach_the_encoder() {
+    // `--png-effort` picks the rung and `--png-refinement-passes` overrides one knob inside it
+    // (issue #630); the pair must still write a PNG that decodes to its input. Rung 3 is the one
+    // that consults the refinement budget, so this is the combination where both flags act.
+    let scratch = Scratch::new("png-effort");
+    std::fs::write(scratch.path("in.png"), png()).unwrap();
+
+    let run = convert(
+        &[
+            &scratch.path("in.png"),
+            &scratch.path("out.png"),
+            Path::new("--png-effort"),
+            Path::new("3"),
+            Path::new("--png-refinement-passes"),
+            Path::new("0"),
+        ],
+        b"",
+    );
+
+    assert!(run.status.success(), "{}", streams(&run));
+    let written = std::fs::read(scratch.path("out.png")).unwrap();
+    let decoded: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&written).unwrap();
+    assert_eq!(decoded.into_samples(), PIXELS);
+}
+
+#[test]
 fn quiet_prints_no_summary() {
     let scratch = Scratch::new("quiet");
     std::fs::write(scratch.path("in.png"), png()).unwrap();

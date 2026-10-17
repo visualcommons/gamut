@@ -123,19 +123,21 @@ pub(crate) struct ConvertArgs {
     /// Compress TIFF output with PackBits run-length encoding instead of storing it uncompressed.
     #[arg(long)]
     packbits: bool,
-    /// PNG effort preset: one setting for the five knobs that trade encoding time for output size
-    /// (compression level, DEFLATE effort, filter strategy, optimal-parse span, and lossless
-    /// colour-type reduction). `small` is the default and is what this command has always done;
-    /// `smallest` adds the whole-image filter search, which is much slower. Ignored for other
-    /// output formats.
-    #[arg(long = "png-preset", value_enum, default_value = "small")]
-    png_preset: PngPreset,
-    /// PNG DEFLATE effort: optimal-parse refinement passes, overriding whatever `--png-preset`
-    /// chose (0 = lazy parse only; zopfli's default budget is 15). Only the best compression level
-    /// consults it, so it does nothing under `--png-preset fast` or `balanced`. Omitting it keeps
-    /// the preset's own budget. Ignored for other output formats.
+    /// PNG encoder effort, 0 (fastest) to 3 (smallest): one rung of `gamut-png`'s ladder, setting
+    /// the five knobs that trade encoding time for output size (compression level, DEFLATE
+    /// refinement passes, filter strategy, optimal-parse span, and lossless colour-type
+    /// reduction). 0 is greedy matching on one fixed filter; 1 is the library default; 2, the
+    /// default here, adds the optimal parse and lossless reduction; 3 adds the whole-image filter
+    /// search, about six times slower than 2 for a few percent. Ignored for other output formats.
+    #[arg(long, default_value_t = PNG_EFFORT_DEFAULT,
+        value_parser = clap::value_parser!(u8).range(0..=i64::from(PNG_EFFORT_MAX)))]
+    png_effort: u8,
+    /// PNG DEFLATE optimal-parse refinement passes, overriding the one knob `--png-effort` chose
+    /// for it (0 = lazy parse only; zopfli's default budget is 15). Only the best compression
+    /// level consults it, so it does nothing under `--png-effort 0` or `1`. Omitting it keeps the
+    /// rung's own budget. Ignored for other output formats.
     #[arg(long)]
-    png_effort: Option<u8>,
+    png_refinement_passes: Option<u8>,
     /// JPEG XL Butteraugli distance for lossy encoding (~1.0 = visually lossless, up to 25.0).
     /// Supplying it selects lossy JXL; omitting it keeps the lossless default. Ignored for other
     /// output formats.
@@ -180,7 +182,7 @@ pub(crate) enum OutputFormat {
     /// TIFF (8-bit RGB; uncompressed, or PackBits with `--packbits`).
     Tiff,
     /// PNG — lossless; transparency preserved, with automatic lossless colour-type reduction at
-    /// the default `--png-preset`.
+    /// the default `--png-effort`.
     Png,
     /// JPEG XL — lossless by default, or lossy at `--jxl-distance`; transparency preserved.
     Jxl,
@@ -288,36 +290,24 @@ pub(crate) enum JxlModular {
     Modular,
 }
 
-/// PNG effort preset for `--png-preset`, naming the rungs of `gamut_png::Preset`.
+/// The highest `--png-effort`: the top level of `gamut_png::Preset`'s ladder.
 ///
-/// The discriminants **are** the codec's ladder levels, and `to_codec` resolves them through
-/// [`PngCodecPreset::from_level`] rather than re-deciding the mapping — the same route
-/// `--webp-effort` and `--jxl-effort` take through their own ladders. A named value enum rather
-/// than the siblings' bare integer only because clap prints a rung's doc comment in `--help`,
-/// which a number cannot.
-#[derive(Clone, Copy, ValueEnum)]
-#[repr(u8)]
-pub(crate) enum PngPreset {
-    /// Fastest: greedy matching and one fixed filter, accepting a larger file.
-    Fast = 0,
-    /// The `gamut-png` library default — the balanced speed/size point.
-    Balanced = 1,
-    /// The optimal parse and lossless reduction on one filter heuristic; this command's default.
-    Small = 2,
-    /// Adds the whole-image filter search, zopfli's own refinement budget and a wider
-    /// optimal-parse span. Six times slower than `small` and worth about 3.6% on gamut's corpus,
-    /// but nothing at all on three of its nine rows: measure your own material.
-    Smallest = 3,
-}
+/// The flag carries the codec's own ladder level, as `--webp-effort` and `--jxl-effort` carry
+/// theirs, so this bound is the one fact the command line restates about the ladder;
+/// `the_png_effort_range_is_exactly_the_codec_ladder` holds it to the codec.
+const PNG_EFFORT_MAX: u8 = 3;
 
-impl PngPreset {
-    /// Maps the CLI choice onto the codec's [`PngCodecPreset`] rung.
-    fn to_codec(self) -> PngCodecPreset {
-        // `the_png_preset_flag_offers_exactly_the_codec_ladder` pins that every discriminant here
-        // is a level the codec admits, so the fallback is unreachable; it exists because this is
-        // a CLI and a panic is not an error report.
-        PngCodecPreset::from_level(self as u8).unwrap_or_default()
-    }
+/// The default `--png-effort`: `gamut_png::Preset::Small`, which is what this command has always
+/// encoded with.
+const PNG_EFFORT_DEFAULT: u8 = 2;
+
+/// Resolves a `--png-effort` level onto the codec's [`PngCodecPreset`] rung through the codec's
+/// own [`PngCodecPreset::from_level`], rather than re-deciding the mapping here.
+fn png_preset(level: u8) -> PngCodecPreset {
+    // clap admits only `0..=PNG_EFFORT_MAX`, and `the_png_effort_range_is_exactly_the_codec_ladder`
+    // pins every one of those as a level the codec admits, so the fallback is unreachable; it
+    // exists because this is a CLI and a panic is not an error report.
+    PngCodecPreset::from_level(level).unwrap_or_default()
 }
 
 impl JpegSubsampling {
@@ -725,11 +715,11 @@ fn encode(
                 bytes = rgba.len(),
                 "decoded input"
             );
-            // The preset sets every size/time knob; `--png-effort` still overrides the one it
-            // names, so it must be applied after.
-            let mut encoder = PngEncoder::new().with_preset(args.png_preset.to_codec());
-            if let Some(effort) = args.png_effort {
-                encoder = encoder.with_effort(effort);
+            // The rung sets every size/time knob; `--png-refinement-passes` still overrides the
+            // one it names, so it must be applied after.
+            let mut encoder = PngEncoder::new().with_preset(png_preset(args.png_effort));
+            if let Some(passes) = args.png_refinement_passes {
+                encoder = encoder.with_effort(passes);
             }
             // Carry the input's metadata rather than dropping it (issue #483). `png_metadata`
             // walks the bytes already read, which is cheap (it skips IDAT by length and never
@@ -923,12 +913,12 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::path::PathBuf;
 
-    use clap::{Parser, ValueEnum};
+    use clap::Parser;
     use gamut::avif::AvifMode;
 
     use super::{
         AvifEncoder, AvifSpeed, BitDepth, ChromaSubsampling, ConvertArgs, Job, MatrixCoefficients,
-        OutputFormat, Plan, PngCodecPreset, PngPreset, avif_encoder, plan,
+        OutputFormat, Plan, PngCodecPreset, avif_encoder, plan, png_preset,
     };
     use crate::error::CliError;
 
@@ -952,6 +942,16 @@ mod tests {
     fn parse_avif(flags: &[&str]) -> Result<ConvertArgs, clap::Error> {
         Cli::try_parse_from(
             ["convert", "in.png", "out.avif"]
+                .into_iter()
+                .chain(flags.iter().copied()),
+        )
+        .map(|cli| cli.args)
+    }
+
+    /// `convert in.png out.png <flags>` parsed, or clap's refusal.
+    fn parse_png(flags: &[&str]) -> Result<ConvertArgs, clap::Error> {
+        Cli::try_parse_from(
+            ["convert", "in.png", "out.png"]
                 .into_iter()
                 .chain(flags.iter().copied()),
         )
@@ -1070,14 +1070,14 @@ mod tests {
     }
 
     #[test]
-    fn the_png_preset_flag_offers_exactly_the_codec_ladder() {
-        // The flag's values and the codec's rungs are two lists that must stay the same list.
-        // Walking `from_level` from zero is the codec's own enumeration of its ladder, so a rung
-        // added to `gamut_png::Preset` fails here instead of being silently unreachable from the
-        // command line — which is what a hand-written arm-per-variant mapping could not catch.
-        let from_flag: Vec<u8> = PngPreset::value_variants()
-            .iter()
-            .map(|preset| preset.to_codec().level())
+    fn the_png_effort_range_is_exactly_the_codec_ladder() {
+        // The levels clap admits and the codec's rungs are two lists that must stay the same
+        // list. Walking `from_level` from zero is the codec's own enumeration of its ladder, so a
+        // rung added to `gamut_png::Preset` fails here instead of being silently unreachable from
+        // the command line, and each admitted level must resolve to the rung of that level.
+        let from_flag: Vec<u8> = (0..=u8::MAX)
+            .filter(|level| parse_png(&["--png-effort", &level.to_string()]).is_ok())
+            .map(|level| png_preset(level).level())
             .collect();
         let from_codec: Vec<u8> = (0..=u8::MAX)
             .map_while(PngCodecPreset::from_level)
@@ -1085,8 +1085,31 @@ mod tests {
             .collect();
         assert!(
             from_flag == from_codec,
-            "--png-preset offers levels {from_flag:?} against the codec ladder {from_codec:?}"
+            "--png-effort admits levels {from_flag:?} against the codec ladder {from_codec:?}"
         );
+    }
+
+    #[test]
+    fn png_effort_defaults_to_the_small_rung() {
+        // `small` is what this command encoded with before the flag existed.
+        let args = parse_png(&[]).unwrap();
+        assert_eq!(png_preset(args.png_effort), PngCodecPreset::Small);
+        assert_eq!(args.png_refinement_passes, None);
+    }
+
+    #[test]
+    fn png_refinement_passes_is_its_own_flag() {
+        let args = parse_png(&["--png-effort", "3", "--png-refinement-passes", "0"]).unwrap();
+        assert_eq!(png_preset(args.png_effort), PngCodecPreset::Smallest);
+        assert_eq!(args.png_refinement_passes, Some(0));
+    }
+
+    #[test]
+    fn the_retired_png_preset_flag_is_refused() {
+        // The rename is a breaking change taken on purpose (issue #630); the old spelling must
+        // fail loudly rather than be silently accepted under another meaning.
+        let error = parse_png(&["--png-preset", "small"]).err().unwrap();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

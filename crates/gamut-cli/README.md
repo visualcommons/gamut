@@ -44,6 +44,13 @@ gamut convert input.png output.jxl
 gamut convert input.png output.jxl --jxl-distance 1.0 --jxl-effort 7
 gamut convert input.png output.jxl --jxl-container
 
+# Encode PNG (lossless). --png-effort 0..=3 picks a rung of gamut-png's size/time ladder (default
+# 2; 3 adds the whole-image filter search, much slower). --png-refinement-passes N overrides the
+# one DEFLATE knob inside the rung (consulted only at --png-effort 2 and 3).
+gamut convert input.jpg output.png
+gamut convert input.jpg output.png --png-effort 3
+gamut convert input.jpg output.png --png-effort 3 --png-refinement-passes 30
+
 # Encode JPEG (JPEG-1): always lossy at --quality (default 75). --jpeg-subsampling picks the
 # YCbCr chroma resolution (444/422/420, default 420); --jpeg-restart-interval N inserts RSTn
 # restart markers every N MCUs (0 = off); --jpeg-progressive selects the progressive (SOF2)
