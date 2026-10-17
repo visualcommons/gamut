@@ -128,11 +128,11 @@ pub use gamut_ifd::c2pa::{
 // `C2paExclusions` measures in).
 pub use gamut_ifd::{ByteOrder, Range, Segment, SpanKind, Value};
 // The shared metadata facade supplies this crate's metadata models rather than a DNG-local
-// restatement of them: `DngMetadata::exif` *is* the facade's `Exif`, and `DngMetadata::blocks`
+// restatement of them: `DngMetadata::exif` *is* the facade's `Exif`, and its `TypedMetadata` impl
 // hands the byte carriers over as `MetadataBlock`s. Re-exported so a caller can build and read
 // that surface without also depending on `gamut-metadata` directly.
-pub use gamut_metadata::MetadataBlock;
 pub use gamut_metadata::exif::{Exif, ExifTag, Rational};
+pub use gamut_metadata::{Metadata, MetadataBlock, TypedMetadata};
 pub use levels::RawLevels;
 pub use linearize::LinearImage;
 pub use lossless_jpeg::LosslessJpeg;

@@ -144,8 +144,10 @@ already models one — over the very same `gamut_ifd::Ifd` this crate speaks —
   directory is dropped, and it arrives typed rather than as loose `RawTag`s.
 - **XMP (700), IPTC-IIM (33723) and ICC (34675) stay verbatim `Vec<u8>`** — a DNG holds each as
   one opaque payload, so there is no structure here for this crate to duplicate, exactly as
-  `gamut-png` and `gamut-webp` carry theirs. `DngMetadata::blocks` presents them as the facade's
-  `MetadataBlock`s, so `Metadata::from_blocks` turns them into the unified model.
+  `gamut-png` and `gamut-webp` carry theirs. `DngMetadata` implements the facade's
+  `TypedMetadata` trait (#628): `blocks` presents them as the facade's `MetadataBlock`s (never
+  `Err`; fallible by the trait's shared signature), and `metadata` turns them into the unified
+  model with the `exif` model assigned onto `Metadata::exif` rather than re-parsed.
   `iptc` deliberately keeps its own field even though `gamut_metadata::Metadata` has no IPTC
   carrier: reconciling a legacy IIM block into an XMP graph is a `ConflictPolicy` decision that
   belongs to the caller, and a container that made it silently could not give the file's bytes

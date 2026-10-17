@@ -3,7 +3,7 @@
 
 mod common;
 
-use gamut_dng::{ByteOrder, DngDecoder, DngEncoder, RawImage};
+use gamut_dng::{ByteOrder, DngDecoder, DngEncoder, RawImage, TypedMetadata};
 
 fn encode_cfa(order: ByteOrder, w: u32, h: u32, bits: u16) -> (Vec<u8>, RawImage) {
     let raw = common::sample_raw(w, h, bits);
@@ -581,7 +581,7 @@ fn metadata_embeds_and_roundtrips() {
     assert_eq!(got.icc, meta.icc);
     // The byte carriers hand over to the unified facade model unchanged.
     assert_eq!(
-        got.blocks(),
+        got.blocks().expect("blocks"),
         vec![
             gamut_dng::MetadataBlock::Xmp(meta.xmp.as_deref().expect("xmp")),
             gamut_dng::MetadataBlock::IptcIim(meta.iptc.as_deref().expect("iptc")),
