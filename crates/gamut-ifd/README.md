@@ -62,6 +62,24 @@ principled exception is the [`tags`] module: the handful of **structural pointer
 the directory graph itself, so they live here (`tags::STANDARD_POINTER_TAGS` is the ready-made
 `read_tree` set) instead of being re-declared by every consumer.
 
+The same module holds the shared **tag registry** (issue #532): each tag a vendored specification
+defines, as a `TagSpec` row of number, name, permitted field types and component count, grouped
+into one `TagBlock` per specification — `tags::TIFF6` (TIFF 6.0, `references/tiff/tiff6.pdf`, 74
+tags) and `tags::DNG` (DNG 1.7.1.0, `references/dng/DNG_Spec_1_7_1_0.pdf`, 118 tags). It records
+identity and value shape, not meaning, and is read by `gamut-tiff` and `gamut-dng` (to recognise
+standard tags) and `gamut-exif` (to name 0th-IFD tags CIPA DC-008 does not define). Tags from
+specifications not vendored here — TIFF/EP, the Adobe technical notes, and the vendor lineages
+exiv2 folds into its standard tables — are deliberately absent.
+
+```rust
+use gamut_ifd::tags::{DNG, TIFF6, TagCount};
+
+let page = TIFF6.find(297).unwrap();
+assert_eq!(page.name, "PageNumber");
+assert_eq!(page.count, TagCount::Exact(2));
+assert_eq!(DNG.find(50706).map(|s| s.name), Some("DNGVersion"));
+```
+
 ### Streaming (RAW-grade) parsing
 
 A multi-hundred-MB camera file should not need to be in memory to have its kilobytes of

@@ -177,10 +177,13 @@ the catalogue and vendor enums are `#[non_exhaustive]`):
   note's absolute source offset and the writer **pins** the byte range there on a rewrite, so
   vendor TIFF-absolute internal offsets stay valid; only an unsatisfiable pin (the directory
   region outgrew the old position) falls back to relocation, with the bytes still value-exact.
-- **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags to gamut's 160;
-  the difference is entirely tags CIPA DC-008 does not define (TIFF/EP, DNG, and other lineages),
-  which would have to be transcribed from *their* specifications, not copied out of an oracle.
-  Unknown tags still round-trip losslessly via the raw `Ifd`.
+- **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags. The 160 CIPA
+  DC-008 ones are catalogued here; since issue #532 the 0th IFD's TIFF 6.0 and DNG 1.7.1.0 tags
+  (162 more) are named through `IfdKind::registry_spec` from the shared `gamut_ifd::tags`
+  registry, transcribed from those vendored specifications. What remains — TIFF/EP, the Adobe
+  technical notes, and the vendor lineages exiv2 folds into its standard tables — has no vendored
+  specification to transcribe from, and is not copied out of an oracle. Unknown tags still
+  round-trip losslessly via the raw `Ifd`.
 - **A derivation of the per-tag `Type`/`Count` columns from the PDF itself.** Since issue #544 they
   are checked against a second, independent transcription of the DC-008 tables
   (`tests/fixtures/dc008_tag_columns.txt`, compared by `tests/tag_spec_columns.rs`), so a

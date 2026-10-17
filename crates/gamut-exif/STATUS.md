@@ -144,11 +144,15 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
   — and, since issue #263, pins its byte range at the source offset on rewrites so
   vendor-absolute internal offsets stay valid — and detects the vendor from `Make`, but does not
   decode the block (documented on `MakerNote`).
-- **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags to gamut's 160.
-  The catalogue is complete for CIPA DC-008 (P10 above), so the whole difference is tags DC-008
-  does not define — TIFF/EP, DNG, and other lineages. Adding them means vendoring *their*
-  specifications and transcribing from those, not copying a table out of the oracle, so they are a
-  separate deliverable. Unknown and MakerNote tags still round-trip losslessly because the raw
+- **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags. The catalogue
+  is complete for CIPA DC-008 (P10 above), and since issue #532 the 0th IFD's TIFF 6.0 (44 tags
+  beyond DC-008 Table 6) and DNG 1.7.1.0 (118) tags are named through `IfdKind::registry_spec`
+  from the shared `gamut_ifd::tags` registry, which gamut-tiff and gamut-dng read too;
+  `tests/oracle.rs` holds those rows to exiv2's names (one spelling divergence, `Threshholding`,
+  and four baseline TIFF 6.0 tags exiv2 has no entry for). The remaining difference is tags no
+  vendored specification defines — TIFF/EP, the Adobe technical notes, and the vendor lineages —
+  and stays deferred until a specification is staked for each; a table copied out of the oracle
+  is not a source. Unknown and MakerNote tags still round-trip losslessly because the raw
   `gamut_ifd::Ifd` is retained.
 - **A derivation of the `Type`/`Count` columns from the PDF itself.** Since issue #544 the
   catalogue's `Hex`/`Type`/`Count` columns are checked in both directions against
