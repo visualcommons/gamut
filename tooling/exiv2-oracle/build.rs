@@ -1,9 +1,10 @@
-//! Builds exiv2 0.28 (with its bundled Adobe XMP Toolkit) and the expat it depends on, both from
-//! `third_party/` submodules, into `OUT_DIR`, then links them behind the `extern "C"` shim in
-//! `src/shim.cpp`.
+//! Builds exiv2 0.28 (with its bundled Adobe XMP Toolkit, plus its PNG and BMFF image handlers)
+//! and the expat it depends on, both from `third_party/` submodules, into `OUT_DIR`, then links
+//! them behind the `extern "C"` shim in `src/shim.cpp`.
 //!
 //! expat is vendored and built static (rather than linked from the system) so the oracle is
-//! hermetic; only the system `zlib` is needed, exactly as the other C oracles already require.
+//! hermetic; only the system `zlib` is needed (exiv2's PNG handler inflates/deflates `iCCP` and
+//! `zTXt` through it), exactly as the other C oracles already require.
 //! Everything lands under `OUT_DIR`, so `cargo clean` fully resets the build. CI needs the
 //! submodules checked out (`git submodule update --init --recursive`) and a C++ toolchain.
 
@@ -60,9 +61,14 @@ fn main() {
         .args(["--config", "Release", "--target", "install", "--parallel"])
         .arg(build_env::build_parallelism().to_string()));
 
-    // ---- exiv2: static, XMP only (the bundled XMPCore), every other feature/dependency off. -----
-    let exiv2_install = out.join("exiv2-install");
-    let exiv2_build = out.join("exiv2-build");
+    // ---- exiv2: static, XMP (the bundled XMPCore) + PNG + BMFF; every other feature off. -------
+    // The build and install dirs are keyed on the option set (`EXIV2_TAG`): configuring runs only
+    // when `CMakeCache.txt` is absent, so a changed option set must land in a fresh directory
+    // rather than silently reuse a cache configured with the old one. Change the tag whenever
+    // the option list below changes.
+    const EXIV2_TAG: &str = "png-bmff";
+    let exiv2_install = out.join(format!("exiv2-install-{EXIV2_TAG}"));
+    let exiv2_build = out.join(format!("exiv2-build-{EXIV2_TAG}"));
     if !exiv2_build.join("CMakeCache.txt").exists() {
         run(Command::new("cmake")
             .arg("-S")
@@ -74,10 +80,10 @@ fn main() {
                 "-DBUILD_SHARED_LIBS=OFF",
                 "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
                 "-DEXIV2_ENABLE_XMP=ON", // pulls in the bundled Adobe XMPCore
-                "-DEXIV2_ENABLE_PNG=OFF", // drop zlib's PNG path
+                "-DEXIV2_ENABLE_PNG=ON", // PNG container handler (needs zlib)
                 "-DEXIV2_ENABLE_NLS=OFF",
                 "-DEXIV2_ENABLE_WEBREADY=OFF",
-                "-DEXIV2_ENABLE_BMFF=OFF",
+                "-DEXIV2_ENABLE_BMFF=ON", // ISOBMFF (AVIF/HEIF/JXL) handler, read-only in exiv2
                 "-DEXIV2_ENABLE_BROTLI=OFF",
                 "-DEXIV2_ENABLE_INIH=OFF",
                 "-DEXIV2_ENABLE_VIDEO=OFF",
