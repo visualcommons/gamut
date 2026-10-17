@@ -502,7 +502,8 @@ pub struct EncodeOpts<'a> {
     pub srgb_intent: Option<i32>,
     /// eXIf payload (a TIFF stream), written verbatim.
     pub exif: Option<&'a [u8]>,
-    /// iCCP profile as (name, raw ICC bytes); libpng deflates the profile itself.
+    /// iCCP profile as (name, raw ICC bytes); libpng deflates the profile itself. The name is
+    /// written as Latin-1 (§11.3.2.3); a character outside it panics.
     pub icc: Option<(&'a str, &'a [u8])>,
     /// Text chunks to embed.
     pub text: &'a [TextChunk<'a>],
@@ -703,7 +704,9 @@ pub fn encode(
             sys::png_set_eXIf_1(png, info, exif.len() as u32, exif.as_ptr().cast_mut());
         }
         if let Some((name, profile)) = opts.icc {
-            let name = std::ffi::CString::new(name).expect("iCCP name without NUL");
+            // PNG §11.3.2.3: the profile name is Latin-1, exactly like a text keyword.
+            let name =
+                std::ffi::CString::new(latin1(name, "iCCP name")).expect("iCCP name without NUL");
             sys::png_set_iCCP(
                 png,
                 info,
@@ -1064,10 +1067,10 @@ mod tests {
         assert_eq!((dec.bkgd, dec.warnings), (None, 1));
     }
 
-    #[test]
-    fn every_metadata_chunk_written_reads_back_in_its_own_field() {
-        // A header, an empty tag table, then 128 bytes that do not deflate away: libpng drops an
-        // iCCP chunk shorter than 92 bytes (see `DecodedImage::iccp`).
+    /// A minimal ICC profile libpng accepts: a header, an empty tag table, then 128 bytes that do
+    /// not deflate away, since libpng drops an iCCP chunk shorter than 92 bytes (see
+    /// `DecodedImage::iccp`).
+    fn tiny_icc_profile() -> Vec<u8> {
         let mut icc = vec![0u8; 132];
         icc.extend((0u32..128).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
         let size = icc.len() as u32;
@@ -1078,6 +1081,32 @@ mod tests {
         icc[20..24].copy_from_slice(b"XYZ ");
         icc[36..40].copy_from_slice(b"acsp");
         icc[68..80].copy_from_slice(&[0, 0, 0xF6, 0xD6, 0, 1, 0, 0, 0, 0, 0xD3, 0x2D]);
+        icc
+    }
+
+    #[test]
+    fn iccp_name_is_written_and_read_back_as_latin1() {
+        let icc = tiny_icc_profile();
+        // An RGB image: libpng rejects an RGB profile on a greyscale one.
+        let png = encode(
+            &[0; 3],
+            1,
+            1,
+            COLOR_RGB,
+            8,
+            &EncodeOpts {
+                icc: Some(("Caf\u{e9}", &icc)),
+                ..EncodeOpts::default()
+            },
+        );
+        // Name, NUL separator, compression method 0, then the zlib stream.
+        assert_eq!(&chunk_payload(&png, b"iCCP")[..6], b"Caf\xE9\0\0");
+        assert_eq!(decode(&png).iccp, Some(("Caf\u{e9}".to_string(), icc)));
+    }
+
+    #[test]
+    fn every_metadata_chunk_written_reads_back_in_its_own_field() {
+        let icc = tiny_icc_profile();
         let chrm = [
             31_270, 32_900, 64_000, 33_000, 30_000, 60_000, 15_000, 6_000,
         ];
