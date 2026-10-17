@@ -61,6 +61,18 @@
 #define GAMUT_AVIF_MIRROR_LEFT_RIGHT 1
 
 /**
+ * `gamut_png_encoder_set_palette_order` value: a caller-supplied palette keeps the order it
+ * was given in (the default).
+ */
+#define GAMUT_PNG_PALETTE_ORDER_AS_SUPPLIED 0
+
+/**
+ * `gamut_png_encoder_set_palette_order` value: a caller-supplied palette is reordered by
+ * modified-Zeng, entries that neighbour each other in the picture placed side by side.
+ */
+#define GAMUT_PNG_PALETTE_ORDER_MODIFIED_ZENG 1
+
+/**
  * Opaque handle over a `gamut::avif::AvifEncoder` and its backend registry.
  */
 typedef struct GamutAvifEncoder GamutAvifEncoder;
@@ -1216,6 +1228,21 @@ void gamut_png_encoder_free(struct GamutPngEncoder *encoder);
 gamut_status_t gamut_png_encoder_push_backend(struct GamutPngEncoder *encoder,
                                               const struct GamutEncoderVTable *vtable,
                                               void *ctx);
+
+/**
+ * Selects the order a caller-supplied palette is written in, one of the
+ * `GAMUT_PNG_PALETTE_ORDER_*` constants (`PngEncoder::with_palette_order`). Lossless in what a
+ * decoder renders: reordering renumbers the entries and rewrites the indices and the `bKGD`
+ * index to follow. Has no effect on a palette the encoder derives itself.
+ *
+ * Returns `GAMUT_STATUS_INVALID_INPUT` for a value that is not one of the constants (the
+ * encoder is then unchanged), `GAMUT_STATUS_NULL_ARGUMENT` on a `NULL` encoder.
+ *
+ * # Safety
+ *
+ * `encoder` is `NULL` or a live encoder handle.
+ */
+gamut_status_t gamut_png_encoder_set_palette_order(struct GamutPngEncoder *encoder, uint8_t order);
 
 /**
  * Creates a WebP decoder with default settings and an empty backend registry.
