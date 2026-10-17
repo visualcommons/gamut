@@ -386,4 +386,94 @@ mod tests {
         tokens.extend((0..3000u32).map(|i| Token::Literal((i % 200 + 30) as u8)));
         assert!(multi_body(&tokens).len() < body(&tokens).len());
     }
+
+    /// `n` literals cycling through the `period` byte values from `first`.
+    fn region(n: u32, period: u32, first: u32) -> Vec<Token> {
+        (0..n)
+            .map(|i| Token::Literal((i % period + first) as u8))
+            .collect()
+    }
+
+    /// Split points `recurse` records for `tokens[start..end]` at depth `depth`.
+    fn splits(tokens: &[Token], start: usize, end: usize, depth: u32) -> Vec<usize> {
+        let mut points = Vec::new();
+        recurse(tokens, start, end, &mut points, depth);
+        points
+    }
+
+    /// `block_bits` is the exact number of bits `write_block` emits — header, code-length RLE,
+    /// every literal and match with its extra bits, and the end-of-block code. Only whole bytes
+    /// are observable, so each stream is written after `k` padding bits for every `k` in `0..8`:
+    /// across that cycle the byte count pins the bit count exactly, where one byte count alone
+    /// would hide an error of up to seven bits.
+    #[test]
+    fn block_bits_is_the_exact_length_of_the_written_block() {
+        let mut with_matches = region(300, 40, 20);
+        with_matches.extend([
+            Token::Match { len: 3, dist: 1 },
+            Token::Match { len: 258, dist: 32768 },
+            Token::Match { len: 17, dist: 300 },
+            Token::Literal(255),
+        ]);
+        for tokens in [with_matches, region(1000, 7, 0), region(5, 200, 30)] {
+            let built = build(&tokens);
+            let bits = block_bits(&built, &tokens);
+            for pad in 0..8 {
+                let mut w = BitWriter::new();
+                w.write_bits(0, pad);
+                write_block(&mut w, &built, &tokens, true);
+                assert_eq!(
+                    w.finish().len() as u64,
+                    (u64::from(pad) + bits).div_ceil(8),
+                    "{} tokens after {pad} padding bits",
+                    tokens.len()
+                );
+            }
+        }
+    }
+
+    /// A segment of exactly `2 * MIN_SPLIT_TOKENS` tokens is large enough to split: its one
+    /// candidate, the midpoint between two regions with nothing in common, is taken.
+    #[test]
+    fn recurse_splits_a_segment_of_exactly_twice_the_minimum() {
+        let mut tokens = region(512, 1, 0);
+        tokens.extend(region(512, 200, 30));
+        assert_eq!(splits(&tokens, 0, 1024, 1), [512]);
+    }
+
+    /// One token fewer and the segment is too small, however much a split would save — measured
+    /// on a segment that does not start at index 0, so the size is `end - start` and not `end`.
+    #[test]
+    fn recurse_leaves_a_segment_one_token_short_of_twice_the_minimum_whole() {
+        let mut tokens = region(1024, 1, 0);
+        tokens.extend(region(511, 200, 30));
+        assert_eq!(splits(&tokens, 512, 1535, 1), []);
+    }
+
+    /// Between candidates of equal cost the first is kept. `A B B A` with `A`/`B` regions of
+    /// `MIN_SPLIT_TOKENS` tokens costs the same split after the first `A` as before the last one,
+    /// because a block's cost depends only on its histogram; at depth 1 only the first is taken.
+    #[test]
+    fn recurse_keeps_the_first_of_equally_cheap_candidates() {
+        let mut tokens = region(512, 1, 0);
+        tokens.extend(region(1024, 200, 30));
+        tokens.extend(region(512, 1, 0));
+        let at = |j: usize| cost(&tokens[..j]) + cost(&tokens[j..]);
+        assert_eq!(at(512), at(1536), "fixture must tie");
+        assert_eq!(splits(&tokens, 0, 2048, 1), [512]);
+    }
+
+    /// A split that costs exactly as much as the whole segment is not taken: a split must save.
+    #[test]
+    fn recurse_does_not_split_where_it_saves_nothing() {
+        let mut tokens = region(512, 13, 0);
+        tokens.extend(region(512, 15, 1));
+        let whole = cost(&tokens);
+        assert_eq!(
+            cost(&tokens[..512]) + cost(&tokens[512..]),
+            whole,
+            "fixture must tie"
+        );
+        assert_eq!(splits(&tokens, 0, 1024, 1), []);
+    }
 }
