@@ -322,6 +322,45 @@ fn encode_filter_strategy(bencher: Bencher, filter: FilterStrategy) {
         .bench_local(|| case.gamut(Level::Default, black_box(filter), false));
 }
 
+/// The seven whole-image candidates `BruteForce` races (`BRUTE_FORCE_STRATEGIES`, in its order).
+const BRUTE_FORCE_CANDIDATES: [FilterStrategy; 7] = [
+    FilterStrategy::None,
+    FilterStrategy::Fixed(FilterType::Sub),
+    FilterStrategy::Fixed(FilterType::Up),
+    FilterStrategy::Fixed(FilterType::Average),
+    FilterStrategy::Fixed(FilterType::Paeth),
+    FilterStrategy::MinSumAbs,
+    FilterStrategy::MinBigrams,
+];
+
+/// What running `BruteForce`'s trials on scoped threads buys (issue #624), at the `Level::Best`
+/// the `Smallest` rung pairs it with.
+///
+/// `serial` encodes the seven candidates one after another through the public API -- the work
+/// `BruteForce` did before #624, plus six PNG framings that cost microseconds against seven
+/// DEFLATE streams. `brute_force` is the encoder's own race, which now runs them concurrently.
+/// The ratio of the two is the win, and it is bounded by the slowest single candidate and by the
+/// cores available, not by seven.
+///
+/// Seconds per iteration at this level and size, so the sample count is pinned low: divan's
+/// default of 100 would spend most of an hour here.
+#[divan::bench(args = ["serial", "brute_force"], sample_count = 5, sample_size = 1)]
+fn brute_force_trials(bencher: Bencher, mode: &str) {
+    let case = case_named("photo_rgb8");
+    bencher
+        .counter(BytesCount::new(case.raw_len()))
+        .bench_local(|| {
+            if mode == "serial" {
+                BRUTE_FORCE_CANDIDATES
+                    .into_iter()
+                    .map(|filter| case.gamut(Level::Best, black_box(filter), false))
+                    .min_by_key(Vec::len)
+            } else {
+                Some(case.gamut(Level::Best, FilterStrategy::BruteForce, false))
+            }
+        });
+}
+
 /// Attributes the whole reduce stage without needing any seam into it: the same image encoded
 /// with the analysis on and off.
 #[divan::bench(args = [false, true])]
