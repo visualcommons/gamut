@@ -1902,8 +1902,9 @@ mod tests {
             ] {
                 let samples = vec![1u16 << (precision - 1); w * h * c];
                 let stream = encode(&samples, w, h, c, precision).expect("encode");
+                let dht = 2 + 2 + 8 + 3 * c; // SOI, then SOF3: marker plus `8 + 3·Nf` bytes
                 assert_eq!(
-                    stream[2 + 13 + 5..2 + 13 + 21],
+                    stream[dht + 5..dht + 21],
                     [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                     "{w}x{h}x{c}@{precision}: one-code BITS",
                 );
