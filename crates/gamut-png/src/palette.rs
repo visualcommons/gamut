@@ -209,7 +209,8 @@ impl PngPalette {
     /// pixels that name them, which gives a symmetric co-occurrence weight `w(a, b)`. The list
     /// starts as the heaviest pair. Each step then takes the unplaced entry with the largest
     /// unweighted adjacency to the whole list and puts it at whichever end its adjacency, weighted
-    /// by `log2(1 + 1/d)` for an entry `d` places from that end (1-based), is larger. Entries that
+    /// by `log2(1 + 1/d)` for an entry `d` places from that end (1-based, in the fixed point of
+    /// [`DISTANCE_WEIGHT`]), is larger. Entries that
     /// sit beside each other in the picture end up beside each other in the palette, so the index
     /// differences the scanline filters hand DEFLATE are small.
     ///
@@ -260,11 +261,11 @@ impl PngPalette {
             .max_by_key(|&c| (adjacency[c], std::cmp::Reverse(c)))
         {
             let len = list.len();
-            let (mut front, mut back) = (0f64, 0f64);
+            let (mut front, mut back) = (0u128, 0u128);
             for (k, &entry) in list.iter().enumerate() {
-                let w = weight[next * n + entry] as f64;
-                front += w * (1.0 + 1.0 / (k + 1) as f64).log2();
-                back += w * (1.0 + 1.0 / (len - k) as f64).log2();
+                let w = u128::from(weight[next * n + entry]);
+                front += w * u128::from(DISTANCE_WEIGHT[k]);
+                back += w * u128::from(DISTANCE_WEIGHT[len - 1 - k]);
             }
             if front > back {
                 list.push_front(next);
@@ -304,6 +305,45 @@ impl PngPalette {
         }
     }
 }
+
+/// Pinho and Neves's distance weight `log2(1 + 1/d)` for `d = i + 1`, in fixed point:
+/// `round(2^24 · log2(1 + 1/d))`, one entry for each distance a list of at most 255 placed
+/// entries can hold.
+///
+/// A table rather than `f64::log2`, because the encoder's output is byte-reproducible and the
+/// standard library documents that function's precision as platform- and even call-dependent: a
+/// one-ulp difference near a tie between the two ends would put an entry at the other end and
+/// change the file. Integer sums of these weights compare the same everywhere. 2^24 keeps the
+/// smallest weight (`d = 255`) near 95 000, so rounding moves only a comparison that was within
+/// 2^-24 of a tie in the real numbers. `the_distance_weights_are_log2_of_one_plus_one_over_d`
+/// checks every entry against the formula.
+#[rustfmt::skip]
+const DISTANCE_WEIGHT: [u32; 255] = [
+    16777216, 9814042, 6963174, 5401057, 4412985, 3731126, 3232048, 2850868, 2550189, 2306926,
+    2106059, 1937386, 1793739, 1669931, 1562117, 1467383, 1383485, 1308665, 1241524, 1180937,
+    1125989, 1075929, 1030130, 988072, 949314, 913482, 880257, 849365, 820567, 793658, 768458,
+    744810, 722573, 701626, 681859, 663176, 645489, 628721, 612803, 597670, 583267, 569542,
+    556448, 543942, 531986, 520545, 509585, 499078, 488995, 479311, 470003, 461050, 452432,
+    444130, 436127, 428408, 420957, 413761, 406806, 400082, 393576, 387279, 381180, 375270,
+    369540, 363983, 358590, 353355, 348271, 343331, 338529, 333859, 329317, 324896, 320593,
+    316402, 312319, 308341, 304462, 300680, 296990, 293390, 289877, 286446, 283096, 279823,
+    276625, 273499, 270443, 267455, 264532, 261672, 258873, 256134, 253452, 250825, 248252,
+    245732, 243262, 240842, 238469, 236142, 233861, 231623, 229427, 227273, 225159, 223084,
+    221046, 219046, 217081, 215152, 213256, 211394, 209563, 207764, 205996, 204258, 202549,
+    200868, 199214, 197588, 195988, 194414, 192865, 191340, 189839, 188362, 186908, 185475,
+    184065, 182676, 181307, 179959, 178631, 177322, 176033, 174762, 173509, 172274, 171057,
+    169856, 168673, 167505, 166354, 165218, 164098, 162993, 161903, 160827, 159766, 158718,
+    157684, 156663, 155656, 154661, 153679, 152710, 151752, 150807, 149873, 148951, 148040,
+    147140, 146251, 145372, 144504, 143647, 142799, 141962, 141134, 140316, 139507, 138708,
+    137917, 137136, 136363, 135599, 134844, 134097, 133358, 132627, 131904, 131190, 130482,
+    129783, 129090, 128406, 127728, 127058, 126394, 125737, 125088, 124445, 123808, 123178,
+    122554, 121937, 121326, 120720, 120121, 119528, 118941, 118359, 117783, 117213, 116648,
+    116089, 115534, 114986, 114442, 113903, 113370, 112841, 112318, 111799, 111285, 110776,
+    110271, 109771, 109275, 108784, 108297, 107815, 107337, 106863, 106393, 105928, 105466,
+    105008, 104555, 104105, 103659, 103217, 102779, 102344, 101913, 101486, 101062, 100642,
+    100225, 99812, 99402, 98996, 98592, 98192, 97796, 97402, 97012, 96625, 96240, 95859, 95481,
+    95106, 94734,
+];
 
 /// The symmetric co-occurrence table of an `n`-entry palette's indices over a `width`-pixel-wide
 /// image, row-major: `weight[a * n + b]` counts the horizontally or vertically neighbouring pixel
@@ -594,6 +634,36 @@ mod tests {
         let indices = [2, 1, 1, 0, 1, 4, 3, 2];
         let (reordered, _) = greys(5).modified_zeng(&indices, indices.len());
         assert_eq!(order_of(&reordered), vec![0, 1, 2, 3, 4]);
+    }
+
+    /// The front end can win on an entry that does not sit at the front.
+    ///
+    /// Pairs: 0–1 six times (the seed), 1–2 and 2–3 three times each, and 4–1 once. The list grows
+    /// `[0, 1, 2, 3]`, and 4 links only to 1: two places from the front, three from the back, so
+    /// `log2(1 + 1/2)` beats `log2(1 + 1/3)` and 4 is prepended beside 0, which it never touches.
+    #[test]
+    fn modified_zeng_weighs_an_inner_entry_by_its_distance_from_each_end() {
+        let indices = [4, 1, 0, 1, 0, 1, 0, 1, 2, 1, 2, 3, 2, 3];
+        let (reordered, _) = greys(5).modified_zeng(&indices, indices.len());
+        assert_eq!(order_of(&reordered), vec![4, 0, 1, 2, 3]);
+    }
+
+    /// Every [`DISTANCE_WEIGHT`] entry is `log2(1 + 1/d)` in 2^24 fixed point, to the nearest
+    /// integer, for `d` one more than its index — and the table covers distances 1 to 255.
+    ///
+    /// A drift guard for a table written out as literals: an `f64` evaluated here may differ
+    /// from the table by the rounding of the last step, never by more than one unit.
+    #[test]
+    fn the_distance_weights_are_log2_of_one_plus_one_over_d() {
+        for (i, &weight) in DISTANCE_WEIGHT.iter().enumerate() {
+            let d = (i + 1) as f64;
+            let exact = (1.0 + 1.0 / d).log2() * f64::from(1u32 << 24);
+            assert!(
+                (f64::from(weight) - exact).abs() <= 1.0,
+                "d = {d}: {weight} against {exact}"
+            );
+        }
+        assert_eq!(DISTANCE_WEIGHT.len(), 255);
     }
 
     /// Ties fall to the lower index: with no neighbour pairs at all the seed is `[0, 1]`, and every
