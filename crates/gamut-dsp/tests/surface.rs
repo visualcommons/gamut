@@ -1,7 +1,7 @@
 //! Drives the crate through its public API only: each of the 12 `av1`/`math` public functions is
 //! exercised via its `gamut_dsp::module::item` path, proving that surface self-sufficient — a
 //! dropped export or re-flattened module breaks this file before it breaks a consumer crate. The
-//! two `jpeg` functions are not driven here; their inline tests and doctests pin them.
+//! four `jpeg` functions are not driven here; their inline tests and doctests pin them.
 
 use gamut_dsp::av1::{
     forward_adst, forward_dct, forward_identity, forward_wht4x4, inverse_adst, inverse_dct,

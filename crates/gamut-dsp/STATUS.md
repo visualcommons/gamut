@@ -100,8 +100,9 @@ inline against a direct evaluation of the §A.3.3 double sum, plus DC, orientati
 probes; `idct8x8_int` is held to the full IEEE 1180-1990 accuracy procedure against `idct8x8`
 (three input ranges × 10 000 blocks × both signs, all five bounds; T.83 is not vendored), plus
 impulse, dense-block and DC-shortcut equality probes, and its bit-exactness with libjpeg-turbo
-lands through `gamut-jpeg`'s oracle gate, which asserts exact equality on gray — plus `tests/surface.rs`, which drives the 12 `av1`/`math` public functions through their
-`gamut_dsp::module::item` paths only (the two `jpeg` functions are not yet in it), and the
+lands through `gamut-jpeg`'s oracle gate, which asserts exact equality on gray and 4:4:4 — plus
+`tests/surface.rs`, which drives the 12 `av1`/`math` public functions through their
+`gamut_dsp::module::item` paths only (the four `jpeg` functions are not yet in it), and the
 compiled crate-root doctest.
 Bit-exactness of the inverse kernels against dav1d/libaom lands transitively through the 2-D
 pipeline's conformance suites in `gamut-av1`/`gamut-avif`. The divan bench harness
