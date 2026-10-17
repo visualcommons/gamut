@@ -1,5 +1,5 @@
 //! Entropy-scan decoding (T.81 Annex F §F.2 and Annex G §G.2): the byte-destuffing bit reader
-//! (§F.2.2.5), the canonical `DECODE`/`RECEIVE`/`EXTEND` procedures (Figures F.16, F.12), the
+//! (§F.2.2.5), the canonical `DECODE`/`RECEIVE`/`EXTEND` procedures (Figures F.16, F.17, F.12), the
 //! sequential MCU walk that reconstructs each component's sample plane (§A.2), and the progressive
 //! DCT decoder (§G.2) that accumulates DCT coefficients across scans. Restart processing follows
 //! §E.2.5.
@@ -18,10 +18,12 @@
 //! (at EOI) is each component dequantized (§A.3.4), inverse-transformed (§A.3.3) and level-shifted
 //! (§A.3.1) — once — through the same [`write_block`] tail the sequential path uses.
 
+use std::num::NonZeroU16;
+
 use gamut_core::{Error, Result};
 use gamut_dsp::jpeg::idct8x8;
 
-use crate::huffman::DecTable;
+use crate::huffman::{DecTable, LOOKAHEAD};
 use crate::syntax::{Frame, ScanHeader, Tables};
 use crate::zigzag::ZIGZAG;
 
@@ -82,11 +84,28 @@ enum Fetch {
 /// bytes before a marker per §B.1.1.2 are skipped). Once a marker is reached, further bit requests
 /// are satisfied with `1`-padding so the final valid symbols still decode; the byte cursor stays
 /// parked on the marker.
+///
+/// The buffer is 64 bits wide and [`Self::fill`] tops it up a whole byte at a time to more than 56
+/// bits, so a read is a shift and a mask rather than a byte fetch per request, and a Huffman code
+/// can be resolved from a single 16-bit [`Self::peek`] (issue #305). Prefetching runs ahead of what
+/// the decoder has consumed, and is invisible to every caller: whatever it appends past the
+/// entropy data -- `1`-padding at a marker, zero bytes at the end of a truncated stream -- is
+/// counted in [`Self::pad_bits`], and [`Self::consume`] is where reaching into it is judged, so a
+/// truncation is reported at the read that needs the missing bits, exactly as a byte-at-a-time
+/// reader would.
 struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
-    bit_buf: u32,
+    bit_buf: u64,
     bit_count: u32,
+    /// How many of the low `bit_count` buffered bits were appended past the entropy data rather
+    /// than read from it: `1`-padding past a marker, or zero bytes past the end of a stream that
+    /// has no marker. Padding only ever follows the last data byte, so it is always the low end of
+    /// the buffer, and a stream reaches at most one of the two kinds.
+    pad_bits: u32,
+    /// Whether a read has consumed marker padding: the decoder needed more bits than the entropy
+    /// data held before its marker.
+    overread: bool,
     marker: Option<u8>,
     marker_off: usize,
 }
@@ -98,6 +117,8 @@ impl<'a> BitReader<'a> {
             pos: start,
             bit_buf: 0,
             bit_count: 0,
+            pad_bits: 0,
+            overread: false,
             marker: None,
             marker_off: start,
         }
@@ -136,50 +157,81 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    /// Ensures at least `n` (`≤ 16`) bits are buffered, byte at a time, padding with `1`s past a
-    /// marker. Errors only on a truncated stream (EOF with no marker).
+    /// Tops the buffer up with as many whole bytes as its 64 bits have room for: entropy data while
+    /// there is some, then `1`-padding past a marker or zero bytes past the end of a truncated
+    /// stream, both counted in [`Self::pad_bits`]. Afterwards at least 57 bits are buffered, so any
+    /// read of up to 16 bits can be [`Self::peek`]ed.
+    ///
+    /// The byte count is computed before the loop rather than re-tested against the buffered count
+    /// on each pass, so the loop is bounded by its own arithmetic whatever the body does.
     ///
     /// Each byte is composed with `+` rather than `|`: the shift just vacated 8 low zero bits and
     /// the addend is `< 256`, so the addition fills exactly those vacant bits (the same convention
     /// as `bitwriter`/`pack_nibbles`, where `|` and `^` would be equivalent on disjoint operands).
-    fn ensure(&mut self, n: u32) -> Result<()> {
-        while self.bit_count < n {
-            match self.fetch() {
-                Fetch::Data(b) => {
-                    self.bit_buf = (self.bit_buf << 8) + u32::from(b);
-                    self.bit_count += 8;
-                }
+    fn fill(&mut self) {
+        let room = (64 - self.bit_count) / 8;
+        for _ in 0..room {
+            let byte = match self.fetch() {
+                Fetch::Data(b) => b,
                 Fetch::Marker => {
-                    self.bit_buf = (self.bit_buf << 8) + 0xFF;
-                    self.bit_count += 8;
+                    self.pad_bits += 8;
+                    0xFF
                 }
                 Fetch::Eof => {
-                    return Err(Error::invalid_input(
-                        env!("CARGO_PKG_NAME"),
-                        "JPEG: truncated entropy-coded data",
-                    )
-                    .with_byte_offset(self.pos as u64));
+                    self.pad_bits += 8;
+                    0x00
                 }
-            }
+            };
+            self.bit_buf = (self.bit_buf << 8) + u64::from(byte);
         }
+        self.bit_count += room * 8;
+    }
+
+    /// The next `n` (`1..=16`) buffered bits, MSB-first, without consuming them. Valid after
+    /// [`Self::fill`], which leaves more than 16 bits buffered.
+    fn peek(&self, n: u32) -> u32 {
+        ((self.bit_buf >> (self.bit_count - n)) & ((1u64 << n) - 1)) as u32
+    }
+
+    /// Consumes the next `n` buffered bits. Reaching past the entropy data is allowed at a marker
+    /// (the `1`-padding the final symbols decode from, recorded as an overread) and is a truncated
+    /// stream otherwise -- the error a byte-at-a-time reader raises when its fetch finds no byte.
+    fn consume(&mut self, n: u32) -> Result<()> {
+        let data_bits = self.bit_count - self.pad_bits;
+        if n > data_bits {
+            if self.marker.is_none() {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: truncated entropy-coded data",
+                )
+                .with_byte_offset(self.pos as u64));
+            }
+            // Past the data, padding is all there is: what remains buffered is no longer told
+            // apart, because `at_data_end` answers from `overread` alone from here on.
+            self.overread = true;
+            self.pad_bits = 0;
+        }
+        self.bit_count -= n;
         Ok(())
     }
 
-    /// Reads `n` (`0..=16`) bits MSB-first (`RECEIVE`, Figure F.12).
+    /// Reads `n` (`0..=16`) bits MSB-first (`RECEIVE`, Figure F.17).
     fn read_bits(&mut self, n: u32) -> Result<u32> {
         if n == 0 {
             return Ok(0);
         }
-        self.ensure(n)?;
-        self.bit_count -= n;
-        Ok((self.bit_buf >> self.bit_count) & ((1u32 << n) - 1))
+        self.fill();
+        let bits = self.peek(n);
+        self.consume(n)?;
+        Ok(bits)
     }
 
     /// Reads one bit (the `NEXTBIT` of Figure F.16).
     fn read_bit(&mut self) -> Result<i32> {
-        self.ensure(1)?;
-        self.bit_count -= 1;
-        Ok(((self.bit_buf >> self.bit_count) & 1) as i32)
+        self.fill();
+        let bit = self.peek(1);
+        self.consume(1)?;
+        Ok(bit as i32)
     }
 
     /// Whether, at an MCU-row boundary, only `1`-padding remains before a marker — the end of the
@@ -187,15 +239,20 @@ impl<'a> BitReader<'a> {
     /// middle of a scan the pending bits are real data (or the next byte is not a marker), so this is
     /// `false`; a false positive would require the pending bits to be all-`1` *and* the next byte to
     /// begin a marker, which coincide only at the true end.
+    ///
+    /// "Pending" means bits the decoder has not consumed and that came from entropy data: the
+    /// prefetched padding past a marker is not pending, and a decoder that has already consumed
+    /// padding is past the end by definition.
     fn at_data_end(&self) -> bool {
-        if self.marker.is_some() {
+        if self.overread {
             return true;
         }
-        if self.bit_count >= 8 {
+        let pending = self.bit_count - self.pad_bits;
+        if pending >= 8 {
             return false; // a whole unconsumed data byte is buffered
         }
-        let mask = (1u32 << self.bit_count) - 1;
-        if (self.bit_buf & mask) != mask {
+        let mask = (1u64 << pending) - 1;
+        if ((self.bit_buf >> self.pad_bits) & mask) != mask {
             return false; // pending bits are not all-1 padding
         }
         // Peek forward for a marker without consuming (mirrors `fetch`): skip any run of fill 0xFF
@@ -221,11 +278,19 @@ impl<'a> BitReader<'a> {
         }
     }
 
+    /// Byte-aligns by discarding everything buffered: the partial byte the decoder was in, and any
+    /// whole bytes prefetched past it, which the marker search below would skip as data anyway.
+    fn discard_buffer(&mut self) {
+        self.bit_count = 0;
+        self.bit_buf = 0;
+        self.pad_bits = 0;
+        self.overread = false;
+    }
+
     /// Consumes a restart marker at an interval boundary (§E.2.5): byte-aligns, verifies the marker
     /// is `RSTm` with `m == expected`, and advances past it. The caller resets the DC predictors.
     fn take_restart(&mut self, expected: u8) -> Result<()> {
-        self.bit_count = 0;
-        self.bit_buf = 0;
+        self.discard_buffer();
         let code = loop {
             match self.fetch() {
                 Fetch::Data(_) => continue,
@@ -258,8 +323,7 @@ impl<'a> BitReader<'a> {
     /// Byte-aligns and advances to the marker that ends the scan, returning `(code, offset)` without
     /// consuming it (the segment parser resumes at `offset`).
     fn end_marker(&mut self) -> Result<(u8, usize)> {
-        self.bit_count = 0;
-        self.bit_buf = 0;
+        self.discard_buffer();
         loop {
             match self.fetch() {
                 Fetch::Data(_) => continue,
@@ -286,26 +350,25 @@ fn extend(v: u32, t: u8) -> i32 {
     }
 }
 
-/// `DECODE` (Figure F.16): reads bits until a canonical code matches, returning its symbol.
+/// `DECODE` (Figure F.16): resolves the canonical code at the head of the bit stream, returning its
+/// symbol.
 ///
-/// The code is grown with `+` rather than `|`: the shift just vacated the low bit and the addend is
-/// a single bit, so the addition fills exactly that vacant bit.
+/// The procedure runs over a 16-bit [`BitReader::peek`] -- one probe of the table's precomputed
+/// [`DecTable::lookup`] for codes of up to [`LOOKAHEAD`] bits, [`DecTable::walk`] otherwise -- and
+/// then consumes exactly the bits it read. A stream that ends inside the code therefore fails in
+/// [`BitReader::consume`], as reading those bits one at a time would.
 fn decode_symbol(table: &DecTable, r: &mut BitReader) -> Result<u8> {
-    let mut length = 1usize;
-    let mut code = r.read_bit()?;
-    while code > table.maxcode(length) {
-        length += 1;
-        if length > 16 {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "JPEG: undecodable Huffman code",
-            ));
-        }
-        code = (code << 1) + r.read_bit()?;
-    }
-    table.value_at(length, code).ok_or_else(|| {
-        Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: Huffman value out of table")
-    })
+    r.fill();
+    let bits = r.peek(16);
+    // A miss is told apart by `NonZeroU16`, not by comparing the entry with zero: inverting that
+    // comparison would send misses to a zero-length "hit" that consumes nothing, which a Y=0 frame
+    // can only report as a hang, never as a failure.
+    let (length, symbol) = match NonZeroU16::new(table.lookup(bits >> (16 - LOOKAHEAD))) {
+        Some(entry) => (u32::from(entry.get() >> 8), Ok((entry.get() & 0xFF) as u8)),
+        None => table.walk(bits),
+    };
+    r.consume(length)?;
+    symbol
 }
 
 /// Per-scan-component decode context: the tables it uses, its sampling, and its running DC predictor
@@ -382,10 +445,10 @@ fn write_block(zz: &mut [i32; 64], plane: &mut Plane, bx: usize, by: usize) {
     idct8x8(zz);
     plane.ensure_rows((by + 1) * 8);
     let stride = plane.stride;
-    for row in 0..8 {
+    for (row, samples) in zz.as_chunks::<8>().0.iter().enumerate() {
         let dst = (by * 8 + row) * stride + bx * 8;
-        for col in 0..8 {
-            plane.data[dst + col] = (zz[row * 8 + col] + 128).clamp(0, 255) as u8;
+        for (out, &s) in plane.data[dst..dst + 8].iter_mut().zip(samples) {
+            *out = (s + 128).clamp(0, 255) as u8;
         }
     }
 }
@@ -1000,5 +1063,127 @@ mod tests {
         assert_eq!(extend(3, 3), -4);
         assert_eq!(extend(4, 3), 4);
         assert_eq!(extend(7, 3), 7);
+    }
+
+    /// The bits of `bytes`, MSB-first: the reference the buffered reader must reproduce.
+    fn bit(bytes: &[u8], i: usize) -> u32 {
+        u32::from(bytes[i / 8] >> (7 - i % 8) & 1)
+    }
+
+    /// `BitReader::fill`/`peek`/`read_bits`: reads of every width from 1 to 16 bits, in a sequence
+    /// that crosses each refill at a different offset, return exactly the stream's bits. A refill
+    /// that took one byte too many would shift the oldest buffered bit out of the 64-bit word; one
+    /// that took too few, or miscounted, would misalign every later read.
+    #[test]
+    fn bit_reader_reads_match_the_stream_across_refills() {
+        let bytes: Vec<u8> = (0..64u32).map(|i| (i * 37 + 11) as u8 & 0xFE).collect();
+        let mut r = BitReader::new(&bytes, 0);
+        let mut at = 0usize;
+        for n in (1..=16u32).cycle().take(40) {
+            let want = (0..n as usize).fold(0, |v, k| v * 2 + bit(&bytes, at + k));
+            assert_eq!(r.read_bits(n).unwrap(), want, "{n} bits at bit {at}");
+            at += n as usize;
+        }
+        // `read_bit` takes the next single bit, and zero-width reads take nothing.
+        assert_eq!(r.read_bits(0).unwrap(), 0);
+        assert_eq!(r.read_bit().unwrap() as u32, bit(&bytes, at));
+    }
+
+    /// `BitReader::consume`: a stream that ends without a marker supplies exactly its own bits. The
+    /// read that ends on the last one succeeds; the next fails as truncated, at the stream's end.
+    #[test]
+    fn bit_reader_truncation_fails_at_the_first_missing_bit() {
+        let mut r = BitReader::new(&[0xAB, 0xCD], 0);
+        assert_eq!(r.read_bits(12).unwrap(), 0xABC);
+        assert_eq!(r.read_bits(4).unwrap(), 0xD);
+        let err = r.read_bit().unwrap_err();
+        assert_eq!(
+            err.static_message(),
+            Some("JPEG: truncated entropy-coded data")
+        );
+        assert_eq!(err.byte_offset(), Some(2));
+    }
+
+    /// `BitReader::consume` at a marker: reads past the data return `1`-padding instead of failing,
+    /// and from then on `at_data_end` reports the end whatever follows.
+    #[test]
+    fn bit_reader_pads_with_ones_past_a_marker() {
+        let mut r = BitReader::new(&[0x12, 0xFF, 0xD0], 0);
+        assert_eq!(r.read_bits(8).unwrap(), 0x12);
+        // Exactly at the data's end, before a restart marker: not the end of the scan.
+        assert!(!r.at_data_end());
+        assert_eq!(r.read_bits(5).unwrap(), 0x1F);
+        assert!(r.at_data_end(), "an overread is the end, even before RSTm");
+    }
+
+    /// `BitReader::at_data_end` reads only the pending *data* bits: prefetched marker padding is
+    /// not pending, a pending partial byte must be all ones, a whole pending byte means data
+    /// remains, and the marker that follows must end the scan (not be a restart).
+    #[test]
+    fn bit_reader_at_data_end_reads_only_pending_data_bits() {
+        let end_after = |bytes: &[u8], n: u32| {
+            let mut r = BitReader::new(bytes, 0);
+            r.read_bits(n).unwrap();
+            r.at_data_end()
+        };
+        // Four pending bits, all ones, then EOI.
+        assert!(end_after(&[0xAF, 0xFF, 0xD9], 4));
+        // Four pending bits, not all ones.
+        assert!(!end_after(&[0xA7, 0xFF, 0xD9], 4));
+        // A whole pending byte of ones (a stuffed 0xFF) is data, not padding.
+        assert!(!end_after(&[0x00, 0xFF, 0x00, 0xFF, 0xD9], 8));
+        // All-ones partial byte, but the marker is a restart: more MCUs follow.
+        assert!(!end_after(&[0xAF, 0xFF, 0xD3], 4));
+        // Nothing read yet: a data byte is next.
+        assert!(!BitReader::new(&[0x00, 0xFF, 0xD9], 0).at_data_end());
+    }
+
+    /// `decode_symbol`: codes resolved by the lookahead table and codes longer than it decode alike,
+    /// and each consumes exactly its own length. The table has one code of every length 1..=16
+    /// except the all-ones code of length 16, so the stream walks both paths in turn.
+    #[test]
+    fn decode_symbol_consumes_exactly_each_codes_length() {
+        let bits = [1u8; 16];
+        let values: Vec<u8> = (1..=16).collect();
+        let table = DecTable::from_bits(&bits, &values).unwrap();
+        // Code of length l is l−1 ones then a zero; length 16 is fifteen ones then a zero.
+        let mut stream = Vec::new();
+        for l in [1usize, 9, 10, 3, 16, 12, 2] {
+            stream.extend(std::iter::repeat_n(1u8, l - 1));
+            stream.push(0);
+        }
+        stream.extend([0, 1, 0, 1]); // trailing raw bits, read after the last code
+        let mut packed = vec![0u8; stream.len().div_ceil(8)];
+        for (i, &b) in stream.iter().enumerate() {
+            packed[i / 8] += b << (7 - i % 8);
+        }
+        // Byte-stuff (§F.1.2.3): the long runs of ones form whole 0xFF bytes.
+        let mut bytes = Vec::new();
+        for b in packed {
+            bytes.push(b);
+            if b == 0xFF {
+                bytes.push(0x00);
+            }
+        }
+        bytes.extend([0xFF, 0xD9]);
+        let mut r = BitReader::new(&bytes, 0);
+        for l in [1u8, 9, 10, 3, 16, 12, 2] {
+            assert_eq!(decode_symbol(&table, &mut r).unwrap(), l);
+        }
+        assert_eq!(r.read_bits(4).unwrap(), 0b0101);
+    }
+
+    /// `decode_symbol` on a code the table cannot resolve: sixteen ones match no code of this
+    /// table (its all-ones length-16 slot is unassigned), the Figure F.16 undecodable case.
+    #[test]
+    fn decode_symbol_rejects_an_unassigned_code() {
+        let bits = [1u8; 16];
+        let values: Vec<u8> = (1..=16).collect();
+        let table = DecTable::from_bits(&bits, &values).unwrap();
+        let mut r = BitReader::new(&[0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00], 0);
+        assert_eq!(
+            decode_symbol(&table, &mut r).unwrap_err().static_message(),
+            Some("JPEG: undecodable Huffman code")
+        );
     }
 }

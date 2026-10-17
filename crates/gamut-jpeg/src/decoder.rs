@@ -573,13 +573,31 @@ struct DecodedImage {
 }
 
 impl DecodedImage {
-    /// The sample of component `ci` under the output pixel `(px, py)`, via nearest-neighbour
+    /// The column of component `ci` under output column `px`, via nearest-neighbour
     /// (sample-replication) upsampling.
-    fn sample(&self, ci: usize, px: usize, py: usize) -> u8 {
+    fn sample_col(&self, ci: usize, px: usize) -> usize {
         let c = &self.comps[ci];
-        let cx = (px * usize::from(c.h) / self.hmax).min(c.comp_w - 1);
+        (px * usize::from(c.h) / self.hmax).min(c.comp_w - 1)
+    }
+
+    /// The row of component `ci` under output row `py` -- [`Self::sample_col`]'s vertical twin --
+    /// as the slice of the plane that holds it.
+    fn sample_row(&self, ci: usize, py: usize) -> &[u8] {
+        let c = &self.comps[ci];
         let cy = (py * usize::from(c.v) / self.vmax).min(c.comp_h - 1);
-        c.data[cy * c.stride + cx]
+        &c.data[cy * c.stride..(cy + 1) * c.stride]
+    }
+
+    /// Every component's samples under output row `py`, upsampled into `rows` through the
+    /// per-component column maps `cols` ([`Self::sample_col`] for every output column, computed
+    /// once per image rather than once per sample).
+    fn upsample_row(&self, py: usize, cols: &[Vec<usize>], rows: &mut [Vec<u8>]) {
+        for (ci, (row, map)) in rows.iter_mut().zip(cols).enumerate() {
+            let src = self.sample_row(ci, py);
+            for (dst, &cx) in row.iter_mut().zip(map) {
+                *dst = src[cx];
+            }
+        }
     }
 }
 
@@ -894,69 +912,84 @@ fn assemble(
 /// colour transform the stream declares: YCbCr → RGB, and YCCK → CMYK (Adobe TN #5116). Rearranging
 /// that into the caller's pixel layout is [`gamut_core::convert`]'s job, so this function never
 /// replicates grey across channels or refuses a target.
+///
+/// Works a row at a time: each component's row is upsampled once into a scratch row through a
+/// column map computed once per image ([`DecodedImage::upsample_row`]), and the transform then runs
+/// over the zipped rows. Per sample that is one indexed load, where resolving the replication
+/// arithmetic per sample cost two divisions and two clamps for every component of every pixel.
 fn present_native(img: &DecodedImage) -> Result<(PixelFormat, Vec<u8>)> {
     let (w, h) = (img.width as usize, img.height as usize);
     let transform = decide_transform(img)?;
-    Ok(match transform {
-        Transform::Gray => {
-            let mut out = vec![0u8; w * h];
-            for py in 0..h {
-                for px in 0..w {
-                    out[py * w + px] = img.sample(0, px, py);
+    let (format, channels) = match transform {
+        Transform::Gray => (PixelFormat::Gray8, 1),
+        Transform::Rgb | Transform::YCbCr => (PixelFormat::Rgb8, 3),
+        Transform::Cmyk | Transform::Ycck => (PixelFormat::Cmyk8, 4),
+    };
+    let cols: Vec<Vec<usize>> = (0..img.comps.len())
+        .map(|ci| (0..w).map(|px| img.sample_col(ci, px)).collect())
+        .collect();
+    let mut rows = vec![vec![0u8; w]; img.comps.len()];
+    let mut out = vec![0u8; w * h * channels];
+    for (py, line) in out.chunks_exact_mut(w * channels).enumerate() {
+        img.upsample_row(py, &cols, &mut rows);
+        match (transform, rows.as_slice()) {
+            (Transform::Gray, [y]) => line.copy_from_slice(y),
+            (Transform::Rgb, [r, g, b]) => {
+                for (((px, &r), &g), &b) in
+                    line.as_chunks_mut::<3>().0.iter_mut().zip(r).zip(g).zip(b)
+                {
+                    px.copy_from_slice(&[r, g, b]);
                 }
             }
-            (PixelFormat::Gray8, out)
-        }
-        Transform::Rgb | Transform::YCbCr => {
-            let mut out = vec![0u8; w * h * 3];
-            for py in 0..h {
-                for px in 0..w {
-                    let i = (py * w + px) * 3;
-                    let (r, g, b) = if transform == Transform::Rgb {
-                        (
-                            img.sample(0, px, py),
-                            img.sample(1, px, py),
-                            img.sample(2, px, py),
-                        )
-                    } else {
-                        ycbcr_to_rgb(
-                            img.sample(0, px, py),
-                            img.sample(1, px, py),
-                            img.sample(2, px, py),
-                            ColorRange::Full,
-                        )
-                    };
-                    out[i..i + 3].copy_from_slice(&[r, g, b]);
+            (Transform::YCbCr, [y, cb, cr]) => {
+                for (((px, &y), &cb), &cr) in line
+                    .as_chunks_mut::<3>()
+                    .0
+                    .iter_mut()
+                    .zip(y)
+                    .zip(cb)
+                    .zip(cr)
+                {
+                    let (r, g, b) = ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
+                    px.copy_from_slice(&[r, g, b]);
                 }
             }
-            (PixelFormat::Rgb8, out)
-        }
-        Transform::Cmyk | Transform::Ycck => {
-            let mut out = vec![0u8; w * h * 4];
-            for py in 0..h {
-                for px in 0..w {
-                    let i = (py * w + px) * 4;
-                    if transform == Transform::Cmyk {
-                        out[i] = img.sample(0, px, py);
-                        out[i + 1] = img.sample(1, px, py);
-                        out[i + 2] = img.sample(2, px, py);
-                    } else {
-                        // YCCK → CMYK: invert the YCbCr transform on the first three channels, K
-                        // passes through (Adobe TN #5116).
-                        let (r, g, b) = ycbcr_to_rgb(
-                            img.sample(0, px, py),
-                            img.sample(1, px, py),
-                            img.sample(2, px, py),
-                            ColorRange::Full,
-                        );
-                        out[i..i + 3].copy_from_slice(&[255 - r, 255 - g, 255 - b]);
-                    }
-                    out[i + 3] = img.sample(3, px, py);
+            (Transform::Cmyk, [c, m, y, k]) => {
+                for ((((px, &c), &m), &y), &k) in line
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(c)
+                    .zip(m)
+                    .zip(y)
+                    .zip(k)
+                {
+                    px.copy_from_slice(&[c, m, y, k]);
                 }
             }
-            (PixelFormat::Cmyk8, out)
+            // YCCK → CMYK: invert the YCbCr transform on the first three channels, K passes
+            // through (Adobe TN #5116).
+            (Transform::Ycck, [y, cb, cr, k]) => {
+                for ((((px, &y), &cb), &cr), &k) in line
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(y)
+                    .zip(cb)
+                    .zip(cr)
+                    .zip(k)
+                {
+                    let (r, g, b) = ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
+                    px.copy_from_slice(&[255 - r, 255 - g, 255 - b, k]);
+                }
+            }
+            // `decide_transform` picks each transform from the component count, so the row count
+            // always matches the arm; this one is unreachable and stays only to keep the match
+            // total without an `unwrap`.
+            _ => {}
         }
-    })
+    }
+    Ok((format, out))
 }
 
 impl JpegDecoder {

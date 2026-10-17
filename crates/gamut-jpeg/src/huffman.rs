@@ -154,7 +154,19 @@ pub struct DecTable {
     valptr: [usize; 17],
     /// `HUFFVAL`: the symbol values ordered by increasing code length.
     values: Vec<u8>,
+    /// The Figure F.16 outcome for every [`LOOKAHEAD`]-bit prefix, precomputed: `(length << 8) +
+    /// value` when the procedure stops at a `length ≤ LOOKAHEAD` code that maps to `value`, and `0`
+    /// otherwise (a longer code, or one the procedure rejects). The decoder's fast path; anything
+    /// it marks `0` goes through the procedure itself, so the table changes speed, never outcome.
+    /// §F.2.2.3 presents Figure F.16 as one implementation of `DECODE` among "many other[s]
+    /// possible"; this is the usual one.
+    lookup: Box<[u16; 1 << LOOKAHEAD]>,
 }
+
+/// Bits of lookahead [`DecTable::lookup`] resolves in one probe. Nine covers every DC code and the
+/// common AC codes of the Annex K tables (libjpeg-turbo's `HUFF_LOOKAHEAD` is eight; zune-jpeg's
+/// is nine) while keeping the table at 1 KiB.
+pub(crate) const LOOKAHEAD: u32 = 9;
 
 impl DecTable {
     /// Builds the decode tables from a wire `(bits, values)` pair (§B.2.4.2), rejecting a code space
@@ -202,12 +214,69 @@ impl DecTable {
             }
             code <<= 1;
         }
+        // The lookahead table, by the same canonical assignment: the code of length `l` claims the
+        // `2^(LOOKAHEAD − l)` prefixes it heads. The code space is not overfull (checked above), so
+        // the codes of length `≤ LOOKAHEAD` are distinct prefixes and their spans neither overlap
+        // nor leave the table; an incomplete table leaves the unclaimed prefixes at `0`.
+        let mut lookup = Box::new([0u16; 1 << LOOKAHEAD]);
+        let mut code = 0usize;
+        let mut symbols = values.iter();
+        for length in 1..=LOOKAHEAD {
+            let span = 1usize << (LOOKAHEAD - length);
+            for _ in 0..bits[length as usize - 1] {
+                let entry = (length as u16) * 256 + u16::from(*symbols.next().unwrap_or(&0));
+                lookup
+                    .iter_mut()
+                    .skip(code * span)
+                    .take(span)
+                    .for_each(|e| *e = entry);
+                code += 1;
+            }
+            code *= 2;
+        }
         Ok(Self {
             mincode,
             maxcode,
             valptr,
             values: values.to_vec(),
+            lookup,
         })
+    }
+
+    /// The [`Self::lookup`] entry for a [`LOOKAHEAD`]-bit prefix: `(length << 8) + value`, or `0`
+    /// where the prefix does not resolve to a code of at most that length.
+    #[must_use]
+    pub(crate) fn lookup(&self, prefix: u32) -> u16 {
+        self.lookup[prefix as usize]
+    }
+
+    /// `DECODE` (Figure F.16) over the MSB-first 16-bit window `bits`: grows the code a bit at a
+    /// time until it is at most `MAXCODE` for its length, and returns how many bits the procedure
+    /// read with its outcome -- the symbol, or the error a corrupt code earns. A code that matches
+    /// no length up to 16 is undecodable (all 16 bits read); one whose `VALPTR` offset falls outside
+    /// `HUFFVAL` is out of table.
+    ///
+    /// The code is grown with `+` rather than `|`: the shift just vacated the low bit and the addend
+    /// is a single bit, so the addition fills exactly that vacant bit. The walk is a `for` over the
+    /// sixteen lengths, so it ends after at most sixteen steps however its arithmetic is perturbed.
+    pub(crate) fn walk(&self, bits: u32) -> (u32, Result<u8>) {
+        let mut code = 0i32;
+        for length in 1..=16usize {
+            code = (code << 1) + ((bits >> (16 - length)) & 1) as i32;
+            if code <= self.maxcode(length) {
+                let symbol = self.value_at(length, code).ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: Huffman value out of table")
+                });
+                return (length as u32, symbol);
+            }
+        }
+        (
+            16,
+            Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: undecodable Huffman code",
+            )),
+        )
     }
 
     /// `MAXCODE[length]`, or `-1` if no code has that length.
@@ -531,6 +600,48 @@ mod tests {
             code = (code << 1) | i32::from(bits.next()?);
         }
         table.value_at(length, code)
+    }
+
+    #[test]
+    fn dectable_lookup_agrees_with_the_walk_on_every_window() {
+        // `DecTable::from_bits`'s lookahead table is the Figure F.16 walk, tabulated: for every
+        // 16-bit window, a non-zero entry for its 9-bit prefix is exactly the walk's (length,
+        // symbol), and a zero entry is exactly a window the walk resolves to a longer code or
+        // rejects. Over the four Annex K tables plus one with a code of every length 1..=16 (so
+        // every span size, both sides of the lookahead boundary, and an unassigned window).
+        let every_length = ([1u8; 16], (1..=16).collect::<Vec<u8>>());
+        let tables = [&STD_LUMA_DC, &STD_CHROMA_DC, &STD_LUMA_AC, &STD_CHROMA_AC]
+            .map(|s| (s.bits, s.values.to_vec()))
+            .into_iter()
+            .chain([every_length]);
+        for (bits, values) in tables {
+            let dec = DecTable::from_bits(&bits, &values).unwrap();
+            for window in 0..=u16::MAX {
+                let window = u32::from(window);
+                let entry = dec.lookup(window >> (16 - LOOKAHEAD));
+                match dec.walk(window) {
+                    (length, Ok(symbol)) if length <= LOOKAHEAD => {
+                        assert_eq!(entry, (length as u16) * 256 + u16::from(symbol));
+                    }
+                    _ => assert_eq!(entry, 0, "window {window:#06x}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dectable_walk_reports_the_bits_it_read() {
+        // `DecTable::walk` on the every-length table: a length-12 code (eleven ones, a zero) reads
+        // 12 bits, and sixteen ones -- the one unassigned window -- read all 16 and are rejected.
+        let dec = DecTable::from_bits(&[1u8; 16], &(1..=16).collect::<Vec<u8>>()).unwrap();
+        let (length, symbol) = dec.walk(0b1111_1111_1110_0101);
+        assert_eq!((length, symbol.unwrap()), (12, 12));
+        let (length, symbol) = dec.walk(0xFFFF);
+        assert_eq!(length, 16);
+        assert_eq!(
+            symbol.unwrap_err().static_message(),
+            Some("JPEG: undecodable Huffman code")
+        );
     }
 
     #[test]

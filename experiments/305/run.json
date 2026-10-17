@@ -1,0 +1,28 @@
+{
+  "issue": 305,
+  "git_sha": "6f351939c64d3419199f2811c564b5db053a633f",
+  "git_dirty": false,
+  "before_sha": "63e0762aeb97c7eb8e25d0281d17735cfbccdcf8",
+  "before_patch_sha256": "3880196da4f92e5b790b4def0466b232779568fcbeace04a5700b29316f884bf",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28);binary: rustc;commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4;commit-date: 2026-09-28;host: x86_64-unknown-linux-gnu;release: 1.99.0;LLVM version: 23.1.1;",
+  "mise_lock_sha256": null,
+  "cargo_lock_sha256": "49c88b74e32e2934d7817066f42d7d4b1cd1236aef169947c0ce948f4c348539",
+  "rust_toolchain_toml_sha256": "e7613d421d2367015f232d2a0f8fe9684daf707a56308b046b92405ce2ccab09",
+  "width": 6000,
+  "height": 4000,
+  "samples_per_input_decoder_and_variant": 100,
+  "rounds": 10,
+  "warmup_decodes_per_input_decoder_and_round": 1,
+  "profile_head": "recorded",
+  "seeds": "none: the corpus is a deterministic generator (fixed LCG seed) in crates/gamut-jpeg/benches/common/corpus.rs, encoded by libjpeg-turbo at q90",
+  "corpus_sha256": {
+    "baseline-420.jpg": "074ebf75789c6ac95d146ac13aef9f081b1d6b227dd9753f18e6095badd73294",
+    "baseline-422.jpg": "a0fb609ee68e37f872f8d8257cc653c52b09f98edfca2b2492c13fb6c91afe0c",
+    "baseline-444.jpg": "e5f9470c24720bef4ab4094fe20f4b5a7630c7b24d389239c6be3f141e10ec89",
+    "progressive-420.jpg": "7c61e9d6d8b8032c6969eca15a3fb86c33be8bac6e720fe00da3972b644a28f2"
+  },
+  "cpu_model": "AMD Ryzen 7 7800X3D 8-Core Processor",
+  "cpu_cores": 16,
+  "load_average_start": "29.37 28.09 24.00",
+  "load_average_end": "22.70 20.28 18.98"
+}
