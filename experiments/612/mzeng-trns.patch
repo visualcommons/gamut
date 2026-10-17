@@ -1,0 +1,93 @@
+diff --git a/crates/gamut-png/src/reduce.rs b/crates/gamut-png/src/reduce.rs
+index ae371fc0..c6c7ecaf 100644
+--- a/crates/gamut-png/src/reduce.rs
++++ b/crates/gamut-png/src/reduce.rs
+@@ -588,6 +588,79 @@ fn ordered_palette(palette: &[[u8; 4]]) -> Vec<[u8; 4]> {
+     out
+ }
+ 
++/// Experiment #612 variant: modified-Zeng palette ordering.
++///
++/// Zeng, Li and Lei (ICIP 2000) as modified by Pinho and Neves (IEEE TIP 13(11), 2004): build the
++/// symmetric co-occurrence matrix `C` of neighbouring indices, seed the list with the heaviest
++/// pair, then repeatedly take the unplaced entry with the largest unweighted adjacency to the
++/// whole list, and append it at whichever end its distance-weighted adjacency (`log2(1 + 1/d)`,
++/// `d` the 1-based distance from that end) is larger. Neighbours are consecutive pixels in raster
++/// order, the only adjacency this analysis can see without the image width.
++fn ordered_palette_mzeng(
++    pixels: &[u8],
++    channels: usize,
++    palette: &[[u8; 4]],
++    palette_index: &HashMap<[u8; 4], u8>,
++) -> Vec<[u8; 4]> {
++    let n = palette.len();
++    if n < 2 {
++        return ordered_palette(palette);
++    }
++    let idx: Vec<usize> = pixels
++        .chunks_exact(channels)
++        .map(|px| usize::from(*palette_index.get(&pixel_key(px, channels)).unwrap_or(&0)))
++        .collect();
++    let mut weight = vec![0u64; n * n];
++    for pair in idx.windows(2) {
++        let (a, b) = (pair[0], pair[1]);
++        if a != b {
++            weight[a * n + b] += 1;
++            weight[b * n + a] += 1;
++        }
++    }
++    let (mut seed_a, mut seed_b, mut heaviest) = (0, 1, 0);
++    for a in 0..n {
++        for b in a + 1..n {
++            if weight[a * n + b] > heaviest {
++                (seed_a, seed_b, heaviest) = (a, b, weight[a * n + b]);
++            }
++        }
++    }
++    let mut list = std::collections::VecDeque::from([seed_a, seed_b]);
++    let mut placed = vec![false; n];
++    placed[seed_a] = true;
++    placed[seed_b] = true;
++    let mut adjacency: Vec<u64> = (0..n)
++        .map(|c| weight[c * n + seed_a] + weight[c * n + seed_b])
++        .collect();
++    while let Some(next) = (0..n)
++        .filter(|&c| !placed[c])
++        .max_by_key(|&c| (adjacency[c], std::cmp::Reverse(c)))
++    {
++        let len = list.len();
++        let (mut left, mut right) = (0f64, 0f64);
++        for (k, &l) in list.iter().enumerate() {
++            let w = weight[next * n + l] as f64;
++            left += w * (1.0 + 1.0 / (k + 1) as f64).log2();
++            right += w * (1.0 + 1.0 / (len - k) as f64).log2();
++        }
++        if left > right {
++            list.push_front(next);
++        } else {
++            list.push_back(next);
++        }
++        placed[next] = true;
++        for (c, sum) in adjacency.iter_mut().enumerate() {
++            *sum += weight[c * n + next];
++        }
++    }
++    let mut out: Vec<[u8; 4]> = list.iter().map(|&i| palette[i]).collect();
++    // Rule 1 of `ordered_palette` kept: a stable partition moving every non-opaque entry to the
++    // front, in Zeng order, so the trailing-opaque `tRNS` trim still cuts as far as it can.
++    out.sort_by_key(|c| c[3] == palette::OPAQUE);
++    out
++}
++
+ /// Builds the indexed reduction from the collected palette.
+ fn build_indexed(
+     pixels: &[u8],
+@@ -595,7 +668,7 @@ fn build_indexed(
+     palette: &[[u8; 4]],
+     palette_index: &HashMap<[u8; 4], u8>,
+ ) -> Reduced {
+-    let ordered = ordered_palette(palette);
++    let ordered = ordered_palette_mzeng(pixels, channels, palette, palette_index);
+     // Reindex through the new order. `palette_index` maps a colour to its *discovery* index, so
+     // this composes discovery -> colour -> final position.
+     let mut remap = vec![0u8; palette.len()];
