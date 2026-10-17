@@ -95,16 +95,16 @@ back. At **IFD 0** that is `ExifIFD` and — since `TiffMetadata::gps` (#876) �
 `SubIFDs` is out, because its target feeds no field of `TiffMetadata` and is never re-encoded, so
 following it there could only add failure modes — and did: a single dangling `SubIFDs` offset made XMP, IPTC, ICC and C2PA
 unreachable on a file whose pixels decode perfectly, and two pages sharing one thumbnail directory
-tripped the reader's cross-chain loop guard. **Inside the Exif subtree all four**
+tripped the reader's cross-chain loop guard. **Inside the Exif and GPS subtrees all four**
 `gamut_ifd::tags::STANDARD_POINTER_TAGS` are resolved — `SubIFDs`, `ExifIFD`, `GPSInfo`,
-`InteroperabilityIFD` — because that directory *is* returned to the caller and may be written
+`InteroperabilityIFD` — because those directories *are* returned to the caller and may be written
 back, so a pointer left unresolved there is handed over as a raw absolute offset into the source
 file; re-encoding it writes a dangling pointer into a file laid out differently, which the crate's
 own `deconstruct` grades `Severity::Error`. `InteroperabilityIFD` is the one EXIF 2.3 §4.6.3 puts
 there, but a `GPSInfo` or `SubIFDs` group under `ExifIFD` re-encodes just as badly and the reader
 cannot tell a hand-built directory from a camera's. The cost is stated rather than hidden: inside
-the Exif subtree an unreadable target under any of the four fails the whole read, the same trade
-`ExifIFD` itself already makes. Only *standard* pointer tags are recognised anywhere; a **vendor
+the Exif and GPS subtrees an unreadable target under any of the four fails the whole read, the
+same trade `ExifIFD` and `GPSInfo` themselves already make. Only *standard* pointer tags are recognised anywhere; a **vendor
 private tag holding an offset** is indistinguishable from an integer field, so it is carried
 through and re-encoded verbatim, still holding the source file's offset — neither this crate nor
 `deconstruct` can grade that, and a round trip through such a field is not proof the result is

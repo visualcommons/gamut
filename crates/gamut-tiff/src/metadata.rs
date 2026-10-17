@@ -114,8 +114,8 @@ pub struct TiffMetadata {
     /// resolved because a directory this crate *hands back* must not contain an offset into the
     /// file it was read from, whichever tag carries it.
     ///
-    /// This is the Exif subtree's rule and not IFD 0's: at IFD 0 only `ExifIFD` is followed, so a
-    /// `SubIFDs` or `GPSInfo` pointer sitting on the page — whose target feeds no field here —
+    /// This is the Exif subtree's rule and not IFD 0's: at IFD 0 only `ExifIFD` and `GPSInfo` are
+    /// followed, so a `SubIFDs` pointer sitting on the page — whose target feeds no field here —
     /// cannot fail the call. Inside this directory the same pointer is followed, and an
     /// unreadable target is an error, because this directory is the one that comes back.
     ///
