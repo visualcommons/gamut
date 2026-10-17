@@ -91,11 +91,13 @@ fn run_trials(trial: &(impl Fn(FilterStrategy) -> Result<Vec<u8>> + Sync)) -> Re
             (strategy, handle)
         });
         core::iter::once(trial(first))
-            .chain(spawned.into_iter().map(|(strategy, handle)| match handle {
-                Ok(handle) => handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                Err(_) => trial(strategy),
+            .chain(spawned.into_iter().map(|(strategy, handle)| {
+                match handle {
+                    Ok(handle) => handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    Err(_) => trial(strategy),
+                }
             }))
             .collect()
     })
