@@ -236,8 +236,12 @@ impl PngPalette {
         let mut seed = None;
         for a in 0..n {
             for b in a + 1..n {
-                if seed.is_none_or(|(_, _, heaviest)| weight[a * n + b] > heaviest) {
-                    seed = Some((a, b, weight[a * n + b]));
+                // Read once, so the weight compared and the weight kept cannot disagree. Read
+                // twice, a mutation of the second read went unseen: it changes only the bar later
+                // pairs are compared against.
+                let pair = weight[a * n + b];
+                if seed.is_none_or(|(_, _, heaviest)| pair > heaviest) {
+                    seed = Some((a, b, pair));
                 }
             }
         }
@@ -265,13 +269,19 @@ impl PngPalette {
             else {
                 break;
             };
-            let len = list.len();
-            let (mut front, mut back) = (0u128, 0u128);
-            for (k, &entry) in list.iter().enumerate() {
-                let w = u128::from(weight[next * n + entry]);
-                front += w * u128::from(DISTANCE_WEIGHT[k]);
-                back += w * u128::from(DISTANCE_WEIGHT[len - 1 - k]);
-            }
+            // Each end weighs the list walked from that end, so an entry's distance is its
+            // position in the walk. Written as `DISTANCE_WEIGHT[len - 1 - k]`, the back end's
+            // `len - 1` had a twin, `len / 1`, that shifts every back distance by one and that no
+            // small list could tell apart. The walk has no index arithmetic left to mutate, so
+            // this site now yields fewer mutants than it did, not stronger tests.
+            let weigh = |from_end: &mut dyn Iterator<Item = &usize>| -> u128 {
+                from_end
+                    .zip(DISTANCE_WEIGHT)
+                    .map(|(&entry, d)| u128::from(weight[next * n + entry]) * u128::from(d))
+                    .sum()
+            };
+            let front = weigh(&mut list.iter());
+            let back = weigh(&mut list.iter().rev());
             if front > back {
                 list.push_front(next);
             } else {
