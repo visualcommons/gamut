@@ -228,3 +228,5 @@ re-survey before relying on it.
 | gamut-riff | 165 | 157 | 8 | 0 | 0 | — | #575 | nothing to do |
 | gamut-ifd | 652 | 587 | 57 | 0 | 8 | — | #575 | 7 loops bounded by their data, 1 excluded |
 | gamut-heic | 848 | 732 | 116 | 0 | 0 | 28 min | `ef6c2e12` | nothing to do |
+| gamut-tiff | 985 | 911 | 63 | 0 | 11 | 45 min | `ef6c2e12` | all 11 in PackBits/CCITT encoder loops advanced by their own arithmetic; each loop now walks its data (#585), and the G4 `reference_changes` exclusion went with them. The rewritten files then scored 283 mutants, 280 caught, 3 unviable — 38 fewer mutants than the 321 before, since the deleted loops took their killable siblings too |
+| gamut-cmm | 1342 | 1269 | 71 | 0 | 2 | 47 min | `ef6c2e12` | both in `collapse`'s fixpoint loop, now bounded by the stage count, plus a test that needs the second sweep (#585). `optimize.rs` then scored 148 mutants, 137 caught, 11 unviable |
