@@ -459,6 +459,20 @@ therefore 7 × 3 × 2 = **42** filter-plus-DEFLATE passes for one file, against 
 alone. That is the price of choosing by measured size rather than by a
 cost model; a model good enough to skip the losing candidate is [#480]'s remainder.
 
+**An equal-raw-size runner-up is not raced — a measured negative result ([#514]).** `analyze8`
+names a chunk-free runner-up only when it stores *strictly* fewer raw bytes than the input layout.
+The objection was that `<=` would race a candidate that only looks equivalent before DEFLATE, as
+the palette once did. It does not hold at this site: of the three chunk-free sizes, grey
+(`⌊n·d/8⌋`, `d ≤ 8`) equals an `n·c`-byte input only at `c = 1, d = 8`, grey+alpha (`2n`) only at
+`c = 2`, and the alpha drop (`3n`, gated on `c = 4`) never. So a tie is always the input
+re-spelled — same colour type, same depth, same samples — and its encode is the unreduced
+candidate's twin, which the race already holds. Measured on every `size_contract` row plus six
+grey and grey+alpha inputs where a palette or colour key wins the estimate (the only layouts a tie
+can reach, and none of them a `size_contract` row): **every file is byte-identical** (same length
+and CRC-32), no row regresses and none improves, while each of the six reach rows pays one more
+whole `BruteForce` + `Level::Best` encode (race of 2 → 3). Kept as `<`. Data, provenance and
+`mise run experiment 514`: `experiments/514/`.
+
 **Chunks that follow the race.** `bKGD` and `sBIT` have a payload whose shape is the colour type, and
 the race decides the colour type after they were set. Both are resolved against the header actually
 written — RGBA `sBIT` loses its alpha entry under RGB or a palette, an RGB or grey background under a
@@ -732,6 +746,7 @@ dropped entries also take the index stream from 8 bits per pixel to 2.
 [#483]: https://github.com/visualcommons/gamut/issues/483
 [#484]: https://github.com/visualcommons/gamut/issues/484
 [#501]: https://github.com/visualcommons/gamut/issues/501
+[#514]: https://github.com/visualcommons/gamut/issues/514
 [#612]: https://github.com/visualcommons/gamut/issues/612
 [#624]: https://github.com/visualcommons/gamut/issues/624
 [#631]: https://github.com/visualcommons/gamut/issues/631

@@ -19,4 +19,4 @@
 pub use crate::crc32::Crc32;
 pub use crate::filter::filter_image;
 pub use crate::pack::pack_scanlines;
-pub use crate::reduce::{Reduced, analyze8, analyze16};
+pub use crate::reduce::{Reduced, Reductions, analyze8, analyze16};
