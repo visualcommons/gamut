@@ -87,7 +87,7 @@ How to read it:
 
 The [delivery record on #305](https://github.com/visualcommons/gamut/issues/305#issuecomment-6236460699) records two departures from the issue's original decision:
 
-- **Scope.** #305 is reduced to the bench, this experiment record and this first pass. The residual gap is not part of it: it is filed as #896 (the `gamut-dsp` IDCT) and #897 (the `gamut-jpeg` follow-up, blocked by #896).
+- **Scope.** #305 is reduced to the bench, this experiment record and this first pass. The reduction is the maintainer's decision of 2026-10-17, which supersedes the 2026-10-16 note that an unclosed gap lands as `Part of #305`: "Close #305, residual in #896/#897 — #305 becomes 'bench + experiment + first pass', the gap work lives in #896/#897". The residual gap is not part of #305: it is filed as #896 (the `gamut-dsp` IDCT) and #897 (the `gamut-jpeg` follow-up, blocked by #896).
 - **Harness.** The issue's decision named criterion with at least 100 samples. The bench (`crates/gamut-jpeg/benches/decode.rs`) uses divan instead, following the workspace's single-harness convention (#149, `docs/benchmarking.md`). It keeps the 100 samples per stream shape (`sample_count = 100`). This experiment's own numbers come from its arm (`examples/experiment_305.rs`), which also takes 100 samples per input x decoder x variant.
 
 ## Reproducing
