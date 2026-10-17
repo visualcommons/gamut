@@ -3334,3 +3334,246 @@ mod tests {
         );
     }
 }
+
+/// The `metadata` feature: the encoder half of the typed [`gamut_metadata`] wiring (the reader
+/// half is the `TypedMetadata` impl on [`AvifImage`](crate::AvifImage)). A facade `Metadata` is
+/// serialized and each carrier routed to this encoder's raw setters.
+#[cfg(feature = "metadata")]
+mod typed {
+    use gamut_core::{Error, Result};
+    use gamut_metadata::{EncodedMetadata, Metadata, MetadataEmbedder};
+
+    use super::AvifEncoder;
+
+    impl AvifEncoder {
+        /// Embeds a unified [`Metadata`] model: serializes it with the default
+        /// [`MetadataEmbedder`] and routes each carrier to the matching raw setter
+        /// ([`with_exif`](Self::with_exif), [`with_xmp`](Self::with_xmp),
+        /// [`with_icc_profile`](Self::with_icc_profile)). Returns the updated encoder for
+        /// chaining.
+        ///
+        /// The default embedder emits no legacy IPTC-IIM block (IPTC lives inside the XMP packet)
+        /// and **drops** a C2PA manifest store — a store is signed over the file it came from and
+        /// can never be copied into a re-encoded one; see [`gamut_metadata::C2paPolicy`]. A caller
+        /// that must be told about either configures the embedder itself and calls
+        /// [`with_encoded_metadata`](Self::with_encoded_metadata). Carriers absent from the model
+        /// leave any earlier raw setting untouched.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message
+        /// is carried as [`Error::detail`]), and whatever
+        /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
+        pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
+            let encoded = MetadataEmbedder::new().embed(meta).map_err(|e| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: metadata does not serialize")
+                    .with_detail(e.to_string())
+            })?;
+            self.with_encoded_metadata(&encoded)
+        }
+
+        /// Embeds already-serialized facade blocks — the output of a [`MetadataEmbedder`]
+        /// configured by the caller — routing each present carrier to the matching raw setter.
+        /// Returns the updated encoder for chaining.
+        ///
+        /// EXIF goes to [`with_exif`](Self::with_exif) with the facade's `Exif\0\0` signature
+        /// stripped (the setter takes the bare TIFF stream and adds HEIF's own
+        /// `exif_tiff_header_offset`), XMP to [`with_xmp`](Self::with_xmp), ICC to
+        /// [`with_icc_profile`](Self::with_icc_profile), and a C2PA store — which
+        /// [`MetadataEmbedder::embed`] never fills, so only a caller that produced one for this
+        /// file assigns it — to [`with_c2pa`](Self::with_c2pa). Fields that are `None` leave any
+        /// earlier raw setting untouched.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream: HEIF
+        /// defines no IPTC-IIM item type. Nothing is applied when an error is returned.
+        pub fn with_encoded_metadata(mut self, encoded: &EncodedMetadata) -> Result<Self> {
+            if encoded.iptc_iim.is_some() {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: IPTC-IIM has no item type",
+                ));
+            }
+            if let Some(exif) = &encoded.exif {
+                self = self.with_exif(exif.strip_prefix(b"Exif\0\0").unwrap_or(exif));
+            }
+            if let Some(xmp) = &encoded.xmp {
+                self = self.with_xmp(xmp);
+            }
+            if let Some(icc) = &encoded.icc {
+                self = self.with_icc_profile(icc);
+            }
+            if let Some(c2pa) = &encoded.c2pa {
+                self = self.with_c2pa(c2pa);
+            }
+            Ok(self)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
+        use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+        use gamut_metadata::icc::{
+            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Signature, TagData,
+        };
+        use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
+        use gamut_metadata::{MetadataBlock, TypedMetadata};
+
+        use super::*;
+        use crate::AvifContainer;
+
+        /// A typed model with the three facade-writable carriers populated, normalised through one
+        /// embed → extract pass so it is an *extracted* model (the ICC header's `size` is stamped
+        /// by the serializer).
+        fn typed() -> Metadata {
+            let mut exif = Exif::new(ByteOrder::BigEndian);
+            exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
+            let mut xmp = XmpMeta::new();
+            xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
+            let icc = IccProfile {
+                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
+                tags: Vec::new(),
+            };
+            let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
+                .encode()
+                .unwrap();
+            Metadata::from_blocks(&[
+                MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
+                MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
+                MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
+            ])
+            .unwrap()
+        }
+
+        /// Encodes an 8×8 RGB image with `encoder`.
+        fn encode(encoder: &AvifEncoder) -> Vec<u8> {
+            let pixels = vec![128u8; 8 * 8 * 3];
+            let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+            let mut out = Vec::new();
+            encoder.encode_image(image, &mut out).unwrap();
+            out
+        }
+
+        #[test]
+        fn typed_metadata_round_trips_through_the_container() {
+            // The facade's keystone equality, extended through the `Exif` / `mime` items and the
+            // `colr` `prof` property.
+            let typed = typed();
+            let file = encode(&AvifEncoder::lossless().with_metadata(&typed).unwrap());
+            let container = AvifContainer::parse(&file).unwrap();
+            assert_eq!(container.image().blocks().unwrap().len(), 3);
+            assert_eq!(container.image().metadata().unwrap(), typed);
+        }
+
+        #[test]
+        fn a_manifest_store_is_never_copied_forward() {
+            let mut typed = typed();
+            typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());
+            let file = encode(&AvifEncoder::lossless().with_metadata(&typed).unwrap());
+            let container = AvifContainer::parse(&file).unwrap();
+            assert!(container.c2pa_slot().is_none());
+            typed.c2pa = None;
+            assert_eq!(container.image().metadata().unwrap(), typed);
+        }
+
+        #[test]
+        fn encoded_blocks_route_to_the_raw_setters() {
+            // Each present field lands in its item / property / box — the EXIF one without the
+            // facade's signature — and an absent one leaves an earlier setting.
+            let mut encoded = typed().encode().unwrap();
+            encoded.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
+            let file = encode(
+                &AvifEncoder::lossless()
+                    .with_encoded_metadata(&encoded)
+                    .unwrap(),
+            );
+            let container = AvifContainer::parse(&file).unwrap();
+            let image = container.image();
+            assert_eq!(
+                image.exif().unwrap().exif_tiff_stream().ok(),
+                encoded
+                    .exif
+                    .as_deref()
+                    .and_then(|e| e.strip_prefix(b"Exif\0\0"))
+            );
+            assert_eq!(
+                Some(image.xmp().unwrap().as_isobmff_item().payload.as_slice()),
+                encoded.xmp.as_deref()
+            );
+            assert_eq!(image.primary_item().icc_profile(), encoded.icc.as_deref());
+            assert_eq!(
+                container.c2pa_slot().and_then(|slot| slot.store()),
+                encoded.c2pa.as_deref()
+            );
+
+            let mut only_icc = EncodedMetadata::default();
+            only_icc.icc = encoded.icc.clone();
+            let file = encode(
+                &AvifEncoder::lossless()
+                    .with_xmp(b"<x:xmpmeta/>")
+                    .with_encoded_metadata(&only_icc)
+                    .unwrap(),
+            );
+            let container = AvifContainer::parse(&file).unwrap();
+            let image = container.image();
+            assert_eq!(
+                image.xmp().unwrap().as_isobmff_item().payload,
+                b"<x:xmpmeta/>"
+            );
+            assert_eq!(image.primary_item().icc_profile(), encoded.icc.as_deref());
+            assert!(image.exif().is_none());
+        }
+
+        #[test]
+        fn a_bare_exif_stream_is_written_unchanged() {
+            // `strip_prefix` must not eat a stream that never carried the signature.
+            let mut bare = EncodedMetadata::default();
+            bare.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
+            let file = encode(
+                &AvifEncoder::lossless()
+                    .with_encoded_metadata(&bare)
+                    .unwrap(),
+            );
+            let container = AvifContainer::parse(&file).unwrap();
+            assert_eq!(
+                container.image().exif().unwrap().exif_tiff_stream().ok(),
+                bare.exif.as_deref()
+            );
+        }
+
+        #[test]
+        fn iptc_iim_is_a_typed_unsupported_error() {
+            let mut iim = EncodedMetadata::default();
+            iim.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
+            let err = AvifEncoder::lossless()
+                .with_encoded_metadata(&iim)
+                .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                err.static_message(),
+                Some("AVIF: IPTC-IIM has no item type")
+            );
+        }
+
+        #[test]
+        fn a_model_that_does_not_serialize_is_invalid_input_with_the_facade_detail() {
+            // An ICC model with a duplicate tag signature is rejected by `gamut-icc`'s writer
+            // (ICC.1:2022 §7.3).
+            let duplicate = (Signature(*b"wtpt"), TagData::Xyz(Vec::new()));
+            let bad_icc = IccProfile {
+                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
+                tags: vec![duplicate.clone(), duplicate],
+            };
+            let model = Metadata::from_carriers(None, None, Some(bad_icc));
+            let err = AvifEncoder::lossless().with_metadata(&model).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert_eq!(
+                err.static_message(),
+                Some("AVIF: metadata does not serialize")
+            );
+            assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+        }
+    }
+}

@@ -674,6 +674,7 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-isobmff",
+ "gamut-metadata",
  "libavif-oracle",
  "proptest",
 ]
