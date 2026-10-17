@@ -38,7 +38,7 @@ internal encode→decode round-trips guard every lossless path.
 | P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0 (JPEG preview + size cap deferred) | ✅ done |
 | P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe. Finalization hardened it: full IFD-forest raw search, per-strip sub-byte alignment, `SampleFormat` validation, 64-bit offset reads | ✅ done |
 | P12 | Ch4     | Deflate/ZIP (8) encode+decode (zlib format; encode `gamut-deflate`, decode `miniz_oxide`) — CFA + LinearRaw, Adobe-validated; encode limited to 8/16-bit (the SDK reader's constraint) | ✅ done |
-| P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope and published the `lossless_jpeg` module; per-chunk geometry follows the spec's total-sample-count rule | ✅ done |
+| P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope and published the `lossless_jpeg` module; per-chunk geometry follows the spec's total-sample-count rule, and #584 made the encoder use it: a CFA chunk is declared as `repeat-cols` interleaved components at `width / repeat-cols` so predictor 1 differences like colours (DNG 1.7.1.0 p. 20), falling back to the chunk's own geometry past four components or on a width the repeat does not divide. The T.81 65535 line limit now binds the *frame* width, so an untiled Bayer strip encodes up to 131 070 photosites wide (previously refused past 65 535) and decodes back exactly | ✅ done |
 | P14 | Ch2     | Tiled raw layout (`TileWidth`/`TileLength`/`TileOffsets`/`TileByteCounts`): decode with edge-crop reassembly + `with_tiling` encode (zero-padded edge tiles), all schemes, Adobe pixel-exact | ✅ done |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
 | P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) — embed + decode, Adobe-validated. #353 replaced the crate-local models with the workspace facade's: `DngMetadata::exif` is `gamut-exif`'s `Exif`, and the byte carriers hand over as `gamut-metadata` `MetadataBlock`s | ✅ done |
@@ -563,6 +563,26 @@ measures the codec is not the place to change it:
   so the reshaped file would be 508 112 bytes, **129.2 %** of raw: **6.2 % smaller than the
   uncompressed file**, not the ~33 % a reader gets by chaining the codestream ratio onto the file
   ratio.
+
+  **Fixed by #584**, and the fixture table now prints exactly that 508 112 for `cfa/lossless-jpeg`
+  (`linear-raw/lossless-jpeg` is unchanged at 1 262 560: its period is 1, so its geometry is its
+  own). The decode timings above were taken against the pre-reshape `cfa/lossless-jpeg` stream —
+  one component at full width — and are not re-measured here; the `cfa` rows of a new run read a
+  different codestream. The gain was measured where the paragraph below says it belongs, on the
+  real-camera corpus: each CFA file decoded with gamut and re-encoded with
+  `Compression::LosslessJpeg`, same samples, before and after.
+
+  | corpus file | raw samples (16-bit) | codestream before | after | whole DNG before | after |
+  | --- | --- | --- | --- | --- | --- |
+  | Canon 5D3 (5920×3950, RGGB) | 46 768 000 | 36 298 966 (77.6 %) | 24 962 613 (53.4 %) | 53 838 242 | 42 501 889 (**−21.1 %**) |
+  | Leica M10 (5984×3992, RGGB) | 47 776 256 | 41 785 281 (87.5 %) | 32 398 714 (67.8 %) | 59 702 425 | 50 315 858 (**−15.7 %**) |
+
+  The codestream shrinks by 31.2 % and 22.5 %; the whole-file deltas equal the codestream deltas
+  byte for byte. For scale, the Adobe DNG Converter's own `lossless.DNG` of the same Canon frame
+  is 23 206 642 bytes whole — it fits its Huffman table to the data, which gamut's single fixed
+  table does not (the remaining gap #584 names as secondary). The corpus's other two files are
+  not CFA (`LinearRaw` ProRAW, and a single-plane monochrome image that decodes as
+  `LinearRaw`), so the change does not reach them.
 
 **The fixture table is not a codec gate, and should not become one.** #584's verification section
 proposes pinning the encoder to the sizes this harness prints. It should not be: the margin is a
