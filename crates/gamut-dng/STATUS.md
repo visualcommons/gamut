@@ -366,19 +366,29 @@ The Adobe DNG SDK validates the output on every fixture the oracle covers (CFA a
 ## Codec benchmark harness (#163)
 
 `cargo bench -p gamut-dng --bench codec` measures **encode and decode throughput across the whole
-shipped codec matrix** — uncompressed, Deflate and lossless JPEG, each for CFA and `LinearRaw`
-photometry — and puts gamut's decode next to the **Adobe DNG SDK's**. (The older `--bench
+shipped codec matrix** — uncompressed, Deflate, lossless JPEG and, behind the `jxl-encode`
+feature, JPEG XL (#556), each for CFA and `LinearRaw` photometry — and puts gamut's decode next
+to the **Adobe DNG SDK's**. The crate's own `jxl-encode` self-dev-dependency opens that gate for
+every bench build, so a plain `cargo bench` measures the JPEG XL cells. (The older `--bench
 compression` is narrower and stays as it is: it answers the #196 question, "which DEFLATE encoder
-should the ZIP path use", on packed payloads.) Fixtures are synthesised in-process, so the harness
-needs no sample corpus and runs by default; the ~178 MiB real-camera submodule behind `mise run
-fetch-dng-samples` is deliberately not a prerequisite.
+should the ZIP path use", on packed payloads.) The matrix's fixtures are synthesised in-process,
+so it needs no sample corpus and runs by default.
+
+Beside the matrix, `decode_dng_file` (#556) times gamut and the SDK as an adjacent pair over DNGs
+gamut's encoder did not write: Adobe's `01_jxl_linear_raw_integer.dng`, which the oracle
+extracts, and — only when `third_party/gamut-dng-samples/MANIFEST.toml` exists — the three
+largest real-camera `*.dng` files both implementations decode. The ~178 MiB corpus behind `mise
+run fetch-dng-samples` is not a prerequisite: an absent corpus, or a file either decoder refuses,
+prints a `skipped:` line under the fixture table rather than failing. These rows carry no
+preview correction (each arm counts its own raw volume) and run at `sample_count = 20`.
 
 **What is timed.** The codec call, the allocation and growth of the buffer it produces, and that
 buffer's teardown — the last of those explicitly, because divan would otherwise defer a returned
 value's drop past the timed region, which would charge gamut nothing for freeing a decoded image
 while the SDK's `dng_negative` destructor runs inside its own call. Fixture synthesis, the
 `RawImage`/`CameraProfile` build, and the encode that produces the bytes a decode benchmark reads
-are all outside it. Nothing touches the filesystem.
+are all outside it. No timed region touches the filesystem: `decode_dng_file` reads each file
+once, before divan starts, and times only the decode of bytes already in memory.
 
 **Whether the comparison is fair.** Every asymmetry between the two implementations is either
 removed or measured; none is left as an adjective.
