@@ -279,7 +279,11 @@ mod tests {
     fn assert_optimal_invariants(freq: &[u32], bits: &[u8; 16], values: &[u8]) {
         let total: usize = bits.iter().map(|&b| usize::from(b)).sum();
         assert_eq!(total, values.len(), "sum(BITS) != len(HUFFVAL)");
-        assert_eq!(total, freq.iter().filter(|&&f| f != 0).count(), "one code per symbol");
+        assert_eq!(
+            total,
+            freq.iter().filter(|&&f| f != 0).count(),
+            "one code per symbol"
+        );
         assert!(fits_code_space(bits), "over-subscribed code space");
         let t = CanonicalCodes::from_bits_values(bits, values);
         let mut coded = Vec::new();
