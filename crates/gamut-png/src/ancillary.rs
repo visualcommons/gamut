@@ -93,6 +93,16 @@ impl PhysicalUnit {
             PhysicalUnit::Meter => 1,
         }
     }
+
+    /// The unit for a `pHYs` unit specifier, or `None` for a value §11.3.4.3 Table 24 does not
+    /// define.
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(PhysicalUnit::Unknown),
+            1 => Some(PhysicalUnit::Meter),
+            _ => None,
+        }
+    }
 }
 
 /// How a text chunk is encoded.

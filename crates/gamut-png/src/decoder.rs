@@ -405,7 +405,8 @@ impl PngDecoder {
     /// Decodes a PNG into its native layout together with the ancillary metadata — the rich
     /// counterpart of the typed [`DecodeImage`] implementations, and the only way to reach the
     /// palette of an indexed image, the tRNS colour key, and the raw metadata payloads
-    /// (eXIf/ICC/XMP/text and the C2PA manifest store, plus parsed gAMA/cHRM/sRGB/cICP values).
+    /// (eXIf/ICC/XMP/text and the C2PA manifest store, plus parsed gAMA/cHRM/sRGB/cICP and
+    /// sBIT/bKGD/pHYs/tIME values).
     ///
     /// # Errors
     ///
@@ -418,6 +419,7 @@ impl PngDecoder {
             &parsed.ancillary,
             self.max_metadata_bytes,
             parsed.c2pa_after_idat,
+            &parsed.header,
         );
         let native = self.decode_parsed(&parsed)?;
         let header = PngHeader {
@@ -444,6 +446,10 @@ impl PngDecoder {
             chromaticities: meta.chromaticities,
             srgb: meta.srgb,
             cicp: meta.cicp,
+            significant_bits: meta.significant_bits,
+            background: meta.background,
+            physical_dimensions: meta.physical_dimensions,
+            modification_time: meta.modification_time,
         })
     }
 
@@ -478,8 +484,13 @@ impl PngDecoder {
     /// # }
     /// ```
     pub fn metadata(&self, data: &[u8]) -> Result<PngMetadata> {
-        let (chunks, c2pa_after_idat) = walk_metadata_chunks(data)?;
-        Ok(collected(&chunks, self.max_metadata_bytes, c2pa_after_idat))
+        let (chunks, c2pa_after_idat, header) = walk_metadata_chunks(data)?;
+        Ok(collected(
+            &chunks,
+            self.max_metadata_bytes,
+            c2pa_after_idat,
+            &header,
+        ))
     }
 
     /// Runs the typed pipeline: parse (without metadata) → decode.
@@ -549,10 +560,10 @@ impl PngDecoder {
     }
 }
 
-/// What one metadata walk found: the chunks in a position where their type may appear, and how
+/// What one metadata walk found: the chunks in a position where their type may appear, how
 /// many CRC-valid `caBX` chunks sat after `IDAT` — never the store (C2PA §A.3.2), so counted
-/// rather than returned among the chunks.
-type MetadataWalk<'a> = (Vec<([u8; 4], &'a [u8])>, usize);
+/// rather than returned among the chunks — and the IHDR, which `sBIT` and `bKGD` are read against.
+type MetadataWalk<'a> = (Vec<([u8; 4], &'a [u8])>, usize, Ihdr);
 
 /// Walks the chunk stream collecting the CRC-valid ancillary chunks, for [`decoded::collect`] to
 /// classify — the same handoff [`PngDecoder::parse_stream`] makes, so the two entry points cannot
@@ -565,7 +576,8 @@ type MetadataWalk<'a> = (Vec<([u8; 4], &'a [u8])>, usize);
 /// Returns a [`MetadataWalk`]: the chunks together with the number of CRC-valid `caBX` chunks
 /// seen *after* `IDAT`,
 /// which are never the store (§A.3.2) and so are counted rather than returned — the same split
-/// [`PngDecoder::parse_stream`] makes, so the two entry points agree on what the store is.
+/// [`PngDecoder::parse_stream`] makes, so the two entry points agree on what the store is —
+/// and the parsed IHDR.
 fn walk_metadata_chunks(data: &[u8]) -> Result<MetadataWalk<'_>> {
     let mut reader = ChunkReader::new(data)?;
     let first = reader
@@ -583,9 +595,10 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<MetadataWalk<'_>> {
             "PNG: critical chunk CRC mismatch",
         ));
     }
-    // Parsed but discarded: this validates the header the same way `decode` does, so a stream
-    // with a corrupt IHDR is rejected here too rather than yielding metadata from a broken file.
-    ihdr::parse(first.data)?;
+    // Validated the same way `decode` does, so a stream with a corrupt IHDR is rejected here too
+    // rather than yielding metadata from a broken file; kept, because `sBIT` and `bKGD` are
+    // shaped by its colour type and depth.
+    let header = ihdr::parse(first.data)?;
 
     let mut chunks = Vec::new();
     let mut c2pa_after_idat = 0usize;
@@ -645,16 +658,21 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<MetadataWalk<'_>> {
             "PNG: missing IEND",
         ));
     }
-    Ok((chunks, c2pa_after_idat))
+    Ok((chunks, c2pa_after_idat, header))
 }
 
-/// Assembles the metadata from a walk's two results: the chunks in a store-bearing position, and
-/// the count of `caBX` chunks the walk found after `IDAT`.
+/// Assembles the metadata from a walk's results: the chunks in a store-bearing position, the
+/// count of `caBX` chunks the walk found after `IDAT`, and the IHDR the chunks are read against.
 ///
 /// The one place that addition happens, so `decode` and both `metadata` entry points cannot come
 /// to report different counts for the same file.
-fn collected(chunks: &[([u8; 4], &[u8])], budget: usize, c2pa_after_idat: usize) -> PngMetadata {
-    let mut meta = decoded::collect(chunks, budget);
+fn collected(
+    chunks: &[([u8; 4], &[u8])],
+    budget: usize,
+    c2pa_after_idat: usize,
+    header: &Ihdr,
+) -> PngMetadata {
+    let mut meta = decoded::collect(chunks, budget, header);
     meta.c2pa_ignored += c2pa_after_idat;
     meta
 }
@@ -714,11 +732,12 @@ fn collected(chunks: &[([u8; 4], &[u8])], budget: usize, c2pa_after_idat: usize)
 /// # }
 /// ```
 pub fn metadata(data: &[u8]) -> Result<PngMetadata> {
-    let (chunks, c2pa_after_idat) = walk_metadata_chunks(data)?;
+    let (chunks, c2pa_after_idat, header) = walk_metadata_chunks(data)?;
     Ok(collected(
         &chunks,
         DEFAULT_MAX_METADATA_BYTES,
         c2pa_after_idat,
+        &header,
     ))
 }
 
@@ -802,9 +821,9 @@ fn validate_plte_and_trns(
     Ok((None, Some(key)))
 }
 
-/// The native-range mask for a colour key: §11.3.1.1 stores keys as 2-byte values but only the
-/// low `bit_depth` bits are significant below depth 16.
-fn depth_mask(bit_depth: u8) -> u16 {
+/// The native-range mask for a two-byte sample: §11.3.1.1 stores a colour key, and §11.3.4.1 a
+/// background, as 2-byte values but only the low `bit_depth` bits are significant below depth 16.
+pub(crate) fn depth_mask(bit_depth: u8) -> u16 {
     if bit_depth >= 16 {
         u16::MAX
     } else {
