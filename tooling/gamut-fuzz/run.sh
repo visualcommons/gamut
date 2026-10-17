@@ -72,6 +72,35 @@ for arg in "$@"; do
 	fi
 done
 
+# ── Dictionaries (#567) ─────────────────────────────────────────────────────────────────────
+#
+# The TIFF/IFD parser targets run with a libFuzzer `-dict` of the tokens real-camera files carry
+# (tag IDs in both byte orders, MakerNote magics, DNG opcode IDs) -- committed under `dict/` in
+# place of a fetched real-camera seed corpus; README "Dictionaries" says why. Applied here rather
+# than in the workflow so `mise run fuzz <target>` locally searches exactly as the Extended job
+# does. libFuzzer reads a single `-dict` file, so a target that needs several gets them
+# concatenated into the ignored `state/` directory. An explicit `-dict=` on the command line wins.
+case "${cargo_args[0]:-}" in
+ifd_read | tiff_decode) dicts=(ifd) ;;
+dng_decode) dicts=(ifd dng) ;;
+*) dicts=() ;;
+esac
+user_dict=""
+for arg in ${libfuzzer_args[@]+"${libfuzzer_args[@]}"}; do
+	if [[ $arg == -dict=* ]]; then
+		user_dict=1
+	fi
+done
+if [ ${#dicts[@]} -gt 0 ] && [ -z "$user_dict" ]; then
+	merged="$PWD/$FUZZ_DIR/state/${cargo_args[0]}.dict"
+	mkdir -p "$PWD/$FUZZ_DIR/state"
+	: >"$merged"
+	for name in "${dicts[@]}"; do
+		cat "$FUZZ_DIR/dict/$name.dict" >>"$merged"
+	done
+	libfuzzer_args+=("-dict=$merged")
+fi
+
 invocation=(run --fuzz-dir "$FUZZ_DIR" --target "$target")
 if [ ${#cargo_args[@]} -gt 0 ]; then
 	invocation+=("${cargo_args[@]}")
