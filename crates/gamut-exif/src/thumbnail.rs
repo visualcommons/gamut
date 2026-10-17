@@ -71,7 +71,9 @@ impl Thumbnail {
 
     /// The image strips of an uncompressed thumbnail, in `StripOffsets` order, each exactly the
     /// bytes its `StripByteCounts` entry sized; `None` when the 1st IFD addresses no strips, or
-    /// when any strip range could not be read (the directory then keeps its source `StripOffsets`).
+    /// when the strip set could not be read — which a parse report names as a
+    /// [`ThumbnailStrips`](crate::DroppedRegion::ThumbnailStrips) drop, and which strict mode
+    /// rejects. Either way the directory no longer holds `StripOffsets`.
     #[must_use]
     pub fn strips(&self) -> Option<&[Vec<u8>]> {
         self.strips.as_deref()
