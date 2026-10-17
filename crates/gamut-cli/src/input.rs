@@ -14,7 +14,10 @@
 //! [`decode_native`] is the other door, for an encoder that takes more than one layout (AVIF): it
 //! asks each decoder for the narrowest of five layouts that holds the file *without* loss — grey,
 //! RGB or RGBA, at 8 or 16 bits — so the encoder sees the alpha and the precision the file
-//! carries, and it reads the file's ICC profile and Exif alongside.
+//! carries.
+//!
+//! [`read_metadata`] reads what the file carries besides its pixels, as the `gamut-metadata`
+//! facade's blocks, for `gamut convert` to map into the output.
 
 use std::path::Path;
 
@@ -24,7 +27,8 @@ use gamut::core::{
 };
 use gamut::jpeg::JpegDecoder;
 use gamut::jxl::JxlDecoder;
-use gamut::png::{ColorType as PngColorType, PngDecoder};
+use gamut::metadata::{MetadataBlock, TypedMetadata};
+use gamut::png::{ColorType as PngColorType, PngDecoder, PngMetadata};
 use gamut::webp::WebpDecoder;
 
 use crate::error::CliError;
@@ -70,31 +74,142 @@ impl NativeImage {
     }
 }
 
-/// The input metadata an encoder can carry: the ICC profile and the Exif TIFF stream, each
-/// verbatim from the input file.
+/// The metadata an input file carries, located as `gamut-metadata` [`MetadataBlock`]s and held
+/// verbatim, plus the facts about the decode a conversion needs to keep it truthful.
 #[derive(Default)]
 pub(crate) struct InputMetadata {
-    /// The embedded ICC profile.
-    pub(crate) icc: Option<Vec<u8>>,
-    /// The Exif payload as a bare TIFF stream (starting `II`/`MM`, no `Exif\0\0` prefix).
+    /// The Exif payload, as the reader located it (with or without the `Exif\0\0` marker).
     pub(crate) exif: Option<Vec<u8>>,
+    /// The XMP packet.
+    pub(crate) xmp: Option<Vec<u8>>,
+    /// The embedded ICC profile — absent when the decoder renders the pixels into another colour
+    /// space rather than into it (see [`decoded_to_srgb`](Self::decoded_to_srgb)).
+    pub(crate) icc: Option<Vec<u8>>,
+    /// A legacy IPTC-IIM dataset stream.
+    pub(crate) iptc_iim: Option<Vec<u8>>,
+    /// Whether the file holds a C2PA manifest store. Only its presence is kept: a store is never
+    /// carried into a rewritten file.
+    pub(crate) c2pa: bool,
+    /// Blocks of a kind this command does not know, by count: a carrier `gamut-metadata` added
+    /// after this command was written.
+    pub(crate) unknown: usize,
+    /// Whether the decoder already applied the file's orientation to the pixels (JPEG XL does), so
+    /// the decoded pixels are display-oriented.
+    pub(crate) oriented: bool,
+    /// Whether the decoder rendered the pixels into sRGB rather than into the file's own colour
+    /// encoding (an XYB-coded JPEG XL), so a profile the file embeds describes the original image
+    /// and not these pixels.
+    pub(crate) decoded_to_srgb: bool,
+    /// A PNG input's whole metadata, for a PNG output: the text annotations and colour chunks
+    /// have no `gamut-metadata` block, so only a PNG output holds them.
+    pub(crate) png: Option<PngMetadata>,
 }
 
 impl InputMetadata {
-    /// The metadata as it describes the decoded image in `layout`, given whether the file's
-    /// samples are `grey`.
-    ///
-    /// A grey image widened to an RGB(A) layout keeps its pixels but not its ICC profile: a grey
-    /// profile's data colour space is `GRAY` (ICC.1:2022 §7.2.6, Table 19), which cannot describe
-    /// three-channel data, and a reader may ignore or reject the image for it. The profile is
-    /// dropped rather than replaced — the widened image is then untagged (sRGB by default), which
-    /// is how every grey image left this CLI before ICC was carried at all.
-    fn for_layout(mut self, grey: bool, layout: Layout) -> Self {
-        if grey && layout != Layout::Gray8 {
-            self.icc = None;
+    /// Owns the payloads `blocks` borrow, one field per carrier.
+    fn from_blocks(blocks: &[MetadataBlock<'_>]) -> Self {
+        let mut meta = Self::default();
+        for block in blocks {
+            match *block {
+                MetadataBlock::Exif(bytes) => meta.exif = Some(bytes.to_vec()),
+                MetadataBlock::Xmp(bytes) => meta.xmp = Some(bytes.to_vec()),
+                MetadataBlock::Icc(bytes) => meta.icc = Some(bytes.to_vec()),
+                MetadataBlock::IptcIim(bytes) => meta.iptc_iim = Some(bytes.to_vec()),
+                MetadataBlock::C2pa(_) => meta.c2pa = true,
+                // `MetadataBlock` is `#[non_exhaustive]`: a later carrier is counted, so the
+                // conversion reports it as not carried rather than passing over it in silence.
+                _ => meta.unknown += 1,
+            }
         }
-        self
+        meta
     }
+
+    /// The blocks of a reader that hands its payloads over as raw fields rather than through
+    /// [`TypedMetadata`] (PNG and WebP).
+    fn from_fields(
+        exif: Option<&[u8]>,
+        xmp: Option<&[u8]>,
+        icc: Option<&[u8]>,
+        c2pa: Option<&[u8]>,
+    ) -> Self {
+        let blocks: Vec<MetadataBlock<'_>> = [
+            exif.map(MetadataBlock::Exif),
+            xmp.map(MetadataBlock::Xmp),
+            icc.map(MetadataBlock::Icc),
+            c2pa.map(MetadataBlock::C2pa),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        Self::from_blocks(&blocks)
+    }
+
+    /// The blocks a [`TypedMetadata`] reader hands over; none when it cannot locate them.
+    fn from_typed(typed: &dyn TypedMetadata) -> Self {
+        typed
+            .blocks()
+            .map(|blocks| Self::from_blocks(&blocks))
+            .unwrap_or_default()
+    }
+}
+
+/// Reads the metadata a supported input file carries, through each format's reader: the
+/// [`TypedMetadata`] blocks where the format crate implements the trait (JPEG, JPEG XL), and the
+/// raw fields its reader documents as blocks otherwise (PNG, WebP). PPM carries none.
+///
+/// Best-effort and total: the pixels decode separately, so a payload that cannot be read is simply
+/// absent rather than failing the conversion.
+pub(crate) fn read_metadata(bytes: &[u8]) -> InputMetadata {
+    if is_webp(bytes) {
+        return gamut::webp::metadata(bytes)
+            .map(|m| {
+                InputMetadata::from_fields(
+                    m.exif.as_deref(),
+                    m.xmp.as_deref(),
+                    m.icc.as_deref(),
+                    m.c2pa.as_deref(),
+                )
+            })
+            .unwrap_or_default();
+    }
+    if is_jxl(bytes) {
+        let decoder = JxlDecoder::new();
+        let mut meta = decoder
+            .metadata(bytes)
+            .map(|m| InputMetadata::from_typed(&m))
+            .unwrap_or_default();
+        // The decoder orients the pixels for display (the `jxl` crate's `adjust_orientation`
+        // default), and an XYB-coded stream decodes to sRGB, not into its embedded profile.
+        meta.oriented = true;
+        if decoder
+            .info(bytes)
+            .is_ok_and(|info| !info.uses_original_profile)
+        {
+            meta.decoded_to_srgb = true;
+            meta.icc = None;
+        }
+        return meta;
+    }
+    if is_png(bytes) {
+        return gamut::png::metadata(bytes)
+            .map(|m| {
+                let mut meta = InputMetadata::from_fields(
+                    m.exif.as_deref(),
+                    m.xmp.as_deref(),
+                    m.icc_profile.as_ref().map(|icc| icc.profile.as_slice()),
+                    m.c2pa.as_deref(),
+                );
+                meta.png = Some(m);
+                meta
+            })
+            .unwrap_or_default();
+    }
+    if is_jpeg(bytes) {
+        return gamut::jpeg::metadata(bytes)
+            .map(|m| InputMetadata::from_typed(&m))
+            .unwrap_or_default();
+    }
+    InputMetadata::default()
 }
 
 /// Which of [`NativeImage`]'s layouts holds an image without loss.
@@ -138,7 +253,7 @@ macro_rules! decode_as {
 }
 
 /// Decodes a supported image file (PNG, JPEG, PPM/P6, WebP, or JPEG XL) in the narrowest layout
-/// that holds it without loss, and reads its ICC profile and Exif.
+/// that holds it without loss.
 ///
 /// What decides the layout, per format:
 ///
@@ -151,16 +266,8 @@ macro_rules! decode_as {
 ///   is wide).
 /// - **PPM** (through the `image` crate): its colour type.
 ///
-/// Metadata is best-effort: the pixels have decoded by the time it is read, so a payload that
-/// cannot be read is simply absent rather than failing the conversion. An ICC profile is returned
-/// only when it describes the decoded pixels: not for an XYB-coded JPEG XL (decoded to sRGB), and
-/// not for a grey image widened to an RGB(A) layout.
-///
 /// `bytes` is the file already read (see [`read_input`]); `path` only labels errors.
-pub(crate) fn decode_native(
-    path: &Path,
-    bytes: &[u8],
-) -> Result<(NativeImage, InputMetadata), CliError> {
+pub(crate) fn decode_native(path: &Path, bytes: &[u8]) -> Result<NativeImage, CliError> {
     // The layout is chosen so no conversion loses anything; the permissive policy only matters
     // where no layout can (a float JPEG XL narrowing to 16 bits), as on the fixed-layout path.
     let lossy = ConvertPolicy::permissive();
@@ -177,13 +284,7 @@ pub(crate) fn decode_native(
             ),
             Err(err) => return Err(err.into()),
         };
-        let metadata = gamut::webp::metadata(bytes)
-            .map(|m| InputMetadata {
-                icc: m.icc,
-                exif: m.exif,
-            })
-            .unwrap_or_default();
-        return Ok((image, metadata));
+        return Ok(image);
     }
 
     if is_jxl(bytes) {
@@ -195,17 +296,7 @@ pub(crate) fn decode_native(
             info.has_alpha,
             info.is_float || info.bits_per_sample > 8,
         );
-        // An XYB-coded stream decodes to sRGB, not into its embedded ICC profile, so the profile
-        // describes the original image rather than these pixels and is not carried.
-        let metadata = decoder
-            .metadata(bytes)
-            .map(|m| InputMetadata {
-                icc: m.icc.filter(|_| info.uses_original_profile),
-                exif: m.exif,
-            })
-            .unwrap_or_default()
-            .for_layout(grey, layout);
-        return Ok((decode_as!(decoder, bytes, layout), metadata));
+        return Ok(decode_as!(decoder, bytes, layout));
     }
 
     if is_png(bytes) {
@@ -225,12 +316,7 @@ pub(crate) fn decode_native(
             PngColorType::Grayscale | PngColorType::GrayscaleAlpha
         );
         let layout = Layout::pick(grey, alpha, decoded.header.bit_depth == 16);
-        let metadata = InputMetadata {
-            icc: decoded.icc_profile.map(|icc| icc.profile),
-            exif: decoded.exif,
-        }
-        .for_layout(grey, layout);
-        return Ok((decode_as!(decoder, bytes, layout), metadata));
+        return Ok(decode_as!(decoder, bytes, layout));
     }
 
     if is_jpeg(bytes) {
@@ -240,13 +326,7 @@ pub(crate) fn decode_native(
         } else {
             NativeImage::Rgb8(decoder.decode_image(bytes)?)
         };
-        let metadata = gamut::jpeg::metadata(bytes)
-            .map(|m| InputMetadata {
-                icc: m.icc,
-                exif: m.exif,
-            })
-            .unwrap_or_default();
-        return Ok((image, metadata));
+        return Ok(image);
     }
 
     let decoded = image::load_from_memory(bytes).map_err(|source| CliError::Decode {
@@ -266,7 +346,7 @@ pub(crate) fn decode_native(
         Layout::Rgb16 => NativeImage::Rgb16(ImageBuf::new(decoded.to_rgb16().into_raw(), dims)?),
         Layout::Rgba16 => NativeImage::Rgba16(ImageBuf::new(decoded.to_rgba16().into_raw(), dims)?),
     };
-    Ok((image, InputMetadata::default()))
+    Ok(image)
 }
 
 /// Unwraps a gamut decode into the flat `(samples, dimensions)` pair the encoders take, choosing
@@ -630,7 +710,7 @@ mod tests {
 
     /// The layout `decode_native` chose for `bytes`.
     fn native_layout(bytes: &[u8]) -> Layout {
-        match decode_native(Path::new("mem"), bytes).unwrap().0 {
+        match decode_native(Path::new("mem"), bytes).unwrap() {
             NativeImage::Gray8(_) => Layout::Gray8,
             NativeImage::Rgb8(_) => Layout::Rgb8,
             NativeImage::Rgba8(_) => Layout::Rgba8,
@@ -732,47 +812,65 @@ mod tests {
         assert_eq!(native_layout(&png), Layout::Rgb16);
     }
 
-    /// The ICC profile `decode_native` read for `bytes`.
+    /// Every carrier a block can name lands in its own field, and a C2PA store only as its
+    /// presence.
+    #[test]
+    fn from_blocks_keeps_each_carrier_in_its_field() {
+        let meta = InputMetadata::from_blocks(&[
+            MetadataBlock::Exif(b"exif"),
+            MetadataBlock::Xmp(b"xmp"),
+            MetadataBlock::Icc(b"icc"),
+            MetadataBlock::IptcIim(b"iim"),
+            MetadataBlock::C2pa(b"jumb"),
+        ]);
+        assert_eq!(meta.exif.as_deref(), Some(&b"exif"[..]));
+        assert_eq!(meta.xmp.as_deref(), Some(&b"xmp"[..]));
+        assert_eq!(meta.icc.as_deref(), Some(&b"icc"[..]));
+        assert_eq!(meta.iptc_iim.as_deref(), Some(&b"iim"[..]));
+        assert!(meta.c2pa);
+        assert_eq!(meta.unknown, 0);
+        assert!(!meta.oriented && !meta.decoded_to_srgb);
+    }
+
+    /// A WebP's raw chunks are read as blocks; a JPEG's through its `TypedMetadata` impl.
+    #[test]
+    fn read_metadata_reads_webp_and_jpeg_blocks() {
+        use gamut::jpeg::JpegEncoder;
+
+        let rgba = [
+            1, 2, 3, 0xff, 4, 5, 6, 0xff, 7, 8, 9, 0xff, 10, 11, 12, 0xff,
+        ];
+        let mut webp = Vec::new();
+        WebpEncoder::lossless()
+            .with_exif(b"MM\0*webp")
+            .with_xmp(b"<x/>")
+            .with_c2pa(b"jumb")
+            .encode_image(
+                ImageRef::<Rgba8>::new(&rgba, Dimensions::new(2, 2).unwrap()).unwrap(),
+                &mut webp,
+            )
+            .unwrap();
+        let meta = read_metadata(&webp);
+        assert_eq!(meta.exif.as_deref(), Some(&b"MM\0*webp"[..]));
+        assert_eq!(meta.xmp.as_deref(), Some(&b"<x/>"[..]));
+        assert!(meta.c2pa);
+
+        let mut jpeg = Vec::new();
+        JpegEncoder::new()
+            .with_xmp(b"<y/>")
+            .encode_image(
+                ImageRef::<Gray8>::new(&[0x40; 64], Dimensions::new(8, 8).unwrap()).unwrap(),
+                &mut jpeg,
+            )
+            .unwrap();
+        let meta = read_metadata(&jpeg);
+        assert_eq!(meta.xmp.as_deref(), Some(&b"<y/>"[..]));
+        assert!(meta.png.is_none());
+    }
+
+    /// The ICC profile `read_metadata` kept for `bytes`.
     fn native_icc(bytes: &[u8]) -> Option<Vec<u8>> {
-        decode_native(Path::new("mem"), bytes).unwrap().1.icc
-    }
-
-    #[test]
-    fn metadata_for_layout_drops_icc_only_from_widened_grey() {
-        let tagged = || InputMetadata {
-            icc: Some(vec![1]),
-            exif: Some(vec![2]),
-        };
-        assert!(tagged().for_layout(true, Layout::Gray8).icc.is_some());
-        let widened = tagged().for_layout(true, Layout::Rgb16);
-        assert!(widened.icc.is_none());
-        assert!(widened.exif.is_some(), "Exif is layout-independent");
-        assert!(tagged().for_layout(false, Layout::Rgb16).icc.is_some());
-    }
-
-    #[test]
-    fn native_png_drops_a_grey_profile_when_widened() {
-        use gamut::core::Gray16;
-        use gamut::icc::IccProfile;
-        use gamut::png::PngEncoder;
-
-        let grey_icc = IccProfile::gray_with_gamma(2.2)
-            .unwrap()
-            .to_bytes()
-            .unwrap();
-        let dims = Dimensions {
-            width: 2,
-            height: 1,
-        };
-        let encoder = || PngEncoder::new().with_icc_profile("grey", &grey_icc);
-        let grey8 = encoder()
-            .encode_to_vec(ImageRef::<Gray8>::new(&[0, 0x80], dims).unwrap())
-            .unwrap();
-        let grey16 = encoder()
-            .encode_to_vec(ImageRef::<Gray16>::new(&[0, 0x8080], dims).unwrap())
-            .unwrap();
-        assert_eq!(native_icc(&grey8), Some(grey_icc.clone()));
-        assert_eq!(native_icc(&grey16), None);
+        read_metadata(bytes).icc
     }
 
     #[test]
@@ -826,6 +924,10 @@ mod tests {
         );
         assert_eq!(native_icc(&lossless), Some(icc));
         assert_eq!(native_icc(&xyb), None);
+        assert!(!read_metadata(&lossless).decoded_to_srgb);
+        let xyb = read_metadata(&xyb);
+        assert!(xyb.decoded_to_srgb);
+        assert!(xyb.oriented, "the JPEG XL decoder orients its pixels");
     }
 
     #[test]

@@ -8,18 +8,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use clap::{Args, ValueEnum};
 use gamut::avif::{AvifEncodeReport, AvifEncoder, Speed as AvifSpeed};
 use gamut::color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
-use gamut::core::{EncodeImage, ImageRef, Rgb8, Rgba8};
+use gamut::core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
+use gamut::exif::{Exif, ExifTag, ExifWriter, Value as ExifValue};
+use gamut::icc::{ColorSpace as IccColorSpace, ProfileHeader};
 use gamut::jpeg::{ChromaSubsampling as JpegChroma, JpegEncoder};
 use gamut::jxl::{
-    Container as JxlContainer, Distance as JxlDistance, Effort as JxlEffort, JxlEncoder,
-    ModularMode as JxlModularMode,
+    ColorSpec as JxlColorSpec, Container as JxlContainer, Distance as JxlDistance,
+    Effort as JxlEffort, JxlEncoder, ModularMode as JxlModularMode, Orientation as JxlOrientation,
 };
-use gamut::png::{PngEncoder, Preset as PngCodecPreset};
+use gamut::metadata::capability::{Carrier, Direction, Format as MetadataFormat, supports};
+use gamut::png::{PngEncoder, PngMetadata, Preset as PngCodecPreset};
 use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
 use gamut::webp::{Effort as WebpEffort, NearLossless as WebpNearLossless, WebpEncoder};
 
 use crate::error::CliError;
-use crate::input::{InputMetadata, NativeImage, STDIO, decode_bytes, decode_native, read_input};
+use crate::input::{
+    InputMetadata, NativeImage, STDIO, decode_bytes, decode_native, read_input, read_metadata,
+};
 
 /// Arguments for `gamut convert`.
 #[derive(Args)]
@@ -156,17 +161,19 @@ pub(crate) struct ConvertArgs {
     /// for other output formats.
     #[arg(long)]
     jxl_container: bool,
-    /// Drop the input's metadata instead of carrying it into the output. By default a PNG input
-    /// re-encoded to PNG keeps its EXIF, ICC profile, XMP packet, text annotations and colour
-    /// chunks; a stripped file is smaller, an unstripped one is colour-accurate, so the default
-    /// is the one that loses nothing. Anything that cannot be carried — the C2PA manifest store,
-    /// signed over the bytes of the file it was made for — and anything carried in a shape the
-    /// PNG specification does not endorse is reported on stderr rather than passed over in
-    /// silence. Applies to the PNG output path with a PNG input, and to AVIF output, which carries
-    /// the ICC profile and Exif of a PNG, JPEG, WebP or JPEG XL input (the ICC profile only where
-    /// it describes the decoded pixels — not for a lossy, XYB-coded JPEG XL, and not for a grey
-    /// image with alpha or 16-bit samples, which AVIF codes as colour); every other pair drops
-    /// metadata regardless.
+    /// Drop the input's metadata instead of carrying it into the output. By default the Exif,
+    /// XMP packet and ICC profile of a PNG, JPEG, WebP or JPEG XL input are carried into every
+    /// output that can hold them; a stripped file is smaller, an unstripped one is
+    /// colour-accurate, so the default is the one that loses nothing. The Exif claims a
+    /// conversion can make false are rewritten to match the output: `Orientation` (1 when the
+    /// decoder already oriented the pixels, as JPEG XL's does), `PixelXDimension` /
+    /// `PixelYDimension` (the output's size) and `ColorSpace` (sRGB when the pixels were decoded
+    /// into sRGB, uncalibrated when their ICC profile is not carried). A PNG input re-encoded to
+    /// PNG also keeps its text annotations and colour chunks. Anything that is not carried — a
+    /// block the output cannot hold, an ICC profile that cannot describe the output's samples
+    /// (a grey profile on colour output), the C2PA manifest store (signed over the bytes of the
+    /// file it was made for, so never carried) — and anything carried in a shape the PNG
+    /// specification does not endorse is reported on stderr rather than passed over in silence.
     #[arg(long)]
     strip_metadata: bool,
 }
@@ -342,6 +349,31 @@ impl OutputFormat {
             OutputFormat::Png => "png",
             OutputFormat::Jxl => "jxl",
             OutputFormat::Jpeg => "jpg",
+        }
+    }
+
+    /// The format's name, as the metadata warnings print it.
+    fn name(self) -> &'static str {
+        match self {
+            OutputFormat::Avif => "AVIF",
+            OutputFormat::Webp => "WebP",
+            OutputFormat::Tiff => "TIFF",
+            OutputFormat::Png => "PNG",
+            OutputFormat::Jxl => "JPEG XL",
+            OutputFormat::Jpeg => "JPEG",
+        }
+    }
+
+    /// The format as `gamut-metadata`'s capability table names it, which decides what metadata an
+    /// output of this format can hold.
+    fn container(self) -> MetadataFormat {
+        match self {
+            OutputFormat::Avif => MetadataFormat::Avif,
+            OutputFormat::Webp => MetadataFormat::WebP,
+            OutputFormat::Tiff => MetadataFormat::Tiff,
+            OutputFormat::Png => MetadataFormat::Png,
+            OutputFormat::Jxl => MetadataFormat::Jxl,
+            OutputFormat::Jpeg => MetadataFormat::Jpeg,
         }
     }
 }
@@ -626,11 +658,20 @@ fn encode(
 ) -> Result<Encoded, CliError> {
     let mut out = Vec::new();
     let mut avif = None;
+    // Read without touching the pixels, which decode separately below; every output maps it
+    // through `carry` once its samples and size are known (issue #570).
+    let metadata = (!args.strip_metadata).then(|| read_metadata(bytes));
+    let carry_into = |samples, dims| {
+        metadata
+            .as_ref()
+            .map(|metadata| carry(metadata, format, samples, dims))
+            .unwrap_or_default()
+    };
     let (raw_len, dims) = match format {
         OutputFormat::Avif => {
             // The input's own layout, so alpha and 16-bit precision reach the encoder (issue
             // #663); a 16-bit input codes at the encoder's default depth, 12 bits.
-            let (image, metadata) = decode_native(input, bytes)?;
+            let image = decode_native(input, bytes)?;
             let dims = image.dimensions();
             tracing::info!(
                 width = dims.width,
@@ -638,9 +679,30 @@ fn encode(
                 bytes = image.byte_len(),
                 "decoded input"
             );
+            let samples = match image {
+                NativeImage::Gray8(_) => Samples::Grey,
+                _ => Samples::Colour,
+            };
+            let carried = carry_into(Some(samples), dims);
+            if carried
+                .orientation
+                .is_some_and(|orientation| orientation != 1)
+            {
+                tracing::warn!(
+                    "input metadata carried with a caveat — the Exif Orientation is kept, but the \
+                     AVIF output signals no orientation of its own (no `irot`/`imir`), so a reader \
+                     that orients by the container shows the stored pixels unrotated"
+                );
+            }
             let mut encoder = avif_encoder(args);
-            if !args.strip_metadata {
-                encoder = with_avif_metadata(encoder, metadata);
+            if let Some(icc) = &carried.icc {
+                encoder = encoder.with_icc_profile(icc);
+            }
+            if let Some(exif) = &carried.exif {
+                encoder = encoder.with_exif(exif);
+            }
+            if let Some(xmp) = &carried.xmp {
+                encoder = encoder.with_xmp(xmp);
             }
             // The report splits the file into its colour and alpha codestreams and the container
             // around them, for the summary line's size breakdown.
@@ -675,11 +737,21 @@ fn encode(
             if args.lossy && near_lossless.is_some() {
                 tracing::warn!("--webp-near-lossless applies to lossless WebP only; ignoring");
             }
-            let encoder = if args.lossy {
+            let mut encoder = if args.lossy {
                 WebpEncoder::lossy(args.quality)
             } else {
                 WebpEncoder::lossless()
             };
+            let carried = carry_into(Some(Samples::Colour), dims);
+            if let Some(icc) = &carried.icc {
+                encoder = encoder.with_icc_profile(icc);
+            }
+            if let Some(exif) = &carried.exif {
+                encoder = encoder.with_exif(exif);
+            }
+            if let Some(xmp) = &carried.xmp {
+                encoder = encoder.with_xmp(xmp);
+            }
             encoder
                 .with_effort(effort)
                 .with_near_lossless(near_lossless)
@@ -699,6 +771,9 @@ fn encode(
             } else {
                 TiffCompression::None
             };
+            // `gamut-metadata`'s capability table gives TIFF no writable carrier, so this only
+            // reports what is left behind.
+            let _ = carry_into(Some(Samples::Colour), dims);
             let image = ImageRef::<Rgb8>::new(&rgb, dims)?;
             TiffEncoder::new()
                 .with_compression(compression)
@@ -721,30 +796,48 @@ fn encode(
             if let Some(passes) = args.png_refinement_passes {
                 encoder = encoder.with_effort(passes);
             }
-            // Carry the input's metadata rather than dropping it (issue #483). `png_metadata`
-            // walks the bytes already read, which is cheap (it skips IDAT by length and never
-            // inflates a pixel); it yields nothing for an input that is not a PNG.
-            let metadata = (!args.strip_metadata)
-                .then(|| png_metadata(bytes))
-                .flatten();
-            if let Some(metadata) = &metadata {
+            // A PNG input keeps every chunk it carries (issue #483), with its Exif rewritten; its
+            // ICC profile is the file's own, so it needs no check against the samples here.
+            // Any other input carries only what has a `gamut-metadata` block (issue #570).
+            let png_input = metadata.as_ref().and_then(|m| m.png.as_ref());
+            let samples = if png_input.is_some() {
+                None
+            } else {
+                Some(Samples::Colour)
+            };
+            let mut carried = carry_into(samples, dims);
+            if let Some(png) = png_input {
                 tracing::info!(
-                    texts = metadata.texts.len(),
-                    exif = metadata.exif.is_some(),
-                    icc = metadata.icc_profile.is_some(),
-                    xmp = metadata.xmp.is_some(),
+                    texts = png.texts.len(),
+                    exif = carried.exif.is_some(),
+                    icc = png.icc_profile.is_some(),
+                    xmp = png.xmp.is_some(),
                     "carrying input metadata"
                 );
-                encoder = encoder.with_metadata(metadata);
-                // Say what could not come along, and what came along with a caveat. Silent loss
-                // is the defect this path exists to remove, and a payload the spec forbids
-                // carrying is still a payload the caller had.
-                for notice in encoder.metadata_notices() {
-                    if notice.carried() {
-                        tracing::warn!("input metadata carried with a caveat — {notice}");
-                    } else {
-                        tracing::warn!("input metadata not carried — {notice}");
-                    }
+                let mut png: PngMetadata = png.clone();
+                png.exif = carried.exif.take();
+                // `carry` has already reported the store, which is never carried.
+                png.c2pa = None;
+                encoder = encoder.with_metadata(&png);
+            } else {
+                if let Some(exif) = &carried.exif {
+                    encoder = encoder.with_exif(exif);
+                }
+                if let Some(icc) = &carried.icc {
+                    encoder = encoder.with_icc_profile("ICC profile", icc);
+                }
+                if let Some(xmp) = carried.xmp.as_deref().and_then(utf8_xmp) {
+                    encoder = encoder.with_xmp(xmp);
+                }
+            }
+            // Say what could not come along, and what came along with a caveat. Silent loss is
+            // the defect this path exists to remove, and a payload the spec forbids carrying is
+            // still a payload the caller had.
+            for notice in encoder.metadata_notices() {
+                if notice.carried() {
+                    tracing::warn!("input metadata carried with a caveat — {notice}");
+                } else {
+                    tracing::warn!("input metadata not carried — {notice}");
                 }
             }
             encoder.encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
@@ -761,10 +854,38 @@ fn encode(
             );
             // A `--jxl-distance` selects lossy; `Distance::new` validates the range and surfaces an
             // out-of-range value as the codec's `InvalidInput` through `CliError::Codec`.
-            let encoder = match args.jxl_distance {
+            let mut encoder = match args.jxl_distance {
                 Some(distance) => JxlEncoder::lossy(JxlDistance::new(distance)?),
                 None => JxlEncoder::lossless(),
             };
+            let carried = carry_into(Some(Samples::Colour), dims);
+            // Orientation and the ICC profile live in the codestream itself, so they are carried
+            // in either framing.
+            if let Some(orientation) = carried
+                .orientation
+                .and_then(|value| JxlOrientation::from_exif_value(u8::try_from(value).ok()?))
+            {
+                encoder = encoder.with_orientation(orientation);
+            }
+            if let Some(icc) = carried.icc {
+                encoder = encoder.with_color(JxlColorSpec::Icc(icc));
+            }
+            if args.jxl_container {
+                if let Some(exif) = &carried.exif {
+                    encoder = encoder.with_exif(exif);
+                }
+                if let Some(xmp) = carried.xmp.as_deref().and_then(utf8_xmp) {
+                    encoder = encoder.with_xmp(xmp);
+                }
+            } else if carried.exif.is_some() || carried.xmp.is_some() {
+                // Exif and XMP are container boxes, which a bare codestream has nowhere to put
+                // (`JxlEncoder::with_exif` refuses the pair). The framing is the caller's choice,
+                // so it is not changed behind their back.
+                tracing::warn!(
+                    "input metadata not carried — a bare JPEG XL codestream holds no Exif or XMP; \
+                     pass --jxl-container to carry them"
+                );
+            }
             // The clap `1..=10` range guarantees `from_level` returns `Some`; fall back to the
             // default effort (Squirrel/7) rather than unwrap so the path stays panic-free.
             let effort = JxlEffort::from_level(args.jxl_effort).unwrap_or_default();
@@ -803,7 +924,30 @@ fn encode(
             if args.jpeg_restart_interval != 0 {
                 encoder = encoder.with_restart_interval(args.jpeg_restart_interval);
             }
-            encoder.encode_image(ImageRef::<Rgb8>::new(&rgb, dims)?, &mut out)?;
+            let image = ImageRef::<Rgb8>::new(&rgb, dims)?;
+            let carried = carry_into(Some(Samples::Colour), dims);
+            let bare = encoder.clone();
+            let attached = carried.icc.is_some() || carried.exif.is_some() || carried.xmp.is_some();
+            if let Some(icc) = &carried.icc {
+                encoder = encoder.with_icc_profile(icc);
+            }
+            if let Some(exif) = &carried.exif {
+                encoder = encoder.with_exif(exif);
+            }
+            if let Some(xmp) = &carried.xmp {
+                encoder = encoder.with_xmp(xmp);
+            }
+            // A JPEG segment is capped at 64 KiB, so an Exif or XMP payload over its segment's
+            // limit is refused by the encode (the encoder owns those limits). Metadata failing
+            // must not fail a conversion whose pixels are fine: say so, and encode without it.
+            if let Err(err) = encoder.encode_image(image, &mut out) {
+                if !attached {
+                    return Err(err.into());
+                }
+                tracing::warn!("input metadata not carried — the JPEG encoder refused it: {err}");
+                out.clear();
+                bare.encode_image(image, &mut out)?;
+            }
             (rgb.len(), dims)
         }
     };
@@ -813,16 +957,6 @@ fn encode(
         dims,
         avif,
     })
-}
-
-/// The metadata the input `bytes` carry, or `None` when they are not a PNG.
-///
-/// Deliberately total: the input has already been decoded successfully by the time this is
-/// called, so an error here means the file is simply not a PNG — a JPEG or WebP input has
-/// metadata of its own, but mapping that into PNG chunks is a cross-format job this command does
-/// not do yet. Failing to *read* metadata must never fail a conversion whose pixels are fine.
-fn png_metadata(bytes: &[u8]) -> Option<gamut::png::PngMetadata> {
-    gamut::png::metadata(bytes).ok()
 }
 
 /// The AVIF encoder the `--avif-*` flags (and the deprecated `--qindex`) describe, before the
@@ -866,27 +1000,220 @@ fn avif_encoder(args: &ConvertArgs) -> AvifEncoder {
     encoder
 }
 
-/// Carries the input's ICC profile and Exif into an AVIF encode, both verbatim.
+/// The samples an output codes, which decides the ICC profile that can describe them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Samples {
+    /// One grey channel (plus alpha).
+    Grey,
+    /// Three colour channels (plus alpha).
+    Colour,
+}
+
+/// The input metadata one output carries, after [`carry`] rewrote and dropped what it had to.
+#[derive(Debug, Default)]
+struct Carried {
+    /// The Exif payload as a bare TIFF stream (no `Exif\0\0` marker), its conversion-sensitive
+    /// claims rewritten (see [`rewrite_exif`]).
+    exif: Option<Vec<u8>>,
+    /// The XMP packet, verbatim.
+    xmp: Option<Vec<u8>>,
+    /// The ICC profile, verbatim.
+    icc: Option<Vec<u8>>,
+    /// The Exif orientation (1–8) the output's stored pixels need for display, after the rewrite.
+    /// Read even where the output cannot hold the Exif itself, for a format that signals
+    /// orientation in its own header (JPEG XL).
+    orientation: Option<u16>,
+}
+
+/// Maps the input's metadata onto a `format` output of `dims` whose samples are `samples` —
+/// `None` when the encoder fits its colour type to the profile itself, as a PNG input re-encoded to
+/// PNG does — reporting on stderr everything left behind.
 ///
-/// The encoder does not validate the Exif stream, and libavif rejects a whole file whose Exif item
-/// is not a TIFF stream — so a payload that does not open with a TIFF byte-order header (`II*\0` or
-/// `MM\0*`, TIFF 6.0 §2) is left out with a warning rather than written into a file a reader then
-/// refuses. Every input decoder already strips JPEG's `Exif\0\0` prefix; one still present is a
-/// malformed WebP `EXIF` chunk, and it falls under the same rule.
-fn with_avif_metadata(mut encoder: AvifEncoder, metadata: InputMetadata) -> AvifEncoder {
-    if let Some(icc) = &metadata.icc {
-        tracing::info!(bytes = icc.len(), "carrying input ICC profile");
-        encoder = encoder.with_icc_profile(icc);
+/// What the output can hold is `gamut-metadata`'s capability table, not a judgement made here, so
+/// no output arm is handed a carrier the table says its format cannot write. Beyond that table:
+///
+/// - a **C2PA manifest store** is never carried, into any format: its hard binding covers the
+///   bytes of the file it was made for (C2PA 2.4 §9.1), so a copy would be an invalid claim;
+/// - an **ICC profile** is carried only where its data colour space (ICC.1:2022 §7.2.6) is the
+///   output samples' — a `GRAY` profile cannot describe RGB data, nor an RGB one grey data;
+/// - the **Exif** is carried only once it parses, because a payload that does not parse cannot be
+///   rewritten (see [`rewrite_exif`]) and copying it would repeat claims the conversion may have
+///   made false;
+/// - a PNG input's **text annotations and colour chunks** have no block, so only a PNG output
+///   holds them.
+fn carry(
+    meta: &InputMetadata,
+    format: OutputFormat,
+    samples: Option<Samples>,
+    dims: Dimensions,
+) -> Carried {
+    let holds = |carrier| supports(format.container(), carrier, Direction::Write);
+    let not_held = |what: &str| {
+        tracing::warn!(
+            "input metadata not carried — {} output cannot hold the {what}",
+            format.name()
+        );
+    };
+
+    if meta.c2pa {
+        tracing::warn!(
+            "input metadata not carried — the C2PA manifest store, which is signed over the bytes \
+             of the file it was made for (C2PA 2.4 §9.1)"
+        );
     }
-    if let Some(exif) = &metadata.exif {
-        if exif.starts_with(b"II*\0") || exif.starts_with(b"MM\0*") {
-            tracing::info!(bytes = exif.len(), "carrying input Exif");
-            encoder = encoder.with_exif(exif);
-        } else {
-            tracing::warn!("input metadata not carried — the Exif payload is not a TIFF stream");
+    if meta.iptc_iim.is_some() {
+        // No output this command writes takes the legacy block (the capability table gives it to
+        // DNG alone), and IPTC Core already travels inside the XMP packet.
+        not_held("IPTC-IIM block");
+    }
+    if meta.unknown > 0 {
+        tracing::warn!(
+            "input metadata not carried — {} metadata block(s) of a kind this command does not know",
+            meta.unknown
+        );
+    }
+    if let Some(png) = &meta.png
+        && format != OutputFormat::Png
+    {
+        let chunks = png_only_chunks(png);
+        if !chunks.is_empty() {
+            not_held(&format!("PNG chunks {}", chunks.join(", ")));
         }
     }
-    encoder
+
+    let icc = match (&meta.icc, samples) {
+        (None, _) => None,
+        (Some(_), _) if !holds(Carrier::Icc) => {
+            not_held("ICC profile");
+            None
+        }
+        (Some(icc), Some(samples)) if !profile_describes(icc, samples) => {
+            tracing::warn!(
+                "input metadata not carried — the ICC profile, whose colour space does not \
+                 describe the output's {} samples (ICC.1:2022 §7.2.6)",
+                match samples {
+                    Samples::Grey => "grey",
+                    Samples::Colour => "RGB",
+                }
+            );
+            None
+        }
+        (Some(icc), _) => Some(icc.clone()),
+    };
+    let xmp = match &meta.xmp {
+        Some(_) if !holds(Carrier::Xmp) => {
+            not_held("XMP packet");
+            None
+        }
+        xmp => xmp.clone(),
+    };
+    let mut carried = Carried {
+        exif: None,
+        xmp,
+        icc,
+        orientation: None,
+    };
+
+    let Some(raw) = &meta.exif else {
+        return carried;
+    };
+    let mut exif = match Exif::parse(raw) {
+        Ok(exif) => exif,
+        Err(err) => {
+            tracing::warn!(
+                "input metadata not carried — the Exif payload, which does not parse, so its \
+                 claims about the image cannot be rewritten: {err}"
+            );
+            return carried;
+        }
+    };
+    rewrite_exif(&mut exif, meta, dims, carried.icc.is_some());
+    carried.orientation = exif.orientation();
+    if !holds(Carrier::Exif) {
+        not_held("Exif payload");
+        return carried;
+    }
+    match ExifWriter::new().marker(false).write(&exif) {
+        Ok(bytes) => carried.exif = Some(bytes),
+        Err(err) => {
+            tracing::warn!(
+                "input metadata not carried — the Exif payload does not re-encode: {err}"
+            );
+        }
+    }
+    carried
+}
+
+/// Rewrites the Exif claims a conversion can make false, each only where the input makes it — a
+/// tag the input leaves out is not invented:
+///
+/// - `Orientation` (0th IFD, CIPA DC-008 §4.6.5) becomes 1 when the decoder already applied it to
+///   the pixels, as JPEG XL's does; otherwise the pixels are stored as they were and the value
+///   still holds;
+/// - `PixelXDimension` / `PixelYDimension` (Exif IFD, §4.6.6) become the output's `dims`;
+/// - `ColorSpace` (Exif IFD, §4.6.6) becomes 1 (sRGB) when the decoder rendered the pixels into
+///   sRGB, and `0xFFFF` (Uncalibrated) when the input's ICC profile described them and
+///   `icc_carried` says the output does not — the pixels are then in a space the file no longer
+///   names.
+fn rewrite_exif(exif: &mut Exif, meta: &InputMetadata, dims: Dimensions, icc_carried: bool) {
+    let present = |exif: &Exif, tag| exif.get_tag(tag).is_some();
+    if meta.oriented && present(exif, ExifTag::Orientation) {
+        exif.set_tag(ExifTag::Orientation, ExifValue::Short(vec![1]));
+    }
+    for (tag, length) in [
+        (ExifTag::PixelXDimension, dims.width),
+        (ExifTag::PixelYDimension, dims.height),
+    ] {
+        if present(exif, tag) {
+            exif.set_tag(tag, ExifValue::Long(vec![length]));
+        }
+    }
+    if present(exif, ExifTag::ColorSpace) {
+        if meta.decoded_to_srgb {
+            exif.set_tag(ExifTag::ColorSpace, ExifValue::Short(vec![1]));
+        } else if meta.icc.is_some() && !icc_carried {
+            exif.set_tag(ExifTag::ColorSpace, ExifValue::Short(vec![0xFFFF]));
+        }
+    }
+}
+
+/// Whether `icc`'s data colour space (ICC.1:2022 §7.2.6) is that of `samples`. A profile whose
+/// header does not parse describes nothing.
+fn profile_describes(icc: &[u8], samples: Samples) -> bool {
+    let wanted = match samples {
+        Samples::Grey => IccColorSpace::Gray,
+        Samples::Colour => IccColorSpace::Rgb,
+    };
+    ProfileHeader::parse(icc).is_ok_and(|header| header.data_color_space == wanted)
+}
+
+/// The chunks of a PNG input that only a PNG output holds, by name, for the warning that they were
+/// left behind.
+fn png_only_chunks(png: &PngMetadata) -> Vec<&'static str> {
+    [
+        (!png.texts.is_empty(), "tEXt/zTXt/iTXt"),
+        (png.gamma.is_some(), "gAMA"),
+        (png.chromaticities.is_some(), "cHRM"),
+        (png.srgb.is_some(), "sRGB"),
+        (png.cicp.is_some(), "cICP"),
+        (png.significant_bits.is_some(), "sBIT"),
+        (png.background.is_some(), "bKGD"),
+        (png.physical_dimensions.is_some(), "pHYs"),
+        (png.modification_time.is_some(), "tIME"),
+    ]
+    .into_iter()
+    .filter_map(|(present, name)| present.then_some(name))
+    .collect()
+}
+
+/// `xmp` as the `&str` the PNG and JPEG XL encoders take, or `None` — with a warning — when it is
+/// not UTF-8, which an XMP packet must be in those formats (PNG §11.3.3.4's `iTXt` is UTF-8).
+fn utf8_xmp(xmp: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(xmp).ok();
+    if text.is_none() {
+        tracing::warn!("input metadata not carried — the XMP packet, which is not UTF-8");
+    }
+    text
 }
 
 /// The output format an output file's extension names, for when `--format` is not given.
