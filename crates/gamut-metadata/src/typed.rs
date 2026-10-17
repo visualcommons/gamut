@@ -56,6 +56,15 @@ pub trait TypedMetadata {
     /// [`ConflictPolicy`](crate::ConflictPolicy). Each carrier appears only when the file holds
     /// it.
     ///
+    /// The one exception is a carrier the type holds as an already-typed model rather than as
+    /// bytes: it is absent here, because a borrowed [`MetadataBlock`] has no bytes to point at,
+    /// and only an overridden [`metadata`](Self::metadata) puts it into the unified model.
+    /// `gamut-dng`'s `DngMetadata` is that case for its EXIF sub-IFD. A caller extracting with a
+    /// non-default policy over `&dyn TypedMetadata` therefore takes such a model from the
+    /// concrete type itself (`DngMetadata::exif`) and assigns it onto the extracted
+    /// [`Metadata`]; the policy only reconciles IPTC-IIM against XMP, so the omitted model reads
+    /// the same under every policy.
+    ///
     /// # Errors
     ///
     /// Returns [`MetadataError::Container`](crate::MetadataError::Container) when the container
