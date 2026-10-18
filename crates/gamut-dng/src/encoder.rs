@@ -1085,6 +1085,17 @@ mod tests {
         );
     }
 
+    /// The other side of that bound: `u32::MAX` itself is a LONG and is stored, so the
+    /// comparison is `>`, not `>=` (a survivor of the #891 survey; every case above sat one past
+    /// the bound or well inside it).
+    #[test]
+    fn a_white_level_of_exactly_u32_max_is_stored_as_a_long() {
+        assert_eq!(
+            white_level_value(&[f64::from(u32::MAX)]).expect("u32::MAX fits a LONG"),
+            Value::Long(vec![u32::MAX])
+        );
+    }
+
     /// The RATIONAL grid's upper bound is exclusive, and has to be.
     ///
     /// A fractional black level is stored as `(v * 65536).round() / 65536`, so a value of exactly
