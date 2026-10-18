@@ -15,8 +15,8 @@
 //! - `zune-jpeg` -- the pure-Rust reference the issue measures the gap against, to RGB.
 //! - `libjpeg-turbo` -- the crate's oracle, to RGB: the output reference, and a second yardstick.
 //!   Its time includes one copy the binding makes out of the C allocation (`tooling/libjpeg-oracle`
-//!   `take_owned`). gamut's includes the copy its own presentation makes through
-//!   `gamut_core::convert`, which a caller pays too; the arm itself copies nothing.
+//!   `take_owned`). gamut's makes no such copy: since #905 it writes `Rgb8` from a YCbCr stream
+//!   straight into the returned buffer, as zune-jpeg does. The arm itself copies nothing.
 //!
 //! Columns: `input,width,height,jpeg_bytes,variant,decoder,sample,decode_ns,output_fnv64,
 //! max_abs_diff_vs_libjpeg,mean_abs_diff_vs_libjpeg`. `decode_ns` is one wall-clock decode;

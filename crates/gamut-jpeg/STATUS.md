@@ -204,8 +204,12 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   reassembled by their 1-based index regardless of segment order; an inconsistent chunk sequence
   (index/count out of range, duplicate, mismatched, or missing chunks) is `InvalidInput`.
 - **`decode_image_into` reuses the destination.** When the decoded dimensions match the
-  destination's, the presentation stage writes into its existing sample storage (no allocation);
-  otherwise the buffer is replaced. Error paths fire before any byte is written.
+  destination's, the presentation stage writes into its existing sample storage; otherwise the
+  buffer is replaced. When the requested layout is the stream's native one (`Gray8` for one
+  component, `Rgb8` for YCbCr/RGB, `Cmyk8` for CMYK/YCCK) the samples are written there directly,
+  with no image-sized buffer in between (#905); any other layout is presented natively once and
+  converted into the destination by `gamut_core::convert`. Error paths fire before any byte is
+  written.
 
 **Encoder-specific notes:**
 
