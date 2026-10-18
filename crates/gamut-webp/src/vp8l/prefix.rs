@@ -132,11 +132,17 @@ impl PrefixCode {
                 "VP8L: incomplete prefix code",
             ));
         }
-        // Sort symbols by (length, symbol) into a flat table.
-        let mut offsets = [0usize; MAX_CODE_LENGTH + 2];
-        for len in 1..=MAX_CODE_LENGTH {
-            offsets[len + 1] = offsets[len] + usize::from(counts[len]);
-        }
+        // Sort symbols by (length, symbol) into a flat table: `offsets[len]` is where the first
+        // symbol of length `len` goes, the running sum of the counts below it (`counts[0]` is
+        // always 0, since only nonzero lengths are counted). Mapped over `counts` rather than
+        // sized by hand: a hand-written `[0; MAX_CODE_LENGTH + 2]` had a `+` → `*` twin that only
+        // grew an array whose tail nothing reads, which no input can tell apart (#903).
+        let mut next = 0usize;
+        let mut offsets = counts.map(|count| {
+            let start = next;
+            next += usize::from(count);
+            start
+        });
         let mut symbols = vec![0u16; n_used];
         for (sym, &len) in code_lengths.iter().enumerate() {
             if len > 0 {
@@ -677,12 +683,16 @@ fn write_description(w: &mut BitWriter, lengths: &[u8], description: Description
                 return false;
             };
             w.write_bits(1, 1); // 1 = simple code length code.
-            w.write_bits((symbols.len() - 1) as u32, 1);
+            // `num_symbols - 1` is one bit: whether a second symbol follows. Decided by the same
+            // `get(1)` that writes that symbol, not as `len - 1`: `simple_symbols` caps the length
+            // at 2 and `write_bits` keeps the low bit, so `len + 1` wrote the same bit (#903).
+            let symbol1 = symbols.get(1).copied();
+            w.write_bits(u32::from(symbol1.is_some()), 1);
             let symbol0 = symbols[0];
             let is_first_8bits = u32::from(symbol0 > 1);
             w.write_bits(is_first_8bits, 1);
             w.write_bits(u32::from(symbol0), 1 + 7 * is_first_8bits);
-            if let Some(&symbol1) = symbols.get(1) {
+            if let Some(symbol1) = symbol1 {
                 w.write_bits(u32::from(symbol1), 8);
             }
             true
