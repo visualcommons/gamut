@@ -218,10 +218,11 @@ through, and four twenty-minute shards finish inside the window.
 ## Survey record
 
 Whole-crate surveys taken with `mise run mutants-crate <crate>` (cargo-mutants 27.1.0, all
-features, AV1 oracles fetched), one crate at a time. The counts are the survey as taken at
-**Base**, *before* any survivor it found was resolved; **Resolution** then says how each was
-resolved — a test that kills it, a rewrite that removes it, or an argued entry in
-`.cargo/mutants.toml` — and, where the fix was re-scored, what the touched files scored after it.
+features, AV1 oracles fetched unless the row says otherwise), one crate at a time. The counts
+are the survey as taken at **Base**, *before* any survivor it found was resolved;
+**Resolution** then says how each was resolved — a test that kills it, a rewrite that removes
+it, or an argued entry in `.cargo/mutants.toml` — and, where the fix was re-scored, what the
+touched files scored after it.
 Base is the commit surveyed, or, for a row carried over from an earlier survey that did not pin
 one, the issue that records it. A row is evidence about that base, not a standing claim —
 re-survey before relying on it.
