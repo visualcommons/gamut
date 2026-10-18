@@ -1,9 +1,9 @@
 {
   "issue": 305,
-  "git_sha": "876ad872ae862569e01c0e78c5bbc2b5177013ee",
+  "git_sha": "ad613c5a83ace6fd0dd1c05b98c88a02d0e2e75f",
   "git_dirty": false,
   "before_sha": "63e0762aeb97c7eb8e25d0281d17735cfbccdcf8",
-  "before_patch_sha256": "b28fc14b1d48ebe8b79accf0586855575dcf83a56b82cf2835a20734b0224abc",
+  "before_patch_sha256": "11d26e087b36af257a1d89c0e17029a617b5422204fda85dbc5bac81aaa6b706",
   "rustc": "rustc 1.99.0 (b940084d7 2026-09-28);binary: rustc;commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4;commit-date: 2026-09-28;host: x86_64-unknown-linux-gnu;release: 1.99.0;LLVM version: 23.1.1;",
   "mise_lock_sha256": null,
   "cargo_lock_sha256": "6328053372c66b7b67dea0f71ada545583a29a443e9559be3a03b91112a8a12c",
@@ -23,6 +23,6 @@
   },
   "cpu_model": "AMD Ryzen 7 7800X3D 8-Core Processor",
   "cpu_cores": 16,
-  "load_average_start": "2.88 4.32 9.37",
-  "load_average_end": "7.52 8.73 7.90"
+  "load_average_start": "31.33 25.37 26.41",
+  "load_average_end": "32.63 29.50 27.69"
 }
