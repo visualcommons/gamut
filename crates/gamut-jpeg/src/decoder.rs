@@ -587,8 +587,8 @@ impl DecodedImage {
 ///
 /// That column never needs clamping to the component's width: [`assemble`] sizes a component
 /// `comp_w = ceil(width * h / hmax)` samples wide, and for `px < width`,
-/// `px * h / hmax <= (width - 1) * h / hmax < comp_w`. The vertical twin
-/// ([`DecodedImage::sample_row`]) keeps its clamp, which is the same bound written out.
+/// `px * h / hmax <= (width - 1) * h / hmax < comp_w`. (The same argument holds for the vertical
+/// twin, [`DecodedImage::sample_row`], whose clamp this change leaves as it was.)
 ///
 /// The two ratios real streams use get a path of their own, so the common rows need no per-sample
 /// index: full horizontal resolution reads the plane row in place, and half resolution (4:2:0 and
@@ -646,50 +646,35 @@ impl ColumnMap {
     }
 }
 
-/// Pixels per block of [`ycbcr_to_rgb_row`].
-///
-/// Sixteen 8-bit lanes fill one 128-bit vector, the width every target the workspace builds for
-/// vectorises without a runtime feature check (SSE2 on x86-64, NEON on aarch64, `simd128` on
-/// wasm32).
-const YCBCR_BLOCK: usize = 16;
-
-/// Converts one row of full-range YCbCr (T.871 §7) to interleaved RGB in `out`, which is three
-/// samples per pixel of the rows' common length.
+/// Converts one row of full-range YCbCr (T.871 §7) to interleaved RGB in `out`, three samples per
+/// pixel, through `packed`, a scratch row of at least as many pixels.
 ///
 /// The arithmetic is [`ycbcr_to_rgb`]'s, sample for sample, so the output is byte-identical to the
-/// per-pixel conversion. What changes is its shape: each block of [`YCBCR_BLOCK`] pixels is first
-/// converted into three planar lane arrays, which the compiler vectorises with the target's
-/// baseline vector instructions and no `unsafe`, and only then interleaved. The pixels past the
-/// last whole block take the per-pixel conversion.
-fn ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], out: &mut [u8]) {
-    let (blocks, tail) = out.as_chunks_mut::<{ 3 * YCBCR_BLOCK }>();
-    let done = blocks.len() * YCBCR_BLOCK;
-    for (((px, y), cb), cr) in blocks
-        .iter_mut()
-        .zip(y.as_chunks::<YCBCR_BLOCK>().0)
-        .zip(cb.as_chunks::<YCBCR_BLOCK>().0)
-        .zip(cr.as_chunks::<YCBCR_BLOCK>().0)
-    {
-        let mut planes = [[0u8; YCBCR_BLOCK]; 3];
-        for (i, ((&y, &cb), &cr)) in y.iter().zip(cb).zip(cr).enumerate() {
-            let (r, g, b) = ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
-            planes[0][i] = r;
-            planes[1][i] = g;
-            planes[2][i] = b;
-        }
-        for (i, rgb) in px.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-            *rgb = [planes[0][i], planes[1][i], planes[2][i]];
-        }
-    }
-    for (((px, &y), &cb), &cr) in tail
-        .as_chunks_mut::<3>()
-        .0
-        .iter_mut()
-        .zip(&y[done..])
-        .zip(&cb[done..])
-        .zip(&cr[done..])
-    {
+/// per-pixel conversion; what changes is the shape of the loops, so that the compiler vectorises
+/// them with the target's baseline vector instructions (SSE2 on x86-64, NEON on aarch64) and no
+/// `unsafe`:
+///
+/// 1. The conversion runs over whole rows with nothing but the three source samples and one
+///    destination per pixel, packing each result into a `u32` lane (`R`, `G`, `B`, then a zero
+///    byte). Converting straight into the interleaved row instead left it scalar: its three byte
+///    stores per pixel are a stride-3 pattern the vectoriser does not take.
+/// 2. The packed row is written out with one four-byte store per pixel, each overlapping the next
+///    pixel's first byte, which that pixel's own store then overwrites. Only the last pixel, whose
+///    fourth byte would land past the row, is written as three bytes.
+fn ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], packed: &mut [u32], out: &mut [u8]) {
+    for (((p, &y), &cb), &cr) in packed.iter_mut().zip(y).zip(cb).zip(cr) {
         let (r, g, b) = ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
+        *p = u32::from_le_bytes([r, g, b, 0]);
+    }
+    let n = out.len() / 3;
+    for (i, p) in packed.iter().enumerate().take(n.saturating_sub(1)) {
+        out[3 * i..3 * i + 4].copy_from_slice(&p.to_le_bytes());
+    }
+    if let (Some(px), Some(p)) = (
+        out.as_chunks_mut::<3>().0.last_mut(),
+        packed.get(n.wrapping_sub(1)),
+    ) {
+        let [r, g, b, _] = p.to_le_bytes();
         *px = [r, g, b];
     }
 }
@@ -1009,7 +994,8 @@ fn assemble(
 /// full resolution, into a scratch row otherwise), and the transform then runs over the zipped
 /// rows, writing straight into `out` -- `width * height` pixels of `format` as
 /// [`native_layout`] returned it alongside `transform`. The caller sizes `out`, so the presented
-/// image is written once, into the buffer that is returned.
+/// image is written once, into the buffer that is returned. YCbCr rows, the common case, convert
+/// through [`ycbcr_to_rgb_row`].
 fn present_native(img: &DecodedImage, transform: Transform, format: PixelFormat, out: &mut [u8]) {
     let w = img.width as usize;
     let maps: Vec<ColumnMap> = img
@@ -1018,6 +1004,7 @@ fn present_native(img: &DecodedImage, transform: Transform, format: PixelFormat,
         .map(|c| ColumnMap::new(usize::from(c.h), img.hmax, w))
         .collect();
     let mut scratch = vec![vec![0u8; w]; img.comps.len()];
+    let mut packed = vec![0u32; w];
     for (py, line) in out.chunks_exact_mut(w * format.channels()).enumerate() {
         let rows: Vec<&[u8]> = maps
             .iter()
@@ -1034,7 +1021,7 @@ fn present_native(img: &DecodedImage, transform: Transform, format: PixelFormat,
                     px.copy_from_slice(&[r, g, b]);
                 }
             }
-            (Transform::YCbCr, &[y, cb, cr]) => ycbcr_to_rgb_row(y, cb, cr, line),
+            (Transform::YCbCr, &[y, cb, cr]) => ycbcr_to_rgb_row(y, cb, cr, &mut packed, line),
             (Transform::Cmyk, &[c, m, y, k]) => {
                 for ((((px, &c), &m), &y), &k) in line
                     .as_chunks_mut::<4>()
@@ -1695,9 +1682,11 @@ mod tests {
 
     #[test]
     fn ycbcr_row_matches_the_per_pixel_conversion() {
-        // Lengths below, at and across the block size, with the three planes varied independently
-        // so a lane, plane or tail-offset mix-up moves a sample.
-        for len in [0usize, 1, 15, 16, 17, 31, 32, 33, 50] {
+        // Short rows (where the overlapping stores and the last pixel's three-byte store meet) and
+        // rows past a vector's width, with the three planes varied independently so a lane, plane
+        // or byte-order mix-up moves a sample, and a scratch row holding junk so every pixel's
+        // packed value must be rewritten before it is stored.
+        for len in [0usize, 1, 2, 3, 4, 5, 15, 16, 17, 33] {
             let y: Vec<u8> = (0..len).map(|i| (i * 97 + 3) as u8).collect();
             let cb: Vec<u8> = (0..len).map(|i| (i * 53 + 200) as u8).collect();
             let cr: Vec<u8> = (0..len).map(|i| (i * 29 + 90) as u8).collect();
@@ -1707,8 +1696,9 @@ mod tests {
                     [r, g, b]
                 })
                 .collect();
+            let mut packed = vec![u32::MAX; len];
             let mut out = vec![0u8; 3 * len];
-            ycbcr_to_rgb_row(&y, &cb, &cr, &mut out);
+            ycbcr_to_rgb_row(&y, &cb, &cr, &mut packed, &mut out);
             assert_eq!(out, want, "len {len}");
         }
     }
