@@ -87,7 +87,7 @@ How to read it:
 
 ## What is left, and where it is filed
 
-- **Presentation (#905, `gamut-jpeg`).** It is a fifth of gamut's decode and the one stage #897 left alone. Upsampling and YCbCr to RGB are scalar per pixel, where zune-jpeg uses AVX2 (`ycbcr_to_rgb_avx2_1`, `upsample_horizontal_avx2`). Every decode also pays a second full-image copy through `gamut_core::convert`, even when the native layout is the one requested.
+- **Presentation (#905, `gamut-jpeg`).** It is a fifth of gamut's decode and the one stage #897 left alone. Upsampling and YCbCr to RGB are scalar per pixel, where zune-jpeg uses AVX2 (`ycbcr_to_rgb_avx2_1`, `upsample_horizontal_avx2`). Every decode also pays a second full-image copy through `gamut_core::convert`, even when the native layout is the one requested. Both halves of the remaining presentation work, the native-layout write (no second copy when the decoded layout is the requested one) and the vectorised upsampling and colour conversion, are tracked by #905, which stays open after #897's delivery.
 - **The IDCT itself.** `idct8x8_int` is scalar. zune-jpeg's AVX2 IDCT (`idct_avx2` 1.43% + `idct_avx2_4x4` 0.63%) costs a little over a quarter of it per decode. SIMD variants behind the kernel's signature are already a `gamut-dsp` follow-up in its `STATUS.md`.
 - **The entropy decoder.** It is still the largest stage, but it is now spread over the block loop, the progressive scan loops and the reader, with no single hot symbol. The progressive refinement path is the clearest remaining target. No issue is filed for it: the next profile, after #905, decides whether it leads.
 
