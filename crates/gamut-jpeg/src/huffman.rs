@@ -143,6 +143,30 @@ pub struct DecTable {
     /// §F.2.2.3 presents Figure F.16 as one implementation of `DECODE` among "many other[s]
     /// possible"; this is the usual one.
     lookup: Box<[u16; 1 << LOOKAHEAD]>,
+    /// [`Self::lookup`] fused with the magnitude bits that follow the code (§F.2.2.1, §F.2.2.2): for
+    /// every [`LOOKAHEAD`]-bit prefix whose code of length `l` and the `s = value & 0x0F` magnitude
+    /// bits after it fit in the prefix (`l + s ≤ LOOKAHEAD`), the entry is `(EXTEND(magnitude, s) <<
+    /// 16) + (value << 8) + l`, with an `EXTEND` of `0` when `s = 0`; every other prefix holds `0`.
+    /// `l ≥ 1`, so a resolved entry is never `0`. One probe then yields a coefficient's run, size
+    /// and signed value at once (zune-jpeg's `ac_lookup` is the same idea), where [`Self::lookup`]
+    /// still leaves the magnitude to read and extend. Like [`Self::lookup`], it changes speed and
+    /// never outcome: a prefix it marks `0` decodes through [`Self::lookup`] and the walk.
+    ///
+    /// The `s` nibble is the size of a run/size AC symbol (`RRRRSSSS`) and, for a DC table, the
+    /// whole category `SSSS`: DC categories reach at most 11, so their high nibble is `0` and the one
+    /// table layout serves both classes.
+    fused: Box<[i32; 1 << LOOKAHEAD]>,
+}
+
+/// `EXTEND` (Figure F.12): sign-extends the `t`-bit magnitude `v` to a signed value. `t ≥ 1`.
+pub(crate) fn extend(v: u32, t: u8) -> i32 {
+    let t = u32::from(t);
+    let v = v as i32;
+    if v < (1 << (t - 1)) {
+        v - (1 << t) + 1
+    } else {
+        v
+    }
 }
 
 /// Bits of lookahead [`DecTable::lookup`] resolves in one probe. Nine covers every DC code and the
@@ -216,13 +240,22 @@ impl DecTable {
             }
             code *= 2;
         }
+        let fused = Box::new(core::array::from_fn(|prefix| fuse(lookup[prefix], prefix)));
         Ok(Self {
             mincode,
             maxcode,
             valptr,
             values: values.to_vec(),
             lookup,
+            fused,
         })
+    }
+
+    /// The [`Self::fused`] entry for a [`LOOKAHEAD`]-bit prefix: `(value << 16) + (symbol << 8) +
+    /// length`, or `0` where the code and its magnitude bits do not both fit in the prefix.
+    #[must_use]
+    pub(crate) fn fused(&self, prefix: u32) -> i32 {
+        self.fused[prefix as usize]
     }
 
     /// The [`Self::lookup`] entry for a [`LOOKAHEAD`]-bit prefix: `(length << 8) + value`, or `0`
@@ -276,6 +309,28 @@ impl DecTable {
     }
 }
 
+/// The [`DecTable::fused`] entry for the [`LOOKAHEAD`]-bit `prefix`, from that prefix's
+/// [`DecTable::lookup`] `entry`.
+///
+/// A miss needs no test of its own: its entry is `0`, so length, symbol, size and value are all `0`
+/// and so is the sum. The fields are composed with `*` and `+` rather than shifts and `|`, so no
+/// operator here has an equivalent twin on the disjoint lanes.
+fn fuse(entry: u16, prefix: usize) -> i32 {
+    let length = u32::from(entry >> 8);
+    let symbol = entry & 0xFF;
+    let size = u32::from(symbol & 0x0F);
+    if length + size > LOOKAHEAD {
+        return 0;
+    }
+    let value = if size == 0 {
+        0
+    } else {
+        let magnitude = (prefix as u32 >> (LOOKAHEAD - length - size)) & ((1 << size) - 1);
+        extend(magnitude, size as u8)
+    };
+    value * 65536 + i32::from(symbol) * 256 + length as i32
+}
+
 /// Appends a DHT marker segment (§B.2.4.2) carrying `tables`, each an `(class, id, spec)` triple:
 /// `class` is 0 for DC / 1 for AC (the `Tc` nibble), `id` is the destination (`Th` nibble).
 pub fn emit_dht(out: &mut Vec<u8>, tables: &[(u8, u8, &TableSpec)]) {
@@ -317,6 +372,18 @@ mod tests {
     fn assert_consistent(spec: &TableSpec, ctx: &str) {
         let total: usize = spec.bits.iter().map(|&b| usize::from(b)).sum();
         assert_eq!(total, spec.values.len(), "{ctx}: sum(BITS) != len(HUFFVAL)");
+    }
+
+    #[test]
+    fn extend_matches_figure_f12() {
+        // t=1: v=0 → −1, v=1 → 1.
+        assert_eq!(extend(0, 1), -1);
+        assert_eq!(extend(1, 1), 1);
+        // t=3: v in 0..3 map to −7..−4, v in 4..7 map to 4..7.
+        assert_eq!(extend(0, 3), -7);
+        assert_eq!(extend(3, 3), -4);
+        assert_eq!(extend(4, 3), 4);
+        assert_eq!(extend(7, 3), 7);
     }
 
     #[test]
@@ -467,6 +534,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dectable_fused_agrees_with_the_walk_and_extend_on_every_window() {
+        // `DecTable::from_bits`'s fused table is the Figure F.16 walk followed by `RECEIVE` and
+        // `EXTEND` (Figures F.17, F.12), tabulated: for every 16-bit window, a non-zero entry for its
+        // 9-bit prefix holds exactly the walk's (length, symbol) and the extended magnitude bits
+        // after the code, and a zero entry is exactly a window whose code and magnitude together
+        // overrun the prefix. Luma AC 0x71 (length 8, size 1) is the case that fills all nine
+        // bits; luma DC category 6 (length 4, size 6) one that overruns them; EOB a size of zero.
+        let every_length = ([1u8; 16], (1..=16).collect::<Vec<u8>>());
+        let tables = [&STD_LUMA_DC, &STD_CHROMA_DC, &STD_LUMA_AC, &STD_CHROMA_AC]
+            .map(|s| (s.bits, s.values.to_vec()))
+            .into_iter()
+            .chain([every_length]);
+        let mut fills_the_prefix = false;
+        for (bits, values) in tables {
+            let dec = DecTable::from_bits(&bits, &values).unwrap();
+            for window in 0..=u16::MAX {
+                let window = u32::from(window);
+                let entry = dec.fused(window >> (16 - LOOKAHEAD));
+                match dec.walk(window) {
+                    (length, Ok(symbol)) if length + u32::from(symbol & 0x0F) <= LOOKAHEAD => {
+                        let size = symbol & 0x0F;
+                        let value = if size == 0 {
+                            0
+                        } else {
+                            let rest = window >> (16 - length - u32::from(size));
+                            extend(rest & ((1 << size) - 1), size)
+                        };
+                        fills_the_prefix |= length + u32::from(size) == LOOKAHEAD;
+                        let got = (entry & 0xFF, (entry >> 8) & 0xFF, entry >> 16);
+                        assert_eq!(got, (length as i32, i32::from(symbol), value));
+                    }
+                    _ => assert_eq!(entry, 0, "window {window:#06x}"),
+                }
+            }
+        }
+        assert!(fills_the_prefix);
     }
 
     #[test]
