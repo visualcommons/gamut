@@ -160,6 +160,35 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_tile_size_prefix_little_endian_across_bytes() {
+        // `tile_size_minus_1` is `le(TileSizeBytes)` (§5.11.1, §4.10.4): 299 = 0x012b codes as
+        // `2b 01`, so the second byte is worth 256. Every other fixture fits in its first byte,
+        // where the shift by `8 * i` is a shift by zero.
+        let mut info = two_column_grid();
+        info.tile_size_bytes = 2;
+        let first = vec![0x5a_u8; 300];
+        let second: &[u8] = &[1, 2];
+        let bytes = payload(&info, &[&first, second]);
+        assert_eq!(&bytes[1..3], &[0x2b, 0x01]);
+
+        let tiles = split_tiles(&bytes, &info).unwrap();
+        assert_eq!(tiles[0].len(), 300);
+        assert_eq!(tiles[1], second);
+    }
+
+    #[test]
+    fn a_complete_size_field_with_no_tile_after_it_overruns_the_payload() {
+        // The payload holds exactly the 4-byte size field and nothing else: the field itself is
+        // whole, so what is wrong is the tile it promises, not the field.
+        let info = two_column_grid();
+        let bytes = [0u8, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(
+            split_tiles(&bytes, &info).unwrap_err().static_message(),
+            Some("AV1 tile group: tile size runs past the end of the payload")
+        );
+    }
+
+    #[test]
     fn a_single_tile_group_codes_no_flag_and_no_size() {
         let info = single_tile_grid();
         let only: &[u8] = &[0xaa, 0xbb, 0xcc];
