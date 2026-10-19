@@ -1986,6 +1986,36 @@ mod tests {
     }
 
     #[test]
+    fn context_update_tile_id_must_name_a_tile_of_the_grid() {
+        // §6.8.14: `context_update_tile_id` must be less than `TileCols * TileRows`. Three
+        // columns code it in `TileColsLog2 = 2` bits, so id 3 is codable but names no tile —
+        // and is still below `TileCols + TileRows = 4`.
+        let still = crate::decode::testutil::StillBuilder {
+            width: 256,
+            width_bits: 8,
+            explicit_tiles: Some((&[1, 1, 2], &[1])),
+            context_update_tile_id: 2,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.tile_info.tile_cols, 3);
+        assert_eq!(fh.tile_info.context_update_tile_id, 2);
+
+        let past = crate::decode::testutil::StillBuilder {
+            context_update_tile_id: 3,
+            ..still
+        };
+        let seq = SequenceHeader::parse(&past.sequence_header()).unwrap();
+        let payload = past.frame_obu();
+        assert_eq!(
+            FrameHeader::parse(&mut BitReader::new(&payload), &seq)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 tile_info: context_update_tile_id is out of range")
+        );
+    }
+
+    #[test]
     fn rejects_a_truncated_frame_header() {
         let cfg = crate::decode::testutil::still_config(64, 64, Av1Colour::default());
         let seq_payload = crate::headers::sequence_header_payload(&cfg, 64, 64, true, false);

@@ -449,6 +449,9 @@ pub(crate) mod testutil {
         pub tile_cols_log2: u32,
         /// See [`tile_cols_log2`](Self::tile_cols_log2).
         pub tile_rows_log2: u32,
+        /// `context_update_tile_id`, coded in `TileRowsLog2 + TileColsLog2` bits whenever the
+        /// grid has more than one tile. It may name a tile past the grid, which the parser refuses.
+        pub context_update_tile_id: u32,
         /// Explicit tile sizes in superblocks as `(per column, per row)`, coding
         /// `uniform_tile_spacing_flag = 0` and an `ns()` size for every tile. `None` codes the
         /// uniform branch from [`tile_cols_log2`](Self::tile_cols_log2) /
@@ -511,6 +514,7 @@ pub(crate) mod testutil {
                 render_size: None,
                 tile_cols_log2: 0,
                 tile_rows_log2: 0,
+                context_update_tile_id: 0,
                 explicit_tiles: None,
                 enable_cdef: false,
                 cdef_bits: 0,
@@ -944,7 +948,7 @@ pub(crate) mod testutil {
                 let cols_log2 = tile_log2(1, cols.len() as u32);
                 let rows_log2 = tile_log2(1, rows.len() as u32);
                 if cols_log2 > 0 || rows_log2 > 0 {
-                    w.put_bits(0, rows_log2 + cols_log2); // context_update_tile_id
+                    w.put_bits(self.context_update_tile_id, rows_log2 + cols_log2);
                     w.put_bits(0, 2); // tile_size_bytes_minus_1 => TileSizeBytes = 1
                 }
                 return;
@@ -971,7 +975,7 @@ pub(crate) mod testutil {
                 rows_log2 += 1;
             }
             if cols_log2 > 0 || rows_log2 > 0 {
-                w.put_bits(0, rows_log2 + cols_log2); // context_update_tile_id
+                w.put_bits(self.context_update_tile_id, rows_log2 + cols_log2);
                 w.put_bits(0, 2); // tile_size_bytes_minus_1 => TileSizeBytes = 1
             }
         }
