@@ -357,10 +357,10 @@ pub(crate) fn deblock(
         // Pass 0: vertical edges. Each on-screen edge (column x = 4, 8, … inside the frame) filters
         // the four sample rows of its MI block, when the column is a transform-block edge. The whole
         // pass must finish before the horizontal pass, which reads the vertical-filtered samples.
-        let mut x = 4;
-        while x < width {
-            let mut y = 0;
-            while y < height {
+        // Both passes walk ranges of the plane rather than advancing a cursor by their own
+        // arithmetic, which a mutated bound or step turned into a loop that never ends (#908).
+        for x in (4..width).step_by(4) {
+            for y in (0..height).step_by(4) {
                 let (col, row) = g.deblock_mi(x, y);
                 let txw = 1usize << txlog2(row * mi_cols + col);
                 if x % txw == 0 {
@@ -376,16 +376,12 @@ pub(crate) fn deblock(
                         filter_sample(plane, (y + i) * coded_w + x, 1, filter_size, is_luma, st);
                     }
                 }
-                y += 4;
             }
-            x += 4;
         }
         // Pass 1: horizontal edges (row y = 4, 8, … inside the frame), filtering the four columns of
         // each MI block when the row is a transform-block edge.
-        let mut y = 4;
-        while y < height {
-            let mut x = 0;
-            while x < width {
+        for y in (4..height).step_by(4) {
+            for x in (0..width).step_by(4) {
                 let (col, row) = g.deblock_mi(x, y);
                 let txh = 1usize << txlog2_h(row * mi_cols + col);
                 if y % txh == 0 {
@@ -405,9 +401,7 @@ pub(crate) fn deblock(
                         );
                     }
                 }
-                x += 4;
             }
-            y += 4;
         }
     }
 }
@@ -920,14 +914,11 @@ pub(crate) fn loop_restore_wiener_luma(
             })
             .collect()
     };
-    let mut st = 0usize;
-    while st < height {
-        let stripe_h = if st == 0 {
-            56.min(height)
-        } else {
-            64.min(height - st)
-        };
-        let se = st + stripe_h;
+    // The stripes start at row 0, 56, 120, … — the first is 8 rows short of the 64 — and the walk
+    // is over those starts rather than advanced by its own arithmetic: a stripe end that failed to
+    // move past its start would otherwise spin forever (#908).
+    for st in core::iter::once(0).chain((56..height).step_by(64)) {
+        let se = if st == 0 { 56 } else { st + 64 }.min(height);
         // Horizontal-filter the band of rows the vertical 7-tap spans: `st-3 ..= se+2`, each picking
         // its source (post-CDEF interior, deblocked boundary, or replicated edge).
         let band: Vec<Vec<i32>> = ((st as isize - 3)..=(se as isize + 2))
@@ -960,7 +951,6 @@ pub(crate) fn loop_restore_wiener_luma(
                     gamut_color::clip_pixel((sum + v_round) >> round1, bit_depth);
             }
         }
-        st = se;
     }
 }
 
