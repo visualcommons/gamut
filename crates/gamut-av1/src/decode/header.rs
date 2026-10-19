@@ -676,12 +676,9 @@ impl FrameHeader {
 
         let tile_cols = mi_col_starts.len() - 1;
         let tile_rows = mi_row_starts.len() - 1;
-        if tile_cols == 0 || tile_rows == 0 {
-            return Err(Error::invalid_input(
-                ORIGIN,
-                "AV1 tile_info: frame has no tiles",
-            ));
-        }
+        // Both are at least 1 by construction: `mi_cols`/`mi_rows` are at least 2 for a frame of
+        // at least one sample, so `sb_cols`/`sb_rows` are at least 1 and each start loop above
+        // pushes at least one start before its end.
 
         let (context_update_tile_id, tile_size_bytes) = if tile_cols_log2 > 0 || tile_rows_log2 > 0
         {
@@ -767,7 +764,7 @@ impl FrameHeader {
         let mut params = SegmentationParams {
             enabled: true,
             update_map: true,
-            temporal_update: false,
+            // `segmentation_temporal_update` is inferred 0, which `disabled()` already holds.
             ..SegmentationParams::disabled()
         };
         for segment in 0..MAX_SEGMENTS {
@@ -1881,6 +1878,141 @@ mod tests {
         assert_eq!(seq.color.subsampling, Subsampling::Yuv420);
         assert!(seq.film_grain_params_present);
         assert!(fh.apply_grain);
+    }
+
+    #[test]
+    fn film_grain_codes_the_chroma_points_for_4_2_2_grain_without_luma_points() {
+        // The §5.9.30 chroma-point exemption needs `subsampling_x`, `subsampling_y` *and*
+        // `num_y_points == 0`. 4:2:2 with no luma points fails only the `subsampling_y` term, so
+        // the counts and their multiplier triples are still coded.
+        let still = crate::decode::testutil::StillBuilder {
+            colour: crate::decode::testutil::BuilderColour::Yuv422,
+            film_grain: Some(crate::decode::testutil::GrainSpec {
+                num_y_points: 0,
+                chroma_scaling_from_luma: false,
+                num_cb_points: 1,
+                num_cr_points: 2,
+                ar_coeff_lag: 1,
+            }),
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (seq, fh) = parse_built(&still);
+        assert_eq!(seq.color.subsampling, Subsampling::Yuv422);
+        assert!(fh.apply_grain);
+    }
+
+    #[test]
+    fn a_monochrome_frame_codes_no_chroma_quantizer_deltas() {
+        // §5.9.12 codes the U (and V) `delta_coded` flags only when NumPlanes > 1. Zero luma
+        // filter levels keep `loop_filter_params()` from coding any chroma level either way.
+        let still = crate::decode::testutil::StillBuilder {
+            colour: crate::decode::testutil::BuilderColour::Monochrome,
+            base_q_idx: 128,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (seq, fh) = parse_built(&still);
+        assert_eq!(seq.color.subsampling, Subsampling::Monochrome);
+        assert_eq!(fh.quant.base_q_idx, 128);
+    }
+
+    #[test]
+    fn a_monochrome_frame_codes_no_chroma_filter_levels() {
+        // §5.9.11 codes `loop_filter_level[2]` and `[3]` only when NumPlanes > 1, whatever the
+        // luma levels are.
+        let still = crate::decode::testutil::StillBuilder {
+            colour: crate::decode::testutil::BuilderColour::Monochrome,
+            base_q_idx: 128,
+            loop_filter_level: [5, 9, 17, 34],
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.loop_filter.level, [5, 9, 0, 0]);
+    }
+
+    #[test]
+    fn cdef_params_code_one_strength_set_per_cdef_bits_value() {
+        // §5.9.19 reads `1 << cdef_bits` strength sets. Every other fixture has `cdef_bits = 0`,
+        // where one set is read whatever the shift does.
+        let still = crate::decode::testutil::StillBuilder {
+            base_q_idx: 128,
+            enable_cdef: true,
+            cdef_bits: 1,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.cdef.bits, 1);
+        assert_eq!(fh.cdef.y_pri[..2], [1, 2]);
+        assert_eq!(fh.cdef.uv_pri[..2], [1, 2]);
+    }
+
+    #[test]
+    fn lr_unit_size_under_128x128_superblocks_adds_the_implicit_shift() {
+        // §5.9.20: with `use_128x128_superblock` the coded `lr_unit_shift` is incremented, so a
+        // coded 0 is a shift of 1 and `LoopRestorationSize` is 256 >> (2 - 1) = 128. Every other
+        // fixture codes a shift of 2, where `>> 0` and `<< 0` agree.
+        let still = crate::decode::testutil::StillBuilder {
+            use_128x128_superblock: true,
+            base_q_idx: 128,
+            enable_restoration: true,
+            lr: crate::decode::testutil::LrSpec {
+                types: [2, 0, 0],
+                unit_shift: 1,
+                uv_shift: 0,
+            },
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.lr.loop_restoration_size, [128; 3]);
+    }
+
+    #[test]
+    fn tile_info_bounds_explicit_rows_by_the_frame_area_below_the_tile_limit() {
+        // §5.9.15's explicit branch with `minLog2Tiles == 0` takes the whole `sbRows * sbCols`
+        // as `maxTileAreaSb`. A 256x256 frame is 4x4 superblocks; one column 4 wide leaves
+        // `maxTileHeightSb = 16 / 4 = 4`, so a single 4-superblock row is coded against `ns(4)`.
+        // Halving the area, or adding instead of multiplying, gives a cap of 2 and a narrower
+        // `ns()`.
+        let still = crate::decode::testutil::StillBuilder {
+            width: 256,
+            height: 256,
+            width_bits: 8,
+            height_bits: 8,
+            explicit_tiles: Some((&[4], &[4])),
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.tile_info.tile_rows, 1);
+        assert_eq!(fh.tile_info.mi_row_starts, [0, 64]);
+    }
+
+    #[test]
+    fn context_update_tile_id_must_name_a_tile_of_the_grid() {
+        // §6.8.14: `context_update_tile_id` must be less than `TileCols * TileRows`. Three
+        // columns code it in `TileColsLog2 = 2` bits, so id 3 is codable but names no tile —
+        // and is still below `TileCols + TileRows = 4`.
+        let still = crate::decode::testutil::StillBuilder {
+            width: 256,
+            width_bits: 8,
+            explicit_tiles: Some((&[1, 1, 2], &[1])),
+            context_update_tile_id: 2,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.tile_info.tile_cols, 3);
+        assert_eq!(fh.tile_info.context_update_tile_id, 2);
+
+        let past = crate::decode::testutil::StillBuilder {
+            context_update_tile_id: 3,
+            ..still
+        };
+        let seq = SequenceHeader::parse(&past.sequence_header()).unwrap();
+        let payload = past.frame_obu();
+        assert_eq!(
+            FrameHeader::parse(&mut BitReader::new(&payload), &seq)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 tile_info: context_update_tile_id is out of range")
+        );
     }
 
     #[test]
