@@ -2345,10 +2345,12 @@ impl<'a> FrameEncoder<'a> {
         let base_x = (c >> g.ss_x) * 4;
         let base_y = (r >> g.ss_y) * 4;
         let (mut sse, mut rate) = (0, 0);
-        let mut sy = base_y;
-        while sy < base_y + rh {
-            let mut sx = base_x;
-            while sx < base_x + rw {
+        // The transform grid is walked as ranges stepped by the transform size, not as cursors
+        // advanced by it: a cursor loop (`while sy < … { …; sy += ph }`) never ends if the step
+        // is 0, which a mutated `TxSize::height`/`width` produced as a suite TIMEOUT (#910);
+        // `step_by(0)` panics instead. The rewrite also removes the cursor's `<`/`+=` mutants.
+        for sy in (base_y..base_y + rh).step_by(ph) {
+            for sx in (base_x..base_x + rw).step_by(pw) {
                 if sx < g.coded_w && sy < g.coded_h {
                     let (d, r) =
                         self.transform_block(plane, sx, sy, rw, rh, ptx, pred, skip, coding);
@@ -2358,22 +2360,20 @@ impl<'a> FrameEncoder<'a> {
                 // BlockDecoded (§5.11.34) is updated after each *transform* block (not the whole
                 // block), so a later luma sub-transform's directional prediction sees the
                 // above-right / below-left siblings just reconstructed. Luma-grid only (chroma is
-                // never directional); marked on the luma pass.
+                // never directional); marked on the luma pass. The block lies inside its
+                // superblock and a luma transform inside its block, so every cell is in `0..16`
+                // of the superblock: no bounds guard, which held for every block and so left its
+                // `&&` → `||` mutant equivalent (#910).
                 if plane == 0 {
                     for ty in 0..ph / 4 {
                         for tx in 0..pw / 4 {
-                            let by = (sy / 4 + ty) as isize - self.sb_r as isize;
-                            let bx = (sx / 4 + tx) as isize - self.sb_c as isize;
-                            if (0..16).contains(&by) && (0..16).contains(&bx) {
-                                self.block_decoded
-                                    [(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
-                            }
+                            let by = sy / 4 + ty - self.sb_r;
+                            let bx = sx / 4 + tx - self.sb_c;
+                            self.block_decoded[(by + 1) * BD_STRIDE + bx + 1] = 1;
                         }
                     }
                 }
-                sx += pw;
             }
-            sy += ph;
         }
         (sse, rate)
     }
