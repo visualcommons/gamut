@@ -1024,12 +1024,15 @@ const fn remap_sec_strength(coded: u8) -> u8 {
 }
 
 /// `tile_log2( blkSize, target )` (§5.9.16): the smallest `k` with `blkSize << k >= target`.
+///
+/// `blkSize << k >= target` is `1 << k >= ceil(target / blkSize)`, so `k` is the exponent of the
+/// next power of two at or above that quotient — computed directly, as the encoder's twin in
+/// `crate::headers` is, rather than by the spec's counting loop: its `k += 1` → `k *= 1` mutant
+/// never advances `k` from 0 and spun until the gate's timeout (#914). Every caller passes a
+/// `blkSize` of at least 1 (`1`, `maxTileWidthSb`, or `maxTileAreaSb`, both §3 constants shifted
+/// by at most `2 * 7`).
 pub(crate) fn tile_log2(blk_size: u32, target: u32) -> u32 {
-    let mut k = 0;
-    while (blk_size << k) < target {
-        k += 1;
-    }
-    k
+    target.div_ceil(blk_size).next_power_of_two().trailing_zeros()
 }
 
 /// `get_qindex( 1, segmentId )` (§7.12.2) — the `ignoreDeltaQ` form the header's `CodedLossless`
@@ -1624,6 +1627,11 @@ mod tests {
         assert_eq!(tile_log2(1, 5), 3);
         assert_eq!(tile_log2(64, 64), 0);
         assert_eq!(tile_log2(64, 65), 1);
+        assert_eq!(tile_log2(64, 256), 2);
+        // `maxTileAreaSb` for 64x64 superblocks against a frame area just either side of a
+        // doubling.
+        assert_eq!(tile_log2(2304, 4608), 1);
+        assert_eq!(tile_log2(2304, 4609), 2);
     }
 
     #[test]
@@ -1943,6 +1951,24 @@ mod tests {
         assert_eq!(fh.cdef.bits, 1);
         assert_eq!(fh.cdef.y_pri[..2], [1, 2]);
         assert_eq!(fh.cdef.uv_pri[..2], [1, 2]);
+    }
+
+    #[test]
+    fn a_monochrome_frame_codes_no_chroma_cdef_strengths() {
+        // §5.9.19 codes `cdef_uv_pri_strength` / `cdef_uv_sec_strength` only when NumPlanes > 1.
+        // Two strength sets put a luma strength after the first set, so reading chroma strengths
+        // for the one plane would misplace it as well as overrun the header.
+        let still = crate::decode::testutil::StillBuilder {
+            colour: crate::decode::testutil::BuilderColour::Monochrome,
+            base_q_idx: 128,
+            enable_cdef: true,
+            cdef_bits: 1,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (seq, fh) = parse_built(&still);
+        assert_eq!(seq.color.subsampling, Subsampling::Monochrome);
+        assert_eq!(fh.cdef.y_pri[..2], [1, 2]);
+        assert_eq!(fh.cdef.uv_pri, [0; 8]);
     }
 
     #[test]
