@@ -1032,7 +1032,10 @@ const fn remap_sec_strength(coded: u8) -> u8 {
 /// `blkSize` of at least 1 (`1`, `maxTileWidthSb`, or `maxTileAreaSb`, both §3 constants shifted
 /// by at most `2 * 7`).
 pub(crate) fn tile_log2(blk_size: u32, target: u32) -> u32 {
-    target.div_ceil(blk_size).next_power_of_two().trailing_zeros()
+    target
+        .div_ceil(blk_size)
+        .next_power_of_two()
+        .trailing_zeros()
 }
 
 /// `get_qindex( 1, segmentId )` (§7.12.2) — the `ignoreDeltaQ` form the header's `CodedLossless`
