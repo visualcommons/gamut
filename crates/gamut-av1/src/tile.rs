@@ -2345,10 +2345,12 @@ impl<'a> FrameEncoder<'a> {
         let base_x = (c >> g.ss_x) * 4;
         let base_y = (r >> g.ss_y) * 4;
         let (mut sse, mut rate) = (0, 0);
-        let mut sy = base_y;
-        while sy < base_y + rh {
-            let mut sx = base_x;
-            while sx < base_x + rw {
+        // The transform grid is walked as ranges stepped by the transform size, not as cursors
+        // advanced by it: a cursor loop (`while sy < … { …; sy += ph }`) never ends if the step
+        // is 0, which a mutated `TxSize::height`/`width` produced as a suite TIMEOUT (#910);
+        // `step_by(0)` panics instead. The rewrite also removes the cursor's `<`/`+=` mutants.
+        for sy in (base_y..base_y + rh).step_by(ph) {
+            for sx in (base_x..base_x + rw).step_by(pw) {
                 if sx < g.coded_w && sy < g.coded_h {
                     let (d, r) =
                         self.transform_block(plane, sx, sy, rw, rh, ptx, pred, skip, coding);
@@ -2371,9 +2373,7 @@ impl<'a> FrameEncoder<'a> {
                         }
                     }
                 }
-                sx += pw;
             }
-            sy += ph;
         }
         (sse, rate)
     }
