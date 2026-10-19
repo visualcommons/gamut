@@ -2360,16 +2360,16 @@ impl<'a> FrameEncoder<'a> {
                 // BlockDecoded (§5.11.34) is updated after each *transform* block (not the whole
                 // block), so a later luma sub-transform's directional prediction sees the
                 // above-right / below-left siblings just reconstructed. Luma-grid only (chroma is
-                // never directional); marked on the luma pass.
+                // never directional); marked on the luma pass. The block lies inside its
+                // superblock and a luma transform inside its block, so every cell is in `0..16`
+                // of the superblock: no bounds guard, which held for every block and so left its
+                // `&&` → `||` mutant equivalent (#910).
                 if plane == 0 {
                     for ty in 0..ph / 4 {
                         for tx in 0..pw / 4 {
-                            let by = (sy / 4 + ty) as isize - self.sb_r as isize;
-                            let bx = (sx / 4 + tx) as isize - self.sb_c as isize;
-                            if (0..16).contains(&by) && (0..16).contains(&bx) {
-                                self.block_decoded
-                                    [(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
-                            }
+                            let by = sy / 4 + ty - self.sb_r;
+                            let bx = sx / 4 + tx - self.sb_c;
+                            self.block_decoded[(by + 1) * BD_STRIDE + bx + 1] = 1;
                         }
                     }
                 }
