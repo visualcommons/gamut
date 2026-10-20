@@ -935,6 +935,35 @@ fn restoration_unit_rows_are_each_signalled_once_in_both_decoders() {
 }
 
 #[test]
+fn restoration_units_of_a_grid_are_signalled_in_raster_order_in_both_decoders() {
+    // Two units by two (512 / 256 each way). The top row is the smooth field, which restoration
+    // helps; the bottom row is light noise over a ramp, which it does not. So the bottom row's
+    // decisions differ from the top row's, and a unit read at any index but `row * cols + col`
+    // codes a `use_wiener` the reconstruction did not apply.
+    let field = |x: u32, y: u32| {
+        if y < 256 {
+            smooth_field(x, y)
+        } else {
+            let v = (100 + x / 4 + (x * 7 + y * 13) % 9) as u8;
+            [v, v, v]
+        }
+    };
+    let (still, recon) = encode_still_intra_with_speed(
+        &planes(512, 512, field),
+        110,
+        Av1Colour::default(),
+        Speed::Thorough,
+    )
+    .unwrap();
+    let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
+    assert_eq!(
+        header.frame.lr.frame_restoration_type[0],
+        gamut_av1::RestorationType::Wiener
+    );
+    check_with((still, recon), 110);
+}
+
+#[test]
 fn superres_matches_dav1d() {
     // Horizontal superres (§7.16): the source is coded at FrameWidth = UpscaledWidth*8/denom and the
     // reconstruction is upscaled back. dav1d must upscale the coded frame identically — this exercises

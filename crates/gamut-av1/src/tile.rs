@@ -6232,6 +6232,38 @@ mod tests {
     }
 
     #[test]
+    fn reference_4x4_reads_below_left_only_when_that_4x4_is_decoded() {
+        // §5.11.34 `haveBelowLft` asks about the 4×4 one row down and one column left of the
+        // block, and no other: the left and above-left 4×4s (always decoded before it) must not
+        // stand in for it, nor the one below-right (never decoded before it).
+        let planes = Planar8::from_rgb8_identity(&[0u8; 16 * 16 * 3], 16, 16).unwrap();
+        let mut e = FrameEncoder::new(&planes, 40);
+        for (i, v) in e.recon[0].iter_mut().enumerate() {
+            *v = i as u16;
+        }
+        let cw = e.geom[0].coded_w;
+        let at = |x: usize, y: usize| (y * cw + x) as i32;
+        // `BlockDecoded` at superblock-relative 4×4 `(by, bx)`; the block is `(1, 1)`.
+        let mark = |e: &mut FrameEncoder, by: usize, bx: usize, v: u8| {
+            e.block_decoded[(by + 1) * BD_STRIDE + bx + 1] = v;
+        };
+
+        // Left and above-left decoded, below-left not: the 4th sample repeats.
+        mark(&mut e, 1, 0, 1);
+        mark(&mut e, 0, 0, 1);
+        let (_, left, _) = e.reference_4x4(0, 4, 4);
+        assert_eq!(left[4], at(3, 7));
+
+        // Only below-left decoded: its samples are real.
+        mark(&mut e, 1, 0, 0);
+        mark(&mut e, 0, 0, 0);
+        mark(&mut e, 2, 0, 1);
+        let (_, left, _) = e.reference_4x4(0, 4, 4);
+        assert_eq!(left[4], at(3, 8));
+        assert_eq!(left[7], at(3, 11));
+    }
+
+    #[test]
     fn loop_restoration_unit_count_absorbs_a_short_trailing_unit() {
         const UNIT: usize = 256;
         // Below one unit — and at zero — there is still exactly one unit.
