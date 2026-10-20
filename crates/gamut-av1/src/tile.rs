@@ -1811,56 +1811,29 @@ impl<'a> FrameEncoder<'a> {
 
     /// `get_palette_cache` (§5.11.46) for luma: the sorted, deduplicated merge of the above (only
     /// when the block is not at the top of its 64-superblock) and left blocks' palettes.
+    ///
+    /// The spec spells this as a two-cursor merge that skips a colour equal to the last one
+    /// cached. Every palette this encoder stores ascends strictly ([`Self::decide_palette`] builds
+    /// it by sorted insertion of distinct samples), and for two ascending lists that merge is
+    /// exactly the sorted union, so it is computed as one. The cursor form left mutants no input
+    /// could tell apart — `lc < ac` against `<=`, and the spec's `leftIdx` step on equal colours
+    /// against `*=`, both absorbed by the repeat check — and a `+= 1` → `*= 1` on any of its four
+    /// cursors spun the walk until the test timeout.
     fn palette_cache(&self, r: usize, c: usize) -> Vec<u16> {
-        let above_n = if !r.is_multiple_of(16) {
-            self.mi_psize[(r - 1) * self.mi_cols + c] as usize
+        let palette = |i: usize| &self.mi_pcolors[i][..usize::from(self.mi_psize[i])];
+        let above = if !r.is_multiple_of(16) {
+            palette((r - 1) * self.mi_cols + c)
         } else {
-            0
+            &[]
         };
-        let left_n = if c > self.tile_c0 {
-            self.mi_psize[r * self.mi_cols + (c - 1)] as usize
+        let left = if c > self.tile_c0 {
+            palette(r * self.mi_cols + (c - 1))
         } else {
-            0
+            &[]
         };
-        let blank = [0u16; 8];
-        let above = if above_n > 0 {
-            &self.mi_pcolors[(r - 1) * self.mi_cols + c]
-        } else {
-            &blank
-        };
-        let left = if left_n > 0 {
-            &self.mi_pcolors[r * self.mi_cols + (c - 1)]
-        } else {
-            &blank
-        };
-        let mut cache: Vec<u16> = Vec::new();
-        let push = |cache: &mut Vec<u16>, v: u16| {
-            if cache.last() != Some(&v) {
-                cache.push(v);
-            }
-        };
-        let (mut ai, mut li) = (0, 0);
-        while ai < above_n && li < left_n {
-            let (ac, lc) = (above[ai], left[li]);
-            if lc < ac {
-                push(&mut cache, lc);
-                li += 1;
-            } else {
-                push(&mut cache, ac);
-                ai += 1;
-                if lc == ac {
-                    li += 1;
-                }
-            }
-        }
-        while ai < above_n {
-            push(&mut cache, above[ai]);
-            ai += 1;
-        }
-        while li < left_n {
-            push(&mut cache, left[li]);
-            li += 1;
-        }
+        let mut cache: Vec<u16> = above.iter().chain(left).copied().collect();
+        cache.sort_unstable();
+        cache.dedup();
         cache
     }
 
@@ -5195,6 +5168,27 @@ mod tests {
     }
 
     #[test]
+    fn coeff_cdf_prices_each_eob_pt_class_against_the_cdf_it_codes() {
+        // `probs` (the rate a trial pays) and `slot` (what the stream codes) spell the `eob_pt_*`
+        // dispatch twice. Each class's table has its own alphabet size (5 symbols for 16
+        // coefficients up to 11 for 1024), so a class priced against the `_` fallback's table is a
+        // different slice.
+        let mut cdfs = cdf::CdfContext::new(0);
+        for class in 0..=6 {
+            for ptype in 0..2 {
+                let c = CoeffCdf::EobPt(class, ptype);
+                let priced = c.probs(&cdfs).to_vec();
+                assert_eq!(priced.len(), class + 5, "class {class}");
+                assert_eq!(
+                    priced,
+                    c.slot(&mut cdfs).probs(),
+                    "class {class}, ptype {ptype}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cfl_sign_is_the_spec_sign_code() {
         assert_eq!([cfl_sign(0), cfl_sign(-3), cfl_sign(5)], [0, 1, 2]);
     }
@@ -5997,10 +5991,17 @@ mod tests {
         assert_eq!(e.txb_skip_ctx(0, 1, 1, 16, 16, 8, 8), 6);
         // A window whose *guard* arithmetic decides which cells are read: four cells from x4 = 2
         // are all inside the 6-column grid, so the highest level (63, at index 5) must be seen —
-        // a guard computing `x4 * k` would stop early and miss it. Four rows from y4 = 1 reach
+        // a guard computing `x4 * k` would stop early (2 * 3 = 6) and miss it. Every other cell in
+        // the window is at most 3, so missing it moves `top` to 3 and the ladder to rung 5, rather
+        // than leaving a second level above 3 to stand in for it. Four rows from y4 = 1 reach
         // exactly the 4-row edge, so the row guard must stop *before* index 4; `<=` reads one past
         // the end of the array. top = 63 and left = 5, both non-zero and both above 3 ⇒ rung 6.
+        e.above_level[0] = vec![0, 1, 2, 3, 1, 63];
         assert_eq!(e.txb_skip_ctx(0, 2, 1, 32, 32, 16, 16), 6);
+        // The column guard's own edge: four cells from x4 = 3 overhang the 6-column grid by one,
+        // so the guard must stop before index 6 — `<=` reads past the array. Cells 3..=5 give
+        // top = 63, rows 0..=3 give left = 5 ⇒ rung 6.
+        assert_eq!(e.txb_skip_ctx(0, 3, 0, 32, 32, 16, 16), 6);
         let dc = e.dc_sign_ctx(1, 1, 1, 4, 4);
         assert_eq!(dc, 1, "two -1 categories sum negative");
     }
@@ -6018,6 +6019,9 @@ mod tests {
         assert_eq!(e.txb_skip_ctx(1, 0, 0, 8, 8, 4, 4), 10);
         // Luma uses a different ladder entirely, and returns 0 when block == transform.
         assert_eq!(e.txb_skip_ctx(0, 0, 0, 8, 8, 8, 8), 0);
+        // …and only then: a transform matching the block in width alone takes the ladder, whose
+        // first rung (both neighbours zero) is 1.
+        assert_eq!(e.txb_skip_ctx(0, 0, 0, 8, 16, 8, 8), 1);
     }
 
     #[test]
