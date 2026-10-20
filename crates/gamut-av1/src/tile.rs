@@ -45,7 +45,7 @@
 //! from.
 
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::{ChromaSubsampling, Planar8, Planar16, clip_pixel};
@@ -690,6 +690,16 @@ const SUPERRES_NUM: usize = 8;
 /// guard row/column and the `+16` below/right edge ⇒ indices `-1..=16` → 18 entries.
 const BD_STRIDE: usize = 18;
 
+/// `Default_Scan` (§9.2) for every coded coefficient region, `SCANS[i][j]` being `4 << i` wide by
+/// `4 << j` high (a 64-sample transform dimension codes a 32-sample region, §7.13), built once
+/// from [`cdf::default_scan`]. One table for squares and rectangles alike: the hand-transcribed
+/// square tables (`cdf::DEFAULT_SCAN_*`) are what `default_scan` is tested against, and a square
+/// shortcut beside the generator was a choice between two equal answers — four match arms whose
+/// deletion no input could see.
+static SCANS: LazyLock<[[Vec<usize>; 4]; 4]> = LazyLock::new(|| {
+    std::array::from_fn(|i| std::array::from_fn(|j| cdf::default_scan(4 << i, 4 << j)))
+});
+
 /// `Partition_Context` lookup (`dav1d_al_part_ctx[2][N_BL_LEVELS][PARTITION]`, §5.11.4), restricted to
 /// the partition types this encoder emits: `[above|left][block level 0=128…4=8][NONE|HORZ|VERT|SPLIT]`.
 /// After a terminal partition, the block's MI cells take these context bytes; a later block reads bit
@@ -989,9 +999,11 @@ impl<'a> FrameEncoder<'a> {
                 let replayed = replayed.unwrap_or_default();
                 self.decided = replayed.blocks;
                 self.decided_partitions = replayed.partitions;
-                if self.qindex > 0 {
-                    self.write_lr(r, c);
-                }
+                // A lossless frame never has `Self::lr` set (only the lossy path in `encoder.rs`
+                // re-codes with restoration units), so `write_lr` codes nothing for it; a
+                // `qindex > 0` guard here would be a second copy of that fact, and an equivalent
+                // `>` → `>=` mutant.
+                self.write_lr(r, c);
                 self.encode_partition(r, c, 64);
                 self.record[sb] = std::mem::take(&mut self.sb_decisions);
             }
@@ -1693,7 +1705,8 @@ impl<'a> FrameEncoder<'a> {
         let abs = delta.unsigned_abs() as usize;
         self.sym.encode(abs, self.cdfs.delta_lf.slot());
         if abs > 0 {
-            self.sym.encode_literal(u32::from(delta < 0), 1); // delta_lf_sign_bit
+            // delta_lf_sign_bit: `delta` is 0 or 1, never negative, so the sign is always 0.
+            self.sym.encode_literal(0, 1);
         }
         self.current_dlf = (self.current_dlf + delta).clamp(-63, 63);
     }
@@ -2167,10 +2180,7 @@ impl<'a> FrameEncoder<'a> {
         // (Palette is only *chosen* for ≤32 — `palette` is `None` at 64 — but the flag is still coded.)
         if self.qindex > 0 && (8..=64).contains(&bw) {
             if y_mode == DC_PRED {
-                let bctx = bw.trailing_zeros() as usize + bh.trailing_zeros() as usize - 6; // Mi_W_Log2 + Mi_H_Log2 - 2
-                let above = r > self.tile_r0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
-                let left = c > self.tile_c0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
-                let pctx = usize::from(above) + usize::from(left);
+                let (bctx, pctx) = self.palette_y_ctx(r, c, bw, bh);
                 self.sym.encode(
                     usize::from(palette.is_some()),
                     self.cdfs.palette_y_mode[bctx][pctx].slot(),
@@ -2449,9 +2459,9 @@ impl<'a> FrameEncoder<'a> {
     /// Puts back what [`Self::save_plane`] captured.
     fn restore_plane(&mut self, s: PlaneState) {
         let p = s.plane;
-        if s.w > 0 {
-            self.store_recon(p, s.x0, s.y0, s.w, &s.recon);
-        }
+        // `s.w` is never 0: a block's top-left MI lies inside the frame, so `x0 < coded_w` on
+        // every plane the frame codes, and `rw` is at least 4.
+        self.store_recon(p, s.x0, s.y0, s.w, &s.recon);
         let (x4, y4) = (s.x0 / 4, s.y0 / 4);
         self.above_level[p][x4..x4 + s.above_level.len()].copy_from_slice(&s.above_level);
         self.above_dc[p][x4..x4 + s.above_dc.len()].copy_from_slice(&s.above_dc);
@@ -3196,11 +3206,11 @@ impl<'a> FrameEncoder<'a> {
         let mut pred = vec![0i32; n * n];
         for i in 0..n as i32 {
             for j in 0..n as i32 {
-                let v = if p_angle == 90 {
-                    above[j as usize]
-                } else if p_angle == 180 {
-                    left[i as usize]
-                } else if p_angle < 90 {
+                // The branches run in angle order, each cardinal angle between the two zones it
+                // separates, so no comparison overlaps an earlier branch: a `<` → `<=` on either
+                // zone bound sends its cardinal angle into the zone, which indexes
+                // `Dr_Intra_Derivative[90]`, one past the table.
+                let v = if p_angle < 90 {
                     // Zone 1: ray sweeps the above row (extended to the above-right).
                     let dx = cdf::DR_INTRA_DERIVATIVE[p_angle as usize];
                     let idx = (i + 1) * dx;
@@ -3215,6 +3225,8 @@ impl<'a> FrameEncoder<'a> {
                     } else {
                         above[max_base_x as usize]
                     }
+                } else if p_angle == 90 {
+                    above[j as usize]
                 } else if p_angle < 180 {
                     // Zone 2: ray sweeps the above row, falling back to the left column past the top.
                     let dx = cdf::DR_INTRA_DERIVATIVE[(180 - p_angle) as usize];
@@ -3230,6 +3242,8 @@ impl<'a> FrameEncoder<'a> {
                         let shift = (idx2 >> 1) & 0x1F;
                         (left_col(base2) * (32 - shift) + left_col(base2 + 1) * shift + 16) >> 5
                     }
+                } else if p_angle == 180 {
+                    left[i as usize]
                 } else {
                     // Zone 3: ray sweeps the left column (extended to the below-left).
                     let dy = cdf::DR_INTRA_DERIVATIVE[(270 - p_angle) as usize];
@@ -3429,6 +3443,18 @@ impl<'a> FrameEncoder<'a> {
         out
     }
 
+    /// The `has_palette_y` contexts (§8.3.2) of the `bw × bh` block at MI `(r, c)`: `bsizeCtx =
+    /// Mi_Width_Log2 + Mi_Height_Log2 - 2`, which also keys `palette_size_y_minus_2`, and the
+    /// count of above and left neighbours (within the tile) that carry a luma palette. One
+    /// derivation for both the signalled flag and [`Self::luma_mode_rate`]'s price of it, so the
+    /// rate can only ever be read against the context the stream codes under.
+    fn palette_y_ctx(&self, r: usize, c: usize, bw: usize, bh: usize) -> (usize, usize) {
+        let bctx = bw.trailing_zeros() as usize + bh.trailing_zeros() as usize - 6;
+        let above = r > self.tile_r0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
+        let left = c > self.tile_c0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
+        (bctx, usize::from(above) + usize::from(left))
+    }
+
     /// The rate, in [`RATE_ONE`] units, of signalling `cand` as the luma mode of the lossy
     /// `bw × bh` block at MI `(r, c)` (no palette): `y_mode`, then `angle_delta_y` (directional,
     /// ≥8×8), then for a `DC_PRED` block the `has_palette_y = 0` flag (8×8..64×64) and
@@ -3449,10 +3475,7 @@ impl<'a> FrameEncoder<'a> {
             return rate;
         }
         if (8..=64).contains(&bw) {
-            let bctx = bw.trailing_zeros() as usize + bh.trailing_zeros() as usize - 6;
-            let above = r > self.tile_r0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
-            let left = c > self.tile_c0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
-            let pctx = usize::from(above) + usize::from(left);
+            let (bctx, pctx) = self.palette_y_ctx(r, c, bw, bh);
             rate += symbol_rate(self.cdfs.palette_y_mode[bctx][pctx].probs(), 0);
         }
         if bw <= 32 && bh <= 32 {
@@ -3812,17 +3835,7 @@ impl<'a> FrameEncoder<'a> {
         // scan order and the eob class (by coefficient count) differ.
         let up_sq = w.max(h);
 
-        let rect_scan;
-        let scan: &[usize] = match (w, h) {
-            (4, 4) => &cdf::DEFAULT_SCAN_4X4,
-            (8, 8) => &cdf::DEFAULT_SCAN_8X8,
-            (16, 16) => &cdf::DEFAULT_SCAN_16X16,
-            (32, 32) | (64, 64) => &cdf::DEFAULT_SCAN_32X32, // both code a 32×32 region
-            _ => {
-                rect_scan = cdf::default_scan(code_w, code_h);
-                &rect_scan
-            }
-        };
+        let scan: &[usize] = &SCANS[bwl - 2][code_h.trailing_zeros() as usize - 2];
 
         // `txSzCtx` (§8.3.2): the bounding square's class, which keys the skip/eob/base CDFs.
         // `coeff_br` is capped at TX_32X32 (`Min(txSzCtx, 3)`), so TX_64X64 shares its row.
@@ -4912,6 +4925,25 @@ mod tests {
             px.copy_from_slice(&[((x * 37) ^ (y * 91)) as u8, (x * 13 + y * 7) as u8, 128]);
         }
         Planar8::from_rgb8_identity(&rgb, 64, 64).unwrap()
+    }
+
+    #[test]
+    fn clear_block_decoded_ends_the_above_row_and_left_column_at_the_tile_edge() {
+        // §5.11.3: `BlockDecoded[-1][x]` is set for `x < sbWidth4` and `BlockDecoded[y][-1]` for
+        // `y < sbHeight4`, both counted to the tile's end, so a superblock at a tile's right or
+        // bottom edge sees no above-right or below-left samples in the next tile. A tile edge
+        // inside the 16-MI superblock puts both bounds where a fixture can read either side.
+        let p = busy64();
+        let mut e = FrameEncoder::new(&p, 40);
+        (e.tile_r1, e.tile_c1) = (5, 7);
+        e.clear_block_decoded(0, 0);
+        assert!(e.block_decoded_at(-1, 6), "the tile's last column is above");
+        assert!(
+            !e.block_decoded_at(-1, 7),
+            "the column past the tile is not"
+        );
+        assert!(e.block_decoded_at(4, -1), "the tile's last row is left");
+        assert!(!e.block_decoded_at(5, -1), "the row past the tile is not");
     }
 
     #[test]
