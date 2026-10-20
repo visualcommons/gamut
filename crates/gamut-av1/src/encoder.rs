@@ -1133,6 +1133,34 @@ mod tests {
     }
 
     #[test]
+    fn restoration_units_of_a_grid_are_decided_row_by_row() {
+        // Two units by two (512 / 256 each way): the smooth field above, light noise over a ramp
+        // below. Both top units are restored and neither bottom one is, so a unit read at any row
+        // but its own codes a `use_wiener` the reconstruction did not apply. That difference is
+        // what lets `recon.rs`'s raster-order grid test, which decodes the same frame with both
+        // oracles, tell `row * cols + col` from any other index; this pins it.
+        let frame = coded_frame(
+            &planes(512, 512, |x, y| {
+                if y < 256 {
+                    smooth_field(x, y)
+                } else {
+                    let v = (100 + x / 4 + (x * 7 + y * 13) % 9) as u8;
+                    [v, v, v]
+                }
+            }),
+            110,
+        );
+        assert_eq!(
+            frame.lr,
+            LrUnits {
+                cols: 2,
+                rows: 2,
+                wiener: vec![true, true, false, false],
+            }
+        );
+    }
+
+    #[test]
     fn no_unit_is_restored_where_restoration_does_not_help() {
         // Light noise over a ramp at a fine quantizer: the reconstruction is already close, and
         // the low-pass Wiener filter only blurs the noise away from the source.

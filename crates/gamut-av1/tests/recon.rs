@@ -938,8 +938,10 @@ fn restoration_unit_rows_are_each_signalled_once_in_both_decoders() {
 fn restoration_units_of_a_grid_are_signalled_in_raster_order_in_both_decoders() {
     // Two units by two (512 / 256 each way). The top row is the smooth field, which restoration
     // helps; the bottom row is light noise over a ramp, which it does not. So the bottom row's
-    // decisions differ from the top row's, and a unit read at any index but `row * cols + col`
-    // codes a `use_wiener` the reconstruction did not apply.
+    // decisions differ from the top row's (both top units restored, neither bottom one, pinned by
+    // the encoder's own unit test), and a unit read at any index but `row * cols + col` codes a
+    // `use_wiener` the reconstruction did not apply. That unit test codes the full search, so this
+    // one names `Thorough` to code the same frame.
     let field = |x: u32, y: u32| {
         if y < 256 {
             smooth_field(x, y)
