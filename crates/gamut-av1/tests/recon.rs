@@ -913,6 +913,59 @@ fn restoration_units_decided_one_by_one_match_both_decoders() {
 }
 
 #[test]
+fn restoration_unit_rows_are_each_signalled_once_in_both_decoders() {
+    // The test above turned on its side: 640 rows make three 256-high units, so the superblock
+    // rows at 256 and 320 samples both lie in the second unit's span. §5.11.57 codes a unit at the
+    // superblock row its top falls in, counted from the superblock's first sample row (`r * 4`
+    // over the 256-sample unit), so the second unit is coded at row 256 and not again at 320 —
+    // a row counted any other way codes it twice or never, and both decoders lose sync.
+    let (still, recon) = encode_still_intra_with_speed(
+        &planes(64, 640, |x, y| smooth_field(y, x)),
+        110,
+        Av1Colour::default(),
+        Speed::Thorough,
+    )
+    .unwrap();
+    let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
+    assert_eq!(
+        header.frame.lr.frame_restoration_type[0],
+        gamut_av1::RestorationType::Wiener
+    );
+    check_with((still, recon), 110);
+}
+
+#[test]
+fn restoration_units_of_a_grid_are_signalled_in_raster_order_in_both_decoders() {
+    // Two units by two (512 / 256 each way). The top row is the smooth field, which restoration
+    // helps; the bottom row is light noise over a ramp, which it does not. So the bottom row's
+    // decisions differ from the top row's (both top units restored, neither bottom one, pinned by
+    // the encoder's own unit test), and a unit read at any index but `row * cols + col` codes a
+    // `use_wiener` the reconstruction did not apply. That unit test codes the full search, so this
+    // one names `Thorough` to code the same frame.
+    let field = |x: u32, y: u32| {
+        if y < 256 {
+            smooth_field(x, y)
+        } else {
+            let v = (100 + x / 4 + (x * 7 + y * 13) % 9) as u8;
+            [v, v, v]
+        }
+    };
+    let (still, recon) = encode_still_intra_with_speed(
+        &planes(512, 512, field),
+        110,
+        Av1Colour::default(),
+        Speed::Thorough,
+    )
+    .unwrap();
+    let header = gamut_av1::Av1Decoder::new().inspect(&still.obus).unwrap();
+    assert_eq!(
+        header.frame.lr.frame_restoration_type[0],
+        gamut_av1::RestorationType::Wiener
+    );
+    check_with((still, recon), 110);
+}
+
+#[test]
 fn superres_matches_dav1d() {
     // Horizontal superres (§7.16): the source is coded at FrameWidth = UpscaledWidth*8/denom and the
     // reconstruction is upscaled back. dav1d must upscale the coded frame identically — this exercises

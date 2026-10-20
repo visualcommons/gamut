@@ -2009,9 +2009,9 @@ impl<'a> FrameEncoder<'a> {
         }
         // Per-block quantizer get_qindex(segment) = Clip3(0, 255, CurrentQIndex + alt_q) (§7.12.2):
         // only the dc/ac step sizes follow the segment; `CurrentQIndex` stays the delta-Q accumulator.
-        if self.qindex > 0 {
-            self.apply_seg_quant(segid);
-        }
+        // Unconditional: a lossless frame codes segment 0 (no `SEG_LVL_ALT_Q`) and no `delta_q`
+        // (`delta_q_present` needs `base_q_idx > 0`), so there it sets the frame's own steps again.
+        self.apply_seg_quant(segid);
         // The luma transforms the block may be coded with, each with the rate of signalling it:
         // a square lossy ≥8×8 block chooses its `tx_depth` (0..=`Max_Tx_Depth`, one prediction
         // over `bw >> tx_depth` square transforms), jointly with its mode; a rectangular block
@@ -2577,7 +2577,11 @@ impl<'a> FrameEncoder<'a> {
         // conformant decoder applies it, so the encoder reconstruction must.
         let dq_denom = tx_size.dq_denom();
         let mut dq = vec![0i32; tw * th];
-        if tw == 64 && th == 64 {
+        // The test `quantize_tx` compacts by, so the two layouts agree by construction. TX_64X64 is
+        // the only transform with a 64-sample side this encoder forms (luma rectangles stop at 32,
+        // and `chroma_tx_size` caps chroma at 32), so this is that size's test; a `tw == 64 &&
+        // th == 64` here was equal to `||` on every transform that reaches it.
+        if tw == 64 {
             // Re-expand the 32-stride coded levels into the top-left 32×32 of the 64-stride array the
             // inverse transform reads (the remaining coefficients stay zero).
             for i in 0..32 {
@@ -6203,6 +6207,60 @@ mod tests {
             "past the bottom edge repeats the last row"
         );
         assert_eq!(left[7], at(3, 7));
+    }
+
+    #[test]
+    fn reference_4x4_replicates_its_own_edge_without_above_right_or_below_left() {
+        // §7.11.2: with the above-right (below-left) 4×4 not yet decoded, the above row (left
+        // column) holds the block's own 4 samples and then repeats the 4th; the `- 1` in each
+        // limit is what stops at that 4th. Away from the frame edge, so the plane clamp the test
+        // above pins cannot stand in for it, and with a distinct value per sample.
+        let planes = Planar8::from_rgb8_identity(&[0u8; 16 * 16 * 3], 16, 16).unwrap();
+        let mut e = FrameEncoder::new(&planes, 40);
+        for (i, v) in e.recon[0].iter_mut().enumerate() {
+            *v = i as u16;
+        }
+        let cw = e.geom[0].coded_w;
+        let at = |x: usize, y: usize| (y * cw + x) as i32;
+        assert!(!e.block_decoded_at(0, 2) && !e.block_decoded_at(2, 0));
+
+        let (above, left, _) = e.reference_4x4(0, 4, 4);
+        assert_eq!(above[3], at(7, 3));
+        assert_eq!(above[4], at(7, 3), "no above-right: the 4th sample repeats");
+        assert_eq!(left[3], at(3, 7));
+        assert_eq!(left[4], at(3, 7), "no below-left: the 4th sample repeats");
+    }
+
+    #[test]
+    fn reference_4x4_reads_below_left_only_when_that_4x4_is_decoded() {
+        // §5.11.34 `haveBelowLft` asks about the 4×4 one row down and one column left of the
+        // block, and no other: the left and above-left 4×4s (always decoded before it) must not
+        // stand in for it, nor the one below-right (never decoded before it).
+        let planes = Planar8::from_rgb8_identity(&[0u8; 16 * 16 * 3], 16, 16).unwrap();
+        let mut e = FrameEncoder::new(&planes, 40);
+        for (i, v) in e.recon[0].iter_mut().enumerate() {
+            *v = i as u16;
+        }
+        let cw = e.geom[0].coded_w;
+        let at = |x: usize, y: usize| (y * cw + x) as i32;
+        // `BlockDecoded` at superblock-relative 4×4 `(by, bx)`; the block is `(1, 1)`.
+        let mark = |e: &mut FrameEncoder, by: usize, bx: usize, v: u8| {
+            e.block_decoded[(by + 1) * BD_STRIDE + bx + 1] = v;
+        };
+
+        // Left and above-left decoded, below-left not: the 4th sample repeats.
+        mark(&mut e, 1, 0, 1);
+        mark(&mut e, 0, 0, 1);
+        let (_, left, _) = e.reference_4x4(0, 4, 4);
+        assert_eq!(left[4], at(3, 7));
+
+        // Only below-left decoded: its samples are real.
+        mark(&mut e, 1, 0, 0);
+        mark(&mut e, 0, 0, 0);
+        mark(&mut e, 2, 0, 1);
+        let (_, left, _) = e.reference_4x4(0, 4, 4);
+        assert_eq!(left[4], at(3, 8));
+        assert_eq!(left[7], at(3, 11));
     }
 
     #[test]
