@@ -3886,8 +3886,11 @@ impl<'a> FrameEncoder<'a> {
         sink.symbol(eobpt - 1, CoeffCdf::EobPt(eob_pt_class(area), ptype));
         if eobpt >= 3 {
             let nbits = eobpt - 2;
-            let base_eob_val = (1usize << (eobpt - 2)) + 1;
-            let extra = eob - base_eob_val;
+            // §5.11.39 codes `eob - (1 << nbits) - 1` in `nbits` bits. `eob - 1` lies in
+            // `[1 << nbits, 2 << nbits)`, so it is that value with its top bit set, and the low
+            // `nbits` bits — all that is coded — are the same. Subtracting the top bit as well
+            // would be an operation no coded bit can see.
+            let extra = eob - 1;
             sink.symbol(
                 (extra >> (nbits - 1)) & 1,
                 CoeffCdf::EobExtra(sz, ptype, eobpt - 3),
@@ -3933,7 +3936,7 @@ impl<'a> FrameEncoder<'a> {
         for (c, &pos) in scan.iter().enumerate().take(eob) {
             let level = quant[pos].abs();
             if level != 0 {
-                let neg = quant[pos] < 0;
+                let neg = quant[pos].is_negative();
                 if c == 0 {
                     sink.symbol(usize::from(neg), CoeffCdf::DcSign(ptype, job.dc_ctx));
                 } else {
@@ -3946,12 +3949,11 @@ impl<'a> FrameEncoder<'a> {
         }
 
         let cul = levels.iter().sum::<i32>().min(63) as u8;
-        let dc_cat = if quant[0] == 0 {
-            0
-        } else if quant[0] < 0 {
-            1
-        } else {
-            2
+        // `dcCategory`: one three-way comparison, so no bound overlaps the zero case before it.
+        let dc_cat = match quant[0].cmp(&0) {
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Less => 1,
+            std::cmp::Ordering::Greater => 2,
         };
         (cul, dc_cat)
     }
@@ -4932,11 +4934,12 @@ mod tests {
         // §5.11.3: `BlockDecoded[-1][x]` is set for `x < sbWidth4` and `BlockDecoded[y][-1]` for
         // `y < sbHeight4`, both counted to the tile's end, so a superblock at a tile's right or
         // bottom edge sees no above-right or below-left samples in the next tile. A tile edge
-        // inside the 16-MI superblock puts both bounds where a fixture can read either side.
+        // inside the 16-MI superblock puts both bounds where a fixture can read either side; a
+        // superblock away from the origin makes the bounds differences, not the tile's ends.
         let p = busy64();
         let mut e = FrameEncoder::new(&p, 40);
-        (e.tile_r1, e.tile_c1) = (5, 7);
-        e.clear_block_decoded(0, 0);
+        (e.tile_r1, e.tile_c1) = (16 + 5, 16 + 7);
+        e.clear_block_decoded(16, 16);
         assert!(e.block_decoded_at(-1, 6), "the tile's last column is above");
         assert!(
             !e.block_decoded_at(-1, 7),
@@ -4944,6 +4947,21 @@ mod tests {
         );
         assert!(e.block_decoded_at(4, -1), "the tile's last row is left");
         assert!(!e.block_decoded_at(5, -1), "the row past the tile is not");
+    }
+
+    #[test]
+    fn clear_block_decoded_forces_only_the_below_left_corner_unavailable() {
+        // §5.11.3 then clears `BlockDecoded[sbSize4][-1]`: in a tile that runs on past the
+        // superblock, the left column is available down to row 15 and the corner below it is not.
+        // Every other edge cell, the top-left corner among them, keeps its availability.
+        let p = busy64();
+        let mut e = FrameEncoder::new(&p, 40);
+        (e.tile_r1, e.tile_c1) = (64, 64);
+        e.clear_block_decoded(0, 0);
+        assert!(e.block_decoded_at(-1, -1), "the top-left corner");
+        assert!(e.block_decoded_at(-1, 16), "the above-right corner");
+        assert!(e.block_decoded_at(15, -1), "the left column's last row");
+        assert!(!e.block_decoded_at(16, -1), "the below-left corner");
     }
 
     #[test]
@@ -5286,10 +5304,20 @@ mod tests {
                 + fi_flag(true)
                 + symbol_rate(e.cdfs.filter_intra_mode.probs(), 3)
         );
-        // `DC_PRED` at 64x64 has a palette flag but no filter-intra flag.
+        // Each filter-intra size row is its own CDF: 16x16 does not borrow the 32x32 row.
+        assert_eq!(
+            e.luma_mode_rate(0, 0, 16, 16, DC_LUMA),
+            y(DC_PRED) + no_palette(2) + symbol_rate(e.cdfs.filter_intra_16x16.probs(), 0)
+        );
+        // `DC_PRED` at 64x64 has a palette flag but no filter-intra flag, and neither does a
+        // 64x32: §5.11.24 asks `Max(w, h) <= 32`, so one long side is enough to drop it.
         assert_eq!(
             e.luma_mode_rate(0, 0, 64, 64, DC_LUMA),
             y(DC_PRED) + no_palette(6)
+        );
+        assert_eq!(
+            e.luma_mode_rate(0, 0, 64, 32, DC_LUMA),
+            y(DC_PRED) + no_palette(5)
         );
     }
 
