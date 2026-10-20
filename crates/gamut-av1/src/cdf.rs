@@ -1415,9 +1415,15 @@ pub static COEFF_BR: [[[[u16; 4]; 21]; 2]; 4] = [
 ];
 
 /// `Default_Scan_4x4` (§9.2): up-right diagonal scan order over the 16 positions.
+///
+/// The four square `DEFAULT_SCAN_*` tables are the spec's transcription and the oracle
+/// [`default_scan`] is tested against; the encoder reads every scan, square or not, from that
+/// generator, so the tables are test-only.
+#[cfg(test)]
 pub static DEFAULT_SCAN_4X4: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
 /// `Default_Scan_8x8[64]` (§9.2): the up-right diagonal scan order for an 8×8 transform block.
+#[cfg(test)]
 pub static DEFAULT_SCAN_8X8: [usize; 64] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
     13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
@@ -3164,6 +3170,7 @@ pub static INTRA_TX_TYPE_SET2_16X16: [[u16; 5]; 13] = [
 ];
 
 /// `Default_Scan_16x16` (§9.2): the up-right diagonal scan order for a 16×16 transform block.
+#[cfg(test)]
 pub static DEFAULT_SCAN_16X16: [usize; 256] = [
     0, 1, 16, 32, 17, 2, 3, 18, 33, 48, 64, 49, 34, 19, 4, 5, 20, 35, 50, 65, 80, 96, 81, 66, 51,
     36, 21, 6, 7, 22, 37, 52, 67, 82, 97, 112, 128, 113, 98, 83, 68, 53, 38, 23, 8, 9, 24, 39, 54,
@@ -4008,6 +4015,7 @@ pub static COEFF_BR_32X32: [[[[u16; 4]; 21]; 2]; 4] = [
 ];
 
 /// `Default_Scan_32x32` (§9.2): the up-right diagonal scan order for a 32×32 transform block.
+#[cfg(test)]
 pub static DEFAULT_SCAN_32X32: [usize; 1024] = [
     0, 1, 32, 64, 33, 2, 3, 34, 65, 96, 128, 97, 66, 35, 4, 5, 36, 67, 98, 129, 160, 192, 161, 130,
     99, 68, 37, 6, 7, 38, 69, 100, 131, 162, 193, 224, 256, 225, 194, 163, 132, 101, 70, 39, 8, 9,
