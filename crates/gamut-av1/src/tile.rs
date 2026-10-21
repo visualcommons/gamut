@@ -1333,21 +1333,21 @@ impl<'a> FrameEncoder<'a> {
             self.update_partition_ctx(r, c, bsl, bp);
         }
 
+        // §5.11.4 decodes a HORZ (VERT) partition's second half only `if (hasRows)` (`hasCols`),
+        // but this encoder offers HORZ and VERT only to a region inside the frame
+        // (`encode_partition` forces SPLIT where `block_exceeds_frame`), where both hold; the
+        // guards were deleted with their `<` → `<=` twins, which no region could tell apart.
         match bp {
             usize::MAX | 0 => self.encode_block(r, c, bw, bw),
             1 => {
                 // PARTITION_HORZ: top then bottom half, each `bw × bw/2`.
                 self.encode_block(r, c, bw, bw / 2);
-                if r + half < self.mi_rows {
-                    self.encode_block(r + half, c, bw, bw / 2);
-                }
+                self.encode_block(r + half, c, bw, bw / 2);
             }
             2 => {
                 // PARTITION_VERT: left then right half, each `bw/2 × bw`.
                 self.encode_block(r, c, bw / 2, bw);
-                if c + half < self.mi_cols {
-                    self.encode_block(r, c + half, bw / 2, bw);
-                }
+                self.encode_block(r, c + half, bw / 2, bw);
             }
             _ => {
                 let h = bw / 2;
@@ -2047,8 +2047,36 @@ impl<'a> FrameEncoder<'a> {
                 .position(|d| d.at == (r, c, bw, bh))
                 .map(|i| self.decided.swap_remove(i))
         };
-        let (luma, tx_depth) = if let Some(d) = decided {
-            (d.luma, d.tx_depth)
+        // §5.11.5 `HasChroma`: with subsampled chroma a sub-8x8 block can cover no chroma samples
+        // of its own, and the covering block of its MI group codes chroma for the whole group. Such
+        // a block codes no `uv_mode`, no `cfl_alpha` (§5.11.7) and no chroma residual (§5.11.34).
+        // Always true at 4:4:4, and always false in a monochrome frame — the spec writes the
+        // two parity tests first and then falls through to `HasChroma = NumPlanes > 1`.
+        let block_has_chroma = has_chroma(r, c, bw, bh, self.subsampling);
+        // §6.10.4 is a bitstream-conformance requirement the *partition search* has to respect, so
+        // assert it at the point a block is committed rather than discovering it in the residual
+        // loop. `partitions_offered` is the only thing that can produce a shape that violates it.
+        debug_assert!(
+            !block_has_chroma || self.rect_partition_is_codable(bw, bh),
+            "{bw}x{bh} has no codable chroma residual under {:?}",
+            self.subsampling
+        );
+        // `is_cfl_allowed` is `MiSize == BLOCK_4X4` when Lossless, else `Max(w, h) <= 32` — so CfL
+        // is allowed for the lossy 4×4 to 32×32 blocks and the lossless 4×4 blocks.
+        let cfl_allowed = if self.qindex == 0 {
+            bw == 4
+        } else {
+            bw.max(bh) <= 32
+        };
+        // The chroma-from-luma alphas are chosen with the luma mode, by the branch that searches
+        // one, so a block that searches neither codes plain `DC_PRED` chroma for the reason it
+        // codes `DC_PRED` luma. A separate `match` on `skip` and `HasChroma` left an arm no
+        // fixture could tell from its deletion: a skip block's chroma is flat and exactly
+        // DC-predicted (`block_is_skippable`, `decide_palette`), so plain DC costs no distortion
+        // and CfL could only win on rate, and a block without chroma of its own never codes the
+        // result. The search branch is lossy by construction, so its guard needs no `is_lossy`.
+        let (luma, tx_depth, cfl) = if let Some(d) = decided {
+            (d.luma, d.tx_depth, d.cfl)
         } else if skip || self.qindex == 0 {
             // Palette requires YMode == DC_PRED (and no filter-intra); lossless also forces DC_PRED.
             // A block skipped for being flat and DC-predictable (`block_is_skippable`) takes
@@ -2058,9 +2086,18 @@ impl<'a> FrameEncoder<'a> {
             // With no residual there is nothing for a deeper transform to code either, so a
             // skip block keeps one block-size transform (`tx_depth = 0`), which also leaves the
             // deblocking filter no inner transform edge to cross.
-            (DC_LUMA, 0)
+            (DC_LUMA, 0, None)
         } else {
-            self.select_luma_mode(r, c, bw, bh, &tx_options)
+            let (luma, tx_depth) = self.select_luma_mode(r, c, bw, bh, &tx_options);
+            // The plane loop codes chroma only for a block with chroma of its own, and CfL is
+            // square-only here: a rectangular block's chroma is plain DC_PRED. The pick precedes
+            // `y_mode` and `angle_delta` in the stream, which it neither reads nor prices.
+            let cfl = if cfl_allowed && !is_rect && block_has_chroma {
+                self.select_cfl(r, c, bw, luma, tx_options[tx_depth].0)
+            } else {
+                None
+            };
+            (luma, tx_depth, cfl)
         };
         let luma_tx = tx_options[tx_depth].0;
         let LumaMode {
@@ -2083,39 +2120,6 @@ impl<'a> FrameEncoder<'a> {
                 self.cdfs.angle_delta[(y_mode - V_PRED) as usize].slot(),
             );
         }
-        // uv_mode. Its CDF is indexed by the luma mode. `is_cfl_allowed` is `MiSize == BLOCK_4X4`
-        // when Lossless, else `Max(w, h) <= 32` — so CfL is allowed for the lossy 4×4 and 8×8 blocks
-        // and the lossless 4×4 blocks. When allowed, the encoder picks chroma-from-luma if it beats
-        // plain DC_PRED, then emits read_cfl_alphas; otherwise uv_mode = DC_PRED.
-        // §5.11.5 `HasChroma`: with subsampled chroma a sub-8x8 block can cover no chroma samples
-        // of its own, and the covering block of its MI group codes chroma for the whole group. Such
-        // a block codes no `uv_mode`, no `cfl_alpha` (§5.11.7) and no chroma residual (§5.11.34).
-        // Always true at 4:4:4, and always false in a monochrome frame — the spec writes the
-        // two parity tests first and then falls through to `HasChroma = NumPlanes > 1`.
-        let block_has_chroma = has_chroma(r, c, bw, bh, self.subsampling);
-        // §6.10.4 is a bitstream-conformance requirement the *partition search* has to respect, so
-        // assert it at the point a block is committed rather than discovering it in the residual
-        // loop. `partitions_offered` is the only thing that can produce a shape that violates it.
-        debug_assert!(
-            !block_has_chroma || self.rect_partition_is_codable(bw, bh),
-            "{bw}x{bh} has no codable chroma residual under {:?}",
-            self.subsampling
-        );
-        let cfl_allowed = if self.qindex == 0 {
-            bw == 4
-        } else {
-            bw.max(bh) <= 32
-        };
-        let is_lossy = self.qindex != 0;
-        let cfl = match (decided, block_has_chroma, skip) {
-            (Some(d), ..) => d.cfl,
-            // No chroma of its own (or none in the frame at all), or a skip block — palette or
-            // flat, whose chroma is plain DC_PRED for the reason its luma is.
-            (_, false, _) | (_, _, true) => None,
-            _ if is_lossy && cfl_allowed && !is_rect => self.select_cfl(r, c, bw, luma, luma_tx),
-            // CfL is square-only here; a rectangular block's chroma is plain DC_PRED.
-            _ => None,
-        };
         if !skip {
             let decided = Decided {
                 at: (r, c, bw, bh),
@@ -2130,6 +2134,9 @@ impl<'a> FrameEncoder<'a> {
             }
         }
         let ym = usize::from(y_mode);
+        // uv_mode. Its CDF is indexed by the luma mode. When CfL is allowed, the encoder picks
+        // chroma-from-luma if it beats plain DC_PRED, then emits read_cfl_alphas; otherwise
+        // uv_mode = DC_PRED.
         // §5.11.7 wraps `uv_mode` (and the `read_cfl_alphas` that follows UV_CFL_PRED) in
         // `if (HasChroma)`. A monochrome frame codes neither, and neither does a subsampled
         // sub-8x8 block whose chroma is coded by the covering block of its MI group.
@@ -5329,6 +5336,21 @@ mod tests {
             e.emit_cfl_alphas(au, av);
             assert_eq!(e.sym.tally.take(), Some(want), "({au}, {av})");
         }
+    }
+
+    #[test]
+    fn only_the_lossy_path_allocates_a_reconstruction() {
+        // Lossless prediction reads the source itself (`dc_pred`'s `sample`), so the encoder
+        // keeps no frame-sized reconstruction there; `absorb_tile` relies on the empty planes.
+        let p = grey4x4();
+        assert!(FrameEncoder::new(&p, 0).recon.iter().all(Vec::is_empty));
+        let lossy = FrameEncoder::new(&p, 1);
+        assert!(
+            lossy
+                .recon
+                .iter()
+                .all(|plane| plane.len() == lossy.geom[0].len())
+        );
     }
 
     #[test]
