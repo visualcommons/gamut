@@ -2470,12 +2470,17 @@ impl<'a> FrameEncoder<'a> {
     ) -> (u64, u32) {
         // Lossless: forced 4×4 Walsh–Hadamard, DC prediction, source-as-recon (M0 path, unchanged).
         // Nothing is searched on this path, so it is never trialled.
+        // Every lossless block is `DC_PRED` on every plane (`encode_block` takes `DC_LUMA` there
+        // and chroma is plain DC), so its prediction is one value, subtracted here as such: a 4×4
+        // array of it made any index into it equivalent to any other (a `pred[i + 4 + j]`
+        // survived), so the per-sample index and its operator mutants are gone with the array.
         if self.qindex == 0 {
-            let pred = self.predict_4x4(plane, sx, sy, desc.mode);
+            debug_assert_eq!(desc.mode, DC_PRED, "lossless blocks are DC_PRED");
+            let dc = self.dc_avg(plane, sx, sy);
             let mut res = [0i32; 16];
             for i in 0..4 {
                 for j in 0..4 {
-                    res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - pred[i * 4 + j];
+                    res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - dc;
                 }
             }
             let quant = gamut_dsp::av1::forward_wht4x4(&res);
@@ -5584,6 +5589,34 @@ mod tests {
         let cost = e.trial_cost(0, 0, 8, |e| e.encode_block(0, 0, 8, 8));
         assert!(cost > 0);
         assert!(Snapshot::of(&e) == before, "trial_cost changed the encoder");
+    }
+
+    #[test]
+    fn save_block_captures_the_blocks_cells_clipped_to_the_frame() {
+        // A trial writes only inside its block, so restoring a wider capture puts back values
+        // nothing changed and no trial can tell the two apart; the capture's extent is what
+        // `save_block` owes, and it is asserted on what it returns. 64×64 luma: a 16×16 MI grid.
+        let p = busy64();
+        let e = FrameEncoder::new(&p, 40);
+        let extent = |s: &BlockState| {
+            (
+                s.w4,
+                s.above_partition.len(),
+                s.left_partition.len(),
+                s.maps[0].len(),
+            )
+        };
+        assert_eq!(extent(&e.save_block(0, 0, 8)), (2, 2, 2, 4), "interior 8×8");
+        assert_eq!(
+            extent(&e.save_block(4, 8, 16)),
+            (4, 4, 4, 16),
+            "interior 16×16"
+        );
+        assert_eq!(
+            extent(&e.save_block(12, 14, 16)),
+            (2, 2, 4, 8),
+            "clipped 16×16"
+        );
     }
 
     /// Everything a trial must leave as it found it, comparable.
