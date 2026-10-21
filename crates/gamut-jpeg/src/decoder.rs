@@ -944,7 +944,6 @@ fn assemble(
     }
     let hmax = usize::from(frame.hmax());
     let vmax = usize::from(frame.vmax());
-    let x = usize::from(frame.x);
     let y = usize::from(frame.y);
 
     let mut comps = Vec::with_capacity(frame.components.len());
@@ -953,12 +952,15 @@ fn assemble(
         let plane = plane.ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: a component was never coded")
         })?;
-        let comp_w = (x * usize::from(fc.h)).div_ceil(hmax);
         let comp_h = (y * usize::from(fc.v)).div_ceil(vmax);
-        // The decoded plane must cover the valid region (a DNL claiming more lines than were coded
-        // would fail here).
+        // The decoded plane must cover the valid region's height (a DNL claiming more lines than
+        // were coded would fail here). Its width needs no check: every plane is as wide as its
+        // scan's block grid, `ceil(ceil(X·h/Hmax) / 8)` blocks or more (`decode_scan`'s `mcus_x`,
+        // `build_prog_comps`), so the valid width `ceil(X·h/Hmax)` never exceeds the stride. The
+        // width test this replaces could not fire; it went because its `X · h` was a mutant (`*` →
+        // `/`) no input distinguishes, and it took that line's two killable siblings with it (#924).
         let padded_rows = plane.data.len().checked_div(plane.stride).unwrap_or(0);
-        if comp_w > plane.stride || comp_h > padded_rows {
+        if comp_h > padded_rows {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: decoded plane smaller than the frame declares",
