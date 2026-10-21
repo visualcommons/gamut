@@ -905,6 +905,19 @@ impl<'a> FrameEncoder<'a> {
         self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] != 0
     }
 
+    /// Marks decoded in `BlockDecoded` (§5.11.34) the `h4`×`w4` luma 4×4s whose top-left is at
+    /// MI `(r, c)`. Both callers mark cells of the current superblock — a luma transform lies in
+    /// its block, a block in its 64×64 superblock — so each cell is in `0..16` of it and needs
+    /// no bounds guard: such a guard holds for every block, and its `&&` → `||` is equivalent
+    /// (#910, #922). The index is `usize`, so a cell before the superblock underflows and
+    /// panics. The palette branch of `encode_block` and `code_plane` share it.
+    fn mark_block_decoded(&mut self, r: usize, c: usize, h4: usize, w4: usize) {
+        for by in r - self.sb_r..r - self.sb_r + h4 {
+            let row = (by + 1) * BD_STRIDE + 1 + c - self.sb_c;
+            self.block_decoded[row..row + w4].fill(1);
+        }
+    }
+
     /// Signals the loop-restoration units (§5.11.57 `read_lr`) whose top-left falls in the superblock
     /// at MI `(r, c)`, as [`Self::lr`] decided them: `use_wiener`, and for a restored unit the
     /// default reference filter — every coded coefficient delta is zero. Chroma is `RESTORE_NONE`,
@@ -2254,15 +2267,7 @@ impl<'a> FrameEncoder<'a> {
         // residual, then marks its luma cells decoded so later directional predictions see them.
         if let Some(pal) = palette {
             self.recon_palette(r, c, bw, &pal);
-            for ty in 0..bw / 4 {
-                for tx in 0..bw / 4 {
-                    let by = (r + ty) as isize - self.sb_r as isize;
-                    let bx = (c + tx) as isize - self.sb_c as isize;
-                    if (0..16).contains(&by) && (0..16).contains(&bx) {
-                        self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
-                    }
-                }
-            }
+            self.mark_block_decoded(r, c, bw / 4, bw / 4);
             return;
         }
 
@@ -2350,18 +2355,9 @@ impl<'a> FrameEncoder<'a> {
                 // BlockDecoded (§5.11.34) is updated after each *transform* block (not the whole
                 // block), so a later luma sub-transform's directional prediction sees the
                 // above-right / below-left siblings just reconstructed. Luma-grid only (chroma is
-                // never directional); marked on the luma pass. The block lies inside its
-                // superblock and a luma transform inside its block, so every cell is in `0..16`
-                // of the superblock: no bounds guard, which held for every block and so left its
-                // `&&` → `||` mutant equivalent (#910).
+                // never directional); marked on the luma pass.
                 if plane == 0 {
-                    for ty in 0..ph / 4 {
-                        for tx in 0..pw / 4 {
-                            let by = sy / 4 + ty - self.sb_r;
-                            let bx = sx / 4 + tx - self.sb_c;
-                            self.block_decoded[(by + 1) * BD_STRIDE + bx + 1] = 1;
-                        }
-                    }
+                    self.mark_block_decoded(sy / 4, sx / 4, ph / 4, pw / 4);
                 }
             }
         }
@@ -4961,6 +4957,22 @@ mod tests {
         assert!(e.block_decoded_at(-1, 16), "the above-right corner");
         assert!(e.block_decoded_at(15, -1), "the left column's last row");
         assert!(!e.block_decoded_at(16, -1), "the below-left corner");
+    }
+
+    #[test]
+    fn mark_block_decoded_marks_exactly_its_cells_relative_to_the_superblock() {
+        // A superblock away from the origin makes the MI position differ from the cell, and a
+        // 2×3 run that starts off the superblock's corner makes rows, columns and each extent
+        // distinguishable: the whole map is compared, so a mark anywhere else fails too.
+        let p = busy64();
+        let mut e = FrameEncoder::new(&p, 40);
+        (e.sb_r, e.sb_c) = (16, 16);
+        e.mark_block_decoded(16 + 4, 16 + 2, 2, 3);
+        let marked: Vec<(isize, isize)> = (-1..=16)
+            .flat_map(|by| (-1..=16).map(move |bx| (by, bx)))
+            .filter(|&(by, bx)| e.block_decoded_at(by, bx))
+            .collect();
+        assert_eq!(marked, [(4, 2), (4, 3), (4, 4), (5, 2), (5, 3), (5, 4)]);
     }
 
     #[test]
