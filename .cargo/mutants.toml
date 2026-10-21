@@ -656,29 +656,11 @@ exclude_re = [
     # equivalent. The clamp itself stays, per the never-panic-on-untrusted-input policy.
     'replace - with \+ in DecodedImage::sample',
     'replace - with / in DecodedImage::sample',
-    # gamut-jpeg `refine` (§G.1.2.3 correction) sign test `if coeff > 0`: `refine` is only ever called
-    # on a NON-zero coefficient — both call sites guard `block[nat] != 0` before calling it — so the
-    # only value at which `>` and `>=` disagree (coeff == 0) is unreachable, making `> -> >=` provably
-    # equivalent. (`> -> <` and `> -> ==` flip the correction direction for real inputs and ARE caught
-    # by the successive-approximation test's positive and negative AC coefficients.)
-    "replace > with >= in refine",
-    # gamut-jpeg progressive encoder (`ProgCoder::ac_refine`, §G.1.2.3) — two provably-non-observable
-    # mutants, line/column-anchored so each matches EXACTLY its mutant and leaves the sibling operators
-    # (the abs==0 run test, the abs>1 history test, the ZRL/EOB boundaries) in the survey.
-    #
-    # 493:41 `self.raw_bit(u8::from(coeff > 0))` — the newly-nonzero coefficient's sign bit. This arm
-    # is reached only when `abs == 1`, i.e. `|coeff| >> al == 1`, which forces `coeff != 0`; `coeff > 0`
-    # and `coeff >= 0` therefore agree on every value that reaches it. (`> -> <`/`> -> ==` flip the sign
-    # for real inputs and ARE caught by `ac_refine_sign_and_eob_fold_round_trip`'s negative coefficient.)
-    'progressive\.rs:493:41: replace > with >=',
-    # 459:55 `.find(|&k| (block[ZIGZAG[k]].abs() >> al) == 1)` computes `eob_pos`, the last coefficient
-    # that becomes newly-nonzero this scan. It gates ONLY whether a >15 run of zero-history coefficients
-    # ending at an *already-nonzero* coefficient is coded as a ZRL or folded into the EOB run — a free
-    # choice in EOB/ZRL segmentation (§G.1.2.3): both are valid codings of the identical coefficients,
-    # and the decoder reconstructs the same values from either, so no decode-parity test can distinguish
-    # `== 1` from `!= 1`. (The `abs == 0` and `abs > 1` branch tests, which DO change coefficients, are
-    # caught — this line:col anchor leaves them in the survey.)
-    'progressive\.rs:459:55: replace == with !=',
+    # (gamut-jpeg's `refine` and `ProgCoder::ac_refine` sign tests, `coeff > 0` on a coefficient
+    # that is never zero, used to be excluded here as equivalent; #924 rewrote both as
+    # `is_positive()`, which has no comparison to mutate. `ac_refine`'s `eob_pos` search, excluded
+    # beside them by a line:column that had drifted off it, scored caught in #924's survey and
+    # needs no entry.)
     # gamut-jpeg `rd` (issue #333) — the module's provably-equivalent mutants, line/column anchored
     # so each matches EXACTLY its mutant and leaves every sibling in the survey. The same module's
     # non-terminating mutants make the other claim and sit in GROUP 2, not here.
@@ -904,7 +886,7 @@ exclude_re = [
     # scenario is reportable only as a TIMEOUT. Line- and column-anchored so it matches exactly
     # this hang and leaves the sibling `n > 64` guard mutants — which DO terminate and ARE caught
     # by `f_rejects_oversized_and_truncated_fields` — in the survey. Same shape as the
-    # gamut-jpeg `BitReader`/`Reader` hang exclusions below.
+    # gamut-jpeg `Reader::u8` hang exclusion below.
     "bitreader\\.rs:125:20: replace > with >= in BitReader<.a>::f64$",
     # gamut-bitstream `SymbolDecoder::read_golomb` — the other non-terminating mutant.
     # `length += 1` mutated to `*= 1` pins `length` at 0, so `length < max_bits` never stops the
@@ -958,20 +940,17 @@ exclude_re = [
     # gamut-jpeg entropy-reader hang-on-mutation timeouts (unkillable by any finite test). Each
     # mutation turns an inherently-terminating advance loop into a non-terminating one: no test can
     # observe a decoded result because execution never returns, so cargo-mutants can only ever report
-    # a TIMEOUT (exit 3, gate-failing) — never a catchable behavioural escape. Line/column-anchored so
-    # each regex matches EXACTLY its hang mutant and leaves the sibling arithmetic mutants (which DO
-    # terminate and ARE caught) in the survey. These are the byte/bit cursor's own accounting; the
-    # correct advance is exercised end-to-end by the decode battery.
+    # a TIMEOUT (exit 3, gate-failing) — never a catchable behavioural escape. Each entry names only
+    # its hang mutant and leaves the sibling arithmetic mutants (which DO terminate and ARE caught)
+    # in the survey. These are the byte/bit cursor's own accounting; the correct advance is
+    # exercised end-to-end by the decode battery.
     #
-    # BitReader::fetch — the destuffing byte cursor. `self.pos += 1` (138, 149) mutated to `*= 1`
-    # leaves `pos` pinned (pos ≥ 1 is invariant once decoding), so `end_marker`/`take_restart`'s
-    # `loop { fetch }` re-reads the same byte forever; `-=` (138, 144, 149) walks `pos` backwards and
-    # never reaches the terminating marker/EOF. (`144 *=` scales `pos += 2` forward, so it DOES reach
-    # EOF and is caught — deliberately not excluded here.) `BitReader::fill`, the other caller, runs
-    # a byte count fixed before its loop, so these mutants cannot hang it.
-    "scan\\.rs:138:26: replace \\+= with (\\*|-)= in BitReader",
-    "scan\\.rs:144:30: replace \\+= with -= in BitReader",
-    "scan\\.rs:149:30: replace \\+= with (\\*|-)= in BitReader",
+    # (`BitReader::fetch`'s byte-cursor advances and `decode_ac_refine`'s coefficient cursor used to
+    # be excluded here by line:column, and the lines moved under them so the entries matched
+    # nothing. #924 removed those hangs instead: `fetch` measures a fill run rather than stepping
+    # over it, its marker walk `next_marker` is bounded by the bytes left, and `decode_ac_refine`
+    # walks the band with `for` loops, so each former hang is now a killable mutant.)
+    #
     # decode_symbol / decode_block stubbed to a constant consume no entropy bits; for a Y=0 (DNL)
     # frame the row count is unknown and the MCU loop runs until `at_data_end` — which never fires
     # because nothing is ever consumed — so the loop never terminates. (For a Y-known frame the same
@@ -994,14 +973,6 @@ exclude_re = [
     # terminate. (The `-=` sibling walks `pos` backwards into an out-of-range read that errors, and is
     # caught — only the non-terminating `*=` is excluded.)
     "replace \\+= with \\*= in Reader<'a>::u8",
-    # gamut-jpeg progressive AC refinement (decode_ac_refine) — the coefficient cursor `k += 1` in the
-    # do-while advance loop (1008) and the EOB-run correction-bit tail loop (1033). Mutated to `*= 1` it
-    # pins `k` (k ≥ Ss ≥ 1, so k·1 = k) and the `while k <= se` loop spins forever — non-terminating,
-    # reportable only as a TIMEOUT, never a catchable behavioural escape. Line/col-anchored so each
-    # matches exactly its hang mutant; the `-=` siblings walk `k` backwards into a usize underflow that
-    # panics and ARE caught. Same shape as the sequential BitReader/Reader hang exclusions above.
-    "scan\\.rs:1008:19: replace \\+= with \\*= in decode_ac_refine",
-    "scan\\.rs:1033:15: replace \\+= with \\*= in decode_ac_refine",
     # gamut-jpeg `rd` (issue #333) — the module's non-terminating mutants, line/column anchored so
     # each matches EXACTLY its mutant and leaves every sibling in the survey. The same module's
     # provably-equivalent mutants make the other claim and sit in GROUP 1.
@@ -1009,7 +980,7 @@ exclude_re = [
     # isqrt's ascending settle `while (r + 1) * (r + 1) <= n { r += 1 }`: `* -> /` turns the
     # probe into `(r+1)/(r+1) = 1 <= n`, true for every n >= 1, and `+= -> *=` pins `r` at its
     # seed (`r * 1 == r`) — in both the loop never terminates, so cargo-mutants can only report a
-    # TIMEOUT, never a catchable behavioural escape (the same shape as the scan.rs cursor hangs).
+    # TIMEOUT, never a catchable behavioural escape (the same shape as the `Reader::u8` cursor hang).
     # The seed arithmetic, the `<=` boundary, and `+= -> -=` (which walks r negative and returns
     # a wrong root) ARE caught by the exact isqrt cases incl. the 2^52 - 1 rounded-up-seed pin.
     'rd\.rs:110:19: replace \* with / in isqrt',
