@@ -311,17 +311,13 @@ fn palette_color_context(
                 max_idx = j;
             }
         }
-        if max_idx != i {
-            let (ms, mo) = (scores[max_idx], order[max_idx]);
-            let mut k = max_idx;
-            while k > i {
-                scores[k] = scores[k - 1];
-                order[k] = order[k - 1];
-                k -= 1;
-            }
-            scores[i] = ms;
-            order[i] = mo;
-        }
+        // The spec's shift loop (`for k = maxIdx; k > i; k--`) moves `maxIdx` to `i` and every
+        // entry between them one place right: a right rotation of `i..=max_idx`, which is a no-op
+        // when `max_idx == i`. Spelled as the rotation, not as a cursor stepped by its own
+        // arithmetic, since `k -= 1` → `k /= 1` never moves the cursor and spins (#920); the
+        // rewrite also took the loop's own operator mutants and the `max_idx != i` guard with it.
+        scores[i..=max_idx].rotate_right(1);
+        order[i..=max_idx].rotate_right(1);
     }
     let hash = (scores[0] + scores[1] * 2 + scores[2] * 2) as usize;
     (order, cdf::PALETTE_COLOR_CONTEXT[hash] as usize)
@@ -1678,10 +1674,12 @@ impl<'a> FrameEncoder<'a> {
     /// quantizer so adjacent superblocks differ. Magnitude is kept ≤ 2, so the `DELTA_Q_SMALL` escape
     /// is never coded.
     fn signal_delta_q(&mut self) {
-        let sb_idx = self.sb_r / 16 + self.sb_c / 16;
-        let delta: i32 = match sb_idx % 3 {
+        // `(sb_r / 16 + sb_c / 16) % 3` over superblock origins, which are multiples of 16 MI:
+        // `/ 16` → `* 16` multiplies by 256 ≡ 1 (mod 3) and changed nothing (#920), so the
+        // superblock count mod 3 is read as `(sb_r + sb_c) % 48`, in MI units, with no division.
+        let delta: i32 = match (self.sb_r + self.sb_c) % 48 {
             0 => 1,
-            1 => -1,
+            16 => -1,
             _ => 2,
         };
         let abs = delta.unsigned_abs() as usize;
@@ -3655,11 +3653,8 @@ impl<'a> FrameEncoder<'a> {
         }
         self.restore_plane(luma_state);
 
+        let dc_rate = self.dc_chroma_rate(luma.mode, bw);
         let uv = self.cdfs.uv_mode_cfl_allowed[usize::from(luma.mode)].probs();
-        let mut dc_rate = symbol_rate(uv, usize::from(DC_PRED));
-        if (8..=64).contains(&bw) {
-            dc_rate += symbol_rate(self.cdfs.palette_uv_mode[0].probs(), 0);
-        }
         let cfl_rate = symbol_rate(uv, usize::from(UV_CFL_PRED));
         let [u, v] = &trials;
         let (u0, v0) = (u[0], v[0]);
@@ -3678,6 +3673,21 @@ impl<'a> FrameEncoder<'a> {
                 std::cmp::min_by_key(best, (self.rd_cost(su + sv, rate), Some((au, av))), |c| c.0)
             })
             .1
+    }
+
+    /// The mode-info rate [`Self::select_cfl`] charges plain `DC_PRED` chroma in a lossy square
+    /// `bw`-wide block under luma mode `y_mode`, in [`RATE_ONE`] units: `uv_mode = DC_PRED` under
+    /// the CfL-allowed CDF, plus, for an 8×8..64×64 block (§5.11.46), the `has_palette_uv = 0`
+    /// that follows it, priced at context 0. A function of its own so that the palette flag's
+    /// share is assertable: inside `select_cfl` it only moves a close RD decision, and no fixture
+    /// told adding it from subtracting it (#920).
+    fn dc_chroma_rate(&self, y_mode: u8, bw: usize) -> u32 {
+        let uv = self.cdfs.uv_mode_cfl_allowed[usize::from(y_mode)].probs();
+        let mut rate = symbol_rate(uv, usize::from(DC_PRED));
+        if (8..=64).contains(&bw) {
+            rate += symbol_rate(self.cdfs.palette_uv_mode[0].probs(), 0);
+        }
+        rate
     }
 
     /// The rate of `read_cfl_alphas` (§5.11.45) for `(au, av)` against the CDFs as they stand,
@@ -5261,6 +5271,22 @@ mod tests {
         // A segment's quantizer does not move λ.
         e.apply_seg_quant(2);
         assert_eq!(e.rd_cost(0, RATE_ONE), u64::from(RATE_ONE) * q * q);
+    }
+
+    #[test]
+    fn dc_chroma_rate_adds_the_palette_uv_flag_from_8x8_to_64x64() {
+        let p = grey4x4();
+        let e = FrameEncoder::new(&p, 40);
+        let uv = symbol_rate(
+            e.cdfs.uv_mode_cfl_allowed[usize::from(D67_PRED)].probs(),
+            usize::from(DC_PRED),
+        );
+        let flag = symbol_rate(e.cdfs.palette_uv_mode[0].probs(), 0);
+        assert!(flag > 0, "a free flag would hide its sign");
+        // A 4×4 codes no `has_palette_uv`; 8×8 and 64×64 bound the blocks that do.
+        assert_eq!(e.dc_chroma_rate(D67_PRED, 4), uv);
+        assert_eq!(e.dc_chroma_rate(D67_PRED, 8), uv + flag);
+        assert_eq!(e.dc_chroma_rate(D67_PRED, 64), uv + flag);
     }
 
     #[test]
