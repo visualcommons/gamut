@@ -4306,13 +4306,14 @@ const LAMBDA_DIV: u64 = 1024;
 
 /// The `CflSign` of a CfL alpha (§5.11.45): `CFL_SIGN_ZERO` (0), `CFL_SIGN_NEG` (1) or
 /// `CFL_SIGN_POS` (2).
+///
+/// One three-way comparison, not `alpha == 0` then `alpha < 0`: there the second test ran only on
+/// a nonzero `alpha`, so its `<` and `<=` were the same function.
 fn cfl_sign(alpha: i32) -> usize {
-    if alpha == 0 {
-        0
-    } else if alpha < 0 {
-        1
-    } else {
-        2
+    match alpha.cmp(&0) {
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Less => 1,
+        std::cmp::Ordering::Greater => 2,
     }
 }
 
