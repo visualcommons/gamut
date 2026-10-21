@@ -656,29 +656,11 @@ exclude_re = [
     # equivalent. The clamp itself stays, per the never-panic-on-untrusted-input policy.
     'replace - with \+ in DecodedImage::sample',
     'replace - with / in DecodedImage::sample',
-    # gamut-jpeg `refine` (§G.1.2.3 correction) sign test `if coeff > 0`: `refine` is only ever called
-    # on a NON-zero coefficient — both call sites guard `block[nat] != 0` before calling it — so the
-    # only value at which `>` and `>=` disagree (coeff == 0) is unreachable, making `> -> >=` provably
-    # equivalent. (`> -> <` and `> -> ==` flip the correction direction for real inputs and ARE caught
-    # by the successive-approximation test's positive and negative AC coefficients.)
-    "replace > with >= in refine",
-    # gamut-jpeg progressive encoder (`ProgCoder::ac_refine`, §G.1.2.3) — two provably-non-observable
-    # mutants, line/column-anchored so each matches EXACTLY its mutant and leaves the sibling operators
-    # (the abs==0 run test, the abs>1 history test, the ZRL/EOB boundaries) in the survey.
-    #
-    # 493:41 `self.raw_bit(u8::from(coeff > 0))` — the newly-nonzero coefficient's sign bit. This arm
-    # is reached only when `abs == 1`, i.e. `|coeff| >> al == 1`, which forces `coeff != 0`; `coeff > 0`
-    # and `coeff >= 0` therefore agree on every value that reaches it. (`> -> <`/`> -> ==` flip the sign
-    # for real inputs and ARE caught by `ac_refine_sign_and_eob_fold_round_trip`'s negative coefficient.)
-    'progressive\.rs:493:41: replace > with >=',
-    # 459:55 `.find(|&k| (block[ZIGZAG[k]].abs() >> al) == 1)` computes `eob_pos`, the last coefficient
-    # that becomes newly-nonzero this scan. It gates ONLY whether a >15 run of zero-history coefficients
-    # ending at an *already-nonzero* coefficient is coded as a ZRL or folded into the EOB run — a free
-    # choice in EOB/ZRL segmentation (§G.1.2.3): both are valid codings of the identical coefficients,
-    # and the decoder reconstructs the same values from either, so no decode-parity test can distinguish
-    # `== 1` from `!= 1`. (The `abs == 0` and `abs > 1` branch tests, which DO change coefficients, are
-    # caught — this line:col anchor leaves them in the survey.)
-    'progressive\.rs:459:55: replace == with !=',
+    # (gamut-jpeg's `refine` and `ProgCoder::ac_refine` sign tests, `coeff > 0` on a coefficient
+    # that is never zero, used to be excluded here as equivalent; #924 rewrote both as
+    # `is_positive()`, which has no comparison to mutate. `ac_refine`'s `eob_pos` search, excluded
+    # beside them by a line:column that had drifted off it, scored caught in #924's survey and
+    # needs no entry.)
     # gamut-jpeg `rd` (issue #333) — the module's provably-equivalent mutants, line/column anchored
     # so each matches EXACTLY its mutant and leaves every sibling in the survey. The same module's
     # non-terminating mutants make the other claim and sit in GROUP 2, not here.

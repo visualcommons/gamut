@@ -1131,8 +1131,12 @@ fn decode_ac_refine(
 /// scaled magnitude increases by one bit — `+p1` for a positive coefficient, `+m1` (= `−p1`) for a
 /// negative one. The refined bit position is always previously zero (the prior scan coded bit
 /// `Ah = Al + 1` and above), so no guard against a double-set is needed.
+///
+/// The sign is read with `is_positive` rather than `coeff > 0`: `coeff` is never zero here, so
+/// `> 0` and its `>= 0` mutant always agreed. That rewrite also took the comparison's two killable
+/// siblings (`<`, `==`) out of the survey (#924).
 fn refine(coeff: i32, p1: i32, m1: i32) -> i32 {
-    if coeff > 0 {
+    if coeff.is_positive() {
         coeff.wrapping_add(p1)
     } else {
         coeff.wrapping_add(m1)
