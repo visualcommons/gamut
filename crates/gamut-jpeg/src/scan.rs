@@ -126,34 +126,36 @@ impl<'a> BitReader<'a> {
     }
 
     /// Fetches the next destuffed data byte, or reports a marker / EOF (§F.2.2.5).
+    ///
+    /// A run of `0xFF` bytes is fill before a marker (§B.1.1.2) except its last, which pairs with
+    /// the byte after it. The run is measured rather than stepped over one byte at a time, so this
+    /// has no loop of its own, and the cursor is parked on the run's last `0xFF` -- the marker's
+    /// first byte -- whatever follows it.
     fn fetch(&mut self) -> Fetch {
         if self.marker.is_some() {
             return Fetch::Marker;
         }
-        loop {
-            let b = match self.data.get(self.pos) {
-                Some(&b) => b,
-                None => return Fetch::Eof,
-            };
-            if b != 0xFF {
-                self.pos += 1;
-                return Fetch::Data(b);
+        let Some(&b) = self.data.get(self.pos) else {
+            return Fetch::Eof;
+        };
+        if b != 0xFF {
+            self.pos += 1;
+            return Fetch::Data(b);
+        }
+        self.pos += self.data[self.pos + 1..]
+            .iter()
+            .take_while(|&&b| b == 0xFF)
+            .count();
+        match self.data.get(self.pos + 1) {
+            None => Fetch::Eof,
+            Some(0x00) => {
+                self.pos += 2;
+                Fetch::Data(0xFF)
             }
-            match self.data.get(self.pos + 1) {
-                None => return Fetch::Eof,
-                Some(0x00) => {
-                    self.pos += 2;
-                    return Fetch::Data(0xFF);
-                }
-                Some(0xFF) => {
-                    // Fill byte before a marker (§B.1.1.2): skip it and re-examine.
-                    self.pos += 1;
-                }
-                Some(&m) => {
-                    self.marker = Some(m);
-                    self.marker_off = self.pos;
-                    return Fetch::Marker;
-                }
+            Some(&m) => {
+                self.marker = Some(m);
+                self.marker_off = self.pos;
+                Fetch::Marker
             }
         }
     }
@@ -317,17 +319,11 @@ impl<'a> BitReader<'a> {
     /// is `RSTm` with `m == expected`, and advances past it. The caller resets the DC predictors.
     fn take_restart(&mut self, expected: u8) -> Result<()> {
         self.discard_buffer();
-        let code = loop {
-            match self.fetch() {
-                Fetch::Data(_) => continue,
-                Fetch::Marker => break self.marker.unwrap_or(0),
-                Fetch::Eof => {
-                    return Err(Error::invalid_input(
-                        env!("CARGO_PKG_NAME"),
-                        "JPEG: truncated before restart marker",
-                    ));
-                }
-            }
+        let Some(code) = self.next_marker() else {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: truncated before restart marker",
+            ));
         };
         if !(0xD0..=0xD7).contains(&code) {
             return Err(Error::invalid_input(
@@ -350,18 +346,31 @@ impl<'a> BitReader<'a> {
     /// consuming it (the segment parser resumes at `offset`).
     fn end_marker(&mut self) -> Result<(u8, usize)> {
         self.discard_buffer();
-        loop {
+        match self.next_marker() {
+            Some(code) => Ok((code, self.marker_off)),
+            None => Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: missing marker after scan",
+            )),
+        }
+    }
+
+    /// Skips entropy data up to the next marker and returns its code, or `None` when the input
+    /// ends first.
+    ///
+    /// Every [`Self::fetch`] that returns data consumes at least one byte, so the bytes left bound
+    /// the walk: it is a `for` over them rather than a `loop` that ends only when the cursor's own
+    /// arithmetic delivers it to a marker. A cursor advance that stops advancing therefore runs out
+    /// of steps and reports the input exhausted, instead of re-reading one byte forever.
+    fn next_marker(&mut self) -> Option<u8> {
+        for _ in self.pos..=self.data.len() {
             match self.fetch() {
-                Fetch::Data(_) => continue,
-                Fetch::Marker => return Ok((self.marker.unwrap_or(0), self.marker_off)),
-                Fetch::Eof => {
-                    return Err(Error::invalid_input(
-                        env!("CARGO_PKG_NAME"),
-                        "JPEG: missing marker after scan",
-                    ));
-                }
+                Fetch::Data(_) => {}
+                Fetch::Marker => return self.marker,
+                Fetch::Eof => return None,
             }
         }
+        None
     }
 }
 
@@ -1073,8 +1082,10 @@ fn decode_ac_refine(
 
             // Advance over the band, appending a correction bit to each non-zero-history coefficient
             // and counting down `run` zero-history coefficients to the target insertion position.
-            loop {
-                let nat = ZIGZAG[k];
+            // A `for` over the band's indices rather than a cursor stepped until it passes `se`, so
+            // the walk ends with the band whatever the arithmetic on the cursor does.
+            let mut target = None;
+            for (i, &nat) in ZIGZAG[..=se].iter().enumerate().skip(k) {
                 if block[nat] != 0 {
                     if r.read_bit()? != 0 {
                         block[nat] = refine(block[nat], p1, m1);
@@ -1082,35 +1093,34 @@ fn decode_ac_refine(
                 } else {
                     run -= 1;
                     if run < 0 {
-                        break; // reached the target zero-history coefficient
+                        target = Some(i); // reached the target zero-history coefficient
+                        break;
                     }
                 }
-                k += 1;
-                if k > se {
-                    break;
-                }
             }
-            if new_val != 0 {
-                if k > se {
+            let Some(t) = target else {
+                // The band ran out first: an error for a new coefficient, which has nowhere to go;
+                // a ZRL's sixteen zeros merely end the band, as nothing is written for them.
+                if new_val != 0 {
                     return Err(Error::invalid_input(
                         env!("CARGO_PKG_NAME"),
                         "JPEG: progressive AC refinement past band end",
                     ));
                 }
-                block[ZIGZAG[k]] = new_val;
-            }
-            k += 1;
+                break;
+            };
+            // The target has a zero history, so for a ZRL (`new_val == 0`) this write is a no-op.
+            block[ZIGZAG[t]] = new_val;
+            k = t + 1;
         }
     }
     if *eobrun > 0 {
         // A block within an EOB run: no new coefficients, but non-zero-history coefficients in the
         // remaining band still receive their correction bits (§G.1.2.3).
-        while k <= se {
-            let nat = ZIGZAG[k];
+        for &nat in ZIGZAG.get(k..=se).unwrap_or_default() {
             if block[nat] != 0 && r.read_bit()? != 0 {
                 block[nat] = refine(block[nat], p1, m1);
             }
-            k += 1;
         }
         *eobrun -= 1;
     }
@@ -1362,5 +1372,121 @@ mod tests {
             Some("JPEG: truncated entropy-coded data")
         );
         assert_eq!(err.byte_offset(), Some(1));
+    }
+
+    /// `BitReader::fetch` over a stream with fill bytes (§B.1.1.2) both before a stuffed `0xFF
+    /// 0x00` and before the closing marker: the fill is skipped, the run's last `0xFF` pairs with
+    /// the byte after it, and the cursor parks on the marker's first byte, which
+    /// `BitReader::end_marker` then reports.
+    #[test]
+    fn fetch_skips_fill_bytes_and_parks_on_the_marker() {
+        let bytes = [
+            0x12, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0x34, 0xFF, 0xFF, 0xFF, 0xD9,
+        ];
+        let mut r = BitReader::new(&bytes, 0);
+        let mut data = Vec::new();
+        for _ in 0..bytes.len() {
+            match r.fetch() {
+                Fetch::Data(b) => data.push(b),
+                Fetch::Marker | Fetch::Eof => break,
+            }
+        }
+        assert_eq!(data, [0x12, 0xFF, 0xFF, 0x34]);
+        assert_eq!((r.marker, r.marker_off), (Some(0xD9), 9));
+        assert_eq!(BitReader::new(&bytes, 0).end_marker().unwrap(), (0xD9, 9));
+    }
+
+    /// `BitReader::end_marker` on entropy data that ends in fill bytes with no marker after them:
+    /// the input runs out first.
+    #[test]
+    fn end_marker_without_a_marker_is_missing() {
+        let err = BitReader::new(&[0x12, 0xFF, 0xFF], 0)
+            .end_marker()
+            .unwrap_err();
+        assert_eq!(
+            err.static_message(),
+            Some("JPEG: missing marker after scan")
+        );
+    }
+
+    /// `BitReader::take_restart` skips the rest of the interval's data and the fill before
+    /// `RST3`, and resumes on the byte after the marker.
+    #[test]
+    fn take_restart_resumes_after_the_marker() {
+        let mut r = BitReader::new(&[0x56, 0xFF, 0xFF, 0xD3, 0x78], 0);
+        r.take_restart(3).unwrap();
+        assert!(matches!(r.fetch(), Fetch::Data(0x78)));
+    }
+
+    /// The table `decode_ac_refine`'s tests decode with: `0x01` (a new coefficient) = `00`,
+    /// `0xF0` (ZRL) = `01`, `0x00` (EOB0) = `10`, `0x21` (two zeros, then a new coefficient) =
+    /// `110`.
+    fn refine_table() -> DecTable {
+        let mut bits = [0u8; 16];
+        bits[1] = 3;
+        bits[2] = 1;
+        DecTable::from_bits(&bits, &[0x01, 0xF0, 0x00, 0x21]).unwrap()
+    }
+
+    /// `decode_ac_refine` (§G.1.2.3) over band 1..=3 holding `5` at 1 and zeros at 2 and 3: a new
+    /// coefficient (sign bit `0`, so `−1`) is placed after the correction bit (`1`) that refines
+    /// the `5` it passes, and the EOB0 that follows leaves 3 untouched and reads nothing more.
+    /// Bits: `00` `0` `1` `10`, then `1`-padding.
+    #[test]
+    fn decode_ac_refine_inserts_after_correcting_what_it_passes() {
+        let mut block = [0i32; 64];
+        block[ZIGZAG[1]] = 5;
+        let mut r = BitReader::new(&[0b0001_1011, 0xFF, 0xD9], 0);
+        let mut eobrun = 0;
+        decode_ac_refine(&mut r, &mut block, 1, 3, 0, &refine_table(), &mut eobrun).unwrap();
+        assert_eq!(
+            [block[ZIGZAG[1]], block[ZIGZAG[2]], block[ZIGZAG[3]]],
+            [6, -1, 0]
+        );
+        assert_eq!(eobrun, 0);
+        assert_eq!(r.read_bits(2).unwrap(), 0b11);
+    }
+
+    /// `decode_ac_refine`: a new coefficient whose run of zeros passes the band's end has nowhere
+    /// to go. `0x21` (`110`) needs a third zero in a two-coefficient band.
+    #[test]
+    fn decode_ac_refine_rejects_a_new_coefficient_past_the_band() {
+        let mut block = [0i32; 64];
+        let mut r = BitReader::new(&[0b1101_1111, 0xFF, 0xD9], 0);
+        let err =
+            decode_ac_refine(&mut r, &mut block, 1, 2, 0, &refine_table(), &mut 0).unwrap_err();
+        assert_eq!(
+            err.static_message(),
+            Some("JPEG: progressive AC refinement past band end")
+        );
+    }
+
+    /// `decode_ac_refine`: a ZRL whose sixteen zeros pass the band's end only ends the band -- no
+    /// error, nothing written, and no further symbol read (the six bits after its `01` are left).
+    #[test]
+    fn decode_ac_refine_ends_the_band_at_a_zrl_past_it() {
+        let mut block = [0i32; 64];
+        let mut r = BitReader::new(&[0b0110_1010, 0xFF, 0xD9], 0);
+        let mut eobrun = 0;
+        decode_ac_refine(&mut r, &mut block, 1, 2, 0, &refine_table(), &mut eobrun).unwrap();
+        assert_eq!(block, [0; 64]);
+        assert_eq!(eobrun, 0);
+        assert_eq!(r.read_bits(6).unwrap(), 0b10_1010);
+    }
+
+    /// `decode_ac_refine` inside an EOB run: no symbol is decoded, and each non-zero-history
+    /// coefficient of the band takes one correction bit in band order -- `0` leaves the `3`, `1`
+    /// takes the `−2` to `−3` -- before the run counts down.
+    #[test]
+    fn decode_ac_refine_in_an_eob_run_only_corrects() {
+        let mut block = [0i32; 64];
+        block[ZIGZAG[1]] = 3;
+        block[ZIGZAG[2]] = -2;
+        let mut r = BitReader::new(&[0b0100_0000, 0xFF, 0xD9], 0);
+        let mut eobrun = 1;
+        decode_ac_refine(&mut r, &mut block, 1, 2, 0, &refine_table(), &mut eobrun).unwrap();
+        assert_eq!([block[ZIGZAG[1]], block[ZIGZAG[2]]], [3, -3]);
+        assert_eq!(eobrun, 0);
+        assert_eq!(r.read_bits(6).unwrap(), 0);
     }
 }
