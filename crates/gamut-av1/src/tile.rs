@@ -1684,7 +1684,9 @@ impl<'a> FrameEncoder<'a> {
         };
         let abs = delta.unsigned_abs() as usize;
         self.sym.encode(abs, self.cdfs.delta_q.slot());
-        self.sym.encode_literal(u32::from(delta < 0), 1); // delta_q_sign_bit (1 ⇒ negative)
+        // delta_q_sign_bit (1 ⇒ negative). `delta` is never 0, so `delta < 0` → `<= 0` changed
+        // nothing (#920); the sign is read as `is_negative()`, which has no such twin.
+        self.sym.encode_literal(u32::from(delta.is_negative()), 1);
         let nq = (self.current_qindex + delta).clamp(1, 255);
         self.set_quant(nq);
     }
