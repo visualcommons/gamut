@@ -4308,7 +4308,9 @@ const LAMBDA_DIV: u64 = 1024;
 /// `CFL_SIGN_POS` (2).
 ///
 /// One three-way comparison, not `alpha == 0` then `alpha < 0`: there the second test ran only on
-/// a nonzero `alpha`, so its `<` and `<=` were the same function.
+/// a nonzero `alpha`, so its `<` and `<=` were the same function. The rewrite also took the two
+/// tests' three killable operator mutants with it, leaving only the body replacements, which
+/// `cfl_sign_is_the_spec_sign_code` still kills by naming all three arms.
 fn cfl_sign(alpha: i32) -> usize {
     match alpha.cmp(&0) {
         std::cmp::Ordering::Equal => 0,
