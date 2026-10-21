@@ -131,6 +131,10 @@ impl<'a> BitReader<'a> {
     /// the byte after it. The run is measured rather than stepped over one byte at a time, so this
     /// has no loop of its own, and the cursor is parked on the run's last `0xFF` -- the marker's
     /// first byte -- whatever follows it.
+    ///
+    /// The rewrite's cost in the survey (#924): the fill-byte step `pos += 1` it replaced carried
+    /// two mutants (`-=`, `*=`), both TIMEOUTs and neither killable, so no killable sibling went
+    /// with it; the run count adds five (`fetch` went from 10 mutants to 13).
     fn fetch(&mut self) -> Fetch {
         if self.marker.is_some() {
             return Fetch::Marker;
@@ -1083,7 +1087,11 @@ fn decode_ac_refine(
             // Advance over the band, appending a correction bit to each non-zero-history coefficient
             // and counting down `run` zero-history coefficients to the target insertion position.
             // A `for` over the band's indices rather than a cursor stepped until it passes `se`, so
-            // the walk ends with the band whatever the arithmetic on the cursor does.
+            // the walk ends with the band whatever the arithmetic on the cursor does. The rewrite
+            // took the old cursor's killable siblings with it: of the two `k += 1` steps' four
+            // mutants only the in-loop `*=` was a TIMEOUT, and the two `k > se` tests' six (`==`,
+            // `<`, `>=`) were caught -- nine killable mutants gone, against two new ones on `t + 1`. With the EOB-run walk below,
+            // `decode_ac_refine` went from 46 mutants to 35, smaller here, not stronger (#924).
             let mut target = None;
             for (i, &nat) in ZIGZAG[..=se].iter().enumerate().skip(k) {
                 if block[nat] != 0 {
@@ -1116,7 +1124,9 @@ fn decode_ac_refine(
     }
     if *eobrun > 0 {
         // A block within an EOB run: no new coefficients, but non-zero-history coefficients in the
-        // remaining band still receive their correction bits (§G.1.2.3).
+        // remaining band still receive their correction bits (§G.1.2.3). The `for` replaced a
+        // `while k <= se` cursor, and took its caught `<=` → `>` and `k += 1` → `-=` with it (its `*=`
+        // was a TIMEOUT) (#924).
         for &nat in ZIGZAG.get(k..=se).unwrap_or_default() {
             if block[nat] != 0 && r.read_bit()? != 0 {
                 block[nat] = refine(block[nat], p1, m1);
