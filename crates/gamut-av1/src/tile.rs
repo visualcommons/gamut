@@ -1333,21 +1333,21 @@ impl<'a> FrameEncoder<'a> {
             self.update_partition_ctx(r, c, bsl, bp);
         }
 
+        // §5.11.4 decodes a HORZ (VERT) partition's second half only `if (hasRows)` (`hasCols`),
+        // but this encoder offers HORZ and VERT only to a region inside the frame
+        // (`encode_partition` forces SPLIT where `block_exceeds_frame`), where both hold; the
+        // guards were deleted with their `<` → `<=` twins, which no region could tell apart.
         match bp {
             usize::MAX | 0 => self.encode_block(r, c, bw, bw),
             1 => {
                 // PARTITION_HORZ: top then bottom half, each `bw × bw/2`.
                 self.encode_block(r, c, bw, bw / 2);
-                if r + half < self.mi_rows {
-                    self.encode_block(r + half, c, bw, bw / 2);
-                }
+                self.encode_block(r + half, c, bw, bw / 2);
             }
             2 => {
                 // PARTITION_VERT: left then right half, each `bw/2 × bw`.
                 self.encode_block(r, c, bw / 2, bw);
-                if c + half < self.mi_cols {
-                    self.encode_block(r, c + half, bw / 2, bw);
-                }
+                self.encode_block(r, c + half, bw / 2, bw);
             }
             _ => {
                 let h = bw / 2;
@@ -5336,6 +5336,21 @@ mod tests {
             e.emit_cfl_alphas(au, av);
             assert_eq!(e.sym.tally.take(), Some(want), "({au}, {av})");
         }
+    }
+
+    #[test]
+    fn only_the_lossy_path_allocates_a_reconstruction() {
+        // Lossless prediction reads the source itself (`dc_pred`'s `sample`), so the encoder
+        // keeps no frame-sized reconstruction there; `absorb_tile` relies on the empty planes.
+        let p = grey4x4();
+        assert!(FrameEncoder::new(&p, 0).recon.iter().all(Vec::is_empty));
+        let lossy = FrameEncoder::new(&p, 1);
+        assert!(
+            lossy
+                .recon
+                .iter()
+                .all(|plane| plane.len() == lossy.geom[0].len())
+        );
     }
 
     #[test]
