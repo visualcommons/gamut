@@ -2509,8 +2509,11 @@ impl<'a> FrameEncoder<'a> {
             self.max_luma_w = sx + tw;
             self.max_luma_h = sy + th;
         }
+        // Filter-intra is luma-only (§5.11.24), and every `Pred` a chroma plane receives is built
+        // with `filter_intra: None`, so it needs no `plane == 0` guard here: one was equivalent
+        // to `true` and is gone, with its two killable siblings.
         let pred: Vec<i32> = match desc.filter_intra {
-            Some(fi) if plane == 0 => self.predict_filter_intra(plane, sx, sy, tw, fi),
+            Some(fi) => self.predict_filter_intra(plane, sx, sy, tw, fi),
             _ => {
                 let mut p = self.predict_intra(plane, sx, sy, desc.mode, tw, th, desc.angle_delta);
                 if let Some(alpha) = desc.cfl_alpha {
