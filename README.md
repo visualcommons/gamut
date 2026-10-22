@@ -145,14 +145,14 @@ why; deciding that comparison needs the network, so it is stated there rather th
 | `gamut-heic`      | HEIC/HEIF still-image container **decoder** — HEVC via a pluggable backend | decode-only container (S1–S7); no encoder, by charter |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
 | `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | stable (v3, byte completeness #263); BigTIFF behind Cargo feature `bigtiff` |
-| `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on `gamut-ifd`        | stable (v2, #194); MakerNote preserved verbatim, not decoded |
-| `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | stable (v2, #180)                      |
+| `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on `gamut-ifd`        | stable (v2; v1 was #194); MakerNote preserved verbatim, not decoded |
+| `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | stable (v2; v1 was #180)               |
 | `gamut-cmm`       | ICC colour management module (transform engine) over `gamut-icc` profiles | P1–P8 complete per its STATUS.md — P1–P7 are epic #323, while P8 (pipeline optimization) is #372, which #323 lists out of scope |
-| `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | stable (v2, #189); canonical serializer, UTF-8 packets only |
+| `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | stable (v2; v1 was #189); canonical serializer, UTF-8 packets only |
 | `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | stable (v2; v1 was #182); full IIM 4.2 tag table (#422) and typed models for every IPTC Extension structure (#422, #538) |
 | `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | stable (v2); orchestration only. A C2PA manifest store is extracted verbatim but never re-embedded: embedding drops it, or refuses, because its hard binding cannot survive the rewrite |
-| `gamut-tiff`      | TIFF 6.0 encoder/decoder — on the shared `gamut-ifd` container core     | stable (v2, #107); YCbCr/Lab and JPEG-in-TIFF deferred |
-| `gamut-dng`       | DNG 1.7.1 raw encoder + decoder — a TIFF/EP profile over `gamut-ifd`   | encoder + decoder (v2, #109), Adobe DNG SDK-gated |
+| `gamut-tiff`      | TIFF 6.0 encoder/decoder — on the shared `gamut-ifd` container core     | stable (v2; v1 was #107); YCbCr/Lab and JPEG-in-TIFF deferred |
+| `gamut-dng`       | DNG 1.7.1 raw encoder + decoder — a TIFF/EP profile over `gamut-ifd`   | encoder + decoder (v2; v1 was #109), Adobe DNG SDK-gated |
 | `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut's own writers | encoder (#195); consumed by `gamut-dng`, `gamut-png` and `gamut-tiff`, which inflate with the external dependency `miniz_oxide` rather than here — this crate has no always-on dependencies of its own |
 | `gamut-png`       | PNG (W3C 3rd edition) encoder + decoder, over the still-image subset   | encoder (#24) + decoder (#249); APNG out of scope, so an animated PNG decodes as its default image |
 | `gamut-cli`       | `gamut` CLI sandbox: `convert` (decode PNG/JPEG/PPM/WebP/JXL, re-encode AVIF/WebP/TIFF/PNG/JXL/JPEG), `inspect` (TIFF/DNG byte accounting), `icc`, `isobmff`, `av1`, and the `color`, `dsp` and `bitstream` primitive inspectors | ready for use |
