@@ -78,14 +78,21 @@ pub const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
 /// thread while the calling thread takes the first. Results are joined in the order the
 /// candidates are listed, never in completion order, so the caller's `min_by_key` sees exactly
 /// the sequence a serial loop would produce and a tie still resolves to the earlier strategy:
-/// output stays byte-reproducible however the threads are scheduled. Where an error is returned,
-/// it is the first one in candidate order — the same error the serial loop stopped at — though
-/// the later trials have run by then rather than being skipped.
+/// output stays byte-reproducible however the threads are scheduled. Every trial is joined before
+/// any result is examined (issue #941). Where an error is returned, it is the first one in
+/// candidate order — the same error the serial loop stopped at — though the later trials have run
+/// by then rather than being skipped.
 ///
 /// A thread the platform cannot create is not an error: that candidate runs on the calling
-/// thread instead. This is also how `wasm32` runs serially without a `cfg` — its `std` reports
-/// thread creation as unsupported, so every trial falls back in order. A panic in a trial is
-/// re-raised on the caller, as it would have been without the threads.
+/// thread instead, at its turn in candidate order, even after an earlier candidate has failed.
+/// This is also how `wasm32` runs serially without a `cfg` — its `std` reports thread creation as
+/// unsupported, so every trial falls back in order.
+///
+/// A panic in a trial is re-raised on the caller with its own payload, and where several trials
+/// panic it is the first in candidate order. A panic outranks an error from an earlier candidate:
+/// the serial loop would have stopped at that error and never run the panicking trial, but here
+/// the trial has already run, and resuming its payload is what keeps it from being replaced by
+/// `std::thread::scope`'s generic "a scoped thread panicked".
 ///
 /// **The speed is paid for in memory.** Run one after another, the trials held one candidate's
 /// filtered image and optimal-parse buffers at a time; run together, all of them are alive at
@@ -107,16 +114,17 @@ fn run_trials(trial: &(impl Fn(FilterStrategy) -> Result<Vec<u8>> + Sync)) -> Re
             let handle = std::thread::Builder::new().spawn_scoped(scope, move || trial(strategy));
             (strategy, handle)
         });
-        core::iter::once(trial(first))
-            .chain(spawned.into_iter().map(|(strategy, handle)| {
-                match handle {
-                    Ok(handle) => handle
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                    Err(_) => trial(strategy),
-                }
-            }))
-            .collect()
+        let first = trial(first);
+        // `[_; N]::map` is eager, so every handle is joined here, before the `Result`s are
+        // reduced: a lazy chain into `collect` would stop at the first `Err` and leave a later
+        // panicked thread unjoined for the scope to report without its payload (issue #941).
+        let joined = spawned.map(|(strategy, handle)| match handle {
+            Ok(handle) => handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+            Err(_) => trial(strategy),
+        });
+        core::iter::once(first).chain(joined).collect()
     })
 }
 
@@ -2673,6 +2681,27 @@ mod tests {
             .unwrap();
         assert_eq!(brute.len(), paeth.len(), "same length, different bytes");
         assert_ne!(brute, paeth);
+    }
+
+    /// `run_trials` re-raises a later trial's own panic payload even when an earlier candidate
+    /// returned `Err` (issue #941). Joining lazily stopped at that `Err` and left the panicked
+    /// thread unjoined, so `std::thread::scope` replaced the payload with its generic one.
+    #[test]
+    fn run_trials_resumes_a_later_panic_past_an_earlier_err() {
+        let trial = |strategy: FilterStrategy| -> Result<Vec<u8>> {
+            match strategy {
+                FilterStrategy::Fixed(FilterType::Sub) => Err(crate::backend::poisoned()),
+                FilterStrategy::MinTrialDeflate => panic!("the backend's own payload"),
+                _ => Ok(Vec::new()),
+            }
+        };
+        let payload = std::panic::catch_unwind(|| run_trials(&trial))
+            .expect_err("the later trial's panic must reach the caller");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"the backend's own payload"),
+            "the scope's generic payload replaced the trial's"
+        );
     }
 
     /// One long greyscale row whose bytes are neither flat nor periodic, so the span the optimal
