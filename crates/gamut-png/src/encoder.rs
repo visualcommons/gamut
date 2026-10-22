@@ -68,6 +68,55 @@ const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
     FilterStrategy::MinTrialDeflate,
 ];
 
+/// Runs `trial` once per [`BRUTE_FORCE_STRATEGIES`] candidate, concurrently, and returns the
+/// results **in candidate order** (issue #624).
+///
+/// The eight trials share nothing but borrowed input, so each of the last seven runs on a scoped
+/// thread while the calling thread takes the first. Results are joined in the order the
+/// candidates are listed, never in completion order, so the caller's `min_by_key` sees exactly
+/// the sequence a serial loop would produce and a tie still resolves to the earlier strategy:
+/// output stays byte-reproducible however the threads are scheduled. Where an error is returned,
+/// it is the first one in candidate order — the same error the serial loop stopped at — though
+/// the later trials have run by then rather than being skipped.
+///
+/// A thread the platform cannot create is not an error: that candidate runs on the calling
+/// thread instead. This is also how `wasm32` runs serially without a `cfg` — its `std` reports
+/// thread creation as unsupported, so every trial falls back in order. A panic in a trial is
+/// re-raised on the caller, as it would have been without the threads.
+///
+/// **The speed is paid for in memory.** Run one after another, the trials held one candidate's
+/// filtered image and optimal-parse buffers at a time; run together, all of them are alive at
+/// once, and nothing here caps how many. Each trial's filtered copy is the whole image, so peak
+/// memory grows with image size times the number of concurrent candidates; the optimal-parse span
+/// bounds only the parse buffers. Measured on a square RGB photograph at [`Level::Best`] with the
+/// [`Preset::Smallest`] span, when the search still had seven candidates, a `BruteForce` encode's
+/// peak resident set was **2.4x to 3.4x** what the serial loop's was — `STATUS.md` carries the
+/// table. That is the trade the maintainer's
+/// decision on #624 accepted; a caller encoding near its memory limit should budget for it.
+///
+/// No dependency is added for this (a maintainer decision on #624): `std::thread::scope` borrows
+/// the image without copying it, and one encode's eight trials are too few and too coarse for a
+/// work-stealing pool to schedule any better.
+fn run_trials(trial: &(impl Fn(FilterStrategy) -> Result<Vec<u8>> + Sync)) -> Result<Vec<Vec<u8>>> {
+    let [first, rest @ ..] = BRUTE_FORCE_STRATEGIES;
+    std::thread::scope(|scope| {
+        let spawned = rest.map(|strategy| {
+            let handle = std::thread::Builder::new().spawn_scoped(scope, move || trial(strategy));
+            (strategy, handle)
+        });
+        core::iter::once(trial(first))
+            .chain(spawned.into_iter().map(|(strategy, handle)| {
+                match handle {
+                    Ok(handle) => handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    Err(_) => trial(strategy),
+                }
+            }))
+            .collect()
+    })
+}
+
 /// What [`PngEncoder::encode_with_report`] found in the bytes it wrote.
 ///
 /// Non-exhaustive: a later revision may report a further region without a breaking change.
@@ -352,6 +401,12 @@ pub enum Preset {
     /// step from `Small` costs **6.26x** and buys 3.6%, and on four of the nine rows it buys three
     /// bytes or fewer. Intended for write-once assets where size dominates, and worth measuring on
     /// your own material rather than assuming — see `STATUS.md`.
+    ///
+    /// Also the most memory-hungry rung: the filter search's eight candidates run concurrently,
+    /// each with its own whole-image filtered copy and 8 MiB-span parse, so peak memory grows with
+    /// image size times the candidate count. A 2048x2048 RGB photograph peaked near 680 MiB
+    /// resident where the same search run serially peaked near 210 MiB (both at refinement budget
+    /// 1, measured with seven candidates; `STATUS.md` has the table).
     Smallest = 3,
 }
 
@@ -379,6 +434,17 @@ struct PresetKnobs {
 /// bound in the image, which is not something to ship behind a rung named for size. Measured peak
 /// resident set for one encode of a 4096x4096 RGB photograph at [`Level::Best`]: **701.8 MiB**
 /// unbounded against **219.0 MiB** at this span and **177.9 MiB** at the 1 MiB default.
+///
+/// Those are **one** stream's figures, and the rung does not parse one stream at a time. Its
+/// [`FilterStrategy::BruteForce`] runs eight candidates concurrently (#624), each with its own
+/// filtered image and its own span-length buffers, so the rung's own peak is several times a
+/// single encode's. Measured for a whole `BruteForce` encode at this span, refinement budget 1,
+/// concurrent against the serial search it replaced, when the search had seven candidates:
+/// **261.8 against 77.3 MiB** at 1024x1024, **678.6 against 210.9 MiB** at 2048x2048, and
+/// **1266.1 against 517.3 MiB** at 4096x4096. The span bounds only each candidate's parse
+/// buffers: each candidate also holds a whole-image filtered copy (`filter::filter_image` in
+/// `compress_scanlines`), so the rung's peak memory is **not** bounded by the span — it grows with
+/// image size times the number of concurrent candidates.
 ///
 /// Eight and not more, measured rather than picked: a wider span only helps an image whose
 /// *filtered* stream exceeds it, and the help saturates fast. At 8 MiB the span is the whole
@@ -534,6 +600,14 @@ impl PngEncoder {
     /// [`PngEncoder`] is [`Clone`], and cloning copies the registry *handles*: the clone and the
     /// original drive the **same** backend instances (they are held behind `Arc<Mutex<…>>`, since
     /// encoding takes `&self`). Push a fresh backend instance if you need independent state.
+    ///
+    /// # Concurrent calls under [`FilterStrategy::BruteForce`]
+    ///
+    /// The brute-force search runs its eight candidate streams on scoped threads (issue #624),
+    /// so a backend is offered them from several threads, one at a time through its mutex, in no
+    /// fixed order *across* candidates. Push order still decides who sees each stream first. If
+    /// one candidate fails, the encode returns the first failure in candidate order, but the other
+    /// candidates have already been offered to the backend by then.
     ///
     /// Takes `&mut self` and returns `&mut Self` — unlike the `with_*` builder setters — because a
     /// registry accumulates rather than replaces.
@@ -1690,11 +1764,10 @@ impl PngEncoder {
         };
         if matches!(self.filter, FilterStrategy::BruteForce) {
             // `min_by_key` keeps the *first* minimum, so a tie resolves to the earlier (more
-            // preferred) strategy — the behaviour the golden outputs are pinned to.
-            let candidates = BRUTE_FORCE_STRATEGIES
-                .into_iter()
-                .map(compress)
-                .collect::<Result<Vec<_>>>()?;
+            // preferred) strategy — the behaviour the golden outputs are pinned to. The trials run
+            // concurrently, but `run_trials` hands them back in candidate order, so which thread
+            // finished first never reaches the reduction.
+            let candidates = run_trials(&compress)?;
             Ok(candidates
                 .into_iter()
                 .min_by_key(Vec::len)
