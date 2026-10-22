@@ -99,10 +99,11 @@ pub const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
 /// once, and nothing here caps how many. Each trial's filtered copy is the whole image, so peak
 /// memory grows with image size times the number of concurrent candidates; the optimal-parse span
 /// bounds only the parse buffers. Measured on a square RGB photograph at [`Level::Best`] with the
-/// [`Preset::Smallest`] span, when the search still had seven candidates, a `BruteForce` encode's
-/// peak resident set was **2.4x to 3.4x** what the serial loop's was — `STATUS.md` carries the
-/// table. That is the trade the maintainer's
-/// decision on #624 accepted; a caller encoding near its memory limit should budget for it.
+/// [`Preset::Smallest`] span, a `BruteForce` encode's peak resident set with all eight candidates
+/// was **2.5x to 3.8x** what the serial loop's was — typical rather than a bound, since the
+/// concurrent peak depends on scheduling; `STATUS.md` carries the table. That is the trade the
+/// maintainer's decision on #624 accepted; a caller encoding near its memory limit should budget
+/// for it.
 ///
 /// No dependency is added for this (a maintainer decision on #624): `std::thread::scope` borrows
 /// the image without copying it, and one encode's eight trials are too few and too coarse for a
@@ -415,9 +416,9 @@ pub enum Preset {
     ///
     /// Also the most memory-hungry rung: the filter search's eight candidates run concurrently,
     /// each with its own whole-image filtered copy and 8 MiB-span parse, so peak memory grows with
-    /// image size times the candidate count. A 2048x2048 RGB photograph peaked near 680 MiB
-    /// resident where the same search run serially peaked near 210 MiB (both at refinement budget
-    /// 1, measured with seven candidates; `STATUS.md` has the table).
+    /// image size times the candidate count. A 2048x2048 RGB photograph peaked near 690 MiB
+    /// resident where the same search run serially peaked near 212 MiB (both at refinement budget
+    /// 1; `STATUS.md` has the table).
     Smallest = 3,
 }
 
@@ -450,12 +451,12 @@ struct PresetKnobs {
 /// [`FilterStrategy::BruteForce`] runs eight candidates concurrently (#624), each with its own
 /// filtered image and its own span-length buffers, so the rung's own peak is several times a
 /// single encode's. Measured for a whole `BruteForce` encode at this span, refinement budget 1,
-/// concurrent against the serial search it replaced, when the search had seven candidates:
-/// **261.8 against 77.3 MiB** at 1024x1024, **678.6 against 210.9 MiB** at 2048x2048, and
-/// **1266.1 against 517.3 MiB** at 4096x4096. The span bounds only each candidate's parse
-/// buffers: each candidate also holds a whole-image filtered copy (`filter::filter_image` in
-/// `compress_scanlines`), so the rung's peak memory is **not** bounded by the span — it grows with
-/// image size times the number of concurrent candidates.
+/// concurrent against the serial search it replaced: **294.6 against 77.3 MiB** at 1024x1024,
+/// **690.3 against 211.7 MiB** at 2048x2048, and **1293.9 against 517.2 MiB** at 4096x4096. The
+/// concurrent figures are typical rather than a bound, since they depend on scheduling. The span
+/// bounds only each candidate's parse buffers: each candidate also holds a whole-image filtered
+/// copy (`filter::filter_image` in `compress_scanlines`), so the rung's peak memory is **not**
+/// bounded by the span — it grows with image size times the number of concurrent candidates.
 ///
 /// Eight and not more, measured rather than picked: a wider span only helps an image whose
 /// *filtered* stream exceeds it, and the help saturates fast. At 8 MiB the span is the whole
