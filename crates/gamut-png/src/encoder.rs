@@ -57,7 +57,10 @@ const IDAT_MAX: usize = 1 << 16;
 ///
 /// [`FilterStrategy::MinTrialDeflate`] is last, so it changes a file only where it is strictly
 /// smaller than all seven before it (`experiments/480/`).
-const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
+///
+/// `pub` only so `stages` can re-export it to `benches/encode.rs`, whose serial arm must race
+/// exactly this list (issue #940); the module itself stays private.
+pub const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
     FilterStrategy::None,
     FilterStrategy::Fixed(FilterType::Sub),
     FilterStrategy::Fixed(FilterType::Up),

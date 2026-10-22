@@ -17,6 +17,7 @@
 //! bodies), so it carries no logic of its own to mutate."
 
 pub use crate::crc32::Crc32;
+pub use crate::encoder::BRUTE_FORCE_STRATEGIES;
 pub use crate::filter::filter_image;
 pub use crate::pack::pack_scanlines;
 pub use crate::reduce::{Reduced, Reductions, analyze8, analyze16};

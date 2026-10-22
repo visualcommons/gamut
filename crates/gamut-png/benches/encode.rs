@@ -325,24 +325,14 @@ fn encode_filter_strategy(bencher: Bencher, filter: FilterStrategy) {
         .bench_local(|| case.gamut(Level::Default, black_box(filter), false));
 }
 
-/// The eight whole-image candidates `BruteForce` races (`BRUTE_FORCE_STRATEGIES`, in its order).
-const BRUTE_FORCE_CANDIDATES: [FilterStrategy; 8] = [
-    FilterStrategy::None,
-    FilterStrategy::Fixed(FilterType::Sub),
-    FilterStrategy::Fixed(FilterType::Up),
-    FilterStrategy::Fixed(FilterType::Average),
-    FilterStrategy::Fixed(FilterType::Paeth),
-    FilterStrategy::MinSumAbs,
-    FilterStrategy::MinBigrams,
-    FilterStrategy::MinTrialDeflate,
-];
-
 /// What running `BruteForce`'s trials on scoped threads buys (issue #624), at the `Level::Best`
 /// the `Smallest` rung pairs it with.
 ///
 /// `serial` encodes the eight candidates one after another through the public API -- the work
 /// `BruteForce` did before #624, plus seven PNG framings that cost microseconds against eight
-/// DEFLATE streams. `brute_force` is the encoder's own race, which now runs them concurrently.
+/// DEFLATE streams. The candidates are the encoder's own `BRUTE_FORCE_STRATEGIES`, imported
+/// through `stages` rather than copied, so this arm cannot drift from the list `BruteForce`
+/// races (issue #940). `brute_force` is the encoder's own race, which now runs them concurrently.
 /// The ratio of the two is the win, and it is bounded by the slowest single candidate and by the
 /// cores available, not by eight.
 ///
@@ -355,7 +345,7 @@ fn brute_force_trials(bencher: Bencher, mode: &str) {
         .counter(BytesCount::new(case.raw_len()))
         .bench_local(|| {
             if mode == "serial" {
-                BRUTE_FORCE_CANDIDATES
+                gamut_png::stages::BRUTE_FORCE_STRATEGIES
                     .into_iter()
                     .map(|filter| case.gamut(Level::Best, black_box(filter), false))
                     .min_by_key(Vec::len)
