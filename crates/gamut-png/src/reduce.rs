@@ -104,7 +104,7 @@ pub enum Reduced {
     },
 }
 
-/// What [`analyze8_for`] / [`analyze16_for`] offer the encoder for one image.
+/// What `analyze8_for` / `analyze16_for` offer the encoder for one image.
 ///
 /// The estimate that ranks the candidates counts *raw* bytes, which does not predict compressed
 /// size: a palette's `PLTE` (and often `tRNS`) and a colour key's `tRNS` are flat, incompressible
@@ -286,7 +286,7 @@ fn colour_key(pixels: &[u8], channels: usize) -> Option<[u8; 4]> {
 /// and returns the lossless reductions that beat the input encoding — see `Reductions` for why
 /// that is one candidate or two rather than always one.
 ///
-/// The encoder itself calls [`analyze8_for`]; this `Family::Any` entry exists only for the unit
+/// The encoder itself calls `analyze8_for`; this `Family::Any` entry exists only for the unit
 /// tests and the `stages` re-export the benchmarks drive, so it is compiled only for them.
 #[cfg(any(test, feature = "test-support"))]
 pub fn analyze8(pixels: &[u8], channels: usize) -> Reductions {
@@ -471,7 +471,7 @@ pub(crate) fn analyze8_for(pixels: &[u8], channels: usize, family: Family) -> Re
 /// costs nothing.
 ///
 /// Compiled only for the unit tests and the `stages` re-export, as [`analyze8`] is; the encoder
-/// calls [`analyze16_for`].
+/// calls `analyze16_for`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn analyze16(samples: &[u16], channels: usize) -> Reductions {
     analyze16_for(samples, channels, Family::Any)
