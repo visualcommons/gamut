@@ -41,7 +41,7 @@ fn encoded_with_store() -> (Vec<u8>, gamut_tiff::TiffEncodeReport) {
     let mut bytes = Vec::new();
     let report = TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
-        .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
         .encode_with_report(image(&pixels, 17, 13), &mut bytes)
         .expect("encode");
     (bytes, report)
@@ -115,7 +115,7 @@ fn the_tile_path_places_the_store_too() {
     let report = TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
         .with_tiling(16, 16)
-        .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
         .encode_with_report(image(&pixels, 32, 32), &mut bytes)
         .expect("encode");
     let range = report.c2pa.expect("a store was written").store();
@@ -132,7 +132,7 @@ fn a_bigtiff_carries_the_store_with_its_wider_count_field() {
     let report = TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
         .with_big_tiff(true)
-        .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
         .encode_with_report(image(&pixels, 17, 13), &mut bytes)
         .expect("encode");
     let excl = report.c2pa.expect("a store was written");
@@ -157,7 +157,7 @@ fn the_palette_path_places_the_store_and_reports_it_through_the_locator() {
     let mut bytes = Vec::new();
     TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
-        .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
         .encode_palette8(
             ImageRef::<Indexed8>::new(
                 &indices,
@@ -196,7 +196,7 @@ fn a_multipage_document_puts_the_entry_in_its_last_page() {
     let mut bytes = Vec::new();
     TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
-        .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
+        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()))
         .encode_pages_rgb8(&[page, page], &mut bytes)
         .expect("encode");
     let file = read(&bytes).expect("read");
@@ -225,7 +225,7 @@ fn the_pixel_paths_that_pack_their_own_buffer_place_the_store_too() {
     };
     let encoder = TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
-        .with_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()));
+        .with_tiff_metadata(TiffMetadata::new().with_c2pa(STORE.to_vec()));
     let files = [
         (
             "the 16-bit path",

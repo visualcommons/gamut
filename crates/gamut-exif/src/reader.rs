@@ -102,8 +102,10 @@ impl ExifReader {
     /// malformed, or (in [`strict`](Self::strict) mode)
     /// [`ExifError::InvalidIfd`](crate::ExifError::InvalidIfd) when a sub-IFD pointer addresses a
     /// malformed directory or [`ExifError::BadThumbnail`](crate::ExifError::BadThumbnail) when the
-    /// 1st IFD's JPEG range is unusable — outside the blob, or an offset with no
-    /// `JPEGInterchangeFormatLength` to size it.
+    /// 1st IFD's thumbnail bytes are unusable: a JPEG range outside the blob, or an offset with no
+    /// `JPEGInterchangeFormatLength` to size it; or an uncompressed strip set with no
+    /// `StripByteCounts` entry to size each strip, a strip outside the blob, or strips whose
+    /// total length exceeds the blob.
     ///
     /// An offset inside an error message is a position in `bytes` — the buffer the caller handed
     /// in — so for a marked blob it counts the six-byte `Exif\0\0` marker. That is deliberately a

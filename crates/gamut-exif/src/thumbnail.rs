@@ -1,26 +1,34 @@
-//! The embedded thumbnail — the 1st IFD and, for a JPEG thumbnail, its compressed bytes.
+//! The embedded thumbnail — the 1st IFD and the image bytes it addresses.
 //!
 //! Virtually all EXIF thumbnails are JPEG (`Compression` = 6, with `JPEGInterchangeFormat` /
-//! `JPEGInterchangeFormatLength` pointing at the byte range). v1 extracts and re-embeds those
-//! losslessly. An uncompressed strip-based thumbnail is preserved on read as its directory
-//! ([`jpeg`](Thumbnail::jpeg) is `None`) but is **not** re-embedded on write — a documented v1
-//! limitation, since its `StripOffsets` array would need the same offset-patching machinery.
+//! `JPEGInterchangeFormatLength` pointing at the byte range). The rest are uncompressed
+//! (`Compression` = 1), their pixels held in strips addressed by the `StripOffsets` /
+//! `StripByteCounts` arrays (Exif 3.0 §4.6.9.2 Table 21's uncompressed columns). Both are
+//! extracted on read and re-embedded on write, the writer re-synthesising each offset; the model
+//! never stores an offset, since it is an address into one particular layout of the blob.
 
 use gamut_ifd::{Ifd, Value};
 
 use crate::tag::ExifTag;
 
-/// The image's embedded thumbnail: the 1st IFD's directory plus, for a JPEG thumbnail, its bytes.
+/// The image's embedded thumbnail: the 1st IFD's directory plus the image bytes it addresses — a
+/// JPEG thumbnail's compressed bytes, an uncompressed thumbnail's strips, or neither.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Thumbnail {
     ifd: Ifd,
     jpeg: Option<Vec<u8>>,
+    strips: Option<Vec<Vec<u8>>>,
 }
 
 impl Thumbnail {
-    /// Assembles a thumbnail from an already-parsed 1st IFD and its extracted JPEG bytes (if any).
-    pub(crate) fn from_parts(ifd: Ifd, jpeg: Option<Vec<u8>>) -> Self {
-        Self { ifd, jpeg }
+    /// Assembles a thumbnail from an already-parsed 1st IFD and the bytes extracted from it: the
+    /// JPEG range and the strips, each `None` when the directory addresses none (or none readable).
+    pub(crate) fn from_parts(
+        ifd: Ifd,
+        jpeg: Option<Vec<u8>>,
+        strips: Option<Vec<Vec<u8>>>,
+    ) -> Self {
+        Self { ifd, jpeg, strips }
     }
 
     /// Builds a JPEG thumbnail from its compressed bytes, synthesising the 1st IFD tags
@@ -40,6 +48,7 @@ impl Thumbnail {
         Self {
             ifd,
             jpeg: Some(jpeg),
+            strips: None,
         }
     }
 
@@ -58,6 +67,16 @@ impl Thumbnail {
     #[must_use]
     pub fn jpeg(&self) -> Option<&[u8]> {
         self.jpeg.as_deref()
+    }
+
+    /// The image strips of an uncompressed thumbnail, in `StripOffsets` order, each exactly the
+    /// bytes its `StripByteCounts` entry sized; `None` when the 1st IFD addresses no strips, or
+    /// when the strip set could not be read — which a parse report names as a
+    /// [`ThumbnailStrips`](crate::DroppedRegion::ThumbnailStrips) drop, and which strict mode
+    /// rejects. Either way the directory no longer holds `StripOffsets`.
+    #[must_use]
+    pub fn strips(&self) -> Option<&[Vec<u8>]> {
+        self.strips.as_deref()
     }
 
     /// The thumbnail's `Compression` tag (6 = JPEG, 1 = uncompressed), if present.
@@ -106,8 +125,10 @@ mod tests {
     fn uncompressed_thumbnail_has_no_jpeg() {
         let mut ifd = Ifd::new();
         ifd.set(ExifTag::Compression.tag_id(), Value::Short(vec![1]));
-        let thumb = Thumbnail::from_parts(ifd, None);
+        let strips = vec![vec![1, 2, 3], vec![4]];
+        let thumb = Thumbnail::from_parts(ifd, None, Some(strips.clone()));
         assert_eq!(thumb.jpeg(), None);
+        assert_eq!(thumb.strips(), Some(strips.as_slice()));
         assert_eq!(thumb.compression(), Some(1));
     }
 }

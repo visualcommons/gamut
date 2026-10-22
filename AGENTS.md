@@ -72,13 +72,16 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
 - **gamut-jpeg** — JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec: baseline sequential DCT
   Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF; opt-in jpegli-style XYB colour mode
   with a static vendored ICC profile), sequential/progressive decoder and progressive encoder
-  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, codec-abi, color,
-  dsp, metadata (optional, `metadata` feature).
+  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, bitstream (the T.81
+  Annex K.2 optimal-table builder and Annex C canonical codes), codec-abi, color, dsp, metadata
+  (optional, `metadata` feature).
 - **gamut-avif** ← av1, isobmff, core, color, codec-abi (pluggable `Av1StillEncoder`
-  codestream seam; `gamut-av1` is the implicit software tail).
-- **gamut-webp** — WebP codec. ← core, codec-abi, color, dsp, riff. Like gamut-png it carries
-  the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw `MetadataBlock`-ready payloads, so it does not
-  depend on the metadata facade.
+  codestream seam; `gamut-av1` is the implicit software tail), metadata (optional, `metadata`
+  feature).
+- **gamut-webp** — WebP codec. ← core, codec-abi, color, dsp, riff, metadata (optional,
+  `metadata` feature). Like gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw
+  `MetadataBlock`-ready payloads, and wires them to the facade's typed models only behind that
+  feature.
 - **gamut-heic** — decode-only HEIF/HEIC container: full-fidelity byte-accounting parse
   (every input byte maps to a box, appended motion-photo stream, or explicit trailer), typed
   `hvcC`/NAL layer, pluggable `HevcDecoder` hook for platform HEVC decoders (HEVC bitstream
@@ -96,7 +99,8 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
   decoder's conformance fixtures. ← core, codec-abi, deflate, `miniz_oxide` (for inflate),
   `crc32fast` (**maintainer-approved** for the chunk CRC that every encode pays on its critical
   path — hardware CRC-32 on x86-64/aarch64, table fallback elsewhere including wasm32, and it
-  keeps its `unsafe` to itself, so gamut-png stays `#![deny(unsafe_code)]`).
+  keeps its `unsafe` to itself, so gamut-png stays `#![deny(unsafe_code)]`), metadata
+  (optional, `metadata` feature).
 - **gamut-ifd** — TIFF/IFD container core (byte order, field types, IFD read/write); a
   low-level container primitive (sibling to bitstream), shared by `gamut-tiff` and EXIF
   metadata. ← core. Optional `bigtiff` feature adds 64-bit BigTIFF. The per-format metadata
@@ -116,7 +120,8 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
 - **gamut-tiff** — natively still-image TIFF 6.0; its IFD/tag container is the shared
   **gamut-ifd** primitive (with `bigtiff`), not isobmff/riff. Adds pixel modes plus
   compressions (None/PackBits/LZW/CCITT/Deflate; JPEG-in-TIFF deferred). ← ifd, core,
-  bitstream, deflate (Deflate encode), `miniz_oxide` (Deflate decode).
+  bitstream, deflate (Deflate encode), `miniz_oxide` (Deflate decode), metadata (optional,
+  `metadata` feature).
 - **gamut-dng** — DNG (Adobe Digital Negative) 1.7.1 raw encoder + decoder, a TIFF/EP
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw
   photometry, uncompressed/Deflate/lossless-JPEG/JPEG XL, colour-calibration profile,

@@ -16,8 +16,16 @@
 //! - [`pack_msb_rows`] / [`unpack_msb_rows`] — MSB-first packing of fixed-width integer samples into
 //!   byte-aligned rows, the sub-byte sample layout shared by the TIFF-family raw formats.
 //!
-//! The forward-looking ANS / Huffman coders named in the workspace plan (for AV2 / JPEG XL) are
-//! not implemented yet; they will join this crate behind their own modules.
+//! And the table side of length-limited canonical Huffman coding, in the ITU-T T.81 form
+//! (`references/jpeg/itu-t81.pdf`) that JPEG and lossless JPEG (and so DNG) share:
+//!
+//! - [`build_optimal_table`] — the Annex K.2 optimal 16-bit length-limited table over measured
+//!   symbol frequencies, for any alphabet of at most 256 symbols, as a `(BITS, HUFFVAL)` pair.
+//! - [`CanonicalCodes`] — the Annex C canonical `(code, length)` of every symbol of a
+//!   `(BITS, HUFFVAL)` pair.
+//!
+//! The forward-looking ANS coders and the JPEG XL prefix codes named in the workspace plan (for
+//! AV2 / JPEG XL) are not implemented yet; they will join this crate behind their own modules.
 #![forbid(unsafe_code)]
 
 // Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
@@ -27,12 +35,14 @@ struct ReadmeDoctests;
 
 mod bitreader;
 mod bitwriter;
+mod huffman;
 mod leb128;
 mod samplepack;
 mod symbol;
 
 pub use bitreader::BitReader;
 pub use bitwriter::BitWriter;
+pub use huffman::{CanonicalCodes, build_optimal_table};
 pub use leb128::{leb128_len, write_leb128};
 pub use samplepack::{pack_msb_rows, row_bytes, unpack_msb_rows};
 pub use symbol::{SymbolDecoder, SymbolEncoder};

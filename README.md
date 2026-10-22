@@ -88,11 +88,12 @@ profiles `gamut-icc` parses — conformance-gated against Little-CMS, though sti
 on throughput — and is the one crate here not yet on crates.io.
 
 The long-term goal is de-facto, fully-featured implementations — for EXIF, exiftool-class tag
-coverage — and today's crates do not reach it yet. The largest gap is reach rather than depth:
-the `gamut-metadata` facade is consumed by `gamut-dng` and the umbrella only, so every other
-format crate still carries EXIF/XMP/ICC as raw byte blocks instead of calling the typed path.
-Behind that sit per-vendor MakerNote payloads, which round-trip verbatim but are not decoded, and
-tag breadth beyond the standard dictionary. Issue #416 tracks the whole gap, measured.
+coverage — and today's crates do not reach it yet. The `gamut-metadata` facade now reaches every
+container format: `gamut-dng` depends on it outright, and `gamut-jpeg`, `gamut-jxl`, `gamut-heic`,
+`gamut-png`, `gamut-webp`, `gamut-avif` and `gamut-tiff` wire it behind an optional `metadata`
+feature (a `TypedMetadata` impl and a `with_metadata` encoder builder where the crate encodes).
+The remaining gap is depth: per-vendor MakerNote payloads, which round-trip verbatim but are not
+decoded, and tag breadth beyond the standard dictionary. Issue #416 tracks the whole gap, measured.
 
 **gamut is image-first.** Even where a format's codec (AV1, AV2, VVC, HEVC) is fundamentally a
 video codec, gamut implements only the intra-frame, still-image subset those formats use — no
@@ -129,7 +130,7 @@ why; deciding that comparison needs the network, so it is stated there rather th
 | `gamut-core`      | Core traits (`EncodeImage`/`DecodeImage`), image buffers, dimensions, errors, `convert` | stable (v2; v1 under #177), pixel conversion added by #268 |
 | `gamut-color`     | Coded-plane bit depths and chroma subsampling, CICP code points and planar buffers, the `ycbcr` matrixing layer (H.273, plus the libwebp-exact BT.601 one VP8 needs), and the `f64` colour science (transfer, Lab/OKLab, XYB, `matrix`/`linalg`, gamut map, CCT, profile) | stable (v2; v1 under #179); the colour science is Tier-1 `f64`, not bit-reproducible |
 | `gamut-dsp`       | Shared DSP kernels: AV1 DCT/ADST/identity/WHT, the JPEG 8×8 forward/inverse DCT, quantization rounding | stable (v2; v1 under #192)             |
-| `gamut-bitstream` | Bit readers/writers, LEB128, the AV1 §8.2 symbol (arithmetic) coder, MSB-first sample packing | v0.2, no v1 release issue yet; the ANS and Huffman coders are not implemented |
+| `gamut-bitstream` | Bit readers/writers, LEB128, the AV1 §8.2 symbol (arithmetic) coder, MSB-first sample packing, the T.81 Annex K.2 Huffman table builder and Annex C canonical codes | v0.2, no v1 release issue yet; the ANS and JPEG XL prefix coders are not implemented |
 | `gamut-tonemap`   | Tone-mapping curves for HDR→SDR: the `ToneCurve` trait over the Linear, Clamp, Exposure, Reinhard, ReinhardExtended, ACES, Hable and Drago operators | stable (v1, #188); surface frozen |
 | `gamut-codec-abi` | Shared codestream-backend seam: `repr(C)` vtables, their object-safe Rust twins, and the registry fallback *contract*; this crate declares no registry — each host crate that offers a seam keeps its own | consumed by `gamut`, `gamut-avif`, `gamut-ffi`, `gamut-heic`, `gamut-jpeg`, `gamut-jxl`, `gamut-png` and `gamut-webp`; the umbrella's edge is optional, behind Cargo feature `codec-abi` |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | stable (v2); structure only, codestream carried opaquely |

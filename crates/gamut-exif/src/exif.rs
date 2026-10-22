@@ -349,7 +349,7 @@ impl Exif {
             IfdKind::Interop => self.interop.get_or_insert_with(Ifd::new),
             IfdKind::Thumbnail => self
                 .thumbnail
-                .get_or_insert_with(|| Thumbnail::from_parts(Ifd::new(), None))
+                .get_or_insert_with(|| Thumbnail::from_parts(Ifd::new(), None, None))
                 .ifd_mut(),
         }
     }

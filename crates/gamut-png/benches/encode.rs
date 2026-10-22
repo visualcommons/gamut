@@ -260,8 +260,8 @@ fn print_stage_table() {
 fn print_heuristic_table() {
     println!(
         "\nper-scanline filter heuristic, IDAT bytes at Level::Best (lower is better):\n\n\
-         {:<17} {:>10} {:>10} {:>10}  winner",
-        "input", "MinSumAbs", "Entropy", "Bigrams"
+         {:<17} {:>10} {:>10} {:>10} {:>10}  winner",
+        "input", "MinSumAbs", "Entropy", "Bigrams", "Trial"
     );
     for case in corpus() {
         let of = |filter| {
@@ -270,26 +270,29 @@ fn print_heuristic_table() {
                 .expect("gamut's own output deconstructs")
                 .idat_compressed
         };
-        let (msa, ent, big) = (
-            of(FilterStrategy::MinSumAbs),
-            of(FilterStrategy::MinEntropy),
-            of(FilterStrategy::MinBigrams),
-        );
-        let best = msa.min(ent).min(big);
-        // A three-way tie is a real outcome on incompressible input, and naming the first
-        // heuristic the winner there would record a preference the measurement did not find.
-        let winner = if msa == ent && ent == big {
-            "tie"
-        } else if best == msa {
-            "MinSumAbs"
-        } else if best == ent {
-            "Entropy"
-        } else {
-            "Bigrams"
-        };
+        let sizes = [
+            ("MinSumAbs", of(FilterStrategy::MinSumAbs)),
+            ("Entropy", of(FilterStrategy::MinEntropy)),
+            ("Bigrams", of(FilterStrategy::MinBigrams)),
+            ("Trial", of(FilterStrategy::MinTrialDeflate)),
+        ];
+        let best = sizes.iter().map(|&(_, n)| n).min().unwrap_or_default();
+        let winners: Vec<&str> = sizes
+            .iter()
+            .filter(|&&(_, n)| n == best)
+            .map(|&(name, _)| name)
+            .collect();
+        // A tie for the minimum is a real outcome (all four tie on incompressible input), and
+        // naming the first heuristic the winner there would record a preference the measurement
+        // did not find, so every tied heuristic is named.
         println!(
-            "{:<17} {:>10} {:>10} {:>10}  {winner}",
-            case.name, msa, ent, big
+            "{:<17} {:>10} {:>10} {:>10} {:>10}  {}",
+            case.name,
+            sizes[0].1,
+            sizes[1].1,
+            sizes[2].1,
+            sizes[3].1,
+            winners.join(" = ")
         );
     }
 }
@@ -322,8 +325,8 @@ fn encode_filter_strategy(bencher: Bencher, filter: FilterStrategy) {
         .bench_local(|| case.gamut(Level::Default, black_box(filter), false));
 }
 
-/// The seven whole-image candidates `BruteForce` races (`BRUTE_FORCE_STRATEGIES`, in its order).
-const BRUTE_FORCE_CANDIDATES: [FilterStrategy; 7] = [
+/// The eight whole-image candidates `BruteForce` races (`BRUTE_FORCE_STRATEGIES`, in its order).
+const BRUTE_FORCE_CANDIDATES: [FilterStrategy; 8] = [
     FilterStrategy::None,
     FilterStrategy::Fixed(FilterType::Sub),
     FilterStrategy::Fixed(FilterType::Up),
@@ -331,16 +334,17 @@ const BRUTE_FORCE_CANDIDATES: [FilterStrategy; 7] = [
     FilterStrategy::Fixed(FilterType::Paeth),
     FilterStrategy::MinSumAbs,
     FilterStrategy::MinBigrams,
+    FilterStrategy::MinTrialDeflate,
 ];
 
 /// What running `BruteForce`'s trials on scoped threads buys (issue #624), at the `Level::Best`
 /// the `Smallest` rung pairs it with.
 ///
-/// `serial` encodes the seven candidates one after another through the public API -- the work
-/// `BruteForce` did before #624, plus six PNG framings that cost microseconds against seven
+/// `serial` encodes the eight candidates one after another through the public API -- the work
+/// `BruteForce` did before #624, plus seven PNG framings that cost microseconds against eight
 /// DEFLATE streams. `brute_force` is the encoder's own race, which now runs them concurrently.
 /// The ratio of the two is the win, and it is bounded by the slowest single candidate and by the
-/// cores available, not by seven.
+/// cores available, not by eight.
 ///
 /// Seconds per iteration at this level and size, so the sample count is pinned low: divan's
 /// default of 100 would spend most of an hour here.

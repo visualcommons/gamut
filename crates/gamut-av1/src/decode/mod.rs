@@ -342,8 +342,8 @@ pub(crate) mod testutil {
     use crate::decode::header::tile_log2;
     use crate::headers::{Av1Colour, Av1StillConfig};
 
-    /// The `color_config()` (§5.5.2) a [`StillBuilder`] codes. Both forms are 8-bit with three
-    /// planes; they differ in the chroma subsampling, which several later syntax conditions read.
+    /// The `color_config()` (§5.5.2) a [`StillBuilder`] codes. Every form is 8-bit; they differ in
+    /// the chroma subsampling and the plane count, which several later syntax conditions read.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum BuilderColour {
         /// `seq_profile = 1` plus the §5.5.2 sRGB shortcut: 4:4:4, full range, nothing else coded.
@@ -351,6 +351,11 @@ pub(crate) mod testutil {
         /// `seq_profile = 0` with an unspecified colour description: 4:2:0, so `subsampling_x`
         /// and `subsampling_y` are both 1.
         Yuv420,
+        /// `seq_profile = 2` at 8 bits with an unspecified colour description: §5.5.2 infers
+        /// 4:2:2 for any profile-2 depth but 12, so `subsampling_x` is 1 and `subsampling_y` 0.
+        Yuv422,
+        /// `seq_profile = 0` with `mono_chrome = 1`: one plane, so `NumPlanes` is 1.
+        Monochrome,
     }
 
     impl BuilderColour {
@@ -358,7 +363,8 @@ pub(crate) mod testutil {
         const fn seq_profile(self) -> u32 {
             match self {
                 Self::Srgb444 => 1,
-                Self::Yuv420 => 0,
+                Self::Yuv420 | Self::Monochrome => 0,
+                Self::Yuv422 => 2,
             }
         }
 
@@ -366,8 +372,14 @@ pub(crate) mod testutil {
         const fn subsampling(self) -> (u32, u32) {
             match self {
                 Self::Srgb444 => (0, 0),
-                Self::Yuv420 => (1, 1),
+                Self::Yuv420 | Self::Monochrome => (1, 1),
+                Self::Yuv422 => (1, 0),
             }
+        }
+
+        /// Whether `NumPlanes` is 3 rather than 1.
+        const fn has_chroma(self) -> bool {
+            !matches!(self, Self::Monochrome)
         }
     }
 
@@ -437,6 +449,9 @@ pub(crate) mod testutil {
         pub tile_cols_log2: u32,
         /// See [`tile_cols_log2`](Self::tile_cols_log2).
         pub tile_rows_log2: u32,
+        /// `context_update_tile_id`, coded in `TileRowsLog2 + TileColsLog2` bits whenever the
+        /// grid has more than one tile. It may name a tile past the grid, which the parser refuses.
+        pub context_update_tile_id: u32,
         /// Explicit tile sizes in superblocks as `(per column, per row)`, coding
         /// `uniform_tile_spacing_flag = 0` and an `ns()` size for every tile. `None` codes the
         /// uniform branch from [`tile_cols_log2`](Self::tile_cols_log2) /
@@ -445,6 +460,9 @@ pub(crate) mod testutil {
         /// `enable_cdef` in the sequence header. A `CodedLossless` frame must still skip
         /// `cdef_params()` when this is set (§5.9.19).
         pub enable_cdef: bool,
+        /// `cdef_bits`, coded when the frame is not `CodedLossless` and
+        /// [`enable_cdef`](Self::enable_cdef) is set: `1 << cdef_bits` strength sets follow.
+        pub cdef_bits: u32,
         /// `enable_restoration` in the sequence header. An `AllLossless` frame must still skip
         /// `lr_params()` when this is set (§5.9.20).
         pub enable_restoration: bool,
@@ -496,8 +514,10 @@ pub(crate) mod testutil {
                 render_size: None,
                 tile_cols_log2: 0,
                 tile_rows_log2: 0,
+                context_update_tile_id: 0,
                 explicit_tiles: None,
                 enable_cdef: false,
+                cdef_bits: 0,
                 enable_restoration: false,
                 intra_only: false,
                 refresh_frame_flags: 0xff,
@@ -595,8 +615,23 @@ pub(crate) mod testutil {
                     // chroma_sample_position coded.
                     w.put_bits(0, 2); // chroma_sample_position = CSP_UNKNOWN
                 }
+                BuilderColour::Yuv422 => {
+                    w.put_bit(0); // mono_chrome
+                    w.put_bit(0); // color_description_present_flag -> all three unspecified
+                    w.put_bit(0); // color_range
+                    // An 8-bit seq_profile 2 infers 4:2:2 and codes no subsampling bits; only
+                    // 4:2:0 codes chroma_sample_position.
+                }
+                BuilderColour::Monochrome => {
+                    w.put_bit(1); // mono_chrome
+                    w.put_bit(0); // color_description_present_flag -> all three unspecified
+                    w.put_bit(0); // color_range
+                }
             }
-            w.put_bit(0); // separate_uv_delta_q
+            if self.colour.has_chroma() {
+                // A monochrome color_config() returns straight after color_range.
+                w.put_bit(0); // separate_uv_delta_q
+            }
             w.put_bit(u8::from(self.film_grain.is_some())); // film_grain_params_present
             w.put_bit(1); // trailing_bits
             w.byte_align();
@@ -681,8 +716,11 @@ pub(crate) mod testutil {
             // quantization_params() (§5.9.12): no DeltaQ*, no quantizer matrix.
             w.put_bits(u32::from(self.base_q_idx), 8);
             w.put_bit(0); // DeltaQYDc delta_coded
-            w.put_bit(0); // DeltaQUDc delta_coded
-            w.put_bit(0); // DeltaQUAc delta_coded
+            if self.colour.has_chroma() {
+                // separate_uv_delta_q is 0, so diff_uv_delta is inferred and V shares U's deltas.
+                w.put_bit(0); // DeltaQUDc delta_coded
+                w.put_bit(0); // DeltaQUAc delta_coded
+            }
             w.put_bit(0); // using_qmatrix
             w.put_bit(0); // segmentation_enabled
             // With no segment deltas and no DeltaQ*, CodedLossless is exactly `base_q_idx == 0` —
@@ -692,7 +730,7 @@ pub(crate) mod testutil {
                 w.put_bit(0); // delta_q_present
                 self.loop_filter_params(&mut w);
                 if self.enable_cdef {
-                    Self::cdef_params(&mut w);
+                    self.cdef_params(&mut w);
                 }
                 if self.enable_restoration {
                     self.lr_params(&mut w);
@@ -726,9 +764,9 @@ pub(crate) mod testutil {
         fn loop_filter_params(&self, w: &mut BitWriter) {
             w.put_bits(u32::from(self.loop_filter_level[0]), 6);
             w.put_bits(u32::from(self.loop_filter_level[1]), 6);
-            // NumPlanes is 3 for every colour this builder codes, so only the luma-level test
-            // decides whether the chroma levels are coded.
-            if self.loop_filter_level[0] != 0 || self.loop_filter_level[1] != 0 {
+            if self.colour.has_chroma()
+                && (self.loop_filter_level[0] != 0 || self.loop_filter_level[1] != 0)
+            {
                 w.put_bits(u32::from(self.loop_filter_level[2]), 6);
                 w.put_bits(u32::from(self.loop_filter_level[3]), 6);
             }
@@ -736,21 +774,27 @@ pub(crate) mod testutil {
             w.put_bit(0); // loop_filter_delta_enabled
         }
 
-        /// `cdef_params()` (§5.9.19): one strength set, every strength zero.
-        fn cdef_params(w: &mut BitWriter) {
+        /// `cdef_params()` (§5.9.19): `1 << cdef_bits` strength sets, each strength set to its
+        /// index plus one so a set read twice or skipped shows in the parsed values.
+        fn cdef_params(&self, w: &mut BitWriter) {
             w.put_bits(0, 2); // cdef_damping_minus_3
-            w.put_bits(0, 2); // cdef_bits
-            w.put_bits(0, 4); // cdef_y_pri_strength[0]
-            w.put_bits(0, 2); // cdef_y_sec_strength[0]
-            w.put_bits(0, 4); // cdef_uv_pri_strength[0]
-            w.put_bits(0, 2); // cdef_uv_sec_strength[0]
+            w.put_bits(self.cdef_bits, 2);
+            for i in 0..(1u32 << self.cdef_bits) {
+                w.put_bits(i + 1, 4); // cdef_y_pri_strength[i]
+                w.put_bits(0, 2); // cdef_y_sec_strength[i]
+                if self.colour.has_chroma() {
+                    w.put_bits(i + 1, 4); // cdef_uv_pri_strength[i]
+                    w.put_bits(0, 2); // cdef_uv_sec_strength[i]
+                }
+            }
         }
 
         /// `lr_params()` (§5.9.20) for a frame that is not `AllLossless`.
         fn lr_params(&self, w: &mut BitWriter) {
             let mut uses_lr = false;
             let mut uses_chroma_lr = false;
-            for (plane, &kind) in self.lr.types.iter().enumerate() {
+            let planes = if self.colour.has_chroma() { 3 } else { 1 };
+            for (plane, &kind) in self.lr.types.iter().take(planes).enumerate() {
                 w.put_bits(kind, 2); // lr_type
                 if kind != 0 {
                     uses_lr = true;
@@ -787,10 +831,13 @@ pub(crate) mod testutil {
                 w.put_bits(0, 8); // point_y_value
                 w.put_bits(0, 8); // point_y_scaling
             }
-            // mono_chrome is 0 for every colour this builder codes, so the flag is always coded.
-            w.put_bit(u8::from(grain.chroma_scaling_from_luma));
+            let mono = !self.colour.has_chroma();
+            if !mono {
+                w.put_bit(u8::from(grain.chroma_scaling_from_luma));
+            }
             let (ssx, ssy) = self.colour.subsampling();
-            let codes_chroma_points = !grain.chroma_scaling_from_luma
+            let codes_chroma_points = !mono
+                && !grain.chroma_scaling_from_luma
                 && !(ssx == 1 && ssy == 1 && grain.num_y_points == 0);
             let (num_cb_points, num_cr_points) = if codes_chroma_points {
                 w.put_bits(grain.num_cb_points, 4);
@@ -901,7 +948,7 @@ pub(crate) mod testutil {
                 let cols_log2 = tile_log2(1, cols.len() as u32);
                 let rows_log2 = tile_log2(1, rows.len() as u32);
                 if cols_log2 > 0 || rows_log2 > 0 {
-                    w.put_bits(0, rows_log2 + cols_log2); // context_update_tile_id
+                    w.put_bits(self.context_update_tile_id, rows_log2 + cols_log2);
                     w.put_bits(0, 2); // tile_size_bytes_minus_1 => TileSizeBytes = 1
                 }
                 return;
@@ -928,7 +975,7 @@ pub(crate) mod testutil {
                 rows_log2 += 1;
             }
             if cols_log2 > 0 || rows_log2 > 0 {
-                w.put_bits(0, rows_log2 + cols_log2); // context_update_tile_id
+                w.put_bits(self.context_update_tile_id, rows_log2 + cols_log2);
                 w.put_bits(0, 2); // tile_size_bytes_minus_1 => TileSizeBytes = 1
             }
         }

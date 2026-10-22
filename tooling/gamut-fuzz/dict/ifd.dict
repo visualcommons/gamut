@@ -1,0 +1,88 @@
+# libFuzzer dictionary for the TIFF/IFD parser targets (issue #567): `ifd_read` and `tiff_decode`
+# load it alone, `dng_decode` loads it with `dng.dict` appended (see `run.sh`). One token per
+# line, libFuzzer's `name="value"` syntax with `\xNN` escapes.
+#
+# Every multi-byte token appears twice, little-endian (`_le`, an `II` file) and big-endian (`_be`,
+# an `MM` file): the real-camera files this was distilled from use both byte orders, and a tag ID
+# the engine can only splice in one order reaches half the parser.
+#
+# The selection is what a byte-level mutator is slowest to rediscover by itself: the headers, the
+# field types only BigTIFF and sub-IFD trees use, the pointer tags `ifd_read` follows into child
+# IFDs, and the image-layout tags `gamut-tiff` reads. DNG-specific tags, MakerNote magics and
+# opcode IDs are in `dng.dict`.
+
+# ── Headers (TIFF 6.0 §2; BigTIFF: version 43, offset size 8, reserved 0) ──────────────────────
+header_le="II*\x00"
+header_be="MM\x00*"
+bigtiff_header_le="II+\x00\x08\x00\x00\x00"
+bigtiff_header_be="MM\x00+\x00\x08\x00\x00"
+
+# ── Field types beyond TIFF 6.0's twelve: IFD (13), and BigTIFF's LONG8/SLONG8/IFD8 (16-18) ─────
+type_ifd_le="\x0D\x00"
+type_ifd_be="\x00\x0D"
+type_long8_le="\x10\x00"
+type_long8_be="\x00\x10"
+type_slong8_le="\x11\x00"
+type_slong8_be="\x00\x11"
+type_ifd8_le="\x12\x00"
+type_ifd8_be="\x00\x12"
+
+# ── Pointer tags: SubIFDs, ExifIFD, GPSInfo, InteroperabilityIFD ────────────────────────────────
+sub_ifds_le="\x4A\x01"
+sub_ifds_be="\x01\x4A"
+exif_ifd_le="\x69\x87"
+exif_ifd_be="\x87\x69"
+gps_info_le="\x25\x88"
+gps_info_be="\x88\x25"
+interoperability_ifd_le="\x05\xA0"
+interoperability_ifd_be="\xA0\x05"
+
+# ── Image layout (TIFF 6.0 baseline and extensions) ───────────────────────────────────────────
+new_subfile_type_le="\xFE\x00"
+new_subfile_type_be="\x00\xFE"
+image_width_le="\x00\x01"
+image_width_be="\x01\x00"
+# ImageLength is 257 = 0x0101, the same two bytes in either order.
+image_length="\x01\x01"
+bits_per_sample_le="\x02\x01"
+bits_per_sample_be="\x01\x02"
+compression_le="\x03\x01"
+compression_be="\x01\x03"
+photometric_interpretation_le="\x06\x01"
+photometric_interpretation_be="\x01\x06"
+strip_offsets_le="\x11\x01"
+strip_offsets_be="\x01\x11"
+samples_per_pixel_le="\x15\x01"
+samples_per_pixel_be="\x01\x15"
+rows_per_strip_le="\x16\x01"
+rows_per_strip_be="\x01\x16"
+strip_byte_counts_le="\x17\x01"
+strip_byte_counts_be="\x01\x17"
+planar_configuration_le="\x1C\x01"
+planar_configuration_be="\x01\x1C"
+predictor_le="\x3D\x01"
+predictor_be="\x01\x3D"
+color_map_le="\x40\x01"
+color_map_be="\x01\x40"
+tile_width_le="\x42\x01"
+tile_width_be="\x01\x42"
+tile_length_le="\x43\x01"
+tile_length_be="\x01\x43"
+tile_offsets_le="\x44\x01"
+tile_offsets_be="\x01\x44"
+tile_byte_counts_le="\x45\x01"
+tile_byte_counts_be="\x01\x45"
+extra_samples_le="\x52\x01"
+extra_samples_be="\x01\x52"
+sample_format_le="\x53\x01"
+sample_format_be="\x01\x53"
+
+# ── Embedded-metadata tags: XMP, IPTC-NAA, ICC profile, MakerNote ─────────────────────────────
+xmp_le="\xBC\x02"
+xmp_be="\x02\xBC"
+iptc_naa_le="\xBB\x83"
+iptc_naa_be="\x83\xBB"
+icc_profile_le="\x73\x87"
+icc_profile_be="\x87\x73"
+maker_note_le="\x7C\x92"
+maker_note_be="\x92\x7C"

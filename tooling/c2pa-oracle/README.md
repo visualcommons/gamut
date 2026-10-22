@@ -2,7 +2,7 @@
 
 Dev-only differential oracle against [`c2pa-rs`](https://github.com/contentauth/c2pa-rs), the C2PA
 reference implementation, for the container half of the C2PA epic (issue #239, this crate is issue
-#447).
+#447; the non-BMFF containers — PNG, RIFF/WebP, TIFF and DNG — are issue #534).
 
 Not a member of the gamut workspace — it is listed under `[workspace].exclude` in the root
 manifest and nothing depends on it, so `cargo build`/`test --workspace` never reaches it. Run it by
@@ -21,7 +21,9 @@ Being workspace-`exclude`d with no dependents, this crate is invisible to
 mirroring `check-dng-real`/`test-dng-real`
 ([issue #541](https://github.com/visualcommons/gamut/issues/541)): `check-c2pa` runs on every pull
 request in `ci.yml`'s `lint` job, and `test-c2pa` runs post-merge on master in `extended.yml`'s
-`c2pa` job. A pull request that touches `gamut-avif` or `gamut-heic` is therefore compile-checked
+`c2pa` job. A pull request that touches any of the eight `gamut-*` crates this one dev-depends on
+(`gamut-avif`, `gamut-heic`, `gamut-png`, `gamut-webp`, `gamut-tiff`, `gamut-dng`, `gamut-core`,
+`gamut-metadata`) is therefore compile-checked
 against this crate, but its differentials run only after merge: run `mise run test-c2pa` by hand
 before merging such a change.
 
@@ -44,6 +46,42 @@ in both directions.
 | a derivative carries no parent store | `tests/no_copy_forward.rs` | the parent's located store, carried through `gamut-metadata`'s `C2paPolicy` and into a re-encode, reads back as **unsigned** (`JumbfNotFound`) |
 | the build stays crypto-free where it must | `tests/build_configuration.rs` | the `c2pa` dependency never regains its default `openssl` feature, in the manifest and in the resolved graph |
 | the one BMFF layout gamut cannot discriminate | `tests/update_manifest.rs` | what c2pa-rs actually emits for `box_purpose = update` — see below |
+| PNG `caBX` (§A.3.2), both directions | `tests/png.rs` | a store signed around the chunk span `PngEncoder::encode_with_report` gave validates once `fill_c2pa` writes it, and signing around the payload alone does not; `gamut-png` locates c2pa-rs's store at its JUMBF span, and the chunk span is the exclusion c2pa-rs wrote |
+| RIFF/WebP `C2PA` chunk (§A.3.7), both directions | `tests/riff_webp.rs` | a store signed around the span `WebpEncoder::encode_with_report` gave validates once a same-length re-encode carries it; `gamut-webp` locates c2pa-rs's store at its JUMBF span, and c2pa-rs's exclusion is the header-inclusive span `gamut-riff` reports — see below |
+| TIFF and DNG tag 52545 (§A.3.6), both directions | `tests/dng_tiff.rs` | a store signed around the two ranges each encoder reports validates once copied in; each locator finds c2pa-rs's store at its JUMBF span, and c2pa-rs's two exclusions are exactly the store and `count`-field ranges gamut locates (§18.5.5) |
+| `gamut inspect`'s C2PA report, on a file c2pa-rs embedded into | `tests/inspect_report.rs` | each container's `c2pa_summary` (PNG, WebP, TIFF, DNG, AVIF, HEIC) reports the store at the span its own JUMBF header declares, and the data-hashed ones report exactly the exclusions c2pa-rs wrote; the built `gamut inspect --output json` prints the same size, offsets and PNG chunk — see below |
+| remote provenance (§11.5), both directions | `tests/remote_provenance.rs` | a PNG carrying no store and a `dcterms:provenance` URL — written by c2pa-rs, or by gamut — is `ProvenanceState::Remote` at that URL to `Metadata::provenance` and remote at the same URL to c2pa-rs; the store signed for the URL binds to the asset; an embedded store is remote to neither — see below |
+
+The four rows above are the `c2pa.hash.data` containers. Their direction-1 driver,
+`reserve_then_fill_data_hashed`, differs from the BMFF one in the one way the binding forces: a
+data hash excludes **byte ranges**, not a box path, so the ranges come from the gamut crate's own
+report and go to `Builder::set_data_hash_exclusions` unchanged. The exclusion set is therefore
+itself under test — a range that misses a byte the fill rewrites leaves that byte digested, and the
+filled file stops validating, which is exactly what the PNG payload-only test shows for the chunk
+CRC. c2pa-rs is asked to compose its store as a bare `application/c2pa` store, because each gamut
+crate writes its own framing and c2pa-rs's RIFF handler has no composer at all.
+
+JPEG (§A.3.1, APP11) is not covered: issue #441 descoped JPEG C2PA carriage, so there is no gamut
+surface to cross-check.
+
+## The inspect report and remote provenance (#846)
+
+`gamut inspect` computes nothing of its own about a store: it prints each format crate's
+`c2pa_summary`. `tests/inspect_report.rs` therefore holds every summary to c2pa-rs directly, and
+runs the command once, on a PNG, to show the numbers survive the trip to stdout. `gamut-cli` is a
+binary crate with no library to link and a dev-dependency cannot name a binary, so that test runs
+the `gamut` executable by path: the one `GAMUT_BIN` names, or one it builds from this checkout with
+`cargo build --locked -p gamut-cli` into its own `CARGO_TARGET_TMPDIR`. That build is the one thing
+in this crate that is not pure Rust — `gamut-cli` takes the umbrella's `all` feature and with it
+`gamut-jxl`'s statically built libjxl encoder — so it needs the CMake and C++ toolchain the
+workspace build already needs; every other test here still needs none.
+
+`Reader::remote_url` reports a URL only once c2pa-rs has *fetched* the store from it, which takes its
+`fetch_remote_manifests` feature and a network; this crate has neither. Without them c2pa 0.90.21
+reports the same URL — the `dcterms:provenance` value its own XMP reader found — as
+`Error::RemoteManifestUrl` (`src/store.rs:3540-3563`), and `remote_manifest_url` in `src/lib.rs`
+reads that. What a fetch would return is checked in its place: the store c2pa-rs signed for the URL
+validates against the asset carrying the reference.
 
 ## The `update`-purpose finding
 
@@ -121,9 +159,47 @@ On that file (`tests/reserve_then_fill.rs`, `tests/locate_embedded.rs`):
 Whether gamut should reserve padded slots on its own account is a separate question this fixture
 does not answer; it covers a configuration a signer produces.
 
+## The WebP finding
+
+`gamut_riff::c2pa_span` — and so `WebpEncodeReport::c2pa` — reports the `C2PA` chunk **with** its
+eight-byte header, and its own documentation records an open question: C2PA 2.4 §18.5.1 says a
+data-hash exclusion "shall not overlap with any header or length field associated with that unit",
+which as written points at the payload alone, `start + 8..end`. `tests/riff_webp.rs` records what
+the reference implementation does:
+
+- **c2pa-rs's own embedder excludes the header-inclusive span**, byte for byte the one
+  `gamut-riff` reports, and leaves the RIFF pad byte after an odd-length store outside it, as
+  `gamut-riff` does;
+- a store signed around `gamut-riff`'s span, then carried by a same-length re-encode, validates.
+
+That is evidence for the decision, not the decision: it says the header-inclusive range is what
+c2pa-rs writes and accepts, not what §18.5.1 requires. A payload-only binding would validate too
+under a same-length fill, which never changes the header, so direction 1 cannot tell the two
+readings apart and does not try.
+
+## The TIFF and DNG findings
+
+§18.5.5 asks a TIFF-based asset to exclude the `count` field of the store's IFD entry as a range
+of its own. `tests/dng_tiff.rs` compares, on files c2pa-rs embedded into, the two exclusions c2pa-rs
+wrote with the `C2paExclusions` `gamut-tiff` and `gamut-dng` locate: **they are the same two
+ranges**, store and `count` field, for both containers.
+
+How c2pa-rs arrives at its second range is worth knowing before trusting that agreement beyond
+these fixtures. It does not look the C2PA entry up: it takes the `count` field of the **first**
+entry of the last IFD (`src/asset_handlers/tiff_io.rs:1969-1977`). On the files above that is the
+same field, because c2pa-rs's embedder places the store in a **new** IFD of its own, whose only
+entry is tag 52545 — one of the two placements §A.3.6 allows, observed by reading back a gamut TIFF
+c2pa-rs had embedded into: the original IFD's twelve entries, then a second IFD holding 52545
+alone. gamut's encoders take the other allowed placement, the entry inside the existing last IFD
+among its other tags, where the first entry is not the C2PA one. c2pa-rs's *validation* follows the
+ranges the assertion lists, so a store gamut reserved and signed around its own two ranges reads
+`Valid`; but a c2pa-rs workflow that derives the ranges itself for such a file would, by that
+source line, name the wrong `count` field. That second half is read from source, not exercised
+here.
+
 ## What this oracle does not check
 
-Three limits, stated so nobody reads a green run as covering them.
+Four limits, stated so nobody reads a green run as covering them.
 
 **Where the box sits.** C2PA 2.4 §A.5.3 constrains a `ContentProvenanceBox`'s *placement* among the
 top-level boxes. c2pa-rs validates a store wherever it finds one, so no assertion here can
@@ -150,8 +226,18 @@ today's fixtures. The unpadded ones' stores run exactly to the end of their box.
 [padded fixture](#the-padded-fixture-where-the-two-bounds-diverge) is the one store followed by
 more bytes, and those are the `PADDING` zeros the oracle itself wrote *inside* the same box: its
 store stops short of its box rather than overrunning it, so it is no case of this limit either.
-Issue #534, which points this crate at PNG, TIFF and RIFF, is where a store followed by container
-bytes the oracle did not write first appears.
+The non-BMFF containers (#534) are where a store followed by container bytes the oracle did not
+write first appears — a PNG store by its chunk CRC and every chunk after it, an odd-length WebP
+store by its RIFF pad byte — and there the same limit holds against the chunk instead of the box:
+`jumbf_superbox_span` is checked against the gamut locator's *payload*, which is bounded by the
+chunk's own length field, so a store overrunning its chunk would disagree with it rather than pass.
+A TIFF or DNG store is the file's last bytes (§A.3.6), so nothing follows it at all.
+
+**That the `count` field must be excluded.** Direction 1 fills a reservation with a store of the
+same length, so the TIFF/DNG entry's `count` never changes, and a binding that digested it would
+validate just as well. The signing test therefore shows only that excluding it does no harm; that
+it is the field §18.5.5 means is shown by direction 2 alone, where c2pa-rs's own two exclusions are
+compared with gamut's — see [The TIFF and DNG findings](#the-tiff-and-dng-findings).
 
 ## Why gamut owns the locate/bound step at all
 
@@ -262,11 +348,11 @@ PY
 
 The version has to be carried through the walk: 21 package names occur at more than one version
 here (`syn` and `getrandom` at three), so a name-keyed walk counts names rather than packages and
-lands on 285. The whole file holds 326 entries
-(`grep -c '^name = ' tooling/c2pa-oracle/Cargo.lock`) — those 307, `c2pa` itself, this crate, and 17
-reachable only through its four `gamut-*` dev-dependencies. Those 17 are resolved **here**, not by
+lands on 285. The whole file holds 341 entries
+(`grep -c '^name = ' tooling/c2pa-oracle/Cargo.lock`) — those 307, `c2pa` itself, this crate, and 32
+reachable only through its eight `gamut-*` dev-dependencies. Those 32 are resolved **here**, not by
 the root workspace lockfile: this crate is `exclude`d from the workspace, so its lockfile records
-every package it reaches, and 15 of the 17 are the `gamut-*` crates it reaches by `path` (see
+every package it reaches, and 22 of the 32 are the `gamut-*` crates it reaches by `path` (see
 [Refreshing the lockfile](#refreshing-the-lockfile-after-a-gamut-crate-changes) for what that
 costs). Fewer are ever compiled: 240 with default features off
 (`cargo tree --manifest-path tooling/c2pa-oracle/Cargo.toml --locked -e normal -p c2pa
@@ -285,7 +371,7 @@ unify `openssl` back on, and says nothing about which versions those 307 package
 `--locked` holds the path-reached `gamut-*` entries exactly as it holds the 307: the lockfile
 records each one's version and its dependency list. So a change that touches none of this crate's
 files still fails both tasks with `cannot update the lock file … because --locked was passed` when
-it moves any of those 15 crates' lock entries — a release-plz version bump (`gamut-core` 2.0.1 →
+it moves any of those 22 crates' lock entries — a release-plz version bump (`gamut-core` 2.0.1 →
 2.0.2 is enough), or a dependency added to or removed from one of them. That failure says the
 lockfile is stale, not that the oracle found anything. Refresh it, and commit the result with the
 change that caused it:
@@ -301,9 +387,13 @@ for a version bump the diff is that one `version =` line. A bare `cargo update` 
 `cargo generate-lockfile` re-resolves the whole graph instead, which is exactly what the committed
 file exists to prevent.
 
-Nothing refreshes it automatically — no release workflow touches this crate — but since #541 the
-per-PR `lint` job runs `check-c2pa`, so a stale lockfile fails CI on the first pull request (the
-release-plz one included, when its checks run) after the change that staled it.
+Since #541 the per-PR `lint` job runs `check-c2pa`, so a stale lockfile fails CI on the first pull
+request after the change that staled it. For release-plz version bumps the release workflow does
+the refresh itself (#839): after release-plz opens or updates the release PR, the `release-pr` job
+in `.github/workflows/release.yml` runs the same `cargo update --workspace` on that PR's branch and
+pushes the result as a `github-actions[bot]` commit, so the bump and this file move together. Any
+other change that moves a path crate's entry — a dependency added to or removed from one of them —
+still refreshes it by hand, in the pull request that makes the change.
 
 ## The signing identity
 
@@ -399,6 +489,10 @@ buffer falls into the `LBox == 0` arm, which refuses it too, so only the message
 branch that fired from the one that caught the fall.
 
 For the same reason `find_jumbf_superbox` **continues** past a `jumb` that appears too early to
-carry an `LBox` in front of it, instead of concluding the buffer has no superbox. Today's fixtures
-put a fixed ISOBMFF framing ahead of the store, so nothing can trip it; issue #534 points this
-crate at PNG, TIFF and RIFF, where a store follows arbitrary compressed bytes.
+carry an `LBox` in front of it, instead of concluding the buffer has no superbox. The BMFF fixtures
+put a fixed ISOBMFF framing ahead of the store, so nothing can trip it there; the TIFF, DNG and WebP
+fixtures (#534) search a **whole file** whose store follows the image data, so arbitrary bytes do
+precede it. A `jumb` in that data would make the search return a decoy, and every comparison that
+uses it would then fail — the span would disagree with the gamut locator, and the bytes at it would
+not validate — so a decoy turns a test red rather than green. None occurs in today's fixtures,
+which are deterministic.

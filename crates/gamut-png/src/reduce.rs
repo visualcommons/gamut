@@ -575,7 +575,8 @@ fn be_bytes(samples: impl Iterator<Item = u16>) -> Vec<u8> {
 ///    raster-scan discovery order gives — which is what `Sub` and `Paeth` are good at.
 ///
 /// Rec. 601 luma, integer, because this only has to *order* entries and never round-trips through
-/// a pixel. The full modified-Zeng ordering oxipng uses is a further step (#482).
+/// a pixel. Modified-Zeng ordering was measured against this and declined: it never improved a
+/// finished file and regressed one gated row (#612, `experiments/612/RESULTS.md`).
 fn ordered_palette(palette: &[[u8; 4]]) -> Vec<[u8; 4]> {
     let mut out = palette.to_vec();
     out.sort_by_key(|c| {
@@ -905,6 +906,22 @@ mod tests {
             }
             _ => panic!("expected Indexed"),
         }
+    }
+
+    /// The tRNS table is *added* to the PLTE bytes, not subtracted from them: `analyze8_for`'s
+    /// overhead is `3C + C + 24` for `C` translucent entries (PLTE, tRNS, and two chunk frames).
+    ///
+    /// 200 pixels, each its own translucent, non-grey colour: 800 raw RGBA bytes against an
+    /// estimate of `200 + 600 + 200 + 24` = 1024, so the palette loses and nothing is reduced.
+    /// Spelled `3C - C + 24` instead, the estimate is 624 and the palette wins by 176 bytes. No
+    /// other candidate exists here (not grey, not opaque, alpha 128 admits no colour key), so the
+    /// verdict is the palette's alone.
+    #[test]
+    fn the_trns_table_adds_to_the_palette_overhead() {
+        let rgba: Vec<u8> = (0..200u8)
+            .flat_map(|c| [c, c.wrapping_add(64), 200, 128])
+            .collect();
+        assert!(matches!(analyze8(&rgba, 4), Reductions::None));
     }
 
     /// Trailing opaque entries are trimmed from tRNS; the first non-opaque one is kept.

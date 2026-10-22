@@ -1,0 +1,30 @@
+# Dev-only generator: NOT a member of the gamut workspace (it is listed under `[workspace].exclude`
+# in the root manifest), and nothing depends on it. It turns a vendored specification under
+# `references/` into the committed `clauses.tsv` clause index beside it (issue #606), which the
+# citation lint `tooling/check-citations/run.sh` reads. The lint never builds or runs this crate:
+# the TSV is the checked-in artifact, and `mise run check-spec-clauses` is what holds it to the
+# specification it was extracted from.
+#
+# Being excluded, it cannot use `*.workspace = true` inheritance, so metadata is local; and being
+# reachable from no workspace crate, no root-lockfile entry stands behind its one dependency, so it
+# commits its own `Cargo.lock` (the `.gitignore` exception beside `tooling/c2pa-oracle`'s) and every
+# task runs it `--locked`. That lockfile plus the exact `=` pin below is what makes the extractor
+# pinned: the same PDF yields the same index on every machine, with no PDF tool on `PATH`.
+[package]
+name = "spec-clauses"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only extractor: clause number -> heading index (clauses.tsv) from the vendored specifications, HTML and PDF."
+license = "MIT OR Apache-2.0"
+
+# Its own workspace root, so cargo never walks further up looking for one: a checkout nested
+# inside another gamut checkout (a worktree under `.claude/worktrees/`) would otherwise find the
+# outer manifest, which does not exclude this path.
+[workspace]
+
+[dependencies]
+# Inflate for the PDF's FlateDecode object and content streams. The same crate (and the same
+# version) the workspace's decoders already inflate with -- `gamut-deflate` is deliberately
+# encoder-only.
+miniz_oxide = "=0.8.9"

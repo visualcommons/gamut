@@ -26,9 +26,11 @@
 //! The scan order is libjpeg's `jpeg_simple_progression` (transcribed from `jcparam.c`), SemVer-frozen
 //! here: a 6-scan grayscale layout and the 10-scan YCbCr layout (see [`scan_script`]).
 
+use gamut_bitstream::build_optimal_table;
+
 use crate::bitwriter::BitWriter;
 use crate::encoder::{Plane, additional_bits, magnitude_category, quantize_block_rd};
-use crate::huffman::{EncTable, build_optimal_table, emit_dht_dynamic};
+use crate::huffman::{EncTable, emit_dht_dynamic};
 use crate::marker;
 use crate::rd::RdCtx;
 use crate::zigzag::ZIGZAG;
@@ -490,7 +492,10 @@ impl<'a, 'o> ProgCoder<'a, 'o> {
             }
             self.flush_eobrun();
             self.symbol(marker::pack_nibbles(run as u8, 1)); // run/size, size = 1 (newly nonzero)
-            self.raw_bit(u8::from(coeff > 0));
+            // The sign as `is_positive` rather than `coeff > 0`: `abs == 1` here makes `coeff`
+            // nonzero, so `> 0` and its `>= 0` mutant always agreed. The rewrite also took the
+            // comparison's two killable siblings (`<`, `==`) out of the survey (#924).
+            self.raw_bit(u8::from(coeff.is_positive()));
             self.flush_br(&mut br);
             run = 0;
         }
@@ -726,7 +731,7 @@ mod tests {
         // transform → a correction bit), a newly-nonzero negative coefficient (magnitude 1 → run/size
         // + sign 0), and trailing zeros that fold into the EOB run. Decoding must recover the newly
         // nonzero coefficient with its correct sign and the correction applied to the existing one —
-        // pinning the eob-position search (`== 1`) and the sign test (`coeff > 0`).
+        // pinning the eob-position search (`== 1`) and the sign test (`is_positive`).
         let al = 1u8;
         let p1 = 1i32 << al;
         // Prior-scan block state: position 1 already nonzero at magnitude 2<<al (a "history" coef);

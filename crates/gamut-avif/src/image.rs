@@ -323,6 +323,85 @@ impl AvifImage {
     }
 }
 
+/// The facade's [`TypedMetadata`](gamut_metadata::TypedMetadata) over the primary item's
+/// located payloads; [`metadata`](gamut_metadata::TypedMetadata::metadata) is the trait's default,
+/// [`Metadata::from_blocks`](gamut_metadata::Metadata::from_blocks) over
+/// [`blocks`](gamut_metadata::TypedMetadata::blocks). Compiled with the `metadata` feature.
+///
+/// AVIF's payloads are ISOBMFF items, framed rather than bare — the `Exif` item wraps its TIFF
+/// stream in an `exif_tiff_header_offset` — so here, as in `gamut-heic`, `blocks` can fail.
+///
+/// ```
+/// use gamut_avif::{AvifContainer, AvifEncoder, TypedMetadata};
+/// use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+/// use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+/// use gamut_metadata::Metadata;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut exif = Exif::new(ByteOrder::LittleEndian);
+/// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+/// let typed = Metadata::from_carriers(Some(exif), None, None);
+///
+/// let pixels = vec![128u8; 8 * 8 * 3];
+/// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(8, 8)?)?;
+/// let mut file = Vec::new();
+/// AvifEncoder::lossless()
+///     .with_metadata(&typed)?
+///     .encode_image(image, &mut file)?;
+///
+/// let container = AvifContainer::parse(&file)?;
+/// assert_eq!(container.image().metadata()?, typed);
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "metadata")]
+impl gamut_metadata::TypedMetadata for AvifImage {
+    /// The primary item's located payloads as
+    /// [`MetadataBlock`](gamut_metadata::MetadataBlock)s: the `Exif` item's TIFF stream (its
+    /// `exif_tiff_header_offset` applied by the shared
+    /// [`gamut_isobmff::Item::exif_tiff_stream`] lens), the XMP `mime` item's
+    /// packet and the primary item's ICC `colr` profile, each present only when the file carries
+    /// it.
+    ///
+    /// AVIF has no IPTC-IIM item type, so no `MetadataBlock::IptcIim` is produced. The C2PA
+    /// manifest store is a top-level `uuid` box rather than an item of this model; it is located
+    /// by [`AvifContainer::c2pa_slot`](crate::AvifContainer::c2pa_slot) and is not among these
+    /// blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataError::Container`](gamut_metadata::MetadataError::Container) carrying
+    /// [`Error::InvalidInput`] when the `Exif` item's offset field is short or points past the
+    /// payload, and carrying [`Error::Unsupported`] when the XMP item declares a
+    /// `content_encoding` (ISO/IEC 14496-12 §8.11.6): its payload is then not the raw packet, and
+    /// this crate decodes no content codings. The coded item stays reachable through
+    /// [`xmp`](AvifImage::xmp).
+    fn blocks(&self) -> gamut_metadata::Result<Vec<gamut_metadata::MetadataBlock<'_>>> {
+        use gamut_metadata::MetadataBlock;
+        let mut blocks = Vec::new();
+        if let Some(exif) = self.exif() {
+            blocks.push(MetadataBlock::Exif(
+                exif.as_isobmff_item().exif_tiff_stream()?,
+            ));
+        }
+        if let Some(xmp) = self.xmp() {
+            let item = xmp.as_isobmff_item();
+            if item.content_encoding.is_some() {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: content-encoded XMP item is not supported",
+                )
+                .into());
+            }
+            blocks.push(MetadataBlock::Xmp(&item.payload));
+        }
+        if let Some(icc) = self.primary_item().icc_profile() {
+            blocks.push(MetadataBlock::Icc(icc));
+        }
+        Ok(blocks)
+    }
+}
+
 /// A single AVIF item, viewed by role. A zero-cost borrow of the underlying
 /// [`gamut_isobmff::Item`]; [`as_isobmff_item`](Self::as_isobmff_item) exposes it. Per-item
 /// accessors read the item's type and properties; cross-item relationships live on [`AvifImage`].
@@ -639,4 +718,91 @@ pub enum TransformativeProperty {
 /// or unknown item.
 fn is_coded_image_type(item_type: &[u8; 4]) -> bool {
     matches!(item_type, b"av01" | b"hvc1" | b"hev1" | b"vvc1" | b"vvi1")
+}
+
+/// The facade's `TypedMetadata` over [`AvifImage`]. They build `AvifImage::new`, which is
+/// `pub(crate)`, so they live here; the `Exif` item's offset arithmetic is
+/// `gamut_isobmff::Item::exif_tiff_stream`'s and is tested there.
+#[cfg(all(test, feature = "metadata"))]
+mod tests {
+    use gamut_isobmff::ItemReference;
+
+    use super::*;
+
+    /// An item of `item_type` carrying `payload`, describing item 1 through `cdsc`.
+    fn item(id: u32, item_type: [u8; 4], payload: &[u8]) -> Item {
+        Item {
+            id,
+            item_type,
+            name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            references: vec![ItemReference {
+                reference_type: *b"cdsc",
+                to_item_ids: vec![1],
+            }],
+            properties: Vec::new(),
+            payload: payload.to_vec(),
+        }
+    }
+
+    mod typed {
+        use gamut_metadata::{MetadataBlock, MetadataError, TypedMetadata};
+
+        use super::*;
+
+        /// An AVIF image whose primary item 1 is described by `metadata`.
+        fn image(metadata: Vec<Item>) -> AvifImage {
+            let mut primary = item(1, *b"av01", b"");
+            primary.references.clear();
+            let mut items = vec![primary];
+            items.extend(metadata);
+            AvifImage::new(IsoBmffImage::new(*b"avif", vec![*b"avif"], 1, items)).unwrap()
+        }
+
+        #[test]
+        fn blocks_hand_over_the_tiff_stream_and_the_packet() {
+            let mut xmp = item(3, *b"mime", b"<x:xmpmeta/>");
+            xmp.content_type = Some("application/rdf+xml".to_owned());
+            let image = image(vec![item(2, *b"Exif", b"\0\0\0\0MM\0*"), xmp]);
+            assert_eq!(
+                image.blocks().unwrap(),
+                vec![
+                    MetadataBlock::Exif(b"MM\0*"),
+                    MetadataBlock::Xmp(b"<x:xmpmeta/>")
+                ]
+            );
+            assert!(self::image(Vec::new()).blocks().unwrap().is_empty());
+        }
+
+        #[test]
+        fn an_unlocatable_exif_stream_is_a_container_error() {
+            let image = image(vec![item(2, *b"Exif", b"\0\0\0\x09MM\0*")]);
+            let err = image.blocks().unwrap_err();
+            let MetadataError::Container(inner) = err else {
+                panic!("expected Container, got {err:?}");
+            };
+            assert_eq!(
+                inner.static_message(),
+                Some("ISOBMFF: Exif item tiff-header offset out of range")
+            );
+        }
+
+        #[test]
+        fn a_content_encoded_xmp_item_is_unsupported() {
+            let mut xmp = item(2, *b"mime", b"compressed");
+            xmp.content_type = Some("application/rdf+xml".to_owned());
+            xmp.content_encoding = Some("deflate".to_owned());
+            let err = image(vec![xmp]).blocks().unwrap_err();
+            let MetadataError::Container(inner) = err else {
+                panic!("expected Container, got {err:?}");
+            };
+            assert_eq!(inner.kind(), gamut_core::ErrorKind::Unsupported);
+            assert_eq!(
+                inner.static_message(),
+                Some("AVIF: content-encoded XMP item is not supported")
+            );
+        }
+    }
 }

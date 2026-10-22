@@ -18,7 +18,7 @@ pub(crate) const SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A,
 ///
 /// The last bit is the point. A PNG editor that rewrites the image must drop an unrecognised
 /// unsafe-to-copy chunk (§14.2), and a C2PA manifest store is bound to the exact bytes it was
-/// signed over (§18.5), so a store copied forward into a rewritten file is invalid by
+/// signed over (C2PA §18.5), so a store copied forward into a rewritten file is invalid by
 /// construction. That is the same no-copy-forward law `gamut_metadata::C2paPolicy` states for
 /// the facade, here enforced by the container's own naming convention — which is why the type is
 /// spelled in exactly one place and its *bits* are asserted, not only its letters.
@@ -125,7 +125,7 @@ impl C2paSpan {
 ///   skips it — so a span a caller excludes from a hash names the store the decoder read;
 /// - **the first**, because a PNG carries exactly one store (C2PA 2.4 §A.3.2); a later one is a
 ///   malformed file's extra chunk, never merged in;
-/// - **before the first `IDAT`**, because §A.3.2 places the store there and calls data after
+/// - **before the first `IDAT`**, because C2PA §A.3.2 places the store there and calls data after
 ///   `IDAT` bad-form. A `caBX` appended to a finished file is therefore not the store, which is
 ///   what stops an appender turning a file that carries none into one that appears to.
 ///
@@ -315,7 +315,7 @@ pub struct C2paUnreadChunk {
 /// Built by [`c2pa_summary`]. The summary carries the facts and renders the lines, so every host
 /// prints the same words and none can drop [`C2PA_NOT_VALIDATED`] while rewording them — the shape
 /// and wording of the TIFF/DNG summary in `gamut-ifd`, repeated for PNG (issue #727), with one store
-/// rather than a list because §A.3.2 admits one per file, as §A.3.6 does for TIFF.
+/// rather than a list because C2PA §A.3.2 admits one per file, as C2PA §A.3.6 does for TIFF.
 ///
 /// Non-exhaustive: a later revision may report more without a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

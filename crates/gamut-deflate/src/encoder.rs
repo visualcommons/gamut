@@ -231,4 +231,56 @@ mod tests {
             store.len()
         );
     }
+
+    /// `zlib_compress` reports what it appended, not the buffer's new length: with bytes already
+    /// in `out` the two differ, so `out.len() - start` cannot be read as `out.len() + start`.
+    #[test]
+    fn zlib_compress_reports_only_the_bytes_it_appended() {
+        let mut out = vec![0xEE; 3];
+        let n = DeflateEncoder::new().zlib_compress(b"abc", &mut out);
+        assert_eq!(n, out.len() - 3);
+    }
+
+    /// When the fixed-Huffman body is exactly as long as the stored one, `deflate_body` keeps the
+    /// stored body: a candidate replaces the incumbent only when strictly shorter. Every fourth
+    /// byte value is 64 distinct bytes, so there is no match: 36 below 144 at 8 fixed bits and 28
+    /// above at 9, a fixed body of `3 + 36 * 8 + 28 * 9 + 7 = 550` bits, 69 bytes — the stored
+    /// body's `5 + 64`. Spread that thinly, the alphabet makes a dynamic header far too dear.
+    #[test]
+    fn deflate_body_keeps_stored_over_an_equally_long_fixed_body() {
+        let data: Vec<u8> = (0..=255).step_by(4).collect();
+        let encoder = DeflateEncoder::new().with_level(Level::Fast);
+        let tokens = lz77::parse(&data, encoder.max_chain(), false);
+        let stored = block::stored(&data);
+        assert_eq!(
+            block::fixed(&tokens).len(),
+            stored.len(),
+            "fixture must tie"
+        );
+        assert!(
+            dynamic::body(&tokens).len() > stored.len(),
+            "dynamic must not win"
+        );
+        assert_eq!(encoder.deflate_body(&data), stored);
+    }
+
+    /// When the dynamic body is exactly as long as the best so far, `deflate_body` keeps the
+    /// incumbent — here the fixed body, both 20 bytes against the stored body's 23.
+    #[test]
+    fn deflate_body_keeps_fixed_over_an_equally_long_dynamic_body() {
+        let data = b"ecbbcbeabebbdabadb";
+        let encoder = DeflateEncoder::new().with_level(Level::Default);
+        let tokens = lz77::parse(data, encoder.max_chain(), true);
+        let fixed = block::fixed(&tokens);
+        assert_eq!(
+            dynamic::body(&tokens).len(),
+            fixed.len(),
+            "fixture must tie"
+        );
+        assert!(
+            fixed.len() < block::stored(data).len(),
+            "fixed must beat stored"
+        );
+        assert_eq!(encoder.deflate_body(data), fixed);
+    }
 }

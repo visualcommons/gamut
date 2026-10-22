@@ -73,7 +73,7 @@ Until now the crate had no metadata surface at all: `tags.rs` named XMP (700), I
 ICC (34675) and the Exif/GPS/Interop pointers only so `deconstruct` would not flag them unknown,
 and a caller wanting any of them dropped to the re-exported `gamut-ifd` spine. `TiffMetadata`
 (`#[non_exhaustive]`, built through `new` + `with_*`) is now written by
-`TiffEncoder::with_metadata` on the strip, tile and multi-page paths alike and read back by
+`TiffEncoder::with_tiff_metadata` on the strip, tile and multi-page paths alike and read back by
 `TiffDecoder::metadata`. XMP, IPTC-IIM, ICC and C2PA are **opaque bytes carried verbatim** — the
 raw blocks the workspace's metadata facade consumes, as `gamut-png` and `gamut-webp` hand them
 over — so this crate parses, validates and reconciles none of them; the `ExifIFD` is handed over
@@ -91,20 +91,20 @@ group, which is two entries under one tag — is refused by the encode rather th
 because normalising it means silently choosing which of the two the caller meant.
 **(b)** Which pointer tags the reader resolves depends on the **level**, and one rule decides it
 at both: a pointer is followed exactly when its target belongs to a directory `TiffMetadata` hands
-back. At **IFD 0** that is `ExifIFD` alone. `SubIFDs` and `GPSInfo` are out, because their targets
-feed no field of `TiffMetadata` and are never re-encoded, so following them there could only add
-failure modes — and did: a single dangling `SubIFDs` offset made XMP, IPTC, ICC and C2PA
+back. At **IFD 0** that is `ExifIFD` and — since `TiffMetadata::gps` (#876) — `GPSInfo`.
+`SubIFDs` is out, because its target feeds no field of `TiffMetadata` and is never re-encoded, so
+following it there could only add failure modes — and did: a single dangling `SubIFDs` offset made XMP, IPTC, ICC and C2PA
 unreachable on a file whose pixels decode perfectly, and two pages sharing one thumbnail directory
-tripped the reader's cross-chain loop guard. **Inside the Exif subtree all four**
+tripped the reader's cross-chain loop guard. **Inside the Exif and GPS subtrees all four**
 `gamut_ifd::tags::STANDARD_POINTER_TAGS` are resolved — `SubIFDs`, `ExifIFD`, `GPSInfo`,
-`InteroperabilityIFD` — because that directory *is* returned to the caller and may be written
+`InteroperabilityIFD` — because those directories *are* returned to the caller and may be written
 back, so a pointer left unresolved there is handed over as a raw absolute offset into the source
 file; re-encoding it writes a dangling pointer into a file laid out differently, which the crate's
 own `deconstruct` grades `Severity::Error`. `InteroperabilityIFD` is the one EXIF 2.3 §4.6.3 puts
 there, but a `GPSInfo` or `SubIFDs` group under `ExifIFD` re-encodes just as badly and the reader
 cannot tell a hand-built directory from a camera's. The cost is stated rather than hidden: inside
-the Exif subtree an unreadable target under any of the four fails the whole read, the same trade
-`ExifIFD` itself already makes. Only *standard* pointer tags are recognised anywhere; a **vendor
+the Exif and GPS subtrees an unreadable target under any of the four fails the whole read, the
+same trade `ExifIFD` and `GPSInfo` themselves already make. Only *standard* pointer tags are recognised anywhere; a **vendor
 private tag holding an offset** is indistinguishable from an integer field, so it is carried
 through and re-encoded verbatim, still holding the source file's offset — neither this crate nor
 `deconstruct` can grade that, and a round trip through such a field is not proof the result is
@@ -135,7 +135,7 @@ now refuses a recognised code in `UnknownValue::new` (#608), so variant and code
 value a caller can build. *Pair*: a tag given both a field and a group is two entries under one tag, which
 TIFF 6.0 §2 does not allow and which readers resolve in opposite directions — this crate keeps the
 last occurrence, libtiff ignores everything after the first — so it is refused too. All four are
-`Error::InvalidInput` from `with_metadata`'s encode before any pixel work, on **every** public
+`Error::InvalidInput` from `with_tiff_metadata`'s encode before any pixel work, on **every** public
 encode surface, rather than a well-formed file this crate cannot read back unchanged. The bound is
 the spec's; that a narrower one is also easier to assert is not on its own a reason to narrow a
 contract.
@@ -184,9 +184,12 @@ oracle the way every codec above did:
   4-bit grayscale; 16-bit palette (`ColorMap` indices stay 8-bit); `Cmyk16`/`GrayAlpha16`
   presentation (no such `gamut-core` pixel type — a 16-bit CMYK page decodes through `Cmyk8` by
   narrowing, or `Rgb16` with the fourth sample dropped); halftone hints (§17); document-storage
-  metadata tags (§12 beyond `PageNumber`); **typed metadata** — the seam above carries raw
-  payloads only, and wiring them to the `gamut-metadata` facade's models is deliberately left out
-  (adding that dependency edge is the metadata epic's job, not this crate's).
+  metadata tags (§12 beyond `PageNumber`); the facade EXIF model's thumbnail (the 1st IFD, which a
+  TIFF would hold as a page of its own) and its 0th-IFD fields outside `IFD0_EXIF_TAGS` (the
+  layout tags IFD 0 holds as the encoder's own — `XResolution`, `YCbCrPositioning`,
+  `TransferFunction`, …) have no `TiffMetadata` carrier, so the `metadata` feature's
+  `with_metadata` refuses a model holding them rather than drop them. A caller-chosen resolution
+  would need a `TiffEncoder` builder of its own, not a metadata carrier.
 
 **Additivity guarantee:** each deferred row lands semver-minor — a new variant on a
 `#[non_exhaustive]` enum (`Compression`, `PhotometricInterpretation`, `Predictor`), a new builder
@@ -231,7 +234,7 @@ The API was frozen after a full-surface review; the additions and breaks:
   returned `Err(Unsupported)`.
 - **Additions since the freeze (#446)** — `TiffMetadata`, `TiffEncodeReport`, `c2pa_exclusions`,
   `tags::C2PA_MANIFEST_STORE`, `TiffEncoder::{with_metadata, with_c2pa_reserved,
-  encode_with_report}`, `TiffDecoder::metadata`, the `Anomaly::DuplicateTag` variant (an
+  encode_with_report}` (the first renamed `with_tiff_metadata` by #510), `TiffDecoder::metadata`, the `Anomaly::DuplicateTag` variant (an
   addition to an enum that was already `#[non_exhaustive]`, so semver-minor), and the
   `C2paExclusions` re-export that keeps the closure complete. All new items; nothing existing was
   reshaped. `TiffMetadata` is `#[non_exhaustive]` from the start — a sixth carrier must not cost
@@ -240,6 +243,29 @@ The API was frozen after a full-surface review; the additions and breaks:
   and writes it; and a directory carrying two entries under one tag is now reported as an
   `Anomaly::DuplicateTag` of `Severity::Error`, so a file that repeats a tag — previously graded
   clean — is no longer `is_fully_accounted`.
+- **Additions since the freeze (#510) — typed metadata.** An optional `metadata` Cargo feature
+  (off by default; a normal `gamut-metadata` edge) implements the facade's `TypedMetadata` on
+  `TiffMetadata` — the XMP / IPTC-IIM / ICC / C2PA byte blocks, with the `ExifIFD` assigned as
+  the EXIF model's Exif sub-IFD (its `InteroperabilityIFD` group lifted into the model's own
+  Interoperability sub-IFD) — and adds `TiffEncoder::{with_metadata, with_encoded_metadata}`.
+  **Breaking:** the facade builder takes the `with_metadata` name every wired format crate
+  shares (issue #510; `gamut-metadata`'s README contract), so the whole-`TiffMetadata` builder
+  #446 added under that name is renamed `TiffEncoder::with_tiff_metadata`, unchanged otherwise. `TiffMetadata` gains `exif_byte_order`, read-side provenance the
+  encoder ignores (a field on a `#[non_exhaustive]` struct, so semver-minor). A C2PA store in
+  the blocks is a typed `Unsupported`, as is an EXIF model holding a thumbnail or a 0th-IFD
+  field outside `IFD0_EXIF_TAGS`. Typed round trip in both byte orders: `encoder::typed::tests`.
+- **Additions since the freeze (#876) — the Exif 0th IFD and GPS sub-IFD.** `TiffMetadata` gains
+  `ifd0` (the descriptive EXIF 2.32 §4.6.4 Table 4 tags listed in the new `IFD0_EXIF_TAGS`,
+  written into the page's own IFD 0) and `gps` (the `GPSInfo` sub-IFD), with `with_ifd0` /
+  `with_gps` builders and nine named `tags` constants (`IMAGE_DESCRIPTION` … `PRIMARY_CHROMATICITIES`)
+  — fields on a `#[non_exhaustive]` struct and new items, so semver-minor. The encode refuses a
+  0th-IFD field under any other tag, or a group, with `Error::InvalidInput`; the GPS sub-IFD is
+  held to the Exif sub-IFD's four bounds. The typed path maps the facade model's 0th IFD and GPS
+  sub-IFD onto them instead of refusing it. **Behaviour change:** `GPSInfo` is now followed at
+  IFD 0, so a file whose IFD-0 `GPSInfo` names an unreadable directory — which used to read with
+  the pointer ignored — now fails `TiffDecoder::metadata`, as a dangling `ExifIFD` always has;
+  and an IFD-0 `GPSInfo` array of two or more directories is refused as an `ExifIFD` one is.
+  `exif_byte_order` is now `Some` when any of the three Exif carriers was read.
 - **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
   on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
   diagnostics whose wording is not contractual.

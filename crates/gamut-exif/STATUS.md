@@ -5,8 +5,8 @@ Part of the **image metadata primitives** campaign (GitHub issue #34). Implement
 TIFF/IFD core. Released as **v1** (issue #194).
 
 **Keystone (done):** the **writer round-trip** — re-emitting a valid `Exif\0\0` + TIFF blob through
-`gamut-ifd`'s offset-patching writer with the Exif/GPS/Interop sub-IFD pointers, JPEG thumbnail, and
-source byte order intact. `parse → to_bytes → parse` is value-level identical in both byte orders.
+`gamut-ifd`'s offset-patching writer with the Exif/GPS/Interop sub-IFD pointers, JPEG or
+uncompressed strip thumbnail, and source byte order intact. `parse → to_bytes → parse` is value-level identical in both byte orders.
 
 **Oracle:** differential vs **exiv2** (`tooling/exiv2-oracle`, dev-only FFI over
 `Exiv2::ExifParser::decode/encode`) for read/round-trip parity, plus committed **byte-level golden
@@ -27,6 +27,7 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
 | P9 | §4.6 | `ReadAt` streaming entry point + lenient-drop report (`ReadReport`, scoped to the regions `DroppedRegion` names) | ✅ |
 | P11 | §4.6 | Read-report depth (issue #521): opt-in per-entry recovery (`ExifReader::recover_entries` → `ReadReport::dropped_entries`, over `gamut_ifd::IfdReader::decode_ifd_lenient`), opt-in byte-completeness verdict (`ExifReader::audit_bytes` → `ReadReport::byte_audit`), real-camera-DNG laziness case (`tooling/gamut-dng-real-conformance/tests/exif_laziness.rs`, extended tier) | ✅ |
 | P12 | §4.6 | Shadowed duplicate tags (issue #719): every directory the model keeps is decoded through `gamut_ifd::IfdReader::decode_ifd_reporting` (or `decode_ifd_lenient` under recovery), and each entry a repeated tag shadowed is a `ReadReport::dropped_entries` record with `EntryDropReason::Shadowed`, in every mode | ✅ |
+| P13 | §4.6.5.2, §4.6.9.2 | Unreadable strip thumbnails (issue #868): an integer `StripOffsets` naming strips that cannot be read is a `DroppedRegion::ThumbnailStrips` drop (`DropReason::StripsUnsized` / `OutOfBounds` / `StripsOverlap`) and a strict-mode `ExifError::BadThumbnail`, and `StripOffsets` leaves the model whenever its strips do not, so the writer never re-emits offsets addressing nothing | ✅ |
 | P10 | §4.6 | Full DC-008 tag breadth + per-tag value shape + value descriptions (issue #417) | ✅ |
 
 ## P10 — what the catalogue now covers
@@ -143,11 +144,15 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
   — and, since issue #263, pins its byte range at the source offset on rewrites so
   vendor-absolute internal offsets stay valid — and detects the vendor from `Make`, but does not
   decode the block (documented on `MakerNote`).
-- **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags to gamut's 160.
-  The catalogue is complete for CIPA DC-008 (P10 above), so the whole difference is tags DC-008
-  does not define — TIFF/EP, DNG, and other lineages. Adding them means vendoring *their*
-  specifications and transcribing from those, not copying a table out of the oracle, so they are a
-  separate deliverable. Unknown and MakerNote tags still round-trip losslessly because the raw
+- **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags. The catalogue
+  is complete for CIPA DC-008 (P10 above), and since issue #532 the 0th IFD's TIFF 6.0 (44 tags
+  beyond DC-008 Table 6) and DNG 1.7.1.0 (118) tags are named through `IfdKind::registry_spec`
+  from the shared `gamut_ifd::tags` registry, which gamut-tiff and gamut-dng read too;
+  `tests/oracle.rs` holds those rows to exiv2's names (one spelling divergence, `Threshholding`,
+  and four baseline TIFF 6.0 tags exiv2 has no entry for). The remaining difference is tags no
+  vendored specification defines — TIFF/EP, the Adobe technical notes, and the vendor lineages —
+  and stays deferred until a specification is staked for each; a table copied out of the oracle
+  is not a source. Unknown and MakerNote tags still round-trip losslessly because the raw
   `gamut_ifd::Ifd` is retained.
 - **A derivation of the `Type`/`Count` columns from the PDF itself.** Since issue #544 the
   catalogue's `Hex`/`Type`/`Count` columns are checked in both directions against
@@ -157,8 +162,6 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
   list that fails once it stops being live. A *corrected-but-different* value in either copy is
   therefore a test failure. What remains is that the fixture is itself a hand transcription:
   nothing re-reads the vendored PDF, so an error made identically in both copies would still pass.
-- **Uncompressed strip-based thumbnails** are read (as their directory) but not re-embedded; JPEG
-  thumbnails round-trip fully.
 - **An async entry point.** Declined rather than deferred: `parse_from` is synchronous over
   `gamut_ifd::ReadAt`, and an async caller drives that source itself. A `tokio` feature would put a
   runtime dependency in a crate that has none and constrain the public shape against the

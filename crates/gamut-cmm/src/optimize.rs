@@ -241,8 +241,11 @@ fn fold_affine(
 /// As [`optimize`].
 fn collapse(pipeline: Pipeline) -> Result<Pipeline> {
     let (input_channels, output_channels, mut stages) = pipeline.into_parts();
-    // Every rewriting pass removes at least one stage, so the loop terminates.
-    loop {
+    // Every rewriting pass removes at least one stage, so at most `len` passes rewrite anything
+    // and the one after them confirms the fixpoint. The loop is bounded by that count rather than
+    // only by `changed`, so a sweep that misreports a change — `collapse_once` stubbed to
+    // `(vec![], true)` hung the suite (#585) — runs out of passes instead.
+    for _ in 0..=stages.len() {
         let (next, changed) = collapse_once(stages);
         stages = next;
         if !changed {
@@ -574,6 +577,21 @@ mod tests {
         .unwrap();
         let optimized = optimize(pipeline, PipelineOptimization::Collapse).unwrap();
         assert_eq!(kinds(&optimized), ["matrix"]);
+    }
+
+    /// Kills `delete !` in `collapse`. `elision_uncovers_a_further_fold` finishes in one sweep
+    /// (an elided stage is never pushed, so the fold sees its neighbour at once); here the fold
+    /// itself *produces* the identity, which only a second sweep elides.
+    #[test]
+    fn a_fold_that_yields_the_identity_is_elided_by_the_next_sweep() {
+        let scale = |d: [f64; 3]| Stage::Matrix {
+            m: [[d[0], 0.0, 0.0], [0.0, d[1], 0.0], [0.0, 0.0, d[2]]],
+            offset: [0.0; 3],
+        };
+        let pipeline =
+            Pipeline::new(3, 3, vec![scale([2.0, 4.0, 0.5]), scale([0.5, 0.25, 2.0])]).unwrap();
+        let optimized = optimize(pipeline, PipelineOptimization::Collapse).unwrap();
+        assert!(kinds(&optimized).is_empty(), "{:?}", kinds(&optimized));
     }
 
     #[test]

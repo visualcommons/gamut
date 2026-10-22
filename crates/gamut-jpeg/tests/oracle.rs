@@ -10,7 +10,9 @@
 //!   correctness from the lossy encode error (both decoders see identical coefficients).
 //!
 //! Tolerances are **measured**, then asserted with a margin; each bound cites the measured worst
-//! case in a comment. Content is deterministic (a smooth gradient for fidelity-vs-source, a fixed
+//! case in a comment. The exception is decode-vs-decode parity on gray and 4:4:4: gamut's IDCT is
+//! libjpeg-turbo's accurate integer IDCT (`gamut_dsp::jpeg::idct8x8_int`, issue #896), so with
+//! no upsampling filter between them the two decodes are asserted **byte-identical**. Content is deterministic (a smooth gradient for fidelity-vs-source, a fixed
 //! LCG for the geometry-sensitive parity checks) so the numbers are stable across runs.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
@@ -309,7 +311,7 @@ fn encode_q90_is_tight_against_source() {
 #[test]
 fn encode_cross_parity_gamut_vs_libjpeg() {
     // Same gamut stream, decoded by gamut and by libjpeg-turbo. For gray/4:4:4 (no upsampling-filter
-    // divergence) the two decodes differ only by IDCT rounding — a small per-pixel delta. For 4:2:0
+    // divergence) both decoders run the same integer IDCT, so the decodes are identical. For 4:2:0
     // the upsampling filters legitimately differ (gamut = replication, libjpeg = fancy/triangle), so
     // only a PSNR floor is asserted.
     let mut worst_tight = 0u8;
@@ -332,9 +334,10 @@ fn encode_cross_parity_gamut_vs_libjpeg() {
             }
         }
     }
-    // Measured (q85): gray/444 decode-vs-decode max-diff = 2 (IDCT rounding only); 4:2:0 PSNR =
-    // 35.22 dB (bounded by the replication-vs-fancy upsampling divergence). Asserted with margin.
-    assert!(worst_tight <= 4, "gray/444 parity max-diff {worst_tight}");
+    // gray/444 decode-vs-decode: exact (max-diff 0; it was 2 under the f64 reference IDCT). 4:2:0
+    // PSNR measured 35.22 dB (bounded by the replication-vs-fancy upsampling divergence), asserted
+    // with margin.
+    assert_eq!(worst_tight, 0, "gray/444 parity max-diff {worst_tight}");
     assert!(
         psnr(worst_420_mse) > 32.0,
         "4:2:0 parity PSNR {:.2} dB",
@@ -508,11 +511,11 @@ fn decode_matches_libjpeg_turbo_own_decode() {
             }
         }
     }
-    // Measured over q ∈ {40,75,95} on high-frequency LCG content: gray/444 decode-parity max-diff =
-    // 3 (IDCT rounding only); subsampled PSNR = 22.91 dB (upsampling-filter divergence, worst on
-    // random content). Asserted with margin.
-    assert!(
-        worst_tight <= 6,
+    // Over q ∈ {40,75,95} on high-frequency LCG content: gray/444 decode parity is exact (max-diff
+    // 0; 3 under the f64 reference IDCT); subsampled PSNR measured 22.91 dB (upsampling-filter
+    // divergence, worst on random content), asserted with margin.
+    assert_eq!(
+        worst_tight, 0,
         "gray/444 decode-parity max-diff {worst_tight}"
     );
     assert!(
@@ -527,10 +530,10 @@ fn decode_progressive_matches_libjpeg_turbo_own_decode() {
     // libjpeg-turbo emits a PROGRESSIVE (SOF2) stream via its standard `jpeg_simple_progression`
     // 10-scan script (DC first + refinement, luma/chroma AC bands with successive approximation);
     // gamut's progressive decoder must reconstruct it and match libjpeg-turbo's OWN decode of the
-    // same stream. Progressive and sequential coefficients are identical, so the only divergence is
-    // IDCT rounding (gray/4:4:4) and the upsampling-filter difference (subsampled) — exactly the two
-    // sources bounded by the sequential decode-parity test, and asserted with the same margins.
-    let mut worst_tight = 0u8; // gray + 4:4:4: IDCT rounding only
+    // same stream. Progressive and sequential coefficients are identical and both decoders run the
+    // same integer IDCT, so gray/4:4:4 must match exactly and the only divergence left is the
+    // upsampling-filter difference (subsampled) — asserted as in the sequential decode-parity test.
+    let mut worst_tight = 0u8; // gray + 4:4:4: must stay 0
     let mut worst_sub_mse = 0f64; // subsampled: upsampling-filter divergence
     for &(w, h) in &[(16u32, 16u32), (17, 9), (33, 31), (64, 48)] {
         for mode in Mode::ALL {
@@ -565,12 +568,12 @@ fn decode_progressive_matches_libjpeg_turbo_own_decode() {
             }
         }
     }
-    // Measured over q ∈ {40,75,95} on high-frequency LCG content, progressive streams: gray/444
-    // decode-parity max-diff = 3 (IDCT rounding only — identical to the sequential battery, proving
-    // the coefficients match); subsampled PSNR = 22.9 dB (upsampling-filter divergence). Asserted
-    // with the same margins as the sequential decode-parity test.
-    assert!(
-        worst_tight <= 6,
+    // Over q ∈ {40,75,95} on high-frequency LCG content, progressive streams: gray/444 decode
+    // parity is exact (max-diff 0, as in the sequential battery — the coefficients match);
+    // subsampled PSNR measured 22.9 dB (upsampling-filter divergence), asserted with the same
+    // margin as the sequential decode-parity test.
+    assert_eq!(
+        worst_tight, 0,
         "progressive gray/444 decode-parity max-diff {worst_tight}"
     );
     assert!(
@@ -647,8 +650,8 @@ fn encode_all_one_custom_tables_are_near_lossless() {
 #[test]
 fn encode_coarse_custom_tables_decode_parity_gamut_vs_libjpeg() {
     // A deliberately coarse custom pair (Annex K scaled to quality 20): both decoders see the
-    // same stream, so gamut's decode must match libjpeg-turbo's within the same IDCT-rounding
-    // parity bound the standard-table battery established (gray/4:4:4 ≤ 3 codes).
+    // same stream, so gamut's decode must match libjpeg-turbo's exactly, as the standard-table
+    // battery does on gray/4:4:4.
     use gamut_jpeg::QuantTables;
     let coarse = QuantTables::annex_k().scaled(20);
     let mut worst = 0u8;
@@ -664,8 +667,8 @@ fn encode_coarse_custom_tables_decode_parity_gamut_vs_libjpeg() {
             worst = worst.max(max);
         }
     }
-    // Measured worst over the battery: 2. Asserted at the established parity bound.
-    assert!(worst <= 3, "coarse custom tables parity max-diff {worst}");
+    // Exact: max-diff 0 over the battery (2 under the f64 reference IDCT).
+    assert_eq!(worst, 0, "coarse custom tables parity max-diff {worst}");
 }
 
 // ================================================================================================

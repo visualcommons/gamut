@@ -34,10 +34,10 @@ use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
 use crate::decoded::{
     Background, Chromaticities, Cicp, DecodedPng, IccProfile, ModificationTime, PhysicalDimensions,
-    PngMetadata, TextChunk, TextChunkKind, XmpFraming,
+    PngMetadata, TextChunk, TextChunkKind,
 };
 use crate::filter::{self, FilterStrategy, FilterType};
-use crate::palette::PngPalette;
+use crate::palette::{PaletteOrder, PngPalette};
 use crate::reduce::{self, Family, Reduced, Reductions};
 use crate::{ihdr, pack};
 
@@ -54,7 +54,10 @@ const IDAT_MAX: usize = 1 << 16;
 /// everywhere costs a full filter pass and a full DEFLATE for nothing. It stays available as a
 /// caller-selectable strategy — the corpus is eight images, not a proof — but it does not earn a
 /// slot here. See `STATUS.md`'s heuristic table.
-const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 7] = [
+///
+/// [`FilterStrategy::MinTrialDeflate`] is last, so it changes a file only where it is strictly
+/// smaller than all seven before it (`experiments/480/`).
+const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
     FilterStrategy::None,
     FilterStrategy::Fixed(FilterType::Sub),
     FilterStrategy::Fixed(FilterType::Up),
@@ -62,12 +65,13 @@ const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 7] = [
     FilterStrategy::Fixed(FilterType::Paeth),
     FilterStrategy::MinSumAbs,
     FilterStrategy::MinBigrams,
+    FilterStrategy::MinTrialDeflate,
 ];
 
 /// Runs `trial` once per [`BRUTE_FORCE_STRATEGIES`] candidate, concurrently, and returns the
 /// results **in candidate order** (issue #624).
 ///
-/// The seven trials share nothing but borrowed input, so each of the last six runs on a scoped
+/// The eight trials share nothing but borrowed input, so each of the last seven runs on a scoped
 /// thread while the calling thread takes the first. Results are joined in the order the
 /// candidates are listed, never in completion order, so the caller's `min_by_key` sees exactly
 /// the sequence a serial loop would produce and a tie still resolves to the earlier strategy:
@@ -81,14 +85,15 @@ const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 7] = [
 /// re-raised on the caller, as it would have been without the threads.
 ///
 /// **The speed is paid for in memory.** Run one after another, the trials held one candidate's
-/// filtered image and optimal-parse buffers at a time; run together, all seven are alive at once,
-/// and nothing here caps how many. Measured on a square RGB photograph at [`Level::Best`] with
-/// the [`Preset::Smallest`] span, a `BruteForce` encode's peak resident set is **2.4x to 3.4x**
-/// what the serial loop's was — `STATUS.md` carries the table. That is the trade the maintainer's
+/// filtered image and optimal-parse buffers at a time; run together, all of them are alive at
+/// once, and nothing here caps how many. Measured on a square RGB photograph at [`Level::Best`] with the
+/// [`Preset::Smallest`] span, when the search still had seven candidates, a `BruteForce` encode's
+/// peak resident set was **2.4x to 3.4x** what the serial loop's was — `STATUS.md` carries the
+/// table. That is the trade the maintainer's
 /// decision on #624 accepted; a caller encoding near its memory limit should budget for it.
 ///
 /// No dependency is added for this (a maintainer decision on #624): `std::thread::scope` borrows
-/// the image without copying it, and one encode's seven trials are too few and too coarse for a
+/// the image without copying it, and one encode's eight trials are too few and too coarse for a
 /// work-stealing pool to schedule any better.
 fn run_trials(trial: &(impl Fn(FilterStrategy) -> Result<Vec<u8>> + Sync)) -> Result<Vec<Vec<u8>>> {
     let [first, rest @ ..] = BRUTE_FORCE_STRATEGIES;
@@ -134,10 +139,7 @@ pub struct PngEncodeReport {
 struct MetadataView<'a> {
     exif: Option<&'a [u8]>,
     icc_profile: Option<&'a IccProfile>,
-    xmp: Option<&'a [u8]>,
-    /// How the source framed its XMP packet (§11.3.3.4): compression flag, language tag,
-    /// translated keyword. Carried beside the packet because the packet has its own field.
-    xmp_framing: Option<&'a XmpFraming>,
+    /// The text annotations, the XMP packet among them.
     texts: &'a [TextChunk],
     gamma: Option<u32>,
     chromaticities: Option<Chromaticities>,
@@ -152,7 +154,7 @@ struct MetadataView<'a> {
     c2pa: bool,
 }
 
-/// Something [`PngEncoder::with_metadata`] could not do faithfully with a payload it was given.
+/// Something [`PngEncoder::with_png_metadata`] could not do faithfully with a payload it was given.
 ///
 /// Preservation exists to stop metadata disappearing quietly, so anything a carry cannot take —
 /// and anything it takes only by writing bytes the specification does not endorse — is named
@@ -207,9 +209,9 @@ pub enum MetadataNotice {
     /// Written as UTF-8 into a field a reader takes as Latin-1 the tag would not survive the
     /// trip; an empty tag is §11.3.3.4's own way of saying the language is unspecified.
     ItxtLanguageTag = 6,
-    /// An XMP packet left behind because it is not UTF-8. §11.3.3.4 gives the `iTXt` text field
-    /// UTF-8 and no alternative, so there is no chunk to frame it in.
-    XmpNotUtf8 = 7,
+    // 7 is retired, never to be reused: it was `XmpNotUtf8`, a packet handed over as bytes that
+    // were not UTF-8. The packet is now an ordinary `TextChunk` (issue #600), whose text is a
+    // `String`, so no path into the encoder can carry such bytes any more.
     /// A text payload left behind because its **text string** holds a null character, which
     /// §11.3.3.2 ("Neither the keyword nor the text string may contain a null character") and
     /// §11.3.3.4 ("neither shall contain a zero byte") both forbid.
@@ -289,9 +291,6 @@ impl MetadataNotice {
             Self::ItxtLanguageTag => {
                 "text annotation: written without its language tag, which was not the BCP 47 \
                  shape §11.3.3.4 requires"
-            }
-            Self::XmpNotUtf8 => {
-                "XMP packet: not UTF-8, and an iTXt text string must be (§11.3.3.4)"
             }
             Self::TextStringNull => {
                 "text annotation or XMP packet: its text string contains a null character, \
@@ -401,10 +400,10 @@ pub enum Preset {
     /// bytes or fewer. Intended for write-once assets where size dominates, and worth measuring on
     /// your own material rather than assuming — see `STATUS.md`.
     ///
-    /// Also the most memory-hungry rung: the filter search's seven candidates run concurrently,
-    /// each with its own 8 MiB-span parse, so a 2048x2048 RGB photograph peaks near 680 MiB
+    /// Also the most memory-hungry rung: the filter search's eight candidates run concurrently,
+    /// each with its own 8 MiB-span parse, so a 2048x2048 RGB photograph peaked near 680 MiB
     /// resident where the same search run serially peaked near 210 MiB (both at refinement budget
-    /// 1; `STATUS.md` has the table).
+    /// 1, measured with seven candidates; `STATUS.md` has the table).
     Smallest = 3,
 }
 
@@ -434,13 +433,14 @@ struct PresetKnobs {
 /// unbounded against **219.0 MiB** at this span and **177.9 MiB** at the 1 MiB default.
 ///
 /// Those are **one** stream's figures, and the rung does not parse one stream at a time. Its
-/// [`FilterStrategy::BruteForce`] runs seven candidates concurrently (#624), each with its own
+/// [`FilterStrategy::BruteForce`] runs eight candidates concurrently (#624), each with its own
 /// filtered image and its own span-length buffers, so the rung's own peak is several times a
 /// single encode's. Measured for a whole `BruteForce` encode at this span, refinement budget 1,
-/// concurrent against the serial search it replaced: **261.8 against 77.3 MiB** at 1024x1024,
-/// **678.6 against 210.9 MiB** at 2048x2048, and **1266.1 against 517.3 MiB** at 4096x4096.
-/// The span still bounds each candidate, and the candidate count is fixed at seven, so the
-/// rung's working set stays bounded in the span — by up to seven candidates' worth of it.
+/// concurrent against the serial search it replaced, when the search had seven candidates:
+/// **261.8 against 77.3 MiB** at 1024x1024, **678.6 against 210.9 MiB** at 2048x2048, and
+/// **1266.1 against 517.3 MiB** at 4096x4096. The span still bounds each candidate, and the
+/// candidate count is fixed at eight, so the rung's working set stays bounded in the span — by up
+/// to eight candidates' worth of it.
 ///
 /// Eight and not more, measured rather than picked: a wider span only helps an image whose
 /// *filtered* stream exceeds it, and the help saturates fast. At 8 MiB the span is the whole
@@ -540,6 +540,7 @@ pub struct PngEncoder {
     ancillary: Ancillary,
     auto_reduce: bool,
     clean_transparent: bool,
+    palette_order: PaletteOrder,
     backends: Registry<dyn IdatDeflater + Send>,
     /// What the last metadata carry could not take *as a whole payload*, in the order it was
     /// found. Reset by each [`Self::with_metadata`] / [`Self::with_metadata_from`] call, so it
@@ -567,6 +568,7 @@ impl PngEncoder {
             ancillary: Ancillary::default(),
             auto_reduce: false,
             clean_transparent: false,
+            palette_order: PaletteOrder::AsSupplied,
             backends: Registry::default(),
             carry_notices: Vec::new(),
         }
@@ -597,7 +599,7 @@ impl PngEncoder {
     ///
     /// # Concurrent calls under [`FilterStrategy::BruteForce`]
     ///
-    /// The brute-force search runs its seven candidate streams on scoped threads (issue #624),
+    /// The brute-force search runs its eight candidate streams on scoped threads (issue #624),
     /// so a backend is offered them from several threads, one at a time through its mutex, in no
     /// fixed order *across* candidates. Push order still decides who sees each stream first. If
     /// one candidate fails, the encode returns the first failure in candidate order, but the other
@@ -756,6 +758,23 @@ impl PngEncoder {
     #[must_use]
     pub fn with_auto_reduce(mut self, enabled: bool) -> Self {
         self.auto_reduce = enabled;
+        self
+    }
+
+    /// Sets the order [`encode_indexed8`](Self::encode_indexed8) writes a caller-supplied
+    /// palette in: [`PaletteOrder::AsSupplied`] (the default) or [`PaletteOrder::ModifiedZeng`].
+    ///
+    /// Lossless in what a decoder renders, and applied after the palette is cleaned: the entries
+    /// that survive are renumbered, and every pixel index and the `bKGD` index are rewritten to
+    /// follow them. The palette's length, and so the index bit depth, does not change.
+    ///
+    /// Not part of any [`Preset`] rung, and not applied to the palette
+    /// [`with_auto_reduce`](Self::with_auto_reduce) derives, which has its own fixed order. A rung
+    /// is a dial for effort, and this changes which number names which colour in a palette you
+    /// chose — see [`PaletteOrder`] for when that matters.
+    #[must_use]
+    pub fn with_palette_order(mut self, order: PaletteOrder) -> Self {
+        self.palette_order = order;
         self
     }
 
@@ -997,13 +1016,17 @@ impl PngEncoder {
 
     /// Embeds an XMP packet (an iTXt chunk with the standard `XML:com.adobe.xmp` keyword). `xmp` is
     /// the XMP/RDF document — for example the bytes produced by `gamut-xmp`.
+    ///
+    /// A PNG carries one packet, so this replaces any packet already set — by an earlier call or
+    /// carried in by [`with_png_metadata`](Self::with_png_metadata) — rather than adding a
+    /// second; it reads back through [`PngMetadata::xmp`].
     #[must_use]
     pub fn with_xmp(mut self, xmp: &str) -> Self {
         // §11.3.3.1 Table 21: "The use of iTXt, with Compression Flag set to 0, and both Language
         // Tag and Translated Keyword set to the null string, are recommended for XMP compliance."
         // A packet read out of a file that framed it otherwise keeps its framing; this entry
         // point has no framing to keep, so it takes the recommended one.
-        self.ancillary.add_xmp(xmp.as_bytes(), "", "", false);
+        self.ancillary.add_xmp(xmp);
         self
     }
 
@@ -1030,9 +1053,10 @@ impl PngEncoder {
     /// to honour depends on whether the reader has a colour-management module, which an encoder
     /// cannot know. Resolving a profile against an intent belongs to `gamut-cmm`. Each text annotation goes back into
     /// the chunk it came out of, compressed if it was compressed
-    /// ([`TextChunkKind`](crate::TextChunkKind)); so does the XMP packet, whose own framing —
-    /// compression flag, language tag, translated keyword — rides in
-    /// [`XmpFraming`](crate::XmpFraming).
+    /// ([`TextChunkKind`](crate::TextChunkKind)) and in its place among the others. The XMP
+    /// packet is one of those annotations, so it keeps its compression flag, language tag,
+    /// translated keyword and position the same way, and replaces a packet set earlier with
+    /// [`with_xmp`](Self::with_xmp).
     ///
     /// Two payloads cannot be carried at all, and neither is dropped in silence — read them back
     /// with [`metadata_notices`](Self::metadata_notices):
@@ -1040,10 +1064,10 @@ impl PngEncoder {
     /// - a **`cICP` whose matrix coefficients are not 0**, which §11.3.2.6 does not allow in PNG;
     /// - the **C2PA manifest store**, signed over the bytes of the file it was made for.
     ///
-    /// A text annotation whose keyword or XMP packet §11.3.3 does not endorse is reported through
-    /// the same channel rather than failing the carry: a keyword outside §11.3.3.1's repertoire
-    /// or spacing rules is written as it arrived, while a keyword no chunk can hold, a text
-    /// string holding a null and an XMP packet that is not UTF-8 are left behind, and
+    /// A text annotation (the XMP packet included) that §11.3.3 does not endorse is reported
+    /// through the same channel rather than failing the carry: a keyword outside §11.3.3.1's
+    /// repertoire or spacing rules is written as it arrived, while a keyword no chunk can hold
+    /// and a text string holding a null are left behind, and
     /// [`MetadataNotice::carried`](MetadataNotice::carried) says which happened. **Only a null in
     /// a keyword** — or in an `iTXt` translated keyword — fails the encode with
     /// [`Error::InvalidInput`] naming the annotation: those fields end at their first null, so
@@ -1067,12 +1091,10 @@ impl PngEncoder {
     /// entry of the source's palette, so it is carried only by
     /// [`encode_indexed8`](Self::encode_indexed8) with that palette.
     #[must_use]
-    pub fn with_metadata(self, metadata: &PngMetadata) -> Self {
+    pub fn with_png_metadata(self, metadata: &PngMetadata) -> Self {
         self.with_metadata_view(MetadataView {
             exif: metadata.exif.as_deref(),
             icc_profile: metadata.icc_profile.as_ref(),
-            xmp: metadata.xmp.as_deref(),
-            xmp_framing: metadata.xmp_framing.as_ref(),
             texts: &metadata.texts,
             gamma: metadata.gamma,
             chromaticities: metadata.chromaticities,
@@ -1087,17 +1109,15 @@ impl PngEncoder {
     }
 
     /// Carries the metadata of a decoded file into this encoder: the [`DecodedPng`] twin of
-    /// [`with_metadata`](Self::with_metadata), which documents exactly what is and is not carried.
+    /// [`with_png_metadata`](Self::with_png_metadata), which documents exactly what is and is not carried.
     ///
-    /// Use this when you already decoded the pixels; use `with_metadata` when
+    /// Use this when you already decoded the pixels; use `with_png_metadata` when
     /// [`metadata`](crate::metadata) read the file without them.
     #[must_use]
     pub fn with_metadata_from(self, decoded: &DecodedPng) -> Self {
         self.with_metadata_view(MetadataView {
             exif: decoded.exif.as_deref(),
             icc_profile: decoded.icc_profile.as_ref(),
-            xmp: decoded.xmp.as_deref(),
-            xmp_framing: decoded.xmp_framing.as_ref(),
             texts: &decoded.texts,
             gamma: decoded.gamma,
             chromaticities: decoded.chromaticities,
@@ -1120,7 +1140,7 @@ impl PngEncoder {
     /// explanation is a choice the spec forces. Use
     /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
     ///
-    /// The payload-level notices describe the last [`with_metadata`](Self::with_metadata) /
+    /// The payload-level notices describe the last [`with_png_metadata`](Self::with_png_metadata) /
     /// [`with_metadata_from`](Self::with_metadata_from) call and are reset by each; the
     /// per-annotation notices belong to the annotations still accumulated, so they follow the
     /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
@@ -1136,7 +1156,7 @@ impl PngEncoder {
         notices
     }
 
-    /// The one implementation behind [`with_metadata`](Self::with_metadata) and
+    /// The one implementation behind [`with_png_metadata`](Self::with_png_metadata) and
     /// [`with_metadata_from`](Self::with_metadata_from).
     fn with_metadata_view(mut self, meta: MetadataView<'_>) -> Self {
         self.carry_notices.clear();
@@ -1219,22 +1239,11 @@ impl PngEncoder {
                 time.second,
             );
         }
-        // Handed over as bytes, because that is what the chunk held, and with the framing its
-        // chunk gave it — above all §11.3.3.4's compression flag, without which a packet stored
-        // as 71 compressed bytes is rewritten as the 4 045 it inflates to. §11.3.3.4 requires
-        // UTF-8, so a packet that is not is reported by `metadata_notices` — never a silent drop.
-        if let Some(xmp) = meta.xmp {
-            let (language, translated, compressed) =
-                meta.xmp_framing.map_or(("", "", false), |f| {
-                    (
-                        f.language.as_deref().unwrap_or_default(),
-                        f.translated_keyword.as_deref().unwrap_or_default(),
-                        f.compressed,
-                    )
-                });
-            self.ancillary
-                .add_xmp(xmp, language, translated, compressed);
-        }
+        // The XMP packet is an ordinary annotation and goes back through the loop below, in its
+        // file position and with its own chunk's framing. A packet set directly with `with_xmp`
+        // is displaced by a carried one, as one carry's packet is by the next: the encoder
+        // writes the packet it was last handed, and a source that holds none leaves it alone.
+        // `end_carry` decides that on the entries as written, so a promoted packet counts too.
         for text in meta.texts {
             let (language, translated) = (
                 text.language.as_deref().unwrap_or_default(),
@@ -1305,7 +1314,7 @@ impl PngEncoder {
     ///    names the chunk's span (for an indexed image, `deconstruct(&png)?.c2pa()` names the same
     ///    span — see [`encode_indexed8`](Self::encode_indexed8));
     /// 2. hash the output with that **whole** span excluded — length, type, payload and CRC
-    ///    (§18.5.4) — and have the signer build the store against it;
+    ///    (C2PA §18.5.4) — and have the signer build the store against it;
     /// 3. write the finished store into the span with [`fill_c2pa`](crate::fill_c2pa). Only the
     ///    payload and the chunk CRC change, so every other byte — and every offset — is the one
     ///    the signer hashed.
@@ -1369,7 +1378,9 @@ impl PngEncoder {
     /// the index bit depth is derived from what survives, and the image's indices are renumbered to
     /// match (`PngPalette::cleaned`). The colour every pixel resolves to is unchanged, which is
     /// why this reports nothing: a merged entry did not fail to come along, it arrived under
-    /// another index. Surviving entries keep the order you gave them.
+    /// another index. Surviving entries keep the order you gave them unless
+    /// [`with_palette_order`](Self::with_palette_order) asks for another, in which case they are
+    /// renumbered after cleaning and the indices follow.
     ///
     /// "Nothing in the file names it" includes the `bKGD` background, in **whichever** of its three
     /// forms you set it — [`with_background_index`](Self::with_background_index),
@@ -1428,8 +1439,20 @@ impl PngEncoder {
         if let Some(index) = background {
             used[usize::from(index)] = true;
         }
-        let (palette, remap) = palette.cleaned(&used);
-        let indices: Vec<u8> = indices.iter().map(|&i| remap[usize::from(i)]).collect();
+        let (palette, mut remap) = palette.cleaned(&used);
+        let mut indices: Vec<u8> = indices.iter().map(|&i| remap[usize::from(i)]).collect();
+        // A reorder is a second renumbering on top of the cleaning one, composed into `remap`
+        // so the background below follows both.
+        let palette = match self.palette_order {
+            PaletteOrder::AsSupplied => palette,
+            PaletteOrder::ModifiedZeng => {
+                let (reordered, order) = palette.modified_zeng(&indices);
+                for index in indices.iter_mut().chain(remap.iter_mut()) {
+                    *index = order[usize::from(*index)];
+                }
+                reordered
+            }
+        };
         // The background still names the colour the caller chose, so the chunk is rewritten as
         // that entry's index in the *cleaned* palette, whichever form it arrived in. Pinning the
         // index is also what stops a colour-form background being resolved a second time against
@@ -2356,6 +2379,48 @@ mod tests {
         );
     }
 
+    /// [`PaletteOrder::ModifiedZeng`] writes the cleaned palette in its reordered sequence, and
+    /// the pixels and the `bKGD` index follow both renumberings — cleaning's, then the reorder's.
+    ///
+    /// Entry 5 is dropped (nothing names it) and entry 0 is named by the background alone. Zeng
+    /// over the pixels seeds with 1–3, appends 4 and then 2, and the unattached 0 goes last, so
+    /// the background moves from slot 0 to slot 4. libpng resolves every pixel to the colour the
+    /// caller gave it — libpng rather than our own decoder, which would read the file through the
+    /// palette the encoder wrote, so a wrong palette and a matching wrong index map would agree.
+    #[test]
+    fn a_reordered_palette_carries_its_pixels_and_background_along() {
+        let entries: Vec<[u8; 3]> = (0..6).map(|i| [i * 10, i * 10, i * 10]).collect();
+        let palette = PngPalette::new(&entries).unwrap();
+        let indices = [1u8, 3, 1, 3, 1, 3, 4, 3, 4, 2];
+        let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(10, 1).unwrap()).unwrap();
+        let mut reordered = Vec::new();
+        PngEncoder::new()
+            .with_background_index(0)
+            .with_palette_order(PaletteOrder::ModifiedZeng)
+            .encode_indexed8(img, &palette, &mut reordered)
+            .unwrap();
+
+        assert_eq!(
+            find_chunk(&reordered, b"PLTE"),
+            Some(vec![
+                10, 10, 10, 30, 30, 30, 40, 40, 40, 20, 20, 20, 0, 0, 0
+            ])
+        );
+        assert_eq!(find_chunk(&reordered, b"bKGD"), Some(vec![4]));
+        let (_, _, rgba) = libpng_oracle::decode_rgba8(&reordered);
+        let expected: Vec<u8> = indices
+            .iter()
+            .flat_map(|&i| {
+                let [r, g, b] = entries[usize::from(i)];
+                [r, g, b, 255]
+            })
+            .collect();
+        assert_eq!(
+            rgba, expected,
+            "every pixel still resolves to the colour the caller gave it"
+        );
+    }
+
     /// A background set as a *colour* names, after cleaning, an entry holding that colour with
     /// that alpha.
     ///
@@ -2807,5 +2872,316 @@ mod tests {
             reduced_color_type::<Rgba8>(&greys, Some(&icc_profile(b"GRAY"))),
             ColorType::Grayscale.code()
         );
+    }
+}
+
+/// The `metadata` feature: the encoder half of the typed [`gamut_metadata`] wiring (the reader
+/// half is the `TypedMetadata` impl on [`PngMetadata`] and [`DecodedPng`]). A facade `Metadata` is
+/// serialized and each carrier routed to this encoder's raw setters.
+#[cfg(feature = "metadata")]
+mod typed {
+    use gamut_core::{Error, Result};
+    use gamut_metadata::{EncodedMetadata, Metadata, MetadataEmbedder};
+
+    use super::PngEncoder;
+
+    /// The `iCCP` profile name written for a profile that arrives as a facade block, which
+    /// carries no name of its own: 1–79 printable Latin-1 characters with no leading, trailing or
+    /// consecutive space, as §11.3.2.3 requires.
+    pub(super) const TYPED_ICC_PROFILE_NAME: &str = "ICC profile";
+
+    impl PngEncoder {
+        /// Embeds a unified [`Metadata`] model: serializes it with the default
+        /// [`MetadataEmbedder`] and routes each carrier to the matching raw setter
+        /// ([`with_exif`](Self::with_exif), [`with_xmp`](Self::with_xmp),
+        /// [`with_icc_profile`](Self::with_icc_profile)). Returns the updated encoder for
+        /// chaining.
+        ///
+        /// This is the facade builder every wired format crate spells `with_metadata`. Its
+        /// chunk-for-chunk sibling is [`with_png_metadata`](Self::with_png_metadata), which
+        /// carries a [`PngMetadata`](crate::PngMetadata) — every PNG chunk the read side
+        /// surfaces — whereas this method takes the facade's container-agnostic model, which
+        /// holds only the EXIF, XMP and ICC carriers.
+        ///
+        /// The default embedder emits no legacy IPTC-IIM block (IPTC lives inside the XMP packet)
+        /// and **drops** a C2PA manifest store — a store is signed over the file it came from and
+        /// can never be copied into a re-encoded one; see [`gamut_metadata::C2paPolicy`]. A caller
+        /// that must be told about either configures the embedder itself and calls
+        /// [`with_encoded_metadata`](Self::with_encoded_metadata). Carriers absent from the model
+        /// leave any earlier raw setting untouched.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::InvalidInput`] when the model does not serialize (the facade's message
+        /// is carried as [`Error::detail`]), and whatever
+        /// [`with_encoded_metadata`](Self::with_encoded_metadata) returns.
+        pub fn with_metadata(self, meta: &Metadata) -> Result<Self> {
+            let encoded = MetadataEmbedder::new().embed(meta).map_err(|e| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: metadata does not serialize")
+                    .with_detail(e.to_string())
+            })?;
+            self.with_encoded_metadata(&encoded)
+        }
+
+        /// Embeds already-serialized facade blocks — the output of a [`MetadataEmbedder`]
+        /// configured by the caller — routing each present carrier to the matching raw setter.
+        /// Returns the updated encoder for chaining.
+        ///
+        /// EXIF goes to [`with_exif`](Self::with_exif) with the facade's `Exif\0\0` signature
+        /// stripped (an `eXIf` chunk holds the bare TIFF stream, §11.3.4.5), XMP to
+        /// [`with_xmp`](Self::with_xmp) and ICC to [`with_icc_profile`](Self::with_icc_profile)
+        /// under the name `"ICC profile"`, since a facade block carries no profile name. Fields
+        /// that are `None` leave any earlier raw setting untouched.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::Unsupported`] when the blocks carry a legacy IPTC-IIM stream (PNG
+        /// defines no IPTC-IIM chunk) or a C2PA manifest store. A store is never embedded from
+        /// metadata blocks: it is signed over the bytes of the one file it was made for, so a
+        /// store computed for this output goes through [`with_c2pa`](Self::with_c2pa) /
+        /// [`with_c2pa_reserved`](Self::with_c2pa_reserved) instead. Returns
+        /// [`Error::InvalidInput`] when the XMP packet is not UTF-8, which an `iTXt` text field
+        /// must be (§11.3.3.4). Nothing is applied when an error is returned.
+        pub fn with_encoded_metadata(mut self, encoded: &EncodedMetadata) -> Result<Self> {
+            if encoded.iptc_iim.is_some() {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "PNG: IPTC-IIM has no chunk",
+                ));
+            }
+            if encoded.c2pa.is_some() {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "PNG: a C2PA manifest store is not embedded from metadata blocks",
+                ));
+            }
+            let xmp = encoded
+                .xmp
+                .as_deref()
+                .map(core::str::from_utf8)
+                .transpose()
+                .map_err(|_| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: XMP packet is not UTF-8")
+                })?;
+            if let Some(exif) = &encoded.exif {
+                self = self.with_exif(exif.strip_prefix(b"Exif\0\0").unwrap_or(exif));
+            }
+            if let Some(xmp) = xmp {
+                self = self.with_xmp(xmp);
+            }
+            if let Some(icc) = &encoded.icc {
+                self = self.with_icc_profile(TYPED_ICC_PROFILE_NAME, icc);
+            }
+            Ok(self)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef};
+        use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+        use gamut_metadata::icc::{
+            ColorSpace, DeviceClass, IccProfile, ProfileHeader, Signature, TagData,
+        };
+        use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
+        use gamut_metadata::{MetadataBlock, TypedMetadata};
+
+        use super::*;
+
+        /// A typed model with the three facade-writable carriers populated, normalised through one
+        /// embed → extract pass so it is an *extracted* model (the ICC header's `size` is stamped
+        /// by the serializer). The profile is a greyscale one, matching the image `encode` writes
+        /// (§11.3.2.3).
+        fn typed() -> Metadata {
+            let mut exif = Exif::new(ByteOrder::BigEndian);
+            exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
+            let mut xmp = XmpMeta::new();
+            xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
+            let icc = IccProfile {
+                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
+                tags: Vec::new(),
+            };
+            let encoded = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc))
+                .encode()
+                .unwrap();
+            Metadata::from_blocks(&[
+                MetadataBlock::Exif(encoded.exif.as_deref().unwrap()),
+                MetadataBlock::Xmp(encoded.xmp.as_deref().unwrap()),
+                MetadataBlock::Icc(encoded.icc.as_deref().unwrap()),
+            ])
+            .unwrap()
+        }
+
+        /// Encodes an 8×8 grayscale image with `encoder`.
+        fn encode(encoder: &PngEncoder) -> Vec<u8> {
+            let pixels = vec![128u8; 64];
+            let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+            encoder.encode_to_vec(image).unwrap()
+        }
+
+        #[test]
+        fn typed_metadata_round_trips_through_the_datastream() {
+            // The facade's keystone equality, extended through the `eXIf` / `iTXt` / `iCCP`
+            // chunks.
+            let typed = typed();
+            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
+            let read = crate::metadata(&png).unwrap();
+            assert!(read.exif.is_some() && read.xmp().is_some() && read.icc_profile.is_some());
+            assert_eq!(read.metadata().unwrap(), typed);
+        }
+
+        #[test]
+        fn exiv2_reads_what_with_metadata_embeds() {
+            // Container-level differential: exiv2's own PNG reader finds the `eXIf`, the XMP
+            // `iTXt` and the `iCCP` this encoder writes, not only this crate's reader.
+            let typed = typed();
+            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
+            assert_eq!(
+                exiv2_oracle::image_exif_get(&png, "Exif.Image.Make").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_xmp_get(&png, "Xmp.xmp.CreatorTool").unwrap(),
+                "gamut"
+            );
+            assert_eq!(
+                exiv2_oracle::image_icc(&png).unwrap(),
+                typed.encode().unwrap().icc
+            );
+        }
+
+        #[test]
+        fn the_typed_reader_reads_what_exiv2_embeds() {
+            // The other direction: exiv2 writes an `eXIf` and an XMP `iTXt` into a file this
+            // crate encoded bare, and the typed reader finds both values.
+            let bare = encode(&PngEncoder::new());
+            let png = exiv2_oracle::image_set(
+                &bare,
+                Some(("Exif.Photo.ISOSpeedRatings", "400")),
+                Some(("Xmp.xmp.CreatorTool", "exiv2")),
+            )
+            .unwrap();
+            let read = crate::metadata(&png).unwrap().metadata().unwrap();
+            assert_eq!(
+                read.exif.unwrap().get_tag(ExifTag::PhotographicSensitivity),
+                Some(&Value::Short(vec![400]))
+            );
+            assert_eq!(
+                read.xmp
+                    .unwrap()
+                    .get_text(WellKnownNs::Xmp.uri(), "CreatorTool"),
+                Some("exiv2")
+            );
+        }
+
+        #[test]
+        fn a_manifest_store_is_never_copied_forward() {
+            let mut typed = typed();
+            typed.c2pa = Some(b"\0\0\0\x14jumbc2pa".to_vec());
+            let png = encode(&PngEncoder::new().with_metadata(&typed).unwrap());
+            let read = crate::metadata(&png).unwrap().metadata().unwrap();
+            assert_eq!(read.c2pa, None);
+            typed.c2pa = None;
+            assert_eq!(read, typed);
+        }
+
+        #[test]
+        fn encoded_blocks_route_to_the_raw_setters() {
+            // Each present field lands in its chunk — the EXIF one without the facade's
+            // signature, the profile under the fixed name — and an absent one leaves an earlier
+            // setting.
+            let encoded = typed().encode().unwrap();
+            let png = encode(&PngEncoder::new().with_encoded_metadata(&encoded).unwrap());
+            let read = crate::metadata(&png).unwrap();
+            assert_eq!(
+                read.exif.as_deref(),
+                encoded
+                    .exif
+                    .as_deref()
+                    .and_then(|e| e.strip_prefix(b"Exif\0\0"))
+            );
+            assert_eq!(read.xmp(), encoded.xmp.as_deref());
+            let icc = read.icc_profile.unwrap();
+            assert_eq!(icc.name, TYPED_ICC_PROFILE_NAME);
+            assert_eq!(Some(icc.profile), encoded.icc);
+
+            let mut only_icc = EncodedMetadata::default();
+            only_icc.icc = encoded.icc.clone();
+            let png = encode(
+                &PngEncoder::new()
+                    .with_xmp("<x:xmpmeta/>")
+                    .with_encoded_metadata(&only_icc)
+                    .unwrap(),
+            );
+            let read = crate::metadata(&png).unwrap();
+            assert_eq!(read.xmp(), Some(&b"<x:xmpmeta/>"[..]));
+            assert_eq!(read.icc_profile.map(|icc| icc.profile), encoded.icc);
+            assert_eq!(read.exif, None);
+        }
+
+        #[test]
+        fn the_typed_profile_name_draws_no_notice() {
+            // The fixed name must itself satisfy §11.3.2.3, or every typed ICC embed would be
+            // reported as bent.
+            let mut only_icc = EncodedMetadata::default();
+            only_icc.icc = typed().encode().unwrap().icc;
+            let encoder = PngEncoder::new().with_encoded_metadata(&only_icc).unwrap();
+            assert!(encoder.metadata_notices().is_empty());
+        }
+
+        #[test]
+        fn a_bare_exif_stream_is_written_unchanged() {
+            // `strip_prefix` must not eat a stream that never carried the signature.
+            let mut bare = EncodedMetadata::default();
+            bare.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
+            let png = encode(&PngEncoder::new().with_encoded_metadata(&bare).unwrap());
+            assert_eq!(crate::metadata(&png).unwrap().exif, bare.exif);
+        }
+
+        #[test]
+        fn unembeddable_carriers_are_typed_errors() {
+            let mut iim = EncodedMetadata::default();
+            iim.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
+            let err = PngEncoder::new().with_encoded_metadata(&iim).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(err.static_message(), Some("PNG: IPTC-IIM has no chunk"));
+
+            let mut c2pa = EncodedMetadata::default();
+            c2pa.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
+            let err = PngEncoder::new().with_encoded_metadata(&c2pa).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                err.static_message(),
+                Some("PNG: a C2PA manifest store is not embedded from metadata blocks")
+            );
+
+            let mut latin1 = EncodedMetadata::default();
+            latin1.xmp = Some(vec![0xff, 0xfe]);
+            latin1.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
+            let err = PngEncoder::new()
+                .with_encoded_metadata(&latin1)
+                .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert_eq!(err.static_message(), Some("PNG: XMP packet is not UTF-8"));
+        }
+
+        #[test]
+        fn a_model_that_does_not_serialize_is_invalid_input_with_the_facade_detail() {
+            // An ICC model with a duplicate tag signature is rejected by `gamut-icc`'s writer
+            // (ICC.1:2022 §7.3).
+            let duplicate = (Signature(*b"wtpt"), TagData::Xyz(Vec::new()));
+            let bad_icc = IccProfile {
+                header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Gray),
+                tags: vec![duplicate.clone(), duplicate],
+            };
+            let model = Metadata::from_carriers(None, None, Some(bad_icc));
+            let err = PngEncoder::new().with_metadata(&model).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput);
+            assert_eq!(
+                err.static_message(),
+                Some("PNG: metadata does not serialize")
+            );
+            assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
+        }
     }
 }

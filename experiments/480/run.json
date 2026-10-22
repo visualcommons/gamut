@@ -1,0 +1,28 @@
+{
+  "issue": 480,
+  "git_sha": "ca368e0c5aa862410a8dad15166b375461e23d3c",
+  "git_dirty": false,
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28);binary: rustc;commit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4;commit-date: 2026-09-28;host: x86_64-unknown-linux-gnu;release: 1.99.0;LLVM version: 23.1.1;",
+  "mise_lock_sha256": null,
+  "cargo_lock_sha256": "5a50ba85e0aab1ab5eff4e1527301213a0cff775ec85c03ed818b08316439166",
+  "rust_toolchain_toml_sha256": "e7613d421d2367015f232d2a0f8fe9684daf707a56308b046b92405ce2ccab09",
+  "samples_per_input": 3,
+  "warmup_encodes_per_input": 1,
+  "seeds": "none: every input is a deterministic generator in crates/gamut-png/tests/common/corpus.rs",
+  "corpus_sha256": {
+    "demotable_rgb16.raw": "7d6654f08141e05b250c9ab56832906dfbfc73923fcf337348807f3d3b5a06ea",
+    "flat_rgba8.raw": "c1626e6550151c6612305389941b5322e815a6197a2a3d233592c88ed167af12",
+    "gradient_rgb8.raw": "5499e56b221f2f155419933579d47ba4a12f3565c392f7093f5099dffc4dc53f",
+    "grey_as_rgb8.raw": "7461577b255e4b46f8b26c7b4419452bda780f0d4f3022adfa884c092620af82",
+    "noise_rgb8.raw": "70d69ae2e1f4b640723aaee705fa836e10005314c319b49045462542210c5a71",
+    "opaque256_rgba8.raw": "09e76181de4c4f48b54b0c6387477fd9187697a9ced82da81d3a1c051db6da72",
+    "palette64_rgba8.raw": "c66dc8a363a41a113f9cf845482abb42ef13722d06a46d97be9fbfebda4dfd83",
+    "photo_rgb8.raw": "85e6881d9e764826f23f4e5ddb6e3134dde03deb69ee3821c3e40ba6995bacdb",
+    "sprite_rgba8.raw": "57525801413b84cdde4615c514c165ee62559abc631f42cfec7af9992195f5a4",
+    "tiny_rgb8.raw": "98c7dd06f7096c70ca95c73f7ece655ad956f92fe0bef5589e81e792c994a9c8"
+  },
+  "cpu_model": "AMD Ryzen 7 7800X3D 8-Core Processor",
+  "cpu_cores": 16,
+  "load_average_start": "18.02 24.09 23.16",
+  "load_average_end": "19.71 20.43 20.63"
+}

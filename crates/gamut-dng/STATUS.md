@@ -366,19 +366,29 @@ The Adobe DNG SDK validates the output on every fixture the oracle covers (CFA a
 ## Codec benchmark harness (#163)
 
 `cargo bench -p gamut-dng --bench codec` measures **encode and decode throughput across the whole
-shipped codec matrix** — uncompressed, Deflate and lossless JPEG, each for CFA and `LinearRaw`
-photometry — and puts gamut's decode next to the **Adobe DNG SDK's**. (The older `--bench
+shipped codec matrix** — uncompressed, Deflate, lossless JPEG and, behind the `jxl-encode`
+feature, JPEG XL (#556), each for CFA and `LinearRaw` photometry — and puts gamut's decode next
+to the **Adobe DNG SDK's**. The crate's own `jxl-encode` self-dev-dependency opens that gate for
+every bench build, so a plain `cargo bench` measures the JPEG XL cells. (The older `--bench
 compression` is narrower and stays as it is: it answers the #196 question, "which DEFLATE encoder
-should the ZIP path use", on packed payloads.) Fixtures are synthesised in-process, so the harness
-needs no sample corpus and runs by default; the ~178 MiB real-camera submodule behind `mise run
-fetch-dng-samples` is deliberately not a prerequisite.
+should the ZIP path use", on packed payloads.) The matrix's fixtures are synthesised in-process,
+so it needs no sample corpus and runs by default.
+
+Beside the matrix, `decode_dng_file` (#556) times gamut and the SDK as an adjacent pair over DNGs
+gamut's encoder did not write: Adobe's `01_jxl_linear_raw_integer.dng`, which the oracle
+extracts, and — only when `third_party/gamut-dng-samples/MANIFEST.toml` exists — the three
+largest real-camera `*.dng` files both implementations decode. The ~178 MiB corpus behind `mise
+run fetch-dng-samples` is not a prerequisite: an absent corpus, or a file either decoder refuses,
+prints a `skipped:` line under the fixture table rather than failing. These rows carry no
+preview correction (each arm counts its own raw volume) and run at `sample_count = 20`.
 
 **What is timed.** The codec call, the allocation and growth of the buffer it produces, and that
 buffer's teardown — the last of those explicitly, because divan would otherwise defer a returned
 value's drop past the timed region, which would charge gamut nothing for freeing a decoded image
 while the SDK's `dng_negative` destructor runs inside its own call. Fixture synthesis, the
 `RawImage`/`CameraProfile` build, and the encode that produces the bytes a decode benchmark reads
-are all outside it. Nothing touches the filesystem.
+are all outside it. No timed region touches the filesystem: `decode_dng_file` reads each file
+once, before divan starts, and times only the decode of bytes already in memory.
 
 **Whether the comparison is fair.** Every asymmetry between the two implementations is either
 removed or measured; none is left as an adjective.
@@ -598,9 +608,26 @@ measures the codec is not the place to change it:
   The codestream shrinks by 31.2 % and 22.5 %; the whole-file deltas equal the codestream deltas
   byte for byte. For scale, the Adobe DNG Converter's own `lossless.DNG` of the same Canon frame
   is 23 206 642 bytes whole — it fits its Huffman table to the data, which gamut's single fixed
-  table does not (the remaining gap #584 names as secondary). The corpus's other two files are
-  not CFA (`LinearRaw` ProRAW, and a single-plane monochrome image that decodes as
-  `LinearRaw`), so the change does not reach them.
+  table did not (the remaining gap #584 names as secondary).
+
+  **Fixed by #824**: `lossless_jpeg::encode` now writes, per chunk, the T.81 Annex K.2 optimal
+  table over that chunk's own magnitude-category histogram. Same harness, same files, the
+  reshaped encoder before and after:
+
+  | corpus file | codestream before | after | whole DNG before | after |
+  | --- | --- | --- | --- | --- |
+  | Canon 5D3 | 24 962 613 (53.4 %) | 21 467 155 (45.9 %) | 42 501 889 | 39 006 431 (**−8.2 %**) |
+  | Leica M10 | 32 398 714 (67.8 %) | 30 578 971 (64.0 %) | 50 315 858 | 48 496 115 (**−3.6 %**) |
+
+  The codestream shrinks by 14.0 % and 5.6 %; the "after" codestreams are the "before" figures
+  less the whole-file delta, since nothing outside the codestream changed. The fixture table's
+  508 112 and 1 262 560 above are the fixed-table figures: with fitted tables it prints 444 566
+  (113.1 %) for `cfa/lossless-jpeg` and 1 037 520 (88.0 %) for `linear-raw/lossless-jpeg`, and the
+  decode timings were not re-measured against either. As before, no size is pinned in a test.
+
+  The corpus's other two files are not CFA (`LinearRaw` ProRAW, and a single-plane monochrome
+  image that decodes as `LinearRaw`), so #584's reshape does not reach them; #824's fitted table
+  does, but neither was re-measured for it.
 
 **The fixture table is not a codec gate, and should not become one.** #584's verification section
 proposes pinning the encoder to the sizes this harness prints. It should not be: the margin is a

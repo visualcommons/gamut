@@ -52,7 +52,8 @@ jobs:
         run: rustup toolchain uninstall stable || true
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          # clippy for the spec-clauses extractor's lint step below.
+          components: rustfmt, clippy
       - name: Format check
         # Self-installs the nightly rustfmt it needs (rustfmt.toml's import options are nightly-only).
         run: mise run fmt-check
@@ -90,6 +91,22 @@ jobs:
         # anywhere reporting it. Pure text, no cargo, sub-second, which is why it is here and not
         # in lint.
         run: mise run check-fuzz-matrix
+      - name: § citations name real spec clauses
+        # Static, like the guards above: awk over the committed references/*/clauses.tsv indexes
+        # and the cited crates' tracked text. Builds nothing, sub-second. The hk pre-push hook runs
+        # it too, but a `--no-verify` push or a checkout without `hk install` skips that.
+        run: mise run check-citations
+      - name: Spec clause indexes match the vendored specifications
+        # Holds the clauses.tsv files the step above trusts to the specifications they came from.
+        # Unlike its neighbours it builds something -- a release build of tooling/spec-clauses, a
+        # pure-Rust crate with one dependency (miniz_oxide) and its own lockfile -- but no native
+        # code, so it needs nothing this job lacks and costs seconds, not a heavy lane.
+        run: mise run check-spec-clauses
+      - name: spec-clauses extractor tests and Clippy
+        # tooling/spec-clauses is workspace-excluded and nothing depends on it, so neither
+        # `test --workspace` nor the lint job ever builds its tests or lints it; without this step
+        # they run nowhere.
+        run: mise run test-spec-clauses
       - name: Check PR commit messages
         # Only PRs have a base..head range; validate just the PR's own commits so the pre-existing
         # non-conventional history on master doesn't fail the check.
@@ -239,9 +256,10 @@ jobs:
       # workspace and nothing depends on it, so no workspace command compiles it, and a gamut-dng
       # API change breaks it unnoticed until the extended run on master. Its expensive half — the
       # Adobe DNG SDK — is already built by this job for gamut-dng's own dev-dependency on
-      # `gamut-dng-oracle`, so what is added here is the tier's own Rust targets. `check` needs no
-      # corpus, so this job does not grow the ~178 MiB fetch that `test-dng-real` requires.
-      - name: Real-DNG conformance tier compiles
+      # `gamut-dng-oracle`, so what is added here is the tier's own Rust targets. Clippy needs no
+      # corpus, so this job does not grow the ~178 MiB fetch that `test-dng-real` requires, and it
+      # holds the tier to the same `-D warnings` as the workspace (#615).
+      - name: Real-DNG conformance tier compiles and lints
         run: mise run check-dng-real
       # Same hole again (issue #541): `tooling/c2pa-oracle` is workspace-excluded and nothing
       # depends on it, so a gamut-avif, gamut-heic or gamut-metadata API change breaks it with
@@ -257,8 +275,9 @@ jobs:
       # the next Extended run on master. This is build-only: no nightly, no sanitizer, no engine,
       # so it stays bounded and reproducible and does not put a coverage-guided run on the PR path
       # (docs/testing.md, "Why fuzzing is not in the per-PR gate"). The driven crates are already
-      # built by the Clippy step above, so the marginal cost is the targets themselves.
-      - name: Fuzz tier compiles
+      # built by the Clippy step above, so the marginal cost is the targets themselves. It is Clippy
+      # under `-D warnings`, not `cargo check` (#615), so the targets are linted as well as compiled.
+      - name: Fuzz tier compiles and lints
         run: mise run check-fuzz
       - name: gamut-ffi feature sync
         run: mise run check-ffi-features

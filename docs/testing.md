@@ -169,11 +169,19 @@ single-byte-overwrite sweeps already in `gamut-ifd/tests/robustness.rs`. Fuzzing
 lives where the DNG sample corpus lives: an excluded `tooling/` crate, a corpus behind a fetch
 task, and an `extended.yml` job. **A crash it finds is minimised and promoted into a named
 deterministic case in that crate's `tests/robustness.rs`**, which is where the regression value is.
+That job persists each target's search corpus between runs in an `actions/cache` entry, minimised
+by `cargo fuzz cmin` before it is saved and kept in an ignored `state/<target>/` directory apart
+from the tracked seeds (#603; `tooling/gamut-fuzz/README.md`, "The search corpus"). The cache is a
+search aid like the corpus it holds, never the regression record. Because that corpus accumulates,
+the job is an exploration run rather than a regression gate: it runs **nightly** on `extended.yml`'s
+`schedule:` trigger at an hour per target, and on manual dispatch, but not per push (#594;
+`tooling/gamut-fuzz/README.md`, "The cadence").
 
 What the per-PR path *does* carry is the **compile** half, for the reason the excluded real-DNG
 tier already carries it: nothing else builds an excluded crate, so an API change in a driven crate
 breaks its targets unnoticed until the next run on master. CI's lint job runs `mise run
-check-fuzz` — no nightly, no sanitizer, no engine, nothing unbounded — and its `Format & Metadata`
+check-fuzz` — Clippy under `-D warnings` over every target, so the tier is linted as well as
+compiled (#615); no nightly, no sanitizer, no engine, nothing unbounded — and its `Format & Metadata`
 job runs `mise run check-fuzz-matrix`, which reconciles the three hand-maintained lists that
 describe the target set (the files, the `[[bin]]` entries, the `extended.yml` matrix), because a
 target missing from the third is one that never runs and nothing reports it. Both are mise tasks
@@ -240,7 +248,7 @@ bodies.
 | gamut-core | *none* — no oracle exists | **property** (`convert`, `image` stride math) | — |
 | gamut-ifd | *none in-crate* — libtiff/exiv2 reach it via the consuming codecs (STATUS.md P7) | **property** + exact-byte | `IfdReader`, `read` ☑ laws; ☑ driver |
 | gamut-tonemap | *none* | **property** (monotonicity, endpoints, no NaN) | — |
-| gamut-bitstream | *none* — self-inverse | property + exact-byte | — |
+| gamut-bitstream | *none* — self-inverse (bit I/O); T.81 Annex C/K.2 derivations (Huffman table builder) | property + exact-byte | — |
 | gamut-dsp | AV1 §7.13 / T.81 §A.3 transform definitions | example + in-test reference transform | — |
 | gamut-codec-abi | *none* | exact-byte + compile-time assertion | — |
 | gamut-color | Little-CMS | differential | — |
@@ -267,8 +275,10 @@ Eight crates hold no oracle dev-dependency of their own: `gamut-core`, `gamut-if
 `gamut-tonemap`, `gamut-bitstream`, `gamut-dsp`, `gamut-codec-abi`, `gamut-isobmff` and
 `gamut-metadata`. Most have something else standing in — `gamut-isobmff` has specification vectors,
 exact-byte assertions and libavif's reach through `gamut-avif`; `gamut-ifd` is covered through
-`gamut-tiff`'s libtiff and `gamut-exif`'s exiv2; `gamut-bitstream` and `gamut-dsp` check against a
-self-inverse or a reference transform; `gamut-codec-abi` pins its ABI at compile time.
+`gamut-tiff`'s libtiff and `gamut-exif`'s exiv2; `gamut-dsp` checks against a reference
+transform; `gamut-bitstream` checks its bit I/O against a self-inverse and its T.81 Annex K.2
+Huffman table builder against hand derivations from Annexes C and K plus exact-byte regression
+goldens (no libjpeg table-byte differential); `gamut-codec-abi` pins its ABI at compile time.
 
 **Where a property is the primary signal rather than a supplement: `gamut-core`, `gamut-ifd` and
 `gamut-tonemap`** — real algorithmic content, no reference implementation to defer to, and no

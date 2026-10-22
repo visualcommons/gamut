@@ -573,6 +573,8 @@ impl SequenceHeader {
 
 #[cfg(test)]
 mod tests {
+    use gamut_bitstream::BitWriter;
+
     use super::*;
     use crate::decode::testutil::{encoder_seq_header, still_config};
     use crate::headers::Av1Colour;
@@ -630,6 +632,196 @@ mod tests {
         assert_eq!(sh.color.transfer_characteristics, 1);
         assert_eq!(sh.color.matrix_coefficients, 1);
         assert!(!sh.color.full_range, "limited range must survive the parse");
+        assert_eq!(sh.color.subsampling, Subsampling::Yuv444);
+    }
+
+    /// A general (non-reduced) §5.5.1 sequence header for a 64×64 frame. `operating_points` codes
+    /// everything from `timing_info_present_flag` through the operating-point loop, and `colour`
+    /// codes the whole `color_config()` (§5.5.2); every other field is zero.
+    ///
+    /// Neither encoder this crate is tested against emits timing info, a decoder model, a level
+    /// above 7, profile 2 or a high bit depth, so those §5.5 branches are only reachable from here.
+    fn general_header(
+        seq_profile: u32,
+        operating_points: impl FnOnce(&mut BitWriter),
+        colour: impl FnOnce(&mut BitWriter),
+    ) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.put_bits(seq_profile, 3);
+        w.put_bit(1); // still_picture
+        w.put_bit(0); // reduced_still_picture_header
+        operating_points(&mut w);
+        w.put_bits(5, 4); // frame_width_bits_minus_1
+        w.put_bits(5, 4); // frame_height_bits_minus_1
+        w.put_bits(63, 6); // max_frame_width_minus_1
+        w.put_bits(63, 6); // max_frame_height_minus_1
+        w.put_bit(0); // frame_id_numbers_present_flag
+        w.put_bits(0, 3); // use_128x128_superblock, enable_filter_intra, enable_intra_edge_filter
+        w.put_bits(0, 4); // the four inter-coding tool flags
+        w.put_bit(0); // enable_order_hint
+        w.put_bit(1); // seq_choose_screen_content_tools
+        w.put_bit(1); // seq_choose_integer_mv
+        w.put_bits(0, 3); // enable_superres, enable_cdef, enable_restoration
+        colour(&mut w);
+        w.put_bit(0); // film_grain_params_present
+        w.put_bit(1); // trailing_bits
+        w.byte_align();
+        w.into_bytes()
+    }
+
+    /// One operating point at level 0, with no timing, decoder model or display delay.
+    fn one_level_0_operating_point(w: &mut BitWriter) {
+        w.put_bit(0); // timing_info_present_flag
+        w.put_bit(0); // initial_display_delay_present_flag
+        w.put_bits(0, 5); // operating_points_cnt_minus_1
+        w.put_bits(0, 12); // operating_point_idc[0]
+        w.put_bits(0, 5); // seq_level_idx[0]
+    }
+
+    #[test]
+    fn levels_above_7_and_only_those_code_a_tier() {
+        // §5.5.1: `if (seq_level_idx[i] > 7) seq_tier[i]`. Operating point 0 is at level 8 with
+        // the tier bit set; operating point 1 at level 7 codes none, so reading one there shifts
+        // every later field by a bit.
+        let payload = general_header(
+            0,
+            |w| {
+                w.put_bit(0); // timing_info_present_flag
+                w.put_bit(0); // initial_display_delay_present_flag
+                w.put_bits(1, 5); // operating_points_cnt_minus_1
+                w.put_bits(0x103, 12); // operating_point_idc[0]
+                w.put_bits(8, 5); // seq_level_idx[0]
+                w.put_bit(1); // seq_tier[0]
+                w.put_bits(0x101, 12); // operating_point_idc[1]
+                w.put_bits(7, 5); // seq_level_idx[1], no tier
+            },
+            |w| {
+                w.put_bits(0, 3); // high_bitdepth, mono_chrome, color_description_present_flag
+                w.put_bit(0); // color_range
+                w.put_bits(0, 2); // chroma_sample_position
+                w.put_bit(0); // separate_uv_delta_q
+            },
+        );
+        let sh = SequenceHeader::parse(&payload).unwrap();
+        assert_eq!(
+            (sh.operating_point_idc, sh.seq_level_idx, sh.seq_tier),
+            (0x103, 8, 1)
+        );
+        assert_eq!((sh.max_frame_width, sh.max_frame_height), (64, 64));
+    }
+
+    #[test]
+    fn timing_info_and_the_decoder_model_are_consumed_at_their_coded_widths() {
+        // §5.5.3 `timing_info()` is 64 bits plus a `uvlc()` when `equal_picture_interval` is set,
+        // and §5.5.4 makes `buffer_delay_length_minus_1 + 1` the width of both §5.5.5 delays. A
+        // still decoder keeps none of it, so only the fields after it can show it was skipped
+        // at the right width.
+        let payload = general_header(
+            0,
+            |w| {
+                w.put_bit(1); // timing_info_present_flag
+                w.put_bits(1001, 32); // num_units_in_display_tick
+                w.put_bits(60_000, 32); // time_scale
+                w.put_bit(1); // equal_picture_interval
+                w.put_bit(1); // num_ticks_per_picture_minus_1 = uvlc() 0
+                w.put_bit(1); // decoder_model_info_present_flag
+                w.put_bits(9, 5); // buffer_delay_length_minus_1: delays are 10 bits
+                w.put_bits(0xdead_beef, 32); // num_units_in_decoding_tick
+                w.put_bits(0, 5); // buffer_removal_time_length_minus_1
+                w.put_bits(0, 5); // frame_presentation_time_length_minus_1
+                w.put_bit(0); // initial_display_delay_present_flag
+                w.put_bits(0, 5); // operating_points_cnt_minus_1
+                w.put_bits(0x7ff, 12); // operating_point_idc[0]
+                w.put_bits(5, 5); // seq_level_idx[0]
+                w.put_bit(1); // decoder_model_present_for_this_op[0]
+                w.put_bits(0x2aa, 10); // decoder_buffer_delay
+                w.put_bits(0x155, 10); // encoder_buffer_delay
+                w.put_bit(1); // low_delay_mode_flag
+            },
+            |w| {
+                w.put_bits(0, 3); // high_bitdepth, mono_chrome, color_description_present_flag
+                w.put_bit(1); // color_range
+                w.put_bits(0, 2); // chroma_sample_position
+                w.put_bit(0); // separate_uv_delta_q
+            },
+        );
+        let sh = SequenceHeader::parse(&payload).unwrap();
+        assert!(sh.decoder_model_info_present);
+        assert_eq!((sh.operating_point_idc, sh.seq_level_idx), (0x7ff, 5));
+        assert_eq!((sh.max_frame_width, sh.max_frame_height), (64, 64));
+        assert!(sh.color.full_range);
+    }
+
+    #[test]
+    fn profile_2_codes_twelve_bit_and_each_of_its_chroma_layouts() {
+        // §5.5.2 for `seq_profile = 2` outside the sRGB shortcut: 10-bit is always 4:2:2, and
+        // only 12-bit codes `subsampling_x`, then `subsampling_y` only when `subsampling_x` is 1.
+        // `chroma_sample_position` is coded for 4:2:0 alone.
+        for (twelve_bit, ss, depth, subsampling, csp) in [
+            (false, None, 10, Subsampling::Yuv422, 0),
+            (true, Some((0, None)), 12, Subsampling::Yuv444, 0),
+            (true, Some((1, Some(0))), 12, Subsampling::Yuv422, 0),
+            (true, Some((1, Some(1))), 12, Subsampling::Yuv420, 2),
+        ] {
+            let payload = general_header(2, one_level_0_operating_point, |w| {
+                w.put_bit(1); // high_bitdepth
+                w.put_bit(u8::from(twelve_bit)); // twelve_bit
+                w.put_bit(0); // mono_chrome
+                w.put_bit(0); // color_description_present_flag
+                w.put_bit(0); // color_range
+                if let Some((x, y)) = ss {
+                    w.put_bits(x, 1); // subsampling_x
+                    if let Some(y) = y {
+                        w.put_bits(y, 1); // subsampling_y
+                    }
+                }
+                if subsampling == Subsampling::Yuv420 {
+                    w.put_bits(csp, 2); // chroma_sample_position
+                }
+                w.put_bit(0); // separate_uv_delta_q
+            });
+            let sh = SequenceHeader::parse(&payload)
+                .unwrap_or_else(|e| panic!("{depth}-bit {subsampling:?}: {e}"));
+            assert_eq!(sh.seq_profile, 2);
+            assert_eq!(sh.color.bit_depth, depth, "{subsampling:?}");
+            assert_eq!(sh.color.subsampling, subsampling, "{depth}-bit");
+            assert_eq!(u32::from(sh.color.chroma_sample_position), csp);
+        }
+    }
+
+    #[test]
+    fn a_high_bitdepth_profile_0_header_is_ten_bit_without_a_twelve_bit_flag() {
+        // `twelve_bit` is coded only for `seq_profile == 2` (§5.5.2); profile 0 at high bit depth
+        // is 10-bit and goes straight on to `mono_chrome`.
+        let payload = general_header(0, one_level_0_operating_point, |w| {
+            w.put_bit(1); // high_bitdepth
+            w.put_bit(0); // mono_chrome
+            w.put_bit(0); // color_description_present_flag
+            w.put_bit(1); // color_range
+            w.put_bits(1, 2); // chroma_sample_position
+            w.put_bit(0); // separate_uv_delta_q
+        });
+        let sh = SequenceHeader::parse(&payload).unwrap();
+        assert_eq!(sh.color.bit_depth, 10);
+        assert_eq!(sh.color.subsampling, Subsampling::Yuv420);
+        assert_eq!(sh.color.chroma_sample_position, 1);
+    }
+
+    #[test]
+    fn an_identity_matrix_alone_is_not_the_srgb_shortcut() {
+        // The §5.5.2 shortcut needs all three of BT.709 primaries, sRGB transfer and the identity
+        // matrix. Identity with unspecified primaries and transfer still codes `color_range`.
+        let payload = general_header(1, one_level_0_operating_point, |w| {
+            w.put_bit(0); // high_bitdepth; profile 1 codes no mono_chrome
+            w.put_bit(1); // color_description_present_flag
+            w.put_bits(2, 8); // color_primaries = unspecified
+            w.put_bits(2, 8); // transfer_characteristics = unspecified
+            w.put_bits(0, 8); // matrix_coefficients = MC_IDENTITY
+            w.put_bit(0); // color_range: limited
+            w.put_bit(0); // separate_uv_delta_q
+        });
+        let sh = SequenceHeader::parse(&payload).unwrap();
+        assert!(!sh.color.full_range, "the shortcut would infer full range");
         assert_eq!(sh.color.subsampling, Subsampling::Yuv444);
     }
 

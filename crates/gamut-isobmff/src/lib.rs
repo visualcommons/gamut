@@ -18,7 +18,9 @@
 //! `ContentProvenanceBox`, a `free`, a vendor box), written after `ftyp` or after `mdat` per its
 //! [`TopLevelPosition`]. The C2PA framing of that `uuid` box — its user type, `box_purpose`,
 //! merkle offset and store slot — is read by [`C2paUuidBox::classify`] and written by
-//! [`content_provenance_payload`], once for both codecs. The writer normalises to the
+//! [`content_provenance_payload`], once for both codecs; so is the `Exif` item's
+//! `exif_tiff_header_offset` framing (ISO/IEC 23008-12 §A.2.1), by [`Item::exif_tiff_stream`].
+//! The writer normalises to the
 //! smallest box versions (`iloc` v0, single extent into `mdat`); the reader additionally accepts
 //! the foreign-encoder repertoire (`iloc` v1/v2, `idat` placement, multi-extent payloads, 32-bit
 //! item ids, 16-bit `ipma` indices). Image sequences/tracks and item protection are out of scope —

@@ -54,8 +54,8 @@ points:
   async caller drives the source itself, which keeps a runtime dependency out of the crate.
 - **`parse_with_report`** (and its `parse_from_with_report` twin) returns a `ReadReport` alongside
   the `Exif`, naming each region the lenient reader discarded — a malformed Exif/GPS/Interop
-  sub-IFD, an unusable thumbnail range, or a top-level directory past the 1st IFD — with the tag
-  that addressed it, the offset it carried, and a typed reason. `parse` stays silent, as before.
+  sub-IFD, an unusable thumbnail range or strip set, or a top-level directory past the 1st IFD —
+  with the tag that addressed it, the offset it carried, and a typed reason. `parse` stays silent, as before.
   It also names, in `ReadReport::dropped_entries`, every entry a repeated tag shadowed in a
   directory the model keeps (the last occurrence wins). The report is complete over those regions
   and entries, but its drop lists are **not** a byte-completeness verdict: bytes no structure
@@ -123,6 +123,16 @@ the typed [`GpsConversionError`].
 
 ## Compatibility
 
+**One read verdict changed after 2.0.0.** A 1st IFD whose integer `StripOffsets` names strips that
+cannot be read — `StripByteCounts` absent, not an integer array or of a different length; a strip
+outside the blob; or strips overlapping past the blob's length — used to parse as a thumbnail with
+no strips, its `StripOffsets` kept and re-emitted by the writer addressing nothing. It is now a
+**loss**, named in the report as a `DroppedRegion::ThumbnailStrips` drop
+(`DropReason::StripsUnsized`, `OutOfBounds` or `StripsOverlap`), its `StripOffsets` removed from
+the model, and **rejected by `strict`** with `ExifError::BadThumbnail`. As with the JPEG pair below, it refuses no conformant
+input: Exif 3.0 §4.6.5.2.1/§4.6.5.2.3 give both tags the same count and Table 21 the same support
+level in every column, and a conformant thumbnail's strips are disjoint ranges of the blob.
+
 **One read verdict changed after 1.0.0.** A 1st IFD carrying `JPEGInterchangeFormat` with no
 `JPEGInterchangeFormatLength` used to parse as a thumbnail that simply had no bytes; it is a
 **loss** — named in the report as `DropReason::ThumbnailLengthMissing`, and **rejected by
@@ -158,25 +168,27 @@ specification puts it in — the Exif and GPS pointers from the 0th IFD, the Int
 from the Exif sub-IFD — so a name for them would only invite a write that is silently discarded.
 (One written into some other directory is not one the writer looks for: it survives as an ordinary
 field that no accessor reads.) The crate also gives full read/write
-round-trips over `gamut-ifd`, the typed [`GpsInfo`] projection, and JPEG thumbnails. Intentionally
-deferred (and designed to be added without breaking the 1.0 API — the catalogue and vendor enums
-are `#[non_exhaustive]`):
+round-trips over `gamut-ifd`, the typed [`GpsInfo`] projection, and both JPEG and uncompressed
+strip thumbnails. Intentionally deferred (and designed to be added without breaking the 1.0 API —
+the catalogue and vendor enums are `#[non_exhaustive]`):
 
 - **Per-vendor MakerNote decoding.** The `MakerNote` block is preserved verbatim and its vendor
   detected ([`MakerNoteVendor`]), but not decoded. Since issue #263 a parsed model records the
   note's absolute source offset and the writer **pins** the byte range there on a rewrite, so
   vendor TIFF-absolute internal offsets stay valid; only an unsatisfiable pin (the directory
   region outgrew the old position) falls back to relocation, with the bytes still value-exact.
-- **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags to gamut's 160;
-  the difference is entirely tags CIPA DC-008 does not define (TIFF/EP, DNG, and other lineages),
-  which would have to be transcribed from *their* specifications, not copied out of an oracle.
-  Unknown tags still round-trip losslessly via the raw `Ifd`.
+- **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags. The 160 CIPA
+  DC-008 ones are catalogued here; since issue #532 the 0th IFD's TIFF 6.0 and DNG 1.7.1.0 tags
+  (162 more) are named through `IfdKind::registry_spec` from the shared `gamut_ifd::tags`
+  registry, transcribed from those vendored specifications. What remains — TIFF/EP, the Adobe
+  technical notes, and the vendor lineages exiv2 folds into its standard tables — has no vendored
+  specification to transcribe from, and is not copied out of an oracle. Unknown tags still
+  round-trip losslessly via the raw `Ifd`.
 - **A derivation of the per-tag `Type`/`Count` columns from the PDF itself.** Since issue #544 they
   are checked against a second, independent transcription of the DC-008 tables
   (`tests/fixtures/dc008_tag_columns.txt`, compared by `tests/tag_spec_columns.rs`), so a
   *corrected-but-different* value in either copy fails a test; but nothing re-reads the vendored
   PDF, so an error made identically in both transcriptions would still pass.
-- **Uncompressed strip-based thumbnails** are read but not re-embedded (JPEG thumbnails are).
 
 ## Status
 

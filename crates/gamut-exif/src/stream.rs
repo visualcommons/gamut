@@ -390,8 +390,118 @@ impl ExifReader {
         // site's two condition mutants; the tests pinning the drop now kill nothing there.
         let mut ifd = ifd;
         ifd.remove(ptr);
-        Ok(Thumbnail::from_parts(ifd, jpeg))
+        // `StripOffsets` is structural in the same way, and leaves the model on the same terms:
+        // read strips are re-addressed by the writer, and unreadable ones — named in the report as
+        // a `ThumbnailStrips` drop, or rejected in strict mode — leave nothing to address, so
+        // `to_bytes` must not re-emit offsets the report says lead nowhere (#868, as #548 for the
+        // JPEG pointer). A `StripOffsets` that names no strip (not an integer array, or an empty
+        // one) addresses no bytes, so nothing is lost and nothing is reported; it is removed all
+        // the same, as an unreadable `JPEGInterchangeFormat` is above.
+        //
+        // Removing unconditionally deletes the former `if strips.is_some()` guard and with it that
+        // site's condition mutants.
+        let strips = match read_strips(reader, &ifd)? {
+            Strips::Absent => None,
+            Strips::Read(strips) => Some(strips),
+            Strips::Unreadable { why, .. } if self.strict => {
+                return Err(ExifError::BadThumbnail(why));
+            }
+            Strips::Unreadable { offset, reason, .. } => {
+                report.record(Dropped::new(
+                    DroppedRegion::ThumbnailStrips,
+                    u64::from(offset),
+                    reason,
+                ));
+                None
+            }
+        };
+        ifd.remove(ifd_tags::STRIP_OFFSETS);
+        Ok(Thumbnail::from_parts(ifd, jpeg, strips))
     }
+}
+
+/// What the 1st IFD's `StripOffsets` / `StripByteCounts` pair yielded.
+enum Strips {
+    /// `StripOffsets` names no strip: it is absent, not an integer array, or empty. Nothing is
+    /// addressed, so nothing is lost.
+    Absent,
+    /// Every strip, in `StripOffsets` order.
+    Read(Vec<Vec<u8>>),
+    /// `StripOffsets` addresses strips that cannot be read.
+    Unreadable {
+        /// The [`Dropped::offset`] to report: the strip that lies outside the stream, or the
+        /// first strip's offset when the defect belongs to the set rather than to one strip.
+        offset: u32,
+        /// Why the set could not be read.
+        reason: DropReason,
+        /// The strict-mode [`ExifError::BadThumbnail`] message.
+        why: &'static str,
+    },
+}
+
+/// Fetches every strip of the 1st IFD's `StripOffsets` / `StripByteCounts` arrays (Exif 3.0
+/// §4.6.9.2 Table 21, the uncompressed thumbnail columns).
+///
+/// Read whatever `Compression` says, for the reason `read_thumbnail` gives for the JPEG pair: the
+/// rule is structural, not a Table 21 support-level check. An integer `StripOffsets` naming at
+/// least one strip addresses bytes, so failing to read them is a loss
+/// ([`Strips::Unreadable`]), checked in this order:
+///
+/// * [`DropReason::StripsUnsized`] — `StripByteCounts` is absent, not an integer array, or holds a
+///   different number of entries. Exif 3.0 §4.6.5.2.1 and §4.6.5.2.3 give both tags the same
+///   count, and Table 21 the same support level in every column, so no conformant 1st IFD has an
+///   offset without its count.
+/// * [`DropReason::OutOfBounds`] — a strip's range is not wholly inside the stream; the first such
+///   strip's offset is reported.
+/// * [`DropReason::StripsOverlap`] — every strip is inside the stream but their *total* length is
+///   not. Like `read_range`, the bound comes before any allocation, since each strip alone fitting
+///   would still let `n` overlapping strips allocate `n` times the stream. A conformant
+///   thumbnail's strips are disjoint ranges of the blob, so no conformant input exceeds that
+///   total; what it stops accepting is a 1st IFD whose strips overlap by more than the stream's
+///   own length.
+fn read_strips<S: ReadAt>(reader: &mut IfdReader<S>, ifd: &Ifd) -> Result<Strips> {
+    let Some(offsets) = ifd.get_u32_vec(ifd_tags::STRIP_OFFSETS) else {
+        return Ok(Strips::Absent);
+    };
+    let Some(&first) = offsets.first() else {
+        return Ok(Strips::Absent);
+    };
+    let counts = match ifd.get_u32_vec(ifd_tags::STRIP_BYTE_COUNTS) {
+        Some(counts) if counts.len() == offsets.len() => counts,
+        _ => {
+            return Ok(Strips::Unreadable {
+                offset: first,
+                reason: DropReason::StripsUnsized,
+                why: "StripOffsets with no StripByteCounts entry to size each strip",
+            });
+        }
+    };
+    let len = reader.source_mut().len()?;
+    let mut total = 0u64;
+    for (&offset, &count) in offsets.iter().zip(&counts) {
+        // Widened to 64 bits first: the sum of two `u32`s cannot overflow a `u64`.
+        if u64::from(offset) + u64::from(count) > len {
+            return Ok(Strips::Unreadable {
+                offset,
+                reason: DropReason::OutOfBounds,
+                why: "strip range out of bounds",
+            });
+        }
+        total += u64::from(count);
+    }
+    if total > len {
+        return Ok(Strips::Unreadable {
+            offset: first,
+            reason: DropReason::StripsOverlap,
+            why: "strips overlapping past the stream's length",
+        });
+    }
+    let strips = offsets
+        .into_iter()
+        .zip(counts)
+        .map(|(offset, length)| fetch(reader, offset, length))
+        .collect::<Result<_>>()?;
+    Ok(Strips::Read(strips))
 }
 
 /// Records each of `offsets` — the top-level directories past the 1st IFD, which parse cleanly but
@@ -467,11 +577,17 @@ fn read_range<S: ReadAt>(
     if end > reader.source_mut().len()? {
         return Ok(None);
     }
+    fetch(reader, offset, length).map(Some)
+}
+
+/// Fetches `length` bytes at `offset`. The caller has already bounded the range by the stream's
+/// length, so the allocation is too.
+fn fetch<S: ReadAt>(reader: &mut IfdReader<S>, offset: u32, length: u32) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; length as usize];
     reader
         .source_mut()
         .read_exact_at(u64::from(offset), &mut buf)?;
-    Ok(Some(buf))
+    Ok(buf)
 }
 
 /// The absolute offset of the Exif sub-IFD's out-of-line `MakerNote` value in the TIFF stream, or
@@ -781,6 +897,233 @@ mod tests {
         let mut out = MARKER.to_vec();
         out.extend(tiff);
         out
+    }
+
+    /// `build(len)` where `len` is the TIFF-stream length `build` itself produces: the length
+    /// depends only on each field's type and count, never on its values, so an offset or byte
+    /// count can name the stream's own end.
+    fn sized(build: impl Fn(u32) -> Vec<u8>) -> Vec<u8> {
+        let len = (build(0).len() - MARKER.len()) as u32;
+        build(len)
+    }
+
+    /// A marked blob whose uncompressed 1st IFD addresses `strips`, appended contiguously past the
+    /// directories, through `StripOffsets` and a SHORT `StripByteCounts`.
+    fn strip_blob(strips: &[&[u8]]) -> Vec<u8> {
+        let counts = Value::Short(strips.iter().map(|s| s.len() as u16).collect());
+        let mut blob = sized(|base| {
+            let mut at = base;
+            let offsets = strips
+                .iter()
+                .map(|s| {
+                    let o = at;
+                    at += s.len() as u32;
+                    o
+                })
+                .collect();
+            thumbnail_blob_of(&[
+                (ExifTag::Compression.tag_id(), Value::Short(vec![1])),
+                (ifd_tags::STRIP_OFFSETS, Value::Long(offsets)),
+                (ifd_tags::STRIP_BYTE_COUNTS, counts.clone()),
+            ])
+        });
+        for strip in strips {
+            blob.extend_from_slice(strip);
+        }
+        blob
+    }
+
+    /// An uncompressed thumbnail's strips are read in `StripOffsets` order, and the offsets leave
+    /// the model as the JPEG pointer does: the writer re-synthesises them. `StripByteCounts`
+    /// stays, as `JPEGInterchangeFormatLength` does.
+    #[test]
+    fn strip_thumbnail_bytes_are_read_and_their_offsets_leave_the_model() {
+        let strips: [&[u8]; 2] = [b"abc", b"defgh"];
+        let exif = ExifReader::new()
+            .strict(true)
+            .parse(&strip_blob(&strips))
+            .expect("parse");
+        let thumb = exif.thumbnail().expect("thumbnail");
+        assert_eq!(
+            thumb.strips(),
+            Some(&[b"abc".to_vec(), b"defgh".to_vec()][..])
+        );
+        assert_eq!(thumb.ifd().get(ifd_tags::STRIP_OFFSETS), None);
+        assert_eq!(
+            thumb.ifd().get(ifd_tags::STRIP_BYTE_COUNTS),
+            Some(&Value::Short(vec![3, 5]))
+        );
+    }
+
+    /// `StripByteCounts`, if any, given the stream's own length.
+    type StripCounts = fn(u32) -> Option<Value>;
+
+    /// A marked blob whose 1st IFD carries `offsets` as `StripOffsets` and `counts(len)` — `len`
+    /// being the TIFF stream's own length — as `StripByteCounts`.
+    fn strip_pair_blob(offsets: &Value, counts: StripCounts) -> Vec<u8> {
+        sized(|len| {
+            let mut fields = vec![(ifd_tags::STRIP_OFFSETS, offsets.clone())];
+            fields.extend(counts(len).map(|c| (ifd_tags::STRIP_BYTE_COUNTS, c)));
+            thumbnail_blob_of(&fields)
+        })
+    }
+
+    /// Every way an integer `StripOffsets` naming strips can fail to describe readable ones, with
+    /// the report entry each must produce and the strict-mode message: `(case, StripOffsets,
+    /// StripByteCounts, reported offset, reason, strict message)`.
+    ///
+    /// The out-of-bounds case puts the bad strip second, so the reported offset is the offending
+    /// strip's rather than the first. The overlap case is the allocation bound: two strips each
+    /// ending exactly at the stream's end — so neither is out of bounds — whose total is nearly
+    /// twice its length; its first offset is not 0, so the report is seen to carry it.
+    fn unreadable_strip_cases() -> [(
+        &'static str,
+        Value,
+        StripCounts,
+        u64,
+        DropReason,
+        &'static str,
+    ); 5] {
+        const UNSIZED: &str = "StripOffsets with no StripByteCounts entry to size each strip";
+        [
+            (
+                "out of bounds",
+                Value::Long(vec![8, 0xFFFF]),
+                |_| Some(Value::Long(vec![1, 4])),
+                0xFFFF,
+                DropReason::OutOfBounds,
+                "strip range out of bounds",
+            ),
+            (
+                "no byte counts",
+                Value::Long(vec![8]),
+                |_| None,
+                8,
+                DropReason::StripsUnsized,
+                UNSIZED,
+            ),
+            (
+                "non-integer byte counts",
+                Value::Short(vec![9]),
+                |_| Some(Value::Ascii("x".into())),
+                9,
+                DropReason::StripsUnsized,
+                UNSIZED,
+            ),
+            (
+                "unequal lengths",
+                Value::Long(vec![10, 8]),
+                |_| Some(Value::Long(vec![1])),
+                10,
+                DropReason::StripsUnsized,
+                UNSIZED,
+            ),
+            (
+                "overlap past the stream's length",
+                Value::Long(vec![2, 1]),
+                // Saturating: `sized` first builds with `len = 0` to measure the stream.
+                |len| {
+                    Some(Value::Long(vec![
+                        len.saturating_sub(2),
+                        len.saturating_sub(1),
+                    ]))
+                },
+                2,
+                DropReason::StripsOverlap,
+                "strips overlapping past the stream's length",
+            ),
+        ]
+    }
+
+    /// A lenient parse names each unreadable strip set as one `ThumbnailStrips` drop, at the
+    /// offset and for the reason the case expects, and removes `StripOffsets` from the model —
+    /// while `StripByteCounts` stays, as `JPEGInterchangeFormatLength` does beside a dropped JPEG
+    /// range. The written blob then carries no strip pointer, so it is strictly valid and re-parses
+    /// to the same thumbnail with nothing reported (#868, as #548 for the JPEG pointer).
+    #[test]
+    fn unreadable_strips_are_dropped_and_their_offsets_leave_the_model() {
+        for (name, offsets, counts, at, reason, _) in unreadable_strip_cases() {
+            let blob = strip_pair_blob(&offsets, counts);
+            let (exif, report) = ExifReader::new()
+                .parse_with_report(&blob)
+                .expect("lenient parse");
+            assert_eq!(
+                report.dropped(),
+                &[Dropped::new(DroppedRegion::ThumbnailStrips, at, reason)],
+                "{name}"
+            );
+            let thumb = exif.thumbnail().expect("the 1st IFD is still a thumbnail");
+            assert_eq!(thumb.strips(), None, "{name}");
+            assert_eq!(thumb.ifd().get(ifd_tags::STRIP_OFFSETS), None, "{name}");
+            let len = (blob.len() - MARKER.len()) as u32;
+            assert_eq!(
+                thumb.ifd().get(ifd_tags::STRIP_BYTE_COUNTS),
+                counts(len).as_ref(),
+                "{name}: StripByteCounts must stay as the source had it"
+            );
+
+            let emitted = exif.to_bytes().expect("write");
+            let (reparsed, report) = ExifReader::new()
+                .strict(true)
+                .parse_with_report(&emitted)
+                .expect("the emitted blob must be strictly valid");
+            assert!(report.is_empty(), "{name}: {:?}", report.dropped());
+            assert_eq!(reparsed.thumbnail(), exif.thumbnail(), "{name}");
+        }
+    }
+
+    /// Strict mode rejects each unreadable strip set as the bad thumbnail it is, naming the defect.
+    #[test]
+    fn unreadable_strips_are_rejected_strictly() {
+        for (name, offsets, counts, _, _, why) in unreadable_strip_cases() {
+            let err = ExifReader::new()
+                .strict(true)
+                .parse(&strip_pair_blob(&offsets, counts))
+                .expect_err(name);
+            assert_eq!(
+                err.to_string(),
+                format!("invalid thumbnail: {why}"),
+                "{name}"
+            );
+        }
+    }
+
+    /// A `StripOffsets` that names no strip — not an integer array, or an empty one — addresses no
+    /// bytes, so nothing is reported and strict mode accepts it; it still leaves the model, so the
+    /// writer emits no strip pointer.
+    #[test]
+    fn a_strip_pointer_naming_no_strip_is_removed_without_a_drop() {
+        for (name, offsets) in [
+            ("non-integer", Value::Ascii("x".into())),
+            ("empty", Value::Long(vec![])),
+        ] {
+            let blob = strip_pair_blob(&offsets, |_| Some(Value::Long(vec![1])));
+            let (exif, report) = ExifReader::new()
+                .strict(true)
+                .parse_with_report(&blob)
+                .expect("strict parse");
+            assert!(report.is_empty(), "{name}: {:?}", report.dropped());
+            let thumb = exif.thumbnail().expect("thumbnail");
+            assert_eq!(thumb.strips(), None, "{name}");
+            assert_eq!(thumb.ifd().get(ifd_tags::STRIP_OFFSETS), None, "{name}");
+        }
+    }
+
+    /// A strip set whose total is exactly the stream's length is inside the bound: one strip
+    /// spanning the whole TIFF stream, header included.
+    #[test]
+    fn strips_totalling_the_stream_length_are_read() {
+        let blob = sized(|len| {
+            thumbnail_blob_of(&[
+                (ifd_tags::STRIP_OFFSETS, Value::Long(vec![0])),
+                (ifd_tags::STRIP_BYTE_COUNTS, Value::Long(vec![len])),
+            ])
+        });
+        let exif = Exif::parse(&blob).expect("parse");
+        assert_eq!(
+            exif.thumbnail().and_then(Thumbnail::strips),
+            Some(&[blob[MARKER.len()..].to_vec()][..])
+        );
     }
 
     /// A thumbnail pointer whose bytes were dropped never reaches the model, so `to_bytes` cannot

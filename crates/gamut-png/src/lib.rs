@@ -18,6 +18,12 @@
 //! and `gamut_webp::metadata`, and what a colour-space probe should call.
 //! [`PngDecoder::metadata`] is the same walk with a configurable inflation budget.
 //!
+//! With the optional **`metadata`** Cargo feature the EXIF/XMP/ICC/C2PA payloads are wired to the
+//! `gamut-metadata` facade's typed models through its `TypedMetadata` trait, implemented by
+//! [`PngMetadata`] and [`DecodedPng`] (`blocks` / `metadata`); `PngEncoder::with_metadata` /
+//! `PngEncoder::with_encoded_metadata` embed a unified `Metadata`, routing each carrier to the raw
+//! setters. The chunk-for-chunk carry of a [`PngMetadata`] is [`PngEncoder::with_png_metadata`].
+//!
 //! # C2PA manifest store
 //!
 //! A C2PA manifest store travels in the `caBX` chunk (C2PA 2.4 §A.3.2: ancillary, private,
@@ -28,7 +34,7 @@
 //! store computed for this file and [`PngEncoder::with_c2pa_reserved`] reserves its place, as the
 //! last chunk before `IDAT`; [`PngEncoder::encode_with_report`] and [`PngReport::c2pa`] name the
 //! chunk's **whole** span — length, type, payload and CRC — which is what a `c2pa.hash.data`
-//! assertion excludes (§18.5.4). [`fill_c2pa`] then writes the finished store into that span in
+//! assertion excludes (C2PA §18.5.4). [`fill_c2pa`] then writes the finished store into that span in
 //! place, rewriting only the payload and the chunk CRC, so the file the signer hashed is the file
 //! it signed. For a reader rather than a signer, [`c2pa_summary`] reports the same store beside
 //! every other `caBX` chunk the file carries — each with the reason it is not the store — and
@@ -101,7 +107,7 @@ pub use chunk::{
 pub use color::ColorType;
 pub use decoded::{
     Background, Chromaticities, Cicp, DecodedPng, IccProfile, ModificationTime, PhysicalDimensions,
-    PngHeader, PngImage, PngMetadata, TextChunk, TextChunkKind, XmpFraming,
+    PngHeader, PngImage, PngMetadata, TextChunk, TextChunkKind,
 };
 pub use decoder::{PngDecoder, TransparencyKey, metadata};
 pub use deconstruct::{
@@ -112,4 +118,8 @@ pub use encoder::{MetadataNotice, PngEncodeReport, PngEncoder, Preset};
 pub use filter::{FilterStrategy, FilterType};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
 pub use gamut_deflate::Level;
-pub use palette::PngPalette;
+// The facade types named in the `metadata`-feature signatures, so a caller can spell
+// `PngMetadata::metadata` / `PngEncoder::with_metadata` without a direct dependency.
+#[cfg(feature = "metadata")]
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
+pub use palette::{PaletteOrder, PngPalette};

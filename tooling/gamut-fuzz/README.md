@@ -64,8 +64,9 @@ same rule `docs/testing.md` applies to a shrunk `proptest` counterexample, and t
 - **This crate is workspace-excluded**, so `cargo test --workspace --all-features` never builds it.
   Nothing on the pull-request path would otherwise compile these targets at all, and an API change
   in a driven crate would break them unnoticed until the next Extended run. CI's lint job therefore
-  runs `mise run check-fuzz` — build-only, no nightly, no sanitizer, no engine — exactly as it
-  already does for the excluded real-DNG conformance tier with `mise run check-dng-real`.
+  runs `mise run check-fuzz` — Clippy under the workspace's `-D warnings`, which compiles every
+  target and lints it too (#615); no nightly, no sanitizer, no engine — exactly as it already does
+  for the excluded real-DNG conformance tier with `mise run check-dng-real`.
 - **The dependency graph is shared across every target.** A feature turned on for one target's
   crate is on for all of them, because Cargo resolves features once per crate for the whole
   package: `bigtiff` was added to `gamut-ifd` for the `ifd_read` driver, and the pre-existing
@@ -255,47 +256,80 @@ An **allocation** defect needs the engine's malloc hook to be visible at all: an
 nothing and `-malloc_limit_mb` (which libFuzzer defaults to `-rss_limit_mb`, 2048) is the oracle.
 That is how `dng_decode` reports a 780-byte file asking for a 34 GB allocation.
 
-### Two of these rows are red on purpose
+### The first two defects it found
 
-`Fuzz tiff_decode` and `Fuzz dng_decode` **fail today**, on the first defects this tier found:
+`Fuzz tiff_decode` and `Fuzz dng_decode` failed on the first defects this tier found:
 [#563](https://github.com/visualcommons/gamut/issues/563) (a panic on `SamplesPerPixel = 0`) and
 [#564](https://github.com/visualcommons/gamut/issues/564) (a raw buffer sized from declared
-geometry). They are filed rather than fixed, because narrowing a target so its row goes green is
-weakening a check to make a report green — the opposite of what the tier is for.
+geometry). They were filed and fixed in the crates rather than worked around in the targets,
+because narrowing a target so its row goes green is weakening a check to make a report green — the
+opposite of what the tier is for. A row that goes red is read the same way: per row, since the job
+is `fail-fast: false` and one target's crash says nothing about another's.
 
-What that costs, stated plainly so nobody has to rediscover it: **Extended runs on every push to
-the default branch, so its aggregate status stays red until both are fixed.** The blast radius is
-bounded — Extended is post-merge and manual-dispatch only, and the fuzz job is `fail-fast: false`,
-so no pull request is blocked and no other row is cancelled — but a human scanning one red tick
-per push learns nothing from it. Read the per-row status, not the aggregate, until #563 and #564
-close; both rows go green with no change here. Whether these two rows should instead live in a
-separate, expected-to-fail lane so the aggregate keeps its meaning is
-[#593](https://github.com/visualcommons/gamut/issues/593) — a workflow-topology question, not a
-fuzzing one.
+### The cadence
 
-### The cadence, answered
+The fuzz job runs **nightly**, on `extended.yml`'s `schedule:` trigger, at `-max_total_time=3600`
+per target, and on manual dispatch; it does **not** run per push
+([#594](https://github.com/visualcommons/gamut/issues/594)). Every other Extended job keeps the
+opposite cadence — per push to the default branch, skipped on the schedule — because rebuilding an
+unchanged tree finds nothing new, whereas a fuzzer searching an unchanged tree for longer does.
 
-Nine parallel ten-minute runners on every push to the default branch, growing by one runner per
-target, was inherited from the workflow's trigger rather than chosen ([#594](https://github.com/visualcommons/gamut/issues/594)).
-It is **kept**, and here is why, so the next target added does not reopen it:
+- **Exploration, not regression.** A per-push run and a scheduled run are different jobs: the
+  first catches a defect the push introduced, the second searches deeper for one that was already
+  there. This tier is the second. Its regression value lives in the named deterministic tests a
+  crash is promoted into, which run on every pull request; the price of dropping the per-push run
+  is that a defect a push introduces into a target's reach is found up to a day later.
+- **The persisted corpus is what makes depth pay.** Before
+  [#603](https://github.com/visualcommons/gamut/issues/603) each run started from the committed
+  seeds, so frequency was the only dial and every run was the same shallow search. Now each night
+  resumes from the minimised corpus the last one left (see "The search corpus" below), so an hour
+  a night accumulates into one long search instead of many repeated short ones. A nightly run also
+  touches every cache entry daily, well inside the seven-day eviction window.
+- **Cost scales with the matrix, once a day.** One runner per target per night, rather than per
+  push, so adding a row adds an hour of runner time a day however busy the default branch is.
 
-- The cost is queue time, not budget — Actions minutes are free for public repositories — and the
-  job is post-merge with `fail-fast: false`, so it blocks no pull request. The matrix grows the
-  number of *parallel* runners, not the job's wall time.
-- Frequency is the wrong dial, because **nothing accumulates between runs**. Each run starts from
-  the committed seeds and discards what the engine finds, so a run's yield is ten minutes of cold
-  search whatever the cadence: running less often searches strictly less, and running more often
-  re-derives the same shallow space. What would change the tier's yield is persisting the corpus,
-  filed as [#603](https://github.com/visualcommons/gamut/issues/603) — and the cadence and the
-  `-max_total_time` budget are both worth re-opening *after* that lands, not before.
-- Changing the trigger would also move #593's premise (whether a per-push aggregate is red), which
-  is a decision about the workflow's shape rather than about this tier.
+A per-push smoke run alongside the nightly one was considered and not taken: it would need a second
+matrix that `check-targets.sh` reconciles against the first, for a regression signal the promoted
+tests already give. When the matrix's cost or its search depth needs tuning, the dial is the
+`-max_total_time` budget, not the trigger.
 
-The **size** of the matrix is a separate question with the same answer. Nine rows is nine targets,
-and dropping one to buy back queue time would trade coverage for a cost that #603 already owns —
-persisting the corpus is what changes this tier's yield per minute, and until it lands, a shorter
-matrix is simply less search. A target is removed when its checks stop having reach, which is what
-the injection audit decides, and never to make a job finish sooner.
+The **size** of the matrix is a separate question with the same answer. Each row is one target,
+and dropping one to buy back runner time would trade coverage for a cost the nightly cadence and
+the persisted corpus already bound — a shorter matrix is simply less search. A target is removed when
+its checks stop having reach, which is what the injection audit decides, and never to make a job
+finish sooner.
+
+### The search corpus
+
+Each Extended row resumes from the corpus the previous run left
+([#603](https://github.com/visualcommons/gamut/issues/603)), so search deepens across runs instead
+of restarting from the seeds. The engine's search state lives in `state/<target>/`, a directory of
+its own that the root `.gitignore` ignores whole; the curated seeds stay in `corpus/<target>/`
+(see "Seeds" below). Keeping them apart is the point: the seeds are tracked and reviewed, the
+search state is neither, and a shared directory is how one leaks into the other. Per row the job
+
+1. restores `state/<target>/` from an `actions/cache` entry keyed `fuzz-corpus-<target>-<run>`,
+   taking the newest one for that target by prefix — a miss is the old cold start, not a failure;
+2. fuzzes with `state/<target>/` as libFuzzer's **first** corpus directory, the only one it writes,
+   and `corpus/<target>/` as a read-only second;
+3. minimises `state/<target>/` in place with `cargo fuzz cmin`, so the stored corpus is bounded by
+   the coverage the target can reach rather than growing with every run;
+4. saves it under this run's own key — cache keys are immutable — even when the fuzz step failed,
+   because a crash goes to `artifacts/` and leaves the inputs found before it just as valid.
+
+The same layout works locally, and `mise run fuzz cmin` is the step CI runs:
+
+```bash
+mkdir -p tooling/gamut-fuzz/state/heic_hvcc
+mise run fuzz heic_hvcc tooling/gamut-fuzz/state/heic_hvcc tooling/gamut-fuzz/corpus/heic_hvcc -- -max_total_time=60
+mise run fuzz cmin heic_hvcc tooling/gamut-fuzz/state/heic_hvcc
+```
+
+The cache is a search aid with the same standing as the corpus it holds: never the regression
+record, and disposable. Entries unused for seven days are evicted, and so are the oldest once the
+repository passes its 10 GB cache limit; either only costs the next run its head start. A change to
+a target's byte-to-input mapping makes the stored inputs less useful but not wrong, so nothing
+invalidates the cache by hand — `cmin` drops what no longer adds coverage.
 
 ## Keeping the three lists in step
 
@@ -307,7 +341,7 @@ check-fuzz-matrix`; run the same thing locally:
 
 ```bash
 mise run check-fuzz-matrix   # the three lists describe the same target set
-mise run check-fuzz          # every target still compiles against the crates it drives
+mise run check-fuzz          # every target still compiles against the crates it drives, Clippy-clean
 ```
 
 Both are tasks rather than bare commands so a contributor runs *what CI runs*: a step whose command
@@ -323,8 +357,10 @@ re-includes each seed **by its full path**, one negation per file — so the ign
 the list of what is tracked here. `cargo fuzz` uses the directory as its corpus with no extra
 wiring, so `mise run fuzz <target>` picks them up.
 
-Running a target writes its new findings into the same directory — a few minutes of `heic_hvcc`
-adds a couple of hundred files — and those stay ignored, which is the point. That is also why the
+Running a target with no corpus arguments writes its new findings into the same directory — a few
+minutes of `heic_hvcc` adds a couple of hundred files — and those stay ignored, which is the point
+(the Extended job instead passes `state/<target>/` first, so its findings never land here; see "The
+search corpus" above). That is also why the
 negations name files rather than patterns: libFuzzer names its findings by content hash, and a
 wildcard broad enough to cover the next seed would sooner or later cover them too. To add a seed,
 append its `!tooling/gamut-fuzz/corpus/<target>/<file>` line to `.gitignore` and `git add` it by
@@ -367,4 +403,38 @@ each names the check it feeds:
 `corpus/tiff_decode/` carries two — `rgb8-none.tif` and `rgb8-lzw.tif` — because an uncompressed
 strip and an LZW strip enter the decoder through different code, and seeding only one leaves the
 other to be rediscovered. Real-camera corpora are deliberately not vendored: they run to hundreds
-of megabytes and live in `justin13888/rawshift-test-fixtures` releases.
+of megabytes and live in `justin13888/rawshift-test-fixtures` releases. What they would teach the
+engine is carried by a dictionary instead (next section).
+
+## Dictionaries
+
+`dict/` holds libFuzzer `-dict` files for the TIFF/IFD parser targets
+([#567](https://github.com/visualcommons/gamut/issues/567)). The decoder targets start from seeds
+this workspace's own encoders wrote, which reach the pixel path but nothing camera-specific —
+maker notes, sub-IFD trees several levels deep, opcode lists. A dictionary hands the mutator the
+tokens those constructs are made of, so it splices a whole tag ID or magic in one step instead of
+assembling it a byte at a time.
+
+| file | applied to | holds |
+|---|---|---|
+| `dict/ifd.dict` | `ifd_read`, `tiff_decode`, `dng_decode` | TIFF and BigTIFF headers, the IFD/LONG8/SLONG8/IFD8 field types, the pointer tags, the layout tags `gamut-tiff` reads, the embedded-metadata tags |
+| `dict/dng.dict` | `dng_decode` | every DNG-range tag gamut-dng's decode path reads, the Compression/PhotometricInterpretation codes that pick a decode path, DNGVersion octets, the opcode IDs, JPEG/JPEG XL codestream markers, MakerNote and DNGPrivateData magics |
+
+Each multi-byte tag token appears in both byte orders, since the real-camera files use both.
+Opcode IDs appear once, big-endian: an opcode list is big-endian whatever the file's byte order.
+`dng.dict` was distilled from the real-camera DNGs in the `gamut-dng-samples` submodule (`mise run
+fetch-dng-samples`) by walking every IFD, sub-IFD and Exif IFD in them. Its header says which
+tokens came from those files and which came from gamut-dng's tag table or the DNG specification.
+
+`run.sh` applies them, so `mise run fuzz <target>` locally and the Extended job search with the
+same dictionary. libFuzzer reads a single `-dict` file, so for `dng_decode` the runner writes
+`ifd.dict` followed by `dng.dict` to `state/dng_decode.dict` (ignored, like all of `state/`). The
+runner keys on the first argument, so name the target first, as every example here does. An
+explicit `-dict=<file>` argument replaces the committed dictionary for that run. The law targets
+take none: their input is a structured encoding, not a file format, so no token in it has a fixed
+spelling.
+
+A real-camera **seed corpus** was considered and not taken. Vendoring one makes every clone pay
+for hundreds of megabytes, and a third fetch task on the `fetch-av1-oracles`/`fetch-dng-samples`
+pattern would leave the Extended job choosing between fetching it every night and seeding without
+it. A multi-megabyte seed also lowers the executions per second each row's hour buys. The dictionary carries the camera-specific tokens for a few kilobytes.

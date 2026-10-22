@@ -23,7 +23,20 @@ if [ "$#" -eq 0 ]; then
 	echo "A crash is minimised (cargo +nightly fuzz tmin --fuzz-dir $FUZZ_DIR <target> <input>)"
 	echo "and then promoted into a NAMED DETERMINISTIC TEST in the crate's own suite."
 	echo "The corpus is a search aid, not the regression record."
+	echo
+	echo "  mise run fuzz cmin <target> <corpus-dir>              # minimise a corpus in place"
 	exit 0
+fi
+
+# `mise run fuzz cmin <target> <dir>` minimises a corpus directory in place (#603): the Extended job
+# runs it on the persisted search corpus before caching it, so the cache holds the inputs that add
+# coverage rather than everything the engine ever wrote. A subcommand of this runner rather than a
+# bare `cargo fuzz cmin` in the workflow so it carries the same host-triple pin as `run` below and a
+# contributor reproduces exactly what CI does. No target is named `cmin`; `check-targets.sh` keeps
+# the target set to the files under `fuzz_targets/`.
+if [ "$1" = "cmin" ]; then
+	shift
+	exec cargo +nightly fuzz cmin --fuzz-dir "$FUZZ_DIR" --target "$target" "$@"
 fi
 
 # ── Reconstructing the `--` cargo-fuzz needs ────────────────────────────────────────────────
@@ -58,6 +71,35 @@ for arg in "$@"; do
 		cargo_args+=("$arg")
 	fi
 done
+
+# ── Dictionaries (#567) ─────────────────────────────────────────────────────────────────────
+#
+# The TIFF/IFD parser targets run with a libFuzzer `-dict` of the tokens real-camera files carry
+# (tag IDs in both byte orders, MakerNote magics, DNG opcode IDs) -- committed under `dict/` in
+# place of a fetched real-camera seed corpus; README "Dictionaries" says why. Applied here rather
+# than in the workflow so `mise run fuzz <target>` locally searches exactly as the Extended job
+# does. libFuzzer reads a single `-dict` file, so a target that needs several gets them
+# concatenated into the ignored `state/` directory. An explicit `-dict=` on the command line wins.
+case "${cargo_args[0]:-}" in
+ifd_read | tiff_decode) dicts=(ifd) ;;
+dng_decode) dicts=(ifd dng) ;;
+*) dicts=() ;;
+esac
+user_dict=""
+for arg in ${libfuzzer_args[@]+"${libfuzzer_args[@]}"}; do
+	if [[ $arg == -dict=* ]]; then
+		user_dict=1
+	fi
+done
+if [ ${#dicts[@]} -gt 0 ] && [ -z "$user_dict" ]; then
+	merged="$PWD/$FUZZ_DIR/state/${cargo_args[0]}.dict"
+	mkdir -p "$PWD/$FUZZ_DIR/state"
+	: >"$merged"
+	for name in "${dicts[@]}"; do
+		cat "$FUZZ_DIR/dict/$name.dict" >>"$merged"
+	done
+	libfuzzer_args+=("-dict=$merged")
+fi
 
 invocation=(run --fuzz-dir "$FUZZ_DIR" --target "$target")
 if [ ${#cargo_args[@]} -gt 0 ]; then

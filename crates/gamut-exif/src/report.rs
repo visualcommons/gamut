@@ -1,7 +1,7 @@
 //! What a lenient parse discarded.
 //!
 //! [`ExifReader`](crate::ExifReader) is lenient by default: a malformed Exif/GPS/Interop sub-IFD or
-//! an out-of-bounds thumbnail range is dropped so the rest of the blob still parses. That is the
+//! an unreadable thumbnail range or strip set is dropped so the rest of the blob still parses. That is the
 //! right default for real-world files, but on its own it is *silent* — a caller cannot tell a blob
 //! that never carried GPS from one whose GPS pointer was dangling.
 //!
@@ -28,7 +28,8 @@
 //! # What this report does and does not claim
 //!
 //! It covers exactly the regions [`DroppedRegion`] enumerates — the three pointer-addressed
-//! sub-IFDs, the thumbnail's JPEG bytes, and any top-level directory past the 1st IFD — and the
+//! sub-IFDs, the thumbnail's JPEG bytes and strips, and any top-level directory past the 1st IFD —
+//! and the
 //! entries of every directory the model keeps: each one a duplicate tag shadowed, and, under
 //! `recover_entries`, each one whose value could not be read. Within that set it is complete:
 //! nothing in it is discarded without an entry.
@@ -88,14 +89,28 @@ pub enum DroppedRegion {
     /// regions, and nothing about a trailing directory is malformed — it is well-formed and
     /// unrepresentable. A strict report is therefore empty of everything *but* this.
     TrailingIfd = 4,
+    /// The 1st IFD's uncompressed-thumbnail strips, addressed by `StripOffsets` (`0x0111`) and
+    /// sized by `StripByteCounts` (`0x0117`). The thumbnail's own directory survives, minus its
+    /// `StripOffsets`; only the strips' bytes are lost.
+    ///
+    /// Reported when an integer `StripOffsets` names at least one strip and the set cannot be
+    /// read: [`DropReason::StripsUnsized`] when `StripByteCounts` does not give one count per
+    /// strip, [`DropReason::OutOfBounds`] when a strip's range is not wholly inside the blob, and
+    /// [`DropReason::StripsOverlap`] when every strip is inside the blob but their total length is
+    /// not. The [offset](Dropped::offset) is the first out-of-bounds strip's, or — for the two
+    /// defects of the set as a whole — the first strip's. A `StripOffsets` that names no
+    /// strip — not an integer array, or an empty one — addresses no bytes, so nothing is reported
+    /// for it. Like [`ThumbnailJpeg`](Self::ThumbnailJpeg), the rule is structural and does not
+    /// consult `Compression`.
+    ThumbnailStrips = 5,
 }
 
 impl DroppedRegion {
     /// The region's short name, as it appears in [`Dropped`]'s `Display`.
     ///
     /// For the three sub-IFDs this is also the spelling
-    /// [`ExifError::InvalidIfd`](crate::ExifError::InvalidIfd) uses in strict mode. The other two
-    /// have no such error: a strict out-of-bounds thumbnail is
+    /// [`ExifError::InvalidIfd`](crate::ExifError::InvalidIfd) uses in strict mode. The others
+    /// have no such error: an unreadable thumbnail range or strip set is a strict
     /// [`ExifError::BadThumbnail`](crate::ExifError::BadThumbnail), and a trailing directory is
     /// discarded in strict mode exactly as in lenient mode, since nothing about it is malformed.
     #[must_use]
@@ -106,6 +121,7 @@ impl DroppedRegion {
             Self::InteropIfd => "Interop",
             Self::ThumbnailJpeg => "Thumbnail",
             Self::TrailingIfd => "TrailingIFD",
+            Self::ThumbnailStrips => "ThumbnailStrips",
         }
     }
 
@@ -117,6 +133,7 @@ impl DroppedRegion {
             Self::InteropIfd => Some(INTEROP_IFD_POINTER),
             Self::ThumbnailJpeg => Some(ExifTag::JpegInterchangeFormat.tag_id()),
             Self::TrailingIfd => None,
+            Self::ThumbnailStrips => Some(ExifTag::StripOffsets.tag_id()),
         }
     }
 }
@@ -169,6 +186,24 @@ pub enum DropReason {
     /// as non-conformant as a 1st IFD with neither tag, and strictness rejects unreadable regions,
     /// not Table 21 support levels.
     ThumbnailLengthMissing = 3,
+    /// The 1st IFD's `StripOffsets` named strips that its `StripByteCounts` does not size one by
+    /// one: the counts are absent, not an integer array, or a different number of entries. Only
+    /// ever recorded for [`DroppedRegion::ThumbnailStrips`], and named for that one site for the
+    /// reason [`ThumbnailLengthMissing`](Self::ThumbnailLengthMissing) gives.
+    ///
+    /// Exif 3.0 §4.6.5.2.1 and §4.6.5.2.3 give both tags the same count (`StripsPerImage`, or
+    /// `SamplesPerPixel * StripsPerImage` when planar), and §4.6.9.2 Table 21 the same support
+    /// level in every column, so no conformant 1st IFD carries one without the other matching it.
+    StripsUnsized = 4,
+    /// The 1st IFD's strips each lie inside the blob, but their total length does not, so at least
+    /// two of them overlap. Only ever recorded for [`DroppedRegion::ThumbnailStrips`].
+    ///
+    /// The reader bounds what it allocates for the strips by the blob's own length — each strip
+    /// fitting alone would still let `n` overlapping strips cost `n` times the blob — so such a
+    /// set is not read. A conformant thumbnail's strips are disjoint ranges of the blob, so no
+    /// conformant input reaches this; what the bound stops accepting is a set overlapping by more
+    /// than the blob's length.
+    StripsOverlap = 5,
 }
 
 impl DropReason {
@@ -179,6 +214,8 @@ impl DropReason {
             Self::Malformed => "is not a well-formed directory",
             Self::Unrepresentable => "parsed cleanly but has no place in the EXIF model",
             Self::ThumbnailLengthMissing => "has no JPEGInterchangeFormatLength to size the read",
+            Self::StripsUnsized => "has no StripByteCounts entry to size each strip",
+            Self::StripsOverlap => "names strips whose total length exceeds the EXIF blob",
         }
     }
 }
@@ -212,7 +249,7 @@ impl Dropped {
     }
 
     /// The tag whose value addressed the discarded region — the pointer tag for a sub-IFD,
-    /// `JPEGInterchangeFormat` for the thumbnail bytes.
+    /// `JPEGInterchangeFormat` for the thumbnail bytes, `StripOffsets` for the thumbnail strips.
     ///
     /// `None` when no tag addresses the region, which today means only
     /// [`DroppedRegion::TrailingIfd`]: a top-level directory is reached through the structural
@@ -227,7 +264,9 @@ impl Dropped {
     /// The offset of the discarded region, relative to the start of the TIFF stream (i.e. *after*
     /// any `Exif\0\0` marker) — the same frame of reference EXIF's own offsets use.
     ///
-    /// For a sub-IFD or the thumbnail bytes this is the value the addressing tag carried; for a
+    /// For a sub-IFD or the thumbnail bytes this is the value the addressing tag carried (for the
+    /// strips, one entry of the `StripOffsets` array —
+    /// [`ThumbnailStrips`](DroppedRegion::ThumbnailStrips) says which); for a
     /// [`TrailingIfd`](DroppedRegion::TrailingIfd) it is the directory's own position in the
     /// stream.
     ///
@@ -504,6 +543,7 @@ mod tests {
             (DroppedRegion::InteropIfd, Some(0xA005)),
             (DroppedRegion::ThumbnailJpeg, Some(0x0201)),
             (DroppedRegion::TrailingIfd, None),
+            (DroppedRegion::ThumbnailStrips, Some(0x0111)),
         ] {
             assert_eq!(
                 Dropped::new(region, 0, DropReason::OutOfBounds).tag(),
@@ -542,6 +582,22 @@ mod tests {
             .to_string(),
             "dropped Thumbnail (tag 0x0201) at offset 42: has no JPEGInterchangeFormatLength to \
              size the read"
+        );
+    }
+
+    /// The strips render under their own region name and `StripOffsets`, with each strip-only
+    /// reason as its own clause — an unsized set and an overlapping one are different repairs.
+    #[test]
+    fn the_rendered_strip_drop_names_its_region_and_reason() {
+        assert_eq!(
+            Dropped::new(DroppedRegion::ThumbnailStrips, 8, DropReason::StripsUnsized).to_string(),
+            "dropped ThumbnailStrips (tag 0x0111) at offset 8: has no StripByteCounts entry to \
+             size each strip"
+        );
+        assert_eq!(
+            Dropped::new(DroppedRegion::ThumbnailStrips, 2, DropReason::StripsOverlap).to_string(),
+            "dropped ThumbnailStrips (tag 0x0111) at offset 2: names strips whose total length \
+             exceeds the EXIF blob"
         );
     }
 

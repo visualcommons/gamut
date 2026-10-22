@@ -77,6 +77,66 @@ pub struct DecodedImage {
     /// ancillary chunk libpng rejects and drops is reported here rather than aborting, so a
     /// non-zero count is how a test observes that libpng discarded something the file carried.
     pub warnings: usize,
+    /// Every `tEXt`, `zTXt` and `iTXt` libpng accepted (`png_get_text`), before and after `IDAT`,
+    /// in the order libpng stored them — file order.
+    pub texts: Vec<OracleText>,
+    /// The `iCCP` libpng accepted (`png_get_iCCP`): the profile name decoded from Latin-1
+    /// (§11.3.2.3) and the **inflated** profile bytes. libpng 1.6.43 drops, with a warning, an
+    /// `iCCP` chunk shorter than 92 bytes (`png_handle_iCCP` reads up to 81 keyword bytes, then
+    /// wants 11 more for the zlib stream), so a fixture profile has to deflate past that to be seen
+    /// here at all.
+    pub iccp: Option<(String, Vec<u8>)>,
+    /// The `sRGB` rendering intent libpng accepted (`png_get_sRGB`).
+    pub srgb: Option<u8>,
+    /// The gamma libpng reports (`png_get_gAMA_fixed`), × 100 000. libpng's colour-space model
+    /// reports one for an `sRGB` chunk too (its 45 455), so a value here does not by itself say the
+    /// file carried a `gAMA` chunk.
+    pub gamma: Option<u32>,
+    /// The chromaticities libpng reports (`png_get_cHRM_fixed`) as white, red, green, blue x,y
+    /// pairs × 100 000 — the order [`EncodeOpts::chromaticities`] takes. As for
+    /// [`gamma`](Self::gamma), libpng also reports the sRGB primaries for an `sRGB` chunk.
+    pub chromaticities: Option<[u32; 8]>,
+    /// The `eXIf` payload libpng accepted (`png_get_eXIf_1`), verbatim.
+    pub exif: Option<Vec<u8>>,
+    /// The chunks of a type in [`KEPT_UNKNOWN_CHUNKS`] (`png_get_unknown_chunks`), as
+    /// `(type, payload)` in file order. libpng 1.6.43 predates both, so it reads them as unknown
+    /// chunks and keeps their payloads verbatim.
+    pub unknown_chunks: Vec<([u8; 4], Vec<u8>)>,
+}
+
+/// The chunk types [`decode`] asks libpng to keep as unknown chunks, which this libpng does not
+/// parse itself: `cICP` (PNG 3rd edition §11.3.2.6) and the C2PA manifest store `caBX`.
+pub const KEPT_UNKNOWN_CHUNKS: [[u8; 4]; 2] = [*b"cICP", *b"caBX"];
+
+/// One text chunk as libpng read it back (see [`DecodedImage::texts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OracleText {
+    /// The keyword, decoded from Latin-1 (§11.3.3.1).
+    pub keyword: String,
+    /// The text: decoded from Latin-1 for `tEXt`/`zTXt` (§11.3.3.2), from UTF-8 for `iTXt`
+    /// (§11.3.3.4). For a compressed chunk this is the inflated text.
+    pub text: String,
+    /// Which chunk carried it, from libpng's `compression` field.
+    pub kind: OracleTextKind,
+}
+
+/// Which chunk an [`OracleText`] came from — libpng's `png_text::compression`, with the `iTXt`
+/// fields it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OracleTextKind {
+    /// `tEXt` (`PNG_TEXT_COMPRESSION_NONE`).
+    Text,
+    /// `zTXt` (`PNG_TEXT_COMPRESSION_zTXt`).
+    ZTxt,
+    /// `iTXt` (`PNG_ITXT_COMPRESSION_NONE` or `_zTXt`).
+    ITxt {
+        /// The language tag (may be empty).
+        language: String,
+        /// The translated keyword, decoded from UTF-8 (may be empty).
+        translated: String,
+        /// Whether the text was stored compressed (`PNG_ITXT_COMPRESSION_zTXt`).
+        compressed: bool,
+    },
 }
 
 /// Cursor over the in-memory PNG, handed to libpng's read callback via its IO pointer.
@@ -159,6 +219,123 @@ unsafe fn read_sbit(
     })
 }
 
+/// Decodes Latin-1 bytes: each byte is the code point of the same value.
+fn from_latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| char::from(b)).collect()
+}
+
+/// Decodes UTF-8 bytes, panicking (naming `what`) on bytes that are not UTF-8: a lossy decode
+/// would hide exactly the encoding defect a read-back exists to show.
+fn from_utf8(bytes: &[u8], what: &str) -> String {
+    String::from_utf8(bytes.to_vec())
+        .unwrap_or_else(|e| panic!("libpng-oracle: {what} {bytes:?} is not UTF-8: {e}"))
+}
+
+/// The `len` bytes at `ptr`, or none for a null pointer.
+unsafe fn bytes_at<'a>(ptr: *const c_char, len: usize) -> &'a [u8] {
+    if ptr.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) }
+    }
+}
+
+/// The NUL-terminated string at `ptr`, or none for a null pointer.
+unsafe fn c_bytes<'a>(ptr: *const c_char) -> &'a [u8] {
+    if ptr.is_null() {
+        &[]
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(ptr).to_bytes() }
+    }
+}
+
+/// Every text chunk libpng stored in `info` (see [`DecodedImage::texts`]).
+unsafe fn read_texts(png: sys::png_structp, info: sys::png_infop) -> Vec<OracleText> {
+    let mut texts: sys::png_textp = std::ptr::null_mut();
+    let mut count = 0i32;
+    unsafe { sys::png_get_text(png, info, &raw mut texts, &raw mut count) };
+    if texts.is_null() {
+        return Vec::new();
+    }
+    let texts = unsafe { std::slice::from_raw_parts(texts, count as usize) };
+    texts
+        .iter()
+        .map(|t| unsafe {
+            let keyword = from_latin1(c_bytes(t.key));
+            let itxt = |compressed| OracleTextKind::ITxt {
+                language: from_latin1(c_bytes(t.lang)),
+                translated: from_utf8(c_bytes(t.lang_key), "iTXt translated keyword"),
+                compressed,
+            };
+            match t.compression {
+                sys::PNG_TEXT_COMPRESSION_NONE => OracleText {
+                    keyword,
+                    text: from_latin1(bytes_at(t.text, t.text_length)),
+                    kind: OracleTextKind::Text,
+                },
+                c if c == sys::PNG_TEXT_COMPRESSION_zTXt as i32 => OracleText {
+                    keyword,
+                    text: from_latin1(bytes_at(t.text, t.text_length)),
+                    kind: OracleTextKind::ZTxt,
+                },
+                c => OracleText {
+                    keyword,
+                    text: from_utf8(bytes_at(t.text, t.itxt_length), "iTXt text"),
+                    kind: itxt(c == sys::PNG_ITXT_COMPRESSION_zTXt as i32),
+                },
+            }
+        })
+        .collect()
+}
+
+/// The accepted `iCCP` (see [`DecodedImage::iccp`]).
+unsafe fn read_iccp(png: sys::png_structp, info: sys::png_infop) -> Option<(String, Vec<u8>)> {
+    let mut name: sys::png_charp = std::ptr::null_mut();
+    let mut compression = 0i32;
+    let mut profile: sys::png_bytep = std::ptr::null_mut();
+    let mut len = 0u32;
+    let valid = unsafe {
+        sys::png_get_iCCP(
+            png,
+            info,
+            &raw mut name,
+            &raw mut compression,
+            &raw mut profile,
+            &raw mut len,
+        )
+    };
+    (valid != 0).then(|| unsafe {
+        (
+            from_latin1(c_bytes(name)),
+            bytes_at(profile.cast(), len as usize).to_vec(),
+        )
+    })
+}
+
+/// The accepted `cHRM`, white/red/green/blue x,y × 100 000 (see [`DecodedImage::chromaticities`]).
+unsafe fn read_chrm(png: sys::png_structp, info: sys::png_infop) -> Option<[u32; 8]> {
+    let mut c = [0 as sys::png_fixed_point; 8];
+    let [wx, wy, rx, ry, gx, gy, bx, by] = &mut c;
+    let valid = unsafe { sys::png_get_cHRM_fixed(png, info, wx, wy, rx, ry, gx, gy, bx, by) };
+    (valid != 0).then(|| c.map(|v| v as u32))
+}
+
+/// The kept unknown chunks (see [`DecodedImage::unknown_chunks`]).
+unsafe fn read_unknown(png: sys::png_structp, info: sys::png_infop) -> Vec<([u8; 4], Vec<u8>)> {
+    let mut chunks: sys::png_unknown_chunkp = std::ptr::null_mut();
+    let count = unsafe { sys::png_get_unknown_chunks(png, info, &raw mut chunks) };
+    if chunks.is_null() {
+        return Vec::new();
+    }
+    unsafe { std::slice::from_raw_parts(chunks, count as usize) }
+        .iter()
+        .map(|c| {
+            let ty = [c.name[0], c.name[1], c.name[2], c.name[3]];
+            (ty, unsafe { bytes_at(c.data.cast(), c.size) }.to_vec())
+        })
+        .collect()
+}
+
 /// Decodes a PNG byte stream with libpng into raw samples (no colour transforms).
 ///
 /// Aborts the process if libpng reports the stream is malformed — for this dev oracle the input is
@@ -190,6 +367,17 @@ pub fn decode(bytes: &[u8]) -> DecodedImage {
         // checking the *image* should not abort on third-party metadata content. Critical errors
         // (IHDR, IDAT, CRC) still abort.
         sys::png_set_benign_errors(png, 1);
+        // Keep the chunk types this libpng cannot parse, as 5-byte NUL-terminated names.
+        let kept: Vec<u8> = KEPT_UNKNOWN_CHUNKS
+            .iter()
+            .flat_map(|ty| ty.iter().copied().chain([0]))
+            .collect();
+        sys::png_set_keep_unknown_chunks(
+            png,
+            sys::PNG_HANDLE_CHUNK_ALWAYS as i32,
+            kept.as_ptr(),
+            KEPT_UNKNOWN_CHUNKS.len() as i32,
+        );
         sys::png_read_info(png, info);
 
         let width = sys::png_get_image_width(png, info);
@@ -214,7 +402,22 @@ pub fn decode(bytes: &[u8]) -> DecodedImage {
             .map(|y| pixels.as_mut_ptr().add(y * rowbytes))
             .collect();
         sys::png_read_image(png, rows.as_mut_ptr());
-        sys::png_read_end(png, std::ptr::null_mut());
+        // Into `info`, so text and kept chunks after IDAT are stored beside those before it.
+        sys::png_read_end(png, info);
+
+        let texts = read_texts(png, info);
+        let iccp = read_iccp(png, info);
+        let mut intent = 0i32;
+        let srgb = (sys::png_get_sRGB(png, info, &raw mut intent) != 0).then_some(intent as u8);
+        let mut gamma_fixed: sys::png_fixed_point = 0;
+        let gamma = (sys::png_get_gAMA_fixed(png, info, &raw mut gamma_fixed) != 0)
+            .then_some(gamma_fixed as u32);
+        let chromaticities = read_chrm(png, info);
+        let mut exif_ptr: sys::png_bytep = std::ptr::null_mut();
+        let mut exif_len = 0u32;
+        let exif = (sys::png_get_eXIf_1(png, info, &raw mut exif_len, &raw mut exif_ptr) != 0)
+            .then(|| bytes_at(exif_ptr.cast(), exif_len as usize).to_vec());
+        let unknown_chunks = read_unknown(png, info);
 
         let mut png = png;
         sys::png_destroy_read_struct(&raw mut png, &raw mut info, std::ptr::null_mut());
@@ -230,6 +433,13 @@ pub fn decode(bytes: &[u8]) -> DecodedImage {
             bkgd,
             sbit,
             warnings,
+            texts,
+            iccp,
+            srgb,
+            gamma,
+            chromaticities,
+            exif,
+            unknown_chunks,
         }
     }
 }
@@ -292,7 +502,8 @@ pub struct EncodeOpts<'a> {
     pub srgb_intent: Option<i32>,
     /// eXIf payload (a TIFF stream), written verbatim.
     pub exif: Option<&'a [u8]>,
-    /// iCCP profile as (name, raw ICC bytes); libpng deflates the profile itself.
+    /// iCCP profile as (name, raw ICC bytes); libpng deflates the profile itself. The name is
+    /// written as Latin-1 (§11.3.2.3); a character outside it panics.
     pub icc: Option<(&'a str, &'a [u8])>,
     /// Text chunks to embed.
     pub text: &'a [TextChunk<'a>],
@@ -493,7 +704,9 @@ pub fn encode(
             sys::png_set_eXIf_1(png, info, exif.len() as u32, exif.as_ptr().cast_mut());
         }
         if let Some((name, profile)) = opts.icc {
-            let name = std::ffi::CString::new(name).expect("iCCP name without NUL");
+            // PNG §11.3.2.3: the profile name is Latin-1, exactly like a text keyword.
+            let name =
+                std::ffi::CString::new(latin1(name, "iCCP name")).expect("iCCP name without NUL");
             sys::png_set_iCCP(
                 png,
                 info,
@@ -852,6 +1065,168 @@ mod tests {
         // One byte is a palette index; under truecolour libpng rejects it (`png_handle_bKGD`).
         let dec = decode(&with_chunks(COLOR_RGB, &[(b"bKGD", &[1])]));
         assert_eq!((dec.bkgd, dec.warnings), (None, 1));
+    }
+
+    /// A minimal ICC profile libpng accepts: a header, an empty tag table, then 128 bytes that do
+    /// not deflate away, since libpng drops an iCCP chunk shorter than 92 bytes (see
+    /// `DecodedImage::iccp`).
+    fn tiny_icc_profile() -> Vec<u8> {
+        let mut icc = vec![0u8; 132];
+        icc.extend((0u32..128).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
+        let size = icc.len() as u32;
+        icc[0..4].copy_from_slice(&size.to_be_bytes());
+        icc[8..12].copy_from_slice(&0x0210_0000u32.to_be_bytes());
+        icc[12..16].copy_from_slice(b"mntr");
+        icc[16..20].copy_from_slice(b"RGB ");
+        icc[20..24].copy_from_slice(b"XYZ ");
+        icc[36..40].copy_from_slice(b"acsp");
+        icc[68..80].copy_from_slice(&[0, 0, 0xF6, 0xD6, 0, 1, 0, 0, 0, 0, 0xD3, 0x2D]);
+        icc
+    }
+
+    #[test]
+    fn iccp_name_is_written_and_read_back_as_latin1() {
+        let icc = tiny_icc_profile();
+        // An RGB image: libpng rejects an RGB profile on a greyscale one.
+        let png = encode(
+            &[0; 3],
+            1,
+            1,
+            COLOR_RGB,
+            8,
+            &EncodeOpts {
+                icc: Some(("Caf\u{e9}", &icc)),
+                ..EncodeOpts::default()
+            },
+        );
+        // Name, NUL separator, compression method 0, then the zlib stream.
+        assert_eq!(&chunk_payload(&png, b"iCCP")[..6], b"Caf\xE9\0\0");
+        assert_eq!(decode(&png).iccp, Some(("Caf\u{e9}".to_string(), icc)));
+    }
+
+    #[test]
+    fn every_metadata_chunk_written_reads_back_in_its_own_field() {
+        let icc = tiny_icc_profile();
+        let chrm = [
+            31_270, 32_900, 64_000, 33_000, 30_000, 60_000, 15_000, 6_000,
+        ];
+        let exif = [0x49, 0x49, 0x2A, 0, 8, 0, 0, 0, 0, 0];
+        let png = encode(
+            &[0; 3],
+            1,
+            1,
+            COLOR_RGB,
+            8,
+            &EncodeOpts {
+                gamma: Some(45_000),
+                chromaticities: Some(chrm),
+                exif: Some(&exif),
+                icc: Some(("Tiny", &icc)),
+                text: &[
+                    TextChunk {
+                        keyword: "Author",
+                        text: "caf\u{e9}",
+                        kind: TextKind::Text,
+                    },
+                    TextChunk {
+                        keyword: "Comment",
+                        text: "na\u{ef}ve",
+                        kind: TextKind::ZTxt,
+                    },
+                    TextChunk {
+                        keyword: "Note",
+                        text: "g\u{e4}mut",
+                        kind: TextKind::ITxt {
+                            language: "de",
+                            translated: "Notiz",
+                            compressed: true,
+                        },
+                    },
+                ],
+                extra_chunks: &[(*b"cICP", &[9, 16, 0, 1]), (*b"caBX", b"store")],
+                ..EncodeOpts::default()
+            },
+        );
+        let dec = decode(&png);
+        assert_eq!(dec.warnings, 0);
+        assert_eq!(dec.gamma, Some(45_000));
+        assert_eq!(dec.chromaticities, Some(chrm));
+        assert_eq!(dec.exif.as_deref(), Some(&exif[..]));
+        assert_eq!(dec.iccp, Some(("Tiny".to_string(), icc)));
+        assert_eq!(dec.srgb, None);
+        let text = |keyword: &str, text: &str, kind| OracleText {
+            keyword: keyword.into(),
+            text: text.into(),
+            kind,
+        };
+        assert_eq!(
+            dec.texts,
+            [
+                text("Author", "caf\u{e9}", OracleTextKind::Text),
+                text("Comment", "na\u{ef}ve", OracleTextKind::ZTxt),
+                text(
+                    "Note",
+                    "g\u{e4}mut",
+                    OracleTextKind::ITxt {
+                        language: "de".into(),
+                        translated: "Notiz".into(),
+                        compressed: true,
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            dec.unknown_chunks,
+            [(*b"cICP", vec![9, 16, 0, 1]), (*b"caBX", b"store".to_vec())]
+        );
+    }
+
+    #[test]
+    fn an_srgb_intent_reads_back_with_libpngs_implied_gamma() {
+        let png = encode(
+            &[0; 3],
+            1,
+            1,
+            COLOR_RGB,
+            8,
+            &EncodeOpts {
+                srgb_intent: Some(2),
+                ..EncodeOpts::default()
+            },
+        );
+        let dec = decode(&png);
+        assert_eq!((dec.srgb, dec.gamma), (Some(2), Some(45_455)));
+        assert!(dec.texts.is_empty() && dec.unknown_chunks.is_empty());
+        assert_eq!((dec.iccp, dec.exif), (None, None));
+    }
+
+    #[test]
+    fn a_text_chunk_after_idat_is_read_by_png_read_end() {
+        // PNG §5.6 places no ordering constraint on tEXt, so one framed just before IEND is
+        // conformant; only `png_read_end(png, info)` stores it where `read_texts` looks.
+        let bare = encode(&[0], 1, 1, COLOR_GRAY, 8, &EncodeOpts::default());
+        let iend = bare.len() - 12;
+        assert_eq!(&bare[iend + 4..iend + 8], b"IEND");
+        let data = b"Comment\0late";
+        let mut png = bare[..iend].to_vec();
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(b"tEXt");
+        png.extend_from_slice(data);
+        let crc = crc32(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+        png.extend_from_slice(&bare[iend..]);
+
+        let dec = decode(&png);
+        assert_eq!(
+            dec.texts,
+            [OracleText {
+                keyword: "Comment".into(),
+                text: "late".into(),
+                kind: OracleTextKind::Text,
+            }]
+        );
+        assert_eq!(dec.warnings, 0);
     }
 
     #[test]

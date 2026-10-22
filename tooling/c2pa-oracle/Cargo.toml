@@ -44,18 +44,32 @@ doctest = false
 # used; without both, the no-OpenSSL assertion in `tests/build_configuration.rs` could only ever
 # inspect a resolution cargo had just written for it, which the pin does nothing to constrain.
 c2pa = { version = "=0.90.21", default-features = false, features = ["rust_native_crypto"] }
+# Reads c2pa-rs's own `Reader::detailed_json`, the one place it exposes the `c2pa.hash.data`
+# exclusions it wrote (`data_hash_exclusions` in `src/lib.rs`; issue #534). Already in the graph
+# under `c2pa` itself, so this adds an edge, not a package: the committed lockfile holds its
+# version.
+serde_json = "1"
 
 [dev-dependencies]
-# The crates under test. Both locate a C2PA manifest store in a top-level ISOBMFF `uuid`
+# The crates under test. The two BMFF ones both locate a C2PA manifest store in a top-level ISOBMFF `uuid`
 # `ContentProvenanceBox`; `gamut-avif` additionally *reserves* and *writes* one, which is the only
 # direction that needs a gamut encoder.
 gamut-avif = { path = "../../crates/gamut-avif" }
 gamut-heic = { path = "../../crates/gamut-heic" }
 gamut-core = { path = "../../crates/gamut-core" }
-# The metadata facade, for `tests/no_copy_forward.rs` only: its `C2paPolicy` is the mechanism that
-# refuses to carry a parent's manifest store into a derivative, and the test drives it rather than
-# asserting a re-encode happens not to emit one.
+# The metadata facade, for two tests. `tests/no_copy_forward.rs`: its `C2paPolicy` is the mechanism
+# that refuses to carry a parent's manifest store into a derivative, and the test drives it rather
+# than asserting a re-encode happens not to emit one. `tests/remote_provenance.rs` (issue #846):
+# `Metadata::provenance` is the gamut side of the remote-provenance differential.
 gamut-metadata = { path = "../../crates/gamut-metadata" }
+# The non-BMFF containers (issue #534). Each carries its store in its own framing — a PNG `caBX`
+# chunk, a RIFF `C2PA` chunk, a TIFF/DNG tag-52545 value — and binds it with `c2pa.hash.data`,
+# whose byte-range exclusions the crate itself reports. `gamut-dng` reaches `gamut-jxl` with its
+# `decode` feature only (pure Rust), so no native libjxl build enters this crate.
+gamut-png = { path = "../../crates/gamut-png" }
+gamut-webp = { path = "../../crates/gamut-webp" }
+gamut-tiff = { path = "../../crates/gamut-tiff" }
+gamut-dng = { path = "../../crates/gamut-dng" }
 
 # Keeps this manifest from being read as a member of any workspace above it — the same guard
 # `tooling/gamut-fuzz/Cargo.toml` carries. Without it, cargo walks past `tooling/` looking for a

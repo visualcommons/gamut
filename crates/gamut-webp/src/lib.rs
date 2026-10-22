@@ -71,6 +71,13 @@
 //! straight into `gamut-metadata`'s `MetadataBlock` (the still-image [`gamut_core`] traits carry no
 //! metadata channel, which is why this is a separate entry point rather than a decode result field).
 //!
+//! With the optional **`metadata`** Cargo feature the same payloads are wired to the facade's typed
+//! models through its `TypedMetadata` trait: `WebpMetadata::blocks` hands them over as
+//! `MetadataBlock`s and `WebpMetadata::metadata` parses them into a unified `Metadata`, while
+//! `WebpEncoder::with_metadata` / `WebpEncoder::with_encoded_metadata` embed one, routing each
+//! carrier to the raw setters above. The feature is off by default; the dependency direction stays
+//! `gamut-webp → gamut-metadata`.
+//!
 //! # C2PA manifest stores
 //!
 //! A C2PA manifest store rides in a `C2PA` chunk (C2PA 2.4 §A.3.7), carried as opaquely as the three
@@ -133,6 +140,10 @@ pub use config::{Effort, NearLossless, WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
 pub use encoder::{WebpEncodeReport, WebpEncoder};
 pub use gamut_core::Dimensions;
+// The facade types named in the `metadata`-feature signatures, so a caller can spell
+// `WebpMetadata::metadata` / `WebpEncoder::with_metadata` without a direct dependency.
+#[cfg(feature = "metadata")]
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
 pub use metadata::{
     C2PA_NOT_VALIDATED, C2paChunkPosition, C2paStoreSummary, C2paSummary, C2paUnreadChunk,
     WebpMetadata, c2pa_span, c2pa_summary, metadata,

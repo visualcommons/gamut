@@ -184,7 +184,10 @@
 //! [`AvifEncoder::with_mastering_display`]), an embedded ICC profile
 //! ([`AvifEncoder::with_icc_profile`]), Exif / XMP items
 //! ([`AvifEncoder::with_exif`] / [`AvifEncoder::with_xmp`]), and a reserved or written C2PA
-//! manifest store (above); and the **container decode surface** above (full read of items,
+//! manifest store (above) — with the optional **`metadata`** Cargo feature, the same items are
+//! also wired to the `gamut-metadata` facade's typed models (`AvifImage` implements its
+//! `TypedMetadata` trait; `AvifEncoder::with_metadata` / `with_encoded_metadata` embed a unified
+//! `Metadata`); and the **container decode surface** above (full read of items,
 //! properties, derivations, and metadata; planar, 8-bit and high-bit-depth RGBA presentation around
 //! a caller decoder). Output is validated end-to-end against `libavif` (its dav1d-backed reference
 //! container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the AV1
@@ -243,6 +246,10 @@ pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
 pub use gamut_core::Dimensions;
 // The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-heic` (#505).
 pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paByteRange, C2paSlot, C2paUnreadReason};
+// The facade types named in the `metadata`-feature signatures, so a caller can spell
+// `AvifImage::metadata` / `AvifEncoder::with_metadata` without a direct dependency.
+#[cfg(feature = "metadata")]
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
 pub use image::{
     AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, MasteringDisplay,
     PixelAspectRatio, TransformativeProperty,

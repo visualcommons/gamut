@@ -20,6 +20,8 @@
 //! `Trailing` one) — the order the file has and [`crate::read`] produces; [`crate::write`] refuses
 //! an interleaved list, and [`IsoBmffImage::push_top_level_box`] appends without interleaving.
 
+use gamut_core::{Error, Result};
+
 /// A parsed or constructed ISOBMFF still-image file: its `ftyp` brands, the id of the primary
 /// (displayed) item, the image items, the entity groups, and any top-level boxes the model does not
 /// otherwise own.
@@ -274,6 +276,46 @@ pub struct Item {
     pub payload: Vec<u8>,
 }
 
+impl Item {
+    /// For an `Exif` item, the TIFF stream (starting `II`/`MM`) behind the payload's 4-byte
+    /// big-endian `exif_tiff_header_offset` — the `ExifDataBlock` of ISO/IEC 23008-12 §A.2.1,
+    /// whose offset counts bytes from the end of the field to the TIFF header. This is the form
+    /// `gamut-exif` parses; the raw payload, offset included, stays in
+    /// [`payload`](Self::payload). The framing is HEIF's, not a codec's, so `gamut-heic` and
+    /// `gamut-avif` both read their `Exif` items through this one lens.
+    ///
+    /// An offset that lands exactly at the payload's end yields an empty stream, not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`gamut_core::ErrorKind::InvalidInput`] if [`item_type`](Self::item_type) is not
+    /// `Exif`, if the payload is shorter than the offset field, or if the offset points past the
+    /// payload's end.
+    pub fn exif_tiff_stream(&self) -> Result<&[u8]> {
+        if self.item_type != *b"Exif" {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: item is not an Exif item",
+            ));
+        }
+        let [o0, o1, o2, o3, rest @ ..] = self.payload.as_slice() else {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: Exif item payload is shorter than its tiff-header offset field",
+            ));
+        };
+        usize::try_from(u32::from_be_bytes([*o0, *o1, *o2, *o3]))
+            .ok()
+            .and_then(|offset| rest.get(offset..))
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "ISOBMFF: Exif item tiff-header offset out of range",
+                )
+            })
+    }
+}
+
 /// One `iref` entry: a typed reference from the owning [`Item`] to other items
 /// (ISO/IEC 14496-12 `SingleItemTypeReferenceBox`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,4 +513,71 @@ pub struct MasteringDisplay {
     pub max_display_mastering_luminance: u32,
     /// Nominal minimum display luminance, in units of 0.0001 cd/m².
     pub min_display_mastering_luminance: u32,
+}
+
+/// The `exif_tiff_header_offset` arithmetic of [`Item::exif_tiff_stream`] (ISO/IEC 23008-12
+/// §A.2.1), moved here from `gamut-heic` and `gamut-avif`, which both delegate to it.
+#[cfg(test)]
+mod tests {
+    use gamut_core::ErrorKind;
+
+    use super::*;
+
+    /// A bare item of `item_type` carrying `payload`.
+    fn item(item_type: [u8; 4], payload: &[u8]) -> Item {
+        Item {
+            id: 1,
+            item_type,
+            name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            references: vec![],
+            properties: vec![],
+            payload: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn exif_tiff_stream_skips_the_offset_field_and_the_offset() {
+        for (payload, expected) in [
+            // Offset 0, the usual case.
+            (&b"\0\0\0\0II*\0"[..], &b"II*\0"[..]),
+            // A non-zero offset: a lens that ignored it would return the filler bytes.
+            (&b"\0\0\0\x02\xEE\xEEMM\0*"[..], &b"MM\0*"[..]),
+            // An offset landing exactly at the end is an empty stream, not an error.
+            (&b"\0\0\0\x01\xEE"[..], &b""[..]),
+        ] {
+            assert_eq!(
+                item(*b"Exif", payload).exif_tiff_stream().unwrap(),
+                expected,
+                "{payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exif_tiff_stream_refuses_the_named_faults() {
+        for (item_type, payload, message) in [
+            (
+                *b"mime",
+                &b"\0\0\0\0II*\0"[..],
+                "ISOBMFF: item is not an Exif item",
+            ),
+            (
+                *b"Exif",
+                &b"\0\0\0"[..],
+                "ISOBMFF: Exif item payload is shorter than its tiff-header offset field",
+            ),
+            (
+                *b"Exif",
+                &b"\0\0\0\x05II*\0"[..],
+                "ISOBMFF: Exif item tiff-header offset out of range",
+            ),
+        ] {
+            let err = item(item_type, payload).exif_tiff_stream().unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{message}");
+            assert_eq!(err.static_message(), Some(message));
+        }
+    }
 }

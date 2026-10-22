@@ -778,6 +778,30 @@ mod tests {
     }
 
     #[test]
+    fn the_detail_line_count_is_the_number_of_detail_lines() {
+        // Unequal kind counts (1 store, 3 unread, no merkle): the end-to-end test above has
+        // 2 + 2 + 1, which a product of the first two terms also gives.
+        let summary = C2paSummary {
+            stores: vec![C2paStoreSummary {
+                range: range(0, 9),
+                purpose: C2paBoxPurpose::Manifest,
+                position: C2paBoxPosition::BeforeMediaData,
+                slot: range(0, 9),
+            }],
+            unread: [50, 100, 150]
+                .map(|start| C2paUnreadBox {
+                    range: range(start, start + 30),
+                    reason: C2paUnreadReason::UnknownPurpose,
+                    position: C2paBoxPosition::BeforeMediaData,
+                })
+                .to_vec(),
+            ..C2paSummary::default()
+        };
+        assert_eq!(summary.detail_line_count(), 4);
+        assert_eq!(summary.detail_lines().count(), 4);
+    }
+
+    #[test]
     fn only_a_box_past_the_media_data_carries_a_position_note() {
         // The reasons' words are `gamut-isobmff`'s, tested there; the positions are this crate's.
         assert_eq!(C2paBoxPosition::BeforeMediaData.note(), None);

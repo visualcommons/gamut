@@ -293,7 +293,11 @@ fn ancillary_pile_survives_decode() {
     assert_eq!(decoded.srgb, Some(SrgbIntent::RelativeColorimetric));
     assert!(decoded.chromaticities.is_some());
     assert_eq!(decoded.exif.as_deref(), Some(exif.as_slice()));
-    assert_eq!(decoded.icc_profile.unwrap().profile, icc);
-    assert_eq!(decoded.xmp.as_deref(), Some(xmp.as_bytes()));
-    assert_eq!(decoded.texts.len(), 3);
+    assert_eq!(decoded.icc_profile.as_ref().unwrap().profile, icc);
+    assert_eq!(decoded.xmp(), Some(xmp.as_bytes()));
+    assert_eq!(
+        decoded.texts.len(),
+        4,
+        "three annotations and the XMP packet"
+    );
 }

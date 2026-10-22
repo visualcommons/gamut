@@ -330,7 +330,7 @@ impl PngDecoder {
                     // not a copy of its payload.
                     if want_metadata && chunk.crc_ok {
                         // The one chunk type whose *position* decides whether it is metadata at
-                        // all: a manifest store precedes IDAT (§A.3.2), so one after IDAT is
+                        // all: a manifest store precedes IDAT (C2PA §A.3.2), so one after IDAT is
                         // counted as ignored rather than offered as the store.
                         if chunk.chunk_type == CABX && seen_idat {
                             c2pa_after_idat += 1;
@@ -437,8 +437,6 @@ impl PngDecoder {
             transparency: native.trns_key,
             exif: meta.exif,
             icc_profile: meta.icc_profile,
-            xmp: meta.xmp,
-            xmp_framing: meta.xmp_framing,
             c2pa: meta.c2pa,
             c2pa_ignored: meta.c2pa_ignored,
             texts: meta.texts,
@@ -575,7 +573,7 @@ type MetadataWalk<'a> = (Vec<([u8; 4], &'a [u8])>, usize, Ihdr);
 ///
 /// Returns a [`MetadataWalk`]: the chunks together with the number of CRC-valid `caBX` chunks
 /// seen *after* `IDAT`,
-/// which are never the store (§A.3.2) and so are counted rather than returned — the same split
+/// which are never the store (C2PA §A.3.2) and so are counted rather than returned — the same split
 /// [`PngDecoder::parse_stream`] makes, so the two entry points agree on what the store is —
 /// and the parsed IHDR.
 fn walk_metadata_chunks(data: &[u8]) -> Result<MetadataWalk<'_>> {
@@ -633,7 +631,7 @@ fn walk_metadata_chunks(data: &[u8]) -> Result<MetadataWalk<'_>> {
             _ if chunk.is_ancillary() => {
                 // §13.1: a CRC mismatch skips the chunk rather than failing the image.
                 if chunk.crc_ok {
-                    // A store precedes IDAT (§A.3.2); one after it is counted, not offered.
+                    // A store precedes IDAT (C2PA §A.3.2); one after it is counted, not offered.
                     if chunk.chunk_type == CABX && seen_idat {
                         c2pa_after_idat += 1;
                     } else {
@@ -1696,19 +1694,20 @@ mod tests {
         assert_eq!(chrm.white, (31270, 32900));
         assert_eq!(chrm.blue, (15000, 6000));
         assert_eq!(decoded.exif.as_deref(), Some(&exif[..]));
-        let icc = decoded.icc_profile.unwrap();
+        let icc = decoded.icc_profile.as_ref().unwrap();
         assert_eq!(icc.name, "prof");
         assert_eq!(icc.profile, b"not-a-real-profile-but-bytes");
-        assert_eq!(decoded.xmp.as_deref(), Some(xmp.as_bytes()));
-        assert_eq!(decoded.texts.len(), 2);
+        assert_eq!(decoded.xmp(), Some(xmp.as_bytes()));
+        // The packet is the first annotation, in the order the setters ran.
+        assert_eq!(decoded.texts.len(), 3);
         assert_eq!(
             (
-                decoded.texts[0].keyword.as_str(),
-                decoded.texts[0].text.as_str()
+                decoded.texts[1].keyword.as_str(),
+                decoded.texts[1].text.as_str()
             ),
             ("Title", "gamut")
         );
-        assert_eq!(decoded.texts[1].text, comment);
+        assert_eq!(decoded.texts[2].text, comment);
         assert!(decoded.palette.is_none());
         assert!(decoded.transparency.is_none());
         let cicp = decoded.cicp.expect("cICP present");

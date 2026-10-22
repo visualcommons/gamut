@@ -15,8 +15,12 @@
 //!
 //! **Encode** deliberately stays a valid subset — predictor 1, one Huffman table, no point
 //! transform, no restarts — which every reader must accept; the wider decode surface exists for
-//! files other writers produce.
+//! files other writers produce. The one table is fitted to each call's own data: the optimal
+//! 16-bit length-limited code of T.81 Annex K.2 (§K.2) over the frame's magnitude-category
+//! histogram, built by [`gamut_bitstream::build_optimal_table`] and written in the frame's `DHT`.
+//! Every DNG tile or strip is its own call, so each chunk carries its own table.
 
+use gamut_bitstream::{CanonicalCodes, build_optimal_table};
 use gamut_core::{Error, Result};
 
 /// A decoded lossless-JPEG frame.
@@ -45,40 +49,6 @@ const DHT: u8 = 0xC4;
 const SOS: u8 = 0xDA;
 const DRI: u8 = 0xDD;
 const RST0: u8 = 0xD0;
-
-/// A fixed, valid Huffman table over the 17 magnitude categories (`SSSS = 0..=16`).
-///
-/// `BITS[i]` (1-indexed) is the number of codes of length `i`; here 15 codes of length 4 and 2 of
-/// length 5 (Kraft sum `15/16 + 2/32 = 1`). The table is written into the DHT, so the decoder uses
-/// whatever we emit — correctness does not depend on it being optimal.
-const BITS: [u8; 16] = [0, 0, 0, 15, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-const HUFFVAL: [u8; 17] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-
-/// Canonical Huffman codes per symbol: `(code, length)` keyed by symbol value.
-fn canonical_codes(bits: &[u8; 16], huffval: &[u8]) -> Vec<(u16, u8)> {
-    // Code lengths in HUFFVAL order (JPEG Annex C: generate_size_table).
-    let mut sizes = Vec::new();
-    for (len_minus_1, &count) in bits.iter().enumerate() {
-        for _ in 0..count {
-            sizes.push((len_minus_1 + 1) as u8);
-        }
-    }
-    // Codes (generate_code_table): ascending within each length.
-    let mut table = vec![(0u16, 0u8); 256];
-    let mut code: u16 = 0;
-    let mut k = 0;
-    let mut length = sizes.first().copied().unwrap_or(0);
-    while k < sizes.len() {
-        while k < sizes.len() && sizes[k] == length {
-            table[huffval[k] as usize] = (code, length);
-            code += 1;
-            k += 1;
-        }
-        code <<= 1;
-        length += 1;
-    }
-    table
-}
 
 /// MSB-first bit writer with JPEG `FF` → `FF 00` byte stuffing.
 struct BitWriter {
@@ -198,8 +168,9 @@ fn predict(
 }
 
 /// Encodes interleaved `samples` (`width * height * components`) as a lossless JPEG at
-/// `precision` bits per sample, using predictor 1, a single Huffman table, and no point
-/// transform or restarts (a valid encoder free choice — see the module docs).
+/// `precision` bits per sample, using predictor 1, a single Huffman table fitted to these samples
+/// (T.81 Annex K.2), and no point transform or restarts (a valid encoder free choice — see the
+/// module docs).
 ///
 /// # Errors
 ///
@@ -237,7 +208,9 @@ pub fn encode(
             "DNG: lossless-JPEG sample count must be width * height * components",
         ));
     }
-    let codes = canonical_codes(&BITS, &HUFFVAL);
+    let diffs = differences(samples, width, height, components, precision);
+    let (bits, huffval) = build_optimal_table(&category_histogram(&diffs));
+    let codes = CanonicalCodes::from_bits_values(&bits, &huffval);
     let mut out = Vec::new();
     out.extend_from_slice(&[MARKER, SOI]);
 
@@ -255,13 +228,13 @@ pub fn encode(
         out.push(0x00); // quantization table (unused in lossless)
     }
 
-    // DHT: one DC table (class 0, id 0).
+    // DHT: one DC table (class 0, id 0), fitted to this frame's categories.
     out.extend_from_slice(&[MARKER, DHT]);
-    let dht_len = 2 + 1 + 16 + HUFFVAL.len();
+    let dht_len = 2 + 1 + 16 + huffval.len();
     out.extend_from_slice(&(dht_len as u16).to_be_bytes());
     out.push(0x00); // Tc=0 (DC/lossless), Th=0
-    out.extend_from_slice(&BITS);
-    out.extend_from_slice(&HUFFVAL);
+    out.extend_from_slice(&bits);
+    out.extend_from_slice(&huffval);
 
     // SOS: all components, predictor selector 1.
     out.extend_from_slice(&[MARKER, SOS]);
@@ -277,26 +250,61 @@ pub fn encode(
     out.push(0); // Ah=0, Al (point transform) = 0
 
     let mut writer = BitWriter::new();
+    for &diff in &diffs {
+        let (ssss, mantissa) = magnitude(i32::from(diff));
+        // The table codes every category the histogram counted, and `diffs` is what it counted.
+        let (code, len) = codes.lookup(ssss).unwrap_or_default();
+        writer.put(u32::from(code), len);
+        // Categories 0 and 16 carry no mantissa; only `1..16` has magnitude bits.
+        if ssss != 0 && ssss < 16 {
+            writer.put(mantissa, ssss);
+        }
+    }
+    out.extend_from_slice(&writer.finish());
+    out.extend_from_slice(&[MARKER, EOI]);
+    Ok(out)
+}
+
+/// The predictor-1 prediction error of every sample, in scan order, reduced mod 2^16 to
+/// `[-32768, 32767]` (so it fits an `i16`, the size of the sample it came from).
+///
+/// The encoder needs the errors twice — once to count the table's histogram, once to code them —
+/// so they are computed once here rather than predicted twice.
+fn differences(
+    samples: &[u16],
+    width: usize,
+    height: usize,
+    components: usize,
+    precision: u16,
+) -> Vec<i16> {
+    let mut diffs = Vec::with_capacity(samples.len());
     for y in 0..height {
         for x in 0..width {
             for c in 0..components {
                 let actual = i32::from(samples[(y * width + x) * components + c]);
                 let prediction =
                     predict(samples, width, components, x, y, c, precision, 0, 1, (0, 0));
-                let diff = reduce(actual - prediction);
-                let (ssss, mantissa) = magnitude(diff);
-                let (code, len) = codes[ssss as usize];
-                writer.put(u32::from(code), len);
-                // Categories 0 and 16 carry no mantissa; only `1..16` has magnitude bits.
-                if ssss != 0 && ssss < 16 {
-                    writer.put(mantissa, ssss);
-                }
+                // `reduce` lands in `[-32768, 32767]`, so the cast is exact.
+                diffs.push(reduce(actual - prediction) as i16);
             }
         }
     }
-    out.extend_from_slice(&writer.finish());
-    out.extend_from_slice(&[MARKER, EOI]);
-    Ok(out)
+    diffs
+}
+
+/// How many times each magnitude category `SSSS = 0..=16` (T.81 Table H.2) occurs in `diffs`: the
+/// frequencies the Annex K.2 table is built over.
+///
+/// A frame can hold up to `65535 · 65535 · 4` samples, more than a `u32` counts, so a count
+/// saturates. A saturated count stays non-zero, so every category that occurs still gets a code;
+/// only the table's optimality, never its validity, is at stake past `u32::MAX` occurrences.
+fn category_histogram(diffs: &[i16]) -> [u32; 17] {
+    let mut freq = [0u32; 17];
+    for &diff in diffs {
+        let count = &mut freq[usize::from(magnitude(i32::from(diff)).0)];
+        *count = count.saturating_add(1);
+    }
+    freq
 }
 
 /// MSB-first bit reader over a 64-bit accumulator that unstuffs `FF 00` and treats any other
@@ -584,19 +592,25 @@ fn parse_sof3(data: &[u8], pos: usize) -> Result<Frame> {
 }
 
 /// Parses a DHT segment (possibly holding several tables) into the four destinations.
+///
+/// The loop walks the segment's own bytes: each table splits its `Tc/Th` byte, sixteen `BITS`
+/// and `HUFFVAL` symbols off the front of what is left, and the loop ends when nothing is. Every
+/// pass therefore consumes at least one byte whatever the length arithmetic says (#891). A table
+/// that runs past the segment's declared end is truncated, the same rejection a table running
+/// past the data is.
 fn parse_dht(
     data: &[u8],
     pos: usize,
     len: usize,
     tables: &mut [Option<HuffmanTable>; 4],
 ) -> Result<()> {
+    let truncated = || Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT");
     let end = pos
         .checked_add(len)
         .filter(|e| *e <= data.len())
-        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT"))?;
-    let mut at = pos + 2;
-    while at < end {
-        let tc_th = data[at];
+        .ok_or_else(truncated)?;
+    let mut rest = data.get(pos + 2..end).ok_or_else(truncated)?;
+    while let Some((&tc_th, tail)) = rest.split_first() {
         let (class, dest) = (tc_th >> 4, usize::from(tc_th & 0x0F));
         if class != 0 {
             return Err(Error::invalid_input(
@@ -610,13 +624,9 @@ fn parse_dht(
                 "DNG: Huffman table destination must be 0..=3",
             ));
         }
-        let bits: [u8; 16] = data
-            .get(at + 1..at + 17)
-            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT"))?
-            .try_into()
-            .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT"))?;
+        let (bits, tail) = tail.split_first_chunk::<16>().ok_or_else(truncated)?;
         let nvals: usize = bits.iter().map(|&b| usize::from(b)).sum();
-        let huffval = data.get(at + 17..at + 17 + nvals).ok_or_else(|| {
+        let (huffval, tail) = tail.split_at_checked(nvals).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT values")
         })?;
         if huffval.iter().any(|&v| v > 16) {
@@ -625,14 +635,8 @@ fn parse_dht(
                 "DNG: lossless-JPEG Huffman symbols are magnitude categories 0..=16",
             ));
         }
-        tables[dest] = Some(HuffmanTable::new(&bits, huffval));
-        at += 17 + nvals;
-    }
-    if at != end {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "DNG: DHT length mismatch",
-        ));
+        tables[dest] = Some(HuffmanTable::new(bits, huffval));
+        rest = tail;
     }
     Ok(())
 }
@@ -719,26 +723,34 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
     let mut frame: Option<Frame> = None;
     let mut tables: [Option<HuffmanTable>; 4] = [None, None, None, None];
     let mut restart_interval = 0usize;
-    let scan;
+    let mut scan = None;
 
-    loop {
+    // Every pass consumes at least the `FF` and the marker code, so `data.len()` passes are never
+    // what stops a stream: a header walk ends at SOS, at an error, or when the data runs out of
+    // markers. The bound is there so that no arithmetic on `pos` — a segment length subtracted,
+    // an offset multiplied — can turn the walk into a cycle (#891).
+    for _ in 0..data.len() {
         // Find the next marker: skip to the first `FF` at or after `pos`. `position` returns an
         // offset strictly within `data[pos..]`, so there is no off-by-one bound to mutate. A
         // segment length running past the data leaves `pos` beyond it, which reads as no marker.
-        let off = data
+        let Some(off) = data
             .get(pos..)
             .and_then(|rest| rest.iter().position(|&b| b == MARKER))
+        else {
+            break;
+        };
+        // Any run of `FF` fill bytes may precede the marker code (T.81 B.1.1.2); the code is the
+        // first byte after the run.
+        let (fill, &marker) = data
+            .get(pos + off..)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .find(|&(_, &b)| b != MARKER)
             .ok_or_else(|| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOS")
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated lossless JPEG")
             })?;
-        pos += off;
-        while data.get(pos) == Some(&MARKER) {
-            pos += 1;
-        }
-        let marker = *data.get(pos).ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated lossless JPEG")
-        })?;
-        pos += 1;
+        pos += off + fill + 1;
         match marker {
             SOF3 => {
                 if frame.is_some() {
@@ -780,7 +792,7 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
                     Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: SOS before SOF3")
                 })?;
                 let len = be16(data, pos)?;
-                scan = parse_sos(data, pos, f)?;
+                scan = Some(parse_sos(data, pos, f)?);
                 pos += len; // entropy data follows
                 break;
             }
@@ -798,6 +810,9 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
         }
     }
 
+    let scan = scan.ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOS")
+    })?;
     let frame = frame.ok_or_else(|| {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOF3")
     })?;
@@ -905,6 +920,12 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
 mod tests {
     use super::*;
 
+    /// A fixed, valid Huffman table over the 17 magnitude categories (`SSSS = 0..=16`), for the
+    /// hand-built streams below: 15 codes of length 4 and 2 of length 5 (Kraft sum
+    /// `15/16 + 2/32 = 1`). The encoder fits its own table; this one only has to be valid.
+    const BITS: [u8; 16] = [0, 0, 0, 15, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const HUFFVAL: [u8; 17] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+
     #[test]
     fn roundtrips_varied_shapes_and_depths() {
         for &precision in &[8u16, 12, 14, 16] {
@@ -966,6 +987,68 @@ mod tests {
             two.push(v ^ 0x8000);
         }
         roundtrip_samples(&two, len, 1, 2);
+    }
+
+    /// The encoder's whole stream for a 4x1 8-bit row, derived by hand. The row `128 129 129 127`
+    /// predicts `128` (the default `2^(P-1)`, §H.1.2) and then its left neighbour, so the errors
+    /// are `0 1 0 -2`: categories `0 1 0 2`, a histogram of `{0: 2, 1: 1, 2: 1}`. Annex K.2 over
+    /// that histogram plus its reserved pseudo-symbol (frequency 1) merges the pseudo with
+    /// category 2, then category 1 with that pair, then category 0 with the rest: lengths 1, 2, 3
+    /// for categories 0, 1, 2 once the pseudo is dropped from length 3. That is BITS `1 1 1`,
+    /// HUFFVAL `0 1 2`, codes `0`, `10`, `110` — where the fixed table this replaced gave every
+    /// category a 4- or 5-bit code. The scan is `0 | 10 1 | 0 | 110 01`, padded with 1-bits.
+    #[test]
+    fn encode_writes_the_table_fitted_to_its_own_categories() {
+        let row = [128u16, 129, 129, 127];
+        assert_eq!(differences(&row, 4, 1, 1, 8), [0, 1, 0, -2]);
+        let mut expected_histogram = [0u32; 17];
+        expected_histogram[..3].copy_from_slice(&[2, 1, 1]);
+        assert_eq!(category_histogram(&[0, 1, 0, -2]), expected_histogram);
+        #[rustfmt::skip]
+        let expected = [
+            MARKER, SOI,
+            MARKER, SOF3, 0x00, 0x0B, 8, 0x00, 0x01, 0x00, 0x04, 1, 1, 0x11, 0x00,
+            MARKER, DHT, 0x00, 0x16, 0x00,
+            1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // BITS
+            0, 1, 2, // HUFFVAL
+            MARKER, SOS, 0x00, 0x08, 1, 1, 0x00, 1, 0, 0,
+            0b0101_0110, 0b0111_1111, // 0 10 1 0 110 01, then 1-bit padding
+            MARKER, EOI,
+        ];
+        assert_eq!(encode(&row, 4, 1, 1, 8).expect("encode"), expected);
+    }
+
+    /// `differences` walks interleaved components across rows: every component of every pixel
+    /// gets the predictor-1 error against its own component's neighbour (left on a row, above at
+    /// the start of a later row), reduced mod 2^16.
+    #[test]
+    fn differences_follow_components_across_rows() {
+        // 2x2, two components, 16-bit. Row 0: (10, 500) (13, 400); row 1: (7, 65535) (9, 0).
+        let samples = [10u16, 500, 13, 400, 7, 65535, 9, 0];
+        assert_eq!(
+            differences(&samples, 2, 2, 2, 16),
+            // The first pixel predicts 2^15, the next its left neighbour, and row 1 starts from
+            // above: 10 - 32768, 500 - 32768, 3, -100, -3, (65535 - 500) - 65536, 2, 1 - 0.
+            [-32758, -32268, 3, -100, -3, -501, 2, 1],
+        );
+    }
+
+    /// A frame of one category gets a one-code table: the sole category takes code `0` and the
+    /// reserved all-ones word `1` stays unused (§K.2), so every sample costs one bit.
+    #[test]
+    fn encode_codes_a_single_category_in_one_bit() {
+        let flat = [2048u16; 9]; // 12-bit default prediction: every error is 0
+        let stream = encode(&flat, 3, 3, 1, 12).expect("encode");
+        let dht = 2 + 13; // SOI, then the 13-byte SOF3 segment
+        assert_eq!(&stream[dht..dht + 5], [MARKER, DHT, 0x00, 0x14, 0x00]);
+        assert_eq!(
+            stream[dht + 5..dht + 21],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(stream[dht + 21], 0); // HUFFVAL: category 0
+        // Nine 0-bits, then seven 1-bits of padding.
+        assert_eq!(stream[stream.len() - 4..], [0x00, 0x7F, MARKER, EOI]);
+        assert_eq!(decode(&stream).expect("decode").samples, flat);
     }
 
     #[test]
@@ -1474,12 +1557,12 @@ mod tests {
 
             // Entropy-code the point-transformed samples with the module's own prediction.
             let shifted: Vec<u16> = samples.iter().map(|&s| s >> self.pt).collect();
-            let codes: Vec<Vec<(u16, u8)>> = self
+            let codes: Vec<CanonicalCodes> = self
                 .table_ids
                 .iter()
                 .map(|td| {
                     let huffval = &self.tables.iter().find(|(d, _)| d == td).expect("table").1;
-                    canonical_codes(&self.bits, huffval)
+                    CanonicalCodes::from_bits_values(&self.bits, huffval)
                 })
                 .collect();
             let mut bits = TestBits::new();
@@ -1510,7 +1593,7 @@ mod tests {
                         );
                         let diff = reduce(actual - pred);
                         let (ssss, mantissa) = magnitude(diff);
-                        let (code, len) = codes[c][ssss as usize];
+                        let (code, len) = codes[c].lookup(ssss).expect("table codes category");
                         bits.put(u32::from(code), len);
                         if ssss != 0 && ssss < 16 {
                             bits.put(mantissa, ssss);
@@ -1787,7 +1870,8 @@ mod tests {
     mod sdk_differential {
         use super::super::*;
         use super::{
-            BITS_EVERY_LENGTH, HUFFVAL_REV, StreamBuilder, every_category_row, test_samples,
+            BITS_EVERY_LENGTH, HUFFVAL, HUFFVAL_REV, StreamBuilder, every_category_row,
+            test_samples,
         };
 
         fn assert_sdk_agrees(stream: &[u8], expected: &[u16], what: &str) {
@@ -1808,6 +1892,30 @@ mod tests {
                 let samples = test_samples(w, h, c, precision);
                 let stream = encode(&samples, w, h, c, precision).expect("encode");
                 assert_sdk_agrees(&stream, &samples, "encoder output");
+            }
+        }
+
+        /// A flat chunk at the default prediction `2^(P-1)` has every difference in category 0,
+        /// so the fitted table is the degenerate one-code `BITS = 1 0 …` table
+        /// (`encode_codes_a_single_category_in_one_bit` pins its bytes). The pseudo-random
+        /// `test_samples` above never produce it; this puts that table in front of the SDK.
+        #[test]
+        fn sdk_matches_our_single_category_encoder_output() {
+            for &(w, h, c, precision) in &[
+                (3usize, 3usize, 1usize, 12u16),
+                (17, 9, 1, 12),
+                (8, 8, 3, 16),
+                (5, 4, 2, 8),
+            ] {
+                let samples = vec![1u16 << (precision - 1); w * h * c];
+                let stream = encode(&samples, w, h, c, precision).expect("encode");
+                let dht = 2 + 2 + 8 + 3 * c; // SOI, then SOF3: marker plus `8 + 3·Nf` bytes
+                assert_eq!(
+                    stream[dht + 5..dht + 21],
+                    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    "{w}x{h}x{c}@{precision}: one-code BITS",
+                );
+                assert_sdk_agrees(&stream, &samples, "single-category encoder output");
             }
         }
 

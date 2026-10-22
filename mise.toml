@@ -60,7 +60,7 @@ depends_post = ["fmt-tooling-check"]
 # `cargo fmt --all` formats workspace *members*, and `members = ["crates/*"]` — so no crate under
 # `tooling/` has ever been fmt-gated. This is wider than the compile gap `check-dng-real` closes:
 # that one is unique to `gamut-dng-real-conformance`, the only excluded crate nothing depends on,
-# whereas rustfmt is blind to all fifteen — a path dev-dependency edge makes a crate reachable to
+# whereas rustfmt is blind to all of them — a path dev-dependency edge makes a crate reachable to
 # `clippy --workspace --all-targets`, but does nothing for `fmt --all`. Hung off `fmt`/`fmt-check`
 # rather than exposed as a separate gate so the hooks (hk.pkl) and CI inherit it with no second
 # call site to keep in sync. rustfmt compiles nothing, so iterating the manifests costs seconds.
@@ -69,11 +69,13 @@ depends_post = ["fmt-tooling-check"]
 #
 # Deliberately *not* `--all` on each manifest: that flag means "all packages, and also their local
 # path-based dependencies", so `gamut-dng-real-conformance` alone drags the whole `crates/` tree
-# back in — 483 of the 518 files such a loop reaches, every one already covered by the `fmt --all`
-# above — and reports one drifting file once per dependent crate that can see it, up to 18 times
-# for a single file. Iterating the manifests bare visits each crate's own targets (lib, examples,
-# tests) exactly once: the same `tooling/` coverage — set-identical, all 35 files across all 15
-# crates — for 35 file-visits instead of 1131.
+# back in — 555 of the 616 files such a loop reaches, every one already covered by the `fmt --all`
+# above — and reports one drifting file once per visit, up to 48 times for a single file.
+# Iterating the manifests bare visits each crate's own targets (lib, examples, tests) once: the
+# same `tooling/` coverage — set-identical to `git ls-files 'tooling/**/*.rs'`, all 61 files
+# across the 17 `tooling/*/Cargo.toml` crates — for 65 file-visits instead of 2681 (a shared
+# `tests/common/mod.rs` is visited once per test target that declares it). Figures as of #847;
+# re-derive by collecting rustfmt's `--verbose` "Formatting" lines from both loops.
 [tasks.fmt-tooling]
 description = "Format the workspace-excluded tooling crates (`fmt --all` stops at the workspace boundary)"
 depends = ["ensure-nightly-rustfmt"]
@@ -202,11 +204,16 @@ run = "./tooling/gamut-fuzz/run.sh"
 # is workspace-excluded *and* nothing depends on it, so `clippy --workspace --all-targets` and
 # `test --workspace` never build it, and an API change in gamut-ifd, gamut-tiff, gamut-dng,
 # gamut-isobmff or gamut-heic can break every target while all four required checks stay green.
-# Build-only: no nightly, no sanitizer, no engine, so it stays bounded and reproducible and does
+# Clippy only: no nightly, no sanitizer, no engine, so it stays bounded and reproducible and does
 # not put a coverage-guided run on the pull-request path (docs/testing.md).
+#
+# Clippy rather than `cargo check` (#615): it subsumes the compile this task exists for -- an API
+# break in a driven crate still fails it -- and adds the workspace's own `-D warnings` oracle, so
+# the tier is no longer the one place CI compiles code without linting it. Same step, stricter
+# oracle; `check-dng-real` below makes the same switch.
 [tasks.check-fuzz]
-description = "Compile the fuzz tier's targets (no nightly, no engine)"
-run = "cargo check --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets"
+description = "Compile and lint the fuzz tier's targets with Clippy (no nightly, no engine)"
+run = "cargo clippy --manifest-path tooling/gamut-fuzz/Cargo.toml --all-targets -- -D warnings"
 
 # The drift guard for the three hand-maintained lists that describe the same target set: the files
 # under `fuzz_targets/`, the `[[bin]]` entries, and `extended.yml`'s fuzz matrix. Missing from the
@@ -225,18 +232,24 @@ run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
 # path — so `clippy --workspace --all-targets` and `test --workspace` never build it, and a
 # gamut-dng API change can break it while every per-PR gate stays green (#353 removed
 # `DecodedDng::exif_extra` and only master's extended run noticed, at compile time, before a
-# single sample was decoded). `check` needs no corpus, which is what makes this cheap enough for
-# the lint job; the corpus-backed assertions stay in `test-dng-real`.
+# single sample was decoded). Clippy needs no corpus, which is what makes this cheap enough for
+# the lint job; the corpus-backed assertions stay in `test-dng-real`. It runs Clippy under
+# `-D warnings` rather than `cargo check` for the reason `check-fuzz` above does (#615): the same
+# compile, plus the lint oracle every workspace crate already answers to.
 [tasks.check-dng-real]
-description = "Compile the real-camera DNG conformance tier (no corpus needed)"
-run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml --all-targets"
+description = "Compile and lint the real-camera DNG conformance tier with Clippy (no corpus needed)"
+run = "cargo clippy --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml --all-targets -- -D warnings"
 
 # The C2PA differential oracle (issue #447 under the #239 epic). Like the tier above it is
 # workspace-excluded *and* nothing depends on it, so no per-PR gate reaches it; unlike that tier it
-# needs no corpus and no native toolchain — `c2pa-rs` is a pure-Rust crate built
+# needs no corpus. `c2pa-rs` itself is a pure-Rust crate built
 # `--no-default-features --features rust_native_crypto`, which is what keeps its vendored OpenSSL
-# out of this repository entirely. It is still kept off `mise run test` because a shipped crate
-# must never gain an edge to it, and the excluded manifest is what enforces that.
+# out of this repository entirely. The task still needs a native toolchain, for one test: the
+# end-to-end `gamut inspect` check in `tooling/c2pa-oracle/tests/inspect_report.rs` builds
+# `gamut-cli`, whose umbrella `all` feature takes `gamut-jxl`'s statically built libjxl encoder, so
+# it needs CMake and a C++ compiler (both preinstalled on `ubuntu-latest`). Setting `GAMUT_BIN` to
+# an already built `gamut` binary skips that build. It is still kept off `mise run test` because a
+# shipped crate must never gain an edge to it, and the excluded manifest is what enforces that.
 #
 # `--locked` is what makes the committed `tooling/c2pa-oracle/Cargo.lock` load-bearing. Without it
 # cargo silently re-resolves the 307 transitive packages under the pinned `c2pa` (the figure is
@@ -245,7 +258,8 @@ run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml
 # earlier. With it, a lockfile that is missing or out of date fails the task instead of being
 # regenerated.
 #
-# That lockfile also records the 15 `gamut-*` crates this one reaches by path (it is workspace-
+# That lockfile also records every `gamut-*` crate this one reaches by path — 22 as of #847,
+# counted by `grep -c '^name = "gamut-' tooling/c2pa-oracle/Cargo.lock` (it is workspace-
 # `exclude`d, so the root lockfile does not stand in for it). A release-plz version bump or a
 # dependency change in any of them therefore fails both tasks with "cannot update the lock file …
 # --locked was passed" even though nothing here changed. Refresh with
@@ -262,7 +276,7 @@ run = "cargo test --locked --manifest-path tooling/c2pa-oracle/Cargo.toml"
 #
 # Wired like the DNG pair (issue #541): `check-c2pa` runs in ci.yml's per-PR `lint` job beside
 # `check-dng-real`, and `test-c2pa` in extended.yml's `c2pa` job on master. Because both pass
-# `--locked`, a release-plz bump of any of the 15 path-reached gamut crates fails the lint step
+# `--locked`, a release-plz bump of any of the path-reached gamut crates fails the lint step
 # until the lockfile refresh above is committed.
 [tasks.check-c2pa]
 description = "Compile the C2PA differential oracle (no signing, no corpus)"
@@ -337,11 +351,22 @@ run = "cargo bench --workspace"
 # an `unwrap` on an encode that now fails -- was invisible.
 #
 # `--benches` restricts this to bench targets. Without it `cargo bench` also builds every lib and
-# test target in release just to look for `#[bench]` functions that do not exist here (all 16
-# benches are `harness = false` Divan), which is a second full release build for nothing.
+# test target in release just to look for `#[bench]` functions that do not exist here (every
+# bench is a `harness = false` Divan), which is a second full release build for nothing.
 [tasks.bench-test]
 description = "Run every bench once to prove it still executes (no timings; issue #437)"
 run = "cargo bench --workspace --benches -- --test"
+
+# Measured experiments (the protocol on #514/#480/#612): each lives in `experiments/<issue>/`, whose
+# `run.sh` regenerates that directory's `raw/*.csv` (one row per input x variant x sample) and
+# `run.json` (git SHA, rustc, lockfile hashes, corpus SHA-256s, CPU, load average) from scratch.
+# `RESULTS.md` beside them states the claim, the verdict and the table, and is read from that data.
+# Like `bench`, the measurement arms link the crate's oracle dev-dependencies, so they need the
+# submodules and a C toolchain.
+[tasks.experiment]
+description = "Regenerate one experiment's raw data and provenance, e.g. `mise run experiment 514`"
+usage = 'arg "<issue>" help="The issue number naming the experiments/ directory"'
+run = './experiments/${usage_issue?}/run.sh'
 
 # Bindings/binary crates (cli, wasm, ffi), the declarations-only `gamut-jxl-sys` FFI crate, and the
 # dev-only `tooling/` oracles are excluded — their entry points are not meaningfully unit-testable
@@ -453,6 +478,71 @@ actionlint -color
 [tasks.check-agents-edges-fixtures]
 description = "Run the AGENTS.md dependency-edge guard against its own fixture battery"
 run = "./tooling/check-agents-edges/fixtures.sh"
+
+# A `§X.Y` citation was only ever compared with the clause it names by a human reading a diff, and
+# three wrong ones reached review in two crates (#604, PR #542 twice) — the last beside a hand
+# audit's false claim that every other citation checked out. Issue #606 settles the shape: a
+# pinned, hermetic Rust extractor (`tooling/spec-clauses`, its own lockfile, no PDF tool on PATH)
+# generates a `clauses.tsv` committed beside each vendored specification, and the lint reads only
+# those TSVs, so the gate itself builds nothing. Clause numbers are the *headings'*: where a
+# specification's cross-references number a clause differently, the heading wins.
+#
+# `gen-spec-clauses` rewrites the indexes; `check-spec-clauses` regenerates them into target/ and
+# fails on any difference from the committed ones, which is what holds a hand edit of a TSV (or an
+# extractor change) to the specification. Each writes to a scratch file first, so a failed
+# extraction never truncates a committed index.
+[tasks.gen-spec-clauses]
+description = "Regenerate references/{icc,png}/clauses.tsv from the vendored specifications"
+run = """
+set -euo pipefail
+cargo build --locked --release --quiet --manifest-path tooling/spec-clauses/Cargo.toml
+bin=tooling/spec-clauses/target/release/spec-clauses
+"$bin" references/icc/icc.1-2022-05.pdf references/icc/icc.1-2001-04.pdf > references/icc/clauses.tsv.new
+"$bin" references/png/png-3.html > references/png/clauses.tsv.new
+mv references/icc/clauses.tsv.new references/icc/clauses.tsv
+mv references/png/clauses.tsv.new references/png/clauses.tsv
+"""
+
+[tasks.check-spec-clauses]
+description = "Verify the committed clauses.tsv indexes are exactly what tooling/spec-clauses extracts from the vendored specifications"
+run = """
+set -euo pipefail
+cargo build --locked --release --quiet --manifest-path tooling/spec-clauses/Cargo.toml
+bin=tooling/spec-clauses/target/release/spec-clauses
+mkdir -p target/spec-clauses
+"$bin" references/icc/icc.1-2022-05.pdf references/icc/icc.1-2001-04.pdf > target/spec-clauses/icc.tsv
+"$bin" references/png/png-3.html > target/spec-clauses/png.tsv
+fail=0
+diff -u references/icc/clauses.tsv target/spec-clauses/icc.tsv || fail=1
+diff -u references/png/clauses.tsv target/spec-clauses/png.tsv || fail=1
+[ "$fail" = 0 ] || echo "check-spec-clauses: a committed index differs from the extraction; run 'mise run gen-spec-clauses'"
+exit "$fail"
+"""
+
+# The extractor's own unit tests and lint. Like `check-fuzz` and `check-dng-real` above, it is
+# workspace-excluded *and* nothing depends on it, so `test --workspace` and
+# `clippy --workspace --all-targets` never build it, and `check-spec-clauses` builds only its
+# binary: without this task its tests and `-D warnings` run nowhere.
+[tasks.test-spec-clauses]
+description = "Run tooling/spec-clauses's unit tests and lint it with Clippy -D warnings"
+run = """
+set -euo pipefail
+cargo test --locked --manifest-path tooling/spec-clauses/Cargo.toml
+cargo clippy --locked --manifest-path tooling/spec-clauses/Cargo.toml --all-targets -- -D warnings
+"""
+
+# The lint itself: static, sub-second, reads only the committed TSVs and the crates' text. What it
+# checks and deliberately does not is written once, in the script header.
+[tasks.check-citations]
+description = "Verify every § citation in gamut-icc, gamut-cmm and gamut-png names a clause the vendored specification's headings give, and the clause a cited tag, type or chunk name heads"
+run = "./tooling/check-citations/run.sh"
+
+# The guard's own regression battery: a few lines of crate prose per fixture, each asserting the
+# exit code and the message the guard owes it. For whoever changes the guard; not in CI.
+# `CHECK_CITATIONS_AWK` selects the interpreter, e.g. `CHECK_CITATIONS_AWK='gawk --posix'`.
+[tasks.check-citations-fixtures]
+description = "Run the § citation guard against its own fixture battery"
+run = "./tooling/check-citations/fixtures.sh"
 
 [tasks.check-release-deps]
 description = "Reject publishable dev-only workspace edges that release-plz cannot order"

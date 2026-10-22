@@ -1,0 +1,13 @@
+diff --git a/crates/gamut-png/src/reduce.rs b/crates/gamut-png/src/reduce.rs
+index ae371fc0..74f38ab0 100644
+--- a/crates/gamut-png/src/reduce.rs
++++ b/crates/gamut-png/src/reduce.rs
+@@ -389,7 +389,7 @@ pub(crate) fn analyze8_for(pixels: &[u8], channels: usize, family: Family) -> Re
+     // runner-up would make the encoder compress the same samples a second time for a file it
+     // already has.
+     let free_size = gray_size.min(gray_alpha_size).min(rgb_size);
+-    let chunk_free = (free_size < input_size).then(|| {
++    let chunk_free = (free_size <= input_size).then(|| {
+         if free_size == gray_size {
+             let scale = gray8_scale(gray_depth);
+             Reduced::Gray {

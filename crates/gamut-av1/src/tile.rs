@@ -45,7 +45,7 @@
 //! from.
 
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::{ChromaSubsampling, Planar8, Planar16, clip_pixel};
@@ -311,17 +311,13 @@ fn palette_color_context(
                 max_idx = j;
             }
         }
-        if max_idx != i {
-            let (ms, mo) = (scores[max_idx], order[max_idx]);
-            let mut k = max_idx;
-            while k > i {
-                scores[k] = scores[k - 1];
-                order[k] = order[k - 1];
-                k -= 1;
-            }
-            scores[i] = ms;
-            order[i] = mo;
-        }
+        // The spec's shift loop (`for k = maxIdx; k > i; k--`) moves `maxIdx` to `i` and every
+        // entry between them one place right: a right rotation of `i..=max_idx`, which is a no-op
+        // when `max_idx == i`. Spelled as the rotation, not as a cursor stepped by its own
+        // arithmetic, since `k -= 1` → `k /= 1` never moves the cursor and spins (#920); the
+        // rewrite also took the loop's own operator mutants and the `max_idx != i` guard with it.
+        scores[i..=max_idx].rotate_right(1);
+        order[i..=max_idx].rotate_right(1);
     }
     let hash = (scores[0] + scores[1] * 2 + scores[2] * 2) as usize;
     (order, cdf::PALETTE_COLOR_CONTEXT[hash] as usize)
@@ -690,6 +686,16 @@ const SUPERRES_NUM: usize = 8;
 /// guard row/column and the `+16` below/right edge ⇒ indices `-1..=16` → 18 entries.
 const BD_STRIDE: usize = 18;
 
+/// `Default_Scan` (§9.2) for every coded coefficient region, `SCANS[i][j]` being `4 << i` wide by
+/// `4 << j` high (a 64-sample transform dimension codes a 32-sample region, §7.13), built once
+/// from [`cdf::default_scan`]. One table for squares and rectangles alike: the hand-transcribed
+/// square tables (`cdf::DEFAULT_SCAN_*`) are what `default_scan` is tested against, and a square
+/// shortcut beside the generator was a choice between two equal answers — four match arms whose
+/// deletion no input could see.
+static SCANS: LazyLock<[[Vec<usize>; 4]; 4]> = LazyLock::new(|| {
+    std::array::from_fn(|i| std::array::from_fn(|j| cdf::default_scan(4 << i, 4 << j)))
+});
+
 /// `Partition_Context` lookup (`dav1d_al_part_ctx[2][N_BL_LEVELS][PARTITION]`, §5.11.4), restricted to
 /// the partition types this encoder emits: `[above|left][block level 0=128…4=8][NONE|HORZ|VERT|SPLIT]`.
 /// After a terminal partition, the block's MI cells take these context bytes; a later block reads bit
@@ -899,6 +905,19 @@ impl<'a> FrameEncoder<'a> {
         self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] != 0
     }
 
+    /// Marks decoded in `BlockDecoded` (§5.11.34) the `h4`×`w4` luma 4×4s whose top-left is at
+    /// MI `(r, c)`. Both callers mark cells of the current superblock — a luma transform lies in
+    /// its block, a block in its 64×64 superblock — so each cell is in `0..16` of it and needs
+    /// no bounds guard: such a guard holds for every block, and its `&&` → `||` is equivalent
+    /// (#910, #922). The index is `usize`, so a cell before the superblock underflows and
+    /// panics. The palette branch of `encode_block` and `code_plane` share it.
+    fn mark_block_decoded(&mut self, r: usize, c: usize, h4: usize, w4: usize) {
+        for by in r - self.sb_r..r - self.sb_r + h4 {
+            let row = (by + 1) * BD_STRIDE + 1 + c - self.sb_c;
+            self.block_decoded[row..row + w4].fill(1);
+        }
+    }
+
     /// Signals the loop-restoration units (§5.11.57 `read_lr`) whose top-left falls in the superblock
     /// at MI `(r, c)`, as [`Self::lr`] decided them: `use_wiener`, and for a restored unit the
     /// default reference filter — every coded coefficient delta is zero. Chroma is `RESTORE_NONE`,
@@ -989,9 +1008,11 @@ impl<'a> FrameEncoder<'a> {
                 let replayed = replayed.unwrap_or_default();
                 self.decided = replayed.blocks;
                 self.decided_partitions = replayed.partitions;
-                if self.qindex > 0 {
-                    self.write_lr(r, c);
-                }
+                // A lossless frame never has `Self::lr` set (only the lossy path in `encoder.rs`
+                // re-codes with restoration units), so `write_lr` codes nothing for it; a
+                // `qindex > 0` guard here would be a second copy of that fact, and an equivalent
+                // `>` → `>=` mutant.
+                self.write_lr(r, c);
                 self.encode_partition(r, c, 64);
                 self.record[sb] = std::mem::take(&mut self.sb_decisions);
             }
@@ -1321,21 +1342,21 @@ impl<'a> FrameEncoder<'a> {
             self.update_partition_ctx(r, c, bsl, bp);
         }
 
+        // §5.11.4 decodes a HORZ (VERT) partition's second half only `if (hasRows)` (`hasCols`),
+        // but this encoder offers HORZ and VERT only to a region inside the frame
+        // (`encode_partition` forces SPLIT where `block_exceeds_frame`), where both hold; the
+        // guards were deleted with their `<` → `<=` twins, which no region could tell apart.
         match bp {
             usize::MAX | 0 => self.encode_block(r, c, bw, bw),
             1 => {
                 // PARTITION_HORZ: top then bottom half, each `bw × bw/2`.
                 self.encode_block(r, c, bw, bw / 2);
-                if r + half < self.mi_rows {
-                    self.encode_block(r + half, c, bw, bw / 2);
-                }
+                self.encode_block(r + half, c, bw, bw / 2);
             }
             2 => {
                 // PARTITION_VERT: left then right half, each `bw/2 × bw`.
                 self.encode_block(r, c, bw / 2, bw);
-                if c + half < self.mi_cols {
-                    self.encode_block(r, c + half, bw / 2, bw);
-                }
+                self.encode_block(r, c + half, bw / 2, bw);
             }
             _ => {
                 let h = bw / 2;
@@ -1666,15 +1687,19 @@ impl<'a> FrameEncoder<'a> {
     /// quantizer so adjacent superblocks differ. Magnitude is kept ≤ 2, so the `DELTA_Q_SMALL` escape
     /// is never coded.
     fn signal_delta_q(&mut self) {
-        let sb_idx = self.sb_r / 16 + self.sb_c / 16;
-        let delta: i32 = match sb_idx % 3 {
+        // `(sb_r / 16 + sb_c / 16) % 3` over superblock origins, which are multiples of 16 MI:
+        // `/ 16` → `* 16` multiplies by 256 ≡ 1 (mod 3) and changed nothing (#920), so the
+        // superblock count mod 3 is read as `(sb_r + sb_c) % 48`, in MI units, with no division.
+        let delta: i32 = match (self.sb_r + self.sb_c) % 48 {
             0 => 1,
-            1 => -1,
+            16 => -1,
             _ => 2,
         };
         let abs = delta.unsigned_abs() as usize;
         self.sym.encode(abs, self.cdfs.delta_q.slot());
-        self.sym.encode_literal(u32::from(delta < 0), 1); // delta_q_sign_bit (1 ⇒ negative)
+        // delta_q_sign_bit (1 ⇒ negative). `delta` is never 0, so `delta < 0` → `<= 0` changed
+        // nothing (#920); the sign is read as `is_negative()`, which has no such twin.
+        self.sym.encode_literal(u32::from(delta.is_negative()), 1);
         let nq = (self.current_qindex + delta).clamp(1, 255);
         self.set_quant(nq);
     }
@@ -1693,7 +1718,8 @@ impl<'a> FrameEncoder<'a> {
         let abs = delta.unsigned_abs() as usize;
         self.sym.encode(abs, self.cdfs.delta_lf.slot());
         if abs > 0 {
-            self.sym.encode_literal(u32::from(delta < 0), 1); // delta_lf_sign_bit
+            // delta_lf_sign_bit: `delta` is 0 or 1, never negative, so the sign is always 0.
+            self.sym.encode_literal(0, 1);
         }
         self.current_dlf = (self.current_dlf + delta).clamp(-63, 63);
     }
@@ -1798,56 +1824,29 @@ impl<'a> FrameEncoder<'a> {
 
     /// `get_palette_cache` (§5.11.46) for luma: the sorted, deduplicated merge of the above (only
     /// when the block is not at the top of its 64-superblock) and left blocks' palettes.
+    ///
+    /// The spec spells this as a two-cursor merge that skips a colour equal to the last one
+    /// cached. Every palette this encoder stores ascends strictly ([`Self::decide_palette`] builds
+    /// it by sorted insertion of distinct samples), and for two ascending lists that merge is
+    /// exactly the sorted union, so it is computed as one. The cursor form left mutants no input
+    /// could tell apart — `lc < ac` against `<=`, and the spec's `leftIdx` step on equal colours
+    /// against `*=`, both absorbed by the repeat check — and a `+= 1` → `*= 1` on any of its four
+    /// cursors spun the walk until the test timeout.
     fn palette_cache(&self, r: usize, c: usize) -> Vec<u16> {
-        let above_n = if !r.is_multiple_of(16) {
-            self.mi_psize[(r - 1) * self.mi_cols + c] as usize
+        let palette = |i: usize| &self.mi_pcolors[i][..usize::from(self.mi_psize[i])];
+        let above = if !r.is_multiple_of(16) {
+            palette((r - 1) * self.mi_cols + c)
         } else {
-            0
+            &[]
         };
-        let left_n = if c > self.tile_c0 {
-            self.mi_psize[r * self.mi_cols + (c - 1)] as usize
+        let left = if c > self.tile_c0 {
+            palette(r * self.mi_cols + (c - 1))
         } else {
-            0
+            &[]
         };
-        let blank = [0u16; 8];
-        let above = if above_n > 0 {
-            &self.mi_pcolors[(r - 1) * self.mi_cols + c]
-        } else {
-            &blank
-        };
-        let left = if left_n > 0 {
-            &self.mi_pcolors[r * self.mi_cols + (c - 1)]
-        } else {
-            &blank
-        };
-        let mut cache: Vec<u16> = Vec::new();
-        let push = |cache: &mut Vec<u16>, v: u16| {
-            if cache.last() != Some(&v) {
-                cache.push(v);
-            }
-        };
-        let (mut ai, mut li) = (0, 0);
-        while ai < above_n && li < left_n {
-            let (ac, lc) = (above[ai], left[li]);
-            if lc < ac {
-                push(&mut cache, lc);
-                li += 1;
-            } else {
-                push(&mut cache, ac);
-                ai += 1;
-                if lc == ac {
-                    li += 1;
-                }
-            }
-        }
-        while ai < above_n {
-            push(&mut cache, above[ai]);
-            ai += 1;
-        }
-        while li < left_n {
-            push(&mut cache, left[li]);
-            li += 1;
-        }
+        let mut cache: Vec<u16> = above.iter().chain(left).copied().collect();
+        cache.sort_unstable();
+        cache.dedup();
         cache
     }
 
@@ -2023,9 +2022,9 @@ impl<'a> FrameEncoder<'a> {
         }
         // Per-block quantizer get_qindex(segment) = Clip3(0, 255, CurrentQIndex + alt_q) (§7.12.2):
         // only the dc/ac step sizes follow the segment; `CurrentQIndex` stays the delta-Q accumulator.
-        if self.qindex > 0 {
-            self.apply_seg_quant(segid);
-        }
+        // Unconditional: a lossless frame codes segment 0 (no `SEG_LVL_ALT_Q`) and no `delta_q`
+        // (`delta_q_present` needs `base_q_idx > 0`), so there it sets the frame's own steps again.
+        self.apply_seg_quant(segid);
         // The luma transforms the block may be coded with, each with the rate of signalling it:
         // a square lossy ≥8×8 block chooses its `tx_depth` (0..=`Max_Tx_Depth`, one prediction
         // over `bw >> tx_depth` square transforms), jointly with its mode; a rectangular block
@@ -2061,8 +2060,36 @@ impl<'a> FrameEncoder<'a> {
                 .position(|d| d.at == (r, c, bw, bh))
                 .map(|i| self.decided.swap_remove(i))
         };
-        let (luma, tx_depth) = if let Some(d) = decided {
-            (d.luma, d.tx_depth)
+        // §5.11.5 `HasChroma`: with subsampled chroma a sub-8x8 block can cover no chroma samples
+        // of its own, and the covering block of its MI group codes chroma for the whole group. Such
+        // a block codes no `uv_mode`, no `cfl_alpha` (§5.11.7) and no chroma residual (§5.11.34).
+        // Always true at 4:4:4, and always false in a monochrome frame — the spec writes the
+        // two parity tests first and then falls through to `HasChroma = NumPlanes > 1`.
+        let block_has_chroma = has_chroma(r, c, bw, bh, self.subsampling);
+        // §6.10.4 is a bitstream-conformance requirement the *partition search* has to respect, so
+        // assert it at the point a block is committed rather than discovering it in the residual
+        // loop. `partitions_offered` is the only thing that can produce a shape that violates it.
+        debug_assert!(
+            !block_has_chroma || self.rect_partition_is_codable(bw, bh),
+            "{bw}x{bh} has no codable chroma residual under {:?}",
+            self.subsampling
+        );
+        // `is_cfl_allowed` is `MiSize == BLOCK_4X4` when Lossless, else `Max(w, h) <= 32` — so CfL
+        // is allowed for the lossy 4×4 to 32×32 blocks and the lossless 4×4 blocks.
+        let cfl_allowed = if self.qindex == 0 {
+            bw == 4
+        } else {
+            bw.max(bh) <= 32
+        };
+        // The chroma-from-luma alphas are chosen with the luma mode, by the branch that searches
+        // one, so a block that searches neither codes plain `DC_PRED` chroma for the reason it
+        // codes `DC_PRED` luma. A separate `match` on `skip` and `HasChroma` left an arm no
+        // fixture could tell from its deletion: a skip block's chroma is flat and exactly
+        // DC-predicted (`block_is_skippable`, `decide_palette`), so plain DC costs no distortion
+        // and CfL could only win on rate, and a block without chroma of its own never codes the
+        // result. The search branch is lossy by construction, so its guard needs no `is_lossy`.
+        let (luma, tx_depth, cfl) = if let Some(d) = decided {
+            (d.luma, d.tx_depth, d.cfl)
         } else if skip || self.qindex == 0 {
             // Palette requires YMode == DC_PRED (and no filter-intra); lossless also forces DC_PRED.
             // A block skipped for being flat and DC-predictable (`block_is_skippable`) takes
@@ -2072,9 +2099,18 @@ impl<'a> FrameEncoder<'a> {
             // With no residual there is nothing for a deeper transform to code either, so a
             // skip block keeps one block-size transform (`tx_depth = 0`), which also leaves the
             // deblocking filter no inner transform edge to cross.
-            (DC_LUMA, 0)
+            (DC_LUMA, 0, None)
         } else {
-            self.select_luma_mode(r, c, bw, bh, &tx_options)
+            let (luma, tx_depth) = self.select_luma_mode(r, c, bw, bh, &tx_options);
+            // The plane loop codes chroma only for a block with chroma of its own, and CfL is
+            // square-only here: a rectangular block's chroma is plain DC_PRED. The pick precedes
+            // `y_mode` and `angle_delta` in the stream, which it neither reads nor prices.
+            let cfl = if cfl_allowed && !is_rect && block_has_chroma {
+                self.select_cfl(r, c, bw, luma, tx_options[tx_depth].0)
+            } else {
+                None
+            };
+            (luma, tx_depth, cfl)
         };
         let luma_tx = tx_options[tx_depth].0;
         let LumaMode {
@@ -2097,39 +2133,6 @@ impl<'a> FrameEncoder<'a> {
                 self.cdfs.angle_delta[(y_mode - V_PRED) as usize].slot(),
             );
         }
-        // uv_mode. Its CDF is indexed by the luma mode. `is_cfl_allowed` is `MiSize == BLOCK_4X4`
-        // when Lossless, else `Max(w, h) <= 32` — so CfL is allowed for the lossy 4×4 and 8×8 blocks
-        // and the lossless 4×4 blocks. When allowed, the encoder picks chroma-from-luma if it beats
-        // plain DC_PRED, then emits read_cfl_alphas; otherwise uv_mode = DC_PRED.
-        // §5.11.5 `HasChroma`: with subsampled chroma a sub-8x8 block can cover no chroma samples
-        // of its own, and the covering block of its MI group codes chroma for the whole group. Such
-        // a block codes no `uv_mode`, no `cfl_alpha` (§5.11.7) and no chroma residual (§5.11.34).
-        // Always true at 4:4:4, and always false in a monochrome frame — the spec writes the
-        // two parity tests first and then falls through to `HasChroma = NumPlanes > 1`.
-        let block_has_chroma = has_chroma(r, c, bw, bh, self.subsampling);
-        // §6.10.4 is a bitstream-conformance requirement the *partition search* has to respect, so
-        // assert it at the point a block is committed rather than discovering it in the residual
-        // loop. `partitions_offered` is the only thing that can produce a shape that violates it.
-        debug_assert!(
-            !block_has_chroma || self.rect_partition_is_codable(bw, bh),
-            "{bw}x{bh} has no codable chroma residual under {:?}",
-            self.subsampling
-        );
-        let cfl_allowed = if self.qindex == 0 {
-            bw == 4
-        } else {
-            bw.max(bh) <= 32
-        };
-        let is_lossy = self.qindex != 0;
-        let cfl = match (decided, block_has_chroma, skip) {
-            (Some(d), ..) => d.cfl,
-            // No chroma of its own (or none in the frame at all), or a skip block — palette or
-            // flat, whose chroma is plain DC_PRED for the reason its luma is.
-            (_, false, _) | (_, _, true) => None,
-            _ if is_lossy && cfl_allowed && !is_rect => self.select_cfl(r, c, bw, luma, luma_tx),
-            // CfL is square-only here; a rectangular block's chroma is plain DC_PRED.
-            _ => None,
-        };
         if !skip {
             let decided = Decided {
                 at: (r, c, bw, bh),
@@ -2144,6 +2147,9 @@ impl<'a> FrameEncoder<'a> {
             }
         }
         let ym = usize::from(y_mode);
+        // uv_mode. Its CDF is indexed by the luma mode. When CfL is allowed, the encoder picks
+        // chroma-from-luma if it beats plain DC_PRED, then emits read_cfl_alphas; otherwise
+        // uv_mode = DC_PRED.
         // §5.11.7 wraps `uv_mode` (and the `read_cfl_alphas` that follows UV_CFL_PRED) in
         // `if (HasChroma)`. A monochrome frame codes neither, and neither does a subsampled
         // sub-8x8 block whose chroma is coded by the covering block of its MI group.
@@ -2167,10 +2173,7 @@ impl<'a> FrameEncoder<'a> {
         // (Palette is only *chosen* for ≤32 — `palette` is `None` at 64 — but the flag is still coded.)
         if self.qindex > 0 && (8..=64).contains(&bw) {
             if y_mode == DC_PRED {
-                let bctx = bw.trailing_zeros() as usize + bh.trailing_zeros() as usize - 6; // Mi_W_Log2 + Mi_H_Log2 - 2
-                let above = r > self.tile_r0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
-                let left = c > self.tile_c0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
-                let pctx = usize::from(above) + usize::from(left);
+                let (bctx, pctx) = self.palette_y_ctx(r, c, bw, bh);
                 self.sym.encode(
                     usize::from(palette.is_some()),
                     self.cdfs.palette_y_mode[bctx][pctx].slot(),
@@ -2264,15 +2267,7 @@ impl<'a> FrameEncoder<'a> {
         // residual, then marks its luma cells decoded so later directional predictions see them.
         if let Some(pal) = palette {
             self.recon_palette(r, c, bw, &pal);
-            for ty in 0..bw / 4 {
-                for tx in 0..bw / 4 {
-                    let by = (r + ty) as isize - self.sb_r as isize;
-                    let bx = (c + tx) as isize - self.sb_c as isize;
-                    if (0..16).contains(&by) && (0..16).contains(&bx) {
-                        self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
-                    }
-                }
-            }
+            self.mark_block_decoded(r, c, bw / 4, bw / 4);
             return;
         }
 
@@ -2345,10 +2340,12 @@ impl<'a> FrameEncoder<'a> {
         let base_x = (c >> g.ss_x) * 4;
         let base_y = (r >> g.ss_y) * 4;
         let (mut sse, mut rate) = (0, 0);
-        let mut sy = base_y;
-        while sy < base_y + rh {
-            let mut sx = base_x;
-            while sx < base_x + rw {
+        // The transform grid is walked as ranges stepped by the transform size, not as cursors
+        // advanced by it: a cursor loop (`while sy < … { …; sy += ph }`) never ends if the step
+        // is 0, which a mutated `TxSize::height`/`width` produced as a suite TIMEOUT (#910);
+        // `step_by(0)` panics instead. The rewrite also removes the cursor's `<`/`+=` mutants.
+        for sy in (base_y..base_y + rh).step_by(ph) {
+            for sx in (base_x..base_x + rw).step_by(pw) {
                 if sx < g.coded_w && sy < g.coded_h {
                     let (d, r) =
                         self.transform_block(plane, sx, sy, rw, rh, ptx, pred, skip, coding);
@@ -2360,20 +2357,9 @@ impl<'a> FrameEncoder<'a> {
                 // above-right / below-left siblings just reconstructed. Luma-grid only (chroma is
                 // never directional); marked on the luma pass.
                 if plane == 0 {
-                    for ty in 0..ph / 4 {
-                        for tx in 0..pw / 4 {
-                            let by = (sy / 4 + ty) as isize - self.sb_r as isize;
-                            let bx = (sx / 4 + tx) as isize - self.sb_c as isize;
-                            if (0..16).contains(&by) && (0..16).contains(&bx) {
-                                self.block_decoded
-                                    [(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
-                            }
-                        }
-                    }
+                    self.mark_block_decoded(sy / 4, sx / 4, ph / 4, pw / 4);
                 }
-                sx += pw;
             }
-            sy += ph;
         }
         (sse, rate)
     }
@@ -2449,9 +2435,9 @@ impl<'a> FrameEncoder<'a> {
     /// Puts back what [`Self::save_plane`] captured.
     fn restore_plane(&mut self, s: PlaneState) {
         let p = s.plane;
-        if s.w > 0 {
-            self.store_recon(p, s.x0, s.y0, s.w, &s.recon);
-        }
+        // `s.w` is never 0: a block's top-left MI lies inside the frame, so `x0 < coded_w` on
+        // every plane the frame codes, and `rw` is at least 4.
+        self.store_recon(p, s.x0, s.y0, s.w, &s.recon);
         let (x4, y4) = (s.x0 / 4, s.y0 / 4);
         self.above_level[p][x4..x4 + s.above_level.len()].copy_from_slice(&s.above_level);
         self.above_dc[p][x4..x4 + s.above_dc.len()].copy_from_slice(&s.above_dc);
@@ -2480,12 +2466,17 @@ impl<'a> FrameEncoder<'a> {
     ) -> (u64, u32) {
         // Lossless: forced 4×4 Walsh–Hadamard, DC prediction, source-as-recon (M0 path, unchanged).
         // Nothing is searched on this path, so it is never trialled.
+        // Every lossless block is `DC_PRED` on every plane (`encode_block` takes `DC_LUMA` there
+        // and chroma is plain DC), so its prediction is one value, subtracted here as such: a 4×4
+        // array of it made any index into it equivalent to any other (a `pred[i + 4 + j]`
+        // survived), so the per-sample index and its operator mutants are gone with the array.
         if self.qindex == 0 {
-            let pred = self.predict_4x4(plane, sx, sy, desc.mode);
+            debug_assert_eq!(desc.mode, DC_PRED, "lossless blocks are DC_PRED");
+            let dc = self.dc_avg(plane, sx, sy);
             let mut res = [0i32; 16];
             for i in 0..4 {
                 for j in 0..4 {
-                    res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - pred[i * 4 + j];
+                    res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - dc;
                 }
             }
             let quant = gamut_dsp::av1::forward_wht4x4(&res);
@@ -2514,8 +2505,11 @@ impl<'a> FrameEncoder<'a> {
             self.max_luma_w = sx + tw;
             self.max_luma_h = sy + th;
         }
+        // Filter-intra is luma-only (§5.11.24), and every `Pred` a chroma plane receives is built
+        // with `filter_intra: None`, so it needs no `plane == 0` guard here: one was equivalent
+        // to `true` and is gone, with its two killable siblings.
         let pred: Vec<i32> = match desc.filter_intra {
-            Some(fi) if plane == 0 => self.predict_filter_intra(plane, sx, sy, tw, fi),
+            Some(fi) => self.predict_filter_intra(plane, sx, sy, tw, fi),
             _ => {
                 let mut p = self.predict_intra(plane, sx, sy, desc.mode, tw, th, desc.angle_delta);
                 if let Some(alpha) = desc.cfl_alpha {
@@ -2594,7 +2588,11 @@ impl<'a> FrameEncoder<'a> {
         // conformant decoder applies it, so the encoder reconstruction must.
         let dq_denom = tx_size.dq_denom();
         let mut dq = vec![0i32; tw * th];
-        if tw == 64 && th == 64 {
+        // The test `quantize_tx` compacts by, so the two layouts agree by construction. TX_64X64 is
+        // the only transform with a 64-sample side this encoder forms (luma rectangles stop at 32,
+        // and `chroma_tx_size` caps chroma at 32), so this is that size's test; a `tw == 64 &&
+        // th == 64` here was equal to `||` on every transform that reaches it.
+        if tw == 64 {
             // Re-expand the 32-stride coded levels into the top-left 32×32 of the 64-stride array the
             // inverse transform reads (the remaining coefficients stay zero).
             for i in 0..32 {
@@ -3196,11 +3194,11 @@ impl<'a> FrameEncoder<'a> {
         let mut pred = vec![0i32; n * n];
         for i in 0..n as i32 {
             for j in 0..n as i32 {
-                let v = if p_angle == 90 {
-                    above[j as usize]
-                } else if p_angle == 180 {
-                    left[i as usize]
-                } else if p_angle < 90 {
+                // The branches run in angle order, each cardinal angle between the two zones it
+                // separates, so no comparison overlaps an earlier branch: a `<` → `<=` on either
+                // zone bound sends its cardinal angle into the zone, which indexes
+                // `Dr_Intra_Derivative[90]`, one past the table.
+                let v = if p_angle < 90 {
                     // Zone 1: ray sweeps the above row (extended to the above-right).
                     let dx = cdf::DR_INTRA_DERIVATIVE[p_angle as usize];
                     let idx = (i + 1) * dx;
@@ -3215,6 +3213,8 @@ impl<'a> FrameEncoder<'a> {
                     } else {
                         above[max_base_x as usize]
                     }
+                } else if p_angle == 90 {
+                    above[j as usize]
                 } else if p_angle < 180 {
                     // Zone 2: ray sweeps the above row, falling back to the left column past the top.
                     let dx = cdf::DR_INTRA_DERIVATIVE[(180 - p_angle) as usize];
@@ -3230,6 +3230,8 @@ impl<'a> FrameEncoder<'a> {
                         let shift = (idx2 >> 1) & 0x1F;
                         (left_col(base2) * (32 - shift) + left_col(base2 + 1) * shift + 16) >> 5
                     }
+                } else if p_angle == 180 {
+                    left[i as usize]
                 } else {
                     // Zone 3: ray sweeps the left column (extended to the below-left).
                     let dy = cdf::DR_INTRA_DERIVATIVE[(270 - p_angle) as usize];
@@ -3429,6 +3431,18 @@ impl<'a> FrameEncoder<'a> {
         out
     }
 
+    /// The `has_palette_y` contexts (§8.3.2) of the `bw × bh` block at MI `(r, c)`: `bsizeCtx =
+    /// Mi_Width_Log2 + Mi_Height_Log2 - 2`, which also keys `palette_size_y_minus_2`, and the
+    /// count of above and left neighbours (within the tile) that carry a luma palette. One
+    /// derivation for both the signalled flag and [`Self::luma_mode_rate`]'s price of it, so the
+    /// rate can only ever be read against the context the stream codes under.
+    fn palette_y_ctx(&self, r: usize, c: usize, bw: usize, bh: usize) -> (usize, usize) {
+        let bctx = bw.trailing_zeros() as usize + bh.trailing_zeros() as usize - 6;
+        let above = r > self.tile_r0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
+        let left = c > self.tile_c0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
+        (bctx, usize::from(above) + usize::from(left))
+    }
+
     /// The rate, in [`RATE_ONE`] units, of signalling `cand` as the luma mode of the lossy
     /// `bw × bh` block at MI `(r, c)` (no palette): `y_mode`, then `angle_delta_y` (directional,
     /// ≥8×8), then for a `DC_PRED` block the `has_palette_y = 0` flag (8×8..64×64) and
@@ -3449,10 +3463,7 @@ impl<'a> FrameEncoder<'a> {
             return rate;
         }
         if (8..=64).contains(&bw) {
-            let bctx = bw.trailing_zeros() as usize + bh.trailing_zeros() as usize - 6;
-            let above = r > self.tile_r0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
-            let left = c > self.tile_c0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
-            let pctx = usize::from(above) + usize::from(left);
+            let (bctx, pctx) = self.palette_y_ctx(r, c, bw, bh);
             rate += symbol_rate(self.cdfs.palette_y_mode[bctx][pctx].probs(), 0);
         }
         if bw <= 32 && bh <= 32 {
@@ -3648,11 +3659,8 @@ impl<'a> FrameEncoder<'a> {
         }
         self.restore_plane(luma_state);
 
+        let dc_rate = self.dc_chroma_rate(luma.mode, bw);
         let uv = self.cdfs.uv_mode_cfl_allowed[usize::from(luma.mode)].probs();
-        let mut dc_rate = symbol_rate(uv, usize::from(DC_PRED));
-        if (8..=64).contains(&bw) {
-            dc_rate += symbol_rate(self.cdfs.palette_uv_mode[0].probs(), 0);
-        }
         let cfl_rate = symbol_rate(uv, usize::from(UV_CFL_PRED));
         let [u, v] = &trials;
         let (u0, v0) = (u[0], v[0]);
@@ -3671,6 +3679,21 @@ impl<'a> FrameEncoder<'a> {
                 std::cmp::min_by_key(best, (self.rd_cost(su + sv, rate), Some((au, av))), |c| c.0)
             })
             .1
+    }
+
+    /// The mode-info rate [`Self::select_cfl`] charges plain `DC_PRED` chroma in a lossy square
+    /// `bw`-wide block under luma mode `y_mode`, in [`RATE_ONE`] units: `uv_mode = DC_PRED` under
+    /// the CfL-allowed CDF, plus, for an 8×8..64×64 block (§5.11.46), the `has_palette_uv = 0`
+    /// that follows it, priced at context 0. A function of its own so that the palette flag's
+    /// share is assertable: inside `select_cfl` it only moves a close RD decision, and no fixture
+    /// told adding it from subtracting it (#920).
+    fn dc_chroma_rate(&self, y_mode: u8, bw: usize) -> u32 {
+        let uv = self.cdfs.uv_mode_cfl_allowed[usize::from(y_mode)].probs();
+        let mut rate = symbol_rate(uv, usize::from(DC_PRED));
+        if (8..=64).contains(&bw) {
+            rate += symbol_rate(self.cdfs.palette_uv_mode[0].probs(), 0);
+        }
+        rate
     }
 
     /// The rate of `read_cfl_alphas` (§5.11.45) for `(au, av)` against the CDFs as they stand,
@@ -3812,17 +3835,7 @@ impl<'a> FrameEncoder<'a> {
         // scan order and the eob class (by coefficient count) differ.
         let up_sq = w.max(h);
 
-        let rect_scan;
-        let scan: &[usize] = match (w, h) {
-            (4, 4) => &cdf::DEFAULT_SCAN_4X4,
-            (8, 8) => &cdf::DEFAULT_SCAN_8X8,
-            (16, 16) => &cdf::DEFAULT_SCAN_16X16,
-            (32, 32) | (64, 64) => &cdf::DEFAULT_SCAN_32X32, // both code a 32×32 region
-            _ => {
-                rect_scan = cdf::default_scan(code_w, code_h);
-                &rect_scan
-            }
-        };
+        let scan: &[usize] = &SCANS[bwl - 2][code_h.trailing_zeros() as usize - 2];
 
         // `txSzCtx` (§8.3.2): the bounding square's class, which keys the skip/eob/base CDFs.
         // `coeff_br` is capped at TX_32X32 (`Min(txSzCtx, 3)`), so TX_64X64 shares its row.
@@ -3873,8 +3886,11 @@ impl<'a> FrameEncoder<'a> {
         sink.symbol(eobpt - 1, CoeffCdf::EobPt(eob_pt_class(area), ptype));
         if eobpt >= 3 {
             let nbits = eobpt - 2;
-            let base_eob_val = (1usize << (eobpt - 2)) + 1;
-            let extra = eob - base_eob_val;
+            // §5.11.39 codes `eob - (1 << nbits) - 1` in `nbits` bits. `eob - 1` lies in
+            // `[1 << nbits, 2 << nbits)`, so it is that value with its top bit set, and the low
+            // `nbits` bits — all that is coded — are the same. Subtracting the top bit as well
+            // would be an operation no coded bit can see.
+            let extra = eob - 1;
             sink.symbol(
                 (extra >> (nbits - 1)) & 1,
                 CoeffCdf::EobExtra(sz, ptype, eobpt - 3),
@@ -3920,7 +3936,7 @@ impl<'a> FrameEncoder<'a> {
         for (c, &pos) in scan.iter().enumerate().take(eob) {
             let level = quant[pos].abs();
             if level != 0 {
-                let neg = quant[pos] < 0;
+                let neg = quant[pos].is_negative();
                 if c == 0 {
                     sink.symbol(usize::from(neg), CoeffCdf::DcSign(ptype, job.dc_ctx));
                 } else {
@@ -3933,12 +3949,11 @@ impl<'a> FrameEncoder<'a> {
         }
 
         let cul = levels.iter().sum::<i32>().min(63) as u8;
-        let dc_cat = if quant[0] == 0 {
-            0
-        } else if quant[0] < 0 {
-            1
-        } else {
-            2
+        // `dcCategory`: one three-way comparison, so no bound overlaps the zero case before it.
+        let dc_cat = match quant[0].cmp(&0) {
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Less => 1,
+            std::cmp::Ordering::Greater => 2,
         };
         (cul, dc_cat)
     }
@@ -4307,13 +4322,16 @@ const LAMBDA_DIV: u64 = 1024;
 
 /// The `CflSign` of a CfL alpha (§5.11.45): `CFL_SIGN_ZERO` (0), `CFL_SIGN_NEG` (1) or
 /// `CFL_SIGN_POS` (2).
+///
+/// One three-way comparison, not `alpha == 0` then `alpha < 0`: there the second test ran only on
+/// a nonzero `alpha`, so its `<` and `<=` were the same function. The rewrite also took the two
+/// tests' three killable operator mutants with it, leaving only the body replacements, which
+/// `cfl_sign_is_the_spec_sign_code` still kills by naming all three arms.
 fn cfl_sign(alpha: i32) -> usize {
-    if alpha == 0 {
-        0
-    } else if alpha < 0 {
-        1
-    } else {
-        2
+    match alpha.cmp(&0) {
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Less => 1,
+        std::cmp::Ordering::Greater => 2,
     }
 }
 
@@ -4915,6 +4933,57 @@ mod tests {
     }
 
     #[test]
+    fn clear_block_decoded_ends_the_above_row_and_left_column_at_the_tile_edge() {
+        // §5.11.3: `BlockDecoded[-1][x]` is set for `x < sbWidth4` and `BlockDecoded[y][-1]` for
+        // `y < sbHeight4`, both counted to the tile's end, so a superblock at a tile's right or
+        // bottom edge sees no above-right or below-left samples in the next tile. A tile edge
+        // inside the 16-MI superblock puts both bounds where a fixture can read either side; a
+        // superblock away from the origin makes the bounds differences, not the tile's ends.
+        let p = busy64();
+        let mut e = FrameEncoder::new(&p, 40);
+        (e.tile_r1, e.tile_c1) = (16 + 5, 16 + 7);
+        e.clear_block_decoded(16, 16);
+        assert!(e.block_decoded_at(-1, 6), "the tile's last column is above");
+        assert!(
+            !e.block_decoded_at(-1, 7),
+            "the column past the tile is not"
+        );
+        assert!(e.block_decoded_at(4, -1), "the tile's last row is left");
+        assert!(!e.block_decoded_at(5, -1), "the row past the tile is not");
+    }
+
+    #[test]
+    fn clear_block_decoded_forces_only_the_below_left_corner_unavailable() {
+        // §5.11.3 then clears `BlockDecoded[sbSize4][-1]`: in a tile that runs on past the
+        // superblock, the left column is available down to row 15 and the corner below it is not.
+        // Every other edge cell, the top-left corner among them, keeps its availability.
+        let p = busy64();
+        let mut e = FrameEncoder::new(&p, 40);
+        (e.tile_r1, e.tile_c1) = (64, 64);
+        e.clear_block_decoded(0, 0);
+        assert!(e.block_decoded_at(-1, -1), "the top-left corner");
+        assert!(e.block_decoded_at(-1, 16), "the above-right corner");
+        assert!(e.block_decoded_at(15, -1), "the left column's last row");
+        assert!(!e.block_decoded_at(16, -1), "the below-left corner");
+    }
+
+    #[test]
+    fn mark_block_decoded_marks_exactly_its_cells_relative_to_the_superblock() {
+        // A superblock away from the origin makes the MI position differ from the cell, and a
+        // 2×3 run that starts off the superblock's corner makes rows, columns and each extent
+        // distinguishable: the whole map is compared, so a mark anywhere else fails too.
+        let p = busy64();
+        let mut e = FrameEncoder::new(&p, 40);
+        (e.sb_r, e.sb_c) = (16, 16);
+        e.mark_block_decoded(16 + 4, 16 + 2, 2, 3);
+        let marked: Vec<(isize, isize)> = (-1..=16)
+            .flat_map(|by| (-1..=16).map(move |bx| (by, bx)))
+            .filter(|&(by, bx)| e.block_decoded_at(by, bx))
+            .collect();
+        assert_eq!(marked, [(4, 2), (4, 3), (4, 4), (5, 2), (5, 3), (5, 4)]);
+    }
+
+    #[test]
     fn encode_partition_stops_splitting_at_the_preset_floor() {
         // `Mi_Width_Log2` 0 is a 4-sample-wide block. Under the full search this texture splits
         // down to 4x4 leaves; the `Fastest` preset stops choosing a split below 8x8, and a 64x64
@@ -5145,6 +5214,27 @@ mod tests {
     }
 
     #[test]
+    fn coeff_cdf_prices_each_eob_pt_class_against_the_cdf_it_codes() {
+        // `probs` (the rate a trial pays) and `slot` (what the stream codes) spell the `eob_pt_*`
+        // dispatch twice. Each class's table has its own alphabet size (5 symbols for 16
+        // coefficients up to 11 for 1024), so a class priced against the `_` fallback's table is a
+        // different slice.
+        let mut cdfs = cdf::CdfContext::new(0);
+        for class in 0..=6 {
+            for ptype in 0..2 {
+                let c = CoeffCdf::EobPt(class, ptype);
+                let priced = c.probs(&cdfs).to_vec();
+                assert_eq!(priced.len(), class + 5, "class {class}");
+                assert_eq!(
+                    priced,
+                    c.slot(&mut cdfs).probs(),
+                    "class {class}, ptype {ptype}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cfl_sign_is_the_spec_sign_code() {
         assert_eq!([cfl_sign(0), cfl_sign(-3), cfl_sign(5)], [0, 1, 2]);
     }
@@ -5206,6 +5296,22 @@ mod tests {
     }
 
     #[test]
+    fn dc_chroma_rate_adds_the_palette_uv_flag_from_8x8_to_64x64() {
+        let p = grey4x4();
+        let e = FrameEncoder::new(&p, 40);
+        let uv = symbol_rate(
+            e.cdfs.uv_mode_cfl_allowed[usize::from(D67_PRED)].probs(),
+            usize::from(DC_PRED),
+        );
+        let flag = symbol_rate(e.cdfs.palette_uv_mode[0].probs(), 0);
+        assert!(flag > 0, "a free flag would hide its sign");
+        // A 4×4 codes no `has_palette_uv`; 8×8 and 64×64 bound the blocks that do.
+        assert_eq!(e.dc_chroma_rate(D67_PRED, 4), uv);
+        assert_eq!(e.dc_chroma_rate(D67_PRED, 8), uv + flag);
+        assert_eq!(e.dc_chroma_rate(D67_PRED, 64), uv + flag);
+    }
+
+    #[test]
     fn luma_mode_rate_prices_each_mode_info_element_it_codes() {
         let p = grey4x4();
         let e = FrameEncoder::new(&p, 40);
@@ -5254,10 +5360,20 @@ mod tests {
                 + fi_flag(true)
                 + symbol_rate(e.cdfs.filter_intra_mode.probs(), 3)
         );
-        // `DC_PRED` at 64x64 has a palette flag but no filter-intra flag.
+        // Each filter-intra size row is its own CDF: 16x16 does not borrow the 32x32 row.
+        assert_eq!(
+            e.luma_mode_rate(0, 0, 16, 16, DC_LUMA),
+            y(DC_PRED) + no_palette(2) + symbol_rate(e.cdfs.filter_intra_16x16.probs(), 0)
+        );
+        // `DC_PRED` at 64x64 has a palette flag but no filter-intra flag, and neither does a
+        // 64x32: §5.11.24 asks `Max(w, h) <= 32`, so one long side is enough to drop it.
         assert_eq!(
             e.luma_mode_rate(0, 0, 64, 64, DC_LUMA),
             y(DC_PRED) + no_palette(6)
+        );
+        assert_eq!(
+            e.luma_mode_rate(0, 0, 64, 32, DC_LUMA),
+            y(DC_PRED) + no_palette(5)
         );
     }
 
@@ -5271,6 +5387,21 @@ mod tests {
             e.emit_cfl_alphas(au, av);
             assert_eq!(e.sym.tally.take(), Some(want), "({au}, {av})");
         }
+    }
+
+    #[test]
+    fn only_the_lossy_path_allocates_a_reconstruction() {
+        // Lossless prediction reads the source itself (`dc_pred`'s `sample`), so the encoder
+        // keeps no frame-sized reconstruction there; `absorb_tile` relies on the empty planes.
+        let p = grey4x4();
+        assert!(FrameEncoder::new(&p, 0).recon.iter().all(Vec::is_empty));
+        let lossy = FrameEncoder::new(&p, 1);
+        assert!(
+            lossy
+                .recon
+                .iter()
+                .all(|plane| plane.len() == lossy.geom[0].len())
+        );
     }
 
     #[test]
@@ -5473,6 +5604,34 @@ mod tests {
         let cost = e.trial_cost(0, 0, 8, |e| e.encode_block(0, 0, 8, 8));
         assert!(cost > 0);
         assert!(Snapshot::of(&e) == before, "trial_cost changed the encoder");
+    }
+
+    #[test]
+    fn save_block_captures_the_blocks_cells_clipped_to_the_frame() {
+        // A trial writes only inside its block, so restoring a wider capture puts back values
+        // nothing changed and no trial can tell the two apart; the capture's extent is what
+        // `save_block` owes, and it is asserted on what it returns. 64×64 luma: a 16×16 MI grid.
+        let p = busy64();
+        let e = FrameEncoder::new(&p, 40);
+        let extent = |s: &BlockState| {
+            (
+                s.w4,
+                s.above_partition.len(),
+                s.left_partition.len(),
+                s.maps[0].len(),
+            )
+        };
+        assert_eq!(extent(&e.save_block(0, 0, 8)), (2, 2, 2, 4), "interior 8×8");
+        assert_eq!(
+            extent(&e.save_block(4, 8, 16)),
+            (4, 4, 4, 16),
+            "interior 16×16"
+        );
+        assert_eq!(
+            extent(&e.save_block(12, 14, 16)),
+            (2, 2, 4, 8),
+            "clipped 16×16"
+        );
     }
 
     /// Everything a trial must leave as it found it, comparable.
@@ -5937,10 +6096,17 @@ mod tests {
         assert_eq!(e.txb_skip_ctx(0, 1, 1, 16, 16, 8, 8), 6);
         // A window whose *guard* arithmetic decides which cells are read: four cells from x4 = 2
         // are all inside the 6-column grid, so the highest level (63, at index 5) must be seen —
-        // a guard computing `x4 * k` would stop early and miss it. Four rows from y4 = 1 reach
+        // a guard computing `x4 * k` would stop early (2 * 3 = 6) and miss it. Every other cell in
+        // the window is at most 3, so missing it moves `top` to 3 and the ladder to rung 5, rather
+        // than leaving a second level above 3 to stand in for it. Four rows from y4 = 1 reach
         // exactly the 4-row edge, so the row guard must stop *before* index 4; `<=` reads one past
         // the end of the array. top = 63 and left = 5, both non-zero and both above 3 ⇒ rung 6.
+        e.above_level[0] = vec![0, 1, 2, 3, 1, 63];
         assert_eq!(e.txb_skip_ctx(0, 2, 1, 32, 32, 16, 16), 6);
+        // The column guard's own edge: four cells from x4 = 3 overhang the 6-column grid by one,
+        // so the guard must stop before index 6 — `<=` reads past the array. Cells 3..=5 give
+        // top = 63, rows 0..=3 give left = 5 ⇒ rung 6.
+        assert_eq!(e.txb_skip_ctx(0, 3, 0, 32, 32, 16, 16), 6);
         let dc = e.dc_sign_ctx(1, 1, 1, 4, 4);
         assert_eq!(dc, 1, "two -1 categories sum negative");
     }
@@ -5958,6 +6124,9 @@ mod tests {
         assert_eq!(e.txb_skip_ctx(1, 0, 0, 8, 8, 4, 4), 10);
         // Luma uses a different ladder entirely, and returns 0 when block == transform.
         assert_eq!(e.txb_skip_ctx(0, 0, 0, 8, 8, 8, 8), 0);
+        // …and only then: a transform matching the block in width alone takes the ladder, whose
+        // first rung (both neighbours zero) is 1.
+        assert_eq!(e.txb_skip_ctx(0, 0, 0, 8, 16, 8, 8), 1);
     }
 
     #[test]
@@ -6139,6 +6308,60 @@ mod tests {
             "past the bottom edge repeats the last row"
         );
         assert_eq!(left[7], at(3, 7));
+    }
+
+    #[test]
+    fn reference_4x4_replicates_its_own_edge_without_above_right_or_below_left() {
+        // §7.11.2: with the above-right (below-left) 4×4 not yet decoded, the above row (left
+        // column) holds the block's own 4 samples and then repeats the 4th; the `- 1` in each
+        // limit is what stops at that 4th. Away from the frame edge, so the plane clamp the test
+        // above pins cannot stand in for it, and with a distinct value per sample.
+        let planes = Planar8::from_rgb8_identity(&[0u8; 16 * 16 * 3], 16, 16).unwrap();
+        let mut e = FrameEncoder::new(&planes, 40);
+        for (i, v) in e.recon[0].iter_mut().enumerate() {
+            *v = i as u16;
+        }
+        let cw = e.geom[0].coded_w;
+        let at = |x: usize, y: usize| (y * cw + x) as i32;
+        assert!(!e.block_decoded_at(0, 2) && !e.block_decoded_at(2, 0));
+
+        let (above, left, _) = e.reference_4x4(0, 4, 4);
+        assert_eq!(above[3], at(7, 3));
+        assert_eq!(above[4], at(7, 3), "no above-right: the 4th sample repeats");
+        assert_eq!(left[3], at(3, 7));
+        assert_eq!(left[4], at(3, 7), "no below-left: the 4th sample repeats");
+    }
+
+    #[test]
+    fn reference_4x4_reads_below_left_only_when_that_4x4_is_decoded() {
+        // §5.11.34 `haveBelowLft` asks about the 4×4 one row down and one column left of the
+        // block, and no other: the left and above-left 4×4s (always decoded before it) must not
+        // stand in for it, nor the one below-right (never decoded before it).
+        let planes = Planar8::from_rgb8_identity(&[0u8; 16 * 16 * 3], 16, 16).unwrap();
+        let mut e = FrameEncoder::new(&planes, 40);
+        for (i, v) in e.recon[0].iter_mut().enumerate() {
+            *v = i as u16;
+        }
+        let cw = e.geom[0].coded_w;
+        let at = |x: usize, y: usize| (y * cw + x) as i32;
+        // `BlockDecoded` at superblock-relative 4×4 `(by, bx)`; the block is `(1, 1)`.
+        let mark = |e: &mut FrameEncoder, by: usize, bx: usize, v: u8| {
+            e.block_decoded[(by + 1) * BD_STRIDE + bx + 1] = v;
+        };
+
+        // Left and above-left decoded, below-left not: the 4th sample repeats.
+        mark(&mut e, 1, 0, 1);
+        mark(&mut e, 0, 0, 1);
+        let (_, left, _) = e.reference_4x4(0, 4, 4);
+        assert_eq!(left[4], at(3, 7));
+
+        // Only below-left decoded: its samples are real.
+        mark(&mut e, 1, 0, 0);
+        mark(&mut e, 0, 0, 0);
+        mark(&mut e, 2, 0, 1);
+        let (_, left, _) = e.reference_4x4(0, 4, 4);
+        assert_eq!(left[4], at(3, 8));
+        assert_eq!(left[7], at(3, 11));
     }
 
     #[test]

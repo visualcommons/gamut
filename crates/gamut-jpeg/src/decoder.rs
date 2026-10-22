@@ -549,12 +549,12 @@ fn trunc_seg() -> Error {
     Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated segment")
 }
 
-/// One decoded component ready for presentation: its sampling factors, the valid image region, and
-/// the reconstructed plane at block-padded resolution (`stride` wide).
+/// One decoded component ready for presentation: its sampling factors, its valid height, and the
+/// reconstructed plane at block-padded resolution (`stride` wide). Its valid width needs no field:
+/// no output column maps past it ([`ColumnMap`]).
 struct DecComp {
     h: u8,
     v: u8,
-    comp_w: usize,
     comp_h: usize,
     stride: usize,
     data: Vec<u8>,
@@ -573,13 +573,109 @@ struct DecodedImage {
 }
 
 impl DecodedImage {
-    /// The sample of component `ci` under the output pixel `(px, py)`, via nearest-neighbour
-    /// (sample-replication) upsampling.
-    fn sample(&self, ci: usize, px: usize, py: usize) -> u8 {
+    /// The row of component `ci` under output row `py`, via nearest-neighbour (sample-replication)
+    /// upsampling -- [`ColumnMap`]'s vertical twin -- as the slice of the plane that holds it.
+    fn sample_row(&self, ci: usize, py: usize) -> &[u8] {
         let c = &self.comps[ci];
-        let cx = (px * usize::from(c.h) / self.hmax).min(c.comp_w - 1);
         let cy = (py * usize::from(c.v) / self.vmax).min(c.comp_h - 1);
-        c.data[cy * c.stride + cx]
+        &c.data[cy * c.stride..(cy + 1) * c.stride]
+    }
+}
+
+/// How one component's samples spread across the output columns under nearest-neighbour
+/// (sample-replication) upsampling: output column `px` takes component column `px * h / hmax`.
+///
+/// That column never needs clamping to the component's width: [`assemble`] sizes a component
+/// `comp_w = ceil(width * h / hmax)` samples wide, and for `px < width`,
+/// `px * h / hmax <= (width - 1) * h / hmax < comp_w`. (The same argument holds for the vertical
+/// twin, [`DecodedImage::sample_row`], whose clamp this change leaves as it was.)
+///
+/// The two ratios real streams use get a path of their own, so the common rows need no per-sample
+/// index: full horizontal resolution reads the plane row in place, and half resolution (4:2:0 and
+/// 4:2:2 chroma) doubles each sample. Every other ratio (the `3`s §A.1.1 permits) goes through a
+/// column map computed once per image. All three compute the same function, so no decoded image
+/// can tell which one a component took; `column_map_picks_the_path_for_each_ratio` pins the
+/// choice itself.
+#[derive(Debug, PartialEq, Eq)]
+enum ColumnMap {
+    /// `h == hmax`: component column `px` under output column `px`, read in place.
+    Direct,
+    /// `2 * h == hmax`: component column `px / 2` under output column `px`.
+    Double,
+    /// Any other ratio: the component column under every output column.
+    Indexed(Vec<usize>),
+}
+
+impl ColumnMap {
+    /// The map for a component sampled `h` of `hmax` horizontally, under an image `width` columns
+    /// wide.
+    fn new(h: usize, hmax: usize, width: usize) -> Self {
+        if h == hmax {
+            Self::Direct
+        } else if 2 * h == hmax {
+            Self::Double
+        } else {
+            Self::Indexed((0..width).map(|px| px * h / hmax).collect())
+        }
+    }
+
+    /// The component's samples under every output column of the plane row `src`: `src` itself for
+    /// [`Self::Direct`], otherwise `scratch` (one output row wide) filled with them.
+    fn upsample<'a>(&self, src: &'a [u8], scratch: &'a mut [u8]) -> &'a [u8] {
+        match self {
+            Self::Direct => &src[..scratch.len()],
+            Self::Double => {
+                let (pairs, last) = scratch.as_chunks_mut::<2>();
+                let paired = pairs.len();
+                for (pair, &s) in pairs.iter_mut().zip(src) {
+                    *pair = [s, s];
+                }
+                // An odd width's last column is the first half of a pair the row has no room for.
+                for (dst, &s) in last.iter_mut().zip(&src[paired..]) {
+                    *dst = s;
+                }
+                scratch
+            }
+            Self::Indexed(map) => {
+                for (dst, &cx) in scratch.iter_mut().zip(map) {
+                    *dst = src[cx];
+                }
+                scratch
+            }
+        }
+    }
+}
+
+/// Converts one row of full-range YCbCr (T.871 §7) to interleaved RGB in `out`, three samples per
+/// pixel, through `packed`, a scratch row of at least as many pixels.
+///
+/// The arithmetic is [`ycbcr_to_rgb`]'s, sample for sample, so the output is byte-identical to the
+/// per-pixel conversion; what changes is the shape of the loops, so that the compiler vectorises
+/// them with the target's baseline vector instructions (SSE2 on x86-64, NEON on aarch64) and no
+/// `unsafe`:
+///
+/// 1. The conversion runs over whole rows with nothing but the three source samples and one
+///    destination per pixel, packing each result into a `u32` lane (`R`, `G`, `B`, then a zero
+///    byte). Converting straight into the interleaved row instead left it scalar: its three byte
+///    stores per pixel are a stride-3 pattern the vectoriser does not take.
+/// 2. The packed row is written out with one four-byte store per pixel, each overlapping the next
+///    pixel's first byte, which that pixel's own store then overwrites. Only the last pixel, whose
+///    fourth byte would land past the row, is written as three bytes.
+fn ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], packed: &mut [u32], out: &mut [u8]) {
+    for (((p, &y), &cb), &cr) in packed.iter_mut().zip(y).zip(cb).zip(cr) {
+        let (r, g, b) = ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
+        *p = u32::from_le_bytes([r, g, b, 0]);
+    }
+    let n = out.len() / 3;
+    for (i, p) in packed.iter().enumerate().take(n.saturating_sub(1)) {
+        out[3 * i..3 * i + 4].copy_from_slice(&p.to_le_bytes());
+    }
+    if let (Some(px), Some(p)) = (
+        out.as_chunks_mut::<3>().0.last_mut(),
+        packed.get(n.wrapping_sub(1)),
+    ) {
+        let [r, g, b, _] = p.to_le_bytes();
+        *px = [r, g, b];
     }
 }
 
@@ -848,7 +944,6 @@ fn assemble(
     }
     let hmax = usize::from(frame.hmax());
     let vmax = usize::from(frame.vmax());
-    let x = usize::from(frame.x);
     let y = usize::from(frame.y);
 
     let mut comps = Vec::with_capacity(frame.components.len());
@@ -857,12 +952,15 @@ fn assemble(
         let plane = plane.ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: a component was never coded")
         })?;
-        let comp_w = (x * usize::from(fc.h)).div_ceil(hmax);
         let comp_h = (y * usize::from(fc.v)).div_ceil(vmax);
-        // The decoded plane must cover the valid region (a DNL claiming more lines than were coded
-        // would fail here).
+        // The decoded plane must cover the valid region's height (a DNL claiming more lines than
+        // were coded would fail here). Its width needs no check: every plane is as wide as its
+        // scan's block grid, `ceil(ceil(X·h/Hmax) / 8)` blocks or more (`decode_scan`'s `mcus_x`,
+        // `build_prog_comps`), so the valid width `ceil(X·h/Hmax)` never exceeds the stride. The
+        // width test this replaces could not fire; it went because its `X · h` was a mutant (`*` →
+        // `/`) no input distinguishes, and it took that line's two killable siblings with it (#924).
         let padded_rows = plane.data.len().checked_div(plane.stride).unwrap_or(0);
-        if comp_w > plane.stride || comp_h > padded_rows {
+        if comp_h > padded_rows {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: decoded plane smaller than the frame declares",
@@ -871,7 +969,6 @@ fn assemble(
         comps.push(DecComp {
             h: plane.h,
             v: plane.v,
-            comp_w,
             comp_h,
             stride: plane.stride,
             data: plane.data,
@@ -894,69 +991,86 @@ fn assemble(
 /// colour transform the stream declares: YCbCr → RGB, and YCCK → CMYK (Adobe TN #5116). Rearranging
 /// that into the caller's pixel layout is [`gamut_core::convert`]'s job, so this function never
 /// replicates grey across channels or refuses a target.
-fn present_native(img: &DecodedImage) -> Result<(PixelFormat, Vec<u8>)> {
-    let (w, h) = (img.width as usize, img.height as usize);
+///
+/// Works a row at a time: each component's row is upsampled through its [`ColumnMap`] (in place at
+/// full resolution, into a scratch row otherwise), and the transform then runs over the zipped
+/// rows, writing straight into `out` -- `width * height` pixels of `format` as
+/// [`native_layout`] returned it alongside `transform`. The caller sizes `out`, so the presented
+/// image is written once, into the buffer that is returned. YCbCr rows, the common case, convert
+/// through [`ycbcr_to_rgb_row`].
+fn present_native(img: &DecodedImage, transform: Transform, format: PixelFormat, out: &mut [u8]) {
+    let w = img.width as usize;
+    let maps: Vec<ColumnMap> = img
+        .comps
+        .iter()
+        .map(|c| ColumnMap::new(usize::from(c.h), img.hmax, w))
+        .collect();
+    let mut scratch = vec![vec![0u8; w]; img.comps.len()];
+    let mut packed = vec![0u32; w];
+    for (py, line) in out.chunks_exact_mut(w * format.channels()).enumerate() {
+        let rows: Vec<&[u8]> = maps
+            .iter()
+            .zip(&mut scratch)
+            .enumerate()
+            .map(|(ci, (map, scratch))| map.upsample(img.sample_row(ci, py), scratch))
+            .collect();
+        match (transform, rows.as_slice()) {
+            (Transform::Gray, &[y]) => line.copy_from_slice(y),
+            (Transform::Rgb, &[r, g, b]) => {
+                for (((px, &r), &g), &b) in
+                    line.as_chunks_mut::<3>().0.iter_mut().zip(r).zip(g).zip(b)
+                {
+                    px.copy_from_slice(&[r, g, b]);
+                }
+            }
+            (Transform::YCbCr, &[y, cb, cr]) => ycbcr_to_rgb_row(y, cb, cr, &mut packed, line),
+            (Transform::Cmyk, &[c, m, y, k]) => {
+                for ((((px, &c), &m), &y), &k) in line
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(c)
+                    .zip(m)
+                    .zip(y)
+                    .zip(k)
+                {
+                    px.copy_from_slice(&[c, m, y, k]);
+                }
+            }
+            // YCCK → CMYK: invert the YCbCr transform on the first three channels, K passes
+            // through (Adobe TN #5116).
+            (Transform::Ycck, &[y, cb, cr, k]) => {
+                for ((((px, &y), &cb), &cr), &k) in line
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(y)
+                    .zip(cb)
+                    .zip(cr)
+                    .zip(k)
+                {
+                    let (r, g, b) = ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
+                    px.copy_from_slice(&[255 - r, 255 - g, 255 - b, k]);
+                }
+            }
+            // `decide_transform` picks each transform from the component count, so the row count
+            // always matches the arm; this one is unreachable and stays only to keep the match
+            // total without an `unwrap`.
+            _ => {}
+        }
+    }
+}
+
+/// The colour transform `img` needs and the pixel layout it presents natively, decided before any
+/// sample is written: Gray8 for one component, Rgb8 for three, Cmyk8 for four.
+fn native_layout(img: &DecodedImage) -> Result<(Transform, PixelFormat)> {
     let transform = decide_transform(img)?;
-    Ok(match transform {
-        Transform::Gray => {
-            let mut out = vec![0u8; w * h];
-            for py in 0..h {
-                for px in 0..w {
-                    out[py * w + px] = img.sample(0, px, py);
-                }
-            }
-            (PixelFormat::Gray8, out)
-        }
-        Transform::Rgb | Transform::YCbCr => {
-            let mut out = vec![0u8; w * h * 3];
-            for py in 0..h {
-                for px in 0..w {
-                    let i = (py * w + px) * 3;
-                    let (r, g, b) = if transform == Transform::Rgb {
-                        (
-                            img.sample(0, px, py),
-                            img.sample(1, px, py),
-                            img.sample(2, px, py),
-                        )
-                    } else {
-                        ycbcr_to_rgb(
-                            img.sample(0, px, py),
-                            img.sample(1, px, py),
-                            img.sample(2, px, py),
-                            ColorRange::Full,
-                        )
-                    };
-                    out[i..i + 3].copy_from_slice(&[r, g, b]);
-                }
-            }
-            (PixelFormat::Rgb8, out)
-        }
-        Transform::Cmyk | Transform::Ycck => {
-            let mut out = vec![0u8; w * h * 4];
-            for py in 0..h {
-                for px in 0..w {
-                    let i = (py * w + px) * 4;
-                    if transform == Transform::Cmyk {
-                        out[i] = img.sample(0, px, py);
-                        out[i + 1] = img.sample(1, px, py);
-                        out[i + 2] = img.sample(2, px, py);
-                    } else {
-                        // YCCK → CMYK: invert the YCbCr transform on the first three channels, K
-                        // passes through (Adobe TN #5116).
-                        let (r, g, b) = ycbcr_to_rgb(
-                            img.sample(0, px, py),
-                            img.sample(1, px, py),
-                            img.sample(2, px, py),
-                            ColorRange::Full,
-                        );
-                        out[i..i + 3].copy_from_slice(&[255 - r, 255 - g, 255 - b]);
-                    }
-                    out[i + 3] = img.sample(3, px, py);
-                }
-            }
-            (PixelFormat::Cmyk8, out)
-        }
-    })
+    let format = match transform {
+        Transform::Gray => PixelFormat::Gray8,
+        Transform::Rgb | Transform::YCbCr => PixelFormat::Rgb8,
+        Transform::Cmyk | Transform::Ycck => PixelFormat::Cmyk8,
+    };
+    Ok((transform, format))
 }
 
 impl JpegDecoder {
@@ -969,8 +1083,30 @@ impl JpegDecoder {
         }
         let img = self.decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
-        let (format, samples) = present_native(&img)?;
-        convert_from_raw(RawImage::new(&samples, format, dims)?, self.policy)
+        let (transform, format) = native_layout(&img)?;
+        self.present_decoded(&img, dims, transform, format)
+    }
+
+    /// Presents the built-in decoder's `img` as layout `P` in a new buffer. When `P` is the native
+    /// layout the samples are written straight into the returned image; otherwise they are written
+    /// once natively and converted by [`gamut_core::convert`] under the decoder's policy (the
+    /// identity a matching layout would take there needs no permission, so writing it directly
+    /// changes no outcome).
+    fn present_decoded<P: Pixel<Sample = u8>>(
+        &self,
+        img: &DecodedImage,
+        dims: Dimensions,
+        transform: Transform,
+        format: PixelFormat,
+    ) -> Result<ImageBuf<P>> {
+        if format == P::FORMAT {
+            let mut out = ImageBuf::<P>::zeroed(dims)?;
+            present_native(img, transform, format, out.as_mut_samples());
+            Ok(out)
+        } else {
+            let samples = native_samples(img, transform, format);
+            convert_from_raw(RawImage::new(&samples, format, dims)?, self.policy)
+        }
     }
 
     /// As [`JpegDecoder::present`], reusing `dst`'s sample storage when the decoded dimensions
@@ -980,23 +1116,50 @@ impl JpegDecoder {
         data: &[u8],
         dst: &mut ImageBuf<P>,
     ) -> Result<()> {
-        let (format, samples, dims) = if let Some(img) = self.decode_via_backend(data)? {
+        if let Some(img) = self.decode_via_backend(data)? {
             let dims = Dimensions::new(img.width(), img.height())?;
-            (img.format(), img.samples().to_vec(), dims)
-        } else {
-            let img = self.decode_internal(data)?;
-            let dims = Dimensions::new(img.width, img.height)?;
-            let (format, samples) = present_native(&img)?;
-            (format, samples, dims)
-        };
-        let raw = RawImage::new(&samples, format, dims)?;
+            return self.convert_into(RawImage::new(img.samples(), img.format(), dims)?, dst);
+        }
+        let img = self.decode_internal(data)?;
+        let dims = Dimensions::new(img.width, img.height)?;
+        let (transform, format) = native_layout(&img)?;
+        if format != P::FORMAT {
+            let samples = native_samples(&img, transform, format);
+            return self.convert_into(RawImage::new(&samples, format, dims)?, dst);
+        }
+        // The native layout is the requested one: write it straight into `dst` when the
+        // dimensions let it hold the image. Nothing past `native_layout` can fail, so `dst` is
+        // only touched once the presentation is certain to complete.
         if dst.dimensions() == dims {
+            present_native(&img, transform, format, dst.as_mut_samples());
+        } else {
+            *dst = self.present_decoded(&img, dims, transform, format)?;
+        }
+        Ok(())
+    }
+
+    /// Converts `raw` into `dst` under the decoder's policy, reusing `dst`'s storage when the
+    /// dimensions match and replacing the buffer otherwise. On error `dst` is left unchanged.
+    fn convert_into<P: Pixel<Sample = u8>>(
+        &self,
+        raw: RawImage<'_, u8>,
+        dst: &mut ImageBuf<P>,
+    ) -> Result<()> {
+        if dst.dimensions() == raw.dimensions() {
             convert_from_raw_into::<_, P>(raw, self.policy, dst.as_mut_samples())
         } else {
             *dst = convert_from_raw(raw, self.policy)?;
             Ok(())
         }
     }
+}
+
+/// [`present_native`] into a new buffer of exactly the native layout's size, for a caller that
+/// converts it on into another layout.
+fn native_samples(img: &DecodedImage, transform: Transform, format: PixelFormat) -> Vec<u8> {
+    let mut out = vec![0u8; img.width as usize * img.height as usize * format.channels()];
+    present_native(img, transform, format, &mut out);
+    out
 }
 
 impl DecodeImage<Rgb8> for JpegDecoder {
@@ -1050,7 +1213,7 @@ mod tests {
 
     use gamut_color::{ColorRange, ycbcr_to_rgb};
     use gamut_core::{Cmyk8, DecodeImage, Dimensions, Gray8, ImageBuf, Rgb8};
-    use gamut_dsp::jpeg::idct8x8;
+    use gamut_dsp::jpeg::idct8x8_int;
 
     use super::*;
     use crate::bitwriter::BitWriter;
@@ -1165,7 +1328,8 @@ mod tests {
     #[test]
     fn exact_8x8_gray_block() {
         // A single 8×8 gray block with hand-chosen quantized coefficients decoded to exact pixels,
-        // computed independently: dequantize (coeff · Q, natural order) → idct8x8 → +128 → clamp.
+        // computed independently: dequantize (coeff · Q, natural order) → integer IDCT → +128 →
+        // clamp.
         let quant = quant::LUMINANCE; // a non-trivial Annex K table exercises the AC dequant multiply
         let mut coeffs = [0i32; 64];
         coeffs[0] = 5; // DC
@@ -1178,7 +1342,7 @@ mod tests {
         for (i, cell) in zz.iter_mut().enumerate() {
             *cell = coeffs[i] * i32::from(quant[i]);
         }
-        idct8x8(&mut zz);
+        idct8x8_int(&mut zz);
         let expected: Vec<u8> = zz.iter().map(|&s| (s + 128).clamp(0, 255) as u8).collect();
 
         let (ldc, lac, ..) = std_enc();
@@ -1460,6 +1624,85 @@ mod tests {
             .unwrap();
         assert_eq!(small.dimensions(), Dimensions::new(8, 8).unwrap());
         assert_eq!(&small.as_samples()[..4], &[138, 148, 158, 168]);
+    }
+
+    #[test]
+    fn decode_image_into_converts_a_gray_stream_into_a_matching_rgb_buffer() {
+        // The native layout (Gray8) is not the requested one (Rgb8), so `present_into` must go
+        // through `gamut_core::convert` even though `dst` already has the decoded dimensions. Two
+        // blocks of different level make the rows non-uniform, so a gray row written straight into
+        // the RGB buffer would land samples of the second block under the first block's pixels.
+        let jpeg = gray_stream(16, 8, &[flat(-40), flat(40)], None);
+        let mut dst: ImageBuf<Rgb8> = ImageBuf::zeroed(Dimensions::new(16, 8).unwrap()).unwrap();
+        let ptr = dst.as_samples().as_ptr();
+        JpegDecoder::new()
+            .decode_image_into(&jpeg, &mut dst)
+            .unwrap();
+        assert_eq!(dst.as_samples().as_ptr(), ptr, "allocation must be reused");
+        let row: Vec<u8> = [[88u8; 3]; 8]
+            .into_iter()
+            .chain([[168u8; 3]; 8])
+            .flatten()
+            .collect();
+        assert_eq!(dst.as_samples(), row.repeat(8));
+    }
+
+    #[test]
+    fn column_map_picks_the_path_for_each_ratio() {
+        // The three paths agree on every output (next test), so only the choice itself can show
+        // which ratio takes which path.
+        assert_eq!(ColumnMap::new(1, 1, 5), ColumnMap::Direct);
+        assert_eq!(ColumnMap::new(2, 2, 5), ColumnMap::Direct);
+        assert_eq!(ColumnMap::new(1, 2, 5), ColumnMap::Double);
+        assert_eq!(ColumnMap::new(2, 4, 5), ColumnMap::Double);
+        assert_eq!(
+            ColumnMap::new(1, 4, 5),
+            ColumnMap::Indexed(vec![0, 0, 0, 0, 1])
+        );
+        assert_eq!(
+            ColumnMap::new(2, 3, 5),
+            ColumnMap::Indexed(vec![0, 0, 1, 2, 2])
+        );
+    }
+
+    #[test]
+    fn column_map_paths_replicate_like_the_index_formula() {
+        // Every path against `px * h / hmax` itself, at odd and even widths, from a plane row
+        // padded past the component's width (as a block-padded plane is) with samples that differ
+        // at every column, so reading one column off or past the valid region moves an output.
+        for (h, hmax) in [(1, 1), (2, 2), (1, 2), (2, 4), (1, 4), (1, 3), (2, 3)] {
+            for width in 1usize..=19 {
+                let comp_w = (width * h).div_ceil(hmax);
+                let src: Vec<u8> = (0..comp_w + 8).map(|i| (i * 37 + 11) as u8).collect();
+                let want: Vec<u8> = (0..width).map(|px| src[px * h / hmax]).collect();
+                let mut scratch = vec![0u8; width];
+                let got = ColumnMap::new(h, hmax, width).upsample(&src, &mut scratch);
+                assert_eq!(got, want, "h {h} of {hmax}, width {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn ycbcr_row_matches_the_per_pixel_conversion() {
+        // Short rows (where the overlapping stores and the last pixel's three-byte store meet) and
+        // rows past a vector's width, with the three planes varied independently so a lane, plane
+        // or byte-order mix-up moves a sample, and a scratch row holding junk so every pixel's
+        // packed value must be rewritten before it is stored.
+        for len in [0usize, 1, 2, 3, 4, 5, 15, 16, 17, 33] {
+            let y: Vec<u8> = (0..len).map(|i| (i * 97 + 3) as u8).collect();
+            let cb: Vec<u8> = (0..len).map(|i| (i * 53 + 200) as u8).collect();
+            let cr: Vec<u8> = (0..len).map(|i| (i * 29 + 90) as u8).collect();
+            let want: Vec<u8> = (0..len)
+                .flat_map(|i| {
+                    let (r, g, b) = ycbcr_to_rgb(y[i], cb[i], cr[i], ColorRange::Full);
+                    [r, g, b]
+                })
+                .collect();
+            let mut packed = vec![u32::MAX; len];
+            let mut out = vec![0u8; 3 * len];
+            ycbcr_to_rgb_row(&y, &cb, &cr, &mut packed, &mut out);
+            assert_eq!(out, want, "len {len}");
+        }
     }
 
     /// Builds an 8×8 three-component stream (given component ids, all 1×1, quant [`dc8_quant`]) with

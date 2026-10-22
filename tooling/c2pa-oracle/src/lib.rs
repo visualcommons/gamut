@@ -18,6 +18,13 @@
 //!    at exactly that range straight back to [`read_with_external_store`], which is c2pa-rs
 //!    re-validating gamut's own bounds.
 //!
+//! Direction 1 has two drivers because the hard binding comes in two kinds. A BMFF asset (AVIF,
+//! HEIC) is bound by `c2pa.hash.bmff.v3`, which excludes the store's box *by path*, so
+//! [`reserve_then_fill`] lets c2pa-rs work the exclusion out. PNG, RIFF/WebP, TIFF and DNG are
+//! bound by `c2pa.hash.data`, which excludes *byte ranges*, so [`reserve_then_fill_data_hashed`]
+//! signs around the ranges the gamut crate reported — which puts that report under test too — and
+//! [`data_hash_exclusions`] reads back the ranges c2pa-rs chose when it embedded a store itself.
+//!
 //! # Why there is no "parse but do not judge" mode
 //!
 //! See `README.md`. In short: [`ValidationState::Invalid`] is also what c2pa-rs reports when
@@ -28,7 +35,7 @@
 use std::io::Cursor;
 use std::ops::Range;
 
-use c2pa::{Builder, Context, EphemeralSigner, Reader, Settings, ValidationState};
+use c2pa::{Builder, Context, EphemeralSigner, HashRange, Reader, Settings, ValidationState};
 
 /// The oracle's own errors, kept separate from [`c2pa::Error`] so a failure names which side of
 /// the differential produced it.
@@ -94,6 +101,31 @@ pub const AVIF_MIME: &str = "image/avif";
 
 /// The MIME type a HEIF/HEIC asset is handed to c2pa-rs under.
 pub const HEIC_MIME: &str = "image/heic";
+
+/// The MIME type gamut-png's output is handed to c2pa-rs under.
+pub const PNG_MIME: &str = "image/png";
+
+/// The MIME type gamut-webp's output is handed to c2pa-rs under — c2pa-rs's RIFF handler.
+pub const WEBP_MIME: &str = "image/webp";
+
+/// The MIME type gamut-tiff's output is handed to c2pa-rs under.
+pub const TIFF_MIME: &str = "image/tiff";
+
+/// The MIME type gamut-dng's output is handed to c2pa-rs under — the same TIFF handler as
+/// [`TIFF_MIME`], which c2pa-rs registers for DNG too.
+pub const DNG_MIME: &str = "image/dng";
+
+/// The format [`reserve_then_fill_data_hashed`] asks c2pa-rs to *compose* its store for: a bare
+/// `.c2pa` manifest store, whose composition is the identity.
+///
+/// Every container the data-hashed driver serves writes its own framing around the store — a PNG
+/// `caBX` chunk header and CRC, a RIFF chunk header, a TIFF tag value — so what the oracle wants
+/// back from c2pa-rs is the raw JUMBF and nothing else. Asking for it under the asset's own MIME
+/// type would not work uniformly: c2pa-rs wraps a PNG store in a whole chunk, and its RIFF handler
+/// has no composer at all, so `Builder::placeholder("image/webp")` is refused as an unsupported
+/// type. The *binding* is still computed under the asset's own MIME type; only the wrapping of the
+/// returned bytes uses this one.
+pub const RAW_JUMBF_FORMAT: &str = "application/c2pa";
 
 /// The JUMBF box type that opens a manifest store's outer superbox: `jumb`.
 ///
@@ -201,6 +233,12 @@ impl ComposedBox {
 ///
 /// The returned offset is therefore an *independent* claim about where the store begins, which is
 /// what makes "gamut reports the same range" a differential rather than a tautology.
+///
+/// That argument covers a composed box. Handed a **whole file** whose store follows the image data
+/// — TIFF, DNG and WebP put it last — the search also passes over coded pixels, where a `jumb` can
+/// occur by chance. A decoy found that way cannot make a differential pass: the span it yields
+/// disagrees with the gamut locator and the bytes at it do not validate, so it shows up as a
+/// failing test, never as a passing one.
 ///
 /// A `jumb` in the first four bytes cannot be a superbox type — there would be no room for the
 /// `LBox` in front of it — so the search **continues past** one rather than giving up on it. That
@@ -463,6 +501,134 @@ pub fn reserve_then_fill_padded(
     })
 }
 
+/// What [`reserve_then_fill_data_hashed`] produced.
+#[derive(Debug, Clone)]
+pub struct DataHashFilled {
+    /// The asset with the signed store written into its reservation by the caller's `fill`.
+    pub asset: Vec<u8>,
+    /// The byte ranges the `c2pa.hash.data` binding was computed around — exactly the ones the
+    /// gamut crate reported for the reservation, in the order it reported them.
+    pub exclusions: Vec<Range<usize>>,
+    /// The signed store, raw JUMBF, exactly as handed to `fill`.
+    pub store: Vec<u8>,
+    /// The store length `Builder::placeholder` asked the caller to reserve, before signing. Equal
+    /// to `store.len()`, or the driver refuses before `fill` runs.
+    pub placeholder_store_len: usize,
+}
+
+/// Direction 1 for a container bound by **`c2pa.hash.data`** — PNG, RIFF/WebP, TIFF and DNG —
+/// rather than by `c2pa.hash.bmff.v3`.
+///
+/// The BMFF driver, [`reserve_then_fill`], can let c2pa-rs work out the exclusion itself, because
+/// a BMFF binding excludes the `ContentProvenanceBox` *by box path*. A data hash excludes *byte
+/// ranges*, and nothing but the container knows which bytes those are. So here the ranges are the
+/// gamut crate's own report, handed to `Builder::set_data_hash_exclusions` unchanged, and the
+/// exclusion set is therefore itself under test: a range that misses a byte the fill rewrites —
+/// a PNG chunk CRC, a TIFF `count` field — leaves that byte digested, and the filled asset stops
+/// validating.
+///
+/// 1. `Builder::placeholder` under [`RAW_JUMBF_FORMAT`] pins the store length;
+/// 2. `reserve` is handed that length and returns the finished asset, the exclusion ranges the
+///    gamut encoder reported for its reservation, and whatever `fill` will need to find the
+///    reservation again (`T`: the PNG `C2paSpan`, the TIFF store range, nothing for WebP);
+/// 3. those ranges become the binding's exclusions, and `Builder::update_hash_from_stream`
+///    digests the asset *as reserved* under `format`;
+/// 4. `Builder::sign_embeddable` signs and zero-pads back to the pinned length;
+/// 5. `fill` writes the store into the reservation by the container's own route — `fill_c2pa`
+///    for PNG, a same-length re-encode for WebP, an in-place copy for TIFF and DNG.
+///
+/// # Errors
+///
+/// [`OracleError::C2pa`] if any c2pa-rs step fails, [`OracleError::NoJumbfSuperbox`] if a composed
+/// store carries no superbox, [`OracleError::Asset`] if the signed store is not the length the
+/// placeholder pinned — checked before `fill` is called, so no caller ever writes a mis-sized
+/// store — and whatever `reserve` or `fill` return.
+pub fn reserve_then_fill_data_hashed<T>(
+    format: &str,
+    reserve: impl FnOnce(usize) -> Result<(Vec<u8>, Vec<Range<usize>>, T)>,
+    fill: impl FnOnce(Vec<u8>, T, &[u8]) -> Result<Vec<u8>>,
+) -> Result<DataHashFilled> {
+    let mut builder = manifest_builder()?;
+    let placeholder_store_len = split_composed_box(builder.placeholder(RAW_JUMBF_FORMAT)?)?
+        .store()
+        .len();
+
+    let (asset, exclusions, reservation) = reserve(placeholder_store_len)?;
+    builder.set_data_hash_exclusions(
+        exclusions
+            .iter()
+            .map(|range| HashRange::new(range.start as u64, range.len() as u64))
+            .collect(),
+    )?;
+    builder.update_hash_from_stream(format, &mut Cursor::new(asset.clone()))?;
+    let store = split_composed_box(builder.sign_embeddable(RAW_JUMBF_FORMAT)?)?
+        .store()
+        .to_vec();
+
+    if store.len() != placeholder_store_len {
+        return Err(OracleError::Asset(format!(
+            "signed store is {} bytes but the placeholder pinned {placeholder_store_len}",
+            store.len()
+        )));
+    }
+    let asset = fill(asset, reservation, &store)?;
+
+    Ok(DataHashFilled {
+        asset,
+        exclusions,
+        store,
+        placeholder_store_len,
+    })
+}
+
+/// The byte ranges the `c2pa.hash.data` assertion of `asset`'s active manifest excludes, in the
+/// order the assertion lists them — what c2pa-rs itself chose to exclude when it embedded the
+/// store, read back through its own `Reader::detailed_json`.
+///
+/// This is the only route c2pa-rs offers: its `Manifest` deliberately drops hard-binding
+/// assertions when it reads a store (`src/manifest.rs:604-608`), so the exclusions are reachable
+/// only through the detailed report, which carries the claim's whole assertion store.
+///
+/// # Errors
+///
+/// [`OracleError::C2pa`] if c2pa-rs cannot read the asset; [`OracleError::Asset`] if the detailed
+/// report names no active manifest, carries no `c2pa.hash.data` assertion with an `exclusions`
+/// array, or lists an exclusion whose `start`/`length` is not an unsigned integer.
+pub fn data_hash_exclusions(format: &str, asset: &[u8]) -> Result<Vec<Range<usize>>> {
+    let reader = Reader::from_context(signing_context()?)
+        .with_stream(format, Cursor::new(asset.to_vec()))?;
+    let report: serde_json::Value = serde_json::from_str(&reader.detailed_json())
+        .map_err(|error| OracleError::Asset(format!("detailed report is not JSON: {error}")))?;
+
+    let active = report["active_manifest"]
+        .as_str()
+        .ok_or_else(|| OracleError::Asset("the detailed report names no active manifest".into()))?;
+    // A JSON pointer escapes only `~` and `/`, which a `urn:c2pa:` label does not contain.
+    let pointer = format!("/manifests/{active}/assertion_store/c2pa.hash.data/exclusions");
+    let exclusions = report
+        .pointer(&pointer)
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            OracleError::Asset("the active manifest carries no c2pa.hash.data exclusions".into())
+        })?;
+
+    exclusions
+        .iter()
+        .map(|exclusion| {
+            let field = |name: &str| {
+                exclusion[name]
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| {
+                        OracleError::Asset(format!("an exclusion's `{name}` is not a usize"))
+                    })
+            };
+            let start = field("start")?;
+            Ok(start..start + field("length")?)
+        })
+        .collect()
+}
+
 /// Direction 2: lets c2pa-rs embed a store into `asset` itself, choosing the placement.
 ///
 /// # Errors
@@ -474,6 +640,61 @@ pub fn embed(format: &str, asset: &[u8]) -> Result<Vec<u8>> {
     let mut dest = Cursor::new(Vec::new());
     builder.save_to_stream(format, &mut source, &mut dest)?;
     Ok(dest.into_inner())
+}
+
+/// What [`embed_remote`] produces: an asset that references its manifest store by URL, and the
+/// store that URL would serve.
+#[derive(Debug)]
+pub struct RemoteSigned {
+    /// The asset as c2pa-rs wrote it: no embedded store, and a `dcterms:provenance` URL in its XMP.
+    pub asset: Vec<u8>,
+    /// The manifest store c2pa-rs signed for that asset — the bytes the URL is meant to serve.
+    pub store: Vec<u8>,
+}
+
+/// The remote counterpart of [`embed`] (issue #846): lets c2pa-rs sign a store for `asset` that is
+/// **not** embedded, and write `url` into the asset's XMP as the `dcterms:provenance` reference
+/// C2PA 2.4 §11.5 reserves for an external manifest.
+///
+/// c2pa-rs writes the reference itself (`Builder::set_remote_url` with `set_no_embed(true)`), so
+/// the XMP a gamut reader is pointed at is the reference implementation's, not gamut's.
+///
+/// # Errors
+///
+/// [`OracleError::C2pa`] if the manifest cannot be built or signed, or c2pa-rs cannot write a
+/// remote reference into `format`.
+pub fn embed_remote(format: &str, asset: &[u8], url: &str) -> Result<RemoteSigned> {
+    let mut builder = manifest_builder()?;
+    builder.set_remote_url(url).set_no_embed(true);
+    let mut source = Cursor::new(asset.to_vec());
+    let mut dest = Cursor::new(Vec::new());
+    let store = builder.save_to_stream(format, &mut source, &mut dest)?;
+    Ok(RemoteSigned {
+        asset: dest.into_inner(),
+        store,
+    })
+}
+
+/// The external-manifest URL c2pa-rs reports for `asset`, or `None` when it reports none.
+///
+/// c2pa-rs reaches `Reader::remote_url` only after it has *fetched* the remote store, which needs
+/// its `fetch_remote_manifests` feature and a network this crate deliberately builds without (see
+/// `Cargo.toml`). Without it, c2pa 0.90.21 reports the same URL — the `dcterms:provenance` value
+/// its own XMP reader extracted — as `Error::RemoteManifestUrl` instead (`src/store.rs:3540-3563`).
+/// Both outcomes are read here: the error carries the URL a fetch would have used, and a
+/// successful read reports `Reader::remote_url`, which is `None` for an embedded store.
+///
+/// # Errors
+///
+/// [`OracleError::C2pa`] for any other refusal — notably [`c2pa::Error::JumbfNotFound`] when the
+/// asset carries neither an embedded store nor a remote reference.
+pub fn remote_manifest_url(format: &str, asset: &[u8]) -> Result<Option<String>> {
+    match Reader::from_context(signing_context()?).with_stream(format, Cursor::new(asset.to_vec()))
+    {
+        Ok(reader) => Ok(reader.remote_url().map(str::to_owned)),
+        Err(c2pa::Error::RemoteManifestUrl(url)) => Ok(Some(url)),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// c2pa-rs's verdict on an asset that carries its own store.
@@ -551,9 +772,26 @@ mod tests {
     //! covers the row the widening was made for. Hence the list. It claims to be complete over
     //! four named functions and nothing wider.
     //!
-    //! Two kinds of discriminating branch in this file sit outside it, named here so their absence
-    //! is a decision and not an oversight:
+    //! Four kinds of discriminating branch in this file sit outside it, named here so their
+    //! absence is a decision and not an oversight:
     //!
+    //! * [`remote_manifest_url`]'s match over c2pa-rs's reading of an asset (issue #846): a URL
+    //!   carried by `RemoteManifestUrl`, a successful read's `remote_url`, or any other refusal
+    //!   passed through. Its outcomes are c2pa-rs's own, reached only by handing it a real asset,
+    //!   so they are pinned in `tests/remote_provenance.rs` — the error arm by both remote
+    //!   references there, the read arm by the embedded store that reports no URL. The
+    //!   pass-through arm is not pinned: every asset that file hands it carries a store or a
+    //!   reference.
+    //!
+    //! * The data-hashed driver and its reader (issue #534):
+    //!   `reserve_then_fill_data_hashed`'s refusal of a signed store that is not the
+    //!   placeholder's length, and [`data_hash_exclusions`]'s walk of c2pa-rs's detailed report.
+    //!   Both are reached only through c2pa-rs signing or reading a real asset, so — like the
+    //!   padded driver's below — what keeps them out is reach: the refusal is pinned in
+    //!   `tests/png.rs`, and the walk's accepting side in every exclusion comparison of
+    //!   `tests/png.rs`, `tests/riff_webp.rs` and `tests/dng_tiff.rs`. Its refusing sides — no
+    //!   active manifest, no `c2pa.hash.data`, a non-integer bound — are not pinned: every asset
+    //!   those files hand it carries a data hash c2pa-rs wrote itself.
     //! * [`reserve_then_fill_padded`]'s two refusals — the `checked_add` of store length and
     //!   padding, and the `slot.len() - padding != store.len()` guard (which [`reserve_then_fill`]
     //!   reaches with `padding == 0`). They discriminate exactly as a row does; what separates

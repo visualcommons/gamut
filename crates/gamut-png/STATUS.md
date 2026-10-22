@@ -53,6 +53,7 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 | D5 | §11.3 | Rich `decode()` → `DecodedPng`: raw eXIf/iCCP/XMP/text payloads (MetadataBlock-ready), parsed gAMA/cHRM/sRGB/cICP, metadata inflation budget | ✅ done |
 | D6 | — | libpng differential conformance suite over generated fixtures; malformed-input rejection corpus; mutation-gap closure | ✅ done |
 | D7 | §5, §11.3 | Pixel-free metadata entry point (issue #379): `metadata()` / `PngDecoder::metadata()` → `PngMetadata`, sharing one chunk-classification predicate with `decode()`; IDAT skipped by length, never read or inflated. Mirrors `gamut_jpeg::metadata` / `gamut_webp::metadata` | ✅ done |
+| D8 | §11.3 | Typed metadata (issue #510), behind the optional `metadata` feature: `PngMetadata` and `DecodedPng` implement `gamut_metadata::TypedMetadata` over the eXIf / XMP / iCCP / caBX payloads; `PngEncoder::with_metadata` / `with_encoded_metadata` embed a facade `Metadata` (the chunk-for-chunk carry of a `PngMetadata`, formerly `with_metadata`, is renamed `with_png_metadata` — a breaking change — so the facade builder has the name every wired crate shares), refusing IPTC-IIM and a C2PA store as `Unsupported`. Typed round trip, and exiv2 differential in both directions | ✅ done |
 
 ## C2PA manifest store (issue #440)
 
@@ -70,9 +71,9 @@ unsafe-to-copy chunk, which is the container enforcing the same no-copy-forward 
 over, so one copied forward into a rewritten file is invalid by construction.
 
 **What counts as the store.** One rule, in every reader: the **first CRC-valid `caBX` before the
-first `IDAT`**. First, because a file carries exactly one store (§A.3.2) — PNG has no multi-chunk
+first `IDAT`**. First, because a file carries exactly one store (C2PA §A.3.2) — PNG has no multi-chunk
 store, unlike JPEG's APP11 run. CRC-valid, because §13.1 makes a mismatch skippable and the decode
-skips it. Before `IDAT`, because §A.3.2 puts it there and calls data after it bad-form: a `caBX`
+skips it. Before `IDAT`, because C2PA §A.3.2 puts it there and calls data after it bad-form: a `caBX`
 appended to a finished file is not that file's provenance, and accepting one would let an appender
 give a store to a file that carries none.
 
@@ -93,7 +94,7 @@ metadata walk reaches; that shape is visible in `deconstruct`'s report, as a tra
 **Encode.** `with_c2pa(store)` embeds a store computed for this file; `with_c2pa_reserved(len)`
 writes `len` zero bytes in its place. Either is emitted as the **last** chunk before the first
 `IDAT` — after `PLTE`/`tRNS` and every other ancillary chunk — so the chunk's offset depends only
-on what precedes it and every later byte is `IDAT`/`IEND`. §A.3.2 asks only that it precede
+on what precedes it and every later byte is `IDAT`/`IEND`. C2PA §A.3.2 asks only that it precede
 `IDAT`; last-before-`IDAT` is what makes the reserve-then-fill flow a no-move: encode with the
 reservation, hash with the chunk's span excluded, then write the finished store into that span
 with `fill_c2pa` (below), which rewrites only the payload and the chunk CRC. Encoding again with
@@ -109,7 +110,7 @@ accepts.
 
 **Exclusion span, and filling it.** `encode_with_report` (for the file just written) and
 `PngReport::c2pa` (for any file, including an indexed encode) name the chunk's **whole** span —
-length, type, payload and CRC — as `C2paSpan`, with the payload bracketed inside it. §18.5.4 says
+length, type, payload and CRC — as `C2paSpan`, with the payload bracketed inside it. C2PA §18.5.4 says
 the length and type go inside the exclusion; the CRC must too, since it changes with the payload,
 and a `c2pa.hash.data` computed over any of them breaks on the store's first write. The span is
 derived from the same chunk walk the byte accounting uses, so it is always one of the report's
@@ -167,9 +168,19 @@ an annotation and whether its text was compressed, and a carry puts it back in t
 Without it a `zTXt` is indistinguishable from a `tEXt` once decoded, and a compressed 40-byte
 payload comes back out as 1 600 uncompressed bytes — no words lost, but not preservation either.
 
-The **XMP packet leaves the read side through its own field**, not through `texts`, so the framing
-that field does not hold travels beside it in `XmpFraming`: §11.3.3.4's compression flag, language
-tag and translated keyword. §11.3.3.1 Table 21 recommends the null framing for XMP compliance
+The **XMP packet is an ordinary entry of `texts`** (#600): the `iTXt` under the keyword §11.3.3.1
+Table 21 reserves, so its §11.3.3.4 compression flag, language tag and translated keyword ride in
+`TextChunk` like any annotation's, and a carry writes it back in its file position. `xmp()` on
+`PngMetadata` and `DecodedPng` is a `#[must_use]` accessor that scans `texts` for the first such
+`iTXt` (a `tEXt`/`zTXt` under the keyword is not the packet; Table 21 names `iTXt`) — the
+`MetadataBlock::Xmp`-ready read path. This retired the `xmp` / `xmp_framing` field pair and the
+`XmpFraming` type, a breaking change: the pair had to agree with nothing in the type system to say
+so. A packet whose text is not UTF-8 is now skipped by the reader as a malformed `iTXt` (§11.3.3.4
+makes the field UTF-8; §13.1), as any other `iTXt` was — the raw-bytes field used to surface it.
+That is what the reader stops accepting, and the `XmpNotUtf8` notice (discriminant 7, retired, not
+reused) went with it, since no path into the encoder can carry such bytes any more. A source with
+two packets is carried with both; `xmp()` reports the first before and after. §11.3.3.1 Table 21
+recommends the null framing for XMP compliance
 ("with Compression Flag set to 0, and both Language Tag and Translated Keyword set to the null
 string") — recommends, not requires, and a provenance packet is exactly the payload a writer
 compresses. The measured cost of getting this wrong, on the fixture in `tests/preservation.rs`:
@@ -177,13 +188,11 @@ the source `iTXt` payload is 354 bytes, the carry that keeps the flag writes 352
 carry with the flag cleared writes **3 734** — a factor of 10.6 against the 352 it should have
 been. The language tag and translated keyword were a second, separate loss of the same defect,
 pinned by a test of their own. `with_xmp` — which has no source file to take framing from — takes
-Table 21's recommended framing. The packet is a **single-value payload** like `iCCP` or `eXIf`: setting it
-again replaces it, because a second `iTXt` under the reserved keyword is one this crate's own
-reader discards.
-
-Consolidating the packet into `texts` would retire `XmpFraming` and put the packet back in its
-file position rather than first among the annotations; it reshapes a public type, so it is
-[#600](https://github.com/visualcommons/gamut/issues/600), not this work.
+Table 21's recommended framing. On the write side the packet is a **single-value payload** like
+`iCCP` or `eXIf`: `with_xmp` replaces every packet already accumulated, and a carry that writes a
+packet replaces one set directly — decided on the chunk written, so a `tEXt` under the keyword
+whose text has no Latin-1 encoding, promoted to `iTXt`, counts — because a second `iTXt` under the reserved keyword is one
+this crate's own reader passes over.
 
 **Two payloads cannot be carried, and neither is dropped in silence.** `metadata_notices()` names
 them and `gamut convert` prints them:
@@ -246,7 +255,6 @@ the wording:
 | Keyword outside Latin-1, or outside 1–79 bytes | §11.3.3.1 | annotation **dropped**, `TextKeywordNotLatin1` / `TextKeywordLength` — no chunk can hold it, and this crate's own reader drops one that tries |
 | Keyword outside `0x20`–`0x7E` / `0xA1`–`0xFF`, or with a leading, trailing or consecutive space | §11.3.3.1 | **written verbatim**, `TextKeywordRepertoire` / `TextKeywordSpacing` — the datastream is then non-conforming per §15.3.1 |
 | `iTXt` language tag outside ASCII letters, digits and `-` | §11.3.3.4 | tag **dropped**, annotation written, `ItxtLanguageTag` |
-| XMP packet that is not UTF-8 | §11.3.3.4 | packet **dropped**, `XmpNotUtf8` |
 | `iCCP` profile name outside Latin-1, outside 1–79 bytes, or holding a null | §11.3.2.3 | profile **dropped**, `IccpNameNotLatin1` / `IccpNameLength` / `IccpNameNull` — this crate's reader refuses such a chunk, so writing it lost the profile on the next read with nothing said (#619); a null is a drop, not a refusal, because the byte after it is read as the compression method and the chunk is refused rather than re-read as another profile |
 | `iCCP` profile name outside `0x20`–`0x7E` / `0xA1`–`0xFF`, or with a leading, trailing or consecutive space | §11.3.2.3 | **written verbatim**, `IccpNameRepertoire` / `IccpNameSpacing` — the keyword's rule word for word, so the keyword's outcome |
 
@@ -307,10 +315,7 @@ never emits a `tIME` its own reader skips.
 **Not done.** An `sBIT`/`bKGD` the written header cannot carry is omitted without a
 `MetadataNotice`, as for the setters: the omission is decided at encode time. A palette-index
 background is carried only onto `encode_indexed8` with the source's palette. The `iTXt` language tag is checked for
-its character set, not for full BCP 47 well-formedness (subtag order, registry membership). The XMP
-packet rides in its own field beside `XmpFraming` rather than in `texts`, so a carry emits it
-**first** among the annotations regardless of where it sat in the source, and the two fields can be
-set inconsistently by a caller building a `PngMetadata` by hand — #600. `sPLT` and `hIST` are
+its character set, not for full BCP 47 well-formedness (subtag order, registry membership). `sPLT` and `hIST` are
 surfaced by neither read walk, so they are not carried either. `gamut convert` carries metadata
 only PNG→PNG; mapping a JPEG/WebP/JXL input's metadata into PNG chunks is a cross-format job of its
 own. The libpng oracle reads no chunk back and drops warnings, so preservation is pinned against
@@ -337,47 +342,84 @@ absolute times**.
 
 | input | raw | default | best | +clean | libpng-9 | best/lp9 | bpp |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `gradient_rgb8` | 196 608 | 2 831 | 1 562 | 1 562 | 2 393 | **−34.7%** | 0.191 |
-| `photo_rgb8` | 196 608 | 29 885 | 19 570 | 19 570 | 27 467 | **−28.8%** | 2.389 |
+| `gradient_rgb8` | 196 608 | 2 831 | 1 245 | 1 245 | 2 393 | **−48.0%** | 0.152 |
+| `photo_rgb8` | 196 608 | 29 885 | 19 408 | 19 408 | 27 467 | **−29.3%** | 2.369 |
 | `noise_rgb8` | 196 608 | 196 983 | 196 983 | 196 983 | 197 280 | −0.2% | 24.046 |
 | `grey_as_rgb8` | 196 608 | 721 | 368 | 368 | 566 | **−35.0%** | 0.045 |
-| `palette64_rgba8` | 262 144 | 1 274 | 726 | 688 | 1 102 | **−34.1%** | 0.089 |
-| `sprite_rgba8` | 262 144 | 4 181 | 3 729 | **2 235** | 3 889 | −4.1% | 0.455 |
+| `palette64_rgba8` | 262 144 | 1 274 | 725 | 686 | 1 102 | **−34.2%** | 0.089 |
+| `sprite_rgba8` | 262 144 | 4 181 | 3 512 | **2 232** | 3 889 | **−9.7%** | 0.429 |
 | `flat_rgba8` | 262 144 | 821 | 103 | 103 | 664 | **−84.5%** | 0.013 |
 | `tiny_rgb8` (16×16) | 768 | 136 | 119 | 119 | 138 | **−13.8%** | 3.719 |
+
+Regenerated for [#480], which added `MinTrialDeflate` to the brute-force set: it is what moved
+`gradient_rgb8` (from 1 562) and `sprite_rgba8` (from 3 729). The table had also drifted since it
+was last pasted: `photo_rgb8` moved from 19 570, and the trial never wins that row
+(`experiments/480/`). `palette64_rgba8`'s one- and two-byte moves (from 726 and 688) are on the
+reduced indexed image, which the experiment does not measure, so they are not attributed.
 
 gamut is smaller than libpng-9 on every row, though `noise_rgb8` is a 0.2% near-tie rather than a
 win: incompressible input leaves both encoders emitting stored blocks, so that row's budget is the
 one deliberately set above parity (1.02) and it is excluded from the win assertion. The margin is
-thin where no reduction applies
-(`gradient`, `tiny`) or nothing is compressible (`noise`), and large where a lawful
-representation change is available that libpng does not attempt.
+thin where no reduction applies (`tiny`) or nothing is compressible (`noise`), and large where a
+lawful representation change is available that libpng does not attempt, or where the per-line
+trial finds structure the estimating heuristics miss (`gradient`).
 
 ### Filter heuristics (issue #480)
 
 `BruteForce` tries every whole-image strategy and keeps the smallest, so the size table above
 cannot say *which* heuristic earned the win. IDAT bytes at `Level::Best`, each heuristic alone:
 
-| input | MinSumAbs | Entropy | Bigrams | winner |
-| --- | --- | --- | --- | --- |
-| `gradient_rgb8` | 2 215 | 2 215 | **1 505** | Bigrams |
-| `photo_rgb8` | 25 364 | 22 427 | **19 513** | Bigrams |
-| `noise_rgb8` | 196 890 | 196 890 | 196 890 | tie |
-| `grey_as_rgb8` | **475** | 506 | 506 | MinSumAbs |
-| `palette64_rgba8` | 990 | 899 | **770** | Bigrams |
-| `sprite_rgba8` | **3 672** | 3 857 | 4 062 | MinSumAbs |
-| `flat_rgba8` | **573** | 573 | 605 | MinSumAbs |
-| `tiny_rgb8` | 79 | 79 | **62** | Bigrams |
+| input | MinSumAbs | Entropy | Bigrams | Trial | winner |
+| --- | --- | --- | --- | --- | --- |
+| `gradient_rgb8` | 2 203 | 2 203 | 1 503 | **1 188** | Trial |
+| `photo_rgb8` | 25 234 | 22 294 | **19 351** | 21 805 | Bigrams |
+| `noise_rgb8` | 196 890 | 196 890 | 196 890 | 196 890 | tie |
+| `grey_as_rgb8` | **475** | 506 | 506 | 506 | MinSumAbs |
+| `palette64_rgba8` | 984 | 898 | **770** | **770** | Bigrams = Trial |
+| `sprite_rgba8` | 3 641 | 3 807 | 4 026 | **3 455** | Trial |
+| `flat_rgba8` | **573** | **573** | 605 | 606 | MinSumAbs = Entropy |
+| `tiny_rgb8` | 79 | 79 | **62** | 63 | Bigrams |
 
-**Bigrams wins four rows by 22–32%; MinSumAbs wins three by 5–6%.** Both stay in the brute-force
-set: neither dominates, and the margins run the wrong way to drop either. That matches oxipng
-keeping MinSum at `-o 0`/`-o 6` while its default preset leads with Bigrams.
+`Trial` is `FilterStrategy::MinTrialDeflate`, new with [#480]: per line, DEFLATE each candidate
+after the sixteen rows already emitted and keep the shortest (oxipng's `Brute`). The table was
+regenerated with it; the other columns had drifted by under 1% since they were last pasted.
+
+**Bigrams wins two rows outright and ties Trial on a third; MinSumAbs wins one and ties Entropy on
+another; Trial wins two, by 21.0% and 5.1% over the best of the rest.** All three stay in the
+brute-force set: none dominates, and the margins run the wrong way to drop any. That matches oxipng
+keeping MinSum at `-o 0`/`-o 6` while its default preset leads with Bigrams. Trial is last in the
+set, so it changes a file only where it is strictly smaller than every older candidate.
 
 **Entropy is never the unique winner**, and that is a recorded negative result. It beats MinSumAbs
-on the photographic and palette rows but loses to Bigrams on both, and ties MinSumAbs elsewhere.
+on the photographic and palette rows but loses to Bigrams on both, and elsewhere it at best ties
+MinSumAbs.
 Since the brute-force set is resolved by taking the smallest, a candidate dominated everywhere
 costs a full filter pass and a full DEFLATE for nothing — so it is not in that set. It stays
 selectable: eight images is a corpus, not a proof.
+
+**Three more of oxipng's techniques were measured for [#480] and declined**, with the data,
+provenance and procedure in `experiments/480/` (`mise run experiment 480`):
+
+- **BigEnt is never the unique winner, a negative result.** BigEnt is the entropy of the
+  adjacent-byte-pair histogram. Over ten corpus rows it never comes in below the seven candidates
+  `BruteForce` already had. It ties on two rows and is 6.5–53% larger on the other seven
+  compressible ones. It would also score in floating point, like Entropy. It is not shipped, not
+  even as a selectable strategy.
+- **Two-tier trials are a negative result for `BruteForce`.** These rank the candidates at
+  `Level::Fast` or `Level::Default` and encode only the top one or two at `Best`. That is 6.4–6.7x
+  faster over the corpus, but `grey_as_rgb8` and `flat_rgba8` come out 6.5% and 5.8% larger at
+  every tier: the cheap ranking drops the `MinSumAbs` candidate that wins at `Best`. `BruteForce`
+  promises the smallest of its candidates, so this cannot replace it. As a separate speed/size
+  rung it would be a new knob, and that has not been proposed.
+- **`AtomicMin` pruning has nothing to prune today, a negative result.** It means a trial abandoning
+  itself once its output passes the best so far. `DeflateEncoder` runs the whole parse before it
+  encodes a block, so a trial cannot know it has lost until its work is done. A linear model of
+  output growth puts the ceiling at about **10%** of brute-force time. That is the most it could
+  buy even with a budget hook in `gamut-deflate`, and it is far less than two-tier.
+
+**Per-line trial deflate pays, so it ships** as `MinTrialDeflate`, at the setting the experiment's
+sweep chose (16 rows of context, `Level::Default`). It costs about 17% more `BruteForce` time over
+the corpus, measured on a loaded machine.
 
 ### Throughput
 
@@ -396,14 +438,14 @@ byte) plus removing a sixth redundant filter pass per scanline.
 
 | # | Axis | State |
 | --- | --- | --- |
-| 1 | Filter selection | **partial** — MinSumAbs, Entropy and Bigrams per line, plus seven whole-image candidates each fully DEFLATEd. Bigrams is worth 22–32% where it wins (see above). Still missing: per-line trial deflate, `AtomicMin` pruning, and a two-tier cheap-trial codec. [#480]. `FilterStrategy` became `#[non_exhaustive]` with this phase — a heuristic is a measurement result and the set grows with the corpus — which is a **breaking change** for any downstream exhaustive `match`: add a wildcard arm. |
+| 1 | Filter selection | **done** — MinSumAbs, Entropy, Bigrams and per-line trial deflate (`MinTrialDeflate`), plus eight whole-image candidates each fully DEFLATEd. The trial is worth 21.0% and 5.1% on the two rows it wins (see above). BigEnt, two-tier trials and `AtomicMin` pruning were measured and declined as negative results ([#480], `experiments/480/`). A genetic search over filter choices is not built: an ECT author reports it "did not prove helpful". `FilterStrategy` became `#[non_exhaustive]` with this phase — a heuristic is a measurement result and the set grows with the corpus — which is a **breaking change** for any downstream exhaustive `match`: add a wildcard arm. |
 | 2 | DEFLATE quality | **good, ~2% behind zopfli**, and honestly documented in `gamut-deflate`. Two contained wins remain: an 8-byte-at-a-time match compare, and `parse_dp`'s single-distance relaxation. [#478], [#479] |
 | 3 | Smallest lawful representation | **partial** — every reduction is implemented (grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour) and the key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. What is not done is the **selection**. `reduce::analyze8` still resolves *some* candidates on the raw estimate alone, and a raw estimate cannot see DEFLATE (below). Until the three-candidate race below it resolved all of them, and the eliminated runner-up was often the one that won the finished file: an opaque RGBA image with ≤256 colours kept an alpha channel that was 255 everywhere (349 bytes against 317), and a 16-bit image whose samples are all `k·257` kept all sixteen bits (220 against 172). The estimate now hands the best **chunk-free** candidate over beside the chunk-carrying one and `write_reduced_or_native` measures both, which closes that whole family — the chunk-free gates are mutually exclusive, so at most one such candidate ever exists. The remainder is the *pair* that both carry a chunk: where a palette and a `tRNS` colour key are both lawful, only the raw-smaller one is ever encoded. |
-| 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.1.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. A **caller-supplied** palette is now cleaned as well (see [Cleaning a caller's palette](#cleaning-a-callers-palette)), so a redundant caller palette costs what the tight caller palette costs. The derived palette is still not the same palette: it is reordered (transparent first, then luma) where a caller's keeps its order, so its `tRNS` length and index compression can differ. Modified-Zeng ordering — and any ordering of a caller's palette — remain, as a measured heuristic rather than a rule the spec states. [#612] |
+| 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.1.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. A **caller-supplied** palette is now cleaned as well (see [Cleaning a caller's palette](#cleaning-a-callers-palette)), so a redundant caller palette costs what the tight caller palette costs. The derived palette is still not the same palette: it is reordered (transparent first, then luma), while a caller's keeps its order by default, so its `tRNS` length and index compression can differ. **Modified-Zeng ordering of the derived palette was measured and declined** ([#612], `experiments/612/`). It makes the indexed candidate smaller than luma on 8 of 13 palette inputs (−1.9% to −16.5%) and larger on 2 (up to +11.2%). That never reaches a finished file, though: wherever the two orders differ, the indexed candidate loses the race to a non-indexed encode, except on `sprite_rgba8 +clean`, where Zeng costs **+14 bytes (+1.27%)** at the head [#887] re-measured (+18 at #612's). No row improves, so luma stays. **A caller's palette can opt in** to modified-Zeng ordering ([#887]): `PngEncoder::with_palette_order(PaletteOrder::ModifiedZeng)`, off by default, applied after cleaning, with a transparent-first partition and fixed-point distance weights. Against the caller's first-seen order on the same inputs it measured **−6.75% in total**, −15.9% to +4.5% per input (5 wins, 5 ties, 3 losses). It counts consecutive pixels in raster order. Horizontal plus vertical neighbours measured −6.05% and horizontal alone −6.52%, so the width the caller path knows does not help (`experiments/612/RESULTS.md`). Unconfirmed on real palette art: the corpus is synthetic. |
 | 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. A tie keeps the **plain** encoding: cleaning buys its rewritten samples with a size win, and where there is no win there is nothing to buy them with. |
 | 6 | Metadata hygiene | **preserve, never strip** — the encoder emits exactly what the caller set, and `gamut convert` carries a PNG input's metadata into a PNG output unless `--strip-metadata` asks otherwise (see [Metadata preservation](#metadata-preservation-issue-483)). Preserving costs bytes, and that is the trade this axis takes: a smaller file that silently lost a colour profile is not a better one. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
-| 8 | Effort / speed / determinism | **done** — output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). The five size/time knobs now compose into a four-rung `Preset` dial (see [The effort ladder](#the-effort-ladder-issue-484)), and `gamut-deflate`'s `with_optimal_parse_limit` is reachable from `PngEncoder` at last, so PNG callers are no longer stuck at 1 MiB spans. `BruteForce`'s seven candidates now run concurrently on `std::thread::scope` threads, with no new dependency, and serially where the platform cannot create threads (`wasm32`). They are joined in candidate order, so a tie still goes to the earlier strategy and the output stays byte-reproducible (see [The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)). Parallelism was the axis's last named gap. It is paid for in memory, 2.4–3.4x the serial peak with no cap, which is a stated cost rather than an open item; a caller-facing concurrency cap is not planned. [#484], [#624] |
+| 8 | Effort / speed / determinism | **done** — output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). The five size/time knobs now compose into a four-rung `Preset` dial (see [The effort ladder](#the-effort-ladder-issue-484)), and `gamut-deflate`'s `with_optimal_parse_limit` is reachable from `PngEncoder` at last, so PNG callers are no longer stuck at 1 MiB spans. `BruteForce`'s eight candidates (seven before [#480] added `MinTrialDeflate`) now run concurrently on `std::thread::scope` threads, with no new dependency, and serially where the platform cannot create threads (`wasm32`). They are joined in candidate order, so a tie still goes to the earlier strategy and the output stays byte-reproducible (see [The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)). Parallelism was the axis's last named gap. It is paid for in memory, 2.4–3.4x the serial peak as measured with seven candidates and with no cap, which is a stated cost rather than an open item; a caller-facing concurrency cap is not planned. [#484], [#624] |
 | 9 | Correctness / robustness | **covered** — 16-bit, odd dimensions, 1×1, CRC policy, malformed input. |
 
 ### The cost model, and why it is a race
@@ -450,14 +492,30 @@ comparison that chose it is sound and it is written straight out. It is a chunk-
 that has to be measured, because the candidate that beat it does carry a chunk.
 
 **What the races cost.** Each race is a full extra encode, and they nest: `FilterStrategy::BruteForce`
-tries seven whole-image strategies, `write_reduced_or_native` encodes up to three candidates when
+tries eight whole-image strategies, `write_reduced_or_native` encodes up to three candidates when
 the reduction carries a chunk (a palette's `PLTE`/`tRNS`, a colour key's `tRNS`), and
 `cleaned_or_plain` encodes both the cleaned and the untouched samples when cleanup changed
 anything. The worst case — `Level::Best` + `BruteForce` + auto-reduce + cleanup on an alpha image
 that is cleanable, palettisable or keyable, *and* has a chunk-free reduction available — is
-therefore 7 × 3 × 2 = **42** filter-plus-DEFLATE passes for one file, against 7 for `BruteForce`
-alone. That is the price of choosing by measured size rather than by a
-cost model; a model good enough to skip the losing candidate is [#480]'s remainder.
+therefore 8 × 3 × 2 = **48** filter-plus-DEFLATE passes for one file, against 8 for `BruteForce`
+alone. That is the price of choosing by measured size rather than by a cost model. [#480] measured
+the two ways to skip a losing candidate, and neither is shipped: a cheap-level trial loses bytes,
+and pruning has nothing to prune until `gamut-deflate` can stop early (see
+[Filter heuristics](#filter-heuristics-issue-480)).
+
+**An equal-raw-size runner-up is not raced — a measured negative result ([#514]).** `analyze8`
+names a chunk-free runner-up only when it stores *strictly* fewer raw bytes than the input layout.
+The objection was that `<=` would race a candidate that only looks equivalent before DEFLATE, as
+the palette once did. It does not hold at this site: of the three chunk-free sizes, grey
+(`⌊n·d/8⌋`, `d ≤ 8`) equals an `n·c`-byte input only at `c = 1, d = 8`, grey+alpha (`2n`) only at
+`c = 2`, and the alpha drop (`3n`, gated on `c = 4`) never. So a tie is always the input
+re-spelled — same colour type, same depth, same samples — and its encode is the unreduced
+candidate's twin, which the race already holds. Measured on every `size_contract` row plus six
+grey and grey+alpha inputs where a palette or colour key wins the estimate (the only layouts a tie
+can reach, and none of them a `size_contract` row): **every file is byte-identical** (same length
+and CRC-32), no row regresses and none improves, while each of the six reach rows pays one more
+whole `BruteForce` + `Level::Best` encode (race of 2 → 3). Kept as `<`. Data, provenance and
+`mise run experiment 514`: `experiments/514/`.
 
 **Chunks that follow the race.** `bKGD` and `sBIT` have a payload whose shape is the colour type, and
 the race decides the colour type after they were set. Both are resolved against the header actually
@@ -492,8 +550,10 @@ matrix it already computed and this table can be regenerated by paste rather tha
 reproduces them in one step.** They were taken by an ad-hoc harness in the test profile rather than
 by `cargo bench`, on one machine, with every arm warmed up and the minimum kept over three
 interleaved passes. They are not in `benches/encode.rs` because that suite runs at 256x256, where
-one `Preset::Smallest` row is seven whole-image DEFLATE passes over sixteen times these pixels —
-minutes per row, which is not a benchmark anyone would run. Read the
+one `Preset::Smallest` row is eight whole-image DEFLATE passes over sixteen times these pixels —
+minutes per row, which is not a benchmark anyone would run. They were also taken when
+`BruteForce` had seven candidates; [#480] added an eighth and re-pasted only the byte columns, so
+the `Smallest` times are low by about one candidate's share. Read the
 ratios, not the absolute milliseconds — and read them as approximate: a first pass measured
 without warm-up put the same two ratios at 150x and 968x rather than 186x and 1147x, so the order
 of magnitude is the finding and the third digit is not. Every arm is the same pure-Rust binary and
@@ -504,11 +564,11 @@ library the loader resolved.
 | --- | ---: | ---: | ---: | ---: |
 | `Fast` | 0.951 | 0.32x | 17 530 | +3.4% |
 | `Balanced` | 2.939 | 1x | 16 952 | — |
-| `Small` | 546.7 | ~190x | 16 497 | **−2.7%** |
-| `Smallest` | 3 370.7 | ~1150x | 15 903 | **−6.2%** |
+| `Small` | 546.7 | ~190x | 16 459 | **−2.9%** |
+| `Smallest` | 3 370.7 | ~1150x | 15 843 | **−6.5%** |
 
 The shape is the finding: **the ladder is steep in time and shallow in size.** `Small` costs
-roughly 190x `Balanced` to save 2.7%, and `Smallest` roughly 1150x to save 6.2%, because both
+roughly 190x `Balanced` to save 2.9%, and `Smallest` roughly 1150x to save 6.5%, because both
 cross into the zopfli-style optimal parse and `Smallest` additionally runs a full DEFLATE per
 brute-force candidate. That is the trade `Level::Best` has always carried; the dial does not
 change it, it makes it selectable and says what it costs.
@@ -531,7 +591,8 @@ filters to less than the 32 KiB window the span floor already covers, so every a
 each row as one span whatever the limit says — the parse-span row above was taken when the rung
 set an unbounded span and stands unchanged for the 8 MiB it sets now, because at this size the two
 are the same parse. So the 6.26x is
-the seven whole-image candidates running one after another, which makes this table the direct
+the seven whole-image candidates of the time running one after another (eight since [#480]),
+which makes this table the direct
 case for [#624]: it is the one factor here that parallelism could reclaim. Both tables above were
 measured before #624, when the candidates ran one after another. What running them concurrently
 buys is measured under
@@ -546,15 +607,19 @@ Per row:
 
 | input | `Fast` | `Balanced` | `Small` | `Smallest` |
 | --- | ---: | ---: | ---: | ---: |
-| `gradient_rgb8` | 301 | 292 | 259 | **224** |
-| `photo_rgb8` | 2 758 | 2 339 | 2 193 | **1 736** |
+| `gradient_rgb8` | 301 | 292 | 259 | **222** |
+| `photo_rgb8` | 2 758 | 2 339 | 2 160 | **1 717** |
 | `noise_rgb8` | 12 420 | 12 420 | 12 420 | 12 420 |
 | `grey_as_rgb8` | 154 | 146 | **98** | **98** |
-| `palette64_rgba8` | 236 | 216 | 209 | **193** |
-| `sprite_rgba8` | 1 070 | 987 | 902 | **859** |
+| `palette64_rgba8` | 236 | 216 | 208 | **187** |
+| `sprite_rgba8` | 1 070 | 987 | 898 | **827** |
 | `flat_rgba8` | 197 | 167 | **86** | **86** |
-| `opaque256_rgba8` | 239 | 224 | 212 | **172** |
+| `opaque256_rgba8` | 239 | 224 | 212 | **171** |
 | `demotable_rgb16` | **155** | 161 | 118 | **115** |
+
+Re-pasted for [#480]. The `Small` column moved too, and `Small` runs no brute-force search, so
+that much of the change is drift since the last paste rather than the eighth candidate; this table
+cannot separate the two on the `Smallest` column.
 
 **The ladder is ordered over the corpus, not per row**, and `demotable_rgb16` is the recorded
 counterexample: `Fast` emits 155 bytes there against `Balanced`'s 161. `Fast` fixes the Paeth
@@ -570,7 +635,7 @@ blocks.
 promise about the total, and the total hides this: `Smallest` is byte-identical to `Small` on
 `grey_as_rgb8` (98) and `flat_rgba8` (86), ties with every other rung on `noise_rgb8`, and saves
 three bytes on `demotable_rgb16` — four of nine rows where 6.26x the time buys three bytes or
-fewer, and three where it buys none. `Smallest`'s 3.6% over `Small` is earned on the five rows
+fewer, and three where it buys none. `Smallest`'s 3.7% over `Small` is earned on the five rows
 that are left, and mostly on `photo_rgb8`. A rung is a bet on the material, not a guarantee about
 it: if your images look like the rows that tie, the rung above costs six times the time for
 nothing, and the only way to know is to measure your own corpus.
@@ -595,38 +660,41 @@ to cost almost nothing extra in size.
 
 ### The brute-force trials run concurrently (issue #624)
 
-`BruteForce`'s seven candidates share nothing but the borrowed input, so `run_trials` in
-`src/encoder.rs` runs six of them on `std::thread::scope` threads and the first on the caller. No
+`BruteForce`'s eight candidates share nothing but the borrowed input, so `run_trials` in
+`src/encoder.rs` runs seven of them on `std::thread::scope` threads and the first on the caller. No
 dependency is added. **The output does not change.** The results are joined in candidate order,
 never in completion order, and reduced by the same `min_by_key`, so a tie still goes to the earlier
 strategy (`brute_force_keeps_the_first_strategy_on_a_tie`) and the bytes are still a function of
 the input (`encoded_size_is_deterministic`). Where the platform cannot create a thread, that
 candidate runs on the caller. That is how `wasm32`, whose `std` refuses thread creation, runs all
-seven serially.
+eight serially.
 
 `cargo bench -p gamut-png --bench encode -- brute_force_trials` measures it on `photo_rgb8` at
 256x256 and `Level::Best`, the level `Preset::Smallest` uses. `serial` is the pre-#624 work: the
-seven candidates encoded one after another through the public API, keeping the smallest.
+candidates encoded one after another through the public API, keeping the smallest.
 `brute_force` is the encoder's own race. Medians are over five one-shot samples, on a 16-thread
-x86-64 host that other jobs were also using:
+x86-64 host that other jobs were also using. Every figure in this section was measured when the
+search had seven candidates, before [#480] added `MinTrialDeflate` as the eighth (the bench's
+`serial` arm now lists all eight); they are left as they were taken:
 
 | arm | median | mean | relative |
 | --- | ---: | ---: | ---: |
 | `serial` | 16.54 s | 17.82 s | 1x |
 | `brute_force` | 3.057 s | 3.128 s | **0.18x (5.4x faster)** |
 
-The ceiling is not 7x. The wall time is now the slowest single candidate rather than the sum of all seven, and a machine with
-fewer than seven free cores gets proportionally less. The effort-ladder tables above were measured
+The ceiling is not the candidate count (7x as measured, 8x now). The wall time is now the slowest
+single candidate rather than the sum of all of them, and a machine with fewer free cores than
+candidates gets proportionally less. The effort-ladder tables above were measured
 before this change and are left as they were taken.
 
 **What it costs is memory.** Serially, one candidate's filtered image and optimal-parse buffers
 (12 bytes per byte of span, see [below](#the-optimal-parse-span-measured-where-it-is-live)) were
-alive at a time. Concurrently, all seven are, and nothing caps how many: `available_parallelism` is
+alive at a time. Concurrently, all of them are, and nothing caps how many: `available_parallelism` is
 not consulted, because the output must not depend on the machine. Peak resident set for one
 `BruteForce` encode per process (`/usr/bin/time -v`, release build, `photo_rgb` at the given side,
 `Level::Best`, the `Preset::Smallest` 8 MiB span, refinement budget 1, auto-reduce off). `serial`
-encodes the seven candidates one after another through the public API, as the bench's `serial` arm
-does; the two arms emit the same bytes at every size:
+encodes the (then seven) candidates one after another through the public API, as the bench's
+`serial` arm does; the two arms emit the same bytes at every size:
 
 | image | serial | concurrent | ratio |
 | --- | ---: | ---: | ---: |
@@ -637,7 +705,7 @@ does; the two arms emit the same bytes at every size:
 A second run of each 1024 and 2048 cell landed within 1% of the first. The ratio is measured, not
 derived: it is well short of seven, and why was not investigated. This is the trade the
 maintainer's decision on #624 accepted for a 5.4x faster rung. It stays bounded in the span, since
-each candidate is, and the candidate count is fixed at seven. A caller that must stay near the
+each candidate is, and the candidate count is fixed at eight. A caller that must stay near the
 serial figure can pick one strategy instead of `BruteForce`; there is no knob that keeps the search
 and runs it serially, and none is planned.
 
@@ -713,7 +781,7 @@ more refinement passes to converge, so time is data-dependent rather than flat; 
 time, which is [#631].
 
 These are single-stream figures: one filter strategy, one DEFLATE. `Preset::Smallest` runs
-`BruteForce`, whose seven candidates now parse concurrently, so the rung's own peak is several
+`BruteForce`, whose eight candidates now parse concurrently, so the rung's own peak is several
 times the 8 MiB column;
 [The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)
 measures it.
@@ -757,8 +825,12 @@ So the palette is cleaned before it is written (`PngPalette::cleaned`): an entry
 earlier one is merged into it, the trailing opaque `tRNS` bytes §11.3.1.1 lets a chunk omit are
 omitted, the index bit depth is derived from what survives, and the image's indices — and the
 background, in whichever of its three forms it was set — are renumbered onto the result. Surviving
-entries keep the caller's relative order; **ordering** a caller's palette is a separate, heuristic
-question ([#612]).
+entries keep the caller's relative order by default. **Ordering** a caller's palette is a separate,
+heuristic question, and it is an opt-in: `with_palette_order(PaletteOrder::ModifiedZeng)` ([#887])
+renumbers the cleaned palette by modified-Zeng adjacency and composes that renumbering into the
+cleaning one, so the pixels and the background follow both. It measured −6.75% in total against
+first-seen order, −15.9% to +4.5% per input (see axis 4). It is off by default because a caller's
+indices can mean something beyond their colour, and because it loses on some inputs.
 
 It is silent and lossless, which is why it goes through no notice channel: a merged entry did not
 fail to come along, it arrived under another index, and a background's entry is kept rather than
@@ -790,6 +862,8 @@ dropped entries also take the index stream from 8 bits per pixel to 2.
 [#483]: https://github.com/visualcommons/gamut/issues/483
 [#484]: https://github.com/visualcommons/gamut/issues/484
 [#501]: https://github.com/visualcommons/gamut/issues/501
+[#514]: https://github.com/visualcommons/gamut/issues/514
 [#612]: https://github.com/visualcommons/gamut/issues/612
 [#624]: https://github.com/visualcommons/gamut/issues/624
 [#631]: https://github.com/visualcommons/gamut/issues/631
+[#887]: https://github.com/visualcommons/gamut/issues/887

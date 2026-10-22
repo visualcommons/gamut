@@ -23,12 +23,22 @@ tooling/*/Cargo.lock
 # assertion. Committing this one lockfile is what makes it one.
 !tooling/c2pa-oracle/Cargo.lock
 
+# A second exception, for the same reason: `tooling/spec-clauses` (issue #606) is reachable from no
+# workspace crate, so no root-lockfile entry pins its inflate dependency. Its lockfile is what makes
+# the clause indexes it regenerates reproducible machine to machine.
+!tooling/spec-clauses/Cargo.lock
+
 # The fuzz tier's search state (issues #264, #311). The corpus is a search aid, not the regression
 # record: a saved input is only reproducible while the target's byte-to-input mapping is unchanged,
 # so a crash is minimised and promoted into a NAMED DETERMINISTIC TEST in the crate's own suite
 # instead (see tooling/gamut-fuzz/README.md and docs/testing.md).
 tooling/gamut-fuzz/artifacts/
 tooling/gamut-fuzz/coverage/
+# The persisted search corpus (#603): what the engine finds, kept apart from the curated seeds
+# below so neither the Extended job's per-target cache nor a contributor's checkout can mix the
+# two. The workflow passes `state/<target>/` as libFuzzer's first (written) corpus directory and
+# `corpus/<target>/` as a read-only second one, and caches only the former.
+tooling/gamut-fuzz/state/
 
 # Everything under `corpus/` is ignored except the curated seed set, which is named file by file
 # below. git cannot re-include a file whose parent directory is excluded, so the ignore covers the
