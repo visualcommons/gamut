@@ -51,7 +51,7 @@ consumers depend on:
 
 ```toml
 [dependencies]
-gamut = { version = "0.3", features = ["avif"] }
+gamut = { version = "0.4", features = ["avif"] }
 ```
 
 ```rust
