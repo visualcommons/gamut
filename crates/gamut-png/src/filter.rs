@@ -67,6 +67,11 @@ pub enum FilterStrategy {
     MinTrialDeflate,
     /// Encode the whole image under several filter strategies, DEFLATE each, and keep the smallest.
     /// Pairs with [`Level::Best`] for maximum compression; slowest.
+    ///
+    /// The candidates run concurrently where the platform can create threads, so the encode's
+    /// peak memory is that of all of them at once — each holds a whole-image filtered copy, so it
+    /// grows with image size times the candidate count. Measured at 2.4x to 3.4x a serial
+    /// search's peak on a photograph at `Level::Best`, with seven candidates (`STATUS.md`).
     BruteForce,
 }
 
