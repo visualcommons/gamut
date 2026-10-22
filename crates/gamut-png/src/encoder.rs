@@ -86,7 +86,9 @@ const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
 ///
 /// **The speed is paid for in memory.** Run one after another, the trials held one candidate's
 /// filtered image and optimal-parse buffers at a time; run together, all of them are alive at
-/// once, and nothing here caps how many. Measured on a square RGB photograph at [`Level::Best`] with the
+/// once, and nothing here caps how many. Each trial's filtered copy is the whole image, so peak
+/// memory grows with image size times the number of concurrent candidates; the optimal-parse span
+/// bounds only the parse buffers. Measured on a square RGB photograph at [`Level::Best`] with the
 /// [`Preset::Smallest`] span, when the search still had seven candidates, a `BruteForce` encode's
 /// peak resident set was **2.4x to 3.4x** what the serial loop's was — `STATUS.md` carries the
 /// table. That is the trade the maintainer's
@@ -401,7 +403,8 @@ pub enum Preset {
     /// your own material rather than assuming — see `STATUS.md`.
     ///
     /// Also the most memory-hungry rung: the filter search's eight candidates run concurrently,
-    /// each with its own 8 MiB-span parse, so a 2048x2048 RGB photograph peaked near 680 MiB
+    /// each with its own whole-image filtered copy and 8 MiB-span parse, so peak memory grows with
+    /// image size times the candidate count. A 2048x2048 RGB photograph peaked near 680 MiB
     /// resident where the same search run serially peaked near 210 MiB (both at refinement budget
     /// 1, measured with seven candidates; `STATUS.md` has the table).
     Smallest = 3,
@@ -438,9 +441,10 @@ struct PresetKnobs {
 /// single encode's. Measured for a whole `BruteForce` encode at this span, refinement budget 1,
 /// concurrent against the serial search it replaced, when the search had seven candidates:
 /// **261.8 against 77.3 MiB** at 1024x1024, **678.6 against 210.9 MiB** at 2048x2048, and
-/// **1266.1 against 517.3 MiB** at 4096x4096. The span still bounds each candidate, and the
-/// candidate count is fixed at eight, so the rung's working set stays bounded in the span — by up
-/// to eight candidates' worth of it.
+/// **1266.1 against 517.3 MiB** at 4096x4096. The span bounds only each candidate's parse
+/// buffers: each candidate also holds a whole-image filtered copy (`filter::filter_image` in
+/// `compress_scanlines`), so the rung's peak memory is **not** bounded by the span — it grows with
+/// image size times the number of concurrent candidates.
 ///
 /// Eight and not more, measured rather than picked: a wider span only helps an image whose
 /// *filtered* stream exceeds it, and the help saturates fast. At 8 MiB the span is the whole
