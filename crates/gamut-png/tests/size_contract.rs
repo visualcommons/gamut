@@ -14,7 +14,10 @@
 
 mod common;
 
+use std::sync::LazyLock;
+
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgb16, Rgba8};
+use gamut_png::stages::BRUTE_FORCE_STRATEGIES;
 use gamut_png::{FilterStrategy, Level, PngEncoder, deconstruct};
 
 /// One case's size budget against libpng at zlib level 9.
@@ -226,9 +229,6 @@ const BUDGETS: &[Budget] = &[
     },
 ];
 
-/// Half the bench's side, so this file stays fast enough for the coverage and mutation lanes.
-const SIDE: u32 = 128;
-
 /// The pixels for a budget row, and how many channels they carry.
 fn pixels(fixture: &str, side: u32) -> (Vec<u8>, usize) {
     match fixture {
@@ -284,6 +284,98 @@ fn gamut_best(samples: &[u8], channels: usize, depth: u8, side: u32, cleanup: bo
     out
 }
 
+/// One [`gamut_best`] output, keyed by the inputs that determine it.
+struct Encoding {
+    fixture: &'static str,
+    side: u32,
+    depth: u8,
+    cleanup: bool,
+    bytes: Vec<u8>,
+}
+
+/// Every distinct encoding the tests below read, each computed once per test binary.
+///
+/// A [`gamut_best`] encode is this file's whole cost: eight `BruteForce` candidates, each through
+/// the optimal parse. The five tests read 20 distinct encodings, and while each made its own they
+/// paid for 66, which dominated the coverage lane. A row's `+clean` twin and the cleaned variant
+/// `cleanup_never_costs_bytes_on_any_corpus_row` asks for are the same encoding, so the table
+/// holds it once. [`encoded_size_is_deterministic`] still encodes afresh: a second, independent
+/// encode is what it compares against this table.
+///
+/// The encodes are shared out over scoped workers. Built on one thread, the table made every test
+/// wait on it while the five tests it replaced had run side by side, and the file got slower in
+/// wall time despite doing half the work. The workers are bounded, not one per encoding: each
+/// encode already runs [`BRUTE_FORCE_STRATEGIES`] trials concurrently, so twenty unbounded workers
+/// meant some 180 live threads, and their per-thread allocator arenas exhausted the mutation
+/// lane's fixed address-space cap on a 16-core host. One worker per that many cores keeps the
+/// thread count near the core count on any machine.
+static ENCODINGS: LazyLock<Vec<Encoding>> = LazyLock::new(|| {
+    let mut inputs: Vec<(&Budget, bool)> = Vec::new();
+    for budget in BUDGETS {
+        for cleanup in [budget.cleanup, true] {
+            let held = inputs.iter().any(|(b, c)| {
+                (b.fixture, b.side, b.depth, *c)
+                    == (budget.fixture, budget.side, budget.depth, cleanup)
+            });
+            if !held {
+                inputs.push((budget, cleanup));
+            }
+        }
+    }
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    let workers = cores.div_ceil(BRUTE_FORCE_STRATEGIES.len());
+    let inputs = &inputs;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                scope.spawn(move || {
+                    inputs
+                        .iter()
+                        .skip(worker)
+                        .step_by(workers)
+                        .map(|&(budget, cleanup)| {
+                            let (samples, channels) = pixels(budget.fixture, budget.side);
+                            Encoding {
+                                fixture: budget.fixture,
+                                side: budget.side,
+                                depth: budget.depth,
+                                cleanup,
+                                bytes: gamut_best(
+                                    &samples,
+                                    channels,
+                                    budget.depth,
+                                    budget.side,
+                                    cleanup,
+                                ),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+});
+
+/// This row's fixture through [`gamut_best`], with cleanup as asked, from [`ENCODINGS`].
+fn best(budget: &Budget, cleanup: bool) -> &'static [u8] {
+    &ENCODINGS
+        .iter()
+        .find(|e| {
+            (e.fixture, e.side, e.depth, e.cleanup)
+                == (budget.fixture, budget.side, budget.depth, cleanup)
+        })
+        .expect("ENCODINGS holds every row, with and without cleanup")
+        .bytes
+}
+
 /// The same source layout through libpng at zlib level 9 — no palette hint, default adaptive
 /// filtering. Handing libpng a palette would hand it gamut's own reduction.
 fn libpng9(samples: &[u8], channels: usize, depth: u8, side: u32) -> Vec<u8> {
@@ -309,13 +401,7 @@ fn libpng9(samples: &[u8], channels: usize, depth: u8, side: u32) -> Vec<u8> {
 fn gamut_never_exceeds_its_size_budget_against_libpng9() {
     for budget in BUDGETS {
         let (samples, channels) = pixels(budget.fixture, budget.side);
-        let ours = gamut_best(
-            &samples,
-            channels,
-            budget.depth,
-            budget.side,
-            budget.cleanup,
-        );
+        let ours = best(budget, budget.cleanup);
         let theirs = libpng9(&samples, channels, budget.depth, budget.side);
         let ratio = ours.len() as f64 / theirs.len() as f64;
         // Printed, not just asserted: the `measured` column is only honest if refreshing it is a
@@ -359,13 +445,7 @@ fn gamut_beats_libpng9_where_it_claims_to() {
     ];
     for budget in BUDGETS.iter().filter(|b| WINS.contains(&b.name)) {
         let (samples, channels) = pixels(budget.fixture, budget.side);
-        let ours = gamut_best(
-            &samples,
-            channels,
-            budget.depth,
-            budget.side,
-            budget.cleanup,
-        );
+        let ours = best(budget, budget.cleanup);
         let theirs = libpng9(&samples, channels, budget.depth, budget.side);
         assert!(
             ours.len() < theirs.len(),
@@ -391,11 +471,15 @@ fn the_codestream_is_no_larger_where_both_encoders_choose_the_same_representatio
     // isolating the DEFLATE stage would mean re-filtering libpng's pixels with gamut's own
     // choices first. Only the rows where no reduction applies can be compared at all.
     for name in ["gradient_rgb8", "photo_rgb8"] {
-        let (samples, channels) = pixels(name, SIDE);
-        let ours = gamut_best(&samples, channels, 8, SIDE, false);
-        let theirs = libpng9(&samples, channels, 8, SIDE);
+        let budget = BUDGETS
+            .iter()
+            .find(|b| b.name == name)
+            .expect("both rows are in the budget table");
+        let (samples, channels) = pixels(name, budget.side);
+        let ours = best(budget, false);
+        let theirs = libpng9(&samples, channels, budget.depth, budget.side);
         let (a, b) = (
-            deconstruct(&ours).expect("gamut output deconstructs"),
+            deconstruct(ours).expect("gamut output deconstructs"),
             deconstruct(&theirs).expect("libpng output deconstructs"),
         );
 
@@ -422,13 +506,7 @@ fn encoded_size_is_deterministic() {
     // Without this the budget table is measuring noise rather than the encoder.
     for budget in BUDGETS {
         let (samples, channels) = pixels(budget.fixture, budget.side);
-        let first = gamut_best(
-            &samples,
-            channels,
-            budget.depth,
-            budget.side,
-            budget.cleanup,
-        );
+        let first = best(budget, budget.cleanup);
         let second = gamut_best(
             &samples,
             channels,
@@ -451,9 +529,8 @@ fn cleanup_never_costs_bytes_on_any_corpus_row() {
     //
     // A law rather than a budget, so it covers every row and every side, and needs no constant.
     for budget in BUDGETS.iter().filter(|b| !b.cleanup) {
-        let (samples, channels) = pixels(budget.fixture, budget.side);
-        let plain = gamut_best(&samples, channels, budget.depth, budget.side, false);
-        let cleaned = gamut_best(&samples, channels, budget.depth, budget.side, true);
+        let plain = best(budget, false);
+        let cleaned = best(budget, true);
         assert!(
             cleaned.len() <= plain.len(),
             "{}: cleanup cost {} bytes ({} -> {}); the race in `cleaned_or_plain` should have \
