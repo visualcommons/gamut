@@ -21,9 +21,9 @@
 #   * a row inside an HTML comment or a fenced code block is not a row. Both render as something
 #     other than a table cell, so a crate documented only there is documented nowhere, and the
 #     membership check must see it as missing rather than as present;
-#   * (outside the section) every `gamut = ...` dependency line in a fenced block names the
-#     umbrella's own release line, in this README and in the umbrella crate's own
-#     (`crates/gamut/README.md`) -- see the Usage-snippet block near the end, issue #559;
+#   * (outside the section) the Usage snippet adds the umbrella with `cargo add gamut` and pins
+#     no version, in this README and in the umbrella crate's own (`crates/gamut/README.md`) --
+#     see the Usage-snippet block near the end, issues #559 and #954;
 #   * EVERY crate row in the section lives inside ONE rendered table. A table is a header row
 #     immediately followed by a GFM delimiter row of the same width, neither indented four spaces
 #     or more, and it ends at the first line that is not a table row. That is a claim about the
@@ -53,9 +53,8 @@
 # WHAT THE CONTRACT COVERS. The whole `## Crates` section, not only its rows. The structural
 # checks always judged the section; the claim checks do too, so a machine-decidable claim written
 # as ordinary prose above or below the table -- or in a `###` sub-heading inside it -- is read
-# exactly as it would be inside a cell. Two forms -- the version token and the `consumed
-# by`/`always-on` lists -- name no subject of their own and take the row's crate as their subject,
-# so outside a crate row they have nobody to be about: writing one there is a failure rather than
+# exactly as it would be inside a cell. Two forms -- the `consumed by` and `always-on`
+# lists -- name no subject of their own and take the row's crate as their subject, so outside a crate row they have nobody to be about: writing one there is a failure rather than
 # a silent pass, and the message says to move it into a row. The one exception is a fenced or
 # indented code block, which is outside every check here: its content is a code sample, not a
 # claim this workspace has to answer for.
@@ -79,6 +78,11 @@
 #     purpose so a phantom row cannot hide behind one -- one half would fold the spelling while
 #     the other treats it as a distinct name. Cells name packages; the umbrella's module aliases
 #     (`gamut::png`) are how the Rust side is spelled in prose.
+#   * a `vN`/`vN.M` version token, in a row or in prose, is a failure. A crate's version is its
+#     own `Cargo.toml`'s and moves on every release; release-plz bumps manifests and nothing
+#     else, so a restated version either goes stale or turns every release pull request red
+#     (#954). The table states disposition (`stable`, `placeholder`, an issue), never version;
+#     a release a row names is written `1.0`, which is a milestone rather than a current version.
 #
 # CRLF input is accepted: a trailing carriage return is removed from every line before anything is
 # matched, so a CRLF README does not silently lose its heading and report itself as rowless.
@@ -100,8 +104,8 @@
 #   * The header row's own text. Its *presence* directly above the delimiter and its *column
 #     count* are asserted; what the three column headings are called is prose like any other cell.
 #   * Anything that needs the network. Whether crates.io serves the version a manifest declares
-#     cannot be decided here, so the table states the manifest version and [Releases](#releases)
-#     states the gaps.
+#     cannot be decided here; the table states no version, and [Releases](#releases) states the
+#     known gaps.
 #   * A row whose crate cell is written in legal Markdown this pattern does not recognise -- an
 #     omitted leading OR trailing pipe, a linked or annotated crate cell, prose after the code
 #     span. Each is reported as a *missing crate*, and the failure message says so, because
@@ -136,7 +140,7 @@ for f in "${usage_files[@]}"; do
 done
 
 # One pass over the file emits every stream -- `NAME` for membership, `BAD` for shape, `ORPHAN`
-# and `SPLIT` for the table context, `VER`/`CONS`/`ALWAYS`/`FEAT`/`CITE` for the claims -- so the
+# and `SPLIT` for the table context, `CONS`/`ALWAYS`/`FEAT`/`CITE` for the claims and `VER` for a refused version token -- so the
 # checks can never disagree about which lines are crate rows. Bounded to the "## Crates" section
 # so the README's other tables (the `mise run ...` table) can never be mistaken for a crate row.
 #
@@ -398,20 +402,14 @@ scan="$(
         # instead of being read, because they would have nobody to be about.
         function claims(subject, name, text,   s, tok, nxt, pre, qual, lst, at, len) {
             cites(subject, text)
-            # CLAIM FORM: a `vN`/`vN.M` token -- the FIRST one in the row -- must agree with that
-            # crate`s own `Cargo.toml` version, to the precision written (`v2` checks the major,
-            # `v0.2` the major and minor). This is what makes a version the most checkable thing
-            # a cell can carry.
+            # REFUSED: a `vN`/`vN.M` token anywhere in the text (see the header`s forbidden
+            # list). One report per text is enough to point at it.
             s = " " text
             while (match(s, /[^A-Za-z0-9_.]v[0-9]+(\.[0-9]+)*/)) {
                 tok = substr(s, RSTART + 2, RLENGTH - 2)
                 nxt = substr(s, RSTART + RLENGTH, 1)
                 s = substr(s, RSTART + RLENGTH)
-                if (nxt !~ /[A-Za-z0-9_]/) {
-                    if (name == "") { print "SUBJ\t" subject "\ta version token (v" tok ")" }
-                    else { print "VER\t" name "\t" tok }
-                    break
-                }
+                if (nxt !~ /[A-Za-z0-9_]/) { print "VER\t" subject "\tv" tok; break }
             }
             # CLAIM FORM: `consumed by` followed by backticked crate names -- that set must be
             # exactly the workspace crates declaring a normal or build dependency on the row`s
@@ -728,32 +726,14 @@ normalise_set() {
     printf '%s\n' "$1" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 
-# `vN` / `vN.M`: the row's first version token against the crate's own manifest version, compared
-# to the precision the row wrote.
-version_claims="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "VER" { print $2 "\t" $3 }')"
-if [ -n "$version_claims" ]; then
-    manifest_versions="$(printf '%s' "$metadata" | jq -r '.packages[] | "\(.name)\t\(.version)"')"
-    version_errors="$(
-        printf '%s\n' "$version_claims" | while IFS="$(printf '\t')" read -r crate claimed; do
-            actual="$(printf '%s\n' "$manifest_versions" | awk -F'\t' -v c="$crate" '$1 == c { print $2 }')"
-            if [ -n "$actual" ]; then
-                prefix="$(printf '%s\n' "$actual" | awk -F. -v t="$claimed" '
-                    BEGIN { n = split(t, want, ".") }
-                    { s = $1; for (i = 2; i <= n; i++) { s = s "." $i } print s }
-                ')"
-                if [ "$prefix" != "$claimed" ]; then
-                    echo "  $crate: the row cites v$claimed, its Cargo.toml declares $actual"
-                fi
-            fi
-        done
-        true
-    )"
-    if [ -n "$version_errors" ]; then
-        fail=1
-        echo "check-readme-crates: version claims in $readme that the workspace manifests refute:"
-        echo "$version_errors"
-        echo "  A row's version is its own Cargo.toml's, to whatever precision the row writes."
-    fi
+# `vN`: refused wherever the section writes one; nothing here compares it to a manifest.
+versions="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "VER" { print "  " $2 ": " $3 }')"
+if [ -n "$versions" ]; then
+    fail=1
+    echo "check-readme-crates: in $readme, version tokens the crates section must not write:"
+    echo "$versions"
+    echo "  A crate's version is its own Cargo.toml's (\`mise run versions\`); a restated one goes"
+    echo "  stale on the next release. State the disposition instead, and write a milestone as 1.0."
 fi
 
 # `consumed by`: the claimed consumer set against the workspace crates that declare a normal or
@@ -857,7 +837,7 @@ if [ -n "$unbackticked" ]; then
     echo "  English here as well as a package name), and so is a fenced or indented code block."
 fi
 
-# A version token, a `consumed by` list or an `always-on` list takes the row's crate as its
+# A `consumed by` list or an `always-on` list takes the row's crate as its
 # subject. Outside a crate row there is no such crate, so the claim cannot be decided; it is
 # refused rather than silently skipped, which is what made prose in this section invisible.
 subjectless="$(printf '%s\n' "$scan" | awk -F'\t' '$1 == "SUBJ" { print "  " $2 ": " $3 }')"
@@ -956,87 +936,51 @@ if [ -n "$extdep_claims" ]; then
     fi
 fi
 
-# The Usage snippet (issue #559). Outside `## Crates`, and the one claim in the README a reader
+# The Usage snippet (issue #559). Outside `## Crates`, and the one line in the README a reader
 # copies verbatim: by the time anyone looked it pinned `gamut = "0.1"` while the umbrella was at
 # 0.3.2, and `^0.1` still resolves, so a new user silently got a crate two breaking releases old.
+# The umbrella crate's own README (`crates/gamut/README.md`, its manifest's `readme`, the page
+# crates.io shows) carries its own copy and is read by the same rule. With no argument both files
+# are checked; a caller naming files names every one it wants read.
 #
-# The same holds for the umbrella crate's own README (`crates/gamut/README.md`, its manifest's
-# `readme`), which is what crates.io shows on the `gamut` page and carries its own copy of the
-# snippet: it goes stale on exactly the same bump, so it is read by exactly the same rule. With no
-# argument both files are checked; a caller naming files names every one it wants read.
-#
-# Every `gamut = ...` dependency line inside a fenced code block anywhere in the file is read --
-# the inline-table form and the bare-string form, with its keys in any order -- and its version
-# requirement must name the umbrella's own manifest version to the precision written, exactly as
-# a row's `vN.M` token does: the requirement's components are a prefix of the manifest version,
-# and at least as long as the release line caret compatibility spans (`0.3` for 0.3.2, `1` for
-# 1.4.0, `0.0.7` for 0.0.7). So `0.3` and `0.3.2` pass for 0.3.2; `0.1`, `0.3.0` (an older patch
-# than the tree's) and `0` (all of 0.x) do not. A leading `^` is the same requirement and is
-# accepted; any other operator is refused, because the snippet's job is to name the line to use.
-#
-# The authority is the manifest, not crates.io, for the reason the table's version tokens give:
-# deciding what the index serves needs the network. The consequence is that the release pull
-# request bumping the umbrella's minor (or, after 1.0, major) fails this check until it also
-# moves the snippet -- which is exactly the moment the snippet goes stale.
-#
-# At least one such line must exist in each file. A snippet rewritten into a form this does not
-# read (a `[dependencies.gamut]` table, say) would otherwise pass by saying nothing, and silence is
-# the defect this check is for; extend the reader rather than the exemption.
+# A pinned requirement goes stale on every umbrella release line, and holding it to the manifest
+# only moves that failure onto the release pull request, which bumps manifests and nothing else
+# (#954). So the snippet names no version: it is a `cargo add gamut` line, which resolves the
+# newest release and writes its caret requirement for the reader. Each file must have one in a
+# fenced block, and a `gamut = ...` dependency line in any fence is refused. A form this does not
+# read (a `[dependencies.gamut]` table, say) is not a pin it can see; extend the reader rather
+# than the exemption.
 #
 # What is a fence is decided by `fence_lib`, the scan's own reader, so a four-backtick fence
 # wrapping a nested three-backtick example stays one block here exactly as it does there.
-umbrella_version="$(printf '%s' "$metadata" | jq -r '.packages[] | select(.name == "gamut") | .version')"
-# The release line caret compatibility spans: every component up to and including the first
-# non-zero one (all three if they are all zero).
-umbrella_line="$(printf '%s\n' "$umbrella_version" | awk -F'[.+-]' '{
-    out = $1; if ($1 != "0") { print out; exit }
-    out = out "." $2; if ($2 != "0") { print out; exit }
-    print out "." $3 }')"
 for usage_file in "${usage_files[@]}"; do
-    usage_lines="$(LC_ALL=C ${CHECK_README_AWK:-awk} "$fence_lib"'
+    usage_scan="$(LC_ALL=C ${CHECK_README_AWK:-awk} "$fence_lib"'
         { line = $0; sub(/\r$/, "", line) }
         in_fence {
             if (is_fence_close(line)) { in_fence = 0 }
-            else if (line ~ /^[ \t]*gamut[ \t]*=/) { print NR "\t" line }
+            else if (line ~ /^[ \t]*gamut[ \t]*=/) { print "PIN\t" NR "\t" line }
+            else if (line ~ /^[ \t]*cargo[ \t]+add[ \t]+gamut([ \t]|$)/) { print "ADD" }
             next
         }
         fence_open(line) { in_fence = 1 }
     ' "$usage_file")"
-    if [ -z "$usage_lines" ]; then
+    pins="$(printf '%s\n' "$usage_scan" | awk -F'\t' '$1 == "PIN" { print "  line " $2 ": " $3 }')"
+    if [ -n "$pins" ]; then
         fail=1
-        echo "check-readme-crates: $usage_file has no \`gamut = ...\` dependency line in a code block,"
-        echo "  so nothing tells a reader which version of the umbrella to depend on. Write one as"
-        echo "  gamut = { version = \"X.Y\", features = [...] } -- or gamut = \"X.Y\" -- in a fence."
-        continue
+        echo "check-readme-crates: \`gamut\` dependency lines in $usage_file pin a version, which goes stale:"
+        echo "$pins"
+        echo "  Write the snippet as \`cargo add gamut -F <features>\`, which resolves the newest release."
     fi
-    usage_errors="$(
-        printf '%s\n' "$usage_lines" | while IFS="$(printf '\t')" read -r lineno text; do
-            req="$(printf '%s\n' "$text" |
-                sed -n -e 's/^[ \t]*gamut[ \t]*=[ \t]*"\([^"]*\)".*/\1/p' \
-                    -e 's/^[ \t]*gamut[ \t]*=[ \t]*{.*[{ ,]version[ \t]*=[ \t]*"\([^"]*\)".*/\1/p')"
-            req="${req#^}"
-            if ! printf '%s\n' "$req" | grep -qE '^[0-9]+(\.[0-9]+){0,2}$'; then
-                echo "  line $lineno: no plain version requirement readable in: $text"
-            elif [ "${req#"$umbrella_line"}" = "$req" ] ||
-                { [ "$req" != "$umbrella_version" ] &&
-                    [ "${umbrella_version#"$req".}" = "$umbrella_version" ]; }; then
-                echo "  line $lineno: requires \"$req\"; the umbrella's manifest is $umbrella_version (want \"$umbrella_line\")"
-            fi
-        done
-        true
-    )"
-    if [ -n "$usage_errors" ]; then
+    if ! printf '%s\n' "$usage_scan" | grep -qx ADD; then
         fail=1
-        echo "check-readme-crates: \`gamut\` dependency lines in $usage_file that the umbrella's manifest refutes:"
-        echo "$usage_errors"
-        echo "  A snippet names the umbrella's own Cargo.toml version, to whatever precision it writes,"
-        echo "  and no coarser than the release line caret compatibility spans."
+        echo "check-readme-crates: $usage_file has no \`cargo add gamut ...\` line in a code block,"
+        echo "  so nothing tells a reader how to depend on the umbrella. Write one in a fence."
     fi
 done
 
 if [ "$fail" -eq 0 ]; then
     echo "README crates table lists every workspace crate ($(echo "$workspace_crates" | wc -l) crates)"
-    echo "Usage snippet in ${usage_files[*]} names the umbrella's release line ($umbrella_line, manifest $umbrella_version)"
+    echo "Usage snippet in ${usage_files[*]} adds the umbrella with cargo add and pins no version"
 fi
 
 exit "$fail"

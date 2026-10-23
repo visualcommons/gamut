@@ -49,9 +49,8 @@ consumers depend on:
 
 ## Usage
 
-```toml
-[dependencies]
-gamut = { version = "0.4", features = ["avif"] }
+```sh
+cargo add gamut -F avif
 ```
 
 ```rust
