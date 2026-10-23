@@ -10,17 +10,26 @@
 mod common;
 
 use gamut_core::{Dimensions, EncodeImage, GrayAlpha16, ImageRef, Rgba8, Rgba16};
-use gamut_png::{FilterStrategy, Level, PngEncoder};
+use gamut_png::PngEncoder;
 
 const SIDE: u32 = 64;
+
+/// The encoder every test here starts from: a default one, at `Level::Default`.
+///
+/// Both halves of the claim -- nothing visible changes, and cleaning pays where invisible colour
+/// is noise -- hold at every compression level, and the cleanup pass and the race that keeps the
+/// smaller file run the same at each. `Level::Best` with `BruteForce` is two to three orders of
+/// magnitude slower per encode (#959 measures it) and reached nothing more of either, so it cost
+/// this file most of twenty minutes of the coverage lane for no extra reach.
+fn encoder() -> PngEncoder {
+    PngEncoder::new()
+}
 
 fn encode(samples: &[u8], cleanup: bool, auto_reduce: bool) -> Vec<u8> {
     let dims = Dimensions::new(SIDE, SIDE).expect("valid dimensions");
     let image = ImageRef::<Rgba8>::new(samples, dims).expect("buffer matches dimensions");
     let mut out = Vec::new();
-    PngEncoder::new()
-        .with_compression(Level::Best)
-        .with_filter(FilterStrategy::BruteForce)
+    encoder()
         .with_auto_reduce(auto_reduce)
         .with_transparent_cleanup(cleanup)
         .encode_image(image, &mut out)
@@ -112,9 +121,7 @@ fn cleanup_is_off_by_default() {
     let dims = Dimensions::new(SIDE, SIDE).expect("valid dimensions");
     let image = ImageRef::<Rgba8>::new(&src, dims).expect("buffer matches dimensions");
     let mut default_out = Vec::new();
-    PngEncoder::new()
-        .with_compression(Level::Best)
-        .with_filter(FilterStrategy::BruteForce)
+    encoder()
         .encode_image(image, &mut default_out)
         .expect("encode");
     assert_eq!(default_out, encode(&src, false, false));
@@ -176,9 +183,7 @@ fn encode_rgba16(samples: &[u16], cleanup: bool) -> Vec<u8> {
     let dims = Dimensions::new(SIDE, SIDE).expect("valid dimensions");
     let image = ImageRef::<Rgba16>::new(samples, dims).expect("buffer matches dimensions");
     let mut out = Vec::new();
-    PngEncoder::new()
-        .with_compression(Level::Best)
-        .with_filter(FilterStrategy::BruteForce)
+    encoder()
         .with_transparent_cleanup(cleanup)
         .encode_image(image, &mut out)
         .expect("encode");
@@ -189,9 +194,7 @@ fn encode_gray_alpha16(samples: &[u16], cleanup: bool) -> Vec<u8> {
     let dims = Dimensions::new(SIDE, SIDE).expect("valid dimensions");
     let image = ImageRef::<GrayAlpha16>::new(samples, dims).expect("buffer matches dimensions");
     let mut out = Vec::new();
-    PngEncoder::new()
-        .with_compression(Level::Best)
-        .with_filter(FilterStrategy::BruteForce)
+    encoder()
         .with_transparent_cleanup(cleanup)
         .encode_image(image, &mut out)
         .expect("encode");

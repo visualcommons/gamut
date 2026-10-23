@@ -9,16 +9,16 @@
 mod common;
 
 use gamut_core::{Dimensions, EncodeImage, Gray8, GrayAlpha8, ImageRef, Rgb8, Rgba8};
-use gamut_png::{FilterStrategy, Level, PngEncoder, deconstruct};
+use gamut_png::{PngEncoder, deconstruct};
 
 /// 128, not something smaller, and the reason is the whole design of the reduction.
 ///
 /// A colour key costs a flat 18-byte `tRNS` chunk that DEFLATE cannot touch, and buys an alpha
 /// plane that usually compresses very well. So whether it wins is size-dependent, exactly as the
 /// palette is: measured on this fixture the analysis offers `Rgb8Keyed` at every size, but
-/// `write_reduced_or_native` only takes it once the chunk is amortised. Brute-force filtered at
-/// `Level::Best`, keyed against plain RGBA: 32 declines it (279 against 274), 48 takes it (347
-/// against 353), and by 128 it is worth about 7% (863 against 926).
+/// `write_reduced_or_native` only takes it once the chunk is amortised. Through [`encoder`], keyed
+/// against plain RGBA: 32 declines it (294 against 292), 48 takes it (379 against 383), and by 128
+/// it is worth about 4% (1014 against 1057).
 ///
 /// That also matters for the *negative* tests below. Asserting "stayed RGBA" at a size where the
 /// key would never have been taken anyway proves nothing; at 128 a valid key is taken, so RGBA
@@ -32,6 +32,17 @@ const TRNS_RGB_CHUNK: usize = 18;
 /// The 14 bytes a greyscale `tRNS` adds: the same framing over a single 16-bit sample.
 const TRNS_GRAY_CHUNK: usize = 14;
 
+/// The encoder every test here starts from: a default one, at `Level::Default`.
+///
+/// Every claim in this file is about which reduction the encoder takes and whether libpng renders
+/// it losslessly, and that analysis and race run the same at every compression level and filter
+/// strategy; only the byte counts behind the race move. `Level::Best` with `BruteForce` is two to
+/// three orders of magnitude slower per encode (#959 measures it) and reached nothing more of the
+/// reduction, so it made this file most of half an hour of the coverage lane for no extra reach.
+fn encoder() -> PngEncoder {
+    PngEncoder::new()
+}
+
 fn encode(samples: &[u8]) -> Vec<u8> {
     encode_at(SIDE, samples)
 }
@@ -40,9 +51,7 @@ fn encode_at(side: u32, samples: &[u8]) -> Vec<u8> {
     let dims = Dimensions::new(side, side).expect("valid dimensions");
     let image = ImageRef::<Rgba8>::new(samples, dims).expect("buffer matches dimensions");
     let mut out = Vec::new();
-    PngEncoder::new()
-        .with_compression(Level::Best)
-        .with_filter(FilterStrategy::BruteForce)
+    encoder()
         .with_auto_reduce(true)
         .encode_image(image, &mut out)
         .expect("encode");
@@ -187,8 +196,7 @@ fn cleanup_makes_an_unkeyable_image_keyable() {
     let dims = Dimensions::new(SIDE, SIDE).expect("valid dimensions");
 
     let mut plain = Vec::new();
-    PngEncoder::new()
-        .with_compression(Level::Best)
+    encoder()
         .with_auto_reduce(true)
         .encode_image(
             ImageRef::<Rgba8>::new(&src, dims).expect("buffer"),
@@ -197,8 +205,7 @@ fn cleanup_makes_an_unkeyable_image_keyable() {
         .expect("encode");
 
     let mut cleaned = Vec::new();
-    PngEncoder::new()
-        .with_compression(Level::Best)
+    encoder()
         .with_auto_reduce(true)
         .with_transparent_cleanup(true)
         .encode_image(
@@ -263,9 +270,8 @@ fn keyable_grey_alpha() -> Vec<u8> {
 ///
 /// The win is thinner here than for truecolour: dropping the alpha plane saves one byte per pixel
 /// rather than three, while the `tRNS` chunk still costs a flat 14. It is a win regardless --
-/// measured at `SIDE`, brute-force filtered at `Level::Best`, 499 bytes keyed against 626 as
-/// `GrayAlpha8`, about 20% -- and it stayed a win at every square from 32 to 256, so no size
-/// threshold is needed on this side.
+/// measured at `SIDE` through [`encoder`], 529 bytes keyed against 685 as `GrayAlpha8`, about 23%
+/// -- and it was a win at 32 and 64 too, so no size threshold is needed on this side.
 ///
 /// The key is grey 7 rather than 0 deliberately: a `tRNS` written little-endian would read
 /// `[7, 0]`, which a key of 0 could not tell from the correct `[0, 7]`.
@@ -274,9 +280,7 @@ fn a_greyscale_colour_key_drops_the_alpha_channel_losslessly() {
     let src = keyable_grey_alpha();
     let dims = Dimensions::new(SIDE, SIDE).expect("valid dimensions");
     let mut png = Vec::new();
-    PngEncoder::new()
-        .with_compression(Level::Best)
-        .with_filter(FilterStrategy::BruteForce)
+    encoder()
         .with_auto_reduce(true)
         .encode_image(
             ImageRef::<GrayAlpha8>::new(&src, dims).expect("buffer matches dimensions"),
@@ -321,7 +325,7 @@ fn a_greyscale_colour_key_drops_the_alpha_channel_losslessly() {
 /// emitting the keyed file with no race -- would not change its result. Losing needs a thinner saving: the
 /// `tRNS` costs a flat 14 bytes while dropping the alpha plane saves only one byte per pixel, so a
 /// mostly-opaque image is where the fixed cost wins. A quarter-width transparent border at 16x16
-/// measures 88 bytes as `GrayAlpha8` against 97 for the key, and the encoder must emit the 88.
+/// measures 91 bytes as `GrayAlpha8` against 99 for the key, and the encoder must emit the 91.
 #[test]
 fn a_greyscale_colour_key_that_would_cost_bytes_is_declined() {
     const SMALL: u32 = 16;
@@ -338,11 +342,6 @@ fn a_greyscale_colour_key_that_would_cost_bytes_is_declined() {
         }
     }
     let dims = Dimensions::new(SMALL, SMALL).expect("valid dimensions");
-    let encoder = || {
-        PngEncoder::new()
-            .with_compression(Level::Best)
-            .with_filter(FilterStrategy::BruteForce)
-    };
     let mut chosen = Vec::new();
     encoder()
         .with_auto_reduce(true)
@@ -385,9 +384,12 @@ fn a_greyscale_colour_key_that_would_cost_bytes_is_declined() {
 /// winner over as `Reductions::Chunked` is observable: hand it over as `Reductions::ChunkFree`
 /// instead and the encoder would emit the larger keyed file without racing it.
 ///
-/// Measured on `keyable_rgba_at(32)`, brute-force filtered at `Level::Best`: plain RGBA is 274
-/// bytes and `RGB + tRNS` is 279 (261 for the RGB stream plus the flat 18-byte chunk). 32 is the
-/// largest square where the key loses -- by 48 it already wins, 347 against 353.
+/// Measured on `keyable_rgba_at(32)` through [`encoder`]: plain RGBA is 292 bytes and `RGB + tRNS`
+/// is 294 (276 for the RGB stream plus the flat 18-byte chunk). By 48 the key wins, 379 against
+/// 383. The 2-byte margin is accepted rather than chased to a smaller side: at 16 the key loses by
+/// 12, but the fixture's ~90 visible colours put a palette in the race, so `Rgb8Keyed` would no
+/// longer be the winner handed over and the test would stop observing it. A drift that flips the
+/// margin fails the `COLOR_RGBA` assertion loudly rather than passing silently.
 #[test]
 fn a_colour_key_that_would_cost_bytes_is_declined() {
     const SMALL: u32 = 32;
@@ -409,9 +411,7 @@ fn a_colour_key_that_would_cost_bytes_is_declined() {
         .collect();
     let dims = Dimensions::new(SMALL, SMALL).expect("valid dimensions");
     let mut keyed = Vec::new();
-    PngEncoder::new()
-        .with_compression(Level::Best)
-        .with_filter(FilterStrategy::BruteForce)
+    encoder()
         .with_auto_reduce(false)
         .encode_image(
             ImageRef::<Rgb8>::new(&rgb, dims).expect("buffer matches dimensions"),
