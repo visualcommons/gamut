@@ -37,3 +37,8 @@ gamut-ifd = { path = "../../crates/gamut-ifd", features = ["bigtiff"] }
 gamut-exif = { path = "../../crates/gamut-exif" }
 # Authoritative differential oracle: the headless-built Adobe DNG SDK 1.7.1.
 gamut-dng-oracle = { path = "../gamut-dng-oracle" }
+
+# Its own workspace root, so cargo never walks further up looking for one: a checkout nested
+# inside another gamut checkout (a worktree under `.claude/worktrees/`) would otherwise find the
+# outer manifest, which does not exclude this path.
+[workspace]

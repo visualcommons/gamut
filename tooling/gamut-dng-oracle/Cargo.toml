@@ -39,3 +39,8 @@ zlib-oracle = { path = "../zlib-oracle" }
 [build-dependencies]
 cc = "1"
 zip = "2"
+
+# Its own workspace root, so cargo never walks further up looking for one: a checkout nested
+# inside another gamut checkout (a worktree under `.claude/worktrees/`) would otherwise find the
+# outer manifest, which does not exclude this path.
+[workspace]

@@ -36,3 +36,8 @@ bindgen = "0.72"
 # Normalises ambient compiler-launcher env (sccache/ccache) so this build is hermetic to
 # exactly what it configures. See its crate docs.
 build-env = { path = "../build-env" }
+
+# Its own workspace root, so cargo never walks further up looking for one: a checkout nested
+# inside another gamut checkout (a worktree under `.claude/worktrees/`) would otherwise find the
+# outer manifest, which does not exclude this path.
+[workspace]
