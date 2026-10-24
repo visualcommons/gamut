@@ -72,7 +72,9 @@ check() {
         failed=$((failed + 1))
         return
     fi
-    if [ -n "$fragment" ] && ! printf '%s\n' "$out" | grep -qF -- "$fragment"; then
+    # A here-string, not a pipe: `grep -q` exits at its first match, and under `pipefail` the
+    # writer's SIGPIPE would fail a fixture whose output does carry the fragment.
+    if [ -n "$fragment" ] && ! grep -qF -- "$fragment" <<<"$out"; then
         echo "FAIL  $name -- exit $got as expected, but the output does not say '$fragment'"
         printf '%s\n' "$out" | sed 's/^/        /'
         failed=$((failed + 1))
