@@ -1,8 +1,10 @@
 //! The egui front end: one tab per scenario or primitive panel, every one of them a thin view
 //! over a [`gamut_icc_sandbox::panels`] function.
 //!
-//! Rendered images are cached as textures keyed on everything that produced them, so a frame
-//! that changes nothing recomputes nothing.
+//! Rendered images are cached as textures keyed on everything that produced them, and the
+//! camera patch errors and gamut hulls beside their inputs, so a frame that changes nothing
+//! recomputes nothing. Every cache is bounded by the discrete settings space except the CLUT
+//! slice's, whose key carries continuous slider values; that one keeps only its latest entry.
 
 use std::collections::HashMap;
 
@@ -81,6 +83,8 @@ pub struct SandboxApp {
     clut_axes: [usize; 2],
     clut_fixed: [f64; 4],
     hull_kinds: Vec<(ProfileKind, bool)>,
+    hulls: HashMap<(ProfileKind, RenderingIntent), Result<panels::Hull, String>>,
+    camera_errors: Option<[PatchErrors; 2]>,
     textures: HashMap<String, Result<TextureHandle, String>>,
     badge: Badge,
 }
@@ -120,6 +124,8 @@ impl SandboxApp {
                 (ProfileKind::CameraB, false),
                 (ProfileKind::Printer, true),
             ],
+            hulls: HashMap::new(),
+            camera_errors: None,
             textures: HashMap::new(),
             badge,
         })
@@ -258,14 +264,15 @@ impl SandboxApp {
         });
         ui.separator();
         ui.strong("ΔE₀₀ to the scene, per patch (exposure undone, media-relative)");
-        let errors: Vec<_> = [ProfileKind::CameraA, ProfileKind::CameraB]
-            .iter()
-            .map(|&k| {
-                self.battery
+        // Independent of every setting, so computed once.
+        let battery = &self.battery;
+        let errors = self.camera_errors.get_or_insert_with(|| {
+            [ProfileKind::CameraA, ProfileKind::CameraB].map(|k| {
+                battery
                     .profile(k)
                     .map(|p| panels::camera_patch_errors(p).map_err(|e| e.to_string()))
             })
-            .collect();
+        });
         egui::Grid::new("camera errors")
             .striped(true)
             .show(ui, |ui| {
@@ -275,7 +282,7 @@ impl SandboxApp {
                 ui.end_row();
                 for i in 0..scene::PATCHES.len() {
                     ui.label(format!("{}", i + 1));
-                    for e in &errors {
+                    for e in errors.iter() {
                         match e {
                             Some(Ok(v)) => ui.label(format!("{:.2}", v[i])),
                             Some(Err(err)) => ui.label(err.as_str()),
@@ -544,9 +551,13 @@ impl SandboxApp {
             clut.grid_points, clut.output_channels
         );
         let key = format!(
-            "clut {:?} {} {:?} {:?} {:?}",
+            "{CLUT_KEY}{:?} {} {:?} {:?} {:?}",
             self.clut_kind, self.clut_tag, self.clut_interpolation, self.clut_axes, self.clut_fixed
         );
+        // The slider values make this key continuous: drop every other slice so dragging does
+        // not leave a texture behind per position.
+        self.textures
+            .retain(|k, _| !k.starts_with(CLUT_KEY) || *k == key);
         let display = &self.display;
         let (interpolation, axes, fixed) =
             (self.clut_interpolation, self.clut_axes, self.clut_fixed);
@@ -569,14 +580,18 @@ impl SandboxApp {
             }
         });
         let intent = self.settings.intent;
+        for &(kind, on) in &self.hull_kinds {
+            if let (true, Some(profile)) = (on, self.battery.profile(kind)) {
+                self.hulls.entry((kind, intent)).or_insert_with(|| {
+                    panels::gamut_hull(profile, intent).map_err(|e| e.to_string())
+                });
+            }
+        }
         let hulls: Vec<_> = self
             .hull_kinds
             .iter()
             .filter(|(_, on)| *on)
-            .filter_map(|&(kind, _)| {
-                let profile = self.battery.profile(kind)?;
-                Some((kind, panels::gamut_hull(profile, intent)))
-            })
+            .filter_map(|&(kind, _)| Some((kind, self.hulls.get(&(kind, intent))?)))
             .collect();
         egui::Grid::new("hull stats").striped(true).show(ui, |ui| {
             ui.label("profile");
@@ -597,7 +612,7 @@ impl SandboxApp {
                         );
                     }
                     Err(e) => {
-                        ui.label(e.to_string());
+                        ui.label(e.as_str());
                     }
                 }
                 ui.end_row();
@@ -694,9 +709,16 @@ impl SandboxApp {
     }
 }
 
+/// The prefix of every CLUT-slice texture key.
+const CLUT_KEY: &str = "clut ";
+
 /// Rendered textures, keyed on everything that produced them; an entry is the texture or the
 /// error that stopped it.
 type Textures = HashMap<String, Result<TextureHandle, String>>;
+
+/// One camera's per-patch ΔE₀₀, the error that stopped it, or `None` when its profile did not
+/// parse.
+type PatchErrors = Option<Result<Vec<f64>, String>>;
 
 /// An image size as egui wants it.
 fn size(width: u32, height: u32) -> [usize; 2] {
@@ -849,5 +871,31 @@ mod tests {
         // Formats 4, camera 2, print 7 and malformed 1 per settings; the CLUT slice does not
         // depend on them, so it renders once.
         assert_eq!(app.textures.len(), 14 * 5 + 1);
+    }
+
+    /// Dragging a CLUT slider replaces the slice's texture rather than adding one per
+    /// position.
+    #[test]
+    fn clut_slider_keeps_one_slice_texture() {
+        let ctx = egui::Context::default();
+        let mut app = SandboxApp::new().expect("the app builds");
+        app.tab = Tab::Clut;
+        let mut keys = Vec::new();
+        for v in [0.1, 0.2, 0.3] {
+            app.clut_fixed[2] = v;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw(ui));
+            output.textures_delta.clear();
+            keys.extend(
+                app.textures
+                    .keys()
+                    .filter(|k| k.starts_with(CLUT_KEY))
+                    .cloned(),
+            );
+        }
+        assert_eq!(keys.len(), 3, "one slice per frame");
+        assert_eq!(
+            keys.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
     }
 }
