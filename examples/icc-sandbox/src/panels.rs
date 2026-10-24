@@ -423,7 +423,7 @@ pub struct Diagnosis {
 /// Parses `bytes`; on failure, explains why and what to do. `None` when the bytes parse.
 ///
 /// `gamut-icc` reports a parse failure as one static message naming the structure at fault (no
-/// byte offset or tag identity — #254 tracks structured context in `gamut-core`), so the sandbox
+/// byte offset or tag identity — #1004 tracks structured context in `IccError`), so the sandbox
 /// adds the one fact it can establish itself: whether the header's declared size matches the
 /// bytes supplied, which is what tells a truncated embed from a corrupt one.
 #[must_use]

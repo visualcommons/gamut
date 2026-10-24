@@ -33,8 +33,8 @@ pub const BOUND: f64 = 2e-2;
 ///
 /// One pair is deliberately absent: the printer into the **v2** sRGB (its 1024-entry sampled
 /// TRC inverted numerically), which no panel renders and which measures 3.51e-2 at ICC-absolute
-/// — over [`BOUND`]. That is a `gamut-cmm` finding, filed against that crate rather than hidden
-/// in a looser badge here.
+/// — over [`BOUND`]. That is a `gamut-cmm` finding, filed against that crate as #1003 rather
+/// than hidden in a looser badge here.
 pub const PAIRS: [(ProfileKind, ProfileKind); 8] = [
     (ProfileKind::SrgbV2, ProfileKind::SrgbV4),
     (ProfileKind::SrgbV2, ProfileKind::DisplayP3),
