@@ -92,6 +92,9 @@ Where this reader deliberately differs from exiv2:
 - **Samsung under a `PENTAX \0` header** is read as Pentax DNG. exiv2 checks only `AOC\0` for
   Samsung.
 
+The vendor tags themselves are staked per vendor in a subdirectory, before that vendor's view is
+implemented: [`canon/`](canon/README.md) (issue #977).
+
 Notes that exiv2 does not cover, Leica's being the one the sample corpus holds, have no
 dialect yet. Each one is staked here by its vendor's sub-issue of #418 before it is implemented
 (Leica: #978). A Canon note that Adobe DNG Converter moved into `DNGPrivateData` (`Adobe\0MakN`)

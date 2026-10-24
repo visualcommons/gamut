@@ -4,9 +4,13 @@
 //! per-vendor quirks (its own header, byte order, and offset base). The crate preserves the bytes
 //! verbatim, detects the vendor (from the `Make` tag), and resolves the block's **dispatch layout**
 //! — which header dialect it is, the byte order and position of its IFD, and what that IFD's value
-//! offsets count from — but decodes **no vendor tag**. Per-vendor tag decoding is the remainder of
-//! issue #418 and can be added without breaking this API (every enum and the layout struct here
-//! are `#[non_exhaustive]`).
+//! offsets count from. On top of that layout sit read-only per-vendor views:
+//!
+//! - **Canon** — [`canon::CanonMakerNote`], through [`MakerNote::canon`] (issue #977).
+//!
+//! Every other vendor's tags stay undecoded; their views are the remainder of issue #418 and can
+//! be added without breaking this API (every enum and the layout struct here are
+//! `#[non_exhaustive]`). A view only reads: the block's bytes are never rewritten from it.
 //!
 //! # Dispatch
 //!
@@ -30,7 +34,11 @@
 //! offsets may go stale. Note-relative offsets ([`OffsetBase::MakerNote`]) survive a relocation
 //! too.
 
-use gamut_ifd::{ByteOrder, Variant};
+pub mod canon;
+
+use gamut_ifd::{AuditFinding, ByteOrder, Ifd, IfdReader, ReadAt, Variant};
+
+use crate::error::Result;
 
 /// The bytes a one-entry IFD occupies before its next-IFD pointer: a 2-byte entry count plus one
 /// 12-byte entry. A note shorter than its header plus this holds no IFD to decode.
@@ -56,6 +64,109 @@ impl MakerNote {
     pub fn layout(&self, outer: ByteOrder) -> Option<MakerNoteLayout> {
         MakerNoteLayout::detect(self.vendor, &self.bytes, outer)
     }
+
+    /// The block decoded as a Canon note, given `outer` (as for [`layout`](Self::layout)) and
+    /// `note_at`, the note's position in its TIFF stream
+    /// ([`Exif::maker_note_offset`](crate::Exif::maker_note_offset)) — Canon's value offsets
+    /// count from the TIFF header, so they mean nothing without it.
+    ///
+    /// Reads only these bytes, so a value whose offset points outside the note is unreadable here
+    /// and named by [`CanonMakerNote::unreadable_tags`](canon::CanonMakerNote::unreadable_tags);
+    /// [`CanonMakerNote::read`](canon::CanonMakerNote::read) reads through the whole stream
+    /// instead.
+    ///
+    /// `Ok(None)` when the block has no [`MakerNoteDialect::Canon`] layout.
+    ///
+    /// # Errors
+    ///
+    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// entries and next-IFD pointer — does not fit in the note.
+    pub fn canon(&self, outer: ByteOrder, note_at: u64) -> Result<Option<canon::CanonMakerNote>> {
+        let Some(layout) = self.layout(outer) else {
+            return Ok(None);
+        };
+        let placed = Placed {
+            bytes: &self.bytes,
+            at: note_at,
+        };
+        canon::CanonMakerNote::read(placed, note_at, layout)
+    }
+}
+
+/// A note's bytes standing at `at` in the TIFF stream's offset space: offset `o` reads byte
+/// `o - at` of the note, and every offset before the note is out of bounds.
+///
+/// The opposite of [`gamut_ifd::Rebased`], which maps `o` *forward* to `base + o`: a note whose
+/// offsets count from the TIFF header needs the stream's offsets mapped *back* into the note, and
+/// the [`Exif`](crate::Exif) model keeps the note's bytes, not the stream around them.
+struct Placed<'a> {
+    bytes: &'a [u8],
+    at: u64,
+}
+
+impl ReadAt for Placed<'_> {
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> gamut_core::Result<()> {
+        let within = offset.checked_sub(self.at).ok_or_else(|| {
+            gamut_core::Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "MakerNote: read before the note",
+            )
+            .with_byte_offset(offset)
+        })?;
+        self.bytes.read_exact_at(within, buf)
+    }
+
+    fn len(&mut self) -> gamut_core::Result<u64> {
+        // The stream is at least as long as the note's end; saturating keeps a hostile `at` from
+        // wrapping the length below the note's own position.
+        Ok(self.at.saturating_add(self.bytes.len() as u64))
+    }
+}
+
+/// Reads the IFD a note laid out as `layout` holds, out of `stream` — the note's TIFF stream, or
+/// any source in that stream's offset space — where the note starts at `note_at`.
+///
+/// File-absolute offsets ([`OffsetBase::TiffHeader`]) are read through `stream` directly;
+/// note-relative ones through a [`gamut_ifd::Rebased`] view at the base's
+/// [`origin`](OffsetBase::origin). The directory is decoded leniently: an entry whose value cannot
+/// be read is left out, and its tag returned beside the directory, in on-disk order. A tag the
+/// note repeats keeps its last readable occurrence.
+///
+/// The directory is read with its 4-byte next-IFD pointer, so this serves only the dialects whose
+/// [`has_next_ifd`](MakerNoteDialect::has_next_ifd) holds; the pointer itself is not followed.
+///
+/// # Errors
+///
+/// [`ExifError::Ifd`](crate::ExifError::Ifd) when the directory does not fit in `stream` or
+/// `stream` fails, and [`ExifError::BadOffset`](crate::ExifError::BadOffset) when the IFD's
+/// position overflows `u64` or lies before the offset base.
+pub(crate) fn read_note_ifd<S: ReadAt>(
+    stream: S,
+    note_at: u64,
+    layout: MakerNoteLayout,
+) -> Result<(Ifd, Vec<u16>)> {
+    let ifd_at = note_at
+        .checked_add(u64::from(layout.ifd_offset))
+        .ok_or(crate::ExifError::BadOffset(note_at))?;
+    let origin = layout
+        .offset_base
+        .origin(note_at)
+        .ok_or(crate::ExifError::BadOffset(note_at))?;
+    let within = ifd_at
+        .checked_sub(origin)
+        .ok_or(crate::ExifError::BadOffset(ifd_at))?;
+    let mut reader =
+        IfdReader::with_layout(stream.rebased(origin), layout.byte_order, Variant::Classic);
+    let raw = reader.read_ifd(within)?;
+    let (ifd, findings) = reader.decode_ifd_lenient(&raw)?;
+    let unreadable = findings
+        .iter()
+        .filter_map(|finding| match finding {
+            AuditFinding::UnreadableEntry { tag, .. } => Some(*tag),
+            _ => None,
+        })
+        .collect();
+    Ok((ifd, unreadable))
 }
 
 /// A MakerNote vendor dialect.
