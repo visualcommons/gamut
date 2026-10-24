@@ -869,7 +869,7 @@ exclude_re = [
     # walk runs up to 1024 candidates per position at `Level::Best`), and every other spelling of "strictly longer" has the same
     # twin. Line/column-anchored: the prune's own `==` and the `len >= max_len` break in the same
     # function are killable and stay in the survey.
-    'lz77\.rs:147:24: replace > with >= in Matcher::walk$',
+    'lz77\.rs:140:24: replace > with >= in Matcher::walk$',
     # -----------------------------------------------------------------------------------------
     # GROUP 2 — NON-TERMINATING: detected, but reportable only as a TIMEOUT.
     #
