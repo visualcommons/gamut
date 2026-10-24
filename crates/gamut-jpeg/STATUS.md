@@ -144,7 +144,11 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **XYB-tuned quantization tables.** The XYB mode quantizes X/Y with Annex K.1 and the stored
   B−Y with K.2 — an honest placeholder (those tables are YCbCr-tuned). jpegli's
   `kBaseQuantMatrixXYB` needs a quality→distance mapping and a vendored citation; additive later
-  through the `QuantTables` plumbing.
+  through the `QuantTables` plumbing. Experiment #29 (`experiments/29/RESULTS.md`) measured
+  XYB-directed tables through that plumbing. Flat or CSF X/Y tables save 11–12% against this
+  pairing at equal sRGB PSNR/SSIM, but no table tried brings XYB near YCbCr 4:2:0 on those
+  metrics. The decision waits on a perceptual metric the workspace does not have. X and Y share
+  destination 0, so a separate X table is not expressible yet.
 - **jpegli B-only subsampling for XYB.** jpegli optionally subsamples only the B channel
   (2,2/2,2/1,1); gamut's XYB mode is 4:4:4-only for now (`ChromaSubsampling` is ignored — its
   chroma semantics would subsample X, destroying opponent-colour detail). The scan machinery is
@@ -157,7 +161,12 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **Alternate built-in base tables (flat, mozjpeg/jpegli psychovisual).** Every built-in constant
   table is a citation obligation under the `references/` policy, and no such table has a vendored
   source here yet. `QuantTables`' inherent constructors are append-only, so tuned built-ins are
-  additive later; until then callers supply their own bytes.
+  additive later; until then callers supply their own bytes. Experiment #29
+  (`experiments/29/RESULTS.md`) measured flat and contrast-sensitivity luma tables through
+  `with_quant_tables`. They beat Annex K by 12–14% at equal PSNR/SSIM, and by about 20% combined
+  with the trellis. Those metrics favour flat tables by construction, so this is not evidence for
+  a built-in; that needs a perceptual metric. DC trellis and overshoot deringing need encoder
+  internals and were not measured.
 - **CLI metadata passthrough.** `gamut convert` now decodes JPEG input with `JpegDecoder` rather
   than the third-party `image` crate (issue #268), but still through the `DecodeImage` pixel path,
   which carries no APP segments; a passthrough needs the metadata-bearing decode entry point and

@@ -1,0 +1,20 @@
+{
+  "issue": 29,
+  "git_sha": "c2f4f6c1013c99be8a3ee88a248d7c97d2ab1395",
+  "git_dirty": false,
+  "libjpeg_turbo_submodule": "c85e6b905bf237038faa936dab160ebfc5da0344",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13);binary: rustc;commit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67;commit-date: 2026-10-13;host: x86_64-unknown-linux-gnu;release: 1.99.1;LLVM version: 23.1.1;",
+  "mise_lock_sha256": null,
+  "cargo_lock_sha256": "6328053372c66b7b67dea0f71ada545583a29a443e9559be3a03b91112a8a12c",
+  "rust_toolchain_toml_sha256": "e7613d421d2367015f232d2a0f8fe9684daf707a56308b046b92405ce2ccab09",
+  "synthetic": "512x384",
+  "seeds": "none: encodes are deterministic and the synthetic input is a fixed-seed LCG generator (crates/gamut-jpeg/benches/common/corpus.rs)",
+  "input_sha256": {
+    "third_party/libjpeg-turbo/testimages/testorig.ppm": "4afe49cb62ba87be1a958d7fd29b822a2ba1a0e966d1136f616ee5353691a002",
+    "third_party/libjpeg-turbo/testimages/shira_bird8.bmp": "cd4c0f6835f8737be8f9b980ed6e748778b12f7cad09fa5c86317305c8de654c",
+    "third_party/libjpeg-turbo/testimages/vgl_6434_0018a.bmp": "88be89f624ed412c879980639d673f4041bf148fd69c08df659068411dfb0d5e",
+    "third_party/libjpeg-turbo/testimages/vgl_6548_0026a.bmp": "834c45c7a4456d3ef26e334d1551a2b39c155d0390f98fb572cf60951e26ccdf"
+  },
+  "cpu_model": "AMD Ryzen 7 7800X3D 8-Core Processor",
+  "cpu_cores": 16
+}
