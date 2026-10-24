@@ -19,7 +19,7 @@ use gamut_metadata::exif::Exif;
 
 use crate::color_profile::{ColorProfileInfo, NoiseProfile, TagSource};
 use crate::gain_map::ProfileGainTableMap;
-use crate::levels::RawLevels;
+use crate::levels::{RawLevels, checked_black_repeat};
 use crate::metadata::DngMetadata;
 use crate::opcode::OpcodeList;
 use crate::profile::CameraProfile;
@@ -1075,20 +1075,10 @@ fn decode_levels(
     dims: Dimensions,
     active_area: Option<[u32; 4]>,
 ) -> Result<RawLevels> {
+    // Bounded before `cells` sizes anything below: the two SHORTs are all that backs the
+    // pattern when `BlackLevel` is absent or broadcast (#950).
     let repeat = match ifd.get_u32_vec(tags::BLACK_LEVEL_REPEAT_DIM) {
-        Some(v) if v.len() == 2 => {
-            let rows = u16::try_from(v[0]).ok().filter(|r| *r > 0);
-            let cols = u16::try_from(v[1]).ok().filter(|c| *c > 0);
-            match (rows, cols) {
-                (Some(rows), Some(cols)) => (rows, cols),
-                _ => {
-                    return Err(Error::invalid_input(
-                        env!("CARGO_PKG_NAME"),
-                        "DNG: BlackLevelRepeatDim dimensions must be non-zero",
-                    ));
-                }
-            }
-        }
+        Some(v) if v.len() == 2 => checked_black_repeat(v[0], v[1])?,
         Some(_) => {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
