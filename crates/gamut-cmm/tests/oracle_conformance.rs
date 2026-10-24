@@ -618,6 +618,183 @@ fn optimized_transforms_stay_inside_the_precision_budget() {
     assert!(precalc_vs_lcms[0].value < PRECALC_SHAPER_DRIFT / 10.0);
 }
 
+/// Quantizes a `[0, 1]` device pixel to the 16-bit codes both sides of a LOOSE comparison
+/// are fed (round half up — lcms2's `_cmsQuickSaturateWord`).
+fn quantize16(device: &[f64]) -> Vec<u16> {
+    device
+        .iter()
+        .map(|&v| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "v is in [0, 1]"
+            )]
+            {
+                (v * 65535.0 + 0.5) as u16
+            }
+        })
+        .collect()
+}
+
+// The bounds the precision tiers (#423) are held to. Each tier is the `Precalculate`
+// construction (same grid, same joined curves, same interpolation mode) with narrower node
+// storage and arithmetic, so each is measured **against `Precalculate` itself** — isolating
+// the error the tier adds, not re-measuring the resampling it shares — and the fixed-point
+// tier additionally against lcms2's default path, which is the same representation. Measured
+// on this battery (lcms2 2.19):
+//
+//   tier                 metric                                 measured max (shaper / LUT)
+//   PrecalculateF32      device units vs our Precalculate        1.04e-7 (both classes)
+//   PrecalculateFixed16  ΔE₀₀ vs our Precalculate (u16 entry)    2.88e-3 / 7.12e-3
+//   PrecalculateFixed16  ΔE₀₀ vs lcms2 default path (u16 entry)  3.29e-3 / 6.87e-3
+//
+// `PrecalculateF32` is measured in device units for the reason `Collapse` is: the ΔE₀₀ lens is
+// an lcms2 transform with f32 internals, which cannot resolve an f32 last-place difference.
+// Its bound is the f32 tier's own definition — a few f32 ulps of a `[0, 1]` sample (2⁻²⁴ ≈
+// 6e-8 each; the measured 1.04e-7 is under two) through one interpolation.
+//
+// `PrecalculateFixed16`'s **contract** is the LOOSE row verbatim, exactly as for
+// `Precalculate`: it is the representation lcms2's default 16-bit path runs, so "no worse than
+// the approximation lcms2's own default path makes" is the promise. As there, the contract
+// sits far above what the tier does, so a drift guard at ~3× the measured maxima is asserted
+// beside it. What the tier adds over `Precalculate` is 16-bit node quantization (≤ 0.5 code)
+// and 16.16 interpolation rounding (≤ 1 code), worst at the steep deep-shadow end of a
+// γ-encoded destination (srgb→p3) and at the grid-9 printer's CMYK ends. Against lcms2's
+// default path it lands where `Precalculate` already does (2.98e-3 / 7.12e-3, the
+// optimization table above): the two sides now share the representation as well as the
+// construction, and what remains between them is how each computes its node values (lcms2
+// samples its f32 stage pipeline at 16-bit-quantized node coordinates, this crate its f64
+// pipeline at exact ones), not the tier.
+const F32_TIER_BOUND: f64 = 3e-7; // 2.90× over 1.04e-7
+const FIXED16_SHAPER_DRIFT: f64 = 1e-2; // 3.04× over 3.29e-3
+const FIXED16_LUT_DRIFT: f64 = 2e-2; // 2.81× over 7.12e-3
+
+#[test]
+fn precision_tiers_stay_inside_their_budget() {
+    set_quiet_log_handler();
+    let battery = battery();
+    let lab = lab4();
+    // As for the optimization budget: the tiers are intent-blind, so two intents with BPC off
+    // cover the stage shapes.
+    let intents = [
+        (RenderingIntent::Perceptual, INTENT_PERCEPTUAL),
+        (
+            RenderingIntent::MediaRelativeColorimetric,
+            INTENT_RELATIVE_COLORIMETRIC,
+        ),
+    ];
+    let mut narrow = Worst::default();
+    let mut fixed = [Worst::default(), Worst::default()]; // [Shaper, Lut]
+    let mut fixed_vs_lcms = [Worst::default(), Worst::default()];
+    for (src_name, dst_name, class) in PAIRS {
+        let src = find(&battery, src_name);
+        let dst = find(&battery, dst_name);
+        let lens = Transform::new(
+            &dst.oracle,
+            dst.dbl_format,
+            &lab,
+            TYPE_Lab_DBL,
+            INTENT_RELATIVE_COLORIMETRIC,
+            FLAGS_NOCACHE,
+        );
+        for (our_intent, lcms_intent) in intents {
+            let cell = format!("{src_name}->{dst_name} {our_intent:?}");
+            let build = |optimization| {
+                IccTransform::between(
+                    &src.parsed,
+                    &dst.parsed,
+                    TransformOptions {
+                        intent: our_intent,
+                        black_point_compensation: false,
+                        optimization,
+                        prefer_cicp_transfer: false,
+                    },
+                )
+                .unwrap()
+            };
+            let reference = build(PipelineOptimization::Precalculate);
+            let tier_f32 = build(PipelineOptimization::PrecalculateF32);
+            let tier_fixed16 = build(PipelineOptimization::PrecalculateFixed16);
+            let lcms_loose = Transform::new(
+                &src.oracle,
+                src.u16_format,
+                &dst.oracle,
+                dst.u16_format,
+                lcms_intent,
+                FLAGS_NOWHITEONWHITEFIXUP,
+            );
+            let class_slot = usize::from(class == Class::Lut);
+            for device in sweep(src.channels, 40, 0x7135_0423 ^ u64::from(lcms_intent)) {
+                let device16 = quantize16(&device);
+                let device_q: Vec<f64> = device16.iter().map(|&v| f64::from(v) / 65535.0).collect();
+                let wide = eval_ours(&reference, &device_q);
+                for (x, y) in wide.iter().zip(&eval_ours(&tier_f32, &device_q)) {
+                    narrow.feed((x - y).abs(), &cell);
+                }
+                // The fixed-point tier through its native 16-bit entry point.
+                let mut codes = vec![0_u16; dst.channels];
+                tier_fixed16.transform_u16(&device16, &mut codes).unwrap();
+                let ours16: Vec<f64> = codes.iter().map(|&v| f64::from(v) / 65535.0).collect();
+                fixed[class_slot].feed(lens_delta_e(&lens, &wide, &ours16, dst.ink_scale), &cell);
+                let want16 = lcms_loose.apply_u16(&device16, 1, dst.channels);
+                let want: Vec<f64> = want16.iter().map(|&v| f64::from(v) / 65535.0).collect();
+                fixed_vs_lcms[class_slot]
+                    .feed(lens_delta_e(&lens, &ours16, &want, dst.ink_scale), &cell);
+            }
+        }
+    }
+    eprintln!(
+        "precision tiers: f32 {:.3e} device units ({}), \
+         fixed16 shaper {:.3e} ({}), fixed16 LUT {:.3e} ({}), \
+         fixed16-vs-lcms shaper {:.3e} ({}), fixed16-vs-lcms LUT {:.3e} ({})",
+        narrow.value,
+        narrow.cell,
+        fixed[0].value,
+        fixed[0].cell,
+        fixed[1].value,
+        fixed[1].cell,
+        fixed_vs_lcms[0].value,
+        fixed_vs_lcms[0].cell,
+        fixed_vs_lcms[1].value,
+        fixed_vs_lcms[1].cell,
+    );
+    assert!(
+        narrow.value < F32_TIER_BOUND,
+        "f32 tier max device deviation {:.3e} at {}",
+        narrow.value,
+        narrow.cell
+    );
+    // The f32 tier really narrows: bit-identical output would mean it silently ran in f64.
+    assert!(narrow.value > 0.0, "the f32 tier moved nothing");
+    let bounds = [LOOSE_SHAPER_BOUND, LOOSE_LUT_BOUND];
+    let drift = [FIXED16_SHAPER_DRIFT, FIXED16_LUT_DRIFT];
+    for (slot, name) in [(0, "shaper"), (1, "LUT")] {
+        for (worst, what) in [
+            (&fixed[slot], "fixed16"),
+            (&fixed_vs_lcms[slot], "fixed16-vs-lcms"),
+        ] {
+            assert!(
+                worst.value < bounds[slot],
+                "{what}/{name} max ΔE00 {:.3e} at {}",
+                worst.value,
+                worst.cell
+            );
+            assert!(
+                worst.value < drift[slot],
+                "{what}/{name} drifted: max ΔE00 {:.3e} at {} (guard {:.3e})",
+                worst.value,
+                worst.cell,
+                drift[slot]
+            );
+        }
+        // Quantizing the nodes is a real approximation: zero would mean the tier never ran.
+        assert!(
+            fixed[slot].value > 1e-5,
+            "fixed16/{name} moved nothing — did the tier run?"
+        );
+    }
+}
+
 #[test]
 fn multiprofile_chain_matches_lcms2() {
     set_quiet_log_handler();
