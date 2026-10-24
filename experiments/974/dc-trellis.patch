@@ -1,0 +1,163 @@
+diff --git a/crates/gamut-jpeg/src/encoder.rs b/crates/gamut-jpeg/src/encoder.rs
+index d332fdc5..43228de9 100644
+--- a/crates/gamut-jpeg/src/encoder.rs
++++ b/crates/gamut-jpeg/src/encoder.rs
+@@ -982,10 +982,14 @@ fn encode_block(
+     comp: &Component,
+     block_x: usize,
+     block_y: usize,
++    dc: Option<i32>,
+     dc_pred: &mut i32,
+     coder: &mut BaselineCoder,
+ ) {
+-    let q = quantize_block_rd(comp.plane, comp.quant, block_x, block_y, comp.rd);
++    let mut q = quantize_block_rd(comp.plane, comp.quant, block_x, block_y, comp.rd);
++    if let Some(dc) = dc {
++        q[0] = dc;
++    }
+     encode_quantized_block(&q, dc_pred, comp.dest, coder);
+ }
+ 
+@@ -1049,6 +1053,40 @@ fn encode_scan(
+     let mcus_x = width.div_ceil(mcu_w);
+     let mcus_y = height.div_ceil(mcu_h);
+ 
++    // Experiment #974 variant (DC trellis): plan each RD component's DC values over its
++    // coding-order block sequence before the walk, with the restart resets the walk applies.
++    let dc_plan: Vec<Option<Vec<i32>>> = components
++        .iter()
++        .map(|comp| {
++            let ctx = comp.rd?;
++            let (mut dcs, mut starts) = (Vec::new(), Vec::new());
++            let mut mcu_index = 0u32;
++            for my in 0..mcus_y {
++                for mx in 0..mcus_x {
++                    let restart = restart_interval != 0
++                        && mcu_index.is_multiple_of(u32::from(restart_interval));
++                    for by in 0..u32::from(comp.v) {
++                        for bx in 0..u32::from(comp.h) {
++                            let block_x = (mx * u32::from(comp.h) + bx) as usize;
++                            let block_y = (my * u32::from(comp.v) + by) as usize;
++                            dcs.push(dct_block(comp.plane, block_x, block_y)[0]);
++                            starts.push(restart && by == 0 && bx == 0);
++                        }
++                    }
++                    mcu_index += 1;
++                }
++            }
++            let spec = if comp.dest == 0 {
++                &huffman::STD_LUMA_DC
++            } else {
++                &huffman::STD_CHROMA_DC
++            };
++            let table = EncTable::from_spec(spec);
++            Some(rd::dc_trellis(&dcs, &starts, comp.quant[0], &table, ctx))
++        })
++        .collect();
++    let mut block_seq = vec![0usize; components.len()];
++
+     let mut dc_pred = vec![0i32; components.len()];
+     let mut mcu_index = 0u32;
+     let mut restart_m = 0u8;
+@@ -1068,7 +1106,9 @@ fn encode_scan(
+                     for bx in 0..u32::from(comp.h) {
+                         let block_x = (mx * u32::from(comp.h) + bx) as usize;
+                         let block_y = (my * u32::from(comp.v) + by) as usize;
+-                        encode_block(comp, block_x, block_y, &mut dc_pred[ci], coder);
++                        let dc = dc_plan[ci].as_ref().map(|plan| plan[block_seq[ci]]);
++                        block_seq[ci] += 1;
++                        encode_block(comp, block_x, block_y, dc, &mut dc_pred[ci], coder);
+                     }
+                 }
+             }
+diff --git a/crates/gamut-jpeg/src/rd.rs b/crates/gamut-jpeg/src/rd.rs
+index f4ce482f..9c8d8631 100644
+--- a/crates/gamut-jpeg/src/rd.rs
++++ b/crates/gamut-jpeg/src/rd.rs
+@@ -275,6 +275,86 @@ pub(crate) fn trellis_quantize(dct: &[i32; 64], quant: &[u8; 64], ctx: &RdCtx) -
+     q
+ }
+ 
++/// Experiment #974 variant, not shipped: chooses one component's quantized DC values jointly over
++/// its coding-order block sequence, minimizing `J = Σ d_i + λ·Σ R(DIFF_i)`. `DIFF_i = q_i − q_(i−1)`
++/// is the §F.1.2.1 difference, whose predictor is 0 at the first block and at every block
++/// `seg_start` marks (the first block after a restart). `R` is the DC symbol's code length in
++/// `dc_rate` (the typical Annex K.3 or K.4 table, the AC trellis's fixed-proxy choice) plus its
++/// `SSSS` magnitude bits; `d_i` is the step-normalized squared error, as for AC. λ is the
++/// context's unmodulated λ. Two candidates per block: nearest rounding first, then the other
++/// neighbouring multiple of the step, so ties and λ = 0 reproduce plain rounding.
++pub(crate) fn dc_trellis(
++    dc: &[i32],
++    seg_start: &[bool],
++    step: u8,
++    dc_rate: &EncTable,
++    ctx: &RdCtx,
++) -> Vec<i32> {
++    let s = i64::from(step);
++    let cands: Vec<[i64; 2]> = dc
++        .iter()
++        .map(|&c| {
++            let near = i64::from(round_div_nearest(c, i32::from(step)));
++            let other = if i64::from(c) >= near * s {
++                near + 1
++            } else {
++                near - 1
++            };
++            [near, other]
++        })
++        .collect();
++    let dist = |i: usize, v: i64| -> i64 {
++        let e = i64::from(dc[i]) - v * s;
++        ((e * e) << FIX_SHIFT) / (s * s)
++    };
++    // Every 8-bit DC difference has a category the standard tables code; the fallback only keeps
++    // an impossible one from being chosen.
++    let rate = |diff: i64| -> i64 {
++        let cat = magnitude_category(diff as i32);
++        dc_rate
++            .lookup(cat)
++            .map_or(1 << 20, |(_, len)| i64::from(len) + i64::from(cat))
++    };
++    let n = dc.len();
++    let mut cost = vec![[0i64; 2]; n];
++    let mut parent = vec![[0usize; 2]; n];
++    for i in 0..n {
++        for c in 0..2 {
++            let v = cands[i][c];
++            let d = dist(i, v);
++            cost[i][c] = if i == 0 || seg_start[i] {
++                d + ctx.lambda * rate(v)
++            } else {
++                let (mut best, mut arg) = (i64::MAX, 0);
++                for p in 0..2 {
++                    let t = cost[i - 1][p] + ctx.lambda * rate(v - cands[i - 1][p]);
++                    if t < best {
++                        (best, arg) = (t, p);
++                    }
++                }
++                parent[i][c] = arg;
++                best + d
++            };
++        }
++    }
++    // Backtrack; a segment's last block is free of the next segment, so it takes its own best.
++    let mut out = vec![0i32; n];
++    let mut c = n
++        .checked_sub(1)
++        .map_or(0, |l| usize::from(cost[l][1] < cost[l][0]));
++    for i in (0..n).rev() {
++        out[i] = cands[i][c] as i32;
++        if i > 0 {
++            c = if seg_start[i] {
++                usize::from(cost[i - 1][1] < cost[i - 1][0])
++            } else {
++                parent[i][c]
++            };
++        }
++    }
++    out
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
