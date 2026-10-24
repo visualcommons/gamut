@@ -45,7 +45,7 @@ impl DeflateEncoder {
     /// The default [`Level::Best`] optimal-parse limit: the largest span the shortest-path parse
     /// handles in one piece, unless overridden by [`DeflateEncoder::with_optimal_parse_limit`].
     ///
-    /// 1 MiB, chosen so a single span's dynamic program stays cheap in working set — 12 MiB of
+    /// 1 MiB, chosen so a single span's dynamic program stays cheap in working set — 22 MiB of
     /// parse state at most (see [`DeflateEncoder::with_optimal_parse_limit`] for the arithmetic).
     /// Inputs larger than this are parsed as consecutive spans of this size rather than falling
     /// back to lazy matching, so total input size never decides whether the optimal parse runs.
@@ -93,15 +93,20 @@ impl DeflateEncoder {
     ///
     /// **What the limit costs is memory, not time.** The shortest-path parse holds three
     /// span-length vectors for each refinement pass — the cost row, the chosen length and the
-    /// chosen distance — which is **12 bytes of working set for every byte of span**, and the
-    /// widest span is `min(max(limit, 32 KiB), input length)`. The limit is the only bound on it:
-    /// set it past the input's length (`usize::MAX`) and one encode's peak memory grows linearly
-    /// and without bound in the input. The parse's work is linear in the input whatever the span,
-    /// so wall time at a fixed [`with_effort`](Self::with_effort) budget stays roughly flat as the
-    /// limit rises — `gamut-png` measured peak resident set 177.9 → 701.8 MiB against
-    /// 133.9 → 132.7 s on a 4096x4096 RGB photograph, default limit against none — though a
-    /// wider span can take more refinement passes to converge on some material, so time is
-    /// data-dependent rather than strictly flat.
+    /// chosen distance — which is 12 bytes for every byte of span. Beside them it keeps the span's
+    /// match-finder results, searched once and read back by every pass: 2 bytes per position plus
+    /// 4 per match run there, capped at two runs per span byte on average (positions past the cap
+    /// are searched again in each pass instead, with the same result). So the working set is
+    /// **at most 22 bytes for every byte of span** — about 16 to 19 on photographic, flat and
+    /// periodic material, which averages 0.6 to 1.1 runs per byte — and the widest span is
+    /// `min(max(limit, 32 KiB), input length)`. The limit is the only bound on it: set it past
+    /// the input's length (`usize::MAX`) and one encode's peak memory grows linearly and without
+    /// bound in the input. The parse's work is linear in the input whatever the span, so wall
+    /// time at a fixed [`with_effort`](Self::with_effort) budget stays roughly flat as the limit
+    /// rises — `gamut-png` measured peak resident set 177.9 → 701.8 MiB against 133.9 → 132.7 s
+    /// on a 4096x4096 RGB photograph, default limit against none, before the match results were
+    /// kept (#959) — though a wider span can take more refinement passes to converge on some
+    /// material, so time is data-dependent rather than strictly flat.
     ///
     /// The knob is ignored at every other level.
     #[must_use]
