@@ -1,0 +1,109 @@
+diff --git a/crates/gamut-jpeg/src/encoder.rs b/crates/gamut-jpeg/src/encoder.rs
+index d332fdc5..220cfa5f 100644
+--- a/crates/gamut-jpeg/src/encoder.rs
++++ b/crates/gamut-jpeg/src/encoder.rs
+@@ -933,7 +933,7 @@ fn emit_symbol(writer: &mut BitWriter, table: Option<&EncTable>, symbol: u8) {
+ 
+ /// Gathers and level-shifts one 8×8 block of `plane` at block coordinates `(bx, by)` and runs the
+ /// forward DCT (§A.3.1 / §A.3.3), returning the natural-order **unquantized** coefficients.
+-fn dct_block(plane: &Plane, bx: usize, by: usize) -> [i32; 64] {
++fn dct_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usize) -> [i32; 64] {
+     // Gather the level-shifted samples in natural (raster) order.
+     let mut block = [0i32; 64];
+     for row in 0..8usize {
+@@ -941,16 +941,85 @@ fn dct_block(plane: &Plane, bx: usize, by: usize) -> [i32; 64] {
+             block[row * 8 + col] = plane.level_shifted(bx * 8 + col, by * 8 + row);
+         }
+     }
++    overshoot_deringing(&mut block, quant[0]);
+     fdct8x8(&mut block);
+     block
+ }
+ 
++/// Experiment #974 variant, not shipped: mozjpeg's overshoot deringing (`preprocess_deringing` in
++/// its `jcdctmgr.c`). A decoder clamps reconstructed samples to 255 (§A.3.1 inverse level shift
++/// and clamp), so a run of saturated samples codes equally well as any value at or above the
++/// ceiling. Each zig-zag-order run of level-shifted 127s becomes a Catmull-Rom bump through the
++/// ceiling whose end slopes follow the run's neighbours, capped at
++/// `127 + min(31, 2·dc_step, (127·64 − Σ samples) / run samples)`, which lets the transform spend
++/// less on the ringing a hard edge into the ceiling produces. Blocks with no saturated sample, or
++/// only saturated samples, are untouched. Applied to every component, as mozjpeg does.
++fn overshoot_deringing(block: &mut [i32; 64], dc_step: u8) {
++    const MAX: i32 = 255 - 128;
++    let sum: i32 = block.iter().sum();
++    let count = block.iter().filter(|&&s| s >= MAX).count() as i32;
++    if count == 0 || count == 64 {
++        return;
++    }
++    let max_overshoot = MAX + 31.min(2 * i32::from(dc_step)).min((MAX * 64 - sum) / count);
++    let at = |b: &[i32; 64], k: usize| b[ZIGZAG[k]];
++    let mut n = 0usize;
++    while n < 64 {
++        if at(block, n) < MAX {
++            n += 1;
++            continue;
++        }
++        // A run of saturated samples: `start` is its first position, `end` the first past it.
++        let start = n;
++        n += 1;
++        while n < 64 && at(block, n) >= MAX {
++            n += 1;
++        }
++        let end = n;
++        let f1 = at(block, start.saturating_sub(1));
++        let f2 = at(block, start.saturating_sub(2));
++        let l1 = at(block, end.min(63));
++        let l2 = at(block, if end < 62 { end + 1 } else { 63 });
++        let mut fslope = (f1 - f2).max(MAX - f1);
++        let mut lslope = (l1 - l2).max(MAX - l1);
++        // A run touching either end of the block has no slope there: make the bump symmetric.
++        if start == 0 {
++            fslope = lslope;
++        }
++        if end == 64 {
++            lslope = fslope;
++        }
++        let length = (end - start) as i32;
++        let step = 1.0 / (length + 1) as f32;
++        let mut position = step;
++        for k in start..end {
++            let v = catmull_rom(MAX - fslope, MAX, MAX, MAX - lslope, position, length);
++            block[ZIGZAG[k]] = (v.ceil() as i32).min(max_overshoot);
++            position += step;
++        }
++        n += 1;
++    }
++}
++
++/// The Catmull-Rom (cubic Hermite) segment from `v2` to `v3` at `t ∈ [0, 1]`, its tangents taken
++/// from `v1` and `v4` and scaled by `size`, as mozjpeg's deringing evaluates it.
++fn catmull_rom(v1: i32, v2: i32, v3: i32, v4: i32, t: f32, size: i32) -> f32 {
++    let tan1 = ((v3 - v1) * size) as f32;
++    let tan2 = ((v4 - v2) * size) as f32;
++    let (t2, t3) = (t * t, t * t * t);
++    let f1 = 2.0 * t3 - 3.0 * t2 + 1.0;
++    let f2 = -2.0 * t3 + 3.0 * t2;
++    let f3 = t3 - 2.0 * t2 + t;
++    let f4 = t3 - t2;
++    v2 as f32 * f1 + tan1 * f3 + v3 as f32 * f2 + tan2 * f4
++}
++
+ /// Level-shifts, forward-transforms and quantizes one 8×8 block of `plane` at block coordinates
+ /// `(bx, by)` (§A.3.1 / §A.3.3 / §A.3.4), returning the natural-order quantized coefficients. Shared
+ /// by the baseline single-pass coder ([`encode_block`]) and the progressive encoder
+ /// ([`crate::progressive`]), which materializes every block up front before running the scan script.
+ pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usize) -> [i32; 64] {
+-    let block = dct_block(plane, bx, by);
++    let block = dct_block(plane, quant, bx, by);
+     // Quantize (§A.3.4): round-to-nearest divide by the table entry (which is ≥ 1).
+     let mut q = [0i32; 64];
+     for (dst, (&coeff, &step)) in q.iter_mut().zip(block.iter().zip(quant.iter())) {
+@@ -972,7 +1041,7 @@ pub(crate) fn quantize_block_rd(
+ ) -> [i32; 64] {
+     match rd {
+         None => quantize_block(plane, quant, bx, by),
+-        Some(ctx) => rd::trellis_quantize(&dct_block(plane, bx, by), quant, ctx),
++        Some(ctx) => rd::trellis_quantize(&dct_block(plane, quant, bx, by), quant, ctx),
+     }
+ }
+ 
