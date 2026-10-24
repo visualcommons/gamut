@@ -30,16 +30,40 @@
 //!   `(B·A)·x + (B·a + b)` rounds differently in the last places, and eliding an identity
 //!   affine drops multiplications by `0.0` that today turn a non-finite sample into `NaN`
 //!   across every output channel. Measured against unoptimized output over the conformance
-//!   battery the worst deviation is **1.0e-15 device units** — three ulps of a sample, and
+//!   battery the worst deviation is **7.06e-16 device units** — a few ulps of a sample, and
 //!   below what the gate's ΔE₀₀ lens can even resolve (STATUS.md).
 //! - **[`Precalculate`]** is the lossy tier, and deliberately the *same* construction lcms2's
 //!   default path applies: a 4096-point joined curve table and a grid-33 (RGB) / grid-17
 //!   (CMYK) / grid-7 (hifi) resampled CLUT. Its budget is therefore the conformance gate's
-//!   **LOOSE** row — max ΔE₀₀ `< 6e-1` for shaper pairs and `< 2.0` for LUT pairs (measured
-//!   2.6e-1 / 5.1e-2) — because that row already measures exactly this approximation on the
-//!   oracle's side (STATUS.md, "Conformance gate (P7)"). Matching lcms2's construction rather
-//!   than inventing one also brings the *outputs* together: optimized-vs-lcms2-optimized
-//!   measures 3.5e-3 ΔE₀₀ where unoptimized-vs-lcms2-optimized measures 3.3e-1.
+//!   **LOOSE** row — max ΔE₀₀ `< 1.0` for shaper pairs and `< 5.0` for LUT pairs (measured
+//!   1.08e-1 / 6.35e-2, with drift guards at `< 3e-1` / `< 2e-1`) — because that row already
+//!   measures exactly this approximation on the oracle's side (STATUS.md, "Conformance gate
+//!   (P7)"). Matching lcms2's construction rather than inventing one also brings the
+//!   *outputs* together: optimized-vs-lcms2-optimized measures 2.98e-3 ΔE₀₀ where
+//!   unoptimized-vs-lcms2-optimized measures 3.92e-1.
+//!
+//! # Precision tiers
+//!
+//! [`PrecalculateF32`](PipelineOptimization::PrecalculateF32) and
+//! [`PrecalculateFixed16`](PipelineOptimization::PrecalculateFixed16) run exactly the
+//! [`Precalculate`] construction — same grid, same joined curves, same interpolation mode — and
+//! store the resampled table at a narrower [`NodePrecision`]. Each is gated against
+//! `Precalculate` itself, so the budget is the error the tier *adds*:
+//!
+//! - **`f32`** — nodes rounded to `f32` and interpolated at that width: lcms2's own float
+//!   interpolators, bit for bit. Measured ≤ 1.04e-7 device units over the conformance battery
+//!   (under two `f32` ulps of a sample), half the node memory.
+//! - **16-bit fixed point** — nodes encoded to 16-bit codes and interpolated by transcriptions
+//!   of lcms2's integer interpolators, bit for bit. Under the 8- and 16-bit buffer entry points
+//!   ([`crate::Transform::transform_u8`]/[`crate::Transform::transform_u16`]) the whole
+//!   evaluation is integer arithmetic; an 8-bit code widens with lcms2's `FROM_8_TO_16` and the
+//!   result narrows with `FROM_16_TO_8`. Measured ≤ 2.88e-3 / 7.12e-3 ΔE₀₀ (shaper / LUT
+//!   pairs) against `Precalculate`, and 3.29e-3 / 6.87e-3 against lcms2's default 16-bit path
+//!   — where `Precalculate` itself lands. A quarter of the node memory.
+//!
+//! When the resampling declines (a PCS end, a single stage, the node ceiling), every tier
+//! leaves the pipeline exactly as `Precalculate` does — there is no table to narrow — and the
+//! integer entry points convert through `f64`.
 //!
 //! One deliberate divergence from lcms2: no white-point "scum dot" fixup is applied to the
 //! resampled table (lcms2's `PatchLUT`, which its callers disable with
@@ -83,7 +107,10 @@ pub enum PipelineOptimization {
     /// [`Precalculate`](Self::Precalculate) with the resampled CLUT stored and interpolated
     /// in **`f32`** ([`NodePrecision::F32`]) — lcms2's own float-interpolator width, at half
     /// the node memory. Its added error over `Precalculate` is `f32` rounding of the nodes and
-    /// the interpolation (module docs, "Precision tiers").
+    /// the interpolation (module docs, "Precision tiers"). It buys lcms2's float arithmetic and
+    /// the memory, **not** speed: scalar `f32` costs what `f64` does, plus a conversion at each
+    /// end, so it measures slightly *slower* than `Precalculate` (`STATUS.md`, "Throughput
+    /// (#423)") — [`PrecalculateFixed16`](Self::PrecalculateFixed16) is the throughput tier.
     PrecalculateF32 = 3,
     /// [`Precalculate`](Self::Precalculate) with the resampled CLUT stored as **16-bit
     /// codes** and interpolated in 16.16 fixed point ([`NodePrecision::Fixed16`]) — the

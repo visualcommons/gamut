@@ -49,8 +49,7 @@ pub trait Transform {
     /// (`floor(v · 65535 + 0.5)`, saturating, NaN → 0), so a transform that overrides nothing
     /// keeps its `f64` numerics. A transform with a native integer path overrides it — a
     /// pipeline resampled at
-    /// [`PipelineOptimization::PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16)
-    /// interpolates the codes directly, with no float conversion on either side.
+    /// [`PipelineOptimization::PrecalculateFixed16`] interpolates the codes directly, with no float conversion on either side.
     ///
     /// # Errors
     ///
