@@ -524,21 +524,46 @@ pub fn clut_slice(
     })
 }
 
-/// Renders a slice for the screen: three outputs read as v4-encoded PCS Lab and shown through
-/// [`Display`]; four as CMYK inks over white paper (a naive preview — the full pipeline panel
-/// shows the real proof); anything else as the first channel in grey.
-#[must_use]
-pub fn slice_rgb8(slice: &ClutSlice, display: &Display) -> Vec<u8> {
-    slice
-        .samples
-        .chunks_exact(slice.outputs)
-        .flat_map(|s| match s {
-            [l, a, b] => display.lab_to_rgb8([l * 100.0, a * 255.0 - 128.0, b * 255.0 - 128.0]),
-            [c, m, y, k] => [c, m, y].map(|&ink| to_u8((1.0 - ink) * (1.0 - k))),
-            [v, ..] => [to_u8(*v); 3],
-            [] => [0; 3],
-        })
-        .collect()
+/// Renders a slice for the screen. Three outputs are read as v4-encoded PCS Lab (every
+/// three-output CLUT in the battery is a device → Lab table) and shown through [`Display`].
+/// Four outputs are CMYK device values, shown as `profile` renders them: through its own
+/// device → PCS link (media-relative) and then [`Display`], so the preview is the printer's
+/// colour, not a guess at it. Any other count (the one-channel `gamt` table) is data rather than
+/// colour, and is drawn as its first channel in grey.
+///
+/// # Errors
+///
+/// [`CmmError`] when a four-output slice's `profile` has no device → PCS rendition.
+pub fn slice_rgb8(
+    slice: &ClutSlice,
+    profile: &IccProfile,
+    display: &Display,
+) -> Result<Vec<u8>, CmmError> {
+    let device = if slice.outputs == 4 {
+        Some(device_to_pcs(
+            profile,
+            RenderingIntent::MediaRelativeColorimetric,
+        )?)
+    } else {
+        None
+    };
+    let mut out = Vec::with_capacity(slice.samples.len() / slice.outputs.max(1) * 3);
+    for s in slice.samples.chunks_exact(slice.outputs.max(1)) {
+        let rgb = match (s, &device) {
+            ([l, a, b], _) => {
+                display.lab_to_rgb8([l * 100.0, a * 255.0 - 128.0, b * 255.0 - 128.0])
+            }
+            ([_, _, _, _], Some(link)) => {
+                let mut pcs = [0.0; 3];
+                link.eval(s, &mut pcs)?;
+                display.lab_to_rgb8(pcs_to_lab(profile.header.pcs, pcs))
+            }
+            ([v, ..], _) => [to_u8(*v); 3],
+            ([], _) => [0; 3],
+        };
+        out.extend_from_slice(&rgb);
+    }
+    Ok(out)
 }
 
 // --- Full pipeline -------------------------------------------------------------------------
@@ -908,6 +933,32 @@ mod tests {
             slice.samples[0]
         );
         assert_eq!(slice.samples.len(), 5 * 5 * 3);
+    }
+
+    #[test]
+    fn cmyk_slice_renders_through_the_printer() {
+        let battery = battery();
+        let printer = battery.profile(ProfileKind::Printer).expect("parses");
+        let display = Display::new().expect("display link");
+        let (_, b2a1) = clut_tags(printer)
+            .into_iter()
+            .find(|(tag, _)| tag == "B2A1")
+            .expect("B2A1 has a CLUT");
+        // L* = 100 held, a* across, b* down: the centre pixel is the PCS white, which the
+        // separation leaves unprinted and the printer's A2B1 renders as white.
+        let slice = clut_slice(
+            b2a1,
+            ClutInterpolation::Tetrahedral,
+            1,
+            2,
+            &[1.0, 0.0, 0.0],
+            3,
+        )
+        .expect("slice");
+        let rgb = slice_rgb8(&slice, printer, &display).expect("A2B1 renders the inks");
+        assert_eq!(rgb.len(), 9 * 3);
+        let centre = &rgb[4 * 3..5 * 3];
+        assert!(centre.iter().all(|&c| c >= 250), "{centre:?}");
     }
 
     #[test]

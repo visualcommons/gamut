@@ -20,9 +20,10 @@
 //!   reduced to the max-ΔE₀₀ badge.
 //!
 //! The binary (`src/main.rs`, feature `gui`) draws those panels with egui/eframe, natively or in
-//! a browser canvas. **Every displayed pixel is converted to sRGB by `gamut-cmm` itself** and then
+//! a browser canvas. **Every displayed colour is converted to sRGB by `gamut-cmm` itself** and then
 //! handed to the canvas untagged, so neither the OS nor the browser colour-manages it a second
-//! time.
+//! time. The only exceptions are values that are data rather than colour: ink-coverage plates and
+//! the one-channel `gamt` table, which are drawn as grey levels.
 
 #[cfg(feature = "oracle")]
 pub mod conformance;

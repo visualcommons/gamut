@@ -351,7 +351,10 @@ impl SandboxApp {
                     let pixels = scene::chart_rgb8();
                     let mask = panels::gamut_mask(src, printer, &pixels, settings)
                         .map_err(|e| e.to_string())?;
-                    let out = pixels
+                    // The warning overlays the source as the display shows it.
+                    let shown = panels::to_display(src, display, &pixels, settings)
+                        .map_err(|e| e.to_string())?;
+                    let out = shown
                         .as_chunks::<3>()
                         .0
                         .iter()
@@ -362,7 +365,7 @@ impl SandboxApp {
                 },
             );
         });
-        ui.strong("Ink plates");
+        ui.strong("Ink plates (coverage as grey: data, not colour)");
         ui.horizontal(|ui| {
             for (index, name) in ["Cyan", "Magenta", "Yellow", "Black"]
                 .into_iter()
@@ -549,7 +552,8 @@ impl SandboxApp {
             (self.clut_interpolation, self.clut_axes, self.clut_fixed);
         show_image(&mut self.textures, ui, &caption, key, || {
             panels::clut_slice(clut, interpolation, axes[0], axes[1], &fixed, SIZE)
-                .map(|s| (panels::slice_rgb8(&s, display), [SIZE, SIZE]))
+                .and_then(|s| panels::slice_rgb8(&s, &profile, display))
+                .map(|rgb| (rgb, [SIZE, SIZE]))
                 .map_err(|e| e.to_string())
         });
     }
