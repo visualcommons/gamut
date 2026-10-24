@@ -337,7 +337,7 @@ workspace includes the vendored C/C++ oracles. At $MUTANTS_JOBS job(s) this runs
 a run that long is the one most likely to meet a mutant that allocates without limit.
 
 Pick a bound:
-  mise run mutants -- --diff                 only what this branch changed (what PR CI runs)
+  mise run mutants -- --diff                 only what this branch changed (what CI runs per push)
   mise run mutants -- --crate gamut-png      one package
   mise run mutants -- --shard 1/16           one shard of the whole workspace
   mise run mutants -- --all-at-once          you meant it
@@ -371,7 +371,8 @@ if [ -n "$want_diff" ]; then
 	# The base is the branch this work will merge into, which is not always master: this repo
 	# stacks pull requests on each other. Diffing a stacked branch against master would hand the
 	# gate every mutant the *base* branch introduced as well, failing it on already-reviewed code
-	# and blowing out the shard budget. CI passes the pull request's own base ref.
+	# and blowing out the shard budget. CI, which runs on push to master, passes the
+	# commit master pointed at before the push.
 	base_ref="${GAMUT_MUTANTS_BASE:-origin/master}"
 	git rev-parse --verify --quiet "$base_ref" >/dev/null ||
 		die "base ref $base_ref does not resolve; fetch it or set GAMUT_MUTANTS_BASE"

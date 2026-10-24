@@ -400,7 +400,7 @@ run = "./tooling/mutants/run.sh"
 # same budget, guards and dials as everything else. Arguments after the task name reach the
 # runner; anything after a second `--` is passed through to cargo-mutants verbatim.
 [tasks.mutants-diff]
-description = "Mutation testing of only the code changed vs master; fast (mirrors PR CI)"
+description = "Mutation testing of only the code changed vs master; fast (mirrors the master push CI run)"
 run = "./tooling/mutants/run.sh --diff"
 
 [tasks.mutants-crate]

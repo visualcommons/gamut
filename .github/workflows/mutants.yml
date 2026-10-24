@@ -3,13 +3,15 @@ name: Mutants
 # Mutation testing with cargo-mutants (https://mutants.rs). cargo-mutants is installed from
 # the pinned `mise.toml` entry via mise, so CI and local use the same binary.
 #
-# Two jobs:
-#   * incremental — runs on every PR, mutating only the code changed in the diff
-#     (`--in-diff`). BLOCKING: a surviving mutant in changed code fails the check, so new
-#     code must be mutation-covered.
-#   * full — manual (workflow_dispatch) full-workspace survey. Informational only
-#     (continue-on-error) and uploads a report; existing code still has gaps, so it must
-#     not gate merges. Flip to blocking once the baseline is clean.
+# Not run per pull request (issue #964): a blocking four-shard mutation pass on every PR held
+# up the review loop, so mutation testing moved after the merge. Two jobs:
+#   * incremental — runs on every push to master, mutating only the code that push changed
+#     (`--in-diff` against `github.event.before`). A surviving mutant fails the check, which
+#     turns that master commit red: it can no longer block the merge that already happened, but
+#     it is a visible failure on the commit that introduced the gap, not a buried report.
+#   * full — nightly (schedule) and manual (workflow_dispatch) full-workspace survey.
+#     Informational only (continue-on-error) and uploads a report; existing code still has
+#     gaps, so it must not read as a failure. Flip to blocking once the baseline is clean.
 #
 # Both jobs invoke `mise run mutants`, never `cargo mutants` directly. That runner
 # (tooling/mutants/run.sh) derives every parallelism dial from GAMUT_MUTANTS_BUDGET_GB and
@@ -20,31 +22,36 @@ name: Mutants
 # exhausting a 16 GB runner and getting the step SIGKILLed with no diagnostic.
 
 on:
-  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    # Nightly full survey, 06:00 UTC. GitHub runs schedules on the default branch only.
+    - cron: "0 6 * * *"
   workflow_dispatch:
-  # Uncomment to also run a full survey weekly (Mondays 06:00 UTC):
-  # schedule:
-  #   - cron: "0 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: mutants-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A push run scores only that push's own diff (`event.before..sha`), so a later push never
+  # re-covers it: cancelling or superseding it would leave that commit unscored for good. Each
+  # push therefore gets a group of its own, keyed on its SHA. A full survey covers the whole
+  # tree, so a newer one does supersede an older one on the same ref and cancels it.
+  group: mutants-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
-  # Mutate only the code changed by the PR. Fast and blocking.
+  # Mutate only the code changed by the push to master. Fails on a surviving mutant.
   incremental:
-    # Sharded because the runners are preemptible. A single pass over a large PR's mutants runs
+    # Sharded because the runners are preemptible. A single pass over a large diff's mutants runs
     # 80-plus minutes, and runs of that length were being killed partway through — "the runner has
     # received a shutdown signal" — at 51, 64 and 85 minutes across five attempts, every one of
     # them having missed nothing. The work is embarrassingly parallel and cargo-mutants shards it
     # natively, so four shards of roughly twenty minutes each finish inside the window instead of
     # racing it. Same total compute, and a lost shard costs a quarter of the job rather than all
     # of it.
-    name: Incremental (PR diff)
-    if: github.event_name == 'pull_request'
+    name: Incremental (push diff)
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     env:
       # 14 GiB of the runner's 16: the runner needs the rest, and the runner script derives
@@ -74,7 +81,7 @@ jobs:
           # in gamut-av1/avif/webp need them to build a green baseline. `aom`/`dav1d` are
           # `update = none` and arrive via the explicit fetch step below, not this checkout.
           submodules: recursive
-          # Full history so we can diff against the PR's base branch.
+          # Full history so the push's `before` commit is present to diff against.
           fetch-depth: 0
       - name: Install native build deps (vendored dav1d/libavif oracles; nasm is vendored)
         # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
@@ -153,22 +160,31 @@ jobs:
       # them, so it pulls them explicitly. Every other submodule still arrives with the checkout.
       - name: Fetch the AV1 oracle submodules
         run: mise run fetch-av1-oracles
-      # The runner script diffs against the merge base itself; this fetch is what makes that
-      # base resolvable, and the summary is for a human reading the log.
-      - name: Fetch the base branch and summarise the changed files
+      # The base is the commit master pointed at before this push, so the run scores exactly
+      # what the push added — not origin/master, which on a push *is* HEAD and diffs to nothing.
+      # The runner script takes the merge base with it itself; this step resolves it, hands it
+      # over as GAMUT_MUTANTS_BASE, and summarises the diff for a human reading the log.
+      # `before` is all zeros when the push created the ref, and absent from the clone when a
+      # force-push discarded it; both fall back to the pushed commit's first parent, which is
+      # the whole of a squash merge and the last commit of anything else.
+      - name: Resolve the push's base and summarise the changed files
+        env:
+          BEFORE: ${{ github.event.before }}
         run: |
-          git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
-          echo "Changed files cargo-mutants will consider:"
-          git --no-pager diff --stat "origin/${{ github.base_ref }}...HEAD"
+          base="$BEFORE"
+          if [ -z "$base" ] || [ "$base" = 0000000000000000000000000000000000000000 ] ||
+            ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "::warning::push base '$base' is not in the clone; diffing against HEAD^ instead"
+            base=$(git rev-parse HEAD^)
+          fi
+          echo "GAMUT_MUTANTS_BASE=$base" >> "$GITHUB_ENV"
+          echo "Changed files cargo-mutants will consider (vs $base):"
+          git --no-pager diff --stat "$base...HEAD"
       - name: Run cargo-mutants on the diff
         # Sharding is round-robin rather than the default contiguous slices; the runner passes
         # that, since mutants from one file land in one slice and a file whose tests are slow
         # would then load a single shard while the others idle.
-        # GAMUT_MUTANTS_BASE is the pull request's own base branch, not master: this repo stacks
-        # pull requests, and diffing a stacked branch against master would hand the gate every
-        # mutant the base branch introduced too — failing it on already-reviewed code.
-        env:
-          GAMUT_MUTANTS_BASE: origin/${{ github.base_ref }}
+        # GAMUT_MUTANTS_BASE comes from the step above, through GITHUB_ENV.
         # First-class runner flags, not a `--` passthrough: mise strips that separator on some
         # versions (it did here, and the shards failed with "unknown option --no-shuffle"), so
         # CI must not depend on it surviving. `--no-shuffle` is gone because it is already
@@ -184,10 +200,10 @@ jobs:
           name: mutants-incremental-shard-${{ matrix.shard }}
           path: mutants.out
 
-  # Full-workspace survey. Manual; informational only.
+  # Full-workspace survey. Nightly and manual, never per push; informational only.
   full:
     name: Full workspace
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
       # 14 GiB of the runner's 16: the runner needs the rest, and the runner script derives
