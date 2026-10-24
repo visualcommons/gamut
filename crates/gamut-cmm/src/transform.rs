@@ -7,7 +7,7 @@ use gamut_icc::{ColorSpace, DeviceClass, IccProfile, RenderingIntent};
 
 use crate::chain;
 use crate::error::{CmmError, Result};
-use crate::optimize::PipelineOptimization;
+use crate::optimize::{self, MatShaper8, PipelineOptimization};
 use crate::pipeline::{MAX_CHANNELS, Pipeline};
 
 /// A runnable colour transform: interleaved `f64` pixels in, interleaved `f64` pixels out.
@@ -262,6 +262,10 @@ impl Default for TransformOptions {
 #[must_use]
 pub struct IccTransform {
     pipeline: Pipeline,
+    /// lcms2's 8-bit matrix-shaper ([`optimize::mat_shaper_8`]), which `transform_u8` runs in
+    /// place of `pipeline` — present only at
+    /// [`PipelineOptimization::PrecalculateFixed16`] on an RGB → RGB matrix/TRC link.
+    mat_shaper: Option<MatShaper8>,
 }
 
 /// `MAX_ENCODEABLE_XYZ = 65535/32768` (lcms2 `lcms2_internal.h:71`): the factor between this
@@ -388,8 +392,16 @@ impl IccTransform {
         pipeline: Pipeline,
         optimization: PipelineOptimization,
     ) -> Result<Self> {
+        // Built from the link as it stands, before the resampling replaces the chain: the
+        // matrix-shaper is a different construction of the same stages, not a view of the CLUT.
+        let mat_shaper = if optimization == PipelineOptimization::PrecalculateFixed16 {
+            optimize::mat_shaper_8(&pipeline)?
+        } else {
+            None
+        };
         Ok(Self {
             pipeline: pipeline.optimized(optimization)?,
+            mat_shaper,
         })
     }
 
@@ -416,7 +428,10 @@ impl Transform for IccTransform {
     }
 
     fn transform_u8(&self, src: &[u8], dst: &mut [u8]) -> Result<()> {
-        self.pipeline.transform_u8(src, dst)
+        match &self.mat_shaper {
+            Some(mat_shaper) => mat_shaper.transform(src, dst),
+            None => self.pipeline.transform_u8(src, dst),
+        }
     }
 
     fn input_channels(&self) -> u8 {
