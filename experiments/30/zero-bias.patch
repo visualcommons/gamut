@@ -1,5 +1,5 @@
 diff --git a/crates/gamut-jpeg/src/encoder.rs b/crates/gamut-jpeg/src/encoder.rs
-index ecce964c..c27fceba 100644
+index ecce964c..5d3a2a85 100644
 --- a/crates/gamut-jpeg/src/encoder.rs
 +++ b/crates/gamut-jpeg/src/encoder.rs
 @@ -739,7 +739,7 @@ impl JpegEncoder {
@@ -178,7 +178,7 @@ index ecce964c..c27fceba 100644
                      quant: &luma_quant,
                      dest: 0,
 -                    rd: luma_rd.as_ref(),
-+                    rd: luma_rd.as_ref(), zero_bias: 0,
++                    rd: luma_rd.as_ref(), zero_bias: ZERO_BIAS_AC[0],
                  },
                  Component {
                      h: 1,
@@ -187,7 +187,7 @@ index ecce964c..c27fceba 100644
                      quant: &chroma_quant,
                      dest: 1,
 -                    rd: chroma_rd.as_ref(),
-+                    rd: chroma_rd.as_ref(), zero_bias: 0,
++                    rd: chroma_rd.as_ref(), zero_bias: ZERO_BIAS_AC[1],
                  },
                  Component {
                      h: 1,
@@ -196,7 +196,7 @@ index ecce964c..c27fceba 100644
                      quant: &chroma_quant,
                      dest: 1,
 -                    rd: chroma_rd.as_ref(),
-+                    rd: chroma_rd.as_ref(), zero_bias: 0,
++                    rd: chroma_rd.as_ref(), zero_bias: ZERO_BIAS_AC[2],
                  },
              ];
              self.write_baseline_frame(
