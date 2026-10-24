@@ -762,6 +762,21 @@ exclude_re = [
     # ±360° shift of either hue to the identical h̄′ (that invariance is the point of its
     # adjustment arms). Provably equivalent.
     'replace < with <= in ciede2000_hue_deg',
+    # gamut-cmm pipeline.rs Pipeline::fixed16 — the integer fast path's selection (#423), a
+    # performance choice with no observable output. `None` sends `transform_u16`/`transform_u8`
+    # through the provided `f64` conversion, which over a `NodePrecision::Fixed16` table computes
+    # the identical codes: on the way in `quantize16(v / 65535) = v` and
+    # `quantize16(v / 255) = 257·v = FROM_8_TO_16(v)` for every code (the products land within an
+    # ulp of an integer and the `+ 0.5` floor recovers it), the table then quantizes those same
+    # codes and runs the same `Fixed16::eval`, and on the way out `encode_u16(c / 65535) = c` and
+    # `encode_u8(c / 65535) = FROM_16_TO_8(c)` — verified for all 65 536 codes, and pinned by
+    # `widen_and_narrow_are_lcms2_from_8_to_16_and_from_16_to_8` (transform.rs) and
+    # `integer_entry_points_agree_with_the_f64_entry_point_on_every_tier` (pipeline.rs), which
+    # assert exactly that agreement. Equivalent by design: the two entry points are required to
+    # agree. Every other mutant on the fast path (the per-pixel loops, the widening and narrowing,
+    # the buffer checks) stays in the survey; `ClutTable::fixed16` stays too, since the clut.rs
+    # unit tests call it directly.
+    "replace Pipeline::fixed16 -> Option<Fixed16<'_>> with None",
     # gamut-cmm curve.rs — provably-equivalent mutants in tone-curve inversion/monotonicity.
     #   is_monotonic: deleting the tabulated arm falls through to the dense-probe path; both
     #   tabulated representations hold exactly MONOTONICITY_PROBES entries by construction

@@ -440,11 +440,15 @@ impl Pipeline {
     /// [`PipelineOptimization::PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16)
     /// produces whenever its resampling applies — or `None`, in which case the integer entry
     /// points convert through `f64`.
+    ///
+    /// The selection is a pure performance choice — both routes compute the same codes — so
+    /// its one whole-body mutant is excluded in `.cargo/mutants.toml` with that argument;
+    /// `let`-`else` rather than a `match` with a wildcard keeps it to that one mutant.
     fn fixed16(&self) -> Option<Fixed16<'_>> {
-        match self.stages.as_slice() {
-            [Stage::Clut(table)] => table.fixed16(),
-            _ => None,
-        }
+        let [Stage::Clut(table)] = self.stages.as_slice() else {
+            return None;
+        };
+        table.fixed16()
     }
 }
 
