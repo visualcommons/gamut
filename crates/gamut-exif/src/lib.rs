@@ -109,6 +109,7 @@ pub use gamut_ifd::{ByteOrder, FieldType, Ifd, Value};
 #[cfg(feature = "geocoordinates")]
 pub use gps::GpsConversionError;
 pub use gps::{GpsAltitude, GpsCoordinate, GpsInfo, GpsReference};
+pub use maker_note::canon::CanonMakerNote;
 pub use maker_note::{MakerNote, MakerNoteDialect, MakerNoteLayout, MakerNoteVendor, OffsetBase};
 pub use reader::ExifReader;
 pub use report::{DropReason, Dropped, DroppedEntry, DroppedRegion, EntryDropReason, ReadReport};
