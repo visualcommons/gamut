@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-av1"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-avif"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "gamut-av1",
  "gamut-codec-abi",
@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-bitstream"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "gamut-core",
 ]
@@ -1017,11 +1017,11 @@ dependencies = [
 
 [[package]]
 name = "gamut-dsp"
-version = "2.0.1"
+version = "2.0.2"
 
 [[package]]
 name = "gamut-exif"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "gamut-core",
  "gamut-ifd",
@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-ifd"
-version = "3.0.0"
+version = "3.1.0"
 dependencies = [
  "gamut-core",
 ]
@@ -1066,14 +1066,14 @@ dependencies = [
 
 [[package]]
 name = "gamut-isobmff"
-version = "3.0.0"
+version = "4.0.0"
 dependencies = [
  "gamut-core",
 ]
 
 [[package]]
 name = "gamut-jxl"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "gamut-codec-abi",
  "gamut-core",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-metadata"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "gamut-core",
  "gamut-exif",
