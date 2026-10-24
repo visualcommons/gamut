@@ -40,7 +40,7 @@ use lcms2_oracle::{
     FLAGS_BLACKPOINTCOMPENSATION, FLAGS_GAMUTCHECK, FLAGS_NOCACHE, FLAGS_NOOPTIMIZE,
     FLAGS_NOWHITEONWHITEFIXUP, FLAGS_SOFTPROOFING, INTENT_ABSOLUTE_COLORIMETRIC, INTENT_PERCEPTUAL,
     INTENT_RELATIVE_COLORIMETRIC, INTENT_SATURATION, Profile, TYPE_CMYK_16, TYPE_CMYK_DBL,
-    TYPE_GRAY_16, TYPE_GRAY_DBL, TYPE_Lab_DBL, TYPE_RGB_16, TYPE_RGB_DBL, Transform,
+    TYPE_GRAY_16, TYPE_GRAY_DBL, TYPE_Lab_DBL, TYPE_RGB_8, TYPE_RGB_16, TYPE_RGB_DBL, Transform,
     cie2000_delta_e, cmyk_ink_limiting_devicelink, cmyk_prtr_v2, cmyk_prtr_v4, display_p3_srgb_trc,
     gray, lab4, rgb_linearization_devicelink, rgb_matrix_shaper, rgb_matrix_shaper_d65_wtpt,
     scnr_lut, set_alarm_codes, set_quiet_log_handler, srgb,
@@ -792,6 +792,203 @@ fn precision_tiers_stay_inside_their_budget() {
             fixed[slot].value > 1e-5,
             "fixed16/{name} moved nothing — did the tier run?"
         );
+    }
+}
+
+/// The RGB → RGB matrix/TRC pairs lcms2 runs through `OptimizeMatrixShaper` under `TYPE_RGB_8`
+/// (#992): every RGB shaper of the battery as a source, sRGB as a destination, and the
+/// sRGB → wide-gamut direction, so the matrices reach both signs and the curves are parametric
+/// (sRGB, Display P3) and pure gamma (the wide pair).
+const MAT_SHAPER_PAIRS: [(&str, &str); 5] = [
+    ("srgb", "p3"),
+    ("p3", "srgb"),
+    ("wide", "srgb"),
+    ("srgb", "wide"),
+    ("wide-d65-wtpt", "srgb"),
+];
+
+/// Every 8-bit RGB pixel, `0x000000..=0xFFFFFF`, interleaved.
+fn rgb8_cube() -> Vec<u8> {
+    (0..=0x00FF_FFFF_u32)
+        .flat_map(|v| {
+            let [_, r, g, b] = v.to_be_bytes();
+            [r, g, b]
+        })
+        .collect()
+}
+
+/// The 8-bit matrix-shaper (#992) is lcms2's `OptimizeMatrixShaper` to the bit: over the whole
+/// 8-bit cube of every [`MAT_SHAPER_PAIRS`] pair, at the two intents that put no adjustment
+/// layer at the seam (where lcms2 also selects the pass), `PrecalculateFixed16` through
+/// `transform_u8` equals lcms2's `TYPE_RGB_8` transform at its default flags. A CLUT at any
+/// precision does not — this equality is also the evidence the pass ran.
+#[test]
+fn mat_shaper_8_matches_lcms2_rgb8_bit_for_bit() {
+    set_quiet_log_handler();
+    let battery = battery();
+    let cube = rgb8_cube();
+    let pixels = cube.len() / 3;
+    let intents = [
+        (RenderingIntent::Perceptual, INTENT_PERCEPTUAL),
+        (
+            RenderingIntent::MediaRelativeColorimetric,
+            INTENT_RELATIVE_COLORIMETRIC,
+        ),
+    ];
+    let mut ours = vec![0_u8; cube.len()];
+    for (src_name, dst_name) in MAT_SHAPER_PAIRS {
+        let (src, dst) = (find(&battery, src_name), find(&battery, dst_name));
+        for (our_intent, lcms_intent) in intents {
+            let transform = IccTransform::between(
+                &src.parsed,
+                &dst.parsed,
+                TransformOptions {
+                    intent: our_intent,
+                    optimization: PipelineOptimization::PrecalculateFixed16,
+                    ..TransformOptions::default()
+                },
+            )
+            .unwrap();
+            transform.transform_u8(&cube, &mut ours).unwrap();
+            let want = Transform::new(
+                &src.oracle,
+                TYPE_RGB_8,
+                &dst.oracle,
+                TYPE_RGB_8,
+                lcms_intent,
+                0,
+            )
+            .apply_u8(&cube, pixels, 3);
+            let mismatches = ours.iter().zip(&want).filter(|(a, b)| a != b).count();
+            let first = ours
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(want.as_chunks::<3>().0)
+                .zip(cube.as_chunks::<3>().0)
+                .find(|((a, b), _)| a != b);
+            assert_eq!(
+                mismatches, 0,
+                "{src_name}->{dst_name} {our_intent:?}: first (ours, lcms2, input) {first:?}"
+            );
+        }
+    }
+}
+
+// The matrix-shaper's (#992) budget against the Tier-1 reference: our own `f64` stage-by-stage
+// evaluation (`PipelineOptimization::None`) through the same 8-bit entry point, so both sides
+// are 8-bit codes and the comparison sees only what the pass adds, not the output rounding
+// every 8-bit path pays. Measured on `MAT_SHAPER_PAIRS` × all four intents × a 4096-pixel sweep
+// (lcms2 2.19):
+//
+//   metric                                  measured max                  mean
+//   codes vs `None`, `transform_u8`          2 (srgb->wide perceptual)     8.84e-3
+//   ΔE₀₀ of those codes, dst lens            1.38e0 (srgb->wide saturation) 5.83e-3
+//
+// The LOOSE rows above do not transfer: they compare 16-bit outputs, and at 8 bits a single code
+// in a γ2.2 destination's toe is itself ~1 ΔE₀₀ (rounding the `f64` reference to 8 bits already
+// costs 1.06 against the unrounded value on this sweep). So the row is stated in **codes**,
+// where the pass's error is visible on its own. The whole-cube maximum is also 2 codes (srgb->
+// wide; 1 for srgb->p3 and wide->srgb), and it is inherent to the representation, not slack:
+// Q1.14's first step above black, 1/16384 linear, is already 3.1 codes of a γ2.2 encoding, so a
+// toe value can sit 1.5 codes from its grid point before rounding. lcms2's own 8-bit path is the
+// same codes (the bit-exact test above), so this is its error too.
+//
+// The code bound is the measured exhaustive maximum — an integer metric has no headroom to give,
+// and a third code is a regression. The mean ΔE₀₀ is the sensitive half, as the LOOSE means are:
+// a drift guard at ~3.4× the measured mean, which a structural mistake (a wrong curve, a dropped
+// offset) moves by orders of magnitude.
+const MAT_SHAPER_MAX_CODES: f64 = 2.0;
+const MAT_SHAPER_MEAN_DRIFT: f64 = 2e-2; // 3.43× over 5.83e-3
+
+#[test]
+fn mat_shaper_8_stays_inside_its_budget() {
+    set_quiet_log_handler();
+    let battery = battery();
+    let lab = lab4();
+    let mut codes_off = Worst::default();
+    let mut delta_e = Worst::default();
+    for (src_name, dst_name) in MAT_SHAPER_PAIRS {
+        let (src, dst) = (find(&battery, src_name), find(&battery, dst_name));
+        let lens = Transform::new(
+            &dst.oracle,
+            dst.dbl_format,
+            &lab,
+            TYPE_Lab_DBL,
+            INTENT_RELATIVE_COLORIMETRIC,
+            FLAGS_NOCACHE,
+        );
+        for (our_intent, lcms_intent) in INTENTS {
+            let cell = format!("{src_name}->{dst_name} {our_intent:?}");
+            let build = |optimization| {
+                IccTransform::between(
+                    &src.parsed,
+                    &dst.parsed,
+                    TransformOptions {
+                        intent: our_intent,
+                        optimization,
+                        ..TransformOptions::default()
+                    },
+                )
+                .unwrap()
+            };
+            let reference = build(PipelineOptimization::None);
+            let tier = build(PipelineOptimization::PrecalculateFixed16);
+            let codes: Vec<u8> = sweep(3, 4096, 0x0992_8B17 ^ u64::from(lcms_intent))
+                .iter()
+                .flatten()
+                .map(|&v| quantize8(v))
+                .collect();
+            let (mut want, mut got) = (vec![0_u8; codes.len()], vec![0_u8; codes.len()]);
+            reference.transform_u8(&codes, &mut want).unwrap();
+            tier.transform_u8(&codes, &mut got).unwrap();
+            for (a, b) in want.as_chunks::<3>().0.iter().zip(got.as_chunks::<3>().0) {
+                for (x, y) in a.iter().zip(b) {
+                    codes_off.feed(f64::from(x.abs_diff(*y)), &cell);
+                }
+                let unit = |px: &[u8; 3]| px.map(|v| f64::from(v) / 255.0);
+                delta_e.feed(lens_delta_e(&lens, &unit(a), &unit(b), 1.0), &cell);
+            }
+        }
+    }
+    eprintln!(
+        "mat-shaper-8 vs None (u8): max {} codes ({}), mean {:.3e}; max ΔE00 {:.3e} ({}), \
+         mean {:.3e}",
+        codes_off.value,
+        codes_off.cell,
+        codes_off.mean(),
+        delta_e.value,
+        delta_e.cell,
+        delta_e.mean()
+    );
+    assert!(
+        codes_off.value <= MAT_SHAPER_MAX_CODES,
+        "mat-shaper-8 max deviation {} codes at {}",
+        codes_off.value,
+        codes_off.cell
+    );
+    assert!(
+        delta_e.mean() < MAT_SHAPER_MEAN_DRIFT,
+        "mat-shaper-8 drifted: mean ΔE00 {:.3e} (guard {MAT_SHAPER_MEAN_DRIFT:.3e})",
+        delta_e.mean()
+    );
+    // Q1.14 is a real approximation: no deviation at all would mean the pass never ran and the
+    // tier fell back to the f64 route.
+    assert!(
+        codes_off.mean() > 0.0,
+        "mat-shaper-8 moved nothing — did the pass run?"
+    );
+}
+
+/// Round-half-up to an 8-bit code (`encode_u8`'s rounding, for `v` in `[0, 1]`).
+fn quantize8(v: f64) -> u8 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "v is in [0, 1]"
+    )]
+    {
+        (v * 255.0 + 0.5) as u8
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! The question #372 asks is a throughput question: what does evaluating a transform stage by
 //! stage cost against collapsing it first, and how does either compare to lcms2 — the oracle
-//! this crate is measured against — on the same buffer? So each scenario runs five bars over
+//! this crate is measured against — on the same buffer? So each scenario runs these bars over
 //! one 256×256 interleaved image:
 //!
 //! | bar | what it is |
@@ -12,15 +12,21 @@
 //! | `precalculate` | + curve joining and CLUT resampling (lcms2's default construction) |
 //! | `precalculate_f32` | the same resampled CLUT at `f32` nodes and arithmetic (#423) |
 //! | `precalculate_fixed16` | the same resampled CLUT at `u16` nodes, 16.16 fixed point (#423) |
+//! | `mat_shaper_8` | shaper pair only: lcms2's 8-bit matrix-shaper (#992) |
 //! | `lcms2_optimized` | lcms2 at `flags = 0`, its own default optimized path |
 //! | `lcms2_baseline` | lcms2 at `cmsFLAGS_NOOPTIMIZE`, its stage-by-stage path |
 //!
+//! On the shaper pair an `IccTransform` at `PrecalculateFixed16` runs the matrix-shaper from
+//! `transform_u8`, so that is what `mat_shaper_8` times; `precalculate_fixed16` there is the
+//! same link built as a bare `Pipeline` (the two halves composed and optimized), which carries
+//! no matrix-shaper and so keeps timing the resampled CLUT the row has always meant.
+//!
 //! Two caveats when reading the lcms2 bars. They run lcms2's `TYPE_*_8` formatters (its 8-bit
-//! fast path), which only `precalculate_fixed16` matches representation for representation —
-//! every other gamut bar runs an `f64` or `f32` core, so against those the lcms2 bars are a
-//! *context* line rather than a like-for-like comparison; and `lcms2_oracle`'s `apply_u8`
-//! allocates a fresh output `Vec` per call, which the gamut bars (writing into a reused buffer)
-//! do not.
+//! fast path), which only `precalculate_fixed16` and `mat_shaper_8` match representation for
+//! representation — every other gamut bar runs an `f64` or `f32` core, so against those the
+//! lcms2 bars are a *context* line rather than a like-for-like comparison; and
+//! `lcms2_oracle`'s `apply_u8` allocates a fresh output `Vec` per call, which the gamut bars
+//! (writing into a reused buffer) do not.
 //!
 //! Transform *construction* is hoisted out of every timed closure — including the resampling,
 //! which is build-time work by design — because what a pixel-buffer workload cares about is the
@@ -28,7 +34,10 @@
 
 use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
-use gamut_cmm::{IccTransform, PipelineOptimization, TransformOptions, transform_interleaved_u8};
+use gamut_cmm::{
+    IccTransform, PipelineOptimization, TransformOptions, device_to_pcs, pcs_to_device,
+    transform_interleaved_u8,
+};
 use gamut_core::PixelFormat;
 use gamut_icc::{BuiltinProfile, IccProfile, RenderingIntent};
 use lcms2_oracle::{
@@ -130,6 +139,35 @@ fn bench_gamut(bencher: Bencher, scenario: &Scenario, level: PipelineOptimizatio
     });
 }
 
+/// Runs one gamut-cmm bar over the scenario's link as a bare `Pipeline` — `device_to_pcs`
+/// composed with `pcs_to_device` at the relative intent, which is the chain `bench_gamut`'s
+/// transform links when no seam adjustment applies — optimized at `level`. A `Pipeline`
+/// carries no 8-bit matrix-shaper, so this times the resampled CLUT where `bench_gamut` would
+/// time the matrix-shaper.
+fn bench_pipeline(bencher: Bencher, scenario: &Scenario, level: PipelineOptimization) {
+    let (src_profile, dst_profile) = scenario.profiles();
+    let (src_channels, dst_channels, _, _, dst_format) = scenario.layout();
+    let (src, _) = reopen(&src_profile);
+    let (dst, _) = reopen(&dst_profile);
+    let intent = RenderingIntent::MediaRelativeColorimetric;
+    let pipeline = device_to_pcs(&src, intent)
+        .and_then(|first| first.compose(pcs_to_device(&dst, intent)?))
+        .and_then(|link| link.optimized(level))
+        .expect("the benchmark profiles link");
+    let input = gradient(src_channels);
+    let mut output = vec![0u8; pixels() * dst_channels];
+    bencher.counter(ItemsCount::new(pixels())).bench_local(|| {
+        transform_interleaved_u8(
+            &pipeline,
+            PixelFormat::Rgb8,
+            black_box(&input),
+            dst_format,
+            &mut output,
+        )
+        .expect("the buffers match the pipeline");
+    });
+}
+
 /// Runs one lcms2 bar at `flags`.
 fn bench_lcms2(bencher: Bencher, scenario: &Scenario, flags: u32) {
     let (src_profile, dst_profile) = scenario.profiles();
@@ -151,7 +189,9 @@ fn bench_lcms2(bencher: Bencher, scenario: &Scenario, flags: u32) {
 }
 
 mod shaper_pair {
-    use super::{Bencher, PipelineOptimization, Scenario, bench_gamut, bench_lcms2};
+    use super::{
+        Bencher, PipelineOptimization, Scenario, bench_gamut, bench_lcms2, bench_pipeline,
+    };
 
     #[divan::bench]
     fn off(bencher: Bencher) {
@@ -187,6 +227,15 @@ mod shaper_pair {
 
     #[divan::bench]
     fn precalculate_fixed16(bencher: Bencher) {
+        bench_pipeline(
+            bencher,
+            &Scenario::ShaperPair,
+            PipelineOptimization::PrecalculateFixed16,
+        );
+    }
+
+    #[divan::bench]
+    fn mat_shaper_8(bencher: Bencher) {
         bench_gamut(
             bencher,
             &Scenario::ShaperPair,

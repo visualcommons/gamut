@@ -16,6 +16,7 @@
 //! | matrix folding | [`Collapse`](PipelineOptimization::Collapse) | replaces an adjacent affine pair with their composed affine |
 //! | curve joining | [`Precalculate`](PipelineOptimization::Precalculate) | tabulates an adjacent [`Stage::Curves`] pair as one curve set |
 //! | CLUT resampling | [`Precalculate`](PipelineOptimization::Precalculate) | replaces the whole chain with one resampled [`Stage::Clut`] |
+//! | 8-bit matrix-shaper | [`PrecalculateFixed16`](PipelineOptimization::PrecalculateFixed16), 8-bit entry point only | runs a curves → matrix → curves link as lcms2's Q1.14 tables (below) |
 //!
 //! Elision and folding both shrink the stage list by one, so the two run together to a
 //! fixpoint (termination is structural: every rewriting pass strictly reduces the stage
@@ -70,6 +71,28 @@
 //! `cmsFLAGS_NOWHITEONWHITEFIXUP` — the conformance gate disables it too, because it would
 //! dominate the metric at the device-white corner).
 //!
+//! # The 8-bit matrix-shaper
+//!
+//! lcms2 does not resample an RGB → RGB matrix/TRC link under its 8-bit formatters: its
+//! `OptimizeMatrixShaper` (`cmsopt.c`) precomputes the chain as 256-entry Q1.14 input tables
+//! (one per code), a Q1.14 matrix, and 16 385-entry output tables (one per Q1.14 value of
+//! `[0, 1]`), evaluated by `MatShaperEval16` in integer arithmetic. Under
+//! [`PrecalculateFixed16`](PipelineOptimization::PrecalculateFixed16) an [`crate::IccTransform`]
+//! whose link collapses to curves → 3×3 matrix → curves builds that alongside its resampled CLUT
+//! and runs it from [`crate::Transform::transform_u8`]; the 16-bit and `f64` entry points keep the
+//! CLUT, because the input tables are indexed by the 8-bit code itself. A
+//! [`Pipeline::optimized`] pipeline has no 8-bit-only representation, so it never carries one.
+//!
+//! On every RGB matrix/TRC pair of the conformance battery, at the intents that put no
+//! adjustment at the seam, the result is lcms2's `TYPE_RGB_8` transform to the bit over the whole
+//! 8-bit cube; against this crate's `f64` reference through the same entry point it is at most 2
+//! codes off (STATUS.md, "Precision budget (#992)"). It differs from lcms2 in two ways. Its
+//! selection follows the `Collapse` passes rather than lcms2's `PreOptimize`, so it also runs on links
+//! with a seam adjustment and does not run on Lab-PCS shaper pairs. And it applies a matrix
+//! offset at the scale of the matrix product, where lcms2 applies it `2¹⁴` too small; the two
+//! agree wherever the offset is zero, which on a two-profile link is everywhere lcms2 selects
+//! the pass.
+//!
 //! [`Collapse`]: PipelineOptimization::Collapse
 //! [`Precalculate`]: PipelineOptimization::Precalculate
 
@@ -77,6 +100,7 @@ use crate::clut::{ClutInterpolation, ClutTable, NodePrecision};
 use crate::curve::ToneCurve;
 use crate::error::Result;
 use crate::pipeline::{MAX_CHANNELS, Pipeline, Stage};
+use crate::transform::{check_buffers, narrow_u16};
 
 /// How far [`Pipeline::optimized`] collapses a stage chain before it is evaluated.
 ///
@@ -120,6 +144,11 @@ pub enum PipelineOptimization {
     /// [`crate::transform_interleaved_u8`] and its siblings) run integer arithmetic end to
     /// end; the `f64` entry point quantizes to 16 bits on the way in (module docs, "Precision
     /// tiers").
+    ///
+    /// On an [`crate::IccTransform`] whose link is an RGB → RGB matrix/TRC pair, the 8-bit entry
+    /// point instead runs lcms2's 8-bit matrix-shaper (`OptimizeMatrixShaper`: Q1.14 input
+    /// tables, matrix and output tables — module docs, "The 8-bit matrix-shaper"), which is what
+    /// lcms2 itself runs there; the 16-bit and `f64` entry points keep the resampled CLUT.
     PrecalculateFixed16 = 4,
 }
 
@@ -446,11 +475,274 @@ fn resample(pipeline: Pipeline, precision: NodePrecision) -> Result<Pipeline> {
     rebuild(&pipeline, vec![Stage::Clut(table)])
 }
 
+/// Entries of a matrix-shaper input table: one per 8-bit code (`MatShaper8Data::Shaper1R`).
+const SHAPER_IN_ENTRIES: usize = 256;
+
+/// Entries of a matrix-shaper output table: every Q1.14 value of `[0, 1]`, `0..=0x4000`
+/// (`MatShaper8Data::Shaper2R`).
+const SHAPER_OUT_ENTRIES: usize = 16_385;
+
+/// One in Q1.14, `0x4000` — the scale of every matrix-shaper table entry and coefficient.
+const ONE_Q14: i32 = 1 << 14;
+
+/// The precomputed 8-bit matrix-shaper (lcms2's `MatShaper8Data`, `cmsopt.c`): a
+/// shaper → 3×3 matrix → shaper chain as three 256-entry Q1.14 input tables, a Q1.14 matrix
+/// with its offset, and three 16 385-entry output tables already narrowed to 8 bits.
+///
+/// Built by [`mat_shaper_8`] and run only by an 8-bit entry point
+/// ([`crate::IccTransform`]'s `transform_u8`): the input tables are indexed by the 8-bit code
+/// itself, so there is no 16-bit or `f64` form of it. About 52 KB (3 KB of input tables, 48 KB
+/// of output tables); lcms2 stores the output tables as 16-bit `FROM_8_TO_16(b)` words its
+/// optimized 8-bit formatter narrows again, which this keeps as the byte `b` — the same result
+/// at half the memory.
+#[derive(Debug, Clone)]
+pub(crate) struct MatShaper8 {
+    /// Per channel, code `i` through the first shaper, in Q1.14 (`FillFirstShaper`).
+    input: [[i32; SHAPER_IN_ENTRIES]; 3],
+    /// The matrix in Q1.14, row-major (`DOUBLE_TO_1FIXED14` of each coefficient).
+    matrix: [[i32; 3]; 3],
+    /// The offset in Q2.28 — the scale of a coefficient times an input entry, which is the sum
+    /// it is added to ([`to_q28`] says where this departs from lcms2).
+    offset: [i32; 3],
+    /// Per channel, Q1.14 value `i` through the second shaper, as the 8-bit code lcms2's
+    /// 8-bit-output `FillSecondShaper` stores.
+    output: [Box<[u8; SHAPER_OUT_ENTRIES]>; 3],
+}
+
+/// lcms2's `DOUBLE_TO_1FIXED14`: `floor(x · 16384 + 0.5)`. `as` saturates an out-of-range
+/// coefficient, which [`fits_q14_accumulator`] then refuses.
+fn to_q14(x: f64) -> i32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "saturating by design; the accumulator guard refuses a saturated coefficient"
+    )]
+    {
+        (x * f64::from(ONE_Q14) + 0.5).floor() as i32
+    }
+}
+
+/// A matrix offset at the scale of the Q1.14 × Q1.14 product it is added to:
+/// `floor(x · 2²⁸ + 0.5)`, saturating like [`to_q14`].
+///
+/// **A deliberate divergence from lcms2.** `MatShaperEval16` adds `DOUBLE_TO_1FIXED14(Off)` —
+/// a Q1.14 value — to the Q2.28 sum before its `>> 14`, so lcms2 applies a matrix-shaper's
+/// offset scaled down by `2¹⁴`: an offset of 0.0625 moves the result by `3.8e-6` instead of
+/// 0.0625. On a two-profile link lcms2 reaches the pass only with a zero offset: the seam
+/// layers that carry one (absolute intent, black-point compensation) stop its
+/// `_MultiplyMatrix`, so the chain never takes the curves → matrix → curves shape. This crate's
+/// [`collapse`] does fold those layers, so here the offset is real and is applied at the
+/// sum's scale; where it is zero the two agree to the bit.
+fn to_q28(x: f64) -> i32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "saturating by design; the accumulator guard refuses a saturated offset"
+    )]
+    {
+        (x * f64::from(ONE_Q14) * f64::from(ONE_Q14) + 0.5).floor() as i32
+    }
+}
+
+/// lcms2's `_cmsQuickFloor` (`lcms2_internal.h`, default build — no
+/// `CMS_DONT_USE_FAST_FLOOR`): adds `1.5 · 2³⁶`, which rounds `val` to the nearest `2⁻¹⁶`,
+/// then takes the integer part of that 16.16 value. So it is `floor` except within `2⁻¹⁷` below
+/// an integer, where it rounds up — the difference that makes a plain `floor` disagree with
+/// lcms2 on a few output-table entries.
+fn quick_floor(val: f64) -> i32 {
+    let magic = 68_719_476_736.0 * 1.5;
+    // The low 32 bits of the sum's mantissa are `val` in 16.16 fixed point.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "the low word reinterpreted as a signed 16.16 value, as lcms2's union does"
+    )]
+    let fixed = (val + magic).to_bits() as u32 as i32;
+    fixed >> 16
+}
+
+/// lcms2's `_cmsQuickSaturateWord(v · 65535)` for the `v ∈ [0, 1]` a second shaper produces:
+/// `_cmsQuickFloorWord(v · 65535 + 0.5)`.
+///
+/// lcms2's two saturation guards are dropped rather than transcribed, because on this domain
+/// neither can change a result: the operand is at least `0.5`, so `<= 0` never holds, and at
+/// the top (`≥ 65535`, reached only by `v` within `2⁻¹⁷` of 1) `_cmsQuickFloorWord`'s own
+/// 16-bit wrap already yields `0xFFFF` — the 16.16 value `32768` reads back as `-32768`, and
+/// `-32768 + 32767` truncates to `0xFFFF`.
+fn quick_saturate_word_unit(v: f64) -> u16 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "lcms2's `(cmsUInt16Number)` truncation, which the top end relies on"
+    )]
+    {
+        (quick_floor(v * 65535.0 + 0.5 - 32767.0) + 32767) as u16
+    }
+}
+
+/// lcms2's `FillFirstShaper`: code `i` through `curve` into Q1.14, evaluated at lcms2's
+/// widths — the code as the `f32` `i / 255`, the curve's result rounded to `f32`
+/// (`cmsEvalToneCurveFloat`). lcms2's `0x7fffffff` arm for a result `≥ 8.0` is absent: a
+/// [`ToneCurve`] clamps its output to `[0, 1]`, so every entry is in `0..=0x4000`.
+fn first_shaper(curve: &ToneCurve) -> [i32; SHAPER_IN_ENTRIES] {
+    let mut table = [0; SHAPER_IN_ENTRIES];
+    for (code, entry) in (0_u8..=u8::MAX).zip(table.iter_mut()) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "lcms2 evaluates the curve at the f32 code"
+        )]
+        let x = (f64::from(code) / 255.0) as f32;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "cmsEvalToneCurveFloat returns f32"
+        )]
+        let y = curve.eval(f64::from(x)) as f32;
+        *entry = to_q14(f64::from(y));
+    }
+    table
+}
+
+/// lcms2's 8-bit-output `FillSecondShaper`: Q1.14 value `i` (exact in `f32`) through `curve`,
+/// rounded to `f32`, to a 16-bit word, and narrowed with `FROM_16_TO_8`. lcms2's clamp of the
+/// curve's result to `[0, 1]` is absent because [`ToneCurve::eval`] already guarantees it.
+fn second_shaper(curve: &ToneCurve) -> Box<[u8; SHAPER_OUT_ENTRIES]> {
+    let mut table = Box::new([0; SHAPER_OUT_ENTRIES]);
+    for (step, entry) in (0_u16..).zip(table.iter_mut()) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "cmsEvalToneCurveFloat returns f32"
+        )]
+        let y = curve.eval(f64::from(step) / f64::from(ONE_Q14)) as f32;
+        *entry = narrow_u16(quick_saturate_word_unit(f64::from(y)));
+    }
+    table
+}
+
+/// Whether every row's worst-case Q1.14 accumulation — each coefficient's magnitude times the
+/// largest input-table entry (`0x4000`), plus the offset and the `0x2000` rounding term —
+/// stays inside `i32`.
+///
+/// lcms2 evaluates the sum in `int` with no such check, so a matrix whose row magnitudes sum
+/// past about 8 (no realistic colorant pair; sRGB ↔ Display P3 sums under 1.5) overflows there,
+/// which C leaves undefined. The pass declines such a matrix, so wherever it runs the `i32`
+/// arithmetic is exactly lcms2's.
+fn fits_q14_accumulator(matrix: &[[i32; 3]; 3], offset: &[i32; 3]) -> bool {
+    matrix.iter().zip(offset).all(|(row, &off)| {
+        let reach: i64 = row.iter().map(|&q| i64::from(q).abs()).sum();
+        reach * i64::from(ONE_Q14) + i64::from(off).abs() + 0x2000 <= i64::from(i32::MAX)
+    })
+}
+
+/// lcms2's `_cmsMAT3isIdentity`: every coefficient within `1/65535` of the identity's.
+fn is_near_identity(m: &[[f64; 3]; 3]) -> bool {
+    m.iter().enumerate().all(|(r, row)| {
+        row.iter().enumerate().all(|(c, &v)| {
+            let identity = if r == c { 1.0 } else { 0.0 };
+            (v - identity).abs() < 1.0 / 65535.0
+        })
+    })
+}
+
+/// lcms2's `OptimizeMatrixShaper` (`cmsopt.c`) for an 8-bit RGB → RGB transform: when the
+/// collapsed chain ([`collapse`]) is exactly curves → 3×3 matrix → curves, precompute it as a
+/// [`MatShaper8`]. `None` — the transform keeps its other paths — when:
+///
+/// - the collapsed chain has any other shape (a CLUT, a PCS conversion, a Lab bridge, a
+///   channel-count change, curves that are not separated by exactly one matrix);
+/// - the matrix is within `1/65535` of the identity and the offset is zero: lcms2 drops such a
+///   matrix and joins the curves instead (`_cmsMAT3isIdentity && Offset == NULL`);
+/// - the Q1.14 accumulation could overflow `i32` ([`fits_q14_accumulator`]).
+///
+/// Where lcms2 also selects this pass, the result is lcms2's to the bit for parametric and
+/// gamma curves; lcms2 evaluates a *sampled* curve through its 16-bit table interpolation,
+/// which [`ToneCurve`] does in `f64`, so a profile with `curveType` tables can land a code away
+/// at the entries where the two round differently. The selection differs from lcms2's in two
+/// directions, both because [`collapse`] is not lcms2's `PreOptimize`:
+///
+/// - **selected here, not by lcms2:** a link with a seam adjustment (absolute intent with
+///   unequal whites, black-point compensation). lcms2 keeps the adjustment as a separate
+///   offset-carrying matrix its `_MultiplyMatrix` refuses to fold, and resamples instead;
+///   [`collapse`] folds it, and the pass runs with the offset applied correctly ([`to_q28`]).
+/// - **selected by lcms2, not here:** a Lab-PCS shaper pair. lcms2 first removes the adjacent
+///   `XYZ2Lab`/`Lab2XYZ` round trip; [`collapse`] keeps it, so the chain is not the
+///   matrix-shaper shape and the transform keeps its resampled CLUT.
+///
+/// # Errors
+///
+/// As [`optimize`].
+pub(crate) fn mat_shaper_8(pipeline: &Pipeline) -> Result<Option<MatShaper8>> {
+    let collapsed = collapse(pipeline.clone())?;
+    let [
+        Stage::Curves(first),
+        Stage::Matrix { m, offset },
+        Stage::Curves(second),
+    ] = collapsed.stages()
+    else {
+        return Ok(None);
+    };
+    if is_near_identity(m) && offset.iter().all(|&o| o == 0.0) {
+        return Ok(None);
+    }
+    let matrix = m.map(|row| row.map(to_q14));
+    let offset = offset.map(to_q28);
+    if !fits_q14_accumulator(&matrix, &offset) {
+        return Ok(None);
+    }
+    // A 3×3 matrix fixes both curve sets at three curves (the pipeline's validated seams).
+    let mut input = [[0; SHAPER_IN_ENTRIES]; 3];
+    for (table, curve) in input.iter_mut().zip(first) {
+        *table = first_shaper(curve);
+    }
+    let [r, g, b] = [0, 1, 2].map(|channel| second_shaper(&second[channel]));
+    Ok(Some(MatShaper8 {
+        input,
+        matrix,
+        offset,
+        output: [r, g, b],
+    }))
+}
+
+impl MatShaper8 {
+    /// lcms2's `MatShaperEval16` over one 8-bit pixel: the input tables, the matrix in Q1.14
+    /// with `0x2000` rounding back to Q1.14, a clip to `0..=0x4000`, and the output tables —
+    /// with the offset at the product's scale ([`to_q28`]).
+    fn eval(&self, pixel: [u8; 3]) -> [u8; 3] {
+        let linear: [i32; 3] = [0, 1, 2].map(|c| self.input[c][usize::from(pixel[c])]);
+        [0, 1, 2].map(|c| {
+            let row = self.matrix[c];
+            let sum = row[0] * linear[0] + row[1] * linear[1] + row[2] * linear[2];
+            let value = (sum + self.offset[c] + 0x2000) >> 14;
+            // Clipped to 0..=0x4000, so the cast is exact and the index in bounds.
+            #[expect(clippy::cast_sign_loss, reason = "clamped non-negative")]
+            let index = value.clamp(0, ONE_Q14) as usize;
+            self.output[c][index]
+        })
+    }
+
+    /// Runs the matrix-shaper over interleaved RGB bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::CmmError::BufferLength`] under the [`crate::Transform`] buffer contract at three
+    /// channels in and out.
+    pub(crate) fn transform(&self, src: &[u8], dst: &mut [u8]) -> Result<()> {
+        check_buffers(3, 3, src.len(), dst.len())?;
+        for (pixel, out) in src
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<3>().0)
+        {
+            *out = self.eval(*pixel);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gamut_icc::{Curve, CurveOrParametric, U8Fixed8};
 
     use super::*;
+    use crate::Transform as _;
 
     /// A non-trivial 3×3 affine over exact dyadic rationals, so a fold's coefficients assert
     /// with `==`.
@@ -917,5 +1209,230 @@ mod tests {
         .unwrap();
         let optimized = optimize(pipeline, PipelineOptimization::Precalculate).unwrap();
         assert_eq!(kinds(&optimized), ["curves", "matrix", "xyz2lab"]);
+    }
+
+    /// A curves → `matrix` → curves chain over gamma curves, the matrix-shaper's one shape.
+    fn shaper_chain(m: [[f64; 3]; 3], offset: [f64; 3]) -> Pipeline {
+        Pipeline::new(
+            3,
+            3,
+            vec![
+                Stage::Curves(vec![gamma(0x0233); 3]),
+                Stage::Matrix { m, offset },
+                Stage::Curves(vec![gamma(0x0074); 3]),
+            ],
+        )
+        .unwrap()
+    }
+
+    const UNIT: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+    #[test]
+    fn to_q14_is_lcms2_double_to_1fixed14() {
+        assert_eq!(to_q14(1.0), 0x4000);
+        assert_eq!(to_q14(-1.0), -0x4000);
+        assert_eq!(to_q14(0.5 / 16384.0), 1, "half a step rounds up");
+        assert_eq!(to_q14(-0.5 / 16384.0), 0, "half up, not away from zero");
+        assert_eq!(to_q14(1e12), i32::MAX, "saturates");
+    }
+
+    #[test]
+    fn to_q28_puts_an_offset_at_the_products_scale() {
+        // One Q1.14 coefficient times one Q1.14 entry is 2^28: an offset of 1.0 must equal it.
+        assert_eq!(to_q28(1.0), ONE_Q14 * ONE_Q14);
+        assert_eq!(to_q28(-0.0625), -(1 << 24));
+        assert_eq!(to_q28(0.5 / f64::from(1 << 28)), 1, "half a step rounds up");
+        assert_eq!(to_q28(1e3), i32::MAX, "saturates");
+    }
+
+    #[test]
+    fn quick_floor_rounds_to_a_sixteenth_of_sixteen_bits_first() {
+        assert_eq!(quick_floor(2.75), 2);
+        assert_eq!(quick_floor(-2.25), -3, "a floor, not a truncation");
+        // Within 2^-17 below an integer the 16.16 rounding carries into the integer part —
+        // where lcms2's fast floor and a true floor disagree.
+        assert_eq!(quick_floor(3.0 - 2f64.powi(-18)), 3);
+        assert_eq!(quick_floor(3.0 - 2f64.powi(-15)), 2);
+    }
+
+    #[test]
+    fn quick_saturate_word_unit_rounds_half_up_and_tops_out_by_wrapping() {
+        assert_eq!(quick_saturate_word_unit(0.0), 0);
+        assert_eq!(quick_saturate_word_unit(0.5), 32768, "32767.5 rounds up");
+        assert_eq!(quick_saturate_word_unit(1.0), 0xFFFF);
+        // The largest f32 below 1 also lands on 0xFFFF, through the same wrap.
+        assert_eq!(
+            quick_saturate_word_unit(f64::from(1.0_f32.next_down())),
+            0xFFFF
+        );
+        // Away from those edges it is the plain half-up encoding.
+        for i in 0..=1000_u16 {
+            let v = f64::from(i) / 1000.0;
+            assert_eq!(
+                quick_saturate_word_unit(v),
+                crate::clut::quantize16(v),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_q14_accumulator_guard_sits_exactly_on_i32_max() {
+        // 131071 · 0x4000 + 8191 + 0x2000 = i32::MAX: the widest row that cannot overflow.
+        let row = [65_536, -32_768, 32_767];
+        assert!(fits_q14_accumulator(&[row, [0; 3], [0; 3]], &[8191, 0, 0]));
+        assert!(!fits_q14_accumulator(
+            &[row, [0; 3], [0; 3]],
+            &[-8192, 0, 0]
+        ));
+        // Every row is checked, not only the first.
+        assert!(!fits_q14_accumulator(&[[0; 3], [0; 3], row], &[0, 0, 8192]));
+    }
+
+    #[test]
+    fn near_identity_is_lcms2_mat3_is_identity() {
+        assert!(is_near_identity(&UNIT));
+        let mut m = UNIT;
+        m[0][1] = 0.9 / 65535.0;
+        m[2][2] = 1.0 - 0.9 / 65535.0;
+        assert!(is_near_identity(&m));
+        // The tolerance is strict: exactly 1/65535 off is a colour operation.
+        m[0][1] = 1.0 / 65535.0;
+        assert!(!is_near_identity(&m));
+        let mut m = UNIT;
+        m[1][1] = 0.0;
+        assert!(!is_near_identity(&m), "a diagonal entry must be near one");
+    }
+
+    #[test]
+    fn mat_shaper_takes_exactly_the_curves_matrix_curves_shape() {
+        let m = [[0.75, 0.25, 0.0], [0.125, 0.75, 0.125], [0.0, 0.25, 0.75]];
+        assert!(mat_shaper_8(&shaper_chain(m, [0.0; 3])).unwrap().is_some());
+        // Two matrices fold first, as in lcms2's PreOptimize.
+        let split = Pipeline::new(
+            3,
+            3,
+            vec![
+                Stage::Curves(vec![gamma(0x0233); 3]),
+                Stage::Matrix {
+                    m,
+                    offset: [0.0; 3],
+                },
+                Stage::Matrix {
+                    m,
+                    offset: [0.0; 3],
+                },
+                Stage::Curves(vec![gamma(0x0074); 3]),
+            ],
+        )
+        .unwrap();
+        assert!(mat_shaper_8(&split).unwrap().is_some());
+        // A Lab bridge, a missing shaper, or a CLUT anywhere is not a matrix-shaper.
+        for stages in [
+            vec![
+                Stage::Curves(vec![gamma(0x0233); 3]),
+                Stage::Matrix {
+                    m,
+                    offset: [0.0; 3],
+                },
+                Stage::XyzToLab,
+            ],
+            vec![
+                Stage::Matrix {
+                    m,
+                    offset: [0.0; 3],
+                },
+                Stage::Curves(vec![gamma(0x0074); 3]),
+            ],
+            vec![
+                Stage::Curves(vec![gamma(0x0233); 3]),
+                Stage::Clamp { channels: 3 },
+                Stage::Matrix {
+                    m,
+                    offset: [0.0; 3],
+                },
+                Stage::Curves(vec![gamma(0x0074); 3]),
+            ],
+        ] {
+            let pipeline = Pipeline::new(3, 3, stages).unwrap();
+            assert!(
+                mat_shaper_8(&pipeline).unwrap().is_none(),
+                "{:?}",
+                kinds(&pipeline)
+            );
+        }
+    }
+
+    #[test]
+    fn mat_shaper_declines_what_lcms2_declines() {
+        // A near-identity matrix without an offset: lcms2 joins the curves instead.
+        let mut near = UNIT;
+        near[0][0] = 1.0 + 0.5 / 65535.0;
+        assert!(
+            mat_shaper_8(&shaper_chain(near, [0.0; 3]))
+                .unwrap()
+                .is_none()
+        );
+        // The same matrix carrying an offset is still a matrix-shaper.
+        let shaper = mat_shaper_8(&shaper_chain(near, [0.0, 0.0, 0.25])).unwrap();
+        assert!(shaper.is_some());
+        // So is any matrix away from the identity with a zero offset.
+        let mut far = UNIT;
+        far[0][1] = 0.5;
+        assert!(
+            mat_shaper_8(&shaper_chain(far, [0.0; 3]))
+                .unwrap()
+                .is_some()
+        );
+        // A row too wide for the i32 accumulation is refused rather than overflowed.
+        let mut wide = UNIT;
+        wide[1] = [4.0, -4.0, 0.5];
+        assert!(
+            mat_shaper_8(&shaper_chain(wide, [0.0; 3]))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The `f64` chain is the reference, offset included: at lcms2's own offset scale (Q1.14
+    /// added to the Q2.28 sum) the 0.0625 offset would vanish and cost ~15 codes here.
+    #[test]
+    fn mat_shaper_tracks_the_f64_chain_offset_included() {
+        let m = [
+            [0.75, 0.25, 0.0],
+            [0.125, 0.75, 0.125],
+            [-0.125, 0.25, 0.875],
+        ];
+        let pipeline = shaper_chain(m, [0.0, 0.0, 0.0625]);
+        let shaper = mat_shaper_8(&pipeline).unwrap().unwrap();
+        let src: Vec<u8> = (0..=255_u8).flat_map(|v| [v, 255 - v, v / 2]).collect();
+        let mut got = vec![0_u8; src.len()];
+        shaper.transform(&src, &mut got).unwrap();
+        let mut want = vec![0_u8; src.len()];
+        pipeline.transform_u8(&src, &mut want).unwrap();
+        // Two codes: Q1.14's first step above black is ~3 codes of the x^0.453 output curve's
+        // toe, so a toe value can sit 1.5 codes from its grid point before rounding.
+        for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert!(a.abs_diff(*b) <= 2, "sample {i}: {a} vs {b}");
+        }
+        // Black lands on the offset's channel only, through the output curve.
+        let mut black = [0_u8; 3];
+        shaper.transform(&[0, 0, 0], &mut black).unwrap();
+        assert_eq!(black[..2], [0, 0]);
+        assert!(black[2] > 0);
+    }
+
+    #[test]
+    fn mat_shaper_enforces_the_buffer_contract() {
+        let m = [[0.75, 0.25, 0.0], [0.125, 0.75, 0.125], [0.0, 0.25, 0.75]];
+        let shaper = mat_shaper_8(&shaper_chain(m, [0.0; 3])).unwrap().unwrap();
+        let mut short = [0_u8; 3];
+        assert!(matches!(
+            shaper.transform(&[0; 6], &mut short),
+            Err(crate::CmmError::BufferLength {
+                channels: 3,
+                found: 3
+            })
+        ));
     }
 }
