@@ -92,6 +92,9 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   (natural order, entries `1..=255` by construction) used **verbatim** via
   `JpegEncoder::with_quant_tables`, bypassing — without changing — the frozen quality mapping;
   `QuantTables::annex_k()`/`scaled()` recover the frozen mapping over arbitrary base tables.
+  `QuantTables::with_xyb_x` (issue #973) adds an optional third table for the XYB colour mode's
+  X channel, emitted at DQT destination `Tq = 2` so X can be quantized apart from Y; without it
+  the XYB stream is unchanged (X and Y share destination 0), and other modes ignore it.
   Custom tables pin the encode to the built-in path (a `JpegEncodeRequest` cannot carry them, so
   backends are not consulted — the host-side-veto convention).
 - Opt-in optimized baseline Huffman tables (P10, issue #331): `JpegEncoder::with_optimized_tables`,
@@ -150,8 +153,9 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   through the `QuantTables` plumbing. Experiment #29 (`experiments/29/RESULTS.md`) measured
   XYB-directed tables through that plumbing. Flat or CSF X/Y tables save 11–12% against this
   pairing at equal sRGB PSNR/SSIM, but no table tried brings XYB near YCbCr 4:2:0 on those
-  metrics. The decision waits on a perceptual metric the workspace does not have. X and Y share
-  destination 0, so a separate X table is not expressible yet.
+  metrics. The decision waits on a perceptual metric the workspace does not have. A separate,
+  coarser X table is expressible through `QuantTables::with_xyb_x` (destination 2, issue #973)
+  and is not yet measured by the #29 arm.
 - **jpegli B-only subsampling for XYB.** jpegli optionally subsamples only the B channel
   (2,2/2,2/1,1); gamut's XYB mode is 4:4:4-only for now (`ChromaSubsampling` is ignored — its
   chroma semantics would subsample X, destroying opponent-colour detail). The scan machinery is

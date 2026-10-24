@@ -320,8 +320,9 @@ impl JpegEncoder {
     /// While set, `with_quality` has no effect on the emitted tables or coefficients, and the
     /// encode is pinned to the **built-in** encoder: pushed backends are not consulted, because a
     /// [`crate::backend::JpegEncodeRequest`] cannot carry custom tables. Grayscale uses only the
-    /// luma table. The frozen quality contract is unaffected — it continues to govern the default
-    /// path.
+    /// luma table. In [`JpegColorMode::Xyb`] a [`QuantTables::with_xyb_x`] table quantizes the X
+    /// channel at its own destination (`Tq = 2`); other modes ignore it. The frozen quality
+    /// contract is unaffected — it continues to govern the default path.
     #[must_use]
     pub fn with_quant_tables(mut self, tables: QuantTables) -> Self {
         self.quant_tables = Some(tables);
@@ -491,6 +492,12 @@ impl JpegEncoder {
         }
     }
 
+    /// The separate XYB X-channel table (natural order) when the caller's [`QuantTables`] carry
+    /// one ([`QuantTables::with_xyb_x`]); `None` means X shares the luminance table.
+    fn xyb_x_quant(&self) -> Option<[u8; 64]> {
+        self.quant_tables.and_then(|tables| tables.xyb_x().copied())
+    }
+
     /// The rate–distortion context for one component class (`chroma` selects the typical AC rate
     /// proxy: Annex K.6 rather than K.5), or `None` when RD optimization is off.
     fn rd_ctx(&self, chroma: bool) -> Option<RdCtx> {
@@ -643,7 +650,8 @@ impl JpegEncoder {
     /// ids `R`,`G`,`B` under a no-APP0 / APP14 `transform = 0` prologue that embeds
     /// [`XYB_ICC_PROFILE`]. X and Y quantize with the luminance table (destination 0), the stored
     /// B−Y with the chrominance table (destination 1) — Annex K tables are YCbCr-tuned, so this
-    /// pairing is an honest placeholder, not XYB-tuned (see STATUS.md). The caller writes EOI.
+    /// pairing is an honest placeholder, not XYB-tuned (see STATUS.md). A caller X table
+    /// ([`QuantTables::with_xyb_x`]) moves X alone to destination 2. The caller writes EOI.
     fn encode_xyb(&self, rgb: &[u8], width: u16, height: u16, out: &mut Vec<u8>) {
         let (w, h) = (usize::from(width), usize::from(height));
 
@@ -703,7 +711,20 @@ impl JpegEncoder {
             appmeta::write_app1_xmp(out, xmp);
         }
         appmeta::write_app2_icc(out, XYB_ICC_PROFILE);
-        quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant)]);
+        // X quantizes with its own table at destination 2 when the caller supplied one; otherwise
+        // it shares Y's luminance table at destination 0 (the default two-table stream).
+        let x_table = self.xyb_x_quant();
+        let x_tq = match &x_table {
+            Some(x) => {
+                quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant), (2, x)]);
+                2
+            }
+            None => {
+                quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant)]);
+                0
+            }
+        };
+        let x_quant = x_table.as_ref().unwrap_or(&luma_quant);
 
         // Component ids are the bytes 'R','G','B' (the jpegli convention for XYB streams),
         // belt-and-braces beside the APP14: either signal alone keeps a decoder from applying a
@@ -715,9 +736,9 @@ impl JpegEncoder {
                     id: ids[0],
                     h: 1,
                     v: 1,
-                    tq: 0,
+                    tq: x_tq,
                     plane: &x_plane,
-                    quant: &luma_quant,
+                    quant: x_quant,
                     rd: luma_rd.as_ref(),
                 },
                 progressive::ProgComponent {
@@ -746,7 +767,7 @@ impl JpegEncoder {
                     h: 1,
                     v: 1,
                     plane: &x_plane,
-                    quant: &luma_quant,
+                    quant: x_quant,
                     dest: 0,
                     rd: luma_rd.as_ref(),
                 },
@@ -771,7 +792,7 @@ impl JpegEncoder {
                 out,
                 width,
                 height,
-                &[(ids[0], 1, 1, 0), (ids[1], 1, 1, 0), (ids[2], 1, 1, 1)],
+                &[(ids[0], 1, 1, x_tq), (ids[1], 1, 1, 0), (ids[2], 1, 1, 1)],
                 &[(ids[0], 0, 0), (ids[1], 0, 0), (ids[2], 1, 1)],
                 &components,
             );
