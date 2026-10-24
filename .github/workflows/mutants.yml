@@ -9,9 +9,12 @@ name: Mutants
 #     (`--in-diff` against `github.event.before`). A surviving mutant fails the check, which
 #     turns that master commit red: it can no longer block the merge that already happened, but
 #     it is a visible failure on the commit that introduced the gap, not a buried report.
-#   * full — nightly (schedule) and manual (workflow_dispatch) full-workspace survey.
-#     Informational only (continue-on-error) and uploads a report; existing code still has
-#     gaps, so it must not read as a failure. Flip to blocking once the baseline is clean.
+#   * full — nightly (schedule) and manual (workflow_dispatch) whole-workspace survey, run as a
+#     rotation: each run scores 8 of the workspace's 128 round-robin shards, so 16 consecutive
+#     nights cover every mutant once. One unsharded pass is ~24k mutants and runs for days,
+#     which no GitHub-hosted job (360-minute limit) can finish. Informational only
+#     (continue-on-error) and uploads a report per shard; existing code still has gaps, so it
+#     must not read as a failure. Flip to blocking once the baseline is clean.
 #
 # Both jobs invoke `mise run mutants`, never `cargo mutants` directly. That runner
 # (tooling/mutants/run.sh) derives every parallelism dial from GAMUT_MUTANTS_BUDGET_GB and
@@ -28,6 +31,13 @@ on:
     # Nightly full survey, 06:00 UTC. GitHub runs schedules on the default branch only.
     - cron: "0 6 * * *"
   workflow_dispatch:
+    inputs:
+      round:
+        description: >-
+          Rotation round to survey (a non-negative integer; shards round*8..round*8+7 of 128,
+          modulo 128). Empty means today's: days since the Unix epoch, as the nightly run uses.
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,10 +45,11 @@ env:
 concurrency:
   # A push run scores only that push's own diff (`event.before..sha`), so a later push never
   # re-covers it: cancelling or superseding it would leave that commit unscored for good. Each
-  # push therefore gets a group of its own, keyed on its SHA. A full survey covers the whole
-  # tree, so a newer one does supersede an older one on the same ref and cancels it.
-  group: mutants-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  # push therefore gets a group of its own, keyed on its SHA. A full survey scores only its own
+  # round's shards of the rotation, so a newer one does not re-cover an older one either: each
+  # gets a group of its own, keyed on its run id, and nothing cancels anything.
+  group: mutants-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   # Mutate only the code changed by the push to master. Fails on a surviving mutant.
@@ -200,12 +211,32 @@ jobs:
           name: mutants-incremental-shard-${{ matrix.shard }}
           path: mutants.out
 
-  # Full-workspace survey. Nightly and manual, never per push; informational only.
+  # Whole-workspace survey as a rotation. Nightly and manual, never per push; informational only.
   full:
-    name: Full workspace
+    # Why a rotation and not one pass: the whole workspace is ~24k mutants, and every mutant is
+    # an all-features build and test that includes the vendored C/C++ oracles; run.sh's own
+    # guard says an unsharded pass "runs for days". A GitHub-hosted job is killed at 360
+    # minutes, so a single `--all-at-once` job would time out and turn the run red every night.
+    # Instead each run takes SLOTS shards of SHARDS, in parallel, and the next night takes the
+    # next SLOTS: shard = (round * SLOTS + slot) mod SHARDS, round = days since the epoch.
+    # SHARDS is a multiple of SLOTS, so SHARDS / SLOTS = 16 consecutive rounds score every
+    # shard exactly once. 128 puts ~190 mutants in a shard. No shard of this split has been
+    # timed on a runner yet; the step timeout below bounds one that overruns, so it ends
+    # informational (its partial mutants.out still uploads) instead of failing the job.
+    name: Full workspace (rotation slot ${{ matrix.slot }})
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Backstop under GitHub's 360-minute default; the survey step's own timeout fires first.
+    timeout-minutes: 330
+    strategy:
+      # Each slot is an independent sample of the rotation; one failing must not cancel the rest.
+      fail-fast: false
+      matrix:
+        # Must list exactly 0..SLOTS-1 (GAMUT_NIGHTLY_SLOTS below).
+        slot: [0, 1, 2, 3, 4, 5, 6, 7]
     env:
+      GAMUT_NIGHTLY_SHARDS: 128
+      GAMUT_NIGHTLY_SLOTS: 8
       # 14 GiB of the runner's 16: the runner needs the rest, and the runner script derives
       # MUTANTS_JOBS, CARGO_BUILD_JOBS, CMAKE_BUILD_PARALLEL_LEVEL and RUST_TEST_THREADS from
       # this one number. On a four-core runner it yields CARGO_BUILD_JOBS=2, the value ci.yml's
@@ -300,13 +331,30 @@ jobs:
       # them, so it pulls them explicitly. Every other submodule still arrives with the checkout.
       - name: Fetch the AV1 oracle submodules
         run: mise run fetch-av1-oracles
-      - name: Run cargo-mutants over the whole workspace
-        # Informational: surviving mutants in existing code don't fail the run.
+      - name: Pick this slot's shard of the rotation
+        env:
+          ROUND: ${{ inputs.round }}
+          SLOT: ${{ matrix.slot }}
+        run: |
+          round="${ROUND:-$(( $(date -u +%s) / 86400 ))}"
+          case "$round" in
+            '' | *[!0-9]*) echo "::error::round must be a non-negative integer, got '$round'"; exit 1 ;;
+          esac
+          # Base 10 explicitly: a leading zero would otherwise read as octal.
+          round=$(( 10#$round ))
+          k=$(( (round * GAMUT_NIGHTLY_SLOTS + SLOT) % GAMUT_NIGHTLY_SHARDS ))
+          echo "round $round, slot $SLOT: shard $k/$GAMUT_NIGHTLY_SHARDS"
+          echo "GAMUT_NIGHTLY_SHARD=$k/$GAMUT_NIGHTLY_SHARDS" >> "$GITHUB_ENV"
+      - name: Run cargo-mutants over one shard of the whole workspace
+        # Informational: surviving mutants in existing code don't fail the run, and neither does
+        # a shard that overruns this timeout. The step timeout, unlike the job's, leaves the job
+        # alive to upload the partial report. 300 minutes leaves the setup steps above 30 of the
+        # job's 330.
         continue-on-error: true
-        # `--all-at-once` is the deliberate opt-in past the runner's guard against an unsharded
-        # whole-workspace run. This job is the one place that guard is meant to be waived: it is
-        # manual, it is not a gate, and a full survey is the whole point of it.
-        run: mise run mutants --all-at-once --verbose
+        timeout-minutes: 300
+        # GAMUT_NIGHTLY_SHARD comes from the step above, through GITHUB_ENV. A `--shard` is the
+        # bound the runner's whole-workspace guard asks for, so no `--all-at-once` waiver.
+        run: mise run mutants --shard "$GAMUT_NIGHTLY_SHARD" --verbose
       - name: sccache stats
         if: always()
         run: sccache --show-stats
@@ -314,5 +362,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: mutants-full
+          name: mutants-full-slot-${{ matrix.slot }}
           path: mutants.out

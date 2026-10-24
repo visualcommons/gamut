@@ -210,9 +210,14 @@ each edit costs one build of one package rather than the whole survey.
   each run scores exactly what its push added; when that commit is absent (a created ref, or a
   force-push that discarded it) it falls back to `HEAD^`. Each push runs in a concurrency group
   of its own, because no later run re-covers an earlier push's diff.
-- **full** — nightly (`schedule`, 06:00 UTC) and manual (`workflow_dispatch`), whole workspace,
-  `--all-at-once`, informational (`continue-on-error`). A newer survey cancels an older one on
-  the same ref.
+- **full** — nightly (`schedule`, 06:00 UTC) and manual (`workflow_dispatch`), whole workspace
+  as a rotation, informational (`continue-on-error`). An unsharded pass runs for days and a
+  GitHub-hosted job is killed at 360 minutes, so each run scores 8 of 128 round-robin shards in
+  parallel: shard `(round * 8 + slot) mod 128`, where `round` is days since the Unix epoch (or
+  the dispatch's `round` input). Sixteen consecutive rounds cover every mutant once. The survey
+  step times out at 300 minutes, leaving the job alive to upload the partial `mutants.out`; the
+  job backstop is 330. No shard of this split has been timed on a runner yet. Runs do not cancel
+  each other, since a newer round does not re-cover an older one's shards.
 
 Neither job runs on pull requests (issue #964): a blocking four-shard pass per pull request held
 up the review loop. So CI does not mutation-gate a pull request: `mise run mutants-diff`
