@@ -450,6 +450,100 @@ mod tests {
     }
 
     #[test]
+    fn widen_and_narrow_are_lcms2_from_8_to_16_and_from_16_to_8() {
+        use super::{narrow_u16, widen_u8};
+        for v in 0..=u8::MAX {
+            assert_eq!(
+                widen_u8(v),
+                u16::from(v) << 8 | u16::from(v),
+                "FROM_8_TO_16({v})"
+            );
+            assert_eq!(narrow_u16(widen_u8(v)), v, "the round trip is the identity");
+        }
+        // FROM_16_TO_8 is round-to-nearest of v · 255 / 65535 for every code.
+        for code in 0..=u16::MAX {
+            let nearest = (u32::from(code) * 255 * 2 + 65535) / (65535 * 2);
+            assert_eq!(u32::from(narrow_u16(code)), nearest, "FROM_16_TO_8({code})");
+        }
+    }
+
+    /// A transform overriding nothing but the required methods: `out = in / 2 + 1/4` on one
+    /// channel in, two out (the second channel inverted), so the provided integer entry
+    /// points are exercised exactly as a third-party `Transform` sees them.
+    struct HalfAndInverse;
+
+    impl Transform for HalfAndInverse {
+        fn transform(&self, src: &[f64], dst: &mut [f64]) -> crate::Result<()> {
+            super::check_buffers(1, 2, src.len(), dst.len())?;
+            for (v, out) in src.iter().zip(dst.as_chunks_mut::<2>().0) {
+                *out = [v / 2.0 + 0.25, 1.0 - v];
+            }
+            Ok(())
+        }
+
+        fn input_channels(&self) -> u8 {
+            1
+        }
+
+        fn output_channels(&self) -> u8 {
+            2
+        }
+    }
+
+    #[test]
+    fn provided_integer_entry_points_normalize_transform_and_round() {
+        use super::{encode_u8, encode_u16};
+        // 150 pixels: two full 64-pixel stack chunks and a partial one, with the input and
+        // output chunks at different widths.
+        let codes16: Vec<u16> = (0..150_u16).map(|i| i * 437).collect();
+        let mut got16 = vec![0_u16; 300];
+        HalfAndInverse.transform_u16(&codes16, &mut got16).unwrap();
+        let codes8: Vec<u8> = (0..150_u8).collect();
+        let mut got8 = vec![0_u8; 300];
+        HalfAndInverse.transform_u8(&codes8, &mut got8).unwrap();
+        for i in 0..150 {
+            let v = f64::from(codes16[i]) / 65535.0;
+            assert_eq!(got16[2 * i], encode_u16(v / 2.0 + 0.25), "pixel {i}");
+            assert_eq!(got16[2 * i + 1], encode_u16(1.0 - v), "pixel {i}");
+            let v = f64::from(codes8[i]) / 255.0;
+            assert_eq!(got8[2 * i], encode_u8(v / 2.0 + 0.25), "pixel {i}");
+            assert_eq!(got8[2 * i + 1], encode_u8(1.0 - v), "pixel {i}");
+        }
+    }
+
+    #[test]
+    fn provided_integer_entry_points_enforce_the_buffer_contract() {
+        use crate::CmmError;
+        let mut dst = [0_u16; 3];
+        assert!(matches!(
+            HalfAndInverse.transform_u16(&[1, 2], &mut dst),
+            Err(CmmError::BufferLength {
+                channels: 2,
+                found: 3
+            })
+        ));
+        let mut dst = [0_u8; 4];
+        assert!(matches!(
+            HalfAndInverse.transform_u8(&[1, 2, 3], &mut dst),
+            Err(CmmError::BufferLength {
+                channels: 2,
+                found: 4
+            })
+        ));
+        // Whole pixels are checked against the input channel count.
+        assert!(matches!(
+            super::check_buffers(3, 1, 4, 1),
+            Err(CmmError::BufferLength {
+                channels: 3,
+                found: 4
+            })
+        ));
+        super::check_buffers(3, 4, 6, 8).unwrap();
+        // Empty buffers are zero pixels, not an error.
+        HalfAndInverse.transform_u16(&[], &mut []).unwrap();
+    }
+
+    #[test]
     fn transform_is_object_safe() {
         let pipeline = Pipeline::new(3, 3, vec![Stage::Clamp { channels: 3 }]).unwrap();
         let dynamic: &dyn Transform = &pipeline;

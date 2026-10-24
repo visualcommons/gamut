@@ -440,10 +440,10 @@ fn f32_tier_is_bit_exact_against_lcms2_float_interpolators() {
     lcms2_oracle::set_quiet_log_handler();
     // LinLerp1Dfloat / Eval1InputFloat, TetrahedralInterpFloat, Eval4InputsFloat.
     for (inputs, outputs, seed) in [
-        (1_usize, 1_u8, 0xF32_01_u64),
-        (1, 3, 0xF32_13),
-        (3, 3, 0xF32_33),
-        (4, 2, 0xF32_42),
+        (1_usize, 1_u8, 0x3201_u64),
+        (1, 3, 0x3213),
+        (3, 3, 0x3233),
+        (4, 2, 0x3242),
     ] {
         let grid = resampled_grid(inputs);
         let nodes: usize = grid.iter().map(|&n| usize::from(n)).product();

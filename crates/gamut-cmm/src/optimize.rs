@@ -736,6 +736,72 @@ mod tests {
     }
 
     #[test]
+    fn precision_levels_resample_at_their_tier_with_the_same_construction() {
+        let pipeline = Pipeline::new(
+            4,
+            3,
+            vec![
+                Stage::Curves(vec![gamma(0x0233); 4]),
+                Stage::MatrixN {
+                    rows: 3,
+                    cols: 4,
+                    m: vec![
+                        0.5, 0.25, 0.0, 0.125, 0.0, 0.5, 0.25, 0.125, 0.25, 0.0, 0.5, 0.125,
+                    ],
+                    offset: vec![0.0; 3],
+                },
+                Stage::Clamp { channels: 3 },
+            ],
+        )
+        .unwrap();
+        for (level, precision) in [
+            (PipelineOptimization::Precalculate, NodePrecision::F64),
+            (PipelineOptimization::PrecalculateF32, NodePrecision::F32),
+            (
+                PipelineOptimization::PrecalculateFixed16,
+                NodePrecision::Fixed16,
+            ),
+        ] {
+            let optimized = optimize(pipeline.clone(), level).unwrap();
+            let [Stage::Clut(table)] = optimized.stages() else {
+                panic!("{level:?}: a device-cube chain resamples into one CLUT");
+            };
+            // The tiers differ in representation only: lcms2's grid and interpolation mode.
+            assert_eq!(table.grid_points(), [17, 17, 17, 17], "{level:?}");
+            assert_eq!(table.interpolation(), ClutInterpolation::Tetrahedral);
+            assert_eq!(table.node_precision(), precision, "{level:?}");
+            // At a node every tier returns the pipeline's value to its own precision.
+            let probe = [0.25, 0.5, 0.75, 1.0];
+            let (expected, got) = (eval(&pipeline, &probe), eval(&optimized, &probe));
+            let tolerance = match precision {
+                NodePrecision::F64 => 1e-12,
+                NodePrecision::F32 => 1e-7,
+                NodePrecision::Fixed16 => 0.5 / 65535.0,
+            };
+            for (x, y) in expected.iter().zip(&got) {
+                assert!(
+                    (x - y).abs() <= tolerance,
+                    "{level:?}: {expected:?} vs {got:?}"
+                );
+            }
+        }
+        // A declined resampling is declined at every tier: nothing is quantized.
+        let pcs_exit = Pipeline::new(
+            3,
+            3,
+            vec![Stage::Curves(vec![gamma(0x0233); 3]), Stage::XyzToLab],
+        )
+        .unwrap();
+        for level in [
+            PipelineOptimization::PrecalculateF32,
+            PipelineOptimization::PrecalculateFixed16,
+        ] {
+            let optimized = optimize(pcs_exit.clone(), level).unwrap();
+            assert_eq!(kinds(&optimized), ["curves", "xyz2lab"], "{level:?}");
+        }
+    }
+
+    #[test]
     fn resampling_declines_a_pipeline_entered_from_a_pcs() {
         // A decoded-Lab entry: the leading matrix does not confine the input to [0, 1], so a
         // grid over the unit cube would cover the wrong domain.
