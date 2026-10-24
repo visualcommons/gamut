@@ -12,7 +12,7 @@ once it has run.
 mise run mutants -- --help                 # selection, budget and guard flags
 mise run mutants -- --crate gamut-png      # one package
 mise run mutants-crate gamut-png           # same thing, shorter
-mise run mutants-diff                      # only what this branch changed (what PR CI runs)
+mise run mutants-diff                      # only what this branch changed (what CI runs per push)
 mise run mutants -- --shard 1/16           # one shard of the whole workspace
 ```
 
@@ -204,11 +204,26 @@ each edit costs one build of one package rather than the whole survey.
 
 `.github/workflows/mutants.yml` has two jobs, both through `mise run mutants`:
 
-- **incremental** — every PR, `--in-diff`, four round-robin shards, blocking. A surviving mutant
-  in changed code fails the check. It passes `GAMUT_MUTANTS_BASE=origin/<the PR's base>`, not
-  master: this repo stacks pull requests, and diffing a stacked branch against master would hand
-  the gate every mutant the base branch introduced too.
-- **full** — manual, whole workspace, `--all-at-once`, informational (`continue-on-error`).
+- **incremental** — every push to master, `--in-diff`, four round-robin shards. A surviving
+  mutant in changed code fails the check and turns that master commit red. It passes
+  `GAMUT_MUTANTS_BASE=<github.event.before>`, the commit master pointed at before the push, so
+  each run scores exactly what its push added; when that commit is absent (a created ref, or a
+  force-push that discarded it) it falls back to `HEAD^`. Each push runs in a concurrency group
+  of its own, because no later run re-covers an earlier push's diff.
+- **full** — nightly (`schedule`, 06:00 UTC) and manual (`workflow_dispatch`), whole workspace
+  as a rotation, informational (`continue-on-error`). An unsharded pass runs for days and a
+  GitHub-hosted job is killed at 360 minutes, so each run scores 8 of 128 round-robin shards in
+  parallel: shard `(round * 8 + slot) mod 128`, where `round` is days since the Unix epoch (or
+  the dispatch's `round` input), decided once per run by a `rotation` job before the slots fan
+  out, so a run that straddles 00:00 UTC still scores one round's shards. Sixteen consecutive rounds cover every mutant once. The survey
+  step times out at 300 minutes, leaving the job alive to upload the partial `mutants.out`; the
+  job backstop is 330. No shard of this split has been timed on a runner yet. Runs do not cancel
+  each other, since a newer round does not re-cover an older one's shards.
+
+Neither job runs on pull requests (issue #964): a blocking four-shard pass per pull request held
+up the review loop. So CI does not mutation-gate a pull request: `mise run mutants-diff`
+scores a branch locally before it merges, and the master push run is where a survivor that
+slipped through surfaces.
 
 Round-robin sharding rather than contiguous slices, because mutants from one file land in one
 slice and a file with slow tests would then load a single shard while the others idle. Sharding

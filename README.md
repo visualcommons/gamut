@@ -330,8 +330,10 @@ locally and the CI PR check (see [Git Hooks](#git-hooks)) — to keep the change
 
 ## Releases
 
-Publishing to crates.io is automated with [release-plz](https://release-plz.dev). On pushes
-to `master` it opens a release PR (per-crate version bumps + changelogs); merging that PR
+Publishing to crates.io is automated with [release-plz](https://release-plz.dev). The
+Release workflow runs only after a CI run on `master` succeeds (a `push` event in this
+repository), and works from the commit that CI run passed rather than `master`'s current tip,
+so a red build never publishes. Each such run opens a release PR (per-crate version bumps + changelogs); merging that PR
 publishes every changed crate in dependency order, then creates the per-crate tags and GitHub
 releases. Publishing authenticates via crates.io
 [Trusted Publishing](https://crates.io/docs/trusted-publishing) (OIDC) — no
@@ -350,8 +352,9 @@ pipeline stalls silently when either is missing (issue #377):
    [`release.yml`](.github/workflows/release.yml) prefers it over `GITHUB_TOKEN` when present.
 2. **A brand-new crate needs one manual first publish.** Trusted Publishing mints a token *for a
    crate that already exists*, so the very first version of a new crate must be published once
-   with an owner-scoped token, after which OIDC takes over. **`gamut-cmm` is the only crate still
-   awaiting that bootstrap** — it is the one workspace crate absent from crates.io.
+   with an owner-scoped token, after which OIDC takes over. As of 2026-10-24 every crate under `crates/`
+   is on crates.io (each name checked against the sparse index), so this applies only to a
+   crate added after that.
 
 A missing `<crate>-v<version>` tag is **not** evidence of a missing publish, and this section
 previously read it that way. `gamut-deflate`, `gamut-dng`, `gamut-jpeg`, `gamut-jxl-sys` and
