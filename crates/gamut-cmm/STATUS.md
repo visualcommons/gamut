@@ -2,9 +2,12 @@
 
 **Epic: GitHub issue #323.** The colour management module (CMM) over the profiles
 [`gamut-icc`](../gamut-icc) parses: builds runnable colour transforms (device→PCS→device) and
-evaluates them over interleaved `f64` pixels. Data layouts follow **ICC.1:2022**
+evaluates them over interleaved `f64` pixels (and, through the precision tiers, `u8`/`u16`
+codes in fixed point). Data layouts follow **ICC.1:2022**
 ([`references/icc`](../../references/icc)); scope is the ICC v2/v4 still-image profile set.
-Runtime dependencies: `gamut-icc`, `gamut-color`, `gamut-core`; `#![forbid(unsafe_code)]`.
+Runtime dependencies: `gamut-icc`, `gamut-color`, `gamut-core`; `#![deny(unsafe_code)]` — a
+hot-path crate, so a benchmarked exception may be taken (AGENTS.md, `## Conventions`), and none
+is: the crate is 100% safe Rust.
 
 **Keystone:** the **pipeline/stage model** — a colour transform as a validated chain of `Stage`s.
 `Pipeline::new` is the validity boundary: every channel count (declared ends, per-stage
@@ -33,6 +36,7 @@ that add behaviour (#325 onward).
 | P7 | #330 | Transform chaining (`IccTransform::chain`), device links (`IccTransform::device_link`), soft proofing (`IccTransform::proofing`/`ProofingOptions`), gamut check (`GamutCheck`), typed pixel buffers (`image`), and the epic's max-ΔE₀₀ conformance gate | ✅ |
 | P8 | #372 | Pipeline optimization: the opt-in `PipelineOptimization` knob (`optimize`) — identity elision, matrix folding, curve joining, CLUT resampling — threaded through every transform constructor, default off, with divan throughput benches | ✅ |
 | — | #555 | `TransformOptions::prefer_cicp_transfer`: closed-form evaluation of a shaper profile's `cicp`-signalled transfer, checked against its TRC; default off on the measured trade (below) | ✅ |
+| — | #423 | Precision tiers: `PipelineOptimization::PrecalculateF32`/`PrecalculateFixed16` (`NodePrecision`) — the resampled CLUT at `f32` or 16-bit fixed point, bit-exact against lcms2's interpolators, with integer `Transform::transform_u8`/`transform_u16` entry points under the image functions; each tier budgeted in the conformance gate. SIMD and the 8-bit matrix-shaper path are separate (deferred table) | ✅ |
 
 ## Settled decisions (P2, tone curves)
 
@@ -363,10 +367,101 @@ So: `Precalculate` is **2.8×/4.6×** the default path's throughput, `Collapse` 
 a few percent (it removes stages, not `powf` calls), and this crate's stage-by-stage
 evaluation sits right on lcms2's own stage-by-stage baseline. The remaining gap to lcms2's
 default path is representational, not structural — lcms2 runs a `u16` fixed-point CLUT under
-8-bit formatters where this crate interpolates `f64` (the deferred integer/`f32` fast paths
-below). Building the resampled transform costs 4.8 ms against 0.16 ms unoptimized (35 937
-pipeline evaluations for a 33³ grid), so the tier pays off from roughly one 256×256 buffer
-onward; its `f64` node table is ~6.9 MB at 3×3 channels.
+8-bit formatters where this crate interpolates `f64` (the precision tiers #423 added — see
+"Throughput (#423)" below). Building the resampled transform costs 4.8 ms against 0.16 ms
+unoptimized (35 937 pipeline evaluations for a 33³ grid), so the tier pays off from roughly
+one 256×256 buffer onward; its `f64` node table is 35 937 × 3 × 8 B ≈ 0.86 MB at 3×3 channels
+(this line said ~6.9 MB until #423 re-derived it; the `f32` and 16-bit tables are 0.43 MB
+and 0.22 MB).
+
+## Settled decisions (#423, precision tiers)
+
+- **Tiers are optimization levels, not a separate knob.** `PipelineOptimization` gains
+  `PrecalculateF32 = 3` and `PrecalculateFixed16 = 4` (append-only discriminants), so every
+  constructor that already takes the knob — `between`, `chain`, `device_link`, `proofing`,
+  `GamutCheck::new` — reaches the tiers with no new parameter. Each is the `Precalculate`
+  construction (lcms2's grid, joined curves, interpolation mode) with the resampled CLUT stored
+  at a narrower `NodePrecision` (`F64 = 0`, `F32 = 1`, `Fixed16 = 2`, read back through
+  `ClutTable::node_precision`). Tables built from profiles stay `F64`; `f64` is the Tier-1
+  reference every tier is measured against.
+- **Each tier is lcms2's own arithmetic, bit for bit.** `F32` runs the reference interpolators
+  generically at `f32` — lcms2's float interpolators are `cmsFloat32Number` — and matches
+  `ClutPipeline` (`cmsPipelineEvalFloat`) exactly in 1-D, 3-D and 4-D. `Fixed16` transcribes
+  `Eval1Input`/`LinLerp1D`, `BilinearInterp16`, `TetrahedralInterp16` and the
+  `Eval4Inputs`…`Eval15Inputs` recursion, with `_cmsToFixedDomain`, `LinearInterp` and the
+  `0x8001` single-shift rounding, and matches lcms2's 16-bit `cmsDoTransform` over a probe
+  devicelink exactly for 1→1, 1→3, 3→3, 3→4, 4→3 and 4→4 (`tests/oracle_clut.rs`). The
+  tetrahedron is selected by ordering the fractions rather than by lcms2's branch cascade:
+  ties sit on a face two tetrahedra share and `Rest` is an exact integer sum, so the two
+  agree to the bit (pinned against a transcription of the cascade, ties included).
+- **One guarded divergence: `i64` accumulation.** lcms2 accumulates `TetrahedralInterp16`'s
+  `Rest` and `BilinearInterp16`'s `LERP` in `int`, which signed-overflows when one cell steps
+  more than half the code range; the wrapped result is off by a code. This crate accumulates
+  in `i64` and is exact there. `LinearInterp`'s 32-bit *unsigned* wrap is not a divergence —
+  it reproduces the arithmetic shift for every in-range result, which the unit tests check
+  against a wrap-around transcription. No smooth resampled transform steps that far in one
+  cell; the differential stays on half-range tables where both are defined.
+- **Fixed-point construction rules.** A `Fixed16` table needs ≥ 2 nodes per axis (lcms2's
+  integer routines have no single-node guard, so there is no fixed-point original for the
+  float path's constant-axis semantics) and tetrahedral interpolation from 3 inputs (lcms2's
+  `TrilinearInterp16` serves only Lab-indexed profile tables, which are never resampled).
+  Every grid the resampling builds satisfies both; `ClutTable` rejects the rest with
+  `ClutGeometry`.
+- **Integer entry points on `Transform`.** `transform_u16`/`transform_u8` are *provided*
+  methods (object safety kept): normalize by 65535/255, call `transform`, re-encode with
+  `_cmsQuickSaturateWord` rounding — exactly the `image` module's old per-sample conversion,
+  so every existing transform keeps its numerics bit for bit. `transform_interleaved_*`/
+  `transform_planar_*` now route colour channels through them. A `Pipeline` that is one
+  `Fixed16` CLUT overrides both and never touches a float: 8-bit codes widen with
+  `FROM_8_TO_16` (`v·257`) and narrow with `FROM_16_TO_8` (`(c·65281 + 2²³) >> 24`), lcms2's
+  8-bit formatter conversions — which agree with the `f64` route's round-half-up for every
+  code, so the fast path is a speed choice only (its one selection mutant is excluded in
+  `.cargo/mutants.toml` on that argument). The `f64` entry point over a `Fixed16` table
+  quantizes its input with the same encoding, so all three entry points agree.
+- **SIMD: no `unsafe`, and the `unsafe`/portable-SIMD trade is a maintainer decision.** #423
+  asks for that decision to be recorded *before* any SIMD lands. This change takes none of it:
+  the tiers are scalar safe Rust (the fixed-point inner loop is shaped for autovectorization —
+  corner offsets resolved once per pixel, a branch-free per-channel loop — but nothing relies
+  on it), and `#![deny(unsafe_code)]` is untouched. Whether `std::simd` or explicit
+  `#[target_feature]` intrinsics are worth an `#[expect(unsafe_code)]` exception is handed to
+  the maintainers as its own issue (deferred table).
+- **Not hand-written: the changelog.** release-plz generates `CHANGELOG.md` from the
+  conventional commits; the `feat(gamut-cmm)!` commit is the entry.
+
+### Precision budget (#423)
+
+Measured over the conformance battery (`tests/oracle_conformance.rs`,
+`precision_tiers_stay_inside_their_budget`, lcms2 2.19; 8 pairs × 2 intents × 40 pixels, each
+fed the same 16-bit-quantized device values):
+
+| tier | metric | measured max (shaper / LUT) | asserted | justification |
+|------|--------|-----------------------------|----------|---------------|
+| `PrecalculateF32` | device units vs our `Precalculate` | 1.04e-7 (both) | `< 3e-7`, and `> 0` | measured in device units for `Collapse`'s reason — the ΔE₀₀ lens is an f32 lcms2 transform and cannot see an f32 last place. The bound *is* the tier's definition: a few f32 ulps (2⁻²⁴ ≈ 6e-8) through one interpolation; `> 0` proves the tier did not silently run in `f64` |
+| `PrecalculateFixed16` | ΔE₀₀ vs our `Precalculate`, through `transform_u16` | 2.88e-3 / 7.12e-3 | `< 1.0` / `< 5.0`, **and** `< 1e-2` / `< 2e-2`, and `> 1e-5` | **the LOOSE row verbatim** as contract — this is the representation lcms2's default 16-bit path runs — with a ~3× drift guard beside it, as for `Precalculate`. The error is 16-bit node quantization (≤ ½ code) plus 16.16 rounding (≤ 1 code), worst in srgb→p3's deep shadows and at the grid-9 printer's ends |
+| `PrecalculateFixed16` | ΔE₀₀ vs lcms2 default path, through `transform_u16` | 3.29e-3 / 6.87e-3 | same | where `Precalculate` already lands (2.98e-3 / 7.12e-3): sharing the representation adds nothing measurable; what remains is how each side computes its nodes (lcms2 samples its f32 stages at 16-bit-quantized node coordinates) |
+
+### Throughput (#423)
+
+`cargo bench -p gamut-cmm --bench pipeline -- shaper_ --sample-count 60` (256×256 interleaved
+`u8`, **fastest** of 60 samples, every bar in one run). The host was heavily loaded (load
+average ≈ 37 on 16 cores), so absolute times sit above the P8 table's and only the ratios
+within this table are meaningful:
+
+| scenario | `None` | `Precalculate` | `PrecalculateF32` | `PrecalculateFixed16` | lcms2 default | lcms2 `NOOPTIMIZE` |
+|----------|--------|----------------|-------------------|-----------------------|---------------|--------------------|
+| sRGB → Display P3 | 12.76 ms (5.1 Mpx/s) | 4.59 ms (14.3) | 5.01 ms (13.1) | **2.26 ms (29.1)** | 0.67 ms (97.5) | 8.22 ms (8.0) |
+| sRGB → CMYK `prtr` (grid-9) | 15.61 ms (4.2) | 3.14 ms (20.9) | 3.82 ms (17.1) | **1.79 ms (36.6)** | 1.59 ms (41.1) | 16.36 ms (4.0) |
+
+So the fixed-point tier is **2.0×/1.75×** `Precalculate`'s throughput, and on the CLUT
+scenario it is within **1.13×** of lcms2's default path — the same representation lcms2 runs
+there (`OptimizeByResampling` → `TetrahedralInterp16` between `FROM_8_TO_16` and
+`FROM_16_TO_8`), so what is left is per-pixel overhead, not arithmetic. The shaper pair stays
+**3.4×** behind because lcms2 does not use a CLUT there at all: its 8-bit `OptimizeMatrixShaper`
+path (deferred table) is a different construction. The `f32` tier is *slower* than `f64`
+(0.92×/0.82×): scalar `f32` arithmetic costs the same as `f64` on this hardware and the tier
+adds an input narrowing and an output widening per pixel. What it buys is lcms2's float
+arithmetic bit for bit and half the node memory — not speed — which is why the fixed-point
+tier, not the `f32` one, is the throughput tier.
 
 ## Settled decisions (#555, CICP-signalled transfer characteristics)
 
@@ -472,7 +567,9 @@ lcms2's reference answer there and what it diverges from is lcms2's grid. The sh
 |------|-------|--------|
 | iccMAX (`ICC.2:2019`) | A separate, parallel next-generation format (spectral PCS, v5 header); not an extension of ICC.1 and unimplementable against the lcms2 oracle. See [`references/icc`](../../references/icc/README.md). | ✗ out of scope |
 | `multiProcessElementsType` (`mpet`) + `DToBx`/`BToDx` tags | The v4/iccMAX general-purpose processing pipeline; `gamut-icc` preserves it as `Raw`, and this CMM does not evaluate it. | ✗ out of scope |
-| Integer/`f32` fast paths | Evaluation is `f64` throughout at Tier-1 (correctness only, not bit-reproducible — the `gamut-color` posture, see [`references/color`](../../references/color/README.md)). | ☐ unplanned |
+| Integer/`f32` CLUT tiers | Landed with #423: `PrecalculateF32`/`PrecalculateFixed16` (above). `f64` stays the Tier-1 default (correctness only, not bit-reproducible — the `gamut-color` posture, see [`references/color`](../../references/color/README.md)). | ✅ |
+| 8-bit integer matrix-shaper path | lcms2's `OptimizeMatrixShaper` (`cmsopt.c`, 8-bit input only): a shaper→matrix→shaper chain evaluated as 256-entry Q1.14 input tables, a Q1.14 matrix and a 16 385-entry output table (`MatShaperEval16`) — the path behind lcms2's sRGB → Display P3 figure, which a 33³ CLUT at any precision does not reach. A distinct construction with its own budget row, split from #423 as #992. | ☐ deferred |
+| SIMD evaluation | #423 requires a maintainer decision on `unsafe`/portable SIMD before any lands; the tiers are scalar safe Rust (settled decisions above). Handed to the maintainers as #993. | ☐ awaiting decision |
 | White-point ("scum dot") fixup on a resampled CLUT | lcms2's `PatchLUT` snaps the input white node onto the output white in a precalculated table (`cmsFLAGS_NOWHITEONWHITEFIXUP` disables it, as the conformance gate does). An lcms2 aesthetic with no ICC.1 basis; the resampling pass does not replicate it. | ✗ out of scope |
 | Public per-hop intent/BPC arrays | The chain internals already take them (proofing uses them); the public `chain` API stays single-intent until a consumer needs lcms2's `cmsCreateExtendedTransform` shape. | ☐ deferred |
 | Named-colour profiles | No continuous pixel transform; rejected with a typed error everywhere. | ✗ out of scope |
@@ -560,7 +657,19 @@ one-channel-narrower grid that still fits proving the ceiling is a boundary and 
 blanket refusal), the conformance gate's optimized-budget battery
 (`optimized_transforms_stay_inside_the_precision_budget` — the table above), and
 `benches/pipeline.rs` (divan throughput, off vs the
-two levels vs lcms2 at default and `NOOPTIMIZE` flags). Gates: `mise run test` / `lint` /
+two levels vs lcms2 at default and `NOOPTIMIZE` flags). #423 adds the precision-tier layer:
+`src/clut.rs` pins the fixed-point helpers (`_cmsQuickSaturateWord`, `_cmsToFixedDomain`,
+`LinearInterp` against a 32-bit wrap-around transcription) and each fixed-point interpolator
+against independent transcriptions of lcms2's 1-D, 2-D, tetrahedral (its own branch cascade,
+ties included), 4-D and 5-D routines, the `f32` tier's width, and the fixed-point
+construction rules; `src/transform.rs` the provided integer entry points over a transform that
+overrides nothing (chunking across unequal in/out widths, the buffer contract) and
+`FROM_8_TO_16`/`FROM_16_TO_8` exhaustively; `src/pipeline.rs` the fixed-point pipeline's
+integer path and the three entry points' agreement on every tier; `src/optimize.rs` that each
+level resamples onto lcms2's grid at its own precision. `tests/oracle_clut.rs` holds both tiers
+**bit-exact** against lcms2 (16-bit `cmsDoTransform` over a probe devicelink; the float
+`ClutPipeline`), `tests/oracle_conformance.rs` the budget table above, and the benches a bar
+per tier. Gates: `mise run test` / `lint` /
 `fmt-check` / `coverage` (≥ 80%) / `mise run mutants-crate gamut-cmm` (equivalent
 float-boundary survivors are excluded in `.cargo/mutants.toml` with per-mutant proofs, the
 workspace convention).

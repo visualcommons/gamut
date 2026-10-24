@@ -19,15 +19,27 @@
 //! that confound the interpolator measurement. The multilinear path is instead cross-checked
 //! against an independent naive 2ᴺ-corner-weight implementation in the crate's unit tests, and
 //! its 1-D/2-D base cases (where lcms2's float routines *are* multilinear) are swept here.
+//!
+//! The two narrower precision tiers meet the same two windows **bit-exactly**, because each is
+//! the oracle's own arithmetic: the profile route at `TYPE_*_16` *is* lcms2's fixed-point
+//! interpolator over the table's codes, which [`NodePrecision::Fixed16`] transcribes, and the
+//! float pipeline *is* lcms2's `f32` interpolator, which [`NodePrecision::F32`] runs. Both are
+//! reached through the public route — a `[Clamp, Clut]` pipeline resampled at
+//! `PrecalculateFixed16`/`PrecalculateF32` on exactly the grid the resampling pass picks (33
+//! nodes up to three inputs, 17 for four), whose resampled nodes are therefore the parsed
+//! table's own samples.
 
 mod common;
 
 use common::Lcg;
-use gamut_cmm::{ClutInterpolation, ClutTable, Pipeline, Stage};
+use gamut_cmm::{
+    ClutInterpolation, ClutTable, NodePrecision, Pipeline, PipelineOptimization, Stage, Transform,
+};
 use gamut_icc::{Clut, ClutPrecision};
 use lcms2_oracle::{
-    ClutPipeline, FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, INTENT_PERCEPTUAL, TYPE_CMYK_DBL, TYPE_GRAY_DBL,
-    TYPE_RGB_DBL, Transform, clut_probe_profile,
+    ClutPipeline, FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, INTENT_PERCEPTUAL, TYPE_CMYK_16, TYPE_CMYK_DBL,
+    TYPE_GRAY_16, TYPE_GRAY_DBL, TYPE_RGB_16, TYPE_RGB_DBL, Transform as LcmsTransform,
+    clut_probe_profile,
 };
 
 fn random_samples(seed: u64, n: usize) -> Vec<u16> {
@@ -196,7 +208,7 @@ fn worst_vs_probe_profile(
     let table = ClutTable::new(&u16_clut(grid, out_ch, samples.clone())).unwrap();
     let ours = clut_pipeline(table);
     let probe = clut_probe_profile(grid, &samples, u32::from(out_ch));
-    let transform = Transform::devicelink(
+    let transform = LcmsTransform::devicelink(
         &probe,
         in_format,
         out_format,
@@ -293,6 +305,173 @@ fn forced_multilinear_3d_still_matches_lcms2_at_nodes() {
                     );
                 }
             }
+        }
+    }
+}
+
+// ---- precision tiers ----------------------------------------------------------------------
+
+/// The resampling pass's grid for `inputs` channels (lcms2's
+/// `_cmsReasonableGridpointsByColorspace` default arm): a parsed table on exactly this grid
+/// resamples onto its own nodes.
+fn resampled_grid(inputs: usize) -> Vec<u8> {
+    vec![if inputs == 4 { 17 } else { 33 }; inputs]
+}
+
+/// `[Clamp, Clut(samples)]` resampled at `level`, asserting the pass produced the single tier
+/// table this suite measures (and not, say, a declined resampling).
+fn resampled_tier(
+    samples: &[u16],
+    inputs: usize,
+    outputs: u8,
+    level: PipelineOptimization,
+    precision: NodePrecision,
+) -> Pipeline {
+    let grid = resampled_grid(inputs);
+    let table = ClutTable::new(&u16_clut(&grid, outputs, samples.to_vec())).unwrap();
+    let n_in = u8::try_from(inputs).unwrap();
+    let pipeline = Pipeline::new(
+        n_in,
+        outputs,
+        vec![Stage::Clamp { channels: n_in }, Stage::Clut(table)],
+    )
+    .unwrap()
+    .optimized(level)
+    .unwrap();
+    match pipeline.stages() {
+        [Stage::Clut(resampled)] => {
+            assert_eq!(resampled.grid_points(), grid.as_slice());
+            assert_eq!(resampled.node_precision(), precision);
+        }
+        other => panic!("resampling declined: {other:?}"),
+    }
+    pipeline
+}
+
+/// 16-bit sweep inputs: every corner, the half-scale code, and seeded codes — a fifth of the
+/// axes drawn equal to another (fraction ties) and a fifth at full scale (the upper-node rule).
+fn sweep16(seed: u64, dims: usize, count: usize) -> Vec<u16> {
+    let mut codes = Vec::new();
+    for corner in 0..(1_usize << dims) {
+        codes.extend((0..dims).map(|d| if corner & (1 << d) != 0 { u16::MAX } else { 0 }));
+    }
+    codes.extend(std::iter::repeat_n(0x8000, dims));
+    let mut lcg = Lcg::new(seed);
+    for _ in 0..count {
+        let shared = lcg.next_u16();
+        codes.extend((0..dims).map(|_| match lcg.next_u32() % 5 {
+            0 => shared,
+            1 => u16::MAX,
+            _ => lcg.next_u16(),
+        }));
+    }
+    codes
+}
+
+/// lcms2's 16-bit format code for a probe space.
+fn format16(channels: usize) -> u32 {
+    match channels {
+        1 => TYPE_GRAY_16,
+        3 => TYPE_RGB_16,
+        _ => TYPE_CMYK_16,
+    }
+}
+
+#[test]
+fn fixed16_tier_is_bit_exact_against_lcms2_integer_interpolators() {
+    lcms2_oracle::set_quiet_log_handler();
+    // (inputs, outputs): lcms2's Eval1Input (1→1 is LinLerp1D), TetrahedralInterp16 and
+    // Eval4Inputs, at the probe spaces lcms2's 16-bit formatters address (gray/RGB/CMYK).
+    for (inputs, outputs, seed) in [
+        (1_usize, 1_u8, 0x16_01_u64),
+        (1, 3, 0x16_13),
+        (3, 3, 0x16_33),
+        (3, 4, 0x16_34),
+        (4, 3, 0x16_43),
+        (4, 4, 0x16_44),
+    ] {
+        let grid = resampled_grid(inputs);
+        let nodes: usize = grid.iter().map(|&n| usize::from(n)).product();
+        // Half-range codes: lcms2 accumulates `TetrahedralInterp16`'s `Rest` and
+        // `BilinearInterp16`'s `LERP` in `int`, which a cell spanning more than half the code
+        // range can overflow (signed overflow, whose wrapped result is off by a code); this
+        // crate accumulates in `i64` and is exact there. Smooth resampled transforms never
+        // step that far within one cell, so the differential stays where both are defined.
+        let samples: Vec<u16> = random_samples(seed, nodes * usize::from(outputs))
+            .into_iter()
+            .map(|s| s >> 1)
+            .collect();
+        let ours = resampled_tier(
+            &samples,
+            inputs,
+            outputs,
+            PipelineOptimization::PrecalculateFixed16,
+            NodePrecision::Fixed16,
+        );
+        let probe = clut_probe_profile(&grid, &samples, u32::from(outputs));
+        let oracle = LcmsTransform::devicelink(
+            &probe,
+            format16(inputs),
+            format16(usize::from(outputs)),
+            INTENT_PERCEPTUAL,
+            FLAGS_NOCACHE | FLAGS_NOOPTIMIZE,
+        );
+        let src = sweep16(seed ^ 0xA5, inputs, 2000);
+        let pixels = src.len() / inputs;
+        let mut got = vec![0_u16; pixels * usize::from(outputs)];
+        ours.transform_u16(&src, &mut got).unwrap();
+        let want = oracle.apply_u16(&src, pixels, usize::from(outputs));
+        let first_miss = got
+            .chunks(usize::from(outputs))
+            .zip(want.chunks(usize::from(outputs)))
+            .position(|(g, w)| g != w);
+        assert!(
+            first_miss.is_none(),
+            "{inputs}→{outputs}: pixel {:?} gives {:?}, lcms2 {:?}",
+            first_miss.map(|p| &src[p * inputs..(p + 1) * inputs]),
+            first_miss.map(|p| &got[p * usize::from(outputs)..(p + 1) * usize::from(outputs)]),
+            first_miss.map(|p| &want[p * usize::from(outputs)..(p + 1) * usize::from(outputs)]),
+        );
+    }
+}
+
+#[test]
+fn f32_tier_is_bit_exact_against_lcms2_float_interpolators() {
+    lcms2_oracle::set_quiet_log_handler();
+    // LinLerp1Dfloat / Eval1InputFloat, TetrahedralInterpFloat, Eval4InputsFloat.
+    for (inputs, outputs, seed) in [
+        (1_usize, 1_u8, 0x3201_u64),
+        (1, 3, 0x3213),
+        (3, 3, 0x3233),
+        (4, 2, 0x3242),
+    ] {
+        let grid = resampled_grid(inputs);
+        let nodes: usize = grid.iter().map(|&n| usize::from(n)).product();
+        let samples = random_samples(seed, nodes * usize::from(outputs));
+        let ours = resampled_tier(
+            &samples,
+            inputs,
+            outputs,
+            PipelineOptimization::PrecalculateF32,
+            NodePrecision::F32,
+        );
+        // The oracle's nodes are the same values at f32: `(s / 65535) as f32`.
+        let narrow: Vec<f32> = samples
+            .iter()
+            .map(|&s| (f64::from(s) / 65535.0) as f32)
+            .collect();
+        let oracle = ClutPipeline::new(&grid, &narrow, u32::from(outputs));
+        for point in sweep_points(seed ^ 0x5A, &grid, 1500) {
+            // Inputs the f32 tier receives exactly: it narrows `f64` to `f32` on entry.
+            let narrow_point: Vec<f32> = point.iter().map(|&v| v as f32).collect();
+            let wide_point: Vec<f64> = narrow_point.iter().map(|&v| f64::from(v)).collect();
+            let got = eval_ours(&ours, &wide_point);
+            let want: Vec<f64> = oracle
+                .eval(&narrow_point)
+                .into_iter()
+                .map(f64::from)
+                .collect();
+            assert_eq!(got, want, "{inputs}→{outputs} at {narrow_point:?}");
         }
     }
 }

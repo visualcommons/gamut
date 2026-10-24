@@ -15,9 +15,15 @@
 //!
 //! # Numeric domain
 //!
-//! Evaluation is scalar **`f64` throughout**, at **Tier-1 (correctness only)**: results are
+//! Evaluation is scalar **`f64` by default**, at **Tier-1 (correctness only)**: results are
 //! correct to specification but not bit-reproducible across platforms — the same posture as
-//! `gamut-color` (see `references/color/README.md`). Samples are interleaved per pixel.
+//! `gamut-color` (see `references/color/README.md`). Two opt-in **precision tiers** trade
+//! that for throughput, each under its own conformance budget: a resampled CLUT at `f32`
+//! ([`PipelineOptimization::PrecalculateF32`]) or at 16-bit fixed point
+//! ([`PipelineOptimization::PrecalculateFixed16`], lcms2's integer interpolators, run end to
+//! end in integers under the 8- and 16-bit buffer entry points) — see [`NodePrecision`].
+//! `f64` stays the reference every tier is measured against. Samples are interleaved per
+//! pixel.
 //! **Device channels are encoded values in `[0.0, 1.0]`** (an 8-bit device sample `s` enters
 //! as `s / 255`); **PCS seams are decoded colorimetry** — PCSXYZ carries XYZ with D50
 //! luminance `Y = 1.0`, PCSLAB carries `L*` in `0..=100` and `a*`/`b*` in their natural
@@ -37,7 +43,8 @@
 //!   per channel by [`Stage::Curves`].
 //! - [`clut`] — [`ClutTable`]: multi-dimensional CLUT interpolation (lcms2's tetrahedral
 //!   decomposition and N-D multilinear, selectable via [`ClutInterpolation`]) over
-//!   `gamut-icc`'s parsed CLUT elements, applied by [`Stage::Clut`].
+//!   `gamut-icc`'s parsed CLUT elements, applied by [`Stage::Clut`], at a [`NodePrecision`]
+//!   tier (`f64`, or for resampled tables `f32` and 16-bit fixed point).
 //! - [`link`] — profile linking: [`device_to_pcs`]/[`pcs_to_device`] build runnable pipelines
 //!   from parsed profiles — LUT profiles (`lut8`/`lut16`/`lutAToB`/`lutBToA` tags, selected
 //!   per rendering intent with lcms2's intent tables and perceptual fallback) and matrix/TRC
@@ -118,7 +125,7 @@ pub use bpc::{detect_black_point, detect_destination_black_point};
 #[doc(inline)]
 pub use chain::ProofingOptions;
 #[doc(inline)]
-pub use clut::{ClutInterpolation, ClutTable};
+pub use clut::{ClutInterpolation, ClutTable, NodePrecision};
 #[doc(inline)]
 pub use curve::ToneCurve;
 #[doc(inline)]

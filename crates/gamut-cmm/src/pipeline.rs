@@ -7,10 +7,12 @@
 
 use gamut_color::lab::{D50_XYZ, lab_to_xyz, xyz_to_lab};
 
-use crate::clut::ClutTable;
+use crate::clut::{ClutTable, Fixed16};
 use crate::curve::ToneCurve;
 use crate::error::{CmmError, Result};
-use crate::transform::Transform;
+use crate::transform::{
+    Transform, check_buffers, encode_u8, encode_u16, narrow_u16, through_f64, widen_u8,
+};
 
 /// The largest channel count a stage or pipeline end may declare.
 ///
@@ -432,24 +434,81 @@ impl Pipeline {
     }
 }
 
+impl Pipeline {
+    /// The integer evaluation view of a pipeline that is exactly one
+    /// [`NodePrecision::Fixed16`](crate::clut::NodePrecision::Fixed16) CLUT — the shape
+    /// [`PipelineOptimization::PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16)
+    /// produces whenever its resampling applies — or `None`, in which case the integer entry
+    /// points convert through `f64`.
+    ///
+    /// The selection is a pure performance choice — both routes compute the same codes — so
+    /// its one whole-body mutant is excluded in `.cargo/mutants.toml` with that argument;
+    /// `let`-`else` rather than a `match` with a wildcard keeps it to that one mutant.
+    fn fixed16(&self) -> Option<Fixed16<'_>> {
+        let [Stage::Clut(table)] = self.stages.as_slice() else {
+            return None;
+        };
+        table.fixed16()
+    }
+}
+
 impl Transform for Pipeline {
     fn transform(&self, src: &[f64], dst: &mut [f64]) -> Result<()> {
+        check_buffers(
+            self.input_channels,
+            self.output_channels,
+            src.len(),
+            dst.len(),
+        )?;
         let n_in = usize::from(self.input_channels);
         let n_out = usize::from(self.output_channels);
-        if !src.len().is_multiple_of(n_in) {
-            return Err(CmmError::BufferLength {
-                channels: self.input_channels,
-                found: src.len(),
-            });
-        }
-        if dst.len() != (src.len() / n_in) * n_out {
-            return Err(CmmError::BufferLength {
-                channels: self.output_channels,
-                found: dst.len(),
-            });
-        }
         for (pixel_in, pixel_out) in src.chunks_exact(n_in).zip(dst.chunks_exact_mut(n_out)) {
             self.eval(pixel_in, pixel_out)?;
+        }
+        Ok(())
+    }
+
+    fn transform_u16(&self, src: &[u16], dst: &mut [u16]) -> Result<()> {
+        let Some(lut) = self.fixed16() else {
+            return through_f64(self, src, dst, 65535.0, encode_u16);
+        };
+        check_buffers(
+            self.input_channels,
+            self.output_channels,
+            src.len(),
+            dst.len(),
+        )?;
+        let n_in = usize::from(self.input_channels);
+        let n_out = usize::from(self.output_channels);
+        for (pixel_in, pixel_out) in src.chunks_exact(n_in).zip(dst.chunks_exact_mut(n_out)) {
+            lut.eval(pixel_in, pixel_out);
+        }
+        Ok(())
+    }
+
+    fn transform_u8(&self, src: &[u8], dst: &mut [u8]) -> Result<()> {
+        let Some(lut) = self.fixed16() else {
+            return through_f64(self, src, dst, 255.0, encode_u8);
+        };
+        check_buffers(
+            self.input_channels,
+            self.output_channels,
+            src.len(),
+            dst.len(),
+        )?;
+        let n_in = usize::from(self.input_channels);
+        let n_out = usize::from(self.output_channels);
+        let mut wide_in = [0_u16; MAX_CHANNELS as usize];
+        let mut wide_out = [0_u16; MAX_CHANNELS as usize];
+        let (wide_in, wide_out) = (&mut wide_in[..n_in], &mut wide_out[..n_out]);
+        for (pixel_in, pixel_out) in src.chunks_exact(n_in).zip(dst.chunks_exact_mut(n_out)) {
+            for (wide, &code) in wide_in.iter_mut().zip(pixel_in) {
+                *wide = widen_u8(code);
+            }
+            lut.eval(wide_in, wide_out);
+            for (code, &wide) in pixel_out.iter_mut().zip(wide_out.iter()) {
+                *code = narrow_u16(wide);
+            }
         }
         Ok(())
     }
@@ -671,5 +730,114 @@ mod tests {
         pipeline.eval(&[0.25, 0.5, -1.0], &mut out).unwrap();
         // Matrix result [0.375, 1.5, 0.625] survives Identity, then Clamp caps 1.5 to 1.0.
         assert_eq!(out, [0.375, 1.0, 0.625]);
+    }
+
+    /// `[Clamp, Curves(gamma 2.2)]` on three channels, resampled at `level`.
+    fn resampled_gamma(level: crate::PipelineOptimization) -> Pipeline {
+        // 563/256 ≈ 2.2 in u8Fixed8Number.
+        let gamma = ToneCurve::new(&gamut_icc::CurveOrParametric::Curve(
+            gamut_icc::Curve::Gamma(gamut_icc::U8Fixed8(563)),
+        ))
+        .unwrap();
+        Pipeline::new(
+            3,
+            3,
+            vec![Stage::Clamp { channels: 3 }, Stage::Curves(vec![gamma; 3])],
+        )
+        .unwrap()
+        .optimized(level)
+        .unwrap()
+    }
+
+    /// Seeded 16-bit codes: `pixels` RGB pixels including both ends of the range.
+    fn codes(pixels: usize) -> Vec<u16> {
+        let mut state = 0x9E37_79B9_u32;
+        let mut out = vec![0, 0, 0, u16::MAX, u16::MAX, u16::MAX];
+        while out.len() < pixels * 3 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            out.push((state >> 16) as u16);
+        }
+        out
+    }
+
+    #[test]
+    fn fixed16_pipelines_evaluate_codes_without_a_float_round_trip() {
+        let pipeline = resampled_gamma(crate::PipelineOptimization::PrecalculateFixed16);
+        let [Stage::Clut(table)] = pipeline.stages() else {
+            panic!("resampling declined: {:?}", pipeline.stages());
+        };
+        let lut = table.fixed16().unwrap();
+        let src = codes(400);
+        let mut got = vec![0_u16; src.len()];
+        pipeline.transform_u16(&src, &mut got).unwrap();
+        for (pixel, out) in src.as_chunks::<3>().0.iter().zip(got.as_chunks::<3>().0) {
+            let mut want = [0_u16; 3];
+            lut.eval(pixel, &mut want);
+            assert_eq!(*out, want, "pixel {pixel:?}");
+        }
+        // 8-bit: FROM_8_TO_16 in, the same integer table, FROM_16_TO_8 out.
+        let src8: Vec<u8> = (0..=255_u8).flat_map(|v| [v, 255 - v, v / 3]).collect();
+        let mut got8 = vec![0_u8; src8.len()];
+        pipeline.transform_u8(&src8, &mut got8).unwrap();
+        for (pixel, out) in src8.as_chunks::<3>().0.iter().zip(got8.as_chunks::<3>().0) {
+            let wide = pixel.map(|v| u16::from(v) * 257);
+            let mut want = [0_u16; 3];
+            lut.eval(&wide, &mut want);
+            let want = want.map(|c| ((u32::from(c) * 65281 + 8_388_608) >> 24) as u8);
+            assert_eq!(*out, want, "pixel {pixel:?}");
+        }
+    }
+
+    #[test]
+    fn integer_entry_points_agree_with_the_f64_entry_point_on_every_tier() {
+        // On a fixed-point pipeline the f64 entry point quantizes to the same codes, so both
+        // integer widths reproduce `transform` followed by round-half-up exactly; on the float
+        // tiers the integer entry points *are* that conversion.
+        for level in [
+            crate::PipelineOptimization::None,
+            crate::PipelineOptimization::PrecalculateF32,
+            crate::PipelineOptimization::PrecalculateFixed16,
+        ] {
+            let pipeline = resampled_gamma(level);
+            let src = codes(300);
+            let mut got = vec![0_u16; src.len()];
+            pipeline.transform_u16(&src, &mut got).unwrap();
+            let unit: Vec<f64> = src.iter().map(|&c| f64::from(c) / 65535.0).collect();
+            let mut wide = vec![0.0; unit.len()];
+            pipeline.transform(&unit, &mut wide).unwrap();
+            let want: Vec<u16> = wide.iter().map(|&v| crate::clut::quantize16(v)).collect();
+            assert_eq!(got, want, "{level:?} u16");
+            let src8: Vec<u8> = src.iter().map(|&c| (c >> 8) as u8).collect();
+            let mut got8 = vec![0_u8; src8.len()];
+            pipeline.transform_u8(&src8, &mut got8).unwrap();
+            let unit8: Vec<f64> = src8.iter().map(|&c| f64::from(c) / 255.0).collect();
+            pipeline.transform(&unit8, &mut wide).unwrap();
+            let want8: Vec<u8> = wide
+                .iter()
+                .map(|&v| (v * 255.0 + 0.5).floor().clamp(0.0, 255.0) as u8)
+                .collect();
+            assert_eq!(got8, want8, "{level:?} u8");
+        }
+    }
+
+    #[test]
+    fn fixed16_entry_points_enforce_the_buffer_contract() {
+        let pipeline = resampled_gamma(crate::PipelineOptimization::PrecalculateFixed16);
+        let mut dst16 = [0_u16; 3];
+        assert!(matches!(
+            pipeline.transform_u16(&[0; 4], &mut dst16),
+            Err(CmmError::BufferLength {
+                channels: 3,
+                found: 4
+            })
+        ));
+        let mut dst8 = [0_u8; 2];
+        assert!(matches!(
+            pipeline.transform_u8(&[0; 3], &mut dst8),
+            Err(CmmError::BufferLength {
+                channels: 3,
+                found: 2
+            })
+        ));
     }
 }

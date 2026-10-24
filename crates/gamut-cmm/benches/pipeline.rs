@@ -10,13 +10,17 @@
 //! | `off` | `PipelineOptimization::None` — v1's stage-by-stage evaluation, the default |
 //! | `collapse` | identity elision + matrix folding only |
 //! | `precalculate` | + curve joining and CLUT resampling (lcms2's default construction) |
+//! | `precalculate_f32` | the same resampled CLUT at `f32` nodes and arithmetic (#423) |
+//! | `precalculate_fixed16` | the same resampled CLUT at `u16` nodes, 16.16 fixed point (#423) |
 //! | `lcms2_optimized` | lcms2 at `flags = 0`, its own default optimized path |
 //! | `lcms2_baseline` | lcms2 at `cmsFLAGS_NOOPTIMIZE`, its stage-by-stage path |
 //!
 //! Two caveats when reading the lcms2 bars. They run lcms2's `TYPE_*_8` formatters (its 8-bit
-//! fast path) against this crate's `f64` core, so they are a *context* line rather than a
-//! like-for-like comparison; and `lcms2_oracle`'s `apply_u8` allocates a fresh output `Vec` per
-//! call, which the gamut bars (writing into a reused buffer) do not.
+//! fast path), which only `precalculate_fixed16` matches representation for representation —
+//! every other gamut bar runs an `f64` or `f32` core, so against those the lcms2 bars are a
+//! *context* line rather than a like-for-like comparison; and `lcms2_oracle`'s `apply_u8`
+//! allocates a fresh output `Vec` per call, which the gamut bars (writing into a reused buffer)
+//! do not.
 //!
 //! Transform *construction* is hoisted out of every timed closure — including the resampling,
 //! which is build-time work by design — because what a pixel-buffer workload cares about is the
@@ -173,6 +177,24 @@ mod shaper_pair {
     }
 
     #[divan::bench]
+    fn precalculate_f32(bencher: Bencher) {
+        bench_gamut(
+            bencher,
+            &Scenario::ShaperPair,
+            PipelineOptimization::PrecalculateF32,
+        );
+    }
+
+    #[divan::bench]
+    fn precalculate_fixed16(bencher: Bencher) {
+        bench_gamut(
+            bencher,
+            &Scenario::ShaperPair,
+            PipelineOptimization::PrecalculateFixed16,
+        );
+    }
+
+    #[divan::bench]
     fn lcms2_optimized(bencher: Bencher) {
         bench_lcms2(bencher, &Scenario::ShaperPair, 0);
     }
@@ -206,6 +228,24 @@ mod shaper_to_lut {
             bencher,
             &Scenario::ShaperToLut,
             PipelineOptimization::Precalculate,
+        );
+    }
+
+    #[divan::bench]
+    fn precalculate_f32(bencher: Bencher) {
+        bench_gamut(
+            bencher,
+            &Scenario::ShaperToLut,
+            PipelineOptimization::PrecalculateF32,
+        );
+    }
+
+    #[divan::bench]
+    fn precalculate_fixed16(bencher: Bencher) {
+        bench_gamut(
+            bencher,
+            &Scenario::ShaperToLut,
+            PipelineOptimization::PrecalculateFixed16,
         );
     }
 
