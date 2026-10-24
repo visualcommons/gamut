@@ -67,7 +67,9 @@ pub trait Transform {
     /// `floor(v · 255 + 0.5)`, saturating. A
     /// [`PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16) pipeline
     /// instead widens each code to 16 bits and narrows the result back the way lcms2's 8-bit
-    /// formatters do (`FROM_8_TO_16`, `FROM_16_TO_8`).
+    /// formatters do (`FROM_8_TO_16`, `FROM_16_TO_8`), and an [`IccTransform`] at that level
+    /// over an RGB → RGB matrix/TRC link runs lcms2's 8-bit matrix-shaper instead
+    /// ([`crate::optimize`], "The 8-bit matrix-shaper").
     ///
     /// # Errors
     ///
