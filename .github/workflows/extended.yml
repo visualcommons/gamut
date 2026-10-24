@@ -566,3 +566,35 @@ jobs:
         env:
           MISE_TASK_RUN_AUTO_INSTALL: false
         run: mise run test-c2pa
+
+  # The ICC sandbox's tests (issue #1005): the UI-free model, the live conformance badge cross-checked
+  # against Little-CMS (`tests/conformance.rs`), and every tab drawn headlessly. The per-PR lint
+  # lane only lints it (`check-icc-sandbox`); this runs the assertions. A job of its own because it
+  # shares nothing with the others: it needs one submodule, `third_party/lcms2`, which
+  # `tooling/lcms2-oracle` compiles with the `cc` crate and binds with bindgen, so the runner's own
+  # C compiler and libclang suffice -- no CMake, no apt step, no other oracle. Nothing opens a
+  # window, so no display server is needed.
+  icc-sandbox:
+    name: ICC sandbox tests
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Fetch the Little-CMS submodule
+        run: git submodule update --init --depth 1 third_party/lcms2
+      - uses: jdx/mise-action@v4
+        with:
+          # Only put `mise` on PATH: the task needs rustup + cargo and none of the [tools] entries.
+          install: false
+      - name: Clear pre-installed Rust toolchain
+        # Same rustup `bin/cargo-fmt` reinstall-conflict guard as ci.yml's check job.
+        run: rustup toolchain uninstall stable || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The crate is workspace-excluded, so it builds into its own target dir, not the root one.
+          workspaces: examples/icc-sandbox -> target
+      - name: Test the ICC sandbox
+        env:
+          MISE_TASK_RUN_AUTO_INSTALL: false
+        run: mise run test-icc-sandbox
