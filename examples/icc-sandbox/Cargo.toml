@@ -12,6 +12,9 @@
 name = "gamut-icc-sandbox"
 version = "0.0.0"
 edition = "2024"
+# Above the workspace MSRV (1.92) because egui, eframe and egui_plot 0.37/0.38 each declare
+# `rust-version = "1.95"`; this floor is theirs. No shipped crate reaches it — the sandbox is
+# workspace-excluded and `publish = false`.
 rust-version = "1.95"
 publish = false
 description = "Interactive ICC sandbox: every gamut-icc / gamut-cmm code path, exercised on synthesized profiles."
@@ -23,7 +26,8 @@ default = ["gui", "oracle"]
 # exercise without compiling a windowing stack.
 gui = ["dep:eframe", "dep:egui_plot"]
 # The live conformance badge: the profile battery cross-checked against a vendored, statically
-# linked Little-CMS. Native only — lcms2-oracle builds C, so the wasm build leaves it off.
+# linked Little-CMS. Native only — lcms2-oracle builds C, so the wasm build leaves it off. It also
+# gates `tests/conformance.rs`, which therefore runs only when `oracle` is on (it is by default).
 oracle = ["dep:lcms2-oracle"]
 
 [dependencies]
@@ -46,10 +50,6 @@ egui_plot = { version = "0.38", optional = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["console", "Document", "HtmlCanvasElement", "Window"] }
-
-[dev-dependencies]
-# The conformance test always runs against the oracle, whatever features the build selected.
-lcms2-oracle = { path = "../../tooling/lcms2-oracle" }
 
 [[bin]]
 name = "icc-sandbox"
