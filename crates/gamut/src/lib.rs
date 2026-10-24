@@ -3,8 +3,8 @@
 //! This crate re-exports the high-level APIs of the format-specific crates behind Cargo
 //! features, so a consumer compiles only the codecs they need:
 //!
-//! ```toml
-//! gamut = { version = "0.1", features = ["avif", "jxl"] }
+//! ```sh
+//! cargo add gamut -F avif,jxl
 //! ```
 //!
 //! [`core`] (re-exported from [`gamut-core`](https://crates.io/crates/gamut-core)) is always

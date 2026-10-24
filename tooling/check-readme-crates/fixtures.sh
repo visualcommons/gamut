@@ -72,7 +72,9 @@ check() {
         failed=$((failed + 1))
         return
     fi
-    if [ -n "$fragment" ] && ! printf '%s\n' "$out" | grep -qF -- "$fragment"; then
+    # A here-string, not a pipe: `grep -q` exits at its first match, and under `pipefail` the
+    # writer's SIGPIPE would fail a fixture whose output does carry the fragment.
+    if [ -n "$fragment" ] && ! grep -qF -- "$fragment" <<<"$out"; then
         echo "FAIL  $name -- exit $got as expected, but the output does not say '$fragment'"
         printf '%s\n' "$out" | sed 's/^/        /'
         failed=$((failed + 1))
@@ -146,15 +148,15 @@ check "a heading whose text is Crates#, not Crates"       1 "found no crate rows
 # The claim forms. Each is opt-in and marker-driven; each fixture writes one claim cargo refutes,
 # and each is paired with the legal claim it must not reject.
 # ---------------------------------------------------------------------------------------------
-check "a version token contradicting the manifest"        1 "version claims"   sedx '/^| `gamut-core` /s/stable (v2;/stable (v3;/'
-check "a minor version contradicting the manifest"        1 "version claims"   sedx '/^| `gamut-bitstream` /s/v0.2,/v0.3,/'
+check "a version token in a row"                         1 "must not write"   sedx '/^| `gamut-core` /s/stable (1.0 under/stable (v3; 1.0 under/'
+check "a minor version token in a row"                   1 "must not write"   sedx '/^| `gamut-bitstream` /s/pre-1.0,/v0.2,/'
 check "a consumed-by list one crate short"                1 "consumed by"      sedx 's/`gamut-png` and `gamut-webp`;/`gamut-png`;/'
 check "a consumed-by list naming a non-consumer"          1 "consumed by"      sedx 's/`gamut-png` and `gamut-webp`;/`gamut-png`, `gamut-riff` and `gamut-webp`;/'
 check "an always-on list naming an optional edge"         1 "always-on"        sedx 's/always-on dependency: `gamut-core`/always-on dependency: `gamut-avif`/'
 check "an always-on list naming an edge that is absent"   1 "always-on"        sedx 's/always-on dependency: `gamut-core`/always-on dependency: `gamut-jxl-sys`/'
 check "a feature no crate the row names declares"         1 "feature claims"   sedx 's/behind Cargo feature `codec-abi`/behind Cargo feature `codec-abii`/'
 check "an off-by-default feature called a default one"    1 "feature claims"   sedx 's/BigTIFF behind Cargo feature `bigtiff`/BigTIFF behind default Cargo feature `bigtiff`/'
-check "a default feature owned by a crate not named here" 1 "feature claims"   sedx '/^| `gamut-riff` /s/stable (v1, #186)/stable (v1, #186); default Cargo feature `decode`/'
+check "a default feature owned by a crate not named here" 1 "feature claims"   sedx '/^| `gamut-riff` /s/stable (#186)/stable (#186); default Cargo feature `decode`/'
 check "another real feature of the row crate (legal)"     0 "lists every"      sedx 's/BigTIFF behind Cargo feature `bigtiff`/BigTIFF behind Cargo feature `bigtiff`, with Cargo feature `test-support` for fixtures/'
 check "a feature of another crate the row names (legal)"  0 "lists every"      sedx 's/behind Cargo feature `codec-abi`/behind Cargo feature `codec-abi` and Cargo feature `avif`/'
 check "a cell naming a crate that does not exist"         1 "do not exist"     sedx 's/built on `gamut-ifd`/built on `gamut-ifdd`/'
@@ -178,33 +180,23 @@ check "a phantom crate named in section prose"            1 "do not exist"      
 check "a feature claim in section prose cargo refutes"    1 "feature claims"      sedx 's/^Each crate manifest sets/The `gamut-png` Cargo feature `nope` is gone; each crate manifest sets/'
 check "a consumed-by list outside a crate row"            1 "no crate to be about" sedx 's/^Each crate manifest sets/Each is consumed by `gamut-png`; each crate manifest sets/'
 check "an always-on list outside a crate row"             1 "no crate to be about" sedx 's/^Each crate manifest sets/Each has an always-on dependency: `gamut-core`; each crate manifest sets/'
-check "a version token outside a crate row"               1 "no crate to be about" sedx 's/^Each crate manifest sets/Each v9 crate manifest sets/'
+check "a version token in section prose"                 1 "must not write"      sedx 's/^Each crate manifest sets/Each v9 crate manifest sets/'
 check "a phantom crate named in a sub-heading"            1 "do not exist"        awkx '/^Each crate manifest sets/{print "### The `gamut-ifdd` note"; print ""} {print}'
 check "a claim in a sub-heading cargo refutes"            1 "feature claims"      awkx '/^Each crate manifest sets/{print "### The `gamut-png` Cargo feature `nope`"; print ""} {print}'
 
 # ---------------------------------------------------------------------------------------------
-# The Usage snippet (#559): its `gamut` requirement against the umbrella's manifest version. The
-# fixtures derive the expected line from the manifest, so they follow it across releases.
+# The Usage snippet (#559, #954): a `cargo add gamut` line in a fence, and no pinned `gamut = ...`
+# requirement in any fence, since a pin goes stale on the next release line.
 # ---------------------------------------------------------------------------------------------
-umbrella="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gamut") | .version')"
-line="$(printf '%s\n' "$umbrella" | awk -F'[.+-]' '{ if ($1 != "0") print $1; else if ($2 != "0") print $1 "." $2; else print $1 "." $2 "." $3 }')"
-snippet='/^gamut = { version = "/'
-check "the snippet pinned to a stale line"                1 "umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"0.1\"/"
-check "the snippet pinned coarser than the release line"  1 "umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"0\"/"
-# A patch other than the manifest's on the right release line: below it where one exists (0.3.0
-# against 0.3.2), above it otherwise. Only the patch clause can refuse it.
-stale="$(printf '%s\n' "$umbrella" | awk -F'[.+-]' '{ print $1 "." $2 "." ($3 > 0 ? $3 - 1 : $3 + 1) }')"
-check "the snippet pinned to a patch the tree is not"     1 "the umbrella's manifest is $umbrella" sedx "${snippet}s/version = \"[^\"]*\"/version = \"$stale\"/"
-check "the snippet with a four-component version"         1 "no plain version requirement" sedx "${snippet}s/version = \"[^\"]*\"/version = \"$umbrella.9\"/"
-check "the snippet with a non-caret operator"             1 "no plain version requirement" sedx "${snippet}s/version = \"[^\"]*\"/version = \">=$line\"/"
-check "the snippet in bare-string form, stale"            1 "umbrella's manifest refutes" sedx "${snippet}s/.*/gamut = \"0.1\"/"
-check "the snippet with its keys reordered, stale"        1 "umbrella's manifest refutes" sedx "${snippet}s/.*/gamut = { features = [\"avif\"], version = \"0.1\" }/"
-check "the snippet deleted"                               1 "no \`gamut = ...\` dependency line" sedx "${snippet}d"
-check "the snippet moved out of its fence"                1 "no \`gamut = ...\` dependency line" awkx '/^```toml$/{drop = 1; next} drop && /^```$/{drop = 0; next} {print}'
-check "the snippet at the exact manifest version (legal)" 0 "names the umbrella's release line" sedx "${snippet}s/version = \"[^\"]*\"/version = \"$umbrella\"/"
-check "the snippet with a caret operator (legal)"         0 "names the umbrella's release line" sedx "${snippet}s/version = \"[^\"]*\"/version = \"^$line\"/"
-check "the snippet in bare-string form (legal)"           0 "names the umbrella's release line" sedx "${snippet}s/.*/gamut = \"$line\"/"
-check "a stale line nested in a four-backtick fence"      1 "umbrella's manifest refutes" awkx '{print} END {print "````markdown"; print "```toml"; print "gamut = \"0.1\""; print "```"; print "````"}'
+snippet='/^cargo add gamut /'
+pin_inline='{print} END {print "```toml"; print "gamut = { version = \"0.4\", features = [\"avif\"] }"; print "```"}'
+check "a pin in inline-table form"                       1 "pin a version"        awkx "$pin_inline"
+check "a pin in bare-string form"                        1 "pin a version"        awkx '{print} END {print "```toml"; print "gamut = \"0.4\""; print "```"}'
+check "a pin nested in a four-backtick fence"            1 "pin a version"        awkx '{print} END {print "````markdown"; print "```toml"; print "gamut = \"0.4\""; print "```"; print "````"}'
+check "the snippet deleted"                              1 "no \`cargo add gamut" sedx "${snippet}d"
+check "the snippet moved out of its fence"               1 "no \`cargo add gamut" awkx '/^```sh$/{drop = 1; next} drop && /^```$/{drop = 0; next} {print}'
+check "the snippet adding a sibling crate instead"       1 "no \`cargo add gamut" sedx "${snippet}s/cargo add gamut /cargo add gamut-png /"
+check "the snippet without features (legal)"             0 "pins no version"      sedx "${snippet}s/.*/cargo add gamut/"
 
 # The umbrella crate's own README (the crates.io page) carries its own copy of the snippet. These
 # apply the transform to that file and hand it to the guard beside the unchanged base README.
@@ -222,9 +214,9 @@ umbrella_check() {
     check "$name" "$want" "$fragment" unchanged
     also=""
 }
-umbrella_check "the umbrella README's snippet as committed"     0 "names the umbrella's release line" unchanged
-umbrella_check "the umbrella README's snippet on a stale line"  1 "umbrella-README.md that the umbrella's manifest refutes" sedx "${snippet}s/version = \"[^\"]*\"/version = \"0.1\"/"
-umbrella_check "the umbrella README's snippet deleted"          1 "umbrella-README.md has no \`gamut = ...\` dependency line" sedx "${snippet}d"
+umbrella_check "the umbrella README's snippet as committed" 0 "pins no version" unchanged
+umbrella_check "the umbrella README's snippet pinned"       1 "umbrella-README.md pin a version" awkx "$pin_inline"
+umbrella_check "the umbrella README's snippet deleted"      1 "umbrella-README.md has no \`cargo add gamut" sedx "${snippet}d"
 
 echo
 echo "check-readme-crates fixtures: $passed passed, $failed failed (awk: ${CHECK_README_AWK:-awk})"
