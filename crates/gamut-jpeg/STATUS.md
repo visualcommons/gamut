@@ -84,7 +84,10 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   identical), step-normalized distortion with a tuned dimensionless λ, and per-block adaptive λ
   modulation from block activity relative to the quantization resolution. DC keeps plain rounding
   (DC trellis deferred: a cross-block DP through the §F.1.2.1 predictor and restart resets —
-  mozjpeg ships it separately too). Default off (byte-identical); backends vetoed.
+  mozjpeg ships it separately too). Experiment #974 (`experiments/974/RESULTS.md`) measured a
+  two-candidate Viterbi DC trellis on the AC trellis's cost model: it moves BD-rate by under 0.1%
+  on average and at most 0.26% on any image, so the deferral stands. Default off
+  (byte-identical); backends vetoed.
 - Caller-supplied quantization tables (P11, issue #332): the validated `QuantTables` pair
   (natural order, entries `1..=255` by construction) used **verbatim** via
   `JpegEncoder::with_quant_tables`, bypassing — without changing — the frozen quality mapping;
@@ -166,7 +169,11 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   `with_quant_tables`. They beat Annex K by 12–14% at equal PSNR/SSIM, and by about 20% combined
   with the trellis. Those metrics favour flat tables by construction, so this is not evidence for
   a built-in; that needs a perceptual metric. DC trellis and overshoot deringing need encoder
-  internals and were not measured.
+  internals, so experiment #974 (`experiments/974/RESULTS.md`) measured them as patches of the
+  encoder: neither is shipped. The DC trellis is negligible (see the RD entry above). Deringing
+  saves 12–16% at equal PSNR on black text on white and is otherwise small, with a 0.7–1.0%
+  equal-SSIM loss on one photograph; shipping it would need perceptual-metric evidence and an
+  integer formulation of mozjpeg's `f32` curve.
 - **CLI metadata passthrough.** `gamut convert` now decodes JPEG input with `JpegDecoder` rather
   than the third-party `image` crate (issue #268), but still through the `DecodeImage` pixel path,
   which carries no APP segments; a passthrough needs the metadata-bearing decode entry point and

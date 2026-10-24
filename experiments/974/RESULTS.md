@@ -19,14 +19,17 @@ changes on master.
 Deringing is a large, narrow win that these metrics can only partly judge.**
 
 - **DC trellis: nothing to ship.** On the four RD variants it moves rate by -0.05% to +0.04% at
-  equal fidelity, averaged over the seven images. No single image moves more than 0.24%. It
+  equal fidelity, averaged over the seven images. No single image moves more than 0.26%. It
   changes stream sizes on about 70% of the RD quality points, so it does act; the DC bits it
   trades are simply too few to matter. The `rd` module's deferral of DC trellis "for marginal gain" stands, now measured.
-- **Overshoot deringing: -13% to -16% on black text on white, about zero elsewhere.** On
-  `text-384x256` every variant saves 12-16% rate at equal PSNR, and 24-25% at equal SSIM. On the
-  other six images it moves rate by under 0.5% either way, with one outlier (below). The mean of
-  about -2% (PSNR) and -3.5% (SSIM) over seven images is that one image divided by seven, not a
-  general gain.
+- **Overshoot deringing: -12% to -16% at equal PSNR on black text on white, small elsewhere,
+  with a small SSIM regression on one photograph.** On `text-384x256` every variant saves 12-16%
+  rate at equal PSNR, and 23-27% at equal SSIM. On the other six images it moves rate by under
+  0.5% either way, with two exceptions (below): `chroma-x0.5` on `testorig` (+4.37% PSNR-Y) and
+  `vgl_6548_0026a`, where five variants lose 0.70-1.01% at equal SSIM (and `xyb-trellis` gains
+  0.52% at equal PSNR-RGB). The mean of about -2%
+  (PSNR) and -3.5% (SSIM) over seven images is that one image divided by seven, not a general
+  gain.
   - The win is real on the metrics measured here: PSNR is taken after libjpeg-turbo's decode
     clamps to 255, so the overshoot is credited exactly as a viewer would see it.
   - What the metrics cannot settle: whether the curve deringing paints through the ceiling moves
@@ -53,7 +56,9 @@ to the trellis path. The RD variants:
 | `luma-csf32-trellis` | -0.01 | -0.03 | -0.01 |
 | `xyb-trellis` | -0.05 | -0.04 | -0.02 |
 
-The largest single-image value is `xyb-trellis` on `synthetic-512x384`, -0.24% PSNR-Y.
+The largest single-image values are `trellis-adaptive` and `trellis` on `clipped-512x384`, +0.26%
+and +0.23% SSIM-Y, and `xyb-trellis` on `synthetic-512x384`, -0.24% PSNR-Y. No other image moves
+by 0.2% or more.
 
 **`overshoot-deringing`, mean over the seven images:**
 
@@ -91,8 +96,8 @@ How to read it:
 
 - **Deringing acts almost everywhere, and matters almost nowhere.** It changed stream sizes on 83-92
   of each variant's 98 points (`raw/changed.csv`), because nearly every image has some block that
-  touches 255. But apart from one outlier (below), only on `text-384x256` does it change rate by
-  more than half a percent.
+  touches 255. But apart from the two exceptions below, only on `text-384x256` does it change rate
+  by more than half a percent.
 - **Why text and not `clipped-512x384`.** The clipped photograph has 6.7% white pixels
   (`raw/inputs.csv`), but they sit in smooth highlights: a block partly at 255 is mostly a gentle
   ramp into the ceiling, which costs few AC bits to begin with. The text image (82% white) is all
@@ -104,6 +109,15 @@ How to read it:
   (#29), so its rate-distortion curve is irregular. The other two metrics for that cell are
   +0.03% (PSNR-RGB) and +0.05% (SSIM-Y) in `raw/bdrate-overshoot-deringing.csv`, so a curve
   irregularity is the likelier reading than a real regression. That is an untested explanation.
+- **The regression, `vgl_6548_0026a` at equal SSIM.** Deringing costs rate here on five
+  variants: SSIM-Y +1.01% (`luma-flat`), +0.93% (`xyb-flat`), +0.92% (`luma-csf32`), +0.79%
+  (`xyb-csf32`) and +0.70% (`luma-csf32-trellis`). These are exactly the variants on the flat and
+  `csf32` tables; on every other variant, `luma-csf64` included (+0.03%), this image's SSIM-Y
+  value stays within 0.3% either way. Separately, `xyb-trellis` on
+  this image moves PSNR-RGB by -0.52%, a gain. All six values are in
+  `raw/bdrate-overshoot-deringing.csv`. Unlike the `testorig` cell, this is not one metric on one
+  variant, so it is read as a real, small loss on this photograph's saturated regions; why
+  these tables and SSIM in particular was not measured.
 - **DC trellis.** It changes 67-83 of the 98 points per RD variant, and never by enough to move
   the BD-rate a tenth of a percent on average. DC is one symbol per block against up to 63 AC
   symbols. With a step-normalized distortion and the AC trellis's λ, the only DC moves it buys
