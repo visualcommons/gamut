@@ -100,7 +100,7 @@ pub const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 8] = [
 /// memory grows with image size times the number of concurrent candidates; the optimal-parse span
 /// bounds only the parse buffers. Measured on a square RGB photograph at [`Level::Best`] with the
 /// [`Preset::Smallest`] span, a `BruteForce` encode's peak resident set with all eight candidates
-/// was **2.5x to 3.8x** what the serial loop's was — typical rather than a bound, since the
+/// was **2.7x to 5.0x** what the serial loop's was — typical rather than a bound, since the
 /// concurrent peak depends on scheduling; `STATUS.md` carries the table. That is the trade the
 /// maintainer's decision on #624 accepted; a caller encoding near its memory limit should budget
 /// for it.
@@ -416,8 +416,8 @@ pub enum Preset {
     ///
     /// Also the most memory-hungry rung: the filter search's eight candidates run concurrently,
     /// each with its own whole-image filtered copy and 8 MiB-span parse, so peak memory grows with
-    /// image size times the candidate count. A 2048x2048 RGB photograph peaked near 690 MiB
-    /// resident where the same search run serially peaked near 212 MiB (both at refinement budget
+    /// image size times the candidate count. A 2048x2048 RGB photograph peaked near 1115 MiB
+    /// resident where the same search run serially peaked near 229 MiB (both at refinement budget
     /// 1; `STATUS.md` has the table).
     Smallest = 3,
 }
@@ -453,8 +453,8 @@ struct PresetKnobs {
 /// [`FilterStrategy::BruteForce`] runs eight candidates concurrently (#624), each with its own
 /// filtered image and its own span-length buffers, so the rung's own peak is several times a
 /// single encode's. Measured for a whole `BruteForce` encode at this span, refinement budget 1,
-/// concurrent against the serial search it replaced: **294.6 against 77.3 MiB** at 1024x1024,
-/// **690.3 against 211.7 MiB** at 2048x2048, and **1293.9 against 517.2 MiB** at 4096x4096. The
+/// concurrent against the serial search it replaced: **424.0 against 84.2 MiB** at 1024x1024,
+/// **1114.5 against 228.8 MiB** at 2048x2048, and **1431.9 against 533.0 MiB** at 4096x4096. The
 /// concurrent figures are typical rather than a bound, since they depend on scheduling. The span
 /// bounds only each candidate's parse buffers: each candidate also holds a whole-image filtered
 /// copy (`filter::filter_image` in `compress_scanlines`), so the rung's peak memory is **not**

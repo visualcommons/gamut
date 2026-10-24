@@ -70,7 +70,7 @@ pub enum FilterStrategy {
     ///
     /// The candidates run concurrently where the platform can create threads, so the encode's
     /// peak memory is that of all of them at once — each holds a whole-image filtered copy, so it
-    /// grows with image size times the candidate count. Measured at 2.5x to 3.8x a serial
+    /// grows with image size times the candidate count. Measured at 2.7x to 5.0x a serial
     /// search's peak on a photograph at `Level::Best`, with all eight candidates (`STATUS.md`).
     BruteForce,
 }
