@@ -106,7 +106,7 @@ applies by default in `cmsopt.c`:
 | `Collapse` | identity elision, adjacent matrix folding | `f64` re-association only (measured 1e-15 device units) |
 | `Precalculate` | + curve joining, whole-pipeline CLUT resampling | lcms2's own default-path approximation — the conformance gate's LOOSE bounds |
 | `PrecalculateF32` | `Precalculate`, resampled CLUT at `f32` | + `f32` rounding (≤ 1.04e-7 device units); lcms2's float interpolators bit for bit, half the memory, no faster |
-| `PrecalculateFixed16` | `Precalculate`, resampled CLUT at 16-bit fixed point | + 16-bit quantization (≤ 7.1e-3 ΔE₀₀); lcms2's integer interpolators bit for bit, integer end to end under the `u8`/`u16` buffer functions — the throughput tier |
+| `PrecalculateFixed16` | `Precalculate`, resampled CLUT at 16-bit fixed point | + 16-bit quantization (≤ 7.1e-3 ΔE₀₀); lcms2's integer interpolators bit for bit, integer end to end under the `u8`/`u16` buffer functions — the throughput tier. Under the `u8` functions an RGB→RGB matrix/TRC transform runs lcms2's 8-bit matrix-shaper instead (≤ 2 codes from `None`; lcms2's `TYPE_RGB_8` path bit for bit) |
 
 ```rust,ignore
 let fast = IccTransform::between(&src, &dst, TransformOptions {
@@ -120,7 +120,8 @@ let fast = IccTransform::between(&src, &dst, TransformOptions {
 On a 256×256 buffer that is 2.8× the default path's throughput for a shaper pair and 4.6×
 for an RGB→CMYK LUT pair, against a one-off build cost of a few milliseconds;
 `PrecalculateFixed16` roughly doubles `Precalculate` again, to within ~1.1× of lcms2's default
-path on the RGB→CMYK pair (`cargo bench -p gamut-cmm`; numbers and the precision budgets in
+path on the RGB→CMYK pair, and its 8-bit matrix-shaper reaches lcms2's default path on the
+shaper pair (`cargo bench -p gamut-cmm`; numbers and the precision budgets in
 [STATUS.md](STATUS.md)).
 
 ## Deferred

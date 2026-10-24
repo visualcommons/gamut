@@ -621,7 +621,7 @@ fn second_shaper(curve: &ToneCurve) -> Box<[u8; SHAPER_OUT_ENTRIES]> {
 /// stays inside `i32`.
 ///
 /// lcms2 evaluates the sum in `int` with no such check, so a matrix whose row magnitudes sum
-/// past about 8 (no realistic colorant pair; sRGB ↔ Display P3 sums under 1.3) overflows there,
+/// past about 8 (no realistic colorant pair; sRGB ↔ Display P3 sums under 1.5) overflows there,
 /// which C leaves undefined. The pass declines such a matrix, so wherever it runs the `i32`
 /// arithmetic is exactly lcms2's.
 fn fits_q14_accumulator(matrix: &[[i32; 3]; 3], offset: &[i32; 3]) -> bool {
