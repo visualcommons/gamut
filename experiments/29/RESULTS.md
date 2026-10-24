@@ -138,8 +138,8 @@ Mean rate difference over the five images, in percent. Negative means smaller at
 | `xyb-trellis` | -5.94 | -7.38 | -5.71 |
 
 Measured the other way round, against `annexk`, `xyb-annexk` is +68.95% (PSNR-Y), +26.26%
-(PSNR-RGB) and +73.44% (SSIM-Y). The best XYB variant, `xyb-csf32`, is +48.60%, +20.89% and
-+54.13%. (The two directions are not negatives of each other: each is a mean of per-image ratios.)
+(PSNR-RGB) and +73.44% (SSIM-Y). The best XYB variant on PSNR-Y and SSIM-Y, `xyb-csf32`, is
++48.60%, +20.89% and +54.13%; on PSNR-RGB `xyb-trellis` is better, at +17.25%. (The two directions are not negatives of each other: each is a mean of per-image ratios.)
 
 **Per image, PSNR-Y, for the table variants:**
 
@@ -178,7 +178,7 @@ How to read it:
   +23% luma rate for -3% RGB-PSNR rate. On the saturated-colour `vgl_6434_0018a` it is -30% RGB.
 - **XYB under sRGB metrics.**
   - **The 8-bit sample floor.** At q95, `xyb-annexk` reaches 40.9-50.7 dB PSNR-Y where `annexk`
-    reaches 42.7-53.5. Quantizing the scaled-XYB samples to 8 bits caps fidelity before any DCT
+    reaches 42.1-53.5. Quantizing the scaled-XYB samples to 8 bits caps fidelity before any DCT
     quantization: this is the roughly 40 dB floor `tests/xyb.rs` gates at.
   - **The metrics.** PSNR and SSIM in sRGB measure what YCbCr's error structure is easiest on.
     XYB's design target, a perceptual distance, is not among them.
