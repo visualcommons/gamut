@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2](https://github.com/visualcommons/gamut/compare/gamut-dsp-v2.0.1...gamut-dsp-v2.0.2) - 2026-10-24
+
+### Other
+
+- *(gamut-dsp)* fixed-point integer IDCT for the JPEG decoder ([#898](https://github.com/visualcommons/gamut/pull/898))
+
 ## [2.0.1](https://github.com/visualcommons/gamut/compare/gamut-dsp-v2.0.0...gamut-dsp-v2.0.1) - 2026-10-12
 
 ### Other
