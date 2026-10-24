@@ -36,7 +36,8 @@ that add behaviour (#325 onward).
 | P7 | #330 | Transform chaining (`IccTransform::chain`), device links (`IccTransform::device_link`), soft proofing (`IccTransform::proofing`/`ProofingOptions`), gamut check (`GamutCheck`), typed pixel buffers (`image`), and the epic's max-ΔE₀₀ conformance gate | ✅ |
 | P8 | #372 | Pipeline optimization: the opt-in `PipelineOptimization` knob (`optimize`) — identity elision, matrix folding, curve joining, CLUT resampling — threaded through every transform constructor, default off, with divan throughput benches | ✅ |
 | — | #555 | `TransformOptions::prefer_cicp_transfer`: closed-form evaluation of a shaper profile's `cicp`-signalled transfer, checked against its TRC; default off on the measured trade (below) | ✅ |
-| — | #423 | Precision tiers: `PipelineOptimization::PrecalculateF32`/`PrecalculateFixed16` (`NodePrecision`) — the resampled CLUT at `f32` or 16-bit fixed point, bit-exact against lcms2's interpolators, with integer `Transform::transform_u8`/`transform_u16` entry points under the image functions; each tier budgeted in the conformance gate. SIMD and the 8-bit matrix-shaper path are separate (deferred table) | ✅ |
+| — | #423 | Precision tiers: `PipelineOptimization::PrecalculateF32`/`PrecalculateFixed16` (`NodePrecision`) — the resampled CLUT at `f32` or 16-bit fixed point, bit-exact against lcms2's interpolators, with integer `Transform::transform_u8`/`transform_u16` entry points under the image functions; each tier budgeted in the conformance gate. SIMD is separate (deferred table); the 8-bit matrix-shaper path is #992 (next row) | ✅ |
+| — | #992 | 8-bit matrix-shaper: lcms2's `OptimizeMatrixShaper` (256-entry Q1.14 input tables, Q1.14 matrix, 16 385-entry output tables) run by `transform_u8` of an `IccTransform` at `PrecalculateFixed16` whose link collapses to curves → matrix → curves; bit-exact against lcms2's `TYPE_RGB_8` transform over the whole 8-bit cube, budgeted in codes against the `f64` reference | ✅ |
 
 ## Settled decisions (P2, tone curves)
 
@@ -457,11 +458,82 @@ scenario it is within **1.13×** of lcms2's default path — the same representa
 there (`OptimizeByResampling` → `TetrahedralInterp16` between `FROM_8_TO_16` and
 `FROM_16_TO_8`), so what is left is per-pixel overhead, not arithmetic. The shaper pair stays
 **3.4×** behind because lcms2 does not use a CLUT there at all: its 8-bit `OptimizeMatrixShaper`
-path (deferred table) is a different construction. The `f32` tier is *slower* than `f64`
+path is a different construction, which #992 added ("Throughput (#992)" below). The `f32` tier is *slower* than `f64`
 (0.92×/0.82×): scalar `f32` arithmetic costs the same as `f64` on this hardware and the tier
 adds an input narrowing and an output widening per pixel. What it buys is lcms2's float
 arithmetic bit for bit and half the node memory — not speed — which is why the fixed-point
 tier, not the `f32` one, is the throughput tier.
+
+## Settled decisions (#992, 8-bit matrix-shaper)
+
+- **Selected under `PrecalculateFixed16`, at the 8-bit entry point, on `IccTransform`.** No new
+  `PipelineOptimization` level (adding a variant to the exhaustive enum would be a breaking
+  change for no new choice a caller makes): the fixed-point tier is "lcms2's integer
+  representation under its 8- and 16-bit formatters", and for an 8-bit RGB → RGB matrix/TRC
+  link that representation *is* `OptimizeMatrixShaper`. lcms2 picks the pass from the input
+  format at transform creation; this crate's transforms learn the format per call, so the
+  transform builds the matrix-shaper beside its resampled CLUT (≈ 52 KB more) and
+  `transform_u8` runs it, while `transform_u16` and the `f64` entry point keep the CLUT — the
+  input tables are indexed by the 8-bit code itself. `Pipeline::optimized` returns a
+  `Pipeline`, which has no 8-bit-only representation, so a bare pipeline never carries one.
+- **Selection is the `Collapse` passes' shape, not lcms2's `PreOptimize`.** The pass runs when
+  the collapsed link is exactly curves → 3×3 matrix → curves, declines lcms2's
+  near-identity-without-offset case (`_cmsMAT3isIdentity`, `1/65535`, where lcms2 joins the
+  curves instead), and declines a matrix whose Q1.14 accumulation could overflow `i32` (row
+  magnitudes summing past ≈ 8 — C leaves lcms2's overflow undefined; no realistic colorant pair
+  comes near). It therefore also runs on links with a folded seam adjustment (absolute intent,
+  BPC), where lcms2's `_MultiplyMatrix` stops at the offset-carrying matrix and resamples, and
+  does not run on Lab-PCS shaper pairs, whose `XYZ2Lab`/`Lab2XYZ` round trip lcms2 removes and
+  `Collapse` keeps.
+- **lcms2's widths, transcribed.** Input entries are the curve at the `f32` code `i / 255`,
+  rounded to `f32` (`cmsEvalToneCurveFloat`), then `DOUBLE_TO_1FIXED14`; output entries are the
+  curve at `i / 16384`, rounded to `f32`, encoded with `_cmsQuickSaturateWord` — including its
+  fast floor, which rounds to the nearest `2⁻¹⁶` first and so differs from `floor` within `2⁻¹⁷`
+  of an integer — and narrowed with `FROM_16_TO_8`. The output tables keep that byte rather
+  than lcms2's `FROM_8_TO_16` word (its formatter narrows it straight back): same result, half
+  the memory. A `ToneCurve` clamps its output to `[0, 1]`, so lcms2's `≥ 8.0` input-table arm and
+  its output-side clamp have nothing to act on and are not transcribed.
+- **One deliberate divergence: the offset's scale.** `MatShaperEval16` adds the Q1.14 offset to
+  the Q2.28 matrix product before its `>> 14`, so lcms2 applies a matrix-shaper offset `2¹⁴` too
+  small. lcms2 never reaches the pass with a non-zero offset on a two-profile link (above); this
+  crate does, so it keeps the offset in Q2.28. The two agree to the bit whenever the offset is
+  zero; the unit test `mat_shaper_tracks_the_f64_chain_offset_included` holds a 0.0625 offset to
+  the `f64` chain, where lcms2's scale would miss by ~15 codes.
+- **Sampled curves are not bit-exact.** lcms2 evaluates a `curveType` table through its 16-bit
+  table interpolation; `ToneCurve` interpolates it in `f64`. A profile with sampled TRCs runs the
+  same pass and lands within the budget below, but can differ from lcms2 by a code where the two
+  round differently. The battery's RGB shapers are parametric and pure-gamma.
+
+### Precision budget (#992)
+
+Measured over `tests/oracle_conformance.rs` (lcms2 2.19) on the RGB matrix/TRC pairs srgb→p3,
+p3→srgb, wide→srgb, srgb→wide and wide-d65-wtpt→srgb:
+
+| metric | measured | asserted | justification |
+|--------|----------|----------|---------------|
+| codes vs lcms2 `TYPE_RGB_8`, default flags, whole 8-bit cube (`mat_shaper_8_matches_lcms2_rgb8_bit_for_bit`) | 0 mismatches, every pair at perceptual and relative | `== 0` | the pass *is* lcms2's; the two intents are the ones with no seam adjustment, where lcms2 selects it too. A CLUT at any precision does not reach this, so the equality is also the evidence the pass ran |
+| codes vs our `None` through `transform_u8` (`mat_shaper_8_stays_inside_its_budget`, 4 intents × 4096 pixels) | max 2 (srgb→wide), mean 8.84e-3 | `≤ 2` | stated in codes because the 16-bit LOOSE rows do not transfer: one 8-bit code in a γ2.2 toe is itself ~1 ΔE₀₀. 2 is also the whole-cube maximum (1 for srgb→p3 and wide→srgb) and is inherent: Q1.14's first step above black, 1/16384 linear, is 3.1 codes of a γ2.2 encoding. An integer bound has no headroom to give — a third code is a regression |
+| mean ΔE₀₀ of those codes, destination lens | 5.83e-3 (max 1.38e0 at srgb→wide saturation — that one-to-two-code toe) | `< 2e-2` | the sensitive drift guard, ~3.4× the measured mean, as the LOOSE means are: a structural mistake (a wrong curve, a lost offset) moves it by orders of magnitude |
+
+The conformance gate does not loosen: `f64` stays the Tier-1 reference and every existing row is
+unchanged.
+
+### Throughput (#992)
+
+`cargo bench -p gamut-cmm --bench pipeline -- shaper_ --sample-count 60` (256×256 interleaved
+`u8`, **fastest** of 60 samples, one run; load average ≈ 23 on 16 cores, so read the ratios):
+
+| scenario | `None` | `PrecalculateFixed16` CLUT (`precalculate_fixed16`) | 8-bit matrix-shaper (`mat_shaper_8`) | lcms2 default | lcms2 `NOOPTIMIZE` |
+|----------|--------|------------------------------------------------------|--------------------------------------|---------------|--------------------|
+| sRGB → Display P3 | 13.01 ms (5.0 Mpx/s) | 2.23 ms (29.3) | **0.52 ms (126.3)** | 0.63 ms (103.5) | 12.87 ms (5.1) |
+
+So the matrix-shaper is **4.3×** the fixed-point CLUT on the shaper pair and closes the 3.4× gap
+#423 left: it now runs **1.22×** lcms2's default path. Part of that margin is the harness, not the
+arithmetic — `lcms2_oracle`'s `apply_u8` allocates its output per call, which the gamut bars do
+not (`benches/pipeline.rs`) — so read it as parity. Building it costs 256 + 16 385 curve
+evaluations per channel on top of the resampling. The `precalculate_fixed16` bar of the shaper
+pair now times a bare `Pipeline` (which carries no matrix-shaper), so it keeps measuring the
+CLUT the #423 table measured.
 
 ## Settled decisions (#555, CICP-signalled transfer characteristics)
 
@@ -568,7 +640,7 @@ lcms2's reference answer there and what it diverges from is lcms2's grid. The sh
 | iccMAX (`ICC.2:2019`) | A separate, parallel next-generation format (spectral PCS, v5 header); not an extension of ICC.1 and unimplementable against the lcms2 oracle. See [`references/icc`](../../references/icc/README.md). | ✗ out of scope |
 | `multiProcessElementsType` (`mpet`) + `DToBx`/`BToDx` tags | The v4/iccMAX general-purpose processing pipeline; `gamut-icc` preserves it as `Raw`, and this CMM does not evaluate it. | ✗ out of scope |
 | Integer/`f32` CLUT tiers | Landed with #423: `PrecalculateF32`/`PrecalculateFixed16` (above). `f64` stays the Tier-1 default (correctness only, not bit-reproducible — the `gamut-color` posture, see [`references/color`](../../references/color/README.md)). | ✅ |
-| 8-bit integer matrix-shaper path | lcms2's `OptimizeMatrixShaper` (`cmsopt.c`, 8-bit input only): a shaper→matrix→shaper chain evaluated as 256-entry Q1.14 input tables, a Q1.14 matrix and a 16 385-entry output table (`MatShaperEval16`) — the path behind lcms2's sRGB → Display P3 figure, which a 33³ CLUT at any precision does not reach. A distinct construction with its own budget row, split from #423 as #992. | ☐ deferred |
+| 8-bit integer matrix-shaper path | Landed with #992: lcms2's `OptimizeMatrixShaper` under `PrecalculateFixed16`'s 8-bit entry point (above). | ✅ |
 | SIMD evaluation | #423 requires a maintainer decision on `unsafe`/portable SIMD before any lands; the tiers are scalar safe Rust (settled decisions above). Handed to the maintainers as #993. | ☐ awaiting decision |
 | White-point ("scum dot") fixup on a resampled CLUT | lcms2's `PatchLUT` snaps the input white node onto the output white in a precalculated table (`cmsFLAGS_NOWHITEONWHITEFIXUP` disables it, as the conformance gate does). An lcms2 aesthetic with no ICC.1 basis; the resampling pass does not replicate it. | ✗ out of scope |
 | Public per-hop intent/BPC arrays | The chain internals already take them (proofing uses them); the public `chain` API stays single-intent until a consumer needs lcms2's `cmsCreateExtendedTransform` shape. | ☐ deferred |
