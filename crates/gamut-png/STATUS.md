@@ -445,7 +445,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. A tie keeps the **plain** encoding: cleaning buys its rewritten samples with a size win, and where there is no win there is nothing to buy them with. |
 | 6 | Metadata hygiene | **preserve, never strip** — the encoder emits exactly what the caller set, and `gamut convert` carries a PNG input's metadata into a PNG output unless `--strip-metadata` asks otherwise (see [Metadata preservation](#metadata-preservation-issue-483)). Preserving costs bytes, and that is the trade this axis takes: a smaller file that silently lost a colour profile is not a better one. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
-| 8 | Effort / speed / determinism | **done** — output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). The five size/time knobs now compose into a four-rung `Preset` dial (see [The effort ladder](#the-effort-ladder-issue-484)), and `gamut-deflate`'s `with_optimal_parse_limit` is reachable from `PngEncoder` at last, so PNG callers are no longer stuck at 1 MiB spans. `BruteForce`'s eight candidates (seven before [#480] added `MinTrialDeflate`) now run concurrently on `std::thread::scope` threads, with no new dependency, and serially where the platform cannot create threads (`wasm32`). They are joined in candidate order, so a tie still goes to the earlier strategy and the output stays byte-reproducible (see [The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)). Parallelism was the axis's last named gap. It is paid for in memory, 2.5–3.8x the serial peak with all eight candidates, growing with image size times the candidate count and with no cap, which is a stated cost rather than an open item; a caller-facing concurrency cap is not planned. [#484], [#624] |
+| 8 | Effort / speed / determinism | **done** — output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). The five size/time knobs now compose into a four-rung `Preset` dial (see [The effort ladder](#the-effort-ladder-issue-484)), and `gamut-deflate`'s `with_optimal_parse_limit` is reachable from `PngEncoder` at last, so PNG callers are no longer stuck at 1 MiB spans. `BruteForce`'s eight candidates (seven before [#480] added `MinTrialDeflate`) now run concurrently on `std::thread::scope` threads, with no new dependency, and serially where the platform cannot create threads (`wasm32`). They are joined in candidate order, so a tie still goes to the earlier strategy and the output stays byte-reproducible (see [The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)). Parallelism was the axis's last named gap. It is paid for in memory, 2.5–3.8x the serial peak with all eight candidates (measured before #959's match cache; re-measuring is [#996]), growing with image size times the candidate count and with no cap, which is a stated cost rather than an open item; a caller-facing concurrency cap is not planned. [#484], [#624] |
 | 9 | Correctness / robustness | **covered** — 16-bit, odd dimensions, 1×1, CRC policy, malformed input. |
 
 ### The cost model, and why it is a race
@@ -699,7 +699,9 @@ not consulted, because the output must not depend on the machine. Peak resident 
 `BruteForce` encode per process (`/usr/bin/time -v`, release build, `photo_rgb` at the given side,
 `Level::Best`, the `Preset::Smallest` 8 MiB span, refinement budget 1, auto-reduce off). `serial`
 encodes all eight candidates one after another through the public API, as the bench's `serial`
-arm does. The two arms emit the same bytes at every size. Measured at `9e1553be`:
+arm does. The two arms emit the same bytes at every size. Measured at `9e1553be`, before #959's
+match cache, which is expected to raise every figure below by up to that cache's 10 bytes per
+byte of span for each parse alive at the peak; re-measuring it on a quiet host is [#996]:
 
 | image | serial | concurrent | ratio |
 | --- | ---: | ---: | ---: |
@@ -778,7 +780,7 @@ Since #959 it also holds the span's match cache, capped at 10 bytes per byte of 
 parse's working set is at most 22 bytes per byte of span, and the span is still the only thing
 bounding it. Peak resident set for one encode per process (`/usr/bin/time -v`, square RGB
 photograph, refinement budget 1), measured before #959 and so without the match cache
-(re-measuring it is #970):
+(re-measuring it on a quiet host is [#996]):
 
 | image | filtered stream | 1 MiB | 8 MiB | 16 MiB | no bound |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -786,9 +788,10 @@ photograph, refinement budget 1), measured before #959 and so without the match 
 | 2048x2048 | 12 584 960 | 56.0 MiB | 127.2 MiB | 177.4 MiB | 177.2 MiB |
 | 4096x4096 | 50 335 744 | 177.9 MiB | 219.0 MiB | 312.6 MiB | **701.8 MiB** |
 
-That is the formula, measured. Against the 1 MiB column the extra resident set per extra byte of
-span is 12.3, 11.0 and 11.1 bytes across the three rows — 12 allocated, slightly less resident
-because the two `u16` rows are zero-initialised and pages they never write are never faulted in.
+That is the formula as it stood before the match cache, measured. Against the 1 MiB column the
+extra resident set per extra byte of span is 12.3, 11.0 and 11.1 bytes across the three rows — 12
+allocated, slightly less resident because the two `u16` rows are zero-initialised and pages they
+never write are never faulted in.
 Time is not what scales: the same twelve runs moved by under 2% and not monotonically
 (8.41 / 8.37 / 8.37 / 8.47 s, 34.65 / 34.08 / 33.92 / 33.95 s, 133.9 / 135.4 / 134.3 / 132.7 s),
 because the parse's work is linear in the input whatever the span. A wider span *can* still take
@@ -807,11 +810,12 @@ measures it.
 the whole stream — byte-identical to no bound — for any image up to about 1670x1670 RGB or
 1448x1448 RGBA, which is where every win in the first table lives. Past that it keeps most of what
 is left (−0.100% of the −0.106% available on the 2048 gradient; −0.028% of −0.044% on a 4096
-photograph) for a third of the memory. Doubling to 16 MiB buys a further 0.005% at 4096x4096 and
-costs another 94 MiB, which is the trade the constant declines. An encoder knob whose working set
-grows without bound in the image is not something to ship behind a rung named for size — and a
-caller who has measured that their material wants more can still say
-`with_optimal_parse_limit(usize::MAX)` after the rung, having read what it costs.
+photograph) for a third of the memory, as measured before the match cache. Doubling to 16 MiB
+buys a further 0.005% at 4096x4096 and cost another 94 MiB before the cache, more with it, which is
+the trade the constant declines. An encoder knob whose working set grows without bound in the
+image is not something to ship behind a rung named for size — and a caller who has measured that
+their material wants more can still say `with_optimal_parse_limit(usize::MAX)` after the rung,
+having read what it costs.
 
 **What the dial deliberately does not touch.** `with_transparent_cleanup` is in no rung. It is this
 crate's one lossy knob (axis 5), and a dial named for effort must not be what silently changes
@@ -885,3 +889,4 @@ dropped entries also take the index stream from 8 bits per pixel to 2.
 [#631]: https://github.com/visualcommons/gamut/issues/631
 [#887]: https://github.com/visualcommons/gamut/issues/887
 [#944]: https://github.com/visualcommons/gamut/issues/944
+[#996]: https://github.com/visualcommons/gamut/issues/996
