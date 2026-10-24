@@ -777,6 +777,14 @@ fn matrix_grid(ui: &mut egui::Ui, id: &str, m: &[[f64; 3]; 3]) {
 
 impl eframe::App for SandboxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+}
+
+impl SandboxApp {
+    /// One frame of the whole window — the [`eframe::App::ui`] body, separate so a test can
+    /// drive it without an `eframe::Frame`.
+    fn draw(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             self.top_bar(ui);
             ui.separator();
@@ -798,3 +806,44 @@ impl eframe::App for SandboxApp {
 /// The window size the native build opens at.
 #[cfg(not(target_arch = "wasm32"))]
 pub const WINDOW: egui::Vec2 = egui::Vec2::new(1100.0, 800.0);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every tab draws headlessly, and every image it asks for renders: no tab's pipeline
+    /// fails at its default settings, nor at each intent with BPC on — the acceptance criterion
+    /// that no scenario runs with a code path stubbed.
+    #[test]
+    fn every_tab_renders_every_image() {
+        let ctx = egui::Context::default();
+        let mut app = SandboxApp::new().expect("the app builds");
+        let mut frames = Vec::new();
+        for (intent, _) in INTENTS {
+            frames.push(Settings {
+                intent,
+                bpc: true,
+                ..Settings::default()
+            });
+        }
+        frames.push(Settings::default());
+        for settings in frames {
+            app.settings = settings;
+            for (tab, _) in Tab::ALL {
+                app.tab = tab;
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw(ui));
+                // No renderer consumes the uploads here.
+                output.textures_delta.clear();
+            }
+        }
+        let failures: Vec<_> = app
+            .textures
+            .iter()
+            .filter_map(|(key, t)| t.as_ref().err().map(|e| format!("{key}: {e}")))
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+        // Formats 4, camera 2, print 7 and malformed 1 per settings; the CLUT slice does not
+        // depend on them, so it renders once.
+        assert_eq!(app.textures.len(), 14 * 5 + 1);
+    }
+}
