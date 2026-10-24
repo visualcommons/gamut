@@ -1,0 +1,85 @@
+diff --git a/crates/gamut-jpeg/src/encoder.rs b/crates/gamut-jpeg/src/encoder.rs
+index ecce964c..5452f16f 100644
+--- a/crates/gamut-jpeg/src/encoder.rs
++++ b/crates/gamut-jpeg/src/encoder.rs
+@@ -1131,6 +1131,63 @@ fn downsample(plane: &[u8], width: usize, height: usize, sx: usize, sy: usize) -
+     }
+ }
+ 
++/// Experiment #30: libjpeg-turbo's `smoothing_factor` (cjpeg `-smooth N`, `SF = N / 1024`).
++const SMOOTHING_FACTOR: i64 = 10;
++
++/// Experiment #30: libjpeg-turbo's input smoothing (`jcsample.c`), transcribed. A full-size plane
++/// takes `fullsize_smooth_downsample`: each sample becomes `(1 - 8 SF)` itself plus `SF` of each of
++/// its eight neighbours. A 2x2 box takes `h2v2_smooth_downsample`: the average of the four
++/// smoothed member samples, formed directly as `(1 - 5 SF) / 4` of each member, `SF / 2` of each
++/// of the eight edge neighbours and `SF / 4` of each of the four corner neighbours. Both scale by
++/// 2^16 and round. Samples outside the plane replicate its edge, as libjpeg's context rows and
++/// `expand_right_edge` do. Any other factor (libjpeg has no smoothing for it) is the plain box.
++fn smooth_downsample(plane: &[u8], width: usize, height: usize, sx: usize, sy: usize) -> Plane {
++    let at = |x: isize, y: isize| -> i64 {
++        let x = x.clamp(0, width as isize - 1) as usize;
++        let y = y.clamp(0, height as isize - 1) as usize;
++        i64::from(plane[y * width + x])
++    };
++    let sf = SMOOTHING_FACTOR;
++    let (cw, ch) = (width.div_ceil(sx), height.div_ceil(sy));
++    let mut data = vec![0u8; cw * ch];
++    match (sx, sy) {
++        (1, 1) => {
++            let (member_scale, neigh_scale) = (65_536 - sf * 512, sf * 64);
++            for y in 0..ch as isize {
++                for x in 0..cw as isize {
++                    let mut neigh = 0;
++                    for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
++                        neigh += at(x + dx, y + dy);
++                    }
++                    let v = at(x, y) * member_scale + neigh * neigh_scale;
++                    data[y as usize * cw + x as usize] = ((v + 32_768) >> 16) as u8;
++                }
++            }
++        }
++        (2, 2) => {
++            let (member_scale, neigh_scale) = (16_384 - sf * 80, sf * 16);
++            for cy in 0..ch as isize {
++                for cx in 0..cw as isize {
++                    let (x0, y0) = (2 * cx, 2 * cy);
++                    let member = at(x0, y0) + at(x0 + 1, y0) + at(x0, y0 + 1) + at(x0 + 1, y0 + 1);
++                    let edge = at(x0, y0 - 1) + at(x0 + 1, y0 - 1) + at(x0, y0 + 2) + at(x0 + 1, y0 + 2)
++                        + at(x0 - 1, y0) + at(x0 + 2, y0) + at(x0 - 1, y0 + 1) + at(x0 + 2, y0 + 1);
++                    let corner = at(x0 - 1, y0 - 1) + at(x0 + 2, y0 - 1) + at(x0 - 1, y0 + 2)
++                        + at(x0 + 2, y0 + 2);
++                    let v = member * member_scale + (2 * edge + corner) * neigh_scale;
++                    data[cy as usize * cw + cx as usize] = ((v + 32_768) >> 16) as u8;
++                }
++            }
++        }
++        _ => return downsample(plane, width, height, sx, sy),
++    }
++    Plane {
++        data,
++        width: cw,
++        height: ch,
++    }
++}
++
+ impl EncodeImage<Gray8> for JpegEncoder {
+     /// Encodes a grayscale image as a single-component (Y) baseline JPEG. Subsampling does not apply
+     /// to a one-component image; a JFIF APP0 segment is still written.
+@@ -1224,13 +1281,9 @@ impl EncodeImage<Rgb8> for JpegEncoder {
+         }
+         let (yh, yv) = self.subsampling.luma_factors();
+         let (sx, sy) = (usize::from(yh), usize::from(yv));
+-        let luma_plane = Plane {
+-            data: y,
+-            width: w,
+-            height: h,
+-        };
+-        let cb_plane = downsample(&cb, w, h, sx, sy);
+-        let cr_plane = downsample(&cr, w, h, sx, sy);
++        let luma_plane = smooth_downsample(&y, w, h, 1, 1);
++        let cb_plane = smooth_downsample(&cb, w, h, sx, sy);
++        let cr_plane = smooth_downsample(&cr, w, h, sx, sy);
+ 
+         let luma_quant = self.luma_quant();
+         let chroma_quant = self.chroma_quant();

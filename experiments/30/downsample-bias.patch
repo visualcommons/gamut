@@ -1,0 +1,22 @@
+diff --git a/crates/gamut-jpeg/src/encoder.rs b/crates/gamut-jpeg/src/encoder.rs
+index ecce964c..70eac96f 100644
+--- a/crates/gamut-jpeg/src/encoder.rs
++++ b/crates/gamut-jpeg/src/encoder.rs
+@@ -1121,7 +1121,16 @@ fn downsample(plane: &[u8], width: usize, height: usize, sx: usize, sy: usize) -
+                     }
+                 }
+             }
+-            data[cy * cw + cx] = ((sum + count / 2) / count) as u8;
++            // Experiment #30: libjpeg-turbo's ordered rounding bias (`jcsample.c`): a full 2x2 box
++            // adds 1, 2, 1, 2, ... and a full 2x1 box 0, 1, 0, 1, ... along each output row, so
++            // the rounding error averages to zero instead of the +1/2-step bias of always rounding
++            // half up. Partial edge boxes keep the round-half-up average.
++            let bias = if count == (sx * sy) as u32 && count > 1 {
++                count / 2 - 1 + (cx & 1) as u32
++            } else {
++                count / 2
++            };
++            data[cy * cw + cx] = ((sum + bias) / count) as u8;
+         }
+     }
+     Plane {

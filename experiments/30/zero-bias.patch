@@ -1,0 +1,251 @@
+diff --git a/crates/gamut-jpeg/src/encoder.rs b/crates/gamut-jpeg/src/encoder.rs
+index ecce964c..c27fceba 100644
+--- a/crates/gamut-jpeg/src/encoder.rs
++++ b/crates/gamut-jpeg/src/encoder.rs
+@@ -739,7 +739,7 @@ impl JpegEncoder {
+                     tq: x_tq,
+                     plane: &x_plane,
+                     quant: x_quant,
+-                    rd: luma_rd.as_ref(),
++                    rd: luma_rd.as_ref(), zero_bias: 0,
+                 },
+                 progressive::ProgComponent {
+                     id: ids[1],
+@@ -748,7 +748,7 @@ impl JpegEncoder {
+                     tq: 0,
+                     plane: &y_plane,
+                     quant: &luma_quant,
+-                    rd: luma_rd.as_ref(),
++                    rd: luma_rd.as_ref(), zero_bias: 0,
+                 },
+                 progressive::ProgComponent {
+                     id: ids[2],
+@@ -757,7 +757,7 @@ impl JpegEncoder {
+                     tq: 1,
+                     plane: &b_plane,
+                     quant: &chroma_quant,
+-                    rd: chroma_rd.as_ref(),
++                    rd: chroma_rd.as_ref(), zero_bias: 0,
+                 },
+             ];
+             progressive::encode(out, width, height, &comps, self.restart_interval);
+@@ -769,7 +769,7 @@ impl JpegEncoder {
+                     plane: &x_plane,
+                     quant: x_quant,
+                     dest: 0,
+-                    rd: luma_rd.as_ref(),
++                    rd: luma_rd.as_ref(), zero_bias: 0,
+                 },
+                 Component {
+                     h: 1,
+@@ -777,7 +777,7 @@ impl JpegEncoder {
+                     plane: &y_plane,
+                     quant: &luma_quant,
+                     dest: 0,
+-                    rd: luma_rd.as_ref(),
++                    rd: luma_rd.as_ref(), zero_bias: 0,
+                 },
+                 Component {
+                     h: 1,
+@@ -785,7 +785,7 @@ impl JpegEncoder {
+                     plane: &b_plane,
+                     quant: &chroma_quant,
+                     dest: 1,
+-                    rd: chroma_rd.as_ref(),
++                    rd: chroma_rd.as_ref(), zero_bias: 0,
+                 },
+             ];
+             self.write_baseline_frame(
+@@ -833,8 +833,15 @@ struct Component<'a> {
+     dest: usize,
+     /// The rate–distortion context for this component's class, when RD optimization is enabled.
+     rd: Option<&'a RdCtx>,
++    /// Experiment #30: the AC zero-bias threshold in units of 1e-5 of a step (0 = plain rounding).
++    zero_bias: u32,
+ }
+ 
++/// Experiment #30: jpegli's non-adaptive YCbCr AC zero-bias offsets (`kZeroBiasOffsetYCbCrAC` in
++/// `lib/jpegli/quant.cc`: 0.59082, 0.58146, 0.57988 for Y, Cb, Cr), in units of 1e-5 of a step.
++/// jpegli's DC offset is 0, and it applies no zero bias outside YCbCr.
++pub(crate) const ZERO_BIAS_AC: [u32; 3] = [59_082, 58_146, 57_988];
++
+ /// The entropy tables a baseline scan codes with, indexed by destination (0 = luma, 1 = chroma).
+ ///
+ /// A destination is `None` when the scan never references it — a grayscale frame has no chroma
+@@ -970,13 +977,26 @@ fn dct_block(plane: &Plane, bx: usize, by: usize) -> [i32; 64] {
+ /// `(bx, by)` (§A.3.1 / §A.3.3 / §A.3.4), returning the natural-order quantized coefficients. Shared
+ /// by the baseline single-pass coder ([`encode_block`]) and the progressive encoder
+ /// ([`crate::progressive`]), which materializes every block up front before running the scan script.
+-pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usize) -> [i32; 64] {
++pub(crate) fn quantize_block(
++    plane: &Plane,
++    quant: &[u8; 64],
++    bx: usize,
++    by: usize,
++    zero_bias: u32,
++) -> [i32; 64] {
+     let block = dct_block(plane, bx, by);
+     // Quantize (§A.3.4): round-to-nearest divide by the table entry (which is ≥ 1).
+     let mut q = [0i32; 64];
+     for (dst, (&coeff, &step)) in q.iter_mut().zip(block.iter().zip(quant.iter())) {
+         *dst = round_div_nearest(coeff, i32::from(step));
+     }
++    // Experiment #30: jpegli's QuantizeBlock zeroes an AC coefficient whose |coeff / step| is below
++    // the zero-bias threshold, and rounds the rest to nearest. DC keeps plain rounding.
++    for (dst, (&coeff, &step)) in q.iter_mut().zip(block.iter().zip(quant.iter())).skip(1) {
++        if i64::from(coeff.unsigned_abs()) * 100_000 < i64::from(zero_bias) * i64::from(step) {
++            *dst = 0;
++        }
++    }
+     q
+ }
+ 
+@@ -990,9 +1010,10 @@ pub(crate) fn quantize_block_rd(
+     bx: usize,
+     by: usize,
+     rd: Option<&RdCtx>,
++    zero_bias: u32,
+ ) -> [i32; 64] {
+     match rd {
+-        None => quantize_block(plane, quant, bx, by),
++        None => quantize_block(plane, quant, bx, by, zero_bias),
+         Some(ctx) => rd::trellis_quantize(&dct_block(plane, bx, by), quant, ctx),
+     }
+ }
+@@ -1006,7 +1027,14 @@ fn encode_block(
+     dc_pred: &mut i32,
+     coder: &mut BaselineCoder,
+ ) {
+-    let q = quantize_block_rd(comp.plane, comp.quant, block_x, block_y, comp.rd);
++    let q = quantize_block_rd(
++        comp.plane,
++        comp.quant,
++        block_x,
++        block_y,
++        comp.rd,
++        comp.zero_bias,
++    );
+     encode_quantized_block(&q, dc_pred, comp.dest, coder);
+ }
+ 
+@@ -1169,7 +1197,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
+                 tq: 0,
+                 plane: &plane,
+                 quant: &luma_quant,
+-                rd: luma_rd.as_ref(),
++                rd: luma_rd.as_ref(), zero_bias: 0,
+             }];
+             progressive::encode(out, width, height, &comps, self.restart_interval);
+         } else {
+@@ -1179,7 +1207,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
+                 plane: &plane,
+                 quant: &luma_quant,
+                 dest: 0,
+-                rd: luma_rd.as_ref(),
++                rd: luma_rd.as_ref(), zero_bias: 0,
+             };
+             self.write_baseline_frame(out, width, height, &[(1, 1, 1, 0)], &[(1, 0, 0)], &[comp]);
+         }
+@@ -1247,7 +1275,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
+                     tq: 0,
+                     plane: &luma_plane,
+                     quant: &luma_quant,
+-                    rd: luma_rd.as_ref(),
++                    rd: luma_rd.as_ref(), zero_bias: ZERO_BIAS_AC[0],
+                 },
+                 progressive::ProgComponent {
+                     id: 2,
+@@ -1256,7 +1284,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
+                     tq: 1,
+                     plane: &cb_plane,
+                     quant: &chroma_quant,
+-                    rd: chroma_rd.as_ref(),
++                    rd: chroma_rd.as_ref(), zero_bias: ZERO_BIAS_AC[1],
+                 },
+                 progressive::ProgComponent {
+                     id: 3,
+@@ -1265,7 +1293,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
+                     tq: 1,
+                     plane: &cr_plane,
+                     quant: &chroma_quant,
+-                    rd: chroma_rd.as_ref(),
++                    rd: chroma_rd.as_ref(), zero_bias: ZERO_BIAS_AC[2],
+                 },
+             ];
+             progressive::encode(out, width, height, &comps, self.restart_interval);
+@@ -1277,7 +1305,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
+                     plane: &luma_plane,
+                     quant: &luma_quant,
+                     dest: 0,
+-                    rd: luma_rd.as_ref(),
++                    rd: luma_rd.as_ref(), zero_bias: 0,
+                 },
+                 Component {
+                     h: 1,
+@@ -1285,7 +1313,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
+                     plane: &cb_plane,
+                     quant: &chroma_quant,
+                     dest: 1,
+-                    rd: chroma_rd.as_ref(),
++                    rd: chroma_rd.as_ref(), zero_bias: 0,
+                 },
+                 Component {
+                     h: 1,
+@@ -1293,7 +1321,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
+                     plane: &cr_plane,
+                     quant: &chroma_quant,
+                     dest: 1,
+-                    rd: chroma_rd.as_ref(),
++                    rd: chroma_rd.as_ref(), zero_bias: 0,
+                 },
+             ];
+             self.write_baseline_frame(
+@@ -1723,7 +1751,7 @@ mod tests {
+             plane: &plane,
+             quant: &quant,
+             dest: 0,
+-            rd: None,
++            rd: None, zero_bias: 0,
+         };
+ 
+         let entropy = scan_entropy(&[comp], 16, 16, 0);
+@@ -1774,7 +1802,7 @@ mod tests {
+             plane: &plane,
+             quant: &quant,
+             dest: 0,
+-            rd: None,
++            rd: None, zero_bias: 0,
+         };
+ 
+         let entropy = scan_entropy(&[comp], 8, 8, 0);
+@@ -2013,7 +2041,7 @@ mod tests {
+             plane: &plane,
+             quant: &quant,
+             dest: 0,
+-            rd: None,
++            rd: None, zero_bias: 0,
+         };
+         let entropy = scan_entropy(&[comp], 16, 16, 0);
+ 
+diff --git a/crates/gamut-jpeg/src/progressive.rs b/crates/gamut-jpeg/src/progressive.rs
+index 0a7f8be4..6a76fe13 100644
+--- a/crates/gamut-jpeg/src/progressive.rs
++++ b/crates/gamut-jpeg/src/progressive.rs
+@@ -59,6 +59,8 @@ pub(crate) struct ProgComponent<'a> {
+     /// Shared with the baseline path through the same quantization seam, so the materialized
+     /// coefficients — and hence the decoded image — stay identical between the two processes.
+     pub rd: Option<&'a RdCtx>,
++    /// Experiment #30: the AC zero-bias threshold in units of 1e-5 of a step (0 = plain rounding).
++    pub zero_bias: u32,
+ }
+ 
+ /// One frame component's fully-materialized quantized coefficients (§A.3.4), the source the scan
+@@ -172,7 +174,7 @@ fn build_coeffs(input: &[ProgComponent], x: usize, y: usize) -> (Vec<CoeffComp>,
+             let mut coeffs = vec![[0i32; 64]; pbw * pbh];
+             for by in 0..pbh {
+                 for bx in 0..pbw {
+-                    coeffs[by * pbw + bx] = quantize_block_rd(c.plane, c.quant, bx, by, c.rd);
++                    coeffs[by * pbw + bx] = quantize_block_rd(c.plane, c.quant, bx, by, c.rd, c.zero_bias);
+                 }
+             }
+             CoeffComp {
