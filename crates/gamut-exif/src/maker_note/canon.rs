@@ -171,7 +171,10 @@ impl CanonMakerNote {
 
     /// `tag` as text up to its first NUL. Canon writes its text fields fixed-width and NUL-padded
     /// (`OwnerName` is 32 bytes), and exiv2 reports the same prefix; the padding stays in
-    /// [`ifd`](Self::ifd).
+    /// [`ifd`](Self::ifd). The prefix is taken from the decoded value, so a field holding any
+    /// non-UTF-8 byte — padding after the NUL included — is already in
+    /// [`unreadable_tags`](Self::unreadable_tags) and reads as `None`, where exiv2 still reports
+    /// the prefix (the divergence `references/exif/canon/README.md` records).
     fn text(&self, tag: u16) -> Option<&str> {
         as_text(self.ifd.get(tag)?)?.split('\0').next()
     }
@@ -321,6 +324,28 @@ mod tests {
             view.ifd().get(OWNER_NAME),
             Some(&Value::Ascii("Ada\0\0\0\0".into()))
         );
+    }
+
+    /// The recorded divergence from exiv2 (`references/exif/canon/README.md`): `gamut-ifd` decodes
+    /// an `ASCII` value whole, so a byte that is not UTF-8 anywhere in the field — even in the
+    /// padding after the first NUL — makes the entry unreadable rather than yielding the prefix.
+    #[test]
+    fn non_utf8_padding_makes_the_text_entry_unreadable() {
+        let order = LE;
+        let note = maker(canon_note(
+            &[
+                ascii(OWNER_NAME, b"Ada\0\xff\xfe\0\0"),
+                long(FILE_NUMBER, 1, order),
+            ],
+            order,
+            0,
+        ));
+        let view = note.canon(order, 0).expect("reads").expect("is Canon");
+        assert_eq!(view.owner_name(), None);
+        assert_eq!(view.unreadable_tags(), &[OWNER_NAME]);
+        assert_eq!(view.ifd().get(OWNER_NAME), None);
+        // The rest of the note is still read.
+        assert_eq!(view.file_number(), Some(1));
     }
 
     #[test]

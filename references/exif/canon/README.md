@@ -45,7 +45,13 @@ Notes on reading them:
 
 - **Text** fields are fixed-width and NUL-padded in real files (`OwnerName` is 32 bytes). The
   accessors return the text before the first NUL, which is what exiv2 reports; the raw value with
-  its padding stays in `ifd()`.
+  its padding stays in `ifd()`. **Divergence from exiv2:** `gamut-ifd` decodes an `ASCII` value
+  whole and requires it to be UTF-8 (`Value::decode`, `crates/gamut-ifd/src/value.rs`), so a text
+  field holding any non-UTF-8 byte — a Latin-1 `OwnerName`, or stale bytes in the padding after
+  the first NUL — is left out of `ifd()` and named by `unreadable_tags()`, and its accessor
+  returns `None`. exiv2 still reports the bytes before the first NUL for such a field. Returning
+  that prefix would need the raw field bytes, which only a `gamut-ifd` change can supply; it is
+  not promised by this view.
 - **`CameraSettings` and `ShotInfo`** are binary arrays: exiv2 splits them into one key per
   `SHORT` (`tiffimage_int.cpp`, `canonCsCfg` and `canonSiCfg`, both "with size element", so
   element 0 is the array's own byte length). The view returns the whole array unsplit; naming
