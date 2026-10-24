@@ -294,8 +294,11 @@ run = "cargo check --locked --manifest-path tooling/c2pa-oracle/Cargo.toml --all
 # the coverage gate. Like `tooling/c2pa-oracle` it commits its own lockfile (no root-lockfile entry
 # pins egui) and every task passes `--locked`, so a release-plz bump of a path-reached gamut crate
 # fails these until `cargo update --workspace --manifest-path examples/icc-sandbox/Cargo.toml` is
-# committed. The default features (`gui` + `oracle`) link Little-CMS through `tooling/lcms2-oracle`,
-# so the native tasks need the `third_party/lcms2` submodule and a C compiler.
+# committed. Unlike `tooling/c2pa-oracle/Cargo.lock`, which release.yml refreshes on every release
+# PR, nothing refreshes this lockfile yet, so after any such bump the tasks fail locally until
+# someone commits that refresh; #1005 carries adding the matching release.yml step. The default
+# features (`gui` + `oracle`) link Little-CMS through `tooling/lcms2-oracle`, so the native tasks
+# need the `third_party/lcms2` submodule and a C compiler.
 [tasks.icc-sandbox]
 description = "Run the interactive ICC sandbox in a native window (issue #247)"
 run = "cargo run --locked --release --manifest-path examples/icc-sandbox/Cargo.toml"
