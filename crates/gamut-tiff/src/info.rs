@@ -94,15 +94,28 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
 
     // BitsPerSample (258) is one value per sample. This crate's sample model gives every component
     // the same depth, so a page whose samples disagree cannot be described — let alone decoded.
-    let bits = ifd
-        .get_u32_vec(tags::BITS_PER_SAMPLE)
-        .unwrap_or_else(|| vec![1; samples_per_pixel as usize]);
-    if bits.len() != samples_per_pixel as usize || bits.iter().any(|&b| b != bits[0]) {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: mixed bit depths not supported",
-        ));
-    }
+    //
+    // The absent tag's default (one bit for every sample) is applied as the single depth it is,
+    // never materialised as a per-sample list: `SamplesPerPixel` is an untrusted count up to
+    // `u32::MAX`, and a list sized by it is an allocation no byte of the file backs (#949: a
+    // 173-byte file declaring 4 294 967 209 samples asked for 16 GiB). A list that *is* present
+    // was read from the file, so its length is already bounded by the input.
+    let bits_per_sample = match ifd.get_u32_vec(tags::BITS_PER_SAMPLE) {
+        None => 1,
+        Some(bits) => match bits.first() {
+            Some(&first)
+                if bits.len() == samples_per_pixel as usize && bits.iter().all(|&b| b == first) =>
+            {
+                first
+            }
+            _ => {
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: mixed bit depths not supported",
+                ));
+            }
+        },
+    };
 
     // SampleFormat (339) is likewise one value per sample. Writers commonly store a single value
     // for all samples, so the count is deliberately not checked against SamplesPerPixel — only
@@ -129,7 +142,7 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
     Ok(TiffInfo {
         width,
         height,
-        bits_per_sample: bits[0],
+        bits_per_sample,
         sample_format,
         photometric,
         samples_per_pixel,
