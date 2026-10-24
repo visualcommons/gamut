@@ -7,10 +7,12 @@
 
 use gamut_color::lab::{D50_XYZ, lab_to_xyz, xyz_to_lab};
 
-use crate::clut::ClutTable;
+use crate::clut::{ClutTable, Fixed16};
 use crate::curve::ToneCurve;
 use crate::error::{CmmError, Result};
-use crate::transform::Transform;
+use crate::transform::{
+    Transform, check_buffers, encode_u8, encode_u16, narrow_u16, through_f64, widen_u8,
+};
 
 /// The largest channel count a stage or pipeline end may declare.
 ///
@@ -432,24 +434,77 @@ impl Pipeline {
     }
 }
 
+impl Pipeline {
+    /// The integer evaluation view of a pipeline that is exactly one
+    /// [`NodePrecision::Fixed16`](crate::clut::NodePrecision::Fixed16) CLUT — the shape
+    /// [`PipelineOptimization::PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16)
+    /// produces whenever its resampling applies — or `None`, in which case the integer entry
+    /// points convert through `f64`.
+    fn fixed16(&self) -> Option<Fixed16<'_>> {
+        match self.stages.as_slice() {
+            [Stage::Clut(table)] => table.fixed16(),
+            _ => None,
+        }
+    }
+}
+
 impl Transform for Pipeline {
     fn transform(&self, src: &[f64], dst: &mut [f64]) -> Result<()> {
+        check_buffers(
+            self.input_channels,
+            self.output_channels,
+            src.len(),
+            dst.len(),
+        )?;
         let n_in = usize::from(self.input_channels);
         let n_out = usize::from(self.output_channels);
-        if !src.len().is_multiple_of(n_in) {
-            return Err(CmmError::BufferLength {
-                channels: self.input_channels,
-                found: src.len(),
-            });
-        }
-        if dst.len() != (src.len() / n_in) * n_out {
-            return Err(CmmError::BufferLength {
-                channels: self.output_channels,
-                found: dst.len(),
-            });
-        }
         for (pixel_in, pixel_out) in src.chunks_exact(n_in).zip(dst.chunks_exact_mut(n_out)) {
             self.eval(pixel_in, pixel_out)?;
+        }
+        Ok(())
+    }
+
+    fn transform_u16(&self, src: &[u16], dst: &mut [u16]) -> Result<()> {
+        let Some(lut) = self.fixed16() else {
+            return through_f64(self, src, dst, 65535.0, encode_u16);
+        };
+        check_buffers(
+            self.input_channels,
+            self.output_channels,
+            src.len(),
+            dst.len(),
+        )?;
+        let n_in = usize::from(self.input_channels);
+        let n_out = usize::from(self.output_channels);
+        for (pixel_in, pixel_out) in src.chunks_exact(n_in).zip(dst.chunks_exact_mut(n_out)) {
+            lut.eval(pixel_in, pixel_out);
+        }
+        Ok(())
+    }
+
+    fn transform_u8(&self, src: &[u8], dst: &mut [u8]) -> Result<()> {
+        let Some(lut) = self.fixed16() else {
+            return through_f64(self, src, dst, 255.0, encode_u8);
+        };
+        check_buffers(
+            self.input_channels,
+            self.output_channels,
+            src.len(),
+            dst.len(),
+        )?;
+        let n_in = usize::from(self.input_channels);
+        let n_out = usize::from(self.output_channels);
+        let mut wide_in = [0_u16; MAX_CHANNELS as usize];
+        let mut wide_out = [0_u16; MAX_CHANNELS as usize];
+        let (wide_in, wide_out) = (&mut wide_in[..n_in], &mut wide_out[..n_out]);
+        for (pixel_in, pixel_out) in src.chunks_exact(n_in).zip(dst.chunks_exact_mut(n_out)) {
+            for (wide, &code) in wide_in.iter_mut().zip(pixel_in) {
+                *wide = widen_u8(code);
+            }
+            lut.eval(wide_in, wide_out);
+            for (code, &wide) in pixel_out.iter_mut().zip(wide_out.iter()) {
+                *code = narrow_u16(wide);
+            }
         }
         Ok(())
     }

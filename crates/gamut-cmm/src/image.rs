@@ -3,10 +3,14 @@
 //!
 //! # Semantics
 //!
-//! - **Colour channels** are normalized `v / 255` (8-bit) or `v / 65535` (16-bit), run
-//!   through the transform, then re-encoded `round_half_up(v × scale)` clamped to the
-//!   sample range — lcms2's `_cmsQuickSaturateWord` rounding (`floor(x + 0.5)`, saturating),
-//!   at both widths.
+//! - **Colour channels** go through the transform's integer entry point at the buffer's
+//!   width ([`Transform::transform_u8`]/[`Transform::transform_u16`]). For every transform
+//!   that does not override it, that means: normalized `v / 255` (8-bit) or `v / 65535`
+//!   (16-bit), run through the transform, then re-encoded `round_half_up(v × scale)` clamped
+//!   to the sample range — lcms2's `_cmsQuickSaturateWord` rounding (`floor(x + 0.5)`,
+//!   saturating), at both widths. A
+//!   [`PipelineOptimization::PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16)
+//!   transform interpolates the codes in fixed point instead.
 //! - **Alpha channels** ([`ColorModel::Rgba`]/[`ColorModel::GrayAlpha`], alpha stored last)
 //!   never enter the transform: when both formats carry alpha it is copied through
 //!   untouched; a source-only alpha is dropped; a destination-only alpha is filled with the
@@ -20,12 +24,13 @@
 //!
 //! # Space/time tradeoff
 //!
-//! Buffers are processed in fixed chunks of 256 pixels through **one reused
-//! pair of `f64` scratch vectors** (≤ `2 × 256 × 16` samples ≈ 64 KiB), so peak extra
-//! memory is constant in the image size while the transform still sees whole batches
-//! rather than single pixels. Planar buffers gather each chunk from the per-channel planes
-//! into the same interleaved scratch (and scatter back), trading one extra copy for reuse
-//! of the identical conversion core.
+//! Buffers are processed in fixed chunks of 256 pixels through **one reused pair of
+//! colour-only scratch vectors** at the buffer's own sample width (≤ `2 × 256 × 16` samples,
+//! 8 or 16 KiB), so peak extra memory is constant in the image size while the transform still
+//! sees whole batches rather than single pixels; the provided integer entry points convert
+//! through a further 16 KiB of `f64` stack scratch. Planar buffers gather each chunk from the
+//! per-channel planes into the same interleaved scratch (and scatter back), trading one extra
+//! copy for reuse of the identical conversion core.
 
 use gamut_core::{ColorModel, PixelFormat};
 
@@ -35,47 +40,26 @@ use crate::transform::Transform;
 /// Pixels processed per scratch-buffer refill (the module's space/time tradeoff).
 const CHUNK_PIXELS: usize = 256;
 
-/// The integer sample scalar of a buffer: its full-scale value and exact conversions.
-trait Sample: Copy {
+/// The integer sample scalar of a buffer: its full-scale value and the [`Transform`] entry
+/// point at its width.
+trait Sample: Copy + Default {
     /// The full-scale (and opaque-alpha) code value, e.g. `255` for `u8`.
     const OPAQUE: Self;
-    /// The normalization divisor (`255.0` / `65535.0`).
-    const FULL_SCALE: f64;
-    /// Widen to `f64` (exact).
-    fn to_f64(self) -> f64;
-    /// Encode a normalized value: `floor(v × FULL_SCALE + 0.5)`, saturating to the sample
-    /// range (lcms2's `_cmsQuickSaturateWord` rounding; NaN saturates to 0).
-    fn encode(v: f64) -> Self;
+    /// Runs gathered colour samples through the transform's entry point at this width.
+    fn run(transform: &dyn Transform, src: &[Self], dst: &mut [Self]) -> Result<()>;
 }
 
 impl Sample for u8 {
     const OPAQUE: Self = u8::MAX;
-    const FULL_SCALE: f64 = 255.0;
-    fn to_f64(self) -> f64 {
-        f64::from(self)
-    }
-    fn encode(v: f64) -> Self {
-        // `as` saturates (NaN → 0), so the clamp only needs the rounding to be done first.
-        #[expect(clippy::cast_possible_truncation, reason = "clamped to the u8 range")]
-        #[expect(clippy::cast_sign_loss, reason = "clamped to be non-negative")]
-        {
-            (v * Self::FULL_SCALE + 0.5).floor().clamp(0.0, 255.0) as u8
-        }
+    fn run(transform: &dyn Transform, src: &[Self], dst: &mut [Self]) -> Result<()> {
+        transform.transform_u8(src, dst)
     }
 }
 
 impl Sample for u16 {
     const OPAQUE: Self = u16::MAX;
-    const FULL_SCALE: f64 = 65535.0;
-    fn to_f64(self) -> f64 {
-        f64::from(self)
-    }
-    fn encode(v: f64) -> Self {
-        #[expect(clippy::cast_possible_truncation, reason = "clamped to the u16 range")]
-        #[expect(clippy::cast_sign_loss, reason = "clamped to be non-negative")]
-        {
-            (v * Self::FULL_SCALE + 0.5).floor().clamp(0.0, 65535.0) as u16
-        }
+    fn run(transform: &dyn Transform, src: &[Self], dst: &mut [Self]) -> Result<()> {
+        transform.transform_u16(src, dst)
     }
 }
 
@@ -125,22 +109,29 @@ fn check_formats(
     Ok((src, dst))
 }
 
-/// The reused scratch pair, sized for `min(pixels, CHUNK_PIXELS)` pixels.
-fn scratch(pixels: usize, src: Shape, dst: Shape) -> (Vec<f64>, Vec<f64>) {
+/// The reused colour-only scratch pair, sized for `min(pixels, CHUNK_PIXELS)` pixels.
+fn scratch<S: Sample>(pixels: usize, src: Shape, dst: Shape) -> (Vec<S>, Vec<S>) {
     let chunk = pixels.min(CHUNK_PIXELS);
-    (vec![0.0; chunk * src.color], vec![0.0; chunk * dst.color])
+    (
+        vec![S::default(); chunk * src.color],
+        vec![S::default(); chunk * dst.color],
+    )
 }
 
-/// Transforms `count` gathered pixels sitting in `fin` into `fout`.
-fn run_chunk(
+/// Transforms `count` gathered pixels sitting in `cin` into `cout`.
+fn run_chunk<S: Sample>(
     transform: &dyn Transform,
-    fin: &[f64],
-    fout: &mut [f64],
+    cin: &[S],
+    cout: &mut [S],
     count: usize,
     src: Shape,
     dst: Shape,
 ) -> Result<()> {
-    transform.transform(&fin[..count * src.color], &mut fout[..count * dst.color])
+    S::run(
+        transform,
+        &cin[..count * src.color],
+        &mut cout[..count * dst.color],
+    )
 }
 
 /// Applies `transform` to an interleaved buffer (both sides `u8`).
@@ -266,20 +257,20 @@ fn interleaved<S: Sample>(
             found: dst.len(),
         });
     }
-    let (mut fin, mut fout) = scratch(pixels, src_shape, dst_shape);
+    let (mut cin, mut cout) = scratch::<S>(pixels, src_shape, dst_shape);
     let src_chunks = src.chunks(CHUNK_PIXELS * src_shape.channels);
     let dst_chunks = dst.chunks_mut(CHUNK_PIXELS * dst_shape.channels);
     for (src_chunk, dst_chunk) in src_chunks.zip(dst_chunks) {
         let count = src_chunk.len() / src_shape.channels;
         for (p, pixel) in src_chunk.chunks_exact(src_shape.channels).enumerate() {
-            for (c, sample) in pixel.iter().take(src_shape.color).enumerate() {
-                fin[p * src_shape.color + c] = sample.to_f64() / S::FULL_SCALE;
+            for (c, &sample) in pixel.iter().take(src_shape.color).enumerate() {
+                cin[p * src_shape.color + c] = sample;
             }
         }
-        run_chunk(transform, &fin, &mut fout, count, src_shape, dst_shape)?;
+        run_chunk(transform, &cin, &mut cout, count, src_shape, dst_shape)?;
         for (p, pixel) in dst_chunk.chunks_exact_mut(dst_shape.channels).enumerate() {
             for (c, sample) in pixel.iter_mut().take(dst_shape.color).enumerate() {
-                *sample = S::encode(fout[p * dst_shape.color + c]);
+                *sample = cout[p * dst_shape.color + c];
             }
             if dst_shape.alpha {
                 pixel[dst_shape.channels - 1] = if src_shape.alpha {
@@ -323,22 +314,22 @@ fn planar<S: Sample>(
             "destination plane length differs from the pixel count",
         ));
     }
-    let (mut fin, mut fout) = scratch(pixels, src_shape, dst_shape);
+    let (mut cin, mut cout) = scratch::<S>(pixels, src_shape, dst_shape);
     // Iterator-driven chunking: `step_by` owns the loop's progress, so no arithmetic
     // inside the body can stall it (a `while start < pixels { … start += count }` shape
     // hangs forever under mutation testing when the increment is mutated away).
     for start in (0..pixels).step_by(CHUNK_PIXELS) {
         let count = (pixels - start).min(CHUNK_PIXELS);
         for (c, plane) in src_planes.iter().take(src_shape.color).enumerate() {
-            for (p, sample) in plane[start..start + count].iter().enumerate() {
-                fin[p * src_shape.color + c] = sample.to_f64() / S::FULL_SCALE;
+            for (p, &sample) in plane[start..start + count].iter().enumerate() {
+                cin[p * src_shape.color + c] = sample;
             }
         }
-        run_chunk(transform, &fin, &mut fout, count, src_shape, dst_shape)?;
+        run_chunk(transform, &cin, &mut cout, count, src_shape, dst_shape)?;
         for (c, plane) in dst_planes.iter_mut().enumerate() {
             for (p, sample) in plane[start..start + count].iter_mut().enumerate() {
                 *sample = if c < dst_shape.color {
-                    S::encode(fout[p * dst_shape.color + c])
+                    cout[p * dst_shape.color + c]
                 } else if src_shape.alpha {
                     src_planes[src_shape.channels - 1][start + p]
                 } else {
@@ -359,6 +350,7 @@ fn channel_count_u8(shape: Shape) -> u8 {
 mod tests {
     use super::*;
     use crate::pipeline::{Pipeline, Stage};
+    use crate::transform::{encode_u8, encode_u16};
 
     /// A 3→3 halving matrix transform.
     fn halve3() -> Pipeline {
@@ -399,19 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn rounding_is_half_up_with_saturation() {
-        assert_eq!(u8::encode(0.5), 128, "127.5 rounds up");
-        assert_eq!(u8::encode(1.0), 255);
-        assert_eq!(u8::encode(1.5), 255, "saturates high");
-        assert_eq!(u8::encode(-0.2), 0, "saturates low");
-        assert_eq!(u8::encode(f64::NAN), 0, "NaN saturates to 0");
-        assert_eq!(u16::encode(0.5), 32768, "32767.5 rounds up");
-        assert_eq!(u16::encode(1.0), 65535);
-        assert_eq!(u16::encode(2.0), 65535);
-        assert_eq!(u16::encode(-1.0), 0);
-    }
-
-    #[test]
     fn interleaved_u8_matches_the_scalar_path_exactly() {
         // Every 8-bit gray code through a big enough buffer to cross the chunk boundary
         // (256 pixels = exactly one chunk; 300 forces two).
@@ -433,7 +412,7 @@ mod tests {
             let normalized: Vec<f64> = s.iter().map(|&v| f64::from(v) / 255.0).collect();
             transform.transform(&normalized, &mut want).unwrap();
             for ch in 0..3 {
-                assert_eq!(d[ch], u8::encode(want[ch]), "pixel {s:?}");
+                assert_eq!(d[ch], encode_u8(want[ch]), "pixel {s:?}");
             }
         }
     }
@@ -461,7 +440,7 @@ mod tests {
             let mut want = [0.0; 3];
             transform.transform(&normalized, &mut want).unwrap();
             for ch in 0..3 {
-                assert_eq!(d[ch], u16::encode(want[ch]));
+                assert_eq!(d[ch], encode_u16(want[ch]));
             }
         }
     }
@@ -480,7 +459,7 @@ mod tests {
         )
         .unwrap();
         // C = 1−1 = 0, M = 1−0 = 1, Y = 1 − 128/255, K = 0.25.
-        assert_eq!(dst, [0, 255, u8::encode(1.0 - 128.0 / 255.0), 64]);
+        assert_eq!(dst, [0, 255, encode_u8(1.0 - 128.0 / 255.0), 64]);
     }
 
     #[test]

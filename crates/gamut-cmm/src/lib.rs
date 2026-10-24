@@ -118,7 +118,7 @@ pub use bpc::{detect_black_point, detect_destination_black_point};
 #[doc(inline)]
 pub use chain::ProofingOptions;
 #[doc(inline)]
-pub use clut::{ClutInterpolation, ClutTable};
+pub use clut::{ClutInterpolation, ClutTable, NodePrecision};
 #[doc(inline)]
 pub use curve::ToneCurve;
 #[doc(inline)]

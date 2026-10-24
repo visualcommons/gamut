@@ -49,7 +49,7 @@
 //! [`Collapse`]: PipelineOptimization::Collapse
 //! [`Precalculate`]: PipelineOptimization::Precalculate
 
-use crate::clut::{ClutInterpolation, ClutTable};
+use crate::clut::{ClutInterpolation, ClutTable, NodePrecision};
 use crate::curve::ToneCurve;
 use crate::error::Result;
 use crate::pipeline::{MAX_CHANNELS, Pipeline, Stage};
@@ -80,6 +80,20 @@ pub enum PipelineOptimization {
     /// precision budget (module docs) — the throughput tier, for pixel-buffer workloads that
     /// can spend the resampling's build time and memory.
     Precalculate = 2,
+    /// [`Precalculate`](Self::Precalculate) with the resampled CLUT stored and interpolated
+    /// in **`f32`** ([`NodePrecision::F32`]) — lcms2's own float-interpolator width, at half
+    /// the node memory. Its added error over `Precalculate` is `f32` rounding of the nodes and
+    /// the interpolation (module docs, "Precision tiers").
+    PrecalculateF32 = 3,
+    /// [`Precalculate`](Self::Precalculate) with the resampled CLUT stored as **16-bit
+    /// codes** and interpolated in 16.16 fixed point ([`NodePrecision::Fixed16`]) — the
+    /// representation lcms2 runs under its 8- and 16-bit formatters, at a quarter of the node
+    /// memory. On a pipeline that resamples, the 8- and 16-bit buffer entry points
+    /// ([`crate::Transform::transform_u8`]/[`crate::Transform::transform_u16`], and so
+    /// [`crate::transform_interleaved_u8`] and its siblings) run integer arithmetic end to
+    /// end; the `f64` entry point quantizes to 16 bits on the way in (module docs, "Precision
+    /// tiers").
+    PrecalculateFixed16 = 4,
 }
 
 /// Grid nodes per axis for a resampled CLUT, by input channel count — lcms2's
@@ -120,11 +134,20 @@ pub(crate) fn optimize(pipeline: Pipeline, level: PipelineOptimization) -> Resul
     match level {
         PipelineOptimization::None => Ok(pipeline),
         PipelineOptimization::Collapse => collapse(pipeline),
-        PipelineOptimization::Precalculate => {
-            let joined = join_curves(collapse(pipeline)?)?;
-            resample(joined)
-        }
+        PipelineOptimization::Precalculate => precalculate(pipeline, NodePrecision::F64),
+        PipelineOptimization::PrecalculateF32 => precalculate(pipeline, NodePrecision::F32),
+        PipelineOptimization::PrecalculateFixed16 => precalculate(pipeline, NodePrecision::Fixed16),
     }
+}
+
+/// The sampled-table levels: collapse, join curves, then resample at `precision`.
+///
+/// # Errors
+///
+/// As [`optimize`].
+fn precalculate(pipeline: Pipeline, precision: NodePrecision) -> Result<Pipeline> {
+    let joined = join_curves(collapse(pipeline)?)?;
+    resample(joined, precision)
 }
 
 /// Rebuilds `pipeline` with `stages`, keeping its declared ends.
@@ -345,7 +368,7 @@ fn clamps_domain(stage: &Stage) -> bool {
 ///
 /// As [`optimize`], plus [`ClutTable::from_samples`]'s geometry errors — unreachable here,
 /// since the grid is constructed to satisfy them.
-fn resample(pipeline: Pipeline) -> Result<Pipeline> {
+fn resample(pipeline: Pipeline, precision: NodePrecision) -> Result<Pipeline> {
     let stages = pipeline.stages();
     if stages.len() < 2 {
         return Ok(pipeline);
@@ -391,7 +414,8 @@ fn resample(pipeline: Pipeline) -> Result<Pipeline> {
     } else {
         ClutInterpolation::Multilinear
     };
-    let table = ClutTable::from_samples(vec![grid; axes], outputs, samples, interpolation)?;
+    let table =
+        ClutTable::from_samples(vec![grid; axes], outputs, samples, interpolation, precision)?;
     rebuild(&pipeline, vec![Stage::Clut(table)])
 }
 

@@ -38,19 +38,104 @@ use crate::pipeline::MAX_CHANNELS;
 /// rejects wider grids, so behaviour above 15 inputs would be untestable against it.
 const MAX_INPUT_DIMENSIONS: usize = 15;
 
+/// The floating-point arithmetic a table's interpolators run in: `f64` for the Tier-1
+/// reference tables, `f32` for the [`NodePrecision::F32`] tier — the width lcms2's own float
+/// interpolators (`cmsFloat32Number`, `cmsintrp.c`) compute in. One generic body serves both,
+/// so the `f32` tier is the reference arithmetic at a narrower width and nothing else.
+trait Real:
+    Copy
+    + PartialOrd
+    + core::ops::Add<Output = Self>
+    + core::ops::Sub<Output = Self>
+    + core::ops::Mul<Output = Self>
+{
+    /// Additive identity, and `fclamp`'s floor value.
+    const ZERO: Self;
+    /// `fclamp`'s ceiling, and the exact-`1.0` edge the upper-node rule tests.
+    const ONE: Self;
+    /// `fclamp`'s sub-epsilon threshold, `1e-9` at this width (lcms2 spells it `1.0e-9f`).
+    const EPSILON: Self;
+    /// Whether the value is NaN.
+    fn is_nan(self) -> bool;
+    /// The smaller of two non-NaN values.
+    fn min(self, other: Self) -> Self;
+    /// Rounds toward negative infinity.
+    fn floor(self) -> Self;
+    /// An axis's `nodes − 1` (at most 254) at this width — exact in either type.
+    fn domain(nodes: u8) -> Self;
+    /// A non-negative, already-floored cell position as an index.
+    fn index(self) -> usize;
+}
+
+impl Real for f64 {
+    const ZERO: Self = 0.0;
+    const ONE: Self = 1.0;
+    const EPSILON: Self = 1.0e-9;
+    fn is_nan(self) -> bool {
+        f64::is_nan(self)
+    }
+    fn min(self, other: Self) -> Self {
+        f64::min(self, other)
+    }
+    fn floor(self) -> Self {
+        f64::floor(self)
+    }
+    fn domain(nodes: u8) -> Self {
+        f64::from(nodes) - 1.0
+    }
+    fn index(self) -> usize {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a floored cell position in 0..=254"
+        )]
+        {
+            self as usize
+        }
+    }
+}
+
+impl Real for f32 {
+    const ZERO: Self = 0.0;
+    const ONE: Self = 1.0;
+    const EPSILON: Self = 1.0e-9;
+    fn is_nan(self) -> bool {
+        f32::is_nan(self)
+    }
+    fn min(self, other: Self) -> Self {
+        f32::min(self, other)
+    }
+    fn floor(self) -> Self {
+        f32::floor(self)
+    }
+    fn domain(nodes: u8) -> Self {
+        f32::from(nodes) - 1.0
+    }
+    fn index(self) -> usize {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a floored cell position in 0..=254"
+        )]
+        {
+            self as usize
+        }
+    }
+}
+
 /// lcms2's `fclamp` (`cmsintrp.c`): NaN, negatives, and sub-`1e-9` positives collapse to
 /// exactly `0.0`; values above `1.0` clamp to `1.0` (spelt `min`, equivalent to lcms2's
 /// `v > 1.0 ? 1.0 : v` since NaN is already gone).
-fn fclamp(v: f64) -> f64 {
-    if v.is_nan() || v < 1.0e-9 {
-        0.0
+fn fclamp<T: Real>(v: T) -> T {
+    if v.is_nan() || v < T::EPSILON {
+        T::ZERO
     } else {
-        v.min(1.0)
+        v.min(T::ONE)
     }
 }
 
 /// `l + (h − l)·a` — lcms2's `LERP` macro.
-fn lerp(a: f64, l: f64, h: f64) -> f64 {
+fn lerp<T: Real>(a: T, l: T, h: T) -> T {
     l + (h - l) * a
 }
 
@@ -61,19 +146,80 @@ fn lerp(a: f64, l: f64, h: f64) -> f64 {
 /// (lcms2's `>= 1.0` edge rule) — and, this crate's guard, when the axis has a single node
 /// (`Domain == 0`, where lcms2 would index out of bounds; the fraction is `0` there, so the
 /// axis interpolates as constant).
-fn axis(v: f64, nodes: u8) -> (usize, usize, f64) {
+fn axis<T: Real>(v: T, nodes: u8) -> (usize, usize, T) {
     let clamped = fclamp(v);
-    let domain = usize::from(nodes) - 1;
-    let px = clamped * domain as f64;
+    let px = clamped * T::domain(nodes);
     let floor = px.floor();
     let fraction = px - floor;
-    let lower = floor as usize;
-    let upper = if domain == 0 || clamped >= 1.0 {
+    let lower = floor.index();
+    let upper = if nodes == 1 || clamped >= T::ONE {
         lower
     } else {
         lower + 1
     };
     (lower, upper, fraction)
+}
+
+/// lcms2's `_cmsQuickSaturateWord(v · 65535)` (`lcms2_internal.h`): the `f64` → 16-bit
+/// encoding every float-to-`u16` seam of a [`NodePrecision::Fixed16`] table uses — node
+/// quantization at construction and input quantization on the `f64` evaluation path.
+/// `floor(v · 65535 + 0.5)`, saturating; NaN saturates to `0`.
+pub(crate) fn quantize16(v: f64) -> u16 {
+    // `as` saturates (NaN → 0), so the clamp only needs the rounding done first.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to the u16 range"
+    )]
+    {
+        (v * 65535.0 + 0.5).floor().clamp(0.0, 65535.0) as u16
+    }
+}
+
+/// lcms2's `_cmsToFixedDomain(a)` (`lcms2_internal.h`): `a + (a + 0x7FFF) / 0xFFFF` — a
+/// grid position `input · (nodes − 1)` in `0..=65535·254` rescaled from the 16-bit input scale
+/// to 16.16 fixed point, so that the full-scale input `0xFFFF` lands exactly on the last node.
+fn to_fixed_domain(a: u32) -> u32 {
+    a + (a + 0x7FFF) / 0xFFFF
+}
+
+/// Maps one 16-bit input onto a grid axis of `nodes` points (at least 2 — the
+/// [`NodePrecision::Fixed16`] construction rule): `(lower node, upper node, 16-bit fraction)`.
+///
+/// lcms2's fixed-point mapping, common to `Eval1Input`, `BilinearInterp16`,
+/// `TetrahedralInterp16` and the `Eval4Inputs`… recursion: the 16.16 position
+/// `_cmsToFixedDomain(input · Domain)` splits into a cell (`FIXED_TO_INT`) and a fraction
+/// (`FIXED_REST_TO_INT`), and the upper node equals the lower exactly when the input is
+/// `0xFFFF` (whose fraction is then `0`).
+fn axis16(v: u16, nodes: u8) -> (usize, usize, i64) {
+    let fixed = to_fixed_domain(u32::from(v) * (u32::from(nodes) - 1));
+    let lower = (fixed >> 16) as usize;
+    let upper = if v == u16::MAX { lower } else { lower + 1 };
+    (lower, upper, i64::from(fixed & 0xFFFF))
+}
+
+/// A 16-bit interpolation result back to a sample. Every caller's value is a convex
+/// combination of `u16` node samples rounded to the nearest code, so it is in range by
+/// construction.
+fn word(v: i64) -> u16 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a rounded convex combination of u16 samples"
+    )]
+    {
+        v as u16
+    }
+}
+
+/// lcms2's fixed-point `LinearInterp(a, l, h)` (`cmsintrp.c`) — `l + ((h − l)·a + 0x8000) >> 16`
+/// with a 16-bit fraction `a` — which is also `BilinearInterp16`'s `LERP` macro
+/// (`l + ROUND_FIXED_TO_INT((h − l)·a)`, the same expression). lcms2 computes it in 32-bit
+/// unsigned wrap-around arithmetic whose logical shift reproduces this arithmetic shift for
+/// every in-range result; `i64` states the same value without relying on the wrap.
+fn linear16(a: i64, l: u16, h: u16) -> u16 {
+    let (l, h) = (i64::from(l), i64::from(h));
+    word(l + (((h - l) * a + 0x8000) >> 16))
 }
 
 /// How a [`ClutTable`] interpolates between grid nodes.
@@ -94,6 +240,46 @@ pub enum ClutInterpolation {
     Tetrahedral = 1,
 }
 
+/// The numeric representation a [`ClutTable`] stores its nodes in and interpolates with —
+/// the crate's precision tiers.
+///
+/// Every table built from a parsed profile is [`F64`](Self::F64), the Tier-1 correctness
+/// reference. The two narrower tiers exist only as the output of
+/// [`crate::optimize`]'s CLUT resampling, selected by
+/// [`PipelineOptimization::PrecalculateF32`](crate::PipelineOptimization::PrecalculateF32)
+/// and
+/// [`PipelineOptimization::PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16);
+/// each carries its own budget in the conformance gate (`STATUS.md`).
+///
+/// The discriminants are permanent and append-only (workspace C-portability convention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum NodePrecision {
+    /// `f64` nodes, `f64` interpolation: the Tier-1 reference arithmetic, transcribed from
+    /// lcms2's float interpolators at double width.
+    F64 = 0,
+    /// `f32` nodes, `f32` interpolation: the same interpolators at lcms2's own float width
+    /// (`cmsFloat32Number`), half the node memory of [`F64`](Self::F64).
+    F32 = 1,
+    /// `u16` nodes, 16.16 fixed-point interpolation: lcms2's integer interpolators
+    /// (`Eval1Input`, `BilinearInterp16`, `TetrahedralInterp16`, `Eval4Inputs`…) transcribed —
+    /// the representation lcms2 runs under its 8- and 16-bit formatters, a quarter of the node
+    /// memory of [`F64`](Self::F64). An `f64` sample enters it through lcms2's
+    /// `_cmsQuickSaturateWord` encoding and leaves as `code / 65535`.
+    Fixed16 = 2,
+}
+
+/// A table's node samples in its [`NodePrecision`], in grid order (last input axis fastest,
+/// output channels interleaved per node — the §10.12.3 layout `gamut_icc::Clut` preserves).
+/// Float samples are normalized to `[0, 1]`; fixed-point samples are 16-bit codes of the same
+/// values.
+#[derive(Debug, Clone)]
+enum Nodes {
+    F64(Vec<f64>),
+    F32(Vec<f32>),
+    Fixed16(Vec<u16>),
+}
+
 /// A validated, evaluation-ready colour lookup table over a parsed [`gamut_icc::Clut`].
 ///
 /// Construction ([`ClutTable::new`]/[`ClutTable::with_interpolation`]) is the validity
@@ -105,15 +291,24 @@ pub enum ClutInterpolation {
 /// `[f64; 16]` stack buffers per sliced axis).
 #[derive(Debug, Clone)]
 pub struct ClutTable {
-    /// Grid nodes per input axis, first axis slowest-varying; every entry ≥ 1.
+    /// Grid nodes per input axis, first axis slowest-varying; every entry ≥ 1 (≥ 2 for a
+    /// [`NodePrecision::Fixed16`] table).
     grid_points: Vec<u8>,
     /// Output samples per grid node, `1..=MAX_CHANNELS`.
     output_channels: u8,
-    /// Node samples normalized to `[0, 1]`, in grid order (last input axis fastest, output
-    /// channels interleaved per node — the §10.12.3 layout `gamut_icc::Clut` preserves).
-    samples: Vec<f64>,
+    /// The node samples, in the table's precision tier.
+    nodes: Nodes,
     /// The interpolation mode evaluation dispatches on.
     interpolation: ClutInterpolation,
+}
+
+/// A borrowed view of a [`NodePrecision::Fixed16`] table: the integer evaluation path the
+/// 8- and 16-bit buffer entry points ([`crate::Transform::transform_u8`]/
+/// [`crate::Transform::transform_u16`]) run without any float conversion.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Fixed16<'a> {
+    grid_points: &'a [u8],
+    words: &'a [u16],
 }
 
 /// The geometry invariants every [`ClutTable`] upholds, checked once per construction
@@ -216,7 +411,7 @@ impl ClutTable {
         Ok(Self {
             grid_points: clut.grid_points.clone(),
             output_channels: clut.output_channels,
-            samples,
+            nodes: Nodes::F64(samples),
             interpolation,
         })
     }
@@ -228,26 +423,83 @@ impl ClutTable {
     ///
     /// `samples` is in the same grid order as a parsed CLUT (last input axis fastest, output
     /// channels interleaved per node) and carries values already in the table's own domain —
-    /// no full-scale division happens here. Geometry is validated exactly as
-    /// [`ClutTable::with_interpolation`] validates it.
+    /// no full-scale division happens here. They are then stored at `precision`: kept as-is
+    /// ([`F64`](NodePrecision::F64)), rounded to nearest ([`F32`](NodePrecision::F32)), or
+    /// encoded with [`quantize16`] ([`Fixed16`](NodePrecision::Fixed16)). Geometry is
+    /// validated exactly as [`ClutTable::with_interpolation`] validates it.
+    ///
+    /// A fixed-point table carries two further rules, because lcms2's integer interpolators
+    /// are only defined there: at least **two nodes per axis** (`Eval1Input` and its siblings
+    /// have no single-node guard, so the in-bounds constant-axis semantics the float path pins
+    /// have no fixed-point original), and **tetrahedral** interpolation from three inputs (the
+    /// only 3-D+ fixed-point mode this crate transcribes; lcms2's `TrilinearInterp16` serves
+    /// Lab-indexed profile tables, which are never resampled). Every grid the resampling pass
+    /// builds satisfies both.
     ///
     /// # Errors
     ///
-    /// Everything [`ClutTable::with_interpolation`] reports for an inconsistent geometry.
+    /// Everything [`ClutTable::with_interpolation`] reports for an inconsistent geometry, and
+    /// [`CmmError::ClutGeometry`] when a [`Fixed16`](NodePrecision::Fixed16) table breaks
+    /// either fixed-point rule.
     #[must_use = "the constructed table is the only handle on the resampled grid"]
     pub(crate) fn from_samples(
         grid_points: Vec<u8>,
         output_channels: u8,
         samples: Vec<f64>,
         interpolation: ClutInterpolation,
+        precision: NodePrecision,
     ) -> Result<Self> {
         check_geometry(&grid_points, output_channels, samples.len(), interpolation)?;
+        let nodes = match precision {
+            NodePrecision::F64 => Nodes::F64(samples),
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "rounding to the f32 tier is the point"
+            )]
+            NodePrecision::F32 => Nodes::F32(samples.iter().map(|&s| s as f32).collect()),
+            NodePrecision::Fixed16 => {
+                if grid_points.contains(&1) {
+                    return Err(CmmError::ClutGeometry(
+                        "fixed-point tables need at least two nodes per axis",
+                    ));
+                }
+                if interpolation == ClutInterpolation::Multilinear && grid_points.len() >= 3 {
+                    return Err(CmmError::ClutGeometry(
+                        "fixed-point tables interpolate tetrahedrally from three inputs",
+                    ));
+                }
+                Nodes::Fixed16(samples.iter().map(|&s| quantize16(s)).collect())
+            }
+        };
         Ok(Self {
             grid_points,
             output_channels,
-            samples,
+            nodes,
             interpolation,
         })
+    }
+
+    /// The precision tier the table stores its nodes in and interpolates with —
+    /// [`NodePrecision::F64`] for every table built from a parsed profile.
+    #[must_use]
+    pub fn node_precision(&self) -> NodePrecision {
+        match self.nodes {
+            Nodes::F64(_) => NodePrecision::F64,
+            Nodes::F32(_) => NodePrecision::F32,
+            Nodes::Fixed16(_) => NodePrecision::Fixed16,
+        }
+    }
+
+    /// The integer evaluation view of a [`NodePrecision::Fixed16`] table; `None` for the
+    /// float tiers.
+    pub(crate) fn fixed16(&self) -> Option<Fixed16<'_>> {
+        match &self.nodes {
+            Nodes::Fixed16(words) => Some(Fixed16 {
+                grid_points: &self.grid_points,
+                words,
+            }),
+            Nodes::F64(_) | Nodes::F32(_) => None,
+        }
     }
 
     /// The number of input channels (grid dimensions), `1..=15`.
@@ -281,174 +533,345 @@ impl ClutTable {
     /// receives `output_channels()` samples. Lengths are guaranteed by the caller
     /// ([`Stage::eval`](crate::Stage), via `Pipeline`'s construction-time validation, or the
     /// unit tests).
+    ///
+    /// The table's [`NodePrecision`] decides the arithmetic: `f64` evaluates directly; `f32`
+    /// narrows the inputs, interpolates at that width, and widens the outputs; `Fixed16`
+    /// encodes each input with [`quantize16`], runs the integer interpolators, and returns
+    /// `code / 65535`.
     pub(crate) fn eval(&self, input: &[f64], output: &mut [f64]) {
-        self.eval_grid(input, &self.grid_points, &self.samples, output);
-    }
-
-    /// Evaluates the sub-grid spanned by the trailing `axes` over `table`. Above 3 dimensions,
-    /// slices the outermost axis and blends the two inner evaluations (lcms2's
-    /// `Eval4InputsFloat`… recursion); at ≤ 3 dimensions dispatches to the mode's base case.
-    fn eval_grid(&self, input: &[f64], axes: &[u8], table: &[f64], output: &mut [f64]) {
-        match axes.len() {
-            1 => self.eval_linear(input[0], axes[0], table, output),
-            2 => self.eval_bilinear(input, axes, table, output),
-            3 => match self.interpolation {
-                ClutInterpolation::Multilinear => self.eval_trilinear(input, axes, table, output),
-                ClutInterpolation::Tetrahedral => self.eval_tetrahedral(input, axes, table, output),
-            },
-            _ => {
-                let out_n = output.len();
-                // Stride of the outermost axis: one full inner sub-grid.
-                let stride: usize =
-                    axes[1..].iter().map(|&n| usize::from(n)).product::<usize>() * out_n;
-                let (lower, upper, rest) = axis(input[0], axes[0]);
-                let mut lo = [0.0_f64; MAX_CHANNELS as usize];
-                let mut hi = [0.0_f64; MAX_CHANNELS as usize];
-                self.eval_grid(
-                    &input[1..],
-                    &axes[1..],
-                    &table[lower * stride..lower * stride + stride],
-                    &mut lo[..out_n],
+        match &self.nodes {
+            Nodes::F64(table) => {
+                eval_grid(self.interpolation, input, &self.grid_points, table, output);
+            }
+            Nodes::F32(table) => {
+                let mut narrow_in = [0.0_f32; MAX_CHANNELS as usize];
+                let mut narrow_out = [0.0_f32; MAX_CHANNELS as usize];
+                for (n, &v) in narrow_in.iter_mut().zip(input) {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "the f32 tier's input rounding"
+                    )]
+                    {
+                        *n = v as f32;
+                    }
+                }
+                let narrow_out = &mut narrow_out[..output.len()];
+                eval_grid(
+                    self.interpolation,
+                    &narrow_in[..input.len()],
+                    &self.grid_points,
+                    table,
+                    narrow_out,
                 );
-                self.eval_grid(
-                    &input[1..],
-                    &axes[1..],
-                    &table[upper * stride..upper * stride + stride],
-                    &mut hi[..out_n],
-                );
-                for (out, (&y0, &y1)) in output.iter_mut().zip(lo.iter().zip(&hi)) {
-                    // lcms2's blend: y0 + (y1 − y0) · rest.
-                    *out = y0 + (y1 - y0) * rest;
+                for (out, &v) in output.iter_mut().zip(narrow_out.iter()) {
+                    *out = f64::from(v);
+                }
+            }
+            Nodes::Fixed16(words) => {
+                let lut = Fixed16 {
+                    grid_points: &self.grid_points,
+                    words,
+                };
+                let mut codes_in = [0_u16; MAX_CHANNELS as usize];
+                let mut codes_out = [0_u16; MAX_CHANNELS as usize];
+                for (code, &v) in codes_in.iter_mut().zip(input) {
+                    *code = quantize16(v);
+                }
+                let codes_out = &mut codes_out[..output.len()];
+                lut.eval(&codes_in[..input.len()], codes_out);
+                for (out, &code) in output.iter_mut().zip(codes_out.iter()) {
+                    *out = f64::from(code) / 65535.0;
                 }
             }
         }
     }
+}
 
-    /// 1-D base case: linear interpolation between the two bracketing nodes
-    /// (lcms2 `LinLerp1Dfloat`/`Eval1InputFloat`).
-    fn eval_linear(&self, input: f64, nodes: u8, table: &[f64], output: &mut [f64]) {
-        let out_n = output.len();
-        let (lower, upper, r) = axis(input, nodes);
-        for (ch, out) in output.iter_mut().enumerate() {
-            let y0 = table[lower * out_n + ch];
-            let y1 = table[upper * out_n + ch];
-            *out = y0 + (y1 - y0) * r;
+impl Fixed16<'_> {
+    /// Evaluates one pixel of 16-bit codes: `input` holds the table's input channel count,
+    /// `output` its output channel count (guaranteed by the caller, as for
+    /// [`ClutTable::eval`]).
+    pub(crate) fn eval(&self, input: &[u16], output: &mut [u16]) {
+        eval_grid16(input, self.grid_points, self.words, output);
+    }
+}
+
+/// Evaluates the sub-grid spanned by the trailing `axes` over `table`. Above 3 dimensions,
+/// slices the outermost axis and blends the two inner evaluations (lcms2's
+/// `Eval4InputsFloat`… recursion); at ≤ 3 dimensions dispatches to the mode's base case.
+fn eval_grid<T: Real>(
+    interpolation: ClutInterpolation,
+    input: &[T],
+    axes: &[u8],
+    table: &[T],
+    output: &mut [T],
+) {
+    match axes.len() {
+        1 => eval_linear(input[0], axes[0], table, output),
+        2 => eval_bilinear(input, axes, table, output),
+        3 => match interpolation {
+            ClutInterpolation::Multilinear => eval_trilinear(input, axes, table, output),
+            ClutInterpolation::Tetrahedral => eval_tetrahedral(input, axes, table, output),
+        },
+        _ => {
+            let out_n = output.len();
+            // Stride of the outermost axis: one full inner sub-grid.
+            let stride: usize =
+                axes[1..].iter().map(|&n| usize::from(n)).product::<usize>() * out_n;
+            let (lower, upper, rest) = axis(input[0], axes[0]);
+            let mut lo = [T::ZERO; MAX_CHANNELS as usize];
+            let mut hi = [T::ZERO; MAX_CHANNELS as usize];
+            eval_grid(
+                interpolation,
+                &input[1..],
+                &axes[1..],
+                &table[lower * stride..lower * stride + stride],
+                &mut lo[..out_n],
+            );
+            eval_grid(
+                interpolation,
+                &input[1..],
+                &axes[1..],
+                &table[upper * stride..upper * stride + stride],
+                &mut hi[..out_n],
+            );
+            for (out, (&y0, &y1)) in output.iter_mut().zip(lo.iter().zip(&hi)) {
+                // lcms2's blend: y0 + (y1 − y0) · rest.
+                *out = y0 + (y1 - y0) * rest;
+            }
         }
     }
+}
 
-    /// 2-D base case: bilinear, `LERP` along X then Y (lcms2 `BilinearInterpFloat`).
-    fn eval_bilinear(&self, input: &[f64], axes: &[u8], table: &[f64], output: &mut [f64]) {
-        let out_n = output.len();
-        let sx = usize::from(axes[1]) * out_n;
-        let sy = out_n;
-        let (x_lo, x_hi, fx) = axis(input[0], axes[0]);
-        let (y_lo, y_hi, fy) = axis(input[1], axes[1]);
-        let (x0, x1) = (x_lo * sx, x_hi * sx);
-        let (y0, y1) = (y_lo * sy, y_hi * sy);
-        for (ch, out) in output.iter_mut().enumerate() {
-            let d00 = table[x0 + y0 + ch];
-            let d01 = table[x0 + y1 + ch];
-            let d10 = table[x1 + y0 + ch];
-            let d11 = table[x1 + y1 + ch];
-            let dx0 = lerp(fx, d00, d10);
-            let dx1 = lerp(fx, d01, d11);
-            *out = lerp(fy, dx0, dx1);
+/// The fixed-point twin of [`eval_grid`] over a [`NodePrecision::Fixed16`] table: lcms2's
+/// `Eval1Input` (1-D), `BilinearInterp16` (2-D), `TetrahedralInterp16` (3-D), and the
+/// `Eval4Inputs`…`Eval15Inputs` recursion above — slice the outermost axis, evaluate both
+/// inner sub-grids, blend with `LinearInterp`. Fixed-point tables are tetrahedral from three
+/// inputs by construction, so there is no mode to dispatch on.
+fn eval_grid16(input: &[u16], axes: &[u8], table: &[u16], output: &mut [u16]) {
+    match axes.len() {
+        1 => eval_linear16(input[0], axes[0], table, output),
+        2 => eval_bilinear16(input, axes, table, output),
+        3 => eval_tetrahedral16(input, axes, table, output),
+        _ => {
+            let out_n = output.len();
+            let stride: usize =
+                axes[1..].iter().map(|&n| usize::from(n)).product::<usize>() * out_n;
+            let (lower, upper, rest) = axis16(input[0], axes[0]);
+            let mut lo = [0_u16; MAX_CHANNELS as usize];
+            let mut hi = [0_u16; MAX_CHANNELS as usize];
+            eval_grid16(
+                &input[1..],
+                &axes[1..],
+                &table[lower * stride..lower * stride + stride],
+                &mut lo[..out_n],
+            );
+            eval_grid16(
+                &input[1..],
+                &axes[1..],
+                &table[upper * stride..upper * stride + stride],
+                &mut hi[..out_n],
+            );
+            for (out, (&y0, &y1)) in output.iter_mut().zip(lo.iter().zip(&hi)) {
+                *out = linear16(rest, y0, y1);
+            }
         }
     }
+}
 
-    /// 3-D multilinear base case: trilinear, `LERP` X then Y then Z
-    /// (lcms2 `TrilinearInterpFloat`).
-    fn eval_trilinear(&self, input: &[f64], axes: &[u8], table: &[f64], output: &mut [f64]) {
-        let out_n = output.len();
-        let sz = out_n;
-        let sy = usize::from(axes[2]) * sz;
-        let sx = usize::from(axes[1]) * sy;
-        let (x_lo, x_hi, fx) = axis(input[0], axes[0]);
-        let (y_lo, y_hi, fy) = axis(input[1], axes[1]);
-        let (z_lo, z_hi, fz) = axis(input[2], axes[2]);
-        let (x0, x1) = (x_lo * sx, x_hi * sx);
-        let (y0, y1) = (y_lo * sy, y_hi * sy);
-        let (z0, z1) = (z_lo * sz, z_hi * sz);
-        for (ch, out) in output.iter_mut().enumerate() {
-            let d000 = table[x0 + y0 + z0 + ch];
-            let d001 = table[x0 + y0 + z1 + ch];
-            let d010 = table[x0 + y1 + z0 + ch];
-            let d011 = table[x0 + y1 + z1 + ch];
-            let d100 = table[x1 + y0 + z0 + ch];
-            let d101 = table[x1 + y0 + z1 + ch];
-            let d110 = table[x1 + y1 + z0 + ch];
-            let d111 = table[x1 + y1 + z1 + ch];
-            let dx00 = lerp(fx, d000, d100);
-            let dx01 = lerp(fx, d001, d101);
-            let dx10 = lerp(fx, d010, d110);
-            let dx11 = lerp(fx, d011, d111);
-            let dxy0 = lerp(fy, dx00, dx10);
-            let dxy1 = lerp(fy, dx01, dx11);
-            *out = lerp(fz, dxy0, dxy1);
-        }
+/// 1-D fixed-point base case (lcms2 `Eval1Input`/`LinLerp1D`). At `0xFFFF` both bracketing
+/// nodes are the last node and the fraction is `0`, which is lcms2's last-value shortcut.
+fn eval_linear16(input: u16, nodes: u8, table: &[u16], output: &mut [u16]) {
+    let out_n = output.len();
+    let (lower, upper, rest) = axis16(input, nodes);
+    for (ch, out) in output.iter_mut().enumerate() {
+        *out = linear16(rest, table[lower * out_n + ch], table[upper * out_n + ch]);
     }
+}
 
-    /// 3-D tetrahedral base case: lcms2 `TetrahedralInterpFloat`'s six-branch cascade,
-    /// `>=` comparisons in the same order (ties are order-dependent; see the transcription in
-    /// `references/cmm/README.md`).
-    ///
-    /// lcms2 ends the cascade with an unreachable `c1 = c2 = c3 = 0` fallback for NaN
-    /// fractions; `fclamp` maps NaN to `0.0` before the fractions exist, so for the finite
-    /// fractions here the six orderings are exhaustive and the sixth is the `else` arm.
-    fn eval_tetrahedral(&self, input: &[f64], axes: &[u8], table: &[f64], output: &mut [f64]) {
-        let out_n = output.len();
-        let sz = out_n;
-        let sy = usize::from(axes[2]) * sz;
-        let sx = usize::from(axes[1]) * sy;
-        let (x_lo, x_hi, rx) = axis(input[0], axes[0]);
-        let (y_lo, y_hi, ry) = axis(input[1], axes[1]);
-        let (z_lo, z_hi, rz) = axis(input[2], axes[2]);
-        let (x0, x1) = (x_lo * sx, x_hi * sx);
-        let (y0, y1) = (y_lo * sy, y_hi * sy);
-        let (z0, z1) = (z_lo * sz, z_hi * sz);
-        for (ch, out) in output.iter_mut().enumerate() {
-            let dens = |i: usize, j: usize, k: usize| table[i + j + k + ch];
-            let c0 = dens(x0, y0, z0);
-            let (c1, c2, c3) = if rx >= ry && ry >= rz {
-                (
-                    dens(x1, y0, z0) - c0,
-                    dens(x1, y1, z0) - dens(x1, y0, z0),
-                    dens(x1, y1, z1) - dens(x1, y1, z0),
-                )
-            } else if rx >= rz && rz >= ry {
-                (
-                    dens(x1, y0, z0) - c0,
-                    dens(x1, y1, z1) - dens(x1, y0, z1),
-                    dens(x1, y0, z1) - dens(x1, y0, z0),
-                )
-            } else if rz >= rx && rx >= ry {
-                (
-                    dens(x1, y0, z1) - dens(x0, y0, z1),
-                    dens(x1, y1, z1) - dens(x1, y0, z1),
-                    dens(x0, y0, z1) - c0,
-                )
-            } else if ry >= rx && rx >= rz {
-                (
-                    dens(x1, y1, z0) - dens(x0, y1, z0),
-                    dens(x0, y1, z0) - c0,
-                    dens(x1, y1, z1) - dens(x1, y1, z0),
-                )
-            } else if ry >= rz && rz >= rx {
-                (
-                    dens(x1, y1, z1) - dens(x0, y1, z1),
-                    dens(x0, y1, z0) - c0,
-                    dens(x0, y1, z1) - dens(x0, y1, z0),
-                )
-            } else {
-                // rz >= ry && ry >= rx — the only ordering left once the five above fail.
-                (
-                    dens(x1, y1, z1) - dens(x0, y1, z1),
-                    dens(x0, y1, z1) - dens(x0, y0, z1),
-                    dens(x0, y0, z1) - c0,
-                )
-            };
-            *out = c0 + c1 * rx + c2 * ry + c3 * rz;
-        }
+/// 2-D fixed-point base case (lcms2 `BilinearInterp16`): `LERP` along X, then Y.
+fn eval_bilinear16(input: &[u16], axes: &[u8], table: &[u16], output: &mut [u16]) {
+    let out_n = output.len();
+    let sx = usize::from(axes[1]) * out_n;
+    let (x_lo, x_hi, rx) = axis16(input[0], axes[0]);
+    let (y_lo, y_hi, ry) = axis16(input[1], axes[1]);
+    let (x0, x1) = (x_lo * sx, x_hi * sx);
+    let (y0, y1) = (y_lo * out_n, y_hi * out_n);
+    for (ch, out) in output.iter_mut().enumerate() {
+        let dx0 = linear16(rx, table[x0 + y0 + ch], table[x1 + y0 + ch]);
+        let dx1 = linear16(rx, table[x0 + y1 + ch], table[x1 + y1 + ch]);
+        *out = linear16(ry, dx0, dx1);
+    }
+}
+
+/// 3-D fixed-point base case: lcms2 `TetrahedralInterp16`.
+///
+/// The tetrahedron is the walk from the cell's lower corner to its upper corner one axis at a
+/// time, **largest fraction first**; each step's node difference is weighted by that axis's
+/// fraction, `Rest = Σ Δᵢ·rᵢ + 0x8001`, and the output is `c₀ + ((Rest + (Rest >> 16)) >> 16)`
+/// (lcms2's single-shift spelling of `ROUND_FIXED_TO_INT(_cmsToFixedDomain(Rest))`). lcms2
+/// spells the six walks as a branch cascade; ordering the fractions is the same selection.
+/// Where two fractions tie, the two candidate walks share the face between their tetrahedra
+/// and `Rest` is an exact integer sum, so the walks agree to the bit and the order a tie
+/// sorts in cannot change any output — unlike the float path, whose cascade order is
+/// observable through rounding and is transcribed branch for branch.
+///
+/// `Rest` accumulates in `i64`. lcms2 accumulates it in `int`, which would overflow only
+/// for a cell stepping the full code range (`|Δ| · r` near `2³²`) — not a table any smooth
+/// resampled transform produces.
+fn eval_tetrahedral16(input: &[u16], axes: &[u8], table: &[u16], output: &mut [u16]) {
+    let out_n = output.len();
+    let sz = out_n;
+    let sy = usize::from(axes[2]) * sz;
+    let sx = usize::from(axes[1]) * sy;
+    let (x_lo, x_hi, rx) = axis16(input[0], axes[0]);
+    let (y_lo, y_hi, ry) = axis16(input[1], axes[1]);
+    let (z_lo, z_hi, rz) = axis16(input[2], axes[2]);
+    let base = x_lo * sx + y_lo * sy + z_lo * sz;
+    // Each axis's step to its upper node (zero at a full-scale input).
+    let mut walk = [
+        (rx, (x_hi - x_lo) * sx),
+        (ry, (y_hi - y_lo) * sy),
+        (rz, (z_hi - z_lo) * sz),
+    ];
+    walk.sort_unstable_by_key(|&(fraction, _)| core::cmp::Reverse(fraction));
+    let [(r1, s1), (r2, s2), (r3, s3)] = walk;
+    let (o1, o2) = (base + s1, base + s1 + s2);
+    let o3 = o2 + s3;
+    for (ch, out) in output.iter_mut().enumerate() {
+        let c0 = i64::from(table[base + ch]);
+        let v1 = i64::from(table[o1 + ch]);
+        let v2 = i64::from(table[o2 + ch]);
+        let v3 = i64::from(table[o3 + ch]);
+        let rest = (v1 - c0) * r1 + (v2 - v1) * r2 + (v3 - v2) * r3 + 0x8001;
+        *out = word(c0 + ((rest + (rest >> 16)) >> 16));
+    }
+}
+
+/// 1-D base case: linear interpolation between the two bracketing nodes
+/// (lcms2 `LinLerp1Dfloat`/`Eval1InputFloat`).
+fn eval_linear<T: Real>(input: T, nodes: u8, table: &[T], output: &mut [T]) {
+    let out_n = output.len();
+    let (lower, upper, r) = axis(input, nodes);
+    for (ch, out) in output.iter_mut().enumerate() {
+        let y0 = table[lower * out_n + ch];
+        let y1 = table[upper * out_n + ch];
+        *out = y0 + (y1 - y0) * r;
+    }
+}
+
+/// 2-D base case: bilinear, `LERP` along X then Y (lcms2 `BilinearInterpFloat`).
+fn eval_bilinear<T: Real>(input: &[T], axes: &[u8], table: &[T], output: &mut [T]) {
+    let out_n = output.len();
+    let sx = usize::from(axes[1]) * out_n;
+    let sy = out_n;
+    let (x_lo, x_hi, fx) = axis(input[0], axes[0]);
+    let (y_lo, y_hi, fy) = axis(input[1], axes[1]);
+    let (x0, x1) = (x_lo * sx, x_hi * sx);
+    let (y0, y1) = (y_lo * sy, y_hi * sy);
+    for (ch, out) in output.iter_mut().enumerate() {
+        let d00 = table[x0 + y0 + ch];
+        let d01 = table[x0 + y1 + ch];
+        let d10 = table[x1 + y0 + ch];
+        let d11 = table[x1 + y1 + ch];
+        let dx0 = lerp(fx, d00, d10);
+        let dx1 = lerp(fx, d01, d11);
+        *out = lerp(fy, dx0, dx1);
+    }
+}
+
+/// 3-D multilinear base case: trilinear, `LERP` X then Y then Z
+/// (lcms2 `TrilinearInterpFloat`).
+fn eval_trilinear<T: Real>(input: &[T], axes: &[u8], table: &[T], output: &mut [T]) {
+    let out_n = output.len();
+    let sz = out_n;
+    let sy = usize::from(axes[2]) * sz;
+    let sx = usize::from(axes[1]) * sy;
+    let (x_lo, x_hi, fx) = axis(input[0], axes[0]);
+    let (y_lo, y_hi, fy) = axis(input[1], axes[1]);
+    let (z_lo, z_hi, fz) = axis(input[2], axes[2]);
+    let (x0, x1) = (x_lo * sx, x_hi * sx);
+    let (y0, y1) = (y_lo * sy, y_hi * sy);
+    let (z0, z1) = (z_lo * sz, z_hi * sz);
+    for (ch, out) in output.iter_mut().enumerate() {
+        let d000 = table[x0 + y0 + z0 + ch];
+        let d001 = table[x0 + y0 + z1 + ch];
+        let d010 = table[x0 + y1 + z0 + ch];
+        let d011 = table[x0 + y1 + z1 + ch];
+        let d100 = table[x1 + y0 + z0 + ch];
+        let d101 = table[x1 + y0 + z1 + ch];
+        let d110 = table[x1 + y1 + z0 + ch];
+        let d111 = table[x1 + y1 + z1 + ch];
+        let dx00 = lerp(fx, d000, d100);
+        let dx01 = lerp(fx, d001, d101);
+        let dx10 = lerp(fx, d010, d110);
+        let dx11 = lerp(fx, d011, d111);
+        let dxy0 = lerp(fy, dx00, dx10);
+        let dxy1 = lerp(fy, dx01, dx11);
+        *out = lerp(fz, dxy0, dxy1);
+    }
+}
+
+/// 3-D tetrahedral base case: lcms2 `TetrahedralInterpFloat`'s six-branch cascade,
+/// `>=` comparisons in the same order (ties are order-dependent; see the transcription in
+/// `references/cmm/README.md`).
+///
+/// lcms2 ends the cascade with an unreachable `c1 = c2 = c3 = 0` fallback for NaN
+/// fractions; `fclamp` maps NaN to `0.0` before the fractions exist, so for the finite
+/// fractions here the six orderings are exhaustive and the sixth is the `else` arm.
+fn eval_tetrahedral<T: Real>(input: &[T], axes: &[u8], table: &[T], output: &mut [T]) {
+    let out_n = output.len();
+    let sz = out_n;
+    let sy = usize::from(axes[2]) * sz;
+    let sx = usize::from(axes[1]) * sy;
+    let (x_lo, x_hi, rx) = axis(input[0], axes[0]);
+    let (y_lo, y_hi, ry) = axis(input[1], axes[1]);
+    let (z_lo, z_hi, rz) = axis(input[2], axes[2]);
+    let (x0, x1) = (x_lo * sx, x_hi * sx);
+    let (y0, y1) = (y_lo * sy, y_hi * sy);
+    let (z0, z1) = (z_lo * sz, z_hi * sz);
+    for (ch, out) in output.iter_mut().enumerate() {
+        let dens = |i: usize, j: usize, k: usize| table[i + j + k + ch];
+        let c0 = dens(x0, y0, z0);
+        let (c1, c2, c3) = if rx >= ry && ry >= rz {
+            (
+                dens(x1, y0, z0) - c0,
+                dens(x1, y1, z0) - dens(x1, y0, z0),
+                dens(x1, y1, z1) - dens(x1, y1, z0),
+            )
+        } else if rx >= rz && rz >= ry {
+            (
+                dens(x1, y0, z0) - c0,
+                dens(x1, y1, z1) - dens(x1, y0, z1),
+                dens(x1, y0, z1) - dens(x1, y0, z0),
+            )
+        } else if rz >= rx && rx >= ry {
+            (
+                dens(x1, y0, z1) - dens(x0, y0, z1),
+                dens(x1, y1, z1) - dens(x1, y0, z1),
+                dens(x0, y0, z1) - c0,
+            )
+        } else if ry >= rx && rx >= rz {
+            (
+                dens(x1, y1, z0) - dens(x0, y1, z0),
+                dens(x0, y1, z0) - c0,
+                dens(x1, y1, z1) - dens(x1, y1, z0),
+            )
+        } else if ry >= rz && rz >= rx {
+            (
+                dens(x1, y1, z1) - dens(x0, y1, z1),
+                dens(x0, y1, z0) - c0,
+                dens(x0, y1, z1) - dens(x0, y1, z0),
+            )
+        } else {
+            // rz >= ry && ry >= rx — the only ordering left once the five above fail.
+            (
+                dens(x1, y1, z1) - dens(x0, y1, z1),
+                dens(x0, y1, z1) - dens(x0, y0, z1),
+                dens(x0, y0, z1) - c0,
+            )
+        };
+        *out = c0 + c1 * rx + c2 * ry + c3 * rz;
     }
 }
 
@@ -1024,5 +1447,430 @@ mod tests {
             CmmError::ClutGeometry("zero grid axis").to_string(),
             "cmm: CLUT geometry inconsistent (zero grid axis)"
         );
+    }
+
+    // ---- precision tiers -------------------------------------------------------------------
+
+    /// A table at `precision` whose nodes are exactly the 16-bit `samples` (`s / 65535`
+    /// quantizes back to `s`), with lcms2's device-default interpolation.
+    fn tier_table(grid: &[u8], out: u8, samples: &[u16], precision: NodePrecision) -> ClutTable {
+        let mode = if grid.len() >= 3 {
+            ClutInterpolation::Tetrahedral
+        } else {
+            ClutInterpolation::Multilinear
+        };
+        let normalized = samples.iter().map(|&s| norm(s)).collect();
+        ClutTable::from_samples(grid.to_vec(), out, normalized, mode, precision).unwrap()
+    }
+
+    fn eval16(table: &ClutTable, input: &[u16]) -> Vec<u16> {
+        let mut out = vec![0_u16; usize::from(table.output_channels())];
+        table.fixed16().unwrap().eval(input, &mut out);
+        out
+    }
+
+    /// lcms2's `_cmsToFixedDomain`, transcribed independently of the production helper.
+    fn ref_fixed_domain(a: u32) -> u32 {
+        a + (a + 0x7FFF) / 0xFFFF
+    }
+
+    /// lcms2's `LinearInterp` in its own **32-bit unsigned wrap-around** arithmetic, so the
+    /// production `i64` form is checked against the C semantics rather than restated.
+    fn ref_linear_interp(a: u32, l: u16, h: u16) -> u16 {
+        let dif = (i32::from(h) - i32::from(l))
+            .cast_unsigned()
+            .wrapping_mul(a)
+            .wrapping_add(0x8000);
+        ((dif >> 16).wrapping_add(u32::from(l)) & 0xFFFF) as u16
+    }
+
+    /// One axis in lcms2's 16-bit form: `(x0, rx, upper step present)`.
+    fn ref_axis(v: u16, nodes: u8) -> (usize, u32, bool) {
+        let fixed = ref_fixed_domain(u32::from(v) * (u32::from(nodes) - 1));
+        ((fixed >> 16) as usize, fixed & 0xFFFF, v != 0xFFFF)
+    }
+
+    /// lcms2's `TetrahedralInterp16`, transcribed with its own branch cascade and offset
+    /// arithmetic (the production code orders the fractions instead).
+    fn ref_tetrahedral16(input: [u16; 3], grid: [u8; 3], out: usize, table: &[u16]) -> Vec<u16> {
+        let opta = [
+            out,
+            out * usize::from(grid[2]),
+            out * usize::from(grid[2]) * usize::from(grid[1]),
+        ];
+        let (x0, rx, sx) = ref_axis(input[0], grid[0]);
+        let (y0, ry, sy) = ref_axis(input[1], grid[1]);
+        let (z0, rz, sz) = ref_axis(input[2], grid[2]);
+        let (rx, ry, rz) = (i64::from(rx), i64::from(ry), i64::from(rz));
+        let base = opta[2] * x0 + opta[1] * y0 + opta[0] * z0;
+        let mut x1 = if sx { opta[2] } else { 0 };
+        let mut y1 = if sy { opta[1] } else { 0 };
+        let mut z1 = if sz { opta[0] } else { 0 };
+        if rx >= ry {
+            if ry >= rz {
+                y1 += x1;
+                z1 += y1;
+            } else if rz >= rx {
+                x1 += z1;
+                y1 += x1;
+            } else {
+                z1 += x1;
+                y1 += z1;
+            }
+        } else if rx >= rz {
+            x1 += y1;
+            z1 += x1;
+        } else if ry >= rz {
+            z1 += y1;
+            x1 += z1;
+        } else {
+            y1 += z1;
+            x1 += y1;
+        }
+        (0..out)
+            .map(|ch| {
+                let t = |o: usize| i64::from(table[base + o + ch]);
+                let c0 = t(0);
+                let (mut c1, mut c2, mut c3) = (t(x1), t(y1), t(z1));
+                if rx >= ry {
+                    if ry >= rz {
+                        c3 -= c2;
+                        c2 -= c1;
+                        c1 -= c0;
+                    } else if rz >= rx {
+                        c2 -= c1;
+                        c1 -= c3;
+                        c3 -= c0;
+                    } else {
+                        c2 -= c3;
+                        c3 -= c1;
+                        c1 -= c0;
+                    }
+                } else if rx >= rz {
+                    c3 -= c1;
+                    c1 -= c2;
+                    c2 -= c0;
+                } else if ry >= rz {
+                    c1 -= c3;
+                    c3 -= c2;
+                    c2 -= c0;
+                } else {
+                    c1 -= c2;
+                    c2 -= c3;
+                    c3 -= c0;
+                }
+                let rest = c1 * rx + c2 * ry + c3 * rz + 0x8001;
+                (c0 + ((rest + (rest >> 16)) >> 16)) as u16
+            })
+            .collect()
+    }
+
+    /// 16-bit probe inputs: both ends, the half-scale code, and seeded interior codes — the
+    /// three axes deliberately drawn so ties between fractions occur.
+    fn probes16(seed: u64, dims: usize, count: usize) -> Vec<Vec<u16>> {
+        let mut lcg = Lcg(seed);
+        let mut probes = vec![vec![0; dims], vec![u16::MAX; dims], vec![0x8000; dims]];
+        for _ in 0..count {
+            let shared = lcg.next_u16();
+            probes.push(
+                (0..dims)
+                    .map(|_| match lcg.next_u32() % 5 {
+                        0 => shared,
+                        1 => u16::MAX,
+                        _ => lcg.next_u16(),
+                    })
+                    .collect(),
+            );
+        }
+        probes
+    }
+
+    #[test]
+    fn quantize16_is_lcms2_quick_saturate_word() {
+        assert_eq!(quantize16(0.0), 0);
+        assert_eq!(quantize16(1.0), 65535);
+        assert_eq!(quantize16(0.5), 32768, "32767.5 rounds half up");
+        assert_eq!(
+            quantize16(0.4999 / 65535.0),
+            0,
+            "below half a code rounds down"
+        );
+        assert_eq!(quantize16(0.5 / 65535.0), 1, "half a code rounds up");
+        assert_eq!(quantize16(-0.25), 0, "saturates low");
+        assert_eq!(quantize16(1.5), 65535, "saturates high");
+        assert_eq!(quantize16(f64::NAN), 0, "NaN saturates to 0");
+    }
+
+    #[test]
+    fn to_fixed_domain_maps_full_scale_onto_the_last_node() {
+        for nodes in [2_u8, 7, 17, 33, 255] {
+            let domain = u32::from(nodes) - 1;
+            assert_eq!(
+                to_fixed_domain(65535 * domain),
+                domain << 16,
+                "{nodes} nodes"
+            );
+            assert_eq!(
+                axis16(u16::MAX, nodes),
+                (domain as usize, domain as usize, 0)
+            );
+        }
+        // Mid-scale on a 33-node axis: 32768·32 = 1 048 576 → + 1 081 343/65 535 = 16.
+        assert_eq!(to_fixed_domain(32768 * 32), 1_048_592);
+        assert_eq!(axis16(32768, 33), (16, 17, 16));
+        assert_eq!(axis16(0, 33), (0, 1, 0));
+        // The rescale term rounds: (a + 0x7FFF) / 0xFFFF steps at a = 0x8000.
+        assert_eq!(to_fixed_domain(0x7FFF), 0x7FFF);
+        assert_eq!(to_fixed_domain(0x8000), 0x8001);
+    }
+
+    #[test]
+    fn linear16_is_lcms2_linear_interp_including_its_rounding() {
+        assert_eq!(linear16(0x8000, 0, 65535), 32768);
+        assert_eq!(linear16(0x8000, 65535, 0), 32768);
+        assert_eq!(linear16(1, 0, 32768), 1, "exactly half a code rounds up");
+        assert_eq!(linear16(1, 0, 32767), 0, "just under half rounds down");
+        assert_eq!(
+            linear16(1, 32768, 0),
+            32768,
+            "the descending half rounds up too"
+        );
+        assert_eq!(linear16(0, 1234, 4321), 1234);
+        assert_eq!(linear16(0xFFFF, 0, 65535), 65534);
+        let mut lcg = Lcg(0x11_1EA2);
+        for _ in 0..20_000 {
+            let (a, l, h) = (u32::from(lcg.next_u16()), lcg.next_u16(), lcg.next_u16());
+            assert_eq!(
+                linear16(i64::from(a), l, h),
+                ref_linear_interp(a, l, h),
+                "a={a} l={l} h={h}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed16_linear_and_bilinear_match_lcms2_transcriptions() {
+        // 1-D, three outputs (Eval1Input).
+        let samples = random_samples(0x1D16, 9 * 3);
+        let table = tier_table(&[9], 3, &samples, NodePrecision::Fixed16);
+        for probe in probes16(0x1D, 1, 300) {
+            let (x0, rx, step) = ref_axis(probe[0], 9);
+            let x1 = if step { x0 + 1 } else { x0 };
+            let want: Vec<u16> = (0..3)
+                .map(|ch| ref_linear_interp(rx, samples[x0 * 3 + ch], samples[x1 * 3 + ch]))
+                .collect();
+            assert_eq!(eval16(&table, &probe), want, "input {probe:?}");
+        }
+        // 2-D, two outputs (BilinearInterp16: LERP along X, then Y).
+        let grid = [5_u8, 7];
+        let samples = random_samples(0x2D16, 5 * 7 * 2);
+        let table = tier_table(&grid, 2, &samples, NodePrecision::Fixed16);
+        for probe in probes16(0x2D, 2, 400) {
+            let (x0, rx, sx) = ref_axis(probe[0], grid[0]);
+            let (y0, ry, sy) = ref_axis(probe[1], grid[1]);
+            let (x1, y1) = (x0 + usize::from(sx), y0 + usize::from(sy));
+            let at = |x: usize, y: usize, ch: usize| samples[(x * 7 + y) * 2 + ch];
+            let want: Vec<u16> = (0..2)
+                .map(|ch| {
+                    let dx0 = ref_linear_interp(rx, at(x0, y0, ch), at(x1, y0, ch));
+                    let dx1 = ref_linear_interp(rx, at(x0, y1, ch), at(x1, y1, ch));
+                    ref_linear_interp(ry, dx0, dx1)
+                })
+                .collect();
+            assert_eq!(eval16(&table, &probe), want, "input {probe:?}");
+        }
+    }
+
+    #[test]
+    fn fixed16_tetrahedral_matches_lcms2_branch_cascade_including_ties() {
+        let grid = [5_u8, 4, 6];
+        let samples = random_samples(0x3D16, 5 * 4 * 6 * 3);
+        let table = tier_table(&grid, 3, &samples, NodePrecision::Fixed16);
+        for probe in probes16(0x3D, 3, 3000) {
+            let input = [probe[0], probe[1], probe[2]];
+            assert_eq!(
+                eval16(&table, &probe),
+                ref_tetrahedral16(input, grid, 3, &samples),
+                "input {probe:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed16_four_and_five_inputs_slice_the_outer_axis_and_blend() {
+        // Eval4Inputs: two tetrahedral evaluations at the bracketing K slices, LinearInterp.
+        let grid = [3_u8, 4, 3, 5];
+        let inner: usize = 4 * 3 * 5;
+        let samples = random_samples(0x4D16, 3 * inner * 2);
+        let table = tier_table(&grid, 2, &samples, NodePrecision::Fixed16);
+        for probe in probes16(0x4D, 4, 600) {
+            let (k0, rk, step) = ref_axis(probe[0], grid[0]);
+            let k1 = k0 + usize::from(step);
+            let rest = [probe[1], probe[2], probe[3]];
+            let inner_grid = [grid[1], grid[2], grid[3]];
+            let lo = ref_tetrahedral16(rest, inner_grid, 2, &samples[k0 * inner * 2..]);
+            let hi = ref_tetrahedral16(rest, inner_grid, 2, &samples[k1 * inner * 2..]);
+            let want: Vec<u16> = (0..2)
+                .map(|ch| ref_linear_interp(rk, lo[ch], hi[ch]))
+                .collect();
+            assert_eq!(eval16(&table, &probe), want, "input {probe:?}");
+        }
+        // Eval5Inputs recurses once more over the same 4-D evaluation.
+        let grid5 = [2_u8, 3, 4, 3, 5];
+        let samples5 = random_samples(0x5D16, 2 * 3 * inner * 2);
+        let table5 = tier_table(&grid5, 2, &samples5, NodePrecision::Fixed16);
+        let sub = |k: usize| {
+            let start = k * 3 * inner * 2;
+            tier_table(
+                &grid5[1..],
+                2,
+                &samples5[start..start + 3 * inner * 2],
+                NodePrecision::Fixed16,
+            )
+        };
+        let slices = [sub(0), sub(1)];
+        for probe in probes16(0x5D, 5, 300) {
+            let (j0, rj, step) = ref_axis(probe[0], 2);
+            let j1 = j0 + usize::from(step);
+            let lo = eval16(&slices[j0], &probe[1..]);
+            let hi = eval16(&slices[j1], &probe[1..]);
+            let want: Vec<u16> = (0..2)
+                .map(|ch| ref_linear_interp(rj, lo[ch], hi[ch]))
+                .collect();
+            assert_eq!(eval16(&table5, &probe), want, "input {probe:?}");
+        }
+    }
+
+    #[test]
+    fn fixed16_f64_entry_quantizes_in_and_scales_out() {
+        let samples = random_samples(0xF64, 3 * 3 * 3 * 2);
+        let table = tier_table(&[3, 3, 3], 2, &samples, NodePrecision::Fixed16);
+        for probe in probes16(0xF6, 3, 200) {
+            let input: Vec<f64> = probe.iter().map(|&v| norm(v)).collect();
+            let mut got = [0.0; 2];
+            table.eval(&input, &mut got);
+            let want: Vec<f64> = eval16(&table, &probe).into_iter().map(norm).collect();
+            assert_eq!(got.to_vec(), want, "input {probe:?}");
+        }
+        // Out-of-range and NaN inputs saturate through `quantize16` exactly like lcms2's
+        // float → 16-bit formatter: below 0 and NaN to code 0, above 1 to code 65535.
+        let mut low = [0.0; 2];
+        table.eval(&[-0.5, f64::NAN, 2.0], &mut low);
+        let want: Vec<f64> = eval16(&table, &[0, 0, u16::MAX])
+            .into_iter()
+            .map(norm)
+            .collect();
+        assert_eq!(low.to_vec(), want);
+    }
+
+    #[test]
+    fn f32_tier_runs_the_reference_interpolators_at_f32_width() {
+        // 1-D: the f32 lerp, input narrowed and output widened.
+        let table = ClutTable::from_samples(
+            vec![2],
+            1,
+            vec![0.1, 0.7],
+            ClutInterpolation::Multilinear,
+            NodePrecision::F32,
+        )
+        .unwrap();
+        let mut out = [0.0];
+        table.eval(&[0.3], &mut out);
+        let want = 0.1_f32 + (0.7_f32 - 0.1_f32) * 0.3_f32;
+        assert_eq!(out[0], f64::from(want));
+        assert_ne!(
+            out[0],
+            0.1 + (0.7 - 0.1) * 0.3,
+            "the f64 answer is distinguishable"
+        );
+        // fclamp at f32 width: NaN and negatives to the first node, above 1 to the last.
+        for (input, node) in [(f64::NAN, 0.1_f32), (-1.0, 0.1), (2.0, 0.7), (1.0, 0.7)] {
+            table.eval(&[input], &mut out);
+            assert_eq!(out[0], f64::from(node), "input {input}");
+        }
+        // 3-D tetrahedral and 4-D slicing agree with the f64 tier to f32 rounding, and are
+        // not bit-identical to it.
+        for grid in [&[5_u8, 4, 6] as &[u8], &[3, 4, 3, 5]] {
+            let nodes: usize = grid.iter().map(|&n| usize::from(n)).product();
+            let samples = random_samples(0xF32 + grid.len() as u64, nodes * 2);
+            let narrow = tier_table(grid, 2, &samples, NodePrecision::F32);
+            let wide = tier_table(grid, 2, &samples, NodePrecision::F64);
+            let mut lcg = Lcg(0xF3 + grid.len() as u64);
+            let mut differs = false;
+            for _ in 0..500 {
+                let input: Vec<f64> = (0..grid.len()).map(|_| lcg.next_unit()).collect();
+                let (mut a, mut b) = ([0.0; 2], [0.0; 2]);
+                narrow.eval(&input, &mut a);
+                wide.eval(&input, &mut b);
+                for ch in 0..2 {
+                    assert!((a[ch] - b[ch]).abs() < 1e-6, "{grid:?} {input:?}");
+                    differs |= a[ch] != b[ch];
+                }
+            }
+            assert!(differs, "{grid:?}: the f32 tier must not be the f64 tier");
+        }
+    }
+
+    #[test]
+    fn node_precision_reports_the_tier() {
+        let parsed = ClutTable::new(&u16_clut(&[2, 2], 1, vec![0; 4])).unwrap();
+        assert_eq!(parsed.node_precision(), NodePrecision::F64);
+        assert!(parsed.fixed16().is_none());
+        let samples = [0_u16; 4];
+        for precision in [
+            NodePrecision::F64,
+            NodePrecision::F32,
+            NodePrecision::Fixed16,
+        ] {
+            let table = tier_table(&[2, 2], 1, &samples, precision);
+            assert_eq!(table.node_precision(), precision);
+            assert_eq!(
+                table.fixed16().is_some(),
+                precision == NodePrecision::Fixed16
+            );
+        }
+    }
+
+    #[test]
+    fn fixed16_construction_enforces_the_fixed_point_rules() {
+        let single_node = ClutTable::from_samples(
+            vec![1, 2, 2],
+            1,
+            vec![0.0; 4],
+            ClutInterpolation::Tetrahedral,
+            NodePrecision::Fixed16,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            single_node,
+            CmmError::ClutGeometry("fixed-point tables need at least two nodes per axis")
+        ));
+        let trilinear = ClutTable::from_samples(
+            vec![2, 2, 2],
+            1,
+            vec![0.0; 8],
+            ClutInterpolation::Multilinear,
+            NodePrecision::Fixed16,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            trilinear,
+            CmmError::ClutGeometry(
+                "fixed-point tables interpolate tetrahedrally from three inputs"
+            )
+        ));
+        // Both rules are fixed-point only: the float tiers keep every float-path geometry.
+        for precision in [NodePrecision::F64, NodePrecision::F32] {
+            ClutTable::from_samples(
+                vec![1, 2, 2],
+                1,
+                vec![0.0; 4],
+                ClutInterpolation::Multilinear,
+                precision,
+            )
+            .unwrap();
+        }
+        // Multilinear stays legal below three inputs, where it is the only mode.
+        tier_table(&[2, 2], 1, &[0; 4], NodePrecision::Fixed16);
     }
 }

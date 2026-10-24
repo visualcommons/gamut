@@ -8,7 +8,7 @@ use gamut_icc::{ColorSpace, DeviceClass, IccProfile, RenderingIntent};
 use crate::chain;
 use crate::error::{CmmError, Result};
 use crate::optimize::PipelineOptimization;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{MAX_CHANNELS, Pipeline};
 
 /// A runnable colour transform: interleaved `f64` pixels in, interleaved `f64` pixels out.
 ///
@@ -41,6 +41,42 @@ pub trait Transform {
     /// matching number of `output_channels()`-sample pixels.
     fn transform(&self, src: &[f64], dst: &mut [f64]) -> Result<()>;
 
+    /// Transforms interleaved **16-bit** samples: each code `v` is a device value `v / 65535`.
+    ///
+    /// The entry point [`crate::transform_interleaved_u16`] and its planar sibling run colour
+    /// channels through. The provided implementation is exactly that normalization, then
+    /// [`transform`](Transform::transform), then lcms2's `_cmsQuickSaturateWord` re-encoding
+    /// (`floor(v · 65535 + 0.5)`, saturating, NaN → 0), so a transform that overrides nothing
+    /// keeps its `f64` numerics. A transform with a native integer path overrides it — a
+    /// pipeline resampled at
+    /// [`PipelineOptimization::PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16)
+    /// interpolates the codes directly, with no float conversion on either side.
+    ///
+    /// # Errors
+    ///
+    /// The buffer contract of [`transform`](Transform::transform), in samples:
+    /// [`CmmError::BufferLength`] if `src` is not whole pixels or `dst` does not hold the
+    /// matching pixel count; plus anything `transform` itself returns.
+    fn transform_u16(&self, src: &[u16], dst: &mut [u16]) -> Result<()> {
+        through_f64(self, src, dst, 65535.0, encode_u16)
+    }
+
+    /// Transforms interleaved **8-bit** samples: each code `v` is a device value `v / 255`.
+    ///
+    /// As [`transform_u16`](Transform::transform_u16) at 8 bits: the provided implementation
+    /// normalizes by 255, calls [`transform`](Transform::transform), and re-encodes with
+    /// `floor(v · 255 + 0.5)`, saturating. A
+    /// [`PrecalculateFixed16`](crate::PipelineOptimization::PrecalculateFixed16) pipeline
+    /// instead widens each code to 16 bits and narrows the result back the way lcms2's 8-bit
+    /// formatters do (`FROM_8_TO_16`, `FROM_16_TO_8`).
+    ///
+    /// # Errors
+    ///
+    /// As [`transform_u16`](Transform::transform_u16).
+    fn transform_u8(&self, src: &[u8], dst: &mut [u8]) -> Result<()> {
+        through_f64(self, src, dst, 255.0, encode_u8)
+    }
+
     /// The number of samples this transform consumes per pixel.
     #[must_use]
     fn input_channels(&self) -> u8;
@@ -48,6 +84,108 @@ pub trait Transform {
     /// The number of samples this transform produces per pixel.
     #[must_use]
     fn output_channels(&self) -> u8;
+}
+
+/// Pixels per refill of the stack scratch the provided integer entry points convert through.
+const THROUGH_F64_PIXELS: usize = 64;
+
+/// Checks the [`Transform`] buffer contract for `src_len` input and `dst_len` output samples
+/// of a transform with the given per-pixel channel counts.
+///
+/// # Errors
+///
+/// [`CmmError::BufferLength`] if `src_len` is not a whole number of input pixels, or
+/// `dst_len` is not the matching number of output samples.
+pub(crate) fn check_buffers(
+    input_channels: u8,
+    output_channels: u8,
+    src_len: usize,
+    dst_len: usize,
+) -> Result<()> {
+    let n_in = usize::from(input_channels);
+    if !src_len.is_multiple_of(n_in) {
+        return Err(CmmError::BufferLength {
+            channels: input_channels,
+            found: src_len,
+        });
+    }
+    if dst_len != (src_len / n_in) * usize::from(output_channels) {
+        return Err(CmmError::BufferLength {
+            channels: output_channels,
+            found: dst_len,
+        });
+    }
+    Ok(())
+}
+
+/// The provided integer entry points: normalize each code by `full_scale`, run the `f64`
+/// [`Transform::transform`] over a stack chunk, and re-encode with `encode`. Constant extra
+/// memory (two `THROUGH_F64_PIXELS × MAX_CHANNELS` `f64` arrays, 16 KiB), no allocation.
+///
+/// # Errors
+///
+/// As [`Transform::transform_u16`].
+pub(crate) fn through_f64<T, S>(
+    transform: &T,
+    src: &[S],
+    dst: &mut [S],
+    full_scale: f64,
+    encode: fn(f64) -> S,
+) -> Result<()>
+where
+    T: Transform + ?Sized,
+    S: Copy + Into<f64>,
+{
+    let (n_in, n_out) = (transform.input_channels(), transform.output_channels());
+    check_buffers(n_in, n_out, src.len(), dst.len())?;
+    let mut fin = [0.0_f64; THROUGH_F64_PIXELS * MAX_CHANNELS as usize];
+    let mut fout = [0.0_f64; THROUGH_F64_PIXELS * MAX_CHANNELS as usize];
+    let src_chunks = src.chunks(THROUGH_F64_PIXELS * usize::from(n_in));
+    let dst_chunks = dst.chunks_mut(THROUGH_F64_PIXELS * usize::from(n_out));
+    for (s, d) in src_chunks.zip(dst_chunks) {
+        for (f, &code) in fin.iter_mut().zip(s) {
+            *f = code.into() / full_scale;
+        }
+        transform.transform(&fin[..s.len()], &mut fout[..d.len()])?;
+        for (code, &f) in d.iter_mut().zip(fout.iter()) {
+            *code = encode(f);
+        }
+    }
+    Ok(())
+}
+
+/// lcms2's `_cmsQuickSaturateWord` rounding at 8 bits: `floor(v · 255 + 0.5)`, saturating to
+/// the sample range (NaN saturates to 0).
+pub(crate) fn encode_u8(v: f64) -> u8 {
+    // `as` saturates (NaN → 0), so the clamp only needs the rounding to be done first.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to the u8 range"
+    )]
+    {
+        (v * 255.0 + 0.5).floor().clamp(0.0, 255.0) as u8
+    }
+}
+
+/// lcms2's `_cmsQuickSaturateWord`: `floor(v · 65535 + 0.5)`, saturating (NaN → 0) — the
+/// same encoding a [`NodePrecision::Fixed16`](crate::clut::NodePrecision::Fixed16) table
+/// quantizes its nodes with.
+pub(crate) fn encode_u16(v: f64) -> u16 {
+    crate::clut::quantize16(v)
+}
+
+/// lcms2's `FROM_8_TO_16` (`lcms2_internal.h`): `v · 257`, the exact 8 → 16-bit widening
+/// (`v / 255 = v·257 / 65535`).
+pub(crate) fn widen_u8(v: u8) -> u16 {
+    u16::from(v) * 257
+}
+
+/// lcms2's `FROM_16_TO_8` (`lcms2_internal.h`): `(v · 65281 + 8388608) >> 24`, the
+/// round-to-nearest 16 → 8-bit narrowing lcms2's 8-bit formatters apply.
+pub(crate) fn narrow_u16(v: u16) -> u8 {
+    // In range: (65535 · 65281 + 8388608) >> 24 = 255.
+    ((u32::from(v) * 65281 + 8_388_608) >> 24) as u8
 }
 
 /// Options for building an [`IccTransform`].
@@ -274,6 +412,14 @@ impl Transform for IccTransform {
         self.pipeline.transform(src, dst)
     }
 
+    fn transform_u16(&self, src: &[u16], dst: &mut [u16]) -> Result<()> {
+        self.pipeline.transform_u16(src, dst)
+    }
+
+    fn transform_u8(&self, src: &[u8], dst: &mut [u8]) -> Result<()> {
+        self.pipeline.transform_u8(src, dst)
+    }
+
     fn input_channels(&self) -> u8 {
         self.pipeline.input_channels()
     }
@@ -287,6 +433,21 @@ impl Transform for IccTransform {
 mod tests {
     use super::Transform;
     use crate::{Pipeline, Stage};
+
+    #[test]
+    fn rounding_is_half_up_with_saturation() {
+        use super::{encode_u8, encode_u16};
+        assert_eq!(encode_u8(0.5), 128, "127.5 rounds up");
+        assert_eq!(encode_u8(1.0), 255);
+        assert_eq!(encode_u8(1.5), 255, "saturates high");
+        assert_eq!(encode_u8(-0.2), 0, "saturates low");
+        assert_eq!(encode_u8(f64::NAN), 0, "NaN saturates to 0");
+        assert_eq!(encode_u16(0.5), 32768, "32767.5 rounds up");
+        assert_eq!(encode_u16(1.0), 65535);
+        assert_eq!(encode_u16(2.0), 65535);
+        assert_eq!(encode_u16(-1.0), 0);
+        assert_eq!(encode_u16(f64::NAN), 0, "NaN saturates to 0");
+    }
 
     #[test]
     fn transform_is_object_safe() {
