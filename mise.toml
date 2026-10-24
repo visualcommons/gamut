@@ -129,12 +129,17 @@ GAMUT_JXL_SYS_SKIP_NATIVE=1 cargo check --workspace --exclude gamut-cli --all-fe
 # -sALLOW_MEMORY_GROWTH=1: rustc's default emscripten link uses a fixed 16 MiB heap and passes
 # -sABORTING_MALLOC=0, so a large libjxl allocation (brotli in the jbrd path) gets a NULL malloc
 # and kills the process; growable memory is how libjxl's own wasm builds run.
+# RUSTDOCFLAGS carries the same link arg to the doctest links: Cargo hands target rustflags to
+# rustc only, never to rustdoc, so without it the README's jbrd example (#952) links with the
+# fixed heap and exits 1 with no panic message. With `--target` set, RUSTDOCFLAGS reaches only
+# the target's rustdoc, so the host build is untouched.
 [tasks.test-jxl-wasm]
 description = "Build and run the JPEG XL crates' tests on wasm32-unknown-emscripten (needs emsdk's emcc + node on PATH)"
 run = """
 command -v emcc >/dev/null || { echo "emcc not found: install and activate emsdk first (https://emscripten.org)"; exit 1; }
 rustup target add wasm32-unknown-emscripten
 CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-C link-arg=-sALLOW_MEMORY_GROWTH=1" \
+RUSTDOCFLAGS="-C link-arg=-sALLOW_MEMORY_GROWTH=1" \
 CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUNNER=node \
 cargo test -p gamut-jxl-sys -p gamut-jxl --all-features --target wasm32-unknown-emscripten
 """
