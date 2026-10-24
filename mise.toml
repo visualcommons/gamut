@@ -75,17 +75,19 @@ depends_post = ["fmt-tooling-check"]
 # same `tooling/` coverage — set-identical to `git ls-files 'tooling/**/*.rs'`, all 61 files
 # across the 17 `tooling/*/Cargo.toml` crates — for 65 file-visits instead of 2681 (a shared
 # `tests/common/mod.rs` is visited once per test target that declares it). Figures as of #847;
-# re-derive by collecting rustfmt's `--verbose` "Formatting" lines from both loops.
+# re-derive by collecting rustfmt's `--verbose` "Formatting" lines from both loops. The loop also
+# visits `examples/*/Cargo.toml` (the ICC sandbox, #247), excluded from the workspace for the same
+# reason and therefore just as invisible to `fmt --all`.
 [tasks.fmt-tooling]
 description = "Format the workspace-excluded tooling crates (`fmt --all` stops at the workspace boundary)"
 depends = ["ensure-nightly-rustfmt"]
-run = "for m in tooling/*/Cargo.toml; do cargo +nightly fmt --manifest-path \"$m\"; done"
+run = "for m in tooling/*/Cargo.toml examples/*/Cargo.toml; do cargo +nightly fmt --manifest-path \"$m\"; done"
 
 [tasks.fmt-tooling-check]
 description = "Check formatting of the workspace-excluded tooling crates"
 depends = ["ensure-nightly-rustfmt"]
 # Deliberately does not stop at the first drifting crate, so one run names every one of them.
-run = "fail=0; for m in tooling/*/Cargo.toml; do cargo +nightly fmt --manifest-path \"$m\" --check || fail=1; done; exit $fail"
+run = "fail=0; for m in tooling/*/Cargo.toml examples/*/Cargo.toml; do cargo +nightly fmt --manifest-path \"$m\" --check || fail=1; done; exit $fail"
 
 [tasks.lint]
 description = "Lint with Clippy (warnings as errors)"
@@ -286,6 +288,52 @@ run = "cargo test --locked --manifest-path tooling/c2pa-oracle/Cargo.toml"
 [tasks.check-c2pa]
 description = "Compile the C2PA differential oracle (no signing, no corpus)"
 run = "cargo check --locked --manifest-path tooling/c2pa-oracle/Cargo.toml --all-targets"
+
+# The interactive ICC sandbox (issue #247), the flagship gamut-icc/gamut-cmm example: an egui/eframe
+# app under `examples/icc-sandbox`, workspace-excluded so egui stays out of `test --workspace` and
+# the coverage gate. Like `tooling/c2pa-oracle` it commits its own lockfile (no root-lockfile entry
+# pins egui) and every task passes `--locked`, so a release-plz bump of a path-reached gamut crate
+# fails these until `cargo update --workspace --manifest-path examples/icc-sandbox/Cargo.toml` is
+# committed. Unlike `tooling/c2pa-oracle/Cargo.lock`, which release.yml refreshes on every release
+# PR, nothing refreshes this lockfile yet, so after any such bump the tasks fail locally until
+# someone commits that refresh; #1005 carries adding the matching release.yml step. The default
+# features (`gui` + `oracle`) link Little-CMS through `tooling/lcms2-oracle`, so the native tasks
+# need the `third_party/lcms2` submodule and a C compiler.
+[tasks.icc-sandbox]
+description = "Run the interactive ICC sandbox in a native window (issue #247)"
+run = "cargo run --locked --release --manifest-path examples/icc-sandbox/Cargo.toml"
+
+[tasks.test-icc-sandbox]
+description = "Test the ICC sandbox: its model, the lcms2 conformance badge, and every tab drawn headlessly"
+run = "cargo test --locked --manifest-path examples/icc-sandbox/Cargo.toml"
+
+# Both builds, under Clippy: native with every feature and target, and the wasm32 front end
+# (`gui` only — lcms2 is C, so the badge is native-only). No window opens and nothing runs.
+[tasks.check-icc-sandbox]
+description = "Lint the ICC sandbox natively and for wasm32 with Clippy (warnings as errors)"
+run = """
+rustup target add wasm32-unknown-unknown
+cargo clippy --locked --manifest-path examples/icc-sandbox/Cargo.toml --all-targets --all-features -- -D warnings
+cargo clippy --locked --manifest-path examples/icc-sandbox/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features gui -- -D warnings
+"""
+
+# The browser build: the same egui app on a WebGL canvas, no npm and no bundler. `wasm-bindgen`
+# emits the JS glue the page's one-line module loader imports; its CLI must match the
+# `wasm-bindgen` crate version exactly, so the version is read from the sandbox's lockfile rather
+# than pinned a second time here, and fetched on demand by `mise exec` (it is not in `[tools]`, so
+# `mise install` never builds it for contributors who do not want the web build).
+[tasks.icc-sandbox-web]
+description = "Build the ICC sandbox for the browser into examples/icc-sandbox/target/web"
+run = """
+set -eu
+rustup target add wasm32-unknown-unknown
+cargo build --locked --release --manifest-path examples/icc-sandbox/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features gui
+version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print }' examples/icc-sandbox/Cargo.lock)
+out=examples/icc-sandbox/target/web
+mise exec "cargo:wasm-bindgen-cli@$version" -- wasm-bindgen --target web --no-typescript --out-dir "$out" examples/icc-sandbox/target/wasm32-unknown-unknown/release/icc-sandbox.wasm
+cp examples/icc-sandbox/index.html "$out/"
+echo "Built $out — serve it over HTTP, e.g. python3 -m http.server --directory $out"
+"""
 
 # Re-derive gamut-iptc's IIM 4.2 DataSet-name table from the vendored standard (issue #623). The
 # inline drift guard in `crates/gamut-iptc/src/iim.rs` compares `KNOWN_TAGS` against the committed

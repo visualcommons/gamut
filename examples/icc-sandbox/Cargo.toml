@@ -1,0 +1,65 @@
+# Interactive ICC sandbox (issue #247): the flagship example for `gamut-icc` and `gamut-cmm`.
+#
+# NOT a member of the gamut workspace — listed under `[workspace].exclude` in the root manifest —
+# so `cargo test --workspace --all-features` never compiles egui and the 80% coverage gate never
+# counts it. It has its own `[workspace]` table below for the reason `tooling/lcms2-oracle` does: a
+# checkout nested inside another gamut checkout would otherwise find the outer manifest. Its own
+# committed `Cargo.lock` holds the egui tree still, since no root-lockfile entry pins it.
+#
+# Run it with the mise tasks: `mise run icc-sandbox` (native window), `mise run icc-sandbox-web`
+# (wasm build + static page), `mise run test-icc-sandbox`, `mise run check-icc-sandbox`.
+[package]
+name = "gamut-icc-sandbox"
+version = "0.0.0"
+edition = "2024"
+# Above the workspace MSRV (1.92) because egui, eframe and egui_plot 0.37/0.38 each declare
+# `rust-version = "1.95"`; this floor is theirs. No shipped crate reaches it — the sandbox is
+# workspace-excluded and `publish = false`.
+rust-version = "1.95"
+publish = false
+description = "Interactive ICC sandbox: every gamut-icc / gamut-cmm code path, exercised on synthesized profiles."
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["gui", "oracle"]
+# The egui/eframe front end. Off, the crate is the UI-free model the panels draw — what the tests
+# exercise without compiling a windowing stack.
+gui = ["dep:eframe", "dep:egui_plot"]
+# The live conformance badge: the profile battery cross-checked against a vendored, statically
+# linked Little-CMS. Native only — lcms2-oracle builds C, so the wasm build leaves it off. It also
+# gates `tests/conformance.rs`, which therefore runs only when `oracle` is on (it is by default).
+oracle = ["dep:lcms2-oracle"]
+
+[dependencies]
+gamut-core = { path = "../../crates/gamut-core" }
+gamut-color = { path = "../../crates/gamut-color" }
+gamut-icc = { path = "../../crates/gamut-icc" }
+gamut-cmm = { path = "../../crates/gamut-cmm" }
+gamut-png = { path = "../../crates/gamut-png" }
+gamut-jpeg = { path = "../../crates/gamut-jpeg" }
+lcms2-oracle = { path = "../../tooling/lcms2-oracle", optional = true }
+eframe = { version = "0.37", optional = true, default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+egui_plot = { version = "0.38", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["console", "Document", "HtmlCanvasElement", "Window"] }
+
+[[bin]]
+name = "icc-sandbox"
+path = "src/main.rs"
+required-features = ["gui"]
+
+# The workspace's own lint table, restated because an excluded crate cannot inherit it, plus the
+# `forbid(unsafe_code)` every non-hot-path crate carries (AGENTS.md, `## Conventions`).
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace]

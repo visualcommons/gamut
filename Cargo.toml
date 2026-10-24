@@ -51,6 +51,11 @@ exclude = [
     # Nothing depends on it, and the citation lint reads only the TSVs, so no gate builds it but
     # `mise run check-spec-clauses`; it commits its own lockfile (see .gitignore).
     "tooling/spec-clauses",
+    # The interactive ICC sandbox (issue #247), the flagship `gamut-icc`/`gamut-cmm` example.
+    # Excluded so egui/eframe stay out of `cargo test --workspace --all-features` and out of the
+    # 80% coverage gate; it commits its own lockfile for the same reason `tooling/c2pa-oracle`
+    # does — no root-lockfile entry pins its external tree. Run it with `mise run icc-sandbox`.
+    "examples/icc-sandbox",
 ]
 
 [workspace.package]
