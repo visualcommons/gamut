@@ -493,6 +493,7 @@ run = "./tooling/check-agents-edges/fixtures.sh"
 # extraction never truncates a committed index.
 [tasks.gen-spec-clauses]
 description = "Regenerate references/{icc,png}/clauses.tsv from the vendored specifications"
+shell = "bash -c" # `set -o pipefail` is bash; mise runs an inline script under sh, which is dash on ubuntu-latest
 run = """
 set -euo pipefail
 cargo build --locked --release --quiet --manifest-path tooling/spec-clauses/Cargo.toml
@@ -505,6 +506,7 @@ mv references/png/clauses.tsv.new references/png/clauses.tsv
 
 [tasks.check-spec-clauses]
 description = "Verify the committed clauses.tsv indexes are exactly what tooling/spec-clauses extracts from the vendored specifications"
+shell = "bash -c" # `set -o pipefail` is bash; mise runs an inline script under sh, which is dash on ubuntu-latest
 run = """
 set -euo pipefail
 cargo build --locked --release --quiet --manifest-path tooling/spec-clauses/Cargo.toml
@@ -525,6 +527,7 @@ exit "$fail"
 # binary: without this task its tests and `-D warnings` run nowhere.
 [tasks.test-spec-clauses]
 description = "Run tooling/spec-clauses's unit tests and lint it with Clippy -D warnings"
+shell = "bash -c" # `set -o pipefail` is bash; mise runs an inline script under sh, which is dash on ubuntu-latest
 run = """
 set -euo pipefail
 cargo test --locked --manifest-path tooling/spec-clauses/Cargo.toml
