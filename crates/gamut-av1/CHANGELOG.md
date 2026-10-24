@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/visualcommons/gamut/compare/gamut-av1-v0.5.0...gamut-av1-v0.5.1) - 2026-10-24
+
+### Other
+
+- *(gamut-av1)* mutation survey of tile.rs shard 7/8, and its palette-mark survivors ([#933](https://github.com/visualcommons/gamut/pull/933))
+- *(gamut-av1)* mutation survey of tile.rs shard 6/8, and its survivors ([#932](https://github.com/visualcommons/gamut/pull/932))
+- *(gamut-av1)* mutation survey of tile.rs shard 5/8, and its survivors and TIMEOUT ([#931](https://github.com/visualcommons/gamut/pull/931))
+- *(gamut-av1)* mutation survey of tile.rs shard 4/8, and its survivors ([#930](https://github.com/visualcommons/gamut/pull/930))
+- *(gamut-av1)* mutation survey of tile.rs shard 3/8, and its survivors ([#929](https://github.com/visualcommons/gamut/pull/929))
+- *(gamut-av1)* mutation survey of tile.rs shard 2/8, and its four survivors ([#928](https://github.com/visualcommons/gamut/pull/928))
+- *(gamut-av1)* mutation survey of tile.rs shard 1/8, and its survivors and TIMEOUTs ([#927](https://github.com/visualcommons/gamut/pull/927))
+- *(gamut-av1)* mutation survey of tile.rs shard 0/8, and its seven survivors ([#926](https://github.com/visualcommons/gamut/pull/926))
+- *(gamut-av1)* mutation survey of decode/header.rs shard 0/2, and its survivor and TIMEOUT ([#925](https://github.com/visualcommons/gamut/pull/925))
+- *(gamut-av1)* mutation survey of decode/ and the filter.rs tail, and its 26 survivors ([#913](https://github.com/visualcommons/gamut/pull/913))
+- *(gamut-av1)* mutation survey of headers, transform, geom and quant, and its two loop TIMEOUTs ([#912](https://github.com/visualcommons/gamut/pull/912))
+- *(gamut-av1)* partial mutation survey and its six loop TIMEOUTs ([#909](https://github.com/visualcommons/gamut/pull/909))
+
 ## [0.5.0](https://github.com/visualcommons/gamut/compare/gamut-av1-v0.4.1...gamut-av1-v0.5.0) - 2026-10-12
 
 ### Added

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-avif-v2.0.0...gamut-avif-v3.0.0) - 2026-10-24
+
+### Added
+
+- *(gamut-metadata)* [**breaking**] wire the facade into png, webp, avif and tiff ([#866](https://github.com/visualcommons/gamut/pull/866))
+
+### Other
+
+- *(gamut-avif)* mutation survey and its three survivors ([#894](https://github.com/visualcommons/gamut/pull/894))
+
 ## [2.0.0](https://github.com/visualcommons/gamut/compare/gamut-avif-v1.1.0...gamut-avif-v2.0.0) - 2026-10-12
 
 ### Added

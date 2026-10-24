@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0](https://github.com/visualcommons/gamut/compare/gamut-isobmff-v3.0.0...gamut-isobmff-v4.0.0) - 2026-10-24
+
+### Added
+
+- *(gamut-metadata)* [**breaking**] wire the facade into png, webp, avif and tiff ([#866](https://github.com/visualcommons/gamut/pull/866))
+
 ## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-isobmff-v2.0.1...gamut-isobmff-v3.0.0) - 2026-10-12
 
 ### Added
