@@ -12,6 +12,32 @@
 
 use gamut_core::{Error, Result};
 
+/// The largest `BlackLevelRepeatDim` rows or columns value: the Adobe DNG SDK's
+/// `kMaxBlackPattern` (`dng_sdk_limits.h`), which its validator holds every raw IFD to
+/// (`dng_ifd::IsValidDNG`, "Invalid BlackLevelRepeatDim").
+///
+/// DNG 1.7.1 p. 27 gives the tag no upper bound, so this is the conformance oracle's limit, not
+/// the spec's. Without it, the pattern's `rows × cols × samples_per_pixel` cells are sized from
+/// two `SHORT`s alone — up to 65535² per plane, and 7.5 GB of `f64` from an 872-byte file
+/// (#950) — before anything in the file backs them. A repeat of 9 to 65535 rows or columns is
+/// refused; the SDK already rejects every such file as an invalid DNG, so no file the SDK reads
+/// is lost.
+pub const MAX_BLACK_REPEAT: u16 = 8;
+
+/// Checks a `BlackLevelRepeatDim` `(rows, cols)` against `1..=`[`MAX_BLACK_REPEAT`], returning
+/// it narrowed to the model's `u16`s. Shared by [`RawLevels::new`] and the decoder, which calls
+/// it before sizing the black pattern, so an encoder cannot emit a repeat its own reader refuses.
+pub(crate) fn checked_black_repeat(rows: u32, cols: u32) -> Result<(u16, u16)> {
+    let limit = u32::from(MAX_BLACK_REPEAT);
+    if rows == 0 || cols == 0 || rows > limit || cols > limit {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: BlackLevelRepeatDim dimensions must be non-zero and at most 8",
+        ));
+    }
+    Ok((rows as u16, cols as u16))
+}
+
 /// The DNG level family for one raw image: the `BlackLevel` pattern (+ optional per-column /
 /// per-row deltas), the per-plane `WhiteLevel`, and the optional `LinearizationTable`.
 ///
@@ -58,8 +84,8 @@ impl RawLevels {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `samples_per_pixel` or a repeat dimension is zero, the
-    /// vector lengths don't match, a black level is negative or not finite, or a white level is
+    /// Returns [`Error::InvalidInput`] if `samples_per_pixel` is zero, a repeat dimension is zero
+    /// or above [`MAX_BLACK_REPEAT`], the vector lengths don't match, a black level is negative or not finite, or a white level is
     /// not finite and positive.
     pub fn new(
         samples_per_pixel: u16,
@@ -74,12 +100,7 @@ impl RawLevels {
                 "DNG: levels need at least one sample plane",
             ));
         }
-        if rows == 0 || cols == 0 {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "DNG: BlackLevelRepeatDim dimensions must be non-zero",
-            ));
-        }
+        checked_black_repeat(u32::from(rows), u32::from(cols))?;
         let cells = usize::from(rows) * usize::from(cols) * usize::from(samples_per_pixel);
         if black.len() != cells {
             return Err(Error::invalid_input(
@@ -238,6 +259,23 @@ mod tests {
         assert!(RawLevels::new(1, (1, 1), vec![0.0], vec![f64::INFINITY]).is_err());
         // The valid boundary: black 0, white 1.
         assert!(RawLevels::new(1, (1, 1), vec![0.0], vec![1.0]).is_ok());
+        // A repeat past the SDK's pattern limit is refused even with a matching black length.
+        assert!(RawLevels::new(1, (9, 1), vec![0.0; 9], vec![255.0]).is_err());
+    }
+
+    #[test]
+    fn checked_black_repeat_accepts_exactly_one_to_the_sdk_limit_on_each_axis() {
+        // Rows and columns are compared separately, so each bound is pinned on each axis.
+        assert_eq!(checked_black_repeat(1, 1).ok(), Some((1, 1)));
+        assert_eq!(checked_black_repeat(8, 8).ok(), Some((8, 8)));
+        for (rows, cols) in [(0, 1), (1, 0), (9, 1), (1, 9), (14335, 65534)] {
+            let error = checked_black_repeat(rows, cols).expect_err("outside 1..=8");
+            assert_eq!(
+                error.static_message(),
+                Some("DNG: BlackLevelRepeatDim dimensions must be non-zero and at most 8"),
+                "({rows}, {cols})"
+            );
+        }
     }
 
     #[test]

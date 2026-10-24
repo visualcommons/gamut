@@ -915,9 +915,10 @@ fn a_black_level_repeat_dim_that_is_not_two_values_is_rejected() {
 
 #[test]
 fn a_zero_black_level_repeat_dimension_is_rejected() {
-    // `(rows, cols)` are counts, so zero is malformed -- and the guard that says so is
-    // `.filter(|r| *r > 0)`, which no fixture reached: relaxing it to `>= 0` accepts zero for a
-    // `u16` unconditionally, giving a repeat of (0, 0) and a cell count of nothing (#110).
+    // `(rows, cols)` are counts, so zero is malformed -- and the guard that says so (now
+    // `levels::checked_black_repeat`, whose bounds its own unit test pins) was reached by no
+    // fixture: relaxing it accepted zero, giving a repeat of (0, 0) and a cell count of nothing
+    // (#110). This case pins that the decoder routes the tag through it.
     use gamut_ifd::Value;
 
     // Rows and columns are filtered separately, so a zero in one does not exercise the other's

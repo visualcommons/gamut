@@ -1,6 +1,6 @@
 //! Robustness: the raw decoder sizes its buffers from the bytes a file holds, never from the
-//! geometry its tags declare (issue #564) or a lossless-JPEG chunk's SOF3 header declares
-//! (issue #758).
+//! geometry its tags declare (issue #564), a lossless-JPEG chunk's SOF3 header declares
+//! (issue #758), or a `BlackLevelRepeatDim` declares (issue #950).
 //!
 //! `ImageWidth`/`ImageLength` are two tag values. Patched to `60000` each over a tiny encoded raw,
 //! they used to make the decoder reserve `60000 × 60000` samples (7.2 GB) before noticing the data
@@ -130,6 +130,27 @@ fn a_tile_declaring_huge_geometry_is_rejected_without_a_geometry_sized_allocatio
         raw.set(tags::TILE_LENGTH, Value::Short(vec![60000]));
     });
     assert_truncated(&dng);
+}
+
+/// Issue #950's fuzz find, minimised: `BlackLevelRepeatDim = 14335 × 65534` over the encoder's
+/// single broadcast `BlackLevel`. The pattern is two `SHORT`s backed by nothing else, and sizing
+/// its cells from them requested 7.5 GB of `f64`; the decoder must refuse the repeat first.
+#[test]
+fn a_black_level_repeat_past_the_sdk_limit_is_rejected_without_a_pattern_sized_allocation() {
+    let dng = patched_raw_ifd(DngEncoder::new(), |raw| {
+        raw.set(
+            tags::BLACK_LEVEL_REPEAT_DIM,
+            Value::Short(vec![14335, 65534]),
+        );
+    });
+    let error = DngDecoder::new()
+        .decode(&dng)
+        .expect_err("the repeat exceeds kMaxBlackPattern");
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        error.static_message(),
+        Some("DNG: BlackLevelRepeatDim dimensions must be non-zero and at most 8")
+    );
 }
 
 /// Issue #758: a lossless-JPEG chunk's own SOF3 header declaring `65535 × 65535 × 4` samples
