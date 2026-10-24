@@ -20,6 +20,18 @@ pub(crate) enum Token {
     Match { len: u16, dist: u16 },
 }
 
+/// One step of a position's per-length nearest-distance table (zopfli's `sublen`, run-length
+/// coded): every length above the previous run's `len` -- above `MIN_MATCH - 1` for a position's
+/// first run -- up to and including `len` is reachable at `dist`, and at no nearer distance.
+///
+/// [`Matcher::walk`] emits one run per improvement of its longest match, so a position's runs
+/// ascend strictly in both fields and the last one is its longest match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Run {
+    len: u16,
+    dist: u16,
+}
+
 /// Number of hash buckets is `1 << HASH_BITS`.
 const HASH_BITS: u32 = 15;
 /// Number of hash buckets.
@@ -84,8 +96,10 @@ impl Matcher {
         self.head[h] = pos as i32;
     }
 
-    /// Finds the longest back-reference for the bytes at `pos`, walking at most `max_chain`
-    /// candidates. Returns `(len, dist)` with `len >= MIN_MATCH` and `1 <= dist <= 32768`.
+    /// Finds the back-references for the bytes at `pos`, walking at most `max_chain` candidates,
+    /// and **appends** them to `runs` as one [`Run`] per length the walk improves to: every
+    /// `len >= MIN_MATCH` and `1 <= dist <= 32768`, the last run being the longest match. A
+    /// position with no match appends nothing.
     ///
     /// Matches never extend past `limit` (`<= data.len()`), so a caller parsing one span of a
     /// larger buffer cannot emit a token that runs off the end of its span. Candidates *behind*
@@ -94,50 +108,21 @@ impl Matcher {
     /// Each surviving candidate is measured with [`common_prefix_len`], eight bytes per step. The
     /// prune in front of it is still a single byte: it rejects most candidates outright, and a
     /// wide read there would touch bytes past `best_len` for nothing.
-    fn find(&self, data: &[u8], pos: usize, max_chain: usize, limit: usize) -> Option<(u16, u16)> {
-        self.walk(data, pos, max_chain, limit, None)
-    }
-
-    /// [`find`](Self::find), and additionally fills `sublen` so that `sublen[len]` is the
-    /// **nearest** distance at which a match of at least `len` bytes exists, for every `len` from
-    /// `MIN_MATCH` up to the returned longest length; every other entry is `0`.
     ///
-    /// The table is what lets the optimal parse price a short match at its own cheapest distance
-    /// instead of at the distance of the longest one (zopfli's `sublen`). The chain is walked
-    /// nearest-first and a candidate only records the lengths it is the first to reach, so the
-    /// first candidate reaching a length is the nearest that does.
-    ///
-    /// The table is caller-owned so a parse can allocate it once and reuse it at every position.
-    fn find_sublen(
-        &self,
-        data: &[u8],
-        pos: usize,
-        max_chain: usize,
-        limit: usize,
-        sublen: &mut [u16; MAX_MATCH + 1],
-    ) -> Option<(u16, u16)> {
-        sublen.fill(0);
-        self.walk(data, pos, max_chain, limit, Some(sublen))
-    }
-
-    /// The chain walk shared by [`find`](Self::find) and [`find_sublen`](Self::find_sublen): the
-    /// longest match, plus the per-length nearest distances when a table is supplied. The table is
-    /// optional so the lazy parser, which needs only the longest match, pays nothing for it.
-    fn walk(
-        &self,
-        data: &[u8],
-        pos: usize,
-        max_chain: usize,
-        limit: usize,
-        mut sublen: Option<&mut [u16; MAX_MATCH + 1]>,
-    ) -> Option<(u16, u16)> {
+    /// The runs give, for every length from `MIN_MATCH` up to the longest, the **nearest** distance
+    /// at which a match of at least that length exists, which is what lets the optimal parse price
+    /// a short match at its own cheapest distance instead of at the distance of the longest one
+    /// (zopfli's `sublen`). The chain is walked nearest-first and a candidate only records the
+    /// lengths it is the first to reach, so the first candidate reaching a length is the nearest
+    /// that does. They are appended rather than written to a fresh table so that [`MatchCache`] can
+    /// store every position's runs end to end.
+    fn walk(&self, data: &[u8], pos: usize, max_chain: usize, limit: usize, runs: &mut Vec<Run>) {
         if pos + MIN_MATCH > limit {
-            return None;
+            return;
         }
         let max_len = (limit - pos).min(MAX_MATCH);
         let lowest = pos.saturating_sub(WINDOW); // candidates must be >= this for dist <= window
         let mut best_len = MIN_MATCH - 1; // a real match must strictly exceed this
-        let mut best_dist = 0usize;
         let mut cand = self.head[Self::hash([data[pos], data[pos + 1], data[pos + 2]])];
         let mut chain = 0usize;
         while cand >= 0 {
@@ -156,11 +141,11 @@ impl Matcher {
                     let dist = pos - c;
                     // Lengths up to `best_len` were reached by a nearer candidate already; this one
                     // is the first -- hence the nearest -- to reach `best_len + 1..=len`.
-                    if let Some(table) = sublen.as_deref_mut() {
-                        table[best_len + 1..=len].fill(dist as u16);
-                    }
+                    runs.push(Run {
+                        len: len as u16,
+                        dist: dist as u16,
+                    });
                     best_len = len;
-                    best_dist = dist;
                     if len >= max_len {
                         break; // can't do better than the maximum
                     }
@@ -171,11 +156,6 @@ impl Matcher {
                 break;
             }
             cand = self.prev[c & WMASK];
-        }
-        if best_len >= MIN_MATCH {
-            Some((best_len as u16, best_dist as u16))
-        } else {
-            None
         }
     }
 }
@@ -209,6 +189,159 @@ fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
         .count()
 }
 
+/// Where a parse of one span gets each position's match [`Run`]s: searched live, or read back from
+/// a [`MatchCache`] that searched them once. Both return the same runs for the same position.
+///
+/// A parse asks for positions in non-decreasing order, starting at or after the span's start; it
+/// may ask for one position more than once.
+trait Matches {
+    /// The runs of the position `pos` (an absolute index into the data), shortest first.
+    fn runs(&mut self, pos: usize) -> &[Run];
+}
+
+/// Live search over `data[start..end]`: a [`Matcher`] primed with the window before `start`, which
+/// inserts every position below the one asked for before walking its chain.
+///
+/// Inserting on demand is what makes the answer independent of the order of questions: whichever
+/// positions a parse skips (the bytes a match covers), the chain at `pos` always holds exactly the
+/// positions in the window before it -- the same chain a [`MatchCache`] walks once.
+struct Search<'a> {
+    data: &'a [u8],
+    end: usize,
+    max_chain: usize,
+    matcher: Matcher,
+    /// Every position below this one is in the matcher.
+    inserted: usize,
+    /// The last walk's runs, reused across positions.
+    runs: Vec<Run>,
+}
+
+impl<'a> Search<'a> {
+    fn new(data: &'a [u8], start: usize, end: usize, max_chain: usize) -> Self {
+        let mut matcher = Matcher::new();
+        matcher.prime(data, start);
+        Self {
+            data,
+            end,
+            max_chain,
+            matcher,
+            inserted: start,
+            runs: Vec::new(),
+        }
+    }
+}
+
+impl Matches for Search<'_> {
+    fn runs(&mut self, pos: usize) -> &[Run] {
+        for p in self.inserted..pos {
+            self.matcher.insert(self.data, p);
+        }
+        self.inserted = pos;
+        self.runs.clear();
+        self.matcher
+            .walk(self.data, pos, self.max_chain, self.end, &mut self.runs);
+        &self.runs
+    }
+}
+
+/// The runs of a span's leading positions, searched once and stored end to end.
+///
+/// The optimal parse asks the same question at every position in every pass -- only the cost model
+/// changes between passes, never the match finder's answer -- so the span is searched once here
+/// and every pass reads the answers back. That replaces `1 + iterations` chain walks per position
+/// (the lazy seed, then one per pass) with one.
+///
+/// A cached position costs `2 + 4 * r` bytes for its `r` runs. A position can have up to
+/// `MAX_MATCH - MIN_MATCH + 1` runs, so the cache holds only as many leading positions as a
+/// caller-set run budget allows, and a parse searches the rest of the span live.
+struct MatchCache<'a> {
+    data: &'a [u8],
+    start: usize,
+    end: usize,
+    max_chain: usize,
+    /// `counts[i]` is the number of runs of position `start + i`, for each cached position.
+    counts: Vec<u16>,
+    runs: Vec<Run>,
+}
+
+impl<'a> MatchCache<'a> {
+    /// Searches the positions of `data[start..end]` in order, caching each one whose runs still
+    /// fit in `budget` runs in all, and stopping at the first that does not.
+    fn build(data: &'a [u8], start: usize, end: usize, max_chain: usize, budget: usize) -> Self {
+        let mut search = Search::new(data, start, end, max_chain);
+        let mut counts = Vec::new();
+        let mut runs = Vec::new();
+        for pos in start..end {
+            let found = search.runs(pos);
+            if runs.len() + found.len() > budget {
+                break;
+            }
+            runs.extend_from_slice(found);
+            // A walk appends one run per strictly longer match, so at most 256 runs.
+            counts.push(found.len() as u16);
+        }
+        // Growth by doubling can leave up to as much capacity again unused; give it back before
+        // the passes allocate their own tables, so the budget bounds what the parse holds.
+        counts.shrink_to_fit();
+        runs.shrink_to_fit();
+        Self {
+            data,
+            start,
+            end,
+            max_chain,
+            counts,
+            runs,
+        }
+    }
+
+    /// A source for one parse of the span, from its start.
+    fn reader(&self) -> CacheReader<'_, 'a> {
+        CacheReader {
+            cache: self,
+            next: 0,
+            offset: 0,
+            search: None,
+        }
+    }
+}
+
+/// One parse's forward cursor over a [`MatchCache`], searching live past its cached positions.
+struct CacheReader<'c, 'a> {
+    cache: &'c MatchCache<'a>,
+    /// The span-relative position whose runs begin at `offset`.
+    next: usize,
+    offset: usize,
+    /// The live search for the uncached positions, started on the first one asked for.
+    search: Option<Search<'a>>,
+}
+
+impl Matches for CacheReader<'_, '_> {
+    fn runs(&mut self, pos: usize) -> &[Run] {
+        let cache = self.cache;
+        let i = pos - cache.start;
+        let Some(&count) = cache.counts.get(i) else {
+            return self
+                .search
+                .get_or_insert_with(|| {
+                    Search::new(cache.data, cache.start, cache.end, cache.max_chain)
+                })
+                .runs(pos);
+        };
+        // Skip the runs of every position passed over since the last question.
+        self.offset += cache.counts[self.next..i]
+            .iter()
+            .map(|&c| usize::from(c))
+            .sum::<usize>();
+        self.next = i;
+        &cache.runs[self.offset..][..usize::from(count)]
+    }
+}
+
+/// The longest match among `runs` as `(len, dist)`: the last run, if any.
+fn longest(runs: &[Run]) -> Option<(u16, u16)> {
+    runs.last().map(|run| (run.len, run.dist))
+}
+
 /// Parses `data` into an LZ77 token stream, searching up to `max_chain` candidates per position.
 ///
 /// With `lazy` set, the parser uses lazy matching (RFC 1951 §4): after finding a match it checks
@@ -216,21 +349,32 @@ fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
 /// literal. This finds better parses than pure greedy at a small time cost. A larger `max_chain`
 /// finds more/longer matches, also at a time cost.
 pub(crate) fn parse(data: &[u8], max_chain: usize, lazy: bool) -> Vec<Token> {
-    parse_range(data, 0, data.len(), max_chain, lazy)
+    let end = data.len();
+    parse_range(
+        data,
+        0,
+        end,
+        lazy,
+        &mut Search::new(data, 0, end, max_chain),
+    )
 }
 
 /// Parses `data[start..end]` the same way [`parse`] does, with matches allowed to reference the
-/// history before `start` but never to extend past `end`.
-fn parse_range(data: &[u8], start: usize, end: usize, max_chain: usize, lazy: bool) -> Vec<Token> {
+/// history before `start` but never to extend past `end`, taking each position's matches from
+/// `matches`.
+fn parse_range(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    lazy: bool,
+    matches: &mut dyn Matches,
+) -> Vec<Token> {
     let mut tokens = Vec::new();
-    let mut matcher = Matcher::new();
-    matcher.prime(data, start);
     let mut pos = start;
     while pos < end {
-        let current = matcher.find(data, pos, max_chain, end);
-        matcher.insert(data, pos); // pos becomes a candidate for subsequent positions
+        let current = longest(matches.runs(pos));
         // A match covers at least `MIN_MATCH` bytes, so emitting one always advances the cursor.
-        // Requiring that here rather than trusting `find` keeps termination a property of this
+        // Requiring that here rather than trusting the walk keeps termination a property of this
         // loop: a shorter run is not a codeable match anyway, and falls through to a literal.
         let Some((len, dist)) = current.filter(|&(len, _)| usize::from(len) >= MIN_MATCH) else {
             tokens.push(Token::Literal(data[pos]));
@@ -238,11 +382,12 @@ fn parse_range(data: &[u8], start: usize, end: usize, max_chain: usize, lazy: bo
             continue;
         };
         // Lazy matching: if the next position begins a strictly longer match, defer this one.
-        // No length or bounds guard is needed in front of the lookahead: `find` is already bounded
-        // by `end` (and yields nothing once fewer than `MIN_MATCH` bytes remain), and a maximal
-        // match cannot be beaten, so `next_len > len` rejects that case on its own.
+        // No length or bounds guard is needed in front of the lookahead: a match at `pos` leaves
+        // at least `MIN_MATCH - 1` bytes after `pos + 1` inside the span, the walk is bounded by
+        // `end`, and a maximal match cannot be beaten, so `next_len > len` rejects that case on
+        // its own.
         if lazy
-            && let Some((next_len, _)) = matcher.find(data, pos + 1, max_chain, end)
+            && let Some((next_len, _)) = longest(matches.runs(pos + 1))
             && next_len > len
         {
             tokens.push(Token::Literal(data[pos]));
@@ -250,13 +395,7 @@ fn parse_range(data: &[u8], start: usize, end: usize, max_chain: usize, lazy: bo
             continue;
         }
         tokens.push(Token::Match { len, dist });
-        // `pos` is already inserted; insert the rest of the covered span so future matches can
-        // reference inside it.
-        let covered = pos + len as usize;
-        for p in (pos + 1)..covered {
-            matcher.insert(data, p);
-        }
-        pos = covered;
+        pos += len as usize;
     }
     tokens
 }
@@ -287,25 +426,51 @@ pub(crate) fn parse_optimal(
     // and the spans exactly tile the input.
     for chunk in data.chunks(span) {
         let end = start + chunk.len();
-        tokens.append(&mut optimal_span(data, start, end, max_chain, iterations));
+        let budget = run_budget(chunk.len());
+        tokens.append(&mut optimal_span(
+            data, start, end, max_chain, iterations, budget,
+        ));
         start = end;
     }
     tokens
 }
 
+/// The [`MatchCache`] run budget, as runs per span byte. A cached position costs 2 bytes plus 4 per
+/// run, so while the passes run the cache holds at most `2 + 4 * 2 = 10` bytes per span byte --
+/// below the 12 the shortest-path table itself holds -- where an unbounded one could reach 1 KiB.
+/// (Building it may briefly hold twice that, before any pass has allocated its table.)
+///
+/// Two covers the whole span on most material: a noisy synthetic photograph, gradients, flat
+/// fills, periodic data and short-period prose measured 0.6 to 1.1 runs per byte (#959).
+/// Low-entropy text-like inputs run higher (a six-letter skewed alphabet near 4, a Fibonacci word
+/// near 6), and there only the span's leading positions are cached; the rest are searched live in
+/// every pass, as before.
+const RUNS_PER_BYTE: usize = 2;
+
+/// The [`MatchCache`] budget for a span of `len` bytes.
+fn run_budget(len: usize) -> usize {
+    len * RUNS_PER_BYTE
+}
+
 /// Runs the iterated cost-model refinement over the single span `data[start..end]`.
+///
+/// The span's matches are searched once into a [`MatchCache`] of at most `budget` runs that the
+/// lazy seed and every pass read back, searching live wherever it stops. Cached or live, a
+/// position's runs are the same, so the budget moves time and memory, never the tokens.
 fn optimal_span(
     data: &[u8],
     start: usize,
     end: usize,
     max_chain: usize,
     iterations: u32,
+    budget: usize,
 ) -> Vec<Token> {
+    let cache = MatchCache::build(data, start, end, max_chain, budget);
     // Seed the cost model from a lazy parse of this span.
-    let mut tokens = parse_range(data, start, end, max_chain, true);
+    let mut tokens = parse_range(data, start, end, true, &mut cache.reader());
     for _ in 0..iterations {
         let (lit_cost, dist_cost) = costs(&tokens);
-        let next = parse_dp(data, start, end, max_chain, &lit_cost, &dist_cost);
+        let next = parse_dp(data, start, end, &mut cache.reader(), &lit_cost, &dist_cost);
         if next == tokens {
             break; // converged
         }
@@ -340,12 +505,13 @@ fn costs(tokens: &[Token]) -> (Vec<u16>, Vec<u16>) {
 }
 
 /// One shortest-path pass over `data[start..end]`: finds the parse minimising total cost under
-/// `lit_cost`/`dist_cost`. Matches may reach back before `start` but never past `end`.
+/// `lit_cost`/`dist_cost`. Matches, taken from `matches`, may reach back before `start` but never
+/// past `end`.
 fn parse_dp(
     data: &[u8],
     start: usize,
     end: usize,
-    max_chain: usize,
+    matches: &mut dyn Matches,
     lit_cost: &[u16],
     dist_cost: &[u16],
 ) -> Vec<Token> {
@@ -356,43 +522,29 @@ fn parse_dp(
     let mut blen = vec![0u16; n + 1];
     let mut bdist = vec![0u16; n + 1];
     f[0] = 0;
-    let mut matcher = Matcher::new();
-    matcher.prime(data, start);
-    // The per-length nearest-distance table, allocated once and refilled at every position.
-    let mut sublen = [0u16; MAX_MATCH + 1];
+    // Each length's own code cost (symbol plus extra bits), derived once per pass rather than at
+    // every relaxation; the entries below `MIN_MATCH` are never read.
+    let mut len_cost = [0u64; MAX_MATCH + 1];
+    for (len, cost) in len_cost.iter_mut().enumerate().skip(MIN_MATCH) {
+        let (lsym, lbits, _) = symbols::length_code(len as u16);
+        *cost = u64::from(lit_cost[lsym as usize]) + u64::from(lbits);
+    }
     for i in 0..n {
-        let fi = f[i];
         // A literal always advances one byte.
-        let lit = fi + u64::from(lit_cost[usize::from(data[start + i])]);
+        let lit = f[i] + u64::from(lit_cost[usize::from(data[start + i])]);
         if lit < f[i + 1] {
             f[i + 1] = lit;
             blen[i + 1] = 0;
             bdist[i + 1] = 0;
         }
-        let found = matcher.find_sublen(data, start + i, max_chain, end, &mut sublen);
-        matcher.insert(data, start + i);
-        if let Some((max_len, _)) = found {
-            // Every length from MIN_MATCH up to the longest match is reachable, each at its own
-            // nearest distance: a short match need not pay the distance code of the longest one.
-            // The distance is non-decreasing in the length and changes only a few times over the
-            // range, so its cost is re-derived only when it does.
-            let mut dist = 0u16;
-            let mut dcost = 0u64;
-            for len in MIN_MATCH..=max_len as usize {
-                if sublen[len] != dist {
-                    dist = sublen[len];
-                    let (dsym, dbits, _) = symbols::distance_code(dist);
-                    dcost = u64::from(dist_cost[dsym as usize]) + u64::from(dbits);
-                }
-                let (lsym, lbits, _) = symbols::length_code(len as u16);
-                let cost = fi + u64::from(lit_cost[lsym as usize]) + u64::from(lbits) + dcost;
-                if cost < f[i + len] {
-                    f[i + len] = cost;
-                    blen[i + len] = len as u16;
-                    bdist[i + len] = dist;
-                }
-            }
-        }
+        relax_matches(
+            &mut f[i..],
+            &mut blen[i..],
+            &mut bdist[i..],
+            matches.runs(start + i),
+            &len_cost,
+            dist_cost,
+        );
     }
     // Backtrack from the end to recover the token sequence. `blen[i] == 0` marks a literal edge,
     // which covers one byte; any other value is the match length that reached `i`.
@@ -418,6 +570,37 @@ fn parse_dp(
     }
     tokens.reverse();
     tokens
+}
+
+/// Relaxes every match edge out of one position of the shortest-path table. The slices start at
+/// that position, so `f[0]` is its cost and `f[len]` the cost of the position `len` bytes on.
+///
+/// Every length from `MIN_MATCH` up to the longest match is reachable, each at its own nearest
+/// distance: a short match need not pay the distance code of the longest one. The distance is
+/// constant over each [`Run`], so its cost is derived once per run.
+fn relax_matches(
+    f: &mut [u64],
+    blen: &mut [u16],
+    bdist: &mut [u16],
+    runs: &[Run],
+    len_cost: &[u64; MAX_MATCH + 1],
+    dist_cost: &[u16],
+) {
+    let mut first = MIN_MATCH;
+    for run in runs {
+        let (dsym, dbits, _) = symbols::distance_code(run.dist);
+        let base = f[0] + u64::from(dist_cost[dsym as usize]) + u64::from(dbits);
+        let last = usize::from(run.len);
+        for len in first..=last {
+            let cost = base + len_cost[len];
+            if cost < f[len] {
+                f[len] = cost;
+                blen[len] = len as u16;
+                bdist[len] = run.dist;
+            }
+        }
+        first = last + 1;
+    }
 }
 
 #[cfg(test)]
@@ -471,28 +654,139 @@ mod tests {
 
     /// Two candidates for the final `abcde`: the nearer (`abcX`, distance 7) reaches length 3, the
     /// farther (`abcde`, distance 15) reaches 5. Each length must be recorded at the nearest
-    /// distance that achieves it -- 3 at 7, and 4 and 5 at 15 -- with the longest match unchanged
-    /// and every length past it left at zero.
+    /// distance that achieves it -- 3 at 7, and 4 and 5 at 15 -- which is two runs, the second
+    /// ending at the longest match. The runs are appended after whatever the buffer held.
     #[test]
-    fn find_sublen_records_each_length_at_its_nearest_distance() {
+    fn walk_records_each_length_at_its_nearest_distance() {
         let data = b"abcdeQQQabcXQQQabcde";
         let pos = 15;
         let mut matcher = Matcher::new();
         matcher.prime(data, pos);
-        let mut sublen = [0xFFFFu16; MAX_MATCH + 1];
-        let found = matcher.find_sublen(data, pos, 128, data.len(), &mut sublen);
-        assert_eq!(found, Some((5, 15)));
-        assert_eq!(found, matcher.find(data, pos, 128, data.len()));
+        let earlier = Run { len: 9, dist: 9 };
+        let mut runs = vec![earlier];
+        matcher.walk(data, pos, 128, data.len(), &mut runs);
         assert_eq!(
-            sublen[MIN_MATCH], 7,
-            "length 3 is reachable at the nearer candidate"
+            runs,
+            [earlier, Run { len: 3, dist: 7 }, Run { len: 5, dist: 15 }]
         );
-        assert_eq!(sublen[4], 15);
-        assert_eq!(sublen[5], 15);
-        assert!(
-            sublen[..MIN_MATCH].iter().all(|&d| d == 0) && sublen[6..].iter().all(|&d| d == 0),
-            "lengths with no match are zero"
+    }
+
+    /// Low-entropy input with several runs at many positions, so a mis-skipped offset or a
+    /// mis-counted budget lands on a different position's runs.
+    fn skewed(len: usize) -> Vec<u8> {
+        let mut seed = 0x9E37_79B9_u32;
+        (0..len)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                b"aaaaaabbcd"[(seed >> 28) as usize % 10]
+            })
+            .collect()
+    }
+
+    /// The cache is the live search, stored: read back in the order a lazy parse asks -- skipping
+    /// the positions a match covers and asking for one position twice -- every position's runs are
+    /// the ones a fresh live search gives it, both inside the cached prefix and past it.
+    #[test]
+    fn a_cache_reader_answers_as_the_live_search_does() {
+        let data = skewed(3000);
+        let (start, end) = (500, 2600);
+        let full = MatchCache::build(&data, start, end, 64, usize::MAX);
+        assert_eq!(
+            full.counts.len(),
+            end - start,
+            "an unlimited budget caches the span"
         );
+        let partial = MatchCache::build(&data, start, end, 64, full.runs.len() / 2);
+        assert!((1..end - start).contains(&partial.counts.len()));
+        for cache in [&full, &partial] {
+            let mut reader = cache.reader();
+            let mut live = Search::new(&data, start, end, 64);
+            for pos in (start..end).step_by(3) {
+                for again in [pos, pos, pos + 1] {
+                    assert_eq!(reader.runs(again), live.runs(again), "position {again}");
+                }
+            }
+        }
+    }
+
+    /// The budget is a bound on the runs held, not a target: a budget of exactly the span's run
+    /// total caches every position, and one run fewer stops at the last position with runs (the
+    /// span's final two cannot start a match), keeping every run of the positions before it.
+    #[test]
+    fn a_match_cache_stops_at_the_first_position_past_its_budget() {
+        let data = skewed(1200);
+        let (start, end) = (100, 1100);
+        let total = MatchCache::build(&data, start, end, 64, usize::MAX)
+            .runs
+            .len();
+        let exact = MatchCache::build(&data, start, end, 64, total);
+        assert_eq!((exact.counts.len(), exact.runs.len()), (end - start, total));
+        let last = exact.counts.iter().rposition(|&c| c > 0).unwrap();
+        assert_eq!(
+            last,
+            end - start - MIN_MATCH,
+            "the last position that can start a match"
+        );
+        let short = MatchCache::build(&data, start, end, 64, total - 1);
+        assert_eq!(short.counts.len(), last);
+        assert_eq!(short.runs.len(), total - usize::from(exact.counts[last]));
+        let summed: usize = short.counts.iter().map(|&c| usize::from(c)).sum();
+        assert_eq!(summed, short.runs.len(), "counts describe the runs held");
+    }
+
+    /// The budget moves time and memory, never the tokens: a cache that stops at the first match
+    /// (budget 0), one that stops partway (one run per byte, where this input has about four) and
+    /// a whole one parse a span identically.
+    #[test]
+    fn the_cache_budget_never_changes_the_parse() {
+        let data = skewed(WINDOW + 4000);
+        let (start, end) = (3000, data.len());
+        let whole = optimal_span(&data, start, end, 64, 3, usize::MAX);
+        for budget in [0, end - start] {
+            assert_eq!(
+                optimal_span(&data, start, end, 64, 3, budget),
+                whole,
+                "budget {budget}"
+            );
+        }
+        let mut covered = 0;
+        for token in &whole {
+            covered += match token {
+                Token::Literal(_) => 1,
+                Token::Match { len, .. } => usize::from(*len),
+            };
+        }
+        assert_eq!(covered, end - start);
+    }
+
+    /// The per-span budget is the documented two runs per byte, the figure the cache's memory
+    /// bound (`2 + 4 * 2` bytes per span byte) is stated for.
+    #[test]
+    fn the_run_budget_is_two_runs_per_span_byte() {
+        assert_eq!(run_budget(0), 0);
+        assert_eq!(run_budget(32_768), 65_536);
+    }
+
+    /// Two runs out of a position whose cost is 0: lengths 3 at distance 7 (distance code 5, one
+    /// extra bit) and 4..=5 at distance 15 (code 7, two extra bits), with the far code priced
+    /// cheaper than the near one. Each length must still be relaxed at its own run's distance
+    /// only -- length 3 at 7 although 15 would be cheaper, since no match of length 3 at 15 is
+    /// on offer -- and nothing below `MIN_MATCH` or past the longest match may be touched.
+    #[test]
+    fn relax_matches_prices_each_length_at_its_own_run() {
+        let mut f = [0, 999, 999, 999, 999, 999, 999];
+        let mut blen = [0u16; 7];
+        let mut bdist = [0u16; 7];
+        let mut len_cost = [0u64; MAX_MATCH + 1];
+        len_cost[MIN_MATCH..=5].copy_from_slice(&[100, 200, 300]);
+        let mut dist_cost = [0u16; 30];
+        dist_cost[5] = 20;
+        dist_cost[7] = 1;
+        let runs = [Run { len: 3, dist: 7 }, Run { len: 5, dist: 15 }];
+        relax_matches(&mut f, &mut blen, &mut bdist, &runs, &len_cost, &dist_cost);
+        assert_eq!(f, [0, 999, 999, 100 + 21, 200 + 3, 300 + 3, 999]);
+        assert_eq!(blen, [0, 0, 0, 3, 4, 5, 0]);
+        assert_eq!(bdist, [0, 0, 0, 7, 15, 15, 0]);
     }
 
     /// With far distance codes priced high and near ones low, the shortest path through the second
@@ -514,7 +808,8 @@ mod tests {
         let lit_cost = vec![8u16; 286];
         let mut dist_cost = vec![15u16; 30];
         dist_cost[..4].fill(1);
-        let tokens = parse_dp(&data, 0, data.len(), 128, &lit_cost, &dist_cost);
+        let mut search = Search::new(&data, 0, data.len(), 128);
+        let tokens = parse_dp(&data, 0, data.len(), &mut search, &lit_cost, &dist_cost);
         let leading = far; // "abcde", the filler and the first "abc" are all literals
         assert!(
             tokens[..leading]
