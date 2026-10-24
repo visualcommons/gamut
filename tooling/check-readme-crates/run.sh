@@ -806,7 +806,9 @@ if [ -n "$cite_claims" ]; then
     cite_errors="$(
         printf '%s\n' "$cite_claims" | while IFS="$(printf '\t')" read -r subject names; do
             for cited in $names; do
-                if ! printf '%s\n' "$workspace_crates" | grep -qxF -- "$cited"; then
+                # A here-string, not a pipe: `grep -q` exits at its first match, and under
+                # `pipefail` the writer's SIGPIPE would refute a crate that exists.
+                if ! grep -qxF -- "$cited" <<<"$workspace_crates"; then
                     echo "  $subject names \`$cited\`, which is not a workspace crate"
                 fi
             done
@@ -971,7 +973,9 @@ for usage_file in "${usage_files[@]}"; do
         echo "$pins"
         echo "  Write the snippet as \`cargo add gamut -F <features>\`, which resolves the newest release."
     fi
-    if ! printf '%s\n' "$usage_scan" | grep -qx ADD; then
+    # A here-string, not a pipe: `grep -q` exits at its first match, and under `pipefail` the
+    # writer's resulting SIGPIPE would fail the pipeline and refute a snippet that is there.
+    if ! grep -qx ADD <<<"$usage_scan"; then
         fail=1
         echo "check-readme-crates: $usage_file has no \`cargo add gamut ...\` line in a code block,"
         echo "  so nothing tells a reader how to depend on the umbrella. Write one in a fence."
