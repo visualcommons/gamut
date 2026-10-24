@@ -794,7 +794,14 @@ span is 20.3, 20.7 and 20.3 bytes across the three rows — up to 22 allocated, 
 because the two `u16` rows are zero-initialised and pages they never write are never faulted in,
 and because the match cache is filled only as far as the span's matches reach its cap. Before the
 match cache the same rows measured 12.3, 11.0 and 11.1 bytes (no bound: 46.5, 177.2 and
-701.8 MiB), so the cache costs about nine resident bytes per byte of span. The host these runs
+701.8 MiB), so the cache costs about nine resident bytes per byte of span. That is more than
+`gamut-deflate`'s "about 16 to 19" bytes per byte of span suggests, and the two are not in
+conflict. A cached position costs `2 + 4r` bytes for its `r` runs, and that range is the 12-byte
+table plus the cache at the 0.6 to 1.1 runs per byte #959 counted on its own synthetic corpus (a
+noisy synthetic photograph, gradients, flat fills, periodic data). Nine bytes means `photo_rgb`'s
+*filtered* stream carries about 1.6 to 1.9 runs per byte. That run count is inferred from the
+resident set, not counted. It is under the cache's cap of two runs per byte, consistent with the
+cache covering the whole span, and inside the 22-byte bound. The host these runs
 shared was under load (load averages 38–71 on 16 threads). A single stream's peak does not depend
 on scheduling — two runs at 1024 differed by 0.2% at the 1 MiB span (32.3 / 32.3 MiB) and 0.2%
 with no bound (72.8 / 73.0 MiB) — so the table is read as measured. Time is what load does move,
