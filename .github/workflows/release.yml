@@ -1,7 +1,17 @@
 name: Release
 
+# Gated on green CI (issue #953): this workflow starts only when a CI run on master
+# completes, and each job below runs only when that run concluded `success` and was a
+# `push` to master in this repository (the `branches` filter matches a run's head branch
+# by name alone, so a fork's PR from a branch called `master` would otherwise pass it).
+# A red, cancelled or skipped CI run — or CI being disabled — publishes nothing.
+#
+# A `workflow_run` workflow always runs the default branch's copy of this file, so
+# `github.ref` is `refs/heads/master` and the concurrency group below stays one queue.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [master]
 
 permissions:
@@ -9,7 +19,7 @@ permissions:
   pull-requests: write
   id-token: write # OIDC: lets the release job mint a short-lived crates.io token (Trusted Publishing)
 
-# Run after CI so we never publish a red build. Also avoid overlapping releases.
+# Avoid overlapping releases.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -18,16 +28,30 @@ jobs:
   # Opens/updates the "release" PR that bumps versions and updates changelogs.
   release-pr:
     name: Release PR
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
+          # The commit CI just passed, not master's current tip, which may be newer
+          # and not yet green.
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0 # release-plz needs full history for changelogs
           # The lockfile step below pushes with the credentials checkout persists, so it
           # uses the same token as release-plz: a push made with RELEASE_PLZ_TOKEN
           # triggers CI on the release PR's new head, one made with the default token
           # leaves that head without checks.
           token: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+      # Checking out a SHA leaves HEAD detached; release-plz reads the current branch
+      # name, so name it after the branch CI ran on, still at the green commit.
+      - name: Attach the green commit to its branch name
+        env:
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: git switch -C "${HEAD_BRANCH}"
       - uses: dtolnay/rust-toolchain@stable
       - name: release-plz (release-pr)
         id: release-pr
@@ -87,14 +111,26 @@ jobs:
           git push origin "HEAD:refs/heads/${HEAD_BRANCH}"
 
   # Publishes crates (in dependency order) + tags/releases once the release PR is
-  # merged. Safe to run on every push: it only acts when an unpublished version exists.
+  # merged. Safe to run on every green master CI run: it only acts when an unpublished
+  # version exists.
   release:
     name: Release
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
+          # Publish exactly the commit CI passed (see the release-pr job).
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
+      - name: Attach the green commit to its branch name
+        env:
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: git switch -C "${HEAD_BRANCH}"
       - uses: dtolnay/rust-toolchain@stable
       # Exchanges the workflow's OIDC identity for a short-lived crates.io token.
       # Requires Trusted Publishing to be configured on each crate at
@@ -103,9 +139,8 @@ jobs:
       # "already exist" is a real gate for a crate that has never been published: OIDC
       # cannot mint a token for a name crates.io does not know, so the first version of
       # a new crate needs one manual `cargo publish` with an owner-scoped token, after
-      # which Trusted Publishing takes over. As of this commit that applies to
-      # gamut-cmm, gamut-deflate, gamut-dng, gamut-jpeg, gamut-jxl-sys and gamut-png —
-      # none of which has a `<crate>-v<version>` tag yet.
+      # which Trusted Publishing takes over. As of 2026-10-24 every crate under `crates/`
+      # exists on crates.io, so this gate applies only to a crate added after that.
       - uses: rust-lang/crates-io-auth-action@v1.0.4
         id: auth
       - name: release-plz (release)
