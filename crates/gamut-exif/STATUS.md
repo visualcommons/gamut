@@ -141,7 +141,8 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
 
 ## Intentionally deferred (additive under the `#[non_exhaustive]` surface)
 
-- **Per-vendor MakerNote tag decoding** (Canon/Nikon/Sony/…; the per-vendor sub-issues of #418).
+- **Per-vendor MakerNote tag decoding** (Canon/Nikon/Sony/…; the per-vendor sub-issues of #418,
+  #976–#988, plus #989 for the note Adobe DNG Converter moves into `DNGPrivateData`).
   The crate preserves the block verbatim — and, since issue #263, pins its byte range at the
   source offset on rewrites so vendor-absolute internal offsets stay valid — detects the vendor
   from `Make`, and since P14 resolves the block's dispatch layout, but decodes no vendor tag

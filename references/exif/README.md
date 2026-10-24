@@ -93,9 +93,9 @@ Where this reader deliberately differs from exiv2:
   Samsung.
 
 Notes that exiv2 does not cover, Leica's being the one the sample corpus holds, have no
-dialect yet. Each one is staked here by its vendor's sub-issue of #418 before it is implemented.
-A Canon note that Adobe DNG Converter moved into `DNGPrivateData` (`Adobe\0MakN`) is outside
-the `0x927C` tag. That is its own sub-issue too.
+dialect yet. Each one is staked here by its vendor's sub-issue of #418 before it is implemented
+(Leica: #978). A Canon note that Adobe DNG Converter moved into `DNGPrivateData` (`Adobe\0MakN`)
+is outside the `0x927C` tag. That is its own sub-issue, #989.
 
 ## Conformance
 
