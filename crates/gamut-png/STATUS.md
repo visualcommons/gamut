@@ -692,7 +692,8 @@ candidates gets proportionally less. The effort-ladder tables above were measure
 before this change and are left as they were taken.
 
 **What it costs is memory.** Serially, one candidate's filtered image and optimal-parse buffers
-(12 bytes per byte of span, see [below](#the-optimal-parse-span-measured-where-it-is-live)) were
+(up to 22 bytes per byte of span since #959 — 12 for the shortest-path table, up to 10 for its
+match cache — see [below](#the-optimal-parse-span-measured-where-it-is-live)) were
 alive at a time. Concurrently, all of them are, and nothing caps how many: `available_parallelism` is
 not consulted, because the output must not depend on the machine. Peak resident set for one
 `BruteForce` encode per process (`/usr/bin/time -v`, release build, `photo_rgb` at the given side,
@@ -772,9 +773,12 @@ real one:
 
 **What an unbounded span costs is memory, and it has no bound of its own.** `gamut-deflate`'s
 shortest-path parse allocates three span-length vectors per refinement pass — the cost row
-(`u64`), the chosen length and the chosen distance (`u16` each) — for 12 bytes per byte of span,
-so the span is the only thing bounding this encoder's working set. Peak resident set for one
-encode per process (`/usr/bin/time -v`, square RGB photograph, refinement budget 1):
+(`u64`), the chosen length and the chosen distance (`u16` each) — for 12 bytes per byte of span.
+Since #959 it also holds the span's match cache, capped at 10 bytes per byte of span, so the
+parse's working set is at most 22 bytes per byte of span, and the span is still the only thing
+bounding it. Peak resident set for one encode per process (`/usr/bin/time -v`, square RGB
+photograph, refinement budget 1), measured before #959 and so without the match cache
+(re-measuring it is #970):
 
 | image | filtered stream | 1 MiB | 8 MiB | 16 MiB | no bound |
 | --- | ---: | ---: | ---: | ---: | ---: |
