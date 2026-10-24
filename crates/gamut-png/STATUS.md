@@ -776,20 +776,28 @@ shortest-path parse allocates three span-length vectors per refinement pass — 
 (`u64`), the chosen length and the chosen distance (`u16` each) — for 12 bytes per byte of span.
 Since #959 it also holds the span's match cache, capped at 10 bytes per byte of span, so the
 parse's working set is at most 22 bytes per byte of span, and the span is still the only thing
-bounding it. Peak resident set for one encode per process (`/usr/bin/time -v`, square RGB
-photograph, refinement budget 1), measured before #959 and so without the match cache
-(re-measuring it is #970):
+bounding it. Peak resident set for one encode per process (`/usr/bin/time -v`, release build,
+`photo_rgb` at the given side, `Level::Best`, `MinSumAbs`, auto-reduce on, refinement budget 1),
+measured at `5fbd78e2`, whose `gamut-png` and `gamut-deflate` are #959's (#971) unchanged:
 
 | image | filtered stream | 1 MiB | 8 MiB | 16 MiB | no bound |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1024x1024 | 3 146 752 | 21.9 MiB | 46.7 MiB | 46.6 MiB | 46.5 MiB |
-| 2048x2048 | 12 584 960 | 56.0 MiB | 127.2 MiB | 177.4 MiB | 177.2 MiB |
-| 4096x4096 | 50 335 744 | 177.9 MiB | 219.0 MiB | 312.6 MiB | **701.8 MiB** |
+| 1024x1024 | 3 146 752 | 32.3 MiB | 72.3 MiB | 73.1 MiB | 73.0 MiB |
+| 2048x2048 | 12 584 960 | 56.8 MiB | 198.5 MiB | 284.5 MiB | 284.4 MiB |
+| 4096x4096 | 50 335 744 | 178.6 MiB | 290.9 MiB | 455.8 MiB | **1130.8 MiB** |
 
 That is the formula, measured. Against the 1 MiB column the extra resident set per extra byte of
-span is 12.3, 11.0 and 11.1 bytes across the three rows — 12 allocated, slightly less resident
-because the two `u16` rows are zero-initialised and pages they never write are never faulted in.
-Time is not what scales: the same twelve runs moved by under 2% and not monotonically
+span is 20.3, 20.7 and 20.3 bytes across the three rows — up to 22 allocated, less resident
+because the two `u16` rows are zero-initialised and pages they never write are never faulted in,
+and because the match cache is filled only as far as the span's matches reach its cap. Before the
+match cache the same rows measured 12.3, 11.0 and 11.1 bytes (no bound: 46.5, 177.2 and
+701.8 MiB), so the cache costs about nine resident bytes per byte of span. The host these runs
+shared was under load (load average 37–53 on 16 threads). A single stream's peak does not depend
+on scheduling — two runs at 1024 differed by 0.2% at the 1 MiB span (32.3 / 32.3 MiB) and 0.2%
+with no bound (72.8 / 73.0 MiB) — so the table is read as measured. Time is what load does move,
+so the timings below are the pre-cache run's and are not re-measured: they describe the encoder
+before #971 changed what each span's search costs. Time is not what scales: those twelve runs moved
+by under 2% and not monotonically
 (8.41 / 8.37 / 8.37 / 8.47 s, 34.65 / 34.08 / 33.92 / 33.95 s, 133.9 / 135.4 / 134.3 / 132.7 s),
 because the parse's work is linear in the input whatever the span. A wider span *can* still take
 more refinement passes to converge, so time is data-dependent rather than flat; memory is neither.
@@ -807,8 +815,10 @@ measures it.
 the whole stream — byte-identical to no bound — for any image up to about 1670x1670 RGB or
 1448x1448 RGBA, which is where every win in the first table lives. Past that it keeps most of what
 is left (−0.100% of the −0.106% available on the 2048 gradient; −0.028% of −0.044% on a 4096
-photograph) for a third of the memory. Doubling to 16 MiB buys a further 0.005% at 4096x4096 and
-costs another 94 MiB, which is the trade the constant declines. An encoder knob whose working set
+photograph) for about a quarter of the memory (290.9 against 1130.8 MiB). Doubling to 16 MiB buys
+a further 0.005% at 4096x4096 and costs another 164.9 MiB, which is the trade the constant
+declines; the match cache made that trade dearer (it was 94 MiB without it), not cheaper, so the
+re-measurement argues for the same span. An encoder knob whose working set
 grows without bound in the image is not something to ship behind a rung named for size — and a
 caller who has measured that their material wants more can still say
 `with_optimal_parse_limit(usize::MAX)` after the rung, having read what it costs.

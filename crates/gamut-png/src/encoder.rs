@@ -440,12 +440,14 @@ struct PresetKnobs {
 ///
 /// Finite, and that is the point. The span is the only thing bounding the shortest-path parse's
 /// working set: `gamut-deflate` allocates three span-length vectors per refinement pass — the cost
-/// row, the chosen length and the chosen distance — for **12 bytes per byte of span** (11.0 to
-/// 12.3 measured resident; the two `u16` rows are zero-initialised, so pages they never write are
-/// never faulted in). An unbounded span therefore makes one encode's peak memory grow without
-/// bound in the image, which is not something to ship behind a rung named for size. Measured peak
-/// resident set for one encode of a 4096x4096 RGB photograph at [`Level::Best`]: **701.8 MiB**
-/// unbounded against **219.0 MiB** at this span and **177.9 MiB** at the 1 MiB default.
+/// row, the chosen length and the chosen distance — for 12 bytes per byte of span, and since #959
+/// it also holds the span's match cache, capped at 10 bytes per byte of span: **up to 22 bytes
+/// per byte of span** in all (20.3 to 20.7 measured resident; the two `u16` rows are
+/// zero-initialised, so pages they never write are never faulted in). An unbounded span therefore
+/// makes one encode's peak memory grow without bound in the image, which is not something to ship
+/// behind a rung named for size. Measured peak resident set for one encode of a 4096x4096 RGB
+/// photograph at [`Level::Best`]: **1130.8 MiB** unbounded against **290.9 MiB** at this span and
+/// **178.6 MiB** at the 1 MiB default.
 ///
 /// Those are **one** stream's figures, and the rung does not parse one stream at a time. Its
 /// [`FilterStrategy::BruteForce`] runs eight candidates concurrently (#624), each with its own
@@ -464,7 +466,7 @@ struct PresetKnobs {
 /// 1448x1448 RGBA, which is where every size win this crate measured for the knob lives. Past
 /// that it keeps most of what is left: on a 2048x2048 gradient it takes −0.100% of the −0.106%
 /// unbounded reaches, and on a 4096x4096 photograph −0.028% of −0.044%. Doubling to 16 MiB buys
-/// a further 0.005% there and costs another 94 MiB, which is the trade this constant declines.
+/// a further 0.005% there and costs another 164.9 MiB, which is the trade this constant declines.
 /// `STATUS.md` carries the whole sweep, including the rows where a wider span costs bytes.
 ///
 /// Both ends of that — wider than the default, and finite — are what
@@ -696,14 +698,16 @@ impl PngEncoder {
     /// # What raising it costs: memory, linearly, with no bound of its own
     ///
     /// The shortest-path parse allocates three span-length vectors per refinement pass — the cost
-    /// row, the chosen length and the chosen distance — which is **12 bytes for every byte of
-    /// span**. The limit is therefore the only thing bounding this encoder's working set, and a
-    /// caller who removes it makes one encode's peak memory grow without bound in the image.
-    /// Measured peak resident set for a single encode of a square RGB photograph at
-    /// [`Level::Best`], default span against no bound: **21.9 → 46.5 MiB** at 1024x1024,
-    /// **56.0 → 177.2 MiB** at 2048x2048, **177.9 → 701.8 MiB** at 4096x4096. Time is not what
-    /// scales here — the same three pairs measured 8.41 → 8.47 s, 34.65 → 33.95 s and
-    /// 133.9 → 132.7 s, because the parse's work is linear in the input whatever the span. (A
+    /// row, the chosen length and the chosen distance — which is 12 bytes for every byte of span,
+    /// plus the span's match cache, capped at 10 bytes per byte of span (#959): **up to 22 bytes
+    /// for every byte of span**. The limit is therefore the only thing bounding this encoder's
+    /// working set, and a caller who removes it makes one encode's peak memory grow without bound
+    /// in the image. Measured peak resident set for a single encode of a square RGB photograph at
+    /// [`Level::Best`], default span against no bound: **32.3 → 73.0 MiB** at 1024x1024,
+    /// **56.8 → 284.4 MiB** at 2048x2048, **178.6 → 1130.8 MiB** at 4096x4096. Time is not what
+    /// scales here — the same three pairs measured, before #959's cache, 8.41 → 8.47 s,
+    /// 34.65 → 33.95 s and 133.9 → 132.7 s, because the parse's work is linear in the input
+    /// whatever the span. (A
     /// wider span can still take more refinement passes to converge on some material, so time is
     /// data-dependent rather than flat.)
     ///
@@ -2765,7 +2769,7 @@ mod tests {
     fn the_smallest_rungs_parse_span_sits_between_the_default_and_no_bound_at_all() {
         // Both ends are the point of the knob. Wider than the default, or the rung is not asking
         // for anything; finite, or one encode's parse state grows without bound in the image, at
-        // 12 bytes per byte of span. Asserted on the value rather than through an encode because
+        // up to 22 bytes per byte of span. Asserted on the value rather than through an encode because
         // it is not observable through one: this crate's corpus filters to less than the 32 KiB
         // span floor, so every candidate span already covers the whole stream and every rung
         // emits the same bytes whatever the limit says.
