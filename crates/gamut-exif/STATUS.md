@@ -29,6 +29,7 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
 | P12 | §4.6 | Shadowed duplicate tags (issue #719): every directory the model keeps is decoded through `gamut_ifd::IfdReader::decode_ifd_reporting` (or `decode_ifd_lenient` under recovery), and each entry a repeated tag shadowed is a `ReadReport::dropped_entries` record with `EntryDropReason::Shadowed`, in every mode | ✅ |
 | P13 | §4.6.5.2, §4.6.9.2 | Unreadable strip thumbnails (issue #868): an integer `StripOffsets` naming strips that cannot be read is a `DroppedRegion::ThumbnailStrips` drop (`DropReason::StripsUnsized` / `OutOfBounds` / `StripsOverlap`) and a strict-mode `ExifError::BadThumbnail`, and `StripOffsets` leaves the model whenever its strips do not, so the writer never re-emits offsets addressing nothing | ✅ |
 | P10 | §4.6 | Full DC-008 tag breadth + per-tag value shape + value descriptions (issue #417) | ✅ |
+| P14 | — | MakerNote dispatch layer (issue #968, phase 0 of #418): `MakerNoteLayout::detect` / `Exif::maker_note_layout` resolve the dialect, IFD byte order and offset, next-IFD pointer and `OffsetBase` for 19 dialects across 13 vendors, after exiv2's `TiffMnCreator` table plus Apple (`references/exif/README.md`); no vendor tag decoded | ✅ |
 
 ## P10 — what the catalogue now covers
 
@@ -140,10 +141,13 @@ transcription from DC-008 and the structural checks in `src/describe.rs`.
 
 ## Intentionally deferred (additive under the `#[non_exhaustive]` surface)
 
-- **Per-vendor MakerNote decoding** (Canon/Nikon/Sony/…). The crate preserves the block verbatim
-  — and, since issue #263, pins its byte range at the source offset on rewrites so
-  vendor-absolute internal offsets stay valid — and detects the vendor from `Make`, but does not
-  decode the block (documented on `MakerNote`).
+- **Per-vendor MakerNote tag decoding** (Canon/Nikon/Sony/…; the per-vendor sub-issues of #418,
+  #976–#988, plus #989 for the note Adobe DNG Converter moves into `DNGPrivateData`).
+  The crate preserves the block verbatim — and, since issue #263, pins its byte range at the
+  source offset on rewrites so vendor-absolute internal offsets stay valid — detects the vendor
+  from `Make`, and since P14 resolves the block's dispatch layout, but decodes no vendor tag
+  (documented on `MakerNote`). Leica, Kodak and the other vendors outside exiv2's table have no
+  dialect yet, so their notes have no layout and stay opaque.
 - **Tag breadth beyond any vendored specification.** exiv2 knows 408 standard tags. The catalogue
   is complete for CIPA DC-008 (P10 above), and since issue #532 the 0th IFD's TIFF 6.0 (44 tags
   beyond DC-008 Table 6) and DNG 1.7.1.0 (118) tags are named through `IfdKind::registry_spec`

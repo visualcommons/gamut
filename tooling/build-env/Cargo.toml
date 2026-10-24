@@ -19,3 +19,8 @@ doctest = false
 # Intentionally none: this crate is pure `std` string/path handling, so every oracle can depend
 # on it without adding anything to the build graph. `cc::Build` sites need no help — the `cc`
 # crate already parses a launcher-prefixed `CC` correctly (see the crate docs).
+
+# Its own workspace root, so cargo never walks further up looking for one: a checkout nested
+# inside another gamut checkout (a worktree under `.claude/worktrees/`) would otherwise find the
+# outer manifest, which does not exclude this path.
+[workspace]

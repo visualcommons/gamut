@@ -42,6 +42,61 @@ structural reference is **TIFF 6.0** (see [`../tiff`](../tiff)).
   `exiv2`/`libexif` differential oracle rather than vendored, following the same policy as the
   paywalled ISOBMFF/HEIF specs.
 
+## MakerNote dialects (not a specification; issue #418)
+
+No standard defines the `MakerNote` (`0x927C`) payload. DC-008 calls it manufacturer-specific and
+says nothing more. The dispatch layer in `gamut-exif` (`MakerNoteLayout`, issue #968) therefore
+follows the closest thing to a documented table. That is **exiv2's** dispatch: `TiffMnCreator::registry_`
+and the `*MnHeader` classes in `third_party/exiv2/src/makernote_int.cpp` (the pinned submodule
+the `exiv2-oracle` builds), summarised at <https://exiv2.org/makernote.html>. Apple is not in exiv2,
+so its row comes from ExifTool's `MakerNoteApple` (`lib/Image/ExifTool/MakerNotes.pm`, not
+vendored) and was checked against the iPhone 12 Pro sample in `third_party/gamut-dng-samples`.
+The vendor is taken from `Make`, and the note's leading bytes then choose among that vendor's
+dialects:
+
+| Dialect | Signature | IFD at | Byte order | Offsets count from |
+| --- | --- | --- | --- | --- |
+| Canon, Minolta, Nikon 1, Sony 2, Casio 1 | none | 0 | outer | TIFF header |
+| Samsung | none (an `AOC\0` note is Pentax) | 0 | outer | note start |
+| Nikon 2 | `Nikon\0` with no TIFF header at byte 10 | 8 | outer | TIFF header |
+| Nikon 3 | `Nikon\0` + 4 bytes + TIFF header | 10 + header offset | embedded header | note byte 10 |
+| Sony 1 | `SONY DSC \0\0\0` | 12, no next pointer | outer | TIFF header |
+| Fujifilm | `FUJIFILM` + LE u32 IFD offset | that offset | little-endian | note start |
+| Olympus 1 | `OLYMP\0` | 8 | outer | TIFF header |
+| Olympus 2 | `OLYMPUS\0` + `II`/`MM` | 12 | the mark | note start |
+| OM System | `OM SYSTEM\0\0\0` + `II`/`MM` | 16 | the mark | note start |
+| Panasonic | `Panasonic` | 12, no next pointer | outer | TIFF header |
+| Pentax (also Ricoh, Samsung) | `AOC\0` | 6 | mark at 4, else outer | TIFF header |
+| Pentax DNG (also Ricoh, Samsung) | `PENTAX \0` | 10 | mark at 8, else outer | note start |
+| Sigma | `SIGMA\0\0\0` or `FOVEON\0\0` | 10 | outer | TIFF header |
+| Casio 2 | `QVC\0\0\0` | 6 | big-endian | TIFF header |
+| Apple | `Apple iOS\0` | 14 | mark at 12, else outer | note start |
+
+A note resolves only if it holds its header plus a one-entry IFD (2 + 12 bytes) at the IFD
+offset. Otherwise it has no layout and stays opaque, as does a note whose vendor has no row here.
+
+Where this reader deliberately differs from exiv2:
+
+- **Byte-order marks are read, not ignored.** exiv2 inherits the outer order for Olympus 2, OM
+  System and both Pentax headers even though each one carries `II`/`MM`. Its Olympus 2 and OM
+  System checks accept only `II`. Here the mark decides. An Olympus 2 or OM System header without
+  a valid mark matches nothing, and a Pentax mark that is neither `II` nor `MM` falls back to the
+  outer order. ExifTool reads these marks the same way.
+- **Minimum size is one rule, not nineteen.** exiv2 asks most dialects for an 18-byte IFD (a
+  next pointer included) and some for 14. Here every dialect needs a one-entry IFD at its offset,
+  so this reader also accepts notes that end without a next pointer. It rejects one thing exiv2
+  admits: a Casio 2 note under 20 bytes. exiv2 accepts that on the signature alone and then has
+  no IFD to read in it.
+- **A Nikon 3 header whose IFD offset overflows** (`10 + offset` past `u32`) has no layout here.
+  exiv2 would build the reader and fail at the IFD.
+- **Samsung under a `PENTAX \0` header** is read as Pentax DNG. exiv2 checks only `AOC\0` for
+  Samsung.
+
+Notes that exiv2 does not cover, Leica's being the one the sample corpus holds, have no
+dialect yet. Each one is staked here by its vendor's sub-issue of #418 before it is implemented
+(Leica: #978). A Canon note that Adobe DNG Converter moved into `DNGPrivateData` (`Adobe\0MakN`)
+is outside the `0x927C` tag. That is its own sub-issue, #989.
+
 ## Conformance
 
 Implementations are held to the standard via differential oracles (`exiv2`/`libexif`, C FFI) for

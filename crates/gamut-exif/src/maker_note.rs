@@ -1,21 +1,40 @@
 //! The vendor-specific `MakerNote` block (Exif tag `0x927C`).
 //!
 //! `MakerNote` is an `UNDEFINED` blob of vendor-proprietary data — usually a mini-IFD with
-//! per-vendor quirks (its own byte order, header, and offset base). v1 treats it as **opaque**: the
-//! bytes are preserved verbatim and the vendor is *detected* (from the `Make` tag), but the block is
-//! **not decoded**. Per-vendor decoding is deferred; it can be added later without breaking this
-//! API (hence [`MakerNoteVendor`] is `#[non_exhaustive]`).
+//! per-vendor quirks (its own header, byte order, and offset base). The crate preserves the bytes
+//! verbatim, detects the vendor (from the `Make` tag), and resolves the block's **dispatch layout**
+//! — which header dialect it is, the byte order and position of its IFD, and what that IFD's value
+//! offsets count from — but decodes **no vendor tag**. Per-vendor tag decoding is the remainder of
+//! issue #418 and can be added without breaking this API (every enum and the layout struct here
+//! are `#[non_exhaustive]`).
+//!
+//! # Dispatch
+//!
+//! [`MakerNoteLayout::detect`] follows exiv2's dispatch table (`TiffMnCreator::registry_` and the
+//! `*MnHeader` classes in `third_party/exiv2/src/makernote_int.cpp`; summarised at
+//! <https://exiv2.org/makernote.html>), plus Apple, which exiv2 does not handle (ExifTool's
+//! `MakerNoteApple`). The vendor picks the candidate dialects and the note's own signature picks
+//! among them. See `references/exif/README.md` for the per-dialect table and where this reader
+//! deliberately differs from exiv2. A note no dialect recognises has no layout and stays opaque.
 //!
 //! # Round-trip behaviour
 //!
-//! The *bytes* always round-trip exactly (value-level). Additionally, a model that came from
-//! [`Exif::parse`](crate::Exif::parse) records the note's absolute source offset
-//! ([`Exif::maker_note_offset`](crate::Exif::maker_note_offset)), and the writer **pins** the
-//! note's byte range at that exact position on a rewrite — so TIFF-header-absolute internal
-//! offsets a vendor encodes (common for Canon and many Nikon) stay valid even when edits shift
-//! the surrounding directories (issue #263). Only when the new layout makes the pin
-//! unsatisfiable (the directory region grows past the note's old position) does the writer fall
-//! back to relocating the block, in which case such vendor-internal offsets may go stale.
+//! The *bytes* always round-trip exactly (value-level); resolving a layout reads them and changes
+//! nothing. Additionally, a model that came from [`Exif::parse`](crate::Exif::parse) records the
+//! note's absolute source offset ([`Exif::maker_note_offset`](crate::Exif::maker_note_offset)),
+//! and the writer **pins** the note's byte range at that exact position on a rewrite — so
+//! TIFF-header-absolute internal offsets a vendor encodes ([`OffsetBase::TiffHeader`]: Canon and
+//! most others) stay valid even when edits shift the surrounding directories (issue #263). Only
+//! when the new layout makes the pin unsatisfiable (the directory region grows past the note's old
+//! position) does the writer fall back to relocating the block, in which case such vendor-internal
+//! offsets may go stale. Note-relative offsets ([`OffsetBase::MakerNote`]) survive a relocation
+//! too.
+
+use gamut_ifd::{ByteOrder, Variant};
+
+/// The bytes a one-entry IFD occupies before its next-IFD pointer: a 2-byte entry count plus one
+/// 12-byte entry. A note shorter than its header plus this holds no IFD to decode.
+const ONE_ENTRY_IFD: usize = 14;
 
 /// A decoded-only-as-far-as-the-vendor MakerNote block: its detected vendor and its raw bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +44,18 @@ pub struct MakerNote {
     pub vendor: MakerNoteVendor,
     /// The opaque, verbatim block bytes.
     pub bytes: Vec<u8>,
+}
+
+impl MakerNote {
+    /// The block's dispatch layout, given `outer` — the byte order of the TIFF stream the note sits
+    /// in ([`Exif::byte_order`](crate::Exif::byte_order)), which most dialects inherit.
+    ///
+    /// `None` when the vendor has no known dialect or the bytes match none of its signatures; the
+    /// block then stays opaque. See [`MakerNoteLayout::detect`].
+    #[must_use]
+    pub fn layout(&self, outer: ByteOrder) -> Option<MakerNoteLayout> {
+        MakerNoteLayout::detect(self.vendor, &self.bytes, outer)
+    }
 }
 
 /// A MakerNote vendor dialect.
@@ -50,13 +81,26 @@ pub enum MakerNoteVendor {
     Apple,
     /// An unrecognised or absent vendor.
     Unknown,
+    /// Minolta / Konica Minolta.
+    Minolta,
+    /// Pentax.
+    Pentax,
+    /// Ricoh (including Ricoh Imaging's Pentax-branded bodies).
+    Ricoh,
+    /// Samsung.
+    Samsung,
+    /// Sigma / Foveon.
+    Sigma,
+    /// Casio.
+    Casio,
 }
 
 impl MakerNoteVendor {
     /// Detects the vendor from the `Make` tag.
     ///
-    /// A heuristic match on the manufacturer string — enough to route to a future per-vendor
-    /// decoder, without inspecting the block's own (vendor-specific) signature.
+    /// A case-insensitive substring match on the manufacturer string — enough to route to the
+    /// vendor's dialects, without inspecting the block's own signature (that is
+    /// [`MakerNoteLayout::detect`]'s job).
     #[must_use]
     pub fn detect(make: Option<&str>) -> MakerNoteVendor {
         let Some(make) = make else {
@@ -78,47 +122,565 @@ impl MakerNoteVendor {
             MakerNoteVendor::Panasonic
         } else if has("APPLE") {
             MakerNoteVendor::Apple
+        } else if has("MINOLTA") {
+            MakerNoteVendor::Minolta
+        } else if has("PENTAX") {
+            MakerNoteVendor::Pentax
+        } else if has("RICOH") {
+            MakerNoteVendor::Ricoh
+        } else if has("SAMSUNG") {
+            MakerNoteVendor::Samsung
+        } else if has("SIGMA") || has("FOVEON") {
+            MakerNoteVendor::Sigma
+        } else if has("CASIO") {
+            MakerNoteVendor::Casio
         } else {
             MakerNoteVendor::Unknown
         }
     }
 }
 
+/// The header variant a MakerNote follows within its vendor, named after exiv2's makernote groups.
+///
+/// The discriminants are permanent and append-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum MakerNoteDialect {
+    /// Canon: a bare IFD at byte 0.
+    Canon = 0,
+    /// Nikon type 1 (early Coolpix): a bare IFD at byte 0, no `Nikon` signature.
+    Nikon1 = 1,
+    /// Nikon type 2: `Nikon\0` + 2 version bytes, IFD at byte 8.
+    Nikon2 = 2,
+    /// Nikon type 3: `Nikon\0` + 4 version bytes, then an embedded TIFF header at byte 10 whose
+    /// byte order and first-IFD offset the note's IFD follows.
+    Nikon3 = 3,
+    /// Sony with the `SONY DSC \0\0\0` header: IFD at byte 12, no next-IFD pointer.
+    Sony1 = 4,
+    /// Sony without a header: a bare IFD at byte 0.
+    Sony2 = 5,
+    /// Fujifilm: `FUJIFILM` + a little-endian IFD offset; the whole note is little-endian.
+    Fujifilm = 6,
+    /// Olympus type 1: `OLYMP\0` + 2 version bytes, IFD at byte 8.
+    Olympus1 = 7,
+    /// Olympus type 2: `OLYMPUS\0` + a byte-order mark + 2 version bytes, IFD at byte 12.
+    Olympus2 = 8,
+    /// OM System: `OM SYSTEM\0\0\0` + a byte-order mark + 2 version bytes, IFD at byte 16.
+    OmSystem = 9,
+    /// Panasonic: `Panasonic\0\0\0`, IFD at byte 12, no next-IFD pointer.
+    Panasonic = 10,
+    /// Pentax (and Pentax-format Ricoh/Samsung): `AOC\0` + a byte-order mark, IFD at byte 6.
+    Pentax = 11,
+    /// Pentax in DNG: `PENTAX \0` + a byte-order mark, IFD at byte 10.
+    PentaxDng = 12,
+    /// Samsung (genuine Samsung bodies): a bare IFD at byte 0.
+    Samsung = 13,
+    /// Sigma / Foveon: `SIGMA\0\0\0` or `FOVEON\0\0` + 2 version bytes, IFD at byte 10.
+    Sigma = 14,
+    /// Casio type 1: a bare IFD at byte 0.
+    Casio1 = 15,
+    /// Casio type 2: `QVC\0\0\0`, IFD at byte 6; the whole note is big-endian.
+    Casio2 = 16,
+    /// Minolta / Konica Minolta: a bare IFD at byte 0.
+    Minolta = 17,
+    /// Apple: `Apple iOS\0` + 2 version bytes + a byte-order mark, IFD at byte 14.
+    Apple = 18,
+}
+
+impl MakerNoteDialect {
+    /// Whether the note's IFD ends in a 4-byte next-IFD pointer. Panasonic and Sony type 1 omit it
+    /// (exiv2 builds both with `hasNext = false`); every other dialect carries one.
+    #[must_use]
+    pub fn has_next_ifd(self) -> bool {
+        !matches!(self, MakerNoteDialect::Panasonic | MakerNoteDialect::Sony1)
+    }
+}
+
+/// What a MakerNote IFD's value offsets count from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OffsetBase {
+    /// File-absolute: offsets count from the outer TIFF header, like the rest of the Exif stream.
+    /// They stay valid on a rewrite only while the writer's pin holds the note in place.
+    TiffHeader,
+    /// Note-relative: offsets count from `at` bytes into the MakerNote value (`0` for most such
+    /// dialects; `10`, the embedded TIFF header, for Nikon type 3).
+    MakerNote {
+        /// The base's position within the note.
+        at: u32,
+    },
+}
+
+impl OffsetBase {
+    /// The base's absolute position in the TIFF stream, given `note_at`, the note's own position
+    /// there ([`Exif::maker_note_offset`](crate::Exif::maker_note_offset)). `None` only if the sum
+    /// overflows.
+    #[must_use]
+    pub fn origin(self, note_at: u64) -> Option<u64> {
+        match self {
+            OffsetBase::TiffHeader => Some(0),
+            OffsetBase::MakerNote { at } => note_at.checked_add(u64::from(at)),
+        }
+    }
+}
+
+/// How a MakerNote block is laid out: the dispatch facts a vendor decoder needs before it reads a
+/// single tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MakerNoteLayout {
+    /// The header variant the note follows.
+    pub dialect: MakerNoteDialect,
+    /// The byte order of the note's IFD: inherited from the outer stream, fixed by the dialect, or
+    /// read from a byte-order mark in the note's header.
+    pub byte_order: ByteOrder,
+    /// Where the note's IFD (its 2-byte entry count) starts, in bytes from the start of the note.
+    pub ifd_offset: u32,
+    /// What the IFD's value offsets count from.
+    pub offset_base: OffsetBase,
+}
+
+impl MakerNoteLayout {
+    fn new(
+        dialect: MakerNoteDialect,
+        byte_order: ByteOrder,
+        ifd_offset: u32,
+        offset_base: OffsetBase,
+    ) -> MakerNoteLayout {
+        MakerNoteLayout {
+            dialect,
+            byte_order,
+            ifd_offset,
+            offset_base,
+        }
+    }
+
+    /// Resolves the layout of `note`, a `vendor` MakerNote inside a TIFF stream of byte order
+    /// `outer`.
+    ///
+    /// `None` when the vendor has no known dialect ([`MakerNoteVendor::Unknown`] always), when the
+    /// note matches none of the vendor's signatures, or when it is too short to hold its header
+    /// plus a one-entry IFD at [`ifd_offset`](Self::ifd_offset). Never reads past `note`.
+    #[must_use]
+    pub fn detect(
+        vendor: MakerNoteVendor,
+        note: &[u8],
+        outer: ByteOrder,
+    ) -> Option<MakerNoteLayout> {
+        use MakerNoteDialect as D;
+        let bare = |dialect| MakerNoteLayout::new(dialect, outer, 0, OffsetBase::TiffHeader);
+        let layout = match vendor {
+            MakerNoteVendor::Canon => bare(D::Canon),
+            MakerNoteVendor::Minolta => bare(D::Minolta),
+            MakerNoteVendor::Nikon => nikon(note, outer)?,
+            MakerNoteVendor::Sony if note.starts_with(b"SONY DSC \0\0\0") => {
+                MakerNoteLayout::new(D::Sony1, outer, 12, OffsetBase::TiffHeader)
+            }
+            MakerNoteVendor::Sony => bare(D::Sony2),
+            MakerNoteVendor::Fujifilm => fujifilm(note)?,
+            MakerNoteVendor::Olympus => olympus(note, outer)?,
+            MakerNoteVendor::Panasonic if note.starts_with(b"Panasonic") => {
+                MakerNoteLayout::new(D::Panasonic, outer, 12, OffsetBase::TiffHeader)
+            }
+            MakerNoteVendor::Pentax | MakerNoteVendor::Ricoh => pentax(note, outer)?,
+            MakerNoteVendor::Samsung => pentax(note, outer).unwrap_or(MakerNoteLayout::new(
+                D::Samsung,
+                outer,
+                0,
+                OffsetBase::MakerNote { at: 0 },
+            )),
+            MakerNoteVendor::Sigma
+                if note.starts_with(b"SIGMA\0\0\0") || note.starts_with(b"FOVEON\0\0") =>
+            {
+                MakerNoteLayout::new(D::Sigma, outer, 10, OffsetBase::TiffHeader)
+            }
+            MakerNoteVendor::Casio if note.starts_with(b"QVC\0\0\0") => {
+                MakerNoteLayout::new(D::Casio2, ByteOrder::BigEndian, 6, OffsetBase::TiffHeader)
+            }
+            MakerNoteVendor::Casio => bare(D::Casio1),
+            MakerNoteVendor::Apple if note.starts_with(b"Apple iOS\0") => MakerNoteLayout::new(
+                D::Apple,
+                mark(note, 12).unwrap_or(outer),
+                14,
+                OffsetBase::MakerNote { at: 0 },
+            ),
+            _ => return None,
+        };
+        let ifd_end = usize::try_from(layout.ifd_offset)
+            .ok()?
+            .checked_add(ONE_ENTRY_IFD)?;
+        (ifd_end <= note.len()).then_some(layout)
+    }
+}
+
+/// The byte order a two-byte mark at `at` names: `II` little-endian, `MM` big-endian, anything
+/// else (or a mark past the end of `note`) none.
+fn mark(note: &[u8], at: usize) -> Option<ByteOrder> {
+    match note.get(at..at + 2)? {
+        b"II" => Some(ByteOrder::LittleEndian),
+        b"MM" => Some(ByteOrder::BigEndian),
+        _ => None,
+    }
+}
+
+/// Nikon, as exiv2's `newNikonMn` splits it: no `Nikon\0` signature is type 1; the signature
+/// followed by a classic TIFF header at byte 10 is type 3; the signature alone is type 2.
+fn nikon(note: &[u8], outer: ByteOrder) -> Option<MakerNoteLayout> {
+    use MakerNoteDialect as D;
+    if !note.starts_with(b"Nikon\0") {
+        return Some(MakerNoteLayout::new(
+            D::Nikon1,
+            outer,
+            0,
+            OffsetBase::TiffHeader,
+        ));
+    }
+    let Some(Ok((order, Variant::Classic, first_ifd))) = note.get(10..).map(gamut_ifd::read_header)
+    else {
+        return Some(MakerNoteLayout::new(
+            D::Nikon2,
+            outer,
+            8,
+            OffsetBase::TiffHeader,
+        ));
+    };
+    // A classic header's first-IFD offset is a u32, so only the `+ 10` can fail — and an IFD
+    // that would start past 4 GiB into the note is no IFD this note holds.
+    let ifd_offset = u32::try_from(first_ifd).ok()?.checked_add(10)?;
+    Some(MakerNoteLayout::new(
+        D::Nikon3,
+        order,
+        ifd_offset,
+        OffsetBase::MakerNote { at: 10 },
+    ))
+}
+
+/// Fujifilm: `FUJIFILM`, then the IFD's offset as a little-endian u32 at byte 8; the IFD and its
+/// values are little-endian whatever the outer stream says.
+fn fujifilm(note: &[u8]) -> Option<MakerNoteLayout> {
+    if !note.starts_with(b"FUJIFILM") {
+        return None;
+    }
+    let ifd_offset = u32::from_le_bytes(note.get(8..12)?.try_into().ok()?);
+    Some(MakerNoteLayout::new(
+        MakerNoteDialect::Fujifilm,
+        ByteOrder::LittleEndian,
+        ifd_offset,
+        OffsetBase::MakerNote { at: 0 },
+    ))
+}
+
+/// Olympus and OM System: the two newer headers carry a byte-order mark, which this reader
+/// requires and follows; the oldest carries none and inherits.
+fn olympus(note: &[u8], outer: ByteOrder) -> Option<MakerNoteLayout> {
+    use MakerNoteDialect as D;
+    let note_base = OffsetBase::MakerNote { at: 0 };
+    if note.starts_with(b"OM SYSTEM\0\0\0") {
+        Some(MakerNoteLayout::new(
+            D::OmSystem,
+            mark(note, 12)?,
+            16,
+            note_base,
+        ))
+    } else if note.starts_with(b"OLYMPUS\0") {
+        Some(MakerNoteLayout::new(
+            D::Olympus2,
+            mark(note, 8)?,
+            12,
+            note_base,
+        ))
+    } else if note.starts_with(b"OLYMP\0") {
+        Some(MakerNoteLayout::new(
+            D::Olympus1,
+            outer,
+            8,
+            OffsetBase::TiffHeader,
+        ))
+    } else {
+        None
+    }
+}
+
+/// Pentax-format notes (Pentax, Ricoh, and Pentax-built Samsung bodies): `PENTAX \0` in DNG,
+/// `AOC\0` elsewhere, each followed by a byte-order mark the note's IFD follows when it is one.
+fn pentax(note: &[u8], outer: ByteOrder) -> Option<MakerNoteLayout> {
+    use MakerNoteDialect as D;
+    if note.starts_with(b"PENTAX \0") {
+        Some(MakerNoteLayout::new(
+            D::PentaxDng,
+            mark(note, 8).unwrap_or(outer),
+            10,
+            OffsetBase::MakerNote { at: 0 },
+        ))
+    } else if note.starts_with(b"AOC\0") {
+        Some(MakerNoteLayout::new(
+            D::Pentax,
+            mark(note, 4).unwrap_or(outer),
+            6,
+            OffsetBase::TiffHeader,
+        ))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use ByteOrder::{BigEndian as BE, LittleEndian as LE};
+    use MakerNoteDialect as D;
+    use MakerNoteVendor as V;
+
     use super::*;
+
+    /// `header` followed by a one-entry IFD and its next-IFD pointer — the shortest note every
+    /// dialect accepts once its header matches.
+    fn note(header: &[u8]) -> Vec<u8> {
+        let mut bytes = header.to_vec();
+        bytes.extend_from_slice(&[0; ONE_ENTRY_IFD + 4]);
+        bytes
+    }
+
+    /// The layout `vendor` resolves for `bytes` inside a little-endian and a big-endian stream.
+    fn both(vendor: MakerNoteVendor, bytes: &[u8]) -> [Option<MakerNoteLayout>; 2] {
+        [LE, BE].map(|outer| MakerNoteLayout::detect(vendor, bytes, outer))
+    }
+
+    /// Asserts that `bytes` resolves, for `vendor` under both outer byte orders, to `dialect` at
+    /// `ifd_offset` with `base`, and with the byte order `order` names (`None` = inherited).
+    fn assert_layout(
+        vendor: MakerNoteVendor,
+        bytes: &[u8],
+        dialect: MakerNoteDialect,
+        order: Option<ByteOrder>,
+        ifd_offset: u32,
+        base: OffsetBase,
+    ) {
+        for (outer, got) in [LE, BE].into_iter().zip(both(vendor, bytes)) {
+            let want = MakerNoteLayout::new(dialect, order.unwrap_or(outer), ifd_offset, base);
+            assert_eq!(got, Some(want), "{vendor:?} under {outer:?}");
+        }
+    }
+
+    const ABSOLUTE: OffsetBase = OffsetBase::TiffHeader;
+    const RELATIVE: OffsetBase = OffsetBase::MakerNote { at: 0 };
 
     #[test]
     fn detects_vendors_case_insensitively() {
+        let cases = [
+            ("Canon", V::Canon),
+            ("NIKON CORPORATION", V::Nikon),
+            ("SONY", V::Sony),
+            ("FUJIFILM", V::Fujifilm),
+            ("OLYMPUS IMAGING CORP.", V::Olympus),
+            ("OM Digital Solutions", V::Olympus),
+            ("Panasonic", V::Panasonic),
+            ("LUMIX", V::Panasonic),
+            ("Apple", V::Apple),
+            ("KONICA MINOLTA", V::Minolta),
+            ("PENTAX Corporation", V::Pentax),
+            ("RICOH IMAGING COMPANY, LTD.", V::Ricoh),
+            ("SAMSUNG", V::Samsung),
+            ("SIGMA", V::Sigma),
+            ("FOVEON", V::Sigma),
+            ("CASIO COMPUTER CO.,LTD.", V::Casio),
+            ("Hasselblad", V::Unknown),
+        ];
+        for (make, vendor) in cases {
+            assert_eq!(MakerNoteVendor::detect(Some(make)), vendor, "{make}");
+        }
+        assert_eq!(MakerNoteVendor::detect(None), V::Unknown);
+    }
+
+    #[test]
+    fn bare_ifd_dialects_inherit_the_outer_order_at_byte_zero() {
+        let bytes = note(b"");
+        assert_layout(V::Canon, &bytes, D::Canon, None, 0, ABSOLUTE);
+        assert_layout(V::Minolta, &bytes, D::Minolta, None, 0, ABSOLUTE);
+        assert_layout(V::Nikon, &bytes, D::Nikon1, None, 0, ABSOLUTE);
+        assert_layout(V::Sony, &bytes, D::Sony2, None, 0, ABSOLUTE);
+        assert_layout(V::Casio, &bytes, D::Casio1, None, 0, ABSOLUTE);
+        assert_layout(V::Samsung, &bytes, D::Samsung, None, 0, RELATIVE);
+    }
+
+    #[test]
+    fn nikon_type_2_is_the_signature_without_an_embedded_tiff_header() {
+        let bytes = note(b"Nikon\0\x01\x00");
+        assert_layout(V::Nikon, &bytes, D::Nikon2, None, 8, ABSOLUTE);
+        // A header with the wrong magic is not a TIFF header either.
+        let bytes = note(b"Nikon\0\x02\x10\0\0II\x2b\0\x08\0\0\0");
+        assert_layout(V::Nikon, &bytes, D::Nikon2, None, 8, ABSOLUTE);
+    }
+
+    #[test]
+    fn nikon_type_3_follows_its_embedded_tiff_header() {
+        let base = OffsetBase::MakerNote { at: 10 };
+        let bytes = note(b"Nikon\0\x02\x10\0\0MM\0\x2a\0\0\0\x08");
+        assert_layout(V::Nikon, &bytes, D::Nikon3, Some(BE), 18, base);
+        let bytes = note(b"Nikon\0\x02\x10\0\0II\x2a\0\x08\0\0\0");
+        assert_layout(V::Nikon, &bytes, D::Nikon3, Some(LE), 18, base);
+        // The first-IFD offset is honoured, not assumed to be 8.
+        let mut bytes = note(b"Nikon\0\x02\x10\0\0II\x2a\0\x0c\0\0\0");
+        bytes.extend_from_slice(&[0; 4]);
+        assert_layout(V::Nikon, &bytes, D::Nikon3, Some(LE), 22, base);
+    }
+
+    #[test]
+    fn nikon_type_3_whose_ifd_lies_past_the_note_has_no_layout() {
+        // 0xFFFF_FFFF + 10 does not fit a u32, so the header names no IFD the note can hold.
+        let bytes = note(b"Nikon\0\x02\x10\0\0II\x2a\0\xff\xff\xff\xff");
+        assert_eq!(both(V::Nikon, &bytes), [None, None]);
+        // The largest offset that does fit resolves, and is then refused as past the note.
+        let bytes = note(b"Nikon\0\x02\x10\0\0II\x2a\0\xf5\xff\xff\xff");
+        assert_eq!(both(V::Nikon, &bytes), [None, None]);
+    }
+
+    #[test]
+    fn sony_type_1_carries_its_header() {
+        let bytes = note(b"SONY DSC \0\0\0");
+        assert_layout(V::Sony, &bytes, D::Sony1, None, 12, ABSOLUTE);
+    }
+
+    #[test]
+    fn fujifilm_is_little_endian_with_a_header_named_ifd_offset() {
+        let bytes = note(b"FUJIFILM\x0c\0\0\0");
+        assert_layout(V::Fujifilm, &bytes, D::Fujifilm, Some(LE), 12, RELATIVE);
+        let mut bytes = note(b"FUJIFILM\x10\0\0\0");
+        bytes.extend_from_slice(&[0; 4]);
+        assert_layout(V::Fujifilm, &bytes, D::Fujifilm, Some(LE), 16, RELATIVE);
+        // Signature without the offset field, and no signature at all.
+        assert_eq!(both(V::Fujifilm, b"FUJIFILM\x0c\0\0"), [None, None]);
         assert_eq!(
-            MakerNoteVendor::detect(Some("Canon")),
-            MakerNoteVendor::Canon
+            both(V::Fujifilm, &note(b"FUJIFILX\x0c\0\0\0")),
+            [None, None]
         );
+    }
+
+    #[test]
+    fn olympus_dialects_split_on_their_signatures() {
+        let bytes = note(b"OLYMP\0\x01\0");
+        assert_layout(V::Olympus, &bytes, D::Olympus1, None, 8, ABSOLUTE);
+        let bytes = note(b"OLYMPUS\0II\x03\0");
+        assert_layout(V::Olympus, &bytes, D::Olympus2, Some(LE), 12, RELATIVE);
+        let bytes = note(b"OLYMPUS\0MM\x03\0");
+        assert_layout(V::Olympus, &bytes, D::Olympus2, Some(BE), 12, RELATIVE);
+        let bytes = note(b"OM SYSTEM\0\0\0II\x04\0");
+        assert_layout(V::Olympus, &bytes, D::OmSystem, Some(LE), 16, RELATIVE);
+        let bytes = note(b"OM SYSTEM\0\0\0MM\x04\0");
+        assert_layout(V::Olympus, &bytes, D::OmSystem, Some(BE), 16, RELATIVE);
+    }
+
+    #[test]
+    fn olympus_type_2_and_om_system_require_their_byte_order_mark() {
+        assert_eq!(both(V::Olympus, &note(b"OLYMPUS\0XX\x03\0")), [None, None]);
         assert_eq!(
-            MakerNoteVendor::detect(Some("NIKON CORPORATION")),
-            MakerNoteVendor::Nikon
+            both(V::Olympus, &note(b"OM SYSTEM\0\0\0XX\x04\0")),
+            [None, None]
         );
-        assert_eq!(MakerNoteVendor::detect(Some("SONY")), MakerNoteVendor::Sony);
+        assert_eq!(both(V::Olympus, &note(b"OLYMQ\0\x01\0")), [None, None]);
+    }
+
+    #[test]
+    fn panasonic_carries_its_header() {
+        let bytes = note(b"Panasonic\0\0\0");
+        assert_layout(V::Panasonic, &bytes, D::Panasonic, None, 12, ABSOLUTE);
+        assert_eq!(both(V::Panasonic, &note(b"Panasonix\0\0\0")), [None, None]);
+    }
+
+    #[test]
+    fn pentax_format_notes_follow_their_mark_or_inherit() {
+        for vendor in [V::Pentax, V::Ricoh, V::Samsung] {
+            let bytes = note(b"AOC\0MM");
+            assert_layout(vendor, &bytes, D::Pentax, Some(BE), 6, ABSOLUTE);
+            let bytes = note(b"AOC\0II");
+            assert_layout(vendor, &bytes, D::Pentax, Some(LE), 6, ABSOLUTE);
+            let bytes = note(b"AOC\0  ");
+            assert_layout(vendor, &bytes, D::Pentax, None, 6, ABSOLUTE);
+            let bytes = note(b"PENTAX \0MM");
+            assert_layout(vendor, &bytes, D::PentaxDng, Some(BE), 10, RELATIVE);
+            let bytes = note(b"PENTAX \0II");
+            assert_layout(vendor, &bytes, D::PentaxDng, Some(LE), 10, RELATIVE);
+        }
+        for vendor in [V::Pentax, V::Ricoh] {
+            assert_eq!(both(vendor, &note(b"Ricoh\0\0\0")), [None, None]);
+        }
+    }
+
+    #[test]
+    fn sigma_accepts_either_signature() {
+        let bytes = note(b"SIGMA\0\0\0\x01\0");
+        assert_layout(V::Sigma, &bytes, D::Sigma, None, 10, ABSOLUTE);
+        let bytes = note(b"FOVEON\0\0\x01\0");
+        assert_layout(V::Sigma, &bytes, D::Sigma, None, 10, ABSOLUTE);
+        assert_eq!(both(V::Sigma, &note(b"SIGMB\0\0\0\x01\0")), [None, None]);
+    }
+
+    #[test]
+    fn casio_type_2_is_big_endian() {
+        let bytes = note(b"QVC\0\0\0");
+        assert_layout(V::Casio, &bytes, D::Casio2, Some(BE), 6, ABSOLUTE);
+    }
+
+    #[test]
+    fn apple_is_note_relative_and_follows_its_mark() {
+        // The iPhone 12 Pro sample in `third_party/gamut-dng-samples` opens `Apple iOS\0\0\x01MM`.
+        let bytes = note(b"Apple iOS\0\0\x01MM");
+        assert_layout(V::Apple, &bytes, D::Apple, Some(BE), 14, RELATIVE);
+        let bytes = note(b"Apple iOS\0\0\x01II");
+        assert_layout(V::Apple, &bytes, D::Apple, Some(LE), 14, RELATIVE);
+        let bytes = note(b"Apple iOS\0\0\x01\0\0");
+        assert_layout(V::Apple, &bytes, D::Apple, None, 14, RELATIVE);
+        assert_eq!(both(V::Apple, &note(b"Apple iOS!\0\x01MM")), [None, None]);
+    }
+
+    #[test]
+    fn unknown_vendors_have_no_layout() {
+        assert_eq!(both(V::Unknown, &note(b"")), [None, None]);
+    }
+
+    #[test]
+    fn a_note_must_hold_its_header_and_a_one_entry_ifd() {
+        // Exactly the header plus a one-entry IFD resolves; one byte less does not.
+        let fits = b"Panasonic\0\0\0".iter().copied().chain([0; ONE_ENTRY_IFD]);
+        let fits: Vec<u8> = fits.collect();
+        assert!(both(V::Panasonic, &fits).iter().all(Option::is_some));
+        assert_eq!(both(V::Panasonic, &fits[..fits.len() - 1]), [None, None]);
+        assert!(
+            both(V::Canon, &[0; ONE_ENTRY_IFD])
+                .iter()
+                .all(Option::is_some)
+        );
+        assert_eq!(both(V::Canon, &[0; ONE_ENTRY_IFD - 1]), [None, None]);
+        // A Fujifilm offset past the note is refused, never read.
         assert_eq!(
-            MakerNoteVendor::detect(Some("FUJIFILM")),
-            MakerNoteVendor::Fujifilm
+            both(V::Fujifilm, &note(b"FUJIFILM\xff\xff\xff\xff")),
+            [None, None]
         );
-        assert_eq!(
-            MakerNoteVendor::detect(Some("OM Digital Solutions")),
-            MakerNoteVendor::Olympus
-        );
-        assert_eq!(
-            MakerNoteVendor::detect(Some("Panasonic")),
-            MakerNoteVendor::Panasonic
-        );
-        assert_eq!(
-            MakerNoteVendor::detect(Some("Apple")),
-            MakerNoteVendor::Apple
-        );
-        assert_eq!(
-            MakerNoteVendor::detect(Some("Hasselblad")),
-            MakerNoteVendor::Unknown
-        );
-        assert_eq!(MakerNoteVendor::detect(None), MakerNoteVendor::Unknown);
+    }
+
+    #[test]
+    fn only_panasonic_and_sony_type_1_omit_the_next_ifd_pointer() {
+        assert!(!D::Panasonic.has_next_ifd());
+        assert!(!D::Sony1.has_next_ifd());
+        assert!(D::Sony2.has_next_ifd());
+        assert!(D::Canon.has_next_ifd());
+    }
+
+    #[test]
+    fn offset_base_origin() {
+        assert_eq!(OffsetBase::TiffHeader.origin(100), Some(0));
+        assert_eq!(OffsetBase::MakerNote { at: 0 }.origin(100), Some(100));
+        assert_eq!(OffsetBase::MakerNote { at: 10 }.origin(100), Some(110));
+        assert_eq!(OffsetBase::MakerNote { at: 1 }.origin(u64::MAX), None);
+    }
+
+    #[test]
+    fn maker_note_layout_reads_its_own_bytes_and_vendor() {
+        let maker = MakerNote {
+            vendor: V::Fujifilm,
+            bytes: note(b"FUJIFILM\x0c\0\0\0"),
+        };
+        let want = MakerNoteLayout::new(D::Fujifilm, LE, 12, RELATIVE);
+        assert_eq!(maker.layout(BE), Some(want));
     }
 }

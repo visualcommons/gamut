@@ -3,7 +3,7 @@
 use gamut_ifd::{ByteOrder, Ifd, Value};
 
 use crate::gps::GpsInfo;
-use crate::maker_note::{MakerNote, MakerNoteVendor};
+use crate::maker_note::{MakerNote, MakerNoteLayout, MakerNoteVendor};
 use crate::tag::{ExifTag, IfdKind};
 use crate::thumbnail::Thumbnail;
 use crate::value::{Rational, as_text};
@@ -316,7 +316,7 @@ impl Exif {
     }
 
     /// The `MakerNote` block as its opaque bytes plus the vendor detected from `Make`, or `None` if
-    /// absent. v1 does not decode the block; see [`MakerNote`] for the round-trip caveat.
+    /// absent. No vendor tag is decoded; see [`MakerNote`] for the round-trip caveat.
     #[must_use]
     pub fn maker_note(&self) -> Option<MakerNote> {
         let bytes = match self.get_tag(ExifTag::MakerNote)? {
@@ -327,6 +327,14 @@ impl Exif {
             vendor: MakerNoteVendor::detect(self.make()),
             bytes,
         })
+    }
+
+    /// The `MakerNote` block's dispatch layout — its dialect, IFD byte order and position, and
+    /// offset base — resolved against this stream's [`byte_order`](Self::byte_order). `None` if
+    /// there is no note or no dialect recognises it; see [`MakerNoteLayout::detect`].
+    #[must_use]
+    pub fn maker_note_layout(&self) -> Option<MakerNoteLayout> {
+        self.maker_note()?.layout(self.order)
     }
 
     /// The directory for `kind`, if present.
@@ -485,6 +493,26 @@ mod tests {
         assert_eq!(empty.iso(), None);
         assert_eq!(empty.gps(), None);
         assert_eq!(empty.maker_note(), None);
+        assert_eq!(empty.maker_note_layout(), None);
+    }
+
+    /// The layout inherits the stream's own byte order, and resolving it leaves the note — and
+    /// the re-serialised blob — byte-identical.
+    #[test]
+    fn maker_note_layout_inherits_the_stream_order_and_changes_no_byte() {
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            let mut exif = Exif::new(order);
+            exif.set_tag(ExifTag::Make, Value::Ascii("Canon".into()));
+            let note = vec![0x5A; 32];
+            exif.set_tag(ExifTag::MakerNote, Value::Undefined(note.clone()));
+            let bytes = exif.to_bytes().expect("serialise");
+            let parsed = Exif::parse(&bytes).expect("parse");
+
+            let layout = parsed.maker_note_layout().expect("Canon note has a layout");
+            assert_eq!(layout.byte_order, order);
+            assert_eq!(parsed.maker_note().expect("note").bytes, note);
+            assert_eq!(parsed.to_bytes().expect("re-serialise"), bytes);
+        }
     }
 
     #[test]

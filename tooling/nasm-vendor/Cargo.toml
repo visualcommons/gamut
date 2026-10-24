@@ -22,3 +22,8 @@ tar = "0.4"      # untar the decompressed archive
 lzma-rs = "0.3"  # decode the exact upstream `.tar.xz` in pure Rust (no liblzma C dep)
 # Normalises ambient compiler-launcher env (sccache/ccache) for nasm's own configure/make.
 build-env = { path = "../build-env" }
+
+# Its own workspace root, so cargo never walks further up looking for one: a checkout nested
+# inside another gamut checkout (a worktree under `.claude/worktrees/`) would otherwise find the
+# outer manifest, which does not exclude this path.
+[workspace]
