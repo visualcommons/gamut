@@ -25,8 +25,10 @@ impl IccProfile {
     ///
     /// # Errors
     ///
-    /// Returns [`IccError::Malformed`] if the header, the tag table, or any tag's element data is
-    /// malformed or points outside the profile.
+    /// Returns [`IccError::MalformedAt`] if the header, the tag table, or any tag's element data is
+    /// malformed or points outside the profile. The error's [`offset`](IccError::offset) is the
+    /// failing header field, the tag count (128), the duplicated tag-table row, or the start its
+    /// row declares for the failing tag's element data; [`tag`](IccError::tag) names that tag.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         Self::parse_with(bytes, false)
     }
@@ -51,27 +53,31 @@ impl IccProfile {
     pub(crate) fn parse_with(bytes: &[u8], strict: bool) -> Result<Self> {
         let header = ProfileHeader::parse(bytes)?;
         if strict && header.reserved.iter().any(|&b| b != 0) {
-            return Err(IccError::Malformed(
-                "icc: nonzero reserved header bytes (strict)",
-            ));
+            // The reserved field is the header's last 28 bytes (§7.2 Table 18).
+            return Err(
+                IccError::Malformed("icc: nonzero reserved header bytes (strict)")
+                    .located(100, None),
+            );
         }
         let entries = parse_tag_table(bytes)?;
         let data_start = tag_table_end(entries.len());
         let mut tags = Vec::with_capacity(entries.len());
         for entry in entries {
             let start = entry.offset as usize;
+            // Every failure from here on is this tag's: locate it at the element's declared start.
+            let at_tag = |e: IccError| e.located(start, Some(entry.signature));
             if strict && start < data_start {
-                return Err(IccError::Malformed(
+                return Err(at_tag(IccError::Malformed(
                     "icc: tag data overlaps the header or tag table (strict)",
-                ));
+                )));
             }
             let end = start
                 .checked_add(entry.size as usize)
-                .ok_or(IccError::Malformed("icc: tag size overflow"))?;
+                .ok_or_else(|| at_tag(IccError::Malformed("icc: tag size overflow")))?;
             let element = bytes
                 .get(start..end)
-                .ok_or(IccError::Malformed("icc: tag data out of bounds"))?;
-            tags.push((entry.signature, decode_tag(element)?));
+                .ok_or_else(|| at_tag(IccError::Malformed("icc: tag data out of bounds")))?;
+            tags.push((entry.signature, decode_tag(element).map_err(at_tag)?));
         }
         Ok(Self { header, tags })
     }
@@ -142,7 +148,30 @@ mod tests {
         b.extend_from_slice(b"wtpt");
         b.extend_from_slice(&10_000u32.to_be_bytes()); // offset past EOF
         b.extend_from_slice(&20u32.to_be_bytes());
-        assert!(IccProfile::parse(&b).is_err());
+        let err = IccProfile::parse(&b).unwrap_err();
+        assert_eq!(err.message(), "icc: tag data out of bounds");
+        assert_eq!(err.offset(), Some(10_000));
+        assert_eq!(err.tag(), Some(Signature(*b"wtpt")));
+    }
+
+    #[test]
+    fn element_decode_failure_is_located_at_its_tag() {
+        let mut b = header();
+        b.extend_from_slice(&2u32.to_be_bytes()); // two tags
+        let first = 128 + 4 + 2 * 12;
+        // An unmodelled element first, so the failing tag is not the first row.
+        b.extend_from_slice(b"wtpt");
+        b.extend_from_slice(&(first as u32).to_be_bytes());
+        b.extend_from_slice(&8u32.to_be_bytes());
+        b.extend_from_slice(b"targ");
+        b.extend_from_slice(&(first as u32 + 8).to_be_bytes());
+        b.extend_from_slice(&9u32.to_be_bytes());
+        b.extend_from_slice(b"zzzz\x00\x00\x00\x00");
+        b.extend_from_slice(b"text\x00\x00\x00\x00\x80"); // non-ASCII textType
+        let err = IccProfile::parse(&b).unwrap_err();
+        assert_eq!(err.message(), "icc: non-ASCII textType");
+        assert_eq!(err.offset(), Some(first as u64 + 8));
+        assert_eq!(err.tag(), Some(Signature(*b"targ")));
     }
 
     #[test]
@@ -159,7 +188,8 @@ mod tests {
         b.extend_from_slice(&0u32.to_be_bytes()); // empty tag table
         b[100] = 1; // a reserved header byte (100..128)
         assert!(IccProfile::parse(&b).is_ok()); // lenient tolerates it
-        assert!(IccProfile::parse_with(&b, true).is_err()); // strict rejects it
+        let err = IccProfile::parse_with(&b, true).unwrap_err(); // strict rejects it
+        assert_eq!((err.offset(), err.tag()), (Some(100), None));
     }
 
     #[test]
@@ -170,6 +200,15 @@ mod tests {
         b.extend_from_slice(&8u32.to_be_bytes()); // offset 8 — inside the header
         b.extend_from_slice(&12u32.to_be_bytes());
         assert!(IccProfile::parse(&b).is_ok()); // lenient allows odd offsets
-        assert!(IccProfile::parse_with(&b, true).is_err()); // strict requires offsets past the table
+        // Strict requires offsets past the table.
+        let err = IccProfile::parse_with(&b, true).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "icc: tag data overlaps the header or tag table (strict)"
+        );
+        assert_eq!(
+            (err.offset(), err.tag()),
+            (Some(8), Some(Signature(*b"wtpt")))
+        );
     }
 }

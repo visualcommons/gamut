@@ -3,7 +3,9 @@
 //! ICC data is always big-endian and byte-aligned, so this needs neither a byte-order parameter
 //! (unlike `gamut-ifd`'s TIFF readers) nor the bit-level packing of `gamut-bitstream`. Every read is
 //! bounds-checked and returns [`IccError::Malformed`] on overrun, keeping the parser panic-free
-//! under `#![forbid(unsafe_code)]`.
+//! under `#![forbid(unsafe_code)]`. The reader does not locate its own errors: a cursor over a tag
+//! element (or a description embedded in one) knows only its slice-relative position, so the
+//! profile parser locates every error at the structure it was reading instead.
 
 use crate::error::{IccError, Result};
 use crate::primitives::{DateTime, S15Fixed16, Signature, U16Fixed16, XyzNumber};
