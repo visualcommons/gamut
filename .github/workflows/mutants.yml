@@ -211,6 +211,32 @@ jobs:
           name: mutants-incremental-shard-${{ matrix.shard }}
           path: mutants.out
 
+  # Fix the rotation round once per run, before the matrix fans out. Each slot reaches its shard
+  # pick only after ~30 minutes of setup, and slots start at different times, so a round read
+  # from each slot's own clock could straddle 00:00 UTC and split one run across two rounds —
+  # scoring some shards twice and skipping others. One job decides it; every slot reads it.
+  rotation:
+    name: Pick the rotation round
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      round: ${{ steps.round.outputs.round }}
+    steps:
+      - name: Resolve the round
+        id: round
+        env:
+          ROUND: ${{ inputs.round }}
+        run: |
+          round="${ROUND:-$(( $(date -u +%s) / 86400 ))}"
+          case "$round" in
+            '' | *[!0-9]*) echo "::error::round must be a non-negative integer, got '$round'"; exit 1 ;;
+          esac
+          # Base 10 explicitly: a leading zero would otherwise read as octal.
+          round=$(( 10#$round ))
+          echo "round $round"
+          echo "round=$round" >> "$GITHUB_OUTPUT"
+
   # Whole-workspace survey as a rotation. Nightly and manual, never per push; informational only.
   full:
     # Why a rotation and not one pass: the whole workspace is ~24k mutants, and every mutant is
@@ -224,7 +250,7 @@ jobs:
     # timed on a runner yet; the step timeout below bounds one that overruns, so it ends
     # informational (its partial mutants.out still uploads) instead of failing the job.
     name: Full workspace (rotation slot ${{ matrix.slot }})
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: rotation
     runs-on: ubuntu-latest
     # Backstop under GitHub's 360-minute default; the survey step's own timeout fires first.
     timeout-minutes: 330
@@ -333,15 +359,11 @@ jobs:
         run: mise run fetch-av1-oracles
       - name: Pick this slot's shard of the rotation
         env:
-          ROUND: ${{ inputs.round }}
+          # Decided once for the whole run by the `rotation` job, already validated there.
+          ROUND: ${{ needs.rotation.outputs.round }}
           SLOT: ${{ matrix.slot }}
         run: |
-          round="${ROUND:-$(( $(date -u +%s) / 86400 ))}"
-          case "$round" in
-            '' | *[!0-9]*) echo "::error::round must be a non-negative integer, got '$round'"; exit 1 ;;
-          esac
-          # Base 10 explicitly: a leading zero would otherwise read as octal.
-          round=$(( 10#$round ))
+          round=$ROUND
           k=$(( (round * GAMUT_NIGHTLY_SLOTS + SLOT) % GAMUT_NIGHTLY_SHARDS ))
           echo "round $round, slot $SLOT: shard $k/$GAMUT_NIGHTLY_SHARDS"
           echo "GAMUT_NIGHTLY_SHARD=$k/$GAMUT_NIGHTLY_SHARDS" >> "$GITHUB_ENV"

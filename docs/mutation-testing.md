@@ -214,7 +214,8 @@ each edit costs one build of one package rather than the whole survey.
   as a rotation, informational (`continue-on-error`). An unsharded pass runs for days and a
   GitHub-hosted job is killed at 360 minutes, so each run scores 8 of 128 round-robin shards in
   parallel: shard `(round * 8 + slot) mod 128`, where `round` is days since the Unix epoch (or
-  the dispatch's `round` input). Sixteen consecutive rounds cover every mutant once. The survey
+  the dispatch's `round` input), decided once per run by a `rotation` job before the slots fan
+  out, so a run that straddles 00:00 UTC still scores one round's shards. Sixteen consecutive rounds cover every mutant once. The survey
   step times out at 300 minutes, leaving the job alive to upload the partial `mutants.out`; the
   job backstop is 330. No shard of this split has been timed on a runner yet. Runs do not cancel
   each other, since a newer round does not re-cover an older one's shards.
