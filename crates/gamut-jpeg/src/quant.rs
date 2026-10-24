@@ -54,7 +54,8 @@ pub const CHROMINANCE: [u8; 64] = [
 
 /// A validated pair of baseline quantization tables in **natural** (row-major) order: one for the
 /// luminance destination (`Tq = 0`; also the only table a grayscale frame uses) and one for the
-/// chrominance destination (`Tq = 1`).
+/// chrominance destination (`Tq = 1`), plus an optional third table for the X channel of the XYB
+/// colour mode ([`Self::with_xyb_x`], destination `Tq = 2`).
 ///
 /// Every entry is in the baseline `Pq = 0` range `1..=255` (§A.3.4) — `u8` caps the top and
 /// [`Self::new`] rejects zero — so an encoder holding a `QuantTables` never divides by zero and
@@ -67,19 +68,31 @@ pub const CHROMINANCE: [u8; 64] = [
 pub struct QuantTables {
     luma: [u8; 64],
     chroma: [u8; 64],
+    xyb_x: Option<[u8; 64]>,
+}
+
+/// Rejects a table holding a zero entry as `InvalidInput` (§A.3.4: baseline `Q` is `1..=255`).
+fn reject_zero(table: &[u8; 64]) -> Result<()> {
+    if table.contains(&0) {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: quantization table entries must be in 1..=255 (zero is illegal)",
+        ));
+    }
+    Ok(())
 }
 
 impl QuantTables {
     /// Builds a table pair from natural-order entries, rejecting any zero entry as
     /// `InvalidInput` (§A.3.4 requires baseline `Q` values in `1..=255`).
     pub fn new(luma: [u8; 64], chroma: [u8; 64]) -> Result<Self> {
-        if luma.contains(&0) || chroma.contains(&0) {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "JPEG: quantization table entries must be in 1..=255 (zero is illegal)",
-            ));
-        }
-        Ok(Self { luma, chroma })
+        reject_zero(&luma)?;
+        reject_zero(&chroma)?;
+        Ok(Self {
+            luma,
+            chroma,
+            xyb_x: None,
+        })
     }
 
     /// The T.81 Annex K.1/K.2 example tables verbatim — the pair the default quality path scales.
@@ -88,19 +101,37 @@ impl QuantTables {
         Self {
             luma: LUMINANCE,
             chroma: CHROMINANCE,
+            xyb_x: None,
         }
+    }
+
+    /// Adds a separate natural-order table for the **X** channel of the XYB colour mode
+    /// ([`JpegColorMode::Xyb`](crate::JpegColorMode::Xyb)), rejecting any zero entry as
+    /// `InvalidInput` like [`Self::new`].
+    ///
+    /// Without it, XYB mode quantizes X and Y together with the luminance table (destination
+    /// `Tq = 0`). With it, X quantizes with this table at destination `Tq = 2` — a third DQT
+    /// entry — so X can be quantized more coarsely (or finely) than Y; Y keeps the luminance
+    /// table and the stored B−Y the chrominance table. The table is ignored outside XYB mode,
+    /// where the YCbCr and grayscale frames have no X channel.
+    pub fn with_xyb_x(mut self, x: [u8; 64]) -> Result<Self> {
+        reject_zero(&x)?;
+        self.xyb_x = Some(x);
+        Ok(self)
     }
 
     /// These tables re-scaled by the frozen IJG quality mapping (`quality` clamped to `1..=100`,
     /// matching [`JpegEncoder::with_quality`](crate::JpegEncoder::with_quality)). Infallible: the
     /// mapping clamps every output entry into `1..=255`. `QuantTables::annex_k().scaled(q)`
-    /// reproduces exactly the tables `with_quality(q)` uses.
+    /// reproduces exactly the tables `with_quality(q)` uses. A [`Self::with_xyb_x`] table is
+    /// scaled by the same mapping.
     #[must_use]
     pub fn scaled(&self, quality: u8) -> Self {
         let q = quality.clamp(1, 100);
         Self {
             luma: scale(&self.luma, q),
             chroma: scale(&self.chroma, q),
+            xyb_x: self.xyb_x.map(|x| scale(&x, q)),
         }
     }
 
@@ -114,6 +145,13 @@ impl QuantTables {
     #[must_use]
     pub fn chroma(&self) -> &[u8; 64] {
         &self.chroma
+    }
+
+    /// The separate XYB **X** (`Tq = 2`) table, natural order, or `None` when X shares the
+    /// luminance table ([`Self::with_xyb_x`]).
+    #[must_use]
+    pub fn xyb_x(&self) -> Option<&[u8; 64]> {
+        self.xyb_x.as_ref()
     }
 }
 
@@ -228,6 +266,27 @@ mod tests {
         assert_eq!(q75.chroma(), &scale(&CHROMINANCE, 75));
         assert_eq!(q75.luma()[0], 8);
         assert_eq!(q75.chroma()[0], 9);
+    }
+
+    #[test]
+    fn xyb_x_table_is_absent_by_default_validated_when_added_and_scaled_with_the_pair() {
+        // `new` and `annex_k` carry no X table, so XYB keeps its two-table default.
+        assert_eq!(QuantTables::annex_k().xyb_x(), None);
+        assert_eq!(
+            QuantTables::new(LUMINANCE, CHROMINANCE).unwrap().xyb_x(),
+            None
+        );
+        // A zero entry is rejected like the pair's; a legal table is stored verbatim.
+        let mut bad = [7u8; 64];
+        bad[63] = 0;
+        assert!(QuantTables::annex_k().with_xyb_x(bad).is_err());
+        let x = scale(&LUMINANCE, 30);
+        let t = QuantTables::annex_k().with_xyb_x(x).unwrap();
+        assert_eq!(t.xyb_x(), Some(&x));
+        assert_eq!((t.luma(), t.chroma()), (&LUMINANCE, &CHROMINANCE));
+        // `scaled` applies the frozen mapping to the X table too (75 → scale 50 halves it).
+        assert_eq!(t.scaled(75).xyb_x(), Some(&scale(&x, 75)));
+        assert_eq!(QuantTables::annex_k().scaled(75).xyb_x(), None);
     }
 
     #[test]
