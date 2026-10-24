@@ -32,8 +32,8 @@ impl IccReader {
     ///
     /// # Errors
     ///
-    /// Returns [`IccError::Malformed`](crate::IccError::Malformed) if the profile is malformed, or
-    /// — in strict mode — non-conformant.
+    /// Returns [`IccError::MalformedAt`](crate::IccError::MalformedAt) if the profile is malformed,
+    /// or — in strict mode — non-conformant, located as [`IccProfile::parse`] documents.
     pub fn parse(&self, bytes: &[u8]) -> Result<IccProfile> {
         IccProfile::parse_with(bytes, self.strict)
     }

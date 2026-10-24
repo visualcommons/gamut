@@ -99,14 +99,16 @@ impl ProfileHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`IccError::Malformed`] if `bytes` is shorter than 128 bytes, the `acsp` signature
+    /// Returns [`IccError::MalformedAt`] if `bytes` is shorter than 128 bytes, the `acsp` signature
     /// is missing, or a closed-registry field (device class, colour space, rendering intent) holds
-    /// an unrecognized value.
+    /// an unrecognized value. Its offset is the failing field's (§7.2 Table 18), or the input's
+    /// length for a short header.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 128 {
-            return Err(IccError::Malformed(
-                "icc: profile shorter than 128-byte header",
-            ));
+            return Err(
+                IccError::Malformed("icc: profile shorter than 128-byte header")
+                    .located(bytes.len(), None),
+            );
         }
         let mut r = ByteReader::new(bytes);
         let size = r.u32()?;
@@ -115,19 +117,24 @@ impl ProfileHeader {
         let minor_bugfix = r.u8()?;
         r.skip(2)?; // the two reserved version bytes
         let version = ProfileVersion::from_bytes(major, minor_bugfix);
-        let device_class = DeviceClass::try_from(r.signature()?)?;
-        let data_color_space = ColorSpace::try_from(r.signature()?)?;
-        let pcs = ColorSpace::try_from(r.signature()?)?;
+        let device_class =
+            DeviceClass::try_from(r.signature()?).map_err(|e| e.located(12, None))?;
+        let data_color_space =
+            ColorSpace::try_from(r.signature()?).map_err(|e| e.located(16, None))?;
+        let pcs = ColorSpace::try_from(r.signature()?).map_err(|e| e.located(20, None))?;
         let created = r.date_time()?;
         if r.signature()? != Signature(*b"acsp") {
-            return Err(IccError::Malformed("icc: missing 'acsp' profile signature"));
+            return Err(
+                IccError::Malformed("icc: missing 'acsp' profile signature").located(36, None)
+            );
         }
         let platform = r.signature()?;
         let flags = r.u32()?;
         let manufacturer = r.signature()?;
         let model = r.signature()?;
         let attributes = r.u64()?;
-        let rendering_intent = RenderingIntent::try_from(r.u32()?)?;
+        let rendering_intent =
+            RenderingIntent::try_from(r.u32()?).map_err(|e| e.located(64, None))?;
         let pcs_illuminant = r.xyz_number()?;
         let creator = r.signature()?;
         let mut profile_id = [0u8; 16];
@@ -777,24 +784,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_headers() {
-        // Too short.
-        assert!(ProfileHeader::parse(&[0u8; 64]).is_err());
+    fn rejects_malformed_headers_at_the_failing_field() {
+        /// The message and offset `parse` reports; a header failure never names a tag.
+        fn failure(bytes: &[u8]) -> (&'static str, Option<u64>) {
+            let err = ProfileHeader::parse(bytes).unwrap_err();
+            assert_eq!(err.tag(), None);
+            (err.message(), err.offset())
+        }
+        // Too short: located where the missing bytes begin.
+        assert_eq!(
+            failure(&[0u8; 64]),
+            ("icc: profile shorter than 128-byte header", Some(64))
+        );
         // Bad 'acsp' magic at offset 36.
         let mut bad = sample_header();
         bad[36] = b'X';
-        assert!(ProfileHeader::parse(&bad).is_err());
+        assert_eq!(
+            failure(&bad),
+            ("icc: missing 'acsp' profile signature", Some(36))
+        );
         // Rendering intent out of range at offset 64.
         let mut bad = sample_header();
         bad[67] = 9;
-        assert!(ProfileHeader::parse(&bad).is_err());
-        // Unknown colour space at offset 16.
+        assert_eq!(failure(&bad), ("icc: invalid rendering intent", Some(64)));
+        // Unknown data colour space at offset 16.
         let mut bad = sample_header();
         bad[16..20].copy_from_slice(b"zzzz");
-        assert!(ProfileHeader::parse(&bad).is_err());
+        assert_eq!(failure(&bad), ("icc: unknown colour space", Some(16)));
+        // Unknown PCS at offset 20.
+        let mut bad = sample_header();
+        bad[20..24].copy_from_slice(b"zzzz");
+        assert_eq!(failure(&bad), ("icc: unknown colour space", Some(20)));
         // Unknown device class at offset 12.
         let mut bad = sample_header();
         bad[12..16].copy_from_slice(b"zzzz");
-        assert!(ProfileHeader::parse(&bad).is_err());
+        assert_eq!(failure(&bad), ("icc: unknown device class", Some(12)));
     }
 }

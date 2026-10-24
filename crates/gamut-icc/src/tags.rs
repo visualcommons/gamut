@@ -31,22 +31,26 @@ pub(crate) const fn tag_table_end(tag_count: usize) -> usize {
 /// Validates that the table itself fits within `profile` and that no tag signature is duplicated.
 /// Each tag's element-data bounds are checked by the caller as it is decoded.
 pub(crate) fn parse_tag_table(profile: &[u8]) -> Result<Vec<TagEntry>> {
+    // A parsed header guarantees the 128 bytes this skips.
     let mut r = ByteReader::at(profile, 128)?;
-    let count = r.u32()? as usize;
+    let count = r.u32().map_err(|e| e.located(128, None))? as usize;
     // Reject a count that cannot fit before allocating; `12 * count + 132` must be within bounds.
     let table_end = count
         .checked_mul(12)
         .and_then(|n| n.checked_add(132))
-        .ok_or(IccError::Malformed("icc: tag count overflow"))?;
+        .ok_or(IccError::Malformed("icc: tag count overflow").located(128, None))?;
     if table_end > profile.len() {
-        return Err(IccError::Malformed("icc: tag table exceeds profile"));
+        return Err(IccError::Malformed("icc: tag table exceeds profile").located(128, None));
     }
     let mut entries = Vec::with_capacity(count);
     let mut seen = HashSet::with_capacity(count);
     for _ in 0..count {
+        let row = r.pos();
         let signature = r.signature()?;
         if !seen.insert(signature.0) {
-            return Err(IccError::Malformed("icc: duplicate tag signature"));
+            return Err(
+                IccError::Malformed("icc: duplicate tag signature").located(row, Some(signature))
+            );
         }
         let offset = r.u32()?;
         let size = r.u32()?;
@@ -242,21 +246,38 @@ mod tests {
             b.extend_from_slice(&156u32.to_be_bytes());
             b.extend_from_slice(&0u32.to_be_bytes());
         }
-        assert!(parse_tag_table(&b).is_err());
+        let err = parse_tag_table(&b).unwrap_err();
+        assert_eq!(err.message(), "icc: duplicate tag signature");
+        // The second row (132 + 12) holds the repeat.
+        assert_eq!(err.offset(), Some(144));
+        assert_eq!(err.tag(), Some(Signature(*b"wtpt")));
     }
 
     #[test]
     fn rejects_count_that_overflows_the_buffer() {
         let mut b = header_padding();
         b.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // absurd count
-        assert!(parse_tag_table(&b).is_err());
+        let err = parse_tag_table(&b).unwrap_err();
+        assert_eq!(err.message(), "icc: tag table exceeds profile");
+        assert_eq!((err.offset(), err.tag()), (Some(128), None));
     }
 
     #[test]
     fn rejects_truncated_table() {
         let mut b = header_padding();
         b.extend_from_slice(&1u32.to_be_bytes()); // count 1, but no row follows
-        assert!(parse_tag_table(&b).is_err());
+        let err = parse_tag_table(&b).unwrap_err();
+        assert_eq!(err.message(), "icc: tag table exceeds profile");
+        assert_eq!((err.offset(), err.tag()), (Some(128), None));
+    }
+
+    #[test]
+    fn missing_tag_count_is_located_at_the_count() {
+        let mut b = header_padding();
+        b.extend_from_slice(&[0, 0]); // half a count word
+        let err = parse_tag_table(&b).unwrap_err();
+        assert_eq!(err.message(), "icc: unexpected end of data");
+        assert_eq!((err.offset(), err.tag()), (Some(128), None));
     }
 
     #[test]
