@@ -112,6 +112,31 @@ pub enum RdOptimization {
     TrellisAdaptive = 2,
 }
 
+/// The scan script a progressive stream is coded with ([`JpegEncoder::with_progressive_script`]).
+///
+/// Both scripts deliver every coefficient bit, so the decoded image is identical to the baseline
+/// encoding of the same input whichever is chosen; they differ only in how the coefficients are
+/// split into scans, and therefore in stream size and in how a progressive preview refines.
+///
+/// The discriminants are permanent and append-only (the workspace C-ABI contract for fieldless
+/// enums).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum ProgressiveScript {
+    /// libjpeg's `jpeg_simple_progression` (`jcparam.c`) — the SemVer-frozen default: 6 scans for
+    /// grayscale, 10 for three components, with DC sent by successive approximation.
+    #[default]
+    Libjpeg = 0,
+    /// mozjpeg's `jpeg_simple_progression` under its `JCP_MAX_COMPRESSION` profile with
+    /// `dc_scan_opt_mode = 0` (the jpgcrush `jpeg_scan_bw.txt` / `jpeg_scan_rgb.txt` scripts; see
+    /// `references/jpeg/README.md`): DC sent whole in one scan and AC split at coefficient 8/9 —
+    /// 5 scans for grayscale, 9 for YCbCr, and mozjpeg's all-purpose 13-scan script for
+    /// [`JpegColorMode::Xyb`]. Measured smaller than [`Self::Libjpeg`] on average (issue #30's
+    /// experiment: −0.35% grey, −0.66% 4:2:0, −1.51% 4:4:4), though not at every quality.
+    Mozjpeg = 1,
+}
+
 /// A reusable baseline JPEG encoder.
 ///
 /// Configure it with the builder methods, then drive it through [`EncodeImage`]. It writes JFIF
@@ -149,6 +174,7 @@ pub struct JpegEncoder {
     x_density: u16,
     y_density: u16,
     progressive: bool,
+    progressive_script: ProgressiveScript,
     optimize_tables: bool,
     quant_tables: Option<QuantTables>,
     rd: RdOptimization,
@@ -172,6 +198,7 @@ impl fmt::Debug for JpegEncoder {
             .field("x_density", &self.x_density)
             .field("y_density", &self.y_density)
             .field("progressive", &self.progressive)
+            .field("progressive_script", &self.progressive_script)
             .field("optimize_tables", &self.optimize_tables)
             .field("quant_tables", &self.quant_tables)
             .field("rd", &self.rd)
@@ -203,6 +230,7 @@ impl JpegEncoder {
             x_density: 1,
             y_density: 1,
             progressive: false,
+            progressive_script: ProgressiveScript::Libjpeg,
             optimize_tables: false,
             quant_tables: None,
             rd: RdOptimization::None,
@@ -255,13 +283,15 @@ impl JpegEncoder {
         samples: &[u8],
         out: &mut Vec<u8>,
     ) -> Result<Option<usize>> {
-        // Caller-supplied quantization tables, RD optimization, and the XYB colour mode cannot
-        // ride a `JpegEncodeRequest`, so any of them pins the encode to the built-in path rather
-        // than let a backend silently encode with a different configuration (the same host-side
-        // veto gamut-jxl applies to its container features).
+        // Caller-supplied quantization tables, RD optimization, the XYB colour mode, and a
+        // non-default progressive scan script cannot ride a `JpegEncodeRequest`, so any of them
+        // pins the encode to the built-in path rather than let a backend silently encode with a
+        // different configuration (the same host-side veto gamut-jxl applies to its container
+        // features).
         if self.quant_tables.is_some()
             || self.rd != RdOptimization::None
             || self.color_mode != JpegColorMode::Ycbcr
+            || self.progressive_script != ProgressiveScript::Libjpeg
         {
             return Ok(None);
         }
@@ -361,14 +391,30 @@ impl JpegEncoder {
     ///
     /// A progressive stream codes the image as several scans, each carrying one spectral band at one
     /// successive-approximation precision, so a decoder can render a coarse whole-image preview from
-    /// the first scans and refine it as more arrive. gamut uses libjpeg's frozen
-    /// `jpeg_simple_progression` scan script (a 6-scan gray / 10-scan YCbCr layout) with optimized
-    /// per-scan Huffman tables (Annex K.2). The quantized coefficients — and therefore the decoded
-    /// image — are identical to the baseline encoding of the same input at the same
-    /// `(quality, subsampling)`; only the stream structure differs.
+    /// the first scans and refine it as more arrive. By default gamut uses libjpeg's frozen
+    /// `jpeg_simple_progression` scan script (a 6-scan gray / 10-scan YCbCr layout;
+    /// [`Self::with_progressive_script`] selects another) with optimized per-scan Huffman tables
+    /// (Annex K.2). The quantized coefficients — and therefore the decoded image — are identical
+    /// to the baseline encoding of the same input at the same `(quality, subsampling)`; only the
+    /// stream structure differs.
     #[must_use]
     pub fn with_progressive(mut self, progressive: bool) -> Self {
         self.progressive = progressive;
+        self
+    }
+
+    /// Selects the scan script a [`Self::with_progressive`] stream is coded with
+    /// ([`ProgressiveScript`]).
+    ///
+    /// The default [`ProgressiveScript::Libjpeg`] is the frozen script, whose byte stream is
+    /// unchanged. [`ProgressiveScript::Mozjpeg`] trades it for mozjpeg's maximum-compression
+    /// script, usually a little smaller; the decoded image is identical either way. Has no effect
+    /// on a baseline (non-progressive) stream. While set to a non-default script the encode is
+    /// pinned to the **built-in** encoder — a [`crate::backend::JpegEncodeRequest`] cannot carry
+    /// the script — even for a baseline stream, where the script itself is inert.
+    #[must_use]
+    pub fn with_progressive_script(mut self, script: ProgressiveScript) -> Self {
+        self.progressive_script = script;
         self
     }
 
@@ -760,7 +806,16 @@ impl JpegEncoder {
                     rd: chroma_rd.as_ref(),
                 },
             ];
-            progressive::encode(out, width, height, &comps, self.restart_interval);
+            // XYB is not YCbCr, so mozjpeg's script choice takes its all-purpose branch.
+            progressive::encode(
+                out,
+                width,
+                height,
+                &comps,
+                self.restart_interval,
+                self.progressive_script,
+                false,
+            );
         } else {
             let components = [
                 Component {
@@ -1171,7 +1226,15 @@ impl EncodeImage<Gray8> for JpegEncoder {
                 quant: &luma_quant,
                 rd: luma_rd.as_ref(),
             }];
-            progressive::encode(out, width, height, &comps, self.restart_interval);
+            progressive::encode(
+                out,
+                width,
+                height,
+                &comps,
+                self.restart_interval,
+                self.progressive_script,
+                false,
+            );
         } else {
             let comp = Component {
                 h: 1,
@@ -1268,7 +1331,15 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     rd: chroma_rd.as_ref(),
                 },
             ];
-            progressive::encode(out, width, height, &comps, self.restart_interval);
+            progressive::encode(
+                out,
+                width,
+                height,
+                &comps,
+                self.restart_interval,
+                self.progressive_script,
+                true,
+            );
         } else {
             let components = [
                 Component {
@@ -1397,6 +1468,7 @@ mod tests {
         assert_eq!(d.density_unit, DensityUnit::AspectRatio);
         assert_eq!((d.x_density, d.y_density), (1, 1));
         assert!(!d.progressive);
+        assert_eq!(d.progressive_script, ProgressiveScript::Libjpeg);
         assert!(!d.optimize_tables);
         assert_eq!(d.quant_tables, None);
         assert_eq!(d.rd, RdOptimization::None);

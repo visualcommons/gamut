@@ -78,6 +78,9 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   validated end-to-end against the lcms2 oracle — the runtime dependency edge stays
   jpeg ← core, color, dsp. Always 4:4:4; grayscale and caller ICC profiles rejected; backends
   vetoed; progressive/restarts/optimized-tables/custom-tables/RD compose.
+- Opt-in mozjpeg progressive scan script (P15, issue #1021):
+  `with_progressive_script(ProgressiveScript::Mozjpeg)` beside the frozen libjpeg default; see
+  *Progressive scan script (mozjpeg, opt-in)* below.
 - Rate–distortion optimized coefficient selection (P12, issue #333): `with_rd_optimization` —
   per-block AC trellis over the exact §F.1.2.2 run/size cost of the typical Annex K.5/K.6 tables
   (a documented rate-proxy free choice that keeps baseline and progressive coefficients
@@ -247,9 +250,23 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   coefficients. mozjpeg's `JCP_MAX_COMPRESSION` script is smaller on average over the qualities
   for every image and configuration tried: by 0.66% (4:2:0), 1.51% (4:4:4) and 0.35% (grey), at
   identical decoded pixels. It is not smaller at every point: at 16 of 294 image x configuration x
-  quality points, 15 of them at q70-95, it is equal or up to 0.52% larger. Offering it needs an opt-in or a breaking change to this frozen script, plus a
-  vendored citation (issue #1021). jpegli's default script loses on small colour images, because
-  each of its 13–15 scans carries its own optimized table here.
+  quality points, 15 of them at q70-95, it is equal or up to 0.52% larger. It ships as an
+  **opt-in** beside this frozen script (P15 below), not a replacement. jpegli's default script
+  loses on small colour images, because each of its 13–15 scans carries its own optimized table
+  here.
+- **Progressive scan script (mozjpeg, opt-in).** `with_progressive_script(ProgressiveScript::Mozjpeg)`
+  emits mozjpeg 4.1.5's `jpeg_simple_progression` under `JCP_MAX_COMPRESSION` with
+  `dc_scan_opt_mode = 0`, transcribed from its `jcparam.c` (cited, with its file hash, in
+  `references/jpeg/README.md`). mozjpeg chooses between two scripts and so does gamut: **YCbCr**
+  is the 9-scan jpgcrush `jpeg_scan_rgb.txt` — interleaved DC `Al=0`; Y AC `1–8` `Al=2`; Cb, Cr AC
+  `1–8` `Al=0`; Y AC `9–63` `Al=2`; Y AC refine `Ah=2 Al=1`, `Ah=1 Al=0`; Cb, Cr AC `9–63` `Al=0` —
+  and **every other frame** takes the all-purpose `jpeg_scan_bw.txt`: interleaved DC `Al=0`, then
+  one scan per component for each of AC `1–8` `Al=2`, AC `9–63` `Al=2`, AC refine `Ah=2 Al=1` and
+  AC refine `Ah=1 Al=0` (5 scans for grayscale, 13 for XYB, which is not YCbCr). The frozen libjpeg
+  script, by contrast, keys on the component count alone and gives XYB its YCbCr layout; that is
+  unchanged. Not shipped: mozjpeg's `optimize_scans` search, of which this fixed script is the
+  starting point, and the other `dc_scan_opt_mode` values. While set, backends are vetoed (a
+  `JpegEncodeRequest` cannot carry the script), even for a baseline stream.
 - **Optimized per-scan Huffman tables (Annex K.2).** The standard Annex K AC tables cannot code a
   progressive AC scan (the `EOBn` run/size bytes are absent), so — like libjpeg, which forces
   `optimize_coding` for progressive — each scan builds its own table(s) from its symbol frequencies
@@ -293,3 +310,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P12 | T.81 §F.1.2, Annex K.5/K.6; issue #333 | **RD-optimized coefficient selection:** the `rd` module's per-block AC trellis — dynamic program over (position, {v, v−1}) nodes with the exact run/size + ZRL + EOB bit cost of the typical AC tables as rate proxy, step-normalized distortion (the quantization table as the perceptual weighting), tuned dimensionless λ (pinned; measured 8.7% battery-wide saving at ≤ 0.35 dB) — plus `TrellisAdaptive` per-block λ modulation `√(energy/Σstep²)` clamped `[¼, 4]`. Opt-in `with_rd_optimization`; DC plain (deferred: cross-block DP through the DC predictor/restarts); default byte-identical; backends vetoed; progressive carries identical coefficients by the shared `quantize_block_rd` seam + configuration-only rate model | ✅ done |
 | P13 | Adobe TN #5116; ISO/IEC 18181-1 (XYB, via the vendored CD + pinned libjxl 0.12.0 constants); issue #334 | **XYB colour mode:** `with_color_mode(JpegColorMode::Xyb)` — sRGB → linear (EOTF LUT) → opsin XYB → scaled-XYB u8 planes (X, Y, B−Y) coded 4:4:4 under SOI → APP14 `transform=0` → EXIF/XMP → APP2 `XYB_ICC_PROFILE` → DQT, SOF ids `R`,`G`,`B`, X/Y on the luminance table and B−Y on the chrominance table (placeholder pairing, ledgered above). The 768-byte profile (input class, D50 XYZ PCS, `desc`/`cprt`/`wtpt`/`chad`/`A2B0` mAB with a 2×2×2 CLUT + cube-root parametric M curves + the frozen 0.5·XYZ(D50)·OpsinInverse matrix/`B2A0` no-op) is vendored static and umbrella-pinned; the decoder needs zero changes (RGB passthrough via APP14/ids). Differential: libjpeg-turbo decodes + test-side XYB inversion ≥ 40 dB on the battery; lcms2 reproduces sRGB from real samples (worst 25 codes at the documented near-black X amplification, mean 2.46) | ✅ done |
 | P14 | issue #420; `gamut-metadata` | **Typed metadata wiring** behind the opt-in `metadata` feature: `JpegMetadata::blocks` / `metadata`, `JpegEncoder::with_metadata` / `with_encoded_metadata`; IPTC-IIM / C2PA typed `Unsupported`; pinned by the typed extract → embed → extract equality through the stream. **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no JPEG reader), so "exiv2 reads the embedded APP1/APP2 payloads out of the JPEG" is untested; the located bytes are pinned byte-exact against libjpeg-turbo (ICC, `tests/oracle.rs`) and the leaf crates pin the payloads against exiv2 (#510) | ✅ done |
+| P15 | T.81 §G; mozjpeg 4.1.5 `jcparam.c`; issue #1021 | **Opt-in mozjpeg progressive scan script:** the fieldless `ProgressiveScript` selector (`Libjpeg = 0` frozen default, `Mozjpeg = 1`) via `JpegEncoder::with_progressive_script` — mozjpeg's `JCP_MAX_COMPRESSION` script with `dc_scan_opt_mode = 0`, its YCbCr/all-purpose choice transcribed (9-scan YCbCr, 5-scan grey, 13-scan XYB). Walker-pinned scan lists, gamut-decoder and libjpeg-turbo `decode(progressive) == decode(baseline)` exactness, backends vetoed; default byte-identical | ✅ done |
