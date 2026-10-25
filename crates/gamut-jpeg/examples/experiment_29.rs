@@ -57,7 +57,7 @@ use gamut_jpeg::{
     reason = "the arm uses only the generator, not the bench's streams"
 )]
 #[path = "../benches/common/corpus.rs"]
-mod corpus;
+pub(crate) mod corpus;
 
 /// The quality sweep every variant is encoded at (also #30's scan-script sweep).
 pub(crate) const QUALITIES: [u8; 14] = [30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95];

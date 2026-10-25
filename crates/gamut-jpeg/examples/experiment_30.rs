@@ -33,17 +33,14 @@ use gamut_jpeg::{ChromaSubsampling, JpegEncoder};
 
 #[allow(
     dead_code,
-    reason = "the arm reuses #29's input loader and quality sweep, not its measurement"
+    reason = "the arm reuses #29's input loader, quality sweep and corpus, not its measurement"
 )]
 #[path = "experiment_29.rs"]
 mod exp29;
 
-#[allow(
-    dead_code,
-    reason = "the arm uses only the generator, not the bench's streams"
-)]
-#[path = "../benches/common/corpus.rs"]
-mod corpus;
+/// The decode bench's generator, through #29's arm: a second `#[path]` include of the same file
+/// would compile it twice (`clippy::duplicate_mod`).
+use exp29::corpus;
 
 /// One coding configuration: the RGB input at a chroma subsampling, or its luma as grayscale.
 #[derive(Clone, Copy)]
