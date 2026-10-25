@@ -103,6 +103,11 @@ struct Member {
 
 fn member(name: &'static str, profile: &Profile, channels: usize) -> Member {
     let (parsed, oracle) = reopen(profile);
+    member_of(name, parsed, oracle, channels)
+}
+
+/// A battery member from an already-reopened pair (see [`reopen`] and [`reopen_builtin`]).
+fn member_of(name: &'static str, parsed: IccProfile, oracle: Profile, channels: usize) -> Member {
     let (dbl_format, u16_format, ink_scale) = match channels {
         1 => (TYPE_GRAY_DBL, TYPE_GRAY_16, 1.0),
         3 => (TYPE_RGB_DBL, TYPE_RGB_16, 1.0),
@@ -238,6 +243,96 @@ impl Worst {
     }
 }
 
+/// Runs `src` → `dst` through every intent × BPC cell (BPC × absolute skipped) over the seeded
+/// 60-pixel sweep, feeding each pixel's ΔE₀₀ — through the destination's Lab lens — into `tight`
+/// (lcms2 `TYPE_*_DBL`, `NOOPTIMIZE|NOCACHE`, exact `f64` device values on both sides) and
+/// `loose` (lcms2 `TYPE_*_16` at default flags, both sides fed the same u16-quantized values).
+fn measure_pair(src: &Member, dst: &Member, lab: &Profile, tight: &mut Worst, loose: &mut Worst) {
+    let lens = Transform::new(
+        &dst.oracle,
+        dst.dbl_format,
+        lab,
+        TYPE_Lab_DBL,
+        INTENT_RELATIVE_COLORIMETRIC,
+        FLAGS_NOCACHE,
+    );
+    for (our_intent, lcms_intent) in INTENTS {
+        for bpc in [false, true] {
+            if bpc && our_intent == RenderingIntent::IccAbsoluteColorimetric {
+                continue; // BPC and absolute are mutually exclusive: nothing to gate.
+            }
+            let cell = format!("{}->{} {our_intent:?} bpc={bpc}", src.name, dst.name);
+            let bpc_flag = if bpc { FLAGS_BLACKPOINTCOMPENSATION } else { 0 };
+            let ours = IccTransform::between(
+                &src.parsed,
+                &dst.parsed,
+                TransformOptions {
+                    intent: our_intent,
+                    black_point_compensation: bpc,
+                    optimization: PipelineOptimization::None,
+                    prefer_cicp_transfer: false,
+                },
+            )
+            .unwrap();
+            let lcms_tight = Transform::new(
+                &src.oracle,
+                src.dbl_format,
+                &dst.oracle,
+                dst.dbl_format,
+                lcms_intent,
+                FLAGS_NOOPTIMIZE | FLAGS_NOCACHE | bpc_flag,
+            );
+            // The 16-bit path real callers get: default flags, quantized formatters.
+            // One default is disabled: the white-on-white ("scum dot") fixup, an
+            // lcms2-only aesthetic that snaps the input white node onto the output
+            // white in the precalculated CLUT — it would dominate the metric at the
+            // device-white corner (measured 8.5 dE00 on the CMYK printer, whose paper
+            // simulation is deliberately off-white) while gating nothing about this
+            // crate's correctness.
+            let lcms_loose = Transform::new(
+                &src.oracle,
+                src.u16_format,
+                &dst.oracle,
+                dst.u16_format,
+                lcms_intent,
+                bpc_flag | FLAGS_NOWHITEONWHITEFIXUP,
+            );
+            for device in sweep(src.channels, 60, 0xC0FF_EE00 ^ u64::from(lcms_intent)) {
+                // TIGHT: exact f64 device values on both sides.
+                let got = eval_ours(&ours, &device);
+                let ink: Vec<f64> = device.iter().map(|&v| v * src.ink_scale).collect();
+                let want = clamp01(
+                    lcms_tight
+                        .apply_f64(&ink, 1, dst.channels)
+                        .iter()
+                        .map(|&v| v / dst.ink_scale)
+                        .collect(),
+                );
+                tight.feed(lens_delta_e(&lens, &got, &want, dst.ink_scale), &cell);
+                // LOOSE: both sides fed the identical u16-quantized device values.
+                let device16: Vec<u16> = device
+                    .iter()
+                    .map(|&v| {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "v is in [0, 1]"
+                        )]
+                        {
+                            (v * 65535.0 + 0.5) as u16
+                        }
+                    })
+                    .collect();
+                let device_q: Vec<f64> = device16.iter().map(|&v| f64::from(v) / 65535.0).collect();
+                let got = eval_ours(&ours, &device_q);
+                let want16 = lcms_loose.apply_u16(&device16, 1, dst.channels);
+                let want: Vec<f64> = want16.iter().map(|&v| f64::from(v) / 65535.0).collect();
+                loose.feed(lens_delta_e(&lens, &got, &want, dst.ink_scale), &cell);
+            }
+        }
+    }
+}
+
 // The asserted per-class bounds. Measured (this battery, seeds below, lcms2 2.19) over the
 // **full** input domain — every figure here was re-measured for #453, and is not comparable
 // with the ones it replaces, because the sweeps producing those had only ever covered `[0, 0.5)`:
@@ -285,93 +380,14 @@ fn conformance_pairs_battery() {
     let mut tight = [Worst::default(), Worst::default()]; // [Shaper, Lut]
     let mut loose = [Worst::default(), Worst::default()];
     for (src_name, dst_name, class) in PAIRS {
-        let src = find(&battery, src_name);
-        let dst = find(&battery, dst_name);
-        let lens = Transform::new(
-            &dst.oracle,
-            dst.dbl_format,
+        let class_slot = usize::from(class == Class::Lut);
+        measure_pair(
+            find(&battery, src_name),
+            find(&battery, dst_name),
             &lab,
-            TYPE_Lab_DBL,
-            INTENT_RELATIVE_COLORIMETRIC,
-            FLAGS_NOCACHE,
+            &mut tight[class_slot],
+            &mut loose[class_slot],
         );
-        for (our_intent, lcms_intent) in INTENTS {
-            for bpc in [false, true] {
-                if bpc && our_intent == RenderingIntent::IccAbsoluteColorimetric {
-                    continue; // BPC and absolute are mutually exclusive: nothing to gate.
-                }
-                let cell = format!("{src_name}->{dst_name} {our_intent:?} bpc={bpc}");
-                let bpc_flag = if bpc { FLAGS_BLACKPOINTCOMPENSATION } else { 0 };
-                let ours = IccTransform::between(
-                    &src.parsed,
-                    &dst.parsed,
-                    TransformOptions {
-                        intent: our_intent,
-                        black_point_compensation: bpc,
-                        optimization: PipelineOptimization::None,
-                        prefer_cicp_transfer: false,
-                    },
-                )
-                .unwrap();
-                let lcms_tight = Transform::new(
-                    &src.oracle,
-                    src.dbl_format,
-                    &dst.oracle,
-                    dst.dbl_format,
-                    lcms_intent,
-                    FLAGS_NOOPTIMIZE | FLAGS_NOCACHE | bpc_flag,
-                );
-                // The 16-bit path real callers get: default flags, quantized formatters.
-                // One default is disabled: the white-on-white ("scum dot") fixup, an
-                // lcms2-only aesthetic that snaps the input white node onto the output
-                // white in the precalculated CLUT — it would dominate the metric at the
-                // device-white corner (measured 8.5 dE00 on the CMYK printer, whose paper
-                // simulation is deliberately off-white) while gating nothing about this
-                // crate's correctness.
-                let lcms_loose = Transform::new(
-                    &src.oracle,
-                    src.u16_format,
-                    &dst.oracle,
-                    dst.u16_format,
-                    lcms_intent,
-                    bpc_flag | FLAGS_NOWHITEONWHITEFIXUP,
-                );
-                let class_slot = usize::from(class == Class::Lut);
-                for device in sweep(src.channels, 60, 0xC0FF_EE00 ^ u64::from(lcms_intent)) {
-                    // TIGHT: exact f64 device values on both sides.
-                    let got = eval_ours(&ours, &device);
-                    let ink: Vec<f64> = device.iter().map(|&v| v * src.ink_scale).collect();
-                    let want = clamp01(
-                        lcms_tight
-                            .apply_f64(&ink, 1, dst.channels)
-                            .iter()
-                            .map(|&v| v / dst.ink_scale)
-                            .collect(),
-                    );
-                    tight[class_slot].feed(lens_delta_e(&lens, &got, &want, dst.ink_scale), &cell);
-                    // LOOSE: both sides fed the identical u16-quantized device values.
-                    let device16: Vec<u16> = device
-                        .iter()
-                        .map(|&v| {
-                            #[expect(
-                                clippy::cast_possible_truncation,
-                                clippy::cast_sign_loss,
-                                reason = "v is in [0, 1]"
-                            )]
-                            {
-                                (v * 65535.0 + 0.5) as u16
-                            }
-                        })
-                        .collect();
-                    let device_q: Vec<f64> =
-                        device16.iter().map(|&v| f64::from(v) / 65535.0).collect();
-                    let got = eval_ours(&ours, &device_q);
-                    let want16 = lcms_loose.apply_u16(&device16, 1, dst.channels);
-                    let want: Vec<f64> = want16.iter().map(|&v| f64::from(v) / 65535.0).collect();
-                    loose[class_slot].feed(lens_delta_e(&lens, &got, &want, dst.ink_scale), &cell);
-                }
-            }
-        }
     }
     eprintln!(
         "conformance maxima: tight shaper {:.3e} ({}), tight LUT {:.3e} ({}), \
@@ -1722,4 +1738,113 @@ fn sampled_pq_transforms_stay_inside_their_class_budget() {
     ];
     assert_within("pq, TRC tags", &cicp_pairs(&pairs, false), bounds);
     assert_within("pq, cicp preferred", &cicp_pairs(&pairs, true), bounds);
+}
+
+/// Entry count of [`srgb_v2_sampled`]'s TRC tables — the common size of a v2 display
+/// profile's tabulated sRGB `curveType`.
+const SAMPLED_SRGB_ENTRIES: u16 = 1024;
+
+/// The built-in sRGB re-dressed as a v2.1 display profile whose `rTRC`/`gTRC`/`bTRC` are one
+/// [`SAMPLED_SRGB_ENTRIES`]-entry `curveType` tabulating the sRGB EOTF — the shape a v2 sRGB
+/// carries in the wild. `chad` and `cicp` are dropped (neither is a v2 tag); `desc` and `cprt`
+/// take their v2 types (`textDescriptionType`, `textType`).
+fn srgb_v2_sampled() -> IccProfile {
+    use gamut_color::transfer::srgb_eotf;
+    use gamut_icc::{
+        BuiltinProfile, Curve, KnownTag, ProfileVersion, Signature, TagData, TextDescription,
+    };
+    let mut profile = IccProfile::builtin(BuiltinProfile::Srgb).unwrap();
+    profile.header.version = ProfileVersion {
+        major: 2,
+        minor: 1,
+        bugfix: 0,
+    };
+    let last = f64::from(SAMPLED_SRGB_ENTRIES - 1);
+    let table = (0..SAMPLED_SRGB_ENTRIES)
+        .map(|i| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the EOTF maps [0, 1] into [0, 1]"
+            )]
+            {
+                (srgb_eotf(f64::from(i) / last) * 65535.0).round() as u16
+            }
+        })
+        .collect();
+    let trc = TagData::Curve(Curve::Sampled(table));
+    let is = |sig: Signature, tags: &[KnownTag]| tags.iter().any(|&t| Signature::from(t) == sig);
+    profile
+        .tags
+        .retain(|&(sig, _)| !is(sig, &[KnownTag::ChromaticAdaptation, KnownTag::Cicp]));
+    for (sig, data) in &mut profile.tags {
+        if is(
+            *sig,
+            &[KnownTag::RedTrc, KnownTag::GreenTrc, KnownTag::BlueTrc],
+        ) {
+            *data = trc.clone();
+        } else if is(*sig, &[KnownTag::ProfileDescription]) {
+            *data = TagData::TextDescription(TextDescription {
+                ascii: "sRGB (v2, sampled TRC)".to_owned(),
+                ..TextDescription::default()
+            });
+        } else if is(*sig, &[KnownTag::Copyright]) {
+            *data = TagData::Text("No copyright, use freely".to_owned());
+        }
+    }
+    profile
+}
+
+// LUT sources into a **sampled-TRC** matrix/TRC destination (#1003) sit outside TIGHT_LUT_BOUND,
+// and this crate's error is not why. Measured (lcms2 2.19), per source, against the same source
+// into the built-in v4 sRGB, whose TRC is the parametric encoding of the same curve:
+//
+//   source     tight → srgb-v2-sampled   worst tight cell        tight → v4 sRGB   loose max / mean
+//   cmyk-v4    3.20e-2                   perceptual              8.77e-3           2.07e0 / 2.92e-2
+//   cmyk-v2    3.15e-2                   saturation + BPC        6.60e-3           5.80e-1 / 2.04e-2
+//   scnr-lut   7.95e-3                   saturation              3.41e-3           9.21e-2 / 4.39e-3
+//   all three  3.20e-2                                                             2.07e0 / 1.80e-2
+//
+// Only TIGHT moves, so LOOSE keeps the LUT class's bounds (2.42× / 1.67× headroom). What moves
+// it is how lcms2 evaluates the destination's inverse TRC: it reverses the 1024-entry table into
+// a 4096-entry **16-bit** table (`cmsReverseToneCurve`, `cmsgamma.c`) and evaluates it through
+// `cmsEvalToneCurveFloat`, which for a tabulated curve quantizes the linear-light input to 16
+// bits and evaluates in 16 bits even inside a `TYPE_*_DBL` transform — at the sRGB toe, an
+// inverse slope of 12.92 times a 1/65535 step.
+//
+// Two experiments, each a one-line local change to `ToneCurve::inverse`'s table, separate the
+// engines. Refining this crate's reversal 64× (262 144 entries, a near-exact pseudo-inverse of
+// the piecewise-linear table) leaves the measured TIGHT at 3.199e-2 to four digits: the
+// inversion here contributes nothing the gate can see. Quantizing this crate's reversed-table
+// evaluation to 16 bits the way lcms2 does (input, table and output, rounded) drops it to
+// 1.95e-2, inside TIGHT_LUT_BOUND. The excess is lcms2's quantization, not a defect here, so
+// `ToneCurve::inverse` is left as it is: copying the oracle's quantization would make this crate
+// less accurate to match it.
+//
+// Re-derived with these pairs, TIGHT_LUT_BOUND would rise to 8e-2 — 9× over the 8.77e-3 every
+// other LUT pair measures, so a near-decade regression there would pass. It stays as measured,
+// and these pairs get their own TIGHT bound at ~2.5× over the measurement, as the PQ class above
+// does for the same reason.
+const TIGHT_SAMPLED_TRC_LUT_BOUND: f64 = 8e-2; // 2.50× over 3.20e-2
+
+#[test]
+fn lut_into_sampled_trc_transforms_stay_inside_their_class_budget() {
+    set_quiet_log_handler();
+    let battery = battery();
+    let (parsed, oracle) = reopen_builtin(&srgb_v2_sampled());
+    let dst = member_of("srgb-v2-sampled", parsed, oracle, 3);
+    let lab = lab4();
+    let (mut tight, mut loose) = (Worst::default(), Worst::default());
+    for src_name in ["cmyk-v4", "cmyk-v2", "scnr-lut"] {
+        measure_pair(find(&battery, src_name), &dst, &lab, &mut tight, &mut loose);
+    }
+    assert_within(
+        "LUT into sampled TRC",
+        &(tight, loose),
+        [
+            TIGHT_SAMPLED_TRC_LUT_BOUND,
+            LOOSE_LUT_BOUND,
+            LOOSE_LUT_MEAN_BOUND,
+        ],
+    );
 }
