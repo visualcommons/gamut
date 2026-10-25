@@ -59,6 +59,8 @@ lcms2 is C.
   The malformed-profile panel adds the one fact it can check on its own, the header's declared
   size against the bytes present. Structured context in `IccError` is tracked in #1004.
 - The badge leaves out one pair that no panel renders, the printer into the v2 sampled-TRC sRGB.
-  It measures 3.51e-2 there, over the bound, and that `gamut-cmm` finding is #1003.
+  It measures 3.51e-2 there, over the bound. #1003 traced that excess to lcms2's 16-bit
+  evaluation of the reversed sampled TRC, not to `gamut-cmm`, which gates the pair under its own
+  class bound, 8e-2.
 - The browser page needs a one-line JavaScript module loader. `wasm-bindgen` generates that
   glue, and no npm, bundler, or hand-written JavaScript is involved.

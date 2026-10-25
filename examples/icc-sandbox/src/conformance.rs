@@ -33,8 +33,10 @@ pub const BOUND: f64 = 2e-2;
 ///
 /// One pair is deliberately absent: the printer into the **v2** sRGB (its 1024-entry sampled
 /// TRC inverted numerically), which no panel renders and which measures 3.51e-2 at ICC-absolute
-/// — over [`BOUND`]. That is a `gamut-cmm` finding, filed against that crate as #1003 rather
-/// than hidden in a looser badge here.
+/// — over [`BOUND`]. #1003 traced the excess to lcms2, which evaluates the reversed sampled TRC
+/// in 16 bits even in a double-precision transform, not to `gamut-cmm`; that crate gates the
+/// pair under its own class bound (`TIGHT_SAMPLED_TRC_LUT_BOUND`, 8e-2), and this badge keeps
+/// the plain LUT bound rather than loosening it for one pair no panel renders.
 pub const PAIRS: [(ProfileKind, ProfileKind); 8] = [
     (ProfileKind::SrgbV2, ProfileKind::SrgbV4),
     (ProfileKind::SrgbV2, ProfileKind::DisplayP3),
