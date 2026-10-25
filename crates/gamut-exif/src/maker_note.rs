@@ -7,6 +7,7 @@
 //! offsets count from. On top of that layout sit read-only per-vendor views:
 //!
 //! - **Canon** — [`canon::CanonMakerNote`], through [`MakerNote::canon`] (issue #977).
+//! - **Leica** — [`leica::LeicaMakerNote`], through [`MakerNote::leica`] (issue #978).
 //!
 //! Every other vendor's tags stay undecoded; their views are the remainder of issue #418 and can
 //! be added without breaking this API (every enum and the layout struct here are
@@ -16,9 +17,10 @@
 //!
 //! [`MakerNoteLayout::detect`] follows exiv2's dispatch table (`TiffMnCreator::registry_` and the
 //! `*MnHeader` classes in `third_party/exiv2/src/makernote_int.cpp`; summarised at
-//! <https://exiv2.org/makernote.html>), plus Apple, which exiv2 does not handle (ExifTool's
-//! `MakerNoteApple`). The vendor picks the candidate dialects and the note's own signature picks
-//! among them. See `references/exif/README.md` for the per-dialect table and where this reader
+//! <https://exiv2.org/makernote.html>), plus Apple and Leica, which exiv2 does not handle
+//! (ExifTool's `MakerNoteApple` and `MakerNoteLeica*` entries; Leica's are staked in
+//! `references/exif/leica/README.md`). The vendor picks the candidate dialects and the note's own
+//! signature picks among them. See `references/exif/README.md` for the per-dialect table and where this reader
 //! deliberately differs from exiv2. A note no dialect recognises has no layout and stays opaque.
 //!
 //! # Round-trip behaviour
@@ -35,8 +37,9 @@
 //! too.
 
 pub mod canon;
+pub mod leica;
 
-use gamut_ifd::{AuditFinding, ByteOrder, Ifd, IfdReader, ReadAt, Variant};
+use gamut_ifd::{AuditFinding, ByteOrder, Ifd, IfdReader, RawIfd, ReadAt, Rebased, Variant};
 
 use crate::error::Result;
 
@@ -90,6 +93,33 @@ impl MakerNote {
             at: note_at,
         };
         canon::CanonMakerNote::read(placed, note_at, layout)
+    }
+
+    /// The block decoded as a Leica note, given `outer` and `note_at` as for
+    /// [`canon`](Self::canon): some Leica dialects count their value offsets from the TIFF header,
+    /// the others from the note's start.
+    ///
+    /// Reads only these bytes, so a value whose offset points outside the note is unreadable here
+    /// and named by [`LeicaMakerNote::unreadable_tags`](leica::LeicaMakerNote::unreadable_tags);
+    /// [`LeicaMakerNote::read`](leica::LeicaMakerNote::read) reads through the whole stream
+    /// instead.
+    ///
+    /// `Ok(None)` when the block has no layout, or one that is not a Leica IFD dialect (see
+    /// [`LeicaMakerNote::read`](leica::LeicaMakerNote::read)).
+    ///
+    /// # Errors
+    ///
+    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// entries and next-IFD pointer — does not fit in the note.
+    pub fn leica(&self, outer: ByteOrder, note_at: u64) -> Result<Option<leica::LeicaMakerNote>> {
+        let Some(layout) = self.layout(outer) else {
+            return Ok(None);
+        };
+        let placed = Placed {
+            bytes: &self.bytes,
+            at: note_at,
+        };
+        leica::LeicaMakerNote::read(placed, note_at, layout)
     }
 }
 
@@ -145,6 +175,22 @@ pub(crate) fn read_note_ifd<S: ReadAt>(
     note_at: u64,
     layout: MakerNoteLayout,
 ) -> Result<(Ifd, Vec<u16>)> {
+    let (mut reader, raw) = open_note_ifd(stream, note_at, layout)?;
+    decode_lenient(&mut reader, &raw)
+}
+
+/// Reads the note's directory raw, as [`read_note_ifd`] does before decoding it, and returns it
+/// with the reader it came from: a reader over `stream` rebased at the offset base's origin, so
+/// any further offset the note holds (a vendor subdirectory's) reads in the same space.
+///
+/// # Errors
+///
+/// As [`read_note_ifd`].
+pub(crate) fn open_note_ifd<S: ReadAt>(
+    stream: S,
+    note_at: u64,
+    layout: MakerNoteLayout,
+) -> Result<(IfdReader<Rebased<S>>, RawIfd)> {
     let ifd_at = note_at
         .checked_add(u64::from(layout.ifd_offset))
         .ok_or(crate::ExifError::BadOffset(note_at))?;
@@ -158,7 +204,22 @@ pub(crate) fn read_note_ifd<S: ReadAt>(
     let mut reader =
         IfdReader::with_layout(stream.rebased(origin), layout.byte_order, Variant::Classic);
     let raw = reader.read_ifd(within)?;
-    let (ifd, findings) = reader.decode_ifd_lenient(&raw)?;
+    Ok((reader, raw))
+}
+
+/// Decodes `raw` leniently: an entry whose value cannot be read is left out of the directory and
+/// its tag returned beside it, in on-disk order. A tag `raw` repeats keeps its last readable
+/// occurrence.
+///
+/// # Errors
+///
+/// [`ExifError::Ifd`](crate::ExifError::Ifd) only when the source fails (an I/O-kind error); an
+/// unreadable value is never an error.
+pub(crate) fn decode_lenient<S: ReadAt>(
+    reader: &mut IfdReader<S>,
+    raw: &RawIfd,
+) -> Result<(Ifd, Vec<u16>)> {
+    let (ifd, findings) = reader.decode_ifd_lenient(raw)?;
     let unreadable = findings
         .iter()
         .filter_map(|finding| match finding {
@@ -204,6 +265,8 @@ pub enum MakerNoteVendor {
     Sigma,
     /// Casio.
     Casio,
+    /// Leica (`LEICA`, `Leica Camera AG`, `LEICA CAMERA AG`).
+    Leica,
 }
 
 impl MakerNoteVendor {
@@ -245,13 +308,16 @@ impl MakerNoteVendor {
             MakerNoteVendor::Sigma
         } else if has("CASIO") {
             MakerNoteVendor::Casio
+        } else if has("LEICA") {
+            MakerNoteVendor::Leica
         } else {
             MakerNoteVendor::Unknown
         }
     }
 }
 
-/// The header variant a MakerNote follows within its vendor, named after exiv2's makernote groups.
+/// The header variant a MakerNote follows within its vendor, named after exiv2's makernote groups
+/// (Leica's, which exiv2 lacks, after ExifTool's `MakerNoteLeica*` entries).
 ///
 /// The discriminants are permanent and append-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,14 +363,36 @@ pub enum MakerNoteDialect {
     Minolta = 17,
     /// Apple: `Apple iOS\0` + 2 version bytes + a byte-order mark, IFD at byte 14.
     Apple = 18,
+    /// Leica R8/R9 (ExifTool's `MakerNoteLeica3`): a bare IFD at byte 0, offsets from the TIFF
+    /// header.
+    Leica3 = 19,
+    /// Leica M9 / M Monochrom (`MakerNoteLeica4`): `LEICA0`, IFD at byte 8, offsets from the note's
+    /// start.
+    Leica4 = 20,
+    /// Leica X1/X2/X Vario/T/X/X-U (`MakerNoteLeica5`): `LEICA\0` + a version byte + `\0`, IFD at
+    /// byte 8, offsets from the note's start.
+    Leica5 = 21,
+    /// Leica Q/SL/CL (`MakerNoteLeica8`): `LEICA\0` + a version byte + `\0`, IFD at byte 8, offsets
+    /// from the TIFF header.
+    Leica8 = 22,
+    /// Leica M10/S (`MakerNoteLeica9`): `LEICA\0\x02\0`, IFD at byte 8, offsets from the TIFF
+    /// header.
+    Leica9 = 23,
+    /// Leica D-Lux 7 (`MakerNoteLeica10`): `LEICA CAMERA AG\0`, a Panasonic-format IFD at byte 18
+    /// with no next-IFD pointer, offsets from the TIFF header.
+    Leica10 = 24,
 }
 
 impl MakerNoteDialect {
     /// Whether the note's IFD ends in a 4-byte next-IFD pointer. Panasonic and Sony type 1 omit it
-    /// (exiv2 builds both with `hasNext = false`); every other dialect carries one.
+    /// (exiv2 builds both with `hasNext = false`), and so does Leica 10, a Panasonic-format note;
+    /// every other dialect carries one.
     #[must_use]
     pub fn has_next_ifd(self) -> bool {
-        !matches!(self, MakerNoteDialect::Panasonic | MakerNoteDialect::Sony1)
+        !matches!(
+            self,
+            MakerNoteDialect::Panasonic | MakerNoteDialect::Sony1 | MakerNoteDialect::Leica10
+        )
     }
 }
 
@@ -416,6 +504,7 @@ impl MakerNoteLayout {
                 14,
                 OffsetBase::MakerNote { at: 0 },
             ),
+            MakerNoteVendor::Leica => leica(note, outer)?,
             _ => return None,
         };
         let ifd_end = usize::try_from(layout.ifd_offset)
@@ -533,6 +622,44 @@ fn pentax(note: &[u8], outer: ByteOrder) -> Option<MakerNoteLayout> {
         ))
     } else {
         None
+    }
+}
+
+/// Leica, after ExifTool's `MakerNoteLeica*` entries (`references/exif/leica/README.md`), as far
+/// as the note's own bytes decide them: Fujifilm's signature (Leica's Fujifilm-built bodies), a
+/// `LEICA` signature naming one of the dialects below, or no `LEICA` signature at all (a bare IFD).
+/// Every Leica IFD inherits the outer byte order. A `LEICA` signature whose bytes fit none of them
+/// — `LEICA\0\0\0` and `LEICA\0\x02\xff` among them, whose offset base ExifTool settles from
+/// `Make` and `Model` — has no layout.
+fn leica(note: &[u8], outer: ByteOrder) -> Option<MakerNoteLayout> {
+    use MakerNoteDialect as D;
+    let layout = |dialect, ifd_offset, offset_base| {
+        Some(MakerNoteLayout::new(
+            dialect,
+            outer,
+            ifd_offset,
+            offset_base,
+        ))
+    };
+    let note_start = OffsetBase::MakerNote { at: 0 };
+    let tiff = OffsetBase::TiffHeader;
+    if note.starts_with(b"FUJIFILM") {
+        return fujifilm(note);
+    }
+    if note.starts_with(b"LEICA CAMERA AG\0") {
+        return layout(D::Leica10, 18, tiff);
+    }
+    if note.starts_with(b"LEICA0") {
+        return layout(D::Leica4, 8, note_start);
+    }
+    if !note.starts_with(b"LEICA") {
+        return layout(D::Leica3, 0, tiff);
+    }
+    match note.get(5..8)? {
+        [0, 0x01 | 0x04..=0x07 | 0x10 | 0x1a, 0] => layout(D::Leica5, 8, note_start),
+        [0, 0x08..=0x0a, 0] => layout(D::Leica8, 8, tiff),
+        [0, 0x02, 0] => layout(D::Leica9, 8, tiff),
+        _ => None,
     }
 }
 
@@ -745,6 +872,80 @@ mod tests {
     }
 
     #[test]
+    fn leica_is_any_make_naming_leica() {
+        for make in ["LEICA", "Leica Camera AG", "LEICA CAMERA AG"] {
+            assert_eq!(MakerNoteVendor::detect(Some(make)), V::Leica, "{make}");
+        }
+    }
+
+    #[test]
+    fn leica_signatures_pick_their_dialect() {
+        // `Leica3`: anything not signed `LEICA` (or `FUJIFILM`) is a bare IFD.
+        assert_layout(V::Leica, &note(b""), D::Leica3, None, 0, ABSOLUTE);
+        assert_layout(V::Leica, &note(b"LEIC"), D::Leica3, None, 0, ABSOLUTE);
+        // `Leica4`: `LEICA0`, whatever follows (the M Monochrom fixture opens `LEICA0\x03\0`).
+        assert_layout(
+            V::Leica,
+            &note(b"LEICA0\x03\0"),
+            D::Leica4,
+            None,
+            8,
+            RELATIVE,
+        );
+        assert_layout(V::Leica, &note(b"LEICA0\0\0"), D::Leica4, None, 8, RELATIVE);
+        // Each version byte separately: an or-pattern alternative is invisible to the gate.
+        for version in [0x01, 0x04, 0x05, 0x06, 0x07, 0x10, 0x1a] {
+            let bytes = note(&[b'L', b'E', b'I', b'C', b'A', 0, version, 0]);
+            assert_layout(V::Leica, &bytes, D::Leica5, None, 8, RELATIVE);
+        }
+        for version in [0x08, 0x09, 0x0a] {
+            let bytes = note(&[b'L', b'E', b'I', b'C', b'A', 0, version, 0]);
+            assert_layout(V::Leica, &bytes, D::Leica8, None, 8, ABSOLUTE);
+        }
+        assert_layout(
+            V::Leica,
+            &note(b"LEICA\0\x02\0"),
+            D::Leica9,
+            None,
+            8,
+            ABSOLUTE,
+        );
+        let mut bytes = note(b"LEICA CAMERA AG\0\0\0");
+        bytes.truncate(18 + ONE_ENTRY_IFD);
+        assert_layout(V::Leica, &bytes, D::Leica10, None, 18, ABSOLUTE);
+    }
+
+    #[test]
+    fn leica_signatures_the_bytes_cannot_decide_have_no_layout() {
+        for header in [
+            &b"LEICA\0\0\0"[..],
+            b"LEICA\0\x02\xff",
+            b"LEICA\0\x03\0",
+            b"LEICA\0\x0b\0",
+            b"LEICA\x01\x02\0",
+            b"LEICA\0\x02\x01",
+            b"LEICA CAMERA AG!",
+        ] {
+            assert_eq!(both(V::Leica, &note(header)), [None, None], "{header:?}");
+        }
+        // A signature cut short of its version bytes names no dialect.
+        assert_eq!(both(V::Leica, b"LEICA\0\x02"), [None, None]);
+    }
+
+    #[test]
+    fn leica_fujifilm_bodies_follow_the_fujifilm_dialect() {
+        let bytes = note(b"FUJIFILM\x0c\0\0\0");
+        assert_layout(V::Leica, &bytes, D::Fujifilm, Some(LE), 12, RELATIVE);
+    }
+
+    #[test]
+    fn leica_10_must_hold_its_18_byte_header_and_a_one_entry_ifd() {
+        let mut bytes = note(b"LEICA CAMERA AG\0\0\0");
+        bytes.truncate(18 + ONE_ENTRY_IFD - 1);
+        assert_eq!(both(V::Leica, &bytes), [None, None]);
+    }
+
+    #[test]
     fn unknown_vendors_have_no_layout() {
         assert_eq!(both(V::Unknown, &note(b"")), [None, None]);
     }
@@ -773,6 +974,8 @@ mod tests {
     fn only_panasonic_and_sony_type_1_omit_the_next_ifd_pointer() {
         assert!(!D::Panasonic.has_next_ifd());
         assert!(!D::Sony1.has_next_ifd());
+        assert!(!D::Leica10.has_next_ifd());
+        assert!(D::Leica9.has_next_ifd());
         assert!(D::Sony2.has_next_ifd());
         assert!(D::Canon.has_next_ifd());
     }
