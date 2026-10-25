@@ -86,8 +86,11 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   (DC trellis deferred: a cross-block DP through the §F.1.2.1 predictor and restart resets —
   mozjpeg ships it separately too). Experiment #974 (`experiments/974/RESULTS.md`) measured a
   two-candidate Viterbi DC trellis on the AC trellis's cost model: it moves BD-rate by under 0.1%
-  on average and at most 0.26% on any image, so the deferral stands. Default off
-  (byte-identical); backends vetoed.
+  on average and at most 0.26% on any image, so the deferral stands. Experiment #30 measured
+  jpegli's non-adaptive AC zero bias as a cheaper alternative. It saves 3–6% on the plain path but
+  stays 0.8–1.8% behind this trellis on the same tables, so it is not offered. The same record
+  measured libjpeg-turbo's input smoothing (costs rate on clean input) and its ordered
+  downsampling bias (negligible): neither ships. Default off (byte-identical); backends vetoed.
 - Caller-supplied quantization tables (P11, issue #332): the validated `QuantTables` pair
   (natural order, entries `1..=255` by construction) used **verbatim** via
   `JpegEncoder::with_quant_tables`, bypassing — without changing — the frozen quality mapping;
@@ -240,6 +243,12 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   is the 10-scan colour variant: interleaved DC `Al=1`; Y AC `1–5` `Al=2`; Cr AC `1–63` `Al=1`;
   Cb AC `1–63` `Al=1`; Y AC `6–63` `Al=2`; Y AC refine `Ah=2 Al=1`; interleaved DC refine `Ah=1 Al=0`;
   Cr, Cb, then Y AC refine `Ah=1 Al=0` (Cr before Cb, exactly as libjpeg orders them).
+  Experiment #30 (`experiments/30/RESULTS.md`) measured two alternative scripts on the same
+  coefficients. mozjpeg's `JCP_MAX_COMPRESSION` script is smaller on every image and
+  configuration tried: by 0.66% (4:2:0), 1.51% (4:4:4) and 0.35% (grey) on average, at identical
+  decoded pixels. Offering it needs an opt-in or a breaking change to this frozen script, plus a
+  vendored citation (issue #1021). jpegli's default script loses on small colour images, because
+  each of its 13–15 scans carries its own optimized table here.
 - **Optimized per-scan Huffman tables (Annex K.2).** The standard Annex K AC tables cannot code a
   progressive AC scan (the `EOBn` run/size bytes are absent), so — like libjpeg, which forces
   `optimize_coding` for progressive — each scan builds its own table(s) from its symbol frequencies
