@@ -125,10 +125,10 @@ impl LeicaMakerNote {
         self.subdirectories[slot].as_ref()
     }
 
-    /// The tags whose values could not be read (an offset past the source, or a malformed value)
-    /// — the note's own entries first, in on-disk order, then each `Leica4` subdirectory's in the
-    /// order the note lists them — plus every subdirectory entry whose IFD could not be read.
-    /// Empty for a well-formed note.
+    /// The tags whose values could not be read (an offset past the source, or a malformed value):
+    /// the note's own entries first, in on-disk order; then, for each `Leica4` subdirectory entry
+    /// in the order the note lists them, either its IFD's unreadable entries or, when that IFD
+    /// itself could not be read, the subdirectory's own tag. Empty for a well-formed note.
     #[must_use]
     pub fn unreadable_tags(&self) -> &[u16] {
         &self.unreadable
