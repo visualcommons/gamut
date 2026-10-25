@@ -97,8 +97,10 @@ impl DeflateEncoder {
     /// match-finder results, searched once and read back by every pass: 2 bytes per position plus
     /// 4 per match run there, capped at two runs per span byte on average (positions past the cap
     /// are searched again in each pass instead, with the same result). So the working set is
-    /// **at most 22 bytes for every byte of span** — about 16 to 19 on photographic, flat and
-    /// periodic material, which averages 0.6 to 1.1 runs per byte — and the widest span is
+    /// **at most 22 bytes for every byte of span** — about 16 to 19 on the synthetic photograph,
+    /// flat and periodic material #959 measured at 0.6 to 1.1 runs per byte, and about 20.5
+    /// resident on `gamut-png`'s filtered `photo_rgb` stream, whose runs come nearer the cap
+    /// (`gamut-png`'s `STATUS.md` has the figures) — and the widest span is
     /// `min(max(limit, 32 KiB), input length)`. The limit is the only bound on it: set it past
     /// the input's length (`usize::MAX`) and one encode's peak memory grows linearly and without
     /// bound in the input. The parse's work is linear in the input whatever the span, so wall

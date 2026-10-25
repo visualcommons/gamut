@@ -238,7 +238,13 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.10
       # Cache target/ and the cargo registry for the Rust half; sccache (above) covers the native
       # half, which rust-cache structurally cannot. Precedent: mutants.yml. (Same as coverage.)
+      # The ICC sandbox is workspace-excluded and builds into its own target dir; it is listed so
+      # the egui/eframe tree `check-icc-sandbox` lints is cached rather than rebuilt per run.
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            examples/icc-sandbox -> target
       # cbindgen is a `cargo:` mise tool, so it needs a working cargo — which the runner's
       # baked-in `stable` toolchain is not (see the uninstall step above: rustup reports
       # "the 'cargo' binary … is not applicable to the 'stable-…' toolchain"). Installing it
@@ -269,6 +275,15 @@ jobs:
       # one-line `cargo update --workspace` in `tooling/c2pa-oracle/README.md`.
       - name: C2PA oracle compiles
         run: mise run check-c2pa
+      # Same hole for `examples/icc-sandbox` (issue #1005): the workspace-excluded egui app that
+      # exercises gamut-icc, gamut-cmm, gamut-png and gamut-jpeg, so an API change in any of them
+      # breaks it with every other gate green. Clippy under `-D warnings` over the native build
+      # (every feature and target, which links Little-CMS from the `third_party/lcms2` submodule
+      # this job already checks out) and the wasm32 front end. `--locked` behaves as for
+      # `check-c2pa`: the fix is `cargo update --workspace --manifest-path
+      # examples/icc-sandbox/Cargo.toml`. Its tests run in extended.yml's `icc-sandbox` job.
+      - name: ICC sandbox compiles and lints
+        run: mise run check-icc-sandbox
       # Same hole, same shape: `tooling/gamut-fuzz` is workspace-excluded and nothing depends on
       # it, so no gate on the pull-request path compiles its targets at all -- an API change in
       # gamut-ifd, gamut-tiff, gamut-dng, gamut-isobmff or gamut-heic breaks them unnoticed until

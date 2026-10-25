@@ -76,20 +76,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
       # `tooling/c2pa-oracle` and `examples/icc-sandbox` are excluded from the workspace,
       # so release-plz never touches their lockfiles, yet each records the version of every
-      # `gamut-*` crate it reaches by path, and the mise tasks that build them read it
-      # `--locked`: `check-c2pa` (per-PR `lint`) reads `tooling/c2pa-oracle/Cargo.lock`,
-      # and `check-icc-sandbox` and its siblings read `examples/icc-sandbox/Cargo.lock`.
-      # Any bump in the release PR would stale them and turn those tasks red (issues #839,
-      # #1009), so the bump and the refresh land on the same branch. release-plz has no
-      # setting for an extra lockfile, hence this step.
+      # `gamut-*` crate it reaches by path, and `mise run check-c2pa` and
+      # `mise run check-icc-sandbox` (both per-PR `lint`) read them `--locked`. Any bump in
+      # the release PR would stale them and turn `lint` red (issues #839, #1009), so the
+      # bump and the refresh land on the same branch. release-plz has no setting for an
+      # extra lockfile, hence this step.
       #
       # `cargo update --workspace` rewrites only the local path crates' entries and leaves
       # every locked registry version, the graphs under `c2pa` and egui included, where it
       # was (`tooling/c2pa-oracle/README.md`, "Refreshing the lockfile after a gamut crate
-      # changes"). Resolving reads only manifests, so neither the `third_party/lcms2`
-      # submodule the sandbox's oracle builds from nor a C compiler is needed here.
-      # release-plz reports the PR whenever it opens or updates one, and an update
-      # force-pushes a fresh branch, so the step reruns on every new head.
+      # changes"). release-plz reports the PR whenever it opens or updates one, and an
+      # update force-pushes a fresh branch, so the step reruns on every new head.
       #
       # The commit is authored as github-actions[bot] on purpose: release-plz treats a
       # non-bot author on its branch as a contributor and then closes the PR rather than
@@ -100,9 +97,9 @@ jobs:
           HEAD_BRANCH: ${{ fromJSON(steps.release-pr.outputs.pr).head_branch }}
         run: |
           set -euo pipefail
-          lockfiles=(tooling/c2pa-oracle/Cargo.lock examples/icc-sandbox/Cargo.lock)
           git fetch --no-tags origin "refs/heads/${HEAD_BRANCH}"
           git switch --detach FETCH_HEAD
+          lockfiles=(tooling/c2pa-oracle/Cargo.lock examples/icc-sandbox/Cargo.lock)
           for lockfile in "${lockfiles[@]}"; do
             cargo update --workspace --manifest-path "$(dirname "${lockfile}")/Cargo.toml"
           done
@@ -113,7 +110,7 @@ jobs:
           git diff --stat
           git -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m 'chore: refresh workspace-excluded lockfile path entries' \
+            commit -m 'chore: refresh workspace-excluded Cargo.lock path entries' \
             -- "${lockfiles[@]}"
           git push origin "HEAD:refs/heads/${HEAD_BRANCH}"
 

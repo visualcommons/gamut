@@ -445,7 +445,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. A tie keeps the **plain** encoding: cleaning buys its rewritten samples with a size win, and where there is no win there is nothing to buy them with. |
 | 6 | Metadata hygiene | **preserve, never strip** — the encoder emits exactly what the caller set, and `gamut convert` carries a PNG input's metadata into a PNG output unless `--strip-metadata` asks otherwise (see [Metadata preservation](#metadata-preservation-issue-483)). Preserving costs bytes, and that is the trade this axis takes: a smaller file that silently lost a colour profile is not a better one. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
-| 8 | Effort / speed / determinism | **done** — output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). The five size/time knobs now compose into a four-rung `Preset` dial (see [The effort ladder](#the-effort-ladder-issue-484)), and `gamut-deflate`'s `with_optimal_parse_limit` is reachable from `PngEncoder` at last, so PNG callers are no longer stuck at 1 MiB spans. `BruteForce`'s eight candidates (seven before [#480] added `MinTrialDeflate`) now run concurrently on `std::thread::scope` threads, with no new dependency, and serially where the platform cannot create threads (`wasm32`). They are joined in candidate order, so a tie still goes to the earlier strategy and the output stays byte-reproducible (see [The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)). Parallelism was the axis's last named gap. It is paid for in memory, 2.5–3.8x the serial peak with all eight candidates, growing with image size times the candidate count and with no cap, which is a stated cost rather than an open item; a caller-facing concurrency cap is not planned. [#484], [#624] |
+| 8 | Effort / speed / determinism | **done** — output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). The five size/time knobs now compose into a four-rung `Preset` dial (see [The effort ladder](#the-effort-ladder-issue-484)), and `gamut-deflate`'s `with_optimal_parse_limit` is reachable from `PngEncoder` at last, so PNG callers are no longer stuck at 1 MiB spans. `BruteForce`'s eight candidates (seven before [#480] added `MinTrialDeflate`) now run concurrently on `std::thread::scope` threads, with no new dependency, and serially where the platform cannot create threads (`wasm32`). They are joined in candidate order, so a tie still goes to the earlier strategy and the output stays byte-reproducible (see [The brute-force trials run concurrently](#the-brute-force-trials-run-concurrently-issue-624)). Parallelism was the axis's last named gap. It is paid for in memory, 2.7–5.0x the serial peak with all eight candidates, growing with image size times the candidate count and with no cap, which is a stated cost rather than an open item; a caller-facing concurrency cap is not planned. [#484], [#624] |
 | 9 | Correctness / robustness | **covered** — 16-bit, odd dimensions, 1×1, CRC policy, malformed input. |
 
 ### The cost model, and why it is a race
@@ -699,23 +699,26 @@ not consulted, because the output must not depend on the machine. Peak resident 
 `BruteForce` encode per process (`/usr/bin/time -v`, release build, `photo_rgb` at the given side,
 `Level::Best`, the `Preset::Smallest` 8 MiB span, refinement budget 1, auto-reduce off). `serial`
 encodes all eight candidates one after another through the public API, as the bench's `serial`
-arm does. The two arms emit the same bytes at every size. Measured at `9e1553be`:
+arm does. The two arms emit the same bytes at every size. Measured at `5fbd78e2`, whose
+`gamut-png` and `gamut-deflate` are #959's (#971) unchanged, so every parse holds its match cache:
 
 | image | serial | concurrent | ratio |
 | --- | ---: | ---: | ---: |
-| 1024x1024 | 77.3 MiB | 294.6 MiB | 3.8x |
-| 2048x2048 | 211.7 MiB | 690.3 MiB | 3.3x |
-| 4096x4096 | 517.2 MiB | 1293.9 MiB | 2.5x |
+| 1024x1024 | 84.2 MiB | 424.0 MiB | 5.0x |
+| 2048x2048 | 228.8 MiB | 1114.5 MiB | 4.9x |
+| 4096x4096 | 533.0 MiB | 1431.9 MiB | 2.7x |
 
-The serial peak does not depend on scheduling. Two runs at 1024 differed by less than 0.1%. The
-concurrent peak does, because it depends on which candidates' buffers are alive at the same
-moment, and these runs shared the host with other jobs (load average 124–152 on 16 threads). Three
-concurrent runs at 1024 peaked at 294.6, 262.5 and 296.1 MiB (3.4–3.8x), and two at 2048 at
-690.3 and 694.6 MiB. Read the column as typical rather than a bound. Against the seven-candidate
-figures this table replaces (77.3/261.8, 210.9/678.6 and 517.3/1266.1 MiB), the serial column
-moved by at most 0.4% and the concurrent one rose by 2–13%. The 13% is at 1024, where it is
-within the run-to-run spread. The ratio is measured, not derived. It is well short of eight, and
-why was not investigated. This is the trade the maintainer's decision on #624 accepted for a rung
+The serial peak does not depend on scheduling. Two runs at 1024 differed by 0.1% (84.2 / 84.1 MiB).
+The concurrent peak can, because it depends on which candidates' buffers are alive at the same
+moment, and these runs shared the host with other jobs (load averages 22–63 on 16 threads). Three
+concurrent runs at 1024 peaked at 424.0, 422.7 and 422.7 MiB, and two at 2048 at 1114.5 and
+1116.2 MiB — a far tighter spread than the 3.4–3.8x the pre-cache runs scattered over at 1024, on
+a host then under heavier load (124–152). Still read the column as typical rather than a bound:
+it is one host's schedule. Against the pre-cache figures this table replaces (77.3/294.6,
+211.7/690.3 and 517.2/1293.9 MiB, at `9e1553be`), the serial column rose by 3–9% and the
+concurrent one by 11–61%, which fits the cache being paid once per parse alive at the peak:
+serially that is one, concurrently up to eight. The ratio is measured, not derived. It is short of
+eight, and why was not investigated. This is the trade the maintainer's decision on #624 accepted for a rung
 5.4x faster (the seven-candidate timing above). It is **not** bounded by the span: the span
 bounds only each candidate's parse buffers, while each candidate also holds a whole-image
 filtered copy (`filter::filter_image` in `compress_scanlines`), so peak memory grows with image size
@@ -776,20 +779,37 @@ shortest-path parse allocates three span-length vectors per refinement pass — 
 (`u64`), the chosen length and the chosen distance (`u16` each) — for 12 bytes per byte of span.
 Since #959 it also holds the span's match cache, capped at 10 bytes per byte of span, so the
 parse's working set is at most 22 bytes per byte of span, and the span is still the only thing
-bounding it. Peak resident set for one encode per process (`/usr/bin/time -v`, square RGB
-photograph, refinement budget 1), measured before #959 and so without the match cache
-(re-measuring it is #970):
+bounding it. Peak resident set for one encode per process (`/usr/bin/time -v`, release build,
+`photo_rgb` at the given side, `Level::Best`, `MinSumAbs`, auto-reduce on, refinement budget 1),
+measured at `5fbd78e2`, whose `gamut-png` and `gamut-deflate` are #959's (#971) unchanged:
 
 | image | filtered stream | 1 MiB | 8 MiB | 16 MiB | no bound |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1024x1024 | 3 146 752 | 21.9 MiB | 46.7 MiB | 46.6 MiB | 46.5 MiB |
-| 2048x2048 | 12 584 960 | 56.0 MiB | 127.2 MiB | 177.4 MiB | 177.2 MiB |
-| 4096x4096 | 50 335 744 | 177.9 MiB | 219.0 MiB | 312.6 MiB | **701.8 MiB** |
+| 1024x1024 | 3 146 752 | 32.3 MiB | 72.3 MiB | 73.1 MiB | 73.0 MiB |
+| 2048x2048 | 12 584 960 | 56.8 MiB | 198.5 MiB | 284.5 MiB | 284.4 MiB |
+| 4096x4096 | 50 335 744 | 178.6 MiB | 290.9 MiB | 455.8 MiB | **1130.8 MiB** |
 
 That is the formula, measured. Against the 1 MiB column the extra resident set per extra byte of
-span is 12.3, 11.0 and 11.1 bytes across the three rows — 12 allocated, slightly less resident
-because the two `u16` rows are zero-initialised and pages they never write are never faulted in.
-Time is not what scales: the same twelve runs moved by under 2% and not monotonically
+span is 20.3, 20.7 and 20.3 bytes across the three rows — up to 22 allocated, less resident
+because the two `u16` rows are zero-initialised and pages they never write are never faulted in,
+and because the match cache is filled only as far as the span's matches reach its cap. Before the
+match cache the same rows measured 12.3, 11.0 and 11.1 bytes (no bound: 46.5, 177.2 and
+701.8 MiB), so the cache costs about nine resident bytes per byte of span. That is more than
+`gamut-deflate`'s "about 16 to 19" bytes per byte of span suggests, and the two are not in
+conflict. A cached position costs `2 + 4r` bytes for its `r` runs, and that range is the 12-byte
+table plus the cache at the 0.6 to 1.1 runs per byte #959 counted on its own synthetic corpus (a
+noisy synthetic photograph, gradients, flat fills, periodic data). Row by row the cache costs
+8.0, 9.7 and 9.2 bytes (20.3 − 12.3, 20.7 − 11.0, 20.3 − 11.1), and solving each as `2 + 4r`
+gives `r` = 1.5, 1.9 and 1.8, so `photo_rgb`'s *filtered* stream carries about 1.5 to 1.9 runs
+per byte. That run count is inferred from the
+resident set, not counted. It is under the cache's cap of two runs per byte, consistent with the
+cache covering the whole span, and inside the 22-byte bound. The host these runs
+shared was under load (load averages 38–71 on 16 threads). A single stream's peak does not depend
+on scheduling — two runs at 1024 differed by 0.2% at the 1 MiB span (32.3 / 32.3 MiB) and 0.2%
+with no bound (72.8 / 73.0 MiB) — so the table is read as measured. Time is what load does move,
+so the timings below are the pre-cache run's and are not re-measured: they describe the encoder
+before #971 changed what each span's search costs. Time is not what scales: those twelve runs moved
+by under 2% and not monotonically
 (8.41 / 8.37 / 8.37 / 8.47 s, 34.65 / 34.08 / 33.92 / 33.95 s, 133.9 / 135.4 / 134.3 / 132.7 s),
 because the parse's work is linear in the input whatever the span. A wider span *can* still take
 more refinement passes to converge, so time is data-dependent rather than flat; memory is neither.
@@ -807,8 +827,10 @@ measures it.
 the whole stream — byte-identical to no bound — for any image up to about 1670x1670 RGB or
 1448x1448 RGBA, which is where every win in the first table lives. Past that it keeps most of what
 is left (−0.100% of the −0.106% available on the 2048 gradient; −0.028% of −0.044% on a 4096
-photograph) for a third of the memory. Doubling to 16 MiB buys a further 0.005% at 4096x4096 and
-costs another 94 MiB, which is the trade the constant declines. An encoder knob whose working set
+photograph) for about a quarter of the memory (290.9 against 1130.8 MiB). Doubling to 16 MiB buys
+a further 0.005% at 4096x4096 and costs another 164.9 MiB, which is the trade the constant
+declines; the match cache made that trade dearer (it was 94 MiB without it), not cheaper, so the
+re-measurement argues for the same span. An encoder knob whose working set
 grows without bound in the image is not something to ship behind a rung named for size — and a
 caller who has measured that their material wants more can still say
 `with_optimal_parse_limit(usize::MAX)` after the rung, having read what it costs.
