@@ -1,0 +1,59 @@
+diff --git a/crates/gamut-jpeg/src/progressive.rs b/crates/gamut-jpeg/src/progressive.rs
+index 0a7f8be4..41bb2f65 100644
+--- a/crates/gamut-jpeg/src/progressive.rs
++++ b/crates/gamut-jpeg/src/progressive.rs
+@@ -124,32 +124,20 @@ impl Scan {
+ ///   quick low luma AC band; full Cr then Cb AC bands (`Al = 1`); the high luma AC band; a luma AC
+ ///   refinement; the interleaved DC final pass; Cr, Cb, then luma AC final refinements. Component
+ ///   order (Cr before Cb) is exactly libjpeg's.
+-fn scan_script(ncomps: usize) -> Vec<Scan> {
+-    if ncomps == 1 {
+-        // Component index 0 is the single (luma) component.
+-        vec![
+-            Scan::new(&[0], 0, 0, 0, 1),  // DC first pass
+-            Scan::new(&[0], 1, 5, 0, 2),  // low AC, first pass
+-            Scan::new(&[0], 6, 63, 0, 2), // high AC, first pass
+-            Scan::new(&[0], 1, 63, 2, 1), // AC refinement
+-            Scan::new(&[0], 0, 0, 1, 0),  // DC final pass
+-            Scan::new(&[0], 1, 63, 1, 0), // AC final refinement
+-        ]
++fn scan_script(ncomps: usize, subsampled: bool) -> Vec<Scan> {
++    // Experiment #30: jpegli's `SetDefaultScanScript` at its default `progressive_level = 2`
++    // (`lib/jpegli/encode.cc`): one DC scan with no successive approximation, interleaved only when
++    // no component is subsampled, then four AC passes, each one scan per component in SOF order.
++    let all: Vec<usize> = (0..ncomps).collect();
++    let mut scans = if subsampled {
++        all.iter().map(|&c| Scan::new(&[c], 0, 0, 0, 0)).collect()
+     } else {
+-        // Component indices: 0 = Y, 1 = Cb, 2 = Cr (the SOF order).
+-        vec![
+-            Scan::new(&[0, 1, 2], 0, 0, 0, 1), // interleaved DC first pass
+-            Scan::new(&[0], 1, 5, 0, 2),       // quick low luma AC
+-            Scan::new(&[2], 1, 63, 0, 1),      // full Cr AC
+-            Scan::new(&[1], 1, 63, 0, 1),      // full Cb AC
+-            Scan::new(&[0], 6, 63, 0, 2),      // high luma AC
+-            Scan::new(&[0], 1, 63, 2, 1),      // luma AC refinement
+-            Scan::new(&[0, 1, 2], 0, 0, 1, 0), // interleaved DC final pass
+-            Scan::new(&[2], 1, 63, 1, 0),      // Cr AC final refinement
+-            Scan::new(&[1], 1, 63, 1, 0),      // Cb AC final refinement
+-            Scan::new(&[0], 1, 63, 1, 0),      // luma AC final refinement (usually the largest)
+-        ]
++        vec![Scan::new(&all, 0, 0, 0, 0)]
++    };
++    for (ss, se, ah, al) in [(1, 2, 0, 0), (3, 63, 0, 2), (3, 63, 2, 1), (3, 63, 1, 0)] {
++        scans.extend(all.iter().map(|&c| Scan::new(&[c], ss, se, ah, al)));
+     }
++    scans
+ }
+ 
+ /// Materializes every component's quantized coefficients (§A.3.1/§A.3.3/§A.3.4) over its padded block
+@@ -208,7 +196,8 @@ pub(crate) fn encode(
+         marker::write_dri(out, restart_interval);
+     }
+ 
+-    for scan in &scan_script(comps.len()) {
++    let subsampled = comps.iter().any(|c| c.h > 1 || c.v > 1);
++    for scan in &scan_script(comps.len(), subsampled) {
+         encode_one_scan(out, scan, &comps, &geom, restart_interval);
+     }
+ }

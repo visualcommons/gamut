@@ -57,10 +57,10 @@ use gamut_jpeg::{
     reason = "the arm uses only the generator, not the bench's streams"
 )]
 #[path = "../benches/common/corpus.rs"]
-mod corpus;
+pub(crate) mod corpus;
 
-/// The quality sweep every variant is encoded at.
-const QUALITIES: [u8; 14] = [30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95];
+/// The quality sweep every variant is encoded at (also #30's scan-script sweep).
+pub(crate) const QUALITIES: [u8; 14] = [30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95];
 
 /// Viewing geometries for the CSF tables, in pixels per degree of visual angle: 32 is a 96 dpi
 /// display at about 48 cm, 64 the same display at twice the distance (or a 192 dpi one at 48 cm).
@@ -325,8 +325,9 @@ fn ssim(a: &[f64], b: &[f64], w: usize, h: usize) -> f64 {
         / n as f64
 }
 
-/// Reads a binary PPM (`P6`, maxval 255) or an uncompressed 24-bit BMP to interleaved RGB.
-fn load(path: &Path) -> (Vec<u8>, u32, u32) {
+/// Reads a binary PPM (`P6`, maxval 255) or an uncompressed 24-bit BMP to interleaved RGB. Shared
+/// with #30's arm (`experiment_30.rs`), which includes this file as a module.
+pub(crate) fn load(path: &Path) -> (Vec<u8>, u32, u32) {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     if bytes.starts_with(b"P6") {
         load_ppm(&bytes)

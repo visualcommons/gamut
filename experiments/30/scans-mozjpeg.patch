@@ -1,0 +1,48 @@
+diff --git a/crates/gamut-jpeg/src/progressive.rs b/crates/gamut-jpeg/src/progressive.rs
+index 0a7f8be4..f97bb80a 100644
+--- a/crates/gamut-jpeg/src/progressive.rs
++++ b/crates/gamut-jpeg/src/progressive.rs
+@@ -125,29 +125,29 @@ impl Scan {
+ ///   refinement; the interleaved DC final pass; Cr, Cb, then luma AC final refinements. Component
+ ///   order (Cr before Cb) is exactly libjpeg's.
+ fn scan_script(ncomps: usize) -> Vec<Scan> {
++    // Experiment #30: mozjpeg's `jpeg_simple_progression` under `JCP_MAX_COMPRESSION` with the
++    // default `dc_scan_opt_mode = 0` (mozjpeg `jcparam.c`; the scripts are jpgcrush's
++    // `jpeg_scan_bw.txt` / `jpeg_scan_rgb.txt`). DC is sent whole, with no successive approximation.
+     if ncomps == 1 {
+-        // Component index 0 is the single (luma) component.
+         vec![
+-            Scan::new(&[0], 0, 0, 0, 1),  // DC first pass
+-            Scan::new(&[0], 1, 5, 0, 2),  // low AC, first pass
+-            Scan::new(&[0], 6, 63, 0, 2), // high AC, first pass
++            Scan::new(&[0], 0, 0, 0, 0),  // DC, no successive approximation
++            Scan::new(&[0], 1, 8, 0, 2),  // low AC, first pass
++            Scan::new(&[0], 9, 63, 0, 2), // high AC, first pass
+             Scan::new(&[0], 1, 63, 2, 1), // AC refinement
+-            Scan::new(&[0], 0, 0, 1, 0),  // DC final pass
+             Scan::new(&[0], 1, 63, 1, 0), // AC final refinement
+         ]
+     } else {
+         // Component indices: 0 = Y, 1 = Cb, 2 = Cr (the SOF order).
+         vec![
+-            Scan::new(&[0, 1, 2], 0, 0, 0, 1), // interleaved DC first pass
+-            Scan::new(&[0], 1, 5, 0, 2),       // quick low luma AC
+-            Scan::new(&[2], 1, 63, 0, 1),      // full Cr AC
+-            Scan::new(&[1], 1, 63, 0, 1),      // full Cb AC
+-            Scan::new(&[0], 6, 63, 0, 2),      // high luma AC
++            Scan::new(&[0, 1, 2], 0, 0, 0, 0), // interleaved DC, no successive approximation
++            Scan::new(&[0], 1, 8, 0, 2),       // low luma AC, first pass
++            Scan::new(&[1], 1, 8, 0, 0),       // low Cb AC, whole
++            Scan::new(&[2], 1, 8, 0, 0),       // low Cr AC, whole
++            Scan::new(&[0], 9, 63, 0, 2),      // high luma AC, first pass
+             Scan::new(&[0], 1, 63, 2, 1),      // luma AC refinement
+-            Scan::new(&[0, 1, 2], 0, 0, 1, 0), // interleaved DC final pass
+-            Scan::new(&[2], 1, 63, 1, 0),      // Cr AC final refinement
+-            Scan::new(&[1], 1, 63, 1, 0),      // Cb AC final refinement
+-            Scan::new(&[0], 1, 63, 1, 0),      // luma AC final refinement (usually the largest)
++            Scan::new(&[0], 1, 63, 1, 0),      // luma AC final refinement
++            Scan::new(&[1], 9, 63, 0, 0),      // high Cb AC, whole
++            Scan::new(&[2], 9, 63, 0, 0),      // high Cr AC, whole
+         ]
+     }
+ }
