@@ -97,7 +97,8 @@ Where this reader deliberately differs from ExifTool:
 
 `LeicaMakerNote` keeps every entry of the note's IFD as a `gamut_ifd::Value`
 (`LeicaMakerNote::ifd`), so any tag is reachable by number, for every dialect except `Leica10`
-(a Panasonic-format note, which the Panasonic view will read). Typed accessors exist for the two
+(a Panasonic-format note, which the Panasonic view will read) and a `FUJIFILM`-signed note (which
+follows Fujifilm's table). Typed accessors (`Leica4Tags`, `Leica9Tags`) exist for the two
 tables the corpus holds, each checked against ExifTool's reading of its fixture in
 `crates/gamut-exif/tests/maker_note_leica.rs`. Values are raw, as stored: the "raw" column is
 what `exiftool -v3` prints for the fixture, and the "ExifTool" column is its value conversion
