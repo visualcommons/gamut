@@ -74,23 +74,24 @@ jobs:
           # with the default token deliberately do not. Either fix works — the fallback
           # keeps this workflow valid whether or not the secret exists.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
-      # `tooling/c2pa-oracle` is excluded from the workspace, so release-plz never touches
-      # its lockfile, yet that file records the version of every `gamut-*` crate the oracle
-      # reaches by path, and `mise run check-c2pa` (per-PR `lint`) reads it `--locked`.
-      # Any bump in the release PR would stale it and turn `lint` red (issue #839), so the
+      # `tooling/c2pa-oracle` and `examples/icc-sandbox` are excluded from the workspace,
+      # so release-plz never touches their lockfiles, yet each records the version of every
+      # `gamut-*` crate it reaches by path, and `mise run check-c2pa` and
+      # `mise run check-icc-sandbox` (both per-PR `lint`) read them `--locked`. Any bump in
+      # the release PR would stale them and turn `lint` red (issues #839, #1009), so the
       # bump and the refresh land on the same branch. release-plz has no setting for an
       # extra lockfile, hence this step.
       #
       # `cargo update --workspace` rewrites only the local path crates' entries and leaves
-      # every locked registry version, the graph under `c2pa` included, where it was
-      # (`tooling/c2pa-oracle/README.md`, "Refreshing the lockfile after a gamut crate
+      # every locked registry version, the graphs under `c2pa` and egui included, where it
+      # was (`tooling/c2pa-oracle/README.md`, "Refreshing the lockfile after a gamut crate
       # changes"). release-plz reports the PR whenever it opens or updates one, and an
       # update force-pushes a fresh branch, so the step reruns on every new head.
       #
       # The commit is authored as github-actions[bot] on purpose: release-plz treats a
       # non-bot author on its branch as a contributor and then closes the PR rather than
       # force-pushing over that commit on its next update.
-      - name: Refresh tooling/c2pa-oracle/Cargo.lock on the release PR
+      - name: Refresh the workspace-excluded lockfiles on the release PR
         if: steps.release-pr.outputs.prs_created == 'true'
         env:
           HEAD_BRANCH: ${{ fromJSON(steps.release-pr.outputs.pr).head_branch }}
@@ -98,16 +99,19 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin "refs/heads/${HEAD_BRANCH}"
           git switch --detach FETCH_HEAD
-          cargo update --workspace --manifest-path tooling/c2pa-oracle/Cargo.toml
-          if git diff --quiet -- tooling/c2pa-oracle/Cargo.lock; then
-            echo "tooling/c2pa-oracle/Cargo.lock already matches the release PR"
+          lockfiles=(tooling/c2pa-oracle/Cargo.lock examples/icc-sandbox/Cargo.lock)
+          for lockfile in "${lockfiles[@]}"; do
+            cargo update --workspace --manifest-path "$(dirname "${lockfile}")/Cargo.toml"
+          done
+          if git diff --quiet -- "${lockfiles[@]}"; then
+            echo "${lockfiles[*]} already match the release PR"
             exit 0
           fi
           git diff --stat
           git -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m 'chore: refresh tooling/c2pa-oracle/Cargo.lock path entries' \
-            -- tooling/c2pa-oracle/Cargo.lock
+            commit -m 'chore: refresh workspace-excluded Cargo.lock path entries' \
+            -- "${lockfiles[@]}"
           git push origin "HEAD:refs/heads/${HEAD_BRANCH}"
 
   # Publishes crates (in dependency order) + tags/releases once the release PR is
