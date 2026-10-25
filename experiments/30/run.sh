@@ -14,6 +14,9 @@
 #                           -- per image x variant x metric rate difference of the patched build's
 #                              variant against the same variant in the baseline build, plus the
 #                              mean over images (#29's `bdrate`); `variant` reads `<patch>:<variant>`
+#   raw/bdrate-zero-bias-vs-trellis.csv
+#                           -- the same, for the zero-biased plain variants against the baseline
+#                              build's trellis variant on the same tables (the two alternatives)
 #   raw/changed.csv         -- per quantization patch x variant x image, how many quality points
 #                              coded to a different size than the baseline build's
 #   raw/scans-baseline.csv, raw/<scan patch>.csv
@@ -129,6 +132,24 @@ for p in "${quant_patches[@]}"; do
   done
   rm -f "$work/pair.csv"
 done
+# The zero bias and the shipped trellis are alternatives on one path (the patch leaves the RD path
+# alone), so the zero-biased plain variant is also compared with the baseline build's trellis
+# variant on the same tables: `zero-bias:annexk` against `trellis`, `zero-bias:luma-csf32` against
+# `luma-csf32-trellis`.
+out="$work/bdrate-zero-bias-vs-trellis.csv"
+echo "image,variant,baseline,metric,bd_rate_pct,overlap_lo,overlap_hi" >"$out"
+for vt in annexk:trellis luma-csf32:luma-csf32-trellis; do
+  v=${vt%%:*} t=${vt#*:}
+  pair="$work/pair.csv"
+  {
+    head -n1 "$work/baseline.csv"
+    awk -F, -v t="$t" 'NR > 1 && $4 == t' "$work/baseline.csv"
+    awk -F, -v v="$v" 'BEGIN { OFS = "," } NR > 1 && $4 == v { $4 = "zero-bias:" v; print }' \
+      "$work/zero-bias.csv"
+  } >"$pair"
+  "$arm" bdrate --baseline "$t" "$pair" | tail -n +2 >>"$out"
+done
+rm -f "$work/pair.csv"
 {
   echo "build,variant,image,points_changed,points"
   for p in "${quant_patches[@]}"; do
@@ -180,7 +201,7 @@ done
 }
 mkdir -p "$raw"
 cp "$work"/inputs.csv "$work"/baseline.csv "$work"/changed.csv "$work"/scans-baseline.csv \
-  "$work"/scans-summary.csv "$raw/"
+  "$work"/scans-summary.csv "$work"/bdrate-zero-bias-vs-trellis.csv "$raw/"
 for p in "${quant_patches[@]}"; do cp "$work/$p.csv" "$work/bdrate-$p.csv" "$raw/"; done
 for p in "${scan_patches[@]}"; do cp "$work/$p.csv" "$raw/"; done
 
@@ -235,5 +256,8 @@ for p in "${quant_patches[@]}"; do
   awk -F, -v p="$p" '$1 == p { c[$2] += $4; n[$2] += $5; if (!($2 in s)) { s[$2] = 1; o[++r] = $2 } }
     END { for (i = 1; i <= r; i++) printf "  %-24s %4d / %4d\n", o[i], c[o[i]], n[o[i]] }' "$raw/changed.csv"
 done
+echo "zero-bias plain variants vs the baseline build's trellis on the same tables (mean BD-rate %)"
+awk -F, '$1 == "mean" { printf "  %-36s %-20s %-10s %8s\n", $2, $3, $4, $5 }' \
+  "$raw/bdrate-zero-bias-vs-trellis.csv"
 echo "scan scripts: mean size % vs the shipped script and vs sequential (negative is smaller)"
 awk -F, '$3 == "mean" { printf "  %-16s %-10s %8s %8s\n", $1, $2, $4, $5 }' "$raw/scans-summary.csv"
