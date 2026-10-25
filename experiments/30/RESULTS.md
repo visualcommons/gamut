@@ -22,12 +22,15 @@ measurement arm and reverted afterwards, as the #514, #612 and #974 records do. 
 as #1021. One is a cheaper, weaker alternative to the shipped trellis. Two cost rate or do
 nothing.**
 
-- **`scans-mozjpeg`: smaller on every image and configuration, by 0.35-1.51% on average.** A scan
+- **`scans-mozjpeg`: smaller on average in every image and configuration, by 0.35-1.51%, but not
+  at every quality.** A scan
   script changes how the same quantized coefficients are coded, never the coefficients
   themselves. The arm asserts this at every point: libjpeg-turbo decodes both streams to
   identical pixels. So this saving costs no fidelity. Averaged over the seven images, the stream
-  is 0.66% smaller for 4:2:0, 1.51% for 4:4:4 and 0.35% for grey. It is smaller in all 21 image x
-  configuration cells, by 0.13% to 2.87%. The shipped script is SemVer-frozen (`STATUS.md`,
+  is 0.66% smaller for 4:2:0, 1.51% for 4:4:4 and 0.35% for grey. Its mean over the 14 qualities
+  is smaller in all 21 image x configuration cells, by 0.13% to 2.87%. Point by point it is not:
+  at 16 of the 294 image x configuration x quality points it is equal to or larger than the
+  shipped script (*Scan scripts*, below). The shipped script is SemVer-frozen (`STATUS.md`,
   *Progressive scan script (frozen)*), and mozjpeg is not vendored under `references/`. Shipping
   this script therefore needs an API decision (an opt-in, or a breaking change of the frozen
   script) and a vendored citation. #1021 tracks both.
@@ -160,11 +163,40 @@ tables (`vs sequential`). Negative is smaller. `raw/scans-summary.csv` has every
 
 How to read it:
 
-- **mozjpeg's script wins everywhere, by a little.** Its saving against the shipped script is
-  -0.13% (`shira_bird8`, grey) to -2.87% (`synthetic-512x384`, 4:4:4). It is the only script here
-  that makes the progressive stream smaller than the sequential one on average in every
-  configuration. Most of its gain plausibly comes from dropping DC successive approximation, which
-  saves the DC refinement scan and its header. That reading is untested.
+- **mozjpeg's script wins every cell's mean, by a little.** Its mean saving against the shipped
+  script is -0.13% (`shira_bird8`, grey) to -2.87% (`synthetic-512x384`, 4:4:4). It is the only
+  script here that makes the progressive stream smaller than the sequential one on average in
+  every configuration. Most of its gain plausibly comes from dropping DC successive
+  approximation, which saves the DC refinement scan and its header. That reading is untested.
+- **It loses at 16 of 294 points, almost all at high quality.** Comparing `raw/scans-mozjpeg.csv`
+  with `raw/scans-baseline.csv` point by point, its progressive stream is equal or larger here
+  (sizes in bytes):
+
+  | image | config | quality | shipped | mozjpeg | difference |
+  | --- | --- | ---: | ---: | ---: | ---: |
+  | `testorig` | 4:2:0 | 90 | 6934 | 6934 | 0.00% |
+  | `testorig` | 4:4:4 | 95 | 12223 | 12286 | +0.52% |
+  | `testorig` | grey | 90 | 5286 | 5297 | +0.21% |
+  | `testorig` | grey | 95 | 6585 | 6594 | +0.14% |
+  | `shira_bird8` | 4:2:0 | 85 | 9976 | 9988 | +0.12% |
+  | `shira_bird8` | 4:4:4 | 85 | 12155 | 12179 | +0.20% |
+  | `shira_bird8` | 4:4:4 | 90 | 14986 | 15001 | +0.10% |
+  | `shira_bird8` | grey | 70 | 6110 | 6117 | +0.11% |
+  | `shira_bird8` | grey | 75 | 6731 | 6740 | +0.13% |
+  | `shira_bird8` | grey | 80 | 7626 | 7632 | +0.08% |
+  | `shira_bird8` | grey | 85 | 8787 | 8805 | +0.20% |
+  | `shira_bird8` | grey | 90 | 10816 | 10829 | +0.12% |
+  | `clipped-512x384` | grey | 90 | 49175 | 49229 | +0.11% |
+  | `clipped-512x384` | grey | 95 | 70860 | 70942 | +0.12% |
+  | `synthetic-512x384` | grey | 95 | 61762 | 61802 | +0.06% |
+  | `text-384x256` | grey | 50 | 28753 | 28764 | +0.04% |
+
+  Fifteen of the 16 are at q70-95, and the exception is `text-384x256` grey at q50. Eleven are
+  grey, where the two scripts differ least (5 scans against 6). No loss exceeds 0.52%. At high
+  quality the refinement scans the shipped script spends on DC successive approximation are a
+  smaller share of a larger stream, which plausibly explains it; that is untested. #1021 must weigh
+  these points: an opt-in, or a breaking change to the frozen script, makes a few high-quality
+  encodes slightly larger, so the saving is a mean over qualities, not a guarantee per encode.
 - **jpegli's script splits by image size in colour.** At 4:2:0 it is 4.2-7.0% smaller than the
   shipped script on the two 512x384 images. It is +0.23% on the 384x256 text image, and 1.7-5.7%
   larger on the four small test images, which are 95-149 pixels tall. For grey (5 scans against
@@ -221,7 +253,8 @@ How to read it:
 ## What is left
 
 - **#1021: mozjpeg's scan script.** It needs a vendored citation and a decision between an opt-in
-  and a breaking change of the frozen script.
+  and a breaking change of the frozen script, and it must weigh the 16 points, mostly at q70-95,
+  where the script is equal or larger (*Scan scripts*).
 - **jpegli's adaptive quantization.** jpegli's default mode scales the zero-bias threshold per
   block from a local masking estimate (`quant_field`, `zero_bias_mul`). Its purpose is
   perceptual, so it can only be judged with the perceptual-metric oracle #29 and #974 wait on.

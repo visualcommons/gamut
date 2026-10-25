@@ -244,9 +244,10 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   Cb AC `1–63` `Al=1`; Y AC `6–63` `Al=2`; Y AC refine `Ah=2 Al=1`; interleaved DC refine `Ah=1 Al=0`;
   Cr, Cb, then Y AC refine `Ah=1 Al=0` (Cr before Cb, exactly as libjpeg orders them).
   Experiment #30 (`experiments/30/RESULTS.md`) measured two alternative scripts on the same
-  coefficients. mozjpeg's `JCP_MAX_COMPRESSION` script is smaller on every image and
-  configuration tried: by 0.66% (4:2:0), 1.51% (4:4:4) and 0.35% (grey) on average, at identical
-  decoded pixels. Offering it needs an opt-in or a breaking change to this frozen script, plus a
+  coefficients. mozjpeg's `JCP_MAX_COMPRESSION` script is smaller on average over the qualities
+  for every image and configuration tried: by 0.66% (4:2:0), 1.51% (4:4:4) and 0.35% (grey), at
+  identical decoded pixels. It is not smaller at every point: at 16 of 294 image x configuration x
+  quality points, 15 of them at q70-95, it is equal or up to 0.52% larger. Offering it needs an opt-in or a breaking change to this frozen script, plus a
   vendored citation (issue #1021). jpegli's default script loses on small colour images, because
   each of its 13–15 scans carries its own optimized table here.
 - **Optimized per-scan Huffman tables (Annex K.2).** The standard Annex K AC tables cannot code a
