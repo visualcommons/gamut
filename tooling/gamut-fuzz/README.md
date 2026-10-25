@@ -129,10 +129,12 @@ There is no law function to share, because the primary oracle is the engine's ow
 these crates is `#![forbid(unsafe_code)]` and promises a *typed error* on hostile input, so a
 panic, a hang, or an allocation past libFuzzer's limit is the defect.
 
-Each target but `dng_decode` adds at least one check the engine cannot make on its own, so that a
-defect producing no crash is still visible. `dng_decode` has none that can fail — both of its
-assertions are structure pins (below) — and runs for the crash oracle alone, which is what found
-#564:
+The six targets #264 added each carry at least one check the engine cannot make on its own, so
+that a defect producing no crash is still visible — all but `dng_decode`, which has none that can
+fail (both of its assertions are structure pins, below) and runs for the crash oracle alone, which
+is what found #564. The ten #311 added (the second table) are crash-oracle-only by the same
+standard: none lists a check, so none owes the injection audit an entry, and a check is added to
+one only together with the injection that shows it can fail.
 
 | target | crate | entry points | check beyond the crash oracle |
 |---|---|---|---|
@@ -142,6 +144,40 @@ assertions are structure pins (below) — and runs for the crash oracle alone, w
 | `isobmff_boxes` | `gamut-isobmff` | `walk_segments`, `walk_meta_children`, `read`, `BoxReader` | the segments tile `0..len` exactly — contiguous, **and** covering to end of file |
 | `heic_container` | `gamut-heic` | `HeifContainer::parse` | every accessor agrees with the segment list, **and** every borrowed slice lies inside `data()` |
 | `heic_hvcc` | `gamut-heic` | `HevcConfig::parse`, `annex_b*`, `validate_still_payload`, `iter_nal_units` | the Annex-B emitters append rather than replace — on the success path **and** on the error path |
+
+The decoder and metadata-parser targets (#311) complete the per-crate table's "Fuzz entry point"
+column: every entry point it lists is now driven. Each runs with the configuration a caller
+handling untrusted input is told to use — the crate's default where its default is bounded, and
+the crate's own documented limits where they are opt-in — so that what the engine reports is a
+defect, not a restatement of a documented default:
+
+| target | crate | entry points | configuration |
+|---|---|---|---|
+| `png_decode` | `gamut-png` | `PngDecoder::decode` (the rich path: every ancillary payload inflated) | default — 64 MiB sample budget, 16 MiB metadata budget |
+| `jpeg_decode` | `gamut-jpeg` | `metadata`, `DecodeImage<Rgb8>` | `with_max_image_bytes(64 MiB)` and `with_max_dimensions` at the format's 16-bit ceiling, since the decoder's limits are opt-in; `permissive` policy so CMYK/YCCK converts |
+| `webp_decode` | `gamut-webp` | `DecodeImage<Rgba8>` | default — no configurable limit; the 14-bit frame dimensions bound it |
+| `riff_chunks` | `gamut-riff` | `RiffReader` (to `None`), `MetadataChunks::read`, `WebpLayout::parse`, `c2pa_summary` | — |
+| `jxl_decode` | `gamut-jxl` | `info`, `embedded_icc_profile`, `metadata_boxes`, `DecodeImage<Rgba8>`, and `decode_partial_image` where the full decode fails | `decode` feature only (no libjxl build); `permissive` policy |
+| `av1_inspect` | `gamut-av1` | `Av1Decoder::inspect` | default `DecodeLimits` |
+| `icc_parse` | `gamut-icc` | `IccProfile::parse` | lenient (strict only adds refusals) |
+| `exif_parse` | `gamut-exif` | `ExifReader::parse_with_report`, then `gps`, `thumbnail_bytes`, `MakerNote::canon` | `recover_entries` and `audit_bytes` on: the widest walk |
+| `xmp_parse` | `gamut-xmp` | `XmpMeta::from_packet` | — |
+| `iptc_read_irb` | `gamut-iptc` | `IptcReader::read_irb`, then `read` | default conflict policy |
+
+`gamut-deflate` has no target because it has no decoder, and `gamut-av2`/`gamut-vvc` none because
+they are stubs with no function bodies.
+
+**Two of them run slowly by design, not by defect.** In the 60-second local run that preceded them,
+`webp_decode` and `jxl_decode` both wrote `slow-unit-*` artifacts and ran at under a hundred
+executions per second, against thousands for the rest. Both are decompression amplification that
+the formats permit and the crates' contracts state: a 54-byte lossy WebP declaring a 4176 × 4176
+frame decodes to 70 MB of RGBA (about 1 s in a release build), and a 5-byte JPEG XL header declaring
+9717 × 8098 makes `decode_partial_image` return its documented zero-filled `HeaderOnly` buffer at
+those dimensions (about 1.1 s). Neither is a crash, and neither target narrows its input to avoid
+them: an input the format allows is an input the target searches. That the WebP decoder offers no
+caller-set limit at all, and the JPEG XL one only a fixed one, is the decoder-limits posture
+question #311's audit filed separately, as #1025 and #1026 (and, for `JpegDecoder`'s unbounded
+default, #1024).
 
 **A check is only listed here if it can fail — and each target's module doc names the injected
 defect that made *each listed check* fail**, with the message it produced and the command that
@@ -374,7 +410,7 @@ carries no file**, because `"II" LE16(42)` *is* `"II" 2A 00` byte for byte and i
 four bytes as case 1; and cases 9 and 10 carry two files each, `a` and `b`, for the two variants
 their rows name.
 
-Six of the other seven directories start from one or two small well-formed files, written by this
+Of the seven other directories that predate #311, six start from one or two small well-formed files, written by this
 workspace's own encoders, so a decoder target begins from something that reaches its pixel path
 instead of spending its budget rediscovering a header. `corpus/avif_parse_decode/`'s two were
 written by `gamut-isobmff`'s writer in the shape its property generates — a 2 × 2 `grid` cropped to
@@ -405,6 +441,25 @@ strip and an LZW strip enter the decoder through different code, and seeding onl
 other to be rediscovered. Real-camera corpora are deliberately not vendored: they run to hundreds
 of megabytes and live in `justin13888/rawshift-test-fixtures` releases. What they would teach the
 engine is carried by a dictionary instead (next section).
+
+The #311 targets' seeds follow the same rule — small, well-formed, and written by this workspace —
+from one of two sources. Where a crate's own suite already tracks a fixture, the seed is a copy of
+it: `jpeg_decode/` holds `gamut-jpeg`'s `color_baseline.jpg` and `color_progressive.jpg` goldens
+(sequential and progressive scans enter the decoder through different code), `exif_parse/` holds
+`gamut-exif`'s `golden_bare_le.bin` and `golden_marker_le.bin` (a bare TIFF stream and an
+`Exif\0\0`-prefixed one), and `icc_parse/` holds `gamut-jpeg`'s vendored XYB profile. The rest were
+written by the workspace's encoders over one 5 × 3 image — an odd width, so no row is a multiple of
+a filter stride: `png_decode/` an RGB and an RGBA PNG; `webp_decode/` a lossless `VP8L` RGBA file
+and a lossy `VP8 ` RGB one; `riff_chunks/` a lossless `VP8X` file carrying the Exif golden above
+and an XMP packet as `EXIF` and `XMP ` chunks; `av1_inspect/` `encode_still_lossless_identity`'s
+4:4:4 temporal unit, the one profile the decoder accepts; `xmp_parse/` an `XmpMeta::to_packet`
+packet with two properties; and `iptc_read_irb/` `IptcWriter::write_irb`'s block for a headline and
+a city.
+
+`jxl_decode/` has **no seed**: the only JPEG XL encoder here is libjxl through `gamut-jxl-sys`, and
+the target is built without it. It starts cold: the engine synthesised the `FF 0A` signature and a
+header the decoder accepts within a 60-second local run, but a seed written once by libjxl and
+committed would start it at a frame instead.
 
 ## Dictionaries
 

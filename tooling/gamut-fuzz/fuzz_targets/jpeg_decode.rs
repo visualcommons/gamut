@@ -9,8 +9,8 @@
 //! default) and the format's own 65 535-sample dimension ceiling. Without them every `SOF` the
 //! engine writes with a large frame is a 12 GB allocation that libFuzzer reports at once — a
 //! report about the documented default rather than a search of the decoder. Whether that default
-//! should itself be bounded, as `PngDecoder`'s is, is a posture question for `gamut-jpeg`, not one
-//! a fuzz target settles by narrowing its own input.
+//! should itself be bounded, as `PngDecoder`'s is, is a posture question for `gamut-jpeg` (#1024),
+//! not one a fuzz target settles by narrowing its own input.
 //!
 //! The policy is `permissive`, so a CMYK/YCCK stream is converted rather than refused at the
 //! layout check, and its colour conversion is searched too. [`gamut_jpeg::metadata`] is driven as
