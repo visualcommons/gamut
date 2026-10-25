@@ -798,8 +798,10 @@ match cache the same rows measured 12.3, 11.0 and 11.1 bytes (no bound: 46.5, 17
 `gamut-deflate`'s "about 16 to 19" bytes per byte of span suggests, and the two are not in
 conflict. A cached position costs `2 + 4r` bytes for its `r` runs, and that range is the 12-byte
 table plus the cache at the 0.6 to 1.1 runs per byte #959 counted on its own synthetic corpus (a
-noisy synthetic photograph, gradients, flat fills, periodic data). Nine bytes means `photo_rgb`'s
-*filtered* stream carries about 1.6 to 1.9 runs per byte. That run count is inferred from the
+noisy synthetic photograph, gradients, flat fills, periodic data). Row by row the cache costs
+8.0, 9.7 and 9.2 bytes (20.3 − 12.3, 20.7 − 11.0, 20.3 − 11.1), and solving each as `2 + 4r`
+gives `r` = 1.5, 1.9 and 1.8, so `photo_rgb`'s *filtered* stream carries about 1.5 to 1.9 runs
+per byte. That run count is inferred from the
 resident set, not counted. It is under the cache's cap of two runs per byte, consistent with the
 cache covering the whole span, and inside the 22-byte bound. The host these runs
 shared was under load (load averages 38–71 on 16 threads). A single stream's peak does not depend
