@@ -103,7 +103,13 @@ on a hand-written golden bitstream.
   tail: the codec-abi seam has no notion of a partial result, so the registry is not consulted, as
   for `info` / `embedded_icc_profile`. It presents through the same `gamut_core::convert` seam, so
   it answers to the same `ConvertPolicy`. The default `DecodeImage` path is unchanged.
-- **Decode policies.** Pixel-limit bound (`1 << 28` samples); truncated → `InvalidInput` on the
+- **Decode policies.** Pixel-limit bound (`1 << 28` samples), the fixed ceiling in the built-in
+  tail; beneath it, caller caps `JxlDecoder::with_max_dimensions` / `with_max_image_bytes` (issue
+  #1026; unbounded by default, so nothing the ceiling admits is refused) are checked against the
+  parsed header before any pixel buffer is sized, on both `DecodeImage` and `DecodePartialImage`,
+  and against the raster a pushed backend returns. Over a cap → `Unsupported`. The header-only
+  accessors `info` / `embedded_icc_profile` / `metadata` do not apply them, since they allocate
+  nothing proportional to the dimensions; truncated → `InvalidInput` on the
   default `DecodeImage` path (`DecodePartialImage` above is the opt-in relaxation, and relaxes
   *only* truncation); animation and premultiplied (associated) alpha → `Unsupported` (deliberate
   refusals to guess, additive to relax later). Layout loss (dropping a present alpha channel,
