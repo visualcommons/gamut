@@ -298,6 +298,7 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | codestream backend registries (`WebpCodestreamDecoder`/`WebpCodestreamEncoder`, push order + built-in tails) | issue #275 | ✅ | M6 |
 | `gamut-codec-abi` adapters (`AbiDecoderBackend` / `AbiEncoderBackend`, `VP8 `/`VP8L` codec ids) | issue #241 | ✅ | M6 |
 | `Effort` compression ladder (libwebp `method` `0..=6`) on both codestreams | issue #261 | ✅ | M4 |
+| decoder resource limits (`with_max_dimensions` / `with_max_image_bytes`, 64 MiB default at 4 B/px), checked on the `VP8 `/`VP8L` header before allocation and backend dispatch | issue #1025 | ✅ | M6 |
 | VP8L candidate-plan search: transform chain, palette order, cache size, grouping, LZ77 depth | issue #31 | ✅ | M4 |
 | VP8 two-pass entropy: derived coefficient probabilities + measured skip probability | issue #32 | ✅ | M4 |
 | VP8 dead-zone quantizer (AC only; DC stays round-to-nearest) | issue #32 | ✅ | M4 |

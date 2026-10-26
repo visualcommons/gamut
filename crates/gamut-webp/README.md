@@ -53,6 +53,11 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   scale. The stream stays bit-exact — to the quantized image. Red/green/blue move by at most
   `NearLossless::max_deviation()`; **alpha is never touched**. Turning it on can never enlarge a
   file: the encoder codes both ways and keeps the smaller.
+- **Decode limits** — a few header bytes can declare a 16384×16384 frame (1 GiB of RGBA), so
+  `WebpDecoder` refuses, with `Unsupported`, any frame over its byte budget — 64 MiB by default
+  (`with_max_image_bytes`), charged at four bytes per pixel whether or not the file is opaque — or
+  its dimension caps (`with_max_dimensions`, default the format's 16384). Both are checked against
+  the `VP8 `/`VP8L` header before any frame-sized allocation and before a backend sees the job.
 - **Embedded metadata** — `WebpEncoder::with_icc_profile` / `with_exif` / `with_xmp` embed the `ICCP`,
   `EXIF`, and `XMP ` chunks; the `gamut_webp::metadata` free function reads them back out of any WebP
   file without decoding pixels. Payloads are carried **verbatim** — never parsed or reserialized — so
