@@ -1250,10 +1250,9 @@ mod tests {
     fn encoded_bitstream_is_stable() {
         // The encoder's structural choices — block partition (choose_partition), palette
         // (decide_palette/palette_cache/signal_palette_colors), skip (block_is_skippable), tx
-        // depth and type (select_luma_mode,
-        // select_tx_type), loop-restoration
-        // signalling (write_lr) — change the OBU bitstream but reconstruct bit-exactly, so the dav1d
-        // recon oracle in recon_dav1d.rs cannot see them. This snapshot pins an FNV-1a checksum of the
+        // depth and type (select_luma_mode, select_tx_type), loop-restoration signalling
+        // (write_lr) — change the OBU bitstream but reconstruct bit-exactly, so the libaom/dav1d
+        // recon oracle in tests/recon.rs cannot see them. This snapshot pins an FNV-1a checksum of the
         // OBU stream for a spread of content patterns, sizes and quantizers; any change to a
         // (deterministic) encoder decision moves a checksum. The recon oracle proves these same streams
         // decode correctly, so the pair certifies "deterministic AND correct", not just "deterministic".
@@ -1894,20 +1893,74 @@ mod tests {
         );
     }
 
+    /// Whether `obus` signals `(segmentation_enabled, delta_q_present, delta_lf_present)`, read
+    /// with the sequence and frame header parsers directly, so a layout `Av1Decoder::inspect`
+    /// refuses (4:2:0, high bit depth) can still be checked.
+    #[cfg(feature = "decode")]
+    fn block_variation_flags(obus: &[u8]) -> (bool, bool, bool) {
+        let units: Vec<_> = crate::decode::obu::ObuIter::new(obus)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let seq = crate::decode::obu::SequenceHeader::parse(units[0].payload).unwrap();
+        let mut r = gamut_bitstream::BitReader::new(units[1].payload);
+        let fh = crate::decode::header::FrameHeader::parse(&mut r, &seq).unwrap();
+        (
+            fh.segmentation.enabled,
+            fh.delta_q_present,
+            fh.delta_lf_present,
+        )
+    }
+
     /// #1011: no default lossy encode varies its quantizer or loop-filter level by block position.
     /// Kills `BlockVariation::exercised` → `true` (and `frame_header_payload`'s gate on it), which
-    /// would put the position-only segmentation, `delta_q` and `delta_lf` back on every encode.
+    /// would put the position-only segmentation, `delta_q` and `delta_lf` back on every encode,
+    /// and pins `BlockVariation::Frame` at each public entry point: the plain one, the options one
+    /// `gamut-avif`'s lossy encoder calls (BT.709 4:2:0, two tiles, two threads), superres and the
+    /// high-bit-depth one.
     #[cfg(feature = "decode")]
     #[test]
     fn block_variation_exercised_is_off_in_every_default_lossy_encode() {
+        let none = (false, false, false);
         let p = planes(160, 96, texture);
         for q in [1u8, 20, 120, 255] {
             let (still, _) = encode_still_intra(&p, q).unwrap();
-            let frame = crate::Av1Decoder::new().inspect(&still.obus).unwrap().frame;
-            assert!(!frame.segmentation.enabled, "q={q} codes segmentation");
-            assert!(!frame.delta_q_present, "q={q} codes delta_q");
-            assert!(!frame.delta_lf_present, "q={q} codes delta_lf");
+            assert_eq!(block_variation_flags(&still.obus), none, "plain q{q}");
         }
+        let rgb: Vec<u8> = (0..160u32 * 96)
+            .flat_map(|i| texture(i % 160, i / 160))
+            .collect();
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(160, 96).unwrap()).unwrap();
+        let m =
+            RgbToYcbcr::new(MatrixCoefficients::Bt709, ColorRange::Full, BitDepth::Eight).unwrap();
+        let yuv = Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
+        let colour = Av1Colour {
+            matrix: MatrixCoefficients::Bt709,
+            ..Av1Colour::default()
+        };
+        let options = EncodeOptions::default().with_threads(NonZeroUsize::new(2).unwrap());
+        let (still, _) = encode_still_intra_with_options(&yuv, 90, colour, options).unwrap();
+        assert_eq!(block_variation_flags(&still.obus), none, "options, 4:2:0");
+        let (still, _) = encode_still_intra_superres(&p, 90, 4).unwrap();
+        assert_eq!(block_variation_flags(&still.obus), none, "superres");
+        let deep = Planar16::from_planes(
+            64,
+            48,
+            BitDepth::Ten,
+            std::array::from_fn(|c| {
+                (0..64u32 * 48)
+                    .map(|i| u16::from(texture(i % 64, i / 64)[c]) * 4)
+                    .collect()
+            }),
+        )
+        .unwrap();
+        let (still, _) = encode_still_intra16_with_options(
+            &deep,
+            90,
+            Av1Colour::default(),
+            EncodeOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(block_variation_flags(&still.obus), none, "10-bit");
     }
 
     #[test]
