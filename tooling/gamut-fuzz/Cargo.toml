@@ -47,6 +47,19 @@ gamut-tiff = { path = "../../crates/gamut-tiff" }
 gamut-dng = { path = "../../crates/gamut-dng" }
 gamut-isobmff = { path = "../../crates/gamut-isobmff" }
 gamut-heic = { path = "../../crates/gamut-heic" }
+# The decoder and metadata-parser robustness targets (#311). gamut-jxl is taken decode-only, as
+# gamut-dng already takes it: its `encode` feature statically builds libjxl with cmake, which no
+# target here drives and which would put a C++ toolchain on the path of every fuzz build.
+gamut-png = { path = "../../crates/gamut-png" }
+gamut-jpeg = { path = "../../crates/gamut-jpeg" }
+gamut-webp = { path = "../../crates/gamut-webp" }
+gamut-riff = { path = "../../crates/gamut-riff" }
+gamut-jxl = { path = "../../crates/gamut-jxl", default-features = false, features = ["decode"] }
+gamut-av1 = { path = "../../crates/gamut-av1" }
+gamut-icc = { path = "../../crates/gamut-icc" }
+gamut-exif = { path = "../../crates/gamut-exif" }
+gamut-xmp = { path = "../../crates/gamut-xmp" }
+gamut-iptc = { path = "../../crates/gamut-iptc" }
 
 [[bin]]
 name = "ifd_read_ledger"
@@ -135,6 +148,76 @@ bench = false
 [[bin]]
 name = "heic_hvcc"
 path = "fuzz_targets/heic_hvcc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "png_decode"
+path = "fuzz_targets/png_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jpeg_decode"
+path = "fuzz_targets/jpeg_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webp_decode"
+path = "fuzz_targets/webp_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "riff_chunks"
+path = "fuzz_targets/riff_chunks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jxl_decode"
+path = "fuzz_targets/jxl_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "av1_inspect"
+path = "fuzz_targets/av1_inspect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "icc_parse"
+path = "fuzz_targets/icc_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exif_parse"
+path = "fuzz_targets/exif_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xmp_parse"
+path = "fuzz_targets/xmp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "iptc_read_irb"
+path = "fuzz_targets/iptc_read_irb.rs"
 test = false
 doc = false
 bench = false

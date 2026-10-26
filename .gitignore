@@ -53,12 +53,16 @@ tooling/gamut-fuzz/corpus/**
 !tooling/gamut-fuzz/corpus/avif_clean_alpha/8bit-2x2-edge.bin
 !tooling/gamut-fuzz/corpus/avif_parse_decode/grid-2x2-limits-6.avif
 !tooling/gamut-fuzz/corpus/avif_parse_decode/overlay-two-inputs-limits-100px.avif
+!tooling/gamut-fuzz/corpus/av1_inspect/identity-444-5x3.obu
 !tooling/gamut-fuzz/corpus/dng_decode/cfa-12bit.dng
+!tooling/gamut-fuzz/corpus/exif_parse/golden_bare_le.bin
+!tooling/gamut-fuzz/corpus/exif_parse/golden_marker_le.bin
 !tooling/gamut-fuzz/corpus/heic_container/appended-stream.heic
 !tooling/gamut-fuzz/corpus/heic_container/heic-single-item.heic
 !tooling/gamut-fuzz/corpus/heic_container/trailer.heic
 !tooling/gamut-fuzz/corpus/heic_hvcc/main-still-vps-sps-pps.bin
 !tooling/gamut-fuzz/corpus/heic_hvcc/truncated-payload-nal.bin
+!tooling/gamut-fuzz/corpus/icc_parse/xyb-srgb.icc
 !tooling/gamut-fuzz/corpus/ifd_read/01-truncated-header.tif
 !tooling/gamut-fuzz/corpus/ifd_read/03-invalid-byte-order.tif
 !tooling/gamut-fuzz/corpus/ifd_read/04-invalid-magic.tif
@@ -74,9 +78,18 @@ tooling/gamut-fuzz/corpus/**
 !tooling/gamut-fuzz/corpus/ifd_read/12-unknown-tag-preserved.tif
 !tooling/gamut-fuzz/corpus/ifd_read/13-unknown-field-type.tif
 !tooling/gamut-fuzz/corpus/ifd_read/padding-unread-claim.tif
+!tooling/gamut-fuzz/corpus/iptc_read_irb/headline-city.irb
 !tooling/gamut-fuzz/corpus/isobmff_boxes/avif-single-item.avif
+!tooling/gamut-fuzz/corpus/jpeg_decode/color_baseline.jpg
+!tooling/gamut-fuzz/corpus/jpeg_decode/color_progressive.jpg
+!tooling/gamut-fuzz/corpus/png_decode/rgb8-5x3.png
+!tooling/gamut-fuzz/corpus/png_decode/rgba8-5x3.png
+!tooling/gamut-fuzz/corpus/riff_chunks/vp8x-exif-xmp.webp
 !tooling/gamut-fuzz/corpus/tiff_decode/rgb8-lzw.tif
 !tooling/gamut-fuzz/corpus/tiff_decode/rgb8-none.tif
+!tooling/gamut-fuzz/corpus/webp_decode/vp8-rgb-5x3.webp
+!tooling/gamut-fuzz/corpus/webp_decode/vp8l-rgba-5x3.webp
+!tooling/gamut-fuzz/corpus/xmp_parse/two-properties.xmp
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
