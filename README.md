@@ -93,7 +93,7 @@ container format: `gamut-dng` depends on it outright, and `gamut-jpeg`, `gamut-j
 `gamut-png`, `gamut-webp`, `gamut-avif` and `gamut-tiff` wire it behind an optional `metadata`
 feature (a `TypedMetadata` impl and a `with_metadata` encoder builder where the crate encodes).
 The remaining gap is depth: per-vendor MakerNote payloads, which round-trip verbatim but are
-decoded only for Canon, Leica and Sony so far, and tag breadth beyond the standard dictionary. Issue #416 tracks the whole gap, measured.
+decoded only for Canon, Leica, Sony and Fujifilm so far, and tag breadth beyond the standard dictionary. Issue #416 tracks the whole gap, measured.
 
 **gamut is image-first.** Even where a format's codec (AV1, AV2, VVC, HEVC) is fundamentally a
 video codec, gamut implements only the intra-frame, still-image subset those formats use — no
@@ -144,7 +144,7 @@ rather than restating it.
 | `gamut-heic`      | HEIC/HEIF still-image container **decoder** — HEVC via a pluggable backend | decode-only container (S1–S7); no encoder, by charter |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
 | `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | stable (byte completeness #263); BigTIFF behind Cargo feature `bigtiff` |
-| `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on `gamut-ifd`        | stable (1.0 was #194); MakerNote preserved verbatim; Canon's, Leica's and Sony's tags decoded, other vendors' not yet |
+| `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on `gamut-ifd`        | stable (1.0 was #194); MakerNote preserved verbatim; Canon's, Leica's, Sony's and Fujifilm's tags decoded, other vendors' not yet |
 | `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | stable (1.0 was #180)               |
 | `gamut-cmm`       | ICC colour management module (transform engine) over `gamut-icc` profiles | P1–P8 complete per its STATUS.md — P1–P7 are epic #323, while P8 (pipeline optimization) is #372, which #323 lists out of scope |
 | `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | stable (1.0 was #189); canonical serializer, UTF-8 packets only |

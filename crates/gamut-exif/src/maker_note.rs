@@ -11,6 +11,9 @@
 //! - **Sony** — [`sony::SonyMakerNote`], through [`MakerNote::sony`] (issue #980), for the
 //!   [`Sony2`](MakerNoteDialect::Sony2) dialect; a [`Sony1`](MakerNoteDialect::Sony1) note has no
 //!   view yet (issue #1033).
+//! - **Fujifilm** — [`fujifilm::FujifilmMakerNote`], through [`MakerNote::fujifilm`] (issue #981),
+//!   for the [`Fujifilm`](MakerNoteDialect::Fujifilm) dialect, Leica's Fujifilm-built bodies
+//!   included.
 //!
 //! Every other vendor's tags stay undecoded; their views are the remainder of issue #418 and can
 //! be added without breaking this API (every enum and the layout struct here are
@@ -40,6 +43,7 @@
 //! too.
 
 pub mod canon;
+pub mod fujifilm;
 pub mod leica;
 pub mod sony;
 
@@ -150,6 +154,36 @@ impl MakerNote {
             at: note_at,
         };
         sony::SonyMakerNote::read(placed, note_at, layout)
+    }
+
+    /// The block decoded as a Fujifilm note, given `outer` and `note_at` as for
+    /// [`canon`](Self::canon). Fujifilm's value offsets count from the note's own start and its IFD
+    /// is little-endian whatever `outer` says, so a well-formed note reads completely from these
+    /// bytes alone; `note_at` only places them in the stream's offset space.
+    ///
+    /// A value whose offset points outside the note is unreadable and named by
+    /// [`FujifilmMakerNote::unreadable_tags`](fujifilm::FujifilmMakerNote::unreadable_tags).
+    ///
+    /// `Ok(None)` when the block has no [`MakerNoteDialect::Fujifilm`] layout. A Leica note in
+    /// that dialect (Leica's Fujifilm-built bodies) reads too.
+    ///
+    /// # Errors
+    ///
+    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// entries and next-IFD pointer — does not fit in the note.
+    pub fn fujifilm(
+        &self,
+        outer: ByteOrder,
+        note_at: u64,
+    ) -> Result<Option<fujifilm::FujifilmMakerNote>> {
+        let Some(layout) = self.layout(outer) else {
+            return Ok(None);
+        };
+        let placed = Placed {
+            bytes: &self.bytes,
+            at: note_at,
+        };
+        fujifilm::FujifilmMakerNote::read(placed, note_at, layout)
     }
 }
 
