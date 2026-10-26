@@ -357,6 +357,17 @@ mod tests {
     }
 
     #[test]
+    fn debug_renders_the_backend_count_and_the_limits() {
+        let decoder = WebpDecoder::new()
+            .with_max_dimensions(3, 5)
+            .with_max_image_bytes(7);
+        assert_eq!(
+            format!("{decoder:?}"),
+            "WebpDecoder { backends: 0, max_width: 3, max_height: 5, max_image_bytes: 7, .. }"
+        );
+    }
+
+    #[test]
     fn decodes_lossless_container_to_rgb8() {
         let file = solid_lossless_webp(2, 2, 0x12, 0x34, 0x56);
         let got: ImageBuf<Rgb8> = WebpDecoder::new().decode_image(&file).unwrap();
