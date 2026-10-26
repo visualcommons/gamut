@@ -11,10 +11,10 @@
 use std::path::PathBuf;
 
 use gamut_avif::{
-    Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, AvifImage, ChromaFormat, DecodedFrame,
-    Mirror, Rotation, SegmentKind, Subsampling,
+    Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, AvifImage, ChromaFormat,
+    ChromaUpsampling, DecodeOptions, DecodedFrame, Mirror, Rotation, SegmentKind, Subsampling,
 };
-use gamut_color::{ColorRange, MatrixCoefficients};
+use gamut_color::{ChromaSubsampling, ColorRange, MatrixCoefficients};
 use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
 use gamut_isobmff::{ColourInformation, PropertyKind};
 
@@ -282,8 +282,8 @@ fn content_light_level_agrees_with_libavif() {
 fn presentation_pixels_agree_with_libavif() {
     // Files whose colour configuration the RGBA surface supports (BT.601/unspecified/identity,
     // 8-bit), including a real multi-tile grid, an alpha-merged image, and an idat-backed one.
-    // Both readers use nearest-neighbour chroma upsampling, so only conversion rounding may
-    // differ; alpha must be exact.
+    // Both readers use nearest-neighbour chroma upsampling here, so only conversion rounding may
+    // differ; alpha must be exact. The default (interpolated) path has its own, tighter test below.
     for name in [
         "io/kodim03_yuv420_8bpc.avif",
         "sofa_grid1x5_420.avif",
@@ -295,8 +295,14 @@ fn presentation_pixels_agree_with_libavif() {
         let (ow, oh, oracle) = libavif_oracle::decode_rgba(&data)
             .unwrap_or_else(|e| panic!("{name}: libavif decode_rgba: {e}"));
         let container = AvifContainer::parse(&data).unwrap();
+        let nearest = DecodeOptions::default().with_chroma_upsampling(ChromaUpsampling::Nearest);
         let ours = container
-            .decode_item_rgba8(container.image().primary_item().id(), &mut Dav1dDecoder)
+            .image()
+            .decode_item_rgba8_with_options(
+                container.image().primary_item().id(),
+                &mut Dav1dDecoder,
+                nearest,
+            )
             .unwrap_or_else(|e| panic!("{name}: gamut rgba decode: {e:?}"));
         // libavif does not apply irot/imir/clap; compare pre-transform by decoding the item
         // directly (the primary of every file above carries no transform except
@@ -311,6 +317,60 @@ fn presentation_pixels_agree_with_libavif() {
         );
         assert_eq!(diff.max_alpha, 0, "{name}: alpha must be exact");
     }
+}
+
+#[test]
+fn default_presentation_matches_libavif_default_upsampling() {
+    // The default surface (interpolated chroma) against libavif's own default conversion, which
+    // in this libyuv-free build is its built-in bilinear filter. 4:2:0 corpus files (a real photo,
+    // a five-tile grid) plus this crate's own lossy output at 4:2:0 and 4:2:2, odd sizes
+    // included, in BT.709 full range and BT.601 limited range. Both sides compute the same 9/3/3/1
+    // sum and round once at the end, gamut in exact fixed point and libavif in `f32`, so they
+    // can disagree only where a value lands within float error of a rounding tie.
+    let mut cases: Vec<(String, Vec<u8>)> =
+        ["io/kodim03_yuv420_8bpc.avif", "sofa_grid1x5_420.avif"]
+            .iter()
+            .map(|name| (name.to_string(), corpus(name)))
+            .collect();
+    for (w, h) in [(33u32, 17u32), (64, 48), (7, 9)] {
+        let rgb = source_rgb(w, h);
+        for chroma in [ChromaSubsampling::Cs420, ChromaSubsampling::Cs422] {
+            for (matrix, range) in [
+                (MatrixCoefficients::Bt709, ColorRange::Full),
+                (MatrixCoefficients::Bt601, ColorRange::Limited),
+            ] {
+                let enc = AvifEncoder::lossy(60)
+                    .with_chroma(chroma)
+                    .with_matrix(matrix)
+                    .with_color_range(range);
+                let label = format!("gamut {w}x{h} {chroma:?} {matrix:?} {range:?}");
+                cases.push((label, encode(enc, &rgb, w, h)));
+            }
+        }
+    }
+    let mut worst = 0u8;
+    for (label, data) in &cases {
+        let (ow, oh, oracle) = libavif_oracle::decode_rgba_default_upsampling(data)
+            .unwrap_or_else(|e| panic!("{label}: libavif decode_rgba: {e}"));
+        let container = AvifContainer::parse(data).unwrap();
+        let ours = container
+            .decode_item_rgba8(container.image().primary_item().id(), &mut Dav1dDecoder)
+            .unwrap_or_else(|e| panic!("{label}: gamut rgba decode: {e:?}"));
+        assert_eq!((ours.width(), ours.height()), (ow, oh), "{label}: dims");
+        let diff = rgba_diff(ours.as_samples(), &oracle);
+        assert_eq!(diff.max_alpha, 0, "{label}: alpha must be exact");
+        worst = worst.max(diff.max_rgb);
+        assert!(
+            diff.max_rgb <= 1,
+            "{label}: rgb diff too large (max {}, mean {:.4})",
+            diff.max_rgb,
+            diff.mean
+        );
+    }
+    eprintln!(
+        "default-upsampling parity: worst max-diff {worst} over {} files",
+        cases.len()
+    );
 }
 
 // ---- t2b/t4: the crate's own encoder output --------------------------------------------------
@@ -848,7 +908,8 @@ fn colr_stripped_file_presents_like_the_original_and_like_libavif() {
     // This crate's encoder stamps the same CICP into colr and the sequence header, so once colr is
     // stripped the header alone must reproduce the original presentation exactly — the BT.709
     // full-range default included, which the old BT.601-limited fallback could not. libavif reads
-    // the stripped file the same way, within conversion rounding.
+    // the stripped file the same way: both sides at their default (interpolated) chroma
+    // upsampling, so only `f32`-versus-fixed-point rounding separates them.
     let decode = |bytes: &[u8]| {
         AvifContainer::parse(bytes)
             .unwrap()
@@ -866,16 +927,17 @@ fn colr_stripped_file_presents_like_the_original_and_like_libavif() {
         let ours = decode(&stripped);
         assert_eq!(ours, decode(&data), "{label}: stripped vs original");
 
-        let (_, _, oracle_stripped) = libavif_oracle::decode_rgba(&stripped)
+        let (_, _, oracle_stripped) = libavif_oracle::decode_rgba_default_upsampling(&stripped)
             .unwrap_or_else(|e| panic!("{label}: libavif decode_rgba: {e}"));
-        let (_, _, oracle_original) = libavif_oracle::decode_rgba(&data).unwrap();
+        let (_, _, oracle_original) =
+            libavif_oracle::decode_rgba_default_upsampling(&data).unwrap();
         assert_eq!(
             oracle_stripped, oracle_original,
             "{label}: libavif reads the stripped fixture as the original"
         );
         let diff = rgba_diff(&ours, &oracle_stripped);
         assert!(
-            diff.max_rgb <= 3 && diff.mean <= 0.5,
+            diff.max_rgb <= 1,
             "{label}: rgb diff too large (max {}, mean {:.3})",
             diff.max_rgb,
             diff.mean

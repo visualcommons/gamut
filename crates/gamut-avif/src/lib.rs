@@ -240,9 +240,10 @@ pub use c2pa::{
 };
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
-pub use decode::{Av1StillDecoder, DecodeLimits, DecodedFrame};
+pub use decode::{Av1StillDecoder, DecodeLimits, DecodeOptions, DecodedFrame};
 pub use encoder::{AlphaMode, AvifEncodeReport, AvifEncoder, RawPlanes};
 pub use gamut_av1::{ColorConfig, SequenceHeader, Speed, Subsampling};
+pub use gamut_color::ChromaUpsampling;
 pub use gamut_core::Dimensions;
 // The C2PA `ContentProvenanceBox` framing is `gamut-isobmff`'s, shared with `gamut-heic` (#505).
 pub use gamut_isobmff::{C2PA_UUID, C2paBoxPurpose, C2paByteRange, C2paSlot, C2paUnreadReason};
