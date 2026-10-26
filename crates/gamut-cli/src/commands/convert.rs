@@ -114,8 +114,9 @@ pub(crate) struct ConvertArgs {
     /// exact. Ignored with `--lossy` and for other output formats.
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
     webp_near_lossless: Option<u8>,
-    /// JPEG chroma subsampling for colour input: `444` (none), `422` (halve horizontally), or `420`
-    /// (halve both, the default). Ignored for other output formats and for grayscale.
+    /// JPEG chroma subsampling for colour input: `444` (none), `422` (halve horizontally), `420`
+    /// (halve both, the default), or `440` (halve vertically). Ignored for other output formats and
+    /// for grayscale.
     #[arg(long = "jpeg-subsampling", value_enum, default_value = "420")]
     jpeg_subsampling: JpegSubsampling,
     /// JPEG restart interval in MCUs: insert an RSTn marker every N MCUs so a decoder can resync
@@ -210,6 +211,9 @@ pub(crate) enum JpegSubsampling {
     /// 4:2:0 — halve chroma both horizontally and vertically.
     #[value(name = "420")]
     S420,
+    /// 4:4:0 — halve chroma vertically.
+    #[value(name = "440")]
+    S440,
 }
 
 /// CICP matrix for lossy AVIF output — the four [`MatrixCoefficients`] the AVIF encoder codes.
@@ -325,6 +329,7 @@ impl JpegSubsampling {
             JpegSubsampling::S444 => JpegChroma::Ycbcr444,
             JpegSubsampling::S422 => JpegChroma::Ycbcr422,
             JpegSubsampling::S420 => JpegChroma::Ycbcr420,
+            JpegSubsampling::S440 => JpegChroma::Ycbcr440,
         }
     }
 }
@@ -1348,8 +1353,8 @@ mod tests {
 
     use super::{
         AvifEncoder, AvifSpeed, BitDepth, ChromaSubsampling, ConvertArgs, Dimensions,
-        InputMetadata, Job, MatrixCoefficients, OutputFormat, Plan, PngCodecPreset, Samples,
-        avif_encoder, carry, plan, png_preset,
+        InputMetadata, Job, JpegChroma, MatrixCoefficients, OutputFormat, Plan, PngCodecPreset,
+        Samples, avif_encoder, carry, plan, png_preset,
     };
     use crate::error::CliError;
 
@@ -1655,6 +1660,27 @@ mod tests {
             );
         }
         assert!(parse_avif(&["--avif-chroma", "400"]).is_err());
+    }
+
+    #[test]
+    fn jpeg_subsampling_maps_each_value() {
+        let parse_jpeg = |flag: &str| {
+            Cli::try_parse_from(["convert", "in.png", "out.jpg", "--jpeg-subsampling", flag])
+                .map(|cli| cli.args.jpeg_subsampling.to_codec())
+        };
+        for (flag, chroma) in [
+            ("444", JpegChroma::Ycbcr444),
+            ("422", JpegChroma::Ycbcr422),
+            ("420", JpegChroma::Ycbcr420),
+            ("440", JpegChroma::Ycbcr440),
+        ] {
+            assert_eq!(
+                parse_jpeg(flag).ok(),
+                Some(chroma),
+                "--jpeg-subsampling {flag}"
+            );
+        }
+        assert!(parse_jpeg("411").is_err());
     }
 
     /// No input this command reads yields an IPTC-IIM block today, so the routing is pinned here:

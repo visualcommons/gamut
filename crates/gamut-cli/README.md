@@ -52,7 +52,7 @@ gamut convert input.jpg output.png --png-effort 3
 gamut convert input.jpg output.png --png-effort 3 --png-refinement-passes 30
 
 # Encode JPEG (JPEG-1): always lossy at --quality (default 75). --jpeg-subsampling picks the
-# YCbCr chroma resolution (444/422/420, default 420); --jpeg-restart-interval N inserts RSTn
+# YCbCr chroma resolution (444/422/420/440, default 420); --jpeg-restart-interval N inserts RSTn
 # restart markers every N MCUs (0 = off); --jpeg-progressive selects the progressive (SOF2)
 # process instead of baseline sequential.
 gamut convert input.png output.jpg
@@ -120,8 +120,8 @@ The sandbox exposes:
     `--jxl-container` (ISO BMFF); transparency preserved. Encoded via libjxl; the `.jxl` input path
     decodes through the pure-Rust jxl-rs backend.
   - **JPEG** (`.jpg`/`.jpeg`) — JPEG-1, baseline sequential or progressive (`--jpeg-progressive`),
-    always lossy at `--quality`; colour is YCbCr with `--jpeg-subsampling` (444/422/420, default
-    420) and optional `--jpeg-restart-interval` restart markers. No alpha (JPEG has none).
+    always lossy at `--quality`; colour is YCbCr with `--jpeg-subsampling` (444/422/420/440,
+    default 420) and optional `--jpeg-restart-interval` restart markers. No alpha (JPEG has none).
 - `inspect` — strict deconstruct of a TIFF, DNG or PNG (every byte classified, unknowns and
   anomalies flagged, PNG's compression figures), and the C2PA provenance report — located, never
   validated — for HEIC, AVIF, WebP, TIFF and DNG. `--output json` renders the same facts as one
