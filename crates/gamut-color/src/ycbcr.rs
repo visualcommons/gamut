@@ -36,16 +36,20 @@
 //!   JPEG convention. Kept for callers that genuinely want full-range BT.601; it is **not** what a
 //!   WebP file should carry.
 //!
-//! Chroma is box-subsampled (2×2 average) on the way down and nearest-replicated on the way up — a
-//! correct, simple pair; better resampling (fancy upsampling, sharp YUV) is a quality concern tracked
-//! as issue #32, not a correctness one. This conversion is deliberately *not* on the VP8 codec's
-//! bit-exact path (the codec operates on YCbCr planes directly); it backs the public RGB API.
+//! Chroma is box-subsampled (2×2 average) on the way down. On the way up, [`Yuv420::to_rgb8`] takes
+//! a [`ChromaUpsampling`]. [`ChromaUpsampling::Interpolated`] is libwebp's fancy upsampler, ported
+//! exactly ([`crate::upsample::libwebp`]), so RGB from a WebP decode is byte-identical to
+//! `dwebp`'s default output. [`ChromaUpsampling::Nearest`] replicates each chroma sample across its
+//! 2×2 luma block (`dwebp -nofancy`). Sharp-YUV downsampling on the encode side is not implemented.
+//! This conversion is deliberately *not* on the VP8 codec's bit-exact path (the codec operates on
+//! YCbCr planes directly); it backs the public RGB API.
 
 use gamut_core::luminance::BT601_LUMA_WEIGHTS;
 use gamut_core::{Dimensions, Error, Result};
 
 use crate::cicp::{ColorRange, MatrixCoefficients};
 use crate::format::BitDepth;
+use crate::upsample::{ChromaUpsampling, libwebp, replicate, taps};
 use crate::{clip_pixel, clip_pixel8};
 
 /// Fixed-point fractional bits for the conversion coefficients.
@@ -272,21 +276,46 @@ impl Yuv420 {
         })
     }
 
-    /// Converts back to an interleaved 8-bit RGB image in the given [`ColorRange`], nearest-replicating
-    /// each chroma sample across its 2×2 luma block.
+    /// Converts back to an interleaved 8-bit RGB image in the given [`ColorRange`], reconstructing
+    /// full-resolution chroma with `upsampling`.
+    ///
+    /// [`ChromaUpsampling::Interpolated`] is libwebp's fancy upsampler
+    /// ([`crate::upsample::libwebp::fancy_row`]), which together with the libwebp-exact
+    /// [`ycbcr_to_rgb`] makes the output byte-identical to libwebp's default RGB decode.
+    /// [`ChromaUpsampling::Nearest`] replicates each chroma sample across its 2×2 luma block.
     #[must_use]
-    pub fn to_rgb8(&self, range: ColorRange) -> Vec<u8> {
+    pub fn to_rgb8(&self, range: ColorRange, upsampling: ChromaUpsampling) -> Vec<u8> {
         let (w, h) = (self.width as usize, self.height as usize);
         let cw = Self::chroma_width(self.width) as usize;
+        let ch = Self::chroma_height(self.height) as usize;
         let mut out = vec![0u8; w * h * 3];
-        for py in 0..h {
-            for px in 0..w {
-                let ci = (py / 2) * cw + (px / 2);
-                let (r, g, b) = ycbcr_to_rgb(self.y[py * w + px], self.u[ci], self.v[ci], range);
-                let o = (py * w + px) * 3;
-                out[o] = r;
-                out[o + 1] = g;
-                out[o + 2] = b;
+        if w == 0 {
+            // `new` admits a zero-width buffer; it has no rows to convert.
+            return out;
+        }
+        let (mut u_row, mut v_row) = (vec![0u8; w], vec![0u8; w]);
+        for (py, line) in out.chunks_exact_mut(w * 3).enumerate() {
+            let (near, far) = taps(py, ch);
+            let (near, far) = (near * cw..(near + 1) * cw, far * cw..(far + 1) * cw);
+            for (plane, row) in [(&self.u, &mut u_row), (&self.v, &mut v_row)] {
+                match upsampling {
+                    ChromaUpsampling::Nearest => replicate(&plane[near.clone()], row),
+                    ChromaUpsampling::Interpolated => {
+                        libwebp::fancy_row(&plane[near.clone()], &plane[far.clone()], row);
+                    }
+                }
+            }
+            let luma = &self.y[py * w..(py + 1) * w];
+            for (((px, &y), &u), &v) in line
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .zip(luma)
+                .zip(&u_row)
+                .zip(&v_row)
+            {
+                let (r, g, b) = ycbcr_to_rgb(y, u, v, range);
+                *px = [r, g, b];
             }
         }
         out
@@ -332,8 +361,9 @@ impl Yuv420 {
 /// exactly-rounded value. Q24 would gain a little more but leaves no headroom for a future
 /// `i32`-lane vector path.
 const MATRIX_FIX: u32 = 20;
-/// Rounding addend (`0.5` in the [`MATRIX_FIX`] scale).
-const MATRIX_HALF: i64 = 1 << (MATRIX_FIX - 1);
+/// Extra fractional bits of a chroma sample given in sixteenths of a code value
+/// ([`YcbcrMatrix::to_rgb_sixteenths`]).
+const SIXTEENTHS_FIX: u32 = 4;
 /// Denominator of the published `Kr`/`Kb` luma weights (ITU-T H.273 Table 4), which are exact
 /// four-decimal values — so the whole coefficient derivation is exact integer arithmetic.
 const K_DEN: i128 = 10_000;
@@ -351,9 +381,14 @@ fn round_div(num: i128, den: i128) -> i128 {
 /// Rounds a [`MATRIX_FIX`]-scaled accumulator to an integer sample and saturates it to `bit_depth`
 /// (the AV1 `Clip1` of [`clip_pixel`]).
 fn round_clip(acc: i64, bit_depth: u32) -> u16 {
+    round_clip_at(acc, MATRIX_FIX, bit_depth)
+}
+
+/// [`round_clip`] for an accumulator with `frac` fractional bits: rounds half up, then saturates.
+fn round_clip_at(acc: i64, frac: u32, bit_depth: u32) -> u16 {
     // Over every derived coefficient set and every `u16` input triple the shifted value stays well
     // inside 19 bits, so narrowing to `i32` for `clip_pixel` cannot truncate.
-    let v = (acc + MATRIX_HALF) >> MATRIX_FIX;
+    let v = (acc + (1 << (frac - 1))) >> frac;
     debug_assert!(i32::try_from(v).is_ok(), "YCbCr accumulator exceeds i32");
     clip_pixel(v as i32, bit_depth)
 }
@@ -518,6 +553,37 @@ impl YcbcrMatrix {
                 bits,
             ),
             round_clip(yy + i64::from(self.b_cb) * u, bits),
+        )
+    }
+
+    /// Converts one YCbCr triple whose chroma is given in **sixteenths** of a code value to RGB,
+    /// each component in `0..=(1 << bit_depth) - 1`.
+    ///
+    /// `cb` and `cr` are 16 times the chroma value, which is the unrounded weighted sum
+    /// [`crate::upsample::libavif::bilinear_row`] returns. The conversion is
+    /// [`to_rgb`](Self::to_rgb)'s with the chroma's four fractional bits carried through to the
+    /// single final rounding, so `to_rgb_sixteenths(y, 16 * cb, 16 * cr)` equals
+    /// `to_rgb(y, cb, cr)`. Rounding interpolated chroma to whole code values first would add up
+    /// to half a chroma step of error before the conversion. libavif, the AVIF reference, never
+    /// takes that step.
+    #[must_use]
+    #[inline]
+    pub fn to_rgb_sixteenths(self, y: u16, cb: u32, cr: u32) -> (u16, u16, u16) {
+        let bits = u32::from(self.depth.bits());
+        let frac = MATRIX_FIX + SIXTEENTHS_FIX;
+        let yy =
+            (i64::from(self.y_gain) * (i64::from(y) - i64::from(self.y_offset))) << SIXTEENTHS_FIX;
+        let offset = i64::from(self.c_offset) << SIXTEENTHS_FIX;
+        let u = i64::from(cb) - offset;
+        let v = i64::from(cr) - offset;
+        (
+            round_clip_at(yy + i64::from(self.r_cr) * v, frac, bits),
+            round_clip_at(
+                yy + i64::from(self.g_cb) * u + i64::from(self.g_cr) * v,
+                frac,
+                bits,
+            ),
+            round_clip_at(yy + i64::from(self.b_cb) * u, frac, bits),
         )
     }
 
@@ -841,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn to_rgb8_matches_reference_upsampling() {
+    fn to_rgb8_nearest_replicates_chroma() {
         // Distinct per-position Y/U/V so the nearest-chroma index `(py/2)*cw + (px/2)` and the luma
         // index `py*w + px` both matter; an independent reference upsamples identically. An empty
         // `vec![]` body, a mutated index, or wrong index arithmetic all diverge.
@@ -853,7 +919,7 @@ mod tests {
         let v: Vec<u8> = (0..cw * chh).map(|i| (220 - i * 13 % 200) as u8).collect();
         let yuv = Yuv420::new(w, h, y.clone(), u.clone(), v.clone()).unwrap();
         assert_eq!((yuv.width(), yuv.height()), (w, h));
-        let out = yuv.to_rgb8(Full);
+        let out = yuv.to_rgb8(Full, ChromaUpsampling::Nearest);
         assert_eq!(out.len(), (w * h * 3) as usize);
         let (wu, cwu) = (w as usize, cw as usize);
         for py in 0..h as usize {
@@ -868,6 +934,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn to_rgb8_of_an_empty_buffer_is_empty() {
+        // `new` admits zero dimensions; converting them must not panic in either mode.
+        for (w, h) in [(0u32, 3u32), (3, 0), (0, 0)] {
+            let chroma = (Yuv420::chroma_width(w) * Yuv420::chroma_height(h)) as usize;
+            let yuv = Yuv420::new(
+                w,
+                h,
+                vec![0; (w * h) as usize],
+                vec![0; chroma],
+                vec![0; chroma],
+            )
+            .unwrap();
+            for upsampling in [ChromaUpsampling::Nearest, ChromaUpsampling::Interpolated] {
+                assert!(
+                    yuv.to_rgb8(Limited, upsampling).is_empty(),
+                    "{w}x{h} {upsampling:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn to_rgb8_interpolated_runs_libwebps_fancy_upsampler_per_plane() {
+        // Each output row interpolates between chroma row `py / 2` and its neighbour above (even
+        // rows) or below (odd rows), clamped to the plane: libwebp's `EmitFancyRGB` row order. U
+        // and V carry different data, so swapping them, reading the wrong row, or replicating
+        // instead of interpolating all diverge from this independently assembled expectation.
+        let (w, h) = (5u32, 5u32);
+        let (cw, ch) = (3usize, 3usize);
+        let y: Vec<u8> = (0..w * h).map(|i| (16 + i * 9 % 219) as u8).collect();
+        let u: Vec<u8> = (0..9u32).map(|i| (40 + i * 23 % 180) as u8).collect();
+        let v: Vec<u8> = (0..9u32).map(|i| (210 - i * 19 % 170) as u8).collect();
+        let yuv = Yuv420::new(w, h, y.clone(), u.clone(), v.clone()).unwrap();
+        let out = yuv.to_rgb8(Limited, ChromaUpsampling::Interpolated);
+        let rows: [(usize, usize); 5] = [(0, 0), (0, 1), (1, 0), (1, 2), (2, 1)];
+        let wu = w as usize;
+        for (py, &(near, far)) in rows.iter().enumerate() {
+            let row = |p: &[u8], r: usize| p[r * cw..(r + 1) * cw].to_vec();
+            let (mut ur, mut vr) = (vec![0u8; wu], vec![0u8; wu]);
+            libwebp::fancy_row(&row(&u, near), &row(&u, far), &mut ur);
+            libwebp::fancy_row(&row(&v, near), &row(&v, far), &mut vr);
+            for px in 0..wu {
+                let (r, g, b) = ycbcr_to_rgb(y[py * wu + px], ur[px], vr[px], Limited);
+                let o = (py * wu + px) * 3;
+                assert_eq!(&out[o..o + 3], &[r, g, b], "pixel ({px},{py})");
+            }
+        }
+        assert_eq!(ch, Yuv420::chroma_height(h) as usize);
+        // Interpolation really happened: it differs from replication on this content.
+        assert_ne!(out, yuv.to_rgb8(Limited, ChromaUpsampling::Nearest));
     }
 
     // ---- YcbcrMatrix ------------------------------------------------------------------------
@@ -1158,6 +1277,40 @@ mod tests {
         }
         assert_eq!(MatrixCoefficients::from_code_point(5), Some(Bt470Bg));
         assert_eq!(Bt470Bg.code_point(), 5);
+    }
+
+    #[test]
+    fn to_rgb_sixteenths_of_whole_chroma_equals_to_rgb() {
+        for (matrix, range, depth) in CONFIGS {
+            let m = YcbcrMatrix::new(matrix, range, depth).unwrap();
+            let max = (1u32 << depth.bits()) - 1;
+            for (y, cb, cr) in [(0, 0, 0), (max, max, max), (max / 3, max / 2, max / 5)] {
+                let (y, cb, cr) = (y as u16, cb as u16, cr as u16);
+                assert_eq!(
+                    m.to_rgb_sixteenths(y, 16 * u32::from(cb), 16 * u32::from(cr)),
+                    m.to_rgb(y, cb, cr),
+                    "{matrix:?} {range:?} {depth:?} ({y}, {cb}, {cr})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn to_rgb_sixteenths_carries_the_fraction_to_the_final_rounding() {
+        // 8-bit full-range BT.601: R = Y + 1.402·(Cr - 128). Cr = 128 + 6/16 puts R at Y + 0.526,
+        // which rounds up; Cr = 128 + 5/16 puts it at Y + 0.438, which rounds down. Either way
+        // rounding the chroma to a whole code first would give Y. B moves the same way through Cb
+        // (1.772·(6/16) = 0.665 up, 1.772·(4/16) = 0.443 down), and G = Y - 0.714·(Cr - 128) for
+        // Cr = 128 + 12/16 sits at Y - 0.536.
+        let m = YcbcrMatrix::new(Bt601, Full, Eight).unwrap();
+        assert_eq!(m.to_rgb_sixteenths(100, 2048, 2048 + 6), (101, 100, 100));
+        assert_eq!(m.to_rgb_sixteenths(100, 2048, 2048 + 5), (100, 100, 100));
+        assert_eq!(m.to_rgb_sixteenths(100, 2048 + 6, 2048), (100, 100, 101));
+        assert_eq!(m.to_rgb_sixteenths(100, 2048 + 4, 2048), (100, 100, 100));
+        assert_eq!(m.to_rgb_sixteenths(100, 2048, 2048 + 12), (101, 99, 100));
+        // Saturation still applies at both ends.
+        assert_eq!(m.to_rgb_sixteenths(255, 4080, 4080), (255, 121, 255));
+        assert_eq!(m.to_rgb_sixteenths(0, 0, 0), (0, 135, 0));
     }
 
     #[test]

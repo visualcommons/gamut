@@ -19,7 +19,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use gamut_color::{ColorRange, Yuv420};
+use gamut_color::{ChromaUpsampling, ColorRange, Yuv420};
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
 use gamut_core::{
     DecodeImage, Dimensions, Error, ImageBuf, Pixel, PixelFormat, Result, Rgb8, Rgba8,
@@ -290,7 +290,7 @@ impl WebpDecoder {
                     height: yuv.height(),
                 };
                 // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
-                let rgb = yuv.to_rgb8(ColorRange::Limited);
+                let rgb = yuv.to_rgb8(ColorRange::Limited, ChromaUpsampling::Nearest);
                 // A lossy bitstream carries no alpha of its own: it exists only when the extended
                 // container supplies an `ALPH` chunk.
                 let Some(payload) = layout.alph else {

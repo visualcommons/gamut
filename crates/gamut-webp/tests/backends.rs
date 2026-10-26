@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gamut_codec_abi as abi;
-use gamut_color::{ColorRange, Yuv420};
+use gamut_color::{ChromaUpsampling, ColorRange, Yuv420};
 use gamut_core::{
     DecodeImage, Dimensions, EncodeImage, Error, ErrorKind, ImageBuf, ImageRef, Result, Rgb8, Rgba8,
 };
@@ -337,7 +337,7 @@ fn decode_routing_is_per_codestream() {
     assert_eq!(log.ran(), vec!["vp8only"]);
     let expected = Yuv420::new(16, 16, vec![200u8; 256], vec![128u8; 64], vec![128u8; 64])
         .expect("yuv")
-        .to_rgb8(ColorRange::Limited);
+        .to_rgb8(ColorRange::Limited, ChromaUpsampling::Nearest);
     assert_eq!(got.as_samples(), expected.as_slice());
 
     // And a VP8L-only backend is never chosen for a VP8 stream.
