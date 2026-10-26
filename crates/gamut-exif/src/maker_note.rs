@@ -8,6 +8,9 @@
 //!
 //! - **Canon** — [`canon::CanonMakerNote`], through [`MakerNote::canon`] (issue #977).
 //! - **Leica** — [`leica::LeicaMakerNote`], through [`MakerNote::leica`] (issue #978).
+//! - **Sony** — [`sony::SonyMakerNote`], through [`MakerNote::sony`] (issue #980), for the
+//!   [`Sony2`](MakerNoteDialect::Sony2) dialect; a [`Sony1`](MakerNoteDialect::Sony1) note has no
+//!   view yet (issue #1033).
 //!
 //! Every other vendor's tags stay undecoded; their views are the remainder of issue #418 and can
 //! be added without breaking this API (every enum and the layout struct here are
@@ -38,10 +41,12 @@
 
 pub mod canon;
 pub mod leica;
+pub mod sony;
 
-use gamut_ifd::{AuditFinding, ByteOrder, Ifd, IfdReader, RawIfd, ReadAt, Rebased, Variant};
+use gamut_ifd::{AuditFinding, ByteOrder, Ifd, IfdReader, RawIfd, ReadAt, Rebased, Value, Variant};
 
 use crate::error::Result;
+use crate::value::as_text;
 
 /// The bytes a one-entry IFD occupies before its next-IFD pointer: a 2-byte entry count plus one
 /// 12-byte entry. A note shorter than its header plus this holds no IFD to decode.
@@ -120,6 +125,31 @@ impl MakerNote {
             at: note_at,
         };
         leica::LeicaMakerNote::read(placed, note_at, layout)
+    }
+
+    /// The block decoded as a Sony note, given `outer` and `note_at` as for
+    /// [`canon`](Self::canon): Sony's value offsets count from the TIFF header.
+    ///
+    /// Reads only these bytes, so a value whose offset points outside the note is unreadable here
+    /// and named by [`SonyMakerNote::unreadable_tags`](sony::SonyMakerNote::unreadable_tags);
+    /// [`SonyMakerNote::read`](sony::SonyMakerNote::read) reads through the whole stream instead.
+    ///
+    /// `Ok(None)` when the block has no [`MakerNoteDialect::Sony2`] layout — a
+    /// [`Sony1`](MakerNoteDialect::Sony1) note included, which has no view yet (issue #1033).
+    ///
+    /// # Errors
+    ///
+    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// entries and next-IFD pointer — does not fit in the note.
+    pub fn sony(&self, outer: ByteOrder, note_at: u64) -> Result<Option<sony::SonyMakerNote>> {
+        let Some(layout) = self.layout(outer) else {
+            return Ok(None);
+        };
+        let placed = Placed {
+            bytes: &self.bytes,
+            at: note_at,
+        };
+        sony::SonyMakerNote::read(placed, note_at, layout)
     }
 }
 
@@ -228,6 +258,32 @@ pub(crate) fn decode_lenient<S: ReadAt>(
         })
         .collect();
     Ok((ifd, unreadable))
+}
+
+/// The one element of `values`, or `None` for an empty or multi-valued field. Shared by the
+/// vendor views' scalar accessors.
+pub(crate) fn single<T: Copy>(values: &[T]) -> Option<T> {
+    match values {
+        [value] => Some(*value),
+        _ => None,
+    }
+}
+
+/// `tag` of `ifd` as a single `SLONG`, or `None` if absent, of another type, or not one value.
+pub(crate) fn slong(ifd: &Ifd, tag: u16) -> Option<i32> {
+    match ifd.get(tag)? {
+        Value::SLong(values) => single(values),
+        _ => None,
+    }
+}
+
+/// `tag` of `ifd` as text up to its first NUL. Vendors write fixed-width, NUL-padded text fields
+/// and exiv2 and ExifTool report the same prefix; the padding stays in the raw value. The prefix
+/// is taken from the decoded value, so a field holding any non-UTF-8 byte — padding after the NUL
+/// included — is already among a view's unreadable tags and reads as `None`, where exiv2 still
+/// reports the prefix (the divergence `references/exif/canon/README.md` records).
+pub(crate) fn text(ifd: &Ifd, tag: u16) -> Option<&str> {
+    as_text(ifd.get(tag)?)?.split('\0').next()
 }
 
 /// A MakerNote vendor dialect.
@@ -986,6 +1042,13 @@ mod tests {
         assert_eq!(OffsetBase::MakerNote { at: 0 }.origin(100), Some(100));
         assert_eq!(OffsetBase::MakerNote { at: 10 }.origin(100), Some(110));
         assert_eq!(OffsetBase::MakerNote { at: 1 }.origin(u64::MAX), None);
+    }
+
+    #[test]
+    fn single_takes_exactly_one_value() {
+        assert_eq!(single::<u8>(&[]), None);
+        assert_eq!(single(&[7]), Some(7));
+        assert_eq!(single(&[7, 8]), None);
     }
 
     #[test]
