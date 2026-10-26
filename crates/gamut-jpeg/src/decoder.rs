@@ -52,8 +52,9 @@
 //! ratio, is replicated, as libjpeg-turbo does too. The output is therefore byte-identical to
 //! libjpeg-turbo's default decode, which the crate's oracle tests pin. A non-integer ratio (the
 //! `3`s §A.1.1 permits, e.g. a component sampled 2 of 3) is replicated too; libjpeg-turbo refuses
-//! such a stream (`JERR_FRACT_SAMPLE_NOTIMPL`), so there is no reference output to match. [`JpegDecoder::with_chroma_upsampling`] selects [`ChromaUpsampling::Nearest`], which
-//! replicates every component (`djpeg -nosmooth`). The choice applies to every subsampled
+//! such a stream (`JERR_FRACT_SAMPLE_NOTIMPL`), so there is no reference output to match.
+//! [`JpegDecoder::with_chroma_upsampling`] selects [`ChromaUpsampling::Nearest`], which replicates
+//! every component (`djpeg -nosmooth`). The choice applies to every subsampled
 //! component, CMYK and RGB included, and only to the built-in decoder: a pushed backend presents
 //! its own raster.
 

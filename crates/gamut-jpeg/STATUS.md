@@ -227,7 +227,8 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   (h2v2) resolutions, with libjpeg-turbo's alternating rounding bias and its replication fallback for
   an h2v1/h2v2 component one or two samples wide; every other integer ratio is replicated, as
   libjpeg-turbo does. A non-integer ratio (e.g. 2 of 3, which §A.1.1 permits) is replicated too;
-  libjpeg-turbo refuses it (`JERR_FRACT_SAMPLE_NOTIMPL`). `JpegDecoder::with_chroma_upsampling(ChromaUpsampling::Nearest)` replicates everything
+  libjpeg-turbo refuses it (`JERR_FRACT_SAMPLE_NOTIMPL`).
+  `JpegDecoder::with_chroma_upsampling(ChromaUpsampling::Nearest)` replicates everything
   (`djpeg -nosmooth`). Both are oracle-gated byte for byte. libjpeg-turbo's DCT-domain scaling is not
   modelled: the decoder always outputs at full size.
 - **Trailing bytes after EOI** are ignored (the libjpeg convention).
