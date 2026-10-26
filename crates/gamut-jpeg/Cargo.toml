@@ -51,6 +51,10 @@ divan.workspace = true
 # libjpeg-turbo above stays the output oracle). Default features keep its x86/NEON SIMD paths on,
 # which is the configuration a downstream user of it actually runs.
 zune-jpeg = "0.5.15"
+# Perceptual-metric oracle (issue #972): SSIMULACRA 2 scores for the quality experiment arms
+# (`examples/experiment_29.rs`), where PSNR and SSIM credit flat quantization tables by
+# construction. Dev-only and excluded from the workspace, like the libjpeg-turbo oracle above.
+perceptual-oracle = { path = "../../tooling/perceptual-oracle" }
 
 [[bench]]
 name = "decode"
