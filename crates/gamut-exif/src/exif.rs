@@ -316,8 +316,8 @@ impl Exif {
     }
 
     /// The `MakerNote` block as its opaque bytes plus the vendor detected from `Make`, or `None` if
-    /// absent. Vendor tags are decoded only through a vendor view, [`MakerNote::canon`] or
-    /// [`MakerNote::leica`]; see [`MakerNote`] for the round-trip caveat.
+    /// absent. Vendor tags are decoded only through a vendor view, [`MakerNote::canon`],
+    /// [`MakerNote::leica`] or [`MakerNote::sony`]; see [`MakerNote`] for the round-trip caveat.
     #[must_use]
     pub fn maker_note(&self) -> Option<MakerNote> {
         let bytes = match self.get_tag(ExifTag::MakerNote)? {
