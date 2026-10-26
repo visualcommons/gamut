@@ -152,7 +152,8 @@ fn caller_limits_refuse_a_stream_truncated_after_its_headers() {
 mod with_streams {
     use gamut_core::convert::ConvertPolicy;
     use gamut_core::{
-        DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Pixel, Rgb8, Rgba8,
+        DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Pixel, Rgb8, Rgb16,
+        Rgba8, Rgba16,
     };
     use gamut_jxl::{Container, DecodePartialImage, Effort, JxlDecoder, JxlEncoder};
 
@@ -328,6 +329,17 @@ mod with_streams {
             ConvertPolicy::permissive(),
             16 * 16 * 4,
         );
+    }
+
+    #[test]
+    fn the_byte_budget_weighs_the_stream_layout_at_its_sample_width() {
+        // The 16-bit twin of the case above: the stream's 4 channels at 2 bytes each, 8 bytes per
+        // pixel, are what is budgeted, so the sample width is a factor of the count.
+        let (w, h) = (16u32, 16u32);
+        let px = crate::common::gen_u16(w, h, Rgba16::CHANNELS);
+        let img = ImageRef::<Rgba16>::new(&px, Dimensions::new(w, h).unwrap()).unwrap();
+        let stream = JxlEncoder::lossless().encode_to_vec(img).unwrap();
+        assert_byte_budget_is_exact::<Rgb16>(&stream, ConvertPolicy::permissive(), 16 * 16 * 8);
     }
 
     #[test]
