@@ -5,10 +5,14 @@
 //! VP8/VP8L decoders instead of wrapping libwebp — so a hostile file must end in a typed error,
 //! never a panic, a hang, or an allocation past libFuzzer's malloc limit.
 //!
-//! The decoder has no configurable limits: its bound is the format's own 14-bit dimension fields
-//! (16 384 × 16 384 at most, so at most 1 GiB of RGBA output), which is inside libFuzzer's default
-//! 2048 MB malloc limit. A report here is therefore an allocation the decoder sized from something
-//! other than the frame it is decoding.
+//! The decoder has no configurable limits (#1025): its only bound is the format's own 14-bit
+//! dimension fields, 16 384 × 16 384 at most. That bound does **not** fit libFuzzer's default
+//! `-rss_limit_mb=2048`: a conformant lossless frame at that size holds its 1 GiB ARGB `Vec<u32>`
+//! and its 1 GiB RGBA output alive together (`WebpDecoder::decode_native`), so an out-of-memory
+//! report here can be a conformant file rather than a mis-sized allocation. Triage one by the
+//! frame size the input declares: a report whose declared frame needs the memory is the missing
+//! limit #1025 tracks, and only one whose frame does not is a defect in this crate. Once #1025
+//! gives the decoder a caller-set limit, this target sets it and the ambiguity goes away.
 //!
 //! It decodes to `Rgba8` with the default (lossless) policy: an opaque image widens to it without
 //! permission, so both the lossy `VP8 ` path (with or without an `ALPH` chunk) and the lossless
