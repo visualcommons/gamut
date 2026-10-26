@@ -8,7 +8,9 @@
 //! restart cadence) and that the EOB-run machinery is actually exercised.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_jpeg::{ChromaSubsampling, JpegDecoder, JpegEncoder, JpegProcess};
+use gamut_jpeg::{
+    ChromaSubsampling, JpegColorMode, JpegDecoder, JpegEncoder, JpegProcess, ProgressiveScript,
+};
 
 /// A deterministic per-pixel-distinct pattern (varies on both axes) so every coordinate is
 /// load-bearing — a mis-indexed scan diverges somewhere.
@@ -54,11 +56,28 @@ fn encode(
     restart: u16,
     progressive: bool,
 ) -> Vec<u8> {
+    let script = ProgressiveScript::default();
+    encode_with_script(mode, src, w, h, q, restart, progressive, script)
+}
+
+/// [`encode`] with an explicit progressive scan script.
+#[allow(clippy::too_many_arguments)]
+fn encode_with_script(
+    mode: Mode,
+    src: &[u8],
+    w: u32,
+    h: u32,
+    q: u8,
+    restart: u16,
+    progressive: bool,
+    script: ProgressiveScript,
+) -> Vec<u8> {
     let dims = Dimensions::new(w, h).unwrap();
     let enc = JpegEncoder::new()
         .with_quality(q)
         .with_restart_interval(restart)
-        .with_progressive(progressive);
+        .with_progressive(progressive)
+        .with_progressive_script(script);
     match mode {
         Mode::Gray => enc
             .encode_to_vec(ImageRef::<Gray8>::new(src, dims).unwrap())
@@ -124,6 +143,32 @@ fn progressive_decodes_identically_to_baseline() {
                     assert_eq!(
                         a, b,
                         "{mode:?} {w}x{h} q{q} r{restart}: prog != baseline decode"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mozjpeg_script_decodes_identically_to_baseline() {
+    // The same exactness gate for the opt-in mozjpeg script: it codes the baseline coefficients in a
+    // different scan split (DC whole, AC split at 8/9, chroma AC whole), so its stream must still
+    // decode byte-identically to the baseline stream of the same input.
+    for &(w, h) in &[(1u32, 1u32), (17, 9), (33, 31)] {
+        for mode in Mode::ALL {
+            for &q in &[50u8, 90] {
+                for &restart in &[0u16, 2] {
+                    let src: Vec<u8> = (0..(w * h * mode.channels()) as usize)
+                        .map(pattern)
+                        .collect();
+                    let base = encode(mode, &src, w, h, q, restart, false);
+                    let script = ProgressiveScript::Mozjpeg;
+                    let prog = encode_with_script(mode, &src, w, h, q, restart, true, script);
+                    assert_eq!(
+                        decode(mode, &base),
+                        decode(mode, &prog),
+                        "{mode:?} {w}x{h} q{q} r{restart}: mozjpeg prog != baseline decode"
                     );
                 }
             }
@@ -342,6 +387,102 @@ fn stream_matches_the_frozen_scan_script() {
                 "spectral fields"
             );
         }
+    }
+}
+
+/// The expected `(comp_ids, ss, se, ah, al)` for each scan of mozjpeg's `JCP_MAX_COMPRESSION`
+/// script (`dc_scan_opt_mode = 0`), written out from mozjpeg 4.1.5 `jcparam.c` as cited in
+/// `references/jpeg/README.md`: the YCbCr `jpeg_scan_rgb.txt` script, or the all-purpose
+/// `jpeg_scan_bw.txt` one over the frame's component `ids`.
+fn expected_mozjpeg_script(ycbcr: bool, ids: &[u8]) -> Vec<(Vec<u8>, u8, u8, u8, u8)> {
+    if ycbcr {
+        vec![
+            (vec![1, 2, 3], 0, 0, 0, 0),
+            (vec![1], 1, 8, 0, 2),
+            (vec![2], 1, 8, 0, 0),
+            (vec![3], 1, 8, 0, 0),
+            (vec![1], 9, 63, 0, 2),
+            (vec![1], 1, 63, 2, 1),
+            (vec![1], 1, 63, 1, 0),
+            (vec![2], 9, 63, 0, 0),
+            (vec![3], 9, 63, 0, 0),
+        ]
+    } else {
+        let mut scans = vec![(ids.to_vec(), 0, 0, 0, 0)];
+        for (ss, se, ah, al) in [(1, 8, 0, 2), (9, 63, 0, 2), (1, 63, 2, 1), (1, 63, 1, 0)] {
+            scans.extend(ids.iter().map(|&id| (vec![id], ss, se, ah, al)));
+        }
+        scans
+    }
+}
+
+/// Asserts that `jpeg` is SOF2 and carries exactly the `expected` scan list.
+fn assert_scan_list(jpeg: &[u8], expected: &[(Vec<u8>, u8, u8, u8, u8)], what: &str) {
+    let walked = walk(jpeg);
+    assert_eq!(walked.process, 0xC2, "{what}: SOF2 marker");
+    let got: Vec<(Vec<u8>, u8, u8, u8, u8)> = walked
+        .scans
+        .iter()
+        .map(|s| (s.comp_ids.clone(), s.ss, s.se, s.ah, s.al))
+        .collect();
+    assert_eq!(got, expected, "{what}: scan list");
+}
+
+#[test]
+fn stream_matches_the_mozjpeg_scan_script() {
+    // The opt-in mozjpeg script, in each of its three shapes: 5 scans for grayscale, the 9-scan
+    // custom script for YCbCr, and the 13-scan all-purpose script for the non-YCbCr XYB frame.
+    let (w, h) = (24u32, 24u32);
+    let dims = Dimensions::new(w, h).unwrap();
+    let enc = JpegEncoder::new()
+        .with_progressive(true)
+        .with_progressive_script(ProgressiveScript::Mozjpeg);
+
+    let gray: Vec<u8> = (0..(w * h) as usize).map(pattern).collect();
+    let jpeg = enc
+        .clone()
+        .encode_to_vec(ImageRef::<Gray8>::new(&gray, dims).unwrap())
+        .unwrap();
+    assert_scan_list(&jpeg, &expected_mozjpeg_script(false, &[1]), "gray");
+
+    let rgb: Vec<u8> = (0..(w * h * 3) as usize).map(pattern).collect();
+    let jpeg = enc
+        .clone()
+        .with_subsampling(ChromaSubsampling::Ycbcr420)
+        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims).unwrap())
+        .unwrap();
+    assert_scan_list(&jpeg, &expected_mozjpeg_script(true, &[1, 2, 3]), "ycbcr");
+
+    let jpeg = enc
+        .with_color_mode(JpegColorMode::Xyb)
+        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims).unwrap())
+        .unwrap();
+    assert_scan_list(&jpeg, &expected_mozjpeg_script(false, b"RGB"), "xyb");
+}
+
+#[test]
+fn mozjpeg_xyb_script_decodes_identically_to_baseline() {
+    // The all-purpose branch is reached only by the XYB frame, so its exactness is asserted there:
+    // four non-interleaved AC scans per component must still deliver every baseline coefficient.
+    for &(w, h) in &[(17u32, 9u32), (33, 31)] {
+        let dims = Dimensions::new(w, h).unwrap();
+        let src: Vec<u8> = (0..(w * h * 3) as usize).map(pattern).collect();
+        let enc = JpegEncoder::new()
+            .with_color_mode(JpegColorMode::Xyb)
+            .with_progressive_script(ProgressiveScript::Mozjpeg);
+        let base = enc
+            .clone()
+            .encode_to_vec(ImageRef::<Rgb8>::new(&src, dims).unwrap())
+            .unwrap();
+        let prog = enc
+            .with_progressive(true)
+            .encode_to_vec(ImageRef::<Rgb8>::new(&src, dims).unwrap())
+            .unwrap();
+        assert_eq!(
+            decode(Mode::C444, &base),
+            decode(Mode::C444, &prog),
+            "{w}x{h}"
+        );
     }
 }
 

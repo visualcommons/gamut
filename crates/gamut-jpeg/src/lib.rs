@@ -36,7 +36,8 @@
 //! component ids `R`,`G`,`B`, and the embedded [`XYB_ICC_PROFILE`] so any ICC-aware decoder
 //! reproduces sRGB), and optional restart intervals; [`JpegEncoder::with_progressive`]
 //! selects the progressive process (Annex G), which uses libjpeg's frozen `jpeg_simple_progression`
-//! scan script with optimized per-scan Huffman tables (Annex K.2) and produces the same quantized
+//! scan script (or, opted into with [`JpegEncoder::with_progressive_script`], mozjpeg's
+//! maximum-compression one) with optimized per-scan Huffman tables (Annex K.2) and produces the same quantized
 //! coefficients — hence the same decoded image — as the baseline encoding. The [`JpegDecoder`] reads
 //! any spec-valid sequential **or progressive** stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via
 //! the JFIF APP0 / Adobe APP14 hints), interleaved or non-interleaved scans, spectral selection and
@@ -129,7 +130,10 @@ pub use backend::{
     is_backend_declined,
 };
 pub use decoder::{JpegDecoder, JpegInfo, JpegMetadata, JpegProcess, info, metadata};
-pub use encoder::{ChromaSubsampling, JpegColorMode, JpegEncoder, RdOptimization, XYB_ICC_PROFILE};
+pub use encoder::{
+    ChromaSubsampling, JpegColorMode, JpegEncoder, ProgressiveScript, RdOptimization,
+    XYB_ICC_PROFILE,
+};
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `JpegMetadata::metadata` / `JpegEncoder::with_metadata` without a direct dependency, and the
 // trait those accessors are methods of.

@@ -386,6 +386,36 @@ fn progressive_encode_libjpeg_decodes_identically_to_baseline() {
 }
 
 #[test]
+fn mozjpeg_script_libjpeg_decodes_identically_to_baseline() {
+    // The same exact bar for the opt-in mozjpeg scan script: a different scan split of the same
+    // quantized coefficients, so libjpeg-turbo must decode it to exactly the baseline's pixels.
+    for &(w, h) in DIMS {
+        for mode in Mode::ALL {
+            for &q in &[40u8, 75, 95] {
+                for &restart in &[0u16, 2] {
+                    let src = lcg_pixels(w, h, mode.channels(), 0x1234_5678);
+                    let baseline = gamut_encode_cfg(mode, &src, w, h, q, restart, false);
+                    let enc = JpegEncoder::new()
+                        .with_quality(q)
+                        .with_restart_interval(restart)
+                        .with_progressive(true)
+                        .with_progressive_script(gamut_jpeg::ProgressiveScript::Mozjpeg);
+                    let progressive = gamut_encode_with(enc, mode, &src, w, h);
+                    let base_dec =
+                        libjpeg_oracle::decode(&baseline).expect("oracle decode baseline");
+                    let prog_dec =
+                        libjpeg_oracle::decode(&progressive).expect("oracle decode progressive");
+                    assert_eq!(
+                        prog_dec.pixels, base_dec.pixels,
+                        "mozjpeg progressive != baseline through libjpeg-turbo: {mode:?} {w}x{h} q{q} r{restart}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn optimized_baseline_libjpeg_decodes_identically_to_the_fixed_tables() {
     // The sharp optimized-table gate, the baseline twin of the progressive one above: Annex K.2
     // tables change only the Huffman code words, never the quantized coefficients, so libjpeg-turbo
