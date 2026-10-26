@@ -139,7 +139,7 @@ rather than restating it.
 | `gamut-avif`      | AVIF encoder + container decoder — AV1 still frames in ISOBMFF         | encoder (8/10/12-bit) + container decode (#250); AV1 codestream decode via the `Av1StillDecoder` seam |
 | `gamut-jxl`       | JPEG XL encoder (libjxl wrap) + decoder (pure-Rust jxl-rs)             | encoder + decoder (#243)               |
 | `gamut-jxl-sys`   | Static libjxl 0.12.0 FFI declarations — native core of `gamut-jxl` encode | encoder backend (#243)                 |
-| `gamut-jpeg`      | JPEG-1 (ISO/IEC 10918-1) encoder + decoder — baseline & progressive; the jpegli-style XYB colour mode is encode-only | encoder + decoder (#28, P1–P13) |
+| `gamut-jpeg`      | JPEG-1 (ISO/IEC 10918-1) encoder + decoder — baseline & progressive; the jpegli-style XYB colour mode encodes natively and decodes to sRGB through `gamut-cmm` behind the `cmm` feature | encoder + decoder (#28, P1–P16) |
 | `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder, with a public `backend` seam for an alternate VP8/VP8L codestream implementation | implemented VP8 + VP8L (+alpha, metadata, effort/near-lossless) |
 | `gamut-heic`      | HEIC/HEIF still-image container **decoder** — HEVC via a pluggable backend | decode-only container (S1–S7); no encoder, by charter |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |

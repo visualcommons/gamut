@@ -463,7 +463,8 @@ impl JpegEncoder {
     /// Progressive mode, restart intervals, optimized tables, custom quantization tables, and RD
     /// optimization all compose. Decoding an XYB stream (with this crate's decoder or any other)
     /// yields the scaled-XYB samples presented as RGB plus the embedded profile via
-    /// [`crate::metadata`]; applying the profile is the caller's CMM's job.
+    /// [`crate::metadata`]; applying the profile is a CMM's job — with the `cmm` feature,
+    /// `JpegDecoder::decode_srgb` does it through `gamut-cmm`.
     ///
     /// The samples come from `f64` colour math, so — unlike the default path — XYB-mode output
     /// bytes are **not** bit-reproducible across platforms (gamut-color's Tier-1 determinism);

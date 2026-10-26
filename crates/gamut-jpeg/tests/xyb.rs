@@ -443,3 +443,68 @@ fn jpegli_decodes_gamut_xyb_to_srgb() {
         );
     }
 }
+
+#[cfg(feature = "cmm")]
+#[test]
+fn decode_srgb_reproduces_gamut_xyb_sources() {
+    // gamut's own sRGB path over its own XYB streams.
+    for (w, h, subsampling, progressive, restart) in xyb_battery() {
+        let src = rgb_gradient(w, h);
+        let jpeg = gamut_xyb(&src, w, h, subsampling, progressive, restart);
+        let ours = gamut_jpeg::JpegDecoder::new().decode_srgb(&jpeg).unwrap();
+        let (max, psnr) = stats(ours.as_samples(), &src);
+        // Measured worst over the battery: 36.9 dB (16×16, B subsampled). Asserted with margin.
+        assert!(
+            psnr > 35.0,
+            "{w}x{h} {subsampling:?} prog={progressive} r={restart}: PSNR {psnr:.2} (max {max})"
+        );
+    }
+}
+
+#[cfg(feature = "cmm")]
+#[test]
+fn decode_srgb_agrees_with_jpegli_on_gamut_xyb() {
+    // gamut's sRGB path against the jpegli + lcms2 pipeline on the same streams. They differ only
+    // in IDCT rounding, upsampling (jpegli interpolates a subsampled B, gamut replicates it) and
+    // CMS arithmetic.
+    for (w, h, subsampling, progressive, restart) in xyb_battery() {
+        let src = rgb_gradient(w, h);
+        let jpeg = gamut_xyb(&src, w, h, subsampling, progressive, restart);
+        let ours = gamut_jpeg::JpegDecoder::new().decode_srgb(&jpeg).unwrap();
+        let (max, psnr) = stats(ours.as_samples(), &jpegli_srgb(&jpeg));
+        // Measured worst over the battery: 38.7 dB. Asserted with margin.
+        assert!(
+            psnr > 37.0,
+            "{w}x{h} {subsampling:?} prog={progressive} r={restart}: PSNR {psnr:.2} (max {max})"
+        );
+    }
+}
+
+#[cfg(feature = "cmm")]
+#[test]
+fn decode_srgb_agrees_with_jpegli_on_jpeglis_xyb_streams() {
+    // jpegli's own XYB streams — libjxl's transform, libjxl's profile, jpegli's XYB tables and
+    // adaptive quantization — decode through `decode_srgb` to what the jpegli + lcms2 pipeline
+    // shows for them.
+    for &(w, h) in &[(16u32, 16u32), (33, 31), (64, 48)] {
+        let src = rgb_gradient(w, h);
+        for sampling in [
+            jpegli_oracle::XybSampling::SubsampledB,
+            jpegli_oracle::XybSampling::Full,
+        ] {
+            let jpeg = jpegli_xyb(&src, w, h, sampling);
+            assert_eq!(
+                metadata(&jpeg).unwrap().icc,
+                Some(jpegli_oracle::xyb_icc_profile()),
+                "the stream carries libjxl's profile, not gamut's"
+            );
+            let ours = gamut_jpeg::JpegDecoder::new().decode_srgb(&jpeg).unwrap();
+            let (max, psnr) = stats(ours.as_samples(), &jpegli_srgb(&jpeg));
+            // Measured worst: 38.1 dB. Asserted with margin.
+            assert!(
+                psnr > 36.5,
+                "{w}x{h} {sampling:?}: PSNR {psnr:.2} (max {max})"
+            );
+        }
+    }
+}
