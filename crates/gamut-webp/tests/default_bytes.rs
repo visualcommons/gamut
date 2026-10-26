@@ -25,7 +25,7 @@
 
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy};
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
-use gamut_webp::{Effort, WebpDecoder, WebpEncoder};
+use gamut_webp::{ChromaUpsampling, Effort, WebpDecoder, WebpEncoder};
 
 /// FNV-1a (64-bit) over `bytes` — a dependency-free digest for pinning fixture bytes.
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -135,25 +135,29 @@ fn lossy_rgba_opaque_default_bytes_are_unchanged() {
 
 #[test]
 fn default_decode_output_is_unchanged() {
+    // Re-pinned once, deliberately, by issue #1016: the default lossy decode now upsamples chroma
+    // with libwebp's fancy upsampler (byte-identical to libwebp, gated in `tests/oracle.rs`). The
+    // digests from before that change still hold under `ChromaUpsampling::Nearest`, which is what
+    // shows the switch moved only the upsampler.
     let lossy = encode_rgb(&WebpEncoder::lossy(60), &rgb_fixture(32, 24), dims(32, 24));
-    let rgb: ImageBuf<Rgb8> = WebpDecoder::new().decode_image(&lossy).expect("decode");
-    assert_eq!(rgb.dimensions(), dims(32, 24));
-    assert_bytes(
-        "lossy decode rgb",
-        rgb.as_samples(),
-        2304,
-        0x5b45_4f5a_c084_c917,
-    );
-
     let ext = encode_rgba(&WebpEncoder::lossy(60), &rgba_fixture(32, 24), dims(32, 24));
-    let rgba: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&ext).expect("decode");
-    assert_eq!(rgba.dimensions(), dims(32, 24));
-    assert_bytes(
-        "extended decode rgba",
-        rgba.as_samples(),
-        3072,
-        0xd12d_2572_ff93_296f,
-    );
+    let nearest = WebpDecoder::new().with_chroma_upsampling(ChromaUpsampling::Nearest);
+    for (decoder, rgb_digest, rgba_digest) in [
+        (
+            WebpDecoder::new(),
+            0x3f94_72ce_7cb2_a7a0,
+            0x9e12_c909_ceb2_704e,
+        ),
+        (nearest, 0x5b45_4f5a_c084_c917, 0xd12d_2572_ff93_296f),
+    ] {
+        let rgb: ImageBuf<Rgb8> = decoder.decode_image(&lossy).expect("decode");
+        assert_eq!(rgb.dimensions(), dims(32, 24));
+        assert_bytes("lossy decode rgb", rgb.as_samples(), 2304, rgb_digest);
+
+        let rgba: ImageBuf<Rgba8> = decoder.decode_image(&ext).expect("decode");
+        assert_eq!(rgba.dimensions(), dims(32, 24));
+        assert_bytes("extended decode rgba", rgba.as_samples(), 3072, rgba_digest);
+    }
 }
 
 #[test]

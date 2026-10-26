@@ -358,6 +358,44 @@ pub fn libwebp_decode_rgba(webp: &[u8]) -> DecodedRgba {
     }
 }
 
+/// Decodes a WebP file with libwebp into interleaved 8-bit RGBA with fancy upsampling **off**
+/// (`dwebp -nofancy`): 4:2:0 chroma is replicated. Panics (these are tests) if libwebp rejects the
+/// input.
+#[must_use]
+pub fn libwebp_decode_rgba_nofancy(webp: &[u8]) -> DecodedRgba {
+    // SAFETY: an all-zero `WebPDecoderConfig` is a valid starting value (plain integers and null
+    // pointers); `WebPInitDecoderConfig` then initializes it for this libwebp's ABI.
+    let mut config: libwebp_sys::WebPDecoderConfig = unsafe { std::mem::zeroed() };
+    assert!(
+        unsafe { libwebp_sys::WebPInitDecoderConfig(&mut config) } != 0,
+        "libwebp ABI mismatch"
+    );
+    config.options.no_fancy_upsampling = 1;
+    config.output.colorspace = libwebp_sys::MODE_RGBA;
+    // SAFETY: `webp` is a valid slice and `config` was initialized above; on success libwebp owns
+    // an internal RGBA buffer described by `config.output`, released below.
+    let status = unsafe { libwebp_sys::WebPDecode(webp.as_ptr(), webp.len(), &mut config) };
+    assert_eq!(status, libwebp_sys::VP8_STATUS_OK, "libwebp decode failed");
+    let (width, height) = (config.output.width as usize, config.output.height as usize);
+    // SAFETY: the output colorspace is RGBA, so the union holds the RGBA view.
+    let buf = unsafe { config.output.u.RGBA };
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for row in 0..height {
+        // SAFETY: each of the `height` rows starts `stride` bytes after the last and holds at
+        // least `width * 4` bytes.
+        let line =
+            unsafe { slice::from_raw_parts(buf.rgba.add(row * buf.stride as usize), width * 4) };
+        rgba.extend_from_slice(line);
+    }
+    // SAFETY: releases the internal buffer `WebPDecode` allocated into `config.output`.
+    unsafe { libwebp_sys::WebPFreeDecBuffer(&mut config.output) };
+    DecodedRgba {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+    }
+}
+
 /// Generates a deterministic, fully-opaque RGBA test image with enough structure and variation to
 /// exercise the codec. Alpha is held at 255 so libwebp's default lossless mode (which may rewrite
 /// the RGB of transparent pixels) preserves every channel bit-exactly.

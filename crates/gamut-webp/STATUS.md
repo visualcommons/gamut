@@ -275,6 +275,7 @@ Owner: [`gamut-color`](../gamut-color). VP8L is RGB-native (no YCbCr); VP8 needs
 | --- | --- | --- | --- |
 | VP8L: 8-bit RGB / ARGB, identity (no color conversion) | — | ✅ | M0 |
 | VP8: **limited-range** BT.601 RGB↔YCbCr + 4:2:0 chroma subsample/upsample (**new** module) | RFC 6386 §14.2; Google *WebP Container* (BT.601) | ✅ | M2 |
+| VP8 decode: 4:2:0 chroma upsampled with libwebp's fancy upsampler by default (`ChromaUpsampling::Interpolated`, `gamut_color::upsample::libwebp`); `WebpDecoder::with_chroma_upsampling(ChromaUpsampling::Nearest)` replicates. Oracle: RGB and RGBA byte-identical to libwebp's default decode, `Nearest` byte-identical to libwebp `no_fancy_upsampling` | libwebp `src/dsp/upsampling.c`; issue #1016 | ✅ | #1016 |
 | alpha-channel plane handling | §2.7.1 (Alpha) | ✅ | M3 |
 
 ---
