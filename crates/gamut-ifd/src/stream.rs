@@ -178,9 +178,40 @@ impl<S: ReadAt> IfdReader<S> {
     /// Returns [`Error::InvalidInput`] if the directory is truncated, extends past the end of
     /// the source, or its entry count overflows; [`Error::Io`] if the source fails.
     pub fn read_ifd(&mut self, offset: u64) -> Result<RawIfd> {
+        self.read_ifd_body(offset, true)
+    }
+
+    /// Reads the directory at `offset` as one the format defines **without** a next-IFD
+    /// pointer: its entry count and raw entries, and nothing after them. The returned
+    /// [`RawIfd::next`] is `0`.
+    ///
+    /// Some maker-note dialects store a bare directory that ends right after its last entry
+    /// (exiv2 builds Sony type-1 and Panasonic notes with `hasNext = false`). Reading those with
+    /// [`read_ifd`](Self::read_ifd) would either refuse a note that ends at its last entry or
+    /// read 4 (classic) / 8 (BigTIFF) bytes that are not part of the directory. Here those bytes
+    /// are neither bounds-checked, counted in the body, nor fetched; every other check is
+    /// [`read_ifd`](Self::read_ifd)'s.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the count or entries are truncated, extend past the
+    /// end of the source, or the entry count overflows; [`Error::Io`] if the source fails.
+    pub fn read_ifd_unterminated(&mut self, offset: u64) -> Result<RawIfd> {
+        self.read_ifd_body(offset, false)
+    }
+
+    /// The one directory-body read behind [`read_ifd`](Self::read_ifd) and
+    /// [`read_ifd_unterminated`](Self::read_ifd_unterminated): `has_next` says whether the
+    /// directory carries a next-IFD pointer after its entries.
+    fn read_ifd_body(&mut self, offset: u64, has_next: bool) -> Result<RawIfd> {
         let entry_size = self.variant.entry_size() as u64;
         let count_size = self.variant.count_size() as u64;
-        let offset_size = self.variant.offset_size() as u64;
+        // The next-IFD pointer's bytes, or none: an unterminated directory ends at its last entry.
+        let pointer_size = if has_next {
+            self.variant.offset_size() as u64
+        } else {
+            0
+        };
         let len = self.source.len()?;
 
         let mut count_buf = [0u8; 8];
@@ -199,7 +230,7 @@ impl<S: ReadAt> IfdReader<S> {
         })?;
         let body_size = count
             .checked_mul(entry_size)
-            .and_then(|n| n.checked_add(offset_size))
+            .and_then(|n| n.checked_add(pointer_size))
             .ok_or_else(|| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: IFD entry count overflow")
             })?;
@@ -239,7 +270,11 @@ impl<S: ReadAt> IfdReader<S> {
                 word,
             });
         }
-        let next = offset_at(&body, count as usize * entry_size, self.order, self.variant)?;
+        let next = if has_next {
+            offset_at(&body, count as usize * entry_size, self.order, self.variant)?
+        } else {
+            0
+        };
         Ok(RawIfd {
             offset,
             entries,
