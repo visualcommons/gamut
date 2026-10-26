@@ -57,9 +57,11 @@ tag by tag in `crates/gamut-exif/tests/oracle_sony.rs`:
 
 Notes on reading them:
 
-- **Types are held exactly.** An accessor returns its value only when the entry has exiv2's type
-  (and, for the scalars, a count of one); anything else reads as `None` and stays in `ifd()`.
-  `FlashExposureComp` is the raw `SRATIONAL` numerator/denominator pair, not a float.
+- **Types.** A `LONG` scalar accessor (`quality`, `white_balance`, `rating`, `color_temperature`,
+  `lens_id`) accepts any unsigned integer type with a count of one, as `Ifd::get_u32` does; every
+  other accessor returns its value only when the entry has exiv2's type (and, for a scalar, a
+  count of one). Anything else reads as `None` and stays in `ifd()`. `FlashExposureComp` is the raw
+  `SRATIONAL` numerator/denominator pair, not a float.
 - **Text** fields return the text before the first NUL, which is what exiv2 reports; the raw value
   with any padding stays in `ifd()`. As for Canon (`../canon/README.md`), a text field holding any
   non-UTF-8 byte is unreadable through `gamut-ifd` and its accessor returns `None` where exiv2
