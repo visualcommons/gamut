@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn only_panasonic_and_sony_type_1_omit_the_next_ifd_pointer() {
+    fn only_panasonic_sony_type_1_and_leica_10_omit_the_next_ifd_pointer() {
         assert!(!D::Panasonic.has_next_ifd());
         assert!(!D::Sony1.has_next_ifd());
         assert!(!D::Leica10.has_next_ifd());
