@@ -551,7 +551,11 @@ exclude_re = [
     # validates every parameter it forwards *before* the FFI — dimensions > 0 (`Dimensions`), distance
     # ∈ (0,25] (`Distance`), effort ∈ 1..=10 (`Effort`), modular ∈ {-1,0,1} (`ModularMode`, and the
     # one combination libjxl would override — lossless + forced VarDCT — is rejected before the FFI
-    # by `JxlEncoder::validate_modular`), and a fixed set of supported pixel formats —
+    # by `JxlEncoder::validate_modular`), the `FrameSettings` options only as values their enums can
+    # produce (PROGRESSIVE_AC/QPROGRESSIVE_AC/RESPONSIVE ∈ {0,1}, PROGRESSIVE_DC ∈ 0..=2,
+    # DECODING_SPEED ∈ 0..=4, each inside the range libjxl 0.12.0's `SetOption` accepts for it, and
+    # pinned against those ranges by gamut-jxl-sys's `tests/frame_settings.rs`), and a fixed set of
+    # supported pixel formats —
     # and libjxl's setters accept all of them, so in every reachable state the checked status IS
     # SUCCESS and `check` already returns `Ok(())`. Replacing the whole body with `Ok(())` is therefore
     # indistinguishable on every reachable path (the error path is defensive, like the av1/tiff

@@ -4,8 +4,8 @@
 //!
 //! Construct one with a mode — [`JxlEncoder::lossless`] (the default) or [`JxlEncoder::lossy`] — then
 //! refine it with the chainable [`JxlEncoder::with_effort`] / [`JxlEncoder::with_modular`] /
-//! [`JxlEncoder::with_container`] builders, and drive it through the [`EncodeImage`] trait for any
-//! of the eight supported pixel layouts.
+//! [`JxlEncoder::with_frame_settings`] / [`JxlEncoder::with_container`] builders, and drive it
+//! through the [`EncodeImage`] trait for any of the eight supported pixel layouts.
 
 use gamut_core::{
     EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Pixel, Result, Rgb8,
@@ -13,7 +13,9 @@ use gamut_core::{
 };
 
 use crate::backend::{JxlCodestreamEncoder, JxlEncodeRequest, JxlImageRef, JxlSamples, Registry};
-use crate::config::{ColorSpec, Container, Distance, Effort, Mode, ModularMode, Orientation};
+use crate::config::{
+    ColorSpec, Container, Distance, Effort, FrameSettings, Mode, ModularMode, Orientation,
+};
 
 /// The refusal returned when no backend can encode: nothing was pushed, and the built-in libjxl
 /// tail is not compiled into this build (no `encode` feature, or a `wasm32` target it cannot be
@@ -65,9 +67,9 @@ pub(crate) fn resolve_coded_bits(cfg: &JxlEncoder, bits_per_sample: u32) -> Resu
 /// Encodes 8- and 16-bit grayscale, gray+alpha, RGB and RGBA images. Pick a mode at construction —
 /// [`JxlEncoder::lossless`] (bit-exact; also [`JxlEncoder::new`] and [`Default`]) or
 /// [`JxlEncoder::lossy`] with a Butteraugli [`Distance`] — then optionally set the [`Effort`],
-/// [`ModularMode`] and output [`Container`] with the `with_*` builders. Encode through the
-/// [`EncodeImage`](gamut_core::EncodeImage) trait, which appends the JPEG XL stream to the caller's
-/// buffer.
+/// [`ModularMode`], progression and decoding-speed [`FrameSettings`] and output [`Container`] with
+/// the `with_*` builders. Encode through the [`EncodeImage`](gamut_core::EncodeImage) trait, which
+/// appends the JPEG XL stream to the caller's buffer.
 ///
 /// # Backends
 ///
@@ -91,6 +93,8 @@ pub struct JxlEncoder {
     effort: Effort,
     /// Which coding tool (VarDCT or Modular) the encoder is told to use, if either.
     modular: ModularMode,
+    /// The progression and decoding-speed overrides, each unsent until set.
+    frame_settings: FrameSettings,
     /// Codestream vs. ISO BMFF container framing.
     container: Container,
     /// The colour interpretation signalled for the pixel samples.
@@ -119,6 +123,7 @@ impl PartialEq for JxlEncoder {
         self.mode == other.mode
             && self.effort == other.effort
             && self.modular == other.modular
+            && self.frame_settings == other.frame_settings
             && self.container == other.container
             && self.color == other.color
             && self.orientation == other.orientation
@@ -136,6 +141,7 @@ impl Default for JxlEncoder {
             mode: Mode::Lossless,
             effort: Effort::default(),
             modular: ModularMode::default(),
+            frame_settings: FrameSettings::default(),
             container: Container::default(),
             color: ColorSpec::default(),
             color_explicit: false,
@@ -188,6 +194,22 @@ impl JxlEncoder {
     #[must_use]
     pub fn with_modular(mut self, modular: ModularMode) -> Self {
         self.modular = modular;
+        self
+    }
+
+    /// Sets the progression and decoding-speed [`FrameSettings`]. Returns the updated encoder for
+    /// chaining.
+    ///
+    /// Each field left at its encoder-default variant stays **unsent**, so
+    /// `FrameSettings::default()` encodes exactly as an encoder that never called this. The built-in
+    /// libjxl encoder forwards a set field to libjxl's matching frame setting unchanged, with no
+    /// validation or reconciliation of its own — the same stream a libjxl C-API client gets by
+    /// setting that option (pinned byte for byte by the crate's tests for 8-bit RGB, lossless and
+    /// lossy). Pushed backends see the settings through [`JxlEncodeRequest::frame_settings`]; the
+    /// codec-abi adapter declines any set field.
+    #[must_use]
+    pub fn with_frame_settings(mut self, frame_settings: FrameSettings) -> Self {
+        self.frame_settings = frame_settings;
         self
     }
 
@@ -418,6 +440,12 @@ impl JxlEncoder {
         self.modular
     }
 
+    /// The configured [`FrameSettings`].
+    #[must_use]
+    pub fn frame_settings(&self) -> FrameSettings {
+        self.frame_settings
+    }
+
     /// The configured output [`Container`].
     #[must_use]
     pub fn container(&self) -> Container {
@@ -497,6 +525,7 @@ impl JxlEncoder {
             self.distance(),
             self.effort,
             self.modular,
+            self.frame_settings,
             resolve_coded_bits(self, image.bits_per_sample())?,
             self.color.clone(),
             self.orientation,
@@ -580,10 +609,12 @@ impl JxlEncoder {
     /// not apply here. The transcode is inherently lossless, so the lossless/lossy mode and
     /// [`Distance`] do not apply either; only the configured [`Effort`] is honoured. [`ModularMode`]
     /// does not apply: the path re-packs the JPEG's own DCT coefficients, so there is no coding-tool
-    /// choice to make, and a non-default setting is ignored rather than rejected. Metadata
-    /// attached with [`JxlEncoder::with_exif`]/[`JxlEncoder::with_xmp`] is **not** applied on this
-    /// path: libjxl already carries the JPEG's own EXIF/XMP into the container automatically, and
-    /// duplicating those boxes would corrupt the reconstruction metadata's byte accounting.
+    /// choice to make, and a non-default setting is ignored rather than rejected. [`FrameSettings`]
+    /// are not forwarded on this path either: a set field is ignored, as the other pixel-encode
+    /// knobs are. Metadata attached with [`JxlEncoder::with_exif`]/[`JxlEncoder::with_xmp`] is
+    /// **not** applied on this path: libjxl already carries the JPEG's own EXIF/XMP into the
+    /// container automatically, and duplicating those boxes would corrupt the reconstruction
+    /// metadata's byte accounting.
     ///
     /// # Errors
     ///
@@ -647,6 +678,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use crate::config::{DecodingSpeed, ProgressiveDc, Toggle};
 
     #[cfg(feature = "metadata")]
     #[test]
@@ -753,6 +785,7 @@ mod tests {
         let enc = JxlEncoder::new();
         assert_eq!(enc.effort(), Effort::Squirrel);
         assert_eq!(enc.modular(), ModularMode::Auto);
+        assert_eq!(enc.frame_settings(), FrameSettings::default());
         assert_eq!(enc.container(), Container::Codestream);
     }
 
@@ -805,6 +838,30 @@ mod tests {
         );
         assert_eq!(
             JxlEncoder::new().with_modular(ModularMode::Auto),
+            JxlEncoder::new()
+        );
+    }
+
+    #[test]
+    fn with_frame_settings_is_chainable_and_touches_only_its_own_field() {
+        let settings = FrameSettings::default()
+            .with_progressive_ac(Toggle::On)
+            .with_decoding_speed(DecodingSpeed::Tier2);
+        let enc = JxlEncoder::lossy(Distance::new(3.0).unwrap())
+            .with_frame_settings(settings)
+            .with_effort(Effort::Kitten);
+        assert_eq!(enc.frame_settings(), settings);
+        assert_eq!(enc.effort(), Effort::Kitten);
+        assert_eq!(enc.modular(), ModularMode::Auto);
+        assert_eq!(enc.distance(), Some(Distance::new(3.0).unwrap()));
+
+        // The settings participate in configuration equality; the default is no change at all.
+        assert_ne!(
+            JxlEncoder::new().with_frame_settings(settings),
+            JxlEncoder::new()
+        );
+        assert_eq!(
+            JxlEncoder::new().with_frame_settings(FrameSettings::default()),
             JxlEncoder::new()
         );
     }
@@ -957,6 +1014,11 @@ mod tests {
         let enc = JxlEncoder::lossy(Distance::new(4.0).unwrap())
             .with_effort(Effort::Tortoise)
             .with_modular(ModularMode::Modular)
+            .with_frame_settings(
+                FrameSettings::default()
+                    .with_responsive(Toggle::Off)
+                    .with_progressive_dc(ProgressiveDc::TwoLevels),
+            )
             .with_color(ColorSpec::Hlg)
             .with_orientation(Orientation::FlipVertical)
             .with_bit_depth(12);
@@ -972,6 +1034,12 @@ mod tests {
         assert!(!req.is_lossless());
         assert_eq!(req.effort(), Effort::Tortoise);
         assert_eq!(req.modular(), ModularMode::Modular);
+        assert_eq!(
+            req.frame_settings(),
+            FrameSettings::default()
+                .with_responsive(Toggle::Off)
+                .with_progressive_dc(ProgressiveDc::TwoLevels)
+        );
         assert_eq!(req.coded_bit_depth(), 12);
         assert_eq!(req.color(), &ColorSpec::Hlg);
         assert_eq!(req.orientation(), Orientation::FlipVertical);
@@ -982,6 +1050,7 @@ mod tests {
         assert_eq!(req.distance(), None);
         assert_eq!(req.coded_bit_depth(), 16);
         assert_eq!(req.modular(), ModularMode::Auto);
+        assert_eq!(req.frame_settings(), FrameSettings::default());
     }
 
     #[test]

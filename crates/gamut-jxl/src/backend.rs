@@ -55,7 +55,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use gamut_core::{Dimensions, Error, PixelFormat, Result};
 
-use crate::config::{ColorSpec, Distance, Effort, ModularMode, Orientation};
+use crate::config::{ColorSpec, Distance, Effort, FrameSettings, ModularMode, Orientation};
 
 /// Borrowed interleaved samples handed to an encode backend, tagged with their storage width.
 ///
@@ -344,8 +344,9 @@ impl JxlDecoded {
 ///
 /// It carries exactly the knobs that shape the **codestream**: the lossless/lossy mode and its
 /// Butteraugli [`Distance`], the [`Effort`] dial, the [`ModularMode`] coding-tool selection, the
-/// coded bit depth, the [`ColorSpec`] signalling and the [`Orientation`] metadata. Container-level
-/// requests are deliberately absent — they never reach a backend (see the
+/// [`FrameSettings`] progression and decoding-speed overrides, the coded bit depth, the
+/// [`ColorSpec`] signalling and the [`Orientation`] metadata. Container-level requests are
+/// deliberately absent — they never reach a backend (see the
 /// [module docs](self#container-feature-veto)).
 ///
 /// Requests are produced by the host and handed to a backend by reference; there is no public
@@ -358,6 +359,8 @@ pub struct JxlEncodeRequest {
     effort: Effort,
     /// Which coding tool (VarDCT or Modular) the caller asked for, if either.
     modular: ModularMode,
+    /// The progression and decoding-speed overrides the caller set, if any.
+    frame_settings: FrameSettings,
     /// The declared coded bit depth, in bits per sample.
     coded_bit_depth: u32,
     /// The colour interpretation signalled for the samples.
@@ -372,6 +375,7 @@ impl JxlEncodeRequest {
         distance: Option<Distance>,
         effort: Effort,
         modular: ModularMode,
+        frame_settings: FrameSettings,
         coded_bit_depth: u32,
         color: ColorSpec,
         orientation: Orientation,
@@ -380,6 +384,7 @@ impl JxlEncodeRequest {
             distance,
             effort,
             modular,
+            frame_settings,
             coded_bit_depth,
             color,
             orientation,
@@ -412,6 +417,16 @@ impl JxlEncodeRequest {
     #[must_use]
     pub fn modular(&self) -> ModularMode {
         self.modular
+    }
+
+    /// The requested [`FrameSettings`] (progression and decoding-speed overrides).
+    ///
+    /// [`FrameSettings::default`] means every setting is left to the backend, exactly as libjxl
+    /// leaves an unsent setting to itself. A backend that cannot honour a set field should decline
+    /// the job rather than encode without it.
+    #[must_use]
+    pub fn frame_settings(&self) -> FrameSettings {
+        self.frame_settings
     }
 
     /// The coded bit depth to declare in the stream, in bits per sample.
@@ -644,6 +659,7 @@ impl<T: ?Sized> fmt::Debug for Registry<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProgressiveDc;
 
     #[test]
     fn layout_of_covers_the_eight_coded_formats_and_rejects_the_rest() {
@@ -784,6 +800,7 @@ mod tests {
             Some(d),
             Effort::Kitten,
             ModularMode::Modular,
+            FrameSettings::default().with_progressive_dc(ProgressiveDc::OneLevel),
             10,
             ColorSpec::Pq,
             Orientation::Rotate90Cw,
@@ -792,6 +809,10 @@ mod tests {
         assert_eq!(lossy.distance(), Some(d));
         assert_eq!(lossy.effort(), Effort::Kitten);
         assert_eq!(lossy.modular(), ModularMode::Modular);
+        assert_eq!(
+            lossy.frame_settings().progressive_dc(),
+            ProgressiveDc::OneLevel
+        );
         assert_eq!(lossy.coded_bit_depth(), 10);
         assert_eq!(lossy.color(), &ColorSpec::Pq);
         assert_eq!(lossy.orientation(), Orientation::Rotate90Cw);
@@ -800,6 +821,7 @@ mod tests {
             None,
             Effort::Squirrel,
             ModularMode::Auto,
+            FrameSettings::default(),
             8,
             ColorSpec::Srgb,
             Orientation::Identity,
