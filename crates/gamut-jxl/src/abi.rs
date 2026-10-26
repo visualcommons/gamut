@@ -24,13 +24,17 @@
 //! [`EncodeConfig`] carries a codec id and a `0..=100` quality; [`ImageDesc`] carries the pixel
 //! format, dimensions, coded depth, and plane pointers. That covers the raster, the coded bit depth
 //! and the lossless/lossy target, but **not** JPEG XL's [`Effort`](crate::Effort) dial,
-//! [`ModularMode`] coding-tool selection, [`ColorSpec`]
-//! signalling or [`Orientation`] metadata.
+//! [`ModularMode`] coding-tool selection, [`FrameSettings`] progression and decoding-speed
+//! overrides, [`ColorSpec`] signalling or [`Orientation`] metadata.
 //! Rather than emit a stream that silently ignores a request, [`AbiEncodeBackend::supports`]
-//! **declines** any job whose colour signalling, orientation or coding tool is non-default. Effort
-//! is a pure speed/density free choice with no effect on decoded pixels, so it is simply not
-//! conveyed and an ABI backend picks its own; a pinned [`ModularMode`] is not
-//! in that class — it reshapes the codestream — so it is declined rather than dropped.
+//! **declines** any job whose colour signalling, orientation, coding tool or frame settings are
+//! non-default. Effort is the one exception: it is a search-time dial every encoder interprets its own
+//! way (libjxl's levels have no meaning to another implementation), so it is simply not conveyed and
+//! an ABI backend picks its own. A pinned [`ModularMode`] is a property of the produced stream — it
+//! reshapes the codestream — so it is declined rather than dropped, and so is any set
+//! [`FrameSettings`] field, explicit `Off`/`Tier0` included: a progressive layout, or a stream built
+//! for a decode-speed tier, is a property of the output the caller asked for by name, and a
+//! backend that ignored it would hand back a stream without it.
 
 use gamut_codec_abi::{
     Decoder as AbiDecoder, EncodeConfig, Encoder as AbiEncoder, ImageDesc, MAX_PLANES, Status,
@@ -42,7 +46,7 @@ use crate::backend::{
     JxlCodestreamDecoder, JxlCodestreamEncoder, JxlDecoded, JxlEncodeRequest, JxlImageRef,
     JxlOwnedSamples, JxlSamples, JxlStreamInfo, layout_of,
 };
-use crate::config::{ColorSpec, ModularMode, Orientation};
+use crate::config::{ColorSpec, FrameSettings, ModularMode, Orientation};
 
 /// The codec identifier gamut-jxl puts in every [`StreamConfig`] / [`EncodeConfig`] it builds: the
 /// four-character code `"jxl "` read big-endian (`0x6A_78_6C_20`).
@@ -79,13 +83,15 @@ fn quality_for(req: &JxlEncodeRequest) -> u32 {
 
 /// Whether the ABI descriptors can faithfully carry `req`.
 ///
-/// Colour signalling, orientation and the coding-tool selection have no [`EncodeConfig`] field, so a
-/// non-default request for any of them is declined rather than dropped (see the
-/// [module docs](self#what-the-abi-can-and-cannot-carry)).
+/// Colour signalling, orientation, the coding-tool selection and the frame settings have no
+/// [`EncodeConfig`] field, so a non-default request for any of them is declined rather than dropped
+/// (see the [module docs](self#what-the-abi-can-and-cannot-carry)). The frame settings are compared
+/// as a whole, so a field added to [`FrameSettings`] later is declined here without a change.
 fn is_conveyable(req: &JxlEncodeRequest) -> bool {
     *req.color() == ColorSpec::Srgb
         && req.orientation() == Orientation::Identity
         && req.modular() == ModularMode::Auto
+        && req.frame_settings() == FrameSettings::default()
 }
 
 /// Builds an [`ImageDesc`] over a borrowed encode raster: one interleaved plane, tightly packed.
@@ -172,10 +178,10 @@ impl<E: AbiEncoder + Send> JxlCodestreamEncoder for AbiEncodeBackend<E> {
     fn encode(&mut self, req: &JxlEncodeRequest, image: &JxlImageRef<'_>) -> Result<Vec<u8>> {
         if !is_conveyable(req) {
             // A late decline mirroring `supports`: the host falls through to the next backend
-            // rather than letting the colour/orientation request be silently dropped.
+            // rather than letting an unconveyable request be silently dropped.
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "JXL: codec-abi encode cannot carry this colour or orientation request",
+                "JXL: codec-abi encode cannot carry this request",
             ));
         }
         let cfg = EncodeConfig::new(JXL_CODEC_ID, quality_for(req));
@@ -335,7 +341,7 @@ mod tests {
 
     use super::*;
     use crate::backend::{JxlFraming, JxlSamples};
-    use crate::config::{Distance, Effort};
+    use crate::config::{DecodingSpeed, Distance, Effort, ProgressiveDc, Toggle};
 
     /// A request with the given distance and otherwise ABI-conveyable settings.
     fn request(distance: Option<Distance>) -> JxlEncodeRequest {
@@ -343,6 +349,7 @@ mod tests {
             distance,
             Effort::Squirrel,
             ModularMode::Auto,
+            FrameSettings::default(),
             8,
             ColorSpec::Srgb,
             Orientation::Identity,
@@ -386,6 +393,7 @@ mod tests {
             None,
             Effort::Squirrel,
             ModularMode::Auto,
+            FrameSettings::default(),
             8,
             ColorSpec::Pq,
             Orientation::Identity
@@ -394,6 +402,7 @@ mod tests {
             None,
             Effort::Squirrel,
             ModularMode::Auto,
+            FrameSettings::default(),
             8,
             ColorSpec::Srgb,
             Orientation::Rotate180
@@ -405,11 +414,38 @@ mod tests {
                     Some(Distance::new(1.0).unwrap()),
                     Effort::Squirrel,
                     modular,
+                    FrameSettings::default(),
                     8,
                     ColorSpec::Srgb,
                     Orientation::Identity
                 )),
                 "{modular:?} should not be conveyable"
+            );
+        }
+    }
+
+    #[test]
+    fn conveyable_only_for_default_frame_settings() {
+        // Any single set field declines — including an explicit Off, which is a request too.
+        let base = FrameSettings::default();
+        for settings in [
+            base.with_progressive_ac(Toggle::On),
+            base.with_qprogressive_ac(Toggle::Off),
+            base.with_progressive_dc(ProgressiveDc::OneLevel),
+            base.with_responsive(Toggle::On),
+            base.with_decoding_speed(DecodingSpeed::Tier0),
+        ] {
+            assert!(
+                !is_conveyable(&JxlEncodeRequest::new(
+                    Some(Distance::new(1.0).unwrap()),
+                    Effort::Squirrel,
+                    ModularMode::Auto,
+                    settings,
+                    8,
+                    ColorSpec::Srgb,
+                    Orientation::Identity
+                )),
+                "{settings:?} should not be conveyable"
             );
         }
     }
@@ -564,6 +600,7 @@ mod tests {
             None,
             Effort::Squirrel,
             ModularMode::Auto,
+            FrameSettings::default(),
             8,
             ColorSpec::Srgb,
             Orientation::Rotate90Cw,
@@ -579,7 +616,7 @@ mod tests {
         assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
         assert_eq!(
             error.static_message(),
-            Some("JXL: codec-abi encode cannot carry this colour or orientation request")
+            Some("JXL: codec-abi encode cannot carry this request")
         );
         // The inner backend was never asked to encode.
         assert_eq!(backend.get_ref().seen_quality, None);

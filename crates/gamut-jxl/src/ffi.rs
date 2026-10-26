@@ -231,6 +231,44 @@ pub(crate) fn encode(
         })?;
     }
 
+    // The progression and decoding-speed overrides, each only when the caller set it: an unset
+    // field keeps the libjxl encoder default by never reaching libjxl, the same way an unset
+    // MODULAR does. libjxl accepts every value these enums can produce (tri-states in -1..=1,
+    // PROGRESSIVE_DC in -1..=2, DECODING_SPEED in 0..=4), and reconciles their interplay itself.
+    // Written inline over the raw handle rather than as a helper taking `*mut` (a safe fn could not
+    // enforce the pointer's validity); with no helper there is also no whole-body mutant here — the
+    // forwarding is pinned by tests/frame_settings.rs instead.
+    let fs = cfg.frame_settings();
+    for (id, value) in [
+        (
+            sys_enc::JxlEncoderFrameSettingId::PROGRESSIVE_AC,
+            fs.progressive_ac().option_value(),
+        ),
+        (
+            sys_enc::JxlEncoderFrameSettingId::QPROGRESSIVE_AC,
+            fs.qprogressive_ac().option_value(),
+        ),
+        (
+            sys_enc::JxlEncoderFrameSettingId::PROGRESSIVE_DC,
+            fs.progressive_dc().option_value(),
+        ),
+        (
+            sys_enc::JxlEncoderFrameSettingId::RESPONSIVE,
+            fs.responsive().option_value(),
+        ),
+        (
+            sys_enc::JxlEncoderFrameSettingId::DECODING_SPEED,
+            fs.decoding_speed().option_value(),
+        ),
+    ] {
+        if let Some(value) = value {
+            // SAFETY: `frame_settings` is valid for the live `enc` (null-checked above).
+            enc.check(unsafe {
+                sys_enc::JxlEncoderFrameSettingsSetOption(frame_settings, id, i64::from(value))
+            })?;
+        }
+    }
+
     // With a coded-depth override, tell libjxl to read the integer input buffer at the basic
     // info's declared depth (from-codestream) instead of the pixel format's full range — without
     // this, a 10-bit image handed over as u16 would be rescaled from 16-bit.

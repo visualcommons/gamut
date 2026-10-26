@@ -78,9 +78,29 @@ impl JxlEncoderFrameSettingId {
     /// (`JXL_ENC_FRAME_SETTING_EFFORT`).
     pub const EFFORT: Self = Self(0);
 
+    /// Decoding-speed tier, `0` (slowest to decode, best quality/density; the default) to `4`
+    /// (fastest to decode) (`JXL_ENC_FRAME_SETTING_DECODING_SPEED`).
+    pub const DECODING_SPEED: Self = Self(1);
+
     /// Coding-tool selection: `-1` lets the encoder choose (the default), `0` enforces VarDCT, `1`
     /// enforces modular (`JXL_ENC_FRAME_SETTING_MODULAR`).
     pub const MODULAR: Self = Self(11);
+
+    /// Progressive (responsive) encoding for modular mode: `-1` encoder default, `0` off, `1` on
+    /// (`JXL_ENC_FRAME_SETTING_RESPONSIVE`).
+    pub const RESPONSIVE: Self = Self(16);
+
+    /// Spectral progression of the VarDCT AC coefficients: `-1` encoder default, `0` off, `1` on
+    /// (`JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC`).
+    pub const PROGRESSIVE_AC: Self = Self(17);
+
+    /// Quantization (least-significant-bit) progression of the VarDCT AC coefficients: `-1`
+    /// encoder default, `0` off, `1` on (`JXL_ENC_FRAME_SETTING_QPROGRESSIVE_AC`).
+    pub const QPROGRESSIVE_AC: Self = Self(18);
+
+    /// Lower-resolution DC passes for VarDCT: `-1` encoder default, `0` off, `1` one extra 64x64
+    /// pass, `2` a 512x512 and a 64x64 pass (`JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC`).
+    pub const PROGRESSIVE_DC: Self = Self(19);
 }
 
 unsafe extern "C" {

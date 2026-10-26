@@ -1,7 +1,8 @@
 //! Encoder configuration: the [`Effort`] speed/density dial, the [`ModularMode`] coding-tool
-//! selector, the validated lossy [`Distance`] newtype, the output [`Container`] selector, the
-//! [`ColorSpec`] colour signalling, and the internal [`Mode`] that makes a lossless-with-a-distance
-//! state unrepresentable.
+//! selector, the [`FrameSettings`] progression and decoding-speed overrides (over [`Toggle`],
+//! [`ProgressiveDc`] and [`DecodingSpeed`]), the validated lossy [`Distance`] newtype, the output
+//! [`Container`] selector, the [`ColorSpec`] colour signalling, and the internal [`Mode`] that makes
+//! a lossless-with-a-distance state unrepresentable.
 
 use gamut_core::{Error, Result};
 
@@ -132,6 +133,222 @@ impl ModularMode {
             1 => Self::Modular,
             _ => return None,
         })
+    }
+}
+
+/// A libjxl on/off frame setting that can also be left to the encoder.
+///
+/// Several libjxl frame settings are tri-state: `-1` lets the encoder decide, `0` turns the feature
+/// off and `1` turns it on. [`Toggle::EncoderDefault`] — the default — leaves the setting
+/// **unsent**, so libjxl's own choice applies and the stream is byte-identical to one encoded
+/// without naming the knob at all. Used by [`FrameSettings`] for the AC progressions and
+/// responsive mode.
+///
+/// The discriminants are permanent and append-only (a C caller may name them as constants); they
+/// are not libjxl's option values — [`Toggle::option_value`] is the mapping.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Toggle {
+    /// Leave the setting unsent so libjxl chooses; the default.
+    #[default]
+    EncoderDefault = 0,
+    /// Turn the feature off (libjxl option value `0`).
+    Off = 1,
+    /// Turn the feature on (libjxl option value `1`).
+    On = 2,
+}
+
+impl Toggle {
+    /// The libjxl option value this variant sends, or `None` for [`Toggle::EncoderDefault`], which
+    /// sends nothing.
+    #[must_use]
+    pub fn option_value(self) -> Option<i32> {
+        match self {
+            Self::EncoderDefault => None,
+            Self::Off => Some(0),
+            Self::On => Some(1),
+        }
+    }
+}
+
+/// libjxl's progressive-DC frame setting (`JXL_ENC_FRAME_SETTING_PROGRESSIVE_DC`): how many
+/// lower-resolution DC passes a VarDCT frame carries ahead of the full-resolution data.
+///
+/// [`ProgressiveDc::EncoderDefault`] — the default — leaves the setting **unsent**, so libjxl's own
+/// choice applies. The discriminants are permanent and append-only; [`ProgressiveDc::option_value`]
+/// is the mapping onto libjxl's values.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ProgressiveDc {
+    /// Leave the setting unsent so libjxl chooses; the default.
+    #[default]
+    EncoderDefault = 0,
+    /// No lower-resolution DC pass (libjxl option value `0`).
+    Off = 1,
+    /// One extra 64×64-downscaled pass (libjxl option value `1`).
+    OneLevel = 2,
+    /// A 512×512- and a 64×64-downscaled pass (libjxl option value `2`).
+    TwoLevels = 3,
+}
+
+impl ProgressiveDc {
+    /// The libjxl option value this variant sends, or `None` for
+    /// [`ProgressiveDc::EncoderDefault`], which sends nothing.
+    #[must_use]
+    pub fn option_value(self) -> Option<i32> {
+        match self {
+            Self::EncoderDefault => None,
+            Self::Off => Some(0),
+            Self::OneLevel => Some(1),
+            Self::TwoLevels => Some(2),
+        }
+    }
+}
+
+/// libjxl's decoding-speed tier (`JXL_ENC_FRAME_SETTING_DECODING_SPEED`): trades density for a
+/// faster decode, from [`DecodingSpeed::Tier0`] (slowest to decode, densest) to
+/// [`DecodingSpeed::Tier4`] (fastest to decode).
+///
+/// [`DecodingSpeed::EncoderDefault`] — the default — leaves the setting **unsent**. libjxl's own
+/// default is tier `0`, but that is libjxl's choice to make, so gamut does not restate it. The
+/// discriminants are permanent and append-only; [`DecodingSpeed::option_value`] is the mapping
+/// onto libjxl's tiers.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DecodingSpeed {
+    /// Leave the setting unsent so libjxl chooses; the default.
+    #[default]
+    EncoderDefault = 0,
+    /// Tier `0`: slowest to decode, best quality for the size.
+    Tier0 = 1,
+    /// Tier `1`.
+    Tier1 = 2,
+    /// Tier `2`.
+    Tier2 = 3,
+    /// Tier `3`.
+    Tier3 = 4,
+    /// Tier `4`: fastest to decode, at some cost in quality for the size.
+    Tier4 = 5,
+}
+
+impl DecodingSpeed {
+    /// The libjxl tier (`0..=4`) this variant sends, or `None` for
+    /// [`DecodingSpeed::EncoderDefault`], which sends nothing.
+    #[must_use]
+    pub fn option_value(self) -> Option<i32> {
+        match self {
+            Self::EncoderDefault => None,
+            Self::Tier0 => Some(0),
+            Self::Tier1 => Some(1),
+            Self::Tier2 => Some(2),
+            Self::Tier3 => Some(3),
+            Self::Tier4 => Some(4),
+        }
+    }
+}
+
+/// The progression and decoding-speed frame settings, each left to libjxl unless set.
+///
+/// Plain `Copy` data, built from [`FrameSettings::default`] with the chainable `with_*` methods and
+/// handed to [`JxlEncoder::with_frame_settings`](crate::JxlEncoder::with_frame_settings):
+///
+/// | Setting | libjxl frame setting | Mainly shapes |
+/// | --- | --- | --- |
+/// | [`progressive_ac`](Self::progressive_ac) | `PROGRESSIVE_AC` (spectral AC progression) | VarDCT |
+/// | [`qprogressive_ac`](Self::qprogressive_ac) | `QPROGRESSIVE_AC` (quantized AC progression) | VarDCT |
+/// | [`progressive_dc`](Self::progressive_dc) | `PROGRESSIVE_DC` (lower-resolution DC passes) | VarDCT |
+/// | [`responsive`](Self::responsive) | `RESPONSIVE` (progressive Modular) | Modular parts |
+/// | [`decoding_speed`](Self::decoding_speed) | `DECODING_SPEED` (tier `0..=4`) | both |
+///
+/// Every field defaults to its encoder-default variant, which leaves that setting **unsent**, so
+/// the default value encodes exactly as an encoder that never named it. A set field is forwarded to
+/// libjxl as-is, and how the settings combine is libjxl's behaviour, reproduced rather than
+/// second-guessed: an AC progression also turns responsive mode on, and on a lossless (Modular)
+/// frame additionally forces the quantized progression; responsive mode also governs the
+/// Modular-coded parts of a lossy VarDCT frame.
+///
+/// [`Effort`] and [`ModularMode`] are libjxl frame settings too, but predate this struct and stay
+/// separate builders on the encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct FrameSettings {
+    /// Spectral progression of the VarDCT AC coefficients.
+    progressive_ac: Toggle,
+    /// Quantization (least-significant-bit) progression of the VarDCT AC coefficients.
+    qprogressive_ac: Toggle,
+    /// Lower-resolution DC passes.
+    progressive_dc: ProgressiveDc,
+    /// Progressive (responsive) Modular encoding.
+    responsive: Toggle,
+    /// The decoding-speed tier.
+    decoding_speed: DecodingSpeed,
+}
+
+// Not `const fn`: cargo-mutants' `Default::default()` body replacement is unviable in a const fn,
+// which would leave every builder and getter here outside the mutation gate.
+impl FrameSettings {
+    /// Sets the spectral AC progression (`PROGRESSIVE_AC`). Returns the updated settings.
+    #[must_use]
+    pub fn with_progressive_ac(mut self, progressive_ac: Toggle) -> Self {
+        self.progressive_ac = progressive_ac;
+        self
+    }
+
+    /// Sets the quantization AC progression (`QPROGRESSIVE_AC`). Returns the updated settings.
+    #[must_use]
+    pub fn with_qprogressive_ac(mut self, qprogressive_ac: Toggle) -> Self {
+        self.qprogressive_ac = qprogressive_ac;
+        self
+    }
+
+    /// Sets the lower-resolution DC passes (`PROGRESSIVE_DC`). Returns the updated settings.
+    #[must_use]
+    pub fn with_progressive_dc(mut self, progressive_dc: ProgressiveDc) -> Self {
+        self.progressive_dc = progressive_dc;
+        self
+    }
+
+    /// Sets progressive (responsive) Modular encoding (`RESPONSIVE`). Returns the updated settings.
+    #[must_use]
+    pub fn with_responsive(mut self, responsive: Toggle) -> Self {
+        self.responsive = responsive;
+        self
+    }
+
+    /// Sets the decoding-speed tier (`DECODING_SPEED`). Returns the updated settings.
+    #[must_use]
+    pub fn with_decoding_speed(mut self, decoding_speed: DecodingSpeed) -> Self {
+        self.decoding_speed = decoding_speed;
+        self
+    }
+
+    /// The spectral AC progression setting.
+    #[must_use]
+    pub fn progressive_ac(&self) -> Toggle {
+        self.progressive_ac
+    }
+
+    /// The quantization AC progression setting.
+    #[must_use]
+    pub fn qprogressive_ac(&self) -> Toggle {
+        self.qprogressive_ac
+    }
+
+    /// The lower-resolution DC pass setting.
+    #[must_use]
+    pub fn progressive_dc(&self) -> ProgressiveDc {
+        self.progressive_dc
+    }
+
+    /// The responsive (progressive Modular) setting.
+    #[must_use]
+    pub fn responsive(&self) -> Toggle {
+        self.responsive
+    }
+
+    /// The decoding-speed tier setting.
+    #[must_use]
+    pub fn decoding_speed(&self) -> DecodingSpeed {
+        self.decoding_speed
     }
 }
 
@@ -424,6 +641,91 @@ mod tests {
     fn modular_mode_default_is_auto() {
         assert_eq!(ModularMode::default(), ModularMode::Auto);
         assert_eq!(ModularMode::default().option_value(), -1);
+    }
+
+    #[test]
+    fn toggle_option_values_are_libjxl_s_tri_state() {
+        assert_eq!(Toggle::EncoderDefault.option_value(), None);
+        assert_eq!(Toggle::Off.option_value(), Some(0));
+        assert_eq!(Toggle::On.option_value(), Some(1));
+        assert_eq!(Toggle::default(), Toggle::EncoderDefault);
+    }
+
+    #[test]
+    fn toggle_discriminants_are_permanent() {
+        assert_eq!(Toggle::EncoderDefault as u8, 0);
+        assert_eq!(Toggle::Off as u8, 1);
+        assert_eq!(Toggle::On as u8, 2);
+    }
+
+    #[test]
+    fn progressive_dc_option_values_cover_libjxl_s_range() {
+        assert_eq!(ProgressiveDc::EncoderDefault.option_value(), None);
+        assert_eq!(ProgressiveDc::Off.option_value(), Some(0));
+        assert_eq!(ProgressiveDc::OneLevel.option_value(), Some(1));
+        assert_eq!(ProgressiveDc::TwoLevels.option_value(), Some(2));
+        assert_eq!(ProgressiveDc::default(), ProgressiveDc::EncoderDefault);
+    }
+
+    #[test]
+    fn progressive_dc_discriminants_are_permanent() {
+        assert_eq!(ProgressiveDc::EncoderDefault as u8, 0);
+        assert_eq!(ProgressiveDc::Off as u8, 1);
+        assert_eq!(ProgressiveDc::OneLevel as u8, 2);
+        assert_eq!(ProgressiveDc::TwoLevels as u8, 3);
+    }
+
+    #[test]
+    fn decoding_speed_option_values_are_tiers_zero_to_four() {
+        assert_eq!(DecodingSpeed::EncoderDefault.option_value(), None);
+        let tiers = [
+            DecodingSpeed::Tier0,
+            DecodingSpeed::Tier1,
+            DecodingSpeed::Tier2,
+            DecodingSpeed::Tier3,
+            DecodingSpeed::Tier4,
+        ];
+        for (tier, speed) in tiers.into_iter().enumerate() {
+            assert_eq!(speed.option_value(), Some(tier as i32), "{speed:?}");
+            // Discriminants are permanent: the encoder default is 0, tier N is N + 1.
+            assert_eq!(speed as u8, tier as u8 + 1, "{speed:?} discriminant");
+        }
+        assert_eq!(DecodingSpeed::EncoderDefault as u8, 0);
+        assert_eq!(DecodingSpeed::default(), DecodingSpeed::EncoderDefault);
+    }
+
+    #[test]
+    fn frame_settings_default_leaves_every_setting_to_libjxl() {
+        let fs = FrameSettings::default();
+        assert_eq!(fs.progressive_ac(), Toggle::EncoderDefault);
+        assert_eq!(fs.qprogressive_ac(), Toggle::EncoderDefault);
+        assert_eq!(fs.progressive_dc(), ProgressiveDc::EncoderDefault);
+        assert_eq!(fs.responsive(), Toggle::EncoderDefault);
+        assert_eq!(fs.decoding_speed(), DecodingSpeed::EncoderDefault);
+    }
+
+    #[test]
+    fn frame_settings_builders_each_touch_only_their_own_field() {
+        let base = FrameSettings::default();
+        let fs = base.with_progressive_ac(Toggle::On);
+        assert_eq!(fs.progressive_ac(), Toggle::On);
+        assert_eq!(fs.with_progressive_ac(Toggle::EncoderDefault), base);
+
+        let fs = base.with_qprogressive_ac(Toggle::Off);
+        assert_eq!(fs.qprogressive_ac(), Toggle::Off);
+        assert_eq!(fs.with_qprogressive_ac(Toggle::EncoderDefault), base);
+
+        let fs = base.with_progressive_dc(ProgressiveDc::TwoLevels);
+        assert_eq!(fs.progressive_dc(), ProgressiveDc::TwoLevels);
+        assert_eq!(fs.with_progressive_dc(ProgressiveDc::EncoderDefault), base);
+
+        let fs = base.with_responsive(Toggle::On);
+        assert_eq!(fs.responsive(), Toggle::On);
+        assert_eq!(fs.with_responsive(Toggle::EncoderDefault), base);
+
+        let fs = base.with_decoding_speed(DecodingSpeed::Tier3);
+        assert_eq!(fs.decoding_speed(), DecodingSpeed::Tier3);
+        assert_eq!(fs.with_decoding_speed(DecodingSpeed::EncoderDefault), base);
     }
 
     #[test]
