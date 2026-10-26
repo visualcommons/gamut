@@ -179,8 +179,12 @@ alpha is dropped. It refuses to *guess*, returning `Error::Unsupported` rather t
 - **Colour-as-grayscale** — a colour stream cannot be decoded into a grayscale layout (no luminance
   is invented).
 
-Oversized streams are bounded by a pixel limit; truncated or malformed input returns a typed
-`Error`, never a panic.
+Oversized streams are bounded by a fixed pixel limit (`1 << 28` samples). A caller with a smaller
+budget tightens it with `JxlDecoder::with_max_dimensions` / `with_max_image_bytes`, which are
+unbounded by default and checked against the parsed header before any pixel buffer is sized
+(and against a pushed backend's raster). The header-only `info` / `embedded_icc_profile` /
+`metadata` accessors do not apply them. Truncated or malformed input returns a typed `Error`,
+never a panic.
 
 ### Truncated and partial decode
 
