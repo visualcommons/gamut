@@ -3,14 +3,13 @@
 //! `docs/testing.md`'s per-crate table names `JpegDecoder` as this crate's untrusted-input
 //! surface. The crate is `#![deny(unsafe_code)]` with no `unsafe` site in its decode path.
 //!
-//! **The decoder's limits are opt-in**, and its own docs say that "applications handling untrusted
-//! input should set both" `with_max_dimensions` and `with_max_image_bytes`. This target is such an
-//! application, so it sets them: a 64 MiB raster budget (the figure `PngDecoder` uses as its
-//! default) and the format's own 65 535-sample dimension ceiling. Without them every `SOF` the
-//! engine writes with a large frame is a 12 GB allocation that libFuzzer reports at once — a
-//! report about the documented default rather than a search of the decoder. Whether that default
-//! should itself be bounded, as `PngDecoder`'s is, is a posture question for `gamut-jpeg` (#1024),
-//! not one a fuzz target settles by narrowing its own input.
+//! **The decoder's default is bounded** (#1024): `JpegDecoder::new()` caps dimensions at the
+//! format's own 65 535-sample ceiling and the native raster at 64 MiB, the figure `PngDecoder` uses
+//! as its default. The target's explicit `with_max_dimensions` and `with_max_image_bytes` calls
+//! restate exactly that default. They are kept so that a later change to the crate's default
+//! cannot silently change what this target searches. Without a budget, every `SOF` the engine
+//! writes with a large frame would be a 12 GB allocation that libFuzzer reports at once, which is a
+//! report about a default rather than a search of the decoder.
 //!
 //! The policy is `permissive`, so a CMYK/YCCK stream is converted rather than refused at the
 //! layout check, and its colour conversion is searched too. [`gamut_jpeg::metadata`] is driven as

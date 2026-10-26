@@ -65,14 +65,27 @@ use crate::syntax::{
     parse_sof, parse_sos,
 };
 
+/// Default cap on the native interleaved raster (`width × height × frame components`): 64 MiB,
+/// matching `gamut-png`'s default decoded-sample budget.
+const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
+/// Default dimension cap: the format's own 16-bit ceiling (T.81 Table B.2, `X` and `Y` ≤ 65535),
+/// so the default admits every dimension a frame header can declare and leaves the byte budget as
+/// the guard.
+const DEFAULT_MAX_DIMENSION: u32 = u16::MAX as u32;
+
 /// A decoder for sequential (baseline SOF0 / extended SOF1) 8-bit Huffman JPEG streams.
 ///
 /// Cheap to construct; drive it through the [`DecodeImage`] trait. It presents the decoded image as
 /// [`Rgb8`] (grayscale replicated, YCbCr/RGB three-component), [`Gray8`] (single-component streams
-/// only), or [`Cmyk8`] (four-component CMYK/YCCK streams only). Limits are opt-in, preserving the
-/// decoder's previous unrestricted defaults; applications handling untrusted input should set both
-/// [`with_max_dimensions`](Self::with_max_dimensions) and
-/// [`with_max_image_bytes`](Self::with_max_image_bytes).
+/// only), or [`Cmyk8`] (four-component CMYK/YCCK streams only).
+///
+/// The defaults bound hostile input the way `gamut-png`'s decoder does: the dimension caps sit at
+/// the format's own 16-bit ceiling (T.81 Table B.2: `X`, `Y` ≤ 65535) and the native interleaved
+/// raster is capped at 64 MiB — the byte budget, not the dimension caps, is the real guard, since a
+/// few-byte SOF declaring 65535 × 65535 × 3 would otherwise ask for ~12.9 GB before any scan is
+/// read. Tighten either with [`with_max_dimensions`](Self::with_max_dimensions) and
+/// [`with_max_image_bytes`](Self::with_max_image_bytes); a caller that trusts its input and needs a
+/// larger raster loosens the budget with `with_max_image_bytes(usize::MAX)`.
 ///
 /// # Example
 ///
@@ -89,14 +102,14 @@ use crate::syntax::{
 /// let _rgb: gamut_core::ImageBuf<Rgb8> = decoded; // grayscale replicated across channels
 /// # Ok::<(), gamut_core::Error>(())
 /// ```
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct JpegDecoder {
-    /// Optional maximum accepted width.
-    max_width: Option<u32>,
-    /// Optional maximum accepted height.
-    max_height: Option<u32>,
-    /// Optional maximum native interleaved raster length.
-    max_image_bytes: Option<usize>,
+    /// Maximum accepted width.
+    max_width: u32,
+    /// Maximum accepted height.
+    max_height: u32,
+    /// Maximum native interleaved raster length.
+    max_image_bytes: usize,
     /// Pluggable whole-stream backends, tried in push order ahead of the built-in decoder.
     backends: Vec<DecoderSlot>,
     /// Which lossy layout conversions a typed decode may perform.
@@ -115,12 +128,25 @@ impl fmt::Debug for JpegDecoder {
     }
 }
 
+impl Default for JpegDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JpegDecoder {
-    /// Creates a decoder with no resource limits and no pluggable backends: every stream is decoded
-    /// by the built-in decoder.
+    /// Creates a decoder with the default limits (65535 × 65535 dimensions, 64 MiB of native
+    /// interleaved raster) and no pluggable backends: every stream is decoded by the built-in
+    /// decoder.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            max_width: DEFAULT_MAX_DIMENSION,
+            max_height: DEFAULT_MAX_DIMENSION,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            backends: Vec::new(),
+            policy: ConvertPolicy::lossless(),
+        }
     }
 
     /// Caps the accepted image dimensions. A wider SOF or a known taller SOF is refused before any
@@ -128,8 +154,8 @@ impl JpegDecoder {
     /// checked exactly when the DNL arrives.
     #[must_use]
     pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
-        self.max_width = Some(width);
-        self.max_height = Some(height);
+        self.max_width = width;
+        self.max_height = height;
         self
     }
 
@@ -139,10 +165,10 @@ impl JpegDecoder {
     /// The cap is independent of the requested presentation type: for example, a one-component
     /// grayscale JPEG costs one byte per pixel even when decoded as [`Rgb8`]. For a DNL-deferred
     /// height, the decoder derives a safe MCU-row ceiling from this budget before growing its sample
-    /// planes. The default is unrestricted.
+    /// planes. The default is 64 MiB; `usize::MAX` lifts the budget for trusted input.
     #[must_use]
     pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
-        self.max_image_bytes = Some(bytes);
+        self.max_image_bytes = bytes;
         self
     }
 
@@ -195,9 +221,7 @@ impl JpegDecoder {
     /// Checks dimensions and native raster bytes. A zero `height` is a DNL-deferred SOF: width and
     /// the minimum possible one-row raster are still checked immediately.
     fn check_limits(&self, width: u32, height: u32, components: usize) -> Result<()> {
-        if self.max_width.is_some_and(|max| width > max)
-            || (height != 0 && self.max_height.is_some_and(|max| height > max))
-        {
+        if width > self.max_width || (height != 0 && height > self.max_height) {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
                 "JPEG: image exceeds the dimension limit",
@@ -209,30 +233,22 @@ impl JpegDecoder {
             .ok_or_else(|| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: image dimensions overflow")
             })?;
-        if let Some(max) = self.max_image_bytes {
-            let native_bytes = if height == 0 {
-                row_bytes
-            } else {
-                row_bytes
-                    .checked_mul(usize::try_from(height).map_err(|_| {
-                        Error::invalid_input(
-                            env!("CARGO_PKG_NAME"),
-                            "JPEG: image dimensions overflow",
-                        )
-                    })?)
-                    .ok_or_else(|| {
-                        Error::invalid_input(
-                            env!("CARGO_PKG_NAME"),
-                            "JPEG: image dimensions overflow",
-                        )
-                    })?
-            };
-            if native_bytes > max {
-                return Err(Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "JPEG: image exceeds the size limit",
-                ));
-            }
+        let native_bytes = if height == 0 {
+            row_bytes
+        } else {
+            row_bytes
+                .checked_mul(usize::try_from(height).map_err(|_| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: image dimensions overflow")
+                })?)
+                .ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: image dimensions overflow")
+                })?
+        };
+        if native_bytes > self.max_image_bytes {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: image exceeds the size limit",
+            ));
         }
         Ok(())
     }
@@ -243,27 +259,29 @@ impl JpegDecoder {
         &self,
         frame: &Frame,
         scan: &crate::syntax::ScanHeader,
-    ) -> Result<Option<McuRowLimit>> {
-        let mut limit = self.max_height.map(|height| McuRowLimit {
-            rows: scan_mcu_rows(frame, scan, usize::try_from(height).unwrap_or(usize::MAX)),
+    ) -> Result<McuRowLimit> {
+        let dimension_limit = McuRowLimit {
+            rows: scan_mcu_rows(
+                frame,
+                scan,
+                usize::try_from(self.max_height).unwrap_or(usize::MAX),
+            ),
             message: "JPEG: image exceeds the dimension limit",
-        });
-        if let Some(max_bytes) = self.max_image_bytes {
-            let row_bytes = usize::from(frame.x)
-                .checked_mul(frame.components.len())
-                .ok_or_else(|| {
-                    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: image dimensions overflow")
-                })?;
-            let height = max_bytes / row_bytes;
-            let size_limit = McuRowLimit {
-                rows: scan_mcu_rows(frame, scan, height),
-                message: "JPEG: image exceeds the size limit",
-            };
-            if limit.is_none_or(|current| size_limit.rows < current.rows) {
-                limit = Some(size_limit);
-            }
-        }
-        Ok(limit)
+        };
+        let row_bytes = usize::from(frame.x)
+            .checked_mul(frame.components.len())
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: image dimensions overflow")
+            })?;
+        let size_limit = McuRowLimit {
+            rows: scan_mcu_rows(frame, scan, self.max_image_bytes / row_bytes),
+            message: "JPEG: image exceeds the size limit",
+        };
+        Ok(if size_limit.rows < dimension_limit.rows {
+            size_limit
+        } else {
+            dimension_limit
+        })
     }
 }
 
@@ -829,7 +847,7 @@ impl JpegDecoder {
                             }
                         }
                         let row_limit = if f.y == 0 {
-                            self.deferred_row_limit(f, &scan)?
+                            Some(self.deferred_row_limit(f, &scan)?)
                         } else {
                             None
                         };
@@ -2025,7 +2043,7 @@ mod tests {
             al: 0,
         };
         let selected = |decoder: JpegDecoder| {
-            let limit = decoder.deferred_row_limit(&frame, &scan).unwrap().unwrap();
+            let limit = decoder.deferred_row_limit(&frame, &scan).unwrap();
             (limit.rows, limit.message)
         };
 

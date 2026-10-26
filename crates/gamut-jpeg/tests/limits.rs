@@ -104,7 +104,63 @@ fn synthetic_pathological_sof_is_rejected_by_the_cap_first() {
 }
 
 #[test]
-fn limits_are_cloneable_and_defaults_remain_unrestricted() {
+fn default_budget_refuses_the_pathological_sof_and_usize_max_lifts_it() {
+    // SOI + three-component SOF0 declaring 65535×65535 (~12.9 GB native raster) + EOI. Both
+    // `new()` and `default()` refuse it at the SOF with no limit configured by the caller.
+    let jpeg = [
+        0xFF, 0xD8, // SOI
+        0xFF, 0xC0, 0, 17, // SOF0, length 17
+        8, 0xFF, 0xFF, 0xFF, 0xFF, // P=8, Y=65535, X=65535
+        3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, // three components
+        0xFF, 0xD9, // EOI
+    ];
+    let rgb_error = |decoder: &JpegDecoder| {
+        DecodeImage::<Rgb8>::decode_image(decoder, &jpeg)
+            .unwrap_err()
+            .static_message()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        rgb_error(&JpegDecoder::new()),
+        "JPEG: image exceeds the size limit"
+    );
+    assert_eq!(
+        rgb_error(&JpegDecoder::default()),
+        "JPEG: image exceeds the size limit"
+    );
+    // Lifting the budget gets past the limit check, so the stream fails later for its missing scan.
+    assert_ne!(
+        rgb_error(&JpegDecoder::new().with_max_image_bytes(usize::MAX)),
+        "JPEG: image exceeds the size limit"
+    );
+}
+
+#[test]
+fn default_budget_is_exactly_64_mib_of_native_raster() {
+    // One-component 8192 × 8192 is exactly 64 MiB; one more row is over. The SOF alone decides it.
+    let sof = |height: u16| {
+        let [hi, lo] = height.to_be_bytes();
+        [
+            0xFF, 0xD8, // SOI
+            0xFF, 0xC0, 0, 11, // SOF0, length 11
+            8, hi, lo, 0x20, 0x00, // P=8, Y=height, X=8192
+            1, 1, 0x11, 0, // one component
+            0xFF, 0xD9, // EOI
+        ]
+    };
+    assert_ne!(
+        gray_error(&JpegDecoder::new(), &sof(8192)),
+        "JPEG: image exceeds the size limit"
+    );
+    assert_eq!(
+        gray_error(&JpegDecoder::new(), &sof(8193)),
+        "JPEG: image exceeds the size limit"
+    );
+}
+
+#[test]
+fn limits_are_cloneable_and_defaults_admit_ordinary_images() {
     let jpeg = gray_jpeg(8, 8);
     let default: ImageBuf<Gray8> = JpegDecoder::default().decode_image(&jpeg).unwrap();
     assert_eq!(default.dimensions(), Dimensions::new(8, 8).unwrap());

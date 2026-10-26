@@ -66,8 +66,9 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Pluggable codestream backends (P8, issue #277): the `backend` module's `JpegStreamDecoder` /
   `JpegStreamEncoder` traits, `JpegDecoder::push_backend` / `JpegEncoder::push_backend`, and the
   `gamut-codec-abi` adapters in both directions.
-- Opt-in decoder resource guards (P9, issue #306): `JpegDecoder::with_max_dimensions` and
-  `with_max_image_bytes`, enforced before built-in frame allocations and backend selection, while
+- Decoder resource guards (P9, issue #306; default-on since issue #1024): `JpegDecoder::new()`
+  caps dimensions at 65535 × 65535 and the native raster at 64 MiB, and
+  `JpegDecoder::with_max_dimensions` / `with_max_image_bytes` override them, enforced before built-in frame allocations and backend selection, while
   bounding sequential DNL-deferred sample-plane growth until the exact height arrives.
 - XYB colour mode (P13, issue #334): `with_color_mode(JpegColorMode::Xyb)` — jpegli-style
   scaled-XYB samples (via `gamut_color::xyb`; stored channels X, Y, B−Y), a no-JFIF-APP0 / Adobe
@@ -194,12 +195,13 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **DNL (define number of lines, §B.2.5).** The **decoder** parses DNL and resolves a *sequential*
   frame with `Y = 0` by decoding MCU rows until the entropy data ends at a marker (the `Y = 0`
   frame's height then arrives in the following DNL). A DNL after a `Y ≠ 0` frame is advisory and
-  ignored. An opt-in dimension or byte cap derives an MCU-row ceiling before this dynamic decode,
+  ignored. The dimension and byte caps derive an MCU-row ceiling before this dynamic decode,
   then the exact resolved height is checked when DNL arrives. The encoder never emits `Y = 0` (it
   always knows its height and writes it in SOF0).
 - **Resource-budget accounting.** `with_max_image_bytes` budgets the native 8-bit interleaved
   raster (`width × height × frame components`), independent of chroma subsampling or requested
-  `Gray8`/`Rgb8`/`Cmyk8` presentation. Defaults remain unrestricted for compatibility. SOF limits
+  `Gray8`/`Rgb8`/`Cmyk8` presentation. The default budget is 64 MiB (issue #1024, matching
+  `gamut-png`); a trusted image beyond it needs `with_max_image_bytes(usize::MAX)`. SOF limits
   run before built-in frame-sized allocation or backend selection; accepted backend output is
   checked again, although the host cannot cap memory internal to an accepted foreign backend.
 - **Progressive + `Y = 0` (deferred height) is rejected as `Unsupported`.** The progressive
@@ -304,7 +306,7 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14 (landed with P2), CLI `gamut convert → .jpg` (`--quality`/`--jpeg-subsampling`/`--jpeg-restart-interval`/`--jpeg-progressive`), umbrella `jpeg` feature audit, facade mutants scoping, full-workspace gate re-run | ✅ done |
 | P7 | Exif 3.0 §4.7.2; XMP Part 3 §1.1.3; ICC.1:2001-04 Annex B.4 | APP-segment metadata (rawshift requirements, issue #28 follow-up): `metadata()` header-only read of APP1 EXIF/XMP and index-reassembled multi-segment APP2 ICC; `with_exif`/`with_xmp`/`with_icc_profile` encoder builders with pre-write size validation; bidirectional libjpeg-turbo interop (`jpeg_read_icc_profile`/`jpeg_write_icc_profile`/marker capture) and a dev-only `gamut-metadata` `MetadataBlock` round-trip; `decode_image_into` destination reuse | ✅ done |
 | P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegStreamDecoder`/`JpegStreamEncoder` traits over the **whole SOI..EOI interchange stream**, `push_backend` push-order registries (`Arc<Mutex<..>>`, so `Clone` shares backends), the `backend_declined` late-decline sentinel, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
-| P9 | issue #306 | **Decoder resource limits:** opt-in dimension and native-raster byte builders; checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
+| P9 | issue #306, #1024 | **Decoder resource limits:** dimension and native-raster byte builders over bounded defaults (65535 × 65535, 64 MiB); checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
 | P10 | T.81 §K.2; issue #331 | **Optimized baseline Huffman tables:** `JpegEncoder::with_optimized_tables(bool)` — the baseline scan is walked twice through one shared coder (`BaselineCoder::gather`/`::emit`), per-destination symbol histograms drive the §K.2 construction, and the resulting luma/chroma DC+AC tables replace the Annex K.3–K.6 typical ones in the same single DHT segment. Default off, so every previously-encodable configuration stays byte-identical | ✅ done |
 | P11 | T.81 §A.3.4, §B.2.4.1; issue #332 | **Caller-supplied quantization tables:** the public `QuantTables` pair — natural order, every entry `1..=255` **by construction** (`new` rejects zero, so the encoder never divides by zero and never emits a DQT its own decoder refuses) — used verbatim via `JpegEncoder::with_quant_tables`, with `annex_k()`/`scaled()` recovering the frozen IJG mapping over arbitrary bases. Quality becomes inert while set; the frozen quality contract still governs the default path; backends are vetoed (a `JpegEncodeRequest` cannot carry tables). Alternate built-in base tables deferred (citation obligation) | ✅ done |
 | P12 | T.81 §F.1.2, Annex K.5/K.6; issue #333 | **RD-optimized coefficient selection:** the `rd` module's per-block AC trellis — dynamic program over (position, {v, v−1}) nodes with the exact run/size + ZRL + EOB bit cost of the typical AC tables as rate proxy, step-normalized distortion (the quantization table as the perceptual weighting), tuned dimensionless λ (pinned; measured 8.7% battery-wide saving at ≤ 0.35 dB) — plus `TrellisAdaptive` per-block λ modulation `√(energy/Σstep²)` clamped `[¼, 4]`. Opt-in `with_rd_optimization`; DC plain (deferred: cross-block DP through the DC predictor/restarts); default byte-identical; backends vetoed; progressive carries identical coefficients by the shared `quantize_block_rd` seam + configuration-only rate model | ✅ done |
