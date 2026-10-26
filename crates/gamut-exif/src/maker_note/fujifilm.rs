@@ -496,7 +496,7 @@ mod tests {
             shorts(HIGH_ISO_NOISE_REDUCTION, &[0x280]),
             shorts(FLASH_MODE, &[0x8120]),
             srationals(FLASH_STRENGTH, &[(-2, 3)]),
-            shorts(MACRO, &[1]),
+            shorts(MACRO, &[12]),
             shorts(FOCUS_MODE, &[2]),
             shorts(SLOW_SYNC, &[4]),
             shorts(PICTURE_MODE, &[5]),
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(view.high_iso_noise_reduction(), Some(0x280));
         assert_eq!(view.flash_mode(), Some(0x8120));
         assert_eq!(view.flash_strength(), Some(SRational::from((-2, 3))));
-        assert_eq!(view.macro_mode(), Some(1));
+        assert_eq!(view.macro_mode(), Some(12));
         assert_eq!(view.focus_mode(), Some(2));
         assert_eq!(view.slow_sync(), Some(4));
         assert_eq!(view.picture_mode(), Some(5));

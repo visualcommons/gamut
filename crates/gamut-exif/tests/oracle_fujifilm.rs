@@ -86,7 +86,7 @@ fn entries() -> Vec<Entry> {
         short(0x100e, 0x280),
         short(0x1010, 0x8120),
         srational(0x1011, (-2, 3)),
-        short(0x1020, 1),
+        short(0x1020, 12),
         short(0x1021, 2),
         short(0x1030, 4),
         short(0x1031, 5),
