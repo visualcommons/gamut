@@ -35,6 +35,14 @@ unsafe extern "C" {
         out: *mut *mut u8,
         out_len: *mut usize,
     ) -> c_int;
+    fn oracle_jpeg_sampling_factors(
+        data: *const u8,
+        len: usize,
+        h: *mut u8,
+        v: *mut u8,
+        cap: c_uint,
+        out_components: *mut c_uint,
+    ) -> c_int;
     fn oracle_jpeg_read_app1(
         data: *const u8,
         len: usize,
@@ -108,6 +116,8 @@ pub enum Subsampling {
     /// 4:2:0 — horizontal + vertical chroma subsampling (luma 2x2). libjpeg's default.
     #[default]
     S420,
+    /// 4:4:0 — vertical chroma subsampling (luma 1x2).
+    S440,
 }
 
 impl Subsampling {
@@ -118,6 +128,7 @@ impl Subsampling {
             Subsampling::S444 => (1, 1),
             Subsampling::S422 => (2, 1),
             Subsampling::S420 => (2, 2),
+            Subsampling::S440 => (1, 2),
         }
     }
 }
@@ -290,6 +301,37 @@ pub fn read_icc_profile(data: &[u8]) -> Result<Option<Vec<u8>>, String> {
         0 => Ok(Some(unsafe { take_owned(ptr, len) })),
         _ => Err("libjpeg-oracle: libjpeg-turbo rejected the JPEG stream".to_string()),
     }
+}
+
+/// The per-component sampling factors `(Hi, Vi)` libjpeg-turbo parsed from the frame header, in
+/// frame order — what the reference decoder will upsample by, read independently of gamut's own
+/// marker parser.
+///
+/// # Errors
+///
+/// Returns an error message if libjpeg-turbo rejects the stream's header.
+pub fn sampling_factors(data: &[u8]) -> Result<Vec<(u8, u8)>, String> {
+    // libjpeg caps a frame at MAX_COMPONENTS (10) components.
+    const CAP: usize = 10;
+    let (mut h, mut v) = ([0u8; CAP], [0u8; CAP]);
+    let mut components: c_uint = 0;
+    // SAFETY: `data` is a valid slice, `h`/`v` hold `CAP` bytes each (the shim writes at most
+    // `cap` entries), and `components` is a valid out-param.
+    let rc = unsafe {
+        oracle_jpeg_sampling_factors(
+            data.as_ptr(),
+            data.len(),
+            h.as_mut_ptr(),
+            v.as_mut_ptr(),
+            CAP as c_uint,
+            &raw mut components,
+        )
+    };
+    if rc != 0 {
+        return Err("libjpeg-oracle: libjpeg-turbo rejected the JPEG header".to_string());
+    }
+    let n = (components as usize).min(CAP);
+    Ok(h[..n].iter().copied().zip(v[..n].iter().copied()).collect())
 }
 
 /// Returns the raw payload of the first APP1 marker segment (e.g. `"Exif\0\0"` + TIFF), or
@@ -534,6 +576,36 @@ mod tests {
             diff <= 12,
             "restart-interval round-trip diff too large: {diff}"
         );
+    }
+
+    #[test]
+    fn sampling_factors_report_each_mode_and_gray() {
+        let (w, h) = (16, 16);
+        let src = rgb_gradient(w, h);
+        for (mode, luma) in [
+            (Subsampling::S444, (1, 1)),
+            (Subsampling::S422, (2, 1)),
+            (Subsampling::S420, (2, 2)),
+            (Subsampling::S440, (1, 2)),
+        ] {
+            let params = EncodeParams {
+                subsampling: mode,
+                ..EncodeParams::default()
+            };
+            let jpeg = encode(&src, w, h, &params).expect("encode");
+            assert_eq!(
+                sampling_factors(&jpeg).expect("header"),
+                vec![luma, (1, 1), (1, 1)],
+                "{mode:?}"
+            );
+        }
+        let gray = EncodeParams {
+            gray: true,
+            ..EncodeParams::default()
+        };
+        let jpeg = encode(&gray_gradient(w, h), w, h, &gray).expect("encode gray");
+        assert_eq!(sampling_factors(&jpeg).expect("header"), vec![(1, 1)]);
+        assert!(sampling_factors(&jpeg[..8]).is_err());
     }
 
     #[test]
