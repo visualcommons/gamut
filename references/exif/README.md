@@ -71,6 +71,17 @@ dialects:
 | Sigma | `SIGMA\0\0\0` or `FOVEON\0\0` | 10 | outer | TIFF header |
 | Casio 2 | `QVC\0\0\0` | 6 | big-endian | TIFF header |
 | Apple | `Apple iOS\0` | 14 | mark at 12, else outer | note start |
+| Leica 3 | none (not `LEICA` or `FUJIFILM`) | 0 | outer | TIFF header |
+| Leica 4 | `LEICA0` | 8 | outer | note start |
+| Leica 5 | `LEICA\0` + `01`/`04`/`05`/`06`/`07`/`10`/`1a` + `\0` | 8 | outer | note start |
+| Leica 8 | `LEICA\0` + `08`/`09`/`0a` + `\0` | 8 | outer | TIFF header |
+| Leica 9 | `LEICA\0\x02\0` | 8 | outer | TIFF header |
+| Leica 10 | `LEICA CAMERA AG\0` | 18, no next pointer | outer | TIFF header |
+| Fujifilm (also Leica) | `FUJIFILM` + LE u32 IFD offset | that offset | little-endian | note start |
+
+The Leica rows are not exiv2's (it has no Leica module). They come from ExifTool's
+`MakerNoteLeica*` entries, staked with their sources, the Leica signatures left without a layout,
+and where this reader differs from ExifTool in [`leica/`](leica/README.md) (issue #978).
 
 A note resolves only if it holds its header plus a one-entry IFD (2 + 12 bytes) at the IFD
 offset. Otherwise it has no layout and stays opaque, as does a note whose vendor has no row here.
@@ -82,7 +93,7 @@ Where this reader deliberately differs from exiv2:
   System checks accept only `II`. Here the mark decides. An Olympus 2 or OM System header without
   a valid mark matches nothing, and a Pentax mark that is neither `II` nor `MM` falls back to the
   outer order. ExifTool reads these marks the same way.
-- **Minimum size is one rule, not nineteen.** exiv2 asks most dialects for an 18-byte IFD (a
+- **Minimum size is one rule for every dialect.** exiv2 asks most dialects for an 18-byte IFD (a
   next pointer included) and some for 14. Here every dialect needs a one-entry IFD at its offset,
   so this reader also accepts notes that end without a next pointer. It rejects one thing exiv2
   admits: a Casio 2 note under 20 bytes. exiv2 accepts that on the signature alone and then has
@@ -93,11 +104,11 @@ Where this reader deliberately differs from exiv2:
   Samsung.
 
 The vendor tags themselves are staked per vendor in a subdirectory, before that vendor's view is
-implemented: [`canon/`](canon/README.md) (issue #977).
+implemented: [`canon/`](canon/README.md) (issue #977) and [`leica/`](leica/README.md)
+(issue #978).
 
-Notes that exiv2 does not cover, Leica's being the one the sample corpus holds, have no
-dialect yet. Each one is staked here by its vendor's sub-issue of #418 before it is implemented
-(Leica: #978). A Canon note that Adobe DNG Converter moved into `DNGPrivateData` (`Adobe\0MakN`)
+Other vendors that exiv2 does not cover (Kodak and the rest) have no dialect yet. Each one is
+staked here by its vendor's sub-issue of #418 before it is implemented. A Canon note that Adobe DNG Converter moved into `DNGPrivateData` (`Adobe\0MakN`)
 is outside the `0x927C` tag. That is its own sub-issue, #989.
 
 ## Conformance
