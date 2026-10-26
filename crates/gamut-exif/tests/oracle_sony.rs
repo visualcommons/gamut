@@ -163,7 +163,8 @@ fn every_typed_accessor_agrees_with_exiv2() {
             ("Quality", view.quality().map(|n| n.to_string())),
             (
                 "FlashExposureComp",
-                view.flash_exposure_comp().map(|(n, d)| format!("{n}/{d}")),
+                view.flash_exposure_comp()
+                    .map(|r| format!("{}/{}", r.num, r.den)),
             ),
             ("WhiteBalance", view.white_balance().map(|n| n.to_string())),
             ("Rating", view.rating().map(|n| n.to_string())),

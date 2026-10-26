@@ -21,9 +21,9 @@
 
 use gamut_ifd::{Ifd, ReadAt, Value};
 
-use super::{MakerNoteDialect, MakerNoteLayout, read_note_ifd};
+use super::{MakerNoteDialect, MakerNoteLayout, read_note_ifd, single, slong, text};
 use crate::error::Result;
-use crate::value::as_text;
+use crate::value::SRational;
 
 /// `Quality`: a `LONG`.
 const QUALITY: u16 = 0x0102;
@@ -116,12 +116,12 @@ impl SonyMakerNote {
         self.ifd.get_u32(QUALITY)
     }
 
-    /// `FlashExposureComp` (`0x0104`): flash exposure compensation in EV, as the raw `SRATIONAL`
-    /// `(numerator, denominator)`.
+    /// `FlashExposureComp` (`0x0104`): flash exposure compensation in EV, the `SRATIONAL` exactly
+    /// as stored (see [`SRational::to_f64`] for the value).
     #[must_use]
-    pub fn flash_exposure_comp(&self) -> Option<(i32, i32)> {
+    pub fn flash_exposure_comp(&self) -> Option<SRational> {
         match self.ifd.get(FLASH_EXPOSURE_COMP)? {
-            Value::SRational(values) => single(values),
+            Value::SRational(values) => single(values).map(SRational::from),
             _ => None,
         }
     }
@@ -141,31 +141,31 @@ impl SonyMakerNote {
     /// `Contrast` (`0x2004`).
     #[must_use]
     pub fn contrast(&self) -> Option<i32> {
-        self.slong(CONTRAST)
+        slong(&self.ifd, CONTRAST)
     }
 
     /// `Saturation` (`0x2005`).
     #[must_use]
     pub fn saturation(&self) -> Option<i32> {
-        self.slong(SATURATION)
+        slong(&self.ifd, SATURATION)
     }
 
     /// `Sharpness` (`0x2006`).
     #[must_use]
     pub fn sharpness(&self) -> Option<i32> {
-        self.slong(SHARPNESS)
+        slong(&self.ifd, SHARPNESS)
     }
 
     /// `Brightness` (`0x2007`).
     #[must_use]
     pub fn brightness(&self) -> Option<i32> {
-        self.slong(BRIGHTNESS)
+        slong(&self.ifd, BRIGHTNESS)
     }
 
     /// `SerialNumber` (`0x2031`).
     #[must_use]
     pub fn serial_number(&self) -> Option<&str> {
-        self.text(SERIAL_NUMBER)
+        text(&self.ifd, SERIAL_NUMBER)
     }
 
     /// `FileFormat` (`0xb000`): the whole `BYTE` array (four bytes in Sony's bodies).
@@ -186,7 +186,7 @@ impl SonyMakerNote {
     /// `CreativeStyle` (`0xb020`), e.g. `"Standard"`.
     #[must_use]
     pub fn creative_style(&self) -> Option<&str> {
-        self.text(CREATIVE_STYLE)
+        text(&self.ifd, CREATIVE_STYLE)
     }
 
     /// `ColorTemperature` (`0xb021`), in kelvin (0 for automatic white balance).
@@ -217,35 +217,12 @@ impl SonyMakerNote {
         }
     }
 
-    /// `tag` as a single `SLONG`, or `None` if absent, of another type, or not one value.
-    fn slong(&self, tag: u16) -> Option<i32> {
-        match self.ifd.get(tag)? {
-            Value::SLong(values) => single(values),
-            _ => None,
-        }
-    }
-
     /// `tag` as a `BYTE` array, or `None` if absent or of another type.
     fn bytes(&self, tag: u16) -> Option<&[u8]> {
         match self.ifd.get(tag)? {
             Value::Byte(values) => Some(values),
             _ => None,
         }
-    }
-
-    /// `tag` as text up to its first NUL, which is what exiv2 reports; any padding stays in
-    /// [`ifd`](Self::ifd). As for Canon, a field holding a non-UTF-8 byte is already in
-    /// [`unreadable_tags`](Self::unreadable_tags) and reads as `None`.
-    fn text(&self, tag: u16) -> Option<&str> {
-        as_text(self.ifd.get(tag)?)?.split('\0').next()
-    }
-}
-
-/// The one element of `values`, or `None` if it holds any other number of them.
-fn single<T: Copy>(values: &[T]) -> Option<T> {
-    match values {
-        [value] => Some(*value),
-        _ => None,
     }
 }
 
@@ -370,7 +347,7 @@ mod tests {
             let note = maker(sony_note(&every_tag(order), order, 200));
             let view = note.sony(order, 200).expect("reads").expect("is Sony");
             assert_eq!(view.quality(), Some(2));
-            assert_eq!(view.flash_exposure_comp(), Some((-2, 3)));
+            assert_eq!(view.flash_exposure_comp(), Some(SRational::from((-2, 3))));
             assert_eq!(view.white_balance(), Some(16));
             assert_eq!(view.rating(), Some(4));
             assert_eq!(view.contrast(), Some(-1));
@@ -450,13 +427,6 @@ mod tests {
         assert_eq!(view.flash_exposure_comp(), None);
         assert_eq!(view.brightness(), None);
         assert_eq!(view.model_id(), None);
-    }
-
-    #[test]
-    fn single_takes_exactly_one_value() {
-        assert_eq!(single::<u8>(&[]), None);
-        assert_eq!(single(&[7]), Some(7));
-        assert_eq!(single(&[7, 8]), None);
     }
 
     #[test]

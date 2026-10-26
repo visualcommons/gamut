@@ -43,9 +43,10 @@ pub mod canon;
 pub mod leica;
 pub mod sony;
 
-use gamut_ifd::{AuditFinding, ByteOrder, Ifd, IfdReader, RawIfd, ReadAt, Rebased, Variant};
+use gamut_ifd::{AuditFinding, ByteOrder, Ifd, IfdReader, RawIfd, ReadAt, Rebased, Value, Variant};
 
 use crate::error::Result;
+use crate::value::as_text;
 
 /// The bytes a one-entry IFD occupies before its next-IFD pointer: a 2-byte entry count plus one
 /// 12-byte entry. A note shorter than its header plus this holds no IFD to decode.
@@ -257,6 +258,32 @@ pub(crate) fn decode_lenient<S: ReadAt>(
         })
         .collect();
     Ok((ifd, unreadable))
+}
+
+/// The one element of `values`, or `None` for an empty or multi-valued field. Shared by the
+/// vendor views' scalar accessors.
+pub(crate) fn single<T: Copy>(values: &[T]) -> Option<T> {
+    match values {
+        [value] => Some(*value),
+        _ => None,
+    }
+}
+
+/// `tag` of `ifd` as a single `SLONG`, or `None` if absent, of another type, or not one value.
+pub(crate) fn slong(ifd: &Ifd, tag: u16) -> Option<i32> {
+    match ifd.get(tag)? {
+        Value::SLong(values) => single(values),
+        _ => None,
+    }
+}
+
+/// `tag` of `ifd` as text up to its first NUL. Vendors write fixed-width, NUL-padded text fields
+/// and exiv2 and ExifTool report the same prefix; the padding stays in the raw value. The prefix
+/// is taken from the decoded value, so a field holding any non-UTF-8 byte — padding after the NUL
+/// included — is already among a view's unreadable tags and reads as `None`, where exiv2 still
+/// reports the prefix (the divergence `references/exif/canon/README.md` records).
+pub(crate) fn text(ifd: &Ifd, tag: u16) -> Option<&str> {
+    as_text(ifd.get(tag)?)?.split('\0').next()
 }
 
 /// A MakerNote vendor dialect.
@@ -1015,6 +1042,13 @@ mod tests {
         assert_eq!(OffsetBase::MakerNote { at: 0 }.origin(100), Some(100));
         assert_eq!(OffsetBase::MakerNote { at: 10 }.origin(100), Some(110));
         assert_eq!(OffsetBase::MakerNote { at: 1 }.origin(u64::MAX), None);
+    }
+
+    #[test]
+    fn single_takes_exactly_one_value() {
+        assert_eq!(single::<u8>(&[]), None);
+        assert_eq!(single(&[7]), Some(7));
+        assert_eq!(single(&[7, 8]), None);
     }
 
     #[test]

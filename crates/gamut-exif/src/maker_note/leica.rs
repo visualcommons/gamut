@@ -24,9 +24,11 @@
 use gamut_core::ErrorKind;
 use gamut_ifd::{Ifd, IfdReader, RawEntry, ReadAt, Value};
 
-use super::{MakerNoteDialect, MakerNoteLayout, decode_lenient, open_note_ifd};
+use super::{
+    MakerNoteDialect, MakerNoteLayout, decode_lenient, open_note_ifd, single, slong, text,
+};
 use crate::error::Result;
-use crate::value::{Rational, SRational, as_text};
+use crate::value::{Rational, SRational};
 
 /// The `Leica4` entries that each hold a subdirectory, in the order the view stores them.
 const SUBDIRECTORIES: [u16; 4] = [0x3000, 0x3100, 0x3400, 0x3900];
@@ -390,22 +392,6 @@ impl<'a> Leica4Tags<'a> {
     }
 }
 
-/// The one element of `values`, or `None` for an empty or multi-valued field.
-fn single<T: Copy>(values: &[T]) -> Option<T> {
-    match values {
-        [value] => Some(*value),
-        _ => None,
-    }
-}
-
-/// `tag` as a single `SLONG`.
-fn slong(ifd: &Ifd, tag: u16) -> Option<i32> {
-    match ifd.get(tag)? {
-        Value::SLong(values) => single(values),
-        _ => None,
-    }
-}
-
 /// `tag` as a single signed rational, an unsigned `RATIONAL` reinterpreted bit for bit.
 fn signed_rational(ifd: &Ifd, tag: u16) -> Option<SRational> {
     match ifd.get(tag)? {
@@ -416,13 +402,6 @@ fn signed_rational(ifd: &Ifd, tag: u16) -> Option<SRational> {
         }
         _ => None,
     }
-}
-
-/// `tag` as text up to its first NUL. Leica pads some text fields with NULs (`UserProfile` is five
-/// of them on the M10); the padding stays in the raw value. As for Canon, a field holding any
-/// non-UTF-8 byte is already in [`LeicaMakerNote::unreadable_tags`] and reads as `None`.
-fn text(ifd: &Ifd, tag: u16) -> Option<&str> {
-    as_text(ifd.get(tag)?)?.split('\0').next()
 }
 
 #[cfg(test)]
