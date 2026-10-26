@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/visualcommons/gamut/compare/gamut-jxl-v0.5.0...gamut-jxl-v0.5.1) - 2026-10-24
+
+### Other
+
+- updated the following local packages: gamut-metadata
+
 ## [0.5.0](https://github.com/visualcommons/gamut/compare/gamut-jxl-v0.4.0...gamut-jxl-v0.5.0) - 2026-10-12
 
 ### Added

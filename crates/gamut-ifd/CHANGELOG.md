@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0](https://github.com/visualcommons/gamut/compare/gamut-ifd-v3.0.0...gamut-ifd-v3.1.0) - 2026-10-24
+
+### Added
+
+- *(gamut-ifd)* shared tag registry for TIFF 6.0 and DNG tags ([#892](https://github.com/visualcommons/gamut/pull/892))
+
 ## [3.0.0](https://github.com/visualcommons/gamut/compare/gamut-ifd-v2.0.1...gamut-ifd-v3.0.0) - 2026-10-12
 
 ### Added
