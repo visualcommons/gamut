@@ -15,6 +15,12 @@
 //! ([`with_max_dimensions`](WebpDecoder::with_max_dimensions),
 //! [`with_max_image_bytes`](WebpDecoder::with_max_image_bytes)), checked against the bitstream's
 //! own header before any frame-sized allocation and before any backend is offered the job.
+//!
+//! A lossy bitstream's 4:2:0 chroma is reconstructed with libwebp's fancy upsampler by default
+//! ([`ChromaUpsampling::Interpolated`], via [`gamut_color::upsample::libwebp`]). With the
+//! libwebp-exact YUV→RGB inverse that makes the RGB byte-identical to `dwebp`'s default decode,
+//! which the crate's oracle tests pin. [`WebpDecoder::with_chroma_upsampling`] selects
+//! [`ChromaUpsampling::Nearest`] (`dwebp -nofancy`).
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -76,6 +82,8 @@ pub struct WebpDecoder {
     max_height: u32,
     /// The largest decoded frame accepted, in bytes at four bytes per pixel.
     max_image_bytes: usize,
+    /// How a lossy bitstream's 4:2:0 chroma is reconstructed.
+    upsampling: ChromaUpsampling,
 }
 
 impl Default for WebpDecoder {
@@ -92,13 +100,15 @@ impl fmt::Debug for WebpDecoder {
             .field("max_width", &self.max_width)
             .field("max_height", &self.max_height)
             .field("max_image_bytes", &self.max_image_bytes)
+            .field("upsampling", &self.upsampling)
             .finish_non_exhaustive()
     }
 }
 
 impl WebpDecoder {
     /// Creates a decoder with the default configuration: no backends, the lossless
-    /// [`ConvertPolicy`], format-maximum dimensions and a 64 MiB decoded-frame budget.
+    /// [`ConvertPolicy`], format-maximum dimensions, a 64 MiB decoded-frame budget, and
+    /// [`ChromaUpsampling::Interpolated`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -107,6 +117,7 @@ impl WebpDecoder {
             max_width: FORMAT_MAX_DIMENSION,
             max_height: FORMAT_MAX_DIMENSION,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            upsampling: ChromaUpsampling::default(),
         }
     }
 
@@ -241,6 +252,19 @@ impl WebpDecoder {
         self
     }
 
+    /// Selects how a lossy (VP8) bitstream's 4:2:0 chroma is reconstructed before conversion to
+    /// RGB, whichever decoder produced the planes.
+    ///
+    /// Defaults to [`ChromaUpsampling::Interpolated`], libwebp's fancy upsampler: the output is
+    /// byte-identical to `dwebp`'s default decode. [`ChromaUpsampling::Nearest`] replicates each
+    /// chroma sample across its 2×2 block (`dwebp -nofancy`). Lossless (VP8L) images carry no
+    /// subsampled chroma and are unaffected.
+    #[must_use]
+    pub fn with_chroma_upsampling(mut self, upsampling: ChromaUpsampling) -> Self {
+        self.upsampling = upsampling;
+        self
+    }
+
     /// Sorts the container's chunks and locates the image bitstream.
     ///
     /// [`WebpLayout::parse`] is the single container walk behind the pixel path: it validates the
@@ -290,7 +314,7 @@ impl WebpDecoder {
                     height: yuv.height(),
                 };
                 // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
-                let rgb = yuv.to_rgb8(ColorRange::Limited, ChromaUpsampling::Nearest);
+                let rgb = yuv.to_rgb8(ColorRange::Limited, self.upsampling);
                 // A lossy bitstream carries no alpha of its own: it exists only when the extended
                 // container supplies an `ALPH` chunk.
                 let Some(payload) = layout.alph else {
@@ -357,13 +381,15 @@ mod tests {
     }
 
     #[test]
-    fn debug_renders_the_backend_count_and_the_limits() {
+    fn debug_renders_the_backend_count_the_limits_and_the_upsampling() {
         let decoder = WebpDecoder::new()
             .with_max_dimensions(3, 5)
-            .with_max_image_bytes(7);
+            .with_max_image_bytes(7)
+            .with_chroma_upsampling(ChromaUpsampling::Nearest);
         assert_eq!(
             format!("{decoder:?}"),
-            "WebpDecoder { backends: 0, max_width: 3, max_height: 5, max_image_bytes: 7, .. }"
+            "WebpDecoder { backends: 0, max_width: 3, max_height: 5, max_image_bytes: 7, \
+             upsampling: Nearest, .. }"
         );
     }
 

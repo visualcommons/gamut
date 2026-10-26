@@ -86,13 +86,25 @@ fn lossy_fixture() -> (Vec<u8>, Vec<u8>) {
 enum Outcome {
     /// Return this VP8L raster (or, for the encoder, these payload bytes).
     Argb(Vec<u32>),
-    /// Return a YUV raster of the given constant luma — used to prove discriminant mismatches are
-    /// rejected as well as to serve genuine `VP8 ` jobs.
+    /// Return a YUV raster of the given constant luma over [`scripted_yuv`]'s varying chroma —
+    /// used to prove discriminant mismatches are rejected as well as to serve genuine `VP8 ` jobs.
     Yuv(u8),
     /// Return these bytes as the encoded chunk payload.
     Bytes(Vec<u8>),
     /// Fail with this error.
     Fail(&'static str),
+}
+
+/// The raster a [`Outcome::Yuv`] backend returns: constant `luma`, and chroma that varies from
+/// sample to sample, so interpolating and replicating upsamplers present it differently.
+fn scripted_yuv(width: u32, height: u32, luma: u8) -> Result<Yuv420> {
+    let (cw, ch) = (
+        Yuv420::chroma_width(width) as usize,
+        Yuv420::chroma_height(height) as usize,
+    );
+    let u = (0..cw * ch).map(|i| (64 + i * 37 % 128) as u8).collect();
+    let v = (0..cw * ch).map(|i| (192 - i * 29 % 128) as u8).collect();
+    Yuv420::new(width, height, vec![luma; (width * height) as usize], u, v)
 }
 
 /// A decode backend that accepts only `accepts` (a codestream, or nothing) and records every call.
@@ -152,19 +164,9 @@ impl WebpCodestreamDecoder for ScriptedDecoder {
                 dimensions: d,
                 pixels: pixels.clone(),
             }),
-            Outcome::Yuv(luma) => {
-                let (cw, ch) = (
-                    Yuv420::chroma_width(d.width) as usize,
-                    Yuv420::chroma_height(d.height) as usize,
-                );
-                Ok(DecodedRaster::Yuv420(Yuv420::new(
-                    d.width,
-                    d.height,
-                    vec![*luma; (d.width * d.height) as usize],
-                    vec![128; cw * ch],
-                    vec![128; cw * ch],
-                )?))
-            }
+            Outcome::Yuv(luma) => Ok(DecodedRaster::Yuv420(scripted_yuv(
+                d.width, d.height, *luma,
+            )?)),
             Outcome::Bytes(_) => panic!("byte outcome is encode-only"),
             Outcome::Fail(msg) => Err(Error::InvalidInput(msg)),
         }
@@ -332,13 +334,23 @@ fn decode_routing_is_per_codestream() {
     let _: ImageBuf<Rgb8> = dec.decode_image(&lossless).expect("lossless via tail");
     assert!(log.ran().is_empty(), "VP8 backend ran on a VP8L stream");
 
-    // On a VP8 stream the same backend accepts, and its constant-luma raster reaches the output.
+    // On a VP8 stream the same backend accepts, and its raster reaches the output through the
+    // decoder's chroma upsampling: libwebp's fancy upsampler by default, replication on request.
     let got: ImageBuf<Rgb8> = dec.decode_image(&lossy).expect("lossy via backend");
     assert_eq!(log.ran(), vec!["vp8only"]);
-    let expected = Yuv420::new(16, 16, vec![200u8; 256], vec![128u8; 64], vec![128u8; 64])
-        .expect("yuv")
-        .to_rgb8(ColorRange::Limited, ChromaUpsampling::Nearest);
+    let raster = scripted_yuv(16, 16, 200).expect("yuv");
+    let expected = raster.to_rgb8(ColorRange::Limited, ChromaUpsampling::Interpolated);
     assert_eq!(got.as_samples(), expected.as_slice());
+    let nearest_dec = dec
+        .clone()
+        .with_chroma_upsampling(ChromaUpsampling::Nearest);
+    let nearest: ImageBuf<Rgb8> = nearest_dec.decode_image(&lossy).expect("lossy via backend");
+    let replicated = raster.to_rgb8(ColorRange::Limited, ChromaUpsampling::Nearest);
+    assert_eq!(nearest.as_samples(), replicated.as_slice());
+    assert_ne!(
+        expected, replicated,
+        "the fixture must tell the upsamplers apart"
+    );
 
     // And a VP8L-only backend is never chosen for a VP8 stream.
     let log2 = Arc::new(Log::default());

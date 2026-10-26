@@ -1,12 +1,14 @@
 //! Differential oracle (libwebp) for the WebP codecs — lossless (VP8L) and lossy (VP8).
 //!
-//! libwebp is the third-party reference. Lossy is checked at the YUV-plane level (RGB↔YCbCr is
-//! implementation-defined and off the bit-exact gate), in both directions:
+//! libwebp is the third-party reference. Lossy is checked at the YUV-plane level (the encoder's
+//! RGB→YCbCr is implementation-defined and off the bit-exact gate), in both directions:
 //!   - **gamut encode → libwebp decode == gamut decode**, across every encoder feature (prediction,
 //!     loop filters, segmentation, token partitions, skip) — pinning gamut's streams as conformant;
 //!   - **libwebp encode → gamut decode == libwebp decode**, bit-exact — pinning gamut's decoder
 //!     against the full feature surface a production encoder emits (per-segment filter levels,
-//!     probability updates, …);
+//!     probability updates, …), and since issue #1016 bit-exact in RGB/RGBA too: the default
+//!     chroma upsampling is libwebp's fancy upsampler, and `ChromaUpsampling::Nearest` matches
+//!     libwebp with fancy upsampling off;
 //!   - the lossless round-trips (libwebp self-round-trip; gamut↔libwebp) that shipped with VP8L.
 
 mod common;
@@ -16,7 +18,7 @@ use common::{
     photo_like_rgba,
 };
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
-use gamut_webp::{WebpDecoder, WebpEncoder};
+use gamut_webp::{ChromaUpsampling, WebpDecoder, WebpEncoder};
 
 /// The standard dimension matrix exercised by the differential tests, including the awkward
 /// single-row / single-column / non-power-of-two cases.
@@ -890,32 +892,77 @@ fn gamut_lossy_webp_decodes_correctly_in_libwebp() {
     }
 }
 
-#[test]
-fn gamut_decodes_libwebp_lossy_close_to_libwebp() {
-    // The decode direction: gamut and libwebp must decode the *same* libwebp-encoded stream to close
-    // RGB. The per-pixel YUV→RGB inverse is bit-exact with libwebp (pinned in gamut-color's
-    // `limited_range_matches_libwebp_anchors` unit test); the residual here is chroma *upsampling*
-    // (gamut nearest-replicates, libwebp uses fancy bilinear) — a quality choice (issue #32), not a
-    // colour error. A regression of the inverse back to full-range would blow well past this bound.
-    use common::libwebp_encode_lossy_rgba;
+/// The largest per-sample difference between two equal-length buffers.
+fn max_abs(a: &[u8], b: &[u8]) -> u8 {
+    assert_eq!(a.len(), b.len(), "buffers differ in length");
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| x.abs_diff(*y))
+        .max()
+        .unwrap_or(0)
+}
 
-    let max_abs = |a: &[u8], b: &[u8]| {
-        a.iter()
-            .zip(b)
-            .map(|(x, y)| (i32::from(*x) - i32::from(*y)).abs())
-            .max()
-            .unwrap_or(0)
-    };
-    for &(w, h) in &[(64u32, 48u32), (128, 96), (49, 33)] {
-        let rgba = photo_like_rgba(w, h, 0x2ab0);
-        let webp = libwebp_encode_lossy_rgba(&rgba, w, h, 90.0);
+#[test]
+fn gamut_decodes_libwebp_lossy_rgb_bit_exact() {
+    // The decode direction in RGB: gamut and libwebp decode the *same* libwebp-encoded stream to
+    // identical RGB. The planes already match bit for bit (above), the YUV→RGB inverse is
+    // libwebp's own (gamut-color's `limited_range_matches_libwebp_anchors`), and the default chroma
+    // upsampling is libwebp's fancy upsampler (`gamut_color::upsample::libwebp`, issue #1016). The
+    // dimensions cover odd sizes, single rows and columns, and the 1×1 and 2×2 edge cases. Before
+    // #1016 gamut replicated chroma and this was bounded at 24.
+    let mut sizes = DIMENSIONS.to_vec();
+    sizes.extend_from_slice(&[(64, 48), (128, 96), (49, 33), (3, 3), (4, 5)]);
+    for (w, h) in sizes {
+        let rgba = photo_like_rgba(w, h, 0x2ab0 ^ w ^ (h << 8));
+        let webp = common::libwebp_encode_lossy_rgba(&rgba, w, h, 90.0);
         let gamut: ImageBuf<Rgb8> = WebpDecoder::new()
             .decode_image(&webp)
             .expect("gamut decode");
         let lib = rgba_to_rgb(&libwebp_decode_rgba(&webp).rgba);
-        assert!(
-            max_abs(gamut.as_samples(), &lib) <= 24,
-            "gamut vs libwebp decode differs by >24 at {w}x{h} (more than chroma upsampling)"
+        let max = max_abs(gamut.as_samples(), &lib);
+        assert_eq!(max, 0, "gamut vs libwebp RGB at {w}x{h}: max-diff {max}");
+    }
+}
+
+#[test]
+fn gamut_decodes_libwebp_lossy_alpha_rgba_bit_exact() {
+    // The `ALPH` path presents RGBA through the same upsampler: colour and alpha both match
+    // libwebp's default RGBA decode.
+    for &(w, h) in &[(16u32, 16u32), (49, 33), (80, 17), (1, 7)] {
+        let rgba: Vec<u8> = (0..(w * h) as usize)
+            .flat_map(|i| {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                [
+                    (x * 7) as u8,
+                    (y * 9) as u8,
+                    (x ^ y) as u8,
+                    ((x * 11 + y * 5) & 0xff) as u8,
+                ]
+            })
+            .collect();
+        let webp = common::libwebp_encode_lossy_rgba(&rgba, w, h, 75.0);
+        let got: ImageBuf<Rgba8> = WebpDecoder::new()
+            .decode_image(&webp)
+            .expect("gamut decode");
+        let lib = libwebp_decode_rgba(&webp).rgba;
+        let max = max_abs(got.as_samples(), &lib);
+        assert_eq!(max, 0, "gamut vs libwebp RGBA at {w}x{h}: max-diff {max}");
+    }
+}
+
+#[test]
+fn nearest_decode_matches_libwebp_without_fancy_upsampling() {
+    // `ChromaUpsampling::Nearest` against libwebp with `no_fancy_upsampling` (`dwebp -nofancy`).
+    let nearest = WebpDecoder::new().with_chroma_upsampling(ChromaUpsampling::Nearest);
+    for &(w, h) in &[(1u32, 1u32), (17, 9), (64, 48), (255, 1), (1, 255)] {
+        let rgba = photo_like_rgba(w, h, 0x77 ^ w);
+        let webp = common::libwebp_encode_lossy_rgba(&rgba, w, h, 80.0);
+        let got: ImageBuf<Rgb8> = nearest.decode_image(&webp).expect("gamut decode");
+        let lib = rgba_to_rgb(&common::libwebp_decode_rgba_nofancy(&webp).rgba);
+        let max = max_abs(got.as_samples(), &lib);
+        assert_eq!(
+            max, 0,
+            "nearest vs libwebp -nofancy at {w}x{h}: max-diff {max}"
         );
     }
 }
