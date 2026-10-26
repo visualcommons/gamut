@@ -7,8 +7,9 @@
 //! reject hostile frame geometry before the built-in decoder allocates from it. The pipeline is:
 //! walk the marker segments
 //! (SOI → tables → frame → scans → EOI, [`crate::syntax`]); decode each scan's entropy data into
-//! per-component sample planes ([`crate::scan`]); upsample the chroma planes to full resolution by
-//! sample replication; and colour-convert to the requested pixel layout.
+//! per-component sample planes ([`crate::scan`]); upsample the chroma planes to full resolution
+//! (libjpeg-turbo's fancy upsampling by default, see [Upsampling](#upsampling)); and
+//! colour-convert to the requested pixel layout.
 //!
 //! # Progressive frames (SOF2)
 //!
@@ -42,15 +43,25 @@
 //!
 //! # Upsampling
 //!
-//! Chroma planes coded at reduced resolution are upsampled to full resolution by **sample
-//! replication** (nearest-neighbour). T.81 leaves the reconstruction filter open (§A.2 NOTE); sample
-//! replication is the decoder's documented free choice — exact for 4:4:4 and the cheapest faithful
-//! choice for subsampled chroma.
+//! T.81 leaves the reconstruction filter for a component coded at reduced resolution open (§A.2
+//! NOTE). By default ([`ChromaUpsampling::Interpolated`]) the decoder does what libjpeg-turbo's
+//! `djpeg` does by default, the "fancy" triangle filter of `jdsample.c`, through
+//! [`gamut_color::upsample::libjpeg`]. That covers a component at half the horizontal resolution
+//! (4:2:2), half the vertical (4:4:0) or half both (4:2:0), whatever the absolute sampling
+//! factors. A 4:2:2 or 4:2:0 component only one or two samples wide, and every other integer
+//! ratio, is replicated, as libjpeg-turbo does too. The output is therefore byte-identical to
+//! libjpeg-turbo's default decode, which the crate's oracle tests pin. A non-integer ratio (the
+//! `3`s §A.1.1 permits, e.g. a component sampled 2 of 3) is replicated too; libjpeg-turbo refuses
+//! such a stream (`JERR_FRACT_SAMPLE_NOTIMPL`), so there is no reference output to match. [`JpegDecoder::with_chroma_upsampling`] selects [`ChromaUpsampling::Nearest`], which
+//! replicates every component (`djpeg -nosmooth`). The choice applies to every subsampled
+//! component, CMYK and RGB included, and only to the built-in decoder: a pushed backend presents
+//! its own raster.
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use gamut_color::{ColorRange, ycbcr_to_rgb};
+use gamut_color::upsample::{libjpeg, taps};
+use gamut_color::{ChromaUpsampling, ColorRange, ycbcr_to_rgb};
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw, convert_from_raw_into};
 use gamut_core::{
     Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Pixel, PixelFormat, Result, Rgb8,
@@ -114,6 +125,8 @@ pub struct JpegDecoder {
     backends: Vec<DecoderSlot>,
     /// Which lossy layout conversions a typed decode may perform.
     policy: ConvertPolicy,
+    /// How the built-in decoder reconstructs subsampled components.
+    upsampling: ChromaUpsampling,
 }
 
 impl fmt::Debug for JpegDecoder {
@@ -124,6 +137,7 @@ impl fmt::Debug for JpegDecoder {
             .field("max_height", &self.max_height)
             .field("max_image_bytes", &self.max_image_bytes)
             .field("backends", &self.backends.len())
+            .field("upsampling", &self.upsampling)
             .finish()
     }
 }
@@ -136,8 +150,9 @@ impl Default for JpegDecoder {
 
 impl JpegDecoder {
     /// Creates a decoder with the default limits (65535 × 65535 dimensions, 64 MiB of native
-    /// interleaved raster) and no pluggable backends: every stream is decoded by the built-in
-    /// decoder.
+    /// interleaved raster), libjpeg-turbo's fancy chroma upsampling
+    /// ([`ChromaUpsampling::Interpolated`]) and no pluggable backends: every stream is decoded by
+    /// the built-in decoder.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -146,6 +161,7 @@ impl JpegDecoder {
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             backends: Vec::new(),
             policy: ConvertPolicy::lossless(),
+            upsampling: ChromaUpsampling::Interpolated,
         }
     }
 
@@ -180,6 +196,18 @@ impl JpegDecoder {
     #[must_use]
     pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Selects how the built-in decoder reconstructs components coded at reduced resolution.
+    ///
+    /// Defaults to [`ChromaUpsampling::Interpolated`]: libjpeg-turbo's fancy upsampling, so the
+    /// output is byte-identical to `djpeg`'s default decode (see the [module docs](self)).
+    /// [`ChromaUpsampling::Nearest`] replicates each sample instead, which is cheaper. A pushed
+    /// backend presents its own raster and ignores this setting.
+    #[must_use]
+    pub fn with_chroma_upsampling(mut self, upsampling: ChromaUpsampling) -> Self {
+        self.upsampling = upsampling;
         self
     }
 
@@ -569,7 +597,8 @@ fn trunc_seg() -> Error {
 
 /// One decoded component ready for presentation: its sampling factors, its valid height, and the
 /// reconstructed plane at block-padded resolution (`stride` wide). Its valid width needs no field:
-/// no output column maps past it ([`ColumnMap`]).
+/// no output column maps past it ([`ColumnMap`]), and the interpolating kernels read only the
+/// `ceil(width / 2)` samples a half-resolution component holds.
 struct DecComp {
     h: u8,
     v: u8,
@@ -595,8 +624,80 @@ impl DecodedImage {
     /// upsampling -- [`ColumnMap`]'s vertical twin -- as the slice of the plane that holds it.
     fn sample_row(&self, ci: usize, py: usize) -> &[u8] {
         let c = &self.comps[ci];
-        let cy = (py * usize::from(c.v) / self.vmax).min(c.comp_h - 1);
+        self.plane_row(ci, (py * usize::from(c.v) / self.vmax).min(c.comp_h - 1))
+    }
+
+    /// Row `cy` of component `ci`'s plane, `stride` samples wide.
+    fn plane_row(&self, ci: usize, cy: usize) -> &[u8] {
+        let c = &self.comps[ci];
         &c.data[cy * c.stride..(cy + 1) * c.stride]
+    }
+}
+
+/// How one component is upsampled to the output grid: libjpeg-turbo's choice of method
+/// (`jinit_upsampler` in `jdsample.c`) under [`ChromaUpsampling::Interpolated`], and replication
+/// for every component under [`ChromaUpsampling::Nearest`].
+#[derive(Debug, PartialEq, Eq)]
+enum Filter {
+    /// Sample replication through the component's [`ColumnMap`] and [`DecodedImage::sample_row`].
+    Replicate(ColumnMap),
+    /// Half horizontal resolution, full vertical: [`libjpeg::h2v1`].
+    H2v1,
+    /// Full horizontal resolution, half vertical: [`libjpeg::h1v2`].
+    H1v2,
+    /// Half resolution both ways: [`libjpeg::h2v2`].
+    H2v2,
+}
+
+impl Filter {
+    /// The filter for a component sampled `h` of `hmax` horizontally and `v` of `vmax`
+    /// vertically, under an image `width` columns wide. Like libjpeg-turbo, the interpolating
+    /// kernels are picked by the ratio alone, so a component sampled 2 of 4 takes the same one as
+    /// a component sampled 1 of 2.
+    fn new(
+        (h, hmax): (usize, usize),
+        (v, vmax): (usize, usize),
+        width: usize,
+        upsampling: ChromaUpsampling,
+    ) -> Self {
+        if upsampling == ChromaUpsampling::Interpolated {
+            match (h * 2 == hmax, v * 2 == vmax) {
+                (true, true) => return Self::H2v2,
+                (true, false) if v == vmax => return Self::H2v1,
+                (false, true) if h == hmax => return Self::H1v2,
+                _ => {}
+            }
+        }
+        Self::Replicate(ColumnMap::new(h, hmax, width))
+    }
+
+    /// Component `ci`'s samples under every column of output row `py`: the plane row itself when
+    /// [`ColumnMap::Direct`] replicates it in place, otherwise `scratch` (one output row wide)
+    /// filled with them.
+    fn row<'a>(
+        &self,
+        img: &'a DecodedImage,
+        ci: usize,
+        py: usize,
+        scratch: &'a mut [u8],
+    ) -> &'a [u8] {
+        let rows = || {
+            let (near, far) = taps(py, img.comps[ci].comp_h);
+            (img.plane_row(ci, near), img.plane_row(ci, far))
+        };
+        match self {
+            Self::Replicate(map) => return map.upsample(img.sample_row(ci, py), scratch),
+            Self::H2v1 => libjpeg::h2v1(img.sample_row(ci, py), scratch),
+            Self::H1v2 => {
+                let (near, far) = rows();
+                libjpeg::h1v2(near, far, !py.is_multiple_of(2), scratch);
+            }
+            Self::H2v2 => {
+                let (near, far) = rows();
+                libjpeg::h2v2(near, far, scratch);
+            }
+        }
+        scratch
     }
 }
 
@@ -1010,27 +1111,40 @@ fn assemble(
 /// that into the caller's pixel layout is [`gamut_core::convert`]'s job, so this function never
 /// replicates grey across channels or refuses a target.
 ///
-/// Works a row at a time: each component's row is upsampled through its [`ColumnMap`] (in place at
+/// Works a row at a time: each component's row is upsampled through its [`Filter`] (in place at
 /// full resolution, into a scratch row otherwise), and the transform then runs over the zipped
 /// rows, writing straight into `out` -- `width * height` pixels of `format` as
 /// [`native_layout`] returned it alongside `transform`. The caller sizes `out`, so the presented
 /// image is written once, into the buffer that is returned. YCbCr rows, the common case, convert
 /// through [`ycbcr_to_rgb_row`].
-fn present_native(img: &DecodedImage, transform: Transform, format: PixelFormat, out: &mut [u8]) {
+fn present_native(
+    img: &DecodedImage,
+    upsampling: ChromaUpsampling,
+    transform: Transform,
+    format: PixelFormat,
+    out: &mut [u8],
+) {
     let w = img.width as usize;
-    let maps: Vec<ColumnMap> = img
+    let filters: Vec<Filter> = img
         .comps
         .iter()
-        .map(|c| ColumnMap::new(usize::from(c.h), img.hmax, w))
+        .map(|c| {
+            Filter::new(
+                (usize::from(c.h), img.hmax),
+                (usize::from(c.v), img.vmax),
+                w,
+                upsampling,
+            )
+        })
         .collect();
     let mut scratch = vec![vec![0u8; w]; img.comps.len()];
     let mut packed = vec![0u32; w];
     for (py, line) in out.chunks_exact_mut(w * format.channels()).enumerate() {
-        let rows: Vec<&[u8]> = maps
+        let rows: Vec<&[u8]> = filters
             .iter()
             .zip(&mut scratch)
             .enumerate()
-            .map(|(ci, (map, scratch))| map.upsample(img.sample_row(ci, py), scratch))
+            .map(|(ci, (filter, scratch))| filter.row(img, ci, py, scratch))
             .collect();
         match (transform, rows.as_slice()) {
             (Transform::Gray, &[y]) => line.copy_from_slice(y),
@@ -1119,10 +1233,16 @@ impl JpegDecoder {
     ) -> Result<ImageBuf<P>> {
         if format == P::FORMAT {
             let mut out = ImageBuf::<P>::zeroed(dims)?;
-            present_native(img, transform, format, out.as_mut_samples());
+            present_native(
+                img,
+                self.upsampling,
+                transform,
+                format,
+                out.as_mut_samples(),
+            );
             Ok(out)
         } else {
-            let samples = native_samples(img, transform, format);
+            let samples = native_samples(img, self.upsampling, transform, format);
             convert_from_raw(RawImage::new(&samples, format, dims)?, self.policy)
         }
     }
@@ -1142,14 +1262,20 @@ impl JpegDecoder {
         let dims = Dimensions::new(img.width, img.height)?;
         let (transform, format) = native_layout(&img)?;
         if format != P::FORMAT {
-            let samples = native_samples(&img, transform, format);
+            let samples = native_samples(&img, self.upsampling, transform, format);
             return self.convert_into(RawImage::new(&samples, format, dims)?, dst);
         }
         // The native layout is the requested one: write it straight into `dst` when the
         // dimensions let it hold the image. Nothing past `native_layout` can fail, so `dst` is
         // only touched once the presentation is certain to complete.
         if dst.dimensions() == dims {
-            present_native(&img, transform, format, dst.as_mut_samples());
+            present_native(
+                &img,
+                self.upsampling,
+                transform,
+                format,
+                dst.as_mut_samples(),
+            );
         } else {
             *dst = self.present_decoded(&img, dims, transform, format)?;
         }
@@ -1174,9 +1300,14 @@ impl JpegDecoder {
 
 /// [`present_native`] into a new buffer of exactly the native layout's size, for a caller that
 /// converts it on into another layout.
-fn native_samples(img: &DecodedImage, transform: Transform, format: PixelFormat) -> Vec<u8> {
+fn native_samples(
+    img: &DecodedImage,
+    upsampling: ChromaUpsampling,
+    transform: Transform,
+    format: PixelFormat,
+) -> Vec<u8> {
     let mut out = vec![0u8; img.width as usize * img.height as usize * format.channels()];
-    present_native(img, transform, format, &mut out);
+    present_native(img, upsampling, transform, format, &mut out);
     out
 }
 
@@ -1680,6 +1811,36 @@ mod tests {
         assert_eq!(
             ColumnMap::new(2, 3, 5),
             ColumnMap::Indexed(vec![0, 0, 1, 2, 2])
+        );
+    }
+
+    #[test]
+    fn filter_picks_libjpeg_turbos_method_for_each_ratio() {
+        // jinit_upsampler's ladder: by ratio, not absolute factor, and only the three 2:1 shapes
+        // interpolate. Each case pins one arm or guard; a 2:1 axis paired with any other ratio on
+        // the other axis falls back to replication.
+        let fancy = ChromaUpsampling::Interpolated;
+        let f = |h, v| Filter::new(h, v, 5, fancy);
+        assert_eq!(f((1, 2), (1, 2)), Filter::H2v2);
+        assert_eq!(f((2, 4), (2, 4)), Filter::H2v2);
+        assert_eq!(f((1, 2), (1, 1)), Filter::H2v1);
+        assert_eq!(f((2, 4), (2, 2)), Filter::H2v1);
+        assert_eq!(f((1, 1), (1, 2)), Filter::H1v2);
+        assert_eq!(f((3, 3), (2, 4)), Filter::H1v2);
+        assert_eq!(f((1, 1), (1, 1)), Filter::Replicate(ColumnMap::Direct));
+        assert_eq!(f((1, 2), (1, 4)), Filter::Replicate(ColumnMap::Double));
+        assert_eq!(
+            f((1, 4), (1, 2)),
+            Filter::Replicate(ColumnMap::Indexed(vec![0, 0, 0, 0, 1]))
+        );
+        let nearest = |h, v| Filter::new(h, v, 5, ChromaUpsampling::Nearest);
+        assert_eq!(
+            nearest((1, 2), (1, 2)),
+            Filter::Replicate(ColumnMap::Double)
+        );
+        assert_eq!(
+            nearest((1, 1), (1, 2)),
+            Filter::Replicate(ColumnMap::Direct)
         );
     }
 

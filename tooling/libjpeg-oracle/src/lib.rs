@@ -2,7 +2,8 @@
 //!
 //! gamut-jpeg's encoder must produce files the canonical reference decoder reads back to the same
 //! pixels, and gamut-jpeg's decoder must reproduce what libjpeg-turbo decodes. This crate wraps the
-//! reference encoder ([`encode`]) and decoder ([`decode`], [`decode_forced_rgb`]) behind a small,
+//! reference encoder ([`encode`]) and decoder ([`decode`], [`decode_forced_rgb`],
+//! [`decode_nearest`]) behind a small,
 //! safe API returning owned buffers.
 //!
 //! libjpeg reports fatal errors via `setjmp`/`longjmp`, which cannot be driven from Rust, so the
@@ -11,7 +12,8 @@
 //! yields an `Err` instead of aborting the process. All `unsafe` FFI is confined to this crate.
 //!
 //! Decode keeps libjpeg's default colour-space decision and default IDCT / fancy-upsampling
-//! settings — the gamut tests own their pixel tolerances.
+//! settings — the gamut tests own their pixel tolerances. [`decode_nearest`] alone turns fancy
+//! upsampling off.
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_uint};
@@ -23,6 +25,7 @@ unsafe extern "C" {
         data: *const u8,
         len: usize,
         force_rgb: c_int,
+        no_fancy: c_int,
         out_width: *mut c_uint,
         out_height: *mut c_uint,
         out_channels: *mut c_uint,
@@ -108,6 +111,8 @@ pub enum Subsampling {
     /// 4:2:0 — horizontal + vertical chroma subsampling (luma 2x2). libjpeg's default.
     #[default]
     S420,
+    /// 4:4:0 — vertical chroma subsampling (luma 1x2).
+    S440,
 }
 
 impl Subsampling {
@@ -118,6 +123,7 @@ impl Subsampling {
             Subsampling::S444 => (1, 1),
             Subsampling::S422 => (2, 1),
             Subsampling::S420 => (2, 2),
+            Subsampling::S440 => (1, 2),
         }
     }
 }
@@ -171,7 +177,17 @@ unsafe fn take_owned(ptr: *mut u8, len: usize) -> Vec<u8> {
 ///
 /// Returns an error message if libjpeg-turbo rejects the stream (malformed / truncated input).
 pub fn decode(data: &[u8]) -> Result<DecodedImage, String> {
-    decode_impl(data, false)
+    decode_impl(data, false, false)
+}
+
+/// Decodes a JPEG like [`decode`], but with fancy upsampling off (`djpeg -nosmooth`): every
+/// subsampled component is replicated rather than interpolated.
+///
+/// # Errors
+///
+/// Returns an error message if libjpeg-turbo rejects the stream (malformed / truncated input).
+pub fn decode_nearest(data: &[u8]) -> Result<DecodedImage, String> {
+    decode_impl(data, false, true)
 }
 
 /// Decodes a JPEG with libjpeg-turbo, forcing the output colour space to RGB (grayscale is
@@ -181,10 +197,10 @@ pub fn decode(data: &[u8]) -> Result<DecodedImage, String> {
 ///
 /// Returns an error message if libjpeg-turbo rejects the stream (malformed / truncated input).
 pub fn decode_forced_rgb(data: &[u8]) -> Result<DecodedImage, String> {
-    decode_impl(data, true)
+    decode_impl(data, true, false)
 }
 
-fn decode_impl(data: &[u8], force_rgb: bool) -> Result<DecodedImage, String> {
+fn decode_impl(data: &[u8], force_rgb: bool, no_fancy: bool) -> Result<DecodedImage, String> {
     let mut width: c_uint = 0;
     let mut height: c_uint = 0;
     let mut channels: c_uint = 0;
@@ -198,6 +214,7 @@ fn decode_impl(data: &[u8], force_rgb: bool) -> Result<DecodedImage, String> {
             data.as_ptr(),
             data.len(),
             c_int::from(force_rgb),
+            c_int::from(no_fancy),
             &raw mut width,
             &raw mut height,
             &raw mut channels,

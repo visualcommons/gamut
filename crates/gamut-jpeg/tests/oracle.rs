@@ -10,13 +10,16 @@
 //!   correctness from the lossy encode error (both decoders see identical coefficients).
 //!
 //! Tolerances are **measured**, then asserted with a margin; each bound cites the measured worst
-//! case in a comment. The exception is decode-vs-decode parity on gray and 4:4:4: gamut's IDCT is
-//! libjpeg-turbo's accurate integer IDCT (`gamut_dsp::jpeg::idct8x8_int`, issue #896), so with
-//! no upsampling filter between them the two decodes are asserted **byte-identical**. Content is deterministic (a smooth gradient for fidelity-vs-source, a fixed
+//! case in a comment. The exception is decode-vs-decode parity, asserted **byte-identical** in
+//! every mode. gamut's IDCT is libjpeg-turbo's accurate integer IDCT
+//! (`gamut_dsp::jpeg::idct8x8_int`, issue #896), and its default chroma upsampling is
+//! libjpeg-turbo's fancy upsampling (`gamut_color::upsample::libjpeg`, issue #1016), so nothing
+//! between the coefficients and the pixels differs. `ChromaUpsampling::Nearest` is held to
+//! libjpeg-turbo with fancy upsampling off (`djpeg -nosmooth`) the same way. Content is deterministic (a smooth gradient for fidelity-vs-source, a fixed
 //! LCG for the geometry-sensitive parity checks) so the numbers are stable across runs.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_jpeg::{ChromaSubsampling, JpegDecoder, JpegEncoder, JpegProcess};
+use gamut_jpeg::{ChromaSubsampling, ChromaUpsampling, JpegDecoder, JpegEncoder, JpegProcess};
 use libjpeg_oracle::{EncodeParams, Subsampling};
 
 /// The dimension battery: block-aligned, odd, and larger-than-MCU cases so component-dimension
@@ -58,9 +61,8 @@ impl Mode {
         }
     }
 
-    /// Chroma is upsampled by different filters (gamut = sample replication, libjpeg = fancy
-    /// triangle), so subsampled modes diverge legitimately; only gray and 4:4:4 avoid that.
-    fn upsampling_matches(self) -> bool {
+    /// No chroma subsampling, so fidelity against the source is bounded by quantization alone.
+    fn full_chroma(self) -> bool {
         matches!(self, Mode::Gray | Mode::C444)
     }
 }
@@ -257,7 +259,7 @@ fn encode_battery_decoded_by_libjpeg_turbo() {
                         "geometry {mode:?} {w}x{h} q{q} r{restart}"
                     );
                     let (max, mse) = diff_stats(&img.pixels, &src);
-                    if mode.upsampling_matches() {
+                    if mode.full_chroma() {
                         worst_gray444 = worst_gray444.max(max);
                     } else {
                         worst_sub_mse = worst_sub_mse.max(mse);
@@ -292,7 +294,7 @@ fn encode_q90_is_tight_against_source() {
             let jpeg = gamut_encode(mode, &src, w, h, 90, 0);
             let img = libjpeg_oracle::decode(&jpeg).expect("decode");
             let (max, mse) = diff_stats(&img.pixels, &src);
-            if mode.upsampling_matches() {
+            if mode.full_chroma() {
                 worst_gray444 = worst_gray444.max(max);
             } else {
                 worst_sub_mse = worst_sub_mse.max(mse);
@@ -310,14 +312,11 @@ fn encode_q90_is_tight_against_source() {
 
 #[test]
 fn encode_cross_parity_gamut_vs_libjpeg() {
-    // Same gamut stream, decoded by gamut and by libjpeg-turbo. For gray/4:4:4 (no upsampling-filter
-    // divergence) both decoders run the same integer IDCT, so the decodes are identical. For 4:2:0
-    // the upsampling filters legitimately differ (gamut = replication, libjpeg = fancy/triangle), so
-    // only a PSNR floor is asserted.
-    let mut worst_tight = 0u8;
-    let mut worst_420_mse = 0f64;
+    // Same gamut stream, decoded by gamut and by libjpeg-turbo. Both decoders run the same integer
+    // IDCT and the same fancy upsampling, so the decodes are identical in every mode.
+    let mut worst = 0u8;
     for &(w, h) in &[(16u32, 16u32), (33, 31), (64, 48)] {
-        for mode in [Mode::Gray, Mode::C444, Mode::C420] {
+        for mode in Mode::ALL {
             let src = if matches!(mode, Mode::Gray) {
                 gray_gradient(w, h)
             } else {
@@ -326,23 +325,13 @@ fn encode_cross_parity_gamut_vs_libjpeg() {
             let jpeg = gamut_encode(mode, &src, w, h, 85, 0);
             let oracle = libjpeg_oracle::decode(&jpeg).expect("oracle decode");
             let (_, _, gamut) = gamut_decode(mode, &jpeg);
-            let (max, mse) = diff_stats(&gamut, &oracle.pixels);
-            if mode.upsampling_matches() {
-                worst_tight = worst_tight.max(max);
-            } else {
-                worst_420_mse = worst_420_mse.max(mse);
-            }
+            let (max, _) = diff_stats(&gamut, &oracle.pixels);
+            worst = worst.max(max);
         }
     }
-    // gray/444 decode-vs-decode: exact (max-diff 0; it was 2 under the f64 reference IDCT). 4:2:0
-    // PSNR measured 35.22 dB (bounded by the replication-vs-fancy upsampling divergence), asserted
-    // with margin.
-    assert_eq!(worst_tight, 0, "gray/444 parity max-diff {worst_tight}");
-    assert!(
-        psnr(worst_420_mse) > 32.0,
-        "4:2:0 parity PSNR {:.2} dB",
-        psnr(worst_420_mse)
-    );
+    // Exact in every mode. Before #1016, gray/444 was exact and 4:2:0 measured 35.22 dB PSNR
+    // (replication against fancy upsampling).
+    assert_eq!(worst, 0, "decode-vs-decode parity max-diff {worst}");
 }
 
 #[test]
@@ -512,8 +501,7 @@ fn decode_matches_libjpeg_turbo_own_decode() {
     // libjpeg-turbo encodes; gamut decodes and must match libjpeg-turbo's OWN decode of the same
     // stream (decode-vs-decode parity — no lossy encode error in the comparison). The `optimize`
     // cell exercises arbitrary (non-standard) DHT tables; the `restart` cell exercises RSTn resync.
-    let mut worst_tight = 0u8;
-    let mut worst_sub_mse = 0f64;
+    let mut worst = 0u8;
     for &(w, h) in &[(16u32, 16u32), (17, 9), (33, 31), (64, 48)] {
         for mode in Mode::ALL {
             for &q in &[40i32, 75, 95] {
@@ -531,28 +519,15 @@ fn decode_matches_libjpeg_turbo_own_decode() {
                         (w, h, oracle.pixels.len()),
                         "geometry {mode:?} {w}x{h} q{q} r{restart} opt{optimize}"
                     );
-                    let (max, mse) = diff_stats(&gamut, &oracle.pixels);
-                    if mode.upsampling_matches() {
-                        worst_tight = worst_tight.max(max);
-                    } else {
-                        worst_sub_mse = worst_sub_mse.max(mse);
-                    }
+                    let (max, _) = diff_stats(&gamut, &oracle.pixels);
+                    worst = worst.max(max);
                 }
             }
         }
     }
-    // Over q ∈ {40,75,95} on high-frequency LCG content: gray/444 decode parity is exact (max-diff
-    // 0; 3 under the f64 reference IDCT); subsampled PSNR measured 22.91 dB (upsampling-filter
-    // divergence, worst on random content), asserted with margin.
-    assert_eq!(
-        worst_tight, 0,
-        "gray/444 decode-parity max-diff {worst_tight}"
-    );
-    assert!(
-        psnr(worst_sub_mse) > 20.0,
-        "subsampled decode-parity PSNR {:.2} dB",
-        psnr(worst_sub_mse)
-    );
+    // Over q ∈ {40,75,95} on high-frequency LCG content, decode parity is exact in every mode.
+    // Before #1016 only gray/444 was; subsampled measured 22.91 dB PSNR.
+    assert_eq!(worst, 0, "decode-parity max-diff {worst}");
 }
 
 #[test]
@@ -561,10 +536,8 @@ fn decode_progressive_matches_libjpeg_turbo_own_decode() {
     // 10-scan script (DC first + refinement, luma/chroma AC bands with successive approximation);
     // gamut's progressive decoder must reconstruct it and match libjpeg-turbo's OWN decode of the
     // same stream. Progressive and sequential coefficients are identical and both decoders run the
-    // same integer IDCT, so gray/4:4:4 must match exactly and the only divergence left is the
-    // upsampling-filter difference (subsampled) — asserted as in the sequential decode-parity test.
-    let mut worst_tight = 0u8; // gray + 4:4:4: must stay 0
-    let mut worst_sub_mse = 0f64; // subsampled: upsampling-filter divergence
+    // same integer IDCT and fancy upsampling, so every mode must match exactly.
+    let mut worst = 0u8;
     for &(w, h) in &[(16u32, 16u32), (17, 9), (33, 31), (64, 48)] {
         for mode in Mode::ALL {
             for &q in &[40i32, 75, 95] {
@@ -588,29 +561,92 @@ fn decode_progressive_matches_libjpeg_turbo_own_decode() {
                         (w, h, oracle.pixels.len()),
                         "geometry {mode:?} {w}x{h} q{q} r{restart} opt{optimize}"
                     );
-                    let (max, mse) = diff_stats(&gamut, &oracle.pixels);
-                    if mode.upsampling_matches() {
-                        worst_tight = worst_tight.max(max);
-                    } else {
-                        worst_sub_mse = worst_sub_mse.max(mse);
-                    }
+                    let (max, _) = diff_stats(&gamut, &oracle.pixels);
+                    worst = worst.max(max);
                 }
             }
         }
     }
-    // Over q ∈ {40,75,95} on high-frequency LCG content, progressive streams: gray/444 decode
-    // parity is exact (max-diff 0, as in the sequential battery — the coefficients match);
-    // subsampled PSNR measured 22.9 dB (upsampling-filter divergence), asserted with the same
-    // margin as the sequential decode-parity test.
-    assert_eq!(
-        worst_tight, 0,
-        "progressive gray/444 decode-parity max-diff {worst_tight}"
-    );
-    assert!(
-        psnr(worst_sub_mse) > 20.0,
-        "progressive subsampled decode-parity PSNR {:.2} dB",
-        psnr(worst_sub_mse)
-    );
+    // Over q ∈ {40,75,95} on high-frequency LCG content, progressive streams: exact in every mode,
+    // as in the sequential battery.
+    assert_eq!(worst, 0, "progressive decode-parity max-diff {worst}");
+}
+
+/// libjpeg-turbo encodes `subsampling` over the parity dimensions, sequential and progressive, and
+/// `decoder` must reproduce `reference`'s decode of every stream byte for byte. Returns how many
+/// streams were compared.
+fn assert_decode_parity(
+    subsampling: Subsampling,
+    decoder: &JpegDecoder,
+    reference: fn(&[u8]) -> Result<libjpeg_oracle::DecodedImage, String>,
+) -> usize {
+    let mut streams = 0;
+    // Widths 1..=6 reach libjpeg-turbo's replication fallback for a 2:1 horizontal component one
+    // or two samples wide (output widths up to 4) and the first widths past it.
+    let dims = [
+        (1u32, 1u32),
+        (3, 2),
+        (4, 5),
+        (5, 3),
+        (6, 7),
+        (17, 9),
+        (33, 31),
+        (64, 48),
+    ];
+    for &(w, h) in &dims {
+        for progressive in [false, true] {
+            let src = lcg_pixels(w, h, 3, 0x0bad_cafe ^ (w << 8) ^ h);
+            let params = EncodeParams {
+                quality: 80,
+                gray: false,
+                subsampling,
+                progressive,
+                restart_interval: 0,
+                optimize_coding: false,
+            };
+            let jpeg = libjpeg_oracle::encode(&src, w, h, &params).expect("oracle encode");
+            let want = reference(&jpeg).expect("oracle decode");
+            let got: ImageBuf<Rgb8> = decoder.decode_image(&jpeg).expect("gamut decode");
+            assert_eq!(
+                (got.width(), got.height()),
+                (want.width, want.height),
+                "{subsampling:?} {w}x{h} progressive {progressive}"
+            );
+            let (max, _) = diff_stats(got.as_samples(), &want.pixels);
+            assert_eq!(
+                max, 0,
+                "{subsampling:?} {w}x{h} progressive {progressive}: max-diff {max}"
+            );
+            streams += 1;
+        }
+    }
+    streams
+}
+
+#[test]
+fn decode_matches_libjpeg_turbo_fancy_upsampling_at_every_subsampling() {
+    // 4:4:0 (h1v2) has no gamut encoder path, so it is reached only through this oracle; 4:2:2
+    // (h2v1) and 4:2:0 (h2v2) also cover the narrow widths the batteries above skip.
+    for subsampling in [Subsampling::S422, Subsampling::S420, Subsampling::S440] {
+        assert_eq!(
+            assert_decode_parity(subsampling, &JpegDecoder::new(), libjpeg_oracle::decode),
+            16
+        );
+    }
+}
+
+#[test]
+fn nearest_decode_matches_libjpeg_turbo_without_fancy_upsampling() {
+    // `ChromaUpsampling::Nearest` against `djpeg -nosmooth`: libjpeg-turbo then replicates every
+    // subsampled component (its merged upsampler for h2v1/h2v2 shares the colour tables with the
+    // separate path, so the bytes are the same).
+    let nearest = JpegDecoder::new().with_chroma_upsampling(ChromaUpsampling::Nearest);
+    for subsampling in [Subsampling::S422, Subsampling::S420, Subsampling::S440] {
+        assert_eq!(
+            assert_decode_parity(subsampling, &nearest, libjpeg_oracle::decode_nearest),
+            16
+        );
+    }
 }
 
 #[test]

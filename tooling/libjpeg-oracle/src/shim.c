@@ -50,11 +50,12 @@ void oracle_free(unsigned char *p) { free(p); }
  *
  * With `force_rgb == 0` libjpeg's default out_color_space stands (grayscale -> 1 channel,
  * YCbCr -> RGB 3, CMYK/YCCK -> 4); with `force_rgb != 0` the output is forced to RGB.
- * Fancy upsampling and the default IDCT are left at libjpeg's defaults.
+ * The default IDCT is left at libjpeg's default. Fancy upsampling is too, unless `no_fancy != 0`
+ * turns it off (`djpeg -nosmooth`): every subsampled component is then replicated.
  *
  * Returns 0 on success (and fills the out-params + a malloc'd `*out_pixels`), 1 on a libjpeg error,
  * 2 on allocation failure. */
-int oracle_jpeg_decode(const unsigned char *data, size_t len, int force_rgb,
+int oracle_jpeg_decode(const unsigned char *data, size_t len, int force_rgb, int no_fancy,
                        unsigned int *out_width, unsigned int *out_height,
                        unsigned int *out_channels, unsigned char **out_pixels,
                        size_t *out_len) {
@@ -77,6 +78,9 @@ int oracle_jpeg_decode(const unsigned char *data, size_t len, int force_rgb,
   jpeg_read_header(&cinfo, TRUE);
   if (force_rgb) {
     cinfo.out_color_space = JCS_RGB;
+  }
+  if (no_fancy) {
+    cinfo.do_fancy_upsampling = FALSE;
   }
   jpeg_start_decompress(&cinfo);
 
