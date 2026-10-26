@@ -1,7 +1,8 @@
 //! AV1 OBU framing (§5.3, Annex B), the reduced-still-picture sequence header (§5.5), and the
 //! all-intra keyframe uncompressed frame header (§5.9.2). Both the lossless M0 config and the lossy
-//! intra path are emitted: `base_q_idx > 0` with per-superblock delta-Q/delta-LF, segmentation
-//! (`SEG_LVL_ALT_Q`), CDEF, loop restoration, superres, and uniform multi-tile — all under
+//! intra path are emitted: `base_q_idx > 0` with CDEF, loop restoration, superres, and uniform
+//! multi-tile (plus per-superblock delta-Q/delta-LF and segmentation, `SEG_LVL_ALT_Q`, under the
+//! test-only [`BlockVariation::SyntaxExercise`]) — all under
 //! `disable_cdf_update = 0` (adapting CDFs, §8.2.6) and `using_qmatrix = 0` (8-bit 4:4:4).
 //!
 //! `color_config()` (§5.5.2) is parameterized by [`Av1Colour`]: the identity/sRGB default takes the
@@ -13,6 +14,7 @@ use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, Transfe
 use gamut_core::{Error, Result};
 
 use crate::filter::FrameFilters;
+use crate::tile::BlockVariation;
 
 /// `OBU_SEQUENCE_HEADER`.
 const OBU_SEQUENCE_HEADER: u8 = 1;
@@ -572,7 +574,9 @@ fn write_tile_info(w: &mut BitWriter, layout: &TileLayout) {
 /// selects the lossy path: `TX_MODE_SELECT` (per-block `tx_depth`), the deblocking level and CDEF
 /// strengths `filters` carries, and luma loop restoration `RESTORE_WIENER` when `luma_lr` (some
 /// unit is restored) or `RESTORE_NONE` otherwise. All quantizer deltas are 0 and
-/// `using_qmatrix = 0`.
+/// `using_qmatrix = 0`. Segmentation and `delta_q`/`delta_lf` are signalled only when `variation`
+/// is [`BlockVariation::SyntaxExercise`] on a lossy frame — the tiles must have been coded with the
+/// same `variation` — and otherwise every block is at `base_q_idx` and the frame loop-filter level.
 ///
 /// The returned bytes precede the tile (symbol-coded) data; together they form the frame OBU
 /// payload (AV1 §5.10).
@@ -583,8 +587,10 @@ pub(crate) fn frame_header_payload(
     monochrome: bool,
     filters: FrameFilters,
     luma_lr: bool,
+    variation: BlockVariation,
 ) -> Vec<u8> {
     let lossless = base_q_idx == 0;
+    let block_variation = variation.exercised(base_q_idx);
     let mut w = BitWriter::new();
     // reduced_still_picture_header ⇒ KEY_FRAME, show_frame=1, FrameIsIntra=1 (no bits).
     // disable_cdf_update = 0: every symbol adapts its CDF as it is coded (§8.2.6). The tile encoder
@@ -631,9 +637,10 @@ pub(crate) fn frame_header_payload(
     }
     w.put_bit(0); // using_qmatrix = 0
 
-    // segmentation_params(): on the lossy path, enable per-segment alternate quantizers
-    // (SEG_LVL_ALT_Q) on a couple of segments so blocks can carry their own quantizer.
-    if lossless {
+    // segmentation_params(): only under the block-variation syntax exercise, enable per-segment
+    // alternate quantizers (SEG_LVL_ALT_Q) on a couple of segments so blocks carry their own
+    // quantizer; by default every block is coded at `base_q_idx`.
+    if !block_variation {
         w.put_bit(0); // segmentation_enabled = 0
     } else {
         w.put_bit(1); // segmentation_enabled = 1
@@ -653,19 +660,21 @@ pub(crate) fn frame_header_payload(
     }
 
     if !lossless {
-        // delta_q_params(): base_q_idx > 0 ⇒ delta_q_present = 1, delta_q_res = 0 (deltas in qindex
-        // units). delta_lf_params(): delta_lf_present = 0 (the loop-filter level stays frame-level).
-        w.put_bit(1); // delta_q_present = 1
-        w.put_bits(0, 2); // delta_q_res = 0
-        // delta_lf_params(): per-superblock loop-filter-level deltas (single, not multi).
-        w.put_bit(1); // delta_lf_present = 1
-        w.put_bits(0, 2); // delta_lf_res = 0
-        // `delta_lf_multi = 0` is also what keeps `read_delta_lf` (§5.11.13) plane-count agnostic:
-        // it sets `frameLfCount = delta_lf_multi ? (NumPlanes > 1 ? FRAME_LF_COUNT
-        // : FRAME_LF_COUNT - 2) : 1`, so exactly one delta is coded whatever `NumPlanes` is. Turning
-        // multi on would make the count monochrome-dependent, and `signal_delta_lf` would have to
-        // follow.
-        w.put_bit(0); // delta_lf_multi = 0
+        // delta_q_params() (§5.9.17), coded since base_q_idx > 0. delta_q_present = 0 by default,
+        // which also leaves delta_lf_params() (§5.9.18) uncoded with delta_lf_present = 0.
+        w.put_bit(u8::from(block_variation)); // delta_q_present
+        if block_variation {
+            w.put_bits(0, 2); // delta_q_res = 0 (deltas in qindex units)
+            // delta_lf_params(): per-superblock loop-filter-level deltas (single, not multi).
+            w.put_bit(1); // delta_lf_present = 1
+            w.put_bits(0, 2); // delta_lf_res = 0
+            // `delta_lf_multi = 0` is also what keeps `read_delta_lf` (§5.11.13) plane-count
+            // agnostic: it sets `frameLfCount = delta_lf_multi ? (NumPlanes > 1 ? FRAME_LF_COUNT
+            // : FRAME_LF_COUNT - 2) : 1`, so exactly one delta is coded whatever `NumPlanes` is.
+            // Turning multi on would make the count monochrome-dependent, and `signal_delta_lf`
+            // would have to follow.
+            w.put_bit(0); // delta_lf_multi = 0
+        }
         // loop_filter_params(): a single deblock level (the same for both luma passes and both
         // chroma planes). level 0 ⇒ deblock disabled and level[2]/[3] omitted.
         let lf = u32::from(filters.deblock_level);
@@ -1055,7 +1064,15 @@ mod tests {
             let seq = SequenceHeader::parse(&sequence_header_payload(&cfg, w, h, true, false))
                 .expect("sequence header parses");
             let l = TileLayout::resolve(req, w as usize, h as usize, cfg.seq_level_idx_0, None);
-            let frame = frame_header_payload(&l, 100, None, false, FrameFilters::default(), true);
+            let frame = frame_header_payload(
+                &l,
+                100,
+                None,
+                false,
+                FrameFilters::default(),
+                true,
+                BlockVariation::Frame,
+            );
             let fh = FrameHeader::parse(&mut BitReader::new(&frame), &seq).expect("parses");
             let t = &fh.tile_info;
             assert_eq!(

@@ -1059,6 +1059,7 @@ mod tests {
     use crate::decode::obu::{ObuIter, Subsampling};
     use crate::filter::{CdefStrengths, FrameFilters};
     use crate::headers::Av1Colour;
+    use crate::tile::BlockVariation;
 
     /// The in-loop filters [`parse_encoder_headers`] has the encoder signal: a non-zero value in
     /// every field, so each reads back as itself rather than as a default.
@@ -1079,11 +1080,19 @@ mod tests {
         base_q_idx: u8,
         superres: Option<u8>,
     ) -> (SequenceHeader, FrameHeader) {
-        parse_encoder_headers_with(width, height, base_q_idx, superres, ENCODER_FILTERS, true)
+        parse_encoder_headers_with(
+            width,
+            height,
+            base_q_idx,
+            superres,
+            ENCODER_FILTERS,
+            true,
+            BlockVariation::Frame,
+        )
     }
 
     /// The headers the encoder writes for a frame whose in-loop filters are `filters`, with luma
-    /// restoration signalled when `luma_lr`.
+    /// restoration signalled when `luma_lr` and the block variation `variation`.
     fn parse_encoder_headers_with(
         width: u32,
         height: u32,
@@ -1091,6 +1100,7 @@ mod tests {
         superres: Option<u8>,
         filters: FrameFilters,
         luma_lr: bool,
+        variation: BlockVariation,
     ) -> (SequenceHeader, FrameHeader) {
         let lossy = base_q_idx > 0;
         let cfg = crate::decode::testutil::still_config(width, height, Av1Colour::default());
@@ -1108,7 +1118,7 @@ mod tests {
             superres,
         );
         let frame_payload = crate::headers::frame_header_payload(
-            &layout, base_q_idx, superres, false, filters, luma_lr,
+            &layout, base_q_idx, superres, false, filters, luma_lr, variation,
         );
         let unit = crate::headers::assemble_temporal_unit(&seq_payload, &frame_payload);
         let obus: Vec<_> = ObuIter::new(&unit).collect::<Result<Vec<_>>>().unwrap();
@@ -1158,11 +1168,10 @@ mod tests {
             assert!(!fh.coded_lossless, "q={q} must not be CodedLossless");
             assert_eq!(fh.tx_mode, TxMode::Select);
             assert_eq!(fh.quant.base_q_idx, q);
-            assert!(fh.segmentation.enabled, "q={q} enables segmentation");
-            assert!(fh.delta_q_present);
-            assert_eq!(fh.delta_q_res, 0);
-            assert!(fh.delta_lf_present);
-            assert!(!fh.delta_lf_multi);
+            // Every block at the frame quantizer and loop-filter level (#1011).
+            assert!(!fh.segmentation.enabled, "q={q} codes no segmentation");
+            assert!(!fh.delta_q_present, "q={q} codes no delta_q");
+            assert!(!fh.delta_lf_present, "q={q} codes no delta_lf");
             // One deblock level, repeated for both luma passes and both chroma planes.
             assert_eq!(fh.loop_filter.level, [ENCODER_FILTERS.deblock_level; 4]);
             // CDEF: one strength set, secondary strengths already remapped.
@@ -1203,7 +1212,8 @@ mod tests {
                 uv_sec: 1,
             },
         };
-        let (_, fh) = parse_encoder_headers_with(128, 96, 100, None, filters, false);
+        let (_, fh) =
+            parse_encoder_headers_with(128, 96, 100, None, filters, false, BlockVariation::Frame);
         assert_eq!(fh.loop_filter.level, [0; 4]);
         assert_eq!(
             (fh.cdef.y_pri[0], fh.cdef.y_sec[0]),
@@ -1215,8 +1225,40 @@ mod tests {
     }
 
     #[test]
+    fn the_block_variation_exercise_signals_segmentation_delta_q_and_delta_lf() {
+        for q in [20u8, 60, 120, 200] {
+            let (seq, fh) = parse_encoder_headers_with(
+                128,
+                96,
+                q,
+                None,
+                ENCODER_FILTERS,
+                true,
+                BlockVariation::SyntaxExercise,
+            );
+            assert!(fh.segmentation.enabled, "q={q} enables segmentation");
+            assert!(fh.delta_q_present);
+            assert_eq!(fh.delta_q_res, 0);
+            assert!(fh.delta_lf_present);
+            assert_eq!(fh.delta_lf_res, 0);
+            assert!(!fh.delta_lf_multi);
+            // The fields after the deltas still read back as signalled.
+            assert_eq!(fh.loop_filter.level, [ENCODER_FILTERS.deblock_level; 4]);
+            fh.reject_unsupported_tools(&seq).unwrap();
+        }
+    }
+
+    #[test]
     fn segmentation_alt_q_survives_the_round_trip() {
-        let (_, fh) = parse_encoder_headers(128, 96, 100, None);
+        let (_, fh) = parse_encoder_headers_with(
+            128,
+            96,
+            100,
+            None,
+            ENCODER_FILTERS,
+            true,
+            BlockVariation::SyntaxExercise,
+        );
         for (segment, alt) in crate::tile::SEG_ALT_Q.iter().enumerate() {
             match alt {
                 Some(delta) => {
@@ -2063,6 +2105,8 @@ mod tests {
             false,
             crate::filter::FrameFilters::default(),
             true,
+            // The longest lossy header: segmentation and the delta params are coded too.
+            crate::tile::BlockVariation::SyntaxExercise,
         );
         for cut in 0..frame.len() {
             let mut r = BitReader::new(&frame[..cut]);

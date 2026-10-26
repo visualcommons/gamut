@@ -17,8 +17,10 @@
 //! **lossy** all-intra keyframes: a wide intra mode set (the eight directional modes with
 //! `angle_delta`, `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, recursive filter-intra, chroma-from-luma,
 //! and palette), DCT/ADST/identity transforms with variable `tx_depth` and `TX_SET_INTRA_2` type
-//! selection, recursive partitioning, per-superblock delta-Q/delta-LF, segmentation, uniform
-//! multi-tile, and the in-loop filters (deblocking, CDEF, loop restoration, superres). Symbols are
+//! selection, recursive partitioning, uniform multi-tile, and the in-loop filters (deblocking,
+//! CDEF, loop restoration, superres). Every block is coded at the frame-level quantizer and
+//! loop-filter level: the encoder emits segmentation and per-superblock delta-Q/delta-LF only as a
+//! crate-internal syntax exercise for its oracle tests, never on a public encode. Symbols are
 //! coded against **adapting CDFs** (`disable_cdf_update = 0`): each tile starts from the §9.4
 //! defaults and nudges every context toward what it codes, which costs no fidelity and shrinks a
 //! still by roughly 20–35%. It produces the AV1 temporal unit that `gamut-avif` wraps in an AVIF

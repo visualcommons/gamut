@@ -10,7 +10,7 @@ use gamut_core::{Error, Result};
 use crate::filter::{FrameFilters, LrUnits};
 use crate::geom::PlaneGeom;
 use crate::headers::{self, Av1Colour, Av1StillConfig, TileLayout, Tiling};
-use crate::tile::{FrameEncoder, Reconstruction, Search};
+use crate::tile::{BlockVariation, FrameEncoder, Reconstruction, Search};
 
 /// How much mode-decision search the lossy intra encoder runs: a preset that trades search for
 /// encode time.
@@ -236,6 +236,7 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
         None,
         Av1Colour::default(),
         EncodeOptions::default(),
+        BlockVariation::Frame,
     )
 }
 
@@ -304,7 +305,7 @@ pub fn encode_still_intra_with_options(
     colour: Av1Colour,
     options: EncodeOptions,
 ) -> Result<(EncodedStill, ReconImage)> {
-    encode_with(planes, qindex, None, colour, options)
+    encode_with(planes, qindex, None, colour, options, BlockVariation::Frame)
 }
 
 /// Like [`encode_still_intra`] but codes the frame with horizontal **superres** (§7.16): the source
@@ -322,6 +323,7 @@ pub fn encode_still_intra_superres(
         Some(coded_denom),
         Av1Colour::default(),
         EncodeOptions::default(),
+        BlockVariation::Frame,
     )
 }
 
@@ -551,6 +553,18 @@ pub fn encode_still_intra16_with_options(
     colour: Av1Colour,
     options: EncodeOptions,
 ) -> Result<(EncodedStill, ReconImage)> {
+    encode16_with(planes, qindex, colour, options, BlockVariation::Frame)
+}
+
+/// The high-bit-depth encode behind [`encode_still_intra16_with_options`], with the block
+/// variation as [`encode_with`] takes it.
+fn encode16_with(
+    planes: &Planar16,
+    qindex: u8,
+    colour: Av1Colour,
+    options: EncodeOptions,
+    variation: BlockVariation,
+) -> Result<(EncodedStill, ReconImage)> {
     let (width, height) = (planes.width(), planes.height());
     let monochrome = check_layout(width, height, planes.subsampling(), colour, qindex)?;
     let config = still_config(
@@ -570,8 +584,11 @@ pub fn encode_still_intra16_with_options(
         config.seq_level_idx_0,
         None,
     );
-    let encoder =
-        || FrameEncoder::new16(planes, qindex).with_search(Search::for_speed(options.speed));
+    let encoder = || {
+        FrameEncoder::new16(planes, qindex)
+            .with_search(Search::for_speed(options.speed))
+            .with_block_variation(variation)
+    };
     let frame = if qindex == 0 {
         // Lossless: the reconstruction *is* the source. Each plane crops at its own extent, so a
         // monochrome buffer's empty chroma planes stay empty.
@@ -596,6 +613,7 @@ pub fn encode_still_intra16_with_options(
         monochrome,
         frame.filters,
         frame.lr.any(),
+        variation,
     );
     append_tiles(&mut frame_payload, &frame.tile_bytes);
     let recon_planes = frame.planes;
@@ -615,12 +633,17 @@ pub fn encode_still_intra16_with_options(
     ))
 }
 
+/// The 8-bit encode behind every [`Planar8`] entry point. `variation` is the position-only block
+/// variation the crate's oracle tests exercise; every public entry point passes
+/// [`BlockVariation::Frame`], so no public encode varies a block's quantizer or loop-filter level
+/// by position (#1011).
 fn encode_with(
     planes: &Planar8,
     qindex: u8,
     coded_denom: Option<u8>,
     colour: Av1Colour,
     options: EncodeOptions,
+    variation: BlockVariation,
 ) -> Result<(EncodedStill, ReconImage)> {
     let width = planes.width();
     let height = planes.height();
@@ -676,8 +699,11 @@ fn encode_with(
         config.seq_level_idx_0,
         coded_denom,
     );
-    let encoder =
-        || FrameEncoder::new(&coded_src, qindex).with_search(Search::for_speed(options.speed));
+    let encoder = || {
+        FrameEncoder::new(&coded_src, qindex)
+            .with_search(Search::for_speed(options.speed))
+            .with_block_variation(variation)
+    };
     let frame = if qindex == 0 {
         // Lossless: the reconstruction equals the 8-bit source; widen it into the u16 recon buffer.
         // Each plane crops at its **own** extent — the source carries no coded padding, so the
@@ -710,6 +736,7 @@ fn encode_with(
         monochrome,
         frame.filters,
         frame.lr.any(),
+        variation,
     );
     append_tiles(&mut frame_payload, &frame.tile_bytes);
 
@@ -1118,8 +1145,8 @@ mod tests {
     #[test]
     fn restoration_units_are_decided_one_by_one() {
         // 640 columns make three 256-wide units, the last absorbing the remainder. On this field
-        // the Wiener filter brings the left unit closer to the source and the other two further
-        // from it, so only the left one is restored — and the frame, having one, is coded twice.
+        // the Wiener filter brings the middle unit closer to the source and the other two further
+        // from it, so only the middle one is restored — and the frame, having one, is coded twice.
         // `recon.rs` decodes the same frame with both oracles.
         let frame = coded_frame(&planes(640, 64, smooth_field), 110);
         assert_eq!(
@@ -1127,7 +1154,7 @@ mod tests {
             LrUnits {
                 cols: 3,
                 rows: 1,
-                wiener: vec![true, false, false],
+                wiener: vec![false, true, false],
             }
         );
     }
@@ -1222,11 +1249,10 @@ mod tests {
     #[test]
     fn encoded_bitstream_is_stable() {
         // The encoder's structural choices — block partition (choose_partition), palette
-        // (decide_palette/palette_cache/signal_palette_colors), per-superblock delta-q/lf
-        // (signal_delta_q/lf), skip (block_is_skippable), tx depth and type (select_luma_mode,
-        // select_tx_type), loop-restoration
-        // signalling (write_lr) — change the OBU bitstream but reconstruct bit-exactly, so the dav1d
-        // recon oracle in recon_dav1d.rs cannot see them. This snapshot pins an FNV-1a checksum of the
+        // (decide_palette/palette_cache/signal_palette_colors), skip (block_is_skippable), tx
+        // depth and type (select_luma_mode, select_tx_type), loop-restoration signalling
+        // (write_lr) — change the OBU bitstream but reconstruct bit-exactly, so the libaom/dav1d
+        // recon oracle in tests/recon.rs cannot see them. This snapshot pins an FNV-1a checksum of the
         // OBU stream for a spread of content patterns, sizes and quantizers; any change to a
         // (deterministic) encoder decision moves a checksum. The recon oracle proves these same streams
         // decode correctly, so the pair certifies "deterministic AND correct", not just "deterministic".
@@ -1254,16 +1280,16 @@ mod tests {
         };
         let cases: &[(u8, u32, u32, u8, u64)] = &[
             (0, 40, 24, 0, 0x5728_aabc_5720_858a),
-            (1, 64, 64, 1, 0x221e_d8d7_91ab_47f9),
-            (2, 32, 32, 40, 0x10a2_0b1d_ba5c_a801),
-            (3, 48, 48, 16, 0xe5ac_76e3_1e8d_712f),
-            (4, 64, 48, 90, 0x0eee_fbff_4f10_49cc),
-            (0, 100, 80, 8, 0x5952_adcb_1226_3495),
+            (1, 64, 64, 1, 0xe582_b966_f13a_a1f3),
+            (2, 32, 32, 40, 0x2cee_d06e_116f_84f9),
+            (3, 48, 48, 16, 0x24fa_0cb0_41a7_5c54),
+            (4, 64, 48, 90, 0xcb16_c36e_28da_2df3),
+            (0, 100, 80, 8, 0xb6c9_186d_65e4_65f1),
             // One tile: two would leave the second 2 samples wide (Annex A.3, CroppedTileWidth).
-            (0, 130, 70, 120, 0x979c_33da_1a4f_e1ce),
-            (2, 64, 64, 200, 0x8a4f_5af4_2cbd_8e85),
-            (3, 96, 96, 60, 0x0702_5bf1_df0a_c11b),
-            (4, 128, 64, 30, 0x5042_d972_2087_5abb),
+            (0, 130, 70, 120, 0xe098_b58f_9ae1_2cda),
+            (2, 64, 64, 200, 0x5a5c_1a4f_0f5e_8fac),
+            (3, 96, 96, 60, 0x36f5_8d2c_3684_0002),
+            (4, 128, 64, 30, 0xe749_0937_59b1_43c0),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
         let got: Vec<(u8, u32, u32, u8, u64)> = cases
@@ -1329,7 +1355,9 @@ mod tests {
         // stream and reconstruction. The reconstruction is what proves the merge — the tiles a
         // spawned worker codes reach the in-loop filters only through `absorb_tile` — and the
         // content mixes texture, palette-like steps and stripes so each merged per-MI map
-        // (partition sizes, transform sizes, skip, delta-LF) varies across the frame.
+        // (partition sizes, transform sizes, skip) varies across the frame. The delta-LF map is
+        // all zero here; `the_block_variation_exercise_survives_the_restoration_pass_and_threaded_tiles`
+        // merges one that varies.
         let mix = |x: u32, y: u32| -> [u8; 3] {
             match ((x / 37) % 3, (y / 29) % 2) {
                 (0, _) => [(x * 7 + y) as u8, (x ^ (y * 3)) as u8, (x + y * 5) as u8],
@@ -1512,13 +1540,13 @@ mod tests {
             }
         });
         let cases: &[(Speed, u8, u64)] = &[
-            (Speed::Thorough, 40, 0x884e_d6af_33aa_29a6),
-            (Speed::Balanced, 40, 0x291c_4e41_4169_bd71),
-            (Speed::Fast, 40, 0x44ab_1240_3334_5b54),
-            (Speed::Fastest, 40, 0xc45e_7fa1_6c03_aa2b),
-            (Speed::Balanced, 120, 0x366c_a306_88b3_ca63),
-            (Speed::Fast, 120, 0x6ab7_d124_35a0_ffaa),
-            (Speed::Fastest, 120, 0xd042_e96d_52a5_c768),
+            (Speed::Thorough, 40, 0xe067_d32e_9491_3c8f),
+            (Speed::Balanced, 40, 0x96e5_c275_b493_ce51),
+            (Speed::Fast, 40, 0x71c6_ad52_69ee_3895),
+            (Speed::Fastest, 40, 0xb0c1_e20a_e32a_6fb1),
+            (Speed::Balanced, 120, 0x6fa7_90ff_0c36_9732),
+            (Speed::Fast, 120, 0x9a5d_85fe_2cb8_c80a),
+            (Speed::Fastest, 120, 0xd9e4_e7cb_d1a7_2609),
         ];
         // Every case is encoded before any is compared, so one run reports every pin that moved.
         let got: Vec<(Speed, u8, u64)> = cases
@@ -1813,5 +1841,332 @@ mod tests {
         .unwrap();
         assert_eq!(parse_obus(&still.obus).len(), 2);
         assert_eq!(recon.planes[0].len(), 48 * 48);
+    }
+
+    /// A busy texture whose blocks stay non-skip, so every block codes its segment id.
+    fn texture(x: u32, y: u32) -> [u8; 3] {
+        let r = (x.wrapping_mul(5).wrapping_add(y.wrapping_mul(3)) % 256) as u8;
+        let g = ((x.wrapping_add(y).wrapping_mul(2)) % 256) as u8;
+        let b = (40 + ((x.wrapping_mul(7) ^ y) % 160)) as u8;
+        [r, g, b]
+    }
+
+    /// `p` encoded as `encode_still_intra_with_options` would, with the position-only block
+    /// variation switched on.
+    fn exercised(
+        p: &Planar8,
+        qindex: u8,
+        colour: Av1Colour,
+        options: EncodeOptions,
+    ) -> (EncodedStill, ReconImage) {
+        encode_with(
+            p,
+            qindex,
+            None,
+            colour,
+            options,
+            BlockVariation::SyntaxExercise,
+        )
+        .unwrap()
+    }
+
+    /// Decodes `still` with libaom (the AV1 reference decoder) and dav1d, and asserts each
+    /// reproduces the encoder's reconstruction of every coded plane byte for byte.
+    fn assert_both_oracles_reconstruct((still, recon): &(EncodedStill, ReconImage), case: &str) {
+        // A standalone Section-5 stream leads with a temporal-delimiter OBU, which AVIF omits.
+        let mut stream = vec![0x12u8, 0x00];
+        stream.extend_from_slice(&still.obus);
+        let coded = recon.subsampling.num_planes();
+        let size = (recon.width, recon.height);
+        let aom = aom_oracle::decode_av1(&stream).unwrap_or_else(|e| panic!("libaom, {case}: {e}"));
+        assert_eq!((aom.width, aom.height), size, "libaom size, {case}");
+        assert!(
+            aom.planes[..coded] == recon.planes[..coded],
+            "libaom differs from the reconstruction, {case}"
+        );
+        let dav1d =
+            dav1d_oracle::decode_obu(&stream).unwrap_or_else(|e| panic!("dav1d, {case}: {e}"));
+        assert_eq!((dav1d.width, dav1d.height), size, "dav1d size, {case}");
+        assert!(
+            dav1d.planes[..coded] == recon.planes[..coded],
+            "dav1d differs from the reconstruction, {case}"
+        );
+    }
+
+    /// Whether `obus` signals `(segmentation_enabled, delta_q_present, delta_lf_present)`, read
+    /// with the sequence and frame header parsers directly, so a layout `Av1Decoder::inspect`
+    /// refuses (4:2:0, high bit depth) can still be checked.
+    #[cfg(feature = "decode")]
+    fn block_variation_flags(obus: &[u8]) -> (bool, bool, bool) {
+        let units: Vec<_> = crate::decode::obu::ObuIter::new(obus)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let seq = crate::decode::obu::SequenceHeader::parse(units[0].payload).unwrap();
+        let mut r = gamut_bitstream::BitReader::new(units[1].payload);
+        let fh = crate::decode::header::FrameHeader::parse(&mut r, &seq).unwrap();
+        (
+            fh.segmentation.enabled,
+            fh.delta_q_present,
+            fh.delta_lf_present,
+        )
+    }
+
+    /// #1011: no default lossy encode varies its quantizer or loop-filter level by block position.
+    /// Kills `BlockVariation::exercised` → `true` (and `frame_header_payload`'s gate on it), which
+    /// would put the position-only segmentation, `delta_q` and `delta_lf` back on every encode,
+    /// and pins `BlockVariation::Frame` at each public entry point: the plain one, the options one
+    /// `gamut-avif`'s lossy encoder calls (BT.709 4:2:0, two tiles, two threads), superres and the
+    /// high-bit-depth one.
+    #[cfg(feature = "decode")]
+    #[test]
+    fn block_variation_exercised_is_off_in_every_default_lossy_encode() {
+        let none = (false, false, false);
+        let p = planes(160, 96, texture);
+        for q in [1u8, 20, 120, 255] {
+            let (still, _) = encode_still_intra(&p, q).unwrap();
+            assert_eq!(block_variation_flags(&still.obus), none, "plain q{q}");
+        }
+        let rgb: Vec<u8> = (0..160u32 * 96)
+            .flat_map(|i| texture(i % 160, i / 160))
+            .collect();
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(160, 96).unwrap()).unwrap();
+        let m =
+            RgbToYcbcr::new(MatrixCoefficients::Bt709, ColorRange::Full, BitDepth::Eight).unwrap();
+        let yuv = Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
+        let colour = Av1Colour {
+            matrix: MatrixCoefficients::Bt709,
+            ..Av1Colour::default()
+        };
+        let options = EncodeOptions::default().with_threads(NonZeroUsize::new(2).unwrap());
+        let (still, _) = encode_still_intra_with_options(&yuv, 90, colour, options).unwrap();
+        assert_eq!(block_variation_flags(&still.obus), none, "options, 4:2:0");
+        let (still, _) = encode_still_intra_superres(&p, 90, 4).unwrap();
+        assert_eq!(block_variation_flags(&still.obus), none, "superres");
+        let deep = Planar16::from_planes(
+            64,
+            48,
+            BitDepth::Ten,
+            std::array::from_fn(|c| {
+                (0..64u32 * 48)
+                    .map(|i| u16::from(texture(i % 64, i / 64)[c]) * 4)
+                    .collect()
+            }),
+        )
+        .unwrap();
+        let (still, _) = encode_still_intra16_with_options(
+            &deep,
+            90,
+            Av1Colour::default(),
+            EncodeOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(block_variation_flags(&still.obus), none, "10-bit");
+    }
+
+    #[test]
+    fn the_block_variation_exercise_has_a_stable_bitstream() {
+        // Pin: which segment, `delta_q` and `delta_lf` each block or superblock is given is a free
+        // choice — any value reconstructs bit-exactly, so neither oracle sees it — and since #1011
+        // no default encode codes them for `encoded_bitstream_is_stable` to pin. So the exercised
+        // stream is pinned here: a change to `signal_segment_id`'s `(r + c) % 3`,
+        // `signal_delta_q`'s cycle or `signal_delta_lf`'s alternation moves a checksum.
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+        }
+        let cases: &[(u32, u32, u8, u64)] = &[
+            (64, 48, 40, 0xb9e0_eb56_8470_1461),
+            (160, 96, 90, 0x5c64_97fe_666c_5078),
+            (200, 136, 200, 0xad8f_9751_87b9_e2f4),
+        ];
+        let got: Vec<(u32, u32, u8, u64)> = cases
+            .iter()
+            .map(|&(w, h, q, _)| {
+                let p = planes(w, h, texture);
+                let coded = exercised(&p, q, Av1Colour::default(), EncodeOptions::default());
+                (w, h, q, fnv1a(&coded.0.obus))
+            })
+            .collect();
+        assert_eq!(got, cases, "an exercised bitstream changed");
+    }
+
+    #[test]
+    fn the_block_variation_exercise_codes_delta_q_both_decoders_follow() {
+        // Oracle: each superblock's first block signals a per-SB delta_q, so CurrentQIndex (and
+        // the dc/ac dequantizer step) varies across superblocks while the coefficient-CDF qctx
+        // stays at its frame value (init_coeff_cdfs derives it from base_q_idx, §8.3.2).
+        // Multi-superblock sizes (> 64 px) exercise several deltas; base_q_idx values sit on the
+        // qctx boundaries (20/60/120) so a ±delta pushes CurrentQIndex across the boundary without
+        // changing qctx — the case that would desync if qctx tracked CurrentQIndex.
+        let texture = |x: u32, y: u32| {
+            let r = (x.wrapping_mul(3).wrapping_add(y) % 256) as u8;
+            let g = ((x + y.wrapping_mul(2)) % 256) as u8;
+            let b = (128 + ((x ^ y) % 64)) as u8;
+            [r, g, b]
+        };
+        for q in [20u8, 21, 60, 61, 120, 121, 200] {
+            for (w, h) in [(64u32, 64u32), (96, 96), (160, 96), (100, 70)] {
+                let p = planes(w, h, texture);
+                let coded = exercised(&p, q, Av1Colour::default(), EncodeOptions::default());
+                assert_both_oracles_reconstruct(&coded, &format!("{w}x{h} q{q}"));
+            }
+        }
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn the_block_variation_exercise_codes_delta_lf_both_decoders_follow() {
+        // Oracle: each superblock's first block signals a per-SB delta_lf, so the deblocking level
+        // varies across superblocks (loop_filter_level + accumulated DeltaLF, §7.14.4). Structured
+        // content gives the deblock real work; multi-superblock sizes exercise several levels.
+        let edged = |x: u32, y: u32| {
+            let bar = if (x / 3).is_multiple_of(2) { 70 } else { 190 } as u8;
+            let ramp = ((x.wrapping_add(y).wrapping_mul(11)) % 256) as u8;
+            let band = if (y / 4).is_multiple_of(2) { 60 } else { 200 } as u8;
+            [bar, ramp, band]
+        };
+        let mut levels = Vec::new();
+        for q in [24u8, 64, 128, 220] {
+            for (w, h) in [(96u32, 96u32), (160, 96), (128, 128)] {
+                let p = planes(w, h, edged);
+                let coded = exercised(&p, q, Av1Colour::default(), EncodeOptions::default());
+                let frame = crate::Av1Decoder::new()
+                    .inspect(&coded.0.obus)
+                    .unwrap()
+                    .frame;
+                assert!(frame.delta_lf_present, "{w}x{h} q{q} codes delta_lf");
+                levels.push(frame.loop_filter.level[0]);
+                assert_both_oracles_reconstruct(&coded, &format!("{w}x{h} q{q}"));
+            }
+        }
+        // A frame level of 0 switches the loop filter off whatever DeltaLF says (§7.4), so the
+        // accumulation is only under test where the encoder chose to deblock.
+        assert!(
+            levels.iter().any(|&l| l > 0),
+            "no case deblocks: {levels:?}"
+        );
+    }
+
+    #[test]
+    fn the_block_variation_exercise_codes_segment_ids_both_decoders_follow() {
+        // Oracle: segmentation_enabled with SEG_LVL_ALT_Q on two segments: every non-skip block is
+        // assigned a position-only segment id (coded via neg_interleave under the
+        // spatial-prediction context) and quantized at CurrentQIndex + the segment's alt-Q delta.
+        // Textured content keeps blocks non-skip so the ids are actually coded.
+        for q in [8u8, 32, 96, 180] {
+            for (w, h) in [(32u32, 32u32), (64, 48), (96, 72)] {
+                let p = planes(w, h, texture);
+                let coded = exercised(&p, q, Av1Colour::default(), EncodeOptions::default());
+                assert_both_oracles_reconstruct(&coded, &format!("{w}x{h} q{q}"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_block_variation_exercise_reaches_every_layout_both_decoders_follow() {
+        // Oracle: the variation's symbols under each layout that changes how they are coded or
+        // applied — tile rows and columns (segment-id prediction stops at a tile edge), a
+        // whole-superblock block that is skip (which codes neither delta) or not (which codes
+        // both), monochrome (one `delta_lf` whatever `NumPlanes`), 4:2:0 at 10 bits (the segment
+        // quantizer through the deeper step tables), and superres (the coded grid narrower than
+        // the display).
+        let base = EncodeOptions::default();
+        let tiled = base.with_tiling(Tiling::new(1, 1));
+        let p = planes(160, 136, texture);
+        let coded = exercised(&p, 90, Av1Colour::default(), tiled);
+        assert_both_oracles_reconstruct(&coded, "2x2 tiles");
+
+        let solid = planes(128, 128, |_, _| [128, 90, 128]);
+        let grad = planes(128, 128, |x, y| {
+            [128, 90 + ((x % 64) / 8 + (y % 64) / 8) as u8, 128]
+        });
+        for q in [16u8, 64, 144] {
+            let coded = exercised(&solid, q, Av1Colour::default(), base);
+            assert_both_oracles_reconstruct(&coded, &format!("skip superblocks q{q}"));
+            let coded = exercised(&grad, q, Av1Colour::default(), base);
+            assert_both_oracles_reconstruct(&coded, &format!("64x64 gradient q{q}"));
+        }
+
+        let luma = (0..96u32 * 80)
+            .map(|i| texture(i % 96, i / 96)[1])
+            .collect::<Vec<_>>();
+        let mono = Planar8::from_planes_subsampled(
+            96,
+            80,
+            ChromaSubsampling::Cs400,
+            [luma, Vec::new(), Vec::new()],
+        )
+        .unwrap();
+        let coded = exercised(&mono, 70, Av1Colour::monochrome(), base);
+        assert_both_oracles_reconstruct(&coded, "monochrome");
+
+        let (w, h) = (96u32, 72u32);
+        let deep = |p: usize, pw: u32, ph: u32| -> Vec<u16> {
+            (0..pw * ph)
+                .map(|i| u16::from(texture(i % pw, i / pw)[p]) * 4 + (i % 3) as u16)
+                .collect()
+        };
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let src = Planar16::from_planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs420,
+            BitDepth::Ten,
+            [deep(1, w, h), deep(2, cw, ch), deep(0, cw, ch)],
+        )
+        .unwrap();
+        let colour = Av1Colour {
+            matrix: MatrixCoefficients::Bt709,
+            ..Av1Colour::default()
+        };
+        for q in [40u8, 160] {
+            let coded = encode16_with(&src, q, colour, base, BlockVariation::SyntaxExercise);
+            assert_both_oracles_reconstruct(&coded.unwrap(), &format!("10-bit 4:2:0 q{q}"));
+        }
+
+        let wide = planes(192, 64, texture);
+        let coded = encode_with(
+            &wide,
+            100,
+            Some(4),
+            Av1Colour::default(),
+            base,
+            BlockVariation::SyntaxExercise,
+        );
+        assert_both_oracles_reconstruct(&coded.unwrap(), "superres");
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn the_block_variation_exercise_survives_the_restoration_pass_and_threaded_tiles() {
+        // Oracle: a frame that restores a unit is coded twice (`CodedFrame::lossy`'s second pass),
+        // and with tiles on several threads each worker's per-MI maps — the `delta_lf` one among
+        // them — are merged back before the in-loop filters. Both must carry the variation, or the
+        // second pass codes a different stream from the reconstruction the first one produced.
+        let p = planes(640, 64, smooth_field);
+        let options = EncodeOptions::default().with_threads(NonZeroUsize::new(3).unwrap());
+        let mut restored = Vec::new();
+        for q in [110u8, 160, 200, 240] {
+            let coded = exercised(&p, q, Av1Colour::default(), options);
+            let frame = crate::Av1Decoder::new()
+                .inspect(&coded.0.obus)
+                .unwrap()
+                .frame;
+            assert!(frame.delta_lf_present && frame.segmentation.enabled);
+            assert!(
+                frame.tile_info.tile_cols > 1,
+                "tiles to spread over threads"
+            );
+            let lr = frame.lr.frame_restoration_type[0] == crate::RestorationType::Wiener;
+            restored.push((q, lr, frame.loop_filter.level[0]));
+            assert_both_oracles_reconstruct(&coded, &format!("640x64 q{q}, three threads"));
+        }
+        // A frame that restores no unit is coded once, and one deblocked at level 0 ignores
+        // DeltaLF, so the claim needs a case that does both.
+        assert!(
+            restored.iter().any(|&(_, lr, level)| lr && level > 0),
+            "no case is both restored and deblocked: {restored:?}"
+        );
     }
 }
