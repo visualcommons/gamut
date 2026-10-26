@@ -924,6 +924,8 @@ dependencies = [
  "gamut-core",
  "gamut-dsp",
  "gamut-metadata",
+ "jpegli-oracle",
+ "lcms2-oracle",
  "libjpeg-oracle",
  "perceptual-oracle",
  "zune-jpeg",
@@ -945,7 +947,7 @@ name = "gamut-jxl-sys"
 version = "0.1.1"
 dependencies = [
  "cmake",
- "jpegxl-src",
+ "jpegxl-src 0.12.0",
 ]
 
 [[package]]
@@ -1197,6 +1199,23 @@ checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
+]
+
+[[package]]
+name = "jpegli-oracle"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "jpegxl-src 0.11.4",
+]
+
+[[package]]
+name = "jpegxl-src"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "902ce3ffcd089c3c02a74a44bdd4fd01ad18ecc63ec582b9c84b12418cdeba1e"
+dependencies = [
+ "cmake",
 ]
 
 [[package]]

@@ -45,6 +45,13 @@ metadata = ["dep:gamut-metadata"]
 # canonical reference codec that proves the encoder's output decodes to the same pixels and the
 # decoder reproduces what libjpeg-turbo decodes.
 libjpeg-oracle = { path = "../../tooling/libjpeg-oracle" }
+# Differential oracle for the XYB colour mode (issue #1015): a vendored, statically-linked jpegli
+# (libjxl v0.11.2, the last release carrying it in-tree). Dev-only and excluded from the workspace.
+# It proves gamut's XYB streams decode through jpegli's decoder.
+jpegli-oracle = { path = "../../tooling/jpegli-oracle" }
+# The independent CMS that turns jpegli's (colour-unmanaged) XYB samples into sRGB in the XYB
+# tests: a vendored, statically-linked Little-CMS. Dev-only and excluded from the workspace.
+lcms2-oracle = { path = "../../tooling/lcms2-oracle" }
 # Benchmark harness (issue #149) for `benches/decode.rs`.
 divan.workspace = true
 # The pure-Rust decoder issue #305 measures decode throughput against (bench + experiment arm only;

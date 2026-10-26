@@ -260,7 +260,7 @@ carry no function bodies.
 | gamut-cmm | Little-CMS | differential | — |
 | gamut-deflate | zlib | differential | — |
 | gamut-png | libpng (both directions) | differential + conformance + size contract | `PngDecoder` ☑ |
-| gamut-jpeg | libjpeg-turbo | differential + exact-byte | `JpegDecoder` ☑ |
+| gamut-jpeg | libjpeg-turbo; jpegli (XYB mode) with Little-CMS applying the profile | differential + exact-byte | `JpegDecoder` ☑ |
 | gamut-tiff | libtiff | differential | `TiffDecoder` ☑ |
 | gamut-dng | Adobe DNG SDK; libtiff (container) | conformance + differential | `DngDecoder` ☑ |
 | gamut-isobmff | ISO/IEC 14496-12 + 23008-12; libavif/dav1d via gamut-avif | exact-byte + law | `read` ☑ |
