@@ -23,10 +23,11 @@ enum Mode {
     C444,
     C422,
     C420,
+    C440,
 }
 
 impl Mode {
-    const ALL: [Mode; 4] = [Mode::Gray, Mode::C444, Mode::C422, Mode::C420];
+    const ALL: [Mode; 5] = [Mode::Gray, Mode::C444, Mode::C422, Mode::C420, Mode::C440];
 
     fn channels(self) -> u32 {
         match self {
@@ -40,6 +41,7 @@ impl Mode {
             Mode::Gray | Mode::C444 => ChromaSubsampling::Ycbcr444,
             Mode::C422 => ChromaSubsampling::Ycbcr422,
             Mode::C420 => ChromaSubsampling::Ycbcr420,
+            Mode::C440 => ChromaSubsampling::Ycbcr440,
         }
     }
 }

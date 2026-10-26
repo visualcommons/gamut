@@ -30,10 +30,11 @@ enum Mode {
     C444,
     C422,
     C420,
+    C440,
 }
 
 impl Mode {
-    const ALL: [Mode; 4] = [Mode::Gray, Mode::C444, Mode::C422, Mode::C420];
+    const ALL: [Mode; 5] = [Mode::Gray, Mode::C444, Mode::C422, Mode::C420, Mode::C440];
 
     fn channels(self) -> u32 {
         match self {
@@ -47,6 +48,7 @@ impl Mode {
             Mode::Gray | Mode::C444 => ChromaSubsampling::Ycbcr444,
             Mode::C422 => ChromaSubsampling::Ycbcr422,
             Mode::C420 => ChromaSubsampling::Ycbcr420,
+            Mode::C440 => ChromaSubsampling::Ycbcr440,
         }
     }
 
@@ -54,8 +56,22 @@ impl Mode {
         match self {
             Mode::C422 => Subsampling::S422,
             Mode::C420 => Subsampling::S420,
+            Mode::C440 => Subsampling::S440,
             _ => Subsampling::S444,
         }
+    }
+
+    /// The frame's `(Hi, Vi)` per component, as T.81 §B.2.2 declares them: luma carries the
+    /// subsampling ratio and both chroma components stay `1×1`.
+    fn sampling_factors(self) -> Vec<(u8, u8)> {
+        let luma = match self {
+            Mode::Gray => return vec![(1, 1)],
+            Mode::C444 => (1, 1),
+            Mode::C422 => (2, 1),
+            Mode::C420 => (2, 2),
+            Mode::C440 => (1, 2),
+        };
+        vec![luma, (1, 1), (1, 1)]
     }
 
     /// Chroma is upsampled by different filters (gamut = sample replication, libjpeg = fancy
@@ -239,7 +255,7 @@ fn encode_battery_decoded_by_libjpeg_turbo() {
     // dims × mode × quality × restart. libjpeg-turbo must decode every stream with the right
     // geometry (stream validity — the real point), and the pixels must be faithful to the SOURCE.
     let mut worst_gray444 = 0u8; // max per-pixel diff, gray + 4:4:4
-    let mut worst_sub_mse = 0f64; // worst MSE, 4:2:2 + 4:2:0
+    let mut worst_sub_mse = 0f64; // worst MSE, 4:2:2 + 4:2:0 + 4:4:0
     for &(w, h) in DIMS {
         for mode in Mode::ALL {
             for &q in &[50u8, 75, 90] {
@@ -267,13 +283,62 @@ fn encode_battery_decoded_by_libjpeg_turbo() {
         }
     }
     // Measured worst over the battery (q ∈ {50,75,90}): gray/444 max-diff = 11 (the q50 cell
-    // dominates); subsampled PSNR = 30.11 dB. Asserted with margin.
+    // dominates); subsampled PSNR = 30.11 dB, unchanged when 4:4:0 joined (#1014). Asserted with
+    // margin.
     assert!(worst_gray444 <= 16, "gray/444 max-diff {worst_gray444}");
     assert!(
         psnr(worst_sub_mse) > 28.0,
         "subsampled PSNR {:.2} dB",
         psnr(worst_sub_mse)
     );
+}
+
+#[test]
+fn encode_sampling_factors_are_what_libjpeg_turbo_reads() {
+    // The frame header gamut writes for each mode, read back by libjpeg-turbo's own header parser
+    // rather than gamut's: the factors the reference decoder upsamples by are the ones the mode
+    // names. Baseline and progressive write their SOF through different paths, so both are read.
+    let (w, h) = (17u32, 9u32);
+    for mode in Mode::ALL {
+        let src = gray_or_rgb_gradient(mode, w, h);
+        for progressive in [false, true] {
+            let jpeg = gamut_encode_cfg(mode, &src, w, h, 75, 0, progressive);
+            assert_eq!(
+                libjpeg_oracle::sampling_factors(&jpeg).expect("libjpeg-turbo header"),
+                mode.sampling_factors(),
+                "{mode:?} progressive={progressive}"
+            );
+        }
+    }
+}
+
+#[test]
+fn encode_fidelity_tracks_libjpeg_turbo_own_encode() {
+    // Against the reference doing the same job: for every colour mode, gamut's stream and
+    // libjpeg-turbo's own stream of the same source at the same quality, both decoded by
+    // libjpeg-turbo, must reconstruct the source to within one PSNR margin of each other. The same
+    // margin binds every mode, so a newer grid meets exactly the bar the older ones do.
+    for mode in [Mode::C444, Mode::C422, Mode::C420, Mode::C440] {
+        let mut worst_gap = f64::NEG_INFINITY; // libjpeg-turbo's PSNR minus gamut's, in dB
+        for &(w, h) in DIMS {
+            for &q in &[50u8, 75, 90] {
+                let src = rgb_gradient(w, h);
+                let ours = gamut_encode(mode, &src, w, h, q, 0);
+                let theirs = oracle_encode(mode, &src, w, h, i32::from(q), 0, false, false);
+                let ours = libjpeg_oracle::decode(&ours).expect("decode gamut stream");
+                let theirs = libjpeg_oracle::decode(&theirs).expect("decode libjpeg stream");
+                let gap = psnr(diff_stats(&theirs.pixels, &src).1)
+                    - psnr(diff_stats(&ours.pixels, &src).1);
+                worst_gap = worst_gap.max(gap);
+            }
+        }
+        // Measured worst gap per mode over DIMS × q{50,75,90}: 4:4:4 0.62 dB, 4:2:2 1.33 dB
+        // (8×8 q75, the battery's worst), 4:2:0 0.61 dB, 4:4:0 0.41 dB. One margin for all.
+        assert!(
+            worst_gap <= 2.0,
+            "{mode:?}: gamut trails libjpeg-turbo's own encode by {worst_gap:.2} dB"
+        );
+    }
 }
 
 #[test]
@@ -312,12 +377,12 @@ fn encode_q90_is_tight_against_source() {
 fn encode_cross_parity_gamut_vs_libjpeg() {
     // Same gamut stream, decoded by gamut and by libjpeg-turbo. For gray/4:4:4 (no upsampling-filter
     // divergence) both decoders run the same integer IDCT, so the decodes are identical. For 4:2:0
-    // the upsampling filters legitimately differ (gamut = replication, libjpeg = fancy/triangle), so
+    // and 4:4:0 the upsampling filters legitimately differ (gamut = replication, libjpeg = fancy/triangle), so
     // only a PSNR floor is asserted.
     let mut worst_tight = 0u8;
-    let mut worst_420_mse = 0f64;
+    let mut worst_sub_mse = 0f64;
     for &(w, h) in &[(16u32, 16u32), (33, 31), (64, 48)] {
-        for mode in [Mode::Gray, Mode::C444, Mode::C420] {
+        for mode in [Mode::Gray, Mode::C444, Mode::C420, Mode::C440] {
             let src = if matches!(mode, Mode::Gray) {
                 gray_gradient(w, h)
             } else {
@@ -330,18 +395,18 @@ fn encode_cross_parity_gamut_vs_libjpeg() {
             if mode.upsampling_matches() {
                 worst_tight = worst_tight.max(max);
             } else {
-                worst_420_mse = worst_420_mse.max(mse);
+                worst_sub_mse = worst_sub_mse.max(mse);
             }
         }
     }
-    // gray/444 decode-vs-decode: exact (max-diff 0; it was 2 under the f64 reference IDCT). 4:2:0
-    // PSNR measured 35.22 dB (bounded by the replication-vs-fancy upsampling divergence), asserted
-    // with margin.
+    // gray/444 decode-vs-decode: exact (max-diff 0; it was 2 under the f64 reference IDCT).
+    // Subsampled PSNR measured 35.22 dB (4:2:0 16×16; 4:4:0's worst is 38.23 dB), bounded by the
+    // replication-vs-fancy upsampling divergence, asserted with margin.
     assert_eq!(worst_tight, 0, "gray/444 parity max-diff {worst_tight}");
     assert!(
-        psnr(worst_420_mse) > 32.0,
-        "4:2:0 parity PSNR {:.2} dB",
-        psnr(worst_420_mse)
+        psnr(worst_sub_mse) > 32.0,
+        "subsampled parity PSNR {:.2} dB",
+        psnr(worst_sub_mse)
     );
 }
 
