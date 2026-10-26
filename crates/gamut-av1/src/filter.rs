@@ -12,9 +12,10 @@
 //! minimum transform width across the edge: 4 (narrow, §7.14.6.3) for any edge touching a 4×4
 //! transform, 8 (wide, §7.14.6.4 `log2Size = 3`) for an 8↔8 edge, and 16 (wide, §7.14.6.4
 //! `log2Size = 4`) for a 16↔16 luma edge. The frame is a single intra key-frame with one segment,
-//! `loop_filter_sharpness = 0`, and `loop_filter_delta_enabled = 0`; `delta_lf_present = 1`, so the
-//! level is the frame `loop_filter_level` plus a per-superblock `DeltaLF` (each edge takes the level
-//! of its q0-side block, §7.14.4 — the same `loop_filter_level` for both luma passes and chroma).
+//! `loop_filter_sharpness = 0`, and `loop_filter_delta_enabled = 0`. The level is the frame
+//! `loop_filter_level` plus a per-superblock `DeltaLF` (each edge takes the level of its q0-side
+//! block, §7.14.4 — the same `loop_filter_level` for both luma passes and chroma); `DeltaLF` is 0
+//! everywhere except under the crate's test-only block-variation exercise (`delta_lf_present = 1`).
 //!
 //! CDEF: a single signaled strength set (`cdef_bits = 0`) is applied to every 8×8 block; the
 //! per-block `cdef_idx` is `L(0)` (no tile bits). For 4:4:4, chroma shares the luma grid and
