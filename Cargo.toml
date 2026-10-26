@@ -37,6 +37,7 @@ exclude = [
     "tooling/zlib-oracle",
     "tooling/libpng-oracle",
     "tooling/libjpeg-oracle",
+    "tooling/jpegli-oracle",
     "tooling/exiv2-oracle",
     "tooling/libheif-oracle",
     # Dev-only perceptual-metric oracle (issue #972): SSIMULACRA 2 scores for gamut-jpeg's quality

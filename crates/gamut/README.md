@@ -41,7 +41,7 @@ consumers depend on:
 | `isobmff`    | ISOBMFF/HEIF still-image container primitive (`gamut-isobmff`)           |
 | `metadata`   | Metadata facade + primitives (`gamut-metadata` + `exif`/`xmp`/`icc`/`iptc`/`ifd`) |
 | `exif-describe` | `metadata` plus EXIF tag-value descriptions (`gamut_metadata::exif::describe`, via `gamut-metadata/exif-describe`) |
-| `cmm`        | ICC colour management module over `gamut-icc` profiles (`gamut-cmm`)     |
+| `cmm`        | ICC colour management module over `gamut-icc` profiles (`gamut-cmm`); with `jpeg`, also `JpegDecoder::decode_srgb` |
 | `tonemap`    | Scalar tone-mapping curves for HDR→SDR (`gamut-tonemap`)                 |
 | `primitives` | Re-export `color` / `dsp` / `bitstream` for tooling                      |
 | `codec-abi`  | Shared codestream-backend seam for backend implementors (`gamut-codec-abi`) |
