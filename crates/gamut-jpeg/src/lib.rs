@@ -25,9 +25,9 @@
 //! This crate is a JPEG **encoder + decoder** (unlike the workspace's encoder-only PNG crate — JPEG
 //! is a two-way format). It ships a **baseline (SOF0) sequential and progressive (SOF2) 8-bit DCT
 //! Huffman encoder**, and a **decoder for the sequential and progressive processes**. The encoder
-//! writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 subsampling, standard (Annex K) tables
-//! — or, with [`JpegEncoder::with_optimized_tables`], tables fitted to the image's own symbol
-//! statistics (Annex K.2), a few percent smaller for the same decoded pixels —
+//! writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 / 4:4:0 subsampling, standard
+//! (Annex K) tables — or, with [`JpegEncoder::with_optimized_tables`], tables fitted to the
+//! image's own symbol statistics (Annex K.2), a few percent smaller for the same decoded pixels —
 //! a quality→quantization mapping (or caller-supplied [`QuantTables`] via
 //! [`JpegEncoder::with_quant_tables`]), opt-in rate–distortion optimized coefficient selection
 //! ([`JpegEncoder::with_rd_optimization`]: per-block AC trellis, optionally with per-block

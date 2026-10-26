@@ -36,8 +36,10 @@ const MAX_DIMENSION: u32 = u16::MAX as u32;
 /// Chroma subsampling mode for YCbCr (colour) encoding: the ratio at which the Cb/Cr planes are
 /// sampled relative to luma. Ignored for grayscale, which has a single component.
 ///
-/// Named for the conventional `J:a:b` notation. The luma sampling factors are `1×1` (4:4:4),
-/// `2×1` (4:2:2), or `2×2` (4:2:0); chroma is always `1×1`.
+/// Named for the conventional `J:a:b` notation. The luma sampling factors `H×V` are `1×1` (4:4:4),
+/// `2×1` (4:2:2), `2×2` (4:2:0), or `1×2` (4:4:0); chroma is always `1×1`. T.81 §B.2.2 (Table B.2)
+/// admits any factor in `1..=4` per component, so each grid is a choice the format leaves to the
+/// encoder; all four fit the §B.2.3 limit of ten data units per MCU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChromaSubsampling {
@@ -48,6 +50,11 @@ pub enum ChromaSubsampling {
     /// 4:2:0 — Cb/Cr subsampled 2:1 both horizontally and vertically (the common photographic
     /// default; T.871 §9 NOTE 3 names it the most common form).
     Ycbcr420,
+    /// 4:4:0 — Cb/Cr subsampled 2:1 vertically only (luma `1×2`): the transpose of 4:2:2, and
+    /// libjpeg-turbo's `TJSAMP_440`. T.871 §9 NOTE 3 discourages forms other than 4:2:0 for JFIF
+    /// because some applications may not support them; a T.81 decoder such as libjpeg-turbo reads
+    /// it.
+    Ycbcr440,
 }
 
 impl ChromaSubsampling {
@@ -58,6 +65,7 @@ impl ChromaSubsampling {
             ChromaSubsampling::Ycbcr444 => (1, 1),
             ChromaSubsampling::Ycbcr422 => (2, 1),
             ChromaSubsampling::Ycbcr420 => (2, 2),
+            ChromaSubsampling::Ycbcr440 => (1, 2),
         }
     }
 }

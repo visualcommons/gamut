@@ -194,6 +194,39 @@ int oracle_jpeg_read_app1(const unsigned char *data, size_t len, unsigned char *
   return 0;
 }
 
+/* Reads the per-component sampling factors libjpeg-turbo parsed from the frame header, in frame
+ * order. Only the header is parsed; no pixels are decoded. `h`/`v` hold `cap` entries; at most
+ * `cap` are written, and `*out_components` receives the frame's component count either way.
+ *
+ * Returns 0 on success, 1 on a libjpeg error. */
+int oracle_jpeg_sampling_factors(const unsigned char *data, size_t len, unsigned char *h,
+                                 unsigned char *v, unsigned int cap,
+                                 unsigned int *out_components) {
+  struct jpeg_decompress_struct cinfo;
+  struct oracle_error_mgr jerr;
+
+  cinfo.err = jpeg_std_error(&jerr.pub);
+  jerr.pub.error_exit = oracle_error_exit;
+  jerr.pub.emit_message = oracle_emit_message;
+  if (setjmp(jerr.setjmp_buffer)) {
+    jpeg_destroy_decompress(&cinfo);
+    return 1;
+  }
+
+  jpeg_create_decompress(&cinfo);
+  jpeg_mem_src(&cinfo, data, (unsigned long)len);
+  jpeg_read_header(&cinfo, TRUE);
+
+  unsigned int n = (unsigned int)cinfo.num_components;
+  for (unsigned int i = 0; i < n && i < cap; i++) {
+    h[i] = (unsigned char)cinfo.comp_info[i].h_samp_factor;
+    v[i] = (unsigned char)cinfo.comp_info[i].v_samp_factor;
+  }
+  *out_components = n;
+  jpeg_destroy_decompress(&cinfo);
+  return 0;
+}
+
 /* oracle_jpeg_encode plus embedded metadata: an optional raw APP1 payload (written verbatim via
  * jpeg_write_marker, e.g. "Exif\0\0" + TIFF) and an optional ICC profile (written via
  * jpeg_write_icc_profile, which produces the APP2 ICC_PROFILE chunk sequence).
@@ -275,8 +308,8 @@ int oracle_jpeg_encode_meta(const unsigned char *pixels, unsigned int width, uns
 /* Encodes interleaved 8-bit `pixels` (RGB when gray==0, grayscale when gray!=0) to a JPEG.
  *
  * `quality` is applied with force_baseline=TRUE. `h_samp`/`v_samp` set the luma sampling factors
- * (chroma stays 1x1): 1,1 = 4:4:4, 2,1 = 4:2:2, 2,2 = 4:2:0. `progressive` selects a default
- * progressive script; `restart_interval` and `optimize_coding` map to the like-named cinfo fields.
+ * (chroma stays 1x1): 1,1 = 4:4:4, 2,1 = 4:2:2, 2,2 = 4:2:0, 1,2 = 4:4:0. `progressive` selects a
+ * default progressive script; `restart_interval` and `optimize_coding` map to the like-named cinfo fields.
  *
  * Returns 0 on success (and fills a malloc'd `*out`), 1 on a libjpeg error. */
 int oracle_jpeg_encode(const unsigned char *pixels, unsigned int width, unsigned int height,

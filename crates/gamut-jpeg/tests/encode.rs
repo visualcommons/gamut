@@ -306,6 +306,7 @@ fn luma_max(s: ChromaSubsampling) -> (u32, u32) {
         ChromaSubsampling::Ycbcr444 => (1, 1),
         ChromaSubsampling::Ycbcr422 => (2, 1),
         ChromaSubsampling::Ycbcr420 => (2, 2),
+        ChromaSubsampling::Ycbcr440 => (1, 2),
         _ => unreachable!(),
     }
 }
@@ -317,6 +318,7 @@ fn dimension_and_subsampling_battery() {
         ChromaSubsampling::Ycbcr444,
         ChromaSubsampling::Ycbcr422,
         ChromaSubsampling::Ycbcr420,
+        ChromaSubsampling::Ycbcr440,
     ];
     for &(w, h) in &dims {
         for &restart in &[0u16, 1, 3] {
