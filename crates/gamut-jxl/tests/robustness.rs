@@ -86,6 +86,63 @@ fn signatures_followed_by_garbage_error() {
     }
 }
 
+/// Five bytes — a codestream signature and a size header declaring 9717 × 8098 — that the
+/// best-effort path otherwise answers with a zero-filled ~314 MB `HeaderOnly` raster (#1026).
+const HEADER_ONLY_9717X8098: [u8; 5] = [0xFF, 0x0A, 0x0A, 0xFD, 0x1A];
+
+/// Decodes `data` best-effort as `Rgba8` through `decoder`, returning only the error.
+fn partial_error(decoder: &JxlDecoder, data: &[u8]) -> gamut_core::Error {
+    <JxlDecoder as DecodePartialImage<Rgba8>>::decode_partial_image(decoder, data)
+        .map(|_| ())
+        .expect_err("the caller's limit must refuse the stream")
+}
+
+#[test]
+fn caller_limits_refuse_a_stream_truncated_after_its_headers() {
+    // The stream really declares those dimensions: the header parser reads them back.
+    let info = JxlDecoder::new()
+        .info(&HEADER_ONLY_9717X8098)
+        .expect("the size header parses");
+    assert_eq!(
+        (info.dimensions.width, info.dimensions.height),
+        (9717, 8098)
+    );
+
+    let size = |message: &str, error: gamut_core::Error| {
+        assert_eq!(
+            error.kind(),
+            gamut_core::ErrorKind::Unsupported,
+            "{message}"
+        );
+        error.static_message()
+    };
+    // Either side over its cap is refused on its own.
+    let narrow = JxlDecoder::new().with_max_dimensions(9716, 8098);
+    assert_eq!(
+        size("width", partial_error(&narrow, &HEADER_ONLY_9717X8098)),
+        Some("JXL: image exceeds the dimension limit")
+    );
+    let short = JxlDecoder::new().with_max_dimensions(9717, 8097);
+    assert_eq!(
+        size("height", partial_error(&short, &HEADER_ONLY_9717X8098)),
+        Some("JXL: image exceeds the dimension limit")
+    );
+    // A byte budget well under the declared raster is refused too.
+    let budget = JxlDecoder::new().with_max_image_bytes(1 << 20);
+    assert_eq!(
+        size("bytes", partial_error(&budget, &HEADER_ONLY_9717X8098)),
+        Some("JXL: image exceeds the size limit")
+    );
+    // The rejecting path refuses on the limit too, not on the truncation it would otherwise
+    // report.
+    let error = <JxlDecoder as DecodeImage<Rgba8>>::decode_image(&budget, &HEADER_ONLY_9717X8098)
+        .expect_err("the limit refuses the full decode as well");
+    assert_eq!(
+        error.static_message(),
+        Some("JXL: image exceeds the size limit")
+    );
+}
+
 /// The stream-producing corpus: everything that first encodes a real JPEG XL stream (via libjxl) and
 /// then feeds a mangled version of it to the decoder.
 #[cfg(all(
@@ -93,7 +150,10 @@ fn signatures_followed_by_garbage_error() {
     any(not(target_arch = "wasm32"), target_os = "emscripten")
 ))]
 mod with_streams {
-    use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Pixel, Rgb8, Rgba8};
+    use gamut_core::convert::ConvertPolicy;
+    use gamut_core::{
+        DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Pixel, Rgb8, Rgba8,
+    };
     use gamut_jxl::{Container, DecodePartialImage, Effort, JxlDecoder, JxlEncoder};
 
     use super::{decode_rgba8, decode_rgba8_partial};
@@ -197,6 +257,79 @@ mod with_streams {
         }
     }
 
+    /// A small lossless bare codestream of layout `P` (16×16, textured).
+    fn codestream_of<P: Pixel<Sample = u8> + std::fmt::Debug>() -> Vec<u8>
+    where
+        JxlEncoder: EncodeImage<P>,
+    {
+        let (w, h) = (16u32, 16u32);
+        let px = gen_u8(w, h, P::CHANNELS);
+        let img = ImageRef::<P>::new(&px, Dimensions::new(w, h).unwrap()).unwrap();
+        JxlEncoder::lossless().encode_to_vec(img).unwrap()
+    }
+
+    #[test]
+    fn dimension_caps_admit_their_exact_bound() {
+        let stream = valid_codestream();
+        let at = JxlDecoder::new().with_max_dimensions(16, 16);
+        let image = <JxlDecoder as DecodeImage<Rgb8>>::decode_image(&at, &stream)
+            .expect("an image exactly at the caps decodes");
+        assert_eq!(image.dimensions(), Dimensions::new(16, 16).unwrap());
+        for (w, h) in [(15, 16), (16, 15)] {
+            let under = JxlDecoder::new().with_max_dimensions(w, h);
+            let err = <JxlDecoder as DecodeImage<Rgb8>>::decode_image(&under, &stream)
+                .expect_err("one pixel over a cap is refused");
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                err.static_message(),
+                Some("JXL: image exceeds the dimension limit")
+            );
+        }
+    }
+
+    /// Asserts `budget` bytes decode `stream` as `P` under `policy` and `budget - 1` are refused.
+    fn assert_byte_budget_is_exact<P: Pixel>(stream: &[u8], policy: ConvertPolicy, budget: usize)
+    where
+        JxlDecoder: DecodeImage<P>,
+    {
+        let decoder = JxlDecoder::new().with_convert_policy(policy);
+        let at = decoder.clone().with_max_image_bytes(budget);
+        assert!(
+            <JxlDecoder as DecodeImage<P>>::decode_image(&at, stream).is_ok(),
+            "{budget} bytes admit the raster"
+        );
+        let under = decoder.with_max_image_bytes(budget - 1);
+        let err = <JxlDecoder as DecodeImage<P>>::decode_image(&under, stream)
+            .map(|_| ())
+            .expect_err("one byte under the raster is refused");
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            err.static_message(),
+            Some("JXL: image exceeds the size limit")
+        );
+    }
+
+    #[test]
+    fn the_byte_budget_weighs_the_requested_layout_when_it_is_wider() {
+        // A grayscale stream widened to RGBA: the requested 4 bytes per pixel are what is budgeted.
+        assert_byte_budget_is_exact::<Rgba8>(
+            &codestream_of::<Gray8>(),
+            ConvertPolicy::lossless(),
+            16 * 16 * 4,
+        );
+    }
+
+    #[test]
+    fn the_byte_budget_weighs_the_stream_layout_when_it_is_wider() {
+        // An RGBA stream whose alpha a permissive policy drops: the stream's 4 bytes per pixel are
+        // decoded before the 3-byte result exists, so they are what is budgeted.
+        assert_byte_budget_is_exact::<Rgb8>(
+            &codestream_of::<Rgba8>(),
+            ConvertPolicy::permissive(),
+            16 * 16 * 4,
+        );
+    }
+
     #[test]
     fn oversized_dimensions_trigger_the_pixel_limit() {
         // Honestly provoke the decoder's pixel-limit guard: encode a real 10000×10000 grayscale image
@@ -213,6 +346,17 @@ mod with_streams {
             .with_effort(Effort::Lightning)
             .encode_to_vec(img)
             .unwrap();
+
+        // The caller's caps only tighten: the most permissive settings leave the fixed ceiling.
+        let wide_open = JxlDecoder::new()
+            .with_max_dimensions(u32::MAX, u32::MAX)
+            .with_max_image_bytes(usize::MAX);
+        let err = <JxlDecoder as DecodeImage<Rgba8>>::decode_image(&wide_open, &bytes)
+            .expect_err("the pixel limit is not raised by the caller's caps");
+        assert_eq!(
+            err.static_message(),
+            Some("JXL: image exceeds the decoder pixel limit")
+        );
 
         let err = decode_rgba8(&bytes).expect_err("oversized image must be rejected");
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
