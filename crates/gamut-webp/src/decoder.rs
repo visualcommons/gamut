@@ -10,6 +10,11 @@
 //! other gamut decoder. Decoding a genuinely transparent file to [`Rgb8`](gamut_core::Rgb8) would
 //! discard the alpha channel, so it is refused unless
 //! [`WebpDecoder::convert_policy`] permits it.
+//!
+//! Every decode is bounded by caller-set resource limits
+//! ([`with_max_dimensions`](WebpDecoder::with_max_dimensions),
+//! [`with_max_image_bytes`](WebpDecoder::with_max_image_bytes)), checked against the bitstream's
+//! own header before any frame-sized allocation and before any backend is offered the job.
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -28,6 +33,19 @@ use crate::backend::{
 };
 use crate::vp8l::decoder::{argb_to_rgb8, argb_to_rgba8, decode as decode_vp8l};
 
+/// Default cap on the decoded frame: 64 MiB, a 4096×4096 frame at four bytes per pixel — the same
+/// budget, and the same image, as `gamut-png`'s `PngDecoder` default.
+const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
+
+/// The format's own dimension bound: VP8L codes `width - 1` and `height - 1` in 14 bits each
+/// (RFC 9649 §3.2), so no WebP bitstream declares a side above 16384; a VP8 key frame's 14-bit
+/// fields stop one short of it (RFC 6386 §9.1).
+const FORMAT_MAX_DIMENSION: u32 = 1 << 14;
+
+/// Bytes the budget charges per pixel: the 8-bit RGBA frame, the widest layout a WebP decodes to and
+/// the size of the VP8L decoder's own ARGB working buffer.
+const BUDGET_BYTES_PER_PIXEL: u64 = 4;
+
 /// Decodes a WebP file to interleaved 8-bit RGB.
 ///
 /// gamut ships its own decoder because every WebP decoder in the Rust ecosystem ultimately wraps
@@ -36,28 +54,104 @@ use crate::vp8l::decoder::{argb_to_rgb8, argb_to_rgba8, decode as decode_vp8l};
 /// [`push_backend`](Self::push_backend) — a hardware VP8 decoder, say; with none installed (the
 /// default) the crate's own `vp8`/`vp8l` decoders run. See [`crate::backend`] for the fallback
 /// contract.
-#[derive(Clone, Default)]
+///
+/// # Resource limits
+///
+/// A WebP's few header bytes can declare a 16384×16384 frame — 1 GiB of RGBA — so the decoder
+/// bounds what it will decode. The defaults accept every dimension the format allows but cap the
+/// decoded frame at 64 MiB ([`with_max_image_bytes`](Self::with_max_image_bytes)); tighten the
+/// dimension caps with [`with_max_dimensions`](Self::with_max_dimensions) when the application
+/// knows its domain. Both are checked against the `VP8 ` key-frame or `VP8L` header before any
+/// frame-sized allocation, and before any [backend](Self::push_backend) is offered the job; a file
+/// over either limit is refused with [`Error::Unsupported`].
+#[derive(Clone)]
 pub struct WebpDecoder {
     /// Pluggable codestream decoders, tried in push order ahead of the built-in tails.
     backends: Vec<SharedDecoder>,
     /// Which lossy layout conversions a typed decode may perform.
     policy: ConvertPolicy,
+    /// The widest frame accepted, in pixels.
+    max_width: u32,
+    /// The tallest frame accepted, in pixels.
+    max_height: u32,
+    /// The largest decoded frame accepted, in bytes at four bytes per pixel.
+    max_image_bytes: usize,
+}
+
+impl Default for WebpDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl fmt::Debug for WebpDecoder {
-    /// Renders the number of installed backends (a backend need not be `Debug`).
+    /// Renders the number of installed backends (a backend need not be `Debug`) and the limits.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebpDecoder")
             .field("backends", &self.backends.len())
-            .finish()
+            .field("max_width", &self.max_width)
+            .field("max_height", &self.max_height)
+            .field("max_image_bytes", &self.max_image_bytes)
+            .finish_non_exhaustive()
     }
 }
 
 impl WebpDecoder {
-    /// Creates a decoder with the default configuration.
+    /// Creates a decoder with the default configuration: no backends, the lossless
+    /// [`ConvertPolicy`], format-maximum dimensions and a 64 MiB decoded-frame budget.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            backends: Vec::new(),
+            policy: ConvertPolicy::default(),
+            max_width: FORMAT_MAX_DIMENSION,
+            max_height: FORMAT_MAX_DIMENSION,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+        }
+    }
+
+    /// Caps the accepted frame dimensions; a wider or taller frame is refused with
+    /// [`Error::Unsupported`] before any allocation. The default is the format's own bound, 16384
+    /// on each side.
+    #[must_use]
+    pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
+        self.max_width = width;
+        self.max_height = height;
+        self
+    }
+
+    /// Caps the decoded frame in bytes (default 64 MiB), refusing a larger one with
+    /// [`Error::Unsupported`] before any allocation.
+    ///
+    /// The frame is charged at **four bytes per pixel** (`width × height × 4`, the 8-bit RGBA
+    /// frame) whatever the file turns out to hold: whether a lossless image is opaque is known
+    /// only after it is decoded, and the limit has to be decided from the header alone. So the
+    /// budget a caller sets admits the same frames whether they are later presented as
+    /// [`Rgb8`] or [`Rgba8`].
+    #[must_use]
+    pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
+        self.max_image_bytes = bytes;
+        self
+    }
+
+    /// Enforces the dimension and byte-budget limits against the frame a codestream header declares.
+    fn check_limits(&self, dims: Dimensions) -> Result<()> {
+        if dims.width > self.max_width || dims.height > self.max_height {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "WebP: image exceeds the dimension limit",
+            ));
+        }
+        // Two `u32` sides times four cannot overflow `u64`, and `usize` widens into `u64` losslessly
+        // on every target Rust supports, so the comparison is exact.
+        let bytes = u64::from(dims.width) * u64::from(dims.height) * BUDGET_BYTES_PER_PIXEL;
+        if bytes > self.max_image_bytes as u64 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "WebP: image exceeds the size limit",
+            ));
+        }
+        Ok(())
     }
 
     /// Installs a codestream decoder backend, returning `&mut self` so pushes chain.
@@ -78,13 +172,22 @@ impl WebpDecoder {
     /// Decodes one codestream `payload` through the registry, falling back to the built-in decoder
     /// when every backend declines (or when the codestream header cannot even be peeked, in which
     /// case the built-in decoder reports the parse error).
+    ///
+    /// The resource limits are enforced here, on the peeked header, ahead of every decoder. A
+    /// header that cannot be peeked is one both built-in decoders reject while reading it —
+    /// [`peek_dimensions`] runs their own header readers — so it never reaches a frame-sized
+    /// allocation unchecked.
     fn decode_codestream(
         &self,
         codestream: WebpCodestream,
         payload: &[u8],
     ) -> Result<DecodedRaster> {
+        let peeked = peek_dimensions(codestream, payload);
+        if let Some(dims) = peeked {
+            self.check_limits(dims)?;
+        }
         if !self.backends.is_empty()
-            && let Some(dims) = peek_dimensions(codestream, payload)
+            && let Some(dims) = peeked
             && let Some(result) = dispatch_decode(
                 &self.backends,
                 &CodestreamInfo::new(codestream, dims),
@@ -251,6 +354,17 @@ mod tests {
         write_simple_prefix_code(&mut w, &[0xff]); // alpha (opaque)
         write_simple_prefix_code(&mut w, &[0]); // distance (unused)
         write_simple_lossless(&w.finish()).unwrap()
+    }
+
+    #[test]
+    fn debug_renders_the_backend_count_and_the_limits() {
+        let decoder = WebpDecoder::new()
+            .with_max_dimensions(3, 5)
+            .with_max_image_bytes(7);
+        assert_eq!(
+            format!("{decoder:?}"),
+            "WebpDecoder { backends: 0, max_width: 3, max_height: 5, max_image_bytes: 7, .. }"
+        );
     }
 
     #[test]
