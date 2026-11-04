@@ -62,7 +62,10 @@
 //! surfaces while the planar surface still delivers the samples.
 
 use gamut_av1::SequenceHeader;
-use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, YcbcrMatrix, ycbcr_to_rgb};
+use gamut_color::upsample::{libavif, taps};
+use gamut_color::{
+    BitDepth, ChromaUpsampling, ColorRange, MatrixCoefficients, YcbcrMatrix, ycbcr_to_rgb,
+};
 use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8, Rgba16};
 use gamut_isobmff::ColourInformation;
 
@@ -209,6 +212,42 @@ impl DecodeLimits {
             return Err(Error::unsupported(env!("CARGO_PKG_NAME"), PIXEL_LIMIT));
         }
         Ok(())
+    }
+}
+
+/// Options for the RGBA presentation surfaces: the [`DecodeLimits`] the decode runs under and the
+/// [`ChromaUpsampling`] its colour conversion uses.
+///
+/// [`DecodeOptions::default`] is what the plain surfaces
+/// ([`decode_item_rgba8`](AvifImage::decode_item_rgba8) and its siblings) use: the default limits
+/// and [`ChromaUpsampling::Interpolated`], which matches libavif's default conversion. Pass one to
+/// the `*_with_options` surfaces to change either. The struct is `#[non_exhaustive]` so a further
+/// option can be added without a breaking change. Build it from the default with the `with_*`
+/// methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct DecodeOptions {
+    /// The size and work caps the decode runs under. Default [`DecodeLimits::default`].
+    pub limits: DecodeLimits,
+    /// How 4:2:0 and 4:2:2 chroma is reconstructed before colour conversion. Default
+    /// [`ChromaUpsampling::Interpolated`].
+    pub chroma_upsampling: ChromaUpsampling,
+}
+
+impl DecodeOptions {
+    /// These options with the limits replaced.
+    #[must_use]
+    pub const fn with_limits(self, limits: DecodeLimits) -> Self {
+        Self { limits, ..self }
+    }
+
+    /// These options with the chroma upsampling replaced.
+    #[must_use]
+    pub const fn with_chroma_upsampling(self, chroma_upsampling: ChromaUpsampling) -> Self {
+        Self {
+            chroma_upsampling,
+            ..self
+        }
     }
 }
 
@@ -494,11 +533,14 @@ impl AvifImage {
     ///   `bit_depth > 8` frame is too: narrowing it would trade an honest error for silent quality
     ///   loss, so use [`decode_item_rgba16`](Self::decode_item_rgba16) instead.
     ///
-    /// **Which conversion runs.** BT.601 at 8 bits uses [`gamut_color::ycbcr_to_rgb`], gamut-color's
-    /// libwebp-exact integer inverse; **every other (matrix, depth) pair** uses the H.273-derived
-    /// bit-depth-generic [`YcbcrMatrix`]. The two agree to within a rounding unit — the split exists
-    /// so the 8-bit BT.601 output this crate has always produced, which the libavif differential
-    /// bound pins, stays byte-identical.
+    /// **Which conversion runs.** Interpolated 4:2:0 or 4:2:2 chroma (the default, see below)
+    /// always goes through the H.273-derived, bit-depth-generic [`YcbcrMatrix`], with the
+    /// interpolated chroma kept to sixteenths of a code value
+    /// ([`YcbcrMatrix::to_rgb_sixteenths`]). Otherwise, that is at 4:4:4 or under
+    /// [`ChromaUpsampling::Nearest`], BT.601 at 8 bits uses [`gamut_color::ycbcr_to_rgb`],
+    /// gamut-color's libwebp-exact integer inverse, and **every other (matrix, depth) pair** uses
+    /// [`YcbcrMatrix`]. The two agree to within a rounding unit. The split exists so the 8-bit
+    /// BT.601 output this crate has always produced on those paths stays byte-identical.
     ///
     /// **Missing `colr`.** AVIF v1.2.0 §2.2.1 defers an item without a `colr` to the AV1 sequence
     /// header's `color_config`, and so does this surface: `matrix_coefficients` and `color_range`
@@ -509,9 +551,16 @@ impl AvifImage {
     /// including when the two disagree. A sequence header that does not parse is an error here,
     /// never a guessed default; the planar surface still delivers the samples.
     ///
-    /// **Chroma upsampling** is nearest-neighbour, co-sited (4:2:0 / 4:2:2 → 4:4:4) — the
-    /// deliberate space/time tradeoff for a container-layer presentation helper; a caller wanting
-    /// a better resampler works from the planar surface.
+    /// **Chroma upsampling** (4:2:0 / 4:2:2 → 4:4:4) defaults to
+    /// [`ChromaUpsampling::Interpolated`]: libavif's own bilinear filter
+    /// ([`gamut_color::upsample::libavif`]), which is what libavif applies by default when built
+    /// without libyuv. Each pixel weighs its four nearest chroma samples 9/3/3/1 (3/1 along the
+    /// row at 4:2:2), treats chroma as centred between luma samples, and repeats edge samples.
+    /// libavif ignores the sequence header's `chroma_sample_position` here, and so does this
+    /// surface. [`ChromaUpsampling::Nearest`], selected through
+    /// [`decode_item_rgba8_with_options`](Self::decode_item_rgba8_with_options), replicates each
+    /// chroma sample instead. libyuv-enabled libavif builds convert with libyuv's own fixed-point
+    /// arithmetic, which this surface does not reproduce.
     ///
     /// **Alpha.** The item's alpha auxiliary (if any) is decoded through the same planar path and
     /// must match the master's **pre-transform** dimensions; its **luma plane** supplies the
@@ -557,8 +606,27 @@ impl AvifImage {
         decoder: &mut dyn Av1StillDecoder,
         limits: DecodeLimits,
     ) -> Result<ImageBuf<Rgba8>> {
+        self.decode_item_rgba8_with_options(
+            id,
+            decoder,
+            DecodeOptions::default().with_limits(limits),
+        )
+    }
+
+    /// [`decode_item_rgba8`](Self::decode_item_rgba8) under caller-chosen [`DecodeOptions`]: its
+    /// limits and its chroma upsampling.
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba8`](Self::decode_item_rgba8), with `options.limits` as the budget.
+    pub fn decode_item_rgba8_with_options(
+        &self,
+        id: u32,
+        decoder: &mut dyn Av1StillDecoder,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba8>> {
         let mut walk = Walk::default();
-        let (rgba, dims) = self.decode_rgba_inner::<u8>(id, decoder, &mut walk, limits)?;
+        let (rgba, dims) = self.decode_rgba_inner::<u8>(id, decoder, &mut walk, options)?;
         ImageBuf::<Rgba8>::new(rgba, dims)
     }
 
@@ -587,6 +655,20 @@ impl AvifImage {
         limits: DecodeLimits,
     ) -> Result<ImageBuf<Rgba8>> {
         self.decode_item_rgba8_with_limits(self.as_isobmff().primary_item_id, decoder, limits)
+    }
+
+    /// [`decode_primary_rgba8`](Self::decode_primary_rgba8) under caller-chosen
+    /// [`DecodeOptions`].
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba8`](Self::decode_item_rgba8), with `options.limits` as the budget.
+    pub fn decode_primary_rgba8_with_options(
+        &self,
+        decoder: &mut dyn Av1StillDecoder,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.decode_item_rgba8_with_options(self.as_isobmff().primary_item_id, decoder, options)
     }
 
     /// Decodes an item to a presentation-ready **high-bit-depth** [`ImageBuf<Rgba16>`]: the same
@@ -640,8 +722,27 @@ impl AvifImage {
         decoder: &mut dyn Av1StillDecoder,
         limits: DecodeLimits,
     ) -> Result<ImageBuf<Rgba16>> {
+        self.decode_item_rgba16_with_options(
+            id,
+            decoder,
+            DecodeOptions::default().with_limits(limits),
+        )
+    }
+
+    /// [`decode_item_rgba16`](Self::decode_item_rgba16) under caller-chosen [`DecodeOptions`]:
+    /// its limits and its chroma upsampling.
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba16`](Self::decode_item_rgba16), with `options.limits` as the budget.
+    pub fn decode_item_rgba16_with_options(
+        &self,
+        id: u32,
+        decoder: &mut dyn Av1StillDecoder,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba16>> {
         let mut walk = Walk::default();
-        let (rgba, dims) = self.decode_rgba_inner::<u16>(id, decoder, &mut walk, limits)?;
+        let (rgba, dims) = self.decode_rgba_inner::<u16>(id, decoder, &mut walk, options)?;
         ImageBuf::<Rgba16>::new(rgba, dims)
     }
 
@@ -671,6 +772,20 @@ impl AvifImage {
         limits: DecodeLimits,
     ) -> Result<ImageBuf<Rgba16>> {
         self.decode_item_rgba16_with_limits(self.as_isobmff().primary_item_id, decoder, limits)
+    }
+
+    /// [`decode_primary_rgba16`](Self::decode_primary_rgba16) under caller-chosen
+    /// [`DecodeOptions`].
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba16`](Self::decode_item_rgba16), with `options.limits` as the budget.
+    pub fn decode_primary_rgba16_with_options(
+        &self,
+        decoder: &mut dyn Av1StillDecoder,
+        options: DecodeOptions,
+    ) -> Result<ImageBuf<Rgba16>> {
+        self.decode_item_rgba16_with_options(self.as_isobmff().primary_item_id, decoder, options)
     }
 
     // ---- planar pipeline ---------------------------------------------------------------------
@@ -851,8 +966,9 @@ impl AvifImage {
         id: u32,
         decoder: &mut dyn Av1StillDecoder,
         walk: &mut Walk,
-        limits: DecodeLimits,
+        options: DecodeOptions,
     ) -> Result<(Vec<T>, Dimensions)> {
+        let limits = options.limits;
         let item = self.item(id).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: item id names no item")
         })?;
@@ -866,14 +982,18 @@ impl AvifImage {
         let (rgba, w, h) = if matches!(item.kind(), ItemKind::Overlay) {
             walk.charge_derivation(limits)?;
             enter_derivation(&mut walk.stack, id)?;
-            let composited = self.composite_overlay(id, item, decoder, walk, limits);
+            let composited = self.composite_overlay(id, item, decoder, walk, options);
             walk.stack.pop();
             composited?
         } else {
             // The planar path applies its own cycle/depth guard for `id`, and its own limits: a
             // frame it returns is within them, so the RGBA buffer sized from it is too.
             let frame = self.decode_planar_inner(id, decoder, walk, limits)?;
-            let mut rgba = frame_to_rgba(&frame, self.colour_params(&item)?)?;
+            let mut rgba = frame_to_rgba(
+                &frame,
+                self.colour_params(&item)?,
+                options.chroma_upsampling,
+            )?;
             let (w, h) = (frame.width, frame.height);
             if let Some(alpha) = self.alpha_auxiliary_of(id) {
                 let alpha_frame = self.decode_planar_inner(alpha.id(), decoder, walk, limits)?;
@@ -892,8 +1012,9 @@ impl AvifImage {
         item: AvifItem<'_>,
         decoder: &mut dyn Av1StillDecoder,
         walk: &mut Walk,
-        limits: DecodeLimits,
+        options: DecodeOptions,
     ) -> Result<(Vec<T>, u32, u32)> {
+        let limits = options.limits;
         // `overlay` validates the payload holds exactly one offset per `dimg` reference.
         let overlay = self.overlay(id)?;
         let (ow, oh) = (overlay.output_width, overlay.output_height);
@@ -923,7 +1044,7 @@ impl AvifImage {
             px.copy_from_slice(&fill);
         }
         for (&input_id, &(dx, dy)) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
-            let (src, dims) = self.decode_rgba_inner::<T>(input_id, decoder, walk, limits)?;
+            let (src, dims) = self.decode_rgba_inner::<T>(input_id, decoder, walk, options)?;
             composite_over(
                 &mut canvas,
                 (ow, oh),
@@ -1209,6 +1330,13 @@ impl Converter {
         if matches!(matrix, 2 | 5 | 6) && bit_depth == 8 {
             return Ok(Converter::Bt601Legacy8(range));
         }
+        Self::generic(matrix, range, bit_depth).map(Converter::Generic)
+    }
+
+    /// The H.273 de-matrixing for an nclx `matrix_coefficients` code point at `range` and
+    /// `bit_depth`, whatever the depth, or [`Error::Unsupported`] if this surface does not present
+    /// that combination. Matrix 2 (unspecified) resolves to BT.601, as in [`select`](Self::select).
+    fn generic(matrix: u16, range: ColorRange, bit_depth: u8) -> Result<YcbcrMatrix> {
         let unsupported = || {
             Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -1227,7 +1355,7 @@ impl Converter {
         // `DecodedFrame` admits any depth in 8..=16, but only the CICP-modeled depths have a
         // de-matrixing; an unmodeled depth is an explicit refusal, never a silent reinterpretation.
         let depth = BitDepth::from_bits(u32::from(bit_depth)).ok_or_else(unsupported)?;
-        YcbcrMatrix::new(coefficients, range, depth).map(Converter::Generic)
+        YcbcrMatrix::new(coefficients, range, depth)
     }
 
     /// Converts one triple, returning samples at the **input** depth's scale, so the caller
@@ -1249,6 +1377,7 @@ impl Converter {
 fn frame_to_rgba<T: RgbaSample>(
     frame: &DecodedFrame,
     (matrix, range): (u16, ColorRange),
+    upsampling: ChromaUpsampling,
 ) -> Result<Vec<T>> {
     if frame.bit_depth > T::MAX_CODED_DEPTH {
         return Err(Error::unsupported(env!("CARGO_PKG_NAME"), T::WIDER_SURFACE));
@@ -1295,9 +1424,41 @@ fn frame_to_rgba<T: RgbaSample>(
         return Ok(out);
     }
 
+    let (cw, ch) = frame.chroma.chroma_dimensions(frame.width, frame.height);
+    let (cw, ch) = (cw as usize, ch as usize);
+    if upsampling == ChromaUpsampling::Interpolated && frame.chroma != ChromaFormat::Yuv444 {
+        // libavif's bilinear upsampling, kept in sixteenths through the conversion.
+        let matrix = Converter::generic(matrix, range, frame.bit_depth)?;
+        let (mut cb, mut cr) = (vec![0u32; w], vec![0u32; w]);
+        for (y, line) in out.chunks_exact_mut(w * 4).enumerate() {
+            let (near, far) = match frame.chroma {
+                ChromaFormat::Yuv420 => taps(y, ch),
+                _ => (y, y),
+            };
+            let (n, f) = (near * cw..(near + 1) * cw, far * cw..(far + 1) * cw);
+            libavif::bilinear_row(&frame.cb[n.clone()], &frame.cb[f.clone()], &mut cb);
+            libavif::bilinear_row(&frame.cr[n], &frame.cr[f], &mut cr);
+            let luma = &frame.y[y * w..(y + 1) * w];
+            for (((px, &yy), &cb), &cr) in line
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(luma)
+                .zip(&cb)
+                .zip(&cr)
+            {
+                let (r, g, b) = matrix.to_rgb_sixteenths(yy, cb, cr);
+                *px = [
+                    rescale::<T>(r, max_in),
+                    rescale::<T>(g, max_in),
+                    rescale::<T>(b, max_in),
+                    opaque,
+                ];
+            }
+        }
+        return Ok(out);
+    }
     let converter = Converter::select(matrix, range, frame.bit_depth)?;
-    let (cw, _) = frame.chroma.chroma_dimensions(frame.width, frame.height);
-    let cw = cw as usize;
     for y in 0..h {
         let cy = match frame.chroma {
             ChromaFormat::Yuv420 => y / 2,

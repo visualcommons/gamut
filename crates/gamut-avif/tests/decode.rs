@@ -6,8 +6,8 @@
 //! behind a solid colour. The grid tests compare against independently-written references.
 
 use gamut_avif::{
-    Av1Config, Av1StillDecoder, AvifContainer, AvifImage, ChromaFormat, DecodeLimits, DecodedFrame,
-    ObuType, Subsampling, iter_obus,
+    Av1Config, Av1StillDecoder, AvifContainer, AvifImage, ChromaFormat, ChromaUpsampling,
+    DecodeLimits, DecodeOptions, DecodedFrame, ObuType, Subsampling, iter_obus,
 };
 use gamut_color::{ColorRange, ycbcr_to_rgb};
 use gamut_core::{Error, ErrorKind, Result};
@@ -309,6 +309,19 @@ fn coded_item(
         payload: coded_payload(chroma_idc, bd, base, w, h),
         ..base_item(id, *b"av01")
     }
+}
+
+/// Item `id`'s 8-bit RGBA presentation with nearest-neighbour chroma: the colour-conversion
+/// goldens below compute their expectation from one chroma sample per pixel.
+fn rgba8_nearest(
+    container: &AvifContainer<'_>,
+    id: u32,
+) -> gamut_core::ImageBuf<gamut_core::Rgba8> {
+    let options = DecodeOptions::default().with_chroma_upsampling(ChromaUpsampling::Nearest);
+    container
+        .image()
+        .decode_item_rgba8_with_options(id, &mut Mock::default(), options)
+        .unwrap()
 }
 
 fn file(primary_id: u32, items: Vec<Item>) -> Vec<u8> {
@@ -1312,9 +1325,7 @@ fn bt601_limited_and_full_range_are_golden() {
         let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(6, full)]);
         let bytes = file(1, vec![item]);
         let container = AvifContainer::parse(&bytes).unwrap();
-        let rgba = container
-            .decode_item_rgba8(1, &mut Mock::default())
-            .unwrap();
+        let rgba = rgba8_nearest(&container, 1);
         for y in 0..4u32 {
             for x in 0..4u32 {
                 let (cx, cy) = (x / 2, y / 2);
@@ -1371,9 +1382,7 @@ fn bt709_and_bt2020_are_golden_against_the_h273_matrix() {
             let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(code, full)]);
             let bytes = file(1, vec![item]);
             let container = AvifContainer::parse(&bytes).unwrap();
-            let rgba = container
-                .decode_item_rgba8(1, &mut Mock::default())
-                .unwrap();
+            let rgba = rgba8_nearest(&container, 1);
             for y in 0..4u32 {
                 for x in 0..4u32 {
                     let (cx, cy) = (x / 2, y / 2);
@@ -1565,22 +1574,22 @@ fn high_bit_depth_matches_an_independent_reference() {
             other => panic!("no reference weights for matrix {other}"),
         }
     }
-    fn ref_rgb16(matrix: u16, full: bool, bd: u8, y: u16, cb: u16, cr: u16) -> (u16, u16, u16) {
+    fn ref_rgb16(matrix: u16, full: bool, bd: u8, y: u16, cb: f64, cr: f64) -> (u16, u16, u16) {
         let (kr, kb) = luma_weights(matrix);
         let max_in = f64::from((1u32 << bd) - 1);
         let (yn, cbn, crn) = if full {
             let mid = f64::from(1u32 << (bd - 1));
             (
                 f64::from(y) / max_in,
-                (f64::from(cb) - mid) / max_in,
-                (f64::from(cr) - mid) / max_in,
+                (cb - mid) / max_in,
+                (cr - mid) / max_in,
             )
         } else {
             let s = f64::from(1u32 << (bd - 8));
             (
                 (f64::from(y) - 16.0 * s) / (219.0 * s),
-                (f64::from(cb) - 128.0 * s) / (224.0 * s),
-                (f64::from(cr) - 128.0 * s) / (224.0 * s),
+                (cb - 128.0 * s) / (224.0 * s),
+                (cr - 128.0 * s) / (224.0 * s),
             )
         };
         let kg = 1.0 - kr - kb;
@@ -1595,41 +1604,68 @@ fn high_bit_depth_matches_an_independent_reference() {
         (q(r), q(g), q(b))
     }
 
+    // The chroma under pixel `(x, y)` of a 4x4 4:2:0 frame, as a real-valued sample: the nearest
+    // chroma sample, or libavif's 9/3/3/1 bilinear blend of the four nearest (the adjacent column
+    // and row lie on the far side of the pixel, clamped to the 2x2 plane).
+    fn chroma(plane: impl Fn(u32, u32) -> u16, x: u32, y: u32, interpolated: bool) -> f64 {
+        let (cx, cy) = (x / 2, y / 2);
+        let adjacent = |p: u32, c: u32| {
+            if p.is_multiple_of(2) {
+                c.saturating_sub(1)
+            } else {
+                (c + 1).min(1)
+            }
+        };
+        let s = |cx: u32, cy: u32| f64::from(plane(cx, cy));
+        if interpolated {
+            let (ax, ay) = (adjacent(x, cx), adjacent(y, cy));
+            (9.0 * s(cx, cy) + 3.0 * s(ax, cy) + 3.0 * s(cx, ay) + s(ax, ay)) / 16.0
+        } else {
+            s(cx, cy)
+        }
+    }
+
     // Matrix 6 at 10 bits is load-bearing: it is the pair that must leave the 8-bit libwebp path
     // and take the generic converter.
-    for (matrix, full, bd) in [
-        (1u16, false, 10u8),
-        (6, false, 10),
-        (9, false, 10),
-        (9, true, 10),
-        (1, false, 12),
+    for (matrix, full, bd, upsampling) in [
+        (1u16, false, 10u8, ChromaUpsampling::Nearest),
+        (6, false, 10, ChromaUpsampling::Nearest),
+        (9, false, 10, ChromaUpsampling::Nearest),
+        (9, true, 10, ChromaUpsampling::Nearest),
+        (1, false, 12, ChromaUpsampling::Nearest),
+        (1, false, 10, ChromaUpsampling::Interpolated),
+        (6, true, 10, ChromaUpsampling::Interpolated),
+        (9, false, 12, ChromaUpsampling::Interpolated),
     ] {
         let item = coded_item(1, 1, bd, 200, 4, 4, vec![colr(matrix, full)]);
         let bytes = file(1, vec![item]);
         let container = AvifContainer::parse(&bytes).unwrap();
+        let options = DecodeOptions::default().with_chroma_upsampling(upsampling);
         let got = container
-            .decode_item_rgba16(1, &mut Mock::default())
+            .image()
+            .decode_item_rgba16_with_options(1, &mut Mock::default(), options)
             .unwrap()
             .into_samples();
         // Tolerance is one coded-depth LSB on the 16-bit surface: the surface's precision is
         // inherently that of the coded frame.
         let tol = (65535 / ((1u32 << bd) - 1)) as u16 + 1;
+        let interpolated = upsampling == ChromaUpsampling::Interpolated;
         for y in 0..4u32 {
             for x in 0..4u32 {
-                let (cx, cy) = (x / 2, y / 2);
                 let want = ref_rgb16(
                     matrix,
                     full,
                     bd,
                     ey(200, x, y, bd),
-                    ecb(200, cx, cy, bd),
-                    ecr(200, cx, cy, bd),
+                    chroma(|cx, cy| ecb(200, cx, cy, bd), x, y, interpolated),
+                    chroma(|cx, cy| ecr(200, cx, cy, bd), x, y, interpolated),
                 );
                 let o = ((y * 4 + x) * 4) as usize;
                 for (c, want) in [want.0, want.1, want.2].into_iter().enumerate() {
                     assert!(
                         got[o + c].abs_diff(want) <= tol,
-                        "matrix={matrix} full={full} bd={bd} ({x},{y}) ch{c}: got {} want {want}",
+                        "matrix={matrix} full={full} bd={bd} {upsampling:?} ({x},{y}) ch{c}: got {} \
+                         want {want}",
                         got[o + c]
                     );
                 }
@@ -1686,9 +1722,10 @@ fn eight_bit_widens_exactly_by_257() {
 
 #[test]
 fn bt601_at_eight_bit_still_uses_the_libwebp_inverse() {
-    // The deliberate carve-out: 8-bit BT.601 keeps gamut-color's libwebp-exact integer inverse, so
-    // the output this crate has always produced stays byte-identical. Everything else routes
-    // through the H.273-derived converter.
+    // The deliberate carve-out: off the interpolated path (here, `ChromaUpsampling::Nearest`),
+    // 8-bit BT.601 keeps gamut-color's libwebp-exact integer inverse, so the output this crate has
+    // always produced there stays byte-identical. Everything else routes through the H.273-derived
+    // converter.
     for full in [false, true] {
         let range = if full {
             ColorRange::Full
@@ -1698,9 +1735,7 @@ fn bt601_at_eight_bit_still_uses_the_libwebp_inverse() {
         let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(6, full)]);
         let bytes = file(1, vec![item]);
         let container = AvifContainer::parse(&bytes).unwrap();
-        let rgba = container
-            .decode_item_rgba8(1, &mut Mock::default())
-            .unwrap();
+        let rgba = rgba8_nearest(&container, 1);
         for y in 0..4u32 {
             for x in 0..4u32 {
                 let (cx, cy) = (x / 2, y / 2);
@@ -1870,6 +1905,51 @@ fn decode_primary_rgba16_and_container_forwarder_agree() {
         .into_samples();
     assert_eq!(by_id, primary);
     assert_eq!(by_id, image_level);
+}
+
+#[test]
+fn primary_with_options_surfaces_honour_the_chroma_upsampling() {
+    // The primary-item `*_with_options` twins decode the primary item under the options they are
+    // handed: the default options give the plain surface's output, and `Nearest` gives the item's
+    // nearest decode, which differs on this 4:2:0 frame.
+    let item = coded_item(7, 1, 8, 15, 4, 4, vec![colr(1, false)]);
+    let bytes = file(7, vec![item]);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    let image = container.image();
+    let nearest = DecodeOptions::default().with_chroma_upsampling(ChromaUpsampling::Nearest);
+    let rgba8 = |o| {
+        image
+            .decode_primary_rgba8_with_options(&mut Mock::default(), o)
+            .unwrap()
+            .into_samples()
+    };
+    let (default8, nearest8) = (rgba8(DecodeOptions::default()), rgba8(nearest));
+    assert_eq!(
+        default8,
+        image
+            .decode_item_rgba8(7, &mut Mock::default())
+            .unwrap()
+            .into_samples()
+    );
+    assert_eq!(nearest8, rgba8_nearest(&container, 7).into_samples());
+    assert_ne!(default8, nearest8);
+
+    let rgba16 = |o| {
+        image
+            .decode_primary_rgba16_with_options(&mut Mock::default(), o)
+            .unwrap()
+            .into_samples()
+    };
+    let (default16, nearest16) = (rgba16(DecodeOptions::default()), rgba16(nearest));
+    let item16 = |o| {
+        image
+            .decode_item_rgba16_with_options(7, &mut Mock::default(), o)
+            .unwrap()
+            .into_samples()
+    };
+    assert_eq!(default16, item16(DecodeOptions::default()));
+    assert_eq!(nearest16, item16(nearest));
+    assert_ne!(default16, nearest16);
 }
 
 // ---- alpha -----------------------------------------------------------------------------------

@@ -326,13 +326,32 @@ unsafe fn rw_data(data: &sys::avifRWData) -> Vec<u8> {
 ///
 /// Returns a message (including libavif's own result string) if the file cannot be parsed,
 /// decoded, or converted.
+///
+/// Chroma is upsampled nearest-neighbour (`AVIF_CHROMA_UPSAMPLING_NEAREST`), the counterpart of
+/// gamut-avif's `ChromaUpsampling::Nearest`; [`decode_rgba_default_upsampling`] keeps libavif's
+/// default instead.
 pub fn decode_rgba(avif: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     // SAFETY: decoder/image handles and the RGB pixel allocation are created and released in
     // matched pairs on every return path.
-    unsafe { decode_rgba_inner(avif) }
+    unsafe { decode_rgba_inner(avif, sys::AVIF_CHROMA_UPSAMPLING_NEAREST) }
 }
 
-unsafe fn decode_rgba_inner(avif: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+/// [`decode_rgba`] with libavif's **default** chroma upsampling (`AVIF_CHROMA_UPSAMPLING_AUTOMATIC`).
+/// This oracle builds libavif without libyuv, so that default is libavif's built-in bilinear
+/// filter: the reference for gamut-avif's default `ChromaUpsampling::Interpolated`.
+///
+/// # Errors
+///
+/// As [`decode_rgba`].
+pub fn decode_rgba_default_upsampling(avif: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    // SAFETY: as `decode_rgba`.
+    unsafe { decode_rgba_inner(avif, sys::AVIF_CHROMA_UPSAMPLING_AUTOMATIC) }
+}
+
+unsafe fn decode_rgba_inner(
+    avif: &[u8],
+    upsampling: sys::avifChromaUpsampling,
+) -> Result<(u32, u32, Vec<u8>), String> {
     unsafe {
         let decoder = sys::avifDecoderCreate();
         if decoder.is_null() {
@@ -348,7 +367,7 @@ unsafe fn decode_rgba_inner(avif: &[u8]) -> Result<(u32, u32, Vec<u8>), String> 
 
         let result = sys::avifDecoderReadMemory(decoder, image, avif.as_ptr(), avif.len());
         let out = if result == sys::AVIF_RESULT_OK {
-            to_rgba(&*image)
+            to_rgba(&*image, upsampling)
         } else {
             Err(format!(
                 "avifDecoderReadMemory failed: {}",
@@ -363,7 +382,10 @@ unsafe fn decode_rgba_inner(avif: &[u8]) -> Result<(u32, u32, Vec<u8>), String> 
 }
 
 /// Converts a decoded `avifImage` to tightly packed RGBA8 via `avifImageYUVToRGB`.
-unsafe fn to_rgba(image: &sys::avifImage) -> Result<(u32, u32, Vec<u8>), String> {
+unsafe fn to_rgba(
+    image: &sys::avifImage,
+    upsampling: sys::avifChromaUpsampling,
+) -> Result<(u32, u32, Vec<u8>), String> {
     // SAFETY: `rgb` is initialized by `avifRGBImageSetDefaults`; its pixel buffer is allocated by
     // `avifRGBImageAllocatePixels` and freed on every path after the copy.
     unsafe {
@@ -371,9 +393,9 @@ unsafe fn to_rgba(image: &sys::avifImage) -> Result<(u32, u32, Vec<u8>), String>
         sys::avifRGBImageSetDefaults(&mut rgb, image);
         rgb.format = sys::AVIF_RGB_FORMAT_RGBA;
         rgb.depth = 8;
-        // Nearest-neighbour chroma upsampling, matching gamut-avif's documented RGBA policy, so a
-        // pixel diff against it isolates real conversion errors instead of resampler choice.
-        rgb.chromaUpsampling = sys::AVIF_CHROMA_UPSAMPLING_NEAREST;
+        // The caller's chroma upsampling, so a pixel diff against gamut-avif in the same mode
+        // isolates real conversion errors instead of resampler choice.
+        rgb.chromaUpsampling = upsampling;
         let result = sys::avifRGBImageAllocatePixels(&mut rgb);
         if result != sys::AVIF_RESULT_OK {
             return Err(format!(

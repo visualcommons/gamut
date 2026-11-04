@@ -9,7 +9,7 @@ use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
 use gamut_color::oklab::{Gamut, linear_rgb_to_oklab};
 use gamut_color::transfer::srgb_eotf;
-use gamut_color::{ColorRange, Yuv420};
+use gamut_color::{ChromaUpsampling, ColorRange, Yuv420};
 
 fn main() {
     divan::main();
@@ -47,9 +47,9 @@ fn rgb_to_yuv420(bencher: Bencher) {
 #[divan::bench]
 fn yuv420_to_rgb(bencher: Bencher) {
     let yuv = Yuv420::from_rgb8(&gradient_rgb(), SIDE, SIDE, ColorRange::Limited).unwrap();
-    bencher
-        .counter(ItemsCount::new(pixels()))
-        .bench_local(|| black_box(&yuv).to_rgb8(ColorRange::Limited));
+    bencher.counter(ItemsCount::new(pixels())).bench_local(|| {
+        black_box(&yuv).to_rgb8(ColorRange::Limited, ChromaUpsampling::Interpolated)
+    });
 }
 
 #[divan::bench]

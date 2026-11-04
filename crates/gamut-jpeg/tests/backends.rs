@@ -197,7 +197,8 @@ fn an_empty_registry_leaves_both_directions_on_the_built_in_path() {
     let dec = JpegDecoder::new();
     assert_eq!(
         format!("{dec:?}"),
-        "JpegDecoder { max_width: 65535, max_height: 65535, max_image_bytes: 67108864, backends: 0 }"
+        "JpegDecoder { max_width: 65535, max_height: 65535, max_image_bytes: 67108864, backends: 0, \
+         upsampling: Interpolated }"
     );
     let a: ImageBuf<Gray8> = dec.decode_image(&plain).unwrap();
 

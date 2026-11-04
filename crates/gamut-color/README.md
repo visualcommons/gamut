@@ -51,8 +51,9 @@ explicit `code_point`/`from_code_point` API rather than serde's representation.
 Released as **v1** (issue #179); see [`STATUS.md`](STATUS.md) for the phase history, the frozen
 API policies, and the deferrals. Implemented today: 8-bit RGB ↔ identity 4:4:4 conversion
 ([`Planar8::from_rgb8_identity`] / [`Planar8::to_rgb8_identity`]), the CICP tables the AVIF
-`colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP), the general H.273 §8.3 luma–chroma transform
-in both directions (`RgbToYcbcr` / `YcbcrMatrix`: BT.601 / BT.470 B,G / BT.709 / BT.2020-NCL, both
+`colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP), the decoders' reference-exact chroma
+upsampling (`upsample`: libjpeg-turbo, libwebp and libavif kernels behind `ChromaUpsampling`), the
+general H.273 §8.3 luma–chroma transform in both directions (`RgbToYcbcr` / `YcbcrMatrix`: BT.601 / BT.470 B,G / BT.709 / BT.2020-NCL, both
 signal ranges, at every modeled bit depth — the AVIF lossy encode path and the AVIF/HEIC
 presentation path), the `f64` colour science for the sRGB, Display P3, Adobe RGB, BT.2020 and
 ProPhoto gamuts, and the CIELab / ΔE layer (issue #321: XYZ↔Lab↔LCh, xyY, the ICC PCS encodings,
