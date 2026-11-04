@@ -49,6 +49,8 @@ const WHITE_BALANCE_FINE_TUNE: u16 = 0x100a;
 const NOISE_REDUCTION: u16 = 0x100b;
 /// `HighIsoNoiseReduction`: a `SHORT`.
 const HIGH_ISO_NOISE_REDUCTION: u16 = 0x100e;
+/// `Clarity`: an `SLONG`.
+const CLARITY: u16 = 0x100f;
 /// `FlashMode`: a `SHORT`.
 const FLASH_MODE: u16 = 0x1010;
 /// `FlashStrength`: an `SRATIONAL`, in EV.
@@ -61,6 +63,12 @@ const FOCUS_MODE: u16 = 0x1021;
 const SLOW_SYNC: u16 = 0x1030;
 /// `PictureMode`: a `SHORT`.
 const PICTURE_MODE: u16 = 0x1031;
+/// `ExposureCount`: a `SHORT`.
+const EXPOSURE_COUNT: u16 = 0x1032;
+/// `EXRAuto`: a `SHORT`.
+const EXR_AUTO: u16 = 0x1033;
+/// `EXRMode`: a `SHORT`.
+const EXR_MODE: u16 = 0x1034;
 /// `ShadowTone`: an `SLONG`.
 const SHADOW_TONE: u16 = 0x1040;
 /// `HighlightTone`: an `SLONG`.
@@ -223,6 +231,12 @@ impl FujifilmMakerNote {
         self.short(HIGH_ISO_NOISE_REDUCTION)
     }
 
+    /// `Clarity` (`0x100f`): Fujifilm's clarity setting, signed.
+    #[must_use]
+    pub fn clarity(&self) -> Option<i32> {
+        slong(&self.ifd, CLARITY)
+    }
+
     /// `FlashMode` (`0x1010`): Fujifilm's flash-mode code.
     #[must_use]
     pub fn flash_mode(&self) -> Option<u16> {
@@ -261,6 +275,24 @@ impl FujifilmMakerNote {
     #[must_use]
     pub fn picture_mode(&self) -> Option<u16> {
         self.short(PICTURE_MODE)
+    }
+
+    /// `ExposureCount` (`0x1032`): the number of exposures that made the image.
+    #[must_use]
+    pub fn exposure_count(&self) -> Option<u16> {
+        self.short(EXPOSURE_COUNT)
+    }
+
+    /// `EXRAuto` (`0x1033`): 0 off, 1 on.
+    #[must_use]
+    pub fn exr_auto(&self) -> Option<u16> {
+        self.short(EXR_AUTO)
+    }
+
+    /// `EXRMode` (`0x1034`): Fujifilm's EXR-sensor mode code.
+    #[must_use]
+    pub fn exr_mode(&self) -> Option<u16> {
+        self.short(EXR_MODE)
     }
 
     /// `ShadowTone` (`0x1040`).
@@ -494,12 +526,16 @@ mod tests {
             slongs(WHITE_BALANCE_FINE_TUNE, &[-40, 60]),
             shorts(NOISE_REDUCTION, &[0x40]),
             shorts(HIGH_ISO_NOISE_REDUCTION, &[0x280]),
+            slongs(CLARITY, &[-24]),
             shorts(FLASH_MODE, &[0x8120]),
             srationals(FLASH_STRENGTH, &[(-2, 3)]),
             shorts(MACRO, &[12]),
             shorts(FOCUS_MODE, &[2]),
             shorts(SLOW_SYNC, &[4]),
             shorts(PICTURE_MODE, &[5]),
+            shorts(EXPOSURE_COUNT, &[13]),
+            shorts(EXR_AUTO, &[14]),
+            shorts(EXR_MODE, &[15]),
             slongs(SHADOW_TONE, &[-16]),
             slongs(HIGHLIGHT_TONE, &[32]),
             shorts(CONTINUOUS, &[6]),
@@ -533,12 +569,16 @@ mod tests {
         assert_eq!(view.white_balance_fine_tune(), Some(&[-40, 60][..]));
         assert_eq!(view.noise_reduction(), Some(0x40));
         assert_eq!(view.high_iso_noise_reduction(), Some(0x280));
+        assert_eq!(view.clarity(), Some(-24));
         assert_eq!(view.flash_mode(), Some(0x8120));
         assert_eq!(view.flash_strength(), Some(SRational::from((-2, 3))));
         assert_eq!(view.macro_mode(), Some(12));
         assert_eq!(view.focus_mode(), Some(2));
         assert_eq!(view.slow_sync(), Some(4));
         assert_eq!(view.picture_mode(), Some(5));
+        assert_eq!(view.exposure_count(), Some(13));
+        assert_eq!(view.exr_auto(), Some(14));
+        assert_eq!(view.exr_mode(), Some(15));
         assert_eq!(view.shadow_tone(), Some(-16));
         assert_eq!(view.highlight_tone(), Some(32));
         assert_eq!(view.continuous(), Some(6));
@@ -560,7 +600,7 @@ mod tests {
             Some(Rational::from((4, 1)))
         );
         assert_eq!(view.rating(), Some(3_000));
-        assert_eq!(view.ifd().fields().len(), 33);
+        assert_eq!(view.ifd().fields().len(), 37);
         assert!(view.unreadable_tags().is_empty());
     }
 

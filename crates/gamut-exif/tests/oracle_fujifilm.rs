@@ -68,7 +68,7 @@ fn ascii(tag: u16, text: &[u8]) -> Entry {
     entry(tag, FieldType::Ascii, text.len(), text.to_vec())
 }
 
-/// The thirty-three typed tags of `references/exif/fujifilm/README.md`, with values a Fujifilm
+/// The thirty-seven typed tags of `references/exif/fujifilm/README.md`, with values a Fujifilm
 /// body could write (negative where the type is signed, so a sign error is visible).
 fn entries() -> Vec<Entry> {
     vec![
@@ -84,12 +84,16 @@ fn entries() -> Vec<Entry> {
         slongs(0x100a, &[-40, 60]),
         short(0x100b, 0x40),
         short(0x100e, 0x280),
+        slongs(0x100f, &[-24]),
         short(0x1010, 0x8120),
         srational(0x1011, (-2, 3)),
         short(0x1020, 12),
         short(0x1021, 2),
         short(0x1030, 4),
         short(0x1031, 5),
+        short(0x1032, 13),
+        short(0x1033, 14),
+        short(0x1034, 15),
         slongs(0x1040, &[-16]),
         slongs(0x1041, &[32]),
         short(0x1100, 6),
@@ -197,6 +201,7 @@ fn every_typed_accessor_agrees_with_exiv2() {
             ),
             ("NoiseReduction", n(view.noise_reduction())),
             ("HighIsoNoiseReduction", n(view.high_iso_noise_reduction())),
+            ("Clarity", view.clarity().map(|n| n.to_string())),
             ("FlashMode", n(view.flash_mode())),
             (
                 "FlashStrength",
@@ -207,6 +212,9 @@ fn every_typed_accessor_agrees_with_exiv2() {
             ("FocusMode", n(view.focus_mode())),
             ("SlowSync", n(view.slow_sync())),
             ("PictureMode", n(view.picture_mode())),
+            ("ExposureCount", n(view.exposure_count())),
+            ("EXRAuto", n(view.exr_auto())),
+            ("EXRMode", n(view.exr_mode())),
             ("ShadowTone", view.shadow_tone().map(|n| n.to_string())),
             (
                 "HighlightTone",
@@ -240,7 +248,7 @@ fn every_entry_agrees_with_exiv2() {
         let stream = fujifilm_stream(order);
         let view = view(&stream);
         assert!(view.unreadable_tags().is_empty());
-        assert_eq!(view.ifd().fields().len(), 33);
+        assert_eq!(view.ifd().fields().len(), 37);
         for field in view.ifd().fields() {
             let ours = match &field.value {
                 Value::Undefined(values) => joined(values),

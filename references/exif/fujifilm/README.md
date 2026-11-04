@@ -35,7 +35,7 @@ routes to this dialect (`../leica/README.md`). exiv2 decodes only the former, si
 keys on `Make`.
 
 The view keeps every entry of the note's IFD as a `gamut_ifd::Value` (`FujifilmMakerNote::ifd`),
-so any tag is reachable by number. These thirty-three have typed accessors; each is checked against
+so any tag is reachable by number. These thirty-seven have typed accessors; each is checked against
 exiv2 tag by tag in `crates/gamut-exif/tests/oracle_fujifilm.rs`:
 
 | Tag | exiv2 key (`Exif.Fujifilm.` +) | exiv2 type (`fujimn_int.cpp`) | Accessor |
@@ -52,12 +52,16 @@ exiv2 tag by tag in `crates/gamut-exif/tests/oracle_fujifilm.rs`:
 | `0x100a` | `WhiteBalanceFineTune` | `signedLong` (line 387) | `white_balance_fine_tune` |
 | `0x100b` | `NoiseReduction` | `unsignedShort` (line 389) | `noise_reduction` |
 | `0x100e` | `HighIsoNoiseReduction` | `unsignedShort` (line 391) | `high_iso_noise_reduction` |
+| `0x100f` | `Clarity` | `signedLong` (line 393) | `clarity` |
 | `0x1010` | `FlashMode` | `unsignedShort` (line 395) | `flash_mode` |
 | `0x1011` | `FlashStrength` | `signedRational` (line 397) | `flash_strength` |
 | `0x1020` | `Macro` | `unsignedShort` (line 399) | `macro_mode` |
 | `0x1021` | `FocusMode` | `unsignedShort` (line 401) | `focus_mode` |
 | `0x1030` | `SlowSync` | `unsignedShort` (line 413) | `slow_sync` |
 | `0x1031` | `PictureMode` | `unsignedShort` (line 415) | `picture_mode` |
+| `0x1032` | `ExposureCount` | `unsignedShort` (line 417) | `exposure_count` |
+| `0x1033` | `EXRAuto` | `unsignedShort` (line 419) | `exr_auto` |
+| `0x1034` | `EXRMode` | `unsignedShort` (line 422) | `exr_mode` |
 | `0x1040` | `ShadowTone` | `signedLong` (line 425) | `shadow_tone` |
 | `0x1041` | `HighlightTone` | `signedLong` (line 427) | `highlight_tone` |
 | `0x1100` | `Continuous` | `unsignedShort` (line 453) | `continuous` |
@@ -94,7 +98,9 @@ Notes on reading them:
 
 Not decoded, and not promised: the interpretation of any value (exiv2's `exif_print` names
 `FilmMode` 0 "PROVIA (F0/Standard)"; the view returns the number), the tags exiv2 lists that are
-not typed here (they stay in `ifd()`), the face-detection text tags (`0x4005`–`0x4282`), and the
+not typed here (they stay in `ifd()`; in the picture-setting range `0x1000`–`0x1041` those are
+only the focus-area, focus-point and autofocus-setting tags `0x1022`, `0x1023`, `0x102b`,
+`0x102d` and `0x102e`, lines 403–412), the face-detection text tags (`0x4005`–`0x4282`), and the
 RAF-only `FujiIFD` subdirectory (`0xf000`–`0xf010`), which exiv2 reads only when parsing a RAF's
 embedded TIFF. exiv2's table lists `0x1105` twice (`PixelShiftShots` and `PixelShiftOfffset`, lines
 459 and 461), so its key for that tag is ambiguous; it is not typed here.
