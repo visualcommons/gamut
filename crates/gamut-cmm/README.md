@@ -22,7 +22,9 @@ over [`gamut-icc`](../gamut-icc)'s parsed profiles:
 
 - **Colour-correct decoding** — convert decoded pixels through an embedded profile (a PNG
   `iCCP`, a JPEG `APP2`, a TIFF/DNG tag 34675) into a display or working space, straight over
-  `gamut_core::PixelFormat` buffers (`transform_interleaved_u8` and friends).
+  `gamut_core::PixelFormat` buffers (`transform_interleaved_u8` and friends, or in place with
+  `transform_in_place_u8`); `IccTransform::embedded_to_srgb` builds the embedded profile →
+  sRGB transform at the intent that keeps the image's colorimetry.
 - **Profile-accurate encoding** — bring working-space pixels into the space an embedded profile
   describes before encoding.
 - **Prepress workflows** — chain profiles through abstract edits (`IccTransform::chain`), apply

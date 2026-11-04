@@ -3,7 +3,7 @@
 //! their common PCS, with the rendering-intent adjustments (ICC-absolute white scaling,
 //! black-point compensation) applied at the seam.
 
-use gamut_icc::{ColorSpace, DeviceClass, IccProfile, RenderingIntent};
+use gamut_icc::{BuiltinProfile, ColorSpace, DeviceClass, IccProfile, RenderingIntent};
 
 use crate::chain;
 use crate::error::{CmmError, Result};
@@ -381,6 +381,54 @@ impl IccTransform {
         Self::from_pipeline(pipeline, options.optimization)
     }
 
+    /// The transform a format crate applies to show decoded samples as **sRGB**: from
+    /// `embedded`, the ICC profile an image carries, to `gamut-icc`'s built-in sRGB profile
+    /// ([`BuiltinProfile::Srgb`]), at the **media-relative colorimetric** intent with black-point
+    /// compensation off and every other option at its default (stage-by-stage evaluation).
+    ///
+    /// The intent is the point of this constructor. The perceptual default would read the same
+    /// tables from a profile that carries only `A2B0` (lcms2's perceptual fallback), but it
+    /// additionally **forces** black-point compensation because the built-in sRGB is a v4
+    /// destination (the rule documented on [`IccTransform::between`]), and that moves the
+    /// image's own colorimetry: measured on the JPEG XL XYB profile (`gamut-jpeg`'s
+    /// `XYB_ICC_PROFILE`) over an 18³ grid of exact scaled-XYB inputs, the relative intent
+    /// reproduces the sRGB source within 0.44 of an 8-bit code (mean 0.03), while the perceptual
+    /// one misses by up to 11.2 codes (mean 1.62), pulling sRGB grey 20 down to about 12.
+    /// libjxl's own tools evaluate such a table directly (skcms has no compensation), so the
+    /// relative intent is also what a jpegli pipeline shows. A caller wanting another intent
+    /// or an optimization level builds the pair itself with [`IccTransform::between`].
+    ///
+    /// # Errors
+    ///
+    /// As [`IccTransform::between`] for the pair (e.g. a profile with no device → PCS
+    /// pipeline); [`CmmError::UnsupportedProfile`] should `gamut-icc` ever stop modelling sRGB.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gamut_cmm::{IccTransform, transform_in_place_u8};
+    /// use gamut_core::PixelFormat;
+    /// use gamut_icc::{BuiltinProfile, IccProfile};
+    ///
+    /// // An sRGB image tagged sRGB comes through unchanged.
+    /// let embedded = IccProfile::builtin(BuiltinProfile::Srgb).expect("sRGB is built in");
+    /// let to_srgb = IccTransform::embedded_to_srgb(&embedded)?;
+    /// let mut pixels = [12u8, 128, 250];
+    /// transform_in_place_u8(&to_srgb, PixelFormat::Rgb8, &mut pixels)?;
+    /// assert_eq!(pixels, [12, 128, 250]);
+    /// # Ok::<(), gamut_cmm::CmmError>(())
+    /// ```
+    pub fn embedded_to_srgb(embedded: &IccProfile) -> Result<Self> {
+        let srgb = IccProfile::builtin(BuiltinProfile::Srgb).ok_or(
+            CmmError::UnsupportedProfile("gamut-icc has no built-in sRGB profile"),
+        )?;
+        let options = TransformOptions {
+            intent: RenderingIntent::MediaRelativeColorimetric,
+            ..TransformOptions::default()
+        };
+        Self::between(embedded, &srgb, options)
+    }
+
     /// Wraps an internally-built pipeline (the chain/devicelink/proofing constructors in
     /// [`crate::chain`]), applying the requested optimization level.
     ///
@@ -644,6 +692,33 @@ mod icc_transform_tests {
         let mut out = [0.0; 3];
         transform.transform(&rgb, &mut out).unwrap();
         out
+    }
+
+    #[test]
+    fn embedded_to_srgb_keeps_a_lifted_black_colorimetric() {
+        // The pedestal source's device black is a decisively non-zero XYZ. The relative intent
+        // carries it to sRGB as a visible grey; the perceptual default would force BPC against
+        // the v4 built-in sRGB and pull it down to sRGB black.
+        let src = rgb_shaper(pedestal(), None);
+        let ours = IccTransform::embedded_to_srgb(&src).unwrap();
+        let black = eval(&ours, [0.0; 3]);
+        assert!(
+            black.iter().all(|&v| v > 0.2),
+            "lifted black lost: {black:?}"
+        );
+        let srgb = IccProfile::builtin(gamut_icc::BuiltinProfile::Srgb).unwrap();
+        let relative = IccTransform::between(
+            &src,
+            &srgb,
+            TransformOptions {
+                intent: RenderingIntent::MediaRelativeColorimetric,
+                ..TransformOptions::default()
+            },
+        )
+        .unwrap();
+        for rgb in [[0.0; 3], [0.3, 0.6, 0.9]] {
+            assert_eq!(eval(&ours, rgb), eval(&relative, rgb), "{rgb:?}");
+        }
     }
 
     #[test]

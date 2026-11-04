@@ -32,7 +32,7 @@ mod common;
 use common::Lcg;
 use gamut_cmm::{
     GamutCheck, IccTransform, PipelineOptimization, ProofingOptions, Transform as _,
-    TransformOptions, transform_interleaved_u8,
+    TransformOptions, transform_in_place_u8, transform_interleaved_u8,
 };
 use gamut_core::PixelFormat;
 use gamut_icc::{IccProfile, RenderingIntent};
@@ -1543,6 +1543,44 @@ fn pixel_buffers_ride_the_conformance_transforms() {
             let expected = (want[ch] * 255.0 + 0.5).floor().clamp(0.0, 255.0) as u8;
             assert_eq!(out[ch], expected, "pixel {px:?} channel {ch}");
         }
+    }
+}
+
+#[test]
+fn embedded_to_srgb_in_place_agrees_with_lcms2_relative() {
+    set_quiet_log_handler();
+    // The format-crate path end to end: an embedded profile → built-in sRGB, applied in place to
+    // an `Rgb8` raster, against lcms2's 8-bit `cmsDoTransform` of the same bytes at the relative
+    // intent with optimization off (the TIGHT configuration at 8-bit I/O). A matrix-shaper and an
+    // `A2B0`-only LUT profile (the shape of the JPEG XL XYB profile) are both covered. Measured:
+    // byte-identical on both. (lcms2's default, optimized 8-bit path precalculates the LUT pair
+    // and lands up to 3 codes away on `scnr-lut`; that is lcms2's quantization, not a contract.)
+    let srgb = IccProfile::builtin(gamut_icc::BuiltinProfile::Srgb).unwrap();
+    let (_, srgb_oracle) = reopen_builtin(&srgb);
+    let src: Vec<u8> = (0..600u32)
+        .flat_map(|i| {
+            [
+                u8::try_from((i * 41) % 256).unwrap(),
+                u8::try_from((i * 89 + 7) % 256).unwrap(),
+                u8::try_from((i * 173 + 3) % 256).unwrap(),
+            ]
+        })
+        .collect();
+    for (name, profile) in [("p3", display_p3_srgb_trc()), ("scnr-lut", scnr_lut(9))] {
+        let (parsed, oracle) = reopen(&profile);
+        let ours = IccTransform::embedded_to_srgb(&parsed).unwrap();
+        let mut buf = src.clone();
+        transform_in_place_u8(&ours, PixelFormat::Rgb8, &mut buf).unwrap();
+        let want = Transform::new(
+            &oracle,
+            TYPE_RGB_8,
+            &srgb_oracle,
+            TYPE_RGB_8,
+            INTENT_RELATIVE_COLORIMETRIC,
+            FLAGS_NOOPTIMIZE | FLAGS_NOCACHE,
+        )
+        .apply_u8(&src, 600, 3);
+        assert_eq!(buf, want, "{name}");
     }
 }
 

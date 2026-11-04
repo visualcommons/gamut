@@ -38,6 +38,7 @@ that add behaviour (#325 onward).
 | — | #555 | `TransformOptions::prefer_cicp_transfer`: closed-form evaluation of a shaper profile's `cicp`-signalled transfer, checked against its TRC; default off on the measured trade (below) | ✅ |
 | — | #423 | Precision tiers: `PipelineOptimization::PrecalculateF32`/`PrecalculateFixed16` (`NodePrecision`) — the resampled CLUT at `f32` or 16-bit fixed point, bit-exact against lcms2's interpolators, with integer `Transform::transform_u8`/`transform_u16` entry points under the image functions; each tier budgeted in the conformance gate. SIMD is separate (deferred table); the 8-bit matrix-shaper path is #992 (next row) | ✅ |
 | — | #992 | 8-bit matrix-shaper: lcms2's `OptimizeMatrixShaper` (256-entry Q1.14 input tables, Q1.14 matrix, 16 385-entry output tables) run by `transform_u8` of an `IccTransform` at `PrecalculateFixed16` whose link collapses to curves → matrix → curves; bit-exact against lcms2's `TYPE_RGB_8` transform over the whole 8-bit cube, budgeted in codes against the `f64` reference | ✅ |
+| — | #1042 | Format-crate decode helpers: in-place buffer application (`transform_in_place_u8`/`transform_in_place_u16`, byte-identical to `transform_interleaved_*` with one format on both sides, no second raster) and `IccTransform::embedded_to_srgb`, the embedded profile → built-in sRGB transform at the media-relative colorimetric intent (decision below); pinned byte-identical against lcms2's unoptimized 8-bit transform on a matrix-shaper and an `A2B0`-only LUT profile | ✅ |
 
 ## Settled decisions (P2, tone curves)
 
@@ -588,6 +589,22 @@ lcms2's error, not this crate's — at black lcms2 encodes 0.0547 where ST 2084 
 paths are gated (`tests/oracle_conformance.rs`, `cicp_preferring_transforms_match_lcms2`,
 `sampled_pq_transforms_stay_inside_their_class_budget`).
 
+## Settled decisions (#1042, format-crate decode helpers)
+
+- **In place, not a second raster.** A format crate that owns its decoded `ImageBuf` converts it
+  with `transform_in_place_*`: the same 256-pixel chunk scratch as `transform_interleaved_*`, the
+  chunk being both source and destination, so a decode's peak memory — the thing its limits
+  bound — is not doubled. Only a transform with as many output as input colour channels can run
+  in place; alpha stays where it is (the equal-formats copy rule).
+- **Embedded profile → sRGB is media-relative colorimetric, BPC off.** `IccTransform::between`'s
+  default perceptual intent forces black-point compensation against a v4 destination, and
+  `gamut-icc`'s built-in sRGB is v4. Measured on the JPEG XL XYB profile over an 18³ grid of
+  exact scaled-XYB inputs: relative within 0.44 of an 8-bit code of the sRGB source (mean 0.03),
+  perceptual up to 11.2 codes (mean 1.62; grey 20 → ≈ 12). skcms, which libjxl's tools use, has
+  no compensation, so relative is also what a jpegli pipeline shows. The constructor takes no
+  options on purpose: the intent is the decision it carries, and any other pairing is
+  `between`'s.
+
 ## Conformance gate (P7)
 
 `tests/oracle_conformance.rs` — the epic's acceptance badge. Battery pairs (shaper↔shaper,
@@ -713,7 +730,8 @@ mid-chain device links, proofing shape + degenerate-identity case), gamut-check 
 in-gamut vs positive excess on a gain-halved proof, buffer contract, object safety),
 devicelink `LinkMode` seam/trilinear unit pins, and the `image` suite (round-half-up
 saturation pins incl. NaN, interleaved == scalar path exactly at both widths across chunk
-boundaries, planar == interleaved, alpha copy/drop/opaque-fill in both layouts, the
+boundaries, planar == interleaved, in place == interleaved at both widths (#1042), alpha
+copy/drop/opaque-fill in both layouts, the
 Rgb8→Cmyk8 model change, every `UnsupportedPixelFormat`/`ImageGeometry`/`BufferLength`
 error, empty buffers, and a doctest). P8 adds `tests/optimize.rs` (the knob is off by
 default; optimization off reproduces `between` **bit-exactly** against the same link
