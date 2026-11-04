@@ -217,10 +217,10 @@ adding it needs no container change.
 | tile_info: single tile | §5.9.15 | ✅ | M0 |
 | multi-tile (uniform spacing, tile_size_bytes, context_update_tile_id, tile group) | §5.9.15/.16 | ✅ (2 cols ≥2 SB wide; rows deferred) | M1 |
 | quantization: base_q_idx=0 ⇒ CodedLossless | §5.9.12 | ✅ | M0 |
-| quantization: base_q_idx>0, delta-Q, using_qmatrix | §5.9.12/.13,§9.5 | ✅ (base_q_idx>0 + per-SB delta-Q; qmatrix ☐) | M1 |
-| segmentation_params (disabled) | §5.9.14 | ✅ (off) | M0 |
-| segmentation (8 segments, features, temporal pred) | §5.9.14 | ✅ (lossy; SEG_LVL_ALT_Q + spatial segment_id map; temporal pred ☐) | M1 |
-| delta_q_params / delta_lf_params | §5.9.17/.18 | ✅ (delta_q + delta_lf) | M1 |
+| quantization: base_q_idx>0, delta-Q, using_qmatrix | §5.9.12/.13,§9.5 | ✅ (base_q_idx>0; per-SB delta-Q only as a test-only syntax exercise, #1011; qmatrix ☐) | M1 |
+| segmentation_params (disabled) | §5.9.14 | ✅ (off; the lossy default since #1011) | M0 |
+| segmentation (8 segments, features, temporal pred) | §5.9.14 | ✅ (SEG_LVL_ALT_Q + spatial segment_id map, as a test-only syntax exercise with a position-only map — default lossy encodes leave it off, #1011; content-driven segments ☐; temporal pred ☐) | M1 |
+| delta_q_params / delta_lf_params | §5.9.17/.18 | ✅ (delta_q + delta_lf as a test-only syntax exercise; default lossy encodes code `delta_q_present = 0`, #1011) | M1 |
 | read_tx_mode → ONLY_4X4 (lossless) | §5.9.21 | ✅ | M0 |
 | TX_MODE_SELECT / TX_MODE_LARGEST | §5.9.21 | ✅ (TX_MODE_SELECT, lossy intra) | M1 |
 | `reduced_tx_set`=1 | §5.9.2 | ✅ | M0 |
@@ -239,8 +239,8 @@ adding it needs no container change.
 | `intra_frame_mode_info` (KEY-frame block) | §5.11.7 | ✅ | M0 |
 | `skip` flag = 0 (residual always coded) | §5.11.11 | ✅ | M0 |
 | `skip` = 1 (no-residual / all-zero blocks) | §5.11.11 | ✅ (lossy; all-skip 8×8 unfiltered by CDEF) | M1 |
-| intra_segment_id / read_segment_id (spatial pred, neg_interleave) | §5.11.8/.9 | ✅ (lossy multi-segment) | M0/M1 |
-| per-block read_cdef / read_delta_qindex / read_delta_lf | §5.11.56/.12/.13 | ✅ (delta_q + delta_lf; read_cdef 0-bit) | M1 |
+| intra_segment_id / read_segment_id (spatial pred, neg_interleave) | §5.11.8/.9 | ✅ (multi-segment, under the test-only syntax exercise, #1011) | M0/M1 |
+| per-block read_cdef / read_delta_qindex / read_delta_lf | §5.11.56/.12/.13 | ✅ (delta_q + delta_lf under the test-only syntax exercise, #1011; read_cdef 0-bit) | M1 |
 | read_tx_size / read_var_tx_size (per-block tx_depth) | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square tx_depth 0..2) | M0/M1 |
 
 ## D. AV1 — intra prediction (§7.11.2)
