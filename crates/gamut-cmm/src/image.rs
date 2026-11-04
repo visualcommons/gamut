@@ -314,7 +314,10 @@ fn in_place<S: Sample>(
             found: buf.len(),
         });
     }
-    let (mut cin, mut cout) = scratch::<S>(buf.len() / shape.channels, shape, shape);
+    // Always one full chunk of scratch (≤ 2 × 256 × 4 samples), not `min(pixels, chunk)`: the
+    // trim is a capacity hint no output can observe, so computing it here only bred an
+    // unkillable mutant. A tiny buffer pays at most 4 KiB.
+    let (mut cin, mut cout) = scratch::<S>(CHUNK_PIXELS, shape, shape);
     for chunk in buf.chunks_mut(CHUNK_PIXELS * shape.channels) {
         let count = chunk.len() / shape.channels;
         gather(chunk, shape, &mut cin);
