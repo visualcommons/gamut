@@ -214,7 +214,8 @@ impl JpegStreamInfo {
     }
 
     /// The named [`ChromaSubsampling`] the frame uses, or `None` when it is not a three-component
-    /// frame whose chroma components are both `1×1` with a luma factor of `1×1`, `2×1`, or `2×2`.
+    /// frame whose chroma components are both `1×1` with a luma factor of `1×1`, `2×1`, `2×2`, or
+    /// `1×2`.
     ///
     /// `None` therefore covers grayscale, CMYK, and any exotic sampling grid — a backend that cares
     /// about those reads [`sampling_factors`](Self::sampling_factors) instead.
@@ -230,6 +231,7 @@ impl JpegStreamInfo {
             (1, 1) => Some(ChromaSubsampling::Ycbcr444),
             (2, 1) => Some(ChromaSubsampling::Ycbcr422),
             (2, 2) => Some(ChromaSubsampling::Ycbcr420),
+            (1, 2) => Some(ChromaSubsampling::Ycbcr440),
             _ => None,
         }
     }
@@ -919,6 +921,10 @@ mod tests {
             info(vec![(2, 2), (1, 1), (1, 1)]).subsampling(),
             Some(ChromaSubsampling::Ycbcr420)
         );
+        assert_eq!(
+            info(vec![(1, 2), (1, 1), (1, 1)]).subsampling(),
+            Some(ChromaSubsampling::Ycbcr440)
+        );
         // Not three components.
         assert_eq!(info(vec![(1, 1)]).subsampling(), None);
         assert_eq!(info(vec![(1, 1); 4]).subsampling(), None);
@@ -926,7 +932,7 @@ mod tests {
         assert_eq!(info(vec![(2, 2), (2, 1), (1, 1)]).subsampling(), None);
         assert_eq!(info(vec![(2, 2), (1, 1), (1, 2)]).subsampling(), None);
         // Unnamed luma grid.
-        assert_eq!(info(vec![(1, 2), (1, 1), (1, 1)]).subsampling(), None);
         assert_eq!(info(vec![(4, 1), (1, 1), (1, 1)]).subsampling(), None);
+        assert_eq!(info(vec![(2, 4), (1, 1), (1, 1)]).subsampling(), None);
     }
 }

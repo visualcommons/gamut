@@ -23,7 +23,7 @@ IDCT bit for bit, where the `f64` reference kernel left up to 3 codes of roundin
 upsampling, ported exactly into `gamut_color::upsample::libjpeg`, and `ChromaUpsampling::Nearest` is held
 byte-identical to libjpeg-turbo with fancy upsampling off). The decode gate runs the **sequential**
 battery and, from P4, the **progressive** one (libjpeg-turbo's standard 10-scan `jpeg_simple_progression`
-script across gray/colour × 4:4:4/4:2:2/4:2:0 × q{40,75,95} × restart{0,2} × optimize{off,on}); the
+script across gray/colour × 4:4:4/4:2:2/4:2:0/4:4:0 × q{40,75,95} × restart{0,2} × optimize{off,on}); the
 progressive parity numbers are **identical** to the sequential ones (max-diff **0** in every mode;
 before #1016 subsampled modes measured 22.9 dB PSNR under replication), confirming the progressive
 coefficients match exactly. From P5 the **encode** gate adds a **progressive
@@ -45,7 +45,11 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 **In scope** (issue #28, across the phases below):
 
 - Baseline sequential DCT, Huffman, 8-bit (SOF0) **encode** — grayscale + YCbCr 4:4:4/4:2:2/4:2:0,
-  JFIF interchange format (this phase).
+  JFIF interchange format (this phase); YCbCr 4:4:0 (luma `1×2`) added by #1014, held by the same
+  oracle batteries plus two gates every colour mode shares: libjpeg-turbo's own header parser reads
+  back the declared sampling factors, and libjpeg-turbo's decode of gamut's stream stays within
+  2 dB PSNR of its decode of its own encode at equal quality (measured worst: 4:2:2 1.33 dB,
+  4:4:0 0.41 dB).
 - Sequential DCT, Huffman, 8-bit (SOF0 baseline / SOF1 extended) **decode**.
 - Progressive DCT, Huffman (SOF2) **decode and encode** (spectral selection + successive
   approximation).
