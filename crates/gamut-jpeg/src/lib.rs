@@ -58,6 +58,11 @@
 //! carrier to the raw setter above. The feature is off by default so a plain JPEG consumer never
 //! builds the metadata crates; the dependency direction stays `gamut-jpeg → gamut-metadata`.
 //!
+//! With the optional **`cmm`** Cargo feature, `JpegDecoder::decode_srgb` decodes straight to sRGB
+//! `Rgb8` by applying the embedded ICC profile through `gamut-cmm` — the round trip for the XYB
+//! colour mode, whose samples mean nothing without their profile, and for any other RGB-profiled
+//! stream. Off by default, so a plain consumer never builds the colour-management crates.
+//!
 //! # Pluggable backends
 //!
 //! Both directions are pluggable through the [`backend`] module: [`JpegStreamDecoder`] and
@@ -111,6 +116,8 @@ pub mod backend;
 
 mod appmeta;
 mod bitwriter;
+#[cfg(feature = "cmm")]
+mod cmm;
 mod decoder;
 mod encoder;
 mod huffman;

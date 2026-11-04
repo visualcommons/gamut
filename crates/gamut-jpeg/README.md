@@ -116,6 +116,14 @@ APP2 `ICC_PROFILE` payloads without decoding pixels, and the encoder embeds them
 `jpeg_read_icc_profile`/`jpeg_write_icc_profile` in both directions. `decode_image_into` reuses
 the destination's allocation when dimensions match.
 
+The opt-in **XYB colour mode** (`with_color_mode(JpegColorMode::Xyb)`) follows jpegli: scaled-XYB
+samples with the XYB ICC profile embedded, and `with_subsampling` applied to the B channel alone,
+so the default is jpegli's own X 2×2 / Y 2×2 / B 1×1 layout. With the optional **`cmm`** feature,
+`JpegDecoder::decode_srgb` decodes any RGB-profiled stream — gamut's XYB streams and jpegli's
+included — to sRGB `Rgb8` by applying the embedded profile through `gamut-cmm`. jpegli's decoder
+reading gamut's XYB streams, and `decode_srgb` reading jpegli's, are cross-checked against a
+vendored jpegli (dev-only).
+
 Both directions are **pluggable** (P8): `JpegDecoder::push_backend` / `JpegEncoder::push_backend`
 register `JpegStreamDecoder` / `JpegStreamEncoder` backends — or a `gamut-codec-abi` backend through
 the `AbiStreamDecoder` / `AbiStreamEncoder` adapters — tried in push order with the built-in codec as

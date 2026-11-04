@@ -32,12 +32,21 @@ gamut-dsp.workspace = true
 # the four metadata crates — and a *normal* dependency (never dev-only), so release ordering
 # follows it (`mise run check-release-deps`).
 gamut-metadata = { workspace = true, optional = true }
+# Colour-managed decoding (issue #1015): `JpegDecoder::decode_srgb` applies the embedded ICC profile
+# (the XYB colour mode's inverse included) through the workspace's transform engine rather than a
+# local XYB inverse. Optional and off by default, and normal dependencies, so release ordering
+# follows them (`mise run check-release-deps`). gamut-icc parses the profile and supplies the
+# built-in sRGB destination.
+gamut-cmm = { workspace = true, optional = true }
+gamut-icc = { workspace = true, optional = true }
 
 [features]
 default = []
 # Typed metadata wiring: `JpegMetadata::blocks` / `JpegMetadata::metadata` and
 # `JpegEncoder::with_metadata` / `with_encoded_metadata` over the `gamut-metadata` facade.
 metadata = ["dep:gamut-metadata"]
+# Colour-managed decoding to sRGB: `JpegDecoder::decode_srgb` over gamut-cmm + gamut-icc.
+cmm = ["dep:gamut-cmm", "dep:gamut-icc"]
 
 [dev-dependencies]
 # Differential cross-check oracle: a vendored, statically-linked libjpeg-turbo 3.2.0 (built from the
@@ -45,6 +54,14 @@ metadata = ["dep:gamut-metadata"]
 # canonical reference codec that proves the encoder's output decodes to the same pixels and the
 # decoder reproduces what libjpeg-turbo decodes.
 libjpeg-oracle = { path = "../../tooling/libjpeg-oracle" }
+# Differential oracle for the XYB colour mode (issue #1015): a vendored, statically-linked jpegli
+# (libjxl v0.11.2, the last release carrying it in-tree). Dev-only and excluded from the workspace.
+# It proves gamut's XYB streams decode through jpegli's decoder and that `decode_srgb` reads
+# jpegli's own XYB streams (with libjxl's profile).
+jpegli-oracle = { path = "../../tooling/jpegli-oracle" }
+# The independent CMS that turns jpegli's (colour-unmanaged) XYB samples into sRGB in the XYB
+# tests: a vendored, statically-linked Little-CMS. Dev-only and excluded from the workspace.
+lcms2-oracle = { path = "../../tooling/lcms2-oracle" }
 # Benchmark harness (issue #149) for `benches/decode.rs`.
 divan.workspace = true
 # The pure-Rust decoder issue #305 measures decode throughput against (bench + experiment arm only;

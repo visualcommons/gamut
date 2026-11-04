@@ -193,8 +193,10 @@ fn variants() -> Vec<Variant> {
             none,
             custom(LUMINANCE, scaled_table(&CHROMINANCE, 2.0)),
         ),
-        // XYB (always 4:4:4): the shipped placeholder pairing, then XYB-directed tables. X and Y
-        // share destination 0 and the stored B - Y uses destination 1; the public API has no third.
+        // XYB at 4:4:4 (its only layout when #29 ran; since #1015 the default subsamples B, so
+        // these variants pin 4:4:4 explicitly): the shipped placeholder pairing, then XYB-directed
+        // tables. X and Y share destination 0 and the stored B - Y uses destination 1; the public
+        // API has no third.
         v("xyb-annexk", true, s444, none, Tables::AnnexK),
         v("xyb-flat", true, s444, none, custom(flat(), flat())),
         v("xyb-csf32", true, s444, none, custom(csf32, CHROMINANCE)),
