@@ -157,7 +157,8 @@ Output is verified against real decoders (`libavif`, `dav1d`, `libaom`), linked 
 typed `av1C`/OBU layer with the AVIF still-image payload validation, planar decode with
 grid/identity reassembly, and the RGBA presentation paths — 8-bit (`decode_primary_rgba8`) and
 high-bit-depth (`decode_primary_rgba16`, 10/12-bit normalized to full-range 16-bit), with
-identity / BT.601 / BT.709 / BT.2020-NCL / monochrome colour, alpha merge, overlay compositing,
+identity / BT.601 / BT.709 / BT.2020-NCL / monochrome colour, libavif's bilinear chroma
+upsampling by default (nearest-neighbour through `DecodeOptions`), alpha merge, overlay compositing,
 `clap`/`irot`/`imir`. Validated differentially against
 libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 

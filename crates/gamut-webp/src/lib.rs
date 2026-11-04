@@ -139,6 +139,7 @@ pub use backend::{
 pub use config::{Effort, NearLossless, WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
 pub use encoder::{WebpEncodeReport, WebpEncoder};
+pub use gamut_color::ChromaUpsampling;
 pub use gamut_core::Dimensions;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `WebpMetadata::metadata` / `WebpEncoder::with_metadata` without a direct dependency.

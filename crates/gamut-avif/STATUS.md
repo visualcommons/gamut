@@ -217,10 +217,10 @@ adding it needs no container change.
 | tile_info: single tile | §5.9.15 | ✅ | M0 |
 | multi-tile (uniform spacing, tile_size_bytes, context_update_tile_id, tile group) | §5.9.15/.16 | ✅ (2 cols ≥2 SB wide; rows deferred) | M1 |
 | quantization: base_q_idx=0 ⇒ CodedLossless | §5.9.12 | ✅ | M0 |
-| quantization: base_q_idx>0, delta-Q, using_qmatrix | §5.9.12/.13,§9.5 | ✅ (base_q_idx>0 + per-SB delta-Q; qmatrix ☐) | M1 |
-| segmentation_params (disabled) | §5.9.14 | ✅ (off) | M0 |
-| segmentation (8 segments, features, temporal pred) | §5.9.14 | ✅ (lossy; SEG_LVL_ALT_Q + spatial segment_id map; temporal pred ☐) | M1 |
-| delta_q_params / delta_lf_params | §5.9.17/.18 | ✅ (delta_q + delta_lf) | M1 |
+| quantization: base_q_idx>0, delta-Q, using_qmatrix | §5.9.12/.13,§9.5 | ✅ (base_q_idx>0; per-SB delta-Q only as a test-only syntax exercise, #1011; qmatrix ☐) | M1 |
+| segmentation_params (disabled) | §5.9.14 | ✅ (off; the lossy default since #1011) | M0 |
+| segmentation (8 segments, features, temporal pred) | §5.9.14 | ✅ (SEG_LVL_ALT_Q + spatial segment_id map, as a test-only syntax exercise with a position-only map — default lossy encodes leave it off, #1011; content-driven segments ☐; temporal pred ☐) | M1 |
+| delta_q_params / delta_lf_params | §5.9.17/.18 | ✅ (delta_q + delta_lf as a test-only syntax exercise; default lossy encodes code `delta_q_present = 0`, #1011) | M1 |
 | read_tx_mode → ONLY_4X4 (lossless) | §5.9.21 | ✅ | M0 |
 | TX_MODE_SELECT / TX_MODE_LARGEST | §5.9.21 | ✅ (TX_MODE_SELECT, lossy intra) | M1 |
 | `reduced_tx_set`=1 | §5.9.2 | ✅ | M0 |
@@ -239,8 +239,8 @@ adding it needs no container change.
 | `intra_frame_mode_info` (KEY-frame block) | §5.11.7 | ✅ | M0 |
 | `skip` flag = 0 (residual always coded) | §5.11.11 | ✅ | M0 |
 | `skip` = 1 (no-residual / all-zero blocks) | §5.11.11 | ✅ (lossy; all-skip 8×8 unfiltered by CDEF) | M1 |
-| intra_segment_id / read_segment_id (spatial pred, neg_interleave) | §5.11.8/.9 | ✅ (lossy multi-segment) | M0/M1 |
-| per-block read_cdef / read_delta_qindex / read_delta_lf | §5.11.56/.12/.13 | ✅ (delta_q + delta_lf; read_cdef 0-bit) | M1 |
+| intra_segment_id / read_segment_id (spatial pred, neg_interleave) | §5.11.8/.9 | ✅ (multi-segment, under the test-only syntax exercise, #1011) | M0/M1 |
+| per-block read_cdef / read_delta_qindex / read_delta_lf | §5.11.56/.12/.13 | ✅ (delta_q + delta_lf under the test-only syntax exercise, #1011; read_cdef 0-bit) | M1 |
 | read_tx_size / read_var_tx_size (per-block tx_depth) | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square tx_depth 0..2) | M0/M1 |
 
 ## D. AV1 — intra prediction (§7.11.2)
@@ -386,6 +386,7 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | `DecodeLimits` (max dimension 32768, max pixels 16384², libavif's defaults; `*_with_limits` twin per surface): coded `ispe` before the decoder, every decoded frame, `grid` output before its tiles and tiled canvas after the first, `iovl` canvas before allocation → `Unsupported`; every full-image buffer reserved with `try_reserve_exact` → `Unsupported`, never an abort. Law `invariants::decoding_stays_within_limits`, driven by a pinned-seed proptest and the `avif_parse_decode` fuzz target | (hardening) | ✅ (#653; the law sees returned images, not the tiled-canvas cap, which unit tests pin) | — |
 | `DecodeLimits` work caps: `max_decoded_items` (default 131072 = 2 × 256², a full `grid` plus a full alpha `grid`) counts `decode_still` calls and `max_derived_items` (default 1024) counts `grid`/`iden`/`iovl` evaluations, per top-level call and per evaluation (a reused reference is counted each time), refused before the call → `Unsupported`; `with_item_limits` sets them. The fuzz stub serves every call, so `avif_parse_decode` searches this bound | (hardening) | ✅ (#762; no memoisation — a repeated reference is decoded again; defaults refuse no file libavif decodes, which takes only coded `grid` tiles and no `iovl`; the derived cap refuses e.g. a `grid` of > 1023 `iden` tiles) | — |
 | RGBA path: identity / BT.601 (mc 2/5/6) / BT.709 (1) / BT.2020 NCL (9) / monochrome; missing `colr` → AV1 sequence header `color_config` (grid: first tile) | H.273; AVIF §2.2.1 | ✅ | S3/S6, #651 |
+| RGBA path chroma upsampling (4:2:0/4:2:2): default `ChromaUpsampling::Interpolated` is libavif's built-in bilinear filter (`gamut_color::upsample::libavif`, kept in sixteenths through `YcbcrMatrix::to_rgb_sixteenths`); `Nearest` replication through the `*_with_options` surfaces and `DecodeOptions`. Oracle: max abs diff ≤ 1 against libavif's default conversion (libyuv off), nearest held to the existing bound. libyuv's fixed-point conversion and `chroma_sample_position` are not modelled (libavif's built-in path ignores the latter too) | libavif `reformat.c`; issue #1016 | ✅ | #1016 |
 | Typed AV1 sequence header per item (`AvifImage::av1_sequence_header`, payload then `configOBUs`, via `gamut-av1`'s parser) | AV1 §5.5; AVIF §2.1 | ✅ | #651 |
 | High-bit-depth surface `decode_item_rgba16`/`decode_primary_rgba16` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
 | Alpha merge (luma-plane, non-mono accepted, bit-depth rescale) | AVIF §4.1 | ✅ | S3 |
