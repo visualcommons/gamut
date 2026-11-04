@@ -18,13 +18,15 @@ directions in `tests/oracle.rs`: **encode** (gamut encodes → libjpeg-turbo dec
 within tolerance) and **decode** (libjpeg-turbo encodes → gamut decodes → matches libjpeg-turbo's
 own decode of the same stream, gray/4:4:4 **byte-identical** (asserted as exact equality since
 issue #896: the decoder's IDCT is `gamut_dsp::jpeg::idct8x8_int`, libjpeg-turbo's accurate integer
-IDCT bit for bit, where the `f64` reference kernel left up to 3 codes of rounding), subsampled bounded by
-the documented replication-vs-fancy upsampling divergence). The decode gate runs the **sequential**
+IDCT bit for bit, where the `f64` reference kernel left up to 3 codes of rounding), and since issue #1016
+4:2:2/4:2:0/4:4:0 **byte-identical** too: the default chroma upsampling is libjpeg-turbo's fancy
+upsampling, ported exactly into `gamut_color::upsample::libjpeg`, and `ChromaUpsampling::Nearest` is held
+byte-identical to libjpeg-turbo with fancy upsampling off). The decode gate runs the **sequential**
 battery and, from P4, the **progressive** one (libjpeg-turbo's standard 10-scan `jpeg_simple_progression`
 script across gray/colour × 4:4:4/4:2:2/4:2:0/4:4:0 × q{40,75,95} × restart{0,2} × optimize{off,on}); the
-progressive parity numbers are **identical** to the sequential ones (gray/4:4:4 max-diff **0**,
-subsampled PSNR **22.9 dB**), confirming the progressive coefficients match exactly — only the shared
-upsampling remains as a source of divergence. From P5 the **encode** gate adds a **progressive
+progressive parity numbers are **identical** to the sequential ones (max-diff **0** in every mode;
+before #1016 subsampled modes measured 22.9 dB PSNR under replication), confirming the progressive
+coefficients match exactly. From P5 the **encode** gate adds a **progressive
 exactness** direction (`tests/oracle.rs`): gamut's SOF2 stream and its baseline stream of the same
 image carry the same quantized coefficients, so libjpeg-turbo's decode of each must be **byte-for-byte
 identical** — asserted as exact equality (not a tolerance) across the dims × mode × q{40,75,95} ×
@@ -70,8 +72,9 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Pluggable codestream backends (P8, issue #277): the `backend` module's `JpegStreamDecoder` /
   `JpegStreamEncoder` traits, `JpegDecoder::push_backend` / `JpegEncoder::push_backend`, and the
   `gamut-codec-abi` adapters in both directions.
-- Opt-in decoder resource guards (P9, issue #306): `JpegDecoder::with_max_dimensions` and
-  `with_max_image_bytes`, enforced before built-in frame allocations and backend selection, while
+- Decoder resource guards (P9, issue #306; default-on since issue #1024): `JpegDecoder::new()`
+  caps dimensions at 65535 × 65535 and the native raster at 64 MiB, and
+  `JpegDecoder::with_max_dimensions` / `with_max_image_bytes` override them, enforced before built-in frame allocations and backend selection, while
   bounding sequential DNL-deferred sample-plane growth until the exact height arrives.
 - XYB colour mode (P13, issue #334): `with_color_mode(JpegColorMode::Xyb)` — jpegli-style
   scaled-XYB samples (via `gamut_color::xyb`; stored channels X, Y, B−Y), a no-JFIF-APP0 / Adobe
@@ -82,6 +85,9 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   validated end-to-end against the lcms2 oracle — the runtime dependency edge stays
   jpeg ← core, color, dsp. Always 4:4:4; grayscale and caller ICC profiles rejected; backends
   vetoed; progressive/restarts/optimized-tables/custom-tables/RD compose.
+- Opt-in mozjpeg progressive scan script (P15, issue #1021):
+  `with_progressive_script(ProgressiveScript::Mozjpeg)` beside the frozen libjpeg default; see
+  *Progressive scan script (mozjpeg, opt-in)* below.
 - Rate–distortion optimized coefficient selection (P12, issue #333): `with_rd_optimization` —
   per-block AC trellis over the exact §F.1.2.2 run/size cost of the typical Annex K.5/K.6 tables
   (a documented rate-proxy free choice that keeps baseline and progressive coefficients
@@ -195,12 +201,13 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **DNL (define number of lines, §B.2.5).** The **decoder** parses DNL and resolves a *sequential*
   frame with `Y = 0` by decoding MCU rows until the entropy data ends at a marker (the `Y = 0`
   frame's height then arrives in the following DNL). A DNL after a `Y ≠ 0` frame is advisory and
-  ignored. An opt-in dimension or byte cap derives an MCU-row ceiling before this dynamic decode,
+  ignored. The dimension and byte caps derive an MCU-row ceiling before this dynamic decode,
   then the exact resolved height is checked when DNL arrives. The encoder never emits `Y = 0` (it
   always knows its height and writes it in SOF0).
 - **Resource-budget accounting.** `with_max_image_bytes` budgets the native 8-bit interleaved
   raster (`width × height × frame components`), independent of chroma subsampling or requested
-  `Gray8`/`Rgb8`/`Cmyk8` presentation. Defaults remain unrestricted for compatibility. SOF limits
+  `Gray8`/`Rgb8`/`Cmyk8` presentation. The default budget is 64 MiB (issue #1024, matching
+  `gamut-png`); a trusted image beyond it needs `with_max_image_bytes(usize::MAX)`. SOF limits
   run before built-in frame-sized allocation or backend selection; accepted backend output is
   checked again, although the host cannot cap memory internal to an accepted foreign backend.
 - **Progressive + `Y = 0` (deferred height) is rejected as `Unsupported`.** The progressive
@@ -218,8 +225,16 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **Progressive quantization-table binding (§B.2.4.1).** Each component latches its dequantization
   table at its **first** scan; a later DQT redefinition of that destination does not retroactively
   change an already-latched component, matching the reference decoder.
-- **Upsampling filter.** Subsampled chroma is upsampled by **sample replication** (nearest); T.81
-  leaves the reconstruction filter open (§A.2 NOTE), so this is the decoder's documented free choice.
+- **Upsampling filter.** T.81 leaves the reconstruction filter open (§A.2 NOTE). The default,
+  `ChromaUpsampling::Interpolated`, is what libjpeg-turbo's `djpeg` does by default (#1016): the
+  `jdsample.c` triangle filter for components at half the horizontal (h2v1), vertical (h1v2) or both
+  (h2v2) resolutions, with libjpeg-turbo's alternating rounding bias and its replication fallback for
+  an h2v1/h2v2 component one or two samples wide; every other integer ratio is replicated, as
+  libjpeg-turbo does. A non-integer ratio (e.g. 2 of 3, which §A.1.1 permits) is replicated too;
+  libjpeg-turbo refuses it (`JERR_FRACT_SAMPLE_NOTIMPL`).
+  `JpegDecoder::with_chroma_upsampling(ChromaUpsampling::Nearest)` replicates everything
+  (`djpeg -nosmooth`). Both are oracle-gated byte for byte. libjpeg-turbo's DCT-domain scaling is not
+  modelled: the decoder always outputs at full size.
 - **Trailing bytes after EOI** are ignored (the libjpeg convention).
 - **CMYK is presented verbatim** (no Adobe inversion); **YCCK** applies the inverse YCbCr transform to
   the first three channels with `K` passed through (Adobe TN #5116).
@@ -251,9 +266,23 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   coefficients. mozjpeg's `JCP_MAX_COMPRESSION` script is smaller on average over the qualities
   for every image and configuration tried: by 0.66% (4:2:0), 1.51% (4:4:4) and 0.35% (grey), at
   identical decoded pixels. It is not smaller at every point: at 16 of 294 image x configuration x
-  quality points, 15 of them at q70-95, it is equal or up to 0.52% larger. Offering it needs an opt-in or a breaking change to this frozen script, plus a
-  vendored citation (issue #1021). jpegli's default script loses on small colour images, because
-  each of its 13–15 scans carries its own optimized table here.
+  quality points, 15 of them at q70-95, it is equal or up to 0.52% larger. It ships as an
+  **opt-in** beside this frozen script (P15 below), not a replacement. jpegli's default script
+  loses on small colour images, because each of its 13–15 scans carries its own optimized table
+  here.
+- **Progressive scan script (mozjpeg, opt-in).** `with_progressive_script(ProgressiveScript::Mozjpeg)`
+  emits mozjpeg 4.1.5's `jpeg_simple_progression` under `JCP_MAX_COMPRESSION` with
+  `dc_scan_opt_mode = 0`, transcribed from its `jcparam.c` (cited, with its file hash, in
+  `references/jpeg/README.md`). mozjpeg chooses between two scripts and so does gamut: **YCbCr**
+  is the 9-scan jpgcrush `jpeg_scan_rgb.txt` — interleaved DC `Al=0`; Y AC `1–8` `Al=2`; Cb, Cr AC
+  `1–8` `Al=0`; Y AC `9–63` `Al=2`; Y AC refine `Ah=2 Al=1`, `Ah=1 Al=0`; Cb, Cr AC `9–63` `Al=0` —
+  and **every other frame** takes the all-purpose `jpeg_scan_bw.txt`: interleaved DC `Al=0`, then
+  one scan per component for each of AC `1–8` `Al=2`, AC `9–63` `Al=2`, AC refine `Ah=2 Al=1` and
+  AC refine `Ah=1 Al=0` (5 scans for grayscale, 13 for XYB, which is not YCbCr). The frozen libjpeg
+  script, by contrast, keys on the component count alone and gives XYB its YCbCr layout; that is
+  unchanged. Not shipped: mozjpeg's `optimize_scans` search, of which this fixed script is the
+  starting point, and the other `dc_scan_opt_mode` values. While set, backends are vetoed (a
+  `JpegEncodeRequest` cannot carry the script), even for a baseline stream.
 - **Optimized per-scan Huffman tables (Annex K.2).** The standard Annex K AC tables cannot code a
   progressive AC scan (the `EOBn` run/size bytes are absent), so — like libjpeg, which forces
   `optimize_coding` for progressive — each scan builds its own table(s) from its symbol frequencies
@@ -291,9 +320,11 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14 (landed with P2), CLI `gamut convert → .jpg` (`--quality`/`--jpeg-subsampling`/`--jpeg-restart-interval`/`--jpeg-progressive`), umbrella `jpeg` feature audit, facade mutants scoping, full-workspace gate re-run | ✅ done |
 | P7 | Exif 3.0 §4.7.2; XMP Part 3 §1.1.3; ICC.1:2001-04 Annex B.4 | APP-segment metadata (rawshift requirements, issue #28 follow-up): `metadata()` header-only read of APP1 EXIF/XMP and index-reassembled multi-segment APP2 ICC; `with_exif`/`with_xmp`/`with_icc_profile` encoder builders with pre-write size validation; bidirectional libjpeg-turbo interop (`jpeg_read_icc_profile`/`jpeg_write_icc_profile`/marker capture) and a dev-only `gamut-metadata` `MetadataBlock` round-trip; `decode_image_into` destination reuse | ✅ done |
 | P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegStreamDecoder`/`JpegStreamEncoder` traits over the **whole SOI..EOI interchange stream**, `push_backend` push-order registries (`Arc<Mutex<..>>`, so `Clone` shares backends), the `backend_declined` late-decline sentinel, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
-| P9 | issue #306 | **Decoder resource limits:** opt-in dimension and native-raster byte builders; checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
+| P9 | issue #306, #1024 | **Decoder resource limits:** dimension and native-raster byte builders over bounded defaults (65535 × 65535, 64 MiB); checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
 | P10 | T.81 §K.2; issue #331 | **Optimized baseline Huffman tables:** `JpegEncoder::with_optimized_tables(bool)` — the baseline scan is walked twice through one shared coder (`BaselineCoder::gather`/`::emit`), per-destination symbol histograms drive the §K.2 construction, and the resulting luma/chroma DC+AC tables replace the Annex K.3–K.6 typical ones in the same single DHT segment. Default off, so every previously-encodable configuration stays byte-identical | ✅ done |
 | P11 | T.81 §A.3.4, §B.2.4.1; issue #332 | **Caller-supplied quantization tables:** the public `QuantTables` pair — natural order, every entry `1..=255` **by construction** (`new` rejects zero, so the encoder never divides by zero and never emits a DQT its own decoder refuses) — used verbatim via `JpegEncoder::with_quant_tables`, with `annex_k()`/`scaled()` recovering the frozen IJG mapping over arbitrary bases. Quality becomes inert while set; the frozen quality contract still governs the default path; backends are vetoed (a `JpegEncodeRequest` cannot carry tables). Alternate built-in base tables deferred (citation obligation) | ✅ done |
 | P12 | T.81 §F.1.2, Annex K.5/K.6; issue #333 | **RD-optimized coefficient selection:** the `rd` module's per-block AC trellis — dynamic program over (position, {v, v−1}) nodes with the exact run/size + ZRL + EOB bit cost of the typical AC tables as rate proxy, step-normalized distortion (the quantization table as the perceptual weighting), tuned dimensionless λ (pinned; measured 8.7% battery-wide saving at ≤ 0.35 dB) — plus `TrellisAdaptive` per-block λ modulation `√(energy/Σstep²)` clamped `[¼, 4]`. Opt-in `with_rd_optimization`; DC plain (deferred: cross-block DP through the DC predictor/restarts); default byte-identical; backends vetoed; progressive carries identical coefficients by the shared `quantize_block_rd` seam + configuration-only rate model | ✅ done |
 | P13 | Adobe TN #5116; ISO/IEC 18181-1 (XYB, via the vendored CD + pinned libjxl 0.12.0 constants); issue #334 | **XYB colour mode:** `with_color_mode(JpegColorMode::Xyb)` — sRGB → linear (EOTF LUT) → opsin XYB → scaled-XYB u8 planes (X, Y, B−Y) coded 4:4:4 under SOI → APP14 `transform=0` → EXIF/XMP → APP2 `XYB_ICC_PROFILE` → DQT, SOF ids `R`,`G`,`B`, X/Y on the luminance table and B−Y on the chrominance table (placeholder pairing, ledgered above). The 768-byte profile (input class, D50 XYZ PCS, `desc`/`cprt`/`wtpt`/`chad`/`A2B0` mAB with a 2×2×2 CLUT + cube-root parametric M curves + the frozen 0.5·XYZ(D50)·OpsinInverse matrix/`B2A0` no-op) is vendored static and umbrella-pinned; the decoder needs zero changes (RGB passthrough via APP14/ids). Differential: libjpeg-turbo decodes + test-side XYB inversion ≥ 40 dB on the battery; lcms2 reproduces sRGB from real samples (worst 25 codes at the documented near-black X amplification, mean 2.46) | ✅ done |
 | P14 | issue #420; `gamut-metadata` | **Typed metadata wiring** behind the opt-in `metadata` feature: `JpegMetadata::blocks` / `metadata`, `JpegEncoder::with_metadata` / `with_encoded_metadata`; IPTC-IIM / C2PA typed `Unsupported`; pinned by the typed extract → embed → extract equality through the stream. **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no JPEG reader), so "exiv2 reads the embedded APP1/APP2 payloads out of the JPEG" is untested; the located bytes are pinned byte-exact against libjpeg-turbo (ICC, `tests/oracle.rs`) and the leaf crates pin the payloads against exiv2 (#510) | ✅ done |
+| P15 | T.81 §G; mozjpeg 4.1.5 `jcparam.c`; issue #1021 | **Opt-in mozjpeg progressive scan script:** the fieldless `ProgressiveScript` selector (`Libjpeg = 0` frozen default, `Mozjpeg = 1`) via `JpegEncoder::with_progressive_script` — mozjpeg's `JCP_MAX_COMPRESSION` script with `dc_scan_opt_mode = 0`, its YCbCr/all-purpose choice transcribed (9-scan YCbCr, 5-scan grey, 13-scan XYB). Walker-pinned scan lists, gamut-decoder and libjpeg-turbo `decode(progressive) == decode(baseline)` exactness, backends vetoed; default byte-identical | ✅ done |
+| P16 | T.81 §A.2 NOTE; libjpeg-turbo `jdsample.c`; issue #1016 | **Reference chroma upsampling:** the built-in decoder's default `ChromaUpsampling::Interpolated` is libjpeg-turbo's fancy upsampling (h2v1/h1v2/h2v2 triangle filters with the alternating rounding bias and the narrow-component replication fallback, from `gamut_color::upsample::libjpeg`); `with_chroma_upsampling(ChromaUpsampling::Nearest)` keeps replication. Oracle: byte-identical to libjpeg-turbo's default decode at 4:2:2/4:2:0/4:4:0 and to `djpeg -nosmooth` under `Nearest` (`tests/oracle.rs`) | ✅ done |

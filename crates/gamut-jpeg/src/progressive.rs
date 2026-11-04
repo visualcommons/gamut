@@ -23,13 +23,23 @@
 //!
 //! # Frozen scan script
 //!
-//! The scan order is libjpeg's `jpeg_simple_progression` (transcribed from `jcparam.c`), SemVer-frozen
-//! here: a 6-scan grayscale layout and the 10-scan YCbCr layout (see [`scan_script`]).
+//! The default scan order is libjpeg's `jpeg_simple_progression` (transcribed from `jcparam.c`),
+//! SemVer-frozen here: a 6-scan grayscale layout and the 10-scan YCbCr layout (see
+//! [`libjpeg_script`]).
+//!
+//! # Opt-in mozjpeg script
+//!
+//! [`crate::ProgressiveScript::Mozjpeg`] selects mozjpeg's `jpeg_simple_progression` under
+//! `JCP_MAX_COMPRESSION` with `dc_scan_opt_mode = 0` instead (see [`mozjpeg_script`]; the source is
+//! cited in `references/jpeg/README.md`). It is an addition beside the frozen script, not a
+//! replacement: the default stream is unchanged.
 
 use gamut_bitstream::build_optimal_table;
 
 use crate::bitwriter::BitWriter;
-use crate::encoder::{Plane, additional_bits, magnitude_category, quantize_block_rd};
+use crate::encoder::{
+    Plane, ProgressiveScript, additional_bits, magnitude_category, quantize_block_rd,
+};
 use crate::huffman::{EncTable, emit_dht_dynamic};
 use crate::marker;
 use crate::rd::RdCtx;
@@ -124,7 +134,7 @@ impl Scan {
 ///   quick low luma AC band; full Cr then Cb AC bands (`Al = 1`); the high luma AC band; a luma AC
 ///   refinement; the interleaved DC final pass; Cr, Cb, then luma AC final refinements. Component
 ///   order (Cr before Cb) is exactly libjpeg's.
-fn scan_script(ncomps: usize) -> Vec<Scan> {
+fn libjpeg_script(ncomps: usize) -> Vec<Scan> {
     if ncomps == 1 {
         // Component index 0 is the single (luma) component.
         vec![
@@ -149,6 +159,44 @@ fn scan_script(ncomps: usize) -> Vec<Scan> {
             Scan::new(&[1], 1, 63, 1, 0),      // Cb AC final refinement
             Scan::new(&[0], 1, 63, 1, 0),      // luma AC final refinement (usually the largest)
         ]
+    }
+}
+
+/// mozjpeg's `jpeg_simple_progression` under `JCP_MAX_COMPRESSION` with `dc_scan_opt_mode = 0`
+/// (mozjpeg 4.1.5 `jcparam.c`, cited in `references/jpeg/README.md`), transcribed faithfully,
+/// including its choice between two scripts:
+///
+/// - **YCbCr** (`ycbcr`, mozjpeg's `ncomps == 3 && jpeg_color_space == JCS_YCbCr`; the caller only
+///   says so for a three-component YCbCr frame) — jpgcrush's 9-scan `jpeg_scan_rgb.txt`: one
+///   interleaved DC scan sent whole (`Al = 0`, no DC refinement); luma `1..=8` (`Al = 2`); Cb then
+///   Cr `1..=8` whole; luma `9..=63` (`Al = 2`); the two luma AC refinements; Cb then Cr `9..=63`
+///   whole.
+/// - **Any other frame** — the all-purpose `jpeg_scan_bw.txt` script, generic over the component
+///   count: one interleaved DC scan sent whole, then for each of the bands `1..=8` (`Al = 2`),
+///   `9..=63` (`Al = 2`) and the refinements `(Ah, Al) = (2, 1)`, `(1, 0)` over `1..=63`, one scan
+///   per component in frame order (mozjpeg's `fill_scans`). That is 5 scans for grayscale and 13
+///   for a three-component non-YCbCr (XYB) frame.
+fn mozjpeg_script(ncomps: usize, ycbcr: bool) -> Vec<Scan> {
+    if ycbcr {
+        // Component indices: 0 = Y, 1 = Cb, 2 = Cr (the SOF order).
+        vec![
+            Scan::new(&[0, 1, 2], 0, 0, 0, 0), // interleaved DC, whole
+            Scan::new(&[0], 1, 8, 0, 2),       // low luma AC, first pass
+            Scan::new(&[1], 1, 8, 0, 0),       // low Cb AC, whole
+            Scan::new(&[2], 1, 8, 0, 0),       // low Cr AC, whole
+            Scan::new(&[0], 9, 63, 0, 2),      // high luma AC, first pass
+            Scan::new(&[0], 1, 63, 2, 1),      // luma AC refinement
+            Scan::new(&[0], 1, 63, 1, 0),      // luma AC final refinement
+            Scan::new(&[1], 9, 63, 0, 0),      // high Cb AC, whole
+            Scan::new(&[2], 9, 63, 0, 0),      // high Cr AC, whole
+        ]
+    } else {
+        let all: Vec<usize> = (0..ncomps).collect();
+        let mut scans = vec![Scan::new(&all, 0, 0, 0, 0)]; // interleaved DC, whole
+        for (ss, se, ah, al) in [(1, 8, 0, 2), (9, 63, 0, 2), (1, 63, 2, 1), (1, 63, 1, 0)] {
+            scans.extend((0..ncomps).map(|ci| Scan::new(&[ci], ss, se, ah, al)));
+        }
+        scans
     }
 }
 
@@ -193,12 +241,18 @@ fn build_coeffs(input: &[ProgComponent], x: usize, y: usize) -> (Vec<CoeffComp>,
 /// Encodes a grayscale (1) or YCbCr (3) image as a progressive (SOF2) JPEG: writes the frame header,
 /// an optional DRI, and the scan script's DHT+SOS+entropy for each scan. The caller has already
 /// written the SOI/APP0/DQT prologue and appends EOI afterward.
+///
+/// `script` selects the scan script; `ycbcr` says the frame is three-component YCbCr, which only
+/// [`ProgressiveScript::Mozjpeg`]'s script choice reads (the frozen libjpeg script keys on the
+/// component count alone).
 pub(crate) fn encode(
     out: &mut Vec<u8>,
     width: u16,
     height: u16,
     components: &[ProgComponent],
     restart_interval: u16,
+    script: ProgressiveScript,
+    ycbcr: bool,
 ) {
     let (comps, geom) = build_coeffs(components, usize::from(width), usize::from(height));
 
@@ -208,7 +262,11 @@ pub(crate) fn encode(
         marker::write_dri(out, restart_interval);
     }
 
-    for scan in &scan_script(comps.len()) {
+    let scans = match script {
+        ProgressiveScript::Libjpeg => libjpeg_script(comps.len()),
+        ProgressiveScript::Mozjpeg => mozjpeg_script(comps.len(), ycbcr),
+    };
+    for scan in &scans {
         encode_one_scan(out, scan, &comps, &geom, restart_interval);
     }
 }

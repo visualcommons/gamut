@@ -106,8 +106,11 @@ fn fixture_planes(colour: Av1Colour, chroma: ChromaSubsampling) -> Planar8 {
 /// to rate–distortion cost too (#753), taking it to 703; and again when the in-loop filters were
 /// chosen against the source instead of fixed by `qindex` (#754), taking it to 700; and again
 /// when the default speed preset followed `gamut-av1`'s from `Thorough` to `Balanced` (#799),
-/// taking it to 688 — a time control, so the size moved only incidentally. The lossless golden
-/// is unaffected by both colour changes, by the rate–distortion search and by the speed preset:
+/// taking it to 688 — a time control, so the size moved only incidentally; and again when
+/// `gamut-av1` stopped varying the quantizer and loop-filter level by block position (#1011),
+/// coding every block at the frame's, taking it to 704 at a decoded PSNR up from 12.38 to
+/// 12.45 dB. The lossless golden is unaffected by both colour changes, by the rate–distortion
+/// search, by the speed preset and by #1011:
 /// lossless stays on the identity matrix at 4:4:4, which AV1 §6.4.2 requires of it, and has a
 /// single fixed coding path.
 #[test]

@@ -23,19 +23,23 @@
 //! Two subcommands:
 //!
 //! - `measure --image NAME=PATH ... [--synthetic WxH]` prints one CSV row per image x variant x
-//!   quality: `image,width,height,variant,quality,bytes,bpp,psnr_y,psnr_rgb,ssim_y`. `psnr_y` is
-//!   PSNR of BT.601 luma (`0.299 R + 0.587 G + 0.114 B`, unrounded) against the source; `psnr_rgb`
-//!   is PSNR over all three sRGB channels; `ssim_y` is Wang et al. (2004) SSIM on that luma with
-//!   the paper's 11x11 Gaussian window (sigma 1.5), K1 = 0.01, K2 = 0.03, averaged over every
-//!   window that fits (no padding). Inputs are binary PPM (`P6`, maxval 255) or uncompressed
-//!   24-bit BMP. `--synthetic` adds the deterministic photo-like generator the decode bench uses
+//!   quality: `image,width,height,variant,quality,bytes,bpp,psnr_y,psnr_rgb,ssim_y,ssimulacra2`.
+//!   `psnr_y` is PSNR of BT.601 luma (`0.299 R + 0.587 G + 0.114 B`, unrounded) against the
+//!   source; `psnr_rgb` is PSNR over all three sRGB channels; `ssim_y` is Wang et al. (2004) SSIM
+//!   on that luma with the paper's 11x11 Gaussian window (sigma 1.5), K1 = 0.01, K2 = 0.03,
+//!   averaged over every window that fits (no padding); `ssimulacra2` is the SSIMULACRA 2 score of
+//!   the decoded sRGB against the source (`tooling/perceptual-oracle`, issue #972; 100 is
+//!   identical), the one perceptual metric here: unlike the other three, it does not credit a flat
+//!   table by construction. Inputs are binary PPM (`P6`, maxval 255) or uncompressed 24-bit BMP.
+//!   `--synthetic` adds the deterministic photo-like generator the decode bench uses
 //!   (`benches/common/corpus.rs`).
 //! - `bdrate --baseline VARIANT FILE` reads that CSV and prints, per image x variant x metric, the
 //!   Bjontegaard-style rate difference against the baseline: the mean of
 //!   `ln(bpp_variant) - ln(bpp_baseline)` over the metrics' overlapping range, with each curve
 //!   interpolated piecewise-linearly in `ln(bpp)` (200 evenly spaced metric values), reported as
 //!   `exp(mean) - 1` in percent. Negative is smaller files at equal fidelity. SSIM is taken as
-//!   `-10 log10(1 - SSIM)` so its top end is not compressed. Columns:
+//!   `-10 log10(1 - SSIM)` so its top end is not compressed; the SSIMULACRA 2 score is used as
+//!   is. Columns:
 //!   `image,variant,baseline,metric,bd_rate_pct,overlap_lo,overlap_hi`; an `image` of `mean` is the
 //!   arithmetic mean over the images whose curves overlap.
 //!
@@ -405,7 +409,7 @@ fn measure(args: &[String]) {
             _ => panic!("unknown flag {flag}"),
         }
     }
-    println!("image,width,height,variant,quality,bytes,bpp,psnr_y,psnr_rgb,ssim_y");
+    println!("image,width,height,variant,quality,bytes,bpp,psnr_y,psnr_rgb,ssim_y,ssimulacra2");
     for (name, rgb, w, h) in &images {
         let (wu, hu) = (*w as usize, *h as usize);
         let src_y = luma(rgb);
@@ -422,8 +426,10 @@ fn measure(args: &[String]) {
                     .map(|(&a, &b)| f64::from(a.abs_diff(b)).powi(2))
                     .sum();
                 let bpp = jpeg.len() as f64 * 8.0 / (wu * hu) as f64;
+                let ssimulacra2 =
+                    perceptual_oracle::ssimulacra2_srgb8(rgb, &out, *w, *h).expect("SSIMULACRA 2");
                 println!(
-                    "{name},{w},{h},{},{q},{},{bpp:.5},{:.4},{:.4},{:.6}",
+                    "{name},{w},{h},{},{q},{},{bpp:.5},{:.4},{:.4},{:.6},{ssimulacra2:.4}",
                     variant.name,
                     jpeg.len(),
                     psnr(sse_y, wu * hu),
@@ -475,9 +481,9 @@ fn bdrate(args: &[String]) {
     };
     assert_eq!(flag, "--baseline");
     let text = std::fs::read_to_string(file).expect("read CSV");
-    const METRICS: [&str; 3] = ["psnr_y", "psnr_rgb", "ssim_y_db"];
+    const METRICS: [&str; 4] = ["psnr_y", "psnr_rgb", "ssim_y_db", "ssimulacra2"];
     // (image, variant) -> per metric curve.
-    let mut curves: BTreeMap<(String, String), [Curve; 3]> = BTreeMap::new();
+    let mut curves: BTreeMap<(String, String), [Curve; 4]> = BTreeMap::new();
     let mut variant_order: Vec<String> = Vec::new();
     for line in text.lines().skip(1) {
         let c: Vec<&str> = line.split(',').collect();
@@ -487,7 +493,7 @@ fn bdrate(args: &[String]) {
         let e = curves
             .entry((c[0].to_owned(), c[3].to_owned()))
             .or_default();
-        for (curve, m) in e.iter_mut().zip([num(7), num(8), ssim_db]) {
+        for (curve, m) in e.iter_mut().zip([num(7), num(8), ssim_db, num(10)]) {
             if m.is_finite() {
                 curve.push((m, ln_bpp));
             }

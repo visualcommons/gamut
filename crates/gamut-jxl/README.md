@@ -98,6 +98,27 @@ let encoder = JxlEncoder::lossy(Distance::new(1.0).expect("valid distance"))
 let stream = encoder.encode_to_vec(image).expect("encode");
 ```
 
+Request a progressive stream, or trade density for decode speed, through libjxl's own frame
+settings — each one stays unsent (libjxl's default) unless set:
+
+```rust
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use gamut_jxl::{DecodingSpeed, Distance, FrameSettings, JxlEncoder, ProgressiveDc, Toggle};
+
+let dims = Dimensions { width: 64, height: 64 };
+let pixels = vec![0u8; (64 * 64 * 3) as usize];
+let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("buffer length matches dimensions");
+
+let settings = FrameSettings::default()
+    .with_progressive_ac(Toggle::On)                   // JXL_ENC_FRAME_SETTING_PROGRESSIVE_AC = 1
+    .with_progressive_dc(ProgressiveDc::OneLevel)      // PROGRESSIVE_DC = 1
+    .with_decoding_speed(DecodingSpeed::Tier2);        // DECODING_SPEED = 2
+let stream = JxlEncoder::lossy(Distance::new(1.0).expect("valid distance"))
+    .with_frame_settings(settings)
+    .encode_to_vec(image)
+    .expect("encode");
+```
+
 Signal colour, orientation, and metadata (the encoder never converts pixels — it declares how they
 are to be interpreted), or losslessly re-pack an existing JPEG:
 
@@ -179,8 +200,12 @@ alpha is dropped. It refuses to *guess*, returning `Error::Unsupported` rather t
 - **Colour-as-grayscale** — a colour stream cannot be decoded into a grayscale layout (no luminance
   is invented).
 
-Oversized streams are bounded by a pixel limit; truncated or malformed input returns a typed
-`Error`, never a panic.
+Oversized streams are bounded by a fixed pixel limit (`1 << 28` samples). A caller with a smaller
+budget tightens it with `JxlDecoder::with_max_dimensions` / `with_max_image_bytes`, which are
+unbounded by default and checked against the parsed header before any pixel buffer is sized
+(and against a pushed backend's raster). The header-only `info` / `embedded_icc_profile` /
+`metadata` accessors do not apply them. Truncated or malformed input returns a typed `Error`,
+never a panic.
 
 ### Truncated and partial decode
 

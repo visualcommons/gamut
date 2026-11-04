@@ -17,9 +17,8 @@
 
 use gamut_ifd::{Ifd, ReadAt, Value};
 
-use super::{MakerNoteDialect, MakerNoteLayout, read_note_ifd};
+use super::{MakerNoteDialect, MakerNoteLayout, read_note_ifd, text};
 use crate::error::Result;
-use crate::value::as_text;
 
 /// `CameraSettings`: a `SHORT` array whose element 0 is its own byte length.
 const CAMERA_SETTINGS: u16 = 0x0001;
@@ -176,7 +175,7 @@ impl CanonMakerNote {
     /// [`unreadable_tags`](Self::unreadable_tags) and reads as `None`, where exiv2 still reports
     /// the prefix (the divergence `references/exif/canon/README.md` records).
     fn text(&self, tag: u16) -> Option<&str> {
-        as_text(self.ifd.get(tag)?)?.split('\0').next()
+        text(&self.ifd, tag)
     }
 }
 

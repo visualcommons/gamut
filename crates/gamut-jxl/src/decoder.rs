@@ -256,7 +256,9 @@ impl gamut_metadata::TypedMetadata for JxlMetadata {
 /// relax.
 ///
 /// Construct it with [`JxlDecoder::new`] or [`Default`], then optionally set
-/// [`JxlDecoder::with_codestream_bit_depth`] and [`JxlDecoder::with_convert_policy`].
+/// [`JxlDecoder::with_codestream_bit_depth`], [`JxlDecoder::with_convert_policy`], and the hostile-input
+/// caps [`JxlDecoder::with_max_dimensions`] and [`JxlDecoder::with_max_image_bytes`] (unbounded by
+/// default, beneath a fixed `1 << 28`-sample ceiling in the built-in tail).
 ///
 /// # Backends
 ///
@@ -275,6 +277,8 @@ pub struct JxlDecoder {
     codestream_bit_depth: bool,
     /// Which lossy layout conversions a typed decode may perform.
     policy: ConvertPolicy,
+    /// The caller's dimension and byte budget for a decoded raster.
+    limits: DecodeLimits,
     /// Pushed codestream backends, tried in push order ahead of the built-in jxl-rs tail.
     backends: Registry<dyn JxlCodestreamDecoder>,
 }
@@ -283,17 +287,111 @@ impl PartialEq for JxlDecoder {
     /// Compares the decoder **configuration**; the backend registries are ignored, since a
     /// [`JxlCodestreamDecoder`] is an opaque trait object with no notion of equality.
     fn eq(&self, other: &Self) -> bool {
-        self.codestream_bit_depth == other.codestream_bit_depth && self.policy == other.policy
+        self.codestream_bit_depth == other.codestream_bit_depth
+            && self.policy == other.policy
+            && self.limits == other.limits
     }
 }
 
 impl Eq for JxlDecoder {}
+
+/// The caller-set bounds on a decoded raster ([`JxlDecoder::with_max_dimensions`],
+/// [`JxlDecoder::with_max_image_bytes`]), checked against the stream's parsed image header before
+/// any pixel buffer is sized.
+///
+/// The defaults are unbounded (`u32::MAX` per side, `usize::MAX` bytes), so an unconfigured decoder
+/// refuses exactly what it refused before these limits existed: the built-in tail's fixed jxl-rs
+/// pixel limit stays the ceiling under every setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodeLimits {
+    /// Widest accepted image, in pixels.
+    pub(crate) max_width: u32,
+    /// Tallest accepted image, in pixels.
+    pub(crate) max_height: u32,
+    /// Largest accepted decoded sample buffer, in bytes.
+    pub(crate) max_image_bytes: usize,
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_width: u32::MAX,
+            max_height: u32::MAX,
+            max_image_bytes: usize::MAX,
+        }
+    }
+}
+
+impl DecodeLimits {
+    /// Refuses a `width` × `height` raster of `bytes_per_pixel`-byte pixels that exceeds either
+    /// limit. A byte count that overflows `usize` exceeds every budget.
+    pub(crate) fn check(self, width: u32, height: u32, bytes_per_pixel: usize) -> Result<()> {
+        if width > self.max_width || height > self.max_height {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JXL: image exceeds the dimension limit",
+            ));
+        }
+        let bytes = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel));
+        if bytes.is_none_or(|bytes| bytes > self.max_image_bytes) {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JXL: image exceeds the size limit",
+            ));
+        }
+        Ok(())
+    }
+}
 
 impl JxlDecoder {
     /// Creates a decoder with the default configuration.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Caps the accepted image dimensions; a wider or taller image is refused with
+    /// [`Error::Unsupported`] once its header is parsed, before any pixel buffer is allocated.
+    ///
+    /// Unbounded by default. This only ever tightens what the decoder accepts: the built-in
+    /// tail's fixed jxl-rs pixel limit of `1 << 28` samples still applies on top. A raster a pushed
+    /// backend returns is held to the same caps. Returns the updated decoder for chaining.
+    #[must_use]
+    pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
+        self.limits.max_width = width;
+        self.limits.max_height = height;
+        self
+    }
+
+    /// The accepted `(width, height)` caps (see [`JxlDecoder::with_max_dimensions`]).
+    #[must_use]
+    pub fn max_dimensions(&self) -> (u32, u32) {
+        (self.limits.max_width, self.limits.max_height)
+    }
+
+    /// Caps the decoded sample buffer in bytes; a larger image is refused with
+    /// [`Error::Unsupported`] once its header is parsed, before any pixel buffer is allocated.
+    ///
+    /// The budgeted quantity is `width × height × bytes per pixel` of the wider of the stream's
+    /// natural layout and the requested one — the largest raster the decode materialises. It
+    /// bounds the zero-filled `JxlRender::HeaderOnly` buffer the best-effort `DecodePartialImage`
+    /// path returns for a stream cut short after its headers, too.
+    ///
+    /// Unbounded by default; as for [`with_max_dimensions`](Self::with_max_dimensions), the
+    /// built-in tail's fixed pixel limit still applies on top, and a pushed backend's raster is held
+    /// to the same budget. Returns the updated decoder for chaining.
+    #[must_use]
+    pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
+        self.limits.max_image_bytes = bytes;
+        self
+    }
+
+    /// The decoded sample buffer cap in bytes (see [`JxlDecoder::with_max_image_bytes`]).
+    #[must_use]
+    pub fn max_image_bytes(&self) -> usize {
+        self.limits.max_image_bytes
     }
 
     /// Selects whether integer output carries the **codestream's declared bit depth** instead of
@@ -487,6 +585,9 @@ impl JxlDecoder {
                     if decoded.format() != format {
                         return Err(wrong_backend_layout());
                     }
+                    let dims = decoded.dimensions();
+                    self.limits
+                        .check(dims.width, dims.height, format.bytes_per_pixel())?;
                     return Ok(Some(decoded));
                 }
                 // A late decline: fall through exactly as `supports() == false` would.
@@ -505,7 +606,8 @@ impl JxlDecoder {
 /// The mirror of [`DecodeImage`] for input that may be cut short — a partly-downloaded file, a
 /// stream still in flight, a salvage attempt on a damaged one. [`DecodeImage::decode_image`] is
 /// unchanged and still rejects every truncation; this is the opt-in relaxation, and it relaxes
-/// **truncation only**: animation, premultiplied alpha, colour-as-grayscale and the pixel limit
+/// **truncation only**: animation, premultiplied alpha, colour-as-grayscale, the pixel limit and
+/// the caller's [`JxlDecoder::with_max_dimensions`] / [`JxlDecoder::with_max_image_bytes`] caps
 /// stay the same typed refusals.
 ///
 /// # What you actually get
@@ -575,7 +677,12 @@ macro_rules! impl_decode_image {
                 }
                 #[cfg(feature = "decode")]
                 {
-                    crate::jxlrs::decode_to_buf::<$pixel>(data, self.codestream_bit_depth, self.policy)
+                    crate::jxlrs::decode_to_buf::<$pixel>(
+                        data,
+                        self.codestream_bit_depth,
+                        self.policy,
+                        self.limits,
+                    )
                 }
                 #[cfg(not(feature = "decode"))]
                 {
@@ -602,6 +709,7 @@ macro_rules! impl_decode_image {
                         data,
                         self.codestream_bit_depth,
                         self.policy,
+                        self.limits,
                         dst,
                     )
                 }
@@ -624,6 +732,7 @@ macro_rules! impl_decode_image {
                     data,
                     self.codestream_bit_depth,
                     self.policy,
+                    self.limits,
                 )
             }
         }
@@ -662,6 +771,85 @@ mod tests {
         assert_ne!(
             JxlDecoder::new(),
             JxlDecoder::new().with_codestream_bit_depth(true)
+        );
+    }
+
+    #[test]
+    fn the_caps_default_unbounded_and_take_part_in_equality() {
+        let default = JxlDecoder::new();
+        assert_eq!(default.max_dimensions(), (u32::MAX, u32::MAX));
+        assert_eq!(default.max_image_bytes(), usize::MAX);
+
+        let capped = JxlDecoder::new().with_max_dimensions(3, 5);
+        assert_eq!(capped.max_dimensions(), (3, 5));
+        assert_ne!(capped, default);
+        let budgeted = JxlDecoder::new().with_max_image_bytes(7);
+        assert_eq!(budgeted.max_image_bytes(), 7);
+        assert_ne!(budgeted, default);
+    }
+
+    /// The error kind and message a limit refusal carries.
+    fn refusal(result: Result<()>) -> (gamut_core::ErrorKind, Option<&'static str>) {
+        let error = result.expect_err("over the limit");
+        (error.kind(), error.static_message())
+    }
+
+    const DIMENSION: (gamut_core::ErrorKind, Option<&str>) = (
+        gamut_core::ErrorKind::Unsupported,
+        Some("JXL: image exceeds the dimension limit"),
+    );
+    const SIZE: (gamut_core::ErrorKind, Option<&str>) = (
+        gamut_core::ErrorKind::Unsupported,
+        Some("JXL: image exceeds the size limit"),
+    );
+
+    #[test]
+    fn decode_limits_admit_their_exact_bounds_and_refuse_one_past() {
+        let limits = DecodeLimits {
+            max_width: 4,
+            max_height: 3,
+            max_image_bytes: 4 * 3 * 2,
+        };
+        assert!(limits.check(4, 3, 2).is_ok());
+        assert_eq!(refusal(limits.check(5, 3, 1)), DIMENSION);
+        assert_eq!(refusal(limits.check(4, 4, 1)), DIMENSION);
+        // Every factor of the byte count is weighed: one more of any exceeds the budget.
+        assert_eq!(refusal(limits.check(4, 3, 3)), SIZE);
+        let one_short = DecodeLimits {
+            max_image_bytes: 4 * 3 * 2 - 1,
+            ..limits
+        };
+        assert_eq!(refusal(one_short.check(4, 3, 2)), SIZE);
+    }
+
+    #[test]
+    fn decode_limits_refuse_a_byte_count_that_overflows() {
+        // Unbounded caps still cannot admit a raster whose size `usize` cannot even express.
+        let unbounded = DecodeLimits::default();
+        assert_eq!(
+            refusal(unbounded.check(u32::MAX, u32::MAX, usize::MAX)),
+            SIZE
+        );
+    }
+
+    #[test]
+    fn a_backend_raster_is_held_to_the_callers_caps() {
+        // `FixedBackend::returning` answers with a 2×2 `Gray8` raster: 4 bytes.
+        let decode = |decoder: JxlDecoder| {
+            let mut decoder = decoder;
+            decoder.push_backend(FixedBackend::returning(1));
+            let result: Result<ImageBuf<Gray8>> = decoder.decode_image(&STREAM);
+            result.map(|_| ())
+        };
+        assert!(decode(JxlDecoder::new().with_max_dimensions(2, 2)).is_ok());
+        assert!(decode(JxlDecoder::new().with_max_image_bytes(4)).is_ok());
+        assert_eq!(
+            refusal(decode(JxlDecoder::new().with_max_dimensions(1, 2))),
+            DIMENSION
+        );
+        assert_eq!(
+            refusal(decode(JxlDecoder::new().with_max_image_bytes(3))),
+            SIZE
         );
     }
 

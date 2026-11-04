@@ -1,0 +1,31 @@
+# Dev-only perceptual-metric oracle: NOT a member of the gamut workspace (listed under
+# `[workspace].exclude` in the root manifest, pulled in only as a path `dev-dependency`). It scores a
+# distorted 8-bit sRGB image against its source with SSIMULACRA 2, through the pure-Rust `ssimulacra2`
+# crate (rust-av, BSD-2-Clause), so quality experiments (issue #972, experiment #29) can rank encoder
+# variants by a perceptual metric instead of PSNR/SSIM alone.
+#
+# It exists as a crate of its own for two reasons. `gamut-jpeg` may not dev-depend on a sibling
+# publishable workspace crate (`mise run check-release-deps`), and the external metric tree stays
+# behind one dev-only seam that fixes how gamut's interleaved `Rgb8` buffers are interpreted (sRGB
+# transfer, BT.709 primaries), so a consumer cannot hand the metric mislabelled samples.
+[package]
+name = "perceptual-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only perceptual-metric oracle: SSIMULACRA 2 scores for 8-bit sRGB images, for gamut's quality experiments."
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+# Default features off: the default `rayon` feature only parallelises the Gaussian blur's rows
+# (`src/blur/gaussian.rs`), and a serial score keeps the experiment arms single-threaded and their
+# dependency tree smaller.
+ssimulacra2 = { version = "0.5.1", default-features = false }
+
+# Its own workspace root, so cargo never walks further up looking for one: a checkout nested
+# inside another gamut checkout (a worktree under `.claude/worktrees/`) would otherwise find the
+# outer manifest, which does not exclude this path.
+[workspace]

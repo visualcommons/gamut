@@ -1,0 +1,20 @@
+[Leica]         0x300a Contrast                        : 2
+[Leica]         0x300b Sharpening                      : 2
+[Leica]         0x300d Saturation                      : 2
+[Leica]         0x3033 WhiteBalance                    : 0
+[Leica]         0x3034 JPEGQuality                     : 97
+[Leica]         0x3036 WB_RGBLevels                    : 1 1 1
+[Leica]         0x3038 UserProfile                     : 
+[Leica]         0x303a JPEGSize                        : 0
+[Leica]         0x3103 SerialNumber                    : 4348886
+[Leica]         0x3109 FirmwareVersion                 : 1.008
+[Leica]         0x312a BaseISO                         : 320
+[Leica]         0x312b SensorWidth                     : 5270
+[Leica]         0x312c SensorHeight                    : 3516
+[Leica]         0x312d SensorBitDepth                  : 14
+[Leica]         0x3402 CameraTemperature               : 11
+[Leica]         0x3405 LensType                        : 33 3
+[Leica]         0x3406 ApproximateFNumber              : 6.5
+[Leica]         0x3407 MeasuredLV                      : 2.64448
+[Leica]         0x3408 ExternalSensorBrightnessValue   : 3.7888
+[Leica]         0x0016 LensType                        : 33 3

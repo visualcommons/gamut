@@ -149,6 +149,18 @@ jobs:
           - isobmff_boxes
           - heic_container
           - heic_hvcc
+          # The decoder and metadata-parser entry points (#311): every remaining ☐ row of that
+          # table, plus gamut-av1's header-layer `inspect`.
+          - png_decode
+          - jpeg_decode
+          - webp_decode
+          - riff_chunks
+          - jxl_decode
+          - av1_inspect
+          - icc_parse
+          - exif_parse
+          - xmp_parse
+          - iptc_read_irb
     env:
       MISE_TASK_RUN_AUTO_INSTALL: false
     steps:

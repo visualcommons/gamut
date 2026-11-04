@@ -49,8 +49,10 @@ let info = gamut_jpeg::info(jpeg)?; // dimensions / components / process, withou
 # }
 ```
 
-For untrusted input, opt in to both geometry and native-raster budgets. The byte cap counts the
-JPEG frame's own components, independently of the requested presentation type:
+`JpegDecoder::new()` bounds untrusted input by default: dimensions up to the format's 65535 × 65535
+ceiling and a 64 MiB native-raster budget. The byte cap counts the JPEG frame's own components,
+independently of the requested presentation type. Tighten either for your domain, or lift the
+budget with `with_max_image_bytes(usize::MAX)` for trusted input larger than 64 MiB:
 
 ```rust
 # use gamut_core::{DecodeImage, ImageBuf, Rgb8};
@@ -58,7 +60,7 @@ JPEG frame's own components, independently of the requested presentation type:
 # fn demo(jpeg: &[u8]) -> Result<(), gamut_core::Error> {
 let decoder = JpegDecoder::new()
     .with_max_dimensions(16_384, 16_384)
-    .with_max_image_bytes(64 * 1024 * 1024);
+    .with_max_image_bytes(16 * 1024 * 1024);
 let image: ImageBuf<Rgb8> = decoder.decode_image(jpeg)?;
 # let _ = image;
 # Ok(())
@@ -104,8 +106,8 @@ APP0 / Adobe APP14 hints), interleaved or non-interleaved scans, spectral select
 approximation, restart intervals, and (for sequential frames) DNL-defined heights — and never panics
 on malformed input. Progressive frames with a deferred (`Y = 0` / DNL) height are rejected as
 unsupported, and a partial progressive stream renders what it has (matching libjpeg).
-`JpegDecoder::with_max_dimensions` and `with_max_image_bytes` provide opt-in hostile-input guards;
-known SOF geometry is rejected before frame-sized allocation, and a sequential DNL-deferred height
+`JpegDecoder` bounds hostile input by default (65535 × 65535, 64 MiB native raster), and
+`with_max_dimensions` / `with_max_image_bytes` tighten or lift those guards; known SOF geometry is rejected before frame-sized allocation, and a sequential DNL-deferred height
 is bounded while its first scan grows.
 
 Embedded metadata ships both ways (P7): `metadata()` reads APP1 EXIF, APP1 XMP, and multi-segment

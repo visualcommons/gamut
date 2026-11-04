@@ -197,7 +197,8 @@ fn an_empty_registry_leaves_both_directions_on_the_built_in_path() {
     let dec = JpegDecoder::new();
     assert_eq!(
         format!("{dec:?}"),
-        "JpegDecoder { max_width: None, max_height: None, max_image_bytes: None, backends: 0 }"
+        "JpegDecoder { max_width: 65535, max_height: 65535, max_image_bytes: 67108864, backends: 0, \
+         upsampling: Interpolated }"
     );
     let a: ImageBuf<Gray8> = dec.decode_image(&plain).unwrap();
 
@@ -1366,4 +1367,33 @@ fn rd_optimization_pins_the_encode_to_the_built_in_path() {
         .encode_to_vec(img)
         .unwrap();
     assert_eq!(with_registry, built_in);
+}
+
+#[test]
+fn progressive_script_pins_the_encode_to_the_built_in_path() {
+    // A `JpegEncodeRequest` carries `progressive` but not the scan script, so a non-default script
+    // must skip the registry rather than let a backend encode with its own.
+    use gamut_jpeg::ProgressiveScript;
+    let log: Log = Arc::default();
+    let configured = || {
+        JpegEncoder::new()
+            .with_progressive(true)
+            .with_progressive_script(ProgressiveScript::Mozjpeg)
+    };
+    let mut enc = configured();
+    enc.push_backend(ScriptedEncoder {
+        name: "eager",
+        act: Act::Accept,
+        log: Arc::clone(&log),
+        out: backend_stream(),
+    });
+    let pixels = gray_pixels();
+    let img = ImageRef::<Gray8>::new(&pixels, dims()).unwrap();
+    let with_registry = enc.encode_to_vec(img).unwrap();
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "no backend may be consulted while a non-default scan script is set"
+    );
+    let img = ImageRef::<Gray8>::new(&pixels, dims()).unwrap();
+    assert_eq!(with_registry, configured().encode_to_vec(img).unwrap());
 }

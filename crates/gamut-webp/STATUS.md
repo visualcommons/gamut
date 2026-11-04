@@ -275,6 +275,7 @@ Owner: [`gamut-color`](../gamut-color). VP8L is RGB-native (no YCbCr); VP8 needs
 | --- | --- | --- | --- |
 | VP8L: 8-bit RGB / ARGB, identity (no color conversion) | — | ✅ | M0 |
 | VP8: **limited-range** BT.601 RGB↔YCbCr + 4:2:0 chroma subsample/upsample (**new** module) | RFC 6386 §14.2; Google *WebP Container* (BT.601) | ✅ | M2 |
+| VP8 decode: 4:2:0 chroma upsampled with libwebp's fancy upsampler by default (`ChromaUpsampling::Interpolated`, `gamut_color::upsample::libwebp`); `WebpDecoder::with_chroma_upsampling(ChromaUpsampling::Nearest)` replicates. Oracle: RGB and RGBA byte-identical to libwebp's default decode, `Nearest` byte-identical to libwebp `no_fancy_upsampling` | libwebp `src/dsp/upsampling.c`; issue #1016 | ✅ | #1016 |
 | alpha-channel plane handling | §2.7.1 (Alpha) | ✅ | M3 |
 
 ---
@@ -298,6 +299,7 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | codestream backend registries (`WebpCodestreamDecoder`/`WebpCodestreamEncoder`, push order + built-in tails) | issue #275 | ✅ | M6 |
 | `gamut-codec-abi` adapters (`AbiDecoderBackend` / `AbiEncoderBackend`, `VP8 `/`VP8L` codec ids) | issue #241 | ✅ | M6 |
 | `Effort` compression ladder (libwebp `method` `0..=6`) on both codestreams | issue #261 | ✅ | M4 |
+| decoder resource limits (`with_max_dimensions` / `with_max_image_bytes`, 64 MiB default at 4 B/px), checked on the `VP8 `/`VP8L` header before allocation and backend dispatch | issue #1025 | ✅ | M6 |
 | VP8L candidate-plan search: transform chain, palette order, cache size, grouping, LZ77 depth | issue #31 | ✅ | M4 |
 | VP8 two-pass entropy: derived coefficient probabilities + measured skip probability | issue #32 | ✅ | M4 |
 | VP8 dead-zone quantizer (AC only; DC stays round-to-nearest) | issue #32 | ✅ | M4 |

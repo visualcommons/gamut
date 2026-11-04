@@ -1,11 +1,11 @@
 {
   "issue": 29,
-  "git_sha": "c2f4f6c1013c99be8a3ee88a248d7c97d2ab1395",
+  "git_sha": "fc3aec512358782972a1c1db57b72f174b2acfa0",
   "git_dirty": false,
   "libjpeg_turbo_submodule": "c85e6b905bf237038faa936dab160ebfc5da0344",
   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13);binary: rustc;commit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67;commit-date: 2026-10-13;host: x86_64-unknown-linux-gnu;release: 1.99.1;LLVM version: 23.1.1;",
   "mise_lock_sha256": null,
-  "cargo_lock_sha256": "6328053372c66b7b67dea0f71ada545583a29a443e9559be3a03b91112a8a12c",
+  "cargo_lock_sha256": "826e050792452dfd9b451f13d2c2ee2537d0d3450c8d113774769cbc92378cb2",
   "rust_toolchain_toml_sha256": "e7613d421d2367015f232d2a0f8fe9684daf707a56308b046b92405ce2ccab09",
   "synthetic": "512x384",
   "seeds": "none: encodes are deterministic and the synthetic input is a fixed-seed LCG generator (crates/gamut-jpeg/benches/common/corpus.rs)",

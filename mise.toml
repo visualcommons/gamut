@@ -209,8 +209,9 @@ run = "./tooling/gamut-fuzz/run.sh"
 # The compile half of the tier above -- the only part of it the per-PR lane can afford, and the
 # same argument `check-dng-real` below makes for the other excluded `tooling/` crate: `gamut-fuzz`
 # is workspace-excluded *and* nothing depends on it, so `clippy --workspace --all-targets` and
-# `test --workspace` never build it, and an API change in gamut-ifd, gamut-tiff, gamut-dng,
-# gamut-isobmff or gamut-heic can break every target while all four required checks stay green.
+# `test --workspace` never build it, and an API change in any crate a target drives (the
+# `[dependencies]` of tooling/gamut-fuzz/Cargo.toml, not a list repeated here) can break every
+# target while all four required checks stay green.
 # Clippy only: no nightly, no sanitizer, no engine, so it stays bounded and reproducible and does
 # not put a coverage-guided run on the pull-request path (docs/testing.md).
 #

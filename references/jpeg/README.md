@@ -123,6 +123,75 @@ canonical C JPEG-1 implementation (libjpeg-turbo / mozjpeg family) plus the vend
 software** for spec-exact behaviour, gating decode round-trips and encode parity. The concrete oracle
 crate and gate will be documented in `gamut-jpeg`'s `STATUS.md` when the crate lands.
 
+## mozjpeg progressive scan script (issue #1021)
+
+T.81 §G leaves the progressive scan script (which spectral bands and successive-approximation bits
+each scan carries, and in what order) to the encoder. `gamut-jpeg` freezes libjpeg's
+`jpeg_simple_progression` as its default and offers mozjpeg's maximum-compression script as an
+opt-in (`ProgressiveScript::Mozjpeg`). mozjpeg is not vendored; the source is documented here.
+
+- **Source:** mozjpeg **v4.1.5**, `jcparam.c`, function `jpeg_simple_progression`, the
+  `compress_profile == JCP_MAX_COMPRESSION` branches with the default `dc_scan_opt_mode = 0`.
+  Fetched from `https://raw.githubusercontent.com/mozilla/mozjpeg/v4.1.5/jcparam.c`
+  (991 lines, SHA-256 `563fe8e2fbf71760a269cced3dda5a6e67e1a1facc6bbd5f8a9727db5a5d4d9a`). Its
+  comments name the scripts' origin: jpgcrush's `jpeg_scan_rgb.txt` (YCbCr) and
+  `jpeg_scan_bw.txt` (all-purpose).
+- **Licence:** IJG licence + libjpeg-turbo/mozjpeg modified BSD (*"This file was part of the
+  Independent JPEG Group's software … mozjpeg Modifications: Copyright (C) 2014, Mozilla
+  Corporation"*). The excerpt below is quoted for citation.
+- **Selection rule:** the custom script applies when `ncomps == 3 && jpeg_color_space ==
+  JCS_YCbCr`; every other frame takes the all-purpose script, which `fill_scans` repeats for each
+  component in frame order, after one interleaved DC scan (`fill_dc_scans`, interleaved for at
+  most `MAX_COMPS_IN_SCAN = 4` components). With `optimize_scans` on (mozjpeg's default) this
+  fixed script is replaced by a search (`jpeg_search_progression`); gamut does not ship the search.
+
+The two branches, quoted verbatim (`fill_a_scan(ptr, ci, Ss, Se, Ah, Al)`):
+
+```c
+  if (ncomps == 3 && cinfo->jpeg_color_space == JCS_YCbCr) {
+    /* Custom script for YCbCr color images. */
+    if (cinfo->master->compress_profile == JCP_MAX_COMPRESSION) {
+      /* scan defined in jpeg_scan_rgb.txt in jpgcrush */
+    /* Initial DC scan */
+      if (cinfo->master->dc_scan_opt_mode == 0) {
+        /* 1 DC scan for all components */
+        scanptr = fill_dc_scans(scanptr, ncomps, 0, 0);
+      } /* … dc_scan_opt_mode 1 and 2 elided … */
+      /* Low frequency AC scans */
+      scanptr = fill_a_scan(scanptr, 0, 1, 8, 0, 2);
+      scanptr = fill_a_scan(scanptr, 1, 1, 8, 0, 0);
+      scanptr = fill_a_scan(scanptr, 2, 1, 8, 0, 0);
+      /* Complete spectral selection for luma AC */
+      scanptr = fill_a_scan(scanptr, 0, 9, 63, 0, 2);
+      /* Finish luma AC successive approximation */
+      scanptr = fill_a_scan(scanptr, 0, 1, 63, 2, 1);
+      scanptr = fill_a_scan(scanptr, 0, 1, 63, 1, 0);
+      /* Complete spectral selection for chroma AC */
+      scanptr = fill_a_scan(scanptr, 1, 9, 63, 0, 0);
+      scanptr = fill_a_scan(scanptr, 2, 9, 63, 0, 0);
+    } /* … libjpeg's script elided … */
+  } else {
+    /* All-purpose script for other color spaces. */
+    if (cinfo->master->compress_profile == JCP_MAX_COMPRESSION) {
+      /* scan defined in jpeg_scan_bw.txt in jpgcrush */
+      /* DC component, no successive approximation */
+      scanptr = fill_dc_scans(scanptr, ncomps, 0, 0);
+    /* Successive approximation first pass */
+      scanptr = fill_scans(scanptr, ncomps, 1, 8, 0, 2);
+      scanptr = fill_scans(scanptr, ncomps, 9, 63, 0, 2);
+      /* Successive approximation second pass */
+      scanptr = fill_scans(scanptr, ncomps, 1, 63, 2, 1);
+      /* Successive approximation final pass */
+      scanptr = fill_scans(scanptr, ncomps, 1, 63, 1, 0);
+    } /* … libjpeg's script elided … */
+  }
+```
+
+Experiment #30 (`experiments/30/RESULTS.md`, *Scan scripts*) measured this script against the
+frozen libjpeg one on the same quantized coefficients: smaller on average in every image ×
+configuration cell (−0.35% grey, −0.66% 4:2:0, −1.51% 4:4:4), equal or up to 0.52% larger at 16 of
+294 points, at identical libjpeg-turbo-decoded pixels.
+
 ## XYB-coded JPEG (the jpegli convention, issue #334)
 
 An XYB JPEG stores three components of scaled-XYB samples (see `references/color/README.md`,

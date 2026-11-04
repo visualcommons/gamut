@@ -175,9 +175,13 @@ the catalogue and vendor enums are `#[non_exhaustive]`):
 - **Per-vendor MakerNote tag decoding.** The `MakerNote` block is preserved verbatim, its vendor
   detected ([`MakerNoteVendor`]), and its dispatch layout resolved (`MakerNoteLayout`: header
   dialect, IFD byte order and offset, and whether value offsets are file-absolute or
-  note-relative, after exiv2's table plus Apple). Canon's tags are decoded into a read-only
-  `CanonMakerNote` view (`MakerNote::canon`, issue #977; its tags are staked in
-  `references/exif/canon/`); every other vendor's are not yet — that is the rest of the per-vendor
+  note-relative, after exiv2's table plus Apple and Leica). Canon's tags are decoded into a
+  read-only `CanonMakerNote` view (`MakerNote::canon`, issue #977; its tags are staked in
+  `references/exif/canon/`), and Leica's into a `LeicaMakerNote` view (`MakerNote::leica`, issue
+  #978; typed accessors for the M9/M Monochrom and M10/S tables, staked in
+  `references/exif/leica/`), and Sony's into a `SonyMakerNote` view (`MakerNote::sony`, issue
+  #980; the headerless `Sony2` dialect only, staked in `references/exif/sony/`; a `SONY DSC`
+  note has no view until issue #1033); every other vendor's are not yet — that is the rest of the per-vendor
   work of issue #418. Since issue #263 a parsed model records the
   note's absolute source offset and the writer **pins** the byte range there on a rewrite, so
   vendor TIFF-absolute internal offsets stay valid; only an unsatisfiable pin (the directory

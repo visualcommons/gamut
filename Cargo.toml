@@ -39,6 +39,10 @@ exclude = [
     "tooling/libjpeg-oracle",
     "tooling/exiv2-oracle",
     "tooling/libheif-oracle",
+    # Dev-only perceptual-metric oracle (issue #972): SSIMULACRA 2 scores for gamut-jpeg's quality
+    # experiment arms, over the external pure-Rust `ssimulacra2` crate. Excluded so a plain
+    # `cargo build` of the shipped crates never compiles that metric tree.
+    "tooling/perceptual-oracle",
     # Dev-only helper that builds a vendored nasm from a committed source tarball so the
     # oracles above can assemble the aom/dav1d x86 SIMD without a system nasm. Excluded for
     # the same reason: a plain `cargo build` of the shipped crates must never compile it.

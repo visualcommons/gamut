@@ -18,12 +18,17 @@ use jxl::headers::extra_channels::ExtraChannel;
 
 use crate::backend::layout_of;
 use crate::convert::{ConvSample, native_format, reassemble};
+use crate::decoder::DecodeLimits;
 use crate::error::map_decode_error;
 
 /// Upper bound on decoded size, in **pixels × channels**, enforced by jxl-rs's
 /// [`JxlDecoderOptions::pixel_limit`]. `1 << 28` (≈268M) samples caps a hostile stream's memory use
 /// (a 16-bit RGBA image at this limit is ~512 MiB of output) while comfortably admitting every
-/// realistic still image. The limit is deliberately generous and additive to lower later.
+/// realistic still image. The limit is deliberately generous and fixed: it is the ceiling, and a
+/// caller with a smaller budget tightens below it through
+/// [`JxlDecoder::with_max_dimensions`](crate::JxlDecoder::with_max_dimensions) and
+/// [`JxlDecoder::with_max_image_bytes`](crate::JxlDecoder::with_max_image_bytes), which
+/// [`decode_raw`] checks against the parsed header.
 const PIXEL_LIMIT: usize = 1 << 28;
 
 /// Parses the stream's headers and returns its basic properties without decoding any pixels.
@@ -214,6 +219,11 @@ struct RawOptions {
     codestream_bit_depth: bool,
     /// What to do with a stream that ends early.
     truncation: Truncation,
+    /// The caller's dimension and byte budget, checked once the image header is parsed.
+    limits: DecodeLimits,
+    /// Bytes per pixel of the requested layout, which the byte budget weighs against the stream's
+    /// natural layout (the wider of the two is what the decode materialises).
+    dst_bytes_per_pixel: usize,
 }
 
 /// Narrows a jxl-rs `usize` count to `u32`, saturating rather than wrapping.
@@ -297,8 +307,8 @@ fn aligned_backing(total: usize, align2: bool) -> (Vec<u8>, usize) {
 ///
 /// [`RawOptions::truncation`] decides what a stream that ends early yields — a typed error, or the
 /// best-effort frame plus the [`JxlPartialReport`] describing it. Every *other* refusal (animation,
-/// premultiplied alpha, colour-as-grayscale, the pixel limit) stays a hard error under both
-/// policies: this relaxes truncation, nothing else.
+/// premultiplied alpha, colour-as-grayscale, the pixel limit, [`RawOptions::limits`]) stays a hard
+/// error under both policies: this relaxes truncation, nothing else.
 fn decode_raw<S: ConvSample>(
     data: &[u8],
     dst_is_gray_family: bool,
@@ -407,8 +417,17 @@ fn decode_raw<S: ConvSample>(
         extra_channel_format: vec![None; num_extra],
     });
 
-    // Size the single interleaved output buffer, guarding the byte arithmetic against overflow.
+    // The caller's limits, before anything is sized: the zero-filled buffer below is what a stream
+    // truncated after its headers comes back as, so it is the allocation a few hostile header bytes
+    // can otherwise make arbitrarily large.
     let src_channels = src_color + usize::from(src_alpha);
+    options.limits.check(
+        width,
+        height,
+        (src_channels * S::BYTES).max(options.dst_bytes_per_pixel),
+    )?;
+
+    // Size the single interleaved output buffer, guarding the byte arithmetic against overflow.
     let bytes_per_row = (width as usize)
         .checked_mul(src_channels)
         .and_then(|n| n.checked_mul(S::BYTES))
@@ -515,6 +534,7 @@ fn decode_samples<P: Pixel>(
     data: &[u8],
     codestream_bit_depth: bool,
     policy: ConvertPolicy,
+    limits: DecodeLimits,
     truncation: Truncation,
 ) -> Result<(Vec<P::Sample>, PixelFormat, Dimensions, JxlPartialReport)>
 where
@@ -532,6 +552,8 @@ where
         RawOptions {
             codestream_bit_depth,
             truncation,
+            limits,
+            dst_bytes_per_pixel: P::FORMAT.bytes_per_pixel(),
         },
     )?;
     let format =
@@ -554,12 +576,18 @@ pub(crate) fn decode_to_buf<P: Pixel>(
     data: &[u8],
     codestream_bit_depth: bool,
     policy: ConvertPolicy,
+    limits: DecodeLimits,
 ) -> Result<ImageBuf<P>>
 where
     P::Sample: ConvSample,
 {
-    let (samples, format, dims, _) =
-        decode_samples::<P>(data, codestream_bit_depth, policy, Truncation::Reject)?;
+    let (samples, format, dims, _) = decode_samples::<P>(
+        data,
+        codestream_bit_depth,
+        policy,
+        limits,
+        Truncation::Reject,
+    )?;
     convert_from_raw(RawImage::new(&samples, format, dims)?, policy)
 }
 
@@ -568,12 +596,18 @@ pub(crate) fn decode_partial_to_buf<P: Pixel>(
     data: &[u8],
     codestream_bit_depth: bool,
     policy: ConvertPolicy,
+    limits: DecodeLimits,
 ) -> Result<(ImageBuf<P>, JxlPartialReport)>
 where
     P::Sample: ConvSample,
 {
-    let (samples, format, dims, report) =
-        decode_samples::<P>(data, codestream_bit_depth, policy, Truncation::BestEffort)?;
+    let (samples, format, dims, report) = decode_samples::<P>(
+        data,
+        codestream_bit_depth,
+        policy,
+        limits,
+        Truncation::BestEffort,
+    )?;
     let image = convert_from_raw(RawImage::new(&samples, format, dims)?, policy)?;
     Ok((image, report))
 }
@@ -583,13 +617,19 @@ pub(crate) fn decode_into_buf<P: Pixel>(
     data: &[u8],
     codestream_bit_depth: bool,
     policy: ConvertPolicy,
+    limits: DecodeLimits,
     dst: &mut ImageBuf<P>,
 ) -> Result<()>
 where
     P::Sample: ConvSample,
 {
-    let (samples, format, dims, _) =
-        decode_samples::<P>(data, codestream_bit_depth, policy, Truncation::Reject)?;
+    let (samples, format, dims, _) = decode_samples::<P>(
+        data,
+        codestream_bit_depth,
+        policy,
+        limits,
+        Truncation::Reject,
+    )?;
     let src = RawImage::new(&samples, format, dims)?;
     if dst.dimensions() == dims {
         // Same geometry: convert straight into the existing storage (its length is invariant).
@@ -686,12 +726,17 @@ mod tests {
     fn empty_and_garbage_input_error_without_panicking() {
         // Enough of the decode entry path to prove it returns typed errors on junk rather than
         // panicking; full corpus coverage lives in the robustness test unit.
-        assert!(decode_to_buf::<gamut_core::Rgba8>(&[], false, ConvertPolicy::lossless()).is_err());
+        let limits = DecodeLimits::default();
+        assert!(
+            decode_to_buf::<gamut_core::Rgba8>(&[], false, ConvertPolicy::lossless(), limits)
+                .is_err()
+        );
         assert!(
             decode_to_buf::<gamut_core::Rgb8>(
                 &[0x00, 0x01, 0x02, 0x03],
                 false,
                 ConvertPolicy::lossless(),
+                limits,
             )
             .is_err()
         );
@@ -730,15 +775,22 @@ mod tests {
     fn partial_decode_still_rejects_input_it_cannot_size_a_buffer_for() {
         // Truncation before the image headers has no dimensions to report, so the best-effort
         // policy is no more permissive than the rejecting one. Junk is likewise still an error.
+        let limits = DecodeLimits::default();
         assert!(
-            decode_partial_to_buf::<gamut_core::Rgba8>(&[], false, ConvertPolicy::lossless())
-                .is_err()
+            decode_partial_to_buf::<gamut_core::Rgba8>(
+                &[],
+                false,
+                ConvertPolicy::lossless(),
+                limits
+            )
+            .is_err()
         );
         assert!(
             decode_partial_to_buf::<gamut_core::Rgba8>(
                 &[0xFF, 0x0A],
                 false,
-                ConvertPolicy::lossless()
+                ConvertPolicy::lossless(),
+                limits
             )
             .is_err()
         );
@@ -746,7 +798,8 @@ mod tests {
             decode_partial_to_buf::<gamut_core::Rgb8>(
                 &[0x00, 0x01, 0x02, 0x03],
                 false,
-                ConvertPolicy::lossless()
+                ConvertPolicy::lossless(),
+                limits
             )
             .is_err()
         );
@@ -759,6 +812,8 @@ mod tests {
         let reject = RawOptions {
             codestream_bit_depth: true,
             truncation: Truncation::Reject,
+            limits: DecodeLimits::default(),
+            dst_bytes_per_pixel: 4,
         };
         let best_effort = RawOptions {
             truncation: Truncation::BestEffort,

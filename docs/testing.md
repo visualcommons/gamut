@@ -238,10 +238,14 @@ The authority and primary technique for each crate are decided **here, once**. A
 in a pull request that says why. "Authority" is the **in-crate** authority — several crates are
 additionally covered by a consuming codec's oracle, which their own `STATUS.md` records. "Fuzz
 entry point" names the untrusted-input surface a fuzz target takes; ☑ marks one a target in
-`tooling/gamut-fuzz` drives today, ☐ one not yet wired (#264). The binary, binding and stub crates
-(`gamut`, `gamut-cli`, `gamut-wasm`, `gamut-ffi`, `gamut-jxl-sys`, `gamut-av2`, `gamut-vvc`) have
-no row: they are excluded from the coverage and mutation gates, and the stubs carry no function
-bodies.
+`tooling/gamut-fuzz` drives today, ☐ one not yet wired (#264). Every entry point listed is wired
+(#311); a crate that gains one adds it here as ☐ until its target lands. A "—" is a crate with no
+untrusted-input surface: `gamut-deflate` is encoder-only (the workspace inflates through
+`miniz_oxide`), and the rest take caller-built values, or a model another row's parser built,
+rather than file bytes. The binary, binding
+and stub crates (`gamut`, `gamut-cli`, `gamut-wasm`, `gamut-ffi`, `gamut-jxl-sys`, `gamut-av2`,
+`gamut-vvc`) have no row: they are excluded from the coverage and mutation gates, and the stubs
+carry no function bodies.
 
 | Crate | Authority | Primary technique | Fuzz entry point |
 | --- | --- | --- | --- |
@@ -252,23 +256,23 @@ bodies.
 | gamut-dsp | AV1 §7.13 / T.81 §A.3 transform definitions | example + in-test reference transform | — |
 | gamut-codec-abi | *none* | exact-byte + compile-time assertion | — |
 | gamut-color | Little-CMS | differential | — |
-| gamut-icc | Little-CMS | differential | `IccProfile::parse` ☐ |
+| gamut-icc | Little-CMS | differential | `IccProfile::parse` ☑ |
 | gamut-cmm | Little-CMS | differential | — |
 | gamut-deflate | zlib | differential | — |
-| gamut-png | libpng (both directions) | differential + conformance + size contract | `PngDecoder` ☐ |
-| gamut-jpeg | libjpeg-turbo | differential + exact-byte | `JpegDecoder` ☐ |
+| gamut-png | libpng (both directions) | differential + conformance + size contract | `PngDecoder` ☑ |
+| gamut-jpeg | libjpeg-turbo | differential + exact-byte | `JpegDecoder` ☑ |
 | gamut-tiff | libtiff | differential | `TiffDecoder` ☑ |
 | gamut-dng | Adobe DNG SDK; libtiff (container) | conformance + differential | `DngDecoder` ☑ |
 | gamut-isobmff | ISO/IEC 14496-12 + 23008-12; libavif/dav1d via gamut-avif | exact-byte + law | `read` ☑ |
-| gamut-riff | libwebp demux | differential + law | `RiffReader` ☐ |
-| gamut-webp | libwebp (both directions) | differential + size/effort contract | `WebpDecoder` ☐ |
+| gamut-riff | libwebp demux | differential + law | `RiffReader` ☑ |
+| gamut-webp | libwebp (both directions) | differential + size/effort contract | `WebpDecoder` ☑ |
 | gamut-avif | libavif; dav1d | differential + law | `decode` ☑ |
 | gamut-heic | libheif + libde265 | differential + law | container `parse`, NAL `parse` ☑ |
-| gamut-av1 | libaom (definitive); dav1d | differential | — |
-| gamut-jxl | libjxl (the `jxl` crate is the decoder under test, not an authority) | differential | `decode` ☐ |
-| gamut-exif | exiv2 | differential + golden | `parse` ☐ |
-| gamut-xmp | exiv2 XMPCore | differential + golden | `parse` ☐ |
-| gamut-iptc | exiv2; IPTC tech reference | differential + drift guard | `read_irb` ☐ |
+| gamut-av1 | libaom (definitive); dav1d | differential | `Av1Decoder::inspect` ☑ |
+| gamut-jxl | libjxl (the `jxl` crate is the decoder under test, not an authority) | differential | `decode` ☑ |
+| gamut-exif | exiv2 | differential + golden | `parse` ☑ |
+| gamut-xmp | exiv2 XMPCore | differential + golden | `parse` ☑ |
+| gamut-iptc | exiv2; IPTC tech reference | differential + drift guard | `read_irb` ☑ |
 | gamut-metadata | *facade* | law (round-trip through the facade) | — |
 
 Eight crates hold no oracle dev-dependency of their own: `gamut-core`, `gamut-ifd`,

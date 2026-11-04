@@ -285,9 +285,9 @@ jobs:
       - name: ICC sandbox compiles and lints
         run: mise run check-icc-sandbox
       # Same hole, same shape: `tooling/gamut-fuzz` is workspace-excluded and nothing depends on
-      # it, so no gate on the pull-request path compiles its targets at all -- an API change in
-      # gamut-ifd, gamut-tiff, gamut-dng, gamut-isobmff or gamut-heic breaks them unnoticed until
-      # the next Extended run on master. This is build-only: no nightly, no sanitizer, no engine,
+      # it, so no gate on the pull-request path compiles its targets at all -- an API change in any
+      # crate a target drives (the `[dependencies]` of tooling/gamut-fuzz/Cargo.toml) breaks them
+      # unnoticed until the next Extended run on master. This is build-only: no nightly, no sanitizer, no engine,
       # so it stays bounded and reproducible and does not put a coverage-guided run on the PR path
       # (docs/testing.md, "Why fuzzing is not in the per-PR gate"). The driven crates are already
       # built by the Clippy step above, so the marginal cost is the targets themselves. It is Clippy
