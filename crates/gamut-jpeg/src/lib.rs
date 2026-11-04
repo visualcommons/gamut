@@ -25,9 +25,9 @@
 //! This crate is a JPEG **encoder + decoder** (unlike the workspace's encoder-only PNG crate — JPEG
 //! is a two-way format). It ships a **baseline (SOF0) sequential and progressive (SOF2) 8-bit DCT
 //! Huffman encoder**, and a **decoder for the sequential and progressive processes**. The encoder
-//! writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 subsampling, standard (Annex K) tables
-//! — or, with [`JpegEncoder::with_optimized_tables`], tables fitted to the image's own symbol
-//! statistics (Annex K.2), a few percent smaller for the same decoded pixels —
+//! writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 / 4:4:0 subsampling, standard
+//! (Annex K) tables — or, with [`JpegEncoder::with_optimized_tables`], tables fitted to the
+//! image's own symbol statistics (Annex K.2), a few percent smaller for the same decoded pixels —
 //! a quality→quantization mapping (or caller-supplied [`QuantTables`] via
 //! [`JpegEncoder::with_quant_tables`]), opt-in rate–distortion optimized coefficient selection
 //! ([`JpegEncoder::with_rd_optimization`]: per-block AC trellis, optionally with per-block
@@ -57,6 +57,11 @@
 //! [`JpegEncoder::with_metadata`] / [`JpegEncoder::with_encoded_metadata`] embed one, routing each
 //! carrier to the raw setter above. The feature is off by default so a plain JPEG consumer never
 //! builds the metadata crates; the dependency direction stays `gamut-jpeg → gamut-metadata`.
+//!
+//! With the optional **`cmm`** Cargo feature, `JpegDecoder::decode_srgb` decodes straight to sRGB
+//! `Rgb8` by applying the embedded ICC profile through `gamut-cmm` — the round trip for the XYB
+//! colour mode, whose samples mean nothing without their profile, and for any other RGB-profiled
+//! stream. Off by default, so a plain consumer never builds the colour-management crates.
 //!
 //! # Pluggable backends
 //!
@@ -111,6 +116,8 @@ pub mod backend;
 
 mod appmeta;
 mod bitwriter;
+#[cfg(feature = "cmm")]
+mod cmm;
 mod decoder;
 mod encoder;
 mod huffman;

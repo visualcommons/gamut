@@ -94,8 +94,8 @@ assert_eq!(meta.icc.as_deref(), Some(icc));
 Built incrementally; each phase is conformance-checked against libjpeg-turbo (see
 [STATUS.md](STATUS.md)). Shipping now: an **8-bit DCT Huffman encoder** for the baseline sequential
 (SOF0) and **progressive (SOF2)** processes, and a **decoder for the sequential and progressive
-processes**. The encoder writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 chroma
-subsampling, standard (Annex K) tables, and optional restart intervals;
+processes**. The encoder writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 / 4:4:0
+chroma subsampling, standard (Annex K) tables, and optional restart intervals;
 `JpegEncoder::with_optimized_tables(true)` swaps the fixed tables for ones built from the image's own
 symbol statistics (Annex K.2) — a few percent smaller, same decoded pixels;
 `JpegEncoder::with_progressive(true)` selects the progressive process — libjpeg's frozen
@@ -115,6 +115,14 @@ APP2 `ICC_PROFILE` payloads without decoding pixels, and the encoder embeds them
 `with_exif`/`with_xmp`/`with_icc_profile` — validated against libjpeg-turbo's own
 `jpeg_read_icc_profile`/`jpeg_write_icc_profile` in both directions. `decode_image_into` reuses
 the destination's allocation when dimensions match.
+
+The opt-in **XYB colour mode** (`with_color_mode(JpegColorMode::Xyb)`) follows jpegli: scaled-XYB
+samples with the XYB ICC profile embedded, and `with_subsampling` applied to the B channel alone,
+so the default is jpegli's own X 2×2 / Y 2×2 / B 1×1 layout. With the optional **`cmm`** feature,
+`JpegDecoder::decode_srgb` decodes any RGB-profiled stream — gamut's XYB streams and jpegli's
+included — to sRGB `Rgb8` by applying the embedded profile through `gamut-cmm`. jpegli's decoder
+reading gamut's XYB streams, and `decode_srgb` reading jpegli's, are cross-checked against a
+vendored jpegli (dev-only).
 
 Both directions are **pluggable** (P8): `JpegDecoder::push_backend` / `JpegEncoder::push_backend`
 register `JpegStreamDecoder` / `JpegStreamEncoder` backends — or a `gamut-codec-abi` backend through

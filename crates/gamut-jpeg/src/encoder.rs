@@ -34,10 +34,14 @@ use crate::{appmeta, progressive, quant, rd};
 const MAX_DIMENSION: u32 = u16::MAX as u32;
 
 /// Chroma subsampling mode for YCbCr (colour) encoding: the ratio at which the Cb/Cr planes are
-/// sampled relative to luma. Ignored for grayscale, which has a single component.
+/// sampled relative to luma. Ignored for grayscale, which has a single component. In
+/// [`JpegColorMode::Xyb`] the same ratio subsamples the B channel alone, X and Y taking the luma
+/// role ([`JpegEncoder::with_color_mode`]).
 ///
-/// Named for the conventional `J:a:b` notation. The luma sampling factors are `1×1` (4:4:4),
-/// `2×1` (4:2:2), or `2×2` (4:2:0); chroma is always `1×1`.
+/// Named for the conventional `J:a:b` notation. The luma sampling factors `H×V` are `1×1` (4:4:4),
+/// `2×1` (4:2:2), `2×2` (4:2:0), or `1×2` (4:4:0); chroma is always `1×1`. T.81 §B.2.2 (Table B.2)
+/// admits any factor in `1..=4` per component, so each grid is a choice the format leaves to the
+/// encoder; all four fit the §B.2.3 limit of ten data units per MCU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChromaSubsampling {
@@ -48,6 +52,11 @@ pub enum ChromaSubsampling {
     /// 4:2:0 — Cb/Cr subsampled 2:1 both horizontally and vertically (the common photographic
     /// default; T.871 §9 NOTE 3 names it the most common form).
     Ycbcr420,
+    /// 4:4:0 — Cb/Cr subsampled 2:1 vertically only (luma `1×2`): the transpose of 4:2:2, and
+    /// libjpeg-turbo's `TJSAMP_440`. T.871 §9 NOTE 3 discourages forms other than 4:2:0 for JFIF
+    /// because some applications may not support them; a T.81 decoder such as libjpeg-turbo reads
+    /// it.
+    Ycbcr440,
 }
 
 impl ChromaSubsampling {
@@ -58,6 +67,7 @@ impl ChromaSubsampling {
             ChromaSubsampling::Ycbcr444 => (1, 1),
             ChromaSubsampling::Ycbcr422 => (2, 1),
             ChromaSubsampling::Ycbcr420 => (2, 2),
+            ChromaSubsampling::Ycbcr440 => (1, 2),
         }
     }
 }
@@ -360,7 +370,8 @@ impl JpegEncoder {
     }
 
     /// Sets the chroma [`ChromaSubsampling`] used for colour ([`Rgb8`]) input. No effect on
-    /// grayscale.
+    /// grayscale. In [`JpegColorMode::Xyb`] it subsamples the B channel alone
+    /// ([`Self::with_color_mode`]).
     #[must_use]
     pub fn with_subsampling(mut self, subsampling: ChromaSubsampling) -> Self {
         self.subsampling = subsampling;
@@ -447,17 +458,21 @@ impl JpegEncoder {
     ///
     /// The default [`JpegColorMode::Ycbcr`] is the frozen JFIF path. [`JpegColorMode::Xyb`] codes
     /// jpegli-style XYB samples with [`XYB_ICC_PROFILE`] embedded — a perceptual space that
-    /// out-compresses YCbCr on an ICC-aware pipeline. In XYB mode: [`Self::with_subsampling`] is
-    /// ignored (always 4:4:4 — chroma-style subsampling of X would destroy opponent-colour detail
-    /// jpegli keeps at full resolution; jpegli's B-only subsampling is a possible follow-up),
-    /// [`Self::with_density`] is
+    /// out-compresses YCbCr on an ICC-aware pipeline. In XYB mode: [`Self::with_subsampling`]
+    /// subsamples the **B** channel alone (the stored B−Y) by the variant's ratio while X and Y
+    /// stay at full resolution, so the default [`ChromaSubsampling::Ycbcr420`] is jpegli's own
+    /// XYB default — sampling factors X 2×2, Y 2×2, B 1×1 (`jpegli_set_colorspace`, libjxl
+    /// `lib/jpegli/encode.cc`) — and [`ChromaSubsampling::Ycbcr444`] codes all three channels at
+    /// full resolution (X carries opponent-colour detail jpegli never subsamples, so no variant
+    /// touches it), [`Self::with_density`] is
     /// inert (no JFIF APP0 is written), [`Self::with_icc_profile`] is rejected at encode time (a
     /// caller profile would misdescribe the XYB samples; EXIF/XMP stay available), grayscale
     /// ([`Gray8`]) input is rejected as unsupported, and pushed backends are not consulted.
     /// Progressive mode, restart intervals, optimized tables, custom quantization tables, and RD
     /// optimization all compose. Decoding an XYB stream (with this crate's decoder or any other)
     /// yields the scaled-XYB samples presented as RGB plus the embedded profile via
-    /// [`crate::metadata`]; applying the profile is the caller's CMM's job.
+    /// [`crate::metadata`]; applying the profile is a CMM's job — with the `cmm` feature,
+    /// `JpegDecoder::decode_srgb` does it through `gamut-cmm`.
     ///
     /// The samples come from `f64` colour math, so — unlike the default path — XYB-mode output
     /// bytes are **not** bit-reproducible across platforms (gamut-color's Tier-1 determinism);
@@ -692,7 +707,9 @@ impl JpegEncoder {
     }
 
     /// Encodes `rgb` as an XYB stream ([`JpegColorMode::Xyb`]): sRGB → linear (EOTF LUT) → XYB →
-    /// scaled-XYB bytes into three full-resolution planes (X, Y, B−Y), coded 4:4:4 with component
+    /// scaled-XYB bytes into three planes (X, Y, B−Y), the B−Y plane box-subsampled by the
+    /// configured [`ChromaSubsampling`] ratio (X and Y carry that ratio as their sampling factors,
+    /// B stays 1×1 — jpegli's B-only layout), coded with component
     /// ids `R`,`G`,`B` under a no-APP0 / APP14 `transform = 0` prologue that embeds
     /// [`XYB_ICC_PROFILE`]. X and Y quantize with the luminance table (destination 0), the stored
     /// B−Y with the chrominance table (destination 1) — Annex K tables are YCbCr-tuned, so this
@@ -735,11 +752,10 @@ impl JpegEncoder {
             width: w,
             height: h,
         };
-        let b_plane = Plane {
-            data: b,
-            width: w,
-            height: h,
-        };
+        // Only B is subsampled: X and Y take the ratio as their sampling factors (`hx`, `vx`), B
+        // stays 1×1 — the same frame shape the YCbCr path gives luma and chroma.
+        let (hx, vx) = self.subsampling.luma_factors();
+        let b_plane = downsample(&b, w, h, usize::from(hx), usize::from(vx));
 
         let luma_quant = self.luma_quant();
         let chroma_quant = self.chroma_quant();
@@ -774,14 +790,14 @@ impl JpegEncoder {
 
         // Component ids are the bytes 'R','G','B' (the jpegli convention for XYB streams),
         // belt-and-braces beside the APP14: either signal alone keeps a decoder from applying a
-        // YCbCr inverse. All components 1×1 (4:4:4).
+        // YCbCr inverse.
         let ids: [u8; 3] = *b"RGB";
         if self.progressive {
             let comps = [
                 progressive::ProgComponent {
                     id: ids[0],
-                    h: 1,
-                    v: 1,
+                    h: hx,
+                    v: vx,
                     tq: x_tq,
                     plane: &x_plane,
                     quant: x_quant,
@@ -789,8 +805,8 @@ impl JpegEncoder {
                 },
                 progressive::ProgComponent {
                     id: ids[1],
-                    h: 1,
-                    v: 1,
+                    h: hx,
+                    v: vx,
                     tq: 0,
                     plane: &y_plane,
                     quant: &luma_quant,
@@ -819,16 +835,16 @@ impl JpegEncoder {
         } else {
             let components = [
                 Component {
-                    h: 1,
-                    v: 1,
+                    h: hx,
+                    v: vx,
                     plane: &x_plane,
                     quant: x_quant,
                     dest: 0,
                     rd: luma_rd.as_ref(),
                 },
                 Component {
-                    h: 1,
-                    v: 1,
+                    h: hx,
+                    v: vx,
                     plane: &y_plane,
                     quant: &luma_quant,
                     dest: 0,
@@ -847,7 +863,11 @@ impl JpegEncoder {
                 out,
                 width,
                 height,
-                &[(ids[0], 1, 1, x_tq), (ids[1], 1, 1, 0), (ids[2], 1, 1, 1)],
+                &[
+                    (ids[0], hx, vx, x_tq),
+                    (ids[1], hx, vx, 0),
+                    (ids[2], 1, 1, 1),
+                ],
                 &[(ids[0], 0, 0), (ids[1], 0, 0), (ids[2], 1, 1)],
                 &components,
             );

@@ -203,8 +203,7 @@ impl JpegDecoder {
     /// Selects how the built-in decoder reconstructs components coded at reduced resolution.
     ///
     /// Defaults to [`ChromaUpsampling::Interpolated`]: libjpeg-turbo's fancy upsampling, so the
-    /// output is byte-identical to `djpeg`'s default decode, through
-    /// [`gamut_color::upsample::libjpeg`].
+    /// output is byte-identical to `djpeg`'s default decode.
     /// [`ChromaUpsampling::Nearest`] replicates each sample instead, which is cheaper. A pushed
     /// backend presents its own raster and ignores this setting.
     #[must_use]

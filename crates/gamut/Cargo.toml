@@ -104,8 +104,10 @@ metadata = [
 # `metadata` plus gamut-exif's `describe` module (the enumerated tags' meanings), forwarded through
 # the gamut-metadata facade rather than straight to gamut-exif.
 exif-describe = ["metadata", "gamut-metadata/exif-describe"]
-# The ICC colour management module (transform engine) over gamut-icc profiles.
-cmm = ["dep:gamut-cmm"]
+# The ICC colour management module (transform engine) over gamut-icc profiles, plus gamut-jpeg's
+# own `cmm` feature (`JpegDecoder::decode_srgb`) when `jpeg` is on — weak, like the `metadata`
+# forwarding above, so `cmm` alone never drags a codec in.
+cmm = ["dep:gamut-cmm", "gamut-jpeg?/cmm"]
 all = [
     "avif",
     "jxl",

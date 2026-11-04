@@ -66,7 +66,8 @@
 //! - [`gamut`] — [`GamutCheck`]: lcms2's double-round-trip gamut test as a [`Transform`]
 //!   (source device channels in, one in-gamut/ΔE-excess channel out).
 //! - [`image`] — typed pixel-buffer application over [`gamut_core::PixelFormat`]:
-//!   [`transform_interleaved_u8`]/[`transform_interleaved_u16`] and their planar siblings,
+//!   [`transform_interleaved_u8`]/[`transform_interleaved_u16`], their in-place twins
+//!   [`transform_in_place_u8`]/[`transform_in_place_u16`] and their planar siblings,
 //!   with alpha passthrough and lcms2-style round-half-up re-encoding.
 //! - [`bpc`] — black-point **detection** ([`detect_black_point`],
 //!   [`detect_destination_black_point`] — lcms2's estimators transcribed) and the
@@ -134,7 +135,8 @@ pub use error::{CmmError, Result};
 pub use gamut::GamutCheck;
 #[doc(inline)]
 pub use image::{
-    transform_interleaved_u8, transform_interleaved_u16, transform_planar_u8, transform_planar_u16,
+    transform_in_place_u8, transform_in_place_u16, transform_interleaved_u8,
+    transform_interleaved_u16, transform_planar_u8, transform_planar_u16,
 };
 #[doc(inline)]
 pub use link::{device_to_pcs, pcs_to_device};

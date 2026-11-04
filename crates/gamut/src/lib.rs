@@ -23,7 +23,8 @@
 //!
 //! The `cmm` feature re-exports the ICC colour management module (`cmm`, epic #323) — the
 //! transform engine that builds and applies colour transforms from the profiles `gamut-icc`
-//! parses — for colour-managed decode/encode pipelines and tooling.
+//! parses — for colour-managed decode/encode pipelines and tooling. Together with `jpeg` it also
+//! turns on `gamut-jpeg`'s `cmm` feature, so `jpeg::JpegDecoder::decode_srgb` is available.
 //!
 //! The `isobmff` feature re-exports the ISOBMFF/HEIF still-image container primitive (`isobmff`) —
 //! the box tree shared by the AVIF and HEIC codecs — so tooling can read and write containers
