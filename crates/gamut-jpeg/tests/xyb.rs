@@ -239,8 +239,7 @@ fn xyb_byte_count_is_relative_to_appended_output() {
 fn xyb_round_trips_through_libjpeg_and_through_gamut() {
     // Both decoders see passthrough samples; inverting the XYB pipeline in the test must recover
     // the source within JPEG-lossy tolerance, baseline and progressive, plus a restart cell. 4:4:4,
-    // so that libjpeg's fancy upsampling and gamut's sample replication see no subsampled plane
-    // and the two decodes agree to IDCT rounding.
+    // so that neither decoder upsamples a plane and the two decodes agree to IDCT rounding.
     for &(w, h) in &[(16u32, 16u32), (33, 31), (64, 48)] {
         for (progressive, restart) in [(false, 0u16), (true, 0), (false, 2)] {
             let src = rgb_gradient(w, h);
@@ -465,8 +464,8 @@ fn decode_srgb_reproduces_gamut_xyb_sources() {
 #[test]
 fn decode_srgb_agrees_with_jpegli_on_gamut_xyb() {
     // gamut's sRGB path against the jpegli + lcms2 pipeline on the same streams. They differ only
-    // in IDCT rounding, upsampling (jpegli interpolates a subsampled B, gamut replicates it) and
-    // CMS arithmetic.
+    // in IDCT rounding, upsampling (both interpolate a subsampled B: gamut with libjpeg-turbo's
+    // fancy filter, jpegli with its own) and CMS arithmetic.
     for (w, h, subsampling, progressive, restart) in xyb_battery() {
         let src = rgb_gradient(w, h);
         let jpeg = gamut_xyb(&src, w, h, subsampling, progressive, restart);
