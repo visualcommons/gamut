@@ -50,6 +50,17 @@ on a hand-written golden bitstream.
   pinned mode (as it already does for colour and orientation) instead of dropping it. It does not
   apply to `recompress_jpeg`, which re-packs the JPEG's own coefficients — a non-default setting is
   ignored there, as the other inapplicable knobs already are.
+- **Progression and decoding-speed frame settings (issue #1018).** `FrameSettings` via
+  `with_frame_settings` carries libjxl's `PROGRESSIVE_AC` / `QPROGRESSIVE_AC` and `RESPONSIVE`
+  (`Toggle` `EncoderDefault`/`Off`/`On`), `PROGRESSIVE_DC` (`ProgressiveDc`
+  `EncoderDefault`/`Off`/`OneLevel`/`TwoLevels`) and `DECODING_SPEED` (`DecodingSpeed`
+  `EncoderDefault`/`Tier0..=Tier4`). Every field defaults to its encoder-default variant, which
+  leaves that option **unsent**, so a default encoder's bytes are unchanged; a set field is
+  forwarded as-is and libjxl reconciles the combinations itself (an AC progression turns responsive
+  mode on, and on a lossless frame forces the quantization progression). The three enums are
+  `repr(u8)` with permanent discriminants. Like `ModularMode`, the settings reach pushed backends
+  through `JxlEncodeRequest::frame_settings`, and the `gamut-codec-abi` adapter **declines** any set
+  field rather than dropping it. `recompress_jpeg` ignores them, as it does the coding tool.
 - **Pixel layouts.** 8- and 16-bit **Gray / GrayAlpha / RGB / RGBA** (eight `EncodeImage` /
   `DecodeImage` impls); 16-bit samples handed to libjxl as native-endian bytes.
 - **Container framing.** Bare codestream (default, signature `FF 0A`) and the ISO BMFF `.jxl`
@@ -149,14 +160,14 @@ unlocks it.
 - **Premultiplied (associated) alpha decode.** Rejected today; unlocks with an un-premultiply step in
   `convert` (deliberately deferred: an integer un-premultiply is an approximate inverse — alpha = 0
   is unrecoverable — so it belongs behind an explicit opt-in, not a silent default).
-- **Frame settings beyond effort and modular mode.** Progressive control (passes / group order /
-  responsive), the modular *tuning* knobs (`MODULAR_COLOR_SPACE`, `MODULAR_GROUP_SIZE`,
-  `MODULAR_PREDICTOR`, `MODULAR_NB_PREV_CHANNELS`, and the float-valued
-  `MODULAR_MA_TREE_LEARNING_PERCENT`, which additionally needs
+- **Frame settings beyond effort, modular mode, progression and decoding speed.** Group order
+  (`GROUP_ORDER` and its centre coordinates), resampling, the modular *tuning* knobs
+  (`MODULAR_COLOR_SPACE`, `MODULAR_GROUP_SIZE`, `MODULAR_PREDICTOR`, `MODULAR_NB_PREV_CHANNELS`,
+  and the float-valued `MODULAR_MA_TREE_LEARNING_PERCENT`, which additionally needs
   `JxlEncoderFrameSettingsSetFloatOption` declared) and the coding-tool toggles (noise, dots,
   patches, EPF, gaborish) are not exposed. Each unlocks with its `gamut-jxl-sys` enumerant plus a
-  config surface; issue #339 opened that seam, so these are now additive rather than an FFI change
-  each time.
+  field on `FrameSettings` (issue #1018), which the codec-abi adapter then declines automatically,
+  since it compares the settings as a whole.
 - **Extra channels beyond alpha.** Depth, thermal, spot, and other extra channels are ignored on
   decode and unsupported on encode; unlocks with a typed extra-channel model.
 - **Effort 11 ("tectonic plate").** Expert-gated behind `JxlEncoderAllowExpertOptions`; the `Effort`
@@ -272,6 +283,13 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   jxl-rs *and* the oracle, and a forced-Modular lossy stream must still clear the PSNR floor.
   Conversely `ModularMode::Auto` must be **byte-identical** to an encoder that never named the knob
   — the guard that keeps the option unsent — and lossless + forced VarDCT must be the typed refusal.
+- **Progression and decoding speed — byte-identical to direct libjxl.** `tests/frame_settings.rs`
+  encodes every value of every `FrameSettings` field, lossless and lossy, and requires gamut's
+  stream to equal byte for byte the one a plain libjxl C-API client produces with the same frame
+  setting; each setting is also shown to change the stream (so the equality cannot pass on a
+  dropped option), all fields set at once must match too, and the all-default settings must match
+  a direct encode that sets nothing. `gamut-jxl-sys`'s own `tests/frame_settings.rs` pins each
+  declared option id to the value range libjxl validates for it.
 - **jbrd — bit-exact reconstruction.** The vendored baseline-JPEG fixture recompresses and the
   libjxl oracle reconstructs the **original JPEG bytes exactly**; the stream's pixels also decode
   within the lossy agreement bound in both decoders; malformed/truncated JPEG inputs are typed
