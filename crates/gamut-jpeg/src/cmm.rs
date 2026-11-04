@@ -8,25 +8,16 @@
 //! [`XYB`](crate::JpegColorMode::Xyb) stream (gamut's or jpegli's) is not a special case: its
 //! profile's `A2B0` pipeline *is* the XYB inverse, and the CMM evaluates it like any other.
 //!
-//! The transform runs at the **media-relative colorimetric** intent with black-point compensation
-//! off, otherwise at `gamut-cmm`'s defaults (`f64` stage-by-stage evaluation, no pipeline
-//! optimization). Relative colorimetric is what makes the result the profile's own colorimetry: an
-//! input profile carrying only `A2B0` (the XYB profile, and most camera/scanner profiles) is read
-//! through that table under every intent (lcms2's perceptual fallback, which `gamut-cmm` follows),
-//! but the perceptual intent additionally **forces** black-point compensation whenever the
-//! destination is a v4 profile (lcms2's `_cmsLinkProfiles` rule, mirrored by
-//! `IccTransform::between`) — and `gamut-icc`'s built-in sRGB is v4. Measured on the XYB profile
-//! over a 18³ sRGB grid of exact (unquantized) scaled-XYB inputs: relative colorimetric reproduces
-//! the source within 0.44 of an 8-bit code (mean 0.03), perceptual misses by up to 11.2 codes (mean
-//! 1.62) as the compensation pulls the dark end down (sRGB grey 20 comes out near 12). libjxl's own tools evaluate the table directly
-//! (skcms has no compensation), so relative colorimetric is also what a jpegli pipeline shows.
-//!
-//! Neither the profile → sRGB choice nor the row-at-a-time in-place loop below is JPEG-specific;
-//! moving both into `gamut-cmm`, where the other format crates can share them, is issue #1042.
+//! Neither the transform nor its application is JPEG-specific, so neither is made here: the
+//! transform is `gamut-cmm`'s `IccTransform::embedded_to_srgb` (media-relative colorimetric, no
+//! black-point compensation — that constructor's docs carry the measurement that rules out the
+//! perceptual intent), and it runs over the decoded raster in place through
+//! `gamut_cmm::transform_in_place_u8`. What this module owns is the JPEG side: reading the
+//! profile, deciding which streams it applies to, and typing the failures.
 
-use gamut_cmm::{IccTransform, TransformOptions, transform_interleaved_u8};
+use gamut_cmm::{IccTransform, transform_in_place_u8};
 use gamut_core::{DecodeImage, Error, ImageBuf, PixelFormat, Result, Rgb8};
-use gamut_icc::{BuiltinProfile, ColorSpace, IccProfile, RenderingIntent};
+use gamut_icc::{ColorSpace, IccProfile};
 
 use crate::JpegDecoder;
 
@@ -38,7 +29,8 @@ impl JpegDecoder {
     ///   convention) and the plain [`Rgb8`] decode is returned unchanged.
     /// - **An RGB-data profile:** the decoded samples are transformed from that profile to
     ///   `gamut-icc`'s built-in sRGB profile at the media-relative colorimetric intent without
-    ///   black-point compensation (module docs explain why not perceptual). This
+    ///   black-point compensation (`gamut_cmm::IccTransform::embedded_to_srgb`, whose docs
+    ///   explain why not perceptual). This
     ///   covers the [`XYB`](crate::JpegColorMode::Xyb) colour mode, whose profile carries the XYB
     ///   inverse — gamut's [`XYB_ICC_PROFILE`](crate::XYB_ICC_PROFILE) and libjxl's alike.
     ///
@@ -80,28 +72,16 @@ impl JpegDecoder {
         let Some(transform) = transform else {
             return Ok(image);
         };
-        // In place, one row at a time through a row-sized scratch copy: the CMM takes distinct
-        // source and destination buffers, and a whole second raster would double the peak memory
-        // the decoder's limits bound.
-        let stride = image.width() as usize * 3;
-        let mut scratch = vec![0u8; stride];
-        for row in image.as_mut_samples().chunks_exact_mut(stride) {
-            scratch.copy_from_slice(row);
-            transform_interleaved_u8(
-                &transform,
-                PixelFormat::Rgb8,
-                &scratch,
-                PixelFormat::Rgb8,
-                row,
-            )
-            .map_err(|e| {
+        // In place: a second raster would double the peak memory the decoder's limits bound.
+        transform_in_place_u8(&transform, PixelFormat::Rgb8, image.as_mut_samples()).map_err(
+            |e| {
                 Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
                     "JPEG: the colour transform failed on the decoded samples",
                 )
                 .with_detail(e.to_string())
-            })?;
-        }
+            },
+        )?;
         Ok(image)
     }
 }
@@ -121,19 +101,7 @@ fn srgb_transform(icc: &[u8]) -> Result<IccTransform> {
             "JPEG: sRGB decoding applies only RGB-data ICC profiles",
         ));
     }
-    let srgb = IccProfile::builtin(BuiltinProfile::Srgb).ok_or_else(|| {
-        Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "JPEG: gamut-icc has no built-in sRGB profile",
-        )
-    })?;
-    // Black-point compensation stays at its default, off; only the perceptual intent's v4 rule
-    // would force it on (module docs).
-    let options = TransformOptions {
-        intent: RenderingIntent::MediaRelativeColorimetric,
-        ..TransformOptions::default()
-    };
-    IccTransform::between(&source, &srgb, options).map_err(|e| {
+    IccTransform::embedded_to_srgb(&source).map_err(|e| {
         Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "JPEG: no colour transform can be built from the embedded ICC profile",
@@ -178,7 +146,8 @@ mod tests {
     fn an_xyb_stream_decodes_to_its_dark_source_colour() {
         // Pins that the profile is applied (the plain decode returns scaled-XYB bytes, nowhere
         // near the source) and that it is applied colorimetrically: the perceptual intent's forced
-        // black-point compensation crushes this dark grey from 20 to 11 (module docs).
+        // black-point compensation crushes this dark grey from 20 to 11 (the reason
+        // `IccTransform::embedded_to_srgb` is relative colorimetric).
         let src = [20u8; 16 * 16 * 3];
         let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(16, 16).unwrap()).unwrap();
         let jpeg = JpegEncoder::new()

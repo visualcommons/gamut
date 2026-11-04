@@ -82,9 +82,10 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   lcms2) reproduces sRGB from gamut's XYB streams; grayscale and caller ICC profiles rejected;
   backends vetoed; progressive/restarts/optimized-tables/custom-tables/RD compose.
 - Colour-managed sRGB decode (P16, issue #1015): the opt-in `cmm` feature's
-  `JpegDecoder::decode_srgb` applies the embedded ICC profile through `gamut-cmm` (media-relative
-  colorimetric, no black-point compensation — the module docs carry the measurement behind that
-  choice), so it reads gamut's and jpegli's XYB streams alike, cross-checked against the jpegli +
+  `JpegDecoder::decode_srgb` applies the embedded ICC profile through `gamut-cmm`'s
+  `IccTransform::embedded_to_srgb` (media-relative colorimetric, no black-point compensation —
+  that constructor carries the measurement behind the choice), run in place over the decoded
+  raster by `transform_in_place_u8` (#1042), so it reads gamut's and jpegli's XYB streams alike, cross-checked against the jpegli +
   lcms2 pipeline. It applies RGB-data profiles only: a GRAY profile on a grayscale stream and a
   CMYK one on a four-component stream are typed `Unsupported`, not yet wired.
 - Opt-in mozjpeg progressive scan script (P15, issue #1021):
