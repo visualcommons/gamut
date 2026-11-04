@@ -245,9 +245,10 @@ split-debuginfo = "unpacked"
 incremental = true
 
 # Mutation testing (`.cargo/mutants.toml` selects it with `profile = "mutants"`). Identical to
-# `test` except for debug info, which is the largest per-mutant cost that buys nothing: a mutation
-# run reads pass/fail and never a backtrace, while `[profile.test]` links 139 integration binaries
-# at full optimisation with DWARF — once per mutant, in a cold build directory. `opt-level` is
+# `test` except for debug info, which buys nothing per mutant: a mutation run reads pass/fail and
+# never a backtrace, while `[profile.test]` links 139 integration binaries at full optimisation
+# with line tables for every workspace crate (dependencies carry none, inherited from
+# `[profile.dev.package."*"]`) — once per mutant, in a cold build directory. `opt-level` is
 # deliberately kept at 3 so the oracle differential tests run at the same speed the gate sees.
 # `incremental` is off because every mutant builds in a fresh copy of the tree, so an incremental
 # cache can only ever be written, never read.
