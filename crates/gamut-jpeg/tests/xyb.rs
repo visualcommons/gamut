@@ -177,13 +177,18 @@ fn xyb_x_table_round_trips_through_libjpeg_and_through_gamut() {
     // the quality-60 table recovers the source only if the encoder divided by that same table.
     let base = QuantTables::annex_k();
     let tables = base.scaled(90).with_xyb_x(*base.scaled(60).luma()).unwrap();
-    for progressive in [false, true] {
+    for (subsampling, progressive) in [
+        (ChromaSubsampling::Ycbcr444, false),
+        (ChromaSubsampling::Ycbcr444, true),
+        (ChromaSubsampling::Ycbcr420, false),
+        (ChromaSubsampling::Ycbcr420, true),
+    ] {
         let (w, h) = (33u32, 31u32);
         let src = rgb_gradient(w, h);
         let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
         let jpeg = JpegEncoder::new()
             .with_color_mode(JpegColorMode::Xyb)
-            .with_subsampling(ChromaSubsampling::Ycbcr444)
+            .with_subsampling(subsampling)
             .with_quant_tables(tables)
             .with_progressive(progressive)
             .encode_to_vec(img)
@@ -192,11 +197,14 @@ fn xyb_x_table_round_trips_through_libjpeg_and_through_gamut() {
         let (max, psnr) = stats(&xyb_samples_to_srgb(&reference.pixels), &src);
         assert!(
             psnr > 35.0,
-            "prog={progressive}: libjpeg path PSNR {psnr:.2} (max {max})"
+            "{subsampling:?} prog={progressive}: libjpeg path PSNR {psnr:.2} (max {max})"
         );
         let own: ImageBuf<Rgb8> = gamut_jpeg::JpegDecoder::new().decode_image(&jpeg).unwrap();
-        let (parity, _) = stats(own.as_samples(), &reference.pixels);
-        assert!(parity <= 3, "gamut vs libjpeg parity {parity}");
+        assert!(
+            own.as_samples() == reference.pixels.as_slice(),
+            "{subsampling:?} prog={progressive}: gamut vs libjpeg parity {}",
+            stats(own.as_samples(), &reference.pixels).0
+        );
     }
 }
 
@@ -238,49 +246,54 @@ fn xyb_byte_count_is_relative_to_appended_output() {
 #[test]
 fn xyb_round_trips_through_libjpeg_and_through_gamut() {
     // Both decoders see passthrough samples; inverting the XYB pipeline in the test must recover
-    // the source within JPEG-lossy tolerance, baseline and progressive, plus a restart cell. 4:4:4,
-    // so that neither decoder upsamples a plane and the two decodes agree to IDCT rounding.
-    for &(w, h) in &[(16u32, 16u32), (33, 31), (64, 48)] {
-        for (progressive, restart) in [(false, 0u16), (true, 0), (false, 2)] {
-            let src = rgb_gradient(w, h);
-            let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
-            let jpeg = JpegEncoder::new()
-                .with_color_mode(JpegColorMode::Xyb)
-                .with_subsampling(ChromaSubsampling::Ycbcr444)
-                .with_quality(90)
-                .with_progressive(progressive)
-                .with_restart_interval(restart)
-                .encode_to_vec(img)
-                .unwrap();
+    // the source within JPEG-lossy tolerance, baseline and progressive, plus a restart cell, at
+    // 4:4:4 and at the default B-subsampled layout. gamut's default upsampler is libjpeg-turbo's
+    // fancy filter (#1016), so the two decodes agree byte for byte at either layout.
+    for (w, h, subsampling, progressive, restart) in xyb_battery() {
+        let src = rgb_gradient(w, h);
+        let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap();
+        let jpeg = JpegEncoder::new()
+            .with_color_mode(JpegColorMode::Xyb)
+            .with_subsampling(subsampling)
+            .with_quality(90)
+            .with_progressive(progressive)
+            .with_restart_interval(restart)
+            .encode_to_vec(img)
+            .unwrap();
 
-            // libjpeg-turbo: geometry + passthrough decode (no YCbCr inverse thanks to APP14=0).
-            let reference = libjpeg_oracle::decode(&jpeg).expect("libjpeg-turbo decode");
-            assert_eq!(
-                (reference.width, reference.height, reference.channels),
-                (w, h, 3)
-            );
-            let (max, psnr) = stats(&xyb_samples_to_srgb(&reference.pixels), &src);
-            // Measured worst over the battery: max-diff 24 (the inherent near-black X
-            // amplification the ICC pin test documents), PSNR 40.5 dB. Asserted with margin.
-            assert!(
-                psnr > 35.0,
-                "{w}x{h} prog={progressive} r={restart}: libjpeg path PSNR {psnr:.2} (max {max})"
-            );
+        // libjpeg-turbo: geometry + passthrough decode (no YCbCr inverse thanks to APP14=0).
+        let reference = libjpeg_oracle::decode(&jpeg).expect("libjpeg-turbo decode");
+        assert_eq!(
+            (reference.width, reference.height, reference.channels),
+            (w, h, 3)
+        );
+        let (max, psnr) = stats(&xyb_samples_to_srgb(&reference.pixels), &src);
+        // Measured worst over the battery: max-diff 24 (the inherent near-black X
+        // amplification the ICC pin test documents), PSNR 39.1 dB (B-subsampled; 40.5 dB at
+        // 4:4:4). Asserted with margin.
+        assert!(
+            psnr > 35.0,
+            "{w}x{h} prog={progressive} r={restart}: libjpeg path PSNR {psnr:.2} (max {max})"
+        );
 
-            // The oracle also reads back the embedded profile.
-            assert_eq!(
-                libjpeg_oracle::read_icc_profile(&jpeg).expect("read icc"),
-                Some(XYB_ICC_PROFILE.to_vec())
-            );
+        // The oracle also reads back the embedded profile.
+        assert_eq!(
+            libjpeg_oracle::read_icc_profile(&jpeg).expect("read icc"),
+            Some(XYB_ICC_PROFILE.to_vec())
+        );
 
-            // gamut's own decoder: same passthrough presentation, parity with the oracle within
-            // IDCT rounding, and the same reconstruction quality.
-            let own: ImageBuf<Rgb8> = gamut_jpeg::JpegDecoder::new().decode_image(&jpeg).unwrap();
-            let (parity, _) = stats(own.as_samples(), &reference.pixels);
-            assert!(parity <= 3, "gamut vs libjpeg parity {parity}");
-            let (_, own_psnr) = stats(&xyb_samples_to_srgb(own.as_samples()), &src);
-            assert!(own_psnr > 35.0, "gamut path PSNR {own_psnr:.2}");
-        }
+        // gamut's own decoder: same passthrough presentation, byte-identical to the oracle
+        // (measured 0 on every cell; replicating the subsampled B instead differs by 2 to 6
+        // codes, so the subsampled cells pin the default upsampler), and the same
+        // reconstruction quality.
+        let own: ImageBuf<Rgb8> = gamut_jpeg::JpegDecoder::new().decode_image(&jpeg).unwrap();
+        assert!(
+            own.as_samples() == reference.pixels.as_slice(),
+            "{w}x{h} {subsampling:?} prog={progressive} r={restart}: gamut vs libjpeg parity {}",
+            stats(own.as_samples(), &reference.pixels).0
+        );
+        let (_, own_psnr) = stats(&xyb_samples_to_srgb(own.as_samples()), &src);
+        assert!(own_psnr > 35.0, "gamut path PSNR {own_psnr:.2}");
     }
 }
 
@@ -351,7 +364,7 @@ fn gamut_xyb(
         .unwrap()
 }
 
-/// The XYB battery the jpegli cross-checks run: sizes on and off the 16-pixel MCU grid, B
+/// The XYB battery the libjpeg-turbo and jpegli cross-checks run: sizes on and off the 16-pixel MCU grid, B
 /// subsampled and 4:4:4, baseline, progressive and a restart cell.
 fn xyb_battery() -> Vec<(u32, u32, ChromaSubsampling, bool, u16)> {
     let mut cells = Vec::new();
