@@ -24,7 +24,8 @@
 //! `M2` matrices, the `*_standard` transfer-curve variants, the matrix derivations) — is reachable
 //! and grouped under its module. For convenience the crate root additionally re-exports the items
 //! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`],
-//! [`Planar8`] / [`Yuv420`] / [`YcbcrMatrix`] / [`RgbToYcbcr`], the [`clip_pixel`] /
+//! [`Planar8`] / [`Yuv420`] / [`YcbcrMatrix`] / [`RgbToYcbcr`], the decoders' [`ChromaUpsampling`]
+//! choice (its kernels live in [`upsample`]), the [`clip_pixel`] /
 //! [`rgb_to_ycbcr`] helpers, the colour-science entry types [`Gamut`] and [`SourceProfile`] /
 //! [`SourceTransfer`], and the headline colour-difference metrics [`delta_e_76`] /
 //! [`delta_e_2000`].
@@ -90,6 +91,7 @@ pub mod planar;
 pub mod planar16;
 pub mod profile;
 pub mod transfer;
+pub mod upsample;
 pub mod xyb;
 pub mod ycbcr;
 
@@ -102,4 +104,5 @@ pub use pixel::{clip_pixel, clip_pixel8};
 pub use planar::Planar8;
 pub use planar16::Planar16;
 pub use profile::{SourceProfile, SourceTransfer};
+pub use upsample::ChromaUpsampling;
 pub use ycbcr::{RgbToYcbcr, YcbcrMatrix, Yuv420, rgb_to_ycbcr, ycbcr_to_rgb};

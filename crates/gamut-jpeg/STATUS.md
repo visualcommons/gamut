@@ -18,13 +18,15 @@ directions in `tests/oracle.rs`: **encode** (gamut encodes → libjpeg-turbo dec
 within tolerance) and **decode** (libjpeg-turbo encodes → gamut decodes → matches libjpeg-turbo's
 own decode of the same stream, gray/4:4:4 **byte-identical** (asserted as exact equality since
 issue #896: the decoder's IDCT is `gamut_dsp::jpeg::idct8x8_int`, libjpeg-turbo's accurate integer
-IDCT bit for bit, where the `f64` reference kernel left up to 3 codes of rounding), subsampled bounded by
-the documented replication-vs-fancy upsampling divergence). The decode gate runs the **sequential**
+IDCT bit for bit, where the `f64` reference kernel left up to 3 codes of rounding), and since issue #1016
+4:2:2/4:2:0/4:4:0 **byte-identical** too: the default chroma upsampling is libjpeg-turbo's fancy
+upsampling, ported exactly into `gamut_color::upsample::libjpeg`, and `ChromaUpsampling::Nearest` is held
+byte-identical to libjpeg-turbo with fancy upsampling off). The decode gate runs the **sequential**
 battery and, from P4, the **progressive** one (libjpeg-turbo's standard 10-scan `jpeg_simple_progression`
 script across gray/colour × 4:4:4/4:2:2/4:2:0 × q{40,75,95} × restart{0,2} × optimize{off,on}); the
-progressive parity numbers are **identical** to the sequential ones (gray/4:4:4 max-diff **0**,
-subsampled PSNR **22.9 dB**), confirming the progressive coefficients match exactly — only the shared
-upsampling remains as a source of divergence. From P5 the **encode** gate adds a **progressive
+progressive parity numbers are **identical** to the sequential ones (max-diff **0** in every mode;
+before #1016 subsampled modes measured 22.9 dB PSNR under replication), confirming the progressive
+coefficients match exactly. From P5 the **encode** gate adds a **progressive
 exactness** direction (`tests/oracle.rs`): gamut's SOF2 stream and its baseline stream of the same
 image carry the same quantized coefficients, so libjpeg-turbo's decode of each must be **byte-for-byte
 identical** — asserted as exact equality (not a tolerance) across the dims × mode × q{40,75,95} ×
@@ -219,8 +221,16 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **Progressive quantization-table binding (§B.2.4.1).** Each component latches its dequantization
   table at its **first** scan; a later DQT redefinition of that destination does not retroactively
   change an already-latched component, matching the reference decoder.
-- **Upsampling filter.** Subsampled chroma is upsampled by **sample replication** (nearest); T.81
-  leaves the reconstruction filter open (§A.2 NOTE), so this is the decoder's documented free choice.
+- **Upsampling filter.** T.81 leaves the reconstruction filter open (§A.2 NOTE). The default,
+  `ChromaUpsampling::Interpolated`, is what libjpeg-turbo's `djpeg` does by default (#1016): the
+  `jdsample.c` triangle filter for components at half the horizontal (h2v1), vertical (h1v2) or both
+  (h2v2) resolutions, with libjpeg-turbo's alternating rounding bias and its replication fallback for
+  an h2v1/h2v2 component one or two samples wide; every other integer ratio is replicated, as
+  libjpeg-turbo does. A non-integer ratio (e.g. 2 of 3, which §A.1.1 permits) is replicated too;
+  libjpeg-turbo refuses it (`JERR_FRACT_SAMPLE_NOTIMPL`).
+  `JpegDecoder::with_chroma_upsampling(ChromaUpsampling::Nearest)` replicates everything
+  (`djpeg -nosmooth`). Both are oracle-gated byte for byte. libjpeg-turbo's DCT-domain scaling is not
+  modelled: the decoder always outputs at full size.
 - **Trailing bytes after EOI** are ignored (the libjpeg convention).
 - **CMYK is presented verbatim** (no Adobe inversion); **YCCK** applies the inverse YCbCr transform to
   the first three channels with `K` passed through (Adobe TN #5116).
@@ -313,3 +323,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P13 | Adobe TN #5116; ISO/IEC 18181-1 (XYB, via the vendored CD + pinned libjxl 0.12.0 constants); issue #334 | **XYB colour mode:** `with_color_mode(JpegColorMode::Xyb)` — sRGB → linear (EOTF LUT) → opsin XYB → scaled-XYB u8 planes (X, Y, B−Y) coded 4:4:4 under SOI → APP14 `transform=0` → EXIF/XMP → APP2 `XYB_ICC_PROFILE` → DQT, SOF ids `R`,`G`,`B`, X/Y on the luminance table and B−Y on the chrominance table (placeholder pairing, ledgered above). The 768-byte profile (input class, D50 XYZ PCS, `desc`/`cprt`/`wtpt`/`chad`/`A2B0` mAB with a 2×2×2 CLUT + cube-root parametric M curves + the frozen 0.5·XYZ(D50)·OpsinInverse matrix/`B2A0` no-op) is vendored static and umbrella-pinned; the decoder needs zero changes (RGB passthrough via APP14/ids). Differential: libjpeg-turbo decodes + test-side XYB inversion ≥ 40 dB on the battery; lcms2 reproduces sRGB from real samples (worst 25 codes at the documented near-black X amplification, mean 2.46) | ✅ done |
 | P14 | issue #420; `gamut-metadata` | **Typed metadata wiring** behind the opt-in `metadata` feature: `JpegMetadata::blocks` / `metadata`, `JpegEncoder::with_metadata` / `with_encoded_metadata`; IPTC-IIM / C2PA typed `Unsupported`; pinned by the typed extract → embed → extract equality through the stream. **Oracle cell not covered:** `tooling/exiv2-oracle` is block-level and in-memory (no JPEG reader), so "exiv2 reads the embedded APP1/APP2 payloads out of the JPEG" is untested; the located bytes are pinned byte-exact against libjpeg-turbo (ICC, `tests/oracle.rs`) and the leaf crates pin the payloads against exiv2 (#510) | ✅ done |
 | P15 | T.81 §G; mozjpeg 4.1.5 `jcparam.c`; issue #1021 | **Opt-in mozjpeg progressive scan script:** the fieldless `ProgressiveScript` selector (`Libjpeg = 0` frozen default, `Mozjpeg = 1`) via `JpegEncoder::with_progressive_script` — mozjpeg's `JCP_MAX_COMPRESSION` script with `dc_scan_opt_mode = 0`, its YCbCr/all-purpose choice transcribed (9-scan YCbCr, 5-scan grey, 13-scan XYB). Walker-pinned scan lists, gamut-decoder and libjpeg-turbo `decode(progressive) == decode(baseline)` exactness, backends vetoed; default byte-identical | ✅ done |
+| P16 | T.81 §A.2 NOTE; libjpeg-turbo `jdsample.c`; issue #1016 | **Reference chroma upsampling:** the built-in decoder's default `ChromaUpsampling::Interpolated` is libjpeg-turbo's fancy upsampling (h2v1/h1v2/h2v2 triangle filters with the alternating rounding bias and the narrow-component replication fallback, from `gamut_color::upsample::libjpeg`); `with_chroma_upsampling(ChromaUpsampling::Nearest)` keeps replication. Oracle: byte-identical to libjpeg-turbo's default decode at 4:2:2/4:2:0/4:4:0 and to `djpeg -nosmooth` under `Nearest` (`tests/oracle.rs`) | ✅ done |

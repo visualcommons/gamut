@@ -1,5 +1,6 @@
 //! Test-only oracle: a safe wrapper over the reference libjxl **decoder** exposed by
-//! `gamut-jxl-sys`, used to read back what `gamut-jxl`'s encoder produced.
+//! `gamut-jxl-sys`, used to read back what `gamut-jxl`'s encoder produced, plus direct libjxl
+//! **encoder** helpers for streams to compare against or that gamut never writes.
 //!
 //! Integration-test code is a separate crate and is not bound by `gamut-jxl`'s
 //! `#![deny(unsafe_code)]`, so the raw FFI calls live here directly; `#![allow(dead_code)]` keeps the
@@ -407,6 +408,129 @@ pub fn encode_animated_rgb8(width: u32, height: u32, frames: &[Vec<u8>]) -> Vec<
                 out.resize(out.len() * 2, 0);
             }
             other => panic!("animated encode ProcessOutput failed: {other:?}"),
+        }
+    }
+    out.truncate(produced);
+    out
+}
+
+/// Encodes an sRGB RGB8 image as a bare codestream **directly through the libjxl C API**, setting
+/// exactly the given integer frame settings after the mode and effort — the reference a gamut
+/// encode with the same configuration must match byte for byte.
+///
+/// The call sequence is the one a plain libjxl client writes, independent of gamut's own driver:
+/// no container, basic info for the image (`uses_original_profile` only when lossless), the sRGB
+/// colour encoding, then one frame-settings object carrying lossless-or-distance, `EFFORT` and
+/// `options` in order. `distance = None` means lossless.
+///
+/// Panics on any encoder error (appropriate for a test helper).
+pub fn encode_direct_rgb8(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    distance: Option<f32>,
+    effort: i64,
+    options: &[(enc::JxlEncoderFrameSettingId, i64)],
+) -> Vec<u8> {
+    assert_eq!(pixels.len(), width as usize * height as usize * 3);
+    let handle = unsafe { enc::JxlEncoderCreate(core::ptr::null()) };
+    assert!(!handle.is_null(), "JxlEncoderCreate returned null");
+    let encoder = Encoder(handle);
+
+    let st = unsafe { enc::JxlEncoderUseContainer(encoder.0, ty::JxlBool::FALSE) };
+    assert_eq!(st, enc::JxlEncoderStatus::SUCCESS, "UseContainer failed");
+
+    let mut info = MaybeUninit::<ty::JxlBasicInfo>::zeroed();
+    let mut info = unsafe {
+        enc::JxlEncoderInitBasicInfo(info.as_mut_ptr());
+        info.assume_init()
+    };
+    info.xsize = width;
+    info.ysize = height;
+    info.bits_per_sample = 8;
+    info.exponent_bits_per_sample = 0;
+    info.num_color_channels = 3;
+    info.num_extra_channels = 0;
+    info.alpha_bits = 0;
+    info.uses_original_profile = if distance.is_none() {
+        ty::JxlBool::TRUE
+    } else {
+        ty::JxlBool::FALSE
+    };
+    let st = unsafe { enc::JxlEncoderSetBasicInfo(encoder.0, &info) };
+    assert_eq!(st, enc::JxlEncoderStatus::SUCCESS, "SetBasicInfo failed");
+
+    let mut color = MaybeUninit::<ty::JxlColorEncoding>::zeroed();
+    let color = unsafe {
+        enc::JxlColorEncodingSetToSRGB(color.as_mut_ptr(), ty::JxlBool::FALSE);
+        color.assume_init()
+    };
+    let st = unsafe { enc::JxlEncoderSetColorEncoding(encoder.0, &color) };
+    assert_eq!(
+        st,
+        enc::JxlEncoderStatus::SUCCESS,
+        "SetColorEncoding failed"
+    );
+
+    let frame_settings =
+        unsafe { enc::JxlEncoderFrameSettingsCreate(encoder.0, core::ptr::null()) };
+    assert!(
+        !frame_settings.is_null(),
+        "FrameSettingsCreate returned null"
+    );
+    let st = match distance {
+        None => unsafe { enc::JxlEncoderSetFrameLossless(frame_settings, ty::JxlBool::TRUE) },
+        Some(d) => unsafe { enc::JxlEncoderSetFrameDistance(frame_settings, d) },
+    };
+    assert_eq!(st, enc::JxlEncoderStatus::SUCCESS, "mode setter failed");
+    let st = unsafe {
+        enc::JxlEncoderFrameSettingsSetOption(
+            frame_settings,
+            enc::JxlEncoderFrameSettingId::EFFORT,
+            effort,
+        )
+    };
+    assert_eq!(st, enc::JxlEncoderStatus::SUCCESS, "EFFORT failed");
+    for &(id, value) in options {
+        let st = unsafe { enc::JxlEncoderFrameSettingsSetOption(frame_settings, id, value) };
+        assert_eq!(
+            st,
+            enc::JxlEncoderStatus::SUCCESS,
+            "{id:?} = {value} failed"
+        );
+    }
+
+    let format = ty::JxlPixelFormat {
+        num_channels: 3,
+        data_type: ty::JxlDataType::UINT8,
+        endianness: ty::JxlEndianness::NATIVE,
+        align: 0,
+    };
+    let st = unsafe {
+        enc::JxlEncoderAddImageFrame(
+            frame_settings,
+            &format,
+            pixels.as_ptr().cast::<c_void>(),
+            pixels.len(),
+        )
+    };
+    assert_eq!(st, enc::JxlEncoderStatus::SUCCESS, "AddImageFrame failed");
+    unsafe { enc::JxlEncoderCloseInput(encoder.0) };
+
+    let mut out = vec![0u8; 64 * 1024];
+    let mut produced = 0usize;
+    loop {
+        let mut next_out = unsafe { out.as_mut_ptr().add(produced) };
+        let mut avail_out = out.len() - produced;
+        let status =
+            unsafe { enc::JxlEncoderProcessOutput(encoder.0, &mut next_out, &mut avail_out) };
+        produced = out.len() - avail_out;
+        match status {
+            enc::JxlEncoderStatus::SUCCESS => break,
+            enc::JxlEncoderStatus::NEED_MORE_OUTPUT => {
+                out.resize(out.len() * 2, 0);
+            }
+            other => panic!("direct encode ProcessOutput failed: {other:?}"),
         }
     }
     out.truncate(produced);

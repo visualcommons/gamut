@@ -6,8 +6,9 @@
 //! - **Lossless** (`qindex == 0`): forced `TX_4X4` Walsh–Hadamard; prediction neighbours are the
 //!   source samples (which equal the reconstruction under lossless); partitions are
 //!   `PARTITION_NONE` except at the right/bottom frame edges.
-//! - **Lossy** (`qindex > 0`): recursive `PARTITION_NONE`/`HORZ`/`VERT`/`SPLIT` down to 4×4, with
-//!   per-superblock `delta_q`/`delta_lf` and optional segmentation (`SEG_LVL_ALT_Q`). Each luma
+//! - **Lossy** (`qindex > 0`): recursive `PARTITION_NONE`/`HORZ`/`VERT`/`SPLIT` down to 4×4, every
+//!   block at the frame quantizer and loop-filter level — per-superblock `delta_q`/`delta_lf` and
+//!   segmentation (`SEG_LVL_ALT_Q`) are coded only under the test-only [`BlockVariation`]. Each luma
 //!   block codes a transform under `TX_MODE_SELECT` (square `tx_depth` 0..2; sizes `TX_4X4`..
 //!   `TX_64X64`, with `TX_32X32`/`TX_64X64` DCT-only). The luma prediction mode is chosen per block
 //!   from all 13 intra modes (`DC`, the eight directional `V`/`H`/`D45`/`D135`/`D113`/`D157`/`D203`/
@@ -323,6 +324,36 @@ fn palette_color_context(
     (order, cdf::PALETTE_COLOR_CONTEXT[hash] as usize)
 }
 
+/// Whether a lossy frame varies its quantizer and loop-filter level from block to block.
+///
+/// The encoder has no content-driven reason to vary either yet, so a default encode codes every
+/// block at the frame's `base_q_idx` and loop-filter level: `segmentation_enabled = 0` and
+/// `delta_q_present = 0` (which also leaves `delta_lf_present` uncoded, §5.9.18). The variation the
+/// lossy path used to apply unconditionally is kept behind [`Self::SyntaxExercise`] so the
+/// segmentation, `delta_q` and `delta_lf` syntax stays under oracle test: there a block's segment
+/// comes from its position (`(r + c) % 3`, alt-Q `+20`/`+50`, [`SEG_ALT_Q`]), each superblock signals
+/// a `delta_q` cycling `+1/−1/+2` and a `delta_lf` of `0/1`, all by position alone. That is a
+/// content-blind quality penalty on two thirds of the blocks (#1011), so nothing outside this
+/// crate's tests selects it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum BlockVariation {
+    /// Every block at the frame-level quantizer and loop-filter level.
+    #[default]
+    Frame,
+    /// Position-only segment, `delta_q` and `delta_lf` assignment, to exercise their syntax.
+    SyntaxExercise,
+}
+
+impl BlockVariation {
+    /// Whether a frame at `qindex` codes the position-only variation: segmentation with
+    /// [`SEG_ALT_Q`], and `delta_q`/`delta_lf` present. A lossless frame never does — §5.9.18 codes
+    /// `delta_q_present` only when `base_q_idx > 0`, and a segment quantizer above 0 would make the
+    /// frame lossy.
+    pub(crate) fn exercised(self, qindex: u8) -> bool {
+        self == Self::SyntaxExercise && qindex > 0
+    }
+}
+
 /// Per-segment `SEG_LVL_ALT_Q` quantizer deltas (§5.9.14): `Some(delta)` enables the feature on that
 /// segment (its block quantizer is `Clip3(0, 255, CurrentQIndex + delta)`), `None` leaves the segment
 /// on the frame quantizer. The header signals this exact table, so encoder and decoder agree. The two
@@ -582,9 +613,12 @@ pub(crate) struct FrameEncoder<'a> {
     current_qindex: i32,
     /// `CurrentDeltaLF` (§7.14.4): the accumulated per-superblock loop-filter-level delta.
     current_dlf: i32,
-    /// Whether `delta_q_present` (lossy path); when set, the first block of each superblock signals a
-    /// `delta_q` and `read_deltas` gates it.
-    delta_q_present: bool,
+    /// Whether the frame codes the position-only block variation ([`BlockVariation::exercised`]):
+    /// segmentation is enabled, so every block codes a segment id, and `delta_q_present` /
+    /// `delta_lf_present` are set, so the first block of each superblock signals a `delta_q` and a
+    /// `delta_lf`, gated by `read_deltas`. Off by default, when every block keeps the frame's
+    /// quantizer and loop-filter level.
+    block_variation: bool,
     read_deltas: bool,
     /// Bits per sample (8, 10, or 12); sets the reconstruction clamp range and dequant/transform
     /// bit depth.
@@ -808,7 +842,7 @@ impl<'a> FrameEncoder<'a> {
             ac_quant: ac_q(bit_depth, i32::from(qindex)),
             current_qindex: i32::from(qindex),
             current_dlf: 0,
-            delta_q_present: qindex > 0,
+            block_variation: false,
             read_deltas: false,
             bit_depth,
             recon,
@@ -853,6 +887,14 @@ impl<'a> FrameEncoder<'a> {
     /// Replaces the mode-decision search (the full one by default).
     pub(crate) fn with_search(mut self, search: Search) -> Self {
         self.search = search;
+        self
+    }
+
+    /// Replaces the block variation ([`BlockVariation::Frame`] by default). The frame header must
+    /// be written with the same `variation`, which is what tells the decoder to read the symbols
+    /// it adds.
+    pub(crate) fn with_block_variation(mut self, variation: BlockVariation) -> Self {
+        self.block_variation = variation.exercised(self.qindex);
         self
     }
 
@@ -998,8 +1040,9 @@ impl<'a> FrameEncoder<'a> {
             for c in (tile.c0..tile.c1).step_by(SB4) {
                 self.sb_r = r;
                 self.sb_c = c;
-                // ReadDeltas is armed per superblock (§7.18); the first block then signals delta_q.
-                self.read_deltas = self.delta_q_present;
+                // ReadDeltas is armed per superblock (§7.18) under the block-variation exercise;
+                // the first block then signals delta_q and delta_lf.
+                self.read_deltas = self.block_variation;
                 self.clear_block_decoded(r, c);
                 let sb = self.sb_index(r, c);
                 // A second pass starts each superblock from what the first one coded there, so
@@ -1682,9 +1725,10 @@ impl<'a> FrameEncoder<'a> {
 
     /// `read_delta_qindex` (§5.11.12) for the first block of a superblock: signals a small per-SB
     /// `delta_q` (magnitude coded under `Default_Delta_Q_Cdf`, then a sign bit) and updates
-    /// `CurrentQIndex = Clip3(1, 255, CurrentQIndex + delta)` (with `delta_q_res = 0`). The delta is a
-    /// quality placeholder (any value reconstructs bit-exactly) chosen to oscillate around the frame
-    /// quantizer so adjacent superblocks differ. Magnitude is kept ≤ 2, so the `DELTA_Q_SMALL` escape
+    /// `CurrentQIndex = Clip3(1, 255, CurrentQIndex + delta)` (with `delta_q_res = 0`). Coded only
+    /// under [`BlockVariation::SyntaxExercise`]: the delta is position-only syntax exercise (any
+    /// value reconstructs bit-exactly) chosen to oscillate around the frame quantizer so adjacent
+    /// superblocks differ. Magnitude is kept ≤ 2, so the `DELTA_Q_SMALL` escape
     /// is never coded.
     fn signal_delta_q(&mut self) {
         // `(sb_r / 16 + sb_c / 16) % 3` over superblock origins, which are multiples of 16 MI:
@@ -1707,7 +1751,8 @@ impl<'a> FrameEncoder<'a> {
     /// `read_delta_lf` (§5.11.13, `delta_lf_multi = 0`) for the first block of a superblock: signals a
     /// small per-SB `delta_lf` (magnitude under `Default_Delta_Lf_Cdf`, then a sign bit when non-zero)
     /// and updates `CurrentDeltaLF = Clip3(-MAX_LOOP_FILTER, MAX_LOOP_FILTER, CurrentDeltaLF + delta)`.
-    /// The delta is a non-negative `{0, 1}` placeholder (so the per-superblock loop-filter level only
+    /// Coded only under [`BlockVariation::SyntaxExercise`]: the delta is a non-negative,
+    /// position-only `{0, 1}` syntax exercise (so the per-superblock loop-filter level only
     /// rises above the frame level — `loop_filter_level + DeltaLF` stays positive and the p-side-level
     /// fallback for a zero level is never needed). It does not depend on the frame level, which is
     /// chosen only after the tiles are coded: at level 0 §7.4 does not invoke the loop filter at
@@ -2003,8 +2048,9 @@ impl<'a> FrameEncoder<'a> {
             .encode(usize::from(skip), self.cdfs.skip[sctx].slot());
         // intra_segment_id / read_segment_id (§5.11.9): with segmentation on, code the block's
         // segment id right after the skip flag (`SegIdPreSkip = 0`). A skip block inherits the
-        // predicted id with no bits.
-        let segid = if self.qindex > 0 {
+        // predicted id with no bits. Without segmentation (the default, and always when lossless)
+        // nothing is coded and every block is segment 0, at the frame quantizer.
+        let segid = if self.block_variation {
             self.signal_segment_id(r, c, skip)
         } else {
             0
@@ -4985,10 +5031,17 @@ mod tests {
 
     #[test]
     fn encode_partition_stops_splitting_at_the_preset_floor() {
-        // `Mi_Width_Log2` 0 is a 4-sample-wide block. Under the full search this texture splits
-        // down to 4x4 leaves; the `Fastest` preset stops choosing a split below 8x8, and a 64x64
-        // frame forces none.
-        let p = busy64();
+        // `Mi_Width_Log2` 0 is a 4-sample-wide block. A field of flat 4x4 cells, each its own
+        // value, is predicted best one cell at a time, so under the full search it splits down to
+        // 4x4 leaves; the `Fastest` preset stops choosing a split below 8x8, and a 64x64 frame
+        // forces none.
+        let mut rgb = vec![0u8; 64 * 64 * 3];
+        for (i, px) in rgb.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            let cell = (i % 64 / 4) * 7 + (i / 64 / 4) * 13;
+            let v = ((cell * 97) % 251) as u8;
+            px.copy_from_slice(&[v, v.wrapping_mul(3), 128]);
+        }
+        let p = Planar8::from_rgb8_identity(&rgb, 64, 64).unwrap();
         let leaves = |speed| {
             let mut e = at_speed(&p, 40, speed);
             e.clear_block_decoded(0, 0);
@@ -5595,15 +5648,35 @@ mod tests {
     fn a_trial_puts_back_everything_coding_a_superblocks_first_block_changes() {
         // The first block of a superblock also signals `delta_q`/`delta_lf`, moving the quantizer
         // state; a trial of it must restore that too, along with every per-MI map, context and
-        // reconstructed sample it wrote, and must neither code nor adapt anything.
+        // reconstructed sample it wrote, and must neither code nor adapt anything. The segment id
+        // and the deltas are coded only under the block-variation exercise.
         let p = busy64();
-        let mut e = at_speed(&p, 40, Speed::Thorough);
+        let mut e =
+            at_speed(&p, 40, Speed::Thorough).with_block_variation(BlockVariation::SyntaxExercise);
         e.clear_block_decoded(0, 0);
         e.read_deltas = true;
         let before = Snapshot::of(&e);
         let cost = e.trial_cost(0, 0, 8, |e| e.encode_block(0, 0, 8, 8));
         assert!(cost > 0);
         assert!(Snapshot::of(&e) == before, "trial_cost changed the encoder");
+    }
+
+    #[test]
+    fn block_variation_is_exercised_only_when_asked_for_on_a_lossy_frame() {
+        // Example: the variation is coded only under the syntax exercise, never by default (#1011),
+        // and never on a lossless frame, whose header cannot code `delta_q_present`.
+        assert!(!BlockVariation::default().exercised(40));
+        assert!(!BlockVariation::Frame.exercised(40));
+        assert!(BlockVariation::SyntaxExercise.exercised(1));
+        assert!(!BlockVariation::SyntaxExercise.exercised(0));
+        let p = busy64();
+        assert!(!FrameEncoder::new(&p, 40).block_variation);
+        let exercised =
+            FrameEncoder::new(&p, 40).with_block_variation(BlockVariation::SyntaxExercise);
+        assert!(exercised.block_variation);
+        let lossless =
+            FrameEncoder::new(&p, 0).with_block_variation(BlockVariation::SyntaxExercise);
+        assert!(!lossless.block_variation);
     }
 
     #[test]

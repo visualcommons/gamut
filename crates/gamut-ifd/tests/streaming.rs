@@ -268,6 +268,89 @@ fn maker_note_mini_ifd_parses_through_a_rebased_view() {
     );
 }
 
+/// A directory the format defines without a next-IFD pointer, cut from a written file: the
+/// header, count and entries, ending exactly at the last entry's last byte. Returns the
+/// bytes, the directory's offset and the directory it holds.
+fn unterminated_directory(order: ByteOrder, variant: Variant) -> (Vec<u8>, u64, Ifd) {
+    let mut ifd = Ifd::new();
+    ifd.set(1, Value::Short(vec![7])); // inline: no value bytes after the directory
+    ifd.set(2, Value::Long(vec![0x0102_0304]));
+    let bytes = write(&TiffFile {
+        order,
+        variant,
+        ifds: vec![ifd.clone()],
+    })
+    .expect("write");
+    let offset = IfdReader::open(&bytes[..])
+        .expect("open")
+        .first_ifd_offset();
+    let end = offset as usize + variant.count_size() + 2 * variant.entry_size();
+    assert_eq!(
+        bytes.len(),
+        end + variant.offset_size(),
+        "the written file ends with the directory's next pointer"
+    );
+    (bytes[..end].to_vec(), offset, ifd)
+}
+
+/// `read_ifd_unterminated` at the exact boundary: a directory ending at the source's last byte
+/// reads (where `read_ifd` refuses it for its absent pointer), and one byte short does not.
+#[test]
+fn unterminated_directory_reads_to_the_last_byte_and_no_further() {
+    for (order, variant) in orders_and_variants() {
+        let (bytes, offset, ifd) = unterminated_directory(order, variant);
+
+        let mut reader = IfdReader::with_layout(&bytes[..], order, variant);
+        let raw = reader
+            .read_ifd_unterminated(offset)
+            .expect("ends at last byte");
+        assert_eq!(raw.offset, offset);
+        assert_eq!(raw.next, 0);
+        assert_eq!(reader.decode_ifd(&raw).expect("decode"), ifd);
+        assert!(
+            reader.read_ifd(offset).is_err(),
+            "{variant:?}: read_ifd needs the pointer bytes the source lacks"
+        );
+
+        let short = &bytes[..bytes.len() - 1];
+        let mut reader = IfdReader::with_layout(short, order, variant);
+        assert!(
+            reader.read_ifd_unterminated(offset).is_err(),
+            "{variant:?}: one byte short of the last entry"
+        );
+    }
+}
+
+/// The pointer's bytes are not part of an unterminated directory: where the source does carry
+/// bytes after the entries (here a would-be pointer of all ones), they are neither fetched nor
+/// reported as `next`.
+#[test]
+fn unterminated_directory_never_reads_past_its_entries() {
+    for (order, variant) in orders_and_variants() {
+        let (mut bytes, offset, _) = unterminated_directory(order, variant);
+        let entries_end = bytes.len() as u64;
+        bytes.extend(std::iter::repeat_n(0xFF, variant.offset_size()));
+
+        let mut reader = IfdReader::with_layout(
+            Counting {
+                inner: &bytes[..],
+                bytes_read: 0,
+            },
+            order,
+            variant,
+        );
+        let raw = reader.read_ifd_unterminated(offset).expect("read");
+        assert_eq!(raw.next, 0);
+        assert_eq!(
+            reader.source_mut().bytes_read,
+            entries_end - offset,
+            "{variant:?}: exactly the count and the entries"
+        );
+        // The same bytes through `read_ifd` do yield the would-be pointer.
+        assert_ne!(reader.read_ifd(offset).expect("read_ifd").next, 0);
+    }
+}
+
 /// The stream shape a decoder actually uses: a real file on disk, parsed through
 /// `StreamSource<File>` without reading it into memory.
 #[test]

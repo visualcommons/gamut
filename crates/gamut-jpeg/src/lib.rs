@@ -134,6 +134,7 @@ pub use encoder::{
     ChromaSubsampling, JpegColorMode, JpegEncoder, ProgressiveScript, RdOptimization,
     XYB_ICC_PROFILE,
 };
+pub use gamut_color::ChromaUpsampling;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `JpegMetadata::metadata` / `JpegEncoder::with_metadata` without a direct dependency, and the
 // trait those accessors are methods of.

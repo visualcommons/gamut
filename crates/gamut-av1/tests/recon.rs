@@ -568,28 +568,6 @@ fn variable_tx_size_match_dav1d() {
 }
 
 #[test]
-fn delta_q_match_dav1d() {
-    // delta_q_present: each superblock's first block signals a per-SB delta_q, so CurrentQIndex (and
-    // the dc/ac dequantizer step) varies across superblocks while the coefficient-CDF qctx stays at
-    // its frame value (init_coeff_cdfs derives it from base_q_idx, §8.3.2). Multi-superblock sizes
-    // (> 64 px) exercise several deltas; base_q_idx values sit on the qctx boundaries (20/60/120) so
-    // a ±delta pushes CurrentQIndex across the boundary without changing qctx — the case that would
-    // desync if qctx tracked CurrentQIndex. Byte-equality with dav1d validates the per-block quantizer
-    // tracking and the frame-level qctx.
-    let texture = |x: u32, y: u32| {
-        let r = (x.wrapping_mul(3).wrapping_add(y) % 256) as u8;
-        let g = ((x + y.wrapping_mul(2)) % 256) as u8;
-        let b = (128 + ((x ^ y) % 64)) as u8;
-        [r, g, b]
-    };
-    for &q in &[20u8, 21, 60, 61, 120, 121, 200] {
-        for &(w, h) in &[(64u32, 64u32), (96, 96), (160, 96), (100, 70)] {
-            check(&planes(w, h, texture), q);
-        }
-    }
-}
-
-#[test]
 fn skip_blocks_match_dav1d() {
     // Large flat regions: interior blocks are perfectly DC-predicted (residual identically zero), so
     // the encoder codes them with skip = 1 (no residual; reconstruction = prediction). This exercises
@@ -610,33 +588,6 @@ fn skip_blocks_match_dav1d() {
             check(&planes(w, h, halves), q);
         }
     }
-}
-
-#[test]
-fn delta_lf_match_dav1d() {
-    // delta_lf_present: each superblock's first block signals a per-SB delta_lf, so the deblocking
-    // loop-filter level varies across superblocks (loop_filter_level + accumulated DeltaLF, per
-    // §7.14.4). Structured content gives the deblock real work; multi-superblock sizes (> 64 px)
-    // exercise several distinct per-SB levels. Byte-equality with dav1d validates the per-edge level
-    // (taken from the q0-side block) and the DeltaLF accumulation.
-    let edged = |x: u32, y: u32| {
-        let bar = if (x / 3).is_multiple_of(2) { 70 } else { 190 } as u8;
-        let ramp = ((x.wrapping_add(y).wrapping_mul(11)) % 256) as u8;
-        let band = if (y / 4).is_multiple_of(2) { 60 } else { 200 } as u8;
-        [bar, ramp, band]
-    };
-    let mut levels = Vec::new();
-    for &q in &[24u8, 64, 128, 220] {
-        for &(w, h) in &[(96u32, 96u32), (160, 96), (128, 128)] {
-            levels.push(check_filters(&planes(w, h, edged), q).deblock);
-        }
-    }
-    // A frame level of 0 switches the loop filter off whatever DeltaLF says (§7.4), so the
-    // accumulation is only under test where the encoder chose to deblock.
-    assert!(
-        levels.iter().any(|&l| l > 0),
-        "no case deblocks: {levels:?}"
-    );
 }
 
 #[test]
@@ -665,31 +616,11 @@ fn palette_blocks_match_dav1d() {
 }
 
 #[test]
-fn segmentation_match_dav1d() {
-    // segmentation_enabled with SEG_LVL_ALT_Q on two segments: every non-skip block is assigned a
-    // spatially-varied segment id (coded via neg_interleave under the spatial-prediction context) and
-    // quantized at CurrentQIndex + the segment's alt-Q delta. Textured content keeps blocks non-skip so
-    // the ids are actually coded and the per-segment quantizer changes the residual; dav1d must derive
-    // the same per-block quantizer and reach the encoder reconstruction byte-for-byte.
-    let textured = |x: u32, y: u32| {
-        let r = (x.wrapping_mul(5).wrapping_add(y.wrapping_mul(3)) % 256) as u8;
-        let g = ((x.wrapping_add(y).wrapping_mul(2)) % 256) as u8;
-        let b = (40 + ((x.wrapping_mul(7) ^ y) % 160)) as u8;
-        [r, g, b]
-    };
-    for &q in &[8u8, 32, 96, 180] {
-        for &(w, h) in &[(32u32, 32u32), (64, 48), (96, 72)] {
-            check(&planes(w, h, textured), q);
-        }
-    }
-}
-
-#[test]
 fn transform_64x64_blocks_match_dav1d() {
     // 64×64 blocks: PARTITION_NONE + TX_64X64 luma (chroma is a 2×2 raster of TX_32X32, since chroma
-    // never uses TX_64X64). Solid content is DC-predictable, so interior superblocks code skip = 1,
-    // and a skip 64×64 block — one that fills the whole superblock — codes no delta-q/delta-lf
-    // (`read_delta_qindex`/`read_delta_lf` return early). Gradient content codes a multi-coefficient
+    // never uses TX_64X64). Solid content is DC-predictable, so interior superblocks code skip = 1
+    // (that such a block also codes no delta-q/delta-lf is pinned with the block-variation
+    // exercise, beside the encoder). Gradient content codes a multi-coefficient
     // residual instead. The size matrix exercises a single superblock (64×64), the horizontal,
     // vertical, and 2-D multi-superblock layouts (a skip 64×64 SB followed by another SB), and
     // partial superblocks cropped at the frame edge (which split to ≤32×32 rather than code a
@@ -877,7 +808,7 @@ fn loop_restoration_matches_dav1d() {
 #[test]
 fn restoration_units_decided_one_by_one_match_both_decoders() {
     // A frame three restoration units wide (640 / 256, the last absorbing the remainder) whose
-    // units the encoder decides differently — the smooth field's left unit is restored and the
+    // units the encoder decides differently — the smooth field's middle unit is restored and the
     // others are not (pinned by the encoder's own unit test) — so each unit's `use_wiener` is
     // coded at its own superblock and applied to its own samples, and both decoders must agree.
     // That unit test codes the full search, so this one names `Thorough` to code the same frame.
