@@ -70,7 +70,7 @@ outside parentheses and code spans. `mise run check-agents-edges` holds the list
   honors `GAMUT_JXL_SYS_SKIP_NATIVE=1` to skip cmake for check-only (cross/MSRV) jobs.
   ← `cmake` (build), `jpegxl-src` (build).
 - **gamut-jpeg** — JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec: baseline sequential DCT
-  Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF; opt-in jpegli-style XYB colour mode
+  Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0/4:4:0, JFIF; opt-in jpegli-style XYB colour mode
   with a static vendored ICC profile), sequential/progressive decoder and progressive encoder
   phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, bitstream (the T.81
   Annex K.2 optimal-table builder and Annex C canonical codes), codec-abi, color, dsp, metadata
