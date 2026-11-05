@@ -19,7 +19,7 @@ mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 
 use gamut_core::ErrorKind;
-use gamut_dng::{DngDecoder, DngEncoder, DngRewrite, Value, tags};
+use gamut_dng::{Compression, DngDecoder, DngEncoder, DngRewrite, Value, tags};
 
 /// The largest single allocation this binary grants: far above anything decoding an 8×6 raw
 /// needs, and far below what the patched geometry would request.
@@ -67,7 +67,16 @@ static ALLOCATOR: CappedAllocator = CappedAllocator;
 /// Encodes a small 12-bit CFA raw (the issue's 8×6 reproducer) with `encoder`, then applies `edit`
 /// to the raw sub-IFD through the preserving rewrite — the image data itself is untouched.
 fn patched_raw_ifd(encoder: DngEncoder, edit: impl FnOnce(&mut gamut_ifd::Ifd)) -> Vec<u8> {
-    let raw = common::sample_raw(8, 6, 12);
+    patched_raw_ifd_at(encoder, 12, edit)
+}
+
+/// [`patched_raw_ifd`] over an 8×6 raw of `bits`-bit samples (Deflate encodes only 8 or 16).
+fn patched_raw_ifd_at(
+    encoder: DngEncoder,
+    bits: u16,
+    edit: impl FnOnce(&mut gamut_ifd::Ifd),
+) -> Vec<u8> {
+    let raw = common::sample_raw(8, 6, bits);
     let mut dng = Vec::new();
     encoder
         .encode(&raw, &common::sample_profile(), &mut dng)
@@ -97,6 +106,32 @@ fn a_strip_declaring_huge_geometry_is_rejected_without_a_geometry_sized_allocati
         raw.set(tags::IMAGE_LENGTH, Value::Short(vec![60000]));
         raw.set(tags::ROWS_PER_STRIP, Value::Short(vec![60000]));
     });
+    assert_truncated(&dng);
+}
+
+/// A Deflate chunk that inflates short of its geometry: one 16-bit `16 × 16` tile (512 bytes once
+/// inflated) re-declared `60000 × 60000`. `compression::decompress` bounds inflation only from
+/// above and leaves the short-output check to its caller, so this pins that check in
+/// `decode_chunk_samples` to the Deflate path (the uncompressed tile test above reaches the same
+/// site through the other arm). A tile, not a strip, because only tile assembly has no backstop:
+/// it slices each tile by the declared geometry, so without the check the decode panics, whereas
+/// the strip path's after-assembly count check would reject the same short data. The declared
+/// size also keeps inflation itself output-bounded: a buffer sized from `max_out` (7.2 GB here)
+/// is a request this binary's allocator refuses.
+#[test]
+fn a_deflate_tile_inflating_short_of_its_geometry_is_rejected_as_truncated() {
+    let dng = patched_raw_ifd_at(
+        DngEncoder::new()
+            .with_compression(Compression::Deflate)
+            .with_tiling(16, 16),
+        16,
+        |raw| {
+            raw.set(tags::IMAGE_WIDTH, Value::Short(vec![60000]));
+            raw.set(tags::IMAGE_LENGTH, Value::Short(vec![60000]));
+            raw.set(tags::TILE_WIDTH, Value::Short(vec![60000]));
+            raw.set(tags::TILE_LENGTH, Value::Short(vec![60000]));
+        },
+    );
     assert_truncated(&dng);
 }
 

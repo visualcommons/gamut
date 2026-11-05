@@ -60,9 +60,17 @@ mod tests {
 
     #[test]
     fn corruption_and_truncation_are_rejected() {
-        assert!(decode(&[], 1).is_err());
+        assert_eq!(
+            decode(&[], 1).unwrap_err().static_message(),
+            Some("TIFF: corrupt Deflate stream")
+        );
         let mut zlib = encode(&[1, 2, 3, 4]);
         zlib.pop();
-        assert!(decode(&zlib, 4).is_err());
+        let truncated = decode(&zlib, 4).unwrap_err();
+        assert_eq!(
+            truncated.static_message(),
+            Some("TIFF: corrupt Deflate stream")
+        );
+        assert!(truncated.detail().is_some());
     }
 }

@@ -63,15 +63,24 @@ mod tests {
         assert!(inflate_zlib(&zlib, payload.len()).is_ok());
     }
 
+    /// Every non-cap failure is the *corrupt-stream* error, not the cap one: the classification
+    /// in [`inflate_zlib`]'s fall-through arm is what this pins.
+    fn assert_corrupt(result: Result<Vec<u8>>) {
+        let error = result.expect_err("corrupt input must be rejected");
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(error.static_message(), Some("PNG: corrupt zlib stream"));
+        assert!(error.detail().is_some());
+    }
+
     #[test]
     fn rejects_garbage_and_truncation() {
-        assert!(inflate_zlib(&[], 16).is_err());
-        assert!(inflate_zlib(&[0xFF, 0xFF, 0x00], 16).is_err()); // bad zlib header
+        assert_corrupt(inflate_zlib(&[], 16));
+        assert_corrupt(inflate_zlib(&[0xFF, 0xFF, 0x00], 16)); // bad zlib header
         let mut zlib = Vec::new();
         DeflateEncoder::new().zlib_compress(&[1, 2, 3, 4], &mut zlib);
-        assert!(inflate_zlib(&zlib[..zlib.len() - 1], 16).is_err()); // truncated Adler-32
+        assert_corrupt(inflate_zlib(&zlib[..zlib.len() - 1], 16)); // truncated Adler-32
         let last = zlib.len() - 1;
         zlib[last] ^= 0xFF;
-        assert!(inflate_zlib(&zlib, 16).is_err()); // wrong Adler-32
+        assert_corrupt(inflate_zlib(&zlib, 16)); // wrong Adler-32
     }
 }
