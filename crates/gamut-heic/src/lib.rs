@@ -99,7 +99,7 @@
 //! top-level `uuid` box; [`HeifContainer::c2pa`] locates it. The dependency direction stays
 //! `gamut-heic → gamut-metadata`.
 //!
-//! # Deferred to later slices
+//! # Out of scope
 //!
 //! Image *sequences* (`msf1`/`hevc`/`hevx` tracks) are permanently out of scope (gamut is
 //! image-first). See this crate's `STATUS.md`.

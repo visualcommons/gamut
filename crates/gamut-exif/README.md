@@ -121,39 +121,31 @@ preserves EXIF sea-level altitude as an orthometric height; the 2D `Wgs84` newty
 drops altitude. Malformed references, rationals, DMS components, and out-of-range positions return
 the typed [`GpsConversionError`].
 
-## Compatibility
+## Unreadable thumbnails
 
-**One read verdict changed after 2.0.0.** A 1st IFD whose integer `StripOffsets` names strips that
-cannot be read — `StripByteCounts` absent, not an integer array or of a different length; a strip
-outside the blob; or strips overlapping past the blob's length — used to parse as a thumbnail with
-no strips, its `StripOffsets` kept and re-emitted by the writer addressing nothing. It is now a
-**loss**, named in the report as a `DroppedRegion::ThumbnailStrips` drop
-(`DropReason::StripsUnsized`, `OutOfBounds` or `StripsOverlap`), its `StripOffsets` removed from
-the model, and **rejected by `strict`** with `ExifError::BadThumbnail`. As with the JPEG pair below, it refuses no conformant
-input: Exif 3.0 §4.6.5.2.1/§4.6.5.2.3 give both tags the same count and Table 21 the same support
-level in every column, and a conformant thumbnail's strips are disjoint ranges of the blob.
+A 1st IFD whose thumbnail cannot be read is a **loss**, named in the read report and **rejected by
+`strict`** with `ExifError::BadThumbnail`:
 
-**One read verdict changed after 1.0.0.** A 1st IFD carrying `JPEGInterchangeFormat` with no
-`JPEGInterchangeFormatLength` used to parse as a thumbnail that simply had no bytes; it is a
-**loss** — named in the report as `DropReason::ThumbnailLengthMissing`, and **rejected by
-`strict`** with `ExifError::BadThumbnail`. A caller running `strict` over blobs 1.0.0 accepted
-should know the verdict moved.
+- `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` —
+  `DropReason::ThumbnailLengthMissing`.
+- An integer `StripOffsets` naming strips that cannot be read — `StripByteCounts` absent, not an
+  integer array or of a different length; a strip outside the blob; or strips overlapping past the
+  blob's length — a `DroppedRegion::ThumbnailStrips` drop (`DropReason::StripsUnsized`,
+  `OutOfBounds` or `StripsOverlap`), with its `StripOffsets` removed from the model so the writer
+  never re-emits an offset addressing nothing.
 
 The rule is about **readability**: an offset with nothing to size it addresses bytes that cannot be
 read, which is what `strict` is for. It is not about a support level, and the reader does not
-consult `Compression` at all.
-
-**Conformance** is the separate question of whether the move is a *fix* or a *redefinition*, and it
-is a fix, so no major version is forced. Exif 3.0 §4.6.9.2 Table 21 states each 1st IFD tag's
-support level per thumbnail-format column: three uncompressed ones distinguished by photometric
-interpretation and planar configuration (Chunky, Planar, YCC), plus **Compressed**. That axis is not
-the two-valued `Compression` tag. The table gives `JPEGInterchangeFormat` and
-`JPEGInterchangeFormatLength` the *same* level in each column: "not allowed to record" under the
-three uncompressed columns, mandatory under Compressed. An offset with no length is therefore
-non-conformant under every column, and no conformant 1st IFD changes verdict. That grounding is what
-this repository ships — the table is vendored under `references/exif/`; the before/after comparison
-measured behind it is recorded in the pull request that introduced the report, not committed here as
-a harness.
+consult `Compression` at all. It refuses no conformant input. Exif 3.0 §4.6.9.2 Table 21 states
+each 1st IFD tag's support level per thumbnail-format column — three uncompressed ones
+distinguished by photometric interpretation and planar configuration (Chunky, Planar, YCC), plus
+**Compressed**, an axis that is not the two-valued `Compression` tag — and gives
+`JPEGInterchangeFormat` and `JPEGInterchangeFormatLength` the *same* level in each column ("not
+allowed to record" under the three uncompressed columns, mandatory under Compressed), so an offset
+with no length is non-conformant under every column. Likewise §4.6.5.2.1/§4.6.5.2.3 give
+`StripOffsets` and `StripByteCounts` the same count and Table 21 the same support level in every
+column, and a conformant thumbnail's strips are disjoint ranges of the blob. The table is vendored
+under `references/exif/`. When each verdict moved is recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Scope
 

@@ -1,4 +1,4 @@
-//! `gamut-png` — a research-grade, space-efficient **PNG codec** (PNG 3rd edition; W3C).
+//! `gamut-png` — a space-efficient **PNG codec** (PNG 3rd edition; W3C).
 //!
 //! PNG is a lossless raster format: an 8-byte signature followed by typed chunks (IHDR, optional
 //! palette/colour/metadata chunks, IDAT image data, IEND). The image data is scanline-filtered and

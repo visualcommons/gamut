@@ -31,7 +31,9 @@
 //! [`bridge::ForeignEncoder`] adapt a C vtable *into* a Rust twin (C → Rust), and
 //! [`bridge::lower_decoder`] / [`bridge::lower_encoder`] expose a boxed Rust twin *as* a C vtable
 //! (Rust → C). Those adapters, together with [`StreamConfig::extradata`] (defined there), are the
-//! crate's only `unsafe`: everything outside [`bridge`] is `deny(unsafe_code)`.
+//! crate's only `unsafe` code: everything outside [`bridge`] is `deny(unsafe_code)`. The vtables
+//! here only *declare* `unsafe extern "C" fn` pointer types for a backend to fill; nothing outside
+//! [`bridge`] calls through one.
 //!
 //! # Identifiers
 //!

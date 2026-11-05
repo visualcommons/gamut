@@ -2,8 +2,8 @@
 
 `gamut-heic` is a pure-Rust HEIC/HEIF still-image **container decoder** — HEVC (H.265) intra image
 items wrapped in an ISOBMFF container. gamut is **decode-only** for this format: this crate parses
-and (in later slices) decodes HEIF/HEIC; it does **not** encode it (see
-[`references/heif`](../../references/heif/README.md)).
+HEIF/HEIC and decodes it through a caller-supplied HEVC decoder (the `HevcDecoder` hook); it does
+**not** encode it (see [`references/heif`](../../references/heif/README.md)).
 
 ## Goals
 
@@ -22,8 +22,9 @@ Part of the [gamut](../../README.md) workspace, this crate provides HEIC **decod
 - **Sharing the AVIF container.** It reuses [`gamut-isobmff`](../gamut-isobmff) — the same ISOBMFF
   box tree that backs AVIF — for the `ftyp`/`meta`/`iloc`/`iinf`/`iprp`… grammar, layering the HEIF
   still-image profile and the byte-accounting guarantee on top.
-- **Pluggable codestream decoder.** Per issue #238, the HEVC-intra pixel decode is a separate slice
-  behind a decoder hook; the container layer hands a decoder-ready item downstream.
+- **Pluggable codestream decoder.** Per issue #238, the HEVC-intra pixel decode sits behind the
+  `HevcDecoder` hook: the container layer hands each decoder-ready item to the backends a caller
+  pushes, and this crate ships no software HEVC decoder of its own.
 
 Note: HEVC is patent-encumbered, unlike gamut's royalty-free focus formats; this crate is
 decode-side scaffolding and may move or be dropped as the project's scope sharpens (see the
@@ -78,23 +79,9 @@ store is parsed, no hash is computed, no signature is checked, and no verdict ab
 provenance is reached. The range is for observability and byte accounting — it is not a BMFF
 exclusion range, since `c2pa.hash.bmff.v3` excludes by box path rather than by byte offset.
 
-Two limits worth knowing. §A.5.3 states where the store begins for `manifest` and `original` (after
-the merkle offset) but says nothing at all for `update`, while the `c2pa-rs` reference implementation
-writes that offset for `update` too — so `update` is *probed*: offset 8 first, falling back to offset
-0, taking the first that yields a valid `LBox` bound and reporting nothing if neither does. That
-probe rests on `LBox` validity alone, which is content-dependent, because a JUMBF superbox's interior
-is itself length-prefixed: reading an `LBox` 8 bytes into a store that does not begin with a merkle
-offset lands on the first interior box's length, which can read as a valid bound and trim the
-reported store to a fragment. That shape is shared by all three purposes — a spec-conformant
-`manifest`/`original` store and a `c2pa-rs`-written `update` store are located exactly, an
-out-of-spec `manifest`/`original` store is mis-bounded by the same mechanism rather than rejected,
-and the offset-less `update` layout is the one in-spec layout exposed, which no known writer emits.
-Making it exact needs a `TBox` check — the `jumb` constant is traceable (§A.3.9, §15.12.3.2) but
-only as a JPEG XL aside, so asserting it is a deferred maintainer call rather than a missing
-source — or the store's JUMBF type UUID (§11.1.4.2), which needs ISO/IEC 19566-5's Description Box
-layout, or a `c2pa-rs` oracle fixture. And
-the scan covers the top-level boxes of the primary stream only, so a box inside an appended vendor
-stream (a motion-photo HEIC's second file) or a trailer is not seen.
+The probe that bounds an `update` store, the content-dependence of that bound, and the scan's
+reach (the primary stream's top-level boxes only) are recorded with the slice that delivered the
+locator, in [`STATUS.md`](STATUS.md) (S7).
 
 ## Conformance
 

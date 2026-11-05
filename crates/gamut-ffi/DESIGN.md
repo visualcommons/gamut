@@ -210,8 +210,10 @@ void gamut_avif_image_free(GamutAvifImage *image);
   `dimensions` (the primary item's `ispe`). An absent payload is `GAMUT_OK` with `NULL`/`0`; a
   primary or alpha item that is derived (`grid`/`iden`/`iovl`) or not AV1 has no single
   codestream and is `GAMUT_STATUS_UNSUPPORTED`.
-- **Not yet exposed**: the encoder knobs the Rust API has not shipped yet (speed, threads —
-  issues #654, #655) join as setters when they land; AVIF decode waits for the decoder registry (above). Error messages: these entry points
+- **Not yet exposed**: the encoder knobs the Rust API has shipped since this slice —
+  `AvifEncoder::with_speed` and `with_threads` (issues #654, #655) — have no C setter yet; they
+  join with the rest of the consumer boundary (issue #242). AVIF decode waits for the decoder
+  registry (above). Error messages: these entry points
   return only the `gamut_status_t` code (`status_of` maps `Error::kind()`), so neither the
   borrowed `const char*` message nor the thread-local last-error string promised under Errors is
   reachable from C yet; both arrive with the rest of the consumer boundary (issue #242).

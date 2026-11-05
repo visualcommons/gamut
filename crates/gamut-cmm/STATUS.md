@@ -319,7 +319,7 @@ that add behaviour (#325 onward).
   on `ClutInterpolation`), carried as a field of `TransformOptions` and `ProofingOptions`.
   `IccTransform::device_link` and `GamutCheck::new` were widened from a bare
   `RenderingIntent` to the same `TransformOptions` so no constructor can silently miss the
-  knob (a breaking signature change, taken while the crate is still unpublished; both
+  knob (a breaking signature change, taken while the crate was still unpublished; both
   document that they consume `intent` + `optimization` and ignore `black_point_compensation`,
   which neither construction has ever applied). Every `IccTransform` constructor funnels
   through `IccTransform::from_pipeline`, which is where the level is applied.

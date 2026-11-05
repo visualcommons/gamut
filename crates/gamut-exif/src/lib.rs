@@ -23,22 +23,18 @@
 //! [`report`] for what that covers and what it deliberately does not. `parse` is the `&[u8]` case
 //! of `parse_from` and stays silent.
 //!
-//! `parse` keeps its signature, its accept/reject verdict and its re-serialised bytes, with two
-//! narrow exceptions, both measured over a 3 144-case truncation-and-corruption sweep against the
-//! previous release. An error message's offset is now a position in the buffer the caller handed
-//! in, so for a marked blob it is six bytes larger than before — the `Exif\0\0` marker — while a
-//! [`Dropped::offset`] stays relative to the TIFF stream; and a 1st IFD carrying
-//! `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` is now named in the report
-//! instead of vanishing, and rejected in [`strict`](ExifReader::strict) mode as the unreadable
-//! range it is — an offset with nothing to size it addresses bytes that cannot be read. That rule
-//! is structural, not a support level: Exif 3.0 §4.6.9.2 Table 21 states the pair's level only *per
+//! A 1st IFD carrying `JPEGInterchangeFormat` with no `JPEGInterchangeFormatLength` is named in
+//! the report and rejected in [`strict`](ExifReader::strict) mode as the unreadable range it is —
+//! an offset with nothing to size it addresses bytes that cannot be read. That rule is structural,
+//! not a support level: Exif 3.0 §4.6.9.2 Table 21 states the pair's level only *per
 //! thumbnail-format column*, an axis that is not the two-valued `Compression` tag — which this
 //! reader does not consult, though [`Thumbnail::compression`](thumbnail::Thumbnail::compression)
 //! exposes it to callers; why it stays unconditional is recorded on
 //! [`DropReason::ThumbnailLengthMissing`]. It refuses no conformant input: the table gives both tags
 //! the same level in all four columns — `M` under **Compressed**, `N` (not allowed to record) under
 //! the three uncompressed ones — so an offset with no length is non-conformant under every one of
-//! them.
+//! them. An error message's offset is a position in the buffer the caller handed in (so it counts
+//! an `Exif\0\0` marker), while a [`Dropped::offset`] is relative to the TIFF stream.
 //!
 //! Writing has one extra door. Every tag in the five CIPA DC-008 tables that define one — Table 6,
 //! Tables 8 and 9, Table 14 and Table 16 — carries the field type and component count that table

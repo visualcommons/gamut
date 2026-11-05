@@ -50,8 +50,10 @@
 //!
 //! TIFF codestreams are permanently backend-less: unlike the other format crates, this crate
 //! adds **no** pluggable codestream backend (the IoC seam of #241), because TIFF's compression
-//! schemes have no hardware acceleration — gamut's software implementation is always used. See
-//! AGENTS.md's convention on exposing the codestream and `STATUS.md`.
+//! schemes have no hardware acceleration — gamut's software implementation is always used. (A
+//! format crate that does expose its codestream does so through the one shared
+//! `gamut-codec-abi` seam: a typed backend trait, a codec-abi adapter, and a push-order registry
+//! with the crate's own implementation as the tail.) See `STATUS.md`.
 //!
 //! ```
 //! use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};

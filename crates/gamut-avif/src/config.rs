@@ -36,8 +36,10 @@ pub enum AvifMode {
 /// `quality` and `matrix` consistent.
 ///
 /// `#[non_exhaustive]`: the configuration is an open set — fields for deferred encoder knobs
-/// (speed, rate control; see `STATUS.md`) are added as they ship.
-/// Read it as the snapshot returned by [`AvifEncoder::config`](crate::AvifEncoder::config).
+/// (see `STATUS.md`) are added as they ship. Encode speed and thread count are not fields here:
+/// they live on the encoder, as [`AvifEncoder::with_speed`](crate::AvifEncoder::with_speed) and
+/// [`AvifEncoder::with_threads`](crate::AvifEncoder::with_threads). Read it as the snapshot
+/// returned by [`AvifEncoder::config`](crate::AvifEncoder::config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AvifConfig {

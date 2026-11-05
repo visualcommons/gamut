@@ -99,22 +99,29 @@ verbatim, as every other metadata payload in this workspace is carried, so this 
 and then locate a slot shorter than a JUMBF box header. That builder applies no minimum by
 decision (**#577**): a length floor would be the only content judgement the C2PA surface makes. See the C2PA note under section L for the five recorded limits.
 
-**Deferred (planned, additive).** Every ☐ row below: 4:2:0/4:2:2 and `MA1B` landed with
-#390/#391, the alpha auxiliary, `Gray8` and monochrome surface with #396/#397, and the 10/12-bit
-path end to end with #398/#399, and subsampled chroma on the `Rgb16` path with #399 — what remains
-of the pixel-format surface is subsampled chroma on the `Rgba8`/`Rgba16` paths, which need a
-4-stride downsampler; depth auxiliary items; the HDR
-surface beyond CICP tagging and `mdcv`/`clli` (`cclv`/`amve`/`reve`/`ndwt`, film grain); container
-derivations
-(`grid`, thumbnails, `idat`, `iloc` v1/v2 emission, `pasp`/`clap`); layered/progressive still
-images (`a1op`/`a1lx`/`lsel`, multi-operating-point sequence header); `tmap` tone-map (gain-map)
-derived items; `sato` sample transforms (bit depths beyond 12); `cmin`/`cmex` camera matrices;
-`altr`/`ster` entity groups; encoder rate control (encoder speed has since landed, #654); and CLI/wasm/ffi wiring. The
-**container decode surface** (issue #250) has since landed additively as new crate items —
-section L is its ledger; the remaining decode-side gap is the **pure-Rust AV1 codestream
-decoder** (its own issue — `libaom`'s reference encoder is already staged as that decoder's
-oracle, see [`references/av1`](../../references/av1/README.md); today the codestream is supplied
-through the external `Av1StillDecoder` seam). **Additivity guarantee:** each lands semver-minor —
+**Already landed.** 4:2:0/4:2:2 and `MA1B` landed with #390/#391; the alpha
+auxiliary, `Gray8` and the monochrome surface with #396/#397; the 10/12-bit path end to end with
+#398/#399; subsampled chroma on the `Rgb16` path with #399; and encoder speed with #654.
+
+**Deferred (planned, additive).** Every ☐ row below, in these groups:
+
+- **Pixel formats:** subsampled chroma on the `Rgba8`/`Rgba16` paths, which need a 4-stride
+  downsampler; depth auxiliary items.
+- **HDR:** the surface beyond CICP tagging and `mdcv`/`clli` (`cclv`/`amve`/`reve`/`ndwt`, film
+  grain); `tmap` tone-map (gain-map) derived items; `sato` sample transforms (bit depths beyond
+  12).
+- **Container:** derivations (`grid`, thumbnails, `idat`, `iloc` v1/v2 emission, `pasp`/`clap`);
+  layered/progressive still images (`a1op`/`a1lx`/`lsel`, multi-operating-point sequence header);
+  `cmin`/`cmex` camera matrices; `altr`/`ster` entity groups.
+- **Encoder:** rate control.
+- **Bindings:** CLI/wasm/ffi wiring.
+- **Decode:** the **container decode surface** (issue #250) has since landed additively as new
+  crate items — section L is its ledger; the remaining decode-side gap is the **pure-Rust AV1
+  codestream decoder** (its own issue — `libaom`'s reference encoder is already staged as that
+  decoder's oracle, see [`references/av1`](../../references/av1/README.md); today the codestream is
+  supplied through the external `Av1StillDecoder` seam).
+
+**Additivity guarantee:** each lands semver-minor —
 a new builder method on the (non-`Copy`) `AvifEncoder`, a new field on the `#[non_exhaustive]`
 `AvifConfig`, a new `AvifMode` variant, or a new crate item — never a reshape of the v1 surface.
 The **encoded bytes** are not part of that guarantee and never were. Issue #335 changed the lossy

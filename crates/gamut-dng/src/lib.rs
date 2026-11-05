@@ -55,8 +55,10 @@
 //!
 //! DNG codestreams are permanently backend-less: this crate exposes **no** pluggable codestream
 //! backend (the IoC seam of #241), because the DNG compression schemes have no hardware
-//! acceleration — gamut's software implementation is always used. See AGENTS.md's convention on
-//! exposing the codestream and `STATUS.md`.
+//! acceleration — gamut's software implementation is always used. (A format crate that does
+//! expose its codestream does so through the one shared `gamut-codec-abi` seam: a typed backend
+//! trait, a codec-abi adapter, and a push-order registry with the crate's own implementation as
+//! the tail.) See `STATUS.md`.
 //!
 //! For archival use, [`deconstruct()`] classifies **every byte** of a DNG into typed segments
 //! (dual-ledger checked, issue #263), and [`DngRewrite`] is the preserving edit path: the whole

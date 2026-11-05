@@ -4,8 +4,8 @@
 codec builds on: the workspace-wide `Error`/`Result`, the `EncodeImage`/`DecodeImage` traits, the
 branded `ImageRef`/`ImageBuf` interleaved buffers, the `Dimensions` value type, the sealed
 `Pixel`/`Sample`/`ColorModel` pixel vocabulary, and the shared `luminance` reference constants. It
-has **no dependency on the format crates** — everything else depends on it, never the other way
-around — and is `#![forbid(unsafe_code)]`.
+has **no dependency on any other workspace crate** — so no format crate is below it; most crates
+depend on it, never the other way around — and is `#![forbid(unsafe_code)]`.
 
 It is also where **pixel conversion** is defined, once, for every layout pair (issue #268): format
 crates decode to what the file carries and hand the layout change to `convert`, so widening rules and
@@ -27,8 +27,10 @@ while never re-checking the invariant.
 | `EncodeImage<P>` / `DecodeImage<P>` | one `impl` per supported layout `P`; object-safe | sealed via the `Pixel` bound |
 | `ImageRef<'a, P>` / `ImageBuf<P>` | borrowed / owned interleaved buffers | length-validated at construction |
 | `Pixel` / `Sample` / `ColorModel` | compile-time layout descriptors | `Pixel`/`Sample` **sealed**; `ColorModel` `#[non_exhaustive]` |
+| `PixelFormat` | runtime tag mirroring the 11 markers (`Pixel::FORMAT`), with `ALL` and per-format accessors such as `channels` | `#[non_exhaustive]` `repr(u32)`; discriminants are permanent C ABI values, append-only |
 | 11 pixel markers | `Gray8` `Bilevel` `Indexed8` `Rgb8` `Rgba8` `Cmyk8` `GrayAlpha8` `Gray16` `Rgb16` `Rgba16` `GrayAlpha16` | closed set, defined only here |
 | `luminance::*` | reference nit levels + BT.601/709/2020 fixed-point luma weights | shared by `gamut-color`, `gamut-tonemap`, and `convert` |
+| `segment::*` | `Segment<K>` (half-open byte range + format-defined kind) and the `covers`/`tiles` byte-tiling predicates | generic over the format's own kind; the walks stay in the format crates |
 | `convert::*` | `ConvertPolicy` + `AlphaPolicy`/`DepthPolicy`/`LumaPolicy`, `RawImage`, `convert`/`convert_from_raw`/`convert_from_raw_into` | policy enums `#[non_exhaustive]` `repr(u32)`, append-only |
 
 Adding items (new `Error`/`ColorModel` variants, more buffer helpers, more markers) stays

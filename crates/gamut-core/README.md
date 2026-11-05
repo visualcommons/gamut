@@ -13,8 +13,9 @@ foundation so that:
   through the same [`EncodeImage`]/[`DecodeImage`] traits and gets back the same [`Error`] type,
   regardless of format. A codec implements them only for the pixel layouts it supports, so handing
   it an unsupported format is a compile error, not a runtime check.
-- **The dependency graph stays acyclic.** This crate has **no** dependency on the format crates;
-  everything else in the workspace depends on it, never the other way around.
+- **The dependency graph stays acyclic.** This crate has **no** dependency on any other workspace
+  crate, so no format crate is below it; most workspace crates depend on it, never the other way
+  around.
 - **Errors are typed, never panicking.** [`Error`] is a `thiserror` enum marked `#[non_exhaustive]`,
   so new variants land without a breaking change and library paths return errors instead of
   `unwrap()`/`expect()`.
@@ -56,22 +57,9 @@ Stable foundation whose public surface changes incompatibly only in a new major 
 branded [`ImageRef`] / [`ImageBuf`] buffers and [`Pixel`] markers, [`Dimensions`], [`Result`], and
 the structured [`Error`] / [`ErrorKind`] surface. Every codec in the workspace is built on it.
 
-The surface is intentionally minimal. The following are deliberate design decisions, not gaps:
-
-- **Interleaved `u8` / `u16` layouts only.** [`Sample`] is sealed over `u8` and `u16`. Planar
-  layouts and coded bit depth are codec concerns and live in `gamut-color` (`Planar8`, `BitDepth`),
-  which builds on these types.
-- **Open vs. sealed.** [`Error`], [`ErrorKind`], and `ColorModel` are `#[non_exhaustive]`.
-  [`Pixel`] / [`Sample`] are sealed: the supported layouts are closed and defined only here.
-- **Static fast path, structured diagnostics.** `InvalidInput` and `Unsupported` retain their
-  allocation-free `&'static str` shape. The opt-in `Context` wrapper adds an origin, byte offset,
-  or owned detail while `Error::kind` preserves stable classification.
-- **The length invariant lives on the buffers.** [`Dimensions`] is a plain value type; non-emptiness
-  and `len == width * height * channels` are validated once, at [`ImageRef::new`] / [`ImageBuf::new`],
-  so codecs never re-check.
-
-Additive growth (new `Error`/`ColorModel` variants, more buffer helpers) stays backward-compatible;
-removing or changing existing items would not.
+The settled design decisions behind that surface (interleaved `u8`/`u16` only, what is sealed and
+what is `#[non_exhaustive]`, where the length invariant lives) are kept in one place,
+[`STATUS.md`](STATUS.md), together with the frozen-surface table and the deferred follow-ups.
 
 ## License
 

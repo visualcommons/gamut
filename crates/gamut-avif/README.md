@@ -161,7 +161,7 @@ upsampling by default (nearest-neighbour through `DecodeOptions`), alpha merge, 
 libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
-specs: **deferred, planned** features (10/12-bit, the HDR
+specs: **deferred, planned** features (subsampled chroma on the RGBA paths, the HDR
 metadata properties beyond CICP tagging and `clli`/`mdcv`, gain maps, layered/progressive images,
 the pure-Rust AV1 codestream decoder, the decoder backend registry, …) all land semver-minor on the
 current major's surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per

@@ -1,10 +1,10 @@
 # gamut-dsp — shared DSP kernels status
 
 **v1 stabilization: GitHub issue #192.** `gamut-dsp` is the workspace's shared signal-processing
-kernel library: spec-exact transform kernels, quantization rounding, and companding, implemented
-once and consumed by the codec crates (the dependency-edge list in
-[`AGENTS.md`](../../AGENTS.md) names which). It is `#![deny(unsafe_code)]` (a hot-path crate:
-`deny`, not `forbid`, so a benchmarked win may take a site exception; none does today).
+kernel library: spec-exact transform kernels and quantization rounding, implemented once and
+consumed by the codec crates (the dependency-edge list in [`AGENTS.md`](../../AGENTS.md) names
+which). It is `#![deny(unsafe_code)]` (a hot-path crate: `deny`, not `forbid`, so a benchmarked win
+may take a site exception; none does today).
 
 **Keystone:** the split between *normative* and *chosen* math, under a namespace rule that keeps
 every future standard additive. The `inverse_*` kernels are bit-exact transcriptions of the AV1
@@ -37,7 +37,7 @@ would not.
   flips (§7.13.3), and quantizer tables all live there.
 - **Total math with a panic contract, no `Result`s.** No input to any function here is
   data-dependent fallible; semantic preconditions on configuration parameters (`n`, `r`, `bits`,
-  `mu`, `den`) are release `assert!`s documented under `# Panics` — the same category as
+  `den`) are release `assert!`s documented under `# Panics` — the same category as
   gamut-core's documented indexing panics, not error handling. Arithmetic-headroom limits are
   documented per function and guarded by Rust's debug overflow checks; `round2`, the hottest
   primitive (twice per butterfly), has no semantic precondition and deliberately gains no branch.
@@ -105,7 +105,7 @@ compiled crate-root doctest.
 Bit-exactness of the inverse kernels against dav1d/libaom lands transitively through the 2-D
 pipeline's conformance suites in `gamut-av1`/`gamut-avif`. The divan bench harness
 (`benches/transforms.rs`, issue #149) tracks DCT/ADST/WHT throughput — this crate is a real
-computational hot path, unlike core. The full `cargo mutants -p gamut-dsp` survey passes with
-zero missed and one documented equivalence exclusion (`adst_output_permute` `|`→`^`,
+computational hot path, unlike core. The full `mise run mutants --crate gamut-dsp` survey passes
+with zero missed and one documented equivalence exclusion (`adst_output_permute` `|`→`^`,
 `.cargo/mutants.toml`). Gates: `mise run test` / `lint` (`clippy -D warnings`, `missing_docs`
 fatal) / `fmt-check` / `coverage` (≥ 80%).

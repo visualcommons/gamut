@@ -131,8 +131,9 @@ see [STATUS.md](STATUS.md) for the full deferred/out-of-scope ledger.
 `read` models only the *primary* still-image stream and tolerates real-world "motion photo" files
 that append a second, foreign stream: the top-level walk stops cleanly at a second top-level `ftyp`
 (the first wins) and at a malformed trailing box once `ftyp`+`meta` are seen. Mapping every byte of
-the appended remainder to a box or trailer is a consumer's job (`gamut-heic`), served by the
-re-exported [`BoxReader`]/[`RawBox`] box-walk primitives.
+the input to a box, an appended stream or a trailer is [`walk_segments`], here, which `gamut-heic`
+and `gamut-avif` share; the re-exported [`BoxReader`]/[`RawBox`] box-walk primitives serve a
+consumer that needs its own walk.
 
 Box byte layouts follow ISO/IEC 14496-12 (ISOBMFF) and ISO/IEC 23008-12 (HEIF) — paywalled, so
 cross-checked against the public AVIF box table, hand-authored spec fixtures, and a vendored

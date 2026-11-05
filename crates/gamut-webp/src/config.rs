@@ -175,10 +175,8 @@ pub enum WebpMode {
 /// added as they ship. Read it as the snapshot returned by
 /// [`WebpEncoder::config`](crate::WebpEncoder::config).
 ///
-/// `Copy` is **retained** deliberately, unlike [`AvifConfig`](https://docs.rs/gamut-avif): the
-/// owned payloads that forced AVIF to drop it (ICC profiles, Exif/XMP) already live on
-/// [`WebpEncoder`](crate::WebpEncoder) rather than in the config, and every knob here is plain
-/// scalar data.
+/// `Copy`: every knob here is plain scalar data; the owned payloads (ICC profiles, Exif/XMP) live
+/// on [`WebpEncoder`](crate::WebpEncoder) rather than in the config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct WebpConfig {

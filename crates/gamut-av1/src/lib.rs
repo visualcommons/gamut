@@ -11,20 +11,20 @@
 //! intra block copy and film grain are refused with a typed error, each a ☐ row in
 //! `gamut-avif/STATUS.md`.
 //!
-//! **Encoding**: M0 implemented the minimal path: a **lossless** all-intra keyframe — `seq_profile = 1`
-//! (8-bit 4:4:4), identity matrix coefficients, full range, single tile, 64×64 superblocks,
-//! `DC_PRED`, and the forced `TX_4X4` Walsh–Hadamard transform. The crate now also encodes
-//! **lossy** all-intra keyframes: a wide intra mode set (the eight directional modes with
-//! `angle_delta`, `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, recursive filter-intra, chroma-from-luma,
-//! and palette), DCT/ADST/identity transforms with variable `tx_depth` and `TX_SET_INTRA_2` type
-//! selection, recursive partitioning, uniform multi-tile, and the in-loop filters (deblocking,
-//! CDEF, loop restoration, superres). Every block is coded at the frame-level quantizer and
-//! loop-filter level: the encoder emits segmentation and per-superblock delta-Q/delta-LF only as a
-//! crate-internal syntax exercise for its oracle tests, never on a public encode. Symbols are
-//! coded against **adapting CDFs** (`disable_cdf_update = 0`): each tile starts from the §9.4
-//! defaults and nudges every context toward what it codes, which costs no fidelity and shrinks a
-//! still by roughly 20–35%. It produces the AV1 temporal unit that `gamut-avif` wraps in an AVIF
-//! still image.
+//! **Encoding** covers two paths. The **lossless** all-intra keyframe
+//! ([`encode_still_lossless_identity`]) is `seq_profile = 1` (8-bit 4:4:4), identity matrix
+//! coefficients, full range, single tile, 64×64 superblocks, `DC_PRED`, and the forced `TX_4X4`
+//! Walsh–Hadamard transform. The **lossy** all-intra keyframe has a wide intra mode set (the eight
+//! directional modes with `angle_delta`, `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, recursive
+//! filter-intra, chroma-from-luma, and palette), DCT/ADST/identity transforms with variable
+//! `tx_depth` and `TX_SET_INTRA_2` type selection, recursive partitioning, uniform multi-tile, and
+//! the in-loop filters (deblocking, CDEF, loop restoration, superres). Every block is coded at the
+//! frame-level quantizer and loop-filter level: the encoder emits segmentation and per-superblock
+//! delta-Q/delta-LF only as a crate-internal syntax exercise for its oracle tests, never on a
+//! public encode. Symbols are coded against **adapting CDFs** (`disable_cdf_update = 0`): each tile
+//! starts from the §9.4 defaults and nudges every context toward what it codes, which costs no
+//! fidelity and shrinks a still by roughly 20–35%. It produces the AV1 temporal unit that
+//! `gamut-avif` wraps in an AVIF still image.
 //!
 //! The colour signalling is selectable: [`encode_still_intra_with`] takes an [`Av1Colour`] (CICP
 //! primaries/transfer/matrix plus the signal range) and mirrors it into `color_config()` and, via

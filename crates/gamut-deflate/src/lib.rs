@@ -21,8 +21,8 @@
 //! Following gamut's encoder-first philosophy, this crate **does not decode**. Inflating DEFLATE is a
 //! thoroughly solved problem — `miniz_oxide` is a safe, fuzzed, pure-Rust decoder already used across
 //! the ecosystem — and decompressing untrusted input is a security-sensitive surface best left to a
-//! hardened implementation. Decoders in this workspace that need inflate (the DNG and PNG decoders
-//! today; a TIFF `Compression=8` decoder in future) depend on `miniz_oxide` directly. Encoder
+//! hardened implementation. Decoders in this workspace that need inflate (the DNG, PNG and TIFF
+//! decoders) depend on `miniz_oxide` directly. Encoder
 //! correctness is instead proven differentially: the dev-only `zlib-oracle` inflates this crate's
 //! output with the canonical C `zlib` and asserts it round-trips to the original bytes.
 //!

@@ -24,8 +24,8 @@
 //! - [`CanonicalCodes`] — the Annex C canonical `(code, length)` of every symbol of a
 //!   `(BITS, HUFFVAL)` pair.
 //!
-//! The forward-looking ANS coders and the JPEG XL prefix codes named in the workspace plan (for
-//! AV2 / JPEG XL) are not implemented yet; they will join this crate behind their own modules.
+//! No ANS coder or JPEG XL prefix code ships here, and neither is planned: `gamut-jxl` wraps the
+//! format's reference implementations rather than coding its entropy layer itself.
 #![forbid(unsafe_code)]
 
 // Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.

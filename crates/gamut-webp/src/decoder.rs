@@ -52,7 +52,7 @@ const FORMAT_MAX_DIMENSION: u32 = 1 << 14;
 /// the size of the VP8L decoder's own ARGB working buffer.
 const BUDGET_BYTES_PER_PIXEL: u64 = 4;
 
-/// Decodes a WebP file to interleaved 8-bit RGB.
+/// Decodes a WebP file to interleaved 8-bit RGB ([`Rgb8`]) or RGBA ([`Rgba8`]).
 ///
 /// gamut ships its own decoder because every WebP decoder in the Rust ecosystem ultimately wraps
 /// libwebp; a `#![forbid(unsafe_code)]` decoder removes that crate's memory-unsafety exposure.
