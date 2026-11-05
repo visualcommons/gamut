@@ -425,7 +425,7 @@ impl C2paSummary {
 /// let pixels = vec![0u8; 3 * 4];
 /// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
 /// let (png, report) = PngEncoder::new()
-///     .with_c2pa_reserved(16)
+///     .with_c2pa_reserved(16)?
 ///     .encode_with_report(image)?;
 ///
 /// let summary = c2pa_summary(&png)?;
@@ -584,7 +584,7 @@ impl<'a> ChunkReader<'a> {
 /// let pixels = vec![0u8; 3 * 4];
 /// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
 /// let (mut png, report) = PngEncoder::new()
-///     .with_c2pa_reserved(16)
+///     .with_c2pa_reserved(16)?
 ///     .encode_with_report(image)?;
 /// let span = report.c2pa.expect("a reservation was made");
 ///

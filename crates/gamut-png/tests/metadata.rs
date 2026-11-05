@@ -46,8 +46,10 @@ fn every_carrier_round_trips_byte_exact() {
     let c2pa = b"\0\0\0\x14jumbopaque store";
     let png = encode(|e| {
         e.with_exif(&exif)
-            .with_icc_profile("Tiny", &icc)
-            .with_xmp(xmp)
+            .with_icc_profile_name("Tiny")
+            .with_icc_profile(&icc)
+            .with_xmp(xmp.as_bytes())
+            .unwrap()
             .with_c2pa(c2pa)
             .with_text("Author", "nobody")
             .with_compressed_text("Comment", "compressed comment")
@@ -105,8 +107,10 @@ fn metadata_agrees_with_decode_field_for_field() {
     let icc = tiny_icc_profile();
     let png = encode(|e| {
         e.with_exif(&exif)
-            .with_icc_profile("Tiny", &icc)
-            .with_xmp("<x:xmpmeta/>")
+            .with_icc_profile_name("Tiny")
+            .with_icc_profile(&icc)
+            .with_xmp("<x:xmpmeta/>".as_bytes())
+            .unwrap()
             .with_c2pa(b"\0\0\0\x10jumbc2pa")
             .with_text("Author", "nobody")
             .with_gamma(1.0 / 2.2)
@@ -237,7 +241,11 @@ fn ancillary_crc_mismatch_skips_the_chunk() {
 #[test]
 fn the_decoder_entry_point_honours_the_metadata_budget() {
     let icc = tiny_icc_profile();
-    let png = encode(|e| e.with_icc_profile("Tiny", &icc).with_gamma(1.0 / 2.2));
+    let png = encode(|e| {
+        e.with_icc_profile_name("Tiny")
+            .with_icc_profile(&icc)
+            .with_gamma(1.0 / 2.2)
+    });
 
     let generous = PngDecoder::new().with_max_metadata_bytes(1 << 20);
     assert!(generous.metadata(&png).unwrap().icc_profile.is_some());

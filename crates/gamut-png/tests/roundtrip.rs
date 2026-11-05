@@ -81,7 +81,8 @@ fn effort_budget_round_trips_and_defaults_to_six_passes() {
         encoder
             .with_compression(Level::Best)
             .with_filter(FilterStrategy::None)
-            .with_icc_profile("prof", &tiny_icc_profile())
+            .with_icc_profile_name("prof")
+            .with_icc_profile(&tiny_icc_profile())
             .with_compressed_text("Comment", &"squeeze ".repeat(40))
             .encode_image(
                 ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
@@ -282,8 +283,10 @@ fn ancillary_pile_survives_decode() {
         .with_compressed_text("Comment", &"squeeze ".repeat(40))
         .with_international_text("Author", "gämut")
         .with_exif(&exif)
-        .with_icc_profile("prof", &icc)
-        .with_xmp(xmp)
+        .with_icc_profile_name("prof")
+        .with_icc_profile(&icc)
+        .with_xmp(xmp.as_bytes())
+        .unwrap()
         .encode_image(
             ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
             &mut png,

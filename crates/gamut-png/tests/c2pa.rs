@@ -67,7 +67,8 @@ fn everything_else() -> PngEncoder {
         .with_gamma(1.0 / 2.2)
         .with_srgb(SrgbIntent::Perceptual)
         .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
-        .with_icc_profile("Tiny", &tiny_icc_profile())
+        .with_icc_profile_name("Tiny")
+        .with_icc_profile(&tiny_icc_profile())
         .with_significant_bits(&[8, 8, 8, 8])
         .with_background(Background::Rgb(0, 0, 0))
         .with_physical_dimensions(PhysicalDimensions::new(2835, 2835, PhysicalUnit::Meter))
@@ -76,7 +77,8 @@ fn everything_else() -> PngEncoder {
         .with_compressed_text("Comment", "zlib body")
         .with_international_text("Note", "utf-8")
         .with_exif(&tiny_exif())
-        .with_xmp("<x:xmpmeta/>")
+        .with_xmp("<x:xmpmeta/>".as_bytes())
+        .unwrap()
 }
 
 /// C2PA §A.3.2 asks that `caBX` precede `IDAT`; the encoder puts it *immediately* before the first
@@ -142,6 +144,7 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
     let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
     let (png, report) = PngEncoder::new()
         .with_c2pa_reserved(40)
+        .expect("a reservable length")
         .encode_with_report(image)
         .expect("encode");
     let span = report.c2pa.expect("a reservation is reported");
@@ -162,6 +165,7 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
 
     let (empty, report) = PngEncoder::new()
         .with_c2pa_reserved(0)
+        .expect("a reservable length")
         .encode_with_report(image)
         .expect("encode");
     let span = report.c2pa.expect("an empty reservation is still a chunk");
@@ -169,23 +173,24 @@ fn a_reservation_is_a_zero_payload_of_exactly_the_requested_length() {
     assert_eq!(&empty[span.chunk.clone()][..8], b"\0\0\0\0caBX");
 }
 
-/// A reservation past PNG §5.3's 2^31 − 1-byte payload bound fails the encode with the documented
-/// `InvalidInput`. `usize::MAX` is the case that pins the order: were the zero run allocated at
-/// the setter, as it once was, this would abort on allocation before the check could answer.
+/// A reservation past PNG §5.3's 2^31 − 1-byte payload bound is refused at the setter with the
+/// documented `InvalidInput`, and one at the bound is accepted. `usize::MAX` is the case that pins
+/// the order: were the zero run allocated at the setter, as it once was, this would abort on
+/// allocation before the check could answer.
 #[test]
-fn an_oversized_reservation_fails_the_encode_without_allocating_it() {
-    let (src, dims) = rgb_source();
-    let image = ImageRef::<Rgb8>::new(&src, dims).expect("matches");
-    let error = PngEncoder::new()
-        .with_c2pa_reserved(usize::MAX)
-        .encode_with_report(image)
-        .expect_err("no chunk carries usize::MAX bytes");
-    assert!(
-        error
-            .to_string()
-            .contains("chunk payload exceeds 2^31 - 1 bytes"),
-        "{error}"
-    );
+fn an_oversized_reservation_is_refused_at_the_setter_without_allocating_it() {
+    for len in [(1 << 31) as usize, usize::MAX] {
+        let error = PngEncoder::new()
+            .with_c2pa_reserved(len)
+            .expect_err("no chunk carries more than 2^31 - 1 bytes");
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("PNG: chunk payload exceeds 2^31 - 1 bytes"),
+            "len {len}"
+        );
+    }
+    assert!(PngEncoder::new().with_c2pa_reserved((1 << 31) - 1).is_ok());
 }
 
 /// The reserve-then-fill contract: encoding again with a store of the reserved length changes
@@ -199,6 +204,7 @@ fn filling_a_reservation_changes_only_the_chunk_span() {
     let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("image");
     let (reserved, report) = everything_else()
         .with_c2pa_reserved(64)
+        .expect("a reservable length")
         .encode_with_report(image)
         .expect("encode");
     let span = report.c2pa.expect("span");
@@ -324,6 +330,7 @@ fn decode_and_metadata_surface_the_store_verbatim_and_the_last_setter_wins() {
     let reserved_last = PngEncoder::new()
         .with_c2pa(&store)
         .with_c2pa_reserved(5)
+        .expect("a reservable length")
         .encode_to_vec(image)
         .expect("encode");
     assert_eq!(
@@ -332,6 +339,7 @@ fn decode_and_metadata_surface_the_store_verbatim_and_the_last_setter_wins() {
     );
     let store_last = PngEncoder::new()
         .with_c2pa_reserved(5)
+        .expect("a reservable length")
         .with_c2pa(&store)
         .encode_to_vec(image)
         .expect("encode");
@@ -444,6 +452,7 @@ fn a_reserved_store_is_filled_in_place_to_the_same_bytes_as_a_second_encode() {
 
     let (mut reserved, report) = everything_else()
         .with_c2pa_reserved(64)
+        .expect("a reservable length")
         .encode_with_report(image)
         .expect("encode");
     let span = report.c2pa.expect("span");
@@ -492,6 +501,7 @@ fn an_indexed_encode_reserves_and_fills_through_the_report() {
     let mut png = Vec::new();
     PngEncoder::new()
         .with_c2pa_reserved(24)
+        .expect("a reservable length")
         .encode_indexed8(image, &palette, &mut png)
         .expect("encode");
 

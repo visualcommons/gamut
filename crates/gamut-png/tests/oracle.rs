@@ -478,7 +478,8 @@ fn a_profile_beside_a_rendering_intent_is_accepted_by_libpng() {
 
     let mut png = Vec::new();
     PngEncoder::new()
-        .with_icc_profile("both", &icc)
+        .with_icc_profile_name("both")
+        .with_icc_profile(&icc)
         .with_srgb(SrgbIntent::Perceptual)
         .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
         .expect("encode");
@@ -517,8 +518,10 @@ fn metadata_chunks_embed_and_image_survives() {
     PngEncoder::new()
         .with_compression(Level::Best)
         .with_exif(&exif)
-        .with_icc_profile("test profile", &icc)
-        .with_xmp(xmp)
+        .with_icc_profile_name("test profile")
+        .with_icc_profile(&icc)
+        .with_xmp(xmp.as_bytes())
+        .unwrap()
         .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
         .expect("encode");
 

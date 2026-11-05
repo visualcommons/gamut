@@ -849,10 +849,12 @@ fn encode(
                     encoder = encoder.with_exif(exif);
                 }
                 if let Some(icc) = &carried.icc {
-                    encoder = encoder.with_icc_profile("ICC profile", icc);
+                    encoder = encoder.with_icc_profile(icc);
                 }
+                // `utf8_xmp` has already refused, with its warning, the one packet `with_xmp`
+                // would: one that is not UTF-8.
                 if let Some(xmp) = carried.xmp.as_deref().and_then(utf8_xmp) {
-                    encoder = encoder.with_xmp(xmp);
+                    encoder = encoder.with_xmp(xmp.as_bytes())?;
                 }
             }
             // Say what could not come along, and what came along with a caveat. Silent loss is

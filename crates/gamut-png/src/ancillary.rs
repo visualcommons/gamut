@@ -357,6 +357,11 @@ fn profile_name_verdict(name: &str) -> core::result::Result<IccpName, MetadataNo
 /// A writable `iCCP` profile name: its Latin-1 bytes, and the advisory notice it carries.
 type IccpName = (Vec<u8>, Option<MetadataNotice>);
 
+/// The `iCCP` profile name written when none is set: 1–79 printable Latin-1 characters with no
+/// leading, trailing or consecutive space, as §11.3.2.3 requires, so a profile set without a name
+/// draws no notice.
+pub(crate) const DEFAULT_ICC_PROFILE_NAME: &str = "ICC profile";
+
 /// Whether a `tIME`'s month, day, hour, minute and second each lie within the range §11.3.5.1's
 /// Table 26 gives it (1–12, 1–31, 0–23, 0–59, 0–60; the year is any two-byte value). The one rule
 /// both directions apply: the reader skips a chunk outside it as malformed (§13.1), and the writer
@@ -428,14 +433,14 @@ pub(crate) struct Ancillary {
     /// Why the time last given to [`Self::set_time`] was dropped, if it was. A single-value slot
     /// like [`time`](Self::time) itself, so setting a time again replaces it.
     time_notice: Option<MetadataNotice>,
-    /// iCCP: (profile name as its Latin-1 bytes, raw ICC profile bytes); compressed at emit
-    /// time. Set through [`Self::set_icc_profile`], which leaves it empty for a name §11.3.2.3
-    /// gives no chunk to.
-    pub iccp: Option<(Vec<u8>, Vec<u8>)>,
-    /// What §11.3.2.3 says about the profile name last given to [`Self::set_icc_profile`]: why
-    /// the profile was dropped, or the deviation it was written with. A single-value slot like
-    /// [`iccp`](Self::iccp) itself, so setting a profile again replaces it.
-    iccp_notice: Option<MetadataNotice>,
+    /// iCCP: the raw ICC profile bytes, compressed at emit time. Set through
+    /// [`Self::set_icc_profile`]; [`Self::iccp`] is what is written.
+    pub icc_profile: Option<Vec<u8>>,
+    /// The `iCCP` profile name last given to [`Self::set_icc_profile_name`], or `None` for
+    /// [`DEFAULT_ICC_PROFILE_NAME`]. Held as given; §11.3.2.3's verdict on it is taken where the
+    /// chunk is written or reported ([`Self::iccp`], [`Self::iccp_notice`]), so setting the name
+    /// or the profile again replaces both the slot and its notice.
+    icc_name: Option<String>,
     /// eXIf: raw EXIF/TIFF bytes (the chunk payload starts with the TIFF byte-order marker).
     pub exif: Option<Vec<u8>>,
     /// caBX: the C2PA manifest store, raw and uncompressed (C2PA 2.4 §A.3.2) — or a run of zero
@@ -512,21 +517,40 @@ impl Ancillary {
         self.time_notice
     }
 
-    /// Sets the `iCCP` profile, routing its name through [`profile_name_verdict`]: a name no
-    /// chunk this crate's reader accepts can hold leaves the slot empty, and either way the
-    /// verdict's notice replaces the previous profile's.
-    pub(crate) fn set_icc_profile(&mut self, name: &str, profile: &[u8]) {
-        let (iccp, notice) = match profile_name_verdict(name) {
-            Ok((bytes, notice)) => (Some((bytes, profile.to_vec())), notice),
-            Err(notice) => (None, Some(notice)),
-        };
-        self.iccp = iccp;
-        self.iccp_notice = notice;
+    /// Sets the raw `iCCP` profile, written under the name [`Self::set_icc_profile_name`] last
+    /// gave (or [`DEFAULT_ICC_PROFILE_NAME`]).
+    pub(crate) fn set_icc_profile(&mut self, profile: &[u8]) {
+        self.icc_profile = Some(profile.to_vec());
     }
 
-    /// What §11.3.2.3 says about the profile name in the `iCCP` slot, if anything.
+    /// Sets the name the `iCCP` profile is written under, replacing the previous one.
+    pub(crate) fn set_icc_profile_name(&mut self, name: &str) {
+        self.icc_name = Some(name.to_owned());
+    }
+
+    /// §11.3.2.3's verdict on the profile name, routed through [`profile_name_verdict`], or `None`
+    /// when no profile is set and so no chunk is in question.
+    fn iccp_verdict(&self) -> Option<core::result::Result<IccpName, MetadataNotice>> {
+        self.icc_profile.as_ref()?;
+        let name = self.icc_name.as_deref().unwrap_or(DEFAULT_ICC_PROFILE_NAME);
+        Some(profile_name_verdict(name))
+    }
+
+    /// The `iCCP` chunk to write: the profile name as its Latin-1 bytes and the raw profile, or
+    /// `None` when no profile is set or its name is one no chunk this crate's reader accepts can
+    /// hold.
+    pub(crate) fn iccp(&self) -> Option<(Vec<u8>, &[u8])> {
+        let (name, _) = self.iccp_verdict()?.ok()?;
+        Some((name, self.icc_profile.as_deref()?))
+    }
+
+    /// What §11.3.2.3 says about the profile name in the `iCCP` slot, if anything: why the
+    /// profile is dropped, or the deviation it is written with.
     pub(crate) fn iccp_notice(&self) -> Option<MetadataNotice> {
-        self.iccp_notice
+        match self.iccp_verdict()? {
+            Ok((_, notice)) => notice,
+            Err(notice) => Some(notice),
+        }
     }
 
     pub(crate) fn add_text_latin1(&mut self, keyword: &str, text: &str) {
@@ -791,10 +815,10 @@ impl Ancillary {
         if let Some(gamma) = self.gamma {
             chunk::write_chunk(out, *b"gAMA", &gamma.to_be_bytes());
         }
-        if let Some((name, profile)) = &self.iccp {
-            // The name is already its Latin-1 bytes, 1–79 of them and null-free:
-            // `set_icc_profile` let nothing else into the slot (§11.3.2.3).
-            let mut data = name.clone();
+        if let Some((name, profile)) = self.iccp() {
+            // The name is already its Latin-1 bytes, 1–79 of them and null-free: `iccp` lets
+            // nothing else through (§11.3.2.3).
+            let mut data = name;
             data.push(0); // null separator
             data.push(0); // compression method: 0 = zlib/deflate
             DeflateEncoder::new()
@@ -861,11 +885,10 @@ impl Ancillary {
 
 /// The `caBX` payload the caller asked for.
 ///
-/// A reservation is held as its length, not as the zero bytes it stands for, so that the length
-/// is checked against PNG §5.3's 2^31 − 1 bound (in the encoder, before any byte is written)
-/// **before** anything is allocated: [`PngEncoder::with_c2pa_reserved`](crate::PngEncoder::with_c2pa_reserved)
-/// is an infallible builder, and a `usize::MAX` reservation must surface as the documented
-/// `InvalidInput`, not as an allocation failure at the setter.
+/// A reservation is held as its length, not as the zero bytes it stands for, so nothing is
+/// allocated for it until the encode writes it: [`PngEncoder::with_c2pa_reserved`](crate::PngEncoder::with_c2pa_reserved)
+/// checks the length against PNG §5.3's 2^31 − 1 bound, and the zero run is built only by the
+/// write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum C2paStore {
     /// A finished store, written verbatim.
@@ -1362,7 +1385,8 @@ mod tests {
     /// The `iCCP` payload [`Ancillary::set_icc_profile`] leads to, if any.
     fn iccp_chunk(name: &str) -> (Option<Vec<u8>>, Option<MetadataNotice>) {
         let mut a = Ancillary::default();
-        a.set_icc_profile(name, b"profile");
+        a.set_icc_profile_name(name);
+        a.set_icc_profile(b"profile");
         let mut pre = vec![0u8; 8];
         a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         (find_chunk(&pre, b"iCCP"), a.iccp_notice())
@@ -1434,28 +1458,45 @@ mod tests {
         }
     }
 
-    /// The notice belongs to the profile last set: a valid name set after a dropped one clears
-    /// it, and an invalid one set after a valid profile empties the slot. Kills a setter that
-    /// keeps either half of the previous profile's state.
+    /// The notice belongs to the name and profile last set: a valid name set after a dropped one
+    /// clears it, and an invalid one set after a valid profile empties the slot. A name with no
+    /// profile draws no notice, since no chunk is in question, and a profile with no name is
+    /// written under [`DEFAULT_ICC_PROFILE_NAME`]. Kills a setter that keeps either half of the
+    /// previous state.
     #[test]
-    fn setting_an_iccp_profile_again_replaces_its_notice_and_slot() {
+    fn setting_an_iccp_profile_or_name_again_replaces_its_notice_and_slot() {
         let mut a = Ancillary::default();
-        a.set_icc_profile("", b"profile");
-        a.set_icc_profile("p", b"profile");
-        assert_eq!(a.iccp_notice(), None);
-        assert!(a.iccp.is_some());
-        a.set_icc_profile("", b"profile");
+        a.set_icc_profile_name("");
+        assert_eq!((a.iccp(), a.iccp_notice()), (None, None));
+        a.set_icc_profile(b"profile");
         assert_eq!(a.iccp_notice(), Some(MetadataNotice::IccpNameLength));
-        assert_eq!(a.iccp, None);
+        a.set_icc_profile_name("p");
+        assert_eq!(a.iccp_notice(), None);
+        assert_eq!(a.iccp(), Some((b"p".to_vec(), &b"profile"[..])));
+        a.set_icc_profile_name("");
+        assert_eq!(a.iccp_notice(), Some(MetadataNotice::IccpNameLength));
+        assert_eq!(a.iccp(), None);
+
+        let mut unnamed = Ancillary::default();
+        unnamed.set_icc_profile(b"profile");
+        assert_eq!(unnamed.iccp_notice(), None);
+        assert_eq!(
+            unnamed.iccp(),
+            Some((
+                DEFAULT_ICC_PROFILE_NAME.as_bytes().to_vec(),
+                &b"profile"[..]
+            ))
+        );
     }
 
     #[test]
     fn iccp_and_exif_framing() {
-        let a = Ancillary {
-            iccp: Some((b"p".to_vec(), b"the quick brown fox".to_vec())),
+        let mut a = Ancillary {
+            icc_profile: Some(b"the quick brown fox".to_vec()),
             exif: Some(vec![0x49, 0x49, 0x2A, 0x00]),
             ..Default::default()
         };
+        a.set_icc_profile_name("p");
         let mut pre = vec![0u8; 8];
         a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
         let iccp = find_chunk(&pre, b"iCCP").unwrap();
@@ -1865,7 +1906,7 @@ mod tests {
     fn a_profile_and_a_rendering_intent_are_both_written() {
         let mut a = Ancillary::default();
         a.set_srgb(SrgbIntent::Perceptual);
-        a.iccp = Some((b"prof".to_vec(), vec![0u8; 4]));
+        a.set_icc_profile(&[0u8; 4]);
         assert!(a.validate().is_ok(), "the pair is legal");
 
         let mut out = vec![0u8; 8];

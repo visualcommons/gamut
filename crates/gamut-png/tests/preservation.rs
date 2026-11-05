@@ -443,7 +443,9 @@ fn a_profile_name_no_reader_accepts_is_left_behind_with_a_notice() {
         ("pro\0file", MetadataNotice::IccpNameNull),
         ("\u{153}rofile", MetadataNotice::IccpNameNotLatin1),
     ] {
-        let encoder = PngEncoder::new().with_icc_profile(name, &tiny_icc_profile());
+        let encoder = PngEncoder::new()
+            .with_icc_profile_name(name)
+            .with_icc_profile(&tiny_icc_profile());
         assert_eq!(encoder.metadata_notices(), [notice], "name {name:?}");
         assert!(!notice.carried(), "name {name:?}");
         assert_eq!(
@@ -651,7 +653,8 @@ fn xmp_chunks(png: &[u8]) -> usize {
 fn carrying_an_xmp_packet_replaces_one_already_set() {
     let meta = gamut_png::metadata(&source(&[])).unwrap();
     let out = re_encoded_bytes(|e| {
-        e.with_xmp("<x:xmpmeta id='set directly'/>")
+        e.with_xmp("<x:xmpmeta id='set directly'/>".as_bytes())
+            .unwrap()
             .with_png_metadata(&meta)
     });
 
@@ -672,7 +675,8 @@ fn carrying_an_xmp_packet_replaces_one_already_set() {
 fn carrying_a_source_without_a_packet_keeps_one_already_set() {
     let meta = gamut_png::metadata(&minimal_source(&[chunk(b"tEXt", b"Author\0me")])).unwrap();
     let re = re_encoded(|e| {
-        e.with_xmp("<x:xmpmeta id='set directly'/>")
+        e.with_xmp("<x:xmpmeta id='set directly'/>".as_bytes())
+            .unwrap()
             .with_png_metadata(&meta)
     });
     assert_eq!(re.xmp(), Some(&b"<x:xmpmeta id='set directly'/>"[..]));

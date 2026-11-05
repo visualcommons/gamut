@@ -149,7 +149,8 @@ fn tagged_png() -> Vec<u8> {
     let rgb = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
     png::<Rgb8>(
         PngEncoder::new()
-            .with_icc_profile("test", &icc())
+            .with_icc_profile_name("test")
+            .with_icc_profile(&icc())
             .with_exif(&exif()),
         &rgb,
     )
@@ -183,7 +184,7 @@ fn png_xmp_is_carried_into_the_xmp_item() {
     let rgb = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
     let avif = convert(
         "xmp",
-        &png::<Rgb8>(PngEncoder::new().with_xmp(XMP), &rgb),
+        &png::<Rgb8>(PngEncoder::new().with_xmp(XMP.as_bytes()).unwrap(), &rgb),
         &[],
     );
     let container = AvifContainer::parse(&avif).unwrap();
@@ -205,7 +206,9 @@ fn grey_icc() -> Vec<u8> {
 fn a_grey_profile_is_carried_onto_monochrome_samples() {
     let grey = [0, 85, 170, 255];
     let input = png::<Gray8>(
-        PngEncoder::new().with_icc_profile("grey", &grey_icc()),
+        PngEncoder::new()
+            .with_icc_profile_name("grey")
+            .with_icc_profile(&grey_icc()),
         &grey,
     );
     let avif = convert("grey-icc", &input, &[]);
@@ -222,7 +225,9 @@ fn a_grey_profile_is_carried_onto_monochrome_samples() {
 fn a_grey_profile_is_not_carried_onto_grey_with_alpha() {
     let grey_alpha = [0, 0, 85, 85, 170, 170, 255, 255];
     let input = png::<GrayAlpha8>(
-        PngEncoder::new().with_icc_profile("grey", &grey_icc()),
+        PngEncoder::new()
+            .with_icc_profile_name("grey")
+            .with_icc_profile(&grey_icc()),
         &grey_alpha,
     );
     let avif = convert("grey-alpha-icc", &input, &[]);

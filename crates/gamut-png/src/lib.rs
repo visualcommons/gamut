@@ -20,9 +20,10 @@
 //!
 //! With the optional **`metadata`** Cargo feature the EXIF/XMP/ICC/C2PA payloads are wired to the
 //! `gamut-metadata` facade's typed models through its `TypedMetadata` trait, implemented by
-//! [`PngMetadata`] and [`DecodedPng`] (`blocks` / `metadata`); `PngEncoder::with_metadata` /
-//! `PngEncoder::with_encoded_metadata` embed a unified `Metadata`, routing each carrier to the raw
-//! setters. The chunk-for-chunk carry of a [`PngMetadata`] is [`PngEncoder::with_png_metadata`].
+//! [`PngMetadata`] (`blocks` / `metadata`; a full decode holds one as [`DecodedPng::metadata`]),
+//! and its `MetadataSink` trait, implemented by [`PngEncoder`]: `with_metadata` /
+//! `with_encoded_metadata` embed a unified `Metadata`, routing each carrier to the raw setters.
+//! The chunk-for-chunk carry of a [`PngMetadata`] is [`PngEncoder::with_png_metadata`].
 //!
 //! # C2PA manifest store
 //!
@@ -102,6 +103,8 @@ mod reduce;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod stages;
+#[cfg(feature = "metadata")]
+mod typed;
 
 pub use abi::{AbiZlibDeflater, AbiZlibInflater, PIXEL_FORMAT_FILTERED_BYTES, ZLIB_CODEC_ID};
 pub use ancillary::{PhysicalUnit, SrgbIntent};
@@ -131,5 +134,5 @@ pub use gamut_deflate::Level;
 // The facade types named in the `metadata`-feature signatures, so a caller can spell
 // `PngMetadata::metadata` / `PngEncoder::with_metadata` without a direct dependency.
 #[cfg(feature = "metadata")]
-pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, TypedMetadata};
+pub use gamut_metadata::{EncodedMetadata, Metadata, MetadataBlock, MetadataSink, TypedMetadata};
 pub use palette::{PaletteOrder, PngPalette};

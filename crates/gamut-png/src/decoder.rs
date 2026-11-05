@@ -1654,8 +1654,10 @@ mod tests {
             .with_cicp(crate::Cicp::new(9, 16, true))
             .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
             .with_exif(&exif)
-            .with_icc_profile("prof", b"not-a-real-profile-but-bytes")
-            .with_xmp(xmp)
+            .with_icc_profile_name("prof")
+            .with_icc_profile(b"not-a-real-profile-but-bytes")
+            .with_xmp(xmp.as_bytes())
+            .unwrap()
             .with_text("Title", "gamut")
             .with_compressed_text("Comment", comment)
             .encode_image(
