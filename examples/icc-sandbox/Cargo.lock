@@ -832,6 +832,7 @@ name = "gamut-color"
 version = "3.0.0"
 dependencies = [
  "gamut-core",
+ "gamut-dsp",
 ]
 
 [[package]]
