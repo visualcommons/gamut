@@ -876,9 +876,11 @@ mod tests {
         }
     }
 
-    /// A `RowsPerStrip` beyond the image height is clamped to it: still one strip.
+    /// A `RowsPerStrip` beyond the image height decodes as one full-height strip. This does not
+    /// pin the `.min(l.height)` clamp on `rows_per_strip`: without it the strip count is still 1
+    /// and each strip's rows are clamped again in the loop, so the output is identical.
     #[test]
-    fn decode_strips_clamps_rows_per_strip_to_the_image_height() {
+    fn decode_strips_decodes_an_oversized_rows_per_strip_as_one_strip() {
         let data = [1, 2, 3, 4, 5, 6];
         let got = decode_strips(&one_strip_ifd(Some(100), 0, 6), &data, &gray_layout());
         assert_eq!(got.expect("decode"), data);
