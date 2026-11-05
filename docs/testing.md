@@ -159,7 +159,7 @@ raising `cases` to match costs the coverage gate and every one of ~24,000 mutant
 sweep in `gamut-tiff/src/compression/lzw.rs` picks inputs that cross the 9→10→11→12-bit code-width
 boundaries. Properties are for claims that have no sweep, not a rewrite of the ones that do.
 
-### Why fuzzing is not in the per-PR gate
+### Why fuzzing is not in the coverage gate
 
 The `coverage` job is the only gate that runs tests, so anything in it must be bounded and
 reproducible. A corpus-guided engine under `cargo test` is neither: it is time-bounded rather than

@@ -12,7 +12,7 @@ once it has run.
 mise run mutants -- --help                 # selection, budget and guard flags
 mise run mutants -- --crate gamut-png      # one package
 mise run mutants-crate gamut-png           # same thing, shorter
-mise run mutants-diff                      # only what this branch changed (what CI runs per push)
+mise run mutants-diff                      # only what this branch changed (what CI runs on master)
 mise run mutants -- --shard 1/16           # one shard of the whole workspace
 ```
 
@@ -204,12 +204,15 @@ each edit costs one build of one package rather than the whole survey.
 
 `.github/workflows/mutants.yml` has two jobs, both through `mise run mutants`:
 
-- **incremental** — every push to master, `--in-diff`, four round-robin shards. A surviving
-  mutant in changed code fails the check and turns that master commit red. It passes
-  `GAMUT_MUTANTS_BASE=<github.event.before>`, the commit master pointed at before the push, so
-  each run scores exactly what its push added; when that commit is absent (a created ref, or a
-  force-push that discarded it) it falls back to `HEAD^`. Each push runs in a concurrency group
-  of its own, because no later run re-covers an earlier push's diff.
+- **incremental** — after pushes to master, `--in-diff`, four round-robin shards. A surviving
+  mutant in changed code fails the check and turns that master commit red. A `quiet` job first
+  waits until master has gone an hour without a push (`tooling/ci-quiet/run.sh wait`, issue
+  #956), and a newer push cancels an older run's wait, so a burst of merges is surveyed once at
+  its end. It passes `GAMUT_MUTANTS_BASE` from `tooling/ci-quiet/run.sh mutants-base`: the head of
+  the newest push run whose every incremental shard came back clean. A run therefore scores
+  everything since master was last scored clean — including a superseded push, or a diff a red
+  or pre-empted run left behind, so a survivor stays red until it is fixed. Without such a run in
+  HEAD's history it falls back to `github.event.before`, then `HEAD^`.
 - **full** — nightly (`schedule`, 06:00 UTC) and manual (`workflow_dispatch`), whole workspace
   as a rotation, informational (`continue-on-error`). An unsharded pass runs for days and a
   GitHub-hosted job is killed at 360 minutes, so each run scores 8 of 128 round-robin shards in
@@ -218,7 +221,8 @@ each edit costs one build of one package rather than the whole survey.
   out, so a run that straddles 00:00 UTC still scores one round's shards. Sixteen consecutive rounds cover every mutant once. The survey
   step times out at 300 minutes, leaving the job alive to upload the partial `mutants.out`; the
   job backstop is 330. No shard of this split has been timed on a runner yet. Runs do not cancel
-  each other, since a newer round does not re-cover an older one's shards.
+  each other, since a newer round does not re-cover an older one's shards. It waits for the
+  same hour of quiet, capped at four hours so a busy day cannot cost a round.
 
 Neither job runs on pull requests (issue #964): a blocking four-shard pass per pull request held
 up the review loop. So CI does not mutation-gate a pull request: `mise run mutants-diff`

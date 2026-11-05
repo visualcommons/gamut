@@ -190,7 +190,7 @@ description = "Fetch the real-camera DNG corpus submodule (~178 MiB; needed by t
 run = "git submodule update --init --checkout third_party/gamut-dng-samples"
 
 # Coverage-guided fuzzing of the `invariants` laws (issues #264, #311). Deliberately NOT in the
-# per-PR path: `coverage` is the only gate that runs tests, so anything in it must be bounded and
+# coverage gate: `coverage` is the only gate that runs tests, so anything in it must be bounded and
 # reproducible, and a corpus-guided engine is neither -- see `docs/testing.md`.
 #
 # Needs nightly for libFuzzer's `-Z sanitizer=fuzzer`; the workspace pins stable, so this selects

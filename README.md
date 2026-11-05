@@ -284,9 +284,11 @@ The hook steps delegate to the shared `mise run` tasks, so keep mise activated i
 
 ## CI/CD
 
-GitHub Actions provisions tooling via [mise](https://mise.jdx.dev) and runs format checks,
-linting, tests, and coverage on pushes to `master` and pull requests. Pull requests
-additionally validate every commit message against Conventional Commits with convco.
+GitHub Actions provisions tooling via [mise](https://mise.jdx.dev). Pull requests gate on the
+fast lanes only: format and metadata checks, Clippy, doctests and rustdoc, plus a check of every
+commit message against Conventional Commits with convco. Tests, coverage and the incremental
+mutation survey run after the merge, once `master` has gone an hour without a push, against the
+head it settled on; and on release PRs, which re-verify what will be published.
 
 ## Code Coverage
 

@@ -1,5 +1,9 @@
 name: CI
 
+# The pull-request gate, and what Release waits on for master: format and metadata guards, then
+# Clippy, doctests and rustdoc over everything. Tests and coverage are NOT here; they run in
+# coverage.yml after the merge, once master is quiet, and on release PRs (issue #956).
+
 on:
   push:
     branches: [master]
@@ -16,14 +20,15 @@ concurrency:
 # `[workspace].exclude` entries reached as path dev-dependencies, and libjxl builds inside the
 # member `gamut-jxl-sys` — and Swatinem/rust-cache deliberately drops local crates, including
 # their build-script OUT_DIRs where every static archive lives, so before sccache each heavy job
-# rebuilt all fourteen from scratch (~9 min, paid twice per PR).
+# rebuilt all fourteen from scratch (~9 min per job).
 #
 # sccache is the right tool because it is content-addressed on preprocessed source + compiler +
 # flags: a `third_party/` submodule bump changes the content, changes the hash, and misses. There
 # is no cache key for a future change to under-specify, so a stale oracle — tests silently passing
 # against the wrong reference implementation — is not a reachable state. The GHA backend is one
-# store shared by every job, which matters because `cargo llvm-cov` builds into its own
-# `target/llvm-cov-target/` and can share nothing with the lint lane through rust-cache.
+# store shared by every job and workflow, which matters because coverage.yml's `cargo llvm-cov`
+# builds into its own `target/llvm-cov-target/` and can share nothing with the lint lane through
+# rust-cache.
 #
 # `CC`/`CXX` carry the launcher; `tooling/build-env` moves it to `CMAKE_{C,CXX}_COMPILER_LAUNCHER`
 # per spawned cmake/meson command (see that crate's docs for the two failure modes this avoids).
@@ -237,7 +242,7 @@ jobs:
           components: clippy
       - uses: mozilla-actions/sccache-action@v0.0.10
       # Cache target/ and the cargo registry for the Rust half; sccache (above) covers the native
-      # half, which rust-cache structurally cannot. Precedent: mutants.yml. (Same as coverage.)
+      # half, which rust-cache structurally cannot. Precedent: mutants.yml. (Same as coverage.yml.)
       # The ICC sandbox is workspace-excluded and builds into its own target dir; it is listed so
       # the egui/eframe tree `check-icc-sandbox` lints is cached rather than rebuilt per run.
       - uses: Swatinem/rust-cache@v2
@@ -253,9 +258,10 @@ jobs:
       - name: Install cbindgen (needs the rustup toolchain installed above)
         run: mise install cargo:cbindgen
       # Clippy and the doctests go through the shared mise tasks (single source of truth with the
-      # git hooks). The full test suite is NOT run here — the coverage job runs it instrumented and
-      # fails on any test failure, so it is the green-test gate; `test-doc` adds back only the
-      # doctests, which `cargo llvm-cov` cannot instrument on stable.
+      # git hooks). The full test suite is NOT run here, nor anywhere on a pull request (#956):
+      # coverage.yml runs it instrumented after the merge, once master is quiet, and on release
+      # PRs, failing on any test failure. `test-doc` adds back the doctests, which
+      # `cargo llvm-cov` cannot instrument on stable, so they stay on the PR path.
       - name: Clippy
         run: mise run lint
       # `mise run lint` cannot reach the real-camera DNG conformance tier: it is excluded from the
@@ -310,120 +316,3 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats
-
-  coverage:
-    name: Coverage (test gate)
-    runs-on: ubuntu-latest
-    # About 2.5x the job's measured time: 2h11m on PR #961, the run that set this (#960). Not
-    # tighter, because runner speed alone has varied by up to 2.9x: a cold run on the same day
-    # reached the same test 2.9x later. Without it GitHub's 360-minute default was the only bound on
-    # a job that had drifted to 4h31m. Tighten it when the `Level::Best` parse speed-up (#959)
-    # brings the job back down.
-    timeout-minutes: 330
-    env:
-      MISE_TASK_RUN_AUTO_INSTALL: false
-      # Same jobs × cores OOM as the lint job above: this one also builds every C++ oracle
-      # (`--workspace --all-features`), and instrumented builds are heavier still.
-      CARGO_BUILD_JOBS: 2
-      # See the sccache rationale above the `jobs:` key.
-      SCCACHE_GHA_ENABLED: "true"
-      CC: sccache gcc
-      CXX: sccache g++
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: recursive
-      - name: Install system build deps (pkg-config; nasm is vendored, rest via mise)
-        # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
-        # Chrome/Microsoft source on the runner image makes `apt-get update` exit 100, so drop
-        # the entries this project does not consume, then update and install unmasked. Full
-        # rationale, and why classification is per source entry, is in ci.yml.
-        run: |
-          # Print an apt source file with only Ubuntu's own entries; exit 10 if it had none.
-          # SC2016: `$0` is awk's, not the shell's; the program is single-quoted so it stays literal.
-          # shellcheck disable=SC2016
-          prune='
-          function ok(u) { u = tolower(u); return u ~ /apt-mirrors\.txt/ || u ~ /\/\/[a-z0-9._-]+\.ubuntu\.com/ }
-          function flush(  i) {
-            if (n == 0) return
-            if (uri == "" || ok(uri)) { for (i = 0; i < n; i++) print s[i]; if (uri != "") keep++ } else drop++
-            n = 0; uri = ""
-          }
-          /^[ \t]*(deb|deb-src)[ \t]/ { flush(); if (ok($0)) { print; keep++ } else drop++; next }
-          /^[ \t]*$/ { flush(); print; next }
-          /^[ \t]*URIs:/ { uri = $0 }
-          { s[n++] = $0 }
-          END { flush(); exit (keep > 0 ? 0 : 10) }'
-          work=$(mktemp -d)
-          ubuntu=0
-          for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-            [ -f "$f" ] || continue
-            out="$work/$(echo "$f" | tr / _)"
-            rc=0
-            # SC2024: only the read of "$f" needs root; "$out" is our own mktemp file.
-            # shellcheck disable=SC2024
-            sudo awk "$prune" "$f" > "$out" || rc=$?
-            case "$rc" in
-              0) ubuntu=$((ubuntu + 1)) ;;
-              10) ;;
-              *) echo "::error::could not read or classify $f (awk exit $rc); not guessing at it"
-                 exit 1 ;;
-            esac
-            echo "$rc" > "$out.rc"
-          done
-          if [ "$ubuntu" -eq 0 ]; then
-            # Classification recognised nothing as Ubuntu's -- a re-hosted archive, a renamed mirrorlist.
-            # Prune nothing and carry on: that is exactly how this step behaved before the guard existed,
-            # whereas failing here would turn one runner-image change into a total outage across every
-            # job. A genuinely unreachable archive, or a missing package, still fails loudly at the
-            # unmasked `update`/`install` below.
-            echo "::warning::no Ubuntu apt source recognised; standing down and leaving sources as they are"
-          else
-            for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-              [ -f "$f" ] || continue
-              out="$work/$(echo "$f" | tr / _)"
-              if [ "$(cat "$out.rc")" = 10 ]; then
-                echo "removing third-party source $f"
-                sudo rm -f "$f"
-              elif sudo cmp -s "$out" "$f"; then
-                echo "keeping $f"
-              else
-                echo "dropping third-party entries from $f"
-                sudo rm -f "$f"
-                sudo cp "$out" "$f"
-              fi
-            done
-          fi
-          sudo apt-get update
-          sudo apt-get install -y pkg-config
-      - uses: jdx/mise-action@v4
-        with:
-          install_args: cmake ninja meson aqua:taiki-e/cargo-llvm-cov
-      # `aom`/`dav1d` are `update = none` in `.gitmodules` (issue #378), so the `recursive`
-      # checkout above deliberately skips them; this job builds the AV1/AVIF oracles, so it
-      # pulls them explicitly. Every other submodule still arrives with the checkout.
-      - name: Fetch the AV1 oracle submodules
-        run: mise run fetch-av1-oracles
-      - name: Clear pre-installed Rust toolchain
-        # Same rustup `bin/cargo-fmt` conflict guard as the lint job above.
-        run: rustup toolchain uninstall stable || true
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: mozilla-actions/sccache-action@v0.0.10
-      - uses: Swatinem/rust-cache@v2
-      # This is the workspace's test gate as well as its coverage gate: llvm-cov runs the same
-      # suite `cargo test` would and fails the job on any test failure. The invocation lives in
-      # mise.toml so the exclusion regex and the 80% threshold are not duplicated here.
-      - name: Generate coverage report
-        run: mise run coverage-lcov
-      - name: Generate coverage summary
-        run: cargo llvm-cov report --summary-only
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: coverage-report
-          path: lcov.info

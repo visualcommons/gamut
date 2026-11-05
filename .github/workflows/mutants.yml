@@ -5,10 +5,14 @@ name: Mutants
 #
 # Not run per pull request (issue #964): a blocking four-shard mutation pass on every PR held
 # up the review loop, so mutation testing moved after the merge. Two jobs:
-#   * incremental — runs on every push to master, mutating only the code that push changed
-#     (`--in-diff` against `github.event.before`). A surviving mutant fails the check, which
-#     turns that master commit red: it can no longer block the merge that already happened, but
-#     it is a visible failure on the commit that introduced the gap, not a buried report.
+#   * incremental — runs after pushes to master, once master has been quiet for an hour
+#     (`tooling/ci-quiet/run.sh wait`, issue #956; coverage.yml waits the same way), mutating only
+#     the code changed since master was last scored clean (`--in-diff` against
+#     `tooling/ci-quiet/run.sh mutants-base`). A newer push cancels an older run's wait, so a
+#     burst of merges is surveyed once, at its end, over the burst's whole diff. A surviving
+#     mutant fails the check, which turns that master commit red: it can no longer block the
+#     merge that already happened, but it is a visible failure, not a buried report, and it
+#     stays in the next run's diff until a run comes back clean.
 #   * full — nightly (schedule) and manual (workflow_dispatch) whole-workspace survey, run as a
 #     rotation: each run scores 8 of the workspace's 128 round-robin shards, so 16 consecutive
 #     nights cover every mutant once. One unsharded pass is ~24k mutants and runs for days,
@@ -43,15 +47,43 @@ env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  # A push run scores only that push's own diff (`event.before..sha`), so a later push never
-  # re-covers it: cancelling or superseding it would leave that commit unscored for good. Each
-  # push therefore gets a group of its own, keyed on its SHA. A full survey scores only its own
-  # round's shards of the rotation, so a newer one does not re-cover an older one either: each
-  # gets a group of its own, keyed on its run id, and nothing cancels anything.
+  # Nothing cancels a running survey. A push run diffs against the last clean survey rather than
+  # its own push, so a superseded push is re-covered by the next run; superseding happens only
+  # in the `quiet` job below, before anything is built. A full survey scores only its own round's
+  # shards of the rotation, so a newer one does not re-cover an older one: each gets a group of
+  # its own, keyed on its run id.
   group: mutants-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:
+  # Wait until master has gone an hour without a push (issue #956). Push runs share one group
+  # and a newer push cancels this wait, so only the run for the head a burst settles on goes on
+  # to the survey. Scheduled and manual runs get a group of their own so a push cannot cost the
+  # rotation its round; they wait at most four hours, then run anyway.
+  quiet:
+    name: Wait for master to go quiet
+    runs-on: ubuntu-latest
+    concurrency:
+      group: mutants-quiet-${{ github.event_name == 'push' && 'push' || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'push' }}
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.wait.outputs.run }}
+      sha: ${{ steps.wait.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: tooling/ci-quiet
+      - name: Wait for an hour without a push to master
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECT_SHA: ${{ github.event_name == 'push' && github.sha || '' }}
+          MAX_WAIT_SECS: ${{ github.event_name == 'push' && '0' || '14400' }}
+        run: tooling/ci-quiet/run.sh wait
+
   # Mutate only the code changed by the push to master. Fails on a surviving mutant.
   incremental:
     # Sharded because the runners are preemptible. A single pass over a large diff's mutants runs
@@ -62,7 +94,8 @@ jobs:
     # racing it. Same total compute, and a lost shard costs a quarter of the job rather than all
     # of it.
     name: Incremental (push diff)
-    if: github.event_name == 'push'
+    needs: quiet
+    if: github.event_name == 'push' && needs.quiet.outputs.run == 'true'
     runs-on: ubuntu-latest
     env:
       # 14 GiB of the runner's 16: the runner needs the rest, and the runner script derives
@@ -92,7 +125,7 @@ jobs:
           # in gamut-av1/avif/webp need them to build a green baseline. `aom`/`dav1d` are
           # `update = none` and arrive via the explicit fetch step below, not this checkout.
           submodules: recursive
-          # Full history so the push's `before` commit is present to diff against.
+          # Full history so the base (the last clean survey's commit) is present to diff against.
           fetch-depth: 0
       - name: Install native build deps (vendored dav1d/libavif oracles; nasm is vendored)
         # Same third-party apt-source guard as ci.yml's `lint` job (issue #517): a broken
@@ -171,23 +204,22 @@ jobs:
       # them, so it pulls them explicitly. Every other submodule still arrives with the checkout.
       - name: Fetch the AV1 oracle submodules
         run: mise run fetch-av1-oracles
-      # The base is the commit master pointed at before this push, so the run scores exactly
-      # what the push added — not origin/master, which on a push *is* HEAD and diffs to nothing.
-      # The runner script takes the merge base with it itself; this step resolves it, hands it
-      # over as GAMUT_MUTANTS_BASE, and summarises the diff for a human reading the log.
-      # `before` is all zeros when the push created the ref, and absent from the clone when a
-      # force-push discarded it; both fall back to the pushed commit's first parent, which is
-      # the whole of a squash merge and the last commit of anything else.
-      - name: Resolve the push's base and summarise the changed files
+      # The base is the head of the newest push run whose every incremental shard came back clean,
+      # so the run scores everything master gained since it was last scored clean: this push, any
+      # push whose run was superseded during `quiet`, and any diff a red or pre-empted run left.
+      # Not `github.event.before` (one push only, which would leave a superseded push unscored)
+      # and not origin/master (on a push that *is* HEAD, and diffs to nothing). Without such a
+      # run in HEAD's history it falls back to `event.before`, then HEAD^ (the whole of a squash
+      # merge). The runner script takes the merge base with it itself; this step resolves it,
+      # hands it over as GAMUT_MUTANTS_BASE, and summarises the diff for a human reading the log.
+      - name: Resolve the survey's base and summarise the changed files
         env:
-          BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+          FALLBACK_BEFORE: ${{ github.event.before }}
         run: |
-          base="$BEFORE"
-          if [ -z "$base" ] || [ "$base" = 0000000000000000000000000000000000000000 ] ||
-            ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            echo "::warning::push base '$base' is not in the clone; diffing against HEAD^ instead"
-            base=$(git rev-parse HEAD^)
-          fi
+          out=$(mktemp)
+          GITHUB_OUTPUT="$out" tooling/ci-quiet/run.sh mutants-base
+          base=$(sed -n 's/^base=//p' "$out")
           echo "GAMUT_MUTANTS_BASE=$base" >> "$GITHUB_ENV"
           echo "Changed files cargo-mutants will consider (vs $base):"
           git --no-pager diff --stat "$base...HEAD"
@@ -217,7 +249,10 @@ jobs:
   # scoring some shards twice and skipping others. One job decides it; every slot reads it.
   rotation:
     name: Pick the rotation round
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: quiet
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      needs.quiet.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

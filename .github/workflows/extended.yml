@@ -208,7 +208,7 @@ jobs:
           restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: Fuzz ${{ matrix.target }}
         # Time-bounded so the job terminates: this tier is unbounded by nature, which is exactly
-        # why it is here and not in the per-PR `coverage` gate (see docs/testing.md). An hour buys
+        # why it is here and not in the `coverage` gate (see docs/testing.md). An hour buys
         # roughly 30 million executions at the throughput measured locally (~9k/s).
         #
         # A crash found here is minimised and promoted into a NAMED DETERMINISTIC TEST in the
