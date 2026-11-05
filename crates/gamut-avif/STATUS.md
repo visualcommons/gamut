@@ -459,7 +459,7 @@ propagating its error rather than being silently re-encoded.
 | `Av1EncodeRequest`: `#[non_exhaustive]`, private fields + getters, carries the derived `base_q_idx` | (crate API) | ✅ | #274 |
 | `AvifEncoder::push_backend` registry (`Arc<Mutex<…>>`; `Clone` **shares** backends) | (crate API) | ✅ | #274 |
 | Fallback contract: push order, decline-only fall-through, `gamut-av1` tail, error propagation | #241 | ✅ | #274 |
-| `AbiAv1StillEncoder` adapter over `gamut_codec_abi::Encoder` (codec id `av01`, `base_q_idx` in `extra[0]`; a non-`Thorough` `Speed` discriminant in `extra[1]`, #654) | #272 | ✅ (8, 10 and 12-bit — `encode_still16` lowers `Planar16` as native-endian `u16` planes with the coded depth in `ImageDesc::depth` and **byte** strides) | #274 |
+| `AbiAv1StillEncoder` adapter over `gamut_codec_abi::Encoder` (codec id `av01`, `base_q_idx` in `extra[0]`; a non-`Thorough` `Speed` discriminant in `extra[1]`, #654) | #272 | ✅ (8, 10 and 12-bit — `encode_still16` lowers `Planar16` as native-endian `u16` planes with the coded depth in `ImageDesc::bit_depth` and **byte** strides) | #274 |
 | `av1C`/`colr` re-derived from a backend stream's sequence header (§2.3.4 consistency) | AV1-ISOBMFF §2.3.4 | ✅ | #274 |
 | Byte-identical default output with no pushed backend (the 1.0 additivity guarantee) | (crate API) | ✅ | #274 |
 | Typed decode trait `Av1StillDecoder` (`decode_still` → `DecodedFrame`) | (crate API) | ✅ | #250 |

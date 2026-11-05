@@ -7,8 +7,8 @@
 //! often better served by a platform or reference codec. This crate defines the **call shape** and
 //! the **fallback contract** for that seam so every format crate wires backends the same way:
 //!
-//! - Backends are held in a host-owned registry, tried in **push order**; a software fallback (when
-//!   a crate ships one) is the implicit tail, tried last.
+//! - Backends are held in a host-owned [`Registry`] (behind the `std` feature), tried in **push
+//!   order**; a software fallback (when a crate ships one) is the implicit tail, tried last.
 //! - [`Decoder::supports`] / [`Encoder::supports`] returning `false` (or the C
 //!   [`Status::UNSUPPORTED`]) is the **only** signal that lets the host fall through to the next
 //!   backend. Any other outcome is terminal.
@@ -30,12 +30,20 @@
 //! The [`bridge`] module converts between the two: [`bridge::ForeignDecoder`] /
 //! [`bridge::ForeignEncoder`] adapt a C vtable *into* a Rust twin (C → Rust), and
 //! [`bridge::lower_decoder`] / [`bridge::lower_encoder`] expose a boxed Rust twin *as* a C vtable
-//! (Rust → C). Those adapters are the crate's only `unsafe`.
+//! (Rust → C). Those adapters, together with [`StreamConfig::extradata`] (defined there), are the
+//! crate's only `unsafe`: everything outside [`bridge`] is `deny(unsafe_code)`.
+//!
+//! # Identifiers
+//!
+//! - [`codec_id`] builds a [`StreamConfig::codec_id`] / [`EncodeConfig::codec_id`] from a FourCC,
+//!   **big-endian** (the first character is the most significant byte).
+//! - [`pixel_format`] defines the [`ImageDesc::pixel_format`] tag namespace.
 //!
 //! # Scope and design notes
 //!
 //! - **`#![no_std]`, dependency-free.** The seam is pure interface: primitive fields, raw pointers,
-//!   and function pointers only. `alloc` is pulled in solely for the `Box`-based [`bridge`] lowering.
+//!   and function pointers only. `alloc` is pulled in for the `Box`-based [`bridge`] lowering; the
+//!   opt-in `std` feature adds the lock-based [`Registry`] and nothing else.
 //! - **No `Send` supertrait.** [`Decoder`] / [`Encoder`] are deliberately *not* `Send`; a host binds
 //!   `Send` at the point it inserts a backend into a registry, so single-threaded backends stay
 //!   usable. The C → Rust adapters offer an `unsafe` constructor by which the caller *asserts*
@@ -45,6 +53,7 @@
 //!   `gamut_heic::HevcDecoder` precedent (single object-safe method, borrowed bytes in, owned plain
 //!   data out).
 #![no_std]
+#![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 // Compiles README.md's code blocks as doctests; exists only while rustdoc collects them.
@@ -53,10 +62,23 @@
 struct ReadmeDoctests;
 
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
+#[expect(
+    unsafe_code,
+    reason = "the C ⇄ Rust adapters dereference foreign vtables and raw descriptor pointers; \
+              `bridge` is the one module the crate confines that to"
+)]
 pub mod bridge;
+pub mod pixel_format;
+#[cfg(feature = "std")]
+mod registry;
 
 use core::ffi::c_void;
+
+#[cfg(feature = "std")]
+pub use registry::{Registry, RegistryError};
 
 /// The ABI revision this crate defines.
 ///
@@ -70,6 +92,16 @@ pub const ABI_VERSION: u32 = 1;
 /// Four covers every gamut pixel layout (interleaved RGBA is one plane; the widest planar YCbCr +
 /// alpha case is four). Fixed so [`ImageDesc`] stays a flat `repr(C)` struct with no indirection.
 pub const MAX_PLANES: usize = 4;
+
+/// Builds a codec identifier from a FourCC, **big-endian**: `fourcc[0]` is the most significant
+/// byte, so `codec_id(*b"av01")` is `0x6176_3031` and its `to_be_bytes()` spell `av01` again.
+///
+/// The one byte order every [`StreamConfig::codec_id`] / [`EncodeConfig::codec_id`] and every
+/// FourCC-named [`pixel_format`] tag uses, so a host and a backend built apart agree on the value.
+#[must_use]
+pub const fn codec_id(fourcc: [u8; 4]) -> u32 {
+    u32::from_be_bytes(fourcc)
+}
 
 /// A backend result code, `repr(transparent)` over `i32` so it round-trips a C `int`.
 ///
@@ -110,7 +142,7 @@ pub struct StreamConfig {
     /// `size_of::<StreamConfig>()` as written by the producer; the ABI version guard for this
     /// descriptor. See [`StreamConfig::is_abi_current`].
     pub struct_size: usize,
-    /// Host/backend-agreed codec identifier (e.g. a FourCC or an enum discriminant).
+    /// Codec identifier: a FourCC built by [`codec_id`] (big-endian).
     pub codec_id: u32,
     /// Coded width in pixels.
     pub width: u32,
@@ -147,19 +179,6 @@ impl StreamConfig {
     pub const fn is_abi_current(&self) -> bool {
         self.struct_size == core::mem::size_of::<Self>()
     }
-
-    /// Borrows the extradata as a byte slice, or an empty slice when absent.
-    ///
-    /// # Safety
-    ///
-    /// If [`extradata_len`](Self::extradata_len) is non-zero, [`extradata`](Self::extradata) must
-    /// point to at least that many initialized bytes that stay valid for `'a`.
-    #[must_use]
-    pub unsafe fn extradata(&self) -> &[u8] {
-        // SAFETY: delegated to this fn's contract; the null/zero case yields an empty slice without
-        // dereferencing.
-        unsafe { bytes(self.extradata, self.extradata_len) }
-    }
 }
 
 /// Describes an encode job to an encoder backend: the target codec, a quality knob, and an opaque
@@ -172,7 +191,7 @@ pub struct EncodeConfig {
     /// `size_of::<EncodeConfig>()` as written by the producer; the ABI version guard for this
     /// descriptor. See [`EncodeConfig::is_abi_current`].
     pub struct_size: usize,
-    /// Host/backend-agreed codec identifier (e.g. a FourCC or an enum discriminant).
+    /// Codec identifier: a FourCC built by [`codec_id`] (big-endian).
     pub codec_id: u32,
     /// Quality target on a `0..=100` scale (higher is better quality / larger output); a backend
     /// clamps out-of-range values.
@@ -218,15 +237,14 @@ pub struct ImageDesc {
     /// `size_of::<ImageDesc>()` as written by the producer; the ABI version guard for this
     /// descriptor. See [`ImageDesc::is_abi_current`].
     pub struct_size: usize,
-    /// Host/backend-agreed pixel-format tag (mirrors `gamut_core::PixelFormat`'s discriminants at
-    /// the wiring layer; kept a plain `u32` here to keep this crate dependency-free).
+    /// Pixel-format tag from the [`pixel_format`] namespace.
     pub pixel_format: u32,
     /// Image width in pixels.
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
     /// Bits per component (e.g. `8`, `16`).
-    pub depth: u32,
+    pub bit_depth: u32,
     /// Number of populated entries in [`planes`](Self::planes) / [`strides`](Self::strides);
     /// `1..=MAX_PLANES`.
     pub plane_count: u32,
@@ -247,7 +265,7 @@ impl ImageDesc {
         pixel_format: u32,
         width: u32,
         height: u32,
-        depth: u32,
+        bit_depth: u32,
         plane_count: u32,
         planes: [*mut u8; MAX_PLANES],
         strides: [usize; MAX_PLANES],
@@ -257,7 +275,7 @@ impl ImageDesc {
             pixel_format,
             width,
             height,
-            depth,
+            bit_depth,
             plane_count,
             planes,
             strides,
@@ -441,20 +459,5 @@ impl<E: Encoder + ?Sized> Encoder for &mut E {
         sink: &mut dyn FnMut(&[u8]) -> Status,
     ) -> Status {
         (**self).encode(cfg, image, sink)
-    }
-}
-
-/// Borrows `len` bytes at `ptr`, or an empty slice when `len == 0` (so a null `ptr` with zero length
-/// is safe).
-///
-/// # Safety
-///
-/// When `len != 0`, `ptr` must point to at least `len` initialized bytes valid for `'a`.
-unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
-    if len == 0 {
-        &[]
-    } else {
-        // SAFETY: guaranteed by this fn's contract for the non-empty case.
-        unsafe { core::slice::from_raw_parts(ptr, len) }
     }
 }

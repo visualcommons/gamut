@@ -16,3 +16,8 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+
+[features]
+default = []
+# The lock-based `Registry` (needs `std::sync::Mutex`); the default build stays `no_std` + alloc.
+std = []

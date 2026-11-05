@@ -36,12 +36,12 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, SequenceHeader, Speed, Subsampling};
-use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
+use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status, codec_id, pixel_format};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
     Planar16, TransferCharacteristics,
 };
-use gamut_core::{Dimensions, Error, PixelFormat, Result};
+use gamut_core::{Dimensions, Error, Result};
 
 use crate::av1c::{Av1Config, first_sequence_header};
 
@@ -49,7 +49,7 @@ use crate::av1c::{Av1Config, first_sequence_header};
 /// [`gamut_codec_abi`] backend: the big-endian `av01` FourCC — the same four bytes AV1-ISOBMFF
 /// v1.3.0 §2.2 assigns the AV1 image item type — so a backend can dispatch on the codec without a
 /// gamut-specific table.
-pub const AV1_CODEC_ID: u32 = u32::from_be_bytes(*b"av01");
+pub const AV1_CODEC_ID: u32 = codec_id(*b"av01");
 
 /// One AV1 still-encode job, as handed to an [`Av1StillEncoder`].
 ///
@@ -578,7 +578,7 @@ impl SeqHeaderParams {
 /// [`ImageDesc`] describes the two identically except in three places, and a backend reading the
 /// descriptor must honour all three:
 ///
-/// - [`ImageDesc::depth`] is the **coded** depth — `8`, `10` or `12` — never the storage width.
+/// - [`ImageDesc::bit_depth`] is the **coded** depth — `8`, `10` or `12` — never the storage width.
 /// - [`ImageDesc::strides`] are in **bytes**, so a high-bit-depth row is twice its sample count.
 /// - Above 8 bits the plane pointers address native-endian `u16` samples, **right-justified** at
 ///   the coded depth (a 10-bit sample occupies `0..=1023`, not the top ten bits of a `u16`).
@@ -658,7 +658,7 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
         let image = ImageDesc::new(
             // Three 8-bit planes in gamut's identity order (Y = G, U = B, V = R) — the planar
             // form of `PixelFormat::Rgb8`, which is what the AVIF v1 surface encodes.
-            PixelFormat::Rgb8 as u32,
+            pixel_format::RGB8,
             planes.width(),
             planes.height(),
             8,
@@ -701,8 +701,8 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
         let plane_ptr = |i: usize| planes.plane(i).as_ptr().cast::<u8>().cast_mut();
         let image = ImageDesc::new(
             // `Rgb16` rather than `Rgb8`: the samples are `u16`, and the tag is what tells a
-            // backend how wide to read before `depth` tells it how many bits carry signal.
-            PixelFormat::Rgb16 as u32,
+            // backend how wide to read before `bit_depth` tells it how many bits carry signal.
+            pixel_format::RGB16,
             planes.width(),
             planes.height(),
             // The *coded* depth (10 or 12), not the 16-bit storage width — `av1C` mirrors this and

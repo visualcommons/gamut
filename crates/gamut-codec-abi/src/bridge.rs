@@ -7,9 +7,12 @@
 //!   construction, implement the [`Decoder`] / [`Encoder`] twin by
 //!   calling through the function pointers, and run the vtable's `destroy` on drop.
 //! - **Rust → C** ([`lower_decoder`] / [`lower_encoder`]): take a `Box<dyn Decoder>` /
-//!   `Box<dyn Encoder>`, hand back a [`DecoderVTable`] /
-//!   [`EncoderVTable`] + `ctx` pointer whose function pointers dispatch into
-//!   the box, and whose `destroy` reboxes and drops it.
+//!   `Box<dyn Encoder>`, hand back a [`Lowered`] [`DecoderVTable`] / [`EncoderVTable`] + `ctx`
+//!   pointer whose function pointers dispatch into the box, and whose `destroy` reboxes and drops
+//!   it.
+//!
+//! [`StreamConfig::extradata`], the one raw-pointer read on a descriptor, is defined here too, so
+//! this module is the crate's whole `unsafe` surface.
 //!
 //! Every `unsafe` block below is justified with a `// SAFETY:` comment; the fallible constructors
 //! return `None` rather than trusting a mismatched ABI.
@@ -19,8 +22,56 @@ use core::ffi::c_void;
 
 use crate::{
     ABI_VERSION, Decoder, DecoderVTable, EncodeConfig, Encoder, EncoderVTable, ImageDesc, Status,
-    StreamConfig, WriteFn, bytes,
+    StreamConfig, WriteFn,
 };
+
+impl StreamConfig {
+    /// Borrows the extradata as a byte slice, or an empty slice when absent.
+    ///
+    /// # Safety
+    ///
+    /// If [`extradata_len`](Self::extradata_len) is non-zero, [`extradata`](Self::extradata) must
+    /// point to at least that many initialized bytes that stay valid for the borrow of `self`.
+    #[must_use]
+    pub unsafe fn extradata(&self) -> &[u8] {
+        // SAFETY: delegated to this fn's contract; the null/zero case yields an empty slice without
+        // dereferencing.
+        unsafe { bytes(self.extradata, self.extradata_len) }
+    }
+}
+
+/// Borrows `len` bytes at `ptr`, or an empty slice when `len == 0` (so a null `ptr` with zero length
+/// is safe).
+///
+/// # Safety
+///
+/// When `len != 0`, `ptr` must point to at least `len` initialized bytes valid for `'a`.
+unsafe fn bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+    if len == 0 {
+        &[]
+    } else {
+        // SAFETY: guaranteed by this fn's contract for the non-empty case.
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    }
+}
+
+/// A boxed Rust twin lowered to C: the vtable a C consumer calls plus the `ctx` it passes back.
+///
+/// Returned by [`lower_decoder`] (`Lowered<DecoderVTable>`) and [`lower_encoder`]
+/// (`Lowered<EncoderVTable>`). `ctx` **owns** the boxed twin: exactly one of two things must
+/// eventually happen to it — it is passed to the vtable's `destroy` (e.g. by wrapping the pair back
+/// up in a [`ForeignDecoder`] / [`ForeignEncoder`] and dropping that), or it is otherwise reclaimed.
+/// Dropping a `Lowered` does neither, and leaks the twin.
+///
+/// Deliberately not `Clone`/`Copy`: a copy would be a second owner of the same `ctx`, and running
+/// `destroy` through both is a double free.
+#[must_use = "`ctx` owns the lowered backend and must be destroyed to avoid a leak"]
+pub struct Lowered<V> {
+    /// The function-pointer table; its `destroy` releases [`ctx`](Self::ctx).
+    pub vtable: V,
+    /// The opaque context every call through [`vtable`](Self::vtable) receives first.
+    pub ctx: *mut c_void,
+}
 
 // ============================================================================================
 // C -> Rust: adapt a foreign vtable into a Rust twin.
@@ -188,15 +239,15 @@ unsafe impl Send for ForeignEncoder {}
 /// Lowers a boxed Rust [`Decoder`] to a C [`DecoderVTable`] + `ctx` pointer a C consumer can call
 /// (Rust → C).
 ///
-/// The returned `ctx` owns the decoder; the vtable's `destroy` reboxes and drops it. Exactly one of
-/// two things must eventually happen to `ctx`: it is passed to the vtable's `destroy` (e.g. by
-/// wrapping it back up in a [`ForeignDecoder`] and dropping that), or it is otherwise reclaimed — do
-/// not leak it.
-#[must_use = "the returned ctx owns the decoder and must be destroyed to avoid a leak"]
-pub fn lower_decoder(decoder: Box<dyn Decoder>) -> (DecoderVTable, *mut c_void) {
+/// The returned [`ctx`](Lowered::ctx) owns the decoder; the vtable's `destroy` reboxes and drops
+/// it. See [`Lowered`] for what must eventually happen to it.
+pub fn lower_decoder(decoder: Box<dyn Decoder>) -> Lowered<DecoderVTable> {
     // Double-box so the fat `Box<dyn Decoder>` lives behind a thin `*mut c_void`.
     let ctx = Box::into_raw(Box::new(decoder)) as *mut c_void;
-    (DECODER_VTABLE, ctx)
+    Lowered {
+        vtable: DECODER_VTABLE,
+        ctx,
+    }
 }
 
 /// The static vtable shared by every [`lower_decoder`] result; its `ctx` is a
@@ -245,12 +296,14 @@ unsafe extern "C" fn decoder_destroy_shim(ctx: *mut c_void) {
 /// Lowers a boxed Rust [`Encoder`] to a C [`EncoderVTable`] + `ctx` pointer a C consumer can call
 /// (Rust → C).
 ///
-/// The returned `ctx` owns the encoder; the vtable's `destroy` reboxes and drops it. As with
-/// [`lower_decoder`], `ctx` must eventually be destroyed and not leaked.
-#[must_use = "the returned ctx owns the encoder and must be destroyed to avoid a leak"]
-pub fn lower_encoder(encoder: Box<dyn Encoder>) -> (EncoderVTable, *mut c_void) {
+/// The returned [`ctx`](Lowered::ctx) owns the encoder; the vtable's `destroy` reboxes and drops
+/// it. See [`Lowered`] for what must eventually happen to it.
+pub fn lower_encoder(encoder: Box<dyn Encoder>) -> Lowered<EncoderVTable> {
     let ctx = Box::into_raw(Box::new(encoder)) as *mut c_void;
-    (ENCODER_VTABLE, ctx)
+    Lowered {
+        vtable: ENCODER_VTABLE,
+        ctx,
+    }
 }
 
 /// The static vtable shared by every [`lower_encoder`] result; its `ctx` is a

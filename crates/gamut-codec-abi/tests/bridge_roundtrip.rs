@@ -15,13 +15,15 @@ use std::sync::atomic::Ordering;
 use common::{
     BACKEND_FAILURE, SINK_ABORT, TEST_CODEC, counted_decoder, counted_encoder, one_plane,
 };
-use gamut_codec_abi::bridge::{ForeignDecoder, ForeignEncoder, lower_decoder, lower_encoder};
+use gamut_codec_abi::bridge::{
+    ForeignDecoder, ForeignEncoder, Lowered, lower_decoder, lower_encoder,
+};
 use gamut_codec_abi::{Decoder, EncodeConfig, Encoder, Status, StreamConfig};
 
 #[test]
 fn a_lowered_decoder_delegates_supports_across_the_vtable() {
     let (_destroyed, decoder) = counted_decoder();
-    let (vtable, ctx) = lower_decoder(decoder);
+    let Lowered { vtable, ctx } = lower_decoder(decoder);
     // SAFETY: `vtable`/`ctx` come from `lower_decoder`, and `vtable` (declared first) outlives
     // `foreign`; the boxed decoder is `Send`.
     let mut foreign = unsafe { ForeignDecoder::new(&vtable, ctx) }.expect("ABI version matches");
@@ -34,7 +36,7 @@ fn a_lowered_decoder_delegates_supports_across_the_vtable() {
 #[test]
 fn a_lowered_decoder_carries_the_codestream_and_config_across() {
     let (_destroyed, decoder) = counted_decoder();
-    let (vtable, ctx) = lower_decoder(decoder);
+    let Lowered { vtable, ctx } = lower_decoder(decoder);
     // SAFETY: as above.
     let mut foreign = unsafe { ForeignDecoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -56,7 +58,7 @@ fn a_lowered_decoder_carries_the_codestream_and_config_across() {
 #[test]
 fn a_lowered_decoder_propagates_a_terminal_status_verbatim() {
     let (_destroyed, decoder) = counted_decoder();
-    let (vtable, ctx) = lower_decoder(decoder);
+    let Lowered { vtable, ctx } = lower_decoder(decoder);
     // SAFETY: as above.
     let mut foreign = unsafe { ForeignDecoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -75,7 +77,7 @@ fn a_lowered_decoder_propagates_a_terminal_status_verbatim() {
 #[test]
 fn a_lowered_decoder_destroys_its_boxed_backend_exactly_once() {
     let (destroyed, decoder) = counted_decoder();
-    let (vtable, ctx) = lower_decoder(decoder);
+    let Lowered { vtable, ctx } = lower_decoder(decoder);
     // SAFETY: as above.
     let foreign = unsafe { ForeignDecoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -87,7 +89,7 @@ fn a_lowered_decoder_destroys_its_boxed_backend_exactly_once() {
 #[test]
 fn a_lowered_encoder_delegates_supports_across_the_vtable() {
     let (_destroyed, encoder) = counted_encoder();
-    let (vtable, ctx) = lower_encoder(encoder);
+    let Lowered { vtable, ctx } = lower_encoder(encoder);
     // SAFETY: `vtable` outlives `foreign` and pairs with `ctx`.
     let mut foreign = unsafe { ForeignEncoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -98,7 +100,7 @@ fn a_lowered_encoder_delegates_supports_across_the_vtable() {
 #[test]
 fn a_lowered_encoder_carries_each_chunk_across_in_order() {
     let (_destroyed, encoder) = counted_encoder();
-    let (vtable, ctx) = lower_encoder(encoder);
+    let Lowered { vtable, ctx } = lower_encoder(encoder);
     // SAFETY: as above.
     let mut foreign = unsafe { ForeignEncoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -119,7 +121,7 @@ fn a_lowered_encoder_carries_each_chunk_across_in_order() {
 #[test]
 fn a_lowered_encoder_propagates_a_sink_abort_and_stops_emitting() {
     let (_destroyed, encoder) = counted_encoder();
-    let (vtable, ctx) = lower_encoder(encoder);
+    let Lowered { vtable, ctx } = lower_encoder(encoder);
     // SAFETY: as above.
     let mut foreign = unsafe { ForeignEncoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -140,7 +142,7 @@ fn a_lowered_encoder_propagates_a_sink_abort_and_stops_emitting() {
 #[test]
 fn a_lowered_encoder_destroys_its_boxed_backend_exactly_once() {
     let (destroyed, encoder) = counted_encoder();
-    let (vtable, ctx) = lower_encoder(encoder);
+    let Lowered { vtable, ctx } = lower_encoder(encoder);
     // SAFETY: as above.
     let foreign = unsafe { ForeignEncoder::new(&vtable, ctx) }.expect("ABI version matches");
 

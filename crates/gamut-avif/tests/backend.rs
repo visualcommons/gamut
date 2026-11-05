@@ -1208,7 +1208,7 @@ impl Encoder for AbiStub {
             image.pixel_format,
             image.width,
             image.height,
-            image.depth,
+            image.bit_depth,
             image.plane_count,
             image.strides,
             first,
@@ -1586,7 +1586,7 @@ fn abi_adapter_lowers_the_requested_depth_not_a_fixed_one() {
         encode16(&encoder).unwrap_or_else(|e| panic!("{bits:?}: {e}"));
         let seen = stub.0.lock().unwrap();
         let image = seen.seen_image.expect("the adapter lowered an image");
-        assert_eq!(image.3, depth, "{bits:?}: ImageDesc::depth");
+        assert_eq!(image.3, depth, "{bits:?}: ImageDesc::bit_depth");
         // Lossless is 4:4:4, so every stride is the luma row in bytes.
         assert_eq!(
             image.5,

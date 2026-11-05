@@ -13,7 +13,7 @@ mod common;
 use core::ptr;
 
 use common::{BACKEND_FAILURE, TEST_CODEC, counted_decoder, one_plane};
-use gamut_codec_abi::bridge::{ForeignDecoder, ForeignEncoder, lower_decoder};
+use gamut_codec_abi::bridge::{ForeignDecoder, ForeignEncoder, Lowered, lower_decoder};
 use gamut_codec_abi::{
     ABI_VERSION, Decoder, DecoderVTable, EncodeConfig, Encoder, EncoderVTable, ImageDesc, Status,
     StreamConfig,
@@ -140,7 +140,7 @@ fn an_absent_encode_callback_falls_through_without_invoking_the_sink() {
 fn a_registry_tries_backends_in_push_order_until_one_supports() {
     // Backend 0 accepts only TEST_CODEC; backend 1 is the "software tail" that accepts anything.
     let (_destroyed, decoder) = counted_decoder();
-    let (vt, ctx) = lower_decoder(decoder);
+    let Lowered { vtable: vt, ctx } = lower_decoder(decoder);
     // SAFETY: `vt` outlives `picky` and pairs with `ctx`.
     let mut picky = unsafe { ForeignDecoder::new(&vt, ctx) }.expect("ABI matches");
 
@@ -174,7 +174,7 @@ fn a_registry_stops_at_the_first_backend_that_supports_the_job() {
     // The mirror of the previous test: with a job backend 0 *does* accept, the walk must stop
     // there rather than run on to the tail — otherwise push order would carry no meaning.
     let (_destroyed, decoder) = counted_decoder();
-    let (vt, ctx) = lower_decoder(decoder);
+    let Lowered { vtable: vt, ctx } = lower_decoder(decoder);
     // SAFETY: `vt` outlives `picky` and pairs with `ctx`.
     let mut picky = unsafe { ForeignDecoder::new(&vt, ctx) }.expect("ABI matches");
 

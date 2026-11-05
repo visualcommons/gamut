@@ -54,7 +54,7 @@ use std::sync::{Arc, Mutex};
 
 use gamut_codec_abi::{
     Decoder as AbiDecode, EncodeConfig, Encoder as AbiEncode, ImageDesc, MAX_PLANES, Status,
-    StreamConfig,
+    StreamConfig, codec_id,
 };
 use gamut_core::{Error, PixelFormat, Result};
 
@@ -66,7 +66,7 @@ use crate::encoder::ChromaSubsampling;
 ///
 /// It is written to [`StreamConfig::codec_id`] and [`EncodeConfig::codec_id`] by the adapters in
 /// this module, so a foreign backend registered for several formats can dispatch on it.
-pub const JPEG_CODEC_ID: u32 = u32::from_be_bytes(*b"JPEG");
+pub const JPEG_CODEC_ID: u32 = codec_id(*b"JPEG");
 
 /// The message carried by the [`backend_declined`] sentinel error.
 const DECLINED_MSG: &str = "JPEG: backend declined the stream after accepting it";
@@ -601,6 +601,24 @@ fn image_desc(width: u32, height: u32, format: PixelFormat, base: *mut u8) -> Im
     ImageDesc::new(format as u32, width, height, 8, 1, planes, strides)
 }
 
+// `format as u32` above is a `gamut_codec_abi::pixel_format` tag only while that namespace's
+// channel-layout range mirrors `PixelFormat`'s discriminants. Dependency-free `gamut-codec-abi`
+// cannot see `PixelFormat` to check this itself, so the crate that relies on it does, at build time.
+const _: () = {
+    use gamut_codec_abi::pixel_format as tag;
+    assert!(PixelFormat::Gray8 as u32 == tag::GRAY8);
+    assert!(PixelFormat::Bilevel as u32 == tag::BILEVEL);
+    assert!(PixelFormat::Indexed8 as u32 == tag::INDEXED8);
+    assert!(PixelFormat::Rgb8 as u32 == tag::RGB8);
+    assert!(PixelFormat::Rgba8 as u32 == tag::RGBA8);
+    assert!(PixelFormat::Cmyk8 as u32 == tag::CMYK8);
+    assert!(PixelFormat::GrayAlpha8 as u32 == tag::GRAY_ALPHA8);
+    assert!(PixelFormat::Gray16 as u32 == tag::GRAY16);
+    assert!(PixelFormat::Rgb16 as u32 == tag::RGB16);
+    assert!(PixelFormat::Rgba16 as u32 == tag::RGBA16);
+    assert!(PixelFormat::GrayAlpha16 as u32 == tag::GRAY_ALPHA16);
+};
+
 /// Adapts a [`gamut_codec_abi::Decoder`] — a foreign C backend reached through
 /// [`gamut_codec_abi::bridge::ForeignDecoder`], or any Rust implementation of the shared twin — into
 /// a [`JpegStreamDecoder`].
@@ -886,7 +904,7 @@ mod tests {
         let desc = image_desc(4, 2, PixelFormat::Rgb8, base);
         assert_eq!(desc.pixel_format, PixelFormat::Rgb8 as u32);
         assert_eq!((desc.width, desc.height), (4, 2));
-        assert_eq!(desc.depth, 8);
+        assert_eq!(desc.bit_depth, 8);
         assert_eq!(desc.plane_count, 1);
         assert_eq!(desc.planes[0], base);
         assert_eq!(desc.strides[0], 12);

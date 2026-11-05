@@ -17,7 +17,12 @@ module.
   forward-compatible field growth.
 - **Bridges** (the crate's only `unsafe`) — `bridge::ForeignDecoder` / `bridge::ForeignEncoder`
   adapt a C vtable *into* a Rust twin (C → Rust); `bridge::lower_decoder` / `bridge::lower_encoder`
-  expose a boxed Rust twin *as* a C vtable (Rust → C).
+  expose a boxed Rust twin *as* a C vtable (Rust → C), returned as a `bridge::Lowered` vtable +
+  `ctx` pair.
+- **Identifiers** — `codec_id(*b"av01")` builds a big-endian FourCC codec id, and the
+  `pixel_format` module defines the `ImageDesc::pixel_format` tag namespace.
+- **`Registry<T>`** (`std` feature) — the push-order backend list every format crate holds its
+  pushed backends in, implementing the fallback contract below once.
 
 ## Fallback contract
 

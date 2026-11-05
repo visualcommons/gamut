@@ -327,7 +327,7 @@ impl AbiEncoderTrait for AbiFixture {
             .store(cfg.quality as usize, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(image.width, 16);
         assert_eq!(image.height, 16);
-        assert_eq!(image.depth, 8);
+        assert_eq!(image.bit_depth, 8);
         sink(&self.stream)
     }
 }
