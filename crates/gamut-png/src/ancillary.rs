@@ -37,8 +37,8 @@
 use gamut_core::{Error, Result};
 use gamut_deflate::{DeflateEncoder, Level};
 
+use crate::carry::MetadataNotice;
 use crate::decoded::{Background, Cicp, ModificationTime, PhysicalDimensions, XMP_KEYWORD};
-use crate::encoder::MetadataNotice;
 use crate::{ColorType, chunk};
 
 /// The rendering intent for an `sRGB` chunk (PNG spec §11.3.2.5).

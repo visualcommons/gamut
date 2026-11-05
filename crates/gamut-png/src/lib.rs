@@ -85,12 +85,14 @@ mod abi;
 mod adam7;
 mod ancillary;
 mod backend;
+mod carry;
 mod chunk;
 mod color;
 mod crc32;
 mod decoded;
 mod decoder;
 mod deconstruct;
+mod effort;
 mod encoder;
 mod filter;
 mod ihdr;
@@ -109,6 +111,7 @@ mod typed;
 pub use abi::{AbiZlibDeflater, AbiZlibInflater, PIXEL_FORMAT_FILTERED_BYTES, ZLIB_CODEC_ID};
 pub use ancillary::{PhysicalUnit, SrgbIntent};
 pub use backend::{IdatInfo, ZlibDeflater, ZlibInflater};
+pub use carry::MetadataNotice;
 pub use chunk::{
     C2PA_NOT_VALIDATED, C2paSpan, C2paSummary, C2paUnreadChunk, C2paUnreadReason, c2pa_summary,
     fill_c2pa,
@@ -123,7 +126,8 @@ pub use deconstruct::{
     ChunkStats, DEFAULT_MAX_CHUNKS, DeconstructLimits, FilterHistogram, FilterScan, PassStats,
     PngReport, Segment, SegmentKind, SkippedFilterScan, deconstruct, deconstruct_with_limits,
 };
-pub use encoder::{Effort, MetadataNotice, PngEncodeReport, PngEncoder};
+pub use effort::Effort;
+pub use encoder::{PngEncodeReport, PngEncoder};
 pub use filter::{FilterStrategy, FilterType};
 /// The workspace's shared vocabulary, accepted by [`PngDecoder::with_limits`],
 /// [`PngDecoder::with_convert_policy`] and [`PngEncoder::encode_indexed8`] (and returned in
