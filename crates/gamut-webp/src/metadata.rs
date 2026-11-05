@@ -490,6 +490,39 @@ mod typed {
         }
 
         #[test]
+        fn an_iptc_iim_stream_is_reported_before_a_manifest_store() {
+            // Both unembeddable carriers present: the IPTC-IIM refusal is the one returned.
+            let mut both = EncodedMetadata::default();
+            both.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
+            both.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
+            let err = WebpEncoder::lossless()
+                .with_encoded_metadata(&both)
+                .unwrap_err();
+            assert_eq!(
+                err.static_message(),
+                Some("WebP: IPTC-IIM has no RIFF chunk")
+            );
+        }
+
+        #[test]
+        fn a_writable_carrier_does_not_bypass_the_manifest_store_refusal() {
+            // An EXIF stream beside a C2PA store still fails the whole call: the refusal is
+            // decided before any carrier is routed, so no encoder with only the EXIF applied is
+            // handed back.
+            let mut both = EncodedMetadata::default();
+            both.exif = Some(b"Exif\0\0MM\0*\0\0\0\x08".to_vec());
+            both.c2pa = Some(b"\0\0\0\x08jumb".to_vec());
+            let err = WebpEncoder::lossless()
+                .with_encoded_metadata(&both)
+                .unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::Unsupported);
+            assert_eq!(
+                err.static_message(),
+                Some("WebP: a C2PA manifest store is not embedded from metadata blocks")
+            );
+        }
+
+        #[test]
         fn a_model_that_does_not_serialize_is_invalid_input_with_the_facade_detail() {
             // An ICC model with a duplicate tag signature is rejected by `gamut-icc`'s writer
             // (ICC.1:2022 §7.3).

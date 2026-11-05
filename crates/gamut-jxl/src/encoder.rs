@@ -705,6 +705,46 @@ mod tests {
         assert_eq!(err.detail(), Some("ICC: icc: duplicate tag signature"));
     }
 
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn an_iptc_iim_stream_is_reported_before_a_manifest_store() {
+        // Both unwritable carriers present: the IPTC-IIM refusal is the one returned.
+        let mut both = gamut_metadata::EncodedMetadata::default();
+        both.iptc_iim = Some(vec![0x1c, 0x02, 0x05]);
+        both.c2pa = Some(vec![0u8; 4]);
+        let err = JxlEncoder::new().with_encoded_metadata(&both).unwrap_err();
+        assert_eq!(
+            err.static_message(),
+            Some("JXL: IPTC-IIM has no container carrier")
+        );
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_writable_carrier_does_not_bypass_the_manifest_store_refusal() {
+        // An EXIF stream beside a C2PA store still fails the whole call: the refusal is decided
+        // before any carrier is routed, so no encoder with only the EXIF applied is handed back.
+        let mut both = gamut_metadata::EncodedMetadata::default();
+        both.exif = Some(b"Exif\0\0MM\0*\0\0\0\x08".to_vec());
+        both.c2pa = Some(vec![0u8; 4]);
+        let err = JxlEncoder::new().with_encoded_metadata(&both).unwrap_err();
+        assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(
+            err.static_message(),
+            Some("JXL: C2PA manifest store (jumb box) embedding is not supported")
+        );
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_bare_exif_stream_is_routed_unchanged() {
+        // `strip_prefix` must not eat a stream that never carried the `Exif\0\0` signature.
+        let mut bare = gamut_metadata::EncodedMetadata::default();
+        bare.exif = Some(b"MM\0*\0\0\0\x08".to_vec());
+        let enc = JxlEncoder::new().with_encoded_metadata(&bare).unwrap();
+        assert_eq!(enc.exif(), bare.exif.as_deref());
+    }
+
     /// Facade blocks carrying only the ICC profile `icc`.
     #[cfg(feature = "metadata")]
     fn icc_blocks(icc: &[u8]) -> gamut_metadata::EncodedMetadata {

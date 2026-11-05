@@ -759,6 +759,26 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn blocks_expose_each_located_payload_in_facade_form() {
+        use gamut_metadata::{MetadataBlock, TypedMetadata};
+        let meta = JxlMetadata {
+            exif: Some(b"II*\0".to_vec()),
+            xmp: Some(b"<x:xmpmeta/>".to_vec()),
+            icc: Some(vec![7u8; 4]),
+        };
+        assert_eq!(
+            meta.blocks().unwrap(),
+            vec![
+                MetadataBlock::Exif(b"II*\0"),
+                MetadataBlock::Xmp(b"<x:xmpmeta/>"),
+                MetadataBlock::Icc(&[7u8; 4]),
+            ]
+        );
+        assert!(JxlMetadata::default().blocks().unwrap().is_empty());
+    }
+
     #[test]
     fn new_and_default_are_equal_and_configuration_compares() {
         assert_eq!(JxlDecoder::new(), JxlDecoder::default());
