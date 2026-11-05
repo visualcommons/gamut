@@ -38,7 +38,7 @@
 
 use gamut_codec_abi::{
     Decoder as AbiDecoder, EncodeConfig, Encoder as AbiEncoder, ImageDesc, MAX_PLANES, Status,
-    StreamConfig,
+    StreamConfig, codec_id,
 };
 use gamut_core::{Error, Result};
 
@@ -53,7 +53,7 @@ use crate::config::{ColorSpec, FrameSettings, ModularMode, Orientation};
 ///
 /// A backend registered for JPEG XL matches on this value; it is a permanent part of the wire
 /// contract and never changes.
-pub const JXL_CODEC_ID: u32 = u32::from_be_bytes(*b"jxl ");
+pub const JXL_CODEC_ID: u32 = codec_id(*b"jxl ");
 
 /// The quality value [`EncodeConfig`] carries for a mathematically lossless job.
 const LOSSLESS_QUALITY: u32 = 100;
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(desc.pixel_format, PixelFormat::Rgba8 as u32);
         assert_eq!(desc.width, 4);
         assert_eq!(desc.height, 2);
-        assert_eq!(desc.depth, 8);
+        assert_eq!(desc.bit_depth, 8);
         assert_eq!(desc.plane_count, 1);
         assert_eq!(desc.strides[0], 16);
         assert_eq!(desc.strides[1], 0);
@@ -487,7 +487,7 @@ mod tests {
         let image = JxlImageRef::new(PixelFormat::Rgb16, dims, JxlSamples::U16(&wide)).unwrap();
         let desc = image_desc(&image, 10);
         assert_eq!(desc.strides[0], 24);
-        assert_eq!(desc.depth, 10);
+        assert_eq!(desc.bit_depth, 10);
     }
 
     /// An ABI encoder that answers `supports` from a flag and `encode` with a fixed status,

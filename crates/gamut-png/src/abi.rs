@@ -25,14 +25,15 @@
 //! sub-byte packing stay crate-side. So the descriptor carries the *whole* filtered stream as a
 //! **single plane of one row** — `plane_count = 1`, `strides[0] = raw_len` — because Adam7 makes
 //! per-row lengths non-uniform and a backend has no use for them anyway. `width` / `height` /
-//! `depth` are still filled from IHDR so a backend can size its work, and `pixel_format` is
+//! `bit_depth` are still filled from IHDR so a backend can size its work, and `pixel_format` is
 //! [`PIXEL_FORMAT_FILTERED_BYTES`].
 //!
 //! A decoder backend must fill exactly [`IdatInfo::raw_len`] bytes — PNG always knows the inflated
 //! size ahead of time — and the host still re-checks that against its cap.
 
 use gamut_codec_abi::{
-    Decoder, EncodeConfig, Encoder, ImageDesc, MAX_PLANES, Status, StreamConfig,
+    Decoder, EncodeConfig, Encoder, ImageDesc, MAX_PLANES, Status, StreamConfig, codec_id,
+    pixel_format,
 };
 use gamut_core::{Error, Result};
 
@@ -42,14 +43,14 @@ use crate::backend::{IdatDeflater, IdatInflater, IdatInfo};
 ///
 /// A PNG codestream is a zlib stream (RFC 1950 over DEFLATE), so both the decode and encode
 /// descriptors carry this id; a backend matches on it to recognise the job.
-pub const CODEC_ID_ZLIB: u32 = u32::from_be_bytes(*b"zlib");
+pub const CODEC_ID_ZLIB: u32 = codec_id(*b"zlib");
 
-/// The [`ImageDesc::pixel_format`] tag used across this seam.
+/// The [`ImageDesc::pixel_format`] tag used across this seam: the namespace's
+/// [`OPAQUE_BYTES`](pixel_format::OPAQUE_BYTES) (`u32::MAX`).
 ///
-/// Deliberately **not** a [`gamut_core::PixelFormat`] discriminant: the bytes are the filtered
-/// scanline stream (filter byte + packed samples per row), not pixels in any layout. `u32::MAX`
-/// keeps it unambiguously outside that enum's range for all time.
-pub const PIXEL_FORMAT_FILTERED_BYTES: u32 = u32::MAX;
+/// Deliberately **not** a pixel layout: the bytes are the filtered scanline stream (filter byte +
+/// packed samples per row), not pixels in any layout, and their meaning is [`CODEC_ID_ZLIB`]'s.
+pub const PIXEL_FORMAT_FILTERED_BYTES: u32 = pixel_format::OPAQUE_BYTES;
 
 /// The error a non-OK, non-`UNSUPPORTED` status becomes. Terminal: the host propagates it.
 fn backend_failed() -> Error {

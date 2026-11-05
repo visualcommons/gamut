@@ -420,7 +420,7 @@ impl Decoder for AbiProbe {
             out.pixel_format,
             out.width,
             out.height,
-            out.depth,
+            out.bit_depth,
             out.plane_count,
             out.strides,
         ));

@@ -16,7 +16,9 @@ use core::ptr;
 use std::sync::atomic::Ordering;
 
 use common::{TEST_CODEC, counted_decoder, counted_encoder, one_plane};
-use gamut_codec_abi::bridge::{ForeignDecoder, ForeignEncoder, lower_decoder, lower_encoder};
+use gamut_codec_abi::bridge::{
+    ForeignDecoder, ForeignEncoder, Lowered, lower_decoder, lower_encoder,
+};
 use gamut_codec_abi::{Decoder, EncodeConfig, Encoder, ImageDesc, Status, StreamConfig};
 
 /// A per-job adapter: generic over the backend and taking it **by value**, the shape that forces
@@ -52,7 +54,7 @@ fn encode_one_job<E: Encoder>(
 #[test]
 fn a_borrowed_decoder_forwards_supports_and_decode_to_its_owner() {
     let (_destroyed, decoder) = counted_decoder();
-    let (vtable, ctx) = lower_decoder(decoder);
+    let Lowered { vtable, ctx } = lower_decoder(decoder);
     // SAFETY: `vtable` outlives `owned` and pairs with `ctx`.
     let mut owned = unsafe { ForeignDecoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -72,7 +74,7 @@ fn a_borrowed_decoder_forwards_supports_and_decode_to_its_owner() {
 #[test]
 fn a_borrowed_decoder_forwards_a_rejection_rather_than_accepting_for_its_owner() {
     let (_destroyed, decoder) = counted_decoder();
-    let (vtable, ctx) = lower_decoder(decoder);
+    let Lowered { vtable, ctx } = lower_decoder(decoder);
     // SAFETY: as above.
     let mut owned = unsafe { ForeignDecoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -88,7 +90,7 @@ fn a_borrowed_decoder_forwards_a_rejection_rather_than_accepting_for_its_owner()
 #[test]
 fn lending_a_decoder_does_not_destroy_it() {
     let (destroyed, decoder) = counted_decoder();
-    let (vtable, ctx) = lower_decoder(decoder);
+    let Lowered { vtable, ctx } = lower_decoder(decoder);
     // SAFETY: as above.
     let mut owned = unsafe { ForeignDecoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -111,7 +113,7 @@ fn lending_a_decoder_does_not_destroy_it() {
 #[test]
 fn a_borrowed_encoder_forwards_supports_and_encode_to_its_owner() {
     let (_destroyed, encoder) = counted_encoder();
-    let (vtable, ctx) = lower_encoder(encoder);
+    let Lowered { vtable, ctx } = lower_encoder(encoder);
     // SAFETY: `vtable` outlives `owned` and pairs with `ctx`.
     let mut owned = unsafe { ForeignEncoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -131,7 +133,7 @@ fn a_borrowed_encoder_forwards_supports_and_encode_to_its_owner() {
 #[test]
 fn a_borrowed_encoder_forwards_a_rejection_rather_than_accepting_for_its_owner() {
     let (_destroyed, encoder) = counted_encoder();
-    let (vtable, ctx) = lower_encoder(encoder);
+    let Lowered { vtable, ctx } = lower_encoder(encoder);
     // SAFETY: as above.
     let mut owned = unsafe { ForeignEncoder::new(&vtable, ctx) }.expect("ABI version matches");
 
@@ -146,7 +148,7 @@ fn a_borrowed_encoder_forwards_a_rejection_rather_than_accepting_for_its_owner()
 #[test]
 fn lending_an_encoder_does_not_destroy_it() {
     let (destroyed, encoder) = counted_encoder();
-    let (vtable, ctx) = lower_encoder(encoder);
+    let Lowered { vtable, ctx } = lower_encoder(encoder);
     // SAFETY: as above.
     let mut owned = unsafe { ForeignEncoder::new(&vtable, ctx) }.expect("ABI version matches");
 

@@ -164,7 +164,7 @@ typedef struct GamutEncodeConfig {
    */
   size_t struct_size;
   /**
-   * Host/backend-agreed codec identifier (e.g. a FourCC or an enum discriminant).
+   * Codec identifier: a FourCC built by [`codec_id`] (big-endian).
    */
   uint32_t codec_id;
   /**
@@ -199,8 +199,7 @@ typedef struct GamutImageDesc {
    */
   size_t struct_size;
   /**
-   * Host/backend-agreed pixel-format tag (mirrors `gamut_core::PixelFormat`'s discriminants at
-   * the wiring layer; kept a plain `u32` here to keep this crate dependency-free).
+   * Pixel-format tag from the [`pixel_format`] namespace.
    */
   uint32_t pixel_format;
   /**
@@ -214,7 +213,7 @@ typedef struct GamutImageDesc {
   /**
    * Bits per component (e.g. `8`, `16`).
    */
-  uint32_t depth;
+  uint32_t bit_depth;
   /**
    * Number of populated entries in [`planes`](Self::planes) / [`strides`](Self::strides);
    * `1..=MAX_PLANES`.
@@ -290,7 +289,7 @@ typedef struct GamutStreamConfig {
    */
   size_t struct_size;
   /**
-   * Host/backend-agreed codec identifier (e.g. a FourCC or an enum discriminant).
+   * Codec identifier: a FourCC built by [`codec_id`] (big-endian).
    */
   uint32_t codec_id;
   /**

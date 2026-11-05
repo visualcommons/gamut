@@ -21,7 +21,7 @@
 //! - There is **no implicit software tail**: gamut ships no in-tree HEVC codestream decoder (issue
 //!   #18). An empty registry, or one where every backend declines, returns [`Error::Unsupported`].
 
-use gamut_codec_abi::{Decoder, ImageDesc, MAX_PLANES, StreamConfig};
+use gamut_codec_abi::{Decoder, ImageDesc, MAX_PLANES, StreamConfig, codec_id, pixel_format};
 use gamut_core::{Dimensions, Error, Result};
 
 use crate::{ChromaFormat, DecodedFrame, HevcConfig, HevcDecoder};
@@ -31,7 +31,7 @@ use crate::{ChromaFormat, DecodedFrame, HevcConfig, HevcDecoder};
 ///
 /// A backend keyed on FourCCs can compare against this constant directly; the value is a permanent
 /// part of the seam's wire contract and never changes.
-pub const HEVC_CODEC_ID: u32 = u32::from_be_bytes(*b"hvc1");
+pub const HEVC_CODEC_ID: u32 = codec_id(*b"hvc1");
 
 /// The [`Error::Unsupported`] message a backend returns to decline a codestream **after** its
 /// [`HevcDecoder::supports`] already said `true` — the "late decline".
@@ -204,14 +204,14 @@ pub struct AbiHevcDecoder<D> {
 /// FourCC of the chroma layout — `Y800`, `I420`, `I422`, or `I444`.
 ///
 /// Samples are **always** `u16` in native byte order regardless of the coded bit depth (matching
-/// [`DecodedFrame`]'s uniform plane type); [`ImageDesc::depth`] carries the real bit depth.
+/// [`DecodedFrame`]'s uniform plane type); [`ImageDesc::bit_depth`] carries the real bit depth.
 #[must_use]
 pub const fn planar_pixel_format(chroma: ChromaFormat) -> u32 {
     match chroma {
-        ChromaFormat::Monochrome => u32::from_be_bytes(*b"Y800"),
-        ChromaFormat::Yuv420 => u32::from_be_bytes(*b"I420"),
-        ChromaFormat::Yuv422 => u32::from_be_bytes(*b"I422"),
-        ChromaFormat::Yuv444 => u32::from_be_bytes(*b"I444"),
+        ChromaFormat::Monochrome => pixel_format::Y800,
+        ChromaFormat::Yuv420 => pixel_format::I420,
+        ChromaFormat::Yuv422 => pixel_format::I422,
+        ChromaFormat::Yuv444 => pixel_format::I444,
     }
 }
 

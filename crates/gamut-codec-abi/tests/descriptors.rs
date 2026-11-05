@@ -40,7 +40,7 @@ fn image_desc_new_initialises_every_field() {
     assert_eq!(desc.pixel_format, 0);
     assert_eq!(desc.width, 4);
     assert_eq!(desc.height, 2);
-    assert_eq!(desc.depth, 8);
+    assert_eq!(desc.bit_depth, 8);
     assert_eq!(desc.plane_count, 1);
     assert_eq!(desc.strides[0], 4);
     // Planes past `plane_count` stay null rather than carrying a stale pointer.
