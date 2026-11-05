@@ -121,7 +121,9 @@ pub struct PhysicalDimensions {
 }
 
 /// The time of the last image modification (tIME, §11.3.5.1, Table 26), which §11.3.5.1 says
-/// "should be" UTC. Each field is within the range Table 26 gives it.
+/// "should be" UTC. As read from a file, each field is within the range Table 26 gives it; one
+/// built with [`new`](Self::new) is not checked until
+/// [`PngEncoder::with_time`](crate::PngEncoder::with_time) writes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ModificationTime {
@@ -146,7 +148,7 @@ pub struct ModificationTime {
 /// the image against it directly: the stored value for every depth of 8 or more — the bits above
 /// the depth masked to 0, as §11.3.4.1 tells a decoder to — and, for sub-byte greyscale, which
 /// [`PngImage::Gray8`] presents scaled to 8 bits (§13.12), the background scaled by exactly the same
-/// factor. Those are also the units the encoder's `with_background_*` setters take, so a re-encode
+/// factor. Those are also the units the encoder's `with_background` takes, so a re-encode
 /// of the decoded pixels carries it unchanged.
 ///
 /// Closed: Table 22 defines exactly these three forms.
@@ -329,6 +331,46 @@ impl TextChunk {
                 self.kind,
                 TextChunkKind::International | TextChunkKind::CompressedInternational
             )
+    }
+}
+
+impl Cicp {
+    /// Code points for an RGB image: `color_primaries` and `transfer_function` from ITU-T H.273,
+    /// and whether the samples use the full value range. The matrix coefficients are 0, the only
+    /// value §11.3.2.6 allows in PNG.
+    #[must_use]
+    pub const fn new(color_primaries: u8, transfer_function: u8, full_range: bool) -> Self {
+        Self {
+            color_primaries,
+            transfer_function,
+            matrix_coefficients: 0,
+            full_range,
+        }
+    }
+}
+
+impl PhysicalDimensions {
+    /// `x_ppu` × `y_ppu` pixels per `unit`.
+    #[must_use]
+    pub const fn new(x_ppu: u32, y_ppu: u32, unit: PhysicalUnit) -> Self {
+        Self { x_ppu, y_ppu, unit }
+    }
+}
+
+impl ModificationTime {
+    /// A time from its six Table 26 fields, unchecked: see
+    /// [`PngEncoder::with_time`](crate::PngEncoder::with_time) for what happens to one outside
+    /// the table's ranges.
+    #[must_use]
+    pub const fn new(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Self {
+        Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        }
     }
 }
 

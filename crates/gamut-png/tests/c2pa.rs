@@ -15,8 +15,8 @@ use common::{
 };
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Indexed8, Rgb8, Rgba8};
 use gamut_png::{
-    PhysicalUnit, PngDecoder, PngEncoder, PngPalette, SegmentKind, SrgbIntent, deconstruct,
-    fill_c2pa,
+    Background, ModificationTime, PhysicalDimensions, PhysicalUnit, PngDecoder, PngEncoder,
+    PngPalette, SegmentKind, SrgbIntent, deconstruct, fill_c2pa,
 };
 
 /// A stand-in manifest store of `len` bytes: not all zero, no two runs alike, so a fill is
@@ -69,9 +69,9 @@ fn everything_else() -> PngEncoder {
         .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
         .with_icc_profile("Tiny", &tiny_icc_profile())
         .with_significant_bits(&[8, 8, 8, 8])
-        .with_background_rgb(0, 0, 0)
-        .with_physical_dimensions(2835, 2835, PhysicalUnit::Meter)
-        .with_time(2026, 9, 6, 1, 2, 3)
+        .with_background(Background::Rgb(0, 0, 0))
+        .with_physical_dimensions(PhysicalDimensions::new(2835, 2835, PhysicalUnit::Meter))
+        .with_time(ModificationTime::new(2026, 9, 6, 1, 2, 3))
         .with_text("Title", "placement")
         .with_compressed_text("Comment", "zlib body")
         .with_international_text("Note", "utf-8")

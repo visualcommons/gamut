@@ -11,7 +11,10 @@ use common::{
     chunk, ihdr_payload, minimal_png, png_from_chunks, tiny_exif, tiny_icc_profile, zlib,
 };
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
-use gamut_png::{PhysicalUnit, PngDecoder, PngEncoder, PngMetadata, SrgbIntent};
+use gamut_png::{
+    Background, Cicp, ModificationTime, PhysicalDimensions, PhysicalUnit, PngDecoder, PngEncoder,
+    PngMetadata, SrgbIntent,
+};
 
 /// A 2×2 RGB8 source for the encoder-driven tests.
 fn source() -> Vec<u8> {
@@ -51,7 +54,7 @@ fn every_carrier_round_trips_byte_exact() {
             .with_international_text("Title", "international title")
             .with_gamma(1.0 / 2.2)
             .with_srgb(SrgbIntent::RelativeColorimetric)
-            .with_cicp(9, 16, true)
+            .with_cicp(Cicp::new(9, 16, true))
             .with_chromaticities(
                 (0.3127, 0.3290),
                 (0.6400, 0.3300),
@@ -117,13 +120,13 @@ fn metadata_agrees_with_decode_field_for_field() {
             // comparison of two `None`s would not see a chunk wired into one walk and not the
             // other.
             .with_srgb(SrgbIntent::Perceptual)
-            .with_cicp(1, 13, true)
+            .with_cicp(Cicp::new(1, 13, true))
             // The two chunks shaped by the IHDR, which each walk has to read against its own
             // copy of the header, and the two that are not.
             .with_significant_bits(&[5, 6, 5])
-            .with_background_rgb(0, 20, 40)
-            .with_physical_dimensions(3_780, 3_780, PhysicalUnit::Meter)
-            .with_time(2026, 10, 16, 12, 34, 56)
+            .with_background(Background::Rgb(0, 20, 40))
+            .with_physical_dimensions(PhysicalDimensions::new(3_780, 3_780, PhysicalUnit::Meter))
+            .with_time(ModificationTime::new(2026, 10, 16, 12, 34, 56))
     });
 
     let meta = gamut_png::metadata(&png).unwrap();

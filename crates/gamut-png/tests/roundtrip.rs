@@ -10,7 +10,8 @@ use gamut_core::{
     ImageBuf, ImageRef, Indexed8, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_png::{
-    FilterStrategy, FilterType, Level, PngDecoder, PngEncoder, PngImage, PngPalette, SrgbIntent,
+    Background, FilterStrategy, FilterType, Level, ModificationTime, PhysicalDimensions,
+    PngDecoder, PngEncoder, PngImage, PngPalette, SrgbIntent,
 };
 
 /// Encodes `src` as `P` with `encoder`, decodes as `P`, and asserts the samples survive.
@@ -270,9 +271,13 @@ fn ancillary_pile_survives_decode() {
         .with_srgb(SrgbIntent::RelativeColorimetric)
         .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
         .with_significant_bits(&[8, 8, 8])
-        .with_background_rgb(0, 0, 0)
-        .with_physical_dimensions(2835, 2835, gamut_png::PhysicalUnit::Meter)
-        .with_time(2026, 7, 17, 1, 2, 3)
+        .with_background(Background::Rgb(0, 0, 0))
+        .with_physical_dimensions(PhysicalDimensions::new(
+            2835,
+            2835,
+            gamut_png::PhysicalUnit::Meter,
+        ))
+        .with_time(ModificationTime::new(2026, 7, 17, 1, 2, 3))
         .with_text("Title", "gamut")
         .with_compressed_text("Comment", &"squeeze ".repeat(40))
         .with_international_text("Author", "gämut")

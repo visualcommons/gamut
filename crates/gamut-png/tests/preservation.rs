@@ -15,8 +15,8 @@ mod common;
 use common::{chunk, ihdr_payload, png_from_chunks, tiny_exif, tiny_icc_profile, zlib};
 use gamut_core::{Dimensions, EncodeImage, ErrorKind, ImageRef, Rgb8};
 use gamut_png::{
-    Background, MetadataNotice, PngDecoder, PngEncoder, PngImage, PngMetadata, SrgbIntent,
-    TextChunkKind,
+    Background, MetadataNotice, ModificationTime, PngDecoder, PngEncoder, PngImage, PngMetadata,
+    SrgbIntent, TextChunkKind,
 };
 use libpng_oracle::{OracleText, OracleTextKind};
 
@@ -461,7 +461,7 @@ fn a_profile_name_no_reader_accepts_is_left_behind_with_a_notice() {
 /// Kills the time notice's path into [`PngEncoder::metadata_notices`].
 #[test]
 fn an_out_of_range_time_is_left_behind_with_a_notice() {
-    let encoder = PngEncoder::new().with_time(2026, 6, 15, 24, 0, 0);
+    let encoder = PngEncoder::new().with_time(ModificationTime::new(2026, 6, 15, 24, 0, 0));
     assert_eq!(encoder.metadata_notices(), [MetadataNotice::TimeOutOfRange]);
     assert_eq!(
         chunk_payload(&re_encoded_bytes(|_| encoder.clone()), b"tIME"),

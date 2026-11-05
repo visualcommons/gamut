@@ -1651,7 +1651,7 @@ mod tests {
         PngEncoder::new()
             .with_gamma(1.0 / 2.2)
             .with_srgb(SrgbIntent::Perceptual)
-            .with_cicp(9, 16, true)
+            .with_cicp(crate::Cicp::new(9, 16, true))
             .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
             .with_exif(&exif)
             .with_icc_profile("prof", b"not-a-real-profile-but-bytes")

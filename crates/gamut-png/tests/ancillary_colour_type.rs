@@ -23,7 +23,7 @@
 mod common;
 
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgb16, Rgba8};
-use gamut_png::PngEncoder;
+use gamut_png::{Background, PngEncoder};
 use libpng_oracle::{COLOR_GRAY, COLOR_PALETTE, COLOR_RGB, COLOR_RGBA};
 
 /// The payload of the first chunk of type `want`, or `None` if the file carries none.
@@ -164,7 +164,7 @@ fn an_rgb_background_names_the_opaque_entry_not_the_transparent_twin() {
     let png = encode_rgba(
         &encoder()
             .with_transparent_cleanup(true)
-            .with_background_rgb(0, 0, 0),
+            .with_background(Background::Rgb(0, 0, 0)),
         64,
         &src,
     );
@@ -210,7 +210,7 @@ fn a_palette_index_background_is_dropped_under_an_encoder_derived_palette() {
     // The palette wins here, but it is the encoder's palette, in the encoder's order: the
     // caller's index names an entry in a palette the caller never saw.
     let src = two_colour_rgba(64);
-    let png = encode_rgba(&encoder().with_background_index(1), 64, &src);
+    let png = encode_rgba(&encoder().with_background(Background::Index(1)), 64, &src);
 
     assert_eq!(
         written_colour_type(&png),
@@ -230,7 +230,7 @@ fn a_palette_index_background_is_dropped_when_the_unreduced_stream_wins() {
     // RGBA stream wins the race (STATUS.md's cost-model table) and the caller's index has no
     // palette to point into.
     let src = common::corpus::palette64_rgba(32);
-    let png = encode_rgba(&encoder().with_background_index(0), 32, &src);
+    let png = encode_rgba(&encoder().with_background(Background::Index(0)), 32, &src);
 
     assert_eq!(
         written_colour_type(&png),
@@ -266,7 +266,7 @@ fn an_rgb_background_becomes_that_entrys_index_when_the_palette_wins() {
     let src = two_colour_rgba(64);
     let (r, g, b) = (PAPER[0], PAPER[1], PAPER[2]);
     let png = encode_rgba(
-        &encoder().with_background_rgb(r.into(), g.into(), b.into()),
+        &encoder().with_background(Background::Rgb(r.into(), g.into(), b.into())),
         64,
         &src,
     );
@@ -310,7 +310,11 @@ fn rgba_significant_bits_become_three_under_a_palette() {
 #[test]
 fn a_grey_rgb_background_collapses_to_one_sample_under_greyscale() {
     let src = common::corpus::grey_as_rgb(32);
-    let png = encode_rgb(&encoder().with_background_rgb(77, 77, 77), 32, &src);
+    let png = encode_rgb(
+        &encoder().with_background(Background::Rgb(77, 77, 77)),
+        32,
+        &src,
+    );
 
     assert_eq!(
         written_colour_type(&png),
@@ -327,7 +331,11 @@ fn a_grey_rgb_background_collapses_to_one_sample_under_greyscale() {
 #[test]
 fn a_coloured_background_has_no_greyscale_form_and_is_dropped() {
     let src = common::corpus::grey_as_rgb(32);
-    let png = encode_rgb(&encoder().with_background_rgb(1, 2, 3), 32, &src);
+    let png = encode_rgb(
+        &encoder().with_background(Background::Rgb(1, 2, 3)),
+        32,
+        &src,
+    );
 
     assert_eq!(
         written_colour_type(&png),
@@ -360,7 +368,7 @@ fn chunks_set_for_the_written_colour_type_pass_through_unchanged() {
     let png = encode_rgba(
         &encoder()
             .with_significant_bits(&[5, 6, 5, 4])
-            .with_background_rgb(1, 2, 3),
+            .with_background(Background::Rgb(1, 2, 3)),
         side,
         &src,
     );
@@ -388,7 +396,7 @@ fn a_background_follows_a_16_to_8_demotion() {
     let image = ImageRef::<Rgb16>::new(&src, dims).expect("buffer matches dimensions");
     let mut png = Vec::new();
     encoder()
-        .with_background_rgb(20 * 257, 90 * 257, 220 * 257)
+        .with_background(Background::Rgb(20 * 257, 90 * 257, 220 * 257))
         .encode_image(image, &mut png)
         .expect("encode");
 
@@ -413,7 +421,7 @@ fn a_background_follows_sub_byte_grey_packing() {
     let encode = |grey: u16| {
         let mut png = Vec::new();
         encoder()
-            .with_background_gray(grey)
+            .with_background(Background::Gray(grey))
             .encode_image(image, &mut png)
             .expect("encode");
         png

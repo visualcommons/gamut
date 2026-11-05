@@ -26,13 +26,15 @@ use gamut_core::{
 use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::ancillary::{
-    Ancillary, C2paStore, PaletteOrigin, PhysicalUnit, SrgbIntent, WrittenHeader, WrittenPalette,
+    Ancillary, C2paStore, PaletteOrigin, SrgbIntent, WrittenHeader, WrittenPalette,
     background_entry,
 };
 use crate::backend::{Deflaters, IdatInfo, ZlibDeflater, run_deflaters};
 use crate::chunk::{self, C2paSpan, SIGNATURE};
 use crate::color::ColorType;
-use crate::decoded::{Background, PngMetadata, TextChunkKind};
+use crate::decoded::{
+    Background, Cicp, ModificationTime, PhysicalDimensions, PngMetadata, TextChunkKind,
+};
 use crate::filter::{self, FilterStrategy, FilterType};
 use crate::palette::{PaletteOrder, PngPalette};
 use crate::reduce::{self, Family, Reduced, Reductions};
@@ -793,22 +795,23 @@ impl PngEncoder {
 
     /// Records the video-signal colour space by its ITU-T H.273 code points (cICP chunk,
     /// §11.3.2.6): the colour primaries, the transfer function, and whether the samples use the
-    /// full value range.
+    /// full value range — the value [`PngMetadata::cicp`] reads back.
     ///
-    /// There is no matrix-coefficients parameter because §11.3.2.6 fixes it: "RGB is currently
-    /// the only supported color model in PNG, and as such Matrix Coefficients shall be set to 0."
+    /// §11.3.2.6 fixes the matrix coefficients: "RGB is currently the only supported color model
+    /// in PNG, and as such Matrix Coefficients shall be set to 0." [`Cicp::new`] builds code
+    /// points with that 0. Code points with any other matrix — as a non-conforming file may carry
+    /// them — are **not written**: the chunk is omitted and [`MetadataNotice::NonRgbCicp`] is
+    /// reported through [`metadata_notices`](Self::metadata_notices). Calling this again replaces
+    /// both the code points and their notice.
     ///
     /// cICP is the **highest-precedence** colour chunk (§4.3 Table 1, priority 1), so a reader
     /// that understands it ignores any `iCCP`, `sRGB`, `gAMA` and `cHRM` in the same file. Those
     /// are worth keeping alongside it as a fallback for readers that do not.
+    ///
+    /// [`Cicp::new`]: crate::Cicp::new
     #[must_use]
-    pub fn with_cicp(
-        mut self,
-        color_primaries: u8,
-        transfer_function: u8,
-        full_range: bool,
-    ) -> Self {
-        self.ancillary.cicp = Some((color_primaries, transfer_function, full_range));
+    pub fn with_cicp(mut self, cicp: Cicp) -> Self {
+        self.ancillary.set_cicp(cicp);
         self
     }
 
@@ -850,73 +853,44 @@ impl PngEncoder {
         self
     }
 
-    /// Records a greyscale background colour (bKGD chunk) for greyscale images, as a sample at the
-    /// input's bit depth.
+    /// Records a default background colour (bKGD chunk, §11.3.4.1) in the form its
+    /// [`Background`] variant names — the value [`PngMetadata::background`] reads back. Samples
+    /// are at the input's bit depth.
     ///
-    /// Emitted for the colour type actually **written**, which under
-    /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
-    /// that is lossless (to an RGB triple, or to the palette entry holding the grey), rescaled
-    /// exactly as the pixels were where auto-reduce lowers the depth (16→8, sub-byte grey), and
-    /// **omitted, without error,** where the written colour type or depth cannot carry it. See
-    /// `STATUS.md`, "Chunks that follow the race".
+    /// A [`Background::Gray`] or [`Background::Rgb`] colour is emitted for the colour type
+    /// actually **written**, which under [`with_auto_reduce`](Self::with_auto_reduce) may differ
+    /// from the input's: converted where that is lossless (grey to an RGB triple, RGB to one grey
+    /// sample where the channels agree, either to the palette entry holding the colour — an opaque
+    /// one where a transparent twin exists), rescaled exactly as the pixels were where auto-reduce
+    /// lowers the depth (16→8, sub-byte grey), and **omitted, without error,** where the written
+    /// colour type or depth cannot carry it. See `STATUS.md`, "Chunks that follow the race".
     ///
-    /// Under [`encode_indexed8`](Self::encode_indexed8) the entry holding the grey is kept by the
-    /// palette cleaning even when no pixel names it, and the chunk becomes that entry's index.
-    #[must_use]
-    pub fn with_background_gray(mut self, gray: u16) -> Self {
-        self.ancillary.bkgd = Some(gray.to_be_bytes().to_vec());
-        self
-    }
-
-    /// Records an RGB background colour (bKGD chunk) for truecolour images, as samples at the
-    /// input's bit depth.
-    ///
-    /// Emitted for the colour type actually **written**, which under
-    /// [`with_auto_reduce`](Self::with_auto_reduce) may differ from the input's: converted where
-    /// that is lossless (to one grey sample where the channels agree, or to the palette entry
-    /// holding the colour — an opaque one where a transparent twin exists), rescaled exactly as the
-    /// pixels were where auto-reduce lowers the depth, and **omitted, without error,** where the
-    /// written colour type or depth cannot carry it. See `STATUS.md`, "Chunks
-    /// that follow the race".
-    ///
-    /// Under [`encode_indexed8`](Self::encode_indexed8) the entry holding the colour is kept by the
-    /// palette cleaning even when no pixel names it, and the chunk becomes that entry's index — so
-    /// the opaque entry a transparent twin would otherwise outlive is the one you keep.
-    #[must_use]
-    pub fn with_background_rgb(mut self, red: u16, green: u16, blue: u16) -> Self {
-        let mut data = Vec::with_capacity(6);
-        data.extend_from_slice(&red.to_be_bytes());
-        data.extend_from_slice(&green.to_be_bytes());
-        data.extend_from_slice(&blue.to_be_bytes());
-        self.ancillary.bkgd = Some(data);
-        self
-    }
-
-    /// Records a palette-index background colour (bKGD chunk) for indexed images.
-    ///
-    /// The index names an entry of the palette **you** supply to
+    /// A [`Background::Index`] names an entry of the palette **you** supply to
     /// [`encode_indexed8`](Self::encode_indexed8), and is emitted only there (and only in range).
-    /// It keeps naming that entry: cleaning the palette keeps the entry and may renumber it, and
-    /// the chunk is renumbered with it, so the background written is the colour you pointed at.
     /// Under [`with_auto_reduce`](Self::with_auto_reduce) the palette, if one is written, is the
-    /// encoder's own, in an order this index never referred to, so the chunk is **omitted,
-    /// without error** — set the background as a colour ([`with_background_rgb`](Self::with_background_rgb))
-    /// to have it resolved against whatever is written. See `STATUS.md`, "Chunks that follow the
-    /// race".
+    /// encoder's own, in an order the index never referred to, so the chunk is **omitted, without
+    /// error** — set the background as a colour to have it resolved against whatever is written.
+    ///
+    /// Under [`encode_indexed8`](Self::encode_indexed8), whichever form it takes, the entry the
+    /// background names is kept by the palette cleaning even when no pixel names it, and the chunk
+    /// becomes that entry's index in the cleaned palette — so the opaque entry a transparent twin
+    /// would otherwise outlive is the one you keep.
     #[must_use]
-    pub fn with_background_index(mut self, index: u8) -> Self {
-        self.ancillary.bkgd = Some(vec![index]);
+    pub fn with_background(mut self, background: Background) -> Self {
+        self.ancillary.set_background(background);
         self
     }
 
-    /// Records the intended physical pixel dimensions (pHYs chunk).
+    /// Records the intended physical pixel dimensions (pHYs chunk, §11.3.4.3) — the value
+    /// [`PngMetadata::physical_dimensions`] reads back.
     #[must_use]
-    pub fn with_physical_dimensions(mut self, x_ppu: u32, y_ppu: u32, unit: PhysicalUnit) -> Self {
-        self.ancillary.set_physical(x_ppu, y_ppu, unit);
+    pub fn with_physical_dimensions(mut self, dimensions: PhysicalDimensions) -> Self {
+        self.ancillary.set_physical(dimensions);
         self
     }
 
-    /// Records the last-modification time (tIME chunk), in UTC.
+    /// Records the last-modification time (tIME chunk), in UTC — the value
+    /// [`PngMetadata::modification_time`] reads back.
     ///
     /// Each field must lie within the range §11.3.5.1's Table 26 gives it — month 1–12, day 1–31,
     /// hour 0–23, minute 0–59, second 0–60 (a leap second); the year is any value. A time outside
@@ -925,17 +899,8 @@ impl PngEncoder {
     /// [`metadata_notices`](Self::metadata_notices). The day is not checked against the month.
     /// Calling this again replaces both the time and its notice.
     #[must_use]
-    pub fn with_time(
-        mut self,
-        year: u16,
-        month: u8,
-        day: u8,
-        hour: u8,
-        minute: u8,
-        second: u8,
-    ) -> Self {
-        self.ancillary
-            .set_time(year, month, day, hour, minute, second);
+    pub fn with_time(mut self, time: ModificationTime) -> Self {
+        self.ancillary.set_time(time);
         self
     }
 
@@ -1077,7 +1042,7 @@ impl PngEncoder {
     ///
     /// `sBIT` and `bKGD` are shaped by the colour type, so they go through the same conversion
     /// as their setters ([`with_significant_bits`](Self::with_significant_bits),
-    /// [`with_background_gray`](Self::with_background_gray) and its siblings): emitted for the
+    /// [`with_background`](Self::with_background)): emitted for the
     /// colour type and depth actually written, and omitted, without a notice, where that header
     /// cannot carry them — the omission is decided at encode time, after the notices are read.
     /// A palette-index background ([`Background::Index`](crate::Background::Index)) names an
@@ -1100,21 +1065,10 @@ impl PngEncoder {
         if let Some(intent) = metadata.srgb {
             self = self.with_srgb(intent);
         }
-        match metadata.cicp {
-            // §11.3.2.6: "Matrix Coefficients shall be set to 0". A source chunk that says
-            // otherwise is not a conforming cICP; carrying it forward would put the same defect
-            // in the output.
-            Some(cicp) if cicp.matrix_coefficients != 0 => {
-                self.carry_notices.push(MetadataNotice::NonRgbCicp);
-            }
-            Some(cicp) => {
-                self = self.with_cicp(
-                    cicp.color_primaries,
-                    cicp.transfer_function,
-                    cicp.full_range,
-                );
-            }
-            None => {}
+        // A source chunk whose matrix coefficients are not 0 is not a conforming cICP (§11.3.2.6);
+        // `with_cicp` leaves it behind with a notice rather than carry the defect forward.
+        if let Some(cicp) = metadata.cicp {
+            self = self.with_cicp(cicp);
         }
         if metadata.c2pa.is_some() {
             self.carry_notices.push(MetadataNotice::C2paManifestStore);
@@ -1140,30 +1094,18 @@ impl PngEncoder {
         // Through the same setters a caller uses, so each is emitted for the header actually
         // written exactly as a caller-set one is (`ancillary::sbit_for` / `bkgd_for`). The read
         // side surfaces the background in the decoded pixels' units, which are the units the
-        // `with_background_*` setters take.
+        // `with_background` takes.
         if let Some(bits) = &metadata.significant_bits {
             self = self.with_significant_bits(bits);
         }
-        match metadata.background {
-            Some(Background::Gray(gray)) => self = self.with_background_gray(gray),
-            Some(Background::Rgb(red, green, blue)) => {
-                self = self.with_background_rgb(red, green, blue);
-            }
-            Some(Background::Index(index)) => self = self.with_background_index(index),
-            None => {}
+        if let Some(background) = metadata.background {
+            self = self.with_background(background);
         }
         if let Some(phys) = metadata.physical_dimensions {
-            self = self.with_physical_dimensions(phys.x_ppu, phys.y_ppu, phys.unit);
+            self = self.with_physical_dimensions(phys);
         }
         if let Some(time) = metadata.modification_time {
-            self = self.with_time(
-                time.year,
-                time.month,
-                time.day,
-                time.hour,
-                time.minute,
-                time.second,
-            );
+            self = self.with_time(time);
         }
         // The XMP packet is an ordinary annotation and goes back through the loop below, in its
         // file position and with its own chunk's framing. A packet set directly with `with_xmp`
@@ -1212,8 +1154,9 @@ impl PngEncoder {
     /// explanation is a choice the spec forces. Use
     /// [`MetadataNotice::carried`](MetadataNotice::carried) to tell the two apart.
     ///
-    /// The payload-level notices describe the last [`with_png_metadata`](Self::with_png_metadata)
-    /// call and are reset by each; the
+    /// The `cICP` notice (§11.3.2.6) comes first and belongs to the code points last given to
+    /// [`with_cicp`](Self::with_cicp), directly or by a carry. The payload-level notices describe
+    /// the last [`with_png_metadata`](Self::with_png_metadata) call and are reset by each; the
     /// per-annotation notices belong to the annotations still accumulated, so they follow the
     /// same replace-not-append rule a carry gives the text list. The ICC profile's name notice
     /// (§11.3.2.3) sits between the two and belongs to the profile last set, by
@@ -1221,7 +1164,8 @@ impl PngEncoder {
     /// (§11.3.5.1) follows it and belongs to the time last given to [`with_time`](Self::with_time).
     #[must_use]
     pub fn metadata_notices(&self) -> Vec<MetadataNotice> {
-        let mut notices = self.carry_notices.clone();
+        let mut notices: Vec<MetadataNotice> = self.ancillary.cicp_notice().into_iter().collect();
+        notices.extend(self.carry_notices.iter().copied());
         notices.extend(self.ancillary.iccp_notice());
         notices.extend(self.ancillary.time_notice());
         notices.extend(self.ancillary.text_notices());
@@ -1335,10 +1279,9 @@ impl PngEncoder {
     /// [`with_palette_order`](Self::with_palette_order) asks for another, in which case they are
     /// renumbered after cleaning and the indices follow.
     ///
-    /// "Nothing in the file names it" includes the `bKGD` background, in **whichever** of its three
-    /// forms you set it — [`with_background_index`](Self::with_background_index),
-    /// [`with_background_gray`](Self::with_background_gray) or
-    /// [`with_background_rgb`](Self::with_background_rgb). Each names an entry of the palette you
+    /// "Nothing in the file names it" includes the `bKGD` background, in **whichever** of the three
+    /// [`Background`] forms you set it in with [`with_background`](Self::with_background) — an
+    /// index, a grey level or an RGB triple. Each names an entry of the palette you
     /// supply, so that entry survives even when no pixel names it, and the chunk is written as its
     /// index in the cleaned palette. Your background keeps its colour *and* its alpha: a triple
     /// that appears both opaque and transparent resolves to the opaque entry, and it is that entry
@@ -1421,7 +1364,7 @@ impl PngEncoder {
             Some(index) => {
                 renumbered = self
                     .clone()
-                    .with_background_index(remap[usize::from(index)]);
+                    .with_background(Background::Index(remap[usize::from(index)]));
                 &renumbered
             }
             None => self,
@@ -2191,11 +2134,12 @@ mod tests {
         None
     }
 
-    /// The background builders reach the bKGD chunk, in the width the colour type requires.
+    /// The background builder reaches the bKGD chunk, in the width the colour type requires.
     ///
-    /// Both `with_background_gray` and `with_background_index` could return `Self::default()` --
-    /// discarding the caller's colour *and* every other setting made before them -- and no test
-    /// noticed (#110). `with_background_rgb` was covered; these two were not.
+    /// The grey and index forms once had setters of their own that could return
+    /// `Self::default()` -- discarding the caller's colour *and* every other setting made before
+    /// them -- and no test noticed (#110); one `with_background` now carries all three forms, and
+    /// the RGB form is pinned by `tests/ancillary_colour_type.rs`.
     ///
     /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.4.1): two bytes for
     /// greyscale, one for indexed. Asserting the bytes rather than mere presence is what
@@ -2211,7 +2155,7 @@ mod tests {
         let img = ImageRef::<Gray8>::new(&gray, Dimensions::new(4, 4).unwrap()).unwrap();
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_background_gray(0x34)
+            .with_background(Background::Gray(0x34))
             .encode_image(img, &mut png)
             .unwrap();
         assert_eq!(
@@ -2227,7 +2171,7 @@ mod tests {
         let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(200, 1).unwrap()).unwrap();
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_background_index(7)
+            .with_background(Background::Index(7))
             .encode_indexed8(img, &palette, &mut png)
             .unwrap();
         assert_eq!(find_chunk(&png, b"bKGD"), Some(vec![7]));
@@ -2323,7 +2267,7 @@ mod tests {
         let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(8, 1).unwrap()).unwrap();
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_background_index(3)
+            .with_background(Background::Index(3))
             .encode_indexed8(img, &palette, &mut png)
             .unwrap();
 
@@ -2355,7 +2299,7 @@ mod tests {
         let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(10, 1).unwrap()).unwrap();
         let mut reordered = Vec::new();
         PngEncoder::new()
-            .with_background_index(0)
+            .with_background(Background::Index(0))
             .with_palette_order(PaletteOrder::ModifiedZeng)
             .encode_indexed8(img, &palette, &mut reordered)
             .unwrap();
@@ -2442,7 +2386,7 @@ mod tests {
             let img = ImageRef::<Indexed8>::new(painted, dims).unwrap();
             let mut png = Vec::new();
             PngEncoder::new()
-                .with_background_rgb(r.into(), g.into(), b.into())
+                .with_background(Background::Rgb(r.into(), g.into(), b.into()))
                 .encode_indexed8(img, &palette, &mut png)
                 .unwrap();
 
@@ -2477,7 +2421,7 @@ mod tests {
             let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(4, 1).unwrap()).unwrap();
             let mut png = Vec::new();
             PngEncoder::new()
-                .with_background_index(index)
+                .with_background(Background::Index(index))
                 .encode_indexed8(img, &palette, &mut png)
                 .unwrap();
 

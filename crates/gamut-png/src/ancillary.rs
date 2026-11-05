@@ -37,7 +37,7 @@
 use gamut_core::{Error, Result};
 use gamut_deflate::{DeflateEncoder, Level};
 
-use crate::decoded::XMP_KEYWORD;
+use crate::decoded::{Background, Cicp, ModificationTime, PhysicalDimensions, XMP_KEYWORD};
 use crate::encoder::MetadataNotice;
 use crate::{ColorType, chunk};
 
@@ -409,8 +409,13 @@ pub(crate) struct Ancillary {
     /// sRGB: rendering-intent code.
     pub srgb: Option<u8>,
     /// cICP: (colour primaries, transfer function, video full-range flag). The matrix
-    /// coefficients byte is not carried because §11.3.2.6 fixes it at 0 for PNG.
+    /// coefficients byte is not carried because §11.3.2.6 fixes it at 0 for PNG. Set through
+    /// [`Self::set_cicp`], which leaves it empty for a non-RGB matrix.
     pub cicp: Option<(u8, u8, bool)>,
+    /// Why the code points last given to [`Self::set_cicp`] were dropped, if they were. A
+    /// single-value slot like [`cicp`](Self::cicp) itself, so setting code points again replaces
+    /// it.
+    cicp_notice: Option<MetadataNotice>,
     /// sBIT: significant bits per channel (1–4 values, matching the colour type).
     pub sbit: Option<Vec<u8>>,
     /// bKGD: background colour, pre-serialised to its colour-type-specific bytes.
@@ -449,17 +454,56 @@ impl Ancillary {
         self.srgb = Some(intent.code());
     }
 
-    pub(crate) fn set_physical(&mut self, x: u32, y: u32, unit: PhysicalUnit) {
-        self.phys = Some((x, y, unit.code()));
+    pub(crate) fn set_physical(&mut self, phys: PhysicalDimensions) {
+        self.phys = Some((phys.x_ppu, phys.y_ppu, phys.unit.code()));
+    }
+
+    /// Sets the `cICP` code points, or — for matrix coefficients other than 0, which §11.3.2.6
+    /// forbids in PNG ("Matrix Coefficients shall be set to 0") — leaves the slot empty and
+    /// records [`MetadataNotice::NonRgbCicp`] in its place.
+    pub(crate) fn set_cicp(&mut self, cicp: Cicp) {
+        let rgb = cicp.matrix_coefficients == 0;
+        self.cicp = rgb.then_some((
+            cicp.color_primaries,
+            cicp.transfer_function,
+            cicp.full_range,
+        ));
+        self.cicp_notice = (!rgb).then_some(MetadataNotice::NonRgbCicp);
+    }
+
+    /// Why the code points last set were dropped, if they were.
+    pub(crate) fn cicp_notice(&self) -> Option<MetadataNotice> {
+        self.cicp_notice
+    }
+
+    /// Sets the `bKGD` background in the form its variant names, as the colour-type-specific
+    /// bytes §11.3.4.1 Table 22 gives it: a 2-byte grey, three 2-byte samples, or a 1-byte index.
+    pub(crate) fn set_background(&mut self, background: Background) {
+        self.bkgd = Some(match background {
+            Background::Gray(gray) => gray.to_be_bytes().to_vec(),
+            Background::Rgb(red, green, blue) => [red, green, blue]
+                .iter()
+                .flat_map(|sample| sample.to_be_bytes())
+                .collect(),
+            Background::Index(index) => vec![index],
+        });
     }
 
     /// Sets the `tIME` time, or — for a field outside its Table 26 range, which this crate's
     /// reader skips as malformed — leaves the slot empty and records
     /// [`MetadataNotice::TimeOutOfRange`] in its place.
-    pub(crate) fn set_time(&mut self, year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8) {
+    pub(crate) fn set_time(&mut self, time: ModificationTime) {
+        let ModificationTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        } = time;
         let [yh, yl] = year.to_be_bytes();
-        let in_range = time_in_range(month, day, hour, min, sec);
-        self.time = in_range.then_some([yh, yl, month, day, hour, min, sec]);
+        let in_range = time_in_range(month, day, hour, minute, second);
+        self.time = in_range.then_some([yh, yl, month, day, hour, minute, second]);
         self.time_notice = (!in_range).then_some(MetadataNotice::TimeOutOfRange);
     }
 
@@ -1172,11 +1216,11 @@ mod tests {
     #[test]
     fn physical_unit_codes_are_distinct() {
         let mut unitless = Ancillary::default();
-        unitless.set_physical(300, 300, PhysicalUnit::Unknown);
+        unitless.set_physical(PhysicalDimensions::new(300, 300, PhysicalUnit::Unknown));
         assert_eq!(unitless.phys, Some((300, 300, 0)));
 
         let mut metric = Ancillary::default();
-        metric.set_physical(2835, 2835, PhysicalUnit::Meter);
+        metric.set_physical(PhysicalDimensions::new(2835, 2835, PhysicalUnit::Meter));
         assert_eq!(metric.phys, Some((2835, 2835, 1)));
     }
 
@@ -1201,8 +1245,8 @@ mod tests {
     #[test]
     fn post_plte_serialisation() {
         let mut a = Ancillary::default();
-        a.set_physical(2835, 2835, PhysicalUnit::Meter);
-        a.set_time(2026, 6, 13, 1, 2, 3);
+        a.set_physical(PhysicalDimensions::new(2835, 2835, PhysicalUnit::Meter));
+        a.set_time(ModificationTime::new(2026, 6, 13, 1, 2, 3));
         a.add_text_latin1("Title", "hi");
         let mut out = vec![0u8; 8];
         a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
@@ -1224,7 +1268,7 @@ mod tests {
     #[test]
     fn an_out_of_range_time_is_dropped_with_a_notice() {
         let mut a = Ancillary::default();
-        a.set_time(2026, 13, 1, 0, 0, 0);
+        a.set_time(ModificationTime::new(2026, 13, 1, 0, 0, 0));
         assert_eq!(a.time, None, "month 13 is not written");
         assert_eq!(a.time_notice(), Some(MetadataNotice::TimeOutOfRange));
         let mut out = vec![0u8; 8];
@@ -1232,7 +1276,7 @@ mod tests {
         assert_eq!(find_chunk(&out, b"tIME"), None);
         assert!(!MetadataNotice::TimeOutOfRange.carried());
 
-        a.set_time(2026, 12, 31, 23, 59, 60);
+        a.set_time(ModificationTime::new(2026, 12, 31, 23, 59, 60));
         assert_eq!(a.time, Some([7, 234, 12, 31, 23, 59, 60]));
         assert_eq!(
             a.time_notice(),
@@ -1249,7 +1293,7 @@ mod tests {
         a.add_text_latin1("Before", "set first");
         a.c2pa = Some(C2paStore::Store(b"\0\0\0\x1fjumb".to_vec()));
         a.add_text_compressed("After", "set later");
-        a.set_time(2026, 9, 6, 0, 0, 0);
+        a.set_time(ModificationTime::new(2026, 9, 6, 0, 0, 0));
         let mut out = vec![0u8; 8];
         a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_DEFLATE_PASSES, RGB8);
 
@@ -1279,6 +1323,40 @@ mod tests {
             RGB8,
         );
         assert_eq!(find_chunk(&none, b"caBX"), None);
+    }
+
+    /// §11.3.2.6 admits matrix coefficients 0 only: [`Ancillary::set_cicp`] keeps RGB code points
+    /// with no notice, drops any other matrix with [`MetadataNotice::NonRgbCicp`], and a later
+    /// call replaces both the slot and its notice.
+    #[test]
+    fn set_cicp_keeps_rgb_code_points_and_drops_any_other_matrix_with_a_notice() {
+        let mut a = Ancillary::default();
+        a.set_cicp(Cicp::new(9, 16, true));
+        assert_eq!((a.cicp, a.cicp_notice()), (Some((9, 16, true)), None));
+
+        let mut non_rgb = Cicp::new(1, 13, false);
+        non_rgb.matrix_coefficients = 1;
+        a.set_cicp(non_rgb);
+        assert_eq!(
+            (a.cicp, a.cicp_notice()),
+            (None, Some(MetadataNotice::NonRgbCicp))
+        );
+
+        a.set_cicp(Cicp::new(1, 13, false));
+        assert_eq!((a.cicp, a.cicp_notice()), (Some((1, 13, false)), None));
+    }
+
+    /// [`Ancillary::set_background`] stores each [`Background`] form as the bytes §11.3.4.1
+    /// Table 22 gives it: two for a grey, six for an RGB triple, one for an index — big-endian.
+    #[test]
+    fn set_background_serialises_each_form_as_table_22_gives_it() {
+        let mut a = Ancillary::default();
+        a.set_background(Background::Gray(0x1234));
+        assert_eq!(a.bkgd, Some(vec![0x12, 0x34]));
+        a.set_background(Background::Rgb(0x0102, 0x0304, 0x0506));
+        assert_eq!(a.bkgd, Some(vec![1, 2, 3, 4, 5, 6]));
+        a.set_background(Background::Index(7));
+        assert_eq!(a.bkgd, Some(vec![7]));
     }
 
     /// The `iCCP` payload [`Ancillary::set_icc_profile`] leads to, if any.

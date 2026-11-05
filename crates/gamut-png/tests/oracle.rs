@@ -8,7 +8,10 @@ use gamut_core::{
     Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::Level;
-use gamut_png::{FilterStrategy, FilterType, PhysicalUnit, PngEncoder, PngPalette, SrgbIntent};
+use gamut_png::{
+    Background, FilterStrategy, FilterType, ModificationTime, PhysicalDimensions, PhysicalUnit,
+    PngEncoder, PngPalette, SrgbIntent,
+};
 
 const SIZES: &[(u32, u32)] = &[
     (1, 1),
@@ -343,7 +346,7 @@ fn a_colour_background_keeps_its_entry_in_the_palette_libpng_resolves() {
         })
         .collect();
 
-    let with_background = encode(PngEncoder::new().with_background_rgb(200, 30, 40));
+    let with_background = encode(PngEncoder::new().with_background(Background::Rgb(200, 30, 40)));
     assert_eq!(
         libpng_oracle::decode_rgba8(&with_background),
         (w, h, expected.clone())
@@ -438,9 +441,9 @@ fn ancillary_chunks_are_accepted_by_libpng() {
         .with_srgb(SrgbIntent::Perceptual)
         .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
         .with_significant_bits(&[8, 8, 8])
-        .with_background_rgb(0, 0, 0)
-        .with_physical_dimensions(2835, 2835, PhysicalUnit::Meter)
-        .with_time(2026, 6, 13, 1, 2, 3)
+        .with_background(Background::Rgb(0, 0, 0))
+        .with_physical_dimensions(PhysicalDimensions::new(2835, 2835, PhysicalUnit::Meter))
+        .with_time(ModificationTime::new(2026, 6, 13, 1, 2, 3))
         .with_text("Title", "gamut")
         .with_compressed_text("Comment", &comment)
         .with_international_text("Author", "gämut")
