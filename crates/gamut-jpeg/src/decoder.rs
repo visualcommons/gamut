@@ -2268,6 +2268,21 @@ mod tests {
         );
     }
 
+    /// A frame header's `Y = 0` defers the height to a DNL segment (§B.2.5): `info` reports it as
+    /// no height, and any other `Y` as that height.
+    #[test]
+    fn info_reports_a_dnl_deferred_height_as_none() {
+        let sof = |y: u8| {
+            vec![
+                0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 8, 0x00, y, 0x00, 0x08, 1, 1, 0x11, 0, 0xFF,
+                0xD9,
+            ]
+        };
+        let decoder = JpegDecoder::new();
+        assert_eq!(decoder.info(&sof(0)).unwrap().height, None);
+        assert_eq!(decoder.info(&sof(1)).unwrap().height, Some(1));
+    }
+
     #[test]
     fn unsupported_and_structural_markers_are_classified() {
         let base = gray_stream(8, 8, &[flat(3)], None);

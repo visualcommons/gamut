@@ -944,6 +944,19 @@ mod tests {
         assert_eq!(image_desc(4, 2, PixelFormat::Cmyk8, base).strides[0], 16);
     }
 
+    /// A frame header's `Y = 0` is a DNL-deferred height (§B.2.5), parsed as no height.
+    #[test]
+    fn parse_reports_a_dnl_deferred_height_as_none() {
+        let sof = |y: u8| {
+            vec![
+                0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 8, 0x00, y, 0x00, 0x08, 1, 1, 0x11, 0, 0xFF,
+                0xD9,
+            ]
+        };
+        assert_eq!(JpegStreamInfo::parse(&sof(0)).unwrap().height(), None);
+        assert_eq!(JpegStreamInfo::parse(&sof(1)).unwrap().height(), Some(1));
+    }
+
     #[test]
     fn subsampling_maps_only_the_named_grids() {
         let info = |sampling: Vec<(u8, u8)>| JpegStreamInfo {
