@@ -7,7 +7,7 @@
 //! an 8-bit buffer cannot need: the [`BitDepth`] its samples are coded at. `u16` is storage, `10`
 //! or `12` is meaning, and every sample is validated against it at construction.
 
-use gamut_core::{Error, Gray8, Gray16, ImageRef, Result, Rgb16, Rgba16};
+use gamut_core::{Dimensions, Error, Gray8, Gray16, ImageRef, Result, Rgb16, Rgba16};
 
 use crate::format::{BitDepth, ChromaSubsampling};
 use crate::planar::{downsample_box, pixel_count};
@@ -51,7 +51,7 @@ fn rgb16_to_ycbcr_planes(
     let mut cb = vec![0u16; n];
     let mut cr = vec![0u16; n];
     for i in 0..n {
-        let (yy, u, v) = matrix.from_rgb(
+        let (yy, u, v) = matrix.convert(
             px[i * stride] >> shift,
             px[i * stride + 1] >> shift,
             px[i * stride + 2] >> shift,
@@ -89,12 +89,11 @@ impl Planar16 {
     ///
     /// As [`Planar16::from_planes_subsampled`].
     pub fn from_planes(
-        width: u32,
-        height: u32,
+        dims: Dimensions,
         bit_depth: BitDepth,
         planes: [Vec<u16>; 3],
     ) -> Result<Self> {
-        Self::from_planes_subsampled(width, height, ChromaSubsampling::Cs444, bit_depth, planes)
+        Self::from_planes_subsampled(dims, ChromaSubsampling::Cs444, bit_depth, planes)
     }
 
     /// Builds a buffer from three planes whose chroma is subsampled by `subsampling`, at
@@ -108,13 +107,16 @@ impl Planar16 {
     ///
     /// ```
     /// use gamut_color::{BitDepth, Planar16};
+    /// use gamut_core::Dimensions;
     ///
-    /// let p = Planar16::from_planes(2, 1, BitDepth::Ten, [vec![1023, 0], vec![512, 512], vec![0, 1023]])?;
+    /// let planes = [vec![1023, 0], vec![512, 512], vec![0, 1023]];
+    /// let p = Planar16::from_planes(Dimensions::new(2, 1)?, BitDepth::Ten, planes)?;
     /// assert_eq!(p.bit_depth(), BitDepth::Ten);
-    /// assert_eq!(p.plane(0), &[1023u16, 0]);
+    /// assert_eq!(p.plane(0), Some(&[1023u16, 0][..]));
     ///
     /// // A sample the coded depth cannot represent is a construction error, not a silent clamp.
-    /// assert!(Planar16::from_planes(1, 1, BitDepth::Ten, [vec![1024], vec![0], vec![0]]).is_err());
+    /// let one = Dimensions::new(1, 1)?;
+    /// assert!(Planar16::from_planes(one, BitDepth::Ten, [vec![1024], vec![0], vec![0]]).is_err());
     /// # Ok::<(), gamut_core::Error>(())
     /// ```
     ///
@@ -125,13 +127,13 @@ impl Planar16 {
     /// [`BitDepth::max_value`] — a plane that does not fit the depth it claims would be coded as a
     /// different image than the caller handed over.
     pub fn from_planes_subsampled(
-        width: u32,
-        height: u32,
+        dims: Dimensions,
         subsampling: ChromaSubsampling,
         bit_depth: BitDepth,
         planes: [Vec<u16>; 3],
     ) -> Result<Self> {
-        let n = pixel_count(width, height)?;
+        let (width, height) = (dims.width(), dims.height());
+        let n = pixel_count(dims)?;
         if planes[0].len() != n {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
@@ -187,7 +189,7 @@ impl Planar16 {
     /// let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(1, 1)?)?;
     /// let p = Planar16::from_rgb16_identity_view(img, BitDepth::Twelve);
     /// // GBR order, each sample's top 12 bits.
-    /// assert_eq!((p.plane(0)[0], p.plane(1)[0], p.plane(2)[0]), (0x800, 0x000, 0xFFF));
+    /// assert_eq!((p.planes()[0][0], p.planes()[1][0], p.planes()[2][0]), (0x800, 0x000, 0xFFF));
     /// # Ok::<(), gamut_core::Error>(())
     /// ```
     #[must_use]
@@ -372,8 +374,8 @@ impl Planar16 {
     /// let p = Planar16::from_gray16_view(img, BitDepth::Ten);
     /// assert_eq!(p.subsampling(), ChromaSubsampling::Cs400);
     /// // Each sample's top 10 bits; no chroma planes.
-    /// assert_eq!(p.plane(0), &[0x3FF, 0x200, 0x000]);
-    /// assert!(p.plane(1).is_empty() && p.plane(2).is_empty());
+    /// assert_eq!(p.planes()[0], &[0x3FF, 0x200, 0x000]);
+    /// assert!(p.planes()[1].is_empty() && p.planes()[2].is_empty());
     /// # Ok::<(), gamut_core::Error>(())
     /// ```
     #[must_use]
@@ -414,8 +416,8 @@ impl Planar16 {
     /// let p = Planar16::from_gray8_view(img, BitDepth::Ten);
     /// assert_eq!(p.subsampling(), ChromaSubsampling::Cs400);
     /// // 0x80 replicates to 0x8080, whose top 10 bits are 0x202; no chroma planes.
-    /// assert_eq!(p.plane(0), &[0x3FF, 0x202, 0x000]);
-    /// assert!(p.plane(1).is_empty() && p.plane(2).is_empty());
+    /// assert_eq!(p.planes()[0], &[0x3FF, 0x202, 0x000]);
+    /// assert!(p.planes()[1].is_empty() && p.planes()[2].is_empty());
     /// # Ok::<(), gamut_core::Error>(())
     /// ```
     #[must_use]
@@ -461,28 +463,29 @@ impl Planar16 {
         self.bit_depth
     }
 
-    /// The dimensions of plane `index`, as [`Planar8::plane_dimensions`](crate::Planar8::plane_dimensions).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `index >= 3`.
+    /// The dimensions of plane `index`, as [`Planar8::plane_dimensions`](crate::Planar8::plane_dimensions):
+    /// `None` for an `index >= 3`.
     #[must_use]
-    pub fn plane_dimensions(&self, index: usize) -> (u32, u32) {
+    pub fn plane_dimensions(&self, index: usize) -> Option<(u32, u32)> {
         match index {
-            0 => (self.width, self.height),
-            1 | 2 => self.subsampling.chroma_dimensions(self.width, self.height),
-            _ => panic!("plane index {index} out of range (0..3)"),
+            0 => Some((self.width, self.height)),
+            1 | 2 => Some(self.subsampling.chroma_dimensions(self.width, self.height)),
+            _ => None,
         }
     }
 
-    /// The row-major samples of plane `index` (`0 = Y/G, 1 = U/B, 2 = V/R`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `index >= 3`, like slice indexing.
+    /// The row-major samples of plane `index` (`0 = Y/G, 1 = U/B, 2 = V/R`), or `None` for an
+    /// `index >= 3`, like [`slice::get`].
     #[must_use]
-    pub fn plane(&self, index: usize) -> &[u16] {
-        &self.planes[index]
+    pub fn plane(&self, index: usize) -> Option<&[u16]> {
+        self.planes.get(index).map(Vec::as_slice)
+    }
+
+    /// All three planes, `[Y/G, U/B, V/R]`, each as [`plane`](Self::plane) returns it — the
+    /// infallible form for a caller that wants every plane.
+    #[must_use]
+    pub fn planes(&self) -> [&[u16]; 3] {
+        [&self.planes[0], &self.planes[1], &self.planes[2]]
     }
 }
 
@@ -493,7 +496,12 @@ mod tests {
     use super::*;
 
     fn planes(bits: BitDepth, luma: Vec<u16>) -> Result<Planar16> {
-        Planar16::from_planes(3, 2, bits, [luma, vec![0; 6], vec![0; 6]])
+        Planar16::from_planes(dims(3, 2), bits, [luma, vec![0; 6], vec![0; 6]])
+    }
+
+    /// Test shorthand for non-zero dimensions.
+    fn dims(width: u32, height: u32) -> Dimensions {
+        Dimensions::new(width, height).unwrap()
     }
 
     #[test]
@@ -502,9 +510,12 @@ mod tests {
         assert_eq!((p.width(), p.height()), (3, 2));
         assert_eq!(p.bit_depth(), BitDepth::Twelve);
         assert_eq!(p.subsampling(), ChromaSubsampling::Cs444);
-        assert_eq!(p.plane(0), &[0u16, 500, 1000, 1500, 2000, 2500]);
-        assert_eq!(p.plane_dimensions(0), (3, 2));
-        assert_eq!(p.plane_dimensions(2), (3, 2));
+        assert_eq!(p.planes()[0], &[0u16, 500, 1000, 1500, 2000, 2500]);
+        assert_eq!(p.plane_dimensions(0), Some((3, 2)));
+        assert_eq!(p.plane_dimensions(2), Some((3, 2)));
+        assert_eq!(p.plane_dimensions(3), None);
+        assert_eq!(p.plane(2), Some(&[0u16; 6][..]));
+        assert_eq!(p.plane(3), None);
     }
 
     #[test]
@@ -520,40 +531,39 @@ mod tests {
         assert!(planes(BitDepth::Twelve, vec![1024; 6]).is_ok());
         // Chroma is checked too, not just luma.
         assert!(
-            Planar16::from_planes(1, 1, BitDepth::Ten, [vec![0], vec![0], vec![2000]]).is_err()
+            Planar16::from_planes(dims(1, 1), BitDepth::Ten, [vec![0], vec![0], vec![2000]])
+                .is_err()
         );
     }
 
     #[test]
     fn monochrome_has_a_luma_plane_and_no_chroma() {
         let p = Planar16::from_planes_subsampled(
-            2,
-            2,
+            dims(2, 2),
             ChromaSubsampling::Cs400,
             BitDepth::Ten,
             [vec![1, 2, 3, 4], Vec::new(), Vec::new()],
         )
         .unwrap();
-        assert_eq!(p.plane_dimensions(1), (0, 0));
-        assert!(p.plane(1).is_empty());
+        assert_eq!(p.plane_dimensions(1), Some((0, 0)));
+        assert!(p.planes()[1].is_empty());
     }
 
     #[test]
     fn plane_lengths_are_checked_per_plane() {
+        let two = dims(2, 2);
         let bad_luma =
-            Planar16::from_planes(2, 2, BitDepth::Ten, [vec![0; 3], vec![0; 4], vec![0; 4]]);
+            Planar16::from_planes(two, BitDepth::Ten, [vec![0; 3], vec![0; 4], vec![0; 4]]);
         assert_eq!(
             bad_luma.unwrap_err().static_message(),
             Some("luma plane length != width * height")
         );
-        let bad_u =
-            Planar16::from_planes(2, 2, BitDepth::Ten, [vec![0; 4], vec![0; 3], vec![0; 4]]);
+        let bad_u = Planar16::from_planes(two, BitDepth::Ten, [vec![0; 4], vec![0; 3], vec![0; 4]]);
         assert_eq!(
             bad_u.unwrap_err().static_message(),
             Some("u plane length != chroma dimensions")
         );
-        let bad_v =
-            Planar16::from_planes(2, 2, BitDepth::Ten, [vec![0; 4], vec![0; 4], vec![0; 3]]);
+        let bad_v = Planar16::from_planes(two, BitDepth::Ten, [vec![0; 4], vec![0; 4], vec![0; 3]]);
         assert_eq!(
             bad_v.unwrap_err().static_message(),
             Some("v plane length != chroma dimensions")
@@ -589,14 +599,14 @@ mod tests {
             // GBR order: plane0 = G, plane1 = B, plane2 = R.
             let p = Planar16::from_rgb16_identity_view(img, bits);
             assert_eq!(
-                (p.plane(0)[0], p.plane(1)[0], p.plane(2)[0]),
+                (p.planes()[0][0], p.planes()[1][0], p.planes()[2][0]),
                 want,
                 "{bits:?}"
             );
             assert_eq!(p.bit_depth(), bits);
             // Every narrowed sample fits the claimed depth, which is what `from_planes_subsampled`
             // would otherwise reject.
-            assert!(p.plane(2)[0] <= bits.max_value());
+            assert!(p.planes()[2][0] <= bits.max_value());
         }
     }
 
@@ -630,19 +640,19 @@ mod tests {
 
         let mut want: [Vec<u16>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for pixel in px.as_chunks::<3>().0 {
-            let (y, cb, cr) = matrix.from_rgb(pixel[0] >> 4, pixel[1] >> 4, pixel[2] >> 4);
+            let (y, cb, cr) = matrix.convert(pixel[0] >> 4, pixel[1] >> 4, pixel[2] >> 4);
             want[0].push(y);
             want[1].push(cb);
             want[2].push(cr);
         }
         for (i, w) in want.iter().enumerate() {
-            assert_eq!(p.plane(i), &w[..], "plane {i}");
-            assert_eq!(p.plane(i).len(), 6, "plane {i} covers every pixel");
+            assert_eq!(p.planes()[i], &w[..], "plane {i}");
+            assert_eq!(p.planes()[i].len(), 6, "plane {i} covers every pixel");
         }
         // The three planes differ, so a mapping that read one channel three times could not satisfy
         // the comparison above by coincidence.
-        assert_ne!(p.plane(0), p.plane(1));
-        assert_ne!(p.plane(1), p.plane(2));
+        assert_ne!(p.planes()[0], p.planes()[1]);
+        assert_ne!(p.planes()[1], p.planes()[2]);
 
         // The four-channel source gives the same colour planes for the same colour values — the
         // property that makes an RGBA colour item identical to the RGB one through the matrix path
@@ -658,7 +668,7 @@ mod tests {
             matrix,
         );
         for i in 0..3 {
-            assert_eq!(q.plane(i), p.plane(i), "rgba plane {i}");
+            assert_eq!(q.planes()[i], p.planes()[i], "rgba plane {i}");
         }
     }
 
@@ -681,8 +691,8 @@ mod tests {
             BitDepth::Twelve,
         );
         for i in 0..3 {
-            assert_eq!(colour.plane(i), from_rgb.plane(i), "plane {i}");
-            assert_eq!(colour.plane(i).len(), 6, "plane {i} covers every pixel");
+            assert_eq!(colour.planes()[i], from_rgb.planes()[i], "plane {i}");
+            assert_eq!(colour.planes()[i].len(), 6, "plane {i} covers every pixel");
         }
 
         let alpha = Planar16::from_rgba16_alpha_view(img, BitDepth::Twelve);
@@ -690,9 +700,9 @@ mod tests {
         // The fourth channel of each pixel, narrowed — not the first, and not every fourth sample
         // from the start.
         let want: Vec<u16> = (0..6u16).map(|i| (0xFFFF - (i << 8)) >> 4).collect();
-        assert_eq!(alpha.plane(0), &want[..]);
-        assert!(alpha.plane(1).is_empty());
-        assert_eq!(alpha.plane_dimensions(1), (0, 0));
+        assert_eq!(alpha.planes()[0], &want[..]);
+        assert!(alpha.planes()[1].is_empty());
+        assert_eq!(alpha.plane_dimensions(1), Some((0, 0)));
     }
 
     #[test]
@@ -705,16 +715,19 @@ mod tests {
         assert_eq!(ten.bit_depth(), BitDepth::Ten);
         assert_eq!(ten.subsampling(), ChromaSubsampling::Cs400);
         // Truncated, not rounded: 0x003F's top 10 bits are 0, 0x0040's are 1.
-        assert_eq!(ten.plane(0), &[0x3FF, 0x2AF, 0x200, 0x1FF, 0x000, 0x001]);
-        assert!(ten.plane(1).is_empty() && ten.plane(2).is_empty());
-        assert_eq!(ten.plane_dimensions(1), (0, 0));
+        assert_eq!(ten.planes()[0], &[0x3FF, 0x2AF, 0x200, 0x1FF, 0x000, 0x001]);
+        assert!(ten.planes()[1].is_empty() && ten.planes()[2].is_empty());
+        assert_eq!(ten.plane_dimensions(1), Some((0, 0)));
 
         let twelve = Planar16::from_gray16_view(img, BitDepth::Twelve);
         assert_eq!(twelve.bit_depth(), BitDepth::Twelve);
-        assert_eq!(twelve.plane(0), &[0xFFF, 0xABC, 0x800, 0x7FF, 0x003, 0x004]);
+        assert_eq!(
+            twelve.planes()[0],
+            &[0xFFF, 0xABC, 0x800, 0x7FF, 0x003, 0x004]
+        );
         // A pure prefix: the 12-bit plane's top 10 bits are the 10-bit plane.
-        let prefix: Vec<u16> = twelve.plane(0).iter().map(|&s| s >> 2).collect();
-        assert_eq!(prefix, ten.plane(0));
+        let prefix: Vec<u16> = twelve.planes()[0].iter().map(|&s| s >> 2).collect();
+        assert_eq!(prefix, ten.planes()[0]);
     }
 
     #[test]
@@ -729,29 +742,25 @@ mod tests {
         assert_eq!(ten.bit_depth(), BitDepth::Ten);
         assert_eq!(ten.subsampling(), ChromaSubsampling::Cs400);
         // 0xFF reaches the 10-bit white level 0x3FF, not 0x3FC as a bare `<< 2` would.
-        assert_eq!(ten.plane(0), &[0x000, 0x3FF, 0x202, 0x169, 0x004, 0x1FD]);
-        assert!(ten.plane(1).is_empty() && ten.plane(2).is_empty());
-        assert_eq!(ten.plane_dimensions(1), (0, 0));
+        assert_eq!(ten.planes()[0], &[0x000, 0x3FF, 0x202, 0x169, 0x004, 0x1FD]);
+        assert!(ten.planes()[1].is_empty() && ten.planes()[2].is_empty());
+        assert_eq!(ten.plane_dimensions(1), Some((0, 0)));
 
         let twelve = Planar16::from_gray8_view(img, BitDepth::Twelve);
         assert_eq!(twelve.bit_depth(), BitDepth::Twelve);
-        assert_eq!(twelve.plane(0), &[0x000, 0xFFF, 0x808, 0x5A5, 0x010, 0x7F7]);
+        assert_eq!(
+            twelve.planes()[0],
+            &[0x000, 0xFFF, 0x808, 0x5A5, 0x010, 0x7F7]
+        );
 
         // Eight is the identity, Sixteen the full replication.
         let eight = Planar16::from_gray8_view(img, BitDepth::Eight);
-        assert_eq!(eight.plane(0), &[0x00, 0xFF, 0x80, 0x5A, 0x01, 0x7F]);
+        assert_eq!(eight.planes()[0], &[0x00, 0xFF, 0x80, 0x5A, 0x01, 0x7F]);
         let sixteen = Planar16::from_gray8_view(img, BitDepth::Sixteen);
         assert_eq!(
-            sixteen.plane(0),
+            sixteen.planes()[0],
             &[0x0000, 0xFFFF, 0x8080, 0x5A5A, 0x0101, 0x7F7F]
         );
-    }
-
-    #[test]
-    #[should_panic(expected = "plane index 3 out of range")]
-    fn plane_dimensions_rejects_an_out_of_range_index() {
-        let p = planes(BitDepth::Ten, vec![0; 6]).unwrap();
-        let _ = p.plane_dimensions(3);
     }
 
     /// A BT.709 full-range matrix at `depth`.
@@ -796,25 +805,25 @@ mod tests {
         let p444 =
             Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs444).unwrap();
         assert_eq!(p444.subsampling(), ChromaSubsampling::Cs444);
-        assert_eq!(p444.plane_dimensions(1), (4, 2));
+        assert_eq!(p444.plane_dimensions(1), Some((4, 2)));
 
         let p422 =
             Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs422).unwrap();
         assert_eq!(p422.subsampling(), ChromaSubsampling::Cs422);
-        assert_eq!(p422.plane_dimensions(1), (2, 2));
-        assert_eq!(p422.plane(0).len(), 8, "luma keeps full resolution");
+        assert_eq!(p422.plane_dimensions(1), Some((2, 2)));
+        assert_eq!(p422.planes()[0].len(), 8, "luma keeps full resolution");
 
         let p420 =
             Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
-        assert_eq!(p420.plane_dimensions(1), (2, 1));
+        assert_eq!(p420.plane_dimensions(1), Some((2, 1)));
 
         // Both subsampled layouts halve x and the stripe is constant in y, so their chroma agrees —
         // and differs from the un-averaged sample.
-        assert_eq!(p422.plane(1)[0], p420.plane(1)[0]);
-        assert_ne!(p444.plane(1)[0], p422.plane(1)[0]);
+        assert_eq!(p422.planes()[1][0], p420.planes()[1][0]);
+        assert_ne!(p444.planes()[1][0], p422.planes()[1][0]);
         // Luma is untouched by subsampling.
-        assert_eq!(p444.plane(0)[0], p422.plane(0)[0]);
-        assert_eq!(p444.plane(0)[0], p420.plane(0)[0]);
+        assert_eq!(p444.planes()[0][0], p422.planes()[0][0]);
+        assert_eq!(p444.planes()[0][0], p420.planes()[0][0]);
     }
 
     #[test]
@@ -834,7 +843,7 @@ mod tests {
             let max = depth.max_value();
             for i in 0..3 {
                 assert!(
-                    p.plane(i).iter().all(|&s| s <= max),
+                    p.planes()[i].iter().all(|&s| s <= max),
                     "plane {i} exceeds {depth:?}"
                 );
             }
@@ -853,7 +862,7 @@ mod tests {
         assert_eq!(sub.subsampling(), view.subsampling());
         assert_eq!(sub.bit_depth(), view.bit_depth());
         for i in 0..3 {
-            assert_eq!(sub.plane(i), view.plane(i), "plane {i}");
+            assert_eq!(sub.planes()[i], view.planes()[i], "plane {i}");
         }
     }
 
@@ -868,22 +877,22 @@ mod tests {
         let full = Planar16::from_rgb16_matrix_view(img, m);
         let sub = Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
 
-        let (cw, _) = sub.plane_dimensions(1);
+        let (cw, _) = sub.plane_dimensions(1).unwrap();
         for plane in 1..3 {
             for cx in 0..cw as usize {
                 let group: u32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
                     .iter()
-                    .map(|&(dx, dy)| u32::from(full.plane(plane)[dy * 4 + cx * 2 + dx]))
+                    .map(|&(dx, dy)| u32::from(full.planes()[plane][dy * 4 + cx * 2 + dx]))
                     .sum();
                 assert_eq!(
-                    u32::from(sub.plane(plane)[cx]),
+                    u32::from(sub.planes()[plane][cx]),
                     (group + 2) / 4,
                     "plane {plane} sample {cx}"
                 );
             }
         }
         // And the values are not all equal, so an averaging bug cannot hide behind a flat plane.
-        assert_ne!(sub.plane(1)[0], sub.plane(2)[0]);
+        assert_ne!(sub.planes()[1][0], sub.planes()[2][0]);
     }
 
     #[test]
@@ -914,8 +923,8 @@ mod tests {
             ChromaSubsampling::Cs420,
         )
         .unwrap();
-        assert_eq!(p.plane_dimensions(1), (2, 1));
-        assert_eq!(p.plane(1).len(), 2);
-        assert_eq!(p.plane(0).len(), 3, "luma keeps all three columns");
+        assert_eq!(p.plane_dimensions(1), Some((2, 1)));
+        assert_eq!(p.planes()[1].len(), 2);
+        assert_eq!(p.planes()[0].len(), 3, "luma keeps all three columns");
     }
 }

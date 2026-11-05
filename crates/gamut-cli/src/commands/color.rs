@@ -2,7 +2,7 @@
 
 use clap::Subcommand;
 use gamut::color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients,
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
     TransferCharacteristics,
 };
 use gamut::core::{Cmyk8, Gray8, Pixel, Rgb8, Rgba8};

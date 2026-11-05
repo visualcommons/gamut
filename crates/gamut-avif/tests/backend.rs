@@ -75,7 +75,7 @@ fn builtin_obus(base_q_idx: u8, colour: Av1Colour, chroma: ChromaSubsampling) ->
 fn fixture_planes(colour: Av1Colour, chroma: ChromaSubsampling) -> Planar8 {
     let rgb = fixture();
     match colour.matrix {
-        MatrixCoefficients::Identity => Planar8::from_rgb8_identity(&rgb, W, H).unwrap(),
+        MatrixCoefficients::Identity => Planar8::from_rgb8_identity(&rgb, dims()).unwrap(),
         matrix => {
             let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(W, H).unwrap()).unwrap();
             let m = RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight).unwrap();
@@ -304,10 +304,9 @@ fn a_backend_stream_at_the_wrong_depth_is_rejected() {
         fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
             // Re-narrow the 12-bit planes to 10 and code those instead.
             let ten = Planar16::from_planes(
-                planes.width(),
-                planes.height(),
+                Dimensions::new(planes.width(), planes.height())?,
                 BitDepth::Ten,
-                std::array::from_fn(|i| planes.plane(i).iter().map(|&s| s >> 2).collect()),
+                planes.planes().map(|p| p.iter().map(|&s| s >> 2).collect()),
             )?;
             Ok(gamut_av1::encode_still_intra16_with_speed(
                 &ten,
@@ -588,7 +587,9 @@ fn debug_reports_the_backend_count() {
 /// container whose `ispe` would then lie.
 #[test]
 fn backend_stream_dimensions_must_match() {
-    let other = Planar8::from_rgb8_identity(&vec![7u8; 16 * 8 * 3], 16, 8).unwrap();
+    let other =
+        Planar8::from_rgb8_identity(&vec![7u8; 16 * 8 * 3], Dimensions::new(16, 8).unwrap())
+            .unwrap();
     let wrong = gamut_av1::encode_still_intra(&other, 0).unwrap().0.obus;
     let log = log();
     let mut encoder = AvifEncoder::new();
@@ -698,8 +699,7 @@ fn backend_stream_must_be_three_plane() {
     // a genuine profile-0 `color_config()` and not through a malformed header.
     let luma: Vec<u8> = (0..(W * H)).map(|i| (i * 37) as u8).collect();
     let mono = Planar8::from_planes_subsampled(
-        W,
-        H,
+        dims(),
         gamut_color::ChromaSubsampling::Cs400,
         [luma, Vec::new(), Vec::new()],
     )
@@ -1278,7 +1278,7 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
     // The lowered plane pointers are the encoder's own BT.709 planes, not the raw RGB — the
     // adapter must hand a backend exactly what the request's colour describes.
     let planes = fixture_planes(colour, ChromaSubsampling::Cs420);
-    let first = [planes.plane(0)[0], planes.plane(1)[0], planes.plane(2)[0]];
+    let first = planes.planes().map(|p| p[0]);
     assert_ne!(
         first,
         [fixture()[1], fixture()[2], fixture()[0]],
@@ -1540,7 +1540,7 @@ fn abi_adapter_lowers_a_high_bit_depth_job() {
     // The stub captures the first *byte* of each plane, so compare against the low-order byte of
     // the first `u16` in this platform's own order — which is the point: the pointer addresses
     // native-endian `u16`s, not a byte plane.
-    let first = [0usize, 1, 2].map(|i| planes.plane(i)[0].to_ne_bytes()[0]);
+    let first = planes.planes().map(|p| p[0].to_ne_bytes()[0]);
     let chroma_stride = W.div_ceil(2) as usize * size_of::<u16>();
     assert_eq!(
         seen.seen_image,

@@ -89,7 +89,7 @@ fn first_difference(got: &Planar16, want: &Planar16) -> Option<String> {
         return Some(format!("shape {:?} != {:?}", shape(got), shape(want)));
     }
     for index in 0..3 {
-        let (g, w) = (got.plane(index), want.plane(index));
+        let (g, w) = (got.planes()[index], want.planes()[index]);
         if let Some(i) = g.iter().zip(w).position(|(a, b)| a != b) {
             return Some(format!(
                 "plane {index} sample {i}: {:#06x} != {:#06x}",
@@ -158,8 +158,9 @@ mod tests {
         // `from_planes` builds 4:4:4, so the sample case compares two 4:4:4 buffers that differ
         // only in luma sample 3 (0x01 widened to 10 bits is 0x004).
         let luma = |s3: u16| [vec![0x000, 0x3FF, 0x202, s3], vec![0; 4], vec![0; 4]];
-        let want = Planar16::from_planes(2, 2, BitDepth::Ten, luma(0x004)).unwrap();
-        let got = Planar16::from_planes(2, 2, BitDepth::Ten, luma(0x005)).unwrap();
+        let two = Dimensions::new(2, 2).unwrap();
+        let want = Planar16::from_planes(two, BitDepth::Ten, luma(0x004)).unwrap();
+        let got = Planar16::from_planes(two, BitDepth::Ten, luma(0x005)).unwrap();
         assert_eq!(
             first_difference(&got, &want).as_deref(),
             Some("plane 0 sample 3: 0x0005 != 0x0004")

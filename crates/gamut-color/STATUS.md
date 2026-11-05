@@ -2,7 +2,7 @@
 
 The shared color layer of the [gamut](../../README.md) codec campaign: CICP (H.273 /
 ISO/IEC 23091-2) code points, coded-plane metadata (AV1 §5.5.2/§6.4.2), 8-bit (`Planar8`) and
-10/12-bit (`Planar16`) coded planes, monochrome included, BT.601 YCbCr 4:2:0 planar buffers
+10/12-bit (`Planar16`) coded planes, monochrome included, the BT.601 YCbCr 4:2:0 conversion
 (RFC 6386 §9.2 / libwebp), and the Tier-1 `f64` colour science
 documented in [`references/color`](../../references/color/README.md). Released as **v1**
 (issue #179).
@@ -31,7 +31,7 @@ tolerance-level, not bit-for-bit.
 | ----- | ----- | ------ |
 | P1 | Scaffold + CICP/format tables: H.273 code-point enums, `BitDepth`, `ChromaSubsampling` | ✅ |
 | P2 | `Planar8` identity (`mc = 0`, GBR) 4:4:4 buffers for the AV1/AVIF path | ✅ |
-| P3 | BT.601 YCbCr 4:2:0 (`Yuv420`) with libwebp-exact limited-range integer math (WebP/VP8) | ✅ |
+| P3 | BT.601 YCbCr 4:2:0 (then `Yuv420`, now `Planar8` at `Cs420`) with libwebp-exact limited-range integer math (WebP/VP8) | ✅ |
 | P4 | Colour science: `transfer`, `oklab`, `matrix` (Bradford), `gamut_map`, `profile` | ✅ |
 | P5 | **Keystone** — `M1` derivation cross-check + encoder-exact vs standard curves | ✅ |
 | P6 | Tone-map dedupe with `gamut-tonemap`; luminance levels sourced from `gamut_core::luminance` | ✅ |
@@ -40,6 +40,7 @@ tolerance-level, not bit-for-bit.
 | P8 | Issue #321 — CIELab colorimetry (`lab`): XYZ↔Lab (exact ε = 216/24389, κ = 24389/27), LCh, xyY, ICC PCS encodings (PCSXYZ u1Fixed15, 16-bit PCSLAB v4/v2, 8-bit Lab; lcms2 `cmspcs.c`-exact rounding/clamping), ΔE\*ab + CIEDE2000; `linalg` promoted public for gamut-cmm (#323/#327) | ✅ |
 | P9 | Issue #349 — `cct`: correlated colour temperature of a CIE 1931 chromaticity by Robertson's method (Wyszecki & Stiles isotemperature table, interpolated in mired). The definition raw formats build on: DNG 1.7.1 weights a camera's colour calibrations by inverse CCT, so `gamut-dng` needs it to read `AsShotWhiteXY`. Tier-1 f64 like the rest of the colour science | ✅ |
 | P10 | Issue #1016 — `upsample`: reference-exact chroma upsampling for the decoders. `ChromaUpsampling` (`#[repr(u8)]`, `Nearest = 0`, `Interpolated = 1` default, append-only), the shared 2:1 row-tap geometry, and one kernel family per reference decoder with its rounding ported exactly: `libjpeg` (libjpeg-turbo `jdsample.c` h2v1/h1v2/h2v2 fancy upsampling), `libwebp` (libwebp's fancy upsampler), `libavif` (libavif's built-in bilinear, returned in sixteenths), plus `YcbcrMatrix::to_rgb_sixteenths` to convert unrounded interpolated chroma. `Yuv420::to_rgb8` takes the `ChromaUpsampling` explicitly (breaking). Oracle parity is gated in the consuming crates: gamut-jpeg (libjpeg-turbo), gamut-webp (libwebp), gamut-avif (libavif) | ✅ |
+| P11 | Issue #1066 — one vocabulary (breaking): `ColorPrimaries` (American spelling throughout); `Chromaticities` struct and `primaries::RgbGamut` (`#[repr(u8)]`, was `oklab::Gamut`); `ChromaSubsampling::factors` replaces `subsampling()` and `Cs440` is added; `Planar8`/`Planar16` constructors take `Dimensions` (so zero sides are rejected), `plane`/`plane_dimensions` return `Option` and `planes()` returns all three; `Yuv420` folds into `Planar8::from_rgb8_bt601` / `to_rgb8_bt601` at `Cs420`; `bt601_rgb_to_ycbcr` / `bt601_ycbcr_to_rgb` and `RgbToYcbcr::convert` renames; the tone-mapping `eotf_for`/`oetf_for` removed in favour of `standard_eotf_for`/`standard_oetf_for`; the upsampling kernels and `clip_pixel8`/`clip_pixel` moved to `gamut-dsp` (`ChromaUpsampling` stays, in `format`) | ✅ |
 
 ## API policies frozen at v1
 
@@ -52,7 +53,7 @@ tolerance-level, not bit-for-bit.
   minor releases.
 - **`gamut_core::Error` is the error surface** — the crate's only fallible paths are
   buffer-shape validation, exactly `InvalidInput`-shaped; no crate-local error enum.
-- **Range is a conversion property, not buffer state**: `Yuv420` does not store the
+- **Range is a conversion property, not buffer state**: a `Planar8` does not store the
   `ColorRange` used to fill it; callers carry the flag end to end (it is header metadata).
 - **`oklab_to_linear_srgb` is sRGB-only by design** — sRGB is the gamut-membership test target
   and the encode target; per-gamut inverses are additive later if a use case appears.
@@ -62,8 +63,8 @@ tolerance-level, not bit-for-bit.
 - **16-bit is modeled, not an AV1 depth** — 10/12-bit planes ship (`Planar16`, coded end to end by
   gamut-avif), but `BitDepth::Sixteen` (issue #260) is not an AV1 depth: AV1 tops out at 12 and
   never produces it. It exists for the 16-bit
-  interleaved still-image pipelines (PNG/TIFF/JXL/DNG) that consume this vocabulary. `clip_pixel`
-  accepts it; no gamut encode path emits it. Depths outside the fixed 8/10/12/16 set (RAW's
+  interleaved still-image pipelines (PNG/TIFF/JXL/DNG) that consume this vocabulary.
+  `gamut_dsp::math::clip_pixel` accepts it; no gamut encode path emits it. Depths outside the fixed 8/10/12/16 set (RAW's
   14-bit, TIFF's `1..=16`) are deliberately **not** enum variants — those formats carry a
   free-form integer depth (`gamut-dng`'s `bits_per_sample`, validated `1..=16`), a domain an enum
   cannot model.
@@ -71,7 +72,7 @@ tolerance-level, not bit-for-bit.
   not a `Kr`/`Kb` matrix. `Identity` is deliberately *not* a `YcbcrMatrix` either —
   it is a GBR plane permutation the caller performs, not an affine transform — and `Unspecified` is
   a policy choice belonging to the format layer.
-- **Row / SIMD YCbCr ↔ RGB** — `YcbcrMatrix::to_rgb` and `RgbToYcbcr::from_rgb` are scalar and
+- **Row / SIMD YCbCr ↔ RGB** — `YcbcrMatrix::to_rgb` and `RgbToYcbcr::convert` are scalar and
   `#[inline]`; a subsampling-aware row API is additive if profiling asks for it.
 - **HLG display OOTF** — the HLG transfer (H.273 code point 18) is implemented scene-referred, as
   `hlg_oetf` / `hlg_inverse_oetf` (issue #555); the BT.2100 HLG *EOTF*, which adds a system gamma

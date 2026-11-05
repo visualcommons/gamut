@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 
 use gamut_color::cicp::{ColorRange, MatrixCoefficients};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16};
-use gamut_core::{Error, Result};
+use gamut_core::{Dimensions, Error, Result};
 
 use crate::filter::{FrameFilters, LrUnits};
 use crate::geom::PlaneGeom;
@@ -331,8 +331,11 @@ pub fn encode_still_intra_superres(
     )
 }
 
-/// Validates the source layout and dimensions shared by every entry point, returning whether the
-/// frame is monochrome.
+/// Validates the source layout shared by every entry point, returning whether the frame is
+/// monochrome.
+///
+/// No dimension check lives here: a `Planar8` / `Planar16` is built from a non-zero
+/// `gamut_core::Dimensions`, so an empty source cannot reach an entry point.
 ///
 /// Two rules survive here, both about combinations the coding path cannot represent:
 ///
@@ -351,19 +354,7 @@ pub fn encode_still_intra_superres(
 /// *is* identity: a caller reaching here with monochrome planes and the default colour would
 /// otherwise emit a non-conformant stream that libaom and dav1d are entitled to reject.
 /// `Av1Colour::monochrome()` is the fix, and the error says so.
-fn check_layout(
-    width: u32,
-    height: u32,
-    subsampling: ChromaSubsampling,
-    colour: Av1Colour,
-    qindex: u8,
-) -> Result<bool> {
-    if width == 0 || height == 0 {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "image has a zero dimension",
-        ));
-    }
+fn check_layout(subsampling: ChromaSubsampling, colour: Av1Colour, qindex: u8) -> Result<bool> {
     let monochrome = subsampling == ChromaSubsampling::Cs400;
     if qindex == 0 && !monochrome && subsampling != ChromaSubsampling::Cs444 {
         return Err(Error::unsupported(
@@ -574,7 +565,7 @@ fn encode16_with(
     variation: BlockVariation,
 ) -> Result<(EncodedStill, ReconImage)> {
     let (width, height) = (planes.width(), planes.height());
-    let monochrome = check_layout(width, height, planes.subsampling(), colour, qindex)?;
+    let monochrome = check_layout(planes.subsampling(), colour, qindex)?;
     let config = still_config(
         width,
         height,
@@ -600,16 +591,17 @@ fn encode16_with(
     let frame = if qindex == 0 {
         // Lossless: the reconstruction *is* the source. Each plane crops at its own extent, so a
         // monochrome buffer's empty chroma planes stay empty.
+        let extents = plane_extents(width, height, planes.subsampling());
         CodedFrame::lossless(encoder().encode(&layout, options.threads), |i| {
-            let (pw, ph) = planes.plane_dimensions(i);
-            crop(planes.plane(i), pw, pw, ph)
+            let (pw, ph) = extents[i];
+            crop(planes.planes()[i], pw, pw, ph)
         })
     } else {
         CodedFrame::lossy(
             encoder,
             &layout,
             options.threads,
-            planes.plane(0),
+            planes.planes()[0],
             None,
             (width as usize, height as usize),
         )
@@ -668,7 +660,7 @@ fn encode_with(
             "AV1: superres over a monochrome source is not implemented",
         ));
     }
-    let monochrome = check_layout(width, height, planes.subsampling(), colour, qindex)?;
+    let monochrome = check_layout(planes.subsampling(), colour, qindex)?;
 
     // Superres downscales the source horizontally to the coded (Frame) width; the reconstruction is
     // upscaled back to `width` at the end. `coded_src` is what the block encoder actually codes.
@@ -676,15 +668,11 @@ fn encode_with(
         Some(cd) => {
             let denom = cd as usize + 9;
             let dw = crate::filter::superres_downscaled_width(width as usize, denom);
-            let dp: [Vec<u8>; 3] = std::array::from_fn(|i| {
-                crate::filter::superres_downscale_plane(
-                    planes.plane(i),
-                    width as usize,
-                    dw,
-                    height as usize,
-                )
+            let dp: [Vec<u8>; 3] = planes.planes().map(|plane| {
+                crate::filter::superres_downscale_plane(plane, width as usize, dw, height as usize)
             });
-            (dw as u32, Planar8::from_planes(dw as u32, height, dp)?)
+            let coded_dims = Dimensions::new(dw as u32, height)?;
+            (dw as u32, Planar8::from_planes(coded_dims, dp)?)
         }
         None => (width, planes.clone()),
     };
@@ -717,9 +705,10 @@ fn encode_with(
         // Each plane crops at its **own** extent — the source carries no coded padding, so the
         // stride is the plane width. A monochrome buffer's chroma planes are empty and stay empty;
         // cropping them at the luma extent would index past the end of a zero-length slice.
+        let extents = plane_extents(width, height, planes.subsampling());
         CodedFrame::lossless(encoder().encode(&layout, options.threads), |i| {
-            let (pw, ph) = planes.plane_dimensions(i);
-            crop(planes.plane(i), pw, pw, ph)
+            let (pw, ph) = extents[i];
+            crop(planes.planes()[i], pw, pw, ph)
                 .into_iter()
                 .map(u16::from)
                 .collect()
@@ -732,7 +721,7 @@ fn encode_with(
             encoder,
             &layout,
             options.threads,
-            planes.plane(0),
+            planes.planes()[0],
             coded_denom.map(|cd| (usize::from(cd) + 9, coded_w as usize)),
             (width as usize, height as usize),
         )
@@ -887,6 +876,13 @@ impl CodedFrame {
     }
 }
 
+/// The visible `(width, height)` of each source plane `[Y, U, V]`: the luma extent, then
+/// [`ChromaSubsampling::chroma_dimensions`] twice (`(0, 0)` for monochrome's absent chroma).
+fn plane_extents(width: u32, height: u32, subsampling: ChromaSubsampling) -> [(u32, u32); 3] {
+    let chroma = subsampling.chroma_dimensions(width, height);
+    [(width, height), chroma, chroma]
+}
+
 /// Crops a `src_stride`-wide plane to `width × height`, row-major.
 fn crop<T: Copy>(plane: &[T], width: u32, src_stride: u32, height: u32) -> Vec<T> {
     let (w, sw, h) = (width as usize, src_stride as usize, height as usize);
@@ -904,10 +900,16 @@ mod tests {
 
     use super::*;
 
+    /// Non-zero test dimensions.
+    fn dims(w: u32, h: u32) -> Dimensions {
+        Dimensions::new(w, h).unwrap()
+    }
+
     #[test]
     fn recon_image_reports_each_plane_at_its_own_size() {
         // 4:4:4: every plane is the display size.
-        let planes = Planar8::from_planes(4, 2, [vec![0; 8], vec![0; 8], vec![0; 8]]).unwrap();
+        let planes =
+            Planar8::from_planes(dims(4, 2), [vec![0; 8], vec![0; 8], vec![0; 8]]).unwrap();
         let (_, recon) = encode_still_intra(&planes, 40).expect("encodes");
         assert_eq!(recon.subsampling, gamut_color::ChromaSubsampling::Cs444);
         for i in 0..3 {
@@ -933,7 +935,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "plane index 3 out of range")]
     fn recon_image_plane_dimensions_rejects_an_out_of_range_index() {
-        let planes = Planar8::from_planes(4, 2, [vec![0; 8], vec![0; 8], vec![0; 8]]).unwrap();
+        let planes =
+            Planar8::from_planes(dims(4, 2), [vec![0; 8], vec![0; 8], vec![0; 8]]).unwrap();
         let (_, recon) = encode_still_intra(&planes, 40).expect("encodes");
         let _ = recon.plane_dimensions(3);
     }
@@ -1127,7 +1130,7 @@ mod tests {
                 rgb[i..i + 3].copy_from_slice(&p);
             }
         }
-        Planar8::from_rgb8_identity(&rgb, w, h).unwrap()
+        Planar8::from_rgb8_identity(&rgb, dims(w, h)).unwrap()
     }
 
     /// `p` coded at `qindex` with the full search and no superres, as `encode_with` codes it at
@@ -1148,7 +1151,7 @@ mod tests {
             || FrameEncoder::new(p, qindex),
             &layout,
             NonZeroUsize::MIN,
-            p.plane(0),
+            p.planes()[0],
             None,
             (w, h),
         )
@@ -1338,10 +1341,9 @@ mod tests {
         assert_eq!(plain, speed.0.obus);
 
         let deep = Planar16::from_planes(
-            64,
-            48,
+            dims(64, 48),
             BitDepth::Ten,
-            std::array::from_fn(|i| p.plane(i).iter().map(|&v| u16::from(v) << 2).collect()),
+            std::array::from_fn(|i| p.planes()[i].iter().map(|&v| u16::from(v) << 2).collect()),
         )
         .unwrap();
         let plain = encode_still_intra16_with(&deep, 40, colour).unwrap().0.obus;
@@ -1407,10 +1409,9 @@ mod tests {
             ..Av1Colour::default()
         };
         let mono = Planar8::from_planes_subsampled(
-            200,
-            150,
+            dims(200, 150),
             ChromaSubsampling::Cs400,
-            [rgb.plane(0).to_vec(), Vec::new(), Vec::new()],
+            [rgb.planes()[0].to_vec(), Vec::new(), Vec::new()],
         )
         .unwrap();
         let cases: [(&str, Planar8, u8, Av1Colour, Tiling); 5] = [
@@ -1471,12 +1472,10 @@ mod tests {
 
         // The high-bit-depth entry point threads the same options through.
         let deep = Planar16::from_planes(
-            200,
-            150,
+            dims(200, 150),
             BitDepth::Ten,
             std::array::from_fn(|i| {
-                planes(200, 150, mix)
-                    .plane(i)
+                planes(200, 150, mix).planes()[i]
                     .iter()
                     .map(|&v| u16::from(v) << 2)
                     .collect()
@@ -1673,26 +1672,6 @@ mod tests {
             let p = planes(w, h, |x, y| [(x * 11) as u8, (y * 13) as u8, (x * y) as u8]);
             let e = encode_still_lossless_identity(&p).unwrap();
             assert_eq!(parse_obus(&e.obus).len(), 2);
-        }
-    }
-
-    #[test]
-    fn rejects_zero_dimension() {
-        // Each axis is rejected independently: a 0×0, a 0×4 and a 4×0 image must all fail with the
-        // guard's own message. The mixed cases (exactly one zero) are what force the guard to be an
-        // `||` — under `&&` a 0×4 slips through to fault deeper in the encoder.
-        for (w, h) in [(0, 0), (0, 4), (4, 0)] {
-            let p = Planar8::from_rgb8_identity(&[], w, h).unwrap();
-            match encode_still_intra(&p, 0) {
-                Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
-                    assert_eq!(
-                        error.static_message(),
-                        Some("image has a zero dimension"),
-                        "{w}x{h}"
-                    );
-                }
-                other => panic!("{w}x{h}: expected zero-dimension InvalidInput, got {other:?}"),
-            }
         }
     }
 
@@ -1962,8 +1941,7 @@ mod tests {
         let (still, _) = encode_still_intra_superres(&p, 90, 4).unwrap();
         assert_eq!(block_variation_flags(&still.obus), none, "superres");
         let deep = Planar16::from_planes(
-            64,
-            48,
+            dims(64, 48),
             BitDepth::Ten,
             std::array::from_fn(|c| {
                 (0..64u32 * 48)
@@ -2111,8 +2089,7 @@ mod tests {
             .map(|i| texture(i % 96, i / 96)[1])
             .collect::<Vec<_>>();
         let mono = Planar8::from_planes_subsampled(
-            96,
-            80,
+            dims(96, 80),
             ChromaSubsampling::Cs400,
             [luma, Vec::new(), Vec::new()],
         )
@@ -2128,8 +2105,7 @@ mod tests {
         };
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         let src = Planar16::from_planes_subsampled(
-            w,
-            h,
+            dims(w, h),
             ChromaSubsampling::Cs420,
             BitDepth::Ten,
             [deep(1, w, h), deep(2, cw, ch), deep(0, cw, ch)],

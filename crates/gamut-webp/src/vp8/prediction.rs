@@ -7,7 +7,7 @@
 //! are carried as `usize` indices throughout: the `*_PRED` (whole-block) and `B_*_PRED` (subblock)
 //! constants are the same values as the tree-leaf indices the coders use.
 
-use gamut_color::clip_pixel8;
+use gamut_dsp::math::clip_pixel8;
 
 use super::bool_coder::{Prob, Tree};
 

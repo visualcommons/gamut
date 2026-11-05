@@ -47,7 +47,7 @@
 //! T.81 leaves the reconstruction filter for a component coded at reduced resolution open (§A.2
 //! NOTE). By default ([`ChromaUpsampling::Interpolated`]) the decoder does what libjpeg-turbo's
 //! `djpeg` does by default, the "fancy" triangle filter of `jdsample.c`, through
-//! [`gamut_color::upsample::libjpeg`]. That covers a component at half the horizontal resolution
+//! [`gamut_dsp::upsample::libjpeg`]. That covers a component at half the horizontal resolution
 //! (4:2:2), half the vertical (4:4:0) or half both (4:2:0), whatever the absolute sampling
 //! factors. A 4:2:2 or 4:2:0 component only one or two samples wide, and every other integer
 //! ratio, is replicated, as libjpeg-turbo does too. The output is therefore byte-identical to
@@ -62,12 +62,12 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use gamut_color::upsample::{libjpeg, taps};
-use gamut_color::{ChromaUpsampling, ColorRange, ycbcr_to_rgb};
+use gamut_color::{ChromaUpsampling, ColorRange, bt601_ycbcr_to_rgb};
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw, convert_from_raw_into};
 use gamut_core::{
     Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Pixel, PixelFormat, Result, Rgb8,
 };
+use gamut_dsp::upsample::{libjpeg, taps};
 
 use crate::appmeta;
 use crate::backend::{self, DecodedJpeg, DecoderSlot, JpegStreamDecoder, JpegStreamInfo};
@@ -773,7 +773,7 @@ impl ColumnMap {
 /// Converts one row of full-range YCbCr (T.871 §7) to interleaved RGB in `out`, three samples per
 /// pixel, through `packed`, a scratch row of at least as many pixels.
 ///
-/// The arithmetic is [`ycbcr_to_rgb`]'s, sample for sample, so the output is byte-identical to the
+/// The arithmetic is [`bt601_ycbcr_to_rgb`]'s, sample for sample, so the output is byte-identical to the
 /// per-pixel conversion; what changes is the shape of the loops, so that the compiler vectorises
 /// them with the target's baseline vector instructions (SSE2 on x86-64, NEON on aarch64) and no
 /// `unsafe`:
@@ -787,7 +787,7 @@ impl ColumnMap {
 ///    fourth byte would land past the row, is written as three bytes.
 fn ycbcr_to_rgb_row(y: &[u8], cb: &[u8], cr: &[u8], packed: &mut [u32], out: &mut [u8]) {
     for (((p, &y), &cb), &cr) in packed.iter_mut().zip(y).zip(cb).zip(cr) {
-        let (r, g, b) = ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
+        let (r, g, b) = bt601_ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
         *p = u32::from_le_bytes([r, g, b, 0]);
     }
     let n = out.len() / 3;
@@ -1186,7 +1186,7 @@ fn present_native(
                     .zip(cr)
                     .zip(k)
                 {
-                    let (r, g, b) = ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
+                    let (r, g, b) = bt601_ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
                     px.copy_from_slice(&[255 - r, 255 - g, 255 - b, k]);
                 }
             }
@@ -1366,7 +1366,7 @@ mod tests {
     //! expectation. These cover ground the encoder round-trips cannot (non-interleaved multi-scan,
     //! CMYK/YCCK, Adobe/RGB colour, SOF1).
 
-    use gamut_color::{ColorRange, ycbcr_to_rgb};
+    use gamut_color::{ColorRange, bt601_ycbcr_to_rgb};
     use gamut_core::{Cmyk8, DecodeImage, Dimensions, Gray8, ImageBuf, Rgb8};
     use gamut_dsp::jpeg::inverse_dct8x8_int;
 
@@ -1746,7 +1746,7 @@ mod tests {
         let d = [10, -20, 30, 40];
         let jpeg = four_comp_8x8(d, Some(2));
         let (y, cb, cr) = ((128 + d[0]) as u8, (128 + d[1]) as u8, (128 + d[2]) as u8);
-        let (r, g, b) = ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
+        let (r, g, b) = bt601_ycbcr_to_rgb(y, cb, cr, ColorRange::Full);
         let expected = [255 - r, 255 - g, 255 - b, (128 + d[3]) as u8];
         let out: ImageBuf<Cmyk8> = JpegDecoder::new().decode_image(&jpeg).unwrap();
         assert_eq!(&out.as_samples()[..4], &expected);
@@ -1879,7 +1879,7 @@ mod tests {
             let cr: Vec<u8> = (0..len).map(|i| (i * 29 + 90) as u8).collect();
             let want: Vec<u8> = (0..len)
                 .flat_map(|i| {
-                    let (r, g, b) = ycbcr_to_rgb(y[i], cb[i], cr[i], ColorRange::Full);
+                    let (r, g, b) = bt601_ycbcr_to_rgb(y[i], cb[i], cr[i], ColorRange::Full);
                     [r, g, b]
                 })
                 .collect();
@@ -1945,7 +1945,7 @@ mod tests {
         // A JFIF APP0 (and ids 1,2,3, no Adobe) selects the YCbCr transform.
         let d = [10, -20, 30];
         let jpeg = three_comp_8x8([1, 2, 3], d, true, None);
-        let (r, g, b) = ycbcr_to_rgb(
+        let (r, g, b) = bt601_ycbcr_to_rgb(
             (128 + d[0]) as u8,
             (128 + d[1]) as u8,
             (128 + d[2]) as u8,
@@ -1961,7 +1961,7 @@ mod tests {
         // tree checks JFIF before the id heuristic. This pins that the APP0 flag is actually read.
         let d = [10, -20, 30];
         let jpeg = three_comp_8x8(*b"RGB", d, true, None);
-        let (r, g, b) = ycbcr_to_rgb(
+        let (r, g, b) = bt601_ycbcr_to_rgb(
             (128 + d[0]) as u8,
             (128 + d[1]) as u8,
             (128 + d[2]) as u8,

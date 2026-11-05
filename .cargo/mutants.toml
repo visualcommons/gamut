@@ -301,12 +301,12 @@ exclude_re = [
     # gamut-color `vp8_clip8`: the `else if v < 0` branch is reached only when `v` is out of range
     # (`v == 0` takes the `v & !MASK2 == 0` fast path), so `v != 0` always holds there and `v < 0`
     # is equivalent to `v <= 0`. (`v < 0 → v == 0` *is* observable and is killed by a test.)
-    '^crates/gamut-color/src/ycbcr\.rs:92:17: replace < with <= in vp8_clip8$',
+    '^crates/gamut-color/src/ycbcr\.rs:94:17: replace < with <= in vp8_clip8$',
     # gamut-color `prophoto_rgb_eotf_standard`: the ROMM toe `x/16` and the power curve `x^1.8` are
     # equal at the x = 1/32 breakpoint (both 2^-9), so the curve is continuous and `x < 1/32` vs
     # `x <= 1/32` choose between two identical values there — unobservable. (`1.0/32.0 → 1.0%32.0`
     # *is* observable and is killed by a test at x = 0.5.)
-    '^crates/gamut-color/src/transfer\.rs:110:10: replace < with <= in prophoto_rgb_eotf_standard$',
+    '^crates/gamut-color/src/transfer\.rs:112:10: replace < with <= in prophoto_rgb_eotf_standard$',
     # gamut-iptc `IimBlock::parse`: every `|` assembles a big-endian length from disjoint octet
     # positions — `(hi << 8) | lo` (standard length), `(k_hi << 8) | k_lo` (extended descriptor
     # width), and `(len << 8) | byte` (extended length accumulator). In each the left operand's low
@@ -332,7 +332,7 @@ exclude_re = [
     # `-> Default::default()` replacement is byte-identical — provably equivalent, unkillable. It
     # exists to pair with `lossy()` and make the call site explicit; `new()` (also `Self::default()`)
     # generates no such mutant. This is the only mutant the function produces.
-    '^crates/gamut-avif/src/encoder\.rs:436:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
+    '^crates/gamut-avif/src/encoder\.rs:438:9: replace AvifEncoder::lossless -> Self with Default::default\(\)$',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
     # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
@@ -388,19 +388,19 @@ exclude_re = [
     # requirement. Each function below feeds only an encoder decision:
     #   mb_luma_mean — per-macroblock luma average, used only to choose a quantizer segment;
     '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in mb_luma_mean$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:132:5: replace mb_luma_mean -> u32 with .*$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:133:5: replace mb_luma_mean -> u32 with .*$',
     #   block_sad — the prediction-cost proxy for mode selection;
     '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in block_sad$',
     #   select_luma_mode / select_chroma_mode — lowest-SAD whole-block mode pickers (any mode is legal);
     '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in select_luma_mode$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:698:5: replace select_luma_mode -> usize with .*$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:701:5: replace select_luma_mode -> usize with .*$',
     '^crates/gamut-webp/src/vp8/frame\.rs:\d+:\d+: .* in select_chroma_mode$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:724:5: replace select_chroma_mode -> usize with .*$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:727:5: replace select_chroma_mode -> usize with .*$',
     #   encode_bpred_luma — the submode tie-break (`sad < best`) and the running prediction-cost
     #   accumulator (`total_sad +=`, used only for the B_PRED-vs-whole-block decision); both pick
     #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
-    '^crates/gamut-webp/src/vp8/frame\.rs:914:20: replace < with <= in encode_bpred_luma$',
-    '^crates/gamut-webp/src/vp8/frame\.rs:920:19: replace \+= with \*= in encode_bpred_luma$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:917:20: replace < with <= in encode_bpred_luma$',
+    '^crates/gamut-webp/src/vp8/frame\.rs:923:19: replace \+= with \*= in encode_bpred_luma$',
     #   (Line anchors on `SEGMENT_QUANT_DELTAS`' two signs and on `encode_frame_filtered`'s segment
     #   assignment, segment-map index and B_PRED threshold had drifted off their lines and matched
     #   nothing. #1054 re-surveyed those operators where they now stand — the deltas, the `/ 64`

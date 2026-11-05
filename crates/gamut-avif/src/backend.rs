@@ -38,8 +38,8 @@ use std::sync::{Arc, Mutex};
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, SequenceHeader, Speed, Subsampling};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status, codec_id, pixel_format};
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients, Planar8,
-    Planar16, TransferCharacteristics,
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients, Planar8, Planar16,
+    TransferCharacteristics,
 };
 use gamut_core::{Dimensions, Error, Result};
 
@@ -658,10 +658,14 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
         // Per plane, not one luma stride for all three: `Planar8` carries its chroma geometry, and
         // `ImageDesc` has a stride slot per plane precisely so a subsampled buffer is expressible.
         // At 4:4:4 — everything this crate encodes today — all three are the luma width.
-        let stride = |i: usize| planes.plane_dimensions(i).0 as usize;
+        let (cw, _) = planes
+            .subsampling()
+            .chroma_dimensions(planes.width(), planes.height());
+        let widths = [planes.width(), cw, cw];
+        let stride = |i: usize| widths[i] as usize;
         // Encode inputs are read-only per `ImageDesc`'s contract; the `*mut` is the ABI's single
         // descriptor shape shared with the decode (write) direction.
-        let plane_ptr = |i: usize| planes.plane(i).as_ptr().cast_mut();
+        let plane_ptr = |i: usize| planes.planes()[i].as_ptr().cast_mut();
         let image = ImageDesc::new(
             // Three 8-bit planes in gamut's identity order (Y = G, U = B, V = R) — the planar
             // form of `PixelFormat::Rgb8`, which is what the AVIF v1 surface encodes.
@@ -701,11 +705,15 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
         // Bytes, not samples: `ImageDesc::strides` is a byte stride, and a `u16` row is twice as
         // wide as its sample count. Deriving it from the sample count instead would hand the
         // backend every other row.
-        let stride = |i: usize| planes.plane_dimensions(i).0 as usize * size_of::<u16>();
+        let (cw, _) = planes
+            .subsampling()
+            .chroma_dimensions(planes.width(), planes.height());
+        let widths = [planes.width(), cw, cw];
+        let stride = |i: usize| widths[i] as usize * size_of::<u16>();
         // `Vec<u16>` is 2-byte aligned, which is what a backend reinterpreting the pointer as
         // `uint16_t *` needs; the `*mut` is the ABI's one descriptor shape, shared with the decode
         // (write) direction, and encode inputs stay read-only per its contract.
-        let plane_ptr = |i: usize| planes.plane(i).as_ptr().cast::<u8>().cast_mut();
+        let plane_ptr = |i: usize| planes.planes()[i].as_ptr().cast::<u8>().cast_mut();
         let image = ImageDesc::new(
             // `Rgb16` rather than `Rgb8`: the samples are `u16`, and the tag is what tells a
             // backend how wide to read before `bit_depth` tells it how many bits carry signal.

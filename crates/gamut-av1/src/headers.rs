@@ -10,7 +10,7 @@
 //! while any other CICP triple codes `color_range` explicitly.
 
 use gamut_bitstream::{BitWriter, write_leb128};
-use gamut_color::cicp::{ColorRange, ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Error, Result};
 
 use crate::filter::FrameFilters;

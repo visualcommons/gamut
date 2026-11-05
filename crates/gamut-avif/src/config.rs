@@ -2,7 +2,7 @@
 //! encoding.
 
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients,
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
     TransferCharacteristics,
 };
 

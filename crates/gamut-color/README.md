@@ -30,14 +30,15 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
 
 ```rust
 use gamut_color::Planar8;
+use gamut_core::Dimensions;
 
 // 8-bit interleaved RGB -> identity (mc = 0) 4:4:4 planes (Y=G, U=B, V=R).
-let width = 2;
-let height = 2;
-let rgb: Vec<u8> = vec![0; width * height * 3];
-let planes = Planar8::from_rgb8_identity(&rgb, width as u32, height as u32).expect("valid input");
+let dims = Dimensions::new(2, 2)?;
+let rgb: Vec<u8> = vec![0; 2 * 2 * 3];
+let planes = Planar8::from_rgb8_identity(&rgb, dims)?;
 assert_eq!(planes.width(), 2);
-let _y = planes.plane(0); // luma plane
+let [_y, _u, _v] = planes.planes(); // luma, then the two chroma planes
+# Ok::<(), gamut_core::Error>(())
 ```
 
 Enable the optional `serde` feature to serialize and deserialize [`BitDepth`],
@@ -50,8 +51,9 @@ explicit `code_point`/`from_code_point` API rather than serde's representation.
 Stable at the current major (first released as 1.0 under issue #179); see [`STATUS.md`](STATUS.md) for the phase history, the frozen
 API policies, and the deferrals. Implemented today: 8-bit RGB ↔ identity 4:4:4 conversion
 ([`Planar8::from_rgb8_identity`] / [`Planar8::to_rgb8_identity`]), the CICP tables the AVIF
-`colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP), the decoders' reference-exact chroma
-upsampling (`upsample`: libjpeg-turbo, libwebp and libavif kernels behind `ChromaUpsampling`), the
+`colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP: `Planar8::from_rgb8_bt601` /
+`Planar8::to_rgb8_bt601`), the decoders' `ChromaUpsampling` choice (its reference-exact
+libjpeg-turbo, libwebp and libavif kernels live in `gamut-dsp`'s `upsample` module), the
 general H.273 §8.3 luma–chroma transform in both directions (`RgbToYcbcr` / `YcbcrMatrix`: BT.601 / BT.470 B,G / BT.709 / BT.2020-NCL, both
 signal ranges, at every modeled bit depth — the AVIF lossy encode path and the AVIF/HEIC
 presentation path), the `f64` colour science for the sRGB, Display P3, Adobe RGB, BT.2020 and

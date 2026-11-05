@@ -35,7 +35,7 @@ use gamut::avif::{
 use gamut::core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16};
 use gamut_codec_abi::EncoderVTable;
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients,
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
     TransferCharacteristics,
 };
 

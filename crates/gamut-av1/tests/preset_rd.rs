@@ -33,7 +33,7 @@ fn planes(f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {
             rgb[i..i + 3].copy_from_slice(&f(x, y));
         }
     }
-    Planar8::from_rgb8_identity(&rgb, SIDE, SIDE).unwrap()
+    Planar8::from_rgb8_identity(&rgb, gamut_core::Dimensions::new(SIDE, SIDE).unwrap()).unwrap()
 }
 
 /// A deterministic hash of a position, for the photo's light noise.
@@ -79,7 +79,7 @@ fn psnr(src: &Planar8, recon: &ReconImage) -> f64 {
     let mut sse = 0u64;
     let mut n = 0u64;
     for p in 0..3 {
-        for (&s, &r) in src.plane(p).iter().zip(&recon.planes[p]) {
+        for (&s, &r) in src.planes()[p].iter().zip(&recon.planes[p]) {
             let d = i64::from(s) - i64::from(r);
             sse += (d * d) as u64;
             n += 1;

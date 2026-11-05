@@ -41,7 +41,7 @@ pub const LUMA_ONE: u32 = 1 << LUMA_FIX;
 
 /// BT.601 / SMPTE 170M luma weights (`KR = 0.299`, `KG = 0.587`, `KB = 0.114`) at [`LUMA_FIX`].
 ///
-/// The JFIF/libjpeg row, and the coefficients `gamut_color::rgb_to_ycbcr` applies on its
+/// The JFIF/libjpeg row, and the coefficients `gamut_color::bt601_rgb_to_ycbcr` applies on its
 /// full-range path.
 pub const BT601_LUMA_WEIGHTS: [u32; 3] = [19_595, 38_470, 7_471];
 

@@ -3,7 +3,7 @@
 //! Serde contract tests for the feature-gated colour enums.
 
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients,
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients,
     TransferCharacteristics,
 };
 

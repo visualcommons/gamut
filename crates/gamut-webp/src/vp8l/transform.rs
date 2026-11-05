@@ -6,7 +6,7 @@
 //! lands with the encoder (issue #22 commit series); the inverse application here is what the
 //! decoder runs, last-read transform first.
 
-use gamut_color::clip_pixel8;
+use gamut_dsp::math::clip_pixel8;
 
 use crate::vp8l::div_round_up;
 

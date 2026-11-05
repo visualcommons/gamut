@@ -617,7 +617,7 @@ mod tests {
         // BT.709 primaries / BT.709 transfer / BT.709 matrix is outside the sRGB shortcut, so
         // `color_range` is coded explicitly.
         use gamut_color::cicp::{
-            ColorRange, ColorPrimaries, MatrixCoefficients, TransferCharacteristics,
+            ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics,
         };
         let colour = Av1Colour {
             primaries: ColorPrimaries::Bt709,

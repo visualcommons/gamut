@@ -22,7 +22,7 @@ use gamut_av1::{
     encode_still_intra_with, encode_still_intra_with_options, encode_still_intra_with_speed,
     encode_still_intra16_with, encode_still_intra16_with_options, encode_still_intra16_with_speed,
 };
-use gamut_color::cicp::{ColorRange, ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16, RgbToYcbcr};
 use gamut_core::{Dimensions, ImageRef, Rgb8};
 
@@ -35,7 +35,12 @@ fn planes(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {
             rgb[i..i + 3].copy_from_slice(&f(x, y));
         }
     }
-    Planar8::from_rgb8_identity(&rgb, w, h).unwrap()
+    Planar8::from_rgb8_identity(&rgb, dims(w, h)).unwrap()
+}
+
+/// Non-zero test dimensions.
+fn dims(w: u32, h: u32) -> Dimensions {
+    Dimensions::new(w, h).unwrap()
 }
 
 /// Builds `Y/Cb/Cr` planes through a real luma-chroma matrix, box-averaging chroma to `ss`.
@@ -1343,8 +1348,12 @@ fn mono_planes(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> Planar8 {
             y[(row * w + col) as usize] = f(col, row);
         }
     }
-    Planar8::from_planes_subsampled(w, h, ChromaSubsampling::Cs400, [y, Vec::new(), Vec::new()])
-        .expect("valid monochrome planes")
+    Planar8::from_planes_subsampled(
+        dims(w, h),
+        ChromaSubsampling::Cs400,
+        [y, Vec::new(), Vec::new()],
+    )
+    .expect("valid monochrome planes")
 }
 
 #[test]
@@ -1448,7 +1457,7 @@ fn planes16(w: u32, h: u32, bits: BitDepth, f: impl Fn(u32, u32) -> [u16; 3]) ->
             }
         }
     }
-    Planar16::from_planes(w, h, bits, p).expect("valid high-bit-depth planes")
+    Planar16::from_planes(dims(w, h), bits, p).expect("valid high-bit-depth planes")
 }
 
 /// A textured generator spanning the full `bits` range: the 8-bit pattern the lossy cases use,
@@ -1554,8 +1563,7 @@ fn high_bit_depth_monochrome_matches_both_decoders() {
                 }
             }
             let src = Planar16::from_planes_subsampled(
-                40,
-                24,
+                dims(40, 24),
                 ChromaSubsampling::Cs400,
                 bits,
                 [y, Vec::new(), Vec::new()],
@@ -1587,10 +1595,9 @@ fn an_eight_bit_planar16_encodes_exactly_as_planar8_does() {
             // The *same* planes, widened — not the same RGB re-mapped, which would silently permute
             // them (`planes` maps RGB to GBR; `planes16` is plane-direct).
             let wide = Planar16::from_planes(
-                w,
-                h,
+                dims(w, h),
                 BitDepth::Eight,
-                std::array::from_fn(|i| eight.plane(i).iter().copied().map(u16::from).collect()),
+                std::array::from_fn(|i| eight.planes()[i].iter().copied().map(u16::from).collect()),
             )
             .unwrap();
             let a = encode_still_intra_with(&eight, q, Av1Colour::default()).unwrap();

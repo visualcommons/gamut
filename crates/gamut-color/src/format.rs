@@ -168,9 +168,40 @@ impl ChromaSubsampling {
     }
 }
 
+/// How a decoder reconstructs full-resolution chroma from a subsampled plane.
+///
+/// Every gamut decoder that presents subsampled YCbCr as RGB takes one of these. The default,
+/// [`Interpolated`](Self::Interpolated), matches the format's reference decoder, so a decoded image
+/// sits on the reference's own output. Choose [`Nearest`](Self::Nearest) for the cheaper
+/// sample-replicating reconstruction. The kernels behind both, one rounding-exact port per
+/// reference decoder, are `gamut-dsp`'s `upsample` module.
+///
+/// The discriminants are permanent and new variants are only ever appended, so the value crosses
+/// a C boundary as a plain `u8`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub enum ChromaUpsampling {
+    /// Sample replication: each chroma sample covers every luma sample it was subsampled from.
+    /// Exact at 4:4:4, and the cheapest choice otherwise.
+    Nearest = 0,
+    /// The format's reference interpolating filter: libjpeg-turbo's fancy upsampling for JPEG,
+    /// libwebp's fancy upsampler for WebP, libavif's bilinear filter for AVIF.
+    #[default]
+    Interpolated = 1,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interpolated_is_the_default_and_discriminants_are_pinned() {
+        assert_eq!(ChromaUpsampling::default(), ChromaUpsampling::Interpolated);
+        assert_eq!(ChromaUpsampling::Nearest as u8, 0);
+        assert_eq!(ChromaUpsampling::Interpolated as u8, 1);
+    }
 
     const ALL: [BitDepth; 4] = [
         BitDepth::Eight,

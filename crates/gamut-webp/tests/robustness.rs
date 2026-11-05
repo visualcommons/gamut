@@ -9,12 +9,14 @@ use gamut_webp::vp8::frame::{decode_frame, encode_frame};
 
 /// A valid VP8 key-frame payload to mutate.
 fn valid_payload() -> Vec<u8> {
-    let yuv = gamut_color::Yuv420::new(
-        48,
-        32,
-        (0..48 * 32).map(|i| (i % 251) as u8).collect(),
-        vec![110u8; 24 * 16],
-        vec![120u8; 24 * 16],
+    let yuv = gamut_color::Planar8::from_planes_subsampled(
+        gamut_core::Dimensions::new(48, 32).unwrap(),
+        gamut_color::ChromaSubsampling::Cs420,
+        [
+            (0..48 * 32).map(|i| (i % 251) as u8).collect(),
+            vec![110u8; 24 * 16],
+            vec![120u8; 24 * 16],
+        ],
     )
     .unwrap();
     encode_frame(&yuv, 40)

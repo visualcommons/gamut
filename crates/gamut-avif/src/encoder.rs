@@ -8,8 +8,8 @@ use gamut_av1::{
     encode_still_intra16_with_options,
 };
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColorPrimaries, MatrixCoefficients, Planar8,
-    Planar16, RgbToYcbcr, TransferCharacteristics,
+    BitDepth, ChromaSubsampling, ColorPrimaries, ColorRange, MatrixCoefficients, Planar8, Planar16,
+    RgbToYcbcr, TransferCharacteristics,
 };
 use gamut_core::convert::{AlphaPolicy, ConvertPolicy, convert, premultiply_alpha};
 use gamut_core::{
@@ -168,7 +168,7 @@ impl<'a> RawPlanes<'a> {
     /// # Errors
     ///
     /// An [`ErrorKind::InvalidInput`](gamut_core::ErrorKind::InvalidInput) error when the planes
-    /// cannot form one AVIF image: `colour` is zero-sized or [`ChromaSubsampling::Cs400`] (a single plane is not YCbCr — encode it as
+    /// cannot form one AVIF image: `colour` is [`ChromaSubsampling::Cs400`] (a single plane is not YCbCr — encode it as
     /// [`Gray8`](gamut_core::Gray8)), or `alpha` is not a [`ChromaSubsampling::Cs400`] plane of
     /// `colour`'s width and height.
     pub fn eight(
@@ -267,8 +267,10 @@ impl<'a> RawPlanes<'a> {
     }
 }
 
-/// The size of colour planes that can be a YCbCr AVIF item, refusing zero-sized ones and a single
-/// plane.
+/// The size of colour planes that can be a YCbCr AVIF item, refusing a single plane.
+///
+/// `Dimensions::new` cannot fail here: a `Planar8` / `Planar16` is itself built from non-zero
+/// `Dimensions`; it only re-types the pair the buffers report.
 fn check_colour(width: u32, height: u32, subsampling: ChromaSubsampling) -> Result<Dimensions> {
     let dims = Dimensions::new(width, height)?;
     if subsampling == ChromaSubsampling::Cs400 {
@@ -3169,13 +3171,17 @@ mod tests {
         );
     }
 
+    /// `w`×`h` as [`Dimensions`].
+    fn dims(w: u32, h: u32) -> Dimensions {
+        Dimensions::new(w, h).unwrap()
+    }
+
     /// 4:2:0 8-bit colour planes of `w`×`h`.
     fn colour8(w: u32, h: u32) -> Planar8 {
         let (cw, ch) = ChromaSubsampling::Cs420.chroma_dimensions(w, h);
         let n = (cw * ch) as usize;
         Planar8::from_planes_subsampled(
-            w,
-            h,
+            dims(w, h),
             ChromaSubsampling::Cs420,
             [vec![0; (w * h) as usize], vec![0; n], vec![0; n]],
         )
@@ -3185,8 +3191,7 @@ mod tests {
     /// A single-plane (`Cs400`) 8-bit buffer of `w`×`h`.
     fn mono8(w: u32, h: u32) -> Planar8 {
         Planar8::from_planes_subsampled(
-            w,
-            h,
+            dims(w, h),
             ChromaSubsampling::Cs400,
             [vec![0; (w * h) as usize], vec![], vec![]],
         )
@@ -3196,8 +3201,7 @@ mod tests {
     /// A single-plane (`Cs400`) high-bit-depth buffer of `w`×`h` at `depth`.
     fn mono16(w: u32, h: u32, depth: BitDepth) -> Planar16 {
         Planar16::from_planes_subsampled(
-            w,
-            h,
+            dims(w, h),
             ChromaSubsampling::Cs400,
             depth,
             [vec![0; (w * h) as usize], vec![], vec![]],
@@ -3226,7 +3230,7 @@ mod tests {
         assert_eq!(raw.range(), ColorRange::Limited);
         assert!(raw.has_alpha());
         let colour16 =
-            Planar16::from_planes(1, 1, BitDepth::Ten, [vec![0], vec![0], vec![0]]).unwrap();
+            Planar16::from_planes(dims(1, 1), BitDepth::Ten, [vec![0], vec![0], vec![0]]).unwrap();
         let alpha16 = mono16(1, 1, BitDepth::Ten);
         let bt709 = MatrixCoefficients::Bt709;
         let full = ColorRange::Full;
@@ -3248,7 +3252,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_planes_refuse_a_single_colour_plane_and_an_empty_image() {
+    fn raw_planes_refuse_a_single_colour_plane() {
         let (bt709, full) = (MatrixCoefficients::Bt709, ColorRange::Full);
         assert_eq!(
             refusal(RawPlanes::eight(&mono8(2, 2), None, bt709, full)),
@@ -3259,21 +3263,16 @@ mod tests {
             refusal(RawPlanes::high(&mono, None, bt709, full)),
             "AVIF: raw colour planes need chroma; a single plane codes as Gray8"
         );
-        // `Planar8` admits a 0×n buffer; `Dimensions::new` is what refuses it.
-        let empty = Planar8::from_planes(0, 2, [vec![], vec![], vec![]]).unwrap();
-        assert_eq!(
-            RawPlanes::eight(&empty, None, bt709, full)
-                .unwrap_err()
-                .kind(),
-            gamut_core::ErrorKind::InvalidInput
-        );
+        // No empty-image case: a 0×n `Planar8` / `Planar16` cannot be built, since both take a
+        // non-zero `Dimensions` (gamut-color #1066).
     }
 
     #[test]
     fn raw_planes_high_refuses_an_eight_bit_buffer() {
         // `Planar16` admits an 8-bit buffer; `encode_still16`'s contract is 10 or 12 bits only.
         let colour16 =
-            Planar16::from_planes(1, 1, BitDepth::Eight, [vec![0], vec![0], vec![0]]).unwrap();
+            Planar16::from_planes(dims(1, 1), BitDepth::Eight, [vec![0], vec![0], vec![0]])
+                .unwrap();
         assert_eq!(
             refusal(RawPlanes::high(
                 &colour16,
@@ -3305,7 +3304,7 @@ mod tests {
         );
 
         let colour16 =
-            Planar16::from_planes(1, 1, BitDepth::Ten, [vec![0], vec![0], vec![0]]).unwrap();
+            Planar16::from_planes(dims(1, 1), BitDepth::Ten, [vec![0], vec![0], vec![0]]).unwrap();
         let wide = mono16(2, 1, BitDepth::Ten);
         assert_eq!(
             refusal(RawPlanes::high(&colour16, Some(&wide), bt709, full)),

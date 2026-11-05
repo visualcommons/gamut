@@ -17,7 +17,7 @@
 //! own header before any frame-sized allocation and before any backend is offered the job.
 //!
 //! A lossy bitstream's 4:2:0 chroma is reconstructed with libwebp's fancy upsampler by default
-//! ([`ChromaUpsampling::Interpolated`], via [`gamut_color::upsample::libwebp`]). With the
+//! ([`ChromaUpsampling::Interpolated`], via [`gamut_dsp::upsample::libwebp`]). With the
 //! libwebp-exact YUV→RGB inverse that makes the RGB byte-identical to `dwebp`'s default decode,
 //! which the crate's oracle tests pin. [`WebpDecoder::with_chroma_upsampling`] selects
 //! [`ChromaUpsampling::Nearest`] (`dwebp -nofancy`).
@@ -25,7 +25,7 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use gamut_color::{ChromaUpsampling, ColorRange, Yuv420};
+use gamut_color::{ChromaUpsampling, ColorRange, Planar8};
 use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
 use gamut_core::{
     DecodeImage, Dimensions, Error, ImageBuf, Pixel, PixelFormat, Result, Rgb8, Rgba8,
@@ -232,7 +232,7 @@ impl WebpDecoder {
     }
 
     /// Unwraps a lossy decode result, which is YUV 4:2:0 by construction.
-    fn expect_yuv(raster: DecodedRaster) -> Result<Yuv420> {
+    fn expect_yuv(raster: DecodedRaster) -> Result<Planar8> {
         match raster {
             DecodedRaster::Yuv420(yuv) => Ok(yuv),
             DecodedRaster::Argb { .. } => Err(Error::invalid_input(
@@ -312,7 +312,7 @@ impl WebpDecoder {
                 let yuv = Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
                 let dims = Dimensions::new(yuv.width(), yuv.height())?;
                 // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
-                let rgb = yuv.to_rgb8(ColorRange::Limited, self.upsampling);
+                let rgb = yuv.to_rgb8_bt601(ColorRange::Limited, self.upsampling)?;
                 // A lossy bitstream carries no alpha of its own: it exists only when the extended
                 // container supplies an `ALPH` chunk.
                 let Some(payload) = layout.alph else {

@@ -10,7 +10,7 @@ use core::ops::Range;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use gamut_color::{ColorRange, Yuv420};
+use gamut_color::{ColorRange, Planar8};
 use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Pixel, Result, Rgb8, Rgba8};
 use gamut_riff::{
     Chunk, FourCc, MetadataChunks, Vp8xHeader, WebpChunkId, c2pa_span, write_extended_preserving,
@@ -358,7 +358,7 @@ impl WebpEncoder {
 
     /// Encodes the lossy codestream for `yuv`, via a backend when one accepts, else the built-in
     /// VP8 encoder.
-    fn encode_vp8_codestream(&self, yuv: &Yuv420, dims: Dimensions) -> Result<Vec<u8>> {
+    fn encode_vp8_codestream(&self, yuv: &Planar8, dims: Dimensions) -> Result<Vec<u8>> {
         let req = WebpEncodeRequest::new(WebpCodestream::Vp8, dims, self.config.quality)
             .with_effort(self.config.effort);
         let raster = RasterRef::Yuv420(yuv);
@@ -470,7 +470,7 @@ impl WebpEncoder {
             WebpMode::Lossy => {
                 // WebP/VP8 is limited-range BT.601 (what libwebp + browsers decode); see ColorRange.
                 let yuv =
-                    Yuv420::from_rgb8(pixels, dims.width(), dims.height(), ColorRange::Limited)?;
+                    Planar8::from_rgb8_bt601(ImageRef::new(pixels, dims)?, ColorRange::Limited);
                 let payload = self.encode_vp8_codestream(&yuv, dims)?;
                 self.wrap(dims, WebpCodestream::Vp8, &payload, None, false)
             }
@@ -512,8 +512,7 @@ impl WebpEncoder {
                     .iter()
                     .flat_map(|p| [p[0], p[1], p[2]])
                     .collect();
-                let yuv =
-                    Yuv420::from_rgb8(&rgb, dims.width(), dims.height(), ColorRange::Limited)?;
+                let yuv = Planar8::from_rgb8_bt601(ImageRef::new(&rgb, dims)?, ColorRange::Limited);
                 let vp8 = self.encode_vp8_codestream(&yuv, dims)?;
                 if transparent {
                     let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();

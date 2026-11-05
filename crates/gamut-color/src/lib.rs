@@ -22,12 +22,12 @@
 //! Every module is public, so the full surface — including the colour-science long tail (the `M1` /
 //! `M2` matrices, the `*_standard` transfer-curve variants, the matrix derivations) — is reachable
 //! and grouped under its module. For convenience the crate root additionally re-exports the items
-//! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`],
-//! [`Planar8`] / [`Planar16`] / [`Yuv420`] / [`YcbcrMatrix`] / [`RgbToYcbcr`], the decoders'
-//! [`ChromaUpsampling`] choice (its kernels live in [`upsample`]), the [`clip_pixel`] /
-//! [`rgb_to_ycbcr`] helpers, the colour-science entry types [`RgbGamut`] / [`Chromaticities`] and [`SourceProfile`] /
-//! [`SourceTransfer`], and the headline colour-difference metrics [`delta_e_76`] /
-//! [`delta_e_2000`].
+//! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`] and the
+//! decoders' [`ChromaUpsampling`] choice (its kernels live in `gamut-dsp`'s `upsample` module),
+//! [`Planar8`] / [`Planar16`] / [`YcbcrMatrix`] / [`RgbToYcbcr`], the libwebp-exact
+//! [`bt601_rgb_to_ycbcr`] / [`bt601_ycbcr_to_rgb`] pair, the colour-science entry types
+//! [`RgbGamut`] / [`Chromaticities`] and [`SourceProfile`] / [`SourceTransfer`], and the headline
+//! colour-difference metrics [`delta_e_76`] / [`delta_e_2000`].
 //!
 //! # Implemented vs. modeled
 //!
@@ -40,7 +40,7 @@
 //!   or 4:2:0 from 16-bit RGB(A) ([`Planar16`]); monochrome ([`ChromaSubsampling::Cs400`])
 //!   planes from grey or alpha at every one of those depths, in either buffer (`gamut-avif` codes
 //!   all of these end to end); the CICP code-point tables;
-//!   BT.601 YCbCr 4:2:0 ([`ycbcr`]); **the H.273 matrixing and de-matrixing at every modeled bit
+//!   BT.601 YCbCr 4:2:0 ([`ycbcr`], [`Planar8::from_rgb8_bt601`]); **the H.273 matrixing and de-matrixing at every modeled bit
 //!   depth for [`MatrixCoefficients::Bt709`] / `Bt601` / `Bt470Bg` / `Bt2020Ncl` in both ranges
 //!   ([`RgbToYcbcr`] / [`YcbcrMatrix`])**; and the `f64` colour science ([`transfer`], [`oklab`],
 //!   [`lab`], [`xyb`], [`matrix`], [`gamut_map`], [`cct`], [`profile`]) for the sRGB, Display P3,
@@ -85,24 +85,20 @@ pub mod lab;
 pub mod linalg;
 pub mod matrix;
 pub mod oklab;
-pub mod pixel;
 pub mod planar;
 pub mod planar16;
 pub mod primaries;
 pub mod profile;
 pub mod transfer;
-pub mod upsample;
 pub mod xyb;
 pub mod ycbcr;
 
 pub use cct::cct_from_xy;
-pub use cicp::{ColorRange, ColorPrimaries, MatrixCoefficients, TransferCharacteristics};
-pub use format::{BitDepth, ChromaSubsampling};
+pub use cicp::{ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics};
+pub use format::{BitDepth, ChromaSubsampling, ChromaUpsampling};
 pub use lab::{delta_e_76, delta_e_2000};
-pub use primaries::{Chromaticities, RgbGamut};
-pub use pixel::{clip_pixel, clip_pixel8};
 pub use planar::Planar8;
 pub use planar16::Planar16;
+pub use primaries::{Chromaticities, RgbGamut};
 pub use profile::{SourceProfile, SourceTransfer};
-pub use upsample::ChromaUpsampling;
-pub use ycbcr::{RgbToYcbcr, YcbcrMatrix, Yuv420, rgb_to_ycbcr, ycbcr_to_rgb};
+pub use ycbcr::{RgbToYcbcr, YcbcrMatrix, bt601_rgb_to_ycbcr, bt601_ycbcr_to_rgb};

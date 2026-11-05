@@ -399,9 +399,7 @@ mod tests {
     #[test]
     fn bt601_625_and_525_are_distinct_primaries() {
         let pal = ColorPrimaries::Bt601Pal.chromaticities().expect("modeled");
-        let ntsc = ColorPrimaries::Smpte170m
-            .chromaticities()
-            .expect("modeled");
+        let ntsc = ColorPrimaries::Smpte170m.chromaticities().expect("modeled");
         let (p625, p525, w) = (pal.primaries, ntsc.primaries, pal.white);
         assert_ne!(p625, p525);
 
@@ -436,7 +434,8 @@ mod tests {
     fn every_modeled_primary_set_builds_a_matrix() {
         for cp in MODELED_PRIMARIES {
             let c = cp.chromaticities().expect("modeled");
-            let m = crate::matrix::rgb_to_xyz_matrix(&c.primaries, c.white).expect("non-degenerate");
+            let m =
+                crate::matrix::rgb_to_xyz_matrix(&c.primaries, c.white).expect("non-degenerate");
             // Row 1 is the luminance weighting: by construction it sums to 1 at the white point.
             let luma: f64 = m[1].iter().sum();
             assert!((luma - 1.0).abs() < 1e-12, "{cp:?} luma row sums to {luma}");
