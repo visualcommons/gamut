@@ -10,29 +10,9 @@
 //! [`core`] (re-exported from [`gamut-core`](https://crates.io/crates/gamut-core)) is always
 //! available and provides the shared [`core::EncodeImage`] / [`core::DecodeImage`] traits, the
 //! branded [`core::ImageRef`] / [`core::ImageBuf`] buffers, and the common [`core::Error`] type.
-//! Each format module appears only when its feature is enabled.
-//!
-//! The `primitives` feature additionally re-exports the shared building blocks the codecs are
-//! made of — `color` (pixel formats / CICP), `dsp` (transforms), and `bitstream` (bit writer
-//! + AV1 symbol coder) — for tooling and sandbox use such as the `gamut` CLI.
-//!
-//! The `metadata` feature re-exports the shared image-metadata primitives (issue #34) — the
-//! TIFF/IFD container core (`ifd`) plus, as they land, the per-format crates (`exif`/`xmp`/`icc`/
-//! `iptc`) and the `metadata` facade that unifies them — for tooling and for the container crates
-//! to consume.
-//!
-//! The `cmm` feature re-exports the ICC colour management module (`cmm`, epic #323) — the
-//! transform engine that builds and applies colour transforms from the profiles `gamut-icc`
-//! parses — for colour-managed decode/encode pipelines and tooling. Together with `jpeg` it also
-//! turns on `gamut-jpeg`'s `cmm` feature, so `jpeg::JpegDecoder::decode_srgb` is available.
-//!
-//! The `isobmff` feature re-exports the ISOBMFF/HEIF still-image container primitive (`isobmff`) —
-//! the box tree shared by the AVIF and HEIC codecs — so tooling can read and write containers
-//! directly, independently of the codecs that fill them.
-//!
-//! The `codec-abi` feature re-exports the shared codestream-backend seam (`codec_abi`) — the
-//! `repr(C)` vtables and their object-safe Rust twin traits by which a foreign (C/FFI) or alternate
-//! codestream backend plugs into a format crate — for anyone implementing or adapting a backend.
+//! Every other module appears only when its Cargo feature is enabled. Which feature re-exports
+//! which crate is kept in one place, the
+//! [feature table of this crate's README](https://github.com/visualcommons/gamut/blob/master/crates/gamut/README.md#features).
 #![forbid(unsafe_code)]
 
 // Compiles README.md's code blocks as doctests; exists only while rustdoc collects them. The
