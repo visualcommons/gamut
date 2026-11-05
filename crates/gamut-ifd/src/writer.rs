@@ -42,15 +42,15 @@ pub struct PinnedSpan {
 
 /// Options for [`write_with`].
 ///
-/// `#[non_exhaustive]`: construct via [`Default`] and set fields, so options can grow without
-/// a breaking change.
+/// Built one way: start from [`Default`] and chain the `with_*` builders
+/// ([`with_pin`](Self::with_pin), [`with_preamble`](Self::with_preamble)), so options can grow
+/// without a breaking change.
 #[derive(Debug, Clone, Default)]
-#[non_exhaustive]
 pub struct WriteOptions {
     /// Values to land at exact absolute offsets (see [`PinnedSpan`]). The normal value pool
     /// flows around the pinned ranges; the resulting zero filler is declared as
     /// [`SpanKind::Padding`] in the returned map.
-    pub pinned: Vec<PinnedSpan>,
+    pinned: Vec<PinnedSpan>,
     /// Bytes to emit immediately after the file header, before the first directory — a **vendor
     /// preamble**.
     ///
@@ -69,19 +69,23 @@ pub struct WriteOptions {
     /// span covers it: the declared preamble is always the whole gap between the header and the
     /// first directory, `even(len)` bytes, because that is exactly what an independent audit of
     /// the emitted bytes can see there.
-    pub preamble: Vec<u8>,
+    preamble: Vec<u8>,
 }
 
 impl WriteOptions {
-    /// Adds a pinned span, builder-style: `WriteOptions::default().pin(37500, 0x1000)`.
+    /// Adds a pinned span (see [`PinnedSpan`]), builder-style:
+    /// `WriteOptions::default().with_pin(37500, 0x1000)`. The normal value pool flows around the
+    /// pinned ranges; the resulting zero filler is declared as [`SpanKind::Padding`] in the map
+    /// [`write_with`] returns.
     #[must_use]
-    pub fn pin(mut self, tag: u16, offset: u64) -> Self {
+    pub fn with_pin(mut self, tag: u16, offset: u64) -> Self {
         self.pinned.push(PinnedSpan { tag, offset });
         self
     }
 
-    /// Sets the vendor preamble emitted between the header and the first directory,
-    /// builder-style: `WriteOptions::default().with_preamble(*b"APPLEDNG\0\0")`.
+    /// Sets the vendor preamble emitted between the header and the first directory (see the
+    /// field's notes above on why it exists and how an odd length is aligned), builder-style:
+    /// `WriteOptions::default().with_preamble(*b"APPLEDNG\0\0")`.
     #[must_use]
     pub fn with_preamble(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         self.preamble = bytes.into();
@@ -1107,7 +1111,7 @@ mod tests {
             ifds: vec![ifd],
         };
         let pin_at = 100u64;
-        let opts = WriteOptions::default().pin(37500, pin_at);
+        let opts = WriteOptions::default().with_pin(37500, pin_at);
         let (bytes, map) = write_with(&file, &opts).expect("write");
         // The blob sits exactly at the pin.
         assert_eq!(&bytes[pin_at as usize..pin_at as usize + note.len()], &note);
@@ -1142,7 +1146,9 @@ mod tests {
         };
 
         // 100..110 and 105..115 overlap by five bytes.
-        let opts = WriteOptions::default().pin(37500, 100).pin(37501, 105);
+        let opts = WriteOptions::default()
+            .with_pin(37500, 100)
+            .with_pin(37501, 105);
         let error = write_with(&file, &opts).expect_err("overlapping pins must be rejected");
 
         assert_eq!(error.static_message(), Some("TIFF: pinned spans overlap"));
@@ -1162,7 +1168,9 @@ mod tests {
         };
 
         // 100..110 then 110..120 -- adjacent, not overlapping.
-        let opts = WriteOptions::default().pin(37500, 100).pin(37501, 110);
+        let opts = WriteOptions::default()
+            .with_pin(37500, 100)
+            .with_pin(37501, 110);
         let (bytes, _) = write_with(&file, &opts).expect("abutting pins are legal");
 
         assert_eq!(&bytes[100..110], &[0xC5; 10]);
@@ -1197,7 +1205,7 @@ mod tests {
         // pooled value therefore occupies 50..70. Pinning at exactly 70 abuts it.
         let pool_start = 50u64;
         let pin_at = pool_start + pooled.len() as u64;
-        let opts = WriteOptions::default().pin(37500, pin_at);
+        let opts = WriteOptions::default().with_pin(37500, pin_at);
         let (bytes, map) = write_with(&file, &opts).expect("write");
 
         let pooled_at = bytes
@@ -1240,7 +1248,7 @@ mod tests {
         // The directory ends at 50 for three entries, so an unpinned 20-byte value would sit at
         // 50..70 -- straight through this pin.
         let pin_at = 60u64;
-        let opts = WriteOptions::default().pin(37500, pin_at);
+        let opts = WriteOptions::default().with_pin(37500, pin_at);
         let (bytes, map) = write_with(&file, &opts).expect("write");
 
         // The pin is intact: the pool did not write over it.
@@ -1290,7 +1298,7 @@ mod tests {
         };
 
         // Classic header (8) + one-entry directory (18) ends exactly at byte 26.
-        let (bytes, _) = write_with(&file, &WriteOptions::default().pin(37500, 26))
+        let (bytes, _) = write_with(&file, &WriteOptions::default().with_pin(37500, 26))
             .expect("pin at directory boundary");
         assert_eq!(&bytes[26..36], note.as_slice());
     }
@@ -1299,7 +1307,7 @@ mod tests {
     /// unknown-type value, directory collision, and overlapping pins.
     #[test]
     fn unsatisfiable_pins_are_refused() {
-        let pin = |tag, offset| WriteOptions::default().pin(tag, offset);
+        let pin = |tag, offset| WriteOptions::default().with_pin(tag, offset);
         let le = |ifds| TiffFile {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
@@ -1319,7 +1327,9 @@ mod tests {
         // Overlapping pins.
         let mut two = ifd.clone();
         two.set(700, Value::Undefined(vec![2; 10]));
-        let opts = WriteOptions::default().pin(37500, 100).pin(700, 105);
+        let opts = WriteOptions::default()
+            .with_pin(37500, 100)
+            .with_pin(700, 105);
         assert!(write_with(&le(vec![two]), &opts).is_err());
         // A valid pin on the same fixture still succeeds (the guards are not blanket).
         assert!(write_with(&le(vec![ifd]), &pin(37500, 100)).is_ok());

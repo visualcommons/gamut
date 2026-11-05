@@ -155,7 +155,7 @@ fn maker_note_bytes_survive_and_pin_at_their_source_offset() {
     let note_at = find(&bytes, &note).expect("note present") as u64;
     let (pinned_bytes, map) = write_with(
         &file,
-        &WriteOptions::default().pin(tags::MAKER_NOTE, note_at),
+        &WriteOptions::default().with_pin(tags::MAKER_NOTE, note_at),
     )
     .expect("pinned write");
     assert_eq!(
