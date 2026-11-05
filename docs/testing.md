@@ -267,6 +267,7 @@ carry no function bodies.
 | gamut-isobmff | ISO/IEC 14496-12 + 23008-12; libavif/dav1d via gamut-avif | exact-byte + law | `IsoBmffImage::parse` ☑ |
 | gamut-riff | libwebp demux | differential + law | `RiffReader` ☑ |
 | gamut-webp | libwebp (both directions) | differential + size/effort contract | `WebpDecoder` ☑ |
+| gamut-heif | none of its own; libavif and libheif via gamut-avif / gamut-heic once they move onto it | exact-byte + law | `HeifImage` decode (stub binding) ☑ law |
 | gamut-avif | libavif; dav1d | differential + law | `decode` ☑ |
 | gamut-heic | libheif + libde265 | differential + law | container `parse`, NAL `parse` ☑ |
 | gamut-av1 | libaom (definitive); dav1d | differential | `Av1Decoder::inspect` ☑ |
@@ -276,10 +277,12 @@ carry no function bodies.
 | gamut-iptc | exiv2; IPTC tech reference | differential + drift guard | `read_irb` ☑ |
 | gamut-metadata | *facade* | law (round-trip through the facade) | — |
 
-Eight crates hold no oracle dev-dependency of their own: `gamut-core`, `gamut-ifd`,
-`gamut-tonemap`, `gamut-bitstream`, `gamut-dsp`, `gamut-codec-abi`, `gamut-isobmff` and
-`gamut-metadata`. Most have something else standing in — `gamut-isobmff` has specification vectors,
-exact-byte assertions and libavif's reach through `gamut-avif`; `gamut-ifd` is covered through
+Nine crates hold no oracle dev-dependency of their own: `gamut-core`, `gamut-ifd`,
+`gamut-tonemap`, `gamut-bitstream`, `gamut-dsp`, `gamut-codec-abi`, `gamut-isobmff`, `gamut-heif`
+and `gamut-metadata`. Most have something else standing in — `gamut-isobmff` has specification vectors,
+exact-byte assertions and libavif's reach through `gamut-avif`; `gamut-heif` has its inline
+exact-sample tests and its decode-limit law (`src/invariants.rs`), driven by a pinned-seed property
+and the `heif_decode_limits` fuzz target; `gamut-ifd` is covered through
 `gamut-tiff`'s libtiff and `gamut-exif`'s exiv2; `gamut-dsp` checks against a reference
 transform; `gamut-bitstream` checks its bit I/O against a self-inverse and its T.81 Annex K.2
 Huffman table builder against hand derivations from Annexes C and K plus exact-byte regression
