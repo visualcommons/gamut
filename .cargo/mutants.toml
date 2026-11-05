@@ -606,8 +606,8 @@ exclude_re = [
     # `cy = ⌊py·v/vmax⌋ ≤ ⌊(Y·v−1)/vmax⌋ ≤ ⌈Y·v/vmax⌉−1 = comp_h−1` (v ≥ 1, v ≤ vmax), so both
     # mutations only ENLARGE a bound the no-op clamp never reaches — equivalent. The clamp itself
     # stays, per the never-panic-on-untrusted-input policy.
-    '^crates/gamut-jpeg/src/decoder\.rs:608:77: replace - with \+ in DecodedImage::sample_row$',
-    '^crates/gamut-jpeg/src/decoder\.rs:608:77: replace - with / in DecodedImage::sample_row$',
+    '^crates/gamut-jpeg/src/decoder/upsample\.rs:15:77: replace - with \+ in DecodedImage::sample_row$',
+    '^crates/gamut-jpeg/src/decoder/upsample\.rs:15:77: replace - with / in DecodedImage::sample_row$',
     # (gamut-jpeg's `refine` and `ProgCoder::ac_refine` sign tests, `coeff > 0` on a coefficient
     # that is never zero, used to be excluded here as equivalent; #924 rewrote both as
     # `is_positive()`, which has no comparison to mutate. `ac_refine`'s `eob_pos` search, excluded
