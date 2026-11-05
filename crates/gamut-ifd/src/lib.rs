@@ -13,6 +13,8 @@
 //! Structure follows **TIFF 6.0** (`references/tiff/tiff6.pdf`, Adobe/Aldus, Final — June 3 1992,
 //! §2). [`read`] / [`read_header`] parse a stream into a [`TiffFile`]; [`write()`] serialises one
 //! back, laying out the IFD chain and out-of-line value pool with the two-pass offset machinery.
+//! A codec storing strips or tiles after the tree hands them to [`write_with_blocks`], and a
+//! decoder resolves them back with [`extent_slices`] and [`rows_per_strip`].
 //! [`read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
 //! well-known structural ones live in [`tags`]); [`resolve_subtree`] runs the same guarded walk
 //! over **one** directory a caller already holds, scoped per level by a [`SubtreeScope`]. The
