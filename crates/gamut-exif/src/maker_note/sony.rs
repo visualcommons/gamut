@@ -1,23 +1,4 @@
 //! A read-only view of a Sony `MakerNote` (issue #980).
-//!
-//! A Sony note without the `SONY DSC \0\0\0` header is a bare IFD at byte 0 of the block, in the
-//! outer stream's byte order, ending in a next-IFD pointer, whose value offsets count from the
-//! outer TIFF header ([`MakerNoteDialect::Sony2`]). The view decodes that IFD through [`gamut_ifd`]
-//! at the layout [`MakerNoteLayout::detect`] resolves, keeps every entry as a [`Value`]
-//! ([`SonyMakerNote::ifd`]), and adds typed accessors for the tags staked in
-//! `references/exif/sony/README.md`, after exiv2's `SonyMakerNote::tagInfo_[]`
-//! (`third_party/exiv2/src/sonymn_int.cpp`), which is also the differential oracle.
-//!
-//! A note *with* that header ([`MakerNoteDialect::Sony1`]) has the same tags, but its IFD ends
-//! without a next-IFD pointer, which `gamut-ifd` cannot read yet (issue #1032); it gets its
-//! layout and no view (issue #1033).
-//!
-//! Values are returned raw: `model_id` is the number exiv2 prints as a camera name, and the arrays
-//! (`file_format`, `lens_spec`, `full_image_size`) come back whole.
-//!
-//! The view never writes. The block it was read from re-emits byte-identically, because nothing
-//! here changes it; see the [module docs](super) on how the writer keeps Sony's file-absolute
-//! offsets valid.
 
 use gamut_ifd::{Ifd, ReadAt, Value};
 
@@ -58,8 +39,27 @@ const LENS_SPEC: u16 = 0xb02a;
 /// `FullImageSize`: a `LONG` array.
 const FULL_IMAGE_SIZE: u16 = 0xb02b;
 
-/// The decoded IFD of a Sony `MakerNote`: every entry, plus typed accessors for the tags the
-/// [module docs](self) name.
+/// The decoded IFD of a Sony `MakerNote`: every entry, plus typed accessors for the tags staked
+/// in `references/exif/sony/README.md` (issue #980).
+///
+/// A Sony note without the `SONY DSC \0\0\0` header is a bare IFD at byte 0 of the block, in the
+/// outer stream's byte order, ending in a next-IFD pointer, whose value offsets count from the
+/// outer TIFF header ([`MakerNoteDialect::Sony2`]). The view decodes that IFD through [`gamut_ifd`]
+/// at the layout [`MakerNoteLayout::detect`] resolves, keeps every entry as a [`Value`]
+/// ([`SonyMakerNote::ifd`]), and adds typed accessors for those tags, after exiv2's
+/// `SonyMakerNote::tagInfo_[]` (`third_party/exiv2/src/sonymn_int.cpp`), which is also the
+/// differential oracle.
+///
+/// A note *with* that header ([`MakerNoteDialect::Sony1`]) has the same tags, but its IFD ends
+/// without a next-IFD pointer, which `gamut-ifd` cannot read yet (issue #1032); it gets its
+/// layout and no view (issue #1033).
+///
+/// Values are returned raw: `model_id` is the number exiv2 prints as a camera name, and the arrays
+/// (`file_format`, `lens_spec`, `full_image_size`) come back whole.
+///
+/// The view never writes. The block it was read from re-emits byte-identically, because nothing
+/// here changes it; see [`MakerNote`](super::MakerNote) on how the writer keeps Sony's
+/// file-absolute offsets valid.
 ///
 /// Built by [`MakerNote::sony`](super::MakerNote::sony) from the note's own bytes, or by
 /// [`read`](Self::read) from the whole TIFF stream.
@@ -81,7 +81,7 @@ impl SonyMakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD — entry count, entries and
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD — entry count, entries and
     /// next-IFD pointer — does not fit in `stream`, or `stream` fails;
     /// [`ExifError::BadOffset`](crate::ExifError::BadOffset) when `note_at` plus the IFD's offset
     /// overflows.

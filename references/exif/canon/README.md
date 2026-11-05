@@ -1,7 +1,7 @@
 # Canon MakerNote (not a specification; issue #977)
 
 Canon has never published the layout of its `MakerNote` (`0x927C`) payload. This directory stakes
-what `gamut-exif`'s Canon view (`gamut_exif::maker_note::canon`) is held to, before any tag is
+what `gamut-exif`'s Canon view (`gamut_exif::CanonMakerNote`) is held to, before any tag is
 decoded, as the parent table in [`../README.md`](../README.md#makernote-dialects-not-a-specification-issue-418)
 asks of every vendor.
 

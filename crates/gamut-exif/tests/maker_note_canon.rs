@@ -101,7 +101,7 @@ fn canon_note(order: ByteOrder, note_at: u32) -> Vec<u8> {
 /// length is written first, and the real note is then set into the parsed model, whose pin keeps it
 /// at that same position (issue #263).
 fn canon_stream(order: ByteOrder) -> (Vec<u8>, u64) {
-    let writer = ExifWriter::new().marker(false);
+    let writer = ExifWriter::new().with_marker(false);
     let mut exif = Exif::new(order);
     exif.set_tag(ExifTag::Make, Value::Ascii("Canon".into()));
     exif.set_tag(ExifTag::Model, Value::Ascii("Canon EOS R5".into()));
@@ -239,7 +239,10 @@ fn an_unmodified_canon_stream_round_trips_byte_identically() {
         let (stream, _) = canon_stream(order);
         let exif = Exif::parse(&stream).expect("parse");
         let _ = view(&stream);
-        let rewritten = ExifWriter::new().marker(false).write(&exif).expect("write");
+        let rewritten = ExifWriter::new()
+            .with_marker(false)
+            .write(&exif)
+            .expect("write");
         assert_eq!(rewritten, stream);
     }
 }

@@ -31,7 +31,10 @@ fn sample() -> Exif {
 
 /// The bare TIFF stream (no `Exif\0\0` marker) that exiv2's `ExifParser` consumes.
 fn bare(exif: &Exif) -> Vec<u8> {
-    ExifWriter::new().marker(false).write(exif).expect("write")
+    ExifWriter::new()
+        .with_marker(false)
+        .write(exif)
+        .expect("write")
 }
 
 #[test]
@@ -123,7 +126,7 @@ fn stream_of_every_tag(ifd: IfdKind) -> (Vec<ExifTag>, Vec<u8>) {
         exif.set_tag(tag, conforming_value(tag));
     }
     let bytes = ExifWriter::new()
-        .marker(false)
+        .with_marker(false)
         .write(&exif)
         .expect("gamut writes every catalogued tag");
     (tags, bytes)
@@ -210,7 +213,7 @@ fn stream_of_registry_rows(block: TagBlock) -> (Vec<&'static TagSpec>, Vec<u8>) 
             .set(spec.id, conforming(spec.field_types, spec.count));
     }
     let bytes = ExifWriter::new()
-        .marker(false)
+        .with_marker(false)
         .write(&exif)
         .expect("gamut writes every registry row");
     (rows, bytes)

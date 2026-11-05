@@ -29,7 +29,7 @@ fn exif_with(tags: &[(ExifTag, Value)]) -> Vec<u8> {
     for (tag, value) in tags {
         exif.set_tag(*tag, value.clone());
     }
-    ExifWriter::new().marker(false).write(&exif).unwrap()
+    ExifWriter::new().with_marker(false).write(&exif).unwrap()
 }
 
 /// The Exif stream `exif`, parsed back.
@@ -455,7 +455,7 @@ fn a_tiff_output_carries_the_gps_and_interop_ifds_and_reports_the_thumbnail() {
         )
         .unwrap();
     exif.set_thumbnail(thumbnail);
-    let exif = ExifWriter::new().marker(false).write(&exif).unwrap();
+    let exif = ExifWriter::new().with_marker(false).write(&exif).unwrap();
 
     let (tiff, stderr) = convert_to("tiff-gps-thumb", &jpeg_with(&exif), "tiff", &[]);
 

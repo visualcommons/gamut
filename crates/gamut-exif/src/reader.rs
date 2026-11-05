@@ -40,7 +40,7 @@ impl ExifReader {
     /// Off by default: the JPEG `APP1` segment carries the marker, but the WebP `EXIF` and PNG
     /// `eXIf` chunks carry a bare TIFF stream.
     #[must_use]
-    pub fn require_marker(mut self, yes: bool) -> Self {
+    pub fn with_marker_required(mut self, yes: bool) -> Self {
         self.require_marker = yes;
         self
     }
@@ -48,7 +48,7 @@ impl ExifReader {
     /// In strict mode a malformed Exif/GPS/Interop sub-IFD fails the parse; by default it is
     /// dropped and the rest of the blob is returned.
     #[must_use]
-    pub fn strict(mut self, yes: bool) -> Self {
+    pub fn with_strict(mut self, yes: bool) -> Self {
         self.strict = yes;
         self
     }
@@ -64,13 +64,13 @@ impl ExifReader {
     /// parse. A directory whose *body* cannot be read (a bad entry count, a body past the end of
     /// the stream) is still dropped or fatal as before — recovery is per entry, never per byte.
     ///
-    /// Ignored in [`strict`](Self::strict) mode, which rejects what it would recover.
+    /// Ignored in [`strict`](Self::with_strict) mode, which rejects what it would recover.
     ///
     /// **Round trip.** The [`Exif`] simply lacks each skipped field, so
     /// [`to_bytes`](Exif::to_bytes) writes a well-formed blob without it; the report is the only
     /// record that the entry existed.
     #[must_use]
-    pub fn recover_entries(mut self, yes: bool) -> Self {
+    pub fn with_entry_recovery(mut self, yes: bool) -> Self {
         self.recover_entries = yes;
         self
     }
@@ -85,7 +85,7 @@ impl ExifReader {
     /// entry points; [`parse`](Self::parse) and [`parse_from`](Self::parse_from) have no report to
     /// put it in and never pay for it.
     #[must_use]
-    pub fn audit_bytes(mut self, yes: bool) -> Self {
+    pub fn with_byte_audit(mut self, yes: bool) -> Self {
         self.audit_bytes = yes;
         self
     }
@@ -98,8 +98,8 @@ impl ExifReader {
     /// # Errors
     ///
     /// Returns [`ExifError::MissingMarker`](crate::ExifError::MissingMarker) when the marker is
-    /// required but absent, an [`ExifError::Ifd`](crate::ExifError::Ifd) when the TIFF stream is
-    /// malformed, or (in [`strict`](Self::strict) mode)
+    /// required but absent, an [`ExifError::Core`](crate::ExifError::Core) when the TIFF stream is
+    /// malformed, or (in [`strict`](Self::with_strict) mode)
     /// [`ExifError::InvalidIfd`](crate::ExifError::InvalidIfd) when a sub-IFD pointer addresses a
     /// malformed directory or [`ExifError::BadThumbnail`](crate::ExifError::BadThumbnail) when the
     /// 1st IFD's thumbnail bytes are unusable: a JPEG range outside the blob, or an offset with no
@@ -119,31 +119,31 @@ impl ExifReader {
     /// Parses an EXIF blob and reports what a lenient parse discarded.
     ///
     /// [`parse`](Self::parse) is silent about what leniency drops; this returns the same [`Exif`]
-    /// alongside a [`ReadReport`] naming each discarded region, so a caller can tell a blob that
+    /// alongside a [`ReadReport`] naming each discarded region, together as a [`ReadOutcome`], so a caller can tell a blob that
     /// never carried GPS from one whose GPS pointer was dangling.
     ///
     /// The report covers the regions [`DroppedRegion`](crate::DroppedRegion) enumerates and the
     /// entries the kept directories lost — every one a repeated tag shadowed, and, under
-    /// [`recover_entries`](Self::recover_entries), every one it skipped — and is complete over
+    /// [`with_entry_recovery`](Self::with_entry_recovery), every one it skipped — and is complete over
     /// them. Its drop lists are **not** a byte-completeness verdict: an empty report says nothing
-    /// about source bytes no structure claims — see the [`report`](crate::report) module.
-    /// [`audit_bytes`](Self::audit_bytes) adds that verdict.
+    /// about source bytes no structure claims — see [`ReadReport`].
+    /// [`with_byte_audit`](Self::with_byte_audit) adds that verdict.
     ///
     /// ```
     /// # use gamut_exif::{ByteOrder, Exif, ExifReader};
     /// # let bytes = Exif::new(ByteOrder::LittleEndian).to_bytes()?;
-    /// let (exif, report) = ExifReader::new().parse_with_report(&bytes)?;
-    /// assert!(report.is_empty()); // no covered region was discarded
-    /// for dropped in report.dropped() {
+    /// let outcome = ExifReader::new().parse_with_report(&bytes)?;
+    /// assert!(outcome.report.is_empty()); // no covered region was discarded
+    /// for dropped in outcome.report.dropped() {
     ///     eprintln!("{dropped}");
     /// }
-    /// # let _ = exif;
+    /// # let _ = outcome.exif;
     /// # Ok::<(), gamut_exif::ExifError>(())
     /// ```
     ///
     /// # Errors
     ///
-    /// As [`parse`](Self::parse). In [`strict`](Self::strict) mode the first *malformed* region
+    /// As [`parse`](Self::parse). In [`strict`](Self::with_strict) mode the first *malformed* region
     /// fails the parse instead of being reported — but a strict report is **not** therefore always
     /// empty: [`DroppedRegion::TrailingIfd`](crate::DroppedRegion::TrailingIfd) is well-formed and
     /// merely unrepresentable, so strictness has no grounds to reject it and it is reported in both
@@ -156,9 +156,25 @@ impl ExifReader {
     /// that renders both beside each other must normalise one of them. They *meet* rather than
     /// always arrive together: the return is a sum type, so a blob whose strict-fatal defect is
     /// reached after a reportable one yields the error alone and no report.
-    pub fn parse_with_report(&self, bytes: &[u8]) -> Result<(Exif, ReadReport)> {
+    pub fn parse_with_report(&self, bytes: &[u8]) -> Result<ReadOutcome> {
         self.parse_from_with_report(bytes)
     }
+}
+
+/// The result of a reporting parse: the [`Exif`] model and the [`ReadReport`] of what the parse
+/// discarded on the way.
+///
+/// Returned by [`ExifReader::parse_with_report`] and [`ExifReader::parse_from_with_report`]. Both
+/// fields are public so a caller can move either out; `#[non_exhaustive]` so a later reporting
+/// read can carry more without a breaking change.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ReadOutcome {
+    /// The parsed model — the same one [`ExifReader::parse`] returns for the same input.
+    pub exif: Exif,
+    /// What the lenient parse discarded, and (under
+    /// [`with_byte_audit`](ExifReader::with_byte_audit)) the byte-completeness verdict.
+    pub report: ReadReport,
 }
 
 #[cfg(test)]
@@ -247,7 +263,7 @@ mod tests {
     fn require_marker_rejects_bare_tiff() {
         let bare = sample_blob(ByteOrder::LittleEndian, false);
         let err = ExifReader::new()
-            .require_marker(true)
+            .with_marker_required(true)
             .parse(&bare)
             .expect_err("bare TIFF must be rejected");
         assert!(matches!(err, ExifError::MissingMarker));
@@ -255,7 +271,7 @@ mod tests {
         let marked = sample_blob(ByteOrder::LittleEndian, true);
         assert!(
             ExifReader::new()
-                .require_marker(true)
+                .with_marker_required(true)
                 .parse(&marked)
                 .is_ok()
         );
@@ -311,7 +327,7 @@ mod tests {
 
         // Strict: the same input is refused.
         let err = ExifReader::new()
-            .strict(true)
+            .with_strict(true)
             .parse(&bytes)
             .expect_err("strict must reject an out-of-bounds thumbnail");
         assert!(
@@ -355,7 +371,7 @@ mod tests {
             .expect("write");
 
             let err = ExifReader::new()
-                .strict(true)
+                .with_strict(true)
                 .parse(&bytes)
                 .expect_err("strict must reject half a thumbnail pair");
             assert_eq!(
@@ -388,7 +404,7 @@ mod tests {
 
         // Strict: the malformed sub-IFD fails the parse.
         let err = ExifReader::new()
-            .strict(true)
+            .with_strict(true)
             .parse(&bytes)
             .expect_err("strict must reject");
         assert!(matches!(err, ExifError::InvalidIfd("Exif")));

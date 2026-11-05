@@ -1,23 +1,4 @@
 //! A read-only view of a Fujifilm `MakerNote` (issue #981).
-//!
-//! A Fujifilm note opens with `FUJIFILM` and the IFD's offset as a little-endian `u32` at byte 8.
-//! The IFD at that offset is little-endian whatever the outer stream's byte order, ends in a
-//! next-IFD pointer, and counts its value offsets from the note's own start
-//! ([`MakerNoteDialect::Fujifilm`]). The view decodes that IFD through [`gamut_ifd`] at the layout
-//! [`MakerNoteLayout::detect`] resolves, keeps every entry as a [`Value`]
-//! ([`FujifilmMakerNote::ifd`]), and adds typed accessors for the tags staked in
-//! `references/exif/fujifilm/README.md`, after exiv2's `FujiMakerNote::tagInfo_[]`
-//! (`third_party/exiv2/src/fujimn_int.cpp`), which is also the differential oracle.
-//!
-//! The same note in Leica's Fujifilm-built bodies resolves to the same dialect and reads through
-//! the same view.
-//!
-//! Values are returned raw: `film_mode` is the number exiv2 prints as a film simulation, and the
-//! arrays (`version`, `white_balance_fine_tune`) come back whole.
-//!
-//! The view never writes. The block it was read from re-emits byte-identically, because nothing
-//! here changes it; its note-relative offsets stay valid wherever the writer places it (see the
-//! [module docs](super)).
 
 use gamut_ifd::{Ifd, ReadAt, Value};
 
@@ -100,8 +81,27 @@ const MAX_APERTURE_AT_MAX_FOCAL: u16 = 0x1407;
 /// `Rating`: a `LONG`.
 const RATING: u16 = 0x1431;
 
-/// The decoded IFD of a Fujifilm `MakerNote`: every entry, plus typed accessors for the tags the
-/// [module docs](self) name.
+/// The decoded IFD of a Fujifilm `MakerNote`: every entry, plus typed accessors for the tags
+/// staked in `references/exif/fujifilm/README.md` (issue #981).
+///
+/// A Fujifilm note opens with `FUJIFILM` and the IFD's offset as a little-endian `u32` at byte 8.
+/// The IFD at that offset is little-endian whatever the outer stream's byte order, ends in a
+/// next-IFD pointer, and counts its value offsets from the note's own start
+/// ([`MakerNoteDialect::Fujifilm`]). The view decodes that IFD through [`gamut_ifd`] at the layout
+/// [`MakerNoteLayout::detect`] resolves, keeps every entry as a [`Value`]
+/// ([`FujifilmMakerNote::ifd`]), and adds typed accessors for those tags, after exiv2's
+/// `FujiMakerNote::tagInfo_[]` (`third_party/exiv2/src/fujimn_int.cpp`), which is also the
+/// differential oracle.
+///
+/// The same note in Leica's Fujifilm-built bodies resolves to the same dialect and reads through
+/// the same view.
+///
+/// Values are returned raw: `film_mode` is the number exiv2 prints as a film simulation, and the
+/// arrays (`version`, `white_balance_fine_tune`) come back whole.
+///
+/// The view never writes. The block it was read from re-emits byte-identically, because nothing
+/// here changes it; its note-relative offsets stay valid wherever the writer places it (see
+/// [`MakerNote`](super::MakerNote)).
 ///
 /// Built by [`MakerNote::fujifilm`](super::MakerNote::fujifilm) from the note's own bytes, or by
 /// [`read`](Self::read) from the whole TIFF stream.
@@ -122,7 +122,7 @@ impl FujifilmMakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD — entry count, entries and
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD — entry count, entries and
     /// next-IFD pointer — does not fit in `stream`, or `stream` fails;
     /// [`ExifError::BadOffset`](crate::ExifError::BadOffset) when `note_at` plus the IFD's offset
     /// overflows.

@@ -1,46 +1,4 @@
 //! The vendor-specific `MakerNote` block (Exif tag `0x927C`).
-//!
-//! `MakerNote` is an `UNDEFINED` blob of vendor-proprietary data — usually a mini-IFD with
-//! per-vendor quirks (its own header, byte order, and offset base). The crate preserves the bytes
-//! verbatim, detects the vendor (from the `Make` tag), and resolves the block's **dispatch layout**
-//! — which header dialect it is, the byte order and position of its IFD, and what that IFD's value
-//! offsets count from. On top of that layout sit read-only per-vendor views:
-//!
-//! - **Canon** — [`canon::CanonMakerNote`], through [`MakerNote::canon`] (issue #977).
-//! - **Leica** — [`leica::LeicaMakerNote`], through [`MakerNote::leica`] (issue #978).
-//! - **Sony** — [`sony::SonyMakerNote`], through [`MakerNote::sony`] (issue #980), for the
-//!   [`Sony2`](MakerNoteDialect::Sony2) dialect; a [`Sony1`](MakerNoteDialect::Sony1) note has no
-//!   view yet (issue #1033).
-//! - **Fujifilm** — [`fujifilm::FujifilmMakerNote`], through [`MakerNote::fujifilm`] (issue #981),
-//!   for the [`Fujifilm`](MakerNoteDialect::Fujifilm) dialect, Leica's Fujifilm-built bodies
-//!   included.
-//!
-//! Every other vendor's tags stay undecoded; their views are the remainder of issue #418 and can
-//! be added without breaking this API (every enum and the layout struct here are
-//! `#[non_exhaustive]`). A view only reads: the block's bytes are never rewritten from it.
-//!
-//! # Dispatch
-//!
-//! [`MakerNoteLayout::detect`] follows exiv2's dispatch table (`TiffMnCreator::registry_` and the
-//! `*MnHeader` classes in `third_party/exiv2/src/makernote_int.cpp`; summarised at
-//! <https://exiv2.org/makernote.html>), plus Apple and Leica, which exiv2 does not handle
-//! (ExifTool's `MakerNoteApple` and `MakerNoteLeica*` entries; Leica's are staked in
-//! `references/exif/leica/README.md`). The vendor picks the candidate dialects and the note's own
-//! signature picks among them. See `references/exif/README.md` for the per-dialect table and where this reader
-//! deliberately differs from exiv2. A note no dialect recognises has no layout and stays opaque.
-//!
-//! # Round-trip behaviour
-//!
-//! The *bytes* always round-trip exactly (value-level); resolving a layout reads them and changes
-//! nothing. Additionally, a model that came from [`Exif::parse`](crate::Exif::parse) records the
-//! note's absolute source offset ([`Exif::maker_note_offset`](crate::Exif::maker_note_offset)),
-//! and the writer **pins** the note's byte range at that exact position on a rewrite — so
-//! TIFF-header-absolute internal offsets a vendor encodes ([`OffsetBase::TiffHeader`]: Canon and
-//! most others) stay valid even when edits shift the surrounding directories (issue #263). Only
-//! when the new layout makes the pin unsatisfiable (the directory region grows past the note's old
-//! position) does the writer fall back to relocating the block, in which case such vendor-internal
-//! offsets may go stale. Note-relative offsets ([`OffsetBase::MakerNote`]) survive a relocation
-//! too.
 
 pub mod canon;
 pub mod fujifilm;
@@ -56,7 +14,53 @@ use crate::value::as_text;
 /// 12-byte entry. A note shorter than its header plus this holds no IFD to decode.
 const ONE_ENTRY_IFD: usize = 14;
 
-/// A decoded-only-as-far-as-the-vendor MakerNote block: its detected vendor and its raw bytes.
+/// A decoded-only-as-far-as-the-vendor MakerNote block (Exif tag `0x927C`): its detected vendor
+/// and its raw bytes.
+///
+/// `MakerNote` is an `UNDEFINED` blob of vendor-proprietary data — usually a mini-IFD with
+/// per-vendor quirks (its own header, byte order, and offset base). The crate preserves the bytes
+/// verbatim, detects the vendor (from the `Make` tag), and resolves the block's **dispatch layout**
+/// — which header dialect it is, the byte order and position of its IFD, and what that IFD's value
+/// offsets count from. On top of that layout sit read-only per-vendor views:
+///
+/// - **Canon** — [`CanonMakerNote`](canon::CanonMakerNote), through [`MakerNote::canon`]
+///   (issue #977).
+/// - **Leica** — [`LeicaMakerNote`](leica::LeicaMakerNote), through [`MakerNote::leica`]
+///   (issue #978).
+/// - **Sony** — [`SonyMakerNote`](sony::SonyMakerNote), through [`MakerNote::sony`] (issue #980),
+///   for the [`Sony2`](MakerNoteDialect::Sony2) dialect; a [`Sony1`](MakerNoteDialect::Sony1) note
+///   has no view yet (issue #1033).
+/// - **Fujifilm** — [`FujifilmMakerNote`](fujifilm::FujifilmMakerNote), through
+///   [`MakerNote::fujifilm`] (issue #981), for the [`Fujifilm`](MakerNoteDialect::Fujifilm)
+///   dialect, Leica's Fujifilm-built bodies included.
+///
+/// Every other vendor's tags stay undecoded; their views are the remainder of issue #418 and can
+/// be added without breaking this API (every MakerNote enum and the layout struct are
+/// `#[non_exhaustive]`). A view only reads: the block's bytes are never rewritten from it.
+///
+/// # Dispatch
+///
+/// [`MakerNoteLayout::detect`] follows exiv2's dispatch table (`TiffMnCreator::registry_` and the
+/// `*MnHeader` classes in `third_party/exiv2/src/makernote_int.cpp`; summarised at
+/// <https://exiv2.org/makernote.html>), plus Apple and Leica, which exiv2 does not handle
+/// (ExifTool's `MakerNoteApple` and `MakerNoteLeica*` entries; Leica's are staked in
+/// `references/exif/leica/README.md`). The vendor picks the candidate dialects and the note's own
+/// signature picks among them. See `references/exif/README.md` for the per-dialect table and where
+/// this reader deliberately differs from exiv2. A note no dialect recognises has no layout and
+/// stays opaque.
+///
+/// # Round-trip behaviour
+///
+/// The *bytes* always round-trip exactly (value-level); resolving a layout reads them and changes
+/// nothing. Additionally, a model that came from [`Exif::parse`](crate::Exif::parse) records the
+/// note's absolute source offset ([`Exif::maker_note_offset`](crate::Exif::maker_note_offset)),
+/// and the writer **pins** the note's byte range at that exact position on a rewrite — so
+/// TIFF-header-absolute internal offsets a vendor encodes ([`OffsetBase::TiffHeader`]: Canon and
+/// most others) stay valid even when edits shift the surrounding directories (issue #263). Only
+/// when the new layout makes the pin unsatisfiable (the directory region grows past the note's old
+/// position) does the writer fall back to relocating the block, in which case such vendor-internal
+/// offsets may go stale. Note-relative offsets ([`OffsetBase::MakerNote`]) survive a relocation
+/// too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MakerNote {
     /// The vendor whose dialect the block follows (detected from `Make`; [`MakerNoteVendor::Unknown`]
@@ -91,7 +95,7 @@ impl MakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD itself — its entry count,
     /// entries and next-IFD pointer — does not fit in the note.
     pub fn canon(&self, outer: ByteOrder, note_at: u64) -> Result<Option<canon::CanonMakerNote>> {
         let Some(layout) = self.layout(outer) else {
@@ -118,7 +122,7 @@ impl MakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD itself — its entry count,
     /// entries and next-IFD pointer — does not fit in the note.
     pub fn leica(&self, outer: ByteOrder, note_at: u64) -> Result<Option<leica::LeicaMakerNote>> {
         let Some(layout) = self.layout(outer) else {
@@ -143,7 +147,7 @@ impl MakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD itself — its entry count,
     /// entries and next-IFD pointer — does not fit in the note.
     pub fn sony(&self, outer: ByteOrder, note_at: u64) -> Result<Option<sony::SonyMakerNote>> {
         let Some(layout) = self.layout(outer) else {
@@ -169,7 +173,7 @@ impl MakerNote {
     ///
     /// # Errors
     ///
-    /// [`ExifError::Ifd`](crate::ExifError::Ifd) when the note's IFD itself — its entry count,
+    /// [`ExifError::Core`](crate::ExifError::Core) when the note's IFD itself — its entry count,
     /// entries and next-IFD pointer — does not fit in the note.
     pub fn fujifilm(
         &self,
@@ -231,7 +235,7 @@ impl ReadAt for Placed<'_> {
 ///
 /// # Errors
 ///
-/// [`ExifError::Ifd`](crate::ExifError::Ifd) when the directory does not fit in `stream` or
+/// [`ExifError::Core`](crate::ExifError::Core) when the directory does not fit in `stream` or
 /// `stream` fails, and [`ExifError::BadOffset`](crate::ExifError::BadOffset) when the IFD's
 /// position overflows `u64` or lies before the offset base.
 pub(crate) fn read_note_ifd<S: ReadAt>(
@@ -277,7 +281,7 @@ pub(crate) fn open_note_ifd<S: ReadAt>(
 ///
 /// # Errors
 ///
-/// [`ExifError::Ifd`](crate::ExifError::Ifd) only when the source fails (an I/O-kind error); an
+/// [`ExifError::Core`](crate::ExifError::Core) only when the source fails (an I/O-kind error); an
 /// unreadable value is never an error.
 pub(crate) fn decode_lenient<S: ReadAt>(
     reader: &mut IfdReader<S>,

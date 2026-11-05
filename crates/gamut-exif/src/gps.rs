@@ -21,12 +21,6 @@ pub enum GpsConversionError {
     /// Longitude is required for a complete position.
     #[error("GPS longitude is missing")]
     MissingLongitude,
-    /// Latitude used an east/west reference instead of north/south.
-    #[error("GPS latitude reference must be N or S")]
-    InvalidLatitudeReference,
-    /// Longitude used a north/south reference instead of east/west.
-    #[error("GPS longitude reference must be E or W")]
-    InvalidLongitudeReference,
     /// A rational component had a zero denominator.
     #[error("GPS {0} has a zero denominator")]
     ZeroDenominator(&'static str),
@@ -41,25 +35,40 @@ pub enum GpsConversionError {
 /// The positioning data from the GPS sub-IFD, as typed latitude/longitude/altitude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpsInfo {
-    /// Latitude (paired with its N/S reference), if present.
-    pub latitude: Option<GpsCoordinate>,
-    /// Longitude (paired with its E/W reference), if present.
-    pub longitude: Option<GpsCoordinate>,
+    /// Latitude with its N/S reference, if both are present and readable.
+    pub latitude: Option<GpsLatitude>,
+    /// Longitude with its E/W reference, if both are present and readable.
+    pub longitude: Option<GpsLongitude>,
     /// Altitude relative to sea level, if present.
     pub altitude: Option<GpsAltitude>,
 }
 
-/// A GPS coordinate: degrees/minutes/seconds as rationals, plus the hemisphere reference.
+/// A latitude: degrees/minutes/seconds as rationals (`GPSLatitude`), plus its north/south
+/// reference (`GPSLatitudeRef`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GpsCoordinate {
+pub struct GpsLatitude {
     /// Degrees.
     pub degrees: Rational,
     /// Minutes.
     pub minutes: Rational,
     /// Seconds.
     pub seconds: Rational,
-    /// The hemisphere reference (`N`/`S` for latitude, `E`/`W` for longitude).
-    pub reference: GpsReference,
+    /// The hemisphere: `N` or `S`.
+    pub reference: LatitudeRef,
+}
+
+/// A longitude: degrees/minutes/seconds as rationals (`GPSLongitude`), plus its east/west
+/// reference (`GPSLongitudeRef`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpsLongitude {
+    /// Degrees.
+    pub degrees: Rational,
+    /// Minutes.
+    pub minutes: Rational,
+    /// Seconds.
+    pub seconds: Rational,
+    /// The hemisphere: `E` or `W`.
+    pub reference: LongitudeRef,
 }
 
 /// An altitude: metres from sea level, with the sign carried by `below_sea_level`.
@@ -71,27 +80,31 @@ pub struct GpsAltitude {
     pub below_sea_level: bool,
 }
 
-/// The hemisphere reference of a GPS coordinate (`GPSLatitudeRef` / `GPSLongitudeRef`).
+/// The hemisphere of a latitude (`GPSLatitudeRef`, Exif 3.0 §4.6.7.1.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GpsReference {
+pub enum LatitudeRef {
     /// `N` — northern latitude.
     North,
     /// `S` — southern latitude.
     South,
+}
+
+/// The hemisphere of a longitude (`GPSLongitudeRef`, Exif 3.0 §4.6.7.1.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongitudeRef {
     /// `E` — eastern longitude.
     East,
     /// `W` — western longitude.
     West,
 }
 
-impl GpsReference {
-    /// Parses the single-letter reference string (`"N"`/`"S"`/`"E"`/`"W"`).
+impl LatitudeRef {
+    /// Parses the single-letter reference string (`"N"`/`"S"`, either case). Any other letter —
+    /// an `E`/`W` written into `GPSLatitudeRef` included — is no latitude reference.
     fn parse(s: &str) -> Option<Self> {
         match s.trim_end_matches('\0').chars().next()? {
-            'N' | 'n' => Some(GpsReference::North),
-            'S' | 's' => Some(GpsReference::South),
-            'E' | 'e' => Some(GpsReference::East),
-            'W' | 'w' => Some(GpsReference::West),
+            'N' | 'n' => Some(LatitudeRef::North),
+            'S' | 's' => Some(LatitudeRef::South),
             _ => None,
         }
     }
@@ -99,39 +112,77 @@ impl GpsReference {
     /// The single-letter reference string.
     fn as_str(self) -> &'static str {
         match self {
-            GpsReference::North => "N",
-            GpsReference::South => "S",
-            GpsReference::East => "E",
-            GpsReference::West => "W",
+            LatitudeRef::North => "N",
+            LatitudeRef::South => "S",
         }
     }
 
-    /// `-1.0` for the southern/western hemispheres, `+1.0` otherwise.
+    /// `-1.0` for the southern hemisphere, `+1.0` for the northern.
     fn sign(self) -> f64 {
         match self {
-            GpsReference::South | GpsReference::West => -1.0,
-            GpsReference::North | GpsReference::East => 1.0,
+            LatitudeRef::North => 1.0,
+            LatitudeRef::South => -1.0,
         }
     }
 }
 
-impl GpsCoordinate {
-    /// The coordinate as signed decimal degrees, or `None` if any rational has a zero denominator.
+impl LongitudeRef {
+    /// Parses the single-letter reference string (`"E"`/`"W"`, either case). Any other letter —
+    /// an `N`/`S` written into `GPSLongitudeRef` included — is no longitude reference.
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim_end_matches('\0').chars().next()? {
+            'E' | 'e' => Some(LongitudeRef::East),
+            'W' | 'w' => Some(LongitudeRef::West),
+            _ => None,
+        }
+    }
+
+    /// The single-letter reference string.
+    fn as_str(self) -> &'static str {
+        match self {
+            LongitudeRef::East => "E",
+            LongitudeRef::West => "W",
+        }
+    }
+
+    /// `-1.0` for the western hemisphere, `+1.0` for the eastern.
+    fn sign(self) -> f64 {
+        match self {
+            LongitudeRef::East => 1.0,
+            LongitudeRef::West => -1.0,
+        }
+    }
+}
+
+impl GpsLatitude {
+    /// The latitude as signed decimal degrees (negative south), or `None` if any rational has a
+    /// zero denominator.
     #[must_use]
     pub fn to_degrees(self) -> Option<f64> {
-        let d = self.degrees.to_f64()?;
-        let m = self.minutes.to_f64()?;
-        let s = self.seconds.to_f64()?;
-        Some(self.reference.sign() * (d + m / 60.0 + s / 3600.0))
+        Some(self.reference.sign() * unsigned_degrees(self.degrees, self.minutes, self.seconds)?)
     }
+}
+
+impl GpsLongitude {
+    /// The longitude as signed decimal degrees (negative west), or `None` if any rational has a
+    /// zero denominator.
+    #[must_use]
+    pub fn to_degrees(self) -> Option<f64> {
+        Some(self.reference.sign() * unsigned_degrees(self.degrees, self.minutes, self.seconds)?)
+    }
+}
+
+/// `d + m/60 + s/3600`, or `None` if any rational has a zero denominator.
+fn unsigned_degrees(degrees: Rational, minutes: Rational, seconds: Rational) -> Option<f64> {
+    Some(degrees.to_f64()? + minutes.to_f64()? / 60.0 + seconds.to_f64()? / 3600.0)
 }
 
 impl GpsInfo {
     /// Lifts the positioning tags out of a GPS sub-IFD, or `None` if none are present.
     #[must_use]
     pub fn from_ifd(ifd: &Ifd) -> Option<GpsInfo> {
-        let latitude = coordinate(ifd, ExifTag::GpsLatitude, ExifTag::GpsLatitudeRef);
-        let longitude = coordinate(ifd, ExifTag::GpsLongitude, ExifTag::GpsLongitudeRef);
+        let latitude = latitude(ifd);
+        let longitude = longitude(ifd);
         let altitude = altitude(ifd);
         if latitude.is_none() && longitude.is_none() && altitude.is_none() {
             None
@@ -157,13 +208,20 @@ impl GpsInfo {
             Value::Byte(vec![2, 3, 0, 0]),
         );
         if let Some(lat) = self.latitude {
-            set_coordinate(&mut ifd, lat, ExifTag::GpsLatitude, ExifTag::GpsLatitudeRef);
+            set_coordinate(
+                &mut ifd,
+                [lat.degrees, lat.minutes, lat.seconds],
+                ExifTag::GpsLatitude,
+                lat.reference.as_str(),
+                ExifTag::GpsLatitudeRef,
+            );
         }
         if let Some(lon) = self.longitude {
             set_coordinate(
                 &mut ifd,
-                lon,
+                [lon.degrees, lon.minutes, lon.seconds],
                 ExifTag::GpsLongitude,
+                lon.reference.as_str(),
                 ExifTag::GpsLongitudeRef,
             );
         }
@@ -183,13 +241,13 @@ impl GpsInfo {
     /// Latitude in signed decimal degrees (negative for the southern hemisphere).
     #[must_use]
     pub fn latitude_deg(&self) -> Option<f64> {
-        self.latitude.and_then(GpsCoordinate::to_degrees)
+        self.latitude.and_then(GpsLatitude::to_degrees)
     }
 
     /// Longitude in signed decimal degrees (negative for the western hemisphere).
     #[must_use]
     pub fn longitude_deg(&self) -> Option<f64> {
-        self.longitude.and_then(GpsCoordinate::to_degrees)
+        self.longitude.and_then(GpsLongitude::to_degrees)
     }
 
     /// Altitude in signed metres (negative below sea level).
@@ -252,8 +310,16 @@ fn coordinate_without_height(
     let longitude = value
         .longitude
         .ok_or(GpsConversionError::MissingLongitude)?;
-    let lat = coordinate_degrees(latitude, true)?;
-    let lon = coordinate_degrees(longitude, false)?;
+    let lat = coordinate_degrees(
+        [latitude.degrees, latitude.minutes, latitude.seconds],
+        latitude.reference.sign(),
+        "latitude",
+    )?;
+    let lon = coordinate_degrees(
+        [longitude.degrees, longitude.minutes, longitude.seconds],
+        longitude.reference.sign(),
+        "longitude",
+    )?;
     let coordinate = geocoordinates::Coordinate::wgs84(lat, lon);
     coordinate
         .validate()
@@ -261,32 +327,21 @@ fn coordinate_without_height(
     Ok(coordinate)
 }
 
+/// Signed decimal degrees of one DMS triple, refusing a zero denominator or a minutes/seconds
+/// component outside `[0, 60)`. `axis` names the coordinate in the error.
 #[cfg(feature = "geocoordinates")]
 fn coordinate_degrees(
-    coordinate: GpsCoordinate,
-    latitude: bool,
+    [degrees, minutes, seconds]: [Rational; 3],
+    sign: f64,
+    axis: &'static str,
 ) -> Result<f64, GpsConversionError> {
-    let sign = match (latitude, coordinate.reference) {
-        (true, GpsReference::North) | (false, GpsReference::East) => 1.0,
-        (true, GpsReference::South) | (false, GpsReference::West) => -1.0,
-        (true, GpsReference::East | GpsReference::West) => {
-            return Err(GpsConversionError::InvalidLatitudeReference);
-        }
-        (false, GpsReference::North | GpsReference::South) => {
-            return Err(GpsConversionError::InvalidLongitudeReference);
-        }
-    };
-    let axis = if latitude { "latitude" } else { "longitude" };
-    let degrees = coordinate
-        .degrees
+    let degrees = degrees
         .to_f64()
         .ok_or(GpsConversionError::ZeroDenominator(axis))?;
-    let minutes = coordinate
-        .minutes
+    let minutes = minutes
         .to_f64()
         .ok_or(GpsConversionError::ZeroDenominator(axis))?;
-    let seconds = coordinate
-        .seconds
+    let seconds = seconds
         .to_f64()
         .ok_or(GpsConversionError::ZeroDenominator(axis))?;
     if minutes >= 60.0 || seconds >= 60.0 {
@@ -295,34 +350,51 @@ fn coordinate_degrees(
     Ok(sign * (degrees + minutes / 60.0 + seconds / 3600.0))
 }
 
-/// Reads a degrees/minutes/seconds coordinate and its reference from `ifd`.
-fn coordinate(ifd: &Ifd, value_tag: ExifTag, ref_tag: ExifTag) -> Option<GpsCoordinate> {
-    let dms = match ifd.get(value_tag.tag_id())? {
-        Value::Rational(r) if r.len() >= 3 => r,
-        _ => return None,
-    };
-    let reference = GpsReference::parse(as_text(ifd.get(ref_tag.tag_id())?)?)?;
-    Some(GpsCoordinate {
-        degrees: dms[0].into(),
-        minutes: dms[1].into(),
-        seconds: dms[2].into(),
+/// Reads the latitude and its N/S reference from `ifd`.
+fn latitude(ifd: &Ifd) -> Option<GpsLatitude> {
+    let [degrees, minutes, seconds] = dms(ifd, ExifTag::GpsLatitude)?;
+    let reference = LatitudeRef::parse(as_text(ifd.get(ExifTag::GpsLatitudeRef.tag_id())?)?)?;
+    Some(GpsLatitude {
+        degrees,
+        minutes,
+        seconds,
         reference,
     })
 }
 
+/// Reads the longitude and its E/W reference from `ifd`.
+fn longitude(ifd: &Ifd) -> Option<GpsLongitude> {
+    let [degrees, minutes, seconds] = dms(ifd, ExifTag::GpsLongitude)?;
+    let reference = LongitudeRef::parse(as_text(ifd.get(ExifTag::GpsLongitudeRef.tag_id())?)?)?;
+    Some(GpsLongitude {
+        degrees,
+        minutes,
+        seconds,
+        reference,
+    })
+}
+
+/// Reads a degrees/minutes/seconds triple of RATIONALs from `tag`; `None` unless it holds at
+/// least three.
+fn dms(ifd: &Ifd, tag: ExifTag) -> Option<[Rational; 3]> {
+    match ifd.get(tag.tag_id())? {
+        Value::Rational(r) if r.len() >= 3 => Some([r[0].into(), r[1].into(), r[2].into()]),
+        _ => None,
+    }
+}
+
 /// Writes a coordinate's reference letter and its three DMS rationals into `ifd`.
-fn set_coordinate(ifd: &mut Ifd, coord: GpsCoordinate, value_tag: ExifTag, ref_tag: ExifTag) {
-    ifd.set(
-        ref_tag.tag_id(),
-        Value::Ascii(coord.reference.as_str().to_owned()),
-    );
+fn set_coordinate(
+    ifd: &mut Ifd,
+    [degrees, minutes, seconds]: [Rational; 3],
+    value_tag: ExifTag,
+    reference: &str,
+    ref_tag: ExifTag,
+) {
+    ifd.set(ref_tag.tag_id(), Value::Ascii(reference.to_owned()));
     ifd.set(
         value_tag.tag_id(),
-        Value::Rational(vec![
-            coord.degrees.into(),
-            coord.minutes.into(),
-            coord.seconds.into(),
-        ]),
+        Value::Rational(vec![degrees.into(), minutes.into(), seconds.into()]),
     );
 }
 
@@ -368,8 +440,8 @@ mod tests {
     #[test]
     fn parses_coordinates_and_altitude() {
         let gps = GpsInfo::from_ifd(&sample_ifd()).expect("gps present");
-        assert_eq!(gps.latitude.unwrap().reference, GpsReference::North);
-        assert_eq!(gps.longitude.unwrap().reference, GpsReference::East);
+        assert_eq!(gps.latitude.unwrap().reference, LatitudeRef::North);
+        assert_eq!(gps.longitude.unwrap().reference, LongitudeRef::East);
         assert!((gps.latitude_deg().unwrap() - 48.858_222).abs() < 1e-5);
         assert!((gps.longitude_deg().unwrap() - 2.350_666).abs() < 1e-5);
         assert_eq!(gps.altitude_m(), Some(35.0));
@@ -388,7 +460,7 @@ mod tests {
     #[test]
     fn western_longitude_is_negative() {
         // The sibling test above covers South, so the *latitude* axis was pinned; longitude is
-        // East in every fixture, so `'W' | 'w' => West` in `GpsReference::parse` had no test at
+        // East in every fixture, so `'W' | 'w' => West` in `LongitudeRef::parse` had no test at
         // all -- deleting that arm entirely left the suite green (#110). Without it a western
         // longitude parses as `None` and the coordinate silently disappears, which is every
         // photograph taken in the Americas.
@@ -396,7 +468,7 @@ mod tests {
         ifd.set(ExifTag::GpsLongitudeRef.tag_id(), Value::Ascii("W".into()));
         let gps = GpsInfo::from_ifd(&ifd).expect("gps");
 
-        assert_eq!(gps.longitude.unwrap().reference, GpsReference::West);
+        assert_eq!(gps.longitude.unwrap().reference, LongitudeRef::West);
         assert!(
             gps.longitude_deg().unwrap() < 0.0,
             "a western longitude is negative"
@@ -407,14 +479,79 @@ mod tests {
 
     #[test]
     fn lowercase_references_parse_too() {
-        // `parse` accepts either case on all four axes. Only the uppercase arms were exercised.
-        let mut ifd = sample_ifd();
-        ifd.set(ExifTag::GpsLatitudeRef.tag_id(), Value::Ascii("s".into()));
-        ifd.set(ExifTag::GpsLongitudeRef.tag_id(), Value::Ascii("w".into()));
-        let gps = GpsInfo::from_ifd(&ifd).expect("gps");
+        // `parse` accepts either case for every hemisphere. Each letter is asserted on its own,
+        // because the mutation gate cannot delete one alternative of an or-pattern.
+        for (lat_text, lon_text, lat, lon) in [
+            ("s", "w", LatitudeRef::South, LongitudeRef::West),
+            ("n", "e", LatitudeRef::North, LongitudeRef::East),
+        ] {
+            let mut ifd = sample_ifd();
+            ifd.set(
+                ExifTag::GpsLatitudeRef.tag_id(),
+                Value::Ascii(lat_text.into()),
+            );
+            ifd.set(
+                ExifTag::GpsLongitudeRef.tag_id(),
+                Value::Ascii(lon_text.into()),
+            );
+            let gps = GpsInfo::from_ifd(&ifd).expect("gps");
 
-        assert_eq!(gps.latitude.unwrap().reference, GpsReference::South);
-        assert_eq!(gps.longitude.unwrap().reference, GpsReference::West);
+            assert_eq!(gps.latitude.unwrap().reference, lat, "{lat_text}");
+            assert_eq!(gps.longitude.unwrap().reference, lon, "{lon_text}");
+        }
+    }
+
+    #[test]
+    fn a_reference_from_the_other_axis_is_no_reference() {
+        // `GPSLatitudeRef` is `N` or `S` and `GPSLongitudeRef` is `E` or `W` (Exif 3.0
+        // §4.6.7.1.2, §4.6.7.1.4). A letter from the other axis names no hemisphere of this one,
+        // so the coordinate is dropped exactly as an unknown letter is, and the other axis
+        // survives.
+        for crossed in ["E", "e", "W", "w"] {
+            let mut ifd = sample_ifd();
+            ifd.set(
+                ExifTag::GpsLatitudeRef.tag_id(),
+                Value::Ascii(crossed.into()),
+            );
+            let gps = GpsInfo::from_ifd(&ifd).expect("longitude and altitude survive");
+            assert_eq!(gps.latitude, None, "{crossed} is not a latitude reference");
+            assert!(gps.longitude.is_some());
+        }
+        for crossed in ["N", "n", "S", "s"] {
+            let mut ifd = sample_ifd();
+            ifd.set(
+                ExifTag::GpsLongitudeRef.tag_id(),
+                Value::Ascii(crossed.into()),
+            );
+            let gps = GpsInfo::from_ifd(&ifd).expect("latitude and altitude survive");
+            assert_eq!(
+                gps.longitude, None,
+                "{crossed} is not a longitude reference"
+            );
+            assert!(gps.latitude.is_some());
+        }
+    }
+
+    #[test]
+    fn references_write_back_as_their_letters() {
+        // `to_ifd` writes each reference through `as_str`; every hemisphere round-trips.
+        for (lat, lon, lat_text, lon_text) in [
+            (LatitudeRef::North, LongitudeRef::East, "N", "E"),
+            (LatitudeRef::South, LongitudeRef::West, "S", "W"),
+        ] {
+            let mut gps = GpsInfo::from_ifd(&sample_ifd()).expect("gps");
+            gps.latitude.as_mut().unwrap().reference = lat;
+            gps.longitude.as_mut().unwrap().reference = lon;
+            let ifd = gps.to_ifd();
+            assert_eq!(
+                ifd.get(ExifTag::GpsLatitudeRef.tag_id()),
+                Some(&Value::Ascii(lat_text.into()))
+            );
+            assert_eq!(
+                ifd.get(ExifTag::GpsLongitudeRef.tag_id()),
+                Some(&Value::Ascii(lon_text.into()))
+            );
+        }
     }
 
     #[test]
@@ -503,13 +640,25 @@ mod tests {
 
     #[test]
     fn zero_denominator_yields_no_degrees() {
-        let coord = GpsCoordinate {
-            degrees: Rational { num: 1, den: 0 },
-            minutes: Rational { num: 0, den: 1 },
-            seconds: Rational { num: 0, den: 1 },
-            reference: GpsReference::North,
-        };
-        assert_eq!(coord.to_degrees(), None);
+        let zero = Rational { num: 1, den: 0 };
+        let one = Rational { num: 0, den: 1 };
+        // A zero denominator in any of the three components leaves no degrees, on either axis.
+        for [degrees, minutes, seconds] in [[zero, one, one], [one, zero, one], [one, one, zero]] {
+            let latitude = GpsLatitude {
+                degrees,
+                minutes,
+                seconds,
+                reference: LatitudeRef::North,
+            };
+            assert_eq!(latitude.to_degrees(), None);
+            let longitude = GpsLongitude {
+                degrees,
+                minutes,
+                seconds,
+                reference: LongitudeRef::East,
+            };
+            assert_eq!(longitude.to_degrees(), None);
+        }
     }
 
     #[cfg(feature = "geocoordinates")]
@@ -518,28 +667,32 @@ mod tests {
 
         use super::*;
 
-        fn dms(degrees: u32, minutes: u32, seconds: u32, reference: GpsReference) -> GpsCoordinate {
-            GpsCoordinate {
-                degrees: Rational {
-                    num: degrees,
-                    den: 1,
-                },
-                minutes: Rational {
-                    num: minutes,
-                    den: 1,
-                },
-                seconds: Rational {
-                    num: seconds,
-                    den: 1,
-                },
+        fn whole(num: u32) -> Rational {
+            Rational { num, den: 1 }
+        }
+
+        fn lat(degrees: u32, minutes: u32, seconds: u32, reference: LatitudeRef) -> GpsLatitude {
+            GpsLatitude {
+                degrees: whole(degrees),
+                minutes: whole(minutes),
+                seconds: whole(seconds),
+                reference,
+            }
+        }
+
+        fn lon(degrees: u32, minutes: u32, seconds: u32, reference: LongitudeRef) -> GpsLongitude {
+            GpsLongitude {
+                degrees: whole(degrees),
+                minutes: whole(minutes),
+                seconds: whole(seconds),
                 reference,
             }
         }
 
         fn position() -> GpsInfo {
             GpsInfo {
-                latitude: Some(dms(48, 51, 30, GpsReference::North)),
-                longitude: Some(dms(2, 21, 2, GpsReference::East)),
+                latitude: Some(lat(48, 51, 30, LatitudeRef::North)),
+                longitude: Some(lon(2, 21, 2, LongitudeRef::East)),
                 altitude: Some(GpsAltitude {
                     meters: Rational { num: 35, den: 1 },
                     below_sea_level: false,
@@ -554,8 +707,8 @@ mod tests {
             assert!((north_east.lon - 2.350_555_555_555_555_4).abs() < 1e-12);
 
             let mut south_west = position();
-            south_west.latitude.as_mut().unwrap().reference = GpsReference::South;
-            south_west.longitude.as_mut().unwrap().reference = GpsReference::West;
+            south_west.latitude.as_mut().unwrap().reference = LatitudeRef::South;
+            south_west.longitude.as_mut().unwrap().reference = LongitudeRef::West;
             let converted = Wgs84::try_from(south_west).unwrap();
             assert_eq!(converted.lat, -north_east.lat);
             assert_eq!(converted.lon, -north_east.lon);
@@ -581,7 +734,9 @@ mod tests {
         }
 
         #[test]
-        fn complete_coordinates_and_axis_references_are_required() {
+        fn complete_coordinates_are_required() {
+            // A reference from the wrong axis is no longer representable (`LatitudeRef` has no
+            // East, `LongitudeRef` no North), so only a missing coordinate is left to refuse.
             let mut missing_latitude = position();
             missing_latitude.latitude = None;
             assert_eq!(
@@ -594,20 +749,6 @@ mod tests {
             assert_eq!(
                 Wgs84::try_from(missing_longitude),
                 Err(GpsConversionError::MissingLongitude)
-            );
-
-            let mut bad_latitude_ref = position();
-            bad_latitude_ref.latitude.as_mut().unwrap().reference = GpsReference::East;
-            assert_eq!(
-                Wgs84::try_from(bad_latitude_ref),
-                Err(GpsConversionError::InvalidLatitudeReference)
-            );
-
-            let mut bad_longitude_ref = position();
-            bad_longitude_ref.longitude.as_mut().unwrap().reference = GpsReference::North;
-            assert_eq!(
-                Wgs84::try_from(bad_longitude_ref),
-                Err(GpsConversionError::InvalidLongitudeReference)
             );
         }
 
@@ -642,14 +783,14 @@ mod tests {
         #[test]
         fn angular_boundaries_are_valid_and_excess_is_rejected() {
             let boundary = GpsInfo {
-                latitude: Some(dms(90, 0, 0, GpsReference::South)),
-                longitude: Some(dms(180, 0, 0, GpsReference::West)),
+                latitude: Some(lat(90, 0, 0, LatitudeRef::South)),
+                longitude: Some(lon(180, 0, 0, LongitudeRef::West)),
                 altitude: None,
             };
             assert_eq!(Wgs84::try_from(boundary), Ok(Wgs84::new(-90.0, -180.0)));
 
             let mut beyond_pole = boundary;
-            beyond_pole.latitude = Some(dms(90, 0, 1, GpsReference::North));
+            beyond_pole.latitude = Some(lat(90, 0, 1, LatitudeRef::North));
             assert_eq!(
                 Coordinate::try_from(beyond_pole),
                 Err(GpsConversionError::OutOfRange)

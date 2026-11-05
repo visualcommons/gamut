@@ -1,7 +1,7 @@
 # Fujifilm MakerNote (not a specification; issue #981)
 
 Fujifilm has never published the layout of its `MakerNote` (`0x927C`) payload. This directory
-stakes what `gamut-exif`'s Fujifilm view (`gamut_exif::maker_note::fujifilm`) is held to, before
+stakes what `gamut-exif`'s Fujifilm view (`gamut_exif::FujifilmMakerNote`) is held to, before
 any tag is decoded, as the parent table in
 [`../README.md`](../README.md#makernote-dialects-not-a-specification-issue-418) asks of every
 vendor.

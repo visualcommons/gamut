@@ -123,7 +123,7 @@ impl Exif {
     ///
     /// # Errors
     ///
-    /// Returns [`ExifError::Ifd`](crate::ExifError::Ifd) if the model is not representable in
+    /// Returns [`ExifError::Core`](crate::ExifError::Core) if the model is not representable in
     /// classic-TIFF widths (see [`ExifWriter::write`](crate::ExifWriter::write)).
     pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
         crate::ExifWriter::new().write(self)

@@ -1,42 +1,8 @@
 //! The EXIF tag dictionary and the directories tags live in.
 //!
 //! [`IfdKind`] classifies which directory a tag belongs to; [`ExifTag`] names the standard Exif 3.0
-//! tags. The catalogue is generated from a single table (the `exif_tags!` invocation), so a tag's
-//! id, home directory, canonical name, permitted field types and component count can never drift
-//! apart. It intentionally covers the **standard** CIPA DC-008 tags, not exiftool's full vendor
-//! breadth — unknown and MakerNote tags still round-trip losslessly because [`Exif`](crate::Exif)
-//! retains the raw [`gamut_ifd::Ifd`].
-//!
-//! # What the spec constrains
-//!
-//! Every tag in the five CIPA DC-008 tables that define one carries the `Type` and `Count` columns
-//! of the table that defines it — Table 6 (0th IFD), Tables 8 and 9 (Exif sub-IFD), Table 14 (GPS) and Table 16
-//! (Interoperability) — as [`ExifTag::field_types`] and [`ExifTag::component_count`]. A handful of
-//! catalogued tags come from **other** specifications and are carried only for compatibility
-//! (`ApplicationNotes`, `IPTC-NAA`, `InterColorProfile`, `Rating`, `RatingPercent`, and the DCF-era
-//! Interoperability tags beyond `InteroperabilityIndex`); DC-008 mandates nothing for them, so
-//! their `field_types` list is **empty** and no constraint is claimed.
-//!
-//! These two columns describe what a *conformant writer* must emit. They are used by
-//! [`set_tag_checked`](crate::set_tag_checked) on the write path only: the reader stays lenient and
-//! accepts whatever a real-world file carries.
-//!
-//! # Tags beyond CIPA DC-008
-//!
-//! The 0th IFD shares its number space with TIFF 6.0 and DNG, whose tags DC-008 does not
-//! profile. Those are not catalogued here: their identity and value shape live once, in the
-//! shared [`gamut_ifd::tags`] registry that gamut-tiff and gamut-dng read too, and
-//! [`IfdKind::registry_spec`] looks a 0th- or 1st-IFD tag up there.
-//!
-//! # The three pointer tags are deliberately absent
-//!
-//! DC-008 gives `Exif IFD Pointer` (34665), `GPS Info IFD Pointer` (34853) and
-//! `Interoperability IFD Pointer` (40965) their own `Tag`/`Type`/`Count` blocks in §4.6.3.1.1,
-//! §4.6.3.2.1 and §4.6.3.3.1, outside the five tables above, and this catalogue does not name
-//! them. They are structural: the writer synthesises each one from the sub-IFD tree it is handed
-//! and removes any that were set by hand. Cataloguing them would let `set_tag_checked` accept a
-//! pointer that is then silently discarded, which is worse than having no name for it — reach the
-//! directories through [`Exif`](crate::Exif)'s accessors instead.
+//! tags and carries the catalogue's documentation (what the spec constrains, what is deliberately
+//! absent).
 
 use gamut_ifd::FieldType;
 
@@ -110,6 +76,46 @@ macro_rules! exif_tags {
         /// ([`ExifTag::ifd`]); [`ExifTag::name`] gives the canonical CIPA DC-008 name, and
         /// [`ExifTag::field_types`]/[`ExifTag::component_count`] the value shape the spec mandates.
         ///
+        /// The catalogue is generated from a single table (the `exif_tags!` invocation), so a
+        /// tag's id, home directory, canonical name, permitted field types and component count can
+        /// never drift apart. It intentionally covers the **standard** CIPA DC-008 tags, not
+        /// exiftool's full vendor breadth — unknown and MakerNote tags still round-trip losslessly
+        /// because [`Exif`](crate::Exif) retains the raw [`gamut_ifd::Ifd`].
+        ///
+        /// # What the spec constrains
+        ///
+        /// Every tag in the five CIPA DC-008 tables that define one carries the `Type` and `Count`
+        /// columns of the table that defines it — Table 6 (0th IFD), Tables 8 and 9 (Exif
+        /// sub-IFD), Table 14 (GPS) and Table 16 (Interoperability) — as
+        /// [`ExifTag::field_types`] and [`ExifTag::component_count`]. A handful of catalogued tags
+        /// come from **other** specifications and are carried only for compatibility
+        /// (`ApplicationNotes`, `IPTC-NAA`, `InterColorProfile`, `Rating`, `RatingPercent`, and
+        /// the DCF-era Interoperability tags beyond `InteroperabilityIndex`); DC-008 mandates
+        /// nothing for them, so their `field_types` list is **empty** and no constraint is
+        /// claimed.
+        ///
+        /// These two columns describe what a *conformant writer* must emit. They are used by
+        /// [`set_tag_checked`](crate::set_tag_checked) on the write path only: the reader stays
+        /// lenient and accepts whatever a real-world file carries.
+        ///
+        /// # Tags beyond CIPA DC-008
+        ///
+        /// The 0th IFD shares its number space with TIFF 6.0 and DNG, whose tags DC-008 does not
+        /// profile. Those are not catalogued here: their identity and value shape live once, in
+        /// the shared [`gamut_ifd::tags`] registry that gamut-tiff and gamut-dng read too, and
+        /// [`IfdKind::registry_spec`] looks a 0th- or 1st-IFD tag up there.
+        ///
+        /// # The three pointer tags are deliberately absent
+        ///
+        /// DC-008 gives `Exif IFD Pointer` (34665), `GPS Info IFD Pointer` (34853) and
+        /// `Interoperability IFD Pointer` (40965) their own `Tag`/`Type`/`Count` blocks in
+        /// §4.6.3.1.1, §4.6.3.2.1 and §4.6.3.3.1, outside the five tables above, and this
+        /// catalogue does not name them. They are structural: the writer synthesises each one from
+        /// the sub-IFD tree it is handed and removes any that were set by hand. Cataloguing them
+        /// would let `set_tag_checked` accept a pointer that is then silently discarded, which is
+        /// worse than having no name for it — reach the directories through
+        /// [`Exif`](crate::Exif)'s accessors instead.
+        ///
         /// # The discriminants are not stable
         ///
         /// Variants are declared in the specification's own order — directory by directory,
@@ -155,8 +161,8 @@ macro_rules! exif_tags {
             /// The field types CIPA DC-008 permits for this tag, in the order the spec lists them
             /// (`SHORT or LONG` reads as `[Short, Long]`).
             ///
-            /// **Empty** for a catalogued tag CIPA DC-008 does not define — see the [module
-            /// docs](self). An empty list is not "no valid type"; it is "this specification claims
+            /// **Empty** for a catalogued tag CIPA DC-008 does not define — see
+            /// [`ExifTag`]'s documentation. An empty list is not "no valid type"; it is "this specification claims
             /// nothing", and [`set_tag_checked`](crate::set_tag_checked) accepts any value there.
             #[must_use]
             pub const fn field_types(self) -> &'static [FieldType] {
@@ -229,7 +235,7 @@ exif_tags! {
     ReferenceBlackWhite => (Image, 0x0214, "ReferenceBlackWhite", [Rational], Exact(6)),
     Copyright => (Image, 0x8298, "Copyright", [Ascii, Utf8], Any),
     // Carried for compatibility and defined by specifications other than CIPA DC-008, so no field
-    // type or count is claimed and nothing is validated (see the module docs).
+    // type or count is claimed and nothing is validated (see `ExifTag`'s docs).
     Xmp => (Image, 0x02BC, "ApplicationNotes", [], Any),
     IptcNaa => (Image, 0x83BB, "IPTC-NAA", [], Any),
     InterColorProfile => (Image, 0x8773, "InterColorProfile", [], Any),
